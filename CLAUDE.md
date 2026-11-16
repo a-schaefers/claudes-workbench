@@ -39,6 +39,9 @@ has the architecture; read it first.
   - It loads AGENTS.md itself but never CLAUDE.md, which reaches it through `instructions` (absolute paths).
   - Skills come from `~/.claude/skills` and `.claude/skills`. A `disable-model-invocation` skill is not listed.
   - `permissions: [{action, resource, effect: "deny"}]` removes a tool or skill from the prompt.
+    For the `shell` action the resource matches each part of a compound command (`cd x && sudo y`
+    is caught), and a later rule overrides an earlier one. The agent's only shell limit is sudo;
+    git writes and deploys are the driver's by convention (the handbook), not by rule.
     Denying `execute` (code mode) turns the `opencode_*` tools into direct tools, so deny `opencode_*` too.
     `opencode_worktree_remove` stays listed whatever you do; the rule still refuses the call.
 - To see exactly what OpenCode sends a model, point a provider at `tests/capture_llm.py`, which records

@@ -23,6 +23,9 @@ ROOT_FILES = ("CLAUDE.md", ".claude/CLAUDE.md", "CLAUDE.local.md")
 # lists opencode_worktree_remove; the rule then refuses the call.
 DENIED_TOOLS = ("question", "experimental_image_generate", "execute", "subagent", "websearch",
                 "opencode_*", "*worktree*")
+# The one hard limit on the shell: no root. OpenCode checks each part of a compound command, so
+# `cd x && sudo ...` is refused too. Everything else is the agent's to use, guided by the handbook.
+DENIED_SHELL = ("sudo", "sudo *", "doas", "doas *", "pkexec *", "su", "su *")
 
 
 def _digest(path: Path) -> str:
@@ -87,6 +90,7 @@ def layer(task: store.Task) -> dict:
     files, nested = instruction_files(task)
     note = write_map(task, nested)
     rules = [{"action": t, "resource": "*", "effect": "deny"} for t in DENIED_TOOLS]
+    rules += [{"action": "shell", "resource": c, "effect": "deny"} for c in DENIED_SHELL]
     rules += [{"action": "skill", "resource": n, "effect": "deny"}
               for n in denied_skills(task.spec.get("deny_skills"))]
     return {"instructions": [str(p) for p in files + ([note] if note else [])],

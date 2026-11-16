@@ -1,7 +1,10 @@
 """A fake OpenAI-compatible model server: it records every request and answers "ok".
 
-Run: capture_llm.py <port> <out.jsonl>. It shows exactly what OpenCode sends a model: the
-system prompt, the instructions it loaded, the skills and tools it offered.
+Run: capture_llm.py <port> <out.jsonl> [<tool call as JSON>]. It shows exactly what OpenCode
+sends a model: the system prompt, the instructions it loaded, the skills and tools it offered.
+Given a tool call ({"name": ..., "arguments": {...}}), the first request that offers tools gets
+that call as its answer, so a test can see what OpenCode does with it (the next request carries
+the tool's result).
 """
 import json
 import sys
@@ -9,6 +12,8 @@ import time
 from http.server import BaseHTTPRequestHandler, HTTPServer
 
 OUT = sys.argv[2]
+CALL = json.loads(sys.argv[3]) if len(sys.argv) > 3 else None
+made = []
 USAGE = {"prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2}
 
 
@@ -44,6 +49,17 @@ class Handler(BaseHTTPRequestHandler):
         self.send_response(200)
         self.send_header("Content-Type", "text/event-stream")
         self.end_headers()
+        if CALL and req.get("tools") and not made:
+            made.append(1)
+            call = {"index": 0, "id": "call_1", "type": "function", "function": {
+                "name": CALL["name"], "arguments": json.dumps(CALL["arguments"])}}
+            for c in (chunk(choices=[{"index": 0, "delta": {"role": "assistant",
+                                                            "tool_calls": [call]}}]),
+                      chunk(choices=[{"index": 0, "delta": {}, "finish_reason": "tool_calls"}],
+                            usage=USAGE)):
+                self.wfile.write(f"data: {json.dumps(c)}\n\n".encode())
+            self.wfile.write(b"data: [DONE]\n\n")
+            return
         for c in (chunk(choices=[{"index": 0, "delta": {"role": "assistant", "content": "ok"}}]),
                   chunk(choices=[{"index": 0, "delta": {}, "finish_reason": "stop"}], usage=USAGE)):
             self.wfile.write(f"data: {json.dumps(c)}\n\n".encode())

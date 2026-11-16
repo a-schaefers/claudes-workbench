@@ -305,6 +305,8 @@ def activity(task: store.Task, data: dict, now: float | None = None) -> str | No
             n = live.get("prompt_tokens")
             return (f"Reading the prompt… {_secs(since * 1000)}"
                     + (f" · {_k(n)} tokens" if n else "") + tokens)
+        if live.get("state") != "generating":  # loading, unloaded, restarting...
+            return f"Model server {live.get('state')}… {_secs(since * 1000)}{tokens}"
         gen = live.get("generated") or 0
         rate = live.get("tok_s")
         what = "Thinking" if live.get("phase") == "thinking" else "Writing"

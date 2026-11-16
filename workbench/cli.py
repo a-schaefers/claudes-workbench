@@ -19,7 +19,8 @@ PROTOCOL = """
 
 ---
 How to work (workbench protocol):
-- You are in a git worktree on branch {branch}. Do not commit, push, or switch branches.
+- You are in a git worktree on branch {branch}. Git is read-only for you; leave the changes
+  uncommitted. Claude commits, pushes and deploys.
 {test_line}- If the spec is genuinely ambiguous, you may call the `ask_reviewer` tool ({budget} \
 question(s) for this task). Otherwise make reasonable choices and say what you assumed.
 - Stay inside the scope of the spec. No unrelated refactors, no new dependencies unless asked.
@@ -367,9 +368,8 @@ def cmd_accept(a):
     repo = Path(spec["repo"])
     rounds, autofix = st.get("round", 1), st.get("auto_fixes_total", 0) + st.get("auto_fixes", 0)
     msg = (f"{a.message}\n\nDelegated to {spec['model_label']} via OpenCode: {rounds} round(s), "
-           f"{autofix} automatic test-fix, {st.get('reviews', 0)} review round(s); reviewed by "
-           f"Claude.\nWorkbench-Task: {a.name}\nOpenCode-Session: {st.get('session')}\n\n"
-           "Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>")
+           f"{autofix} automatic test-fix, {st.get('reviews', 0)} review round(s)."
+           f"\n\nWorkbench-Task: {a.name}\nOpenCode-Session: {st.get('session')}")
     try:
         commit = gitops.commit_all(task.worktree, msg)
         gitops.remove_worktree(repo, task.worktree)

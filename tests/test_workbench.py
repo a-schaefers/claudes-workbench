@@ -100,6 +100,7 @@ class Lifecycle(Base):
                               "delegate/t-ok"], capture_output=True, text=True).stdout
         self.assertIn("Workbench-Task: t-ok", log)
         self.assertIn("OpenCode-Session: ses_", log)
+        self.assertNotIn("Co-Authored-By", log)   # the user's commit; no AI credit line
         rows, _ = store.read_jsonl(store.home() / "results.jsonl")
         self.assertEqual(rows[-1]["outcome"], "accepted")
 
@@ -425,6 +426,38 @@ class RealOpenCode(Base):
         self.assertTrue({"edit", "read", "shell"} <= tools)
         self.assertFalse({"question", "execute", "subagent"} & tools)
         self.assertNotIn("<id>delegate</id>", text)
+
+
+    def test_sudo_is_refused_even_inside_a_compound_command(self):
+        from workbench import runner
+        self.start("t-sudo", "ok")
+        wait_phase("t-sudo", {"review"})
+        task = store.Task("t-sudo")
+        with socket.socket() as sock:
+            sock.bind(("127.0.0.1", 0))
+            port = sock.getsockname()[1]
+        out = Path(self.tmp.name) / "requests.jsonl"
+        call = {"name": "shell", "arguments": {"command": "cd . && sudo -n true",
+                                               "workdir": str(task.worktree)}}
+        server = subprocess.Popen([sys.executable, str(ROOT / "tests" / "capture_llm.py"),
+                                   str(port), str(out), json.dumps(call)])
+        self.addCleanup(server.kill)
+        layer_path = runner.write_config_layer(task)
+        layer = json.loads(layer_path.read_text())
+        layer["provider"] = {"cap": {
+            "npm": "@ai-sdk/openai-compatible",
+            "options": {"baseURL": f"http://127.0.0.1:{port}/v1", "apiKey": "x"},
+            "models": {"cap": {"name": "capture", "tool_call": True,
+                               "limit": {"context": 32768, "output": 1024}}}}}
+        layer_path.write_text(json.dumps(layer))
+        time.sleep(0.5)
+        env = {**os.environ, "PWD": str(task.worktree), "OPENCODE_CONFIG": str(layer_path)}
+        subprocess.run(["opencode", "run", "--standalone", "-m", "cap/cap", "--auto", "--format",
+                        "json", "go"], cwd=task.worktree, env=env, capture_output=True, timeout=120)
+        reqs = [json.loads(line) for line in out.read_text().splitlines()]
+        answers = [m for r in reqs for m in r.get("messages", []) if m.get("role") == "tool"]
+        self.assertTrue(answers, "the fake model's call never came back")
+        self.assertIn("permission.rejected", json.dumps(answers[-1]["content"]))
 
 
 class Discovery(Base):
