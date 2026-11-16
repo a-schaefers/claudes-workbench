@@ -99,10 +99,16 @@ Read just enough of the repo to scope it, then write the spec to a file in the s
 budget, the summary format), so don't repeat it. The agent also starts with what you would have:
 the repo's CLAUDE.md / AGENTS.md / CLAUDE.local.md / `.claude/rules`, a map of nested CLAUDE.md
 files, the workbench handbook (`agent/HANDBOOK.md`: read first, match the code, smallest diff,
-verify, honest summary) and the skills in `~/.claude/skills` and the repo. So don't restate
-project conventions; spend the spec on what is specific to this task: the files to read first,
-the existing code to imitate, and any skill to load by name ("load the `x` skill first").
-One function/module/feature per task; split big asks and run the parts one after another.
+verify, honest summary) and the repo's own `.claude/skills` (never the user's personal skills
+in `~/.claude/skills`). So don't restate project conventions; spend the spec on what is specific
+to this task: the files to read first, the existing code to imitate, and any skill to load by
+name ("load the `x` skill first").
+
+**Size every task to what the local models finish, as measured.** One concern, at most 2–3 files
+and ~150 new lines, with the files named. The local agents work in a 32K context: a task
+that spends it (8 files at once, measured 2026-11-16) costs 30–60 minutes of compactions,
+re-reading and drift, where the same work in 3 small tasks costs minutes each. Splitting is your
+job, the architect's: run the parts one after another, each with its own acceptance command.
 
 ## 3. Dispatch
 ```
