@@ -145,7 +145,9 @@ Without the mod, the user may ask for the same in words; run those commands then
 reply there with `wb chat reply --text "…"`: a one-line acknowledgement first when the work will
 take a while, then the outcome, short (what was done, what needs them). Don't stream progress or
 paste diffs. While a `web-chat` context block says they are away, also tell them there when
-something they asked for finishes or needs them. `wb chat log` shows the thread. A message they
+something they asked for finishes or needs them. `wb chat log` shows the thread. The web thread is
+all they see: each reply must stand on its own, and a yes there answers only a question asked
+there, never one asked in the terminal. Nothing hard to undo (downloads, deletes) on an ambiguous OK. A message they
 type in the terminal means they are back.
 
 **Check-ins.** A significant task wakes you every 10 minutes while it runs (`--checkin MIN`

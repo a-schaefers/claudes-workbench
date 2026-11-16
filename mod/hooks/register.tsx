@@ -84,7 +84,10 @@ const WEB_NOTE =
   'same authority as a message typed here. Answer there with `wb chat reply --text "…"`: if the ' +
   'work will take more than a minute or two, first a one-line acknowledgement of what you are ' +
   'doing, then the outcome when it is done (results, what needs them, short; they read it on a ' +
-  'phone). Work as usual otherwise; the terminal keeps the full detail.)'
+  'phone). The web thread is all they see: read it as its own conversation (`wb chat log`), make ' +
+  'each reply make sense without the terminal, and take a yes there only as an answer to a ' +
+  'question asked there. Never download, delete or do anything hard to undo on an ambiguous OK. ' +
+  'Work as usual otherwise; the terminal keeps the full detail.)'
 
 const ACTIVE = new Set(['queued', 'running', 'testing', 'asking'])
 const NEEDS = new Set(['review', 'stuck', 'failed', 'asking'])
