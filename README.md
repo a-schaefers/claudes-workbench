@@ -52,7 +52,10 @@ That's it. Claude takes over from there:
 1. It checks your hardware and your local models. If you have none, or better ones would fit your
    GPU, it recommends them and offers to set them up (it always asks before downloading).
 2. It plans the work and splits it into small pieces a local model can finish.
-3. It hands each piece to the best local model for the job and watches it work.
+3. It decides how hard each piece is and hands it to the right local model: chores (a rename, a
+   config tweak, a small test) to a small fast model like MiMo 9B, real work (features,
+   refactors, tricky bugs) to the strongest model your GPU runs, like Qwen 27B. Then it watches
+   the agent work.
 4. It reviews every change, sends it back with notes until it's right, and only then commits it.
 
 A **Workbench** pane in Claude Code shows the agents working live. `/delegate-quit` stops them;
