@@ -32,7 +32,7 @@ import urllib.error
 import urllib.request
 from pathlib import Path
 
-from . import models, store
+from . import hardware, models, store
 
 PLACEHOLDERS = ("prompt", "out", "width", "height", "seed")
 
@@ -114,6 +114,24 @@ def _server(e: dict, values: dict) -> None:
     Path(values["out"]).write_bytes(base64.b64decode(data["data"][0]["b64_json"]))
 
 
+def _settle(say, timeout: float = 90) -> None:
+    """Wait until the unloaded models have let go of the VRAM. free_gpu's unload returns before
+    the memory does: seen 2026-11-16, an engine starting a second later found 1.1 GB free of 16."""
+    if models._fake():
+        return
+    deadline = time.time() + timeout
+    while models.resident() and time.time() < deadline:
+        time.sleep(1)
+    last = None
+    while time.time() < deadline:  # then until the GPU's used VRAM stops falling
+        used = sum(g["vram_used"] for g in hardware.gpus() if g.get("vram_used") is not None)
+        if last is not None and last - used < 64 * 2 ** 20:
+            return
+        last = used
+        time.sleep(1)
+    say("the GPU's memory was still being released after 90 s; generating anyway")
+
+
 def generate(prompt: str, out_dir: Path, n: int = 4, size: tuple[int, int] = (1024, 1024),
              seed: int | None = None, name: str | None = None, refs: list[Path] = (),
              say=print) -> list[Path]:
@@ -132,6 +150,7 @@ def generate(prompt: str, out_dir: Path, n: int = 4, size: tuple[int, int] = (10
     made = []
     with store.locked(store.home() / "gpu.lock"):  # one model on the GPU at a time
         models.free_gpu(say=say)
+        _settle(say)
         for i in range(n):
             s = seed + i
             out = out_dir / f"{_slug(prompt)}-{s}.png"

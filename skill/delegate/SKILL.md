@@ -107,6 +107,9 @@ Read just enough of the repo to scope it, then write the spec to a file in the s
 - conventions to follow (point at an existing file to imitate)
 - acceptance criteria, and an **acceptance command** that proves them (an existing test command,
   or a new test the agent must write first — say which)
+- every number checked against every rule: work each example through the limits the spec sets
+  (a clamp, a cap, float rounding) before sending it. An example that breaks a rule sends the
+  agent chasing a bug that isn't there, round after round.
 `wb` appends the working protocol itself (no commits, run the tests, stay in scope, ask_reviewer
 budget, the summary format), so don't repeat it. The agent also starts with what you would have:
 the repo's CLAUDE.md / AGENTS.md / CLAUDE.local.md / `.claude/rules`, a map of nested CLAUDE.md
@@ -180,6 +183,16 @@ Agents can't make images; one that needs an asset asks you, and you make it.
    engine, prompt and seed made it (its `.json` sidecar has them).
 Mind the engine's `notes` in `wb image --list`: an image model's licence can restrict where and
 how its output may be used. A generation holds the GPU: running tasks wait their turn.
+
+**No ready engine? Offer to set one up; never set it up unasked.** This is an optional step, as
+the README's Images section says. Read `wb scout` for the OS and GPU, then propose in one
+message: a runtime that fits (stable-diffusion.cpp on Vulkan for AMD or Intel, CUDA for NVIDIA,
+Metal on macOS; built from its upstream source, with packages from the OS's own repositories),
+and an image model you've just checked. It must fit the VRAM without spilling, and its licence
+must allow the user's use and country. Some licences exclude whole regions, so read the licence
+text, not the tag. Give the download size. Wait for a yes, then install, write
+`~/.config/workbench/images.json` (the licence goes in `notes`), make one test image, and look at
+it before saying it works.
 
 ## 3. Dispatch
 ```

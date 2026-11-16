@@ -64,6 +64,9 @@ and it works.
   sets them up in OpenCode (it asks before downloading anything)
 - Linux, macOS, or Windows through WSL2 (native Windows lacks the POSIX file locks and signals
   `wb` uses), with Python 3.11+ and git, which `wb` itself runs on
+- **Optional, for images:** a local image tool and model ([Images](#images)). Claude offers to set
+  one up the first time a project needs a picture, and asks before installing or downloading
+  anything
 
 Whatever your machine, Claude picks models that fit it, and checks again every week as new ones
 come out.
@@ -514,16 +517,33 @@ committed like any other change. Each image has a `.json` file beside it with th
 size and engine, so it can be made again. The coding agents can't make images; when one needs an
 asset, it asks Claude.
 
-You install an image tool and model yourself, then describe it in
-`~/.config/workbench/images.json` (`$WB_IMAGES`). Two kinds work:
+**Setting it up is optional.** The first time a project needs an image, Claude offers to set it up.
+It looks at your OS and GPU, then proposes a tool and a model whose licence allows your use, and
+gives the download size. It installs nothing until you say yes. To do it yourself instead, here is
+what this machine runs (Arch Linux, a 16 GB AMD card), about 11 GB of downloads:
+
+```sh
+sudo pacman -S --needed vulkan-headers spirv-headers shaderc cmake   # or your distro's packages
+git clone --recursive https://github.com/leejet/stable-diffusion.cpp ~/.local/opt/stable-diffusion.cpp
+cd ~/.local/opt/stable-diffusion.cpp && git submodule update --init --recursive
+cmake -S . -B build -DSD_VULKAN=ON -DCMAKE_BUILD_TYPE=Release && cmake --build build -j
+ln -s "$PWD/build/bin/sd-cli" ~/.local/bin/sd-cli
+mkdir -p ~/models/image && cd ~/models/image
+curl -LO https://huggingface.co/leejet/Z-Image-Turbo-GGUF/resolve/main/z_image_turbo-Q8_0.gguf
+curl -LO https://huggingface.co/unsloth/Qwen3-4B-Instruct-2507-GGUF/resolve/main/Qwen3-4B-Instruct-2507-Q8_0.gguf
+curl -LO https://huggingface.co/Comfy-Org/z_image_turbo/resolve/main/split_files/vae/ae.safetensors
+```
+
+Z-Image-Turbo is Apache-2.0, takes 8 steps and needs about 11 GB of VRAM at Q8 (smaller
+quantizations fit smaller cards). On NVIDIA, build with `-DSD_CUDA=ON`; on a Mac, `-DSD_METAL=ON`.
+Then describe the engine in `~/.config/workbench/images.json` (`$WB_IMAGES`). Two kinds work:
 
 ```json
 {
-  "sdcpp": {
-    "command": "sd-cli --diffusion-model ~/models/image/model.gguf -p {prompt} -o {out} -W {width} -H {height} --seed {seed}",
-    "ref_arg": "-r",
-    "label": "stable-diffusion.cpp, Vulkan",
-    "notes": "licence: Apache-2.0; good at sprites and icons"
+  "z-image-turbo": {
+    "command": "sd-cli --diffusion-model ~/models/image/z_image_turbo-Q8_0.gguf --vae ~/models/image/ae.safetensors --llm ~/models/image/Qwen3-4B-Instruct-2507-Q8_0.gguf -p {prompt} -o {out} -W {width} -H {height} --seed {seed} --cfg-scale 1.0 --steps 8",
+    "label": "Z-Image-Turbo Q8 on stable-diffusion.cpp (Vulkan)",
+    "notes": "licence: Apache-2.0; text to image only; 8 steps; ~11 GB VRAM"
   },
   "server": { "url": "http://127.0.0.1:30000/v1/images/generations", "model": "…" }
 }
@@ -531,7 +551,8 @@ You install an image tool and model yourself, then describe it in
 
 - A **command** is any command-line tool. `{prompt}`, `{out}`, `{width}`, `{height}` and
   `{seed}` are filled in, and the prompt is passed as a single argument, never through a shell.
-  `ref_arg` adds `--ref` images, for models that edit or keep a character consistent.
+  `ref_arg` (e.g. `"-r"`) adds `--ref` images, for models that edit or keep a character
+  consistent.
 - A **url** is any server with the OpenAI images API (SGLang, vLLM-Omni, LocalAI and others).
 - `notes` is shown to Claude. Put the model's licence there: some licences limit where and how
   their output may be used.
