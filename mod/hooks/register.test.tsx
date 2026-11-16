@@ -60,6 +60,12 @@ function fakeTasks(on: any, files: Record<string, string>, dirs = ['fix-it'], sc
   on('command.register', () => ({ value: { command: 'workbench' } }))
   on('ui.open', () => ({ value: { isPlaced: true } }))
   on('ui.status', () => ({ value: undefined }))
+  // `wb events`: says hello and then stays open, as the real watcher does
+  on('process.spawn', async function* () {
+    yield { stream: 'stdout', text: '{"hello": 4242}\n' }
+    await new Promise(() => {})
+    return { code: 0, signal: null }
+  })
   on('session.start', (_: any, e: any) => ({ cwd: e.cwd }))
   on('turn.start', (_: any, e: any) => ({ turnId: e.turnId }))
   on('turn.complete', () => ({ text: '' }))
@@ -340,4 +346,30 @@ test('the web chat reaches Claude only in /delegate mode, with a receipt, and on
   await $.command.run({ command: 'delegate-quit', args: '' })
   await clock.advance(20_000)
   expect(asked.length).toBe(1)
+})
+
+test('running wb counts as delegate mode, and a web message reaches a running turn', async ($, on) => {
+  const clock = mock.clock(on, { now: 1_800_000_000_000 })
+  const files: Record<string, string> = {}
+  fakeTasks(on, files, [])
+  on('ui.toast', () => ({ value: undefined }))
+  on('session.cwd', () => ({ value: '/home/u/game' }))
+  on('session.id', () => ({ value: 'sess-1' }))
+  const sent: any[] = []
+  on('session.send', (_: any, e: any) => { sent.push(e); return { isDelivered: true } })
+  const runs: string[][] = []
+  on('process.run', (_: any, e: any) => { runs.push(e.argv); return { value: { exitCode: 0, stdout: 'no open tasks', stderr: '' } } })
+  const asked: string[] = []
+  on('prompt.submit', (_: any, e: any) => { asked.push(e.text); return { text: e.text } })
+  on('tool.call', (_: any, e: any) => ({ result: { stdout: '' }, text: '' }))  // the engine's Bash
+  files['/wb/chat/messages.jsonl'] = JSON.stringify({ id: 'm1', ts: 1_800_000_000, from: 'user', text: 'still there?' }) + '\n'
+  await $.session.start({ cwd: '/home/u/game', surface: 'terminal', isInteractive: true })
+  await $.turn.start({ text: 'go', turnId: 't1' })
+  await $.tool.call({ tool: 'Bash', command: 'cd ~ && wb start step-2 --spec s.md --repo .' })
+  await clock.advance(3000)
+  expect(asked).toEqual([])                                     // mid-turn: not a queued prompt…
+  expect(sent.length).toBe(1)                                   // …but into the running turn
+  expect(sent[0].to).toBe('sess-1')                              // its own session
+  expect(sent[0].text).toContain('[web chat] still there?')
+  expect(runs.some(a => a.join(' ') === 'wb chat ack m1 --by ' + a[5] + ' --how now')).toBe(true)
 })

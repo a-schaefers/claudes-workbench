@@ -12,6 +12,7 @@ import time
 import uuid
 
 from . import store
+from .watch import Watcher
 
 PROTOCOL = "2025-06-18"
 TOOL = {
@@ -53,14 +54,17 @@ def ask(task: store.Task, question: str, context: str = "") -> str:
     body = f"Q: {question}" + (f"\nContext: {context}" if context else "")
     task.notify("question", body, id=qid)
     deadline = time.time() + float(spec.get("ask_timeout", 1200))
+    watcher = Watcher(afile.parent)  # wakes the moment `wb answer` writes the file
     while time.time() < deadline:
         if afile.exists():
             answer = afile.read_text().strip()
             task.set_status(phase=prev if prev != "asking" else "running", asking=None)
             task.event({"ts": store.now(), "round": task.status.get("round"), "kind": "answer",
                         "id": qid, "text": answer})
+            watcher.close()
             return answer
-        time.sleep(1)
+        watcher.wait(max(0.0, min(60.0, deadline - time.time())))
+    watcher.close()
     task.set_status(phase=prev if prev != "asking" else "running", asking=None)
     return ("No answer arrived in time. Make the most reasonable assumption, carry on, and state "
             "the assumption in your final summary.")

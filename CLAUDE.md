@@ -11,6 +11,11 @@ has the architecture; read it first.
     adds and retires them (Ollama's pull/delete, opencode.json entries) for the weekly model check.
   - `chat.py`: the web chat (`wb chat serve`, stdlib HTTP, a token and a Host check; `systemd/wb-chat.service`
     keeps it up). The mod hands its messages to the /delegate session as prompts; Claude replies with `wb chat reply`.
+  - `watch.py`: waiting without polling: inotify (ctypes) on state directories and pidfd on processes.
+    `wb events` streams state changes to the mod; `wb wait`, `log -f`, `watch`, the agent's
+    question wait, steer interrupts and the chat stream all sleep in the kernel until a file changes.
+  - `chat_static/`: the web chat's page (served by chat.py): a fetch-streamed event stream with resync
+    on reconnect, an idempotent outbox, the paced reveal.
   - `hardware.py`: GPU/VRAM, RAM, CPU and disk, read fresh each time for `wb scout`. Nothing about the machine is hard-coded.
   - `router.py`: picks a model per task size from evidence. `bench.py`: `wb bench`, the probes and graded tasks.
   - `events.py`: event normalization and the stuck detector.

@@ -17,6 +17,7 @@ import hmac
 import json
 import os
 import secrets
+import select
 import subprocess
 import threading
 import time
@@ -24,11 +25,19 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
 from . import store
+from .watch import Watcher
 
 PORT = 1337
 LISTENING_FOR = 15      # seconds: a listener.json older than this means nobody is listening
 MAX_TEXT = 8000
 MAX_BODY = 32 * 1024
+MAX_STREAMS = 16        # open /api/stream connections (each holds a thread)
+PING_EVERY = 15         # seconds between keep-alive comments on a stream
+STATIC = Path(__file__).parent / "chat_static"
+TYPES = {".html": "text/html; charset=utf-8", ".js": "text/javascript; charset=utf-8",
+         ".css": "text/css; charset=utf-8", ".svg": "image/svg+xml",
+         ".webmanifest": "application/manifest+json"}
+_send_lock = threading.Lock()
 
 
 def chat_dir() -> Path:
@@ -66,15 +75,24 @@ def tailscale() -> dict:
 
 # ---- the thread ----
 
-def send(text: str, frm: str) -> dict:
-    row = {"id": f"{int(time.time() * 1000)}-{secrets.token_hex(3)}", "ts": store.now(),
-           "from": frm, "text": text}
-    store.append_jsonl(chat_dir() / "messages.jsonl", row)
-    return row
+def send(text: str, frm: str, cid: str | None = None) -> dict:
+    """Append a message. A client id (cid) already in the thread returns that message instead,
+    so a retried send never lands twice."""
+    with _send_lock:
+        if cid:
+            for r in store.read_jsonl(chat_dir() / "messages.jsonl")[0][-500:]:
+                if r.get("cid") == cid:
+                    return r
+        row = {"id": f"{int(time.time() * 1000)}-{secrets.token_hex(3)}", "ts": store.now(),
+               "from": frm, "text": text, **({"cid": cid} if cid else {})}
+        store.append_jsonl(chat_dir() / "messages.jsonl", row)
+        return row
 
 
-def ack(msg_id: str, by: str) -> None:
-    store.append_jsonl(chat_dir() / "receipts.jsonl", {"id": msg_id, "ts": store.now(), "by": by})
+def ack(msg_id: str, by: str, how: str = "now") -> None:
+    """Claude has the message: read at once ("now"), or queued until its current step ends."""
+    store.append_jsonl(chat_dir() / "receipts.jsonl",
+                       {"id": msg_id, "ts": store.now(), "by": by, "how": how})
 
 
 def thread(limit: int = 200) -> list[dict]:
@@ -88,11 +106,69 @@ def pending() -> list[dict]:
     return [r for r in thread() if r["from"] == "user" and not r["received"]]
 
 
+def snapshot() -> dict:
+    return {"messages": thread(), "listener": listener(), "now": store.now()}
+
+
+def _alive(pid) -> bool:
+    try:
+        os.kill(int(pid), 0)
+        return True
+    except (ProcessLookupError, ValueError, TypeError):
+        return False
+    except PermissionError:
+        return True
+
+
 def listener() -> dict | None:
+    """The session listening now. Its `wb events` process (pid) lives exactly as long as the
+    session; a listener.json without a pid falls back to its age."""
     st = store.read_json(chat_dir() / "listener.json", None)
-    if not st or store.now() - st.get("ts", 0) > LISTENING_FOR:
+    if not st:
         return None
-    return st
+    if st.get("pid"):
+        return st if _alive(st["pid"]) else None
+    return st if store.now() - st.get("ts", 0) <= LISTENING_FOR else None
+
+
+class Hub:
+    """One watcher for every open stream: it wakes them the moment a chat file changes or the
+    listening session's process ends (a pidfd), so nothing polls."""
+
+    def __init__(self):
+        self.cond = threading.Condition()
+        self.version = 0
+        threading.Thread(target=self._run, daemon=True).start()
+
+    def bump(self) -> None:
+        with self.cond:
+            self.version += 1
+            self.cond.notify_all()
+
+    def _run(self) -> None:
+        w = Watcher(chat_dir())
+        pid, pidfd = None, None
+        while True:
+            st = store.read_json(chat_dir() / "listener.json", None) or {}
+            if st.get("pid") != pid:
+                if pidfd is not None:
+                    os.close(pidfd)
+                pid, pidfd = st.get("pid"), None
+                try:
+                    pidfd = os.pidfd_open(int(pid)) if pid else None
+                except (OSError, ValueError, AttributeError):
+                    pidfd = None
+            if not w.native:
+                w.wait(1)
+            else:
+                ready, _, _ = select.select([w.fd] + ([pidfd] if pidfd is not None else []), [], [], 60)
+                w.read()
+                if pidfd is not None and pidfd in ready:  # the listener is gone
+                    os.close(pidfd)
+                    pidfd = None
+                time.sleep(0.02)  # gather a burst of writes into one wake
+                w.read()
+            self.bump()
 
 
 # ---- the server ----
@@ -101,6 +177,8 @@ class Handler(BaseHTTPRequestHandler):
     server_version = "wb-chat"
     hosts: set[str] = set()
     secret = ""
+    hub: "Hub"
+    streams: threading.BoundedSemaphore
 
     def log_message(self, *args):  # the journal needn't hold every poll
         pass
@@ -140,15 +218,50 @@ class Handler(BaseHTTPRequestHandler):
         if not self._allowed():
             return
         path = self.path.split("?")[0]
-        if path in ("/", "/index.html"):
-            return self._send(200, PAGE.encode(), "text/html; charset=utf-8")
-        if path == "/app.js":
-            return self._send(200, SCRIPT.encode(), "text/javascript; charset=utf-8")
         if path == "/api/state":
             if self._authed():
-                self._json(200, {"messages": thread(), "listener": listener(), "now": store.now()})
+                self._json(200, snapshot())
             return
-        self._json(404, {"error": "not found"})
+        if path == "/api/stream":
+            if self._authed():
+                self._stream()
+            return
+        name = "index.html" if path in ("/", "/index.html") else path.lstrip("/")
+        f = STATIC / name
+        if "/" in name or f.suffix not in TYPES or not f.is_file():
+            return self._json(404, {"error": "not found"})
+        self._send(200, f.read_bytes(), TYPES[f.suffix])
+
+    def _stream(self):
+        """Server-sent events: the whole state on connect and on every change, a ping between.
+        The client takes each state as the truth, so a reconnect is a resync."""
+        if not self.streams.acquire(blocking=False):
+            return self._json(503, {"error": "too many open streams"})
+        try:
+            self.send_response(200)
+            self.send_header("Content-Type", "text/event-stream")
+            self.send_header("Cache-Control", "no-store")
+            self.send_header("X-Accel-Buffering", "no")
+            self.end_headers()
+            hub, seen, last_body = self.hub, -1, None
+            while True:
+                with hub.cond:
+                    woke = hub.cond.wait_for(lambda: hub.version != seen, timeout=PING_EVERY)
+                    seen = hub.version
+                if woke:
+                    snap = snapshot()
+                    body = json.dumps({k: v for k, v in snap.items() if k != "now"})
+                    if body != last_body:
+                        last_body = body
+                        self.wfile.write(f"event: state\ndata: {json.dumps(snap)}\n\n".encode())
+                        self.wfile.flush()
+                        continue
+                self.wfile.write(b": ping\n\n")  # keeps the line (and the page's watchdog) alive
+                self.wfile.flush()
+        except (BrokenPipeError, ConnectionResetError, OSError):
+            pass
+        finally:
+            self.streams.release()
 
     def do_POST(self):
         if not self._allowed():
@@ -163,12 +276,16 @@ class Handler(BaseHTTPRequestHandler):
         if n > MAX_BODY:
             return self._json(413, {"error": "too long"})
         try:
-            text = str(json.loads(self.rfile.read(n) or b"{}").get("text", "")).strip()
-        except ValueError:
+            body = json.loads(self.rfile.read(n) or b"{}")
+            text, cid = str(body.get("text", "")).strip(), body.get("cid")
+        except (ValueError, AttributeError):
             return self._json(400, {"error": "bad json"})
         if not text or len(text) > MAX_TEXT:
             return self._json(400, {"error": f"a message is 1 to {MAX_TEXT} characters"})
-        self._json(200, {"message": send(text, "user"), "listener": listener()})
+        if cid is not None and not (isinstance(cid, str) and 0 < len(cid) <= 64):
+            return self._json(400, {"error": "bad cid"})
+        msg = send(text, "user", cid)
+        self._json(200, {"message": msg, "listener": listener(), "state": snapshot()})
 
 
 def make_servers(port: int, binds: list[str] | None = None) -> tuple[list[ThreadingHTTPServer], dict]:
@@ -178,7 +295,8 @@ def make_servers(port: int, binds: list[str] | None = None) -> tuple[list[Thread
         binds = ["127.0.0.1"] + ([ts["ip"]] if ts.get("ip") else [])
     handler = type("ChatHandler", (Handler,), {
         "hosts": {"localhost", "127.0.0.1", *binds, *ts.get("names", ())},
-        "secret": token()})
+        "secret": token(), "hub": Hub(),
+        "streams": threading.BoundedSemaphore(MAX_STREAMS)})
     servers = []
     for addr in binds:
         srv = ThreadingHTTPServer((addr, port), handler)
@@ -197,149 +315,30 @@ def serve(port: int, binds: list[str] | None, say=print) -> None:
     servers[0].serve_forever()
 
 
-def urls(port: int) -> list[str]:
-    ts = tailscale()
-    names = sorted(ts.get("names", ()), key=len, reverse=True)
-    hosts = names[:1] + ([ts["ip"]] if ts.get("ip") else []) + ["localhost"]
-    return [f"http://{h}:{port}/#token={token()}" for h in hosts]
+def served(port: int) -> list[str]:
+    """`tailscale serve` front doors that proxy to this port (HTTPS on the tailnet)."""
+    try:
+        r = subprocess.run(["tailscale", "serve", "status", "--json"], capture_output=True,
+                           text=True, timeout=5)
+        web = json.loads(r.stdout or "{}").get("Web") or {}
+    except (OSError, ValueError, subprocess.TimeoutExpired):
+        return []
+    found = []
+    for hostport, conf in web.items():
+        for path, h in (conf.get("Handlers") or {}).items():
+            if (h.get("Proxy") or "").rstrip("/") in (f"http://127.0.0.1:{port}", f"http://localhost:{port}"):
+                host = hostport.removesuffix(":443")
+                found.append(f"https://{host}{path}")
+    return found
 
 
-PAGE = """<!doctype html>
-<html lang="en"><head>
-<meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
-<meta name="apple-mobile-web-app-capable" content="yes">
-<meta name="mobile-web-app-capable" content="yes">
-<meta name="theme-color" content="#1f1e1d">
-<title>Claude, away</title>
-<style>
-:root { --bg:#faf9f5; --fg:#1f1e1d; --dim:#6b6a66; --me:#d97757; --meFg:#fff; --them:#efede6;
-        --line:#e3e0d6; --ok:#4f8a5b; --warn:#b5862f; }
-@media (prefers-color-scheme: dark) {
-  :root { --bg:#1f1e1d; --fg:#ecebe6; --dim:#9a988f; --me:#c4673f; --meFg:#fff; --them:#2c2b29;
-          --line:#3a3936; --ok:#7bbf87; --warn:#d9ad5b; }
-}
-* { box-sizing: border-box; }
-html, body { height: 100%; margin: 0; background: var(--bg); color: var(--fg);
-  font: 16px/1.45 ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif; }
-body { display: flex; flex-direction: column; max-width: 720px; margin: 0 auto; }
-header { padding: 12px 16px; border-bottom: 1px solid var(--line); display: flex; gap: 10px;
-  align-items: baseline; }
-header b { font-size: 17px; }
-#who { font-size: 13px; color: var(--dim); }
-#who.on::before { content: "\\25CF "; color: var(--ok); }
-#who.off::before { content: "\\25CF "; color: var(--warn); }
-main { flex: 1; overflow-y: auto; padding: 12px 16px; display: flex; flex-direction: column; gap: 10px; }
-.msg { max-width: 85%; padding: 8px 12px; border-radius: 14px; white-space: pre-wrap;
-  overflow-wrap: anywhere; }
-.user { align-self: flex-end; background: var(--me); color: var(--meFg); border-bottom-right-radius: 4px; }
-.claude { align-self: flex-start; background: var(--them); border-bottom-left-radius: 4px; }
-.meta { font-size: 12px; color: var(--dim); margin-top: -6px; }
-.user + .meta { align-self: flex-end; }
-code { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 14px; }
-.empty { color: var(--dim); text-align: center; margin: auto; padding: 24px; }
-form { display: flex; gap: 8px; padding: 10px 16px calc(10px + env(safe-area-inset-bottom));
-  border-top: 1px solid var(--line); }
-textarea { flex: 1; resize: none; font: inherit; padding: 9px 12px; border-radius: 12px;
-  border: 1px solid var(--line); background: var(--bg); color: var(--fg); min-height: 44px; max-height: 40vh; }
-button { font: inherit; padding: 0 16px; border: 0; border-radius: 12px; background: var(--me);
-  color: var(--meFg); min-height: 44px; }
-button:disabled { opacity: .5; }
-#err { color: var(--warn); font-size: 13px; padding: 0 16px; }
-</style>
-</head><body>
-<header><b>Claude</b><span id="who">connecting…</span></header>
-<main id="log"><div class="empty">Messages you send here reach Claude in your terminal while
-/delegate is running there. Claude answers here.</div></main>
-<div id="err"></div>
-<form id="f"><textarea id="t" rows="1" placeholder="Message Claude" enterkeyhint="send"></textarea>
-<button id="b">Send</button></form>
-<script src="/app.js"></script>
-</body></html>
-"""
-
-SCRIPT = r"""
-const KEY = 'wb-chat-token'
-let tok = ''
-try {
-  const m = location.hash.match(/token=([\w-]+)/)
-  if (m) { localStorage.setItem(KEY, m[1]); history.replaceState(null, '', location.pathname) }
-  tok = localStorage.getItem(KEY) || ''
-} catch (e) { const m = location.hash.match(/token=([\w-]+)/); tok = m ? m[1] : '' }
-const $ = id => document.getElementById(id)
-const log = $('log'), who = $('who'), err = $('err'), box = $('t'), btn = $('b')
-let last = '', timer = 0
-
-const clock = ts => new Date(ts * 1000).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })
-function body(text) {           // text, with `code` spans; never HTML from the thread
-  const el = document.createElement('div')
-  text.split(/(`[^`\n]+`)/).forEach(part => {
-    if (part.startsWith('`') && part.endsWith('`') && part.length > 2) {
-      const c = document.createElement('code'); c.textContent = part.slice(1, -1); el.append(c)
-    } else el.append(document.createTextNode(part))
-  })
-  return el
-}
-function draw(state) {
-  const key = JSON.stringify([state.messages, !!state.listener])
-  if (state.listener) {
-    who.className = 'on'
-    who.textContent = 'listening in ' + state.listener.cwd.replace(/^\/home\/[^/]+/, '~')
-  } else {
-    who.className = 'off'
-    who.textContent = 'no Claude session is listening: messages wait for one'
-  }
-  if (key === last) return
-  last = key
-  const atEnd = log.scrollHeight - log.scrollTop - log.clientHeight < 80
-  log.replaceChildren()
-  if (!state.messages.length) {
-    const e = document.createElement('div'); e.className = 'empty'
-    e.textContent = 'Messages you send here reach Claude in your terminal while /delegate is ' +
-      'running there. Claude answers here.'
-    log.append(e)
-  }
-  for (const m of state.messages) {
-    const b = body(m.text); b.className = 'msg ' + m.from; log.append(b)
-    const meta = document.createElement('div'); meta.className = 'meta'
-    meta.textContent = m.from === 'user'
-      ? clock(m.ts) + (m.received ? ' · received by Claude ' + clock(m.received.ts) : ' · waiting for Claude')
-      : 'Claude · ' + clock(m.ts)
-    if (m.from === 'user') meta.style.alignSelf = 'flex-end'
-    log.append(meta)
-  }
-  if (atEnd) log.scrollTop = log.scrollHeight
-}
-async function api(path, opts = {}) {
-  const r = await fetch(path, { ...opts, headers: { ...(opts.headers || {}), Authorization: 'Bearer ' + tok } })
-  const j = await r.json().catch(() => ({}))
-  if (!r.ok) throw new Error(j.error || r.status)
-  return j
-}
-async function refresh() {
-  clearTimeout(timer)
-  try { draw(await api('/api/state')); err.textContent = '' }
-  catch (e) { err.textContent = String(e.message || e) }
-  timer = setTimeout(refresh, document.hidden ? 20000 : 3000)
-}
-document.addEventListener('visibilitychange', () => { if (!document.hidden) refresh() })
-$('f').addEventListener('submit', async ev => {
-  ev.preventDefault()
-  const text = box.value.trim()
-  if (!text) return
-  btn.disabled = true
-  try {
-    await api('/api/send', { method: 'POST', headers: { 'Content-Type': 'application/json' },
-                             body: JSON.stringify({ text }) })
-    box.value = ''; box.style.height = ''
-    last = ''; await refresh(); log.scrollTop = log.scrollHeight
-  } catch (e) { err.textContent = String(e.message || e) }
-  btn.disabled = false
-})
-box.addEventListener('input', () => { box.style.height = ''; box.style.height = box.scrollHeight + 'px' })
-box.addEventListener('keydown', ev => {
-  if (ev.key === 'Enter' && !ev.shiftKey && !('ontouchstart' in window)) { ev.preventDefault(); $('f').requestSubmit() }
-})
-if (!tok) err.textContent = 'No token: open the link `wb chat url` prints on the computer.'
-refresh()
-"""
+def url(port: int) -> str:
+    """The one link to open: `tailscale serve`'s HTTPS front door if there is one, else the
+    tailnet name on the port, else localhost; the token rides in the fragment."""
+    front = served(port)
+    if front:
+        base = front[0].rstrip("/")
+    else:
+        names = sorted(tailscale().get("names", ()), key=len, reverse=True)
+        base = f"http://{names[0] if names else 'localhost'}:{port}"
+    return f"{base}/#token={token()}"

@@ -1,0 +1,46 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover, interactive-widget=resizes-content">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<meta name="apple-mobile-web-app-title" content="Claude">
+<meta name="theme-color" content="#f5f3ec" media="(prefers-color-scheme: light)">
+<meta name="theme-color" content="#1c1b19" media="(prefers-color-scheme: dark)">
+<link rel="manifest" href="/manifest.webmanifest">
+<link rel="icon" href="/icon.svg" type="image/svg+xml">
+<link rel="stylesheet" href="/app.css">
+<title>Claude</title>
+</head>
+<body>
+<header class="top">
+  <div class="mark" aria-hidden="true"><svg viewBox="0 0 24 24"><use href="/icon.svg#spark"/></svg></div>
+  <div class="who">
+    <div class="name">Claude</div>
+    <div class="presence" id="presence"><span class="dot"></span><span id="presence-text">connecting…</span></div>
+  </div>
+</header>
+<div class="net" id="net" hidden></div>
+<main id="scroll">
+  <div class="thread" id="thread">
+    <div class="intro" id="intro">
+      <div class="intro-mark" aria-hidden="true"><svg viewBox="0 0 24 24"><use href="/icon.svg#spark"/></svg></div>
+      <p>Messages you send here reach Claude in your terminal while <code>/delegate</code> runs there.
+      Claude answers here.</p>
+    </div>
+  </div>
+</main>
+<button class="jump" id="jump" hidden aria-label="Jump to the newest message">
+  <svg viewBox="0 0 24 24"><path d="M12 5v14M5 12l7 7 7-7"/></svg>
+</button>
+<form class="composer" id="composer" autocomplete="off">
+  <textarea id="input" rows="1" placeholder="Message Claude" enterkeyhint="send" aria-label="Message"></textarea>
+  <button id="send" type="submit" aria-label="Send" disabled>
+    <svg viewBox="0 0 24 24"><path d="M12 19V5M5 12l7-7 7 7"/></svg>
+  </button>
+</form>
+<script src="/app.js"></script>
+</body>
+</html>

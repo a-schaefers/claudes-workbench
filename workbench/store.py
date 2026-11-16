@@ -51,7 +51,7 @@ def write_json(path: Path, data) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     tmp = path.with_name(f".{path.name}.{os.getpid()}.tmp")
     tmp.write_text(json.dumps(data, indent=2, ensure_ascii=False) + "\n")
-    os.replace(tmp, path)  # readers (the mod polls these) never see half a file
+    os.replace(tmp, path)  # readers (woken by inotify on the rename) never see half a file
 
 
 def read_json(path: Path, default=None):

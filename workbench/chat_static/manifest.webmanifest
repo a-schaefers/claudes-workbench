@@ -1,0 +1,9 @@
+{
+  "name": "Claude, away",
+  "short_name": "Claude",
+  "start_url": "/",
+  "display": "standalone",
+  "background_color": "#1c1b19",
+  "theme_color": "#d97757",
+  "icons": [{ "src": "/icon.svg", "sizes": "any", "type": "image/svg+xml", "purpose": "any" }]
+}

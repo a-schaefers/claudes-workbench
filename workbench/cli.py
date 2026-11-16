@@ -15,6 +15,7 @@ from contextlib import redirect_stdout
 from pathlib import Path
 
 from . import __version__, bench, chat, gitops, hardware, models, results, router, store, transcript
+from .watch import Watcher, wait_exit
 from .runner import PKG_ROOT
 
 PROTOCOL = """
@@ -249,6 +250,8 @@ def cmd_wait(a):
     """Block until a task (or any task) raises a notification nobody has acknowledged yet."""
     deadline = time.time() + a.timeout if a.timeout else None
     path = store.home() / "notify.jsonl"
+    path.touch()
+    watcher = Watcher(store.home(), *([need(a.name).dir] if a.name else []))
     while True:
         rows, _ = store.read_jsonl(path)
         for row in reversed(rows):
@@ -274,7 +277,8 @@ def cmd_wait(a):
                 return
         if deadline and time.time() > deadline:
             die("timed out waiting", 2)
-        time.sleep(2)
+        # woken by the change itself; the minute bound re-checks the runner is alive
+        watcher.wait(min(60.0, deadline - time.time()) if deadline else 60.0)
 
 
 def cmd_watch(a):
@@ -333,8 +337,9 @@ def cmd_log(a):
 
     for r in rows[-a.n:] if a.n else rows:
         show(r)
+    watcher = Watcher(task.dir) if a.follow else None
     while a.follow:
-        time.sleep(1)
+        watcher.wait(30)
         more, off = store.read_jsonl(task.dir / "events.jsonl", off)
         for r in more:
             show(r)
@@ -364,10 +369,7 @@ def _stop_runner(task):
             os.kill(pid, signal.SIGTERM)  # the runner stops its agent's process group itself
         except ProcessLookupError:
             return
-        for _ in range(30):
-            if not runner_alive(task):
-                break
-            time.sleep(0.5)
+        wait_exit(pid, 15)
 
 
 LIVE = ("queued", "running", "testing", "asking")
@@ -429,10 +431,8 @@ def stop_everything() -> list[str]:
             stopped.append(f"wb bench (pid {pid})")
         except ProcessLookupError:
             pass
-    for _ in range(20):  # gone before the scan below, or a task it just started would be missed
-        if not any(_alive(p) for p in benches):
-            break
-        time.sleep(0.25)
+    for pid in benches:  # gone before the scan below, or a task it just started would be missed
+        wait_exit(pid, 5)
     (store.home() / "bench.pid").unlink(missing_ok=True)
     for t in _open_tasks():
         _stop_runner(t)
@@ -808,13 +808,36 @@ def cmd_init(a):
              if status == "no CLAUDE.md" else ""))
 
 
+# What `wb events` reports: the state, not the work (worktrees, bench repos) or the noise.
+EVENT_SKIP = ("worktree", "repos", "rounds")
+QUIET = (".lock", ".tmp", "runner.log")
+
+
+def cmd_events(a):
+    """One JSON line the moment workbench's state changes: what the mod listens to instead of
+    polling. The first line is {"hello": pid}; it ends when the process that started it does."""
+    home = store.home()
+    (home / "tasks").mkdir(parents=True, exist_ok=True)
+    chat.chat_dir()
+    parent = os.getppid()
+    print(json.dumps({"hello": os.getpid()}), flush=True)
+    with Watcher(home, recursive=True, skip=EVENT_SKIP) as w:
+        while os.getppid() == parent:
+            changed = {str(p.relative_to(home)) for p in w.wait(10)
+                       if not p.name.endswith(QUIET) and not p.name.startswith(".")}
+            if changed:
+                try:
+                    print(json.dumps({"changed": sorted(changed)}), flush=True)
+                except BrokenPipeError:
+                    return
+
+
 def cmd_chat(a):
     """The web chat: the user's side door to Claude while away from the terminal."""
     if a.action == "serve":
         chat.serve(a.port, a.bind or None, say=lambda m: print(m, flush=True))
     elif a.action == "url":
-        print("open one of these on the phone (the token is the key: keep the link private):")
-        print("\n".join(f"  {u}" for u in chat.urls(a.port)))
+        print(chat.url(a.port))  # the token is the key: keep the link private
     elif a.action == "reply":
         text = (a.text if a.text is not None else
                 Path(a.message).read_text() if a.message and a.message != "-" else sys.stdin.read()).strip()
@@ -823,7 +846,7 @@ def cmd_chat(a):
         chat.send(text, "claude")
         print("sent to the web chat")
     elif a.action == "ack":
-        chat.ack(a.id, a.by or "claude")
+        chat.ack(a.id, a.by or "claude", a.how)
     elif a.action == "pending":
         for r in chat.pending():
             print(json.dumps(r))
@@ -984,6 +1007,8 @@ def main(argv=None):
     s.add_argument("--notes", help="with --done: what was recommended or changed")
     s.add_argument("--due", action="store_true", help="exit 0 if a check is due, else 1")
     s.set_defaults(f=cmd_scout)
+    s = sub.add_parser("events", help="print a line whenever workbench's state changes (the mod's ears)")
+    s.set_defaults(f=cmd_events)
     s = sub.add_parser("chat", help="the web chat: serve it, its link, reply to the user there")
     s.add_argument("action", choices=["serve", "url", "reply", "log", "ack", "pending"], nargs="?",
                    default="log")
@@ -992,6 +1017,7 @@ def main(argv=None):
     s.add_argument("--bind", action="append", help="serve: address (default: localhost and Tailscale)")
     s.add_argument("--text", help="reply: the text"); s.add_argument("--message", help="reply: file, or -")
     s.add_argument("--by", help=argparse.SUPPRESS); s.add_argument("-n", type=int, default=10)
+    s.add_argument("--how", choices=["now", "queued"], default="now", help=argparse.SUPPRESS)
     s.set_defaults(f=cmd_chat)
     s = sub.add_parser("init", help="set a project up: git on master with an initial commit, "
                                     "AGENTS.md → CLAUDE.md")

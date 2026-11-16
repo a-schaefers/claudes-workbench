@@ -23,7 +23,7 @@ export type WbLine = { s: string; t: string }
 export type WbLive = { task: string; lines: WbLine[] }
 
 /** This session and the web chat: whether it listens, and when the user last wrote from there. */
-export type WbChat = { key: string; delegating: boolean; webAt: number }
+export type WbChat = { key: string; delegating: boolean; webAt: number; url: string }
 
 declare module 'claude-code' {
   interface PluginState {

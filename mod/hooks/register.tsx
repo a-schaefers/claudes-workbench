@@ -52,7 +52,11 @@ import type { Register } from 'claude-code'
 import type { WbChat, WbLine, WbLive, WbTask } from '../types'
 
 const PANE = 'workbench'
-const POLL_MS = 1500
+// Nothing waits on a timer for news: `wb events` (inotify) prints a line the moment a task, a
+// notification or a chat message changes, and each line runs poll() at once. The timer only
+// redraws running tasks' clocks, and checks in now and then should the watcher be gone.
+const POLL_MS = 1500 // the clock's redraw while a task runs
+const SAFETY_MS = 30_000 // a poll at least this often, whatever the watcher says
 const KEEP_CLOSED_MS = 30 * 60 * 1000 // closed tasks stay in the pane for half an hour
 const OLDEST_WAKE_MS = 60 * 60 * 1000 // never wake for a notification older than an hour
 
@@ -71,7 +75,7 @@ const KEEP_LINES = 2000 // the pane scrolls back through this much history
 // with several, the first to claim chat/listener.json does, and the others stand by. A message is
 // submitted as a prompt (so the terminal shows it too) with a receipt the page shows at once.
 const chat = atom({ plugin: 'workbench', key: 'chat' } as const,
-  { key: '', delegating: false, webAt: 0 } as WbChat, { shape: 'chat-1' })
+  { key: '', delegating: false, webAt: 0, url: '' } as WbChat, { shape: 'chat-2' })
 const CHAT_STALE_MS = 15_000 // as wb's LISTENING_FOR: a listener silent this long has gone
 const AWAY_MS = 6 * 3600 * 1000 // the user counts as away this long after a web message
 const WEB = '[web chat]'
@@ -197,6 +201,12 @@ const mem = {
   boundary: false, // one closed since: a moment to make room in Claude's context
   toasted: new Set<string>(),
   chatSent: new Set<string>(), // web messages submitted by this load, awaiting their receipt
+  chatUrlAt: 0, // when the web chat's link was last looked up
+  eventsPid: 0, // the `wb events` child: its lines wake poll(); the chat counts it as this session
+  again: false, // something changed while a poll ran: run another after it
+  hasActive: false, // a task is running: the clock redraws
+  lastPoll: 0,
+  listenerBody: '', // what this session last wrote to chat/listener.json
 }
 
 // Every task directory, as the pane draws it. Closed tasks drop out after half an hour.
@@ -314,9 +324,46 @@ async function refreshLive($: any, list: WbTask[]) {
   }
 }
 
+// The ears: a `wb events` child for the session's life, respawned if it dies.
+async function ears($: any) {
+  for (;;) {
+    try {
+      const child = $.process.spawn({ argv: [mem.wb, 'events'] })
+      let buf = ''
+      for await (const { stream, text } of child) {
+        if (stream !== 'stdout') continue
+        buf += text
+        let cut
+        while ((cut = buf.indexOf('\n')) >= 0) {
+          const line = buf.slice(0, cut)
+          buf = buf.slice(cut + 1)
+          let ev: Row
+          try { ev = JSON.parse(line) } catch { continue }
+          if (ev.hello) mem.eventsPid = Number(ev.hello)
+          void poll($)
+        }
+      }
+    } catch {
+      // the child could not start or its stream closed: start another below
+    }
+    mem.eventsPid = 0
+    try {
+      await $.clock.sleep(2000)
+    } catch {
+      return // no clock to wait on (a test): the timer's safety poll stands in
+    }
+  }
+}
+
 async function poll($: any) {
-  if (mem.polling || !mem.root) return // a slow file system must not stack polls
+  if (!mem.root) return
+  if (mem.polling) { // a slow file system must not stack polls, but no change may be missed
+    mem.again = true
+    return
+  }
   mem.polling = true
+  mem.again = false
+  mem.lastPoll = await $.clock.now()
   try {
     const now = await $.clock.now()
     const list = await scan($, mem.root, now)
@@ -326,6 +373,7 @@ async function poll($: any) {
       await update($, tasks, () => list)
     }
     const live = list.filter(t => ACTIVE.has(t.phase) && t.phase !== 'asking')
+    mem.hasActive = list.some(t => ACTIVE.has(t.phase))
     const asking = list.filter(t => t.phase === 'asking')
     const waiting = list.filter(t => NEEDS.has(t.phase) && t.phase !== 'asking')
     const parts = [
@@ -351,20 +399,33 @@ async function poll($: any) {
     if (mem.sawTurn && !mem.busy && !mem.scoutAsked && open.size === 0) await scoutIfDue($, now)
     await deliver($, now)
     await listen($, now)
+    if (now - mem.chatUrlAt > 10 * 60_000) { // the link changes only if Tailscale's setup does
+      mem.chatUrlAt = now
+      const out = await runWb($, ['chat', 'url'])
+      const link = /^https?:\/\/\S+#token=\S+$/.test(out) ? out : ''
+      if (link !== (await read($, chat)).url) await update($, chat, c => ({ ...c, url: link }))
+    }
   } finally {
     mem.polling = false
   }
+  if (mem.again) void poll($)
 }
 
 async function listen($: any, now: number) {
   const st = await read($, chat)
   if (!st.delegating) return
   const dir = `${mem.root}/chat`
+  if (!mem.eventsPid) return // the chat knows a listener by its live `wb events` process
   const claim = await readJson($, `${dir}/listener.json`)
-  if (claim.session && claim.session !== st.key && now - Number(claim.ts ?? 0) * 1000 < CHAT_STALE_MS) return
+  const theirs = claim.session && claim.session !== st.key
+  if (theirs && (claim.pid ? await $.fs.exists(`/proc/${claim.pid}`)
+    : now - Number(claim.ts ?? 0) * 1000 < CHAT_STALE_MS)) return // another session listens
   if (!(await $.fs.exists(dir))) await runWb($, ['chat', 'log']) // wb makes the directory
-  await $.fs.write(`${dir}/listener.json`,
-    JSON.stringify({ session: st.key, cwd: await $.session.cwd(), ts: now / 1000 }))
+  const body = JSON.stringify({ session: st.key, cwd: await $.session.cwd(), pid: mem.eventsPid, busy: mem.busy })
+  if (body !== mem.listenerBody || theirs || claim.session !== st.key) { // only on change: a write is an event
+    mem.listenerBody = body
+    await $.fs.write(`${dir}/listener.json`, body)
+  }
   const rows = (await $.fs.read(`${dir}/messages.jsonl`).catch(() => '')).split('\n')
   const got = new Set((await $.fs.read(`${dir}/receipts.jsonl`).catch(() => '')).split('\n')
     .map(l => { try { return JSON.parse(l).id } catch { return undefined } }))
@@ -374,10 +435,21 @@ async function listen($: any, now: number) {
     const id = String(m.id ?? '')
     if (m.from !== 'user' || !id || got.has(id) || mem.chatSent.has(id)) continue
     mem.chatSent.add(id)
-    await runWb($, ['chat', 'ack', id, '--by', st.key])
+    const text = `${WEB} ${String(m.text ?? '')}\n\n${WEB_NOTE}`
+    // Mid-turn, into the running turn, as a message typed mid-turn would be; else, or if that is
+    // refused, as a prompt of its own (which waits for the turn to end).
+    let how = 'now'
+    if (mem.busy) {
+      const r = await $.session.send({ to: { sessionId: await $.session.id() }, text })
+        .catch(() => ({ isDelivered: false }))
+      if (!r.isDelivered) {
+        how = 'queued'
+        void $.prompt.submit({ text, asUser: true })
+      }
+    } else void $.prompt.submit({ text, asUser: true })
+    await runWb($, ['chat', 'ack', id, '--by', st.key, '--how', how])
     await update($, chat, c => ({ ...c, webAt: now }))
     $.ui.toast('workbench: a message from the web chat')
-    void $.prompt.submit({ text: `${WEB} ${String(m.text ?? '')}\n\n${WEB_NOTE}` })
   }
 }
 
@@ -449,16 +521,30 @@ export const register: Register = (on, options) => {
       name: HAND_BACK,
       description: 'Stop the agents and hand their tasks back to Claude to finish',
     })
-    $.clock.every(POLL_MS, () => {
-      void poll($)
+    void ears($)
+    $.clock.every(POLL_MS, async () => {
+      const now = await $.clock.now()
+      if (!mem.eventsPid || mem.hasActive || mem.queued.length || now - mem.lastPoll > SAFETY_MS) void poll($)
     })
 
+    return next(e)
+  })
+
+  // Delegating with wb counts as delegate mode too (a session resumed mid-delegation, or one
+  // where /delegate ran before this mod could see it)
+  on('tool.call', { tool: 'Bash' }, async ($, e, next) => {
+    if (/(^|[\s;&|(])wb (start|next|feedback|accept|steer|answer|takeover|bench)\b/.test(e.command) &&
+        !(await read($, chat)).delegating) {
+      await update($, chat, c => ({ ...c, delegating: true }))
+      void poll($)
+    }
     return next(e)
   })
 
   // /delegate turns the web chat on in this session
   on('skill.prompt', { skill: 'delegate' }, async ($, e, next) => {
     await update($, chat, c => ({ ...c, delegating: true }))
+    void poll($) // listen now: a message may already be waiting
     return next(e)
   })
 
@@ -519,13 +605,17 @@ export const register: Register = (on, options) => {
 
   // Only the main loop's turns: a subagent's run doesn't hold the prompt.
   on('turn.start', async ($, e, next) => {
-    if (!e.agentId) mem.busy = true
+    if (!e.agentId) {
+      mem.busy = true
+      void poll($) // the chat page shows "working" now
+    }
     return next(e)
   })
   on('turn.complete', async ($, e, next) => {
     if (!e.agentId) {
       mem.busy = false
       mem.sawTurn = true
+      void poll($) // held wakes and chat messages go now, not at the next tick
     }
     return next(e)
   })
@@ -549,12 +639,23 @@ export const register: Register = (on, options) => {
     const { Box, Text } = $.ui.resolve(e)
     const list = await read($, tasks)
     const watched = await read($, live)
+    const { url } = await read($, chat)
+    // the web chat's link, always at hand to copy
+    const pinned = url ? (
+      <Box marginBottom={1}>
+        <Text>
+          <Text bold color="claude">web chat </Text>
+          <Text dimColor>{url}</Text>
+        </Text>
+      </Box>
+    ) : null
     const props = (e.props ?? {}) as Row
     const cols = Math.max(30, Number(props.bodyColumns ?? e.viewport?.columns ?? 60))
     const now = await $.clock.now()
     if (list.length === 0) {
       return (
         <Box flexDirection="column">
+          {pinned}
           <Text dimColor>No delegated tasks.</Text>
           <Text dimColor>/delegate hands one to a local model.</Text>
         </Box>
@@ -587,6 +688,7 @@ export const register: Register = (on, options) => {
 
     return (
       <Box flexDirection="column">
+        {pinned}
         {benches.length > 0 && (
           <Box marginBottom={1}>
             <Text>

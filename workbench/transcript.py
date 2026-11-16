@@ -18,6 +18,7 @@ import time
 from dataclasses import dataclass
 
 from . import models, store
+from .watch import Watcher
 from .runner import INTERRUPT_HEAD, NOTE_HEAD, opencode_bin
 
 STYLE = {"claude": "1;38;5;208", "agent": "1;36", "think": "2;3", "tool": "33", "out": "2",
@@ -448,6 +449,7 @@ def follow(task: store.Task, verbose: bool = False, once: bool = False, color: b
     else:
         print(header(task, paint, first), file=out, flush=True)
     seen: set[str] = set()
+    watcher = Watcher(task.dir)
     last_phase = None
     worktree = str(task.worktree)
     while True:
@@ -482,4 +484,5 @@ def follow(task: store.Task, verbose: bool = False, once: bool = False, color: b
         last_phase = phase
         if once or phase in store.CLOSED:
             return
-        time.sleep(poll)
+        # the task's files change as it works: wake on that; on a terminal, also tick the clock
+        watcher.wait(poll if out.isatty() else 30)

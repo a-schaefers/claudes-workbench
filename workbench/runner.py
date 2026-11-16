@@ -21,6 +21,7 @@ from pathlib import Path
 
 from . import context, gitops, models, store
 from .events import StuckDetector, normalize
+from .watch import Watcher
 
 PKG_ROOT = Path(__file__).resolve().parent.parent
 CURRENT: dict = {}  # the agent process of the round in flight, for the SIGTERM handler
@@ -139,6 +140,15 @@ def checkin_text(task: store.Task, n: int, out: dict, since: float) -> str:
     return "\n".join(lines)
 
 
+def _steer_bell(task: store.Task, proc, q: queue.Queue) -> None:
+    """Ring the round's loop the moment Claude writes a steer note, so `wb steer --now`
+    interrupts at once instead of at the loop's next timeout."""
+    with Watcher(task.dir) as w:
+        while proc.poll() is None:
+            if any(p.name == "steer.jsonl" for p in w.wait(5)):
+                q.put("")
+
+
 def run_round(task: store.Task, n: int) -> dict:
     spec, st = task.spec, task.status
     prompt = task.round_dir(n).joinpath("prompt.md").read_text()
@@ -157,6 +167,7 @@ def run_round(task: store.Task, n: int) -> dict:
     CURRENT["proc"] = proc
     q: queue.Queue = queue.Queue()
     threading.Thread(target=_reader, args=(proc.stdout, q), daemon=True).start()
+    threading.Thread(target=_steer_bell, args=(task, proc, q), daemon=True).start()
 
     detector = StuckDetector(**spec.get("stuck", {}))
     wall, silence = float(spec.get("round_timeout", 2400)), float(spec.get("silence_timeout", 900))
@@ -164,8 +175,8 @@ def run_round(task: store.Task, n: int) -> dict:
     out = {"exit": None, "stuck": None, "texts": [], "tools": {}, "errors": [],
            "tok_in": 0, "tok_out": 0, "interrupted": False}
     while True:
-        try:
-            line = q.get(timeout=1)
+        try:  # woken by the agent's output or a steer note; the timeout runs the clocks below
+            line = q.get(timeout=5)
         except queue.Empty:
             line = ""
         if line is None:

@@ -789,7 +789,53 @@ class WebChat(Base):
         self.assertEqual(self.call("/api/state", token=tok, host="evil.example")[0], 403)  # rebinding
         self.assertEqual(self.call("/api/state", token=tok)[0], 200)
         self.assertEqual(self.call("/api/send", {"text": ""}, token=tok)[0], 400)
-        self.assertTrue(all("#token=" in u for u in self.chat.urls(1337)))
+        self.assertIn(f"#token={tok}", self.chat.url(1337))
+
+    def test_static_files_and_nothing_else(self):
+        for path, kind in (("/", "text/html"), ("/app.js", "text/javascript"), ("/app.css", "text/css"),
+                           ("/icon.svg", "image/svg+xml"), ("/manifest.webmanifest", "application/manifest+json")):
+            import http.client
+            c = http.client.HTTPConnection("127.0.0.1", self.port, timeout=5)
+            c.request("GET", path, headers={"Host": "localhost"})
+            r = c.getresponse(); r.read(); c.close()
+            self.assertEqual((r.status, r.getheader("Content-Type").split(";")[0]), (200, kind), path)
+        for path in ("/../chat.py", "/chat.py", "/nope.js", "/%2e%2e/store.py"):
+            self.assertEqual(self.call(path)[0], 404, path)
+
+    def test_a_retried_send_lands_once(self):
+        tok = self.chat.token()
+        a = self.call("/api/send", {"text": "hi", "cid": "c-1"}, token=tok)[1]
+        b = self.call("/api/send", {"text": "hi", "cid": "c-1"}, token=tok)[1]
+        self.assertEqual(a["message"]["id"], b["message"]["id"])
+        self.assertEqual(len(b["state"]["messages"]), 1)
+        self.assertEqual(self.call("/api/send", {"text": "x", "cid": 7}, token=tok)[0], 400)
+
+    def test_the_stream_sends_the_whole_state_then_each_change(self):
+        import http.client
+        tok = self.chat.token()
+        self.call("/api/send", {"text": "first"}, token=tok)
+        c = http.client.HTTPConnection("127.0.0.1", self.port, timeout=10)
+        c.request("GET", "/api/stream", headers={"Host": "localhost", "Authorization": f"Bearer {tok}"})
+        r = c.getresponse()
+        self.assertEqual(r.getheader("Content-Type"), "text/event-stream")
+
+        def event():
+            lines = []
+            while True:
+                line = r.fp.readline().decode().rstrip("\n")
+                if not line:
+                    if lines:
+                        return lines
+                    continue
+                lines.append(line)
+        first = event()
+        self.assertEqual(first[0], "event: state")
+        self.assertEqual([m["text"] for m in json.loads(first[1][6:])["messages"]], ["first"])
+        run_wb("chat", "reply", "--text", "On it.")
+        second = event()
+        self.assertEqual([m["text"] for m in json.loads(second[1][6:])["messages"]], ["first", "On it."])
+        c.close()
+        self.assertEqual(self.call("/api/stream")[0], 401)
 
     def test_a_message_its_receipt_and_the_reply(self):
         tok = self.chat.token()
