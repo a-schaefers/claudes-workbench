@@ -67,5 +67,9 @@ has the architecture; read it first.
 python3 -m unittest            # ~15 s: real git, real runners, fake opencode, plus one real-opencode check
 claude plugin validate mod && claude plugin test mod
 ```
+A change to the web chat (`chat.py`, `chat_static/`) also needs the browser test: the real server and page
+in WebKit as an iPhone and Chromium as a Pixel, through sends, receipts, an outage and a reload.
+Playwright isn't a dependency; point `PLAYWRIGHT` at any install:
+`PLAYWRIGHT=…/node_modules/playwright node tests/e2e_chat.mjs`.
 A change to how OpenCode is invoked also needs one real run: `wb start` on MiMo against a
 scratch repo, as the README describes.

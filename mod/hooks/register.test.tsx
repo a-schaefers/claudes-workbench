@@ -126,6 +126,9 @@ test('the pane follows the running task: its whole history, then what it is doin
   const runs: string[][] = []
   on('process.run', (_: any, e: any) => {
     runs.push(e.argv)
+    if (e.argv[1] === 'chat' && e.argv[2] === 'url') {
+      return { value: { exitCode: 0, stdout: 'https://box.tail.ts.net/#token=abc\n', stderr: '' } }
+    }
     const lines = [
       { s: 'claude', t: 'Claude → agent · spec' },
       { s: 'think', t: '  ✻ thought for 2.0s' },
@@ -148,6 +151,10 @@ test('the pane follows the running task: its whole history, then what it is doin
   expect(await ui.find({ type: 'Text', text: /Writing… 3\.0s · ↓ 45 tokens/ })).toBeTruthy()
   expect(await ui.find({ type: 'Text', text: /reasoning on/ })).toBeTruthy()
   expect(await ui.find({ type: 'Text', text: /~5m left/ })).toBeTruthy()
+  // the web chat's link is the last line, so it stays in view while the pane follows the end
+  const texts = await ui.findAll({ type: 'Text' })
+  expect(texts[texts.length - 1].text).toBe('https://box.tail.ts.net/#token=abc')
+  expect(texts[texts.length - 2].text).toBe('web chat ')
   await ui.unmount()
 
   // a running task is re-read every poll, since its session moves between status writes

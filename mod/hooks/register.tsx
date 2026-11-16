@@ -653,9 +653,9 @@ export const register: Register = (on, options) => {
     const list = await read($, tasks)
     const watched = await read($, live)
     const { url } = await read($, chat)
-    // the web chat's link, always at hand to copy
+    // the web chat's link, always at hand to copy: last, since the pane follows its end
     const pinned = url ? (
-      <Box marginBottom={1}>
+      <Box marginTop={1}>
         <Text>
           <Text bold color="claude">web chat </Text>
           <Text dimColor>{url}</Text>
@@ -668,9 +668,9 @@ export const register: Register = (on, options) => {
     if (list.length === 0) {
       return (
         <Box flexDirection="column">
-          {pinned}
           <Text dimColor>No delegated tasks.</Text>
           <Text dimColor>/delegate hands one to a local model.</Text>
+          {pinned}
         </Box>
       )
     }
@@ -701,7 +701,6 @@ export const register: Register = (on, options) => {
 
     return (
       <Box flexDirection="column">
-        {pinned}
         {benches.length > 0 && (
           <Box marginBottom={1}>
             <Text>
@@ -748,6 +747,7 @@ export const register: Register = (on, options) => {
             {clock && <Text dimColor>{clock.t}</Text>}
           </Box>
         )}
+        {pinned}
       </Box>
     )
   })

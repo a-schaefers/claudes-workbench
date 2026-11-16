@@ -13,6 +13,7 @@
   const K = { token: 'wb-chat-token', seen: 'wb-chat-seen', outbox: 'wb-chat-outbox', draft: 'wb-chat-draft' }
   const BACKOFF = [500, 1000, 2000, 4000, 8000, 15000, 30000]
   const DEAD_MS = 40000          // the server pings every 15 s: this long silent means the line is dead
+  const CONNECT_MS = 12000       // a connection that never answers: dial again
   const HIDDEN_GRACE_MS = 60000  // a hidden page keeps its stream this long, then lets go
   const FLOW_MS = 40
 
@@ -45,10 +46,26 @@
   const reduced = matchMedia('(prefers-reduced-motion: reduce)')
 
   // ---- sticky follow (stays at the newest line unless the reader scrolls up) ----
-  let follow = true
+  let follow = true, lastTop = 0, touchY = 0
   const nearEnd = () => scroller.scrollHeight - scroller.scrollTop - scroller.clientHeight < 60
-  scroller.addEventListener('scroll', () => { follow = nearEnd(); jump.hidden = follow }, { passive: true })
-  const toEnd = force => { if (force || follow) { scroller.scrollTop = scroller.scrollHeight; follow = true; jump.hidden = true } }
+  const release = () => { follow = false; jump.hidden = nearEnd() }
+  scroller.addEventListener('scroll', () => {
+    const top = scroller.scrollTop
+    if (top > lastTop + 2 && nearEnd()) follow = true       // the reader came back down
+    else if (top < lastTop - 2 && !nearEnd()) follow = false // the reader went up
+    lastTop = top
+    jump.hidden = follow || nearEnd()
+  }, { passive: true })
+  scroller.addEventListener('wheel', e => { if (e.deltaY < 0) release() }, { passive: true })
+  scroller.addEventListener('touchstart', e => { touchY = e.touches[0]?.clientY ?? 0 }, { passive: true })
+  scroller.addEventListener('touchmove', e => {
+    const y = e.touches[0]?.clientY ?? 0
+    if (y > touchY + 8) release()                           // finger down = view up
+    touchY = y
+  }, { passive: true })
+  const toEnd = force => {
+    if (force || follow) { scroller.scrollTop = scroller.scrollHeight; lastTop = scroller.scrollTop; follow = true; jump.hidden = true }
+  }
   jump.addEventListener('click', () => scroller.scrollTo({ top: scroller.scrollHeight, behavior: 'smooth' }))
 
   // ---- text → DOM, never HTML from the thread ----
@@ -133,7 +150,17 @@
 
   function metaFor(m) {
     const meta = document.createElement('div'); meta.className = 'meta'
-    if (m.from === 'claude') { meta.append(span('', 'Claude · ' + clock(m.ts))); return meta }
+    if (m.from === 'claude') {
+      meta.append(span('', 'Claude · ' + clock(m.ts) + ' · '))
+      const c = document.createElement('button'); c.textContent = 'copy'
+      c.onclick = async () => {
+        try { await navigator.clipboard.writeText(m.text); c.textContent = 'copied' }
+        catch { c.textContent = 'copy failed' }
+        setTimeout(() => { c.textContent = 'copy' }, 1500)
+      }
+      meta.append(c)
+      return meta
+    }
     if (m.local) {
       if (m.error) {
         meta.append(span('', 'Not sent: ' + m.error + ' · '))
@@ -141,7 +168,13 @@
         b.onclick = () => { const o = outbox.find(x => x.cid === m.cid); if (o) { delete o.error; save(K.outbox, outbox) } flush(true); render() }
         const d = document.createElement('button'); d.textContent = 'delete'
         d.onclick = () => { outbox = outbox.filter(x => x.cid !== m.cid); save(K.outbox, outbox); render() }
-        meta.append(b, span('', ' · '), d)
+        const ed = document.createElement('button'); ed.textContent = 'edit'
+        ed.onclick = () => {
+          outbox = outbox.filter(x => x.cid !== m.cid); save(K.outbox, outbox)
+          input.value = m.text; save(K.draft, m.text); grow(); sendBtn.disabled = false
+          render(); input.focus()
+        }
+        meta.append(b, span('', ' · '), ed, span('', ' · '), d)
       } else meta.append(span('', online ? 'Sending…' : 'Waiting for the connection…'))
       return meta
     }
@@ -151,6 +184,10 @@
       : 'read by Claude ' + clock(m.received.ts)))
     else meta.append(span('tick', '✓'), span('', state.listener ? 'delivered' : 'waiting for a Claude session'))
     return meta
+  }
+
+  for (const chip of document.querySelectorAll('.chip')) {
+    chip.addEventListener('click', () => { input.value = chip.textContent; grow(); sendBtn.disabled = false; input.focus() })
   }
 
   function render() {
@@ -212,7 +249,7 @@
       working = document.createElement('div'); working.className = 'working'
       const dots = document.createElement('span'); dots.className = 'dots'; dots.append(document.createElement('i'), document.createElement('i'), document.createElement('i'))
       working.append(dots, span('', ''))
-      workTimer = setInterval(() => { if (working) working.lastChild.textContent = 'Claude is on it · ' + since(working.dataset.from) }, 1000)
+      workTimer = setInterval(() => { if (working) working.lastChild.textContent = 'Claude is on it · ' + since(Number(working.dataset.from)) }, 1000)
     }
     working.dataset.from = last.received.ts
     working.lastChild.textContent = 'Claude is on it · ' + since(last.received.ts)
@@ -244,9 +281,12 @@
     if (conn || !token || document.hidden) return
     clearTimeout(retryTimer)
     const ctrl = new AbortController(); conn = ctrl
+    lastRx = Date.now()  // the watchdog judges this dial from now, not from the last line's silence
+    const dialTimer = setTimeout(() => ctrl.abort(), CONNECT_MS)
     if (failures) banner('Reconnecting…')
     try {
       const r = await fetch('/api/stream', { headers: { Authorization: 'Bearer ' + token }, signal: ctrl.signal, cache: 'no-store' })
+      clearTimeout(dialTimer)
       if (r.status === 401) { conn = null; keyless('That key was not accepted.'); return }
       if (!r.ok || !r.body) throw new Error('HTTP ' + r.status)
       const reader = r.body.getReader(), dec = new TextDecoder()
@@ -273,6 +313,7 @@
         }
       }
     } catch (e) { /* dropped, aborted or refused: retried below */ }
+    clearTimeout(dialTimer)
     if (conn === ctrl) { conn = null; retry() }
   }
   function retry() {
@@ -299,6 +340,34 @@
       flush(true)
     }
   })
+
+  const letGo = () => { finishAll(); if (conn) { conn.abort(); conn = null } }
+  const comeBack = () => { if (!document.hidden && !conn && token) { failures = 0; connect(); flush(true) } }
+  addEventListener('pagehide', letGo)
+  document.addEventListener('freeze', letGo)
+  addEventListener('pageshow', comeBack)
+  document.addEventListener('resume', comeBack)
+
+  // ---- the phone keyboard: keep the composer above it (iOS ignores dvh for the keyboard) ----
+  const vv = window.visualViewport
+  if (vv) {
+    const fit = () => {
+      document.body.style.height = vv.height + 'px'
+      document.body.style.transform = vv.offsetTop ? `translateY(${vv.offsetTop}px)` : ''
+      document.body.classList.toggle('kb-open', innerHeight - vv.height > 120)
+      toEnd()
+    }
+    vv.addEventListener('resize', fit)
+    vv.addEventListener('scroll', fit)
+  }
+  // a downward swipe outside the composer puts the keyboard away
+  let swipeY = null
+  document.addEventListener('touchstart', e => {
+    swipeY = document.activeElement === input && !e.target.closest('.composer') ? e.touches[0].clientY : null
+  }, { passive: true })
+  document.addEventListener('touchmove', e => {
+    if (swipeY !== null && e.touches[0].clientY - swipeY > 48) { input.blur(); swipeY = null }
+  }, { passive: true })
 
   // ---- sending: the outbox ----
   let flushing = false, flushTimer = 0, flushTries = 0
@@ -345,8 +414,10 @@
 
   // ---- no key: say how to get one, or take it pasted ----
   function keyless(why) {
-    token = ''; save(K.token, '')
+    const kept = token  // kept until a new key is given: a stray refusal must not cost the link
+    token = ''
     if (conn) { conn.abort(); conn = null }
+    if (kept) setTimeout(() => { if (!token && document.querySelector('.keyless')) { token = kept; document.querySelector('.keyless')?.remove(); $('composer').hidden = false; render(); connect() } }, 30000)
     banner('')
     const box = document.createElement('div'); box.className = 'keyless'
     const h = document.createElement('h2'); h.textContent = 'This page needs its key'
