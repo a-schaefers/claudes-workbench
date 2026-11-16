@@ -791,16 +791,18 @@ export const register: Register = (on, options) => {
     // The apprentice, in pixels where the pane has the rows for it (it takes six), else its face
     // on the line. Drawing it in pixels arms the timer that animates it. A long history overfills
     // the pane, and anything that may shrink is squeezed: the bubble went down to its border.
+    // So the stage keeps its height, and the bubble takes the width that is left and wraps its
+    // words onto more rows rather than cutting them off: the pane can't be made wider.
     const focus = focusOf(list)
     const sp = speechOf(focus, doing?.t ?? '', list, delegating)
     const busy = sp.pose === 'work' || sp.pose === 'think'
     const pixels = (e as Row).surface === 'terminal' && Number(props.scroll?.bodyRows ?? 24) >= 20 && cols >= 40
     const said = [
-      <Text {...(busy ? LINE_STYLE.activity : { color: sp.color, bold: true })} wrap="truncate-end">
+      <Text {...(busy ? LINE_STYLE.activity : { color: sp.color, bold: true })} wrap="wrap">
         {busy && doing ? `${spin} ` : ''}{sp.say}
       </Text>,
-      sp.more ? <Text dimColor wrap="truncate-end">{sp.more}</Text> : null,
-      clock && focus?.name === watched.task ? <Text dimColor wrap="truncate-end">{clock.t}</Text> : null,
+      sp.more ? <Text dimColor wrap="wrap">{sp.more}</Text> : null,
+      clock && focus?.name === watched.task ? <Text dimColor wrap="wrap">{clock.t}</Text> : null,
     ]
     let stage
     if (pixels) {
@@ -817,7 +819,7 @@ export const register: Register = (on, options) => {
               <Text color={sp.color}>{i === MOUTH ? '─' : ' '}</Text>
             ))}
           </Box>
-          <Box flexDirection="column" flexGrow={1} flexShrink={0} marginTop={MOUTH - 1} borderStyle="round"
+          <Box flexDirection="column" flexGrow={1} flexShrink={1} minWidth={0} marginTop={MOUTH - 1} borderStyle="round"
             borderColor={sp.color} paddingX={1}>
             {said}
           </Box>
