@@ -19,7 +19,7 @@ import time
 import traceback
 from pathlib import Path
 
-from . import context, gitops, store
+from . import context, gitops, models, store
 from .events import StuckDetector, normalize
 
 PKG_ROOT = Path(__file__).resolve().parent.parent
@@ -220,6 +220,14 @@ def drive(task: store.Task) -> None:
     gpu = store.home() / "gpu.lock"
     task.set_status(phase="queued", last="waiting for the GPU", pid=os.getpid())
     with store.locked(gpu):  # one model generates at a time; a second task waits its turn
+        try:
+            m = models.resolve(task.spec["model"])
+            secs = models.make_resident(m, say=lambda msg: task.set_status(last=msg))
+            task.set_status(fingerprint=models.fingerprint(m), load_secs=round(secs, 1))
+        except (KeyError, RuntimeError, OSError) as e:
+            task.set_status(phase="failed", last=f"model: {e}")
+            task.notify("failed", f"task {task.name}: could not load {task.spec['model']}: {e}")
+            return
         while True:
             n = task.status["round"]
             task.set_status(phase="running", round=n, round_started_at=store.now(),

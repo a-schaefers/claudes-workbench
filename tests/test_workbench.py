@@ -20,6 +20,12 @@ from workbench import ask_mcp, cli, events, store  # noqa: E402
 
 FAKE = f"{sys.executable} {ROOT / 'tests' / 'fake_opencode.py'}"
 TEST_CMD = "grep -qx 42 answer.txt"
+OPENCODE_CONFIG = {"provider": {
+    "ollama": {"options": {"baseURL": "http://127.0.0.1:11434/v1"},
+               "models": {"mimo-v2.6:9b-q8_0": {"name": "MiMo"}, "qwen3.8-27b": {"name": "Qwen 27B"}}},
+    "strata": {"options": {"baseURL": "http://127.0.0.1:8080/v1"}, "models": {"strata": {}}},
+    "cloud": {"options": {"baseURL": "https://api.example.com/v1"}, "models": {"big": {}}},
+}}
 
 
 def run_wb(*argv) -> str:
@@ -46,7 +52,10 @@ class Base(unittest.TestCase):
         self.tmp = tempfile.TemporaryDirectory()
         tmp = Path(self.tmp.name)
         self.env_before = dict(os.environ)
-        os.environ.update(WB_HOME=str(tmp / "state"), WB_OPENCODE_BIN=FAKE, WB_FAKE_MODELS="1")
+        os.environ.update(WB_HOME=str(tmp / "state"), WB_OPENCODE_BIN=FAKE, WB_FAKE_MODELS="1",
+                          WB_OPENCODE_CONFIG=str(tmp / "opencode.json"),
+                          WB_MODELS=str(tmp / "wb-models.json"))
+        (tmp / "opencode.json").write_text(json.dumps(OPENCODE_CONFIG))
         self.repo = tmp / "repo"
         self.repo.mkdir()
         g = lambda *a: subprocess.run(["git", "-C", str(self.repo), *a], check=True,  # noqa
@@ -313,6 +322,112 @@ class RealOpenCode(Base):
         self.assertTrue({"edit", "read", "shell"} <= tools)
         self.assertFalse({"question", "execute", "subagent"} & tools)
         self.assertNotIn("<id>delegate</id>", text)
+
+
+class Discovery(Base):
+    def test_local_providers_only_with_overrides(self):
+        from workbench import models
+        Path(os.environ["WB_MODELS"]).write_text(json.dumps({
+            "strata": {"start": "strata launch", "stop": "strata stop"},
+            "ollama/qwen3.8-27b": {"skip": True}}))
+        found = models.discover()
+        self.assertEqual(list(found), ["ollama/mimo-v2.6:9b-q8_0", "strata/strata"])
+        self.assertEqual(found["ollama/mimo-v2.6:9b-q8_0"].engine, "ollama")
+        self.assertEqual(found["strata/strata"].engine, "server")
+        self.assertEqual(found["strata/strata"].start, "strata launch")
+        self.assertEqual(models.resolve("mimo").id, "ollama/mimo-v2.6:9b-q8_0")
+        self.assertEqual(models.resolve("strata").id, "strata/strata")
+
+    def test_ambiguous_and_unknown_names_are_refused(self):
+        from workbench import models
+        with self.assertRaisesRegex(KeyError, "matches"):
+            models.resolve("ollama/")
+        with self.assertRaisesRegex(KeyError, "unknown model"):
+            models.resolve("gpt")
+
+
+class Routing(Base):
+    def bench(self, model, size, passed, minutes, n=1, fp="fake"):
+        for _ in range(n):
+            store.append_jsonl(store.home() / "bench.jsonl", {
+                "kind": "task", "model": model, "fingerprint": fp, "size": size,
+                "passed": passed, "minutes": minutes})
+
+    def test_no_evidence_falls_back_and_says_so(self):
+        from workbench import router
+        top, why = router.choose("significant")
+        self.assertIsNotNone(top)
+        self.assertIn("no significant benchmarks", why)
+
+    def test_fastest_among_the_nearly_best(self):
+        from workbench import router
+        self.bench("ollama/qwen3.8-27b", "significant", True, 2.0, n=5)
+        self.bench("strata/strata", "significant", True, 9.0, n=5)
+        self.bench("ollama/mimo-v2.6:9b-q8_0", "significant", False, 1.0, n=5)
+        top, why = router.choose("significant")
+        self.assertEqual(top.model.id, "ollama/qwen3.8-27b")   # mimo is fast but fails
+        self.assertIn("5/5 passed", why)
+
+    def test_quality_beats_speed_outside_the_margin(self):
+        from workbench import router
+        self.bench("ollama/qwen3.8-27b", "trivial", True, 3.0, n=4)
+        self.bench("ollama/mimo-v2.6:9b-q8_0", "trivial", True, 0.5, n=2)
+        self.bench("ollama/mimo-v2.6:9b-q8_0", "trivial", False, 0.5, n=2)
+        self.assertEqual(router.choose("trivial")[0].model.id, "ollama/qwen3.8-27b")
+
+    def test_real_results_count_and_other_weights_do_not(self):
+        from workbench import router
+        self.bench("ollama/qwen3.8-27b", "significant", True, 2.0, n=3, fp="old-weights")
+        store.append_jsonl(store.home() / "results.jsonl", {
+            "model": "ollama/mimo-v2.6:9b-q8_0", "size": "significant", "outcome": "accepted",
+            "minutes": 1.0})
+        sc = {s.model.id: s for s in router.rank("significant")}
+        self.assertEqual(sc["ollama/qwen3.8-27b"].tries, 0)   # measured on other weights
+        self.assertEqual(sc["ollama/mimo-v2.6:9b-q8_0"].wins, 1)
+
+
+class BenchSuite(unittest.TestCase):
+    def test_every_task_is_real_and_solvable(self):
+        """The seed fails the hidden tests; the reference solution passes them and the visible."""
+        from workbench import bench
+        env = {**os.environ, "PYTHONDONTWRITEBYTECODE": "1"}
+        for name, task in bench.suite().items():
+            for solved in (False, True):
+                with tempfile.TemporaryDirectory() as d:
+                    shutil.copytree(task["dir"] / "repo", d, dirs_exist_ok=True)
+                    if solved:
+                        shutil.copytree(task["dir"] / "reference", d, dirs_exist_ok=True)
+                    shutil.copytree(task["dir"] / "hidden", d, dirs_exist_ok=True)
+                    hidden = subprocess.run(task["hidden"], shell=True, cwd=d, env=env,
+                                            capture_output=True).returncode
+                    self.assertEqual(hidden == 0, solved, f"{name} solved={solved}")
+                    if solved:
+                        visible = subprocess.run(task["test"], shell=True, cwd=d, env=env,
+                                                 capture_output=True).returncode
+                        self.assertEqual(visible, 0, f"{name}: reference fails visible tests")
+            self.assertIn(task["size"], ("trivial", "significant"))
+
+    def test_a_bench_run_is_graded_recorded_and_kept_quiet(self):
+        from workbench import bench, models
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        env_before = dict(os.environ)
+        self.addCleanup(lambda: (os.environ.clear(), os.environ.update(env_before)))
+        cfg = Path(tmp.name) / "opencode.json"
+        cfg.write_text(json.dumps(OPENCODE_CONFIG))
+        os.environ.update(WB_HOME=str(Path(tmp.name) / "state"), WB_OPENCODE_BIN=FAKE,
+                          WB_FAKE_MODELS="1", WB_OPENCODE_CONFIG=str(cfg),
+                          WB_MODELS=str(Path(tmp.name) / "none.json"), FAKE_SCENARIO="ok")
+        warnings.simplefilter("ignore", ResourceWarning)
+        task = bench.suite()["slugify"]
+        row = bench.run_task(models.resolve("mimo"), "slugify", task, say=lambda m: None)
+        self.assertFalse(row["passed"])                 # the fake agent doesn't fix slugify
+        self.assertEqual(row["model"], "ollama/mimo-v2.6:9b-q8_0")
+        rows, _ = store.read_jsonl(store.home() / "bench.jsonl")
+        self.assertEqual(rows[-1]["task"], "slugify")
+        self.assertFalse((store.home() / "notify.jsonl").exists())    # Claude never woken
+        self.assertFalse((store.home() / "results.jsonl").exists())   # not real work
+        self.assertEqual([t.status["phase"] for t in store.all_tasks()], ["discarded"])
 
 
 class Detector(unittest.TestCase):

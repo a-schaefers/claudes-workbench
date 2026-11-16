@@ -11,7 +11,7 @@ import sys
 import time
 from pathlib import Path
 
-from . import __version__, gitops, models, results, store
+from . import __version__, bench, gitops, models, results, router, store
 from .runner import PKG_ROOT
 
 PROTOCOL = """
@@ -66,23 +66,18 @@ def ago(ts) -> str:
     return f"{s}s" if s < 90 else f"{s // 60}m" if s < 5400 else f"{s // 3600}h"
 
 
-def pick_model(size: str, wanted: str | None):
+def pick_model(size: str, wanted: str | None) -> tuple[models.Model, dict, str]:
+    """The task's model: the one asked for, else the router's choice on the evidence."""
     if wanted:
-        key, m = models.resolve(wanted)
-        return key, m, models.check(key, m)
-    reg = models.registry()
-    order = [k for k, m in reg.items() if m.get("tier") == size] + \
-            [k for k, m in reg.items() if m.get("tier") != size]
-    if size == "trivial":  # a trivial task runs on whatever is loaded rather than evict it
-        held = models.on_gpu()
-        order = [k for k in held if k in reg] + [k for k in order if k not in held]
-    first = None
-    for key in order:
-        state = models.check(key, reg[key])
-        if state["ready"]:
-            return key, reg[key], state
-        first = first or (key, reg[key], state)
-    return first
+        try:
+            m = models.resolve(wanted)
+        except KeyError as e:
+            die(str(e).strip('"'))
+        return m, models.status(m), "asked for"
+    top, why = router.choose(size)
+    if top is None:
+        die(why, 3)
+    return top.model, top.state, why
 
 
 # --- commands -----------------------------------------------------------------------------------
@@ -100,9 +95,9 @@ def cmd_start(a):
     spec_text = Path(a.spec).read_text() if a.spec != "-" else sys.stdin.read()
     if not spec_text.strip():
         die("the spec is empty")
-    key, m, state = pick_model(a.size, a.model)
-    if not state["ready"] and not a.force:
-        die(f"{key} can't run now: {state['why']}. (--force queues it anyway)", 3)
+    m, state, why = pick_model(a.size, a.model)
+    if not state["available"] and not a.force:
+        die(f"{m.id} can't run: {state['why']}. (--force queues it anyway)", 3)
     dirty = gitops.git(repo, "status", "--porcelain").strip()
 
     task.dir.mkdir(parents=True)
@@ -114,8 +109,8 @@ def cmd_start(a):
     budget = a.ask_budget
     store.write_json(task.dir / "task.json", {
         "name": a.name, "repo": str(repo), "base": base, "base_ref": a.base,
-        "branch": gitops.branch_name(a.name), "model": key, "model_label": m["label"],
-        "opencode_model": m["opencode"], "size": a.size, "test_cmd": a.test,
+        "branch": gitops.branch_name(a.name), "model": m.id, "model_label": m.label,
+        "opencode_model": m.id, "route": why, "bench": a.bench, "size": a.size, "test_cmd": a.test,
         "auto_fix": a.auto_fix, "ask_budget": budget, "ask_timeout": a.ask_timeout,
         "round_timeout": a.round_timeout, "silence_timeout": a.silence_timeout,
         "created_at": store.now(), "wb_version": __version__})
@@ -128,13 +123,18 @@ def cmd_start(a):
     task.set_status(phase="queued", round=1, reviews=0, auto_fixes=0, tools=0,
                     tok_in=0, tok_out=0, session=None, last="starting")
     spawn_runner(task)
-    print(f"started {a.name} on {m['label']} · branch {gitops.branch_name(a.name)} · "
+    if a.bench:
+        return
+    print(f"started {a.name} on {m.label} · branch {gitops.branch_name(a.name)} · "
           f"base {base[:8]}" + (f" · tests `{a.test}`, auto-fix {a.auto_fix}" if a.test else ""))
     if dirty:
         print("note: the repo has uncommitted changes; the agent's worktree starts from "
               f"{a.base}, without them")
-    if not state["ready"]:
+    print(f"model: {why}" if why != "asked for" else f"model: {m.id} (asked for)")
+    if not state["available"]:
         print(f"note: queued although {state['why']}")
+    elif not state["resident"]:
+        print("note: the runner loads it onto the GPU first, unloading what is there")
     print(f"next: wb wait {a.name}   (the workbench mod wakes Claude by itself when loaded)")
 
 
@@ -222,13 +222,14 @@ def cmd_status(a):
     if not tasks:
         print("no open tasks" + ("" if a.all else " (wb status --all shows closed ones)"))
         return
-    print(f"{'task':22} {'phase':9} {'rnd':>3} {'model':8} {'age':>5} {'idle':>5}  last")
+    print(f"{'task':22} {'phase':9} {'rnd':>3} {'model':16} {'age':>5} {'idle':>5}  last")
     for t in tasks:
         st, sp = t.status, t.spec
         phase = st.get("phase", "?")
         if phase in store.ACTIVE and not runner_alive(t) and phase != "asking":
             phase += "?"  # the runner died without saying so
-        print(f"{t.name:22} {phase:9} {st.get('round', 1):>3} {sp.get('model', ''):8} "
+        short = sp.get("model", "").split("/")[-1][:16]
+        print(f"{t.name:22} {phase:9} {st.get('round', 1):>3} {short:16} "
               f"{ago(sp.get('created_at')):>5} {ago(st.get('updated_at')):>5}  "
               f"{(st.get('last') or '')[:70]}")
 
@@ -341,11 +342,51 @@ def cmd_discard(a):
 
 
 def cmd_models(a):
-    held = models.on_gpu()
-    for key, m in models.registry().items():
-        st = models.check(key, m)
-        print(f"{key:8} {'READY' if st['ready'] else 'no':5} {m['tier']:11} {m['label']}"
-              + ("  [on GPU]" if key in held else "") + ("" if st["ready"] else f"  — {st['why']}"))
+    """What OpenCode offers, whether each can run, and who the router would pick per size."""
+    found = models.discover()
+    if not found:
+        die(f"no local models in {models.opencode_config_path()}")
+    for m in found.values():
+        st = models.status(m)
+        print(f"{m.id:34} {('on GPU' if st['resident'] else 'ready' if st['available'] else 'no'):6}"
+              f"  {m.label}" + ("" if st["available"] else f"  ({st['why']})"))
+    for size in router.SIZES:
+        print(f"\n{size}:")
+        for i, sc in enumerate(router.rank(size)):
+            mark = "→" if i == 0 and sc.state["available"] else " "
+            print(f" {mark} {sc.model.id:34} {sc.line()}")
+    if not store.read_jsonl(store.home() / "bench.jsonl")[0]:
+        print("\nno measurements yet: `wb bench` runs the suite on every model")
+
+
+def cmd_bench(a):
+    """Measure models: probes, then the graded task suite. Long: run it in the background."""
+    targets = [models.resolve(x) for x in a.models] if a.models else \
+        [m for m in models.discover().values() if models.status(m)["available"]]
+    tasks = bench.suite()
+    if a.tasks:
+        unknown = set(a.tasks) - set(tasks)
+        if unknown:
+            die(f"unknown bench task(s): {', '.join(sorted(unknown))}; known: {', '.join(tasks)}")
+        tasks = {k: v for k, v in tasks.items() if k in a.tasks}
+    if a.report:
+        print(bench.table())
+        return
+    say = lambda msg: print(f"  {msg}", flush=True)  # noqa: E731
+    for m in targets:
+        print(f"== {m.id}", flush=True)
+        if not a.no_probe:
+            p = bench.probe(m, say=say)
+            print(f"probe: load {p['load_s']}s · prefill {p['prefill_tps']} tok/s · decode "
+                  f"{p['decode_tps']} tok/s · tool calls {p['tools_ok']}/{p['tools_n']}", flush=True)
+        for _ in range(a.repeat):
+            for name, task in tasks.items():
+                r = bench.run_task(m, name, task, say=say)
+                print(f"{name:16} {'PASS' if r['passed'] else 'fail'}  {r['minutes']:5.1f} min  "
+                      f"rounds {r['rounds']}  visible {'ok' if r['visible_ok'] else 'FAIL'}  "
+                      f"{'' if r['passed'] else r['hidden']}", flush=True)
+    print()
+    print(bench.table())
 
 
 def cmd_stats(a):
@@ -366,9 +407,11 @@ def cmd_doctor(a):
     line(cfg.exists(), f"OpenCode config {cfg}")
     g = subprocess.run(["git", "--version"], capture_output=True, text=True)
     line(g.returncode == 0, g.stdout.strip() or "git not found")
-    for key, m in models.registry().items():
-        st = models.check(key, m)
-        print(f"{'ok ' if st['ready'] else '-- '} model {key}: {st['why']}")
+    found = models.discover()
+    line(bool(found), f"{len(found)} local model(s) in {models.opencode_config_path()}")
+    for m in found.values():
+        st = models.status(m)
+        print(f"{'ok ' if st['available'] else '-- '} model {m.id}: {st['why']}")
     line(os.access(store.home().parent, os.W_OK), f"state dir {store.home()}")
     print(f"--  the Claude Code mod lives in {PKG_ROOT / 'mod'} (see README for installing it)")
     sys.exit(0 if ok else 1)
@@ -385,7 +428,8 @@ def main(argv=None):
     s.add_argument("--spec", required=True, help="spec file, or - for stdin")
     s.add_argument("--repo", default=".")
     s.add_argument("--size", choices=["trivial", "significant"], default="significant")
-    s.add_argument("--model", help="registry key (strata, qwen27b, mimo) or OpenCode model id")
+    s.add_argument("--model", help="an OpenCode model id or a fragment of one; default: the "
+                   "router's choice for --size, from benchmarks and past results")
     s.add_argument("--test", help="acceptance command, run in the worktree after every round")
     s.add_argument("--auto-fix", type=int, default=2,
                    help="rounds that send failing tests back without waking Claude (default 2)")
@@ -395,6 +439,7 @@ def main(argv=None):
     s.add_argument("--silence-timeout", type=int, default=900)
     s.add_argument("--base", default="HEAD")
     s.add_argument("--force", action="store_true", help="queue even if the model can't run now")
+    s.add_argument("--bench", action="store_true", help=argparse.SUPPRESS)
     s.set_defaults(f=cmd_start)
 
     s = sub.add_parser("feedback", help="send review feedback for another round")
@@ -433,7 +478,15 @@ def main(argv=None):
     s.add_argument("name"); s.add_argument("--reason")
     s.add_argument("--keep-branch", action="store_true")
     s.set_defaults(f=cmd_discard)
-    sub.add_parser("models", help="which local models can run now").set_defaults(f=cmd_models)
+    sub.add_parser("models", help="the local models, and which the router picks per task size"
+                   ).set_defaults(f=cmd_models)
+    s = sub.add_parser("bench", help="measure models: speed probes and graded coding tasks")
+    s.add_argument("models", nargs="*", help="default: every model that can run")
+    s.add_argument("--tasks", nargs="+", help="only these bench tasks")
+    s.add_argument("--repeat", type=int, default=1, help="run the task suite N times")
+    s.add_argument("--no-probe", action="store_true", help="skip the speed and tool-call probe")
+    s.add_argument("--report", action="store_true", help="print the measurements, run nothing")
+    s.set_defaults(f=cmd_bench)
     sub.add_parser("stats", help="results by model").set_defaults(f=cmd_stats)
     sub.add_parser("doctor", help="check the setup").set_defaults(f=cmd_doctor)
 

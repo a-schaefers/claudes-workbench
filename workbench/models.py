@@ -1,60 +1,101 @@
-"""The local models workbench can hand work to, and whether each can run right now.
+"""The local models workbench can hand work to: found in OpenCode's config, not listed here.
 
-Only one model fits on the GPU at a time (a 16 GB RX 9070 XT), so availability is two questions:
-is the model's server answering, and is another engine already holding the card. Overridable with
-``~/.config/workbench/models.json`` (same shape as DEFAULT_MODELS, merged by key).
+Every model of an OpenCode provider whose baseURL is on this machine is a candidate. What each
+model is good at is measured (`wb bench`) and learned from real tasks (router.py), never written
+down here, so a new model is one opencode.json entry and one `wb bench` away.
+
+``~/.config/workbench/models.json`` (or ``$WB_MODELS``) adds what OpenCode's config can't say,
+keyed by OpenCode model id or by provider id:
+
+    {"strata": {"start": "strata launch --preset coder --no-tui --yes",
+                "stop": "strata launch --stop --preset coder"},
+     "ollama/some-model": {"skip": true}}
+
+Only one model fits on the GPU at a time (a 16 GB card), so the runner makes the task's model
+resident before it starts (make_resident): it unloads Ollama models and stops servers that have
+a stop command, then loads or starts the one it needs.
 """
+from __future__ import annotations
+
 import json
 import os
+import subprocess
+import time
 import urllib.request
+from dataclasses import dataclass, field
 from pathlib import Path
+from urllib.parse import urlparse
 
-DEFAULT_MODELS = {
-    "strata": {
-        "label": "Qwen3.8-Flash-Next Coder (Strata)",
-        "opencode": "strata/strata",
-        "engine": "strata",
-        "probe": "http://127.0.0.1:8080/v1/models",
-        "tier": "significant",
-    },
-    "qwen27b": {
-        "label": "Qwen3.8 27B UD-Q3_K_XL (Ollama)",
-        "opencode": "ollama/qwen3.8-27b",
-        "engine": "ollama",
-        "ollama_name": "qwen3.8-27b",
-        "probe": "http://127.0.0.1:11434/api/tags",
-        "tier": "significant",
-    },
-    "mimo": {
-        "label": "MiMo-V2.6 9B Q8 (Ollama)",
-        "opencode": "ollama/mimo-v2.6:9b-q8_0",
-        "engine": "ollama",
-        "ollama_name": "mimo-v2.6:9b-q8_0",
-        "probe": "http://127.0.0.1:11434/api/tags",
-        "tier": "trivial",
-    },
-}
-OLLAMA_PS = "http://127.0.0.1:11434/api/ps"
+LOCAL_HOSTS = {"127.0.0.1", "localhost", "::1", "0.0.0.0"}
+OLLAMA_PORT = 11434
+START_TIMEOUT = 20 * 60  # Strata's first start can take minutes
 
 
-def registry() -> dict:
-    models = {k: dict(v) for k, v in DEFAULT_MODELS.items()}
-    override = Path(os.environ.get("WB_MODELS") or Path.home() / ".config/workbench/models.json")
-    if override.exists():
-        for key, fields in json.loads(override.read_text()).items():
-            models.setdefault(key, {}).update(fields)
-    return models
+@dataclass
+class Model:
+    id: str            # the OpenCode model id, "provider/model": the one name used everywhere
+    provider: str
+    name: str          # the model's name at its server
+    base_url: str      # the provider's OpenAI-compatible base URL, ending in /v1
+    engine: str        # "ollama" (loads models on demand) or "server" (serves one model)
+    label: str
+    start: str | None = None
+    stop: str | None = None
+    extra: dict = field(default_factory=dict)
+
+    @property
+    def root(self) -> str:
+        return self.base_url.rstrip("/").removesuffix("/v1")
 
 
-def resolve(key_or_model: str) -> tuple[str, dict]:
-    """Accept a registry key (``mimo``) or an OpenCode model id (``ollama/mimo-v2.6:9b-q8_0``)."""
-    models = registry()
-    if key_or_model in models:
-        return key_or_model, models[key_or_model]
-    for key, m in models.items():
-        if m["opencode"] == key_or_model:
-            return key, m
-    raise KeyError(f"unknown model {key_or_model!r}; known: {', '.join(models)}")
+def opencode_config_path() -> Path:
+    return Path(os.environ.get("WB_OPENCODE_CONFIG")
+                or Path.home() / ".config" / "opencode" / "opencode.json")
+
+
+def _overrides() -> dict:
+    path = Path(os.environ.get("WB_MODELS") or Path.home() / ".config" / "workbench" / "models.json")
+    return json.loads(path.read_text()) if path.exists() else {}
+
+
+def discover() -> dict[str, Model]:
+    """Every local model OpenCode knows, by OpenCode id, in config order."""
+    path = opencode_config_path()
+    cfg = json.loads(path.read_text()) if path.exists() else {}
+    providers = cfg.get("provider") or cfg.get("providers") or {}
+    extra = _overrides()
+    found: dict[str, Model] = {}
+    for pid, prov in providers.items():
+        opts = prov.get("options") or prov.get("settings") or {}
+        url = opts.get("baseURL", "")
+        parsed = urlparse(url)
+        if parsed.hostname not in LOCAL_HOSTS:
+            continue
+        engine = "ollama" if parsed.port == OLLAMA_PORT else "server"
+        for name, spec in (prov.get("models") or {}).items():
+            mid = f"{pid}/{name}"
+            over = {**extra.get(pid, {}), **extra.get(mid, {})}
+            if over.get("skip"):
+                continue
+            found[mid] = Model(id=mid, provider=pid, name=name, base_url=url, engine=engine,
+                               label=over.get("label") or spec.get("name") or mid,
+                               start=over.get("start"), stop=over.get("stop"), extra=over)
+    return found
+
+
+def resolve(wanted: str) -> Model:
+    """An OpenCode id, a model's name at its server, or a fragment naming exactly one model."""
+    models = discover()
+    if wanted in models:
+        return models[wanted]
+    exact = [m for m in models.values() if wanted in (m.name, m.provider)]
+    hits = exact or [m for m in models.values() if wanted.lower() in m.id.lower()]
+    if len(hits) == 1:
+        return hits[0]
+    known = ", ".join(models) or "none (no local provider in opencode.json)"
+    if hits:
+        raise KeyError(f"{wanted!r} matches {', '.join(m.id for m in hits)}; be more specific")
+    raise KeyError(f"unknown model {wanted!r}; known: {known}")
 
 
 def _get(url: str, timeout: float = 2.5):
@@ -65,30 +106,120 @@ def _get(url: str, timeout: float = 2.5):
         return None
 
 
-def check(key: str, m: dict) -> dict:
-    """``{ready, why}`` for one model, without loading anything onto the GPU."""
-    if os.environ.get("WB_FAKE_MODELS"):  # tests drive a fake opencode; no servers involved
-        return {"ready": True, "why": "fake"}
-    body = _get(m["probe"])
-    if body is None:
-        return {"ready": False, "why": f"{m['engine']} server is not answering"}
-    if m["engine"] == "ollama":
-        names = {x.get("name") for x in body.get("models", [])}
-        if m["ollama_name"] not in names and f"{m['ollama_name']}:latest" not in names:
-            return {"ready": False, "why": f"{m['ollama_name']} is not pulled in Ollama"}
-        if _get(registry()["strata"]["probe"], timeout=1.5) is not None:
-            return {"ready": False,
-                    "why": "Strata is running and holds the GPU (strata launch --stop first)"}
-    return {"ready": True, "why": "up"}
+def _post(url: str, body: dict, timeout: float = 600):
+    req = urllib.request.Request(url, data=json.dumps(body).encode(),
+                                 headers={"Content-Type": "application/json"})
+    with urllib.request.urlopen(req, timeout=timeout) as r:
+        return json.loads(r.read() or b"{}")
 
 
-def on_gpu() -> list[str]:
-    """What is holding the card now, by registry key."""
-    held = []
-    if _get(registry()["strata"]["probe"], timeout=1.5) is not None:
-        held.append("strata")
-    loaded = {x.get("name") for x in (_get(OLLAMA_PS, timeout=1.5) or {}).get("models", [])}
-    for key, m in registry().items():
-        if m["engine"] == "ollama" and ({m["ollama_name"], f"{m['ollama_name']}:latest"} & loaded):
-            held.append(key)
-    return held
+def _fake() -> bool:
+    return bool(os.environ.get("WB_FAKE_MODELS"))  # tests drive a fake opencode, no servers
+
+
+def _ollama_names(m: Model, endpoint: str) -> set[str]:
+    body = _get(f"{m.root}/api/{endpoint}") or {}
+    return {x.get("name") for x in body.get("models", [])}
+
+
+def _matches(name: str, names: set[str]) -> bool:
+    return name in names or f"{name}:latest" in names
+
+
+def status(m: Model) -> dict:
+    """``{available, resident, why}``: can the runner get this model onto the GPU, is it there."""
+    if _fake():
+        return {"available": True, "resident": True, "why": "fake"}
+    if m.engine == "ollama":
+        if _get(f"{m.root}/api/tags") is None:
+            return {"available": False, "resident": False, "why": "ollama is not answering"}
+        if not _matches(m.name, _ollama_names(m, "tags")):
+            return {"available": False, "resident": False, "why": f"{m.name} is not pulled"}
+        resident = _matches(m.name, _ollama_names(m, "ps"))
+        return {"available": True, "resident": resident, "why": "loaded" if resident else "pulled"}
+    if _get(f"{m.base_url.rstrip('/')}/models", timeout=2) is not None:
+        return {"available": True, "resident": True, "why": "running"}
+    if m.start:
+        return {"available": True, "resident": False, "why": "stopped (wb starts it)"}
+    return {"available": False, "resident": False,
+            "why": "not running, and no start command in ~/.config/workbench/models.json"}
+
+
+def fingerprint(m: Model) -> str | None:
+    """What identifies the weights behind the id, so a re-pulled or swapped model is re-measured."""
+    if _fake():
+        return "fake"
+    if m.engine == "ollama":
+        for x in (_get(f"{m.root}/api/tags") or {}).get("models", []):
+            if x.get("name") in (m.name, f"{m.name}:latest"):
+                return x.get("digest", "")[:16]
+        return None
+    body = _get(f"{m.base_url.rstrip('/')}/models", timeout=2) or {}
+    ids = sorted(x.get("id", "") for x in body.get("data", []))
+    return ",".join(ids) or None
+
+
+def resident() -> list[Model]:
+    """The discovered models holding the GPU now."""
+    return [m for m in discover().values() if status(m)["resident"]] if not _fake() else []
+
+
+def _server_idle(m: Model) -> bool:
+    live = (_get(f"{m.root}/metrics", timeout=2) or {}).get("live") or {}
+    return live.get("state", "idle") == "idle"  # servers without metrics count as idle
+
+
+def _ollama_loaded(root: str) -> list[str]:
+    return [x.get("name") for x in (_get(f"{root}/api/ps") or {}).get("models", [])]
+
+
+def make_resident(m: Model, say=print) -> float:
+    """Free the GPU for ``m`` and load it. Returns the seconds it took (0 if already there)."""
+    if _fake() or status(m)["resident"] and not _others_resident(m):
+        return 0.0
+    t0 = time.time()
+    for other in discover().values():
+        if other.id == m.id or other.engine != "server" or not status(other)["resident"]:
+            continue
+        if not other.stop:
+            raise RuntimeError(f"{other.id} holds the GPU and has no stop command; stop it first")
+        deadline = time.time() + 600
+        while not _server_idle(other) and time.time() < deadline:  # never cut off someone's reply
+            time.sleep(5)
+        say(f"stopping {other.id}")
+        subprocess.run(other.stop, shell=True, capture_output=True, timeout=300)
+    roots = {o.root for o in discover().values() if o.engine == "ollama"}
+    for root in roots:  # every model Ollama has loaded, ours or another tool's
+        for name in _ollama_loaded(root):
+            if m.engine == "ollama" and root == m.root and _matches(m.name, {name}):
+                continue
+            say(f"unloading {name} from ollama")
+            try:
+                _post(f"{root}/api/generate", {"model": name, "keep_alive": 0}, timeout=120)
+            except Exception:
+                pass
+    if m.engine == "ollama":
+        say(f"loading {m.name} into ollama")
+        _post(f"{m.root}/api/generate", {"model": m.name, "prompt": "", "keep_alive": "30m"},
+              timeout=START_TIMEOUT)
+    elif not status(m)["resident"]:
+        if not m.start:
+            raise RuntimeError(f"{m.id} is not running and has no start command")
+        say(f"starting {m.id}")
+        subprocess.Popen(m.start, shell=True, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
+                         stderr=subprocess.DEVNULL, start_new_session=True)
+        deadline = time.time() + START_TIMEOUT
+        while not status(m)["resident"]:
+            if time.time() > deadline:
+                raise RuntimeError(f"{m.id} did not come up within {START_TIMEOUT // 60} min")
+            time.sleep(5)
+    return time.time() - t0
+
+
+def _others_resident(m: Model) -> bool:
+    if any(o.id != m.id and o.engine == "server" and status(o)["resident"]
+           for o in discover().values()):
+        return True
+    roots = {o.root for o in discover().values() if o.engine == "ollama"}
+    return any(not (m.engine == "ollama" and r == m.root and _matches(m.name, {n}))
+               for r in roots for n in _ollama_loaded(r))

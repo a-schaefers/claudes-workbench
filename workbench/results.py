@@ -4,8 +4,10 @@ from collections import defaultdict
 from . import store
 
 
-def record(task: store.Task, outcome: str, **extra) -> dict:
+def record(task: store.Task, outcome: str, **extra) -> dict | None:
     spec, st = task.spec, task.status
+    if spec.get("bench"):  # measured by wb bench into bench.jsonl instead
+        return None
     row = {"ts": store.now(), "task": task.name, "outcome": outcome, "model": spec.get("model"),
            "size": spec.get("size"), "repo": spec.get("repo"), "rounds": st.get("round", 1),
            "auto_fixes": st.get("auto_fixes_total", 0) + st.get("auto_fixes", 0),
@@ -18,19 +20,19 @@ def record(task: store.Task, outcome: str, **extra) -> dict:
 
 
 def table() -> str:
-    rows, _ = store.read_jsonl(store.home() / "results.jsonl")
+    rows = [r for r in store.read_jsonl(store.home() / "results.jsonl")[0] if not r.get("bench")]
     if not rows:
         return "no finished tasks yet"
     by = defaultdict(list)
     for r in rows:
         by[(r["model"], r.get("size") or "?")].append(r)
-    out = [f"{'model':10} {'size':12} {'tasks':>5} {'accepted':>8} {'rounds':>6} "
+    out = [f"{'model':34} {'size':12} {'tasks':>5} {'accepted':>8} {'rounds':>6} "
            f"{'autofix':>7} {'reviews':>7} {'min':>6} {'local tok':>10}"]
     for (model, size), rs in sorted(by.items()):
         n = len(rs)
         acc = sum(r["outcome"] == "accepted" for r in rs)
         avg = lambda k: sum(r.get(k) or 0 for r in rs) / n  # noqa: E731
-        out.append(f"{model:10} {size:12} {n:>5} {acc / n:>7.0%} {avg('rounds'):>6.1f} "
+        out.append(f"{model:34} {size:12} {n:>5} {acc / n:>7.0%} {avg('rounds'):>6.1f} "
                    f"{avg('auto_fixes'):>7.1f} {avg('reviews'):>7.1f} {avg('minutes'):>6.1f} "
                    f"{int(avg('tok_in') + avg('tok_out')):>10}")
     return "\n".join(out)
