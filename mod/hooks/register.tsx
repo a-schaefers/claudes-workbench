@@ -7,10 +7,9 @@
 // through each task's `acked` file, so a notification wakes Claude once, by whichever got it first.
 // A wake is held while Claude's main loop is mid-turn (a prompt submitted then would queue and
 // arrive stale) and checked against the task's phase when it is finally sent.
-// Two phrases from the user act at once, before Claude reads them: "bail out claude" stops the
-// benchmark and every agent (`wb stop --all`); "just get it done claude" stops the agents and hands
-// their tasks to Claude (`wb takeover --all`) to finish directly. The message reaches Claude with
-// what was done and what to do next appended.
+// Two slash commands for the user: /delegate-quit stops the benchmark and every agent at once
+// (`wb stop --all`) and tells Claude so; /delegate-quit-and-hand-back-claude stops the agents and
+// hands their tasks to Claude (`wb takeover --all`), starting a turn for Claude to finish them.
 // Under the task list the pane follows one task live: the conversation between Claude and the
 // agent, every tool call and test, as `wb watch --json` prints it.
 import { atom, read, update } from 'claude-code'
@@ -109,15 +108,14 @@ const NEXT: Record<string, (n: string) => string> = {
 }
 const RUNNING = new Set(['queued', 'running', 'testing'])
 
-const BAIL_OUT = /\bbail\s+out,?\s+claude\b/i
-const GET_IT_DONE = /\bjust\s+get\s+it\s+done,?\s+claude\b/i
-const BAIL_NOTE = (out: string) =>
-  `[workbench] The user said "bail out claude", so everything delegated was stopped at once ` +
-  `(\`wb stop --all\`):\n${out}\n\nDon't finish, restart or clean up anything. Tell the user in ` +
-  `a few lines what was running and where it was left (real tasks keep their worktrees; ` +
-  `\`wb status --all\`), then wait for their next instruction.`
+const QUIT = 'delegate-quit'
+const HAND_BACK = 'delegate-quit-and-hand-back-claude'
+const QUIT_NOTE = (out: string) =>
+  `[workbench] The user ran /${QUIT}: everything delegated was stopped (\`wb stop --all\`):\n` +
+  `${out}\nDon't finish, restart or clean up any of it unless they ask; real tasks keep their ` +
+  `worktrees (\`wb status --all\`).`
 const DONE_NOTE = (out: string) =>
-  `[workbench] The user said "just get it done claude": the agents were stopped and their tasks ` +
+  `[workbench] The user ran /${HAND_BACK}: the agents were stopped and their tasks ` +
   `handed to you (\`wb takeover --all\`):\n${out}\n\nLeave delegate mode and finish the work ` +
   `yourself, without pausing to ask. For each task: read what the agent left (\`wb diff <name>\`), ` +
   `complete it in its worktree to your own standard, run its acceptance command, then ` +
@@ -137,6 +135,7 @@ const mem = {
   wb: 'wb',
   liveKey: '', // the followed task and its updated_at when last read
   busy: false, // Claude's main loop is mid-turn: a wake would queue and arrive stale
+  queued: [] as string[], // turns for Claude that a command asked for
   toasted: new Set<string>(),
 }
 
@@ -170,6 +169,15 @@ async function scan($: any, root: string, now: number): Promise<WbTask[]> {
   }
 
   return list.sort((a, b) => a.createdAt - b.createdAt)
+}
+
+async function runWb($: any, args: string[]): Promise<string> {
+  try {
+    const r = await $.process.run([mem.wb, ...args], { timeoutMs: 120_000 })
+    return `${r.stdout}${r.stderr}`.trim() || '(no output)'
+  } catch (err) {
+    return `could not run wb ${args.join(' ')}: ${err}`
+  }
 }
 
 // The task worth watching: the newest running one, else the newest waiting for Claude.
@@ -233,6 +241,7 @@ async function poll($: any) {
       void $.ui.open({ id: PANE, title: 'Workbench' })
     }
     void refreshLive($, list)
+    if (!mem.busy && mem.queued.length) void $.prompt.submit({ text: mem.queued.shift()! })
     await deliver($, now)
   } finally {
     mem.polling = false
@@ -291,6 +300,14 @@ export const register: Register = (on, options) => {
       name: 'workbench',
       description: 'Show the tasks delegated to local agents in a pane',
     })
+    await $.command.register({
+      name: QUIT,
+      description: 'Stop every delegated agent and the benchmark now, finishing nothing',
+    })
+    await $.command.register({
+      name: HAND_BACK,
+      description: 'Stop the agents and hand their tasks back to Claude to finish',
+    })
     $.clock.every(POLL_MS, () => {
       void poll($)
     })
@@ -298,21 +315,16 @@ export const register: Register = (on, options) => {
     return next(e)
   })
 
-  on('prompt.submit', async ($, e, next) => {
-    const bail = BAIL_OUT.test(e.text)
-    if (e.command || e.text.startsWith('[workbench]') || (!bail && !GET_IT_DONE.test(e.text))) {
-      return next(e)
-    }
-    const argv = [mem.wb, bail ? 'stop' : 'takeover', '--all']
-    let out: string
-    try {
-      const r = await $.process.run(argv, { timeoutMs: 120_000 })
-      out = `${r.stdout}${r.stderr}`.trim() || '(no output)'
-    } catch (err) {
-      out = `could not run ${argv.join(' ')}: ${err}`
-    }
-    $.ui.toast(bail ? 'workbench: bailed out, everything stopped' : 'workbench: Claude is taking over')
-    return next({ ...e, text: `${e.text}\n\n${bail ? BAIL_NOTE(out) : DONE_NOTE(out)}` })
+  on('command.run', { command: QUIT }, async $ => {
+    const out = await runWb($, ['stop', '--all'])
+    $.ui.toast('workbench: everything delegated is stopped')
+    return { text: `Delegation stopped. ${out}`, context: [QUIT_NOTE(out)] }
+  })
+
+  on('command.run', { command: HAND_BACK }, async $ => {
+    const out = await runWb($, ['takeover', '--all'])
+    mem.queued.push(DONE_NOTE(out)) // a command may not start a turn itself: the next poll does
+    return { text: `Agents stopped; Claude is taking over. ${out}` }
   })
 
   // Only the main loop's turns: a subagent's run doesn't hold the prompt.

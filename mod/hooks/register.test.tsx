@@ -147,34 +147,36 @@ test('the pane follows the running task: its whole history, then what it is doin
   expect(runs.length).toBeGreaterThan(1)
 })
 
-test('"bail out claude" stops everything at once; "just get it done claude" hands the tasks over', async ($, on) => {
-  mock.clock(on, { now: 1_800_000_000_000 })
+test('/delegate-quit stops everything; /delegate-quit-and-hand-back-claude hands the tasks to Claude', async ($, on) => {
+  const clock = mock.clock(on, { now: 1_800_000_000_000 })
   fakeTasks(on, {})
   const runs: string[][] = []
   on('process.run', (_: any, e: any) => {
     runs.push(e.argv)
     return { value: { exitCode: 0, stdout: e.argv[1] === 'stop' ? 'stopped: fix-it' : 'took over fix-it', stderr: '' } }
   })
-  const seen: string[] = []
+  const submitted: string[] = []
   on('prompt.submit', (_: any, e: any) => {
-    seen.push(e.text)
+    submitted.push(e.text)
     return { text: e.text }
   })
   on('ui.toast', () => ({ value: undefined }))
   await $.session.start({ cwd: '/', surface: 'terminal', isInteractive: true })
 
-  await $.prompt.submit({ text: 'ok Bail out, Claude' })
+  const quit = await $.command.run({ command: 'delegate-quit', args: '' })
   expect(runs.at(-1)).toEqual(['wb', 'stop', '--all'])
-  expect(seen.at(-1)).toContain('stopped: fix-it')
-  expect(seen.at(-1)).toContain("Don't finish, restart")
+  expect(quit.text).toContain('stopped: fix-it')
+  expect(JSON.stringify(quit.context)).toContain("Don't finish, restart")  // Claude is told
+  expect(submitted.length).toBe(0)                                         // without a turn
 
-  await $.prompt.submit({ text: 'just get it done claude' })
+  await $.command.run({ command: 'delegate-quit-and-hand-back-claude', args: '' })
   expect(runs.at(-1)).toEqual(['wb', 'takeover', '--all'])
-  expect(seen.at(-1)).toContain('took over fix-it')
-  expect(seen.at(-1)).toContain('Leave delegate mode')
+  await clock.advance(2000)
+  expect(submitted.at(-1)).toContain('took over fix-it')                  // Claude starts now
+  expect(submitted.at(-1)).toContain('Leave delegate mode')
 
+  // Typed words never stop anything: only the commands do.
   const before = runs.length
-  await $.prompt.submit({ text: 'how is it going?' })      // anything else passes untouched
+  await $.prompt.submit({ text: 'if I said bail out claude, would it stop?' })
   expect(runs.length).toBe(before)
-  expect(seen.at(-1)).toBe('how is it going?')
 })

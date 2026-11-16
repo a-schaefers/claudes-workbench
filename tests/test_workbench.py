@@ -246,9 +246,12 @@ class Steering(Base):
         self.start("t-b2", "slow")
         self.wait_session("t-b1")
         self.assertEqual(store.Task("t-b2").status["phase"], "queued")  # behind the GPU lock
-        bench_run = subprocess.Popen(["sleep", "60"])      # stands in for a `wb bench` process
+        # A `wb bench` on this state directory with no bench.pid (started before it existed, as
+        # the first real "bail out" found): the process table must still find it.
+        bench_run = subprocess.Popen(
+            [sys.executable, "-c", "import time; time.sleep(60)", "wb", "bench"],
+            env={**os.environ, "WB_HOME": str(store.home())})
         self.addCleanup(bench_run.kill)
-        (store.home() / "bench.pid").write_text(str(bench_run.pid))
         out = run_wb("stop", "--all")
         self.assertIn("wb bench", out)
         self.assertEqual(bench_run.wait(timeout=10), -15)

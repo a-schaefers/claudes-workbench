@@ -322,20 +322,61 @@ def _open_tasks():
             and (runner_alive(t) or t.status.get("phase") in LIVE)]
 
 
+def bench_pids() -> set[int]:
+    """Running `wb bench` processes on this state directory: from bench.pid, and from the process
+    table, which also finds a run that predates the pid file or lost it."""
+    pids = set()
+    pidfile = store.home() / "bench.pid"
+    try:
+        pids.add(int(pidfile.read_text()))
+    except (OSError, ValueError):
+        pass
+    mine = str(store.home().resolve())
+    for proc in Path("/proc").iterdir():
+        if not proc.name.isdigit() or int(proc.name) == os.getpid():
+            continue
+        try:
+            argv = (proc / "cmdline").read_bytes().split(b"\0")
+            env = dict(x.split(b"=", 1) for x in (proc / "environ").read_bytes().split(b"\0")
+                       if b"=" in x)
+        except OSError:  # gone, or not ours
+            continue
+        words = [a.decode(errors="replace") for a in argv]
+        at = next((i for i, w in enumerate(words) if Path(w).name == "wb"), None)
+        if at is None or words[at + 1:at + 2] != ["bench"] or "--report" in words:
+            continue
+        home = env.get(b"WB_HOME", b"").decode() or str(Path(env.get(b"HOME", b"").decode())
+                                                        / ".local" / "state" / "workbench")
+        if str(Path(home).resolve()) == mine:
+            pids.add(int(proc.name))
+    return {p for p in pids if _alive(p)}
+
+
+def _alive(pid: int) -> bool:
+    try:
+        os.kill(pid, 0)
+        return True
+    except (ProcessLookupError, PermissionError):
+        return False
+
+
 def stop_everything() -> list[str]:
     """"bail out claude": the benchmark, then every agent. Nothing is finished or thrown away:
     real tasks keep their worktrees (stopped, for wb feedback or wb discard later); bench tasks
     are scratch and are discarded."""
     stopped = []
-    pidfile = store.home() / "bench.pid"
-    if pidfile.exists():
+    benches = bench_pids()
+    for pid in benches:  # first, so it starts no new task
         try:
-            pid = int(pidfile.read_text())
-            os.kill(pid, signal.SIGTERM)  # first, so it starts no new task
+            os.kill(pid, signal.SIGTERM)
             stopped.append(f"wb bench (pid {pid})")
-        except (ValueError, ProcessLookupError):
+        except ProcessLookupError:
             pass
-        pidfile.unlink(missing_ok=True)
+    for _ in range(20):  # gone before the scan below, or a task it just started would be missed
+        if not any(_alive(p) for p in benches):
+            break
+        time.sleep(0.25)
+    (store.home() / "bench.pid").unlink(missing_ok=True)
     for t in _open_tasks():
         _stop_runner(t)
         t.event({"ts": store.now(), "round": t.status.get("round"), "kind": "stopped",

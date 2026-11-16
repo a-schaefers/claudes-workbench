@@ -99,16 +99,15 @@ You are the driver, not a spectator. When something tells you the agent is headi
 - `wb stop <name>`: just stop it.
 Notes are instructions, like feedback: concrete and short.
 
-**The user's two phrases.** The workbench mod acts on these the moment they are sent and appends
-what it did to the message:
-- **"just get it done claude"**: take over. The agents are already stopped (`wb takeover --all`).
-  Leave delegate mode and finish the work yourself without pausing: review what each agent
-  left, complete it in its worktree to your standard, run the acceptance command, `wb accept`,
-  then carry on with the rest of the request directly, without delegating.
-- **"bail out claude"**: stop. Everything delegated is already stopped (`wb stop --all`), the
-  benchmark included. Don't finish, restart or clean up anything; say what was running and where
-  it was left (worktrees are kept), and wait.
-Without the mod, run those commands yourself when you see the phrase.
+**The user's two commands.** Only these, never words in a message, stop the delegation; the mod
+runs them and tells you what it did:
+- **`/delegate-quit-and-hand-back-claude`**: take over. The agents are already stopped
+  (`wb takeover --all`). Leave delegate mode and finish the work yourself without pausing: review
+  what each agent left, complete it in its worktree to your standard, run the acceptance command,
+  `wb accept`, then carry on with the rest of the request directly, without delegating.
+- **`/delegate-quit`**: stop. Everything delegated is already stopped (`wb stop --all`), the
+  benchmark included. Don't finish, restart or clean up anything unless asked; worktrees are kept.
+Without the mod, the user may ask for the same in words; run those commands then.
 
 **Check-ins.** A significant task wakes you every 10 minutes while it runs (`--checkin MIN`
 changes it, `0` turns it off) with a digest: tools used, errors, tokens, files touched, its latest
