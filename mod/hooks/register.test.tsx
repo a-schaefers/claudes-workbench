@@ -416,12 +416,13 @@ test('the apprentice says how the followed task stands: in pixels in a terminal,
   await $.session.start({ cwd: '/', surface: 'terminal', isInteractive: true })
   await clock.advance(1600)
 
-  // at work: the wrench swings between draws
+  // at work: the wrench swings now and then between draws, not on every frame
   let ui = await $.ui.mount({ ...PANE, surface: 'terminal' })
   expect(await ui.find({ type: 'Raster' })).toBeTruthy()
   expect(await ui.find({ type: 'Text', text: /Writing… 3\.0s/ })).toBeTruthy()
-  await clock.advance(1000)
+  await clock.advance(5400) // twelve frames: two strokes, up and down
   expect(blits).toContain('apprentice')
+  expect(blits.length).toBeLessThanOrEqual(5)
   await ui.unmount()
 
   // done: it says so, and the task's mark says so too

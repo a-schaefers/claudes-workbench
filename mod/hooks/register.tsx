@@ -116,9 +116,11 @@ const MARK: Record<string, string> = {
 }
 
 // The apprentice (apprentice.ts) at the foot of the pane: how it stands and what it says about
-// the followed task. A timer (FRAME_MS) swings the wrench while it works and blinks it otherwise.
+// the followed task. A timer (FRAME_MS) swings the wrench now and then while it works and blinks
+// it otherwise: a stroke every frame was a distraction beside the transcript.
 const FRAME_MS = 450
 const BLINK_EVERY = 11 // frames
+const STROKE_EVERY = 6 // frames: the wrench comes up once in this many, else rests at its side
 const APPRENTICE = 'apprentice' // its Raster's key, for $.ui.blit
 type Speech = { pose: Pose; say: string; more: string; color: string }
 
@@ -139,9 +141,10 @@ const speechOf = (focus: WbTask | undefined, doing: string, list: WbTask[]): Spe
   return { pose: thinking ? 'think' : 'work', say: doing || focus.last || `${focus.phase}…`, more: '', color: COLOR[focus.phase] ?? 'claude' }
 }
 
-// The frame a pose shows at a tick: the wrench up and down while working, a blink now and then.
+// The frame a pose shows at a tick: a stroke of the wrench now and then while working, else a
+// blink now and then.
 const frameOf = (pose: Pose, tick: number): Pose => {
-  if (pose === 'work') return tick % 2 ? 'swing' : 'work'
+  if (pose === 'work') return tick % STROKE_EVERY ? 'swing' : 'work'
   if (pose === 'sleep' || pose === 'slump') return pose
   return tick % BLINK_EVERY === 0 ? 'blink' : pose
 }
@@ -758,7 +761,8 @@ export const register: Register = (on, options) => {
     const meta = watched.lines.find(l => l.s === 'meta')
 
     // The apprentice, in pixels where the pane has the rows for it (it takes six), else its face
-    // on the line. Drawing it in pixels arms the timer that animates it.
+    // on the line. Drawing it in pixels arms the timer that animates it. A long history overfills
+    // the pane, and anything that may shrink is squeezed: the bubble went down to its border.
     const focus = focusOf(list)
     const sp = speechOf(focus, doing?.t ?? '', list)
     const busy = sp.pose === 'work' || sp.pose === 'think'
@@ -776,7 +780,7 @@ export const register: Register = (on, options) => {
       mem.posed = sp.pose
       mem.shown = frame
       stage = (
-        <Box flexDirection="row" marginTop={1}>
+        <Box flexDirection="row" marginTop={1} flexShrink={0}>
           <Box flexShrink={0}>
             <Raster key={APPRENTICE} columns={COLUMNS} rows={ROWS} cells={cells(frame)} />
           </Box>
@@ -785,7 +789,7 @@ export const register: Register = (on, options) => {
               <Text color={sp.color}>{i === MOUTH ? '─' : ' '}</Text>
             ))}
           </Box>
-          <Box flexDirection="column" flexGrow={1} marginTop={MOUTH - 1} borderStyle="round"
+          <Box flexDirection="column" flexGrow={1} flexShrink={0} marginTop={MOUTH - 1} borderStyle="round"
             borderColor={sp.color} paddingX={1}>
             {said}
           </Box>
@@ -793,7 +797,7 @@ export const register: Register = (on, options) => {
       )
     } else {
       stage = (
-        <Box flexDirection="row" marginTop={list.length ? 1 : 0}>
+        <Box flexDirection="row" marginTop={list.length ? 1 : 0} flexShrink={0}>
           <Box flexShrink={0}>
             <Text color={sp.color}>{FACE[sp.pose]} </Text>
           </Box>
