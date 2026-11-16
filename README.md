@@ -17,11 +17,14 @@ the bulk of the tokens, the reading and writing and test-running, happen on your
 - **Claude architects the work.** It reads your codebase, decides the design, and writes a precise
   spec for every piece: the files to touch and the code to imitate, the exact names other code
   relies on, and a test that proves it's done.
-- **Bite-sized pieces your local models actually finish.** A local model in a 32K context falls
+- **Pieces sized to what your models actually finish.** A local model in a 32K context falls
   apart on an eight-file task and shines on a two-file one, so Claude cuts every project down to
-  one concern, two or three files and about 150 lines per task, and runs the pieces in order. A step
+  one concern per task, sized to the model that takes it, and runs the pieces in order. A step
   that never finished in an hour as one big task landed in half an hour as three small ones. The
-  next piece in the same area goes to the same agent, which already knows the code.
+  size isn't fixed: it scales with the context window your hardware serves (about two or three
+  files and 150 lines on 32K, more on a bigger one), and every finished step corrects it, so a
+  strong machine gets bigger tasks. The next piece in the same area goes to the same agent, which
+  already knows the code.
 - **Claude hands out the skills.** Every lesson Claude learns in review (a library's quirk, a
   pitfall, a check to run) becomes a skill in a library Claude writes and curates. Each agent gets
   only the skills that fit its task, and gives them back when that part is done, so your local
@@ -200,8 +203,8 @@ config entry away.
                └── a steer note or an interrupt continues the same session
 ```
 
-**1. Claude writes a spec.** The skill tells Claude to size every task to what the local models
-actually finish: one concern, at most two or three files and about 150 new lines, with the files
+**1. Claude writes a spec.** The skill tells Claude to size every task to what the model that
+takes it actually finishes: one concern, no bigger than that model's slice, with the files
 named, the code to imitate pointed at, exact names for anything other code relies on, and an
 acceptance command that proves it's done (an existing test, or a new one the agent writes first).
 Bigger work is split into steps run one after another.
@@ -334,10 +337,23 @@ Local models work in a small context window, and so, in its own way, does Claude
 session's export: once it's 60% full, or OpenCode had to compact it (a small model's summary of a
 coding session drops details), the next round starts a fresh session instead, handed exactly what
 it needs: the task (the current step's spec), the steps already committed, the uncommitted diff
-(or the list of changed files when the diff is over about 3K tokens), and the new instructions.
+(or the list of changed files when the diff is over 9% of the window, about 3K tokens on 32K),
+and the new instructions.
 Reports show the fill (`agent context: 19.4K of 32K (60%)`) so Claude sees it coming.
 `wb feedback --fresh` forces a fresh session (a confused agent), `--keep-context` keeps it for one
-more round. A session stays bound to the directory it was made in, so context carries over only
+more round.
+
+**The slice.** How much one task should hold on a model is learned like the router's choice. The
+first guess scales with the window it is served: two or three files and about 150 new lines on
+32K (what was measured), proportionally more on a bigger window, up to four times that. Each step
+that closes (`wb next`, `accept`, `discard`) records its files and added lines, and whether it fit:
+no session filled past 60% or was compacted, the agent didn't get stuck, and Claude didn't take
+over. The biggest step that fit raises the slice past the guess; the smallest that didn't lowers
+it. `wb models`, `wb start` and `wb scout` show it (`slice: ~3 files, ~150 new lines per task (32K
+window; 4 of 5 measured steps fit, 1 overflowed or stuck)`). The window itself comes from what
+Ollama serves the model (the loaded model, its Modelfile's `num_ctx`, or `OLLAMA_CONTEXT_LENGTH`);
+`wb model add` writes that, with an output budget of an eighth of it, and `wb doctor` flags an entry
+that claims more than Ollama serves (prompts would be cut off) or less (tasks could be bigger). A session stays bound to the directory it was made in, so context carries over only
 within a task (rounds, `wb next`), never to a new one.
 
 **Claude's.** `wb` holds the delegation state, so Claude's context doesn't have to. Whoever
@@ -415,7 +431,8 @@ router's pick OpenCode's own default.
 
 **Managing the set.** `wb model add <provider/model> [--pull]` downloads a model into Ollama
 (progress every 5%) and registers it in OpenCode with what Ollama says about it: tool calling,
-reasoning, and the context the provider's other models are served at (else the trained one).
+reasoning, and the context Ollama serves it (else what the provider's other models are set to,
+else the trained one), with an eighth of it for output.
 Ollama entries get an `options.max_tokens` cap, because Ollama ignores the
 `max_completion_tokens` OpenCode sends, and an uncapped model in a degenerate generation runs
 until its context is full. `wb model retire <id> [--delete]` unregisters it (and deletes its

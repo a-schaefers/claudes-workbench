@@ -347,7 +347,10 @@ def summary_text(task: store.Task, n: int, rnd: dict, tests) -> str:
 # model's own summary of a coding session drops details), the next round starts a fresh session
 # that is handed exactly what it needs: the task, the work so far and the new instructions.
 FRESH_AT = 0.6
-HANDOFF_DIFF_CHARS = 12000  # about 3K tokens; a bigger diff is listed, for the agent to read
+ASKED_FRESH = "Claude asked for a fresh session"
+# The handoff carries the diff while it is under this share of the window (at ~4 characters a
+# token: 12K characters, ~3K tokens, on a 32K one); a bigger diff is listed, for the agent to read.
+HANDOFF_DIFF_SHARE = 0.09
 
 
 def context_state(task: store.Task) -> dict:
@@ -373,7 +376,7 @@ def fresh_reason(task: store.Task) -> str | None:
     if not st.get("session") or st.get("context") == "keep":
         return None
     if st.get("context") == "fresh":
-        return "Claude asked for a fresh session"
+        return ASKED_FRESH
     c = context_state(task)
     if c.get("compactions"):
         return "OpenCode had to compact the last session"
@@ -392,7 +395,8 @@ def handoff_prompt(task: store.Task, why: str, instructions: str) -> str:
         stat = gitops.git(wt, "diff", "HEAD", "--stat").rstrip()
     finally:
         gitops.git(wt, "reset", "-q")
-    work = (f"```diff\n{diff}\n```" if len(diff) <= HANDOFF_DIFF_CHARS else
+    room = int(HANDOFF_DIFF_SHARE * (task.status.get("window") or 32768) * 4)
+    work = (f"```diff\n{diff}\n```" if len(diff) <= room else
             f"The diff is too long to include; read the changed files:\n```\n{stat}\n```")
     return (f"You are picking this task up in a fresh session ({why}). Nothing from the earlier "
             f"session carries over except what is in the working tree, so start from what is "
@@ -444,7 +448,7 @@ def _start_fresh(task: store.Task, n: int, why: str) -> None:
     st = task.status
     task.set_status(session=None, sessions=(st.get("sessions") or []) + [st["session"]],
                     context=None, skills_told=None)  # a new session hears the skills again
-    task.event({"ts": store.now(), "round": n, "kind": "fresh",
+    task.event({"ts": store.now(), "round": n, "kind": "fresh", "overflow": why != ASKED_FRESH,
                 "text": f"a fresh session for the agent: {why}"})
 
 

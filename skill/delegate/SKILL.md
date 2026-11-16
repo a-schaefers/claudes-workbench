@@ -90,9 +90,12 @@ disk, what is installed and registered, real-task results, and the watch list
 new). Then research what is
 newest and best: open-weight coding models with reliable tool calls, the sizes and quantizations
 that fit the VRAM with room for the context, and runtime releases worth having. Use primary
-sources and its reputation in recent reports, verify before you name anything, and remember
-this is a consumer card: a model that fits entirely in VRAM beats a bigger one that spills into
-RAM. Results first, then speed. Recommend briefly (keep / add / retire, with sizes and why), and
+sources and its reputation in recent reports, verify before you name anything. Fit the models to the machine `wb scout` describes, whatever
+its size: a model that fits entirely in VRAM (or the GPU's share of unified memory) beats a bigger
+one that spills into RAM, and on a big card the best is a larger model, a longer context, or both.
+The window sets the slice of every task (`slice:` in the report), so where the VRAM has room past
+the weights, raise the context Ollama serves (`OLLAMA_CONTEXT_LENGTH`, then `wb model add …
+--context N`); `wb doctor` flags an entry whose context differs from what Ollama serves. Results first, then speed. Recommend briefly (keep / add / retire, with sizes and why), and
 only with a yes: `wb model add <provider/model> --pull` (background), `wb model sizes` for what it
 should take, `wb model retire <id> [--delete]`. Installed but unregistered models may belong to other tools: ask before touching
 them. When you set a model aside, `wb scout --watch "…"` records what would bring it back:
@@ -113,11 +116,15 @@ in `~/.claude/skills`). So don't restate project conventions; spend the spec on 
 to this task: the files to read first, the existing code to imitate, and the skills to hand it
 (below).
 
-**Size every task to what the local models finish, as measured.** One concern, at most 2–3 files
-and ~150 new lines, with the files named. The local agents work in a 32K context: a task
-that spends it (8 files at once, measured 2026-11-16) costs 30–60 minutes of compactions,
-re-reading and drift, where the same work in 3 small tasks costs minutes each. Splitting is your
-job, the architect's: run the parts one after another, each with its own acceptance command.
+**Size every task to what the model that takes it finishes, as measured.** One concern, with the
+files named, and no bigger than its slice: `wb models` (and `wb start`) give each model's, e.g.
+`~3 files, ~150 new lines per task`. The slice comes from the context window the model is served
+(on 32K, 2–3 files and ~150 lines, measured 2026-11-16; a task that spends it, 8 files at once,
+cost 30–60 minutes of compactions, re-reading and drift) and is corrected by every step that
+closes: the biggest that fit raise it, the smallest that overflowed lower it. So a strong
+machine's big window earns big tasks; don't hold it to the 32K numbers. When the last few steps
+fit, try the next one a little bigger than the slice; that is how it learns to grow.
+Splitting is your job, the architect's: run the parts one after another, each with its own acceptance command.
 A good split is logic, then its tests, then the UI: `wb next` gives each part to the same agent,
 which already knows the code. (Measured: a step that never landed in an hour as one task landed
 in ~30 minutes as three, every hidden check passing.)

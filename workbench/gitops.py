@@ -38,14 +38,21 @@ def changed(worktree: Path) -> str:
     return git(worktree, "status", "--short", "--untracked-files=all").rstrip()
 
 
-def diff(worktree: Path, base: str, stat=False, paths=()) -> str:
+def diff(worktree: Path, base: str, stat=False, paths=(), numstat=False) -> str:
     # intent-to-add makes new files part of the diff; the reset leaves the index as it was
     git(worktree, "add", "-A", "-N")
     try:
-        args = ["diff", base] + (["--stat"] if stat else []) + (["--", *paths] if paths else [])
+        args = (["diff", base] + (["--stat"] if stat else []) + (["--numstat"] if numstat else [])
+                + (["--", *paths] if paths else []))
         return git(worktree, *args).rstrip()
     finally:
         git(worktree, "reset", "-q")
+
+
+def footprint(worktree: Path, base: str) -> dict:
+    """What a change spans since ``base``: files touched and lines added, new files included."""
+    rows = [r.split("\t") for r in diff(worktree, base, numstat=True).splitlines() if r]
+    return {"files": len(rows), "lines": sum(int(r[0]) for r in rows if r[0].isdigit())}
 
 
 def commit_all(worktree: Path, message: str) -> str:

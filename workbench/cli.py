@@ -153,6 +153,7 @@ def cmd_start(a):
         print("note: the repo has uncommitted changes; the agent's worktree starts from "
               f"{a.base}, without them")
     print(f"model: {why}" if why != "asked for" else f"model: {m.id} (asked for)")
+    print(f"slice: {router.slice(m).line()}")
     if handed:
         print("skills handed: " + ", ".join(handed))
     if not state["available"]:
@@ -198,6 +199,7 @@ def cmd_next(a):
     if runner_alive(task):
         die(f"{a.name}'s runner is still running")
     step = st.get("steps", 1)
+    measured = results.step(task, landed=True)
     try:
         commit = gitops.commit_all(task.worktree, f"{a.message}\n\nWorkbench-Task: {a.name} "
                                    f"(step {step})\nOpenCode-Session: {st.get('session')}")
@@ -220,6 +222,7 @@ def cmd_next(a):
     if handed is not None:
         task.set_status(skills=handed, skills_ever=_union(st.get("skills_ever"), handed))
     task.set_status(round=n, steps=step + 1, step_round=n, phase="queued", reviews=0,
+                    step_sizes=(st.get("step_sizes") or []) + [measured],
                     context="fresh" if a.fresh else None,
                     auto_fixes_total=st.get("auto_fixes_total", 0) + st.get("auto_fixes", 0),
                     auto_fixes=0, last=f"step {step} committed; next step queued")
@@ -494,6 +497,7 @@ def cmd_accept(a):
     msg = (f"{a.message}\n\nDelegated to {spec['model_label']} via OpenCode: {rounds} round(s), "
            f"{autofix} automatic test-fix, {st.get('reviews', 0)} review round(s)."
            f"\n\nWorkbench-Task: {a.name}\nOpenCode-Session: {st.get('session')}")
+    measured = results.step(task, landed=True)
     try:
         commit = gitops.commit_all(task.worktree, msg)
         gitops.remove_worktree(repo, task.worktree)
@@ -507,7 +511,7 @@ def cmd_accept(a):
             print(f"wb: not merged: {e}", file=sys.stderr)
     task.set_status(phase="accepted", last=f"accepted as {commit}" +
                     (f", merged {merged}" if merged else ""))
-    results.record(task, "accepted", commit=commit, merged=bool(merged))
+    results.record(task, "accepted", measured, commit=commit, merged=bool(merged))
     _ack_all(task)
     note = claude_md_status(repo, spec["branch"])
     print(f"{note}: keep it current (update and commit it if this change alters what it says)"
@@ -522,11 +526,12 @@ def cmd_discard(a):
     spec = task.spec
     _stop_runner(task)
     repo = Path(spec["repo"])
+    measured = results.step(task, landed=False)
     gitops.remove_worktree(repo, task.worktree, force=True)
     if not a.keep_branch:
         gitops.delete_branch(repo, a.name)
     task.set_status(phase="discarded", last=a.reason or "discarded", pid=None)
-    results.record(task, "discarded", reason=a.reason)
+    results.record(task, "discarded", measured, reason=a.reason)
     _ack_all(task)
     print(f"discarded {a.name}" + ("" if a.keep_branch else f"; branch {spec['branch']} deleted"))
 
@@ -540,6 +545,7 @@ def cmd_models(a):
         st = models.status(m)
         print(f"{m.id:34} {('on GPU' if st['resident'] else 'ready' if st['available'] else 'no'):6}"
               f"  {m.label}" + ("" if st["available"] else f"  ({st['why']})"))
+        print(f"{'':36}slice: {router.slice(m).line()}")
     for size in router.SIZES:
         print(f"\n{size}:")
         for i, sc in enumerate(router.rank(size)):
@@ -627,15 +633,18 @@ def cmd_scout(a):
         for name in prov["models"]:
             m = registered.get(f"{pid}/{name}")
             disk = installed.get(name) or installed.get(f"{name}:latest") or {}
+            served = models.ollama_served_context(prov["root"], name) if prov["engine"] == "ollama" else None
             facts = " · ".join(x for x in (
                 f"{hardware.size(disk.get('size'))} on disk" if disk.get("size") else "",
                 disk.get("params") or "", disk.get("quant") or "",
-                f"{(m.config.get('limit') or {}).get('context', 0) // 1024}K context" if m else "") if x)
+                f"{(m.config.get('limit') or {}).get('context', 0) // 1024}K context" if m else "",
+                f"Ollama serves {served // 1024}K" if served else "") if x)
             rs = real.get(f"{pid}/{name}", [])
             used = (f"{len(rs)} real task(s), {sum(r['outcome'] == 'accepted' for r in rs)} accepted, "
                     f"last {time.strftime('%Y-%m-%d', time.localtime(max(r['ts'] for r in rs)))}"
                     if rs else "no real tasks yet")
-            print(f"  {pid}/{name}: {facts or prov['engine']} · {used}")
+            print(f"  {pid}/{name}: {facts or prov['engine']} · {used}"
+                  + (f"\n    slice: {router.slice(m).line()}" if m else ""))
         extra = [x for x in installed if x not in prov["models"] and x.removesuffix(":latest")
                  not in prov["models"]]
         if extra:
@@ -748,15 +757,16 @@ def cmd_model(a):
             models.ollama_pull(prov["root"], name, say=lambda m: print(m, flush=True))
         facts = models.ollama_show(prov["root"], name) if prov["engine"] == "ollama" else {}
         caps = facts.get("capabilities") or []
-        # the context the server actually serves: what this provider's other models are set to,
-        # else what the model was trained for
+        # the context the server actually serves: what Ollama says it gives this model, else what
+        # this provider's other models are set to, else what the model was trained for
+        served = models.ollama_served_context(prov["root"], name) if prov["engine"] == "ollama" else None
         siblings = [(e.get("limit") or {}).get("context") for e in prov["models"].values()]
-        ctx = a.context or next((c for c in siblings if c), None) or facts.get("context_length")
+        ctx = a.context or served or next((c for c in siblings if c), None) or facts.get("context_length")
         entry = {"name": a.label or name,
                  "tool_call": "tools" in caps if caps else True,
                  "reasoning": "thinking" in caps if caps else True}
         if ctx:
-            out = min(4096, ctx // 8)
+            out = ctx // 8  # 4K on a 32K window; a bigger window writes bigger files in one call
             entry["limit"] = {"context": ctx, "input": ctx - out, "output": out}
         if prov["engine"] == "ollama":
             entry["options"] = {"max_tokens": models.ollama_cap(entry)}
@@ -916,6 +926,14 @@ def cmd_doctor(a):
             line("max_tokens" in (e.get("options") or {}),
                  f"{pid}/{name} caps its output on Ollama (options.max_tokens; Ollama ignores the "
                  "max_completion_tokens OpenCode sends)")
+            said, served = (e.get("limit") or {}).get("context"), models.ollama_served_context(prov["root"], name)
+            if said and served and said > served:
+                line(False, f"{pid}/{name} says a {said // 1024}K context but Ollama serves "
+                     f"{served // 1024}K: it would cut prompts off silently (raise OLLAMA_CONTEXT_LENGTH, "
+                     f"or wb model add {pid}/{name} --context {served})")
+            elif said and served and served > said:
+                print(f"--  {pid}/{name}: Ollama serves {served // 1024}K, the entry says {said // 1024}K; "
+                      f"wb model add {pid}/{name} --context {served} lets its tasks grow")
     line(os.access(store.home().parent, os.W_OK), f"state dir {store.home()}")
     print(f"--  the Claude Code mod lives in {PKG_ROOT / 'mod'} (see README for installing it)")
     sys.exit(0 if ok else 1)
@@ -1060,8 +1078,8 @@ def main(argv=None):
     s.add_argument("sizes", nargs="*", help="sizes: the only task sizes it gets (none: all)")
     s.add_argument("--pull", action="store_true", help="add: download it into Ollama first")
     s.add_argument("--label", help="add: the name OpenCode shows")
-    s.add_argument("--context", type=int, help="add: context tokens (default: what the provider's "
-                                                "other models use, else the model's own)")
+    s.add_argument("--context", type=int, help="add: context tokens (default: what Ollama serves "
+                   "it, else what the provider's other models use, else the model's own)")
     s.add_argument("--delete", action="store_true", help="retire: also delete its weights")
     s.set_defaults(f=cmd_model)
     s = sub.add_parser("scout", help="the weekly model check: hardware, installed models, results")

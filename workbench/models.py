@@ -26,7 +26,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from urllib.parse import urlparse
 
-from . import store
+from . import hardware, store
 
 LOCAL_HOSTS = {"127.0.0.1", "localhost", "::1", "0.0.0.0"}
 OLLAMA_PORT = 11434
@@ -264,13 +264,33 @@ def ollama_installed(root: str) -> list[dict]:
 
 
 def ollama_show(root: str, name: str) -> dict:
-    """Ollama's own facts about a pulled model: its capabilities and trained context length."""
+    """Ollama's own facts about a pulled model: its capabilities, trained context length, and
+    the num_ctx its Modelfile sets, if any."""
     if _fake():
-        return {"capabilities": ["tools", "thinking"], "context_length": None}
+        return {"capabilities": ["tools", "thinking"], "context_length": None, "num_ctx": None}
     body = _post(f"{root}/api/show", {"model": name}, timeout=30)
     ctx = next((v for k, v in (body.get("model_info") or {}).items()
                 if k.endswith(".context_length")), None)
-    return {"capabilities": body.get("capabilities") or [], "context_length": ctx}
+    num = next((int(p.split()[1]) for p in (body.get("parameters") or "").splitlines()
+                if p.split()[:1] == ["num_ctx"]), None)
+    return {"capabilities": body.get("capabilities") or [], "context_length": ctx, "num_ctx": num}
+
+
+def ollama_served_context(root: str, name: str) -> int | None:
+    """The window Ollama gives this model over OpenCode's API, which can't ask for one: what it
+    runs with if loaded, else its Modelfile's num_ctx, else OLLAMA_CONTEXT_LENGTH. None when only
+    Ollama's own default would say (it varies by version and VRAM)."""
+    if _fake():
+        return None
+    for x in (_get(f"{root}/api/ps") or {}).get("models", []):
+        if _matches(name, {x.get("name")}) and x.get("context_length"):
+            return int(x["context_length"])
+    try:
+        num = ollama_show(root, name).get("num_ctx")
+    except Exception:
+        num = None
+    env = hardware.ollama_env().get("OLLAMA_CONTEXT_LENGTH")
+    return num or (int(env) if env and env.isdigit() else None)
 
 
 def ollama_pull(root: str, name: str, say=print) -> None:

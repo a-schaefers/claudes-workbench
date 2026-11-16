@@ -14,7 +14,8 @@ what either says (a command, a flag, a default, a guard, a file) updates it in t
   - `store.py`: task directories, atomic JSON, locked JSONL. Every other part talks through these files.
   - `runner.py`: the detached per-task driver. `cli.py`: `wb`. `ask_mcp.py`: the MCP tool server.
   - `gitops.py`: the task's worktree and branch, the review diff (intent-to-add, so new files
-    show), commits. `results.py`: results.jsonl rows (`wb accept`/`discard`) and `wb stats`.
+    show), commits. `results.py`: results.jsonl rows (`wb accept`/`discard`), each step's size and fit (`step`),
+    and `wb stats`.
   - `models.py`: discovers local models from opencode.json, their status, and GPU residency (make_resident);
     adds and retires them (Ollama's pull/delete, opencode.json entries) for the weekly model check.
   - `chat.py`: the web chat (`wb chat serve`, stdlib HTTP, a token and a Host check; `systemd/wb-chat.service`
@@ -29,7 +30,9 @@ what either says (a command, a flag, a default, a guard, a file) updates it in t
     macOS via sysctl and system_profiler (Apple Silicon: unified memory). Unknowns stay unknown;
     nothing about the machine is hard-coded.
   - `router.py`: picks a model per task size: an educated guess (the largest model allowed significant
-    work, the smallest for trivial) corrected by real results (accepted / tried, per size).
+    work, the smallest for trivial) corrected by real results (accepted / tried, per size). And each
+    model's slice (`slice`): files and lines per task, guessed from its window (measured on 32K,
+    scaled up to GUESS_MAX) and corrected by the steps that fit or overflowed.
   - `events.py`: event normalization and the stuck detector.
   - `transcript.py`: `wb watch`, the human view: the OpenCode session export merged with the task's
     events. Its `--json` lines feed the mod's pane.
@@ -103,7 +106,8 @@ A model is a candidate when its OpenCode provider's `baseURL` is on this machine
 what OpenCode can't say, by provider or model id: `start`/`stop` commands for a one-model server,
 `skip`, `sizes` (`wb model sizes`), `weights_gb` (the router's size for a server that can't
 say) and `label`. Ollama entries need `options.max_tokens` (Ollama ignores
-OpenCode's `max_completion_tokens`); `wb model add` writes it and `wb doctor` checks it.
+OpenCode's `max_completion_tokens`); `wb model add` writes it and `wb doctor` checks it, and
+that `limit.context` matches what Ollama serves (`models.ollama_served_context`): more cuts prompts off, less shrinks every slice.
 
 Environment: `WB_HOME`, `WB_MODELS`, `WB_SKILLS`, `WB_CHAT_TOKEN` (paths above);
 `WB_OPENCODE_CONFIG` (OpenCode's config, default `~/.config/opencode/opencode.json`);
