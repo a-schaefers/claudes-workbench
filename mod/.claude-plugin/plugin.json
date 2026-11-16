@@ -2,6 +2,9 @@
   "name": "workbench",
   "version": "0.1.0",
   "description": "Live pane, status line and wake-ups for tasks Claude delegates to local OpenCode agents (wb).",
+  "author": {
+    "name": "Adam Schaefers"
+  },
   "types": "./types/index.d.ts",
   "userConfig": {
     "wake": {
@@ -9,7 +12,10 @@
       "title": "Wake Claude",
       "description": "Start a turn for Claude when a delegated task needs review, asks a question, or gets stuck",
       "default": "on",
-      "options": ["on", "off"]
+      "options": [
+        "on",
+        "off"
+      ]
     }
   }
 }
