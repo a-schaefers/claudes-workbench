@@ -80,13 +80,13 @@ def step_line(m: dict) -> str | None:
     read_in = tok.get("input", 0) + (tok.get("cache") or {}).get("read", 0)
     out = tok.get("output", 0) + tok.get("reasoning", 0)
     gen_ms = max(1, end - first)
-    rate = f" ({out / (gen_ms / 1000):.0f} tok/s)" if out and gen_ms > 300 else ""
     if not (read_in or out):
         return None  # a call that failed before any token
     cached = (tok.get("cache") or {}).get("read", 0)
-    reuse = f", {_k(cached)} cached" if cached else ""
-    return (f"  ⏱ read {_k(read_in)} tokens{reuse} in {_secs(first - created)} · "
-            f"wrote {_k(out)} in {_secs(gen_ms)}{rate}")
+    reuse = f" ({_k(cached)} cached)" if cached else ""
+    rate = f" · {out / (gen_ms / 1000):.0f} tok/s" if out and gen_ms > 300 else ""
+    return (f"  ⏱ {_k(read_in)} tokens in{reuse}, read in {_secs(first - created)} · "
+            f"{_k(out)} out in {_secs(gen_ms)}{rate}")
 
 
 def _clip(text: str, n: int, tail: bool = False) -> list[str]:
@@ -119,7 +119,16 @@ def _user_message(text: str, verbose: bool) -> tuple[str, list[tuple[str, str]]]
     body = text
     if not verbose and "\n---\nHow to work" in text:
         body = text.split("\n---\nHow to work")[0] + "\n(+ the workbench protocol; -v shows it)"
-    return head, [("claude", head)] + _block("", body, 10_000 if verbose else 40)
+    return head, [("claude", head)] + _block("", body, 10_000 if verbose else 40, "  │ ")
+
+
+RESULT = "  ⎿  "  # under a call, as Claude Code draws a tool's result
+UNDER = "     "
+
+
+def _result(style: str, text: str, n: int, tail: bool = False):
+    lines = _clip(text, n, tail)
+    return [(style, (RESULT if i == 0 else UNDER) + line) for i, line in enumerate(lines)]
 
 
 def _tool_lines(name: str, state: dict, rel, verbose: bool, done: bool):
@@ -129,49 +138,54 @@ def _tool_lines(name: str, state: dict, rel, verbose: bool, done: bool):
     n_out = 400 if verbose else 8
     lines = []
     if name == "shell":
-        lines.append(("tool", f"  $ {inp.get('command', '')}"))
+        lines.append(("tool", f"⏺ Bash({inp.get('command', '')})"))
         if done and out.strip():
-            lines += _block("out", out, n_out, tail=True)
+            lines += _result("out", out, n_out, tail=True)
     elif name == "edit":
-        lines.append(("tool", f"  ✎ edit {rel(inp.get('path', ''))}"))
+        lines.append(("tool", f"⏺ Update({rel(inp.get('path', ''))})"))
         if done or verbose:
             diff = difflib.unified_diff(str(inp.get("oldString", "")).splitlines(),
                                         str(inp.get("newString", "")).splitlines(), lineterm="", n=1)
             body = [d for d in diff if not d.startswith(("---", "+++", "@@"))]
+            added = sum(d.startswith("+") for d in body)
+            removed = sum(d.startswith("-") for d in body)
+            lines.append(("out", f"{RESULT}{added} line(s) added, {removed} removed"))
             for d in body[: (400 if verbose else 14)]:
                 lines.append(("add" if d.startswith("+") else "del" if d.startswith("-") else "out",
-                              "    " + d))
+                              UNDER + d))
             if len(body) > 14 and not verbose:
-                lines.append(("out", f"    … {len(body) - 14} more diff line(s)"))
+                lines.append(("out", f"{UNDER}… {len(body) - 14} more diff line(s)"))
     elif name == "write":
         content = str(inp.get("content", ""))
-        lines.append(("tool", f"  ✎ write {rel(inp.get('path', ''))} "
-                              f"({len(content.splitlines())} lines)"))
-        lines += _block("add", content, 400 if verbose else 8)
+        lines.append(("tool", f"⏺ Write({rel(inp.get('path', ''))})"))
+        lines.append(("out", f"{RESULT}{len(content.splitlines())} line(s)"))
+        lines += [("add", UNDER + x) for x in _clip(content, 400 if verbose else 8)]
     elif name == "read":
-        where = f" @{inp['offset']}" if inp.get("offset") else ""
-        lines.append(("tool", f"  ◇ read {rel(inp.get('path', ''))}{where}"))
+        where = f", from line {inp['offset']}" if inp.get("offset") else ""
+        lines.append(("tool", f"⏺ Read({rel(inp.get('path', ''))}{where})"))
     elif name in ("grep", "glob"):
-        what = inp.get("pattern", "")
-        lines.append(("tool", f"  ◇ {name} {what}" + (f" in {rel(inp['path'])}" if inp.get("path") else "")))
+        what = f'"{inp.get("pattern", "")}"' + (f", in {rel(inp['path'])}" if inp.get("path") else "")
+        lines.append(("tool", f"⏺ {'Search' if name == 'grep' else 'Find'}({what})"))
         if done:
             found = [x for x in out.splitlines() if x.strip()]
-            lines.append(("out", f"    {len(found)} line(s)" + (": " + found[0][:100] if found else "")))
+            lines.append(("out", f"{RESULT}{len(found)} found" + (": " + rel(found[0])[:100] if found else "")))
     elif name == "skill":
-        lines.append(("tool", f"  ★ loads skill {inp.get('id') or inp.get('name') or ''}"))
+        lines.append(("tool", f"⏺ Skill({inp.get('id') or inp.get('name') or ''})"))
     else:
         brief = json.dumps(inp, ensure_ascii=False)
-        lines.append(("tool", f"  ⚙ {name} {brief[:160]}"))
+        lines.append(("tool", f"⏺ {name}({brief[:160]})"))
         if done and out.strip():
-            lines += _block("out", out, n_out, tail=True)
+            lines += _result("out", out, n_out, tail=True)
     if status == "error":
         err = state.get("error") or out or "error"
-        lines += _block("bad", str(err if isinstance(err, str) else json.dumps(err)), 6)
+        lines += _result("bad", str(err if isinstance(err, str) else json.dumps(err)), 6)
     return lines
 
 
 def session_entries(data: dict, worktree: str, verbose: bool) -> list[Entry]:
-    def rel(path: str) -> str:
+    def rel(path: str) -> str:  # paths in the worktree, as the agent's own tree sees them
+        if worktree and path == worktree:
+            return "."
         return path[len(worktree) + 1:] if worktree and path.startswith(worktree + "/") else path
 
     out: list[Entry] = []
@@ -201,12 +215,14 @@ def session_entries(data: dict, worktree: str, verbose: bool) -> list[Entry]:
                             if pt.get("created") and pt.get("completed") else "thought")
                     shown = _clip("\n".join(x for x in text.splitlines() if x.strip()),
                                   400 if verbose else 6)
-                    out.append(Entry(pts, key, [("think", f"  ✻ {took}")]
-                                     + [("think", "    " + line) for line in shown]))
+                    out.append(Entry(pts, key, [("think", f"✻ {took[:1].upper()}{took[1:]}")]
+                                     + [("think", "  " + line) for line in shown]))
             elif kind == "text" and finished:
                 text = part.get("text", "").strip()
                 if text:
-                    out.append(Entry(pts, key, [("agent", "agent:")] + _block("", text, 10_000, "  ")))
+                    body = text.splitlines()
+                    out.append(Entry(pts, key, [("agent", f"⏺ {body[0]}")]
+                                     + [("agent", f"  {line}") for line in body[1:]]))
             elif kind == "tool":
                 name = part.get("name", "")
                 if name.endswith("ask_reviewer"):
@@ -224,7 +240,7 @@ def session_entries(data: dict, worktree: str, verbose: bool) -> list[Entry]:
                 err = m.get("error") or {}
                 msg = err.get("message") if isinstance(err, dict) else err
                 out.append(Entry(end, f"{mid}:error",
-                                 [("bad", f"  ■ the model call failed{': ' + str(msg)[:300] if msg else ''}")]))
+                                 [("bad", f"■ the model call failed{': ' + str(msg)[:300] if msg else ''}")]))
             line = step_line(m)
             if line:
                 out.append(Entry(end + 1e-4, f"{mid}:step", [("out", line)]))
@@ -245,7 +261,7 @@ def task_entries(task: store.Task) -> list[Entry]:
             if not ok:
                 f = task.round_dir(r.get("round", 1)) / "tests.txt"
                 if f.exists():
-                    lines += _block("out", f.read_text(), 12, tail=True)
+                    lines += _result("out", f.read_text(), 12, tail=True)
             out.append(Entry(ts, key, lines))
         elif kind == "autofix":
             out.append(Entry(ts, key, [("sys", "■ workbench sends the failures back to the agent")]))
@@ -349,7 +365,17 @@ def model_line(task: store.Task, data: dict) -> str:
                                   f"variant {variant}", f"{ctx // 1024}K context" if ctx else "") if x)
 
 
-def clock_line(task: store.Task, now: float | None = None) -> str | None:
+def context_fill(data: dict) -> int | None:
+    """The tokens the agent's next request carries: the last step's input, cache and output."""
+    last = next((m for m in reversed(data.get("messages") or [])
+                 if m.get("type") == "assistant" and m.get("tokens")), None)
+    if not last:
+        return None
+    tk, cache = last["tokens"], last["tokens"].get("cache") or {}
+    return tk.get("input", 0) + cache.get("read", 0) + cache.get("write", 0) + tk.get("output", 0)
+
+
+def clock_line(task: store.Task, now: float | None = None, data: dict | None = None) -> str | None:
     """Time, every way that helps at a glance: the task, this round, loading, and an ETA."""
     from . import router
     now = now or time.time()
@@ -370,8 +396,12 @@ def clock_line(task: store.Task, now: float | None = None) -> str | None:
                          else f"{_secs(-left * 1000)} past its typical {typical:.0f}m")
         else:
             parts.append("no ETA yet (wb bench)")
-    if st.get("tok_in"):
-        parts.append(f"Σ {_k(st['tok_in'])} in / {_k(st.get('tok_out', 0))} out")
+    used, window = context_fill(data or {}), st.get("window")
+    if used:
+        parts.append(f"context {_k(used)}" + (f" of {window // 1024}K ({100 * used // window}%)"
+                                               if window else ""))
+    if st.get("tok_out"):
+        parts.append(f"{_k(st['tok_out'])} tokens written")
     return "⏲ " + " · ".join(parts)
 
 
@@ -412,7 +442,8 @@ def follow(task: store.Task, verbose: bool = False, once: bool = False, color: b
     sid = find_session(task)
     first = export(sid) if sid else {}
     if as_json:
-        emit("meta", model_line(task, first))
+        emit("meta", ("benchmark task, graded by hidden tests · " if task.spec.get("bench") else "")
+             + model_line(task, first))
     else:
         print(header(task, paint, first), file=out, flush=True)
     seen: set[str] = set()
@@ -437,12 +468,12 @@ def follow(task: store.Task, verbose: bool = False, once: bool = False, color: b
             now_line = activity(task, data)
             if now_line:
                 emit("activity", now_line)
-            emit("clock", clock_line(task))
+            emit("clock", clock_line(task, data=data))
         elif out.isatty() and phase not in store.CLOSED:
             now_line = activity(task, data)
             spin = "✻✳✶✢·"[int(time.time() * 2) % 5]
             row = (paint("claude", f"{spin} {now_line}") + "  " if now_line else "") \
-                + paint("out", clock_line(task) or "")
+                + paint("out", clock_line(task, data=data) or "")
             print("\r\033[K" + row, end="", file=out, flush=True)
         if phase != last_phase and phase in PHASE_LINE and (last_phase is not None or once
                                                             or phase not in ("running",)):

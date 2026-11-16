@@ -43,7 +43,7 @@ test('/workbench opens the pane and counts open tasks', async ($, on) => {
 })
 
 // A file system in memory: what `wb` and its runner would have written.
-function fakeTasks(on: any, files: Record<string, string>) {
+function fakeTasks(on: any, files: Record<string, string>, dirs = ['fix-it']) {
   on('env.get', (_: any, e: any) => ({ value: ({ WB_HOME: '/wb', HOME: '/home/u' } as any)[e.name] }))
   on('fs.read', (_: any, e: any) => {
     if (!(e.path in files)) throw new Error(`ENOENT: ${e.path}`)
@@ -54,7 +54,7 @@ function fakeTasks(on: any, files: Record<string, string>) {
     return { value: undefined }
   })
   on('fs.exists', (_: any, e: any) => ({ value: Object.keys(files).some(p => p.startsWith(e.path)) }))
-  on('fs.list', () => ({ value: [{ name: 'fix-it', kind: 'dir' }] }))
+  on('fs.list', () => ({ value: dirs.map(name => ({ name, kind: 'dir' })) }))
   on('command.register', () => ({ value: { command: 'workbench' } }))
   on('ui.open', () => ({ value: { isPlaced: true } }))
   on('ui.status', () => ({ value: undefined }))
@@ -134,7 +134,7 @@ test('the pane follows the running task: its whole history, then what it is doin
   expect(runs[0]).toEqual(['wb', 'watch', 'fix-it', '--json'])
 
   const ui = await $.ui.mount({ ...PANE, surface: 'terminal' })
-  expect(await ui.find({ type: 'Text', text: /live: fix-it/ })).toBeTruthy()
+  expect(await ui.find({ type: 'Text', text: /── fix-it · ↑↓ scrolls/ })).toBeTruthy()
   expect(await ui.find({ type: 'Text', text: 'Claude → agent · spec' })).toBeTruthy()
   expect(await ui.find({ type: 'Text', text: '    +42' })).toBeTruthy()
   expect(await ui.find({ type: 'Text', text: /Writing… 3\.0s · ↓ 45 tokens/ })).toBeTruthy()
@@ -229,4 +229,31 @@ test('a closed task compacts Claude early, keeping the delegation state; open ta
   files['/wb/tasks/fix-it/status.json'] = JSON.stringify({ phase: 'discarded', round: 2, updated_at: ts + 12 })
   await clock.advance(2000)
   expect(compactions.length).toBe(2)
+})
+
+test('a benchmark is one line, and the live header names its task', async ($, on) => {
+  const clock = mock.clock(on, { now: 1_800_000_000_000 })
+  const ts = 1_800_000_000
+  const files: Record<string, string> = {}
+  const names = ['bench-slugify-1116074054', 'bench-lru-cache-1116074138', 'bench-merge-intervals-1116074420']
+  names.forEach((name, i) => {
+    files[`/wb/tasks/${name}/task.json`] = JSON.stringify({ name, model: 'q27', model_label: 'Qwen 27B', bench: true, created_at: ts + i })
+    files[`/wb/tasks/${name}/status.json`] = JSON.stringify({ phase: i < 2 ? 'discarded' : 'running', round: 1, updated_at: ts + i })
+  })
+  fakeTasks(on, files, names)
+  let n = 0
+  on('process.run', () => {
+    n += 1  // the transcript grows every poll
+    const lines = Array.from({ length: n }, (_, i) => ({ s: 'tool', t: `⏺ Read(f${i}.py)` }))
+    return { value: { exitCode: 0, stdout: lines.map(l => JSON.stringify(l)).join('\n'), stderr: '' } }
+  })
+  await $.session.start({ cwd: '/', surface: 'terminal', isInteractive: true })
+  const ui = await $.ui.mount({ ...PANE, surface: 'terminal' })
+  await clock.advance(1600)
+  await clock.advance(1600)
+  // (the kit has no pane to scroll, so following the end is checked in a real session)
+  expect(await ui.find({ type: 'Text', text: /Qwen 27B on merge-intervals · 2 task\(s\) done/ })).toBeTruthy()
+  expect(await ui.find({ type: 'Text', text: 'bench-slugify-1116074054' })).toBeFalsy()  // no row each
+  expect(await ui.find({ type: 'Text', text: /── merge-intervals \(benchmark\)/ })).toBeTruthy()
+  await ui.unmount()
 })

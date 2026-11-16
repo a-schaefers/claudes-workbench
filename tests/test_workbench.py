@@ -368,14 +368,19 @@ class Watch(Base):
         self.start("t-watch", "fix", "--test", TEST_CMD)
         wait_phase("t-watch", {"review"})
         out = run_wb("watch", "t-watch", "--once", "--no-color")
-        for want in ("Claude → agent · spec", "Write the answer.",   # what Claude sent
-                     "✻ thought for 1.5s", "It wants 42.",           # its reasoning, timed
-                     "✎ edit answer.txt", "-41", "+42",               # the patch as a diff
-                     "agent:", "Wrote 42.",
-                     "read 1.2k tokens in 1.0s · wrote 80 in 2.0s (40 tok/s)",
-                     "■ tests FAIL", "round 2", "■ tests PASS",       # the runner's side
+        for want in ("Claude → agent · spec", "│ Write the answer.",  # what Claude sent
+                     "✻ Thought for 1.5s", "It wants 42.",            # its reasoning, timed
+                     "⏺ Update(answer.txt)",                          # Claude Code's grammar,
+                     "⎿  1 line(s) added, 1 removed", "-41", "+42",   # the patch as a diff
+                     "⏺ Wrote 42.",                                   # its own words
+                     "1.2k tokens in, read in 1.0s · 80 out in 2.0s · 40 tok/s",
+                     "■ tests FAIL", "⎿  $ grep -qx 42 answer.txt", "round 2", "■ tests PASS",
                      "waiting for Claude's review"):
             self.assertIn(want, out)
+        lines = [json.loads(x) for x in run_wb("watch", "t-watch", "--json").splitlines()]
+        clock = next(x["t"] for x in lines if x["s"] == "clock")
+        self.assertIn("context 1.3k of 32K (3%)", clock)  # the agent's context, not a sum
+        self.assertNotIn("Σ", clock)
         self.assertLess(out.index("■ tests FAIL"), out.index("round 2"))
 
     def test_json_lines_for_the_pane_end_with_what_is_happening(self):

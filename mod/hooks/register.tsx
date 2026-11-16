@@ -82,6 +82,10 @@ const ago = (ms: number) => {
 
 const clip = (text: string, n: number) => (text.length <= n ? text : text.slice(0, n - 1) + '…')
 
+// A benchmark task's name is bench-<task>-<stamp>: the task is what a person wants to read.
+const benchTask = (name: string) => name.replace(/^bench-/, '').replace(/-\d{10}$/, '')
+const shownName = (t: WbTask) => (t.bench ? `${benchTask(t.name)} (benchmark)` : t.name)
+
 const eventLine = (r: Row): string | null => {
   switch (r.kind) {
     case 'tool': return `${r.tool} ${r.brief ?? ''}${r.ok ? '' : '  ✗'}`.trim()
@@ -148,6 +152,7 @@ const mem = {
   busy: false, // Claude's main loop is mid-turn: a wake would queue and arrive stale
   queued: [] as string[], // turns for Claude that a command asked for
   open: new Set<string>(), // delegated tasks open at the last poll
+  follow: true, // the pane sticks to the newest lines until the person scrolls up
   boundary: false, // one closed since: a moment to make room in Claude's context
   toasted: new Set<string>(),
 }
@@ -245,6 +250,9 @@ async function refreshLive($: any, list: WbTask[]) {
     const prev = await read($, live)
     if (prev.task !== focus.name || JSON.stringify(prev.lines) !== JSON.stringify(lines)) {
       await update($, live, () => ({ task: focus.name, lines }))
+      // The engine keeps a window at the end once it is there, but the pane opens at its top:
+      // bring the newest lines into view, unless the person scrolled up to read.
+      if (mem.follow) void $.ui.scroll({ in: PANE, to: 'end' }).catch(() => {})
     }
   } catch {
     // wb missing or slow: the task list still shows; try again next poll
@@ -402,6 +410,13 @@ export const register: Register = (on, options) => {
     return next(e)
   })
 
+  // The person's scrolling decides whether the pane follows: up to read stops it, back down to
+  // the end starts it again.
+  on('ui.scroll', { requestId: PANE }, async ($, e, next) => {
+    if (e.origin.kind === 'person') mem.follow = e.offset + e.bodyRows >= e.contentRows - 1
+    return next(e)
+  })
+
   on('command.run', { command: 'workbench' }, async $ => {
     await $.ui.open({ id: PANE, title: 'Workbench' })
     const list = await read($, tasks)
@@ -428,23 +443,48 @@ export const register: Register = (on, options) => {
 
     // the followed task's own recent lines are in its transcript below, in full
     const recentOf = (t: WbTask) => (t.name === watched.task ? [] : t.recent)
+    // A benchmark is one line, however many tasks it has run; the tasks it runs are graded by
+    // wb bench, not reviewed, so they don't each need a row.
+    const benches = list.filter(t => t.bench)
+    const benchNow = benches.find(t => ACTIVE.has(t.phase))
+    const benchDone = benches.filter(t => !ACTIVE.has(t.phase))
+    const benchLast = Math.max(0, ...benches.map(t => t.updatedAt))
+    const benchBusy = benchNow || now - benchLast < 60_000
+    const rows = list.filter(t => !t.bench)
+    const when = (t: WbTask) =>
+      ACTIVE.has(t.phase) || NEEDS.has(t.phase) ? `for ${ago(now - t.createdAt)}` : `${ago(now - t.updatedAt)} ago`
     // The whole history is drawn: the engine scrolls the pane (arrows, while focused) and
     // follows the end as lines arrive. The activity row, last, carries the spinner.
     const history = watched.lines.filter(l => !['activity', 'clock', 'meta'].includes(l.s))
     const doing = watched.lines.find(l => l.s === 'activity')
     const clock = watched.lines.find(l => l.s === 'clock')
     const meta = watched.lines.find(l => l.s === 'meta')
+    const followed = list.find(t => t.name === watched.task)
+    const liveName = followed ? shownName(followed) : watched.task
 
     return (
       <Box flexDirection="column">
-        {list.map(t => (
+        {benches.length > 0 && (
+          <Box marginBottom={1}>
+            <Text>
+              <Text bold>benchmark</Text>
+              <Text color={benchBusy ? 'claude' : 'inactive'}>{benchBusy ? ' running' : ' finished'}</Text>
+              <Text dimColor>
+                {benchNow ? ` · ${benchNow.label || benchNow.model} on ${benchTask(benchNow.name)}`
+                  : benchBusy ? ' · between tasks' : ` · ${ago(now - benchLast)} ago`}
+                {` · ${benchDone.length} task(s) done · results: wb bench --report`}
+              </Text>
+            </Text>
+          </Box>
+        )}
+        {rows.map(t => (
           <Box flexDirection="column" marginBottom={1}>
             <Text>
               <Text bold>{t.name}</Text>
               <Text color={COLOR[t.phase] ?? 'text'}> {t.phase}</Text>
               <Text dimColor>
-                {' '}r{t.round} · {t.model}
-                {t.tests ? ` · tests ${t.tests}` : ''} · {ago(now - t.createdAt)}
+                {' '}· round {t.round} · {t.label || t.model}
+                {t.tests ? ` · tests ${t.tests}` : ''} · {when(t)}
               </Text>
             </Text>
             {recentOf(t).map(line => (
@@ -457,8 +497,7 @@ export const register: Register = (on, options) => {
         ))}
         {watched.task && (
           <Box flexDirection="column">
-            <Text dimColor>{clip(`── live: ${watched.task} · ↑↓ scroll · wb watch ${watched.task} in a terminal `
-              + '─'.repeat(cols), cols)}</Text>
+            <Text dimColor>{clip(`── ${liveName} · ↑↓ scrolls ` + '─'.repeat(cols), cols)}</Text>
             {meta && <Text dimColor>{meta.t}</Text>}
             {history.map(l => (
               <Text {...(LINE_STYLE[l.s] ?? {})}>{l.t || ' '}</Text>
