@@ -1,6 +1,6 @@
-<p align="center"><img src="docs/logo.jpg" alt="workbench: a warm light directing three little robot craftsmen at a workbench" width="720"></p>
+<p align="center"><img src="docs/logo.jpg" alt="Claude's Workbench: a warm light directing three little robot craftsmen at a workbench" width="720"></p>
 
-# workbench
+# Claude's Workbench
 
 **Claude plans and reviews. Your gaming PC writes the code.**
 
@@ -48,7 +48,7 @@ Built and used on: **Ryzen 5 7600X · Radeon RX 9070 XT (16 GB) · 32 GB DDR5 ·
 ### Install
 
 ```sh
-git clone https://github.com/a-schaefers/workbench ~/repos/workbench
+git clone https://github.com/a-schaefers/claudes-workbench ~/repos/workbench
 cd ~/repos/workbench
 ln -s "$PWD/bin/wb" ~/.local/bin/wb
 ln -s "$PWD/skill/delegate" ~/.claude/skills/delegate

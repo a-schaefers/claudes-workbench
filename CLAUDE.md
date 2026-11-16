@@ -1,4 +1,8 @@
-# workbench
+# Claude's Workbench
+
+The short name, `workbench`, stays on everything inside: the package, the plugin
+(`workbench@workbench`), the state and config directories, and the clone path `~/repos/workbench`
+that the systemd unit and the skill expect. The CLI is `wb`.
 
 Claude delegates coding tasks to local models in OpenCode and reviews the results. README.md is
 for people: the pitch and a quickstart, then (below its rule) "How it works", the full account of
