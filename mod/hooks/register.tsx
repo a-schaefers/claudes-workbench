@@ -170,6 +170,10 @@ async function deliver($: any, now: number) {
     const acked = Number(await $.fs.read(ackPath).catch(() => '0')) || 0
     if (row.ts <= acked) continue
     await $.fs.write(ackPath, String(row.ts)) // acknowledge first: never wake twice
+    // Only wake for news still true: a review notice for a task since discarded, accepted or
+    // sent back is acknowledged and dropped.
+    const status = await readJson($, `${root}/tasks/${name}/status.json`)
+    if (status.phase !== (row.kind === 'question' ? 'asking' : row.kind)) continue
     const headline = HEADLINE[row.kind] ?? row.kind
     $.ui.toast(`workbench: ${name} ${headline}`)
     if (!mem.wake) continue

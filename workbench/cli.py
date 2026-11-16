@@ -156,6 +156,7 @@ def cmd_feedback(a):
                     auto_fixes_total=st.get("auto_fixes_total", 0) + st.get("auto_fixes", 0),
                     auto_fixes=0)
     spawn_runner(task)
+    _ack_all(task)
     print(f"feedback round {reviews} sent to {a.name} (round {n})"
           + ("  — that is past the usual 3 review rounds" if reviews > 3 else ""))
 
@@ -170,11 +171,17 @@ def cmd_answer(a):
         die(f"no question {qid} in {a.name}")
     text = a.text if a.text is not None else Path(a.file).read_text()
     (task.dir / "ask" / f"{qid}.answer").write_text(text.strip() + "\n")
+    _ack_all(task)
     print(f"answered {a.name}/{qid}")
 
 
 def _ack_file(task):
     return task.dir / "acked"
+
+
+def _ack_all(task):
+    """Claude acted on the task: whatever it was notified about so far is handled."""
+    _ack_file(task).write_text(str(store.now()))
 
 
 def cmd_wait(a):
@@ -303,6 +310,7 @@ def cmd_accept(a):
     task.set_status(phase="accepted", last=f"accepted as {commit}" +
                     (f", merged {merged}" if merged else ""))
     results.record(task, "accepted", commit=commit, merged=bool(merged))
+    _ack_all(task)
     print(f"accepted {a.name}: commit {commit} on {spec['branch']}" +
           (f", merged into {gitops.git(repo, 'branch', '--show-current').strip()} as {merged}"
            if merged else f"\nmerge with: git -C {repo} merge --no-ff {spec['branch']}"))
@@ -318,6 +326,7 @@ def cmd_discard(a):
         gitops.delete_branch(repo, a.name)
     task.set_status(phase="discarded", last=a.reason or "discarded", pid=None)
     results.record(task, "discarded", reason=a.reason)
+    _ack_all(task)
     print(f"discarded {a.name}" + ("" if a.keep_branch else f"; branch {spec['branch']} deleted"))
 
 

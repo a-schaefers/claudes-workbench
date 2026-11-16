@@ -132,6 +132,14 @@ class Lifecycle(Base):
         st = wait_phase("t-hang", {"stuck"}, timeout=40)
         self.assertIn("no output", st["last"])
 
+    def test_acting_on_a_task_acknowledges_its_notifications(self):
+        # A review notice nobody waited for must not resurface after the task is discarded.
+        self.start("t-ack", "ok")
+        wait_phase("t-ack", {"review"})
+        run_wb("discard", "t-ack")
+        with self.assertRaises(SystemExit):
+            run_wb("wait", "t-ack", "--timeout", "1")
+
     def test_crash_is_reported_failed(self):
         self.start("t-crash", "crash")
         wait_phase("t-crash", {"failed"})
