@@ -154,6 +154,18 @@ class Lifecycle(Base):
         acked = float((store.Task("t-ack").dir / "acked").read_text())
         self.assertGreaterEqual(acked, notice["ts"])  # what the mod checks before waking Claude
 
+    def test_a_note_does_not_swallow_a_failure_claude_has_not_seen(self):
+        # 2026-11-16: a task failed seconds before Claude logged a note; the note acknowledged
+        # the failure notice and nothing woke Claude for an hour.
+        self.start("t-unseen", "crash")
+        wait_phase("t-unseen", {"failed"})
+        run_wb("note", "t-unseen", "--text", "progress as of the last check-in")
+        rows, _ = store.read_jsonl(store.home() / "notify.jsonl")
+        failed = [r for r in rows if r["task"] == "t-unseen" and r["kind"] == "failed"][-1]
+        acked = float((store.Task("t-unseen").dir / "acked").read_text())
+        self.assertLess(acked, failed["ts"])                     # still news for the mod
+        self.assertIn("[failed] t-unseen", run_wb("wait", "t-unseen", "--timeout", "2"))
+
     def test_wait_returns_when_the_notice_was_taken_elsewhere(self):
         # The mod (or a second waiter) acknowledged the review first: a named wait must not hang.
         self.start("t-taken", "ok")

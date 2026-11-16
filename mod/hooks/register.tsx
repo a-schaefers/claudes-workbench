@@ -401,6 +401,7 @@ async function poll($: any) {
     }
     if (mem.sawTurn && !mem.busy && !mem.scoutAsked && open.size === 0) await scoutIfDue($, now)
     await deliver($, now)
+    await rewake($, now, list)
     await listen($, now)
     if (now - mem.chatUrlAt > 10 * 60_000) { // the link changes only if Tailscale's setup does
       mem.chatUrlAt = now
@@ -491,6 +492,28 @@ async function deliver($: any, now: number) {
     const next = (NEXT[row.kind] ?? NEXT.failed)(name)
     void $.prompt.submit({
       text: `[workbench] Task \`${name}\` ${headline}.\n\n${row.text}\n\n${next}`,
+    })
+  }
+}
+
+// The safety net under deliver: a task waiting on Claude whose news never reached it (a lost or
+// swallowed notice; on 2026-11-16 a failure sat unseen for an hour) wakes Claude anyway, once,
+// after a minute of Claude being idle. `acked` past the moment the task entered that state
+// means Claude has had the news.
+const REWAKE_MS = 60_000
+async function rewake($: any, now: number, list: WbTask[]) {
+  if (mem.busy || !mem.wake) return
+  for (const t of list) {
+    if (t.bench || !NEEDS.has(t.phase) || now - t.updatedAt < REWAKE_MS) continue
+    const ackPath = `${mem.root}/tasks/${t.name}/acked`
+    const acked = Number(await $.fs.read(ackPath).catch(() => '0')) || 0
+    if (acked * 1000 >= t.updatedAt) continue
+    await $.fs.write(ackPath, String(now / 1000))
+    const kind = t.phase === 'asking' ? 'question' : t.phase
+    void $.prompt.submit({
+      text: `[workbench] Task \`${t.name}\` ${HEADLINE[kind] ?? kind}, ${ago(now - t.updatedAt)} ago, ` +
+        `and no notice reached Claude. \`wb report ${t.name}\` shows where it is.\n\n` +
+        (NEXT[kind] ?? NEXT.failed)(t.name),
     })
   }
 }

@@ -241,9 +241,22 @@ def _ack_file(task):
     return task.dir / "acked"
 
 
+def _acked(task):
+    f = _ack_file(task)
+    return float((f.read_text() if f.exists() else "0") or 0)
+
+
 def _ack_all(task):
-    """Claude acted on the task: whatever it was notified about so far is handled."""
-    _ack_file(task).write_text(str(store.now()))
+    """Claude acted on the task: whatever it was notified about so far is handled, except news
+    still true now. A note or a diff run seconds after the task failed must not swallow the
+    failure notice Claude hasn't seen: the mark stops just short of it."""
+    phase = task.status.get("phase")
+    news = "question" if phase == "asking" else phase
+    acked = _acked(task)
+    rows, _ = store.read_jsonl(store.home() / "notify.jsonl")
+    pending = [r["ts"] for r in rows if r["task"] == task.name and r["kind"] == news and r["ts"] > acked]
+    mark = min(pending) - 0.001 if pending else store.now()
+    _ack_file(task).write_text(str(max(acked, mark)))
 
 
 def cmd_wait(a):
@@ -258,8 +271,7 @@ def cmd_wait(a):
             if a.name and row["task"] != a.name:
                 continue
             task = store.Task(row["task"])
-            acked = float((_ack_file(task).read_text() if _ack_file(task).exists() else "0") or 0)
-            if row["ts"] > acked:
+            if row["ts"] > _acked(task):
                 _ack_file(task).write_text(str(row["ts"]))
                 print(f"[{row['kind']}] {row['task']}\n{row['text']}")
                 return

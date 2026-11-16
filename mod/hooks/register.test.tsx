@@ -380,3 +380,27 @@ test('running wb counts as delegate mode, and a web message reaches a running tu
   expect(sent[0].text).toContain('[web chat] still there?')
   expect(runs.some(a => a.join(' ') === 'wb chat ack m1 --by ' + a[5] + ' --how now')).toBe(true)
 })
+
+test('a task left waiting with no notice reaching Claude wakes it anyway, once', async ($, on) => {
+  const clock = mock.clock(on, { now: 1_800_000_000_000 })
+  const ts = 1_800_000_000 - 600  // failed ten minutes ago
+  const files: Record<string, string> = {
+    '/wb/tasks/lost/task.json': JSON.stringify({ name: 'lost', model: 'm', created_at: ts - 60 }),
+    '/wb/tasks/lost/status.json': JSON.stringify({ phase: 'failed', round: 3, updated_at: ts }),
+    '/wb/tasks/lost/acked': String(ts - 1),             // a note ran just before the failure
+    '/wb/tasks/seen/task.json': JSON.stringify({ name: 'seen', model: 'm', created_at: ts - 60 }),
+    '/wb/tasks/seen/status.json': JSON.stringify({ phase: 'review', round: 1, updated_at: ts }),
+    '/wb/tasks/seen/acked': String(ts),                 // Claude had this one
+  }
+  fakeTasks(on, files, ['lost', 'seen'])
+  on('process.run', () => ({ value: { exitCode: 0, stdout: '', stderr: '' } }))
+  const asked: string[] = []
+  on('prompt.submit', (_: any, e: any) => { asked.push(e.text); return { text: e.text } })
+  await $.session.start({ cwd: '/', surface: 'terminal', isInteractive: true })
+  await clock.advance(3000)
+  expect(asked.filter(t => t.includes('no notice reached Claude'))).toHaveLength(1)
+  expect(asked.join('\n')).toContain('Task `lost` failed')
+  expect(asked.join('\n')).not.toContain('`seen`')
+  await clock.advance(10_000)
+  expect(asked.filter(t => t.includes('no notice reached Claude'))).toHaveLength(1)
+})
