@@ -44,6 +44,12 @@ has the architecture; read it first.
     git writes and deploys are the driver's by convention (the handbook), not by rule.
     Denying `execute` (code mode) turns the `opencode_*` tools into direct tools, so deny `opencode_*` too.
     `opencode_worktree_remove` stays listed whatever you do; the rule still refuses the call.
+- A session is bound to the directory it was created in: continued or `--fork`ed from another
+  worktree, the model is still told the first one. So an agent's context carries over only
+  within its own worktree (rounds, `wb next`), never to a new task.
+- `session export` lists OpenCode's compactions as messages `{type: "compaction", status, summary}`;
+  an assistant message's `tokens` (input + cache read/write + output) is the context the next
+  request carries, which the runner's fresh-session check reads.
 - To see exactly what OpenCode sends a model, point a provider at `tests/capture_llm.py`, which records
   each request, and inspect the system prompt and tools. That is how the facts above were found.
 

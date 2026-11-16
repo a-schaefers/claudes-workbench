@@ -144,6 +144,26 @@ standard you just lowered. **Max 3 review rounds.** Still wrong after that: make
 (`~/.local/state/workbench/tasks/<name>/worktree`) and accept, or `wb discard <name> --reason …`.
 If a "trivial" task fails twice, it wasn't trivial: discard and restart it with `--size significant`.
 
+## Context, on both sides
+**The agent's.** Rounds of a task continue one OpenCode session, so the agent keeps what it read.
+When that session passes 60% of the model's window, or OpenCode had to compact it, the runner
+starts the next round on a fresh session handed the task, the work so far (the diff) and the new
+instructions; reports show `agent context: …` so you see it coming. Override per round:
+`wb feedback --fresh` when the agent is confused, stuck on a wrong idea or working from stale
+reads; `--keep-context` when it needs what it read and the window still has room.
+Follow-up work in the same area goes to the same agent: `wb next <name> --spec <file> -m "<subject
+for the approved step>" [--test …]` commits the approved step on the branch and sends the next
+step to the same worktree and session (`--fresh` for a new one). `wb diff` then shows the current
+step, `--all` the whole branch; finish with `wb accept`. Unrelated work is a new task with a fresh
+agent. A new task can't inherit an old task's session: OpenCode binds a session to its directory.
+
+**Yours.** `wb` holds the delegation state, so your context doesn't have to. When a task closes and
+none waits for you, the mod compacts you once you are halfway to automatic compaction, keeping
+the user's goals, the tasks and what each needs next (`WB_COMPACT_AT`, a percentage, 0 turns it
+off); any compaction keeps that state, and after a compaction or `/clear` a `workbench` context
+block lists the open tasks. So don't carry diffs or reports forward: `wb status` and
+`wb report <name>` bring them back. Between unrelated jobs, tell the user `/clear` is safe.
+
 ## 6. Finish
 - Approved: `wb accept <name> -m "<conventional commit subject>"` commits on `delegate/<name>`
   with the task and OpenCode session recorded. Add `--merge` only if the user passed `--merge` or

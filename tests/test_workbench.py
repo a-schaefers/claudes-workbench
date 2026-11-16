@@ -22,7 +22,7 @@ FAKE = f"{sys.executable} {ROOT / 'tests' / 'fake_opencode.py'}"
 TEST_CMD = "grep -qx 42 answer.txt"
 OPENCODE_CONFIG = {"provider": {
     "ollama": {"options": {"baseURL": "http://127.0.0.1:11434/v1"},
-               "models": {"mimo-v2.6:9b-q8_0": {"name": "MiMo"}, "qwen3.8-27b": {"name": "Qwen 27B"}}},
+               "models": {"mimo-v2.6:9b-q8_0": {"name": "MiMo", "limit": {"context": 32768}}, "qwen3.8-27b": {"name": "Qwen 27B"}}},
     "strata": {"options": {"baseURL": "http://127.0.0.1:8080/v1"}, "models": {"strata": {}}},
     "cloud": {"options": {"baseURL": "https://api.example.com/v1"}, "models": {"big": {}}},
 }}
@@ -177,6 +177,85 @@ class Lifecycle(Base):
                                   text=True).stdout
         self.assertNotIn("delegate/t-stop", branches)
         self.assertFalse(store.Task("t-stop").worktree.exists())
+
+
+class Context(Base):
+    """The agent's context: continued round to round, handed to a fresh session when full."""
+    def setUp(self):
+        super().setUp()
+        self.runs_file = Path(self.tmp.name) / "runs.jsonl"
+        os.environ["FAKE_RUNS"] = str(self.runs_file)
+        self.feedback = Path(self.tmp.name) / "fb.md"
+        self.feedback.write_text("1. Add a trailing comment line.\n")
+
+    def runs(self):
+        return [json.loads(x) for x in self.runs_file.read_text().splitlines()]
+
+    def review_then_feedback(self, name, *flags):
+        self.start(name, "ok", "--test", TEST_CMD)
+        wait_phase(name, {"review"})
+        run_wb("feedback", name, "--message", str(self.feedback), *flags)
+        return wait_phase(name, {"review"})
+
+    def test_a_roomy_session_is_continued(self):
+        self.review_then_feedback("t-c1")
+        self.assertEqual([r["session"] for r in self.runs()], [False, True])
+        self.assertIn("agent context: 1.3K of 32K (3%)", run_wb("report", "t-c1"))
+
+    def test_a_full_session_hands_the_task_to_a_fresh_one(self):
+        os.environ["FAKE_FILL"] = "25000"          # 76% of the 32K window
+        st = self.review_then_feedback("t-c2")
+        second = self.runs()[1]
+        self.assertFalse(second["session"])         # a new session, not the full one
+        p = second["prompt"]
+        self.assertTrue(p.startswith("You are picking this task up in a fresh session (the last "
+                                     "session was 76% full"))
+        self.assertIn("Write the answer to answer.txt.", p)       # the task, with the protocol
+        self.assertIn("leave the changes", p)
+        self.assertIn("+42", p)                                   # the work so far
+        self.assertIn("1. Add a trailing comment line.", p.split("## Now")[1])  # then the feedback
+        self.assertEqual(len(st["sessions"]), 1)    # the old session is kept, for the transcript
+        out = run_wb("watch", "t-c2", "--once", "--no-color")
+        self.assertIn("a fresh session for the agent", out)
+        self.assertIn("fresh session: the task, the work so far",  # the fake's export is fixed,
+                      transcript._user_message(p, False)[0])      # so read the head directly
+
+    def test_keep_context_overrides_and_fresh_forces(self):
+        os.environ["FAKE_FILL"] = "25000"
+        self.review_then_feedback("t-c3", "--keep-context")
+        self.assertTrue(self.runs()[1]["session"])
+        os.environ["FAKE_FILL"] = "1200"
+        run_wb("feedback", "t-c3", "--message", str(self.feedback), "--fresh")
+        wait_phase("t-c3", {"review"})
+        self.assertFalse(self.runs()[2]["session"])
+        self.assertIn("Claude asked for a fresh session", self.runs()[2]["prompt"])
+
+    def test_after_opencode_compacts_the_next_round_is_fresh(self):
+        os.environ["FAKE_COMPACTED"] = "1"
+        self.review_then_feedback("t-c4")
+        self.assertFalse(self.runs()[1]["session"])
+        self.assertIn("OpenCode had to compact", self.runs()[1]["prompt"])
+        self.assertIn("OpenCode compacted the agent's context",
+                      run_wb("watch", "t-c4", "--once", "--no-color"))
+
+    def test_next_commits_the_step_and_keeps_the_agent_and_its_session(self):
+        self.start("t-n", "ok", "--test", TEST_CMD)
+        wait_phase("t-n", {"review"})
+        step2 = Path(self.tmp.name) / "step2.md"
+        step2.write_text("Now also write the question to question.txt.\n")
+        out = run_wb("next", "t-n", "--spec", str(step2), "-m", "feat: the answer")
+        self.assertIn("step 1 of t-n committed", out)
+        st = wait_phase("t-n", {"review"})
+        second = self.runs()[1]
+        self.assertTrue(second["session"])          # the same agent, warm
+        self.assertTrue(second["prompt"].startswith("Step 1 of this task is done and committed"))
+        self.assertIn("question.txt", second["prompt"])
+        self.assertEqual(st["steps"], 2)
+        self.assertEqual(run_wb("diff", "t-n").strip(), "(no changes)")  # step 2's own diff: the
+        self.assertIn("+42", run_wb("diff", "t-n", "--all"))  # fake rewrote the same answer
+        log = subprocess.run(["git", "-C", str(self.repo), "log", "--format=%s", "delegate/t-n"],
+                             capture_output=True, text=True).stdout
+        self.assertIn("feat: the answer", log)
 
 
 class Steering(Base):

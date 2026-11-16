@@ -7,6 +7,17 @@
 // through each task's `acked` file, so a notification wakes Claude once, by whichever got it first.
 // A wake is held while Claude's main loop is mid-turn (a prompt submitted then would queue and
 // arrive stale) and checked against the task's phase when it is finally sent.
+// Claude's own context. Whatever compacts it (the engine at its limit, /compact, this mod), the
+// summary is told to keep the delegation state, and after a compaction or /clear the open tasks
+// come back as a context block. At a task boundary (one just closed, none waiting for Claude) the
+// mod compacts early once Claude is COMPACT_AT of the way to the engine's own compaction, so a
+// long delegation session sheds finished tasks' detail at a clean point instead of mid-review.
+const COMPACT_AT = 0.5
+const KEEP_ON_COMPACT =
+  'Workbench delegation is in progress. Keep: the user\'s goals and decisions, which tasks were ' +
+  'delegated (names, repos, branches, what each is for), which are open and what each needs ' +
+  'next, and what was accepted, merged or discarded. Drop the diffs, reports and transcripts of ' +
+  'finished tasks; `wb status` and `wb report <name>` bring back any detail.'
 // Two slash commands for the user: /delegate-quit stops the benchmark and every agent at once
 // (`wb stop --all`) and tells Claude so; /delegate-quit-and-hand-back-claude stops the agents and
 // hands their tasks to Claude (`wb takeover --all`), starting a turn for Claude to finish them.
@@ -136,6 +147,8 @@ const mem = {
   liveKey: '', // the followed task and its updated_at when last read
   busy: false, // Claude's main loop is mid-turn: a wake would queue and arrive stale
   queued: [] as string[], // turns for Claude that a command asked for
+  open: new Set<string>(), // delegated tasks open at the last poll
+  boundary: false, // one closed since: a moment to make room in Claude's context
   toasted: new Set<string>(),
 }
 
@@ -164,11 +177,35 @@ async function scan($: any, root: string, now: number): Promise<WbTask[]> {
       label: String(sp.model_label ?? ''),
       tests: st.tests ? (st.tests.ok ? 'pass' : 'fail') : null,
       last: String(st.last ?? ''), createdAt: Number(sp.created_at ?? 0) * 1000, updatedAt,
-      tokens: Number(st.tok_in ?? 0) + Number(st.tok_out ?? 0), recent,
+      tokens: Number(st.tok_in ?? 0) + Number(st.tok_out ?? 0), recent, bench: !!sp.bench,
     })
   }
 
   return list.sort((a, b) => a.createdAt - b.createdAt)
+}
+
+async function compactAtBoundary($: any): Promise<void> {
+  const set = await $.env.get('WB_COMPACT_AT') // a percentage; 0 turns it off
+  const at = set && Number.isFinite(Number(set)) ? Number(set) / 100 : COMPACT_AT
+  if (!at) return
+  let context
+  try {
+    ({ context } = await $.session.usage({ breakdown: 'summary' }))
+  } catch {
+    return // no reading yet (a session before its first turn)
+  }
+  const b = context.breakdown
+  const limit = b?.isAutoCompactEnabled && b.autoCompactThreshold ? b.autoCompactThreshold : context.window
+  if (!context.tokens || context.tokens < at * limit) return
+  try {
+    const r = await $.session.compact({ instructions: KEEP_ON_COMPACT })
+    if (!r.skip) {
+      $.ui.toast(`workbench: a task closed; compacted Claude's context ` +
+        `(${Math.round(context.tokens / 1000)}K tokens) to make room`)
+    }
+  } catch {
+    // a turn began meanwhile: the next boundary tries again
+  }
 }
 
 async function runWb($: any, args: string[]): Promise<string> {
@@ -242,6 +279,14 @@ async function poll($: any) {
     }
     void refreshLive($, list)
     if (!mem.busy && mem.queued.length) void $.prompt.submit({ text: mem.queued.shift()! })
+    const open = new Set(list.filter(t => !t.bench && (ACTIVE.has(t.phase) || NEEDS.has(t.phase)))
+      .map(t => t.name))
+    if ([...mem.open].some(name => !open.has(name))) mem.boundary = true
+    mem.open = open
+    if (mem.boundary && !mem.busy && !list.some(t => !t.bench && NEEDS.has(t.phase))) {
+      mem.boundary = false
+      await compactAtBoundary($)
+    }
     await deliver($, now)
   } finally {
     mem.polling = false
@@ -325,6 +370,26 @@ export const register: Register = (on, options) => {
     const out = await runWb($, ['takeover', '--all'])
     mem.queued.push(DONE_NOTE(out)) // a command may not start a turn itself: the next poll does
     return { text: `Agents stopped; Claude is taking over. ${out}` }
+  })
+
+  // Whoever compacts the main conversation, the summary keeps the delegation state.
+  on('session.compact', async ($, e, next) => {
+    if (e.agentId || !mem.open.size || e.instructions?.includes(KEEP_ON_COMPACT)) return next(e)
+    return next({ ...e, instructions: [e.instructions, KEEP_ON_COMPACT].filter(Boolean).join('\n\n') })
+  })
+
+  // A fresh or just-compacted conversation is told which tasks are open, from wb itself.
+  on('prompt.context', async ($, e, next) => {
+    const r = await next(e)
+    const status = await runWb($, ['status'])
+    if (status.startsWith('no open tasks') || status.startsWith('could not run')) return r
+    return {
+      blocks: [...r.blocks, {
+        name: 'workbench',
+        text: `Tasks delegated to local agents with wb (the /delegate skill) are open:\n${status}\n` +
+          'Pick them up from here: `wb report <name>` for one, `wb watch <name>` to follow it.',
+      }],
+    }
   })
 
   // Only the main loop's turns: a subagent's run doesn't hold the prompt.

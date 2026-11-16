@@ -180,3 +180,53 @@ test('/delegate-quit stops everything; /delegate-quit-and-hand-back-claude hands
   await $.prompt.submit({ text: 'if I said bail out claude, would it stop?' })
   expect(runs.length).toBe(before)
 })
+
+test('a closed task compacts Claude early, keeping the delegation state; open tasks come back after', async ($, on) => {
+  const clock = mock.clock(on, { now: 1_800_000_000_000 })
+  const ts = 1_800_000_000
+  const files: Record<string, string> = {
+    '/wb/tasks/fix-it/task.json': JSON.stringify({ name: 'fix-it', model: 'q', created_at: ts }),
+    '/wb/tasks/fix-it/status.json': JSON.stringify({ phase: 'running', round: 1, updated_at: ts }),
+  }
+  fakeTasks(on, files)
+  on('process.run', () => ({ value: { exitCode: 0, stdout: 'fix-it   running   1 q', stderr: '' } }))
+  on('ui.toast', () => ({ value: undefined }))
+  on('prompt.context', (_: any, e: any) => ({ blocks: e.blocks }))
+  let tokens = 300_000
+  on('session.usage', () => ({ value: { startedAt: 0, rateLimits: [], context: {
+    tokens, window: 1_000_000, percent: 30,
+    breakdown: { isAutoCompactEnabled: true, autoCompactThreshold: 400_000 } } } }))
+  const compactions: (string | undefined)[] = []
+  on('session.compact', (_: any, e: any) => {
+    compactions.push(e.instructions)
+    return { messages: [{ role: 'user', text: 'summary', toolUses: [] }] }
+  })
+  await $.session.start({ cwd: '/', surface: 'terminal', isInteractive: true })
+  await clock.advance(2000)
+  expect(compactions.length).toBe(0)              // the task is still running
+
+  // Any compaction meanwhile (here a /compact) is told to keep the delegation state.
+  await $.session.compact({ instructions: 'the plan', trigger: 'manual', messages: [{ role: 'user', text: 'hi', toolUses: [] }] } as any)
+  expect(compactions.at(-1)).toContain('the plan')
+  expect(compactions.at(-1)).toContain('Workbench delegation is in progress')
+
+  // A fresh or compacted conversation is handed the open tasks.
+  const ctx = await $.prompt.context({ blocks: [] })
+  expect(ctx.blocks.find((b: any) => b.name === 'workbench')?.text).toContain('fix-it   running')
+
+  // The task closes: at 300K of 400K (75%, past the halfway mark) Claude is compacted once.
+  files['/wb/tasks/fix-it/status.json'] = JSON.stringify({ phase: 'accepted', round: 1, updated_at: ts + 5 })
+  await clock.advance(2000)
+  expect(compactions.length).toBe(2)
+  expect(compactions.at(-1)).toContain('Drop the diffs')
+  await clock.advance(2000)
+  expect(compactions.length).toBe(2)              // once per boundary
+
+  // Below the mark, a boundary leaves the context alone.
+  tokens = 100_000
+  files['/wb/tasks/fix-it/status.json'] = JSON.stringify({ phase: 'running', round: 2, updated_at: ts + 9 })
+  await clock.advance(2000)
+  files['/wb/tasks/fix-it/status.json'] = JSON.stringify({ phase: 'discarded', round: 2, updated_at: ts + 12 })
+  await clock.advance(2000)
+  expect(compactions.length).toBe(2)
+})

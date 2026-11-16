@@ -106,6 +106,10 @@ def _user_message(text: str, verbose: bool) -> tuple[str, list[tuple[str, str]]]
         head = "Claude → agent · review feedback"
     elif text.startswith("The acceptance tests fail"):  # runner.auto_fix_prompt
         head = "workbench → agent · tests failed, sent back automatically"
+    elif text.startswith("You are picking this task up in a fresh session"):  # runner.handoff_prompt
+        head = "workbench → agent · fresh session: the task, the work so far, what's next"
+    elif text.startswith("Step ") and " of this task is done and committed" in text[:60]:
+        head = "Claude → agent · next step"
     elif text.startswith(INTERRUPT_HEAD):
         head = "Claude → agent · INTERRUPT, high priority"
     elif text.startswith(NOTE_HEAD):
@@ -176,6 +180,11 @@ def session_entries(data: dict, worktree: str, verbose: bool) -> list[Entry]:
         if m.get("type") == "user":
             _, lines = _user_message(m.get("text", ""), verbose)
             out.append(Entry(mts, mid, lines))
+            continue
+        if m.get("type") == "compaction" and m.get("status") == "completed":
+            out.append(Entry(mts, mid, [("sys", "⟲ OpenCode compacted the agent's context "
+                                                "(its own summary replaced the earlier messages)")]
+                             + (_block("think", m.get("summary", ""), 400, "    ") if verbose else [])))
             continue
         if m.get("type") != "assistant":
             continue
@@ -254,6 +263,10 @@ def task_entries(task: store.Task) -> list[Entry]:
             out.append(Entry(ts, key, [("claude", f"■ Claude {what}")]))
         elif kind == "interrupted":
             out.append(Entry(ts, key, [("bad", "■ the agent was interrupted")]))
+        elif kind == "fresh":
+            out.append(Entry(ts, key, [("sys", f"■ {r.get('text', '')}")]))
+        elif kind == "next_step":
+            out.append(Entry(ts, key, [("ok", f"■ {r.get('text', '')}")]))
         elif kind == "takeover":
             out.append(Entry(ts, key, [("claude", "■ Claude took over: finishing it by hand")]))
         elif kind == "stopped":
@@ -408,7 +421,9 @@ def follow(task: store.Task, verbose: bool = False, once: bool = False, color: b
     while True:
         sid = find_session(task)
         data = export(sid) if sid else {}
-        entries = session_entries(data, worktree, verbose) + task_entries(task)
+        entries = task_entries(task) + session_entries(data, worktree, verbose)
+        for old in task.status.get("sessions") or []:  # earlier sessions, before a fresh start
+            entries += session_entries(export(old), worktree, verbose)
         for e in sorted((e for e in entries if e.key not in seen), key=lambda e: e.ts):
             seen.add(e.key)
             if e.key.endswith(":end") and e.key[:-4] + ":start" in seen:

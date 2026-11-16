@@ -3,7 +3,7 @@
     python3 -m workbench.runner <task>
 
 Each round sends rounds/<n>/prompt.md to the agent (`opencode run`, continuing the task's session
-after the first), streams its events into events.jsonl and status.json, and stops it if it loops,
+after the first, unless that session is full: see fresh_reason), streams its events into events.jsonl and status.json, and stops it if it loops,
 errors repeatedly, goes silent or runs too long. After a clean round the task's test command runs
 in the worktree; a failure goes back to the agent on its own while auto-fix rounds remain, so
 Claude is only woken for work that passes, or for a task that has run out of road.
@@ -254,6 +254,12 @@ def summary_text(task: store.Task, n: int, rnd: dict, tests) -> str:
     spec, st = task.spec, task.status
     lines = [f"task {task.name} · {spec['model_label']} · round {n} · {rnd['secs'] / 60:.1f} min"
              f" · local tokens {rnd['tok_in']} in / {rnd['tok_out']} out"]
+    c = context_state(task)
+    if c.get("used") and c.get("window"):
+        lines.append(f"agent context: {c['used'] / 1000:.1f}K of {c['window'] // 1024}K "
+                     f"({100 * c['used'] // c['window']}%)"
+                     + (f", compacted {c['compactions']}x" if c.get("compactions") else "")
+                     + ("; the next round starts a fresh session" if fresh_reason(task) else ""))
     if rnd["stuck"]:
         lines.append(f"STOPPED: {rnd['stuck']}")
     elif rnd["exit"] not in (0, None):
@@ -279,6 +285,86 @@ def summary_text(task: store.Task, n: int, rnd: dict, tests) -> str:
     return "\n".join(lines)
 
 
+# A round continues the task's OpenCode session, so the agent keeps what it has read. Once that
+# session has filled this share of the model's window, or OpenCode has compacted it (a small
+# model's own summary of a coding session drops details), the next round starts a fresh session
+# that is handed exactly what it needs: the task, the work so far and the new instructions.
+FRESH_AT = 0.6
+HANDOFF_DIFF_CHARS = 12000  # about 3K tokens; a bigger diff is listed, for the agent to read
+
+
+def context_state(task: store.Task) -> dict:
+    """How full the task's current session is: {"used", "window", "compactions"}."""
+    sid = task.status.get("session")
+    if not sid:
+        return {}
+    from .transcript import export  # transcript imports this module
+    msgs = export(sid).get("messages", [])
+    last = next((m for m in reversed(msgs) if m.get("type") == "assistant" and m.get("tokens")), None)
+    used = None
+    if last:  # what the next request carries: everything the last one read, plus its reply
+        tk, cache = last["tokens"], last["tokens"].get("cache") or {}
+        used = tk.get("input", 0) + cache.get("read", 0) + cache.get("write", 0) + tk.get("output", 0)
+    return {"used": used, "window": task.status.get("window"),
+            "compactions": sum(m.get("type") == "compaction" and m.get("status") == "completed"
+                               for m in msgs)}
+
+
+def fresh_reason(task: store.Task) -> str | None:
+    """Why round n should start a fresh session, or None to continue the current one."""
+    st = task.status
+    if not st.get("session") or st.get("context") == "keep":
+        return None
+    if st.get("context") == "fresh":
+        return "Claude asked for a fresh session"
+    c = context_state(task)
+    if c.get("compactions"):
+        return "OpenCode had to compact the last session"
+    if c.get("used") and c.get("window") and c["used"] >= FRESH_AT * c["window"]:
+        return (f"the last session was {100 * c['used'] // c['window']}% full "
+                f"({c['used'] / 1000:.1f}K of {c['window'] // 1024}K tokens)")
+    return None
+
+
+def handoff_prompt(task: store.Task, why: str, instructions: str) -> str:
+    wt, spec = task.worktree, task.spec
+    steps = gitops.git(wt, "log", "--oneline", f"{spec['base']}..HEAD").strip()
+    gitops.git(wt, "add", "-A", "-N")
+    try:
+        diff = gitops.git(wt, "diff", "HEAD").rstrip()
+        stat = gitops.git(wt, "diff", "HEAD", "--stat").rstrip()
+    finally:
+        gitops.git(wt, "reset", "-q")
+    work = (f"```diff\n{diff}\n```" if len(diff) <= HANDOFF_DIFF_CHARS else
+            f"The diff is too long to include; read the changed files:\n```\n{stat}\n```")
+    return (f"You are picking this task up in a fresh session ({why}). Nothing from the earlier "
+            f"session carries over except what is in the working tree, so start from what is "
+            f"below and re-read the files you need.\n\n## The task\n\n"
+            f"{current_task_prompt(task)}\n\n## The work so far\n\n"
+            + (f"Earlier steps, committed:\n```\n{steps}\n```\n\n" if steps else "")
+            + (f"Uncommitted changes (`git diff HEAD`):\n{work}" if diff else
+               "No uncommitted changes yet.")
+            + f"\n\n## Now\n\n{instructions}")
+
+
+def current_task_prompt(task: store.Task) -> str:
+    """The spec the agent is working to now, with the protocol: round 1's, or the latest `wb next`."""
+    n = task.status.get("step_round") or 1
+    return task.round_dir(n).joinpath("prompt.md").read_text().strip()
+
+
+def _start_fresh(task: store.Task, n: int, why: str) -> None:
+    path = task.round_dir(n).joinpath("prompt.md")
+    now = ("Start on the task above." if n == (task.status.get("step_round") or 1)
+           else path.read_text().strip())
+    path.write_text(handoff_prompt(task, why, now))
+    st = task.status
+    task.set_status(session=None, sessions=(st.get("sessions") or []) + [st["session"]],
+                    context=None)
+    task.event({"ts": store.now(), "round": n, "kind": "fresh",
+                "text": f"a fresh session for the agent: {why}"})
+
+
 def auto_fix_prompt(tests: dict, cmd: str) -> str:
     return (f"The acceptance tests fail. Command: `{cmd}` (exit {tests['exit']}). Output:\n\n"
             f"```\n{tests['tail']}\n```\n\nFix the code so the tests pass. Do not weaken, skip or "
@@ -293,13 +379,19 @@ def drive(task: store.Task) -> None:
         try:
             m = models.resolve(task.spec["model"])
             secs = models.make_resident(m, say=lambda msg: task.set_status(last=msg))
-            task.set_status(fingerprint=models.fingerprint(m), load_secs=round(secs, 1))
+            task.set_status(fingerprint=models.fingerprint(m), load_secs=round(secs, 1),
+                            window=(m.config.get("limit") or {}).get("context"))
         except (KeyError, RuntimeError, OSError) as e:
             task.set_status(phase="failed", last=f"model: {e}")
             task.notify("failed", f"task {task.name}: could not load {task.spec['model']}: {e}")
             return
         while True:
             n = task.status["round"]
+            why = fresh_reason(task) if n > 1 else None
+            if why:
+                _start_fresh(task, n, why)
+            elif task.status.get("context") == "keep":
+                task.set_status(context=None)  # a one-round instruction
             task.set_status(phase="running", round=n, round_started_at=store.now(),
                             last="starting the agent")
             task.event({"ts": store.now(), "round": n, "kind": "round", "text": "started"})

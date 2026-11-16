@@ -129,6 +129,8 @@ Denied tools also leave the prompt. That cuts the fixed prompt from about 9.2k t
 | `wb discard <name> [--reason R] [--keep-branch]` | drop it |
 | `wb stop <name>` | stop a running agent (it becomes `stuck`) |
 | `wb watch [name] [-v]` | follow a task live, for you: Claude's spec and feedback, the agent's timed thinking, every command with output, edits as diffs, tests, speeds and tokens. The Workbench pane in Claude Code shows the same, scrollable |
+| `wb next <name> --spec <file> -m "…"` | commit the approved step and send the next step to the same agent, worktree and session; `wb diff` then shows the step, `--all` the branch |
+| `wb feedback … --fresh` / `--keep-context` | override the runner's context choice: rounds continue the agent's session until it is 60% full or OpenCode compacted it, then a fresh session gets the task, the diff and the instructions |
 | `wb takeover --all` · `wb stop --all` | what `/delegate-quit-and-hand-back-claude` (Claude finishes everything itself) and `/delegate-quit` (stop every agent and the benchmark, keep the work) run; `stop --all` finds a running `wb bench` from the process table |
 | `wb note <name> --text "…"` | Claude's captain's-log line, shown in the transcript. Check-ins (`wb start --checkin MIN`, default 10 for significant tasks) wake Claude with a progress digest to report on |
 | `wb steer <name> --text "…" [--now]` · `wb takeover <name>` | Claude driving a running agent: a note for after its current run, or (`--now`) an interrupt that puts the note first; or stop it and finish by hand |

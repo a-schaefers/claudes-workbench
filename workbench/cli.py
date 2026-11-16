@@ -157,6 +157,7 @@ def cmd_feedback(a):
         "Review feedback from the senior reviewer. Make exactly these changes, then re-run the "
         "acceptance command and finish with a short summary:\n\n" + text.strip())
     reviews = st.get("reviews", 0) + 1
+    task.set_status(context="fresh" if a.fresh else "keep" if a.keep_context else None)
     task.set_status(round=n, reviews=reviews, phase="queued",
                     auto_fixes_total=st.get("auto_fixes_total", 0) + st.get("auto_fixes", 0),
                     auto_fixes=0)
@@ -164,6 +165,45 @@ def cmd_feedback(a):
     _ack_all(task)
     print(f"feedback round {reviews} sent to {a.name} (round {n})"
           + ("  — that is past the usual 3 review rounds" if reviews > 3 else ""))
+
+
+def cmd_next(a):
+    """Commit the approved step on the task's branch and give the same agent the next one: same
+    worktree, same session (so it keeps what it has read), unless it is full or --fresh."""
+    task = need(a.name)
+    spec, st = task.spec, task.status
+    if st.get("phase") != "review":
+        die(f"{a.name} is {st.get('phase')}; wb next follows an approved step under review")
+    if runner_alive(task):
+        die(f"{a.name}'s runner is still running")
+    step = st.get("steps", 1)
+    try:
+        commit = gitops.commit_all(task.worktree, f"{a.message}\n\nWorkbench-Task: {a.name} "
+                                   f"(step {step})\nOpenCode-Session: {st.get('session')}")
+    except gitops.GitError as e:
+        die(str(e))
+    if a.test is not None:
+        store.write_json(task.dir / "task.json", {**spec, "test_cmd": a.test})
+    test = a.test if a.test is not None else spec.get("test_cmd")
+    test_line = (f"- The acceptance command is `{test}`. Run it before you finish and make it "
+                 "pass. Never weaken, skip or delete tests to get there.\n") if test else ""
+    budget = spec.get("ask_budget", 0)
+    n = st.get("round", 1) + 1
+    task.round_dir(n).mkdir(parents=True, exist_ok=True)
+    task.round_dir(n).joinpath("prompt.md").write_text(
+        f"Step {step} of this task is done and committed ({commit}). The next step:\n\n"
+        + Path(a.spec).read_text().rstrip()
+        + PROTOCOL.format(branch=spec["branch"], test_line=test_line, budget=budget))
+    task.event({"ts": store.now(), "round": n, "kind": "next_step",
+                "text": f"step {step} committed as {commit}; next step sent"})
+    task.set_status(round=n, steps=step + 1, step_round=n, phase="queued", reviews=0,
+                    context="fresh" if a.fresh else None,
+                    auto_fixes_total=st.get("auto_fixes_total", 0) + st.get("auto_fixes", 0),
+                    auto_fixes=0, last=f"step {step} committed; next step queued")
+    spawn_runner(task)
+    _ack_all(task)
+    print(f"step {step} of {a.name} committed as {commit}; step {step + 1} sent "
+          + ("to a fresh session" if a.fresh else "to the same session"))
 
 
 def cmd_answer(a):
@@ -295,9 +335,10 @@ def cmd_report(a):
 
 
 def cmd_diff(a):
+    """The work under review: the whole task, or after `wb next` the current step (--all: all)."""
     task = need(a.name)
-    print(gitops.diff(task.worktree, task.spec["base"], stat=a.stat, paths=a.paths)
-          or "(no changes)")
+    base = "HEAD" if task.status.get("steps", 1) > 1 and not a.all else task.spec["base"]
+    print(gitops.diff(task.worktree, base, stat=a.stat, paths=a.paths) or "(no changes)")
 
 
 def _stop_runner(task):
@@ -626,7 +667,18 @@ def main(argv=None):
 
     s = sub.add_parser("feedback", help="send review feedback for another round")
     s.add_argument("name"); s.add_argument("--message", required=True, help="file, or - for stdin")
+    g = s.add_mutually_exclusive_group()
+    g.add_argument("--fresh", action="store_true",
+                   help="start the agent on a fresh session, handed the task and the work so far")
+    g.add_argument("--keep-context", action="store_true",
+                   help="continue the session even if it is getting full")
     s.set_defaults(f=cmd_feedback)
+    s = sub.add_parser("next", help="commit the approved step and send the same agent the next one")
+    s.add_argument("name"); s.add_argument("--spec", required=True)
+    s.add_argument("--message", "-m", required=True, help="commit subject for the approved step")
+    s.add_argument("--test", help="the next step's acceptance command (default: unchanged)")
+    s.add_argument("--fresh", action="store_true", help="a fresh session instead of the same one")
+    s.set_defaults(f=cmd_next)
     s = sub.add_parser("answer", help="answer the agent's ask_reviewer question")
     s.add_argument("name"); s.add_argument("--id")
     g = s.add_mutually_exclusive_group(required=True)
@@ -658,6 +710,7 @@ def main(argv=None):
     s.set_defaults(f=cmd_report)
     s = sub.add_parser("diff", help="the agent's changes against the task's base")
     s.add_argument("name"); s.add_argument("--stat", action="store_true")
+    s.add_argument("--all", action="store_true", help="every step, not just the current one")
     s.add_argument("paths", nargs="*")
     s.set_defaults(f=cmd_diff)
     s = sub.add_parser("steer", help="a note to a running agent: at the end of its current run, "

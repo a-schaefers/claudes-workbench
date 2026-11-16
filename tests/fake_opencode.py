@@ -17,11 +17,19 @@ import uuid
 
 args = sys.argv[1:]
 if args[:2] == ["session", "export"]:  # `wb watch`: one finished step, as OpenCode exports it
-    print(json.dumps({"info": {"id": args[2]}, "messages": [
-        {"type": "user", "id": "m1", "time": {"created": 1000}, "text": "Write the answer."},
-        {"type": "assistant", "id": "m2", "finish": "stop",
+    sid = args[2]
+    # FAKE_FILL: the context the step read (the runner's fresh-session check); FAKE_COMPACTED:
+    # OpenCode compacted the session first
+    compacted = [{"type": "compaction", "id": f"{sid}-c", "status": "completed", "reason": "auto",
+                  "summary": "Earlier: read answer.txt.", "time": {"created": 1500}}] \
+        if os.environ.get("FAKE_COMPACTED") else []
+    print(json.dumps({"info": {"id": sid}, "messages": [
+        {"type": "user", "id": f"{sid}-m1", "time": {"created": 1000}, "text": "Write the answer."},
+        *compacted,
+        {"type": "assistant", "id": f"{sid}-m2", "finish": "stop",
          "time": {"created": 2000, "firstToken": 3000, "streamed": 5000, "completed": 5000},
-         "tokens": {"input": 1200, "output": 80, "reasoning": 0, "cache": {"read": 0}},
+         "tokens": {"input": int(os.environ.get("FAKE_FILL", 1200)), "output": 80, "reasoning": 0,
+                    "cache": {"read": 0}},
          "content": [
              {"type": "reasoning", "text": "It wants 42.", "time": {"created": 3000, "completed": 4500}},
              {"type": "tool", "name": "edit", "state": {"status": "completed", "input": {
@@ -52,6 +60,9 @@ def finish():
 if os.environ.get("FAKE_PROMPTS") and args and args[0] == "run":
     with open(os.environ["FAKE_PROMPTS"], "a") as fh:
         fh.write(json.dumps(args[-1]) + "\n")
+if os.environ.get("FAKE_RUNS") and args and args[0] == "run":  # which runs continued a session
+    with open(os.environ["FAKE_RUNS"], "a") as fh:
+        fh.write(json.dumps({"session": "--session" in args, "prompt": args[-1]}) + "\n")
 if scenario == "slow":
     scenario = "ok" if "--session" in args else "hang"
 if scenario == "crash":
