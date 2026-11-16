@@ -2,35 +2,47 @@
 
 # Claude's Workbench
 
-**Claude plans and reviews. Your gaming PC writes the code.**
+**Frontier judgment, local horsepower. Claude leads; your GPU does the heavy lifting.**
 
-The goal: move to a hybrid workflow on an ordinary gaming PC without giving up the quality of
-a current-generation Claude. Open coding models you can run at home are said to code at roughly the level of
-last year's best cloud models, but left alone they wander, overthink and cut corners. workbench
-puts Claude in charge of them: Claude plans the work, hands each piece to a local model, checks the
-result like a strict senior reviewer, and sends it back until it's right. Claude spends its tokens
-on thinking and judging; your GPU spends electricity on typing.
+Claude's Workbench turns the local LLMs on your gaming PC into a crew led by a frontier model.
+Open coding models you can run at home are strong enough to write real code, but left alone they
+wander, overthink, cut corners, and drown in any task bigger than their small context. What they
+lack isn't typing speed. It's an architect and a reviewer.
 
-The hope is a smaller Claude bill: a cheaper subscription, or one day no subscription at all, just
-the Claude API for the driver and local models for the heavy lifting. Whether it pays off depends
-on how much you use it and what your electricity costs (a busy GPU isn't free). But it's a fun
-project, and it works.
+So Claude is both. It plans the project, breaks it into pieces a local model can finish, hands each
+piece to the right model with the knowledge it needs, and reviews the result to its own standard
+until it's right. Frontier compute goes where it counts, into planning, architecture and judgment;
+the bulk of the tokens, the reading and writing and test-running, happen on your own hardware.
 
-- **Claude is the lead.** It writes a precise spec for each piece of work, with the files to touch
-  and a test that proves it's done.
-- **A local model does the typing** in OpenCode, in its own copy of your repo (a git worktree), so
-  your working tree is never touched until Claude accepts the change.
-- **Tests come first.** Failing tests go back to the agent automatically; Claude only looks at work
-  that passes, a question the agent asks, or an agent that got stuck.
-- **Claude holds the bar.** It reads every diff itself, never trusts the agent's summary, and fixes
-  or discards anything that isn't up to its own standard.
-- **Small pieces.** Local models work in a small context, so one concern and a couple of files per
-  task. A step that never finished as one big task finished in half an hour as three small ones.
-- **Claude builds a skill library for the agents.** When review teaches something the next agent
-  will need too (a library's quirk, a pitfall, a check to run), Claude writes it down as a skill.
-  Each agent gets only the skills that fit its task, and Claude takes them back when that part is
-  done, so a growing library never clutters a small model's prompt. Claude tracks which skills
-  actually help and retires the ones that don't.
+- **Claude architects the work.** It reads your codebase, decides the design, and writes a precise
+  spec for every piece: the files to touch and the code to imitate, the exact names other code
+  relies on, and a test that proves it's done.
+- **Bite-sized pieces your local models actually finish.** A local model in a 32K context falls
+  apart on an eight-file task and shines on a two-file one, so Claude cuts every project down to
+  one concern, two or three files and about 150 lines per task, and runs the pieces in order. A step
+  that never finished in an hour as one big task landed in half an hour as three small ones. The
+  next piece in the same area goes to the same agent, which already knows the code.
+- **Claude hands out the skills.** Every lesson Claude learns in review (a library's quirk, a
+  pitfall, a check to run) becomes a skill in a library Claude writes and curates. Each agent gets
+  only the skills that fit its task, and gives them back when that part is done, so your local
+  models get better at your work without retraining and without a cluttered prompt. Claude tracks
+  which skills actually help and retires the ones that don't.
+- **The right model for each piece.** Chores go to a small fast model, real work to the strongest
+  one your GPU runs, and the choice learns from which model's work Claude actually accepts.
+- **Held to a frontier standard.** Claude reads every diff itself, never takes the agent's word for
+  it, and sends it back with exact notes until it's what Claude would have written, or fixes it or
+  throws it out. "Good enough for a local model" is not a bar it accepts.
+- **The cheap loop stays local.** Failing tests go back to the agent automatically. Claude only
+  spends tokens on work that passes, a question the agent asks, or an agent that got stuck, and a
+  live pane shows you both sides as they work.
+- **Your repo stays yours.** Each agent works in its own git worktree, so your checkout is never
+  touched, and nothing is committed (under your name, with no AI credit line) until Claude accepts
+  it.
+
+The payoff is a smaller Claude bill for the same quality bar: a cheaper subscription, or one day
+just the API for the lead and local models for everything else. How much you save depends on how
+much you use it and what your electricity costs (a busy GPU isn't free). But it's a fun project,
+and it works.
 
 Built and used on: **Ryzen 5 7600X · Radeon RX 9070 XT (16 GB) · 32 GB DDR5 · Arch Linux.**
 
