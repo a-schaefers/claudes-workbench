@@ -558,8 +558,10 @@ custom-node packs do run their own Python).
 reaching the Claude session that runs `/delegate` while you're away.
 
 - **The path of a message.** The page posts it; the server appends it to `chat/messages.jsonl`. The
-  listening session's mod submits it to Claude as a prompt starting `[web chat]` (into the running
-  turn if Claude is mid-turn, else as the next prompt) and writes a receipt the page shows at once
+  listening session's mod submits it to Claude as `[web chat] <your words>`, nothing more, so the
+  terminal shows what you wrote; how to answer is in the `/delegate` skill. It goes into the running
+  turn if Claude is mid-turn, with one line saying it's from you, else as the next prompt. The mod
+  also writes a receipt the page shows at once
   (Claude has it now, or will read it after its current step). Claude answers with `wb chat reply`, which the page shows. The page says
   whether a session is listening and whether Claude is working.
 - **One listener.** A session listens once `/delegate` (or a delegating `wb` command) has run in

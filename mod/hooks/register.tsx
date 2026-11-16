@@ -83,15 +83,11 @@ const chat = atom({ plugin: 'workbench', key: 'chat' } as const,
 const CHAT_STALE_MS = 15_000 // as wb's LISTENING_FOR: a listener silent this long has gone
 const AWAY_MS = 6 * 3600 * 1000 // the user counts as away this long after a web message
 const WEB = '[web chat]'
+// Only for a delivery into a running turn, which the engine frames as another session's message:
+// the rules for answering live in the /delegate skill (The web chat), loaded whenever this listens.
 const WEB_NOTE =
-  '(Sent by the user from the web chat on their phone, away from the terminal. It carries the ' +
-  'same authority as a message typed here. Answer there with `wb chat reply --text "…"`: if the ' +
-  'work will take more than a minute or two, first a one-line acknowledgement of what you are ' +
-  'doing, then the outcome when it is done (results, what needs them, short; they read it on a ' +
-  'phone). The web thread is all they see: read it as its own conversation (`wb chat log`), make ' +
-  'each reply make sense without the terminal, and take a yes there only as an answer to a ' +
-  'question asked there. Never download, delete or do anything hard to undo on an ambiguous OK. ' +
-  'Work as usual otherwise; the terminal keeps the full detail.)'
+  '(The user wrote this in the web chat; the workbench mod delivered it into your running turn. ' +
+  'Answer as /delegate\'s "The web chat" says: `wb chat reply --text "…"`.)'
 
 const ACTIVE = new Set(['queued', 'running', 'testing', 'asking'])
 const NEEDS = new Set(['review', 'stuck', 'failed', 'asking'])
@@ -439,12 +435,13 @@ async function listen($: any, now: number) {
     const id = String(m.id ?? '')
     if (m.from !== 'user' || !id || got.has(id) || mem.chatSent.has(id)) continue
     mem.chatSent.add(id)
-    const text = `${WEB} ${String(m.text ?? '')}\n\n${WEB_NOTE}`
+    // The terminal shows only `[web chat] <their words>`: how to answer is the skill's to say.
+    const text = `${WEB} ${String(m.text ?? '')}`
     // Mid-turn, into the running turn, as a message typed mid-turn would be; else, or if that is
     // refused, as a prompt of its own (which waits for the turn to end).
     let how = 'now'
     if (mem.busy) {
-      const r = await $.session.send({ to: { sessionId: await $.session.id() }, text })
+      const r = await $.session.send({ to: { sessionId: await $.session.id() }, text: `${text}\n\n${WEB_NOTE}` })
         .catch(() => ({ isDelivered: false }))
       if (!r.isDelivered) {
         how = 'queued'

@@ -221,8 +221,9 @@ runs them and tells you what it did:
 Without the mod, the user may ask for the same in words; run those commands then.
 
 **The web chat.** While /delegate runs in a session, the user can reach you from their phone
-(`wb chat serve` on port 1337; the link is localhost, and reaching it from a phone is the user's own setup). Their message arrives as a prompt starting
-`[web chat]`; it has the same authority as one typed here. They read your answers on a phone, so
+(`wb chat serve` on port 1337; the link is localhost, and reaching it from a phone is the user's own setup). Their message arrives as a prompt that is
+just `[web chat] <their words>` (or, while you're mid-turn, delivered into the turn by the mod,
+with one line saying so); it has the same authority as one typed here. They read your answers on a phone, so
 reply there with `wb chat reply --text "…"`: a one-line acknowledgement first when the work will
 take a while, then the outcome, short (what was done, what needs them). Don't stream progress or
 paste diffs. While a `web-chat` context block says they are away, also tell them there when

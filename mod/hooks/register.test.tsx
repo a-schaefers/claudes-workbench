@@ -331,8 +331,7 @@ test('the web chat reaches Claude only in /delegate mode, with a receipt, and on
   await $.skill.prompt({ skill: 'delegate', text: 'x', frontmatter: {}, source: 'userSettings' })
   await clock.advance(3000)
   expect(asked.length).toBe(1)
-  expect(asked[0]).toContain('[web chat] status?')
-  expect(asked[0]).toContain('wb chat reply')
+  expect(asked[0]).toBe('[web chat] status?')                    // their words, nothing else
   expect(JSON.parse(files['/wb/chat/listener.json']).cwd).toBe('/home/u/game')
   expect(runs.some(a => a.join(' ').startsWith('wb chat ack m1'))).toBe(true)
   await clock.advance(3000)
@@ -373,6 +372,7 @@ test('running wb counts as delegate mode, and a web message reaches a running tu
   expect(sent.length).toBe(1)                                   // …but into the running turn
   expect(sent[0].to).toBe('sess-1')                              // its own session
   expect(sent[0].text).toContain('[web chat] still there?')
+  expect(sent[0].text).toContain('wb chat reply')               // framed as a peer's: one line says whose
   expect(runs.some(a => a.join(' ') === 'wb chat ack m1 --by ' + a[5] + ' --how now')).toBe(true)
 })
 
