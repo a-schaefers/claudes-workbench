@@ -124,6 +124,10 @@ You are the driver, not a spectator. When something tells you the agent is headi
   tests. For course corrections that can wait a step.
 - `wb steer <name> --now --text "…"`: interrupts it mid-step; the same session continues with
   your note first, marked high priority. For wrong files, a wrong approach, a runaway loop.
+  The runner does this by itself once a round when the agent generates past its thinking
+  budget with no tool call (from the model's measured speed; `--think-timeout` overrides),
+  and the check-in says so. A second nudge on one task means the spec is too big for one
+  step: split it, or name the first file to write.
 - `wb takeover <name>`: stops it and hands you the worktree. Finish by hand, then `wb accept`,
   or hand it back with `wb feedback`. For when explaining would cost more than doing.
 - `wb stop <name>`: just stop it.

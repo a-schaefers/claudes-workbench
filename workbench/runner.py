@@ -88,6 +88,12 @@ INTERRUPT_HEAD = "Claude, your reviewer, interrupted you."
 NOTE_HEAD = "A note from Claude, your reviewer, before you go on."
 
 
+# The runner's own steer when the agent generates past its thinking budget with nothing to show.
+NUDGE = ("You have been thinking for {mins} minutes without a tool call. Stop planning and act "
+         "now: make the next edit, one file per tool call, smallest first, and run the tests "
+         "as soon as there is something to test. Keep each thought short; decide as you go.")
+
+
 def pending_steer(task: store.Task) -> list[dict]:
     rows, _ = store.read_jsonl(task.dir / "steer.jsonl")
     return rows[task.status.get("steer_taken", 0):]
@@ -171,6 +177,8 @@ def run_round(task: store.Task, n: int) -> dict:
 
     detector = StuckDetector(**spec.get("stuck", {}))
     wall, silence = float(spec.get("round_timeout", 2400)), float(spec.get("silence_timeout", 900))
+    think = float(spec.get("think_timeout") or 0)
+    nudged = False
     started = last_seen = time.time()
     out = {"exit": None, "stuck": None, "texts": [], "tools": {}, "errors": [],
            "tok_in": 0, "tok_out": 0, "interrupted": False}
@@ -219,6 +227,21 @@ def run_round(task: store.Task, n: int) -> dict:
             out["stuck"] = f"the round ran past its {int(wall // 60)}-minute limit"
         if not out["stuck"] and not asking and now - last_seen > silence:
             out["stuck"] = f"no output for {int(silence // 60)} minutes"
+        # Generating with nothing to show past the budget: interrupt with a nudge (once a round;
+        # the silence limit above still stops a model that never answers) and tell Claude.
+        if think and not nudged and not out["stuck"] and not asking and now - last_seen > think:
+            nudged = True
+            mins = int((now - last_seen) // 60)
+            text = NUDGE.format(mins=mins)
+            store.append_jsonl(task.dir / "steer.jsonl", {"ts": store.now(), "text": text, "now": True})
+            task.event({"ts": store.now(), "round": n, "kind": "steer", "now": True, "by": "workbench",
+                        "text": text})
+            nudges = task.status.get("nudges", 0) + 1
+            task.set_status(nudges=nudges)
+            task.notify("checkin", checkin_text(task, n, out, max(started, float(
+                task.status.get("checkin_at") or 0))) + f"\nthe runner nudged it: {mins} min of "
+                f"thinking with no tool call (nudge {nudges} this task; budget {int(think)}s from "
+                "its measured speed)", round=n)
         if out["stuck"]:
             task.event({"ts": store.now(), "round": n, "kind": "stopped", "text": out["stuck"]})
             _stop(proc)

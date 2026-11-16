@@ -166,6 +166,33 @@ def run_task(m: models.Model, name: str, task: dict, say=print) -> dict:
     return row
 
 
+# How long an agent may generate without a tool call or a word before the runner nudges it: the
+# time to write THINK_TOKENS at the model's measured decode speed plus to read a full context at
+# its measured prefill speed. A plan that size is already more than any step needs; past it the
+# model is circling (seen 2026-11-16: 20K-token plans and no edits, twice in a row).
+THINK_TOKENS = 12000
+THINK_DEFAULT_S, THINK_MIN_S, THINK_MAX_S = 480, 180, 900
+
+
+def speeds(model_id: str) -> dict:
+    """The model's latest probe (decode_tps, prefill_tps), or {} before any benchmark."""
+    rows, _ = store.read_jsonl(store.home() / "bench.jsonl")
+    mine = [r for r in rows if r["model"] == model_id]
+    if not mine:
+        return {}
+    fp = mine[-1].get("fingerprint")
+    return next((r for r in reversed(mine) if r["kind"] == "probe" and r.get("fingerprint") == fp), {})
+
+
+def think_budget(model_id: str, window: int = 32768) -> int:
+    p = speeds(model_id)
+    decode, prefill = p.get("decode_tps"), p.get("prefill_tps")
+    if not decode:
+        return THINK_DEFAULT_S
+    secs = THINK_TOKENS / decode + (window / prefill if prefill else 0)
+    return int(min(THINK_MAX_S, max(THINK_MIN_S, secs)))
+
+
 def table() -> str:
     """The latest measurements per model: speeds, then hidden-test pass rates per size."""
     rows, _ = store.read_jsonl(store.home() / "bench.jsonl")

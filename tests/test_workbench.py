@@ -174,6 +174,25 @@ class Lifecycle(Base):
         out = run_wb("wait", "t-taken", "--timeout", "1")
         self.assertIn("already delivered", out)
 
+    def test_thinking_past_the_budget_is_nudged_and_claude_told(self):
+        # A model that generates for many minutes with no tool call gets the runner's own --now
+        # steer (seen 2026-11-16: 20K-token plans, no edits), and Claude a check-in saying so.
+        self.start("t-think", "hang", "--think-timeout", "2", "--silence-timeout", "120")
+        deadline = time.time() + 30
+        steer = store.Task("t-think").dir / "steer.jsonl"
+        while time.time() < deadline and not (steer.exists() and steer.read_text().strip()):
+            time.sleep(0.2)
+        rows, _ = store.read_jsonl(steer)
+        self.assertTrue(rows and rows[0]["now"] and "Stop planning and act now" in rows[0]["text"])
+        notes, _ = store.read_jsonl(store.home() / "notify.jsonl")
+        self.assertTrue(any(r["task"] == "t-think" and "the runner nudged it" in r["text"] for r in notes))
+        self.assertEqual(store.Task("t-think").status.get("nudges"), 1)
+        run_wb("stop", "t-think")
+
+    def test_the_thinking_budget_falls_back_before_any_benchmark(self):
+        from workbench import bench
+        self.assertEqual(bench.think_budget("no/such-model"), bench.THINK_DEFAULT_S)
+
     def test_crash_is_reported_failed(self):
         self.start("t-crash", "crash")
         wait_phase("t-crash", {"failed"})

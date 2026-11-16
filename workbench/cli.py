@@ -135,6 +135,9 @@ def cmd_start(a):
         "checkin": (a.checkin if a.checkin is not None
                     else 10 if a.size == "significant" else 0) if not a.bench else 0,
         "round_timeout": a.round_timeout, "silence_timeout": a.silence_timeout,
+        # a benchmark measures the model unaided: no nudges
+        "think_timeout": 0 if a.bench else (a.think_timeout if a.think_timeout is not None
+                                            else bench.think_budget(m.id)),
         "created_at": store.now(), "wb_version": __version__})
     test_line = (f"- The acceptance command is `{a.test}`. Run it before you finish and make it "
                  "pass. Never weaken, skip or delete tests to get there.\n") if a.test else ""
@@ -917,6 +920,9 @@ def main(argv=None):
     s.add_argument("--ask-timeout", type=int, default=1200)
     s.add_argument("--round-timeout", type=int, default=2400)
     s.add_argument("--silence-timeout", type=int, default=900)
+    s.add_argument("--think-timeout", type=int, help="seconds of generating with no tool call or "
+                   "word before the runner nudges the agent to act (default: from the model's "
+                   "measured speed; 0 turns it off)")
     s.add_argument("--base", default="HEAD")
     s.add_argument("--force", action="store_true", help="queue even if the model can't run now")
     s.add_argument("--bench", action="store_true", help=argparse.SUPPRESS)
