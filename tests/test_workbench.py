@@ -785,6 +785,19 @@ class ModelSet(Base):
         self.assertEqual(due.exception.code, 1)
         self.assertIn("days ago: kept all", run_wb("scout"))
 
+    def test_the_watch_list_comes_back_every_check_until_settled(self):
+        self.assertNotIn("watch list", run_wb("scout"))
+        run_wb("scout", "--watch", "big model: retry when it fits in VRAM")
+        run_wb("scout", "--watch", "runtime: retry after the watchdog fix")
+        out = run_wb("scout")
+        self.assertIn("1. (", out)
+        self.assertIn("big model: retry when it fits in VRAM", out)
+        run_wb("scout", "--unwatch", "1")
+        out = run_wb("scout")
+        self.assertNotIn("big model", out)
+        self.assertIn("1. (", out)
+        self.assertIn("runtime: retry", out)
+
 
 class WebChat(Base):
     """wb chat: the page's API (token, host check), receipts, Claude's replies."""

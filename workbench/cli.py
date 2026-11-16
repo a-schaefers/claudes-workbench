@@ -666,6 +666,18 @@ def cmd_scout(a):
         store.write_json(path, {**st, "done_at": store.now(), "notes": a.notes or ""})
         print(f"model check recorded; the next one is due in {SCOUT_EVERY_DAYS} days")
         return
+    watch = store.home() / "watch.json"
+    items = store.read_json(watch, []) or []
+    if a.watch:
+        store.write_json(watch, items + [{"ts": store.now(), "text": a.watch}])
+        print("added to the watch list")
+        return
+    if a.unwatch:
+        if not 1 <= a.unwatch <= len(items):
+            die(f"the watch list has {len(items)} item(s)")
+        store.write_json(watch, items[:a.unwatch - 1] + items[a.unwatch:])
+        print("removed from the watch list")
+        return
     if a.due:
         due = store.now() - st.get("done_at", 0) > SCOUT_EVERY_DAYS * 86400
         print("due" if due else "not due")
@@ -674,6 +686,10 @@ def cmd_scout(a):
     print("last model check: " + (f"{time.strftime('%Y-%m-%d', time.localtime(when))}, "
                                   f"{(store.now() - when) / 86400:.0f} days ago"
                                   + (f": {st['notes']}" if st.get("notes") else "") if when else "never"))
+    if items:
+        print("\nwatch list: what would reopen a past decision; check each against what is new")
+        for i, r in enumerate(items, 1):
+            print(f"  {i}. ({time.strftime('%Y-%m-%d', time.localtime(r['ts']))}) {r['text']}")
     print("\nhardware")
     print("\n".join(hardware.report()))
     provs = models.providers()
@@ -1033,6 +1049,9 @@ def main(argv=None):
     s.add_argument("--done", action="store_true", help="record that the check was done")
     s.add_argument("--notes", help="with --done: what was recommended or changed")
     s.add_argument("--due", action="store_true", help="exit 0 if a check is due, else 1")
+    s.add_argument("--watch", metavar="TEXT", help="add what would reopen a decision (a model "
+                                                   "set aside, and what it needs to return)")
+    s.add_argument("--unwatch", type=int, metavar="N", help="drop watch-list item N, once settled")
     s.set_defaults(f=cmd_scout)
     s = sub.add_parser("events", help="print a line whenever workbench's state changes (the mod's ears)")
     s.set_defaults(f=cmd_events)

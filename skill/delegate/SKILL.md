@@ -80,14 +80,17 @@ whatever the scores say. Respect it, and change it only when the user asks.
 
 **The weekly model check.** Once a week the mod asks you (or the user runs `/delegate-models`)
 to check the local models against this machine. `wb scout` gives the facts: GPU and VRAM, RAM,
-disk, what is installed and registered, benchmarks and real-task results. Then research what is
+disk, what is installed and registered, benchmarks and real-task results, and the watch list
+(models set aside, with what each needs before it is tried again: check each against what is
+new). Then research what is
 newest and best: open-weight coding models with reliable tool calls, the sizes and quantizations
 that fit the VRAM with room for the context, and runtime releases worth having. Use primary
 sources, verify before you name anything, and remember this is a consumer card: results first,
 then speed. Recommend briefly (keep / add / retire, with sizes and why), and only with a yes:
 `wb model add <provider/model> --pull` (background), `wb bench <id>`, `wb model retire <id>
 [--delete]`. Installed but unregistered models may belong to other tools: ask before touching
-them. Finish with `wb scout --done --notes "…"`. Nothing worth changing: one line, and done.
+them. When you set a model aside, `wb scout --watch "…"` records what would bring it back:
+the change to look for, and the test it must pass. Finish with `wb scout --done --notes "…"`. Nothing worth changing: one line, and done.
 
 ## 2. Spec (the most valuable thing you write)
 Read just enough of the repo to scope it, then write the spec to a file in the scratchpad:

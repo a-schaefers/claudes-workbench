@@ -28,14 +28,16 @@ const SCOUT_NOTE =
   '[workbench] The weekly model check is due. As the driver, keep the local agents on the best ' +
   'models this machine can run:\n' +
   '1. `wb scout`: this machine\'s hardware, what is installed, and how each model has done ' +
-  '(benchmarks and real tasks).\n' +
+  '(benchmarks and real tasks), and its watch list: models set aside and what each needs ' +
+  'before it is tried again.\n' +
   '2. Look up what is newest: open-weight coding models with tool calling, their sizes and ' +
   'quantizations, which fit this GPU\'s VRAM (with room for the context) and this RAM, and ' +
   'recent releases of the runtimes. Prefer primary sources (model cards, the Ollama library, ' +
   'release notes) and recent reports; name nothing you could not verify.\n' +
   '3. Recommend in a few lines: keep, add (the model and quantization, why it should beat what ' +
   'is installed, its size and how it fits), retire (what it replaces, the disk it frees). ' +
-  'Aim for the best results first, then efficiency.\n' +
+  'Aim for the best results first, then efficiency. For each watch-list item, say whether ' +
+  'its conditions are met yet; `wb scout --unwatch N` once one is settled.\n' +
   '4. Ask before downloading or deleting. With a yes: `wb model add <provider/model> --pull` in ' +
   'the background, then `wb bench <id>`, and `wb model retire <id> [--delete]` for what it ' +
   'replaces. Installed models that are not registered may belong to other tools: ask first.\n' +
