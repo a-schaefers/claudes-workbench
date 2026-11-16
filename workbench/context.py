@@ -3,8 +3,9 @@
 OpenCode reads AGENTS.md by itself but not CLAUDE.md, and it lists every skill under
 ~/.claude/skills and the project's .claude/skills. This module adds the rest to the task's
 config layer: the workbench handbook, the user's and the repo's Claude instructions, a map of
-the nested CLAUDE.md files to read on the way, and a skill policy (skills that need Claude's own
-app tools, and /delegate itself, are hidden; so is `question`, which nobody answers headless).
+the nested CLAUDE.md files to read on the way, and a skill policy (the user's personal skills
+and /delegate itself are hidden, leaving the project's own; so is `question`, which nobody
+answers headless).
 """
 from __future__ import annotations
 
@@ -66,10 +67,14 @@ def instruction_files(task: store.Task) -> tuple[list[Path], list[str]]:
 
 
 def denied_skills(extra: list[str] | None = None) -> list[str]:
-    """Skills synced from the Claude apps drive Claude-only tools (browsers, docs connectors)."""
+    """The user's personal skills (~/.claude/skills, the synced Claude-app ones included) are
+    theirs, about their other work: an agent sees only the project's own .claude/skills. On
+    2026-11-16 an agent building a game, its context full, summarised a personal publishing skill
+    into a made-up "newer task" and went off reading the user's private library."""
+    home = Path.home() / ".claude" / "skills"
     names = {"delegate", *(extra or [])}
-    for skill in (Path.home() / ".claude" / "skills" / "synced").glob("*/*/SKILL.md"):
-        names.add(skill.parent.name)
+    names |= {s.parent.name for s in home.glob("*/SKILL.md")}
+    names |= {s.parent.name for s in (home / "synced").glob("*/*/SKILL.md")}
     return sorted(names)
 
 

@@ -495,6 +495,9 @@ class AgentContext(Base):
         synced = tmp / "home" / ".claude" / "skills" / "synced" / "bucket" / "docx"
         synced.mkdir(parents=True)
         (synced / "SKILL.md").write_text("---\nname: docx\n---\n")
+        personal = tmp / "home" / ".claude" / "skills" / "publishing-arm"   # the user's own work
+        personal.mkdir(parents=True)
+        (personal / "SKILL.md").write_text("---\nname: publishing-arm\n---\n")
         (tmp / "home" / ".claude" / "CLAUDE.md").write_text("user rules\n")
         (self.repo / "CLAUDE.md").write_text("repo rules\n")
         (self.repo / "AGENTS.md").write_text("same as agents\n")
@@ -519,7 +522,8 @@ class AgentContext(Base):
         self.assertIn("`web/CLAUDE.md`", Path(loaded[-1]).read_text())  # nested: mapped, not loaded
         denied = {(r["action"], r["resource"]) for r in layer["permissions"]
                   if r["effect"] == "deny"}
-        self.assertLessEqual({("question", "*"), ("execute", "*"), ("opencode_*", "*"), ("skill", "docx"), ("skill", "delegate")}, denied)
+        self.assertLessEqual({("question", "*"), ("execute", "*"), ("opencode_*", "*"), ("skill", "docx"), ("skill", "delegate"),
+                             ("skill", "publishing-arm")}, denied)
 
     def test_uncommitted_local_instructions_come_from_the_repo(self):
         from workbench import context
