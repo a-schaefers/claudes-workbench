@@ -316,6 +316,38 @@ def cmd_stop(a):
     print(f"stopped {a.name}; wb feedback continues it, wb discard drops it")
 
 
+def cmd_steer(a):
+    """A note to a running agent: delivered when its current run ends, or at once with --now."""
+    task = need(a.name)
+    phase = task.status.get("phase")
+    if phase not in ("queued", "running", "testing", "asking") or not runner_alive(task):
+        die(f"{a.name} is {phase}, not running: use wb feedback (or wb answer for a question)")
+    text = (Path(a.message).read_text() if a.message else a.text).strip()
+    if not text:
+        die("empty note")
+    store.append_jsonl(task.dir / "steer.jsonl", {"ts": store.now(), "text": text, "now": a.now})
+    task.event({"ts": store.now(), "round": task.status.get("round"), "kind": "steer",
+                "now": a.now, "text": text})
+    if a.now:
+        print(f"interrupting {a.name}: it stops within a few seconds and continues with your note")
+    else:
+        print(f"note queued for {a.name}: delivered when its current run ends, before the tests")
+
+
+def cmd_takeover(a):
+    """Stop the agent and hand the worktree to Claude, to finish by hand or hand back."""
+    task = need(a.name)
+    if task.status.get("phase") in store.CLOSED:
+        die(f"{a.name} is {task.status.get('phase')}")
+    _stop_runner(task)
+    task.event({"ts": store.now(), "round": task.status.get("round"), "kind": "takeover",
+                "text": "Claude took over"})
+    task.set_status(phase="review", last="Claude took over", pid=None)
+    _ack_all(task)
+    print(f"took over {a.name}: the agent is stopped. Edit in {task.worktree}, then "
+          f"wb accept {a.name} -m \"…\", or hand it back with wb feedback {a.name} --message <file>")
+
+
 def cmd_accept(a):
     task = need(a.name)
     spec, st = task.spec, task.status
@@ -508,6 +540,16 @@ def main(argv=None):
     s.add_argument("name"); s.add_argument("--stat", action="store_true")
     s.add_argument("paths", nargs="*")
     s.set_defaults(f=cmd_diff)
+    s = sub.add_parser("steer", help="a note to a running agent: at the end of its current run, "
+                       "or --now to interrupt it")
+    s.add_argument("name")
+    g = s.add_mutually_exclusive_group(required=True)
+    g.add_argument("--text"); g.add_argument("--message", help="a file")
+    s.add_argument("--now", action="store_true",
+                   help="interrupt the agent mid-step; the note goes first, marked high priority")
+    s.set_defaults(f=cmd_steer)
+    s = sub.add_parser("takeover", help="stop the agent and finish the task by hand")
+    s.add_argument("name"); s.set_defaults(f=cmd_takeover)
     s = sub.add_parser("stop", help="stop a running task (it can be continued with feedback)")
     s.add_argument("name"); s.set_defaults(f=cmd_stop)
     s = sub.add_parser("accept", help="commit the work on its branch and close the task")

@@ -80,6 +80,28 @@ def _stop(proc: subprocess.Popen):
             pass
 
 
+# Claude steering a running task (`wb steer`): queued notes wait for the agent's current run to
+# end; a --now note interrupts it. Either way the same session continues with the note as its
+# next prompt. steer.jsonl holds every note; status.steer_taken counts the delivered ones.
+INTERRUPT_HEAD = "Claude, your reviewer, interrupted you."
+NOTE_HEAD = "A note from Claude, your reviewer, before you go on."
+
+
+def pending_steer(task: store.Task) -> list[dict]:
+    rows, _ = store.read_jsonl(task.dir / "steer.jsonl")
+    return rows[task.status.get("steer_taken", 0):]
+
+
+def steer_prompt(notes: list[dict], interrupted: bool) -> str:
+    body = "\n\n".join(r["text"].strip() for r in notes)
+    if interrupted:
+        return (f"{INTERRUPT_HEAD} Stop what you were doing and do this first; it overrides "
+                f"anything earlier that conflicts with it:\n\n{body}\n\nThen carry on with the "
+                "task unless this says otherwise, and finish with a short summary as before.")
+    return (f"{NOTE_HEAD} Take it into account now:\n\n{body}\n\nThen carry on with the task, "
+            "and finish with a short summary as before.")
+
+
 def run_round(task: store.Task, n: int) -> dict:
     spec, st = task.spec, task.status
     prompt = task.round_dir(n).joinpath("prompt.md").read_text()
@@ -103,10 +125,10 @@ def run_round(task: store.Task, n: int) -> dict:
     wall, silence = float(spec.get("round_timeout", 2400)), float(spec.get("silence_timeout", 900))
     started = last_seen = time.time()
     out = {"exit": None, "stuck": None, "texts": [], "tools": {}, "errors": [],
-           "tok_in": 0, "tok_out": 0}
+           "tok_in": 0, "tok_out": 0, "interrupted": False}
     while True:
         try:
-            line = q.get(timeout=5)
+            line = q.get(timeout=1)
         except queue.Empty:
             line = ""
         if line is None:
@@ -151,6 +173,12 @@ def run_round(task: store.Task, n: int) -> dict:
             out["stuck"] = f"no output for {int(silence // 60)} minutes"
         if out["stuck"]:
             task.event({"ts": store.now(), "round": n, "kind": "stopped", "text": out["stuck"]})
+            _stop(proc)
+            break
+        if any(r.get("now") for r in pending_steer(task)):
+            task.event({"ts": store.now(), "round": n, "kind": "interrupted",
+                        "text": "Claude interrupted the agent"})
+            out["interrupted"] = True
             _stop(proc)
             break
     out["exit"] = proc.wait()
@@ -234,6 +262,9 @@ def drive(task: store.Task) -> None:
                             last="starting the agent")
             task.event({"ts": store.now(), "round": n, "kind": "round", "text": "started"})
             rnd = run_round(task, n)
+            if rnd["interrupted"] or (pending_steer(task) and not rnd["stuck"]):
+                _steer_round(task, n, rnd["interrupted"])
+                continue
             if rnd["stuck"] or (rnd["exit"] not in (0, None) and not rnd["texts"]):
                 text = summary_text(task, n, rnd, None)
                 task.round_dir(n).joinpath("summary.md").write_text(text)
@@ -242,6 +273,9 @@ def drive(task: store.Task) -> None:
                 task.notify(phase, text, round=n)
                 return
             tests = run_tests(task, n)
+            if pending_steer(task):  # a note that came in while the tests ran
+                _steer_round(task, n, False)
+                continue
             text = summary_text(task, n, rnd, tests)
             task.round_dir(n).joinpath("summary.md").write_text(text)
             used = task.status.get("auto_fixes", 0)
@@ -258,6 +292,13 @@ def drive(task: store.Task) -> None:
                             else "waiting for review")
             task.notify("review", text, round=n)
             return
+
+
+def _steer_round(task: store.Task, n: int, interrupted: bool) -> None:
+    notes = pending_steer(task)
+    task.round_dir(n + 1).mkdir(parents=True, exist_ok=True)
+    task.round_dir(n + 1).joinpath("prompt.md").write_text(steer_prompt(notes, interrupted))
+    task.set_status(round=n + 1, steer_taken=task.status.get("steer_taken", 0) + len(notes))
 
 
 def main():

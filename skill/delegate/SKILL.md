@@ -76,6 +76,18 @@ own for `--auto-fix` rounds before you are woken; `wb log <name>` shows what it 
 A model that reads prompts slowly (low prefill in `wb bench --report`), or one the runner must
 load first, can spend minutes before its first reply. That is normal, not stuck.
 
+## Driving a running task
+You are the driver, not a spectator. When something tells you the agent is heading the wrong way
+(a check-in, its log, the user), act on it:
+- `wb steer <name> --text "…"`: a note it gets as soon as its current run ends, before the
+  tests. For course corrections that can wait a step.
+- `wb steer <name> --now --text "…"`: interrupts it mid-step; the same session continues with
+  your note first, marked high priority. For wrong files, a wrong approach, a runaway loop.
+- `wb takeover <name>`: stops it and hands you the worktree. Finish by hand, then `wb accept`,
+  or hand it back with `wb feedback`. For when explaining would cost more than doing.
+- `wb stop <name>`: just stop it.
+Notes are instructions, like feedback: concrete and short.
+
 ## 4. When woken
 - **review**: the report gives the test result, the agent's summary and the files. Read
   `wb diff <name> --stat`, then the full `wb diff <name>` (`wb diff <name> <path>` for big

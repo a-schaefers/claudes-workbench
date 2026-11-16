@@ -16,7 +16,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
 
-from workbench import ask_mcp, cli, events, store  # noqa: E402
+from workbench import runner, ask_mcp, cli, events, store, transcript  # noqa: E402
 
 FAKE = f"{sys.executable} {ROOT / 'tests' / 'fake_opencode.py'}"
 TEST_CMD = "grep -qx 42 answer.txt"
@@ -176,6 +176,62 @@ class Lifecycle(Base):
                                   text=True).stdout
         self.assertNotIn("delegate/t-stop", branches)
         self.assertFalse(store.Task("t-stop").worktree.exists())
+
+
+class Steering(Base):
+    def setUp(self):
+        super().setUp()
+        self.prompts = Path(self.tmp.name) / "prompts.jsonl"
+        os.environ["FAKE_PROMPTS"] = str(self.prompts)
+
+    def sent(self):
+        return [json.loads(x) for x in self.prompts.read_text().splitlines()]
+
+    def wait_session(self, name):
+        deadline = time.time() + 15
+        while not store.Task(name).status.get("session"):
+            self.assertLess(time.time(), deadline, "the agent never started")
+            time.sleep(0.1)
+
+    def test_now_interrupts_the_agent_and_continues_with_the_note_first(self):
+        self.start("t-int", "slow", "--test", TEST_CMD)   # the first run would take an hour
+        self.wait_session("t-int")
+        self.assertIn("interrupting", run_wb("steer", "t-int", "--now", "--text", "Use 42."))
+        st = wait_phase("t-int", {"review"}, timeout=30)
+        self.assertEqual(st["round"], 2)
+        self.assertTrue(st["tests"]["ok"])
+        note = self.sent()[-1]
+        self.assertTrue(note.startswith(runner.INTERRUPT_HEAD))
+        self.assertIn("Use 42.", note)
+        out = run_wb("watch", "t-int", "--once", "--no-color")
+        for want in ("■ Claude interrupts the agent", "■ the agent was interrupted"):
+            self.assertIn(want, out)
+        head, _ = transcript._user_message(note, False)    # how the session shows the note
+        self.assertEqual(head, "Claude → agent · INTERRUPT, high priority")
+
+    def test_a_queued_note_waits_for_the_run_to_end_then_goes_before_the_tests(self):
+        os.environ["FAKE_SLEEP"] = "2"
+        self.start("t-note", "ok", "--test", TEST_CMD)
+        self.wait_session("t-note")  # the first event; the run then pauses 2 s
+        run_wb("steer", "t-note", "--text", "Mention the answer.")
+        st = wait_phase("t-note", {"review"}, timeout=30)
+        rows, _ = store.read_jsonl(store.Task("t-note").dir / "events.jsonl")
+        self.assertNotIn("interrupted", [r["kind"] for r in rows])
+        self.assertEqual(st["round"], 2)
+        self.assertEqual([r["kind"] for r in rows].count("tests"), 1)  # once, after the note
+        self.assertTrue(self.sent()[-1].startswith(runner.NOTE_HEAD))
+
+    def test_takeover_stops_the_agent_and_hands_over_the_worktree(self):
+        self.start("t-take", "slow", "--test", TEST_CMD)
+        self.wait_session("t-take")
+        out = run_wb("takeover", "t-take")
+        self.assertIn("took over", out)
+        task = store.Task("t-take")
+        self.assertFalse(cli.runner_alive(task))
+        (task.worktree / "answer.txt").write_text("42\n")     # Claude finishes it by hand
+        self.assertIn("accepted t-take", run_wb("accept", "t-take", "-m", "feat: answer"))
+        with self.assertRaises(SystemExit):                  # nothing left to steer
+            run_wb("steer", "t-take", "--text", "x")
 
 
 class Watch(Base):

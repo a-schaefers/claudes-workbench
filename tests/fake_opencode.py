@@ -6,6 +6,8 @@
   loop   run the same failing command over and over (the stuck detector should stop it)
   hang   print one event, then go silent (the silence timeout should stop it)
   crash  exit 1 with no events
+  slow   a first run that takes an hour; a continued session behaves like ok
+FAKE_PROMPTS, if set, is a file each run appends its prompt to; FAKE_SLEEP pauses each run after its first event.
 """
 import json
 import os
@@ -47,9 +49,15 @@ def finish():
     emit("step_finish", reason="stop", tokens={"input": 120, "output": 30, "cache": {"read": 0}})
 
 
+if os.environ.get("FAKE_PROMPTS") and args and args[0] == "run":
+    with open(os.environ["FAKE_PROMPTS"], "a") as fh:
+        fh.write(json.dumps(args[-1]) + "\n")
+if scenario == "slow":
+    scenario = "ok" if "--session" in args else "hang"
 if scenario == "crash":
     sys.exit(1)
 emit("step_start")
+time.sleep(float(os.environ.get("FAKE_SLEEP", 0)))  # after the first event: the session is known
 if scenario in ("ok", "fix"):
     value = "41" if scenario == "fix" and "--session" not in args else "42"
     with open("answer.txt", "w") as fh:

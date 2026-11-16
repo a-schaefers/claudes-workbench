@@ -18,7 +18,7 @@ import time
 from dataclasses import dataclass
 
 from . import models, store
-from .runner import opencode_bin
+from .runner import INTERRUPT_HEAD, NOTE_HEAD, opencode_bin
 
 STYLE = {"claude": "1;38;5;208", "agent": "1;36", "think": "2;3", "tool": "33", "out": "2",
          "ok": "1;32", "bad": "1;31", "sys": "34", "add": "32", "del": "31", "head": "1"}
@@ -106,6 +106,10 @@ def _user_message(text: str, verbose: bool) -> tuple[str, list[tuple[str, str]]]
         head = "Claude → agent · review feedback"
     elif text.startswith("The acceptance tests fail"):  # runner.auto_fix_prompt
         head = "workbench → agent · tests failed, sent back automatically"
+    elif text.startswith(INTERRUPT_HEAD):
+        head = "Claude → agent · INTERRUPT, high priority"
+    elif text.startswith(NOTE_HEAD):
+        head = "Claude → agent · note"
     else:
         head = "Claude → agent · spec"
     body = text
@@ -242,6 +246,13 @@ def task_entries(task: store.Task) -> list[Entry]:
         elif kind == "answer":
             out.append(Entry(ts, key, [("claude", "Claude → agent · answer")]
                              + _block("", r.get("text", ""), 40, "  ")))
+        elif kind == "steer":
+            what = "interrupts the agent" if r.get("now") else "queues a note for the agent's next step"
+            out.append(Entry(ts, key, [("claude", f"■ Claude {what}")]))
+        elif kind == "interrupted":
+            out.append(Entry(ts, key, [("bad", "■ the agent was interrupted")]))
+        elif kind == "takeover":
+            out.append(Entry(ts, key, [("claude", "■ Claude took over: finishing it by hand")]))
         elif kind == "stopped":
             out.append(Entry(ts, key, [("bad", f"■ stopped: {r.get('text', '')}")]))
         elif kind == "error":
