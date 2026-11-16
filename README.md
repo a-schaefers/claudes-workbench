@@ -98,12 +98,17 @@ wb doctor
 Open Claude Code in your project and type:
 
 ```
-/delegate add a high-score screen to the game
+/delegate
 ```
 
-That's it. Claude takes over from there:
+The **Workbench** pane opens: delegate mode is on. Now use Claude like normal. Ask for what you
+want in your own words, as often as you like; Claude just hands the coding to your local GPU
+from now on, until you type `/delegate-quit`. (`/delegate add a high-score screen` turns it on
+and starts on that in one go.)
 
-1. It checks your hardware and your local models. If you have none, or better ones would fit your
+Claude takes it from there:
+
+1. The first time, it checks your hardware and your local models. If you have none, or better ones would fit your
    GPU, it recommends them and offers to set them up (it always asks before downloading).
 2. It plans the work and splits it into small pieces a local model can finish.
 3. It decides how hard each piece is and hands it to the right local model: chores (a rename, a
@@ -112,7 +117,7 @@ That's it. Claude takes over from there:
    the agent work.
 4. It reviews every change, sends it back with notes until it's right, and only then commits it.
 
-A **Workbench** pane in Claude Code shows the agents working live. You talk to the driver, Claude,
+The pane shows the agents working live. You talk to the driver, Claude,
 on the left; Claude talks to the local agent, which does the work on the right:
 
 <p align="center"><img src="docs/driver-and-agent.jpg" alt="Claude Code with the Workbench pane: on the left Claude writes review feedback for a task; on the right the local agent's live transcript shows its build, its passing tests and 'done: waiting for Claude's review'" width="900"></p>
@@ -124,11 +129,11 @@ to read the diff.
 
 | Command | What it does |
 |---|---|
-| `/delegate <task>` | Claude plans the task and hands it to your local models |
+| `/delegate [task]` | turn on delegate mode for this session: the pane opens, and from then on Claude hands the coding of what you ask to your local models |
 | `/workbench` | open the pane: every delegated task, and the agent's work live |
 | `/delegate-models` | check now which local models suit your hardware best (it also happens weekly) |
-| `/delegate-quit` | stop every agent now; their work is kept for later |
-| `/delegate-quit-and-hand-back-claude` | stop the agents and have Claude finish their tasks itself |
+| `/delegate-quit` | leave delegate mode: every agent stops now, their work is kept for later |
+| `/delegate-quit-and-hand-back-claude` | leave delegate mode and have Claude finish the agents' tasks itself |
 
 **Away from the computer?** `wb chat serve` runs a small web chat with the running Claude session,
 and `wb chat url` prints its private link (on Linux, `systemctl --user link
@@ -183,8 +188,11 @@ Development notes for contributors (and for Claude) are in [CLAUDE.md](CLAUDE.md
       local model server (Ollama, or any OpenAI-compatible server on this machine)
 ```
 
-- **`/delegate`** (`skill/delegate/SKILL.md`) is Claude's procedure: size the work, write the
-  spec, dispatch, drive, review, accept. Only you start it; Claude never delegates on its own.
+- **`/delegate`** (`skill/delegate/SKILL.md`) turns delegate mode on for the session and is
+  Claude's procedure in it: size the work, write the spec, dispatch, drive, review, accept. You
+  type it once, then ask for things as usual; the mod keeps the mode (and reminds Claude of it
+  after a compaction or `/clear`) until a quit command. Only you turn it on; Claude never
+  delegates on its own.
 - **`wb`** is the CLI Claude drives. Every command does one thing and prints a short, plain
   report, because Claude reads it and Claude's tokens are the scarce resource.
 - **The runner** is a detached process per task. It drives the agent round after round until the
@@ -417,7 +425,8 @@ Claude has had its news.
 
 ### Seeing what the agent does
 
-- **The pane** (`/workbench`, or opened by itself when work starts) lists every task: phase, round,
+- **The pane** (opened by `/delegate` and closed by a quit command, the sign that delegate mode is
+  on; `/workbench` opens it any time) lists every task: phase, round,
   model, test result, age and its last few events. Under the list it follows the newest running
   task (else the newest one waiting for Claude) as a live transcript, scrolling with the newest
   lines unless you scroll up. At its foot stands the apprentice, the local agent drawn as a small
@@ -425,7 +434,8 @@ Claude has had its news.
   for review. Its chest lamp is the task's colour, and its speech bubble says what it is doing now
   and how long the task has left. A short pane gets its face on one line instead. The web chat's
   link is pinned at the bottom.
-- **The status line** reads like `⚒ wb · add-scores running r2 · fix-typo asks · 1 awaiting review`.
+- **The status line** reads like `⚒ wb · add-scores running r2 · fix-typo asks · 1 awaiting review`,
+  or `⚒ wb · delegate mode` with nothing open.
 - **`wb watch [task]`** is the same transcript in a terminal. It merges the OpenCode session export
   (the prompts Claude sent, the agent's reasoning, every tool call with its input and output, its
   messages, compactions) with the task's own events (tests, questions and answers, notes, steers,
@@ -649,7 +659,7 @@ custom-node packs do run their own Python).
 ### The web chat
 
 `wb chat serve` (kept up by `systemd/wb-chat.service`) serves a small page on port 1337 for
-reaching the Claude session that runs `/delegate` while you're away.
+reaching the Claude session in delegate mode while you're away.
 
 - **The path of a message.** The page posts it; the server appends it to `chat/messages.jsonl`. The
   listening session's mod submits it to Claude as `[web chat] <your words>`, nothing more, so the
@@ -658,8 +668,8 @@ reaching the Claude session that runs `/delegate` while you're away.
   also writes a receipt the page shows at once
   (Claude has it now, or will read it after its current step). Claude answers with `wb chat reply`, which the page shows. The page says
   whether a session is listening and whether Claude is working.
-- **One listener.** A session listens once `/delegate` (or a delegating `wb` command) has run in
-  it, until a quit command. With several sessions the first to claim `chat/listener.json` listens;
+- **One listener.** A session listens while delegate mode is on in it (from `/delegate`, or a
+  delegating `wb` command, until a quit command). With several sessions the first to claim `chat/listener.json` listens;
   it is known by its `wb events` process, so it stops counting the moment that session ends.
 - **Claude knows where you are.** A web message carries the same authority as one typed in the
   terminal, with a note: reply there, briefly; the web thread is all you see; a yes there answers
@@ -688,7 +698,8 @@ Only your two slash commands stop the delegation, never words in a message:
   to leave delegate mode, finish each task itself to its own standard, accept it, and carry on with
   the rest of your request without delegating.
 
-Both stop the web chat listening in that session.
+Both end delegate mode: Claude works directly again, the pane closes (`/workbench` brings it
+back) and the web chat stops listening in that session.
 
 ### Every `wb` command
 

@@ -45,9 +45,13 @@ const SCOUT_NOTE =
   '5. The skill library: rewrite or retire (`wb skill retire`) what `wb scout` flags.\n' +
   '6. `wb scout --done --notes "<what you recommended or changed>"`.\n' +
   'Keep it short; if nothing is worth changing, say so in one line.'
-// Two slash commands for the user: /delegate-quit stops every agent at once
-// (`wb stop --all`) and tells Claude so; /delegate-quit-and-hand-back-claude stops the agents and
-// hands their tasks to Claude (`wb takeover --all`), starting a turn for Claude to finish them.
+// Delegate mode: /delegate turns it on for the rest of the session and opens the pane, its sign.
+// The user then asks for things in plain words, and Claude hands the coding to local agents as
+// the skill says. A fresh or compacted conversation is told the mode is still on and where the
+// skill is (`delegate-mode` block). Two slash commands end it: /delegate-quit stops every agent
+// at once (`wb stop --all`) and tells Claude so; /delegate-quit-and-hand-back-claude stops the
+// agents and hands their tasks to Claude (`wb takeover --all`), starting a turn for Claude to
+// finish them. Either closes the pane.
 // Under the task list the pane follows one task live: the conversation between Claude and the
 // agent, every tool call and test, as `wb watch --json` prints it.
 import { atom, read, update } from 'claude-code'
@@ -77,7 +81,7 @@ const live = atom({ plugin: 'workbench', key: 'live' } as const, { task: '', lin
 const KEEP_LINES = 2000 // the pane scrolls back through this much history
 
 // The web chat (`wb chat serve`): the user's side door while away from the terminal. A session
-// listens once /delegate has run in it, until /delegate-quit or the hand-back ends delegate mode;
+// listens while delegate mode is on in it (`delegating`), from /delegate until a quit command;
 // with several, the first to claim chat/listener.json does, and the others stand by. A message is
 // submitted as a prompt (so the terminal shows it too) with a receipt the page shows at once.
 const chat = atom({ plugin: 'workbench', key: 'chat' } as const,
@@ -124,11 +128,13 @@ const STROKE_EVERY = 6 // frames: the wrench comes up once in this many, else re
 const APPRENTICE = 'apprentice' // its Raster's key, for $.ui.blit
 type Speech = { pose: Pose; say: string; more: string; color: string }
 
-const speechOf = (focus: WbTask | undefined, doing: string, list: WbTask[]): Speech => {
+const speechOf = (focus: WbTask | undefined, doing: string, list: WbTask[], on: boolean): Speech => {
   if (!focus) {
-    return list.length
-      ? { pose: 'rest', say: 'All caught up.', more: '/delegate hands me the next one.', color: 'inactive' }
-      : { pose: 'sleep', say: 'No delegated tasks.', more: '/delegate hands me one.', color: 'inactive' }
+    const more = on ? 'Ask Claude for anything: the coding comes to me.' : '/delegate turns delegate mode on.'
+    if (list.length) return { pose: 'rest', say: 'All caught up.', more, color: 'inactive' }
+    return on
+      ? { pose: 'rest', say: 'Delegate mode is on.', more, color: 'claude' }
+      : { pose: 'sleep', say: 'No delegated tasks.', more, color: 'inactive' }
   }
   const n = focus.name
   switch (focus.phase) {
@@ -206,11 +212,17 @@ const NEXT: Record<string, (n: string) => string> = {
 }
 const RUNNING = new Set(['queued', 'running', 'testing'])
 
+const MODE_NOTE = (skill: string) =>
+  'Delegate mode is on in this session: the user ran /delegate, and it lasts until /delegate-quit. ' +
+  'Treat each request as the /delegate skill says: hand its coding to local agents with wb, ' +
+  `then review and accept. If that procedure is not in your context, read ${skill} first.`
+
 const QUIT = 'delegate-quit'
 const HAND_BACK = 'delegate-quit-and-hand-back-claude'
 const QUIT_NOTE = (out: string) =>
   `[workbench] The user ran /${QUIT}: everything delegated was stopped (\`wb stop --all\`):\n` +
-  `${out}\nDon't finish, restart or clean up any of it unless they ask; real tasks keep their ` +
+  `${out}\nDelegate mode is off: from now on work directly, without delegating. Don't finish, ` +
+  `restart or clean up any of the stopped work unless they ask; real tasks keep their ` +
   `worktrees (\`wb status --all\`).`
 const DONE_NOTE = (out: string) =>
   `[workbench] The user ran /${HAND_BACK}: the agents were stopped and their tasks ` +
@@ -250,6 +262,7 @@ const mem = {
   tick: 0, // the apprentice's frame count
   posed: '' as Pose | '', // its pose as last drawn in a Raster: the timer animates it while set
   shown: '' as Pose | '', // the frame on screen now
+  skill: '', // the /delegate skill's SKILL.md, for the delegate-mode block
 }
 
 // Every task directory, as the pane draws it. Closed tasks drop out after half an hour.
@@ -415,6 +428,7 @@ async function poll($: any) {
       mem.lastDrawn = drawn
       await update($, tasks, () => list)
     }
+    const on = (await read($, chat)).delegating
     const live = list.filter(t => ACTIVE.has(t.phase) && t.phase !== 'asking')
     mem.hasActive = list.some(t => ACTIVE.has(t.phase))
     const asking = list.filter(t => t.phase === 'asking')
@@ -424,8 +438,8 @@ async function poll($: any) {
       ...asking.map(t => `${t.name} asks`),
       ...(waiting.length ? [`${waiting.length} awaiting review`] : []),
     ]
-    $.ui.status(parts.length ? `⚒ wb · ${parts.join(' · ')}` : undefined)
-    if (live.length && !mem.paneOpened) { // open once per load, when work starts
+    $.ui.status(parts.length ? `⚒ wb · ${parts.join(' · ')}` : on ? '⚒ wb · delegate mode' : undefined)
+    if ((live.length || on) && !mem.paneOpened) { // open once per load, in delegate mode or when work starts
       mem.paneOpened = true
       void $.ui.open({ id: PANE, title: 'Workbench' })
     }
@@ -568,6 +582,17 @@ async function rewake($: any, now: number, list: WbTask[]) {
   }
 }
 
+// Turning delegate mode on or off: the chat listens while it is on. The context block follows
+// at the next compaction or /clear, not at once: invalidating it would rewrite the first message
+// and cost the whole conversation's cache, and the skill or the quit note says it meanwhile.
+// The quit commands close the pane, the mode's sign.
+async function delegateMode($: any, on: boolean) {
+  if ((await read($, chat)).delegating === on) return
+  await update($, chat, c => ({ ...c, delegating: on }))
+  if (!on) await $.ui.close({ id: PANE }).catch(() => {})
+  void poll($) // listen now: a message may already be waiting
+}
+
 export const register: Register = (on, options) => {
   mem.wake = (options as Row | undefined)?.wake !== 'off'
 
@@ -576,6 +601,7 @@ export const register: Register = (on, options) => {
     const wbHome = await $.env.get('WB_HOME')
     mem.root = wbHome || `${home}/.local/state/workbench`
     mem.wb = (await $.env.get('WB_BIN')) || 'wb'
+    mem.skill = `${(await $.env.get('CLAUDE_CONFIG_DIR')) || `${home}/.claude`}/skills/delegate/SKILL.md`
     mem.startedAt = await $.clock.now()
     if (!(await read($, chat)).key) {
       const key = `${Math.floor(mem.startedAt)}-${Math.random().toString(36).slice(2, 8)}`
@@ -628,18 +654,18 @@ export const register: Register = (on, options) => {
   // Delegating with wb counts as delegate mode too (a session resumed mid-delegation, or one
   // where /delegate ran before this mod could see it)
   on('tool.call', { tool: 'Bash' }, async ($, e, next) => {
-    if (/(^|[\s;&|(])wb (start|next|feedback|accept|steer|answer|takeover)\b/.test(e.command) &&
-        !(await read($, chat)).delegating) {
-      await update($, chat, c => ({ ...c, delegating: true }))
-      void poll($)
+    if (/(^|[\s;&|(])wb (start|next|feedback|accept|steer|answer|takeover)\b/.test(e.command)) {
+      await delegateMode($, true)
     }
     return next(e)
   })
 
-  // /delegate turns the web chat on in this session
+  // /delegate turns delegate mode on for the session, with or without a task, and shows the pane
   on('skill.prompt', { skill: 'delegate' }, async ($, e, next) => {
-    await update($, chat, c => ({ ...c, delegating: true }))
-    void poll($) // listen now: a message may already be waiting
+    if (e.path) mem.skill = e.path
+    await delegateMode($, true)
+    mem.paneOpened = true
+    void $.ui.open({ id: PANE, title: 'Workbench' })
     return next(e)
   })
 
@@ -652,7 +678,7 @@ export const register: Register = (on, options) => {
   })
 
   on('command.run', { command: QUIT }, async $ => {
-    await update($, chat, c => ({ ...c, delegating: false }))
+    await delegateMode($, false)
     const out = await runWb($, ['stop', '--all'])
     $.ui.toast('workbench: everything delegated is stopped')
     return { text: `Delegation stopped. ${out}`, context: [QUIT_NOTE(out)] }
@@ -664,7 +690,7 @@ export const register: Register = (on, options) => {
   })
 
   on('command.run', { command: HAND_BACK }, async $ => {
-    await update($, chat, c => ({ ...c, delegating: false }))
+    await delegateMode($, false)
     const out = await runWb($, ['takeover', '--all'])
     mem.queued.push(DONE_NOTE(out)) // a command may not start a turn itself: the next poll does
     return { text: `Agents stopped; Claude is taking over. ${out}` }
@@ -681,12 +707,14 @@ export const register: Register = (on, options) => {
     const r = await next(e)
     const st = await read($, chat)
     const away = st.webAt && (await $.clock.now()) - st.webAt < AWAY_MS
-    const blocks = away ? [...r.blocks, {
+    const blocks = [...r.blocks]
+    if (st.delegating) blocks.push({ name: 'delegate-mode', text: MODE_NOTE(mem.skill) })
+    if (away) blocks.push({
       name: 'web-chat',
       text: 'The user is away from the terminal and last wrote from the web chat. Tell them ' +
         'there (`wb chat reply --text "…"`) when something they asked for is done or needs them; ' +
         '`wb chat log` shows the thread. Typing in the terminal again ends this.',
-    }] : r.blocks
+    })
     const status = await runWb($, ['status'])
     if (status.startsWith('no open tasks') || status.startsWith('could not run')) return { blocks }
     return {
@@ -734,7 +762,7 @@ export const register: Register = (on, options) => {
     const { Box, Text, Raster } = $.ui.resolve(e) as Row
     const list = await read($, tasks)
     const watched = await read($, live)
-    const { url } = await read($, chat)
+    const { url, delegating } = await read($, chat)
     // the web chat's link, always at hand to copy: last, since the pane follows its end
     const pinned = url ? (
       <Box marginTop={1}>
@@ -764,7 +792,7 @@ export const register: Register = (on, options) => {
     // on the line. Drawing it in pixels arms the timer that animates it. A long history overfills
     // the pane, and anything that may shrink is squeezed: the bubble went down to its border.
     const focus = focusOf(list)
-    const sp = speechOf(focus, doing?.t ?? '', list)
+    const sp = speechOf(focus, doing?.t ?? '', list, delegating)
     const busy = sp.pose === 'work' || sp.pose === 'think'
     const pixels = (e as Row).surface === 'terminal' && Number(props.scroll?.bodyRows ?? 24) >= 20 && cols >= 40
     const said = [

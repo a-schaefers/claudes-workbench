@@ -156,12 +156,16 @@ Tests only: `WB_OPENCODE_BIN` (a fake opencode), `WB_FAKE_MODELS` (no model serv
   an hour, and held while Claude's main loop is mid-turn (`mem.busy`, set by `turn.start` or any
   `tool.call`). It writes `acked` before submitting. `rewake` covers a task waiting on Claude for a
   minute with no notice delivered. `_ack_all` in cli.py stops the mark short of news still true.
+- Delegate mode is `chat.delegating`: on from /delegate (`skill.prompt`, with or without a task,
+  which also opens the pane) or a delegating `wb` command, off at either quit command (which
+  closes the pane). While on, `prompt.context` adds the `delegate-mode` block (the mode lasts until
+  a quit; the skill's SKILL.md path) and an idle status line reads `⚒ wb · delegate mode`.
 - A slash command may not start a turn itself: it pushes onto `mem.queued`, which the next poll
   submits.
 - Compaction: `session.compact` adds KEEP_ON_COMPACT whenever tasks are open; at a task boundary
   it compacts once Claude passes COMPACT_AT of the auto-compact threshold; `prompt.context` adds
   the open tasks (`wb status`) and, for six hours after a web message, the `web-chat` block.
-- The web chat listener: a session that ran /delegate (or a delegating `wb` command) claims
+- The web chat listener: a session in delegate mode claims
   chat/listener.json with its `wb events` pid; the first live claim wins. User messages go in as
   prompts (`asUser`), into the running turn via `session.send` when busy, with a receipt.
 - The weekly model check: in a quiet moment (the person has had a turn, no task open) it submits

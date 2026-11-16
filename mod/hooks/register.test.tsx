@@ -42,8 +42,9 @@ test('/workbench opens the pane and counts open tasks', async ($, on) => {
   expect(JSON.stringify(out)).toContain('no open tasks')
 })
 
-// A file system in memory: what `wb` and its runner would have written.
-function fakeTasks(on: any, files: Record<string, string>, dirs = ['fix-it'], scouted = true) {
+// A file system in memory: what `wb` and its runner would have written. `ui` records the pane
+// opening and closing and each status line.
+function fakeTasks(on: any, files: Record<string, string>, dirs = ['fix-it'], scouted = true, ui: string[] = []) {
   // the weekly model check was done just now, unless the test is about it
   if (scouted) files['/wb/scout.json'] = JSON.stringify({ done_at: 1_800_000_000 })
   on('env.get', (_: any, e: any) => ({ value: ({ WB_HOME: '/wb', HOME: '/home/u' } as any)[e.name] }))
@@ -58,8 +59,9 @@ function fakeTasks(on: any, files: Record<string, string>, dirs = ['fix-it'], sc
   on('fs.exists', (_: any, e: any) => ({ value: Object.keys(files).some(p => p.startsWith(e.path)) }))
   on('fs.list', () => ({ value: dirs.map(name => ({ name, kind: 'dir' })) }))
   on('command.register', () => ({ value: { command: 'workbench' } }))
-  on('ui.open', () => ({ value: { isPlaced: true } }))
-  on('ui.status', () => ({ value: undefined }))
+  on('ui.open', (_: any, e: any) => { ui.push(`open ${e.id}`); return { value: { isPlaced: true } } })
+  on('ui.close', (_: any, e: any) => { ui.push(`close ${e.id}`); return { value: undefined } })
+  on('ui.status', (_: any, e: any) => { ui.push(`status ${e.text ?? ''}`); return { value: undefined } })
   // `wb events`: says hello and then stays open, as the real watcher does
   on('process.spawn', async function* () {
     yield { stream: 'stdout', text: '{"hello": 4242}\n' }
@@ -438,4 +440,40 @@ test('the apprentice says how the followed task stands: in pixels in a terminal,
   expect(await ui.find({ type: 'Raster' })).toBeFalsy()
   expect(await ui.find({ type: 'Text', text: /\[\^_\^\]/ })).toBeTruthy()
   await ui.unmount()
+})
+
+test('/delegate alone turns delegate mode on for the session: the pane opens, and a quit ends it', async ($, on) => {
+  const clock = mock.clock(on, { now: 1_800_000_000_000 })
+  const files: Record<string, string> = {}
+  const ui: string[] = []
+  fakeTasks(on, files, [], true, ui)
+  on('ui.toast', () => ({ value: undefined }))
+  on('session.cwd', () => ({ value: '/home/u/game' }))
+  on('skill.prompt', (_: any, e: any) => ({ text: e.text }))
+  on('process.run', () => ({ value: { exitCode: 0, stdout: 'no open tasks', stderr: '' } }))
+  on('prompt.context', (_: any, e: any) => ({ blocks: e.blocks }))
+  const panes = () => ui.filter(l => !l.startsWith('status'))
+  const status = () => ui.filter(l => l.startsWith('status')).at(-1)
+  await $.session.start({ cwd: '/home/u/game', surface: 'terminal', isInteractive: true })
+  await clock.advance(2000)
+  expect(panes()).toEqual([])                                    // not delegating: no pane
+  expect((await $.prompt.context({ blocks: [] })).blocks.map((b: any) => b.name)).not.toContain('delegate-mode')
+
+  await $.skill.prompt({ skill: 'delegate', text: 'x', frontmatter: {}, source: 'userSettings',
+    path: '/home/u/.claude/skills/delegate/SKILL.md' })
+  await clock.advance(2000)
+  expect(panes()).toEqual(['open workbench'])                    // the mode's sign
+  expect(status()).toBe('status ⚒ wb · delegate mode')
+  const pane = await $.ui.mount({ ...PANE, surface: 'terminal' })
+  expect(await pane.find({ type: 'Text', text: 'Delegate mode is on.' })).toBeTruthy()
+  await pane.unmount()
+  // a compacted or cleared conversation is told the mode is on, and where the skill is
+  const block = (await $.prompt.context({ blocks: [] })).blocks.find((b: any) => b.name === 'delegate-mode')
+  expect(block?.text).toContain('/home/u/.claude/skills/delegate/SKILL.md')
+
+  await $.command.run({ command: 'delegate-quit', args: '' })
+  await clock.advance(2000)
+  expect(panes()).toEqual(['open workbench', 'close workbench'])
+  expect(status()).toBe('status ')
+  expect((await $.prompt.context({ blocks: [] })).blocks.map((b: any) => b.name)).not.toContain('delegate-mode')
 })

@@ -1,12 +1,13 @@
 ---
 name: delegate
 description: >
-  Delegate a coding task to a local model running in OpenCode, via the workbench `wb` CLI, which
-  routes it to the best local model for the task's size; Claude writes the spec, reviews the
-  diff, and accepts or sends feedback, so Claude spends tokens on specs and review instead of
-  code generation. Only when the user invokes /delegate — never on your own.
+  Delegate mode for the rest of the session: Claude hands the coding of each request to local
+  models running in OpenCode, via the workbench `wb` CLI, which routes each task to the best
+  local model for its size; Claude writes the spec, reviews the diff, and accepts or sends
+  feedback, so Claude spends tokens on specs and review instead of code generation. Only when
+  the user invokes /delegate — never on your own.
 disable-model-invocation: true
-argument-hint: "<task description> [--model <id>] [--merge]"
+argument-hint: "[first task] [--model <id>] [--merge]"
 ---
 
 # /delegate — local agent writes, Claude reviews
@@ -43,7 +44,19 @@ it works, explain the why in feedback.
 no `Co-Authored-By` or other AI credit line; `wb accept` writes only the task's provenance
 trailers. Don't add one yourself.
 
-Task: `$ARGUMENTS`
+## Delegate mode
+`/delegate` turns delegate mode on for the rest of this session; the Workbench pane opening is
+the user's sign that it is on. The user then works with you as usual, in plain words, and never
+types /delegate again: each request is handled the way this skill says, until they run
+`/delegate-quit` or `/delegate-quit-and-hand-back-claude`.
+- **First task:** `$ARGUMENTS`. Empty? Reply in one line that delegate mode is on and wait for
+  their first request. Don't scan the repo or check models until there is work.
+- **What goes to the agents:** the coding: features, fixes, refactors, tests, boilerplate.
+  Answer questions, read code, plan, and do what is yours (git, CLAUDE.md, `.claude/`, anything
+  outward) yourself, as always. An edit that costs less to make than to spec (a typo, one line)
+  you may just make.
+- **After a compaction or `/clear`**, a `delegate-mode` context block says the mode is still on
+  and where this file is: read it again if its procedure is no longer in your context.
 
 `wb` is the workbench CLI (`~/repos/workbench`, on PATH as `wb`; `wb --help`). Every command
 prints a short report written for you — don't go digging in raw logs unless a report says to.
@@ -261,17 +274,18 @@ You are the driver, not a spectator. When something tells you the agent is headi
 - `wb stop <name>`: just stop it.
 Notes are instructions, like feedback: concrete and short.
 
-**The user's two commands.** Only these, never words in a message, stop the delegation; the mod
-runs them and tells you what it did:
+**The user's two commands.** Only these, never words in a message, stop the delegation and end
+delegate mode; the mod runs them, closes the pane and tells you what it did:
 - **`/delegate-quit-and-hand-back-claude`**: take over. The agents are already stopped
   (`wb takeover --all`). Leave delegate mode and finish the work yourself without pausing: review
   what each agent left, complete it in its worktree to your standard, run the acceptance command,
   `wb accept`, then carry on with the rest of the request directly, without delegating.
 - **`/delegate-quit`**: stop. Everything delegated is already stopped (`wb stop --all`).
-  Don't finish, restart or clean up anything unless asked; worktrees are kept.
+  Work directly from now on. Don't finish, restart or clean up anything unless asked; worktrees
+  are kept.
 Without the mod, the user may ask for the same in words; run those commands then.
 
-**The web chat.** While /delegate runs in a session, the user can reach you from their phone
+**The web chat.** While delegate mode is on in a session, the user can reach you from their phone
 (`wb chat serve` on port 1337; the link is localhost, and reaching it from a phone is the user's own setup). Their message arrives as a prompt that is
 just `[web chat] <their words>` (or, while you're mid-turn, delivered into the turn by the mod,
 with one line saying so); it has the same authority as one typed here. They read your answers on a phone, so
