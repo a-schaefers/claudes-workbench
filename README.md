@@ -35,6 +35,11 @@ the bulk of the tokens, the reading and writing and test-running, happen on your
 - **The cheap loop stays local.** Failing tests go back to the agent automatically. Claude only
   spends tokens on work that passes, a question the agent asks, or an agent that got stuck, and a
   live pane shows you both sides as they work.
+- **Claude keeps the keys; the agents keep to the code.** Everything that shapes or ships the
+  project stays with the more capable model: the architecture, every git write (commits, branches,
+  merges, pushes, pull requests), CI/CD, deploys and infrastructure, and the project's `CLAUDE.md` /
+  `AGENTS.md`, the instructions every agent reads. The agents write code and use git only to read.
+  When a task needs more, they ask Claude, and Claude does it.
 - **Your repo stays yours.** Each agent works in its own git worktree, so your checkout is never
   touched, and nothing is committed (under your name, with no AI credit line) until Claude accepts
   it.
@@ -453,6 +458,12 @@ up again (a library's quirk, a pitfall, a check to run), Claude writes a skill.
 
 ### Git, commits and projects
 
+- **The split of roles.** The agent writes code and reads git freely (`status`, `diff`, `log`,
+  `show`, `blame`). Everything that leaves its working tree is Claude's: commits, branches,
+  merges, pushes, pull requests, CI/CD, deploys and infrastructure (`gh`, `wrangler` and the like),
+  and the project's `CLAUDE.md` and `AGENTS.md`. The handbook and the working protocol tell the
+  agent so, and to ask through `ask_reviewer` or say so in its summary when the task needs one of
+  those. It's a working agreement, not a sandbox: the one rule OpenCode enforces is no `sudo`.
 - **The agent never commits.** Everything it does stays uncommitted in its worktree, and
   `wb diff` shows it (new files included) against the task's base, or after `wb next` against
   the last committed step (`--all` for the whole branch).
