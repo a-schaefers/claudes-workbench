@@ -117,6 +117,15 @@ and ~150 new lines, with the files named. The local agents work in a 32K context
 that spends it (8 files at once, measured 2026-11-16) costs 30–60 minutes of compactions,
 re-reading and drift, where the same work in 3 small tasks costs minutes each. Splitting is your
 job, the architect's: run the parts one after another, each with its own acceptance command.
+A good split is logic, then its tests, then the UI: `wb next` gives each part to the same agent,
+which already knows the code. (Measured: a step that never landed in an hour as one task landed
+in ~30 minutes as three, every hidden check passing.)
+- Names, signatures and constants that other code relies on: write them in the spec and say
+  "exactly"; agents otherwise rename them to fit their own taste.
+- The agent cannot see what it draws. For anything visual, look at the screenshot yourself;
+  after one miss on a visual detail, fix it yourself rather than describing it again.
+- Check the tests catch bugs, not just that they pass: break the code in a scratch copy a few
+  ways and see each break fail a test.
 
 ## 3. Dispatch
 ```
