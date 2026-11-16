@@ -104,6 +104,11 @@ in `~/.claude/skills`). So don't restate project conventions; spend the spec on 
 to this task: the files to read first, the existing code to imitate, and any skill to load by
 name ("load the `x` skill first").
 
+When a project needs a procedure the agents will repeat (how to add an endpoint, run the
+screenshot check, cut a release), write it as a skill in that project:
+`<repo>/.claude/skills/<name>/SKILL.md`, committed with the project like any other file. The
+agents find it there; never put agent skills in `~/.claude/skills`, which is the user's own.
+
 **Size every task to what the local models finish, as measured.** One concern, at most 2–3 files
 and ~150 new lines, with the files named. The local agents work in a 32K context: a task
 that spends it (8 files at once, measured 2026-11-16) costs 30–60 minutes of compactions,

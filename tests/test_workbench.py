@@ -505,6 +505,8 @@ class AgentContext(Base):
         (self.repo / "web" / "CLAUDE.md").write_text("web rules\n")
         (self.repo / ".claude" / "rules").mkdir(parents=True)
         (self.repo / ".claude" / "rules" / "style.md").write_text("style rules\n")
+        (self.repo / ".claude" / "skills" / "add-level").mkdir(parents=True)   # the project's own
+        (self.repo / ".claude" / "skills" / "add-level" / "SKILL.md").write_text("---\nname: add-level\n---\n")
         g = lambda *a: subprocess.run(["git", "-C", str(self.repo), *a], check=True)  # noqa
         g("add", ".")
         g("commit", "-qm", "instructions")
@@ -524,6 +526,7 @@ class AgentContext(Base):
                   if r["effect"] == "deny"}
         self.assertLessEqual({("question", "*"), ("execute", "*"), ("opencode_*", "*"), ("skill", "docx"), ("skill", "delegate"),
                              ("skill", "publishing-arm")}, denied)
+        self.assertNotIn(("skill", "add-level"), denied)
 
     def test_uncommitted_local_instructions_come_from_the_repo(self):
         from workbench import context
