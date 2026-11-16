@@ -58,8 +58,15 @@ That's it. Claude takes over from there:
    the agent work.
 4. It reviews every change, sends it back with notes until it's right, and only then commits it.
 
-A **Workbench** pane in Claude Code shows the agents working live. `/delegate-quit` stops them;
-`/delegate-quit-and-hand-back-claude` stops them and has Claude finish the work itself.
+A **Workbench** pane in Claude Code shows the agents working live.
+
+| Command | What it does |
+|---|---|
+| `/delegate <task>` | Claude plans the task and hands it to your local models |
+| `/workbench` | open the pane: every delegated task, and the agent's work live |
+| `/delegate-models` | check now which local models suit your hardware best (it also happens weekly) |
+| `/delegate-quit` | stop every agent now; their work is kept for later |
+| `/delegate-quit-and-hand-back-claude` | stop the agents and have Claude finish their tasks itself |
 
 **Away from the computer?** `wb chat url` prints a private link to a small web chat with the
 running Claude session (`systemctl --user link ~/repos/workbench/systemd/wb-chat.service &&
