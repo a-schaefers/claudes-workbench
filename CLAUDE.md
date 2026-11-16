@@ -82,7 +82,7 @@ what either says (a command, a flag, a default, a guard, a file) updates it in t
   Skills for the agents: Claude's library (`wb skill`), handed per task, or a project's own
   `.claude/skills`, committed with it. The user's personal `~/.claude/skills` are denied to agents.
 - `docs/`: the README's images: `logo.jpg` (generated with x.ai), `driver-and-agent.jpg`,
-  `delegate-pane.png` and `web-chat.png` (screenshots).
+  `delegate-mode.png` and `web-chat.png` (screenshots).
 
 ## How a task runs
 1. `wb start` refuses a repo without a committed CLAUDE.md (`--no-claude-md`), asks the router for
