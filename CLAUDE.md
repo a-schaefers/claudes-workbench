@@ -7,7 +7,9 @@ has the architecture; read it first.
 - `workbench/` is the Python package, standard library only (Python 3.11+, developed on 3.14). Do not add dependencies.
   - `store.py`: task directories, atomic JSON, locked JSONL. Every other part talks through these files.
   - `runner.py`: the detached per-task driver. `cli.py`: `wb`. `ask_mcp.py`: the MCP tool server.
-  - `models.py`: discovers local models from opencode.json, their status, and GPU residency (make_resident).
+  - `models.py`: discovers local models from opencode.json, their status, and GPU residency (make_resident);
+    adds and retires them (Ollama's pull/delete, opencode.json entries) for the weekly model check.
+  - `hardware.py`: GPU/VRAM, RAM, CPU and disk, read fresh each time for `wb scout`. Nothing about the machine is hard-coded.
   - `router.py`: picks a model per task size from evidence. `bench.py`: `wb bench`, the probes and graded tasks.
   - `events.py`: event normalization and the stuck detector.
   - `transcript.py`: `wb watch`, the human view: the OpenCode session export merged with the task's

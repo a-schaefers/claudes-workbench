@@ -11,8 +11,8 @@ keyed by OpenCode model id or by provider id:
                 "stop": "strata launch --stop --preset coder"},
      "ollama/some-model": {"skip": true}}
 
-Only one model fits on the GPU at a time (a 16 GB card), so the runner makes the task's model
-resident before it starts (make_resident): it unloads Ollama models and stops servers that have
+The runner keeps one model on the GPU at a time (a consumer card fits one coding model), so it
+makes the task's model resident before it starts (make_resident): it unloads Ollama models and stops servers that have
 a stop command, then loads or starts the one it needs.
 """
 from __future__ import annotations
@@ -25,6 +25,8 @@ import urllib.request
 from dataclasses import dataclass, field
 from pathlib import Path
 from urllib.parse import urlparse
+
+from . import store
 
 LOCAL_HOSTS = {"127.0.0.1", "localhost", "::1", "0.0.0.0"}
 OLLAMA_PORT = 11434
@@ -225,3 +227,101 @@ def _others_resident(m: Model) -> bool:
     roots = {o.root for o in discover().values() if o.engine == "ollama"}
     return any(not (m.engine == "ollama" and r == m.root and _matches(m.name, {n}))
                for r in roots for n in _ollama_loaded(r))
+
+
+# ---- managing the set: what Claude's weekly model check uses to add and retire models ----
+
+def providers() -> dict[str, dict]:
+    """OpenCode's local providers: id → {"root", "engine", "models"} (the config's model entries)."""
+    path = opencode_config_path()
+    cfg = json.loads(path.read_text()) if path.exists() else {}
+    out = {}
+    for pid, prov in (cfg.get("provider") or {}).items():
+        url = (prov.get("options") or {}).get("baseURL", "")
+        parsed = urlparse(url)
+        if parsed.hostname in LOCAL_HOSTS:
+            out[pid] = {"root": url.rstrip("/").removesuffix("/v1"), "models": prov.get("models") or {},
+                        "engine": "ollama" if parsed.port == OLLAMA_PORT else "server"}
+    return out
+
+
+def ollama_installed(root: str) -> list[dict]:
+    """What an Ollama has pulled: name, bytes on disk, parameters, quantization."""
+    if _fake():
+        return []
+    return [{"name": x.get("name"), "size": x.get("size"),
+             "params": (x.get("details") or {}).get("parameter_size"),
+             "quant": (x.get("details") or {}).get("quantization_level")}
+            for x in (_get(f"{root}/api/tags") or {}).get("models", [])]
+
+
+def ollama_show(root: str, name: str) -> dict:
+    """Ollama's own facts about a pulled model: its capabilities and trained context length."""
+    if _fake():
+        return {"capabilities": ["tools", "thinking"], "context_length": None}
+    body = _post(f"{root}/api/show", {"model": name}, timeout=30)
+    ctx = next((v for k, v in (body.get("model_info") or {}).items()
+                if k.endswith(".context_length")), None)
+    return {"capabilities": body.get("capabilities") or [], "context_length": ctx}
+
+
+def ollama_pull(root: str, name: str, say=print) -> None:
+    """Download a model, reporting progress about every 5% (long: run it in the background)."""
+    if _fake():
+        say(f"pulled {name} (fake)")
+        return
+    req = urllib.request.Request(f"{root}/api/pull", data=json.dumps({"model": name}).encode(),
+                                 headers={"Content-Type": "application/json"})
+    shown, last = -1, ""
+    with urllib.request.urlopen(req, timeout=24 * 3600) as r:
+        for raw in r:
+            ev = json.loads(raw or b"{}")
+            if ev.get("error"):
+                raise RuntimeError(ev["error"])
+            status, total, done = ev.get("status", ""), ev.get("total"), ev.get("completed")
+            if total and done is not None:
+                pct = int(100 * done / total)
+                if pct >= shown + 5 or pct == 100:
+                    shown = pct
+                    say(f"{status}: {pct}% of {total / 1024 ** 3:.1f} GB")
+            elif status != last:
+                say(status)
+            last = status
+
+
+def ollama_delete(root: str, name: str) -> None:
+    if _fake():
+        return
+    req = urllib.request.Request(f"{root}/api/delete", data=json.dumps({"model": name}).encode(),
+                                 headers={"Content-Type": "application/json"}, method="DELETE")
+    urllib.request.urlopen(req, timeout=60).close()
+
+
+def set_override(model_id: str, key: str, value) -> None:
+    """Set (or with None, drop) one key of a model's models.json entry."""
+    path = Path(os.environ.get("WB_MODELS") or Path.home() / ".config" / "workbench" / "models.json")
+    data = _overrides()
+    entry = data.setdefault(model_id, {})
+    if value is None:
+        entry.pop(key, None)
+    else:
+        entry[key] = value
+    if not entry:
+        data.pop(model_id)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    store.write_json(path, data)
+
+
+def write_entry(provider: str, name: str, entry: dict | None) -> None:
+    """Add, replace (entry) or remove (None) one model in OpenCode's config."""
+    path = opencode_config_path()
+    cfg = json.loads(path.read_text())
+    prov = (cfg.get("provider") or {}).get(provider)
+    if prov is None:
+        raise KeyError(f"OpenCode has no provider {provider!r}")
+    entries = prov.setdefault("models", {})
+    if entry is None:
+        entries.pop(name, None)
+    else:
+        entries[name] = entry
+    store.write_json(path, cfg)

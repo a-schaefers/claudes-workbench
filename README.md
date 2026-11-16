@@ -132,6 +132,9 @@ Denied tools also leave the prompt. That cuts the fixed prompt from about 9.2k t
 | `wb next <name> --spec <file> -m "…"` | commit the approved step and send the next step to the same agent, worktree and session; `wb diff` then shows the step, `--all` the branch |
 | `wb feedback … --fresh` / `--keep-context` | override the runner's context choice: rounds continue the agent's session until it is 60% full or OpenCode compacted it, then a fresh session gets the task, the diff and the instructions |
 | `wb takeover --all` · `wb stop --all` | what `/delegate-quit-and-hand-back-claude` (Claude finishes everything itself) and `/delegate-quit` (stop every agent and the benchmark, keep the work) run; `stop --all` finds a running `wb bench` from the process table |
+| `wb init <dir>` | set a project up: git on `master` with an initial commit (no remote), AGENTS.md a symlink to CLAUDE.md; `wb start` wants a CLAUDE.md, `wb accept` says how far behind the code it is |
+| `wb scout [--due \| --done --notes …]` | the weekly model check's facts: hardware, installed and registered models, benchmarks and real results; `/delegate-models` asks Claude for the check now |
+| `wb model add <provider/model> [--pull]` · `retire <id> [--delete]` · `sizes <id> [trivial] [significant]` | register a model (Ollama downloads it with `--pull`), remove one, or limit the task sizes the router gives it |
 | `wb note <name> --text "…"` | Claude's captain's-log line, shown in the transcript. Check-ins (`wb start --checkin MIN`, default 10 for significant tasks) wake Claude with a progress digest to report on |
 | `wb steer <name> --text "…" [--now]` · `wb takeover <name>` | Claude driving a running agent: a note for after its current run, or (`--now`) an interrupt that puts the note first; or stop it and finish by hand |
 | `wb models` | the discovered models, whether each can run, and the router's ranking per size |

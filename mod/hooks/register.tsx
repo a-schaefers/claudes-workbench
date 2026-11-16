@@ -18,6 +18,29 @@ const KEEP_ON_COMPACT =
   'delegated (names, repos, branches, what each is for), which are open and what each needs ' +
   'next, and what was accepted, merged or discarded. Drop the diffs, reports and transcripts of ' +
   'finished tasks; `wb status` and `wb report <name>` bring back any detail.'
+// The weekly model check: once a week, in a quiet moment of a session the person is using,
+// Claude is asked to look at this machine, what is installed and how it has done, and what is
+// newest, and to recommend what to add or retire. /delegate-models asks for it now.
+const SCOUT_EVERY_MS = 7 * 24 * 3600 * 1000
+const SCOUT_RETRY_MS = 24 * 3600 * 1000 // raised but never finished: ask again a day later
+const MODELS = 'delegate-models'
+const SCOUT_NOTE =
+  '[workbench] The weekly model check is due. As the driver, keep the local agents on the best ' +
+  'models this machine can run:\n' +
+  '1. `wb scout`: this machine\'s hardware, what is installed, and how each model has done ' +
+  '(benchmarks and real tasks).\n' +
+  '2. Look up what is newest: open-weight coding models with tool calling, their sizes and ' +
+  'quantizations, which fit this GPU\'s VRAM (with room for the context) and this RAM, and ' +
+  'recent releases of the runtimes. Prefer primary sources (model cards, the Ollama library, ' +
+  'release notes) and recent reports; name nothing you could not verify.\n' +
+  '3. Recommend in a few lines: keep, add (the model and quantization, why it should beat what ' +
+  'is installed, its size and how it fits), retire (what it replaces, the disk it frees). ' +
+  'Aim for the best results first, then efficiency.\n' +
+  '4. Ask before downloading or deleting. With a yes: `wb model add <provider/model> --pull` in ' +
+  'the background, then `wb bench <id>`, and `wb model retire <id> [--delete]` for what it ' +
+  'replaces. Installed models that are not registered may belong to other tools: ask first.\n' +
+  '5. `wb scout --done --notes "<what you recommended or changed>"`.\n' +
+  'Keep it short; if nothing is worth changing, say so in one line.'
 // Two slash commands for the user: /delegate-quit stops the benchmark and every agent at once
 // (`wb stop --all`) and tells Claude so; /delegate-quit-and-hand-back-claude stops the agents and
 // hands their tasks to Claude (`wb takeover --all`), starting a turn for Claude to finish them.
@@ -153,6 +176,8 @@ const mem = {
   queued: [] as string[], // turns for Claude that a command asked for
   open: new Set<string>(), // delegated tasks open at the last poll
   follow: true, // the pane sticks to the newest lines until the person scrolls up
+  sawTurn: false, // the person has used this session: a weekly check may follow
+  scoutAsked: false, // the weekly model check was raised in this load
   boundary: false, // one closed since: a moment to make room in Claude's context
   toasted: new Set<string>(),
 }
@@ -187,6 +212,17 @@ async function scan($: any, root: string, now: number): Promise<WbTask[]> {
   }
 
   return list.sort((a, b) => a.createdAt - b.createdAt)
+}
+
+async function scoutIfDue($: any, now: number): Promise<void> {
+  const path = `${mem.root}/scout.json`
+  const st = await readJson($, path)
+  const done = Number(st.done_at ?? 0) * 1000
+  const offered = Number(st.offered_at ?? 0) * 1000
+  if (now - done < SCOUT_EVERY_MS || now - offered < SCOUT_RETRY_MS) return
+  mem.scoutAsked = true
+  await $.fs.write(path, JSON.stringify({ ...st, offered_at: now / 1000 }))
+  void $.prompt.submit({ text: SCOUT_NOTE })
 }
 
 async function compactAtBoundary($: any): Promise<void> {
@@ -295,6 +331,7 @@ async function poll($: any) {
       mem.boundary = false
       await compactAtBoundary($)
     }
+    if (mem.sawTurn && !mem.busy && !mem.scoutAsked && open.size === 0) await scoutIfDue($, now)
     await deliver($, now)
   } finally {
     mem.polling = false
@@ -358,6 +395,10 @@ export const register: Register = (on, options) => {
       description: 'Stop every delegated agent and the benchmark now, finishing nothing',
     })
     await $.command.register({
+      name: MODELS,
+      description: 'Check now which local models suit this machine best (weekly on its own)',
+    })
+    await $.command.register({
       name: HAND_BACK,
       description: 'Stop the agents and hand their tasks back to Claude to finish',
     })
@@ -372,6 +413,11 @@ export const register: Register = (on, options) => {
     const out = await runWb($, ['stop', '--all'])
     $.ui.toast('workbench: everything delegated is stopped')
     return { text: `Delegation stopped. ${out}`, context: [QUIT_NOTE(out)] }
+  })
+
+  on('command.run', { command: MODELS }, async () => {
+    mem.queued.push(SCOUT_NOTE) // a command may not start a turn itself: the next poll does
+    return { text: 'Claude will check the local models against this machine now.' }
   })
 
   on('command.run', { command: HAND_BACK }, async $ => {
@@ -406,7 +452,10 @@ export const register: Register = (on, options) => {
     return next(e)
   })
   on('turn.complete', async ($, e, next) => {
-    if (!e.agentId) mem.busy = false
+    if (!e.agentId) {
+      mem.busy = false
+      mem.sawTurn = true
+    }
     return next(e)
   })
 

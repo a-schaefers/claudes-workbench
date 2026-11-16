@@ -1,0 +1,119 @@
+"""What this machine has to run models on, found fresh each time: nothing about it is written down.
+
+`wb scout` reports it next to the installed models, so Claude can judge each week which models
+are the best fit for this hardware right now (the /delegate skill's weekly model check).
+"""
+from __future__ import annotations
+
+import os
+import shutil
+import subprocess
+from pathlib import Path
+
+GB = 1024 ** 3
+
+
+def _read(path: Path) -> str:
+    try:
+        return path.read_text().strip()
+    except OSError:
+        return ""
+
+
+def _run(*argv: str) -> str:
+    try:
+        r = subprocess.run(argv, capture_output=True, text=True, timeout=10)
+        return r.stdout.strip() if r.returncode == 0 else ""
+    except (OSError, subprocess.TimeoutExpired):
+        return ""
+
+
+def gpus() -> list[dict]:
+    """Every display adapter: name, driver, VRAM total and in use (bytes) where the driver says."""
+    found = []
+    for line in _run("nvidia-smi", "--query-gpu=name,memory.total,memory.used,driver_version",
+                     "--format=csv,noheader,nounits").splitlines():
+        name, total, used, driver = [x.strip() for x in line.split(",")]
+        found.append({"name": name, "driver": f"nvidia {driver}", "vram": int(total) * 2 ** 20,
+                      "vram_used": int(used) * 2 ** 20})
+    seen = set()
+    for dev in sorted(Path("/sys/class/drm").glob("card[0-9]*/device")):
+        if "-" in dev.parent.name:  # a connector (card0-DP-1), not a card
+            continue
+        uevent = dict(x.split("=", 1) for x in _read(dev / "uevent").splitlines() if "=" in x)
+        slot, driver = uevent.get("PCI_SLOT_NAME"), uevent.get("DRIVER", "")
+        if not slot or slot in seen or driver == "nvidia":  # nvidia-smi spoke for those
+            continue
+        seen.add(slot)
+        name = _run("lspci", "-s", slot).partition(": ")[2] or uevent.get("PCI_ID", "unknown")
+        total, used = _read(dev / "mem_info_vram_total"), _read(dev / "mem_info_vram_used")
+        found.append({"name": name, "driver": driver, "vram": int(total) if total else None,
+                      "vram_used": int(used) if used else None})
+    return found
+
+
+def memory() -> dict:
+    info = {}
+    for line in _read(Path("/proc/meminfo")).splitlines():
+        key, _, rest = line.partition(":")
+        if rest.strip().endswith("kB"):
+            info[key] = int(rest.split()[0]) * 1024
+    return {"ram": info.get("MemTotal"), "ram_free": info.get("MemAvailable"),
+            "swap": info.get("SwapTotal"), "swap_free": info.get("SwapFree")}
+
+
+def cpu() -> dict:
+    name = next((line.partition(":")[2].strip() for line in _read(Path("/proc/cpuinfo")).splitlines()
+                 if line.startswith("model name")), "") or os.uname().machine
+    return {"name": name, "threads": os.cpu_count()}
+
+
+def ollama_env() -> dict:
+    """The Ollama service's environment (where it keeps models, its default context), if systemd
+    runs it; an Ollama started by hand reads the caller's environment instead."""
+    env = {}
+    raw = _run("systemctl", "show", "ollama", "-p", "Environment", "--value")
+    for item in raw.split():
+        k, _, v = item.partition("=")
+        env[k] = v
+    for k in ("OLLAMA_MODELS", "OLLAMA_CONTEXT_LENGTH"):
+        env.setdefault(k, os.environ.get(k, ""))
+    return env
+
+
+def ollama_models_dir() -> Path | None:
+    candidates = [ollama_env().get("OLLAMA_MODELS"), str(Path.home() / ".ollama" / "models"),
+                  "/usr/share/ollama/.ollama/models", "/var/lib/ollama"]
+    return next((Path(c) for c in candidates if c and Path(c).is_dir()), None)
+
+
+def disk_free(path: Path | None) -> int | None:
+    try:
+        return shutil.disk_usage(path).free if path else None
+    except OSError:
+        return None
+
+
+def size(n: int | None) -> str:
+    return f"{n / GB:.1f} GB" if n else "?"
+
+
+def report() -> list[str]:
+    lines = []
+    for g in gpus():
+        vram = (f" · {size(g['vram'])} VRAM" + (f" ({size(g['vram_used'])} in use)"
+                                                if g.get("vram_used") else "")) if g["vram"] else ""
+        lines.append(f"  GPU   {g['name']}{vram} · {g['driver']}")
+    if not lines:
+        lines.append("  GPU   none found (models would run on the CPU)")
+    m, c = memory(), cpu()
+    lines.append(f"  RAM   {size(m['ram'])} ({size(m['ram_free'])} free)"
+                 + (f" · swap {size(m['swap'])} ({size(m['swap_free'])} free)" if m.get("swap") else ""))
+    lines.append(f"  CPU   {c['name']} · {c['threads']} threads")
+    where = ollama_models_dir()
+    if where:
+        lines.append(f"  disk  {size(disk_free(where))} free where Ollama keeps models ({where})")
+    ctx = ollama_env().get("OLLAMA_CONTEXT_LENGTH")
+    if ctx:
+        lines.append(f"  ollama serves a {int(ctx) // 1024}K context by default (OLLAMA_CONTEXT_LENGTH)")
+    return lines

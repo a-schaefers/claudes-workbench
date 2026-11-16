@@ -10,10 +10,11 @@ import signal
 import subprocess
 import sys
 import time
+from collections import defaultdict
 from contextlib import redirect_stdout
 from pathlib import Path
 
-from . import __version__, bench, gitops, models, results, router, store, transcript
+from . import __version__, bench, gitops, hardware, models, results, router, store, transcript
 from .runner import PKG_ROOT
 
 PROTOCOL = """
@@ -85,6 +86,20 @@ def pick_model(size: str, wanted: str | None) -> tuple[models.Model, dict, str]:
 
 # --- commands -----------------------------------------------------------------------------------
 
+def _has_file(repo: Path, ref: str, path: str) -> bool:
+    return subprocess.run(["git", "-C", str(repo), "cat-file", "-e", f"{ref}:{path}"],
+                          capture_output=True).returncode == 0
+
+
+def _need_claude_md(repo: Path, base: str, a) -> None:
+    if a.bench or a.no_claude_md:
+        return
+    if not _has_file(repo, base, "CLAUDE.md"):
+        die(f"{repo} has no CLAUDE.md at {base}: the agent would start blind. Write it (what the "
+            "project is, how to build and test it, its conventions), commit it, and run "
+            f"wb init {repo} to link AGENTS.md; --no-claude-md skips this check")
+
+
 def cmd_start(a):
     if not store.NAME_RE.match(a.name):
         die("a task name is lowercase letters, digits and hyphens, at most 48")
@@ -94,7 +109,7 @@ def cmd_start(a):
     try:
         repo = gitops.toplevel(Path(a.repo).resolve())
     except gitops.GitError:
-        die(f"{a.repo} is not inside a git repository")
+        die(f"{a.repo} is not inside a git repository: wb init {a.repo} sets the project up")
     spec_text = Path(a.spec).read_text() if a.spec != "-" else sys.stdin.read()
     if not spec_text.strip():
         die("the spec is empty")
@@ -102,6 +117,7 @@ def cmd_start(a):
     if not state["available"] and not a.force:
         die(f"{m.id} can't run: {state['why']}. (--force queues it anyway)", 3)
     dirty = gitops.git(repo, "status", "--porcelain").strip()
+    _need_claude_md(repo, a.base, a)
 
     task.dir.mkdir(parents=True)
     try:
@@ -521,6 +537,9 @@ def cmd_accept(a):
                     (f", merged {merged}" if merged else ""))
     results.record(task, "accepted", commit=commit, merged=bool(merged))
     _ack_all(task)
+    note = claude_md_status(repo, spec["branch"])
+    print(f"{note}: keep it current (update and commit it if this change alters what it says)"
+          if note != "no CLAUDE.md" else "the repo has no CLAUDE.md: write one (wb init)")
     print(f"accepted {a.name}: commit {commit} on {spec['branch']}" +
           (f", merged into {gitops.git(repo, 'branch', '--show-current').strip()} as {merged}"
            if merged else f"\nmerge with: git -C {repo} merge --no-ff {spec['branch']}"))
@@ -554,6 +573,9 @@ def cmd_models(a):
         for i, sc in enumerate(router.rank(size)):
             mark = "→" if i == 0 and sc.state["available"] else " "
             print(f" {mark} {sc.model.id:34} {sc.line()}")
+        for m in found.values():
+            if not router.allowed(m, size):
+                print(f"   {m.id:34} not for {size} tasks (wb model sizes)")
     if not store.read_jsonl(store.home() / "bench.jsonl")[0]:
         print("\nno measurements yet: `wb bench` runs the suite on every model")
     if a.set_default:
@@ -613,6 +635,179 @@ def cmd_stats(a):
     print(results.table())
 
 
+SCOUT_EVERY_DAYS = 7
+
+
+def scout_state() -> dict:
+    return store.read_json(store.home() / "scout.json", {}) or {}
+
+
+def cmd_scout(a):
+    """The weekly model check's facts: this machine, what is installed, how each model does.
+    Claude reads it, looks up what is newest and best for this hardware, and recommends."""
+    path = store.home() / "scout.json"
+    st = scout_state()
+    if a.done:
+        store.write_json(path, {**st, "done_at": store.now(), "notes": a.notes or ""})
+        print(f"model check recorded; the next one is due in {SCOUT_EVERY_DAYS} days")
+        return
+    if a.due:
+        due = store.now() - st.get("done_at", 0) > SCOUT_EVERY_DAYS * 86400
+        print("due" if due else "not due")
+        sys.exit(0 if due else 1)
+    when = st.get("done_at")
+    print("last model check: " + (f"{time.strftime('%Y-%m-%d', time.localtime(when))}, "
+                                  f"{(store.now() - when) / 86400:.0f} days ago"
+                                  + (f": {st['notes']}" if st.get("notes") else "") if when else "never"))
+    print("\nhardware")
+    print("\n".join(hardware.report()))
+    provs = models.providers()
+    registered = models.discover()
+    print("\nmodels OpenCode can use (opencode.json)")
+    real = defaultdict(list)
+    for r in store.read_jsonl(store.home() / "results.jsonl")[0]:
+        real[r.get("model")].append(r)
+    for pid, prov in provs.items():
+        installed = {x["name"]: x for x in models.ollama_installed(prov["root"])} \
+            if prov["engine"] == "ollama" else {}
+        for name in prov["models"]:
+            m = registered.get(f"{pid}/{name}")
+            disk = installed.get(name) or installed.get(f"{name}:latest") or {}
+            facts = " · ".join(x for x in (
+                f"{hardware.size(disk.get('size'))} on disk" if disk.get("size") else "",
+                disk.get("params") or "", disk.get("quant") or "",
+                f"{(m.config.get('limit') or {}).get('context', 0) // 1024}K context" if m else "") if x)
+            rs = real.get(f"{pid}/{name}", [])
+            used = (f"{len(rs)} real task(s), {sum(r['outcome'] == 'accepted' for r in rs)} accepted, "
+                    f"last {time.strftime('%Y-%m-%d', time.localtime(max(r['ts'] for r in rs)))}"
+                    if rs else "no real tasks yet")
+            print(f"  {pid}/{name}: {facts or prov['engine']} · {used}")
+        extra = [x for x in installed if x not in prov["models"] and x.removesuffix(":latest")
+                 not in prov["models"]]
+        if extra:
+            print(f"  installed in {pid} but not registered: " + ", ".join(
+                f"{x} ({hardware.size(installed[x]['size'])})" for x in extra))
+    cfg = json.loads(models.opencode_config_path().read_text())
+    print(f"  OpenCode's default: {cfg.get('model') or '(none)'}")
+    print("\nmeasured (wb bench)")
+    print(bench.table())
+    print("\nnext: compare with what is newest and best for this hardware, recommend to the user, "
+          "and when done: wb scout --done --notes \"…\"")
+
+
+def cmd_model(a):
+    """Add a model to OpenCode's config (pulling it first with --pull), or retire one."""
+    if a.action == "sizes":
+        m = models.resolve(a.id)
+        bad = set(a.sizes or ()) - set(router.SIZES)
+        if bad:
+            die(f"sizes are {', '.join(router.SIZES)}")
+        models.set_override(m.id, "sizes", sorted(set(a.sizes)) if a.sizes else None)
+        print(f"{m.id}: routed " + (" and ".join(sorted(set(a.sizes))) + " tasks only"
+                                    if a.sizes else "tasks of every size, as measured"))
+        return
+    provider, _, name = a.id.partition("/")
+    provs = models.providers()
+    if provider not in provs or not name:
+        die(f"name it provider/model, with one of OpenCode's local providers: {', '.join(provs)}")
+    prov = provs[provider]
+    if a.action == "add":
+        if a.pull:
+            if prov["engine"] != "ollama":
+                die(f"{provider} is not an Ollama provider; install the model the server's own way")
+            models.ollama_pull(prov["root"], name, say=lambda m: print(m, flush=True))
+        facts = models.ollama_show(prov["root"], name) if prov["engine"] == "ollama" else {}
+        caps = facts.get("capabilities") or []
+        # the context the server actually serves: what this provider's other models are set to,
+        # else what the model was trained for
+        siblings = [(e.get("limit") or {}).get("context") for e in prov["models"].values()]
+        ctx = a.context or next((c for c in siblings if c), None) or facts.get("context_length")
+        entry = {"name": a.label or name,
+                 "tool_call": "tools" in caps if caps else True,
+                 "reasoning": "thinking" in caps if caps else True}
+        if ctx:
+            out = min(4096, ctx // 8)
+            entry["limit"] = {"context": ctx, "input": ctx - out, "output": out}
+        models.write_entry(provider, name, entry)
+        print(f"registered {a.id}: {'tools' if entry['tool_call'] else 'NO tool calls'}, "
+              f"{'reasoning' if entry['reasoning'] else 'no reasoning'}, "
+              f"{(ctx or 0) // 1024}K context\nnext: wb bench {a.id}  (the router ignores it "
+              "until it is measured)")
+        return
+    # retire
+    cfg = json.loads(models.opencode_config_path().read_text())
+    if cfg.get("model") == a.id:
+        die(f"{a.id} is OpenCode's default model; wb models --set-default picks another first")
+    if name not in prov["models"]:
+        die(f"{a.id} is not registered")
+    models.write_entry(provider, name, None)
+    done = f"retired {a.id}: removed from OpenCode's config (its measurements stay in the history)"
+    if a.delete:
+        if prov["engine"] != "ollama":
+            done += f"; {provider} is not Ollama, so delete its weights the server's own way"
+        else:
+            models.ollama_delete(prov["root"], name)
+            done += "; its weights were deleted from Ollama"
+    print(done)
+
+
+def claude_md_status(repo: Path, ref: str = "HEAD") -> str:
+    """One line on the repo's CLAUDE.md at ref: missing, or how far behind the code it may be."""
+    if not _has_file(repo, ref, "CLAUDE.md"):
+        return "no CLAUDE.md"
+    last = gitops.git(repo, "log", "-1", "--format=%h", ref, "--", "CLAUDE.md").strip()
+    since = int(gitops.git(repo, "rev-list", "--count", f"{last}..{ref}", "--", ".",
+                           ":!CLAUDE.md", ":!AGENTS.md").strip() or 0)  # commits that changed code
+    return (f"CLAUDE.md is current with {ref}" if not since else
+            f"CLAUDE.md last changed {since} commit(s) before {ref} ({last})")
+
+
+def cmd_init(a):
+    """Set a project up as Claude keeps every project: a git repo on master with an initial
+    commit, AGENTS.md a symlink to CLAUDE.md. Safe to run again; no remote is ever added."""
+    d = Path(a.dir).expanduser().resolve()
+    d.mkdir(parents=True, exist_ok=True)
+    inside = gitops.git(d, "rev-parse", "--show-toplevel", check=False).strip()
+    if inside and Path(inside) != d:
+        die(f"{d} is inside the git repo {inside}; init the project in its own directory")
+    if not gitops.git(d, "config", "user.email", check=False).strip():
+        die("git has no user.email: the user's identity signs the commits (git config --global)")
+    did = []
+    if not inside:
+        gitops.git(d, "init", "-q", "-b", "master")
+        did.append("git repo on master")
+    claude, agents = d / "CLAUDE.md", d / "AGENTS.md"
+    if agents.is_file() and not agents.is_symlink() and not claude.exists():
+        agents.rename(claude)  # the project's instructions live in CLAUDE.md, AGENTS.md points at it
+        did.append("AGENTS.md moved to CLAUDE.md")
+    if claude.is_file() and agents.is_file() and not agents.is_symlink():
+        if agents.read_text() == claude.read_text():
+            agents.unlink()
+        else:
+            print("AGENTS.md and CLAUDE.md differ: merge them into CLAUDE.md, delete AGENTS.md, "
+                  "and run wb init again")
+    if claude.is_file() and not agents.exists() and not agents.is_symlink():
+        agents.symlink_to("CLAUDE.md")
+        did.append("AGENTS.md → CLAUDE.md")
+    has_commits = bool(gitops.git(d, "rev-parse", "--verify", "-q", "HEAD", check=False).strip())
+    if not has_commits:
+        gitops.git(d, "add", "-A")
+        gitops.git(d, "commit", "-q", "--allow-empty", "-m", "Initial commit")
+        did.append("initial commit")
+    else:
+        touched = [p for p in ("CLAUDE.md", "AGENTS.md")
+                   if gitops.git(d, "status", "--porcelain", "--", p).strip()]
+        if touched and any("AGENTS.md" in x or "moved" in x for x in did):
+            gitops.git(d, "add", "-A", "--", *touched)
+            gitops.git(d, "commit", "-q", "-m", "chore: AGENTS.md links to CLAUDE.md", "--", *touched)
+            did.append("committed")
+    status = claude_md_status(d)
+    print(f"{d}: " + (", ".join(did) if did else "already set up") + f"; {status}"
+          + ("\nnext: write CLAUDE.md (what the project is, how to build and test it, its "
+             "conventions), commit it, then wb init again to link AGENTS.md"
+             if status == "no CLAUDE.md" else ""))
+
+
 def cmd_doctor(a):
     ok = True
 
@@ -663,6 +858,8 @@ def main(argv=None):
     s.add_argument("--base", default="HEAD")
     s.add_argument("--force", action="store_true", help="queue even if the model can't run now")
     s.add_argument("--bench", action="store_true", help=argparse.SUPPRESS)
+    s.add_argument("--no-claude-md", action="store_true",
+                   help="start even though the repo has no CLAUDE.md")
     s.set_defaults(f=cmd_start)
 
     s = sub.add_parser("feedback", help="send review feedback for another round")
@@ -744,6 +941,25 @@ def main(argv=None):
     s.add_argument("--set-default", action="store_true",
                    help="make the router's pick for significant tasks OpenCode's default model")
     s.set_defaults(f=cmd_models)
+    s = sub.add_parser("model", help="add a model to OpenCode (--pull downloads it), retire one, "
+                                     "or limit the task sizes it is routed")
+    s.add_argument("action", choices=["add", "retire", "sizes"])
+    s.add_argument("id", help="provider/model")
+    s.add_argument("sizes", nargs="*", help="sizes: the only task sizes it gets (none: all)")
+    s.add_argument("--pull", action="store_true", help="add: download it into Ollama first")
+    s.add_argument("--label", help="add: the name OpenCode shows")
+    s.add_argument("--context", type=int, help="add: context tokens (default: what the provider's "
+                                                "other models use, else the model's own)")
+    s.add_argument("--delete", action="store_true", help="retire: also delete its weights")
+    s.set_defaults(f=cmd_model)
+    s = sub.add_parser("scout", help="the weekly model check: hardware, installed models, results")
+    s.add_argument("--done", action="store_true", help="record that the check was done")
+    s.add_argument("--notes", help="with --done: what was recommended or changed")
+    s.add_argument("--due", action="store_true", help="exit 0 if a check is due, else 1")
+    s.set_defaults(f=cmd_scout)
+    s = sub.add_parser("init", help="set a project up: git on master with an initial commit, "
+                                    "AGENTS.md → CLAUDE.md")
+    s.add_argument("dir"); s.set_defaults(f=cmd_init)
     s = sub.add_parser("bench", help="measure models: speed probes and graded coding tasks")
     s.add_argument("models", nargs="*", help="default: every model that can run")
     s.add_argument("--tasks", nargs="+", help="only these bench tasks")

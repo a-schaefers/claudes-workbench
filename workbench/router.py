@@ -5,6 +5,9 @@ hidden tests, plus speed probes) and real delegated work (results.jsonl: accepte
 long it took). Quality is the success rate with a uniform prior, (wins + 1) / (tries + 2), so one
 lucky run doesn't crown a model. Among the models within QUALITY_MARGIN of the best, the fastest
 expected finish wins, counting the time to get the model onto the GPU when it isn't there.
+
+The user's policy can narrow that: a model whose models.json entry has ``"sizes": ["trivial"]``
+is only ever routed trivial tasks, whatever it scores elsewhere (`wb model sizes`).
 """
 from __future__ import annotations
 
@@ -83,9 +86,14 @@ def expected_minutes(model_id: str, size: str) -> float | None:
     return score(m, size, state={"available": True, "resident": True}).minutes
 
 
+def allowed(m: models.Model, size: str) -> bool:
+    return size in (m.extra.get("sizes") or SIZES)
+
+
 def rank(size: str) -> list[Score]:
-    """Every discovered model's case for a task of this size, best first."""
-    scores = [score(m, size) for m in models.discover().values()]
+    """Every discovered model's case for a task of this size, best first (the user's policy
+    leaves some out: allowed)."""
+    scores = [score(m, size) for m in models.discover().values() if allowed(m, size)]
     usable = [s for s in scores if s.state["available"]]
     proven = [s for s in usable if s.tries]
     if proven:

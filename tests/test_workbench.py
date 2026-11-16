@@ -62,6 +62,7 @@ class Base(unittest.TestCase):
                                       capture_output=True)
         g("init", "-q", "-b", "main")
         (self.repo / "README.md").write_text("hello\n")
+        (self.repo / "CLAUDE.md").write_text("# repo\nA test project.\n")  # wb start needs one
         g("add", ".")
         g("-c", "user.email=t@t", "-c", "user.name=t", "commit", "-qm", "init")
         g("config", "user.email", "t@t")
@@ -644,6 +645,105 @@ class Routing(Base):
         sc = {s.model.id: s for s in router.rank("significant")}
         self.assertEqual(sc["ollama/qwen3.8-27b"].tries, 0)   # measured on other weights
         self.assertEqual(sc["ollama/mimo-v2.6:9b-q8_0"].wins, 1)
+
+
+class Projects(Base):
+    """wb init, and wb start's demand for a CLAUDE.md."""
+    def git(self, d, *a):
+        return subprocess.run(["git", "-C", str(d), *a], capture_output=True, text=True).stdout.strip()
+
+    def test_init_a_new_project(self):
+        d = Path(self.tmp.name) / "game"
+        os.environ.update(GIT_CONFIG_GLOBAL=str(Path(self.tmp.name) / "gitconfig"))
+        (Path(self.tmp.name) / "gitconfig").write_text("[user]\n\temail = t@t\n\tname = t\n")
+        out = run_wb("init", str(d))
+        self.assertIn("git repo on master", out)
+        self.assertIn("next: write CLAUDE.md", out)
+        self.assertEqual(self.git(d, "branch", "--show-current"), "master")
+        self.assertEqual(self.git(d, "log", "--format=%s"), "Initial commit")
+        self.assertEqual(self.git(d, "remote"), "")             # no remote until the user names one
+        (d / "CLAUDE.md").write_text("# game\n")
+        self.git(d, "add", "CLAUDE.md"); self.git(d, "commit", "-qm", "docs: CLAUDE.md")
+        out = run_wb("init", str(d))
+        self.assertIn("AGENTS.md → CLAUDE.md", out)
+        self.assertIn("CLAUDE.md is current", out)
+        self.assertEqual(os.readlink(d / "AGENTS.md"), "CLAUDE.md")
+        self.assertEqual(self.git(d, "status", "--porcelain"), "")  # the link is committed
+        self.assertIn("already set up", run_wb("init", str(d)))
+        with self.assertRaises(SystemExit):
+            run_wb("init", str(d / "sub"))                     # inside a repo: not a new project
+
+    def test_an_agents_md_becomes_claude_md(self):
+        (self.repo / "AGENTS.md").write_text("# rules\n")
+        (self.repo / "CLAUDE.md").unlink()
+        subprocess.run(["git", "-C", str(self.repo), "add", "-A"], check=True)
+        subprocess.run(["git", "-C", str(self.repo), "commit", "-qm", "agents"], check=True)
+        run_wb("init", str(self.repo))
+        self.assertEqual((self.repo / "CLAUDE.md").read_text(), "# rules\n")
+        self.assertTrue((self.repo / "AGENTS.md").is_symlink())
+
+    def test_start_wants_a_claude_md(self):
+        (self.repo / "CLAUDE.md").unlink()
+        subprocess.run(["git", "-C", str(self.repo), "commit", "-qam", "no docs"], check=True)
+        os.environ["FAKE_SCENARIO"] = "ok"
+        with self.assertRaises(SystemExit):
+            run_wb("start", "t-blind", "--spec", str(self.spec), "--repo", str(self.repo))
+        self.assertFalse(store.Task("t-blind").exists)
+        run_wb("start", "t-ok", "--spec", str(self.spec), "--repo", str(self.repo), "--no-claude-md")
+        self.assertTrue(store.Task("t-ok").exists)
+
+    def test_accept_says_whether_claude_md_kept_up(self):
+        self.start("t-ok", "ok", "--test", TEST_CMD)
+        wait_phase("t-ok", {"review"})
+        out = run_wb("accept", "t-ok", "-m", "feat: answer")
+        self.assertIn("CLAUDE.md last changed 1 commit(s) before", out)
+
+
+class ModelSet(Base):
+    """What the weekly model check uses: add, retire, the size policy, scout's schedule."""
+    def config(self):
+        return json.loads(Path(os.environ["WB_OPENCODE_CONFIG"]).read_text())
+
+    def test_add_and_retire(self):
+        out = run_wb("model", "add", "ollama/new-coder:14b", "--pull", "--label", "New Coder")
+        self.assertIn("registered ollama/new-coder:14b", out)
+        entry = self.config()["provider"]["ollama"]["models"]["new-coder:14b"]
+        self.assertEqual(entry["limit"]["context"], 32768)        # what the provider serves
+        self.assertTrue(entry["tool_call"])
+        self.assertIn("ollama/new-coder:14b", run_wb("models"))
+        out = run_wb("model", "retire", "ollama/new-coder:14b", "--delete")
+        self.assertIn("weights were deleted", out)
+        self.assertNotIn("new-coder:14b", self.config()["provider"]["ollama"]["models"])
+        with self.assertRaises(SystemExit):
+            run_wb("model", "add", "cloud/big")                    # not a local provider
+
+    def test_retire_refuses_the_default(self):
+        cfg = self.config(); cfg["model"] = "ollama/qwen3.8-27b"
+        Path(os.environ["WB_OPENCODE_CONFIG"]).write_text(json.dumps(cfg))
+        with self.assertRaises(SystemExit):
+            run_wb("model", "retire", "ollama/qwen3.8-27b")
+
+    def test_size_policy(self):
+        run_wb("model", "sizes", "mimo", "trivial")
+        from workbench import router
+        self.assertNotIn("ollama/mimo-v2.6:9b-q8_0", [s.model.id for s in router.rank("significant")])
+        self.assertIn("ollama/mimo-v2.6:9b-q8_0", [s.model.id for s in router.rank("trivial")])
+        self.assertIn("not for significant tasks", run_wb("models"))
+        run_wb("model", "sizes", "mimo")
+        self.assertIn("ollama/mimo-v2.6:9b-q8_0", [s.model.id for s in router.rank("significant")])
+
+    def test_scout_schedule(self):
+        with self.assertRaises(SystemExit) as due:
+            run_wb("scout", "--due")
+        self.assertEqual(due.exception.code, 0)
+        out = run_wb("scout")
+        self.assertIn("last model check: never", out)
+        self.assertIn("ollama/qwen3.8-27b", out)
+        run_wb("scout", "--done", "--notes", "kept all")
+        with self.assertRaises(SystemExit) as due:
+            run_wb("scout", "--due")
+        self.assertEqual(due.exception.code, 1)
+        self.assertIn("days ago: kept all", run_wb("scout"))
 
 
 class BenchSuite(unittest.TestCase):

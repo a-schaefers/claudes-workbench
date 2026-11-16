@@ -43,7 +43,9 @@ test('/workbench opens the pane and counts open tasks', async ($, on) => {
 })
 
 // A file system in memory: what `wb` and its runner would have written.
-function fakeTasks(on: any, files: Record<string, string>, dirs = ['fix-it']) {
+function fakeTasks(on: any, files: Record<string, string>, dirs = ['fix-it'], scouted = true) {
+  // the weekly model check was done just now, unless the test is about it
+  if (scouted) files['/wb/scout.json'] = JSON.stringify({ done_at: 1_800_000_000 })
   on('env.get', (_: any, e: any) => ({ value: ({ WB_HOME: '/wb', HOME: '/home/u' } as any)[e.name] }))
   on('fs.read', (_: any, e: any) => {
     if (!(e.path in files)) throw new Error(`ENOENT: ${e.path}`)
@@ -256,4 +258,37 @@ test('a benchmark is one line, and the live header names its task', async ($, on
   expect(await ui.find({ type: 'Text', text: 'bench-slugify-1116074054' })).toBeFalsy()  // no row each
   expect(await ui.find({ type: 'Text', text: /── merge-intervals \(benchmark\)/ })).toBeTruthy()
   await ui.unmount()
+})
+
+test('the weekly model check comes once, in a quiet moment of a session in use; /delegate-models asks now', async ($, on) => {
+  const clock = mock.clock(on, { now: 1_800_000_000_000 })
+  const files: Record<string, string> = {}
+  fakeTasks(on, files, [], false)
+  on('ui.toast', () => ({ value: undefined }))
+  const asked: string[] = []
+  on('prompt.submit', (_: any, e: any) => {
+    asked.push(e.text)
+    return { text: e.text }
+  })
+  await $.session.start({ cwd: '/', surface: 'terminal', isInteractive: true })
+  await clock.advance(3000)
+  expect(asked.length).toBe(0)                       // nobody has used the session yet
+
+  await $.turn.start({ text: 'hi', turnId: 't1' })
+  await $.turn.complete({ answer: '', durationMs: 1, isAborted: false, turnId: 't1', reason: 'answer' })
+  await clock.advance(2000)
+  expect(asked.length).toBe(1)
+  expect(asked[0]).toContain('The weekly model check is due')
+  expect(asked[0]).toContain('`wb scout`')
+  expect(JSON.parse(files['/wb/scout.json']).offered_at).toBeGreaterThan(1_800_000_000)  // raised: not again today
+
+  await clock.advance(10_000)
+  expect(asked.length).toBe(1)
+
+  // done this week: nothing more, until the user asks for it
+  files['/wb/scout.json'] = JSON.stringify({ done_at: 1_800_000_010 })
+  await $.command.run({ command: 'delegate-models', args: '' })
+  await clock.advance(2000)
+  expect(asked.length).toBe(2)
+  expect(asked[1]).toContain('The weekly model check is due')
 })

@@ -45,6 +45,23 @@ Task: `$ARGUMENTS`
 `wb` is the workbench CLI (`~/repos/workbench`, on PATH as `wb`; `wb --help`). Every command
 prints a short report written for you — don't go digging in raw logs unless a report says to.
 
+## 0. The project: git and CLAUDE.md are yours
+Every project you delegate in is a git repo with a CLAUDE.md that tells the truth, and you keep
+it that way; the agents never write either.
+- **New project**: `wb init <dir>` makes the repo (branch `master`, an initial commit). Never add a
+  remote or create a GitHub repo until the user gives the name and says private or public; you
+  may ask once the project has a shape.
+- **CLAUDE.md**: before the first task, write it from what you know and what you read (what the
+  project is and is not, how to build, run and test it, the layout, conventions, decisions made
+  and things deliberately not done), commit it, and run `wb init <dir>` again: AGENTS.md becomes
+  a symlink to it, so OpenCode's agents read the same file. Keep it short and factual; it goes
+  into every agent prompt. An existing AGENTS.md is moved to CLAUDE.md by `wb init`.
+- **Keeping it current**: `wb accept` prints how many code commits CLAUDE.md is behind. After
+  each accepted task, before the next spec, update it for whatever changed (a new module, command,
+  dependency, convention or decision) and commit it on its own (`docs: CLAUDE.md …`). Nothing
+  changed that it describes? Leave it. `wb start` refuses a repo without one (`--no-claude-md`
+  only for throwaway repos).
+
 ## 1. Size it; the router picks the model
 | Size | Typical task |
 |---|---|
@@ -58,6 +75,19 @@ isn't on the GPU, and prints why. The runner then loads that model, unloading wh
 `wb models` shows the ranking per size. Pass `--model <id or fragment>` only if the user names one.
 If `wb models` says nothing has been measured, or a model was added or re-pulled, suggest
 `wb bench` (long: run it in the background) before relying on the choice.
+The user may limit a model to some sizes (`wb model sizes <id> trivial`); the router obeys that
+whatever the scores say. Respect it, and change it only when the user asks.
+
+**The weekly model check.** Once a week the mod asks you (or the user runs `/delegate-models`)
+to check the local models against this machine. `wb scout` gives the facts: GPU and VRAM, RAM,
+disk, what is installed and registered, benchmarks and real-task results. Then research what is
+newest and best: open-weight coding models with reliable tool calls, the sizes and quantizations
+that fit the VRAM with room for the context, and runtime releases worth having. Use primary
+sources, verify before you name anything, and remember this is a consumer card: results first,
+then speed. Recommend briefly (keep / add / retire, with sizes and why), and only with a yes:
+`wb model add <provider/model> --pull` (background), `wb bench <id>`, `wb model retire <id>
+[--delete]`. Installed but unregistered models may belong to other tools: ask before touching
+them. Finish with `wb scout --done --notes "…"`. Nothing worth changing: one line, and done.
 
 ## 2. Spec (the most valuable thing you write)
 Read just enough of the repo to scope it, then write the spec to a file in the scratchpad:
