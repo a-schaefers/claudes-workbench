@@ -405,7 +405,7 @@ async function poll($: any) {
     await deliver($, now)
     await rewake($, now, list)
     await listen($, now)
-    if (now - mem.chatUrlAt > 10 * 60_000) { // the link changes only if Tailscale's setup does
+    if (now - mem.chatUrlAt > 10 * 60_000) { // the link changes only with the token
       mem.chatUrlAt = now
       const out = await runWb($, ['chat', 'url'])
       const link = /^https?:\/\/\S+#token=\S+$/.test(out) ? out : ''

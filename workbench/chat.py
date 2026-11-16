@@ -10,6 +10,7 @@ What a message can do is what typing in the terminal can do, so the API wants a 
 (~/.config/workbench/chat-token, made on first use; `wb chat url` prints a link carrying it in
 the fragment, which never leaves the browser) and answers only to the host names it serves
 (localhost and this machine's Tailscale names), which stops other web pages and DNS rebinding.
+The link it prints is always localhost; reaching it from a phone is the user's own setup.
 """
 from __future__ import annotations
 
@@ -315,30 +316,7 @@ def serve(port: int, binds: list[str] | None, say=print) -> None:
     servers[0].serve_forever()
 
 
-def served(port: int) -> list[str]:
-    """`tailscale serve` front doors that proxy to this port (HTTPS on the tailnet)."""
-    try:
-        r = subprocess.run(["tailscale", "serve", "status", "--json"], capture_output=True,
-                           text=True, timeout=5)
-        web = json.loads(r.stdout or "{}").get("Web") or {}
-    except (OSError, ValueError, subprocess.TimeoutExpired):
-        return []
-    found = []
-    for hostport, conf in web.items():
-        for path, h in (conf.get("Handlers") or {}).items():
-            if (h.get("Proxy") or "").rstrip("/") in (f"http://127.0.0.1:{port}", f"http://localhost:{port}"):
-                host = hostport.removesuffix(":443")
-                found.append(f"https://{host}{path}")
-    return found
-
-
 def url(port: int) -> str:
-    """The one link to open: `tailscale serve`'s HTTPS front door if there is one, else the
-    tailnet name on the port, else localhost; the token rides in the fragment."""
-    front = served(port)
-    if front:
-        base = front[0].rstrip("/")
-    else:
-        names = sorted(tailscale().get("names", ()), key=len, reverse=True)
-        base = f"http://{names[0] if names else 'localhost'}:{port}"
-    return f"{base}/#token={token()}"
+    """The one link to open: localhost, the token in the fragment. Reaching it from another
+    device (Tailscale, a tunnel) is the user's own setup: they change the host in the link."""
+    return f"http://localhost:{port}/#token={token()}"

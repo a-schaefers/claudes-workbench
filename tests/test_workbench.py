@@ -840,7 +840,7 @@ class WebChat(Base):
         self.assertEqual(self.call("/api/state", token=tok, host="evil.example")[0], 403)  # rebinding
         self.assertEqual(self.call("/api/state", token=tok)[0], 200)
         self.assertEqual(self.call("/api/send", {"text": ""}, token=tok)[0], 400)
-        self.assertIn(f"#token={tok}", self.chat.url(1337))
+        self.assertEqual(self.chat.url(1337), f"http://localhost:1337/#token={tok}")
 
     def test_static_files_and_nothing_else(self):
         for path, kind in (("/", "text/html"), ("/app.js", "text/javascript"), ("/app.css", "text/css"),
