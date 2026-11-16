@@ -5,7 +5,7 @@
 **Claude plans and reviews. Your gaming PC writes the code.**
 
 The goal: move to a hybrid workflow on an ordinary gaming PC without giving up the quality of
-Claude (Opus 5.5). Open coding models you can run at home are said to code at roughly the level of
+a current-generation Claude. Open coding models you can run at home are said to code at roughly the level of
 last year's best cloud models, but left alone they wander, overthink and cut corners. workbench
 puts Claude in charge of them: Claude plans the work, hands each piece to a local model, checks the
 result like a strict senior reviewer, and sends it back until it's right. Claude spends its tokens
