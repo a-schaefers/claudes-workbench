@@ -4,6 +4,7 @@ Every command prints a short, plain report: it is read by Claude, whose tokens a
 resource, and by a person at a terminal.
 """
 import argparse
+import json
 import os
 import signal
 import subprocess
@@ -357,6 +358,16 @@ def cmd_models(a):
             print(f" {mark} {sc.model.id:34} {sc.line()}")
     if not store.read_jsonl(store.home() / "bench.jsonl")[0]:
         print("\nno measurements yet: `wb bench` runs the suite on every model")
+    if a.set_default:
+        top, why = router.choose("significant")
+        if top is None or not top.tries:
+            die("no measured model to make the default yet: run `wb bench` first")
+        path = models.opencode_config_path()
+        cfg = json.loads(path.read_text())
+        old = cfg.get("model")
+        cfg["model"] = top.model.id
+        store.write_json(path, cfg)
+        print(f"\nOpenCode's default model: {old} → {top.model.id} ({why})")
 
 
 def cmd_bench(a):
@@ -478,8 +489,10 @@ def main(argv=None):
     s.add_argument("name"); s.add_argument("--reason")
     s.add_argument("--keep-branch", action="store_true")
     s.set_defaults(f=cmd_discard)
-    sub.add_parser("models", help="the local models, and which the router picks per task size"
-                   ).set_defaults(f=cmd_models)
+    s = sub.add_parser("models", help="the local models, and which the router picks per task size")
+    s.add_argument("--set-default", action="store_true",
+                   help="make the router's pick for significant tasks OpenCode's default model")
+    s.set_defaults(f=cmd_models)
     s = sub.add_parser("bench", help="measure models: speed probes and graded coding tasks")
     s.add_argument("models", nargs="*", help="default: every model that can run")
     s.add_argument("--tasks", nargs="+", help="only these bench tasks")

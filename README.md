@@ -3,17 +3,18 @@
 **Claude is the architect and reviewer. Local models do the typing.**
 
 `workbench` lets Claude Code hand a coding task to a local model running in
-[OpenCode](https://opencode.ai), and review the result like a pull request. The model is
-Qwen3.8 Flash-Next Coder on [Strata](https://github.com/Niko1221/Strata), or Qwen3.8 27B /
-MiMo-V2.6 9B on [Ollama](https://ollama.com). Claude writes the spec and judges the diff. The
-GPU writes the code. Failing tests go back to the agent automatically, so Claude is only woken
-for work that passes, a real question, or a run that got stuck.
+[OpenCode](https://opencode.ai), and review the result like a pull request. Any model OpenCode
+serves locally can take the work, for example on [Ollama](https://ollama.com) or
+[Strata](https://github.com/Niko1221/Strata). workbench measures them (`wb bench`) and routes each
+task to the best one for the job. Claude writes the spec and judges the diff. The GPU writes the
+code. Failing tests go back to the agent automatically, so Claude is only woken for work that
+passes, a real question, or a run that got stuck.
 
 ```
  you ─/delegate─▶ Claude Code ─ wb start ─▶ runner (detached, one per task)
                      ▲                          │  git worktree on delegate/<task>
                      │                          ▼
-                     │                     opencode run ──▶ Strata :8080 / Ollama :11434
+                     │                     opencode run ──▶ the routed local model
                      │                          │   ▲
                      │            events, tests,│   │ ask_reviewer (MCP, blocking, budgeted)
                      │            auto-fix      ▼   │
@@ -85,9 +86,11 @@ Denied tools also leave the prompt. That cuts the fixed prompt from about 9.2k t
 
 ## A task's life
 
-1. **start**: `wb start` makes branch `delegate/<task>` in a fresh worktree, writes the round-1
-   prompt and spawns the runner. It returns at once.
-2. **run**: the runner takes the GPU lock (one model at a time fits in 16 GB), then runs
+1. **start**: `wb start` asks the router for a model (unless `--model` names one), makes branch
+   `delegate/<task>` in a fresh worktree, writes the round-1 prompt and spawns the runner. It
+   returns at once.
+2. **run**: the runner takes the GPU lock (one model at a time fits in 16 GB), makes the task's
+   model resident (unloading or stopping whatever holds the card), then runs
    `opencode run --standalone --auto --format json` with the task's layer. Each event is
    normalized into `events.jsonl`; `status.json` carries the live summary.
 3. **guard**: it stops the agent when it:
@@ -125,22 +128,52 @@ Denied tools also leave the prompt. That cuts the fixed prompt from about 9.2k t
 | `wb accept <name> -m MSG [--merge]` | commit on the branch (and merge) |
 | `wb discard <name> [--reason R] [--keep-branch]` | drop it |
 | `wb stop <name>` | stop a running agent (it becomes `stuck`) |
-| `wb models` · `wb stats` · `wb doctor` | registry and readiness · per-model results · environment check |
+| `wb models` | the discovered models, whether each can run, and the router's ranking per size |
+| `wb bench [models…] [--tasks …] [--repeat N] [--report]` | measure models (long: run it in the background) |
+| `wb stats` · `wb doctor` | real results per model · environment check |
 
 ## Models
 
-`workbench/models.py` holds the defaults. Override or add entries in
-`~/.config/workbench/models.json` (or `$WB_MODELS`), using the same shape.
+Nothing in the code names a model. A model is a candidate when it belongs to an OpenCode provider
+whose `baseURL` is on this machine (`~/.config/opencode/opencode.json`). Adding a model to
+OpenCode adds it here; `wb bench` then measures it.
 
-| key | OpenCode model | tier | notes |
-|---|---|---|---|
-| `strata` | `strata/strata` | significant | MoE, experts stream from RAM/SSD. Fast decode once warm, slow prefill |
-| `qwen27b` | `ollama/qwen3.8-27b` | significant | dense 27B at Q3_K_XL, fully on the GPU |
-| `mimo` | `ollama/mimo-v2.6:9b-q8_0` | trivial | ~60 tok/s, 100 % GPU |
+`~/.config/workbench/models.json` (or `$WB_MODELS`) holds only what OpenCode's config can't say,
+keyed by provider or by model id:
 
-`--size significant` picks whichever significant model is ready. `--size trivial` runs on
-whatever already holds the GPU instead of evicting it. An Ollama model reports not-ready while
-Strata holds the card.
+```json
+{"strata": {"start": "cd ~ && strata launch --preset coder --no-tui --yes",
+            "stop": "strata launch --stop --preset coder"},
+ "ollama/some-model": {"skip": true}}
+```
+
+Ollama models load on demand. A server that serves one model, like Strata, needs `start`/`stop`
+so the runner can swap it on and off the GPU; it waits for a busy server to go idle first.
+
+### Measuring: `wb bench`
+
+- **probe**: straight at the model's server. Cold load time, prefill and decode tok/s, and three
+  tool calls checked for the right name and arguments.
+- **tasks**: `bench/tasks/*`, small real tasks at both sizes (fix a bug, extend an API,
+  implement a data structure, add a CLI feature across functions, hunt several bugs from one
+  report). Each runs through the real pipeline (worktree, OpenCode, test gate, auto-fix) on a
+  scratch repo. It passes only if **hidden tests** pass on what the agent left. A unit test
+  checks the suite itself: each seed fails its hidden tests and each reference solution passes
+  them.
+
+Results go to `bench.jsonl` with the model's weights fingerprint (Ollama digest, or the id the
+server reports), so re-pulled or replaced weights are measured afresh. Bench runs never wake
+Claude and never count as real results.
+
+### Routing
+
+For a task of a given size, each model's quality is `(wins + 1) / (tries + 2)` over its bench
+tasks of that size on the current weights, plus real delegated tasks (accepted = win). Among
+models within 0.15 of the best quality, the router takes the fastest expected finish: mean
+minutes per task, plus the measured cold-load time if the model isn't on the GPU. With no
+evidence yet, it uses whatever is loaded and says so. `wb start` prints the reason; `wb models`
+prints the whole ranking. A new model starts with no evidence and earns its place through
+`wb bench`.
 
 ## State
 
@@ -148,7 +181,7 @@ Everything is plain files under `~/.local/state/workbench` (`$WB_HOME`). The CLI
 the MCP server and the mod coordinate only through them:
 
 ```
-notify.jsonl  results.jsonl  gpu.lock
+notify.jsonl  results.jsonl  bench.jsonl  gpu.lock
 tasks/<name>/  task.json status.json events.jsonl opencode.json context.md acked runner.log
                rounds/<n>/{prompt.md,summary.md,tests.txt}  ask/<id>.json|.answer  worktree/
 ```
@@ -169,10 +202,10 @@ It reads the same files as `wb`, and shares acknowledgements with `wb wait` thro
 ## Troubleshooting
 
 - `wb doctor` checks opencode and its config, git, each model's readiness and the state directory.
-- **Ollama model "not ready"**: Strata holds the GPU. Run `strata launch --stop --preset coder`,
-  or use `--model strata`.
-- **Strata's first reply takes minutes**: it is reading the prompt (`strata monitor` shows
-  progress). Later turns reuse the cached prefix.
+- **A model "can't run"**: `wb models` says why: the server is down, the model isn't pulled, or
+  a stopped server has no `start` command in `~/.config/workbench/models.json`.
+- **The first reply takes minutes**: the runner may be loading the model (the status line says
+  so), or the model reads prompts slowly (see prefill in `wb bench --report`).
 - **The agent can't see `ask_reviewer`**: run `PWD=<worktree> OPENCODE_CONFIG=<task>/opencode.json
   opencode mcp list --print-logs`.
 - **What did the model actually receive?** Point a provider at a capturing fake server and

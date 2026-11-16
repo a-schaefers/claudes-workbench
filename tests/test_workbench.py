@@ -375,6 +375,16 @@ class Routing(Base):
         self.bench("ollama/mimo-v2.6:9b-q8_0", "trivial", False, 0.5, n=2)
         self.assertEqual(router.choose("trivial")[0].model.id, "ollama/qwen3.8-27b")
 
+    def test_set_default_writes_the_measured_pick_to_opencode(self):
+        with self.assertRaises(SystemExit):           # nothing measured: refuses
+            run_wb("models", "--set-default")
+        self.bench("ollama/qwen3.8-27b", "significant", True, 2.0, n=3)
+        out = run_wb("models", "--set-default")
+        self.assertIn("→ ollama/qwen3.8-27b", out)
+        cfg = json.loads(Path(os.environ["WB_OPENCODE_CONFIG"]).read_text())
+        self.assertEqual(cfg["model"], "ollama/qwen3.8-27b")
+        self.assertIn("provider", cfg)                # the rest of the config is kept
+
     def test_real_results_count_and_other_weights_do_not(self):
         from workbench import router
         self.bench("ollama/qwen3.8-27b", "significant", True, 2.0, n=3, fp="old-weights")

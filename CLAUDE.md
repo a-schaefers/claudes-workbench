@@ -7,7 +7,14 @@ has the architecture; read it first.
 - `workbench/` is the Python package, standard library only (Python 3.11+, developed on 3.14). Do not add dependencies.
   - `store.py`: task directories, atomic JSON, locked JSONL. Every other part talks through these files.
   - `runner.py`: the detached per-task driver. `cli.py`: `wb`. `ask_mcp.py`: the MCP tool server.
-  - `models.py`: the model registry and readiness checks. `events.py`: event normalization and the stuck detector.
+  - `models.py`: discovers local models from opencode.json, their status, and GPU residency (make_resident).
+  - `router.py`: picks a model per task size from evidence. `bench.py`: `wb bench`, the probes and graded tasks.
+  - `events.py`: event normalization and the stuck detector.
+- `bench/tasks/<name>/`: `task.json` (size, visible and hidden test commands), `spec.md`, `repo/` (the
+  seed), `hidden/` (grading tests the agent never sees), `reference/` (a solution, to prove the
+  task is sound). A new task needs all five; the suite test checks seed fails, reference passes.
+- Never name a model in code, docs or the skill. Models come from OpenCode's config, and choices
+  come from measurements, so newer models slot in without code changes.
   - `context.py`: what the agent knows. It adds CLAUDE.md files and rules, the nested-instructions map and the handbook to the config layer's `instructions`, and it sets the denied tools and skills.
 - `agent/HANDBOOK.md`: Claude's working habits for the local agent. Every agent prompt carries it,
   so keep it short: on Strata each token costs prefill time (~38 tok/s).
