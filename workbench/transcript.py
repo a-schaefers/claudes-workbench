@@ -246,6 +246,9 @@ def task_entries(task: store.Task) -> list[Entry]:
         elif kind == "answer":
             out.append(Entry(ts, key, [("claude", "Claude → agent · answer")]
                              + _block("", r.get("text", ""), 40, "  ")))
+        elif kind == "captain":
+            out.append(Entry(ts, key, [("claude", "Claude (captain):")]
+                             + _block("claude", r.get("text", ""), 40, "  ")))
         elif kind == "steer":
             what = "interrupts the agent" if r.get("now") else "queues a note for the agent's next step"
             out.append(Entry(ts, key, [("claude", f"■ Claude {what}")]))
@@ -280,8 +283,7 @@ def activity(task: store.Task, data: dict, now: float | None = None) -> str | No
     now = now or time.time()
     st = task.status
     phase = st.get("phase")
-    tokens = f" · Σ {_k(st.get('tok_in', 0))} in / {_k(st.get('tok_out', 0))} out" \
-        if st.get("tok_in") else ""
+    tokens = ""  # totals are on the clock line
     if phase == "queued":
         return f"Waiting for the GPU… {st.get('last') or ''}".strip()
     if phase == "testing":
@@ -311,6 +313,53 @@ def activity(task: store.Task, data: dict, now: float | None = None) -> str | No
     return f"{verb}… {_secs(since * 1000)}{tokens}"
 
 
+def model_line(task: store.Task, data: dict) -> str:
+    """The model and how it is set to think: OpenCode's variant and the model's own settings."""
+    sp = task.spec
+    m = models.discover().get(sp.get("model", ""))
+    cfg = m.config if m else {}
+    variant = ((data.get("info") or {}).get("model") or {}).get("variant") \
+        or (sp.get("opencode_model", "").partition("#")[2]) or "default"
+    vopts = ((cfg.get("variants") or {}).get(variant) or {})
+    opts = {**(cfg.get("options") or {}), **(vopts.get("options") or vopts)}
+    effort = opts.get("reasoningEffort") or opts.get("reasoning_effort") or (
+        f"{_k(opts['thinking']['budgetTokens'])} thinking tokens"
+        if isinstance(opts.get("thinking"), dict) and opts["thinking"].get("budgetTokens") else None)
+    if cfg.get("reasoning") is False:
+        think = "no reasoning"
+    else:
+        think = f"reasoning {effort}" if effort else "reasoning on, default effort"
+    ctx = (cfg.get("limit") or {}).get("context")
+    return " · ".join(x for x in (sp.get("model_label") or sp.get("model"), think,
+                                  f"variant {variant}", f"{ctx // 1024}K context" if ctx else "") if x)
+
+
+def clock_line(task: store.Task, now: float | None = None) -> str | None:
+    """Time, every way that helps at a glance: the task, this round, loading, and an ETA."""
+    from . import router
+    now = now or time.time()
+    sp, st = task.spec, task.status
+    took = now - (sp.get("created_at") or now)
+    parts = [f"task {_secs(took * 1000)}"]
+    if st.get("round_started_at") and st.get("phase") in ("running", "testing", "asking"):
+        parts.append(f"round {st.get('round', 1)} {_secs((now - st['round_started_at']) * 1000)}")
+    elif st.get("round", 1) > 1:
+        parts.append(f"{st['round']} rounds")
+    if st.get("load_secs", 0) >= 1:
+        parts.append(f"model load {_secs(st['load_secs'] * 1000)}")
+    if st.get("phase") in ("queued", "running", "testing", "asking"):
+        typical = router.expected_minutes(sp.get("model", ""), sp.get("size", "significant"))
+        if typical:
+            left = typical * 60 - took
+            parts.append(f"~{_secs(left * 1000)} left (typically {typical:.0f}m)" if left > 0
+                         else f"{_secs(-left * 1000)} past its typical {typical:.0f}m")
+        else:
+            parts.append("no ETA yet (wb bench)")
+    if st.get("tok_in"):
+        parts.append(f"Σ {_k(st['tok_in'])} in / {_k(st.get('tok_out', 0))} out")
+    return "⏲ " + " · ".join(parts)
+
+
 PHASE_LINE = {
     "queued": ("sys", "■ waiting for the GPU"),
     "review": ("ok", "■ done: waiting for Claude's review"),
@@ -322,9 +371,9 @@ PHASE_LINE = {
 }
 
 
-def header(task: store.Task, paint: Painter) -> str:
+def header(task: store.Task, paint: Painter, data: dict | None = None) -> str:
     sp = task.spec
-    lines = [paint("head", f"task {task.name}") + f" · {sp.get('model_label') or sp.get('model')}",
+    lines = [paint("head", f"task {task.name}") + f" · {model_line(task, data or {})}",
              paint("out", f"  repo {sp.get('repo')} · branch {sp.get('branch')}"
                    + (f" · tests `{sp['test_cmd']}`" if sp.get("test_cmd") else ""))]
     if sp.get("route"):
@@ -345,8 +394,12 @@ def follow(task: store.Task, verbose: bool = False, once: bool = False, color: b
         clear = "\r\033[K" if out.isatty() else ""  # over the activity row, redrawn after
         def emit(style, text):
             print(clear + paint(style, text), file=out, flush=True)
-    if not as_json:
-        print(header(task, paint), file=out, flush=True)
+    sid = find_session(task)
+    first = export(sid) if sid else {}
+    if as_json:
+        emit("meta", model_line(task, first))
+    else:
+        print(header(task, paint, first), file=out, flush=True)
     seen: set[str] = set()
     last_phase = None
     worktree = str(task.worktree)
@@ -367,11 +420,13 @@ def follow(task: store.Task, verbose: bool = False, once: bool = False, color: b
             now_line = activity(task, data)
             if now_line:
                 emit("activity", now_line)
-        elif out.isatty():
+            emit("clock", clock_line(task))
+        elif out.isatty() and phase not in store.CLOSED:
             now_line = activity(task, data)
             spin = "✻✳✶✢·"[int(time.time() * 2) % 5]
-            print("\r\033[K" + (paint("claude", f"{spin} {now_line}") if now_line else ""),
-                  end="", file=out, flush=True)
+            row = (paint("claude", f"{spin} {now_line}") + "  " if now_line else "") \
+                + paint("out", clock_line(task) or "")
+            print("\r\033[K" + row, end="", file=out, flush=True)
         if phase != last_phase and phase in PHASE_LINE and (last_phase is not None or once
                                                             or phase not in ("running",)):
             emit(*PHASE_LINE[phase])

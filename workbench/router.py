@@ -75,6 +75,14 @@ def score(m: models.Model, size: str, state: dict | None = None) -> Score:
     return s
 
 
+def expected_minutes(model_id: str, size: str) -> float | None:
+    """How long a task of this size usually takes on this model, from the same evidence."""
+    m = models.discover().get(model_id)
+    if not m:
+        return None
+    return score(m, size, state={"available": True, "resident": True}).minutes
+
+
 def rank(size: str) -> list[Score]:
     """Every discovered model's case for a task of this size, best first."""
     scores = [score(m, size) for m in models.discover().values()]

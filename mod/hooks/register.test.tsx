@@ -122,7 +122,9 @@ test('the pane follows the running task: its whole history, then what it is doin
       { s: 'claude', t: 'Claude → agent · spec' },
       { s: 'think', t: '  ✻ thought for 2.0s' },
       { s: 'add', t: '    +42' },
+      { s: 'meta', t: 'M · reasoning on, default effort' },
       { s: 'activity', t: 'Writing… 3.0s · ↓ 45 tokens · 41 tok/s' },
+      { s: 'clock', t: '⏲ task 4m · ~5m left (typically 9m)' },
     ]
     return { value: { exitCode: 0, stdout: lines.map(l => JSON.stringify(l)).join('\n'), stderr: '' } }
   })
@@ -136,6 +138,8 @@ test('the pane follows the running task: its whole history, then what it is doin
   expect(await ui.find({ type: 'Text', text: 'Claude → agent · spec' })).toBeTruthy()
   expect(await ui.find({ type: 'Text', text: '    +42' })).toBeTruthy()
   expect(await ui.find({ type: 'Text', text: /Writing… 3\.0s · ↓ 45 tokens/ })).toBeTruthy()
+  expect(await ui.find({ type: 'Text', text: /reasoning on/ })).toBeTruthy()
+  expect(await ui.find({ type: 'Text', text: /~5m left/ })).toBeTruthy()
   await ui.unmount()
 
   // a running task is re-read every poll, since its session moves between status writes

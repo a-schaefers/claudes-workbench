@@ -44,7 +44,7 @@ const LINE_STYLE: Record<string, Row> = {
   think: { dimColor: true, italic: true }, tool: { color: 'warning' }, out: { dimColor: true },
   ok: { color: 'success', bold: true }, bad: { color: 'error', bold: true },
   sys: { color: 'permission' }, add: { color: 'diffAdded' }, del: { color: 'diffRemoved' },
-  head: { bold: true }, activity: { color: 'claude' },
+  head: { bold: true }, activity: { color: 'claude' }, clock: { dimColor: true },
 }
 const SPIN = ['✻', '✳', '✶', '✢', '·', '✢', '✶', '✳']
 
@@ -90,6 +90,7 @@ const HEADLINE: Record<string, string> = {
   question: 'asks the reviewer a question (the agent is waiting)',
   stuck: 'was stopped: it got stuck',
   failed: 'failed',
+  checkin: 'check-in (still running)',
 }
 const NEXT: Record<string, (n: string) => string> = {
   review: n => `Review it as /delegate says: \`wb diff ${n}\`, then \`wb accept ${n} -m "…"\` ` +
@@ -98,7 +99,11 @@ const NEXT: Record<string, (n: string) => string> = {
   stuck: n => `Steer it with \`wb feedback ${n} --message <file>\`, or \`wb discard ${n}\`.`,
   failed: n => `Look at \`wb log ${n}\`; then \`wb feedback ${n} --message <file>\` or ` +
     `\`wb discard ${n}\`.`,
+  checkin: n => `As the driver: tell the user in two or three plain lines how it is going ` +
+    `(progress, time, anything off), and log the same with \`wb note ${n} --text "…"\`. ` +
+    `If it is heading the wrong way, \`wb steer ${n}\` (\`--now\` to interrupt). Keep it short.`,
 }
+const RUNNING = new Set(['queued', 'running', 'testing'])
 
 // The module's own memory: reset by a reload, which runs register and session.start again.
 const mem = {
@@ -235,7 +240,9 @@ async function deliver($: any, now: number) {
     // Only wake for news still true: a review notice for a task since discarded, accepted or
     // sent back is acknowledged and dropped.
     const status = await readJson($, `${root}/tasks/${name}/status.json`)
-    const current = status.phase === (row.kind === 'question' ? 'asking' : row.kind)
+    const current = row.kind === 'checkin'
+      ? RUNNING.has(status.phase) // a check-in is news while the task still runs
+      : status.phase === (row.kind === 'question' ? 'asking' : row.kind)
     const headline = HEADLINE[row.kind] ?? row.kind
     const key = `${name}:${row.ts}`
     if (current && !mem.toasted.has(key)) {
@@ -310,8 +317,10 @@ export const register: Register = (on, options) => {
     const recentOf = (t: WbTask) => (t.name === watched.task ? [] : t.recent)
     // The whole history is drawn: the engine scrolls the pane (arrows, while focused) and
     // follows the end as lines arrive. The activity row, last, carries the spinner.
-    const history = watched.lines.filter(l => l.s !== 'activity')
+    const history = watched.lines.filter(l => !['activity', 'clock', 'meta'].includes(l.s))
     const doing = watched.lines.find(l => l.s === 'activity')
+    const clock = watched.lines.find(l => l.s === 'clock')
+    const meta = watched.lines.find(l => l.s === 'meta')
 
     return (
       <Box flexDirection="column">
@@ -337,6 +346,7 @@ export const register: Register = (on, options) => {
           <Box flexDirection="column">
             <Text dimColor>{clip(`── live: ${watched.task} · ↑↓ scroll · wb watch ${watched.task} in a terminal `
               + '─'.repeat(cols), cols)}</Text>
+            {meta && <Text dimColor>{meta.t}</Text>}
             {history.map(l => (
               <Text {...(LINE_STYLE[l.s] ?? {})}>{l.t || ' '}</Text>
             ))}
@@ -345,6 +355,7 @@ export const register: Register = (on, options) => {
                 {SPIN[Math.floor(now / 500) % SPIN.length]} {doing.t}
               </Text>
             )}
+            {clock && <Text dimColor>{clock.t}</Text>}
           </Box>
         )}
       </Box>

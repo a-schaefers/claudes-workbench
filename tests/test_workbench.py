@@ -221,6 +221,25 @@ class Steering(Base):
         self.assertEqual([r["kind"] for r in rows].count("tests"), 1)  # once, after the note
         self.assertTrue(self.sent()[-1].startswith(runner.NOTE_HEAD))
 
+    def test_checkins_wake_claude_with_a_digest_and_notes_reach_the_transcript(self):
+        self.start("t-chk", "slow", "--checkin", "0.03")    # every ~2 s
+        self.wait_session("t-chk")
+        deadline = time.time() + 20
+        while True:
+            rows = [r for r in store.read_jsonl(store.home() / "notify.jsonl")[0]
+                    if r["kind"] == "checkin"]
+            if rows or time.time() > deadline:
+                break
+            time.sleep(0.2)
+        self.assertTrue(rows, "no check-in arrived")
+        self.assertIn("task t-chk · MiMo · round 1 · running", rows[0]["text"])
+        self.assertIn("since the last check-in", rows[0]["text"])
+        run_wb("note", "t-chk", "--text", "Slow start, reading first.")
+        run_wb("stop", "t-chk")
+        out = run_wb("watch", "t-chk", "--once", "--no-color")
+        self.assertIn("Claude (captain):\n  Slow start, reading first.", out)
+        self.assertIn("reasoning", out.splitlines()[0])
+
     def test_takeover_stops_the_agent_and_hands_over_the_worktree(self):
         self.start("t-take", "slow", "--test", TEST_CMD)
         self.wait_session("t-take")
@@ -256,8 +275,10 @@ class Watch(Base):
             time.sleep(0.1)
         lines = [json.loads(x) for x in run_wb("watch", "t-live", "--json").splitlines()]
         run_wb("stop", "t-live")
-        self.assertEqual(lines[-1]["s"], "activity")
-        self.assertRegex(lines[-1]["t"], r"…")
+        self.assertEqual([x["s"] for x in (lines[0], lines[-2], lines[-1])],
+                         ["meta", "activity", "clock"])
+        self.assertRegex(lines[-2]["t"], r"…")
+        self.assertRegex(lines[-1]["t"], r"^⏲ task \d")
 
 
 class AskServer(Base):

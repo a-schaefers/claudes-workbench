@@ -102,6 +102,43 @@ def steer_prompt(notes: list[dict], interrupted: bool) -> str:
             "and finish with a short summary as before.")
 
 
+def _clock(secs: float) -> str:
+    return f"{int(secs // 60)}m{int(secs % 60):02d}s"
+
+
+def checkin_text(task: store.Task, n: int, out: dict, since: float) -> str:
+    """The digest a check-in wakes Claude with: what changed since the last one, and timing."""
+    from . import router  # router -> models; imported late to keep the runner's startup lean
+    spec, st, now = task.spec, task.status, time.time()
+    took = now - spec["created_at"]
+    typical = router.expected_minutes(spec["model"], spec.get("size", "significant"))
+    eta = ""
+    if typical:
+        left = typical * 60 - took
+        eta = (f" · ~{_clock(left)} left (typically {typical:.0f}m)" if left > 0 else
+               f" · {_clock(-left)} past its typical {typical:.0f}m")
+    rows = [r for r in store.read_jsonl(task.dir / "events.jsonl")[0] if r.get("ts", 0) > since]
+    tools: dict = {}
+    for r in rows:
+        if r.get("kind") == "tool":
+            tools[r["tool"]] = tools.get(r["tool"], 0) + 1
+    errs = [r for r in rows if r.get("kind") == "tool" and not r.get("ok")]
+    tok_in = sum(r.get("in", 0) for r in rows if r.get("kind") == "step")
+    tok_out = sum(r.get("out", 0) for r in rows if r.get("kind") == "step")
+    lines = [f"task {task.name} · {spec['model_label']} · round {n} · running {_clock(took)}{eta}",
+             f"since the last check-in ({_clock(now - since)}): "
+             + (", ".join(f"{k}×{v}" for k, v in sorted(tools.items())) or "no tool calls")
+             + (f", {len(errs)} failed" if errs else "")
+             + f"; {tok_in} tokens read, {tok_out} written",
+             f"now: {st.get('last') or '?'}"]
+    if out["texts"]:
+        lines.append("its latest words: " + out["texts"][-1].strip().replace("\n", " ")[:400])
+    files = gitops.changed(task.worktree)
+    lines.append("files changed so far: "
+                 + (", ".join(f[3:] for f in files.splitlines()) if files else "none"))
+    return "\n".join(lines)
+
+
 def run_round(task: store.Task, n: int) -> dict:
     spec, st = task.spec, task.status
     prompt = task.round_dir(n).joinpath("prompt.md").read_text()
@@ -175,6 +212,11 @@ def run_round(task: store.Task, n: int) -> dict:
             task.event({"ts": store.now(), "round": n, "kind": "stopped", "text": out["stuck"]})
             _stop(proc)
             break
+        every = float(spec.get("checkin") or 0) * 60
+        since = max(started, float(task.status.get("checkin_at") or 0))
+        if every and now - since >= every and not asking:
+            task.set_status(checkin_at=now)
+            task.notify("checkin", checkin_text(task, n, out, since), round=n)
         if any(r.get("now") for r in pending_steer(task)):
             task.event({"ts": store.now(), "round": n, "kind": "interrupted",
                         "text": "Claude interrupted the agent"})

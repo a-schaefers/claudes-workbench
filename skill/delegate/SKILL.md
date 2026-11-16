@@ -88,6 +88,13 @@ You are the driver, not a spectator. When something tells you the agent is headi
 - `wb stop <name>`: just stop it.
 Notes are instructions, like feedback: concrete and short.
 
+**Check-ins.** A significant task wakes you every 10 minutes while it runs (`--checkin MIN`
+changes it, `0` turns it off) with a digest: tools used, errors, tokens, files touched, its latest
+words, time so far and the ETA. Be the captain: give the user two or three plain lines on how it
+is going, log them with `wb note <name> --text "…"` (they show in `wb watch` and the pane), and
+steer only if it is drifting. Say what you see, including "slow but on course". Keep it short;
+every check-in costs your tokens.
+
 ## 4. When woken
 - **review**: the report gives the test result, the agent's summary and the files. Read
   `wb diff <name> --stat`, then the full `wb diff <name>` (`wb diff <name> <path>` for big

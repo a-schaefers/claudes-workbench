@@ -113,6 +113,8 @@ def cmd_start(a):
         "branch": gitops.branch_name(a.name), "model": m.id, "model_label": m.label,
         "opencode_model": m.id, "route": why, "bench": a.bench, "size": a.size, "test_cmd": a.test,
         "auto_fix": a.auto_fix, "ask_budget": budget, "ask_timeout": a.ask_timeout,
+        "checkin": (a.checkin if a.checkin is not None
+                    else 10 if a.size == "significant" else 0) if not a.bench else 0,
         "round_timeout": a.round_timeout, "silence_timeout": a.silence_timeout,
         "created_at": store.now(), "wb_version": __version__})
     test_line = (f"- The acceptance command is `{a.test}`. Run it before you finish and make it "
@@ -334,6 +336,15 @@ def cmd_steer(a):
         print(f"note queued for {a.name}: delivered when its current run ends, before the tests")
 
 
+def cmd_note(a):
+    """Claude's own words in the task's transcript: a captain's log entry the user sees."""
+    task = need(a.name)
+    task.event({"ts": store.now(), "round": task.status.get("round"), "kind": "captain",
+                "text": a.text.strip()})
+    _ack_all(task)
+    print(f"noted on {a.name}")
+
+
 def cmd_takeover(a):
     """Stop the agent and hand the worktree to Claude, to finish by hand or hand back."""
     task = need(a.name)
@@ -493,6 +504,9 @@ def main(argv=None):
     s.add_argument("--model", help="an OpenCode model id or a fragment of one; default: the "
                    "router's choice for --size, from benchmarks and past results")
     s.add_argument("--test", help="acceptance command, run in the worktree after every round")
+    s.add_argument("--checkin", type=float, metavar="MIN",
+                   help="wake Claude every MIN minutes while it runs, with a digest of progress "
+                   "(default 10 for significant tasks, off for trivial; 0 turns it off)")
     s.add_argument("--auto-fix", type=int, default=2,
                    help="rounds that send failing tests back without waking Claude (default 2)")
     s.add_argument("--ask-budget", type=int, default=2)
@@ -548,6 +562,8 @@ def main(argv=None):
     s.add_argument("--now", action="store_true",
                    help="interrupt the agent mid-step; the note goes first, marked high priority")
     s.set_defaults(f=cmd_steer)
+    s = sub.add_parser("note", help="Claude's captain's-log line in the task's transcript")
+    s.add_argument("name"); s.add_argument("--text", required=True); s.set_defaults(f=cmd_note)
     s = sub.add_parser("takeover", help="stop the agent and finish the task by hand")
     s.add_argument("name"); s.set_defaults(f=cmd_takeover)
     s = sub.add_parser("stop", help="stop a running task (it can be continued with feedback)")

@@ -42,6 +42,7 @@ class Model:
     start: str | None = None
     stop: str | None = None
     extra: dict = field(default_factory=dict)
+    config: dict = field(default_factory=dict)  # OpenCode's entry: reasoning, limit, variants...
 
     @property
     def root(self) -> str:
@@ -79,7 +80,8 @@ def discover() -> dict[str, Model]:
                 continue
             found[mid] = Model(id=mid, provider=pid, name=name, base_url=url, engine=engine,
                                label=over.get("label") or spec.get("name") or mid,
-                               start=over.get("start"), stop=over.get("stop"), extra=over)
+                               start=over.get("start"), stop=over.get("stop"), extra=over,
+                               config=spec)
     return found
 
 
