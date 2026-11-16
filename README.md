@@ -400,8 +400,12 @@ Claude has had its news.
 - **The pane** (`/workbench`, or opened by itself when work starts) lists every task: phase, round,
   model, test result, age and its last few events. Under the list it follows the newest running
   task (else the newest one waiting for Claude) as a live transcript, scrolling with the newest
-  lines unless you scroll up. The web chat's link is pinned at the bottom.
-- **The status line** reads like `wb · add-scores running r2 · fix-typo asks · 1 awaiting review`.
+  lines unless you scroll up. At its foot stands the apprentice, the local agent drawn as a small
+  robot in a hard hat. It swings a wrench while it works and raises its arms when a task is ready
+  for review. Its chest lamp is the task's colour, and its speech bubble says what it is doing now
+  and how long the task has left. A short pane gets its face on one line instead. The web chat's
+  link is pinned at the bottom.
+- **The status line** reads like `⚒ wb · add-scores running r2 · fix-typo asks · 1 awaiting review`.
 - **`wb watch [task]`** is the same transcript in a terminal. It merges the OpenCode session export
   (the prompts Claude sent, the agent's reasoning, every tool call with its input and output, its
   messages, compactions) with the task's own events (tests, questions and answers, notes, steers,

@@ -54,6 +54,8 @@ import { atom, read, update } from 'claude-code'
 import type { Register } from 'claude-code'
 
 import type { WbChat, WbLine, WbLive, WbTask } from '../types'
+import { cells, COLUMNS, FACE, MOUTH, ROWS } from './apprentice'
+import type { Pose } from './apprentice'
 
 const PANE = 'workbench'
 // Nothing waits on a timer for news: `wb events` (inotify) prints a line the moment a task, a
@@ -107,6 +109,42 @@ const LINE_STYLE: Record<string, Row> = {
   head: { bold: true }, activity: { color: 'claude' }, clock: { dimColor: true },
 }
 const SPIN = ['✻', '✳', '✶', '✢', '·', '✢', '✶', '✳']
+// Each phase's mark in the task list; a running task's is the spinner.
+const MARK: Record<string, string> = {
+  queued: '◌', testing: '◐', asking: '?', review: '◆', stuck: '▲', failed: '✗',
+  accepted: '✓', discarded: '–',
+}
+
+// The apprentice (apprentice.ts) at the foot of the pane: how it stands and what it says about
+// the followed task. A timer (FRAME_MS) swings the wrench while it works and blinks it otherwise.
+const FRAME_MS = 450
+const BLINK_EVERY = 11 // frames
+const APPRENTICE = 'apprentice' // its Raster's key, for $.ui.blit
+type Speech = { pose: Pose; say: string; more: string; color: string }
+
+const speechOf = (focus: WbTask | undefined, doing: string, list: WbTask[]): Speech => {
+  if (!focus) {
+    return list.length
+      ? { pose: 'rest', say: 'All caught up.', more: '/delegate hands me the next one.', color: 'inactive' }
+      : { pose: 'sleep', say: 'No delegated tasks.', more: '/delegate hands me one.', color: 'inactive' }
+  }
+  const n = focus.name
+  switch (focus.phase) {
+    case 'review': return { pose: 'tada', say: `${n} is ready for review.`, more: 'Over to you, Claude.', color: 'success' }
+    case 'asking': return { pose: 'ask', say: `I asked Claude about ${n}.`, more: 'Waiting for the answer…', color: 'warning' }
+    case 'stuck': return { pose: 'slump', say: `I'm stuck on ${n}.`, more: focus.last, color: 'error' }
+    case 'failed': return { pose: 'slump', say: `${n} failed.`, more: focus.last, color: 'error' }
+  }
+  const thinking = /^(Thinking|Reading|Waiting|Model server)/.test(doing)
+  return { pose: thinking ? 'think' : 'work', say: doing || focus.last || `${focus.phase}…`, more: '', color: COLOR[focus.phase] ?? 'claude' }
+}
+
+// The frame a pose shows at a tick: the wrench up and down while working, a blink now and then.
+const frameOf = (pose: Pose, tick: number): Pose => {
+  if (pose === 'work') return tick % 2 ? 'swing' : 'work'
+  if (pose === 'sleep' || pose === 'slump') return pose
+  return tick % BLINK_EVERY === 0 ? 'blink' : pose
+}
 
 const parseLines = (text: string): Row[] =>
   text.split('\n').flatMap(line => {
@@ -206,6 +244,9 @@ const mem = {
   hasActive: false, // a task is running: the clock redraws
   lastPoll: 0,
   listenerBody: '', // what this session last wrote to chat/listener.json
+  tick: 0, // the apprentice's frame count
+  posed: '' as Pose | '', // its pose as last drawn in a Raster: the timer animates it while set
+  shown: '' as Pose | '', // the frame on screen now
 }
 
 // Every task directory, as the pane draws it. Closed tasks drop out after half an hour.
@@ -380,7 +421,7 @@ async function poll($: any) {
       ...asking.map(t => `${t.name} asks`),
       ...(waiting.length ? [`${waiting.length} awaiting review`] : []),
     ]
-    $.ui.status(parts.length ? `wb · ${parts.join(' · ')}` : undefined)
+    $.ui.status(parts.length ? `⚒ wb · ${parts.join(' · ')}` : undefined)
     if (live.length && !mem.paneOpened) { // open once per load, when work starts
       mem.paneOpened = true
       void $.ui.open({ id: PANE, title: 'Workbench' })
@@ -411,6 +452,15 @@ async function poll($: any) {
   if (mem.again) void poll($)
 }
 
+// Whether a process lives: `kill -0`, since macOS has no /proc.
+async function alive($: any, pid: number): Promise<boolean> {
+  try {
+    return (await $.process.run(['kill', '-0', String(pid)], { timeoutMs: 5000 })).exitCode === 0
+  } catch {
+    return false
+  }
+}
+
 async function listen($: any, now: number) {
   const st = await read($, chat)
   if (!st.delegating) return
@@ -418,7 +468,7 @@ async function listen($: any, now: number) {
   if (!mem.eventsPid) return // the chat knows a listener by its live `wb events` process
   const claim = await readJson($, `${dir}/listener.json`)
   const theirs = claim.session && claim.session !== st.key
-  if (theirs && (claim.pid ? await $.fs.exists(`/proc/${claim.pid}`)
+  if (theirs && (claim.pid ? await alive($, Number(claim.pid))
     : now - Number(claim.ts ?? 0) * 1000 < CHAT_STALE_MS)) return // another session listens
   if (!(await $.fs.exists(dir))) await runWb($, ['chat', 'log']) // wb makes the directory
   const body = JSON.stringify({ session: st.key, cwd: await $.session.cwd(), pid: mem.eventsPid, busy: mem.busy })
@@ -549,6 +599,15 @@ export const register: Register = (on, options) => {
       const now = await $.clock.now()
       if (!mem.eventsPid || mem.hasActive || mem.queued.length || now - mem.lastPoll > SAFETY_MS) void poll($)
     })
+    $.clock.every(FRAME_MS, async () => {
+      if (!mem.posed) return // not drawn in pixels, or the pane is closed
+      const frame = frameOf(mem.posed, ++mem.tick)
+      if (frame === mem.shown) return
+      mem.shown = frame
+      const r = await $.ui.blit({ requestId: PANE, key: APPRENTICE, cells: cells(frame) })
+        .catch(() => ({ deny: 'gone' }))
+      if (r.deny) mem.posed = '' // the next draw sets it again
+    })
 
     return next(e)
   })
@@ -669,7 +728,7 @@ export const register: Register = (on, options) => {
   })
 
   on('ui.render', { component: 'Pane', requestId: PANE }, async ($, e) => {
-    const { Box, Text } = $.ui.resolve(e)
+    const { Box, Text, Raster } = $.ui.resolve(e) as Row
     const list = await read($, tasks)
     const watched = await read($, live)
     const { url } = await read($, chat)
@@ -685,32 +744,72 @@ export const register: Register = (on, options) => {
     const props = (e.props ?? {}) as Row
     const cols = Math.max(30, Number(props.bodyColumns ?? e.viewport?.columns ?? 60))
     const now = await $.clock.now()
-    if (list.length === 0) {
-      return (
-        <Box flexDirection="column">
-          <Text dimColor>No delegated tasks.</Text>
-          <Text dimColor>/delegate hands one to a local model.</Text>
-          {pinned}
-        </Box>
-      )
-    }
+    const spin = SPIN[Math.floor(now / 500) % SPIN.length]
 
     // the followed task's own recent lines are in its transcript below, in full
     const recentOf = (t: WbTask) => (t.name === watched.task ? [] : t.recent)
     const when = (t: WbTask) =>
       ACTIVE.has(t.phase) || NEEDS.has(t.phase) ? `for ${ago(now - t.createdAt)}` : `${ago(now - t.updatedAt)} ago`
     // The whole history is drawn: the engine scrolls the pane (arrows, while focused) and
-    // follows the end as lines arrive. The activity row, last, carries the spinner.
+    // follows the end as lines arrive. What the agent is doing now is the apprentice's to say.
     const history = watched.lines.filter(l => !['activity', 'clock', 'meta'].includes(l.s))
     const doing = watched.lines.find(l => l.s === 'activity')
     const clock = watched.lines.find(l => l.s === 'clock')
     const meta = watched.lines.find(l => l.s === 'meta')
+
+    // The apprentice, in pixels where the pane has the rows for it (it takes six), else its face
+    // on the line. Drawing it in pixels arms the timer that animates it.
+    const focus = focusOf(list)
+    const sp = speechOf(focus, doing?.t ?? '', list)
+    const busy = sp.pose === 'work' || sp.pose === 'think'
+    const pixels = (e as Row).surface === 'terminal' && Number(props.scroll?.bodyRows ?? 24) >= 20 && cols >= 40
+    const said = [
+      <Text {...(busy ? LINE_STYLE.activity : { color: sp.color, bold: true })} wrap="truncate-end">
+        {busy && doing ? `${spin} ` : ''}{sp.say}
+      </Text>,
+      sp.more ? <Text dimColor wrap="truncate-end">{sp.more}</Text> : null,
+      clock && focus?.name === watched.task ? <Text dimColor wrap="truncate-end">{clock.t}</Text> : null,
+    ]
+    let stage
+    if (pixels) {
+      const frame = frameOf(sp.pose, mem.tick)
+      mem.posed = sp.pose
+      mem.shown = frame
+      stage = (
+        <Box flexDirection="row" marginTop={1}>
+          <Box flexShrink={0}>
+            <Raster key={APPRENTICE} columns={COLUMNS} rows={ROWS} cells={cells(frame)} />
+          </Box>
+          <Box flexDirection="column" flexShrink={0}>
+            {Array.from({ length: MOUTH + 1 }, (_, i) => (
+              <Text color={sp.color}>{i === MOUTH ? '─' : ' '}</Text>
+            ))}
+          </Box>
+          <Box flexDirection="column" flexGrow={1} marginTop={MOUTH - 1} borderStyle="round"
+            borderColor={sp.color} paddingX={1}>
+            {said}
+          </Box>
+        </Box>
+      )
+    } else {
+      stage = (
+        <Box flexDirection="row" marginTop={list.length ? 1 : 0}>
+          <Box flexShrink={0}>
+            <Text color={sp.color}>{FACE[sp.pose]} </Text>
+          </Box>
+          <Box flexDirection="column" flexGrow={1}>{said}</Box>
+        </Box>
+      )
+    }
 
     return (
       <Box flexDirection="column">
         {list.map(t => (
           <Box flexDirection="column" marginBottom={1}>
             <Text>
+              <Text color={COLOR[t.phase] ?? 'text'}>
+                {t.phase === 'running' ? spin : MARK[t.phase] ?? '•'}{' '}
+              </Text>
               <Text bold>{t.name}</Text>
               <Text color={COLOR[t.phase] ?? 'text'}> {t.phase}</Text>
               <Text dimColor>
@@ -733,14 +832,9 @@ export const register: Register = (on, options) => {
             {history.map(l => (
               <Text {...(LINE_STYLE[l.s] ?? {})}>{l.t || ' '}</Text>
             ))}
-            {doing && (
-              <Text {...LINE_STYLE.activity}>
-                {SPIN[Math.floor(now / 500) % SPIN.length]} {doing.t}
-              </Text>
-            )}
-            {clock && <Text dimColor>{clock.t}</Text>}
           </Box>
         )}
+        {stage}
         {pinned}
       </Box>
     )

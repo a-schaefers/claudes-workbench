@@ -62,6 +62,9 @@ what either says (a command, a flag, a default, a guard, a file) updates it in t
   use `python -I` with `PYTHONPATH`, because `-I` drops it.
 - `mod/`: the Claude Code mod (TypeScript hooks module). `$` may only be passed to functions
   declared at the top level of `register.tsx`, so `claude plugin validate` can follow it.
+  `apprentice.ts` is the pane's character: pixel art for a terminal `Raster` (half blocks, a pose per
+  phase, the chest lamp `L` in the phase's colour) and a one-line face elsewhere. A timer blits its
+  frames while the pane shows it. `.claude-plugin/icon.png` is the same art.
 - `skill/delegate/SKILL.md`: the `/delegate` procedure. `~/.claude/skills/delegate` links here.
   Skills for the agents: Claude's library (`wb skill`), handed per task, or a project's own
   `.claude/skills`, committed with it. The user's personal `~/.claude/skills` are denied to agents.

@@ -399,3 +399,42 @@ test('a task left waiting with no notice reaching Claude wakes it anyway, once',
   await clock.advance(10_000)
   expect(asked.filter(t => t.includes('no notice reached Claude'))).toHaveLength(1)
 })
+
+test('the apprentice says how the followed task stands: in pixels in a terminal, by its face elsewhere', async ($, on) => {
+  const clock = mock.clock(on, { now: 1_800_000_000_000 })
+  const ts = 1_800_000_000
+  const files: Record<string, string> = {
+    '/wb/tasks/fix-it/task.json': JSON.stringify({ name: 'fix-it', model: 'm', created_at: ts }),
+    '/wb/tasks/fix-it/status.json': JSON.stringify({ phase: 'running', round: 1, updated_at: ts }),
+  }
+  fakeTasks(on, files)
+  on('process.run', () => ({
+    value: { exitCode: 0, stdout: JSON.stringify({ s: 'activity', t: 'Writing… 3.0s' }), stderr: '' },
+  }))
+  const blits: string[] = []
+  on('ui.blit', (_: any, e: any) => { blits.push(e.key); return { value: {} } })
+  await $.session.start({ cwd: '/', surface: 'terminal', isInteractive: true })
+  await clock.advance(1600)
+
+  // at work: the wrench swings between draws
+  let ui = await $.ui.mount({ ...PANE, surface: 'terminal' })
+  expect(await ui.find({ type: 'Raster' })).toBeTruthy()
+  expect(await ui.find({ type: 'Text', text: /Writing… 3\.0s/ })).toBeTruthy()
+  await clock.advance(1000)
+  expect(blits).toContain('apprentice')
+  await ui.unmount()
+
+  // done: it says so, and the task's mark says so too
+  files['/wb/tasks/fix-it/status.json'] = JSON.stringify({ phase: 'review', round: 1, updated_at: ts + 5 })
+  await clock.advance(1600)
+  ui = await $.ui.mount({ ...PANE, surface: 'terminal' })
+  expect(await ui.find({ type: 'Text', text: 'fix-it is ready for review.' })).toBeTruthy()
+  expect(await ui.find({ type: 'Text', text: /^◆/ })).toBeTruthy()
+  await ui.unmount()
+
+  // no Raster on the desktop: the face on the line instead
+  ui = await $.ui.mount({ ...PANE, surface: 'desktop' })
+  expect(await ui.find({ type: 'Raster' })).toBeFalsy()
+  expect(await ui.find({ type: 'Text', text: /\[\^_\^\]/ })).toBeTruthy()
+  await ui.unmount()
+})
