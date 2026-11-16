@@ -146,3 +146,35 @@ test('the pane follows the running task: its whole history, then what it is doin
   await clock.advance(3000)
   expect(runs.length).toBeGreaterThan(1)
 })
+
+test('"bail out claude" stops everything at once; "just get it done claude" hands the tasks over', async ($, on) => {
+  mock.clock(on, { now: 1_800_000_000_000 })
+  fakeTasks(on, {})
+  const runs: string[][] = []
+  on('process.run', (_: any, e: any) => {
+    runs.push(e.argv)
+    return { value: { exitCode: 0, stdout: e.argv[1] === 'stop' ? 'stopped: fix-it' : 'took over fix-it', stderr: '' } }
+  })
+  const seen: string[] = []
+  on('prompt.submit', (_: any, e: any) => {
+    seen.push(e.text)
+    return { text: e.text }
+  })
+  on('ui.toast', () => ({ value: undefined }))
+  await $.session.start({ cwd: '/', surface: 'terminal', isInteractive: true })
+
+  await $.prompt.submit({ text: 'ok Bail out, Claude' })
+  expect(runs.at(-1)).toEqual(['wb', 'stop', '--all'])
+  expect(seen.at(-1)).toContain('stopped: fix-it')
+  expect(seen.at(-1)).toContain("Don't finish, restart")
+
+  await $.prompt.submit({ text: 'just get it done claude' })
+  expect(runs.at(-1)).toEqual(['wb', 'takeover', '--all'])
+  expect(seen.at(-1)).toContain('took over fix-it')
+  expect(seen.at(-1)).toContain('Leave delegate mode')
+
+  const before = runs.length
+  await $.prompt.submit({ text: 'how is it going?' })      // anything else passes untouched
+  expect(runs.length).toBe(before)
+  expect(seen.at(-1)).toBe('how is it going?')
+})

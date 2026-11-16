@@ -241,6 +241,33 @@ class Steering(Base):
         self.assertIn("Claude (captain):\n  Slow start, reading first.", out)
         self.assertIn("reasoning", out.splitlines()[0])
 
+    def test_bail_out_stops_the_benchmark_and_every_agent_and_keeps_the_work(self):
+        self.start("t-b1", "slow")
+        self.start("t-b2", "slow")
+        self.wait_session("t-b1")
+        self.assertEqual(store.Task("t-b2").status["phase"], "queued")  # behind the GPU lock
+        bench_run = subprocess.Popen(["sleep", "60"])      # stands in for a `wb bench` process
+        self.addCleanup(bench_run.kill)
+        (store.home() / "bench.pid").write_text(str(bench_run.pid))
+        out = run_wb("stop", "--all")
+        self.assertIn("wb bench", out)
+        self.assertEqual(bench_run.wait(timeout=10), -15)
+        self.assertFalse((store.home() / "bench.pid").exists())
+        for name in ("t-b1", "t-b2"):
+            task = store.Task(name)
+            self.assertFalse(cli.runner_alive(task))
+            self.assertEqual(task.status["phase"], "stuck")
+            self.assertTrue(task.worktree.exists())         # stopped, not thrown away
+        self.assertIn("nothing was running", run_wb("stop", "--all"))
+
+    def test_get_it_done_takes_over_every_open_task(self):
+        self.start("t-g1", "slow")
+        self.wait_session("t-g1")
+        self.assertIn("took over t-g1", run_wb("takeover", "--all"))
+        task = store.Task("t-g1")
+        self.assertFalse(cli.runner_alive(task))
+        self.assertEqual(task.status["last"], "Claude took over")
+
     def test_takeover_stops_the_agent_and_hands_over_the_worktree(self):
         self.start("t-take", "slow", "--test", TEST_CMD)
         self.wait_session("t-take")

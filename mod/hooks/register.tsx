@@ -7,6 +7,10 @@
 // through each task's `acked` file, so a notification wakes Claude once, by whichever got it first.
 // A wake is held while Claude's main loop is mid-turn (a prompt submitted then would queue and
 // arrive stale) and checked against the task's phase when it is finally sent.
+// Two phrases from the user act at once, before Claude reads them: "bail out claude" stops the
+// benchmark and every agent (`wb stop --all`); "just get it done claude" stops the agents and hands
+// their tasks to Claude (`wb takeover --all`) to finish directly. The message reaches Claude with
+// what was done and what to do next appended.
 // Under the task list the pane follows one task live: the conversation between Claude and the
 // agent, every tool call and test, as `wb watch --json` prints it.
 import { atom, read, update } from 'claude-code'
@@ -104,6 +108,21 @@ const NEXT: Record<string, (n: string) => string> = {
     `If it is heading the wrong way, \`wb steer ${n}\` (\`--now\` to interrupt). Keep it short.`,
 }
 const RUNNING = new Set(['queued', 'running', 'testing'])
+
+const BAIL_OUT = /\bbail\s+out,?\s+claude\b/i
+const GET_IT_DONE = /\bjust\s+get\s+it\s+done,?\s+claude\b/i
+const BAIL_NOTE = (out: string) =>
+  `[workbench] The user said "bail out claude", so everything delegated was stopped at once ` +
+  `(\`wb stop --all\`):\n${out}\n\nDon't finish, restart or clean up anything. Tell the user in ` +
+  `a few lines what was running and where it was left (real tasks keep their worktrees; ` +
+  `\`wb status --all\`), then wait for their next instruction.`
+const DONE_NOTE = (out: string) =>
+  `[workbench] The user said "just get it done claude": the agents were stopped and their tasks ` +
+  `handed to you (\`wb takeover --all\`):\n${out}\n\nLeave delegate mode and finish the work ` +
+  `yourself, without pausing to ask. For each task: read what the agent left (\`wb diff <name>\`), ` +
+  `complete it in its worktree to your own standard, run its acceptance command, then ` +
+  `\`wb accept <name> -m "…"\` (add --merge only if the user asked for merging). Then carry on ` +
+  `with the rest of the user's request directly, without delegating, and report briefly at the end.`
 
 // The module's own memory: reset by a reload, which runs register and session.start again.
 const mem = {
@@ -277,6 +296,23 @@ export const register: Register = (on, options) => {
     })
 
     return next(e)
+  })
+
+  on('prompt.submit', async ($, e, next) => {
+    const bail = BAIL_OUT.test(e.text)
+    if (e.command || e.text.startsWith('[workbench]') || (!bail && !GET_IT_DONE.test(e.text))) {
+      return next(e)
+    }
+    const argv = [mem.wb, bail ? 'stop' : 'takeover', '--all']
+    let out: string
+    try {
+      const r = await $.process.run(argv, { timeoutMs: 120_000 })
+      out = `${r.stdout}${r.stderr}`.trim() || '(no output)'
+    } catch (err) {
+      out = `could not run ${argv.join(' ')}: ${err}`
+    }
+    $.ui.toast(bail ? 'workbench: bailed out, everything stopped' : 'workbench: Claude is taking over')
+    return next({ ...e, text: `${e.text}\n\n${bail ? BAIL_NOTE(out) : DONE_NOTE(out)}` })
   })
 
   // Only the main loop's turns: a subagent's run doesn't hold the prompt.

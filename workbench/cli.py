@@ -10,6 +10,7 @@ import signal
 import subprocess
 import sys
 import time
+from contextlib import redirect_stdout
 from pathlib import Path
 
 from . import __version__, bench, gitops, models, results, router, store, transcript
@@ -312,7 +313,51 @@ def _stop_runner(task):
             time.sleep(0.5)
 
 
+LIVE = ("queued", "running", "testing", "asking")
+
+
+def _open_tasks():
+    return [t for t in store.all_tasks()
+            if t.status.get("phase") not in store.CLOSED
+            and (runner_alive(t) or t.status.get("phase") in LIVE)]
+
+
+def stop_everything() -> list[str]:
+    """"bail out claude": the benchmark, then every agent. Nothing is finished or thrown away:
+    real tasks keep their worktrees (stopped, for wb feedback or wb discard later); bench tasks
+    are scratch and are discarded."""
+    stopped = []
+    pidfile = store.home() / "bench.pid"
+    if pidfile.exists():
+        try:
+            pid = int(pidfile.read_text())
+            os.kill(pid, signal.SIGTERM)  # first, so it starts no new task
+            stopped.append(f"wb bench (pid {pid})")
+        except (ValueError, ProcessLookupError):
+            pass
+        pidfile.unlink(missing_ok=True)
+    for t in _open_tasks():
+        _stop_runner(t)
+        t.event({"ts": store.now(), "round": t.status.get("round"), "kind": "stopped",
+                 "text": "bail out: stopped by the user"})
+        t.set_status(phase="stuck", last="bail out: stopped", pid=None)
+        _ack_all(t)
+        if t.spec.get("bench"):
+            with open(os.devnull, "w") as quiet, redirect_stdout(quiet):
+                cmd_discard(argparse.Namespace(name=t.name, reason="bail out", keep_branch=False))
+            stopped.append(f"{t.name} (bench, discarded)")
+        else:
+            stopped.append(f"{t.name} (worktree kept: {t.worktree})")
+    return stopped
+
+
 def cmd_stop(a):
+    if a.all:
+        stopped = stop_everything()
+        print("stopped: " + ("; ".join(stopped) if stopped else "nothing was running"))
+        return
+    if not a.name:
+        die("name a task, or --all")
     task = need(a.name)
     _stop_runner(task)
     task.set_status(phase="stuck", last="stopped by the reviewer", pid=None)
@@ -348,6 +393,15 @@ def cmd_note(a):
 
 def cmd_takeover(a):
     """Stop the agent and hand the worktree to Claude, to finish by hand or hand back."""
+    if a.all:  # "just get it done claude"
+        tasks = [t for t in _open_tasks() if not t.spec.get("bench")]
+        if not tasks:
+            print("no open delegated tasks to take over")
+        for t in tasks:
+            cmd_takeover(argparse.Namespace(name=t.name, all=False))
+        return
+    if not a.name:
+        die("name a task, or --all")
     task = need(a.name)
     if task.status.get("phase") in store.CLOSED:
         die(f"{a.name} is {task.status.get('phase')}")
@@ -446,6 +500,17 @@ def cmd_bench(a):
         print(bench.table())
         return
     say = lambda msg: print(f"  {msg}", flush=True)  # noqa: E731
+    pidfile = store.home() / "bench.pid"  # so `wb stop --all` can stop the run itself
+    pidfile.parent.mkdir(parents=True, exist_ok=True)
+    pidfile.write_text(str(os.getpid()))
+    try:
+        _bench(a, targets, tasks, say)
+    finally:
+        if pidfile.exists() and pidfile.read_text() == str(os.getpid()):
+            pidfile.unlink()
+
+
+def _bench(a, targets, tasks, say):
     for m in targets:
         print(f"== {m.id}", flush=True)
         if not a.no_probe:
@@ -565,9 +630,14 @@ def main(argv=None):
     s = sub.add_parser("note", help="Claude's captain's-log line in the task's transcript")
     s.add_argument("name"); s.add_argument("--text", required=True); s.set_defaults(f=cmd_note)
     s = sub.add_parser("takeover", help="stop the agent and finish the task by hand")
-    s.add_argument("name"); s.set_defaults(f=cmd_takeover)
+    s.add_argument("name", nargs="?")
+    s.add_argument("--all", action="store_true", help="every open delegated task")
+    s.set_defaults(f=cmd_takeover)
     s = sub.add_parser("stop", help="stop a running task (it can be continued with feedback)")
-    s.add_argument("name"); s.set_defaults(f=cmd_stop)
+    s.add_argument("name", nargs="?")
+    s.add_argument("--all", action="store_true",
+                   help="everything: the benchmark and every agent (\"bail out claude\")")
+    s.set_defaults(f=cmd_stop)
     s = sub.add_parser("accept", help="commit the work on its branch and close the task")
     s.add_argument("name"); s.add_argument("--message", "-m", required=True)
     s.add_argument("--merge", action="store_true"); s.add_argument("--force", action="store_true")
