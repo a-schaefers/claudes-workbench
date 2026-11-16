@@ -44,18 +44,19 @@ just the API for the lead and local models for everything else. How much you sav
 much you use it and what your electricity costs (a busy GPU isn't free). But it's a fun project,
 and it works.
 
-Built and used on: **Ryzen 5 7600X · Radeon RX 9070 XT (16 GB) · 32 GB DDR5 · Arch Linux.**
-
 ## Quickstart
 
 ### What you need
 
 - **[Claude Code](https://claude.com/claude-code)** with a Claude subscription or an API key
 - **[OpenCode](https://opencode.ai)**, which runs the local models as coding agents
-- **A local model server**, usually [Ollama](https://ollama.com), and at least one coding model
-  registered in OpenCode (no models yet? workbench recommends some for your hardware and helps you
-  set them up)
-- A GPU with about 16 GB of VRAM or more, Python 3.11+, git, and Linux
+- **A local model server**, usually [Ollama](https://ollama.com). No models yet? That's fine: the
+  first time you use it, Claude looks at your hardware, recommends the best models it can run, and
+  sets them up in OpenCode (it asks before downloading anything)
+- Python 3.11+ and git, which `wb` itself runs on
+
+Whatever your machine, Claude picks models that fit it, and checks again every week as new ones
+come out.
 
 ### Install
 
@@ -106,18 +107,21 @@ to read the diff.
 | `/delegate-quit` | stop every agent now; their work is kept for later |
 | `/delegate-quit-and-hand-back-claude` | stop the agents and have Claude finish their tasks itself |
 
-**Away from the computer?** `wb chat url` prints a private link to a small web chat with the
-running Claude session (`systemctl --user link ~/repos/workbench/systemd/wb-chat.service &&
-systemctl --user enable --now wb-chat` keeps it running). It's `http://localhost:1337`; to use it
-from your phone, reach your PC the way you normally do (Tailscale, for example) and change the host
-in the link.
+**Away from the computer?** `wb chat serve` runs a small web chat with the running Claude session,
+and `wb chat url` prints its private link (on Linux, `systemctl --user link
+~/repos/workbench/systemd/wb-chat.service && systemctl --user enable --now wb-chat` keeps it
+running). It's `http://localhost:1337`; to use it from your phone, reach your PC the way you
+normally do (Tailscale, for example) and change the host in the link.
 
 <p align="center"><img src="docs/web-chat.png" alt="The web chat: Claude's report on which model takes which tasks, the user's reply, a receipt saying Claude has it and will read it after its current step, and 'Claude is on it'" width="420"></p>
 
 **Watching from a terminal?** `wb watch` follows the newest task live, and `wb status` lists the
 open ones.
 
-## What we found (November 2026, on the PC above)
+## What we found (November 2026)
+
+workbench is developed and tested on one ordinary gaming PC: **Ryzen 5 7600X · Radeon RX 9070 XT
+(16 GB) · 32 GB DDR5 · Arch Linux.** On that machine:
 
 - **Qwen 27B** (Ollama, Q3) does the real work: it fits entirely on a 16 GB card and passed nearly
   every task we gave it. **MiMo 9B** takes the trivial chores.
@@ -411,7 +415,8 @@ until its context is full. `wb model retire <id> [--delete]` unregisters it (and
 weights); its results stay in the history.
 
 **The weekly model check.** Models change fast, so once a week, in a quiet moment (you've used the
-session and no task is open), the mod asks Claude to check. `wb scout` gives the facts, read fresh
+session and no task is open), the mod asks Claude to check. The first check comes on first use, and
+`/delegate` runs one before anything else when no local model can run yet. `wb scout` gives the facts, read fresh
 each time: GPU and VRAM, RAM and swap, CPU, free disk where Ollama keeps models, Ollama's default
 context, every registered model with its size, quantization, context and real-task record,
 installed models that aren't registered, a watch list of models set aside and what would bring
