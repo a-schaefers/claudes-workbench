@@ -137,8 +137,10 @@ class Lifecycle(Base):
         self.start("t-ack", "ok")
         wait_phase("t-ack", {"review"})
         run_wb("discard", "t-ack")
-        with self.assertRaises(SystemExit):
-            run_wb("wait", "t-ack", "--timeout", "1")
+        rows, _ = store.read_jsonl(store.home() / "notify.jsonl")
+        notice = [r for r in rows if r["task"] == "t-ack"][-1]
+        acked = float((store.Task("t-ack").dir / "acked").read_text())
+        self.assertGreaterEqual(acked, notice["ts"])  # what the mod checks before waking Claude
 
     def test_crash_is_reported_failed(self):
         self.start("t-crash", "crash")
@@ -215,6 +217,50 @@ class ConfigLayer(Base):
                               "params": {"protocolVersion": "2025-06-18"}}) + "\n",
             env={**os.environ, "WB_TASK": "nope", "PYTHONPATH": ""}, timeout=20)
         self.assertEqual(json.loads(out.stdout)["result"]["serverInfo"]["name"], "workbench")
+
+
+class AgentContext(Base):
+    def test_claude_instructions_reach_the_agent(self):
+        from workbench import context, runner
+        tmp = Path(self.tmp.name)
+        os.environ["HOME"] = str(tmp / "home")
+        synced = tmp / "home" / ".claude" / "skills" / "synced" / "bucket" / "docx"
+        synced.mkdir(parents=True)
+        (synced / "SKILL.md").write_text("---\nname: docx\n---\n")
+        (tmp / "home" / ".claude" / "CLAUDE.md").write_text("user rules\n")
+        (self.repo / "CLAUDE.md").write_text("repo rules\n")
+        (self.repo / "AGENTS.md").write_text("same as agents\n")
+        (self.repo / "web").mkdir()
+        (self.repo / "web" / "CLAUDE.md").write_text("web rules\n")
+        (self.repo / ".claude" / "rules").mkdir(parents=True)
+        (self.repo / ".claude" / "rules" / "style.md").write_text("style rules\n")
+        g = lambda *a: subprocess.run(["git", "-C", str(self.repo), *a], check=True)  # noqa
+        g("add", ".")
+        g("commit", "-qm", "instructions")
+        (self.repo / "CLAUDE.local.md").write_text("same as agents\n")  # uncommitted, = AGENTS.md
+        self.start("t-ctx", "ok")
+        wait_phase("t-ctx", {"review"})
+        task = store.Task("t-ctx")
+        layer = json.loads(runner.write_config_layer(task).read_text())
+        loaded = layer["instructions"]
+        self.assertEqual(loaded[0], str(context.HANDBOOK))
+        self.assertIn(str(tmp / "home" / ".claude" / "CLAUDE.md"), loaded)
+        self.assertIn(str(task.worktree / "CLAUDE.md"), loaded)        # committed: worktree copy
+        self.assertIn(str(task.worktree / ".claude" / "rules" / "style.md"), loaded)
+        self.assertNotIn(str(self.repo / "CLAUDE.local.md"), loaded)   # same text as AGENTS.md
+        self.assertIn("`web/CLAUDE.md`", Path(loaded[-1]).read_text())  # nested: mapped, not loaded
+        denied = {(r["action"], r["resource"]) for r in layer["permissions"]
+                  if r["effect"] == "deny"}
+        self.assertLessEqual({("question", "*"), ("execute", "*"), ("opencode_*", "*"), ("skill", "docx"), ("skill", "delegate")}, denied)
+
+    def test_uncommitted_local_instructions_come_from_the_repo(self):
+        from workbench import context
+        (self.repo / "CLAUDE.local.md").write_text("my local rules\n")
+        self.start("t-local", "ok")
+        wait_phase("t-local", {"review"})
+        files, nested = context.instruction_files(store.Task("t-local"))
+        self.assertIn(self.repo.resolve() / "CLAUDE.local.md", [p.resolve() for p in files])
+        self.assertEqual(nested, [])
 
 
 class Detector(unittest.TestCase):

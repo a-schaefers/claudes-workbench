@@ -19,7 +19,7 @@ import time
 import traceback
 from pathlib import Path
 
-from . import gitops, store
+from . import context, gitops, store
 from .events import StuckDetector, normalize
 
 PKG_ROOT = Path(__file__).resolve().parent.parent
@@ -45,11 +45,12 @@ def opencode_bin() -> list[str]:
 
 
 def write_config_layer(task: store.Task) -> Path:
-    """The per-task OpenCode config: just the ask_reviewer MCP server, bound to this task."""
+    """The per-task OpenCode config: the agent's context and the ask_reviewer server."""
     path = task.dir / "opencode.json"
     wait_ms = int(task.spec.get("ask_timeout", 1200) + 60) * 1000
     store.write_json(path, {
         "$schema": "https://opencode.ai/config.json",
+        **context.layer(task),
         "mcp": {"servers": {"workbench": {  # OpenCode 2.x shape: mcp.servers.<name>
             "type": "local",
             "command": [sys.executable, str(PKG_ROOT / "bin" / "wb-ask-mcp")],
