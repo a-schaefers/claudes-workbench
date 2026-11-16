@@ -41,8 +41,13 @@ Read just enough of the repo to scope it, then write the spec to a file in the s
 - acceptance criteria, and an **acceptance command** that proves them (an existing test command,
   or a new test the agent must write first — say which)
 `wb` appends the working protocol itself (no commits, run the tests, stay in scope, ask_reviewer
-budget, the summary format), so don't repeat it. One function/module/feature per task; split big
-asks and run the parts one after another.
+budget, the summary format), so don't repeat it. The agent also starts with what you would have:
+the repo's CLAUDE.md / AGENTS.md / CLAUDE.local.md / `.claude/rules`, a map of nested CLAUDE.md
+files, the workbench handbook (`agent/HANDBOOK.md`: read first, match the code, smallest diff,
+verify, honest summary) and the skills in `~/.claude/skills` and the repo. So don't restate
+project conventions; spend the spec on what is specific to this task: the files to read first,
+the existing code to imitate, and any skill to load by name ("load the `x` skill first").
+One function/module/feature per task; split big asks and run the parts one after another.
 
 ## 3. Dispatch
 ```
@@ -54,6 +59,8 @@ the session is woken by a `[workbench]` prompt when the task needs you (review, 
 failed) — end your turn and wait for it. Without the mod, run `wb wait <name>` with Bash
 `run_in_background: true` and act on its notification. Failing tests go back to the agent on their
 own for `--auto-fix` rounds before you are woken; `wb log <name>` shows what it is doing.
+Strata reads prompts slowly (~30–55 tok/s while experts stream from disk): a new session spends
+a few minutes on its first prompt, and big file reads cost time too. That is normal, not stuck.
 
 ## 4. When woken
 - **review** — the report says tests PASS/FAIL, the agent's summary and the files. Read

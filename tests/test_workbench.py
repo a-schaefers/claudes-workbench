@@ -2,6 +2,8 @@
 import io
 import json
 import os
+import shutil
+import socket
 import subprocess
 import sys
 import tempfile
@@ -79,10 +81,9 @@ class Lifecycle(Base):
         self.assertIn("tests: PASS", report)
         self.assertIn("answer.txt", report)
         self.assertIn("+42", run_wb("diff", "t-ok"))
-        # the review notification is there, once
+        # the review notification is delivered once; a later wait says it was
         self.assertIn("[review] t-ok", run_wb("wait", "t-ok", "--timeout", "1"))
-        with self.assertRaises(SystemExit):
-            run_wb("wait", "t-ok", "--timeout", "1")
+        self.assertIn("already delivered", run_wb("wait", "t-ok", "--timeout", "1"))
         out = run_wb("accept", "t-ok", "-m", "feat: answer", "--merge")
         self.assertIn("merged", out)
         self.assertEqual((self.repo / "answer.txt").read_text(), "42\n")
@@ -141,6 +142,14 @@ class Lifecycle(Base):
         notice = [r for r in rows if r["task"] == "t-ack"][-1]
         acked = float((store.Task("t-ack").dir / "acked").read_text())
         self.assertGreaterEqual(acked, notice["ts"])  # what the mod checks before waking Claude
+
+    def test_wait_returns_when_the_notice_was_taken_elsewhere(self):
+        # The mod (or a second waiter) acknowledged the review first: a named wait must not hang.
+        self.start("t-taken", "ok")
+        wait_phase("t-taken", {"review"})
+        self.assertIn("[review] t-taken", run_wb("wait", "t-taken", "--timeout", "1"))
+        out = run_wb("wait", "t-taken", "--timeout", "1")
+        self.assertIn("already delivered", out)
 
     def test_crash_is_reported_failed(self):
         self.start("t-crash", "crash")
@@ -261,6 +270,49 @@ class AgentContext(Base):
         files, nested = context.instruction_files(store.Task("t-local"))
         self.assertIn(self.repo.resolve() / "CLAUDE.local.md", [p.resolve() for p in files])
         self.assertEqual(nested, [])
+
+
+@unittest.skipUnless(shutil.which("opencode"), "needs the real opencode")
+class RealOpenCode(Base):
+    """Guards the OpenCode behaviour context.py relies on, with a model server that records."""
+
+    def test_what_the_model_receives(self):
+        from workbench import runner
+        (self.repo / "CLAUDE.md").write_text("CANARY-CLAUDE-MD: follow me\n")
+        subprocess.run(["git", "-C", str(self.repo), "add", "CLAUDE.md"], check=True)
+        subprocess.run(["git", "-C", str(self.repo), "commit", "-qm", "rules"], check=True)
+        self.start("t-real", "ok")
+        wait_phase("t-real", {"review"})
+        task = store.Task("t-real")
+        with socket.socket() as sock:
+            sock.bind(("127.0.0.1", 0))
+            port = sock.getsockname()[1]
+        out = Path(self.tmp.name) / "requests.jsonl"
+        server = subprocess.Popen([sys.executable, str(ROOT / "tests" / "capture_llm.py"),
+                                   str(port), str(out)])
+        self.addCleanup(server.kill)
+        layer_path = runner.write_config_layer(task)
+        layer = json.loads(layer_path.read_text())
+        layer["provider"] = {"cap": {
+            "npm": "@ai-sdk/openai-compatible",
+            "options": {"baseURL": f"http://127.0.0.1:{port}/v1", "apiKey": "x"},
+            "models": {"cap": {"name": "capture", "tool_call": True,
+                               "limit": {"context": 32768, "output": 1024}}}}}
+        layer_path.write_text(json.dumps(layer))
+        time.sleep(0.5)
+        env = {**os.environ, "PWD": str(task.worktree), "OPENCODE_CONFIG": str(layer_path)}
+        subprocess.run(["opencode", "run", "--standalone", "-m", "cap/cap", "--format", "json",
+                        "say ok"], cwd=task.worktree, env=env, capture_output=True, timeout=120)
+        reqs = [json.loads(line) for line in out.read_text().splitlines()]
+        agent = max(reqs, key=lambda r: len(r.get("tools", [])))  # not the title request
+        text = json.dumps(agent["messages"])
+        tools = {t["function"]["name"] for t in agent["tools"]}
+        self.assertIn("CANARY-CLAUDE-MD", text)          # CLAUDE.md reaches the model
+        self.assertIn("Workbench handbook", text)
+        self.assertIn("workbench_ask_reviewer", tools)
+        self.assertTrue({"edit", "read", "shell"} <= tools)
+        self.assertFalse({"question", "execute", "subagent"} & tools)
+        self.assertNotIn("<id>delegate</id>", text)
 
 
 class Detector(unittest.TestCase):

@@ -199,8 +199,18 @@ def cmd_wait(a):
                 _ack_file(task).write_text(str(row["ts"]))
                 print(f"[{row['kind']}] {row['task']}\n{row['text']}")
                 return
-        if a.name and need(a.name).status.get("phase") in store.CLOSED:
-            die(f"{a.name} is closed", 2)
+        if a.name:
+            task = need(a.name)
+            phase = task.status.get("phase")
+            if phase in store.CLOSED:
+                die(f"{a.name} is closed", 2)
+            # Already waiting on Claude, its notice taken by the mod or another waiter: say so
+            # now rather than block until a notice that will never come.
+            mine = [r for r in rows if r["task"] == a.name]
+            if (phase in store.NEEDS_CLAUDE and mine and (phase == "asking" or not runner_alive(task))
+                    and mine[-1]["kind"] == ("question" if phase == "asking" else phase)):
+                print(f"[{mine[-1]['kind']}] {a.name} (already delivered once)\n{mine[-1]['text']}")
+                return
         if deadline and time.time() > deadline:
             die("timed out waiting", 2)
         time.sleep(2)
@@ -354,6 +364,8 @@ def cmd_doctor(a):
     line(oc.returncode == 0, f"opencode {oc.stdout.strip() or oc.stderr.strip()}")
     cfg = Path.home() / ".config/opencode/opencode.json"
     line(cfg.exists(), f"OpenCode config {cfg}")
+    g = subprocess.run(["git", "--version"], capture_output=True, text=True)
+    line(g.returncode == 0, g.stdout.strip() or "git not found")
     for key, m in models.registry().items():
         st = models.check(key, m)
         print(f"{'ok ' if st['ready'] else '-- '} model {key}: {st['why']}")
