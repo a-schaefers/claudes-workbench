@@ -180,26 +180,7 @@ def make_resident(m: Model, say=print) -> float:
     if _fake() or status(m)["resident"] and not _others_resident(m):
         return 0.0
     t0 = time.time()
-    for other in discover().values():
-        if other.id == m.id or other.engine != "server" or not status(other)["resident"]:
-            continue
-        if not other.stop:
-            raise RuntimeError(f"{other.id} holds the GPU and has no stop command; stop it first")
-        deadline = time.time() + 600
-        while not _server_idle(other) and time.time() < deadline:  # never cut off someone's reply
-            time.sleep(5)
-        say(f"stopping {other.id}")
-        subprocess.run(other.stop, shell=True, capture_output=True, timeout=300)
-    roots = {o.root for o in discover().values() if o.engine == "ollama"}
-    for root in roots:  # every model Ollama has loaded, ours or another tool's
-        for name in _ollama_loaded(root):
-            if m.engine == "ollama" and root == m.root and _matches(m.name, {name}):
-                continue
-            say(f"unloading {name} from ollama")
-            try:
-                _post(f"{root}/api/generate", {"model": name, "keep_alive": 0}, timeout=120)
-            except Exception:
-                pass
+    free_gpu(keep=m, say=say)
     if m.engine == "ollama":
         say(f"loading {m.name} into ollama")
         _post(f"{m.root}/api/generate", {"model": m.name, "prompt": "", "keep_alive": "30m"},
@@ -216,6 +197,34 @@ def make_resident(m: Model, say=print) -> float:
                 raise RuntimeError(f"{m.id} did not come up within {START_TIMEOUT // 60} min")
             time.sleep(5)
     return time.time() - t0
+
+
+def free_gpu(keep: Model | None = None, say=print) -> None:
+    """Stop every model server and unload every Ollama model holding the GPU, except ``keep``."""
+    if _fake():
+        return
+    for other in discover().values():
+        if keep and other.id == keep.id or other.engine != "server" or \
+                not status(other)["resident"]:
+            continue
+        if not other.stop:
+            raise RuntimeError(f"{other.id} holds the GPU and has no stop command; stop it first")
+        deadline = time.time() + 600
+        while not _server_idle(other) and time.time() < deadline:  # never cut off someone's reply
+            time.sleep(5)
+        say(f"stopping {other.id}")
+        subprocess.run(other.stop, shell=True, capture_output=True, timeout=300)
+    roots = {o.root for o in discover().values() if o.engine == "ollama"}
+    for root in roots:  # every model Ollama has loaded, ours or another tool's
+        for name in _ollama_loaded(root):
+            if keep and keep.engine == "ollama" and root == keep.root and \
+                    _matches(keep.name, {name}):
+                continue
+            say(f"unloading {name} from ollama")
+            try:
+                _post(f"{root}/api/generate", {"model": name, "keep_alive": 0}, timeout=120)
+            except Exception:
+                pass
 
 
 def _others_resident(m: Model) -> bool:

@@ -13,8 +13,8 @@ import time
 from collections import defaultdict
 from pathlib import Path
 
-from . import (__version__, chat, context, gitops, hardware, models, results, router, skills,
-               store, transcript)
+from . import (__version__, chat, context, gitops, hardware, images, models, results, router,
+               skills, store, transcript)
 from .watch import Watcher, wait_exit
 from .runner import PKG_ROOT
 
@@ -621,6 +621,8 @@ def cmd_scout(a):
         print(f"  {n}: {w}")
     print("\nhardware")
     print("\n".join(hardware.report()))
+    print("\nimage engines (wb image)")
+    print("\n".join(image_lines()) or f"  none: describe one in {images.config_path()}")
     provs = models.providers()
     registered = models.discover()
     print("\nmodels OpenCode can use (opencode.json)")
@@ -732,6 +734,35 @@ def cmd_skill(a):
     when = "from its next run" + (" (`wb steer --now` starts that run now)" if runner_alive(task)
                                   else "")
     print(f"{task.name} holds: {', '.join(held) or 'no skills'}; the agent is told {when}")
+
+
+def image_lines() -> list[str]:
+    out = []
+    for name, e in images.engines().items():
+        why = images.ready(e)
+        out.append(f"  {name}: {e.get('label') or e.get('command', e.get('url', ''))[:60]}"
+                   f" · {'ready' if not why else why}"
+                   + (f"\n    {e['notes']}" if e.get("notes") else ""))
+    return out
+
+
+def cmd_image(a):
+    """Local image generation: Claude writes the prompt, looks at the candidates, keeps one."""
+    if a.list or not a.prompt:
+        print("\n".join(image_lines()) or f"no image engine: describe one in {images.config_path()}")
+        return
+    try:
+        w, h = (int(x) for x in a.size.lower().split("x"))
+    except ValueError:
+        die(f"--size {a.size!r}: WIDTHxHEIGHT, e.g. 1024x1024")
+    out = Path(a.out) if a.out else store.home() / "images" / time.strftime("%Y%m%d-%H%M%S")
+    try:
+        made = images.generate(a.prompt, out, n=a.n, size=(w, h), seed=a.seed, name=a.engine,
+                               refs=a.ref or [], say=lambda m: print(m, flush=True))
+    except (KeyError, RuntimeError, OSError, subprocess.TimeoutExpired) as e:
+        die(str(e).strip("'\""))
+    print(f"{len(made)} image(s) in {out}: look at each before choosing; the .json beside each "
+          "holds its prompt and seed")
 
 
 def cmd_model(a):
@@ -1006,6 +1037,18 @@ def main(argv=None):
         x = ss.add_parser(verb, help=what + ", from its next run")
         x.add_argument("task"); x.add_argument("names", nargs="+")
     s.set_defaults(f=cmd_skill)
+    s = sub.add_parser("image", help="generate images with a local image model, for Claude to "
+                       "look at and choose from")
+    s.add_argument("prompt", nargs="?")
+    s.add_argument("--n", type=int, default=4, help="candidates (seeds SEED, SEED+1, ...)")
+    s.add_argument("--size", default="1024x1024")
+    s.add_argument("--seed", type=int)
+    s.add_argument("--out", help="directory (default: a new one under $WB_HOME/images)")
+    s.add_argument("--engine", help="an engine from images.json (default: the first)")
+    s.add_argument("--ref", action="append", help="a reference image (repeatable), for engines "
+                   "that take them")
+    s.add_argument("--list", action="store_true", help="the configured engines")
+    s.set_defaults(f=cmd_image)
     s = sub.add_parser("answer", help="answer the agent's ask_reviewer question")
     s.add_argument("name"); s.add_argument("--id")
     g = s.add_mutually_exclusive_group(required=True)

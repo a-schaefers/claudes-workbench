@@ -165,6 +165,22 @@ After a review: a handed skill was loaded and the agent still made its mistake â
 wrong. `wb skill list` shows each skill's record and flags clutter; the weekly check retires what
 no longer earns its place (`wb skill retire <name> -m why`; `restore` brings one back).
 
+## Images: you art-direct, a local model draws
+When the project needs an image (a sprite, an icon, a background, a README picture), and
+`wb image --list` shows a ready engine, make it locally instead of asking the user for one.
+Agents can't make images; one that needs an asset asks you, and you make it.
+1. **Brief it like an art director.** Say what's in it, then the style, composition, palette and
+   lighting, the size the project needs, and what to avoid. Name the use ("a 64x64 game sprite on
+   a flat background") so the framing fits.
+2. `wb image "<prompt>" --n 4 --size WxH [--seed S] [--ref img]` makes candidates (seeds S, S+1,
+   ...) and prints their paths. **Read every one**: look at it yourself, never pick by filename.
+3. Keep one, or rewrite the prompt for what was wrong and go again. A seed you liked comes back
+   with `--seed` and a changed prompt. Stop after three rounds and show the user the best.
+4. Copy the keeper into the project (resized or cropped as needed), commit it, and say which
+   engine, prompt and seed made it (its `.json` sidecar has them).
+Mind the engine's `notes` in `wb image --list`: an image model's licence can restrict where and
+how its output may be used. A generation holds the GPU: running tasks wait their turn.
+
 ## 3. Dispatch
 ```
 wb start <kebab-name> --spec <file> --repo <repo> --size significant|trivial \

@@ -474,6 +474,44 @@ up again (a library's quirk, a pitfall, a check to run), Claude writes a skill.
   thing), and one not offered in 60 days. `wb skill retire` moves one to `retired/`;
   `wb skill restore` brings it back.
 
+### Images
+
+Claude can make images for a project (sprites, icons, backgrounds, a README picture) with an
+image model on your machine. Claude acts as art director: it writes the prompt, `wb image`
+generates four candidates, and Claude looks at each one. Then it keeps one, rewrites the prompt
+and tries again, or reuses a seed it liked. The image it keeps goes into the project and is
+committed like any other change. Each image has a `.json` file beside it with the prompt, seed,
+size and engine, so it can be made again. The coding agents can't make images; when one needs an
+asset, it asks Claude.
+
+You install an image tool and model yourself, then describe it in
+`~/.config/workbench/images.json` (`$WB_IMAGES`). Two kinds work:
+
+```json
+{
+  "sdcpp": {
+    "command": "sd-cli --diffusion-model ~/models/image/model.gguf -p {prompt} -o {out} -W {width} -H {height} --seed {seed}",
+    "ref_arg": "-r",
+    "label": "stable-diffusion.cpp, Vulkan",
+    "notes": "licence: Apache-2.0; good at sprites and icons"
+  },
+  "server": { "url": "http://127.0.0.1:30000/v1/images/generations", "model": "…" }
+}
+```
+
+- A **command** is any command-line tool. `{prompt}`, `{out}`, `{width}`, `{height}` and
+  `{seed}` are filled in, and the prompt is passed as a single argument, never through a shell.
+  `ref_arg` adds `--ref` images, for models that edit or keep a character consistent.
+- A **url** is any server with the OpenAI images API (SGLang, vLLM-Omni, LocalAI and others).
+- `notes` is shown to Claude. Put the model's licence there: some licences limit where and how
+  their output may be used.
+
+A generation takes the GPU lock and unloads the coding models first, just as a task does, so the
+two never share VRAM. `wb scout` and `wb image --list` show each engine and whether it's ready.
+Prefer weights in safetensors or GGUF from the model's own publisher or a well-known
+quantizer. Prefer tools that load models without running code that comes with them (ComfyUI's
+custom-node packs do run their own Python).
+
 ### Git, commits and projects
 
 - **The split of roles.** The agent writes code and reads git freely (`status`, `diff`, `log`,
@@ -580,6 +618,7 @@ Both stop the web chat listening in that session.
 | `wb model add\|retire\|sizes <provider/model> …` | add (`--pull`), retire (`--delete`), or limit a model's task sizes |
 | `wb scout [--done --notes] [--due] [--watch TEXT] [--unwatch N]` | the weekly model check's facts and its watch list |
 | `wb skill list\|show\|add\|retire\|restore\|hand\|take …` | the skill library |
+| `wb image "<prompt>" [--n] [--size] [--seed] [--ref] [--out] [--engine] [--list]` | candidates from a local image model, for Claude to look at and choose from |
 | `wb stats` | real results by model and size |
 | `wb chat [serve\|url\|reply\|log]` | the web chat |
 | `wb init <dir>` | set a project up: git on master, AGENTS.md → CLAUDE.md |
@@ -605,7 +644,8 @@ Both stop the web chat listening in that session.
     ask/<id>.json  .answer       questions and answers
     worktree/                    the agent's git worktree, branch delegate/<name>
 ~/.local/share/workbench/skills/ ($WB_SKILLS) the skill library, its own git repo
-~/.config/workbench/             models.json ($WB_MODELS), chat-token ($WB_CHAT_TOKEN)
+  images/<when>/                 wb image's candidates (unless --out) and their .json sidecars
+~/.config/workbench/             models.json ($WB_MODELS), images.json ($WB_IMAGES), chat-token ($WB_CHAT_TOKEN)
 ~/.config/opencode/opencode.json the models (OpenCode's own config)
 ```
 

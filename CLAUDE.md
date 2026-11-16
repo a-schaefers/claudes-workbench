@@ -16,7 +16,8 @@ what either says (a command, a flag, a default, a guard, a file) updates it in t
   - `gitops.py`: the task's worktree and branch, the review diff (intent-to-add, so new files
     show), commits. `results.py`: results.jsonl rows (`wb accept`/`discard`), each step's size and fit (`step`),
     and `wb stats`.
-  - `models.py`: discovers local models from opencode.json, their status, and GPU residency (make_resident);
+  - `models.py`: discovers local models from opencode.json, their status, and GPU residency
+    (make_resident, free_gpu);
     adds and retires them (Ollama's pull/delete, opencode.json entries) for the weekly model check.
   - `chat.py`: the web chat (`wb chat serve`, stdlib HTTP, a token and a Host check; `systemd/wb-chat.service`
     keeps it up). The mod hands its messages to the /delegate session as prompts; Claude replies with `wb chat reply`.
@@ -44,6 +45,11 @@ what either says (a command, a flag, a default, a guard, a file) updates it in t
     `GIT_OPTIONAL_LOCKS=0`) and refuses writes in the task's repo and in any repo outside the temp
     dir; for `init`/`clone` it judges by where the new repo lands. Standard library only: it's
     imported on every git call.
+  - `images.py`: `wb image`. Engines come from `~/.config/workbench/images.json` (`$WB_IMAGES`):
+    a `command` argv template ({prompt} {out} {width} {height} {seed}, filled token by token after
+    `shlex.split`, never a shell; `ref_arg` for `--ref`) or a `url` speaking the OpenAI images
+    API (b64_json). It holds gpu.lock and calls `models.free_gpu()` first, so it never shares
+    VRAM with a coding model. Each image gets a `.json` sidecar (prompt, seed, size, engine).
   - `context.py`: what the agent knows. It adds CLAUDE.md files and rules, the nested-instructions map and the handbook to the config layer's `instructions`, and it sets the denied tools and skills.
 - Runs on Linux, WSL2 and macOS. Native Windows doesn't: store.py needs fcntl and the runner
   `os.killpg` and POSIX signals. Off Linux, watch.py falls back to timed waits without inotify/pidfd.
@@ -91,7 +97,7 @@ what either says (a command, a flag, a default, a guard, a file) updates it in t
 ## State and config
 Everything is plain files under `~/.local/state/workbench` (`$WB_HOME`):
 ```
-notify.jsonl  results.jsonl  gpu.lock  scout.json  watch.json
+notify.jsonl  results.jsonl  gpu.lock  scout.json  watch.json  images/<when>/
 chat/          messages.jsonl receipts.jsonl listener.json
 tasks/<name>/  task.json status.json events.jsonl opencode.json HANDBOOK.md context.md bin/git
                steer.jsonl acked runner.log  rounds/<n>/{prompt.md,summary.md,tests.txt}
@@ -109,7 +115,7 @@ say) and `label`. Ollama entries need `options.max_tokens` (Ollama ignores
 OpenCode's `max_completion_tokens`); `wb model add` writes it and `wb doctor` checks it, and
 that `limit.context` matches what Ollama serves (`models.ollama_served_context`): more cuts prompts off, less shrinks every slice.
 
-Environment: `WB_HOME`, `WB_MODELS`, `WB_SKILLS`, `WB_CHAT_TOKEN` (paths above);
+Environment: `WB_HOME`, `WB_MODELS`, `WB_SKILLS`, `WB_IMAGES`, `WB_CHAT_TOKEN` (paths above);
 `WB_OPENCODE_CONFIG` (OpenCode's config, default `~/.config/opencode/opencode.json`);
 `WB_COMPACT_AT` (the mod's early compaction, a percentage, 0 off); `WB_BIN` (the `wb` the mod runs).
 Tests only: `WB_OPENCODE_BIN` (a fake opencode), `WB_FAKE_MODELS` (no model servers).

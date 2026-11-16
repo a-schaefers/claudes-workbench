@@ -787,6 +787,75 @@ class GitGuard(unittest.TestCase):
                          ["CLAUDE.md", "docs/AGENTS.md", ".claude/skills/s/SKILL.md"])
 
 
+class Images(Base):
+    def engines(self, entries):
+        path = Path(self.tmp.name) / "images.json"
+        path.write_text(json.dumps(entries))
+        os.environ["WB_IMAGES"] = str(path)
+
+    def test_a_command_engine_makes_candidates_with_sidecars(self):
+        tmp = Path(self.tmp.name)
+        fake = tmp / "fake_image.py"
+        fake.write_text("import json, sys\n"
+                        "a = sys.argv[1:]\n"
+                        "open(a[a.index('-o') + 1], 'wb').write(b'PNG')\n"
+                        "open(sys.argv[0] + '.calls', 'a').write(json.dumps(a) + '\\n')\n")
+        self.engines({"fake": {"command": f"{sys.executable} {fake} -p {{prompt}} -o {{out}} "
+                                          "-W {width} -H {height} --seed {seed}",
+                               "ref_arg": "-r", "notes": "test engine"}})
+        ref = tmp / "ref.png"
+        ref.write_bytes(b"REF")
+        prompt = "a red fox; it's $HOME & `rm -rf` ~ safe"
+        out = run_wb("image", prompt, "--n", "2", "--seed", "5", "--size", "640x360",
+                     "--out", str(tmp / "img"), "--ref", str(ref))
+        self.assertIn("2 image(s)", out)
+        made = sorted((tmp / "img").glob("*.png"))
+        self.assertEqual([p.name for p in made], ["a-red-fox-it-s-home-5.png",
+                                                  "a-red-fox-it-s-home-6.png"])
+        side = json.loads(made[0].with_suffix(".json").read_text())
+        self.assertEqual((side["prompt"], side["seed"], side["width"], side["engine"]),
+                         (prompt, 5, 640, "fake"))
+        calls = [json.loads(l) for l in Path(str(fake) + ".calls").read_text().splitlines()]
+        self.assertEqual(calls[0][:2], ["-p", prompt])  # one argument, never through a shell
+        self.assertNotIn(os.path.expanduser("~"), calls[0][1])  # a ~ in the prompt stays as is
+        self.assertEqual(calls[1][calls[1].index("--seed") + 1], "6")
+        self.assertEqual(calls[0][-2:], ["-r", str(ref.resolve())])
+        self.assertIn("fake: ", run_wb("image", "--list"))
+        self.assertIn("ready", run_wb("image", "--list"))
+
+    def test_a_server_engine_and_the_failures(self):
+        import base64, threading
+        from http.server import BaseHTTPRequestHandler, HTTPServer
+        got = []
+
+        class H(BaseHTTPRequestHandler):
+            def log_message(self, *a):
+                pass
+
+            def do_GET(self):
+                self.send_response(404); self.end_headers()
+
+            def do_POST(self):
+                got.append(json.loads(self.rfile.read(int(self.headers["Content-Length"]))))
+                body = json.dumps({"data": [{"b64_json": base64.b64encode(b"IMG").decode()}]})
+                self.send_response(200); self.end_headers(); self.wfile.write(body.encode())
+
+        srv = HTTPServer(("127.0.0.1", 0), H)
+        threading.Thread(target=srv.serve_forever, daemon=True).start()
+        self.addCleanup(srv.shutdown)
+        url = f"http://127.0.0.1:{srv.server_port}/v1/images/generations"
+        self.engines({"srv": {"url": url, "model": "m"}})
+        tmp = Path(self.tmp.name)
+        run_wb("image", "a lighthouse", "--n", "1", "--seed", "9", "--out", str(tmp / "o"))
+        self.assertEqual((tmp / "o" / "a-lighthouse-9.png").read_bytes(), b"IMG")
+        self.assertEqual((got[0]["size"], got[0]["seed"], got[0]["model"]), ("1024x1024", 9, "m"))
+        with self.assertRaises(SystemExit):  # a server engine takes no reference images
+            with redirect_stderr(io.StringIO()):
+                run_wb("image", "x", "--ref", str(tmp / "o" / "a-lighthouse-9.png"))
+        self.engines({})
+        self.assertIn("no image engine", run_wb("image", "--list"))
+
+
 class Discovery(Base):
     def test_local_providers_only_with_overrides(self):
         from workbench import models
