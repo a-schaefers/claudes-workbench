@@ -1,4 +1,4 @@
-import { expect, test } from 'claude-code/testing'
+import { expect, mock, test } from 'claude-code/testing'
 
 const PANE = {
   plugin: 'workbench',
@@ -40,4 +40,69 @@ test('/workbench opens the pane and counts open tasks', async ($, on) => {
   const out = await $.command.run({ command: 'workbench', args: '' })
   expect(opened).toBe('workbench')
   expect(JSON.stringify(out)).toContain('no open tasks')
+})
+
+// A file system in memory: what `wb` and its runner would have written.
+function fakeTasks(on: any, files: Record<string, string>) {
+  on('env.get', (_: any, e: any) => ({ value: e.name === 'WB_HOME' ? '/wb' : '/home/u' }))
+  on('fs.read', (_: any, e: any) => {
+    if (!(e.path in files)) throw new Error(`ENOENT: ${e.path}`)
+    return { value: files[e.path] }
+  })
+  on('fs.write', (_: any, e: any) => {
+    files[e.path] = e.text
+    return { value: undefined }
+  })
+  on('fs.exists', (_: any, e: any) => ({ value: Object.keys(files).some(p => p.startsWith(e.path)) }))
+  on('fs.list', () => ({ value: [{ name: 'fix-it', kind: 'dir' }] }))
+  on('command.register', () => ({ value: { command: 'workbench' } }))
+  on('ui.open', () => ({ value: { isPlaced: true } }))
+  on('ui.status', () => ({ value: undefined }))
+  on('session.start', (_: any, e: any) => ({ cwd: e.cwd }))
+  on('turn.start', (_: any, e: any) => ({ turnId: e.turnId }))
+  on('turn.complete', () => ({ text: '' }))
+}
+
+test('a review notice waits for the turn to end, and is dropped if it went stale', async ($, on) => {
+  const clock = mock.clock(on, { now: 1_800_000_000_000 })
+  const ts = 1_800_000_000 // seconds, as the runner writes them
+  const files: Record<string, string> = {
+    '/wb/notify.jsonl': JSON.stringify({ ts, task: 'fix-it', kind: 'review', text: 'REPORT' }) + '\n',
+    '/wb/tasks/fix-it/task.json': JSON.stringify({ name: 'fix-it', model: 'qwen27b', created_at: ts }),
+    '/wb/tasks/fix-it/status.json': JSON.stringify({ phase: 'review', round: 1, updated_at: ts }),
+  }
+  fakeTasks(on, files)
+  const woken: string[] = []
+  const toasts: string[] = []
+  on('prompt.submit', (_: any, e: any) => {
+    woken.push(e.text)
+    return { text: e.text }
+  })
+  on('ui.toast', (_: any, e: any) => {
+    toasts.push(e.text)
+    return { value: undefined }
+  })
+
+  await $.session.start({ cwd: '/', surface: 'terminal', isInteractive: true })
+  await $.turn.start({ text: 'busy with something else', turnId: 't1' })
+  await clock.advance(3000)
+  expect(toasts.length).toBe(1)        // seen at once
+  expect(woken.length).toBe(0)         // but no wake while Claude is mid-turn
+  expect(files['/wb/tasks/fix-it/acked']).toBe(undefined)
+
+  await $.turn.complete({ answer: '', durationMs: 1, isAborted: false, turnId: 't1', reason: 'answer' })
+  await clock.advance(3000)
+  expect(woken.length).toBe(1)         // delivered once the turn ended
+  expect(woken[0]).toContain('REPORT')
+  await clock.advance(3000)
+  expect(woken.length).toBe(1)         // and only once
+
+  // A second notice the turn acted on (accepted) before it ended: no wake, just acknowledged.
+  files['/wb/notify.jsonl'] += JSON.stringify({ ts: ts + 60, task: 'fix-it', kind: 'review', text: 'R2' }) + '\n'
+  await $.turn.start({ text: '', turnId: 't2' })
+  files['/wb/tasks/fix-it/status.json'] = JSON.stringify({ phase: 'accepted', round: 2, updated_at: ts + 90 })
+  await $.turn.complete({ answer: '', durationMs: 1, isAborted: false, turnId: 't2', reason: 'answer' })
+  await clock.advance(3000)
+  expect(woken.length).toBe(1)
+  expect(files['/wb/tasks/fix-it/acked']).toBe(String(ts + 60))
 })

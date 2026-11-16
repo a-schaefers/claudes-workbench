@@ -5,6 +5,8 @@
 // a task needs Claude (ready for review, a question, stuck, failed), starts a turn for Claude with
 // the task's report in it, so nobody has to poll. Acknowledgements are shared with `wb wait`
 // through each task's `acked` file, so a notification wakes Claude once, by whichever got it first.
+// A wake is held while Claude's main loop is mid-turn (a prompt submitted then would queue and
+// arrive stale) and checked against the task's phase when it is finally sent.
 import { atom, read, update } from 'claude-code'
 import type { Register } from 'claude-code'
 
@@ -90,6 +92,8 @@ const mem = {
   lastNotifyLength: -1,
   paneOpened: false,
   polling: false,
+  busy: false, // Claude's main loop is mid-turn: a wake would queue and arrive stale
+  toasted: new Set<string>(),
 }
 
 // Every task directory, as the pane draws it. Closed tasks drop out after half an hour.
@@ -158,8 +162,10 @@ async function poll($: any) {
 async function deliver($: any, now: number) {
   const root = mem.root
   const text = await $.fs.read(`${root}/notify.jsonl`).catch(() => '')
-  if (text.length === mem.lastNotifyLength) return
-  mem.lastNotifyLength = text.length
+  // While Claude is mid-turn, look every poll (the turn may act on the task) but hold the wake:
+  // a prompt submitted now would queue and arrive after the task has moved on.
+  if (text.length === mem.lastNotifyLength && !mem.busy) return
+  if (!mem.busy) mem.lastNotifyLength = text.length
   const latest = new Map<string, Row>() // one wake per task: its newest notification
   for (const row of parseLines(text)) {
     if (row.ts * 1000 < Math.max(mem.startedAt, now) - OLDEST_WAKE_MS) continue
@@ -169,14 +175,19 @@ async function deliver($: any, now: number) {
     const ackPath = `${root}/tasks/${name}/acked`
     const acked = Number(await $.fs.read(ackPath).catch(() => '0')) || 0
     if (row.ts <= acked) continue
-    await $.fs.write(ackPath, String(row.ts)) // acknowledge first: never wake twice
     // Only wake for news still true: a review notice for a task since discarded, accepted or
     // sent back is acknowledged and dropped.
     const status = await readJson($, `${root}/tasks/${name}/status.json`)
-    if (status.phase !== (row.kind === 'question' ? 'asking' : row.kind)) continue
+    const current = status.phase === (row.kind === 'question' ? 'asking' : row.kind)
     const headline = HEADLINE[row.kind] ?? row.kind
-    $.ui.toast(`workbench: ${name} ${headline}`)
-    if (!mem.wake) continue
+    const key = `${name}:${row.ts}`
+    if (current && !mem.toasted.has(key)) {
+      mem.toasted.add(key)
+      $.ui.toast(`workbench: ${name} ${headline}`)
+    }
+    if (mem.busy && current && mem.wake) continue // deliver once the turn ends
+    await $.fs.write(ackPath, String(row.ts)) // acknowledge before waking: never wake twice
+    if (!current || !mem.wake) continue
     const next = (NEXT[row.kind] ?? NEXT.failed)(name)
     void $.prompt.submit({
       text: `[workbench] Task \`${name}\` ${headline}.\n\n${row.text}\n\n${next}`,
@@ -200,6 +211,16 @@ export const register: Register = (on, options) => {
       void poll($)
     })
 
+    return next(e)
+  })
+
+  // Only the main loop's turns: a subagent's run doesn't hold the prompt.
+  on('turn.start', async ($, e, next) => {
+    if (!e.agentId) mem.busy = true
+    return next(e)
+  })
+  on('turn.complete', async ($, e, next) => {
+    if (!e.agentId) mem.busy = false
     return next(e)
   })
 
