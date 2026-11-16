@@ -2,6 +2,8 @@
 
 # Claude's Workbench
 
+<p align="center"><img src="docs/delegate-pane.png" alt="Claude in delegate mode on the left; the Workbench pane on the right, where the apprentice robot says what the local agent is doing"></p>
+
 **Frontier judgment, local horsepower. Claude leads; your GPU does the heavy lifting.**
 
 Claude's Workbench turns the local LLMs on your gaming PC into a crew led by a frontier model.
