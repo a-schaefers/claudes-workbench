@@ -41,7 +41,11 @@ def _tracked(worktree: Path, *patterns: str) -> list[str]:
 def instruction_files(task: store.Task) -> tuple[list[Path], list[str]]:
     """(files OpenCode should load, nested CLAUDE.md paths the agent reads when it works there)."""
     wt, repo = task.worktree, Path(task.spec["repo"])
-    load: list[Path] = [HANDBOOK]
+    # the agent's own copy: OpenCode shows each instruction file's path, and a path into the
+    # workbench repo once led a freshly started agent to go looking there for plans
+    handbook = task.dir / "HANDBOOK.md"
+    handbook.write_text(HANDBOOK.read_text())
+    load: list[Path] = [handbook]
     user = Path.home() / ".claude" / "CLAUDE.md"
     if user.is_file():
         load.append(user)

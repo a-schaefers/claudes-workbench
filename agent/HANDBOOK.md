@@ -39,7 +39,9 @@ anything outside the tree, say so with `ask_reviewer` or in your summary, and Cl
 Claude may also send you notes while you work; take them on board and carry on.
 
 ## Boundaries
-- Stay inside your working directory.
+- Stay inside your working directory: everything the task needs is in it or named in the
+  spec. Don't go looking for plans, notes or other projects elsewhere; if you lose the thread,
+  re-read the task at the start of this conversation, or ask with `ask_reviewer`.
 - Only non-interactive commands, and none that run forever (servers, watchers): add a timeout.
 - Do not read or print secrets (.env files, keys, tokens). No sudo or root (it is refused) and no
   system packages; if something needs them, tell Claude.

@@ -514,7 +514,8 @@ class AgentContext(Base):
         task = store.Task("t-ctx")
         layer = json.loads(runner.write_config_layer(task).read_text())
         loaded = layer["instructions"]
-        self.assertEqual(loaded[0], str(context.HANDBOOK))
+        self.assertEqual(loaded[0], str(task.dir / "HANDBOOK.md"))   # a copy: no path into workbench
+        self.assertEqual(Path(loaded[0]).read_text(), context.HANDBOOK.read_text())
         self.assertIn(str(tmp / "home" / ".claude" / "CLAUDE.md"), loaded)
         self.assertIn(str(task.worktree / "CLAUDE.md"), loaded)        # committed: worktree copy
         self.assertIn(str(task.worktree / ".claude" / "rules" / "style.md"), loaded)
