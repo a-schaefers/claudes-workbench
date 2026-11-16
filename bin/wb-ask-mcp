@@ -1,0 +1,10 @@
+#!/usr/bin/env python3
+"""Entry point for the ask_reviewer MCP server OpenCode starts per task (WB_TASK names it)."""
+import os
+import sys
+
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.realpath(__file__))))
+
+from workbench.ask_mcp import main  # noqa: E402
+
+main()

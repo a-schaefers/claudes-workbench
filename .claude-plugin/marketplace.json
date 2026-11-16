@@ -1,0 +1,5 @@
+{
+  "name": "workbench",
+  "owner": { "name": "Adam Schaefers" },
+  "plugins": [{ "name": "workbench", "source": "./mod" }]
+}

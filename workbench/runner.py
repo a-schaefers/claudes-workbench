@@ -1,0 +1,272 @@
+"""The detached process that drives one task's rounds until it needs Claude.
+
+    python3 -m workbench.runner <task>
+
+Each round sends rounds/<n>/prompt.md to the agent (`opencode run`, continuing the task's session
+after the first), streams its events into events.jsonl and status.json, and stops it if it loops,
+errors repeatedly, goes silent or runs too long. After a clean round the task's test command runs
+in the worktree; a failure goes back to the agent on its own while auto-fix rounds remain, so
+Claude is only woken for work that passes, or for a task that has run out of road.
+"""
+import json
+import os
+import queue
+import signal
+import subprocess
+import sys
+import threading
+import time
+import traceback
+from pathlib import Path
+
+from . import gitops, store
+from .events import StuckDetector, normalize
+
+PKG_ROOT = Path(__file__).resolve().parent.parent
+CURRENT: dict = {}  # the agent process of the round in flight, for the SIGTERM handler
+# Keep build droppings out of the worktree, so the review diff is only the agent's work.
+CLEAN_ENV = {"PYTHONDONTWRITEBYTECODE": "1"}
+
+
+class Stopped(Exception):
+    pass
+
+
+def _on_term(signum, frame):
+    proc = CURRENT.get("proc")
+    if proc and proc.poll() is None:
+        _stop(proc)  # the agent runs in its own process group; take it down with us
+    raise Stopped()
+
+
+def opencode_bin() -> list[str]:
+    fake = os.environ.get("WB_OPENCODE_BIN")
+    return fake.split() if fake else ["opencode"]
+
+
+def write_config_layer(task: store.Task) -> Path:
+    """The per-task OpenCode config: just the ask_reviewer MCP server, bound to this task."""
+    path = task.dir / "opencode.json"
+    wait_ms = int(task.spec.get("ask_timeout", 1200) + 60) * 1000
+    store.write_json(path, {
+        "$schema": "https://opencode.ai/config.json",
+        "mcp": {"servers": {"workbench": {  # OpenCode 2.x shape: mcp.servers.<name>
+            "type": "local",
+            "command": [sys.executable, str(PKG_ROOT / "bin" / "wb-ask-mcp")],
+            "environment": {"WB_TASK": task.name, "WB_HOME": str(store.home())},
+            "codemode": False,  # a plain tool the model sees, not one behind code mode
+            # the tool blocks until Claude answers; OpenCode must not give up on it first
+            "timeout": {"startup": 15000, "execution": wait_ms},
+        }}},
+    })
+    return path
+
+
+def _reader(stream, q):
+    for line in stream:
+        q.put(line)
+    q.put(None)
+
+
+def _stop(proc: subprocess.Popen):
+    try:
+        os.killpg(proc.pid, signal.SIGTERM)
+        proc.wait(timeout=10)
+    except (ProcessLookupError, subprocess.TimeoutExpired):
+        try:
+            os.killpg(proc.pid, signal.SIGKILL)
+        except ProcessLookupError:
+            pass
+
+
+def run_round(task: store.Task, n: int) -> dict:
+    spec, st = task.spec, task.status
+    prompt = task.round_dir(n).joinpath("prompt.md").read_text()
+    cmd = opencode_bin() + ["run", "--standalone", "-m", spec["opencode_model"], "--auto",
+                            "--format", "json", "--title", f"wb: {task.name}"]
+    if st.get("session"):
+        cmd += ["--session", st["session"]]
+    cmd.append(prompt)
+    env = {**os.environ, "PWD": str(task.worktree),  # opencode finds the project from $PWD
+           "OPENCODE_CONFIG": str(write_config_layer(task)),
+           "WB_TASK": task.name, "WB_HOME": str(store.home()), **CLEAN_ENV}
+    log = open(task.dir / "runner.log", "a")
+    proc = subprocess.Popen(cmd, cwd=task.worktree, env=env, stdin=subprocess.DEVNULL,
+                            stdout=subprocess.PIPE, stderr=log, text=True,
+                            start_new_session=True)  # its own group, so a stop takes MCP too
+    CURRENT["proc"] = proc
+    q: queue.Queue = queue.Queue()
+    threading.Thread(target=_reader, args=(proc.stdout, q), daemon=True).start()
+
+    detector = StuckDetector(**spec.get("stuck", {}))
+    wall, silence = float(spec.get("round_timeout", 2400)), float(spec.get("silence_timeout", 900))
+    started = last_seen = time.time()
+    out = {"exit": None, "stuck": None, "texts": [], "tools": {}, "errors": [],
+           "tok_in": 0, "tok_out": 0}
+    while True:
+        try:
+            line = q.get(timeout=5)
+        except queue.Empty:
+            line = ""
+        if line is None:
+            break
+        now = time.time()
+        if line:
+            last_seen = now
+            try:
+                raw = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            if raw.get("sessionID") and not task.status.get("session"):
+                task.set_status(session=raw["sessionID"])
+            row = normalize(raw, n)
+            if row is None:
+                continue
+            sig = row.pop("sig", None)
+            if row["kind"] == "tool":
+                out["tools"][row["tool"]] = out["tools"].get(row["tool"], 0) + 1
+                if not row["ok"]:
+                    out["errors"].append(f"{row['tool']}: {row.get('error', '')}")
+                task.set_status(last=f"{row['tool']} {row['brief']}".strip(),
+                                tools=task.status.get("tools", 0) + 1)
+            elif row["kind"] == "text":
+                out["texts"].append(row["text"])
+                row["text"] = row["text"][:2000]
+            elif row["kind"] == "step":
+                out["tok_in"] += row["in"]
+                out["tok_out"] += row["out"]
+                task.set_status(tok_in=task.status.get("tok_in", 0) + row["in"],
+                                tok_out=task.status.get("tok_out", 0) + row["out"])
+            elif row["kind"] == "error":
+                out["errors"].append(f"opencode: {row['text']}")
+            task.event(row)
+            why = detector.feed({**row, "sig": sig}) if sig else None
+            if why:
+                out["stuck"] = why
+        asking = task.status.get("phase") == "asking"  # the agent is waiting on Claude: not silent
+        if not out["stuck"] and now - started > wall:
+            out["stuck"] = f"the round ran past its {int(wall // 60)}-minute limit"
+        if not out["stuck"] and not asking and now - last_seen > silence:
+            out["stuck"] = f"no output for {int(silence // 60)} minutes"
+        if out["stuck"]:
+            task.event({"ts": store.now(), "round": n, "kind": "stopped", "text": out["stuck"]})
+            _stop(proc)
+            break
+    out["exit"] = proc.wait()
+    log.close()
+    out["secs"] = round(time.time() - started, 1)
+    return out
+
+
+def run_tests(task: store.Task, n: int):
+    cmd = task.spec.get("test_cmd")
+    if not cmd:
+        return None
+    task.set_status(phase="testing", last=f"tests: {cmd}")
+    try:
+        r = subprocess.run(cmd, shell=True, cwd=task.worktree, capture_output=True, text=True,
+                           env={**os.environ, **CLEAN_ENV},
+                           timeout=int(task.spec.get("test_timeout", 900)))
+        code, output = r.returncode, (r.stdout + r.stderr)
+    except subprocess.TimeoutExpired as e:
+        code, output = "timeout", f"{e.stdout or ''}{e.stderr or ''}\n[timed out]"
+    tail = "\n".join(output.strip().splitlines()[-40:])
+    task.round_dir(n).joinpath("tests.txt").write_text(f"$ {cmd}\nexit: {code}\n\n{output}")
+    result = {"ok": code == 0, "exit": code, "tail": tail, "round": n}
+    task.event({"ts": store.now(), "round": n, "kind": "tests", "ok": result["ok"],
+                "text": f"exit {code}"})
+    return result
+
+
+def summary_text(task: store.Task, n: int, rnd: dict, tests) -> str:
+    """The compact report Claude reads; kept short on purpose, the diff is fetched separately."""
+    spec, st = task.spec, task.status
+    lines = [f"task {task.name} · {spec['model_label']} · round {n} · {rnd['secs'] / 60:.1f} min"
+             f" · local tokens {rnd['tok_in']} in / {rnd['tok_out']} out"]
+    if rnd["stuck"]:
+        lines.append(f"STOPPED: {rnd['stuck']}")
+    elif rnd["exit"] not in (0, None):
+        lines.append(f"opencode exited {rnd['exit']} (see {task.dir / 'runner.log'})")
+    if tests is not None:
+        lines.append(f"tests: {'PASS' if tests['ok'] else 'FAIL'} (`{spec['test_cmd']}`, "
+                     f"exit {tests['exit']})")
+        if not tests["ok"]:
+            lines.append("```\n" + "\n".join(tests["tail"].splitlines()[-25:]) + "\n```")
+    if st.get("auto_fixes"):
+        lines.append(f"auto-fix rounds used: {st['auto_fixes']}/{spec.get('auto_fix', 0)}")
+    tools = ", ".join(f"{k}×{v}" for k, v in sorted(rnd["tools"].items())) or "none"
+    lines.append(f"tools: {tools}")
+    for err in rnd["errors"][-4:]:
+        lines.append(f"tool error: {err[:200]}")
+    final = (rnd["texts"][-1] if rnd["texts"] else "(the agent wrote no final message)").strip()
+    lines += ["", "agent's summary:", final[:2500], ""]
+    files = gitops.changed(task.worktree)
+    lines += ["files changed:", files or "(none)"]
+    stat = gitops.diff(task.worktree, spec["base"], stat=True).splitlines()
+    if stat:
+        lines.append(stat[-1].strip())
+    return "\n".join(lines)
+
+
+def auto_fix_prompt(tests: dict, cmd: str) -> str:
+    return (f"The acceptance tests fail. Command: `{cmd}` (exit {tests['exit']}). Output:\n\n"
+            f"```\n{tests['tail']}\n```\n\nFix the code so the tests pass. Do not weaken, skip or "
+            "delete tests to make them pass. Do not commit. Finish with a short summary of what "
+            "you changed and the test result.")
+
+
+def drive(task: store.Task) -> None:
+    gpu = store.home() / "gpu.lock"
+    task.set_status(phase="queued", last="waiting for the GPU", pid=os.getpid())
+    with store.locked(gpu):  # one model generates at a time; a second task waits its turn
+        while True:
+            n = task.status["round"]
+            task.set_status(phase="running", round=n, round_started_at=store.now(),
+                            last="starting the agent")
+            task.event({"ts": store.now(), "round": n, "kind": "round", "text": "started"})
+            rnd = run_round(task, n)
+            if rnd["stuck"] or (rnd["exit"] not in (0, None) and not rnd["texts"]):
+                text = summary_text(task, n, rnd, None)
+                task.round_dir(n).joinpath("summary.md").write_text(text)
+                phase = "stuck" if rnd["stuck"] else "failed"
+                task.set_status(phase=phase, last=rnd["stuck"] or f"opencode exited {rnd['exit']}")
+                task.notify(phase, text, round=n)
+                return
+            tests = run_tests(task, n)
+            text = summary_text(task, n, rnd, tests)
+            task.round_dir(n).joinpath("summary.md").write_text(text)
+            used = task.status.get("auto_fixes", 0)
+            if tests and not tests["ok"] and used < int(task.spec.get("auto_fix", 0)):
+                task.round_dir(n + 1).mkdir(parents=True, exist_ok=True)
+                task.round_dir(n + 1).joinpath("prompt.md").write_text(
+                    auto_fix_prompt(tests, task.spec["test_cmd"]))
+                task.set_status(round=n + 1, auto_fixes=used + 1, tests=tests)
+                task.event({"ts": store.now(), "round": n, "kind": "autofix",
+                            "text": "tests failed; sent the output back to the agent"})
+                continue
+            task.set_status(phase="review", tests=tests,
+                            last="tests passed, waiting for review" if tests and tests["ok"]
+                            else "waiting for review")
+            task.notify("review", text, round=n)
+            return
+
+
+def main():
+    task = store.Task(sys.argv[1])
+    signal.signal(signal.SIGTERM, _on_term)
+    try:
+        drive(task)
+    except Stopped:
+        task.event({"ts": store.now(), "round": task.status.get("round"), "kind": "stopped",
+                    "text": "stopped by the reviewer"})
+    except Exception:
+        err = traceback.format_exc()
+        (task.dir / "runner.log").open("a").write(err)
+        task.set_status(phase="failed", last=err.strip().splitlines()[-1][:200])
+        task.notify("failed", f"task {task.name}: the runner crashed\n{err[-1500:]}")
+    finally:
+        task.set_status(pid=None)
+
+
+if __name__ == "__main__":
+    main()

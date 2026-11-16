@@ -1,0 +1,73 @@
+"""Git for a task: a worktree on its own branch at the start, a diff for review, a commit at the end.
+
+The agent never commits; everything it does stays in the worktree's working tree until `wb accept`.
+"""
+import subprocess
+from pathlib import Path
+
+
+class GitError(RuntimeError):
+    pass
+
+
+def git(cwd, *args, check=True) -> str:
+    r = subprocess.run(["git", "-C", str(cwd), *args], capture_output=True, text=True)
+    if check and r.returncode:
+        raise GitError(f"git {' '.join(args)}: {r.stderr.strip() or r.stdout.strip()}")
+    return r.stdout
+
+
+def toplevel(path) -> Path:
+    return Path(git(path, "rev-parse", "--show-toplevel").strip())
+
+
+def branch_name(task: str) -> str:
+    return f"delegate/{task}"
+
+
+def create_worktree(repo: Path, task: str, dest: Path, base: str = "HEAD") -> str:
+    """New branch delegate/<task> at ``base`` checked out at ``dest``; returns the base commit."""
+    commit = git(repo, "rev-parse", base).strip()
+    if git(repo, "branch", "--list", branch_name(task)).strip():
+        raise GitError(f"branch {branch_name(task)} already exists in {repo}")
+    git(repo, "worktree", "add", "-q", "-b", branch_name(task), str(dest), commit)
+    return commit
+
+
+def changed(worktree: Path) -> str:
+    return git(worktree, "status", "--short", "--untracked-files=all").rstrip()
+
+
+def diff(worktree: Path, base: str, stat=False, paths=()) -> str:
+    # intent-to-add makes new files part of the diff; the reset leaves the index as it was
+    git(worktree, "add", "-A", "-N")
+    try:
+        args = ["diff", base] + (["--stat"] if stat else []) + (["--", *paths] if paths else [])
+        return git(worktree, *args).rstrip()
+    finally:
+        git(worktree, "reset", "-q")
+
+
+def commit_all(worktree: Path, message: str) -> str:
+    git(worktree, "add", "-A")
+    if not git(worktree, "diff", "--cached", "--name-only").strip():
+        raise GitError("nothing to commit: the agent's worktree has no changes")
+    git(worktree, "commit", "-q", "-m", message)
+    return git(worktree, "rev-parse", "--short", "HEAD").strip()
+
+
+def remove_worktree(repo: Path, worktree: Path, force=False) -> None:
+    if worktree.exists():
+        git(repo, "worktree", "remove", *(["--force"] if force else []), str(worktree))
+    git(repo, "worktree", "prune", check=False)
+
+
+def delete_branch(repo: Path, task: str) -> None:
+    git(repo, "branch", "-D", branch_name(task), check=False)
+
+
+def merge(repo: Path, task: str) -> str:
+    if git(repo, "status", "--porcelain", "--untracked-files=no").strip():
+        raise GitError(f"{repo} has uncommitted changes; merge {branch_name(task)} by hand")
+    git(repo, "merge", "--no-ff", "--no-edit", branch_name(task))
+    return git(repo, "rev-parse", "--short", "HEAD").strip()
