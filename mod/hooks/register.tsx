@@ -49,7 +49,7 @@ const SCOUT_NOTE =
 import { atom, read, update } from 'claude-code'
 import type { Register } from 'claude-code'
 
-import type { WbLine, WbLive, WbTask } from '../types'
+import type { WbChat, WbLine, WbLive, WbTask } from '../types'
 
 const PANE = 'workbench'
 const POLL_MS = 1500
@@ -65,6 +65,22 @@ const live = atom({ plugin: 'workbench', key: 'live' } as const, { task: '', lin
   shape: 'live-1',
 })
 const KEEP_LINES = 2000 // the pane scrolls back through this much history
+
+// The web chat (`wb chat serve`): the user's side door while away from the terminal. A session
+// listens once /delegate has run in it, until /delegate-quit or the hand-back ends delegate mode;
+// with several, the first to claim chat/listener.json does, and the others stand by. A message is
+// submitted as a prompt (so the terminal shows it too) with a receipt the page shows at once.
+const chat = atom({ plugin: 'workbench', key: 'chat' } as const,
+  { key: '', delegating: false, webAt: 0 } as WbChat, { shape: 'chat-1' })
+const CHAT_STALE_MS = 15_000 // as wb's LISTENING_FOR: a listener silent this long has gone
+const AWAY_MS = 6 * 3600 * 1000 // the user counts as away this long after a web message
+const WEB = '[web chat]'
+const WEB_NOTE =
+  '(Sent by the user from the web chat on their phone, away from the terminal. It carries the ' +
+  'same authority as a message typed here. Answer there with `wb chat reply --text "…"`: if the ' +
+  'work will take more than a minute or two, first a one-line acknowledgement of what you are ' +
+  'doing, then the outcome when it is done (results, what needs them, short; they read it on a ' +
+  'phone). Work as usual otherwise; the terminal keeps the full detail.)'
 
 const ACTIVE = new Set(['queued', 'running', 'testing', 'asking'])
 const NEEDS = new Set(['review', 'stuck', 'failed', 'asking'])
@@ -180,6 +196,7 @@ const mem = {
   scoutAsked: false, // the weekly model check was raised in this load
   boundary: false, // one closed since: a moment to make room in Claude's context
   toasted: new Set<string>(),
+  chatSent: new Set<string>(), // web messages submitted by this load, awaiting their receipt
 }
 
 // Every task directory, as the pane draws it. Closed tasks drop out after half an hour.
@@ -333,8 +350,34 @@ async function poll($: any) {
     }
     if (mem.sawTurn && !mem.busy && !mem.scoutAsked && open.size === 0) await scoutIfDue($, now)
     await deliver($, now)
+    await listen($, now)
   } finally {
     mem.polling = false
+  }
+}
+
+async function listen($: any, now: number) {
+  const st = await read($, chat)
+  if (!st.delegating) return
+  const dir = `${mem.root}/chat`
+  const claim = await readJson($, `${dir}/listener.json`)
+  if (claim.session && claim.session !== st.key && now - Number(claim.ts ?? 0) * 1000 < CHAT_STALE_MS) return
+  if (!(await $.fs.exists(dir))) await runWb($, ['chat', 'log']) // wb makes the directory
+  await $.fs.write(`${dir}/listener.json`,
+    JSON.stringify({ session: st.key, cwd: await $.session.cwd(), ts: now / 1000 }))
+  const rows = (await $.fs.read(`${dir}/messages.jsonl`).catch(() => '')).split('\n')
+  const got = new Set((await $.fs.read(`${dir}/receipts.jsonl`).catch(() => '')).split('\n')
+    .map(l => { try { return JSON.parse(l).id } catch { return undefined } }))
+  for (const line of rows) {
+    let m: Row
+    try { m = JSON.parse(line) } catch { continue }
+    const id = String(m.id ?? '')
+    if (m.from !== 'user' || !id || got.has(id) || mem.chatSent.has(id)) continue
+    mem.chatSent.add(id)
+    await runWb($, ['chat', 'ack', id, '--by', st.key])
+    await update($, chat, c => ({ ...c, webAt: now }))
+    $.ui.toast('workbench: a message from the web chat')
+    void $.prompt.submit({ text: `${WEB} ${String(m.text ?? '')}\n\n${WEB_NOTE}` })
   }
 }
 
@@ -386,6 +429,10 @@ export const register: Register = (on, options) => {
     mem.root = wbHome || `${home}/.local/state/workbench`
     mem.wb = (await $.env.get('WB_BIN')) || 'wb'
     mem.startedAt = await $.clock.now()
+    if (!(await read($, chat)).key) {
+      const key = `${Math.floor(mem.startedAt)}-${Math.random().toString(36).slice(2, 8)}`
+      await update($, chat, c => ({ ...c, key }))
+    }
     await $.command.register({
       name: 'workbench',
       description: 'Show the tasks delegated to local agents in a pane',
@@ -409,7 +456,22 @@ export const register: Register = (on, options) => {
     return next(e)
   })
 
+  // /delegate turns the web chat on in this session
+  on('skill.prompt', { skill: 'delegate' }, async ($, e, next) => {
+    await update($, chat, c => ({ ...c, delegating: true }))
+    return next(e)
+  })
+
+  // Typed in the terminal: the user is back, so answers go here again
+  on('prompt.submit', async ($, e, next) => {
+    if (!e.isMeta && !e.text.startsWith(WEB) && !e.text.startsWith('[workbench]') && (await read($, chat)).webAt) {
+      await update($, chat, c => ({ ...c, webAt: 0 }))
+    }
+    return next(e)
+  })
+
   on('command.run', { command: QUIT }, async $ => {
+    await update($, chat, c => ({ ...c, delegating: false }))
     const out = await runWb($, ['stop', '--all'])
     $.ui.toast('workbench: everything delegated is stopped')
     return { text: `Delegation stopped. ${out}`, context: [QUIT_NOTE(out)] }
@@ -421,6 +483,7 @@ export const register: Register = (on, options) => {
   })
 
   on('command.run', { command: HAND_BACK }, async $ => {
+    await update($, chat, c => ({ ...c, delegating: false }))
     const out = await runWb($, ['takeover', '--all'])
     mem.queued.push(DONE_NOTE(out)) // a command may not start a turn itself: the next poll does
     return { text: `Agents stopped; Claude is taking over. ${out}` }
@@ -435,10 +498,18 @@ export const register: Register = (on, options) => {
   // A fresh or just-compacted conversation is told which tasks are open, from wb itself.
   on('prompt.context', async ($, e, next) => {
     const r = await next(e)
+    const st = await read($, chat)
+    const away = st.webAt && (await $.clock.now()) - st.webAt < AWAY_MS
+    const blocks = away ? [...r.blocks, {
+      name: 'web-chat',
+      text: 'The user is away from the terminal and last wrote from the web chat. Tell them ' +
+        'there (`wb chat reply --text "…"`) when something they asked for is done or needs them; ' +
+        '`wb chat log` shows the thread. Typing in the terminal again ends this.',
+    }] : r.blocks
     const status = await runWb($, ['status'])
-    if (status.startsWith('no open tasks') || status.startsWith('could not run')) return r
+    if (status.startsWith('no open tasks') || status.startsWith('could not run')) return { blocks }
     return {
-      blocks: [...r.blocks, {
+      blocks: [...blocks, {
         name: 'workbench',
         text: `Tasks delegated to local agents with wb (the /delegate skill) are open:\n${status}\n` +
           'Pick them up from here: `wb report <name>` for one, `wb watch <name>` to follow it.',

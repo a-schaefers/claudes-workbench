@@ -292,3 +292,52 @@ test('the weekly model check comes once, in a quiet moment of a session in use; 
   expect(asked.length).toBe(2)
   expect(asked[1]).toContain('The weekly model check is due')
 })
+
+test('the web chat reaches Claude only in /delegate mode, with a receipt, and one session listens', async ($, on) => {
+  const clock = mock.clock(on, { now: 1_800_000_000_000 })
+  const files: Record<string, string> = {}
+  fakeTasks(on, files, [])
+  on('ui.toast', () => ({ value: undefined }))
+  on('session.cwd', () => ({ value: '/home/u/game' }))
+  on('skill.prompt', (_: any, e: any) => ({ text: e.text }))  // the engine's expansion
+  const runs: string[][] = []
+  on('process.run', (_: any, e: any) => {
+    runs.push(e.argv)
+    if (e.argv[1] === 'chat' && e.argv[2] === 'ack') {
+      files['/wb/chat/receipts.jsonl'] = (files['/wb/chat/receipts.jsonl'] ?? '') +
+        JSON.stringify({ id: e.argv[3], by: e.argv[5] }) + '\n'
+    }
+    return { value: { exitCode: 0, stdout: 'no open tasks', stderr: '' } }
+  })
+  const asked: string[] = []
+  on('prompt.submit', (_: any, e: any) => {
+    asked.push(e.text)
+    return { text: e.text }
+  })
+  files['/wb/chat/messages.jsonl'] = JSON.stringify({ id: 'm1', ts: 1_800_000_000, from: 'user', text: 'status?' }) + '\n'
+  await $.session.start({ cwd: '/home/u/game', surface: 'terminal', isInteractive: true })
+  await clock.advance(3000)
+  expect(asked.length).toBe(0)                                   // not in delegate mode: nobody listens
+  expect(files['/wb/chat/listener.json']).toBeUndefined()
+
+  await $.skill.prompt({ skill: 'delegate', text: 'x', frontmatter: {}, source: 'userSettings' })
+  await clock.advance(3000)
+  expect(asked.length).toBe(1)
+  expect(asked[0]).toContain('[web chat] status?')
+  expect(asked[0]).toContain('wb chat reply')
+  expect(JSON.parse(files['/wb/chat/listener.json']).cwd).toBe('/home/u/game')
+  expect(runs.some(a => a.join(' ').startsWith('wb chat ack m1'))).toBe(true)
+  await clock.advance(3000)
+  expect(asked.length).toBe(1)                                   // once
+
+  // another session holds the chat: this one stands by
+  files['/wb/chat/listener.json'] = JSON.stringify({ session: 'other', cwd: '/x', ts: 1_800_000_009 })
+  files['/wb/chat/messages.jsonl'] += JSON.stringify({ id: 'm2', ts: 1_800_000_009, from: 'user', text: 'hi' }) + '\n'
+  await clock.advance(2000)
+  expect(asked.length).toBe(1)
+
+  // /delegate-quit ends delegate mode, and with it the listening
+  await $.command.run({ command: 'delegate-quit', args: '' })
+  await clock.advance(20_000)
+  expect(asked.length).toBe(1)
+})

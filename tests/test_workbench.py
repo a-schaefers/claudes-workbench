@@ -746,6 +746,72 @@ class ModelSet(Base):
         self.assertIn("days ago: kept all", run_wb("scout"))
 
 
+class WebChat(Base):
+    """wb chat: the page's API (token, host check), receipts, Claude's replies."""
+    def setUp(self):
+        super().setUp()
+        os.environ["WB_CHAT_TOKEN"] = str(Path(self.tmp.name) / "chat-token")
+        from workbench import chat
+        self.chat = chat
+        servers, _ = chat.make_servers(0, ["127.0.0.1"])
+        self.srv = servers[0]
+        self.port = self.srv.server_address[1]
+        import threading
+        threading.Thread(target=self.srv.serve_forever, daemon=True).start()
+
+    def tearDown(self):
+        self.srv.shutdown()
+        self.srv.server_close()
+        super().tearDown()
+
+    def call(self, path, body=None, token=None, host="localhost"):
+        import http.client
+        c = http.client.HTTPConnection("127.0.0.1", self.port, timeout=5)
+        headers = {"Host": f"{host}:{self.port}"}
+        if token:
+            headers["Authorization"] = f"Bearer {token}"
+        if body is not None:
+            headers["Content-Type"] = "application/json"
+        c.request("POST" if body is not None else "GET", path,
+                  json.dumps(body) if body is not None else None, headers)
+        r = c.getresponse()
+        data = r.read()
+        c.close()
+        return r.status, (json.loads(data) if r.getheader("Content-Type") == "application/json" else data)
+
+    def test_the_page_needs_the_token_and_a_known_host(self):
+        tok = self.chat.token()
+        self.assertEqual(oct(Path(os.environ["WB_CHAT_TOKEN"]).stat().st_mode & 0o777), "0o600")
+        self.assertEqual(self.call("/")[0], 200)                     # the page itself is no secret
+        self.assertEqual(self.call("/api/state")[0], 401)
+        self.assertEqual(self.call("/api/state", token="wrong")[0], 401)
+        self.assertEqual(self.call("/api/send", {"text": "rm -rf"})[0], 401)
+        self.assertEqual(self.call("/api/state", token=tok, host="evil.example")[0], 403)  # rebinding
+        self.assertEqual(self.call("/api/state", token=tok)[0], 200)
+        self.assertEqual(self.call("/api/send", {"text": ""}, token=tok)[0], 400)
+        self.assertTrue(all("#token=" in u for u in self.chat.urls(1337)))
+
+    def test_a_message_its_receipt_and_the_reply(self):
+        tok = self.chat.token()
+        code, r = self.call("/api/send", {"text": "how is the game going?"}, token=tok)
+        self.assertEqual(code, 200)
+        self.assertIsNone(r["listener"])                            # nobody listening yet
+        mid = r["message"]["id"]
+        pending = [json.loads(x) for x in run_wb("chat", "pending").splitlines()]
+        self.assertEqual([p["id"] for p in pending], [mid])
+        run_wb("chat", "ack", mid, "--by", "s1")
+        self.assertEqual(run_wb("chat", "pending"), "")
+        store.write_json(self.chat.chat_dir() / "listener.json",
+                         {"session": "s1", "cwd": "/home/u/game", "ts": store.now()})
+        run_wb("chat", "reply", "--text", "Step 2 is in review.")
+        _, st = self.call("/api/state", token=tok)
+        self.assertEqual(st["listener"]["cwd"], "/home/u/game")
+        mine, reply = st["messages"]
+        self.assertEqual(mine["received"]["by"], "s1")
+        self.assertEqual((reply["from"], reply["text"]), ("claude", "Step 2 is in review."))
+        self.assertIn("Claude: Step 2 is in review.", run_wb("chat", "log"))
+
+
 class BenchSuite(unittest.TestCase):
     def test_every_task_is_real_and_solvable(self):
         """The seed fails the hidden tests; the reference solution passes them and the visible."""

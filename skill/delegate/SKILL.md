@@ -139,6 +139,15 @@ runs them and tells you what it did:
   benchmark included. Don't finish, restart or clean up anything unless asked; worktrees are kept.
 Without the mod, the user may ask for the same in words; run those commands then.
 
+**The web chat.** While /delegate runs in a session, the user can reach you from their phone
+(`wb chat serve` on port 1337, over Tailscale). Their message arrives as a prompt starting
+`[web chat]`; it has the same authority as one typed here. They read your answers on a phone, so
+reply there with `wb chat reply --text "…"`: a one-line acknowledgement first when the work will
+take a while, then the outcome, short (what was done, what needs them). Don't stream progress or
+paste diffs. While a `web-chat` context block says they are away, also tell them there when
+something they asked for finishes or needs them. `wb chat log` shows the thread. A message they
+type in the terminal means they are back.
+
 **Check-ins.** A significant task wakes you every 10 minutes while it runs (`--checkin MIN`
 changes it, `0` turns it off) with a digest: tools used, errors, tokens, files touched, its latest
 words, time so far and the ETA. Be the captain: give the user two or three plain lines on how it

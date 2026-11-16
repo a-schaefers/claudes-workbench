@@ -1,0 +1,13 @@
+[Unit]
+Description=workbench web chat (wb chat serve): reach Claude's /delegate session from the browser
+After=network-online.target tailscaled.service
+Wants=network-online.target
+
+[Service]
+# localhost and this machine's Tailscale address; it waits for Tailscale by restarting
+ExecStart=%h/repos/workbench/bin/wb chat serve
+Restart=always
+RestartSec=10
+
+[Install]
+WantedBy=default.target

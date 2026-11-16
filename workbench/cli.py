@@ -14,7 +14,7 @@ from collections import defaultdict
 from contextlib import redirect_stdout
 from pathlib import Path
 
-from . import __version__, bench, gitops, hardware, models, results, router, store, transcript
+from . import __version__, bench, chat, gitops, hardware, models, results, router, store, transcript
 from .runner import PKG_ROOT
 
 PROTOCOL = """
@@ -808,6 +808,33 @@ def cmd_init(a):
              if status == "no CLAUDE.md" else ""))
 
 
+def cmd_chat(a):
+    """The web chat: the user's side door to Claude while away from the terminal."""
+    if a.action == "serve":
+        chat.serve(a.port, a.bind or None, say=lambda m: print(m, flush=True))
+    elif a.action == "url":
+        print("open one of these on the phone (the token is the key: keep the link private):")
+        print("\n".join(f"  {u}" for u in chat.urls(a.port)))
+    elif a.action == "reply":
+        text = (a.text if a.text is not None else
+                Path(a.message).read_text() if a.message and a.message != "-" else sys.stdin.read()).strip()
+        if not text:
+            die("the reply is empty")
+        chat.send(text, "claude")
+        print("sent to the web chat")
+    elif a.action == "ack":
+        chat.ack(a.id, a.by or "claude")
+    elif a.action == "pending":
+        for r in chat.pending():
+            print(json.dumps(r))
+    else:  # log
+        for r in chat.thread()[-a.n:]:
+            who = "you" if r["from"] == "user" else "Claude"
+            print(f"{time.strftime('%H:%M', time.localtime(r['ts']))} {who}: {r['text']}")
+        lst = chat.listener()
+        print(f"listening: {lst['cwd']}" if lst else "no session is listening")
+
+
 def cmd_doctor(a):
     ok = True
 
@@ -957,6 +984,15 @@ def main(argv=None):
     s.add_argument("--notes", help="with --done: what was recommended or changed")
     s.add_argument("--due", action="store_true", help="exit 0 if a check is due, else 1")
     s.set_defaults(f=cmd_scout)
+    s = sub.add_parser("chat", help="the web chat: serve it, its link, reply to the user there")
+    s.add_argument("action", choices=["serve", "url", "reply", "log", "ack", "pending"], nargs="?",
+                   default="log")
+    s.add_argument("id", nargs="?", help="ack: the message id")
+    s.add_argument("--port", type=int, default=chat.PORT)
+    s.add_argument("--bind", action="append", help="serve: address (default: localhost and Tailscale)")
+    s.add_argument("--text", help="reply: the text"); s.add_argument("--message", help="reply: file, or -")
+    s.add_argument("--by", help=argparse.SUPPRESS); s.add_argument("-n", type=int, default=10)
+    s.set_defaults(f=cmd_chat)
     s = sub.add_parser("init", help="set a project up: git on master with an initial commit, "
                                     "AGENTS.md → CLAUDE.md")
     s.add_argument("dir"); s.set_defaults(f=cmd_init)

@@ -22,8 +22,11 @@ export type WbLine = { s: string; t: string }
 /** The task the pane follows live, and its transcript so far (the newest lines). */
 export type WbLive = { task: string; lines: WbLine[] }
 
+/** This session and the web chat: whether it listens, and when the user last wrote from there. */
+export type WbChat = { key: string; delegating: boolean; webAt: number }
+
 declare module 'claude-code' {
   interface PluginState {
-    workbench: { tasks: Shaped<WbTask[]>; live: Shaped<WbLive> }
+    workbench: { tasks: Shaped<WbTask[]>; live: Shaped<WbLive>; chat: Shaped<WbChat> }
   }
 }

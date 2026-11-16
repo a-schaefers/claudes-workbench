@@ -9,6 +9,8 @@ has the architecture; read it first.
   - `runner.py`: the detached per-task driver. `cli.py`: `wb`. `ask_mcp.py`: the MCP tool server.
   - `models.py`: discovers local models from opencode.json, their status, and GPU residency (make_resident);
     adds and retires them (Ollama's pull/delete, opencode.json entries) for the weekly model check.
+  - `chat.py`: the web chat (`wb chat serve`, stdlib HTTP, a token and a Host check; `systemd/wb-chat.service`
+    keeps it up). The mod hands its messages to the /delegate session as prompts; Claude replies with `wb chat reply`.
   - `hardware.py`: GPU/VRAM, RAM, CPU and disk, read fresh each time for `wb scout`. Nothing about the machine is hard-coded.
   - `router.py`: picks a model per task size from evidence. `bench.py`: `wb bench`, the probes and graded tasks.
   - `events.py`: event normalization and the stuck detector.
