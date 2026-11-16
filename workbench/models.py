@@ -231,6 +231,16 @@ def _others_resident(m: Model) -> bool:
 
 # ---- managing the set: what Claude's weekly model check uses to add and retire models ----
 
+# Ollama's OpenAI-compatible API ignores `max_completion_tokens`, the only cap OpenCode sends, and
+# honours `max_tokens` (checked on 0.40: asked for 60, it gave 1,492). Without this, a model that
+# falls into a degenerate generation runs until its context is full: 20K-token turns with no
+# edits, seen 2026-11-16. So every Ollama entry carries max_tokens in its options, which OpenCode
+# passes through: room for the reasoning plus the answer's own output limit.
+def ollama_cap(entry: dict) -> int:
+    out = (entry.get("limit") or {}).get("output") or 4096
+    return 2 * out
+
+
 def providers() -> dict[str, dict]:
     """OpenCode's local providers: id → {"root", "engine", "models"} (the config's model entries)."""
     path = opencode_config_path()

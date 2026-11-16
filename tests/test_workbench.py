@@ -741,6 +741,8 @@ class ModelSet(Base):
         entry = self.config()["provider"]["ollama"]["models"]["new-coder:14b"]
         self.assertEqual(entry["limit"]["context"], 32768)        # what the provider serves
         self.assertTrue(entry["tool_call"])
+        # Ollama ignores max_completion_tokens; max_tokens is the cap it honours
+        self.assertEqual(entry["options"]["max_tokens"], 2 * entry["limit"]["output"])
         self.assertIn("ollama/new-coder:14b", run_wb("models"))
         out = run_wb("model", "retire", "ollama/new-coder:14b", "--delete")
         self.assertIn("weights were deleted", out)

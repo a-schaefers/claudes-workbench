@@ -743,6 +743,8 @@ def cmd_model(a):
         if ctx:
             out = min(4096, ctx // 8)
             entry["limit"] = {"context": ctx, "input": ctx - out, "output": out}
+        if prov["engine"] == "ollama":
+            entry["options"] = {"max_tokens": models.ollama_cap(entry)}
         models.write_entry(provider, name, entry)
         print(f"registered {a.id}: {'tools' if entry['tool_call'] else 'NO tool calls'}, "
               f"{'reasoning' if entry['reasoning'] else 'no reasoning'}, "
@@ -892,6 +894,13 @@ def cmd_doctor(a):
     for m in found.values():
         st = models.status(m)
         print(f"{'ok ' if st['available'] else '-- '} model {m.id}: {st['why']}")
+    for pid, prov in models.providers().items():
+        if prov["engine"] != "ollama":
+            continue
+        for name, e in prov["models"].items():
+            line("max_tokens" in (e.get("options") or {}),
+                 f"{pid}/{name} caps its output on Ollama (options.max_tokens; Ollama ignores the "
+                 "max_completion_tokens OpenCode sends)")
     line(os.access(store.home().parent, os.W_OK), f"state dir {store.home()}")
     print(f"--  the Claude Code mod lives in {PKG_ROOT / 'mod'} (see README for installing it)")
     sys.exit(0 if ok else 1)
