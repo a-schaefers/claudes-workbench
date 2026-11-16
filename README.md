@@ -1,232 +1,95 @@
+<p align="center"><img src="docs/logo.jpg" alt="workbench: a warm light directing three little robot craftsmen at a workbench" width="720"></p>
+
 # workbench
 
-**Claude is the architect and reviewer. Local models do the typing.**
+**Claude plans and reviews. Your gaming PC writes the code.**
 
-`workbench` lets Claude Code hand a coding task to a local model running in
-[OpenCode](https://opencode.ai), and review the result like a pull request. Any model OpenCode
-serves locally can take the work, for example on [Ollama](https://ollama.com) or
-[Strata](https://github.com/Niko1221/Strata). workbench measures them (`wb bench`) and routes each
-task to the best one for the job. Claude writes the spec and judges the diff. The GPU writes the
-code. Failing tests go back to the agent automatically, so Claude is only woken for work that
-passes, a real question, or a run that got stuck.
+The goal: move to a hybrid workflow on an ordinary gaming PC without giving up the quality of
+Claude (Opus 5.5). Open coding models you can run at home are said to code at roughly the level of
+last year's best cloud models, but left alone they wander, overthink and cut corners. workbench
+puts Claude in charge of them: Claude plans the work, hands each piece to a local model, checks the
+result like a strict senior reviewer, and sends it back until it's right. Claude spends its tokens
+on thinking and judging; your GPU spends electricity on typing.
 
-```
- you ─/delegate─▶ Claude Code ─ wb start ─▶ runner (detached, one per task)
-                     ▲                          │  git worktree on delegate/<task>
-                     │                          ▼
-                     │                     opencode run ──▶ the routed local model
-                     │                          │   ▲
-                     │            events, tests,│   │ ask_reviewer (MCP, blocking, budgeted)
-                     │            auto-fix      ▼   │
-                     └── workbench mod ◀── ~/.local/state/workbench (task files)
-                         pane · status line · toast · wakes Claude with the report
-```
+The hope is a smaller Claude bill: a cheaper subscription, or one day no subscription at all, just
+the Claude API for the driver and local models for the heavy lifting. Whether it pays off depends
+on how much you use it and what your electricity costs (a busy GPU isn't free). But it's a fun
+project, and it works.
 
-## Why
+Built and used on: **Ryzen 5 7600X · Radeon RX 9070 XT (16 GB) · 32 GB DDR5 · Arch Linux.**
 
-A Claude subscription is the scarce resource. Code generation, test-fix loops and
-"try again" rounds are the token-heavy part of agentic coding, and they are exactly the part a
-local model can do on its own when it has a good spec and a test to satisfy. Claude's tokens go
-to the parts that need judgment: scoping, the spec, the review, and the final call.
+## What you need
 
-## Quick start
+- **[Claude Code](https://claude.com/claude-code)** with a Claude subscription or an API key
+- **[OpenCode](https://opencode.ai)**, which runs the local models as coding agents
+- **A local model server**, usually [Ollama](https://ollama.com), and at least one coding model
+  registered in OpenCode (no models yet? workbench recommends some for your hardware and helps you
+  set them up)
+- A GPU with about 16 GB of VRAM or more, Python 3.11+, git, and Linux
+
+## Install
 
 ```sh
-# 1. the CLI and the skill
-ln -s ~/repos/workbench/bin/wb ~/.local/bin/wb
-ln -s ~/repos/workbench/skill/delegate ~/.claude/skills/delegate
-
-# 2. the Claude Code mod (live pane, status line, wake-ups)
-claude plugin marketplace add ~/repos/workbench
+git clone https://github.com/a-schaefers/workbench ~/repos/workbench
+cd ~/repos/workbench
+ln -s "$PWD/bin/wb" ~/.local/bin/wb
+ln -s "$PWD/skill/delegate" ~/.claude/skills/delegate
+claude plugin marketplace add "$PWD"
 claude plugin install workbench@workbench
-
-# 3. check everything is reachable
 wb doctor
-wb models
 ```
 
-Then, in Claude Code:
+## Use it
+
+Open Claude Code in your project and type:
 
 ```
-/delegate add a --json flag to `report` that prints the summary as JSON
+/delegate add a high-score screen to the game
 ```
 
-Claude scopes the task, writes a spec, and starts it, then ends its turn. The **Workbench** pane
-shows the agent's tools, test results and questions as they happen. When the task needs Claude,
-the mod starts a turn with the report in it. Claude reviews the diff, then accepts it (a commit
-on `delegate/<task>`, optionally merged) or sends numbered feedback for another round in the
-same OpenCode session.
+That's it. Claude takes over from there:
 
-## What the local agent knows
+1. It checks your hardware and your local models. If you have none, or better ones would fit your
+   GPU, it recommends them and offers to set them up (it always asks before downloading).
+2. It plans the work and splits it into small pieces a local model can finish.
+3. It hands each piece to the best local model for the job and watches it work.
+4. It reviews every change, sends it back with notes until it's right, and only then commits it.
 
-OpenCode on its own loads `AGENTS.md` and skills, not `CLAUDE.md`. Each task gets a config layer
-(`OPENCODE_CONFIG`, built by `workbench/context.py`) so the agent starts with what Claude would
-know in the same repository:
+A **Workbench** pane in Claude Code shows the agents working live. `/delegate-quit` stops them;
+`/delegate-quit-and-hand-back-claude` stops them and has Claude finish the work itself.
 
-| Source | How it reaches the agent |
-|---|---|
-| `agent/HANDBOOK.md` | always: how Claude works (read before editing, match the code, smallest diff, verify, never weaken tests, honest summary) |
-| `~/.claude/CLAUDE.md` | loaded if present |
-| repo `CLAUDE.md`, `.claude/CLAUDE.md`, `CLAUDE.local.md` | loaded: the worktree's copy if committed, the repo's if local or uncommitted |
-| `.claude/rules/*.md` | loaded |
-| `AGENTS.md` | loaded by OpenCode itself; a CLAUDE.md with the same text is skipped |
-| nested `CLAUDE.md` / `AGENTS.md` | listed in a short map; the agent reads one before working in its directory |
-| skills in `~/.claude/skills`, `.claude/skills` | listed by OpenCode, loaded on demand with the `skill` tool |
-| the spec + protocol | the round-1 prompt: the task, the acceptance command, the question budget |
+**Away from the computer?** `wb chat url` prints a private link to a small web chat with the
+running Claude session (`systemctl --user link ~/repos/workbench/systemd/wb-chat.service &&
+systemctl --user enable --now wb-chat` keeps it running). It's `http://localhost:1337`; to use it
+from your phone, reach your PC the way you normally do (Tailscale, for example) and change the host
+in the link.
 
-The same layer applies a policy for an unattended run. `question` is denied, because nobody is
-there to answer; the agent uses `ask_reviewer` instead. Also denied:
-- code mode and the `opencode_*` session/worktree tools
-- `subagent`, which would queue a second model behind the GPU
-- `websearch`
-- skills that need Claude's own app tools (`~/.claude/skills/synced`), and `/delegate` itself
+## How it works
 
-Denied tools also leave the prompt. That cuts the fixed prompt from about 9.2k to about
-3.5k tokens, which saves minutes of prefill on Strata.
+- **Claude is the lead.** It writes a precise spec for each piece of work, with the files to touch
+  and a test that proves it's done.
+- **A local model does the typing** in OpenCode, in its own copy of your repo (a git worktree), so
+  your working tree is never touched until Claude accepts the change.
+- **Tests come first.** Failing tests go back to the agent automatically; Claude only looks at work
+  that passes, a question the agent asks, or an agent that got stuck.
+- **Claude holds the bar.** It reads every diff itself, never trusts the agent's summary, and fixes
+  or discards anything that isn't up to its own standard.
+- **Small pieces.** Local models work in a small context, so one concern and a couple of files per
+  task. A step that never finished as one big task finished in half an hour as three small ones.
 
-## A task's life
+## What we found (November 2026, on the PC above)
 
-1. **start**: `wb start` asks the router for a model (unless `--model` names one), makes branch
-   `delegate/<task>` in a fresh worktree, writes the round-1 prompt and spawns the runner. It
-   returns at once.
-2. **run**: the runner takes the GPU lock (one model at a time fits in 16 GB), makes the task's
-   model resident (unloading or stopping whatever holds the card), then runs
-   `opencode run --standalone --auto --format json` with the task's layer. Each event is
-   normalized into `events.jsonl`; `status.json` carries the live summary.
-3. **guard**: it stops the agent when it:
-   - repeats one call 4 times
-   - makes 6 tool errors in a row
-   - makes 40 calls without an edit
-   - goes silent past `--silence-timeout` (900 s)
-   - runs past `--round-timeout` (2400 s)
+- **Qwen 27B** (Ollama, Q3) does the real work: it fits entirely on a 16 GB card and passed nearly
+  every task we gave it. **MiMo 9B** takes the trivial chores.
+- Bigger models squeezed onto the card with system RAM were slower, crashed, and were no better.
+- Quantization matters (higher is better), but on 16 GB a larger model at about 4 bits beats a
+  smaller one at 8.
+- Thinking mode off works best for agent work: the model writes code instead of planning it at
+  length.
 
-   Time spent waiting on a question doesn't count as silence.
-4. **test gate**: after each round it runs `--test`. On a failure it sends the output back to the
-   agent, up to `--auto-fix` times (2 by default), without waking Claude.
-5. **notify**: it writes the round report and a `review`, `stuck` or `failed` notification.
-   `ask_reviewer` raises a `question` at any time and blocks until `wb answer`.
-6. **deliver**: the mod, or `wb wait`, delivers each notification once, and only while it's
-   still true. Acting on a task (accept, discard, feedback, answer) acknowledges its
-   notifications.
-7. **decide**: `wb accept` commits with trailers (rounds, the OpenCode session, a Co-Authored-By
-   line), with optional `--merge`. `wb feedback` continues the same session. `wb discard` removes
-   the worktree and branch.
-8. **learn**: `results.jsonl` gets a row; `wb stats` compares models on real work.
+Models change fast. Once a week workbench asks Claude to check what's new for your hardware and
+recommend changes; nothing is downloaded without your yes.
 
-## Commands
+## License
 
-| Command | Does |
-|---|---|
-| `wb start <name> --spec F --repo R [--size trivial\|significant] [--model M] [--test CMD]` | start a task (`--auto-fix N`, `--ask-budget N`, `--base REF`, timeouts, `--force`) |
-| `wb wait <name>` | block until the task needs Claude; print the report once |
-| `wb status` | all tasks, one line each |
-| `wb log <name> [-n N] [-f] [-v]` | the agent's recent events |
-| `wb report <name>` | the latest round report |
-| `wb diff <name> [--stat] [paths…]` | the change, including new files |
-| `wb answer <name> --text T` | answer the agent's question |
-| `wb feedback <name> --text T \| --message F` | another round in the same session |
-| `wb accept <name> -m MSG [--merge]` | commit on the branch (and merge) |
-| `wb discard <name> [--reason R] [--keep-branch]` | drop it |
-| `wb stop <name>` | stop a running agent (it becomes `stuck`) |
-| `wb watch [name] [-v]` | follow a task live, for you: Claude's spec and feedback, the agent's timed thinking, every command with output, edits as diffs, tests, speeds and tokens. The Workbench pane in Claude Code shows the same, scrollable |
-| `wb next <name> --spec <file> -m "…"` | commit the approved step and send the next step to the same agent, worktree and session; `wb diff` then shows the step, `--all` the branch |
-| `wb feedback … --fresh` / `--keep-context` | override the runner's context choice: rounds continue the agent's session until it is 60% full or OpenCode compacted it, then a fresh session gets the task, the diff and the instructions |
-| `wb takeover --all` · `wb stop --all` | what `/delegate-quit-and-hand-back-claude` (Claude finishes everything itself) and `/delegate-quit` (stop every agent and the benchmark, keep the work) run; `stop --all` finds a running `wb bench` from the process table |
-| `wb init <dir>` | set a project up: git on `master` with an initial commit (no remote), AGENTS.md a symlink to CLAUDE.md; `wb start` wants a CLAUDE.md, `wb accept` says how far behind the code it is |
-| `wb scout [--due \| --done --notes … \| --watch … \| --unwatch N]` | the weekly model check's facts: hardware, installed and registered models, benchmarks and real results, the watch list (models set aside and what would bring them back); `/delegate-models` asks Claude for the check now |
-| `wb model add <provider/model> [--pull]` · `retire <id> [--delete]` · `sizes <id> [trivial] [significant]` | register a model (Ollama downloads it with `--pull`), remove one, or limit the task sizes the router gives it |
-| `wb chat serve` · `url` · `reply --text …` · `log` | the web chat on port 1337 (localhost and Tailscale only, token required): the user messages the /delegate session from a phone, Claude answers there. `systemctl --user link systemd/wb-chat.service && systemctl --user enable --now wb-chat` keeps it running; `wb chat url` prints the link with its token |
-| `wb note <name> --text "…"` | Claude's captain's-log line, shown in the transcript. Check-ins (`wb start --checkin MIN`, default 10 for significant tasks) wake Claude with a progress digest to report on |
-| `wb steer <name> --text "…" [--now]` · `wb takeover <name>` | Claude driving a running agent: a note for after its current run, or (`--now`) an interrupt that puts the note first; or stop it and finish by hand |
-| `wb models` | the discovered models, whether each can run, and the router's ranking per size |
-| `wb bench [models…] [--tasks …] [--repeat N] [--report]` | measure models (long: run it in the background) |
-| `wb stats` · `wb doctor` | real results per model · environment check |
-
-## Models
-
-Nothing in the code names a model. A model is a candidate when it belongs to an OpenCode provider
-whose `baseURL` is on this machine (`~/.config/opencode/opencode.json`). Adding a model to
-OpenCode adds it here; `wb bench` then measures it.
-
-`~/.config/workbench/models.json` (or `$WB_MODELS`) holds only what OpenCode's config can't say,
-keyed by provider or by model id:
-
-```json
-{"strata": {"start": "cd ~ && strata launch --preset coder --no-tui --yes",
-            "stop": "strata launch --stop --preset coder"},
- "ollama/some-model": {"skip": true}}
-```
-
-Ollama models load on demand. A server that serves one model, like Strata, needs `start`/`stop`
-so the runner can swap it on and off the GPU; it waits for a busy server to go idle first.
-
-### Measuring: `wb bench`
-
-- **probe**: straight at the model's server. Cold load time, prefill and decode tok/s, and three
-  tool calls checked for the right name and arguments.
-- **tasks**: `bench/tasks/*`, small real tasks at both sizes (fix a bug, extend an API,
-  implement a data structure, add a CLI feature across functions, hunt several bugs from one
-  report). Each runs through the real pipeline (worktree, OpenCode, test gate, auto-fix) on a
-  scratch repo. It passes only if **hidden tests** pass on what the agent left. A unit test
-  checks the suite itself: each seed fails its hidden tests and each reference solution passes
-  them.
-
-Results go to `bench.jsonl` with the model's weights fingerprint (Ollama digest, or the id the
-server reports), so re-pulled or replaced weights are measured afresh. Bench runs never wake
-Claude and never count as real results.
-
-### Routing
-
-For a task of a given size, each model's quality is `(wins + 1) / (tries + 2)` over its bench
-tasks of that size on the current weights, plus real delegated tasks (accepted = win). Among
-models within 0.15 of the best quality, the router takes the fastest expected finish: mean
-minutes per task, plus the measured cold-load time if the model isn't on the GPU. With no
-evidence yet, it uses whatever is loaded and says so. `wb start` prints the reason; `wb models`
-prints the whole ranking. A new model starts with no evidence and earns its place through
-`wb bench`.
-
-## State
-
-Everything is plain files under `~/.local/state/workbench` (`$WB_HOME`). The CLI, the runners,
-the MCP server and the mod coordinate only through them:
-
-```
-notify.jsonl  results.jsonl  bench.jsonl  gpu.lock
-tasks/<name>/  task.json status.json events.jsonl opencode.json context.md acked runner.log
-               rounds/<n>/{prompt.md,summary.md,tests.txt}  ask/<id>.json|.answer  worktree/
-```
-
-## The mod
-
-`mod/` is a Claude Code mod (a hooks module):
-- a **Workbench** pane (`/workbench`) with each task's phase, round, model, test state and last
-  few events
-- a status line (`wb · fix-parser running r2 · 1 awaiting review`)
-- a toast per notification
-- with the `wake` option on (the default), a prompt that starts Claude's turn with the report and
-  the next command
-
-It reads the same files as `wb`, and shares acknowledgements with `wb wait` through each task's
-`acked` file.
-
-## Troubleshooting
-
-- `wb doctor` checks opencode and its config, git, each model's readiness and the state directory.
-- **A model "can't run"**: `wb models` says why: the server is down, the model isn't pulled, or
-  a stopped server has no `start` command in `~/.config/workbench/models.json`.
-- **The first reply takes minutes**: the runner may be loading the model (the status line says
-  so), or the model reads prompts slowly (see prefill in `wb bench --report`).
-- **The agent can't see `ask_reviewer`**: run `PWD=<worktree> OPENCODE_CONFIG=<task>/opencode.json
-  opencode mcp list --print-logs`.
-- **What did the model actually receive?** Point a provider at a capturing fake server and
-  inspect the request. `tests/fake_opencode.py` fakes the other side, OpenCode itself.
-
-## Develop
-
-Standard library Python 3.11+, no dependencies. See [CLAUDE.md](CLAUDE.md) for conventions and
-the OpenCode quirks the code relies on.
-
-```sh
-python3 -m unittest -v                              # ~13 s: real git, real runners, fake opencode
-claude plugin validate mod && claude plugin test mod
-```
+MIT. Development notes for contributors (and for Claude) are in [CLAUDE.md](CLAUDE.md).
