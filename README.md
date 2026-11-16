@@ -53,7 +53,8 @@ and it works.
 - **A local model server**, usually [Ollama](https://ollama.com). No models yet? That's fine: the
   first time you use it, Claude looks at your hardware, recommends the best models it can run, and
   sets them up in OpenCode (it asks before downloading anything)
-- Python 3.11+ and git, which `wb` itself runs on
+- Linux, macOS, or Windows through WSL2 (native Windows lacks the POSIX file locks and signals
+  `wb` uses), with Python 3.11+ and git, which `wb` itself runs on
 
 Whatever your machine, Claude picks models that fit it, and checks again every week as new ones
 come out.
@@ -417,7 +418,8 @@ weights); its results stay in the history.
 **The weekly model check.** Models change fast, so once a week, in a quiet moment (you've used the
 session and no task is open), the mod asks Claude to check. The first check comes on first use, and
 `/delegate` runs one before anything else when no local model can run yet. `wb scout` gives the facts, read fresh
-each time: GPU and VRAM, RAM and swap, CPU, free disk where Ollama keeps models, Ollama's default
+each time: the OS (Linux, WSL2 or macOS), GPU and VRAM (on Apple Silicon, the unified memory the
+GPU shares), RAM and swap, CPU, free disk where Ollama keeps models, Ollama's default
 context, every registered model with its size, quantization, context and real-task record,
 installed models that aren't registered, a watch list of models set aside and what would bring
 each back, and skills the library flags. Claude researches what's newest from primary sources,

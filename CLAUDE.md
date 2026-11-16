@@ -24,7 +24,10 @@ what either says (a command, a flag, a default, a guard, a file) updates it in t
     question wait, steer interrupts and the chat stream all sleep in the kernel until a file changes.
   - `chat_static/`: the web chat's page (served by chat.py): a fetch-streamed event stream with resync
     on reconnect, an idempotent outbox, the paced reveal.
-  - `hardware.py`: GPU/VRAM, RAM, CPU and disk, read fresh each time for `wb scout`. Nothing about the machine is hard-coded.
+  - `hardware.py`: the OS, GPU/VRAM, RAM, CPU and disk, read fresh each time for `wb scout`: Linux
+    from sysfs and /proc; WSL2 adds Windows' GPU names (VRAM unknown: AdapterRAM caps at 4 GB);
+    macOS via sysctl and system_profiler (Apple Silicon: unified memory). Unknowns stay unknown;
+    nothing about the machine is hard-coded.
   - `router.py`: picks a model per task size: an educated guess (the largest model allowed significant
     work, the smallest for trivial) corrected by real results (accepted / tried, per size).
   - `events.py`: event normalization and the stuck detector.
@@ -34,6 +37,8 @@ what either says (a command, a flag, a default, a guard, a file) updates it in t
     ~/.local/share/workbench/skills, its own git repo): checks, add/retire/restore, what each task
     was offered and loaded. `wb skill` drives it; a task holds the skills in `status.skills`.
   - `context.py`: what the agent knows. It adds CLAUDE.md files and rules, the nested-instructions map and the handbook to the config layer's `instructions`, and it sets the denied tools and skills.
+- Runs on Linux, WSL2 and macOS. Native Windows doesn't: store.py needs fcntl and the runner
+  `os.killpg` and POSIX signals. Off Linux, watch.py falls back to timed waits without inotify/pidfd.
 - Never name a model in code or the skill. Models come from OpenCode's config and choices from
   the router and the weekly model check, so newer models slot in without code changes. (README's
   quickstart and findings are the only places that name what this machine runs.)
