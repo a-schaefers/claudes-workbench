@@ -530,6 +530,16 @@ export const register: Register = (on, options) => {
     return next(e)
   })
 
+  // A tool call means a turn is running, even one that began before this module (re)loaded and
+  // so never reached turn.start here; turn.complete clears it.
+  on('tool.call', async ($, e, next) => {
+    if (!mem.busy) {
+      mem.busy = true
+      void poll($)
+    }
+    return next(e)
+  })
+
   // Delegating with wb counts as delegate mode too (a session resumed mid-delegation, or one
   // where /delegate ran before this mod could see it)
   on('tool.call', { tool: 'Bash' }, async ($, e, next) => {

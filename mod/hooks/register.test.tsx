@@ -364,7 +364,7 @@ test('running wb counts as delegate mode, and a web message reaches a running tu
   on('tool.call', (_: any, e: any) => ({ result: { stdout: '' }, text: '' }))  // the engine's Bash
   files['/wb/chat/messages.jsonl'] = JSON.stringify({ id: 'm1', ts: 1_800_000_000, from: 'user', text: 'still there?' }) + '\n'
   await $.session.start({ cwd: '/home/u/game', surface: 'terminal', isInteractive: true })
-  await $.turn.start({ text: 'go', turnId: 't1' })
+  // no turn.start: the module loaded mid-turn; the tool call itself says a turn runs
   await $.tool.call({ tool: 'Bash', command: 'cd ~ && wb start step-2 --spec s.md --repo .' })
   await clock.advance(3000)
   expect(asked).toEqual([])                                     // mid-turn: not a queued prompt…
