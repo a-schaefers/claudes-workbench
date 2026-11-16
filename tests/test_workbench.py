@@ -1013,6 +1013,66 @@ class WebChat(Base):
         self.assertIn("Claude: Step 2 is in review.", run_wb("chat", "log"))
 
 
+class Hardware(unittest.TestCase):
+    """wb scout's hardware report off Linux: each platform's own sources, faked here."""
+
+    def fake(self, system, runs=None, files=None):
+        from unittest import mock
+        from workbench import hardware
+        runs, files = runs or {}, files or {}
+        run = lambda *argv: next((out for k, out in runs.items() if argv[:len(k)] == k), "")  # noqa
+        read = lambda path: files.get(str(path), "")  # noqa: E731
+        for target, value in (("platform.system", lambda: system), ("platform.machine", lambda: "arm64"),
+                              ("workbench.hardware._run", run), ("workbench.hardware._read", read)):
+            patcher = mock.patch(target, value)
+            patcher.start()
+            self.addCleanup(patcher.stop)
+        return hardware
+
+    def test_apple_silicon_reports_unified_memory_not_no_gpu(self):
+        hw = self.fake("Darwin", runs={
+            ("sysctl", "-n", "hw.memsize"): "34359738368",
+            ("sysctl", "-n", "hw.pagesize"): "16384",
+            ("sysctl", "-n", "machdep.cpu.brand_string"): "Apple M2 Pro",
+            ("sysctl", "-n", "vm.swapusage"): "total = 2048.00M  used = 512.00M  free = 1536.00M  (encrypted)",
+            ("sysctl", "-n", "iogpu.wired_limit_mb"): "0",
+            ("vm_stat",): "Mach Virtual Memory Statistics: (page size of 16384 bytes)\n"
+                          "Pages free:                               65536.\n"
+                          "Pages inactive:                           65536.\n",
+            ("system_profiler",): json.dumps({"SPDisplaysDataType": [
+                {"_name": "Apple M2 Pro", "sppci_model": "Apple M2 Pro", "sppci_cores": "19"}]})})
+        out = "\n".join(hw.report())
+        self.assertIn("OS    macos (arm64)", out)
+        self.assertIn("Apple M2 Pro (19-core GPU) · unified memory: 32.0 GB shared with the CPU", out)
+        self.assertNotIn("none found", out)
+        self.assertIn("RAM   32.0 GB (2.0 GB free) · swap 2.0 GB (1.5 GB free)", out)
+        self.assertIn("CPU   Apple M2 Pro", out)
+
+    def test_an_intel_mac_reports_its_graphics_cards_vram(self):
+        hw = self.fake("Darwin", runs={("system_profiler",): json.dumps({"SPDisplaysDataType": [
+            {"sppci_model": "AMD Radeon Pro 5500M", "spdisplays_vram": "8 GB"}]})})
+        self.assertIn("AMD Radeon Pro 5500M · 8.0 GB VRAM · metal", "\n".join(hw.report()))
+
+    def test_wsl_names_windows_gpus_and_says_what_it_cannot_see(self):
+        hw = self.fake("Linux", files={
+            "/proc/version": "Linux version 5.15.153.1-microsoft-standard-WSL2",
+            "/proc/meminfo": "MemTotal:       16000000 kB\nMemAvailable:    8000000 kB\n"},
+            runs={("powershell.exe",): "AMD Radeon RX 7900 XTX\r\n"})
+        out = "\n".join(hw.report())
+        self.assertIn("OS    wsl", out)
+        self.assertIn("only NVIDIA GPUs are usable from inside WSL", out)
+        self.assertIn("AMD Radeon RX 7900 XTX · VRAM unknown · windows (seen from WSL)", out)
+        self.assertIn("RAM   15.3 GB", out)
+
+    def test_wsl_with_nvidia_is_not_listed_twice(self):
+        hw = self.fake("Linux", files={"/proc/version": "microsoft-standard-WSL2"}, runs={
+            ("nvidia-smi",): "NVIDIA GeForce RTX 4090, 24564, 1000, 560.94",
+            ("powershell.exe",): "NVIDIA GeForce RTX 4090\n"})
+        gpus = hw.gpus()
+        self.assertEqual([g["name"] for g in gpus], ["NVIDIA GeForce RTX 4090"])
+        self.assertEqual(gpus[0]["vram"], 24564 * 2 ** 20)
+
+
 class Detector(unittest.TestCase):
     def test_edits_reset_the_no_edit_counter(self):
         d = events.StuckDetector(no_edit=3)

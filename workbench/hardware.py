@@ -2,10 +2,17 @@
 
 `wb scout` reports it next to the installed models, so Claude can judge each week which models
 are the best fit for this hardware right now (the /delegate skill's weekly model check).
+
+Linux reads sysfs and /proc; WSL2 adds what Windows says about its GPUs (only NVIDIA's are
+visible inside WSL); macOS asks sysctl and system_profiler, and on Apple Silicon the GPU's memory
+is the unified RAM. Anything a platform can't tell comes back as unknown, never as a guess.
 """
 from __future__ import annotations
 
+import json
 import os
+import platform
+import re
 import shutil
 import subprocess
 from pathlib import Path
@@ -28,14 +35,75 @@ def _run(*argv: str) -> str:
         return ""
 
 
+def system() -> str:
+    """linux, wsl, macos, or what Python calls the platform."""
+    name = platform.system()
+    if name == "Darwin":
+        return "macos"
+    if name == "Linux":
+        return "wsl" if "microsoft" in _read(Path("/proc/version")).lower() else "linux"
+    return name.lower() or "unknown"
+
+
+def _sysctl(key: str) -> str:
+    return _run("sysctl", "-n", key)
+
+
+def _mac_gpus() -> list[dict]:
+    """system_profiler's display adapters. Apple Silicon has no VRAM of its own: the GPU uses the
+    unified RAM, of which macOS lets it wire only part by default (iogpu.wired_limit_mb raises it)."""
+    try:
+        items = json.loads(_run("system_profiler", "SPDisplaysDataType", "-json") or "{}")
+    except ValueError:
+        items = {}
+    found = []
+    for g in items.get("SPDisplaysDataType", []):
+        name = g.get("sppci_model") or g.get("_name") or "unknown"
+        if g.get("sppci_cores"):
+            name += f" ({g['sppci_cores']}-core GPU)"
+        vram = g.get("spdisplays_vram") or g.get("spdisplays_vram_shared") or ""
+        m = re.match(r"(\d+)\s*(MB|GB)", vram)
+        unified = name.startswith("Apple")
+        found.append({"name": name, "driver": "metal", "unified": unified,
+                      "vram": (_int(_sysctl("hw.memsize")) if unified else
+                               int(m.group(1)) * (GB if m.group(2) == "GB" else 2 ** 20) if m else None),
+                      "vram_used": None,
+                      "wired_limit": _int(_sysctl("iogpu.wired_limit_mb")) * 2 ** 20
+                      if unified and _int(_sysctl("iogpu.wired_limit_mb")) else None})
+    return found
+
+
+def _windows_gpus() -> list[dict]:
+    """From inside WSL2: the Windows host's adapters by name (WSL hides all but NVIDIA's from
+    Linux). Windows' AdapterRAM is capped at 4 GB, so VRAM stays unknown rather than wrong."""
+    out = _run("powershell.exe", "-NoProfile", "-Command",
+               "Get-CimInstance Win32_VideoController | Select-Object -ExpandProperty Name")
+    return [{"name": n.strip(), "driver": "windows (seen from WSL)", "vram": None, "vram_used": None}
+            for n in out.splitlines() if n.strip()]
+
+
+def _int(text: str) -> int:
+    try:
+        return int(text.strip())
+    except (ValueError, AttributeError):
+        return 0
+
+
 def gpus() -> list[dict]:
     """Every display adapter: name, driver, VRAM total and in use (bytes) where the driver says."""
+    where = system()
+    if where == "macos":
+        return _mac_gpus()
     found = []
     for line in _run("nvidia-smi", "--query-gpu=name,memory.total,memory.used,driver_version",
                      "--format=csv,noheader,nounits").splitlines():
         name, total, used, driver = [x.strip() for x in line.split(",")]
         found.append({"name": name, "driver": f"nvidia {driver}", "vram": int(total) * 2 ** 20,
                       "vram_used": int(used) * 2 ** 20})
+    if where == "wsl":
+        nvidia = {g["name"] for g in found}
+        return found + [g for g in _windows_gpus()
+                        if not any(n in g["name"] or g["name"] in n for n in nvidia)]
     seen = set()
     for dev in sorted(Path("/sys/class/drm").glob("card[0-9]*/device")):
         if "-" in dev.parent.name:  # a connector (card0-DP-1), not a card
@@ -53,6 +121,14 @@ def gpus() -> list[dict]:
 
 
 def memory() -> dict:
+    if system() == "macos":
+        page = _int(_sysctl("hw.pagesize")) or 4096
+        stats = dict(re.findall(r"^(Pages [\w ]+):\s+(\d+)\.", _run("vm_stat"), re.M))
+        free = sum(_int(stats.get(k, "0")) for k in ("Pages free", "Pages inactive", "Pages speculative"))
+        swap = re.findall(r"(total|free) = ([\d.]+)M", _sysctl("vm.swapusage"))
+        sw = {k: int(float(v) * 2 ** 20) for k, v in swap}
+        return {"ram": _int(_sysctl("hw.memsize")) or None, "ram_free": free * page or None,
+                "swap": sw.get("total"), "swap_free": sw.get("free")}
     info = {}
     for line in _read(Path("/proc/meminfo")).splitlines():
         key, _, rest = line.partition(":")
@@ -63,8 +139,10 @@ def memory() -> dict:
 
 
 def cpu() -> dict:
-    name = next((line.partition(":")[2].strip() for line in _read(Path("/proc/cpuinfo")).splitlines()
-                 if line.startswith("model name")), "") or os.uname().machine
+    name = _sysctl("machdep.cpu.brand_string") if system() == "macos" else next(
+        (line.partition(":")[2].strip() for line in _read(Path("/proc/cpuinfo")).splitlines()
+         if line.startswith("model name")), "")
+    name = name or platform.machine() or "unknown"
     return {"name": name, "threads": os.cpu_count()}
 
 
@@ -98,14 +176,29 @@ def size(n: int | None) -> str:
     return f"{n / GB:.1f} GB" if n else "?"
 
 
+SYSTEM_NOTE = {
+    "wsl": "WSL2: RAM is the VM's share (.wslconfig sets it); only NVIDIA GPUs are usable from "
+           "inside WSL, others are named from Windows without their VRAM",
+    "macos": "macOS: Apple Silicon models run on the GPU through Metal, in the unified memory",
+}
+
+
 def report() -> list[str]:
-    lines = []
+    where = system()
+    lines = [f"  OS    {where} ({platform.machine() or '?'})"
+             + (f" · {SYSTEM_NOTE[where]}" if where in SYSTEM_NOTE else "")]
+    gpu_lines = []
     for g in gpus():
-        vram = (f" · {size(g['vram'])} VRAM" + (f" ({size(g['vram_used'])} in use)"
-                                                if g.get("vram_used") else "")) if g["vram"] else ""
-        lines.append(f"  GPU   {g['name']}{vram} · {g['driver']}")
-    if not lines:
-        lines.append("  GPU   none found (models would run on the CPU)")
+        if g.get("unified"):
+            limit = (f", the GPU may wire {size(g['wired_limit'])} (iogpu.wired_limit_mb)"
+                     if g.get("wired_limit") else ", of which macOS lets the GPU use only part by default")
+            vram = f" · unified memory: {size(g['vram'])} shared with the CPU{limit}"
+        else:
+            vram = (f" · {size(g['vram'])} VRAM" + (f" ({size(g['vram_used'])} in use)"
+                                                    if g.get("vram_used") else "")) if g["vram"] \
+                else " · VRAM unknown"
+        gpu_lines.append(f"  GPU   {g['name']}{vram} · {g['driver']}")
+    lines += gpu_lines or ["  GPU   none found (models would run on the CPU)"]
     m, c = memory(), cpu()
     lines.append(f"  RAM   {size(m['ram'])} ({size(m['ram_free'])} free)"
                  + (f" · swap {size(m['swap'])} ({size(m['swap_free'])} free)" if m.get("swap") else ""))
