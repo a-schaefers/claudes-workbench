@@ -189,7 +189,7 @@ class Lifecycle(Base):
 
     def test_the_thinking_budget_has_a_default(self):
         self.start("t-budget", "ok")
-        self.assertEqual(store.Task("t-budget").spec["think_timeout"], cli.THINK_DEFAULT_S)
+        self.assertEqual(store.Task("t-budget").spec["think_timeout"], cli.router.THINK_DEFAULT_S)
         wait_phase("t-budget", {"review"})
 
     def test_crash_is_reported_failed(self):
@@ -936,11 +936,12 @@ class Projects(Base):
     def test_init_a_new_project(self):
         d = Path(self.tmp.name) / "game"
         os.environ.update(GIT_CONFIG_GLOBAL=str(Path(self.tmp.name) / "gitconfig"))
-        (Path(self.tmp.name) / "gitconfig").write_text("[user]\n\temail = t@t\n\tname = t\n")
+        (Path(self.tmp.name) / "gitconfig").write_text("[user]\n\temail = t@t\n\tname = t\n"
+                                                        "[init]\n\tdefaultBranch = trunk\n")
         out = run_wb("init", str(d))
-        self.assertIn("git repo on master", out)
+        self.assertIn("git repo on trunk", out)                 # the user's default branch
         self.assertIn("next: write CLAUDE.md", out)
-        self.assertEqual(self.git(d, "branch", "--show-current"), "master")
+        self.assertEqual(self.git(d, "branch", "--show-current"), "trunk")
         self.assertEqual(self.git(d, "log", "--format=%s"), "Initial commit")
         self.assertEqual(self.git(d, "remote"), "")             # no remote until the user names one
         (d / "CLAUDE.md").write_text("# game\n")

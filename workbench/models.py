@@ -1,6 +1,7 @@
 """The local models workbench can hand work to: found in OpenCode's config, not listed here.
 
-Every model of an OpenCode provider whose baseURL is on this machine is a candidate. Which one
+Every model of an OpenCode provider whose baseURL is on this machine is a candidate (a provider
+on another host, such as a GPU box on the LAN, opts in with `"local": true`). Which one
 takes a task is the router's guess from its size, corrected by real tasks (router.py), never
 written down here, so a new model is one opencode.json entry away.
 
@@ -11,6 +12,11 @@ keyed by OpenCode model id or by provider id:
                    "weights_gb": 55},
      "ollama/some-model": {"skip": true}}
 
+A provider is driven as Ollama when its server answers Ollama's /api/version, whatever its port;
+anything else is a server (`"engine": "ollama"|"server"` on the provider overrides the probe). A
+server that lists several models (LM Studio, llama-swap, vLLM) swaps them itself: its models
+are one server, stopped or started as one.
+
 The runner makes the task's model resident before it starts (make_resident): it unloads Ollama
 models and stops servers that have a stop command, then loads or starts the one it needs. A
 GpuLease decides first whether it may instead run beside the tasks already running: when every
@@ -20,10 +26,14 @@ its own and leaves theirs; otherwise it waits for the GPU to itself.
 from __future__ import annotations
 
 import fcntl
+import ipaddress
 import json
 import os
+import re
+import socket
 import subprocess
 import time
+import urllib.error
 import urllib.request
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -31,8 +41,8 @@ from urllib.parse import urlparse
 
 from . import hardware, store
 
-LOCAL_HOSTS = {"127.0.0.1", "localhost", "::1", "0.0.0.0"}
-OLLAMA_PORT = 11434
+LOCAL_HOSTS = {"localhost", "0.0.0.0", "host.docker.internal"}
+OLLAMA_PORT = 11434  # Ollama's default: the guess while its server is down
 START_TIMEOUT = 20 * 60  # a big model server's first start can take minutes
 
 
@@ -42,12 +52,13 @@ class Model:
     provider: str
     name: str          # the model's name at its server
     base_url: str      # the provider's OpenAI-compatible base URL, ending in /v1
-    engine: str        # "ollama" (loads models on demand) or "server" (serves one model)
+    engine: str        # "ollama" (loads models on demand) or "server" (an OpenAI-compatible one)
     label: str
     start: str | None = None
     stop: str | None = None
     extra: dict = field(default_factory=dict)
     config: dict = field(default_factory=dict)  # OpenCode's entry: reasoning, limit, variants...
+    remote: bool = False  # on another host (models.json "local": true): its VRAM isn't this GPU's
 
     @property
     def root(self) -> str:
@@ -55,29 +66,103 @@ class Model:
 
 
 def opencode_config_path() -> Path:
-    return Path(os.environ.get("WB_OPENCODE_CONFIG")
-                or Path.home() / ".config" / "opencode" / "opencode.json")
+    """OpenCode's global config, where OpenCode reads it: $XDG_CONFIG_HOME/opencode (default
+    ~/.config/opencode, on macOS too), opencode.json or opencode.jsonc."""
+    if os.environ.get("WB_OPENCODE_CONFIG"):
+        return Path(os.environ["WB_OPENCODE_CONFIG"])
+    d = Path(os.environ.get("XDG_CONFIG_HOME") or Path.home() / ".config") / "opencode"
+    return next((p for p in (d / "opencode.json", d / "opencode.jsonc") if p.exists()),
+                d / "opencode.json")
+
+
+def _strip_jsonc(text: str) -> str:
+    """JSON with comments and trailing commas (OpenCode accepts both) as plain JSON."""
+    text = re.sub(r'"(?:\\.|[^"\\])*"|//[^\n]*|/\*.*?\*/',
+                  lambda m: m.group(0) if m.group(0)[0] == '"' else "", text, flags=re.S)
+    return re.sub(r'"(?:\\.|[^"\\])*"|,(\s*[}\]])',
+                  lambda m: m.group(1) if m.group(1) is not None else m.group(0), text)
+
+
+def read_config() -> dict:
+    path = opencode_config_path()
+    return json.loads(_strip_jsonc(path.read_text())) if path.exists() else {}
+
+
+def write_config(cfg: dict) -> None:
+    """Write OpenCode's config back; refused for a file with comments, which a rewrite would lose."""
+    path = opencode_config_path()
+    try:
+        json.loads(path.read_text() if path.exists() else "{}")
+    except ValueError:
+        raise RuntimeError(f"{path} has comments, which rewriting it would lose; make this change "
+                           f"by hand: {json.dumps(cfg)[:2000]}") from None
+    store.write_json(path, cfg)
+
+
+def overrides_path() -> Path:
+    return Path(os.environ.get("WB_MODELS") or Path.home() / ".config" / "workbench" / "models.json")
 
 
 def _overrides() -> dict:
-    path = Path(os.environ.get("WB_MODELS") or Path.home() / ".config" / "workbench" / "models.json")
+    path = overrides_path()
     return json.loads(path.read_text()) if path.exists() else {}
+
+
+def _this_host(host: str | None) -> bool:
+    """Whether a baseURL's host is this machine: any loopback address, or this host's own name."""
+    if not host:
+        return False
+    if host.lower() in LOCAL_HOSTS:
+        return True
+    try:
+        return ipaddress.ip_address(host).is_loopback
+    except ValueError:
+        me = socket.gethostname().lower()
+        return host.lower() in (me, me.split(".")[0], f"{me.split('.')[0]}.local")
+
+
+_ENGINES: dict[str, str] = {}  # root -> engine, once its server has answered
+
+
+def _engine(url: str, over: dict) -> str:
+    """"ollama" when the server answers Ollama's own /api/version, else "server". While it is
+    down, Ollama's default port decides; the answer is kept once the server has given one."""
+    if over.get("engine") in ("ollama", "server"):
+        return over["engine"]
+    root = url.rstrip("/").removesuffix("/v1")
+    if root in _ENGINES:
+        return _ENGINES[root]
+    guess = "ollama" if urlparse(url).port == OLLAMA_PORT else "server"
+    if _fake():
+        return guess
+    try:
+        with urllib.request.urlopen(f"{root}/api/version", timeout=1.5) as r:
+            body = json.loads(r.read() or b"{}")
+        _ENGINES[root] = "ollama" if isinstance(body, dict) and "version" in body else "server"
+    except urllib.error.HTTPError:  # it answered, without Ollama's API
+        _ENGINES[root] = "server"
+    except Exception:  # down, or not speaking JSON: the port is the best guess
+        return guess
+    return _ENGINES[root]
+
+
+def _local_providers(cfg: dict, extra: dict):
+    """(provider id, its config, its baseURL, engine, remote) for each provider on this machine,
+    or opted in with models.json "local": true."""
+    for pid, prov in (cfg.get("provider") or cfg.get("providers") or {}).items():
+        opts = prov.get("options") or prov.get("settings") or {}
+        url = opts.get("baseURL", "")
+        here = _this_host(urlparse(url).hostname)
+        if not url or not (here or (extra.get(pid) or {}).get("local")):
+            continue
+        yield pid, prov, url, _engine(url, extra.get(pid) or {}), not here
 
 
 def discover() -> dict[str, Model]:
     """Every local model OpenCode knows, by OpenCode id, in config order."""
-    path = opencode_config_path()
-    cfg = json.loads(path.read_text()) if path.exists() else {}
-    providers = cfg.get("provider") or cfg.get("providers") or {}
     extra = _overrides()
     found: dict[str, Model] = {}
-    for pid, prov in providers.items():
-        opts = prov.get("options") or prov.get("settings") or {}
-        url = opts.get("baseURL", "")
-        parsed = urlparse(url)
-        if parsed.hostname not in LOCAL_HOSTS:
-            continue
-        engine = "ollama" if parsed.port == OLLAMA_PORT else "server"
+    for pid, prov, url, engine, remote in _local_providers(read_config(), extra):
         for name, spec in (prov.get("models") or {}).items():
             mid = f"{pid}/{name}"
             over = {**extra.get(pid, {}), **extra.get(mid, {})}
@@ -86,7 +171,7 @@ def discover() -> dict[str, Model]:
             found[mid] = Model(id=mid, provider=pid, name=name, base_url=url, engine=engine,
                                label=over.get("label") or spec.get("name") or mid,
                                start=over.get("start"), stop=over.get("stop"), extra=over,
-                               config=spec)
+                               config=spec, remote=remote)
     return found
 
 
@@ -144,12 +229,18 @@ def status(m: Model) -> dict:
             return {"available": False, "resident": False, "why": f"{m.name} is not pulled"}
         resident = _matches(m.name, _ollama_names(m, "ps"))
         return {"available": True, "resident": resident, "why": "loaded" if resident else "pulled"}
-    if _get(f"{m.base_url.rstrip('/')}/models", timeout=2) is not None:
+    body = _get(f"{m.base_url.rstrip('/')}/models", timeout=2)
+    if body is not None:
+        # one listed model: a one-model server answers to any name; several: it routes by name
+        served = {x.get("id") for x in (body.get("data") or []) if isinstance(x, dict)}
+        if len(served) > 1 and m.name not in served:
+            return {"available": False, "resident": False,
+                    "why": f"the server lists {len(served)} models, not {m.name}"}
         return {"available": True, "resident": True, "why": "running"}
     if m.start:
         return {"available": True, "resident": False, "why": "stopped (wb starts it)"}
     return {"available": False, "resident": False,
-            "why": "not running, and no start command in ~/.config/workbench/models.json"}
+            "why": f"not running, and no start command in {overrides_path()}"}
 
 
 def weights(m: Model) -> int:
@@ -209,11 +300,15 @@ def free_gpu(keep=(), say=print) -> None:
     if _fake():
         return
     kept = [o for o in discover().values() if o.id in keep]
+    done = {o.root for o in kept if o.engine == "server"}  # a server swaps its own models
     for other in discover().values():
-        if other.id in keep or other.engine != "server" or not status(other)["resident"]:
+        if other.engine != "server" or other.root in done or not status(other)["resident"]:
             continue
-        if not other.stop:
-            raise RuntimeError(f"{other.id} holds the GPU and has no stop command; stop it first")
+        done.add(other.root)
+        if not other.stop:  # it may be idle with nothing loaded (LM Studio's server often is)
+            say(f"{other.id} is running and wb can't stop it (no stop command in "
+                f"{overrides_path().name}); it may hold GPU memory")
+            continue
         deadline = time.time() + 600
         while not _server_idle(other) and time.time() < deadline:  # never cut off someone's reply
             time.sleep(5)
@@ -232,10 +327,10 @@ def free_gpu(keep=(), say=print) -> None:
 
 
 def _others_resident(m: Model, keep=()) -> bool:
-    if any(o.id != m.id and o.id not in keep and o.engine == "server" and status(o)["resident"]
-           for o in discover().values()):
-        return True
     ours = [m, *(o for o in discover().values() if o.id in keep)]
+    if any(o.engine == "server" and o.stop and o.root not in {x.root for x in ours}
+           and status(o)["resident"] for o in discover().values()):
+        return True
     roots = {o.root for o in discover().values() if o.engine == "ollama"}
     return any(not any(o.engine == "ollama" and r == o.root and _matches(o.name, {n}) for o in ours)
                for r in roots for n in _ollama_loaded(r))
@@ -278,12 +373,22 @@ def need(m: Model) -> int:
     return int(weights(m) * KV_GUESS)
 
 
+def all_on_gpu(m: Model) -> bool:
+    """Whether Ollama has the model loaded with every byte of it in VRAM (its own placement)."""
+    if m.engine != "ollama" or _fake():
+        return False
+    return any(_matches(m.name, {x.get("name")}) and x.get("size") and x.get("size_vram") == x["size"]
+               for x in (_get(f"{m.root}/api/ps") or {}).get("models", []))
+
+
 def can_share(m: Model, running: list[Model], budget: int | None) -> bool:
     """Whether ``m`` can run beside the running tasks' models, every one on the GPU at once.
     Only Ollama shares (a one-model server wants the GPU to itself). The same model twice needs
     Ollama to serve requests in parallel (OLLAMA_NUM_PARALLEL), or the two would take turns and
-    re-read their prompts on every request."""
-    if not budget or not running or m.engine != "ollama" or any(o.engine != "ollama" for o in running):
+    re-read their prompts on every request. A model on another host runs alone: its GPU isn't
+    the one this machine measures."""
+    if not budget or not running or m.engine != "ollama" or m.remote or \
+            any(o.engine != "ollama" or o.remote for o in running):
         return False
     if any(o.id == m.id for o in running):
         par = hardware.ollama_env().get("OLLAMA_NUM_PARALLEL") or ""
@@ -380,16 +485,9 @@ def ollama_cap(entry: dict) -> int:
 
 def providers() -> dict[str, dict]:
     """OpenCode's local providers: id → {"root", "engine", "models"} (the config's model entries)."""
-    path = opencode_config_path()
-    cfg = json.loads(path.read_text()) if path.exists() else {}
-    out = {}
-    for pid, prov in (cfg.get("provider") or {}).items():
-        url = (prov.get("options") or {}).get("baseURL", "")
-        parsed = urlparse(url)
-        if parsed.hostname in LOCAL_HOSTS:
-            out[pid] = {"root": url.rstrip("/").removesuffix("/v1"), "models": prov.get("models") or {},
-                        "engine": "ollama" if parsed.port == OLLAMA_PORT else "server"}
-    return out
+    return {pid: {"root": url.rstrip("/").removesuffix("/v1"), "models": prov.get("models") or {},
+                  "engine": engine}
+            for pid, prov, url, engine, _ in _local_providers(read_config(), _overrides())}
 
 
 def ollama_installed(root: str) -> list[dict]:
@@ -466,7 +564,7 @@ def ollama_delete(root: str, name: str) -> None:
 
 def set_override(model_id: str, key: str, value) -> None:
     """Set (or with None, drop) one key of a model's models.json entry."""
-    path = Path(os.environ.get("WB_MODELS") or Path.home() / ".config" / "workbench" / "models.json")
+    path = overrides_path()
     data = _overrides()
     entry = data.setdefault(model_id, {})
     if value is None:
@@ -481,8 +579,7 @@ def set_override(model_id: str, key: str, value) -> None:
 
 def write_entry(provider: str, name: str, entry: dict | None) -> None:
     """Add, replace (entry) or remove (None) one model in OpenCode's config."""
-    path = opencode_config_path()
-    cfg = json.loads(path.read_text())
+    cfg = read_config()
     prov = (cfg.get("provider") or {}).get(provider)
     if prov is None:
         raise KeyError(f"OpenCode has no provider {provider!r}")
@@ -491,4 +588,4 @@ def write_entry(provider: str, name: str, entry: dict | None) -> None:
         entries.pop(name, None)
     else:
         entries[name] = entry
-    store.write_json(path, cfg)
+    write_config(cfg)

@@ -73,6 +73,7 @@ come out.
 ```sh
 git clone https://github.com/a-schaefers/claudes-workbench ~/repos/workbench
 cd ~/repos/workbench
+mkdir -p ~/.local/bin ~/.claude/skills   # ~/.local/bin must be on your PATH
 ln -s "$PWD/bin/wb" ~/.local/bin/wb
 ln -s "$PWD/skill/delegate" ~/.claude/skills/delegate
 claude plugin marketplace add "$PWD"
@@ -119,8 +120,8 @@ to read the diff.
 
 **Away from the computer?** `wb chat serve` runs a small web chat with the running Claude session,
 and `wb chat url` prints its private link (on Linux, `systemctl --user link
-~/repos/workbench/systemd/wb-chat.service && systemctl --user enable --now wb-chat` keeps it
-running). It's `http://localhost:1337`; to use it from your phone, reach your PC the way you
+"$PWD/systemd/wb-chat.service" && systemctl --user enable --now wb-chat`, run in the clone, keeps
+it running; on macOS, a launchd agent running `~/.local/bin/wb chat serve` does). It's `http://localhost:1337`; to use it from your phone, reach your PC the way you
 normally do (Tailscale, for example) and change the host in the link.
 
 <p align="center"><img src="docs/web-chat.png" alt="The web chat: Claude's report on which model takes which tasks, the user's reply, a receipt saying Claude has it and will read it after its current step, and 'Claude is on it'" width="420"></p>
@@ -259,6 +260,13 @@ A model generating for minutes with no tool call is usually planning instead of 
 think budget (7 minutes, `--think-timeout`; 0 turns it off) the runner interrupts it once a round
 with a nudge (act now: the smallest edit first, one file per call, run the tests soon) and tells
 Claude.
+
+These limits were set on a 27B model that writes ~36 tokens a second. A slower machine gets
+longer ones, learned per model: after every round the runner reads from the session how fast the
+model wrote (output and reasoning tokens after the first) and read (new input before the first
+token), keeps the recent samples in `speed.json`, and `wb start` gives the think budget the time
+~13.5K tokens of thinking plus a full window of reading take at those speeds, scaling the silence
+and round limits with it. None goes below its default; `wb models` shows each model's speeds.
 
 **6. The tests gate the round.** After a clean round the runner runs the acceptance command
 (`--test`) in the worktree, with a 15-minute limit and the output saved per round. If it fails and
@@ -423,20 +431,30 @@ Claude has had its news.
 ### Models: found, loaded, chosen
 
 **Discovery.** A model is a candidate when it's registered in OpenCode's config
-(`~/.config/opencode/opencode.json`) under a provider whose `baseURL` is on this machine. A
-provider on Ollama's port is driven as Ollama (models load on demand); anything else is a
-one-model server. `~/.config/workbench/models.json` adds only what OpenCode can't say, per
-provider or model id: `start`/`stop` commands for a one-model server, `skip`, `sizes`, and
-`weights_gb` for a server that can't report its size.
+(`$XDG_CONFIG_HOME/opencode/opencode.json` or `opencode.jsonc`, by default under `~/.config`)
+under a provider whose `baseURL` is on this machine: a loopback address, `localhost`, or this
+host's own name. A provider elsewhere, such as a GPU box on your LAN, counts when models.json
+gives it `"local": true`; its models never share the GPU, which `wb` can't measure there. A
+provider whose server answers Ollama's `/api/version`, on any port, is driven as Ollama (models
+load on demand); anything else is an OpenAI-compatible server. A server that lists several
+models (LM Studio, llama-swap, vLLM) swaps them itself, so its models are one server.
+`~/.config/workbench/models.json` adds only what OpenCode can't say, per provider or model id:
+`start`/`stop` commands for a server, `skip`, `sizes`, `weights_gb` for a server that can't
+report its size, `engine` (`ollama` or `server`) where the probe guesses wrong, and `local`.
+A config with comments is read but never rewritten: `wb` says what to change by hand.
 
 **Status.** `wb models` and `wb doctor` say for each model whether it can run and why not: Ollama
-not answering, the model not pulled, a server down with no start command.
+not answering, the model not pulled, a server down with no start command, a multi-model server
+that doesn't list it. A running server `wb` has no stop command for is left running, with a
+warning that it may hold GPU memory.
 
 **Routing.** The router makes an educated guess and corrects it with real results. A model's
 quality on a task size is its acceptance rate with a uniform prior, (accepted + 1) / (tried + 2),
 so one lucky task doesn't crown it. Among the models within 0.15 of the best, the guess decides:
 the largest model (by weight bytes) for significant work, the smallest for trivial work, and at
-equal size the one already on the GPU. `wb model sizes <id> trivial` limits a model to some task
+equal size the one already on the GPU. Where the GPU's memory is known, every model that fits it
+(its weights within 90% of it, or `vram_gb`; or loaded by Ollama all in VRAM) comes before one
+that would spill into RAM and run several times slower. `wb model sizes <id> trivial` limits a model to some task
 sizes, whatever its record. `wb models` prints the ranking per size with each model's record; a new
 model has none, so Claude gives it its first few tasks by hand. `wb models --set-default` makes the
 router's pick OpenCode's own default.
@@ -558,7 +576,7 @@ custom-node packs do run their own Python).
   ```
   It merges only with `--merge`; otherwise it prints the merge command.
 - **`wb init <dir>`** sets a project up the way Claude keeps every project: a git repo on
-  `master` with an initial commit, and `AGENTS.md` as a symlink to `CLAUDE.md`, so OpenCode's
+  git's default branch (`init.defaultBranch`) with an initial commit, and `AGENTS.md` as a symlink to `CLAUDE.md`, so OpenCode's
   agents and Claude read the same file. It never adds a remote.
 - **CLAUDE.md stays true.** It goes into every agent prompt, so `wb accept` prints how many code
   commits it's behind, and the skill has Claude update it after each accepted task that changes
@@ -635,7 +653,7 @@ Both stop the web chat listening in that session.
 | `wb image "<prompt>" [--n] [--size] [--seed] [--ref] [--out] [--engine] [--list]` | candidates from a local image model, for Claude to look at and choose from |
 | `wb stats` | real results by model and size |
 | `wb chat [serve\|url\|reply\|log]` | the web chat |
-| `wb init <dir>` | set a project up: git on master, AGENTS.md → CLAUDE.md |
+| `wb init <dir>` | set a project up: git with an initial commit, AGENTS.md → CLAUDE.md |
 | `wb events` | a line whenever workbench's state changes (what the mod listens to) |
 | `wb doctor` | check opencode, its config, git, each model, the state directory |
 
@@ -647,6 +665,7 @@ Both stop the web chat listening in that session.
   results.jsonl                  one row per closed task: what the router and skill records learn from
   gpu.lock  gpu.json  gpu.admit  held by each running task (shared when models fit together); who holds it
   scout.json  watch.json         the weekly model check: when it was done, the watch list
+  speed.json                     each model's measured tokens/s, read and written: the runner's limits
   chat/                          messages.jsonl  receipts.jsonl  listener.json
   tasks/<name>/
     task.json  status.json       what the task is; what it's doing now

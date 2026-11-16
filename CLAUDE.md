@@ -2,7 +2,8 @@
 
 The short name, `workbench`, stays on everything inside: the package, the plugin
 (`workbench@workbench`), the state and config directories, and the clone path `~/repos/workbench`
-that the systemd unit and the skill expect. The CLI is `wb`.
+the README suggests (nothing depends on it: `bin/wb` finds the package from its real path, and
+the systemd unit runs `~/.local/bin/wb`). The CLI is `wb`.
 
 Claude delegates coding tasks to local models in OpenCode and reviews the results. README.md is
 for people: the pitch and a quickstart, then (below its rule) "How it works", the full account of
@@ -24,6 +25,7 @@ what either says (a command, a flag, a default, a guard, a file) updates it in t
   - `watch.py`: waiting without polling: inotify (ctypes) on state directories and pidfd on processes.
     `wb events` streams state changes to the mod; `wb wait`, `log -f`, `watch`, the agent's
     question wait, steer interrupts and the chat stream all sleep in the kernel until a file changes.
+    Without inotify (macOS, or past the watch limit) it stats those directories every 0.25 s.
   - `chat_static/`: the web chat's page (served by chat.py): a fetch-streamed event stream with resync
     on reconnect, an idempotent outbox, the paced reveal.
   - `hardware.py`: the OS, GPU/VRAM, RAM, CPU and disk, read fresh each time for `wb scout`: Linux
@@ -31,9 +33,12 @@ what either says (a command, a flag, a default, a guard, a file) updates it in t
     macOS via sysctl and system_profiler (Apple Silicon: unified memory). Unknowns stay unknown;
     nothing about the machine is hard-coded.
   - `router.py`: picks a model per task size: an educated guess (the largest model allowed significant
-    work, the smallest for trivial) corrected by real results (accepted / tried, per size). And each
+    work, the smallest for trivial; models that fit the GPU's budget whole before ones that spill)
+    corrected by real results (accepted / tried, per size). And each
     model's slice (`slice`): files and lines per task, guessed from its window (measured on 32K,
-    scaled up to GUESS_MAX) and corrected by the steps that fit or overflowed.
+    scaled up to GUESS_MAX) and corrected by the steps that fit or overflowed. And its `budgets`:
+    the think, silence and round limits, longer for a model measured slow (`speed.json`, which
+    the runner fills from each round's session export; never below 420/900/2400 s).
   - `events.py`: event normalization and the stuck detector.
   - `transcript.py`: `wb watch`, the human view: the OpenCode session export merged with the task's
     events. Its `--json` lines feed the mod's pane.
@@ -65,7 +70,8 @@ what either says (a command, a flag, a default, a guard, a file) updates it in t
   `apprentice.ts` is the pane's character: pixel art for a terminal `Raster` (half blocks, a pose per
   phase, the chest lamp `L` in the phase's colour) and a one-line face elsewhere. A timer blits its
   frames while the pane shows it. `.claude-plugin/icon.png` is the same art.
-- `skill/delegate/SKILL.md`: the `/delegate` procedure. `~/.claude/skills/delegate` links here.
+- `skill/delegate/SKILL.md`: the `/delegate` procedure. `~/.claude/skills/delegate` links here
+  (`$CLAUDE_CONFIG_DIR` moves `~/.claude`; `context.claude_home`).
   Skills for the agents: Claude's library (`wb skill`), handed per task, or a project's own
   `.claude/skills`, committed with it. The user's personal `~/.claude/skills` are denied to agents.
 - `docs/`: the README's images: `logo.jpg` (generated with x.ai), `driver-and-agent.jpg` and
@@ -84,7 +90,8 @@ what either says (a command, a flag, a default, a guard, a file) updates it in t
    an edit, silence past `--silence-timeout` (900 s), a round past `--round-timeout` (2400 s).
    Generating past the think budget (`--think-timeout`, 420 s) without acting gets one automatic
    nudge a round (a `--now` steer). Significant tasks raise a `checkin` notice every `--checkin`
-   minutes (10) while they run. `wb steer` queues a note for the end of the run; `--now`
+   minutes (10) while they run. A model measured slow on this machine gets longer limits
+   (`router.budgets`); `wb start` writes them into task.json. `wb steer` queues a note for the end of the run; `--now`
    interrupts it (`_steer_bell` wakes the round on steer.jsonl). Either continues the session.
 4. After each round the runner runs `--test`; failures go back to the agent up to `--auto-fix`
    times (2) without waking Claude. Rounds continue one session until it is 60% full or OpenCode
@@ -101,7 +108,7 @@ what either says (a command, a flag, a default, a guard, a file) updates it in t
 ## State and config
 Everything is plain files under `~/.local/state/workbench` (`$WB_HOME`):
 ```
-notify.jsonl  results.jsonl  gpu.lock gpu.json gpu.admit  scout.json  watch.json  images/<when>/
+notify.jsonl  results.jsonl  gpu.lock gpu.json gpu.admit  scout.json  watch.json  speed.json  images/<when>/
 chat/          messages.jsonl receipts.jsonl listener.json
 tasks/<name>/  task.json status.json events.jsonl opencode.json HANDBOOK.md context.md bin/git
                steer.jsonl acked runner.log  rounds/<n>/{prompt.md,summary.md,tests.txt}
@@ -111,11 +118,16 @@ The skill library is `~/.local/share/workbench/skills` (`$WB_SKILLS`), a git rep
 (retired skills in `retired/`). The web chat's token is `~/.config/workbench/chat-token`
 (`$WB_CHAT_TOKEN`, mode 600).
 
-A model is a candidate when its OpenCode provider's `baseURL` is on this machine
-(`~/.config/opencode/opencode.json`). `~/.config/workbench/models.json` (`$WB_MODELS`) holds only
-what OpenCode can't say, by provider or model id: `start`/`stop` commands for a one-model server,
+A model is a candidate when its OpenCode provider's `baseURL` is on this machine (loopback,
+`localhost`, this host's name). OpenCode's config is `$XDG_CONFIG_HOME/opencode/opencode.json` or
+`.jsonc`, read through `models.read_config` and written only when it has no comments.
+`~/.config/workbench/models.json` (`$WB_MODELS`) holds only
+what OpenCode can't say, by provider or model id: `start`/`stop` commands for a server,
 `skip`, `sizes` (`wb model sizes`), `vram_gb` (GPU memory it takes, for sharing the GPU), `weights_gb` (the router's size for a server that can't
-say) and `label`. Ollama entries need `options.max_tokens` (Ollama ignores
+say), `label`, `engine` (`ollama`/`server`, else probed: Ollama answers `/api/version` on any
+port) and `local: true` (a provider on another host; it never shares the GPU). A server that
+lists several models swaps them itself: free_gpu treats a root as one server, and warns rather
+than fails on a running server with no `stop`. Ollama entries need `options.max_tokens` (Ollama ignores
 OpenCode's `max_completion_tokens`); `wb model add` writes it and `wb doctor` checks it, and
 that `limit.context` matches what Ollama serves (`models.ollama_served_context`): more cuts prompts off, less shrinks every slice.
 

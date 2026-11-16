@@ -10,6 +10,7 @@ answers headless).
 from __future__ import annotations
 
 import hashlib
+import os
 from pathlib import Path
 
 from . import gitops, skills, store
@@ -35,6 +36,11 @@ DENIED_SHELL = ("sudo", "sudo *", "doas", "doas *", "pkexec *", "su", "su *",
 CLAUDE_FILES = ("*CLAUDE.md", "*CLAUDE.local.md", "*AGENTS.md", ".claude/*", "*/.claude/*")
 
 
+def claude_home() -> Path:
+    """The user's Claude Code directory: $CLAUDE_CONFIG_DIR when they moved it, else ~/.claude."""
+    return Path(os.environ.get("CLAUDE_CONFIG_DIR") or Path.home() / ".claude")
+
+
 def _digest(path: Path) -> str:
     return hashlib.sha256(path.read_bytes()).hexdigest()
 
@@ -52,7 +58,7 @@ def instruction_files(task: store.Task) -> tuple[list[Path], list[str]]:
     handbook = task.dir / "HANDBOOK.md"
     handbook.write_text(HANDBOOK.read_text())
     load: list[Path] = [handbook]
-    user = Path.home() / ".claude" / "CLAUDE.md"
+    user = claude_home() / "CLAUDE.md"
     if user.is_file():
         load.append(user)
     for rel in ROOT_FILES:
@@ -81,10 +87,10 @@ def denied_skills(extra: list[str] | None = None) -> list[str]:
     theirs, about their other work: an agent sees only the project's own .claude/skills. On
     2026-11-16 an agent building a game, its context full, summarised a personal publishing skill
     into a made-up "newer task" and went off reading the user's private library."""
-    home = Path.home() / ".claude" / "skills"
     names = {"delegate", *(extra or [])}
-    names |= {s.parent.name for s in home.glob("*/SKILL.md")}
-    names |= {s.parent.name for s in (home / "synced").glob("*/*/SKILL.md")}
+    for home in {claude_home() / "skills", Path.home() / ".claude" / "skills"}:  # OpenCode reads ~/.claude
+        names |= {s.parent.name for s in home.glob("*/SKILL.md")}
+        names |= {s.parent.name for s in (home / "synced").glob("*/*/SKILL.md")}
     return sorted(names)
 
 

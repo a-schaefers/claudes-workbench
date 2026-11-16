@@ -146,15 +146,23 @@ def cpu() -> dict:
     return {"name": name, "threads": os.cpu_count()}
 
 
+OLLAMA_KEYS = ("OLLAMA_MODELS", "OLLAMA_CONTEXT_LENGTH", "OLLAMA_NUM_PARALLEL")
+
+
 def ollama_env() -> dict:
-    """The Ollama service's environment (where it keeps models, its default context), if systemd
-    runs it; an Ollama started by hand reads the caller's environment instead."""
+    """The Ollama service's environment (where it keeps models, its default context): systemd's
+    unit (the system's, else the user's), or on macOS what the app reads (launchctl setenv). An
+    Ollama started by hand reads the caller's environment instead."""
     env = {}
-    raw = _run("systemctl", "show", "ollama", "-p", "Environment", "--value")
-    for item in raw.split():
-        k, _, v = item.partition("=")
-        env[k] = v
-    for k in ("OLLAMA_MODELS", "OLLAMA_CONTEXT_LENGTH", "OLLAMA_NUM_PARALLEL"):
+    if system() == "macos":
+        env = {k: v for k in OLLAMA_KEYS if (v := _run("launchctl", "getenv", k))}
+    else:
+        for scope in ((), ("--user",)):
+            raw = _run("systemctl", *scope, "show", "ollama", "-p", "Environment", "--value")
+            for item in raw.split():
+                k, _, v = item.partition("=")
+                env.setdefault(k, v)
+    for k in OLLAMA_KEYS:
         env.setdefault(k, os.environ.get(k, ""))
     return env
 

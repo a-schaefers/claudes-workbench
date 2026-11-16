@@ -459,6 +459,21 @@ def auto_fix_prompt(tests: dict, cmd: str) -> str:
             "you changed and the test result.")
 
 
+def measure_speed(task: store.Task, since: float) -> None:
+    """Record how fast the model read and wrote in this round's requests (router.budgets)."""
+    from . import router
+    from .transcript import export
+    sid = task.status.get("session")
+    if not sid:
+        return
+    try:
+        msgs = [m for m in export(sid).get("messages", [])
+                if ((m.get("time") or {}).get("created") or 0) >= since * 1000]
+        router.record_speed(task.spec["model"], msgs)
+    except Exception:  # a measurement, never a reason to stop the task
+        pass
+
+
 def _load_failed(task: store.Task, e: Exception) -> None:
     task.set_status(phase="failed", last=f"model: {e}")
     task.notify("failed", f"task {task.name}: could not load {task.spec['model']}: {e}")
@@ -489,7 +504,9 @@ def drive(task: store.Task) -> None:
             task.set_status(phase="running", round=n, round_started_at=store.now(),
                             last="agent started")  # not "starting…": the pane shows its progress
             task.event({"ts": store.now(), "round": n, "kind": "round", "text": "started"})
+            began = time.time()
             rnd = run_round(task, n)
+            measure_speed(task, began)
             if rnd["interrupted"] or (pending_steer(task) and not rnd["stuck"]):
                 _steer_round(task, n, rnd["interrupted"])
                 continue

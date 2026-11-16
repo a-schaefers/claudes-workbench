@@ -128,14 +128,16 @@ def cmd_start(a):
         task.dir.rmdir()
         die(str(e))
     budget = a.ask_budget
+    limits = router.budgets(m)  # from the model's measured speed on this machine, else defaults
     store.write_json(task.dir / "task.json", {
         "name": a.name, "repo": str(repo), "base": base, "base_ref": a.base,
         "branch": gitops.branch_name(a.name), "model": m.id, "model_label": m.label,
         "opencode_model": m.id, "route": why, "size": a.size, "test_cmd": a.test,
         "auto_fix": a.auto_fix, "ask_budget": budget, "ask_timeout": a.ask_timeout,
         "checkin": a.checkin if a.checkin is not None else 10 if a.size == "significant" else 0,
-        "round_timeout": a.round_timeout, "silence_timeout": a.silence_timeout,
-        "think_timeout": a.think_timeout if a.think_timeout is not None else THINK_DEFAULT_S,
+        "round_timeout": a.round_timeout or limits["round"],
+        "silence_timeout": a.silence_timeout or limits["silence"],
+        "think_timeout": a.think_timeout if a.think_timeout is not None else limits["think"],
         "created_at": store.now(), "wb_version": __version__})
     test_line = (f"- The acceptance command is `{a.test}`. Run it before you finish and make it "
                  "pass. Never weaken, skip or delete tests to get there.\n") if a.test else ""
@@ -546,6 +548,8 @@ def cmd_models(a):
         print(f"{m.id:34} {('on GPU' if st['resident'] else 'ready' if st['available'] else 'no'):6}"
               f"  {m.label}" + ("" if st["available"] else f"  ({st['why']})"))
         print(f"{'':36}slice: {router.slice(m).line()}")
+        if sp := router.speed_line(m.id):
+            print(f"{'':36}speed: {sp} on this machine")
     for size in router.SIZES:
         print(f"\n{size}:")
         for i, sc in enumerate(router.rank(size)):
@@ -558,11 +562,13 @@ def cmd_models(a):
         top, why = router.choose("significant")
         if top is None:
             die(why)
-        path = models.opencode_config_path()
-        cfg = json.loads(path.read_text())
+        cfg = models.read_config()
         old = cfg.get("model")
         cfg["model"] = top.model.id
-        store.write_json(path, cfg)
+        try:
+            models.write_config(cfg)
+        except RuntimeError as e:
+            die(str(e))
         print(f"\nOpenCode's default model: {old} → {top.model.id} ({why})")
 
 
@@ -571,9 +577,6 @@ def cmd_stats(a):
 
 
 SCOUT_EVERY_DAYS = 7
-# Seconds of generating with no tool call or word before the runner nudges the agent to act:
-# about 12k tokens of thinking at a local 27B model's speed, plus reading a full context.
-THINK_DEFAULT_S = 420
 
 
 def scout_state() -> dict:
@@ -652,7 +655,7 @@ def cmd_scout(a):
         if extra:
             print(f"  installed in {pid} but not registered: " + ", ".join(
                 f"{x} ({hardware.size(installed[x]['size'])})" for x in extra))
-    cfg = json.loads(models.opencode_config_path().read_text())
+    cfg = models.read_config()
     print(f"  OpenCode's default: {cfg.get('model') or '(none)'}")
     print("\nreal results (wb stats)")
     print(results.table())
@@ -801,19 +804,25 @@ def cmd_model(a):
             entry["limit"] = {"context": ctx, "input": ctx - out, "output": out}
         if prov["engine"] == "ollama":
             entry["options"] = {"max_tokens": models.ollama_cap(entry)}
-        models.write_entry(provider, name, entry)
+        try:
+            models.write_entry(provider, name, entry)
+        except RuntimeError as e:
+            die(str(e))
         print(f"registered {a.id}: {'tools' if entry['tool_call'] else 'NO tool calls'}, "
               f"{'reasoning' if entry['reasoning'] else 'no reasoning'}, "
               f"{(ctx or 0) // 1024}K context\nnext: wb model sizes {a.id} … if it should only "
               "take some task sizes; the router guesses from its size until real tasks show more")
         return
     # retire
-    cfg = json.loads(models.opencode_config_path().read_text())
+    cfg = models.read_config()
     if cfg.get("model") == a.id:
         die(f"{a.id} is OpenCode's default model; wb models --set-default picks another first")
     if name not in prov["models"]:
         die(f"{a.id} is not registered")
-    models.write_entry(provider, name, None)
+    try:
+        models.write_entry(provider, name, None)
+    except RuntimeError as e:
+        die(str(e))
     done = f"retired {a.id}: removed from OpenCode's config (its measurements stay in the history)"
     if a.delete:
         if prov["engine"] != "ollama":
@@ -836,8 +845,8 @@ def claude_md_status(repo: Path, ref: str = "HEAD") -> str:
 
 
 def cmd_init(a):
-    """Set a project up as Claude keeps every project: a git repo on master with an initial
-    commit, AGENTS.md a symlink to CLAUDE.md. Safe to run again; no remote is ever added."""
+    """Set a project up as Claude keeps every project: a git repo (on git's init.defaultBranch)
+    with an initial commit, AGENTS.md a symlink to CLAUDE.md. Safe to run again; no remote is ever added."""
     d = Path(a.dir).expanduser().resolve()
     d.mkdir(parents=True, exist_ok=True)
     inside = gitops.git(d, "rev-parse", "--show-toplevel", check=False).strip()
@@ -847,8 +856,9 @@ def cmd_init(a):
         die("git has no user.email: the user's identity signs the commits (git config --global)")
     did = []
     if not inside:
-        gitops.git(d, "init", "-q", "-b", "master")
-        did.append("git repo on master")
+        gitops.git(d, "init", "-q")  # on the user's init.defaultBranch
+        did.append("git repo on " + (gitops.git(d, "symbolic-ref", "--short", "HEAD",
+                                                check=False).strip() or "its default branch"))
     claude, agents = d / "CLAUDE.md", d / "AGENTS.md"
     if agents.is_file() and not agents.is_symlink() and not claude.exists():
         agents.rename(claude)  # the project's instructions live in CLAUDE.md, AGENTS.md points at it
@@ -941,8 +951,12 @@ def cmd_doctor(a):
 
     oc = subprocess.run(["opencode", "--version"], capture_output=True, text=True)
     line(oc.returncode == 0, f"opencode {oc.stdout.strip() or oc.stderr.strip()}")
-    cfg = Path.home() / ".config/opencode/opencode.json"
-    line(cfg.exists(), f"OpenCode config {cfg}")
+    cfg = models.opencode_config_path()
+    try:
+        models.read_config()
+        line(cfg.exists(), f"OpenCode config {cfg}")
+    except ValueError as e:
+        line(False, f"OpenCode config {cfg} doesn't parse: {e}")
     g = subprocess.run(["git", "--version"], capture_output=True, text=True)
     line(g.returncode == 0, g.stdout.strip() or "git not found")
     found = models.discover()
@@ -991,10 +1005,13 @@ def main(argv=None):
                    help="rounds that send failing tests back without waking Claude (default 2)")
     s.add_argument("--ask-budget", type=int, default=2)
     s.add_argument("--ask-timeout", type=int, default=1200)
-    s.add_argument("--round-timeout", type=int, default=2400)
-    s.add_argument("--silence-timeout", type=int, default=900)
+    s.add_argument("--round-timeout", type=int, help="seconds a round may run (default 2400, "
+                   "longer for a model measured slow on this machine)")
+    s.add_argument("--silence-timeout", type=int, help="seconds with no output before the round "
+                   "is stopped (default 900, longer for a model measured slow)")
     s.add_argument("--think-timeout", type=int, help="seconds of generating with no tool call or "
-                   "word before the runner nudges the agent to act (default 420; 0 turns it off)")
+                   "word before the runner nudges the agent to act (default 420, or what the "
+                   "model's measured speed gives; 0 turns it off)")
     s.add_argument("--base", default="HEAD")
     s.add_argument("--force", action="store_true", help="queue even if the model can't run now")
     s.add_argument("--no-claude-md", action="store_true",
@@ -1145,7 +1162,7 @@ def main(argv=None):
     s.add_argument("--by", help=argparse.SUPPRESS); s.add_argument("-n", type=int, default=10)
     s.add_argument("--how", choices=["now", "queued"], default="now", help=argparse.SUPPRESS)
     s.set_defaults(f=cmd_chat)
-    s = sub.add_parser("init", help="set a project up: git on master with an initial commit, "
+    s = sub.add_parser("init", help="set a project up: git with an initial commit, "
                                     "AGENTS.md → CLAUDE.md")
     s.add_argument("dir"); s.set_defaults(f=cmd_init)
     sub.add_parser("stats", help="results by model").set_defaults(f=cmd_stats)

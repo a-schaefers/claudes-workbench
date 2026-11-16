@@ -3,8 +3,8 @@
 Every part of workbench talks through files (store.py), so "something happened" is always "a
 file changed": a runner wrote status.json, Claude answered a question, the user sent a chat
 message. A Watcher sleeps in the kernel until one of its directories changes and wakes at once.
-On a system without inotify it falls back to a timeout, which is the old polling, slower but
-correct, so nothing here is required for workbench to work.
+Without inotify (macOS, or past the system's watch limit) it looks at those directories a few
+times a second instead and reports what changed, so nothing here is required for workbench to work.
 """
 from __future__ import annotations
 
@@ -21,6 +21,23 @@ IN_MOVED_FROM, IN_MOVED_TO, IN_CREATE, IN_DELETE = 0x040, 0x080, 0x100, 0x200
 IN_ISDIR, IN_NONBLOCK, IN_CLOEXEC = 0x40000000, 0o4000, 0o2000000
 MASK = IN_MODIFY | IN_CLOSE_WRITE | IN_MOVED_FROM | IN_MOVED_TO | IN_CREATE | IN_DELETE
 _EVENT = struct.Struct("iIII")
+POLL_S = 0.25  # without inotify: how often a directory is looked at
+
+
+def _scan(d: Path) -> dict:
+    """A directory's entries as name -> (inode, mtime, size, is a directory)."""
+    snap = {}
+    try:
+        with os.scandir(d) as it:
+            for e in it:
+                try:
+                    st = e.stat(follow_symlinks=False)
+                    snap[e.name] = (st.st_ino, st.st_mtime_ns, st.st_size, e.is_dir(follow_symlinks=False))
+                except OSError:
+                    continue
+    except OSError:
+        pass
+    return snap
 
 _libc = None
 
@@ -47,6 +64,7 @@ class Watcher:
     def __init__(self, *dirs: Path, recursive: bool = False, skip: tuple[str, ...] = ()):
         self.recursive, self.skip = recursive, set(skip)
         self.dirs: dict[int, Path] = {}
+        self.polled: dict[Path, dict] = {}  # directories inotify isn't watching: looked at instead
         lib = _lib()
         self.fd = lib.inotify_init1(IN_NONBLOCK | IN_CLOEXEC) if lib else -1
         for d in dirs:
@@ -60,15 +78,34 @@ class Watcher:
         return self.fd
 
     def add(self, d: Path) -> None:
-        if not self.native or not d.is_dir() or d.name in self.skip:
+        if not d.is_dir() or d.name in self.skip:
             return
-        wd = _lib().inotify_add_watch(self.fd, os.fsencode(d), MASK)
+        wd = _lib().inotify_add_watch(self.fd, os.fsencode(d), MASK) if self.native else -1
         if wd >= 0:
             self.dirs[wd] = d
+        elif d not in self.polled:
+            self.polled[d] = _scan(d)
         if self.recursive:
             for sub in d.iterdir():
-                if sub.is_dir() and sub.name not in self.skip and sub not in self.dirs.values():
+                if sub.is_dir() and sub.name not in self.skip and sub not in self.dirs.values() \
+                        and sub not in self.polled:
                     self.add(sub)
+
+    def _poll(self) -> list[Path]:
+        """What changed in the polled directories since they were last looked at."""
+        changed = []
+        for d, old in list(self.polled.items()):
+            new = _scan(d)
+            for name in old.keys() | new.keys():
+                if old.get(name) != new.get(name):
+                    changed.append(d / name)
+                    if self.recursive and name not in old and new[name][3]:
+                        self.add(d / name)
+            if new or d.exists():
+                self.polled[d] = new
+            else:
+                del self.polled[d]
+        return changed
 
     def read(self) -> list[Path]:
         """The changes waiting now (non-blocking)."""
@@ -94,19 +131,35 @@ class Watcher:
 
     def wait(self, timeout: float | None = None, settle: float = 0.02) -> list[Path]:
         """Block until something changes (then gather the burst for `settle` seconds), or until
-        the timeout. Without inotify: sleep the timeout (at most a second) and report nothing,
-        so callers re-check their files as they used to."""
-        if not self.native:
-            time.sleep(min(timeout if timeout is not None else 1.0, 1.0))
-            return []
-        ready, _, _ = select.select([self.fd], [], [], timeout)
-        if not ready:
-            return []
-        changed = self.read()
-        if settle:
-            time.sleep(settle)
-            changed += self.read()
-        return changed
+        the timeout. Without inotify it looks every POLL_S and returns within a second, so
+        callers also re-check what no file says."""
+        if self.native and not self.polled:
+            ready, _, _ = select.select([self.fd], [], [], timeout)
+            if not ready:
+                return []
+            changed = self.read()
+            if settle:
+                time.sleep(settle)
+                changed += self.read()
+            return changed
+        cap = timeout if timeout is not None else float("inf")
+        deadline = time.monotonic() + (cap if self.native else min(cap, 1.0))
+        while True:
+            tick = max(0.0, min(POLL_S, deadline - time.monotonic()))
+            if self.native:
+                ready, _, _ = select.select([self.fd], [], [], tick)
+                changed = self.read() if ready else []
+            else:
+                time.sleep(tick)
+                changed = []
+            changed += self._poll()
+            if changed:
+                if settle:
+                    time.sleep(settle)
+                    changed += (self.read() if self.native else []) + self._poll()
+                return changed
+            if time.monotonic() >= deadline:
+                return []
 
     def close(self) -> None:
         if self.native:

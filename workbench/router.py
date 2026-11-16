@@ -4,7 +4,9 @@ Real delegated work (results.jsonl: accepted or not, and how long it took) is th
 Quality is the acceptance rate with a uniform prior, (accepted + 1) / (tries + 2), so one lucky
 task doesn't crown a model. Among the models within QUALITY_MARGIN of the best, the guess
 decides: for significant work the largest model (more parameters, better judgment), for trivial
-work the smallest (faster), and at equal size the one already on the GPU.
+work the smallest (faster), and at equal size the one already on the GPU. A model too big for
+the GPU (models.need over its budget) spills into RAM and runs several times slower, so in that
+band every model that fits comes first.
 
 The user's policy can narrow that: a model whose models.json entry has ``"sizes": ["trivial"]``
 is only ever routed trivial tasks, whatever it scores elsewhere (`wb model sizes`).
@@ -13,9 +15,13 @@ How much one task should hold on a model (its slice) is learned the same way. Th
 with the context window the model is served, from what was measured on a 32K one; each closed
 step then says whether a slice that size fit (results.step). The biggest that fit sets a floor,
 the smallest that overflowed a ceiling, so a big window on a strong machine earns big tasks.
+
+How long the agent may think, or go quiet, before the runner acts (budgets) is learned too: each
+round's session says how fast the model reads and writes on this machine (record_speed).
 """
 from __future__ import annotations
 
+import statistics
 from dataclasses import dataclass
 
 from . import models, store
@@ -37,6 +43,7 @@ class Score:
     tries: int = 0
     wins: int = 0
     minutes: float | None = None   # mean wall time of a real task of this size
+    fits: bool | None = None       # its need within the GPU's budget; None when unknown
 
     @property
     def quality(self) -> float:
@@ -77,13 +84,29 @@ def _guess(size: str):
     """Sort key within the top band: the largest model for significant work, the smallest for
     trivial, then the one already loaded."""
     sign = -1 if size == "significant" else 1
-    return lambda s: (sign * s.weights, not s.state.get("resident"))
+    return lambda s: (s.fits is False, sign * s.weights, not s.state.get("resident"))
+
+
+def fits(m: models.Model, budget: int | None) -> bool | None:
+    """Whether the model fits the GPU whole; None when the machine or the model can't say.
+    Ollama's placement says yes once it is loaded all in VRAM; before that its weights (or
+    models.json's `vram_gb`) must fit, the context left out, since that depends on how the
+    server stores it: only a model that can't fit is held back."""
+    if m.remote:
+        return None
+    if models.all_on_gpu(m):
+        return True
+    n = int(float(m.extra["vram_gb"]) * 1e9) if m.extra.get("vram_gb") else models.weights(m)
+    return n <= models.SHARE_AT * budget if n and budget else None
 
 
 def rank(size: str) -> list[Score]:
     """Every discovered model's case for a task of this size, best first (the user's policy
     leaves some out: allowed)."""
     scores = [score(m, size) for m in models.discover().values() if allowed(m, size)]
+    budget = models.gpu_budget() if scores else None
+    for s in scores:
+        s.fits = fits(s.model, budget)
     usable = [s for s in scores if s.state["available"]]
     best = max((s.quality for s in usable), default=0)
     close = sorted((s for s in usable if s.quality >= best - QUALITY_MARGIN), key=_guess(size))
@@ -101,11 +124,12 @@ def choose(size: str) -> tuple[Score | None, str]:
             f"{s.model.id}: {s.state['why']}" for s in ranked) if ranked else \
             "no local models in opencode.json"
     usable = [s for s in ranked if s.state["available"]]
-    sizes = [s.weights for s in usable]
+    sizes = [s.weights for s in usable if s.fits is not False or top.fits is False]
     if len(usable) == 1:
         pick = f"the only model allowed {size} work"
     elif size == "significant" and top.weights == max(sizes):
-        pick = "the largest model allowed significant work"
+        pick = "the largest model allowed significant work" + (
+            " that fits the GPU" if top.fits and any(s.fits is False for s in usable) else "")
     elif size == "trivial" and top.weights == min(sizes):
         pick = "the smallest model allowed trivial work"
     else:
@@ -143,3 +167,69 @@ def slice(m: models.Model) -> Slice:
         return Slice(files, lines, f"a guess from its {basis}; no steps measured yet")
     return Slice(files, lines, f"{basis}; {len(fit)} of {len(steps)} measured steps fit, "
                  f"{len(over)} overflowed or stuck")
+
+
+# ---- budgets: how long a round may think or go quiet, from the model's measured speed ----
+# THINK_DEFAULT_S (420 s) was set on a 27B that writes ~36 tokens/s and reads ~750/s (measured
+# 2026-11-16): about 13.5K tokens of thinking plus reading a full window. A model measured slower
+# on this machine gets the same work in its own time, and the silence and round limits scale with
+# it, so a slow machine isn't cut off. None goes below its default.
+THINK_DEFAULT_S, SILENCE_DEFAULT_S, ROUND_DEFAULT_S = 420, 900, 2400
+THINK_TOKENS = 13500
+THINK_MAX = 1800
+SPEED_KEEP = 60  # samples kept per model and measure
+
+
+def _speed_path():
+    return store.home() / "speed.json"
+
+
+def record_speed(model_id: str, messages: list[dict]) -> None:
+    """Add a session's measured speeds to speed.json: writing (output and reasoning tokens over
+    the time from first token to done) and reading (new input tokens over the time to first token)."""
+    write, read = [], []
+    for msg in messages:
+        t, tk = msg.get("time") or {}, msg.get("tokens") or {}
+        made, first, done = t.get("created"), t.get("firstToken"), t.get("completed")
+        if msg.get("type") != "assistant" or not (made and first and done):
+            continue
+        out = (tk.get("output") or 0) + (tk.get("reasoning") or 0)
+        if out >= 100 and done - first > 1000:
+            write.append(round(out / ((done - first) / 1000), 1))
+        if (tk.get("input") or 0) >= 1000 and first - made > 500:
+            read.append(round(tk["input"] / ((first - made) / 1000)))
+    if not (write or read):
+        return
+    path = _speed_path()
+    with store.locked(path.with_suffix(".lock")):
+        data = store.read_json(path, {}) or {}
+        row = data.setdefault(model_id, {})
+        row["write"] = (row.get("write", []) + write)[-SPEED_KEEP:]
+        row["read"] = (row.get("read", []) + read)[-SPEED_KEEP:]
+        store.write_json(path, data)
+
+
+def speed(model_id: str) -> dict:
+    """{"write", "read"}: the model's median tokens per second on this machine, where measured."""
+    row = (store.read_json(_speed_path(), {}) or {}).get(model_id) or {}
+    return {k: statistics.median(row[k]) for k in ("write", "read") if row.get(k)}
+
+
+def budgets(m: models.Model) -> dict:
+    """{"think", "silence", "round"} in seconds for a task on this model."""
+    sp = speed(m.id)
+    if not sp.get("write"):
+        return {"think": THINK_DEFAULT_S, "silence": SILENCE_DEFAULT_S, "round": ROUND_DEFAULT_S}
+    window = (m.config.get("limit") or {}).get("context") or BASE_WINDOW
+    think = THINK_TOKENS / sp["write"] + (window / sp["read"] if sp.get("read") else 0)
+    think = int(min(max(think, THINK_DEFAULT_S), THINK_MAX))
+    scale = max(1.0, think / THINK_DEFAULT_S)
+    return {"think": think, "silence": int(SILENCE_DEFAULT_S * scale),
+            "round": int(ROUND_DEFAULT_S * scale)}
+
+
+def speed_line(model_id: str) -> str:
+    sp = speed(model_id)
+    if not sp.get("write"):
+        return ""
+    return f"writes ~{sp['write']:.0f} tok/s" + (f", reads ~{sp['read']:.0f} tok/s" if sp.get("read") else "")
