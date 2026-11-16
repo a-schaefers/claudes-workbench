@@ -14,8 +14,14 @@ export type WbTask = {
   recent: string[]
 }
 
+/** One line of `wb watch --json`: a style name and the text. */
+export type WbLine = { s: string; t: string }
+
+/** The task the pane follows live, and its transcript so far (the newest lines). */
+export type WbLive = { task: string; lines: WbLine[] }
+
 declare module 'claude-code' {
   interface PluginState {
-    workbench: { tasks: Shaped<WbTask[]> }
+    workbench: { tasks: Shaped<WbTask[]>; live: Shaped<WbLive> }
   }
 }

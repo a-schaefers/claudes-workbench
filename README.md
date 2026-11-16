@@ -128,6 +128,7 @@ Denied tools also leave the prompt. That cuts the fixed prompt from about 9.2k t
 | `wb accept <name> -m MSG [--merge]` | commit on the branch (and merge) |
 | `wb discard <name> [--reason R] [--keep-branch]` | drop it |
 | `wb stop <name>` | stop a running agent (it becomes `stuck`) |
+| `wb watch [name] [-v]` | follow a task live, for you: Claude's spec and feedback, the agent's timed thinking, every command with output, edits as diffs, tests, speeds and tokens. The Workbench pane in Claude Code shows the same, scrollable |
 | `wb models` | the discovered models, whether each can run, and the router's ranking per size |
 | `wb bench [models…] [--tasks …] [--repeat N] [--report]` | measure models (long: run it in the background) |
 | `wb stats` · `wb doctor` | real results per model · environment check |

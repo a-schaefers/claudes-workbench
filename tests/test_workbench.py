@@ -178,6 +178,32 @@ class Lifecycle(Base):
         self.assertFalse(store.Task("t-stop").worktree.exists())
 
 
+class Watch(Base):
+    def test_watch_shows_the_whole_exchange(self):
+        self.start("t-watch", "fix", "--test", TEST_CMD)
+        wait_phase("t-watch", {"review"})
+        out = run_wb("watch", "t-watch", "--once", "--no-color")
+        for want in ("Claude → agent · spec", "Write the answer.",   # what Claude sent
+                     "✻ thought for 1.5s", "It wants 42.",           # its reasoning, timed
+                     "✎ edit answer.txt", "-41", "+42",               # the patch as a diff
+                     "agent:", "Wrote 42.",
+                     "read 1.2k tokens in 1.0s · wrote 80 in 2.0s (40 tok/s)",
+                     "■ tests FAIL", "round 2", "■ tests PASS",       # the runner's side
+                     "waiting for Claude's review"):
+            self.assertIn(want, out)
+        self.assertLess(out.index("■ tests FAIL"), out.index("round 2"))
+
+    def test_json_lines_for_the_pane_end_with_what_is_happening(self):
+        self.start("t-live", "hang")
+        deadline = time.time() + 10
+        while not store.Task("t-live").status.get("session") and time.time() < deadline:
+            time.sleep(0.1)
+        lines = [json.loads(x) for x in run_wb("watch", "t-live", "--json").splitlines()]
+        run_wb("stop", "t-live")
+        self.assertEqual(lines[-1]["s"], "activity")
+        self.assertRegex(lines[-1]["t"], r"…")
+
+
 class AskServer(Base):
     def test_protocol_and_budget(self):
         self.start("t-ask", "ok")

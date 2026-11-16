@@ -44,7 +44,7 @@ test('/workbench opens the pane and counts open tasks', async ($, on) => {
 
 // A file system in memory: what `wb` and its runner would have written.
 function fakeTasks(on: any, files: Record<string, string>) {
-  on('env.get', (_: any, e: any) => ({ value: e.name === 'WB_HOME' ? '/wb' : '/home/u' }))
+  on('env.get', (_: any, e: any) => ({ value: ({ WB_HOME: '/wb', HOME: '/home/u' } as any)[e.name] }))
   on('fs.read', (_: any, e: any) => {
     if (!(e.path in files)) throw new Error(`ENOENT: ${e.path}`)
     return { value: files[e.path] }
@@ -105,4 +105,40 @@ test('a review notice waits for the turn to end, and is dropped if it went stale
   await clock.advance(3000)
   expect(woken.length).toBe(1)
   expect(files['/wb/tasks/fix-it/acked']).toBe(String(ts + 60))
+})
+
+test('the pane follows the running task: its whole history, then what it is doing now', async ($, on) => {
+  const clock = mock.clock(on, { now: 1_800_000_000_000 })
+  const ts = 1_800_000_000
+  const files: Record<string, string> = {
+    '/wb/tasks/fix-it/task.json': JSON.stringify({ name: 'fix-it', model: 'm', created_at: ts }),
+    '/wb/tasks/fix-it/status.json': JSON.stringify({ phase: 'running', round: 1, updated_at: ts }),
+  }
+  fakeTasks(on, files)
+  const runs: string[][] = []
+  on('process.run', (_: any, e: any) => {
+    runs.push(e.argv)
+    const lines = [
+      { s: 'claude', t: 'Claude → agent · spec' },
+      { s: 'think', t: '  ✻ thought for 2.0s' },
+      { s: 'add', t: '    +42' },
+      { s: 'activity', t: 'Writing… 3.0s · ↓ 45 tokens · 41 tok/s' },
+    ]
+    return { value: { exitCode: 0, stdout: lines.map(l => JSON.stringify(l)).join('\n'), stderr: '' } }
+  })
+
+  await $.session.start({ cwd: '/', surface: 'terminal', isInteractive: true })
+  await clock.advance(3000)
+  expect(runs[0]).toEqual(['wb', 'watch', 'fix-it', '--json'])
+
+  const ui = await $.ui.mount({ ...PANE, surface: 'terminal' })
+  expect(await ui.find({ type: 'Text', text: /live: fix-it/ })).toBeTruthy()
+  expect(await ui.find({ type: 'Text', text: 'Claude → agent · spec' })).toBeTruthy()
+  expect(await ui.find({ type: 'Text', text: '    +42' })).toBeTruthy()
+  expect(await ui.find({ type: 'Text', text: /Writing… 3\.0s · ↓ 45 tokens/ })).toBeTruthy()
+  await ui.unmount()
+
+  // a running task is re-read every poll, since its session moves between status writes
+  await clock.advance(3000)
+  expect(runs.length).toBeGreaterThan(1)
 })

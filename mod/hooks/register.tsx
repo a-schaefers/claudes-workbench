@@ -7,10 +7,12 @@
 // through each task's `acked` file, so a notification wakes Claude once, by whichever got it first.
 // A wake is held while Claude's main loop is mid-turn (a prompt submitted then would queue and
 // arrive stale) and checked against the task's phase when it is finally sent.
+// Under the task list the pane follows one task live: the conversation between Claude and the
+// agent, every tool call and test, as `wb watch --json` prints it.
 import { atom, read, update } from 'claude-code'
 import type { Register } from 'claude-code'
 
-import type { WbTask } from '../types'
+import type { WbLine, WbLive, WbTask } from '../types'
 
 const PANE = 'workbench'
 const POLL_MS = 1500
@@ -22,6 +24,11 @@ const tasks = atom({ plugin: 'workbench', key: 'tasks' } as const, [] as WbTask[
   shape: 'tasks-1',
 })
 
+const live = atom({ plugin: 'workbench', key: 'live' } as const, { task: '', lines: [] } as WbLive, {
+  shape: 'live-1',
+})
+const KEEP_LINES = 2000 // the pane scrolls back through this much history
+
 const ACTIVE = new Set(['queued', 'running', 'testing', 'asking'])
 const NEEDS = new Set(['review', 'stuck', 'failed', 'asking'])
 const COLOR: Record<string, string> = {
@@ -30,6 +37,16 @@ const COLOR: Record<string, string> = {
 }
 
 type Row = Record<string, any>
+
+// wb watch's line styles, in the theme's colours
+const LINE_STYLE: Record<string, Row> = {
+  claude: { color: 'claude', bold: true }, agent: { color: 'suggestion', bold: true },
+  think: { dimColor: true, italic: true }, tool: { color: 'warning' }, out: { dimColor: true },
+  ok: { color: 'success', bold: true }, bad: { color: 'error', bold: true },
+  sys: { color: 'permission' }, add: { color: 'diffAdded' }, del: { color: 'diffRemoved' },
+  head: { bold: true }, activity: { color: 'claude' },
+}
+const SPIN = ['✻', '✳', '✶', '✢', '·', '✢', '✶', '✳']
 
 const parseLines = (text: string): Row[] =>
   text.split('\n').flatMap(line => {
@@ -92,6 +109,9 @@ const mem = {
   lastNotifyLength: -1,
   paneOpened: false,
   polling: false,
+  watching: false,
+  wb: 'wb',
+  liveKey: '', // the followed task and its updated_at when last read
   busy: false, // Claude's main loop is mid-turn: a wake would queue and arrive stale
   toasted: new Set<string>(),
 }
@@ -128,6 +148,42 @@ async function scan($: any, root: string, now: number): Promise<WbTask[]> {
   return list.sort((a, b) => a.createdAt - b.createdAt)
 }
 
+// The task worth watching: the newest running one, else the newest waiting for Claude.
+const focusOf = (list: WbTask[]): WbTask | undefined => {
+  const newest = (ts: WbTask[]) => [...ts].sort((a, b) => b.updatedAt - a.updatedAt)[0]
+  return newest(list.filter(t => ACTIVE.has(t.phase))) ?? newest(list.filter(t => NEEDS.has(t.phase)))
+}
+
+// Re-read the followed task's transcript: while it runs (the agent's session moves between
+// status writes), or once when it changed. Off the poll's path: an export takes a moment.
+async function refreshLive($: any, list: WbTask[]) {
+  const focus = focusOf(list)
+  const key = focus ? `${focus.name}@${focus.updatedAt}` : ''
+  if (mem.watching || (key === mem.liveKey && !(focus && ACTIVE.has(focus.phase)))) return
+  mem.watching = true
+  try {
+    if (!focus) {
+      mem.liveKey = ''
+      await update($, live, () => ({ task: '', lines: [] }))
+      return
+    }
+    const r = await $.process.run([mem.wb, 'watch', focus.name, '--json'], { timeoutMs: 30_000 })
+    if (r.exitCode !== 0) return
+    const lines = parseLines(r.stdout)
+      .map(x => ({ s: String(x.s ?? ''), t: String(x.t ?? '') }))
+      .slice(-KEEP_LINES)
+    mem.liveKey = key
+    const prev = await read($, live)
+    if (prev.task !== focus.name || JSON.stringify(prev.lines) !== JSON.stringify(lines)) {
+      await update($, live, () => ({ task: focus.name, lines }))
+    }
+  } catch {
+    // wb missing or slow: the task list still shows; try again next poll
+  } finally {
+    mem.watching = false
+  }
+}
+
 async function poll($: any) {
   if (mem.polling || !mem.root) return // a slow file system must not stack polls
   mem.polling = true
@@ -152,6 +208,7 @@ async function poll($: any) {
       mem.paneOpened = true
       void $.ui.open({ id: PANE, title: 'Workbench' })
     }
+    void refreshLive($, list)
     await deliver($, now)
   } finally {
     mem.polling = false
@@ -202,6 +259,7 @@ export const register: Register = (on, options) => {
     const home = await $.env.get('HOME')
     const wbHome = await $.env.get('WB_HOME')
     mem.root = wbHome || `${home}/.local/state/workbench`
+    mem.wb = (await $.env.get('WB_BIN')) || 'wb'
     mem.startedAt = await $.clock.now()
     await $.command.register({
       name: 'workbench',
@@ -235,7 +293,9 @@ export const register: Register = (on, options) => {
   on('ui.render', { component: 'Pane', requestId: PANE }, async ($, e) => {
     const { Box, Text } = $.ui.resolve(e)
     const list = await read($, tasks)
-    const cols = Math.max(30, Number((e.props as Row)?.bodyColumns ?? e.viewport?.columns ?? 60))
+    const watched = await read($, live)
+    const props = (e.props ?? {}) as Row
+    const cols = Math.max(30, Number(props.bodyColumns ?? e.viewport?.columns ?? 60))
     const now = await $.clock.now()
     if (list.length === 0) {
       return (
@@ -245,6 +305,13 @@ export const register: Register = (on, options) => {
         </Box>
       )
     }
+
+    // the followed task's own recent lines are in its transcript below, in full
+    const recentOf = (t: WbTask) => (t.name === watched.task ? [] : t.recent)
+    // The whole history is drawn: the engine scrolls the pane (arrows, while focused) and
+    // follows the end as lines arrive. The activity row, last, carries the spinner.
+    const history = watched.lines.filter(l => l.s !== 'activity')
+    const doing = watched.lines.find(l => l.s === 'activity')
 
     return (
       <Box flexDirection="column">
@@ -258,12 +325,28 @@ export const register: Register = (on, options) => {
                 {t.tests ? ` · tests ${t.tests}` : ''} · {ago(now - t.createdAt)}
               </Text>
             </Text>
-            {t.recent.map(line => (
+            {recentOf(t).map(line => (
               <Text dimColor>  {clip(line, cols - 2)}</Text>
             ))}
-            {t.recent.length === 0 && <Text dimColor>  {clip(t.last, cols - 2)}</Text>}
+            {t.name !== watched.task && t.recent.length === 0 && (
+              <Text dimColor>  {clip(t.last, cols - 2)}</Text>
+            )}
           </Box>
         ))}
+        {watched.task && (
+          <Box flexDirection="column">
+            <Text dimColor>{clip(`── live: ${watched.task} · ↑↓ scroll · wb watch ${watched.task} in a terminal `
+              + '─'.repeat(cols), cols)}</Text>
+            {history.map(l => (
+              <Text {...(LINE_STYLE[l.s] ?? {})}>{l.t || ' '}</Text>
+            ))}
+            {doing && (
+              <Text {...LINE_STYLE.activity}>
+                {SPIN[Math.floor(now / 500) % SPIN.length]} {doing.t}
+              </Text>
+            )}
+          </Box>
+        )}
       </Box>
     )
   })

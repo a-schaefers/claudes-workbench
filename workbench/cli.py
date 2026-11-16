@@ -12,7 +12,7 @@ import sys
 import time
 from pathlib import Path
 
-from . import __version__, bench, gitops, models, results, router, store
+from . import __version__, bench, gitops, models, results, router, store, transcript
 from .runner import PKG_ROOT
 
 PROTOCOL = """
@@ -215,6 +215,25 @@ def cmd_wait(a):
         if deadline and time.time() > deadline:
             die("timed out waiting", 2)
         time.sleep(2)
+
+
+def cmd_watch(a):
+    """The live conversation between Claude and the agent: for a person, in a terminal."""
+    if a.name:
+        task = need(a.name)
+    else:
+        tasks = sorted(store.all_tasks(), key=lambda t: t.status.get("updated_at") or 0)
+        live = [t for t in tasks if t.status.get("phase") not in store.CLOSED]
+        if not tasks:
+            die("no tasks yet")
+        task = (live or tasks)[-1]
+    try:
+        transcript.follow(task, verbose=a.verbose, once=a.once or a.json, as_json=a.json,
+                          color=False if a.no_color else None)
+    except KeyboardInterrupt:
+        print()
+    except BrokenPipeError:  # piped into head/less and the reader quit
+        sys.stdout = open(os.devnull, "w")
 
 
 def cmd_status(a):
@@ -464,6 +483,16 @@ def main(argv=None):
     s = sub.add_parser("wait", help="block until a task needs Claude; prints its report")
     s.add_argument("name", nargs="?"); s.add_argument("--timeout", type=int, default=0)
     s.set_defaults(f=cmd_wait)
+    s = sub.add_parser("watch", help="follow a task live: the conversation between Claude and "
+                       "the agent, every tool call and test")
+    s.add_argument("name", nargs="?", help="default: the most recently active task")
+    s.add_argument("-v", "--verbose", action="store_true",
+                   help="everything in full: reasoning, outputs, the protocol")
+    s.add_argument("--once", action="store_true", help="print what happened so far and exit")
+    s.add_argument("--no-color", action="store_true")
+    s.add_argument("--json", action="store_true", help=argparse.SUPPRESS)  # the mod's pane
+    s.set_defaults(f=cmd_watch)
+
     s = sub.add_parser("status", help="open tasks at a glance")
     s.add_argument("name", nargs="?"); s.add_argument("--all", action="store_true")
     s.set_defaults(f=cmd_status)

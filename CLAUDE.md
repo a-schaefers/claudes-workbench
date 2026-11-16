@@ -10,12 +10,14 @@ has the architecture; read it first.
   - `models.py`: discovers local models from opencode.json, their status, and GPU residency (make_resident).
   - `router.py`: picks a model per task size from evidence. `bench.py`: `wb bench`, the probes and graded tasks.
   - `events.py`: event normalization and the stuck detector.
+  - `transcript.py`: `wb watch`, the human view: the OpenCode session export merged with the task's
+    events. Its `--json` lines feed the mod's pane.
+  - `context.py`: what the agent knows. It adds CLAUDE.md files and rules, the nested-instructions map and the handbook to the config layer's `instructions`, and it sets the denied tools and skills.
 - `bench/tasks/<name>/`: `task.json` (size, visible and hidden test commands), `spec.md`, `repo/` (the
   seed), `hidden/` (grading tests the agent never sees), `reference/` (a solution, to prove the
   task is sound). A new task needs all five; the suite test checks seed fails, reference passes.
 - Never name a model in code, docs or the skill. Models come from OpenCode's config, and choices
   come from measurements, so newer models slot in without code changes.
-  - `context.py`: what the agent knows. It adds CLAUDE.md files and rules, the nested-instructions map and the handbook to the config layer's `instructions`, and it sets the denied tools and skills.
 - `agent/HANDBOOK.md`: Claude's working habits for the local agent. Every agent prompt carries it,
   so keep it short: on Strata each token costs prefill time (~38 tok/s).
 - `bin/wb`, `bin/wb-ask-mcp`: launchers that find the package from their own real path. Never

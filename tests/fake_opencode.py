@@ -14,6 +14,18 @@ import time
 import uuid
 
 args = sys.argv[1:]
+if args[:2] == ["session", "export"]:  # `wb watch`: one finished step, as OpenCode exports it
+    print(json.dumps({"info": {"id": args[2]}, "messages": [
+        {"type": "user", "id": "m1", "time": {"created": 1000}, "text": "Write the answer."},
+        {"type": "assistant", "id": "m2", "finish": "stop",
+         "time": {"created": 2000, "firstToken": 3000, "streamed": 5000, "completed": 5000},
+         "tokens": {"input": 1200, "output": 80, "reasoning": 0, "cache": {"read": 0}},
+         "content": [
+             {"type": "reasoning", "text": "It wants 42.", "time": {"created": 3000, "completed": 4500}},
+             {"type": "tool", "name": "edit", "state": {"status": "completed", "input": {
+                 "path": "answer.txt", "oldString": "41", "newString": "42"}}},
+             {"type": "text", "text": "Wrote 42."}]}]}))
+    sys.exit(0)
 session = args[args.index("--session") + 1] if "--session" in args else f"ses_{uuid.uuid4().hex[:12]}"
 scenario = os.environ.get("FAKE_SCENARIO", "ok")
 t = lambda: int(time.time() * 1000)  # noqa: E731
