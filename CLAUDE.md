@@ -73,7 +73,8 @@ what either says (a command, a flag, a default, a guard, a file) updates it in t
    a model (unless `--model`), makes branch `delegate/<task>` in a fresh worktree, writes the
    round-1 prompt (the spec plus `cli.PROTOCOL`), records any `--skill`, spawns the detached
    runner, and returns.
-2. The runner takes the GPU lock (one model at a time), makes the model resident, and runs
+2. The runner takes the GPU (`models.GpuLease`: `gpu.lock` shared beside other tasks when every model
+   fits the VRAM, `can_share`; exclusive otherwise), makes the model resident, and runs
    `opencode run --standalone --auto --format json` with the task's config layer. Events go to
    `events.jsonl`; `status.json` is the live summary.
 3. Guards stop the agent on: one call repeated 4 times, 6 tool errors in a row, 40 calls without
@@ -97,7 +98,7 @@ what either says (a command, a flag, a default, a guard, a file) updates it in t
 ## State and config
 Everything is plain files under `~/.local/state/workbench` (`$WB_HOME`):
 ```
-notify.jsonl  results.jsonl  gpu.lock  scout.json  watch.json  images/<when>/
+notify.jsonl  results.jsonl  gpu.lock gpu.json gpu.admit  scout.json  watch.json  images/<when>/
 chat/          messages.jsonl receipts.jsonl listener.json
 tasks/<name>/  task.json status.json events.jsonl opencode.json HANDBOOK.md context.md bin/git
                steer.jsonl acked runner.log  rounds/<n>/{prompt.md,summary.md,tests.txt}
@@ -110,7 +111,7 @@ The skill library is `~/.local/share/workbench/skills` (`$WB_SKILLS`), a git rep
 A model is a candidate when its OpenCode provider's `baseURL` is on this machine
 (`~/.config/opencode/opencode.json`). `~/.config/workbench/models.json` (`$WB_MODELS`) holds only
 what OpenCode can't say, by provider or model id: `start`/`stop` commands for a one-model server,
-`skip`, `sizes` (`wb model sizes`), `weights_gb` (the router's size for a server that can't
+`skip`, `sizes` (`wb model sizes`), `vram_gb` (GPU memory it takes, for sharing the GPU), `weights_gb` (the router's size for a server that can't
 say) and `label`. Ollama entries need `options.max_tokens` (Ollama ignores
 OpenCode's `max_completion_tokens`); `wb model add` writes it and `wb doctor` checks it, and
 that `limit.context` matches what Ollama serves (`models.ollama_served_context`): more cuts prompts off, less shrinks every slice.

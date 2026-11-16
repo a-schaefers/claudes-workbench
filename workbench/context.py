@@ -19,7 +19,7 @@ HANDBOOK = PKG_ROOT / "agent" / "HANDBOOK.md"
 ROOT_FILES = ("CLAUDE.md", ".claude/CLAUDE.md", "CLAUDE.local.md")
 # Tools an unattended run in a worktree must not use. Nobody answers `question`. Code mode
 # (`execute`) and the opencode_* tools can move the session or remove worktrees. A `subagent`
-# would queue a second model behind the GPU lock. Denied tools also leave the prompt, which cuts
+# would load a second model onto the GPU behind the task's back. Denied tools also leave the prompt, which cuts
 # the fixed prompt from ~9k to ~3.5k tokens: less to read on every request. OpenCode 2.3 still
 # lists opencode_worktree_remove; the rule then refuses the call.
 DENIED_TOOLS = ("question", "experimental_image_generate", "execute", "subagent", "websearch",

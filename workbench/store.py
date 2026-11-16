@@ -4,7 +4,8 @@ Layout of ``$WB_HOME`` (default ``~/.local/state/workbench``)::
 
     notify.jsonl            events that need Claude (review, stuck, failed, question), all tasks
     results.jsonl           one row per finished task (accepted / discarded), for `wb stats`
-    gpu.lock                held by a runner while its model is generating
+    gpu.lock                held by every running task: shared beside others, exclusive alone
+    gpu.json                who holds it (pid → model, task); gpu.admit serializes admissions
     tasks/<name>/
         task.json           what the task is (static after start)
         status.json         what it is doing now (rewritten by the runner and the ask server)

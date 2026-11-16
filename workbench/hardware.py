@@ -154,7 +154,7 @@ def ollama_env() -> dict:
     for item in raw.split():
         k, _, v = item.partition("=")
         env[k] = v
-    for k in ("OLLAMA_MODELS", "OLLAMA_CONTEXT_LENGTH"):
+    for k in ("OLLAMA_MODELS", "OLLAMA_CONTEXT_LENGTH", "OLLAMA_NUM_PARALLEL"):
         env.setdefault(k, os.environ.get(k, ""))
     return env
 

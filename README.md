@@ -223,11 +223,19 @@ Bigger work is split into steps run one after another.
 - It records the task (`task.json`), spawns the runner, and prints what it did and why it chose
   that model.
 
-**3. The runner takes the GPU.** A consumer card fits one coding model, so runners take
-`gpu.lock` in turn: a second task waits as `queued`. The runner then makes the task's model
-resident: it unloads every other model Ollama holds (yours or another tool's), stops other
-model servers that have a stop command (waiting up to ten minutes for a reply in progress to
-finish), and loads or starts the one it needs.
+**3. The runner takes the GPU.** Tasks run side by side when their models fit the GPU together:
+on a big card, several GPUs or Apple's unified memory, a second task's model loads beside the
+first and both work at once. The test is memory: the models' sizes (Ollama's own figure once
+loaded, weights and context; before that the weights plus a quarter, or `vram_gb` in
+models.json) must fit 90% of the GPU's memory (`wb scout` reads it; on Apple Silicon, what macOS
+lets the GPU wire). Only Ollama models share; the same model twice needs `OLLAMA_NUM_PARALLEL`
+of 2 or more. Otherwise, or when the machine can't say its VRAM, the task waits as `queued` for
+the GPU to itself, first come first served. A runner holds `gpu.lock` shared while it shares and
+exclusively when alone, so anything that needs the whole GPU (`wb image`) waits for the running
+tasks and holds new ones off. The runner then makes the task's model resident: it unloads every
+other model Ollama holds (yours or another tool's) except those of tasks running beside it, stops
+other model servers that have a stop command (waiting up to ten minutes for a reply in progress
+to finish), and loads or starts the one it needs.
 
 **4. The agent works a round.** The runner runs
 `opencode run --standalone --auto --format json` in the worktree, with `$PWD` set to it (OpenCode
@@ -633,7 +641,7 @@ Both stop the web chat listening in that session.
 ~/.local/state/workbench/        ($WB_HOME) every task, notice and result
   notify.jsonl                   notifications that need Claude, all tasks
   results.jsonl                  one row per closed task: what the router and skill records learn from
-  gpu.lock                       held by the runner whose model is generating
+  gpu.lock  gpu.json  gpu.admit  held by each running task (shared when models fit together); who holds it
   scout.json  watch.json         the weekly model check: when it was done, the watch list
   chat/                          messages.jsonl  receipts.jsonl  listener.json
   tasks/<name>/

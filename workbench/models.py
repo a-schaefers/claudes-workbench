@@ -11,12 +11,15 @@ keyed by OpenCode model id or by provider id:
                    "weights_gb": 55},
      "ollama/some-model": {"skip": true}}
 
-The runner keeps one model on the GPU at a time (a consumer card fits one coding model), so it
-makes the task's model resident before it starts (make_resident): it unloads Ollama models and stops servers that have
-a stop command, then loads or starts the one it needs.
+The runner makes the task's model resident before it starts (make_resident): it unloads Ollama
+models and stops servers that have a stop command, then loads or starts the one it needs. A
+GpuLease decides first whether it may instead run beside the tasks already running: when every
+model fits the GPU's memory at once (a big card, several GPUs, Apple's unified memory), it loads
+its own and leaves theirs; otherwise it waits for the GPU to itself.
 """
 from __future__ import annotations
 
+import fcntl
 import json
 import os
 import subprocess
@@ -175,12 +178,13 @@ def _ollama_loaded(root: str) -> list[str]:
     return [x.get("name") for x in (_get(f"{root}/api/ps") or {}).get("models", [])]
 
 
-def make_resident(m: Model, say=print) -> float:
-    """Free the GPU for ``m`` and load it. Returns the seconds it took (0 if already there)."""
-    if _fake() or status(m)["resident"] and not _others_resident(m):
+def make_resident(m: Model, say=print, keep=()) -> float:
+    """Free the GPU for ``m`` and load it, leaving the models in ``keep`` (ids) loaded. Returns
+    the seconds it took (0 if already there)."""
+    if _fake() or status(m)["resident"] and not _others_resident(m, keep):
         return 0.0
     t0 = time.time()
-    free_gpu(keep=m, say=say)
+    free_gpu(keep={m.id, *keep}, say=say)
     if m.engine == "ollama":
         say(f"loading {m.name} into ollama")
         _post(f"{m.root}/api/generate", {"model": m.name, "prompt": "", "keep_alive": "30m"},
@@ -199,13 +203,14 @@ def make_resident(m: Model, say=print) -> float:
     return time.time() - t0
 
 
-def free_gpu(keep: Model | None = None, say=print) -> None:
-    """Stop every model server and unload every Ollama model holding the GPU, except ``keep``."""
+def free_gpu(keep=(), say=print) -> None:
+    """Stop every model server and unload every Ollama model holding the GPU, except the models
+    in ``keep`` (ids): the task's own, and those of tasks running beside it."""
     if _fake():
         return
+    kept = [o for o in discover().values() if o.id in keep]
     for other in discover().values():
-        if keep and other.id == keep.id or other.engine != "server" or \
-                not status(other)["resident"]:
+        if other.id in keep or other.engine != "server" or not status(other)["resident"]:
             continue
         if not other.stop:
             raise RuntimeError(f"{other.id} holds the GPU and has no stop command; stop it first")
@@ -217,8 +222,7 @@ def free_gpu(keep: Model | None = None, say=print) -> None:
     roots = {o.root for o in discover().values() if o.engine == "ollama"}
     for root in roots:  # every model Ollama has loaded, ours or another tool's
         for name in _ollama_loaded(root):
-            if keep and keep.engine == "ollama" and root == keep.root and \
-                    _matches(keep.name, {name}):
+            if any(o.engine == "ollama" and root == o.root and _matches(o.name, {name}) for o in kept):
                 continue
             say(f"unloading {name} from ollama")
             try:
@@ -227,13 +231,139 @@ def free_gpu(keep: Model | None = None, say=print) -> None:
                 pass
 
 
-def _others_resident(m: Model) -> bool:
-    if any(o.id != m.id and o.engine == "server" and status(o)["resident"]
+def _others_resident(m: Model, keep=()) -> bool:
+    if any(o.id != m.id and o.id not in keep and o.engine == "server" and status(o)["resident"]
            for o in discover().values()):
         return True
+    ours = [m, *(o for o in discover().values() if o.id in keep)]
     roots = {o.root for o in discover().values() if o.engine == "ollama"}
-    return any(not (m.engine == "ollama" and r == m.root and _matches(m.name, {n}))
+    return any(not any(o.engine == "ollama" and r == o.root and _matches(o.name, {n}) for o in ours)
                for r in roots for n in _ollama_loaded(r))
+
+
+# ---- sharing the GPU: several tasks' models at once, when they fit ----
+# Every runner holds gpu.lock for its whole run: shared while its model runs beside others',
+# exclusive when it needs the GPU to itself (its model doesn't fit beside the running ones, or
+# can't share). Whatever else needs the whole GPU takes gpu.lock exclusively too, which waits for
+# the running tasks and keeps new ones out. gpu.json lists the holders; gpu.admit makes each
+# admission, and each load, one decision at a time.
+SHARE_AT = 0.9    # of the GPU's memory: the rest is the runtime's and the desktop's
+KV_GUESS = 1.25   # a model not loaded yet: its weights plus about a quarter for its context
+
+
+def gpu_budget() -> int | None:
+    """Bytes of GPU memory models can use, or None when the machine can't say (then no sharing).
+    Apple Silicon: what macOS lets the GPU wire (by default about three quarters of the RAM)."""
+    if _fake():
+        gb = os.environ.get("WB_FAKE_GPU_GB")  # tests: a GPU of this size
+        return int(float(gb) * 1e9) if gb else None
+    total = 0
+    for g in hardware.gpus():
+        if g.get("unified"):
+            total += g.get("wired_limit") or int((g.get("vram") or 0) * 0.75)
+        else:
+            total += g.get("vram") or 0
+    return total or None
+
+
+def need(m: Model) -> int:
+    """Bytes of GPU memory ``m`` takes: Ollama's own figure once loaded (weights and context),
+    else models.json's `vram_gb`, else a guess from its weights; 0 when unknown."""
+    if m.extra.get("vram_gb"):
+        return int(float(m.extra["vram_gb"]) * 1e9)
+    if m.engine == "ollama" and not _fake():
+        for x in (_get(f"{m.root}/api/ps") or {}).get("models", []):
+            if _matches(m.name, {x.get("name")}) and x.get("size"):
+                return int(x["size"])
+    return int(weights(m) * KV_GUESS)
+
+
+def can_share(m: Model, running: list[Model], budget: int | None) -> bool:
+    """Whether ``m`` can run beside the running tasks' models, every one on the GPU at once.
+    Only Ollama shares (a one-model server wants the GPU to itself). The same model twice needs
+    Ollama to serve requests in parallel (OLLAMA_NUM_PARALLEL), or the two would take turns and
+    re-read their prompts on every request."""
+    if not budget or not running or m.engine != "ollama" or any(o.engine != "ollama" for o in running):
+        return False
+    if any(o.id == m.id for o in running):
+        par = hardware.ollama_env().get("OLLAMA_NUM_PARALLEL") or ""
+        return par.isdigit() and int(par) >= 2
+    sizes = [need(o) for o in {o.id: o for o in running}.values()] + [need(m)]
+    return all(sizes) and sum(sizes) <= SHARE_AT * budget
+
+
+class GpuLease:
+    """A task's hold on the GPU, beside other tasks' models when all fit, else alone."""
+
+    def __init__(self, m: Model, task: str, say=print):
+        self.m, self.task, self.say = m, task, say
+        self.home = store.home()
+        self.fh = None
+        self.alone = False
+
+    def _holders(self) -> dict:
+        """gpu.json's live entries: pid → {model, task}."""
+        held = store.read_json(self.home / "gpu.json", {}) or {}
+        return {p: h for p, h in held.items() if _alive(int(p))}
+
+    def _set(self, held: dict) -> None:
+        store.write_json(self.home / "gpu.json", held)
+
+    def __enter__(self):
+        self.fh = open(self.home / "gpu.lock", "a+")
+        try:
+            with store.locked(self.home / "gpu.admit"):
+                held = self._holders()
+                running = [o for o in (discover().get(h["model"]) for h in held.values()) if o]
+                waiting = any(h.get("waiting") for h in held.values())  # first come, first served
+                if not waiting and len(running) == len(held) and (
+                        not held or can_share(self.m, running, gpu_budget())):
+                    try:
+                        fcntl.flock(self.fh, fcntl.LOCK_SH | fcntl.LOCK_NB)
+                    except BlockingIOError:
+                        pass  # something has the GPU to itself: wait below
+                    else:
+                        self._set({**held, str(os.getpid()): {"model": self.m.id, "task": self.task}})
+                        if held:
+                            self.say("sharing the GPU with " + ", ".join(sorted({o.id for o in running})))
+                        return self
+            with store.locked(self.home / "gpu.admit"):
+                self._set({**self._holders(), str(os.getpid()): {"model": self.m.id, "task": self.task,
+                                                                 "waiting": True}})
+            fcntl.flock(self.fh, fcntl.LOCK_EX)  # until the running tasks finish; none join us
+            self.alone = True
+            with store.locked(self.home / "gpu.admit"):
+                self._set({**self._holders(), str(os.getpid()): {"model": self.m.id, "task": self.task}})
+            return self
+        except BaseException:
+            self.fh.close()
+            raise
+
+    def load(self) -> float:
+        """Make the model resident, leaving the other holders' models loaded."""
+        with store.locked(self.home / "gpu.admit"):
+            keep = {h["model"] for p, h in self._holders().items()
+                    if p != str(os.getpid()) and not h.get("waiting")}
+            return make_resident(self.m, say=self.say, keep=keep)
+
+    def __exit__(self, *exc):
+        try:
+            with store.locked(self.home / "gpu.admit"):
+                held = self._holders()
+                held.pop(str(os.getpid()), None)
+                self._set(held)
+        finally:
+            self.fh.close()  # releases gpu.lock
+
+
+def _alive(pid: int) -> bool:
+    try:
+        os.kill(pid, 0)
+        return True
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
 
 
 # ---- managing the set: what Claude's weekly model check uses to add and retire models ----

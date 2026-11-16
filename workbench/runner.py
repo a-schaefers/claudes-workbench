@@ -459,19 +459,26 @@ def auto_fix_prompt(tests: dict, cmd: str) -> str:
             "you changed and the test result.")
 
 
+def _load_failed(task: store.Task, e: Exception) -> None:
+    task.set_status(phase="failed", last=f"model: {e}")
+    task.notify("failed", f"task {task.name}: could not load {task.spec['model']}: {e}")
+
+
 def drive(task: store.Task) -> None:
-    gpu = store.home() / "gpu.lock"
     task.set_status(phase="queued", last="waiting for the GPU", pid=os.getpid())
-    with store.locked(gpu):  # one model generates at a time; a second task waits its turn
+    say = lambda msg: task.set_status(last=msg)  # noqa: E731
+    try:
+        m = models.resolve(task.spec["model"])
+    except KeyError as e:
+        return _load_failed(task, e)
+    # beside the running tasks' models when all fit the GPU, else alone once they finish
+    with models.GpuLease(m, task.name, say) as lease:
         try:
-            m = models.resolve(task.spec["model"])
-            secs = models.make_resident(m, say=lambda msg: task.set_status(last=msg))
+            secs = lease.load()
             task.set_status(load_secs=round(secs, 1),
                             window=(m.config.get("limit") or {}).get("context"))
         except (KeyError, RuntimeError, OSError) as e:
-            task.set_status(phase="failed", last=f"model: {e}")
-            task.notify("failed", f"task {task.name}: could not load {task.spec['model']}: {e}")
-            return
+            return _load_failed(task, e)
         while True:
             n = task.status["round"]
             why = fresh_reason(task) if n > 1 else None
