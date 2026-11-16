@@ -38,6 +38,7 @@ def record(task: store.Task, outcome: str, last_step: dict | None = None, **extr
            "minutes": round((store.now() - spec.get("created_at", store.now())) / 60, 1),
            "tok_in": st.get("tok_in", 0), "tok_out": st.get("tok_out", 0),
            "skills_offered": st.get("skills_ever") or [], "skills_loaded": skills.loaded(task),
+           "skills_rev": st.get("skills_rev") or {},  # the version handed: judges each edit
            "steps": (st.get("step_sizes") or []) + ([last_step] if last_step else []),
            **extra}
     store.append_jsonl(store.home() / "results.jsonl", row)

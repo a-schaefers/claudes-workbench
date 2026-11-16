@@ -25,11 +25,20 @@ the bulk of the tokens, the reading and writing and test-running, happen on your
   files and 150 lines on 32K, more on a bigger one), and every finished step corrects it, so a
   strong machine gets bigger tasks. The next piece in the same area goes to the same agent, which
   already knows the code.
-- **Claude hands out the skills.** Every lesson Claude learns in review (a library's quirk, a
-  pitfall, a check to run) becomes a skill in a library Claude writes and curates. Each agent gets
-  only the skills that fit its task, and gives them back when that part is done, so your local
-  models get better at your work without retraining and without a cluttered prompt. Claude tracks
-  which skills actually help and retires the ones that don't.
+- **A skill library that improves itself, with Claude holding the pen.** Every task leaves its
+  lessons behind: each correction Claude sent back, what stopped the agent, what it had to ask,
+  and what the agent itself says the next one would trip on. Claude is shown them when the task
+  closes, and a correction that turns up in a second task stands out, because the next agent
+  will get it wrong too. Claude turns lessons into skills, or patches the sentence in an existing
+  skill that misled. Each agent gets only the skills that fit its task and gives them back when
+  that part is done, so your local models get better at your work without retraining and without
+  a cluttered prompt. Every skill is judged on outcomes: tasks that loaded it against tasks
+  without it, and each edit on its own. Claude fixes or retires the ones that don't help. Skills
+  from public libraries can seed it, but each is security-scanned and read by Claude first. The
+  loop takes its cue from Nous Research's [Hermes Agent](https://github.com/NousResearch/hermes-agent),
+  the self-improving agent. We kept its patch-first habit, its rules for what a lesson is and
+  isn't, and its skill security scan (ported, MIT). We added what a single agent can't do for
+  itself: a frontier model vetting every lesson, and an outcome record for each skill.
 - **The right model for each piece.** Chores go to a small fast model, real work to the strongest
   one your GPU runs, and the choice learns from which model's work Claude actually accepts.
 - **Held to a frontier standard.** Claude reads every diff itself, never takes the agent's word for
@@ -491,21 +500,55 @@ up again (a library's quirk, a pitfall, a check to run), Claude writes a skill.
   `$WB_SKILLS`), so every skill has a history of why it was written or changed. It never lives in
   `~/.claude/skills`, which is yours. Knowledge of one project that only some of its tasks need
   goes in that project's own `.claude/skills` instead, committed with it.
+- **Lessons, gathered for Claude.** When a task gets feedback, moves to its next step, or closes,
+  workbench reads what it left: each numbered correction in Claude's feedback, every guard stop,
+  each `ask_reviewer` question and its answer, a handed skill the agent loaded yet still needed
+  review rounds, and the agent's own `Lesson:` lines (the protocol asks for one when it hits
+  something the next agent would trip on too). The command ends with one line, such as `lessons: 3
+  from this task, 1 seen in other tasks too`. `wb lessons` lists the open ones, the ones that recur
+  first, each with the skill it seems to belong to. A lesson becomes a skill
+  (`wb skill add|patch … --lesson <id>` closes it), or is closed with why
+  (`wb lessons close <id> -m …`): a one-task detail, an environment problem, a dead end. An agent's
+  lesson from a discarded task is dropped by itself: a task that never found a working method has
+  dead ends, not a recipe. The weekly check counts what's still waiting.
+- **Patched, not piled on.** `wb skill patch <name> --old "…" --new "…" -m why` fixes the passage
+  that misled, in place, rather than appending a correction. The text must occur exactly once.
+  The result is checked and committed like an add.
 - **Checked on the way in.** `wb skill add <name> --from <file> -m "<what review taught>"` refuses
   a skill without a matching name or a description (at most 300 characters: it's all an agent sees
-  before deciding to load it) or over 8 KB, and warns about one over 120 lines, one that names a
-  path outside the repo (agents go looking for those), or a description that doesn't say when to
-  use it.
+  before deciding to load it), over 8 KB, or naming a `references/`, `scripts/` or `templates/`
+  file it doesn't have. It warns about one over 120 lines, more than 10 supporting files, clutter
+  (a README, a .env), one that reads like an incident log (issue numbers, dates: a skill states
+  the rule), one that names a path outside the repo (agents go looking for those), or a
+  description that doesn't say when to use it.
+- **Scanned on the way in.** Every add and patch runs a security scan, ported from Hermes Agent's
+  skills guard (MIT). It looks for what would leak secrets, inject instructions, destroy files,
+  open a shell to the outside, write to `CLAUDE.md` or `AGENTS.md`, or hide text in invisible or
+  bidirectional Unicode. A critical finding refuses the skill; a high one is a warning Claude
+  reads. On an update only what the change brought in counts. `wb skill scan <name|path>` runs it
+  alone.
+- **From outside, read first.** `wb skill import <git-url|owner/repo|path> [--path <dir>]` fetches
+  a public skill into the state directory (`imports/`) and lists the skills a repository holds.
+  For the one picked, it shows the license, a content hash and the scan. A dangerous one is refused
+  and deleted. Nothing goes into the library by itself: Claude reads it, keeps what fits the
+  agents' work, rewrites it in the library's shape, and adds it with `--source "<url>@<commit>,
+  <license>"`, which goes in the commit. The skills Claude writes from review stay the core;
+  imports only seed it.
 - **Handed per task.** `wb start --skill <name>` hands a skill to a task, `wb next --skill` sets a
   new step's, `wb skill hand` / `wb skill take` change them mid-task. Each handed skill reaches
   OpenCode as its own directory in the config layer's `skills` list, so the agent sees exactly
   those and the rest of the library stays out of its prompt. The agent is told what it holds at the
   start of a session, and after that only what was handed or taken back.
-- **Kept honest.** Results record which skills each task was offered and which the agent actually
-  loaded. `wb skill list` shows each one's record, and flags a skill offered three times and never
-  loaded (its description is wrong), one loaded in tasks that mostly failed (it may say the wrong
-  thing), and one not offered in 60 days. `wb skill retire` moves one to `retired/`;
-  `wb skill restore` brings it back.
+- **Judged on outcomes.** Hermes counts how often a skill is viewed; workbench knows how each
+  task ended. Results record which skills each task was offered, which the agent loaded, and the
+  version of each it held (the library commit). `wb skill list` shows, per skill: how the tasks
+  that loaded it went (accepted, accepted with no review round, review rounds a task), the same
+  repos' tasks without it, and the tasks since its last edit. It flags a skill offered three times
+  and never loaded (its description is wrong), one loaded in tasks that mostly failed (patch it
+  with what review taught), one whose tasks go no better than those without it, one whose last
+  edit hasn't helped, and one not offered in 60 days. Too few tasks is no evidence either way.
+  `wb start` without `--skill` names the library skills a spec seems to need, for Claude to hand
+  or not. `wb skill retire` moves one to `retired/`; `wb skill restore` brings it back.
 
 ### Images
 
@@ -670,7 +713,8 @@ Both stop the web chat listening in that session.
 | `wb models [--set-default]` | the local models and the router's ranking per size |
 | `wb model add\|retire\|sizes <provider/model> …` | add (`--pull`), retire (`--delete`), or limit a model's task sizes |
 | `wb scout [--done --notes] [--due] [--watch TEXT] [--unwatch N]` | the weekly model check's facts and its watch list |
-| `wb skill list\|show\|add\|retire\|restore\|hand\|take …` | the skill library |
+| `wb skill list\|show\|add\|patch\|scan\|import\|retire\|restore\|hand\|take …` | the skill library |
+| `wb lessons [--task] [--all]` / `wb lessons close <id> -m …` | what tasks taught, waiting to become skills |
 | `wb image "<prompt>" [--n] [--size] [--seed] [--ref] [--out] [--engine] [--list]` | candidates from a local image model, for Claude to look at and choose from |
 | `wb stats` | real results by model and size |
 | `wb chat [serve\|url\|reply\|log]` | the web chat |
@@ -684,6 +728,8 @@ Both stop the web chat listening in that session.
 ~/.local/state/workbench/        ($WB_HOME) every task, notice and result
   notify.jsonl                   notifications that need Claude, all tasks
   results.jsonl                  one row per closed task: what the router and skill records learn from
+  lessons.jsonl                  what each task taught, open until Claude writes it into a skill or closes it
+  imports/                       skills fetched from outside, waiting for Claude to read them
   gpu.lock  gpu.json  gpu.admit  held by each running task (shared when models fit together); who holds it
   scout.json  watch.json         the weekly model check: when it was done, the watch list
   speed.json                     each model's measured tokens/s, read and written: the runner's limits

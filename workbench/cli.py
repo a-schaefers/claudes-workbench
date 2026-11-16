@@ -6,6 +6,7 @@ resource, and by a person at a terminal.
 import argparse
 import json
 import os
+import shutil
 import signal
 import subprocess
 import sys
@@ -13,8 +14,8 @@ import time
 from collections import defaultdict
 from pathlib import Path
 
-from . import (__version__, chat, context, gitops, hardware, images, models, results, router,
-               skills, store, transcript)
+from . import (__version__, chat, context, gitops, hardware, images, lessons, models, results,
+               router, scan, skills, store, transcript)
 from .watch import Watcher, wait_exit
 from .runner import PKG_ROOT
 
@@ -28,6 +29,8 @@ How to work (workbench protocol):
 question(s) for this task). Otherwise make reasonable choices and say what you assumed.
 - Stay inside the scope of the spec. No unrelated refactors, no new dependencies unless asked.
 - Finish with a short summary: the files you changed, the test result, and any assumptions.
+  If you hit something the next agent would trip on too (a library's quirk, a pitfall, a check
+  worth running), add a line `Lesson: <the rule, and why>` to it.
 """
 
 
@@ -147,7 +150,7 @@ def cmd_start(a):
     task.round_dir(1).joinpath("prompt.md").write_text(prompt)
     task.set_status(phase="queued", round=1, reviews=0, auto_fixes=0, tools=0,
                     tok_in=0, tok_out=0, session=None, last="starting",
-                    skills=handed, skills_ever=handed)
+                    skills=handed, skills_ever=handed, skills_rev=skills.revs(handed))
     spawn_runner(task)
     print(f"started {a.name} on {m.label} · branch {gitops.branch_name(a.name)} · "
           f"base {base[:8]}" + (f" · tests `{a.test}`, auto-fix {a.auto_fix}" if a.test else ""))
@@ -158,6 +161,8 @@ def cmd_start(a):
     print(f"slice: {router.slice(m).line()}")
     if handed:
         print("skills handed: " + ", ".join(handed))
+    elif fits := skills.suggest(spec_text):
+        print(f"library skills that may fit: {', '.join(fits)} (wb skill hand {a.name} <name>)")
     if not state["available"]:
         print(f"note: queued although {state['why']}")
     elif not state["resident"]:
@@ -177,7 +182,7 @@ def cmd_feedback(a):
     n = st.get("round", 1) + 1
     task.round_dir(n).mkdir(parents=True, exist_ok=True)
     task.round_dir(n).joinpath("prompt.md").write_text(
-        "Review feedback from the senior reviewer. Make exactly these changes, then re-run the "
+        f"{lessons.FEEDBACK_HEAD} Make exactly these changes, then re-run the "
         "acceptance command and finish with a short summary:\n\n" + text.strip())
     reviews = st.get("reviews", 0) + 1
     task.set_status(context="fresh" if a.fresh else "keep" if a.keep_context else None)
@@ -188,6 +193,7 @@ def cmd_feedback(a):
     _ack_all(task)
     print(f"feedback round {reviews} sent to {a.name} (round {n})"
           + ("  — that is past the usual 3 review rounds" if reviews > 3 else ""))
+    _say(lessons.nudge(task))
 
 
 def cmd_next(a):
@@ -222,7 +228,8 @@ def cmd_next(a):
     task.event({"ts": store.now(), "round": n, "kind": "next_step",
                 "text": f"step {step} committed as {commit}; next step sent"})
     if handed is not None:
-        task.set_status(skills=handed, skills_ever=_union(st.get("skills_ever"), handed))
+        task.set_status(skills=handed, skills_ever=_union(st.get("skills_ever"), handed),
+                        skills_rev={**(st.get("skills_rev") or {}), **skills.revs(handed)})
     task.set_status(round=n, steps=step + 1, step_round=n, phase="queued", reviews=0,
                     step_sizes=(st.get("step_sizes") or []) + [measured],
                     context="fresh" if a.fresh else None,
@@ -232,6 +239,7 @@ def cmd_next(a):
     _ack_all(task)
     print(f"step {step} of {a.name} committed as {commit}; step {step + 1} sent "
           + ("to a fresh session" if a.fresh else "to the same session"))
+    _say(lessons.nudge(task))
 
 
 def cmd_answer(a):
@@ -521,6 +529,7 @@ def cmd_accept(a):
     print(f"accepted {a.name}: commit {commit} on {spec['branch']}" +
           (f", merged into {gitops.git(repo, 'branch', '--show-current').strip()} as {merged}"
            if merged else f"\nmerge with: git -C {repo} merge --no-ff {spec['branch']}"))
+    _say(lessons.nudge(task, "accepted"))
 
 
 def cmd_discard(a):
@@ -536,6 +545,7 @@ def cmd_discard(a):
     results.record(task, "discarded", measured, reason=a.reason)
     _ack_all(task)
     print(f"discarded {a.name}" + ("" if a.keep_branch else f"; branch {spec['branch']} deleted"))
+    _say(lessons.nudge(task, "discarded"))
 
 
 def cmd_models(a):
@@ -616,12 +626,17 @@ def cmd_scout(a):
         print("\nwatch list: what would reopen a past decision; check each against what is new")
         for i, r in enumerate(items, 1):
             print(f"  {i}. ({time.strftime('%Y-%m-%d', time.localtime(r['ts']))}) {r['text']}")
-    have, use = skills.available(), skills.usage()
+    have = skills.available()
+    use = skills.usage(skills.revs(list(have)))
     flagged = [(n, skills.advice(use.get(n), store.now())) for n in have]
     flagged = [(n, w) for n, w in flagged if w and w != "never offered yet"]
     print(f"\nskill library: {len(have)} skill(s)" + (", all pulling their weight" if have and not flagged else ""))
     for n, w in flagged:
         print(f"  {n}: {w}")
+    pending = lessons.survey()
+    if pending:
+        print(f"lessons waiting: {len(pending)}, {sum(bool(x['again']) for x in pending)} seen in "
+              "more than one task (wb lessons)")
     print("\nhardware")
     print("\n".join(hardware.report()))
     print("\nimage engines (wb image)")
@@ -677,19 +692,30 @@ def _union(a, b) -> list[str]:
     return list(dict.fromkeys([*(a or []), *(b or [])]))
 
 
+def _say(line: str) -> None:
+    if line:
+        print(line)
+
+
+def _closed_by(ids, name: str) -> str:
+    """Close the lessons a skill change took in; the line saying so."""
+    done = lessons.close([x for i in ids or [] for x in i.split(",") if x], f"skill:{name}")
+    return f"\nlessons closed: {', '.join(done)}" if done else ""
+
+
 def cmd_skill(a):
     """Claude's skill library for the agents: write, hand out, take back, retire."""
     if a.action == "list":
-        have, use, now = skills.available(), skills.usage(), store.now()
+        have, now = skills.available(), store.now()
+        use = skills.usage(skills.revs(list(have)))
         if not have:
             print(f"the skill library is empty ({skills.library()}); "
                   "wb skill add <name> --from <file> -m \"why\" starts it")
             return
         for name, info in have.items():
-            u = use.get(name) or {"offered": 0, "loaded": 0, "accepted": 0}
             note = skills.advice(use.get(name), now)
-            print(f"{name}: {info['description']}\n  offered {u['offered']} · loaded "
-                  f"{u['loaded']} · {u['accepted']} of those accepted" + (f" · {note}" if note else ""))
+            print(f"{name}: {info['description']}\n  {skills.record_line(use.get(name))}"
+                  + (f" · {note}" if note else ""))
         return
     if a.action == "show":
         have = skills.available()
@@ -703,10 +729,35 @@ def cmd_skill(a):
         if a.name in personal:
             die(f"{a.name} is the name of one of the user's own skills; pick another")
         try:
-            verb, warns = skills.add(Path(a.source), a.name, a.message)
+            verb, warns = skills.add(Path(a.source), a.name, a.message, a.origin or "")
         except ValueError as e:
             die(f"not added: {e}")
-        print(f"{verb} {a.name}" + "".join(f"\nwarning: {w}" for w in warns))
+        print(f"{verb} {a.name}" + "".join(f"\nwarning: {w}" for w in warns)
+              + _closed_by(a.lesson, a.name))
+        return
+    if a.action == "patch":
+        old = Path(a.old_file).read_text() if a.old_file else a.old
+        new = Path(a.new_file).read_text() if a.new_file else a.new
+        if not old or new is None:
+            die("say what to replace: --old and --new (or --old-file and --new-file)")
+        try:
+            warns = skills.patch(a.name, old, new, a.message)
+        except KeyError:
+            die(f"no skill {a.name} in the library")
+        except ValueError as e:
+            die(f"not patched: {e}")
+        print(f"patched {a.name} ({skills.rev(a.name)}); tasks from now on are judged on this version"
+              + "".join(f"\nwarning: {w}" for w in warns) + _closed_by(a.lesson, a.name))
+        return
+    if a.action == "scan":
+        target = skills.available().get(a.name, {}).get("path") or Path(a.name)
+        if not target.exists():
+            die(f"no skill or path {a.name}")
+        found = scan.scan(target)
+        print(f"{scan.verdict(found)}: {target}" + "".join(f"\n  {x}" for x in scan.lines(found)))
+        return
+    if a.action == "import":
+        cmd_skill_import(a)
         return
     if a.action == "retire":
         try:
@@ -730,13 +781,71 @@ def cmd_skill(a):
     held = st.get("skills") or []
     if a.action == "hand":
         held = _union(held, names)
-        task.set_status(skills=held, skills_ever=_union(st.get("skills_ever"), names))
+        task.set_status(skills=held, skills_ever=_union(st.get("skills_ever"), names),
+                        skills_rev={**(st.get("skills_rev") or {}), **skills.revs(names)})
     else:
         held = [x for x in held if x not in names]
         task.set_status(skills=held)
     when = "from its next run" + (" (`wb steer --now` starts that run now)" if runner_alive(task)
                                   else "")
     print(f"{task.name} holds: {', '.join(held) or 'no skills'}; the agent is told {when}")
+
+
+def cmd_skill_import(a):
+    """Fetch a skill from outside (a git URL, owner/repo on GitHub, or a path) for Claude to read.
+    Nothing enters the library here: a dangerous one is refused and removed; anything else
+    waits in the state directory until Claude has read it, made it ours and added it."""
+    try:
+        root, meta, found = skills.fetch(a.src, a.path)
+    except (RuntimeError, subprocess.TimeoutExpired) as e:
+        die(str(e))
+    if not found:
+        die(f"no SKILL.md {'at ' + a.path if a.path else 'anywhere'} in {meta['source']}")
+    if len(found) > 1:
+        print(f"{len(found)} skills in {meta['source']}; pick one with --path:")
+        for d in found[:40]:
+            print(f"  {d.relative_to(root)}: {skills.parse(d / 'SKILL.md')['description'][:120]}")
+        return
+    d = found[0]
+    findings = scan.scan(d)
+    verdict = scan.verdict(findings)
+    origin = f"{meta['source']}" + (f"@{meta['rev'][:12]}" if meta["rev"] else "") + \
+        (f" {d.relative_to(root)}" if d != root else "")
+    print(f"{d.relative_to(root) if d != root else d.name} from {origin}\n"
+          f"license: {skills.license_of(d, root)}\nsha256: {scan.content_hash(d)}\nscan: {verdict}"
+          + "".join(f"\n  {x}" for x in scan.lines(findings)))
+    if verdict == "dangerous":
+        if root.is_relative_to(store.home() / "imports"):
+            shutil.rmtree(root, ignore_errors=True)
+        die("refused: don't take anything from this skill")
+    problems, warns = skills.check(d / "SKILL.md", a.name or d.name)
+    for w in problems + warns:
+        print(f"  lint: {w}")
+    print(f"\nread it all: {d}\nthen make it ours (our format, our voice, only what fits the "
+          "agents' work), write it to the scratchpad, and:\n"
+          f"  wb skill add {a.name or d.name} --from <dir> -m \"why\" --source \"{origin}, "
+          f"{skills.license_of(d, root)}\"")
+
+
+def cmd_lessons(a):
+    """What tasks taught, waiting for Claude: write or patch a skill, or close it with why."""
+    if a.action == "close":
+        done = lessons.close([x for i in a.ids for x in i.split(",") if x], "dropped", a.message)
+        print(f"closed: {', '.join(done)}" if done else "none of those is open")
+        return
+    pending = [x for x in lessons.survey() if not a.task or x["task"] == a.task]
+    if not pending:
+        print("no open lessons")
+        return
+    shown = pending if a.all else pending[:12]
+    again = sum(bool(x["again"]) for x in pending)
+    print(f"open lessons: {len(pending)}" + (f", {again} seen in more than one task" if again else ""))
+    for x in shown:
+        print("  " + lessons.line(x))
+    if len(shown) < len(pending):
+        print(f"  … and {len(pending) - len(shown)} more (--all)")
+    print("next: a lesson in a skill: wb skill patch|add … --lesson <id>; not one (a one-task "
+          "detail, the environment, a dead end): wb lessons close <id> -m why")
 
 
 def image_lines() -> list[str]:
@@ -1047,6 +1156,21 @@ def main(argv=None):
     x = ss.add_parser("add", help="add or update a skill: a SKILL.md, or a directory holding one")
     x.add_argument("name"); x.add_argument("--from", dest="source", required=True)
     x.add_argument("--message", "-m", required=True, help="why: what review taught")
+    x.add_argument("--source", dest="origin", help="where an imported skill came from (url@commit, license)")
+    x.add_argument("--lesson", action="append", metavar="ID", help="the lessons this takes in (wb lessons)")
+    x = ss.add_parser("patch", help="fix one passage of a skill in place")
+    x.add_argument("name")
+    x.add_argument("--old", help="the passage to replace (it must occur exactly once)")
+    x.add_argument("--new", help="what replaces it")
+    x.add_argument("--old-file"); x.add_argument("--new-file")
+    x.add_argument("--message", "-m", required=True, help="why: what review taught")
+    x.add_argument("--lesson", action="append", metavar="ID", help="the lessons this takes in (wb lessons)")
+    x = ss.add_parser("import", help="fetch a skill from outside for Claude to read: scanned, never added by itself")
+    x.add_argument("src", help="a git URL, owner/repo (GitHub), or a local path")
+    x.add_argument("--path", help="the skill's directory inside it")
+    x.add_argument("--as", dest="name", help="the name it would take here")
+    x = ss.add_parser("scan", help="the security scan, for a library skill or any path")
+    x.add_argument("name")
     x = ss.add_parser("retire"); x.add_argument("name")
     x.add_argument("--message", "-m", required=True, help="why it is no longer needed")
     x = ss.add_parser("restore"); x.add_argument("name")
@@ -1054,6 +1178,13 @@ def main(argv=None):
         x = ss.add_parser(verb, help=what + ", from its next run")
         x.add_argument("task"); x.add_argument("names", nargs="+")
     s.set_defaults(f=cmd_skill)
+    s = sub.add_parser("lessons", help="what tasks taught, waiting to become skills")
+    s.add_argument("action", nargs="?", choices=["close"])
+    s.add_argument("ids", nargs="*")
+    s.add_argument("--task", help="only this task's")
+    s.add_argument("--all", action="store_true")
+    s.add_argument("--message", "-m", default="", help="why it isn't a skill")
+    s.set_defaults(f=cmd_lessons)
     s = sub.add_parser("image", help="generate images with a local image model, for Claude to "
                        "look at and choose from")
     s.add_argument("prompt", nargs="?")

@@ -43,8 +43,15 @@ what either says (a command, a flag, a default, a guard, a file) updates it in t
   - `transcript.py`: `wb watch`, the human view: the OpenCode session export merged with the task's
     events. Its `--json` lines feed the mod's pane.
   - `skills.py`: Claude's skill library for the agents (`$WB_SKILLS`, default
-    ~/.local/share/workbench/skills, its own git repo): checks, add/retire/restore, what each task
-    was offered and loaded. `wb skill` drives it; a task holds the skills in `status.skills`.
+    ~/.local/share/workbench/skills, its own git repo): checks, add/patch/retire/restore, import
+    (`fetch` into `imports/`, never into the library), suggestions for a spec, and the record
+    (offered, loaded, outcome against the same repos without it, per version). `wb skill` drives
+    it; a task holds the skills in `status.skills` and the version handed in `status.skills_rev`.
+  - `lessons.py`: what each task taught (feedback items, guard stops, questions, a loaded skill
+    that still needed reviews, the agent's `Lesson:` lines), gathered by `wb feedback`/`next`/
+    `accept`/`discard` into lessons.jsonl; recurring ones are found by word overlap. `wb lessons`.
+  - `scan.py`: the security scan every skill passes on the way in (critical refuses). Ported from
+    Hermes Agent's skills guard: keep its MIT notice in the docstring.
   - `gitguard.py`: git is read-only for the agent. `runner.agent_env` writes a `git` shim into
     the task's `bin/` and puts it first on `PATH`. The shim passes reads through (with
     `GIT_OPTIONAL_LOCKS=0`) and refuses writes in the task's repo and in any repo outside the temp
@@ -103,12 +110,15 @@ what either says (a command, a flag, a default, a guard, a file) updates it in t
 7. `wb accept` commits with provenance trailers (no AI co-author line), optionally merging;
    `wb next` commits a step and gives the same agent the next; `wb feedback` sends another round;
    `wb discard` drops it. `results.jsonl` gets a row, which the router and the skill records
-   learn from. `wb takeover` stops the agent and leaves the task in `review` for Claude to finish.
+   learn from. Each of these (and `next`) gathers the task's lessons and ends with one
+   `lessons:` line when there are new ones. `wb takeover` stops the agent and leaves the task in
+   `review` for Claude to finish.
 
 ## State and config
 Everything is plain files under `~/.local/state/workbench` (`$WB_HOME`):
 ```
-notify.jsonl  results.jsonl  gpu.lock gpu.json gpu.admit  scout.json  watch.json  speed.json  images/<when>/
+notify.jsonl  results.jsonl  lessons.jsonl  gpu.lock gpu.json gpu.admit  scout.json  watch.json  speed.json  images/<when>/
+imports/<source>/  skills fetched by `wb skill import`, for Claude to read
 chat/          messages.jsonl receipts.jsonl listener.json
 tasks/<name>/  task.json status.json events.jsonl opencode.json HANDBOOK.md context.md bin/git
                steer.jsonl acked runner.log  rounds/<n>/{prompt.md,summary.md,tests.txt}
@@ -179,6 +189,9 @@ Tests only: `WB_OPENCODE_BIN` (a fake opencode), `WB_FAKE_MODELS` (no model serv
     The config's `skills` list adds more: a path to one skill's directory lists that skill, a parent
     directory lists every skill in it, a path to the SKILL.md itself lists nothing. Handed skills
     go in one directory each, so the rest of the library stays out of the prompt.
+    Loading one (the `skill` tool, argument `id`) returns its body, its base directory and a list
+    of its files, which the agent can read from its worktree: a skill's `references/` and
+    `scripts/` need no path rewriting.
   - `permissions: [{action, resource, effect: "deny"}]` removes a tool or skill from the prompt.
     For the `shell` action the resource matches each part of a compound command (`cd x && sudo y`
     is caught), and a later rule overrides an earlier one. The shell limits: sudo, `gh`, and the

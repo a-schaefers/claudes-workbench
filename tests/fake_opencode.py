@@ -8,6 +8,7 @@
   crash  exit 1 with no events
   slow   a first run that takes an hour; a continued session behaves like ok
 FAKE_PROMPTS, if set, is a file each run appends its prompt to; FAKE_SLEEP pauses each run after its first event.
+FAKE_LESSON, if set, ends the agent's text with a `Lesson:` line (what workbench.lessons gathers).
 """
 import json
 import os
@@ -74,7 +75,8 @@ if scenario in ("ok", "fix"):
     with open("answer.txt", "w") as fh:
         fh.write(value + "\n")
     tool("write", {"filePath": os.path.abspath("answer.txt"), "content": value})
-    emit("text", text=f"Wrote answer.txt = {value}.")
+    emit("text", text=f"Wrote answer.txt = {value}."
+         + (f"\nLesson: {os.environ['FAKE_LESSON']}" if os.environ.get("FAKE_LESSON") else ""))
     finish()
 elif scenario == "loop":
     for _ in range(10):

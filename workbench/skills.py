@@ -10,8 +10,13 @@ leaving it out of the next layer.
 The library is a git repository of its own (`$WB_SKILLS`, default ~/.local/share/workbench/skills),
 so every skill has a history saying why it was written or changed. It never lives in
 ~/.claude/skills, which is the user's. Retired skills move to `retired/` and can come back.
-Usage (offered to a task, loaded by the agent, the task's outcome) comes from results.jsonl,
-which is what tells Claude a skill is clutter or needs rewriting.
+Usage (offered to a task, loaded by the agent, the task's outcome, and the skill's version at the
+time) comes from results.jsonl, which is what tells Claude a skill is clutter, needs rewriting,
+or stopped helping after an edit.
+
+Everything that enters the library, written here or imported from outside, is linted (check)
+and scanned (scan.py) on the way in. A skill from outside is fetched into the state directory
+first and never goes in by itself: Claude reads it, adapts it and adds it like its own.
 """
 from __future__ import annotations
 
@@ -19,14 +24,19 @@ import os
 import re
 import shutil
 import subprocess
+import tempfile
 from pathlib import Path
 
-from . import store
+from . import scan, store
 
 NAME = re.compile(r"^[a-z0-9]+(-[a-z0-9]+)*$")
 MAX_DESCRIPTION = 300   # all an agent sees before it decides to load the skill
-MAX_LINES = 120         # a loaded skill spends a 32K context; most should be 20-60 lines
+MAX_LINES = 120         # a loaded skill spends the agent's context; most should be 20-60 lines
 MAX_BYTES = 8000
+MAX_FILES = 10          # supporting files (references/, scripts/, templates/): depth, not a dump
+SUPPORT = re.compile(r"(?<![\w/.-])((?:references|scripts|templates|assets)/[\w./-]*\w)")
+INCIDENT = re.compile(r"(?:#|\bPR\s*|\bissue\s*)\d{2,}\b|\b20\d\d-\d\d-\d\d\b", re.I)
+CLUTTER = {"README.md", "CHANGELOG.md", ".env", ".gitignore", "LICENSE.txt"}
 
 
 def library() -> Path:
@@ -44,6 +54,18 @@ def _git(*args: str) -> str:
     return r.stdout
 
 
+def rev(name: str) -> str:
+    """The skill's version: the library commit that last changed it ("" before the first)."""
+    try:
+        return _git("log", "-1", "--format=%h", "--", name).strip()
+    except RuntimeError:
+        return ""
+
+
+def revs(names: list[str]) -> dict[str, str]:
+    return {n: rev(n) for n in names}
+
+
 def _commit(message: str) -> None:
     """Commit as the user; a machine without a git identity still gets its history."""
     who = [] if subprocess.run(["git", "-C", str(library()), "config", "user.email"],
@@ -56,18 +78,25 @@ def _commit(message: str) -> None:
 
 
 def parse(skill_md: Path) -> dict:
-    """{name, description, body} from a SKILL.md (YAML-ish front matter, one line per key)."""
+    """{name, description, license, body} from a SKILL.md: YAML-ish front matter, top-level keys,
+    a value folded from its indented lines (`description: >` as public skills often write it)."""
     text = skill_md.read_text()
-    meta, body = {}, text
+    meta, body, key = {}, text, None
     m = re.match(r"^---\n(.*?)\n---\n?(.*)$", text, re.S)
     if m:
         body = m.group(2)
         for line in m.group(1).splitlines():
+            if line[:1] in (" ", "\t"):
+                if key:
+                    meta[key] = f"{meta[key]} {line.strip()}".strip()
+                continue
             k, sep, v = line.partition(":")
-            if sep:
-                meta[k.strip()] = v.strip().strip("\"'")
+            key = k.strip() if sep else None
+            if key:
+                v = v.strip()
+                meta[key] = "" if v in ("|", ">", "|-", ">-", "|+", ">+") else v.strip("\"'")
     return {"name": meta.get("name", ""), "description": meta.get("description", ""),
-            "body": body, "text": text}
+            "license": meta.get("license", ""), "body": body, "text": text}
 
 
 def check(skill_md: Path, name: str) -> tuple[list[str], list[str]]:
@@ -94,6 +123,23 @@ def check(skill_md: Path, name: str) -> tuple[list[str], list[str]]:
                         "describe the thing instead")
     if s["description"] and not re.search(r"\b(when|for|before|after|if)\b", s["description"], re.I):
         warnings.append("the description should say when to use it (\"Use when ...\")")
+    # what a directory skill ships beside its SKILL.md
+    root = skill_md.parent
+    for ref in sorted(set(SUPPORT.findall(s["body"]))):
+        if not (root / ref).exists():
+            problems.append(f"names {ref}, which the skill doesn't have: the agent would go looking")
+    if skill_md.name == "SKILL.md" and root.is_dir():
+        extra = [p for p in root.rglob("*") if p.is_file() and p != skill_md
+                 and ".git" not in p.relative_to(root).parts]
+        clutter = sorted(p.name for p in extra if p.name in CLUTTER)
+        if clutter:
+            warnings.append(f"{', '.join(clutter)}: a skill's directory is for the agent; leave these out")
+        if len(extra) > MAX_FILES:
+            warnings.append(f"{len(extra)} supporting files (aim for at most {MAX_FILES}): keep "
+                            "the depth an agent needs, by topic")
+    if len(INCIDENT.findall(s["body"])) >= 3:
+        warnings.append("reads like an incident log (issue numbers, dates): state the rule and why, "
+                        "not the story")
     return problems, warnings
 
 
@@ -116,14 +162,21 @@ def resolve(names: list[str]) -> list[Path]:
     return [have[n]["path"] for n in names]
 
 
-def add(src: Path, name: str, message: str) -> tuple[str, list[str]]:
+def add(src: Path, name: str, message: str, source: str = "") -> tuple[str, list[str]]:
     """Copy a skill (a SKILL.md, or a directory holding one and its files) into the library and
-    commit it. Returns ("added"|"updated", warnings); raises ValueError with the problems."""
+    commit it. Returns ("added"|"updated", warnings); raises ValueError with the problems. The
+    scan refuses a critical finding; on an update only what the change brought in counts.
+    `source` (where an imported skill came from: url@commit, license) goes in the commit."""
     src_md = src / "SKILL.md" if src.is_dir() else src
     problems, warnings = check(src_md, name)
+    dest = library() / name
+    found = scan.scan(src)
+    if dest.exists():
+        found = scan.new_findings(found, scan.scan(dest))
+    problems += [f"scan: {x}" for x, f in zip(scan.lines(found), found) if f["severity"] == "critical"]
+    warnings += [f"scan: {x}" for x, f in zip(scan.lines(found), found) if f["severity"] != "critical"]
     if problems:
         raise ValueError("; ".join(problems))
-    dest = library() / name
     verb = "updated" if dest.exists() else "added"
     _git("status")  # makes the repository on first use
     if src.is_dir():
@@ -136,8 +189,71 @@ def add(src: Path, name: str, message: str) -> tuple[str, list[str]]:
             shutil.copyfile(src, dest / "SKILL.md")
     _git("add", "-A", "--", name)
     if _git("status", "--porcelain", "--", name).strip():
-        _commit(f"{name}: {message}")
+        _commit(f"{name}: {message}" + (f"\n\nSource: {source}" if source else ""))
     return verb, warnings
+
+
+def patch(name: str, old: str, new: str, message: str) -> list[str]:
+    """Fix one passage of a skill in place (the sentence that misled, not an appended
+    correction): `old` must occur exactly once in its SKILL.md. Checked, scanned and committed
+    like add; returns the warnings."""
+    have = available()
+    if name not in have:
+        raise KeyError(name)
+    text = (have[name]["path"] / "SKILL.md").read_text()
+    n = text.count(old)
+    if n != 1:
+        raise ValueError(f"the text to replace occurs {n} times in {name}'s SKILL.md; "
+                         "quote exactly one passage (wb skill show " + name + ")")
+    with tempfile.TemporaryDirectory() as tmp:
+        draft = Path(tmp) / name
+        shutil.copytree(have[name]["path"], draft)
+        (draft / "SKILL.md").write_text(text.replace(old, new))
+        return add(draft, name, message)[1]
+
+
+def fetch(src: str, subdir: str | None = None) -> tuple[Path, dict, list[Path]]:
+    """A skill from outside, for Claude to read: clone a git URL (owner/repo means GitHub) into
+    the state directory's imports/, or take a local path as it is. Returns (the copy's root, its
+    provenance {source, rev}, the skill directories in it, or just `subdir`)."""
+    local = Path(src).expanduser()
+    if local.exists():
+        root, url = local.resolve(), str(local.resolve())
+    else:
+        url = src if "://" in src or src.startswith("git@") else f"https://github.com/{src}"
+        slug = re.sub(r"[^\w.-]+", "-", url.split("://")[-1]).strip("-")[-60:]
+        root = store.home() / "imports" / slug
+        shutil.rmtree(root, ignore_errors=True)
+        root.parent.mkdir(parents=True, exist_ok=True)
+        r = subprocess.run(["git", "clone", "-q", "--depth", "1", "--", url, str(root)],
+                           capture_output=True, text=True, timeout=300,
+                           env={**os.environ, "GIT_TERMINAL_PROMPT": "0"})
+        if r.returncode:
+            raise RuntimeError(f"git clone {url}: {(r.stderr or r.stdout).strip()}")
+    head = subprocess.run(["git", "-C", str(root), "rev-parse", "HEAD"], capture_output=True, text=True)
+    meta = {"source": url, "rev": head.stdout.strip() if head.returncode == 0 else ""}
+    if subdir:
+        found = [root / subdir] if (root / subdir / "SKILL.md").is_file() else []
+    else:
+        found = sorted(md.parent for md in root.rglob("SKILL.md")
+                       if ".git" not in md.relative_to(root).parts)
+    return root, meta, found
+
+
+def license_of(skill: Path, root: Path) -> str:
+    """What the skill says it may be used under: its front matter, else the nearest LICENSE file."""
+    said = parse(skill / "SKILL.md")["license"]
+    named = next((f for f in sorted(skill.glob("LICEN[CS]E*")) if f.name in said), None)
+    if said and not named:
+        return said
+    for d in [skill, *skill.parents]:
+        for f in [named] if named and d == skill else sorted(d.glob("LICEN[CS]E*")):
+            heads = [l.strip() for l in f.read_text(errors="replace").splitlines() if l.strip()][:2]
+            first = " ".join(heads) if heads and len(heads[0]) < 20 else (heads or [""])[0]
+            return f"{first} ({f.relative_to(root)})" if first else str(f.relative_to(root))
+        if d == root:
+            break
+    return "none found"
 
 
 def retire(name: str, message: str) -> None:
@@ -176,29 +292,100 @@ def loaded(task: store.Task) -> list[str]:
     return seen
 
 
-def usage() -> dict[str, dict]:
-    """Per skill, over finished real tasks: offered, loaded, accepted (of the tasks it was loaded
-    in), last offered (ts)."""
+def _tally() -> dict:
+    return {"n": 0, "accepted": 0, "first_try": 0, "reviews": 0}
+
+
+def _count(t: dict, r: dict) -> None:
+    t["n"] += 1
+    t["accepted"] += r.get("outcome") == "accepted"
+    t["first_try"] += r.get("outcome") == "accepted" and not r.get("reviews")
+    t["reviews"] += r.get("reviews") or 0
+
+
+def usage(current: dict[str, str] | None = None) -> dict[str, dict]:
+    """Per skill, over finished real tasks: how often it was offered and loaded, and how the
+    tasks that loaded it went (`with`: accepted, accepted with no review round, review rounds)
+    against tasks in the same repos that didn't load it (`without`). `since` counts the loads of
+    its current version (`current`: name -> rev), so an edit can be judged on its own."""
+    rows = store.read_jsonl(store.home() / "results.jsonl")[0]
     out: dict[str, dict] = {}
-    for r in store.read_jsonl(store.home() / "results.jsonl")[0]:
+    for r in rows:
         for n in r.get("skills_offered") or []:
-            u = out.setdefault(n, {"offered": 0, "loaded": 0, "accepted": 0, "last": 0})
+            u = out.setdefault(n, {"offered": 0, "loaded": 0, "accepted": 0, "last": 0, "repos": set(),
+                                   "with": _tally(), "without": _tally(), "since": _tally()})
             u["offered"] += 1
             u["last"] = max(u["last"], r.get("ts", 0))
             if n in (r.get("skills_loaded") or []):
                 u["loaded"] += 1
                 u["accepted"] += r.get("outcome") == "accepted"
+                u["repos"].add(r.get("repo"))
+                _count(u["with"], r)
+                if current and current.get(n) and (r.get("skills_rev") or {}).get(n) == current[n]:
+                    _count(u["since"], r)
+    for n, u in out.items():
+        for r in rows:
+            if r.get("repo") in u["repos"] and n not in (r.get("skills_loaded") or []):
+                _count(u["without"], r)
+    return out
+
+
+def record_line(u: dict | None) -> str:
+    """offered · loaded · how those went, against the same repos without it."""
+    if not u:
+        return "offered 0 · loaded 0"
+    w, wo, s = u["with"], u["without"], u["since"]
+    out = f"offered {u['offered']} · loaded {u['loaded']}"
+    if w["n"]:
+        out += (f" · {w['accepted']} accepted, {w['first_try']} with no review round, "
+                f"{w['reviews'] / w['n']:.1f} review rounds a task")
+    if wo["n"]:
+        out += (f" · same repos without it: {wo['accepted'] / wo['n']:.0%} accepted, "
+                f"{wo['reviews'] / wo['n']:.1f} review rounds ({wo['n']} tasks)")
+    if s["n"] and s["n"] < w["n"]:
+        out += f" · since its last edit: {s['accepted']} of {s['n']} accepted"
     return out
 
 
 def advice(u: dict | None, now: float) -> str:
-    """One line for Claude: is the skill pulling its weight?"""
+    """One line for Claude: is the skill pulling its weight, and what to do if not? Too few
+    tasks is not evidence either way (a skill nobody needed yet is not a bad skill)."""
     if not u or not u["offered"]:
         return "never offered yet"
+    w, wo, s = u["with"], u["without"], u["since"]
     if u["offered"] >= 3 and not u["loaded"]:
         return "offered but never loaded: rewrite the description, or retire it"
-    if u["loaded"] >= 3 and u["accepted"] / u["loaded"] < 0.5:
-        return "loaded, yet most of those tasks failed: check it still says the right thing"
+    if s["n"] >= 2 and not s["accepted"] and s["n"] < w["n"]:
+        return "its last edit hasn't helped: no task since was accepted; read wb lessons, patch it again"
+    if w["n"] >= 3 and w["accepted"] / w["n"] < 0.5:
+        return "loaded, yet most of those tasks failed: patch it with what review taught (wb lessons)"
+    if w["n"] >= 3 and wo["n"] >= 3 and w["reviews"] / w["n"] >= wo["reviews"] / wo["n"] \
+            and w["accepted"] / w["n"] <= wo["accepted"] / wo["n"]:
+        return "tasks that load it go no better than those without: sharpen it, or retire it"
     if now - u["last"] > 60 * 86400:
         return "not offered in 60 days: retire it if it's no longer useful"
     return ""
+
+
+WORD = re.compile(r"[a-z][a-z0-9]{3,}")
+STOP = {"when", "with", "that", "this", "from", "into", "your", "what", "them", "then", "they",
+        "have", "uses", "using", "used", "each", "only", "file", "files", "code", "make", "should",
+        "must", "write", "task", "tasks", "agent", "skill", "test", "tests", "before", "after"}
+
+
+def words(text: str) -> set[str]:
+    return {w for w in WORD.findall(text.lower()) if w not in STOP}
+
+
+def suggest(text: str, held: list[str] | None = None, n: int = 3) -> list[str]:
+    """Library skills a spec seems to need, by the words it shares with each one's name and
+    description (a name word counts double). A hint for Claude, who decides."""
+    spec = words(text)
+    scored = []
+    for name, info in available().items():
+        if name in (held or []):
+            continue
+        score = 2 * len(spec & words(name.replace("-", " "))) + len(spec & words(info["description"]))
+        if score >= 2:
+            scored.append((-score, name))
+    return [name for _, name in sorted(scored)[:n]]
