@@ -16,6 +16,19 @@ reviewer**: write a precise spec, hand it to a local agent with `wb`, let the ru
 and auto-fix rounds do the cheap iterations, review only what passes, then accept or steer. Don't
 write the code yourself unless the escape hatch fires.
 
+**You run the show, and the bar is yours.** Delegating saves tokens on typing, never on quality.
+What gets accepted is held to the standard you would hold your own code to: correct, complete,
+idiomatic for the repo, minimal, tested. Never think "good enough for a local model". The model
+is a tool you steer; it does not get to shape your judgment:
+- Its summary is a claim, not evidence. "Tests pass", "no other files touched" and "handled the
+  edge cases" are checked against the diff and the test output, every time.
+- Its framing doesn't anchor you. Judge the diff against the spec and the codebase as if no
+  summary existed. A confident or polished summary earns nothing.
+- Don't drift. If round 3 still falls short, fix it yourself or discard it. Never lower the bar
+  to close the task, and never accept on the strength of effort or progress.
+- When the agent disagrees with the spec, weigh its reason on the merits. Change your mind only
+  if it is right, and say so in the feedback.
+
 Task: `$ARGUMENTS`
 
 `wb` is the workbench CLI (`~/repos/workbench`, on PATH as `wb`; `wb --help`). Every command
@@ -64,9 +77,20 @@ A model that reads prompts slowly (low prefill in `wb bench --report`), or one t
 load first, can spend minutes before its first reply. That is normal, not stuck.
 
 ## 4. When woken
-- **review** — the report says tests PASS/FAIL, the agent's summary and the files. Read
-  `wb diff <name> --stat`, then `wb diff <name>` (or `wb diff <name> <path>` for big ones). Review
-  as strictly as any code review: correctness, the spec met, scope creep, stray files, security.
+- **review**: the report gives the test result, the agent's summary and the files. Read
+  `wb diff <name> --stat`, then the full `wb diff <name>` (`wb diff <name> <path>` for big
+  ones). Read every line. Check:
+  - **Correctness**: trace the logic, including edge cases, error paths and inputs the tests
+    don't cover.
+  - **The spec**: every requirement met, nothing missing, nothing added.
+  - **Tests**: they test the behaviour and would fail on a bug; none weakened, skipped or
+    special-cased; expected values not just copied from the output.
+  - **Fit**: the repo's conventions, naming, idioms and existing helpers; no duplicated code.
+  - **Hygiene**: no stray files, debug output, dead code or TODOs.
+  - **Safety**: injection, secrets, unsafe file or shell use.
+
+  If anything is doubtful, check it yourself: run the tests or a quick probe in the worktree
+  (`~/.local/state/workbench/tasks/<name>/worktree`). Accept only what you would have written.
 - **question** — answer it briefly and decisively: `wb answer <name> --text "…"`. The agent is
   blocked until you do.
 - **stuck / failed** — `wb log <name> -n 30` if the report isn't enough; then feedback that unblocks
@@ -74,8 +98,9 @@ load first, can spend minutes before its first reply. That is normal, not stuck.
 
 ## 5. Feedback
 Numbered, concrete changes in a file → `wb feedback <name> --message <file>`. Small models need
-explicit instructions ("in parse(), return 0 for an empty string"), not critique. **Max 3 review
-rounds.** Still wrong after that: make the small remaining fix yourself in the task's worktree
+explicit instructions ("in parse(), return 0 for an empty string"), not critique. Send back
+everything that falls short in one round, small things included. A nit you let through is a
+standard you just lowered. **Max 3 review rounds.** Still wrong after that: make the small remaining fix yourself in the task's worktree
 (`~/.local/state/workbench/tasks/<name>/worktree`) and accept, or `wb discard <name> --reason …`.
 If a "trivial" task fails twice, it wasn't trivial: discard and restart it with `--size significant`.
 
@@ -87,6 +112,7 @@ If a "trivial" task fails twice, it wasn't trivial: discard and restart it with 
   reset); `wb stats` compares the models on finished work.
 
 ## Report to the user
-Short: what was built, on which model, rounds (automatic and review), test result, what you
-fixed or flagged, the branch. Mention the local tokens from the report next to the rough size of
+Short and honest: what was built, on which model, rounds (automatic and review), test result,
+what you fixed, sent back or flagged, the branch. Report the agent's misses plainly; they are
+evidence about the model, and the router learns from accept and discard. Mention the local tokens from the report next to the rough size of
 your own review, so the saving is visible.
