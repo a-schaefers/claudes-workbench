@@ -496,7 +496,10 @@ export const register: Register = (on, options) => {
     // wb bench, not reviewed, so they don't each need a row.
     const benches = list.filter(t => t.bench)
     const benchNow = benches.find(t => ACTIVE.has(t.phase))
-    const benchDone = benches.filter(t => !ACTIVE.has(t.phase))
+    // done in this model's run: earlier runs of other models stay out of the count
+    const benchLatest = benches.reduce<WbTask | undefined>((a, b) => (!a || b.createdAt > a.createdAt ? b : a), undefined)
+    const benchModel = (benchNow ?? benchLatest)?.model
+    const benchDone = benches.filter(t => t.model === benchModel && !ACTIVE.has(t.phase))
     const benchLast = Math.max(0, ...benches.map(t => t.updatedAt))
     const benchBusy = benchNow || now - benchLast < 60_000
     const rows = list.filter(t => !t.bench)
@@ -521,7 +524,7 @@ export const register: Register = (on, options) => {
               <Text dimColor>
                 {benchNow ? ` · ${benchNow.label || benchNow.model} on ${benchTask(benchNow.name)}`
                   : benchBusy ? ' · between tasks' : ` · ${ago(now - benchLast)} ago`}
-                {` · ${benchDone.length} task(s) done · results: wb bench --report`}
+                {` · ${benchDone.length} of its tasks done · results: wb bench --report`}
               </Text>
             </Text>
           </Box>

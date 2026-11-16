@@ -395,7 +395,8 @@ def clock_line(task: store.Task, now: float | None = None, data: dict | None = N
             parts.append(f"~{_secs(left * 1000)} left (typically {typical:.0f}m)" if left > 0
                          else f"{_secs(-left * 1000)} past its typical {typical:.0f}m")
         else:
-            parts.append("no ETA yet (wb bench)")
+            parts.append("no ETA yet: the first measured run" if sp.get("bench")
+                         else "no ETA yet: not measured on this model (wb bench)")
     used, window = context_fill(data or {}), st.get("window")
     if used:
         parts.append(f"context {_k(used)}" + (f" of {window // 1024}K ({100 * used // window}%)"

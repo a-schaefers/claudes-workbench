@@ -393,7 +393,7 @@ def drive(task: store.Task) -> None:
             elif task.status.get("context") == "keep":
                 task.set_status(context=None)  # a one-round instruction
             task.set_status(phase="running", round=n, round_started_at=store.now(),
-                            last="starting the agent")
+                            last="agent started")  # not "starting…": the pane shows its progress
             task.event({"ts": store.now(), "round": n, "kind": "round", "text": "started"})
             rnd = run_round(task, n)
             if rnd["interrupted"] or (pending_steer(task) and not rnd["stuck"]):
