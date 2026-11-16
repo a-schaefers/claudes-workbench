@@ -32,7 +32,7 @@ has the architecture; read it first.
   - `permissions: [{action, resource, effect: "deny"}]` removes a tool or skill from the prompt.
     Denying `execute` (code mode) turns the `opencode_*` tools into direct tools, so deny `opencode_*` too.
     `opencode_worktree_remove` stays listed whatever you do; the rule still refuses the call.
-- To see exactly what OpenCode sends a model, point a provider at a small server that records
+- To see exactly what OpenCode sends a model, point a provider at `tests/capture_llm.py`, which records
   each request, and inspect the system prompt and tools. That is how the facts above were found.
 
 ## Checks before committing
