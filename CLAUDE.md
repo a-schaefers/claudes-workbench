@@ -1,12 +1,16 @@
 # workbench
 
 Claude delegates coding tasks to local models in OpenCode and reviews the results. README.md is
-for people (what it is, install, use); this file is the technical reference.
+for people: the pitch and a quickstart, then (below its rule) "How it works", the full account of
+every feature. This file is the technical reference for changing the code. A change that alters
+what either says (a command, a flag, a default, a guard, a file) updates it in the same commit.
 
 ## Layout
 - `workbench/` is the Python package, standard library only (Python 3.11+, developed on 3.14). Do not add dependencies.
   - `store.py`: task directories, atomic JSON, locked JSONL. Every other part talks through these files.
   - `runner.py`: the detached per-task driver. `cli.py`: `wb`. `ask_mcp.py`: the MCP tool server.
+  - `gitops.py`: the task's worktree and branch, the review diff (intent-to-add, so new files
+    show), commits. `results.py`: results.jsonl rows (`wb accept`/`discard`) and `wb stats`.
   - `models.py`: discovers local models from opencode.json, their status, and GPU residency (make_resident);
     adds and retires them (Ollama's pull/delete, opencode.json entries) for the weekly model check.
   - `chat.py`: the web chat (`wb chat serve`, stdlib HTTP, a token and a Host check; `systemd/wb-chat.service`
@@ -28,7 +32,7 @@ for people (what it is, install, use); this file is the technical reference.
   - `context.py`: what the agent knows. It adds CLAUDE.md files and rules, the nested-instructions map and the handbook to the config layer's `instructions`, and it sets the denied tools and skills.
 - Never name a model in code or the skill. Models come from OpenCode's config and choices from
   the router and the weekly model check, so newer models slot in without code changes. (README's
-  findings section is the one place that names what this machine runs.)
+  quickstart and findings are the only places that name what this machine runs.)
 - `agent/HANDBOOK.md`: Claude's working habits for the local agent. Every agent prompt carries it
   (a copy in the task directory), so keep it short: each token costs prefill time.
 - `bin/wb`, `bin/wb-ask-mcp`: launchers that find the package from their own real path. Never
@@ -38,17 +42,23 @@ for people (what it is, install, use); this file is the technical reference.
 - `skill/delegate/SKILL.md`: the `/delegate` procedure. `~/.claude/skills/delegate` links here.
   Skills for the agents: Claude's library (`wb skill`), handed per task, or a project's own
   `.claude/skills`, committed with it. The user's personal `~/.claude/skills` are denied to agents.
-- `docs/logo.jpg`: the README's banner (generated with x.ai).
+- `docs/`: the README's images: `logo.jpg` (generated with x.ai), `driver-and-agent.jpg` and
+  `web-chat.png` (screenshots; black out any `wb chat url` link, it carries the token).
 
 ## How a task runs
-1. `wb start` asks the router for a model (unless `--model`), makes branch `delegate/<task>` in a
-   fresh worktree, writes the round-1 prompt, spawns the detached runner, and returns.
+1. `wb start` refuses a repo without a committed CLAUDE.md (`--no-claude-md`), asks the router for
+   a model (unless `--model`), makes branch `delegate/<task>` in a fresh worktree, writes the
+   round-1 prompt (the spec plus `cli.PROTOCOL`), records any `--skill`, spawns the detached
+   runner, and returns.
 2. The runner takes the GPU lock (one model at a time), makes the model resident, and runs
    `opencode run --standalone --auto --format json` with the task's config layer. Events go to
    `events.jsonl`; `status.json` is the live summary.
 3. Guards stop the agent on: one call repeated 4 times, 6 tool errors in a row, 40 calls without
    an edit, silence past `--silence-timeout` (900 s), a round past `--round-timeout` (2400 s).
-   Generating past the think budget without acting gets one automatic nudge (a `--now` steer).
+   Generating past the think budget (`--think-timeout`, 420 s) without acting gets one automatic
+   nudge a round (a `--now` steer). Significant tasks raise a `checkin` notice every `--checkin`
+   minutes (10) while they run. `wb steer` queues a note for the end of the run; `--now`
+   interrupts it (`_steer_bell` wakes the round on steer.jsonl). Either continues the session.
 4. After each round the runner runs `--test`; failures go back to the agent up to `--auto-fix`
    times (2) without waking Claude. Rounds continue one session until it is 60% full or OpenCode
    compacted it; then a fresh session gets the task, the diff and the instructions.
@@ -58,20 +68,55 @@ for people (what it is, install, use); this file is the technical reference.
    acknowledges it. A notice Claude never saw is re-raised after a minute (`rewake`).
 7. `wb accept` commits with provenance trailers (no AI co-author line), optionally merging;
    `wb next` commits a step and gives the same agent the next; `wb feedback` sends another round;
-   `wb discard` drops it. `results.jsonl` gets a row, which the router learns from.
+   `wb discard` drops it. `results.jsonl` gets a row, which the router and the skill records
+   learn from. `wb takeover` stops the agent and leaves the task in `review` for Claude to finish.
 
 ## State and config
 Everything is plain files under `~/.local/state/workbench` (`$WB_HOME`):
 ```
-notify.jsonl  results.jsonl  gpu.lock  scout.json  watch.json  chat/
-tasks/<name>/  task.json status.json events.jsonl opencode.json HANDBOOK.md acked runner.log
-               rounds/<n>/{prompt.md,summary.md,tests.txt}  ask/<id>.json|.answer  worktree/
+notify.jsonl  results.jsonl  gpu.lock  scout.json  watch.json
+chat/          messages.jsonl receipts.jsonl listener.json
+tasks/<name>/  task.json status.json events.jsonl opencode.json HANDBOOK.md context.md
+               steer.jsonl acked runner.log  rounds/<n>/{prompt.md,summary.md,tests.txt}
+               ask/<id>.json|.answer  worktree/
 ```
+The skill library is `~/.local/share/workbench/skills` (`$WB_SKILLS`), a git repo of its own
+(retired skills in `retired/`). The web chat's token is `~/.config/workbench/chat-token`
+(`$WB_CHAT_TOKEN`, mode 600).
+
 A model is a candidate when its OpenCode provider's `baseURL` is on this machine
 (`~/.config/opencode/opencode.json`). `~/.config/workbench/models.json` (`$WB_MODELS`) holds only
 what OpenCode can't say, by provider or model id: `start`/`stop` commands for a one-model server,
-`skip`, and `sizes` (`wb model sizes`). Ollama entries need `options.max_tokens` (Ollama ignores
+`skip`, `sizes` (`wb model sizes`), `weights_gb` (the router's size for a server that can't
+say) and `label`. Ollama entries need `options.max_tokens` (Ollama ignores
 OpenCode's `max_completion_tokens`); `wb model add` writes it and `wb doctor` checks it.
+
+Environment: `WB_HOME`, `WB_MODELS`, `WB_SKILLS`, `WB_CHAT_TOKEN` (paths above);
+`WB_OPENCODE_CONFIG` (OpenCode's config, default `~/.config/opencode/opencode.json`);
+`WB_COMPACT_AT` (the mod's early compaction, a percentage, 0 off); `WB_BIN` (the `wb` the mod runs).
+Tests only: `WB_OPENCODE_BIN` (a fake opencode), `WB_FAKE_MODELS` (no model servers).
+`WB_TASK` names the task for the ask server and the agent's environment.
+
+## The mod
+`mod/hooks/register.tsx` keeps no state of its own that matters: it reads the task files.
+- Its ears are a `wb events` child (inotify); each line runs `poll()`. The 1.5 s timer only redraws
+  running clocks and polls every 30 s should the child be gone.
+- A wake is a submitted prompt for a task's newest notice past its `acked` mark, only while that
+  news is still true (the phase matches; a check-in while the task runs), never for one older than
+  an hour, and held while Claude's main loop is mid-turn (`mem.busy`, set by `turn.start` or any
+  `tool.call`). It writes `acked` before submitting. `rewake` covers a task waiting on Claude for a
+  minute with no notice delivered. `_ack_all` in cli.py stops the mark short of news still true.
+- A slash command may not start a turn itself: it pushes onto `mem.queued`, which the next poll
+  submits.
+- Compaction: `session.compact` adds KEEP_ON_COMPACT whenever tasks are open; at a task boundary
+  it compacts once Claude passes COMPACT_AT of the auto-compact threshold; `prompt.context` adds
+  the open tasks (`wb status`) and, for six hours after a web message, the `web-chat` block.
+- The web chat listener: a session that ran /delegate (or a delegating `wb` command) claims
+  chat/listener.json with its `wb events` pid; the first live claim wins. User messages go in as
+  prompts (`asUser`), into the running turn via `session.send` when busy, with a receipt.
+- The weekly model check: in a quiet moment (the person has had a turn, no task open) it submits
+  SCOUT_NOTE when scout.json's `done_at` is a week old, marking `offered_at` so it asks at most daily.
+- Atom shapes are tagged (`tasks-1`, `live-1`, `chat-2`): change the tag when the type changes.
 
 ## Troubleshooting
 - `wb doctor`: opencode and its config, git, each model's readiness, the state directory.
