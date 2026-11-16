@@ -13,7 +13,8 @@ import time
 from collections import defaultdict
 from pathlib import Path
 
-from . import __version__, chat, gitops, hardware, models, results, router, store, transcript
+from . import (__version__, chat, context, gitops, hardware, models, results, router, skills,
+               store, transcript)
 from .watch import Watcher, wait_exit
 from .runner import PKG_ROOT
 
@@ -113,6 +114,7 @@ def cmd_start(a):
     spec_text = Path(a.spec).read_text() if a.spec != "-" else sys.stdin.read()
     if not spec_text.strip():
         die("the spec is empty")
+    handed = _skill_names(a.skill)
     m, state, why = pick_model(a.size, a.model)
     if not state["available"] and not a.force:
         die(f"{m.id} can't run: {state['why']}. (--force queues it anyway)", 3)
@@ -142,7 +144,8 @@ def cmd_start(a):
     task.round_dir(1).mkdir(parents=True)
     task.round_dir(1).joinpath("prompt.md").write_text(prompt)
     task.set_status(phase="queued", round=1, reviews=0, auto_fixes=0, tools=0,
-                    tok_in=0, tok_out=0, session=None, last="starting")
+                    tok_in=0, tok_out=0, session=None, last="starting",
+                    skills=handed, skills_ever=handed)
     spawn_runner(task)
     print(f"started {a.name} on {m.label} · branch {gitops.branch_name(a.name)} · "
           f"base {base[:8]}" + (f" · tests `{a.test}`, auto-fix {a.auto_fix}" if a.test else ""))
@@ -150,6 +153,8 @@ def cmd_start(a):
         print("note: the repo has uncommitted changes; the agent's worktree starts from "
               f"{a.base}, without them")
     print(f"model: {why}" if why != "asked for" else f"model: {m.id} (asked for)")
+    if handed:
+        print("skills handed: " + ", ".join(handed))
     if not state["available"]:
         print(f"note: queued although {state['why']}")
     elif not state["resident"]:
@@ -189,6 +194,7 @@ def cmd_next(a):
     spec, st = task.spec, task.status
     if st.get("phase") != "review":
         die(f"{a.name} is {st.get('phase')}; wb next follows an approved step under review")
+    handed = _skill_names(a.skill) if a.skill else None
     if runner_alive(task):
         die(f"{a.name}'s runner is still running")
     step = st.get("steps", 1)
@@ -211,6 +217,8 @@ def cmd_next(a):
         + PROTOCOL.format(branch=spec["branch"], test_line=test_line, budget=budget))
     task.event({"ts": store.now(), "round": n, "kind": "next_step",
                 "text": f"step {step} committed as {commit}; next step sent"})
+    if handed is not None:
+        task.set_status(skills=handed, skills_ever=_union(st.get("skills_ever"), handed))
     task.set_status(round=n, steps=step + 1, step_round=n, phase="queued", reviews=0,
                     context="fresh" if a.fresh else None,
                     auto_fixes_total=st.get("auto_fixes_total", 0) + st.get("auto_fixes", 0),
@@ -599,6 +607,12 @@ def cmd_scout(a):
         print("\nwatch list: what would reopen a past decision; check each against what is new")
         for i, r in enumerate(items, 1):
             print(f"  {i}. ({time.strftime('%Y-%m-%d', time.localtime(r['ts']))}) {r['text']}")
+    have, use = skills.available(), skills.usage()
+    flagged = [(n, skills.advice(use.get(n), store.now())) for n in have]
+    flagged = [(n, w) for n, w in flagged if w and w != "never offered yet"]
+    print(f"\nskill library: {len(have)} skill(s)" + (", all pulling their weight" if have and not flagged else ""))
+    for n, w in flagged:
+        print(f"  {n}: {w}")
     print("\nhardware")
     print("\n".join(hardware.report()))
     provs = models.providers()
@@ -633,6 +647,82 @@ def cmd_scout(a):
     print(results.table())
     print("\nnext: compare with what is newest and best for this hardware, recommend to the user, "
           "and when done: wb scout --done --notes \"…\"")
+
+
+def _skill_names(names) -> list[str]:
+    """Library skills named on the command line (repeatable, or comma-separated), checked."""
+    out = [x for n in names or [] for x in n.split(",") if x]
+    try:
+        skills.resolve(out)
+    except KeyError as e:
+        die(f"no skill {e.args[0]} in the library (wb skill list)")
+    return list(dict.fromkeys(out))
+
+
+def _union(a, b) -> list[str]:
+    return list(dict.fromkeys([*(a or []), *(b or [])]))
+
+
+def cmd_skill(a):
+    """Claude's skill library for the agents: write, hand out, take back, retire."""
+    if a.action == "list":
+        have, use, now = skills.available(), skills.usage(), store.now()
+        if not have:
+            print(f"the skill library is empty ({skills.library()}); "
+                  "wb skill add <name> --from <file> -m \"why\" starts it")
+            return
+        for name, info in have.items():
+            u = use.get(name) or {"offered": 0, "loaded": 0, "accepted": 0}
+            note = skills.advice(use.get(name), now)
+            print(f"{name}: {info['description']}\n  offered {u['offered']} · loaded "
+                  f"{u['loaded']} · {u['accepted']} of those accepted" + (f" · {note}" if note else ""))
+        return
+    if a.action == "show":
+        have = skills.available()
+        if a.name not in have:
+            die(f"no skill {a.name} in the library")
+        print((have[a.name]["path"] / "SKILL.md").read_text().rstrip())
+        print("\nhistory:\n" + "\n".join("  " + h for h in skills.history(a.name)))
+        return
+    if a.action == "add":
+        personal = set(context.denied_skills())
+        if a.name in personal:
+            die(f"{a.name} is the name of one of the user's own skills; pick another")
+        try:
+            verb, warns = skills.add(Path(a.source), a.name, a.message)
+        except ValueError as e:
+            die(f"not added: {e}")
+        print(f"{verb} {a.name}" + "".join(f"\nwarning: {w}" for w in warns))
+        return
+    if a.action == "retire":
+        try:
+            skills.retire(a.name, a.message)
+        except KeyError:
+            die(f"no skill {a.name} in the library")
+        print(f"retired {a.name} (wb skill restore {a.name} brings it back)")
+        return
+    if a.action == "restore":
+        try:
+            skills.restore(a.name)
+        except KeyError:
+            die(f"no retired skill {a.name}")
+        print(f"restored {a.name}")
+        return
+    # hand / take: change what one task's agent holds, from its next run on
+    task = need(a.task)
+    names = _skill_names(a.names) if a.action == "hand" else \
+        [x for n in a.names for x in n.split(",") if x]
+    st = task.status
+    held = st.get("skills") or []
+    if a.action == "hand":
+        held = _union(held, names)
+        task.set_status(skills=held, skills_ever=_union(st.get("skills_ever"), names))
+    else:
+        held = [x for x in held if x not in names]
+        task.set_status(skills=held)
+    when = "from its next run" + (" (`wb steer --now` starts that run now)" if runner_alive(task)
+                                  else "")
+    print(f"{task.name} holds: {', '.join(held) or 'no skills'}; the agent is told {when}")
 
 
 def cmd_model(a):
@@ -860,6 +950,8 @@ def main(argv=None):
     s.add_argument("--force", action="store_true", help="queue even if the model can't run now")
     s.add_argument("--no-claude-md", action="store_true",
                    help="start even though the repo has no CLAUDE.md")
+    s.add_argument("--skill", action="append", metavar="NAME",
+                   help="hand the agent this library skill (repeatable; wb skill list)")
     s.set_defaults(f=cmd_start)
 
     s = sub.add_parser("feedback", help="send review feedback for another round")
@@ -877,7 +969,25 @@ def main(argv=None):
     s.add_argument("--message", "-m", required=True, help="commit subject for the approved step")
     s.add_argument("--test", help="the next step's acceptance command (default: unchanged)")
     s.add_argument("--fresh", action="store_true", help="a fresh session instead of the same one")
+    s.add_argument("--skill", action="append", metavar="NAME",
+                   help="the skills for the next step (repeatable; replaces the set; default: unchanged)")
     s.set_defaults(f=cmd_next)
+
+    s = sub.add_parser("skill", help="Claude's skill library for the agents: list, show, add, "
+                       "retire, restore; hand a task a skill or take it back")
+    ss = s.add_subparsers(dest="action", required=True)
+    ss.add_parser("list", help="every skill, how often it was offered, loaded and helped")
+    x = ss.add_parser("show"); x.add_argument("name")
+    x = ss.add_parser("add", help="add or update a skill: a SKILL.md, or a directory holding one")
+    x.add_argument("name"); x.add_argument("--from", dest="source", required=True)
+    x.add_argument("--message", "-m", required=True, help="why: what review taught")
+    x = ss.add_parser("retire"); x.add_argument("name")
+    x.add_argument("--message", "-m", required=True, help="why it is no longer needed")
+    x = ss.add_parser("restore"); x.add_argument("name")
+    for verb, what in (("hand", "give a task's agent skills"), ("take", "take skills back")):
+        x = ss.add_parser(verb, help=what + ", from its next run")
+        x.add_argument("task"); x.add_argument("names", nargs="+")
+    s.set_defaults(f=cmd_skill)
     s = sub.add_parser("answer", help="answer the agent's ask_reviewer question")
     s.add_argument("name"); s.add_argument("--id")
     g = s.add_mutually_exclusive_group(required=True)

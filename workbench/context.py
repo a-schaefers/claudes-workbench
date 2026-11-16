@@ -12,7 +12,7 @@ from __future__ import annotations
 import hashlib
 from pathlib import Path
 
-from . import gitops, store
+from . import gitops, skills, store
 
 PKG_ROOT = Path(__file__).resolve().parent.parent
 HANDBOOK = PKG_ROOT / "agent" / "HANDBOOK.md"
@@ -102,5 +102,9 @@ def layer(task: store.Task) -> dict:
     rules += [{"action": "shell", "resource": c, "effect": "deny"} for c in DENIED_SHELL]
     rules += [{"action": "skill", "resource": n, "effect": "deny"}
               for n in denied_skills(task.spec.get("deny_skills"))]
+    # the skills Claude handed this task, one directory each: OpenCode lists exactly those, and
+    # the rest of the library stays out of the prompt (a retired one is simply left out)
+    have = skills.available()
+    handed = [str(have[n]["path"]) for n in task.status.get("skills") or [] if n in have]
     return {"instructions": [str(p) for p in files + ([note] if note else [])],
-            "permissions": rules}
+            "permissions": rules, "skills": handed}

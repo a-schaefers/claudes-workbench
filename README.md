@@ -86,6 +86,11 @@ in the link.
   or discards anything that isn't up to its own standard.
 - **Small pieces.** Local models work in a small context, so one concern and a couple of files per
   task. A step that never finished as one big task finished in half an hour as three small ones.
+- **Claude builds a skill library for the agents.** When review teaches something the next agent
+  will need too (a library's quirk, a pitfall, a check to run), Claude writes it down as a skill.
+  Each agent gets only the skills that fit its task, and Claude takes them back when that part is
+  done, so a growing library never clutters a small model's prompt. Claude tracks which skills
+  actually help and retires the ones that don't.
 
 ## What we found (November 2026, on the PC above)
 

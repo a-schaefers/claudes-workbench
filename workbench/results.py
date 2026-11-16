@@ -1,7 +1,7 @@
 """results.jsonl: one row per closed task, so the models can be compared on real work."""
 from collections import defaultdict
 
-from . import store
+from . import skills, store
 
 
 def record(task: store.Task, outcome: str, **extra) -> dict:
@@ -12,7 +12,9 @@ def record(task: store.Task, outcome: str, **extra) -> dict:
            "reviews": st.get("reviews", 0),
            "tests_ok": (st.get("tests") or {}).get("ok"),
            "minutes": round((store.now() - spec.get("created_at", store.now())) / 60, 1),
-           "tok_in": st.get("tok_in", 0), "tok_out": st.get("tok_out", 0), **extra}
+           "tok_in": st.get("tok_in", 0), "tok_out": st.get("tok_out", 0),
+           "skills_offered": st.get("skills_ever") or [], "skills_loaded": skills.loaded(task),
+           **extra}
     store.append_jsonl(store.home() / "results.jsonl", row)
     return row
 

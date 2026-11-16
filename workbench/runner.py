@@ -19,7 +19,7 @@ import time
 import traceback
 from pathlib import Path
 
-from . import context, gitops, models, store
+from . import context, gitops, models, skills, store
 from .events import StuckDetector, normalize
 from .watch import Watcher
 
@@ -162,7 +162,8 @@ def run_round(task: store.Task, n: int) -> dict:
                             "--format", "json", "--title", f"wb: {task.name}"]
     if st.get("session"):
         cmd += ["--session", st["session"]]
-    cmd.append(prompt)
+    note = skills_note(task, n)
+    cmd.append(note + prompt)
     env = {**os.environ, "PWD": str(task.worktree),  # opencode finds the project from $PWD
            "OPENCODE_CONFIG": str(write_config_layer(task)),
            "WB_TASK": task.name, "WB_HOME": str(store.home()), **CLEAN_ENV}
@@ -380,6 +381,32 @@ def handoff_prompt(task: store.Task, why: str, instructions: str) -> str:
             + f"\n\n## Now\n\n{instructions}")
 
 
+def skills_note(task: store.Task, n: int) -> str:
+    """What the agent is told about the skills Claude handed it: the whole set at the start of a
+    session, then only what changed (handed or taken back) since it was last told."""
+    st = task.status
+    now, told = st.get("skills") or [], st.get("skills_told")
+    have = skills.available()
+    lines = []
+    if told is None:
+        new, gone = now, []
+        head = "Claude picked these skills for this task. Load each with the skill tool " \
+               "before the part of the work it covers, and follow it:"
+    else:
+        new, gone = [x for x in now if x not in told], [x for x in told if x not in now]
+        head = "Claude handed you more skills; load each before the part of the work it covers:"
+    if new:
+        lines += [head] + [f"- `{x}`: {have[x]['description']}" for x in new if x in have]
+    if gone:
+        lines.append("Claude took back: " + ", ".join(f"`{x}`" for x in gone)
+                     + ". They no longer apply to this work; don't follow them.")
+    task.set_status(skills_told=list(now))
+    if not lines:
+        return ""
+    task.event({"ts": store.now(), "round": n, "kind": "skills", "text": "\n".join(lines)})
+    return "\n".join(lines) + "\n\n"
+
+
 def current_task_prompt(task: store.Task) -> str:
     """The spec the agent is working to now, with the protocol: round 1's, or the latest `wb next`."""
     n = task.status.get("step_round") or 1
@@ -393,7 +420,7 @@ def _start_fresh(task: store.Task, n: int, why: str) -> None:
     path.write_text(handoff_prompt(task, why, now))
     st = task.status
     task.set_status(session=None, sessions=(st.get("sessions") or []) + [st["session"]],
-                    context=None)
+                    context=None, skills_told=None)  # a new session hears the skills again
     task.event({"ts": store.now(), "round": n, "kind": "fresh",
                 "text": f"a fresh session for the agent: {why}"})
 

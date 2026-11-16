@@ -278,6 +278,9 @@ def task_entries(task: store.Task) -> list[Entry]:
         elif kind == "steer":
             what = "interrupts the agent" if r.get("now") else "queues a note for the agent's next step"
             out.append(Entry(ts, key, [("claude", f"■ Claude {what}")]))
+        elif kind == "skills":
+            out.append(Entry(ts, key, [("claude", "Claude → agent · skills")]
+                             + _block("", r.get("text", ""), 12, "  ")))
         elif kind == "interrupted":
             out.append(Entry(ts, key, [("bad", "■ the agent was interrupted")]))
         elif kind == "fresh":

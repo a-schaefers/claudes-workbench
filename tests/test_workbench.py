@@ -10,7 +10,7 @@ import tempfile
 import time
 import unittest
 import warnings
-from contextlib import redirect_stdout
+from contextlib import redirect_stderr, redirect_stdout
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -54,7 +54,7 @@ class Base(unittest.TestCase):
         self.env_before = dict(os.environ)
         os.environ.update(WB_HOME=str(tmp / "state"), WB_OPENCODE_BIN=FAKE, WB_FAKE_MODELS="1",
                           WB_OPENCODE_CONFIG=str(tmp / "opencode.json"),
-                          WB_MODELS=str(tmp / "wb-models.json"))
+                          WB_MODELS=str(tmp / "wb-models.json"), WB_SKILLS=str(tmp / "skills"))
         (tmp / "opencode.json").write_text(json.dumps(OPENCODE_CONFIG))
         self.repo = tmp / "repo"
         self.repo.mkdir()
@@ -530,6 +530,111 @@ class AgentContext(Base):
         self.assertEqual(nested, [])
 
 
+def write_skill(path: Path, name: str, description: str, body: str = "Do it this way.\n") -> Path:
+    path.mkdir(parents=True, exist_ok=True)
+    (path / "SKILL.md").write_text(f"---\nname: {name}\ndescription: {description}\n---\n{body}")
+    return path
+
+
+class SkillLibrary(Base):
+    """Claude's skills for the agents: written and checked, handed to one task, taken back, judged."""
+
+    def draft(self, name, description="Use when drawing triangles with raylib.", body="Steps.\n"):
+        return write_skill(Path(self.tmp.name) / "drafts" / name, name, description, body)
+
+    def test_add_checks_the_skill_and_keeps_its_history(self):
+        from workbench import skills
+        self.assertIn("added raylib-2d", run_wb("skill", "add", "raylib-2d", "--from",
+                                                 str(self.draft("raylib-2d")), "-m", "winding order"))
+        self.assertIn("updated raylib-2d", run_wb("skill", "add", "raylib-2d", "--from", str(
+            self.draft("raylib-2d", body="Better steps.\n") / "SKILL.md"), "-m", "clearer"))
+        self.assertIn("Better steps.", run_wb("skill", "show", "raylib-2d"))
+        self.assertEqual(len(skills.history("raylib-2d")), 2)            # why each change was made
+        for why, make in (("directory is 'x'", lambda: self.draft("other-name") / "SKILL.md"),
+                          ("chars (max", lambda: self.draft("x", "Use when " + "very " * 80)),
+                          ("bytes (max", lambda: self.draft("x", body="y" * 9000))):
+            err = io.StringIO()
+            with self.assertRaises(SystemExit), redirect_stderr(err):
+                run_wb("skill", "add", "x", "--from", str(make()), "-m", "no")
+            self.assertIn(why, err.getvalue())
+        out = run_wb("skill", "add", "paths", "--from", str(self.draft(
+            "paths", "Draws things.", "Read ~/notes/plan.md first.\n")), "-m", "warned")
+        self.assertIn("outside the repo", out)
+        self.assertIn("when to use it", out)
+
+    def test_the_users_own_skill_names_are_off_limits(self):
+        home = Path(self.tmp.name) / "home"
+        write_skill(home / ".claude" / "skills" / "publishing-arm", "publishing-arm", "Use when publishing.")
+        os.environ["HOME"] = str(home)
+        with self.assertRaises(SystemExit):
+            run_wb("skill", "add", "publishing-arm", "--from", str(self.draft("publishing-arm")), "-m", "no")
+
+    def test_retired_skills_leave_the_library_and_can_come_back(self):
+        run_wb("skill", "add", "old", "--from", str(self.draft("old")), "-m", "first")
+        run_wb("skill", "retire", "old", "-m", "the model learned it")
+        self.assertIn("empty", run_wb("skill", "list"))
+        with self.assertRaises(SystemExit):
+            self.start("t-old", "ok", "--skill", "old")                  # not in the library now
+        run_wb("skill", "restore", "old")
+        self.assertIn("old:", run_wb("skill", "list"))
+
+    def test_a_handed_skill_reaches_only_its_task_and_can_be_taken_back(self):
+        run_wb("skill", "add", "alpha", "--from", str(self.draft("alpha", "Use when ALPHA.")), "-m", "a")
+        run_wb("skill", "add", "beta", "--from", str(self.draft("beta", "Use when BETA.")), "-m", "b")
+        prompts = Path(self.tmp.name) / "prompts.jsonl"
+        os.environ["FAKE_PROMPTS"] = str(prompts)
+        self.assertIn("skills handed: alpha", self.start("t-sk", "fix", "--auto-fix", "0", "--skill", "alpha"))
+        wait_phase("t-sk", {"review"})
+        task = store.Task("t-sk")
+        layer = json.loads((task.dir / "opencode.json").read_text())
+        self.assertEqual(layer["skills"], [str(Path(os.environ["WB_SKILLS"]) / "alpha")])  # not beta
+        first = json.loads(prompts.read_text().splitlines()[0])
+        self.assertIn("Claude picked these skills", first)
+        self.assertIn("`alpha`: Use when ALPHA.", first)
+        self.assertNotIn("BETA", first)
+        self.assertIn("holds: alpha, beta", run_wb("skill", "hand", "t-sk", "beta"))
+        run_wb("skill", "take", "t-sk", "alpha")
+        run_wb("feedback", "t-sk", "--text", "1. The answer is 42.")
+        wait_phase("t-sk", {"review"})
+        layer = json.loads((task.dir / "opencode.json").read_text())
+        self.assertEqual(layer["skills"], [str(Path(os.environ["WB_SKILLS"]) / "beta")])
+        second = json.loads(prompts.read_text().splitlines()[1])
+        self.assertIn("`beta`: Use when BETA.", second)                  # only what changed
+        self.assertIn("Claude took back: `alpha`", second)
+        self.assertNotIn("ALPHA.", second)
+        self.assertIn("Claude → agent · skills", "\n".join(
+            t for e in transcript.task_entries(task) for _, t in e.lines))
+        run_wb("accept", "t-sk", "-m", "feat: answer")
+        row = store.read_jsonl(store.home() / "results.jsonl")[0][-1]
+        self.assertEqual(row["skills_offered"], ["alpha", "beta"])
+
+    def test_a_fresh_session_hears_the_skills_again(self):
+        from workbench import runner as r
+        run_wb("skill", "add", "alpha", "--from", str(self.draft("alpha", "Use when ALPHA.")), "-m", "a")
+        self.start("t-fr", "ok", "--skill", "alpha")
+        wait_phase("t-fr", {"review"})
+        task = store.Task("t-fr")
+        self.assertEqual(r.skills_note(task, 2), "")                     # told already, nothing new
+        task.set_status(skills_told=None)                                # what _start_fresh does
+        self.assertIn("`alpha`", r.skills_note(task, 2))
+
+    def test_the_record_says_which_skills_earn_their_place(self):
+        from workbench import skills
+        row = events.normalize({"type": "tool_use", "part": {"tool": "skill", "state": {
+            "status": "completed", "input": {"id": "alpha"}}}}, 1)
+        self.assertEqual(row["brief"], "alpha")                           # loads are recorded by name
+        now = store.now()
+        for loaded, outcome in ((["alpha"], "accepted"), ([], "accepted"), ([], "discarded")):
+            store.append_jsonl(store.home() / "results.jsonl", {
+                "ts": now, "outcome": outcome, "skills_offered": ["alpha", "beta"],
+                "skills_loaded": loaded})
+        use = skills.usage()
+        self.assertEqual(use["alpha"], {"offered": 3, "loaded": 1, "accepted": 1, "last": now})
+        self.assertIn("never loaded", skills.advice(use["beta"], now))
+        self.assertEqual(skills.advice(use["alpha"], now), "")
+        self.assertIn("60 days", skills.advice(use["alpha"], now + 61 * 86400))
+
+
 @unittest.skipUnless(shutil.which("opencode"), "needs the real opencode")
 class RealOpenCode(Base):
     """Guards the OpenCode behaviour context.py relies on, with a model server that records."""
@@ -539,7 +644,10 @@ class RealOpenCode(Base):
         (self.repo / "CLAUDE.md").write_text("CANARY-CLAUDE-MD: follow me\n")
         subprocess.run(["git", "-C", str(self.repo), "add", "CLAUDE.md"], check=True)
         subprocess.run(["git", "-C", str(self.repo), "commit", "-qm", "rules"], check=True)
-        self.start("t-real", "ok")
+        lib = Path(os.environ["WB_SKILLS"])
+        write_skill(lib / "handed", "handed", "Use when CANARY-HANDED.")
+        write_skill(lib / "kept", "kept", "Use when CANARY-KEPT.")       # in the library, not handed
+        self.start("t-real", "ok", "--skill", "handed")
         wait_phase("t-real", {"review"})
         task = store.Task("t-real")
         with socket.socket() as sock:
@@ -571,6 +679,8 @@ class RealOpenCode(Base):
         self.assertTrue({"edit", "read", "shell"} <= tools)
         self.assertFalse({"question", "execute", "subagent"} & tools)
         self.assertNotIn("<id>delegate</id>", text)
+        self.assertIn("CANARY-HANDED", text)              # a handed skill is listed to the model
+        self.assertNotIn("CANARY-KEPT", text)             # and the rest of the library is not
 
 
     def test_sudo_is_refused_even_inside_a_compound_command(self):

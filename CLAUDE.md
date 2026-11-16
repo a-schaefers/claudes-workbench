@@ -22,6 +22,9 @@ for people (what it is, install, use); this file is the technical reference.
   - `events.py`: event normalization and the stuck detector.
   - `transcript.py`: `wb watch`, the human view: the OpenCode session export merged with the task's
     events. Its `--json` lines feed the mod's pane.
+  - `skills.py`: Claude's skill library for the agents (`$WB_SKILLS`, default
+    ~/.local/share/workbench/skills, its own git repo): checks, add/retire/restore, what each task
+    was offered and loaded. `wb skill` drives it; a task holds the skills in `status.skills`.
   - `context.py`: what the agent knows. It adds CLAUDE.md files and rules, the nested-instructions map and the handbook to the config layer's `instructions`, and it sets the denied tools and skills.
 - Never name a model in code or the skill. Models come from OpenCode's config and choices from
   the router and the weekly model check, so newer models slot in without code changes. (README's
@@ -33,8 +36,8 @@ for people (what it is, install, use); this file is the technical reference.
 - `mod/`: the Claude Code mod (TypeScript hooks module). `$` may only be passed to functions
   declared at the top level of `register.tsx`, so `claude plugin validate` can follow it.
 - `skill/delegate/SKILL.md`: the `/delegate` procedure. `~/.claude/skills/delegate` links here.
-  Skills for the agents live in each project's own `.claude/skills`, committed with it; the
-  user's personal `~/.claude/skills` are denied to agents.
+  Skills for the agents: Claude's library (`wb skill`), handed per task, or a project's own
+  `.claude/skills`, committed with it. The user's personal `~/.claude/skills` are denied to agents.
 - `docs/logo.jpg`: the README's banner (generated with x.ai).
 
 ## How a task runs
@@ -88,6 +91,9 @@ OpenCode's `max_completion_tokens`); `wb model add` writes it and `wb doctor` ch
   - `--standalone` servers inherit the env and share session storage with the background service.
   - It loads AGENTS.md itself but never CLAUDE.md, which reaches it through `instructions` (absolute paths).
   - Skills come from `~/.claude/skills` and `.claude/skills`. A `disable-model-invocation` skill is not listed.
+    The config's `skills` list adds more: a path to one skill's directory lists that skill, a parent
+    directory lists every skill in it, a path to the SKILL.md itself lists nothing. Handed skills
+    go in one directory each, so the rest of the library stays out of the prompt.
   - `permissions: [{action, resource, effect: "deny"}]` removes a tool or skill from the prompt.
     For the `shell` action the resource matches each part of a compound command (`cd x && sudo y`
     is caught), and a later rule overrides an earlier one. The agent's only shell limit is sudo;

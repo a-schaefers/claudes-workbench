@@ -12,7 +12,9 @@ anything here.
   test) and do it the same way. Reuse existing helpers instead of writing new ones.
 - Never guess at an API, flag, config key or file path. Check it in the code, the installed
   package, or `--help`. If you cannot confirm it, say so in your summary.
-- If a listed skill matches the task, load it with the skill tool first and follow it.
+- Claude may hand you skills for this task: your prompt names them. Load each with the skill
+  tool before the part of the work it covers, and follow it; a skill Claude takes back no
+  longer applies. Other listed skills: load one only if it clearly matches the task.
 
 ## Making the change
 - Do exactly what the spec asks: the smallest diff that does it completely. No drive-by

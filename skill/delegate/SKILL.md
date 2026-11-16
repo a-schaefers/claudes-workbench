@@ -107,13 +107,8 @@ the repo's CLAUDE.md / AGENTS.md / CLAUDE.local.md / `.claude/rules`, a map of n
 files, the workbench handbook (`agent/HANDBOOK.md`: read first, match the code, smallest diff,
 verify, honest summary) and the repo's own `.claude/skills` (never the user's personal skills
 in `~/.claude/skills`). So don't restate project conventions; spend the spec on what is specific
-to this task: the files to read first, the existing code to imitate, and any skill to load by
-name ("load the `x` skill first").
-
-When a project needs a procedure the agents will repeat (how to add an endpoint, run the
-screenshot check, cut a release), write it as a skill in that project:
-`<repo>/.claude/skills/<name>/SKILL.md`, committed with the project like any other file. The
-agents find it there; never put agent skills in `~/.claude/skills`, which is the user's own.
+to this task: the files to read first, the existing code to imitate, and the skills to hand it
+(below).
 
 **Size every task to what the local models finish, as measured.** One concern, at most 2–3 files
 and ~150 new lines, with the files named. The local agents work in a 32K context: a task
@@ -130,10 +125,40 @@ in ~30 minutes as three, every hidden check passing.)
 - Check the tests catch bugs, not just that they pass: break the code in a scratch copy a few
   ways and see each break fail a test.
 
+## Skills for the agents: you write them, you hand them out
+The agents learn nothing between tasks; you do. A skill carries what you learned to the next
+agent that needs it, and only to that one, so a growing library never crowds a small model's
+prompt. You are the only author: an agent writing its own skills would record its mistakes as rules.
+
+**Write one** when review teaches something that will come up again: a correction you'd otherwise
+repeat in the next spec (a library's quirk, a pitfall, a check the agent should run), or a recipe
+the agents need that the repo can't tell them. Not a skill: a one-task detail (the spec), what
+every task in a repo needs (that repo's CLAUDE.md, which every agent reads), a working habit
+(the handbook). General knowledge goes in your library: write the SKILL.md in the scratchpad, then
+`wb skill add <name> --from <file> -m "<what review taught>"` (it checks and commits it).
+Knowledge of one project that only some of its tasks need goes in `<repo>/.claude/skills/<name>/`,
+committed with the project; the agents there always see it. Never `~/.claude/skills`, the user's.
+
+A good skill: front matter `name` (the directory's) and a `description` that says when to use it
+("Use when drawing with raylib ...": it is all the agent sees before it decides to load it); then
+20–60 lines of imperative steps, the pitfall with the right and wrong form, and how to check the
+result. No paths outside the repo (agents go looking for them), no model names.
+
+**Hand out** 0–2 skills per task, only ones that fit this task: `wb start … --skill <name>`; a
+new step gets its own set with `wb next … --skill <name>`. The agent is told which it holds.
+`wb skill hand <task> <name>` adds one mid-task, `wb skill take <task> <name>` takes one back
+once that part of the work is done (from the agent's next run; `wb steer --now` starts that run).
+
+**Keep it honest.** Results record which skills each task was offered and which the agent loaded.
+After a review: a handed skill was loaded and the agent still made its mistake → rewrite it
+(`wb skill add` the new version, saying why); offered and never loaded → its description is
+wrong. `wb skill list` shows each skill's record and flags clutter; the weekly check retires what
+no longer earns its place (`wb skill retire <name> -m why`; `restore` brings one back).
+
 ## 3. Dispatch
 ```
 wb start <kebab-name> --spec <file> --repo <repo> --size significant|trivial \
-   --test "<acceptance command>" [--model …] [--auto-fix 2]
+   --test "<acceptance command>" [--skill <name>] [--model …] [--auto-fix 2]
 ```
 It returns at once; a detached runner does the work. **Don't poll.** With the workbench mod loaded
 the session is woken by a `[workbench]` prompt when the task needs you (review, question, stuck,
@@ -206,6 +231,8 @@ every check-in costs your tokens.
   blocked until you do.
 - **stuck / failed** — `wb log <name> -n 30` if the report isn't enough; then feedback that unblocks
   it, or discard.
+- **After every review**, one question: did I just correct something the next agent will get
+  wrong too? Then it's a skill (above), written now while the lesson is fresh.
 
 ## 5. Feedback
 Numbered, concrete changes in a file → `wb feedback <name> --message <file>` (or `--text "…"`). Small models need

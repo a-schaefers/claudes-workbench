@@ -10,6 +10,8 @@ EDIT_TOOLS = {"edit", "write", "patch", "multiedit", "apply_patch"}
 def _brief(tool: str, inp: dict) -> str:
     if not isinstance(inp, dict):
         return ""
+    if tool == "skill":
+        return str(inp.get("id") or inp.get("name") or "")
     for key in ("command", "filePath", "path", "pattern", "url", "query", "description"):
         if inp.get(key):
             text = str(inp[key]).replace("\n", " ")

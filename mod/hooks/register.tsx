@@ -42,7 +42,8 @@ const SCOUT_NOTE =
   'the background, `wb model sizes <id> …` if it should only take some task sizes, and ' +
   '`wb model retire <id> [--delete]` for what it replaces. Installed models that are not ' +
   'registered may belong to other tools: ask first.\n' +
-  '5. `wb scout --done --notes "<what you recommended or changed>"`.\n' +
+  '5. The skill library: rewrite or retire (`wb skill retire`) what `wb scout` flags.\n' +
+  '6. `wb scout --done --notes "<what you recommended or changed>"`.\n' +
   'Keep it short; if nothing is worth changing, say so in one line.'
 // Two slash commands for the user: /delegate-quit stops every agent at once
 // (`wb stop --all`) and tells Claude so; /delegate-quit-and-hand-back-claude stops the agents and
