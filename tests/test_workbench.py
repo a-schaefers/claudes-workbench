@@ -125,9 +125,7 @@ class Lifecycle(Base):
     def test_feedback_continues_the_same_session(self):
         self.start("t-fb", "fix", "--test", TEST_CMD, "--auto-fix", "0")
         first = wait_phase("t-fb", {"review"})
-        msg = Path(self.tmp.name) / "fb.md"
-        msg.write_text("1. The answer is 42.\n")
-        run_wb("feedback", "t-fb", "--message", str(msg))
+        run_wb("feedback", "t-fb", "--text", "1. The answer is 42.")   # or --message <file>
         st = wait_phase("t-fb", {"review"})
         self.assertEqual(st["session"], first["session"])
         self.assertTrue(st["tests"]["ok"])

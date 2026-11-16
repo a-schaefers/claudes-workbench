@@ -196,7 +196,7 @@ every check-in costs your tokens.
   it, or discard.
 
 ## 5. Feedback
-Numbered, concrete changes in a file → `wb feedback <name> --message <file>`. Small models need
+Numbered, concrete changes in a file → `wb feedback <name> --message <file>` (or `--text "…"`). Small models need
 explicit instructions ("in parse(), return 0 for an empty string"), not critique. Send back
 everything that falls short in one round, small things included. A nit you let through is a
 standard you just lowered. **Max 3 review rounds.** Still wrong after that: make the small remaining fix yourself in the task's worktree

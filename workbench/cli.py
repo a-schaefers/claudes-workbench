@@ -170,7 +170,8 @@ def cmd_feedback(a):
         die(f"{a.name} is {st.get('phase')}; feedback goes to a task waiting for review")
     if runner_alive(task):
         die(f"{a.name}'s runner is still running")
-    text = Path(a.message).read_text() if a.message != "-" else sys.stdin.read()
+    text = a.text if a.text is not None else \
+        sys.stdin.read() if a.message == "-" else Path(a.message).read_text()
     n = st.get("round", 1) + 1
     task.round_dir(n).mkdir(parents=True, exist_ok=True)
     task.round_dir(n).joinpath("prompt.md").write_text(
@@ -956,7 +957,9 @@ def main(argv=None):
     s.set_defaults(f=cmd_start)
 
     s = sub.add_parser("feedback", help="send review feedback for another round")
-    s.add_argument("name"); s.add_argument("--message", required=True, help="file, or - for stdin")
+    s.add_argument("name")
+    g = s.add_mutually_exclusive_group(required=True)
+    g.add_argument("--text"); g.add_argument("--message", help="a file, or - for stdin")
     g = s.add_mutually_exclusive_group()
     g.add_argument("--fresh", action="store_true",
                    help="start the agent on a fresh session, handed the task and the work so far")

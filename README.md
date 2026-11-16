@@ -124,7 +124,7 @@ Denied tools also leave the prompt. That cuts the fixed prompt from about 9.2k t
 | `wb report <name>` | the latest round report |
 | `wb diff <name> [--stat] [paths…]` | the change, including new files |
 | `wb answer <name> --text T` | answer the agent's question |
-| `wb feedback <name> --message F` | another round in the same session |
+| `wb feedback <name> --text T \| --message F` | another round in the same session |
 | `wb accept <name> -m MSG [--merge]` | commit on the branch (and merge) |
 | `wb discard <name> [--reason R] [--keep-branch]` | drop it |
 | `wb stop <name>` | stop a running agent (it becomes `stuck`) |
