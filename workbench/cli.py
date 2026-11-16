@@ -11,10 +11,9 @@ import subprocess
 import sys
 import time
 from collections import defaultdict
-from contextlib import redirect_stdout
 from pathlib import Path
 
-from . import __version__, bench, chat, gitops, hardware, models, results, router, store, transcript
+from . import __version__, chat, gitops, hardware, models, results, router, store, transcript
 from .watch import Watcher, wait_exit
 from .runner import PKG_ROOT
 
@@ -93,7 +92,7 @@ def _has_file(repo: Path, ref: str, path: str) -> bool:
 
 
 def _need_claude_md(repo: Path, base: str, a) -> None:
-    if a.bench or a.no_claude_md:
+    if a.no_claude_md:
         return
     if not _has_file(repo, base, "CLAUDE.md"):
         die(f"{repo} has no CLAUDE.md at {base}: the agent would start blind. Write it (what the "
@@ -130,14 +129,11 @@ def cmd_start(a):
     store.write_json(task.dir / "task.json", {
         "name": a.name, "repo": str(repo), "base": base, "base_ref": a.base,
         "branch": gitops.branch_name(a.name), "model": m.id, "model_label": m.label,
-        "opencode_model": m.id, "route": why, "bench": a.bench, "size": a.size, "test_cmd": a.test,
+        "opencode_model": m.id, "route": why, "size": a.size, "test_cmd": a.test,
         "auto_fix": a.auto_fix, "ask_budget": budget, "ask_timeout": a.ask_timeout,
-        "checkin": (a.checkin if a.checkin is not None
-                    else 10 if a.size == "significant" else 0) if not a.bench else 0,
+        "checkin": a.checkin if a.checkin is not None else 10 if a.size == "significant" else 0,
         "round_timeout": a.round_timeout, "silence_timeout": a.silence_timeout,
-        # a benchmark measures the model unaided: no nudges
-        "think_timeout": 0 if a.bench else (a.think_timeout if a.think_timeout is not None
-                                            else bench.think_budget(m.id)),
+        "think_timeout": a.think_timeout if a.think_timeout is not None else THINK_DEFAULT_S,
         "created_at": store.now(), "wb_version": __version__})
     test_line = (f"- The acceptance command is `{a.test}`. Run it before you finish and make it "
                  "pass. Never weaken, skip or delete tests to get there.\n") if a.test else ""
@@ -148,8 +144,6 @@ def cmd_start(a):
     task.set_status(phase="queued", round=1, reviews=0, auto_fixes=0, tools=0,
                     tok_in=0, tok_out=0, session=None, last="starting")
     spawn_runner(task)
-    if a.bench:
-        return
     print(f"started {a.name} on {m.label} · branch {gitops.branch_name(a.name)} · "
           f"base {base[:8]}" + (f" · tests `{a.test}`, auto-fix {a.auto_fix}" if a.test else ""))
     if dirty:
@@ -397,36 +391,6 @@ def _open_tasks():
             and (runner_alive(t) or t.status.get("phase") in LIVE)]
 
 
-def bench_pids() -> set[int]:
-    """Running `wb bench` processes on this state directory: from bench.pid, and from the process
-    table, which also finds a run that predates the pid file or lost it."""
-    pids = set()
-    pidfile = store.home() / "bench.pid"
-    try:
-        pids.add(int(pidfile.read_text()))
-    except (OSError, ValueError):
-        pass
-    mine = str(store.home().resolve())
-    for proc in Path("/proc").iterdir():
-        if not proc.name.isdigit() or int(proc.name) == os.getpid():
-            continue
-        try:
-            argv = (proc / "cmdline").read_bytes().split(b"\0")
-            env = dict(x.split(b"=", 1) for x in (proc / "environ").read_bytes().split(b"\0")
-                       if b"=" in x)
-        except OSError:  # gone, or not ours
-            continue
-        words = [a.decode(errors="replace") for a in argv]
-        at = next((i for i, w in enumerate(words) if Path(w).name == "wb"), None)
-        if at is None or words[at + 1:at + 2] != ["bench"] or "--report" in words:
-            continue
-        home = env.get(b"WB_HOME", b"").decode() or str(Path(env.get(b"HOME", b"").decode())
-                                                        / ".local" / "state" / "workbench")
-        if str(Path(home).resolve()) == mine:
-            pids.add(int(proc.name))
-    return {p for p in pids if _alive(p)}
-
-
 def _alive(pid: int) -> bool:
     try:
         os.kill(pid, 0)
@@ -436,32 +400,16 @@ def _alive(pid: int) -> bool:
 
 
 def stop_everything() -> list[str]:
-    """"bail out claude": the benchmark, then every agent. Nothing is finished or thrown away:
-    real tasks keep their worktrees (stopped, for wb feedback or wb discard later); bench tasks
-    are scratch and are discarded."""
+    """"bail out claude": every agent. Nothing is finished or thrown away: tasks keep their
+    worktrees (stopped, for wb feedback or wb discard later)."""
     stopped = []
-    benches = bench_pids()
-    for pid in benches:  # first, so it starts no new task
-        try:
-            os.kill(pid, signal.SIGTERM)
-            stopped.append(f"wb bench (pid {pid})")
-        except ProcessLookupError:
-            pass
-    for pid in benches:  # gone before the scan below, or a task it just started would be missed
-        wait_exit(pid, 5)
-    (store.home() / "bench.pid").unlink(missing_ok=True)
     for t in _open_tasks():
         _stop_runner(t)
         t.event({"ts": store.now(), "round": t.status.get("round"), "kind": "stopped",
                  "text": "bail out: stopped by the user"})
         t.set_status(phase="stuck", last="bail out: stopped", pid=None)
         _ack_all(t)
-        if t.spec.get("bench"):
-            with open(os.devnull, "w") as quiet, redirect_stdout(quiet):
-                cmd_discard(argparse.Namespace(name=t.name, reason="bail out", keep_branch=False))
-            stopped.append(f"{t.name} (bench, discarded)")
-        else:
-            stopped.append(f"{t.name} (worktree kept: {t.worktree})")
+        stopped.append(f"{t.name} (worktree kept: {t.worktree})")
     return stopped
 
 
@@ -508,7 +456,7 @@ def cmd_note(a):
 def cmd_takeover(a):
     """Stop the agent and hand the worktree to Claude, to finish by hand or hand back."""
     if a.all:  # "just get it done claude"
-        tasks = [t for t in _open_tasks() if not t.spec.get("bench")]
+        tasks = _open_tasks()
         if not tasks:
             print("no open delegated tasks to take over")
         for t in tasks:
@@ -592,12 +540,10 @@ def cmd_models(a):
         for m in found.values():
             if not router.allowed(m, size):
                 print(f"   {m.id:34} not for {size} tasks (wb model sizes)")
-    if not store.read_jsonl(store.home() / "bench.jsonl")[0]:
-        print("\nno measurements yet: `wb bench` runs the suite on every model")
     if a.set_default:
         top, why = router.choose("significant")
-        if top is None or not top.tries:
-            die("no measured model to make the default yet: run `wb bench` first")
+        if top is None:
+            die(why)
         path = models.opencode_config_path()
         cfg = json.loads(path.read_text())
         old = cfg.get("model")
@@ -606,52 +552,14 @@ def cmd_models(a):
         print(f"\nOpenCode's default model: {old} → {top.model.id} ({why})")
 
 
-def cmd_bench(a):
-    """Measure models: probes, then the graded task suite. Long: run it in the background."""
-    targets = [models.resolve(x) for x in a.models] if a.models else \
-        [m for m in models.discover().values() if models.status(m)["available"]]
-    tasks = bench.suite()
-    if a.tasks:
-        unknown = set(a.tasks) - set(tasks)
-        if unknown:
-            die(f"unknown bench task(s): {', '.join(sorted(unknown))}; known: {', '.join(tasks)}")
-        tasks = {k: v for k, v in tasks.items() if k in a.tasks}
-    if a.report:
-        print(bench.table())
-        return
-    say = lambda msg: print(f"  {msg}", flush=True)  # noqa: E731
-    pidfile = store.home() / "bench.pid"  # so `wb stop --all` can stop the run itself
-    pidfile.parent.mkdir(parents=True, exist_ok=True)
-    pidfile.write_text(str(os.getpid()))
-    try:
-        _bench(a, targets, tasks, say)
-    finally:
-        if pidfile.exists() and pidfile.read_text() == str(os.getpid()):
-            pidfile.unlink()
-
-
-def _bench(a, targets, tasks, say):
-    for m in targets:
-        print(f"== {m.id}", flush=True)
-        if not a.no_probe:
-            p = bench.probe(m, say=say)
-            print(f"probe: load {p['load_s']}s · prefill {p['prefill_tps']} tok/s · decode "
-                  f"{p['decode_tps']} tok/s · tool calls {p['tools_ok']}/{p['tools_n']}", flush=True)
-        for _ in range(a.repeat):
-            for name, task in tasks.items():
-                r = bench.run_task(m, name, task, say=say)
-                print(f"{name:16} {'PASS' if r['passed'] else 'fail'}  {r['minutes']:5.1f} min  "
-                      f"rounds {r['rounds']}  visible {'ok' if r['visible_ok'] else 'FAIL'}  "
-                      f"{'' if r['passed'] else r['hidden']}", flush=True)
-    print()
-    print(bench.table())
-
-
 def cmd_stats(a):
     print(results.table())
 
 
 SCOUT_EVERY_DAYS = 7
+# Seconds of generating with no tool call or word before the runner nudges the agent to act:
+# about 12k tokens of thinking at a local 27B model's speed, plus reading a full context.
+THINK_DEFAULT_S = 420
 
 
 def scout_state() -> dict:
@@ -721,8 +629,8 @@ def cmd_scout(a):
                 f"{x} ({hardware.size(installed[x]['size'])})" for x in extra))
     cfg = json.loads(models.opencode_config_path().read_text())
     print(f"  OpenCode's default: {cfg.get('model') or '(none)'}")
-    print("\nmeasured (wb bench)")
-    print(bench.table())
+    print("\nreal results (wb stats)")
+    print(results.table())
     print("\nnext: compare with what is newest and best for this hardware, recommend to the user, "
           "and when done: wb scout --done --notes \"…\"")
 
@@ -736,7 +644,7 @@ def cmd_model(a):
             die(f"sizes are {', '.join(router.SIZES)}")
         models.set_override(m.id, "sizes", sorted(set(a.sizes)) if a.sizes else None)
         print(f"{m.id}: routed " + (" and ".join(sorted(set(a.sizes))) + " tasks only"
-                                    if a.sizes else "tasks of every size, as measured"))
+                                    if a.sizes else "tasks of every size"))
         return
     provider, _, name = a.id.partition("/")
     provs = models.providers()
@@ -765,8 +673,8 @@ def cmd_model(a):
         models.write_entry(provider, name, entry)
         print(f"registered {a.id}: {'tools' if entry['tool_call'] else 'NO tool calls'}, "
               f"{'reasoning' if entry['reasoning'] else 'no reasoning'}, "
-              f"{(ctx or 0) // 1024}K context\nnext: wb bench {a.id}  (the router ignores it "
-              "until it is measured)")
+              f"{(ctx or 0) // 1024}K context\nnext: wb model sizes {a.id} … if it should only "
+              "take some task sizes; the router guesses from its size until real tasks show more")
         return
     # retire
     cfg = json.loads(models.opencode_config_path().read_text())
@@ -842,8 +750,8 @@ def cmd_init(a):
              if status == "no CLAUDE.md" else ""))
 
 
-# What `wb events` reports: the state, not the work (worktrees, bench repos) or the noise.
-EVENT_SKIP = ("worktree", "repos", "rounds")
+# What `wb events` reports: the state, not the work (worktrees) or the noise.
+EVENT_SKIP = ("worktree", "rounds")
 QUIET = (".lock", ".tmp", "runner.log")
 
 
@@ -935,7 +843,7 @@ def main(argv=None):
     s.add_argument("--repo", default=".")
     s.add_argument("--size", choices=["trivial", "significant"], default="significant")
     s.add_argument("--model", help="an OpenCode model id or a fragment of one; default: the "
-                   "router's choice for --size, from benchmarks and past results")
+                   "router's choice for --size: its guess from model size, corrected by past results")
     s.add_argument("--test", help="acceptance command, run in the worktree after every round")
     s.add_argument("--checkin", type=float, metavar="MIN",
                    help="wake Claude every MIN minutes while it runs, with a digest of progress "
@@ -947,11 +855,9 @@ def main(argv=None):
     s.add_argument("--round-timeout", type=int, default=2400)
     s.add_argument("--silence-timeout", type=int, default=900)
     s.add_argument("--think-timeout", type=int, help="seconds of generating with no tool call or "
-                   "word before the runner nudges the agent to act (default: from the model's "
-                   "measured speed; 0 turns it off)")
+                   "word before the runner nudges the agent to act (default 420; 0 turns it off)")
     s.add_argument("--base", default="HEAD")
     s.add_argument("--force", action="store_true", help="queue even if the model can't run now")
-    s.add_argument("--bench", action="store_true", help=argparse.SUPPRESS)
     s.add_argument("--no-claude-md", action="store_true",
                    help="start even though the repo has no CLAUDE.md")
     s.set_defaults(f=cmd_start)
@@ -1023,7 +929,7 @@ def main(argv=None):
     s = sub.add_parser("stop", help="stop a running task (it can be continued with feedback)")
     s.add_argument("name", nargs="?")
     s.add_argument("--all", action="store_true",
-                   help="everything: the benchmark and every agent (\"bail out claude\")")
+                   help="every agent (\"bail out claude\")")
     s.set_defaults(f=cmd_stop)
     s = sub.add_parser("accept", help="commit the work on its branch and close the task")
     s.add_argument("name"); s.add_argument("--message", "-m", required=True)
@@ -1071,13 +977,6 @@ def main(argv=None):
     s = sub.add_parser("init", help="set a project up: git on master with an initial commit, "
                                     "AGENTS.md → CLAUDE.md")
     s.add_argument("dir"); s.set_defaults(f=cmd_init)
-    s = sub.add_parser("bench", help="measure models: speed probes and graded coding tasks")
-    s.add_argument("models", nargs="*", help="default: every model that can run")
-    s.add_argument("--tasks", nargs="+", help="only these bench tasks")
-    s.add_argument("--repeat", type=int, default=1, help="run the task suite N times")
-    s.add_argument("--no-probe", action="store_true", help="skip the speed and tool-call probe")
-    s.add_argument("--report", action="store_true", help="print the measurements, run nothing")
-    s.set_defaults(f=cmd_bench)
     sub.add_parser("stats", help="results by model").set_defaults(f=cmd_stats)
     sub.add_parser("doctor", help="check the setup").set_defaults(f=cmd_doctor)
 

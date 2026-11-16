@@ -246,16 +246,13 @@ test('a closed task compacts Claude early, keeping the delegation state; open ta
   expect(compactions.length).toBe(2)
 })
 
-test('a benchmark is one line, and the live header names its task', async ($, on) => {
+test('the live header names the followed task', async ($, on) => {
   const clock = mock.clock(on, { now: 1_800_000_000_000 })
   const ts = 1_800_000_000
   const files: Record<string, string> = {}
-  const names = ['bench-slugify-1116074054', 'bench-lru-cache-1116074138', 'bench-merge-intervals-1116074420']
-  names.forEach((name, i) => {
-    files[`/wb/tasks/${name}/task.json`] = JSON.stringify({ name, model: i ? 'q27' : 'mimo', model_label: 'Qwen 27B', bench: true, created_at: ts + i })
-    files[`/wb/tasks/${name}/status.json`] = JSON.stringify({ phase: i < 2 ? 'discarded' : 'running', round: 1, updated_at: ts + i })
-  })
-  fakeTasks(on, files, names)
+  files['/wb/tasks/fix-it/task.json'] = JSON.stringify({ name: 'fix-it', model: 'q27', model_label: 'Qwen 27B', created_at: ts })
+  files['/wb/tasks/fix-it/status.json'] = JSON.stringify({ phase: 'running', round: 1, updated_at: ts })
+  fakeTasks(on, files, ['fix-it'])
   let n = 0
   on('process.run', () => {
     n += 1  // the transcript grows every poll
@@ -267,9 +264,7 @@ test('a benchmark is one line, and the live header names its task', async ($, on
   await clock.advance(1600)
   await clock.advance(1600)
   // (the kit has no pane to scroll, so following the end is checked in a real session)
-  expect(await ui.find({ type: 'Text', text: /Qwen 27B on merge-intervals · 1 of its tasks done/ })).toBeTruthy()
-  expect(await ui.find({ type: 'Text', text: 'bench-slugify-1116074054' })).toBeFalsy()  // no row each
-  expect(await ui.find({ type: 'Text', text: /── merge-intervals \(benchmark\)/ })).toBeTruthy()
+  expect(await ui.find({ type: 'Text', text: /── fix-it/ })).toBeTruthy()
   await ui.unmount()
 })
 

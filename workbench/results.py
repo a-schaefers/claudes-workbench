@@ -4,10 +4,8 @@ from collections import defaultdict
 from . import store
 
 
-def record(task: store.Task, outcome: str, **extra) -> dict | None:
+def record(task: store.Task, outcome: str, **extra) -> dict:
     spec, st = task.spec, task.status
-    if spec.get("bench"):  # measured by wb bench into bench.jsonl instead
-        return None
     row = {"ts": store.now(), "task": task.name, "outcome": outcome, "model": spec.get("model"),
            "size": spec.get("size"), "repo": spec.get("repo"), "rounds": st.get("round", 1),
            "auto_fixes": st.get("auto_fixes_total", 0) + st.get("auto_fixes", 0),
@@ -20,7 +18,7 @@ def record(task: store.Task, outcome: str, **extra) -> dict | None:
 
 
 def table() -> str:
-    rows = [r for r in store.read_jsonl(store.home() / "results.jsonl")[0] if not r.get("bench")]
+    rows = store.read_jsonl(store.home() / "results.jsonl")[0]
     if not rows:
         return "no finished tasks yet"
     by = defaultdict(list)

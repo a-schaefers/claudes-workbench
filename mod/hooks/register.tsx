@@ -28,7 +28,7 @@ const SCOUT_NOTE =
   '[workbench] The weekly model check is due. As the driver, keep the local agents on the best ' +
   'models this machine can run:\n' +
   '1. `wb scout`: this machine\'s hardware, what is installed, and how each model has done ' +
-  '(benchmarks and real tasks), and its watch list: models set aside and what each needs ' +
+  '(real tasks), and its watch list: models set aside and what each needs ' +
   'before it is tried again.\n' +
   '2. Look up what is newest: open-weight coding models with tool calling, their sizes and ' +
   'quantizations, which fit this GPU\'s VRAM (with room for the context) and this RAM, and ' +
@@ -39,11 +39,12 @@ const SCOUT_NOTE =
   'Aim for the best results first, then efficiency. For each watch-list item, say whether ' +
   'its conditions are met yet; `wb scout --unwatch N` once one is settled.\n' +
   '4. Ask before downloading or deleting. With a yes: `wb model add <provider/model> --pull` in ' +
-  'the background, then `wb bench <id>`, and `wb model retire <id> [--delete]` for what it ' +
-  'replaces. Installed models that are not registered may belong to other tools: ask first.\n' +
+  'the background, `wb model sizes <id> …` if it should only take some task sizes, and ' +
+  '`wb model retire <id> [--delete]` for what it replaces. Installed models that are not ' +
+  'registered may belong to other tools: ask first.\n' +
   '5. `wb scout --done --notes "<what you recommended or changed>"`.\n' +
   'Keep it short; if nothing is worth changing, say so in one line.'
-// Two slash commands for the user: /delegate-quit stops the benchmark and every agent at once
+// Two slash commands for the user: /delegate-quit stops every agent at once
 // (`wb stop --all`) and tells Claude so; /delegate-quit-and-hand-back-claude stops the agents and
 // hands their tasks to Claude (`wb takeover --all`), starting a turn for Claude to finish them.
 // Under the task list the pane follows one task live: the conversation between Claude and the
@@ -129,10 +130,6 @@ const ago = (ms: number) => {
 }
 
 const clip = (text: string, n: number) => (text.length <= n ? text : text.slice(0, n - 1) + '…')
-
-// A benchmark task's name is bench-<task>-<stamp>: the task is what a person wants to read.
-const benchTask = (name: string) => name.replace(/^bench-/, '').replace(/-\d{10}$/, '')
-const shownName = (t: WbTask) => (t.bench ? `${benchTask(t.name)} (benchmark)` : t.name)
 
 const eventLine = (r: Row): string | null => {
   switch (r.kind) {
@@ -239,7 +236,7 @@ async function scan($: any, root: string, now: number): Promise<WbTask[]> {
       label: String(sp.model_label ?? ''),
       tests: st.tests ? (st.tests.ok ? 'pass' : 'fail') : null,
       last: String(st.last ?? ''), createdAt: Number(sp.created_at ?? 0) * 1000, updatedAt,
-      tokens: Number(st.tok_in ?? 0) + Number(st.tok_out ?? 0), recent, bench: !!sp.bench,
+      tokens: Number(st.tok_in ?? 0) + Number(st.tok_out ?? 0), recent,
     })
   }
 
@@ -393,11 +390,11 @@ async function poll($: any) {
     }
     void refreshLive($, list)
     if (!mem.busy && mem.queued.length) void $.prompt.submit({ text: mem.queued.shift()! })
-    const open = new Set(list.filter(t => !t.bench && (ACTIVE.has(t.phase) || NEEDS.has(t.phase)))
+    const open = new Set(list.filter(t => ACTIVE.has(t.phase) || NEEDS.has(t.phase))
       .map(t => t.name))
     if ([...mem.open].some(name => !open.has(name))) mem.boundary = true
     mem.open = open
-    if (mem.boundary && !mem.busy && !list.some(t => !t.bench && NEEDS.has(t.phase))) {
+    if (mem.boundary && !mem.busy && !list.some(t => NEEDS.has(t.phase))) {
       mem.boundary = false
       await compactAtBoundary($)
     }
@@ -506,7 +503,7 @@ const REWAKE_MS = 60_000
 async function rewake($: any, now: number, list: WbTask[]) {
   if (mem.busy || !mem.wake) return
   for (const t of list) {
-    if (t.bench || !NEEDS.has(t.phase) || now - t.updatedAt < REWAKE_MS) continue
+    if (!NEEDS.has(t.phase) || now - t.updatedAt < REWAKE_MS) continue
     const ackPath = `${mem.root}/tasks/${t.name}/acked`
     const acked = Number(await $.fs.read(ackPath).catch(() => '0')) || 0
     if (acked * 1000 >= t.updatedAt) continue
@@ -539,7 +536,7 @@ export const register: Register = (on, options) => {
     })
     await $.command.register({
       name: QUIT,
-      description: 'Stop every delegated agent and the benchmark now, finishing nothing',
+      description: 'Stop every delegated agent now, finishing nothing',
     })
     await $.command.register({
       name: MODELS,
@@ -571,7 +568,7 @@ export const register: Register = (on, options) => {
   // Delegating with wb counts as delegate mode too (a session resumed mid-delegation, or one
   // where /delegate ran before this mod could see it)
   on('tool.call', { tool: 'Bash' }, async ($, e, next) => {
-    if (/(^|[\s;&|(])wb (start|next|feedback|accept|steer|answer|takeover|bench)\b/.test(e.command) &&
+    if (/(^|[\s;&|(])wb (start|next|feedback|accept|steer|answer|takeover)\b/.test(e.command) &&
         !(await read($, chat)).delegating) {
       await update($, chat, c => ({ ...c, delegating: true }))
       void poll($)
@@ -702,17 +699,6 @@ export const register: Register = (on, options) => {
 
     // the followed task's own recent lines are in its transcript below, in full
     const recentOf = (t: WbTask) => (t.name === watched.task ? [] : t.recent)
-    // A benchmark is one line, however many tasks it has run; the tasks it runs are graded by
-    // wb bench, not reviewed, so they don't each need a row.
-    const benches = list.filter(t => t.bench)
-    const benchNow = benches.find(t => ACTIVE.has(t.phase))
-    // done in this model's run: earlier runs of other models stay out of the count
-    const benchLatest = benches.reduce<WbTask | undefined>((a, b) => (!a || b.createdAt > a.createdAt ? b : a), undefined)
-    const benchModel = (benchNow ?? benchLatest)?.model
-    const benchDone = benches.filter(t => t.model === benchModel && !ACTIVE.has(t.phase))
-    const benchLast = Math.max(0, ...benches.map(t => t.updatedAt))
-    const benchBusy = benchNow || now - benchLast < 60_000
-    const rows = list.filter(t => !t.bench)
     const when = (t: WbTask) =>
       ACTIVE.has(t.phase) || NEEDS.has(t.phase) ? `for ${ago(now - t.createdAt)}` : `${ago(now - t.updatedAt)} ago`
     // The whole history is drawn: the engine scrolls the pane (arrows, while focused) and
@@ -721,25 +707,10 @@ export const register: Register = (on, options) => {
     const doing = watched.lines.find(l => l.s === 'activity')
     const clock = watched.lines.find(l => l.s === 'clock')
     const meta = watched.lines.find(l => l.s === 'meta')
-    const followed = list.find(t => t.name === watched.task)
-    const liveName = followed ? shownName(followed) : watched.task
 
     return (
       <Box flexDirection="column">
-        {benches.length > 0 && (
-          <Box marginBottom={1}>
-            <Text>
-              <Text bold>benchmark</Text>
-              <Text color={benchBusy ? 'claude' : 'inactive'}>{benchBusy ? ' running' : ' finished'}</Text>
-              <Text dimColor>
-                {benchNow ? ` · ${benchNow.label || benchNow.model} on ${benchTask(benchNow.name)}`
-                  : benchBusy ? ' · between tasks' : ` · ${ago(now - benchLast)} ago`}
-                {` · ${benchDone.length} of its tasks done · results: wb bench --report`}
-              </Text>
-            </Text>
-          </Box>
-        )}
-        {rows.map(t => (
+        {list.map(t => (
           <Box flexDirection="column" marginBottom={1}>
             <Text>
               <Text bold>{t.name}</Text>
@@ -759,7 +730,7 @@ export const register: Register = (on, options) => {
         ))}
         {watched.task && (
           <Box flexDirection="column">
-            <Text dimColor>{clip(`── ${liveName} · ↑↓ scrolls ` + '─'.repeat(cols), cols)}</Text>
+            <Text dimColor>{clip(`── ${watched.task} · ↑↓ scrolls ` + '─'.repeat(cols), cols)}</Text>
             {meta && <Text dimColor>{meta.t}</Text>}
             {history.map(l => (
               <Text {...(LINE_STYLE[l.s] ?? {})}>{l.t || ' '}</Text>

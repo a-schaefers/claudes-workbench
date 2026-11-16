@@ -1,14 +1,14 @@
 """The local models workbench can hand work to: found in OpenCode's config, not listed here.
 
-Every model of an OpenCode provider whose baseURL is on this machine is a candidate. What each
-model is good at is measured (`wb bench`) and learned from real tasks (router.py), never written
-down here, so a new model is one opencode.json entry and one `wb bench` away.
+Every model of an OpenCode provider whose baseURL is on this machine is a candidate. Which one
+takes a task is the router's guess from its size, corrected by real tasks (router.py), never
+written down here, so a new model is one opencode.json entry away.
 
 ``~/.config/workbench/models.json`` (or ``$WB_MODELS``) adds what OpenCode's config can't say,
 keyed by OpenCode model id or by provider id:
 
-    {"strata": {"start": "strata launch --preset coder --no-tui --yes",
-                "stop": "strata launch --stop --preset coder"},
+    {"bigserver": {"start": "bigserver launch --model coder", "stop": "bigserver stop",
+                   "weights_gb": 55},
      "ollama/some-model": {"skip": true}}
 
 The runner keeps one model on the GPU at a time (a consumer card fits one coding model), so it
@@ -30,7 +30,7 @@ from . import store
 
 LOCAL_HOSTS = {"127.0.0.1", "localhost", "::1", "0.0.0.0"}
 OLLAMA_PORT = 11434
-START_TIMEOUT = 20 * 60  # Strata's first start can take minutes
+START_TIMEOUT = 20 * 60  # a big model server's first start can take minutes
 
 
 @dataclass
@@ -149,18 +149,16 @@ def status(m: Model) -> dict:
             "why": "not running, and no start command in ~/.config/workbench/models.json"}
 
 
-def fingerprint(m: Model) -> str | None:
-    """What identifies the weights behind the id, so a re-pulled or swapped model is re-measured."""
-    if _fake():
-        return "fake"
-    if m.engine == "ollama":
+def weights(m: Model) -> int:
+    """Bytes of weights behind the id, the router's measure of a model's size; 0 when unknown.
+    models.json's `weights_gb` says it for a server that can't (or a test)."""
+    if m.extra.get("weights_gb"):
+        return int(float(m.extra["weights_gb"]) * 1e9)
+    if m.engine == "ollama" and not _fake():
         for x in (_get(f"{m.root}/api/tags") or {}).get("models", []):
             if x.get("name") in (m.name, f"{m.name}:latest"):
-                return x.get("digest", "")[:16]
-        return None
-    body = _get(f"{m.base_url.rstrip('/')}/models", timeout=2) or {}
-    ids = sorted(x.get("id", "") for x in body.get("data", []))
-    return ",".join(ids) or None
+                return int(x.get("size") or 0)
+    return 0
 
 
 def resident() -> list[Model]:

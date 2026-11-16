@@ -137,8 +137,6 @@ class Task:
         append_jsonl(self.dir / "events.jsonl", row)
 
     def notify(self, kind: str, text: str, **extra) -> None:
-        if self.spec.get("bench"):  # benchmark runs are graded by wb bench, never by Claude
-            return
         append_jsonl(home() / "notify.jsonl",
                      {"ts": now(), "task": self.name, "kind": kind, "text": text, **extra})
 

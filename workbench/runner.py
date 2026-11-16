@@ -240,8 +240,7 @@ def run_round(task: store.Task, n: int) -> dict:
             task.set_status(nudges=nudges)
             task.notify("checkin", checkin_text(task, n, out, max(started, float(
                 task.status.get("checkin_at") or 0))) + f"\nthe runner nudged it: {mins} min of "
-                f"thinking with no tool call (nudge {nudges} this task; budget {int(think)}s from "
-                "its measured speed)", round=n)
+                f"thinking with no tool call (nudge {nudges} this task; budget {int(think)}s)", round=n)
         if out["stuck"]:
             task.event({"ts": store.now(), "round": n, "kind": "stopped", "text": out["stuck"]})
             _stop(proc)
@@ -413,7 +412,7 @@ def drive(task: store.Task) -> None:
         try:
             m = models.resolve(task.spec["model"])
             secs = models.make_resident(m, say=lambda msg: task.set_status(last=msg))
-            task.set_status(fingerprint=models.fingerprint(m), load_secs=round(secs, 1),
+            task.set_status(load_secs=round(secs, 1),
                             window=(m.config.get("limit") or {}).get("context"))
         except (KeyError, RuntimeError, OSError) as e:
             task.set_status(phase="failed", last=f"model: {e}")

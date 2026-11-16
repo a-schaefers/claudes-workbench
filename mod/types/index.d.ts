@@ -10,8 +10,6 @@ export type WbTask = {
   createdAt: number
   updatedAt: number
   tokens: number
-  /** a `wb bench` run, which Claude never reviews */
-  bench?: boolean
   /** the last few events of an active task, already formatted */
   recent: string[]
 }

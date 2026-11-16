@@ -2,7 +2,7 @@
 name: delegate
 description: >
   Delegate a coding task to a local model running in OpenCode, via the workbench `wb` CLI, which
-  routes it to the best measured model for the task's size; Claude writes the spec, reviews the
+  routes it to the best local model for the task's size; Claude writes the spec, reviews the
   diff, and accepts or sends feedback, so Claude spends tokens on specs and review instead of
   code generation. Only when the user invokes /delegate — never on your own.
 disable-model-invocation: true
@@ -68,27 +68,30 @@ it that way; the agents never write either.
 | `--size significant` | new feature, multi-file change, refactor, non-obvious bug, design judgment, >~50 lines |
 | `--size trivial` | rename, string/config tweak, a test for existing code, small single-function change, boilerplate |
 
-Don't choose a model from memory. `wb start` asks the router, which picks from evidence: graded
-`wb bench` runs (hidden tests) on the model's current weights, plus how real delegated tasks went.
-It takes the fastest model whose pass rate is close to the best, counting load time if the model
-isn't on the GPU, and prints why. The runner then loads that model, unloading whatever is there.
-`wb models` shows the ranking per size. Pass `--model <id or fragment>` only if the user names one.
-If `wb models` says nothing has been measured, or a model was added or re-pulled, suggest
-`wb bench` (long: run it in the background) before relying on the choice.
-The user may limit a model to some sizes (`wb model sizes <id> trivial`); the router obeys that
-whatever the scores say. Respect it, and change it only when the user asks.
+`wb start` asks the router, which makes an educated guess and corrects it with real results:
+the largest model allowed significant work, the smallest allowed trivial work, unless a model's
+record of accepted tasks at that size is clearly worse. It prints why; the runner then loads that
+model, unloading whatever is there. `wb models` shows the ranking per size. Pass
+`--model <id or fragment>` only if the user names one, or when the record argues against the guess.
+Which sizes a model takes is set with `wb model sizes <id> trivial|significant`: set it when you
+add a model you judge fit only for small work, and otherwise change it only when the user asks.
+A newly added model has no record, so the router won't pick it over one with a good record:
+give it its first few real tasks with `--model` (ones you'd review closely anyway).
+**No local model yet?** If `wb models` lists none that can run, do the model check below first:
+recommend models for this hardware and offer to set them up in OpenCode (ask before any download).
 
 **The weekly model check.** Once a week the mod asks you (or the user runs `/delegate-models`)
 to check the local models against this machine. `wb scout` gives the facts: GPU and VRAM, RAM,
-disk, what is installed and registered, benchmarks and real-task results, and the watch list
+disk, what is installed and registered, real-task results, and the watch list
 (models set aside, with what each needs before it is tried again: check each against what is
 new). Then research what is
 newest and best: open-weight coding models with reliable tool calls, the sizes and quantizations
 that fit the VRAM with room for the context, and runtime releases worth having. Use primary
-sources, verify before you name anything, and remember this is a consumer card: results first,
-then speed. Recommend briefly (keep / add / retire, with sizes and why), and only with a yes:
-`wb model add <provider/model> --pull` (background), `wb bench <id>`, `wb model retire <id>
-[--delete]`. Installed but unregistered models may belong to other tools: ask before touching
+sources and its reputation in recent reports, verify before you name anything, and remember
+this is a consumer card: a model that fits entirely in VRAM beats a bigger one that spills into
+RAM. Results first, then speed. Recommend briefly (keep / add / retire, with sizes and why), and
+only with a yes: `wb model add <provider/model> --pull` (background), `wb model sizes` for what it
+should take, `wb model retire <id> [--delete]`. Installed but unregistered models may belong to other tools: ask before touching
 them. When you set a model aside, `wb scout --watch "…"` records what would bring it back:
 the change to look for, and the test it must pass. Finish with `wb scout --done --notes "…"`. Nothing worth changing: one line, and done.
 
@@ -137,8 +140,8 @@ the session is woken by a `[workbench]` prompt when the task needs you (review, 
 failed) — end your turn and wait for it. Without the mod, run `wb wait <name>` with Bash
 `run_in_background: true` and act on its notification. Failing tests go back to the agent on their
 own for `--auto-fix` rounds before you are woken; `wb log <name>` shows what it is doing.
-A model that reads prompts slowly (low prefill in `wb bench --report`), or one the runner must
-load first, can spend minutes before its first reply. That is normal, not stuck.
+A model that reads prompts slowly, or one the runner must load first, can spend minutes before
+its first reply. That is normal, not stuck.
 
 ## Driving a running task
 You are the driver, not a spectator. When something tells you the agent is heading the wrong way
@@ -148,7 +151,7 @@ You are the driver, not a spectator. When something tells you the agent is headi
 - `wb steer <name> --now --text "…"`: interrupts it mid-step; the same session continues with
   your note first, marked high priority. For wrong files, a wrong approach, a runaway loop.
   The runner does this by itself once a round when the agent generates past its thinking
-  budget with no tool call (from the model's measured speed; `--think-timeout` overrides),
+  budget with no tool call (7 minutes; `--think-timeout` overrides),
   and the check-in says so. A second nudge on one task means the spec is too big for one
   step: split it, or name the first file to write.
 - `wb takeover <name>`: stops it and hands you the worktree. Finish by hand, then `wb accept`,
@@ -162,12 +165,12 @@ runs them and tells you what it did:
   (`wb takeover --all`). Leave delegate mode and finish the work yourself without pausing: review
   what each agent left, complete it in its worktree to your standard, run the acceptance command,
   `wb accept`, then carry on with the rest of the request directly, without delegating.
-- **`/delegate-quit`**: stop. Everything delegated is already stopped (`wb stop --all`), the
-  benchmark included. Don't finish, restart or clean up anything unless asked; worktrees are kept.
+- **`/delegate-quit`**: stop. Everything delegated is already stopped (`wb stop --all`).
+  Don't finish, restart or clean up anything unless asked; worktrees are kept.
 Without the mod, the user may ask for the same in words; run those commands then.
 
 **The web chat.** While /delegate runs in a session, the user can reach you from their phone
-(`wb chat serve` on port 1337, over Tailscale). Their message arrives as a prompt starting
+(`wb chat serve` on port 1337; the link is localhost, and reaching it from a phone is the user's own setup). Their message arrives as a prompt starting
 `[web chat]`; it has the same authority as one typed here. They read your answers on a phone, so
 reply there with `wb chat reply --text "…"`: a one-line acknowledgement first when the work will
 take a while, then the outcome, short (what was done, what needs them). Don't stream progress or

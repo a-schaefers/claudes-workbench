@@ -396,8 +396,7 @@ def clock_line(task: store.Task, now: float | None = None, data: dict | None = N
             parts.append(f"~{_secs(left * 1000)} left (typically {typical:.0f}m)" if left > 0
                          else f"{_secs(-left * 1000)} past its typical {typical:.0f}m")
         else:
-            parts.append("no ETA yet: the first measured run" if sp.get("bench")
-                         else "no ETA yet: not measured on this model (wb bench)")
+            parts.append("no ETA yet: no finished task of this size on this model")
     used, window = context_fill(data or {}), st.get("window")
     if used:
         parts.append(f"context {_k(used)}" + (f" of {window // 1024}K ({100 * used // window}%)"
@@ -444,8 +443,7 @@ def follow(task: store.Task, verbose: bool = False, once: bool = False, color: b
     sid = find_session(task)
     first = export(sid) if sid else {}
     if as_json:
-        emit("meta", ("benchmark task, graded by hidden tests · " if task.spec.get("bench") else "")
-             + model_line(task, first))
+        emit("meta", model_line(task, first))
     else:
         print(header(task, paint, first), file=out, flush=True)
     seen: set[str] = set()
