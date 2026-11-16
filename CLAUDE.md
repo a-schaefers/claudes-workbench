@@ -36,6 +36,11 @@ what either says (a command, a flag, a default, a guard, a file) updates it in t
   - `skills.py`: Claude's skill library for the agents (`$WB_SKILLS`, default
     ~/.local/share/workbench/skills, its own git repo): checks, add/retire/restore, what each task
     was offered and loaded. `wb skill` drives it; a task holds the skills in `status.skills`.
+  - `gitguard.py`: git is read-only for the agent. `runner.agent_env` writes a `git` shim into
+    the task's `bin/` and puts it first on `PATH`. The shim passes reads through (with
+    `GIT_OPTIONAL_LOCKS=0`) and refuses writes in the task's repo and in any repo outside the temp
+    dir; for `init`/`clone` it judges by where the new repo lands. Standard library only: it's
+    imported on every git call.
   - `context.py`: what the agent knows. It adds CLAUDE.md files and rules, the nested-instructions map and the handbook to the config layer's `instructions`, and it sets the denied tools and skills.
 - Runs on Linux, WSL2 and macOS. Native Windows doesn't: store.py needs fcntl and the runner
   `os.killpg` and POSIX signals. Off Linux, watch.py falls back to timed waits without inotify/pidfd.
@@ -85,7 +90,7 @@ Everything is plain files under `~/.local/state/workbench` (`$WB_HOME`):
 ```
 notify.jsonl  results.jsonl  gpu.lock  scout.json  watch.json
 chat/          messages.jsonl receipts.jsonl listener.json
-tasks/<name>/  task.json status.json events.jsonl opencode.json HANDBOOK.md context.md
+tasks/<name>/  task.json status.json events.jsonl opencode.json HANDBOOK.md context.md bin/git
                steer.jsonl acked runner.log  rounds/<n>/{prompt.md,summary.md,tests.txt}
                ask/<id>.json|.answer  worktree/
 ```
@@ -150,8 +155,10 @@ Tests only: `WB_OPENCODE_BIN` (a fake opencode), `WB_FAKE_MODELS` (no model serv
     go in one directory each, so the rest of the library stays out of the prompt.
   - `permissions: [{action, resource, effect: "deny"}]` removes a tool or skill from the prompt.
     For the `shell` action the resource matches each part of a compound command (`cd x && sudo y`
-    is caught), and a later rule overrides an earlier one. The agent's only shell limit is sudo;
-    git writes and deploys are the driver's by convention (the handbook), not by rule.
+    is caught), and a later rule overrides an earlier one. The shell limits: sudo, `gh`, and the
+    real git by its path (`*/git *`). For `edit` the resource is the file path, so `*CLAUDE.md`,
+    `*AGENTS.md` and `.claude/*` keep Claude's files Claude's. OpenCode's shell inherits the
+    runner's `PATH`, which is how the git shim (`gitguard.py`) gets called first.
     Denying `execute` (code mode) turns the `opencode_*` tools into direct tools, so deny `opencode_*` too.
     `opencode_worktree_remove` stays listed whatever you do; the rule still refuses the call.
 - A session is bound to the directory it was created in: continued or `--fork`ed from another

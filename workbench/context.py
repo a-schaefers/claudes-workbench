@@ -24,9 +24,15 @@ ROOT_FILES = ("CLAUDE.md", ".claude/CLAUDE.md", "CLAUDE.local.md")
 # lists opencode_worktree_remove; the rule then refuses the call.
 DENIED_TOOLS = ("question", "experimental_image_generate", "execute", "subagent", "websearch",
                 "opencode_*", "*worktree*")
-# The one hard limit on the shell: no root. OpenCode checks each part of a compound command, so
-# `cd x && sudo ...` is refused too. Everything else is the agent's to use, guided by the handbook.
-DENIED_SHELL = ("sudo", "sudo *", "doas", "doas *", "pkexec *", "su", "su *")
+# The shell's hard limits: no root, and no road round the read-only git (gitguard.py, a `git` of
+# its own first on the agent's PATH): not the real git named by its path, not `gh`, which pushes,
+# opens pull requests and runs workflows. OpenCode checks each part of a compound command, so
+# `cd x && sudo ...` is refused too. Everything else is the agent's, guided by the handbook.
+DENIED_SHELL = ("sudo", "sudo *", "doas", "doas *", "pkexec *", "su", "su *",
+                "*/git", "*/git *", "gh", "gh *")
+# Claude's files: the instructions every agent reads, and the project's skills and settings.
+# The agent proposes a change to them in its summary; Claude makes it.
+CLAUDE_FILES = ("*CLAUDE.md", "*CLAUDE.local.md", "*AGENTS.md", ".claude/*", "*/.claude/*")
 
 
 def _digest(path: Path) -> str:
@@ -100,6 +106,7 @@ def layer(task: store.Task) -> dict:
     note = write_map(task, nested)
     rules = [{"action": t, "resource": "*", "effect": "deny"} for t in DENIED_TOOLS]
     rules += [{"action": "shell", "resource": c, "effect": "deny"} for c in DENIED_SHELL]
+    rules += [{"action": "edit", "resource": f, "effect": "deny"} for f in CLAUDE_FILES]
     rules += [{"action": "skill", "resource": n, "effect": "deny"}
               for n in denied_skills(task.spec.get("deny_skills"))]
     # the skills Claude handed this task, one directory each: OpenCode lists exactly those, and

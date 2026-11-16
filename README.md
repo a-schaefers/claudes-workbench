@@ -38,8 +38,9 @@ the bulk of the tokens, the reading and writing and test-running, happen on your
 - **Claude keeps the keys; the agents keep to the code.** Everything that shapes or ships the
   project stays with the more capable model: the architecture, every git write (commits, branches,
   merges, pushes, pull requests), CI/CD, deploys and infrastructure, and the project's `CLAUDE.md` /
-  `AGENTS.md`, the instructions every agent reads. The agents write code and use git only to read.
-  When a task needs more, they ask Claude, and Claude does it.
+  `AGENTS.md`, the instructions every agent reads. The agents write code and use git only to read,
+  and that's enforced, not just asked: a git write or an edit to those files is refused. When a
+  task needs more, they ask Claude, and Claude does it.
 - **Your repo stays yours.** Each agent works in its own git worktree, so your checkout is never
   touched, and nothing is committed (under your name, with no AI credit line) until Claude accepts
   it.
@@ -296,9 +297,9 @@ before every round) gives it:
   local model reads on every request): `question` (nobody answers it headless), code mode and the
   `opencode_*` tools (they can move the session or remove worktrees), `subagent` (a second model
   would queue behind the GPU lock), web search and image generation.
-- **One hard shell limit**: no `sudo`, `doas`, `pkexec` or `su`, checked in every part of a
-  compound command. Everything else is the agent's; git writes and deploys are Claude's by the
-  handbook, not by a rule.
+- **Hard limits**, checked in every part of a compound command: no `sudo`, `doas`, `pkexec` or
+  `su`; no `gh`; and git is read-only (below). No edits to `CLAUDE.md`, `CLAUDE.local.md`,
+  `AGENTS.md` or anything under `.claude/`: those are Claude's. Everything else is the agent's.
 - **Skills**: the repo's own `.claude/skills`, plus the library skills Claude handed this task.
   Your personal `~/.claude/skills` (including synced Claude app skills) and `/delegate` itself are
   denied: an agent once read a personal skill as a "newer task" and went off into your files.
@@ -463,7 +464,18 @@ up again (a library's quirk, a pitfall, a check to run), Claude writes a skill.
   merges, pushes, pull requests, CI/CD, deploys and infrastructure (`gh`, `wrangler` and the like),
   and the project's `CLAUDE.md` and `AGENTS.md`. The handbook and the working protocol tell the
   agent so, and to ask through `ask_reviewer` or say so in its summary when the task needs one of
-  those. It's a working agreement, not a sandbox: the one rule OpenCode enforces is no `sudo`.
+  those.
+- **Git is read-only for the agent, enforced.** The runner puts a small `git` of its own first on
+  the agent's `PATH`, so it's the one called from the shell, a script or `make`. Commands that
+  read (`status`, `diff`, `log`, `show`, `blame`, `grep`, listing branches and tags) go through.
+  Anything that writes (`commit`, `reset`, `checkout`, `stash`, `clean`, `push`...) is refused,
+  with a note telling the agent to leave the change to Claude. That also means an agent can't
+  wipe its own unfinished work by mistake. Writes are refused in the task's repository and in
+  every repository outside the temp directory. The exception is throwaway repositories under the
+  temp directory, which test suites create; those stay writable. OpenCode's rules refuse the real
+  git called by its full path, and `gh`. Edits to `CLAUDE.md`, `AGENTS.md` and `.claude/` are
+  refused too. If the agent changes one of them anyway (from the shell), the round report says
+  so. This guards against mistakes; it is not a sandbox against a model trying to get around it.
 - **The agent never commits.** Everything it does stays uncommitted in its worktree, and
   `wb diff` shows it (new files included) against the task's base, or after `wb next` against
   the last committed step (`--all` for the whole branch).

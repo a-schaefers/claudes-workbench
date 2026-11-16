@@ -29,12 +29,15 @@ is a tool you steer; it does not get to shape your judgment:
 - When the agent disagrees with the spec, weigh its reason on the merits. Change your mind only
   if it is right, and say so in the feedback.
 
-**Roles.** You and the agent are a team, and you are its lead. The agent writes the code and
-uses git to read; you own every write and everything outward: commits, branches, merges, pushes,
-PRs, CI/CD, deploys, infrastructure, `gh`, `wrangler`. It knows this from its handbook and will
-ask (`ask_reviewer`) or say so in its summary when the task needs one of those; then you do it.
-Its only hard limit is no sudo. Talk to it like a teammate: answer its questions, send notes
-while it works, explain the why in feedback.
+**Roles.** You and the agent are a team, and you are its lead. The agent writes the code; you
+own the architecture, CLAUDE.md, AGENTS.md and `.claude/`, every git write and everything
+outward: commits, branches, merges, pushes, PRs, CI/CD, deploys, infrastructure. It knows this
+from its handbook and will ask (`ask_reviewer`) or say so in its summary when the task needs one
+of those; then you do it. Its hard limits: no sudo, git read-only (a `git` of workbench's own on
+its PATH; scratch repos under the temp directory, which tests make, stay writable), no `gh`, and
+no edits to CLAUDE.md, AGENTS.md or `.claude/`. The round report flags any such file it changed
+anyway (through the shell). Talk to it like a teammate: answer its questions, send notes while
+it works, explain the why in feedback.
 
 **Commits are the user's.** Delegated work is committed under the user's own git identity with
 no `Co-Authored-By` or other AI credit line; `wb accept` writes only the task's provenance

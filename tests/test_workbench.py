@@ -16,7 +16,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
 
-from workbench import runner, ask_mcp, cli, events, store, transcript  # noqa: E402
+from workbench import runner, ask_mcp, cli, events, gitops, store, transcript  # noqa: E402
 
 FAKE = f"{sys.executable} {ROOT / 'tests' / 'fake_opencode.py'}"
 TEST_CMD = "grep -qx 42 answer.txt"
@@ -683,21 +683,21 @@ class RealOpenCode(Base):
         self.assertNotIn("CANARY-KEPT", text)             # and the rest of the library is not
 
 
-    def test_sudo_is_refused_even_inside_a_compound_command(self):
-        from workbench import runner
-        self.start("t-sudo", "ok")
-        wait_phase("t-sudo", {"review"})
-        task = store.Task("t-sudo")
+    def run_calls(self, name, calls):
+        """Run real opencode in a task's worktree against a fake model that makes these tool
+        calls; returns the tool results it got back, in order."""
+        self.start(name, "ok")
+        wait_phase(name, {"review"})
+        task = store.Task(name)
         with socket.socket() as sock:
             sock.bind(("127.0.0.1", 0))
             port = sock.getsockname()[1]
-        out = Path(self.tmp.name) / "requests.jsonl"
-        call = {"name": "shell", "arguments": {"command": "cd . && sudo -n true",
-                                               "workdir": str(task.worktree)}}
+        out = Path(self.tmp.name) / f"{name}-requests.jsonl"
         server = subprocess.Popen([sys.executable, str(ROOT / "tests" / "capture_llm.py"),
-                                   str(port), str(out), json.dumps(call)])
+                                   str(port), str(out), json.dumps(calls)])
         self.addCleanup(server.kill)
-        layer_path = runner.write_config_layer(task)
+        env = runner.agent_env(task)
+        layer_path = Path(env["OPENCODE_CONFIG"])
         layer = json.loads(layer_path.read_text())
         layer["provider"] = {"cap": {
             "npm": "@ai-sdk/openai-compatible",
@@ -706,13 +706,85 @@ class RealOpenCode(Base):
                                "limit": {"context": 32768, "output": 1024}}}}}
         layer_path.write_text(json.dumps(layer))
         time.sleep(0.5)
-        env = {**os.environ, "PWD": str(task.worktree), "OPENCODE_CONFIG": str(layer_path)}
         subprocess.run(["opencode", "run", "--standalone", "-m", "cap/cap", "--auto", "--format",
-                        "json", "go"], cwd=task.worktree, env=env, capture_output=True, timeout=120)
+                        "json", "go"], cwd=task.worktree, env=env, capture_output=True, timeout=180)
         reqs = [json.loads(line) for line in out.read_text().splitlines()]
-        answers = [m for r in reqs for m in r.get("messages", []) if m.get("role") == "tool"]
-        self.assertTrue(answers, "the fake model's call never came back")
-        self.assertIn("permission.rejected", json.dumps(answers[-1]["content"]))
+        last = max(reqs, key=lambda r: len(r.get("messages", [])))
+        answers = [json.dumps(m["content"]) for m in last["messages"] if m.get("role") == "tool"]
+        self.assertEqual(len(answers), len(calls), "not every fake call came back")
+        return task, answers
+
+    def test_sudo_is_refused_even_inside_a_compound_command(self):
+        wt = str(store.Task("t-sudo").worktree)  # known before the task starts
+        _, answers = self.run_calls("t-sudo", [
+            {"name": "shell", "arguments": {"command": "cd . && sudo -n true", "workdir": wt}}])
+        self.assertIn("permission.rejected", answers[0])
+
+    def test_git_is_read_only_and_claudes_files_are_claudes(self):
+        task = store.Task("t-git")
+        wt = str(task.worktree)
+        def shell(cmd):
+            return {"name": "shell", "arguments": {"command": cmd, "workdir": wt}}
+        real = shutil.which("git")
+        scratch = Path(self.tmp.name) / "scratch"
+        task, answers = self.run_calls("t-git", [
+            shell("git status --short && git log --oneline -1"),
+            shell("git commit --allow-empty -m sneaky"),
+            shell("sh -c 'git reset --hard'"),
+            shell(f"{real} commit --allow-empty -m sneaky"),
+            shell(f"git init -q {scratch} && git -C {scratch} commit -q --allow-empty -m t "
+                  f"&& echo scratch-ok"),
+            {"name": "write", "arguments": {"path": f"{wt}/CLAUDE.md", "content": "mine now"}},
+            {"name": "write", "arguments": {"path": f"{wt}/notes.txt", "content": "fine"}},
+        ])
+        self.assertIn("init", answers[0])                      # reading works
+        self.assertIn("git is read-only for you", answers[1])  # the shim refuses a commit
+        self.assertIn("git is read-only for you", answers[2])  # from a nested shell too
+        self.assertIn("permission.rejected", answers[3])       # the real git by its path
+        self.assertIn("scratch-ok", answers[4])                # a test's scratch repo is fine
+        self.assertIn("permission.rejected", answers[5])       # CLAUDE.md is Claude's
+        self.assertNotIn("rejected", answers[6])
+        self.assertEqual(gitops.git(task.worktree, "rev-parse", "HEAD").strip(),
+                         task.spec["base"])
+        self.assertNotEqual((task.worktree / "CLAUDE.md").read_text(), "mine now")
+        self.assertIn("notes.txt", gitops.changed(task.worktree))
+
+
+class GitGuard(unittest.TestCase):
+    def test_what_reads_and_what_writes(self):
+        from workbench import gitguard
+        reads = ["status", "-C x log --oneline", "diff HEAD~1", "branch", "branch -a",
+                 "branch --show-current", "branch --contains HEAD", "tag", "tag -l v*",
+                 "config --get user.name", "config user.name", "stash list", "worktree list",
+                 "remote -v", "reflog", "reflog -n 3", "--no-pager show HEAD:src/x.c",
+                 "-c core.pager=cat grep foo", "--version", ""]
+        writes = ["commit -m x", "push", "reset --hard", "checkout main", "switch -c x",
+                  "restore .", "stash", "stash pop", "clean -fd", "add -A", "rm x", "mv a b",
+                  "merge x", "rebase main", "cherry-pick x", "revert x", "fetch", "pull",
+                  "branch new", "branch -D x", "tag v1", "tag -d v1", "config user.name x",
+                  "config --unset user.name", "worktree add ../x", "remote add o u",
+                  "reflog expire --all", "apply p.diff", "am p", "gc", "notes add -m x",
+                  "symbolic-ref HEAD refs/heads/x", "update-ref HEAD x", "st", "-C . commit"]
+        for line in reads:
+            _, sub, rest = gitguard.split(line.split())
+            self.assertTrue(gitguard.reads(sub, rest), line)
+        for line in writes:
+            _, sub, rest = gitguard.split(line.split())
+            self.assertFalse(gitguard.reads(sub, rest), line)
+
+    def test_protected_repositories(self):
+        from workbench import gitguard
+        with tempfile.TemporaryDirectory() as d:
+            scratch = os.path.realpath(d) + "/s/.git"
+            self.assertFalse(gitguard.protected(scratch, "/elsewhere"))  # a test's scratch repo
+            self.assertTrue(gitguard.protected(scratch, scratch))  # the task's own, even here
+        self.assertTrue(gitguard.protected(str(ROOT / ".git"), "/elsewhere"))  # a real project
+        self.assertFalse(gitguard.protected(None, "/elsewhere"))  # no repository: init, clone
+
+    def test_the_report_flags_claudes_files(self):
+        status = " M src/a.c\n M CLAUDE.md\n?? docs/AGENTS.md\nR  x -> .claude/skills/s/SKILL.md\n"
+        self.assertEqual(runner.claude_files_changed(status),
+                         ["CLAUDE.md", "docs/AGENTS.md", ".claude/skills/s/SKILL.md"])
 
 
 class Discovery(Base):

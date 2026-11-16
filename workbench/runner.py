@@ -19,7 +19,7 @@ import time
 import traceback
 from pathlib import Path
 
-from . import context, gitops, models, skills, store
+from . import context, gitguard, gitops, models, skills, store
 from .events import StuckDetector, normalize
 from .watch import Watcher
 
@@ -62,6 +62,28 @@ def write_config_layer(task: store.Task) -> Path:
         }}},
     })
     return path
+
+
+def agent_env(task: store.Task) -> dict:
+    """The agent's environment: its config layer, and git read-only (gitguard.py)."""
+    env = {**os.environ, "PWD": str(task.worktree),  # opencode finds the project from $PWD
+           "OPENCODE_CONFIG": str(write_config_layer(task)),
+           "WB_TASK": task.name, "WB_HOME": str(store.home()), **CLEAN_ENV}
+    env.update(gitguard.install(task.dir / "bin", Path(task.spec["repo"]), PKG_ROOT,
+                                env.get("PATH") or os.defpath) or {})
+    return env
+
+
+def claude_files_changed(files: str) -> list[str]:
+    """The instruction files and .claude/ paths among `git status --short` lines."""
+    out = []
+    for line in files.splitlines():
+        path = line[3:].split(" -> ")[-1].strip('"')
+        name = Path(path).name
+        if name in ("CLAUDE.md", "CLAUDE.local.md", "AGENTS.md") or \
+                path.startswith(".claude/") or "/.claude/" in path:
+            out.append(path)
+    return out
 
 
 def _reader(stream, q):
@@ -164,9 +186,7 @@ def run_round(task: store.Task, n: int) -> dict:
         cmd += ["--session", st["session"]]
     note = skills_note(task, n)
     cmd.append(note + prompt)
-    env = {**os.environ, "PWD": str(task.worktree),  # opencode finds the project from $PWD
-           "OPENCODE_CONFIG": str(write_config_layer(task)),
-           "WB_TASK": task.name, "WB_HOME": str(store.home()), **CLEAN_ENV}
+    env = agent_env(task)
     log = open(task.dir / "runner.log", "a")
     proc = subprocess.Popen(cmd, cwd=task.worktree, env=env, stdin=subprocess.DEVNULL,
                             stdout=subprocess.PIPE, stderr=log, text=True,
@@ -313,6 +333,9 @@ def summary_text(task: store.Task, n: int, rnd: dict, tests) -> str:
     lines += ["", "agent's summary:", final[:2500], ""]
     files = gitops.changed(task.worktree)
     lines += ["files changed:", files or "(none)"]
+    if mine := claude_files_changed(files):
+        lines.append(f"NOTE: the agent changed your files ({', '.join(mine)}): instructions and "
+                     ".claude/ are yours to write; keep, rewrite or revert them")
     stat = gitops.diff(task.worktree, spec["base"], stat=True).splitlines()
     if stat:
         lines.append(stat[-1].strip())
