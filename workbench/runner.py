@@ -19,7 +19,7 @@ import time
 import traceback
 from pathlib import Path
 
-from . import context, gitguard, gitops, models, skills, store
+from . import context, gitguard, gitops, models, skills, store, tuning
 from .events import StuckDetector, normalize
 from .watch import Watcher
 
@@ -49,7 +49,7 @@ def opencode_bin() -> list[str]:
 # `compaction.buffer`, and its compaction is the model's own summary, which a small model can get
 # wrong: seen 2026-11-16, a summary that recounted CLAUDE.md instead of the task, and the agent
 # built what CLAUDE.md said came next. So the runner hands a filling session to a fresh one first
-# (FRESH_AT, checked at every step), and OpenCode's compaction is only the backstop past that:
+# (the fresh_at knob, checked at every step), and OpenCode's compaction is only the backstop past that:
 # its buffer leaves room for one reply at the model's output cap, plus one step's growth.
 STEP_GROWTH = 4096
 
@@ -63,6 +63,16 @@ def compaction_buffer(cfg: dict) -> int | None:
     usable = lim.get("input") or window - (lim.get("output") or 0)
     reply = opts.get("max_tokens") or lim.get("output") or 0
     return max(usable + reply - window, 0) + STEP_GROWTH
+
+
+def fresh_ceiling(cfg: dict) -> float | None:
+    """The latest a fresh session can take over: where OpenCode's compaction sits (tuning.py)."""
+    lim, buf = cfg.get("limit") or {}, compaction_buffer(cfg)
+    window = lim.get("context")
+    if not window or buf is None:
+        return None
+    usable = lim.get("input") or window - (lim.get("output") or 0)
+    return (usable - buf) / window
 
 
 def write_config_layer(task: store.Task) -> Path:
@@ -242,6 +252,7 @@ def run_round(task: store.Task, n: int) -> dict:
     out = {"exit": None, "stuck": None, "texts": [], "tools": {}, "errors": [],
            "tok_in": 0, "tok_out": 0, "interrupted": False, "full": None}
     window = st.get("window")
+    fresh_at = tuning.value(task, "fresh_at")
     while True:
         try:  # woken by the agent's output or a steer note; the timeout runs the clocks below
             line = q.get(timeout=5)
@@ -279,7 +290,7 @@ def run_round(task: store.Task, n: int) -> dict:
                 used = row["in"] + row.get("cache", 0) + row["out"]
                 # Full: a fresh session takes over (drive), never OpenCode's own summary. Only
                 # after some work, so a handoff that is itself large can't loop.
-                if window and used >= FRESH_AT * window and sum(out["tools"].values()):
+                if window and used >= fresh_at * window and sum(out["tools"].values()):
                     out["full"] = used
             elif row["kind"] == "error":
                 out["errors"].append(f"opencode: {row['text']}")
@@ -393,10 +404,11 @@ def summary_text(task: store.Task, n: int, rnd: dict, tests) -> str:
 
 
 # A round continues the task's OpenCode session, so the agent keeps what it has read. Once that
-# session has filled this share of the model's window, or OpenCode has compacted it (a small
-# model's own summary of a coding session drops details), the next round starts a fresh session
-# that is handed exactly what it needs: the task, the work so far and the new instructions.
-FRESH_AT = 0.6
+# session has filled a share of the model's window (the fresh_at knob, tuning.py: learned per
+# model and window from how tasks went; FRESH_AT is its default), or OpenCode has compacted it
+# (a small model's own summary of a coding session drops details), the next round starts a fresh
+# session that is handed exactly what it needs: the task, the work so far and the new instructions.
+FRESH_AT = tuning.KNOBS["fresh_at"].default
 ASKED_FRESH = "Claude asked for a fresh session"
 # The handoff carries the diff while it is under this share of the window (at ~4 characters a
 # token: 12K characters, ~3K tokens, on a 32K one); a bigger diff is listed, for the agent to read.
@@ -432,7 +444,7 @@ def fresh_reason(task: store.Task) -> str | None:
     c = context_state(task)
     if c.get("compactions"):
         return "OpenCode had to compact the last session"
-    if c.get("used") and c.get("window") and c["used"] >= FRESH_AT * c["window"]:
+    if c.get("used") and c.get("window") and c["used"] >= tuning.value(task, "fresh_at") * c["window"]:
         return (f"the last session was {100 * c['used'] // c['window']}% full "
                 f"({c['used'] / 1000:.1f}K of {c['window'] // 1024}K tokens)")
     return None
@@ -542,8 +554,9 @@ def drive(task: store.Task) -> None:
     with models.GpuLease(m, task.name, say) as lease:
         try:
             secs = lease.load()
-            task.set_status(load_secs=round(secs, 1),
-                            window=(m.config.get("limit") or {}).get("context"))
+            window = (m.config.get("limit") or {}).get("context")
+            task.set_status(load_secs=round(secs, 1), window=window)
+            tuning.tune(task, task.spec["model"], window, {"fresh_at": fresh_ceiling(m.config)})
         except (KeyError, RuntimeError, OSError) as e:
             return _load_failed(task, e)
         while True:

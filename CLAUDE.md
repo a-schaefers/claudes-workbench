@@ -17,6 +17,11 @@ what either says (a command, a flag, a default, a guard, a file) updates it in t
   - `gitops.py`: the task's worktree and branch, the review diff (intent-to-add, so new files
     show), commits, the repo's stack (its main languages). `results.py`: results.jsonl rows (`wb accept`/`discard`), each step's size and fit (`step`),
     and `wb stats`. Read them through `store.results()`, which leaves out trial runs.
+    `tuning.py`: knobs learned per model and window from those rows (`wb tune`): each task runs
+    at the best value so far or, one in `EXPLORE`, a neighbour; the reward is acceptance over
+    review rounds, less compaction, ± speed. `fresh_at` (the handover point) is the first, capped
+    below OpenCode's compaction (`runner.fresh_ceiling`). A new knob: add it to `KNOBS`, read it
+    with `tuning.value(task, name)`.
   - `models.py`: discovers local models from opencode.json, their status, and GPU residency
     (make_resident, free_gpu);
     adds and retires them (Ollama's pull/delete, opencode.json entries) for the weekly model check.

@@ -15,7 +15,7 @@ from collections import defaultdict
 from pathlib import Path
 
 from . import (__version__, chat, context, gitops, hardware, images, lessons, models, results,
-               router, scan, skills, store, transcript)
+               router, scan, skills, store, transcript, tuning)
 from .watch import Watcher, wait_exit
 from .runner import PKG_ROOT
 
@@ -634,6 +634,10 @@ def cmd_models(a):
 
 def cmd_stats(a):
     print(results.table())
+
+
+def cmd_tune(a):
+    print(tuning.table())
 
 
 def cmd_trial(a):
@@ -1431,6 +1435,7 @@ def main(argv=None):
                                     "AGENTS.md → CLAUDE.md")
     s.add_argument("dir"); s.set_defaults(f=cmd_init)
     sub.add_parser("stats", help="results by model").set_defaults(f=cmd_stats)
+    sub.add_parser("tune", help="the settings tuned from results, per model and window").set_defaults(f=cmd_tune)
     s = sub.add_parser("trial", help="mark closed tasks as trial runs: their results stop counting")
     s.add_argument("names", nargs="+")
     s.set_defaults(f=cmd_trial)

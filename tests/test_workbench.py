@@ -273,6 +273,17 @@ class Context(Base):
         self.assertIn("42", store.Task("t-c4").worktree.joinpath("answer.txt").read_text())
         self.assertIn("reached 76% of its window", run_wb("watch", "t-c4", "--once", "--no-color"))
 
+    def test_the_handover_point_is_the_tasks_tuned_one(self):
+        os.environ["FAKE_FILL"] = "25000"          # 76%: past the default 0.6, short of 0.8
+        store.home().mkdir(parents=True, exist_ok=True)
+        store.home().joinpath("tuning.json").write_text('{"fresh_at": 0.8}')
+        st = self.review_then_feedback("t-c5")
+        self.assertEqual([r["session"] for r in self.runs()], [False, True])
+        self.assertEqual(st["tuned"], {"fresh_at": 0.8})
+        run_wb("accept", "t-c5", "-m", "feat: answer")
+        row = store.read_jsonl(store.home() / "results.jsonl")[0][-1]
+        self.assertEqual((row["tuned"], row["window"]), ({"fresh_at": 0.8}, 32768))
+
     def test_keep_context_overrides_and_fresh_forces(self):
         os.environ["FAKE_FILL"] = "25000"
         self.review_then_feedback("t-c3", "--keep-context")
@@ -1056,6 +1067,87 @@ class Routing(Base):
         cfg = json.loads(Path(os.environ["WB_OPENCODE_CONFIG"]).read_text())
         self.assertEqual(cfg["model"], "strata/strata")
         self.assertIn("provider", cfg)                # the rest of the config is kept
+
+
+class Tuning(Base):
+    """Settings learned per model and window from how tasks went (tuning.py)."""
+    M, W = "ollama/m", 32768
+
+    def result(self, fresh_at, outcome="accepted", reviews=0, minutes=10.0, n=1, **extra):
+        for _ in range(n):
+            store.append_jsonl(store.home() / "results.jsonl", {
+                "model": self.M, "window": self.W, "outcome": outcome, "reviews": reviews,
+                "minutes": minutes, "tuned": {"fresh_at": fresh_at}, **extra})
+
+    def explores(self, name):
+        from workbench import tuning
+        return tuning.choose("fresh_at", self.M, self.W, name)[1]
+
+    def test_with_no_evidence_every_task_starts_at_the_default(self):
+        from workbench import tuning
+        self.assertEqual(tuning.best("fresh_at", self.M, self.W), 0.6)
+        exploit = next(f"t{i}" for i in range(100) if not self.explores(f"t{i}"))
+        self.assertEqual(tuning.choose("fresh_at", self.M, self.W, exploit), (0.6, False))
+
+    def test_a_better_record_moves_the_pick_and_one_lucky_task_does_not(self):
+        from workbench import tuning
+        self.result(0.6, reviews=1, n=4)                     # 0.5 each
+        self.result(0.7, n=1)                                # one clean task
+        self.assertEqual(tuning.best("fresh_at", self.M, self.W), 0.7)  # smoothed: 0.67 > 0.5...
+        self.result(0.7, outcome="discarded", n=2)           # ...but not once it fails twice
+        self.assertEqual(tuning.best("fresh_at", self.M, self.W), 0.6)
+        self.result(0.7, n=6)
+        self.assertEqual(tuning.best("fresh_at", self.M, self.W), 0.7)
+        self.assertEqual(tuning.best("fresh_at", "ollama/other", self.W), 0.6)  # per model
+        self.assertEqual(tuning.best("fresh_at", self.M, 65536), 0.6)           # and window
+
+    def test_compaction_and_time_cost_reward(self):
+        from workbench import tuning
+        base = {"outcome": "accepted", "reviews": 0, "minutes": 10}
+        self.assertEqual(tuning.reward(base, 10), 1.0)
+        self.assertEqual(tuning.reward({**base, "reviews": 1}, 10), 0.5)
+        self.assertEqual(tuning.reward({**base, "steps": [{"compacted": True}]}, 10), 0.75)
+        self.assertAlmostEqual(tuning.reward({**base, "minutes": 20}, 10), 0.85)
+        self.assertAlmostEqual(tuning.reward({**base, "minutes": 5}, 10), 1.15)
+        self.assertEqual(tuning.reward({**base, "outcome": "discarded"}, 10), 0.0)
+
+    def test_some_tasks_explore_a_neighbour_the_rest_take_the_pick(self):
+        from workbench import tuning
+        self.result(0.6, n=3)
+        self.result(0.5, n=1)
+        picks = [tuning.choose("fresh_at", self.M, self.W, f"t{i}") for i in range(500)]
+        explored = [v for v, e in picks if e]
+        self.assertTrue(0.1 < len(explored) / 500 < 0.3)
+        self.assertEqual(set(explored), {0.7})               # the neighbour tried less
+        self.assertEqual({v for v, e in picks if not e}, {0.6})
+        self.assertEqual(picks[7], tuning.choose("fresh_at", self.M, self.W, "t7"))  # stable
+
+    def test_values_past_the_ceiling_are_never_tried(self):
+        from workbench import runner, tuning
+        cfg = {"limit": {"context": 32768, "input": 28672, "output": 4096}, "options": {"max_tokens": 8192}}
+        top = runner.fresh_ceiling(cfg)
+        self.assertEqual(top, 0.625)                         # where OpenCode would compact
+        self.assertEqual(tuning.allowed("fresh_at", top), [0.4, 0.5, 0.6])
+        self.assertEqual(tuning.default("fresh_at", 0.55), 0.5)
+        self.result(0.6, n=3)
+        picks = {tuning.choose("fresh_at", self.M, self.W, f"t{i}", top) for i in range(300)}
+        self.assertEqual(picks, {(0.6, False), (0.5, True)})  # never 0.7 above the pick
+
+    def test_trials_are_not_evidence_and_a_pin_wins(self):
+        from workbench import tuning
+        self.result(0.8, n=5, trial=True)
+        self.assertEqual(tuning.best("fresh_at", self.M, self.W), 0.6)
+        store.home().mkdir(parents=True, exist_ok=True)
+        store.home().joinpath("tuning.json").write_text('{"fresh_at": 0.5}')
+        self.assertEqual(tuning.choose("fresh_at", self.M, self.W, "any"), (0.5, False))
+        out = run_wb("tune")
+        self.assertIn("pinned to 0.5 in tuning.json", out)
+
+    def test_wb_tune_shows_the_record_and_the_pick(self):
+        self.result(0.6, n=2)
+        out = run_wb("tune")
+        self.assertIn("ollama/m @ 32768:", out)
+        self.assertIn("0.6: 2×1.00←", out)
 
 
 class Notes(Base):

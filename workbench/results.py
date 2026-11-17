@@ -23,7 +23,7 @@ def step(task: store.Task, landed: bool) -> dict:
         compacted = bool(context_state(task).get("compactions"))
     except Exception:  # no session to export: nothing was compacted
         compacted = False
-    return {**size, "window": st.get("window"), "landed": landed,
+    return {**size, "window": st.get("window"), "landed": landed, "compacted": compacted,
             "overflow": compacted or any(e.get("kind") == "fresh" and e.get("overflow") for e in evs),
             "stuck": stuck, "took_over": any(e.get("kind") == "takeover" for e in evs)}
 
@@ -41,6 +41,9 @@ def record(task: store.Task, outcome: str, last_step: dict | None = None, **extr
            "skills_offered": st.get("skills_ever") or [], "skills_loaded": skills.loaded(task),
            "skills_rev": st.get("skills_rev") or {},  # the version handed: judges each edit
            "steps": (st.get("step_sizes") or []) + ([last_step] if last_step else []),
+           "window": st.get("window"),
+           "tuned": st.get("tuned") or {}, "explored": st.get("explored") or [],  # tuning.py
+           "tuned_max": st.get("tuned_max") or {},
            **({"trial": True} if spec.get("trial") else {}), **extra}
     store.append_jsonl(store.home() / "results.jsonl", row)
     return row

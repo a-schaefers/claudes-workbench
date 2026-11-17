@@ -396,7 +396,8 @@ Claude is the driver, not a spectator, and the agent is a teammate it can reach 
 Local models work in a small context window, and so, in its own way, does Claude.
 
 **The agent's.** Rounds continue one OpenCode session. The runner reads the context every step
-reports: once it's 60% full, it stops the agent, mid-round if need be, and a fresh session takes
+reports: once it's past the handover point (60% of the window until evidence says otherwise:
+see *Self-tuning* below), it stops the agent, mid-round if need be, and a fresh session takes
 over, handed exactly what it needs: the task (the current step's spec), the steps already
 committed, the uncommitted diff (or the list of changed files when the diff is over 9% of the
 window, about 3K tokens on 32K), the agent's last words and the new instructions. OpenCode's own
@@ -412,7 +413,7 @@ more round.
 first guess scales with the window it is served: two or three files and about 150 new lines on
 32K (what was measured), proportionally more on a bigger window, up to four times that. Each step
 that closes (`wb next`, `accept`, `discard`) records its files and added lines, and whether it fit:
-no session filled past 60% or was compacted, the agent didn't get stuck, and Claude didn't take
+no session filled past its handover point or was compacted, the agent didn't get stuck, and Claude didn't take
 over. Check-ins and reports also name changed files the spec never mentions (`NOTE: the spec
 doesn't name src/flow.c`), where an agent's drift shows first. The biggest step that fit raises
 the slice past the guess; the smallest that didn't lowers
@@ -422,6 +423,19 @@ Ollama serves the model (the loaded model, its Modelfile's `num_ctx`, or `OLLAMA
 `wb model add` writes that, with an output budget of an eighth of it, and `wb doctor` flags an entry
 that claims more than Ollama serves (prompts would be cut off) or less (tasks could be bigger). A session stays bound to the directory it was made in, so context carries over only
 within a task (rounds, `wb next`), never to a new one.
+
+**Self-tuning.** A setting whose best value depends on the model is learned per model and window
+on your machine, not fixed. The first is the handover point. Earlier means more fresh sessions,
+each re-reading files; later means working in a crowded context, where a model gets sloppier.
+Each task runs at one value: usually the best so far, while one task in five tries the value
+next to it. When a task closes, its value scores the result: 1 for accepted, divided by one plus
+its review rounds, less 0.25 if OpenCode still had to compact, and up to ±0.15 for being faster
+or slower than that model's usual task. Discarded scores 0. Each value's mean is smoothed
+toward the others' (two tasks' worth), so one lucky task moves nothing. The pick walks a step
+at a time toward whatever scores best. Values past the model's compaction point are never tried
+(the window less one reply at the output cap and one step's growth: 62% on a 32K window with an
+8K reply). Trial runs aren't evidence. `wb tune` shows each model's record and pick;
+`$WB_HOME/tuning.json` pins a value (`{"fresh_at": 0.6}`).
 
 **Claude's.** `wb` holds the delegation state, so Claude's context doesn't have to. Whoever
 compacts Claude's conversation (the engine, `/compact`, the mod), the mod tells the summary to keep
@@ -774,6 +788,7 @@ back) and the web chat stops listening in that session.
 | `wb notes [add "…" \| drop N]` | what Claude learned about how you want delegation run, in any project |
 | `wb image "<prompt>" [--n] [--size] [--seed] [--ref] [--out] [--engine] [--list]` | candidates from a local image model, for Claude to look at and choose from |
 | `wb stats` | real results by model and size |
+| `wb tune` | the settings learned from results, per model and window, and each one's pick |
 | `wb trial <task>…` | mark closed tasks as trial runs: their results stop counting |
 | `wb chat [serve\|url\|reply\|log]` | the web chat |
 | `wb init <dir>` | set a project up: git with an initial commit, AGENTS.md → CLAUDE.md |
@@ -785,7 +800,8 @@ back) and the web chat stops listening in that session.
 ```
 ~/.local/state/workbench/        ($WB_HOME) every task, notice and result
   notify.jsonl                   notifications that need Claude, all tasks
-  results.jsonl                  one row per closed task: what the router and skill records learn from
+  results.jsonl                  one row per closed task: what the router, skill records and tuning learn from
+  tuning.json                    optional: pin a self-tuned setting ({"fresh_at": 0.6})
   lessons.jsonl                  what each task taught, open until Claude writes it into a skill or closes it
   notes.md                       wb notes: how you want delegation run, handed to every delegate-mode session
   imports/                       skills fetched from outside, waiting for Claude to read them
