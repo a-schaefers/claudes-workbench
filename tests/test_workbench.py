@@ -968,10 +968,10 @@ class Routing(Base):
             "ollama/qwen3.8-27b": {"weights_gb": 13}, "ollama/mimo-v2.6:9b-q8_0": {"weights_gb": 9.7},
             "strata": {"weights_gb": 55}}))
 
-    def result(self, model, size, outcome, minutes=2.0, n=1):
+    def result(self, model, size, outcome, minutes=2.0, n=1, **extra):
         for _ in range(n):
             store.append_jsonl(store.home() / "results.jsonl", {
-                "model": model, "size": size, "outcome": outcome, "minutes": minutes})
+                "model": model, "size": size, "outcome": outcome, "minutes": minutes, **extra})
 
     def test_with_no_results_significant_gets_the_largest_and_trivial_the_smallest(self):
         from workbench import router
@@ -1002,6 +1002,35 @@ class Routing(Base):
         self.result("strata/strata", "significant", "accepted", n=3)   # 4/6 vs 4/5: within 0.15
         self.result("strata/strata", "significant", "discarded", n=1)
         self.assertEqual(router.choose("significant")[0].model.id, "strata/strata")
+
+    def test_the_record_on_the_same_kind_of_work_counts_most(self):
+        from workbench import router
+        self.result("strata/strata", "significant", "accepted", n=4, stack=["python"])
+        self.result("strata/strata", "significant", "discarded", n=3, stack=["c"])
+        self.result("ollama/qwen3.8-27b", "significant", "accepted", n=2, stack=["c"])
+        self.result("ollama/qwen3.8-27b", "significant", "discarded", n=2, stack=["python"])
+        top, why = router.choose("significant", ["c"])
+        self.assertEqual(top.model.id, "ollama/qwen3.8-27b")
+        self.assertIn("the best record on significant c work", why)
+        self.assertIn("2/4 real tasks accepted, 2/2 on c", why)
+        self.assertEqual(router.choose("significant", ["python"])[0].model.id, "strata/strata")
+        self.assertEqual(router.choose("significant", ["rust"])[0].model.id, "strata/strata")  # no
+        # evidence on rust: the whole record decides, as it does with no stack at all
+        self.assertEqual(router.choose("significant")[0].model.id, "strata/strata")
+
+    def test_an_old_result_without_a_stack_is_read_from_its_repo(self):
+        from workbench import router
+        (self.repo / "game.c").write_text("int main(void) { return 0; }\n")
+        (self.repo / "game.h").write_text("\n")
+        (self.repo / "notes.md").write_text("docs say nothing about the stack\n")
+        subprocess.run(["git", "-C", str(self.repo), "add", "-A"], check=True)
+        subprocess.run(["git", "-C", str(self.repo), "commit", "-qm", "c"], check=True)
+        self.assertEqual(gitops.stack(self.repo), ["c"])
+        self.assertEqual(router.row_stack({"repo": str(self.repo)}), ("c",))
+        self.assertEqual(router.row_stack({"repo": "/gone"}), ())
+        self.assertEqual(router.row_stack({"repo": str(self.repo), "stack": []}), ())  # recorded wins
+        self.start("t-kind", "ok")
+        self.assertEqual(store.Task("t-kind").spec["stack"], ["c"])
 
     def test_set_default_writes_the_pick_to_opencode(self):
         out = run_wb("models", "--set-default")

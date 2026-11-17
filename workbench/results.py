@@ -31,7 +31,8 @@ def step(task: store.Task, landed: bool) -> dict:
 def record(task: store.Task, outcome: str, last_step: dict | None = None, **extra) -> dict:
     spec, st = task.spec, task.status
     row = {"ts": store.now(), "task": task.name, "outcome": outcome, "model": spec.get("model"),
-           "size": spec.get("size"), "repo": spec.get("repo"), "rounds": st.get("round", 1),
+           "size": spec.get("size"), "repo": spec.get("repo"), "stack": spec.get("stack"),
+           "rounds": st.get("round", 1),
            "auto_fixes": st.get("auto_fixes_total", 0) + st.get("auto_fixes", 0),
            "reviews": st.get("reviews", 0),
            "tests_ok": (st.get("tests") or {}).get("ok"),

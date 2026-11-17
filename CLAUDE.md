@@ -15,7 +15,7 @@ what either says (a command, a flag, a default, a guard, a file) updates it in t
   - `store.py`: task directories, atomic JSON, locked JSONL. Every other part talks through these files.
   - `runner.py`: the detached per-task driver. `cli.py`: `wb`. `ask_mcp.py`: the MCP tool server.
   - `gitops.py`: the task's worktree and branch, the review diff (intent-to-add, so new files
-    show), commits. `results.py`: results.jsonl rows (`wb accept`/`discard`), each step's size and fit (`step`),
+    show), commits, the repo's stack (its main languages). `results.py`: results.jsonl rows (`wb accept`/`discard`), each step's size and fit (`step`),
     and `wb stats`.
   - `models.py`: discovers local models from opencode.json, their status, and GPU residency
     (make_resident, free_gpu);
@@ -36,7 +36,8 @@ what either says (a command, a flag, a default, a guard, a file) updates it in t
     nothing about the machine is hard-coded.
   - `router.py`: picks a model per task size: an educated guess (the largest model allowed significant
     work, the smallest for trivial; models that fit the GPU's budget whole before ones that spill)
-    corrected by real results (accepted / tried, per size). And each
+    corrected by real results (accepted / tried, per size; on the repo's stack first, `gitops.stack`,
+    the whole record its prior, `LIKE_PRIOR`). And each
     model's slice (`slice`): files and lines per task, guessed from its window (measured on 32K,
     scaled up to GUESS_MAX) and corrected by the steps that fit or overflowed. And its `budgets`:
     the think, silence and round limits, longer for a model measured slow (`speed.json`, which
@@ -93,7 +94,7 @@ what either says (a command, a flag, a default, a guard, a file) updates it in t
 
 ## How a task runs
 1. `wb start` refuses a repo without a committed CLAUDE.md (`--no-claude-md`), asks the router for
-   a model (unless `--model`), makes branch `delegate/<task>` in a fresh worktree, writes the
+   a model for the task's size and the repo's stack (unless `--model`), makes branch `delegate/<task>` in a fresh worktree, writes the
    round-1 prompt (the spec plus `cli.PROTOCOL`), records any `--skill`, spawns the detached
    runner, and returns.
 2. The runner takes the GPU (`models.GpuLease`: `gpu.lock` shared beside other tasks when every model

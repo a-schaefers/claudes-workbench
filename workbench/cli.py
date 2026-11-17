@@ -74,15 +74,16 @@ def ago(ts) -> str:
     return f"{s}s" if s < 90 else f"{s // 60}m" if s < 5400 else f"{s // 3600}h"
 
 
-def pick_model(size: str, wanted: str | None) -> tuple[models.Model, dict, str]:
-    """The task's model: the one asked for, else the router's choice on the evidence."""
+def pick_model(size: str, wanted: str | None, stack=()) -> tuple[models.Model, dict, str]:
+    """The task's model: the one asked for, else the router's choice on the evidence (the
+    record on this kind of work first: router.score)."""
     if wanted:
         try:
             m = models.resolve(wanted)
         except KeyError as e:
             die(str(e).strip('"'))
         return m, models.status(m), "asked for"
-    top, why = router.choose(size)
+    top, why = router.choose(size, stack)
     if top is None:
         die(why, 3)
     return top.model, top.state, why
@@ -118,7 +119,8 @@ def cmd_start(a):
     if not spec_text.strip():
         die("the spec is empty")
     handed = _skill_names(a.skill)
-    m, state, why = pick_model(a.size, a.model)
+    stack = gitops.stack(repo)
+    m, state, why = pick_model(a.size, a.model, stack)
     if not state["available"] and not a.force:
         die(f"{m.id} can't run: {state['why']}. (--force queues it anyway)", 3)
     dirty = gitops.git(repo, "status", "--porcelain").strip()
@@ -135,7 +137,7 @@ def cmd_start(a):
     store.write_json(task.dir / "task.json", {
         "name": a.name, "repo": str(repo), "base": base, "base_ref": a.base,
         "branch": gitops.branch_name(a.name), "model": m.id, "model_label": m.label,
-        "opencode_model": m.id, "route": why, "size": a.size, "test_cmd": a.test,
+        "opencode_model": m.id, "route": why, "size": a.size, "stack": stack, "test_cmd": a.test,
         "auto_fix": a.auto_fix, "ask_budget": budget, "ask_timeout": a.ask_timeout,
         "checkin": a.checkin if a.checkin is not None else 10 if a.size == "significant" else 0,
         "round_timeout": a.round_timeout or limits["round"],

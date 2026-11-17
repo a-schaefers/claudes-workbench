@@ -246,8 +246,8 @@ your decisions, the review checks) marked apart.
 **2. `wb start` sets it up** and returns at once:
 - It checks the task name, that the repo is a git repo, and that it has a committed `CLAUDE.md`
   (an agent without one starts blind; `--no-claude-md` is for throwaway repos).
-- It picks the model: the router's choice for the task's size (`--size trivial|significant`),
-  or `--model`. A model that can't run right now (server down, not pulled) is refused unless
+- It picks the model: the router's choice for the task's size (`--size trivial|significant`)
+  and the repo's stack (its main languages, from its tracked files), or `--model`. A model that can't run right now (server down, not pulled) is refused unless
   `--force`.
 - It makes branch `delegate/<task>` in a fresh git worktree from `--base` (default `HEAD`). Your
   own checkout is never touched, and uncommitted changes in it stay out of the agent's copy (it
@@ -324,7 +324,7 @@ Then one of:
 | `wb next <task> --spec <file> -m "…"` | commits the approved step on the branch and gives the next step to the same agent, in the same worktree and session |
 | `wb discard <task> --reason "…"` | stops it, removes the worktree and the branch (`--keep-branch` keeps it) |
 
-Every accepted or discarded task leaves a row in `results.jsonl`: the model, the size, rounds,
+Every accepted or discarded task leaves a row in `results.jsonl`: the model, the size, the repo and its stack, rounds,
 auto-fixes, reviews, minutes, local tokens, the skills it was offered and loaded, the outcome. The
 router learns from those rows.
 
@@ -499,7 +499,10 @@ warning that it may hold GPU memory.
 
 **Routing.** The router makes an educated guess and corrects it with real results. A model's
 quality on a task size is its acceptance rate with a uniform prior, (accepted + 1) / (tried + 2),
-so one lucky task doesn't crown it. Among the models within 0.15 of the best, the guess decides:
+so one lucky task doesn't crown it. The same kind of work counts most: in a repo whose main
+languages are C, a model's record on C repos decides, with its whole record as a prior worth two
+tasks, so a model that is strong in Python and weak in C is routed by the language at hand once
+there is evidence, and by everything it has done until then. Among the models within 0.15 of the best, the guess decides:
 the largest model (by weight bytes) for significant work, the smallest for trivial work, and at
 equal size the one already on the GPU. Where the GPU's memory is known, every model that fits it
 (its weights within 90% of it, or `vram_gb`; or loaded by Ollama all in VRAM) comes before one

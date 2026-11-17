@@ -2,7 +2,10 @@
 
 Real delegated work (results.jsonl: accepted or not, and how long it took) is the evidence.
 Quality is the acceptance rate with a uniform prior, (accepted + 1) / (tries + 2), so one lucky
-task doesn't crown a model. Among the models within QUALITY_MARGIN of the best, the guess
+task doesn't crown a model. Work of the same kind counts most: a task in a repo of the same stack
+(its main languages, gitops.stack) is judged first by that model's record on that stack, with its
+overall record as the prior worth LIKE_PRIOR tasks, so a model strong in one language and weak in
+another is routed by the one at hand once there is evidence, and by its whole record until then. Among the models within QUALITY_MARGIN of the best, the guess
 decides: for significant work the largest model (more parameters, better judgment), for trivial
 work the smallest (faster), and at equal size the one already on the GPU. A model too big for
 the GPU (models.need over its budget) spills into RAM and runs several times slower, so in that
@@ -21,12 +24,15 @@ round's session says how fast the model reads and writes on this machine (record
 """
 from __future__ import annotations
 
+import functools
 import statistics
 from dataclasses import dataclass
+from pathlib import Path
 
-from . import models, store
+from . import gitops, models, store
 
 QUALITY_MARGIN = 0.15
+LIKE_PRIOR = 2  # how many tasks of the same stack the overall record weighs as
 SIZES = ("trivial", "significant")
 # Measured 2026-11-16 on a 32K window: 2-3 files and ~150 new lines landed in one session; eight
 # files took an hour of compactions and drift. A bigger window is guessed to hold proportionally
@@ -44,25 +50,46 @@ class Score:
     wins: int = 0
     minutes: float | None = None   # mean wall time of a real task of this size
     fits: bool | None = None       # its need within the GPU's budget; None when unknown
+    stack: tuple = ()              # the kind of work asked about, and the record on it
+    like_tries: int = 0
+    like_wins: int = 0
 
     @property
     def quality(self) -> float:
-        return (self.wins + 1) / (self.tries + 2)
+        overall = (self.wins + 1) / (self.tries + 2)
+        return (self.like_wins + LIKE_PRIOR * overall) / (self.like_tries + LIKE_PRIOR)
 
     def line(self) -> str:
         if not self.tries:
             return "no real tasks yet"
         t = f", ~{self.minutes:.1f} min" if self.minutes is not None else ""
-        return f"{self.wins}/{self.tries} real tasks accepted{t}"
+        like = f", {self.like_wins}/{self.like_tries} on {'/'.join(self.stack)}" if self.like_tries else ""
+        return f"{self.wins}/{self.tries} real tasks accepted{like}{t}"
 
 
-def score(m: models.Model, size: str, state: dict | None = None) -> Score:
+@functools.cache
+def _repo_stack(repo: str) -> tuple:
+    return tuple(gitops.stack(repo)) if Path(repo).is_dir() else ()
+
+
+def row_stack(r: dict) -> tuple:
+    """A result's stack: recorded since it was, else read from its repo while that exists."""
+    if r.get("stack") is not None:
+        return tuple(r["stack"])
+    return _repo_stack(r["repo"]) if r.get("repo") else ()
+
+
+def score(m: models.Model, size: str, state: dict | None = None, stack=()) -> Score:
     state = state or models.status(m)
     real = [r for r in store.read_jsonl(store.home() / "results.jsonl")[0]
             if r.get("model") == m.id and r.get("size") == size]
-    s = Score(model=m, state=state, weights=models.weights(m))
+    s = Score(model=m, state=state, weights=models.weights(m), stack=tuple(stack))
     s.tries = len(real)
     s.wins = sum(r.get("outcome") == "accepted" for r in real)
+    if stack:
+        like = [r for r in real if set(row_stack(r)) & set(stack)]
+        s.like_tries = len(like)
+        s.like_wins = sum(r.get("outcome") == "accepted" for r in like)
     times = [r["minutes"] for r in real if r.get("minutes") is not None]
     s.minutes = sum(times) / len(times) if times else None
     return s
@@ -100,10 +127,10 @@ def fits(m: models.Model, budget: int | None) -> bool | None:
     return n <= models.SHARE_AT * budget if n and budget else None
 
 
-def rank(size: str) -> list[Score]:
-    """Every discovered model's case for a task of this size, best first (the user's policy
-    leaves some out: allowed)."""
-    scores = [score(m, size) for m in models.discover().values() if allowed(m, size)]
+def rank(size: str, stack=()) -> list[Score]:
+    """Every discovered model's case for a task of this size (in a repo of this stack), best
+    first (the user's policy leaves some out: allowed)."""
+    scores = [score(m, size, stack=stack) for m in models.discover().values() if allowed(m, size)]
     budget = models.gpu_budget() if scores else None
     for s in scores:
         s.fits = fits(s.model, budget)
@@ -115,9 +142,9 @@ def rank(size: str) -> list[Score]:
     return close + rest + blocked
 
 
-def choose(size: str) -> tuple[Score | None, str]:
-    """The model for a task of this size and one line on why."""
-    ranked = rank(size)
+def choose(size: str, stack=()) -> tuple[Score | None, str]:
+    """The model for a task of this size (in a repo of this stack) and one line on why."""
+    ranked = rank(size, stack)
     top = ranked[0] if ranked and ranked[0].state["available"] else None
     if top is None:
         return None, "no local model can run: " + "; ".join(
@@ -133,7 +160,8 @@ def choose(size: str) -> tuple[Score | None, str]:
     elif size == "trivial" and top.weights == min(sizes):
         pick = "the smallest model allowed trivial work"
     else:
-        pick = f"the best record on {size} work"
+        kind = f"{size} {'/'.join(stack)}" if top.like_tries else size
+        pick = f"the best record on {kind} work"
     others = "; ".join(f"{s.model.id} {s.line()}" for s in usable[1:4])
     return top, f"{top.model.id}: {pick}; {top.line()}" + (f" (vs {others})" if others else "")
 
