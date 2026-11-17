@@ -102,9 +102,11 @@ def restrict(writable: list[str], readable: list[str] | None = None,
     try:
         read = handled & READ_FILE
         sock = handled & RESOLVE_UNIX
+        # `unix` gets the socket right alone: its reads and writes come from the split lists
+        # (the 0.90 review: `read` there made a granted ~/.config's gh token readable again)
         for path, base in [*((p, write | read) for p in writable),
                            *((p, read) for p in readable or []),
-                           *((p, read | sock) for p in unix or [])]:
+                           *((p, sock) for p in unix or [])]:
             try:
                 pfd = os.open(path, os.O_PATH | os.O_CLOEXEC)
             except OSError:

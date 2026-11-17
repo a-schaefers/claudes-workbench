@@ -712,8 +712,10 @@ deliberately hostile process (the 2026-11-16 audit's list of what it can't stop 
   rights: file writes, removes and every make, plus refer (ABI 2: moves inside the lane work)
   and truncate (ABI 3), file reads when `--reads` is given, and from ABI 9 connecting to a UNIX
   socket made outside the lane, granted only beneath `--unix` (`context.unix_paths`: the
-  `commands.json` and grant `paths`, so `wb allow --path /run/postgresql` reaches a test
-  database), so the session bus (and through it `systemd-run`), the keyring and the SSH and GPG
+  `commands.json` and grant `paths`, split around secrets and workbench's own files as the reads
+  and writes are, so `wb allow --path /run/postgresql` reaches a test database; a `--unix` rule
+  carries the socket right alone, since the 0.90 review found its read right made a granted
+  `~/.config`'s gh token readable again), so the session bus (and through it `systemd-run`), the keyring and the SSH and GPG
   agents are out of reach; sockets the lane's own processes make stay theirs. From ABI 6 it also
   scopes signals and abstract UNIX sockets: the agent can signal only what it started, not its
   runner, other tasks, the chat or Claude Code, while the runner can still stop it. Directories

@@ -2172,6 +2172,27 @@ class Lane(Base):
                              capture_output=True, text=True, timeout=20)
         self.assertEqual(out.stdout.split(), ["refused"] * 4 + ["wrote"] * 2, out.stderr)
 
+    @unittest.skipUnless(lane.abi(), "needs Landlock")
+    def test_a_granted_directory_that_holds_secrets_keeps_them_unreadable_through_the_socket_rule(self):
+        # the 0.90 review: the --unix rule gave READ_FILE to the whole grant, so a granted
+        # ~/.config handed the agent the gh token and the chat token again
+        home = self.fake_home()
+        os.environ.pop("WB_CHAT_TOKEN", None)
+        files = {"gh": home / ".config" / "gh" / "hosts.yml",
+                 "token": home / ".config" / "workbench" / "chat-token",
+                 "app": home / ".config" / "app.toml"}
+        for f in files.values():
+            f.parent.mkdir(parents=True, exist_ok=True)
+            f.write_text("x")
+        Path(os.environ["WB_COMMANDS"]).write_text(json.dumps({"paths": [str(home / ".config")]}))
+        task = self.bare_task("t-unix", self.repo)
+        unix = context.unix_paths(task)
+        self.assertIn(str(home / ".config" / "app.toml"), unix)
+        self.assertFalse([p for p in unix if p in (str(home / ".config"), str(files["gh"].parent))
+                          or "workbench" in p])
+        got = dict(zip(files, self.reads_in_lane(task, files.values(), (unix,))))
+        self.assertEqual(got, {"gh": "refused", "token": "refused", "app": "read"})
+
     def test_wb_allow_path_refuses_a_link_and_the_places_the_lane_hides(self):
         # the agent planted /tmp/out -> another directory and asked for /tmp/out: the grant went
         # to the target; ~/.config/workbench would have handed it the chat token (the audit)

@@ -293,6 +293,11 @@ def repo_dirs(task: store.Task) -> set[str]:
     return {real, _COMMON[real]}
 
 
+def _hidden() -> set[str]:
+    """The secrets and workbench's own files that exist: what a lane entry is split around."""
+    return {h for h in secret_paths() | private_paths() if os.path.lexists(h)}
+
+
 def _split(place: str, out_of: set[str]) -> list[str]:
     """`place`, or when something in `out_of` lies beneath it, its other entries one by one
     (Landlock only allows: the way to leave one file out of a directory is to grant the rest)."""
@@ -331,7 +336,7 @@ def writable(task: store.Task) -> list[str] | None:
     temps = {os.path.realpath(t) for t in (tempfile.gettempdir(), *TEMP_ROOTS)}
     guard = repo_dirs(task)  # a repo kept in /tmp is the user's choice: the temp dirs stay
     cargo = os.environ.get("CARGO_HOME")
-    out_of = {h for h in secret_paths() | private_paths() if os.path.lexists(h)} | \
+    out_of = _hidden() | \
         {os.path.realpath(p) for p in (*(home / h for h in NOT_WRITABLE),
                                        *((Path(cargo) / "bin", Path(cargo) / "env") if cargo else ()))
          if os.path.lexists(p)}
@@ -376,9 +381,11 @@ def snaps(names) -> list[str]:
 def unix_paths(task: store.Task) -> list[str]:
     """Where the agent may connect to a UNIX socket made outside its lane (Landlock ABI 9): only
     what the user and Claude added (`paths`; `wb allow --path /run/postgresql` for a test
-    database), never the session bus or the user's agents."""
-    return _both(p for p in (Path(q).expanduser() for q in lane_paths(task) if q != "*")
-                 if os.path.exists(p))
+    database), never the session bus or the user's agents, split around secrets like the reads
+    (the 0.90 review: a GPG agent socket under a granted ~/.config was in reach)."""
+    hidden = _hidden()
+    return _both(q for p in (Path(r).expanduser() for r in lane_paths(task) if r != "*")
+                 if os.path.exists(p) for q in _split(str(p), hidden))
 
 
 def ask_dir(task: store.Task) -> Path:
