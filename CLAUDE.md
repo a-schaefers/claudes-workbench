@@ -71,15 +71,20 @@ dependencies. No packaging: it runs from the clone.
   `_ack_all`.
 - `runner.py`: the detached per-task driver: the GPU lease, rounds, guards, the think nudge,
   steering, tests and auto-fix, the report, handovers to a fresh session (`fresh_reason`,
-  `handoff_prompt`, `HANDOVER_ROOM`), the config layer and the agent's environment (credentials
-  dropped: `SECRET_ENV`; `commands.json` `env` passes named ones through).
+  `handoff_prompt`, `HANDOVER_ROOM`), the config layer (the user's MCP servers off, the rules
+  again as `OPENCODE_CONFIG_CONTENT`: `rules_env`) and the agent's environment (credentials
+  dropped: `SECRET_ENV`, `USERINFO`, but `ENV_KEEP`; `commands.json` `env` passes named ones
+  through).
 - `events.py`: OpenCode event normalization and the stuck detector.
-- `ask_mcp.py` (+ `bin/wb-ask-mcp`): the `ask_reviewer` MCP server; questions and permission
-  requests, budgeted.
+- `ask_mcp.py` (+ `bin/wb-ask-mcp`): the `ask_reviewer` MCP server, in the lane, writing only
+  `ask/`; and the runner's side (`relay`: checks each ask file, counts the budgets in status
+  `asks`, raises the notice, keeps the phase `asking`), `write_answer` (never through a link).
 - `context.py`: what the agent knows and may do: instructions, denied tools and skills, the shell
   allowlist (`shell_rules`: `ALLOWED_COMMANDS`, `PROJECT_BINS`, `ASK_FIRST`, `INSTALL_LISTED`,
-  `DENIED_SHELL` with its wrappers), the lane (`writable`, `readable`, `SECRETS`, `tool_roots`,
-  `runtime_dir`, `unix_paths`, `external_rules`),
+  `DENIED_SHELL` with its wrappers, `denied_shell()` adding git by path), the lane (`writable`:
+  the worktree and `ask/`, not the rest of the task directory; `readable`, `SECRETS`,
+  `private_paths` (workbench's own state and config), `lane_refusal`, `tool_roots`,
+  `runtime_dir`, `unix_paths`, `external_rules`), `commands_conf` (commands.json, checked),
   `rules_dir` (the agent's rules, outside its lane), `grants`/`grant` (what Claude allowed the
   task: `rules/<task>/grants.json`).
 - `lane.py`: Landlock: the runner starts OpenCode through it (`wrap`); restricts writes, reads,
@@ -150,7 +155,8 @@ Linux there is no Landlock and watch.py falls back to timed waits.
    session gets the task, the diff and its last words; between rounds, a session over the point
    or compacted is replaced. OpenCode's own compaction is set just past it, as a backstop.
 5. The runner writes the round report and a `review`/`stuck`/`failed` notice and exits.
-   `ask_reviewer` raises a `question` at any time and blocks until `wb answer` or `wb allow`.
+   `ask_reviewer` writes a question at any time and blocks until `wb answer` or `wb allow`; the
+   runner checks it and raises the `question` (nothing the agent writes is trusted outside it).
 6. The mod (or `wb wait`) delivers each notice once, while still true; acting on a task
    acknowledges it (`_ack_all`, which stops short of news still true).
 7. `wb accept` commits with provenance trailers (no AI co-author line), optionally merging;
@@ -165,7 +171,7 @@ ARCHITECTURE.md (*Files and formats*):
 notify.jsonl results.jsonl lessons.jsonl notes.md tuning.json speed.json gpu.{lock,json,admit}
 scout.json update.json watch.json imports/ images/ chat/{messages,receipts}.jsonl chat/listener.json
 rules/<task>/  opencode.json HANDBOOK.md CLAUDE.md bin/git grants.json   (outside the agent's lane)
-tasks/<task>/  task.json status.json events.jsonl steer.jsonl acked context.md runner.log
+tasks/<task>/  task.json status.json events.jsonl steer.jsonl acked context.md runner.log  (the lane: worktree/, ask/)
                rounds/<n>/{prompt,instructions,summary}.md rounds/<n>/tests.txt ask/<id>.{json,answer} worktree/
 ```
 The skill library is `~/.local/share/workbench/skills` (`$WB_SKILLS`). `~/.config/workbench/`
@@ -219,6 +225,11 @@ PATH and the lane; the rest is only imitated by the fake.
 - The 2.x config shape is `mcp.servers.<name>`, with `timeout.{startup,execution}`;
   `codemode: false` exposes a plain tool (listed as `workbench_ask_reviewer`).
 - `--standalone` servers inherit the env and share session storage with the background service.
+- Project config (`opencode.json` in the worktree, `.opencode/`, or any directory above it) loads
+  after `OPENCODE_CONFIG` and its permissions come later, so it could lift every deny;
+  `OPENCODE_CONFIG_CONTENT` loads last of all (`OPENCODE_DISABLE_PROJECT_CONFIG` also drops
+  AGENTS.md and the project's skills). The user's global MCP servers merge in too, and one whose
+  entry says `"enabled": false` still starts: the layer swaps its command for `false`.
 - It loads AGENTS.md itself but never CLAUDE.md, which reaches it through `instructions`
   (absolute paths).
 - Skills come from `~/.claude/skills` and `.claude/skills`. A `disable-model-invocation` skill is

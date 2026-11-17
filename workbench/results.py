@@ -20,7 +20,7 @@ def step(task: store.Task, landed: bool) -> dict:
     evs = [e for e in store.read_jsonl(task.dir / "events.jsonl")[0] if (e.get("round") or 0) >= since]
     stuck = any(r.get("task") == task.name and r.get("kind") in ("stuck", "failed")
                 and (r.get("round") or 0) >= since
-                for r in store.read_jsonl(store.home() / "notify.jsonl")[0])
+                for r in store.notices())
     from .runner import context_state  # the runner imports what this module does
     try:
         compacted = bool(context_state(task).get("compactions"))
