@@ -426,8 +426,11 @@ def run_tests(task: store.Task, n: int):
         return None
     task.set_status(phase="testing", last=f"tests: {cmd}")
     limit = int(task.spec.get("test_timeout") or 900)
-    proc = subprocess.Popen(cmd, shell=True, cwd=task.worktree, stdout=subprocess.PIPE,
-                            stderr=subprocess.STDOUT, env={**os.environ, **CLEAN_ENV},
+    # in the agent's lane and with its environment: the tests run the agent's code, and must
+    # pass or fail as they did when the agent ran them
+    argv = lane.wrap(context.writable(task), ["/bin/sh", "-c", cmd], context.readable(task))
+    proc = subprocess.Popen(argv, cwd=task.worktree, stdout=subprocess.PIPE,
+                            stderr=subprocess.STDOUT, env=agent_env(task),
                             start_new_session=True)  # its own group: a timeout ends all of it
     try:
         output, _ = proc.communicate(timeout=limit)
@@ -587,8 +590,9 @@ def skills_note(task: store.Task, n: int) -> str:
 
 def current_task_prompt(task: store.Task) -> str:
     """The spec the agent is working to now, with the protocol: round 1's, or the latest `wb next`."""
-    n = task.status.get("step_round") or 1
-    return task.round_dir(n).joinpath("prompt.md").read_text().strip()
+    d = task.round_dir(task.status.get("step_round") or 1)
+    f = d / "instructions.md"  # the step began in a fresh session: prompt.md is its handoff
+    return (f if f.is_file() else d / "prompt.md").read_text().strip()
 
 
 def _start_fresh(task: store.Task, n: int, why: str) -> None:

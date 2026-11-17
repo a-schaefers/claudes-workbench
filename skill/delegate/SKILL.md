@@ -36,8 +36,10 @@ outward: commits, branches, merges, pushes, PRs, CI/CD, deploys, infrastructure.
 from its handbook and will ask (`ask_reviewer`) or say so in its summary when the task needs one
 of those; then you do it. Its hard limits: no sudo, git read-only (a `git` of workbench's own on
 its PATH; scratch repos under the temp directory, which tests make, stay writable), no `gh`, and
-no edits to CLAUDE.md, AGENTS.md or `.claude/`. The round report flags any such file it changed
-anyway (through the shell). Talk to it like a teammate: answer its questions, send notes while
+no edits to CLAUDE.md, AGENTS.md or `.claude/`. The shell rules refuse the direct forms; behind
+them the kernel refuses root and writes to the repo's git, and no credential is in the agent's
+reach, so `gh` or a push gets no login. The rules stop mistakes, not a determined agent: the
+round report flags any of your files it changed anyway (through the shell). Talk to it like a teammate: answer its questions, send notes while
 it works, explain the why in feedback.
 
 **Commits are the user's.** Delegated work is committed under the user's own git identity with
@@ -405,7 +407,7 @@ every check-in costs your tokens.
   - **Safety**: injection, secrets, unsafe file or shell use.
 
   If anything is doubtful, check it yourself: run the tests or a quick probe in the worktree
-  (`~/.local/state/workbench/tasks/<name>/worktree`). Accept only what you would have written.
+  (`wb status <name>` prints its path). Accept only what you would have written.
 - **question** — answer it briefly and decisively: `wb answer <name> --text "…"`. The agent is
   blocked until you do.
 - **stuck / failed** — `wb log <name> -n 30` if the report isn't enough; then feedback that unblocks
@@ -422,7 +424,7 @@ standard you just lowered. Confirm or correct each assumption the summary lists,
 message: an assumption left unanswered comes back as a question, and the agent waits for it.
 When the fix is for something your spec missed, add `--spec-gap "…"` (checklist item it broke).
 **Max 3 review rounds.** Still wrong after that: make the small remaining fix yourself in the task's worktree
-(`~/.local/state/workbench/tasks/<name>/worktree`) and accept, or `wb discard <name> --reason …`.
+(`wb status <name>` prints its path) and accept, or `wb discard <name> --reason …`.
 If a "trivial" task fails twice, it wasn't trivial: discard and restart it with `--size significant`.
 
 ## Context, on both sides

@@ -10,17 +10,22 @@ allow --path`). context.py decides the lane; OpenCode's own `external_directory`
 file tools to it as well.
 
 Without Landlock (macOS, an old or locked-down kernel) it execs the command unrestricted and
-`wb doctor` says so. Only the standard library here: it runs before every round.
+`wb doctor` says so. A kernel that has Landlock but refuses the lane stops the command instead:
+the agent never runs believed to be in a lane it isn't in. Only the standard library here: it runs before every round.
 """
 from __future__ import annotations
 
 import ctypes
 import os
+import platform
 import struct
 import sys
 
-# syscall numbers, the same on every architecture (they were added after the tables were unified)
+# syscall numbers, the same on the architectures with the unified table (added after it was);
+# alpha's and MIPS's are offset, and there the lane is off rather than a wrong call made
 CREATE_RULESET, ADD_RULE, RESTRICT_SELF = 444, 445, 446
+UNIFIED = ("x86_64", "amd64", "i386", "i686", "aarch64", "arm64", "armv7l", "armv6l", "riscv64",
+           "ppc64le", "ppc64", "s390x", "loongarch64")
 RULE_PATH_BENEATH = 1
 PR_SET_NO_NEW_PRIVS = 38
 WRITE_FILE, READ_FILE, REMOVE_DIR, REMOVE_FILE = 1 << 1, 1 << 2, 1 << 4, 1 << 5
@@ -34,7 +39,7 @@ def _libc():
 
 def abi() -> int:
     """The kernel's Landlock version, 0 without it."""
-    if not sys.platform.startswith("linux"):
+    if not sys.platform.startswith("linux") or platform.machine().lower() not in UNIFIED:
         return 0
     try:
         v = _libc().syscall(CREATE_RULESET, None, ctypes.c_size_t(0), ctypes.c_uint32(1))
@@ -104,8 +109,10 @@ def main(argv: list[str]) -> None:
         if "--reads" in argv[:sep] else None
     try:
         restrict(writable, readable)
-    except OSError as e:  # a lane that can't be drawn mustn't stop the task: say so and run
-        print(f"workbench lane: not enforced ({e})", file=sys.stderr)
+    except OSError as e:  # Landlock is there but refused the lane: don't run outside it
+        print(f"workbench lane: the kernel refused the lane ({e}); not running "
+              f"{argv[sep + 1]}", file=sys.stderr)
+        sys.exit(126)
     os.execvp(argv[sep + 1], argv[sep + 1:])
 
 

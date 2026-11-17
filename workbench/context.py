@@ -25,13 +25,19 @@ ROOT_FILES = ("CLAUDE.md", ".claude/CLAUDE.md", "CLAUDE.local.md")
 # the fixed prompt from ~9k to ~3.5k tokens: less to read on every request. OpenCode 2.3 still
 # lists opencode_worktree_remove; the rule then refuses the call.
 DENIED_TOOLS = ("question", "experimental_image_generate", "execute", "subagent", "websearch",
-                "opencode_*", "*worktree*")
+                "webfetch", "opencode_*", "*worktree*")  # the network, like curl: Claude's to allow
 # The shell's hard limits: no root, and no road round the read-only git (gitguard.py, a `git` of
 # its own first on the agent's PATH): not the real git named by its path, not `gh`, which pushes,
 # opens pull requests and runs workflows. OpenCode checks each part of a compound command, so
 # `cd x && sudo ...` is refused too. Everything else is the agent's, guided by the handbook.
-DENIED_SHELL = ("sudo", "sudo *", "doas", "doas *", "pkexec *", "su", "su *",
-                "*/git", "*/git *", "gh", "gh *")
+# The plain wrappers are covered too (`env gh`, `timeout 5 sudo …`). A command built some other
+# way (`bash -c`, an interpreter) still gets past these patterns; behind them, the kernel refuses
+# sudo (no_new_privs, lane.py) and gh finds no login (its config and tokens are out of reach).
+_HARD = ("sudo", "doas", "pkexec", "su", "gh", "*/git")
+_WRAPPERS = ("env", "env *", "xargs", "xargs *", "nohup", "nice", "nice *", "time", "command",
+             "exec", "timeout *", "stdbuf *", "setsid")
+DENIED_SHELL = tuple(p for c in _HARD for p in (c, f"{c} *")) + \
+    tuple(f"{w} {p}" for w in _WRAPPERS for c in _HARD for p in (c, f"{c} *"))
 # The commands an agent runs without asking: the everyday tools of software work, generously
 # (2026-11-16, the user: guide the agents, don't hobble them). OpenCode checks each command inside
 # a compound line (pipes, &&, loops, subshells, $(…)) against these. Anything else is refused
@@ -63,17 +69,32 @@ ALLOWED_COMMANDS = (
     "dotnet", "ruby", "bundle", "rake", "rspec", "php", "composer", "lua", "luajit", "zig",
     "swift", "swiftc", "kotlin", "kotlinc", "scala", "sbt", "ghc", "cabal", "stack", "elixir",
     "mix", "erl", "perl", "R", "Rscript", "julia",
-    "bash", "sh", "zsh", "dash", "xvfb-run", "Xvfb", "sqlite3", "git", "opencode",
+    "bash", "sh", "zsh", "dash", "xvfb-run", "Xvfb", "sqlite3", "git",
 )
+# A project's own tools and builds, by their usual relative paths (`./x` is allowed already).
+PROJECT_BINS = (".venv/bin/*", "venv/bin/*", "node_modules/.bin/*", "build/*", "target/debug/*",
+                "target/release/*", "bin/*", "out/*", "dist/*", "zig-out/bin/*")
 # Inside the allowed tools, the steps that change what the project depends on: a new package is
 # Claude's decision (the handbook: no new dependencies), so these ask first even though the tool
 # is allowed. Installing what the project already lists (`npm install`, `npm ci`) needs no ask.
 ASK_FIRST = (
     "pip install *", "pip3 install *", "python -m pip install *", "python3 -m pip install *",
     "uv pip install *", "uv add *", "poetry add *", "npm install *", "npm i *", "npm add *",
-    "pnpm add *", "pnpm install *", "yarn add *", "bun add *", "bun install *", "cargo add *",
-    "cargo install *", "go install *", "go get *", "gem install *", "bundle add *",
-    "composer require *",
+    "pnpm add *", "pnpm install *", "pnpm i *", "yarn add *", "yarn global add *", "bun add *",
+    "bun install *", "bun i *", "cargo add *", "cargo install *", "go install *", "go get *",
+    "gem install *", "bundle add *", "composer require *", "deno add *", "deno install *",
+    "dotnet add * package *",
+    # fetch a package and run it
+    "npx -y *", "npx --yes *", "npm exec *", "pnpm dlx *", "yarn dlx *", "bunx *", "uvx *",
+)
+# OpenCode's matcher makes a trailing " *" optional, so `npm install *` also matches a bare
+# `npm install`. Installing what the project already lists is the agent's: allowed again after.
+INSTALL_LISTED = (
+    "npm install", "npm i", "npm ci", "pnpm install", "pnpm i", "bun install", "bun i",
+    "yarn", "yarn install", "pip install -r *", "pip3 install -r *", "pip install -e .",
+    "pip3 install -e .", "python -m pip install -r *", "python3 -m pip install -r *",
+    "python -m pip install -e .", "python3 -m pip install -e .", "uv pip install -r *",
+    "uv pip install -e .",
 )
 
 
@@ -99,7 +120,9 @@ def shell_rules(task: store.Task) -> list[dict]:
     # refused (2026-11-16) though `bash` could run it; the lane, not this list, bounds writes
     rules += [{"action": "shell", "resource": f"{d}/*", "effect": "allow"}
               for d in (writable(task) or []) if os.path.isdir(d) and d not in ("/dev", "/proc")]
+    rules += [{"action": "shell", "resource": r, "effect": "allow"} for r in PROJECT_BINS]
     rules += [{"action": "shell", "resource": r, "effect": "deny"} for r in ASK_FIRST]
+    rules += [{"action": "shell", "resource": r, "effect": "allow"} for r in INSTALL_LISTED]
     rules += [{"action": "shell", "resource": r, "effect": "allow"} for r in allowed_patterns(task)]
     rules += [{"action": "shell", "resource": c, "effect": "deny"} for c in DENIED_SHELL]
     return rules
@@ -113,7 +136,12 @@ def shell_rules(task: store.Task) -> list[dict]:
 # (`wb allow --path`). Reading through the shell stays free: `cat`, a compiler, an interpreter.
 TOOL_HOMES = (".cache", ".cargo", ".rustup", "go", ".npm", ".bun", ".deno", ".yarn",
               ".pnpm-store", ".local/share/pnpm", ".local/share/uv", ".gradle", ".m2", ".nuget",
-              ".dotnet", ".gem", ".julia", ".cabal", ".stack", ".ghcup", ".platformio", ".conan2")
+              ".dotnet", ".gem", ".julia", ".cabal", ".stack", ".ghcup", ".platformio", ".conan2",
+              ".hex", ".mix", ".sbt", ".ivy2", ".local/lib")
+# where the user moved them: a toolchain follows its variable, not the default path
+TOOL_HOME_VARS = ("CARGO_HOME", "RUSTUP_HOME", "GOPATH", "GOMODCACHE", "GOCACHE", "npm_config_cache",
+                  "PIP_CACHE_DIR", "UV_CACHE_DIR", "GRADLE_USER_HOME", "BUN_INSTALL", "DENO_DIR",
+                  "MIX_HOME", "HEX_HOME")
 # what OpenCode and the ask server write themselves, beside the task's directory
 OPENCODE_HOMES = (".local/share/opencode", ".local/state/opencode")
 # the system, for the file tools: headers, man pages, installed packages' sources
@@ -124,7 +152,12 @@ READABLE = ("/usr", "/etc", "/opt", "/lib", "/lib64", "/bin", "/sbin", "/proc", 
 def lane_paths(task: store.Task) -> list[str]:
     """What the user (commands.json `paths`) and Claude (`wb allow --path`) added to the lane."""
     conf = store.read_json(commands_path(), {}) or {}
-    return [*(conf.get("paths") or []), *(grants(task).get("paths") or [])]
+    home, out = os.path.realpath(Path.home()), []
+    for p in [*(conf.get("paths") or []), *(grants(task).get("paths") or [])]:
+        real = os.path.realpath(Path(p).expanduser()) if p != "*" else p
+        if real not in ("/", home):  # never the whole machine or home; "*" turns the lane off
+            out.append(p)
+    return out
 
 
 def _both(paths) -> list[str]:
@@ -145,6 +178,9 @@ def writable(task: store.Task) -> list[str] | None:
         return None
     home = Path.home()
     xdg = [os.environ.get(v) for v in ("XDG_CACHE_HOME", "XDG_RUNTIME_DIR")]
+    xdg += [os.path.join(os.environ[v], "opencode") for v in ("XDG_DATA_HOME", "XDG_STATE_HOME")
+            if os.environ.get(v)]  # OpenCode's own data, when the user moved those
+    xdg += [os.environ[v].split(os.pathsep)[0] for v in TOOL_HOME_VARS if os.environ.get(v)]
     places = [task.dir, tempfile.gettempdir(), "/tmp", "/var/tmp", "/dev", "/proc",
               *(home / h for h in TOOL_HOMES + OPENCODE_HOMES), *(x for x in xdg if x),
               *(Path(p).expanduser() for p in extra)]
@@ -153,7 +189,8 @@ def writable(task: store.Task) -> list[str] | None:
         f.parent.mkdir(parents=True, exist_ok=True)
         f.touch()
         places.append(f)
-    return [p for p in _both(places) if os.path.exists(p)]
+    whole = {"/", os.path.realpath(home)}  # a GOPATH=~ must not hand over the home directory
+    return [p for p in _both(places) if os.path.exists(p) and os.path.realpath(p) not in whole]
 
 
 # Where credentials and the user's own records live, under the home directory: the agent's
@@ -291,8 +328,9 @@ def instruction_files(task: store.Task) -> tuple[list[Path], list[str]]:
                 load.append(base / rel)
                 break
     load += [wt / p for p in _tracked(wt, ".claude/rules/*.md")]
-    # OpenCode already loads AGENTS.md: skip a CLAUDE.md that is the same file or the same text
-    agents = {_digest(p) for p in (wt / "AGENTS.md", repo / "AGENTS.md") if p.is_file()}
+    # OpenCode already loads the worktree's AGENTS.md: skip a CLAUDE.md with the same text (one
+    # only in the user's checkout isn't loaded, so it can't stand in for CLAUDE.md)
+    agents = {_digest(wt / "AGENTS.md")} if (wt / "AGENTS.md").is_file() else set()
     seen, files = set(agents), []
     for p in load:
         d = _digest(p)
@@ -305,7 +343,7 @@ def instruction_files(task: store.Task) -> tuple[list[Path], list[str]]:
     return files, nested
 
 
-def denied_skills(extra: list[str] | None = None) -> list[str]:
+def denied_skills(extra: list[str] | None = None, project: Path | None = None) -> list[str]:
     """The user's personal skills (~/.claude/skills, the synced Claude-app ones included) are
     theirs, about their other work: an agent sees only the project's own .claude/skills. On
     2026-11-16 an agent building a game, its context full, summarised a personal publishing skill
@@ -314,7 +352,9 @@ def denied_skills(extra: list[str] | None = None) -> list[str]:
     for home in {claude_home() / "skills", Path.home() / ".claude" / "skills"}:  # OpenCode reads ~/.claude
         names |= {s.parent.name for s in home.glob("*/SKILL.md")}
         names |= {s.parent.name for s in (home / "synced").glob("*/*/SKILL.md")}
-    return sorted(names)
+    if project:  # a project's own skill keeps its name (the personal ones are unreadable anyway)
+        names -= {s.parent.name for s in (project / ".claude" / "skills").glob("*/SKILL.md")}
+    return sorted(names | {"delegate", *(extra or [])})
 
 
 def write_map(task: store.Task, nested: list[str]) -> Path | None:
@@ -338,7 +378,10 @@ def layer(task: store.Task) -> dict:
     rules += external_rules(task)
     rules += [{"action": "edit", "resource": f, "effect": "deny"} for f in CLAUDE_FILES]
     rules += [{"action": "skill", "resource": n, "effect": "deny"}
-              for n in denied_skills(task.spec.get("deny_skills"))]
+              for n in denied_skills(task.spec.get("deny_skills"), task.worktree)]
+    # the skill library is Claude's to write, with or without the kernel's lane
+    rules += [{"action": "edit", "resource": f"{p.rstrip('/')}/*", "effect": "deny"}
+              for p in _both([skills.library()])]
     # the skills Claude handed this task, one directory each: OpenCode lists exactly those, and
     # the rest of the library stays out of the prompt (a retired one is simply left out)
     have = skills.available()

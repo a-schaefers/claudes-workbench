@@ -406,6 +406,8 @@ def cmd_status(a):
         print(f"{t.name:22} {phase:9} {st.get('round', 1):>3} {short:16} "
               f"{ago(sp.get('created_at')):>5} {ago(st.get('updated_at')):>5}  "
               f"{(st.get('last') or '')[:70]}")
+    if a.name and tasks[0].worktree.is_dir():
+        print(f"worktree: {tasks[0].worktree}")
 
 
 def cmd_log(a):
@@ -1340,9 +1342,17 @@ def cmd_doctor(a):
                       f"wb model add {pid}/{name} --context {served} lets its tasks grow")
     line(os.access(store.home().parent, os.W_OK), f"state dir {store.home()}")
     v = lane.abi()
-    print(f"ok  agents write only in their lane (Landlock ABI {v})" if v else
-          "--  agents' writes outside their lane aren't refused here (no Landlock): only OpenCode's "
-          "file tools keep to it")
+    if v:  # draw a real lane and try a write outside it: the check is the refusal itself
+        import tempfile
+        with tempfile.TemporaryDirectory() as inside, tempfile.TemporaryDirectory(dir=Path.home()) as out:
+            probe = [sys.executable, "-c", f"open({str(Path(out) / 'x')!r}, 'w')"]
+            r = subprocess.run(lane.wrap([inside], probe), capture_output=True, text=True, timeout=30)
+            held = r.returncode != 0 and "lane" not in r.stderr and not (Path(out) / "x").exists()
+        line(held, f"agents write only in their lane (Landlock ABI {v})" if held else
+             f"the lane didn't hold a write outside it: {r.stderr.strip()[-200:] or 'the write went through'}")
+    else:
+        print("--  agents' writes outside their lane aren't refused here (no Landlock): only "
+              "OpenCode's file tools keep to it")
     print(f"--  the Claude Code mod lives in {PKG_ROOT / 'mod'} (see README for installing it)")
     sys.exit(0 if ok else 1)
 

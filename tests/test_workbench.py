@@ -849,9 +849,11 @@ class RealOpenCode(Base):
             shell("pip install --no-index nothing-at-all"),           # a new dependency
             shell(f"printf '#!/bin/sh\\necho built-ok\\n' > {built} && chmod +x {built} "
                   f"&& {built}"),                                     # its own build, by path
+            shell("npm install; true"),                               # what the project lists
+            shell("npx -y cowsay hi"),                                # fetch a package and run it
         ])
         refused = ["permission.rejected" in a for a in answers]
-        self.assertEqual(refused, [False, False, True, True, True, False], answers)
+        self.assertEqual(refused, [False, False, True, True, True, False, False, True], answers)
         self.assertIn("42", answers[1])
         self.assertIn("built-ok", answers[5])
 
@@ -861,9 +863,10 @@ class RealOpenCode(Base):
         def shell(cmd):
             return {"name": "shell", "arguments": {"command": cmd, "workdir": wt}}
         _, answers = self.run_calls("t-open", [shell("curl --version"),
-                                               shell("cd . && sudo -n true"), shell("gh --version")])
+                                               shell("cd . && sudo -n true"), shell("gh --version"),
+                                               shell("env gh --version"), shell("timeout 5 sudo -n true")])
         refused = ["permission.rejected" in a for a in answers]
-        self.assertEqual(refused, [False, True, True], answers)
+        self.assertEqual(refused, [False, True, True, True, True], answers)
 
     @unittest.skipUnless(lane.abi(), "needs Landlock")
     def test_writes_and_file_tools_stay_in_the_lane_until_claude_widens_it(self):
@@ -1118,7 +1121,9 @@ class Permission(Base):
                   if r["action"] == "shell" and r["effect"] == "allow"]
         self.assertEqual(allows[-1], "curl *")                 # after the defaults and ask-first
         shell = [r for r in layer["permissions"] if r["action"] == "shell"]
-        self.assertEqual(shell[-1], {"action": "shell", "resource": "gh *", "effect": "deny"})
+        self.assertEqual([r["resource"] for r in shell[-len(context.DENIED_SHELL):]],
+                         list(context.DENIED_SHELL))            # the hard limits come last
+        self.assertTrue({"gh *", "env gh *"} <= set(context.DENIED_SHELL))
         run_wb("stop", "t-perm")
         run_wb("allow", "t-perm", "docker *", "--always")
         self.assertEqual(json.loads(Path(os.environ["WB_COMMANDS"]).read_text())["allow"],

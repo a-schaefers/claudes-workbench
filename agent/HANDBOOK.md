@@ -19,8 +19,9 @@ anything here.
 ## Making the change
 - The shell runs the everyday tools of the work (files and text, builds, compilers, test
   runners, interpreters, package managers for what the project already lists). Anything else is
-  refused ("Permission denied: shell"), and so is adding a package. A program you built runs by
-  its path anywhere you can write (`./a.out`, `/tmp/dbg`). A command line is refused whole when
+  refused ("Permission denied: shell"), and so are adding a package, fetching one to run (`npx -y`,
+  `uvx`) and the network (`curl`, web fetches). A program you built runs by its path anywhere you
+  can write (`./a.out`, `/tmp/dbg`, `build/app`, `.venv/bin/tool`). A command line is refused whole when
   any part of it is: run the parts on their own to see which. Need it? Call ask_reviewer
   with `command` set to the exact command and why in `question`: Claude allows it or tells you
   another way. Set variables with `env NAME=value cmd`.
