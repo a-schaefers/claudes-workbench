@@ -4,9 +4,12 @@ Every command prints a short, plain report: it is read by Claude, whose tokens a
 resource, and by a person at a terminal.
 """
 import argparse
+import fnmatch
+import functools
 import json
 import os
 import re
+import shlex
 import shutil
 import signal
 import subprocess
@@ -54,7 +57,9 @@ def need(name: str) -> store.Task:
 def spawn_runner(task: store.Task) -> int:
     env = {**os.environ, "PYTHONPATH": str(PKG_ROOT), "WB_HOME": str(store.home())}
     with open(task.dir / "runner.log", "a") as log:
-        proc = subprocess.Popen([sys.executable, "-m", "workbench.runner", task.name],
+        # -X utf8: the runner reads and writes its files as UTF-8 under any locale (the
+        # 2026-11-16 audit); a flag, not PYTHONUTF8, so the agent and its tests keep their own
+        proc = subprocess.Popen([sys.executable, "-X", "utf8", "-m", "workbench.runner", task.name],
                                 cwd=PKG_ROOT, env=env, stdin=subprocess.DEVNULL, stdout=log,
                                 stderr=log, start_new_session=True)  # outlives this command
     task.set_status(pid=proc.pid)
@@ -74,6 +79,23 @@ def runner_alive(task: store.Task) -> bool:
         return f"workbench.runner\0{task.name}\0".encode() in cmdline.read_bytes()
     except OSError:
         return not cmdline.parent.parent.joinpath("self").exists()  # no /proc: trust the pid
+
+
+def one_at_a_time(cmd):
+    """Run a command that changes a task under the task's command lock, so two at once (two
+    sessions woken by one review, the chat and the terminal) run one after the other, the second
+    seeing what the first did: an accept racing a discard once deleted the accepted commit and
+    wrote two results rows (the 2026-11-16 audit). The lock is in rules/<task>/, outside the
+    agent's lane: an agent holding it would wedge every command. The runner never takes it."""
+    @functools.wraps(cmd)
+    def run(a):
+        name = getattr(a, "name", None)
+        if getattr(a, "all", False) or not name or not store.NAME_RE.match(name) \
+                or not store.Task(name).exists:
+            return cmd(a)
+        with store.locked(store.home() / "rules" / name / "cmd.lock"):  # context.rules_dir
+            return cmd(a)
+    return run
 
 
 def ago(ts) -> str:
@@ -136,27 +158,72 @@ def _has_file(repo: Path, ref: str, path: str) -> bool:
                           capture_output=True).returncode == 0
 
 
+def _ignored(repo: Path, path: str) -> bool:
+    """Whether git ignores ``path`` in ``repo`` (a tracked file never is)."""
+    return subprocess.run(["git", "-C", str(repo), "check-ignore", "-q", path],
+                          capture_output=True).returncode == 0
+
+
+def _local_claude_md(repo: Path) -> bool:
+    """A CLAUDE.md kept out of git on purpose: the agents get the checkout's copy
+    (context.instruction_files), so it is never to be committed (the 2026-11-16 audit)."""
+    return (repo / "CLAUDE.md").is_file() and _ignored(repo, "CLAUDE.md")
+
+
+# Where a project's committed instructions may live, as Claude Code reads them (context.ROOT_FILES
+# loads both): a repo with only .claude/CLAUDE.md was refused as having none (the 2026-11-16
+# audit). CLAUDE.local.md is the user's own, rarely committed, so it doesn't count.
+PROJECT_MEMORY = ("CLAUDE.md", ".claude/CLAUDE.md")
+
+
+def _claude_md_at(repo: Path, ref: str) -> str | None:
+    """The first of PROJECT_MEMORY committed at ``ref``, or None."""
+    return next((p for p in PROJECT_MEMORY if _has_file(repo, ref, p)), None)
+
+
 def _need_claude_md(repo: Path, base: str, a) -> None:
     if a.no_claude_md:
         return
-    if not _has_file(repo, base, "CLAUDE.md"):
-        die(f"{repo} has no CLAUDE.md at {base}: the agent would start blind. Write it (what the "
-            "project is, how to build and test it, its conventions), commit it, and run "
-            f"wb init {repo} to link AGENTS.md; --no-claude-md skips this check")
+    if not _claude_md_at(repo, base) and _local_claude_md(repo):
+        print("note: CLAUDE.md is gitignored: the agent gets your checkout's copy")
+    elif not _claude_md_at(repo, base):
+        die(f"{repo} has no CLAUDE.md (or .claude/CLAUDE.md) at {base}: the agent would start "
+            "blind. Write it (what the project is, how to build and test it, its conventions), "
+            f"commit it, and run wb init {shlex.quote(str(repo))} to link AGENTS.md; "
+            "--no-claude-md skips this check")
+
+
+def _identity(repo: Path) -> bool:
+    """Whether git can sign a commit in ``repo`` as someone: what `git commit` itself resolves
+    (repo config, includeIf, GIT_AUTHOR_*/EMAIL), strictly. Without one a task ran for its whole
+    length and only wb accept found out (the 2026-11-16 audit)."""
+    return all(gitops.git(repo, "var", v, check=False).strip()
+               for v in ("GIT_AUTHOR_IDENT", "GIT_COMMITTER_IDENT"))
 
 
 def cmd_start(a):
     if not store.NAME_RE.match(a.name):
         die("a task name is lowercase letters, digits and hyphens, at most 48")
     task = store.Task(a.name)
-    if task.exists:
-        die(f"task {a.name!r} exists ({task.status.get('phase')}): pick a new name"
-            + ("" if task.status.get("phase") in store.CLOSED else f", or wb discard {a.name} first"))
+    if task.exists:  # discarding never frees a name, so the refusal doesn't suggest it (the audit)
+        die(f"task {a.name!r} exists ({task.status.get('phase')}): task names are never reused, "
+            "pick a new one")
     try:
         repo = gitops.toplevel(Path(a.repo).resolve())
-    except gitops.GitError:
-        die(f"{a.repo} is not inside a git repository: wb init {a.repo} sets the project up")
-    spec_text = Path(a.spec).read_text() if a.spec != "-" else sys.stdin.read()
+    except gitops.GitError as e:  # git's own reason when it isn't "not a repo": dubious ownership
+        why = str(e).split(": ", 1)[-1]  # would otherwise send Claude to git init a repo (the audit)
+        if not Path(a.repo).is_dir():
+            die(f"{a.repo} is not a directory")
+        if "not a git repository" not in why:
+            die(f"{a.repo}: {why}")
+        die(f"{a.repo} is not inside a git repository: wb init {shlex.quote(a.repo)} sets the "
+            "project up")
+    tasks = store.tasks_dir().resolve()
+    if repo.resolve().is_relative_to(tasks):  # gone at that task's accept, wedging this one (the audit)
+        owner = store.Task(repo.resolve().relative_to(tasks).parts[0])
+        die(f"{repo} is task {owner.name}'s worktree, not a project: start from its repo "
+            f"(--repo {owner.spec.get('repo', '<the project>')})")
+    spec_text = Path(a.spec).read_text(encoding="utf-8") if a.spec != "-" else sys.stdin.read()
     if not spec_text.strip():
         die("the spec is empty")
     handed = _skill_names(a.skill)
@@ -172,6 +239,11 @@ def cmd_start(a):
         die(f"{m.id} can't run: {state['why']}" + (f": {fix}" if fix else "")
             + (" (--force queues it anyway, to wait for it)" if models.may_come_up(state) else ""), 3)
     dirty = gitops.git(repo, "status", "--porcelain").strip()
+    if not gitops.base_commit(repo, a.base):  # first: a typo read as a missing CLAUDE.md (the audit)
+        die(f"no commit {a.base} in {repo}: a typo, or a ref not fetched yet (git fetch)")
+    if not _identity(repo):
+        die("git has no user.name/user.email here: the user's identity signs the commits "
+            "(git config --global user.name/user.email)")
     _need_claude_md(repo, a.base, a)
     # Two projects, one GPU: a task that can't run beside the GPU's holders used to queue in
     # silence behind them, maybe for hours (the 2026-11-16 audit). Say so before any worktree.
@@ -180,16 +252,22 @@ def cmd_start(a):
         die(models.busy(held, f"{m.id} can't run beside {'it' if len(held) == 1 else 'them'}. "
                         "--queue starts it anyway, to wait behind; or do this step yourself"), 4)
 
-    task.dir.mkdir(parents=True)
+    try:
+        task.dir.mkdir(parents=True)
+    except FileExistsError:  # a start under way, or one that died before task.json
+        die(f"{task.dir} exists without a task.json: another wb start {a.name} is under way or "
+            "one failed; pick a new name")
     try:
         base = gitops.create_worktree(repo, a.name, task.worktree, a.base)
     except gitops.GitError as e:
-        task.dir.rmdir()
+        shutil.rmtree(task.dir, ignore_errors=True)  # create_worktree removed its own leftovers
         die(str(e))
+    subs = gitops.submodules(repo, base)
     budget = a.ask_budget
     limits = router.budgets(m)  # from the model's measured speed on this machine, else defaults
     store.write_json(task.dir / "task.json", {
         "name": a.name, "repo": str(repo), "cwd": os.getcwd(), "base": base, "base_ref": a.base,
+        "base_branch": gitops.start_branch(repo, a.base),  # where wb accept --merge lands
         "branch": gitops.branch_name(a.name), "model": m.id, "model_label": m.label,
         "opencode_model": m.id, "route": why, "size": a.size, "stack": stack,
         **({"trial": True} if a.trial else {}), "test_cmd": a.test, "test_timeout": a.test_timeout,
@@ -204,7 +282,7 @@ def cmd_start(a):
     prompt = spec_text.rstrip() + PROTOCOL.format(branch=gitops.branch_name(a.name),
                                                   test_line=test_line, budget=budget)
     task.round_dir(1).mkdir(parents=True)
-    task.round_dir(1).joinpath("prompt.md").write_text(prompt)
+    task.round_dir(1).joinpath("prompt.md").write_text(prompt, encoding="utf-8")
     task.set_status(phase="queued", round=1, reviews=0, auto_fixes=0, tools=0,
                     tok_in=0, tok_out=0, session=None, last="starting",
                     skills=handed, skills_ever=handed, skills_rev=skills.revs(handed))
@@ -221,6 +299,9 @@ def cmd_start(a):
     if dirty:
         print("note: the repo has uncommitted changes; the agent's worktree starts from "
               f"{a.base}, without them")
+    if subs:
+        print(f"note: submodules ({', '.join(subs[:5])}) are not checked out in the agent's "
+              "worktree: a build or test that needs them fails there")
     print(f"model: {why}" if why != "asked for" else f"model: {m.id} (asked for)")
     print(f"slice: {router.slice(m).line()}")
     if gaps := results.spec_gap_line():
@@ -280,6 +361,7 @@ def _spec_gaps(task: store.Task, gaps: list[str] | None) -> None:
         task.event({"ts": store.now(), "round": rnd, "kind": "spec_gap", "text": g.strip()})
 
 
+@one_at_a_time
 def cmd_feedback(a):
     task = need(a.name)
     st = task.status
@@ -288,14 +370,16 @@ def cmd_feedback(a):
     if runner_alive(task):
         die(f"{a.name}'s runner is still running")
     text = a.text if a.text is not None else \
-        sys.stdin.read() if a.message == "-" else Path(a.message).read_text()
+        sys.stdin.read() if a.message == "-" else Path(a.message).read_text(encoding="utf-8")
+    if not text.strip():  # before anything is written: an empty one cost a round (the audit)
+        die("the feedback is empty")
     _spec_gaps(task, a.spec_gap)
     n = st.get("round", 1) + 1
     task.round_dir(n).mkdir(parents=True, exist_ok=True)
     rerun = " re-run the acceptance command and" if task.spec.get("test_cmd") else ""
     task.round_dir(n).joinpath("prompt.md").write_text(
         f"{lessons.FEEDBACK_HEAD} Make exactly these changes, then{rerun} finish with a short "
-        "summary:\n\n" + text.strip())
+        "summary:\n\n" + text.strip(), encoding="utf-8")
     reviews = st.get("reviews", 0) + 1
     task.set_status(context="fresh" if a.fresh else "keep" if a.keep_context else None)
     task.set_status(round=n, reviews=reviews, phase="queued",
@@ -310,6 +394,7 @@ def cmd_feedback(a):
     _say(lessons.nudge(task))
 
 
+@one_at_a_time
 def cmd_next(a):
     """Commit the approved step on the task's branch and give the same agent the next one: same
     worktree, same session (so it keeps what it has read), unless it is full or --fresh."""
@@ -322,7 +407,7 @@ def cmd_next(a):
         die(f"{a.name}'s runner is still running")
     step = st.get("steps", 1)
     try:  # read before anything is committed: a bad path must leave the step as it was
-        nxt = sys.stdin.read() if a.spec == "-" else Path(a.spec).read_text()
+        nxt = sys.stdin.read() if a.spec == "-" else Path(a.spec).read_text(encoding="utf-8")
     except OSError as e:
         die(f"can't read the next step's spec: {e}")
     if not nxt.strip():
@@ -349,7 +434,8 @@ def cmd_next(a):
     task.round_dir(n).joinpath("prompt.md").write_text(
         f"Step {step} of this task is done and committed ({commit}). The next step:\n\n"
         + nxt.rstrip()
-        + PROTOCOL.format(branch=spec["branch"], test_line=test_line, budget=budget))
+        + PROTOCOL.format(branch=spec["branch"], test_line=test_line, budget=budget),
+        encoding="utf-8")
     task.event({"ts": store.now(), "round": n, "kind": "next_step",
                 "text": f"step {step} committed as {commit}; next step sent"})
     if handed is not None:
@@ -378,7 +464,9 @@ def cmd_answer(a):
     q = task.dir / "ask" / f"{qid}.json"
     if not q.exists():
         die(f"no question {qid} in {a.name}")
-    text = a.text if a.text is not None else Path(a.file).read_text()
+    text = a.text if a.text is not None else Path(a.file).read_text(encoding="utf-8")
+    if not text.strip():  # the question stays open: an empty answer unblocked the agent (the audit)
+        die("the answer is empty")
     tmp = task.dir / "ask" / f".{qid}.{os.getpid()}.tmp"  # the ask server polls: never half a file
     tmp.write_text(text.strip() + "\n")
     os.replace(tmp, task.dir / "ask" / f"{qid}.answer")
@@ -556,9 +644,14 @@ def cmd_diff(a):
     task = need(a.name)
     if not task.worktree.is_dir():
         die(f"{a.name} is {task.status.get('phase')} and its worktree is gone: "
-            f"git -C {task.spec['repo']} diff {task.spec['base'][:12]} {task.spec['branch']}")
+            f"git -C {shlex.quote(task.spec['repo'])} diff {task.spec['base'][:12]} "
+            f"{task.spec['branch']}")
     base = "HEAD" if task.status.get("steps", 1) > 1 and not a.all else task.spec["base"]
-    print(gitops.diff(task.worktree, base, stat=a.stat, paths=a.paths) or "(no changes)")
+    try:
+        print(gitops.diff(task.worktree, base, stat=a.stat, paths=a.paths) or "(no changes)")
+    except gitops.GitError as e:
+        die(f"{e}\nthe branch's commits: git -C {shlex.quote(task.spec['repo'])} diff "
+            f"{task.spec['base'][:12]} {task.spec['branch']}")
 
 
 def _stop_runner(task):
@@ -602,6 +695,7 @@ def stop_everything(tasks=None) -> list[str]:
     return stopped
 
 
+@one_at_a_time
 def cmd_stop(a):
     if a.all:
         mine, others = _scope(_open_tasks(), a.repo)
@@ -622,6 +716,7 @@ def cmd_stop(a):
           "corrections, wb discard drops it")
 
 
+@one_at_a_time
 def cmd_resume(a):
     """Continue a task Claude stopped (wb stop) where the work stands: a fresh session, handed
     the task, the work so far and what the step's rounds asked. Not a review round."""
@@ -729,6 +824,7 @@ def cmd_note(a):
     print(f"noted on {a.name}")
 
 
+@one_at_a_time
 def cmd_takeover(a):
     """Stop the agent and hand the worktree to Claude, to finish by hand or hand back."""
     if a.all:  # "just get it done claude"
@@ -752,10 +848,12 @@ def cmd_takeover(a):
                 "text": "Claude took over"})
     task.set_status(phase="review", last="Claude took over", pid=None)
     _ack_all(task)
-    print(f"took over {a.name}: the agent is stopped. Edit in {task.worktree}, then "
-          f"wb accept {a.name} -m \"…\", or hand it back with wb feedback {a.name} --message <file>")
+    print(f"took over {a.name}: the agent is stopped. Edit in {task.worktree} and leave it "
+          f"uncommitted, then wb accept {a.name} -m \"…\" (it commits), or hand it back with "
+          f"wb feedback {a.name} --message <file>")
 
 
+@one_at_a_time
 def cmd_accept(a):
     task = need(a.name)
     spec, st = task.spec, task.status
@@ -771,33 +869,62 @@ def cmd_accept(a):
            f"\n\nWorkbench-Task: {a.name}\nOpenCode-Session: {st.get('session')}")
     measured = results.step(task, landed=True)
     try:
-        if gitops.changed(task.worktree) or st.get("steps", 1) == 1:
-            commit = gitops.commit_all(task.worktree, msg)
-        else:  # the last step changed nothing more: the branch is its committed steps
-            commit = gitops.git(task.worktree, "rev-parse", "--short", "HEAD").strip()
-        gitops.remove_worktree(repo, task.worktree)
+        commit = _landed(task)
+        if not commit:
+            head = gitops.git(task.worktree, "rev-parse", "HEAD").strip()
+            if gitops.changed(task.worktree) or head == spec["base"]:
+                commit = gitops.commit_all(task.worktree, msg)
+            else:  # nothing new: the branch's commits past the base are the work (the steps
+                # wb next committed, or Claude's own after a takeover: the audit)
+                commit = gitops.git(task.worktree, "rev-parse", "--short", "HEAD").strip()
     except gitops.GitError as e:
-        die(str(e))
+        die(str(e))  # nothing removed: the uncommitted work is still in the worktree
+    if warn := gitops.remove_worktree(repo, task.worktree):  # committed: the rest is cleanup
+        print(f"wb: {warn}", file=sys.stderr)
     _spec_gaps(task, a.spec_gap)
     merged = None
     if a.merge:
         try:
-            merged = gitops.merge(repo, a.name, spec.get("base_ref"))
+            merged = gitops.merge(repo, a.name, spec.get("base_branch") or spec.get("base_ref"),
+                                  spec["base"])
         except gitops.GitError as e:
             print(f"wb: not merged: {e}", file=sys.stderr)
     task.set_status(phase="accepted", last=f"accepted as {commit}" +
                     (f", merged {merged}" if merged else ""))
     results.record(task, "accepted", measured, commit=commit, merged=bool(merged))
     _ack_all(task)
-    note = claude_md_status(repo, spec["branch"])  # the task's own commit counts: the reminder
-    print(f"{note}: keep it current (update and commit it if this change alters what it says)"
-          if note != "no CLAUDE.md" else "the repo has no CLAUDE.md: write one (wb init)")
+    try:  # a reminder: it once turned a finished accept into exit 1 (the 2026-11-16 audit)
+        note = claude_md_status(repo, spec["branch"])  # the task's own commit counts
+    except (gitops.GitError, OSError, ValueError):
+        note = None
+    if note:
+        print("the repo has no CLAUDE.md: write one (wb init)" if note == "no CLAUDE.md" else
+              f"{note}: keep it current (update it if this change alters what it says)"
+              if note == LOCAL_CLAUDE_MD else
+              f"{note}: keep it current (update and commit it if this change alters what it says)")
     print(f"accepted {a.name}: commit {commit} on {spec['branch']}" +
-          (f", merged into {gitops.git(repo, 'branch', '--show-current').strip()} as {merged}"
-           if merged else f"\nmerge with: git -C {repo} merge --no-ff {spec['branch']}"))
+          (f", merged into {gitops.current_branch(repo)} as {merged}" if merged else
+           f"\nmerge with: git -C {shlex.quote(str(repo))} merge --no-ff {spec['branch']}"))
     _say(lessons.nudge(task, "accepted"))
 
 
+def _landed(task: store.Task) -> str | None:
+    """The commit an earlier wb accept made before its cleanup failed: the worktree is gone or
+    broken and the branch's tip carries accept's own trailer (a step's says "(step N)"). A retry
+    then finishes the job; it once died on "nothing to commit" for good (the 2026-11-16 audit)."""
+    try:
+        gitops.git(task.worktree, "rev-parse", "HEAD")
+        return None  # a working worktree: commit from it
+    except gitops.GitError:
+        pass
+    repo, branch = task.spec["repo"], task.spec["branch"]
+    if f"Workbench-Task: {task.name}" in gitops.git(repo, "log", "-1", "--format=%B", branch,
+                                                    check=False).splitlines():
+        return gitops.git(repo, "rev-parse", "--short", branch).strip()
+    return None
+
+
+@one_at_a_time
 def cmd_discard(a):
     task = need(a.name)
     spec = task.spec
@@ -807,13 +934,16 @@ def cmd_discard(a):
     _spec_gaps(task, a.spec_gap)
     repo = Path(spec["repo"])
     measured = results.step(task, landed=False)
-    gitops.remove_worktree(repo, task.worktree, force=True)
-    if not a.keep_branch:
+    if warn := gitops.remove_worktree(repo, task.worktree):  # never stops a discard (the audit)
+        print(f"wb: {warn}", file=sys.stderr)
+    kept = a.keep_branch or not repo.is_dir()
+    if not kept:
         gitops.delete_branch(repo, a.name)
     task.set_status(phase="discarded", last=a.reason or "discarded", pid=None)
     results.record(task, "discarded", measured, reason=a.reason)
     _ack_all(task)
-    print(f"discarded {a.name}" + ("" if a.keep_branch else f"; branch {spec['branch']} deleted"))
+    print(f"discarded {a.name}" + ("" if a.keep_branch else f"; branch {spec['branch']} deleted"
+                                   if not kept else f"; {repo} is gone, so its branch with it"))
     _say(lessons.nudge(task, "discarded"))
 
 
@@ -860,7 +990,14 @@ def cmd_tune(a):
 
 
 def cmd_trial(a):
-    """Closed tasks that were checks of workbench itself, not work: their results stop counting."""
+    """Closed tasks that were checks of workbench itself, not work: their results stop counting.
+    An open task is refused: it has no results row yet, so it was marked as nothing while its
+    lessons were dropped, and its accept later counted (the 2026-11-16 audit)."""
+    live = [n for n in a.names if store.Task(n).exists
+            and store.Task(n).status.get("phase") not in store.CLOSED]
+    if live:
+        die(f"{', '.join(live)} still open: wb trial marks closed tasks (wb start --trial marks "
+            "one up front)")
     hit = store.mark_trials(set(a.names))
     open_ = [i for i, x in lessons._all()[0].items() if x["task"] in a.names]
     shut = lessons.close(open_, "dropped", "a trial run: a check of workbench, not work")
@@ -1368,49 +1505,104 @@ def cmd_model(a):
     print(done)
 
 
+LOCAL_CLAUDE_MD = "CLAUDE.md is gitignored: agents get the checkout's copy"
+
+
 def claude_md_status(repo: Path, ref: str = "HEAD") -> str:
-    """One line on the repo's CLAUDE.md at ref: missing, or how far behind the code it may be."""
-    if not _has_file(repo, ref, "CLAUDE.md"):
-        return "no CLAUDE.md"
-    last = gitops.git(repo, "log", "-1", "--format=%h", ref, "--", "CLAUDE.md").strip()
+    """One line on the repo's CLAUDE.md at ref: missing, local, or how far behind the code it
+    may be."""
+    md = _claude_md_at(repo, ref)  # CLAUDE.md before .claude/CLAUDE.md: AGENTS.md links to it
+    if not md:
+        return LOCAL_CLAUDE_MD if _local_claude_md(repo) else "no CLAUDE.md"
+    last = gitops.git(repo, "log", "-1", "--format=%h", ref, "--", md).strip()
     since = int(gitops.git(repo, "rev-list", "--count", f"{last}..{ref}", "--", ".",
-                           ":!CLAUDE.md", ":!AGENTS.md").strip() or 0)  # commits that changed code
-    return (f"CLAUDE.md is current with {ref}" if not since else
-            f"CLAUDE.md last changed {since} commit(s) before {ref} ({last})")
+                           f":!{md}", ":!AGENTS.md").strip() or 0)  # commits that changed code
+    return (f"{md} is current with {ref}" if not since else
+            f"{md} last changed {since} commit(s) before {ref} ({last})")
+
+
+# What wb init won't put in a project's first commit (the 2026-11-16 audit: an .env with an API
+# key, node_modules and .venv all went in). Matched on a file's name, and on a path's directories.
+SECRET_FILES = (".env", ".env.*", "*.pem", "*.key", "*.p12", "*.pfx", "id_rsa", "id_ed25519",
+                "id_ecdsa", "id_dsa", "credentials.json", ".npmrc", ".pypirc", ".netrc")
+NOT_SECRET = (".env.example", ".env.sample", ".env.template")
+VENDORED = ("node_modules", ".venv", "venv", "__pycache__", ".tox", ".mypy_cache")
+
+
+def _unfit_for_commit(d: Path) -> tuple[list[str], list[str]]:
+    """(likely secrets, vendored or generated directories) among the files `git add -A` would
+    take; `target/` counts only beside a Cargo.toml."""
+    secrets, vendored = [], set()
+    for n in gitops.git(d, "ls-files", "--others", "--exclude-standard", "-z").split("\0"):
+        if not n:
+            continue
+        parts = n.rstrip("/").split("/")
+        if parts[-1] not in NOT_SECRET and any(fnmatch.fnmatch(parts[-1], p) for p in SECRET_FILES):
+            secrets.append(n)
+        for i, c in enumerate(parts[:-1] if not n.endswith("/") else parts):
+            if c in VENDORED or c == "target" and (d.joinpath(*parts[:i]) / "Cargo.toml").is_file():
+                vendored.add("/".join(parts[:i + 1]) + "/")
+                break
+    return secrets, sorted(vendored)
 
 
 def cmd_init(a):
     """Set a project up as Claude keeps every project: a git repo (on git's init.defaultBranch)
     with an initial commit, AGENTS.md a symlink to CLAUDE.md. Safe to run again; no remote is ever added."""
     d = Path(a.dir).expanduser().resolve()
+    if Path.home().resolve().is_relative_to(d):  # the home directory, or above it (/ included)
+        die(f"wb init takes a project's own directory, not {d}: make one (e.g. ~/projects/<name>)")
     d.mkdir(parents=True, exist_ok=True)
-    inside = gitops.git(d, "rev-parse", "--show-toplevel", check=False).strip()
+    try:
+        inside = str(gitops.toplevel(d))
+    except gitops.GitError as e:  # a repo git refuses (dubious ownership) is no place to git init
+        if "not a git repository" not in str(e):
+            die(f"{d}: {str(e).split(': ', 1)[-1]}")
+        inside = ""
     if inside and Path(inside) != d:
         die(f"{d} is inside the git repo {inside}; init the project in its own directory")
-    if not gitops.git(d, "config", "user.email", check=False).strip():
-        die("git has no user.email: the user's identity signs the commits (git config --global)")
+    if not _identity(d):
+        die("git has no user.name/user.email: the user's identity signs the commits "
+            "(git config --global user.name/user.email)")
     did = []
     if not inside:
         gitops.git(d, "init", "-q")  # on the user's init.defaultBranch
         did.append("git repo on " + (gitops.git(d, "symbolic-ref", "--short", "HEAD",
                                                 check=False).strip() or "its default branch"))
+    has_commits = bool(gitops.git(d, "rev-parse", "--verify", "-q", "HEAD", check=False).strip())
+    if not has_commits:  # before anything is changed: a run after the fix starts clean
+        secrets, vendored = _unfit_for_commit(d)
+        if secrets or vendored:
+            die(f"not committing {d} as it is: "
+                + (f"these look like secrets, which never go in git: {', '.join(secrets[:10])}"
+                   + (f" (+{len(secrets) - 10})" if len(secrets) > 10 else "") + "; " if secrets else "")
+                + (f"these are installed or generated: {', '.join(vendored[:10])}; " if vendored else "")
+                + f"add them to {d / '.gitignore'} (or remove them) and run wb init again")
     claude, agents = d / "CLAUDE.md", d / "AGENTS.md"
+    if claude.is_symlink() and agents.is_file() and not agents.is_symlink() \
+            and claude.resolve() == agents.resolve():
+        # CLAUDE.md -> AGENTS.md, the reverse convention: swap them. Comparing the two names'
+        # text once deleted AGENTS.md, the only copy (the audit)
+        claude.unlink()
+        agents.rename(claude)
+        agents.symlink_to("CLAUDE.md")
+        did.append("AGENTS.md moved to CLAUDE.md, which it now links to")
     if agents.is_file() and not agents.is_symlink() and not claude.exists():
         agents.rename(claude)  # the project's instructions live in CLAUDE.md, AGENTS.md points at it
         did.append("AGENTS.md moved to CLAUDE.md")
     if claude.is_file() and agents.is_file() and not agents.is_symlink():
-        if agents.read_text() == claude.read_text():
+        if not os.path.samefile(claude, agents) and agents.read_bytes() == claude.read_bytes():
             agents.unlink()
         else:
             print("AGENTS.md and CLAUDE.md differ: merge them into CLAUDE.md, delete AGENTS.md, "
                   "and run wb init again")
-    if claude.is_file() and not agents.exists() and not agents.is_symlink():
+    local = _local_claude_md(d)  # kept out of git: a link to it would dangle in every clone
+    if claude.is_file() and not local and not agents.exists() and not agents.is_symlink():
         agents.symlink_to("CLAUDE.md")
         did.append("AGENTS.md → CLAUDE.md")
-    has_commits = bool(gitops.git(d, "rev-parse", "--verify", "-q", "HEAD", check=False).strip())
     if not has_commits:
         gitops.git(d, "add", "-A")  # the agents work from commits: the project as it is now
-        n = len(gitops.git(d, "diff", "--cached", "--name-only").split())
+        n = len(gitops.git(d, "diff", "--cached", "--name-only", "-z").split("\0")) - 1
         gitops.git(d, "commit", "-q", "--allow-empty", "-m", "Initial commit")
         did.append(f"initial commit of the {n} file(s) here (git show --stat to check)" if n
                    else "initial commit")
@@ -1423,6 +1615,8 @@ def cmd_init(a):
             did.append("committed")
     status = claude_md_status(d)
     print(f"{d}: " + (", ".join(did) if did else "already set up") + f"; {status}"
+          + (" (AGENTS.md not linked)" if local else "")
+          + ("\nnote: CLAUDE.md is a link to a missing file" if claude.is_symlink() and not claude.exists() else "")
           + ("\nnext: write CLAUDE.md (what the project is, how to build and test it, its "
              "conventions), commit it, then wb init again to link AGENTS.md"
              if status == "no CLAUDE.md" else ""))
@@ -1516,6 +1710,28 @@ def cmd_setup(a):
 UPDATE_EVERY = 7 * 24 * 3600  # the mod's weekly check (wb update --check --if-due)
 
 
+def _fetch_origin() -> None:
+    """The update check's fetch: never prompts and never hangs. The user's own ssh command
+    (GIT_SSH_COMMAND, GIT_SSH, core.sshCommand) is kept, as replacing it picked the wrong key for
+    good; with none, ssh runs in BatchMode. No terminal, so nothing can ask, and a time limit
+    inside the mod's (the 2026-11-16 audit)."""
+    env = {**os.environ, "GIT_TERMINAL_PROMPT": "0", "SSH_ASKPASS_REQUIRE": "never"}
+    if not (env.get("GIT_SSH_COMMAND") or env.get("GIT_SSH")
+            or gitops.git(PKG_ROOT, "config", "core.sshCommand", check=False).strip()):
+        env["GIT_SSH_COMMAND"] = "ssh -o BatchMode=yes -o ConnectTimeout=15"
+    try:
+        r = subprocess.run(["git", "-C", str(PKG_ROOT), "fetch", "-q", "origin"], env=env,
+                           capture_output=True, stdin=subprocess.DEVNULL, start_new_session=True,
+                           timeout=FETCH_SECS)
+    except subprocess.TimeoutExpired:
+        raise gitops.GitError(f"origin didn't answer in {FETCH_SECS}s") from None
+    if r.returncode:
+        raise gitops.GitError(r.stderr.decode("utf-8", "replace").strip() or "git fetch failed")
+
+
+FETCH_SECS = 60  # under the mod's 120 s for a wb command
+
+
 def cmd_update(a):
     """Bring this copy up to date with its origin: the marketplace's clone through Claude Code
     (which also refreshes the mod's cached copy), a developer's clone with a fast-forward pull.
@@ -1527,14 +1743,17 @@ def cmd_update(a):
     if a.check:
         quiet = os.environ.get("CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC")
         if a.if_due and (quiet or time.time() - last.get("checked_at", 0) < UPDATE_EVERY):
-            behind = last.get("behind", 0)  # the last answer stands until the next check
+            try:  # no network: the last fetch's upstream against HEAD as it is now, which a hand
+                # pull or Claude Code's own update moved (a stale count toasted for a week: the audit)
+                behind = int(gitops.git(PKG_ROOT, "rev-list", "--count", "HEAD..@{u}"))
+            except (gitops.GitError, ValueError):
+                behind = last.get("behind", 0)
         else:
-            try:  # never prompts: a check that can't reach origin says so and tries again next week
-                gitops.git(PKG_ROOT, "fetch", "-q", "origin",
-                           env={"GIT_TERMINAL_PROMPT": "0", "GIT_SSH_COMMAND": "ssh -o BatchMode=yes"})
+            store.write_json(path, {**last, "checked_at": time.time()})  # a killed check waits too
+            try:
+                _fetch_origin()
                 behind = int(gitops.git(PKG_ROOT, "rev-list", "--count", "HEAD..@{u}"))
             except gitops.GitError as e:
-                store.write_json(path, {**last, "checked_at": time.time()})
                 die(f"couldn't check for an update: {e}")
             store.write_json(path, {"checked_at": time.time(), "behind": behind, "kind": kind})
         print(f"update available: {behind} new commit(s); /delegate-update (or wb update) installs it"
@@ -1549,11 +1768,23 @@ def cmd_update(a):
         if gitops.git(PKG_ROOT, "status", "--porcelain", "--untracked-files=no").strip():
             die(f"{PKG_ROOT} has uncommitted changes: commit or stash them, then wb update")
         steps.insert(0, ["git", "-C", str(PKG_ROOT), "pull", "-q", "--ff-only"])
+    if not shutil.which("claude"):  # before the pull: a clone once pulled, then died (the audit)
+        die("claude isn't on PATH: wb update refreshes the plugin through it (run /delegate-update "
+            "in Claude Code, or put claude on PATH)")
     before = gitops.git(PKG_ROOT, "rev-parse", "HEAD").strip()
+    pulled = ""
     for step in steps:
-        r = subprocess.run(step, capture_output=True, text=True, timeout=300)
-        if r.returncode:
-            die(f"{' '.join(step[:4])} failed: {(r.stderr or r.stdout).strip()[-300:]}")
+        try:
+            r = subprocess.run(step, capture_output=True, text=True, timeout=300)
+            err = (r.stderr or r.stdout).strip()[-300:] if r.returncode else None
+        except (OSError, subprocess.TimeoutExpired) as e:
+            err = str(e)
+        if err is not None:
+            die(f"{' '.join(step[:4])} failed: {err}" + pulled)
+        if step[0] == "git":  # landed: the count is 0 whatever the claude steps do next
+            store.write_json(path, {"checked_at": time.time(), "behind": 0, "kind": kind})
+            pulled = ("; the pull is done: finish with claude plugin marketplace update workbench "
+                      "&& claude plugin update workbench@workbench, then /reload-plugins")
     after = gitops.git(PKG_ROOT, "rev-parse", "HEAD").strip()
     store.write_json(path, {"checked_at": time.time(), "behind": 0, "kind": kind})
     if before == after:
@@ -1765,7 +1996,7 @@ def main(argv=None):
     s.add_argument("--trial", action="store_true", help="a check of workbench itself (a scratch "
                    "repo): its result and lessons don't count as evidence")
     s.add_argument("--no-claude-md", action="store_true",
-                   help="start even though the repo has no CLAUDE.md")
+                   help="start even though the repo has no CLAUDE.md (or .claude/CLAUDE.md)")
     s.add_argument("--allow", action="append", metavar="PATTERN",
                    help="let the agent run a command outside the everyday list, e.g. \"curl *\"")
     s.add_argument("--allow-path", action="append", metavar="DIR",
@@ -1994,6 +2225,8 @@ def main(argv=None):
         a.f(a)
     except RuntimeError as e:  # wb's own failures (git, a config that doesn't parse): a message
         die(str(e))
+    except OSError as e:  # a --spec, --message or --file that isn't there: a line, not a traceback
+        die(f"{e.filename}: {e.strerror}" if e.filename else str(e))  # (the 2026-11-16 audit)
 
 
 if __name__ == "__main__":

@@ -89,7 +89,8 @@ dependencies. No packaging: it runs from the clone.
 - `gitguard.py`: the read-only `git` shim first on the agent's PATH. Standard library only: it's
   imported on every git call.
 - `gitops.py`: worktrees and branches, the review diff (intent-to-add, so new files show),
-  `mark` (has the worktree changed), commits, the repo's stack.
+  `mark` (has the worktree changed), commits (no hooks), the repo's stack. Calls on a task's
+  worktree are pinned to its recorded git dir (`rules/<task>/gitdir.json`).
 - `results.py`: results.jsonl rows (`record`), each step's size and fit (`step`), `wb stats`,
   Claude's spec record (`spec_gap_line`). Read rows through `store.results()`, which leaves out
   trials.
@@ -132,10 +133,11 @@ launchers refuse it, and Python before 3.11, before importing the package. Off
 Linux there is no Landlock and watch.py falls back to timed waits.
 
 ## How a task runs
-1. `wb start` refuses a repo without a committed CLAUDE.md (`--no-claude-md`), asks the router
-   for a model (unless `--model`), refuses (exit 4) when the GPU's holders leave its model no room
-   (`--queue` waits behind them), makes branch `delegate/<task>` in a fresh worktree, writes
-   round 1's prompt (the spec plus `PROTOCOL`), spawns the runner and returns.
+1. `wb start` refuses a repo without a committed CLAUDE.md or `.claude/CLAUDE.md`
+   (`--no-claude-md`), asks the router for a model (unless `--model`), refuses (exit 4) when the
+   GPU's holders leave its model no room (`--queue` waits behind them), makes branch
+   `delegate/<task>` in a fresh worktree, writes round 1's prompt (the spec plus `PROTOCOL`),
+   spawns the runner and returns.
 2. The runner takes the GPU (`GpuLease`: shared beside other tasks when the models fit, else
    alone), makes the model resident, and runs `opencode run --standalone --auto --format json` in
    the worktree, through `lane.wrap`, with the config layer `rules/<task>/opencode.json`. Events
@@ -166,7 +168,7 @@ ARCHITECTURE.md (*Files and formats*):
 ```
 notify.jsonl results.jsonl lessons.jsonl notes.md tuning.json speed.json gpu.{lock,json,admit,load}
 scout.json update.json watch.json imports/ images/ chat/{messages,receipts}.jsonl chat/listener.json
-rules/<task>/  opencode.json HANDBOOK.md CLAUDE.md bin/git grants.json   (outside the agent's lane)
+rules/<task>/  opencode.json HANDBOOK.md CLAUDE.md bin/git grants.json gitdir.json cmd.lock (no lane)
 tasks/<task>/  task.json status.json events.jsonl steer.jsonl acked context.md base-tests.txt runner.log
                rounds/<n>/{prompt,instructions,summary}.md rounds/<n>/tests.txt ask/<id>.{json,answer} worktree/
 ```

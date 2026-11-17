@@ -48,7 +48,8 @@ def _git(*args: str) -> str:
     if not (lib / ".git").exists():
         lib.mkdir(parents=True, exist_ok=True)
         subprocess.run(["git", "-C", str(lib), "init", "-q", "-b", "master"], check=True)
-    r = subprocess.run(["git", "-C", str(lib), *args], capture_output=True, text=True)
+    r = subprocess.run(["git", "-C", str(lib), "-c", "log.showSignature=false", *args],  # its
+                       capture_output=True, text=True)  # log lines are parsed (the 2026-11-16 audit)
     if r.returncode:
         raise RuntimeError((r.stderr or r.stdout).strip())
     return r.stdout
