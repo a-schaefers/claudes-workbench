@@ -58,6 +58,11 @@ the bulk of the tokens, the reading and writing and test-running, happen on your
 - **Your repo stays yours.** Each agent works in its own git worktree, so your checkout is never
   touched, and nothing is committed (under your name, with no AI credit line) until Claude accepts
   it.
+- **Still the Claude Code you know.** Claude stays the driver, in your own session, so everything
+  you've set up keeps working: plugins and integrations like GitHub or Cloudflare, your skills,
+  hooks and settings. Claude still opens the pull request, checks the deploy and files the issue
+  the way it always has. Workbench only moves as much of the work as it can onto your hardware;
+  the conveniences stay with Claude.
 
 The payoff is a smaller Claude bill for the same quality bar: a cheaper subscription, or one day
 just the API for the lead and local models for everything else. How much you save depends on how
