@@ -42,6 +42,7 @@ import stat
 import subprocess
 import time
 import urllib.error
+import urllib.parse
 import urllib.request
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -630,7 +631,82 @@ def weights(m: Model) -> int:
         row = _tag_row(m.name, _get(f"{m.root}/api/tags") or {})
         if row and not _cloud_row(row):
             return int(row.get("size") or 0)
+    if m.engine != "ollama" and not _fake():
+        return server_facts(m.root, m.name, m.api_key)["weights"] or 0
     return 0
+
+
+# What a server other than Ollama says about a model: only Ollama's API was read, so on any other
+# server the router ranked models without their sizes, checked no fit, and every window had to
+# be typed in (2026-11-17). Each server answers its own call; the fields as each project's docs
+# and source give them (checked 2026-11-17):
+#   LM Studio 0.4+  GET /api/v1/models: models[].key, size_bytes,
+#                   loaded_instances[].config.context_length, capabilities.trained_for_tool_use
+#   llama-server    GET /v1/models: data[].meta.size (bytes; null while loading);
+#                   GET /props?model=<id>&autoload=false: default_generation_settings.n_ctx, the
+#                   window of one slot (-c split across an explicit --parallel unless -kvu); autoload=false so a
+#                   router-mode server isn't made to load a model to answer
+#   vLLM, SGLang    GET /v1/models: data[].max_model_len
+FACTS_TTL = 30          # seconds: weights() runs on every routing; a server's answers don't move faster
+_FACTS: dict = {}
+
+
+def _ask(url: str, key: str = "", timeout: float = 2):
+    """A server's JSON answer to a GET, or None (down, 404, not JSON)."""
+    req = urllib.request.Request(url, headers={"Authorization": f"Bearer {key}"} if key else {})
+    try:
+        with _open(req, timeout=timeout) as r:
+            return json.loads(r.read() or b"{}")
+    except urllib.error.HTTPError as e:
+        e.close()
+        return None
+    except Exception:
+        return None
+
+
+def server_facts(root: str, name: str, key: str = "") -> dict:
+    """{"context", "weights", "tools"} for ``name`` on the server at ``root``: the window it
+    serves, its weights' bytes, whether it was trained for tool calls; each None when the server
+    doesn't say. Cached for FACTS_TTL seconds, misses too (a down server costs one probe)."""
+    hit = _FACTS.get((root, name))
+    if hit and time.monotonic() - hit[0] < FACTS_TTL:
+        return hit[1]
+    facts = {"context": None, "weights": None, "tools": None}
+    lms = _ask(f"{root}/api/v1/models", key)
+    rows = lms.get("models") if isinstance(lms, dict) else None
+    if isinstance(rows, list):  # LM Studio
+        for x in rows:
+            if not isinstance(x, dict):
+                continue
+            loaded = [i for i in x.get("loaded_instances") or [] if isinstance(i, dict)]
+            if not (_serves(str(x.get("key") or ""), name) or any(i.get("id") == name for i in loaded)):
+                continue
+            facts["weights"] = _pos(x.get("size_bytes"))
+            facts["tools"] = (x.get("capabilities") or {}).get("trained_for_tool_use")
+            facts["context"] = next((_pos((i.get("config") or {}).get("context_length"))
+                                     for i in loaded), None)  # a JIT load's window is unknown
+            break
+    else:
+        body = _ask(f"{root}/v1/models", key)
+        data = body.get("data") if isinstance(body, dict) else None
+        cards = [x for x in data if isinstance(x, dict)] if isinstance(data, list) else []
+        card = next((x for x in cards if _serves(str(x.get("id") or ""), name)),
+                    cards[0] if len(cards) == 1 else None)  # one listed: a one-model server
+        if card:
+            facts["context"] = _pos(card.get("max_model_len"))  # vLLM, SGLang
+            meta = card.get("meta") if isinstance(card.get("meta"), dict) else {}
+            facts["weights"] = _pos(meta.get("size"))
+            if card.get("owned_by") == "llamacpp" or meta:
+                q = urllib.parse.quote(str(card.get("id") or name), safe="")
+                props = _ask(f"{root}/props?model={q}&autoload=false", key)
+                gen = (props or {}).get("default_generation_settings") if isinstance(props, dict) else None
+                facts["context"] = _pos((gen or {}).get("n_ctx")) or facts["context"]
+    _FACTS[(root, name)] = (time.monotonic(), facts)
+    return facts
+
+
+def _pos(v) -> int | None:
+    return int(v) if isinstance(v, (int, float)) and not isinstance(v, bool) and v > 0 else None
 
 
 def resident() -> list[Model]:
@@ -1089,10 +1165,11 @@ def ollama_cap(entry: dict) -> int:
 
 def providers() -> dict[str, dict]:
     """OpenCode's local providers: id → {"root", "url", "engine", "engine_known", "start",
-    "problem", "models"} (the config's model entries)."""
+    "problem", "key" (its apiKey, resolved: never printed), "models"} (the config's model entries)."""
     extra = _overrides()
     return {pid: {"root": url.rstrip("/").removesuffix("/v1"), "url": url,
                   "models": prov.get("models") or {}, "engine": engine,
+                  "key": _expand(str((prov.get("options") or prov.get("settings") or {}).get("apiKey") or "")),
                   "engine_known": engine_known(url, extra.get(pid) or {}),
                   "start": (extra.get(pid) or {}).get("start"),
                   "problem": url_problem(url, engine, prov.get("npm"))}

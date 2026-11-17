@@ -87,6 +87,7 @@ class Real(unittest.TestCase):
         os.environ.update(WB_HOME=str(tmp / "state"), WB_OPENCODE_CONFIG=str(tmp / "opencode.json"),
                           WB_MODELS=str(tmp / "models.json"), WB_COMMANDS=str(tmp / "commands.json"))
         models._ENGINES.clear()
+        models._FACTS.clear()
         self.servers = []
 
     def tearDown(self):
@@ -463,6 +464,62 @@ class Real(unittest.TestCase):
             with self.assertRaises(SystemExit), redirect_stderr(err):
                 cli.main(["model", "add", mid, "--context", "32768"])
             self.assertIn("is not answering", err.getvalue())
+
+    # only Ollama's API was read: on any other server the router ranked models without their
+    # sizes, checked no fit, and every window had to be typed in (2026-11-17)
+    def test_lm_studio_says_each_models_size_window_and_tool_training(self):
+        from workbench import cli
+        lms = self.server({"/api/v1/models": {"models": [
+            {"type": "llm", "key": "qwen/coder-30b", "size_bytes": 18_000_000_000,
+             "loaded_instances": [{"id": "qwen/coder-30b", "config": {"context_length": 65536}}],
+             "capabilities": {"trained_for_tool_use": True}},
+            {"type": "llm", "key": "tiny/chat", "size_bytes": 900_000_000, "loaded_instances": [],
+             "capabilities": {"trained_for_tool_use": False}}]}})
+        self.config({"lms": {"options": {"baseURL": lms + "/v1"}, "models": {}}}, {"lms": {"engine": "server"}})
+        self.assertEqual(models.server_facts(lms, "qwen/coder-30b"),
+                         {"context": 65536, "weights": 18_000_000_000, "tools": True})
+        err = io.StringIO()
+        with self.assertRaises(SystemExit), redirect_stderr(err):  # not loaded: its window is unknown
+            cli.main(["model", "add", "lms/tiny/chat"])
+        self.assertIn("doesn't say what window it serves tiny/chat (LM Studio: not loaded yet)", err.getvalue())
+        with redirect_stdout(io.StringIO()):
+            cli.main(["model", "add", "lms/tiny/chat", "--context", "32768"])
+            cli.main(["model", "add", "lms/qwen/coder-30b"])  # no --context: LM Studio said it
+        entry = json.loads(Path(os.environ["WB_OPENCODE_CONFIG"]).read_text())["provider"]["lms"]["models"]
+        self.assertEqual(entry["qwen/coder-30b"]["limit"]["context"], 65536)
+        self.assertEqual(models.weights(models.resolve("lms/qwen/coder-30b")), 18_000_000_000)
+        entry = json.loads(Path(os.environ["WB_OPENCODE_CONFIG"]).read_text())["provider"]["lms"]["models"]
+        self.assertFalse(entry["tiny/chat"]["tool_call"])  # LM Studio says it wasn't trained for tools
+
+    def test_llama_server_says_its_size_and_the_window_of_one_slot_and_is_ranked_by_size(self):
+        big = self.server({"/v1/models": {"data": [{"id": "/m/big.gguf", "owned_by": "llamacpp",
+                                                      "meta": {"size": 20_000_000_000, "n_ctx_train": 131072}}]},
+                           "/props?model=%2Fm%2Fbig.gguf&autoload=false":
+                               {"default_generation_settings": {"n_ctx": 32768}}})
+        small = self.server({"/v1/models": {"data": [{"id": "/m/small.gguf", "owned_by": "llamacpp",
+                                                        "meta": {"size": 2_000_000_000}}]}})  # no /props
+        self.config({"big": {"options": {"baseURL": big + "/v1"}, "models": {"big": {}}},
+                     "small": {"options": {"baseURL": small + "/v1"}, "models": {"small": {}}}},
+                    {"big": {"engine": "server"}, "small": {"engine": "server"}})
+        self.assertEqual(models.server_facts(big, "big"),  # the slot's window, not the trained one
+                         {"context": 32768, "weights": 20_000_000_000, "tools": None})
+        self.assertEqual(models.server_facts(small, "small")["context"], None)
+        with mock.patch.object(models, "gpu_budget", return_value=64_000_000_000):
+            self.assertEqual([s.model.id for s in router.rank("significant")[:2]], ["big/big", "small/small"])
+            self.assertEqual(router.rank("trivial")[0].model.id, "small/small")
+        with mock.patch.object(models, "gpu_budget", return_value=8_000_000_000):
+            self.assertIs(router.rank("significant")[-1].fits, False)  # 20 GB of weights on an 8 GB card
+
+    def test_vllm_says_its_window_and_doctor_flags_an_entry_past_it(self):
+        from workbench import cli
+        vllm = self.server({"/v1/models": {"data": [{"id": "coder", "owned_by": "vllm", "max_model_len": 32768}]}})
+        self.config({"v": {"options": {"baseURL": vllm + "/v1"},
+                           "models": {"coder": {"limit": {"context": 131072}}}}}, {"v": {"engine": "server"}})
+        self.assertEqual(models.server_facts(vllm, "coder")["context"], 32768)
+        out = io.StringIO()
+        with self.assertRaises(SystemExit), redirect_stdout(out):
+            cli.main(["doctor"])
+        self.assertIn("BAD v/coder says a 128K context but the server serves 32K", out.getvalue())
 
     def test_a_down_ollama_is_named_by_add_and_retire_without_a_traceback(self):
         # the 2026-11-16 audit: --pull died in a urllib traceback, a describe blamed a missing
