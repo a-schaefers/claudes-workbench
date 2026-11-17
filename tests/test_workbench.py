@@ -2163,6 +2163,107 @@ class RealOpenCode(Base):
         self.assertIn("notes.txt", gitops.changed(task.worktree))
 
 
+WRITE_42 = {"name": "write", "arguments": {"path": "answer.txt", "content": "42\n"}}
+
+
+@unittest.skipUnless(shutil.which("opencode"), "needs the real opencode")
+class RealOpenCodeRun(Base):
+    """The runner driving real OpenCode, for what fake_opencode.py only imitates: the argv, the
+    `run --format json` events, `session export`, `session list`, `--session` and compaction. An
+    OpenCode release that renames a field fails here, where the fake would go on saying the old
+    one (CI, 2026-11-17)."""
+
+    def setUp(self):
+        super().setUp()
+        tmp = Path(self.tmp.name)
+        with socket.socket() as sock:
+            sock.bind(("127.0.0.1", 0))
+            self.port = sock.getsockname()[1]
+        self.requests = tmp / "requests.jsonl"
+        # The real OpenCode reads the model from its own config: a provider on this machine,
+        # served by the recording server, which writes the answer in the first round.
+        conf = tmp / "xdg" / "config" / "opencode"
+        conf.mkdir(parents=True)
+        (conf / "opencode.json").write_text(json.dumps({"provider": {"cap": {
+            "npm": "@ai-sdk/openai-compatible",
+            "options": {"baseURL": f"http://127.0.0.1:{self.port}/v1", "apiKey": "x"},
+            "models": {"cap": {"name": "capture", "tool_call": True,
+                               "limit": {"context": 32768, "output": 1024}}}}}}))
+        os.environ.update({f"XDG_{d.upper()}_HOME": str(tmp / "xdg" / d)  # and its own sessions
+                           for d in ("config", "data", "state")})
+        os.environ["WB_OPENCODE_CONFIG"] = str(conf / "opencode.json")
+        os.environ.pop("WB_OPENCODE_BIN")
+
+    def serve(self, calls, read=1):
+        server = subprocess.Popen([sys.executable, str(ROOT / "tests" / "capture_llm.py"),
+                                   str(self.port), str(self.requests), json.dumps(calls), str(read)])
+        self.addCleanup(server.kill)
+        self.server = server
+        time.sleep(0.5)
+
+    def answered(self, calls):
+        """A task at review, its answer written by real OpenCode in one round."""
+        self.serve(calls)
+        run_wb("start", "t-run", "--spec", str(self.spec), "--repo", str(self.repo),
+               "--model", "cap", "--test", TEST_CMD)
+        st = wait_phase("t-run", {"review", "stuck", "failed"}, timeout=180)
+        task = store.Task("t-run")
+        self.assertEqual(st["phase"], "review", (task.dir / "runner.log").read_text())
+        return task, st
+
+    def test_the_runner_reads_the_real_events_the_export_and_the_session(self):
+        task, st = self.answered([WRITE_42])
+        self.assertTrue(st["tests"]["ok"])                         # the write landed, in the lane
+        self.assertTrue(st["session"].startswith("ses_"))          # sessionID, from the events
+        rows, _ = store.read_jsonl(task.dir / "events.jsonl")
+        tools = [r for r in rows if r.get("kind") == "tool"]
+        self.assertEqual([(r["tool"], r["brief"], r["ok"]) for r in tools],
+                         [("write", "answer.txt", True)])          # tool_use: part.tool, state.input
+        steps = [r for r in rows if r.get("kind") == "step"]
+        self.assertTrue(steps and all(r["in"] + r["cache"] > 0 and r["out"] > 0 for r in steps),
+                        steps)                                     # step_finish: part.tokens
+        self.assertIn("ok", [r["text"] for r in rows if r.get("kind") == "text"])
+        msgs = transcript.export(st["session"]).get("messages", [])
+        self.assertEqual([m["type"] for m in msgs][:1], ["user"])
+        self.assertTrue(runner.context_state(task)["used"])        # an assistant message's tokens
+        self.assertEqual(transcript.find_session(task), st["session"])  # session list, by title
+        task.set_status(session=None)
+        self.assertEqual(transcript.find_session(task), st["session"])
+        task.set_status(session=st["session"])
+        watched = run_wb("watch", "t-run", "--once", "--no-color")
+        self.assertIn("Write(answer.txt)", watched)                # the export's tool parts
+        # a second round continues the same session: the model sees the first round's messages
+        before = len(self.requests.read_text().splitlines())
+        sid = st["session"]
+        run_wb("feedback", "t-run", "--text", "Now say done.")
+        st = wait_phase("t-run", {"review", "stuck", "failed"}, timeout=180)
+        self.assertEqual((st["phase"], st["session"]), ("review", sid))
+        later = [json.loads(x) for x in self.requests.read_text().splitlines()[before:]]
+        agent = max(later, key=lambda r: len(r.get("messages", [])))
+        text = json.dumps(agent["messages"])
+        self.assertIn("Write the answer to answer.txt", text)
+        self.assertIn("Now say done.", text)
+
+    def test_a_full_window_and_a_compaction_are_read_from_the_real_export(self):
+        task, st = self.answered([WRITE_42])
+        self.assertIsNone(runner.fresh_reason(task))               # 1 token a request: room left
+        self.server.kill()
+        self.server.wait()
+        self.serve([], read=31_000)                                # now every request fills it
+        env = {**runner.agent_env(task), "PWD": str(task.worktree)}
+        def turn(text):
+            subprocess.run(lane.wrap(context.writable(task), [
+                "opencode", "run", "--standalone", "-m", "cap/cap", "--format", "json",
+                "--session", st["session"], text]), cwd=task.worktree, env=env,
+                capture_output=True, timeout=180)
+        turn("Go on.")
+        self.assertIn("full (31.0K of 32K tokens)", runner.fresh_reason(task) or "")
+        turn("Go on again.")                                       # OpenCode compacts first
+        self.assertEqual(runner.context_state(task)["compactions"], 1)
+        self.assertEqual(runner.fresh_reason(task), runner.COMPACTED)
+        self.assertIn("OpenCode compacted", run_wb("watch", "t-run", "--once", "--no-color"))
+
+
 class GitGuard(unittest.TestCase):
     def test_what_reads_and_what_writes(self):
         from workbench import gitguard

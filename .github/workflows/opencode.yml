@@ -1,0 +1,45 @@
+# Runs the Python suite once a day on the newest OpenCode release. The runner drives OpenCode
+# through its CLI, its config and its JSON output, all of which can change between releases, so a
+# red run here means "a new OpenCode broke the interop", not "main is broken": check.yml is the
+# one pinned to the OpenCode the real-OpenCode tests were last verified with (OPENCODE_VERSION).
+# The README shows this run's status as a badge (2026-11-17).
+#
+# "Newest" is the highest version among the releases, not GitHub's "Latest" (the 1.x line still
+# ships patch releases): scripts/install-opencode.sh. The Lane tests skip where the kernel has no
+# Landlock: the "Landlock" step says which this runner was.
+
+name: opencode
+
+on:
+  schedule:
+    - cron: '41 6 * * *'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: opencode-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      # Standard library only: the runner's own python3.
+      - run: python3 --version
+      # The tests' repos carry their own identity; wb accept's commits in a worktree want one too.
+      - run: |
+          git config --global user.name "workbench CI"
+          git config --global user.email "ci@invalid"
+      # Listing the releases needs a token (unauthenticated, the API's limit is per runner IP).
+      - run: scripts/install-opencode.sh newest >> "$GITHUB_PATH"
+        env:
+          GH_TOKEN: ${{ github.token }}
+      - name: Landlock
+        run: python3 -c 'from workbench import lane; print("Landlock ABI", lane.abi() or "none here: the Lane tests skip")'
+      - run: python3 -m unittest

@@ -44,8 +44,8 @@ wb doctor                                             # opencode, its config, gi
 The suite runs real git and real runner processes against a fake OpenCode
 (`tests/fake_opencode.py`, `WB_OPENCODE_BIN`) with no model servers (`WB_FAKE_MODELS`). Its
 real-OpenCode tests (RealOpenCode*, through `tests/capture_llm.py`) skip without `opencode` on
-PATH, and the lane tests without Landlock: a skip is not a pass, so a change to `context.py`, the
-config layer, `gitguard.py` or `lane.py` needs them run where they don't skip.
+PATH (CI installs it), and the lane tests without Landlock: a skip is not a pass, so a change to
+`context.py`, the config layer, `gitguard.py` or `lane.py` needs them run where they don't skip.
 
 ## Checks before committing
 main takes no direct push: commit on a branch or worktree, then `scripts/ship.sh` (pushes, opens
@@ -132,9 +132,11 @@ dependencies. No packaging: it runs from the clone.
   `test_workflows.py` (the merge gate),
   `fake_opencode.py`, `capture_llm.py`, `e2e_chat.mjs`.
 - `.github/`: CI (`workflows/check.yml`, the required check, on each push and pull request;
-  Python 3.11, the floor; `nightly.yml` on the newest Claude Code, plus macOS; README badges show both), `owner-merge.yml` (approves
+  Python 3.11, the floor; OpenCode `OPENCODE_VERSION`; `nightly.yml` on the newest Claude Code,
+  plus macOS; `opencode.yml` on the newest OpenCode; README badges), `owner-merge.yml` (approves
   the owner's pull requests only), `rulesets/main.json`, dependabot for the actions' pins.
-- `scripts/`: `ship.sh` (the road to main), `github-settings.sh check|apply` (the repo's settings).
+- `scripts/`: `ship.sh` (the road to main), `github-settings.sh check|apply` (the repo's settings),
+  `install-opencode.sh` (CI's OpenCode, from its release, hash-checked).
 - `systemd/wb-chat.service`: keeps the web chat up. `docs/`: the README's images (a replaced image
   gets a new file name, for GitHub's cache).
 
@@ -248,7 +250,7 @@ unset: unknown, so no sharing).
 Checked against OpenCode 2.3 with `tests/capture_llm.py` (a recording model server: point a
 provider at it and read the system prompt, tools and tool results). The real-OpenCode tests cover
 the MCP shape, skills, denials, compound shell commands, rule order, git by path, the edit rule,
-PATH and the lane; the rest is only imitated by the fake.
+PATH, the lane, and (RealOpenCodeRun) the events, the export, `--session` and compaction.
 - It resolves the project from `$PWD`, not from the cwd.
 - The 2.x config shape is `mcp.servers.<name>`, with `timeout.{startup,execution}`;
   `codemode: false` exposes a plain tool (listed as `workbench_ask_reviewer`).

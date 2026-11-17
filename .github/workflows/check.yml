@@ -3,8 +3,9 @@
 # against the Claude Code version the mod was last verified with, on Python 3.11 (the floor). nightly.yml runs the same on
 # the newest Claude Code. The README shows both as badges.
 #
-# What a runner can't do skips, not passes: the RealOpenCode tests (no `opencode` on PATH) and the
-# Lane tests where the kernel has no Landlock. CLAUDE.md says where those must still be run.
+# The real-OpenCode tests run against the OpenCode pinned below (OPENCODE_VERSION, installed from
+# its release with the hash pinned here); opencode.yml runs them on the newest OpenCode. The Lane
+# tests skip where the kernel has no Landlock: the "Landlock" step says which this runner was.
 
 name: check
 
@@ -30,6 +31,9 @@ jobs:
       CLAUDE_CODE_VERSION: '2.1.311'
       CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC: '1'
       DISABLE_TELEMETRY: '1'
+      # The OpenCode the real-OpenCode tests were last verified with, and its release tarball's hash.
+      OPENCODE_VERSION: '2.3.0'
+      OPENCODE_SHA256: 'fc0f81522aceeabac47693d88389efa2bc517ce74c2c38fd6967819fcc6e4d3b'
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -48,6 +52,9 @@ jobs:
       - run: |
           git config --global user.name "workbench CI"
           git config --global user.email "ci@invalid"
+      - run: scripts/install-opencode.sh "$OPENCODE_VERSION" "$OPENCODE_SHA256" >> "$GITHUB_PATH"
+      - name: Landlock
+        run: python3 -c 'from workbench import lane; print("Landlock ABI", lane.abi() or "none here: the Lane tests skip")'
       - run: python3 -m unittest
       - run: npm install -g @anthropic-ai/claude-code@$CLAUDE_CODE_VERSION
       - run: claude --version
