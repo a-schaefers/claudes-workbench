@@ -584,6 +584,7 @@ def run_round(task: store.Task, n: int, keep: bool = False) -> dict:
             break
     out["exit"] = proc.wait()
     log.close()
+    ask_mcp.close(task, opened)  # its server is gone: closed, so nothing takes them for open
     if task.status.get("asking") or task.status.get("phase") == "asking":  # it ended
         task.set_status(asking=None, phase="running")  # mid-question: nothing reads that answer now
     out["secs"] = round(time.monotonic() - clock.t0, 1)
@@ -1140,12 +1141,22 @@ def _steer_round(task: store.Task, n: int, interrupted: bool) -> None:
 SIGNAL_STOP = "the runner was stopped by a signal (a shutdown, a logout or a kill), not by Claude"
 
 
+def lock_file(name: str, kind: str):
+    """Task `name`'s lock of `kind` ("runner": one runner a task; "cmd": one wb command at a
+    time), in $WB_HOME/locks/, which no lane reads. In the task's directory or its rules (both
+    readable), an agent could hold one with flock from a process sweep misses and wedge every
+    later runner or command (the 0.90 review)."""
+    return store.home() / "locks" / f"{name}.{kind}.lock"
+
+
 def _one_runner(task: store.Task):
-    """Hold tasks/<task>/runner.lock for the runner's life, or None when another runner holds it:
-    two wb commands acting on one task at once once spawned two runners on one worktree and
-    session (the 2026-11-16 audit). The holder's pid is in the file."""
+    """Hold the task's runner lock (lock_file) for the runner's life, or None when another
+    runner holds it: two wb commands acting on one task at once once spawned two runners on one
+    worktree and session (the 2026-11-16 audit). The holder's pid is in the file."""
     import fcntl
-    fh = open(task.dir / "runner.lock", "a+")
+    path = lock_file(task.name, "runner")
+    path.parent.mkdir(parents=True, exist_ok=True)
+    fh = open(path, "a+")
     try:
         fcntl.flock(fh, fcntl.LOCK_EX | fcntl.LOCK_NB)
     except BlockingIOError:

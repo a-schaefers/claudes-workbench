@@ -16,6 +16,8 @@ export type WbTask = {
    * session's task it is */
   repo: string
   cwd: string
+  /** the Claude Code session `wb start` ran in ('' by hand, or before 0.90): whose task it is */
+  session: string
 }
 
 /** One line of `wb watch --json`: a style name and the text. */
@@ -29,6 +31,8 @@ export type WbChat = { key: string; delegating: boolean; webAt: number; url: str
 
 declare module 'claude-code' {
   interface PluginState {
-    workbench: { tasks: Shaped<WbTask[]>; live: Shaped<WbLive>; chat: Shaped<WbChat> }
+    workbench: {
+      tasks: Shaped<WbTask[]>; live: Shaped<WbLive>; chat: Shaped<WbChat>; sessions: Shaped<string[]>
+    }
   }
 }

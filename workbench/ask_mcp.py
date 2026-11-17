@@ -180,6 +180,27 @@ def write_answer(task: store.Task, qid: str, text: str) -> None:
         os.close(d)
 
 
+def is_open(task: store.Task, qid: str) -> bool:
+    """Asked and not answered, as the mod's asking() judges it: ask/<qid>.json and no answer
+    (read as the server reads it, so a link planted at the answer's name isn't one)."""
+    d = ask_dir(task)
+    return bool(QID.match(qid)) and (d / f"{qid}.json").exists() and _read(d / f"{qid}.answer") is None
+
+
+def close(task: store.Task, opened: dict) -> None:
+    """Answer the questions the runner stops relaying (timed out, or their round ended) with
+    NO_ANSWER: nobody reads it, but a question left without an answer looked open for good, so
+    the mod woke Claude for it and `wb answer` reported an answer nobody would read (the 0.90
+    review). The server's own words, should one still be waiting a moment; lessons skip it."""
+    for qid in list(opened):
+        if is_open(task, qid):
+            try:
+                write_answer(task, qid, NO_ANSWER)
+            except OSError:
+                pass
+        del opened[qid]
+
+
 def used(task: store.Task) -> int:
     """The plain questions the task has asked, as the runner counted them."""
     return sum(1 for k in (task.status.get("asks") or {}).values() if k == "q")
@@ -237,11 +258,14 @@ def relay(task: store.Task, opened: dict) -> None:
     answered with why. The phase is `asking` while any question is open, `status.asking` the
     oldest, so two at once keep the task waiting until both are answered (the audit: the first
     answer set it running, and the silence guard stopped the round). `opened` is the round's
-    open questions, id -> when the runner saw it: a question outlives its round never."""
+    open questions, id -> when the runner saw it: a question outlives its round never, and one
+    the server gave up on is closed (close). The phase is set before the notice is raised: a
+    reader that sees the notice sees the task asking (the mod drops a question notice otherwise)."""
     st = task.status
     asks = dict(st.get("asks") or {})
     now = time.time()
     new = [n[:-5] for n in _names(task) if n[:-5] not in asks]
+    raised = []
     for qid in new[:NEW_MAX] if len(asks) < ASKS_MAX else []:
         q = read_question(task, qid)
         kind, why = _judge(task, q, asks)
@@ -252,10 +276,12 @@ def relay(task: store.Task, opened: dict) -> None:
             except OSError:
                 pass
             continue
-        opened[qid] = now
+        # when it was seen, and its notice's mark: never one another open question's has, or
+        # acknowledging that one acknowledged both (two asked in one tick, the 0.90 review)
+        opened[qid] = max(store.now(), round(max(opened.values(), default=0) + 0.001, 3))
         task.event({"ts": store.now(), "round": st.get("round"), "kind": "ask", "id": qid,
                     "text": q["question"][:QUESTION_CHARS]})
-        task.notify("question", notice(task, qid, q), id=qid)
+        raised.append((qid, opened[qid], notice(task, qid, q)))
     timeout = float(task.spec.get("ask_timeout", 1200))
     for qid in list(opened):
         answer = _read(ask_dir(task) / f"{qid}.answer")
@@ -264,7 +290,7 @@ def relay(task: store.Task, opened: dict) -> None:
                         "id": qid, "text": answer.strip()[:QUESTION_CHARS]})
             del opened[qid]
         elif now - opened[qid] > timeout:  # the server has given up on it
-            del opened[qid]
+            close(task, {qid: opened.pop(qid)})
     if asks != (st.get("asks") or {}):
         task.set_status(asks=asks)
     oldest = min(opened, key=lambda k: (opened[k], k)) if opened else None
@@ -272,6 +298,8 @@ def relay(task: store.Task, opened: dict) -> None:
         task.set_status(phase="asking", asking=oldest)
     elif not oldest and st.get("phase") == "asking":
         task.set_status(phase="running", asking=None)
+    for qid, ts, text in raised:
+        task.notify("question", text, id=qid, ts=ts)
 
 
 def handle(msg: dict, task: store.Task):

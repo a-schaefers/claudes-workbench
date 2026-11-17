@@ -99,7 +99,8 @@ def runner_alive(task: store.Task) -> bool:
 # A live task whose runner is gone without a word (SIGKILL, out of memory, a reboot) would sit
 # in its phase forever: `wb wait` blocked, feedback and resume refused it (the 2026-11-16
 # audit). After REAP_GRACE seconds with no status change (feedback, resume and next set phase
-# queued a moment before spawn_runner writes the new pid) it is failed, with one notice.
+# queued just before spawn_runner writes the new pid, their slow work done first) it is failed,
+# with one notice.
 REAP_GRACE = 15
 RUNNER_DIED = "the runner died (see runner.log)"
 
@@ -151,15 +152,15 @@ def one_at_a_time(cmd):
     """Run a command that changes a task under the task's command lock, so two at once (two
     sessions woken by one review, the chat and the terminal) run one after the other, the second
     seeing what the first did: an accept racing a discard once deleted the accepted commit and
-    wrote two results rows (the 2026-11-16 audit). The lock is in rules/<task>/, outside the
-    agent's lane: an agent holding it would wedge every command. The runner never takes it."""
+    wrote two results rows (the 2026-11-16 audit). The lock (runner.lock_file) is where no lane
+    reads it: an agent holding it would wedge every command. The runner never takes it."""
     @functools.wraps(cmd)
     def run(a):
         name = getattr(a, "name", None)
         if getattr(a, "all", False) or not name or not store.NAME_RE.match(name) \
                 or not store.Task(name).exists:
             return cmd(a)
-        with store.locked(store.home() / "rules" / name / "cmd.lock"):  # context.rules_dir
+        with store.locked(runner.lock_file(name, "cmd")):
             return cmd(a)
     return run
 
@@ -359,6 +360,8 @@ def cmd_start(a):
     limits = router.budgets(m)  # from the model's measured speed on this machine, else defaults
     store.write_json(task.dir / "task.json", {
         "name": a.name, "repo": str(repo), "cwd": os.getcwd(), "base": base, "base_ref": a.base,
+        # the Claude Code session whose Bash ran this (_scope, the mod's `mine`); none by hand
+        **({"session": sid} if (sid := os.environ.get("CLAUDE_CODE_SESSION_ID")) else {}),
         "base_branch": gitops.start_branch(repo, a.base),  # where wb accept --merge lands
         "branch": gitops.branch_name(a.name), "model": m.id, "model_label": m.label,
         "opencode_model": m.id, "route": why, "size": a.size, "stack": stack,
@@ -463,10 +466,10 @@ def cmd_feedback(a):
     reviews = st.get("reviews", 0) + 1
     handled = store.now()  # everything before the new round; what its runner raises stays news
     task.set_status(context="fresh" if a.fresh else "keep" if a.keep_context else None)
+    gpu = _gpu_note(task)  # before the task looks live (REAP_GRACE): it may probe model servers
     task.set_status(round=n, reviews=reviews, phase="queued",
                     auto_fixes_total=st.get("auto_fixes_total", 0) + st.get("auto_fixes", 0),
                     auto_fixes=0)
-    gpu = _gpu_note(task)
     spawn_runner(task)
     _ack_all(task, upto=handled)
     print(f"feedback round {reviews} sent to {a.name} (round {n})"
@@ -527,13 +530,16 @@ def cmd_next(a):
         task.set_status(skills=handed, skills_ever=_union(st.get("skills_ever"), handed),
                         skills_rev={**(st.get("skills_rev") or {}), **skills.revs(handed)})
     handled = store.now()
-    task.set_status(round=n, steps=step + 1, step_round=n, phase="queued", reviews=0,
+    task.set_status(round=n, steps=step + 1, step_round=n, reviews=0,
                     step_sizes=(st.get("step_sizes") or []) + [measured],
                     context="fresh" if a.fresh else None,
                     auto_fixes_total=st.get("auto_fixes_total", 0) + st.get("auto_fixes", 0),
-                    auto_fixes=0, last=f"step {step} committed; next step queued")
+                    auto_fixes=0)
+    # before the task looks live: fresh_reason exports the session (up to 30 s), and a task
+    # queued with no runner that long was reaped as dead under wb next (the 0.90 review)
     why = runner.fresh_reason(task)
     gpu = _gpu_note(task)
+    task.set_status(phase="queued", last=f"step {step} committed; next step queued")
     spawn_runner(task)
     _ack_all(task, upto=handled)
     print(f"step {step} of {a.name} committed as {commit}; step {step + 1} sent "
@@ -550,6 +556,8 @@ def cmd_answer(a):
         die(f"{a.name} has no open question")
     if not ask_mcp.QID.match(qid) or not (task.dir / "ask" / f"{qid}.json").exists():
         die(f"no question {qid} in {a.name}")
+    if not ask_mcp.is_open(task, qid):  # an answer to it would say "answered" to nobody (the 0.90 review)
+        die(f"{qid} is closed: answered, or the agent stopped waiting for it")
     text = a.text if a.text is not None else Path(a.file).read_text(encoding="utf-8")
     if not text.strip():  # the question stays open: an empty answer unblocked the agent (the audit)
         die("the answer is empty")
@@ -586,14 +594,22 @@ def _ack_all(task, upto: float | None = None):
     failure notice Claude hasn't seen: the mark stops just short of it. A command that handles
     the news itself (answer, feedback, next, resume) passes `upto`, the moment it acted: all
     before it is handled, even news still true then (an answered question once came back from
-    wb wait, the 2026-11-16 audit), and what its runner raises after it isn't."""
+    wb wait, the 2026-11-16 audit), and what its runner raises after it isn't; but the mark still
+    stops short of another question still open (answer and allow write their answer first, so
+    theirs isn't): answering the first of two acknowledged the second's notice before anything
+    delivered it, and the agent waited out the ask timeout (the 0.90 review)."""
     acked = _acked(task)
+    phase = task.status.get("phase")
     if upto is None:
-        phase = task.status.get("phase")
         news = "question" if phase == "asking" else "checkin" if phase in LIVE else phase
         pending = [r["ts"] for r in store.notices()
                    if r["task"] == task.name and r["kind"] == news and r["ts"] > acked]
         upto = min(pending) - 0.001 if pending else store.now()
+    elif phase == "asking":  # not in review: a question from an older round is closed by then
+        still = [r["ts"] for r in store.notices()
+                 if r["task"] == task.name and r["kind"] == "question" and r["ts"] > acked
+                 and ask_mcp.is_open(task, str(r.get("id") or ""))]
+        upto = min([upto, *(ts - 0.001 for ts in still)])
     _write_ack(task, max(acked, upto))
 
 
@@ -649,6 +665,14 @@ def cmd_wait(a):
                 if mine:
                     print(f"[{want}] {a.name} (already delivered once)\n{mine[-1].get('text', '')}")
                     return
+                if phase == "failed" and st.get("last") == RUNNER_DIED \
+                        and time.time() - (st.get("updated_at") or 0) < 10 \
+                        and not (deadline and time.time() > deadline):
+                    # another wb is reaping it (reap writes the phase, then sweeps, then the
+                    # notice): said "no notice", and the notice came again on the next wait (the
+                    # 0.90 review). Bounded: a reaper killed meanwhile ends in "no notice".
+                    watcher.wait(1.0)
+                    continue
                 if phase != "asking":  # a question always has its notice, which carries its id
                     print(f"[{phase}] {a.name} (no notice: {st.get('last') or phase})")
                     return
@@ -679,19 +703,33 @@ def cmd_watch(a):
         sys.stdout = open(os.devnull, "w")
 
 
-def _scope(tasks, where):
-    """The tasks of a Claude Code session started in `where` (`--repo`, which the mod passes):
-    a task whose start directory (task.json `cwd`) or repo is `where`, inside it, or holds it.
-    A task with neither is everyone's. The others belong to another project's session, which
-    its mod wakes and its quit commands stop (the 2026-11-16 audit: two projects at once, one
-    session's /delegate-quit stopped the other's agents). Returns (mine, others)."""
-    if not where:
+def _scope(tasks, where, sessions=None):
+    """The tasks of one Claude Code session, as the mod names it: `sessions` (`--session`, every
+    id its process has had: /clear starts another) and `where` (`--repo`, its directory). A task
+    `wb start` recorded a session for (task.json `session`) is that session's, wherever it ran.
+    One without (started by hand, or before 0.90), or with no `sessions` given (by hand), goes by
+    directory: its `repo` is `where`, inside it or holds it, or its `cwd` (where wb start ran) is
+    `where` or inside it. A session in the home directory or / claims none by directory. A task
+    with neither key is everyone's. The others belong to another project's session, which its
+    mod wakes and its quit commands stop (the 2026-11-16 audit: two projects at once, one
+    session's /delegate-quit stopped the other's agents; the 0.90 review: a task started from ~
+    belonged to every session under it, and one started after a `cd` elsewhere to none).
+    Returns (mine, others)."""
+    if not where and not sessions:
         return list(tasks), []
-    here = Path(where).resolve()
+    here = Path(where).resolve() if where else None
+    broad = here in (Path.home().resolve(), Path("/"))
     mine, others = [], []
     for t in tasks:
-        dirs = [Path(p) for p in (t.spec.get("cwd"), t.spec.get("repo")) if p]
-        ok = not dirs or any(d.is_relative_to(here) or here.is_relative_to(d) for d in dirs)
+        sid, cwd, repo = (t.spec.get(k) for k in ("session", "cwd", "repo"))
+        if sessions and sid:
+            ok = sid in sessions
+        elif here is None or (not cwd and not repo):
+            ok = True
+        else:  # Path.is_relative_to compares whole components: /x/ab isn't inside /x/a
+            ok = not broad and bool(
+                cwd and Path(cwd).is_relative_to(here)
+                or repo and (Path(repo).is_relative_to(here) or here.is_relative_to(repo)))
         (mine if ok else others).append(t)
     return mine, others
 
@@ -706,7 +744,7 @@ def _others_line(others, what):
 def cmd_status(a):
     tasks = [need(a.name)] if a.name else [t for t in store.all_tasks()
                                            if a.all or t.status.get("phase") not in store.CLOSED]
-    tasks, others = _scope(tasks, None if a.name else a.repo)
+    tasks, others = (tasks, []) if a.name else _scope(tasks, a.repo, a.session)
     if not tasks:
         print("no open tasks" + ("" if a.all else " (wb status --all shows closed ones)"))
         _say(_others_line(others, "open elsewhere"))
@@ -818,25 +856,30 @@ def stop_everything(tasks=None) -> list[str]:
     tasks keep their worktrees (stopped, for wb feedback or wb discard later)."""
     stopped = []
     for t in _open_tasks() if tasks is None else tasks:
-        _stop_runner(t)
-        t.event({"ts": store.now(), "round": t.status.get("round"), "kind": "stopped",
-                 "by": "user", "text": "bail out: stopped by the user"})
-        t.set_status(phase="stuck", last="bail out: stopped", pid=None)
-        _ack_all(t)
-        stopped.append(f"{t.name} (worktree kept: {t.worktree})")
+        # each task under its command lock, as one_at_a_time (which --all skips): an accept or
+        # discard that closed it after the listing was set back to stuck (the 0.90 review)
+        with store.locked(runner.lock_file(t.name, "cmd")):
+            if t.status.get("phase") in store.CLOSED:
+                continue
+            _stop_runner(t)
+            t.event({"ts": store.now(), "round": t.status.get("round"), "kind": "stopped",
+                     "by": "user", "text": "bail out: stopped by the user"})
+            t.set_status(phase="stuck", last="bail out: stopped", pid=None)
+            _ack_all(t)
+            stopped.append(f"{t.name} (worktree kept: {t.worktree})")
     return stopped
 
 
 @one_at_a_time
 def cmd_stop(a):
     if a.all:
-        mine, others = _scope(_open_tasks(), a.repo)
+        mine, others = _scope(_open_tasks(), a.repo, a.session)
         stopped = stop_everything(mine)
         print("stopped: " + ("; ".join(stopped) if stopped else "nothing was running"))
         _say(_others_line(others, "left running"))
         return
-    if a.repo:
-        die("--repo goes with --all")
+    if a.repo or a.session:
+        die("--repo and --session go with --all")
     if not a.name:
         die("name a task, or --all")
     task = need(a.name)
@@ -869,10 +912,10 @@ def cmd_resume(a):
         asked=runner.ASKED.format("\n\n".join(asks)).rstrip() if asks else "")
         + (f"\n\n{runner.steer_prompt(notes, False)}" if notes else ""))
     handled = store.now()
+    gpu = _gpu_note(task)  # before the task looks live (REAP_GRACE): it may probe model servers
     task.set_status(round=n + 1, context="fresh", phase="queued", last="resumed by the reviewer")
     task.event({"ts": store.now(), "round": n + 1, "kind": "resumed",
                 "text": "Claude resumed the task in a fresh session"})
-    gpu = _gpu_note(task)
     spawn_runner(task)
     _ack_all(task, upto=handled)  # the stuck or failed notice is handled: wb wait must not hand it out again
     print(f"resumed {a.name} in a fresh session (round {n + 1})")
@@ -897,6 +940,20 @@ def _lane_dir(raw: str) -> str:
     if not path.exists():
         path.mkdir(parents=True)
     return str(path)
+
+
+def _permission_asked(task: store.Task) -> str | None:
+    """The oldest permission request still open. status.asking is the oldest question of any
+    kind, and `wb allow` answered a plain question asked before the request with its leave,
+    the request left open (the 0.90 review)."""
+    def made(qid):
+        try:
+            return (task.dir / "ask" / f"{qid}.json").stat().st_mtime
+        except OSError:  # the agent can delete its ask files
+            return float("inf")
+    perms = [q for q, k in (task.status.get("asks") or {}).items()
+             if k == "p" and ask_mcp.is_open(task, q)]
+    return min(perms, key=lambda q: (made(q), q), default=None)
 
 
 def cmd_allow(a):
@@ -925,9 +982,9 @@ def cmd_allow(a):
             + ". Run it again now and carry on." + (f" {a.text.strip()}" if a.text else ""))
     task.event({"ts": store.now(), "round": task.status.get("round"), "kind": "allow",
                 "text": f"allowed {said}" + (" always" if a.always else "")})
-    qid = task.status.get("asking")
+    qid = _permission_asked(task) or task.status.get("asking")
     handled = None
-    if qid and ask_mcp.QID.match(qid) and (task.dir / "ask" / f"{qid}.json").exists():
+    if qid and ask_mcp.is_open(task, qid):
         handled = store.now()  # the request is answered: handled, as wb answer does
         ask_mcp.write_answer(task, qid, text)  # whole, and never through a link in the lane
     if (phase := task.status.get("phase")) in LIVE and runner_alive(task):
@@ -987,15 +1044,15 @@ def cmd_takeover(a):
     """Stop the agent and hand the worktree to Claude, to finish by hand or hand back."""
     if a.all:  # "just get it done claude"
         tasks, others = _scope([t for t in store.all_tasks()
-                                if t.status.get("phase") not in store.CLOSED], a.repo)
+                                if t.status.get("phase") not in store.CLOSED], a.repo, a.session)
         if not tasks:
             print("no open delegated tasks to take over")
         for t in tasks:
-            cmd_takeover(argparse.Namespace(name=t.name, all=False, repo=None))
+            cmd_takeover(argparse.Namespace(name=t.name, all=False, repo=None, session=None))
         _say(_others_line(others, "left alone"))
         return
-    if getattr(a, "repo", None):
-        die("--repo goes with --all")
+    if getattr(a, "repo", None) or getattr(a, "session", None):
+        die("--repo and --session go with --all")
     if not a.name:
         die("name a task, or --all")
     task = need(a.name)
@@ -2308,6 +2365,8 @@ def main(argv=None):
     s = sub.add_parser("status", help="open tasks at a glance")
     s.add_argument("name", nargs="?"); s.add_argument("--all", action="store_true")
     s.add_argument("--repo", metavar="DIR", help="only the tasks of a session started in DIR")
+    s.add_argument("--session", action="append", metavar="ID",
+                   help="only the tasks of Claude Code session ID (repeatable; the mod passes its ids)")
     s.set_defaults(f=cmd_status)
     s = sub.add_parser("log", help="the agent's events")
     s.add_argument("name"); s.add_argument("-n", type=int, default=0)
@@ -2344,11 +2403,15 @@ def main(argv=None):
     s.add_argument("name", nargs="?")
     s.add_argument("--all", action="store_true", help="every open delegated task")
     s.add_argument("--repo", metavar="DIR", help="with --all: only those of a session started in DIR")
+    s.add_argument("--session", action="append", metavar="ID",
+                   help="with --all: only those of Claude Code session ID (repeatable)")
     s.set_defaults(f=cmd_takeover)
     s = sub.add_parser("stop", help="stop a running task (wb resume or wb feedback continues it)")
     s.add_argument("name", nargs="?")
     s.add_argument("--all", action="store_true", help="every running agent")
     s.add_argument("--repo", metavar="DIR", help="with --all: only those of a session started in DIR")
+    s.add_argument("--session", action="append", metavar="ID",
+                   help="with --all: only those of Claude Code session ID (repeatable)")
     s.set_defaults(f=cmd_stop)
     s = sub.add_parser("resume", help="continue a stopped task in a fresh session (not a review round)")
     s.add_argument("name"); s.set_defaults(f=cmd_resume)

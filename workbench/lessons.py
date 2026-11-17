@@ -21,7 +21,7 @@ import hashlib
 import re
 from pathlib import Path
 
-from . import skills, store
+from . import ask_mcp, skills, store
 
 FEEDBACK_HEAD = "Review feedback from the senior reviewer."
 ITEM = re.compile(r"^\s*\d+[.)]\s+")
@@ -105,7 +105,7 @@ def gather(task: store.Task, outcome: str | None = None) -> list[dict]:
             add("stopped", e.get("round"), f"the guard stopped the agent: {e['text'][:300]}")
     for q in sorted(task.dir.glob("ask/*.json")):
         a = q.with_suffix(".answer")
-        if a.is_file():
+        if a.is_file() and a.read_text().strip() != ask_mcp.NO_ANSWER:  # dropped, never answered
             ask = store.read_json(q, {})
             add("question", ask.get("round"), f"the agent asked: {ask.get('question', '')[:250]} "
                                               f"— answered: {a.read_text().strip()[:250]}")

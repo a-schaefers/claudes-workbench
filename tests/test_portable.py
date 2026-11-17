@@ -230,6 +230,21 @@ class Real(unittest.TestCase):
                                  {"name": "y", "size": 10, "size_vram": 10}], ["x", "y"])
         self.assertTrue(models._fits_beside(found["a/x"], {"b/y"}))
 
+    def test_a_partner_model_that_idled_out_before_the_load_is_no_eviction(self):
+        # between rounds, a partner's model unloaded by Ollama's keep-alive read as evicted: the
+        # task unloaded its own model and waited for the partner's whole run (the 0.90 review)
+        found, posts = self.own([{"name": "x", "size": 10, "size_vram": 10}], ["x", "y"])
+        self.assertTrue(models._fits_beside(found["a/x"], {"b/y"}, before={"x"}))
+        self.assertFalse(models._fits_beside(found["a/x"], {"b/y"}, before={"x", "y"}))
+        partner = subprocess.Popen(["sleep", "60"])  # its runner, holding b/y beside us
+        self.addCleanup(partner.kill)
+        store.home().mkdir(parents=True, exist_ok=True)
+        store.write_json(store.home() / "gpu.json", {str(partner.pid): {"model": "b/y", "task": "t-b"}})
+        alone = []
+        with mock.patch.object(models.GpuLease, "_take_alone", lambda self, held: alone.append(held)):
+            self.assertEqual(models.GpuLease(found["a/x"], "t-a", lambda m: None).load(), 0.0)
+        self.assertEqual((alone, posts), ([], []))  # x stays loaded, nobody waits
+
     def test_a_start_command_that_fails_at_once_fails_the_load_at_once(self):
         # it was polled for 20 minutes, its exit unseen (the 2026-11-16 audit)
         self.config({"s": {"options": {"baseURL": "http://127.0.0.1:1/v1"}, "models": {"m": {}}}},

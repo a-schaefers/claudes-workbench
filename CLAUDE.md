@@ -185,9 +185,10 @@ ARCHITECTURE.md (*Files and formats*):
 ```
 notify.jsonl results.jsonl lessons.jsonl notes.md tuning.json speed.json gpu.{lock,json,admit,load}
 scout.json update.json watch.json imports/ images/ chat/{messages,receipts}.jsonl chat/listener.json
-rules/<task>/  opencode.json HANDBOOK.md CLAUDE.md bin/git grants.json gitdir.json cmd.lock (no lane)
+rules/<task>/  opencode.json HANDBOOK.md CLAUDE.md bin/git grants.json gitdir.json (no lane)
+locks/<task>.{runner,cmd}.lock   (no lane reads them: one runner, one wb command a task)
 tasks/<task>/  task.json status.json events.jsonl steer.jsonl acked context.md base-tests.txt runner.log
-               runner.lock (the lane: worktree/, ask/)
+               (the lane: worktree/, ask/)
                rounds/<n>/{prompt,instructions,summary}.md rounds/<n>/tests.txt ask/<id>.{json,answer} worktree/
 ```
 The skill library is `~/.local/share/workbench/skills` (`$WB_SKILLS`). `~/.config/workbench/`
@@ -212,7 +213,8 @@ Environment: `WB_HOME`, `WB_MODELS`, `WB_SKILLS`, `WB_IMAGES`, `WB_CHAT_TOKEN`, 
 `WB_COMMANDS` (the paths above); `WB_OPENCODE_CONFIG` (OpenCode's config); these may be relative
 or start with `~` (`store.absolute_env` makes them absolute against wb's cwd); `WB_COMPACT_AT` (the
 mod's early compaction, a percentage, 0 off); `WB_BIN` (the `wb` the mod runs); `WB_TASK` (set
-for the ask server and the agent). Tests only: `WB_OPENCODE_BIN` (a command line, split with
+for the ask server and the agent); `CLAUDE_CODE_SESSION_ID` (Claude Code's: `wb start` records it,
+which session's task it is). Tests only: `WB_OPENCODE_BIN` (a command line, split with
 `shlex`: the fake), `WB_FAKE_MODELS` (no model servers), `WB_FAKE_GPU_GB` (the fake GPU's size;
 unset: unknown, so no sharing).
 
@@ -234,7 +236,7 @@ unset: unknown, so no sharing).
   Test names read as sentences.
 - The mod keeps no state of its own that matters: it reads the task files. `$` may only be passed
   to functions declared at the top level of `register.tsx`, so `claude plugin validate` can follow
-  it. `$.state` atoms are tagged (`tasks-2`, `live-1`, `chat-2`): change the tag when the type
+  it. `$.state` atoms are tagged (`tasks-3`, `live-1`, `chat-2`, `sessions-1`): change the tag when the type
   changes. A slash command may not start a turn itself: it pushes onto `mem.queued`.
 - Skills for the agents: Claude's library (`wb skill`), handed per task, or a project's own
   `.claude/skills`, committed with it. The user's personal `~/.claude/skills` are denied to agents.
