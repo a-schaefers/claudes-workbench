@@ -850,11 +850,14 @@ def holders(home: Path | None = None) -> dict:
     return {p: h for p, h in held.items() if p.isdigit() and _alive(int(p), h.get("start"))}
 
 
-def _fits_beside(m: Model, keep: set) -> bool:
+def _fits_beside(m: Model, keep: set, before: set | None = None) -> bool:
     """After a shared load: Ollama kept every other holder's model and has all of ``m`` in VRAM.
     need() guesses a model's context before it loads; when the guess is short, Ollama evicts a
     model or splits one onto the CPU, and two tasks then reload their models on every request
-    (the 2026-11-16 audit). Unknown (Ollama didn't answer) counts as fitting."""
+    (the 2026-11-16 audit). Unknown (Ollama didn't answer) counts as fitting. Only a kept model
+    in ``before`` (what /api/ps listed before this load) counts: one Ollama unloaded for idling
+    wasn't evicted by us, and taking it for an eviction sent a task between rounds to unload its
+    own model and wait for its partner's whole run (the 0.90 review)."""
     if _fake() or m.engine != "ollama":
         return True
     body = _get(f"{m.root}/api/ps")
@@ -863,7 +866,8 @@ def _fits_beside(m: Model, keep: set) -> bool:
     ps = body.get("models") or []
     names = {x.get("name") for x in ps}
     found = discover()
-    others = [o for o in (found.get(k) for k in keep) if o and o.server == m.server]
+    others = [o for o in (found.get(k) for k in keep) if o and o.server == m.server
+              and (before is None or _matches(o.name, before))]
     whole = any(_matches(m.name, {x.get("name")}) and x.get("size") and x.get("size_vram") == x["size"]
                 for x in ps)
     return whole and all(_matches(o.name, names) for o in others)
@@ -956,8 +960,11 @@ class GpuLease:
                 held = self._holders()
                 keep = {h["model"] for p, h in held.items()
                         if p != self.me and not h.get("waiting") and h.get("model")}
+            # what was loaded before, so a partner's model that idled out isn't an eviction
+            ps = _get(f"{self.m.root}/api/ps") if keep and self.m.engine == "ollama" and not _fake() else None
+            before = None if ps is None else {x.get("name") for x in ps.get("models") or []}
             secs = make_resident(self.m, say=self.say, keep=keep, warn=self.warn)
-            if not keep or _fits_beside(self.m, keep):
+            if not keep or _fits_beside(self.m, keep, before):
                 return secs
             self.warn(f"ollama could not fit {self.m.id} beside {', '.join(sorted(keep))}; "
                       "waiting for the GPU to itself")

@@ -1284,7 +1284,9 @@ task wait alone). `load()` serializes loads under `gpu.load`, reading the other 
 under `gpu.admit` only for that read (lock order: `gpu.load`, then `gpu.admit`), so an admission
 or a finishing task's exit never waits for another task's load (a runner held there looked alive
 after its review notice, and `wb feedback` refused it). After a shared load (other holders' models
-kept) `_fits_beside` reads `/api/ps`: every kept model must still be loaded and all of `m` in
+kept) `_fits_beside` reads `/api/ps`: every kept model that was loaded before this load must
+still be loaded (one Ollama unloaded for idling, by keep-alive, doesn't count: between rounds it
+sent a task to unload its own model and wait for its partner's whole run) and all of `m` in
 VRAM, since need()'s guess can be short and Ollama then evicts or splits a model, and two tasks
 reload theirs on every request. If not, it warns "ollama could not fit … waiting for the GPU to
 itself", unloads its own model, marks itself waiting and takes `LOCK_EX` (flock converts: the
