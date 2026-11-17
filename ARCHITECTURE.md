@@ -1750,11 +1750,21 @@ with overflow), `read_full`, `reviews`, `spec_rounds`, `stuck`, `took_over`.
 ## The tests
 
 Run from the repo root (`tests/__init__.py` makes `tests` a package; the other modules import
-`tests.test_workbench`): `python3 -m unittest` (about 145 tests in five modules; about two minutes),
+`tests.test_workbench`): `python3 -m unittest` (about 155 tests in six modules; about two minutes),
 one class or test with `python3 -m unittest tests.test_workbench.Context[.test_…]`, by name with
 `-k handover`. The mod's tests: `claude plugin validate mod && claude plugin test mod`
 (`mod/hooks/register.test.tsx`). The web chat in real browsers: `PLAYWRIGHT=…/node_modules/playwright
 node tests/e2e_chat.mjs`.
+
+**CI.** `.github/workflows/check.yml` runs `python3 -m unittest` and `claude plugin validate mod
+&& claude plugin test mod` on every push to main and every pull request, with the Claude Code the
+mod was last verified with (`CLAUDE_CODE_VERSION`); `nightly.yml` runs the same once a day on the
+newest Claude Code, so a red nightly means a new release broke the mod, not that main is broken.
+The README shows both as badges, beside the floor the mod needs (Claude Code 2.1.287, the floor
+for mods). A GitHub runner has no `opencode` and may lack Landlock, so the RealOpenCode and Lane
+tests skip there: CI is not where they count. Not run in CI: the browser test and a real run.
+`.github/dependabot.yml` moves the actions' SHA pins weekly. `check` is the required check on
+main (*Shipping to main*).
 
 **Files.**
 - `tests/test_workbench.py`: end to end, one class per feature (Lifecycle, Context, Steering,
@@ -1768,6 +1778,10 @@ node tests/e2e_chat.mjs`.
   `XDG_CONFIG_HOME`, `CLAUDE_CONFIG_DIR`), the polling watcher (`watch._libc = False`), fit,
   budgets.
 - `tests/test_sizing.py`: the slice guess and its correction from real steps.
+- `tests/test_workflows.py`: the merge gate, in plain text (no YAML library): every action pinned
+  to a commit with its version, every workflow with its own permissions, `check` never
+  path-filtered and required by the ruleset from GitHub Actions, the ruleset with no bypass, and
+  `owner-merge.yml` approving only the owner's pull requests without running their code.
 - `tests/test_docs.py`: the docs cover the code: every `wb` command and flag (from `cli.main`'s
   parser) in *Every `wb` command*, every module in CLAUDE.md's layout, every `WB_*` variable the
   code or the mod reads in CLAUDE.md, CLAUDE.md under 25,000 characters.
@@ -1849,6 +1863,45 @@ test makes and removes `~/.wb-lane-test-*`), the real-OpenCode tests use OpenCod
 storage, test_portable probes 127.0.0.1:11434, `wb scout` reads the real hardware. It never
 touches the real state directory, gpu.lock or a model, so it's safe beside running tasks.
 
+## Shipping to main
+
+Ported from backseat-driver (2026-11-16), which has run it since 2026-10-10. main takes no direct
+push: every change is a pull request that merges once `check` is green and it is approved.
+
+- **The ruleset** (`.github/rulesets/main.json`, on the default branch): no deletion, no force
+  push, a pull request with one approval (stale approvals dismissed on push), and `check` green
+  from GitHub Actions (integration 15368, so a status posted by anyone else doesn't count). No
+  bypass actor: the owner and every agent get the same rule.
+- **Auto-merge for the owner only.** `.github/workflows/owner-merge.yml` (`pull_request_target`)
+  approves a pull request whose author and event sender are both user id 26800291 (a-schaefers;
+  ids, since a login can be renamed and taken), from this repository, not a draft, at the head it
+  was woken for, then arms auto-merge if nobody has. Claude sessions open pull requests and push as
+  the owner, so they count as the owner. Anyone else's (other people, Dependabot, forks) waits for
+  the owner's approval by hand; so does the owner's own after someone else pushes to it. A draft
+  is how the owner holds one back. It runs main's copy of the file and never the pull request's
+  code: no checkout, no `uses:`, nothing from the event in a shell but numbers, the head hash, the
+  repository and the token (`tests/test_workflows.py` holds it to that).
+- **Who arms auto-merge** decides whether main gets its own `check` run: a merge armed with the
+  workflow's token is GitHub Actions' push, which starts no workflow. So `scripts/ship.sh` arms it
+  as the owner; `owner-merge.yml` arms it only when nobody has, and then the nightly is main's only
+  run.
+- **`scripts/ship.sh`**, the one road to main: from a branch or a worktree (a detached HEAD ships
+  as `agent/<worktree>`), it pushes, opens the pull request or finds the open one, arms auto-merge
+  as you with `--match-head-commit`, and waits for the merge or names the failing check. It
+  refuses to ship from main and acts only on this repository's own pull request at the commit it
+  pushed. `--title`, `--body-file`, `--squash`, `--no-wait`, `--draft`. A red check leaves
+  auto-merge armed: fix, commit, run it again.
+- **`scripts/github-settings.sh check|apply`** keeps the repository's settings in git (`check`
+  names any drift, `apply` writes them; `gh` as admin): the ruleset; Actions may approve pull
+  requests, the default token read only; auto-merge, merge commits, delete branch on merge, update
+  branch; only GitHub-owned and verified actions, each pinned to a commit; a fork's workflows wait
+  for approval every time; secret scanning with push protection; Dependabot alerts and security
+  fixes. The first time, `owner-merge.yml` must be on main before the ruleset is applied, or the
+  owner's next pull request has nobody to approve it.
+- **The emergency door**: when `check` itself is broken and its fix can't pass it, the owner sets
+  the ruleset's `enforcement` to `disabled` (Settings → Rules, or the JSON and `apply`), merges the
+  fix, and sets it back (`check` shows the drift if that's forgotten). Never a bypass actor.
+
 ## Couplings: change one, change the other
 
 - **Anything a reader looks up** (a command, flag, default, guard, key, file, prompt text,
@@ -1880,5 +1933,9 @@ touches the real state directory, gpu.lock or a model, so it's safe beside runni
 - **`chat.py` or `chat_static/`** → the browser test.
 - **The `$` uses in `register.tsx`** → only through functions declared at its top level, or
   `claude plugin validate mod` fails.
+- **The Claude Code version** the mod is verified with → `CLAUDE_CODE_VERSION` in
+  `.github/workflows/check.yml`; the floor it needs → the README's badge and *What you need*.
+- **The merge gate** (`owner-merge.yml`, the ruleset, `check.yml`'s job name) →
+  `tests/test_workflows.py`, `scripts/github-settings.sh apply`, *Shipping to main*.
 - **A model name** → never in code or the skill: models come from OpenCode's config, choices from
   the router and the weekly check.

@@ -1,0 +1,49 @@
+# Runs the whole suite on every push to main and every pull request: `python3 -m unittest`
+# (tests/test_docs.py included), then `claude plugin validate mod && claude plugin test mod`
+# against the Claude Code version the mod was last verified with. nightly.yml runs the same on
+# the newest Claude Code. The README shows both as badges.
+#
+# What a runner can't do skips, not passes: the RealOpenCode tests (no `opencode` on PATH) and the
+# Lane tests where the kernel has no Landlock. CLAUDE.md says where those must still be run.
+
+name: check
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: check-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    env:
+      # The Claude Code the mod was last verified with; the README's "needs" badge is the floor.
+      CLAUDE_CODE_VERSION: '2.1.311'
+      CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC: '1'
+      DISABLE_TELEMETRY: '1'
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: 24
+      # Standard library only: the runner's own python3 (3.11+) is all the suite needs.
+      - run: python3 --version
+      # The tests' repos carry their own identity; wb accept's commits in a worktree want one too.
+      - run: |
+          git config --global user.name "workbench CI"
+          git config --global user.email "ci@invalid"
+      - run: python3 -m unittest
+      - run: npm install -g @anthropic-ai/claude-code@$CLAUDE_CODE_VERSION
+      - run: claude --version
+      - run: claude plugin validate mod && claude plugin test mod

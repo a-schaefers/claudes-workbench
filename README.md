@@ -2,6 +2,17 @@
 
 # Claude's Workbench
 
+<p align="center">
+<a href="https://github.com/a-schaefers/claudes-workbench/actions/workflows/check.yml"><img alt="tests" src="https://img.shields.io/github/actions/workflow/status/a-schaefers/claudes-workbench/check.yml?branch=main&label=tests"></a>
+<a href="https://github.com/a-schaefers/claudes-workbench/actions/workflows/nightly.yml"><img alt="newest Claude Code" src="https://img.shields.io/github/actions/workflow/status/a-schaefers/claudes-workbench/nightly.yml?branch=main&label=newest%20Claude%20Code"></a>
+<a href="mod/.claude-plugin/plugin.json"><img alt="version" src="https://img.shields.io/badge/dynamic/json?url=https%3A%2F%2Fraw.githubusercontent.com%2Fa-schaefers%2Fclaudes-workbench%2Fmain%2Fmod%2F.claude-plugin%2Fplugin.json&query=%24.version&label=version&color=blue"></a>
+<a href="https://code.claude.com/docs/en/plugins/mods/overview"><img alt="needs Claude Code 2.1.287+" src="https://img.shields.io/badge/Claude%20Code-2.1.287%2B-d97757"></a>
+<a href="#what-you-need"><img alt="Python 3.11+, standard library only" src="https://img.shields.io/badge/Python-3.11%2B%20%C2%B7%20stdlib%20only-3776ab"></a>
+<a href="#what-you-need"><img alt="Linux, macOS, WSL2" src="https://img.shields.io/badge/runs%20on-Linux%20%C2%B7%20macOS%20%C2%B7%20WSL2-555"></a>
+<a href="LICENSE"><img alt="MIT license" src="https://img.shields.io/github/license/a-schaefers/claudes-workbench"></a>
+<a href="https://github.com/a-schaefers/claudes-workbench/commits/main"><img alt="last commit" src="https://img.shields.io/github/last-commit/a-schaefers/claudes-workbench"></a>
+</p>
+
 <p align="center"><img src="docs/delegate-mode.png" alt="Claude in delegate mode on the left; the Workbench pane on the right, where the apprentice robot says what the local agent is doing"></p>
 
 **Frontier judgment, local horsepower. Claude leads; your GPU does the heavy lifting.**
@@ -75,7 +86,8 @@ and it works.
 
 ### What you need
 
-- **[Claude Code](https://claude.com/claude-code)** with a Claude subscription or an API key
+- **[Claude Code](https://claude.com/claude-code)** 2.1.287 or newer (the pane is a Claude Code
+  mod), with a Claude subscription or an API key
 - **[OpenCode](https://opencode.ai)**, which runs the local models as coding agents
 - **A local model server**, usually [Ollama](https://ollama.com). No models yet? That's fine: the
   first time you use it, Claude looks at your hardware, recommends the best models it can run, and

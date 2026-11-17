@@ -34,7 +34,7 @@ the drift this rule exists to stop.
 
 ## Commands
 ```sh
-python3 -m unittest                                   # from the repo root: ~145 tests, about two minutes
+python3 -m unittest                                   # from the repo root: ~155 tests, about two minutes
 python3 -m unittest tests.test_workbench.Context      # one class (or .Context.test_…); -k handover by name
 claude plugin validate mod && claude plugin test mod  # the mod: the $ rule, then mod/hooks/register.test.tsx
 PLAYWRIGHT=…/node_modules/playwright node tests/e2e_chat.mjs   # the web chat in WebKit and Chromium
@@ -47,6 +47,9 @@ PATH, and the lane tests without Landlock: a skip is not a pass, so a change to 
 config layer, `gitguard.py` or `lane.py` needs them run where they don't skip.
 
 ## Checks before committing
+main takes no direct push: commit on a branch or worktree, then `scripts/ship.sh` (pushes, opens
+the pull request, arms auto-merge, waits). The owner's pull requests merge once `check` is green;
+anyone else's wait for the owner (ARCHITECTURE.md, *Shipping to main*).
 - The docs match the change (*Keeping the docs true*).
 - `python3 -m unittest` (`tests/test_docs.py` included), and `claude plugin validate mod &&
   claude plugin test mod`.
@@ -114,7 +117,12 @@ dependencies. No packaging: it runs from the clone.
 - `bin/wb`, `bin/wb-ask-mcp`: launchers that find the package from their own real path.
 - `tests/`: `test_workbench.py` (end to end, one class per feature), `test_gpu.py`,
   `test_portable.py`, `test_sizing.py`, `test_docs.py` (the docs cover the code),
+  `test_workflows.py` (the merge gate),
   `fake_opencode.py`, `capture_llm.py`, `e2e_chat.mjs`.
+- `.github/`: CI (`workflows/check.yml`, the required check, on each push and pull request;
+  `nightly.yml` on the newest Claude Code; README badges show both), `owner-merge.yml` (approves
+  the owner's pull requests only), `rulesets/main.json`, dependabot for the actions' pins.
+- `scripts/`: `ship.sh` (the road to main), `github-settings.sh check|apply` (the repo's settings).
 - `systemd/wb-chat.service`: keeps the web chat up. `docs/`: the README's images (a replaced image
   gets a new file name, for GitHub's cache).
 

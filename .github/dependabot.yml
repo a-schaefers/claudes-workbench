@@ -1,0 +1,11 @@
+# Keeps the SHA-pinned actions in .github/workflows current: a bump is a pull request that
+# changes a hash and its version comment. The package itself has no dependencies to update.
+version: 2
+updates:
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+    groups:
+      actions:
+        patterns: ["*"]
