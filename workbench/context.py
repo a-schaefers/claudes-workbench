@@ -208,6 +208,10 @@ VAR_CACHES = {"GOPATH": "pkg", "BUN_INSTALL": "install/cache"}
 # inside a toolchain home in the lane, what stays out of it: the programs on the user's PATH and
 # what their shell sources (relative to the home, or to CARGO_HOME for cargo's)
 NOT_WRITABLE = (".cargo/bin", ".cargo/env", ".dotnet/tools", ".cabal/bin", ".ghcup/bin")
+# and what cargo makes at the top of its split home, made first so the split grants it: a split
+# home refuses a new entry (the 0.90 review: a fresh rustup's ~/.cargo, only bin/ and env, failed
+# every build with a dependency, and a git dependency failed wherever git/ didn't exist yet)
+CARGO_MADE = ("registry/", "git/", ".package-cache", ".package-cache-mutate", ".global-cache")
 # what OpenCode and the ask server write themselves, beside the task's directory
 OPENCODE_HOMES = (".local/share/opencode", ".local/state/opencode")
 # The device nodes builds use, not /dev: the user's terminals, input devices (/dev/uinput) and
@@ -336,6 +340,16 @@ def writable(task: store.Task) -> list[str] | None:
     temps = {os.path.realpath(t) for t in (tempfile.gettempdir(), *TEMP_ROOTS)}
     guard = repo_dirs(task)  # a repo kept in /tmp is the user's choice: the temp dirs stay
     cargo = os.environ.get("CARGO_HOME")
+    for c in {os.path.realpath(c) for c in (home / ".cargo", cargo) if c}:
+        if os.path.isdir(c) and any(os.path.lexists(os.path.join(c, n)) for n in ("bin", "env")):
+            for n in CARGO_MADE:
+                try:
+                    if n.endswith("/"):
+                        os.makedirs(os.path.join(c, n), exist_ok=True)
+                    elif not os.path.lexists(os.path.join(c, n)):
+                        Path(c, n).touch()
+                except OSError:  # a read-only home: the task starts all the same
+                    pass
     out_of = _hidden() | \
         {os.path.realpath(p) for p in (*(home / h for h in NOT_WRITABLE),
                                        *((Path(cargo) / "bin", Path(cargo) / "env") if cargo else ()))

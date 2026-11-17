@@ -662,6 +662,10 @@ deliberately hostile process (the 2026-11-16 audit's list of what it can't stop 
   `wb allow --path`. A place holding one of those, an existing secret or workbench's own files
   (`private_paths`, below) is split: its other
   entries are granted one by one (Landlock only allows), so a new top-level file there is refused.
+  So before the split, a cargo home (`~/.cargo`, `$CARGO_HOME`) holding `bin` or `env` gets what
+  cargo makes at its top made for it (`CARGO_MADE`: `registry/`, `git/`, `.package-cache`,
+  `.package-cache-mutate`, `.global-cache`): the 0.90 review found a fresh rustup install
+  refusing every build with a dependency, and any git dependency where `git/` didn't exist yet.
   No entry may resolve to `/` or the home directory, nor contain the task's repo or its git
   directory (`repo_dirs`: with `GOPATH=~/src` or the repo in `~/go/src`, the agent could write a
   hook or `core.fsmonitor` that wb's own git runs outside the lane); the temp directories are

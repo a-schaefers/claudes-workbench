@@ -2302,6 +2302,24 @@ class Lane(Base):
         self.assertIn(str(home / "perl5"), r)
         self.assertNotIn(str(home / "letters"), r)
 
+    def test_a_fresh_cargo_home_gets_its_caches_made_so_the_split_grants_them(self):
+        # the 0.90 review: ~/.cargo split around bin/ and env granted only what existed, so a
+        # fresh rustup install couldn't make registry/ and a git dependency couldn't make git/
+        home = self.fake_home()
+        moved = home / "cargohome"
+        for c in (home / ".cargo", moved):
+            (c / "bin").mkdir(parents=True)
+            (c / "env").write_text("export PATH")
+        os.environ["CARGO_HOME"] = str(moved)
+        (home / ".dotnet").mkdir()                      # no bin or env: never made
+        task = self.bare_task("t-cargo", self.repo)
+        w = context.writable(task)
+        for c in (home / ".cargo", moved):
+            for n in ("registry", "git", ".package-cache", ".package-cache-mutate", ".global-cache"):
+                self.assertIn(str(c / n), w)
+            self.assertFalse([q for q in w if q in (str(c), str(c / "bin"), str(c / "env"))])
+        self.assertEqual(os.listdir(home / ".dotnet"), [])
+
     @unittest.skipUnless(lane.abi(), "needs Landlock")
     def test_secrets_stay_unreadable_inside_tool_homes_and_where_variables_moved_them(self):
         home = self.fake_home()
