@@ -120,7 +120,7 @@ dependencies. No packaging: it runs from the clone.
   `test_workflows.py` (the merge gate),
   `fake_opencode.py`, `capture_llm.py`, `e2e_chat.mjs`.
 - `.github/`: CI (`workflows/check.yml`, the required check, on each push and pull request;
-  `nightly.yml` on the newest Claude Code; README badges show both), `owner-merge.yml` (approves
+  Python 3.11, the floor; `nightly.yml` on the newest Claude Code, plus macOS; README badges show both), `owner-merge.yml` (approves
   the owner's pull requests only), `rulesets/main.json`, dependabot for the actions' pins.
 - `scripts/`: `ship.sh` (the road to main), `github-settings.sh check|apply` (the repo's settings).
 - `systemd/wb-chat.service`: keeps the web chat up. `docs/`: the README's images (a replaced image

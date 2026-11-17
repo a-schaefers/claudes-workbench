@@ -1816,9 +1816,12 @@ one class or test with `python3 -m unittest tests.test_workbench.Context[.test_�
 node tests/e2e_chat.mjs`.
 
 **CI.** `.github/workflows/check.yml` runs `python3 -m unittest` and `claude plugin validate mod
-&& claude plugin test mod` on every push to main and every pull request, with the Claude Code the
+&& claude plugin test mod` on every push to main and every pull request, on Python 3.11 (the
+floor, through `actions/setup-python`: a 3.12+ API can't slip in) with the Claude Code the
 mod was last verified with (`CLAUDE_CODE_VERSION`); `nightly.yml` runs the same once a day on the
-newest Claude Code, so a red nightly means a new release broke the mod, not that main is broken.
+newest Claude Code and the runner's newer python3, so a red nightly means a new release broke the
+mod, not that main is broken. Its `macos` job runs the Python suite on macOS 3.11 with
+`continue-on-error` (a failure there doesn't turn the badge red): look at it before a release.
 The README shows both as badges, beside the floor the mod needs (Claude Code 2.1.287, the floor
 for mods). A GitHub runner has no `opencode` and may lack Landlock, so the RealOpenCode and Lane
 tests skip there: CI is not where they count. Not run in CI: the browser test and a real run.
@@ -1994,6 +1997,8 @@ push: every change is a pull request that merges once `check` is green and it is
   `claude plugin validate mod` fails.
 - **The Claude Code version** the mod is verified with → `CLAUDE_CODE_VERSION` in
   `.github/workflows/check.yml`; the floor it needs → the README's badge and *What you need*.
+- **The Python floor** (3.11) → the launchers' guard (`bin/wb`, `bin/wb-ask-mcp`), `check.yml`'s
+  and the `macos` job's `python-version`, the README's badge and *What you need*.
 - **The merge gate** (`owner-merge.yml`, the ruleset, `check.yml`'s job name) →
   `tests/test_workflows.py`, `scripts/github-settings.sh apply`, *Shipping to main*.
 - **`mod/` for users** → bump `mod/.claude-plugin/plugin.json`'s `version`, or a marketplace
