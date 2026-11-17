@@ -7,15 +7,20 @@ Layout of ``$WB_HOME`` (default ``~/.local/state/workbench``)::
                             a trial run's (`wb start --trial`, `wb trial`) is kept but not evidence
     gpu.lock                held by every running task: shared beside others, exclusive alone
     gpu.json                who holds it (pid → model, task); gpu.admit serializes admissions
+    rules/<name>/           the agent's rules, kept outside its lane (context.rules_dir):
+                            opencode.json (the config layer), HANDBOOK.md, CLAUDE.md, bin/git,
+                            grants.json
     tasks/<name>/
         task.json           what the task is (static after start, but for `wb next --test`)
         status.json         what it is doing now (rewritten by the runner and the ask server)
         events.jsonl        the agent's normalized events, every round
+        steer.jsonl, acked, context.md, base-tests.txt
         runner.log          the runner's own stdout/stderr
-        opencode.json       the per-task OpenCode config layer (the ask_reviewer MCP server)
-        rounds/<n>/prompt.md, summary.md, tests.txt
+        rounds/<n>/prompt.md, instructions.md, summary.md, tests.txt
         ask/<id>.json, ask/<id>.answer
         worktree/           the git worktree the agent works in (branch delegate/<name>)
+
+Every file and format: ARCHITECTURE.md, *Files and formats*.
 """
 import fcntl
 import json

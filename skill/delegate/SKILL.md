@@ -236,7 +236,7 @@ agent that needs it, and only to that one, so a growing library never crowds a s
 prompt. You are the only author. Agents may propose a lesson (a `Lesson:` line in their summary),
 but an agent writing its own skills would record its mistakes as rules, so you vet each one.
 
-**Lessons come to you.** `wb feedback`, `next`, `accept` and `discard` end with
+**Lessons come to you.** `wb feedback`, `next`, `resume`, `accept` and `discard` end with
 `lessons: N from this task` when the task taught something. That covers your numbered corrections,
 guard stops, its questions, a loaded skill that still needed review rounds, and the agent's own
 `Lesson:` lines. Run `wb lessons` then, while it's fresh. The ones seen in more than one task come
