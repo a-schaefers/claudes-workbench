@@ -1322,6 +1322,9 @@ def cmd_doctor(a):
         sys.exit(1)  # nothing below can read the models
     good, said = version("git")
     line(good, said)
+    on_path = shutil.which("wb")  # the mod runs `wb` by name (WB_BIN overrides it)
+    line(bool(on_path or os.environ.get("WB_BIN")), f"wb on PATH: {on_path}" if on_path else
+         "wb isn't on PATH, so the Claude Code mod can't run it: link bin/wb into a PATH directory")
     found = models.discover()
     line(bool(found), f"{len(found)} local model(s) in {models.opencode_config_path()}")
     for m in found.values():

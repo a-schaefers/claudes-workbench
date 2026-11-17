@@ -91,6 +91,7 @@ const HISTORY_CHARS = 60000
 // submitted as a prompt (so the terminal shows it too) with a receipt the page shows at once.
 const chat = atom({ plugin: 'workbench', key: 'chat' } as const,
   { key: '', delegating: false, webAt: 0, url: '' } as WbChat, { shape: 'chat-2' })
+const CHAT_EXPIRE_MS = 6 * 3600_000 // a web message older than this isn't submitted to a new listener
 const CHAT_STALE_MS = 15_000 // as wb's LISTENING_FOR: a listener silent this long has gone
 const AWAY_MS = 6 * 3600 * 1000 // the user counts as away this long after a web message
 const WEB = '[web chat]'
@@ -148,8 +149,9 @@ const speechOf = (focus: WbTask | undefined, doing: string, list: WbTask[], on: 
     case 'stuck': return { pose: 'slump', say: `I'm stuck on ${n}.`, more: focus.last, color: 'error' }
     case 'failed': return { pose: 'slump', say: `${n} failed.`, more: focus.last, color: 'error' }
   }
-  const thinking = /^(Thinking|Reading|Waiting|Model server)/.test(doing)
-  return { pose: thinking ? 'think' : 'work', say: doing || focus.last || `${focus.phase}…`, more: '', color: COLOR[focus.phase] ?? 'claude' }
+  // the hands move while it writes or tests; everything else is the model thinking or waiting
+  const working = /^(Writing|Running)/.test(doing)
+  return { pose: working ? 'work' : 'think', say: doing || focus.last || `${focus.phase}…`, more: '', color: COLOR[focus.phase] ?? 'claude' }
 }
 
 // The frame a pose shows at a tick: a stroke of the wrench now and then while working, else a
@@ -292,6 +294,7 @@ const mem = {
   scoutAsked: false, // the weekly model check was raised in this load
   boundary: false, // one closed since: a moment to make room in Claude's context
   toasted: new Set<string>(),
+  noticed: new Map<string, number>(), // each task's newest notice (its ts), as deliver last read
   chatSent: new Set<string>(), // web messages submitted by this load, awaiting their receipt
   chatUrlAt: 0, // when the web chat's link was last looked up
   eventsPid: 0, // the `wb events` child: its lines wake poll(); the chat counts it as this session
@@ -541,6 +544,7 @@ async function listen($: any, now: number) {
     try { m = JSON.parse(line) } catch { continue }
     const id = String(m.id ?? '')
     if (m.from !== 'user' || !id || got.has(id) || mem.chatSent.has(id)) continue
+    if (now - Number(m.ts ?? 0) * 1000 > CHAT_EXPIRE_MS) continue // stale: the page shows it undelivered
     mem.chatSent.add(id)
     // The terminal shows only `[web chat] <their words>`: how to answer is the skill's to say.
     const text = `${WEB} ${String(m.text ?? '')}`
@@ -590,9 +594,11 @@ async function deliver($: any, now: number) {
       mem.toasted.add(key)
       $.ui.toast(`workbench: ${name} ${headline}`)
     }
-    if (mem.busy && current && mem.wake) continue // deliver once the turn ends
+    mem.noticed.set(name, Math.max(mem.noticed.get(name) ?? 0, row.ts))
+    if (!mem.wake) continue // the toast only: the notice stays for wb wait
+    if (mem.busy && current) continue // deliver once the turn ends
     await $.fs.write(ackPath, String(row.ts)) // acknowledge before waking: never wake twice
-    if (!current || !mem.wake) continue
+    if (!current) continue
     const next = (NEXT[row.kind] ?? NEXT.failed)(name)
     void $.prompt.submit({
       text: `[workbench] Task \`${name}\` ${headline}.\n\n${row.text}\n\n${next}`,
@@ -605,13 +611,17 @@ async function deliver($: any, now: number) {
 // after a minute of Claude being idle. `acked` past the moment the task entered that state
 // means Claude has had the news.
 const REWAKE_MS = 60_000
+const REWAKE_MAX_MS = 12 * 3600_000 // older than this, it waited for a session long gone: wb status shows it
 async function rewake($: any, now: number, list: WbTask[]) {
   if (mem.busy || !mem.wake) return
   for (const t of list) {
-    if (!NEEDS.has(t.phase) || now - t.updatedAt < REWAKE_MS) continue
+    if (!NEEDS.has(t.phase) || now - t.updatedAt < REWAKE_MS || now - t.updatedAt > REWAKE_MAX_MS) continue
     const ackPath = `${mem.root}/tasks/${t.name}/acked`
     const acked = Number(await $.fs.read(ackPath).catch(() => '0')) || 0
-    if (acked * 1000 >= t.updatedAt) continue
+    // Claude had the news if it acked the task's latest notice: the runner's last status write
+    // (its pid cleared) lands just after that notice, so updated_at alone would wake it twice
+    const noticed = mem.noticed.get(t.name)
+    if (noticed !== undefined ? acked >= noticed : acked * 1000 >= t.updatedAt) continue
     await $.fs.write(ackPath, String(now / 1000))
     const kind = t.phase === 'asking' ? 'question' : t.phase
     void $.prompt.submit({
@@ -629,7 +639,15 @@ async function rewake($: any, now: number, list: WbTask[]) {
 async function delegateMode($: any, on: boolean) {
   if ((await read($, chat)).delegating === on) return
   await update($, chat, c => ({ ...c, delegating: on }))
-  if (!on) await $.ui.close({ id: PANE }).catch(() => {})
+  if (!on) {
+    await $.ui.close({ id: PANE }).catch(() => {})
+    const path = `${mem.root}/chat/listener.json` // stop listening: the page and other sessions see it now
+    const claim = await readJson($, path)
+    if (claim.session === (await read($, chat)).key) {
+      await $.fs.write(path, '{}').catch(() => {})
+      mem.listenerBody = ''
+    }
+  }
   void poll($) // listen now: a message may already be waiting
 }
 
@@ -684,7 +702,7 @@ export const register: Register = (on, options) => {
   // A tool call means a turn is running, even one that began before this module (re)loaded and
   // so never reached turn.start here; turn.complete clears it.
   on('tool.call', async ($, e, next) => {
-    if (!mem.busy) {
+    if (!mem.busy && !e.agentId) { // a subagent's call doesn't hold the main loop
       mem.busy = true
       void poll($)
     }
@@ -694,7 +712,8 @@ export const register: Register = (on, options) => {
   // Delegating with wb counts as delegate mode too (a session resumed mid-delegation, or one
   // where /delegate ran before this mod could see it)
   on('tool.call', { tool: 'Bash' }, async ($, e, next) => {
-    if (/(^|[\s;&|(])wb (start|next|feedback|accept|steer|answer|takeover)\b/.test(e.command)) {
+    // the commands that hand work out (accept and takeover also close what a hand-back gave Claude)
+    if (/(^|[\s;&|(])wb (start|next|feedback|steer|answer)\b/.test(e.command)) {
       await delegateMode($, true)
     }
     return next(e)

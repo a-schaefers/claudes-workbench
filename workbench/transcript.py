@@ -108,7 +108,13 @@ def _block(style: str, text: str, n: int, indent: str = "    ", tail: bool = Fal
     return [(style, indent + line) for line in _clip(text, n, tail)]
 
 
+SKILLS_HEADS = ("Claude picked these skills", "Claude handed you more skills", "Claude took back:")
+
+
 def _user_message(text: str, verbose: bool) -> tuple[str, list[tuple[str, str]]]:
+    full = text
+    if text.startswith(SKILLS_HEADS) and "\n\n" in text:  # runner.skills_note goes first
+        text = text.split("\n\n", 1)[1]
     if text.startswith("Review feedback from the senior reviewer"):
         head = "Claude → agent · review feedback"
     elif text.startswith("The acceptance tests fail"):  # runner.auto_fix_prompt
@@ -117,13 +123,15 @@ def _user_message(text: str, verbose: bool) -> tuple[str, list[tuple[str, str]]]
         head = "workbench → agent · fresh session: the task, the work so far, what's next"
     elif text.startswith("Step ") and " of this task is done and committed" in text[:60]:
         head = "Claude → agent · next step"
+    elif text.startswith(INTERRUPT_HEAD) and "without a tool call. Stop planning" in text:
+        head = "workbench → agent · nudge: thinking too long without acting"  # runner.NUDGE
     elif text.startswith(INTERRUPT_HEAD):
         head = "Claude → agent · INTERRUPT, high priority"
     elif text.startswith(NOTE_HEAD):
         head = "Claude → agent · note"
     else:
         head = "Claude → agent · spec"
-    body = text
+    body = text = full
     if not verbose and "\n---\nHow to work" in text:
         body = text.split("\n---\nHow to work")[0] + "\n(+ the workbench protocol; -v shows it)"
     return head, [("claude", head)] + _block("", body, 10_000 if verbose else 40, "  │ ")
@@ -283,7 +291,8 @@ def task_entries(task: store.Task) -> list[Entry]:
                              + _block("claude", r.get("text", ""), 40, "  ")))
         elif kind == "steer":
             what = "interrupts the agent" if r.get("now") else "queues a note for the agent's next step"
-            out.append(Entry(ts, key, [("claude", f"■ Claude {what}")]))
+            who = "the runner" if r.get("by") == "workbench" else "Claude"  # its think nudge
+            out.append(Entry(ts, key, [("claude", f"■ {who} {what}")]))
         elif kind == "skills":
             out.append(Entry(ts, key, [("claude", "Claude → agent · skills")]
                              + _block("", r.get("text", ""), 12, "  ")))
@@ -324,9 +333,11 @@ def activity(task: store.Task, data: dict, now: float | None = None) -> str | No
     now = now or time.time()
     st = task.status
     phase = st.get("phase")
-    tokens = ""  # totals are on the clock line
-    if phase == "queued":
-        return f"Waiting for the GPU… {st.get('last') or ''}".strip()
+    last = st.get("last") or ""
+    if phase == "queued":  # the runner says what it waits on, or what it loads
+        if last.startswith(("loading", "starting", "stopping", "unloading", "sharing")):
+            return f"{last[:1].upper()}{last[1:]}…"
+        return "Waiting for the GPU…"
     if phase == "testing":
         return f"Running the acceptance tests… `{task.spec.get('test_cmd', '')}`"
     if phase == "asking":
@@ -334,8 +345,6 @@ def activity(task: store.Task, data: dict, now: float | None = None) -> str | No
     if phase != "running":
         return None
     msgs = data.get("messages") or []
-    if st.get("last", "").startswith(("loading", "starting", "stopping", "unloading")):
-        return f"{st['last'][:1].upper()}{st['last'][1:]}…"
     stamps = [((m.get("time") or {}).get("completed") or (m.get("time") or {}).get("created") or 0)
               for m in msgs]
     since = now - (max(stamps) / 1000 if stamps else (task.spec.get("created_at") or now))
@@ -345,15 +354,15 @@ def activity(task: store.Task, data: dict, now: float | None = None) -> str | No
         if live.get("state") == "reading" or live.get("phase") == "reading the prompt":
             n = live.get("prompt_tokens")
             return (f"Reading the prompt… {_secs(since * 1000)}"
-                    + (f" · {_k(n)} tokens" if n else "") + tokens)
+                    + (f" · {_k(n)} tokens" if n else ""))
         if live.get("state") != "generating":  # loading, unloaded, restarting...
-            return f"Model server {live.get('state')}… {_secs(since * 1000)}{tokens}"
+            return f"Model server {live.get('state')}… {_secs(since * 1000)}"
         gen = live.get("generated") or 0
         rate = live.get("tok_s")
         what = "Thinking" if live.get("phase") == "thinking" else "Writing"
         return (f"{what}… {_secs(since * 1000)} · ↓ {_k(gen)} tokens"
-                + (f" · {rate:.0f} tok/s" if rate else "") + tokens)
-    return f"{verb}… {_secs(since * 1000)}{tokens}"
+                + (f" · {rate:.0f} tok/s" if rate else ""))
+    return f"{verb}… {_secs(since * 1000)}"
 
 
 def model_line(task: store.Task, data: dict) -> str:
