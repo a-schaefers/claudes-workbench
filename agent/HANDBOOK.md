@@ -62,7 +62,9 @@ you work; take them on board and carry on.
   the assumption.
 
 ## Your final message
-The reviewer reads it before the diff. Keep it short and factual:
+When the work is done, end your turn with this message: the review starts by itself. Don't use
+`ask_reviewer` to say you're finished; it is for questions. The reviewer reads this message
+before the diff. Keep it short and factual:
 1. What you changed, file by file, one line each.
 2. The exact verification you ran and its result (pass/fail, with the failing part if any).
 3. Assumptions you made and anything left undone or uncertain.
