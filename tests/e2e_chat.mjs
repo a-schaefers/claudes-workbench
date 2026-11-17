@@ -30,7 +30,7 @@ async function stopServer() {
 const messages = () => existsSync(join(home, 'state/chat/messages.jsonl'))
   ? readFileSync(join(home, 'state/chat/messages.jsonl'), 'utf8').trim().split('\n').filter(Boolean).map(l => JSON.parse(l)) : []
 const listen = busy => writeFileSync(join(home, 'state/chat/listener.json'),
-  JSON.stringify({ session: 's1', cwd: '/home/u/game', pid: process.pid, busy }))
+  JSON.stringify({ session: 's1', cwd: '/home/u/project', pid: process.pid, busy }))
 
 let failed = 0
 async function check(name, fn) {
@@ -69,7 +69,7 @@ async function run(engine, device) {
   })
   await check('shows a listening session at once', async () => {
     listen(false)
-    await until(async () => (await page.textContent('#presence-text')).includes('listening in ~/game'))
+    await until(async () => (await page.textContent('#presence-text')).includes('listening in ~/project'))
   })
   await check('a sent message lands once, with its tick', async () => {
     await page.fill('#input', 'hello from the phone')

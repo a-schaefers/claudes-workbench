@@ -346,7 +346,7 @@ def instruction_files(task: store.Task) -> tuple[list[Path], list[str]]:
 def denied_skills(extra: list[str] | None = None, project: Path | None = None) -> list[str]:
     """The user's personal skills (~/.claude/skills, the synced Claude-app ones included) are
     theirs, about their other work: an agent sees only the project's own .claude/skills. On
-    2026-11-16 an agent building a game, its context full, summarised a personal publishing skill
+    2026-11-16 an agent, its context full, summarised a personal publishing skill
     into a made-up "newer task" and went off reading the user's private library."""
     names = {"delegate", *(extra or [])}
     for home in {claude_home() / "skills", Path.home() / ".claude" / "skills"}:  # OpenCode reads ~/.claude
