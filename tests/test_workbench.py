@@ -288,8 +288,8 @@ class Lifecycle(Base):
     def test_an_accept_that_died_after_its_commit_finishes_on_a_retry(self):
         self.start("t-retry", "ok")
         wait_phase("t-retry", {"review"})
-        with mock.patch.object(cli.gitops, "remove_worktree", side_effect=OSError("killed")), \
-                self.assertRaises(OSError):
+        with mock.patch.object(cli.gitops, "remove_worktree", side_effect=KeyboardInterrupt), \
+                self.assertRaises(KeyboardInterrupt):  # killed mid-way
             run_wb("accept", "t-retry", "-m", "feat: answer")
         tip = self.branch("delegate/t-retry")
         shutil.rmtree(store.Task("t-retry").worktree)          # and the worktree went with it
@@ -459,6 +459,104 @@ class Lifecycle(Base):
         self.assertEqual(gitops.mark(wt), gitops.mark(wt))
         self.assertEqual(sorted(gitops.changed(wt).splitlines()), ["?? answer.txt", "?? café.md"])
         self.assertEqual(gitops.changed(self.repo), "")
+
+    def test_a_checkout_hook_never_runs_and_a_failed_checkout_leaves_nothing_behind(self):
+        # the 2026-11-16 audit: git-lfs's post-checkout hook fails without git-lfs on PATH; wb start
+        # died with a traceback and left the branch, the worktree and a name never usable again
+        g = lambda *a: subprocess.run(["git", "-C", str(self.repo), *a], check=True)  # noqa
+        marker = Path(self.tmp.name) / "hooked"
+        hook = self.repo / ".git/hooks/post-checkout"
+        hook.write_text(f"#!/bin/sh\necho ran >> {shlex.quote(str(marker))}\nexit 2\n")
+        hook.chmod(0o755)
+        self.assertIn("started t-hook", self.start("t-hook", "ok"))
+        self.assertFalse(marker.exists())
+        wait_phase("t-hook", {"review"})
+        (self.repo / ".gitattributes").write_text("README.md filter=wb\n")
+        g("add", ".gitattributes")
+        g("commit", "-qm", "a filter")
+        g("config", "filter.wb.clean", "cat")
+        g("config", "filter.wb.smudge", "false")    # a required filter that fails: the add fails
+        g("config", "filter.wb.required", "true")
+        err = io.StringIO()
+        with self.assertRaises(SystemExit), redirect_stderr(err):
+            self.start("t-smudge", "ok")
+        self.assertIn("smudge filter wb failed", err.getvalue())   # a message, no traceback
+        self.assertFalse(store.Task("t-smudge").dir.exists())
+        self.assertEqual(self.branch("delegate/t-smudge"), "")
+        self.assertNotIn("t-smudge", subprocess.run(["git", "-C", str(self.repo), "worktree", "list"],
+                                                    capture_output=True, text=True).stdout)
+        g("config", "--remove-section", "filter.wb")
+        self.assertIn("started t-smudge", self.start("t-smudge", "ok"))   # the name is still free
+        wait_phase("t-smudge", {"review"})
+
+    def test_a_sparse_checkout_diff_counts_only_what_changed(self):
+        # the audit: the review diff's scratch index came from read-tree, with no skip-worktree
+        # bits, so every file outside the cone read as deleted (the diff, the stat, the footprint)
+        g = lambda *a: subprocess.run(["git", "-C", str(self.repo), *a], check=True,  # noqa
+                                      capture_output=True)
+        for d in ("a", "b"):
+            (self.repo / d).mkdir()
+            (self.repo / d / "x").write_text(f"{d}\n")
+        g("add", "-A")
+        g("commit", "-qm", "two parts")
+        g("sparse-checkout", "set", "a")
+        self.start("t-sparse", "ok")
+        wait_phase("t-sparse", {"review"})
+        task = store.Task("t-sparse")
+        self.assertFalse((task.worktree / "b/x").exists())          # the worktree is sparse too
+        (task.worktree / "a/x").write_text("changed\n")
+        stat = gitops.diff(task.worktree, task.spec["base"], stat=True)
+        self.assertNotIn("b/x", stat)
+        self.assertIn("2 files changed", stat)                     # a/x and answer.txt
+        self.assertEqual(gitops.footprint(task.worktree, task.spec["base"])["files"], 2)
+
+    def test_a_repository_inside_the_worktree_is_named_and_never_committed(self):
+        # the audit: an in-tree repo with no commit broke the review diff and accept; one with a
+        # commit was one line of the diff and went in as a gitlink to a commit nowhere else
+        self.start("t-nest", "ok")
+        wait_phase("t-nest", {"review"})
+        task = store.Task("t-nest")
+        inner = task.worktree / "tool/inner"
+        inner.mkdir(parents=True)
+        subprocess.run(["git", "init", "-q", str(inner)], check=True)
+        (inner / "z.txt").write_text("z\n")
+        self.assertIn("answer.txt", run_wb("diff", "t-nest", "--stat"))
+        err = io.StringIO()
+        with self.assertRaises(SystemExit), redirect_stderr(err):
+            run_wb("accept", "t-nest", "-m", "feat: answer")
+        self.assertIn("tool/inner: a git repository of its own", err.getvalue())
+        subprocess.run(["git", "-C", str(inner), "add", "z.txt"], check=True)
+        subprocess.run(["git", "-C", str(inner), "-c", "user.email=a@a", "-c", "user.name=a",
+                        "commit", "-qm", "z"], check=True)
+        run_wb("feedback", "t-nest", "--text", "1. Keep it.")
+        wait_phase("t-nest", {"review"})
+        self.assertIn("NOTE: tool/inner: a git repository of its own", run_wb("report", "t-nest"))
+        shutil.rmtree(inner / ".git")
+        self.assertIn("accepted t-nest", run_wb("accept", "t-nest", "-m", "feat: answer"))
+        tree = subprocess.run(["git", "-C", str(self.repo), "ls-tree", "-r", "delegate/t-nest"],
+                              capture_output=True, text=True).stdout
+        self.assertIn("tool/inner/z.txt", tree)
+        self.assertNotIn("160000", tree)
+
+    @unittest.skipUnless(shutil.which("ssh-keygen"), "needs ssh-keygen to sign commits")
+    def test_a_signature_shown_by_git_log_does_not_fail_a_finished_accept(self):
+        # the audit: with log.showSignature and signed commits, `git log --format=%h` printed
+        # "No signature" ahead of the hash, and a finished accept (and wb init) exited 1
+        key = Path(self.tmp.name) / "key"
+        subprocess.run(["ssh-keygen", "-q", "-t", "ed25519", "-N", "", "-f", str(key)], check=True)
+        g = lambda *a: subprocess.run(["git", "-C", str(self.repo), *a], check=True,  # noqa
+                                      capture_output=True)
+        for k, v in (("gpg.format", "ssh"), ("user.signingkey", str(key)),
+                     ("commit.gpgsign", "true"), ("log.showSignature", "true")):
+            g("config", k, v)
+        (self.repo / "CLAUDE.md").write_text("# repo\nSigned.\n")
+        g("commit", "-qam", "signed")
+        self.start("t-sig", "ok")
+        wait_phase("t-sig", {"review"})
+        out = run_wb("accept", "t-sig", "-m", "feat: answer")
+        self.assertIn("CLAUDE.md last changed 1 commit(s) before", out)
+        self.assertIn("accepted t-sig", out)
+        self.assertIn("CLAUDE.md is current", run_wb("init", str(self.repo)))
 
     def test_a_new_file_is_fingerprinted_without_following_or_reading_it_whole(self):
         # the audit: mark() read every new file whole through its links, so a symlink to
@@ -1928,6 +2026,87 @@ class Projects(Base):
         self.assertFalse(store.Task("t-blind").exists)
         run_wb("start", "t-ok", "--spec", str(self.spec), "--repo", str(self.repo), "--no-claude-md")
         self.assertTrue(store.Task("t-ok").exists)
+
+    def refused(self, *argv) -> str:
+        err = io.StringIO()
+        with self.assertRaises(SystemExit), redirect_stderr(err):
+            run_wb(*argv)
+        return err.getvalue()
+
+    def test_an_unknown_base_is_named_not_reported_as_a_missing_claude_md(self):
+        # the 2026-11-16 audit: --base mian sent Claude off to write a CLAUDE.md the repo had
+        err = self.refused("start", "t-typo", "--spec", str(self.spec), "--repo", str(self.repo),
+                           "--model", "mimo", "--base", "mian")
+        self.assertIn("no commit mian", err)
+        self.assertNotIn("CLAUDE.md", err)
+        self.assertFalse(store.Task("t-typo").dir.exists())
+
+    def test_start_wants_a_git_identity_before_the_agent_works(self):
+        # the audit: with no user.name/email, the task ran to review and only wb accept failed
+        cfg = Path(self.tmp.name) / "empty-gitconfig"
+        cfg.write_text("[user]\n\tuseConfigOnly = true\n")   # no guessing from the host name
+        os.environ.update(GIT_CONFIG_GLOBAL=str(cfg), GIT_CONFIG_NOSYSTEM="1")
+        for k in ("EMAIL", "GIT_AUTHOR_NAME", "GIT_AUTHOR_EMAIL", "GIT_COMMITTER_NAME",
+                  "GIT_COMMITTER_EMAIL"):
+            os.environ.pop(k, None)
+        subprocess.run(["git", "-C", str(self.repo), "config", "--unset", "user.email"], check=True)
+        err = self.refused("start", "t-anon", "--spec", str(self.spec), "--repo", str(self.repo),
+                           "--model", "mimo")
+        self.assertIn("no user.name/user.email", err)
+        self.assertFalse(store.Task("t-anon").dir.exists())
+
+    def test_instructions_in_dot_claude_count_and_hints_quote_their_paths(self):
+        # the audit: a repo with only .claude/CLAUDE.md (Claude Code reads it, and so does the
+        # agent) was refused as having none; a path with a space broke the printed merge command
+        g = lambda *a: subprocess.run(["git", "-C", str(self.repo), *a], check=True)  # noqa
+        (self.repo / ".claude").mkdir()
+        g("mv", "CLAUDE.md", ".claude/CLAUDE.md")
+        g("commit", "-qm", "the Claude Code way")
+        self.repo = self.repo.rename(self.repo.with_name("my repo"))
+        self.start("t-dot", "ok")
+        wait_phase("t-dot", {"review"})
+        out = run_wb("accept", "t-dot", "-m", "feat: answer")
+        self.assertIn(".claude/CLAUDE.md last changed 1 commit(s) before", out)
+        self.assertNotIn("no CLAUDE.md", out)
+        self.assertIn(f"git -C {shlex.quote(str(self.repo))} merge", out)
+
+    def test_a_repo_git_refuses_is_reported_with_gits_reason(self):
+        # the audit: dubious ownership read as "not inside a git repository: wb init", which
+        # would git init an existing repo
+        why = gitops.GitError("git rev-parse --show-toplevel: fatal: detected dubious ownership "
+                              "in repository at '/srv/app'")
+        with mock.patch.object(gitops, "toplevel", side_effect=why):
+            err = self.refused("start", "t-own", "--spec", str(self.spec), "--repo", str(self.repo))
+            self.assertIn("dubious ownership", err)
+            self.assertNotIn("wb init", err)
+            self.assertIn("dubious ownership", self.refused("init", str(self.repo)))
+
+    def test_start_refusals_say_what_is_wrong_in_a_line(self):
+        # the audit: a missing spec file was a traceback, and a taken name suggested a discard,
+        # which never frees a name
+        err = self.refused("start", "t-x", "--spec", "/nonexistent.md", "--repo", str(self.repo))
+        self.assertEqual(err, "wb: /nonexistent.md: No such file or directory\n")
+        self.start("t-x", "ok")
+        wait_phase("t-x", {"review"})
+        err = self.refused("start", "t-x", "--spec", str(self.spec), "--repo", str(self.repo))
+        self.assertIn("never reused", err)
+        self.assertNotIn("discard", err)
+
+    def test_start_says_submodules_are_not_checked_out_for_the_agent(self):
+        # the audit: a submodule stayed empty in the worktree and the build failed for no reason
+        # the spec gave; populated, its .git would be a file the agent could repoint (see _pinned)
+        lib = Path(self.tmp.name) / "lib"
+        subprocess.run(["git", "init", "-q", str(lib)], check=True)
+        (lib / "lib.c").write_text("int x;\n")
+        subprocess.run(["git", "-C", str(lib), "add", "."], check=True)
+        subprocess.run(["git", "-C", str(lib), "-c", "user.email=t@t", "-c", "user.name=t",
+                        "commit", "-qm", "lib"], check=True)
+        g = lambda *a: subprocess.run(["git", "-C", str(self.repo), *a], check=True,  # noqa
+                                      capture_output=True)
+        g("-c", "protocol.file.allow=always", "submodule", "add", "-q", str(lib), "vendor/lib")
+        g("commit", "-qm", "a submodule")
+        self.assertIn("note: submodules (vendor/lib) are not checked out", self.start("t-sub", "ok"))
+        wait_phase("t-sub", {"review"})
 
     def test_accept_says_whether_claude_md_kept_up(self):
         self.start("t-ok", "ok", "--test", TEST_CMD)

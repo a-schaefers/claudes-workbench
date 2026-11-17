@@ -83,8 +83,11 @@ it that way; the agents never write either.
   changed that it describes? Leave it. It says what the project is, never what comes next: keep
   the plan and the next step in your own notes. An agent that loses its task takes up whatever
   CLAUDE.md says is next (seen: a compaction summary that recounted CLAUDE.md, and the agent
-  built its "Next:" line instead of its spec). `wb start` refuses a repo without one (`--no-claude-md`
-  only for throwaway repos).
+  built its "Next:" line instead of its spec). `wb start` refuses a repo without one (CLAUDE.md or
+  `.claude/CLAUDE.md`; `--no-claude-md` only for throwaway repos). It also refuses an unknown
+  `--base` and a repo with no git identity for the commits: fix those, don't work around them.
+- **Submodules** are not checked out in the agent's worktree (`wb start` says so): a step whose
+  build or tests need one is yours, or its acceptance command must not need it.
 
 ## Planning work you will hand off
 In delegate mode every plan you write is for agents weaker than you, who see only the spec you
@@ -454,7 +457,9 @@ at once, mid-round if need be: the task, the work so far (the diff), the agent's
 the new instructions. OpenCode's own compaction (the model summarising itself, which can lose the
 task) is only a backstop past that. Reports show `agent context: …` so you see it coming. A
 check-in or report that says `NOTE: the spec doesn't name …` lists files outside the spec: drift
-until you've looked, so read them and steer (`--now`) if the agent left its task. Override per round:
+until you've looked, so read them and steer (`--now`) if the agent left its task. `NOTE: <dir>: a
+git repository of its own` is a nested repo the diff leaves out and `wb accept` refuses: have its
+`.git` removed, or gitignore it. Override per round:
 `wb feedback --fresh` when the agent is confused, stuck on a wrong idea or working from stale
 reads; `--keep-context` when it needs what it read and the window still has room.
 Follow-up work in the same area goes to the same agent: `wb next <name> --spec <file> -m "<subject

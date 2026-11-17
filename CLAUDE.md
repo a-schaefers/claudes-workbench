@@ -131,9 +131,10 @@ Runs on Linux, WSL2 and macOS. Native Windows doesn't (fcntl, `os.killpg`, POSIX
 Linux there is no Landlock and watch.py falls back to timed waits.
 
 ## How a task runs
-1. `wb start` refuses a repo without a committed CLAUDE.md (`--no-claude-md`), asks the router
-   for a model (unless `--model`), makes branch `delegate/<task>` in a fresh worktree, writes
-   round 1's prompt (the spec plus `PROTOCOL`), spawns the runner and returns.
+1. `wb start` refuses a repo without a committed CLAUDE.md or `.claude/CLAUDE.md`
+   (`--no-claude-md`), asks the router for a model (unless `--model`), makes branch
+   `delegate/<task>` in a fresh worktree, writes round 1's prompt (the spec plus `PROTOCOL`),
+   spawns the runner and returns.
 2. The runner takes the GPU (`GpuLease`: shared beside other tasks when the models fit, else
    alone), makes the model resident, and runs `opencode run --standalone --auto --format json` in
    the worktree, through `lane.wrap`, with the config layer `rules/<task>/opencode.json`. Events

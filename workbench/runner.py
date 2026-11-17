@@ -510,6 +510,8 @@ def summary_text(task: store.Task, n: int, rnd: dict, tests) -> str:
     if mine := claude_files_changed(files):
         lines.append(f"NOTE: the agent changed your files ({', '.join(mine)}): instructions and "
                      ".claude/ are yours to write; keep, rewrite or revert them")
+    if nested := gitops.nested_repos(task.worktree):
+        lines.append(gitops.nested_line(nested))
     stat = gitops.diff(task.worktree, spec["base"], stat=True).splitlines()
     if stat:
         lines.append(stat[-1].strip())

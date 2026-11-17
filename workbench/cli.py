@@ -8,6 +8,7 @@ import fnmatch
 import functools
 import json
 import os
+import shlex
 import shutil
 import signal
 import subprocess
@@ -137,28 +138,54 @@ def _local_claude_md(repo: Path) -> bool:
     return (repo / "CLAUDE.md").is_file() and _ignored(repo, "CLAUDE.md")
 
 
+# Where a project's committed instructions may live, as Claude Code reads them (context.ROOT_FILES
+# loads both): a repo with only .claude/CLAUDE.md was refused as having none (the 2026-11-16
+# audit). CLAUDE.local.md is the user's own, rarely committed, so it doesn't count.
+PROJECT_MEMORY = ("CLAUDE.md", ".claude/CLAUDE.md")
+
+
+def _claude_md_at(repo: Path, ref: str) -> str | None:
+    """The first of PROJECT_MEMORY committed at ``ref``, or None."""
+    return next((p for p in PROJECT_MEMORY if _has_file(repo, ref, p)), None)
+
+
 def _need_claude_md(repo: Path, base: str, a) -> None:
     if a.no_claude_md:
         return
-    if not _has_file(repo, base, "CLAUDE.md") and _local_claude_md(repo):
+    if not _claude_md_at(repo, base) and _local_claude_md(repo):
         print("note: CLAUDE.md is gitignored: the agent gets your checkout's copy")
-    elif not _has_file(repo, base, "CLAUDE.md"):
-        die(f"{repo} has no CLAUDE.md at {base}: the agent would start blind. Write it (what the "
-            "project is, how to build and test it, its conventions), commit it, and run "
-            f"wb init {repo} to link AGENTS.md; --no-claude-md skips this check")
+    elif not _claude_md_at(repo, base):
+        die(f"{repo} has no CLAUDE.md (or .claude/CLAUDE.md) at {base}: the agent would start "
+            "blind. Write it (what the project is, how to build and test it, its conventions), "
+            f"commit it, and run wb init {shlex.quote(str(repo))} to link AGENTS.md; "
+            "--no-claude-md skips this check")
+
+
+def _identity(repo: Path) -> bool:
+    """Whether git can sign a commit in ``repo`` as someone: what `git commit` itself resolves
+    (repo config, includeIf, GIT_AUTHOR_*/EMAIL), strictly. Without one a task ran for its whole
+    length and only wb accept found out (the 2026-11-16 audit)."""
+    return all(gitops.git(repo, "var", v, check=False).strip()
+               for v in ("GIT_AUTHOR_IDENT", "GIT_COMMITTER_IDENT"))
 
 
 def cmd_start(a):
     if not store.NAME_RE.match(a.name):
         die("a task name is lowercase letters, digits and hyphens, at most 48")
     task = store.Task(a.name)
-    if task.exists:
-        die(f"task {a.name!r} exists ({task.status.get('phase')}): pick a new name"
-            + ("" if task.status.get("phase") in store.CLOSED else f", or wb discard {a.name} first"))
+    if task.exists:  # discarding never frees a name, so the refusal doesn't suggest it (the audit)
+        die(f"task {a.name!r} exists ({task.status.get('phase')}): task names are never reused, "
+            "pick a new one")
     try:
         repo = gitops.toplevel(Path(a.repo).resolve())
-    except gitops.GitError:
-        die(f"{a.repo} is not inside a git repository: wb init {a.repo} sets the project up")
+    except gitops.GitError as e:  # git's own reason when it isn't "not a repo": dubious ownership
+        why = str(e).split(": ", 1)[-1]  # would otherwise send Claude to git init a repo (the audit)
+        if not Path(a.repo).is_dir():
+            die(f"{a.repo} is not a directory")
+        if "not a git repository" not in why:
+            die(f"{a.repo}: {why}")
+        die(f"{a.repo} is not inside a git repository: wb init {shlex.quote(a.repo)} sets the "
+            "project up")
     tasks = store.tasks_dir().resolve()
     if repo.resolve().is_relative_to(tasks):  # gone at that task's accept, wedging this one (the audit)
         owner = store.Task(repo.resolve().relative_to(tasks).parts[0])
@@ -174,14 +201,24 @@ def cmd_start(a):
     if not state["available"] and not a.force:
         die(f"{m.id} can't run: {state['why']}. (--force queues it anyway)", 3)
     dirty = gitops.git(repo, "status", "--porcelain").strip()
+    if not gitops.base_commit(repo, a.base):  # first: a typo read as a missing CLAUDE.md (the audit)
+        die(f"no commit {a.base} in {repo}: a typo, or a ref not fetched yet (git fetch)")
+    if not _identity(repo):
+        die("git has no user.name/user.email here: the user's identity signs the commits "
+            "(git config --global user.name/user.email)")
     _need_claude_md(repo, a.base, a)
 
-    task.dir.mkdir(parents=True)
+    try:
+        task.dir.mkdir(parents=True)
+    except FileExistsError:  # a start under way, or one that died before task.json
+        die(f"{task.dir} exists without a task.json: another wb start {a.name} is under way or "
+            "one failed; pick a new name")
     try:
         base = gitops.create_worktree(repo, a.name, task.worktree, a.base)
     except gitops.GitError as e:
-        task.dir.rmdir()
+        shutil.rmtree(task.dir, ignore_errors=True)  # create_worktree removed its own leftovers
         die(str(e))
+    subs = gitops.submodules(repo, base)
     budget = a.ask_budget
     limits = router.budgets(m)  # from the model's measured speed on this machine, else defaults
     store.write_json(task.dir / "task.json", {
@@ -218,6 +255,9 @@ def cmd_start(a):
     if dirty:
         print("note: the repo has uncommitted changes; the agent's worktree starts from "
               f"{a.base}, without them")
+    if subs:
+        print(f"note: submodules ({', '.join(subs[:5])}) are not checked out in the agent's "
+              "worktree: a build or test that needs them fails there")
     print(f"model: {why}" if why != "asked for" else f"model: {m.id} (asked for)")
     print(f"slice: {router.slice(m).line()}")
     if gaps := results.spec_gap_line():
@@ -521,13 +561,14 @@ def cmd_diff(a):
     task = need(a.name)
     if not task.worktree.is_dir():
         die(f"{a.name} is {task.status.get('phase')} and its worktree is gone: "
-            f"git -C {task.spec['repo']} diff {task.spec['base'][:12]} {task.spec['branch']}")
+            f"git -C {shlex.quote(task.spec['repo'])} diff {task.spec['base'][:12]} "
+            f"{task.spec['branch']}")
     base = "HEAD" if task.status.get("steps", 1) > 1 and not a.all else task.spec["base"]
     try:
         print(gitops.diff(task.worktree, base, stat=a.stat, paths=a.paths) or "(no changes)")
     except gitops.GitError as e:
-        die(f"{e}\nthe branch's commits: git -C {task.spec['repo']} diff {task.spec['base'][:12]} "
-            f"{task.spec['branch']}")
+        die(f"{e}\nthe branch's commits: git -C {shlex.quote(task.spec['repo'])} diff "
+            f"{task.spec['base'][:12]} {task.spec['branch']}")
 
 
 def _stop_runner(task):
@@ -759,14 +800,18 @@ def cmd_accept(a):
                     (f", merged {merged}" if merged else ""))
     results.record(task, "accepted", measured, commit=commit, merged=bool(merged))
     _ack_all(task)
-    note = claude_md_status(repo, spec["branch"])  # the task's own commit counts: the reminder
-    print("the repo has no CLAUDE.md: write one (wb init)" if note == "no CLAUDE.md" else
-          f"{note}: keep it current (update it if this change alters what it says)"
-          if note == LOCAL_CLAUDE_MD else
-          f"{note}: keep it current (update and commit it if this change alters what it says)")
+    try:  # a reminder: it once turned a finished accept into exit 1 (the 2026-11-16 audit)
+        note = claude_md_status(repo, spec["branch"])  # the task's own commit counts
+    except (gitops.GitError, OSError, ValueError):
+        note = None
+    if note:
+        print("the repo has no CLAUDE.md: write one (wb init)" if note == "no CLAUDE.md" else
+              f"{note}: keep it current (update it if this change alters what it says)"
+              if note == LOCAL_CLAUDE_MD else
+              f"{note}: keep it current (update and commit it if this change alters what it says)")
     print(f"accepted {a.name}: commit {commit} on {spec['branch']}" +
-          (f", merged into {gitops.git(repo, 'branch', '--show-current').strip()} as {merged}"
-           if merged else f"\nmerge with: git -C {repo} merge --no-ff {spec['branch']}"))
+          (f", merged into {gitops.current_branch(repo)} as {merged}" if merged else
+           f"\nmerge with: git -C {shlex.quote(str(repo))} merge --no-ff {spec['branch']}"))
     _say(lessons.nudge(task, "accepted"))
 
 
@@ -1306,13 +1351,14 @@ LOCAL_CLAUDE_MD = "CLAUDE.md is gitignored: agents get the checkout's copy"
 def claude_md_status(repo: Path, ref: str = "HEAD") -> str:
     """One line on the repo's CLAUDE.md at ref: missing, local, or how far behind the code it
     may be."""
-    if not _has_file(repo, ref, "CLAUDE.md"):
+    md = _claude_md_at(repo, ref)  # CLAUDE.md before .claude/CLAUDE.md: AGENTS.md links to it
+    if not md:
         return LOCAL_CLAUDE_MD if _local_claude_md(repo) else "no CLAUDE.md"
-    last = gitops.git(repo, "log", "-1", "--format=%h", ref, "--", "CLAUDE.md").strip()
+    last = gitops.git(repo, "log", "-1", "--format=%h", ref, "--", md).strip()
     since = int(gitops.git(repo, "rev-list", "--count", f"{last}..{ref}", "--", ".",
-                           ":!CLAUDE.md", ":!AGENTS.md").strip() or 0)  # commits that changed code
-    return (f"CLAUDE.md is current with {ref}" if not since else
-            f"CLAUDE.md last changed {since} commit(s) before {ref} ({last})")
+                           f":!{md}", ":!AGENTS.md").strip() or 0)  # commits that changed code
+    return (f"{md} is current with {ref}" if not since else
+            f"{md} last changed {since} commit(s) before {ref} ({last})")
 
 
 # What wb init won't put in a project's first commit (the 2026-11-16 audit: an .env with an API
@@ -1347,11 +1393,17 @@ def cmd_init(a):
     if Path.home().resolve().is_relative_to(d):  # the home directory, or above it (/ included)
         die(f"wb init takes a project's own directory, not {d}: make one (e.g. ~/projects/<name>)")
     d.mkdir(parents=True, exist_ok=True)
-    inside = gitops.git(d, "rev-parse", "--show-toplevel", check=False).strip()
+    try:
+        inside = str(gitops.toplevel(d))
+    except gitops.GitError as e:  # a repo git refuses (dubious ownership) is no place to git init
+        if "not a git repository" not in str(e):
+            die(f"{d}: {str(e).split(': ', 1)[-1]}")
+        inside = ""
     if inside and Path(inside) != d:
         die(f"{d} is inside the git repo {inside}; init the project in its own directory")
-    if not gitops.git(d, "config", "user.email", check=False).strip():
-        die("git has no user.email: the user's identity signs the commits (git config --global)")
+    if not _identity(d):
+        die("git has no user.name/user.email: the user's identity signs the commits "
+            "(git config --global user.name/user.email)")
     did = []
     if not inside:
         gitops.git(d, "init", "-q")  # on the user's init.defaultBranch
@@ -1680,7 +1732,7 @@ def main(argv=None):
     s.add_argument("--trial", action="store_true", help="a check of workbench itself (a scratch "
                    "repo): its result and lessons don't count as evidence")
     s.add_argument("--no-claude-md", action="store_true",
-                   help="start even though the repo has no CLAUDE.md")
+                   help="start even though the repo has no CLAUDE.md (or .claude/CLAUDE.md)")
     s.add_argument("--allow", action="append", metavar="PATTERN",
                    help="let the agent run a command outside the everyday list, e.g. \"curl *\"")
     s.add_argument("--allow-path", action="append", metavar="DIR",
@@ -1903,6 +1955,8 @@ def main(argv=None):
         a.f(a)
     except RuntimeError as e:  # wb's own failures (git, a config that doesn't parse): a message
         die(str(e))
+    except OSError as e:  # a --spec, --message or --file that isn't there: a line, not a traceback
+        die(f"{e.filename}: {e.strerror}" if e.filename else str(e))  # (the 2026-11-16 audit)
 
 
 if __name__ == "__main__":
