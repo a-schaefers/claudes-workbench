@@ -762,6 +762,22 @@ class SkillLibrary(Base):
             "paths", "Draws things.", "Read ~/notes/plan.md first.\n")), "-m", "warned")
         self.assertIn("outside the repo", out)
         self.assertIn("when to use it", out)
+        for path in ("/Users/alice/proj/tools.py", "/var/home/alice/x", "/root/x"):  # not only Linux's
+            out = run_wb("skill", "add", "paths", "--from", str(self.draft(
+                "paths", "Use when drawing.", f"Read {path} first.\n")), "-m", "warned")
+            self.assertIn("outside the repo", out, path)
+
+    def test_the_librarys_commits_ignore_the_users_signing_and_hooks(self):
+        # a signing prompt or a global hook failed `wb skill add` from Claude's Bash (the 2026-11-16 audit)
+        hooks = Path(self.tmp.name) / "hooks"
+        hooks.mkdir()
+        (hooks / "pre-commit").write_text("#!/bin/sh\nexit 1\n")
+        (hooks / "pre-commit").chmod(0o755)
+        conf = Path(self.tmp.name) / "gitconfig"
+        conf.write_text(f"[commit]\n\tgpgsign = true\n[gpg]\n\tprogram = false\n[core]\n\thooksPath = {hooks}\n")
+        os.environ["GIT_CONFIG_GLOBAL"] = str(conf)
+        self.assertIn("added svg-charts", run_wb("skill", "add", "svg-charts", "--from",
+                                                 str(self.draft("svg-charts")), "-m", "signed nowhere"))
 
     def test_the_users_own_skill_names_are_off_limits(self):
         home = Path(self.tmp.name) / "home"

@@ -965,7 +965,10 @@ up again (a library's quirk, a pitfall, a check to run), Claude writes a skill. 
 (`skills._git`). A skill is `<lib>/<name>/SKILL.md` plus any files beside it; a retired one is
 `<lib>/retired/<name>/`. Only `<lib>/*/SKILL.md` is live (`available()`: name → {path,
 description}; `resolve()` raises KeyError on an unknown name). Commits go under the user's git
-identity, or `workbench <workbench@localhost>` when none is set (`_commit`). Messages:
+identity, or `workbench <workbench@localhost>` when none is set (`_commit`), unsigned and without
+hooks (`commit.gpgsign=false`, `core.hooksPath` = the null device, `--no-verify`): the library is
+workbench's own record, and the user's signing prompt or a global hook failed `wb skill add` from
+Claude's Bash (the 2026-11-16 audit); commits in the user's projects keep both. Messages:
 `<name>: <message>` (plus `\n\nSource: <source>` from `--source`), `<name>: retired: <message>`,
 `<name>: restored`. `rev(name)` is the last commit touching the skill (`%h`), `revs()` maps
 names to revs, `history()` the last five `%ad %s` lines over `<name>` and `retired/<name>`
@@ -981,7 +984,7 @@ quotes are stripped. Fields used: `name`, `description`, `license`.
   differs; no description, or one over 300 characters (it's all an agent sees before loading);
   the whole file over 8000 UTF-8 bytes; a body path `references/…`, `scripts/…`, `templates/…` or
   `assets/…` that doesn't exist beside the source file.
-- Warned: a body over 120 lines; `/home/` or `~/` anywhere (agents go looking for those paths); a
+- Warned: a body over 120 lines; a home path (`/home/`, `/Users/`, `/root/`, `/var/home/`) or `~/` anywhere (agents go looking for those paths); a
   description without when/for/before/after/if; for a SKILL.md in a directory, clutter
   (README.md, CHANGELOG.md, .env, .gitignore, LICENSE.txt) or more than 10 other files; a body that
   reads like an incident log (3+ of `#NN`, `PR NN`, `issue NN`, `20YY-MM-DD`): a skill states the
