@@ -92,7 +92,8 @@ def _int(text: str) -> int:
 
 
 def gpus(windows: bool = True) -> list[dict]:
-    """Every display adapter: name, driver, VRAM total and in use (bytes) where the driver says.
+    """Every display adapter: name, driver, VRAM total and in use (bytes) where the driver says,
+    and `discrete` when it is known to be a card with memory of its own (not an APU's carve-out).
     ``windows`` False leaves out what WSL names from Windows (no VRAM, and a PowerShell start of
     seconds): the GPU budget and wb image's settle asked it on every call (the 2026-11-16 audit)."""
     where = system()
@@ -108,7 +109,7 @@ def gpus(windows: bool = True) -> list[dict]:
         name, total, used, driver = parts
         mib = lambda v: int(v) * 2 ** 20 if v.isdigit() else None  # noqa: E731 ("[N/A]" on some cards)
         found.append({"name": name, "driver": f"nvidia {driver}", "vram": mib(total),
-                      "vram_used": mib(used)})
+                      "vram_used": mib(used), "discrete": True})
     if where == "wsl":
         if not windows:
             return found
@@ -126,8 +127,12 @@ def gpus(windows: bool = True) -> list[dict]:
         seen.add(slot)
         name = _run("lspci", "-s", slot).partition(": ")[2] or uevent.get("PCI_ID", "unknown")
         total, used = _read(dev / "mem_info_vram_total"), _read(dev / "mem_info_vram_used")
+        # amdgpu reports an APU's carve-out of system RAM as VRAM too; only a card's own memory
+        # has a vendor (mem_info_vram_vendor: samsung, hynix…), so that marks a discrete one.
+        # Without it the device stays unknown, not integrated (models.budget_devices)
         found.append({"name": name, "driver": driver, "vram": int(total) if total else None,
-                      "vram_used": int(used) if used else None})
+                      "vram_used": int(used) if used else None,
+                      **({"discrete": True} if _read(dev / "mem_info_vram_vendor") else {})})
     return found
 
 

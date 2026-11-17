@@ -1326,9 +1326,14 @@ scout`) comes from one runtime's GPUs: the GPUs are grouped by driver (`nvidia`,
 `metal`…) and the largest group's sum is taken, so several NVIDIA cards (which Ollama splits a
 model across) add up but another vendor's GPU beside them doesn't; a discrete device under
 `IGPU_UNDER` 1 GiB (an integrated GPU's carve-out, Ollama's own cutoff) is left out. Summing
-every GPU counted a laptop's Radeon iGPU into its RTX card's 8 GB (the 2026-11-16 audit). An AMD
-dGPU beside an AMD APU whose carve-out is 1 GiB or more still adds up: nothing tells them apart
-reliably. Apple Silicon: `iogpu.wired_limit_mb` when set, else macOS's default
+every GPU counted a laptop's Radeon iGPU into its RTX card's 8 GB (the 2026-11-16 audit). amdgpu
+reports an APU's carve-out of system RAM as VRAM too, so `hardware.gpus` marks a device
+`discrete` only on evidence: nvidia-smi's, and an amdgpu card that names its memory's vendor
+(`mem_info_vram_vendor`, which an APU's system memory never has); once any device with VRAM is
+known discrete, only those count, so a carve-out never outranks or adds to a card (the 0.90
+review: a 16 GiB Radeon 780M carve-out beside an 8 GiB RTX became the budget, and a 4 GiB one was
+added to an RX 7600S's 8). With none known discrete (an APU alone, a card that names no vendor)
+the groups decide as above. Apple Silicon: `iogpu.wired_limit_mb` when set, else macOS's default
 (`unified_default`: two thirds of the RAM up to `UNIFIED_SMALL` 36 GiB, three quarters above,
 Metal's recommendedMaxWorkingSetSize; it was 75% everywhere, too much on 8-32 GB Macs). Unknown
 VRAM means no sharing. `gpus(windows=False)`: the budget never asks WSL's PowerShell. A model's

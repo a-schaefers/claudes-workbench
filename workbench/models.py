@@ -800,12 +800,19 @@ def budget_devices() -> tuple[int | None, list[dict]]:
     one driver's GPUs (several NVIDIA cards, which Ollama splits a model across, add up; an
     iGPU of another vendor beside them doesn't), leaving out devices under 1 GiB (an integrated
     GPU's carve-out). Summing every GPU counted a laptop's Radeon iGPU into its RTX card's 8 GB
-    (the 2026-11-16 audit). Apple Silicon: iogpu.wired_limit_mb, else macOS's default share."""
+    (the 2026-11-16 audit). Once a device is known discrete (hardware.gpus `discrete`), only
+    those count: an AMD APU's carve-out never outranks or adds to a card (the 0.90 review: a
+    16 GiB Radeon 780M carve-out beside an 8 GiB RTX became the budget, a 4 GiB one was added to
+    an RX 7600S's 8). With none known, as before. Apple Silicon: iogpu.wired_limit_mb, else
+    macOS's default share."""
     if _fake():
         gb = os.environ.get("WB_FAKE_GPU_GB")  # tests: a GPU of this size
         return (int(float(gb) * 1e9), []) if gb else (None, [])
+    devs = hardware.gpus(windows=False)  # WSL's Windows names carry no VRAM: skip PowerShell
+    if any(g.get("discrete") and g.get("vram") for g in devs):
+        devs = [g for g in devs if g.get("discrete")]
     groups: dict[str, list] = {}
-    for g in hardware.gpus(windows=False):  # WSL's Windows names carry no VRAM: skip PowerShell
+    for g in devs:
         if g.get("unified"):
             usable = g.get("wired_limit") or unified_default(g.get("vram") or 0)
         else:
