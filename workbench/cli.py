@@ -863,6 +863,53 @@ def cmd_skill_import(a):
           f"{skills.license_of(d, root)}\"")
 
 
+NOTES_MAX, NOTE_CHARS = 20, 300  # the mod puts them in every delegate-mode prompt: keep them few
+
+
+def _notes() -> list[str]:
+    try:
+        text = (store.home() / "notes.md").read_text()
+    except FileNotFoundError:
+        return []
+    return [line[2:] for line in text.splitlines() if line.startswith("- ")]
+
+
+def cmd_notes(a):
+    """What Claude has learned about how the user wants delegation run, in any project: the mod
+    hands them to every delegate-mode session, so they follow the user from repo to repo."""
+    path = store.home() / "notes.md"
+    with store.locked(store.home() / "notes.lock"):
+        notes = _notes()
+        if a.action == "add":
+            text = " ".join(" ".join(a.args).split())
+            if not text:
+                die('wb notes add "<what the user wants, in any project>"')
+            if len(text) > NOTE_CHARS:
+                die(f"{len(text)} chars (max {NOTE_CHARS}): one preference, in a sentence")
+            if len(notes) >= NOTES_MAX:
+                die(f"{NOTES_MAX} notes already: drop or merge one first (wb notes drop N)")
+            notes.append(text)
+        elif a.action == "drop":
+            try:
+                gone = sorted({int(n) for n in a.args}, reverse=True)
+                for n in gone:
+                    if not 1 <= n <= len(notes):
+                        raise ValueError
+            except ValueError:
+                die(f"wb notes drop N: a number from 1 to {len(notes)}" if notes else "no notes yet")
+            for n in gone:
+                del notes[n - 1]
+        if a.action:
+            path.parent.mkdir(parents=True, exist_ok=True)
+            tmp = path.with_name(f".notes.md.{os.getpid()}.tmp")
+            tmp.write_text("".join(f"- {n}\n" for n in notes))
+            os.replace(tmp, path)
+    if not notes:
+        print("no notes yet: wb notes add \"<what the user wants, in any project>\"")
+    for i, n in enumerate(notes, 1):
+        print(f"{i}. {n}")
+
+
 def cmd_lessons(a):
     """What tasks taught, waiting for Claude: write or patch a skill, or close it with why."""
     if a.action == "close":
@@ -1225,6 +1272,11 @@ def main(argv=None):
     s.add_argument("--all", action="store_true")
     s.add_argument("--message", "-m", default="", help="why it isn't a skill")
     s.set_defaults(f=cmd_lessons)
+    s = sub.add_parser("notes", help="what Claude learned about how the user wants delegation "
+                       "run, carried into every project")
+    s.add_argument("action", nargs="?", choices=["add", "drop"])
+    s.add_argument("args", nargs="*", help="the note (add), or its numbers (drop)")
+    s.set_defaults(f=cmd_notes)
     s = sub.add_parser("image", help="generate images with a local image model, for Claude to "
                        "look at and choose from")
     s.add_argument("prompt", nargs="?")

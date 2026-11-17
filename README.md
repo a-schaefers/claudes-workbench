@@ -427,6 +427,13 @@ Claude is halfway to the engine's own compaction (`WB_COMPACT_AT`, a percentage;
 so a long session sheds detail at a clean point instead of mid-review. After a compaction or
 `/clear`, a context block lists the open tasks from `wb status`.
 
+**What Claude learns about you.** Claude Code keeps its own memory per project, so what Claude
+learned about how you like delegation run in one repo would be gone in the next. When you tell it
+something that holds anywhere (your review bar, whether to merge, how much to ask you), it keeps it
+with `wb notes add "…"` (one sentence; at most 20 notes). Every session in delegate mode, in any
+project, is handed them in a `user-notes` block. `wb notes` lists them and `wb notes drop N`
+removes one that has stopped holding. A fact about one repo goes in its CLAUDE.md instead.
+
 ### Waking Claude, exactly once
 
 The runner and the `ask_reviewer` server append notifications (`review`, `stuck`, `failed`,
@@ -757,6 +764,7 @@ back) and the web chat stops listening in that session.
 | `wb scout [--done --notes] [--due] [--watch TEXT] [--unwatch N]` | the weekly model check's facts and its watch list |
 | `wb skill list\|show\|add\|patch\|scan\|import\|retire\|restore\|hand\|take …` | the skill library |
 | `wb lessons [--task] [--all]` / `wb lessons close <id> -m …` | what tasks taught, waiting to become skills |
+| `wb notes [add "…" \| drop N]` | what Claude learned about how you want delegation run, in any project |
 | `wb image "<prompt>" [--n] [--size] [--seed] [--ref] [--out] [--engine] [--list]` | candidates from a local image model, for Claude to look at and choose from |
 | `wb stats` | real results by model and size |
 | `wb chat [serve\|url\|reply\|log]` | the web chat |
@@ -771,6 +779,7 @@ back) and the web chat stops listening in that session.
   notify.jsonl                   notifications that need Claude, all tasks
   results.jsonl                  one row per closed task: what the router and skill records learn from
   lessons.jsonl                  what each task taught, open until Claude writes it into a skill or closes it
+  notes.md                       wb notes: how you want delegation run, handed to every delegate-mode session
   imports/                       skills fetched from outside, waiting for Claude to read them
   gpu.lock  gpu.json  gpu.admit  held by each running task (shared when models fit together); who holds it
   scout.json  watch.json         the weekly model check: when it was done, the watch list

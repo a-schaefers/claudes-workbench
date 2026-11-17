@@ -129,7 +129,7 @@ what either says (a command, a flag, a default, a guard, a file) updates it in t
 ## State and config
 Everything is plain files under `~/.local/state/workbench` (`$WB_HOME`):
 ```
-notify.jsonl  results.jsonl  lessons.jsonl  gpu.lock gpu.json gpu.admit  scout.json  watch.json  speed.json  images/<when>/
+notify.jsonl  results.jsonl  lessons.jsonl  notes.md  gpu.lock gpu.json gpu.admit  scout.json  watch.json  speed.json  images/<when>/
 imports/<source>/  skills fetched by `wb skill import`, for Claude to read
 chat/          messages.jsonl receipts.jsonl listener.json
 tasks/<name>/  task.json status.json events.jsonl opencode.json HANDBOOK.md context.md bin/git
@@ -171,7 +171,9 @@ Tests only: `WB_OPENCODE_BIN` (a fake opencode), `WB_FAKE_MODELS` (no model serv
 - Delegate mode is `chat.delegating`: on from /delegate (`skill.prompt`, with or without a task,
   which also opens the pane) or a delegating `wb` command, off at either quit command (which
   closes the pane). While on, `prompt.context` adds the `delegate-mode` block (the mode lasts until
-  a quit; the skill's SKILL.md path) and an idle status line reads `⚒ wb · delegate mode`.
+  a quit; the skill's SKILL.md path) and the `user-notes` block (`$WB_HOME/notes.md`, from
+  `wb notes`: how the user wants delegation run, in any project, since Claude Code's own memory
+  is per project), and an idle status line reads `⚒ wb · delegate mode`.
 - A slash command may not start a turn itself: it pushes onto `mem.queued`, which the next poll
   submits.
 - Compaction: `session.compact` adds KEEP_ON_COMPACT whenever tasks are open; at a task boundary

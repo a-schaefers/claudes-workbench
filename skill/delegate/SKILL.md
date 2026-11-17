@@ -393,6 +393,12 @@ off); any compaction keeps that state, and after a compaction or `/clear` a `wor
 block lists the open tasks. So don't carry diffs or reports forward: `wb status` and
 `wb report <name>` bring them back. Between unrelated jobs, tell the user `/clear` is safe.
 
+**What you learn about the user.** When the user tells you how they want delegation run (a
+review bar, how much to ask them, what to merge, a style they always want), and it would hold in
+any project, `wb notes add "<it, in one sentence>"`. Your own memory stays in one project; these
+notes come back in every session in delegate mode (a `user-notes` block). A fact about one repo
+goes in that repo's CLAUDE.md instead. Drop a note that has stopped holding (`wb notes drop N`).
+
 ## 6. Finish
 - Approved: `wb accept <name> -m "<conventional commit subject>"` commits on `delegate/<name>`
   with the task and OpenCode session recorded. Add `--merge` only if the user passed `--merge` or

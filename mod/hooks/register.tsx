@@ -250,6 +250,13 @@ const MODE_NOTE = (skill: string) =>
   `skill's "Planning work you will hand off"). If that procedure is not in your context, read ` +
   `${skill} first.`
 
+// What Claude learned about how this user wants delegation run (`wb notes`), in any project:
+// Claude Code's own memory is per project, so these come back wherever delegate mode is on.
+const NOTES_NOTE = (notes: string) =>
+  'How this user wants delegation run, learned across their projects (`wb notes`; ' +
+  '`wb notes add "…"` when they tell you something that holds in any repo, `wb notes drop N` ' +
+  `when one no longer does):\n${notes}`
+
 const QUIT = 'delegate-quit'
 const HAND_BACK = 'delegate-quit-and-hand-back-claude'
 const QUIT_NOTE = (out: string) =>
@@ -742,6 +749,8 @@ export const register: Register = (on, options) => {
     const away = st.webAt && (await $.clock.now()) - st.webAt < AWAY_MS
     const blocks = [...r.blocks]
     if (st.delegating) blocks.push({ name: 'delegate-mode', text: MODE_NOTE(mem.skill) })
+    const notes = st.delegating ? (await $.fs.read(`${mem.root}/notes.md`).catch(() => '')).trim() : ''
+    if (notes) blocks.push({ name: 'user-notes', text: NOTES_NOTE(notes) })
     if (away) blocks.push({
       name: 'web-chat',
       text: 'The user is away from the terminal and last wrote from the web chat. Tell them ' +

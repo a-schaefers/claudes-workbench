@@ -471,12 +471,18 @@ test('/delegate alone turns delegate mode on for the session: the pane opens, an
   // a compacted or cleared conversation is told the mode is on, and where the skill is
   const block = (await $.prompt.context({ blocks: [] })).blocks.find((b: any) => b.name === 'delegate-mode')
   expect(block?.text).toContain('/home/u/.claude/skills/delegate/SKILL.md')
+  // what Claude learned about the user, in any project, comes with the mode
+  expect((await $.prompt.context({ blocks: [] })).blocks.map((b: any) => b.name)).not.toContain('user-notes')
+  files['/wb/notes.md'] = '- Review strictly: reject any diff without tests\n'
+  const notes = (await $.prompt.context({ blocks: [] })).blocks.find((b: any) => b.name === 'user-notes')
+  expect(notes?.text).toContain('reject any diff without tests')
 
   await $.command.run({ command: 'delegate-quit', args: '' })
   await clock.advance(2000)
   expect(panes()).toEqual(['open workbench', 'close workbench'])
   expect(status()).toBe('status ')
   expect((await $.prompt.context({ blocks: [] })).blocks.map((b: any) => b.name)).not.toContain('delegate-mode')
+  expect((await $.prompt.context({ blocks: [] })).blocks.map((b: any) => b.name)).not.toContain('user-notes')
 })
 
 test('the bubble wraps its words into lines that fit, never cutting a line short', () => {

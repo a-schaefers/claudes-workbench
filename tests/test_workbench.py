@@ -1040,6 +1040,22 @@ class Routing(Base):
         self.assertIn("provider", cfg)                # the rest of the config is kept
 
 
+class Notes(Base):
+    def test_notes_about_the_user_are_kept_short_and_numbered(self):
+        self.assertIn("no notes yet", run_wb("notes"))
+        run_wb("notes", "add", "Review strictly:", "reject a diff without tests")
+        out = run_wb("notes", "add", "Never merge without asking")
+        self.assertEqual(out.splitlines(), ["1. Review strictly: reject a diff without tests",
+                                            "2. Never merge without asking"])
+        self.assertEqual((store.home() / "notes.md").read_text(),     # what the mod reads
+                         "- Review strictly: reject a diff without tests\n- Never merge without asking\n")
+        with self.assertRaises(SystemExit):
+            run_wb("notes", "add", "x" * 301)
+        with self.assertRaises(SystemExit):
+            run_wb("notes", "drop", "3")
+        self.assertEqual(run_wb("notes", "drop", "1"), "1. Never merge without asking\n")
+
+
 class Projects(Base):
     """wb init, and wb start's demand for a CLAUDE.md."""
     def git(self, d, *a):
