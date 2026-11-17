@@ -1,14 +1,30 @@
 [Unit]
 Description=workbench web chat (wb chat serve): reach Claude's /delegate session from the browser
-After=network-online.target
-Wants=network-online.target
+# No start limit: retrying is what brings the chat up when a bound address arrives late (Wi-Fi,
+# DHCP, a VPN) or the port is briefly held, since a user manager has no network-online.target. A
+# start limit gave up for good after five tries (the 0.90 review); the backoff below replaces it.
+StartLimitIntervalSec=0
 
 [Service]
 # localhost, or the addresses in ~/.config/workbench/chat.json (`bind`). The install's link
 # (README): bin/wb finds the package from its real path, wherever the clone is.
+# bin/wb runs `/usr/bin/env python3` with the user manager's PATH (/usr/local/bin:/usr/bin), not
+# your shell's, and without the WB_* variables you export. If your Python 3.11+ comes from pyenv,
+# uv or conda, or you set WB_HOME or WB_CHAT_*: `systemctl --user edit wb-chat` and add
+#   [Service]
+#   Environment=PATH=/path/to/your/python/bin:/usr/local/bin:/usr/bin
+#   Environment=WB_HOME=...
 ExecStart=%h/.local/bin/wb chat serve
 Restart=always
+# The delay grows from 10 s to 5 min (systemd 254+; older systemd ignores these two lines and
+# retries every 10 s). Not exit 75: chat.py exits 75 to be restarted when tailscale comes up.
 RestartSec=10
+RestartSteps=6
+RestartMaxDelaySec=300
+# bin/wb's guards (a python3 older than 3.11 on systemd's PATH, native Windows) exit 78
+# (EX_CONFIG): a broken install, which no retry fixes, so the unit stops at once (the 2026-11-16
+# audit). `systemctl --user restart wb-chat` once it's fixed.
+RestartPreventExitStatus=78
 
 [Install]
 WantedBy=default.target

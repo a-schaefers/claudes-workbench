@@ -87,7 +87,10 @@ def score(m: models.Model, size: str, state: dict | None = None, stack=()) -> Sc
     state = state or models.status(m)
     real = [r for r in store.results() if r.get("model") == m.id and r.get("size") == size
             and tuning.judged(r)]
-    s = Score(model=m, state=state, weights=models.weights(m), stack=tuple(stack))
+    # a model that can't run isn't weighed: its server was just found down, and asking it again
+    # cost seconds per model on a sleeping LAN box (the 2026-11-16 audit)
+    s = Score(model=m, state=state, stack=tuple(stack),
+              weights=models.weights(m) if state["available"] or m.extra.get("weights_gb") else 0)
     s.tries = len(real)
     s.wins = sum(r.get("outcome") == "accepted" for r in real)
     if stack:
@@ -138,7 +141,7 @@ def rank(size: str, stack=()) -> list[Score]:
     scores = [score(m, size, stack=stack) for m in models.discover().values() if allowed(m, size)]
     budget = models.gpu_budget() if scores else None
     for s in scores:
-        s.fits = fits(s.model, budget)
+        s.fits = fits(s.model, budget) if s.state["available"] else None
     usable = [s for s in scores if s.state["available"]]
     best = max((s.quality for s in usable), default=0)
     close = sorted((s for s in usable if s.quality >= best - QUALITY_MARGIN), key=_guess(size))
@@ -152,9 +155,14 @@ def choose(size: str, stack=()) -> tuple[Score | None, str]:
     ranked = rank(size, stack)
     top = ranked[0] if ranked and ranked[0].state["available"] else None
     if top is None:
-        return None, "no local model can run: " + "; ".join(
-            f"{s.model.id}: {s.state['why']}" for s in ranked) if ranked else \
-            "no local models in opencode.json"
+        if ranked:
+            return None, "no local model can run: " + "; ".join(
+                f"{s.model.id}: {s.state['why']}" + (f" ({fix})" if (fix := models.remedy(s.model, s.state)) else "")
+                for s in ranked)
+        if found := models.discover():  # all held back by the size policy, not missing (the 2026-11-16 audit)
+            return None, (f"no local model takes {size} tasks ({', '.join(found)}: limited by wb model "
+                          f"sizes; wb model sizes <id> trivial significant allows one, or pass --model)")
+        return None, "no local models: " + models.why_none()
     usable = [s for s in ranked if s.state["available"]]
     sizes = [s.weights for s in usable if s.fits is not False or top.fits is False]
     if len(usable) == 1:
@@ -198,7 +206,8 @@ def slice(m: models.Model) -> Slice:
     if fit:  # at least the biggest that went well
         files, lines = max(files, max(s["files"] for s in fit)), max(lines, max(s["lines"] for s in fit))
     if not steps:
-        return Slice(files, lines, f"a guess from its {basis}; no steps measured yet")
+        return Slice(files, lines, f"a guess from its {basis}; no steps measured yet" if window
+                     else "a guess, its window unknown; no steps measured yet")  # not "from its window unknown" (the 0.90 review)
     return Slice(files, lines, f"{basis}; {len(fit)} of {len(steps)} measured steps went well, "
                  f"{len(over)} badly")
 
@@ -229,15 +238,18 @@ def _speed_path():
 
 def record_speed(model_id: str, messages: list[dict]) -> None:
     """Add a session's measured speeds to speed.json: writing (output and reasoning tokens over
-    the time from first token to done) and reading (new input tokens over the time to first token)."""
+    the time from first token to done) and reading (new input tokens over the time to first token).
+    A request cut short (a nudge, a stop) still says how fast it read: on a slow machine the
+    first request is often the one interrupted, and the reading was never learned (the
+    2026-11-16 audit)."""
     write, read = [], []
     for msg in messages:
         t, tk = msg.get("time") or {}, msg.get("tokens") or {}
         made, first, done = t.get("created"), t.get("firstToken"), t.get("completed")
-        if msg.get("type") != "assistant" or not (made and first and done):
+        if msg.get("type") != "assistant" or not (made and first):
             continue
         out = (tk.get("output") or 0) + (tk.get("reasoning") or 0)
-        if out >= 100 and done - first > 1000:
+        if done and out >= 100 and done - first > 1000:
             write.append(round(out / ((done - first) / 1000), 1))
         if (tk.get("input") or 0) >= 1000 and first - made > 500:
             read.append(round(tk["input"] / ((first - made) / 1000)))

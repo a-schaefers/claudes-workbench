@@ -9,9 +9,11 @@ Two sources, merged by time:
 """
 from __future__ import annotations
 
+import collections
 import difflib
 import json
 import os
+import re
 import subprocess
 import sys
 import time
@@ -32,6 +34,17 @@ class Entry:
     lines: list[tuple[str, str]]  # (style, text)
 
 
+# Control characters other than newline and tab, C1 included (U+009B is CSI). The agent's shell
+# output and messages reach the user's terminal through `wb watch`: an OSC 52 in a file it cats
+# can set the clipboard, others retitle the window or redraw lines (the 2026-11-16 audit).
+_CTRL = re.compile(r"[\x00-\x08\x0b-\x1f\x7f-\x9f]")
+
+
+def plain(text: str) -> str:
+    """Text from the session or the task's files, safe to print: controls shown as \\xNN."""
+    return _CTRL.sub(lambda m: f"\\x{ord(m.group()):02x}", text)
+
+
 class Painter:
     def __init__(self, color: bool):
         self.color = color
@@ -42,10 +55,27 @@ class Painter:
         return f"\033[{STYLE[style]}m{text}\033[0m"
 
 
+# --standalone, like `opencode run`: a private server on the shared session storage. Through the
+# background service an export needs its fixed port (49374), so another user's service there, or
+# one started with other XDG dirs, made every export fail and left the runner's context checks,
+# its speed learning and `wb watch` silently empty (the 2026-11-16 audit).
+_said: set[str] = set()
+
+
+def _complain(what: str, r: subprocess.CompletedProcess) -> None:
+    """A failing session command, said once per process on stderr (runner.log under the runner)."""
+    why = next(iter((r.stderr or "").strip().splitlines()), f"exit {r.returncode}")
+    if why not in _said:
+        _said.add(why)
+        print(f"opencode session {what} failed: {why[:200]}", file=sys.stderr, flush=True)
+
+
 def export(session: str) -> dict:
     try:
-        r = subprocess.run(opencode_bin() + ["session", "export", session], capture_output=True,
-                           text=True, timeout=30, cwd="/")
+        r = subprocess.run(opencode_bin() + ["session", "export", session, "--standalone"],
+                           capture_output=True, text=True, timeout=30, cwd="/")
+        if r.returncode:
+            _complain("export", r)
         return json.loads(r.stdout) if r.returncode == 0 and r.stdout.strip() else {}
     except (OSError, subprocess.TimeoutExpired, ValueError):  # a busy or broken store: nothing known
         return {}
@@ -57,11 +87,13 @@ def find_session(task: store.Task) -> str | None:
     if sid or not task.worktree.exists():
         return sid
     try:
-        r = subprocess.run(opencode_bin() + ["session", "list"], capture_output=True, text=True,
-                           cwd=task.worktree, env={**os.environ, "PWD": str(task.worktree)},
+        r = subprocess.run(opencode_bin() + ["session", "list", "--standalone"], capture_output=True,
+                           text=True, cwd=task.worktree, env={**os.environ, "PWD": str(task.worktree)},
                            timeout=30)
     except (OSError, subprocess.TimeoutExpired):
         return None
+    if r.returncode:
+        _complain("list", r)
     for line in r.stdout.splitlines():
         parts = line.split("\t")
         if len(parts) > 1 and parts[1] == f"wb: {task.name}":
@@ -300,7 +332,7 @@ def task_entries(task: store.Task) -> list[Entry]:
             out.append(Entry(ts, key, [("claude", f"■ Claude {r.get('text', '')}")]))
         elif kind == "interrupted":
             out.append(Entry(ts, key, [("bad", "■ the agent was interrupted")]))
-        elif kind in ("fresh", "full"):
+        elif kind in ("fresh", "full", "load"):
             out.append(Entry(ts, key, [("sys", f"■ {r.get('text', '')}")]))
         elif kind == "next_step":
             out.append(Entry(ts, key, [("ok", f"■ {r.get('text', '')}")]))
@@ -310,6 +342,8 @@ def task_entries(task: store.Task) -> list[Entry]:
             out.append(Entry(ts, key, [("bad", f"■ stopped: {r.get('text', '')}")]))
         elif kind == "error":
             out.append(Entry(ts, key, [("bad", f"■ error: {r.get('text', '')}")]))
+        elif kind == "gpu":  # a server wb can't stop, a model partly on the CPU: why rounds crawl
+            out.append(Entry(ts, key, [("bad", f"■ GPU: {r.get('text', '')}")]))
     return out
 
 
@@ -335,7 +369,8 @@ def activity(task: store.Task, data: dict, now: float | None = None) -> str | No
     phase = st.get("phase")
     last = st.get("last") or ""
     if phase == "queued":  # the runner says what it waits on, or what it loads
-        if last.startswith(("loading", "starting", "stopping", "unloading", "sharing")):
+        if last.startswith(("loading", "starting", "stopping", "unloading", "sharing", "waiting",
+                            "checking")):  # the base check said "Waiting for the GPU" (the 0.90 review)
             return f"{last[:1].upper()}{last[1:]}…"
         return "Waiting for the GPU…"
     if phase == "testing":
@@ -439,43 +474,65 @@ PHASE_LINE = {
 
 def header(task: store.Task, paint: Painter, data: dict | None = None) -> str:
     sp = task.spec
-    lines = [paint("head", f"task {task.name}") + f" · {model_line(task, data or {})}",
-             paint("out", f"  repo {sp.get('repo')} · branch {sp.get('branch')}"
-                   + (f" · tests `{sp['test_cmd']}`" if sp.get("test_cmd") else ""))]
+    lines = [paint("head", f"task {task.name}") + f" · {plain(model_line(task, data or {}))}",
+             paint("out", plain(f"  repo {sp.get('repo')} · branch {sp.get('branch')}"
+                                + (f" · tests `{sp['test_cmd']}`" if sp.get("test_cmd") else "")))]
     if sp.get("route"):
-        lines.append(paint("out", f"  routed: {sp['route']}"))
+        lines.append(paint("out", plain(f"  routed: {sp['route']}")))
     return "\n".join(lines)
 
 
+JSON_LINE_CHARS = 2000  # the pane cuts each line to this anyway (the mod's LINE_CHARS)
+
+
 def follow(task: store.Task, verbose: bool = False, once: bool = False, color: bool | None = None,
-           out=None, poll: float = 1.5, as_json: bool = False) -> None:
+           out=None, poll: float = 1.5, as_json: bool = False, last: int = 0) -> None:
     """Print the transcript, then (unless once) keep printing what's new until the task closes.
-    as_json writes one {"s": style, "t": text} per line, for the Claude Code pane to style."""
+    as_json writes one {"s": style, "t": text} per line, for the Claude Code pane to style, each
+    cut to JSON_LINE_CHARS, and with `last` only the newest `last` transcript lines (the meta,
+    activity, clock and phase lines always): the engine keeps only the first 4 MiB of the mod's
+    read, so a long task's newest lines were the ones lost (the 2026-11-16 audit)."""
     out = out or sys.stdout
     paint = Painter(out.isatty() if color is None else color)
+    held = collections.deque(maxlen=last) if as_json and last else None
     if as_json:
-        def emit(style, text):
-            print(json.dumps({"s": style, "t": text}, ensure_ascii=False), file=out, flush=True)
+        def emit(style, text, keep=False):
+            if len(text) > JSON_LINE_CHARS:
+                text = text[:JSON_LINE_CHARS - 1] + "…"
+            row = json.dumps({"s": style, "t": text}, ensure_ascii=False)
+            if held is not None and not keep:
+                held.append(row)
+            else:
+                print(row, file=out, flush=True)
     else:
         clear = "\r\033[K" if out.isatty() else ""  # over the activity row, redrawn after
-        def emit(style, text):
-            print(clear + paint(style, text), file=out, flush=True)
-    sid = find_session(task)
+        def emit(style, text):  # cleaned before the colours: those are ours
+            print(clear + paint(style, plain(text)), file=out, flush=True)
+    sid = first_sid = find_session(task)
     first = export(sid) if sid else {}
     if as_json:
-        emit("meta", model_line(task, first))
+        emit("meta", model_line(task, first), keep=True)
     else:
         print(header(task, paint, first), file=out, flush=True)
     seen: set[str] = set()
+    done: dict[str, list[Entry]] = {}  # earlier sessions are finished: export each once
     watcher = Watcher(task.dir)
     last_phase = None
     worktree = str(task.worktree)
     while True:
         sid = find_session(task)
-        data = export(sid) if sid else {}
+        # the first pass reuses the export just made: every `wb watch --json` (the pane's, every
+        # few seconds) ran two OpenCode exports where one does (the 2026-11-16 audit)
+        data = first if first is not None and sid == first_sid else export(sid) if sid else {}
+        first = None
         entries = task_entries(task) + session_entries(data, worktree, verbose)
         for old in task.status.get("sessions") or []:  # earlier sessions, before a fresh start
-            entries += session_entries(export(old), worktree, verbose)
+            if old not in done:
+                got = export(old)
+                if not got:
+                    continue  # a busy store: try again next time
+                done[old] = session_entries(got, worktree, verbose)
+            entries += done[old]
         for e in sorted((e for e in entries if e.key not in seen), key=lambda e: e.ts):
             seen.add(e.key)
             if e.key.endswith(":end") and e.key[:-4] + ":start" in seen:
@@ -486,19 +543,21 @@ def follow(task: store.Task, verbose: bool = False, once: bool = False, color: b
                 emit(style, text)
         phase = task.status.get("phase")
         if as_json:
+            while held:
+                print(held.popleft(), file=out, flush=True)
             now_line = activity(task, data)
             if now_line:
-                emit("activity", now_line)
-            emit("clock", clock_line(task, data=data))
+                emit("activity", now_line, keep=True)
+            emit("clock", clock_line(task, data=data), keep=True)
         elif out.isatty() and phase not in store.CLOSED:
             now_line = activity(task, data)
             spin = "✻✳✶✢·"[int(time.time() * 2) % 5]
-            row = (paint("claude", f"{spin} {now_line}") + "  " if now_line else "") \
+            row = (paint("claude", f"{spin} {plain(now_line)}") + "  " if now_line else "") \
                 + paint("out", clock_line(task, data=data) or "")
             print("\r\033[K" + row, end="", file=out, flush=True)
         if phase != last_phase and phase in PHASE_LINE and (last_phase is not None or once
                                                             or phase not in ("running",)):
-            emit(*PHASE_LINE[phase])
+            emit(*PHASE_LINE[phase], **({"keep": True} if as_json else {}))
         last_phase = phase
         if once or phase in store.CLOSED:
             return

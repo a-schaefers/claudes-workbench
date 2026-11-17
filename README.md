@@ -66,8 +66,13 @@ the bulk of the tokens, the reading and writing and test-running, happen on your
   `AGENTS.md`, the instructions every agent reads. The agents write code, run the everyday tools
   of the work, write only inside their own worktree (plus the temp directory and build caches),
   and use git only to read. That's enforced, not just asked: a git write, an edit to those files,
-  a command outside the everyday list or a write outside the worktree is refused. When a task
-  needs more, they ask Claude, and Claude grants it or does it.
+  a command outside the everyday list or a write outside the worktree is refused, by the kernel
+  on Linux with Landlock (`wb doctor` says whether yours has it). On macOS, and on Linux without
+  it, only the direct forms are refused (OpenCode's rules and the read-only git shim): a
+  guardrail there, not a wall. Two gaps, said plainly: the build caches and toolchain homes the
+  lane leaves writable (so builds work without asking) can hold programs your own tools run later,
+  outside it; and on WSL2 a Windows program runs outside it while interop is on (`wb doctor` says
+  how to turn that off). When a task needs more, they ask Claude, and Claude grants it or does it.
 - **Your repo stays yours.** Each agent works in its own git worktree, so your checkout is never
   touched, and nothing is committed (under your name, with no AI credit line) until Claude accepts
   it.
@@ -88,7 +93,8 @@ and it works.
 
 - **[Claude Code](https://claude.com/claude-code)** 2.1.287 or newer (the pane is a Claude Code
   mod), with a Claude subscription or an API key
-- **[OpenCode](https://opencode.ai)**, which runs the local models as coding agents
+- **[OpenCode](https://opencode.ai)** 2.x (checked against 2.3), which runs the local models as
+  coding agents
 - **A local model server**, usually [Ollama](https://ollama.com). No models yet? That's fine: the
   first time you use it, Claude looks at your hardware, recommends the best models it can run, and
   sets them up in OpenCode (it asks before downloading anything)
@@ -154,13 +160,13 @@ to read the diff.
 | `/delegate-pane` | open the pane: every delegated task, and the agent's work live |
 | `/delegate-models` | check now which local models suit your hardware best (it also happens weekly) |
 | `/delegate-update` | update Workbench now: `wb`, the skill and the pane (it checks weekly and tells you) |
-| `/delegate-quit` | leave delegate mode: every agent stops now, their work is kept for later |
-| `/delegate-quit-and-hand-back-claude` | leave delegate mode and have Claude finish the agents' tasks itself |
+| `/delegate-quit` | leave delegate mode: this session's agents stop now, their work is kept for later |
+| `/delegate-quit-and-hand-back-claude` | leave delegate mode and have Claude finish this session's agents' tasks itself |
 
 **Away from the computer?** `wb chat serve` runs a small web chat with the running Claude session,
 and `wb chat url` prints its private link (on Linux, `systemctl --user link
 "$PWD/systemd/wb-chat.service" && systemctl --user enable --now wb-chat`, run in the clone, keeps
-it running, and `systemctl --user restart wb-chat` after an upgrade; on macOS, a launchd agent running `~/.local/bin/wb chat serve` does). It's `http://localhost:1337`; to use it from your phone, reach your PC the way you
+it running, and `systemctl --user restart wb-chat` after an upgrade; it runs systemd's `python3`, so if yours comes from pyenv, uv or conda, the unit's comment says how to point it there; on macOS, a launchd agent running `~/.local/bin/wb chat serve` does). It's `http://localhost:1337`; to use it from your phone, reach your PC the way you
 normally do and change the host in the link. It serves only localhost until you say otherwise in
 `~/.config/workbench/chat.json`: `{"bind": ["localhost", "tailscale"]}` adds this machine's
 Tailscale address, `{"bind": ["0.0.0.0"]}` every interface (your LAN, a VPN), and

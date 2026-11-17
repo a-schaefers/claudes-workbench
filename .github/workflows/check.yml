@@ -1,6 +1,6 @@
 # Runs the whole suite on every push to main and every pull request: `python3 -m unittest`
 # (tests/test_docs.py included), then `claude plugin validate mod && claude plugin test mod`
-# against the Claude Code version the mod was last verified with. nightly.yml runs the same on
+# against the Claude Code version the mod was last verified with, on Python 3.11 (the floor). nightly.yml runs the same on
 # the newest Claude Code. The README shows both as badges.
 #
 # What a runner can't do skips, not passes: the RealOpenCode tests (no `opencode` on PATH) and the
@@ -37,7 +37,12 @@ jobs:
       - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
           node-version: 24
-      # Standard library only: the runner's own python3 (3.11+) is all the suite needs.
+      # Standard library only. The floor, 3.11, not the runner's newer python3: a 3.12+ API would
+      # pass on the developers' 3.14 and break 3.11 users (the 2026-11-16 audit). nightly.yml runs
+      # the runner's own python3, and macOS.
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
+        with:
+          python-version: '3.11'
       - run: python3 --version
       # The tests' repos carry their own identity; wb accept's commits in a worktree want one too.
       - run: |

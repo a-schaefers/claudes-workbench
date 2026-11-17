@@ -37,8 +37,10 @@ from its handbook and will ask (`ask_reviewer`) or say so in its summary when th
 of those; then you do it. Its hard limits: no sudo, git read-only (a `git` of workbench's own on
 its PATH; scratch repos under the temp directory, which tests make, stay writable), no `gh`, and
 no edits to CLAUDE.md, AGENTS.md or `.claude/`. The shell rules refuse the direct forms; behind
-them the kernel refuses root and writes to the repo's git, and no credential is in the agent's
-reach, so `gh` or a push gets no login. The rules stop mistakes, not a determined agent: the
+them, where `wb doctor` reports Landlock, the kernel refuses root and writes to the repo's git,
+and no credential is in the agent's reach, so `gh` or a push gets no login. Without Landlock
+(macOS, old kernels) only the rules hold: read the report's flagged files closely and check
+`git -C <repo> log` after a task. The rules stop mistakes, not a determined agent: the
 round report flags any of your files it changed anyway (through the shell). Talk to it like a teammate: answer its questions, send notes while
 it works, explain the why in feedback.
 
@@ -61,13 +63,16 @@ types /delegate again: each request is handled the way this skill says, until th
   and where this file is: read it again if its procedure is no longer in your context.
 - **Plans are handoff plans**, in plan mode or not: see "Planning work you will hand off" below.
 
-`wb` is the workbench CLI (`~/repos/workbench`, on PATH as `wb`; `wb --help`). Every command
+`wb` is the workbench CLI (on PATH as `wb`; `wb --help`). Its code, ARCHITECTURE.md included, is
+two directories above `readlink -f "$(command -v wb)"`. Every command
 prints a short report written for you — don't go digging in raw logs unless a report says to.
 
 ## 0. The project: git and CLAUDE.md are yours
 Every project you delegate in is a git repo with a CLAUDE.md that tells the truth, and you keep
 it that way; the agents never write either.
-- **New project**: `wb init <dir>` makes the repo (git's default branch, an initial commit). Never add a
+- **New project**: `wb init <dir>` makes the repo (git's default branch, an initial commit); `<dir>`
+  is the project's own directory, never ~. When it refuses likely secrets or installed directories,
+  write a `.gitignore` for them (ask the user about a secret it names) and run it again. Never add a
   remote or create a GitHub repo until the user gives the name and says private or public; you
   may ask once the project has a shape.
 - **CLAUDE.md**: before the first task, write it from what you know and what you read (what the
@@ -81,8 +86,11 @@ it that way; the agents never write either.
   changed that it describes? Leave it. It says what the project is, never what comes next: keep
   the plan and the next step in your own notes. An agent that loses its task takes up whatever
   CLAUDE.md says is next (seen: a compaction summary that recounted CLAUDE.md, and the agent
-  built its "Next:" line instead of its spec). `wb start` refuses a repo without one (`--no-claude-md`
-  only for throwaway repos).
+  built its "Next:" line instead of its spec). `wb start` refuses a repo without one (CLAUDE.md or
+  `.claude/CLAUDE.md`; `--no-claude-md` only for throwaway repos). It also refuses an unknown
+  `--base` and a repo with no git identity for the commits: fix those, don't work around them.
+- **Submodules** are not checked out in the agent's worktree (`wb start` says so): a step whose
+  build or tests need one is yours, or its acceptance command must not need it.
 
 ## Planning work you will hand off
 In delegate mode every plan you write is for agents weaker than you, who see only the spec you
@@ -99,8 +107,9 @@ if you can, and start nothing until the plan is approved; then write the first s
   constants, file formats. Settle them in the plan; agents rename what isn't pinned.
 - **Its acceptance command**, and the worked examples it tests, each number checked against
   every rule. A step whose done-ness you can't state as a command isn't ready to hand off.
-  `wb start` runs it once on the base, in the agent's lane, and prints what it saw: read that
-  before the agent's first round lands. A test that writes outside the lane or races under load
+  The runner runs it once on the base, in the agent's lane, before round 1: what it saw comes in
+  the first report, and a check-in at once when it already passes. Read it before you judge the
+  agent's work. A test that writes outside the lane or races under load
   fails there whatever the agent does, and the agent spends its rounds on failures it didn't
   cause (seen: `whoami` and /tmp probes); a command that already passes can't tell when the
   step is done. Either way, `wb discard` and start again with a better one. It should fail only for
@@ -132,6 +141,10 @@ A newly added model has no record, so the router won't pick it over one with a g
 give it its first few real tasks with `--model` (ones you'd review closely anyway).
 **No local model yet?** If `wb models` lists none that can run, do the model check below first:
 recommend models for this hardware and offer to set them up in OpenCode (ask before any download).
+`wb doctor` names each provider it skipped and why; one on another host that is the user's own
+server (WSL2's Windows host, a LAN box) needs their yes for `local: true`. With Ollama running and
+no provider, `wb model add ollama/<model>` writes the provider itself. Ollama cloud models
+(`:cloud`) run off this machine: never register one without the user's explicit yes.
 
 **Updating workbench.** The mod checks weekly and tells the user; `/delegate-update` is theirs.
 Asked to update it yourself: `wb update` (it refuses while tasks run; tell the user to restart
@@ -149,7 +162,10 @@ its size: a model that fits entirely in VRAM (or the GPU's share of unified memo
 one that spills into RAM, and on a big card the best is a larger model, a longer context, or both.
 The window sets the slice of every task (`slice:` in the report), so where the VRAM has room past
 the weights, raise the context Ollama serves (`OLLAMA_CONTEXT_LENGTH`, then `wb model add …
---context N`); `wb doctor` flags an entry whose context differs from what Ollama serves. Results first, then speed. Recommend briefly (keep / add / retire, with sizes and why), and
+--context N`); `wb model add` refuses an Ollama model while nothing says what context Ollama
+serves it, and a model on another server (LM Studio, llama.cpp, vLLM) without `--context N`, the
+window it was started with: ask the user if you don't know it. `wb doctor` flags an entry whose
+context differs from what Ollama serves, or that has none. Results first, then speed. Recommend briefly (keep / add / retire, with sizes and why), and
 only with a yes: `wb model add <provider/model> --pull` (background), `wb model sizes` for what it
 should take, `wb model retire <id> [--delete]`. Installed but unregistered models may belong to other tools: ask before touching
 them. When you set a model aside, `wb scout --watch "…"` records what would bring it back:
@@ -236,7 +252,7 @@ agent that needs it, and only to that one, so a growing library never crowds a s
 prompt. You are the only author. Agents may propose a lesson (a `Lesson:` line in their summary),
 but an agent writing its own skills would record its mistakes as rules, so you vet each one.
 
-**Lessons come to you.** `wb feedback`, `next`, `accept` and `discard` end with
+**Lessons come to you.** `wb feedback`, `next`, `resume`, `accept` and `discard` end with
 `lessons: N from this task` when the task taught something. That covers your numbered corrections,
 guard stops, its questions, a loaded skill that still needed review rounds, and the agent's own
 `Lesson:` lines. Run `wb lessons` then, while it's fresh. The ones seen in more than one task come
@@ -305,7 +321,8 @@ network setup) and rewrite it in this library's shape and voice. Then
 ## Images: you art-direct, a local model draws
 When the project needs an image (a sprite, an icon, a background, a README picture), and
 `wb image --list` shows a ready engine, make it locally instead of asking the user for one.
-Agents can't make images; one that needs an asset asks you, and you make it.
+Agents can't make images; one that needs an asset asks you: answer first (a placeholder now, the
+asset at review), and make it once the GPU is free.
 1. **Brief it like an art director.** Say what's in it, then the style, composition, palette and
    lighting, the size the project needs, and what to avoid. Name the use ("a 64x64 icon on
    a flat background") so the framing fits.
@@ -319,11 +336,14 @@ Agents can't make images; one that needs an asset asks you, and you make it.
    asset directory. For a sprite on a black background drawn additively, black is see-through
    and no alpha channel is needed.
 Mind the engine's `notes` in `wb image --list`: an image model's licence can restrict where and
-how its output may be used. A generation waits for the running tasks to finish, then has the
-GPU to itself: tasks started meanwhile wait for it.
+how its output may be used. A generation needs the GPU to itself: while a task holds it,
+`wb image` refuses and names it; `--wait` (Bash `run_in_background: true`) queues behind it.
+While it runs (or waits), `wb start` refuses a new task (exit 4) unless `--queue`, which waits
+behind it; feedback, next and resume queue behind it. A url engine is a server that keeps its GPU
+memory while it runs: ask the user to stop it before big coding tasks.
 
 **No ready engine? Offer to set one up; never set it up unasked.** This is an optional step, as
-ARCHITECTURE.md's Images section says. Read `wb scout` for the OS and GPU, then propose in one
+ARCHITECTURE.md's Images section (in the workbench code, above) says. Read `wb scout` for the OS and GPU, then propose in one
 message: a runtime that fits (stable-diffusion.cpp on Vulkan for AMD or Intel, CUDA for NVIDIA,
 Metal on macOS; built from its upstream source, with packages from the OS's own repositories),
 and an image model you've just checked. It must fit the VRAM without spilling, and its licence
@@ -340,10 +360,16 @@ wb start <kebab-name> --spec <file> --repo <repo> --size significant|trivial \
 It returns at once; a detached runner does the work. **Don't poll.** With the workbench mod loaded
 the session is woken by a `[workbench]` prompt when the task needs you (review, question, stuck,
 failed) — end your turn and wait for it. Without the mod, run `wb wait <name>` with Bash
-`run_in_background: true` and act on its notification. Failing tests go back to the agent on their
+`run_in_background: true` and act on its notification. If the context says wakes are off (the
+plugin's wake setting), none will come: tell the user it runs, and wait only if they ask.
+A session is woken only for its own tasks (those `wb start` ran in it, wherever; one started by
+hand, or one whose Claude Code process has exited, from its directory or a repo in it): start a task from the session that will review it. Failing tests go back to the agent on their
 own for `--auto-fix` rounds before you are woken; `wb log <name>` shows what it is doing.
 A model that reads prompts slowly, or one the runner must load first, can spend minutes before
 its first reply. That is normal, not stuck.
+**Exit 4: the GPU is taken** by another task (often another session's project) or `wb image`,
+which the model can't run beside. Don't wait silently: tell the user who holds it, then either
+do the step yourself or `--queue` it to start when the GPU is free (it may be hours).
 
 ## Driving a running task
 You are the driver, not a spectator. When something tells you the agent is heading the wrong way
@@ -352,12 +378,17 @@ You are the driver, not a spectator. When something tells you the agent is headi
   tests. For course corrections that can wait a step.
 - `wb steer <name> --now --text "…"`: interrupts it mid-step; the same session continues with
   your note first, marked high priority. For wrong files, a wrong approach, a runaway loop.
+  While its tests run or it waits for the GPU there is nothing to interrupt: the note waits, and
+  `wb steer` says so.
   The runner does this by itself once a round when the agent generates past its thinking
-  budget with no tool call (7 minutes; `--think-timeout` overrides),
-  and the check-in says so. A second nudge on one task means the spec is too big for one
-  step: split it, or name the first file to write.
-- `wb takeover <name>`: stops it and hands you the worktree. Finish by hand, then `wb accept`,
-  or hand it back with `wb feedback`. For when explaining would cost more than doing.
+  budget with no tool call (7 minutes from its first output; `--think-timeout` overrides),
+  and the check-in says so; a round that stalls again right after is stopped. Two nudges on one
+  task mean the spec is too big for one step: split it, or name the first file to write.
+- A note the runner never delivered (the round stopped first) is in the stuck report. `wb resume`
+  carries it; `wb feedback` and `wb next` drop it and say so: put it in the feedback if it still
+  matters.
+- `wb takeover <name>`: stops it and hands you the worktree. Finish by hand, leaving it
+  uncommitted (`wb accept` commits it), then `wb accept`, or hand it back with `wb feedback`. For when explaining would cost more than doing.
 - **Commands it asks for.** The agent's shell runs the everyday tools of software work freely;
   anything else, and adding a package, is refused, and the agent asks you (a `PERMISSION`
   question). Lean to yes: their work is hard enough. `wb allow <name> "<pattern>"` (e.g.
@@ -365,15 +396,27 @@ You are the driver, not a spectator. When something tells you the agent is headi
   with the rule; `--always` keeps it for every task (`~/.config/workbench/commands.json`). Say no
   (`wb answer`, with another way) to what reaches outside the task: deploys, other machines,
   system services, the user's data, a dependency the project shouldn't take on. Knowing a task
-  needs something up front, `wb start … --allow "<pattern>"`. sudo, git writes and `gh` stay
-  refused whatever you allow.
+  needs something up front, `wb start … --allow "<pattern>"`. sudo, git writes, git by its full
+  path and `gh` stay refused whatever you allow. A plain `npx <pkg>` runs only what the project
+  installed; to let it fetch one, allow `npx --yes <pkg>`.
 - **Directories it asks for.** The agent writes only in its lane (worktree, temp, build caches)
   and its file tools keep to it; a request names a `path`. `wb allow <name> --path <dir>` grants
   read and write (`--always`, `wb start --allow-path`). Grant a directory the task's output
   really belongs in (a sibling asset folder, a cache a toolchain wants); never your home, the
-  user's checkout or another project: there, take the file yourself or say no.
+  user's checkout or another project: there, take the file yourself or say no. `wb allow --path`
+  refuses a path through a link (it names the target: allow that only if it is what the task
+  needs; the agent can plant links in its lane), a place inside credentials or workbench's own
+  state and config, and one in the task's own repo (the user's checkout: take that file yourself).
+  A toolchain the build wants installed (a Python uv must download, a
+  `rust-toolchain.toml` toolchain, `uv tool install`, `cargo install`) is refused there: install
+  it yourself rather than grant `~/.local/share/uv` or `~/.rustup/toolchains`, whose programs
+  run later outside the lane. A test driving a program through a pseudo-terminal (pexpect, Python's pty,
+  `script`, node-pty) fails in the lane ("out of pty devices", "failed to create
+  pseudo-terminal"): grant `/dev/pts` (`wb start --allow-path /dev/pts`), which also opens the
+  user's other terminals to the agent.
 - `wb stop <name>`: just stop it. `wb resume <name>` continues it in a fresh session (not a
-  review round), e.g. after fixing workbench under it.
+  review round), e.g. after fixing workbench under it. A task failed with "the runner died" (a
+  reboot, a kill) or stuck with "stopped by a signal" resumes the same way.
 - A check-in saying the session "reached N% of its window before it changed a file" (or "had
   read N% before its first change": a fresh session would have little room after re-reading it):
   the step needs more reading than the window holds. Let it carry on; next time name fewer files to read,
@@ -382,13 +425,14 @@ Notes are instructions, like feedback: concrete and short.
 
 **The user's two commands.** Only these, never words in a message, stop the delegation and end
 delegate mode; the mod runs them, closes the pane and tells you what it did:
-- **`/delegate-quit-and-hand-back-claude`**: take over. The agents are already stopped
-  (`wb takeover --all`). Leave delegate mode and finish the work yourself without pausing: review
+- **`/delegate-quit-and-hand-back-claude`**: take over. This session's agents are already stopped
+  (`wb takeover --all --repo <here> --session "$CLAUDE_CODE_SESSION_ID"`). Leave delegate mode and finish the work yourself without pausing: review
   what each agent left, complete it in its worktree to your standard, run the acceptance command,
   `wb accept`, then carry on with the rest of the request directly, without delegating.
-- **`/delegate-quit`**: stop. Everything delegated is already stopped (`wb stop --all`).
-  Work directly from now on. Don't finish, restart or clean up anything unless asked; worktrees
-  are kept.
+- **`/delegate-quit`**: stop. This session's delegated agents are already stopped (`wb stop
+  --all --repo <here> --session "$CLAUDE_CODE_SESSION_ID"`). Work directly from now on. Don't finish, restart or clean up anything
+  unless asked; worktrees are kept.
+Tasks listed as left alone belong to another live session: leave them unless asked.
 Without the mod, the user may ask for the same in words; run those commands then.
 
 **The web chat.** While delegate mode is on in a session, the user can reach you from their phone
@@ -447,12 +491,15 @@ If a "trivial" task fails twice, it wasn't trivial: discard and restart it with 
 ## Context, on both sides
 **The agent's.** Rounds of a task continue one OpenCode session, so the agent keeps what it read.
 When that session passes its handover point (60% of the window until `wb tune` learns better
-for that model), the runner hands the task to a fresh session
+for that model; less on windows under ~32K, and a model served under 16K can't take tasks), the runner hands the task to a fresh session
 at once, mid-round if need be: the task, the work so far (the diff), the agent's last words and
-the new instructions. OpenCode's own compaction (the model summarising itself, which can lose the
+the new instructions. A round that hands over 5 times is stopped as stuck (the step is too big for
+the window: split it), and from the second handover each one is a check-in. OpenCode's own compaction (the model summarising itself, which can lose the
 task) is only a backstop past that. Reports show `agent context: …` so you see it coming. A
 check-in or report that says `NOTE: the spec doesn't name …` lists files outside the spec: drift
-until you've looked, so read them and steer (`--now`) if the agent left its task. Override per round:
+until you've looked, so read them and steer (`--now`) if the agent left its task. `NOTE: <dir>: a
+git repository of its own` is a nested repo the diff leaves out and `wb accept` refuses: have its
+`.git` removed, or gitignore it. Override per round:
 `wb feedback --fresh` when the agent is confused, stuck on a wrong idea or working from stale
 reads; `--keep-context` when it needs what it read and the window still has room.
 Follow-up work in the same area goes to the same agent: `wb next <name> --spec <file> -m "<subject

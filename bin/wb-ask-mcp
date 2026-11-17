@@ -3,6 +3,19 @@
 import os
 import sys
 
+# Before the package is imported, so an unsupported interpreter gets a sentence, not a traceback
+# from deep inside it (the 2026-11-16 audit: 3.10's re rejects scan.py, 3.9 cli.py's annotations;
+# native Windows has no fcntl). Keep these lines parseable by old Pythons. Exit 78 (EX_CONFIG),
+# as bin/wb does (the 0.90 review).
+if sys.platform == "win32":
+    sys.stderr.write("wb-ask-mcp: native Windows is not supported (no POSIX file locks or "
+                     "signals); run Claude Code and wb inside WSL2\n")
+    sys.exit(78)
+if sys.version_info < (3, 11):
+    sys.stderr.write("wb-ask-mcp: needs Python 3.11 or newer; %s is %s. Put a newer python3 first "
+                     "on PATH.\n" % (sys.executable, sys.version.split()[0]))
+    sys.exit(78)
+
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.realpath(__file__))))
 
 from workbench.ask_mcp import main  # noqa: E402

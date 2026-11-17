@@ -6,8 +6,9 @@ Claude Code mod wakes Claude when a task needs it. Everything talks through plai
 
 The short name, `workbench`, stays on everything inside: the package, the plugin
 (`workbench@workbench`), the state and config directories, and the clone path `~/repos/workbench`
-the README suggests (nothing depends on it: `bin/wb` finds the package from its real path, and
-the systemd unit runs `~/.local/bin/wb`).
+ARCHITECTURE.md's *Installing* suggests for developing (users install from the marketplace; nothing
+depends on it: `bin/wb` finds the package from its real path, and the systemd unit runs
+`~/.local/bin/wb`).
 
 ## Keeping the docs true
 README.md is for people and stays simple: the pitch, a quickstart, then a pointer. ARCHITECTURE.md
@@ -34,7 +35,7 @@ the drift this rule exists to stop.
 
 ## Commands
 ```sh
-python3 -m unittest                                   # from the repo root: ~155 tests, about two minutes
+python3 -m unittest                                   # from the repo root: the whole suite, about two minutes
 python3 -m unittest tests.test_workbench.Context      # one class (or .Context.test_…); -k handover by name
 claude plugin validate mod && claude plugin test mod  # the mod: the $ rule, then mod/hooks/register.test.tsx
 PLAYWRIGHT=…/node_modules/playwright node tests/e2e_chat.mjs   # the web chat in WebKit and Chromium
@@ -71,24 +72,35 @@ dependencies. No packaging: it runs from the clone.
   `_ack_all`.
 - `runner.py`: the detached per-task driver: the GPU lease, rounds, guards, the think nudge,
   steering, tests and auto-fix, the report, handovers to a fresh session (`fresh_reason`,
-  `handoff_prompt`, `HANDOVER_ROOM`), the config layer and the agent's environment (credentials
-  dropped: `SECRET_ENV`; `commands.json` `env` passes named ones through).
+  `handoff_prompt`, `HANDOVER_ROOM`), the config layer (the user's MCP servers off, the rules
+  again as `OPENCODE_CONFIG_CONTENT`: `rules_env`) and the agent's environment (credentials
+  dropped: `SECRET_ENV`, `USERINFO`, but `ENV_KEEP`; `commands.json` `env` passes named ones
+  through).
 - `events.py`: OpenCode event normalization and the stuck detector.
-- `ask_mcp.py` (+ `bin/wb-ask-mcp`): the `ask_reviewer` MCP server; questions and permission
-  requests, budgeted.
+- `ask_mcp.py` (+ `bin/wb-ask-mcp`): the `ask_reviewer` MCP server, in the lane, writing only
+  `ask/`; and the runner's side (`relay`: checks each ask file, counts the budgets in status
+  `asks`, raises the notice, keeps the phase `asking`), `write_answer` (never through a link).
 - `context.py`: what the agent knows and may do: instructions, denied tools and skills, the shell
   allowlist (`shell_rules`: `ALLOWED_COMMANDS`, `PROJECT_BINS`, `ASK_FIRST`, `INSTALL_LISTED`,
-  `DENIED_SHELL` with its wrappers), the lane (`writable`, `readable`, `SECRETS`, `external_rules`),
+  `DENIED_SHELL` with its wrappers, `denied_shell()` adding git by path), the lane (`writable`:
+  the worktree and `ask/`, not the rest of the task directory; `readable`, `SECRETS`,
+  `private_paths` (workbench's own state and config), `lane_refusal`, `tool_roots`, on WSL
+  `windows_drives`/`agent_path`/`interop_gap` (Windows programs run outside the lane),
+  `runtime_dir`, `unix_paths`, `external_rules`), `commands_conf` (commands.json, checked),
   `rules_dir` (the agent's rules, outside its lane), `grants`/`grant` (what Claude allowed the
   task: `rules/<task>/grants.json`).
-- `lane.py`: Landlock: the runner starts OpenCode through it (`wrap`); restricts writes and reads,
-  sets no-new-privileges, execs. Fails closed: Landlock present but refusing the lane exits 126
-  (`workbench lane: the kernel refused the lane`); without Landlock (or off `lane.UNIFIED`'s
-  architectures) it runs unrestricted and `wb doctor` says so. Standard library only.
+- `lane.py`: Landlock: the runner starts OpenCode through it (`wrap`); restricts writes, reads,
+  connecting to outside UNIX sockets (ABI 9) and signals (ABI 6), sets no-new-privileges (on any
+  Linux), execs. Fails closed: Landlock present but refusing the lane exits 126
+  (`workbench lane: the kernel refused the lane`); a command it can't exec, `workbench lane: can't
+  run <cmd> (<reason>)`, 127 when not found, else 126 (outside the read lane: Permission denied);
+  without Landlock (or off `lane.UNIFIED`'s architectures) it runs unrestricted and `wb doctor`
+  says so. Standard library only.
 - `gitguard.py`: the read-only `git` shim first on the agent's PATH. Standard library only: it's
   imported on every git call.
 - `gitops.py`: worktrees and branches, the review diff (intent-to-add, so new files show),
-  `mark` (has the worktree changed), commits, the repo's stack.
+  `mark` (has the worktree changed), commits (no hooks), the repo's stack. Calls on a task's
+  worktree are pinned to its recorded git dir (`rules/<task>/gitdir.json`).
 - `results.py`: results.jsonl rows (`record`), each step's size and fit (`step`), `wb stats`,
   Claude's spec record (`spec_gap_line`). Read rows through `store.results()`, which leaves out
   trials.
@@ -102,7 +114,7 @@ dependencies. No packaging: it runs from the clone.
 - `skills.py`: Claude's skill library for the agents (its own git repo): checks, add/patch/
   retire/restore, import, suggestions for a spec, the outcome record. `scan.py`: the security scan
   every skill passes (ported from Hermes Agent's skills guard: keep its MIT notice).
-- `lessons.py`: what each task taught, gathered into lessons.jsonl by feedback/next/accept/discard.
+- `lessons.py`: what each task taught, gathered into lessons.jsonl by feedback/next/resume/accept/discard.
 - `transcript.py`: `wb watch` (the session export merged with the task's events; `--json` feeds
   the mod's pane). `transcript.export` is also the runner's view of the session.
 - `watch.py`: waiting without polling: inotify (ctypes) and pidfd, with a stat fallback.
@@ -120,36 +132,48 @@ dependencies. No packaging: it runs from the clone.
   `test_workflows.py` (the merge gate),
   `fake_opencode.py`, `capture_llm.py`, `e2e_chat.mjs`.
 - `.github/`: CI (`workflows/check.yml`, the required check, on each push and pull request;
-  `nightly.yml` on the newest Claude Code; README badges show both), `owner-merge.yml` (approves
+  Python 3.11, the floor; `nightly.yml` on the newest Claude Code, plus macOS; README badges show both), `owner-merge.yml` (approves
   the owner's pull requests only), `rulesets/main.json`, dependabot for the actions' pins.
 - `scripts/`: `ship.sh` (the road to main), `github-settings.sh check|apply` (the repo's settings).
 - `systemd/wb-chat.service`: keeps the web chat up. `docs/`: the README's images (a replaced image
   gets a new file name, for GitHub's cache).
 
-Runs on Linux, WSL2 and macOS. Native Windows doesn't (fcntl, `os.killpg`, POSIX signals). Off
+Runs on Linux, WSL2 and macOS. Native Windows doesn't (fcntl, `os.killpg`, POSIX signals): the
+launchers refuse it, and Python before 3.11, before importing the package. Off
 Linux there is no Landlock and watch.py falls back to timed waits.
 
 ## How a task runs
-1. `wb start` refuses a repo without a committed CLAUDE.md (`--no-claude-md`), asks the router
-   for a model (unless `--model`), makes branch `delegate/<task>` in a fresh worktree, writes
-   round 1's prompt (the spec plus `PROTOCOL`), spawns the runner and returns.
+1. `wb start` refuses a repo without a committed CLAUDE.md or `.claude/CLAUDE.md`
+   (`--no-claude-md`), asks the router for a model (unless `--model`), refuses (exit 4) when the
+   GPU's holders leave its model no room (`--queue` waits behind them), makes branch
+   `delegate/<task>` in a fresh worktree, writes round 1's prompt (the spec plus `PROTOCOL`),
+   spawns the runner and returns at once. The runner runs `--test` once on the untouched base
+   first (the base check; the first report says what).
 2. The runner takes the GPU (`GpuLease`: shared beside other tasks when the models fit, else
-   alone), makes the model resident, and runs `opencode run --standalone --auto --format json` in
+   alone), makes the model resident (again before every round), and runs `opencode run
+   --standalone --auto --format json … -- <prompt>` in
    the worktree, through `lane.wrap`, with the config layer `rules/<task>/opencode.json`. Events
    go to `events.jsonl`; `status.json` is the live summary.
 3. Guards stop the agent (`stuck`): one call repeated 4 times, 6 tool errors in a row, 40 calls
-   without an edit, silence past `--silence-timeout`, a round past `--round-timeout`. Past the
-   think budget (`--think-timeout`) without acting it gets a nudge. Limits stretch for a model
+   without an edit, silence past `--silence-timeout`, a round past `--round-timeout`, more than
+   `HANDOVER_MAX` handovers in a round. Past the think budget (`--think-timeout`, from the round's
+   first output, paused while OpenCode waits on a background job) it gets a nudge; the round after
+   it that stalls again is stopped. The guards' clocks are monotonic. Limits stretch for a model
    measured slow (`router.budgets`, written into task.json at start). `wb steer` queues a note;
-   `--now` interrupts. A round after a nudge that again does nothing is stopped.
+   `--now` interrupts. Notes a runner never delivered: `wb resume` carries them, feedback and
+   next drop them and say so.
 4. After a clean round the runner runs `--test`, in the agent's lane and environment; failures go back to the agent up to `--auto-fix`
    times without waking Claude (`--test-timeout`, 900 s). A session that reaches the handover point (`fresh_at`, tuned per
    model) after changing a file, with room left for a successor, is stopped mid-round and a fresh
    session gets the task, the diff and its last words; between rounds, a session over the point
    or compacted is replaced. OpenCode's own compaction is set just past it, as a backstop.
-5. The runner writes the round report and a `review`/`stuck`/`failed` notice and exits.
-   `ask_reviewer` raises a `question` at any time and blocks until `wb answer` or `wb allow`.
-6. The mod (or `wb wait`) delivers each notice once, while still true; acting on a task
+5. The runner writes the round report and a `review`/`stuck`/`failed` notice and exits; nothing
+   the agent or the tests started outlives a round (`runner.sweep`). A runner that died without a
+   word is failed by `cli.reap` (status, wait, events and the acting commands call it).
+   `ask_reviewer` writes a question at any time and blocks until `wb answer` or `wb allow`; the
+   runner checks it and raises the `question` (nothing the agent writes is trusted outside it).
+6. The mod (or `wb wait`) delivers each notice once, while still true, in the session the task
+   is `mine` to (task.json `cwd`/`repo` and the session's directory); acting on a task
    acknowledges it (`_ack_all`, which stops short of news still true).
 7. `wb accept` commits with provenance trailers (no AI co-author line), optionally merging;
    `wb next` commits a step and gives the same agent the next; `wb feedback` sends another round;
@@ -160,10 +184,12 @@ Linux there is no Landlock and watch.py falls back to timed waits.
 Plain files under `$WB_HOME` (`~/.local/state/workbench`); the full tree and every format are in
 ARCHITECTURE.md (*Files and formats*):
 ```
-notify.jsonl results.jsonl lessons.jsonl notes.md tuning.json speed.json gpu.{lock,json,admit}
+notify.jsonl results.jsonl lessons.jsonl notes.md tuning.json speed.json gpu.{lock,json,admit,load}
 scout.json update.json watch.json imports/ images/ chat/{messages,receipts}.jsonl chat/listener.json
-rules/<task>/  opencode.json HANDBOOK.md CLAUDE.md bin/git grants.json   (outside the agent's lane)
-tasks/<task>/  task.json status.json events.jsonl steer.jsonl acked context.md runner.log
+rules/<task>/  opencode.json HANDBOOK.md CLAUDE.md bin/git grants.json gitdir.json (no lane)
+locks/<task>.{runner,cmd,status,events,steer,grants}.lock   (store.task_lock: no lane reads them)
+tasks/<task>/  task.json status.json events.jsonl steer.jsonl acked context.md base-tests.txt runner.log
+               (the lane: worktree/, ask/)
                rounds/<n>/{prompt,instructions,summary}.md rounds/<n>/tests.txt ask/<id>.{json,answer} worktree/
 ```
 The skill library is `~/.local/share/workbench/skills` (`$WB_SKILLS`). `~/.config/workbench/`
@@ -171,17 +197,25 @@ holds `models.json` (what OpenCode can't say: `start`/`stop`, `skip`, `sizes`, `
 `weights_gb`, `label`, `engine`, `local`), `commands.json` (standing `allow` patterns, lane
 `paths`, and `env` names passed to the agent), `images.json`, `chat.json`, `chat-token`.
 
-A model is a candidate when its OpenCode provider's `baseURL` is on this machine (loopback,
-`localhost`, this host's name) or models.json marks the provider `local: true`. OpenCode's config
-is `$XDG_CONFIG_HOME/opencode/opencode.json` or `.jsonc`, read through `models.read_config` and
-written only when it has no comments. Ollama entries need `options.max_tokens` (Ollama ignores
-OpenCode's `max_completion_tokens`) and a `limit.context` matching what Ollama serves; `wb model
-add` writes both and `wb doctor` checks them.
+A model is a candidate when OpenCode loads its provider (`disabled_providers`/`enabled_providers`
+followed) and the provider's `baseURL` (`{env:}`/`{file:}` resolved) is on this machine (loopback,
+`localhost`, this host's name) or models.json marks the provider `local: true`. Not an Ollama
+cloud model (`:cloud`, `-cloud`, a tags row with `remote_host`) unless models.json marks that
+model's id `local: true`, nor an entry with `tool_call: false`. OpenCode's config is
+`$XDG_CONFIG_HOME/opencode/opencode.json` and `.jsonc`, layered in that order and merged by
+`models.read_config`; written only when one file holds it and it has no comments (through a
+symlink, keeping its mode; a refusal prints the change, never the config's keys). Probes to this
+machine skip any HTTP proxy. Ollama entries need `options.max_tokens` (Ollama ignores
+OpenCode's `max_completion_tokens`) and a `limit.context` matching what Ollama serves (never the
+trained length); every entry needs `limit.context` (a server other than Ollama: `wb model add
+--context N`); `wb model add` writes both and `wb doctor` checks them.
 
 Environment: `WB_HOME`, `WB_MODELS`, `WB_SKILLS`, `WB_IMAGES`, `WB_CHAT_TOKEN`, `WB_CHAT_CONFIG`,
-`WB_COMMANDS` (the paths above); `WB_OPENCODE_CONFIG` (OpenCode's config); `WB_COMPACT_AT` (the
+`WB_COMMANDS` (the paths above); `WB_OPENCODE_CONFIG` (OpenCode's config); these may be relative
+or start with `~` (`store.absolute_env` makes them absolute against wb's cwd); `WB_COMPACT_AT` (the
 mod's early compaction, a percentage, 0 off); `WB_BIN` (the `wb` the mod runs); `WB_TASK` (set
-for the ask server and the agent). Tests only: `WB_OPENCODE_BIN` (a command line, split with
+for the ask server and the agent); `CLAUDE_CODE_SESSION_ID` (Claude Code's: `wb start` records it,
+which session's task it is) and `CLAUDE_PID` (its process: once gone, the directory rule adopts the task). Tests only: `WB_OPENCODE_BIN` (a command line, split with
 `shlex`: the fake), `WB_FAKE_MODELS` (no model servers), `WB_FAKE_GPU_GB` (the fake GPU's size;
 unset: unknown, so no sharing).
 
@@ -203,7 +237,7 @@ unset: unknown, so no sharing).
   Test names read as sentences.
 - The mod keeps no state of its own that matters: it reads the task files. `$` may only be passed
   to functions declared at the top level of `register.tsx`, so `claude plugin validate` can follow
-  it. `$.state` atoms are tagged (`tasks-1`, `live-1`, `chat-2`): change the tag when the type
+  it. `$.state` atoms are tagged (`tasks-3`, `live-1`, `chat-2`, `sessions-1`): change the tag when the type
   changes. A slash command may not start a turn itself: it pushes onto `mem.queued`.
 - Skills for the agents: Claude's library (`wb skill`), handed per task, or a project's own
   `.claude/skills`, committed with it. The user's personal `~/.claude/skills` are denied to agents.
@@ -216,7 +250,13 @@ PATH and the lane; the rest is only imitated by the fake.
 - It resolves the project from `$PWD`, not from the cwd.
 - The 2.x config shape is `mcp.servers.<name>`, with `timeout.{startup,execution}`;
   `codemode: false` exposes a plain tool (listed as `workbench_ask_reviewer`).
-- `--standalone` servers inherit the env and share session storage with the background service.
+- `--standalone` servers inherit the env and share session storage with the background service;
+  `session export`/`list` use it too, so no workbench call needs the service's fixed port.
+- Project config (`opencode.json` in the worktree, `.opencode/`, or any directory above it) loads
+  after `OPENCODE_CONFIG` and its permissions come later, so it could lift every deny;
+  `OPENCODE_CONFIG_CONTENT` loads last of all (`OPENCODE_DISABLE_PROJECT_CONFIG` also drops
+  AGENTS.md and the project's skills). The user's global MCP servers merge in too, and one whose
+  entry says `"enabled": false` still starts: the layer swaps its command for `false`.
 - It loads AGENTS.md itself but never CLAUDE.md, which reaches it through `instructions`
   (absolute paths).
 - Skills come from `~/.claude/skills` and `.claude/skills`. A `disable-model-invocation` skill is
@@ -243,17 +283,25 @@ PATH and the lane; the rest is only imitated by the fake.
   carries (the between-rounds check). The live `step_finish` tokens (input + cache read + cache
   write + output) drive the mid-round check.
 - `--worktree` takes `=name`; the runner makes its own worktrees anyway.
+- `run` reads a message that starts with `-` as a flag (usage, exit 1): the prompt goes after `--`.
+- `run --format json` prints nothing while a tool runs or the model reads its prompt; a shell
+  command past 2 minutes goes to the background and the turn ends with a `background_wait` line.
 
 ## Troubleshooting
-- `wb doctor`: opencode and its config, git, each model's readiness, each Ollama entry's
-  `max_tokens` and context, the state directory, a real lane around a test write, `wb` on PATH,
-  the mod.
-- A model "can't run": `wb models` says why (server down, not pulled, no `start` command).
+- `wb doctor`: opencode (2.x) and its config files, git, each model's readiness (BAD when none
+  can run), skipped providers and why, an Ollama baseURL without `/v1`, a missing `limit.context`,
+  each Ollama entry's `max_tokens` and context, the state directory, the GPU budget and the devices
+  it counts, a real lane around a test write, `wb` on PATH, the `/delegate` link (and another
+  copy's), whether the mod is listed as installed.
+- A model "can't run": `wb models` says why (server down, not pulled, no `start` command), and
+  `wb start` adds the next step.
 - A task misbehaves: `wb log <t> -v`, `wb watch <t> -v`, `tasks/<t>/runner.log` (the runner's
   output and OpenCode's stderr, including `workbench lane: the kernel refused the lane`).
 - The agent can't see `ask_reviewer`: `PWD=<worktree> OPENCODE_CONFIG=<state>/rules/<task>/opencode.json
   opencode mcp list --print-logs`.
-- The mod does nothing: `wb` must be on Claude Code's PATH (or set `WB_BIN`); `claude --debug`
+- The mod does nothing: `wb` must be on Claude Code's PATH (`WB_BIN` moves only the mod's calls;
+  Claude's Bash still runs `wb` by name; the mod toasts once when it can't run `wb events`); a
+  task started in another live session wakes that session, not this one; `claude --debug`
   shows hook errors.
 - A test fails: the task's `runner.log` is under the test's temp `WB_HOME` (deleted at tearDown);
   `wait_phase` prints the status when it times out. An interrupted run can leave detached runners

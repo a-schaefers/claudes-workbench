@@ -19,14 +19,23 @@ def _brief(tool: str, inp: dict) -> str:
     return ""
 
 
+def _obj(v) -> dict:
+    return v if isinstance(v, dict) else {}
+
+
 def normalize(raw: dict, round_no: int):
-    """One OpenCode event as a compact row, or None for events nobody needs to see."""
+    """One OpenCode event as a compact row, or None for events nobody needs to see. A line of
+    the wrong shape (a plugin's console.log on OpenCode's stdout) is skipped, not a crash of the
+    runner (the 2026-11-16 audit)."""
+    if not isinstance(raw, dict):
+        return None
     kind = raw.get("type")
-    part = raw.get("part") or {}
-    ts = round((raw.get("timestamp") or 0) / 1000, 3)
+    part = _obj(raw.get("part"))
+    ts = raw.get("timestamp")
+    ts = round(ts / 1000, 3) if isinstance(ts, (int, float)) else 0.0
     if kind == "tool_use":
-        state = part.get("state") or {}
-        tool = part.get("tool") or "?"
+        state = _obj(part.get("state"))
+        tool = str(part.get("tool") or "?")
         row = {"ts": ts, "round": round_no, "kind": "tool", "tool": tool,
                "brief": _brief(tool, state.get("input")), "ok": state.get("status") != "error"}
         if state.get("status") == "error":
@@ -35,16 +44,18 @@ def normalize(raw: dict, round_no: int):
         row["sig"] = f"{tool}:{json.dumps(state.get('input'), sort_keys=True)[:400]}"
         return row
     if kind == "text":
-        return {"ts": ts, "round": round_no, "kind": "text", "text": part.get("text", "")}
+        return {"ts": ts, "round": round_no, "kind": "text", "text": str(part.get("text") or "")}
     if kind == "step_finish":
-        tok = part.get("tokens") or {}
+        tok = _obj(part.get("tokens"))
+        cache = _obj(tok.get("cache"))
+        n = lambda v: v if isinstance(v, (int, float)) else 0  # noqa: E731
         return {"ts": ts, "round": round_no, "kind": "step",
-                "in": tok.get("input", 0), "out": tok.get("output", 0),
-                "cache": (tok.get("cache") or {}).get("read", 0) + (tok.get("cache") or {}).get("write", 0)}
+                "in": n(tok.get("input")), "out": n(tok.get("output")),
+                "cache": n(cache.get("read")) + n(cache.get("write"))}
     if kind == "error":
         err = raw.get("error") or {}
         return {"ts": ts, "round": round_no, "kind": "error",
-                "text": str(err.get("message") or err)[:400]}
+                "text": str(err.get("message") if isinstance(err, dict) and err.get("message") else err)[:400]}
     return None
 
 

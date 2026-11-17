@@ -13,6 +13,7 @@ import json
 import os
 import platform
 import re
+import shlex
 import shutil
 import subprocess
 from pathlib import Path
@@ -90,8 +91,11 @@ def _int(text: str) -> int:
         return 0
 
 
-def gpus() -> list[dict]:
-    """Every display adapter: name, driver, VRAM total and in use (bytes) where the driver says."""
+def gpus(windows: bool = True) -> list[dict]:
+    """Every display adapter: name, driver, VRAM total and in use (bytes) where the driver says,
+    and `discrete` when it is known to be a card with memory of its own (not an APU's carve-out).
+    ``windows`` False leaves out what WSL names from Windows (no VRAM, and a PowerShell start of
+    seconds): the GPU budget and wb image's settle asked it on every call (the 2026-11-16 audit)."""
     where = system()
     if where == "macos":
         return _mac_gpus()
@@ -105,8 +109,10 @@ def gpus() -> list[dict]:
         name, total, used, driver = parts
         mib = lambda v: int(v) * 2 ** 20 if v.isdigit() else None  # noqa: E731 ("[N/A]" on some cards)
         found.append({"name": name, "driver": f"nvidia {driver}", "vram": mib(total),
-                      "vram_used": mib(used)})
+                      "vram_used": mib(used), "discrete": True})
     if where == "wsl":
+        if not windows:
+            return found
         nvidia = {g["name"] for g in found}
         return found + [g for g in _windows_gpus()
                         if not any(n in g["name"] or g["name"] in n for n in nvidia)]
@@ -121,8 +127,12 @@ def gpus() -> list[dict]:
         seen.add(slot)
         name = _run("lspci", "-s", slot).partition(": ")[2] or uevent.get("PCI_ID", "unknown")
         total, used = _read(dev / "mem_info_vram_total"), _read(dev / "mem_info_vram_used")
+        # amdgpu reports an APU's carve-out of system RAM as VRAM too; only a card's own memory
+        # has a vendor (mem_info_vram_vendor: samsung, hynix…), so that marks a discrete one.
+        # Without it the device stays unknown, not integrated (models.budget_devices)
         found.append({"name": name, "driver": driver, "vram": int(total) if total else None,
-                      "vram_used": int(used) if used else None})
+                      "vram_used": int(used) if used else None,
+                      **({"discrete": True} if _read(dev / "mem_info_vram_vendor") else {})})
     return found
 
 
@@ -152,20 +162,25 @@ def cpu() -> dict:
     return {"name": name, "threads": os.cpu_count()}
 
 
-OLLAMA_KEYS = ("OLLAMA_MODELS", "OLLAMA_CONTEXT_LENGTH", "OLLAMA_NUM_PARALLEL")
+OLLAMA_KEYS = ("OLLAMA_MODELS", "OLLAMA_CONTEXT_LENGTH", "OLLAMA_NUM_PARALLEL",
+               "OLLAMA_MAX_LOADED_MODELS", "OLLAMA_HOST")
 
 
 def ollama_env() -> dict:
-    """The Ollama service's environment (where it keeps models, its default context): systemd's
-    unit (the system's, else the user's), or on macOS what the app reads (launchctl setenv). An
-    Ollama started by hand reads the caller's environment instead."""
+    """The Ollama service's environment (where it keeps models, its default context, where it
+    listens): systemd's unit (the system's, else the user's), or on macOS what the app reads
+    (launchctl setenv). An Ollama started by hand reads the caller's environment instead."""
     env = {}
     if system() == "macos":
         env = {k: v for k in OLLAMA_KEYS if (v := _run("launchctl", "getenv", k))}
     else:
         for scope in ((), ("--user",)):
             raw = _run("systemctl", *scope, "show", "ollama", "-p", "Environment", "--value")
-            for item in raw.split():
+            try:  # systemd quotes an entry holding a space: "OLLAMA_MODELS=/data/my models"
+                items = shlex.split(raw)  # (split on spaces, it was lost: the 2026-11-16 audit)
+            except ValueError:  # an unbalanced quote
+                items = raw.split()
+            for item in items:
                 k, _, v = item.partition("=")
                 env.setdefault(k, v)
     for k in OLLAMA_KEYS:
@@ -173,10 +188,20 @@ def ollama_env() -> dict:
     return env
 
 
+def ollama_context() -> tuple[int | None, str]:
+    """OLLAMA_CONTEXT_LENGTH as Ollama reads it (spaces and quotes trimmed), and the raw value.
+    wb scout crashed on "32k", which Ollama only warns about (the 2026-11-16 audit)."""
+    raw = ollama_env().get("OLLAMA_CONTEXT_LENGTH") or ""
+    v = raw.strip().strip("\"'")
+    return (int(v) if v.isdigit() and int(v) > 0 else None), raw
+
+
 def ollama_models_dir() -> Path | None:
     candidates = [ollama_env().get("OLLAMA_MODELS"), str(Path.home() / ".ollama" / "models"),
                   "/usr/share/ollama/.ollama/models", "/var/lib/ollama"]
-    return next((Path(c) for c in candidates if c and Path(c).is_dir()), None)
+    # os.path.isdir, not Path.is_dir: before 3.14 that raises on a directory it can't read, such
+    # as Ubuntu's 0750 /usr/share/ollama, and wb scout died (the 2026-11-16 audit)
+    return next((Path(c) for c in candidates if c and os.path.isdir(c)), None)
 
 
 def disk_free(path: Path | None) -> int | None:
@@ -220,7 +245,10 @@ def report() -> list[str]:
     where = ollama_models_dir()
     if where:
         lines.append(f"  disk  {size(disk_free(where))} free where Ollama keeps models ({where})")
-    ctx = ollama_env().get("OLLAMA_CONTEXT_LENGTH")
+    ctx, raw = ollama_context()
     if ctx:
-        lines.append(f"  ollama serves a {int(ctx) // 1024}K context by default (OLLAMA_CONTEXT_LENGTH)")
+        lines.append(f"  ollama serves a {ctx // 1024}K context by default (OLLAMA_CONTEXT_LENGTH)")
+    elif raw.strip():
+        lines.append(f"  ollama: OLLAMA_CONTEXT_LENGTH={raw!r} isn't a number; Ollama ignores it "
+                     "and serves its own default")
     return lines
