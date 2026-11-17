@@ -29,6 +29,9 @@ How to work (workbench protocol):
 {test_line}- If the spec is genuinely ambiguous, you may call the `ask_reviewer` tool ({budget} \
 question(s) for this task). Otherwise make reasonable choices and say what you assumed.
 - Stay inside the scope of the spec. No unrelated refactors, no new dependencies unless asked.
+- You can write only in this worktree, the temp directory and build caches: "Permission denied"
+  anywhere else is that limit, so don't probe it. Need a directory outside? Call `ask_reviewer`
+  with `path` set to it (this doesn't use the question budget).
 - Finish with a short summary: the files you changed, the test result, and any assumptions.
   If you hit something the next agent would trip on too (a library's quirk, a pitfall, a check
   worth running), add a line `Lesson: <the rule, and why>` to it.
