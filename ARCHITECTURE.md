@@ -702,8 +702,9 @@ deliberately hostile process (the 2026-11-16 audit's list of what it can't stop 
   prefix of one under the home (its parent when it is a `bin`, so `~/miniconda3` or `~/flutter`),
   the install a link in the home's PATH directories points into, and the Python running
   workbench; never `/`, the home directory or a parent of a secret), not the user's documents or
-  other projects. Running a program reads it, so a program the walk leaves out can't start
-  (`workbench lane: can't run <cmd> (Permission denied)`, exit 126; not found, 127): add its
+  other projects. Running a program reads it, so a program the walk leaves out can't start (in
+  the agent's shell a plain `Permission denied`; OpenCode itself gets `workbench lane: can't run
+  <cmd> (Permission denied)`, exit 126; not found, 127): add its
   directory to `commands.json` `paths`. Landlock only allows, so `readable()` walks down from `/`
   listing the entries beside each excluded one. Found by trying: `python3` running gh inside the
   lane was logged in, and the SSH keys that push were readable.
