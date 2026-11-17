@@ -462,7 +462,8 @@ each re-reading files; later means working in a crowded context, where a model g
 Each task runs at one value: usually the best so far, while one task in five tries the value
 next to it. When a task closes, its value scores the result: 1 for accepted, divided by one plus
 the review rounds the agent caused (every step's; a `--spec-gap` round is Claude's), less 0.25 if OpenCode still had to compact, and up to ±0.15 for being faster
-or slower than that model's usual task. Discarded scores 0. Each value's mean is smoothed
+or slower than that model's usual task. Discarded scores 0; a discard Claude marks
+`--spec-gap` is its own miss and counts for nothing, here or in the router's and the skills' records. Each value's mean is smoothed
 toward the others' (two tasks' worth), so one lucky task moves nothing. The pick walks a step
 at a time toward whatever scores best. Values past the model's compaction point are never tried
 (the window less one reply at the output cap and one step's growth: 62% on a 32K window with an

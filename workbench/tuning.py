@@ -10,10 +10,11 @@ the pick walks toward a better value one step at a time, never jumping across th
 
 A task's reward is how well it went for what it cost: accepted, discounted by the review rounds
 the agent caused (Claude's time is the expensive part; a round Claude marked as the spec's gap
-isn't the agent's), less COMPACT_PENALTY when OpenCode still had
-to compact a session, plus or minus up to SPEED_WEIGHT for taking less or more time than that
-model's usual task. Discarded scores 0. Trial runs aren't evidence (store.results), and a value is
-judged only by the tasks it ran, so a task routed to explore doesn't blur the pick's record.
+isn't the agent's), less COMPACT_PENALTY when OpenCode still had to compact a session, plus or
+minus up to SPEED_WEIGHT for taking less or more time than that model's usual task. Discarded
+scores 0. Neither a trial run (store.results) nor a discard Claude put down to its own spec
+(judged) is evidence, and a value is judged only by the tasks it ran, so a task routed to
+explore doesn't blur the pick's record.
 
 A knob can have a ceiling per model (the runner's: fresh_at must come before OpenCode's
 compaction, which sits one reply and one step's growth short of the window), and values past it
@@ -59,6 +60,12 @@ def _key(row: dict) -> tuple:
     return row.get("model"), row.get("window")
 
 
+def judged(row: dict) -> bool:
+    """Whether a closed task says anything about the model, a knob or a skill: not a discard
+    Claude put down to its own spec (--spec-gap), which would score the agent for Claude's miss."""
+    return not (row.get("outcome") == "discarded" and row.get("spec_gaps"))
+
+
 def agent_reviews(row: dict) -> int:
     """The review rounds a task (or a step) needed that weren't the spec's fault (--spec-gap)."""
     return max(0, (row.get("reviews") or 0) - (row.get("spec_rounds") or 0))
@@ -88,7 +95,7 @@ def default(name: str, ceiling=None):
 
 def record(name: str, model: str, window, ceiling=None) -> dict:
     """Each allowed value's evidence for this model and window: {value: [rewards]}."""
-    rows = [r for r in store.results() if _key(r) == (model, window)
+    rows = [r for r in store.results() if _key(r) == (model, window) and judged(r)
             and (r.get("tuned") or {}).get(name) is not None]
     mins = [r["minutes"] for r in rows if r.get("minutes")]
     usual = statistics.median(mins) if mins else None

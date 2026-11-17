@@ -308,7 +308,7 @@ def usage(current: dict[str, str] | None = None) -> dict[str, dict]:
     tasks that loaded it went (`with`: accepted, accepted with no review round, review rounds)
     against tasks in the same repos that didn't load it (`without`). `since` counts the loads of
     its current version (`current`: name -> rev), so an edit can be judged on its own."""
-    rows = store.results()
+    rows = [r for r in store.results() if tuning.judged(r)]
     out: dict[str, dict] = {}
     for r in rows:
         for n in r.get("skills_offered") or []:

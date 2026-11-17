@@ -1250,6 +1250,8 @@ class Tuning(Base):
         self.result(0.6, reviews=1, n=4)                     # 0.5 each
         self.result(0.7, n=1)                                # one clean task
         self.assertEqual(tuning.best("fresh_at", self.M, self.W), 0.7)  # smoothed: 0.67 > 0.5...
+        self.result(0.7, outcome="discarded", n=2, spec_gaps=["the spec's reading didn't fit"])
+        self.assertEqual(tuning.best("fresh_at", self.M, self.W), 0.7)  # Claude's misses aren't its
         self.result(0.7, outcome="discarded", n=2)           # ...but not once it fails twice
         self.assertEqual(tuning.best("fresh_at", self.M, self.W), 0.6)
         self.result(0.7, n=6)

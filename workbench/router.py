@@ -85,7 +85,8 @@ def row_stack(r: dict) -> tuple:
 
 def score(m: models.Model, size: str, state: dict | None = None, stack=()) -> Score:
     state = state or models.status(m)
-    real = [r for r in store.results() if r.get("model") == m.id and r.get("size") == size]
+    real = [r for r in store.results() if r.get("model") == m.id and r.get("size") == size
+            and tuning.judged(r)]
     s = Score(model=m, state=state, weights=models.weights(m), stack=tuple(stack))
     s.tries = len(real)
     s.wins = sum(r.get("outcome") == "accepted" for r in real)
