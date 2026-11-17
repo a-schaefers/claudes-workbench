@@ -211,7 +211,12 @@ CLAUDE.md, the user's decisions, the review checks) marked apart.
   step yourself. Before this, the second session's task queued in silence, maybe for hours
   (the 2026-11-16 audit). The holders are gpu.json's live entries plus any task whose live runner
   hasn't reached the lease yet (`cli._gpu_holders`). A remote model takes no lease and is never
-  refused. `wb feedback`, `next` and `resume` continue a task and always queue, but print a note
+  refused. A known limit, left by choice (the 0.90 review): the check takes no lock, and a task
+  is visible to it only once its runner's pid is in its status, after the worktree is made, so
+  two `wb start`s at the same moment (from two sessions) can both pass it. Nothing hangs
+  silently then: the second runner waits for the GPU, and its status (`last`, the pane, `wb
+  status`) says "waiting for the GPU (held by <task>)" (`GpuLease._take_alone`); `wb stop` it,
+  or let it queue. `wb feedback`, `next` and `resume` continue a task and always queue, but print a note
   naming the holders it will wait for (`cli._gpu_note`).
 - It works out the limits: `--round-timeout` and `--silence-timeout` unset (or 0) take the
   model's measured budgets (`router.budgets`), as does `--think-timeout` unset (0 turns the
