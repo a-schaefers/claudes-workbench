@@ -176,9 +176,9 @@ miss:
    before the first edit, twenty sessions in a row.
 8. **The old tests still hold.** A change of behaviour breaks tests that assumed the old one:
    run the whole suite against your simulated change (or read each test the change touches)
-   and say in the spec which tests change and how. Seen: bats that found paths reached the
-   player sooner, so a test measuring distance to its starting point failed, and walls erased a
-   flipped input a replay test relied on: two of the agent's questions, both the spec's.
+   and say in the spec which tests change and how. Seen: a smarter pursuit reached its target
+   sooner, so a test measuring distance from the starting point failed, and a new collision rule
+   erased an input a replay test relied on: two of the agent's questions, both the spec's.
 After review, when a round was the spec's fault, say so: `--spec-gap "what it missed"` on
 `wb feedback`, `next`, `accept` or `discard`. `wb start` shows your record from those,
 and a gap that recurs belongs in this list.
@@ -245,7 +245,7 @@ Not a lesson (close it):
 2. An existing skill that covers this kind of work (wb lessons names a likely one).
 3. A `references/<topic>.md` beside one of those, for depth only some tasks need, with a
    one-line pointer in its SKILL.md.
-4. Only then a new skill, named for the kind of work (`raylib-2d`), never for one task or error.
+4. Only then a new skill, named for the kind of work (`svg-charts`), never for one task or error.
    Write the SKILL.md in the scratchpad, then
    `wb skill add <name> --from <file> -m "<what review taught>"` (it checks, scans and commits it).
 The library follows the user into every project, so it holds only what holds beyond one. Knowledge
@@ -254,7 +254,7 @@ with the project; the agents there always see it. Never `~/.claude/skills`, the 
 `wb skill add` warns that every lesson came from one repo, decide which it is before moving on.
 
 A good skill: front matter `name` (the directory's) and a `description` that says when to use it
-("Use when drawing with raylib ...": it is all the agent sees before it decides to load it); then
+("Use when drawing charts as SVG ...": it is all the agent sees before it decides to load it); then
 20–60 lines of imperative steps, the pitfall with the right and wrong form, and how to check the
 result. No paths outside the repo (agents go looking for them), no model names.
 
@@ -290,7 +290,7 @@ When the project needs an image (a sprite, an icon, a background, a README pictu
 `wb image --list` shows a ready engine, make it locally instead of asking the user for one.
 Agents can't make images; one that needs an asset asks you, and you make it.
 1. **Brief it like an art director.** Say what's in it, then the style, composition, palette and
-   lighting, the size the project needs, and what to avoid. Name the use ("a 64x64 game sprite on
+   lighting, the size the project needs, and what to avoid. Name the use ("a 64x64 icon on
    a flat background") so the framing fits.
 2. `wb image "<prompt>" --n 4 --size WxH [--seed S] [--ref img]` makes candidates (seeds S, S+1,
    ...) and prints their paths. **Read every one**: look at it yourself, never pick by filename.

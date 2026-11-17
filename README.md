@@ -133,8 +133,8 @@ on the left; Claude talks to the local agent, which does the work on the right:
 
 <p align="center"><img src="docs/driver-and-agent.jpg" alt="Claude Code with the Workbench pane: on the left Claude writes review feedback for a task; on the right the local agent's live transcript shows its build, its passing tests and 'done: waiting for Claude's review'" width="900"></p>
 
-Here Claude (left) has just sent the agent review feedback on a game step: two exact changes, and
-why. On the right the agent made them, built the game, ran the tests, and summed up its work;
+Here Claude (left) has just sent the agent review feedback on a step: two exact changes, and
+why. On the right the agent made them, built the project, ran the tests, and summed up its work;
 the tests passed, so the task now says **done: waiting for Claude's review**, and Claude is woken
 to read the diff.
 
@@ -159,22 +159,6 @@ Tailscale address, `{"bind": ["0.0.0.0"]}` every interface (your LAN, a VPN), an
 
 **Watching from a terminal?** `wb watch` follows the newest task live, and `wb status` lists the
 open ones.
-
-## What we found (November 2026)
-
-workbench is developed and tested on one ordinary gaming PC: **Ryzen 5 7600X · Radeon RX 9070 XT
-(16 GB) · 32 GB DDR5 · Arch Linux.** On that machine:
-
-- **Qwen 27B** (Ollama, Q3) does the real work: it fits entirely on a 16 GB card and passed nearly
-  every task we gave it. **MiMo 9B** takes the trivial chores.
-- Bigger models squeezed onto the card with system RAM were slower, crashed, and were no better.
-- Quantization matters (higher is better), but on 16 GB a larger model at about 4 bits beats a
-  smaller one at 8.
-- Thinking mode off works best for agent work: the model writes code instead of planning it at
-  length.
-
-Models change fast. Once a week workbench asks Claude to check what's new for your hardware and
-recommend changes; nothing is downloaded without your yes.
 
 <hr>
 
