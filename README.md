@@ -424,6 +424,13 @@ Ollama serves the model (the loaded model, its Modelfile's `num_ctx`, or `OLLAMA
 that claims more than Ollama serves (prompts would be cut off) or less (tasks could be bigger). A session stays bound to the directory it was made in, so context carries over only
 within a task (rounds, `wb next`), never to a new one.
 
+**Claude's record as a spec writer.** Most review rounds trace back to the spec: a rule with no
+test, two rules that conflict, a name taken from memory. The skill has a checklist to go through
+before `wb start`. When a round was the spec's fault anyway, Claude says so with
+`--spec-gap "what it missed"`. That becomes a lesson for Claude's own checklist, not an agent
+skill, and `wb start` shows the record as the next task goes out: `your specs: 2 of the last 10
+task(s) needed a round for a spec gap; last: …`.
+
 **Self-tuning.** A setting whose best value depends on the model is learned per model and window
 on your machine, not fixed. The first is the handover point. Earlier means more fresh sessions,
 each re-reading files; later means working in a crowded context, where a model gets sloppier.
@@ -765,14 +772,14 @@ back) and the web chat stops listening in that session.
 | Command | What it does |
 |---|---|
 | `wb start <task> --spec <file> [--repo] [--size] [--test] [--skill] [--model]` | hand a task to a local agent (more knobs: `--auto-fix`, `--checkin`, `--ask-budget`, `--ask-timeout`, `--round-timeout`, `--silence-timeout`, `--think-timeout`, `--base`, `--force`, `--no-claude-md`) |
-| `wb feedback <task> --message <file> \| --text "…" [--fresh \| --keep-context]` | another round with review feedback |
+| `wb feedback <task> --message <file> \| --text "…" [--fresh \| --keep-context] [--spec-gap "…"]` | another round with review feedback; `--spec-gap` says the round is the spec's fault, and what it missed |
 | `wb next <task> --spec <file> -m "…" [--test] [--skill] [--fresh]` | commit the approved step, send the next one to the same agent |
 | `wb answer <task> --text "…" \| --file <f>` | answer the agent's question |
 | `wb steer <task> --text "…" [--now]` | a note to a running agent; `--now` interrupts |
 | `wb note <task> --text "…"` | Claude's captain's-log line in the transcript |
 | `wb takeover [<task> \| --all]` | stop the agent and finish by hand |
 | `wb stop [<task> \| --all]` | stop it; the work is kept |
-| `wb accept <task> -m "…" [--merge] [--force]` | commit the work and close the task |
+| `wb accept <task> -m "…" [--merge] [--force] [--spec-gap "…"]` | commit the work and close the task |
 | `wb discard <task> [--reason] [--keep-branch]` | drop the work and close the task |
 | `wb wait [<task>] [--timeout]` | block until a task needs Claude |
 | `wb status [<task>] [--all]` | open tasks at a glance |

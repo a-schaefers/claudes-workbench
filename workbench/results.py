@@ -44,9 +44,26 @@ def record(task: store.Task, outcome: str, last_step: dict | None = None, **extr
            "window": st.get("window"),
            "tuned": st.get("tuned") or {}, "explored": st.get("explored") or [],  # tuning.py
            "tuned_max": st.get("tuned_max") or {},
+           "spec_gaps": [g["text"] for g in st.get("spec_gaps") or []],
            **({"trial": True} if spec.get("trial") else {}), **extra}
     store.append_jsonl(store.home() / "results.jsonl", row)
     return row
+
+
+SPEC_GAP_WINDOW = 10
+
+
+def spec_gap_line() -> str | None:
+    """Claude's own record as a spec writer, shown as it hands the next task off: how many of
+    the latest tasks needed a round for a gap in the spec (wb feedback|accept --spec-gap)."""
+    rows = [r for r in store.results() if "spec_gaps" in r][-SPEC_GAP_WINDOW:]
+    if not rows:
+        return None
+    hit = [r for r in rows if r["spec_gaps"]]
+    if not hit:
+        return f"your specs: no gaps in the last {len(rows)} task(s)"
+    return (f"your specs: {len(hit)} of the last {len(rows)} task(s) needed a round for a spec "
+            f"gap; last: {hit[-1]['spec_gaps'][-1][:160]} (the checklist: /delegate, Before wb start)")
 
 
 def table() -> str:

@@ -162,6 +162,8 @@ def cmd_start(a):
               f"{a.base}, without them")
     print(f"model: {why}" if why != "asked for" else f"model: {m.id} (asked for)")
     print(f"slice: {router.slice(m).line()}")
+    if gaps := results.spec_gap_line():
+        print(gaps)
     if handed:
         print("skills handed: " + ", ".join(handed))
     elif fits := skills.suggest(spec_text):
@@ -186,6 +188,18 @@ def _elsewhere(name: str, u: dict | None, repo: Path, stack: list[str]) -> str:
     return f"{name} (loaded so far only in {', '.join(sorted(Path(r).name for r in seen))}{other})"
 
 
+def _spec_gaps(task: store.Task, gaps: list[str] | None) -> None:
+    """What the spec missed, by Claude's own account (--spec-gap): a review round the spec cost,
+    not the agent. Kept with the task, counted in results, and gathered as lessons."""
+    if not gaps:
+        return
+    rnd = task.status.get("round", 1)
+    task.set_status(spec_gaps=(task.status.get("spec_gaps") or [])
+                    + [{"round": rnd, "text": g.strip()} for g in gaps])
+    for g in gaps:
+        task.event({"ts": store.now(), "round": rnd, "kind": "spec_gap", "text": g.strip()})
+
+
 def cmd_feedback(a):
     task = need(a.name)
     st = task.status
@@ -195,6 +209,7 @@ def cmd_feedback(a):
         die(f"{a.name}'s runner is still running")
     text = a.text if a.text is not None else \
         sys.stdin.read() if a.message == "-" else Path(a.message).read_text()
+    _spec_gaps(task, a.spec_gap)
     n = st.get("round", 1) + 1
     task.round_dir(n).mkdir(parents=True, exist_ok=True)
     task.round_dir(n).joinpath("prompt.md").write_text(
@@ -223,6 +238,7 @@ def cmd_next(a):
     if runner_alive(task):
         die(f"{a.name}'s runner is still running")
     step = st.get("steps", 1)
+    _spec_gaps(task, a.spec_gap)
     measured = results.step(task, landed=True)
     try:
         commit = gitops.commit_all(task.worktree, f"{a.message}\n\nWorkbench-Task: {a.name} "
@@ -557,6 +573,7 @@ def cmd_accept(a):
     msg = (f"{a.message}\n\nDelegated to {spec['model_label']} via OpenCode: {rounds} round(s), "
            f"{autofix} automatic test-fix, {st.get('reviews', 0)} review round(s)."
            f"\n\nWorkbench-Task: {a.name}\nOpenCode-Session: {st.get('session')}")
+    _spec_gaps(task, a.spec_gap)
     measured = results.step(task, landed=True)
     try:
         commit = gitops.commit_all(task.worktree, msg)
@@ -586,6 +603,7 @@ def cmd_discard(a):
     task = need(a.name)
     spec = task.spec
     _stop_runner(task)
+    _spec_gaps(task, a.spec_gap)
     repo = Path(spec["repo"])
     measured = results.step(task, landed=False)
     gitops.remove_worktree(repo, task.worktree, force=True)
@@ -1261,12 +1279,16 @@ def main(argv=None):
                    help="start the agent on a fresh session, handed the task and the work so far")
     g.add_argument("--keep-context", action="store_true",
                    help="continue the session even if it is getting full")
+    s.add_argument("--spec-gap", action="append", metavar="WHAT",
+                   help="this round is the spec's fault: what it missed (repeatable)")
     s.set_defaults(f=cmd_feedback)
     s = sub.add_parser("next", help="commit the approved step and send the same agent the next one")
     s.add_argument("name"); s.add_argument("--spec", required=True)
     s.add_argument("--message", "-m", required=True, help="commit subject for the approved step")
     s.add_argument("--test", help="the next step's acceptance command (default: unchanged)")
     s.add_argument("--fresh", action="store_true", help="a fresh session instead of the same one")
+    s.add_argument("--spec-gap", action="append", metavar="WHAT",
+                   help="a round this step took was the spec's fault: what it missed (repeatable)")
     s.add_argument("--allow", action="append", metavar="PATTERN",
                    help="let the agent run a command outside the everyday list, e.g. \"curl *\"")
     s.add_argument("--skill", action="append", metavar="NAME",
@@ -1389,9 +1411,13 @@ def main(argv=None):
     s = sub.add_parser("accept", help="commit the work on its branch and close the task")
     s.add_argument("name"); s.add_argument("--message", "-m", required=True)
     s.add_argument("--merge", action="store_true"); s.add_argument("--force", action="store_true")
+    s.add_argument("--spec-gap", action="append", metavar="WHAT",
+                   help="a round this task took was the spec's fault: what it missed (repeatable)")
     s.set_defaults(f=cmd_accept)
     s = sub.add_parser("discard", help="drop the work and close the task")
     s.add_argument("name"); s.add_argument("--reason")
+    s.add_argument("--spec-gap", action="append", metavar="WHAT",
+                   help="the spec's part in it: what it missed (repeatable)")
     s.add_argument("--keep-branch", action="store_true")
     s.set_defaults(f=cmd_discard)
     s = sub.add_parser("models", help="the local models, and which the router picks per task size")

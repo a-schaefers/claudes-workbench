@@ -146,12 +146,30 @@ Read just enough of the repo to scope it, then write the spec to a file in the s
 - conventions to follow (point at an existing file to imitate)
 - acceptance criteria, and an **acceptance command** that proves them (an existing test command,
   or a new test the agent must write first — say which)
-- every number checked against every rule: work each example through the limits the spec sets
-  (a clamp, a cap, float rounding) before sending it. An example that breaks a rule sends the
-  agent chasing a bug that isn't there, round after round.
-- every fixed size checked against the algorithm the spec asks for: a buffer sized for the items
-  can be too small for the operations. A heap that skips stale entries holds one entry per push,
-  not one per item. Give the bound and why it holds.
+
+**Before `wb start`: check the spec.** Spec gaps cause review rounds. You check the numbers you
+compute, but they hide in the sentences you didn't execute. Go through these, each from a real
+miss:
+1. **Every rule has a test.** For each "must", "rejects", "at most" or "only", name the test
+   that fails if it's broken. A rule without one is a wish (seen: "one trailing newline"
+   was stated, no test rejected a blank row, and the parser overflowed on one).
+2. **Every edge input is named:** empty, one, the maximum, one past it, and for text, separators
+   that lead, double or trail.
+3. **Rules checked against each other and against the algorithm.** A size limit and a method
+   can conflict: a heap that skips stale entries holds one entry per push, not per item. Give
+   each fixed size its bound and why it holds.
+4. **Every number run, not reasoned:** compute each expected value with a script, through the
+   limits the spec sets (a clamp, a cap, integer division, float rounding). Seen: 24,900 of
+   32,768 printed as 75%.
+5. **Every fact about the repo checked in the repo:** each name, field, file and build step you
+   mention (`grep` it). Memory is not a source. Seen: a field called `in.x` that was `move_x`,
+   and "add it to the Makefile" for a Makefile that finds files by itself.
+6. **Only the task.** Nothing about later steps, in the spec or in CLAUDE.md. An agent takes
+   any "next" as its job.
+After review, when a round was the spec's fault, say so: `--spec-gap "what it missed"` on
+`wb feedback`, `next`, `accept` or `discard`. `wb start` shows your record from those,
+and a gap that recurs belongs in this list.
+
 `wb` appends the working protocol itself (no commits, run the tests, stay in scope, ask_reviewer
 budget, the summary format), so don't repeat it. The agent also starts with what you would have:
 the repo's CLAUDE.md / AGENTS.md / CLAUDE.local.md / `.claude/rules`, a map of nested CLAUDE.md
@@ -375,6 +393,7 @@ explicit instructions ("in parse(), return 0 for an empty string"), not critique
 everything that falls short in one round, small things included. A nit you let through is a
 standard you just lowered. Confirm or correct each assumption the summary lists, in the same
 message: an assumption left unanswered comes back as a question, and the agent waits for it.
+When the fix is for something your spec missed, add `--spec-gap "…"` (checklist item it broke).
 **Max 3 review rounds.** Still wrong after that: make the small remaining fix yourself in the task's worktree
 (`~/.local/state/workbench/tasks/<name>/worktree`) and accept, or `wb discard <name> --reason …`.
 If a "trivial" task fails twice, it wasn't trivial: discard and restart it with `--size significant`.

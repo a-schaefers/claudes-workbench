@@ -1633,6 +1633,23 @@ class SkillLearning(Base):
         self.assertEqual(lessons.items(listed), ["Close the file. - it leaks on error",
                                                  "Check the return value of read."])
 
+    def test_a_round_the_spec_cost_is_claudes_record_shown_at_the_next_start(self):
+        self.start("t-g1", "ok", "--test", TEST_CMD)
+        wait_phase("t-g1", {"review"})
+        run_wb("feedback", "t-g1", "--text", "1. Reject a blank row.",
+               "--spec-gap", "named a rule (one trailing newline) but no test for it")
+        wait_phase("t-g1", {"review"})
+        run_wb("accept", "t-g1", "-m", "feat: answer")
+        row = store.read_jsonl(store.home() / "results.jsonl")[0][-1]
+        self.assertEqual(row["spec_gaps"], ["named a rule (one trailing newline) but no test for it"])
+        self.assertIn("spec (t-g1 round 1): the spec missed: named a rule", run_wb("lessons"))
+        out = self.start("t-g2", "ok", "--test", TEST_CMD)
+        self.assertIn("your specs: 1 of the last 1 task(s) needed a round for a spec gap; "
+                      "last: named a rule (one trailing newline)", out)
+        wait_phase("t-g2", {"review"})
+        run_wb("accept", "t-g2", "-m", "feat: answer")
+        self.assertIn("your specs: 1 of the last 2 task(s)", self.start("t-g3", "ok", "--test", TEST_CMD))
+
     def test_an_agents_lesson_from_a_discarded_task_is_not_kept(self):
         from workbench import lessons
         os.environ["FAKE_LESSON"] = "retry the build three times until it passes"

@@ -89,6 +89,8 @@ def gather(task: store.Task, outcome: str | None = None) -> list[dict]:
             ask = store.read_json(q, {})
             add("question", ask.get("round"), f"the agent asked: {ask.get('question', '')[:250]} "
                                               f"— answered: {a.read_text().strip()[:250]}")
+    for g in st.get("spec_gaps") or []:  # Claude's own: a rule for writing specs, not for agents
+        add("spec", g.get("round"), f"the spec missed: {g['text'][:400]}")
     if outcome and st.get("reviews"):
         for s in loaded:
             add("skill", None, f"loaded {s}, yet needed {st['reviews']} review round(s): "

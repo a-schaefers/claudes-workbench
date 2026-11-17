@@ -17,6 +17,8 @@ what either says (a command, a flag, a default, a guard, a file) updates it in t
   - `gitops.py`: the task's worktree and branch, the review diff (intent-to-add, so new files
     show), commits, the repo's stack (its main languages). `results.py`: results.jsonl rows (`wb accept`/`discard`), each step's size and fit (`step`),
     and `wb stats`. Read them through `store.results()`, which leaves out trial runs.
+    `spec_gap_line`: Claude's record of review rounds its specs cost (`--spec-gap` on
+    feedback/next/accept/discard; status `spec_gaps`, a `spec` lesson), printed by `wb start`.
     `tuning.py`: knobs learned per model and window from those rows (`wb tune`): each task runs
     at the best value so far or, one in `EXPLORE`, a neighbour; the reward is acceptance over
     review rounds, less compaction, ± speed. `fresh_at` (the handover point) is the first, capped
