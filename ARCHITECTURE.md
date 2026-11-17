@@ -1107,8 +1107,9 @@ Drawn in Claude Code's own grammar, results under `  ⎿  `:
 `-v` raises the caps (400 lines of output, diffs and reasoning) but still caps. Under the
 transcript (on a terminal, one row rewritten in place): what's happening now (`activity`) and a
 clock line:
-- *Now:* queued: `Waiting for the GPU…`, or `status.last` itself while it waits for a named
-  holder, loads, starts, stops, unloads or shares a model (`Waiting for the GPU (held by t)…`,
+- *Now:* queued: `Waiting for the GPU…`, or `status.last` itself while it checks the
+  acceptance command on the base, waits for a named holder, loads, starts, stops, unloads or
+  shares a model (`Waiting for the GPU (held by t)…`,
   `Loading …`); testing:
   ``Running the acceptance tests… `cmd` ``; asking: `Waiting for Claude's answer…`; running: from
   the model server's `GET <root>/metrics` when it returns a `live` object (`{state, phase,

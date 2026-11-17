@@ -169,6 +169,14 @@ class Lifecycle(Base):
         self.assertIn("on the base the acceptance command fails (exit", run_wb("report", "t-base"))
         self.assertIn("on the base the acceptance command fails", run_wb("wait", "t-base", "--timeout", "1"))
 
+    def test_the_pane_says_the_base_check_runs_not_that_the_task_waits_for_the_gpu(self):
+        # the 0.90 review: queued, it read "Waiting for the GPU…" on an idle GPU
+        self.start("t-basenow", "ok")
+        wait_phase("t-basenow", {"review"})
+        task = store.Task("t-basenow")
+        task.set_status(phase="queued", last="checking the acceptance command on the base")
+        self.assertEqual(transcript.activity(task, {}), "Checking the acceptance command on the base…")
+
     def test_the_runner_warns_at_once_when_the_acceptance_command_already_passes(self):
         self.start("t-pass", "ok", "--test", "true")
         wait_phase("t-pass", {"review"})
