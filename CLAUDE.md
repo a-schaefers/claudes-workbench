@@ -208,7 +208,9 @@ symlink, keeping its mode; a refusal prints the change, never the config's keys)
 machine skip any HTTP proxy. Ollama entries need `options.max_tokens` (Ollama ignores
 OpenCode's `max_completion_tokens`) and a `limit.context` matching what Ollama serves (never the
 trained length); every entry needs `limit.context` (a server other than Ollama: `wb model add
---context N`); `wb model add` writes both and `wb doctor` checks them.
+--context N`); `wb model add` writes both and `wb doctor` checks them. Any OpenAI-compatible
+server works: `wb model add <p>/<m> --url <baseURL>` writes its provider, `--start`/`--stop`
+its models.json commands; never steer a user to one server.
 
 Environment: `WB_HOME`, `WB_MODELS`, `WB_SKILLS`, `WB_IMAGES`, `WB_CHAT_TOKEN`, `WB_CHAT_CONFIG`,
 `WB_COMMANDS` (the paths above); `WB_OPENCODE_CONFIG` (OpenCode's config); these may be relative

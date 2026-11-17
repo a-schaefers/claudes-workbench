@@ -1340,6 +1340,8 @@ def cmd_scout(a):
     print("\n".join(image_lines()) or f"  none: describe one in {images.config_path()}")
     provs = models.providers()
     registered = models.discover()
+    print("\nmodel servers here (work with what the user runs)")
+    print("\n".join(server_lines(provs)))
     print("\nmodels OpenCode can use (opencode.json)")
     real = defaultdict(list)
     for r in store.results():
@@ -1387,6 +1389,21 @@ def cmd_scout(a):
     print(results.table())
     print("\nnext: compare with what is newest and best for this hardware, recommend to the user, "
           "and when done: wb scout --done --notes \"…\"")
+
+
+def server_lines(provs: dict) -> list[str]:
+    """wb scout's view of the model servers on this machine, whichever they are: the commands on
+    PATH, and each default port that answers, with whether OpenCode has a provider for it."""
+    on_path, answering = models.servers_here()
+    roots = {p["root"].rstrip("/") for p in provs.values()}
+    lines = [f"  on PATH: {', '.join(on_path)}"] if on_path else []
+    for x in answering:
+        listed = ", ".join(x["models"][:8]) + (", ..." if len(x["models"]) > 8 else "") or "no models"
+        known = (x["root"] in roots or x["root"].replace("127.0.0.1", "localhost") in roots)
+        lines.append(f"  {x['root']} answers (usually {x['usually']}): {listed}" + (
+            "" if known else f"; OpenCode has no provider for it (wb model add <provider>/<model> "
+                             f"--url {x['root']}/v1 --context N)"))
+    return lines or ["  none found on PATH or answering on the usual ports"]
 
 
 def _skill_names(names) -> list[str]:
@@ -1672,6 +1689,18 @@ def cmd_model(a):
                                     if a.sizes else "tasks of every size"))
         return
     provider, _, name = a.id.partition("/")
+    if a.action != "add" and (a.url or a.start or a.stop):
+        die("--url, --start and --stop go with wb model add")
+    if a.action == "add" and name and a.url:
+        try:  # any OpenAI-compatible server, not only Ollama (the server is the user's choice)
+            if models.add_server_provider(provider, a.url):
+                print(f"added provider {provider} to {models.opencode_config_path()}: {a.url}")
+        except RuntimeError as e:
+            die(str(e))
+    if a.action == "add" and name:  # how wb starts and stops a server that runs one model each
+        for key, cmd in (("start", a.start), ("stop", a.stop)):
+            if cmd:
+                models.set_override(a.id, key, cmd)
     provs = models.providers()
     if a.action == "add" and name and provider == "ollama" and provider not in provs:
         try:  # the first run: Ollama answers, OpenCode has no provider for it
@@ -1690,11 +1719,13 @@ def cmd_model(a):
     if a.action == "add":
         if prov["problem"]:
             die(f"provider {provider}: {prov['problem']}")
-        if not prov["engine_known"] and not prov["start"]:
+        own = models._overrides().get(a.id) or {}
+        if not prov["engine_known"] and not prov["start"] and not own.get("start"):
             # a guess would write an Ollama entry without its output cap, or the reverse
             # (the 2026-11-16 audit)
             die(f"{prov['root']} is not answering, so wb can't tell whether {provider} is Ollama: "
-                f"start it, or set \"engine\" for {provider} in {models.overrides_path()}, and retry")
+                f"start it, or pass --start (the command that starts it), or set \"engine\" for "
+                f"{provider} in {models.overrides_path()}, and retry")
         if prov["engine"] == "ollama" and not models._fake() and not models.ollama_answers(prov["root"]):
             # a pull then died with a urllib traceback, and a describe blamed a missing pull
             # (the 2026-11-16 audit)
@@ -2485,6 +2516,11 @@ def main(argv=None):
     s.add_argument("id", help="provider/model")
     s.add_argument("sizes", nargs="*", help="sizes: the only task sizes it gets (none: all)")
     s.add_argument("--pull", action="store_true", help="add: download it into Ollama first")
+    s.add_argument("--url", help="add: the baseURL of the OpenAI-compatible server it runs on "
+                   "(e.g. http://127.0.0.1:8080/v1), when OpenCode has no provider for it yet")
+    s.add_argument("--start", metavar="CMD", help="add: the shell command that starts its server "
+                   "(models.json start), for a server that runs one model at a time")
+    s.add_argument("--stop", metavar="CMD", help="add: the shell command that stops it (models.json stop)")
     s.add_argument("--label", help="add: the name OpenCode shows")
     s.add_argument("--context", type=int, help="add: context tokens (default: what Ollama serves "
                    "it, else what the provider's other models use; another server needs it)")

@@ -141,10 +141,17 @@ A newly added model has no record, so the router won't pick it over one with a g
 give it its first few real tasks with `--model` (ones you'd review closely anyway).
 **No local model yet?** If `wb models` lists none that can run, do the model check below first:
 recommend models for this hardware and offer to set them up in OpenCode (ask before any download).
-`wb doctor` names each provider it skipped and why; one on another host that is the user's own
-server (WSL2's Windows host, a LAN box) needs their yes for `local: true`. With Ollama running and
-no provider, `wb model add ollama/<model>` writes the provider itself. Ollama cloud models
-(`:cloud`) run off this machine: never register one without the user's explicit yes.
+**Work with the model server the user already runs**, whichever it is: `wb scout` lists the server
+commands on PATH and the servers answering here. Never steer them to one they don't use. With
+none at all, lay out the options that fit the machine in a line each (llama.cpp's `llama-server`,
+alone or behind llama-swap; LM Studio; Ollama; vLLM on NVIDIA; MLX on Apple Silicon) and let the
+user pick; install nothing unasked. For a server OpenCode has no provider for: `wb model add
+<provider>/<model> --url <its baseURL> --context N`, plus `--start`/`--stop` for one that runs one
+model a process (llama-server, vLLM). Ollama running with no provider: `wb model add
+ollama/<model>` writes it itself. `wb doctor` names each provider it skipped and why; one on
+another host that is the user's own server (WSL2's Windows host, a LAN box) needs their yes for
+`local: true`. Ollama cloud models (`:cloud`) run off this machine: never register one without
+the user's explicit yes.
 
 **Updating workbench.** The mod checks weekly and tells the user; `/delegate-update` is theirs.
 Asked to update it yourself: `wb update` (it refuses while tasks run; tell the user to restart
@@ -161,12 +168,14 @@ sources and its reputation in recent reports, verify before you name anything. F
 its size: a model that fits entirely in VRAM (or the GPU's share of unified memory) beats a bigger
 one that spills into RAM, and on a big card the best is a larger model, a longer context, or both.
 The window sets the slice of every task (`slice:` in the report), so where the VRAM has room past
-the weights, raise the context Ollama serves (`OLLAMA_CONTEXT_LENGTH`, then `wb model add …
---context N`); `wb model add` refuses an Ollama model while nothing says what context Ollama
-serves it, and a model on another server (LM Studio, llama.cpp, vLLM) without `--context N`, the
-window it was started with: ask the user if you don't know it. `wb doctor` flags an entry whose
+the weights, raise the context the server serves (llama-server `-c`, LM Studio's context length,
+vLLM `--max-model-len`, Ollama's `OLLAMA_CONTEXT_LENGTH`), then `wb model add … --context N`;
+`wb model add` refuses an Ollama model while nothing says what context Ollama serves it, and a
+model on another server without `--context N`, the window it was started with: ask the user if
+you don't know it. `wb doctor` flags an entry whose
 context differs from what Ollama serves, or that has none. Results first, then speed. Recommend briefly (keep / add / retire, with sizes and why), and
-only with a yes: `wb model add <provider/model> --pull` (background), `wb model sizes` for what it
+only with a yes: on Ollama `wb model add <provider/model> --pull` (background); on another server,
+download it the server's own way (`lms get`, a GGUF from Hugging Face) and `wb model add`; `wb model sizes` for what it
 should take, `wb model retire <id> [--delete]`. Installed but unregistered models may belong to other tools: ask before touching
 them. When you set a model aside, `wb scout --watch "…"` records what would bring it back:
 the change to look for, and the test it must pass. Finish with `wb scout --done --notes "…"`. Nothing worth changing: one line, and done.
