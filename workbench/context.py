@@ -553,7 +553,7 @@ def tool_roots(hidden: set[str]) -> set[str]:
 
 def readable(task: store.Task) -> list[str] | None:
     """What the agent's processes may read: the system, the home directory's dotfiles but
-    SECRETS, the task's repo, its lane and the programs it runs. None with the lane off. Landlock
+    SECRETS, the task's repo and its git directory, its lane and the programs it runs. None with the lane off. Landlock
     only allows, so this lists the entries beside each excluded one; lane.py adds the lane
     (writable) itself."""
     lane = writable(task)
@@ -564,6 +564,9 @@ def readable(task: store.Task) -> list[str] | None:
     keep = {os.path.realpath(p) for p in (task.spec.get("repo"), PKG_ROOT, *lane,  # PKG_ROOT:
                                           *lane_paths(task)) if p}  # the git shim, the ask server
     keep |= tool_roots(hidden)
+    # the git directory too, outside the repo when it is a linked worktree: git failed there
+    # ("gitfile does not point to a valid repository", the 0.90 review); writable() keeps it out
+    keep |= repo_dirs(task)
     # Inside a hidden directory, only these come out: workbench itself (the marketplace install
     # puts it in ~/.claude/plugins, the 2026-11-16 audit), and of workbench's state the task's own
     # directory (its prompts, the ask server's spec) and its rules (its OpenCode config, its

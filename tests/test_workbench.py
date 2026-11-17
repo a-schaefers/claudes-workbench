@@ -2409,6 +2409,28 @@ class Lane(Base):
             self.assertEqual(out.returncode, 0, out.stderr)
             self.assertEqual(self.reads_in_lane(task, [root / "bob" / "letters.txt"]), ["refused"])
 
+    @unittest.skipUnless(lane.abi(), "needs Landlock")
+    def test_a_repo_that_is_a_linked_worktree_has_git_working_in_the_lane(self):
+        # the 0.90 review: the common git directory lay outside every kept path, so git failed
+        # with "gitfile does not point to a valid repository" (a fake home: /tmp is in the lane)
+        home = self.fake_home()
+        main, linked = home / "proj", home / "proj-feature"
+        g = lambda *a: subprocess.run(["git", *a], check=True, capture_output=True)  # noqa: E731
+        g("init", "-q", str(main))
+        (main / "a.txt").write_text("a\n")
+        g("-C", str(main), "add", ".")
+        g("-C", str(main), "-c", "user.email=t@t", "-c", "user.name=t", "commit", "-qm", "init")
+        g("-C", str(main), "worktree", "add", "-q", str(linked))
+        task = self.bare_task("t-linked", linked)
+        r = context.readable(task)
+        self.assertIn(str(main / ".git"), r)
+        self.assertNotIn(str(main), r)                  # the git directory, not the main checkout
+        self.assertFalse([p for p in context.writable(task) if p.startswith(str(main))])
+        out = subprocess.run(lane.wrap(context.writable(task), ["git", "-C", str(linked), "status",
+                                                                "--short"], r),
+                             capture_output=True, text=True, timeout=20)
+        self.assertEqual(out.returncode, 0, out.stderr)
+
     def test_a_repo_that_holds_secrets_keeps_them_out_and_the_home_is_refused(self):
         home = self.fake_home()
         for d in (".config/gh", ".config/app"):
