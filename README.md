@@ -91,6 +91,8 @@ come out.
 
 ```sh
 git clone https://github.com/a-schaefers/claudes-workbench ~/repos/workbench
+# to upgrade later: git -C ~/repos/workbench pull, then restart Claude Code (or /reload-plugins);
+# the links and the plugin read from the clone, and your state and skills stay as they are
 cd ~/repos/workbench
 mkdir -p ~/.local/bin ~/.claude/skills   # ~/.local/bin must be on your PATH
 ln -s "$PWD/bin/wb" ~/.local/bin/wb
@@ -145,7 +147,7 @@ to read the diff.
 **Away from the computer?** `wb chat serve` runs a small web chat with the running Claude session,
 and `wb chat url` prints its private link (on Linux, `systemctl --user link
 "$PWD/systemd/wb-chat.service" && systemctl --user enable --now wb-chat`, run in the clone, keeps
-it running; on macOS, a launchd agent running `~/.local/bin/wb chat serve` does). It's `http://localhost:1337`; to use it from your phone, reach your PC the way you
+it running, and `systemctl --user restart wb-chat` after an upgrade; on macOS, a launchd agent running `~/.local/bin/wb chat serve` does). It's `http://localhost:1337`; to use it from your phone, reach your PC the way you
 normally do and change the host in the link. It serves only localhost until you say otherwise in
 `~/.config/workbench/chat.json`: `{"bind": ["localhost", "tailscale"]}` adds this machine's
 Tailscale address, `{"bind": ["0.0.0.0"]}` every interface (your LAN, a VPN), and
