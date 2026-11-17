@@ -2,6 +2,7 @@
 import json
 import os
 import socket
+import subprocess
 import sys
 import tempfile
 import threading
@@ -131,6 +132,32 @@ class Real(unittest.TestCase):
         (skill / "SKILL.md").write_text("---\nname: my-own\n---\n")
         self.assertEqual(context.claude_home(), Path(self.tmp.name) / "cc")
         self.assertIn("my-own", context.denied_skills())
+
+
+    def test_state_files_are_utf8_under_a_legacy_locale(self):
+        # the 2026-11-16 audit: an em dash in a spec failed to write under a non-UTF-8 locale
+        code = ("import sys; sys.path.insert(0, sys.argv[1]); from pathlib import Path; "
+                "from workbench import store; p = Path(sys.argv[2]); "
+                "store.write_json(p, {'t': 'a \\u2014 b'}); "
+                "store.append_jsonl(p.with_suffix('.jsonl'), {'t': '\\u2014'}); "
+                "print(store.read_json(p)['t'] == 'a \\u2014 b')")
+        p = Path(self.tmp.name) / "x.json"
+        env = {**os.environ, "LC_ALL": "C", "PYTHONCOERCECLOCALE": "0", "PYTHONUTF8": "0"}
+        r = subprocess.run([sys.executable, "-X", "utf8=0", "-c", code,
+                            str(Path(__file__).resolve().parent.parent), str(p)],
+                           capture_output=True, text=True, env=env)
+        self.assertEqual(r.stdout.strip(), "True", r.stderr)
+        self.assertEqual(json.loads(p.read_bytes())["t"], "a \u2014 b")
+
+    def test_a_line_that_is_not_utf8_is_skipped_like_any_bad_line(self):
+        # the audit: UnicodeDecodeError isn't a JSONDecodeError, so one such line crashed every reader
+        p = Path(self.tmp.name) / "rows.jsonl"
+        p.write_bytes(b'{"a": 1}\n{"b": "\xe9"}\n{"c": 3}\n')
+        rows, end = store.read_jsonl(p)
+        self.assertEqual(rows, [{"a": 1}, {"c": 3}])
+        self.assertEqual(end, p.stat().st_size)
+        p.write_bytes(b'{"b": "\xe9"}')
+        self.assertEqual(store.read_json(p, "default"), "default")
 
 
 class Fallback(unittest.TestCase):

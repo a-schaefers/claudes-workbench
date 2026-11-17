@@ -53,7 +53,9 @@ def need(name: str) -> store.Task:
 def spawn_runner(task: store.Task) -> int:
     env = {**os.environ, "PYTHONPATH": str(PKG_ROOT), "WB_HOME": str(store.home())}
     with open(task.dir / "runner.log", "a") as log:
-        proc = subprocess.Popen([sys.executable, "-m", "workbench.runner", task.name],
+        # -X utf8: the runner reads and writes its files as UTF-8 under any locale (the
+        # 2026-11-16 audit); a flag, not PYTHONUTF8, so the agent and its tests keep their own
+        proc = subprocess.Popen([sys.executable, "-X", "utf8", "-m", "workbench.runner", task.name],
                                 cwd=PKG_ROOT, env=env, stdin=subprocess.DEVNULL, stdout=log,
                                 stderr=log, start_new_session=True)  # outlives this command
     task.set_status(pid=proc.pid)
@@ -124,7 +126,7 @@ def cmd_start(a):
         repo = gitops.toplevel(Path(a.repo).resolve())
     except gitops.GitError:
         die(f"{a.repo} is not inside a git repository: wb init {a.repo} sets the project up")
-    spec_text = Path(a.spec).read_text() if a.spec != "-" else sys.stdin.read()
+    spec_text = Path(a.spec).read_text(encoding="utf-8") if a.spec != "-" else sys.stdin.read()
     if not spec_text.strip():
         die("the spec is empty")
     handed = _skill_names(a.skill)
@@ -160,7 +162,7 @@ def cmd_start(a):
     prompt = spec_text.rstrip() + PROTOCOL.format(branch=gitops.branch_name(a.name),
                                                   test_line=test_line, budget=budget)
     task.round_dir(1).mkdir(parents=True)
-    task.round_dir(1).joinpath("prompt.md").write_text(prompt)
+    task.round_dir(1).joinpath("prompt.md").write_text(prompt, encoding="utf-8")
     task.set_status(phase="queued", round=1, reviews=0, auto_fixes=0, tools=0,
                     tok_in=0, tok_out=0, session=None, last="starting",
                     skills=handed, skills_ever=handed, skills_rev=skills.revs(handed))
@@ -239,14 +241,14 @@ def cmd_feedback(a):
     if runner_alive(task):
         die(f"{a.name}'s runner is still running")
     text = a.text if a.text is not None else \
-        sys.stdin.read() if a.message == "-" else Path(a.message).read_text()
+        sys.stdin.read() if a.message == "-" else Path(a.message).read_text(encoding="utf-8")
     _spec_gaps(task, a.spec_gap)
     n = st.get("round", 1) + 1
     task.round_dir(n).mkdir(parents=True, exist_ok=True)
     rerun = " re-run the acceptance command and" if task.spec.get("test_cmd") else ""
     task.round_dir(n).joinpath("prompt.md").write_text(
         f"{lessons.FEEDBACK_HEAD} Make exactly these changes, then{rerun} finish with a short "
-        "summary:\n\n" + text.strip())
+        "summary:\n\n" + text.strip(), encoding="utf-8")
     reviews = st.get("reviews", 0) + 1
     task.set_status(context="fresh" if a.fresh else "keep" if a.keep_context else None)
     task.set_status(round=n, reviews=reviews, phase="queued",
@@ -271,7 +273,7 @@ def cmd_next(a):
         die(f"{a.name}'s runner is still running")
     step = st.get("steps", 1)
     try:  # read before anything is committed: a bad path must leave the step as it was
-        nxt = sys.stdin.read() if a.spec == "-" else Path(a.spec).read_text()
+        nxt = sys.stdin.read() if a.spec == "-" else Path(a.spec).read_text(encoding="utf-8")
     except OSError as e:
         die(f"can't read the next step's spec: {e}")
     if not nxt.strip():
@@ -298,7 +300,8 @@ def cmd_next(a):
     task.round_dir(n).joinpath("prompt.md").write_text(
         f"Step {step} of this task is done and committed ({commit}). The next step:\n\n"
         + nxt.rstrip()
-        + PROTOCOL.format(branch=spec["branch"], test_line=test_line, budget=budget))
+        + PROTOCOL.format(branch=spec["branch"], test_line=test_line, budget=budget),
+        encoding="utf-8")
     task.event({"ts": store.now(), "round": n, "kind": "next_step",
                 "text": f"step {step} committed as {commit}; next step sent"})
     if handed is not None:

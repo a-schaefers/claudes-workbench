@@ -52,14 +52,16 @@ def now() -> float:
 def write_json(path: Path, data) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     tmp = path.with_name(f".{path.name}.{os.getpid()}.tmp")
-    tmp.write_text(json.dumps(data, indent=2, ensure_ascii=False) + "\n")
+    # UTF-8 whatever the locale: under a legacy one an em dash in a spec failed to write and a
+    # file written under UTF-8 failed to read back (the 2026-11-16 audit)
+    tmp.write_text(json.dumps(data, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
     os.replace(tmp, path)  # readers (woken by inotify on the rename) never see half a file
 
 
 def read_json(path: Path, default=None):
     try:
-        return json.loads(path.read_text())
-    except (FileNotFoundError, json.JSONDecodeError):
+        return json.loads(path.read_text(encoding="utf-8"))
+    except (FileNotFoundError, ValueError):  # ValueError: bad JSON, or bytes that aren't UTF-8
         return default
 
 
@@ -79,7 +81,7 @@ def locked(path: Path, shared: bool = False, blocking: bool = True):
 
 def append_jsonl(path: Path, row: dict) -> None:
     with locked(path.with_name(path.name + ".lock")):
-        with open(path, "a") as fh:
+        with open(path, "a", encoding="utf-8") as fh:
             fh.write(json.dumps(row, ensure_ascii=False) + "\n")
 
 
@@ -99,7 +101,8 @@ def mark_trials(names: set[str]) -> list[str]:
         if hit:
             tmp = path.with_name(f".{path.name}.{os.getpid()}.tmp")
             tmp.write_text("".join(json.dumps({**r, "trial": True} if r.get("task") in names else r,
-                                              ensure_ascii=False) + "\n" for r in rows))
+                                              ensure_ascii=False) + "\n" for r in rows),
+                           encoding="utf-8")
             os.replace(tmp, path)
     return sorted(set(hit))
 
@@ -117,7 +120,7 @@ def read_jsonl(path: Path, offset: int = 0):
     for line in data[:end].splitlines():
         try:
             rows.append(json.loads(line))
-        except json.JSONDecodeError:
+        except ValueError:  # a torn line; one that isn't UTF-8 too, which crashed every reader (the audit)
             pass
     return rows, offset + end
 

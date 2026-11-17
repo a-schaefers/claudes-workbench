@@ -75,7 +75,7 @@ installed module:
 | Process | Started by | How it finds `workbench` |
 |---|---|---|
 | `wb` | the user, Claude, the mod | `bin/wb` puts its real path's repo root on `sys.path` (so the `~/.local/bin/wb` symlink works) |
-| the runner | `cli.spawn_runner` | `python -m workbench.runner <task>`, cwd and `PYTHONPATH` = the repo root, own session, output to `runner.log` |
+| the runner | `cli.spawn_runner` | `python -X utf8 -m workbench.runner <task>`, cwd and `PYTHONPATH` = the repo root, own session, output to `runner.log` |
 | the ask server | OpenCode, from the config layer's `mcp.servers.workbench` | `[sys.executable, <root>/bin/wb-ask-mcp]`, like `bin/wb` |
 | the git shim | the agent's shell (`<rules>/bin/git`) | `#!<python> -I` plus an explicit `sys.path.insert` |
 | the lane | the runner, before OpenCode | `python -I lane.py …`, a standard-library-only script |
@@ -247,7 +247,7 @@ it (its row is kept but left out by `store.results()`, and its lessons aren't ga
 
 ## The runner, inside
 
-`workbench/runner.py`, started as `python -m workbench.runner <task>` by `cli.spawn_runner` (cwd
+`workbench/runner.py`, started as `python -X utf8 -m workbench.runner <task>` by `cli.spawn_runner` (cwd
 and `PYTHONPATH` the repo root, `WB_HOME` set, its own session, stdout and stderr appended to the
 task's `runner.log`). `main` installs a SIGTERM handler that stops the agent's process group and
 raises `Stopped` (a `BaseException`, so no `except Exception` on the way swallows a stop); a stop
@@ -1718,7 +1718,10 @@ $WB_HOME (~/.local/state/workbench)
 `~/.local/state/workbench`. `write_json` writes `.<name>.<pid>.tmp` beside the file and renames it
 (no fsync); `read_json` returns the default for a missing or broken file. `append_jsonl` appends
 one line under `<file>.lock` (flock); `read_jsonl(path, offset)` returns the whole lines and the
-offset after the last one, skipping bad lines. `results(trials=False)` leaves out trial rows;
+offset after the last one, skipping bad lines (bad JSON, or bytes that aren't UTF-8). All of them
+read and write UTF-8 whatever the locale (the 2026-11-16 audit: under a legacy one an em dash in a
+spec failed to write), as do `wb start|next|feedback`'s specs and prompts, and the runner runs
+under `-X utf8`. `results(trials=False)` leaves out trial rows;
 `mark_trials` rewrites results.jsonl under its lock. `Task(name)`: `spec` (task.json) and `status`
 are re-read on every access; `set_status(**kw)` is a locked read-modify-write that adds
 `updated_at`; never write status.json directly. `all_tasks()` lists task directories with a
