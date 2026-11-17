@@ -1331,6 +1331,34 @@ class Routing(Base):
         self.assertNotIn("lessons:", out)
         self.assertTrue(store.read_jsonl(store.home() / "results.jsonl")[0][-1]["trial"])
 
+    def test_a_model_without_tool_calls_is_never_routed_or_started(self):
+        # the 2026-11-16 audit: wb model add printed "NO tool calls" and the router still picked it
+        cfg = json.loads(Path(os.environ["WB_OPENCODE_CONFIG"]).read_text())
+        cfg["provider"]["strata"]["models"]["strata"]["tool_call"] = False
+        Path(os.environ["WB_OPENCODE_CONFIG"]).write_text(json.dumps(cfg))
+        from workbench import router
+        self.assertEqual(router.choose("significant")[0].model.id, "ollama/qwen3.8-27b")
+        self.assertIn("tool_call: false", router.rank("significant")[-1].state["why"])
+        err = io.StringIO()
+        with self.assertRaises(SystemExit) as out, redirect_stderr(err):
+            run_wb("start", "t-notools", "--spec", str(self.spec), "--repo", str(self.repo),
+                   "--model", "strata")
+        self.assertEqual(out.exception.code, 3)
+        self.assertIn("can't call tools", err.getvalue())
+
+    def test_an_ollama_cloud_model_is_left_to_the_user_to_allow(self):
+        # the 2026-11-16 audit: a cloud model looked smallest, so trivial work went to ollama.com
+        cfg = json.loads(Path(os.environ["WB_OPENCODE_CONFIG"]).read_text())
+        cfg["provider"]["ollama"]["models"]["gpt-oss:120b-cloud"] = {}
+        Path(os.environ["WB_OPENCODE_CONFIG"]).write_text(json.dumps(cfg))
+        from workbench import router
+        self.assertEqual(router.choose("trivial")[0].model.id, "ollama/mimo-v2.6:9b-q8_0")
+        self.assertIn("Ollama cloud model", router.rank("trivial")[-1].state["why"])
+        err = io.StringIO()
+        with self.assertRaises(SystemExit), redirect_stderr(err):
+            run_wb("model", "add", "ollama/kimi:cloud")
+        self.assertIn("off this machine", err.getvalue())
+
     def test_set_default_writes_the_pick_to_opencode(self):
         out = run_wb("models", "--set-default")
         self.assertIn("→ strata/strata", out)
@@ -1603,6 +1631,35 @@ class ModelSet(Base):
         self.assertNotIn("new-coder:14b", self.config()["provider"]["ollama"]["models"])
         with self.assertRaises(SystemExit):
             run_wb("model", "add", "cloud/big")                    # not a local provider
+
+    def test_add_never_guesses_the_context_ollama_serves(self):
+        # the 2026-11-16 audit: with nothing set, the trained 256K was written while a stock
+        # Ollama served 4K-8K, and the prompt was cut off silently
+        Path(os.environ["WB_OPENCODE_CONFIG"]).write_text(json.dumps({"provider": {"ollama": {
+            "options": {"baseURL": "http://127.0.0.1:11434/v1"}, "models": {}}}}))
+        err = io.StringIO()
+        with self.assertRaises(SystemExit), redirect_stderr(err):
+            run_wb("model", "add", "ollama/coder:8b")
+        self.assertIn("OLLAMA_CONTEXT_LENGTH", err.getvalue())
+        self.assertEqual(self.config()["provider"]["ollama"]["models"], {})
+        run_wb("model", "add", "ollama/coder:8b", "--context", "32768")
+        self.assertEqual(self.config()["provider"]["ollama"]["models"]["coder:8b"]["limit"]["context"], 32768)
+
+    def test_the_first_add_makes_the_ollama_provider_and_an_empty_config_says_how(self):
+        # the 2026-11-16 audit: with no provider, add listed none and no doc said how to make one
+        Path(os.environ["WB_OPENCODE_CONFIG"]).write_text("{}")
+        err = io.StringIO()
+        with self.assertRaises(SystemExit), redirect_stderr(err):
+            run_wb("model", "add", "strata/x")
+        self.assertIn("wb model add ollama/<model> adds one", err.getvalue())
+        from workbench import hardware
+        with mock.patch.object(hardware, "ollama_env", return_value={"OLLAMA_HOST": "0.0.0.0:11500"}):
+            out = run_wb("model", "add", "ollama/coder:8b", "--context", "32768")
+        self.assertIn("added provider ollama", out)
+        prov = self.config()["provider"]["ollama"]
+        self.assertEqual(prov["npm"], "@ai-sdk/openai-compatible")
+        self.assertEqual(prov["options"]["baseURL"], "http://127.0.0.1:11500/v1")  # a bind address: loopback
+        self.assertIn("coder:8b", prov["models"])
 
     def test_retire_refuses_the_default(self):
         cfg = self.config(); cfg["model"] = "ollama/qwen3.8-27b"

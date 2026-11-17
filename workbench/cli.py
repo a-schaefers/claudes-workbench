@@ -728,7 +728,7 @@ def cmd_models(a):
     """What OpenCode offers, whether each can run, and who the router would pick per size."""
     found = models.discover()
     if not found:
-        die(f"no local models in {models.opencode_config_path()}")
+        die(f"no local models: {models.why_none()}")
     for m in found.values():
         st = models.status(m)
         print(f"{m.id:34} {('on GPU' if st['resident'] else 'ready' if st['available'] else 'no'):6}"
@@ -859,9 +859,18 @@ def cmd_scout(a):
                   + (f"\n    slice: {router.slice(m).line()}" if m else ""))
         extra = [x for x in installed if x not in prov["models"] and x.removesuffix(":latest")
                  not in prov["models"]]
-        if extra:
+        local = [x for x in extra if not installed[x]["cloud"]]
+        if local:
             print(f"  installed in {pid} but not registered: " + ", ".join(
-                f"{x} ({hardware.size(installed[x]['size'])})" for x in extra))
+                f"{x} ({hardware.size(installed[x]['size'])})" for x in local))
+        if cloud := [x for x in extra if installed[x]["cloud"]]:  # stubs: ollama.com runs them
+            print(f"  Ollama cloud models in {pid} (off this machine, not candidates): " + ", ".join(cloud))
+    if not provs:
+        print("  none: " + models.why_none())
+        if models.ollama_answers(root := models.ollama_root_here()):
+            print(f"  Ollama answers at {root} but OpenCode has no provider for it (wb model add "
+                  "ollama/<model> adds one); it has: " + (", ".join(
+                      x["name"] for x in models.ollama_installed(root)) or "nothing pulled"))
     cfg = models.read_config()
     print(f"  OpenCode's default: {cfg.get('model') or '(none)'}")
     print("\nreal results (wb stats)")
@@ -1151,10 +1160,32 @@ def cmd_model(a):
         return
     provider, _, name = a.id.partition("/")
     provs = models.providers()
+    if a.action == "add" and name and provider == "ollama" and provider not in provs:
+        try:  # the first run: Ollama answers, OpenCode has no provider for it
+            root = models.add_ollama_provider(provider)
+        except RuntimeError as e:
+            die(str(e))
+        if root:
+            print(f"added provider {provider} to {models.opencode_config_path()}: the Ollama at {root}")
+            provs = models.providers()
     if provider not in provs or not name:
-        die(f"name it provider/model, with one of OpenCode's local providers: {', '.join(provs)}")
+        skipped = dict(models.skipped_providers())
+        die(f"provider {provider}: {skipped[provider]}" if provider in skipped else
+            f"name it provider/model, with one of OpenCode's local providers: {', '.join(provs)}"
+            if provs else f"no local provider: {models.why_none()}")
     prov = provs[provider]
     if a.action == "add":
+        if prov["problem"]:
+            die(f"provider {provider}: {prov['problem']}")
+        if not prov["engine_known"] and not prov["start"]:
+            # a guess would write an Ollama entry without its output cap, or the reverse
+            # (the 2026-11-16 audit)
+            die(f"{prov['root']} is not answering, so wb can't tell whether {provider} is Ollama: "
+                f"start it, or set \"engine\" for {provider} in {models.overrides_path()}, and retry")
+        if prov["engine"] == "ollama" and models.ollama_cloud(prov["root"], name) \
+                and not models.cloud_allowed(a.id):
+            die(f"{a.id} is an Ollama cloud model: it runs on ollama.com, off this machine. To hand "
+                f"it work anyway, give it \"local\": true in {models.overrides_path()} first")
         if a.pull:
             if prov["engine"] != "ollama":
                 die(f"{provider} is not an Ollama provider; install the model the server's own way")
@@ -1165,10 +1196,18 @@ def cmd_model(a):
             die(f"{provider} can't describe {name} ({e}): is it pulled? (--pull downloads it)")
         caps = facts.get("capabilities") or []
         # the context the server actually serves: what Ollama says it gives this model, else what
-        # this provider's other models are set to, else what the model was trained for
+        # this provider's other models are set to. Never Ollama's trained length: it serves its
+        # own small default then, and the prompt was cut off silently (the 2026-11-16 audit)
         served = models.ollama_served_context(prov["root"], name) if prov["engine"] == "ollama" else None
         siblings = [(e.get("limit") or {}).get("context") for e in prov["models"].values()]
-        ctx = a.context or served or next((c for c in siblings if c), None) or facts.get("context_length")
+        ctx = a.context or served or next((c for c in siblings if c), None)
+        if prov["engine"] == "ollama":
+            if not ctx:
+                die(f"Ollama would serve {name} its own default context (often 4K-8K, too small for "
+                    "OpenCode's ~10K-token prompt): set OLLAMA_CONTEXT_LENGTH (e.g. 32768) in the "
+                    f"Ollama service and restart it, then wb model add {a.id} again; or pass "
+                    "--context N if you know what it serves")
+            ctx = min(ctx, facts.get("context_length") or ctx)  # never past what it was trained on
         entry = {"name": a.label or name,
                  "tool_call": "tools" in caps if caps else True,
                  "reasoning": "thinking" in caps if caps else True}
@@ -1181,7 +1220,8 @@ def cmd_model(a):
             models.write_entry(provider, name, entry)
         except RuntimeError as e:
             die(str(e))
-        print(f"registered {a.id}: {'tools' if entry['tool_call'] else 'NO tool calls'}, "
+        print(f"registered {a.id}: "
+              f"{'tools' if entry['tool_call'] else 'NO tool calls, so wb will not route tasks to it'}, "
               f"{'reasoning' if entry['reasoning'] else 'no reasoning'}, "
               f"{(ctx or 0) // 1024}K context\nnext: wb model sizes {a.id} … if it should only "
               "take some task sizes; the router guesses from its size until real tasks show more")
@@ -1414,24 +1454,37 @@ def cmd_doctor(a):
 
     good, said = version("opencode")
     line(good, f"opencode {said}")
-    cfg = models.opencode_config_path()
+    files = models.opencode_config_files()
     try:
         models.read_config()
-        line(cfg.exists(), f"OpenCode config {cfg}")
+        line(bool(files), "OpenCode config " + (" + ".join(map(str, files)) or
+                                                f"{models.opencode_config_path()} (none)")
+             + (" (OpenCode layers them; wb won't rewrite either)" if len(files) > 1 else ""))
     except ValueError as e:
-        line(False, f"OpenCode config {cfg} doesn't parse: {e}")
+        line(False, f"OpenCode config doesn't parse: {e}")
         sys.exit(1)  # nothing below can read the models
+    if os.environ.get("OPENCODE_CONFIG"):
+        print(f"--  OPENCODE_CONFIG is set ({os.environ['OPENCODE_CONFIG']}): wb reads only "
+              f"{models.opencode_config_path().parent}, and agents get their own layer in its "
+              "place, so providers there are invisible to both")
     good, said = version("git")
     line(good, said)
     on_path = shutil.which("wb")  # the mod runs `wb` by name (WB_BIN overrides it)
     line(bool(on_path or os.environ.get("WB_BIN")), f"wb on PATH: {on_path}" if on_path else
          "wb isn't on PATH, so the Claude Code mod can't run it: link bin/wb into a PATH directory")
     found = models.discover()
-    line(bool(found), f"{len(found)} local model(s) in {models.opencode_config_path()}")
+    line(bool(found), f"{len(found)} local model(s)")
+    for pid, why in models.skipped_providers():  # once dropped without a word (the 2026-11-16 audit)
+        print(f"--  provider {pid}: {why}")
+    if not models.providers() and models.ollama_answers(root := models.ollama_root_here()):
+        print(f"--  Ollama answers at {root} but OpenCode has no provider for it "
+              "(wb model add ollama/<model> adds one)")
     for m in found.values():
         st = models.status(m)
         print(f"{'ok ' if st['available'] else '-- '} model {m.id}: {st['why']}")
     for pid, prov in models.providers().items():
+        if prov["problem"]:
+            line(False, f"provider {pid}: {prov['problem']}")
         if prov["engine"] != "ollama":
             continue
         for name, e in prov["models"].items():
@@ -1439,6 +1492,13 @@ def cmd_doctor(a):
                  f"{pid}/{name} caps its output on Ollama (options.max_tokens; Ollama ignores the "
                  "max_completion_tokens OpenCode sends)")
             said, served = (e.get("limit") or {}).get("context"), models.ollama_served_context(prov["root"], name)
+            if not said:
+                print(f"--  {pid}/{name} has no limit.context: wb can't size its tasks or its "
+                      f"handovers (wb model add {pid}/{name} --context N writes one)")
+            elif not served:  # a stock Ollama serves 4K-8K (the 2026-11-16 audit)
+                print(f"--  {pid}/{name}: Ollama's served context is unknown (not loaded, no num_ctx, "
+                      f"no OLLAMA_CONTEXT_LENGTH); its default may be below the entry's "
+                      f"{said // 1024}K and cut prompts off: set OLLAMA_CONTEXT_LENGTH")
             if said and served and said > served:
                 line(False, f"{pid}/{name} says a {said // 1024}K context but Ollama serves "
                      f"{served // 1024}K: it would cut prompts off silently (raise OLLAMA_CONTEXT_LENGTH, "

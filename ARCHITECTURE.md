@@ -803,24 +803,52 @@ Code: `workbench/models.py` (discovery, status, residency, the GPU lease, adding
 `workbench/router.py` (choice, slice, budgets, speeds), `workbench/hardware.py` (the machine),
 `cli.cmd_models`, `cmd_model`, `cmd_scout`.
 
-**OpenCode's config.** `models.opencode_config_path()`: `$WB_OPENCODE_CONFIG`, else
-`$XDG_CONFIG_HOME/opencode/` (default `~/.config/opencode/`) `opencode.json` if it exists, else
-`opencode.jsonc` if it exists, else `opencode.json`. `read_config` always parses through
-`_strip_jsonc` (comments and trailing commas removed); `write_config` refuses unless the file is
-strict JSON (no comments, no trailing commas) and then says what to change by hand; a write
-reformats the file (atomic, indent 2).
+**OpenCode's config.** `models.opencode_config_files()`: `$WB_OPENCODE_CONFIG` alone, else
+whichever of `$XDG_CONFIG_HOME/opencode/` (default `~/.config/opencode/`) `opencode.json` and
+`opencode.jsonc` exist, in that order: OpenCode 2.3 layers both, the later winning, and
+`read_config` merges them the same way (dicts recursively), each parsed through `_strip_jsonc`
+(comments and trailing commas removed). `opencode_config_path()` is the one file wb writes and
+names: `opencode.json` if it exists, else `opencode.jsonc` if it exists, else `opencode.json`.
+`write_config` refuses while two files are layered (one merged file would undo the layering) and
+unless the file is strict JSON (no comments, no trailing commas), and then says what to change by
+hand; a write reformats the file (atomic, indent 2). `$OPENCODE_CONFIG` is not read: agents get
+their own layer in its place (`runner.agent_env`), so `wb doctor` notes it when set.
 
-**Discovery** (`discover`). A model is a candidate when it is an entry under a provider
-(`provider` or `providers`; `options`/`settings` with a `baseURL`) whose host is this machine:
+**Discovery** (`discover`, `_scan`). A model is a candidate when it is an entry under a provider
+(`provider` or `providers`; `options`/`settings` with a `baseURL`) that OpenCode loads (not in
+`disabled_providers`; in `enabled_providers` when that is set) and whose host is this machine:
 `localhost`, `0.0.0.0`, `host.docker.internal`, any loopback IP, the host name, its first label,
 or `<label>.local`, or any of the machine's own addresses (`_own_addresses`: the host name's
 `getaddrinfo` and `ip -o addr`, so a LAN or Tailscale IP counts) (`_this_host`). A
 provider elsewhere counts when models.json gives it `"local": true`; it is then `remote` and never
-shares the GPU. The id is `provider/name`; `root` is the baseURL without `/v1`. The engine
-(`_engine`): models.json `engine`, else a cached probe of `GET <root>/api/version` (a JSON
-`version` → `ollama`, an HTTP error → `server`), else a guess from the port (11434 → ollama).
+shares the GPU. The baseURL's `{env:NAME}` and `{file:path}` are resolved first, as OpenCode does
+(`_expand`: unset or unreadable is empty, a relative path is the config directory's, and a name
+the agent's environment drops, `runner.SECRET_ENV` unless commands.json `env` passes it, is empty
+too, since the agent's OpenCode won't see it). A provider with a baseURL that is skipped (disabled,
+not enabled, no host after resolving, another host) is named with the reason by
+`skipped_providers()`; `why_none()` puts those reasons (or, with none, how to make a provider) into
+`wb models`, `wb doctor`, `wb model add`, `resolve` and the router's "no local models". A
+provider with no baseURL is one of OpenCode's own cloud providers and is passed over silently.
+The id is `provider/name`; `root` is the baseURL without `/v1`. The engine (`_engine`):
+models.json `engine`, else a cached probe of `GET <root>/api/version` (a JSON `version` →
+`ollama`, an HTTP error → `server`), else a guess: Ollama's port 11434 or a provider id containing
+`ollama` → ollama (`engine_known` says whether it was said or probed rather than guessed).
 `resolve()` takes an exact id, an exact model or provider name, or a unique case-insensitive
 substring.
+
+Every request to a server on this machine (`_open`: probes, loads, pulls, the image engines) goes
+direct, never through an `http_proxy` in the environment, which urllib would otherwise use for
+loopback too (the 2026-11-16 audit: every model read "not answering" behind a proxy); a provider
+on another host keeps the environment's proxy. A provider's `options.apiKey` (its `{env:}` or
+`{file:}` resolved from wb's own environment) is sent as a bearer token on a server's `/models`
+probe; it is never printed or stored.
+
+**Ollama cloud models** (`ollama/<name>:cloud`, `…-cloud`, or an `/api/tags` row with
+`remote_host`/`remote_model`): Ollama forwards them to ollama.com, so they are not candidates:
+`status` says "an Ollama cloud model: it runs on ollama.com, off this machine", `weights` is 0
+(the stub's few hundred bytes once made one "the smallest", the 2026-11-16 audit), `wb model add`
+refuses one, and `wb scout` lists them apart from what is installed. models.json `"local": true`
+on the model's own id allows one; it is then `remote`, holding no GPU lease.
 
 **models.json** (`$WB_MODELS`, default `~/.config/workbench/models.json`, strict JSON; a
 malformed file breaks every command) holds only what OpenCode can't say, keyed by provider id or
@@ -832,13 +860,22 @@ model id; a model's entry is merged over its provider's (`{**provider, **model}`
 - `vram_gb`: the GPU memory it takes (decimal GB), for sharing and for `fits`;
 - `weights_gb`: its size, which always overrides Ollama's figure (servers can't report one);
 - `label`: the display name (also in `wb accept`'s commit message);
-- `engine` (`ollama`/`server`) and `local: true`: per provider only.
+- `engine` (`ollama`/`server`): per provider only;
+- `local: true`: on a provider, counts it although it is on another host; on an Ollama cloud
+  model's own id, allows that model.
 
-**Status** (`status` → {available, resident, why}): Ollama: not answering / `<name>` is not
-pulled / pulled / loaded (`/api/tags`, `/api/ps`). A server (`GET <base>/models`): running (a
-server listing several models must list this one: "the server lists N models, not …"); stopped
-with a `start` ("wb starts it"); not running with no start command. `wb models` and `wb doctor`
-print the reason. `weights()`: `weights_gb`, else Ollama's size, else 0.
+**Status** (`status` → {available, resident, why}). First what the config alone rules out, so
+the fake models meet it too: an entry with `tool_call: false` ("OpenCode's config says it can't
+call tools": the router never picks it, `wb start --model` refuses it; a missing key is OpenCode's
+default and counts as capable), a provider problem (`url_problem`: an Ollama provider, plain
+OpenAI-compatible, whose baseURL doesn't end in `/v1`, where Ollama's OpenAI API lives; OpenCode
+would get 404 on every request after the model loaded), an Ollama cloud model not allowed. Then
+Ollama: not answering / `<name>` is not pulled / a cloud model by its tags row / pulled / loaded
+(`/api/tags`, `/api/ps`). A server (`GET <base>/models`): running (a server listing several models
+must list this one: "the server lists N models, not …"); a 401 or 403 is running too ("it wants
+an API key"), so wb never starts a second copy; stopped with a `start` ("wb starts it"); not
+running with no start command. `wb models` and `wb doctor` print the reason. `weights()`:
+`weights_gb`, else Ollama's size (0 for a cloud model), else 0.
 
 **Residency** (`make_resident(m, keep)`, called by the runner under the lease). Nothing to do when
 `m` is resident and nothing else is. Else `free_gpu(keep={m, *keep})`: every other running
@@ -910,13 +947,28 @@ output: ctx/8}}` plus `options.max_tokens` = 2 × output (`ollama_cap`: Ollama i
 generation runs until the context is full, seen as 20K-token turns with no edit). The context is
 `--context`, else what Ollama serves (`ollama_served_context`: the loaded `context_length`, the
 Modelfile's `num_ctx`, `OLLAMA_CONTEXT_LENGTH`), else the provider's other models' setting, else
-the trained length. It merges into an existing entry, so hand-added keys and options stay; a config with
+never the trained length: with none of those, Ollama serves its own default (often 4K-8K, below
+OpenCode's ~10K-token prompt), so add refuses and says to set `OLLAMA_CONTEXT_LENGTH` or pass
+`--context` (the 2026-11-16 audit: a stock Ollama got a 256K entry and cut prompts off silently);
+the trained length only caps the result. It merges into an existing entry, so hand-added keys and options stay; a config with
 `providers` instead of `provider` is read too. A model Ollama can't describe gets "is it pulled?
-(--pull downloads it)". `wb model retire <id>
+(--pull downloads it)". A model without tool calls is registered with "NO tool calls, so wb will
+not route tasks to it". Add refuses a provider with a `url_problem`, an Ollama cloud model not
+allowed in models.json, and a provider whose server is down with its engine only guessed and no
+`start` (it can't tell whether to write Ollama's `max_tokens`). On a first run, `wb model add
+ollama/<model>` with no provider `ollama` in the config and an Ollama answering at
+`ollama_root_here()` (its service's `OLLAMA_HOST`, a bind address read as loopback, else
+`127.0.0.1:11434`) first writes the provider (`add_ollama_provider`): `{"npm":
+"@ai-sdk/openai-compatible", "name": "Ollama", "options": {"baseURL": "<root>/v1"}}` (under
+`providers`, with `settings`, when the config uses that shape); a provider the user wrote is never
+touched. `wb model retire <id>
 [--delete]` removes the entry (refusing OpenCode's default model) and with `--delete` the weights;
 its results stay. `wb model sizes <id> trivial|significant|…` sets `sizes`. `wb doctor` checks each
 Ollama entry for `options.max_tokens` and compares `limit.context` with what Ollama serves (more is
-BAD: prompts would be cut off silently; less is a note: tasks could be bigger).
+BAD: prompts would be cut off silently; less is a note: tasks could be bigger; unknown, or no
+`limit.context` at all, is a note), and fails a provider with a `url_problem`. It names each
+config file it read, each skipped provider with its reason, a set `$OPENCODE_CONFIG`, and an
+Ollama that answers while OpenCode has no provider at all.
 
 **The machine** (`hardware.py`, read fresh on each call; it is also on the hot path:
 `gpu_budget` runs in routing and in the lease). `system()`: `macos`, `wsl` (`/proc/version`
@@ -927,8 +979,9 @@ VRAM: AdapterRAM caps at 4 GB); Linux scans `/sys/class/drm/card*/device` (amdgp
 else listed from sysfs, VRAM unknown); macOS reads `system_profiler SPDisplaysDataType -json`
 (Apple Silicon: unified memory, `wired_limit`; an adapter with only shared memory, an Intel iGPU,
 has VRAM unknown).
-`memory()`: `/proc/meminfo` or `vm_stat`/`vm.swapusage`. `cpu()`, `ollama_env()` (systemctl or
-launchctl, then the process env), `ollama_models_dir()`, `report()` (the lines `wb scout`
+`memory()`: `/proc/meminfo` or `vm_stat`/`vm.swapusage`. `cpu()`, `ollama_env()` (`OLLAMA_MODELS`,
+`OLLAMA_CONTEXT_LENGTH`, `OLLAMA_NUM_PARALLEL`, `OLLAMA_HOST`: systemctl or launchctl, then the
+process env), `ollama_models_dir()`, `report()` (the lines `wb scout`
 prints). Unknowns stay unknown; nothing about the machine is hard-coded.
 
 **The weekly model check.** Models change fast. Once a week, in a quiet moment, the mod submits
@@ -1626,7 +1679,7 @@ message, not a traceback.
 | Command | Flags | What it does |
 |---|---|---|
 | `wb models` | `--set-default` | Each model's state, slice and speeds; the router's ranking per size. `--set-default` writes the significant-work pick as OpenCode's `model`. |
-| `wb model add <provider/model>` | `--pull`, `--label`, `--context N` | Registers an Ollama model in opencode.json, merged into any existing entry (see *Managing the set*). |
+| `wb model add <provider/model>` | `--pull`, `--label`, `--context N` | Registers an Ollama model in opencode.json, merged into any existing entry; on a first run it writes the `ollama` provider too; refuses a cloud model, an unknown served context, a down server of unknown engine (see *Managing the set*). |
 | `wb model retire <id>` | `--delete` | Unregisters it (not OpenCode's default) and drops its models.json overrides; `--delete` removes Ollama's weights. |
 | `wb model sizes <id> [trivial] [significant]` | | Limits the sizes it's routed (none: every size). |
 | `wb scout` | `--done [--notes "…"]`, `--due`, `--watch "…"`, `--unwatch N` | The weekly check's facts; `--done` records it; `--due` exits 0 when one is due (7 days); the watch list. |
@@ -1648,7 +1701,7 @@ message, not a traceback.
 | `wb init <dir>` | | A project the way Claude keeps one: git on the default branch, an initial commit, AGENTS.md → CLAUDE.md (refuses inside another repo or without a git identity). |
 | `wb setup` | `--force` (replaces a link that points elsewhere; never a real file) | Links `~/.local/bin/wb` to this copy's `bin/wb` and Claude Code's `skills/delegate` to its `skill/delegate`, warns when `~/.local/bin` isn't on PATH; exit 1 when it left something in the way (see *Installing*). |
 | `wb update` | `--check` (only say whether origin has news: `update available: N new commit(s)…` or `up to date`), `--if-due` (with `--check`: ask origin at most weekly, `UPDATE_EVERY`, else answer from `update.json`; never with `CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC`) | Updates this copy (see *Installing*): refuses while any runner is live; a marketplace copy runs `claude plugin marketplace update workbench` then `claude plugin update workbench@workbench`; a clone (refusing uncommitted tracked changes) runs `git pull --ff-only` first. Prints `updated <kind> a..b (N commit(s))` or `already up to date`. The fetch never prompts (`GIT_TERMINAL_PROMPT=0`, ssh `BatchMode`). |
-| `wb doctor` | | `opencode --version`, the OpenCode config, git, models found and each one's readiness, each Ollama entry's `options.max_tokens` and context against what Ollama serves, the state directory, a real lane drawn around a test write (`ok agents write only in their lane (Landlock ABI N)`), `wb` on PATH (or `WB_BIN`) for the mod, where the mod lives. `ok`/`BAD` lines set the exit code; `--` lines inform. |
+| `wb doctor` | | `opencode --version`, the OpenCode config files (and a set `$OPENCODE_CONFIG`), git, models found and each one's readiness, the providers skipped and why, a provider's baseURL problem, each Ollama entry's `options.max_tokens` and context against what Ollama serves (or that it can't say), the state directory, a real lane drawn around a test write (`ok agents write only in their lane (Landlock ABI N)`), `wb` on PATH (or `WB_BIN`) for the mod, where the mod lives. `ok`/`BAD` lines set the exit code; `--` lines inform. |
 
 ## Files and formats
 
@@ -1682,7 +1735,7 @@ $WB_HOME (~/.local/state/workbench)
   commands.json ($WB_COMMANDS)   the user's standing allowances: {"allow": [patterns], "paths": [dirs], "env": [names]}
   chat.json ($WB_CHAT_CONFIG)    the web chat's {"bind": [...], "hosts": [...]}
   chat-token ($WB_CHAT_TOKEN)    the web chat's token, mode 600
-~/.config/opencode/opencode.json (or .jsonc under $XDG_CONFIG_HOME; $WB_OPENCODE_CONFIG) the models
+~/.config/opencode/opencode.json + .jsonc (layered, under $XDG_CONFIG_HOME; $WB_OPENCODE_CONFIG) the models
 ```
 
 **Store primitives** (`workbench/store.py`). `home()` is `$WB_HOME`, else
@@ -1829,7 +1882,9 @@ main (*Shipping to main*).
   holder) and `can_share`.
 - `tests/test_portable.py`: discovery against real HTTP servers on port 0 (the Ollama probe, the
   port guess, multi-model servers, loopback and host names, `local: true`, `opencode.jsonc` under
-  `XDG_CONFIG_HOME`, `CLAUDE_CONFIG_DIR`), the polling watcher (`watch._libc = False`), fit,
+  `XDG_CONFIG_HOME` and layered with `opencode.json`, provider filters and `{env:}` URLs, skipped
+  providers, `/v1`, cloud models, API keys, a proxy, a down Ollama on another port,
+  `CLAUDE_CONFIG_DIR`), the polling watcher (`watch._libc = False`), fit,
   budgets.
 - `tests/test_sizing.py`: the slice guess and its correction from real steps.
 - `tests/test_workflows.py`: the merge gate, in plain text (no YAML library): every action pinned

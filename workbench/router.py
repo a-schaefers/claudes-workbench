@@ -154,7 +154,7 @@ def choose(size: str, stack=()) -> tuple[Score | None, str]:
     if top is None:
         return None, "no local model can run: " + "; ".join(
             f"{s.model.id}: {s.state['why']}" for s in ranked) if ranked else \
-            "no local models in opencode.json"
+            "no local models: " + models.why_none()
     usable = [s for s in ranked if s.state["available"]]
     sizes = [s.weights for s in usable if s.fits is not False or top.fits is False]
     if len(usable) == 1:
