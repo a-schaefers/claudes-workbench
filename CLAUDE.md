@@ -214,7 +214,7 @@ Environment: `WB_HOME`, `WB_MODELS`, `WB_SKILLS`, `WB_IMAGES`, `WB_CHAT_TOKEN`, 
 or start with `~` (`store.absolute_env` makes them absolute against wb's cwd); `WB_COMPACT_AT` (the
 mod's early compaction, a percentage, 0 off); `WB_BIN` (the `wb` the mod runs); `WB_TASK` (set
 for the ask server and the agent); `CLAUDE_CODE_SESSION_ID` (Claude Code's: `wb start` records it,
-which session's task it is). Tests only: `WB_OPENCODE_BIN` (a command line, split with
+which session's task it is) and `CLAUDE_PID` (its process: once gone, the directory rule adopts the task). Tests only: `WB_OPENCODE_BIN` (a command line, split with
 `shlex`: the fake), `WB_FAKE_MODELS` (no model servers), `WB_FAKE_GPU_GB` (the fake GPU's size;
 unset: unknown, so no sharing).
 
@@ -300,7 +300,7 @@ PATH and the lane; the rest is only imitated by the fake.
   opencode mcp list --print-logs`.
 - The mod does nothing: `wb` must be on Claude Code's PATH (`WB_BIN` moves only the mod's calls;
   Claude's Bash still runs `wb` by name; the mod toasts once when it can't run `wb events`); a
-  task started from another project's directory wakes that session, not this one; `claude --debug`
+  task started in another live session wakes that session, not this one; `claude --debug`
   shows hook errors.
 - A test fails: the task's `runner.log` is under the test's temp `WB_HOME` (deleted at tearDown);
   `wait_phase` prints the status when it times out. An interrupted run can leave detached runners

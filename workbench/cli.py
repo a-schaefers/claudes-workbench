@@ -360,8 +360,10 @@ def cmd_start(a):
     limits = router.budgets(m)  # from the model's measured speed on this machine, else defaults
     store.write_json(task.dir / "task.json", {
         "name": a.name, "repo": str(repo), "cwd": os.getcwd(), "base": base, "base_ref": a.base,
-        # the Claude Code session whose Bash ran this (_scope, the mod's `mine`); none by hand
+        # the Claude Code session whose Bash ran this (_scope, the mod's `mine`); none by hand.
+        # And its process: once that is gone, the directory rule may hand the task to a new one
         **({"session": sid} if (sid := os.environ.get("CLAUDE_CODE_SESSION_ID")) else {}),
+        **({"claude_pid": int(pid)} if (pid := os.environ.get("CLAUDE_PID", "")).isdigit() else {}),
         "base_branch": gitops.start_branch(repo, a.base),  # where wb accept --merge lands
         "branch": gitops.branch_name(a.name), "model": m.id, "model_label": m.label,
         "opencode_model": m.id, "route": why, "size": a.size, "stack": stack,
@@ -703,18 +705,35 @@ def cmd_watch(a):
         sys.stdout = open(os.devnull, "w")
 
 
+def _gone(pid) -> bool:
+    """Whether the Claude Code process a task recorded (task.json `claude_pid`) has exited. One we
+    can't signal isn't it either: it ran as this user. Unknown (no pid) is not gone."""
+    if not isinstance(pid, int) or isinstance(pid, bool) or pid <= 0:
+        return False
+    try:
+        os.kill(pid, 0)
+    except (ProcessLookupError, PermissionError):
+        return True
+    except OSError:
+        return False
+    return False
+
+
 def _scope(tasks, where, sessions=None):
     """The tasks of one Claude Code session, as the mod names it: `sessions` (`--session`, every
     id its process has had: /clear starts another) and `where` (`--repo`, its directory). A task
-    `wb start` recorded a session for (task.json `session`) is that session's, wherever it ran.
-    One without (started by hand, or before 0.90), or with no `sessions` given (by hand), goes by
-    directory: its `repo` is `where`, inside it or holds it, or its `cwd` (where wb start ran) is
-    `where` or inside it. A session in the home directory or / claims none by directory. A task
-    with neither key is everyone's. The others belong to another project's session, which its
-    mod wakes and its quit commands stop (the 2026-11-16 audit: two projects at once, one
-    session's /delegate-quit stopped the other's agents; the 0.90 review: a task started from ~
-    belonged to every session under it, and one started after a `cd` elsewhere to none).
-    Returns (mine, others)."""
+    `wb start` recorded a session for (task.json `session`) is that session's, wherever it ran;
+    once the Claude Code process it ran in is gone (`claude_pid`, `_gone`), the directory rule
+    claims it too, so a new process in the project adopts the old one's tasks (the 0.90 review:
+    after a crash or an update, plain `claude` in the same repo was woken for none of them, and
+    its quit left them running for nobody). One without a session (started by hand, or before
+    0.90), or with no `sessions` given (by hand), goes by directory: its `repo` is `where`,
+    inside it or holds it, or its `cwd` (where wb start ran) is `where` or inside it. A session
+    in the home directory or / claims none by directory. A task with neither key is everyone's.
+    The others belong to another session, which its mod wakes and its quit commands stop (the
+    2026-11-16 audit: two projects at once, one session's /delegate-quit stopped the other's
+    agents; the 0.90 review: a task started from ~ belonged to every session under it, and one
+    started after a `cd` elsewhere to none). Returns (mine, others)."""
     if not where and not sessions:
         return list(tasks), []
     here = Path(where).resolve() if where else None
@@ -722,21 +741,23 @@ def _scope(tasks, where, sessions=None):
     mine, others = [], []
     for t in tasks:
         sid, cwd, repo = (t.spec.get(k) for k in ("session", "cwd", "repo"))
+        # Path.is_relative_to compares whole components: /x/ab isn't inside /x/a
+        near = here is not None and not broad and bool(
+            cwd and Path(cwd).is_relative_to(here)
+            or repo and (Path(repo).is_relative_to(here) or here.is_relative_to(repo)))
         if sessions and sid:
-            ok = sid in sessions
+            ok = sid in sessions or near and _gone(t.spec.get("claude_pid"))
         elif here is None or (not cwd and not repo):
             ok = True
-        else:  # Path.is_relative_to compares whole components: /x/ab isn't inside /x/a
-            ok = not broad and bool(
-                cwd and Path(cwd).is_relative_to(here)
-                or repo and (Path(repo).is_relative_to(here) or here.is_relative_to(repo)))
+        else:
+            ok = near
         (mine if ok else others).append(t)
     return mine, others
 
 
 def _others_line(others, what):
     if others:
-        return (f"{what} (other projects' sessions): "
+        return (f"{what} (other sessions'): "
                 + ", ".join(f"{t.name} ({t.spec.get('repo')})" for t in others))
     return ""
 

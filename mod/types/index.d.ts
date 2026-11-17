@@ -18,6 +18,8 @@ export type WbTask = {
   cwd: string
   /** the Claude Code session `wb start` ran in ('' by hand, or before 0.90): whose task it is */
   session: string
+  /** the Claude Code process it ran in (0 when unknown): once gone, the directory rule adopts it */
+  claude_pid: number
 }
 
 /** One line of `wb watch --json`: a style name and the text. */

@@ -88,6 +88,7 @@ class Base(unittest.TestCase):
         self.env_before = dict(os.environ)
         # the suite may run in Claude Code's Bash: no task is a session's unless a test says so
         os.environ.pop("CLAUDE_CODE_SESSION_ID", None)
+        os.environ.pop("CLAUDE_PID", None)
         os.environ.update(WB_HOME=str(tmp / "state"), WB_OPENCODE_BIN=FAKE, WB_FAKE_MODELS="1",
                           WB_OPENCODE_CONFIG=str(tmp / "opencode.json"),
                           WB_MODELS=str(tmp / "wb-models.json"), WB_SKILLS=str(tmp / "skills"),
@@ -1312,15 +1313,15 @@ class Steering(Base):
         status = run_wb("status", "--repo", here)
         self.assertIn("t-mine", status)
         self.assertEqual([l for l in status.splitlines() if "t-theirs" in l],
-                         [f"open elsewhere (other projects' sessions): t-theirs ({other})"])
+                         [f"open elsewhere (other sessions'): t-theirs ({other})"])
         out = run_wb("stop", "--all", "--repo", here)
         self.assertIn("t-mine", out)
-        self.assertIn("left running (other projects' sessions): t-theirs", out)
+        self.assertIn("left running (other sessions'): t-theirs", out)
         self.assertEqual(store.Task("t-theirs").status["phase"], "running")
         self.assertEqual(store.Task("t-mine").status["phase"], "stuck")
         out = run_wb("takeover", "--all", "--repo", here)
         self.assertIn("took over t-mine", out)
-        self.assertIn("left alone (other projects' sessions): t-theirs", out)
+        self.assertIn("left alone (other sessions'): t-theirs", out)
         self.assertEqual(store.Task("t-theirs").status["phase"], "running")
         with self.assertRaises(SystemExit):
             run_wb("stop", "t-mine", "--repo", here)       # a scope goes with --all
@@ -1349,7 +1350,7 @@ class Steering(Base):
             out = run_wb("status", *argv)
             return "".join(l for l in out.splitlines() if l.startswith("open elsewhere"))
         b = str(parent / "b")
-        self.assertEqual(elsewhere("--repo", b, *ids), "open elsewhere (other projects' sessions): "
+        self.assertEqual(elsewhere("--repo", b, *ids), "open elsewhere (other sessions'): "
                          f"t-parent ({parent / 'a'}), t-theirs ({self.repo})")  # t-mine is its own
         self.assertNotIn("t-theirs", elsewhere("--repo", str(self.repo)))  # by hand: directories
         self.assertIn("t-theirs", elsewhere("--repo", str(self.repo), *ids))  # an id outranks them
@@ -1359,11 +1360,36 @@ class Steering(Base):
         self.assertIn("t-parent", elsewhere("--repo", str(parent)))   # none by directory
         out = run_wb("takeover", "--all", "--repo", b, *ids)
         self.assertIn("took over t-mine", out)
-        self.assertIn("left alone (other projects' sessions): ", out)
+        self.assertIn("left alone (other sessions'): ", out)
         self.assertEqual([store.Task(n).status["phase"] for n in ("t-theirs", "t-parent")],
                          ["running", "running"])
         with self.assertRaises(SystemExit):
             run_wb("stop", "t-mine", "--session", "sess-1")           # a scope goes with --all
+
+    def test_a_new_claude_code_process_in_the_project_adopts_the_tasks_of_one_that_is_gone(self):
+        # the 0.90 review: Claude Code exited (a crash, an update) and plain `claude` in the same
+        # repo got a new session id: none of the tasks were its own, so no wake, and its quit
+        # left them running for nobody
+        claude = subprocess.Popen(["sleep", "60"])               # the first Claude Code process
+        self.addCleanup(claude.kill)
+        os.environ.update(CLAUDE_CODE_SESSION_ID="sess-1", CLAUDE_PID=str(claude.pid))
+        self.start("t-old", "slow")
+        self.wait_session("t-old")
+        self.assertEqual(store.Task("t-old").spec["claude_pid"], claude.pid)
+        here, new = str(self.repo), ("--session", "sess-2")
+
+        def elsewhere(*argv):
+            return "".join(l for l in run_wb("status", *argv).splitlines()
+                           if l.startswith("open elsewhere"))
+        self.assertIn("t-old", elsewhere("--repo", here, *new))   # its process lives: its own
+        claude.kill()
+        claude.wait()
+        self.assertEqual(elsewhere("--repo", here, *new), "")      # gone: the project's session's
+        self.assertIn("t-old", elsewhere("--repo", str(Path(self.tmp.name) / "b"), *new))
+        os.environ["HOME"] = here                                  # a session in ~ adopts none
+        self.assertIn("t-old", elsewhere("--repo", here, *new))
+        os.environ["HOME"] = self.env_before.get("HOME", "/")
+        self.assertIn("stopped: t-old", run_wb("stop", "--all", "--repo", here, *new))
 
     def test_takeover_stops_the_agent_and_hands_over_the_worktree(self):
         self.start("t-take", "slow", "--test", TEST_CMD)
