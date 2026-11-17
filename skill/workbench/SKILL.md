@@ -1,16 +1,16 @@
 ---
-name: delegate
+name: workbench
 description: >
-  Delegate mode for the rest of the session: Claude hands the coding of each request to local
+  Workbench mode for the rest of the session: Claude hands the coding of each request to local
   models running in OpenCode, via the workbench `wb` CLI, which routes each task to the best
   local model for its size; Claude writes the spec, reviews the diff, and accepts or sends
   feedback, so Claude spends tokens on specs and review instead of code generation. Only when
-  the user invokes /delegate — never on your own.
+  the user invokes /workbench — never on your own.
 disable-model-invocation: true
 argument-hint: "[first task] [--model <id>] [--merge]"
 ---
 
-# /delegate — local agent writes, Claude reviews
+# /workbench — local agent writes, Claude reviews
 
 The user's Claude budget is tight; that is the point of this mode. You are **architect and
 reviewer**: write a precise spec, hand it to a local agent with `wb`, let the runner's test gate
@@ -48,18 +48,19 @@ it works, explain the why in feedback.
 no `Co-Authored-By` or other AI credit line; `wb accept` writes only the task's provenance
 trailers. Don't add one yourself.
 
-## Delegate mode
-`/delegate` turns delegate mode on for the rest of this session; the Workbench pane opening is
-the user's sign that it is on. The user then works with you as usual, in plain words, and never
-types /delegate again: each request is handled the way this skill says, until they run
-`/delegate-quit` or `/delegate-quit-and-hand-back-claude`.
-- **First task:** `$ARGUMENTS`. Empty? Reply in one line that delegate mode is on and wait for
+## Workbench mode
+`/workbench` turns workbench mode on for the rest of this session; the Workbench pane opening is
+the user's sign that it is on. The user then works with you as usual, in plain words: each
+request is handled the way this skill says, until they run `/workbench-quit` or
+`/workbench-quit-and-hand-back-claude`. Running `/workbench` again while it is on only brings
+the pane back (the mod answers it; with a task, the task is yours to take as usual).
+- **First task:** `$ARGUMENTS`. Empty? Reply in one line that workbench mode is on and wait for
   their first request. Don't scan the repo or check models until there is work.
 - **What goes to the agents:** the coding: features, fixes, refactors, tests, boilerplate.
   Answer questions, read code, plan, and do what is yours (git, CLAUDE.md, `.claude/`, anything
   outward) yourself, as always. An edit that costs less to make than to spec (a typo, one line)
   you may just make.
-- **After a compaction or `/clear`**, a `delegate-mode` context block says the mode is still on
+- **After a compaction or `/clear`**, a `workbench-mode` context block says the mode is still on
   and where this file is: read it again if its procedure is no longer in your context.
 - **Plans are handoff plans**, in plan mode or not: see "Planning work you will hand off" below.
 
@@ -93,7 +94,7 @@ it that way; the agents never write either.
   build or tests need one is yours, or its acceptance command must not need it.
 
 ## Planning work you will hand off
-In delegate mode every plan you write is for agents weaker than you, who see only the spec you
+In workbench mode every plan you write is for agents weaker than you, who see only the spec you
 send, so the plan the user approves is already the list of specs, each sized and checked by §1
 and §2. That holds in plan mode, which is read-only: read the code, `wb models` and `wb status`
 if you can, and start nothing until the plan is approved; then write the first spec and
@@ -153,11 +154,11 @@ another host that is the user's own server (WSL2's Windows host, a LAN box) need
 `local: true`. Ollama cloud models (`:cloud`) run off this machine: never register one without
 the user's explicit yes.
 
-**Updating workbench.** The mod checks weekly and tells the user; `/delegate-update` is theirs.
+**Updating workbench.** The mod checks weekly and tells the user; `/workbench-update` is theirs.
 Asked to update it yourself: `wb update` (it refuses while tasks run; tell the user to restart
 Claude Code or run `/reload-plugins` after).
 
-**The weekly model check.** Once a week the mod asks you (or the user runs `/delegate-models`)
+**The weekly model check.** Once a week the mod asks you (or the user runs `/workbench-models`)
 to check the local models against this machine. `wb scout` gives the facts: GPU and VRAM, RAM,
 disk, what is installed and registered, real-task results, and the watch list
 (models set aside, with what each needs before it is tried again: check each against what is
@@ -433,18 +434,18 @@ You are the driver, not a spectator. When something tells you the agent is headi
 Notes are instructions, like feedback: concrete and short.
 
 **The user's two commands.** Only these, never words in a message, stop the delegation and end
-delegate mode; the mod runs them, closes the pane and tells you what it did:
-- **`/delegate-quit-and-hand-back-claude`**: take over. This session's agents are already stopped
-  (`wb takeover --all --repo <here> --session "$CLAUDE_CODE_SESSION_ID"`). Leave delegate mode and finish the work yourself without pausing: review
+workbench mode; the mod runs them, closes the pane and tells you what it did:
+- **`/workbench-quit-and-hand-back-claude`**: take over. This session's agents are already stopped
+  (`wb takeover --all --repo <here> --session "$CLAUDE_CODE_SESSION_ID"`). Leave workbench mode and finish the work yourself without pausing: review
   what each agent left, complete it in its worktree to your standard, run the acceptance command,
   `wb accept`, then carry on with the rest of the request directly, without delegating.
-- **`/delegate-quit`**: stop. This session's delegated agents are already stopped (`wb stop
+- **`/workbench-quit`**: stop. This session's delegated agents are already stopped (`wb stop
   --all --repo <here> --session "$CLAUDE_CODE_SESSION_ID"`). Work directly from now on. Don't finish, restart or clean up anything
   unless asked; worktrees are kept.
 Tasks listed as left alone belong to another live session: leave them unless asked.
 Without the mod, the user may ask for the same in words; run those commands then.
 
-**The web chat.** While delegate mode is on in a session, the user can reach you from their phone
+**The web chat.** While workbench mode is on in a session, the user can reach you from their phone
 (`wb chat serve` on port 1337; the link is localhost, and reaching it from a phone is the user's own setup). Their message arrives as a prompt that is
 just `[web chat] <their words>` (or, while you're mid-turn, delivered into the turn by the mod,
 with one line saying so); it has the same authority as one typed here. They read your answers on a phone, so
@@ -527,7 +528,7 @@ block lists the open tasks. So don't carry diffs or reports forward: `wb status`
 **What you learn about the user.** When the user tells you how they want delegation run (a
 review bar, how much to ask them, what to merge, a style they always want), and it would hold in
 any project, `wb notes add "<it, in one sentence>"`. Your own memory stays in one project; these
-notes come back in every session in delegate mode (a `user-notes` block). A fact about one repo
+notes come back in every session in workbench mode (a `user-notes` block). A fact about one repo
 goes in that repo's CLAUDE.md instead. Drop a note that has stopped holding (`wb notes drop N`).
 
 ## 6. Finish

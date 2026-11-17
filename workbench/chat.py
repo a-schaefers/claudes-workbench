@@ -1,7 +1,7 @@
 """The web chat: a side door to Claude for the user when they are away from the terminal.
 
 `wb chat serve` serves a small page and a JSON API. Messages the user sends are appended to
-chat/messages.jsonl; the mod of a Claude Code session in /delegate mode picks them up, records a
+chat/messages.jsonl; the mod of a Claude Code session in /workbench mode picks them up, records a
 receipt (chat/receipts.jsonl) and submits each to Claude as a prompt. Claude answers with
 `wb chat reply`, which the page shows. chat/listener.json is the session currently listening
 (the mod rewrites it every poll), so the page can say whether anyone will read a message now.

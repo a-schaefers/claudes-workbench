@@ -1,7 +1,7 @@
 """What this machine has to run models on, found fresh each time: nothing about it is written down.
 
 `wb scout` reports it next to the installed models, so Claude can judge each week which models
-are the best fit for this hardware right now (the /delegate skill's weekly model check).
+are the best fit for this hardware right now (the /workbench skill's weekly model check).
 
 Linux reads sysfs and /proc; WSL2 adds what Windows says about its GPUs (only NVIDIA's are
 visible inside WSL); macOS asks sysctl and system_profiler, and on Apple Silicon the GPU's memory

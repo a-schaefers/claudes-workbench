@@ -25,7 +25,7 @@ test('with no tasks the pane says how to start one, on every surface', async ($,
   }
 })
 
-test('/delegate-pane opens the pane and counts open tasks', async ($, on) => {
+test('/workbench run again brings the pane back; alone, it is all it does', async ($, on) => {
   let opened = ''
   let closed = ''
   let held: any[] = []
@@ -44,17 +44,48 @@ test('/delegate-pane opens the pane and counts open tasks', async ($, on) => {
   on('clock.now', () => ({ value: 1_800_000_000_000 }))
   on('clock.every', () => ({ value: { cancel: () => {} } }))
   on('session.start', (_, e) => ({ cwd: e.cwd }))
+  on('skill.prompt', (_: any, e: any) => ({ text: e.text }))
+  on('fs.exists', () => ({ value: false }))                      // the mode's poll: no state yet
+  on('process.run', () => ({ value: { exitCode: 0, stdout: '', stderr: '' } }))
+  const skill = (task: string) => $.skill.prompt({ skill: 'workbench', frontmatter: {}, source: 'userSettings',
+    text: `- **First task:** \`${task}\`. Empty? Reply in one line that workbench mode is on.` })
 
   await $.session.start({ cwd: '/', surface: 'terminal', isInteractive: true })
-  const out = await $.command.run({ command: 'delegate-pane', args: '' })
-  expect(opened).toBe('workbench')
-  expect(closed).toBe('')
-  expect(JSON.stringify(out)).toContain('no open tasks')
-  // closed by accident, the engine still holding it out of sight: /delegate-pane brings it back
+  expect((await skill('')).text).toContain('First task')         // the skill, the first time
+  expect([closed, opened]).toEqual(['', 'workbench'])
+  // closed by accident, the engine still holding it out of sight: /workbench brings it back,
+  // and Claude isn't handed the whole skill again to say so (2026-11-17: was /delegate-pane)
   held = [{ id: 'workbench', title: 'Workbench', isShown: false, isFocused: false, isPlaced: true }]
   opened = ''
-  await $.command.run({ command: 'delegate-pane', args: '' })
+  expect((await skill('')).text).toContain('The user ran /workbench again')
   expect([closed, opened]).toEqual(['workbench', 'workbench'])
+  // with a task, the skill comes as usual
+  expect((await skill('add a high-score screen')).text).toContain('add a high-score screen')
+})
+
+test('a copy updated from /delegate gets its /workbench link from wb setup', async ($, on) => {
+  const ran: string[][] = []
+  const toasts: string[] = []
+  on('command.register', (_: any, e: any) => ({ value: { command: e.name } }))
+  on('env.get', (_: any, e: any) => ({ value: ({ HOME: '/home/u', WB_HOME: '/wb' } as any)[e.name] }))
+  on('clock.now', () => ({ value: 1_800_000_000_000 }))
+  on('clock.every', () => ({ value: { cancel: () => {} } }))
+  on('session.start', (_, e) => ({ cwd: e.cwd }))
+  on('fs.stat', (_: any, e: any) => {
+    if (e.path !== '/home/u/.claude/skills/delegate') throw new Error(`ENOENT: ${e.path}`)
+    return { value: { kind: 'other', size: 0, mtimeMs: 0, isLink: true } }   // the old link, leading nowhere
+  })
+  on('process.run', (_: any, e: any) => {
+    ran.push(e.argv)
+    return { value: { exitCode: 0, stdout: '', stderr: '' } }
+  })
+  on('ui.toast', (_: any, e: any) => {
+    toasts.push(e.text)
+    return { value: undefined }
+  })
+  await $.session.start({ cwd: '/', surface: 'terminal', isInteractive: false })
+  expect(ran).toContainEqual(['wb', 'setup'])
+  expect(toasts.join('\n')).toContain('/delegate is now /workbench')
 })
 
 // A file system in memory: what `wb` and its runner would have written. `ui` records the pane
@@ -219,7 +250,7 @@ test('a task wb start ran in this session is its own wherever it ran, also after
   notice(files, { ts: ts0 + 60, task: 'scratch', kind: 'review', text: 'REPORT-again' })
   await clock.advance(31_000)                                  // the safety poll reads it
   expect(woken.filter(t => t.includes('REPORT-again'))).toHaveLength(1)
-  await $.command.run({ command: 'delegate-quit', args: '' })
+  await $.command.run({ command: 'workbench-quit', args: '' })
   expect(runs.at(-1)).toEqual(['wb', 'stop', '--all', '--repo', '/home/u', '--session', 'sess-1', '--session', 'sess-2'])
 })
 
@@ -526,7 +557,7 @@ test('the pane follows the running task: its whole history, then what it is doin
   expect(watches().length).toBeGreaterThan(1)
 })
 
-test('/delegate-quit stops everything; /delegate-quit-and-hand-back-claude hands the tasks to Claude', async ($, on) => {
+test('/workbench-quit stops everything; /workbench-quit-and-hand-back-claude hands the tasks to Claude', async ($, on) => {
   const clock = mock.clock(on, { now: 1_800_000_000_000 })
   fakeTasks(on, {})
   const runs: string[][] = []
@@ -542,17 +573,17 @@ test('/delegate-quit stops everything; /delegate-quit-and-hand-back-claude hands
   on('ui.toast', () => ({ value: undefined }))
   await $.session.start({ cwd: '/', surface: 'terminal', isInteractive: true })
 
-  const quit = await $.command.run({ command: 'delegate-quit', args: '' })
+  const quit = await $.command.run({ command: 'workbench-quit', args: '' })
   expect(runs.at(-1)).toEqual(['wb', 'stop', '--all', '--repo', '/'])  // this session's tasks
   expect(quit.text).toContain('stopped: fix-it')
   expect(JSON.stringify(quit.context)).toContain("Don't finish, restart")  // Claude is told
   expect(submitted.length).toBe(0)                                         // without a turn
 
-  await $.command.run({ command: 'delegate-quit-and-hand-back-claude', args: '' })
+  await $.command.run({ command: 'workbench-quit-and-hand-back-claude', args: '' })
   expect(runs.at(-1)).toEqual(['wb', 'takeover', '--all', '--repo', '/'])
   await clock.advance(2000)
   expect(submitted.at(-1)).toContain('took over fix-it')                  // Claude starts now
-  expect(submitted.at(-1)).toContain('Leave delegate mode')
+  expect(submitted.at(-1)).toContain('Leave workbench mode')
 
   // Typed words never stop anything: only the commands do.
   const before = runs.length
@@ -576,13 +607,13 @@ test('wb failing is said as a failure: not open tasks, not agents stopped', asyn
   expect(ctx.blocks.map((b: any) => b.name)).not.toContain('workbench')
   expect(toasts.join('\n')).toContain('wb status failed: SyntaxError: invalid syntax')
 
-  const quit = await $.command.run({ command: 'delegate-quit', args: '' })
+  const quit = await $.command.run({ command: 'workbench-quit', args: '' })
   expect(quit.text).toContain('not stopped')
   expect(JSON.stringify(quit.context)).toContain('failed, so its agents may still be running')
-  const back = await $.command.run({ command: 'delegate-quit-and-hand-back-claude', args: '' })
+  const back = await $.command.run({ command: 'workbench-quit-and-hand-back-claude', args: '' })
   expect(back.text).toContain('wb takeover --all failed')
   await clock.advance(3000)
-  expect(submitted.join('\n')).not.toContain('Leave delegate mode')   // no turn to finish what wasn't handed over
+  expect(submitted.join('\n')).not.toContain('Leave workbench mode')   // no turn to finish what wasn't handed over
 })
 
 test('a closed task compacts Claude early, keeping the delegation state; open tasks come back after', async ($, on) => {
@@ -607,7 +638,7 @@ test('a closed task compacts Claude early, keeping the delegation state; open ta
   })
   on('skill.prompt', (_: any, e: any) => ({ text: e.text }))
   await $.session.start({ cwd: '/', surface: 'terminal', isInteractive: true })
-  await $.skill.prompt({ skill: 'delegate', text: 'x', frontmatter: {}, source: 'userSettings' })
+  await $.skill.prompt({ skill: 'workbench', text: 'x', frontmatter: {}, source: 'userSettings' })
   await clock.advance(2000)
   expect(compactions.length).toBe(0)              // the task is still running
 
@@ -764,7 +795,7 @@ test('one very long transcript line is cut, and the lines before it still show',
   await ui.unmount()
 })
 
-test('the weekly model check comes once, in a quiet moment of a session in use; /delegate-models asks now', async ($, on) => {
+test('the weekly model check comes once, in a quiet moment of a session in use; /workbench-models asks now', async ($, on) => {
   const clock = mock.clock(on, { now: 1_800_000_000_000 })
   const files: Record<string, string> = {}
   fakeTasks(on, files, [], false)
@@ -793,13 +824,13 @@ test('the weekly model check comes once, in a quiet moment of a session in use; 
 
   // done this week: nothing more, until the user asks for it
   files['/wb/scout.json'] = JSON.stringify({ done_at: 1_800_000_010 })
-  await $.command.run({ command: 'delegate-models', args: '' })
+  await $.command.run({ command: 'workbench-models', args: '' })
   await clock.advance(2000)
   expect(asked.length).toBe(2)
   expect(asked[1]).toContain('The weekly model check is due')
 })
 
-test('/delegate-models when the weekly check is due raises it once, not twice', async ($, on) => {
+test('/workbench-models when the weekly check is due raises it once, not twice', async ($, on) => {
   // the 2026-11-16 audit: the weekly check followed at once, burying Claude's question to the user
   const clock = mock.clock(on, { now: 1_800_000_000_000 })
   const files: Record<string, string> = {}
@@ -808,7 +839,7 @@ test('/delegate-models when the weekly check is due raises it once, not twice', 
   const asked: string[] = []
   on('prompt.submit', (_: any, e: any) => { asked.push(e.text); return { text: e.text } })
   await $.session.start({ cwd: '/', surface: 'terminal', isInteractive: true })
-  await $.command.run({ command: 'delegate-models', args: '' })
+  await $.command.run({ command: 'workbench-models', args: '' })
   await clock.advance(2000)
   await $.turn.start({ text: 'the check', turnId: 't1' })
   await $.turn.complete(endTurn('t1'))                          // Claude asks "shall I pull it?"
@@ -837,7 +868,7 @@ test('when wb can\'t run the mod says so once, backs off, and raises no model ch
   expect(asked).toEqual([])
 })
 
-test('an update is checked once a session is in use, and /delegate-update installs it', async ($, on) => {
+test('an update is checked once a session is in use, and /workbench-update installs it', async ($, on) => {
   const clock = mock.clock(on, { now: 1_800_000_000_000 })
   fakeTasks(on, {}, [])
   let behind = 3
@@ -847,7 +878,7 @@ test('an update is checked once a session is in use, and /delegate-update instal
     runs.push(e.argv)
     limits[e.argv.slice(1).join(' ')] = e.init?.timeoutMs
     const said = e.argv[2] === '--check'
-      ? (behind ? `update available: ${behind} new commit(s); /delegate-update (or wb update) installs it` : 'up to date')
+      ? (behind ? `update available: ${behind} new commit(s); /workbench-update (or wb update) installs it` : 'up to date')
       : behind ? 'updated marketplace 1111111..2222222 (3 commit(s))' : 'already up to date'
     return { value: { exitCode: 0, stdout: said, stderr: '' } }
   })
@@ -862,19 +893,19 @@ test('an update is checked once a session is in use, and /delegate-update instal
   await $.turn.complete({ answer: '', durationMs: 1, isAborted: false, turnId: 't1', reason: 'answer' })
   await clock.advance(2000)
   expect(runs.filter(r => r[1] === 'update')).toEqual([['wb', 'update', '--check', '--if-due']])  // wb keeps it weekly
-  expect(toasts.at(-1)).toContain('/delegate-update')
+  expect(toasts.at(-1)).toContain('/workbench-update')
   await clock.advance(5000)
   expect(runs.filter(r => r[1] === 'update').length).toBe(1)     // once per load
 
-  const out = await $.command.run({ command: 'delegate-update', args: '' })
+  const out = await $.command.run({ command: 'workbench-update', args: '' })
   expect(runs.at(-1)).toEqual(['wb', 'update'])
   expect(limits.update).toBe(600_000)                            // its steps take up to 300 s each
   expect(out.text).toContain('updated marketplace')
   behind = 0
-  expect((await $.command.run({ command: 'delegate-update', args: '' })).text).toContain('already up to date')
+  expect((await $.command.run({ command: 'workbench-update', args: '' })).text).toContain('already up to date')
 })
 
-test('the web chat reaches Claude only in /delegate mode, with a receipt, and one session listens', async ($, on) => {
+test('the web chat reaches Claude only in /workbench mode, with a receipt, and one session listens', async ($, on) => {
   const clock = mock.clock(on, { now: 1_800_000_000_000 })
   const files: Record<string, string> = {}
   fakeTasks(on, files, [])
@@ -898,10 +929,10 @@ test('the web chat reaches Claude only in /delegate mode, with a receipt, and on
   files['/wb/chat/messages.jsonl'] = JSON.stringify({ id: 'm1', ts: 1_800_000_000, from: 'user', text: 'status?' }) + '\n'
   await $.session.start({ cwd: '/home/u/project', surface: 'terminal', isInteractive: true })
   await clock.advance(3000)
-  expect(asked.length).toBe(0)                                   // not in delegate mode: nobody listens
+  expect(asked.length).toBe(0)                                   // not in workbench mode: nobody listens
   expect(files['/wb/chat/listener.json']).toBeUndefined()
 
-  await $.skill.prompt({ skill: 'delegate', text: 'x', frontmatter: {}, source: 'userSettings' })
+  await $.skill.prompt({ skill: 'workbench', text: 'x', frontmatter: {}, source: 'userSettings' })
   await clock.advance(3000)
   expect(asked.length).toBe(1)
   expect(asked[0]).toBe('[web chat] status?')                    // their words, nothing else
@@ -916,13 +947,13 @@ test('the web chat reaches Claude only in /delegate mode, with a receipt, and on
   await clock.advance(2000)
   expect(asked.length).toBe(1)
 
-  // /delegate-quit ends delegate mode, and with it the listening
-  await $.command.run({ command: 'delegate-quit', args: '' })
+  // /workbench-quit ends workbench mode, and with it the listening
+  await $.command.run({ command: 'workbench-quit', args: '' })
   await clock.advance(20_000)
   expect(asked.length).toBe(1)
 })
 
-test('running wb counts as delegate mode, and a web message reaches a running turn', async ($, on) => {
+test('running wb counts as workbench mode, and a web message reaches a running turn', async ($, on) => {
   const clock = mock.clock(on, { now: 1_800_000_000_000 })
   const files: Record<string, string> = {}
   fakeTasks(on, files, [])
@@ -1033,7 +1064,7 @@ test('the apprentice says how the followed task stands: in pixels in a terminal,
   await ui.unmount()
 })
 
-test('/delegate alone turns delegate mode on for the session: the pane opens, and a quit ends it', async ($, on) => {
+test('/workbench alone turns workbench mode on for the session: the pane opens, and a quit ends it', async ($, on) => {
   const clock = mock.clock(on, { now: 1_800_000_000_000 })
   const files: Record<string, string> = {}
   const ui: string[] = []
@@ -1048,30 +1079,30 @@ test('/delegate alone turns delegate mode on for the session: the pane opens, an
   await $.session.start({ cwd: '/home/u/project', surface: 'terminal', isInteractive: true })
   await clock.advance(2000)
   expect(panes()).toEqual([])                                    // not delegating: no pane
-  expect((await $.prompt.context({ blocks: [] })).blocks.map((b: any) => b.name)).not.toContain('delegate-mode')
+  expect((await $.prompt.context({ blocks: [] })).blocks.map((b: any) => b.name)).not.toContain('workbench-mode')
 
-  await $.skill.prompt({ skill: 'delegate', text: 'x', frontmatter: {}, source: 'userSettings',
-    path: '/home/u/.claude/skills/delegate/SKILL.md' })
+  await $.skill.prompt({ skill: 'workbench', text: 'x', frontmatter: {}, source: 'userSettings',
+    path: '/home/u/.claude/skills/workbench/SKILL.md' })
   await clock.advance(2000)
   expect(panes()).toEqual(['open workbench'])                    // the mode's sign
-  expect(status()).toBe('status ⚒ wb · delegate mode')
+  expect(status()).toBe('status ⚒ wb · workbench mode')
   const pane = await $.ui.mount({ ...PANE, surface: 'terminal' })
-  expect(await pane.find({ type: 'Text', text: 'Delegate mode is on.' })).toBeTruthy()
+  expect(await pane.find({ type: 'Text', text: 'Workbench mode is on.' })).toBeTruthy()
   await pane.unmount()
   // a compacted or cleared conversation is told the mode is on, and where the skill is
-  const block = (await $.prompt.context({ blocks: [] })).blocks.find((b: any) => b.name === 'delegate-mode')
-  expect(block?.text).toContain('/home/u/.claude/skills/delegate/SKILL.md')
+  const block = (await $.prompt.context({ blocks: [] })).blocks.find((b: any) => b.name === 'workbench-mode')
+  expect(block?.text).toContain('/home/u/.claude/skills/workbench/SKILL.md')
   // what Claude learned about the user, in any project, comes with the mode
   expect((await $.prompt.context({ blocks: [] })).blocks.map((b: any) => b.name)).not.toContain('user-notes')
   files['/wb/notes.md'] = '- Review strictly: reject any diff without tests\n'
   const notes = (await $.prompt.context({ blocks: [] })).blocks.find((b: any) => b.name === 'user-notes')
   expect(notes?.text).toContain('reject any diff without tests')
 
-  await $.command.run({ command: 'delegate-quit', args: '' })
+  await $.command.run({ command: 'workbench-quit', args: '' })
   await clock.advance(2000)
   expect(panes()).toEqual(['open workbench', 'close workbench'])
   expect(status()).toBe('status ')
-  expect((await $.prompt.context({ blocks: [] })).blocks.map((b: any) => b.name)).not.toContain('delegate-mode')
+  expect((await $.prompt.context({ blocks: [] })).blocks.map((b: any) => b.name)).not.toContain('workbench-mode')
   expect((await $.prompt.context({ blocks: [] })).blocks.map((b: any) => b.name)).not.toContain('user-notes')
 })
 
@@ -1085,7 +1116,7 @@ test('with wakes off, Claude is told no wake will come', { options: { wake: 'off
   on('prompt.context', (_: any, e: any) => ({ blocks: e.blocks }))
   await $.session.start({ cwd: '/', surface: 'terminal', isInteractive: true })
   expect((await $.prompt.context({ blocks: [] })).blocks.map((b: any) => b.name)).not.toContain('workbench-wake')
-  await $.skill.prompt({ skill: 'delegate', text: 'x', frontmatter: {}, source: 'userSettings' })
+  await $.skill.prompt({ skill: 'workbench', text: 'x', frontmatter: {}, source: 'userSettings' })
   await clock.advance(2000)
   const block = (await $.prompt.context({ blocks: [] })).blocks.find((b: any) => b.name === 'workbench-wake')
   expect(block?.text).toContain('Wakes are off')

@@ -748,7 +748,7 @@ def _scope(tasks, where, sessions=None):
     inside it or holds it, or its `cwd` (where wb start ran) is `where` or inside it. A session
     in the home directory or / claims none by directory. A task with neither key is everyone's.
     The others belong to another session, which its mod wakes and its quit commands stop (the
-    2026-11-16 audit: two projects at once, one session's /delegate-quit stopped the other's
+    2026-11-16 audit: two projects at once, one session's /workbench-quit stopped the other's
     agents; the 0.90 review: a task started from ~ belonged to every session under it, and one
     started after a `cd` elsewhere to none). Returns (mine, others)."""
     if not where and not sessions:
@@ -1568,7 +1568,7 @@ def cmd_skill_import(a):
           f"{skills.license_of(d, root)}\"")
 
 
-NOTES_MAX, NOTE_CHARS = 20, 300  # the mod puts them in every delegate-mode prompt: keep them few
+NOTES_MAX, NOTE_CHARS = 20, 300  # the mod puts them in every workbench-mode prompt: keep them few
 
 
 def _notes() -> list[str]:
@@ -1587,7 +1587,7 @@ def _notes() -> list[str]:
 
 def cmd_notes(a):
     """What Claude has learned about how the user wants delegation run, in any project: the mod
-    hands them to every delegate-mode session, so they follow the user from repo to repo."""
+    hands them to every workbench-mode session, so they follow the user from repo to repo."""
     path = store.home() / "notes.md"
     with store.locked(store.home() / "notes.lock"):
         notes = _notes()
@@ -1993,11 +1993,11 @@ def cmd_chat(a):
 
 
 def cmd_setup(a):
-    """Link `wb` onto PATH and /delegate into Claude Code's skills, from wherever this copy lives:
+    """Link `wb` onto PATH and /workbench into Claude Code's skills, from wherever this copy lives:
     the marketplace's clone (~/.claude/plugins/marketplaces/workbench) for users, a git clone for
     development (2026-11-16: the plugin install copies only mod/, so these two come from here)."""
     links = [(Path.home() / ".local/bin/wb", PKG_ROOT / "bin/wb"),
-             (context.claude_home() / "skills/delegate", PKG_ROOT / "skill/delegate")]
+             (context.claude_home() / "skills/workbench", PKG_ROOT / "skill/workbench")]
     bad = False
     for at, to in links:
         if at.is_symlink() and at.resolve() == to.resolve():
@@ -2013,6 +2013,10 @@ def cmd_setup(a):
         at.parent.mkdir(parents=True, exist_ok=True)
         at.symlink_to(to)
         print(f"ok  {at} → {to} (made)")
+    old = context.claude_home() / "skills/delegate"  # /delegate became /workbench (2026-11-17)
+    if old.is_symlink() and not old.exists() and os.readlink(old).rstrip("/").endswith("skill/delegate"):
+        old.unlink()
+        print(f"ok  {old} removed: /delegate is now /workbench")
     bindir = str(Path.home() / ".local/bin")
     if bindir not in os.environ.get("PATH", "").split(os.pathsep):
         print(f"--  {bindir} isn't on PATH: add it; Claude and the mod run wb by name (WB_BIN moves "
@@ -2070,7 +2074,7 @@ def cmd_update(a):
             except gitops.GitError as e:
                 die(f"couldn't check for an update: {e}")
             store.write_json(path, {"checked_at": time.time(), "behind": behind, "kind": kind})
-        print(f"update available: {behind} new commit(s); /delegate-update (or wb update) installs it"
+        print(f"update available: {behind} new commit(s); /workbench-update (or wb update) installs it"
               if behind else "up to date")
         return
     live = [t.name for t in store.all_tasks() if runner_alive(t)]
@@ -2083,7 +2087,7 @@ def cmd_update(a):
             die(f"{PKG_ROOT} has uncommitted changes: commit or stash them, then wb update")
         steps.insert(0, ["git", "-C", str(PKG_ROOT), "pull", "-q", "--ff-only"])
     if not shutil.which("claude"):  # before the pull: a clone once pulled, then died (the audit)
-        die("claude isn't on PATH: wb update refreshes the plugin through it (run /delegate-update "
+        die("claude isn't on PATH: wb update refreshes the plugin through it (run /workbench-update "
             "in Claude Code, or put claude on PATH)")
     before = gitops.git(PKG_ROOT, "rev-parse", "HEAD").strip()
     pulled = ""
@@ -2276,10 +2280,10 @@ def cmd_doctor(a):
         print(f"--  {', '.join(snapped)}: snaps, which can't run in the agent's lane "
               "(no-new-privileges stops snap-confine): install them another way, or turn the lane "
               'off with commands.json "paths": ["*"]')
-    skill = context.claude_home() / "skills/delegate/SKILL.md"
-    line(skill.exists(), f"/delegate skill at {skill.parent}" if skill.exists() else
-         f"/delegate isn't in {skill.parent.parent}: wb setup links it")
-    elsewhere("/delegate", skill.parent, PKG_ROOT / "skill/delegate")
+    skill = context.claude_home() / "skills/workbench/SKILL.md"
+    line(skill.exists(), f"/workbench skill at {skill.parent}" if skill.exists() else
+         f"/workbench isn't in {skill.parent.parent}: wb setup links it")
+    elsewhere("/workbench", skill.parent, PKG_ROOT / "skill/workbench")
     try:  # information only: a mod loaded another way (--plugin-dir, a dev mod) isn't listed here
         listed = any(k.startswith("workbench@") for k in json.loads(
             (context.claude_home() / "plugins/installed_plugins.json").read_text()).get("plugins", {}))
@@ -2557,7 +2561,7 @@ def main(argv=None):
     s = sub.add_parser("trial", help="mark closed tasks as trial runs: their results stop counting")
     s.add_argument("names", nargs="+")
     s.set_defaults(f=cmd_trial)
-    s = sub.add_parser("setup", help="link wb onto PATH and /delegate into Claude Code's skills, "
+    s = sub.add_parser("setup", help="link wb onto PATH and /workbench into Claude Code's skills, "
                                      "from this copy")
     s.add_argument("--force", action="store_true", help="replace links that point elsewhere")
     s.set_defaults(f=cmd_setup)

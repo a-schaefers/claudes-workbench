@@ -1,5 +1,5 @@
 [Unit]
-Description=workbench web chat (wb chat serve): reach Claude's /delegate session from the browser
+Description=workbench web chat (wb chat serve): reach Claude's /workbench session from the browser
 # No start limit: retrying is what brings the chat up when a bound address arrives late (Wi-Fi,
 # DHCP, a VPN) or the port is briefly held, since a user manager has no network-online.target. A
 # start limit gave up for good after five tries (the 0.90 review); the backoff below replaces it.

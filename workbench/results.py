@@ -74,7 +74,7 @@ def spec_gap_line() -> str | None:
     if not hit:
         return f"your specs: no gaps in the last {len(rows)} task(s)"
     return (f"your specs: {len(hit)} of the last {len(rows)} task(s) needed a round for a spec "
-            f"gap; last: {hit[-1]['spec_gaps'][-1][:160]} (the checklist: /delegate, Before wb start)")
+            f"gap; last: {hit[-1]['spec_gaps'][-1][:160]} (the checklist: /workbench, Before wb start)")
 
 
 def table() -> str:
