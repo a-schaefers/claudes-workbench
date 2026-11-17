@@ -90,8 +90,10 @@ def _int(text: str) -> int:
         return 0
 
 
-def gpus() -> list[dict]:
-    """Every display adapter: name, driver, VRAM total and in use (bytes) where the driver says."""
+def gpus(windows: bool = True) -> list[dict]:
+    """Every display adapter: name, driver, VRAM total and in use (bytes) where the driver says.
+    ``windows`` False leaves out what WSL names from Windows (no VRAM, and a PowerShell start of
+    seconds): the GPU budget and wb image's settle asked it on every call (the 2026-11-16 audit)."""
     where = system()
     if where == "macos":
         return _mac_gpus()
@@ -107,6 +109,8 @@ def gpus() -> list[dict]:
         found.append({"name": name, "driver": f"nvidia {driver}", "vram": mib(total),
                       "vram_used": mib(used)})
     if where == "wsl":
+        if not windows:
+            return found
         nvidia = {g["name"] for g in found}
         return found + [g for g in _windows_gpus()
                         if not any(n in g["name"] or g["name"] in n for n in nvidia)]
@@ -152,7 +156,8 @@ def cpu() -> dict:
     return {"name": name, "threads": os.cpu_count()}
 
 
-OLLAMA_KEYS = ("OLLAMA_MODELS", "OLLAMA_CONTEXT_LENGTH", "OLLAMA_NUM_PARALLEL")
+OLLAMA_KEYS = ("OLLAMA_MODELS", "OLLAMA_CONTEXT_LENGTH", "OLLAMA_NUM_PARALLEL",
+               "OLLAMA_MAX_LOADED_MODELS")
 
 
 def ollama_env() -> dict:

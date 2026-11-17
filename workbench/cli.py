@@ -98,6 +98,37 @@ def pick_model(size: str, wanted: str | None, stack=()) -> tuple[models.Model, d
     return top.model, top.state, why
 
 
+def _gpu_holders(me: str | None = None) -> dict:
+    """Who holds or waits for the GPU, but ``me``: gpu.json's live entries, plus each task whose
+    runner is alive but hasn't reached the lease yet (one just started), as an entry of its own."""
+    held = {p: h for p, h in models.holders().items() if h.get("task") != me}
+    named = {h.get("task") for h in held.values()}
+    found = models.discover()
+    for t in store.all_tasks():
+        m = found.get(t.spec.get("model") or "")
+        if t.name not in named and t.name != me and m and not m.remote \
+                and t.status.get("phase") in store.ACTIVE and runner_alive(t):
+            held[f"task {t.name}"] = {"model": m.id, "task": t.name}
+    return held
+
+
+def _gpu_wait(m: models.Model, me: str | None = None) -> tuple[dict, bool]:
+    """The GPU's other holders, and whether ``m`` would have to wait for them (queued) rather
+    than run beside them. A remote model takes no lease: it never waits."""
+    if m.remote:
+        return {}, False
+    held = _gpu_holders(me)
+    return held, bool(held) and not models.admits(m, held)
+
+
+def _gpu_note(task: store.Task) -> str:
+    """For wb feedback/next/resume, which queue the task anyway: who it will wait for."""
+    m = models.discover().get(task.spec.get("model") or "")
+    held, waits = _gpu_wait(m, task.name) if m else ({}, False)
+    return (f"note: the GPU is busy with {', '.join(sorted({h['task'] for h in held.values()}))}; "
+            f"{task.name} waits as queued until it's free") if waits else ""
+
+
 # --- commands -----------------------------------------------------------------------------------
 
 def _has_file(repo: Path, ref: str, path: str) -> bool:
@@ -136,6 +167,12 @@ def cmd_start(a):
         die(f"{m.id} can't run: {state['why']}. (--force queues it anyway)", 3)
     dirty = gitops.git(repo, "status", "--porcelain").strip()
     _need_claude_md(repo, a.base, a)
+    # Two projects, one GPU: a task that can't run beside the GPU's holders used to queue in
+    # silence behind them, maybe for hours (the 2026-11-16 audit). Say so before any worktree.
+    held, waits = _gpu_wait(m, a.name)
+    if waits and not a.queue:
+        die(models.busy(held, f"{m.id} can't run beside {'it' if len(held) == 1 else 'them'}. "
+                        "--queue starts it anyway, to wait behind; or do this step yourself"), 4)
 
     task.dir.mkdir(parents=True)
     try:
@@ -188,8 +225,13 @@ def cmd_start(a):
         use = skills.usage()
         print(f"library skills that may fit: {', '.join(_elsewhere(n, use.get(n), repo, stack) for n in fits)}"
               f" (wb skill hand {a.name} <name>)")
+    holding = ", ".join(sorted({h["task"] for h in held.values()}))
     if not state["available"]:
         print(f"note: queued although {state['why']}")
+    elif waits:
+        print(f"note: the GPU is busy with {holding}; this task waits as queued until it's free")
+    elif held:
+        print(f"note: it runs beside {holding} on the GPU (their models fit together)")
     elif not state["resident"]:
         print("note: the runner loads it onto the GPU first, unloading what is there")
     print(f"next: wb wait {a.name}   (the workbench mod wakes Claude by itself when loaded)")
@@ -253,10 +295,12 @@ def cmd_feedback(a):
     task.set_status(round=n, reviews=reviews, phase="queued",
                     auto_fixes_total=st.get("auto_fixes_total", 0) + st.get("auto_fixes", 0),
                     auto_fixes=0)
+    gpu = _gpu_note(task)
     spawn_runner(task)
     _ack_all(task)
     print(f"feedback round {reviews} sent to {a.name} (round {n})"
           + ("  — that is past the usual 3 review rounds" if reviews > 3 else ""))
+    _say(gpu)
     _say(lessons.nudge(task))
 
 
@@ -311,10 +355,12 @@ def cmd_next(a):
                     auto_fixes_total=st.get("auto_fixes_total", 0) + st.get("auto_fixes", 0),
                     auto_fixes=0, last=f"step {step} committed; next step queued")
     why = runner.fresh_reason(task)
+    gpu = _gpu_note(task)
     spawn_runner(task)
     _ack_all(task)
     print(f"step {step} of {a.name} committed as {commit}; step {step + 1} sent "
           + (f"to a fresh session ({why})" if why else "to the same session"))
+    _say(gpu)
     _say(lessons.nudge(task))
 
 
@@ -556,9 +602,11 @@ def cmd_resume(a):
     task.set_status(round=n + 1, context="fresh", phase="queued", last="resumed by the reviewer")
     task.event({"ts": store.now(), "round": n + 1, "kind": "resumed",
                 "text": "Claude resumed the task in a fresh session"})
+    gpu = _gpu_note(task)
     spawn_runner(task)
     _ack_all(task)  # the stuck or failed notice is handled: wb wait must not hand it out again
     print(f"resumed {a.name} in a fresh session (round {n + 1})")
+    _say(gpu)
     _say(lessons.nudge(task))
 
 
@@ -834,6 +882,7 @@ def cmd_scout(a):
               "more than one task (wb lessons)")
     print("\nhardware")
     print("\n".join(hardware.report()))
+    print("  " + gpu_line())
     print("\nimage engines (wb image)")
     print("\n".join(image_lines()) or f"  none: describe one in {images.config_path()}")
     provs = models.providers()
@@ -1116,13 +1165,16 @@ def image_lines() -> list[str]:
         why = images.ready(e)
         out.append(f"  {name}: {e.get('label') or e.get('command', e.get('url', ''))[:60]}"
                    f" · {'ready' if not why else why}"
+                   + (" · a server: it holds its GPU memory while it runs" if e.get("url")
+                      and not e.get("command") else "")
                    + (f"\n    {e['notes']}" if e.get("notes") else ""))
     return out
 
 
 def cmd_image(a):
     """Local image generation: Claude writes the prompt, looks at the candidates, keeps one."""
-    if a.list or not a.prompt:
+    # `wb image list`, like `wb skill list`, used to draw four pictures of "list" (the 2026-11-16 audit)
+    if a.list or not a.prompt or a.prompt.strip().lower() in ("list", "ls"):
         print("\n".join(image_lines()) or f"no image engine: describe one in {images.config_path()}")
         return
     try:
@@ -1132,7 +1184,7 @@ def cmd_image(a):
     out = Path(a.out) if a.out else store.home() / "images" / time.strftime("%Y%m%d-%H%M%S")
     try:
         made = images.generate(a.prompt, out, n=a.n, size=(w, h), seed=a.seed, name=a.engine,
-                               refs=a.ref or [], say=lambda m: print(m, flush=True))
+                               refs=a.ref or [], say=lambda m: print(m, flush=True), wait=a.wait)
     except (KeyError, RuntimeError, OSError, subprocess.TimeoutExpired) as e:
         die(str(e).strip("'\""))
     print(f"{len(made)} image(s) in {out}: look at each before choosing; the .json beside each "
@@ -1408,6 +1460,21 @@ def cmd_update(a):
               "restart picks up the pane")
 
 
+def gpu_line() -> str:
+    """What the GPU budget counts (wb doctor, wb scout): sharing and the router's fit rest on it."""
+    budget, devs = models.budget_devices()
+    if budget:
+        names = "; ".join(g["name"] for g in devs) or "the GPU"
+        return (f"GPU budget {budget / 1e9:.0f} GB, from {names}: tasks share the GPU when their "
+                "Ollama models fit in it together")
+    gs = [] if models._fake() else hardware.gpus()
+    if gs:
+        return (f"GPU memory unknown here ({', '.join(sorted({g['driver'] for g in gs}))}): tasks take "
+                "turns on the GPU, and the router can't hold back a model too big for it")
+    return ("no GPU memory found: local models run on the CPU, slowly; "
+            "wb model sizes <id> trivial keeps a big one off small tasks")
+
+
 def cmd_doctor(a):
     ok = True
 
@@ -1484,6 +1551,7 @@ def cmd_doctor(a):
     except OSError as e:
         why = f"can't make it: {e.strerror or e}"
     line(not why, f"state dir {store.home()}" + (f": {why}" if why else ""))
+    print("--  " + gpu_line())  # informs only: a CPU-only machine isn't broken
     v = lane.abi()
     if v:  # draw a real lane and try a write outside it: the check is the refusal itself
         import tempfile
@@ -1550,6 +1618,8 @@ def main(argv=None):
     s.add_argument("--base", default="HEAD")
     s.add_argument("--force", action="store_true", help="queue the --model asked for even if it "
                    "can't run now")
+    s.add_argument("--queue", action="store_true", help="start even when the GPU's holders leave "
+                   "no room for its model: it waits behind them (else exit 4)")
     s.add_argument("--trial", action="store_true", help="a check of workbench itself (a scratch "
                    "repo): its result and lessons don't count as evidence")
     s.add_argument("--no-claude-md", action="store_true",
@@ -1640,6 +1710,8 @@ def main(argv=None):
     s.add_argument("--ref", action="append", help="a reference image (repeatable), for engines "
                    "that take them")
     s.add_argument("--list", action="store_true", help="the configured engines")
+    s.add_argument("--wait", action="store_true", help="wait for the tasks holding the GPU instead "
+                   "of refusing (long: run it in the background)")
     s.set_defaults(f=cmd_image)
     s = sub.add_parser("answer", help="answer the agent's ask_reviewer question")
     s.add_argument("name"); s.add_argument("--id")

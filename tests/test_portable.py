@@ -12,7 +12,9 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))  # run as a script too
 
-from workbench import context, models, router, store, watch
+from unittest import mock
+
+from workbench import context, images, models, router, store, watch
 from tests.test_workbench import Base, wait_phase
 
 
@@ -30,6 +32,39 @@ def serve(routes: dict) -> tuple[ThreadingHTTPServer, str]:
     srv = ThreadingHTTPServer(("127.0.0.1", 0), H)
     threading.Thread(target=srv.serve_forever, daemon=True).start()
     return srv, f"http://127.0.0.1:{srv.server_address[1]}"
+
+
+def fake_ollama(loaded: list, tags: list, posts: list, fail: dict | None = None):
+    """An Ollama on a free port: /api/tags lists ``tags``, /api/ps ``loaded`` (dicts with name,
+    size, size_vram); POST /api/generate is recorded in ``posts`` and loads or unloads, unless
+    ``fail`` (status, body) answers it."""
+    class H(BaseHTTPRequestHandler):
+        def reply(self, code, body):
+            self.send_response(code)
+            self.end_headers()
+            self.wfile.write(json.dumps(body).encode())
+
+        def do_GET(self):
+            body = {"/api/version": {"version": "0.40.0"}, "/api/tags": {"models": [{"name": n} for n in tags]},
+                    "/api/ps": {"models": loaded}}.get(self.path)
+            self.reply(200 if body is not None else 404, body or {})
+
+        def do_POST(self):
+            body = json.loads(self.rfile.read(int(self.headers["Content-Length"])))
+            posts.append(body)
+            if fail:
+                return self.reply(*fail)
+            if body.get("keep_alive") == 0:
+                loaded[:] = [x for x in loaded if x["name"] != body["model"]]
+            else:
+                loaded.append({"name": body["model"], "size": 10, "size_vram": 10})
+            self.reply(200, {})
+
+        def log_message(self, *a):
+            pass
+    srv = ThreadingHTTPServer(("127.0.0.1", 0), H)
+    threading.Thread(target=srv.serve_forever, daemon=True).start()
+    return srv, srv.server_address[1]
 
 
 class Real(unittest.TestCase):
@@ -95,6 +130,85 @@ class Real(unittest.TestCase):
         llama = self.server({"/v1/models": {"data": [{"id": "/models/coder-q4.gguf"}]}})
         self.config({"l": {"options": {"baseURL": llama + "/v1"}, "models": {"coder": {}}}})
         self.assertTrue(models.status(models.resolve("coder"))["available"])
+
+    def test_a_port_two_started_models_share_says_which_one_it_serves(self):
+        # both read "running", so a task for one ran on the other (the 2026-11-16 audit)
+        llama = self.server({"/v1/models": {"data": [{"id": "/models/coder.gguf"}]}})
+        self.config({"l": {"options": {"baseURL": llama + "/v1"}, "models": {"coder": {}, "general": {}}}},
+                    {"l": {"engine": "server"}, "l/coder": {"start": "serve coder"},
+                     "l/general": {"start": "serve general"}})
+        self.assertTrue(models.status(models.resolve("l/coder"))["resident"])
+        st = models.status(models.resolve("l/general"))
+        self.assertFalse(st["available"] or st["resident"])
+        self.assertIn("is serving /models/coder.gguf, not general", st["why"])
+
+    def own(self, loaded, tags, fail=None):
+        """Two providers reaching one fake Ollama, as localhost and as 127.0.0.1."""
+        posts = []
+        srv, port = fake_ollama(loaded, tags, posts, fail)
+        self.servers.append(srv)
+        self.config({"a": {"options": {"baseURL": f"http://localhost:{port}/v1"}, "models": {"x": {}}},
+                     "b": {"options": {"baseURL": f"http://127.0.0.1:{port}/v1"}, "models": {"y": {}}}})
+        return models.discover(), posts
+
+    def test_one_ollama_under_two_host_spellings_is_one_server(self):
+        # free_gpu unloaded the very models it was told to keep (the 2026-11-16 audit)
+        found, posts = self.own([{"name": "x", "size": 10, "size_vram": 10},
+                                 {"name": "y", "size": 10, "size_vram": 10}], ["x", "y"])
+        self.assertEqual(found["a/x"].server, found["b/y"].server)
+        models.free_gpu(keep={"a/x", "b/y"}, say=lambda m: None)
+        self.assertEqual(posts, [])
+        self.assertFalse(models._others_resident(found["a/x"], keep={"b/y"}))
+        twin = models.Model(id="b/x", provider="b", name="x", base_url=found["b/y"].base_url,
+                            engine="ollama", label="b/x", extra={"weights_gb": 1})
+        with mock.patch.object(models.hardware, "ollama_env", lambda: {"OLLAMA_NUM_PARALLEL": "1"}):
+            self.assertFalse(models.can_share(twin, [found["a/x"]], int(99e9)))  # the same model
+
+    def test_a_failed_ollama_load_says_why_and_a_missing_model_unloads_nothing(self):
+        found, posts = self.own([{"name": "y", "size": 10, "size_vram": 10}], ["x", "y"],
+                                fail=(500, {"error": "model requires more system memory (24.1 GiB)"}))
+        with self.assertRaisesRegex(RuntimeError, "HTTP 500: model requires more system memory"):
+            models.make_resident(found["a/x"], say=lambda m: None)
+        found, posts = self.own([{"name": "y", "size": 10, "size_vram": 10}], ["y"])
+        with self.assertRaisesRegex(RuntimeError, "x is not pulled"):
+            models.make_resident(found["a/x"], say=lambda m: None)
+        self.assertEqual(posts, [])  # y, the user's own, stays loaded
+
+    def test_a_model_partly_on_the_cpu_is_a_warning_and_a_share_that_didnt_hold_is_seen(self):
+        found, posts = self.own([], ["x", "y"])
+        warned = []
+        models._placement(found["a/x"], warned.append)
+        self.assertEqual(warned, [])
+        found, posts = self.own([{"name": "x", "size": 100, "size_vram": 60}], ["x", "y"])
+        models._placement(found["a/x"], warned.append)
+        self.assertIn("x is 40% on the CPU", warned[0])
+        self.assertFalse(models._fits_beside(found["a/x"], {"b/y"}))   # partly on the CPU
+        found, posts = self.own([{"name": "x", "size": 10, "size_vram": 10}], ["x", "y"])
+        self.assertFalse(models._fits_beside(found["a/x"], {"b/y"}))   # y was evicted
+        found, posts = self.own([{"name": "x", "size": 10, "size_vram": 10},
+                                 {"name": "y", "size": 10, "size_vram": 10}], ["x", "y"])
+        self.assertTrue(models._fits_beside(found["a/x"], {"b/y"}))
+
+    def test_a_start_command_that_fails_at_once_fails_the_load_at_once(self):
+        # it was polled for 20 minutes, its exit unseen (the 2026-11-16 audit)
+        self.config({"s": {"options": {"baseURL": "http://127.0.0.1:1/v1"}, "models": {"m": {}}}},
+                    {"s": {"engine": "server", "start": "echo boom >&2; exit 3"}})
+        t0 = time.time()
+        with mock.patch.object(models, "START_GRACE", 0), \
+                self.assertRaisesRegex(RuntimeError, "start command exited 3 .*run it by hand"):
+            models.make_resident(models.resolve("s/m"), say=lambda m: None)
+        self.assertLess(time.time() - t0, 10)
+
+    def test_wb_image_waits_only_for_what_free_gpu_can_release(self):
+        # a server with no stop command cost every generation the whole 90 s (the 2026-11-16 audit)
+        srv = self.server({"/v1/models": {"data": [{"id": "z"}]}})
+        self.config({"one": {"options": {"baseURL": srv + "/v1"}, "models": {"z": {}}}})
+        self.assertEqual([m.id for m in models.resident()], ["one/z"])
+        said, t0 = [], time.time()
+        with mock.patch.object(images.hardware, "gpus", lambda windows=True: []):
+            images._settle(said.append, timeout=30)
+        self.assertLess(time.time() - t0, 5)
+        self.assertEqual(said, [])
 
     def test_this_machine_is_every_loopback_and_its_own_name(self):
         here = socket.gethostname()

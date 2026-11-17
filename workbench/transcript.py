@@ -341,6 +341,8 @@ def task_entries(task: store.Task) -> list[Entry]:
             out.append(Entry(ts, key, [("bad", f"■ stopped: {r.get('text', '')}")]))
         elif kind == "error":
             out.append(Entry(ts, key, [("bad", f"■ error: {r.get('text', '')}")]))
+        elif kind == "gpu":  # a server wb can't stop, a model partly on the CPU: why rounds crawl
+            out.append(Entry(ts, key, [("bad", f"■ GPU: {r.get('text', '')}")]))
     return out
 
 
@@ -366,7 +368,7 @@ def activity(task: store.Task, data: dict, now: float | None = None) -> str | No
     phase = st.get("phase")
     last = st.get("last") or ""
     if phase == "queued":  # the runner says what it waits on, or what it loads
-        if last.startswith(("loading", "starting", "stopping", "unloading", "sharing")):
+        if last.startswith(("loading", "starting", "stopping", "unloading", "sharing", "waiting")):
             return f"{last[:1].upper()}{last[1:]}…"
         return "Waiting for the GPU…"
     if phase == "testing":

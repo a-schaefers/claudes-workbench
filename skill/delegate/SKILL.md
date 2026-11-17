@@ -306,7 +306,8 @@ network setup) and rewrite it in this library's shape and voice. Then
 ## Images: you art-direct, a local model draws
 When the project needs an image (a sprite, an icon, a background, a README picture), and
 `wb image --list` shows a ready engine, make it locally instead of asking the user for one.
-Agents can't make images; one that needs an asset asks you, and you make it.
+Agents can't make images; one that needs an asset asks you: answer first (a placeholder now, the
+asset at review), and make it once the GPU is free.
 1. **Brief it like an art director.** Say what's in it, then the style, composition, palette and
    lighting, the size the project needs, and what to avoid. Name the use ("a 64x64 icon on
    a flat background") so the framing fits.
@@ -320,8 +321,10 @@ Agents can't make images; one that needs an asset asks you, and you make it.
    asset directory. For a sprite on a black background drawn additively, black is see-through
    and no alpha channel is needed.
 Mind the engine's `notes` in `wb image --list`: an image model's licence can restrict where and
-how its output may be used. A generation waits for the running tasks to finish, then has the
-GPU to itself: tasks started meanwhile wait for it.
+how its output may be used. A generation needs the GPU to itself: while a task holds it,
+`wb image` refuses and names it; `--wait` (Bash `run_in_background: true`) queues behind it,
+and tasks started meanwhile wait for the image. A url engine is a server that keeps its GPU
+memory while it runs: ask the user to stop it before big coding tasks.
 
 **No ready engine? Offer to set one up; never set it up unasked.** This is an optional step, as
 ARCHITECTURE.md's Images section (in the workbench code, above) says. Read `wb scout` for the OS and GPU, then propose in one
@@ -345,6 +348,9 @@ failed) — end your turn and wait for it. Without the mod, run `wb wait <name>`
 own for `--auto-fix` rounds before you are woken; `wb log <name>` shows what it is doing.
 A model that reads prompts slowly, or one the runner must load first, can spend minutes before
 its first reply. That is normal, not stuck.
+**Exit 4: the GPU is taken** by another task (often another session's project) that the model
+can't run beside. Don't wait silently: tell the user who holds it, then either do the step
+yourself or `--queue` it to start when the GPU is free (it may be hours).
 
 ## Driving a running task
 You are the driver, not a spectator. When something tells you the agent is heading the wrong way

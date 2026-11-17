@@ -172,6 +172,15 @@ CLAUDE.md, the user's decisions, the review checks) marked apart.
   default significant) and the repo's stack (its main languages, from its tracked files), or
   `--model` (an id, or a fragment that names one model). No model can run: exit 3. A `--model`
   that can't run right now (server down, not pulled) is refused unless `--force`.
+- Two projects, one GPU: when another task holds the GPU (or waits for it, or `wb image` does)
+  and the new task's model couldn't run beside it (`models.admits`: the same rule the lease
+  uses), it refuses before making anything, exit 4, with one line naming each holder's task,
+  repo and model and the two ways out: `--queue` (start anyway and wait behind it) or doing the
+  step yourself. Before this, the second session's task queued in silence, maybe for hours
+  (the 2026-11-16 audit). The holders are gpu.json's live entries plus any task whose live runner
+  hasn't reached the lease yet (`cli._gpu_holders`). A remote model takes no lease and is never
+  refused. `wb feedback`, `next` and `resume` continue a task and always queue, but print a note
+  naming the holders it will wait for (`cli._gpu_note`).
 - It works out the limits: `--round-timeout` and `--silence-timeout` unset (or 0) take the
   model's measured budgets (`router.budgets`), as does `--think-timeout` unset (0 turns the
   think nudge off); `--checkin` defaults to 10 minutes for significant tasks, 0 for trivial.
@@ -188,7 +197,9 @@ CLAUDE.md, the user's decisions, the review checks) marked apart.
 
 **3. The runner takes the GPU** (`models.GpuLease`; *Sharing the GPU* below). Tasks run side by
 side when their models fit the GPU together; otherwise a task waits as `queued` for the GPU to
-itself, first come first served. Then it makes the task's model resident: it unloads every other
+itself, first come first served, with status `last` "waiting for the GPU (held by <task>…)" (the
+pane shows it). No round guard counts the wait: the round, its clock and its guards start once
+the model is loaded. Then it makes the task's model resident: it unloads every other
 model Ollama holds (the user's or another tool's) except those of tasks running beside it, stops
 other model servers that have a stop command, and loads or starts the one it needs. The lease is
 held for every round and every test run until the runner exits; the model loads once per runner.
@@ -782,8 +793,9 @@ Drawn in Claude Code's own grammar, results under `  ⎿  `:
 `-v` raises the caps (400 lines of output, diffs and reasoning) but still caps. Under the
 transcript (on a terminal, one row rewritten in place): what's happening now (`activity`) and a
 clock line:
-- *Now:* queued: `Waiting for the GPU…`, or `status.last` itself while it loads, starts, stops,
-  unloads or shares a model (`Loading …`); testing:
+- *Now:* queued: `Waiting for the GPU…`, or `status.last` itself while it waits for a named
+  holder, loads, starts, stops, unloads or shares a model (`Waiting for the GPU (held by t)…`,
+  `Loading …`); testing:
   ``Running the acceptance tests… `cmd` ``; asking: `Waiting for Claude's answer…`; running: from
   the model server's `GET <root>/metrics` when it returns a `live` object (`{state, phase,
   prompt_tokens, generated, tok_s}`): `Reading the prompt… t · N tokens`, `Thinking|Writing… t · ↓
@@ -828,8 +840,13 @@ reformats the file (atomic, indent 2).
 `localhost`, `0.0.0.0`, `host.docker.internal`, any loopback IP, the host name, its first label,
 or `<label>.local`, or any of the machine's own addresses (`_own_addresses`: the host name's
 `getaddrinfo` and `ip -o addr`, so a LAN or Tailscale IP counts) (`_this_host`). A
-provider elsewhere counts when models.json gives it `"local": true`; it is then `remote` and never
-shares the GPU. The id is `provider/name`; `root` is the baseURL without `/v1`. The engine
+provider elsewhere counts when models.json gives it `"local": true`; it is then `remote`: it
+takes no GPU lease here, so tasks on it run at once and the remote server schedules them. The id
+is `provider/name`; `root` is the baseURL without `/v1`; `server` is the server's identity (host,
+port, path), with every spelling of this machine (loopback, `localhost`, its own names and
+addresses) as one host, so two providers reaching one Ollama as `localhost` and `127.0.0.1` are
+one server everywhere roots are compared (`free_gpu`, `_others_resident`, `can_share`); before,
+free_gpu unloaded the models it was told to keep (the 2026-11-16 audit). The engine
 (`_engine`): models.json `engine`, else a cached probe of `GET <root>/api/version` (a JSON
 `version` → `ollama`, an HTTP error → `server`), else a guess from the port (11434 → ollama).
 `resolve()` takes an exact id, an exact model or provider name, or a unique case-insensitive
@@ -849,37 +866,78 @@ model id; a model's entry is merged over its provider's (`{**provider, **model}`
 
 **Status** (`status` → {available, resident, why}): Ollama: not answering / `<name>` is not
 pulled / pulled / loaded (`/api/tags`, `/api/ps`). A server (`GET <base>/models`): running (a
-server listing several models must list this one: "the server lists N models, not …"); stopped
+server listing several models must list this one: "the server lists N models, not …"; a server
+listing one answers to any name, except on a port that several models share, each with its own
+`start` (`_contended`: one llama-server per model), where the listed id must be the model's name
+or its file's basename without `.gguf` (`_serves`), else it is unavailable, "<root> is serving
+<id>, not <name> …": the task would run on the other model, recorded under this one); stopped
 with a `start` ("wb starts it"); not running with no start command. `wb models` and `wb doctor`
 print the reason. `weights()`: `weights_gb`, else Ollama's size, else 0.
 
-**Residency** (`make_resident(m, keep)`, called by the runner under the lease). Nothing to do when
-`m` is resident and nothing else is. Else `free_gpu(keep={m, *keep})`: every other running
-server with a `stop` command is stopped once per root, after waiting up to 10 minutes while its
-`/metrics` says a reply is in progress (a running server with no `stop` is left, with a warning
-that it may hold GPU memory); every model loaded on each discovered Ollama root is unloaded
-(`POST /api/generate {keep_alive: 0}`) except kept ones. Then Ollama loads the model (`POST
-/api/generate {prompt: "", keep_alive: "30m"}`, 20 min limit) or the server is started. The
-seconds it took go to `status.load_secs`. A server that lists several models swaps them itself:
-`free_gpu` treats a root as one server.
+**Residency** (`make_resident(m, keep, warn)`, called by the runner under the lease). Nothing to
+do when `m` is resident and nothing else is. An Ollama model Ollama can't load (not pulled, not
+answering) fails at once, before anything is unloaded for it. Else `free_gpu(keep={m, *keep})`:
+every other running server with a `stop` command is stopped once per server, after waiting up to
+10 minutes while its `/metrics` says a reply is in progress (a running server with no `stop` is
+left, with a warning that it may hold GPU memory); every model loaded on each discovered Ollama
+server is unloaded (`POST /api/generate {keep_alive: 0}`) except kept ones. Then Ollama loads the
+model (`POST /api/generate {prompt: "", keep_alive: "30m"}`, 20 min limit) or the server is
+started. An HTTP error from Ollama raises with what Ollama said ("…answered HTTP 500: model
+requires more system memory…", `_post`), not urllib's bare "HTTP Error 500". A start command that
+exits non-zero while nothing answers fails after `START_GRACE` 10 s ("…'s start command exited N
+and nothing answers; run it by hand to see why: <cmd>"), not after 20 min; exit 0 keeps waiting
+(a start that daemonizes); a server that answers as another model fails after the same grace.
+After an Ollama load, `_placement` reads `/api/ps`: part of the model in RAM is a warning ("<name>
+is N% on the CPU: expect it to be slow …"). Warnings (that one, a server wb can't stop, a stop
+command that failed or ran past 5 min) go to `warn`: the lease's `warn` sets status `last` and
+appends a `gpu` event, which the transcript shows as `■ GPU: …`, so it outlives the next status
+line. The seconds it took go to `status.load_secs`. A server that lists several models swaps them
+itself: `free_gpu` treats a server as one, kept when a kept model is on it, unless the port is
+contended and it serves another model, which is then stopped first. `releasable(m)`: what
+`free_gpu` can let go of (a local Ollama model, a local server with `stop`).
 
-**Sharing the GPU** (`GpuLease`, `can_share`, `gpu_budget`, `need`). The budget is the sum of the
-GPUs' total VRAM (`hardware.gpus()`; on unified memory macOS's `iogpu.wired_limit_mb`, else 75% of
-RAM); unknown VRAM means no sharing. A model's need: `vram_gb`, else Ollama's loaded size
-(weights and context), else weights × `KV_GUESS` 1.25. `can_share(m)`: every running model and `m`
-are Ollama and local, and their needs sum to at most `SHARE_AT` 0.9 of the budget; the same model
-twice needs Ollama's `OLLAMA_NUM_PARALLEL` ≥ 2 (read from the ollama service's environment,
-`hardware.ollama_env`). Admission happens under the `gpu.admit` flock: holders are the
-`gpu.json` entries whose pids are alive; a runner joins with `LOCK_SH|LOCK_NB` on `gpu.lock` when
-no holder is waiting, every holder's model still resolves, and there are no holders or
-`can_share` passes (so a task alone holds the lock shared). Otherwise it marks itself `waiting`
-and blocks on `LOCK_EX`, first come first served; once it holds the lock exclusively nobody joins
-it. `load()` runs `make_resident` under `gpu.admit`, keeping the other holders' models, so loads
-are serialized. `gpu.json` is `{"<pid>": {model, task, waiting?}}`. `wb image` takes `gpu.lock`
-through `GpuLease(None, "wb image")`: it queues in `gpu.json` like a task with no model, waits for
-the running tasks to finish, then has the GPU to itself, and tasks started meanwhile wait for it. A
-remote model (`local: true`) takes no lease at all, and `free_gpu` never unloads or stops a
-remote provider's models.
+**Sharing the GPU** (`GpuLease`, `admits`, `can_share`, `budget_devices`, `gpu_budget`, `need`).
+The budget (`budget_devices`, which also returns the devices it counts, for `wb doctor` and `wb
+scout`) comes from one runtime's GPUs: the GPUs are grouped by driver (`nvidia`, `amdgpu`,
+`metal`…) and the largest group's sum is taken, so several NVIDIA cards (which Ollama splits a
+model across) add up but another vendor's GPU beside them doesn't; a discrete device under
+`IGPU_UNDER` 1 GiB (an integrated GPU's carve-out, Ollama's own cutoff) is left out. Summing
+every GPU counted a laptop's Radeon iGPU into its RTX card's 8 GB (the 2026-11-16 audit). An AMD
+dGPU beside an AMD APU whose carve-out is 1 GiB or more still adds up: nothing tells them apart
+reliably. Apple Silicon: `iogpu.wired_limit_mb` when set, else macOS's default
+(`unified_default`: two thirds of the RAM up to `UNIFIED_SMALL` 36 GiB, three quarters above,
+Metal's recommendedMaxWorkingSetSize; it was 75% everywhere, too much on 8-32 GB Macs). Unknown
+VRAM means no sharing. `gpus(windows=False)`: the budget never asks WSL's PowerShell. A model's
+need: `vram_gb`, else Ollama's loaded size (weights and context), else weights × `KV_GUESS` 1.25.
+`can_share(m)`: every running model and `m` are Ollama and local, and their needs sum to at most
+`SHARE_AT` 0.9 of the budget; the same model twice (the same `server` and name) needs Ollama's
+`OLLAMA_NUM_PARALLEL` ≥ 2, and different models may not outnumber `OLLAMA_MAX_LOADED_MODELS`
+(unset or 0: `OLLAMA_MAX_LOADED` 3, Ollama's default per GPU), or Ollama swaps them on every
+request (both read from the ollama service's environment, `hardware.ollama_env`). Admission
+happens under the `gpu.admit` flock: holders are the `gpu.json` entries whose process is alive,
+checked by identity (`_alive`: a pid of another user's is dead, and on Linux the process's start
+time, `/proc/<pid>/stat` field 22, must match the entry's `start`), so a pid recycled after a
+reboot doesn't hold the GPU forever. `admits(m, held)`: no holder is waiting, every holder's
+model still resolves, and there are no holders or `can_share` passes; then a runner joins with
+`LOCK_SH|LOCK_NB` on `gpu.lock` (so a task alone holds the lock shared). Otherwise it marks
+itself `waiting`, says "waiting for the GPU (held by <task>…)" and blocks on `LOCK_EX`, first
+come first served; once it holds the lock exclusively nobody joins it, and gpu.json is rewritten
+to its own entry plus the waiting ones (any other is stale by construction). A lease that fails
+or is stopped while queued removes its entry (a stale `waiting` entry used to make every later
+task wait alone). `load()` serializes loads under `gpu.load`, reading the other holders' models
+under `gpu.admit` only for that read (lock order: `gpu.load`, then `gpu.admit`), so an admission
+or a finishing task's exit never waits for another task's load (a runner held there looked alive
+after its review notice, and `wb feedback` refused it). After a shared load (other holders' models
+kept) `_fits_beside` reads `/api/ps`: every kept model must still be loaded and all of `m` in
+VRAM, since need()'s guess can be short and Ollama then evicts or splits a model, and two tasks
+reload theirs on every request. If not, it warns "ollama could not fit … waiting for the GPU to
+itself", unloads its own model, marks itself waiting and takes `LOCK_EX` (flock converts: the
+shared lock goes first), then loads alone. `gpu.json` is `{"<pid>": {model, task, start,
+waiting?}}`. `wb image` takes `gpu.lock` through `GpuLease(None, "wb image", wait=…)`: with
+`--wait` it queues in `gpu.json` like a task with no model, waits for the running tasks to finish,
+then has the GPU to itself, and tasks started meanwhile wait for it; without, any live holder makes
+it refuse at once (`models.busy` names them). A remote model (`local: true`) takes no lease at
+all, and `free_gpu` never unloads or stops a remote provider's models.
 
 **Routing** (`router.rank`, `choose`). Rows: `store.results()` (no trials) that `tuning.judged`
 keeps, for this model and size. Quality is the acceptance rate with a uniform prior, overall =
@@ -935,13 +993,15 @@ BAD: prompts would be cut off silently; less is a note: tasks could be bigger).
 `gpu_budget` runs in routing and in the lease). `system()`: `macos`, `wsl` (`/proc/version`
 contains "microsoft"), `linux`. `gpus()`: `nvidia-smi` (name, MiB total/used, driver) on Linux and
 WSL (`[N/A]` reads as unknown; a line that isn't four fields is skipped); WSL adds Windows' adapters from `powershell.exe Get-CimInstance Win32_VideoController` (no
-VRAM: AdapterRAM caps at 4 GB); Linux scans `/sys/class/drm/card*/device` (amdgpu's
+VRAM: AdapterRAM caps at 4 GB), but only for the report (`wb scout`, `wb doctor`'s GPU line):
+`gpus(windows=False)`, which the budget and `wb image`'s settle use, reads nvidia-smi alone; Linux scans `/sys/class/drm/card*/device` (amdgpu's
 `mem_info_vram_total`/`_used`; names from `lspci`; NVIDIA left to nvidia-smi when it answered,
 else listed from sysfs, VRAM unknown); macOS reads `system_profiler SPDisplaysDataType -json`
 (Apple Silicon: unified memory, `wired_limit`; an adapter with only shared memory, an Intel iGPU,
 has VRAM unknown).
 `memory()`: `/proc/meminfo` or `vm_stat`/`vm.swapusage`. `cpu()`, `ollama_env()` (systemctl or
-launchctl, then the process env), `ollama_models_dir()`, `report()` (the lines `wb scout`
+launchctl, then the process env, for `OLLAMA_KEYS`: `OLLAMA_MODELS`, `OLLAMA_CONTEXT_LENGTH`,
+`OLLAMA_NUM_PARALLEL`, `OLLAMA_MAX_LOADED_MODELS`), `ollama_models_dir()`, `report()` (the lines `wb scout`
 prints). Unknowns stay unknown; nothing about the machine is hard-coded.
 
 **The weekly model check.** Models change fast. Once a week, in a quiet moment, the mod submits
@@ -1182,15 +1242,22 @@ Then describe the engine in `~/.config/workbench/images.json` (`$WB_IMAGES`). Tw
 ```
 
 - A **command** is any command-line tool. `{prompt}`, `{out}`, `{width}`, `{height}` and
-  `{seed}` are filled in, and the prompt is passed as a single argument, never through a shell.
+  `{seed}` are filled in, and the prompt is passed verbatim as a single argument, never through a
+  shell.
   `ref_arg` (e.g. `"-r"`) adds `--ref` images, for models that edit or keep a character
   consistent.
 - A **url** is any server with the OpenAI images API (SGLang, vLLM-Omni, LocalAI and others).
 - `notes` is shown to Claude. Put the model's licence there: some licences limit where and how
   their output may be used.
 
-A generation takes the GPU lock and unloads the coding models first, just as a task does, so the
-two never share VRAM. `wb scout` and `wb image --list` show each engine and whether it's ready.
+A generation takes the GPU lock and unloads the coding models first, just as a task does. While
+a task holds the GPU, `wb image` refuses at once and names it; `--wait` queues behind it instead
+(run that in the background: it can take as long as the task). A command engine exits when it's
+done, so its memory is free for the next task. A url engine is a server you run: it keeps its
+model in GPU memory for as long as it is up, and workbench can't stop it, so a coding model loaded
+beside it may spill into RAM. Start it to make images and stop it afterwards (or give it a GPU of
+its own). `wb scout` and `wb image --list` show each engine, whether it's ready, and which are
+servers.
 Prefer weights in safetensors or GGUF from the model's own publisher or a well-known
 quantizer. Prefer tools that load models without running code that comes with them (ComfyUI's
 custom-node packs do run their own Python).
@@ -1201,20 +1268,23 @@ custom-node packs do run their own Python).
   `ref_arg`, `model`, `label`, `notes` (shown to Claude: put the licence there), `timeout` (s,
   default 1800).
 - A command engine (`_argv`): `shlex.split(command)`, `~` expanded per token, then `{prompt}`,
-  `{out}`, `{width}`, `{height}`, `{seed}` filled in that order, token by token, never through a
-  shell; `--ref` images are appended as `[ref_arg, path]` pairs (both `command` and `ref_arg` are
+  `{out}`, `{width}`, `{height}`, `{seed}` filled in, token by token, in one pass (a prompt that
+  says `{seed}` reaches the engine as written; it used to get the seed and the out path), never
+  through a shell; `--ref` images are appended as `[ref_arg, path]` pairs (both `command` and `ref_arg` are
   required for refs). stdin is /dev/null; stdout and stderr go to `<out_dir>/engine.log`; a
   nonzero exit or no file at `{out}` fails with the log's last lines.
 - A url engine (`_server`): POST `{prompt, n: 1, size: "WxH", response_format: "b64_json", seed[,
   model]}` (no auth header), decode `data[0].b64_json`.
 - Ready (`ready`, shown by `wb image --list` and `wb scout`): a command whose first token is on
   PATH or a file; a url whose server answers a GET (any status) within 2 s.
-- `generate`: holds the GPU for the whole batch through `models.GpuLease(None, "wb image")` (it
+- `generate`: holds the GPU for the whole batch through `models.GpuLease(None, "wb image",
+  wait=…)` (any live holder in gpu.json: a RuntimeError naming them, unless `--wait`; then it
   queues in gpu.json behind the running tasks, and tasks started meanwhile wait for it), calls
-  `models.free_gpu()` with nothing kept, then `_settle` (up to 90 s for the resident models,
-  Ollama's and running servers, to go and used VRAM to stop falling, after
-  an engine started a second after the unload found 1.1 GB of 16 free; skipped under
-  `WB_FAKE_MODELS`). Seeds are seed … seed+n−1 (default seed `time() % 1_000_000`). Files are
+  `models.free_gpu()` with nothing kept, then `_settle` (up to 90 s for what free_gpu can release,
+  `models.releasable`: local Ollama models and servers with a stop command, to go, and used VRAM
+  to stop falling, after an engine started a second after the unload found 1.1 GB of 16 free; a
+  server with no stop command or a remote model used to cost every generation the whole 90 s;
+  skipped under `WB_FAKE_MODELS`). Seeds are seed … seed+n−1 (default seed `time() % 1_000_000`). Files are
   `<slug>-<seed>.png` (the slug is the prompt's first six words), each with a `.json` sidecar
   `{prompt, seed, width, height, engine, refs, secs, ts}`. `--out` defaults to
   `$WB_HOME/images/<YYYYmmdd-HHMMSS>/`.
@@ -1612,7 +1682,8 @@ broken pipe or when its parent process changes.
 `workbench/cli.py` is argparse: `main()` builds one subparser per command with
 `set_defaults(f=cmd_<name>)` and dispatches `a.f(a)`; a new command is a parser block plus a
 `cmd_*` function. `die(msg, code=1)` prints `wb: <msg>` on stderr. Exit codes: 1 an error; 2 a
-usage error, or `wait` on a closed task or a timeout; 3 no model can run (`start`); `scout --due`
+usage error, or `wait` on a closed task or a timeout; 3 no model can run (`start`); 4 the GPU is
+held by a task the new one can't run beside (`start` without `--queue`); `scout --due`
 0 when due, 1 when not; `doctor` 0/1. cli never writes notify.jsonl (the runner and the ask server
 do). `wb --version` prints the version (`workbench.__version__`).
 
@@ -1629,16 +1700,16 @@ message, not a traceback.
 ### Running tasks
 | Command | Flags (defaults) | What it does |
 |---|---|---|
-| `wb start <task> --spec <file\|->` | `--repo` (.), `--size trivial\|significant` (significant), `--model <id or fragment>`, `--test <cmd>`, `--auto-fix N` (2), `--checkin MIN` (10 significant, 0 trivial), `--ask-budget N` (2), `--ask-timeout S` (1200), `--round-timeout S`, `--silence-timeout S`, `--think-timeout S` (0 off; unset or 0 for the other two: the measured budgets), `--test-timeout S` (900), `--no-base-check`, `--base REF` (HEAD), `--skill NAME…`, `--allow PATTERN…`, `--allow-path DIR…`, `--force` (queue a `--model` that can't run now), `--trial`, `--no-claude-md` | Checks the name (`^[a-z0-9][a-z0-9-]{0,47}$`, never reused), the repo, the spec and the skills; picks the model (router, or `--model`; none runnable: exit 3); checks `CLAUDE.md` is committed at the base; makes the worktree and branch `delegate/<task>`; writes task.json, round 1's prompt (spec + PROTOCOL) and status; spawns the runner. Prints the model and why, the slice, Claude's spec record, the handed or suggested skills, notes, `next: wb wait <task>`. With `--test` (and not `--no-base-check`) it first runs the acceptance command once in the fresh worktree, the base, inside the agent's lane (`runner.base_check`, at most `BASE_CHECK_SECS` = 120 s, the output in `base-tests.txt`, the result in status `base_check`) and prints what it saw: a warning when it already passes (it can't tell when the step is done), else its exit and last 8 lines, for Claude to check it fails only for what the step changes; past the limit, a note that it wasn't checked. |
-| `wb feedback <task> --text "…" \| --message <file\|->` | `--fresh` \| `--keep-context`, `--spec-gap "…"…` | Phase review/stuck/failed and no live runner. Writes the next round's prompt (FEEDBACK_HEAD + "Make exactly these changes, then re-run the acceptance command and finish with a short summary:" (the re-run only when there is one) + the text), reviews+1, spawns the runner. Warns past three review rounds. Gathers lessons. |
-| `wb next <task> --spec <file> -m "…"` | `--test` (replaces the acceptance command), `--skill` (replaces the set), `--fresh`, `--allow PATTERN…` (adds to the task's grants), `--spec-gap` | Phase review. Reads the spec (a file or `-`; empty or unreadable: nothing changes), records the step's size and fit, commits the work (`<m>` + `Workbench-Task: <task> (step N)` + `OpenCode-Session:`), writes the next step's prompt ("Step N of this task is done and committed (<sha>). The next step:" + spec + PROTOCOL), records the spec gaps, resets reviews, spawns. Says whether the next step gets a fresh session and why (`runner.fresh_reason`). Gathers lessons. |
+| `wb start <task> --spec <file\|->` | `--repo` (.), `--size trivial\|significant` (significant), `--model <id or fragment>`, `--test <cmd>`, `--auto-fix N` (2), `--checkin MIN` (10 significant, 0 trivial), `--ask-budget N` (2), `--ask-timeout S` (1200), `--round-timeout S`, `--silence-timeout S`, `--think-timeout S` (0 off; unset or 0 for the other two: the measured budgets), `--test-timeout S` (900), `--no-base-check`, `--base REF` (HEAD), `--skill NAME…`, `--allow PATTERN…`, `--allow-path DIR…`, `--force` (queue a `--model` that can't run now), `--queue` (start although the GPU's holders leave no room: wait behind them), `--trial`, `--no-claude-md` | Checks the name (`^[a-z0-9][a-z0-9-]{0,47}$`, never reused), the repo, the spec and the skills; picks the model (router, or `--model`; none runnable: exit 3); checks `CLAUDE.md` is committed at the base; refuses when another task (or `wb image`) holds the GPU and the model can't run beside it (exit 4, naming each holder's task, repo and model; `--queue` overrides); makes the worktree and branch `delegate/<task>`; writes task.json, round 1's prompt (spec + PROTOCOL) and status; spawns the runner. Prints the model and why, the slice, Claude's spec record, the handed or suggested skills, notes, `next: wb wait <task>`. With `--test` (and not `--no-base-check`) it first runs the acceptance command once in the fresh worktree, the base, inside the agent's lane (`runner.base_check`, at most `BASE_CHECK_SECS` = 120 s, the output in `base-tests.txt`, the result in status `base_check`) and prints what it saw: a warning when it already passes (it can't tell when the step is done), else its exit and last 8 lines, for Claude to check it fails only for what the step changes; past the limit, a note that it wasn't checked. |
+| `wb feedback <task> --text "…" \| --message <file\|->` | `--fresh` \| `--keep-context`, `--spec-gap "…"…` | Phase review/stuck/failed and no live runner. Writes the next round's prompt (FEEDBACK_HEAD + "Make exactly these changes, then re-run the acceptance command and finish with a short summary:" (the re-run only when there is one) + the text), reviews+1, spawns the runner. Warns past three review rounds. A note names the GPU's holders when it will wait for them. Gathers lessons. |
+| `wb next <task> --spec <file> -m "…"` | `--test` (replaces the acceptance command), `--skill` (replaces the set), `--fresh`, `--allow PATTERN…` (adds to the task's grants), `--spec-gap` | Phase review. Reads the spec (a file or `-`; empty or unreadable: nothing changes), records the step's size and fit, commits the work (`<m>` + `Workbench-Task: <task> (step N)` + `OpenCode-Session:`), writes the next step's prompt ("Step N of this task is done and committed (<sha>). The next step:" + spec + PROTOCOL), records the spec gaps, resets reviews, spawns. Says whether the next step gets a fresh session and why (`runner.fresh_reason`), and names the GPU's holders when it will wait for them. Gathers lessons. |
 | `wb answer <task> --text "…" \| --file <f>` | `--id` (the pending question) | Writes `ask/<id>.answer` (atomically); the blocked `ask_reviewer` returns it. |
 | `wb allow <task> ["<pattern>"…]` | `--path DIR…`, `--always`, `--text "…"` | Adds to the task's grants (`rules/<task>/grants.json`; and commands.json with `--always`, refused when it doesn't parse); answers any pending question with "Claude allowed … Run it again now and carry on."; if the agent is live, sends that as a `--now` steer so it restarts on its session with the rule. `--path` goes through `_lane_dir` (refuses `/` and home, creates the directory; `*` turns the lane off for the task). |
 | `wb steer <task> --text "…" \| --message <file>` | `--now` | Only while queued/running/testing/asking with a live runner. Appends to steer.jsonl: delivered when the current run ends (before the tests), or at once with `--now`. |
 | `wb note <task> --text "…"` | | A `captain` event: Claude's log line in the transcript. |
 | `wb takeover [<task> \| --all]` | | Stops the runner, phase `review`, "Claude took over"; Claude edits in the worktree and accepts, or hands back with feedback. `--all`: every task that isn't closed. |
 | `wb stop [<task> \| --all]` | | A live task only. SIGTERM the runner (15 s, `wait_exit`, then SIGKILL to its session and the agent's), phase `stuck`, "stopped by the reviewer"; the worktree is kept. `--all` (`stop_everything`): every open task, a `stopped` event "bail out: stopped by the user". |
-| `wb resume <task>` | | Phase stuck/failed, no live runner: a fresh session (round n+1, `runner.RESUME` + what the step's rounds asked), not a review round. Acks the task and gathers lessons. |
+| `wb resume <task>` | | Phase stuck/failed, no live runner: a fresh session (round n+1, `runner.RESUME` + what the step's rounds asked), not a review round. A note names the GPU's holders when it will wait for them. Acks the task and gathers lessons. |
 | `wb accept <task> -m "…"` | `--merge`, `--force` (any open phase; stops a live runner), `--spec-gap` | Phase review; refuses a closed task. Records the step, commits (a last step with no new changes accepts the committed steps) (`<m>` + "Delegated to <label> via OpenCode: R round(s), F automatic test-fix, V review round(s)." + `Workbench-Task:` + `OpenCode-Session:`; no AI co-author line), removes the worktree, `--merge`s (`merge --no-ff --no-edit` into `base_ref`, which the main checkout must have out unless it is `HEAD`, with no changes to tracked files; a conflict is backed out; a failure is reported and the accept stands), writes the results row, prints how far CLAUDE.md is behind. Gathers lessons. |
 | `wb discard <task>` | `--reason "…"`, `--spec-gap`, `--keep-branch` | Stops the runner, records the step, removes the worktree and (unless `--keep-branch`) the branch, writes the results row. Gathers lessons. Refuses a closed task. |
 
@@ -1660,7 +1731,7 @@ message, not a traceback.
 | `wb model add <provider/model>` | `--pull`, `--label`, `--context N` | Registers an Ollama model in opencode.json, merged into any existing entry (see *Managing the set*). |
 | `wb model retire <id>` | `--delete` | Unregisters it (not OpenCode's default) and drops its models.json overrides; `--delete` removes Ollama's weights. |
 | `wb model sizes <id> [trivial] [significant]` | | Limits the sizes it's routed (none: every size). |
-| `wb scout` | `--done [--notes "…"]`, `--due`, `--watch "…"`, `--unwatch N` | The weekly check's facts; `--done` records it; `--due` exits 0 when one is due (7 days); the watch list. |
+| `wb scout` | `--done [--notes "…"]`, `--due`, `--watch "…"`, `--unwatch N` | The weekly check's facts (with the GPU budget and the devices it counts, `cli.gpu_line`); `--done` records it; `--due` exits 0 when one is due (7 days); the watch list. |
 | `wb skill list \| show <n> \| scan <n\|path>` | | The library, a skill with its history, the scan alone. |
 | `wb skill add <n> --from <src> -m "…"` | `--source "<origin>, <license>"`, `--lesson ID…` | Check, scan, copy, commit. |
 | `wb skill patch <n> --old … --new … -m "…"` | `--old-file`, `--new-file`, `--lesson` | An exact, unique replacement, then as add. |
@@ -1674,12 +1745,12 @@ message, not a traceback.
 ### Other
 | Command | Flags | What it does |
 |---|---|---|
-| `wb image "<prompt>"` | `--n` (4), `--size WxH` (1024x1024), `--seed`, `--ref <img>…`, `--out DIR`, `--engine`, `--list` | Candidates from a local image engine (see *Images*). |
+| `wb image "<prompt>"` | `--n` (4), `--size WxH` (1024x1024), `--seed`, `--ref <img>…`, `--out DIR`, `--engine`, `--list`, `--wait` | Candidates from a local image engine (see *Images*). While anything holds the GPU it refuses at once, naming the holders; `--wait` queues behind them. A bare `list` or `ls` as the prompt acts as `--list`. |
 | `wb chat [log\|serve\|url\|reply\|ack\|pending]` | `--port` (1337), `--bind` (replaces chat.json's), `--host` (adds), `--text`, `--message <file\|->` (reply reads stdin without either), `-n` (10); `ack <id> --by --how` (the mod) | The web chat: the thread, the server, the link with its token, Claude's reply. |
 | `wb init <dir>` | | A project the way Claude keeps one: git on the default branch, an initial commit, AGENTS.md → CLAUDE.md (refuses inside another repo or without a git identity). |
 | `wb setup` | `--force` (replaces a link that points elsewhere; never a real file) | Links `~/.local/bin/wb` to this copy's `bin/wb` and Claude Code's `skills/delegate` to its `skill/delegate`, warns when `~/.local/bin` isn't on PATH (Claude and the mod run `wb` by name); exit 1 when it left something in the way (see *Installing*). |
 | `wb update` | `--check` (only say whether origin has news: `update available: N new commit(s)…` or `up to date`), `--if-due` (with `--check`: ask origin at most weekly, `UPDATE_EVERY`, else answer from `update.json`; never with `CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC`) | Updates this copy (see *Installing*): refuses while any runner is live; a marketplace copy runs `claude plugin marketplace update workbench` then `claude plugin update workbench@workbench`; a clone (refusing uncommitted tracked changes) runs `git pull --ff-only` first. Prints `updated <kind> a..b (N commit(s))` or `already up to date`. The fetch never prompts (`GIT_TERMINAL_PROMPT=0`, ssh `BatchMode`). |
-| `wb doctor` | | `opencode --version` (BAD below 2.x, whose config shape and run flags workbench writes; a version that doesn't parse is a `--` line), the OpenCode config, git, models found and each one's readiness, each Ollama entry's `options.max_tokens` and context against what Ollama serves, the state directory (made if missing, then checked writable), a real lane drawn around a test write (`ok agents write only in their lane (Landlock ABI N)`: the probe's `PermissionError`, not exit 126), `wb` on PATH (Claude's Bash runs it by name: BAD without it, whatever `WB_BIN` says; `WB_BIN` is noted when set), the `/delegate` skill link, a `--` line when `wb` or `/delegate` comes from another copy (`wb setup --force` from the one you want), and whether Claude Code lists `workbench@…` in `plugins/installed_plugins.json` (information only: a mod loaded another way isn't listed). `ok`/`BAD` lines set the exit code; `--` lines inform. |
+| `wb doctor` | | `opencode --version` (BAD below 2.x, whose config shape and run flags workbench writes; a version that doesn't parse is a `--` line), the OpenCode config, git, models found and each one's readiness, each Ollama entry's `options.max_tokens` and context against what Ollama serves, the state directory (made if missing, then checked writable), the GPU budget and the devices it counts (or that the GPU's memory is unknown, or that none was found: a `--` line), a real lane drawn around a test write (`ok agents write only in their lane (Landlock ABI N)`: the probe's `PermissionError`, not exit 126), `wb` on PATH (Claude's Bash runs it by name: BAD without it, whatever `WB_BIN` says; `WB_BIN` is noted when set), the `/delegate` skill link, a `--` line when `wb` or `/delegate` comes from another copy (`wb setup --force` from the one you want), and whether Claude Code lists `workbench@…` in `plugins/installed_plugins.json` (information only: a mod loaded another way isn't listed). `ok`/`BAD` lines set the exit code; `--` lines inform. |
 
 ## Files and formats
 
@@ -1691,7 +1762,8 @@ $WB_HOME (~/.local/state/workbench)
   notes.md  notes.lock           wb notes: how the user wants delegation run
   tuning.json                    optional: pin a tuned setting ({"fresh_at": 0.6})
   speed.json  speed.lock         each model's measured write and read speeds
-  gpu.lock  gpu.json  gpu.admit  the GPU lease: the lock, who holds or waits for it, the admission lock
+  gpu.lock  gpu.json  gpu.admit  the GPU lease: the lock, who holds or waits for it, the admission lock,
+  gpu.load                       and the lock that takes model loads one at a time
   scout.json  watch.json         the weekly model check: when it was done and offered; the watch list
   update.json                    wb update: when origin was last asked, how far behind this copy was
   imports/<slug>/                skills fetched by wb skill import, for Claude to read
@@ -1764,7 +1836,8 @@ description, 90 characters; a skill's id), `text {text}` (2000 characters), `ste
 cache}`, `error {text}`. From the runner: `round`, `stopped {text}`, `steer {now, by:
 "workbench"}` (a nudge), `interrupted`, `tests {ok, text}`, `skills`, `fresh {overflow,
 compacted}`,
-`autofix`, `reading_full`, `full`. From the ask server: `ask {id}`, `answer {id}`. From `wb`:
+`autofix`, `reading_full`, `full`, `gpu {text}` (a warning from loading the model: a server wb
+can't stop, a model partly on the CPU, a share Ollama couldn't keep). From the ask server: `ask {id}`, `answer {id}`. From `wb`:
 `spec_gap`, `next_step`, `stopped` (bail out), `resumed`, `allow`, `steer {now}`, `captain`,
 `takeover`.
 
@@ -1784,7 +1857,8 @@ with overflow), `read_full`, `reviews`, `spec_rounds`, `stuck`, `took_over`.
 - `lessons.jsonl`: `{ts, task, repo, skills, id, kind, round, text}`; a close is `{close: id, ts,
   how: "skill:<name>"|"dropped", why}` (*Lessons*).
 - `speed.json`: `{"<model id>": {"write": [tok/s…], "read": [tok/s…]}}`, the last 60 of each.
-- `gpu.json`: `{"<pid>": {model, task, waiting?}}`.
+- `gpu.json`: `{"<pid>": {model, task, start, waiting?}}` (`start`: the holder's start time on
+  Linux, `/proc/<pid>/stat` field 22, so a recycled pid isn't taken for it; null elsewhere).
 - `scout.json`: `{done_at, notes, offered_at}` (`offered_at` from the mod); `watch.json`: `[{ts, text}]`.
 - `update.json`: `{checked_at, behind, kind}` (`kind`: `marketplace` or `clone`); a failed check
   writes only `checked_at`, so it waits a week too.
@@ -1862,7 +1936,9 @@ main (*Shipping to main*).
   Permission, Images, Discovery, Routing, Tuning, Notes, Setup, Update, Projects, ModelSet,
   WebChat, Hardware, Detector, SkillLearning, RealOpenCodeSkillFiles, Drift).
 - `tests/test_gpu.py`: sharing the GPU (side by side, taking turns, unknown VRAM, an exclusive
-  holder) and `can_share`.
+  holder, `wb start` refused or `--queue`d behind a holder, `wb image` refused or `--wait`ing,
+  stale holders, a share Ollama couldn't keep), `can_share` (with `OLLAMA_MAX_LOADED_MODELS`) and
+  the budget (driver groups, an iGPU's carve-out, Apple's default).
 - `tests/test_portable.py`: discovery against real HTTP servers on port 0 (the Ollama probe, the
   port guess, multi-model servers, loopback and host names, `local: true`, `opencode.jsonc` under
   `XDG_CONFIG_HOME`, `CLAUDE_CONFIG_DIR`), the polling watcher (`watch._libc = False`), the
@@ -2023,6 +2099,9 @@ push: every change is a pull request that merges once `check` is green and it is
   the mod's still-true rule, `wb wait`.
 - **A task.json or status key** → *Files and formats*; a key the router, tuning or skills read from
   results → `results.record` and the readers' defaults for old rows.
+- **The GPU admission rule** (`models.admits`, `can_share`) → the lease, `wb start`'s refusal and
+  the feedback/next/resume note (`cli._gpu_holders`, `_gpu_note`), and the Sharing tests. **A new
+  event kind** → `transcript.task_entries` (an unknown kind is never shown) and *Files and formats*.
 - **A new tuned knob** → `tuning.KNOBS`, read with `tuning.value(task, name)`, a ceiling in
   `drive` if it has one.
 - **`chat.py` or `chat_static/`** → the browser test.
