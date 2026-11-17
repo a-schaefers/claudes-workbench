@@ -15,7 +15,15 @@
 
 <p align="center"><img src="docs/delegate-mode.png" alt="Claude in delegate mode on the left; the Workbench pane on the right, where the apprentice robot says what the local agent is doing"></p>
 
-**Frontier judgment, local horsepower. Claude leads; your GPU does the heavy lifting.**
+**Claude plans and reviews. Local models on your GPU write the code.**
+
+**Who runs where**
+- **Claude**, on Anthropic's servers (your subscription or API key): plans the work, writes a
+  spec for each piece, reviews every diff, commits. It never runs on your GPU.
+- **Your GPU**: the open coding models (through Ollama and OpenCode) that do the coding itself:
+  reading the code, editing files, running the tests, fixing what fails. Optionally, an image
+  model too.
+- **Your CPU**: the tests and tools the agents run, and `wb`, which connects the two.
 
 Claude's Workbench turns the local LLMs on your gaming PC into a crew led by a frontier model.
 Open coding models you can run at home are strong enough to write real code, but left alone they
