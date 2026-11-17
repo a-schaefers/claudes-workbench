@@ -639,6 +639,17 @@ class Lifecycle(Base):
         self.assertNotIn("delegate/t-stop", branches)
         self.assertFalse(store.Task("t-stop").worktree.exists())
 
+    def test_stop_all_leaves_a_task_closed_since_its_listing_closed(self):
+        # it listed the open tasks, then set each one stuck: a discard in between reopened the
+        # discarded task as stuck, its worktree gone (the 0.90 review)
+        self.start("t-closing", "hang")
+        running("t-closing")
+        task = store.Task("t-closing")
+        listed = cli._open_tasks()
+        run_wb("discard", "t-closing", "--reason", "test")
+        self.assertEqual(cli.stop_everything(listed), [])
+        self.assertEqual(task.status["phase"], "discarded")
+
     def branch(self, name):
         return subprocess.run(["git", "-C", str(self.repo), "rev-parse", "-q", "--verify", name],
                               capture_output=True, text=True).stdout.strip()

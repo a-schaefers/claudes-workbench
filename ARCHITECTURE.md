@@ -1815,7 +1815,9 @@ custom-node packs do run their own Python).
   resume, takeover and stop hold the task's `locks/<task>.cmd.lock` (`runner.lock_file`, where no
   lane reads: an agent holding a lock with flock would wedge every command), so a
   second one waits and then sees what the first did (an accept racing a discard once deleted the
-  accepted commit and wrote two results rows: the audit). The runner never takes it.
+  accepted commit and wrote two results rows: the audit). `stop --all` takes each task's in turn
+  and skips one closed since it listed them (it set a discarded task back to stuck). The runner
+  never takes it.
 - **The repo's stack** (`gitops.stack`): from `git ls-files -z`, the top two languages by file
   extension that each hold at least 20% of the source files. The router and the skill records use
   it.

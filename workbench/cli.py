@@ -839,12 +839,17 @@ def stop_everything(tasks=None) -> list[str]:
     tasks keep their worktrees (stopped, for wb feedback or wb discard later)."""
     stopped = []
     for t in _open_tasks() if tasks is None else tasks:
-        _stop_runner(t)
-        t.event({"ts": store.now(), "round": t.status.get("round"), "kind": "stopped",
-                 "by": "user", "text": "bail out: stopped by the user"})
-        t.set_status(phase="stuck", last="bail out: stopped", pid=None)
-        _ack_all(t)
-        stopped.append(f"{t.name} (worktree kept: {t.worktree})")
+        # each task under its command lock, as one_at_a_time (which --all skips): an accept or
+        # discard that closed it after the listing was set back to stuck (the 0.90 review)
+        with store.locked(runner.lock_file(t.name, "cmd")):
+            if t.status.get("phase") in store.CLOSED:
+                continue
+            _stop_runner(t)
+            t.event({"ts": store.now(), "round": t.status.get("round"), "kind": "stopped",
+                     "by": "user", "text": "bail out: stopped by the user"})
+            t.set_status(phase="stuck", last="bail out: stopped", pid=None)
+            _ack_all(t)
+            stopped.append(f"{t.name} (worktree kept: {t.worktree})")
     return stopped
 
 
