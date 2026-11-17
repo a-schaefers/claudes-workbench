@@ -389,7 +389,8 @@ Claude is the driver, not a spectator, and the agent is a teammate it can reach 
   changed, time so far and the ETA. Claude tells you how it's going in two or three lines, logs the
   same with `wb note` (a "captain's log" line in the transcript), and steers if it's drifting.
 - **Taking over.** `wb takeover <task>` stops the agent and hands the worktree to Claude, to finish
-  by hand and accept, or hand back with `wb feedback`. `wb stop <task>` just stops it.
+  by hand and accept, or hand back with `wb feedback`. `wb stop <task>` just stops it, and
+`wb resume <task>` continues it in a fresh session, not counted as a review round.
 
 ### Context, on both sides
 
@@ -404,7 +405,11 @@ window, about 3K tokens on 32K), the agent's last words and the new instructions
 compaction is a small model's summary of its session, which drops details and can lose the task
 itself (seen: an agent that built CLAUDE.md's "next step" after one), so the task's config sets it
 only as a backstop just past that point: room for one reply at the model's output cap and one
-step's growth. A session OpenCode compacted anyway is replaced at the next round too.
+step's growth. A session OpenCode compacted anyway is replaced at the next round too. A session that reaches
+the handover point before it has changed a file isn't handed over: the next one would re-read
+the same files and fill up too (seen: twenty handovers in twelve minutes, no edit made). It
+carries on, with compaction as the backstop, and Claude hears that the step needs more reading
+than the window holds.
 Reports show the fill (`agent context: 19.4K of 32K (60%)`) so Claude sees it coming.
 `wb feedback --fresh` forces a fresh session (a confused agent), `--keep-context` keeps it for one
 more round.
@@ -780,6 +785,7 @@ back) and the web chat stops listening in that session.
 | `wb note <task> --text "…"` | Claude's captain's-log line in the transcript |
 | `wb takeover [<task> \| --all]` | stop the agent and finish by hand |
 | `wb stop [<task> \| --all]` | stop it; the work is kept |
+| `wb resume <task>` | continue a stopped task in a fresh session (not a review round) |
 | `wb accept <task> -m "…" [--merge] [--force] [--spec-gap "…"]` | commit the work and close the task |
 | `wb discard <task> [--reason] [--keep-branch]` | drop the work and close the task |
 | `wb wait [<task>] [--timeout]` | block until a task needs Claude |

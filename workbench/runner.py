@@ -230,8 +230,12 @@ def run_round(task: store.Task, n: int) -> dict:
     prompt = task.round_dir(n).joinpath("prompt.md").read_text()
     cmd = opencode_bin() + ["run", "--standalone", "-m", spec["opencode_model"], "--auto",
                             "--format", "json", "--title", f"wb: {task.name}"]
+    marks = {gitops.mark(task.worktree)}  # the tree as the round and the session began
     if st.get("session"):
         cmd += ["--session", st["session"]]
+        marks.add(st.get("session_mark"))
+    else:
+        task.set_status(session_mark=next(iter(marks)))
     note = skills_note(task, n)
     cmd.append(note + prompt)
     env = agent_env(task)
@@ -289,9 +293,15 @@ def run_round(task: store.Task, n: int) -> dict:
                                 tok_out=task.status.get("tok_out", 0) + row["out"])
                 used = row["in"] + row.get("cache", 0) + row["out"]
                 # Full: a fresh session takes over (drive), never OpenCode's own summary. Only
-                # after some work, so a handoff that is itself large can't loop.
-                if window and used >= fresh_at * window and sum(out["tools"].values()):
-                    out["full"] = used
+                # once this session has changed a file: one that filled up reading would hand
+                # the same reading to the next, which fills up too (seen 2026-11-16: twenty
+                # handovers in twelve minutes, no edit made). It carries on instead.
+                if window and used >= fresh_at * window and not out["full"]:
+                    if marks != {gitops.mark(task.worktree)}:  # changed since either began
+                        out["full"] = used
+                    elif not out.get("reading_full"):
+                        out["reading_full"] = used
+                        _reading_full(task, n, used, window)
             elif row["kind"] == "error":
                 out["errors"].append(f"opencode: {row['text']}")
             task.event(row)
@@ -613,6 +623,10 @@ CARRY_ON = ("Your last session filled up, so you are continuing in a fresh one. 
             "the task above from where the work stands: re-read the files you are changing, then "
             "finish them and run the tests.{asked} Your last words before the switch:\n\n{last}")
 ASKED = "\n\nWhat you were asked to do, and it isn't done until it is:\n\n{}\n\n"
+# What the fresh session is told when Claude resumes a task it stopped (wb resume).
+RESUME = ("Claude stopped your last session and is resuming the task in a fresh one. Carry on "
+          "with the task above from where the work stands: re-read the files you are changing, "
+          "then finish them and run the tests.{asked}")
 
 
 def round_asks(task: store.Task, n: int) -> list[str]:
@@ -620,19 +634,29 @@ def round_asks(task: store.Task, n: int) -> list[str]:
     feedback: what a fresh session taking over mid-round must still carry out. A handover's own
     carry-on adds nothing (it is skipped). Seen 2026-11-16: two handovers in a feedback round
     each said only "carry on with the task", and the fresh sessions, finding the tests green,
-    reported done with the feedback never made."""
+    reported done with the feedback never made. A resume (wb resume) is skipped the same way."""
     first = task.status.get("step_round") or 1
     out: list[str] = []
     for r in range(n, first, -1):
         d = task.round_dir(r)
         f = d / "instructions.md" if (d / "instructions.md").is_file() else d / "prompt.md"
         raw = f.read_text().strip() if f.is_file() else ""
-        if not raw or raw.startswith(CARRY_ON[:60]):
+        if not raw or raw.startswith((CARRY_ON[:60], RESUME[:60])):
             continue
         out.insert(0, raw)
         if raw.startswith(lessons.FEEDBACK_HEAD):
             break
     return out
+
+
+def _reading_full(task: store.Task, n: int, used: int, window: int) -> None:
+    pct = 100 * used // window
+    text = (f"the agent's session reached {pct}% of its window before it changed a file: the "
+            f"reading this step needs fills the handover point, so it carries on in this session "
+            f"(OpenCode compacts it if it must). Name fewer files to read, or put what it needs "
+            f"in the spec.")
+    task.event({"ts": store.now(), "round": n, "kind": "reading_full", "text": text})
+    task.notify("checkin", f"task {task.name}: {text}", round=n)
 
 
 def _full_round(task: store.Task, n: int, rnd: dict) -> None:

@@ -2,6 +2,7 @@
 
 The agent never commits; everything it does stays in the worktree's working tree until `wb accept`.
 """
+import hashlib
 import subprocess
 from collections import Counter
 from pathlib import Path
@@ -37,6 +38,20 @@ def create_worktree(repo: Path, task: str, dest: Path, base: str = "HEAD") -> st
 
 def changed(worktree: Path) -> str:
     return git(worktree, "status", "--short", "--untracked-files=all").rstrip()
+
+
+def mark(worktree: Path) -> str:
+    """A fingerprint of the working tree's uncommitted state, new files' contents included: it
+    changes when, and only when, the agent changes a file. The index is left alone."""
+    h = hashlib.sha1(git(worktree, "diff", "HEAD").encode())
+    for f in git(worktree, "ls-files", "--others", "--exclude-standard", "-z").split("\0"):
+        if f:
+            h.update(f.encode() + b"\0")
+            try:
+                h.update((Path(worktree) / f).read_bytes())
+            except OSError:
+                pass
+    return h.hexdigest()
 
 
 def diff(worktree: Path, base: str, stat=False, paths=(), numstat=False) -> str:

@@ -13,7 +13,8 @@ what either says (a command, a flag, a default, a guard, a file) updates it in t
 ## Layout
 - `workbench/` is the Python package, standard library only (Python 3.11+, developed on 3.14). Do not add dependencies.
   - `store.py`: task directories, atomic JSON, locked JSONL. Every other part talks through these files.
-  - `runner.py`: the detached per-task driver. `cli.py`: `wb`. `ask_mcp.py`: the MCP tool server.
+  - `runner.py`: the detached per-task driver (a session hands over only once it has changed
+    a file, `gitops.mark`, so one that fills up reading can't loop). `cli.py`: `wb`. `ask_mcp.py`: the MCP tool server.
   - `gitops.py`: the task's worktree and branch, the review diff (intent-to-add, so new files
     show), commits, the repo's stack (its main languages). `results.py`: results.jsonl rows (`wb accept`/`discard`), each step's size and fit (`step`),
     and `wb stats`. Read them through `store.results()`, which leaves out trial runs.

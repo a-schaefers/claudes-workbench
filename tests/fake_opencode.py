@@ -9,6 +9,7 @@
   slow   a first run that takes an hour; a continued session behaves like ok
   fill   writes "41", then a step that fills 76% of a 32K window, then works on for an hour;
          a fresh session handed the task behaves like ok
+  read   reads, a step that fills 76% before any change, then writes "42" like ok
 FAKE_PROMPTS, if set, is a file each run appends its prompt to; FAKE_SLEEP pauses each run after its first event.
 FAKE_LESSON, if set, ends the agent's text with a `Lesson:` line (what workbench.lessons gathers).
 """
@@ -89,6 +90,16 @@ elif scenario == "loop":
     finish()
 elif scenario == "hang":
     time.sleep(3600)
+elif scenario == "read":
+    tool("read", {"filePath": os.path.abspath("answer.txt")})
+    emit("step_finish", reason="tool-calls", tokens={"input": 2000, "output": 900,
+                                                      "cache": {"read": 22100}})  # 25000: 76%
+    time.sleep(1)
+    with open("answer.txt", "w") as fh:
+        fh.write("42\n")
+    tool("write", {"filePath": os.path.abspath("answer.txt"), "content": "42"})
+    emit("text", text="Wrote answer.txt = 42.")
+    finish()
 elif scenario == "fill":
     with open("answer.txt", "w") as fh:
         fh.write("41\n")

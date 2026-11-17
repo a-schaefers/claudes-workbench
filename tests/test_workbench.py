@@ -287,6 +287,31 @@ class Context(Base):
         from workbench import runner
         self.assertEqual(len(runner.round_asks(store.Task("t-c6"), 4)), 1)  # a carry-on adds nothing
 
+    def test_a_session_that_fills_up_reading_carries_on_instead_of_handing_over(self):
+        self.start("t-c7", "read", "--test", TEST_CMD)
+        st = wait_phase("t-c7", {"review", "stuck", "failed"}, timeout=60)
+        self.assertEqual((st["phase"], st.get("handovers", 0), len(self.runs())), ("review", 0, 1))
+        notes = [r for r in store.read_jsonl(store.home() / "notify.jsonl")[0]
+                 if r["task"] == "t-c7" and r["kind"] == "checkin"]
+        self.assertIn("reached 76% of its window before it changed a file", notes[0]["text"])
+        self.assertIn("Name fewer files to read", notes[0]["text"])
+
+    def test_a_stopped_task_resumes_in_a_fresh_session_without_a_review_round(self):
+        self.start("t-c8", "hang", "--test", TEST_CMD)
+        deadline = time.time() + 30
+        while not store.Task("t-c8").status.get("session") and time.time() < deadline:
+            time.sleep(0.2)                                   # the agent is running
+        run_wb("stop", "t-c8")
+        os.environ["FAKE_SCENARIO"] = "ok"
+        self.assertIn("resumed t-c8 in a fresh session (round 2)", run_wb("resume", "t-c8"))
+        st = wait_phase("t-c8", {"review", "stuck", "failed"}, timeout=60)
+        self.assertEqual((st["phase"], st["reviews"]), ("review", 0))
+        last = self.runs()[-1]
+        self.assertFalse(last["session"])
+        self.assertIn("Write the answer to answer.txt.", last["prompt"])
+        self.assertIn("Claude stopped your last session", last["prompt"].split("## Now")[1])
+        self.assertEqual(runner.round_asks(store.Task("t-c8"), 2), [])  # a resume adds nothing
+
     def test_the_handover_point_is_the_tasks_tuned_one(self):
         os.environ["FAKE_FILL"] = "25000"          # 76%: past the default 0.6, short of 0.8
         store.home().mkdir(parents=True, exist_ok=True)

@@ -17,6 +17,7 @@ from pathlib import Path
 from . import (__version__, chat, context, gitops, hardware, images, lessons, models, results,
                router, scan, skills, store, transcript, tuning)
 from .watch import Watcher, wait_exit
+from . import runner
 from .runner import PKG_ROOT
 
 PROTOCOL = """
@@ -477,6 +478,27 @@ def cmd_stop(a):
     _stop_runner(task)
     task.set_status(phase="stuck", last="stopped by the reviewer", pid=None)
     print(f"stopped {a.name}; wb feedback continues it, wb discard drops it")
+
+
+def cmd_resume(a):
+    """Continue a task Claude stopped (wb stop) where the work stands: a fresh session, handed
+    the task, the work so far and what the step's rounds asked. Not a review round."""
+    task = need(a.name)
+    st = task.status
+    if st.get("phase") not in ("stuck", "failed"):
+        die(f"{a.name} is {st.get('phase')}; wb resume continues a stopped task")
+    if runner_alive(task):
+        die(f"{a.name}'s runner is still running")
+    n = st.get("round", 1)
+    asks = runner.round_asks(task, n)
+    task.round_dir(n + 1).mkdir(parents=True, exist_ok=True)
+    task.round_dir(n + 1).joinpath("prompt.md").write_text(runner.RESUME.format(
+        asked=runner.ASKED.format("\n\n".join(asks)).rstrip() if asks else ""))
+    task.set_status(round=n + 1, context="fresh", phase="queued", last="resumed by the reviewer")
+    task.event({"ts": store.now(), "round": n + 1, "kind": "resumed",
+                "text": "Claude resumed the task in a fresh session"})
+    spawn_runner(task)
+    print(f"resumed {a.name} in a fresh session (round {n + 1})")
 
 
 def cmd_allow(a):
@@ -1408,6 +1430,8 @@ def main(argv=None):
     s.add_argument("--all", action="store_true",
                    help="every agent (\"bail out claude\")")
     s.set_defaults(f=cmd_stop)
+    s = sub.add_parser("resume", help="continue a stopped task in a fresh session (not a review round)")
+    s.add_argument("name"); s.set_defaults(f=cmd_resume)
     s = sub.add_parser("accept", help="commit the work on its branch and close the task")
     s.add_argument("name"); s.add_argument("--message", "-m", required=True)
     s.add_argument("--merge", action="store_true"); s.add_argument("--force", action="store_true")

@@ -336,7 +336,11 @@ You are the driver, not a spectator. When something tells you the agent is headi
   system services, the user's data, a dependency the project shouldn't take on. Knowing a task
   needs something up front, `wb start … --allow "<pattern>"`. sudo, git writes and `gh` stay
   refused whatever you allow.
-- `wb stop <name>`: just stop it.
+- `wb stop <name>`: just stop it. `wb resume <name>` continues it in a fresh session (not a
+  review round), e.g. after fixing workbench under it.
+- A check-in saying the session "reached N% of its window before it changed a file": the step
+  needs more reading than the window holds. Let it carry on; next time name fewer files to read,
+  or put what it needs (a signature, a constant) in the spec.
 Notes are instructions, like feedback: concrete and short.
 
 **The user's two commands.** Only these, never words in a message, stop the delegation and end
