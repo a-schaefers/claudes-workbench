@@ -154,7 +154,9 @@ one that spills into RAM, and on a big card the best is a larger model, a longer
 The window sets the slice of every task (`slice:` in the report), so where the VRAM has room past
 the weights, raise the context Ollama serves (`OLLAMA_CONTEXT_LENGTH`, then `wb model add …
 --context N`); `wb model add` refuses an Ollama model while nothing says what context Ollama
-serves it, and `wb doctor` flags an entry whose context differs from what Ollama serves. Results first, then speed. Recommend briefly (keep / add / retire, with sizes and why), and
+serves it, and a model on another server (LM Studio, llama.cpp, vLLM) without `--context N`, the
+window it was started with: ask the user if you don't know it. `wb doctor` flags an entry whose
+context differs from what Ollama serves, or that has none. Results first, then speed. Recommend briefly (keep / add / retire, with sizes and why), and
 only with a yes: `wb model add <provider/model> --pull` (background), `wb model sizes` for what it
 should take, `wb model retire <id> [--delete]`. Installed but unregistered models may belong to other tools: ask before touching
 them. When you set a model aside, `wb scout --watch "…"` records what would bring it back:

@@ -83,7 +83,7 @@ dependencies. No packaging: it runs from the clone.
   task: `rules/<task>/grants.json`).
 - `lane.py`: Landlock: the runner starts OpenCode through it (`wrap`); restricts writes and reads,
   sets no-new-privileges, execs. Fails closed: Landlock present but refusing the lane exits 126
-  (`workbench lane: the kernel refused the lane`); without Landlock (or off `lane.UNIFIED`'s
+  (`workbench lane: the kernel refused the lane`); a command it can't exec, 127; without Landlock (or off `lane.UNIFIED`'s
   architectures) it runs unrestricted and `wb doctor` says so. Standard library only.
 - `gitguard.py`: the read-only `git` shim first on the agent's PATH. Standard library only: it's
   imported on every git call.
@@ -177,10 +177,12 @@ followed) and the provider's `baseURL` (`{env:}`/`{file:}` resolved) is on this 
 cloud model (`:cloud`, `-cloud`, a tags row with `remote_host`) unless models.json marks that
 model's id `local: true`, nor an entry with `tool_call: false`. OpenCode's config is
 `$XDG_CONFIG_HOME/opencode/opencode.json` and `.jsonc`, layered in that order and merged by
-`models.read_config`; written only when one file holds it and it has no comments. Probes to this
+`models.read_config`; written only when one file holds it and it has no comments (through a
+symlink, keeping its mode; a refusal prints the change, never the config's keys). Probes to this
 machine skip any HTTP proxy. Ollama entries need `options.max_tokens` (Ollama ignores
 OpenCode's `max_completion_tokens`) and a `limit.context` matching what Ollama serves (never the
-trained length); `wb model add` writes both and `wb doctor` checks them.
+trained length); every entry needs `limit.context` (a server other than Ollama: `wb model add
+--context N`); `wb model add` writes both and `wb doctor` checks them.
 
 Environment: `WB_HOME`, `WB_MODELS`, `WB_SKILLS`, `WB_IMAGES`, `WB_CHAT_TOKEN`, `WB_CHAT_CONFIG`,
 `WB_COMMANDS` (the paths above); `WB_OPENCODE_CONFIG` (OpenCode's config); `WB_COMPACT_AT` (the
@@ -249,10 +251,12 @@ PATH and the lane; the rest is only imitated by the fake.
 - `--worktree` takes `=name`; the runner makes its own worktrees anyway.
 
 ## Troubleshooting
-- `wb doctor`: opencode and its config files, git, each model's readiness, skipped providers and
-  why, an Ollama baseURL without `/v1`, each Ollama entry's `max_tokens` and context, the state directory, a real lane around a test write, `wb` on PATH,
+- `wb doctor`: opencode and its config files, git, each model's readiness (BAD when none can run),
+  skipped providers and why, an Ollama baseURL without `/v1`, a missing `limit.context`, each
+  Ollama entry's `max_tokens` and context, the state directory, a real lane around a test write, `wb` on PATH,
   the mod.
-- A model "can't run": `wb models` says why (server down, not pulled, no `start` command).
+- A model "can't run": `wb models` says why (server down, not pulled, no `start` command), and
+  `wb start` adds the next step.
 - A task misbehaves: `wb log <t> -v`, `wb watch <t> -v`, `tasks/<t>/runner.log` (the runner's
   output and OpenCode's stderr, including `workbench lane: the kernel refused the lane`).
 - The agent can't see `ask_reviewer`: `PWD=<worktree> OPENCODE_CONFIG=<state>/rules/<task>/opencode.json

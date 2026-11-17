@@ -87,7 +87,10 @@ def score(m: models.Model, size: str, state: dict | None = None, stack=()) -> Sc
     state = state or models.status(m)
     real = [r for r in store.results() if r.get("model") == m.id and r.get("size") == size
             and tuning.judged(r)]
-    s = Score(model=m, state=state, weights=models.weights(m), stack=tuple(stack))
+    # a model that can't run isn't weighed: its server was just found down, and asking it again
+    # cost seconds per model on a sleeping LAN box (the 2026-11-16 audit)
+    s = Score(model=m, state=state, stack=tuple(stack),
+              weights=models.weights(m) if state["available"] or m.extra.get("weights_gb") else 0)
     s.tries = len(real)
     s.wins = sum(r.get("outcome") == "accepted" for r in real)
     if stack:
@@ -138,7 +141,7 @@ def rank(size: str, stack=()) -> list[Score]:
     scores = [score(m, size, stack=stack) for m in models.discover().values() if allowed(m, size)]
     budget = models.gpu_budget() if scores else None
     for s in scores:
-        s.fits = fits(s.model, budget)
+        s.fits = fits(s.model, budget) if s.state["available"] else None
     usable = [s for s in scores if s.state["available"]]
     best = max((s.quality for s in usable), default=0)
     close = sorted((s for s in usable if s.quality >= best - QUALITY_MARGIN), key=_guess(size))
@@ -152,9 +155,14 @@ def choose(size: str, stack=()) -> tuple[Score | None, str]:
     ranked = rank(size, stack)
     top = ranked[0] if ranked and ranked[0].state["available"] else None
     if top is None:
-        return None, "no local model can run: " + "; ".join(
-            f"{s.model.id}: {s.state['why']}" for s in ranked) if ranked else \
-            "no local models: " + models.why_none()
+        if ranked:
+            return None, "no local model can run: " + "; ".join(
+                f"{s.model.id}: {s.state['why']}" + (f" ({fix})" if (fix := models.remedy(s.model, s.state)) else "")
+                for s in ranked)
+        if found := models.discover():  # all held back by the size policy, not missing (the 2026-11-16 audit)
+            return None, (f"no local model takes {size} tasks ({', '.join(found)}: limited by wb model "
+                          f"sizes; wb model sizes <id> trivial significant allows one, or pass --model)")
+        return None, "no local models: " + models.why_none()
     usable = [s for s in ranked if s.state["available"]]
     sizes = [s.weights for s in usable if s.fits is not False or top.fits is False]
     if len(usable) == 1:

@@ -165,8 +165,15 @@ CLAUDE.md, the user's decisions, the review checks) marked apart.
   `--no-claude-md` is for throwaway repos).
 - It picks the model: the router's choice for the task's size (`--size trivial|significant`,
   default significant) and the repo's stack (its main languages, from its tracked files), or
-  `--model` (an id, or a fragment that names one model). No model can run: exit 3. A `--model`
-  that can't run right now (server down, not pulled) is refused unless `--force`.
+  `--model` (an id, or a fragment that names one model). First it refuses when the first word of
+  `runner.opencode_bin()` isn't on PATH (the runner would empty the GPU, then the round die as
+  "opencode exited 1"). No model can run: exit 3, each model's reason with its next step
+  (`models.remedy`: `wb model add <id> --pull`, start Ollama at its root, load it in the server,
+  give it a `start`; the router's message names models the size policy holds back as such). A
+  `--model` that can't run right now is refused the same way, with "(--force queues it anyway,
+  to wait for it)" only when its server is just down (`models.may_come_up`); `--force` queues it
+  regardless, and the runner's load (`make_resident`) fails it before freeing the GPU if it still
+  can't run.
 - It works out the limits: `--round-timeout` and `--silence-timeout` unset (or 0) take the
   model's measured budgets (`router.budgets`), as does `--think-timeout` unset (0 turns the
   think nudge off); `--checkin` defaults to 10 minutes for significant tasks, 0 for trivial.
@@ -505,7 +512,8 @@ gh finds no login).
   truncate. It also sets no-new-privileges, which disables setuid programs (sudo, su). Execution,
   directory listing and the network stay free. It fails closed: when Landlock is there but the
   lane can't be drawn, it prints `workbench lane: the kernel refused the lane (<error>); not
-  running <cmd>` to `runner.log` and exits 126. Without Landlock (macOS, an old kernel, or an
+  running <cmd>` to `runner.log` and exits 126. A command it can't exec gets `workbench lane:
+  can't run <cmd> (<reason>)` and exit 127 (not found) or 126, not a traceback. Without Landlock (macOS, an old kernel, or an
   architecture whose syscall numbers differ: `lane.UNIFIED` lists the ones it runs on, x86_64,
   i386/i686, aarch64, armv7l/armv6l, riscv64, ppc64/ppc64le, s390x, loongarch64) it execs
   unrestricted. `wb doctor` draws a real lane and tries a write outside it: `ok agents write only
@@ -638,7 +646,7 @@ mentions (`NOTE: the spec doesn't name src/util.c`), where an agent's drift show
 
 The window itself comes from what Ollama serves the model (*Managing the set*): `wb model add`
 writes it, with an output budget of an eighth, and `wb doctor` flags an entry that claims more
-than Ollama serves (prompts would be cut off) or less (tasks could be bigger).
+than Ollama serves (prompts would be cut off) or less (tasks could be bigger), or has none.
 
 **Claude's record as a spec writer.** Most review rounds trace back to the spec: a rule with no
 test, two rules that conflict, a name taken from memory. The skill has a checklist to go through
@@ -809,9 +817,14 @@ whichever of `$XDG_CONFIG_HOME/opencode/` (default `~/.config/opencode/`) `openc
 `read_config` merges them the same way (dicts recursively), each parsed through `_strip_jsonc`
 (comments and trailing commas removed). `opencode_config_path()` is the one file wb writes and
 names: `opencode.json` if it exists, else `opencode.jsonc` if it exists, else `opencode.json`.
-`write_config` refuses while two files are layered (one merged file would undo the layering) and
-unless the file is strict JSON (no comments, no trailing commas), and then says what to change by
-hand; a write reformats the file (atomic, indent 2). `$OPENCODE_CONFIG` is not read: agents get
+A file that doesn't parse is a `RuntimeError` naming it (every command prints it as a message;
+`wb doctor` prints it as BAD and stops). `write_config(cfg, change)` refuses while two files are
+layered (one merged file would undo the layering), unless the file is strict JSON (no comments,
+no trailing commas), and when the file (or a symlink's target) isn't writable (a Nix store), and
+then prints only `change`, what to do by hand (the keys wb sets, or the key to delete or set),
+never the config, which can hold a provider's `apiKey` (the 2026-11-16 audit). A write reformats
+the file (atomic, indent 2), through a symlink to its target (dotfiles stay linked), keeping the
+file's mode (0600 for a new file; the temporary file is never readable by others). `$OPENCODE_CONFIG` is not read: agents get
 their own layer in its place (`runner.agent_env`), so `wb doctor` notes it when set.
 
 **Discovery** (`discover`, `_scan`). A model is a candidate when it is an entry under a provider
@@ -874,10 +887,17 @@ Ollama: not answering / `<name>` is not pulled / a cloud model by its tags row /
 (`/api/tags`, `/api/ps`). A server (`GET <base>/models`): running (a server listing several models
 must list this one: "the server lists N models, not …"); a 401 or 403 is running too ("it wants
 an API key"), so wb never starts a second copy; stopped with a `start` ("wb starts it"); not
-running with no start command. `wb models` and `wb doctor` print the reason. `weights()`:
-`weights_gb`, else Ollama's size (0 for a cloud model), else 0.
+running with no start command. `wb models` and `wb doctor` print the reason. `status(m, down)`
+takes the Ollama roots a caller already found not answering (doctor) and doesn't ask them again.
+`remedy(m, state)` is the next step for a reason (none when the reason says it already), and
+`may_come_up(state)` whether the model may run by the time a queued task gets the GPU (Ollama not
+answering, a server not running). `weights()`: `weights_gb`, else Ollama's size (0 for a cloud
+model), else 0; the router weighs only a model that can run (and `fits` only that one), so a down
+server isn't asked again per model.
 
-**Residency** (`make_resident(m, keep)`, called by the runner under the lease). Nothing to do when
+**Residency** (`make_resident(m, keep)`, called by the runner under the lease). A model `status`
+says can't run raises `RuntimeError` (its reason and remedy) before anything is freed: a `--force`
+task for an unpulled model once emptied the GPU and then failed its load. Nothing to do when
 `m` is resident and nothing else is. Else `free_gpu(keep={m, *keep})`: every other running
 server with a `stop` command is stopped once per root, after waiting up to 10 minutes while its
 `/metrics` says a reply is in progress (a running server with no `stop` is left, with a warning
@@ -915,7 +935,8 @@ The available models within `QUALITY_MARGIN` 0.15 of the best are ordered by the
 VRAM, or `vram_gb`/weights within 90% of the budget; unknown is neither), then the largest by
 weight bytes for `significant` work, the smallest for `trivial` (a model of unknown size ranks last), then
 the one already resident. The rest follow by quality, unavailable models last. `allowed()`:
-models.json `sizes`. `choose` returns the pick and a reason ("the largest … that fits the GPU",
+models.json `sizes`; when it leaves no model, `choose` says "no local model takes <size> tasks
+(…: limited by wb model sizes; …, or pass --model)", not that there are none. `choose` returns the pick and a reason ("the largest … that fits the GPU",
 "the best record on significant C work", … "(vs …)"). `wb models` prints the ranking per size;
 `--set-default` makes the pick OpenCode's default. A new model has no record, so Claude gives it
 its first tasks by hand (`--model`).
@@ -950,7 +971,12 @@ Modelfile's `num_ctx`, `OLLAMA_CONTEXT_LENGTH`), else the provider's other model
 never the trained length: with none of those, Ollama serves its own default (often 4K-8K, below
 OpenCode's ~10K-token prompt), so add refuses and says to set `OLLAMA_CONTEXT_LENGTH` or pass
 `--context` (the 2026-11-16 audit: a stock Ollama got a 256K entry and cut prompts off silently);
-the trained length only caps the result. It merges into an existing entry, so hand-added keys and options stay; a config with
+the trained length only caps the result. A provider that isn't Ollama can't be asked, so add
+needs `--context N` there (the window the server was started with) unless a sibling or the
+entry itself already has one: an entry with no window gets no handovers and no compaction (the
+2026-11-16 audit). An Ollama provider must answer first (`ollama_answers`), so a down Ollama is
+named ("Ollama isn't answering at <root>: start it") rather than a pull's traceback or a describe
+blamed on a missing pull; a failed pull is "pulling <name> failed: <reason>". It merges into an existing entry, so hand-added keys and options stay; a config with
 `providers` instead of `provider` is read too. A model Ollama can't describe gets "is it pulled?
 (--pull downloads it)". A model without tool calls is registered with "NO tool calls, so wb will
 not route tasks to it". Add refuses a provider with a `url_problem`, an Ollama cloud model not
@@ -962,11 +988,20 @@ ollama/<model>` with no provider `ollama` in the config and an Ollama answering 
 "@ai-sdk/openai-compatible", "name": "Ollama", "options": {"baseURL": "<root>/v1"}}` (under
 `providers`, with `settings`, when the config uses that shape); a provider the user wrote is never
 touched. `wb model retire <id>
-[--delete]` removes the entry (refusing OpenCode's default model) and with `--delete` the weights;
-its results stay. `wb model sizes <id> trivial|significant|…` sets `sizes`. `wb doctor` checks each
-Ollama entry for `options.max_tokens` and compares `limit.context` with what Ollama serves (more is
-BAD: prompts would be cut off silently; less is a note: tasks could be bigger; unknown, or no
-`limit.context` at all, is a note), and fails a provider with a `url_problem`. It names each
+[--delete]` removes the entry (refusing OpenCode's default model) and with `--delete` the weights
+(an Ollama that can't delete them is reported with `ollama rm <name>` after the entry is gone, a
+404 as "had no weights"); its results stay. `wb model sizes <id> trivial|significant|…` sets `sizes`. `wb doctor` asks each
+Ollama provider once whether it answers (`ollama_answers`; a sleeping LAN box once cost 35 s a
+model and ran doctor past Claude's 2-minute Bash limit): one that doesn't gets one `--` line, its
+models read "ollama is not answering" without another probe, and their served-context checks are
+skipped. It fails (BAD) when no model can run (with the first one's remedy), any discovered
+entry of any engine with no `limit.context` (no handovers, no compaction: `wb model add <id>`,
+with `--context N` for a server), an Ollama entry without `options.max_tokens` (`wb model add
+<id>` writes it), and a provider with a `url_problem`; it compares `limit.context` with what
+Ollama serves (more is BAD: prompts would be cut off silently; less is a note: tasks could be
+bigger; unknown is a note). `ollama_served_context` skips `/api/show` (10 s, not 30) when
+`/api/ps` had no answer, and uses `OLLAMA_CONTEXT_LENGTH` only for an Ollama on this machine.
+`wb scout` likewise asks each Ollama provider once and says when it isn't answering. It names each
 config file it read, each skipped provider with its reason, a set `$OPENCODE_CONFIG`, and an
 Ollama that answers while OpenCode has no provider at all.
 
@@ -980,8 +1015,11 @@ else listed from sysfs, VRAM unknown); macOS reads `system_profiler SPDisplaysDa
 (Apple Silicon: unified memory, `wired_limit`; an adapter with only shared memory, an Intel iGPU,
 has VRAM unknown).
 `memory()`: `/proc/meminfo` or `vm_stat`/`vm.swapusage`. `cpu()`, `ollama_env()` (`OLLAMA_MODELS`,
-`OLLAMA_CONTEXT_LENGTH`, `OLLAMA_NUM_PARALLEL`, `OLLAMA_HOST`: systemctl or launchctl, then the
-process env), `ollama_models_dir()`, `report()` (the lines `wb scout`
+`OLLAMA_CONTEXT_LENGTH`, `OLLAMA_NUM_PARALLEL`, `OLLAMA_HOST`: systemctl's `Environment`, split
+as a shell would, since systemd quotes a value with a space; or launchctl; then the process env),
+`ollama_context()` (`OLLAMA_CONTEXT_LENGTH` with spaces and quotes trimmed, as Ollama reads it,
+and the raw value: `report` says when it isn't a number instead of crashing),
+`ollama_models_dir()` (`os.path.isdir`: a directory it can't read is passed over), `report()` (the lines `wb scout`
 prints). Unknowns stay unknown; nothing about the machine is hard-coded.
 
 **The weekly model check.** Models change fast. Once a week, in a quiet moment, the mod submits
@@ -1651,7 +1689,7 @@ message, not a traceback.
 ### Running tasks
 | Command | Flags (defaults) | What it does |
 |---|---|---|
-| `wb start <task> --spec <file\|->` | `--repo` (.), `--size trivial\|significant` (significant), `--model <id or fragment>`, `--test <cmd>`, `--auto-fix N` (2), `--checkin MIN` (10 significant, 0 trivial), `--ask-budget N` (2), `--ask-timeout S` (1200), `--round-timeout S`, `--silence-timeout S`, `--think-timeout S` (0 off; unset or 0 for the other two: the measured budgets), `--test-timeout S` (900), `--no-base-check`, `--base REF` (HEAD), `--skill NAME…`, `--allow PATTERN…`, `--allow-path DIR…`, `--force` (queue a `--model` that can't run now), `--trial`, `--no-claude-md` | Checks the name (`^[a-z0-9][a-z0-9-]{0,47}$`, never reused), the repo, the spec and the skills; picks the model (router, or `--model`; none runnable: exit 3); checks `CLAUDE.md` is committed at the base; makes the worktree and branch `delegate/<task>`; writes task.json, round 1's prompt (spec + PROTOCOL) and status; spawns the runner. Prints the model and why, the slice, Claude's spec record, the handed or suggested skills, notes, `next: wb wait <task>`. With `--test` (and not `--no-base-check`) it first runs the acceptance command once in the fresh worktree, the base, inside the agent's lane (`runner.base_check`, at most `BASE_CHECK_SECS` = 120 s, the output in `base-tests.txt`, the result in status `base_check`) and prints what it saw: a warning when it already passes (it can't tell when the step is done), else its exit and last 8 lines, for Claude to check it fails only for what the step changes; past the limit, a note that it wasn't checked. |
+| `wb start <task> --spec <file\|->` | `--repo` (.), `--size trivial\|significant` (significant), `--model <id or fragment>`, `--test <cmd>`, `--auto-fix N` (2), `--checkin MIN` (10 significant, 0 trivial), `--ask-budget N` (2), `--ask-timeout S` (1200), `--round-timeout S`, `--silence-timeout S`, `--think-timeout S` (0 off; unset or 0 for the other two: the measured budgets), `--test-timeout S` (900), `--no-base-check`, `--base REF` (HEAD), `--skill NAME…`, `--allow PATTERN…`, `--allow-path DIR…`, `--force` (queue a `--model` that can't run now; the hint is offered only when its server is just down), `--trial`, `--no-claude-md` | Checks the name (`^[a-z0-9][a-z0-9-]{0,47}$`, never reused), the repo, the spec and the skills, and that opencode is on PATH; picks the model (router, or `--model`; none runnable: exit 3, with each model's next step); checks `CLAUDE.md` is committed at the base; makes the worktree and branch `delegate/<task>`; writes task.json, round 1's prompt (spec + PROTOCOL) and status; spawns the runner. Prints the model and why, the slice, Claude's spec record, the handed or suggested skills, notes, `next: wb wait <task>`. With `--test` (and not `--no-base-check`) it first runs the acceptance command once in the fresh worktree, the base, inside the agent's lane (`runner.base_check`, at most `BASE_CHECK_SECS` = 120 s, the output in `base-tests.txt`, the result in status `base_check`) and prints what it saw: a warning when it already passes (it can't tell when the step is done), else its exit and last 8 lines, for Claude to check it fails only for what the step changes; past the limit, a note that it wasn't checked. |
 | `wb feedback <task> --text "…" \| --message <file\|->` | `--fresh` \| `--keep-context`, `--spec-gap "…"…` | Phase review/stuck/failed and no live runner. Writes the next round's prompt (FEEDBACK_HEAD + "Make exactly these changes, then re-run the acceptance command and finish with a short summary:" (the re-run only when there is one) + the text), reviews+1, spawns the runner. Warns past three review rounds. Gathers lessons. |
 | `wb next <task> --spec <file> -m "…"` | `--test` (replaces the acceptance command), `--skill` (replaces the set), `--fresh`, `--allow PATTERN…` (adds to the task's grants), `--spec-gap` | Phase review. Reads the spec (a file or `-`; empty or unreadable: nothing changes), records the step's size and fit, commits the work (`<m>` + `Workbench-Task: <task> (step N)` + `OpenCode-Session:`), writes the next step's prompt ("Step N of this task is done and committed (<sha>). The next step:" + spec + PROTOCOL), records the spec gaps, resets reviews, spawns. Says whether the next step gets a fresh session and why (`runner.fresh_reason`). Gathers lessons. |
 | `wb answer <task> --text "…" \| --file <f>` | `--id` (the pending question) | Writes `ask/<id>.answer` (atomically); the blocked `ask_reviewer` returns it. |
@@ -1679,8 +1717,8 @@ message, not a traceback.
 | Command | Flags | What it does |
 |---|---|---|
 | `wb models` | `--set-default` | Each model's state, slice and speeds; the router's ranking per size. `--set-default` writes the significant-work pick as OpenCode's `model`. |
-| `wb model add <provider/model>` | `--pull`, `--label`, `--context N` | Registers an Ollama model in opencode.json, merged into any existing entry; on a first run it writes the `ollama` provider too; refuses a cloud model, an unknown served context, a down server of unknown engine (see *Managing the set*). |
-| `wb model retire <id>` | `--delete` | Unregisters it (not OpenCode's default) and drops its models.json overrides; `--delete` removes Ollama's weights. |
+| `wb model add <provider/model>` | `--pull`, `--label`, `--context N` | Registers a model in opencode.json, merged into any existing entry; on a first run it writes the `ollama` provider too; refuses a cloud model, an unknown served context (a server other than Ollama needs `--context`), a down Ollama, a down server of unknown engine (see *Managing the set*). |
+| `wb model retire <id>` | `--delete` | Unregisters it (not OpenCode's default) and drops its models.json overrides; `--delete` removes Ollama's weights (or says `ollama rm <name>` when it can't). |
 | `wb model sizes <id> [trivial] [significant]` | | Limits the sizes it's routed (none: every size). |
 | `wb scout` | `--done [--notes "…"]`, `--due`, `--watch "…"`, `--unwatch N` | The weekly check's facts; `--done` records it; `--due` exits 0 when one is due (7 days); the watch list. |
 | `wb skill list \| show <n> \| scan <n\|path>` | | The library, a skill with its history, the scan alone. |
@@ -1701,7 +1739,7 @@ message, not a traceback.
 | `wb init <dir>` | | A project the way Claude keeps one: git on the default branch, an initial commit, AGENTS.md → CLAUDE.md (refuses inside another repo or without a git identity). |
 | `wb setup` | `--force` (replaces a link that points elsewhere; never a real file) | Links `~/.local/bin/wb` to this copy's `bin/wb` and Claude Code's `skills/delegate` to its `skill/delegate`, warns when `~/.local/bin` isn't on PATH; exit 1 when it left something in the way (see *Installing*). |
 | `wb update` | `--check` (only say whether origin has news: `update available: N new commit(s)…` or `up to date`), `--if-due` (with `--check`: ask origin at most weekly, `UPDATE_EVERY`, else answer from `update.json`; never with `CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC`) | Updates this copy (see *Installing*): refuses while any runner is live; a marketplace copy runs `claude plugin marketplace update workbench` then `claude plugin update workbench@workbench`; a clone (refusing uncommitted tracked changes) runs `git pull --ff-only` first. Prints `updated <kind> a..b (N commit(s))` or `already up to date`. The fetch never prompts (`GIT_TERMINAL_PROMPT=0`, ssh `BatchMode`). |
-| `wb doctor` | | `opencode --version`, the OpenCode config files (and a set `$OPENCODE_CONFIG`), git, models found and each one's readiness, the providers skipped and why, a provider's baseURL problem, each Ollama entry's `options.max_tokens` and context against what Ollama serves (or that it can't say), the state directory, a real lane drawn around a test write (`ok agents write only in their lane (Landlock ABI N)`), `wb` on PATH (or `WB_BIN`) for the mod, where the mod lives. `ok`/`BAD` lines set the exit code; `--` lines inform. |
+| `wb doctor` | | `opencode --version`, the OpenCode config files (and a set `$OPENCODE_CONFIG`), git, models found and each one's readiness (BAD when none can run), the providers skipped and why, an Ollama provider not answering (asked once), a provider's baseURL problem, any entry without `limit.context` (BAD), each Ollama entry's `options.max_tokens` and context against what Ollama serves (or that it can't say), the state directory, a real lane drawn around a test write (`ok agents write only in their lane (Landlock ABI N)`), `wb` on PATH (or `WB_BIN`) for the mod, where the mod lives. `ok`/`BAD` lines set the exit code; `--` lines inform. |
 
 ## Files and formats
 

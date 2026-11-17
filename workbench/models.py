@@ -35,6 +35,7 @@ import json
 import os
 import re
 import socket
+import stat
 import subprocess
 import time
 import urllib.error
@@ -119,24 +120,48 @@ def read_config() -> dict:
     invisible (the 2026-11-16 audit)."""
     cfg: dict = {}
     for path in opencode_config_files():
-        cfg = _merge(cfg, json.loads(_strip_jsonc(path.read_text())))
+        try:
+            cfg = _merge(cfg, json.loads(_strip_jsonc(path.read_text())))
+        except ValueError as e:  # one bad hand edit crashed every model command with a traceback
+            raise RuntimeError(f"{path} doesn't parse ({e}); fix it by hand "
+                               "(wb doctor checks it)") from None  # (the 2026-11-16 audit)
     return cfg
 
 
-def write_config(cfg: dict) -> None:
+def write_config(cfg: dict, change: str) -> None:
     """Write OpenCode's config back; refused for a file with comments, which a rewrite would lose,
-    and while two files are layered, which one merged file would rewrite."""
+    and while two files are layered, which one merged file would rewrite. A refusal says only
+    ``change`` (what to do by hand): it once printed the whole config, a provider's apiKey
+    included, into Claude's context (the 2026-11-16 audit). A symlinked file (dotfiles, stow) is
+    written through to its target, and its mode is kept: a 0600 file holding keys came back
+    0644, and the link was replaced by a plain file (the 2026-11-16 audit)."""
     files = opencode_config_files()
     if len(files) > 1:
         raise RuntimeError(f"OpenCode layers {' and '.join(map(str, files))}; wb won't rewrite "
-                           f"either: make this change by hand: {json.dumps(cfg)[:2000]}")
+                           f"either: make this change by hand: {change}")
     path = opencode_config_path()
     try:
         json.loads(path.read_text() if path.exists() else "{}")
     except ValueError:
         raise RuntimeError(f"{path} has comments, which rewriting it would lose; make this change "
-                           f"by hand: {json.dumps(cfg)[:2000]}") from None
-    store.write_json(path, cfg)
+                           f"by hand: {change}") from None
+    target = path.resolve()
+    target.parent.mkdir(parents=True, exist_ok=True)
+    if not os.access(target.parent, os.W_OK) or target.exists() and not os.access(target, os.W_OK):
+        raise RuntimeError(f"{path}" + (f" links to {target}, which" if target != path else "")
+                           + " isn't writable (a read-only store, such as Nix's?); make this "
+                           f"change in its source by hand: {change}")
+    mode = stat.S_IMODE(target.stat().st_mode) if target.exists() else 0o600  # it may hold keys
+    tmp = target.with_name(f".{target.name}.{os.getpid()}.tmp")
+    fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)  # never readable by others
+    try:
+        with os.fdopen(fd, "w") as f:
+            f.write(json.dumps(cfg, indent=2, ensure_ascii=False) + "\n")
+        os.chmod(tmp, mode)
+        os.replace(tmp, target)
+    except BaseException:
+        tmp.unlink(missing_ok=True)
+        raise
 
 
 def overrides_path() -> Path:
@@ -409,9 +434,10 @@ CLOUD_WHY = ("an Ollama cloud model: it runs on ollama.com, off this machine (mo
              "\"local\": true on {id} allows it)")
 
 
-def status(m: Model) -> dict:
+def status(m: Model, down=frozenset()) -> dict:
     """``{available, resident, why}``: can the runner get this model onto the GPU, is it there.
-    What the config alone rules out comes first, so the fake models meet it too."""
+    What the config alone rules out comes first, so the fake models meet it too. ``down``: Ollama
+    roots the caller already found not answering, not asked again."""
     if m.config.get("tool_call") is False:  # the router used to hand it tasks (the 2026-11-16 audit)
         return _no("OpenCode's config says it can't call tools (tool_call: false): agent work needs them")
     if m.problem:
@@ -421,7 +447,7 @@ def status(m: Model) -> dict:
     if _fake():
         return {"available": True, "resident": True, "why": "fake"}
     if m.engine == "ollama":
-        tags = _get(f"{m.root}/api/tags")
+        tags = None if m.root in down else _get(f"{m.root}/api/tags")
         if tags is None:
             return _no("ollama is not answering")
         row = _tag_row(m.name, tags)
@@ -456,6 +482,29 @@ def status(m: Model) -> dict:
     return _no(f"not running, and no start command in {overrides_path()}")
 
 
+def remedy(m: Model, state: dict) -> str:
+    """The next step for a model status() says can't run; "" when the reason already says it.
+    wb start used to say only why, or offer --force for a model that could only fail to load
+    (the 2026-11-16 audit)."""
+    why = state.get("why", "")
+    if why == "ollama is not answering":
+        return f"start Ollama at {m.root} (ollama serve, or its service or app)"
+    if why.endswith(" is not pulled"):
+        return f"wb model add {m.id} --pull downloads it"
+    if why.startswith("the server lists"):
+        return f"load {m.name} in that server, or fix the model's name in OpenCode's config"
+    if why.startswith("not running, and no start command"):
+        return f"start its server, or give {m.id} a \"start\" command there"
+    return ""
+
+
+def may_come_up(state: dict) -> bool:
+    """Whether a model that can't run now may by the time a queued task gets the GPU: its server
+    is only down. Not pulled, or ruled out by the config, it would only fail to load."""
+    return state.get("why", "") == "ollama is not answering" or \
+        state.get("why", "").startswith("not running, and no start command")
+
+
 def weights(m: Model) -> int:
     """Bytes of weights behind the id, the router's measure of a model's size; 0 when unknown.
     models.json's `weights_gb` says it for a server that can't (or a test). A cloud model's
@@ -486,7 +535,14 @@ def _ollama_loaded(root: str) -> list[str]:
 def make_resident(m: Model, say=print, keep=()) -> float:
     """Free the GPU for ``m`` and load it, leaving the models in ``keep`` (ids) loaded. Returns
     the seconds it took (0 if already there)."""
-    if _fake() or status(m)["resident"] and (m.remote or not _others_resident(m, keep)):
+    if _fake():
+        return 0.0
+    st = status(m)
+    if not st["available"]:  # a --force task for a model that couldn't load emptied the GPU
+        # first and failed after (the 2026-11-16 audit): fail before freeing anything
+        raise RuntimeError(f"{m.id} can't run: {st['why']}"
+                           + (f": {fix}" if (fix := remedy(m, st)) else ""))
+    if st["resident"] and (m.remote or not _others_resident(m, keep)):
         return 0.0
     t0 = time.time()
     if not m.remote:
@@ -757,13 +813,11 @@ def add_ollama_provider(pid: str) -> str | None:
     root = ollama_root_here()
     if not _fake() and not ollama_answers(root):
         return None
-    if "providers" in cfg and "provider" not in cfg:  # OpenCode 2.x's own shape
-        cfg["providers"][pid] = {"npm": "@ai-sdk/openai-compatible", "name": "Ollama",
-                                 "settings": {"baseURL": f"{root}/v1"}}
-    else:
-        cfg.setdefault("provider", {})[pid] = {"npm": "@ai-sdk/openai-compatible", "name": "Ollama",
-                                               "options": {"baseURL": f"{root}/v1"}}
-    write_config(cfg)
+    key, url = ("providers", "settings") if "providers" in cfg and "provider" not in cfg \
+        else ("provider", "options")  # the first: OpenCode 2.x's own shape
+    entry = {"npm": "@ai-sdk/openai-compatible", "name": "Ollama", url: {"baseURL": f"{root}/v1"}}
+    cfg.setdefault(key, {})[pid] = entry
+    write_config(cfg, f'under "{key}" add "{pid}": {json.dumps(entry)}')
     return root
 
 
@@ -785,12 +839,12 @@ def ollama_installed(root: str) -> list[dict]:
             for x in (_get(f"{root}/api/tags") or {}).get("models", [])]
 
 
-def ollama_show(root: str, name: str) -> dict:
+def ollama_show(root: str, name: str, timeout: float = 30) -> dict:
     """Ollama's own facts about a pulled model: its capabilities, trained context length, and
     the num_ctx its Modelfile sets, if any."""
     if _fake():
         return {"capabilities": ["tools", "thinking"], "context_length": None, "num_ctx": None}
-    body = _post(f"{root}/api/show", {"model": name}, timeout=30)
+    body = _post(f"{root}/api/show", {"model": name}, timeout=timeout)
     ctx = next((v for k, v in (body.get("model_info") or {}).items()
                 if k.endswith(".context_length")), None)
     num = next((int(p.split()[1]) for p in (body.get("parameters") or "").splitlines()
@@ -804,15 +858,17 @@ def ollama_served_context(root: str, name: str) -> int | None:
     Ollama's own default would say (it varies by version and VRAM)."""
     if _fake():
         return None
-    for x in (_get(f"{root}/api/ps") or {}).get("models", []):
+    ps, num = _get(f"{root}/api/ps"), None
+    for x in (ps or {}).get("models", []):
         if _matches(name, {x.get("name")}) and x.get("context_length"):
             return int(x["context_length"])
-    try:
-        num = ollama_show(root, name).get("num_ctx")
-    except Exception:
-        num = None
-    env = hardware.ollama_env().get("OLLAMA_CONTEXT_LENGTH")
-    return num or (int(env) if env and env.isdigit() else None)
+    if ps is not None:  # one that didn't answer /api/ps won't answer /api/show: a sleeping LAN
+        try:            # box cost 30 s a model here, and doctor ran past 2 minutes (the 2026-11-16 audit)
+            num = ollama_show(root, name, timeout=10).get("num_ctx")  # metadata, not a load
+        except Exception:
+            num = None
+    # OLLAMA_CONTEXT_LENGTH is this machine's service's: it says nothing of another host's
+    return num or (hardware.ollama_context()[0] if _this_host(urlparse(root).hostname) else None)
 
 
 def ollama_pull(root: str, name: str, say=print) -> None:
@@ -873,9 +929,12 @@ def write_entry(provider: str, name: str, entry: dict | None) -> None:
     entries = prov.setdefault("models", {})
     if entry is None:
         entries.pop(name, None)
+        change = f'delete "{name}" from provider {provider}\'s "models"'
     else:  # keys added by hand (variants, options) stay
         old = entries.get(name) or {}
         entries[name] = {**old, **entry, "options": {**(old.get("options") or {}), **(entry.get("options") or {})}}
         if not entries[name]["options"]:
             del entries[name]["options"]
-    write_config(cfg)
+        change = (f'under provider {provider}\'s "models", merge into "{name}" (keeping keys you '
+                  f"added): {json.dumps(entry)}")  # wb's own keys only: never the rest of the config
+    write_config(cfg, change)

@@ -8,9 +8,10 @@ import tempfile
 import threading
 import time
 import unittest
-from contextlib import redirect_stderr
+from contextlib import redirect_stderr, redirect_stdout
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
+from unittest import mock
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))  # run as a script too
 
@@ -132,6 +133,41 @@ class Real(unittest.TestCase):
             models.write_entry("o", "n", {})
         self.assertIn("// my models", (d / "opencode.jsonc").read_text())  # untouched
 
+    def test_a_refused_rewrite_says_the_change_and_never_the_providers_keys(self):
+        # the 2026-11-16 audit: the refusal printed the whole config, an apiKey included, into
+        # Claude's context, cut at 2000 characters before the new entry
+        Path(os.environ["WB_OPENCODE_CONFIG"]).write_text(
+            '{// mine\n"provider": {"o": {"options": {"baseURL": "http://127.0.0.1:11434/v1"}, "models": {}},'
+            ' "or": {"options": {"apiKey": "sk-or-SECRET-123"}}}}')
+        with self.assertRaises(RuntimeError) as e:
+            models.write_entry("o", "coder", {"limit": {"context": 32768}})
+        self.assertIn("has comments", str(e.exception))
+        self.assertIn('"coder"', str(e.exception))
+        self.assertIn("32768", str(e.exception))
+        self.assertNotIn("SECRET", str(e.exception))
+
+    def test_a_symlinked_config_is_written_through_and_keeps_its_mode(self):
+        # the 2026-11-16 audit: a dotfiles link became a plain file, and 0600 came back 0644
+        real = Path(self.tmp.name) / "dotfiles" / "opencode.json"
+        real.parent.mkdir()
+        real.write_text(json.dumps({"provider": {"o": {"options": {"baseURL": "http://127.0.0.1:11434/v1"},
+                                                       "models": {}}}}))
+        real.chmod(0o600)
+        link = Path(os.environ["WB_OPENCODE_CONFIG"])
+        link.symlink_to(real)
+        models.write_entry("o", "coder", {"limit": {"context": 32768}})
+        self.assertTrue(link.is_symlink())
+        self.assertIn("coder", json.loads(real.read_text())["provider"]["o"]["models"])
+        self.assertEqual(real.stat().st_mode & 0o777, 0o600)
+        if os.geteuid() != 0:  # a link into a read-only store (Nix) is refused, never replaced
+            real.parent.chmod(0o500)
+            try:
+                with self.assertRaisesRegex(RuntimeError, "isn't writable"):
+                    models.write_entry("o", "other", {})
+            finally:
+                real.parent.chmod(0o700)
+            self.assertTrue(link.is_symlink())
+
     def test_opencode_json_and_jsonc_are_layered_as_opencode_does(self):
         # the 2026-11-16 audit: a provider in opencode.jsonc beside an opencode.json holding only a
         # theme was invisible, since only the .json was read
@@ -250,6 +286,70 @@ class Real(unittest.TestCase):
             with self.assertRaises(SystemExit), redirect_stderr(err):
                 cli.main(["model", "add", mid, "--context", "32768"])
             self.assertIn("is not answering", err.getvalue())
+
+    def test_a_down_ollama_is_named_by_add_and_retire_without_a_traceback(self):
+        # the 2026-11-16 audit: --pull died in a urllib traceback, a describe blamed a missing
+        # pull, and retire --delete crashed after the entry was already gone
+        from workbench import cli
+        self.config({"o": {"options": {"baseURL": "http://127.0.0.1:1/v1"},
+                           "models": {"old": {"limit": {"context": 32768}}}}}, {"o": {"engine": "ollama"}})
+        for argv in (["model", "add", "o/m", "--pull"], ["model", "add", "o/m", "--context", "32768"]):
+            err = io.StringIO()
+            with self.assertRaises(SystemExit), redirect_stderr(err):
+                cli.main(argv)
+            self.assertIn("Ollama isn't answering at http://127.0.0.1:1", err.getvalue())
+        out = io.StringIO()
+        with redirect_stdout(out):
+            cli.main(["model", "retire", "o/old", "--delete"])
+        self.assertIn("weights were NOT deleted", out.getvalue())
+        self.assertIn("ollama rm old", out.getvalue())
+        self.assertNotIn("old", json.loads(Path(os.environ["WB_OPENCODE_CONFIG"]).read_text())["provider"]["o"]["models"])
+
+    def test_doctor_fails_when_no_model_can_run_and_asks_a_down_ollama_once(self):
+        # the 2026-11-16 audit: doctor said all was well with no model able to run and an entry
+        # with no limit.context, and a sleeping Ollama cost it 35 s a model
+        from workbench import cli
+        self.config({"o": {"options": {"baseURL": "http://127.0.0.1:1/v1"},
+                           "models": {"a": {"options": {"max_tokens": 1}}, "b": {}}}}, {"o": {"engine": "ollama"}})
+        out = io.StringIO()
+        with mock.patch.object(models, "ollama_answers", wraps=models.ollama_answers) as asked, \
+                mock.patch.object(models, "ollama_served_context") as served, \
+                self.assertRaises(SystemExit) as code, redirect_stdout(out):
+            cli.main(["doctor"])
+        self.assertEqual(code.exception.code, 1)
+        text = out.getvalue()
+        self.assertIn("BAD no model can run now (o/a: start Ollama at http://127.0.0.1:1", text)
+        self.assertIn("BAD o/b has no limit.context", text)
+        self.assertIn("BAD o/b caps its output on Ollama", text)
+        self.assertEqual(text.count("Ollama isn't answering at http://127.0.0.1:1"), 1)
+        self.assertEqual([c.args for c in asked.call_args_list].count(("http://127.0.0.1:1",)), 1)
+        served.assert_not_called()
+
+    def test_the_served_context_asks_no_more_of_an_ollama_that_isnt_answering(self):
+        # the 2026-11-16 audit: /api/show waited 30 s a model after /api/ps had no answer, and
+        # this machine's OLLAMA_CONTEXT_LENGTH was taken for another host's
+        from workbench import hardware
+        with mock.patch.object(models, "_get", return_value=None), \
+                mock.patch.object(models, "ollama_show") as show, \
+                mock.patch.object(hardware, "ollama_env", return_value={"OLLAMA_CONTEXT_LENGTH": '"32768"'}):
+            self.assertEqual(models.ollama_served_context("http://127.0.0.1:11434", "m"), 32768)
+            self.assertIsNone(models.ollama_served_context("http://192.168.7.7:11434", "m"))
+        show.assert_not_called()
+
+    def test_a_model_that_cant_load_gets_its_next_step_and_never_empties_the_gpu(self):
+        # the 2026-11-16 audit: wb start said only why, offered --force for an unpulled model,
+        # and the forced task unloaded the GPU before its load failed
+        ollama = self.server({"/api/version": {"version": "0.40.0"}, "/api/tags": {"models": []}})
+        self.config({"o": {"options": {"baseURL": ollama + "/v1"}, "models": {"m": {}}}})
+        m = models.resolve("o/m")
+        st = models.status(m)
+        self.assertEqual(models.remedy(m, st), "wb model add o/m --pull downloads it")
+        self.assertFalse(models.may_come_up(st))
+        self.assertIn("m is not pulled (wb model add o/m --pull", router.choose("significant")[1])
+        with mock.patch.object(models, "free_gpu") as free:
+            with self.assertRaisesRegex(RuntimeError, "not pulled: wb model add"):
+                models.make_resident(m)
+        free.assert_not_called()
 
     def test_claude_config_dir_moves_the_users_claude_files(self):
         os.environ["CLAUDE_CONFIG_DIR"] = str(Path(self.tmp.name) / "cc")

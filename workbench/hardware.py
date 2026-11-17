@@ -13,6 +13,7 @@ import json
 import os
 import platform
 import re
+import shlex
 import shutil
 import subprocess
 from pathlib import Path
@@ -165,7 +166,11 @@ def ollama_env() -> dict:
     else:
         for scope in ((), ("--user",)):
             raw = _run("systemctl", *scope, "show", "ollama", "-p", "Environment", "--value")
-            for item in raw.split():
+            try:  # systemd quotes an entry holding a space: "OLLAMA_MODELS=/data/my models"
+                items = shlex.split(raw)  # (split on spaces, it was lost: the 2026-11-16 audit)
+            except ValueError:  # an unbalanced quote
+                items = raw.split()
+            for item in items:
                 k, _, v = item.partition("=")
                 env.setdefault(k, v)
     for k in OLLAMA_KEYS:
@@ -173,10 +178,20 @@ def ollama_env() -> dict:
     return env
 
 
+def ollama_context() -> tuple[int | None, str]:
+    """OLLAMA_CONTEXT_LENGTH as Ollama reads it (spaces and quotes trimmed), and the raw value.
+    wb scout crashed on "32k", which Ollama only warns about (the 2026-11-16 audit)."""
+    raw = ollama_env().get("OLLAMA_CONTEXT_LENGTH") or ""
+    v = raw.strip().strip("\"'")
+    return (int(v) if v.isdigit() and int(v) > 0 else None), raw
+
+
 def ollama_models_dir() -> Path | None:
     candidates = [ollama_env().get("OLLAMA_MODELS"), str(Path.home() / ".ollama" / "models"),
                   "/usr/share/ollama/.ollama/models", "/var/lib/ollama"]
-    return next((Path(c) for c in candidates if c and Path(c).is_dir()), None)
+    # os.path.isdir, not Path.is_dir: before 3.14 that raises on a directory it can't read, such
+    # as Ubuntu's 0750 /usr/share/ollama, and wb scout died (the 2026-11-16 audit)
+    return next((Path(c) for c in candidates if c and os.path.isdir(c)), None)
 
 
 def disk_free(path: Path | None) -> int | None:
@@ -220,7 +235,10 @@ def report() -> list[str]:
     where = ollama_models_dir()
     if where:
         lines.append(f"  disk  {size(disk_free(where))} free where Ollama keeps models ({where})")
-    ctx = ollama_env().get("OLLAMA_CONTEXT_LENGTH")
+    ctx, raw = ollama_context()
     if ctx:
-        lines.append(f"  ollama serves a {int(ctx) // 1024}K context by default (OLLAMA_CONTEXT_LENGTH)")
+        lines.append(f"  ollama serves a {ctx // 1024}K context by default (OLLAMA_CONTEXT_LENGTH)")
+    elif raw.strip():
+        lines.append(f"  ollama: OLLAMA_CONTEXT_LENGTH={raw!r} isn't a number; Ollama ignores it "
+                     "and serves its own default")
     return lines

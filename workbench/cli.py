@@ -129,10 +129,16 @@ def cmd_start(a):
         die("the spec is empty")
     handed = _skill_names(a.skill)
     lane_dirs = [_lane_dir(p) for p in a.allow_path or []]
+    if not shutil.which(exe := runner.opencode_bin()[0]):  # else the runner emptied the GPU, then
+        # the round died as "opencode exited 1" (the 2026-11-16 audit)
+        die(f"{exe} isn't on PATH: install OpenCode (https://opencode.ai), or put it on the PATH "
+            "Claude Code runs wb with; wb doctor checks the setup")
     stack = gitops.stack(repo)
     m, state, why = pick_model(a.size, a.model, stack)
     if not state["available"] and not a.force:
-        die(f"{m.id} can't run: {state['why']}. (--force queues it anyway)", 3)
+        fix = models.remedy(m, state)
+        die(f"{m.id} can't run: {state['why']}" + (f": {fix}" if fix else "")
+            + (" (--force queues it anyway, to wait for it)" if models.may_come_up(state) else ""), 3)
     dirty = gitops.git(repo, "status", "--porcelain").strip()
     _need_claude_md(repo, a.base, a)
 
@@ -752,7 +758,7 @@ def cmd_models(a):
         old = cfg.get("model")
         cfg["model"] = top.model.id
         try:
-            models.write_config(cfg)
+            models.write_config(cfg, f'set "model": "{top.model.id}"')
         except RuntimeError as e:
             die(str(e))
         print(f"\nOpenCode's default model: {old} → {top.model.id} ({why})")
@@ -840,16 +846,20 @@ def cmd_scout(a):
         if tuning.judged(r):  # a discard Claude put down to its own spec says nothing of the model
             real[r.get("model")].append(r)
     for pid, prov in provs.items():
-        installed = {x["name"]: x for x in models.ollama_installed(prov["root"])} \
-            if prov["engine"] == "ollama" else {}
+        # an Ollama that doesn't answer is asked once, not for every model (the 2026-11-16 audit)
+        up = prov["engine"] == "ollama" and (models._fake() or models.ollama_answers(prov["root"]))
+        if prov["engine"] == "ollama" and not up:
+            print(f"  {pid}: Ollama isn't answering at {prov['root']}, so what it has and serves is unknown")
+        installed = {x["name"]: x for x in models.ollama_installed(prov["root"])} if up else {}
         for name in prov["models"]:
             m = registered.get(f"{pid}/{name}")
             disk = installed.get(name) or installed.get(f"{name}:latest") or {}
-            served = models.ollama_served_context(prov["root"], name) if prov["engine"] == "ollama" else None
+            served = models.ollama_served_context(prov["root"], name) if up else None
+            ctx = ((m.config.get("limit") or {}).get("context") or 0) if m else 0
             facts = " · ".join(x for x in (
                 f"{hardware.size(disk.get('size'))} on disk" if disk.get("size") else "",
                 disk.get("params") or "", disk.get("quant") or "",
-                f"{(m.config.get('limit') or {}).get('context', 0) // 1024}K context" if m else "",
+                f"{ctx // 1024}K context" if ctx else "no limit.context" if m else "",
                 f"Ollama serves {served // 1024}K" if served else "") if x)
             rs = real.get(f"{pid}/{name}", [])
             used = (f"{len(rs)} real task(s), {sum(r['outcome'] == 'accepted' for r in rs)} accepted, "
@@ -1182,6 +1192,11 @@ def cmd_model(a):
             # (the 2026-11-16 audit)
             die(f"{prov['root']} is not answering, so wb can't tell whether {provider} is Ollama: "
                 f"start it, or set \"engine\" for {provider} in {models.overrides_path()}, and retry")
+        if prov["engine"] == "ollama" and not models._fake() and not models.ollama_answers(prov["root"]):
+            # a pull then died with a urllib traceback, and a describe blamed a missing pull
+            # (the 2026-11-16 audit)
+            die(f"Ollama isn't answering at {prov['root']}: start it (ollama serve, or its "
+                "service or app), then retry")
         if prov["engine"] == "ollama" and models.ollama_cloud(prov["root"], name) \
                 and not models.cloud_allowed(a.id):
             die(f"{a.id} is an Ollama cloud model: it runs on ollama.com, off this machine. To hand "
@@ -1189,7 +1204,10 @@ def cmd_model(a):
         if a.pull:
             if prov["engine"] != "ollama":
                 die(f"{provider} is not an Ollama provider; install the model the server's own way")
-            models.ollama_pull(prov["root"], name, say=lambda m: print(m, flush=True))
+            try:
+                models.ollama_pull(prov["root"], name, say=lambda m: print(m, flush=True))
+            except (OSError, RuntimeError, ValueError) as e:  # URLError and HTTPError are OSErrors
+                die(f"pulling {name} failed: {getattr(e, 'reason', e)}")
         try:
             facts = models.ollama_show(prov["root"], name) if prov["engine"] == "ollama" else {}
         except Exception as e:
@@ -1208,6 +1226,12 @@ def cmd_model(a):
                     f"Ollama service and restart it, then wb model add {a.id} again; or pass "
                     "--context N if you know what it serves")
             ctx = min(ctx, facts.get("context_length") or ctx)  # never past what it was trained on
+        elif not ctx and not ((prov["models"].get(name) or {}).get("limit") or {}).get("context"):
+            # an entry with no window: no handovers, no compaction, and the server cut the
+            # session off mid-task (the 2026-11-16 audit)
+            die(f"{provider} isn't Ollama, so wb can't ask it what window it serves {name}: pass "
+                "--context N, the context the server was started with (llama.cpp -c, LM Studio's "
+                "context length, vLLM --max-model-len)")
         entry = {"name": a.label or name,
                  "tool_call": "tools" in caps if caps else True,
                  "reasoning": "thinking" in caps if caps else True}
@@ -1220,10 +1244,11 @@ def cmd_model(a):
             models.write_entry(provider, name, entry)
         except RuntimeError as e:
             die(str(e))
+        ctx = ctx or prov["models"][name]["limit"]["context"]  # kept from the entry as it was
         print(f"registered {a.id}: "
               f"{'tools' if entry['tool_call'] else 'NO tool calls, so wb will not route tasks to it'}, "
               f"{'reasoning' if entry['reasoning'] else 'no reasoning'}, "
-              f"{(ctx or 0) // 1024}K context\nnext: wb model sizes {a.id} … if it should only "
+              f"{ctx // 1024}K context\nnext: wb model sizes {a.id} … if it should only "
               "take some task sizes; the router guesses from its size until real tasks show more")
         return
     # retire
@@ -1242,9 +1267,13 @@ def cmd_model(a):
     if a.delete:
         if prov["engine"] != "ollama":
             done += f"; {provider} is not Ollama, so delete its weights the server's own way"
-        else:
-            models.ollama_delete(prov["root"], name)
-            done += "; its weights were deleted from Ollama"
+        else:  # the entry is gone already: say what's left rather than crash (the 2026-11-16 audit)
+            try:
+                models.ollama_delete(prov["root"], name)
+                done += "; its weights were deleted from Ollama"
+            except OSError as e:  # URLError and HTTPError are OSErrors
+                done += ("; Ollama had no weights for it" if getattr(e, "code", None) == 404 else
+                         f"; its weights were NOT deleted ({getattr(e, 'reason', e)}): ollama rm {name}")
     print(done)
 
 
@@ -1460,8 +1489,8 @@ def cmd_doctor(a):
         line(bool(files), "OpenCode config " + (" + ".join(map(str, files)) or
                                                 f"{models.opencode_config_path()} (none)")
              + (" (OpenCode layers them; wb won't rewrite either)" if len(files) > 1 else ""))
-    except ValueError as e:
-        line(False, f"OpenCode config doesn't parse: {e}")
+    except RuntimeError as e:  # "<file> doesn't parse (…)"
+        line(False, str(e))
         sys.exit(1)  # nothing below can read the models
     if os.environ.get("OPENCODE_CONFIG"):
         print(f"--  OPENCODE_CONFIG is set ({os.environ['OPENCODE_CONFIG']}): wb reads only "
@@ -1476,26 +1505,44 @@ def cmd_doctor(a):
     line(bool(found), f"{len(found)} local model(s)")
     for pid, why in models.skipped_providers():  # once dropped without a word (the 2026-11-16 audit)
         print(f"--  provider {pid}: {why}")
-    if not models.providers() and models.ollama_answers(root := models.ollama_root_here()):
+    provs = models.providers()
+    if not provs and models.ollama_answers(root := models.ollama_root_here()):
         print(f"--  Ollama answers at {root} but OpenCode has no provider for it "
               "(wb model add ollama/<model> adds one)")
-    for m in found.values():
-        st = models.status(m)
-        print(f"{'ok ' if st['available'] else '-- '} model {m.id}: {st['why']}")
-    for pid, prov in models.providers().items():
+    # each Ollama is asked once whether it answers: a sleeping LAN box cost 35 s a model, and
+    # doctor ran past Claude's 2-minute Bash limit (the 2026-11-16 audit)
+    down = set() if models._fake() else {
+        p["root"] for p in provs.values() if p["engine"] == "ollama" and not models.ollama_answers(p["root"])}
+    for pid, prov in provs.items():
+        if prov["root"] in down:
+            print(f"--  provider {pid}: Ollama isn't answering at {prov['root']}; its context checks are skipped")
+    states = {mid: models.status(m, down) for mid, m in found.items()}
+    for mid, st in states.items():
+        print(f"{'ok ' if st['available'] else '-- '} model {mid}: {st['why']}")
+    if found and not any(st["available"] for st in states.values()):  # doctor said all was well
+        mid = next(iter(found))                                         # (the 2026-11-16 audit)
+        fix = models.remedy(found[mid], states[mid])
+        line(False, "no model can run now" + (f" ({mid}: {fix})" if fix else ""))
+    for pid, prov in provs.items():
         if prov["problem"]:
             line(False, f"provider {pid}: {prov['problem']}")
-        if prov["engine"] != "ollama":
-            continue
+        ollama = prov["engine"] == "ollama"
         for name, e in prov["models"].items():
-            line("max_tokens" in (e.get("options") or {}),
-                 f"{pid}/{name} caps its output on Ollama (options.max_tokens; Ollama ignores the "
-                 "max_completion_tokens OpenCode sends)")
-            said, served = (e.get("limit") or {}).get("context"), models.ollama_served_context(prov["root"], name)
-            if not said:
-                print(f"--  {pid}/{name} has no limit.context: wb can't size its tasks or its "
-                      f"handovers (wb model add {pid}/{name} --context N writes one)")
-            elif not served:  # a stock Ollama serves 4K-8K (the 2026-11-16 audit)
+            said = (e.get("limit") or {}).get("context")
+            if not said and f"{pid}/{name}" in found:  # it passed, and the runner never handed
+                # over (the 2026-11-16 audit)
+                line(False, f"{pid}/{name} has no limit.context, so its tasks never hand over and "
+                     "nothing compacts before the server cuts them off: wb model add "
+                     f"{pid}/{name}" + ("" if ollama else " --context N (the window it serves)"))
+            if not ollama:
+                continue
+            capped = "max_tokens" in (e.get("options") or {})
+            line(capped, f"{pid}/{name} caps its output on Ollama (options.max_tokens; Ollama ignores "
+                 "the max_completion_tokens OpenCode sends)" + ("" if capped else f": wb model add {pid}/{name}"))
+            if prov["root"] in down:
+                continue
+            served = models.ollama_served_context(prov["root"], name)
+            if said and not served:  # a stock Ollama serves 4K-8K (the 2026-11-16 audit)
                 print(f"--  {pid}/{name}: Ollama's served context is unknown (not loaded, no num_ctx, "
                       f"no OLLAMA_CONTEXT_LENGTH); its default may be below the entry's "
                       f"{said // 1024}K and cut prompts off: set OLLAMA_CONTEXT_LENGTH")
@@ -1735,7 +1782,7 @@ def main(argv=None):
     s.add_argument("--pull", action="store_true", help="add: download it into Ollama first")
     s.add_argument("--label", help="add: the name OpenCode shows")
     s.add_argument("--context", type=int, help="add: context tokens (default: what Ollama serves "
-                   "it, else what the provider's other models use, else the model's own)")
+                   "it, else what the provider's other models use; another server needs it)")
     s.add_argument("--delete", action="store_true", help="retire: also delete its weights")
     s.set_defaults(f=cmd_model)
     s = sub.add_parser("scout", help="the weekly model check: hardware, installed models, results")
