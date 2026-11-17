@@ -543,8 +543,12 @@ class Lifecycle(Base):
             time.sleep(0.2)
         rows, _ = store.read_jsonl(steer)
         self.assertTrue(rows and rows[0]["now"] and "Stop planning and act now" in rows[0]["text"])
-        notes, _ = store.read_jsonl(store.home() / "notify.jsonl")
-        self.assertTrue(any(r["task"] == "t-think" and "the runner nudged it" in r["text"] for r in notes))
+        # the runner writes the steer row, then the check-in: wait for that too (CI on 0.90's merge)
+        nudged = lambda: any(r["task"] == "t-think" and "the runner nudged it" in r["text"]  # noqa: E731
+                             for r in store.read_jsonl(store.home() / "notify.jsonl")[0])
+        while time.time() < deadline and not nudged():
+            time.sleep(0.2)
+        self.assertTrue(nudged())
         self.assertEqual(store.Task("t-think").status.get("nudges"), 1)
         st = wait_phase("t-think", {"stuck"})       # the nudged round shows nothing either: stopped,
         self.assertIn("even after a nudge", st["last"])  # not nudged again and again
