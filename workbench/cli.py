@@ -616,15 +616,26 @@ def _ack_all(task, upto: float | None = None):
     _write_ack(task, max(acked, upto))
 
 
-def _stale(row, st: dict) -> bool:
+def _oldest_open(task: store.Task, rows: list[dict]) -> str | None:
+    """The id of the task's oldest question still open, by its notice: the one a wait delivers
+    next. status.asking lags an answer until the runner's next tick (the 0.90 review)."""
+    asked = [r for r in rows if r["task"] == task.name and r["kind"] == "question" and r.get("id")
+             and ask_mcp.is_open(task, str(r["id"]))]
+    return min(asked, key=lambda r: r["ts"])["id"] if asked else None
+
+
+def _stale(row, st: dict, oldest: str | None = None) -> bool:
     """A notice no longer true, as the mod judges it: a review, stuck or failed notice for a task
     since sent back, resumed or closed, a question no longer asked, a check-in for a task no
-    longer running."""
+    longer running. Of the questions, only the oldest still open (`oldest`, _oldest_open) is
+    news: oldest first, as the runner's status.asking orders them, but judged by the answer
+    files, so the second of two is delivered once the first is answered, not the first again
+    (the 0.90 review). An old notice without an id stands for whatever is asked."""
     phase = st.get("phase")
     if row["kind"] in ("review", "stuck", "failed"):
         return phase != row["kind"]
     if row["kind"] == "question":
-        return phase != "asking" or row.get("id", st.get("asking")) != st.get("asking")
+        return phase != "asking" or ("id" in row and row["id"] != oldest)
     if row["kind"] == "checkin":
         return phase not in ("queued", "running", "testing")
     return False
@@ -646,7 +657,8 @@ def cmd_wait(a):
             if a.name and row["task"] != a.name:
                 continue
             task = store.Task(row["task"])
-            if not task.exists or _stale(row, task.status):
+            if not task.exists or _stale(row, task.status, _oldest_open(task, rows)
+                                         if row["kind"] == "question" else None):
                 continue  # its directory removed by hand, or no longer true
             if row["ts"] > _acked(task):
                 _write_ack(task, row["ts"])
@@ -664,7 +676,8 @@ def cmd_wait(a):
             if phase in store.NEEDS_CLAUDE and (phase == "asking" or not runner_alive(task)):
                 want = "question" if phase == "asking" else phase
                 mine = [r for r in rows if r["task"] == a.name and r["kind"] == want
-                        and not _stale(r, st) and r.get("round", st.get("round")) == st.get("round")]
+                        and not _stale(r, st, _oldest_open(task, rows))
+                        and r.get("round", st.get("round")) == st.get("round")]
                 if mine:
                     print(f"[{want}] {a.name} (already delivered once)\n{mine[-1].get('text', '')}")
                     return

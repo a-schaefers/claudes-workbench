@@ -1610,8 +1610,14 @@ class AskServer(Base):
         ask_mcp.relay(task, opened)
         self.assertIn("Q: first?", run_wb("wait", "--timeout", "5"))
         run_wb("answer", "t-twoq", "--id", "aaaaaaaa", "--text", "one")
+        # before the runner's next tick, status.asking still names the first: wb wait skipped
+        # the second as stale and gave the answered first "again" (the 0.90 review)
+        self.assertEqual(task.status["asking"], "aaaaaaaa")
+        out = run_wb("wait", "t-twoq", "--timeout", "5")
+        self.assertIn("Q: second?", out)
+        self.assertNotIn("already delivered", out)
         ask_mcp.relay(task, opened)
-        self.assertIn("Q: second?", run_wb("wait", "--timeout", "5"))
+        self.assertIn("Q: second?", run_wb("wait", "t-twoq", "--timeout", "5"))  # once more: named
 
     def test_a_question_the_runner_drops_is_closed_and_wb_answer_refuses_it(self):
         # one that timed out, or whose round ended, kept looking open: Claude was woken for it

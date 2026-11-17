@@ -1056,7 +1056,10 @@ command raise. Each task's `acked` file holds the time up to which Claude has ha
 - **Without the mod.** `wb wait [task]` blocks until there's news past a task's `acked`, prints
   `[kind] task` and the text, and acks it. It skips what the mod would (`_stale`: a review, stuck
   or failed notice whose phase has moved on, a question no longer asked, a check-in for a task no
-  longer running), rows that aren't whole, and rows for a task whose directory is gone. It reaps
+  longer running; of a task's questions only the oldest still open (`_oldest_open`, judged by the
+  answer files, since status.asking names an answered one until the runner's next tick: the 0.90
+  review, when the second of two was skipped and the answered first given "again") is news, so
+  they come oldest first), rows that aren't whole, and rows for a task whose directory is gone. It reaps
   dead runners first (`reap`), so their `failed` notice is what it delivers. A named wait on a
   closed task exits 2; on a task already waiting whose notice was taken elsewhere it prints it
   again "(already delivered once)" rather than block forever, and one stopped or taken over by
