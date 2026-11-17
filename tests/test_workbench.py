@@ -1638,6 +1638,27 @@ class AskServer(Base):
         from workbench import lessons
         self.assertFalse(any("first?" in r["text"] for r in lessons.gather(task, "accepted")))
 
+    def test_a_stop_closes_the_question_the_agent_waits_on(self):
+        # wb stop (or a signal) unwound past run_round's close: the question stayed open, status
+        # still named it, and `wb answer` said "answered" to nobody (the 0.90 review)
+        self.start("t-stopq", "slow")
+        task = store.Task("t-stopq")
+        deadline = time.time() + 15
+        while not task.status.get("session"):
+            self.assertLess(time.time(), deadline, "the agent never started")
+            time.sleep(0.1)
+        self.agent_asks(task, "aaaaaaaa", question="first?")
+        while task.status.get("asking") != "aaaaaaaa":          # the runner relays it
+            self.assertLess(time.time(), deadline + 15, task.status)
+            time.sleep(0.1)
+        run_wb("stop", "t-stopq")
+        self.assertEqual((task.status["phase"], task.status.get("asking")), ("stuck", None))
+        self.assertFalse(ask_mcp.is_open(task, "aaaaaaaa"))
+        err = io.StringIO()
+        with redirect_stderr(err), self.assertRaises(SystemExit):
+            run_wb("answer", "t-stopq", "--id", "aaaaaaaa", "--text", "late")
+        self.assertIn("closed", err.getvalue())
+
     def test_the_budget_is_counted_where_the_agent_cant_reset_it(self):
         # the server counted the task's ask files, which the agent could delete (the audit)
         self.start("t-count", "ok", "--ask-budget", "1")

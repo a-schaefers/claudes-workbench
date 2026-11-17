@@ -201,6 +201,14 @@ def close(task: store.Task, opened: dict) -> None:
         del opened[qid]
 
 
+def close_all(task: store.Task) -> None:
+    """Close every question the task has relayed (status `asks`) that is still open: called once
+    its round's agent is gone, however the round ended, since no server outlives its round. A
+    stop or a signal unwound past run_round's close, and `wb answer` said "answered" to nobody;
+    after a resume `wb allow` could answer the dead request (the 0.90 review)."""
+    close(task, dict.fromkeys(task.status.get("asks") or {}))
+
+
 def used(task: store.Task) -> int:
     """The plain questions the task has asked, as the runner counted them."""
     return sum(1 for k in (task.status.get("asks") or {}).values() if k == "q")

@@ -257,6 +257,10 @@ def _end_agent(task: store.Task) -> None:
     try:
         if task.status.get("agent_pid"):
             task.set_status(agent_pid=None)
+        ask_mcp.close_all(task)  # its questions died with it: a stop unwound past run_round's close
+        st = task.status
+        if st.get("asking") or st.get("phase") == "asking":
+            task.set_status(asking=None, **({"phase": "running"} if st.get("phase") == "asking" else {}))
     except OSError:  # a full disk must not hide the error that brought us here
         pass
 

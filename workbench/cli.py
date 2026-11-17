@@ -110,10 +110,11 @@ def reap(task: store.Task) -> bool:
     st = task.set_status_if(  # one reaper wins: two waiters, one notice
         lambda st: st.get("phase") in LIVE and not runner_alive(task)
         and time.time() - (st.get("updated_at") or 0) >= REAP_GRACE,
-        phase="failed", last=RUNNER_DIED, pid=None, agent_pid=None)
+        phase="failed", last=RUNNER_DIED, pid=None, agent_pid=None, asking=None)
     if st is None:
         return False
     runner.sweep(task)  # the agent it left, if the kernel didn't take it with the runner
+    ask_mcp.close_all(task)  # and its questions, which nothing will relay (the 0.90 review)
     task.event({"ts": store.now(), "round": st.get("round"), "kind": "error",
                 "text": "the runner died without a report"})
     task.notify("failed", f"task {task.name}: the runner died without a report (killed, out of "

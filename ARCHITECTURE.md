@@ -885,7 +885,10 @@ the task asking, and each open question's notice gets a mark of its own (two ask
 shared one, and acknowledging the first acknowledged both). A round that ends mid-question clears
 it. A question the runner drops, timed out or its round over, is closed (`ask_mcp.close`): it
 writes `NO_ANSWER` as its answer, so nothing takes it for open (Claude was woken for one nobody
-waited on); lessons skip that answer. The prompt `wb next` writes names the
+waited on); lessons skip that answer. However the round ended (a `wb stop`, a signal, a crash),
+`_end_agent` closes every question in status `asks` still open (`ask_mcp.close_all`) and clears
+`asking` (and an `asking` phase), as `cli.reap` does for a runner that died: a stop once unwound
+past the round's close, and `wb answer` said "answered" to nobody (the 0.90 review). The prompt `wb next` writes names the
 questions left (`ask_mcp.used`), not the whole budget. A `tools/call` runs on its own thread
 (replies written under a lock), so `ping` and the rest are answered while a question waits. The
 silence guard doesn't count the wait. `wb answer <task> --text|--file` answers, and refuses a
@@ -2492,7 +2495,7 @@ with overflow), `read_full`, `reviews`, `spec_rounds`, `stuck`, `took_over`.
   and a read between a truncate and the write saw 0.
 - `ask/<id>.json`: `{id, ts, round, question, context, command?, path?}` (the agent's: the runner
   checks it); `<id>.answer`: the text (`ask_mcp.write_answer`), `NO_ANSWER` for one the runner
-  dropped (timed out, or its round ended).
+  dropped (timed out, its round ended, stopped, or its runner died).
 - `lessons.jsonl`: `{ts, task, repo, skills, id, kind, round, text}`; a close is `{close: id, ts,
   how: "skill:<name>"|"dropped", why}` (*Lessons*).
 - `speed.json`: `{"<model id>": {"write": [tok/s…], "read": [tok/s…]}}`, the last 60 of each.
