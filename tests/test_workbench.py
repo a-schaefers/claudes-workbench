@@ -1477,6 +1477,47 @@ class AskServer(Base):
         self.assertEqual(kinds.count("ask"), 2)
         self.assertEqual(kinds.count("answer"), 2)
 
+    def test_answering_one_of_two_questions_leaves_the_other_to_be_delivered(self):
+        # wb answer acknowledged everything up to its own moment, the second question's notice
+        # with it, and the agent waited out the ask timeout; two asked in one tick shared a mark
+        # (the 0.90 review)
+        self.start("t-twoq", "ok", "--ask-budget", "3")
+        wait_phase("t-twoq", {"review"})
+        task, opened = store.Task("t-twoq"), {}
+        task.set_status(phase="running")
+        self.agent_asks(task, "aaaaaaaa", question="first?")
+        self.agent_asks(task, "bbbbbbbb", question="second?")
+        ask_mcp.relay(task, opened)
+        self.assertIn("Q: first?", run_wb("wait", "--timeout", "5"))
+        run_wb("answer", "t-twoq", "--id", "aaaaaaaa", "--text", "one")
+        ask_mcp.relay(task, opened)
+        self.assertIn("Q: second?", run_wb("wait", "--timeout", "5"))
+
+    def test_a_question_the_runner_drops_is_closed_and_wb_answer_refuses_it(self):
+        # one that timed out, or whose round ended, kept looking open: Claude was woken for it
+        # and `wb answer` said "answered" to nobody (the 0.90 review)
+        self.start("t-drop", "ok", "--ask-budget", "3")
+        wait_phase("t-drop", {"review"})
+        task, opened = store.Task("t-drop"), {}
+        task.set_status(phase="running")
+        self.agent_asks(task, "aaaaaaaa", question="first?")
+        ask_mcp.relay(task, opened)
+        opened["aaaaaaaa"] -= 1201                          # past the ask timeout
+        ask_mcp.relay(task, opened)
+        self.assertEqual((task.status["phase"], opened), ("running", {}))
+        self.assertEqual((context.ask_dir(task) / "aaaaaaaa.answer").read_text().strip(),
+                         ask_mcp.NO_ANSWER)
+        err = io.StringIO()
+        with redirect_stderr(err), self.assertRaises(SystemExit):
+            run_wb("answer", "t-drop", "--id", "aaaaaaaa", "--text", "late")
+        self.assertIn("closed", err.getvalue())
+        self.agent_asks(task, "bbbbbbbb", question="second?")
+        ask_mcp.relay(task, opened)
+        ask_mcp.close(task, opened)                          # its round ended (run_round)
+        self.assertFalse(ask_mcp.is_open(task, "bbbbbbbb"))
+        from workbench import lessons
+        self.assertFalse(any("first?" in r["text"] for r in lessons.gather(task, "accepted")))
+
     def test_the_budget_is_counted_where_the_agent_cant_reset_it(self):
         # the server counted the task's ask files, which the agent could delete (the audit)
         self.start("t-count", "ok", "--ask-budget", "1")
@@ -2463,6 +2504,25 @@ class Permission(Base):
         run_wb("allow", "t-perm", "docker *", "--always")
         self.assertEqual(json.loads(Path(os.environ["WB_COMMANDS"]).read_text())["allow"],
                          ["docker *"])
+
+    def test_wb_allow_answers_the_permission_request_not_an_older_plain_question(self):
+        # status.asking is the oldest question of any kind: wb allow answered a plain question
+        # with its leave and left the request open (the 0.90 review)
+        from workbench import ask_mcp
+        self.start("t-two-kinds", "ok", "--ask-budget", "3")
+        wait_phase("t-two-kinds", {"review"})
+        task, opened = store.Task("t-two-kinds"), {}
+        task.set_status(phase="running")
+        store.write_json(context.ask_dir(task) / "aaaaaaaa.json", {"question": "which file?"})
+        ask_mcp.relay(task, opened)
+        store.write_json(context.ask_dir(task) / "bbbbbbbb.json",
+                         {"question": "to fetch it", "command": "curl -sO https://x/f.json"})
+        ask_mcp.relay(task, opened)
+        self.assertEqual(task.status["asking"], "aaaaaaaa")
+        run_wb("allow", "t-two-kinds", "curl *")
+        self.assertTrue(ask_mcp.is_open(task, "aaaaaaaa"))
+        self.assertIn("Claude allowed `curl *`",
+                      (context.ask_dir(task) / "bbbbbbbb.answer").read_text())
 
     @staticmethod
     def verdict(rules, command):

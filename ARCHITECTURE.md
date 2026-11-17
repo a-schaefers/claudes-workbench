@@ -856,11 +856,18 @@ agent's, so none can pass for workbench's own; `command` and `path` are never cl
 copies them). The phase is `asking` while any question of the round is open, `status.asking`
 the oldest; an answer (logged as an `answer` event) or the ask timeout closes one, and with none
 open the phase is `running` again, so two questions at once keep the task asking until both are
-answered. A round that ends mid-question clears it. The prompt `wb next` writes names the
+answered. The phase is set before the notice is raised, so a reader that sees the notice sees
+the task asking, and each open question's notice gets a mark of its own (two asked in one tick
+shared one, and acknowledging the first acknowledged both). A round that ends mid-question clears
+it. A question the runner drops, timed out or its round over, is closed (`ask_mcp.close`): it
+writes `NO_ANSWER` as its answer, so nothing takes it for open (Claude was woken for one nobody
+waited on); lessons skip that answer. The prompt `wb next` writes names the
 questions left (`ask_mcp.used`), not the whole budget. A `tools/call` runs on its own thread
 (replies written under a lock), so `ping` and the rest are answered while a question waits. The
-silence guard doesn't count the wait. `wb answer <task> --text|--file` answers; `wb allow`
-answers a pending question too; both write through `write_answer`.
+silence guard doesn't count the wait. `wb answer <task> --text|--file` answers, and refuses a
+closed question (`ask_mcp.is_open`: answered, or dropped); `wb allow` answers the oldest open
+permission request (`_permission_asked`), else the pending question; both write through
+`write_answer`.
 
 **Granting.** `wb allow <task> "<pattern>"… [--path DIR…] [--always]` adds to the task's grants
 (`rules/<task>/grants.json`, through `context.grant`; and to `commands.json` with `--always`, which
@@ -991,8 +998,8 @@ command raise. Each task's `acked` file holds the time up to which Claude has ha
   directory changes (*Waiting without polling*). Each line makes the mod re-read the tasks.
 - **Still true.** For each task, the newest notice under an hour old and past its `acked` mark
   (and every question past it: two asked at once are both open) is delivered only while it's
-  still true: a check-in while the task is queued, running or testing; a question while its
-  `ask/<id>.json` has no `<id>.answer`; otherwise while the phase matches the kind. A stale one (a
+  still true: a check-in while the task is queued, running or testing; a question while the
+  phase is `asking` and its `ask/<id>.json` has no `<id>.answer`; otherwise while the phase matches the kind. A stale one (a
   review for a task since discarded or sent back) is acknowledged and dropped.
 - **Held mid-turn.** While Claude's main loop is mid-turn (`mem.busy`, set by `turn.start` or the
   model's own `tool.call`) the wake is held (a prompt submitted then would queue and arrive stale)
@@ -1011,7 +1018,9 @@ command raise. Each task's `acked` file holds the time up to which Claude has ha
   A note written seconds after a failure once swallowed the failure notice for an hour. The
   commands that handle the news themselves (`answer`, `allow` answering a request, `feedback`,
   `next`, `resume`) move it to the moment they acted instead: everything before is handled (an
-  answered question once came back from `wb wait`), and what the new round raises isn't.
+  answered question once came back from `wb wait`), and what the new round raises isn't; while
+  the task is asking, it still stops just before the notice of another question still open
+  (answering the first of two acknowledged the second before anything delivered it).
 - **The safety net** (`rewake`). A task that has waited on Claude (review, asking, stuck, failed)
   for a minute after its last status change with its newest notice not acknowledged (any notice in
   notify.jsonl counts, however old, so one delivered before a reload isn't "lost") wakes Claude
@@ -2021,8 +2030,8 @@ wakes are rechecked on every poll.
 **Waking** (`deliver`). Only when notify.jsonl's size or mtime changed, Claude is busy, or a wake
 was held for the turn. Per task, the newest notify row under an hour old and every question
 row, past the task's `acked`; a row is still true when it's a check-in and the task is
-queued/running/testing, a question whose `ask/<id>.json` has no `<id>.answer` (without an id:
-phase `asking`), or the phase equals the kind. A stale one is acked and dropped. A true one is
+queued/running/testing, a question while the phase is `asking` and (with an id) its
+`ask/<id>.json` has no `<id>.answer`, or the phase equals the kind. A stale one is acked and dropped. A true one is
 toasted once (`workbench: <name> <headline>`); a task that isn't this session's (`mine`: its
 `cwd` or `repo` is, holds or is inside the session's directory; neither key: everyone's) gets
 nothing more; if Claude is busy it waits and leaves the file unseen; else the mod writes `acked
@@ -2219,7 +2228,8 @@ failure notice for an hour). It's called by feedback, next, answer, allow, note,
 takeover, accept, discard and stop (one task or `--all`); not by steer, `skill hand|take`, diff,
 report or log. `_ack_all(task, upto=t)` moves the mark to `t` instead, the moment the command
 acted: answer, allow when it answers a request, feedback, next and resume, which handle the news
-themselves. Errors `wb` raises itself (`RuntimeError`, a config that doesn't parse) print as a
+themselves; while the task is asking, that mark too stops just before the notice of any other
+question still open (`ask_mcp.is_open`). Errors `wb` raises itself (`RuntimeError`, a config that doesn't parse) print as a
 message, not a traceback, and so does a file that can't be read (`OSError`: a `--spec`,
 `--message` or `--file` that isn't there prints `wb: <path>: No such file or directory`).
 `feedback`, `next` and `resume` act on a task one at a time (`one_at_a_time`, *Git, commits and
@@ -2234,8 +2244,8 @@ delivered as taken (`_stale_notes`, *Notes*).
 | `wb start <task> --spec <file\|->` | `--repo` (.), `--size trivial\|significant` (significant), `--model <id or fragment>`, `--test <cmd>`, `--auto-fix N` (2), `--checkin MIN` (10 significant, 0 trivial), `--ask-budget N` (2), `--ask-timeout S` (1200), `--round-timeout S`, `--silence-timeout S`, `--think-timeout S` (0 off; unset or 0 for the other two: the measured budgets), `--test-timeout S` (900), `--no-base-check`, `--base REF` (HEAD), `--skill NAME…`, `--allow PATTERN…`, `--allow-path DIR…`, `--force` (queue a `--model` that can't run now; the hint is offered only when its server is just down), `--queue` (start although the GPU's holders leave no room: wait behind them), `--trial`, `--no-claude-md` | Checks the name (`^[a-z0-9][a-z0-9-]{0,47}$`, never reused), the repo (with the lane on, `_lane_fits` refuses one that is the home directory or lies where credentials live, and a `--test` whose command is a snap), the spec and the skills, and that opencode is on PATH; picks the model (router, or `--model`; none runnable: exit 3, with each model's next step); refuses a repo that is a task's worktree, a `--base` that names no commit (`no commit <base> in <repo>`) and a repo with no git identity; checks `CLAUDE.md` or `.claude/CLAUDE.md` is committed at the base (or CLAUDE.md gitignored: the checkout's copy); refuses when another task (or `wb image`) holds the GPU and the model can't run beside it (exit 4, naming each holder's task, repo and model; `--queue` overrides); makes the worktree and branch `delegate/<task>` (no checkout hook; a failed add leaves nothing); notes submodules it doesn't check out; writes task.json, round 1's prompt (spec + PROTOCOL) and status; spawns the runner and returns at once. Prints the model and why, the slice, Claude's spec record, the handed or suggested skills, notes, `next: wb wait <task>`. With `--test` (and not `--no-base-check`, task.json `no_base_check`) the runner first runs the acceptance command once on the base (*The base check*: at most `BASE_CHECK_SECS` = 120 s, or `--test-timeout` when shorter; `base-tests.txt`, status `base_check`); what it saw comes in the first report, and a check-in at once when it already passes or `--test-timeout` cut it short. |
 | `wb feedback <task> --text "…" \| --message <file\|->` | `--fresh` \| `--keep-context`, `--spec-gap "…"…` | Reaps a dead runner first (`reap`). Phase review/stuck/failed and no live runner; empty text is refused before anything is written. Writes the next round's prompt (FEEDBACK_HEAD + "Make exactly these changes, then re-run the acceptance command and finish with a short summary:" (the re-run only when there is one) + the text), reviews+1, spawns the runner. Warns past three review rounds; prints each undelivered note it dropped ("not delivered, dropped …"). A note names the GPU's holders when it will wait for them. Gathers lessons. |
 | `wb next <task> --spec <file> -m "…"` | `--test` (replaces the acceptance command), `--skill` (replaces the set), `--fresh`, `--allow PATTERN…` (adds to the task's grants), `--spec-gap` | Phase review. Reads the spec (a file or `-`; empty or unreadable: nothing changes), records the step's size and fit, commits the work (`<m>` + `Workbench-Task: <task> (step N)` + `OpenCode-Session:`), writes the next step's prompt ("Step N of this task is done and committed (<sha>). The next step:" + spec + PROTOCOL), records the spec gaps, resets reviews, spawns. Says whether the next step gets a fresh session and why (`runner.fresh_reason`), each undelivered note it dropped, and names the GPU's holders when it will wait for them. Gathers lessons. |
-| `wb answer <task> --text "…" \| --file <f>` | `--id` (the pending question) | Writes `ask/<id>.answer` (atomically, never through a link: `ask_mcp.write_answer`); the blocked `ask_reviewer` returns it. An empty answer is refused: the question stays open. |
-| `wb allow <task> ["<pattern>"…]` | `--path DIR…`, `--always`, `--text "…"` | Adds to the task's grants (`rules/<task>/grants.json`; and commands.json with `--always`, refused when it doesn't parse); answers any pending question with "Claude allowed … Run it again now and carry on."; if the agent is live, sends that as a `--now` steer so it restarts on its session with the rule (while the tests run or the task waits for the GPU it says the agent gets it when they end, or when its round starts). `--path` goes through `_lane_dir` (refuses `/` and home, creates the directory; `*` turns the lane off for the task). |
+| `wb answer <task> --text "…" \| --file <f>` | `--id` (the pending question) | Writes `ask/<id>.answer` (atomically, never through a link: `ask_mcp.write_answer`); the blocked `ask_reviewer` returns it. An empty answer is refused: the question stays open. A closed question (answered, or dropped by the runner) is refused. |
+| `wb allow <task> ["<pattern>"…]` | `--path DIR…`, `--always`, `--text "…"` | Adds to the task's grants (`rules/<task>/grants.json`; and commands.json with `--always`, refused when it doesn't parse); answers the oldest open permission request (else the pending question) with "Claude allowed … Run it again now and carry on."; if the agent is live, sends that as a `--now` steer so it restarts on its session with the rule (while the tests run or the task waits for the GPU it says the agent gets it when they end, or when its round starts). `--path` goes through `_lane_dir` (refuses `/` and home, creates the directory; `*` turns the lane off for the task). |
 | `wb steer <task> --text "…" \| --message <file>` | `--now` | Only while queued/running/testing/asking with a live runner. Appends to steer.jsonl: delivered when the current run ends (before the tests), or at once with `--now`. While testing: "its tests are running (up to Ns); the agent gets it when they end"; while queued: when its round starts. |
 | `wb note <task> --text "…"` | | A `captain` event: Claude's log line in the transcript. |
 | `wb takeover [<task> \| --all]` | `--repo DIR` | Stops the runner, phase `review`, "Claude took over"; Claude edits in the worktree and accepts, or hands back with feedback. `--all`: every task that isn't closed. `--repo DIR` (with `--all`; the mod passes its session's directory): only the tasks whose task.json `cwd` or `repo` is DIR, inside it or holds it (`_scope`; neither key: every session's), the rest listed as `left alone (other projects' sessions): …`. |
@@ -2408,7 +2418,8 @@ with overflow), `read_full`, `reviews`, `spec_rounds`, `stuck`, `took_over`.
   (`cli._write_ack`: a temp file renamed over it), since the mod and `wb wait` read it every poll
   and a read between a truncate and the write saw 0.
 - `ask/<id>.json`: `{id, ts, round, question, context, command?, path?}` (the agent's: the runner
-  checks it); `<id>.answer`: the text (`ask_mcp.write_answer`).
+  checks it); `<id>.answer`: the text (`ask_mcp.write_answer`), `NO_ANSWER` for one the runner
+  dropped (timed out, or its round ended).
 - `lessons.jsonl`: `{ts, task, repo, skills, id, kind, round, text}`; a close is `{close: id, ts,
   how: "skill:<name>"|"dropped", why}` (*Lessons*).
 - `speed.json`: `{"<model id>": {"write": [tok/s…], "read": [tok/s…]}}`, the last 60 of each.

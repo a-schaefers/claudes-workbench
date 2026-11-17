@@ -549,6 +549,8 @@ def cmd_answer(a):
         die(f"{a.name} has no open question")
     if not ask_mcp.QID.match(qid) or not (task.dir / "ask" / f"{qid}.json").exists():
         die(f"no question {qid} in {a.name}")
+    if not ask_mcp.is_open(task, qid):  # an answer to it would say "answered" to nobody (the 0.90 review)
+        die(f"{qid} is closed: answered, or the agent stopped waiting for it")
     text = a.text if a.text is not None else Path(a.file).read_text(encoding="utf-8")
     if not text.strip():  # the question stays open: an empty answer unblocked the agent (the audit)
         die("the answer is empty")
@@ -585,14 +587,22 @@ def _ack_all(task, upto: float | None = None):
     failure notice Claude hasn't seen: the mark stops just short of it. A command that handles
     the news itself (answer, feedback, next, resume) passes `upto`, the moment it acted: all
     before it is handled, even news still true then (an answered question once came back from
-    wb wait, the 2026-11-16 audit), and what its runner raises after it isn't."""
+    wb wait, the 2026-11-16 audit), and what its runner raises after it isn't; but the mark still
+    stops short of another question still open (answer and allow write their answer first, so
+    theirs isn't): answering the first of two acknowledged the second's notice before anything
+    delivered it, and the agent waited out the ask timeout (the 0.90 review)."""
     acked = _acked(task)
+    phase = task.status.get("phase")
     if upto is None:
-        phase = task.status.get("phase")
         news = "question" if phase == "asking" else "checkin" if phase in LIVE else phase
         pending = [r["ts"] for r in store.notices()
                    if r["task"] == task.name and r["kind"] == news and r["ts"] > acked]
         upto = min(pending) - 0.001 if pending else store.now()
+    elif phase == "asking":  # not in review: a question from an older round is closed by then
+        still = [r["ts"] for r in store.notices()
+                 if r["task"] == task.name and r["kind"] == "question" and r["ts"] > acked
+                 and ask_mcp.is_open(task, str(r.get("id") or ""))]
+        upto = min([upto, *(ts - 0.001 for ts in still)])
     _write_ack(task, max(acked, upto))
 
 
@@ -898,6 +908,20 @@ def _lane_dir(raw: str) -> str:
     return str(path)
 
 
+def _permission_asked(task: store.Task) -> str | None:
+    """The oldest permission request still open. status.asking is the oldest question of any
+    kind, and `wb allow` answered a plain question asked before the request with its leave,
+    the request left open (the 0.90 review)."""
+    def made(qid):
+        try:
+            return (task.dir / "ask" / f"{qid}.json").stat().st_mtime
+        except OSError:  # the agent can delete its ask files
+            return float("inf")
+    perms = [q for q, k in (task.status.get("asks") or {}).items()
+             if k == "p" and ask_mcp.is_open(task, q)]
+    return min(perms, key=lambda q: (made(q), q), default=None)
+
+
 def cmd_allow(a):
     """Let a task's agent run commands outside the everyday list (context.ALLOWED_COMMANDS), or
     use a directory outside its lane (--path, context.writable): for this task, or --always for
@@ -924,9 +948,9 @@ def cmd_allow(a):
             + ". Run it again now and carry on." + (f" {a.text.strip()}" if a.text else ""))
     task.event({"ts": store.now(), "round": task.status.get("round"), "kind": "allow",
                 "text": f"allowed {said}" + (" always" if a.always else "")})
-    qid = task.status.get("asking")
+    qid = _permission_asked(task) or task.status.get("asking")
     handled = None
-    if qid and ask_mcp.QID.match(qid) and (task.dir / "ask" / f"{qid}.json").exists():
+    if qid and ask_mcp.is_open(task, qid):
         handled = store.now()  # the request is answered: handled, as wb answer does
         ask_mcp.write_answer(task, qid, text)  # whole, and never through a link in the lane
     if (phase := task.status.get("phase")) in LIVE and runner_alive(task):

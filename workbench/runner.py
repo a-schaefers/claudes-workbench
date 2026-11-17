@@ -584,6 +584,7 @@ def run_round(task: store.Task, n: int, keep: bool = False) -> dict:
             break
     out["exit"] = proc.wait()
     log.close()
+    ask_mcp.close(task, opened)  # its server is gone: closed, so nothing takes them for open
     if task.status.get("asking") or task.status.get("phase") == "asking":  # it ended
         task.set_status(asking=None, phase="running")  # mid-question: nothing reads that answer now
     out["secs"] = round(time.monotonic() - clock.t0, 1)

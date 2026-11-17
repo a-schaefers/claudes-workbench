@@ -807,7 +807,9 @@ async function deliver($: any, now: number) {
       const current = row.kind === 'checkin'
         ? RUNNING.has(status.phase) // a check-in is news while the task still runs
         : row.kind === 'question' && row.id
-          ? await asking($, name, String(row.id)) // this question, still unanswered
+          // this question, still unanswered, while the task still asks: a question the runner
+          // dropped (timed out, its round ended or stopped) woke Claude for nobody (the 0.90 review)
+          ? status.phase === 'asking' && await asking($, name, String(row.id))
           : status.phase === (row.kind === 'question' ? 'asking' : row.kind)
       const headline = HEADLINE[row.kind] ?? row.kind
       const key = `${name}:${row.ts}`

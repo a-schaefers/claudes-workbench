@@ -307,6 +307,24 @@ test('two questions asked at once both reach Claude, each with its own id', asyn
   expect(woken.filter(t => t.includes('Q: q2?') && t.includes('wb answer fix-it --id q2'))).toHaveLength(1)
 })
 
+test('a question whose task no longer asks is acknowledged without a wake', async ($, on) => {
+  // the 0.90 review: its ask file had no answer, so a question that timed out woke Claude for it
+  const clock = mock.clock(on, { now: 1_800_000_000_000 })
+  const files: Record<string, string> = {}
+  task(files, 'fix-it', 'running')
+  files['/wb/tasks/fix-it/ask/q1.json'] = JSON.stringify({ id: 'q1' })
+  notice(files, { ts: ts0, task: 'fix-it', kind: 'question', id: 'q1', text: 'Q: q1?' })
+  fakeTasks(on, files)
+  on('process.run', () => ({ value: { exitCode: 0, stdout: '', stderr: '' } }))
+  on('ui.toast', () => ({ value: undefined }))
+  const woken: string[] = []
+  on('prompt.submit', (_: any, e: any) => { woken.push(e.text); return { text: e.text } })
+  await $.session.start({ cwd: '/', surface: 'terminal', isInteractive: true })
+  await clock.advance(3000)
+  expect(woken.filter(t => t.includes('Q: q1?'))).toHaveLength(0)
+  expect(Number(files['/wb/tasks/fix-it/acked'])).toBe(ts0)
+})
+
 test('another plugin\'s tool call between turns does not hold the wakes', {
   plugins: [{
     name: 'peek',
