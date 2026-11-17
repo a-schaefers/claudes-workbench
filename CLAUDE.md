@@ -65,6 +65,11 @@ what either says (a command, a flag, a default, a guard, a file) updates it in t
     API (b64_json). It holds gpu.lock and calls `models.free_gpu()` first, so it never shares
     VRAM with a coding model. Each image gets a `.json` sidecar (prompt, seed, size, engine).
   - `context.py`: what the agent knows. It adds CLAUDE.md files and rules, the nested-instructions map and the handbook to the config layer's `instructions`, and it sets the denied tools and skills.
+    Its shell rules (`shell_rules`): deny by default,
+    `ALLOWED_COMMANDS` (the everyday tools), `ASK_FIRST` (new dependencies), the user's
+    `~/.config/workbench/commands.json` (`$WB_COMMANDS`) and the task's `status.allow`
+    (`wb allow`, `wb start --allow`), then the hard limits. A refused command comes back to Claude
+    as an ask_reviewer request with `command` (outside the question budget, capped at 8).
 - Runs on Linux, WSL2 and macOS. Native Windows doesn't: store.py needs fcntl and the runner
   `os.killpg` and POSIX signals. Off Linux, watch.py falls back to timed waits without inotify/pidfd.
 - Never name a model in code or the skill. Models come from OpenCode's config and choices from
@@ -147,7 +152,7 @@ than fails on a running server with no `stop`. Ollama entries need `options.max_
 OpenCode's `max_completion_tokens`); `wb model add` writes it and `wb doctor` checks it, and
 that `limit.context` matches what Ollama serves (`models.ollama_served_context`): more cuts prompts off, less shrinks every slice.
 
-Environment: `WB_HOME`, `WB_MODELS`, `WB_SKILLS`, `WB_IMAGES`, `WB_CHAT_TOKEN`, `WB_CHAT_CONFIG` (paths above);
+Environment: `WB_HOME`, `WB_MODELS`, `WB_SKILLS`, `WB_IMAGES`, `WB_CHAT_TOKEN`, `WB_CHAT_CONFIG`, `WB_COMMANDS` (paths above);
 `WB_OPENCODE_CONFIG` (OpenCode's config, default `~/.config/opencode/opencode.json`);
 `WB_COMPACT_AT` (the mod's early compaction, a percentage, 0 off); `WB_BIN` (the `wb` the mod runs).
 Tests only: `WB_OPENCODE_BIN` (a fake opencode), `WB_FAKE_MODELS` (no model servers).

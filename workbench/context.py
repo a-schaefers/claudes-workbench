@@ -31,6 +31,75 @@ DENIED_TOOLS = ("question", "experimental_image_generate", "execute", "subagent"
 # `cd x && sudo ...` is refused too. Everything else is the agent's, guided by the handbook.
 DENIED_SHELL = ("sudo", "sudo *", "doas", "doas *", "pkexec *", "su", "su *",
                 "*/git", "*/git *", "gh", "gh *")
+# The commands an agent runs without asking: the everyday tools of software work, generously
+# (2026-11-16, the user: guide the agents, don't hobble them). OpenCode checks each command inside
+# a compound line (pipes, &&, loops, subshells, $(…)) against these. Anything else is refused
+# ("Permission denied: shell") and the agent asks Claude through ask_reviewer with `command`;
+# `wb allow` grants it, for the task or always. This is a guardrail on the agent's own choices,
+# not a sandbox: make and every interpreter can run anything. The hard limits stay DENIED_SHELL.
+ALLOWED_COMMANDS = (
+    # the shell itself
+    "cd", "pwd", "echo", "printf", "test", "[", "true", "false", "export", "set", "unset", "env",
+    "type", "command", "which", "time", "timeout", "sleep", "wait", "exit", "source", ".", "read",
+    "nproc", "uname", "date", "whoami", "id", "hostname", "nice", "nohup", "ps", "kill", "jobs",
+    # files and text
+    "ls", "cat", "head", "tail", "wc", "sort", "uniq", "cut", "tr", "sed", "awk", "gawk", "grep",
+    "egrep", "fgrep", "rg", "ag", "find", "fd", "xargs", "tee", "diff", "cmp", "comm", "patch",
+    "file", "stat", "du", "df", "tree", "realpath", "dirname", "basename", "readlink", "touch",
+    "mkdir", "rmdir", "cp", "mv", "rm", "ln", "chmod", "install", "mktemp", "tar", "gzip",
+    "gunzip", "zcat", "zip", "unzip", "xz", "bzip2", "zstd", "jq", "yq", "column", "nl", "od",
+    "xxd", "hexdump", "strings", "md5sum", "sha1sum", "sha256sum", "base64", "seq", "paste",
+    "fold", "fmt", "expand", "rev", "tac", "split", "csplit", "join", "iconv", "less", "more",
+    # building, testing, running code
+    "make", "gmake", "cmake", "ctest", "ninja", "meson", "autoreconf", "configure", "pkg-config",
+    "cc", "gcc", "g++", "c++", "clang", "clang++", "ld", "ar", "nm", "objdump", "strip", "gdb",
+    "lldb", "valgrind", "clang-format", "clang-tidy", "cppcheck",
+    "python", "python3", "pip", "pip3", "pytest", "ruff", "mypy", "black", "isort", "flake8",
+    "pylint", "uv", "uvx", "poetry", "tox", "coverage",
+    "node", "npm", "npx", "pnpm", "yarn", "bun", "bunx", "deno", "tsc", "tsx", "eslint",
+    "prettier", "vitest", "jest", "playwright",
+    "go", "gofmt", "cargo", "rustc", "rustfmt", "rustup", "java", "javac", "jar", "mvn", "gradle",
+    "dotnet", "ruby", "bundle", "rake", "rspec", "php", "composer", "lua", "luajit", "zig",
+    "swift", "swiftc", "kotlin", "kotlinc", "scala", "sbt", "ghc", "cabal", "stack", "elixir",
+    "mix", "erl", "perl", "R", "Rscript", "julia",
+    "bash", "sh", "zsh", "dash", "xvfb-run", "Xvfb", "sqlite3", "git", "opencode",
+)
+# Inside the allowed tools, the steps that change what the project depends on: a new package is
+# Claude's decision (the handbook: no new dependencies), so these ask first even though the tool
+# is allowed. Installing what the project already lists (`npm install`, `npm ci`) needs no ask.
+ASK_FIRST = (
+    "pip install *", "pip3 install *", "python -m pip install *", "python3 -m pip install *",
+    "uv pip install *", "uv add *", "poetry add *", "npm install *", "npm i *", "npm add *",
+    "pnpm add *", "pnpm install *", "yarn add *", "bun add *", "bun install *", "cargo add *",
+    "cargo install *", "go install *", "go get *", "gem install *", "bundle add *",
+    "composer require *",
+)
+
+
+def allowed_patterns(task: store.Task) -> list[str]:
+    """What this task's agent may run beyond ALLOWED_COMMANDS: the user's standing allowances
+    (commands.json `allow`; "*" turns the list off) and what Claude granted this task."""
+    conf = store.read_json(commands_path(), {}) or {}
+    return [*(conf.get("allow") or []), *(task.status.get("allow") or [])]
+
+
+def commands_path() -> Path:
+    return Path(os.environ.get("WB_COMMANDS") or Path.home() / ".config" / "workbench" / "commands.json")
+
+
+def shell_rules(task: store.Task) -> list[dict]:
+    """Deny by default, allow the everyday tools, ask before new dependencies, then what Claude
+    and the user allowed; the hard limits last, so no allowance lifts them (later rules win)."""
+    rules = [{"action": "shell", "resource": "*", "effect": "deny"}]
+    rules += [{"action": "shell", "resource": r, "effect": "allow"}
+              for c in ALLOWED_COMMANDS for r in (c, f"{c} *")]
+    rules += [{"action": "shell", "resource": r, "effect": "allow"} for r in ("./*", "../*")]
+    rules += [{"action": "shell", "resource": r, "effect": "deny"} for r in ASK_FIRST]
+    rules += [{"action": "shell", "resource": r, "effect": "allow"} for r in allowed_patterns(task)]
+    rules += [{"action": "shell", "resource": c, "effect": "deny"} for c in DENIED_SHELL]
+    return rules
+
+
 # Claude's files: the instructions every agent reads, and the project's skills and settings.
 # The agent proposes a change to them in its summary; Claude makes it.
 CLAUDE_FILES = ("*CLAUDE.md", "*CLAUDE.local.md", "*AGENTS.md", ".claude/*", "*/.claude/*")
@@ -111,7 +180,7 @@ def layer(task: store.Task) -> dict:
     files, nested = instruction_files(task)
     note = write_map(task, nested)
     rules = [{"action": t, "resource": "*", "effect": "deny"} for t in DENIED_TOOLS]
-    rules += [{"action": "shell", "resource": c, "effect": "deny"} for c in DENIED_SHELL]
+    rules += shell_rules(task)
     rules += [{"action": "edit", "resource": f, "effect": "deny"} for f in CLAUDE_FILES]
     rules += [{"action": "skill", "resource": n, "effect": "deny"}
               for n in denied_skills(task.spec.get("deny_skills"))]

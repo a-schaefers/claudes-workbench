@@ -281,6 +281,8 @@ def task_entries(task: store.Task) -> list[Entry]:
         elif kind == "skills":
             out.append(Entry(ts, key, [("claude", "Claude → agent · skills")]
                              + _block("", r.get("text", ""), 12, "  ")))
+        elif kind == "allow":
+            out.append(Entry(ts, key, [("claude", f"■ Claude {r.get('text', '')}")]))
         elif kind == "interrupted":
             out.append(Entry(ts, key, [("bad", "■ the agent was interrupted")]))
         elif kind in ("fresh", "full"):

@@ -150,7 +150,7 @@ def cmd_start(a):
     task.round_dir(1).joinpath("prompt.md").write_text(prompt)
     task.set_status(phase="queued", round=1, reviews=0, auto_fixes=0, tools=0,
                     tok_in=0, tok_out=0, session=None, last="starting",
-                    skills=handed, skills_ever=handed, skills_rev=skills.revs(handed))
+                    skills=handed, skills_ever=handed, skills_rev=skills.revs(handed), allow=a.allow or [])
     spawn_runner(task)
     print(f"started {a.name} on {m.label} · branch {gitops.branch_name(a.name)} · "
           f"base {base[:8]}" + (f" · tests `{a.test}`, auto-fix {a.auto_fix}" if a.test else ""))
@@ -445,6 +445,40 @@ def cmd_stop(a):
     _stop_runner(task)
     task.set_status(phase="stuck", last="stopped by the reviewer", pid=None)
     print(f"stopped {a.name}; wb feedback continues it, wb discard drops it")
+
+
+def cmd_allow(a):
+    """Let a task's agent run commands outside the everyday list (context.ALLOWED_COMMANDS): for
+    this task, or --always for every task. A pending request is answered, and a running agent is
+    restarted on its session at once so the new rule applies (OpenCode reads it at start)."""
+    task = need(a.name)
+    pats = [p.strip() for p in a.pattern if p.strip()]
+    if not pats:
+        die("nothing to allow")
+    have = task.status.get("allow") or []
+    task.set_status(allow=have + [p for p in pats if p not in have])
+    if a.always:
+        path = context.commands_path()
+        conf = store.read_json(path, {}) or {}
+        conf["allow"] = (conf.get("allow") or []) + [p for p in pats if p not in (conf.get("allow") or [])]
+        path.parent.mkdir(parents=True, exist_ok=True)
+        store.write_json(path, conf)
+    said = ", ".join(f"`{p}`" for p in pats)
+    text = (f"Claude allowed {said}" + (" from now on" if a.always else " for this task")
+            + ". Run it again now and carry on." + (f" {a.text.strip()}" if a.text else ""))
+    task.event({"ts": store.now(), "round": task.status.get("round"), "kind": "allow",
+                "text": f"allowed {said}" + (" always" if a.always else "")})
+    qid = task.status.get("asking")
+    if qid and (task.dir / "ask" / f"{qid}.json").exists():
+        (task.dir / "ask" / f"{qid}.answer").write_text(text + "\n")
+    if task.status.get("phase") in ("queued", "running", "testing", "asking") and runner_alive(task):
+        store.append_jsonl(task.dir / "steer.jsonl", {"ts": store.now(), "text": text, "now": True})
+        print(f"allowed {said} on {a.name}" + (" (always)" if a.always else "")
+              + ": the agent restarts on its session with it")
+    else:
+        print(f"allowed {said} on {a.name}" + (" (always)" if a.always else "")
+              + ": it applies from the next round")
+    _ack_all(task)
 
 
 def cmd_steer(a):
@@ -1125,6 +1159,8 @@ def main(argv=None):
     s.add_argument("--force", action="store_true", help="queue even if the model can't run now")
     s.add_argument("--no-claude-md", action="store_true",
                    help="start even though the repo has no CLAUDE.md")
+    s.add_argument("--allow", action="append", metavar="PATTERN",
+                   help="let the agent run a command outside the everyday list, e.g. \"curl *\"")
     s.add_argument("--skill", action="append", metavar="NAME",
                    help="hand the agent this library skill (repeatable; wb skill list)")
     s.set_defaults(f=cmd_start)
@@ -1144,6 +1180,8 @@ def main(argv=None):
     s.add_argument("--message", "-m", required=True, help="commit subject for the approved step")
     s.add_argument("--test", help="the next step's acceptance command (default: unchanged)")
     s.add_argument("--fresh", action="store_true", help="a fresh session instead of the same one")
+    s.add_argument("--allow", action="append", metavar="PATTERN",
+                   help="let the agent run a command outside the everyday list, e.g. \"curl *\"")
     s.add_argument("--skill", action="append", metavar="NAME",
                    help="the skills for the next step (repeatable; replaces the set; default: unchanged)")
     s.set_defaults(f=cmd_next)
@@ -1231,6 +1269,12 @@ def main(argv=None):
     s.add_argument("--all", action="store_true", help="every step, not just the current one")
     s.add_argument("paths", nargs="*")
     s.set_defaults(f=cmd_diff)
+    s = sub.add_parser("allow", help="let a task's agent run a command outside the everyday list "
+                       "(a shell pattern, e.g. \"curl *\"); answers its request")
+    s.add_argument("name"); s.add_argument("pattern", nargs="+")
+    s.add_argument("--always", action="store_true", help="for every task from now on (commands.json)")
+    s.add_argument("--text", help="a word for the agent with it")
+    s.set_defaults(f=cmd_allow)
     s = sub.add_parser("steer", help="a note to a running agent: at the end of its current run, "
                        "or --now to interrupt it")
     s.add_argument("name")

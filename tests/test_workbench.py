@@ -8,6 +8,7 @@ import subprocess
 import sys
 import tempfile
 import types
+import threading
 import time
 import unittest
 from unittest import mock
@@ -56,7 +57,8 @@ class Base(unittest.TestCase):
         self.env_before = dict(os.environ)
         os.environ.update(WB_HOME=str(tmp / "state"), WB_OPENCODE_BIN=FAKE, WB_FAKE_MODELS="1",
                           WB_OPENCODE_CONFIG=str(tmp / "opencode.json"),
-                          WB_MODELS=str(tmp / "wb-models.json"), WB_SKILLS=str(tmp / "skills"))
+                          WB_MODELS=str(tmp / "wb-models.json"), WB_SKILLS=str(tmp / "skills"),
+                          WB_COMMANDS=str(tmp / "commands.json"))
         (tmp / "opencode.json").write_text(json.dumps(OPENCODE_CONFIG))
         self.repo = tmp / "repo"
         self.repo.mkdir()
@@ -735,6 +737,31 @@ class RealOpenCode(Base):
         self.assertEqual(len(answers), len(calls), "not every fake call came back")
         return task, answers
 
+    def test_everyday_tools_run_and_the_rest_waits_for_claude(self):
+        wt = str(store.Task("t-cmds").worktree)
+        def shell(cmd):
+            return {"name": "shell", "arguments": {"command": cmd, "workdir": wt}}
+        _, answers = self.run_calls("t-cmds", [
+            shell("ls | wc -l && for f in a b; do echo $f; done"),   # pipes, &&, loops
+            shell("python3 -c 'print(6*7)'"),
+            shell("curl --version"),                                  # not an everyday tool
+            shell("echo $(curl --version)"),                          # not hidden in $(…) either
+            shell("pip install --no-index nothing-at-all"),           # a new dependency
+        ])
+        refused = ["permission.rejected" in a for a in answers]
+        self.assertEqual(refused, [False, False, True, True, True], answers)
+        self.assertIn("42", answers[1])
+
+    def test_what_claude_allows_runs_and_no_allowance_lifts_the_hard_limits(self):
+        Path(os.environ["WB_COMMANDS"]).write_text(json.dumps({"allow": ["*"]}))  # list off
+        wt = str(store.Task("t-open").worktree)
+        def shell(cmd):
+            return {"name": "shell", "arguments": {"command": cmd, "workdir": wt}}
+        _, answers = self.run_calls("t-open", [shell("curl --version"),
+                                               shell("cd . && sudo -n true"), shell("gh --version")])
+        refused = ["permission.rejected" in a for a in answers]
+        self.assertEqual(refused, [False, True, True], answers)
+
     def test_sudo_is_refused_even_inside_a_compound_command(self):
         wt = str(store.Task("t-sudo").worktree)  # known before the task starts
         _, answers = self.run_calls("t-sudo", [
@@ -806,6 +833,41 @@ class GitGuard(unittest.TestCase):
         status = " M src/a.c\n M CLAUDE.md\n?? docs/AGENTS.md\nR  x -> .claude/skills/s/SKILL.md\n"
         self.assertEqual(runner.claude_files_changed(status),
                          ["CLAUDE.md", "docs/AGENTS.md", ".claude/skills/s/SKILL.md"])
+
+
+class Permission(Base):
+    """A refused command: the agent asks with `command`, `wb allow` answers and restarts it."""
+    def test_a_request_is_answered_by_wb_allow_outside_the_question_budget(self):
+        from workbench import ask_mcp
+        self.start("t-perm", "hang", "--ask-budget", "0")
+        deadline = time.time() + 20
+        while store.Task("t-perm").status.get("phase") != "running" and time.time() < deadline:
+            time.sleep(0.2)
+        task = store.Task("t-perm")
+        self.assertIn("budget for this task is used up", ask_mcp.ask(task, "which file?"))
+        got = {}
+        t = threading.Thread(target=lambda: got.update(a=ask_mcp.ask(
+            task, "to fetch the fixture the spec names", command="curl -sO https://x/f.json")))
+        t.start()
+        while not task.status.get("asking") and t.is_alive():
+            time.sleep(0.1)
+        self.assertIn("PERMISSION to run: `curl -sO https://x/f.json`",
+                      store.read_jsonl(store.home() / "notify.jsonl")[0][-1]["text"])
+        out = run_wb("allow", "t-perm", "curl *")
+        t.join(10)
+        self.assertIn("Claude allowed `curl *` for this task", got["a"])
+        self.assertIn("restarts on its session", out)
+        self.assertEqual(task.status["allow"], ["curl *"])
+        layer = json.loads(Path(runner.write_config_layer(task)).read_text())
+        allows = [r["resource"] for r in layer["permissions"]
+                  if r["action"] == "shell" and r["effect"] == "allow"]
+        self.assertEqual(allows[-1], "curl *")                 # after the defaults and ask-first
+        shell = [r for r in layer["permissions"] if r["action"] == "shell"]
+        self.assertEqual(shell[-1], {"action": "shell", "resource": "gh *", "effect": "deny"})
+        run_wb("stop", "t-perm")
+        run_wb("allow", "t-perm", "docker *", "--always")
+        self.assertEqual(json.loads(Path(os.environ["WB_COMMANDS"]).read_text())["allow"],
+                         ["docker *"])
 
 
 class Images(Base):

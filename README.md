@@ -346,7 +346,16 @@ before every round) gives it:
   would queue behind the GPU lock), web search and image generation.
 - **Hard limits**, checked in every part of a compound command: no `sudo`, `doas`, `pkexec` or
   `su`; no `gh`; and git is read-only (below). No edits to `CLAUDE.md`, `CLAUDE.local.md`,
-  `AGENTS.md` or anything under `.claude/`: those are Claude's. Everything else is the agent's.
+  `AGENTS.md` or anything under `.claude/`: those are Claude's.
+- **Commands.** The agent's shell runs the everyday tools of software work without asking: files
+  and text, builds and compilers, test runners, interpreters, and package managers installing what
+  the project already lists. Anything else (network tools, system services, a new package) is
+  refused, and the agent asks Claude through `ask_reviewer`; Claude grants it with `wb allow
+  <task> "<pattern>"`, for the task or `--always`, and the agent carries on within seconds. Your
+  standing allowances live in `~/.config/workbench/commands.json` (`{"allow": ["curl *"]}`;
+  `["*"]` turns the list off). It's a guardrail on the agent's own choices rather than a sandbox
+  (make and any interpreter can run anything); the hard limits stay hard: no sudo, git
+  read-only, no `gh`.
 - **Skills**: the repo's own `.claude/skills`, plus the library skills Claude handed this task.
   Your personal `~/.claude/skills` (including synced Claude app skills) and `/delegate` itself are
   denied: an agent once read a personal skill as a "newer task" and went off into your files.

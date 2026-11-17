@@ -22,7 +22,9 @@ TOOL = {
         "ambiguous or contradictory and a wrong guess would waste the whole round. Do not ask "
         "for permission, for reassurance, or about things you can find out by reading the code "
         "or running it. The question budget is small. Waits for the answer, which can take "
-        "minutes."
+        "minutes. Also how to run a shell command that was refused (\"Permission denied: "
+        "shell\"): put it in `command` and say why in `question`; Claude allows it or suggests "
+        "another way, and these don't use the question budget."
     ),
     "inputSchema": {
         "type": "object",
@@ -30,28 +32,40 @@ TOOL = {
             "question": {"type": "string", "description": "The question, self-contained."},
             "context": {"type": "string",
                         "description": "What you found and the options you are choosing between."},
+            "command": {"type": "string",
+                        "description": "Only for a refused shell command: the exact command."},
         },
         "required": ["question"],
     },
 }
 
 
-def ask(task: store.Task, question: str, context: str = "") -> str:
+PERMISSION_BUDGET = 8  # requests to run a refused command, per task: a cap on a stuck loop
+
+
+def ask(task: store.Task, question: str, context: str = "", command: str = "") -> str:
     spec = task.spec
-    budget = int(spec.get("ask_budget", 2))
-    asked = len(list((task.dir / "ask").glob("*.json"))) if (task.dir / "ask").exists() else 0
-    if asked >= budget:
+    asked = [store.read_json(p, {}) for p in (task.dir / "ask").glob("*.json")] \
+        if (task.dir / "ask").exists() else []
+    if command:
+        if sum(1 for q in asked if q.get("command")) >= PERMISSION_BUDGET:
+            return (f"You have asked to run {PERMISSION_BUDGET} refused commands already. Use the "
+                    "allowed tools, and list what you couldn't run in your final summary.")
+    elif sum(1 for q in asked if not q.get("command")) >= int(spec.get("ask_budget", 2)):
         return ("The question budget for this task is used up. Make the most reasonable "
                 "assumption, carry on, and state the assumption in your final summary.")
     qid = uuid.uuid4().hex[:8]
     qfile, afile = task.dir / "ask" / f"{qid}.json", task.dir / "ask" / f"{qid}.answer"
     store.write_json(qfile, {"id": qid, "ts": store.now(), "round": task.status.get("round"),
-                             "question": question, "context": context})
+                             "question": question, "context": context,
+                             **({"command": command} if command else {})})
     prev = task.status.get("phase")
     task.set_status(phase="asking", asking=qid)
     task.event({"ts": store.now(), "round": task.status.get("round"), "kind": "ask",
                 "id": qid, "text": question})
-    body = f"Q: {question}" + (f"\nContext: {context}" if context else "")
+    body = ((f"PERMISSION to run: `{command}`\nWhy: {question}\nAllow it with `wb allow "
+             f"{task.name} \"<pattern>\"` (--always to keep it), or answer with another way.")
+            if command else f"Q: {question}") + (f"\nContext: {context}" if context else "")
     task.notify("question", body, id=qid)
     deadline = time.time() + float(spec.get("ask_timeout", 1200))
     watcher = Watcher(afile.parent)  # wakes the moment `wb answer` writes the file
@@ -88,7 +102,8 @@ def handle(msg: dict, task: store.Task):
             return {"jsonrpc": "2.0", "id": mid,
                     "error": {"code": -32602, "message": f"unknown tool {params.get('name')}"}}
         args = params.get("arguments") or {}
-        text = ask(task, str(args.get("question", "")).strip(), str(args.get("context", "")))
+        text = ask(task, str(args.get("question", "")).strip(), str(args.get("context", "")),
+                   str(args.get("command", "")).strip())
         result = {"content": [{"type": "text", "text": text}], "isError": False}
     else:
         return {"jsonrpc": "2.0", "id": mid,

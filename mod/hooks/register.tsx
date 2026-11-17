@@ -203,6 +203,7 @@ const eventLine = (r: Row): string | null => {
     case 'autofix': return 'tests failed → sent back to the agent'
     case 'ask': return `asks: ${r.text}`
     case 'answer': return `answered: ${r.text}`
+    case 'allow': return `Claude ${r.text}`
     case 'stopped': return `stopped: ${r.text}`
     case 'error': return `error: ${r.text}`
     case 'text': {
@@ -223,7 +224,10 @@ const HEADLINE: Record<string, string> = {
 const NEXT: Record<string, (n: string) => string> = {
   review: n => `Review it as /delegate says: \`wb diff ${n}\`, then \`wb accept ${n} -m "…"\` ` +
     `or \`wb feedback ${n} --message <file>\`.`,
-  question: n => `Answer with \`wb answer ${n} --text "…"\`; it is blocked until then.`,
+  question: n => `Answer with \`wb answer ${n} --text "…"\`; it is blocked until then. A ` +
+    `PERMISSION request (a refused command): \`wb allow ${n} "<pattern>"\` (\`--always\` to keep ` +
+    `it) when it is reasonable, which answers it and restarts the agent with it; else answer ` +
+    `with another way.`,
   stuck: n => `Steer it with \`wb feedback ${n} --message <file>\`, or \`wb discard ${n}\`.`,
   failed: n => `Look at \`wb log ${n}\`; then \`wb feedback ${n} --message <file>\` or ` +
     `\`wb discard ${n}\`.`,

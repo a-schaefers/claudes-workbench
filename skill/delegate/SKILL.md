@@ -297,6 +297,15 @@ You are the driver, not a spectator. When something tells you the agent is headi
   step: split it, or name the first file to write.
 - `wb takeover <name>`: stops it and hands you the worktree. Finish by hand, then `wb accept`,
   or hand it back with `wb feedback`. For when explaining would cost more than doing.
+- **Commands it asks for.** The agent's shell runs the everyday tools of software work freely;
+  anything else, and adding a package, is refused, and the agent asks you (a `PERMISSION`
+  question). Lean to yes: their work is hard enough. `wb allow <name> "<pattern>"` (e.g.
+  `"curl *"`) grants it for the task, answers the request and restarts the agent on its session
+  with the rule; `--always` keeps it for every task (`~/.config/workbench/commands.json`). Say no
+  (`wb answer`, with another way) to what reaches outside the task: deploys, other machines,
+  system services, the user's data, a dependency the project shouldn't take on. Knowing a task
+  needs something up front, `wb start … --allow "<pattern>"`. sudo, git writes and `gh` stay
+  refused whatever you allow.
 - `wb stop <name>`: just stop it.
 Notes are instructions, like feedback: concrete and short.
 
