@@ -641,7 +641,10 @@ deliberately hostile process (the 2026-11-16 audit's list of what it can't stop 
   there (the 2026-11-16 audit). Then the temp directories (`gettempdir()`, `TEMP_ROOTS`: `/tmp`, `/var/tmp`), the device nodes builds
   use (`DEV_NODES`: `/dev/null`, `/dev/zero`, `/dev/full`, `/dev/random`, `/dev/urandom`,
   `/dev/tty`, `/dev/ptmx`, `/dev/shm`; not the rest of `/dev`, the user's terminals and input
-  devices, and not `/dev/pts`: a task that needs it or a GPU asks), `/proc`, the build caches and
+  devices, and not `/dev/pts`: a task that needs it or a GPU asks; `/dev/ptmx` alone opens no
+  pty, since Landlock checks the `/dev/pts/N` it hands out ("out of pty devices"), and is kept
+  so that a `/dev/pts` grant is all a pty-driven test needs, which the skill and the handbook
+  say), `/proc`, the build caches and
   toolchain homes under `$HOME` (`TOOL_HOMES`: `.cache`, `.cargo`, `.rustup`, `go/pkg`, `.npm`,
   `.bun/install/cache`, `.yarn`, `.pnpm-store`, `.local/share/pnpm/store`, `.local/share/uv`,
   `.gradle`, `.m2`, `.nuget`, `.dotnet`, `.gem`, `.julia`, `.cabal`, `.stack`, `.ghcup`,

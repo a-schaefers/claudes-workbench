@@ -218,7 +218,9 @@ OPENCODE_HOMES = (".local/share/opencode", ".local/state/opencode")
 # security keys were open to the agent (the 2026-11-16 audit). /dev/shm stays, a trade-off:
 # multiprocessing's semaphores, Chromium and many test runners need it, and Landlock can't tell
 # one program's segments from another's. /dev/pts stays out (every terminal of the user's); a
-# task that needs it, or a GPU, asks (`wb allow --path`).
+# task that needs it, or a GPU, asks (`wb allow --path`). /dev/ptmx alone opens no pty (Landlock
+# checks the /dev/pts/N it hands out: "out of pty devices"); it is here so that a /dev/pts grant
+# is all a pty-driven test needs (the 0.90 review).
 DEV_NODES = ("/dev/null", "/dev/zero", "/dev/full", "/dev/random", "/dev/urandom", "/dev/tty",
              "/dev/ptmx", "/dev/shm")
 # the system, for the file tools: headers, man pages, installed packages' sources

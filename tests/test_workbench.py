@@ -2455,6 +2455,23 @@ class Lane(Base):
         if lane.abi() and devices:  # one the user may open, but not from the lane
             self.assertEqual(self.reads_in_lane(task, devices[:1]) + [], ["refused"])
 
+    @unittest.skipUnless(lane.abi() and os.path.isdir("/dev/pts"), "needs Landlock")
+    def test_a_pty_needs_dev_pts_granted_and_then_needs_nothing_more(self):
+        # the 0.90 review: /dev/ptmx alone opens no pty ("out of pty devices"); the skill and
+        # the handbook say to grant /dev/pts, and that grant must be enough
+        task = self.bare_task("t-pty", self.repo)
+        task.worktree.mkdir()
+        script = ("import pty\ntry:\n    pty.openpty(); print('pty')\n"
+                  "except OSError:\n    print('refused')\n")
+        got = []
+        for paths in ([], ["/dev/pts"]):
+            Path(os.environ["WB_COMMANDS"]).write_text(json.dumps({"paths": paths}))
+            out = subprocess.run(lane.wrap(context.writable(task), [sys.executable, "-c", script],
+                                           context.readable(task), context.unix_paths(task)),
+                                 capture_output=True, text=True, timeout=20)
+            got.append(out.stdout.strip() or out.stderr)
+        self.assertEqual(got, ["refused", "pty"])
+
     @unittest.skipUnless(lane.abi() >= 6, "needs Landlock ABI 6")
     def test_the_lane_can_reach_neither_the_users_sockets_nor_their_processes(self):
         with tempfile.TemporaryDirectory(dir=Path.home(), prefix=".wb-sock-") as d:
