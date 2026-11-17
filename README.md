@@ -185,3 +185,10 @@ The full account of every piece, what it does and why, is in [ARCHITECTURE.md](A
 ## License
 
 MIT.
+
+<hr>
+
+<p align="center"><a href="https://github.com/a-schaefers/backseat-driver"><img src="docs/backseat-driver-ad.jpg" alt="A silver-bearded gentleman lounges in the back seat of a convertible with a beer and a laptop while a robot in a chauffeur cap drives. I don't always use AI when I code. But when I do, it stays in the back seat. Retain your skills, my friends. Backseat Driver" width="720"></a></p>
+
+<p align="center"><b>Don't forget how to code.</b> <a href="https://github.com/a-schaefers/backseat-driver">Backseat Driver</a>
+puts Claude in the back seat: you write every line, it watches, comments and answers.</p>
