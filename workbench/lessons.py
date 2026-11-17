@@ -11,8 +11,9 @@ The agent proposes; Claude decides. An agent's lesson from a task Claude discard
 itself: a task that never found a working method has dead ends, not a recipe.
 
 $WB_HOME/lessons.jsonl is append-only: a lesson row, later a row that closes it (written into a
-skill, or dropped with why). The ids are hashes of where a lesson came from, so gathering a task
-twice adds nothing.
+skill, or dropped with why). A lesson is known by where it came from (task, kind, round, text),
+so gathering a task twice adds nothing; its id is a short prefix of that's hash, made longer only
+when the prefix is taken.
 """
 from __future__ import annotations
 
@@ -32,8 +33,26 @@ def path() -> Path:
     return store.home() / "lessons.jsonl"
 
 
+ID_LEN = 6  # an id's shortest form: Claude types and reads them
+
+
 def _id(task: str, kind: str, rnd, text: str) -> str:
-    return hashlib.sha1(f"{task}\0{kind}\0{rnd}\0{text}".encode()).hexdigest()[:6]
+    """The full hash; harvest keeps the shortest free prefix of it (_free_id)."""
+    return hashlib.sha1(f"{task}\0{kind}\0{rnd}\0{text}".encode()).hexdigest()
+
+
+def _key(x: dict) -> tuple:
+    return x["task"], x["kind"], x.get("round"), x["text"]
+
+
+def _free_id(digest: str, taken) -> str:
+    """The shortest prefix of ``digest`` (ID_LEN, then 2 more at a time) no other lesson has.
+    Six characters alone collided past a few thousand lessons, and a new lesson with a taken id
+    was never written (the 2026-11-16 audit)."""
+    n = ID_LEN
+    while digest[:n] in taken and n < len(digest):
+        n += 2
+    return digest[:n]
 
 
 def items(feedback: str) -> list[str]:
@@ -118,8 +137,14 @@ def harvest(task: store.Task, outcome: str | None = None) -> list[dict]:
     if task.spec.get("trial"):
         return []
     lessons, closed = _all()
-    new = [x for x in gather(task, outcome) if x["id"] not in lessons]
-    for x in new:
+    known, taken, new = {_key(x) for x in lessons.values()}, set(lessons), []
+    for x in gather(task, outcome):
+        if _key(x) in known:
+            continue
+        known.add(_key(x))
+        x = {**x, "id": _free_id(x["id"], taken)}
+        taken.add(x["id"])
+        new.append(x)
         store.append_jsonl(path(), {"ts": store.now(), **x})
     if outcome == "discarded":
         for x in lessons.values():

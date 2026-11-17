@@ -1111,8 +1111,10 @@ Sources, by `kind`:
 - `skill`: at accept/discard only, when agent-caused review rounds > 0: one per loaded skill,
   "loaded X, yet needed N review round(s): does X say the right thing?".
 
-A row is `{ts, task, repo, skills, id, kind, round, text}`; `id` is sha1(task, kind, round,
-text)[:6], so re-gathering adds nothing. A close row is `{close: id, ts, how: "skill:<name>" |
+A row is `{ts, task, repo, skills, id, kind, round, text}`. A lesson is known by (task, kind,
+round, text), so re-gathering adds nothing; `id` is the shortest free prefix of sha1(task, kind,
+round, text), `lessons.ID_LEN` (6) characters, two more at a time while it is taken (six alone
+collided past a few thousand lessons, and the new lesson was never written: the 2026-11-16 audit). A close row is `{close: id, ts, how: "skill:<name>" |
 "dropped", why}`. `survey` finds recurrence: a lesson recurs when one in another task (open or
 closed, kind `skill` excepted) shares 3+ words with Jaccard ≥ 0.35; a closed match means it came
 back after it was handled. Each lesson is attributed to the first loaded skill still in the

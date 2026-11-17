@@ -2290,6 +2290,25 @@ class SkillLearning(Base):
         self.assertIn("closed:", run_wb("lessons", "close", ids[0], "-m", "a one-task detail"))
         self.assertNotIn(ids[0], [x["id"] for x in lessons.survey()])
 
+    def test_lessons_whose_short_ids_collide_are_both_kept_and_closed_apart(self):
+        # the 2026-11-16 audit: ids were 6 hex characters; a new lesson whose id was taken was
+        # never written, and closing the id closed whichever came first
+        import hashlib
+        from workbench import lessons
+        self.start("t-ids", "ok")
+        wait_phase("t-ids", {"review"})
+        same = lambda task, kind, rnd, text: "abcdef" + hashlib.sha1(text.encode()).hexdigest()  # noqa
+        with mock.patch.object(lessons, "_id", same):
+            out = run_wb("feedback", "t-ids", "--text", "1. Name the answer file answer.txt always.\n"
+                         "2. Keep the number on a single line of its own.")
+        self.assertIn("lessons: 2 from this task", out)
+        wait_phase("t-ids", {"review"})
+        ids = [x["id"] for x in lessons.survey() if x["task"] == "t-ids"]
+        self.assertEqual(sorted(len(i) for i in ids), [6, 8])
+        self.assertEqual(lessons.harvest(store.Task("t-ids")), [])   # known by content, not id
+        lessons.close([ids[0]], "dropped")
+        self.assertEqual([x["id"] for x in lessons.survey() if x["task"] == "t-ids"], ids[1:])
+
     def test_a_correction_is_one_lesson_with_its_evidence(self):
         from workbench import lessons
         prose = ("One bug in the parser remains: a blank line is skipped when rows are counted.\n\n"
