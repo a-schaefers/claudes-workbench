@@ -4,6 +4,7 @@ The agent never commits; everything it does stays in the worktree's working tree
 """
 import hashlib
 import os
+import stat
 import subprocess
 import tempfile
 from collections import Counter
@@ -14,12 +15,34 @@ class GitError(RuntimeError):
     pass
 
 
-def git(cwd, *args, check=True, env=None) -> str:
-    r = subprocess.run(["git", "-C", str(cwd), *args], capture_output=True, text=True,
+# The user's settings that would change what we read: found in the 2026-11-16 audit, a
+# `diff.external = difft` made the review diff difftastic's screen, color.ui=always put escape
+# codes in the changed-files list, and core.quotePath escaped every non-ASCII file name.
+# (color.diff/status/branch=always outrank color.ui, so each is named.)
+PLAIN = ("-c", "color.ui=never", "-c", "color.diff=never", "-c", "color.status=never",
+         "-c", "color.branch=never", "-c", "core.quotePath=false")
+
+
+def _run(cwd, args, env=None, check=True) -> subprocess.CompletedProcess:
+    r = subprocess.run(["git", "-C", str(cwd), *PLAIN, *args], capture_output=True,
                        env={**os.environ, **env} if env else None)
     if check and r.returncode:
-        raise GitError(f"git {' '.join(args)}: {r.stderr.strip() or r.stdout.strip()}")
-    return r.stdout
+        err = (r.stderr or r.stdout).decode("utf-8", "replace").strip()
+        raise GitError(f"git {' '.join(args)}: {err}")
+    return r
+
+
+def git(cwd, *args, check=True, env=None) -> str:
+    """git's output as text. Bytes that aren't UTF-8 (a Latin-1 source file in a diff) read as
+    U+FFFD: strict decoding crashed the runner on them (the 2026-11-16 audit), and the text goes
+    to people and prompts, where a surrogate escape would raise when printed."""
+    return _run(cwd, args, env, check).stdout.decode("utf-8", "replace")
+
+
+def git_bytes(cwd, *args) -> bytes:
+    """git's output exactly, for fingerprints: two different non-UTF-8 bytes must not both
+    read as U+FFFD."""
+    return _run(cwd, args).stdout
 
 
 def toplevel(path) -> Path:
@@ -42,20 +65,42 @@ def create_worktree(repo: Path, task: str, dest: Path, base: str = "HEAD") -> st
 def changed(worktree: Path) -> str:
     if not Path(worktree).is_dir():  # removed under us (an accept, a discard)
         return ""
-    return git(worktree, "status", "--short", "--untracked-files=all").rstrip()
+    # porcelain: the `XY path` lines whatever the user's status.branch or colours say (a
+    # status.branch=true put "## delegate/<task>" in every round's changed files: the audit)
+    return git(worktree, "status", "--porcelain", "--untracked-files=all").rstrip()
+
+
+MARK_READ_MAX = 1 << 20  # a new file past this counts by its size and time, not its bytes
+
+
+def _untracked(path: Path) -> bytes:
+    """A new file's part of the fingerprint. Never follows a link or opens anything but a
+    regular file: a symlink to /dev/zero took the runner's memory, one to a FIFO blocked its
+    loop (and with it every guard), and a core dump was re-read at every step (the audit)."""
+    try:
+        st = os.lstat(path)
+        if stat.S_ISLNK(st.st_mode):
+            return b"L" + os.fsencode(os.readlink(path))
+        if not stat.S_ISREG(st.st_mode):
+            return b"T%o" % st.st_mode
+        if st.st_size > MARK_READ_MAX:
+            return b"S%d:%d" % (st.st_size, st.st_mtime_ns)
+        fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+        with os.fdopen(fd, "rb") as f:
+            return b"F" + f.read(MARK_READ_MAX + 1)
+    except OSError:  # gone mid-scan
+        return b""
 
 
 def mark(worktree: Path) -> str:
     """A fingerprint of the working tree's uncommitted state, new files' contents included: it
-    changes when, and only when, the agent changes a file. The index is left alone."""
-    h = hashlib.sha1(git(worktree, "diff", "HEAD").encode())
-    for f in git(worktree, "ls-files", "--others", "--exclude-standard", "-z").split("\0"):
+    changes when, and only when, the agent changes a file (a new file past MARK_READ_MAX counts
+    by its size and time, a symlink by its target). The index is left alone. Raw bytes: a decoded
+    diff would hide an edit from one non-UTF-8 byte to another."""
+    h = hashlib.sha1(git_bytes(worktree, "diff", "--no-ext-diff", "--no-color", "HEAD"))
+    for f in git_bytes(worktree, "ls-files", "--others", "--exclude-standard", "-z").split(b"\0"):
         if f:
-            h.update(f.encode() + b"\0")
-            try:
-                h.update((Path(worktree) / f).read_bytes())
-            except OSError:
-                pass
+            h.update(f + b"\0" + _untracked(Path(worktree) / os.fsdecode(f)))
     return h.hexdigest()
 
 
@@ -79,7 +124,7 @@ def with_new_files(worktree: Path, *args) -> str:
 
 
 def diff(worktree: Path, base: str, stat=False, paths=(), numstat=False) -> str:
-    args = (["diff", base] + (["--stat"] if stat else []) + (["--numstat"] if numstat else [])
+    args = (["diff", "--no-ext-diff", "--no-color", base] + (["--stat"] if stat else []) + (["--numstat"] if numstat else [])
             + (["--", *paths] if paths else []))
     return with_new_files(worktree, *args).rstrip()
 
@@ -107,7 +152,7 @@ def stack(repo) -> list[str]:
     """The repo's main languages, most files first (at most two), from its tracked files; empty
     when it has no source or isn't a repository."""
     try:
-        names = git(repo, "ls-files").splitlines()
+        names = git(repo, "ls-files", "-z").split("\0")
     except (GitError, OSError):
         return []
     langs = Counter(LANGUAGES[x] for n in names if (x := Path(n).suffix[1:].lower()) in LANGUAGES)

@@ -366,7 +366,7 @@ environment (`agent_env`: the git shim, credentials dropped), its own process gr
 4. `tests: PASS|FAIL (`cmd`, exit N)`, the last 25 lines on a failure, `auto-fix rounds used: a/b`.
 5. `tools: name×n …`, then up to four `tool error:` lines.
 6. `agent's summary:` and the agent's last text (2500 characters).
-7. `files changed:` (`git status --short`), a NOTE for files outside the spec, a NOTE when the
+7. `files changed:` (`git status --porcelain`), a NOTE for files outside the spec, a NOTE when the
    agent changed Claude's files (`claude_files_changed`: CLAUDE.md, CLAUDE.local.md, AGENTS.md,
    `.claude/`), and the diffstat's last line against the task's base.
 
@@ -1199,6 +1199,17 @@ custom-node packs do run their own Python).
 
 ## Git, commits and projects
 
+- **How workbench reads git** (`gitops.git`). Every call runs with `-c color.ui=never` (and
+  `color.diff`, `color.status`, `color.branch`, which outrank it) and `-c core.quotePath=false`,
+  diffs with `--no-ext-diff --no-color`, and the changed files come from `status --porcelain`: the
+  user's `diff.external`, colours, `status.branch` or quoted non-ASCII names once turned the review
+  diff and the changed-files list into something else (the 2026-11-16 audit). Output is decoded as
+  UTF-8 with bytes that aren't UTF-8 shown as U+FFFD (a Latin-1 source file crashed the runner);
+  `gitops.mark`, the runner's edit fingerprint, hashes git's raw bytes instead (`git_bytes`), so an
+  edit from one such byte to another still counts. Its untracked files are taken with `lstat`: a
+  symlink counts by its target, anything not a regular file by its type, a file past
+  `MARK_READ_MAX` (1 MiB) by its size and time, so a link to `/dev/zero` or a FIFO, or a core dump,
+  can't hang or swamp the runner.
 - **The split of roles.** The agent writes code and reads git freely (`status`, `diff`, `log`,
   `show`, `blame`). Everything that leaves its working tree is Claude's: commits, branches,
   merges, pushes, pull requests, CI/CD, deploys and infrastructure (`gh`, `wrangler` and the like),
@@ -1254,7 +1265,7 @@ custom-node packs do run their own Python).
 - **The worktree** (`gitops.create_worktree`): `worktree add -b delegate/<task> <task
   dir>/worktree <base sha>`, refused when the branch exists. `remove_worktree` (`--force` on
   discard) and `prune`; `delete_branch` (`branch -D`) unless `--keep-branch`.
-- **The repo's stack** (`gitops.stack`): from `git ls-files`, the top two languages by file
+- **The repo's stack** (`gitops.stack`): from `git ls-files -z`, the top two languages by file
   extension that each hold at least 20% of the source files. The router and the skill records use
   it.
 - **`wb init <dir>`** sets a project up the way Claude keeps every project: a git repo on git's

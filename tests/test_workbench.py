@@ -245,6 +245,58 @@ class Lifecycle(Base):
         self.assertNotIn("delegate/t-stop", branches)
         self.assertFalse(store.Task("t-stop").worktree.exists())
 
+    def test_a_latin1_file_in_the_worktree_does_not_crash_the_runner(self):
+        # the 2026-11-16 audit: git's output was decoded strictly, so an edited Latin-1 source
+        # file crashed the runner at its next mark() and `wb diff` with it
+        (self.repo / "l.c").write_bytes(b"caf\xe9\n")
+        subprocess.run(["git", "-C", str(self.repo), "add", "l.c"], check=True)
+        subprocess.run(["git", "-C", str(self.repo), "commit", "-qm", "latin1"], check=True)
+        self.start("t-l1", "ok", "--test", TEST_CMD)
+        wait_phase("t-l1", {"review"})
+        wt = store.Task("t-l1").worktree
+        (wt / "l.c").write_bytes(b"caf\xe8\n")
+        before = gitops.mark(wt)
+        (wt / "l.c").write_bytes(b"caf\xe7\n")   # one non-UTF-8 byte for another is still an edit
+        self.assertNotEqual(gitops.mark(wt), before)
+        (wt / os.fsdecode(b"f\xe9.c")).write_bytes(b"x")       # and a new file with such a name
+        self.assertIn("�", run_wb("diff", "t-l1"))
+        run_wb("feedback", "t-l1", "--text", "1. Keep it.")
+        self.assertEqual(wait_phase("t-l1", {"review", "failed"})["phase"], "review")
+
+    def test_the_users_git_settings_do_not_change_what_workbench_reads(self):
+        # the audit: diff.external replaced the review diff, color.ui=always put escape codes in
+        # the changed files, status.branch a "## branch" line, quotePath escaped café.md
+        self.start("t-cfg", "ok", "--test", TEST_CMD)
+        wait_phase("t-cfg", {"review"})
+        wt = store.Task("t-cfg").worktree
+        cfg = Path(self.tmp.name) / "gitconfig"
+        cfg.write_text("[diff]\n\texternal = echo EXTERNAL\n[color]\n\tui = always\n\tdiff = always\n"
+                       "\tstatus = always\n[status]\n\tbranch = true\n")
+        os.environ["GIT_CONFIG_GLOBAL"] = str(cfg)
+        (wt / "café.md").write_text("x\n")
+        self.assertTrue(gitops.diff(wt, "HEAD").startswith("diff --git"))
+        self.assertEqual(gitops.mark(wt), gitops.mark(wt))
+        self.assertEqual(sorted(gitops.changed(wt).splitlines()), ["?? answer.txt", "?? café.md"])
+        self.assertEqual(gitops.changed(self.repo), "")
+
+    def test_a_new_file_is_fingerprinted_without_following_or_reading_it_whole(self):
+        # the audit: mark() read every new file whole through its links, so a symlink to
+        # /dev/zero took the runner's memory and one to a FIFO blocked it for good
+        wt = Path(self.tmp.name) / "wt"
+        subprocess.run(["git", "clone", "-q", str(self.repo), str(wt)], check=True)
+        os.mkfifo(wt / "fifo")
+        (wt / "zero").symlink_to("/dev/zero")
+        (wt / "pipe").symlink_to(wt / "fifo")
+        (wt / "big.bin").write_bytes(b"\0" * (5 << 20))
+        out = []
+        t = threading.Thread(target=lambda: out.append(gitops.mark(wt)), daemon=True)
+        t.start()
+        t.join(10)
+        self.assertTrue(out, "mark() blocked")
+        with open(wt / "big.bin", "ab") as f:
+            f.write(b"more")
+        self.assertNotEqual(gitops.mark(wt), out[0])
+
 
 class Context(Base):
     """The agent's context: continued round to round, handed to a fresh session when full."""
