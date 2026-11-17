@@ -31,7 +31,7 @@ PLAIN = ("-c", "color.ui=never", "-c", "color.diff=never", "-c", "color.status=n
 # No git hook runs from workbench in a task's worktree: with a relative core.hooksPath (husky's
 # `.husky/_`, gitignored, so in no diff) the hooks live in the worktree, written by the agent, and
 # wb accept ran them as the user outside the lane (the 2026-11-16 audit). The checks belong in
-# --test, which runs in the lane.
+# --test, which runs in the lane. Signing is kept: only the hooks go.
 NO_HOOKS = ("-c", "core.hooksPath=/dev/null")
 
 
@@ -261,7 +261,7 @@ def stack(repo) -> list[str]:
 
 def commit_all(worktree: Path, message: str) -> str:
     """Commit everything in the worktree, without git hooks (NO_HOOKS; also for a task started
-    before its git dir was recorded). Refuses a nested repository: committed, it was a gitlink to
+    before its git dir was recorded) but signed if the user signs. Refuses a nested repository: committed, it was a gitlink to
     a commit that exists nowhere else."""
     if nested := nested_repos(worktree):
         raise GitError(f"{', '.join(nested)}: a git repository of its own, so not committed: "

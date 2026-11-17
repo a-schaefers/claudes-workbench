@@ -1421,7 +1421,8 @@ description}; `resolve()` raises KeyError on an unknown name). Commits go under 
 identity, or `workbench <workbench@localhost>` when none is set (`_commit`), unsigned and without
 hooks (`commit.gpgsign=false`, `core.hooksPath` = the null device, `--no-verify`): the library is
 workbench's own record, and the user's signing prompt or a global hook failed `wb skill add` from
-Claude's Bash (the 2026-11-16 audit); commits in the user's projects keep both. Messages:
+Claude's Bash (the 2026-11-16 audit); commits in the user's projects (`gitops.commit_all`) stay signed but
+run no hooks either (`gitops.NO_HOOKS`, *No git hooks from the worktree*). Messages:
 `<name>: <message>` (plus `\n\nSource: <source>` from `--source`), `<name>: retired: <message>`,
 `<name>: restored`. `rev(name)` is the last commit touching the skill (`%h`), `revs()` maps
 names to revs, `history()` the last five `%ad %s` lines over `<name>` and `retired/<name>`
@@ -1714,7 +1715,7 @@ custom-node packs do run their own Python).
   ran them as the user (the audit). The commits `wb accept` and `wb next` make
   (`gitops.commit_all`), `worktree add` and `worktree remove` (which runs `git status` in the
   worktree), run with `core.hooksPath=/dev/null` (`gitops.NO_HOOKS`): no checkout, pre-commit,
-  commit-msg or post-commit hook runs, the user's own included (git-lfs's post-checkout hook fails
+  commit-msg or post-commit hook runs, the user's own included; signing is kept (git-lfs's post-checkout hook fails
   without git-lfs on PATH, and wb start died on it). Checks belong in `--test`, which runs in the
   lane.
 - **The split of roles.** The agent writes code and reads git freely (`status`, `diff`, `log`,
