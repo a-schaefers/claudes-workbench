@@ -126,7 +126,8 @@ dependencies. No packaging: it runs from the clone.
 - `systemd/wb-chat.service`: keeps the web chat up. `docs/`: the README's images (a replaced image
   gets a new file name, for GitHub's cache).
 
-Runs on Linux, WSL2 and macOS. Native Windows doesn't (fcntl, `os.killpg`, POSIX signals). Off
+Runs on Linux, WSL2 and macOS. Native Windows doesn't (fcntl, `os.killpg`, POSIX signals): the
+launchers refuse it, and Python before 3.11, before importing the package. Off
 Linux there is no Landlock and watch.py falls back to timed waits.
 
 ## How a task runs

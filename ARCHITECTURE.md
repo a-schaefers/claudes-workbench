@@ -66,7 +66,11 @@ calls are `wb` subcommands (`wb events`, `wb watch --json`, `wb status`, `wb cha
 `cat`.
 
 workbench is Python's standard library only (3.11+), plus the TypeScript mod. There is no
-packaging: it runs from its clone. No model is named anywhere in the code: models come from
+packaging: it runs from its clone. `bin/wb` and `bin/wb-ask-mcp` check the interpreter before they
+import the package and exit 1 with one line on Python older than 3.11 (`wb: needs Python 3.11 or
+newer; <python> is <version>. Put a newer python3 first on PATH.`) or on native Windows (`wb:
+native Windows is not supported …; run Claude Code and wb inside WSL2`), not with a traceback from
+deep inside it (the 2026-11-16 audit). Everything else starts from their `sys.executable`. No model is named anywhere in the code: models come from
 OpenCode's config and the router decides, so a new model is one config entry away.
 
 **Where Python processes start.** Five places, and each finds the package by path, not by an
@@ -1269,7 +1273,8 @@ custom-node packs do run their own Python).
 ## The web chat
 
 `wb chat serve` (`workbench/chat.py`; kept up by `systemd/wb-chat.service`, a user unit running
-`%h/.local/bin/wb chat serve` with `Restart=always`) serves a small page on port 1337 for reaching
+`%h/.local/bin/wb chat serve` with `Restart=always`, giving up after five starts in five minutes:
+`StartLimitBurst`) serves a small page on port 1337 for reaching
 the Claude session in delegate mode while the user is away.
 
 - **The path of a message.** The page posts it; the server appends it to `chat/messages.jsonl`.
@@ -1829,8 +1834,8 @@ main (*Shipping to main*).
   holder) and `can_share`.
 - `tests/test_portable.py`: discovery against real HTTP servers on port 0 (the Ollama probe, the
   port guess, multi-model servers, loopback and host names, `local: true`, `opencode.jsonc` under
-  `XDG_CONFIG_HOME`, `CLAUDE_CONFIG_DIR`), the polling watcher (`watch._libc = False`), fit,
-  budgets.
+  `XDG_CONFIG_HOME`, `CLAUDE_CONFIG_DIR`), the polling watcher (`watch._libc = False`), the
+  launchers on an old Python or native Windows, fit, budgets.
 - `tests/test_sizing.py`: the slice guess and its correction from real steps.
 - `tests/test_workflows.py`: the merge gate, in plain text (no YAML library): every action pinned
   to a commit with its version, every workflow with its own permissions, `check` never

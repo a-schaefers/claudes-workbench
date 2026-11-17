@@ -164,6 +164,35 @@ class Fallback(unittest.TestCase):
             self.assertLess(time.time() - t0, 1.5)  # callers re-check what no file says
 
 
+class Launchers(unittest.TestCase):
+    """bin/wb and bin/wb-ask-mcp on an interpreter the package can't run on: macOS's stock 3.9,
+    Ubuntu 22.04's 3.10, native Windows (the 2026-11-16 audit)."""
+    ROOT = Path(__file__).resolve().parent.parent
+
+    def launch(self, name, setup):
+        import subprocess
+        code = f"import runpy, sys; {setup}; sys.argv = [{name!r}, '--version']; runpy.run_path({str(self.ROOT / 'bin' / name)!r})"
+        return subprocess.run([sys.executable, "-c", code], capture_output=True, text=True, timeout=30)
+
+    def test_an_old_python_is_told_the_version_it_needs_before_any_import(self):
+        for name in ("wb", "wb-ask-mcp"):
+            r = self.launch(name, "sys.version_info = (3, 10, 12)")
+            self.assertEqual(r.returncode, 1, r.stderr)
+            self.assertIn(f"{name}: needs Python 3.11 or newer", r.stderr)
+            self.assertNotIn("Traceback", r.stderr)
+
+    def test_native_windows_is_told_to_use_wsl2(self):
+        r = self.launch("wb", "sys.platform = 'win32'")
+        self.assertEqual(r.returncode, 1, r.stderr)
+        self.assertIn("native Windows is not supported", r.stderr)
+        self.assertIn("WSL2", r.stderr)
+
+    def test_a_supported_python_runs_the_package(self):
+        r = self.launch("wb", "pass")
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertTrue(r.stdout.startswith("wb "))
+
+
 class Fit(Base):
     """The router on a known GPU: a model that spills into RAM loses the size guess."""
     def setUp(self):

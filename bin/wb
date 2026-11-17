@@ -3,6 +3,16 @@
 import os
 import sys
 
+# Before the package is imported, so an unsupported interpreter gets a sentence, not a traceback
+# from deep inside it (the 2026-11-16 audit: 3.10's re rejects scan.py, 3.9 cli.py's annotations;
+# native Windows has no fcntl). Keep these lines parseable by old Pythons.
+if sys.platform == "win32":
+    sys.exit("wb: native Windows is not supported (no POSIX file locks or signals); "
+             "run Claude Code and wb inside WSL2")
+if sys.version_info < (3, 11):
+    sys.exit("wb: needs Python 3.11 or newer; %s is %s. Put a newer python3 first on PATH."
+             % (sys.executable, sys.version.split()[0]))
+
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.realpath(__file__))))
 
 from workbench.cli import main  # noqa: E402
