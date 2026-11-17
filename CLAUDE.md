@@ -91,8 +91,10 @@ dependencies. No packaging: it runs from the clone.
 - `lane.py`: Landlock: the runner starts OpenCode through it (`wrap`); restricts writes, reads,
   connecting to outside UNIX sockets (ABI 9) and signals (ABI 6), sets no-new-privileges (on any
   Linux), execs. Fails closed: Landlock present but refusing the lane exits 126
-  (`workbench lane: the kernel refused the lane`); a command it can't exec, 127; without Landlock (or off `lane.UNIFIED`'s
-  architectures) it runs unrestricted and `wb doctor` says so. Standard library only.
+  (`workbench lane: the kernel refused the lane`); a command it can't exec, `workbench lane: can't
+  run <cmd> (<reason>)`, 127 when not found, else 126 (outside the read lane: Permission denied);
+  without Landlock (or off `lane.UNIFIED`'s architectures) it runs unrestricted and `wb doctor`
+  says so. Standard library only.
 - `gitguard.py`: the read-only `git` shim first on the agent's PATH. Standard library only: it's
   imported on every git call.
 - `gitops.py`: worktrees and branches, the review diff (intent-to-add, so new files show),
@@ -185,7 +187,7 @@ notify.jsonl results.jsonl lessons.jsonl notes.md tuning.json speed.json gpu.{lo
 scout.json update.json watch.json imports/ images/ chat/{messages,receipts}.jsonl chat/listener.json
 rules/<task>/  opencode.json HANDBOOK.md CLAUDE.md bin/git grants.json gitdir.json cmd.lock (no lane)
 tasks/<task>/  task.json status.json events.jsonl steer.jsonl acked context.md base-tests.txt runner.log
-               {runner,act}.lock (the lane: worktree/, ask/)
+               runner.lock (the lane: worktree/, ask/)
                rounds/<n>/{prompt,instructions,summary}.md rounds/<n>/tests.txt ask/<id>.{json,answer} worktree/
 ```
 The skill library is `~/.local/share/workbench/skills` (`$WB_SKILLS`). `~/.config/workbench/`
@@ -232,7 +234,7 @@ unset: unknown, so no sharing).
   Test names read as sentences.
 - The mod keeps no state of its own that matters: it reads the task files. `$` may only be passed
   to functions declared at the top level of `register.tsx`, so `claude plugin validate` can follow
-  it. `$.state` atoms are tagged (`tasks-1`, `live-1`, `chat-2`): change the tag when the type
+  it. `$.state` atoms are tagged (`tasks-2`, `live-1`, `chat-2`): change the tag when the type
   changes. A slash command may not start a turn itself: it pushes onto `mem.queued`.
 - Skills for the agents: Claude's library (`wb skill`), handed per task, or a project's own
   `.claude/skills`, committed with it. The user's personal `~/.claude/skills` are denied to agents.

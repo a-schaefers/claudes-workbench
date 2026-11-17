@@ -71,7 +71,8 @@ def _commit(message: str) -> None:
     """Commit as the user; a machine without a git identity still gets its history. Unsigned and
     without hooks: the library is workbench's own record, not one of the user's projects, and a
     signing prompt or a global hook made `wb skill add` fail from Claude's Bash (the 2026-11-16
-    audit). gitops' commits land in the user's projects and keep both."""
+    audit). gitops' commits land in the user's projects: they stay signed but run no hooks
+    either (gitops.NO_HOOKS)."""
     who = [] if subprocess.run(["git", "-C", str(library()), "config", "user.email"],
                                capture_output=True).stdout.strip() else \
         ["-c", "user.name=workbench", "-c", "user.email=workbench@localhost"]

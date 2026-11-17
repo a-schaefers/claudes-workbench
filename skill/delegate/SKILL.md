@@ -337,8 +337,9 @@ asset at review), and make it once the GPU is free.
    and no alpha channel is needed.
 Mind the engine's `notes` in `wb image --list`: an image model's licence can restrict where and
 how its output may be used. A generation needs the GPU to itself: while a task holds it,
-`wb image` refuses and names it; `--wait` (Bash `run_in_background: true`) queues behind it,
-and tasks started meanwhile wait for the image. A url engine is a server that keeps its GPU
+`wb image` refuses and names it; `--wait` (Bash `run_in_background: true`) queues behind it.
+While it runs (or waits), `wb start` refuses a new task (exit 4) unless `--queue`, which waits
+behind it; feedback, next and resume queue behind it. A url engine is a server that keeps its GPU
 memory while it runs: ask the user to stop it before big coding tasks.
 
 **No ready engine? Offer to set one up; never set it up unasked.** This is an optional step, as
@@ -366,9 +367,9 @@ start a task from the session that will review it. Failing tests go back to the 
 own for `--auto-fix` rounds before you are woken; `wb log <name>` shows what it is doing.
 A model that reads prompts slowly, or one the runner must load first, can spend minutes before
 its first reply. That is normal, not stuck.
-**Exit 4: the GPU is taken** by another task (often another session's project) that the model
-can't run beside. Don't wait silently: tell the user who holds it, then either do the step
-yourself or `--queue` it to start when the GPU is free (it may be hours).
+**Exit 4: the GPU is taken** by another task (often another session's project) or `wb image`,
+which the model can't run beside. Don't wait silently: tell the user who holds it, then either
+do the step yourself or `--queue` it to start when the GPU is free (it may be hours).
 
 ## Driving a running task
 You are the driver, not a spectator. When something tells you the agent is heading the wrong way

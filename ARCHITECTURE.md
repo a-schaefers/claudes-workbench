@@ -68,10 +68,11 @@ crashed piece loses nothing, and every piece can be inspected with `cat`.
 
 workbench is Python's standard library only (3.11+), plus the TypeScript mod. There is no
 packaging: it runs from its clone. `bin/wb` and `bin/wb-ask-mcp` check the interpreter before they
-import the package and exit 1 with one line on Python older than 3.11 (`wb: needs Python 3.11 or
-newer; <python> is <version>. Put a newer python3 first on PATH.`) or on native Windows (`wb:
-native Windows is not supported …; run Claude Code and wb inside WSL2`), not with a traceback from
-deep inside it (the 2026-11-16 audit). Everything else starts from their `sys.executable`. No model is named anywhere in the code: models come from
+import the package and exit 78 (EX_CONFIG) with one line on Python older than 3.11 (`wb: needs
+Python 3.11 or newer; <python> is <version>. Put a newer python3 first on PATH.`) or on native
+Windows (`wb: native Windows is not supported …; run Claude Code and wb inside WSL2`), not with a
+traceback from deep inside it (the 2026-11-16 audit). The chat's unit stops on 78 instead of
+retrying a broken install (*The web chat*). Everything else starts from their `sys.executable`. No model is named anywhere in the code: models come from
 OpenCode's config and the router decides, so a new model is one config entry away.
 
 **Where Python processes start.** Five places, and each finds the package by path, not by an
@@ -147,7 +148,7 @@ stuck, failed, asking (`asking` is in both); `CLOSED` = accepted, discarded. Who
 | `testing` | the runner while the acceptance command runs |
 | `asking` | the runner while a question of the round is open (`ask_mcp.relay`) |
 | `review` | the runner (tests pass; tests fail with auto-fix spent; no `--test`); `wb takeover` |
-| `stuck` | the runner (a guard stop; a SIGTERM that wasn't wb's: `runner.SIGNAL_STOP`); `wb stop` |
+| `stuck` | the runner (a guard stop; a SIGTERM that wasn't wb's: `runner.SIGNAL_STOP`); `wb stop`; `wb accept` when a live task's commit fails ("accept failed: …", the work kept in the worktree) |
 | `failed` | the runner (opencode exited non-zero with no text; the model couldn't load; a crash); `cli.reap` (the runner died without a report) |
 | `accepted` / `discarded` | `wb accept` / `wb discard` |
 
@@ -715,8 +716,9 @@ deliberately hostile process (the 2026-11-16 audit's list of what it can't stop 
   `/media/<user>/<drive>`, which give the PATH directory alone: the 0.90 review found Linuxbrew's
   `../Cellar` hidden), the install a link in those PATH directories points into, and the Python
   running workbench; never `/`, the home directory or a parent of a secret), not the user's documents or
-  other projects. Running a program reads it, so a program the walk leaves out can't start
-  (`workbench lane: can't run <cmd> (Permission denied)`, exit 126; not found, 127): add its
+  other projects. Running a program reads it, so a program the walk leaves out can't start (in
+  the agent's shell a plain `Permission denied`; OpenCode itself gets `workbench lane: can't run
+  <cmd> (Permission denied)`, exit 126; not found, 127): add its
   directory to `commands.json` `paths`. Landlock only allows, so `readable()` walks down from `/`
   listing the entries beside each excluded one. Found by trying: `python3` running gh inside the
   lane was logged in, and the SSH keys that push were readable.
@@ -1000,7 +1002,8 @@ goes in its CLAUDE.md instead.
 The runner appends notices to `$WB_HOME/notify.jsonl` (`Task.notify`: `{ts,
 task, kind, text, round?, id?}`). Kinds: `review`, `stuck`, `failed` (the round report as text;
 a load failure or crash without a round), `question` (with the question's `id`), `checkin`
-(periodic, a nudge, a reading-full session, a base check that warns). `wb` itself writes only
+(periodic, a nudge, a reading-full session, a mid-round handover from the second in a round on, a
+base check that warns). `wb` itself writes only
 one: `reap`'s `failed` for a runner that died without a report. The agent never writes one: the
 file is out of its lane (the 2026-11-16 audit: it could forge any task's wake, or wipe them
 all). Readers take its rows through `store.notices()`, which keeps only whole ones (a dict with a
@@ -1323,10 +1326,11 @@ unloads its own model (unless a holder runs the same model: it is theirs too), m
 waiting and takes `LOCK_EX` (flock converts: the shared lock goes first), then loads alone.
 `gpu.json` is `{"<pid>": {model, task, start, waiting?}}`. `wb image` takes `gpu.lock` through
 `GpuLease(None, "wb image", wait=…)`: with `--wait` it queues in `gpu.json` like a task with no
-model, waits for the running tasks to finish, then has the GPU to itself, and tasks started
-meanwhile wait for it; without, any live holder makes it refuse at once (`models.busy` names them).
-A remote model (`local: true`) takes no lease at all, and `free_gpu` never unloads or stops a
-remote provider's models.
+model, waits for the running tasks to finish, then has the GPU to itself; while it holds or waits
+for the GPU, `wb start` refuses a new task (exit 4, see *Two projects, one GPU*) unless `--queue`,
+and `wb feedback`/`next`/`resume` queue behind it; without `--wait`, any live holder makes it
+refuse at once (`models.busy` names them). A remote model (`local: true`) takes no lease at all,
+and `free_gpu` never unloads or stops a remote provider's models.
 
 **Routing** (`router.rank`, `choose`). Rows: `store.results()` (no trials) that `tuning.judged`
 keeps, for this model and size. Quality is the acceptance rate with a uniform prior, overall =
@@ -1453,7 +1457,8 @@ description}; `resolve()` raises KeyError on an unknown name). Commits go under 
 identity, or `workbench <workbench@localhost>` when none is set (`_commit`), unsigned and without
 hooks (`commit.gpgsign=false`, `core.hooksPath` = the null device, `--no-verify`): the library is
 workbench's own record, and the user's signing prompt or a global hook failed `wb skill add` from
-Claude's Bash (the 2026-11-16 audit); commits in the user's projects keep both. Messages:
+Claude's Bash (the 2026-11-16 audit); commits in the user's projects (`gitops.commit_all`) stay signed but
+run no hooks either (`gitops.NO_HOOKS`, *No git hooks from the worktree*). Messages:
 `<name>: <message>` (plus `\n\nSource: <source>` from `--source`), `<name>: retired: <message>`,
 `<name>: restored`. `rev(name)` is the last commit touching the skill (`%h`), `revs()` maps
 names to revs, `history()` the last five `%ad %s` lines over `<name>` and `retired/<name>`
@@ -1705,7 +1710,8 @@ custom-node packs do run their own Python).
   PATH or a file; a url whose server answers a GET (any status) within 2 s.
 - `generate`: holds the GPU for the whole batch through `models.GpuLease(None, "wb image",
   wait=…)` (any live holder in gpu.json: a RuntimeError naming them, unless `--wait`; then it
-  queues in gpu.json behind the running tasks, and tasks started meanwhile wait for it), calls
+  queues in gpu.json behind the running tasks; while it holds or waits, `wb start` refuses a new
+  task (exit 4) unless `--queue`, and `wb feedback`/`next`/`resume` queue behind it), calls
   `models.free_gpu()` with nothing kept, then `_settle` (up to 90 s for what free_gpu can release,
   `models.releasable`: local Ollama models and servers with a stop command, to go, and used VRAM
   to stop falling, after an engine started a second after the unload found 1.1 GB of 16 free; a
@@ -1746,7 +1752,7 @@ custom-node packs do run their own Python).
   ran them as the user (the audit). The commits `wb accept` and `wb next` make
   (`gitops.commit_all`), `worktree add` and `worktree remove` (which runs `git status` in the
   worktree), run with `core.hooksPath=/dev/null` (`gitops.NO_HOOKS`): no checkout, pre-commit,
-  commit-msg or post-commit hook runs, the user's own included (git-lfs's post-checkout hook fails
+  commit-msg or post-commit hook runs, the user's own included; signing is kept (git-lfs's post-checkout hook fails
   without git-lfs on PATH, and wb start died on it). Checks belong in `--test`, which runs in the
   lane.
 - **The split of roles.** The agent writes code and reads git freely (`status`, `diff`, `log`,
@@ -1855,9 +1861,13 @@ custom-node packs do run their own Python).
 ## The web chat
 
 `wb chat serve` (`workbench/chat.py`; kept up by `systemd/wb-chat.service`, a user unit running
-`%h/.local/bin/wb chat serve` with `Restart=always`, giving up after five starts in five minutes:
-`StartLimitBurst`) serves a small page on port 1337 for reaching
-the Claude session in delegate mode while the user is away.
+`%h/.local/bin/wb chat serve` with `Restart=always` and no start limit) serves a small page on
+port 1337 for reaching the Claude session in delegate mode while the user is away. The unit
+retries with a delay growing from 10 s to 5 min (`RestartSteps`, systemd 254+; every 10 s on
+older ones), since retrying is what brings the chat up when a bound address arrives late (a user
+manager has no network-online.target) or the port is briefly held: a start limit gave up for good
+there (the 0.90 review). It stops only on exit 78 (`RestartPreventExitStatus`), which bin/wb's
+Python-version and Windows guards use; never 75, the replan exit below.
 
 - **The path of a message.** The page posts it; the server appends it to `chat/messages.jsonl`.
   The listening session's mod submits it to Claude as `[web chat] <the user's words>`, nothing
@@ -2266,7 +2276,7 @@ delivered as taken (`_stale_notes`, *Notes*).
 | `wb feedback <task> --text "…" \| --message <file\|->` | `--fresh` \| `--keep-context`, `--spec-gap "…"…` | Reaps a dead runner first (`reap`). Phase review/stuck/failed and no live runner; empty text is refused before anything is written. Writes the next round's prompt (FEEDBACK_HEAD + "Make exactly these changes, then re-run the acceptance command and finish with a short summary:" (the re-run only when there is one) + the text), reviews+1, spawns the runner. Warns past three review rounds; prints each undelivered note it dropped ("not delivered, dropped …"). A note names the GPU's holders when it will wait for them. Gathers lessons. |
 | `wb next <task> --spec <file> -m "…"` | `--test` (replaces the acceptance command), `--skill` (replaces the set), `--fresh`, `--allow PATTERN…` (adds to the task's grants), `--spec-gap` | Phase review. Reads the spec (a file or `-`; empty or unreadable: nothing changes), records the step's size and fit, commits the work (`<m>` + `Workbench-Task: <task> (step N)` + `OpenCode-Session:`), writes the next step's prompt ("Step N of this task is done and committed (<sha>). The next step:" + spec + PROTOCOL), records the spec gaps, resets reviews, spawns. Says whether the next step gets a fresh session and why (`runner.fresh_reason`), each undelivered note it dropped, and names the GPU's holders when it will wait for them. Gathers lessons. |
 | `wb answer <task> --text "…" \| --file <f>` | `--id` (the pending question) | Writes `ask/<id>.answer` (atomically, never through a link: `ask_mcp.write_answer`); the blocked `ask_reviewer` returns it. An empty answer is refused: the question stays open. |
-| `wb allow <task> ["<pattern>"…]` | `--path DIR…`, `--always`, `--text "…"` | Adds to the task's grants (`rules/<task>/grants.json`; and commands.json with `--always`, refused when it doesn't parse); answers any pending question with "Claude allowed … Run it again now and carry on."; if the agent is live, sends that as a `--now` steer so it restarts on its session with the rule (while the tests run or the task waits for the GPU it says the agent gets it when they end, or when its round starts). `--path` goes through `_lane_dir` (refuses `/` and home, creates the directory; `*` turns the lane off for the task). |
+| `wb allow <task> ["<pattern>"…]` | `--path DIR…`, `--always`, `--text "…"` | Adds to the task's grants (`rules/<task>/grants.json`; and commands.json with `--always`, refused when it doesn't parse or has the wrong shape: `context.commands_conf`); answers any pending question with "Claude allowed … Run it again now and carry on."; if the agent is live, sends that as a `--now` steer so it restarts on its session with the rule (while the tests run or the task waits for the GPU it says the agent gets it when they end, or when its round starts). `--path` goes through `_lane_dir` (refuses a path through a link, naming its target, and what `context.lane_refusal` refuses: `/`, home, a place inside credentials, workbench's state or config, or the skill library; creates the directory; `*` turns the lane off for the task). |
 | `wb steer <task> --text "…" \| --message <file>` | `--now` | Only while queued/running/testing/asking with a live runner. Appends to steer.jsonl: delivered when the current run ends (before the tests), or at once with `--now`. While testing: "its tests are running (up to Ns); the agent gets it when they end"; while queued: when its round starts. |
 | `wb note <task> --text "…"` | | A `captain` event: Claude's log line in the transcript. |
 | `wb takeover [<task> \| --all]` | `--repo DIR` | Stops the runner, phase `review`, "Claude took over"; Claude edits in the worktree and accepts, or hands back with feedback. `--all`: every task that isn't closed. `--repo DIR` (with `--all`; the mod passes its session's directory): only the tasks whose task.json `cwd` or `repo` is DIR, inside it or holds it (`_scope`; neither key: every session's), the rest listed as `left alone (other projects' sessions): …`. |

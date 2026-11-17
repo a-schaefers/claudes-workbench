@@ -592,15 +592,25 @@ class Launchers(unittest.TestCase):
     def test_an_old_python_is_told_the_version_it_needs_before_any_import(self):
         for name in ("wb", "wb-ask-mcp"):
             r = self.launch(name, "sys.version_info = (3, 10, 12)")
-            self.assertEqual(r.returncode, 1, r.stderr)
+            self.assertEqual(r.returncode, 78, r.stderr)  # EX_CONFIG: the chat unit stops on it
             self.assertIn(f"{name}: needs Python 3.11 or newer", r.stderr)
             self.assertNotIn("Traceback", r.stderr)
 
     def test_native_windows_is_told_to_use_wsl2(self):
         r = self.launch("wb", "sys.platform = 'win32'")
-        self.assertEqual(r.returncode, 1, r.stderr)
+        self.assertEqual(r.returncode, 78, r.stderr)
         self.assertIn("native Windows is not supported", r.stderr)
         self.assertIn("WSL2", r.stderr)
+
+    def test_the_chat_unit_stops_on_a_broken_install_and_keeps_retrying_anything_else(self):
+        # the 0.90 review: a start limit gave up for good on an address that came up late
+        unit = (self.ROOT / "systemd" / "wb-chat.service").read_text()
+        self.assertIn("StartLimitIntervalSec=0", unit)
+        self.assertNotIn("StartLimitBurst", unit)
+        self.assertIn("Restart=always", unit)
+        prevent = [l.split("=", 1)[1].split() for l in unit.splitlines()
+                   if l.startswith("RestartPreventExitStatus=")]
+        self.assertEqual(prevent, [["78"]])  # never 75: chat.py exits 75 to be restarted
 
     def test_a_supported_python_runs_the_package(self):
         r = self.launch("wb", "pass")
