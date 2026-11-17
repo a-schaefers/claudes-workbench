@@ -2469,7 +2469,15 @@ class Lane(Base):
             with redirect_stderr(err), self.assertRaises(SystemExit):
                 self.start("t-snap", "ok", "--test", "go test ./...")
         self.assertIn("go is a snap", err.getvalue())
+        self.assertIn("--allow-path '*'", err.getvalue())
         self.assertFalse(store.Task("t-snap").exists)
+
+    def test_a_task_started_with_its_lane_off_is_not_refused_for_the_lane(self):
+        # the 0.90 review: `wb start --allow-path '*'` (the lane off for this task) was refused
+        # a snap --test or a home-directory repo all the same, pointing only at commands.json
+        with mock.patch.object(context, "snaps", return_value=["go"]):
+            self.start("t-snap-off", "ok", "--test", "go test ./...", "--allow-path", "*")
+        self.assertEqual(context.grants(store.Task("t-snap-off"))["paths"], ["*"])
 
     def test_the_users_devices_mounts_and_runtime_directory_stay_out_of_the_lane(self):
         self.start("t-dev", "ok")

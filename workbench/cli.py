@@ -267,12 +267,13 @@ def _identity(repo: Path) -> bool:
                for v in ("GIT_AUTHOR_IDENT", "GIT_COMMITTER_IDENT"))
 
 
-def _lane_fits(repo: Path, test: str | None) -> None:
+def _lane_fits(repo: Path, test: str | None, *, off: bool = False) -> None:
     """Refuse a task the agent's lane can't hold (the 2026-11-16 audit): a repo that is the home
     directory (the lane would read all of it) or lies where credentials live (it couldn't read
     the repo at all), and an acceptance command that is a snap (no-new-privileges, which the
-    lane sets, stops snap-confine, so every test round would fail)."""
-    if not context.lane_on():
+    lane sets, stops snap-confine, so every test round would fail). `off`: `--allow-path '*'`
+    turned the lane off for this task (the 0.90 review: it was refused all the same)."""
+    if off or not context.lane_on():
         return
     real = os.path.realpath(repo)
     if real in ("/", os.path.realpath(Path.home())):
@@ -287,8 +288,8 @@ def _lane_fits(repo: Path, test: str | None) -> None:
         first = []
     if first and sys.platform.startswith("linux") and context.snaps(first):
         die(f"{first[0]} is a snap, which can't run in the agent's lane (no-new-privileges stops "
-            "snap-confine): install it another way, or turn the lane off with commands.json "
-            '"paths": ["*"]')
+            "snap-confine): install it another way, or start with --allow-path '*' (the lane "
+            'off for this task), or commands.json "paths": ["*"] for every task')
 
 
 def cmd_start(a):
@@ -313,7 +314,7 @@ def cmd_start(a):
         owner = store.Task(repo.resolve().relative_to(tasks).parts[0])
         die(f"{repo} is task {owner.name}'s worktree, not a project: start from its repo "
             f"(--repo {owner.spec.get('repo', '<the project>')})")
-    _lane_fits(repo, a.test)
+    _lane_fits(repo, a.test, off="*" in (a.allow_path or []))
     spec_text = Path(a.spec).read_text(encoding="utf-8") if a.spec != "-" else sys.stdin.read()
     if not spec_text.strip():
         die("the spec is empty")
