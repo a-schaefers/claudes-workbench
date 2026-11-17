@@ -224,7 +224,7 @@ class Sharing(Base):
         calls, said = [], []
         loads = lambda m, say=print, keep=(), warn=None: calls.append(set(keep)) or 1.0  # noqa: E731
         with mock.patch.object(models, "make_resident", loads), \
-                mock.patch.object(models, "_fits_beside", lambda m, keep: False), \
+                mock.patch.object(models, "_fits_beside", lambda m, keep, before=None: False), \
                 mock.patch.object(models, "_unload", lambda m: said.append(f"unload {m.id}")):
             with models.GpuLease(models.resolve(SMALL), "t-small", said.append) as lease:
                 self.assertEqual(lease.load(), 2.0)
@@ -234,6 +234,33 @@ class Sharing(Base):
         self.assertIn(f"sharing the GPU with {BIG}", said[0])
         self.assertIn(f"ollama could not fit {SMALL} beside {BIG}", said[1])
         self.assertEqual(said[2], f"unload {SMALL}")
+
+    def test_a_load_that_loaded_nothing_or_a_model_a_holder_shares_is_never_unloaded(self):
+        # another holder's model unloaded idle (its task in a test run past Ollama's keep-alive)
+        # read as an eviction: the task unloaded itself, and a shared model too (the 0.90 review)
+        os.environ["WB_FAKE_GPU_GB"] = "48"
+        sleeper = subprocess.Popen(["sleep", "60"])
+        self.addCleanup(sleeper.kill)
+        store.home().mkdir(parents=True, exist_ok=True)
+        store.write_json(store.home() / "gpu.json", {str(sleeper.pid): {"model": SMALL, "task": "t-a"}})
+        parallel = mock.patch.object(models.hardware, "ollama_env", lambda: {"OLLAMA_NUM_PARALLEL": "2"})
+        parallel.start()
+        self.addCleanup(parallel.stop)
+        fits, said = [], []
+        with mock.patch.object(models, "make_resident", lambda m, say=print, keep=(), warn=None: 0.0), \
+                mock.patch.object(models, "_fits_beside", lambda *a: fits.append(a) or False), \
+                mock.patch.object(models, "_unload", lambda m: said.append(f"unload {m.id}")):
+            with models.GpuLease(models.resolve(SMALL), "t-b", said.append) as lease:
+                self.assertEqual(lease.load(), 0.0)    # already resident: nothing checked
+        self.assertEqual((fits, said), ([], [f"sharing the GPU with {SMALL}"]))
+        with mock.patch.object(models, "make_resident", lambda m, say=print, keep=(), warn=None: 1.0), \
+                mock.patch.object(models, "_fits_beside", lambda *a: False), \
+                mock.patch.object(models, "_unload", lambda m: said.append(f"unload {m.id}")), \
+                mock.patch.object(models.GpuLease, "_take_alone", lambda self, held: None):
+            with models.GpuLease(models.resolve(SMALL), "t-b", said.append) as lease:
+                lease.load()
+        self.assertIn(f"ollama could not fit {SMALL} beside {SMALL}", said[-1])
+        self.assertNotIn(f"unload {SMALL}", said)      # t-a is using it
 
 
 class Budget(unittest.TestCase):

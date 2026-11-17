@@ -35,6 +35,7 @@ import ipaddress
 import json
 import os
 import re
+import shlex
 import socket
 import stat
 import subprocess
@@ -376,7 +377,16 @@ def discover() -> dict[str, Model]:
     for pid, prov, url, engine, remote in _local_providers(read_config(), extra):
         opts = prov.get("options") or prov.get("settings") or {}
         problem = url_problem(url, engine, prov.get("npm"))
-        key = _expand(str(opts.get("apiKey") or ""), agent=False)
+        # the key the agent's OpenCode will send: probed with wb's own, a key the agent never got
+        # read as running and every request of the task was refused (the 0.90 review)
+        raw_key = str(opts.get("apiKey") or "")
+        key = _expand(raw_key)
+        hidden = [n.strip() for k, n in _TEMPLATE.findall(raw_key)
+                  if k == "env" and n.strip() in os.environ and not _agent_sees(n.strip())]
+        if hidden and not problem:
+            from . import context
+            problem = (f"its apiKey reads {{env:{hidden[0]}}}, which agents don't get: add "
+                       f"{hidden[0]} to commands.json env ({context.commands_path()})")
         for name, spec in (prov.get("models") or {}).items():
             mid = f"{pid}/{name}"
             over = {**extra.get(pid, {}), **extra.get(mid, {})}
@@ -466,10 +476,28 @@ def _contended(m: Model) -> bool:
     return len(starts) > 1
 
 
+def _base(s: str) -> str:
+    return re.sub(r"\.gguf$", "", s.rsplit("/", 1)[-1], flags=re.I).lower()
+
+
 def _serves(served: str, name: str) -> bool:
     """Whether a one-model server's id is this model: llama-server lists the file's path."""
-    base = lambda s: re.sub(r"\.gguf$", "", s.rsplit("/", 1)[-1], flags=re.I).lower()  # noqa: E731
-    return served == name or base(served) == base(name)
+    return served == name or _base(served) == _base(name)
+
+
+def _owners(m: Model, served: str) -> list[Model]:
+    """The models on m's contended port that a one-model server's id may be: by name, or by the
+    served file in its start command (`-m <path>`). Names that differ from the file left every
+    model on the port unavailable, the one being served too (the 0.90 review)."""
+    def started(o: Model) -> bool:
+        try:
+            words = shlex.split(o.start or "")
+        except ValueError:
+            words = (o.start or "").split()
+        return any(w.rsplit("=", 1)[-1] == served or _base(w.rsplit("=", 1)[-1]) == _base(served)
+                   for w in words)
+    return [o for o in discover().values() if o.engine == "server" and o.server == m.server
+            and (_serves(served, o.name) or started(o))]
 
 
 def _no(why: str) -> dict:
@@ -546,11 +574,20 @@ def status(m: Model, down=frozenset()) -> dict:
         served = {x.get("id") for x in (body.get("data") or []) if isinstance(x, dict)}
         if len(served) > 1 and m.name not in served:
             return _no(f"the server lists {len(served)} models, not {m.name}")
-        if len(served) == 1 and m.start and _contended(m) and not _serves(str(next(iter(served))), m.name):
+        sid = str(next(iter(served))) if len(served) == 1 else ""
+        if sid and m.start and _contended(m) and not _serves(sid, m.name):
             # the task would run on the other model, recorded under this one (the 2026-11-16 audit)
-            return _no(f"{m.root} is serving {next(iter(served))}, not {m.name}, and other models "
-                       "with their own start commands share that port, so wb can't tell or switch "
-                       "them: give each its own port (or --alias it as its name), or use one "
+            owners = _owners(m, sid)
+            if [o.id for o in owners] == [m.id]:
+                return {"available": True, "resident": True, "why": "running"}
+            if len(owners) == 1 and owners[0].stop:  # free_gpu stops it (the 0.90 review)
+                return {"available": True, "resident": False,
+                        "why": f"the port serves {owners[0].id}; wb stops it and starts {m.id}"}
+            why = (f"it is {owners[0].id}, which has no stop command, so wb can't switch them"
+                   if len(owners) == 1 else "so wb can't tell which model it is")
+            return _no(f"{m.root} is serving {sid}, not {m.name}, and other models with their own "
+                       f"start commands share that port; {why}: give each model a stop command and "
+                       "its file's name (or --alias it as its name), or its own port, or use one "
                        "server that swaps models (llama-swap)")
         return {"available": True, "resident": True, "why": "running"}
     if m.start:
@@ -850,11 +887,14 @@ def holders(home: Path | None = None) -> dict:
     return {p: h for p, h in held.items() if p.isdigit() and _alive(int(p), h.get("start"))}
 
 
-def _fits_beside(m: Model, keep: set) -> bool:
+def _fits_beside(m: Model, keep: set, before=None) -> bool:
     """After a shared load: Ollama kept every other holder's model and has all of ``m`` in VRAM.
     need() guesses a model's context before it loads; when the guess is short, Ollama evicts a
     model or splits one onto the CPU, and two tasks then reload their models on every request
-    (the 2026-11-16 audit). Unknown (Ollama didn't answer) counts as fitting."""
+    (the 2026-11-16 audit). Unknown (Ollama didn't answer) counts as fitting. ``before``: the
+    names /api/ps listed before the load. A kept model missing from it was unloaded idle (its task
+    in a long test run or waiting on a question past the keep-alive), not evicted: counted as one,
+    the other task unloaded itself and waited for that task to finish (the 0.90 review)."""
     if _fake() or m.engine != "ollama":
         return True
     body = _get(f"{m.root}/api/ps")
@@ -863,7 +903,8 @@ def _fits_beside(m: Model, keep: set) -> bool:
     ps = body.get("models") or []
     names = {x.get("name") for x in ps}
     found = discover()
-    others = [o for o in (found.get(k) for k in keep) if o and o.server == m.server]
+    others = [o for o in (found.get(k) for k in keep) if o and o.server == m.server
+              and (before is None or _matches(o.name, before))]
     whole = any(_matches(m.name, {x.get("name")}) and x.get("size") and x.get("size_vram") == x["size"]
                 for x in ps)
     return whole and all(_matches(o.name, names) for o in others)
@@ -956,12 +997,18 @@ class GpuLease:
                 held = self._holders()
                 keep = {h["model"] for p, h in held.items()
                         if p != self.me and not h.get("waiting") and h.get("model")}
+            before = set(_ollama_loaded(self.m.root)) if keep and self.m.engine == "ollama" \
+                and not _fake() else None
             secs = make_resident(self.m, say=self.say, keep=keep, warn=self.warn)
-            if not keep or _fits_beside(self.m, keep):
+            # a load that loaded nothing evicted nothing (the 0.90 review)
+            if not keep or not secs or _fits_beside(self.m, keep, before):
                 return secs
             self.warn(f"ollama could not fit {self.m.id} beside {', '.join(sorted(keep))}; "
                       "waiting for the GPU to itself")
-            _unload(self.m)  # or the holders' next requests swap it in and out
+            found = discover()
+            if _key(self.m) not in {_key(o) for o in (found.get(k) for k in keep) if o}:
+                _unload(self.m)  # or the holders' next requests swap it in and out; a model a
+                # holder runs too is theirs as well, and stops being asked for once we wait
             with store.locked(self.home / "gpu.admit"):
                 held = self._holders()
                 self._set({**held, self.me: self._entry(waiting=True)})

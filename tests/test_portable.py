@@ -85,7 +85,7 @@ class Real(unittest.TestCase):
         tmp = Path(self.tmp.name)
         os.environ.pop("WB_FAKE_MODELS", None)
         os.environ.update(WB_HOME=str(tmp / "state"), WB_OPENCODE_CONFIG=str(tmp / "opencode.json"),
-                          WB_MODELS=str(tmp / "models.json"))
+                          WB_MODELS=str(tmp / "models.json"), WB_COMMANDS=str(tmp / "commands.json"))
         models._ENGINES.clear()
         self.servers = []
 
@@ -152,6 +152,35 @@ class Real(unittest.TestCase):
         self.assertFalse(st["available"] or st["resident"])
         self.assertIn("is serving /models/coder.gguf, not general", st["why"])
 
+    def test_a_shared_port_is_known_by_the_file_in_each_start_command_and_switched(self):
+        # names that differ from the file left both models unavailable, the served one too, and a
+        # task failed right after wb started the right server (the 0.90 review)
+        served = Path(self.tmp.name) / "served"
+        llama = self.server({"/v1/models": lambda h: {"data": [{"id": served.read_text().strip()}]}
+                             if served.exists() else None})
+        start = lambda f: f"echo /models/{f} > {served}"  # noqa: E731
+        self.config({"l": {"options": {"baseURL": llama + "/v1"},
+                           "models": {"qwen3-coder-30b": {}, "devstral-24b": {}}}},
+                    {"l": {"engine": "server", "stop": f"rm -f {served}"},
+                     "l/qwen3-coder-30b": {"start": start("Qwen3-Coder-30B-A3B-Instruct-Q4_K_M.gguf")},
+                     "l/devstral-24b": {"start": start("Devstral-Small-24B-Q4_K_M.gguf")}})
+        qwen, dev = models.resolve("l/qwen3-coder-30b"), models.resolve("l/devstral-24b")
+        said = []
+        self.assertEqual(models.status(dev)["why"], "stopped (wb starts it)")
+        self.assertGreater(models.make_resident(dev, say=said.append), 0)     # a cold start
+        self.assertEqual(models.status(dev)["why"], "running")
+        self.assertEqual(models.status(qwen), {"available": True, "resident": False, "why":
+                         "the port serves l/devstral-24b; wb stops it and starts l/qwen3-coder-30b"})
+        models.make_resident(qwen, say=said.append)                            # the switch
+        self.assertEqual(said, ["starting l/devstral-24b", "stopping l/devstral-24b",
+                                "starting l/qwen3-coder-30b"])
+        self.assertTrue(models.status(qwen)["resident"])
+        self.assertFalse(models.status(dev)["resident"])
+        served.write_text("/models/something-else.gguf")                      # nobody's file
+        st = models.status(qwen)
+        self.assertFalse(st["available"])
+        self.assertIn("can't tell which model it is", st["why"])
+
     def own(self, loaded, tags, fail=None):
         """Two providers reaching one fake Ollama, as localhost and as 127.0.0.1."""
         posts = []
@@ -194,7 +223,9 @@ class Real(unittest.TestCase):
         self.assertIn("x is 40% on the CPU", warned[0])
         self.assertFalse(models._fits_beside(found["a/x"], {"b/y"}))   # partly on the CPU
         found, posts = self.own([{"name": "x", "size": 10, "size_vram": 10}], ["x", "y"])
-        self.assertFalse(models._fits_beside(found["a/x"], {"b/y"}))   # y was evicted
+        self.assertFalse(models._fits_beside(found["a/x"], {"b/y"}, {"y"}))   # y was evicted
+        # y was already unloaded idle before the load: not an eviction (the 0.90 review)
+        self.assertTrue(models._fits_beside(found["a/x"], {"b/y"}, set()))
         found, posts = self.own([{"name": "x", "size": 10, "size_vram": 10},
                                  {"name": "y", "size": 10, "size_vram": 10}], ["x", "y"])
         self.assertTrue(models._fits_beside(found["a/x"], {"b/y"}))
@@ -366,6 +397,7 @@ class Real(unittest.TestCase):
         # the 2026-11-16 audit: a 401 read as "not running", and with a start command wb started a
         # second copy and waited 20 minutes for it
         os.environ["WB_TEST_KEY"] = "sekret"
+        Path(os.environ["WB_COMMANDS"]).write_text(json.dumps({"env": ["WB_TEST_KEY"]}))
         keyed = self.server({"/v1/models": lambda h: {"data": [{"id": "a"}, {"id": "b"}]}
                              if h.get("Authorization") == "Bearer sekret" else 401})
         self.config({"k": {"options": {"baseURL": keyed + "/v1", "apiKey": "{env:WB_TEST_KEY}"},
@@ -378,6 +410,21 @@ class Real(unittest.TestCase):
         self.assertTrue(st["available"] and st["resident"])
         self.assertIn("API key", st["why"])
         self.assertNotIn("sekret", repr(found["k/a"]))
+
+    def test_an_api_key_the_agent_wont_get_makes_the_model_unavailable_with_the_fix(self):
+        # probed with wb's own key it read running, and the agent, its key dropped, had every
+        # request refused (the 0.90 review)
+        os.environ["LLAMA_API_KEY"] = "sekret"
+        keyed = self.server({"/v1/models": lambda h: {"data": [{"id": "a"}]}
+                             if h.get("Authorization") == "Bearer sekret" else 401})
+        self.config({"k": {"options": {"baseURL": keyed + "/v1", "apiKey": "{env:LLAMA_API_KEY}"},
+                           "models": {"a": {}}}})
+        st = models.status(models.resolve("k/a"))
+        self.assertFalse(st["available"])
+        self.assertIn("its apiKey reads {env:LLAMA_API_KEY}, which agents don't get: add "
+                      "LLAMA_API_KEY to commands.json env", st["why"])
+        Path(os.environ["WB_COMMANDS"]).write_text(json.dumps({"env": ["LLAMA_API_KEY"]}))
+        self.assertEqual(models.status(models.resolve("k/a"))["why"], "running")
 
     def test_a_proxy_in_the_environment_never_carries_probes_to_this_machine(self):
         # the 2026-11-16 audit: behind a proxy without no_proxy, every local model was "not answering"
