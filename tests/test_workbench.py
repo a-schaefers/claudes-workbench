@@ -273,6 +273,20 @@ class Context(Base):
         self.assertIn("42", store.Task("t-c4").worktree.joinpath("answer.txt").read_text())
         self.assertIn("reached 76% of its window", run_wb("watch", "t-c4", "--once", "--no-color"))
 
+    def test_a_feedback_round_handed_over_mid_round_keeps_the_feedback(self):
+        self.start("t-c6", "fill", "--test", TEST_CMD)
+        wait_phase("t-c6", {"review"}, timeout=60)
+        run_wb("feedback", "t-c6", "--text", "1. Size the heap for every push, not every tile.")
+        st = wait_phase("t-c6", {"review", "stuck", "failed"}, timeout=60)
+        self.assertEqual((st["phase"], st["handovers"]), ("review", 2))
+        p = self.runs()[-1]["prompt"]                 # the fresh session after the feedback round
+        now = p.split("## Now")[1]
+        self.assertIn("Your last session filled up", now)
+        self.assertIn("What you were asked to do, and it isn't done until it is:", now)
+        self.assertIn("1. Size the heap for every push, not every tile.", now)
+        from workbench import runner
+        self.assertEqual(len(runner.round_asks(store.Task("t-c6"), 4)), 1)  # a carry-on adds nothing
+
     def test_the_handover_point_is_the_tasks_tuned_one(self):
         os.environ["FAKE_FILL"] = "25000"          # 76%: past the default 0.6, short of 0.8
         store.home().mkdir(parents=True, exist_ok=True)

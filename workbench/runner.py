@@ -19,7 +19,7 @@ import time
 import traceback
 from pathlib import Path
 
-from . import context, gitguard, gitops, models, skills, store, tuning
+from . import context, gitguard, gitops, lessons, models, skills, store, tuning
 from .events import StuckDetector, normalize
 from .watch import Watcher
 
@@ -506,8 +506,9 @@ def current_task_prompt(task: store.Task) -> str:
 
 def _start_fresh(task: store.Task, n: int, why: str) -> None:
     path = task.round_dir(n).joinpath("prompt.md")
-    now = ("Start on the task above." if n == (task.status.get("step_round") or 1)
-           else path.read_text().strip())
+    raw = path.read_text().strip()
+    path.with_name("instructions.md").write_text(raw)  # round_asks reads it back
+    now = "Start on the task above." if n == (task.status.get("step_round") or 1) else raw
     path.write_text(handoff_prompt(task, why, now))
     st = task.status
     task.set_status(session=None, sessions=(st.get("sessions") or []) + [st["session"]],
@@ -610,7 +611,28 @@ def drive(task: store.Task) -> None:
 # What the fresh session is told after the runner took over from a full one.
 CARRY_ON = ("Your last session filled up, so you are continuing in a fresh one. Carry on with "
             "the task above from where the work stands: re-read the files you are changing, then "
-            "finish them and run the tests. Your last words before the switch:\n\n{last}")
+            "finish them and run the tests.{asked} Your last words before the switch:\n\n{last}")
+ASKED = "\n\nWhat you were asked to do, and it isn't done until it is:\n\n{}\n\n"
+
+
+def round_asks(task: store.Task, n: int) -> list[str]:
+    """The instructions rounds n, n-1, ... gave since the step's task, back to the last review
+    feedback: what a fresh session taking over mid-round must still carry out. A handover's own
+    carry-on adds nothing (it is skipped). Seen 2026-11-16: two handovers in a feedback round
+    each said only "carry on with the task", and the fresh sessions, finding the tests green,
+    reported done with the feedback never made."""
+    first = task.status.get("step_round") or 1
+    out: list[str] = []
+    for r in range(n, first, -1):
+        d = task.round_dir(r)
+        f = d / "instructions.md" if (d / "instructions.md").is_file() else d / "prompt.md"
+        raw = f.read_text().strip() if f.is_file() else ""
+        if not raw or raw.startswith(CARRY_ON[:60]):
+            continue
+        out.insert(0, raw)
+        if raw.startswith(lessons.FEEDBACK_HEAD):
+            break
+    return out
 
 
 def _full_round(task: store.Task, n: int, rnd: dict) -> None:
@@ -621,8 +643,10 @@ def _full_round(task: store.Task, n: int, rnd: dict) -> None:
                         f"({rnd['full'] / 1000:.1f}K of {window // 1024}K): a fresh one takes over"})
     last = "\n\n".join(t.strip() for t in rnd["texts"][-2:] if t.strip())[-1200:]
     task.round_dir(n + 1).mkdir(parents=True, exist_ok=True)
-    task.round_dir(n + 1).joinpath("prompt.md").write_text(
-        CARRY_ON.format(last="> " + last.replace("\n", "\n> ") if last else "(none)"))
+    asks = round_asks(task, n)
+    task.round_dir(n + 1).joinpath("prompt.md").write_text(CARRY_ON.format(
+        asked=ASKED.format("\n\n".join(asks)) if asks else "",
+        last="> " + last.replace("\n", "\n> ") if last else "(none)"))
     task.set_status(round=n + 1, context="full", full_pct=pct,
                     handovers=task.status.get("handovers", 0) + 1)
 
