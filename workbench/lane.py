@@ -113,7 +113,11 @@ def main(argv: list[str]) -> None:
         print(f"workbench lane: the kernel refused the lane ({e}); not running "
               f"{argv[sep + 1]}", file=sys.stderr)
         sys.exit(126)
-    os.execvp(argv[sep + 1], argv[sep + 1:])
+    try:
+        os.execvp(argv[sep + 1], argv[sep + 1:])
+    except OSError as e:  # a traceback in runner.log, and the round only "exited 1" (the 2026-11-16 audit)
+        print(f"workbench lane: can't run {argv[sep + 1]} ({e.strerror})", file=sys.stderr)
+        sys.exit(127 if isinstance(e, FileNotFoundError) else 126)
 
 
 if __name__ == "__main__":

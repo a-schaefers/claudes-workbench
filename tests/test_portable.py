@@ -1,4 +1,5 @@
 """Machines other than the one workbench grew up on: other servers, ports, configs, platforms, speeds."""
+import io
 import json
 import os
 import socket
@@ -7,8 +8,10 @@ import tempfile
 import threading
 import time
 import unittest
+from contextlib import redirect_stderr, redirect_stdout
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
+from unittest import mock
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))  # run as a script too
 
@@ -19,10 +22,16 @@ from tests.test_workbench import Base, wait_phase
 
 
 def serve(routes: dict) -> tuple[ThreadingHTTPServer, str]:
-    """A model server on a free port answering GET path -> JSON body (404 for anything else)."""
+    """A model server on a free port answering GET path -> JSON body (404 for anything else). A
+    route may be a function of the request's headers, and an int body is that status code."""
     class H(BaseHTTPRequestHandler):
         def do_GET(self):
             body = routes.get(self.path)
+            body = body(self.headers) if callable(body) else body
+            if isinstance(body, int):
+                self.send_response(body)
+                self.end_headers()
+                return
             self.send_response(200 if body is not None else 404)
             self.end_headers()
             self.wfile.write(json.dumps(body if body is not None else {"error": "no"}).encode())
@@ -237,6 +246,224 @@ class Real(unittest.TestCase):
         with self.assertRaisesRegex(RuntimeError, "has comments"):
             models.write_entry("o", "n", {})
         self.assertIn("// my models", (d / "opencode.jsonc").read_text())  # untouched
+
+    def test_a_refused_rewrite_says_the_change_and_never_the_providers_keys(self):
+        # the 2026-11-16 audit: the refusal printed the whole config, an apiKey included, into
+        # Claude's context, cut at 2000 characters before the new entry
+        Path(os.environ["WB_OPENCODE_CONFIG"]).write_text(
+            '{// mine\n"provider": {"o": {"options": {"baseURL": "http://127.0.0.1:11434/v1"}, "models": {}},'
+            ' "or": {"options": {"apiKey": "sk-or-SECRET-123"}}}}')
+        with self.assertRaises(RuntimeError) as e:
+            models.write_entry("o", "coder", {"limit": {"context": 32768}})
+        self.assertIn("has comments", str(e.exception))
+        self.assertIn('"coder"', str(e.exception))
+        self.assertIn("32768", str(e.exception))
+        self.assertNotIn("SECRET", str(e.exception))
+
+    def test_a_symlinked_config_is_written_through_and_keeps_its_mode(self):
+        # the 2026-11-16 audit: a dotfiles link became a plain file, and 0600 came back 0644
+        real = Path(self.tmp.name) / "dotfiles" / "opencode.json"
+        real.parent.mkdir()
+        real.write_text(json.dumps({"provider": {"o": {"options": {"baseURL": "http://127.0.0.1:11434/v1"},
+                                                       "models": {}}}}))
+        real.chmod(0o600)
+        link = Path(os.environ["WB_OPENCODE_CONFIG"])
+        link.symlink_to(real)
+        models.write_entry("o", "coder", {"limit": {"context": 32768}})
+        self.assertTrue(link.is_symlink())
+        self.assertIn("coder", json.loads(real.read_text())["provider"]["o"]["models"])
+        self.assertEqual(real.stat().st_mode & 0o777, 0o600)
+        if os.geteuid() != 0:  # a link into a read-only store (Nix) is refused, never replaced
+            real.parent.chmod(0o500)
+            try:
+                with self.assertRaisesRegex(RuntimeError, "isn't writable"):
+                    models.write_entry("o", "other", {})
+            finally:
+                real.parent.chmod(0o700)
+            self.assertTrue(link.is_symlink())
+
+    def test_opencode_json_and_jsonc_are_layered_as_opencode_does(self):
+        # the 2026-11-16 audit: a provider in opencode.jsonc beside an opencode.json holding only a
+        # theme was invisible, since only the .json was read
+        del os.environ["WB_OPENCODE_CONFIG"]
+        os.environ["XDG_CONFIG_HOME"] = str(Path(self.tmp.name) / "xdg")
+        d = Path(self.tmp.name) / "xdg" / "opencode"
+        d.mkdir(parents=True)
+        (d / "opencode.json").write_text(json.dumps({"theme": "dark", "provider": {
+            "o": {"options": {"baseURL": "http://127.0.0.1:11434/v1"}, "models": {"a": {}}}}}))
+        (d / "opencode.jsonc").write_text('{"provider": {"o": {"models": {"b": {}}}}}')
+        self.assertEqual(sorted(models.discover()), ["o/a", "o/b"])
+        self.assertEqual(models.opencode_config_files(), [d / "opencode.json", d / "opencode.jsonc"])
+        with self.assertRaisesRegex(RuntimeError, "layers"):   # one merged file would lose the layering
+            models.write_entry("o", "c", {})
+
+    def test_discovery_follows_opencodes_provider_filters_and_env_urls(self):
+        # the 2026-11-16 audit: wb routed to providers OpenCode wouldn't load, and dropped a
+        # provider whose baseURL came from {env:NAME}
+        os.environ["WB_TEST_BASE"] = "http://127.0.0.1:1"
+        os.environ.pop("WB_TEST_UNSET", None)
+        Path(os.environ["WB_OPENCODE_CONFIG"]).write_text(json.dumps({
+            "disabled_providers": ["off"], "provider": {
+                "env": {"options": {"baseURL": "{env:WB_TEST_BASE}/v1"}, "models": {"m": {}}},
+                "unset": {"options": {"baseURL": "{env:WB_TEST_UNSET}/v1"}, "models": {"m": {}}},
+                "off": {"options": {"baseURL": "http://127.0.0.1:2/v1"}, "models": {"m": {}}}}}))
+        found = models.discover()
+        self.assertEqual(list(found), ["env/m"])
+        self.assertEqual(found["env/m"].base_url, "http://127.0.0.1:1/v1")
+        skipped = dict(models.skipped_providers())
+        self.assertIn("is WB_TEST_UNSET set", skipped["unset"])
+        self.assertIn("disabled_providers", skipped["off"])
+        cfg = json.loads(Path(os.environ["WB_OPENCODE_CONFIG"]).read_text())
+        cfg["enabled_providers"] = ["off"]
+        Path(os.environ["WB_OPENCODE_CONFIG"]).write_text(json.dumps(cfg))
+        self.assertEqual(list(models.discover()), [])
+        self.assertIn("enabled_providers", dict(models.skipped_providers())["env"])
+
+    def test_a_provider_on_another_host_is_named_with_the_opt_in(self):
+        # the 2026-11-16 audit: WSL2's Windows-host Ollama was dropped with "0 local model(s)"
+        self.config({"win": {"options": {"baseURL": "http://10.255.255.1:11434/v1"}, "models": {"m": {}}}})
+        self.assertEqual(models.discover(), {})
+        self.assertIn('add {"win": {"local": true}}', models.why_none())
+        with self.assertRaisesRegex(KeyError, "this machine"):
+            models.resolve("m")
+
+    def test_an_ollama_baseurl_without_v1_is_refused_with_the_reason(self):
+        # the 2026-11-16 audit: the /api probes said ready and every request then got a 404
+        ollama = self.server({"/api/version": {"version": "0.40.0"},
+                              "/api/tags": {"models": [{"name": "m:latest", "size": 9}]}})
+        self.config({"o": {"options": {"baseURL": ollama}, "models": {"m": {}}}})
+        st = models.status(models.resolve("o/m"))
+        self.assertFalse(st["available"])
+        self.assertIn("needs /v1", st["why"])
+        self.assertIn("needs /v1", models.providers()["o"]["problem"])
+
+    def test_an_ollama_cloud_model_is_no_candidate_until_opted_in(self):
+        # the 2026-11-16 audit: a cloud stub of 384 bytes was "the smallest model allowed trivial
+        # work", so trivial tasks' code went to ollama.com
+        ollama = self.server({"/api/version": {"version": "0.40.0"}, "/api/ps": {"models": []},
+                              "/api/tags": {"models": [
+                                  {"name": "coder:latest", "size": 14_000_000_000},
+                                  {"name": "glm-5.1:cloud", "size": 384, "remote_host": "https://ollama.com:443"},
+                                  {"name": "big:latest", "size": 400, "remote_model": "big"}]}})
+        self.config({"o": {"options": {"baseURL": ollama + "/v1"},
+                           "models": {"coder": {}, "glm-5.1:cloud": {}, "big": {}}}})
+        found = models.discover()
+        for mid in ("o/glm-5.1:cloud", "o/big"):
+            st = models.status(found[mid])
+            self.assertFalse(st["available"])
+            self.assertIn("Ollama cloud model", st["why"])
+            self.assertEqual(models.weights(found[mid]), 0)
+        self.assertEqual(router.choose("trivial")[0].model.id, "o/coder")
+        self.assertEqual([x["name"] for x in models.ollama_installed(ollama) if x["cloud"]],
+                         ["glm-5.1:cloud", "big:latest"])
+        Path(os.environ["WB_MODELS"]).write_text(json.dumps({"o/glm-5.1:cloud": {"local": True}}))
+        m = models.resolve("o/glm-5.1:cloud")
+        self.assertTrue(m.remote)          # opted in: it holds no GPU lease here
+        self.assertTrue(models.status(m)["available"])
+
+    def test_a_server_that_wants_an_api_key_is_running_and_gets_the_providers_key(self):
+        # the 2026-11-16 audit: a 401 read as "not running", and with a start command wb started a
+        # second copy and waited 20 minutes for it
+        os.environ["WB_TEST_KEY"] = "sekret"
+        keyed = self.server({"/v1/models": lambda h: {"data": [{"id": "a"}, {"id": "b"}]}
+                             if h.get("Authorization") == "Bearer sekret" else 401})
+        self.config({"k": {"options": {"baseURL": keyed + "/v1", "apiKey": "{env:WB_TEST_KEY}"},
+                           "models": {"a": {}, "c": {}}},
+                     "nokey": {"options": {"baseURL": keyed + "/v1"}, "models": {"a": {}}}})
+        found = models.discover()
+        self.assertEqual(models.status(found["k/a"])["why"], "running")
+        self.assertIn("not c", models.status(found["k/c"])["why"])     # the list was read with the key
+        st = models.status(found["nokey/a"])
+        self.assertTrue(st["available"] and st["resident"])
+        self.assertIn("API key", st["why"])
+        self.assertNotIn("sekret", repr(found["k/a"]))
+
+    def test_a_proxy_in_the_environment_never_carries_probes_to_this_machine(self):
+        # the 2026-11-16 audit: behind a proxy without no_proxy, every local model was "not answering"
+        url = self.server({"/api/version": {"version": "0.40.0"}})
+        os.environ["http_proxy"] = os.environ["HTTP_PROXY"] = "http://127.0.0.1:9"
+        os.environ.pop("no_proxy", None)
+        os.environ.pop("NO_PROXY", None)
+        self.assertEqual(models._get(url + "/api/version"), {"version": "0.40.0"})
+        self.assertEqual(models._get(url.replace("127.0.0.1", "localhost") + "/api/version"),
+                         {"version": "0.40.0"})
+
+    def test_a_down_ollama_on_another_port_is_still_ollama_and_add_waits_for_it(self):
+        # the 2026-11-16 audit: read as a server, wb model add wrote an entry with no output cap
+        from workbench import cli
+        self.config({"ollama": {"options": {"baseURL": "http://127.0.0.1:1/v1"}, "models": {}},
+                     "box": {"options": {"baseURL": "http://127.0.0.1:2/v1"}, "models": {}}})
+        self.assertEqual(models.providers()["ollama"]["engine"], "ollama")
+        self.assertEqual(models.providers()["box"]["engine"], "server")
+        for mid in ("ollama/m", "box/m"):
+            err = io.StringIO()
+            with self.assertRaises(SystemExit), redirect_stderr(err):
+                cli.main(["model", "add", mid, "--context", "32768"])
+            self.assertIn("is not answering", err.getvalue())
+
+    def test_a_down_ollama_is_named_by_add_and_retire_without_a_traceback(self):
+        # the 2026-11-16 audit: --pull died in a urllib traceback, a describe blamed a missing
+        # pull, and retire --delete crashed after the entry was already gone
+        from workbench import cli
+        self.config({"o": {"options": {"baseURL": "http://127.0.0.1:1/v1"},
+                           "models": {"old": {"limit": {"context": 32768}}}}}, {"o": {"engine": "ollama"}})
+        for argv in (["model", "add", "o/m", "--pull"], ["model", "add", "o/m", "--context", "32768"]):
+            err = io.StringIO()
+            with self.assertRaises(SystemExit), redirect_stderr(err):
+                cli.main(argv)
+            self.assertIn("Ollama isn't answering at http://127.0.0.1:1", err.getvalue())
+        out = io.StringIO()
+        with redirect_stdout(out):
+            cli.main(["model", "retire", "o/old", "--delete"])
+        self.assertIn("weights were NOT deleted", out.getvalue())
+        self.assertIn("ollama rm old", out.getvalue())
+        self.assertNotIn("old", json.loads(Path(os.environ["WB_OPENCODE_CONFIG"]).read_text())["provider"]["o"]["models"])
+
+    def test_doctor_fails_when_no_model_can_run_and_asks_a_down_ollama_once(self):
+        # the 2026-11-16 audit: doctor said all was well with no model able to run and an entry
+        # with no limit.context, and a sleeping Ollama cost it 35 s a model
+        from workbench import cli
+        self.config({"o": {"options": {"baseURL": "http://127.0.0.1:1/v1"},
+                           "models": {"a": {"options": {"max_tokens": 1}}, "b": {}}}}, {"o": {"engine": "ollama"}})
+        out = io.StringIO()
+        with mock.patch.object(models, "ollama_answers", wraps=models.ollama_answers) as asked, \
+                mock.patch.object(models, "ollama_served_context") as served, \
+                self.assertRaises(SystemExit) as code, redirect_stdout(out):
+            cli.main(["doctor"])
+        self.assertEqual(code.exception.code, 1)
+        text = out.getvalue()
+        self.assertIn("BAD no model can run now (o/a: start Ollama at http://127.0.0.1:1", text)
+        self.assertIn("BAD o/b has no limit.context", text)
+        self.assertIn("BAD o/b caps its output on Ollama", text)
+        self.assertEqual(text.count("Ollama isn't answering at http://127.0.0.1:1"), 1)
+        self.assertEqual([c.args for c in asked.call_args_list].count(("http://127.0.0.1:1",)), 1)
+        served.assert_not_called()
+
+    def test_the_served_context_asks_no_more_of_an_ollama_that_isnt_answering(self):
+        # the 2026-11-16 audit: /api/show waited 30 s a model after /api/ps had no answer, and
+        # this machine's OLLAMA_CONTEXT_LENGTH was taken for another host's
+        from workbench import hardware
+        with mock.patch.object(models, "_get", return_value=None), \
+                mock.patch.object(models, "ollama_show") as show, \
+                mock.patch.object(hardware, "ollama_env", return_value={"OLLAMA_CONTEXT_LENGTH": '"32768"'}):
+            self.assertEqual(models.ollama_served_context("http://127.0.0.1:11434", "m"), 32768)
+            self.assertIsNone(models.ollama_served_context("http://192.168.7.7:11434", "m"))
+        show.assert_not_called()
+
+    def test_a_model_that_cant_load_gets_its_next_step_and_never_empties_the_gpu(self):
+        # the 2026-11-16 audit: wb start said only why, offered --force for an unpulled model,
+        # and the forced task unloaded the GPU before its load failed
+        ollama = self.server({"/api/version": {"version": "0.40.0"}, "/api/tags": {"models": []}})
+        self.config({"o": {"options": {"baseURL": ollama + "/v1"}, "models": {"m": {}}}})
+        m = models.resolve("o/m")
+        st = models.status(m)
+        self.assertEqual(models.remedy(m, st), "wb model add o/m --pull downloads it")
+        self.assertFalse(models.may_come_up(st))
+        self.assertIn("m is not pulled (wb model add o/m --pull", router.choose("significant")[1])
+        with mock.patch.object(models, "free_gpu") as free:
+            with self.assertRaisesRegex(RuntimeError, "not pulled: wb model add"):
+                models.make_resident(m)
+        free.assert_not_called()
 
     def test_claude_config_dir_moves_the_users_claude_files(self):
         os.environ["CLAUDE_CONFIG_DIR"] = str(Path(self.tmp.name) / "cc")

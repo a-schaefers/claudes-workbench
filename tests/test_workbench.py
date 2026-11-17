@@ -114,6 +114,15 @@ class Lifecycle(Base):
         rows, _ = store.read_jsonl(store.home() / "results.jsonl")
         self.assertEqual(rows[-1]["outcome"], "accepted")
 
+    def test_start_refuses_when_opencode_isnt_on_path_and_leaves_nothing(self):
+        # the 2026-11-16 audit: the runner emptied the GPU, then the round died as "opencode exited 1"
+        os.environ["WB_OPENCODE_BIN"] = "wb-no-such-opencode run"
+        err = io.StringIO()
+        with self.assertRaises(SystemExit), redirect_stderr(err):
+            self.start("t-nooc", "ok")
+        self.assertIn("wb-no-such-opencode isn't on PATH", err.getvalue())
+        self.assertFalse(store.Task("t-nooc").dir.exists())
+
     def test_start_runs_the_acceptance_command_on_the_base(self):
         out = self.start("t-base", "ok", "--test", TEST_CMD)
         self.assertIn("on the base the acceptance command fails (exit", out)
@@ -1190,6 +1199,14 @@ class Lane(Base):
             self.assertTrue((inside / "g").exists())
             self.assertEqual(list(outside.iterdir()), [])
 
+    def test_a_command_the_lane_cant_find_is_named_not_a_traceback(self):
+        # the 2026-11-16 audit: a missing opencode left a traceback in runner.log
+        out = subprocess.run(lane.wrap([tempfile.gettempdir()], ["wb-no-such-command", "run"]),
+                             capture_output=True, text=True, timeout=20)
+        self.assertEqual(out.returncode, 127, out.stderr)
+        self.assertIn("workbench lane: can't run wb-no-such-command", out.stderr)
+        self.assertNotIn("Traceback", out.stderr)
+
 
 class Permission(Base):
     """A refused command: the agent asks with `command`, `wb allow` answers and restarts it."""
@@ -1361,6 +1378,17 @@ class Routing(Base):
         run_wb("model", "sizes", "strata", "trivial")
         self.assertEqual(router.choose("significant")[0].model.id, "ollama/qwen3.8-27b")
 
+    def test_models_held_back_by_the_size_policy_are_named_not_missing(self):
+        # the 2026-11-16 audit: every model limited to trivial gave "no local models in opencode.json"
+        from workbench import router
+        for mid in ("mimo", "qwen3.8", "strata"):
+            run_wb("model", "sizes", mid, "trivial")
+        top, why = router.choose("significant")
+        self.assertIsNone(top)
+        self.assertIn("no local model takes significant tasks", why)
+        self.assertIn("wb model sizes", why)
+        self.assertIsNotNone(router.choose("trivial")[0])
+
     def test_a_poor_record_outweighs_size(self):
         from workbench import router
         self.result("strata/strata", "significant", "discarded", n=4)
@@ -1424,6 +1452,34 @@ class Routing(Base):
         del os.environ["FAKE_LESSON"]
         self.assertNotIn("lessons:", out)
         self.assertTrue(store.read_jsonl(store.home() / "results.jsonl")[0][-1]["trial"])
+
+    def test_a_model_without_tool_calls_is_never_routed_or_started(self):
+        # the 2026-11-16 audit: wb model add printed "NO tool calls" and the router still picked it
+        cfg = json.loads(Path(os.environ["WB_OPENCODE_CONFIG"]).read_text())
+        cfg["provider"]["strata"]["models"]["strata"]["tool_call"] = False
+        Path(os.environ["WB_OPENCODE_CONFIG"]).write_text(json.dumps(cfg))
+        from workbench import router
+        self.assertEqual(router.choose("significant")[0].model.id, "ollama/qwen3.8-27b")
+        self.assertIn("tool_call: false", router.rank("significant")[-1].state["why"])
+        err = io.StringIO()
+        with self.assertRaises(SystemExit) as out, redirect_stderr(err):
+            run_wb("start", "t-notools", "--spec", str(self.spec), "--repo", str(self.repo),
+                   "--model", "strata")
+        self.assertEqual(out.exception.code, 3)
+        self.assertIn("can't call tools", err.getvalue())
+
+    def test_an_ollama_cloud_model_is_left_to_the_user_to_allow(self):
+        # the 2026-11-16 audit: a cloud model looked smallest, so trivial work went to ollama.com
+        cfg = json.loads(Path(os.environ["WB_OPENCODE_CONFIG"]).read_text())
+        cfg["provider"]["ollama"]["models"]["gpt-oss:120b-cloud"] = {}
+        Path(os.environ["WB_OPENCODE_CONFIG"]).write_text(json.dumps(cfg))
+        from workbench import router
+        self.assertEqual(router.choose("trivial")[0].model.id, "ollama/mimo-v2.6:9b-q8_0")
+        self.assertIn("Ollama cloud model", router.rank("trivial")[-1].state["why"])
+        err = io.StringIO()
+        with self.assertRaises(SystemExit), redirect_stderr(err):
+            run_wb("model", "add", "ollama/kimi:cloud")
+        self.assertIn("off this machine", err.getvalue())
 
     def test_set_default_writes_the_pick_to_opencode(self):
         out = run_wb("models", "--set-default")
@@ -1737,6 +1793,56 @@ class ModelSet(Base):
         with self.assertRaises(SystemExit):
             run_wb("model", "add", "cloud/big")                    # not a local provider
 
+    def test_add_never_guesses_the_context_ollama_serves(self):
+        # the 2026-11-16 audit: with nothing set, the trained 256K was written while a stock
+        # Ollama served 4K-8K, and the prompt was cut off silently
+        Path(os.environ["WB_OPENCODE_CONFIG"]).write_text(json.dumps({"provider": {"ollama": {
+            "options": {"baseURL": "http://127.0.0.1:11434/v1"}, "models": {}}}}))
+        err = io.StringIO()
+        with self.assertRaises(SystemExit), redirect_stderr(err):
+            run_wb("model", "add", "ollama/coder:8b")
+        self.assertIn("OLLAMA_CONTEXT_LENGTH", err.getvalue())
+        self.assertEqual(self.config()["provider"]["ollama"]["models"], {})
+        run_wb("model", "add", "ollama/coder:8b", "--context", "32768")
+        self.assertEqual(self.config()["provider"]["ollama"]["models"]["coder:8b"]["limit"]["context"], 32768)
+
+    def test_a_config_that_doesnt_parse_is_named_without_a_traceback(self):
+        # the 2026-11-16 audit: one missing comma made every model command a JSONDecodeError
+        Path(os.environ["WB_OPENCODE_CONFIG"]).write_text('{"provider": {"o": {}}\n "model": "x"}')
+        err = io.StringIO()
+        with self.assertRaises(SystemExit) as code, redirect_stderr(err):
+            run_wb("models")
+        self.assertEqual(code.exception.code, 1)
+        self.assertIn("opencode.json doesn't parse", err.getvalue())
+        self.assertNotIn("Traceback", err.getvalue())
+
+    def test_add_on_a_server_other_than_ollama_needs_the_window_it_serves(self):
+        # the 2026-11-16 audit: an LM Studio model was registered with "0K context" and no limit,
+        # so its tasks never handed over and ran past the server's window
+        err = io.StringIO()
+        with self.assertRaises(SystemExit), redirect_stderr(err):
+            run_wb("model", "add", "strata/coder")
+        self.assertIn("pass --context N", err.getvalue())
+        self.assertNotIn("coder", self.config()["provider"]["strata"]["models"])
+        self.assertIn("32K context", run_wb("model", "add", "strata/coder", "--context", "32768"))
+        self.assertIn("32K context", run_wb("model", "add", "strata/coder", "--label", "Coder"))  # kept
+
+    def test_the_first_add_makes_the_ollama_provider_and_an_empty_config_says_how(self):
+        # the 2026-11-16 audit: with no provider, add listed none and no doc said how to make one
+        Path(os.environ["WB_OPENCODE_CONFIG"]).write_text("{}")
+        err = io.StringIO()
+        with self.assertRaises(SystemExit), redirect_stderr(err):
+            run_wb("model", "add", "strata/x")
+        self.assertIn("wb model add ollama/<model> adds one", err.getvalue())
+        from workbench import hardware
+        with mock.patch.object(hardware, "ollama_env", return_value={"OLLAMA_HOST": "0.0.0.0:11500"}):
+            out = run_wb("model", "add", "ollama/coder:8b", "--context", "32768")
+        self.assertIn("added provider ollama", out)
+        prov = self.config()["provider"]["ollama"]
+        self.assertEqual(prov["npm"], "@ai-sdk/openai-compatible")
+        self.assertEqual(prov["options"]["baseURL"], "http://127.0.0.1:11500/v1")  # a bind address: loopback
+        self.assertIn("coder:8b", prov["models"])
+
     def test_retire_refuses_the_default(self):
         cfg = self.config(); cfg["model"] = "ollama/qwen3.8-27b"
         Path(os.environ["WB_OPENCODE_CONFIG"]).write_text(json.dumps(cfg))
@@ -2043,6 +2149,27 @@ class Hardware(unittest.TestCase):
         self.assertIn("only NVIDIA GPUs are usable from inside WSL", out)
         self.assertIn("AMD Radeon RX 7900 XTX · VRAM unknown · windows (seen from WSL)", out)
         self.assertIn("RAM   15.3 GB", out)
+
+    def test_ollamas_quoted_service_environment_and_a_context_that_isnt_a_number(self):
+        # the 2026-11-16 audit: systemd quotes a value with a space and the split lost it; "32k"
+        # crashed wb scout, which Ollama only warns about
+        hw = self.fake("Linux", runs={("systemctl",): '"OLLAMA_MODELS=/data/my models" OLLAMA_CONTEXT_LENGTH=32k'})
+        self.assertEqual(hw.ollama_env()["OLLAMA_MODELS"], "/data/my models")
+        self.assertEqual(hw.ollama_context(), (None, "32k"))
+        self.assertIn("OLLAMA_CONTEXT_LENGTH='32k' isn't a number", "\n".join(hw.report()))
+
+    @unittest.skipIf(os.geteuid() == 0, "root reads every directory")
+    def test_an_ollama_models_dir_it_cant_read_is_passed_over(self):
+        # the 2026-11-16 audit: Path.is_dir raised under Ubuntu's 0750 /usr/share/ollama before 3.14
+        from workbench import hardware
+        with tempfile.TemporaryDirectory() as d:
+            Path(d, "shut").mkdir(mode=0o000)
+            try:
+                with mock.patch.object(hardware, "ollama_env",
+                                       return_value={"OLLAMA_MODELS": str(Path(d, "shut", "models"))}):
+                    self.assertNotEqual(hardware.ollama_models_dir(), Path(d, "shut", "models"))
+            finally:
+                Path(d, "shut").chmod(0o700)
 
     def test_wsl_with_nvidia_is_not_listed_twice(self):
         hw = self.fake("Linux", files={"/proc/version": "microsoft-standard-WSL2"}, runs={

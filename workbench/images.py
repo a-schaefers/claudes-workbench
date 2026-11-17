@@ -74,7 +74,7 @@ def ready(e: dict) -> str:
     if e.get("url"):
         root = re.sub(r"/v1/.*$", "", e["url"])
         try:
-            urllib.request.urlopen(root, timeout=2)
+            models._open(root, timeout=2).close()  # no proxy to this machine (models._open)
         except urllib.error.HTTPError:
             pass  # something answers
         except OSError:
@@ -116,7 +116,7 @@ def _server(e: dict, values: dict) -> None:
         body["model"] = e["model"]
     req = urllib.request.Request(e["url"], json.dumps(body).encode(),
                                  {"Content-Type": "application/json"})
-    with urllib.request.urlopen(req, timeout=int(e.get("timeout", 1800))) as r:
+    with models._open(req, timeout=int(e.get("timeout", 1800))) as r:
         data = json.loads(r.read())
     Path(values["out"]).write_bytes(base64.b64decode(data["data"][0]["b64_json"]))
 

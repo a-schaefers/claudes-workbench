@@ -1,7 +1,8 @@
 """The local models workbench can hand work to: found in OpenCode's config, not listed here.
 
 Every model of an OpenCode provider whose baseURL is on this machine is a candidate (a provider
-on another host, such as a GPU box on the LAN, opts in with `"local": true`). Which one
+on another host, such as a GPU box on the LAN, opts in with `"local": true`; an Ollama cloud
+model, which runs off this machine, needs the same on its own id). Which one
 takes a task is the router's guess from its size, corrected by real tasks (router.py), never
 written down here, so a new model is one opencode.json entry away.
 
@@ -35,6 +36,7 @@ import json
 import os
 import re
 import socket
+import stat
 import subprocess
 import time
 import urllib.error
@@ -64,6 +66,12 @@ class Model:
     extra: dict = field(default_factory=dict)
     config: dict = field(default_factory=dict)  # OpenCode's entry: reasoning, limit, variants...
     remote: bool = False  # on another host (models.json "local": true): its VRAM isn't this GPU's
+    # An Ollama cloud model (`:cloud`, `-cloud`): Ollama forwards it to ollama.com, so it is no
+    # candidate unless models.json gives its id "local": true (cloud_ok; it is then remote).
+    cloud: bool = False
+    cloud_ok: bool = False
+    problem: str = ""  # a config mistake that would fail every request (url_problem)
+    api_key: str = field(default="", repr=False)  # the provider's options.apiKey, resolved: never printed
 
     @property
     def root(self) -> str:
@@ -82,14 +90,27 @@ class Model:
                 u.path.rstrip("/").removesuffix("/v1"))
 
 
+def _config_dir() -> Path:
+    return Path(os.environ.get("XDG_CONFIG_HOME") or Path.home() / ".config") / "opencode"
+
+
 def opencode_config_path() -> Path:
     """OpenCode's global config, where OpenCode reads it: $XDG_CONFIG_HOME/opencode (default
-    ~/.config/opencode, on macOS too), opencode.json or opencode.jsonc."""
+    ~/.config/opencode, on macOS too), opencode.json or opencode.jsonc: the one wb writes."""
     if os.environ.get("WB_OPENCODE_CONFIG"):
         return Path(os.environ["WB_OPENCODE_CONFIG"])
-    d = Path(os.environ.get("XDG_CONFIG_HOME") or Path.home() / ".config") / "opencode"
+    d = _config_dir()
     return next((p for p in (d / "opencode.json", d / "opencode.jsonc") if p.exists()),
                 d / "opencode.json")
+
+
+def opencode_config_files() -> list[Path]:
+    """Every global file OpenCode layers, in its order: opencode.json, then opencode.jsonc (both
+    when both exist: checked on OpenCode 2.3, the 2026-11-16 audit). $WB_OPENCODE_CONFIG alone."""
+    d = _config_dir()
+    paths = [Path(os.environ["WB_OPENCODE_CONFIG"])] if os.environ.get("WB_OPENCODE_CONFIG") else \
+        [d / "opencode.json", d / "opencode.jsonc"]
+    return [p for p in paths if p.exists()]
 
 
 def _strip_jsonc(text: str) -> str:
@@ -100,20 +121,61 @@ def _strip_jsonc(text: str) -> str:
                   lambda m: m.group(1) if m.group(1) is not None else m.group(0), text)
 
 
+def _merge(base: dict, over: dict) -> dict:
+    out = dict(base)
+    for k, v in over.items():
+        out[k] = _merge(out[k], v) if isinstance(v, dict) and isinstance(out.get(k), dict) else v
+    return out
+
+
 def read_config() -> dict:
-    path = opencode_config_path()
-    return json.loads(_strip_jsonc(path.read_text())) if path.exists() else {}
+    """OpenCode's global config as OpenCode sees it: its files merged, the later winning. Read
+    one file only, a provider kept in opencode.jsonc beside an opencode.json holding a theme was
+    invisible (the 2026-11-16 audit)."""
+    cfg: dict = {}
+    for path in opencode_config_files():
+        try:
+            cfg = _merge(cfg, json.loads(_strip_jsonc(path.read_text())))
+        except ValueError as e:  # one bad hand edit crashed every model command with a traceback
+            raise RuntimeError(f"{path} doesn't parse ({e}); fix it by hand "
+                               "(wb doctor checks it)") from None  # (the 2026-11-16 audit)
+    return cfg
 
 
-def write_config(cfg: dict) -> None:
-    """Write OpenCode's config back; refused for a file with comments, which a rewrite would lose."""
+def write_config(cfg: dict, change: str) -> None:
+    """Write OpenCode's config back; refused for a file with comments, which a rewrite would lose,
+    and while two files are layered, which one merged file would rewrite. A refusal says only
+    ``change`` (what to do by hand): it once printed the whole config, a provider's apiKey
+    included, into Claude's context (the 2026-11-16 audit). A symlinked file (dotfiles, stow) is
+    written through to its target, and its mode is kept: a 0600 file holding keys came back
+    0644, and the link was replaced by a plain file (the 2026-11-16 audit)."""
+    files = opencode_config_files()
+    if len(files) > 1:
+        raise RuntimeError(f"OpenCode layers {' and '.join(map(str, files))}; wb won't rewrite "
+                           f"either: make this change by hand: {change}")
     path = opencode_config_path()
     try:
         json.loads(path.read_text() if path.exists() else "{}")
     except ValueError:
         raise RuntimeError(f"{path} has comments, which rewriting it would lose; make this change "
-                           f"by hand: {json.dumps(cfg)[:2000]}") from None
-    store.write_json(path, cfg)
+                           f"by hand: {change}") from None
+    target = path.resolve()
+    target.parent.mkdir(parents=True, exist_ok=True)
+    if not os.access(target.parent, os.W_OK) or target.exists() and not os.access(target, os.W_OK):
+        raise RuntimeError(f"{path}" + (f" links to {target}, which" if target != path else "")
+                           + " isn't writable (a read-only store, such as Nix's?); make this "
+                           f"change in its source by hand: {change}")
+    mode = stat.S_IMODE(target.stat().st_mode) if target.exists() else 0o600  # it may hold keys
+    tmp = target.with_name(f".{target.name}.{os.getpid()}.tmp")
+    fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)  # never readable by others
+    try:
+        with os.fdopen(fd, "w") as f:
+            f.write(json.dumps(cfg, indent=2, ensure_ascii=False) + "\n")
+        os.chmod(tmp, mode)
+        os.replace(tmp, target)
+    except BaseException:
+        tmp.unlink(missing_ok=True)
+        raise
 
 
 def overrides_path() -> Path:
@@ -162,20 +224,33 @@ def _this_host(host: str | None) -> bool:
 
 _ENGINES: dict[str, str] = {}  # root -> engine, once its server has answered
 
+# A server on this machine is asked directly, never through a proxy: urllib honours http_proxy and
+# exempts loopback only when no_proxy says so, so behind a corporate proxy every local model read
+# as "not answering" (the 2026-11-16 audit). A provider on another host keeps the environment's.
+_DIRECT = urllib.request.build_opener(urllib.request.ProxyHandler({}))
 
-def _engine(url: str, over: dict) -> str:
+
+def _open(target, timeout: float):
+    url = target.full_url if isinstance(target, urllib.request.Request) else target
+    opener = _DIRECT.open if _this_host(urlparse(url).hostname) else urllib.request.urlopen
+    return opener(target, timeout=timeout)
+
+
+def _engine(url: str, over: dict, pid: str = "") -> str:
     """"ollama" when the server answers Ollama's own /api/version, else "server". While it is
-    down, Ollama's default port decides; the answer is kept once the server has given one."""
+    down, Ollama's default port or a provider id naming Ollama decides (an Ollama moved to another
+    port read as a server needing a start command: the 2026-11-16 audit); the answer is kept once
+    the server has given one."""
     if over.get("engine") in ("ollama", "server"):
         return over["engine"]
     root = url.rstrip("/").removesuffix("/v1")
     if root in _ENGINES:
         return _ENGINES[root]
-    guess = "ollama" if urlparse(url).port == OLLAMA_PORT else "server"
+    guess = "ollama" if urlparse(url).port == OLLAMA_PORT or "ollama" in pid.lower() else "server"
     if _fake():
         return guess
     try:
-        with urllib.request.urlopen(f"{root}/api/version", timeout=1.5) as r:
+        with _open(f"{root}/api/version", timeout=1.5) as r:
             body = json.loads(r.read() or b"{}")
         _ENGINES[root] = "ollama" if isinstance(body, dict) and "version" in body else "server"
     except urllib.error.HTTPError:  # it answered, without Ollama's API
@@ -185,16 +260,113 @@ def _engine(url: str, over: dict) -> str:
     return _ENGINES[root]
 
 
+def engine_known(url: str, over: dict) -> bool:
+    """Whether the engine was said (models.json) or probed, not guessed while the server is down."""
+    return _fake() or over.get("engine") in ("ollama", "server") or \
+        url.rstrip("/").removesuffix("/v1") in _ENGINES
+
+
+_TEMPLATE = re.compile(r"\{(env|file):([^}]*)\}")
+
+
+def _agent_sees(name: str) -> bool:
+    """Whether the agent's OpenCode gets this variable (runner.agent_env drops credentials)."""
+    from . import context, runner  # runner imports this module
+    through = set((store.read_json(context.commands_path(), {}) or {}).get("env") or [])
+    return name in through or not runner.SECRET_ENV.search(name)
+
+
+def _expand(value: str, agent: bool = True) -> str:
+    """OpenCode's `{env:NAME}` and `{file:path}` in a config string, resolved as OpenCode does:
+    an unset name or an unreadable file is empty; a relative path is the config's directory's.
+    With ``agent``, a name the agent's environment drops is empty too: its OpenCode won't see it.
+    Taken raw, such a baseURL had no host and its provider vanished (the 2026-11-16 audit)."""
+    def one(mt):
+        kind, arg = mt.group(1), mt.group(2).strip()
+        if kind == "env":
+            return os.environ.get(arg, "") if not agent or _agent_sees(arg) else ""
+        path = Path(os.path.expanduser(arg))
+        try:
+            return (path if path.is_absolute() else opencode_config_path().parent / path).read_text().strip()
+        except OSError:
+            return ""
+    return _TEMPLATE.sub(one, value or "")
+
+
+def _scan(cfg: dict, extra: dict):
+    """(provider id, its config, its baseURL resolved, why it is skipped or "", remote) for each
+    provider with a baseURL, as OpenCode loads them: disabled_providers and enabled_providers
+    followed (the router used to pick a provider OpenCode wouldn't load: the 2026-11-16 audit).
+    A provider with no baseURL is one of OpenCode's own cloud providers: not listed."""
+    enabled, disabled = cfg.get("enabled_providers"), set(cfg.get("disabled_providers") or [])
+    for pid, prov in (cfg.get("provider") or cfg.get("providers") or {}).items():
+        opts = prov.get("options") or prov.get("settings") or {}
+        raw = opts.get("baseURL") or ""
+        if not raw:
+            continue
+        url = _expand(raw)
+        host = urlparse(url).hostname
+        here = _this_host(host)
+        if pid in disabled:
+            why = "disabled in OpenCode's config (disabled_providers)"
+        elif enabled and pid not in enabled:
+            why = "not in OpenCode's enabled_providers"
+        elif not host:
+            names = [n.strip() for k, n in _TEMPLATE.findall(raw) if k == "env"]
+            why = f"its baseURL {raw} resolves to {url or 'nothing'}, which has no host" + (
+                f": is {', '.join(names)} set (and passed to agents: commands.json env)?" if names else "")
+        elif not (here or (extra.get(pid) or {}).get("local")):
+            why = (f"{host} isn't this machine; if it's your own model server (WSL2's Windows host, "
+                   f"a box on the LAN), add {{\"{pid}\": {{\"local\": true}}}} to {overrides_path()}")
+        else:
+            why = ""
+        yield pid, prov, url, why, not here
+
+
 def _local_providers(cfg: dict, extra: dict):
     """(provider id, its config, its baseURL, engine, remote) for each provider on this machine,
     or opted in with models.json "local": true."""
-    for pid, prov in (cfg.get("provider") or cfg.get("providers") or {}).items():
-        opts = prov.get("options") or prov.get("settings") or {}
-        url = opts.get("baseURL", "")
-        here = _this_host(urlparse(url).hostname)
-        if not url or not (here or (extra.get(pid) or {}).get("local")):
-            continue
-        yield pid, prov, url, _engine(url, extra.get(pid) or {}), not here
+    for pid, prov, url, why, remote in _scan(cfg, extra):
+        if not why:
+            yield pid, prov, url, _engine(url, extra.get(pid) or {}, pid), remote
+
+
+def skipped_providers() -> list[tuple[str, str]]:
+    """(provider id, why) for each provider with a baseURL that discovery leaves out."""
+    return [(pid, why) for pid, _, _, why, _ in _scan(read_config(), _overrides()) if why]
+
+
+def why_none() -> str:
+    """Why discovery found no model: the providers it passed over, or how to make one."""
+    skipped = skipped_providers()
+    if skipped:
+        return "; ".join(f"provider {pid}: {why}" for pid, why in skipped)
+    return (f"OpenCode has no local provider in {opencode_config_path()}: with Ollama running, "
+            "wb model add ollama/<model> adds one; or add an OpenAI-compatible provider whose "
+            "baseURL is on this machine")
+
+
+def url_problem(url: str, engine: str, npm: str | None = None) -> str:
+    """Why a provider's baseURL would fail every request, or "". Ollama's OpenAI API lives under
+    /v1: without it OpenCode posts to /chat/completions and gets 404 after the model is loaded,
+    while the /api probes said ready (the 2026-11-16 audit). A native Ollama SDK provider differs."""
+    if engine == "ollama" and (npm or "@ai-sdk/openai-compatible") == "@ai-sdk/openai-compatible" \
+            and not urlparse(url).path.rstrip("/").endswith("/v1"):
+        return f"its baseURL {url} needs /v1 (Ollama's OpenAI API is at {url.rstrip('/')}/v1)"
+    return ""
+
+
+def _cloud_name(name: str) -> bool:
+    return name.endswith((":cloud", "-cloud"))
+
+
+def _cloud_row(row: dict) -> bool:
+    """An /api/tags row Ollama forwards to its cloud: a stub of a few hundred bytes."""
+    return bool(row.get("remote_host") or row.get("remote_model")) or _cloud_name(row.get("name") or "")
+
+
+def cloud_allowed(model_id: str) -> bool:
+    return (_overrides().get(model_id) or {}).get("local") is True
 
 
 def discover() -> dict[str, Model]:
@@ -202,15 +374,22 @@ def discover() -> dict[str, Model]:
     extra = _overrides()
     found: dict[str, Model] = {}
     for pid, prov, url, engine, remote in _local_providers(read_config(), extra):
+        opts = prov.get("options") or prov.get("settings") or {}
+        problem = url_problem(url, engine, prov.get("npm"))
+        key = _expand(str(opts.get("apiKey") or ""), agent=False)
         for name, spec in (prov.get("models") or {}).items():
             mid = f"{pid}/{name}"
             over = {**extra.get(pid, {}), **extra.get(mid, {})}
             if over.get("skip"):
                 continue
+            # an Ollama cloud model was routed trivial work as "the smallest" (the 2026-11-16 audit)
+            cloud = engine == "ollama" and _cloud_name(name)
+            cloud_ok = cloud and (extra.get(mid) or {}).get("local") is True
             found[mid] = Model(id=mid, provider=pid, name=name, base_url=url, engine=engine,
                                label=over.get("label") or spec.get("name") or mid,
                                start=over.get("start"), stop=over.get("stop"), extra=over,
-                               config=spec, remote=remote)
+                               config=spec, remote=remote or cloud_ok, cloud=cloud,
+                               cloud_ok=cloud_ok, problem=problem, api_key=key)
     return found
 
 
@@ -223,7 +402,7 @@ def resolve(wanted: str) -> Model:
     hits = exact or [m for m in models.values() if wanted.lower() in m.id.lower()]
     if len(hits) == 1:
         return hits[0]
-    known = ", ".join(models) or "none (no local provider in opencode.json)"
+    known = ", ".join(models) or f"none ({why_none()})"
     if hits:
         raise KeyError(f"{wanted!r} matches {', '.join(m.id for m in hits)}; be more specific")
     raise KeyError(f"unknown model {wanted!r}; known: {known}")
@@ -231,7 +410,7 @@ def resolve(wanted: str) -> Model:
 
 def _get(url: str, timeout: float = 2.5):
     try:
-        with urllib.request.urlopen(url, timeout=timeout) as r:
+        with _open(url, timeout=timeout) as r:
             return json.loads(r.read() or b"{}")
     except Exception:
         return None
@@ -241,7 +420,7 @@ def _post(url: str, body: dict, timeout: float = 600):
     req = urllib.request.Request(url, data=json.dumps(body).encode(),
                                  headers={"Content-Type": "application/json"})
     try:
-        with urllib.request.urlopen(req, timeout=timeout) as r:
+        with _open(req, timeout=timeout) as r:
             return json.loads(r.read() or b"{}")
     except urllib.error.HTTPError as e:  # say what the server said: "HTTP Error 500" alone
         raw = e.read().decode(errors="replace")  # hid an out-of-memory load (the 2026-11-16 audit)
@@ -293,47 +472,105 @@ def _serves(served: str, name: str) -> bool:
     return served == name or base(served) == base(name)
 
 
-def status(m: Model) -> dict:
-    """``{available, resident, why}``: can the runner get this model onto the GPU, is it there."""
+def _no(why: str) -> dict:
+    return {"available": False, "resident": False, "why": why}
+
+
+def _tag_row(name: str, tags: dict) -> dict | None:
+    return next((x for x in tags.get("models") or [] if _matches(name, {x.get("name")})), None)
+
+
+CLOUD_WHY = ("an Ollama cloud model: it runs on ollama.com, off this machine (models.json "
+             "\"local\": true on {id} allows it)")
+
+
+def status(m: Model, down=frozenset()) -> dict:
+    """``{available, resident, why}``: can the runner get this model onto the GPU, is it there.
+    What the config alone rules out comes first, so the fake models meet it too. ``down``: Ollama
+    roots the caller already found not answering, not asked again."""
+    if m.config.get("tool_call") is False:  # the router used to hand it tasks (the 2026-11-16 audit)
+        return _no("OpenCode's config says it can't call tools (tool_call: false): agent work needs them")
+    if m.problem:
+        return _no(m.problem)
+    if m.cloud and not m.cloud_ok:
+        return _no(CLOUD_WHY.format(id=m.id))
     if _fake():
         return {"available": True, "resident": True, "why": "fake"}
     if m.engine == "ollama":
-        if _get(f"{m.root}/api/tags") is None:
-            return {"available": False, "resident": False, "why": "ollama is not answering"}
-        if not _matches(m.name, _ollama_names(m, "tags")):
-            return {"available": False, "resident": False, "why": f"{m.name} is not pulled"}
+        tags = None if m.root in down else _get(f"{m.root}/api/tags")
+        if tags is None:
+            return _no("ollama is not answering")
+        row = _tag_row(m.name, tags)
+        if row is None:
+            return _no(f"{m.name} is not pulled")
+        if _cloud_row(row) and not cloud_allowed(m.id):  # a cloud model by another name
+            return _no(CLOUD_WHY.format(id=m.id))
         resident = _matches(m.name, _ollama_names(m, "ps"))
         return {"available": True, "resident": resident, "why": "loaded" if resident else "pulled"}
-    body = _get(f"{m.base_url.rstrip('/')}/models", timeout=2)
-    if body is not None:
+    auth = {"Authorization": f"Bearer {m.api_key}"} if m.api_key else {}
+    try:
+        with _open(urllib.request.Request(f"{m.base_url.rstrip('/')}/models", headers=auth), timeout=2) as r:
+            body = json.loads(r.read() or b"{}")
+    except urllib.error.HTTPError as e:
+        e.close()
+        # a server behind a key answered: it runs, and starting a second copy would only wait
+        # 20 minutes for it (the 2026-11-16 audit)
+        if e.code in (401, 403):
+            return {"available": True, "resident": True,
+                    "why": "running (it wants an API key: the provider's options.apiKey)"}
+        body = None
+    except Exception:
+        body = None
+    if isinstance(body, dict):
         # one listed model: a one-model server answers to any name; several: it routes by name
         served = {x.get("id") for x in (body.get("data") or []) if isinstance(x, dict)}
         if len(served) > 1 and m.name not in served:
-            return {"available": False, "resident": False,
-                    "why": f"the server lists {len(served)} models, not {m.name}"}
+            return _no(f"the server lists {len(served)} models, not {m.name}")
         if len(served) == 1 and m.start and _contended(m) and not _serves(str(next(iter(served))), m.name):
             # the task would run on the other model, recorded under this one (the 2026-11-16 audit)
-            return {"available": False, "resident": False,
-                    "why": f"{m.root} is serving {next(iter(served))}, not {m.name}, and other models "
-                           "with their own start commands share that port, so wb can't tell or switch "
-                           "them: give each its own port (or --alias it as its name), or use one "
-                           "server that swaps models (llama-swap)"}
+            return _no(f"{m.root} is serving {next(iter(served))}, not {m.name}, and other models "
+                       "with their own start commands share that port, so wb can't tell or switch "
+                       "them: give each its own port (or --alias it as its name), or use one "
+                       "server that swaps models (llama-swap)")
         return {"available": True, "resident": True, "why": "running"}
     if m.start:
         return {"available": True, "resident": False, "why": "stopped (wb starts it)"}
-    return {"available": False, "resident": False,
-            "why": f"not running, and no start command in {overrides_path()}"}
+    return _no(f"not running, and no start command in {overrides_path()}")
+
+
+def remedy(m: Model, state: dict) -> str:
+    """The next step for a model status() says can't run; "" when the reason already says it.
+    wb start used to say only why, or offer --force for a model that could only fail to load
+    (the 2026-11-16 audit)."""
+    why = state.get("why", "")
+    if why == "ollama is not answering":
+        return f"start Ollama at {m.root} (ollama serve, or its service or app)"
+    if why.endswith(" is not pulled"):
+        return f"wb model add {m.id} --pull downloads it"
+    if why.startswith("the server lists"):
+        return f"load {m.name} in that server, or fix the model's name in OpenCode's config"
+    if why.startswith("not running, and no start command"):
+        return f"start its server, or give {m.id} a \"start\" command there"
+    return ""
+
+
+def may_come_up(state: dict) -> bool:
+    """Whether a model that can't run now may by the time a queued task gets the GPU: its server
+    is only down. Not pulled, or ruled out by the config, it would only fail to load."""
+    return state.get("why", "") == "ollama is not answering" or \
+        state.get("why", "").startswith("not running, and no start command")
 
 
 def weights(m: Model) -> int:
     """Bytes of weights behind the id, the router's measure of a model's size; 0 when unknown.
-    models.json's `weights_gb` says it for a server that can't (or a test)."""
+    models.json's `weights_gb` says it for a server that can't (or a test). A cloud model's
+    figure is a stub's, so it says nothing."""
     if m.extra.get("weights_gb"):
         return int(float(m.extra["weights_gb"]) * 1e9)
-    if m.engine == "ollama" and not _fake():
-        for x in (_get(f"{m.root}/api/tags") or {}).get("models", []):
-            if x.get("name") in (m.name, f"{m.name}:latest"):
-                return int(x.get("size") or 0)
+    if m.engine == "ollama" and not m.cloud and not _fake():
+        row = _tag_row(m.name, _get(f"{m.root}/api/tags") or {})
+        if row and not _cloud_row(row):
+            return int(row.get("size") or 0)
     return 0
 
 
@@ -365,10 +602,12 @@ def make_resident(m: Model, say=print, keep=(), warn=None) -> float:
     if _fake():
         return 0.0
     st = status(m)
+    if not st["available"]:  # a --force task for a model that couldn't load emptied the GPU
+        # first and failed after (the 2026-11-16 audit): fail before freeing anything
+        raise RuntimeError(f"{m.id} can't run: {st['why']}"
+                           + (f": {fix}" if (fix := remedy(m, st)) else ""))
     if st["resident"] and (m.remote or not _others_resident(m, keep)):
         return 0.0
-    if m.engine == "ollama" and not st["available"]:  # before free_gpu unloads anything for it
-        raise RuntimeError(f"{m.id}: {st['why']}")
     t0 = time.time()
     if not m.remote:
         free_gpu(keep={m.id, *keep}, say=say, warn=warn)
@@ -773,28 +1012,78 @@ def ollama_cap(entry: dict) -> int:
 
 
 def providers() -> dict[str, dict]:
-    """OpenCode's local providers: id → {"root", "engine", "models"} (the config's model entries)."""
-    return {pid: {"root": url.rstrip("/").removesuffix("/v1"), "models": prov.get("models") or {},
-                  "engine": engine}
-            for pid, prov, url, engine, _ in _local_providers(read_config(), _overrides())}
+    """OpenCode's local providers: id → {"root", "url", "engine", "engine_known", "start",
+    "problem", "models"} (the config's model entries)."""
+    extra = _overrides()
+    return {pid: {"root": url.rstrip("/").removesuffix("/v1"), "url": url,
+                  "models": prov.get("models") or {}, "engine": engine,
+                  "engine_known": engine_known(url, extra.get(pid) or {}),
+                  "start": (extra.get(pid) or {}).get("start"),
+                  "problem": url_problem(url, engine, prov.get("npm"))}
+            for pid, prov, url, engine, _ in _local_providers(read_config(), extra)}
+
+
+def ollama_root_here() -> str:
+    """Where this machine's Ollama listens: its OLLAMA_HOST (a bind address read as loopback),
+    else its default port."""
+    raw = (hardware.ollama_env().get("OLLAMA_HOST") or "").strip()
+    if not raw:
+        return f"http://127.0.0.1:{OLLAMA_PORT}"
+    u = urlparse(raw if "://" in raw else f"http://{raw}")
+    host = u.hostname or "127.0.0.1"
+    host = "127.0.0.1" if host in ("0.0.0.0", "::") else host
+    return f"{u.scheme}://{f'[{host}]' if ':' in host else host}:{u.port or OLLAMA_PORT}"
+
+
+def ollama_answers(root: str) -> bool:
+    if _fake():
+        return False
+    body = _get(f"{root}/api/version", timeout=1.5)
+    return isinstance(body, dict) and "version" in body
+
+
+def add_ollama_provider(pid: str) -> str | None:
+    """Give OpenCode a provider ``pid`` for this machine's Ollama when its config has none by that
+    id and Ollama answers; its root, or None. A first run had no provider and no command made one
+    (the 2026-11-16 audit). A provider the user wrote is never touched."""
+    cfg = read_config()
+    if pid in (cfg.get("provider") or {}) or pid in (cfg.get("providers") or {}):
+        return None
+    root = ollama_root_here()
+    if not _fake() and not ollama_answers(root):
+        return None
+    key, url = ("providers", "settings") if "providers" in cfg and "provider" not in cfg \
+        else ("provider", "options")  # the first: OpenCode 2.x's own shape
+    entry = {"npm": "@ai-sdk/openai-compatible", "name": "Ollama", url: {"baseURL": f"{root}/v1"}}
+    cfg.setdefault(key, {})[pid] = entry
+    write_config(cfg, f'under "{key}" add "{pid}": {json.dumps(entry)}')
+    return root
+
+
+def ollama_cloud(root: str, name: str) -> bool:
+    """Whether Ollama forwards this model to its cloud: by name, or by its /api/tags row."""
+    if _cloud_name(name) or _fake():
+        return _cloud_name(name)
+    return any(_cloud_row(x) for x in (_get(f"{root}/api/tags") or {}).get("models", [])
+               if _matches(name, {x.get("name")}))
 
 
 def ollama_installed(root: str) -> list[dict]:
     """What an Ollama has pulled: name, bytes on disk, parameters, quantization."""
     if _fake():
         return []
-    return [{"name": x.get("name"), "size": x.get("size"),
+    return [{"name": x.get("name"), "size": x.get("size"), "cloud": _cloud_row(x),
              "params": (x.get("details") or {}).get("parameter_size"),
              "quant": (x.get("details") or {}).get("quantization_level")}
             for x in (_get(f"{root}/api/tags") or {}).get("models", [])]
 
 
-def ollama_show(root: str, name: str) -> dict:
+def ollama_show(root: str, name: str, timeout: float = 30) -> dict:
     """Ollama's own facts about a pulled model: its capabilities, trained context length, and
     the num_ctx its Modelfile sets, if any."""
     if _fake():
         return {"capabilities": ["tools", "thinking"], "context_length": None, "num_ctx": None}
-    body = _post(f"{root}/api/show", {"model": name}, timeout=30)
+    body = _post(f"{root}/api/show", {"model": name}, timeout=timeout)
     ctx = next((v for k, v in (body.get("model_info") or {}).items()
                 if k.endswith(".context_length")), None)
     num = next((int(p.split()[1]) for p in (body.get("parameters") or "").splitlines()
@@ -808,15 +1097,17 @@ def ollama_served_context(root: str, name: str) -> int | None:
     Ollama's own default would say (it varies by version and VRAM)."""
     if _fake():
         return None
-    for x in (_get(f"{root}/api/ps") or {}).get("models", []):
+    ps, num = _get(f"{root}/api/ps"), None
+    for x in (ps or {}).get("models", []):
         if _matches(name, {x.get("name")}) and x.get("context_length"):
             return int(x["context_length"])
-    try:
-        num = ollama_show(root, name).get("num_ctx")
-    except Exception:
-        num = None
-    env = hardware.ollama_env().get("OLLAMA_CONTEXT_LENGTH")
-    return num or (int(env) if env and env.isdigit() else None)
+    if ps is not None:  # one that didn't answer /api/ps won't answer /api/show: a sleeping LAN
+        try:            # box cost 30 s a model here, and doctor ran past 2 minutes (the 2026-11-16 audit)
+            num = ollama_show(root, name, timeout=10).get("num_ctx")  # metadata, not a load
+        except Exception:
+            num = None
+    # OLLAMA_CONTEXT_LENGTH is this machine's service's: it says nothing of another host's
+    return num or (hardware.ollama_context()[0] if _this_host(urlparse(root).hostname) else None)
 
 
 def ollama_pull(root: str, name: str, say=print) -> None:
@@ -827,7 +1118,7 @@ def ollama_pull(root: str, name: str, say=print) -> None:
     req = urllib.request.Request(f"{root}/api/pull", data=json.dumps({"model": name}).encode(),
                                  headers={"Content-Type": "application/json"})
     shown, last = -1, ""
-    with urllib.request.urlopen(req, timeout=24 * 3600) as r:
+    with _open(req, timeout=24 * 3600) as r:
         for raw in r:
             ev = json.loads(raw or b"{}")
             if ev.get("error"):
@@ -850,7 +1141,7 @@ def ollama_delete(root: str, name: str) -> None:
         return
     req = urllib.request.Request(f"{root}/api/delete", data=json.dumps({"model": name}).encode(),
                                  headers={"Content-Type": "application/json"}, method="DELETE")
-    urllib.request.urlopen(req, timeout=60).close()
+    _open(req, timeout=60).close()
 
 
 def set_override(model_id: str, key: str, value) -> None:
@@ -877,9 +1168,12 @@ def write_entry(provider: str, name: str, entry: dict | None) -> None:
     entries = prov.setdefault("models", {})
     if entry is None:
         entries.pop(name, None)
+        change = f'delete "{name}" from provider {provider}\'s "models"'
     else:  # keys added by hand (variants, options) stay
         old = entries.get(name) or {}
         entries[name] = {**old, **entry, "options": {**(old.get("options") or {}), **(entry.get("options") or {})}}
         if not entries[name]["options"]:
             del entries[name]["options"]
-    write_config(cfg)
+        change = (f'under provider {provider}\'s "models", merge into "{name}" (keeping keys you '
+                  f"added): {json.dumps(entry)}")  # wb's own keys only: never the rest of the config
+    write_config(cfg, change)
