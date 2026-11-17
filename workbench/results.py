@@ -5,9 +5,11 @@ from . import gitops, skills, store
 
 
 def step(task: store.Task, landed: bool) -> dict:
-    """The step closing now (committed by wb next or accept, or dropped): its size, and whether
-    it fit the agent's context. A session that filled or compacted, an agent stuck, or Claude
-    taking over says it didn't. The router learns each model's slice from these (router.slice)."""
+    """The step closing now (committed by wb next or accept, or dropped): its size and how it
+    went. A session compacted, an agent stuck, Claude taking over, or review rounds the agent
+    caused (`reviews` less the `spec_rounds` Claude marked as the spec's) say it was too much; a
+    handover to a fresh session is the runner's normal way through a big step, counted, not held
+    against it. The router learns each model's slice from these (router.slice)."""
     st = task.status
     since = st.get("step_round") or 1
     try:
@@ -23,24 +25,30 @@ def step(task: store.Task, landed: bool) -> dict:
         compacted = bool(context_state(task).get("compactions"))
     except Exception:  # no session to export: nothing was compacted
         compacted = False
+    reviews = st.get("reviews", 0)  # wb next starts each step's count afresh
+    gaps = {g.get("round") for g in st.get("spec_gaps") or [] if (g.get("round") or 0) >= since}
     return {**size, "window": st.get("window"), "landed": landed, "compacted": compacted,
-            "overflow": compacted or any(e.get("kind") == "fresh" and e.get("overflow") for e in evs),
+            "handovers": sum(e.get("kind") == "fresh" and bool(e.get("overflow")) for e in evs),
+            "reviews": reviews, "spec_rounds": min(len(gaps), reviews),
             "stuck": stuck, "took_over": any(e.get("kind") == "takeover" for e in evs)}
 
 
 def record(task: store.Task, outcome: str, last_step: dict | None = None, **extra) -> dict:
     spec, st = task.spec, task.status
+    earlier = st.get("step_sizes") or []
+    reviews = sum(s.get("reviews") or 0 for s in earlier) + st.get("reviews", 0)  # every step's
     row = {"ts": store.now(), "task": task.name, "outcome": outcome, "model": spec.get("model"),
            "size": spec.get("size"), "repo": spec.get("repo"), "stack": spec.get("stack"),
            "rounds": st.get("round", 1),
            "auto_fixes": st.get("auto_fixes_total", 0) + st.get("auto_fixes", 0),
-           "reviews": st.get("reviews", 0),
+           "reviews": reviews,
+           "spec_rounds": min(len({g.get("round") for g in st.get("spec_gaps") or []}), reviews),
            "tests_ok": (st.get("tests") or {}).get("ok"),
            "minutes": round((store.now() - spec.get("created_at", store.now())) / 60, 1),
            "tok_in": st.get("tok_in", 0), "tok_out": st.get("tok_out", 0),
            "skills_offered": st.get("skills_ever") or [], "skills_loaded": skills.loaded(task),
            "skills_rev": st.get("skills_rev") or {},  # the version handed: judges each edit
-           "steps": (st.get("step_sizes") or []) + ([last_step] if last_step else []),
+           "steps": earlier + ([last_step] if last_step else []),
            "window": st.get("window"),
            "tuned": st.get("tuned") or {}, "explored": st.get("explored") or [],  # tuning.py
            "tuned_max": st.get("tuned_max") or {},

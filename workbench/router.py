@@ -16,8 +16,11 @@ is only ever routed trivial tasks, whatever it scores elsewhere (`wb model sizes
 
 How much one task should hold on a model (its slice) is learned the same way. The guess scales
 with the context window the model is served, from what was measured on a 32K one; each closed
-step then says whether a slice that size fit (results.step). The biggest that fit sets a floor,
-the smallest that overflowed a ceiling, so a big window on a strong machine earns big tasks.
+step then says how a slice that size went (results.step): well when it landed with at most one
+review round the agent caused, badly when a session compacted, the agent got stuck, or it took
+BAD_REVIEWS rounds. Handing over to a fresh session isn't held against a step: that is how the
+runner gets through one. The biggest that went well sets a floor, the smallest that went badly a
+ceiling, so a big window on a strong machine earns big tasks.
 
 How long the agent may think, or go quiet, before the runner acts (budgets) is learned too: each
 round's session says how fast the model reads and writes on this machine (record_speed).
@@ -29,7 +32,7 @@ import statistics
 from dataclasses import dataclass
 from pathlib import Path
 
-from . import gitops, models, store
+from . import gitops, models, store, tuning
 
 QUALITY_MARGIN = 0.15
 LIKE_PRIOR = 2  # how many tasks of the same stack the overall record weighs as
@@ -39,6 +42,7 @@ SIZES = ("trivial", "significant")
 # more, up to GUESS_MAX times that; past it, only steps that fit earn more.
 BASE_WINDOW, BASE_FILES, BASE_LINES = 32768, 3, 150
 GUESS_MAX = 4
+BAD_REVIEWS = 2  # review rounds the agent caused at which a step held too much
 
 
 @dataclass
@@ -183,17 +187,26 @@ def slice(m: models.Model) -> Slice:
     basis = f"{window // 1024}K window" if window else "window unknown"
     steps = [s for r in store.results() if r.get("model") == m.id
              for s in r.get("steps") or [] if s.get("files") and (not window or s.get("window") in (None, window))]
-    fit = [s for s in steps if s["landed"] and not (s["overflow"] or s["stuck"] or s["took_over"])]
-    over = [s for s in steps if s["overflow"] or s["stuck"]]
-    if over:  # below the smallest step that didn't fit
+    went = [_went(s) for s in steps]
+    fit = [s for s, w in zip(steps, went) if w == "well"]
+    over = [s for s, w in zip(steps, went) if w == "badly"]
+    if over:  # below the smallest step that went badly
         files = min(files, max(1, min(s["files"] for s in over) - 1))
         lines = min(lines, max(50, min(s["lines"] for s in over) * 3 // 4))
-    if fit:  # at least the biggest that did
+    if fit:  # at least the biggest that went well
         files, lines = max(files, max(s["files"] for s in fit)), max(lines, max(s["lines"] for s in fit))
     if not steps:
         return Slice(files, lines, f"a guess from its {basis}; no steps measured yet")
-    return Slice(files, lines, f"{basis}; {len(fit)} of {len(steps)} measured steps fit, "
-                 f"{len(over)} overflowed or stuck")
+    return Slice(files, lines, f"{basis}; {len(fit)} of {len(steps)} measured steps went well, "
+                 f"{len(over)} badly")
+
+
+def _went(s: dict) -> str | None:
+    """"well", "badly", or None (dropped or taken over, nothing to say about its size). A step
+    recorded before handovers were normal has `overflow` set by them alone: it isn't read."""
+    if s.get("compacted") or s.get("stuck") or tuning.agent_reviews(s) >= BAD_REVIEWS:
+        return "badly"
+    return "well" if s["landed"] and not s.get("took_over") else None
 
 
 # ---- budgets: how long a round may think or go quiet, from the model's measured speed ----

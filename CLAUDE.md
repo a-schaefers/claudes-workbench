@@ -46,7 +46,8 @@ what either says (a command, a flag, a default, a guard, a file) updates it in t
     corrected by real results (accepted / tried, per size; on the repo's stack first, `gitops.stack`,
     the whole record its prior, `LIKE_PRIOR`). And each
     model's slice (`slice`): files and lines per task, guessed from its window (measured on 32K,
-    scaled up to GUESS_MAX) and corrected by the steps that fit or overflowed. And its `budgets`:
+    scaled up to GUESS_MAX) and corrected by how each step went (`_went`: compacted, stuck or BAD_REVIEWS agent-caused
+    rounds is badly; a handover isn't held against it). And its `budgets`:
     the think, silence and round limits, longer for a model measured slow (`speed.json`, which
     the runner fills from each round's session export; never below 420/900/2400 s).
   - `events.py`: event normalization and the stuck detector.

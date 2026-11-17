@@ -412,13 +412,14 @@ more round.
 **The slice.** How much one task should hold on a model is learned like the router's choice. The
 first guess scales with the window it is served: two or three files and about 150 new lines on
 32K (what was measured), proportionally more on a bigger window, up to four times that. Each step
-that closes (`wb next`, `accept`, `discard`) records its files and added lines, and whether it fit:
-no session filled past its handover point or was compacted, the agent didn't get stuck, and Claude didn't take
-over. Check-ins and reports also name changed files the spec never mentions (`NOTE: the spec
-doesn't name src/flow.c`), where an agent's drift shows first. The biggest step that fit raises
-the slice past the guess; the smallest that didn't lowers
-it. `wb models`, `wb start` and `wb scout` show it (`slice: ~3 files, ~150 new lines per task (32K
-window; 4 of 5 measured steps fit, 1 overflowed or stuck)`). The window itself comes from what
+that closes (`wb next`, `accept`, `discard`) records its files and added lines, and how it went:
+badly when a session was compacted, the agent got stuck, or it needed two review rounds the agent
+caused (a round marked `--spec-gap` is Claude's, not the agent's); well when it landed short of
+that. A handover to a fresh session is counted but not held against the step: it is how the
+runner gets through a big one, and its cost shows in the task's time. Check-ins and reports also name changed files the spec never mentions (`NOTE: the spec
+doesn't name src/flow.c`), where an agent's drift shows first. The biggest step that went well
+raises the slice past the guess; the smallest that went badly lowers it. `wb models`, `wb start` and `wb scout` show it (`slice: ~3 files, ~150 new lines per task (32K
+window; 4 of 5 measured steps went well, 1 badly)`). The window itself comes from what
 Ollama serves the model (the loaded model, its Modelfile's `num_ctx`, or `OLLAMA_CONTEXT_LENGTH`);
 `wb model add` writes that, with an output budget of an eighth of it, and `wb doctor` flags an entry
 that claims more than Ollama serves (prompts would be cut off) or less (tasks could be bigger). A session stays bound to the directory it was made in, so context carries over only
@@ -436,7 +437,7 @@ on your machine, not fixed. The first is the handover point. Earlier means more 
 each re-reading files; later means working in a crowded context, where a model gets sloppier.
 Each task runs at one value: usually the best so far, while one task in five tries the value
 next to it. When a task closes, its value scores the result: 1 for accepted, divided by one plus
-its review rounds, less 0.25 if OpenCode still had to compact, and up to ±0.15 for being faster
+the review rounds the agent caused (every step's; a `--spec-gap` round is Claude's), less 0.25 if OpenCode still had to compact, and up to ±0.15 for being faster
 or slower than that model's usual task. Discarded scores 0. Each value's mean is smoothed
 toward the others' (two tasks' worth), so one lucky task moves nothing. The pick walks a step
 at a time toward whatever scores best. Values past the model's compaction point are never tried

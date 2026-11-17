@@ -27,7 +27,7 @@ import subprocess
 import tempfile
 from pathlib import Path
 
-from . import scan, store
+from . import scan, store, tuning
 
 NAME = re.compile(r"^[a-z0-9]+(-[a-z0-9]+)*$")
 MAX_DESCRIPTION = 300   # all an agent sees before it decides to load the skill
@@ -299,8 +299,8 @@ def _tally() -> dict:
 def _count(t: dict, r: dict) -> None:
     t["n"] += 1
     t["accepted"] += r.get("outcome") == "accepted"
-    t["first_try"] += r.get("outcome") == "accepted" and not r.get("reviews")
-    t["reviews"] += r.get("reviews") or 0
+    t["first_try"] += r.get("outcome") == "accepted" and not tuning.agent_reviews(r)
+    t["reviews"] += tuning.agent_reviews(r)  # a round the spec cost isn't the skill's
 
 
 def usage(current: dict[str, str] | None = None) -> dict[str, dict]:
