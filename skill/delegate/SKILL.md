@@ -91,12 +91,19 @@ and §2. That holds in plan mode, which is read-only: read the code, `wb models`
 if you can, and start nothing until the plan is approved; then write the first spec and
 `wb start` at once. Per step:
 - **One concern**, no bigger than the slice `wb models` gives the model that will take it, and
-  its size (trivial or significant). A step you can't size is two steps.
+  its size (trivial or significant). A step you can't size is two steps. Size it by the bytes the
+  agent will read (`wc -c`), not the files: a two-line edit in a 2,000-line file still gets the
+  file read (seen: 39% of a 32K window gone before the first edit, then a compaction).
 - **The files**: those to read first, those to create or change, and the existing code to imitate.
 - **Exact interfaces** for anything later steps or other code rely on: names, signatures,
   constants, file formats. Settle them in the plan; agents rename what isn't pinned.
 - **Its acceptance command**, and the worked examples it tests, each number checked against
   every rule. A step whose done-ness you can't state as a command isn't ready to hand off.
+  Run it on the base before `wb start`: it runs in the agent's lane, so a test that writes
+  outside it or races under load fails there whatever the agent does, and the agent spends its
+  rounds on failures it didn't cause (seen: `whoami` and /tmp probes). It should fail only for
+  what the step changes, and check every listed change (each old string gone, each new one
+  there), not just the theme: a small model skips one item of a list.
 - **Order**: logic, then its tests, then UI; a step that needs another's interface comes after it,
   through `wb next` on the same agent when it is the same area.
 - **What stays yours**, marked apart: git, CLAUDE.md, choices and setup only the user can make

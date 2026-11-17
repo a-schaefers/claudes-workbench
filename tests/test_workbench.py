@@ -658,17 +658,17 @@ def write_skill(path: Path, name: str, description: str, body: str = "Do it this
 class SkillLibrary(Base):
     """Claude's skills for the agents: written and checked, handed to one task, taken back, judged."""
 
-    def draft(self, name, description="Use when drawing triangles with raylib.", body="Steps.\n"):
+    def draft(self, name, description="Use when drawing bar charts as SVG.", body="Steps.\n"):
         return write_skill(Path(self.tmp.name) / "drafts" / name, name, description, body)
 
     def test_add_checks_the_skill_and_keeps_its_history(self):
         from workbench import skills
-        self.assertIn("added raylib-2d", run_wb("skill", "add", "raylib-2d", "--from",
-                                                 str(self.draft("raylib-2d")), "-m", "winding order"))
-        self.assertIn("updated raylib-2d", run_wb("skill", "add", "raylib-2d", "--from", str(
-            self.draft("raylib-2d", body="Better steps.\n") / "SKILL.md"), "-m", "clearer"))
-        self.assertIn("Better steps.", run_wb("skill", "show", "raylib-2d"))
-        self.assertEqual(len(skills.history("raylib-2d")), 2)            # why each change was made
+        self.assertIn("added svg-charts", run_wb("skill", "add", "svg-charts", "--from",
+                                                 str(self.draft("svg-charts")), "-m", "axis labels"))
+        self.assertIn("updated svg-charts", run_wb("skill", "add", "svg-charts", "--from", str(
+            self.draft("svg-charts", body="Better steps.\n") / "SKILL.md"), "-m", "clearer"))
+        self.assertIn("Better steps.", run_wb("skill", "show", "svg-charts"))
+        self.assertEqual(len(skills.history("svg-charts")), 2)            # why each change was made
         for why, make in (("directory is 'x'", lambda: self.draft("other-name") / "SKILL.md"),
                           ("chars (max", lambda: self.draft("x", "Use when " + "very " * 80)),
                           ("bytes (max", lambda: self.draft("x", body="y" * 9000))):
@@ -1280,8 +1280,8 @@ class Routing(Base):
 
     def test_an_old_result_without_a_stack_is_read_from_its_repo(self):
         from workbench import router
-        (self.repo / "game.c").write_text("int main(void) { return 0; }\n")
-        (self.repo / "game.h").write_text("\n")
+        (self.repo / "app.c").write_text("int main(void) { return 0; }\n")
+        (self.repo / "app.h").write_text("\n")
         (self.repo / "notes.md").write_text("docs say nothing about the stack\n")
         subprocess.run(["git", "-C", str(self.repo), "add", "-A"], check=True)
         subprocess.run(["git", "-C", str(self.repo), "commit", "-qm", "c"], check=True)
@@ -1423,7 +1423,7 @@ class Projects(Base):
         return subprocess.run(["git", "-C", str(d), *a], capture_output=True, text=True).stdout.strip()
 
     def test_init_a_new_project(self):
-        d = Path(self.tmp.name) / "game"
+        d = Path(self.tmp.name) / "notes-app"
         os.environ.update(GIT_CONFIG_GLOBAL=str(Path(self.tmp.name) / "gitconfig"))
         (Path(self.tmp.name) / "gitconfig").write_text("[user]\n\temail = t@t\n\tname = t\n"
                                                         "[init]\n\tdefaultBranch = trunk\n")
@@ -1433,7 +1433,7 @@ class Projects(Base):
         self.assertEqual(self.git(d, "branch", "--show-current"), "trunk")
         self.assertEqual(self.git(d, "log", "--format=%s"), "Initial commit")
         self.assertEqual(self.git(d, "remote"), "")             # no remote until the user names one
-        (d / "CLAUDE.md").write_text("# game\n")
+        (d / "CLAUDE.md").write_text("# notes-app\n")
         self.git(d, "add", "CLAUDE.md"); self.git(d, "commit", "-qm", "docs: CLAUDE.md")
         out = run_wb("init", str(d))
         self.assertIn("AGENTS.md → CLAUDE.md", out)
@@ -1661,7 +1661,7 @@ class WebChat(Base):
 
     def test_a_message_its_receipt_and_the_reply(self):
         tok = self.chat.token()
-        code, r = self.call("/api/send", {"text": "how is the game going?"}, token=tok)
+        code, r = self.call("/api/send", {"text": "how is the refactor going?"}, token=tok)
         self.assertEqual(code, 200)
         self.assertIsNone(r["listener"])                            # nobody listening yet
         mid = r["message"]["id"]
@@ -1670,10 +1670,10 @@ class WebChat(Base):
         run_wb("chat", "ack", mid, "--by", "s1")
         self.assertEqual(run_wb("chat", "pending"), "")
         store.write_json(self.chat.chat_dir() / "listener.json",
-                         {"session": "s1", "cwd": "/home/u/game", "ts": store.now()})
+                         {"session": "s1", "cwd": "/home/u/project", "ts": store.now()})
         run_wb("chat", "reply", "--text", "Step 2 is in review.")
         _, st = self.call("/api/state", token=tok)
-        self.assertEqual(st["listener"]["cwd"], "/home/u/game")
+        self.assertEqual(st["listener"]["cwd"], "/home/u/project")
         mine, reply = st["messages"]
         self.assertEqual(mine["received"]["by"], "s1")
         self.assertEqual((reply["from"], reply["text"]), ("claude", "Step 2 is in review."))
@@ -1757,7 +1757,7 @@ class SkillLearning(Base):
     """The loop that makes the library better by itself: lessons gathered from each task for
     Claude, skills patched in place and judged by version, skills from outside scanned first."""
 
-    def draft(self, name, description="Use when drawing triangles with raylib.", body="Steps.\n"):
+    def draft(self, name, description="Use when drawing bar charts as SVG.", body="Steps.\n"):
         return write_skill(Path(self.tmp.name) / "drafts" / name, name, description, body)
 
     def refused(self, *argv) -> str:
@@ -1922,21 +1922,21 @@ class SkillLearning(Base):
         self.assertEqual([x for x in lessons.survey() if x["kind"] == "agent"], [])
 
     def test_start_names_the_library_skills_a_spec_seems_to_need(self):
-        run_wb("skill", "add", "raylib-2d", "--from", str(self.draft(
-            "raylib-2d", "Use when drawing 2D shapes or text with raylib.")), "-m", "a")
+        run_wb("skill", "add", "svg-charts", "--from", str(self.draft(
+            "svg-charts", "Use when drawing charts or labels as SVG.")), "-m", "a")
         run_wb("skill", "add", "sql-migrations", "--from", str(self.draft(
             "sql-migrations", "Use when writing database migrations.")), "-m", "b")
-        self.spec.write_text("Draw the score as text with raylib in the top corner.\n")
+        self.spec.write_text("Draw the totals as labels in an SVG chart in the top corner.\n")
         out = self.start("t-sug", "ok")
-        self.assertIn("library skills that may fit: raylib-2d (wb skill hand t-sug <name>)", out)
+        self.assertIn("library skills that may fit: svg-charts (wb skill hand t-sug <name>)", out)
         self.assertNotIn("sql-migrations", out)
         store.append_jsonl(store.home() / "results.jsonl", {          # it has worked in one other repo
-            "repo": "/elsewhere/game", "outcome": "accepted", "skills_offered": ["raylib-2d"],
-            "skills_loaded": ["raylib-2d"]})
+            "repo": "/elsewhere/dashboard", "outcome": "accepted", "skills_offered": ["svg-charts"],
+            "skills_loaded": ["svg-charts"]})
         out = self.start("t-sug2", "ok")
-        self.assertIn("may fit: raylib-2d (loaded so far only in game)", out)
+        self.assertIn("may fit: svg-charts (loaded so far only in dashboard)", out)
         self.assertIn("loaded in 1 repo", run_wb("skill", "list"))
-        self.spec.write_text("Parse the rows of the map; no raylib in this file.\n")
+        self.spec.write_text("Parse the rows of the table; no charts in this file.\n")
         self.assertNotIn("may fit", self.start("t-sug0", "ok"))   # one shared word is chance
 
 
@@ -1980,14 +1980,14 @@ class Drift(unittest.TestCase):
 
     def test_outside_spec_names_files_the_spec_never_mentions(self):
         with tempfile.TemporaryDirectory() as d:
-            Path(d, "prompt.md").write_text("Write `src/tilemap.c`, `tests/test_tilemap.c` "
+            Path(d, "prompt.md").write_text("Write `src/parser.c`, `tests/test_parser.c` "
                                              "and their Makefile lines.")
             task = types.SimpleNamespace(status={}, round_dir=lambda n: Path(d))
-            files = ("?? src/tilemap.c\n?? tests/test_tilemap.c\n M Makefile\n"
+            files = ("?? src/parser.c\n?? tests/test_parser.c\n M Makefile\n"
                      "?? src/flow.c\n M src/main.c")
             self.assertEqual(runner.outside_spec(task, files), ["src/flow.c", "src/main.c"])
             # a spec that names no file at all says nothing about scope
-            Path(d, "prompt.md").write_text("Make the bats smarter.")
+            Path(d, "prompt.md").write_text("Make the search faster.")
             self.assertEqual(runner.outside_spec(task, files), [])
 
 

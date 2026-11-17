@@ -405,7 +405,7 @@ def trigger(description: str) -> str:
     return description.split(":", 1)[0]
 
 
-SUGGEST_MIN = 3  # distinct shared words: one ("raylib" in a spec that only says not to use it) is chance
+SUGGEST_MIN = 3  # distinct shared words: one ("charts" in a spec that only says it draws none) is chance
 
 
 def suggest(text: str, held: list[str] | None = None, n: int = 3) -> list[str]:
