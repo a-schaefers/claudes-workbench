@@ -154,8 +154,8 @@ to read the diff.
 | `/delegate-pane` | open the pane: every delegated task, and the agent's work live |
 | `/delegate-models` | check now which local models suit your hardware best (it also happens weekly) |
 | `/delegate-update` | update Workbench now: `wb`, the skill and the pane (it checks weekly and tells you) |
-| `/delegate-quit` | leave delegate mode: every agent stops now, their work is kept for later |
-| `/delegate-quit-and-hand-back-claude` | leave delegate mode and have Claude finish the agents' tasks itself |
+| `/delegate-quit` | leave delegate mode: this session's agents stop now, their work is kept for later |
+| `/delegate-quit-and-hand-back-claude` | leave delegate mode and have Claude finish this session's agents' tasks itself |
 
 **Away from the computer?** `wb chat serve` runs a small web chat with the running Claude session,
 and `wb chat url` prints its private link (on Linux, `systemctl --user link

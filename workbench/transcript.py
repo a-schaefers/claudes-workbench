@@ -9,6 +9,7 @@ Two sources, merged by time:
 """
 from __future__ import annotations
 
+import collections
 import difflib
 import json
 import os
@@ -447,23 +448,36 @@ def header(task: store.Task, paint: Painter, data: dict | None = None) -> str:
     return "\n".join(lines)
 
 
+JSON_LINE_CHARS = 2000  # the pane cuts each line to this anyway (the mod's LINE_CHARS)
+
+
 def follow(task: store.Task, verbose: bool = False, once: bool = False, color: bool | None = None,
-           out=None, poll: float = 1.5, as_json: bool = False) -> None:
+           out=None, poll: float = 1.5, as_json: bool = False, last: int = 0) -> None:
     """Print the transcript, then (unless once) keep printing what's new until the task closes.
-    as_json writes one {"s": style, "t": text} per line, for the Claude Code pane to style."""
+    as_json writes one {"s": style, "t": text} per line, for the Claude Code pane to style, each
+    cut to JSON_LINE_CHARS, and with `last` only the newest `last` transcript lines (the meta,
+    activity, clock and phase lines always): the engine keeps only the first 4 MiB of the mod's
+    read, so a long task's newest lines were the ones lost (the 2026-11-16 audit)."""
     out = out or sys.stdout
     paint = Painter(out.isatty() if color is None else color)
+    held = collections.deque(maxlen=last) if as_json and last else None
     if as_json:
-        def emit(style, text):
-            print(json.dumps({"s": style, "t": text}, ensure_ascii=False), file=out, flush=True)
+        def emit(style, text, keep=False):
+            if len(text) > JSON_LINE_CHARS:
+                text = text[:JSON_LINE_CHARS - 1] + "…"
+            row = json.dumps({"s": style, "t": text}, ensure_ascii=False)
+            if held is not None and not keep:
+                held.append(row)
+            else:
+                print(row, file=out, flush=True)
     else:
         clear = "\r\033[K" if out.isatty() else ""  # over the activity row, redrawn after
         def emit(style, text):
             print(clear + paint(style, text), file=out, flush=True)
-    sid = find_session(task)
+    sid = first_sid = find_session(task)
     first = export(sid) if sid else {}
     if as_json:
-        emit("meta", model_line(task, first))
+        emit("meta", model_line(task, first), keep=True)
     else:
         print(header(task, paint, first), file=out, flush=True)
     seen: set[str] = set()
@@ -472,7 +486,10 @@ def follow(task: store.Task, verbose: bool = False, once: bool = False, color: b
     worktree = str(task.worktree)
     while True:
         sid = find_session(task)
-        data = export(sid) if sid else {}
+        # the first pass reuses the export just made: every `wb watch --json` (the pane's, every
+        # few seconds) ran two OpenCode exports where one does (the 2026-11-16 audit)
+        data = first if first is not None and sid == first_sid else export(sid) if sid else {}
+        first = None
         entries = task_entries(task) + session_entries(data, worktree, verbose)
         for old in task.status.get("sessions") or []:  # earlier sessions, before a fresh start
             entries += session_entries(export(old), worktree, verbose)
@@ -486,10 +503,12 @@ def follow(task: store.Task, verbose: bool = False, once: bool = False, color: b
                 emit(style, text)
         phase = task.status.get("phase")
         if as_json:
+            while held:
+                print(held.popleft(), file=out, flush=True)
             now_line = activity(task, data)
             if now_line:
-                emit("activity", now_line)
-            emit("clock", clock_line(task, data=data))
+                emit("activity", now_line, keep=True)
+            emit("clock", clock_line(task, data=data), keep=True)
         elif out.isatty() and phase not in store.CLOSED:
             now_line = activity(task, data)
             spin = "✻✳✶✢·"[int(time.time() * 2) % 5]
@@ -498,7 +517,7 @@ def follow(task: store.Task, verbose: bool = False, once: bool = False, color: b
             print("\r\033[K" + row, end="", file=out, flush=True)
         if phase != last_phase and phase in PHASE_LINE and (last_phase is not None or once
                                                             or phase not in ("running",)):
-            emit(*PHASE_LINE[phase])
+            emit(*PHASE_LINE[phase], **({"keep": True} if as_json else {}))
         last_phase = phase
         if once or phase in store.CLOSED:
             return

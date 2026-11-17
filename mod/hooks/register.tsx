@@ -7,11 +7,17 @@
 // through each task's `acked` file, so a notification wakes Claude once, by whichever got it first.
 // A wake is held while Claude's main loop is mid-turn (a prompt submitted then would queue and
 // arrive stale) and checked against the task's phase when it is finally sent.
-// Claude's own context. Whatever compacts it (the engine at its limit, /compact, this mod), the
-// summary is told to keep the delegation state, and after a compaction or /clear the open tasks
-// come back as a context block. At a task boundary (one just closed, none waiting for Claude) the
-// mod compacts early once Claude is COMPACT_AT of the way to the engine's own compaction, so a
-// long delegation session sheds finished tasks' detail at a clean point instead of mid-review.
+// A session acts only on its own tasks (`mine`): those whose task.json `cwd` (where `wb start`
+// ran) or `repo` is the session's directory, inside it, or holds it; an old task with neither is
+// everyone's. Another project's session wakes for, stops and hands back its own (the 2026-11-16
+// audit: two projects at once, each session was woken for and quit the other's). A session with
+// no person at it (`claude -p`, the SDK, until a surface attaches) stays quiet.
+// Claude's own context. In delegate mode, whatever compacts it (the engine at its limit, /compact,
+// this mod), the summary is told to keep the delegation state, and after a compaction or /clear
+// the open tasks come back as a context block. At a task boundary (one of this session's just
+// closed, none waiting for Claude) the mod compacts early once Claude is COMPACT_AT of the way to
+// the engine's own compaction, so a long delegation session sheds finished tasks' detail at a
+// clean point instead of mid-review.
 const COMPACT_AT = 0.5
 const KEEP_ON_COMPACT =
   'Workbench delegation is in progress. Keep: the user\'s goals and decisions, which tasks were ' +
@@ -48,10 +54,10 @@ const SCOUT_NOTE =
 // Delegate mode: /delegate turns it on for the rest of the session and opens the pane, its sign.
 // The user then asks for things in plain words, and Claude hands the coding to local agents as
 // the skill says. A fresh or compacted conversation is told the mode is still on and where the
-// skill is (`delegate-mode` block). Two slash commands end it: /delegate-quit stops every agent
-// at once (`wb stop --all`) and tells Claude so; /delegate-quit-and-hand-back-claude stops the
-// agents and hands their tasks to Claude (`wb takeover --all`), starting a turn for Claude to
-// finish them. Either closes the pane.
+// skill is (`delegate-mode` block). Two slash commands end it: /delegate-quit stops this session's
+// agents at once (`wb stop --all --repo <cwd>`) and tells Claude so;
+// /delegate-quit-and-hand-back-claude stops them and hands their tasks to Claude (`wb takeover
+// --all --repo <cwd>`), starting a turn for Claude to finish them. Either closes the pane.
 // Under the task list the pane follows one task live: the conversation between Claude and the
 // agent, every tool call and test, as `wb watch --json` prints it.
 import { atom, read, update } from 'claude-code'
@@ -72,13 +78,18 @@ const OLDEST_WAKE_MS = 60 * 60 * 1000 // never wake for a notification older tha
 
 // Change the tag when WbTask's fields change: a reload declines what the earlier shape stored.
 const tasks = atom({ plugin: 'workbench', key: 'tasks' } as const, [] as WbTask[], {
-  shape: 'tasks-1',
+  shape: 'tasks-2',
 })
 
 const live = atom({ plugin: 'workbench', key: 'live' } as const, { task: '', lines: [] } as WbLive, {
   shape: 'live-1',
 })
-const KEEP_LINES = 2000 // the pane scrolls back through this much history
+const KEEP_LINES = 2000 // the pane scrolls back through this much history (`wb watch --last`)
+// One heredoc command or minified write is a single line of 100 KB or more, and alone it took the
+// whole HISTORY_CHARS budget, hiding everything before it (the 2026-11-16 audit): each line is
+// cut to this first.
+const LINE_CHARS = 2000
+const LIVE_EVERY_MS = 5000 // a running task's transcript is re-read at most this often, unless its status moved
 // The engine draws a pane's first 100,000 characters of text and drops the rest, and the
 // apprentice comes after the history: a long task's history pushed its words (and its mouth)
 // past the cut, leaving an empty bubble (seen 2026-11-16, 119,728 characters). So the history
@@ -231,10 +242,10 @@ const HEADLINE: Record<string, string> = {
   failed: 'failed',
   checkin: 'check-in (still running)',
 }
-const NEXT: Record<string, (n: string) => string> = {
+const NEXT: Record<string, (n: string, id?: string) => string> = {
   review: n => `Review it as /delegate says: \`wb diff ${n}\`, then \`wb accept ${n} -m "…"\` ` +
     `or \`wb feedback ${n} --message <file>\`.`,
-  question: n => `Answer with \`wb answer ${n} --text "…"\`; it is blocked until then. A ` +
+  question: (n, id) => `Answer with \`wb answer ${n}${id ? ` --id ${id}` : ''} --text "…"\`; it is blocked until then. A ` +
     `PERMISSION request (a refused command or directory): the \`wb allow ${n}\` it names ` +
     `(\`--always\` to keep it) when it is reasonable, which answers it and restarts the agent ` +
     `with it; else answer with another way.`,
@@ -268,18 +279,29 @@ const PANE_CMD = 'delegate-pane'
 const UPDATE = 'delegate-update'
 const QUIT = 'delegate-quit'
 const HAND_BACK = 'delegate-quit-and-hand-back-claude'
-const QUIT_NOTE = (out: string) =>
-  `[workbench] The user ran /${QUIT}: everything delegated was stopped (\`wb stop --all\`):\n` +
+// Tasks of another project's session are listed as left alone: theirs to stop or finish.
+const QUIT_NOTE = (out: string, ok: boolean) =>
+  `[workbench] The user ran /${QUIT}: ` + (ok
+    ? `this session's delegated agents were stopped (\`wb stop --all\`):\n`
+    : `but \`wb stop --all\` failed, so its agents may still be running (\`wb status\`):\n`) +
   `${out}\nDelegate mode is off: from now on work directly, without delegating. Don't finish, ` +
   `restart or clean up any of the stopped work unless they ask; real tasks keep their ` +
-  `worktrees (\`wb status --all\`).`
+  `worktrees (\`wb status --all\`). Tasks left alone belong to another project's session.`
 const DONE_NOTE = (out: string) =>
-  `[workbench] The user ran /${HAND_BACK}: the agents were stopped and their tasks ` +
+  `[workbench] The user ran /${HAND_BACK}: this session's agents were stopped and their tasks ` +
   `handed to you (\`wb takeover --all\`):\n${out}\n\nLeave delegate mode and finish the work ` +
-  `yourself, without pausing to ask. For each task: read what the agent left (\`wb diff <name>\`), ` +
+  `yourself, without pausing to ask. For each task taken over: read what the agent left (\`wb diff <name>\`), ` +
   `complete it in its worktree to your own standard, run its acceptance command, then ` +
-  `\`wb accept <name> -m "…"\` (add --merge only if the user asked for merging). Then carry on ` +
+  `\`wb accept <name> -m "…"\` (add --merge only if the user asked for merging). Tasks left ` +
+  `alone belong to another project's session: don't touch them unless the user asks. Then carry on ` +
   `with the rest of the user's request directly, without delegating, and report briefly at the end.`
+// With the plugin's wake setting off, no [workbench] prompt comes: Claude must not end its turn
+// waiting for one (the 2026-11-16 audit).
+const WAKE_OFF_NOTE =
+  'Wakes are off in this session (the workbench plugin\'s wake setting): no [workbench] prompt ' +
+  'will say when a task needs you. After `wb start`, tell the user it runs and that a toast says ' +
+  'when it is ready; pick it up when they ask (`wb report <name>`), and wait (`wb wait <name>`) ' +
+  'only if they ask you to.'
 
 // The module's own memory: reset by a reload, which runs register and session.start again.
 const mem = {
@@ -287,15 +309,22 @@ const mem = {
   root: '',
   startedAt: 0,
   lastDrawn: '',
-  lastNotifyLength: -1,
+  lastNotify: '-', // notify.jsonl's size and mtime when last read
   paneOpened: false,
   polling: false,
   watching: false,
   wb: 'wb',
   liveKey: '', // the followed task and its updated_at when last read
+  liveAt: 0, // when its transcript was last read
+  cwd: '', // the session's directory, resolved: which tasks are this session's (mine)
+  person: false, // someone can be at this session (not a bare `claude -p` or SDK run)
+  started: false, // the ears and timers run
   busy: false, // Claude's main loop is mid-turn: a wake would queue and arrive stale
   queued: [] as string[], // turns for Claude that a command asked for
-  open: new Set<string>(), // delegated tasks open at the last poll
+  queuedRetryAt: 0, // a queued turn the engine dropped is tried again from then
+  open: new Set<string>(), // this session's delegated tasks open at the last poll
+  delegated: false, // delegate mode was on in this load (a hand-back's compaction still keeps the state)
+  turnEndedAt: 0, // when Claude's last main-loop turn ended
   follow: true, // the pane sticks to the newest lines until the person scrolls up
   sawTurn: false, // the person has used this session: a weekly check may follow
   scoutAsked: false, // the weekly model check was raised in this load
@@ -303,9 +332,14 @@ const mem = {
   boundary: false, // one closed since: a moment to make room in Claude's context
   toasted: new Set<string>(),
   noticed: new Map<string, number>(), // each task's newest notice (its ts), as deliver last read
+  dropped: new Map<string, number>(), // a task whose wake the engine dropped, and when: rewake retries after a minute
+  warned: new Set<string>(), // one-time toasts already shown (a file unreadable, wb failing)
   chatSent: new Set<string>(), // web messages submitted by this load, awaiting their receipt
+  chatRetry: new Map<string, number>(), // a web message whose prompt was dropped: tried again from then
   chatUrlAt: 0, // when the web chat's link was last looked up
   eventsPid: 0, // the `wb events` child: its lines wake poll(); the chat counts it as this session
+  earsOk: false, // `wb events` has said hello in this load: wb runs
+  gone: new Set<string>(), // task directories closed past KEEP_CLOSED_MS: final, never read again
   again: false, // something changed while a poll ran: run another after it
   hasActive: false, // a task is running: the clock redraws
   lastPoll: 0,
@@ -316,24 +350,83 @@ const mem = {
   skill: '', // the /delegate skill's SKILL.md, for the delegate-mode block
 }
 
-// Every task directory, as the pane draws it. Closed tasks drop out after half an hour.
+// Whether path b is path a or inside it.
+const within = (a: string, b: string) => a === b || b.startsWith(a.endsWith('/') ? a : `${a}/`)
+
+// Whether a task is this session's: where `wb start` ran (task.json `cwd`) or its repo is the
+// session's directory, inside it, or holds it (a session started in a subdirectory, or in a
+// folder of several repos). A task with neither (from before `cwd` was kept) is everyone's.
+const mine = (t: { repo?: string; cwd?: string }) => {
+  const dirs = [t.cwd, t.repo].filter(Boolean) as string[]
+  return !mem.cwd || !dirs.length || dirs.some(d => within(d, mem.cwd) || within(mem.cwd, d))
+}
+
+// A toast shown once per load: something is wrong that the person should hear about once.
+const warnOnce = ($: any, key: string, text: string) => {
+  if (mem.warned.has(key)) return
+  mem.warned.add(key)
+  $.ui.toast(`workbench: ${text}`)
+}
+
+// The last line of what a failing command said (a traceback ends with the error itself).
+const brief = (out: string) => out.trim().split('\n').filter(Boolean).at(-1) ?? ''
+
+// A file's text, only its last `max` bytes (from a whole line) when it is longer; '' when it is
+// missing, null when it can't be read. $.fs.read rejects a file over 4 MiB, and notify.jsonl and
+// the chat's files only grow: past that, deliver read '' and no wake came again (the 2026-11-16
+// audit). `key` (size and mtime) tells a change without reading.
+async function readTail($: any, path: string, max: number): Promise<{ text: string; key: string } | null> {
+  const gone = async () => !(await $.fs.exists(path).catch(() => true))
+  let st
+  try {
+    st = await $.fs.stat(path)
+  } catch {
+    return (await gone()) ? { text: '', key: '' } : null
+  }
+  const key = `${st.size}@${st.mtimeMs}`
+  if (st.size <= max) {
+    try {
+      return { text: await $.fs.read(path), key }
+    } catch {
+      return (await gone()) ? { text: '', key: '' } : null
+    }
+  }
+  try {
+    const r = await $.process.run(['tail', '-c', String(max), path], { timeoutMs: 30_000 })
+    if (r.exitCode !== 0) return null
+    return { text: r.stdout.slice(r.stdout.indexOf('\n') + 1), key }
+  } catch {
+    return null
+  }
+}
+const NOTIFY_TAIL = 1 << 20 // far more than OLDEST_WAKE_MS's hour of notices
+const EVENTS_TAIL = 64 << 10 // the pane shows a task's last four events
+
+// Every task directory, as the pane draws it. Closed tasks drop out after half an hour, and are
+// then never read again in this load (a closed phase is final): every poll read both files of
+// every task ever created (the 2026-11-16 audit).
 async function scan($: any, root: string, now: number): Promise<WbTask[]> {
   const dir = `${root}/tasks`
   const entries = (await $.fs.exists(dir)) ? await $.fs.list(dir) : []
   const list: WbTask[] = []
+  const names = new Set<string>()
   for (const ent of entries) {
     if (ent.kind !== 'dir') continue
+    names.add(ent.name)
+    if (mem.gone.has(ent.name)) continue
     const base = `${dir}/${ent.name}`
-    const [st, sp] = await Promise.all([
-      readJson($, `${base}/status.json`), readJson($, `${base}/task.json`),
-    ])
-    if (!sp.name) continue
+    const st = await readJson($, `${base}/status.json`)
     const phase = String(st.phase ?? 'queued')
     const updatedAt = Number(st.updated_at ?? 0) * 1000
-    if (!ACTIVE.has(phase) && !NEEDS.has(phase) && now - updatedAt > KEEP_CLOSED_MS) continue
+    if (!ACTIVE.has(phase) && !NEEDS.has(phase) && now - updatedAt > KEEP_CLOSED_MS) {
+      if (phase === 'accepted' || phase === 'discarded') mem.gone.add(ent.name)
+      continue
+    }
+    const sp = await readJson($, `${base}/task.json`)
+    if (!sp.name) continue
     let recent: string[] = []
     if (ACTIVE.has(phase) || NEEDS.has(phase)) {
-      const text = await $.fs.read(`${base}/events.jsonl`).catch(() => '')
+      const text = (await readTail($, `${base}/events.jsonl`, EVENTS_TAIL))?.text ?? ''
       recent = parseLines(text).map(eventLine).filter(Boolean).slice(-4) as string[]
     }
     list.push({
@@ -342,8 +435,10 @@ async function scan($: any, root: string, now: number): Promise<WbTask[]> {
       tests: st.tests ? (st.tests.ok ? 'pass' : 'fail') : null,
       last: String(st.last ?? ''), createdAt: Number(sp.created_at ?? 0) * 1000, updatedAt,
       tokens: Number(st.tok_in ?? 0) + Number(st.tok_out ?? 0), recent,
+      repo: String(sp.repo ?? ''), cwd: String(sp.cwd ?? ''),
     })
   }
+  for (const name of mem.gone) if (!names.has(name)) mem.gone.delete(name) // removed by hand
 
   return list.sort((a, b) => a.createdAt - b.createdAt)
 }
@@ -354,9 +449,17 @@ async function scoutIfDue($: any, now: number): Promise<void> {
   const done = Number(st.done_at ?? 0) * 1000
   const offered = Number(st.offered_at ?? 0) * 1000
   if (now - done < SCOUT_EVERY_MS || now - offered < SCOUT_RETRY_MS) return
-  mem.scoutAsked = true
-  await $.fs.write(path, JSON.stringify({ ...st, offered_at: now / 1000 }))
+  await scoutOffered($, now)
   void $.prompt.submit({ text: SCOUT_NOTE })
+}
+
+// The model check is raised: not again in this load, nor by any session for a day. Also when
+// /delegate-models raised it: the weekly check came straight after (the 2026-11-16 audit).
+async function scoutOffered($: any, now: number): Promise<void> {
+  mem.scoutAsked = true
+  const path = `${mem.root}/scout.json`
+  const st = await readJson($, path)
+  await $.fs.write(path, JSON.stringify({ ...st, offered_at: now / 1000 })).catch(() => {})
 }
 
 async function compactAtBoundary($: any): Promise<void> {
@@ -383,27 +486,46 @@ async function compactAtBoundary($: any): Promise<void> {
   }
 }
 
-async function runWb($: any, args: string[]): Promise<string> {
+// `wb <args>`: ok when it exited 0, and what it said. A failing wb's traceback is not output to
+// pass on as if it were the answer (the 2026-11-16 audit: it reached Claude as "open tasks").
+// `wb update` takes the longest the engine allows: its steps may take 300 s each.
+async function runWb($: any, args: string[], timeoutMs = 120_000): Promise<{ ok: boolean; out: string }> {
   try {
-    const r = await $.process.run([mem.wb, ...args], { timeoutMs: 120_000 })
-    return `${r.stdout}${r.stderr}`.trim() || '(no output)'
+    const r = await $.process.run([mem.wb, ...args], { timeoutMs })
+    return { ok: r.exitCode === 0, out: `${r.stdout}${r.stderr}`.trim() || '(no output)' }
   } catch (err) {
-    return `could not run wb ${args.join(' ')}: ${err}`
+    return { ok: false, out: `could not run wb ${args.join(' ')}: ${err}` }
   }
 }
 
-// The task worth watching: the newest running one, else the newest waiting for Claude.
-const focusOf = (list: WbTask[]): WbTask | undefined => {
-  const newest = (ts: WbTask[]) => [...ts].sort((a, b) => b.updatedAt - a.updatedAt)[0]
-  return newest(list.filter(t => ACTIVE.has(t.phase))) ?? newest(list.filter(t => NEEDS.has(t.phase)))
+// `--repo <the session's directory>`: a quit or the status block takes this session's tasks only.
+const scope = () => (mem.cwd ? ['--repo', mem.cwd] : [])
+
+// The task worth watching. The one followed stays while it runs: with two running, choosing by
+// the latest status write swapped the pane between them on every tool call (the 2026-11-16
+// audit). Else the newest started that runs (running, testing, asking before queued: a queued one
+// shows nothing yet), else the newest waiting for Claude.
+const focusOf = (list: WbTask[], followed: string): WbTask | undefined => {
+  const kept = list.find(t => t.name === followed && ACTIVE.has(t.phase))
+  if (kept) return kept
+  const by = (ts: WbTask[], k: 'createdAt' | 'updatedAt') => [...ts].sort((a, b) => b[k] - a[k])[0]
+  return by(list.filter(t => ACTIVE.has(t.phase) && t.phase !== 'queued'), 'createdAt') ??
+    by(list.filter(t => t.phase === 'queued'), 'createdAt') ??
+    by(list.filter(t => NEEDS.has(t.phase)), 'updatedAt')
 }
 
-// Re-read the followed task's transcript: while it runs (the agent's session moves between
-// status writes), or once when it changed. Off the poll's path: an export takes a moment.
-async function refreshLive($: any, list: WbTask[]) {
-  const focus = focusOf(list)
+// Re-read the followed task's transcript, while the pane is shown: while it runs (the agent's
+// session moves between status writes) at most every LIVE_EVERY_MS, or once when it changed. Each
+// read is an OpenCode export, which every session ran back to back, pane or not (the 2026-11-16
+// audit). Off the poll's path: an export takes a moment.
+async function refreshLive($: any, list: WbTask[], now: number) {
+  if (mem.watching) return
+  const followed = (await read($, live)).task
+  const focus = focusOf(list, followed)
   const key = focus ? `${focus.name}@${focus.updatedAt}` : ''
-  if (mem.watching || (key === mem.liveKey && !(focus && ACTIVE.has(focus.phase)))) return
+  if (key === mem.liveKey && !(focus && ACTIVE.has(focus.phase) && now - mem.liveAt >= LIVE_EVERY_MS)) return
+  const pane = ((await $.ui.panes().catch(() => [])) as Row[]).find(p => p.id === PANE)
+  if (!pane?.isShown) return // read when it shows again: the key still differs
   mem.watching = true
   try {
     if (!focus) {
@@ -411,13 +533,23 @@ async function refreshLive($: any, list: WbTask[]) {
       await update($, live, () => ({ task: '', lines: [] }))
       return
     }
-    const r = await $.process.run([mem.wb, 'watch', focus.name, '--json'], { timeoutMs: 30_000 })
+    const r = await $.process.run([mem.wb, 'watch', focus.name, '--json', '--last', String(KEEP_LINES)],
+      { timeoutMs: 30_000 })
     if (r.exitCode !== 0) return
-    const lines = parseLines(r.stdout)
-      .map(x => ({ s: String(x.s ?? ''), t: String(x.t ?? '') }))
-      .slice(-KEEP_LINES)
     mem.liveKey = key
+    mem.liveAt = now
     const prev = await read($, live)
+    // Cut at the engine's 4 MiB, the newest lines are the ones lost: keep what was shown and say so
+    if (r.isStdoutTruncated) {
+      const why = { s: 'bad', t: `transcript too long for the pane: wb watch ${focus.name}` }
+      if (prev.task === focus.name && prev.lines.at(-1)?.t !== why.t) {
+        await update($, live, () => ({ task: focus.name, lines: [...prev.lines, why] }))
+      }
+      return
+    }
+    const lines = parseLines(r.stdout)
+      .map(x => ({ s: String(x.s ?? ''), t: clip(String(x.t ?? ''), LINE_CHARS) }))
+      .slice(-KEEP_LINES)
     if (prev.task !== focus.name || JSON.stringify(prev.lines) !== JSON.stringify(lines)) {
       await update($, live, () => ({ task: focus.name, lines }))
       // The engine keeps a window at the end once it is there, but the pane opens at its top:
@@ -431,14 +563,23 @@ async function refreshLive($: any, list: WbTask[]) {
   }
 }
 
-// The ears: a `wb events` child for the session's life, respawned if it dies.
+// The ears: a `wb events` child for the session's life, respawned if it dies. One that never says
+// hello (wb not on Claude Code's PATH, `wb setup` never run, a Python too old) was respawned every
+// 2 s for good, and nobody was told (the 2026-11-16 audit): it is said once, and the respawns back
+// off to a minute until wb has answered once.
 async function ears($: any) {
+  let wait = 2000
   for (;;) {
+    let why = 'it exited at once'
+    let hello = false
     try {
       const child = $.process.spawn({ argv: [mem.wb, 'events'] })
       let buf = ''
       for await (const { stream, text } of child) {
-        if (stream !== 'stdout') continue
+        if (stream !== 'stdout') {
+          if (!hello && text.trim()) why = brief(text)
+          continue
+        }
         buf += text
         let cut
         while ((cut = buf.indexOf('\n')) >= 0) {
@@ -446,24 +587,37 @@ async function ears($: any) {
           buf = buf.slice(cut + 1)
           let ev: Row
           try { ev = JSON.parse(line) } catch { continue }
-          if (ev.hello) mem.eventsPid = Number(ev.hello)
+          if (ev.hello) {
+            mem.eventsPid = Number(ev.hello)
+            mem.earsOk = hello = true
+            wait = 2000
+          }
           void poll($)
         }
       }
-    } catch {
-      // the child could not start or its stream closed: start another below
+    } catch (err) {
+      why = brief(String(err)) // the child could not start or its stream closed: start another below
     }
     mem.eventsPid = 0
+    if (!mem.earsOk) {
+      warnOnce($, 'ears', `can't run \`${mem.wb} events\` (${why}): the pane runs on the task ` +
+        `files alone. Put wb on Claude Code's PATH or set WB_BIN; wb doctor`)
+      wait = Math.min(wait * 2, 60_000)
+    }
     try {
-      await $.clock.sleep(2000)
+      await $.clock.sleep(wait)
     } catch {
       return // no clock to wait on (a test): the timer's safety poll stands in
     }
   }
 }
 
+// The weekly check waits for a quiet minute after a turn: raised the moment the first turn ended,
+// it buried the question Claude had just asked the person (the 2026-11-16 audit).
+const SCOUT_QUIET_MS = 60_000
+
 async function poll($: any) {
-  if (!mem.root) return
+  if (!mem.root || !mem.person) return
   if (mem.polling) { // a slow file system must not stack polls, but no change may be missed
     mem.again = true
     return
@@ -494,35 +648,55 @@ async function poll($: any) {
       mem.paneOpened = true
       void $.ui.open({ id: PANE, title: 'Workbench' })
     }
-    void refreshLive($, list)
-    if (!mem.busy && mem.queued.length) void $.prompt.submit({ text: mem.queued.shift()! })
-    const open = new Set(list.filter(t => ACTIVE.has(t.phase) || NEEDS.has(t.phase))
-      .map(t => t.name))
-    if ([...mem.open].some(name => !open.has(name))) mem.boundary = true
+    void refreshLive($, list, now)
+    if (!mem.busy && mem.queued.length && now >= mem.queuedRetryAt) void sendQueued($, mem.queued.shift()!)
+    const isOpen = (t: WbTask) => ACTIVE.has(t.phase) || NEEDS.has(t.phase)
+    // Only this session's tasks, and only in delegate mode, make a boundary: a task closing
+    // compacted every session's context, delegating or not (the 2026-11-16 audit).
+    const open = new Set(list.filter(t => isOpen(t) && mine(t)).map(t => t.name))
+    if (on && [...mem.open].some(name => !open.has(name))) mem.boundary = true
+    if (!on) mem.boundary = false
     mem.open = open
-    if (mem.boundary && !mem.busy && !list.some(t => NEEDS.has(t.phase))) {
+    if (mem.boundary && !mem.busy && !list.some(t => NEEDS.has(t.phase) && mine(t))) {
       mem.boundary = false
       await compactAtBoundary($)
     }
-    if (mem.sawTurn && !mem.busy && !mem.scoutAsked && open.size === 0) await scoutIfDue($, now)
-    if (mem.sawTurn && !mem.updateAsked) {
+    // the weekly check needs wb to run (`wb events` said hello) and a quiet minute after a turn
+    if (mem.sawTurn && mem.earsOk && !mem.busy && !mem.scoutAsked && !list.some(isOpen) &&
+      now - mem.turnEndedAt >= SCOUT_QUIET_MS) await scoutIfDue($, now)
+    if (mem.sawTurn && mem.earsOk && !mem.updateAsked) {
       mem.updateAsked = true
-      const said = await runWb($, ['update', '--check', '--if-due'])
-      if (said.startsWith('update available')) $.ui.toast(`workbench: ${said}`)
+      void checkUpdate($) // off the poll's path: a stalled fetch held every wake (the 2026-11-16 audit)
     }
     await deliver($, now)
     await rewake($, now, list)
     await listen($, now)
     if (now - mem.chatUrlAt > 10 * 60_000) { // the link changes only with the token
       mem.chatUrlAt = now
-      const out = await runWb($, ['chat', 'url'])
-      const link = /^https?:\/\/\S+#token=\S+$/.test(out) ? out : ''
+      const { ok, out } = await runWb($, ['chat', 'url'])
+      const link = ok && /^https?:\/\/\S+#token=\S+$/.test(out) ? out : ''
       if (link !== (await read($, chat)).url) await update($, chat, c => ({ ...c, url: link }))
     }
   } finally {
     mem.polling = false
   }
   if (mem.again) void poll($)
+}
+
+async function checkUpdate($: any) {
+  const { ok, out } = await runWb($, ['update', '--check', '--if-due'])
+  if (ok && out.startsWith('update available')) $.ui.toast(`workbench: ${out}`)
+}
+
+// A turn a command asked for. One the engine drops (a settings hook's block, a Stop, a host's
+// limit) goes back on the queue and is tried again in a minute: the hand-back's turn was lost
+// after its agents were already stopped (the 2026-11-16 audit).
+async function sendQueued($: any, text: string) {
+  const r = await $.prompt.submit({ text }).catch((err: unknown) => ({ drop: String(err) }))
+  if (!r?.drop) return
+  mem.queued.unshift(text)
+  mem.queuedRetryAt = (await $.clock.now()) + REWAKE_MS
+  warnOnce($, `queued:${text.slice(0, 40)}`, `a turn for Claude was dropped (${r.drop}); trying again in a minute`)
 }
 
 // Whether a process lives: `kill -0`, since macOS has no /proc.
@@ -544,91 +718,149 @@ async function listen($: any, now: number) {
   if (theirs && (claim.pid ? await alive($, Number(claim.pid))
     : now - Number(claim.ts ?? 0) * 1000 < CHAT_STALE_MS)) return // another session listens
   if (!(await $.fs.exists(dir))) await runWb($, ['chat', 'log']) // wb makes the directory
-  const body = JSON.stringify({ session: st.key, cwd: await $.session.cwd(), pid: mem.eventsPid, busy: mem.busy })
+  const body = JSON.stringify({ session: st.key, cwd: mem.cwd, pid: mem.eventsPid, busy: mem.busy })
   if (body !== mem.listenerBody || theirs || claim.session !== st.key) { // only on change: a write is an event
     mem.listenerBody = body
     await $.fs.write(`${dir}/listener.json`, body)
   }
-  const rows = (await $.fs.read(`${dir}/messages.jsonl`).catch(() => '')).split('\n')
-  const got = new Set((await $.fs.read(`${dir}/receipts.jsonl`).catch(() => '')).split('\n')
+  // the tails: both files only grow, and past 4 MiB the whole read failed and the chat went silent
+  const messages = await readTail($, `${dir}/messages.jsonl`, NOTIFY_TAIL)
+  const receipts = await readTail($, `${dir}/receipts.jsonl`, NOTIFY_TAIL)
+  if (!messages || !receipts) {
+    warnOnce($, 'chat', `can't read the web chat's files in ${dir}: wb doctor`)
+    return
+  }
+  const got = new Set(receipts.text.split('\n')
     .map(l => { try { return JSON.parse(l).id } catch { return undefined } }))
-  for (const line of rows) {
+  for (const line of messages.text.split('\n')) {
     let m: Row
     try { m = JSON.parse(line) } catch { continue }
     const id = String(m.id ?? '')
     if (m.from !== 'user' || !id || got.has(id) || mem.chatSent.has(id)) continue
     if (now - Number(m.ts ?? 0) * 1000 > CHAT_EXPIRE_MS) continue // stale: the page shows it undelivered
+    if ((mem.chatRetry.get(id) ?? 0) > now) continue // its prompt was dropped: again in a minute
     mem.chatSent.add(id)
     // The terminal shows only `[web chat] <their words>`: how to answer is the skill's to say.
     const text = `${WEB} ${String(m.text ?? '')}`
     // Mid-turn, into the running turn, as a message typed mid-turn would be; else, or if that is
     // refused, as a prompt of its own (which waits for the turn to end).
-    let how = 'now'
     if (mem.busy) {
       const r = await $.session.send({ to: { sessionId: await $.session.id() }, text: `${text}\n\n${WEB_NOTE}` })
         .catch(() => ({ isDelivered: false }))
-      if (!r.isDelivered) {
-        how = 'queued'
-        void $.prompt.submit({ text, asUser: true })
-      }
-    } else void $.prompt.submit({ text, asUser: true })
-    await runWb($, ['chat', 'ack', id, '--by', st.key, '--how', how])
+      if (r.isDelivered) await runWb($, ['chat', 'ack', id, '--by', st.key, '--how', 'now'])
+      else void sendWeb($, id, text, 'queued', st.key)
+    } else void sendWeb($, id, text, 'now', st.key)
     await update($, chat, c => ({ ...c, webAt: now }))
     $.ui.toast('workbench: a message from the web chat')
   }
 }
 
-// Notifications nobody has acknowledged yet: one toast each, and a turn for Claude if waking.
+// A web message as a prompt of its own; the receipt only once it entered. A dropped one had a
+// "read" receipt for a message Claude never got (the 2026-11-16 audit): it is tried again.
+async function sendWeb($: any, id: string, text: string, how: string, by: string) {
+  const r = await $.prompt.submit({ text, asUser: true }).catch((err: unknown) => ({ drop: String(err) }))
+  if (r?.drop) {
+    mem.chatSent.delete(id)
+    mem.chatRetry.set(id, (await $.clock.now()) + REWAKE_MS)
+    return
+  }
+  const { ok, out } = await runWb($, ['chat', 'ack', id, '--by', by, '--how', how])
+  if (!ok) warnOnce($, 'chat-ack', `wb chat ack failed: ${brief(out)}`)
+}
+
+// Notifications nobody has acknowledged yet: one toast each, and, for this session's tasks, a
+// turn for Claude if waking. Another project's task is left for its own session (or `wb wait`):
+// not acknowledged here.
 async function deliver($: any, now: number) {
   const root = mem.root
-  const text = await $.fs.read(`${root}/notify.jsonl`).catch(() => '')
+  const file = await readTail($, `${root}/notify.jsonl`, NOTIFY_TAIL)
+  if (!file) {
+    warnOnce($, 'notify', `can't read ${root}/notify.jsonl, so no wake can come: wb doctor`)
+    return
+  }
   // While Claude is mid-turn, look every poll (the turn may act on the task) but hold the wake:
   // a prompt submitted now would queue and arrive after the task has moved on.
-  if (text.length === mem.lastNotifyLength && !mem.busy) return
-  if (!mem.busy) mem.lastNotifyLength = text.length
-  const latest = new Map<string, Row>() // one wake per task: its newest notification
-  for (const row of parseLines(text)) {
+  if (file.key === mem.lastNotify && !mem.busy) return
+  // Per task, its newest notice and every question: two asked at once (parallel tool calls) are
+  // both open, and the newest alone hid the first, its agent blocked (the 2026-11-16 audit).
+  const due = new Map<string, Row[]>()
+  for (const row of parseLines(file.text)) {
+    // Every notice counts for rewake, however old: a notice delivered before a reload (or by
+    // another session) is news Claude had, not a lost one (the 2026-11-16 audit).
+    mem.noticed.set(row.task, Math.max(mem.noticed.get(row.task) ?? 0, row.ts))
     if (row.ts * 1000 < Math.max(mem.startedAt, now) - OLDEST_WAKE_MS) continue
-    latest.set(row.task, row)
+    due.set(row.task, [...(due.get(row.task) ?? []).filter(r => r.kind === 'question'), row])
   }
-  for (const [name, row] of latest) {
+  // A wake held for the turn leaves the file unseen, so the poll after the turn sends it: a second
+  // task's wake held while the first one's turn ran was never sent (the 2026-11-16 audit).
+  let held = false
+  for (const [name, rows] of due) {
     const ackPath = `${root}/tasks/${name}/acked`
-    const acked = Number(await $.fs.read(ackPath).catch(() => '0')) || 0
-    if (row.ts <= acked) continue
+    let acked = Number(await $.fs.read(ackPath).catch(() => '0')) || 0
+    if (rows.every(r => r.ts <= acked)) continue
+    const own = mine(await readJson($, `${root}/tasks/${name}/task.json`))
     // Only wake for news still true: a review notice for a task since discarded, accepted or
     // sent back is acknowledged and dropped.
     const status = await readJson($, `${root}/tasks/${name}/status.json`)
-    const current = row.kind === 'checkin'
-      ? RUNNING.has(status.phase) // a check-in is news while the task still runs
-      : status.phase === (row.kind === 'question' ? 'asking' : row.kind)
-    const headline = HEADLINE[row.kind] ?? row.kind
-    const key = `${name}:${row.ts}`
-    if (current && !mem.toasted.has(key)) {
-      mem.toasted.add(key)
-      $.ui.toast(`workbench: ${name} ${headline}`)
+    for (const row of rows) {
+      if (row.ts <= acked) continue
+      const current = row.kind === 'checkin'
+        ? RUNNING.has(status.phase) // a check-in is news while the task still runs
+        : row.kind === 'question' && row.id
+          ? await asking($, name, String(row.id)) // this question, still unanswered
+          : status.phase === (row.kind === 'question' ? 'asking' : row.kind)
+      const headline = HEADLINE[row.kind] ?? row.kind
+      const key = `${name}:${row.ts}`
+      if (current && !mem.toasted.has(key)) {
+        mem.toasted.add(key)
+        $.ui.toast(`workbench: ${name} ${headline}`)
+      }
+      if (!own || !mem.wake) continue // the toast only: the notice stays for its session or wb wait
+      if (mem.busy && current) { // deliver once the turn ends
+        held = true
+        continue
+      }
+      const prev = acked
+      await $.fs.write(ackPath, String(row.ts)) // acknowledge before waking: never wake twice
+      acked = row.ts
+      if (!current) continue
+      const next = (NEXT[row.kind] ?? NEXT.failed)(name, row.id ? String(row.id) : undefined)
+      void wake($, name, `[workbench] Task \`${name}\` ${headline}.\n\n${row.text}\n\n${next}`, prev, row.ts)
     }
-    mem.noticed.set(name, Math.max(mem.noticed.get(name) ?? 0, row.ts))
-    if (!mem.wake) continue // the toast only: the notice stays for wb wait
-    if (mem.busy && current) continue // deliver once the turn ends
-    await $.fs.write(ackPath, String(row.ts)) // acknowledge before waking: never wake twice
-    if (!current) continue
-    const next = (NEXT[row.kind] ?? NEXT.failed)(name)
-    void $.prompt.submit({
-      text: `[workbench] Task \`${name}\` ${headline}.\n\n${row.text}\n\n${next}`,
-    })
   }
+  if (!held) mem.lastNotify = file.key
 }
 
-// The safety net under deliver: a task waiting on Claude whose news never reached it (a lost or
-// swallowed notice; on 2026-11-16 a failure sat unseen for an hour) wakes Claude anyway, once,
-// after a minute of Claude being idle. `acked` past the moment the task entered that state
-// means Claude has had the news.
+// Whether a question is still open: asked (ask/<id>.json) and not answered.
+async function asking($: any, name: string, id: string): Promise<boolean> {
+  const dir = `${mem.root}/tasks/${name}/ask`
+  return (await $.fs.exists(`${dir}/${id}.json`)) && !(await $.fs.exists(`${dir}/${id}.answer`))
+}
+
+// A wake whose `acked` mark this load just moved from `prev` to `ts`. A prompt the engine drops (a
+// settings hook's block, a Stop, a host's limit) never reached Claude, yet was acknowledged and
+// lost for good (the 2026-11-16 audit): the mark goes back, unless something acted on the task
+// since, and rewake tries again after a minute.
+async function wake($: any, name: string, text: string, prev: number, ts: number) {
+  const r = await $.prompt.submit({ text }).catch((err: unknown) => ({ drop: String(err) }))
+  if (!r?.drop) return
+  mem.dropped.set(name, await $.clock.now())
+  const ackPath = `${mem.root}/tasks/${name}/acked`
+  if (Number(await $.fs.read(ackPath).catch(() => '0')) === ts) await $.fs.write(ackPath, String(prev))
+  warnOnce($, `drop:${name}`, `the wake for ${name} was dropped (${r.drop}); trying again in a minute`)
+}
+
+// The safety net under deliver: a task of this session's waiting on Claude whose news never
+// reached it (a lost or swallowed notice; on 2026-11-16 a failure sat unseen for an hour) wakes
+// Claude anyway, once, after a minute of Claude being idle. `acked` past the task's newest notice
+// (or, with none, the moment it entered that state) means Claude has had the news.
 const REWAKE_MS = 60_000
 const REWAKE_MAX_MS = 12 * 3600_000 // older than this, it waited for a session long gone: wb status shows it
 async function rewake($: any, now: number, list: WbTask[]) {
   if (mem.busy || !mem.wake) return
   for (const t of list) {
-    if (!NEEDS.has(t.phase) || now - t.updatedAt < REWAKE_MS || now - t.updatedAt > REWAKE_MAX_MS) continue
+    if (!NEEDS.has(t.phase) || !mine(t) || now - t.updatedAt < REWAKE_MS || now - t.updatedAt > REWAKE_MAX_MS) continue
+    if (now - (mem.dropped.get(t.name) ?? 0) < REWAKE_MS) continue // dropped: once a minute
     const ackPath = `${mem.root}/tasks/${t.name}/acked`
     const acked = Number(await $.fs.read(ackPath).catch(() => '0')) || 0
     // Claude had the news if it acked the task's latest notice: the runner's last status write
@@ -637,12 +869,30 @@ async function rewake($: any, now: number, list: WbTask[]) {
     if (noticed !== undefined ? acked >= noticed : acked * 1000 >= t.updatedAt) continue
     await $.fs.write(ackPath, String(now / 1000))
     const kind = t.phase === 'asking' ? 'question' : t.phase
-    void $.prompt.submit({
-      text: `[workbench] Task \`${t.name}\` ${HEADLINE[kind] ?? kind}, ${ago(now - t.updatedAt)} ago, ` +
-        `and no notice reached Claude. \`wb report ${t.name}\` shows where it is.\n\n` +
-        (NEXT[kind] ?? NEXT.failed)(t.name),
-    })
+    void wake($, t.name, `[workbench] Task \`${t.name}\` ${HEADLINE[kind] ?? kind}, ${ago(now - t.updatedAt)} ago, ` +
+      `and no notice reached Claude. \`wb report ${t.name}\` shows where it is.\n\n` +
+      (NEXT[kind] ?? NEXT.failed)(t.name), acked, now / 1000)
   }
+}
+
+// The ears and the timers, once a person can be at the session.
+function startEars($: any) {
+  if (mem.started) return
+  mem.started = true
+  void ears($)
+  $.clock.every(POLL_MS, async () => {
+    const now = await $.clock.now()
+    if (!mem.eventsPid || mem.hasActive || mem.queued.length || now - mem.lastPoll > SAFETY_MS) void poll($)
+  })
+  $.clock.every(FRAME_MS, async () => {
+    if (!mem.posed) return // not drawn in pixels, or the pane is closed
+    const frame = frameOf(mem.posed, ++mem.tick)
+    if (frame === mem.shown) return
+    mem.shown = frame
+    const r = await $.ui.blit({ requestId: PANE, key: APPRENTICE, cells: cells(frame) })
+      .catch(() => ({ deny: 'gone' }))
+    if (r.deny) mem.posed = '' // the next draw sets it again
+  })
 }
 
 // Turning delegate mode on or off: the chat listens while it is on. The context block follows
@@ -650,6 +900,7 @@ async function rewake($: any, now: number, list: WbTask[]) {
 // and cost the whole conversation's cache, and the skill or the quit note says it meanwhile.
 // The quit commands close the pane, the mode's sign.
 async function delegateMode($: any, on: boolean) {
+  if (on) mem.delegated = true
   if ((await read($, chat)).delegating === on) return
   await update($, chat, c => ({ ...c, delegating: on }))
   if (!on) {
@@ -692,34 +943,35 @@ export const register: Register = (on, options) => {
     })
     await $.command.register({
       name: QUIT,
-      description: 'Stop every delegated agent now, finishing nothing',
+      description: 'Stop this session\'s delegated agents now, finishing nothing',
     })
     await $.command.register({
       name: HAND_BACK,
-      description: 'Stop the agents and hand their tasks back to Claude to finish',
+      description: 'Stop this session\'s agents and hand their tasks back to Claude to finish',
     })
-    void ears($)
-    $.clock.every(POLL_MS, async () => {
-      const now = await $.clock.now()
-      if (!mem.eventsPid || mem.hasActive || mem.queued.length || now - mem.lastPoll > SAFETY_MS) void poll($)
-    })
-    $.clock.every(FRAME_MS, async () => {
-      if (!mem.posed) return // not drawn in pixels, or the pane is closed
-      const frame = frameOf(mem.posed, ++mem.tick)
-      if (frame === mem.shown) return
-      mem.shown = frame
-      const r = await $.ui.blit({ requestId: PANE, key: APPRENTICE, cells: cells(frame) })
-        .catch(() => ({ deny: 'gone' }))
-      if (r.deny) mem.posed = '' // the next draw sets it again
-    })
+    mem.cwd = (await $.fs.stat(e.cwd, { resolve: true }).catch(() => undefined))?.realPath ?? e.cwd
+    // A `claude -p` run or an SDK session has no person at it until a surface attaches: it took
+    // other sessions' wakes, the weekly check and a `wb status` before every prompt (the
+    // 2026-11-16 audit). It stays quiet until then.
+    mem.person = e.isInteractive || e.surface != null
+    if (mem.person) startEars($)
+    return next(e)
+  })
 
+  on('session.attach', async ($, e, next) => {
+    if (!mem.person && mem.root) {
+      mem.person = true
+      startEars($)
+    }
     return next(e)
   })
 
   // A tool call means a turn is running, even one that began before this module (re)loaded and
-  // so never reached turn.start here; turn.complete clears it.
+  // so never reached turn.start here; turn.complete clears it. Only the model's own (the
+  // engine's): another plugin's $.tool.call between turns has no agentId either, and no
+  // turn.complete would clear it, holding every wake (the 2026-11-16 audit).
   on('tool.call', async ($, e, next) => {
-    if (!mem.busy && !e.agentId) { // a subagent's call doesn't hold the main loop
+    if (!mem.busy && !e.agentId && next.origin.plugin === 'engine') { // a subagent's call doesn't hold the main loop
       mem.busy = true
       void poll($)
     }
@@ -753,21 +1005,26 @@ export const register: Register = (on, options) => {
     return next(e)
   })
 
+  // This session's tasks only (`--repo`): another project's session keeps its own running.
   on('command.run', { command: QUIT }, async $ => {
     await delegateMode($, false)
-    const out = await runWb($, ['stop', '--all'])
-    $.ui.toast('workbench: everything delegated is stopped')
-    return { text: `Delegation stopped. ${out}`, context: [QUIT_NOTE(out)] }
+    const { ok, out } = await runWb($, ['stop', '--all', ...scope()])
+    $.ui.toast(ok ? 'workbench: this session\'s delegated agents are stopped'
+      : `workbench: wb stop --all failed: ${brief(out)}`)
+    return { text: ok ? `Delegation stopped. ${out}` : `Delegation not stopped: ${out}`, context: [QUIT_NOTE(out, ok)] }
   })
 
-  on('command.run', { command: MODELS }, async () => {
+  on('command.run', { command: MODELS }, async $ => {
+    await scoutOffered($, await $.clock.now()) // the weekly check won't raise it again straight after
     mem.queued.push(SCOUT_NOTE) // a command may not start a turn itself: the next poll does
     return { text: 'Claude will check the local models against this machine now.' }
   })
 
   on('command.run', { command: UPDATE }, async $ => {
-    const out = await runWb($, ['update'])
-    if (!out.startsWith('updated')) return { text: `workbench: ${out}` }
+    const { ok, out } = await runWb($, ['update'], 600_000)
+    if (!ok || !out.startsWith('updated')) {
+      return { text: `workbench: ${out}` + (ok ? '' : '\n(If it got as far as updating, /reload-plugins starts using it.)') }
+    }
     try {
       await $.command.run({ command: 'reload-plugins', args: '' }) // the new pane, now
       return { text: `workbench: ${out}` }
@@ -778,20 +1035,28 @@ export const register: Register = (on, options) => {
 
   on('command.run', { command: HAND_BACK }, async $ => {
     await delegateMode($, false)
-    const out = await runWb($, ['takeover', '--all'])
+    const { ok, out } = await runWb($, ['takeover', '--all', ...scope()])
+    if (!ok) { // nothing was handed over: no turn telling Claude to finish it
+      $.ui.toast(`workbench: wb takeover --all failed: ${brief(out)}`)
+      return { text: `wb takeover --all failed; the agents may still be running (wb status):\n${out}` }
+    }
     mem.queued.push(DONE_NOTE(out)) // a command may not start a turn itself: the next poll does
     return { text: `Agents stopped; Claude is taking over. ${out}` }
   })
 
-  // Whoever compacts the main conversation, the summary keeps the delegation state.
+  // Whoever compacts the main conversation, the summary keeps the delegation state: in a session
+  // that delegated in this load, with a task of its own open. Any session's compaction got it
+  // (the 2026-11-16 audit).
   on('session.compact', async ($, e, next) => {
     if (e.agentId || !mem.open.size || e.instructions?.includes(KEEP_ON_COMPACT)) return next(e)
+    if (!mem.delegated && !(await read($, chat)).delegating) return next(e)
     return next({ ...e, instructions: [e.instructions, KEEP_ON_COMPACT].filter(Boolean).join('\n\n') })
   })
 
-  // A fresh or just-compacted conversation is told which tasks are open, from wb itself.
+  // A fresh or just-compacted conversation is told which of its tasks are open, from wb itself.
   on('prompt.context', async ($, e, next) => {
     const r = await next(e)
+    if (!mem.person) return r // a scripted run: no `wb status` before every prompt
     const st = await read($, chat)
     const away = st.webAt && (await $.clock.now()) - st.webAt < AWAY_MS
     const blocks = [...r.blocks]
@@ -804,8 +1069,10 @@ export const register: Register = (on, options) => {
         'there (`wb chat reply --text "…"`) when something they asked for is done or needs them; ' +
         '`wb chat log` shows the thread. Typing in the terminal again ends this.',
     })
-    const status = await runWb($, ['status'])
-    if (status.startsWith('no open tasks') || status.startsWith('could not run')) return { blocks }
+    if (!mem.wake && (st.delegating || mem.open.size)) blocks.push({ name: 'workbench-wake', text: WAKE_OFF_NOTE })
+    const { ok, out: status } = await runWb($, ['status', ...scope()])
+    if (!ok) warnOnce($, 'status', `wb status failed: ${brief(status)}; wb doctor`)
+    if (!ok || status.startsWith('no open tasks')) return { blocks }
     return {
       blocks: [...blocks, {
         name: 'workbench',
@@ -827,6 +1094,7 @@ export const register: Register = (on, options) => {
     if (!e.agentId) {
       mem.busy = false
       mem.sawTurn = true
+      mem.turnEndedAt = await $.clock.now()
       void poll($) // held wakes and chat messages go now, not at the next tick
     }
     return next(e)
@@ -879,7 +1147,7 @@ export const register: Register = (on, options) => {
     // while focused) and follows the end as lines arrive. What the agent is doing now is the
     // apprentice's to say.
     const all = watched.lines.filter(l => !['activity', 'clock', 'meta'].includes(l.s))
-    let from = all.length
+    let from = all.length // (each line was cut to LINE_CHARS when read)
     for (let used = 0; from > 0 && used + (all[from - 1].t?.length ?? 0) + 1 <= HISTORY_CHARS; from--)
       used += (all[from - 1].t?.length ?? 0) + 1
     const history = all.slice(from)
@@ -891,7 +1159,7 @@ export const register: Register = (on, options) => {
     // on the line. Drawing it in pixels arms the timer that animates it. The stage keeps its
     // height beside a long history, and the bubble wraps its words onto more rows rather than
     // cutting them off: the pane can't be made wider.
-    const focus = focusOf(list)
+    const focus = focusOf(list, watched.task)
     const sp = speechOf(focus, doing?.t ?? '', list, delegating)
     const busy = sp.pose === 'work' || sp.pose === 'think'
     const pixels = (e as Row).surface === 'terminal' && Number(props.scroll?.bodyRows ?? 24) >= 20 && cols >= 40

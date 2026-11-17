@@ -62,7 +62,7 @@ The runner, the agent's `ask_reviewer` server and the chat server never call eac
 mod; they read and write the same files, and anything that waits sleeps in the kernel (inotify on
 directories, pidfd on processes, `workbench/watch.py`) until one of them changes. The mod's only
 calls are `wb` subcommands (`wb events`, `wb watch --json`, `wb status`, `wb chat ack|url|log`,
-`wb stop|takeover --all`). A crashed piece loses nothing, and every piece can be inspected with
+`wb stop|takeover --all --repo`). A crashed piece loses nothing, and every piece can be inspected with
 `cat`.
 
 workbench is Python's standard library only (3.11+), plus the TypeScript mod. There is no
@@ -668,12 +668,16 @@ value (`{"fresh_at": 0.6}`, used as given, ceiling or not). A new knob: add it t
 with `tuning.value(task, name)`.
 
 **Claude's.** `wb` holds the delegation state, so Claude's context doesn't have to. Whoever
-compacts Claude's conversation while tasks are open (the engine, `/compact`, the mod), the mod tells the summary to
+compacts Claude's conversation while this session's tasks are open in a session that delegated
+(the engine, `/compact`, the mod), the mod tells the summary to
 keep the user's goals and decisions, the tasks and what each needs next, and to drop finished
-tasks' diffs and reports. At a task boundary (one just closed, none waiting for Claude) the mod
+tasks' diffs and reports. At a task boundary in delegate mode (one of this session's just closed,
+none waiting for Claude) the mod
 compacts early once Claude is halfway to the engine's own compaction (`WB_COMPACT_AT`, a
 percentage; 0 turns it off), so a long session sheds detail at a clean point instead of
-mid-review. After a compaction or `/clear`, a context block lists the open tasks from `wb status`.
+mid-review. A session that never delegated is never compacted for a task (the 2026-11-16 audit:
+a task closing compacted every session). After a compaction or `/clear`, a context block lists
+this session's open tasks from `wb status --repo <its directory>`.
 
 **What Claude learns about the user** (`wb notes`). Claude Code keeps its own memory per project,
 so what Claude learned about how the user likes delegation run in one repo would be gone in the
@@ -695,14 +699,19 @@ file holds the time up to which Claude has had its news.
 - **Ears.** The mod runs `wb events`, which prints a line the moment anything in the state
   directory changes (*Waiting without polling*). Each line makes the mod re-read the tasks.
 - **Still true.** For each task, the newest notice under an hour old and past its `acked` mark
-  is delivered only while it's still true: a check-in while the task is queued, running or
-  testing; otherwise while the phase matches the kind (`question` ↔ `asking`). A stale one (a
+  (and every question past it: two asked at once are both open) is delivered only while it's
+  still true: a check-in while the task is queued, running or testing; a question while its
+  `ask/<id>.json` has no `<id>.answer`; otherwise while the phase matches the kind. A stale one (a
   review for a task since discarded or sent back) is acknowledged and dropped.
-- **Held mid-turn.** While Claude's main loop is mid-turn (`mem.busy`, set by `turn.start` or any
-  `tool.call`) the wake is held (a prompt submitted then would queue and arrive stale) and
-  checked again on every poll. Otherwise the mod writes `acked` first, shows a toast, and submits
+- **Held mid-turn.** While Claude's main loop is mid-turn (`mem.busy`, set by `turn.start` or the
+  model's own `tool.call`) the wake is held (a prompt submitted then would queue and arrive stale)
+  and checked again on every poll, and after the turn even if notify.jsonl hasn't changed. Otherwise
+  the mod writes `acked` first, shows a toast, and submits
   a prompt: `[workbench] Task <n> <headline>.`, the notice's text, and the next commands to run
-  (`NEXT[kind]` in `register.tsx`; a PERMISSION question names the `wb allow` that answers it).
+  (`NEXT[kind]` in `register.tsx`; a question names its `wb answer <n> --id <id>`, a PERMISSION
+  question the `wb allow` that answers it). A prompt the engine drops (a settings hook's block, a
+  Stop, a host limit) puts `acked` back (unless something acted on the task since), toasts, and
+  the safety net tries again a minute later.
 - **Acting acknowledges.** `feedback`, `next`, `answer`, `allow`, `note`, `resume`, `takeover`,
   `accept`, `discard` and `stop --all` acknowledge the task (`cli._ack_all`), but the mark stops
   just short of news still true: when an unacked notice of the kind the phase stands for exists
@@ -710,24 +719,34 @@ file holds the time up to which Claude has had its news.
   the mark stops before the oldest one, else it moves to now; it never moves back. A note written seconds
   after a failure once swallowed the failure notice for an hour.
 - **The safety net** (`rewake`). A task that has waited on Claude (review, asking, stuck, failed)
-  for a minute after its last status change with no notice delivered wakes Claude anyway, once,
-  with `wb report <n>` and the next commands.
+  for a minute after its last status change with its newest notice not acknowledged (any notice in
+  notify.jsonl counts, however old, so one delivered before a reload isn't "lost") wakes Claude
+  anyway, once, with `wb report <n>` and the next commands.
 - **Without the mod.** `wb wait [task]` blocks until there's news past a task's `acked`, prints
   `[kind] task` and the text, and acks it (a review, stuck or failed notice for a task that is
   live again is skipped). A named wait on a closed task exits 2; on a task
   already waiting whose notice was taken elsewhere it prints it again "(already delivered once)"
   rather than block forever. `--timeout` exits 2 when it passes.
-- **Off switch.** The plugin's `wake` setting (`on`/`off`) stops the prompts and keeps the pane.
+- **Off switch.** The plugin's `wake` setting (`on`/`off`) stops the prompts and keeps the pane
+  and the toasts; a `workbench-wake` context block tells Claude no wake will come, so it doesn't
+  end its turn waiting for one.
 
-The mod runs in every Claude Code session with the plugin and the state directory is global: the
-first session to deliver a notice wins.
+The mod runs in every Claude Code session with the plugin and the state directory is global, so
+a session wakes, rewakes and compacts only for its own tasks: those whose task.json `cwd` (where
+`wb start` ran) or `repo` is the session's directory, inside it, or holds it (a task with
+neither, from before `cwd` was kept, is everyone's). Another project's notice is toasted at most
+and left unacknowledged for its own session or `wb wait`. Among sessions a task belongs to, the
+first to deliver a notice wins. A session with no person at it (`claude -p`, the SDK) does
+nothing until a surface attaches.
 
 ## Seeing what the agent does
 
 - **The pane** (opened by `/delegate`, or once per load when a task runs, and closed by a quit command;
   `/delegate-pane` opens it any time) lists every task: phase, round, model, test result, age and
-  its last few events. Under the list it follows one task (the newest queued, running, testing
-  or asking one, else the newest waiting for Claude) as a live transcript, scrolling with the
+  its last few events. Under the list it follows one task as a live transcript: the one it
+  follows while that one is queued, running, testing or asking, else the newest started that is
+  running, testing or asking, then queued, else the newest waiting for Claude (choosing by the
+  latest status write swapped between two running tasks on every tool call), scrolling with the
   newest lines unless the user scrolls up. At its foot stands the apprentice, the local agent
   drawn as a small robot in a hard hat: it swings a wrench while it works and raises its arms when
   a task is ready for review; its chest lamp is the phase's colour, and its speech bubble says
@@ -790,9 +809,14 @@ task, else the newest.
 **`wb watch <task> --json`** (hidden) is the mod's feed: one pass, one JSON object per line,
 `{"s": style, "t": text}` (UTF-8 unescaped), in this order: `meta` (the header's model line), the transcript
 lines (styles `claude`, `agent`, `think`, `tool`, `out`, `ok`, `bad`, `sys`, `add`, `del`, `head`,
-or `""` for prompt bodies), `activity` if any, `clock` (always), then the phase line. The mod
-re-runs it on every poll while the followed task is active (else once per `name@updatedAt`),
-keeps the last 2000 lines, shows the newest 60,000 characters of history, puts `meta` under the
+or `""` for prompt bodies), `activity` if any, `clock` (always), then the phase line. Each line's
+text is cut to 2000 characters (`JSON_LINE_CHARS`), and `--last N` (hidden too) prints only the
+newest N transcript lines (meta, activity, clock and the phase line always): the engine keeps a
+command's first 4 MiB, so a long task's newest lines were the ones lost. One OpenCode export per
+run (the first pass reuses the header's). The mod runs it with `--last 2000` while the pane is
+shown: at most every 5 s while the followed task is active, at once when its `name@updatedAt`
+changes; cut at 4 MiB anyway, it keeps the lines it had and adds `transcript too long for the
+pane`. It cuts each line to 2000 characters (`LINE_CHARS`), shows the newest 60,000 characters of history, puts `meta` under the
 rule and `clock` under the speech, and uses `activity` as the apprentice's speech (the pose is
 `work` when it starts `Writing` or `Running`, else `think`). A new style needs an
 entry in the mod's `LINE_STYLE`; changing the shape needs a new `live-1` tag.
@@ -1360,11 +1384,19 @@ A change to `chat.py` or `chat_static/` also needs the browser test (*The tests*
 
 Only the user's two slash commands stop the delegation, never words in a message:
 
-- **`/delegate-quit`** runs `wb stop --all`: every running agent stops, every task keeps its
-  worktree for later, and Claude is told not to finish, restart or clean up anything unless asked.
-- **`/delegate-quit-and-hand-back-claude`** runs `wb takeover --all` and starts a turn for Claude
-  to leave delegate mode, finish each task itself to its own standard (`wb diff`, the acceptance
+- **`/delegate-quit`** runs `wb stop --all --repo <the session's directory>`: this session's
+  running agents stop, every task keeps its worktree for later, and Claude is told not to finish,
+  restart or clean up anything unless asked.
+- **`/delegate-quit-and-hand-back-claude`** runs `wb takeover --all --repo <the session's
+  directory>` and starts a turn for Claude
+  to leave delegate mode, finish each task taken over itself to its own standard (`wb diff`, the acceptance
   command, `wb accept`), and carry on with the rest of the user's request without delegating.
+
+`--repo` keeps them to this session's tasks (the mod's rule, *Waking Claude, exactly once*):
+another project's session keeps its agents running, and they are listed as left alone (the
+2026-11-16 audit: one session's quit stopped and handed back the other's). If `wb` fails, the
+command says so and no hand-back turn starts. Typed in a terminal without `--repo`, both still
+take every task.
 
 Both end delegate mode: Claude works directly again and the pane closes (`/delegate-pane` brings it
 back).
@@ -1392,60 +1424,87 @@ const bound to one; imports from the module's own files also pass). The helpers 
 
 **State.** Three `$.state` atoms survive a module reload within a session; each has a shape tag,
 and an atom read under an old tag is absent, so change the tag when its type changes:
-`tasks` (`tasks-1`, WbTask[]: name, phase, round, model, label, tests, last, createdAt,
-updatedAt, tokens, recent), `live` (`live-1`, {task, lines: {s, t}[]}: the transcript lines),
+`tasks` (`tasks-2`, WbTask[]: name, phase, round, model, label, tests, last, createdAt,
+updatedAt, tokens, recent, repo, cwd), `live` (`live-1`, {task, lines: {s, t}[]}: the transcript lines),
 `chat` (`chat-2`, {key, delegating, webAt, url}: delegate mode lives here, plus the session's
 listener key). Everything else is `mem`, a plain object reset by a reload (busy, queued turns,
-the open set, follow, sawTurn, scoutAsked, toasts sent, the events pid, …). The task facts
+this session's open set, the session's resolved `cwd`, `person`, follow, sawTurn, scoutAsked,
+toasts sent, dropped wakes, the closed tasks no longer read, the events pid, …). The task facts
 themselves are re-read from `$WB_HOME`; the mod writes `tasks/<n>/acked`, scout.json's
 `offered_at` and `chat/listener.json`.
 
 **session.start.** Sets `mem.root` (`WB_HOME` or `~/.local/state/workbench`), `mem.wb` (`WB_BIN`
 or `wb`), `mem.skill` (`$CLAUDE_CONFIG_DIR` or `~/.claude`, then `skills/delegate/SKILL.md`),
-the chat key (`<start ms>-<6 base36>`, kept across reloads), registers the four commands,
-starts the ears and two timers.
+the chat key (`<start ms>-<6 base36>`, kept across reloads), `mem.cwd` (the session's directory,
+resolved: which tasks are this session's, `mine`), registers the commands, and, when a person can
+be at the session (`isInteractive`, or a surface), starts the ears and two timers. A `claude -p`
+run or an SDK session (neither) stays quiet, no poll, no wake, no `wb status` context, until
+`session.attach` (the desktop app attaching) starts them: such a run took the terminal
+session's wakes and the weekly check (the 2026-11-16 audit).
 
 **Ears and timers.** `ears` spawns `wb events` (cli.cmd_events: `{"hello": pid}` first, then
 `{"changed": [...]}` per batch; it skips tasks' `worktree/` and `rounds/`, `imports/`, `images/`,
 `runner.log`, `*.lock`, `*.tmp` and dotfiles, and exits when its parent changes); every line runs `poll()`; when the child ends
-it is respawned after 2 s. A 1.5 s timer polls when there's no events child, a task is
+it is respawned after 2 s. Until a child has said hello in this load (`mem.earsOk`: wb runs),
+a failure toasts once (`can't run \`wb events\` (<why>)…: put wb on Claude Code's PATH or set
+WB_BIN`) and the wait doubles up to a minute. A 1.5 s timer polls when there's no events child, a task is
 queued/running/testing/asking, a turn is queued, or 30 s passed since the last poll (`SAFETY_MS`). A
 450 ms timer animates the apprentice, blitting only changed frames. Every 10 minutes `wb chat
 url` refreshes the pinned link (only a `…#token=…` URL is pinned; the call creates the token file
-if missing). Subprocess limits: `wb` 120 s, `wb watch` 30 s, `kill -0` 5 s.
+if missing). Subprocess limits: `wb` 120 s (`wb update` 600 s, the engine's most: its steps
+take up to 300 s each), `wb watch` 30 s, `tail` 30 s, `kill -0` 5 s. `runWb` returns the exit
+status with the output: a failing `wb` is said as a failure (`brief`, its last line), never
+passed on as its answer. Files that only grow (notify.jsonl, the chat's messages and receipts,
+a task's events.jsonl) are read by `readTail`: whole up to 1 MiB (events: 64 KiB), else their
+last part through `tail -c`, from a whole line, since `$.fs.read` rejects a file over 4 MiB
+(past that, no wake came again; the 2026-11-16 audit); one that can't be read toasts once.
 
 **poll()** (re-entrant calls set `again` and run once more after): `scan` reads every
-`tasks/*/task.json` + `status.json` (closed tasks drop out 30 min after their last update; open
+`tasks/*/status.json`, then `task.json` for the tasks shown (closed tasks drop out 30 min after
+their last update, and an accepted or discarded one is then never read again in that load; open
 ones get their last 4 event lines as `recent`), sorted by creation; sets the status line; opens
 the pane once per load when a task is queued/running/testing or delegate mode is on (an open the
 user didn't ask for is placed only on a wide terminal; a pane the user closed stays closed for that
-load); refreshes the live transcript (`wb watch <task> --json`, every poll while the focused task
-runs, else once per `name@updatedAt`; the last 2000 lines kept; the focus is the newest running
-task, else the newest one waiting for Claude); submits one queued turn when idle; detects a task
-boundary and compacts; offers the weekly check; then `deliver`, `rewake`, `listen`.
+load); refreshes the live transcript while the pane is shown (`wb watch <task> --json --last
+2000`, at most every 5 s (`LIVE_EVERY_MS`) while the followed task is active, at once when its
+`name@updatedAt` changes; the focus, `focusOf`, sticks to the followed task while it is active,
+else the newest started running one, then queued, else the newest waiting for Claude); submits
+one queued turn when idle (one the engine drops goes back on the queue for a minute); detects a
+task boundary and compacts; offers the weekly check; starts the update check beside it; then
+`deliver`, `rewake`, `listen`.
 
-**Busy.** `mem.busy` is set by `turn.start` (main loop) and by a main-loop `tool.call` (a
-module reloaded mid-turn never saw `turn.start`; a subagent's call doesn't count), and cleared
-only by the main loop's `turn.complete`. Held wakes are rechecked on every poll.
+**Busy.** `mem.busy` is set by `turn.start` (main loop) and by the model's own main-loop
+`tool.call` (`next.origin.plugin === 'engine'`; a module reloaded mid-turn never saw
+`turn.start`; a subagent's call doesn't count, nor another plugin's `$.tool.call` between turns,
+which no `turn.complete` would clear), and cleared only by the main loop's `turn.complete`. Held
+wakes are rechecked on every poll.
 
-**Waking** (`deliver`). Only when notify.jsonl's length changed or Claude is busy. Per task, the
-newest notify row under an hour old and past the task's `acked`; it is still true when it's a
-check-in and the task is queued/running/testing, or the phase equals the kind (`question` ↔
-`asking`). A stale one is acked and dropped. A true one is toasted once (`workbench: <name>
-<headline>`); if Claude is busy it waits; else the mod writes `acked = row.ts` and submits
-`[workbench] Task \`<n>\` <headline>.\n\n<row.text>\n\n<NEXT[kind]>` (HEADLINE and NEXT are the
-per-kind texts at the top of register.tsx; NEXT names the commands to run, and the question text
-says a PERMISSION request is answered by the `wb allow` it names). With the `wake` setting off
-it is only toasted: `acked` isn't written, so `wb wait` still gets it. `deliver` remembers each
-task's newest notice ts (`mem.noticed`). `rewake`: when idle, with wake on, a task waiting on
+**Waking** (`deliver`). Only when notify.jsonl's size or mtime changed, Claude is busy, or a wake
+was held for the turn. Per task, the newest notify row under an hour old and every question
+row, past the task's `acked`; a row is still true when it's a check-in and the task is
+queued/running/testing, a question whose `ask/<id>.json` has no `<id>.answer` (without an id:
+phase `asking`), or the phase equals the kind. A stale one is acked and dropped. A true one is
+toasted once (`workbench: <name> <headline>`); a task that isn't this session's (`mine`: its
+`cwd` or `repo` is, holds or is inside the session's directory; neither key: everyone's) gets
+nothing more; if Claude is busy it waits and leaves the file unseen; else the mod writes `acked
+= row.ts` and submits (`wake`) `[workbench] Task \`<n>\` <headline>.\n\n<row.text>\n\n<NEXT[kind]>`
+(HEADLINE and NEXT are the per-kind texts at the top of register.tsx; NEXT names the commands to
+run: a question's `wb answer <n> --id <id>`, and a PERMISSION request is answered by the `wb
+allow` it names). A submit the engine drops (`{drop}`) puts `acked` back if it still holds the
+value written, records `mem.dropped`, and toasts once. With the `wake` setting off it is only
+toasted: `acked` isn't written, so `wb wait` still gets it. `deliver` remembers each task's
+newest notice ts in notify.jsonl's tail, however old (`mem.noticed`). `rewake`: when idle, with
+wake on, a task of this session's waiting on
 Claude (review/asking/stuck/failed) whose status changed between 60 s (`REWAKE_MS`) and 12 h
-(`REWAKE_MAX_MS`) ago and whose news Claude hasn't had gets `acked = now` and a prompt saying no
+(`REWAKE_MAX_MS`) ago, whose news Claude hasn't had and whose wake wasn't dropped in the last
+minute gets `acked = now` and a prompt saying no
 notice reached Claude, with `wb report <n>` and NEXT. Had the news: `acked` is at or past the
-newest notice the mod read (the runner's last status write, clearing its pid, lands just after
+newest notice (the runner's last status write, clearing its pid, lands just after
 its notice, so `updated_at` alone woke Claude twice), else `acked` is past `updated_at`. `cli._ack_all` stops the mark short of news still
-true. Wake prompts are submitted as the plugin, not `asUser`. The mod runs in every session with
-the plugin installed and the state directory is global: the first session to deliver a notice
-wins (the `acked` write is not locked).
+true. Wake prompts are submitted as the plugin, not `asUser`. The state directory is global and
+the mod runs in every session with the plugin, so each acts only on its own tasks (the
+2026-11-16 audit: two projects at once, each session was woken for the other's); among the
+sessions a task belongs to, the first to deliver a notice wins (the `acked` write is not locked).
 
 **Delegate mode** (`delegateMode(on)`, `chat.delegating`). On: the `delegate` skill's prompt
 (`skill.prompt`, which also records its path and opens the pane), or a Bash tool call matching
@@ -1454,20 +1513,26 @@ session or a /delegate the mod missed; a `wb` named by absolute path isn't seen;
 `takeover`, which a done note after a quit asks for). Off:
 either quit command, which also closes the pane. While on: the `delegate-mode` and `user-notes`
 context blocks, the idle status line, pane auto-open, web chat listening, the apprentice's
-"Delegate mode is on.". No `$.ui.invalidate`: rewriting the first message would cost the
-conversation's prompt cache.
+"Delegate mode is on.", the boundary compaction. `mem.delegated` remembers the mode was on in
+this load, so a hand-back's compaction still keeps the state. No `$.ui.invalidate`: rewriting
+the first message would cost the conversation's prompt cache.
 
 **Commands.** Every one is `/delegate` or starts with `delegate-`, so typing `/delegate` lists
 them all (2026-11-16: `/workbench` became `/delegate-pane`, no alias). `/delegate-pane` opens the pane and says how many tasks are open; a pane the engine
 still holds but doesn't show (a tab behind another, or undrawn) is closed first, so it comes back,
 and a pane that can't be drawn here says why (`opened.reason`). `/delegate-quit`:
-delegate mode off, `wb stop --all`, a toast, and hidden context (QUIT_NOTE: don't finish,
-restart or clean up anything unless asked); it starts no turn. `/delegate-quit-and-hand-back-claude`:
-mode off, `wb takeover --all`, and DONE_NOTE queued as a turn (leave delegate mode; per task `wb
+delegate mode off, `wb stop --all --repo <mem.cwd>`, a toast, and hidden context (QUIT_NOTE:
+don't finish, restart or clean up anything unless asked; tasks left alone are another project's;
+or, when wb failed, that the agents may still run); it starts no turn.
+`/delegate-quit-and-hand-back-claude`:
+mode off, `wb takeover --all --repo <mem.cwd>`, and DONE_NOTE queued as a turn (leave delegate
+mode; per task taken over `wb
 diff`, finish in its worktree, run the acceptance command, `wb accept` (`--merge` only if asked);
-carry on without delegating). `/delegate-models` queues SCOUT_NOTE now. `/delegate-update` runs
+leave the tasks left alone; carry on without delegating); when wb failed, no turn, and it says
+so. `/delegate-models` records the check as raised (scout.json `offered_at`, `scoutAsked`: the
+weekly check came straight after it) and queues SCOUT_NOTE now. `/delegate-update` runs
 `wb update` and, when it updated, `/reload-plugins` (`$.command.run`; if that throws, it says to
-run it). A command can't start a
+run it; when wb failed, that /reload-plugins picks up whatever it got as far as). A command can't start a
 turn itself: it pushes onto `mem.queued`, which the next idle poll submits. `/delegate` is the
 skill, not a mod command.
 
@@ -1476,14 +1541,18 @@ conversation's first message and after a compaction or `/clear`, not every turn)
 `delegate-mode` while delegating (MODE_NOTE: the mode lasts until a quit, follow the skill,
 every plan is a handoff plan, the SKILL.md path); `user-notes` while delegating and notes.md has
 notes; `web-chat` for six hours after a web message, until a prompt is typed in the terminal
-(reply with `wb chat reply`, `wb chat log` shows the thread); `workbench` whenever `wb status`
-lists open tasks (the status, plus `wb report`/`wb watch`).
+(reply with `wb chat reply`, `wb chat log` shows the thread); `workbench-wake` with the `wake`
+setting off, while delegating or with a task of this session's open (WAKE_OFF_NOTE: no wake will
+come; tell the user, pick it up when asked); `workbench` whenever `wb status --repo <mem.cwd>`
+exits 0 listing open tasks (the status, plus `wb report`/`wb watch`; a failing one toasts once
+instead). None in a session with no person at it.
 
-**Compaction.** `session.compact` (main conversation only, while a task is open) appends
+**Compaction.** `session.compact` (main conversation only, while a task of this session's is
+open, in a session delegating or that delegated in this load) appends
 KEEP_ON_COMPACT: keep the user's goals and decisions, the tasks and what each needs next, what
 was accepted, merged or discarded; drop finished tasks' diffs, reports and transcripts. At a task
-boundary (a task in the last poll's open set is gone, Claude idle, none waiting for Claude) it
-compacts once usage reaches `WB_COMPACT_AT`% (default `COMPACT_AT` 0.5; 0 off) of the
+boundary in delegate mode (a task in the last poll's open set of this session's tasks is gone,
+Claude idle, none of them waiting for Claude) it compacts once usage reaches `WB_COMPACT_AT`% (default `COMPACT_AT` 0.5; 0 off) of the
 auto-compact threshold (or the window when auto-compact is off).
 
 **Status line and pane.** Status: `⚒ wb · <name> <phase> r<round>` for queued/running/testing,
@@ -1491,7 +1560,7 @@ auto-compact threshold (or the window when auto-compact is off).
 delegate mode` with nothing listed. Pane: one row per task (a mark per phase: spinner running, ◌
 queued, ◐ testing, ? asking, ◆ review, ▲ stuck, ✗ failed, ✓ accepted, – discarded; name, phase,
 round, label or model, tests, age since creation, or "ago" once closed), its recent lines; then
-the followed task's transcript (its newest lines, oldest at the top, within `HISTORY_CHARS` 60,000: Claude Code drops pane
+the followed task's transcript (its newest lines, each cut to `LINE_CHARS` 2000 first, oldest at the top, within `HISTORY_CHARS` 60,000: Claude Code drops pane
 text past 100,000 characters, which once left the bubble empty), scrolling with the newest lines
 unless the user scrolled up (`ui.scroll`); then the stage (the apprentice with a speech bubble,
 pixels on a terminal at least 20 rows by 40 columns, else its one-line face; text wrapped by
@@ -1510,17 +1579,21 @@ session's live claim (its pid answers `kill -0`, else its `ts` within 15 s) make
 by; otherwise it writes `chat/listener.json` `{session, cwd, pid, busy}` when that changes, and
 delivers each user message without a receipt: idle → `prompt.submit('[web chat] <words>', asUser)`,
 receipt `how=now`; busy → `session.send` into the running turn with WEB_NOTE, else a queued
-prompt (`how=queued`); then `wb chat ack <id> --by <key> --how …`, `webAt = now`, a toast.
+prompt (`how=queued`); `wb chat ack <id> --by <key> --how …` once it entered (a dropped prompt
+gets no receipt and is tried again a minute later), `webAt = now`, a toast.
 A web message over 6 h old (`CHAT_EXPIRE_MS`) isn't submitted. Quitting stops delivery and, when
 this session holds listener.json, writes it empty, so the page and other sessions see nobody
 listening at once.
 
-**The weekly model check** (`scoutIfDue`): after a main-loop turn, idle, no task open, once per
+**The weekly model check** (`scoutIfDue`): once `wb events` has said hello (wb runs), Claude idle
+a minute after a main-loop turn (`SCOUT_QUIET_MS`: raised the moment a turn ended, it buried
+Claude's question to the user), no task open, once per
 load: when scout.json's `done_at` is 7+ days old and `offered_at` 1+ day old, it writes
 `offered_at` and submits SCOUT_NOTE (`wb scout`, research, recommend keep/add/retire, change
 nothing without a yes, `wb scout --done --notes`).
 
-**The weekly update check**: after the first main-loop turn of a load, once, `wb update --check
+**The weekly update check**: after the first main-loop turn of a load once wb runs, once, beside
+the poll rather than in it (a stalled fetch held every wake), `wb update --check
 --if-due` (wb asks origin at most weekly and answers from `update.json` in between); an `update
 available` answer becomes a toast naming `/delegate-update`. So a pending update is mentioned once
 per session until it's installed.
@@ -1530,11 +1603,19 @@ per session until it's installed.
 and pinned link, both quit commands (typed words stop nothing), KEEP_ON_COMPACT and the boundary
 compaction, the live header label, the weekly check, the chat listener (exact text, receipt,
 standing by, stopping after a quit), Bash `wb start` turning the mode on and mid-turn delivery,
-rewake, Raster vs face, `/delegate` alone, the update check and `/delegate-update`, `wrapWords`. Not covered: wake off, check-in and
-question wakes, the one-hour cutoff, scrolling, `WB_COMPACT_AT`, the ears respawn.
+rewake, Raster vs face, `/delegate` alone, the update check and `/delegate-update`, `wrapWords`;
+and the 2026-11-16 audit's: another project's task neither woken nor acked, a headless session
+quiet until a surface attaches, a dropped wake retried, no false rewake for a notice delivered
+before, two wakes due in one turn, two open questions, another plugin's tool call, the update
+check beside the wakes, a notify.jsonl read by its tail, the pane read only while shown, a sticky
+focus, a cut transcript, a long line clipped, `/delegate-models` once, wb missing (one toast, a
+backoff, no model check), wb failing (no open-tasks block, quit says so), no compaction without
+delegating, wake off told, closed tasks not re-read. Not covered: check-in wakes, the one-hour
+cutoff, scrolling, `WB_COMPACT_AT`.
 
-**Troubleshooting.** If `wb` isn't on Claude Code's PATH the mod fails quietly (the ears respawn
-every 2 s, the `workbench` context block is left out): set `WB_BIN`. `claude plugin validate mod`
+**Troubleshooting.** If `wb` isn't on Claude Code's PATH, or fails, the mod toasts once (`can't
+run \`wb events\``, `wb status failed`) and keeps running from the task files (the ears respawn,
+backing off to a minute; the `workbench` context block is left out): set `WB_BIN`. `claude plugin validate mod`
 lists the hooks, calls and env reads; `claude --debug` shows hook errors.
 
 ## Waiting without polling
@@ -1605,8 +1686,8 @@ message, not a traceback.
 | `wb allow <task> ["<pattern>"…]` | `--path DIR…`, `--always`, `--text "…"` | Adds to the task's grants (`rules/<task>/grants.json`; and commands.json with `--always`, refused when it doesn't parse); answers any pending question with "Claude allowed … Run it again now and carry on."; if the agent is live, sends that as a `--now` steer so it restarts on its session with the rule. `--path` goes through `_lane_dir` (refuses `/` and home, creates the directory; `*` turns the lane off for the task). |
 | `wb steer <task> --text "…" \| --message <file>` | `--now` | Only while queued/running/testing/asking with a live runner. Appends to steer.jsonl: delivered when the current run ends (before the tests), or at once with `--now`. |
 | `wb note <task> --text "…"` | | A `captain` event: Claude's log line in the transcript. |
-| `wb takeover [<task> \| --all]` | | Stops the runner, phase `review`, "Claude took over"; Claude edits in the worktree and accepts, or hands back with feedback. `--all`: every task that isn't closed. |
-| `wb stop [<task> \| --all]` | | A live task only. SIGTERM the runner (15 s, `wait_exit`, then SIGKILL to its session and the agent's), phase `stuck`, "stopped by the reviewer"; the worktree is kept. `--all` (`stop_everything`): every open task, a `stopped` event "bail out: stopped by the user". |
+| `wb takeover [<task> \| --all]` | `--repo DIR` | Stops the runner, phase `review`, "Claude took over"; Claude edits in the worktree and accepts, or hands back with feedback. `--all`: every task that isn't closed. `--repo DIR` (with `--all`; the mod passes its session's directory): only the tasks whose task.json `cwd` or `repo` is DIR, inside it or holds it (`_scope`; neither key: every session's), the rest listed as `left alone (other projects' sessions): …`. |
+| `wb stop [<task> \| --all]` | `--repo DIR` | A live task only. SIGTERM the runner (15 s, `wait_exit`, then SIGKILL to its session and the agent's), phase `stuck`, "stopped by the reviewer"; the worktree is kept. `--all` (`stop_everything`): every open task, a `stopped` event "bail out: stopped by the user". `--repo DIR` (with `--all`): as for takeover, the rest listed as `left running (other projects' sessions): …`. |
 | `wb resume <task>` | | Phase stuck/failed, no live runner: a fresh session (round n+1, `runner.RESUME` + what the step's rounds asked), not a review round. Acks the task and gathers lessons. |
 | `wb accept <task> -m "…"` | `--merge`, `--force` (any open phase; stops a live runner), `--spec-gap` | Phase review; refuses a closed task. Records the step, commits (a last step with no new changes accepts the committed steps) (`<m>` + "Delegated to <label> via OpenCode: R round(s), F automatic test-fix, V review round(s)." + `Workbench-Task:` + `OpenCode-Session:`; no AI co-author line), removes the worktree, `--merge`s (`merge --no-ff --no-edit` into `base_ref`, which the main checkout must have out unless it is `HEAD`, with no changes to tracked files; a conflict is backed out; a failure is reported and the accept stands), writes the results row, prints how far CLAUDE.md is behind. Gathers lessons. |
 | `wb discard <task>` | `--reason "…"`, `--spec-gap`, `--keep-branch` | Stops the runner, records the step, removes the worktree and (unless `--keep-branch`) the branch, writes the results row. Gathers lessons. Refuses a closed task. |
@@ -1615,8 +1696,8 @@ message, not a traceback.
 | Command | Flags | What it does |
 |---|---|---|
 | `wb wait [<task>]` | `--timeout S` (0: none) | Blocks (inotify) until a notice past a task's `acked` arrives, prints `[<kind>] <task>\n<text>` and acks it (skipping a review, stuck or failed notice for a task live again). Named: a closed task exits 2; a task already waiting whose notice was taken elsewhere prints it again "(already delivered once)". |
-| `wb status [<task>]` | `--all` | One line per open task: name, phase, round, model, age, idle, last action; `?` after queued/running/testing whose runner died. Named: also `worktree: <path>` while it exists. |
-| `wb watch [<task>]` | `-v`, `--once`, `--no-color`, `--json` (hidden: one pass of JSON lines, the mod's pane) | The live transcript (`transcript.follow`); default task: the most recently updated open one, else the most recently updated task. |
+| `wb status [<task>]` | `--all`, `--repo DIR` | One line per open task: name, phase, round, model, age, idle, last action; `?` after queued/running/testing whose runner died. Named: also `worktree: <path>` while it exists. `--repo DIR` (the mod's context block): only that session's tasks (as for `wb stop`), then `open elsewhere (other projects' sessions): …`. |
+| `wb watch [<task>]` | `-v`, `--once`, `--no-color`, `--json` (hidden: one pass of JSON lines, the mod's pane), `--last N` (hidden, with `--json`: the newest N transcript lines) | The live transcript (`transcript.follow`); default task: the most recently updated open one, else the most recently updated task. |
 | `wb log <task>` | `-n N` (0 all), `-f`, `-v` | The agent's events: tool calls (`HH:MM:SS rN tool brief  ✗ error`), text, questions, answers, stops, auto-fixes, rounds, tests, errors. |
 | `wb report <task>` | `--round N` | The round's summary.md. |
 | `wb diff <task> [paths…]` | `--stat`, `--all` | The worktree against the task's base, or after `wb next` against the last committed step (`--all`: the whole branch); new files included. |
@@ -1696,7 +1777,8 @@ are re-read on every access; `set_status(**kw)` is a locked read-modify-write th
 task.json, oldest first.
 
 **task.json** (written by `wb start`; `wb next --test` rewrites `test_cmd`): `name`, `repo`,
-`base` (the full sha), `base_ref`, `branch`, `model`, `model_label`, `opencode_model`, `route` (the
+`cwd` (the directory `wb start` ran in: with `repo`, which Claude Code session the task is
+`mine` to; `--repo` scoping), `base` (the full sha), `base_ref`, `branch`, `model`, `model_label`, `opencode_model`, `route` (the
 router's reason), `size`, `stack`, `trial` (when set), `test_cmd`, `auto_fix`, `ask_budget`,
 `ask_timeout`, `checkin`, `round_timeout`, `silence_timeout`, `think_timeout`, `test_timeout`,
 `created_at`, `wb_version`. Read but written by no command: `stuck` (the guards' thresholds),
@@ -1976,8 +2058,11 @@ push: every change is a pull request that merges once `check` is green and it is
 - **The lane** (`context.writable`, `readable`, `SECRETS`, `lane.py`) → the Lane and RealOpenCode
   tests on a Landlock machine; the protocol's lane line and the handbook's boundaries.
 - **`wb watch --json`** (a style, the order, the activity wording) → the mod's `LINE_STYLE`, its
-  pose regex, the `live-1` tag.
-- **A `$.state` atom's type** in the mod → its tag (`tasks-1`, `live-1`, `chat-2`).
+  pose regex, the `live-1` tag; `--last` and `JSON_LINE_CHARS` with the mod's `KEEP_LINES` and
+  `LINE_CHARS`.
+- **A `$.state` atom's type** in the mod → its tag (`tasks-2`, `live-1`, `chat-2`).
+- **Which session a task is** (task.json `cwd`/`repo`) → the mod's `mine` and `cli._scope`
+  (`--repo`), the same containment rule both ways.
 - **A notice kind or its text** → the mod's `HEADLINE` and `NEXT`, `_ack_all`'s still-true rule,
   the mod's still-true rule, `wb wait`.
 - **A task.json or status key** → *Files and formats*; a key the router, tuning or skills read from
