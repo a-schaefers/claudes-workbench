@@ -110,6 +110,22 @@ class Lifecycle(Base):
         rows, _ = store.read_jsonl(store.home() / "results.jsonl")
         self.assertEqual(rows[-1]["outcome"], "accepted")
 
+    def test_start_runs_the_acceptance_command_on_the_base(self):
+        out = self.start("t-base", "ok", "--test", TEST_CMD)
+        self.assertIn("on the base the acceptance command fails (exit", out)
+        self.assertIs(store.Task("t-base").status["base_check"]["ok"], False)
+        self.assertTrue((store.Task("t-base").dir / "base-tests.txt").exists())
+        wait_phase("t-base", {"review"})
+
+    def test_start_warns_when_the_acceptance_command_already_passes(self):
+        out = self.start("t-pass", "ok", "--test", "true")
+        self.assertIn("already passes on the base", out)
+        wait_phase("t-pass", {"review"})
+        out = self.start("t-skip", "ok", "--test", "true", "--no-base-check")
+        self.assertNotIn("on the base", out)
+        self.assertIsNone(store.Task("t-skip").status.get("base_check"))
+        wait_phase("t-skip", {"review"})
+
     def test_failing_tests_go_back_to_the_agent_without_claude(self):
         self.start("t-fix", "fix", "--test", TEST_CMD)
         st = wait_phase("t-fix", {"review"})
