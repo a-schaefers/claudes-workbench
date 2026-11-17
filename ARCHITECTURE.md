@@ -82,7 +82,7 @@ installed module:
 | `wb` | the user, Claude, the mod | `bin/wb` puts its real path's repo root on `sys.path` (so the `~/.local/bin/wb` symlink works) |
 | the runner | `cli.spawn_runner` | `python -X utf8 -m workbench.runner <task>`, cwd and `PYTHONPATH` = the repo root, own session, output to `runner.log` |
 | the ask server | OpenCode, from the config layer's `mcp.servers.workbench` | `[sys.executable, <root>/bin/wb-ask-mcp]`, like `bin/wb` |
-| the git shim | the agent's shell (`<rules>/bin/git`) | `#!<python> -I` plus an explicit `sys.path.insert` |
+| the git shim | the agent's shell (`<rules>/bin/git`) | a `/bin/sh` wrapper that execs `<python> -I -c` (quoted: a shebang splits at a space) with an explicit `sys.path.insert` |
 | the lane | the runner, before OpenCode | `python -I lane.py …`, a standard-library-only script |
 
 `-I` drops `PYTHONPATH`, so it is used only where the path is inserted in code; never rely on
@@ -103,8 +103,9 @@ installed module:
 - **The agent is a teammate with limits, not a prisoner.** The everyday tools of software work
   run without asking; what's outside (a new dependency, another directory, a network tool) is
   asked for and granted in seconds (`wb allow`). The limits that matter (git writes, credentials,
-  Claude's own files, writes outside the lane) are enforced by the kernel where it can, and the
-  acceptance tests run under the same limits.
+  Claude's own files, writes outside the lane) are enforced by the kernel where it can (Linux
+  with Landlock; file contents, not their permission bits), and the acceptance tests run under
+  the same limits.
 - **Learned, not configured.** Which model takes which size, how big a task can be, how fast a
   model is, when to hand over: each starts as a guess and is corrected by real results on this
   machine (`results.jsonl`), so a new model or a new machine needs no code change.
@@ -142,9 +143,9 @@ stuck, failed, asking (`asking` is in both); `CLOSED` = accepted, discarded. Who
 | Phase | Set by |
 |---|---|
 | `queued` | `wb start`, `feedback`, `next`, `resume`; the runner on every start ("waiting for the GPU") |
-| `running` | the runner at each round's start; the ask server when a question is answered or times out |
+| `running` | the runner at each round's start, and once no question is open (`ask_mcp.relay`) |
 | `testing` | the runner while the acceptance command runs |
-| `asking` | the ask server while `ask_reviewer` blocks |
+| `asking` | the runner while a question of the round is open (`ask_mcp.relay`) |
 | `review` | the runner (tests pass; tests fail with auto-fix spent; no `--test`); `wb takeover` |
 | `stuck` | the runner (a guard stop; a SIGTERM that wasn't wb's: `runner.SIGNAL_STOP`); `wb stop` |
 | `failed` | the runner (opencode exited non-zero with no text; the model couldn't load; a crash); `cli.reap` (the runner died without a report) |
@@ -347,8 +348,8 @@ once more and `pid` and `stopping` are cleared.
 knows*), prepends the skills note (`skills_note`) to the prompt argument (not to `prompt.md`),
 wraps the command in the lane, and starts it in its own process group (so a stop takes the MCP
 server too), stdin `/dev/null`, stderr to `runner.log`. A reader thread queues stdout lines; a
-steer bell (`_steer_bell`, a `Watcher` on the task directory) queues a wake when `steer.jsonl`
-changes. The loop wakes on a line or every 5 s. Per line: `events.normalize` (dropping the rest),
+steer bell (`_steer_bell`, a `Watcher` on the task directory and `ask/`) queues a wake when
+`steer.jsonl` or an ask file changes; each tick relays the agent's questions (`ask_mcp.relay`). The loop wakes on a line or every 5 s. Per line: `events.normalize` (dropping the rest),
 the session id from the first `sessionID`, the tool tally and `status.last`, every text kept, and
 for each `step` the context in use (input + cache read + cache write + output) against the handover point.
 Then, every pass, in this order: asking (phase `asking`) or not, and time spent asking is
@@ -587,7 +588,7 @@ wins; no match means ask, which `--auto` allows. The rules, in order:
    everyday tools, files and text, archivers, builds and compilers, test runners, interpreters,
    package managers, `bash`/`sh`, `sqlite3`, `git` (the shim)); not on it: `curl`, `wget`, `ssh`,
    `rsync`, `docker`, `systemctl`, `opencode`;
-3. allow `./*`, `../*`, and `<dir>/*` for every directory of the lane but `/dev` and `/proc` (a program the agent built
+3. allow `./*`, `../*`, and `<dir>/*` for every directory of the lane but those under `/dev` and `/proc` (a program the agent built
    runs by its path anywhere it can write: a debug binary in the temp directory was refused
    though `bash` could run it);
 4. allow `PROJECT_BINS`, what a project builds or installs for itself, by its path:
@@ -596,7 +597,12 @@ wins; no match means ask, which `--auto` allows. The rules, in order:
 5. deny `ASK_FIRST`: adding a dependency (`pip install *`, `npm install *`, `npm add *`,
    `pnpm i *`, `yarn global add *`, `bun i *`, `deno add *`, `deno install *`, `cargo add *`,
    `go get *`, `dotnet add * package *`, …) and fetching a package to run it (`npx -y *`,
-   `npx --yes *`, `npm exec *`, `pnpm dlx *`, `yarn dlx *`, `bunx *`, `uvx *`);
+   `npx --yes *`, `npm exec *`, `npm x *`, `npx -p *`, `npx --package *`, `pnpm dlx *`,
+   `yarn dlx *`, `bunx *`, `bun x *`, `uvx *`, `uv tool run *`, `uv tool install *`,
+   `uv run --with *`, `deno run *npm:*`, `deno run *jsr:*`). A plain `npx <pkg>` stays allowed
+   (`npx tsc`), but OpenCode runs with `npm_config_yes=false` (`runner.OPENCODE_ENV`), so it runs
+   only what the project installed instead of fetching one (npm says yes by itself without a
+   terminal); `npx --yes <pkg>` is the form to ask for;
 6. allow `INSTALL_LISTED`, installing what the project already lists, because with the optional
    trailing ` *` the rules above also refuse the bare forms: `npm install`, `npm i`, `npm ci`,
    `pnpm install`, `pnpm i`, `bun install`, `bun i`, `yarn`, `yarn install`, `pip install -r *`,
@@ -604,85 +610,198 @@ wins; no match means ask, which `--auto` allows. The rules, in order:
 7. allow the user's standing patterns (`commands.json` `allow`) and the task's grants
    (`rules/<task>/grants.json` `allow`: `wb allow`, `wb start|next --allow`); a `*` there lifts
    everything above;
-8. deny the hard limits (`DENIED_SHELL`): `_HARD` (`sudo`, `doas`, `pkexec`, `su`, `gh`, and the
-   real git by its path, `*/git`), each bare and with ` *`, and each again behind the
-   `_WRAPPERS` (`env`, `env *`, `xargs`, `xargs *`, `nohup`, `nice`, `nice *`, `time`, `command`,
-   `exec`, `timeout *`, `stdbuf *`, `setsid`), so `env gh …` and `timeout 5 sudo …` are refused.
+8. deny the hard limits (`context.denied_shell()`): `DENIED_SHELL`, built from `_HARD` (`sudo`,
+   `doas`, `pkexec`, `su`, `gh`), and the real git by its path (each `git` on the runner's PATH
+   but the shim, its real path, and `GIT_PATHS`: `/usr/bin/git`, `/bin/git`,
+   `/usr/local/bin/git`, `/opt/homebrew/bin/git`), each bare and with ` *`, and each again behind
+   the `_WRAPPERS` (`env`, `env *`, `xargs`, `xargs *`, `nohup`, `nohup --`, `nice`, `nice *`,
+   `time`, `time -p`, `time --`, `command`, `command -p`, `command --`, `exec`, `timeout *`,
+   `stdbuf *`, `setsid`), so `env gh …`, `time -p sudo …` and `timeout 5 sudo …` are refused.
+   Not `*/git`, which also refused `go test ./internal/git` whatever Claude allowed, and not
+   `time *`, which would refuse `time pytest -k gh` (the 2026-11-16 audit).
 
 A refused command comes back to the agent as "Permission denied"; the handbook and the
 `ask_reviewer` tool tell it to ask with `command` set, which raises a PERMISSION question naming
 the `wb allow` that grants it. These patterns are a guardrail on the agent's own choices, not a
 sandbox: they match the command as written, so `bash -c '…'`, make or any interpreter can still
-run something the list refuses. What must hold is held below the patterns: no sudo (the lane sets
-no-new-privileges), git read-only (the shim, and the repo's git directory is outside the lane), no
-push or `gh` with the user's keys (credentials are unreadable and dropped from the environment, so
-gh finds no login).
+run something the list refuses. What must hold is held below the patterns, on Linux with Landlock:
+no sudo (the lane sets no-new-privileges, on any Linux), git read-only (the shim, and the repo's git
+directory is outside the lane), no push or `gh` with the user's keys (credentials are unreadable and
+dropped from the environment, so gh finds no login). Without Landlock (macOS, old kernels, other
+architectures) only the patterns, the git shim and the dropped environment (`SECRET_ENV`) remain,
+so `bash -c` can still write the repo's `.git` and read `~/.ssh`; on macOS nothing refuses sudo.
 
 **Paths, a lane** (`context.writable`, `context.readable`, `context.external_rules`, `lane.py`).
-- *Writes.* The lane is the task directory (the worktree and the files the ask server writes),
-  the temp directories (`gettempdir()`, `/tmp`, `/var/tmp`), `/dev`, `/proc`, the build caches and
-  toolchain homes under `$HOME` (`TOOL_HOMES`: `.cache`, `.cargo`, `.rustup`, `go`, `.npm`, `.bun`,
-  `.deno`, `.yarn`, `.pnpm-store`, `.local/share/pnpm`, `.local/share/uv`, `.gradle`, `.m2`,
-  `.nuget`, `.dotnet`, `.gem`, `.julia`, `.cabal`, `.stack`, `.ghcup`, `.platformio`, `.conan2`,
-  `.hex`, `.mix`, `.sbt`, `.ivy2`, `.local/lib`) and wherever the environment moved them
+The lane keeps an agent's mistakes and its use of the user's credentials in; it is not a jail for a
+deliberately hostile process (the 2026-11-16 audit's list of what it can't stop is below).
+- *Writes.* The lane is the task's worktree and its `ask/` directory (where the ask server writes
+  its questions), not the rest of the task directory: `task.json`, `status.json`, `steer.jsonl`,
+  the rounds and `runner.log` steer the runner and wb outside the lane, so an agent that could
+  write them could lift its own guards, and the runner would write through a link it planted
+  there (the 2026-11-16 audit). Then the temp directories (`gettempdir()`, `TEMP_ROOTS`: `/tmp`, `/var/tmp`), the device nodes builds
+  use (`DEV_NODES`: `/dev/null`, `/dev/zero`, `/dev/full`, `/dev/random`, `/dev/urandom`,
+  `/dev/tty`, `/dev/ptmx`, `/dev/shm`; not the rest of `/dev`, the user's terminals and input
+  devices, and not `/dev/pts`: a task that needs it or a GPU asks), `/proc`, the build caches and
+  toolchain homes under `$HOME` (`TOOL_HOMES`: `.cache`, `.cargo`, `.rustup`, `go/pkg`, `.npm`,
+  `.bun/install/cache`, `.yarn`, `.pnpm-store`, `.local/share/pnpm/store`, `.local/share/uv`,
+  `.gradle`, `.m2`, `.nuget`, `.dotnet`, `.gem`, `.julia`, `.cabal`, `.stack`, `.ghcup`,
+  `.platformio`, `.conan2`, `.hex`, `.mix`, `.sbt`, `.ivy2`, `.pub-cache`, `.konan`,
+  `.local/share/hatch`, `.local/share/virtualenvs`) and wherever the environment moved them
   (`TOOL_HOME_VARS`, each that is set: `CARGO_HOME`, `RUSTUP_HOME`, `GOPATH`'s first entry,
   `GOMODCACHE`, `GOCACHE`, `npm_config_cache`, `PIP_CACHE_DIR`, `UV_CACHE_DIR`,
-  `GRADLE_USER_HOME`, `BUN_INSTALL`, `DENO_DIR`, `MIX_HOME`, `HEX_HOME`), OpenCode's own data
-  (`.local/share/opencode`, `.local/state/opencode`, and `opencode` under `$XDG_DATA_HOME` and
-  `$XDG_STATE_HOME` when set), `$XDG_CACHE_HOME`, `$XDG_RUNTIME_DIR`, `$WB_HOME/notify.jsonl` and its lock (the ask server raises questions), and
-  the extra paths (`commands.json` `paths`, the task's grants `paths`), each with its real path too, keeping
-  only those that exist. No entry may resolve to `/` or the home directory (this covers
-  `commands.json` `paths` and the grants too).
+  `GRADLE_USER_HOME`, `BUN_INSTALL`, `DENO_DIR`, `MIX_HOME`, `HEX_HOME`, `PUB_CACHE`,
+  `KONAN_DATA_DIR`, `HATCH_DATA_DIR`, `WORKON_HOME`; of `GOPATH` and `BUN_INSTALL` only their
+  caches, `VAR_CACHES`: `pkg`, `install/cache`), OpenCode's own data (`.local/share/opencode`,
+  `.local/state/opencode`, and `opencode` under `$XDG_DATA_HOME` and `$XDG_STATE_HOME` when set),
+  `$XDG_CACHE_HOME`, and the extra paths (`commands.json` `paths`, the task's grants `paths`), each with its real path
+  too, keeping only those that exist. Not the toolchains' programs or what a shell sources, where
+  a planted file runs later outside the lane: `~/.local/lib` (user site-packages, whose `.pth`
+  files every python runs) is out, `go`, `.bun`, `.deno` and pnpm's home give only their caches,
+  and `NOT_WRITABLE` (`.cargo/bin`, `.cargo/env`, `.dotnet/tools`, `.cabal/bin`, `.ghcup/bin`, and
+  `$CARGO_HOME`'s `bin` and `env`) are left out of their homes; `cargo install` and the like need
+  `wb allow --path`. A place holding one of those, an existing secret or workbench's own files
+  (`private_paths`, below) is split: its other
+  entries are granted one by one (Landlock only allows), so a new top-level file there is refused.
+  No entry may resolve to `/` or the home directory, nor contain the task's repo or its git
+  directory (`repo_dirs`: with `GOPATH=~/src` or the repo in `~/go/src`, the agent could write a
+  hook or `core.fsmonitor` that wb's own git runs outside the lane); the temp directories are
+  kept whole even so (a repo kept in `/tmp` stays in reach: splitting `/tmp` would refuse every
+  new file there). `$XDG_RUNTIME_DIR` isn't in the lane (the user's bus, SSH and GPG agent
+  sockets and runtime systemd units live there): the agent gets its own (`runtime_dir`,
+  `/tmp/wb-run-<uid>-<hash>`, 0700, short for socket paths). The temp directories are a
+  documented trade-off: Java's temp files, Xvfb's `/tmp/.X11-unix` and many test suites write
+  there directly, so other programs' files in `/tmp` stay writable; the review diff's scratch
+  index lives in `$WB_HOME`, not there. A `$WB_HOME` in `/tmp` (the tests') is in the lane whole.
 - *Reads.* Everything is readable except where credentials and the user's own records live:
   `context.SECRETS` under `$HOME` (`.ssh`, `.gnupg`, `.password-store`, `.netrc`,
-  `.git-credentials`, `.config/gh`, keyrings, `.aws`, `.azure`, `.config/gcloud`, `.kube`,
-  `.docker`, `.pypirc`, cargo and gem credentials, browser and mail profiles, shell history,
-  `.claude`, `.claude.json`, and the like) and Claude's directory; and of the home directory's own
-  entries only the dotfiles, `bin` and `go` are readable, plus the task's repo, workbench itself
-  and the lane, not the user's documents or other projects. Landlock only allows, so `readable()`
-  walks down from `/` listing the entries beside each excluded one. Found by trying: `python3`
-  running gh inside the lane was logged in, and the SSH keys that push were readable.
+  `.git-credentials`, `.config/git/credentials`, `.gcm`, `.config/gh`, keyrings, `.aws`, `.azure`,
+  `.config/gcloud`, `.kube`, `.docker`, `.pypirc`, `.pgpass`, `.my.cnf`, `.vault-token`, cargo and
+  gem credentials, OpenCode's service password (`.config/opencode/service.json`,
+  `.local/state/opencode/service.json`: its background service runs outside the lane), password
+  managers, cloud CLIs, browser and mail profiles (Flatpak's `.var/app` too), shell history,
+  `.claude`, `.claude.json` and its backups, and the like), the same under `$XDG_CONFIG_HOME`,
+  `$XDG_DATA_HOME` and `$XDG_STATE_HOME`, wherever `SECRET_VARS` moved them (`GNUPGHOME`,
+  `PASSWORD_STORE_DIR`, `GH_CONFIG_DIR`, `DOCKER_CONFIG`, `KUBECONFIG`, `AWS_SHARED_CREDENTIALS_FILE`,
+  `AWS_CONFIG_FILE`, `CLOUDSDK_CONFIG`, `AZURE_CONFIG_DIR`, `HISTFILE`, `$CARGO_HOME`'s
+  credentials) and Claude's directory (`secret_paths`); and workbench's own files
+  (`private_paths`): `$WB_HOME` (notify.jsonl, the chat log, the rules, other tasks) and its
+  config (`~/.config/workbench` and wherever `WB_COMMANDS`, `WB_CHAT_TOKEN`, `WB_CHAT_CONFIG`,
+  `WB_MODELS`, `WB_IMAGES` moved its files): the audit read the chat token from a lane, which
+  would let an agent post to Claude as the user. Of `$WB_HOME`, the task's own directory and
+  `rules/<task>/` stay readable (its prompts and spec; its OpenCode config, instructions and git
+  shim). Left readable on purpose: `.npmrc` and
+  `.yarnrc.yml` (the package managers read them to install) and OpenCode's `auth.json` and
+  session database in `.local/share/opencode` (OpenCode runs in the lane and needs them: keep
+  cloud keys out of it). Of the home directory's own entries only the dotfiles and
+  `HOME_READABLE` (`bin`, `go`, `R`, `perl5`) are readable, and of `ONLY_KEPT` (`/dev`, `/mnt`,
+  the Windows drives on WSL2, `/media`, `/run/media`, `/run/user`, `/home`, the other users'
+  homes) nothing; beyond those, the task's repo (its secrets left out even when it holds some: a
+  repo at `~/.config`), workbench itself (even inside Claude's directory, the marketplace
+  install), the lane, and the programs the agent runs (`tool_roots`: each PATH directory, the
+  prefix of one under the home (its parent when it is a `bin`, so `~/miniconda3` or `~/flutter`),
+  the install a link in the home's PATH directories points into, and the Python running
+  workbench; never `/`, the home directory or a parent of a secret), not the user's documents or
+  other projects. Running a program reads it, so a program the walk leaves out can't start
+  (`workbench lane: can't run <cmd> (Permission denied)`, exit 126; not found, 127): add its
+  directory to `commands.json` `paths`. Landlock only allows, so `readable()` walks down from `/`
+  listing the entries beside each excluded one. Found by trying: `python3` running gh inside the
+  lane was logged in, and the SSH keys that push were readable.
 - *The kernel's side* (`lane.py`, Linux Landlock, no root): the runner starts OpenCode as
-  `python -I lane.py --write P… [--reads --read P…] -- opencode …`; it restricts itself and execs,
-  so OpenCode, its shell and everything they run inherit the limit. Handled rights: file writes,
-  removes and every make, plus refer (ABI 2: moves inside the lane work) and truncate (ABI 3), and
-  file reads when `--reads` is given. Directories get every right; files only write, read and
-  truncate. It also sets no-new-privileges, which disables setuid programs (sudo, su). Execution,
-  directory listing and the network stay free. It fails closed: when Landlock is there but the
-  lane can't be drawn, it prints `workbench lane: the kernel refused the lane (<error>); not
-  running <cmd>` to `runner.log` and exits 126. A command it can't exec gets `workbench lane:
-  can't run <cmd> (<reason>)` and exit 127 (not found) or 126, not a traceback. Without Landlock (macOS, an old kernel, or an
-  architecture whose syscall numbers differ: `lane.UNIFIED` lists the ones it runs on, x86_64,
-  i386/i686, aarch64, armv7l/armv6l, riscv64, ppc64/ppc64le, s390x, loongarch64) it execs
-  unrestricted. `wb doctor` draws a real lane and tries a write outside it: `ok agents write only
-  in their lane (Landlock ABI N)`, `BAD the lane didn't hold a write outside it: …`, or a `--` line
-  without Landlock.
+  `python -I lane.py --write P… [--reads --read P…] [--unix P…] -- opencode …`; it restricts
+  itself and execs, so OpenCode, its shell and everything they run inherit the limit. Handled
+  rights: file writes, removes and every make, plus refer (ABI 2: moves inside the lane work)
+  and truncate (ABI 3), file reads when `--reads` is given, and from ABI 9 connecting to a UNIX
+  socket made outside the lane, granted only beneath `--unix` (`context.unix_paths`: the
+  `commands.json` and grant `paths`, so `wb allow --path /run/postgresql` reaches a test
+  database), so the session bus (and through it `systemd-run`), the keyring and the SSH and GPG
+  agents are out of reach; sockets the lane's own processes make stay theirs. From ABI 6 it also
+  scopes signals and abstract UNIX sockets: the agent can signal only what it started, not its
+  runner, other tasks, the chat or Claude Code, while the runner can still stop it. Directories
+  get every right; files only write, read, truncate and the socket right. No-new-privileges,
+  which disables setuid programs (sudo, su, and snap-confine, so a snap can't run in the lane:
+  `wb start` refuses a `--test` that is one, `wb doctor` names those on PATH), is set on every
+  Linux machine, Landlock or not, before the lane. Directory listing and the network stay free;
+  so does metadata: Landlock doesn't cover chmod, chown, utimes or xattrs, so those still succeed
+  on a file outside the lane (only the shell patterns stand in their way). It fails closed: when
+  Landlock is there but the lane can't be drawn, it prints `workbench lane: the kernel refused
+  the lane (<error>); not running <cmd>` to `runner.log` and exits 126. A command it can't exec
+  gets `workbench lane: can't run <cmd> (<reason>)` and exit 127 (not found) or 126, not a
+  traceback. Without Landlock (macOS,
+  an old kernel, or an architecture whose syscall numbers differ: `lane.UNIFIED` lists the ones
+  it runs on, x86_64, i386/i686, aarch64, armv7l/armv6l, riscv64, ppc64/ppc64le, s390x,
+  loongarch64) it execs unrestricted but for no-new-privileges on Linux. Older ABIs hold less
+  (`lane.gaps`): before ABI 3 (Linux 6.2) truncating a file outside the lane isn't refused; on
+  ABI 1 (Linux < 5.19) moving or hard-linking a file between directories fails even inside it
+  (EXDEV, "Invalid cross-device link"; most tools fall back to a copy); before ABI 6 signals and
+  before ABI 9 the user's sockets aren't scoped. `wb doctor` draws a real lane and tries a write
+  outside it: `ok agents write only in their lane (Landlock ABI N)`, `BAD the lane didn't hold a
+  write outside it: …`, or a `--` line without Landlock; then a `--  Landlock ABI N: …` line for
+  each gap.
 - *OpenCode's side* (`external_rules`): its `external_directory` permission, checked for its file
   tools' paths and the shell's working directory and `cd` targets (not other arguments), is deny
   `*`, then allow `<dir>/*` for the lane, `READABLE` (`/usr`, `/etc`, `/opt`, `/lib*`, `/bin`,
-  `/sbin`, `/proc`, `/sys`, `/dev`, `/nix`, `/run/current-system`, and macOS's `/Library`,
-  `/System`, `/Applications`) and the handed skills' directories. This is all that applies
+  `/sbin`, `/proc`, `/sys`, `/nix`, `/run/current-system`, and macOS's `/Library`,
+  `/System`, `/Applications`), the task's `rounds/` (a prompt too long for one argument is read
+  from there) and the handed skills' directories; with the lane off, allow `*` (said outright:
+  the layer's rule for other MCP servers' tools, `*_*`, would match it). This is all that applies
   without Landlock.
 - *Asking for more.* A refused write is "Permission denied" (the protocol says so, and not to
   probe it); the agent calls `ask_reviewer` with `path`, which raises a PERMISSION question naming
   `wb allow <task> --path <dir>`. That grants read and write (`--always` keeps it in
-  `commands.json`; `wb start --allow-path` grants it up front). `_lane_dir` refuses `/` and the
-  home directory, resolves the path and creates it; `*` turns the lane off for the task, as
+  `commands.json`; `wb start --allow-path` grants it up front). `_lane_dir` refuses a path through
+  a link, naming its target (the agent can plant `/tmp/out` -> another project and ask for
+  `/tmp/out`; Claude names the real directory itself), and `context.lane_refusal` refuses `/`, the
+  home directory and a place in a secret, workbench's own files or the skill library; a place
+  that holds one is granted around it. Then it creates the directory. `lane_paths` leaves out a
+  `commands.json` or grant path the same check refuses. `*` turns the lane off for the task, as
   `"paths": ["*"]` in `commands.json` does for every task.
 
 **Its environment** (`runner.agent_env`) is that of the `wb` command that last started its runner
 (`start`, `feedback`, `next`, `resume`) less credentials and the runner's `PYTHONPATH`
 (`SECRET_ENV`: names containing `TOKEN`, `SECRET`, `PASSW`, `CREDENTIAL`, `API_KEY`, `ACCESS_KEY`,
-`PRIVATE_KEY`; the `ANTHROPIC_`, `CLAUDE_`, `GH_`, `GITHUB_`, `GITLAB_`, `AWS_`, `AZURE_`,
-`GOOGLE_`, `OPENAI_`, `HF_` prefixes; `SSH_AUTH_SOCK`, `SSH_AGENT_PID`, `GPG_AGENT_INFO`,
-`DBUS_SESSION_BUS_ADDRESS`), plus `PWD` (the worktree), `OPENCODE_CONFIG`, `WB_TASK`, `WB_HOME`,
-`PYTHONDONTWRITEBYTECODE=1` (no `__pycache__` in the diff) and the shim's `PATH`. A provider that
-needs a key from the environment names it in `commands.json` `"env": [names]`, which passes it
-through.
+`PRIVATE_KEY`, `WEBHOOK`; ending `_PASS`, `_PASSPHRASE`, `_PWD`, `_DSN`, `_JWT`, `_PAT`, `_KEY`, or
+holding `PASS_`; `PASS`, `PASSPHRASE`, `KEY`, `BW_SESSION`, `OP_SESSION_*`, `KRB5CCNAME`; the
+`ANTHROPIC_`, `CLAUDE_`, `GH_`, `GITHUB_`, `GITLAB_`, `AWS_`, `AZURE_`, `GOOGLE_`, `OPENAI_`, `HF_`
+prefixes; `SSH_AUTH_SOCK`, `SSH_AGENT_PID`, `GPG_AGENT_INFO`, `DBUS_SESSION_BUS_ADDRESS`,
+`DBUS_SYSTEM_BUS_ADDRESS`; and any variable whose value is a URL with a password, `USERINFO`:
+`DATABASE_URL=postgres://u:p@h/db`), but for `ENV_KEEP`, configuration under those prefixes
+(`HF_HOME`, `HF_HUB_CACHE`, `HF_HUB_OFFLINE`, `HF_DATASETS_OFFLINE`, `HF_ENDPOINT`,
+`HF_HUB_DISABLE_TELEMETRY`, `TRANSFORMERS_OFFLINE`, `TOKENIZERS_PARALLELISM`, `AWS_REGION`,
+`AWS_DEFAULT_REGION`, `GOOGLE_CLOUD_PROJECT`, `GOOGLE_CLOUD_REGION`); plus `PWD` (the worktree),
+`OPENCODE_CONFIG`, `OPENCODE_CONFIG_CONTENT` (the rules again, below), `WB_TASK`, `WB_HOME`, its
+own `XDG_RUNTIME_DIR` (`context.runtime_dir`, with the lane on), `PYTHONDONTWRITEBYTECODE=1` (no
+`__pycache__` in the diff) and the shim's `PATH`. A provider that needs a key from the
+environment, or tests that need `DATABASE_URL` and the like, name it in `commands.json` `"env":
+[names]`, which passes it through. OpenCode's own environment adds `OPENCODE_ENV`
+(`npm_config_yes=false`); the tests' doesn't.
 
-**The task directory is writable** (the ask server writes the task's status there), which is why
-the grants and the rules live in `rules/<task>/`. The acceptance command runs in the same lane and
-environment as the agent, so code the agent wrote gets no more rights when the runner tests it.
+**Project config can't lift the rules.** OpenCode loads a project's `opencode.json` (the
+worktree's, `.opencode/`, and one in any directory above it) after `OPENCODE_CONFIG`, and appends
+its permissions after the layer's, so an allow-all there won (the 2026-11-16 audit: an agent
+could write one for its next round). `rules_env` passes the layer's permissions again as
+`OPENCODE_CONFIG_CONTENT`, which loads after every file; a list past `CONFIG_CONTENT_MAX`
+(120,000 bytes; one environment string holds 128 KiB) sets `OPENCODE_DISABLE_PROJECT_CONFIG=1`
+instead, which also drops AGENTS.md and the project's skills. The layer's `edit` rule also denies
+`OPENCODE_FILES` (`*opencode.json`, `*opencode.jsonc`, `.opencode/*`, `*/.opencode/*`), and the
+round report flags them with Claude's files.
+
+**The user's MCP servers stay out.** OpenCode merges the user's global config, MCP servers
+included, into every agent's: a GitHub or database server with the user's token would reach
+every agent, and a remote one runs in OpenCode's own process where neither the lane nor
+`SECRET_ENV` applies. The layer replaces each server in the global `mcp.servers` with one that
+can't run (`runner.users_servers_off`: `{"type": "local", "command": ["false"], "enabled":
+false}`; OpenCode 2.3 starts a server whose own entry says `"enabled": false` all the same), and
+its permissions start with `MCP_RULES`: deny `*_*` (every MCP tool, named `<server>_<tool>`, a
+project's too), allow `workbench_*`, allow `doom_loop` (what `--auto` gave it). The layer also
+sets `"share": "disabled"`, against a user's `share: "auto"`.
+
+**What the agent writes is not trusted.** Of the task directory, the lane writes only the
+worktree and `ask/`; the grants, the rules and the config live in `rules/<task>/`, and the ask
+server's questions are checked and raised by the runner (*Talking to a running agent*). What wb
+writes into `ask/` goes through `ask_mcp.write_answer` (a new temporary name, then a rename that
+replaces a link instead of following it), and the runner reads ask files without following links
+or FIFOs, up to `FILE_MAX`. The acceptance command runs in the same lane and environment as the
+agent, so code the agent wrote gets no more rights when the runner tests it.
 
 **Claude's files.** The `edit` permission denies `*CLAUDE.md`, `*CLAUDE.local.md`, `*AGENTS.md`,
 `.claude/*` and `*/.claude/*`, and the skill library (`<library>/*`), so OpenCode's file tools
@@ -712,24 +831,40 @@ OpenCode starts with each `opencode run` (so once a round), configured as
 `mcp.servers.workbench` (`type: local`, `codemode: false` so it's a plain tool, `timeout.startup`
 15 s, `timeout.execution` the ask timeout plus a minute, `environment` `WB_TASK` and `WB_HOME`).
 It answers `initialize` (echoing the client's protocol version, else `2025-06-18`), `ping`,
-`tools/list` and `tools/call`; one tool, `ask_reviewer {question, context?, command?, path?}`. A
-call writes `ask/<id>.json` (`{id, ts, round, question, context, command?, path?}`), sets phase
-`asking` and `status.asking`, logs an `ask` event, raises a `question` notice (`Q: …`, or
-`PERMISSION to run: `cmd`` / `PERMISSION to use the directory D (outside its lane)` with the `wb
-allow` that grants it), and blocks (a `Watcher` on `ask/`) until `ask/<id>.answer` appears or the
-ask timeout passes (`--ask-timeout`, 20 minutes). Then it restores the phase and returns the
-answer (with an `answer` event), or, on timeout, "No answer arrived in time. Make the most reasonable
-assumption…". Budgets count the task's `ask/*.json` files, across all steps: plain questions up to
-`--ask-budget` (2), and command or path requests together up to `PERMISSION_BUDGET` (8), apart
-from the questions; past either, the tool returns a refusal without asking. The prompt `wb next`
-writes names the questions left, not the whole budget. A `tools/call` runs on its own thread
-(replies written under a lock), so `ping` and the rest are answered while a question waits. The silence guard
-doesn't count the wait. `wb answer <task> --text|--file` answers; `wb allow` answers a pending
-question too.
+`tools/list` and `tools/call`; one tool, `ask_reviewer {question, context?, command?, path?}`.
+The server runs inside the agent's lane, so it writes only `ask/`. A call first checks `command`
+and `path` (`bad_request`: one line of at most `LINE_MAX`, 4096, characters; a path absolute) and
+replies with what to fix instead of asking; past a budget (counted from the ask files, a
+courtesy: the runner's count is the one that holds) it returns the refusal. Otherwise it writes
+`ask/<id>.json` (`{id, ts, round, question, context, command?, path?}`) and blocks (a `Watcher`
+on `ask/`) until `ask/<id>.answer` appears or the ask timeout passes (`--ask-timeout`, 20
+minutes), returning the answer or "No answer arrived in time. Make the most reasonable
+assumption…".
+
+The runner relays it (`ask_mcp.relay`, each tick of the round's loop, woken by the steer bell
+when `ask/` changes). Outside the lane, it reads each new ask file (no links, at most
+`FILE_MAX`, 256 KiB; `NEW_MAX` a tick, `ASKS_MAX` in all), checks it again and counts it in
+status `asks` (`{id: "q" | "p" | "x"}`, which the agent can't write: deleting ask files gives it
+no budget back). Plain questions go up to `--ask-budget` (2) across all steps, command or path
+requests together up to `PERMISSION_BUDGET` (8), apart from the questions; a refused one ("x")
+is answered with why, and Claude isn't woken. Otherwise it logs an `ask` event and raises a
+`question` notice (`notice`): `Q: …`, or `PERMISSION to run: `cmd`` / `PERMISSION to use the
+directory D (outside its lane)` with the `wb allow` that grants it, the path shell-quoted. The
+question is clipped at `QUESTION_CHARS` (2,000) and the context at `CONTEXT_CHARS` (4,000), each
+pointing at the ask file for the rest, and every line after a part's first is marked `> `, the
+agent's, so none can pass for workbench's own; `command` and `path` are never clipped (Claude
+copies them). The phase is `asking` while any question of the round is open, `status.asking`
+the oldest; an answer (logged as an `answer` event) or the ask timeout closes one, and with none
+open the phase is `running` again, so two questions at once keep the task asking until both are
+answered. A round that ends mid-question clears it. The prompt `wb next` writes names the
+questions left (`ask_mcp.used`), not the whole budget. A `tools/call` runs on its own thread
+(replies written under a lock), so `ping` and the rest are answered while a question waits. The
+silence guard doesn't count the wait. `wb answer <task> --text|--file` answers; `wb allow`
+answers a pending question too; both write through `write_answer`.
 
 **Granting.** `wb allow <task> "<pattern>"… [--path DIR…] [--always]` adds to the task's grants
 (`rules/<task>/grants.json`, through `context.grant`; and to `commands.json` with `--always`, which
-refuses a `commands.json` that doesn't parse), answers any pending question with
+refuses a `commands.json` that doesn't parse or has the wrong shape), answers any pending question with
 "Claude allowed … Run it again now and carry on.", and when the agent is running, also queues that
 as a `--now` note so the agent restarts on its session with the new rule (the rules are read when
 OpenCode starts).
@@ -842,12 +977,15 @@ goes in its CLAUDE.md instead.
 
 ## Waking Claude, exactly once
 
-The runner and the ask server append notices to `$WB_HOME/notify.jsonl` (`Task.notify`: `{ts,
+The runner appends notices to `$WB_HOME/notify.jsonl` (`Task.notify`: `{ts,
 task, kind, text, round?, id?}`). Kinds: `review`, `stuck`, `failed` (the round report as text;
 a load failure or crash without a round), `question` (with the question's `id`), `checkin`
 (periodic, a nudge, a reading-full session, a base check that warns). `wb` itself writes only
-one: `reap`'s `failed` for a runner that died without a report. Each task's `acked` file holds the
-time up to which Claude has had its news.
+one: `reap`'s `failed` for a runner that died without a report. The agent never writes one: the
+file is out of its lane (the 2026-11-16 audit: it could forge any task's wake, or wipe them
+all). Readers take its rows through `store.notices()`, which keeps only whole ones (a dict with a
+`NAME_RE` task, a kind, a numeric ts): one row without a task once made every acknowledging
+command raise. Each task's `acked` file holds the time up to which Claude has had its news.
 
 - **Ears.** The mod runs `wb events`, which prints a line the moment anything in the state
   directory changes (*Waiting without polling*). Each line makes the mod re-read the tasks.
@@ -1585,8 +1723,10 @@ custom-node packs do run their own Python).
   agent so, and to ask through `ask_reviewer` or say so in its summary when the task needs one of
   those.
 - **Git is read-only for the agent, enforced** (`workbench/gitguard.py`). `install` writes
-  `rules/<task>/bin/git` every round (`#!<python> -I`, the package path, then `gitguard.main(<real
-  git>, <the task repo's common dir>, argv)`) and puts its directory first on the agent's `PATH`,
+  `rules/<task>/bin/git` every round (a `/bin/sh` wrapper, `exec '<python>' -I -c '<code>' "$@"`,
+  quoted, since a shebang line splits at a space and a Python under `/home/John Smith/` broke
+  every git call; the code inserts the package path, then `gitguard.main(<real git>, <the task
+  repo's common dir>, argv)`) and puts its directory first on the agent's `PATH`,
   so it's the git called from the shell, a script or `make`. `split` skips git's global options
   (and the values of `-C`, `-c`, `--git-dir`, `--work-tree`, `--namespace`, `--super-prefix`,
   `--attr-source`) to find the subcommand; `reads` decides: no subcommand or one of `READ` (35:
@@ -1603,7 +1743,7 @@ custom-node packs do run their own Python).
   (the temp roots are fixed when the shim is written, so an agent's `TMPDIR` can't make a project
   count as scratch). For `init` and `clone` it judges by where the new repository lands
   (`destination`, skipping options and their values). The real git
-  called by its full path is refused by OpenCode's rules (`*/git *`), and the task repo's refs are
+  called by its full path is refused by OpenCode's rules (`context.denied_shell()`), and the task repo's refs are
   outside the lane. That also means an agent can't wipe its own unfinished work by mistake. The
   shim is standard library only: it's imported on every git call.
 - **Claude's files.** OpenCode's `edit` rules refuse edits to `CLAUDE.md`, `CLAUDE.local.md`,
@@ -2047,7 +2187,7 @@ Every waiter and its bounded wake (a timeout to re-check what the kernel can't s
 | `wb wait` | the state directory and the named task's directory | 60 s (a dead runner: `reap`) |
 | `wb log -f` | the task directory | 30 s |
 | `wb watch` | the task directory | 1.5 s on a terminal, 30 s otherwise |
-| the runner's steer bell | the task directory (`steer.jsonl`) | 5 s, while OpenCode runs |
+| the runner's steer bell | the task directory (`steer.jsonl`) and `ask/` | 5 s, while OpenCode runs |
 | `ask_reviewer` | `ask/` | 60 s, until the ask timeout |
 | the chat `Hub` | `chat/` and the listener's pidfd | 60 s |
 | `wb stop` / `takeover` | `wait_exit(pid, 15)` | |
@@ -2065,7 +2205,7 @@ broken pipe or when its parent process changes.
 usage error, or `wait` on a closed task, with no open task, or a timeout; 3 no model can run
 (`start`); 4 the GPU is held by a task the new one can't run beside (`start` without `--queue`);
 `scout --due` 0 when due, 1 when not; `doctor` 0/1. cli writes notify.jsonl only in `reap` (the
-runner and the ask server write the rest). `wb --version` prints the version
+runner writes the rest). `wb --version` prints the version
 (`workbench.__version__`).
 
 **Acknowledging.** `_ack_all(task)` moves the task's `acked` mark: if an unacked notice of the
@@ -2089,10 +2229,10 @@ delivered as taken (`_stale_notes`, *Notes*).
 ### Running tasks
 | Command | Flags (defaults) | What it does |
 |---|---|---|
-| `wb start <task> --spec <file\|->` | `--repo` (.), `--size trivial\|significant` (significant), `--model <id or fragment>`, `--test <cmd>`, `--auto-fix N` (2), `--checkin MIN` (10 significant, 0 trivial), `--ask-budget N` (2), `--ask-timeout S` (1200), `--round-timeout S`, `--silence-timeout S`, `--think-timeout S` (0 off; unset or 0 for the other two: the measured budgets), `--test-timeout S` (900), `--no-base-check`, `--base REF` (HEAD), `--skill NAME…`, `--allow PATTERN…`, `--allow-path DIR…`, `--force` (queue a `--model` that can't run now; the hint is offered only when its server is just down), `--queue` (start although the GPU's holders leave no room: wait behind them), `--trial`, `--no-claude-md` | Checks the name (`^[a-z0-9][a-z0-9-]{0,47}$`, never reused), the repo, the spec and the skills, and that opencode is on PATH; picks the model (router, or `--model`; none runnable: exit 3, with each model's next step); refuses a repo that is a task's worktree, a `--base` that names no commit (`no commit <base> in <repo>`) and a repo with no git identity; checks `CLAUDE.md` or `.claude/CLAUDE.md` is committed at the base (or CLAUDE.md gitignored: the checkout's copy); refuses when another task (or `wb image`) holds the GPU and the model can't run beside it (exit 4, naming each holder's task, repo and model; `--queue` overrides); makes the worktree and branch `delegate/<task>` (no checkout hook; a failed add leaves nothing); notes submodules it doesn't check out; writes task.json, round 1's prompt (spec + PROTOCOL) and status; spawns the runner and returns at once. Prints the model and why, the slice, Claude's spec record, the handed or suggested skills, notes, `next: wb wait <task>`. With `--test` (and not `--no-base-check`, task.json `no_base_check`) the runner first runs the acceptance command once on the base (*The base check*: at most `BASE_CHECK_SECS` = 120 s, or `--test-timeout` when shorter; `base-tests.txt`, status `base_check`); what it saw comes in the first report, and a check-in at once when it already passes or `--test-timeout` cut it short. |
+| `wb start <task> --spec <file\|->` | `--repo` (.), `--size trivial\|significant` (significant), `--model <id or fragment>`, `--test <cmd>`, `--auto-fix N` (2), `--checkin MIN` (10 significant, 0 trivial), `--ask-budget N` (2), `--ask-timeout S` (1200), `--round-timeout S`, `--silence-timeout S`, `--think-timeout S` (0 off; unset or 0 for the other two: the measured budgets), `--test-timeout S` (900), `--no-base-check`, `--base REF` (HEAD), `--skill NAME…`, `--allow PATTERN…`, `--allow-path DIR…`, `--force` (queue a `--model` that can't run now; the hint is offered only when its server is just down), `--queue` (start although the GPU's holders leave no room: wait behind them), `--trial`, `--no-claude-md` | Checks the name (`^[a-z0-9][a-z0-9-]{0,47}$`, never reused), the repo (with the lane on, `_lane_fits` refuses one that is the home directory or lies where credentials live, and a `--test` whose command is a snap), the spec and the skills, and that opencode is on PATH; picks the model (router, or `--model`; none runnable: exit 3, with each model's next step); refuses a repo that is a task's worktree, a `--base` that names no commit (`no commit <base> in <repo>`) and a repo with no git identity; checks `CLAUDE.md` or `.claude/CLAUDE.md` is committed at the base (or CLAUDE.md gitignored: the checkout's copy); refuses when another task (or `wb image`) holds the GPU and the model can't run beside it (exit 4, naming each holder's task, repo and model; `--queue` overrides); makes the worktree and branch `delegate/<task>` (no checkout hook; a failed add leaves nothing); notes submodules it doesn't check out; writes task.json, round 1's prompt (spec + PROTOCOL) and status; spawns the runner and returns at once. Prints the model and why, the slice, Claude's spec record, the handed or suggested skills, notes, `next: wb wait <task>`. With `--test` (and not `--no-base-check`, task.json `no_base_check`) the runner first runs the acceptance command once on the base (*The base check*: at most `BASE_CHECK_SECS` = 120 s, or `--test-timeout` when shorter; `base-tests.txt`, status `base_check`); what it saw comes in the first report, and a check-in at once when it already passes or `--test-timeout` cut it short. |
 | `wb feedback <task> --text "…" \| --message <file\|->` | `--fresh` \| `--keep-context`, `--spec-gap "…"…` | Reaps a dead runner first (`reap`). Phase review/stuck/failed and no live runner; empty text is refused before anything is written. Writes the next round's prompt (FEEDBACK_HEAD + "Make exactly these changes, then re-run the acceptance command and finish with a short summary:" (the re-run only when there is one) + the text), reviews+1, spawns the runner. Warns past three review rounds; prints each undelivered note it dropped ("not delivered, dropped …"). A note names the GPU's holders when it will wait for them. Gathers lessons. |
 | `wb next <task> --spec <file> -m "…"` | `--test` (replaces the acceptance command), `--skill` (replaces the set), `--fresh`, `--allow PATTERN…` (adds to the task's grants), `--spec-gap` | Phase review. Reads the spec (a file or `-`; empty or unreadable: nothing changes), records the step's size and fit, commits the work (`<m>` + `Workbench-Task: <task> (step N)` + `OpenCode-Session:`), writes the next step's prompt ("Step N of this task is done and committed (<sha>). The next step:" + spec + PROTOCOL), records the spec gaps, resets reviews, spawns. Says whether the next step gets a fresh session and why (`runner.fresh_reason`), each undelivered note it dropped, and names the GPU's holders when it will wait for them. Gathers lessons. |
-| `wb answer <task> --text "…" \| --file <f>` | `--id` (the pending question) | Writes `ask/<id>.answer` (atomically); the blocked `ask_reviewer` returns it. An empty answer is refused: the question stays open. |
+| `wb answer <task> --text "…" \| --file <f>` | `--id` (the pending question) | Writes `ask/<id>.answer` (atomically, never through a link: `ask_mcp.write_answer`); the blocked `ask_reviewer` returns it. An empty answer is refused: the question stays open. |
 | `wb allow <task> ["<pattern>"…]` | `--path DIR…`, `--always`, `--text "…"` | Adds to the task's grants (`rules/<task>/grants.json`; and commands.json with `--always`, refused when it doesn't parse); answers any pending question with "Claude allowed … Run it again now and carry on."; if the agent is live, sends that as a `--now` steer so it restarts on its session with the rule (while the tests run or the task waits for the GPU it says the agent gets it when they end, or when its round starts). `--path` goes through `_lane_dir` (refuses `/` and home, creates the directory; `*` turns the lane off for the task). |
 | `wb steer <task> --text "…" \| --message <file>` | `--now` | Only while queued/running/testing/asking with a live runner. Appends to steer.jsonl: delivered when the current run ends (before the tests), or at once with `--now`. While testing: "its tests are running (up to Ns); the agent gets it when they end"; while queued: when its round starts. |
 | `wb note <task> --text "…"` | | A `captain` event: Claude's log line in the transcript. |
@@ -2139,13 +2279,13 @@ delivered as taken (`_stale_notes`, *Notes*).
 | `wb init <dir>` | | A project the way Claude keeps one: git on the default branch, an initial commit, AGENTS.md → CLAUDE.md (a CLAUDE.md → AGENTS.md link is swapped; a gitignored CLAUDE.md isn't linked). Refuses the home directory or above, inside another repo, a repo git refuses (git's reason: no `git init` over it), without a git identity (`git var`, as for `wb start`), and a first commit holding likely secrets or installed directories no .gitignore covers. |
 | `wb setup` | `--force` (replaces a link that points elsewhere; never a real file) | Links `~/.local/bin/wb` to this copy's `bin/wb` and Claude Code's `skills/delegate` to its `skill/delegate`, warns when `~/.local/bin` isn't on PATH (Claude and the mod run `wb` by name); exit 1 when it left something in the way (see *Installing*). |
 | `wb update` | `--check` (only say whether origin has news: `update available: N new commit(s)…` or `up to date`), `--if-due` (with `--check`: ask origin at most weekly, `UPDATE_EVERY`, else answer from `update.json`; never with `CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC`) | Updates this copy (see *Installing*): refuses while any runner is live; a marketplace copy runs `claude plugin marketplace update workbench` then `claude plugin update workbench@workbench`; a clone (refusing uncommitted tracked changes) runs `git pull --ff-only` first. Refuses, before anything changes, when `claude` isn't on PATH; a step that can't run or runs past 300 s fails with a line (after a clone's pull: what is left to run), and update.json is written as soon as the pull lands. Prints `updated <kind> a..b (N commit(s))` or `already up to date`. The check's fetch (`cli._fetch_origin`) never prompts and never hangs: no terminal, `GIT_TERMINAL_PROMPT=0`, `SSH_ASKPASS_REQUIRE=never`, at most `FETCH_SECS` = 60 s; the user's own ssh command (`GIT_SSH_COMMAND`, `GIT_SSH`, `core.sshCommand`) is kept, and with none ssh runs with `BatchMode`. In between, `--if-due` recounts `HEAD..@{u}` locally, so a pull made elsewhere shows at once. |
-| `wb doctor` | | `opencode --version` (BAD below 2.x, whose config shape and run flags workbench writes; a version that doesn't parse is a `--` line), the OpenCode config files (and a set `$OPENCODE_CONFIG`), git, models found and each one's readiness (BAD when none can run), the providers skipped and why, an Ollama provider not answering (asked once), a provider's baseURL problem, any entry without `limit.context` (BAD), each Ollama entry's `options.max_tokens` and context against what Ollama serves (or that it can't say), the state directory (made if missing, then checked writable), the GPU budget and the devices it counts (or that the GPU's memory is unknown, or that none was found: a `--` line), a real lane drawn around a test write (`ok agents write only in their lane (Landlock ABI N)`: the probe's `PermissionError`, not exit 126), `wb` on PATH (Claude's Bash runs it by name: BAD without it, whatever `WB_BIN` says; `WB_BIN` is noted when set), the `/delegate` skill link, a `--` line when `wb` or `/delegate` comes from another copy (`wb setup --force` from the one you want), and whether Claude Code lists `workbench@…` in `plugins/installed_plugins.json` (information only: a mod loaded another way isn't listed). `ok`/`BAD` lines set the exit code; `--` lines inform. |
+| `wb doctor` | | `opencode --version` (BAD below 2.x, whose config shape and run flags workbench writes; a version that doesn't parse is a `--` line), the OpenCode config files (and a set `$OPENCODE_CONFIG`), git, models found and each one's readiness (BAD when none can run), the providers skipped and why, an Ollama provider not answering (asked once), a provider's baseURL problem, any entry without `limit.context` (BAD), each Ollama entry's `options.max_tokens` and context against what Ollama serves (or that it can't say), the state directory (made if missing, then checked writable), the GPU budget and the devices it counts (or that the GPU's memory is unknown, or that none was found: a `--` line), a real lane drawn around a test write (`ok agents write only in their lane (Landlock ABI N)`: the probe's `PermissionError`, not exit 126; then a `--  Landlock ABI N: …` line for each of `lane.gaps`; without Landlock a `--` line saying writes and credential reads aren't refused and whether sudo still is), `commands.json` (`context.commands_conf`: it must parse and hold lists of strings; `BAD` stops the check), the toolchains on PATH that are snaps (`context.TOOLCHAINS`; they can't run in the lane), `wb` on PATH (Claude's Bash runs it by name: BAD without it, whatever `WB_BIN` says; `WB_BIN` is noted when set), the `/delegate` skill link, a `--` line when `wb` or `/delegate` comes from another copy (`wb setup --force` from the one you want), and whether Claude Code lists `workbench@…` in `plugins/installed_plugins.json` (information only: a mod loaded another way isn't listed). `ok`/`BAD` lines set the exit code; `--` lines inform. |
 
 ## Files and formats
 
 ```
 $WB_HOME (~/.local/state/workbench)
-  notify.jsonl                   notices that need Claude, all tasks (the runner and the ask server write them)
+  notify.jsonl                   notices that need Claude, all tasks (the runner writes them)
   results.jsonl                  one row per closed task: what the router, slices, tuning and skill records learn from
   lessons.jsonl                  what each task taught, open until written into a skill or closed
   notes.md  notes.lock           wb notes: how the user wants delegation run
@@ -2163,19 +2303,20 @@ $WB_HOME (~/.local/state/workbench)
                                  grants.json grants.lock (what Claude allowed: {"allow", "paths"}),
                                  gitdir.json (the worktree's real git dir and its .git's text: {"gitdir", "dotgit"}),
                                  cmd.lock (one wb command on the task at a time)
-  tasks/<task>/                  inside the lane (the ask server writes here)
+  tasks/<task>/                  readable from the lane; only worktree/ and ask/ writable
     task.json  status.json  status.lock
     events.jsonl(.lock)  steer.jsonl(.lock)  acked  context.md  runner.log
     runner.lock                  held by the task's runner for its life (its pid inside): one runner a task
     base-tests.txt               the base check's output: the acceptance command on the base (`--test`)
     rounds/<n>/                  prompt.md  instructions.md (before a handover rewrote it)  summary.md  tests.txt
-    ask/<id>.json  <id>.answer   questions and permission requests; their answers
+    ask/<id>.json  <id>.answer   questions and permission requests; their answers (all the lane writes here, with worktree/)
     worktree/                    the agent's git worktree, branch delegate/<task>
 ~/.local/share/workbench/skills/ ($WB_SKILLS) the skill library, its own git repo; retired/
 ~/.config/workbench/
   models.json ($WB_MODELS)       what OpenCode can't say about each model or provider
   images.json ($WB_IMAGES)       image engines
   commands.json ($WB_COMMANDS)   the user's standing allowances: {"allow": [patterns], "paths": [dirs], "env": [names]}
+                                 (each a list of strings, or the file is refused: context.commands_conf)
   chat.json ($WB_CHAT_CONFIG)    the web chat's {"bind": [...], "hosts": [...]}
   chat-token ($WB_CHAT_TOKEN)    the web chat's token, mode 600
 ~/.config/opencode/opencode.json + .jsonc (layered, under $XDG_CONFIG_HOME; $WB_OPENCODE_CONFIG) the models
@@ -2232,7 +2373,8 @@ check-ins off), not `wb start`'s.
 | `tuned`, `explored`, `tuned_max` | the knob values this task runs at (`tuning.tune`) |
 | `steer_taken`, `nudges`, `nudged_round`, `checkin_at` | notes delivered; nudges sent; the round that ended in one; the last check-in |
 | `skills`, `skills_ever`, `skills_rev`, `skills_told` | the handed set; every skill held; the library rev of each; what this session was told |
-| `asking`, `agent_pid` | the open question's id; the agent's pid while a round runs (cleared by `_end_agent`, or `reap`) |
+| `asking`, `agent_pid` | the oldest open question's id; the agent's pid while a round runs (cleared by `_end_agent`, or `reap`) |
+| `asks` | the runner's count of the task's ask files, `{id: "q" \| "p" \| "x"}` (question, permission request, refused): the budgets |
 | `spec_gaps` | `[{round, text}]` from `--spec-gap` |
 | `updated_at` | every write |
 
@@ -2244,7 +2386,8 @@ cache}`, `error {text}`. From the runner: `round`, `stopped {text}`, `steer {now
 compacted}`,
 `autofix`, `reading_full`, `full`, `load` (the model reloaded before a round), `stopped {by:
 "signal"}` (a SIGTERM not from wb), `gpu {text}` (a warning from loading the model: a server wb
-can't stop, a model partly on the CPU, a share Ollama couldn't keep). From the ask server: `ask {id}`, `answer {id}`. From `wb`:
+can't stop, a model partly on the CPU, a share Ollama couldn't keep), and relaying the agent's
+questions `ask {id}`, `answer {id}`. From `wb`:
 `spec_gap`, `next_step`, `stopped` (bail out), `resumed`, `allow`, `steer {now}`, `captain`,
 `takeover`, `error` (`reap`: the runner died without a report).
 
@@ -2262,7 +2405,8 @@ with overflow), `read_full`, `reviews`, `spec_rounds`, `stuck`, `took_over`.
 - `steer.jsonl`: `{ts, text, now}`. `acked`: a float timestamp as text, replaced whole
   (`cli._write_ack`: a temp file renamed over it), since the mod and `wb wait` read it every poll
   and a read between a truncate and the write saw 0.
-- `ask/<id>.json`: `{id, ts, round, question, context, command?, path?}`; `<id>.answer`: the text.
+- `ask/<id>.json`: `{id, ts, round, question, context, command?, path?}` (the agent's: the runner
+  checks it); `<id>.answer`: the text (`ask_mcp.write_answer`).
 - `lessons.jsonl`: `{ts, task, repo, skills, id, kind, round, text}`; a close is `{close: id, ts,
   how: "skill:<name>"|"dropped", why}` (*Lessons*).
 - `speed.json`: `{"<model id>": {"write": [tok/s…], "read": [tok/s…]}}`, the last 60 of each.
@@ -2446,7 +2590,8 @@ subclassing a class that has tests; new classes go above the `__main__` block (e
 runs as a script).
 
 **Not hermetic.** The real HOME is used (`~/.claude/CLAUDE.md` enters task instructions; the lane
-test makes and removes `~/.wb-lane-test-*`), the real-OpenCode tests use OpenCode's own session
+tests make and remove `~/.wb-sec-test-*`, `~/.wb-lane-test-*` and `~/.wb-sock-*`, and each task's
+`/tmp/wb-run-<uid>-<hash>`), the real-OpenCode tests use OpenCode's own session
 storage, test_portable probes 127.0.0.1:11434, `wb scout` reads the real hardware. It never
 touches the real state directory, gpu.lock or a model, so it's safe beside running tasks.
 
@@ -2513,6 +2658,11 @@ push: every change is a pull request that merges once `check` is green and it is
 - **`wb update`'s flags or output** (`--check --if-due`; `update available…`, `updated …`) → the
   mod's weekly check, which toasts only an `update available` answer, and `/delegate-update`, which
   reloads the plugins only after an `updated` one (register.tsx `poll` and the `UPDATE` command).
+- **A file the runner or wb reads from the task directory, or one the ask server writes** → keep
+  the lane's part of it to `worktree/` and `ask/`, and have the runner check what comes from there
+  (`ask_mcp.relay`): nothing the agent writes may steer code outside its lane.
+- **The layer's `permissions`** → they go twice, in the file and as `OPENCODE_CONFIG_CONTENT`
+  (`rules_env`): keep them under `CONFIG_CONTENT_MAX`, or the fallback drops AGENTS.md.
 - **`wb watch --json`** (a style, the order, the activity wording) → the mod's `LINE_STYLE`, its
   pose regex, the `live-1` tag; `--last` and `JSON_LINE_CHARS` with the mod's `KEEP_LINES` and
   `LINE_CHARS`.

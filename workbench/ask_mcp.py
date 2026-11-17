@@ -1,13 +1,22 @@
 """MCP server (stdio, newline-delimited JSON-RPC) giving the local agent one tool: ask_reviewer.
 
-OpenCode starts it for each round (each `opencode run`) through the task's config layer, with WB_TASK naming the task. A call
-writes the question into the task directory, raises a "question" notification (the Claude Code mod
-wakes Claude with it; `wb wait` returns on it), and blocks until Claude's answer file appears or
-the wait times out. Questions are budgeted per task so a chatty model can't lean on the reviewer.
-A question is served on a thread of its own, so the server answers pings while it waits.
+OpenCode starts it for each round (each `opencode run`) through the task's config layer, with
+WB_TASK naming the task, inside the agent's lane. A call writes the question to ask/<id>.json,
+the one place in the task's directory the lane may write, and blocks until Claude's answer file
+appears or the wait times out. The runner, outside the lane, relays it (relay): it checks the
+file, counts it against the task's budgets, raises the "question" notice (the Claude Code mod
+wakes Claude with it; `wb wait` returns on it) and keeps the phase `asking` while any question is
+open. The server once set the status and wrote notify.jsonl itself, which put both in the lane,
+where the agent could forge any task's notice and its own spec (the 2026-11-16 audit): nothing
+the agent writes is trusted outside it now. A question is served on a thread of its own, so the
+server answers pings while it waits.
 """
 import json
 import os
+import re
+import secrets
+import shlex
+import stat
 import sys
 import threading
 import time
@@ -47,61 +56,222 @@ TOOL = {
 
 
 PERMISSION_BUDGET = 8  # requests for a refused command or directory, per task: a cap on a stuck loop
+QID = re.compile(r"^[0-9a-f]{8,32}$")
+LINE_MAX = 4096       # characters of a `command` or `path`: one line, never clipped (Claude copies it)
+QUESTION_CHARS = 2000  # of the question in Claude's notice; the ask file keeps the whole of it
+CONTEXT_CHARS = 4000   # of the context: a model pasting a whole log cost Claude 50K tokens a wake
+FILE_MAX = 256 * 1024  # bytes of an ask file the runner reads; a longer one is refused
+NEW_MAX = 20           # new ask files the runner looks at in one tick
+ASKS_MAX = 200         # ask files it counts in all (status `asks`); past that it looks at none
+BUDGET_USED = ("The question budget for this task is used up. Make the most reasonable "
+               "assumption, carry on, and state the assumption in your final summary.")
+PERMISSIONS_USED = (f"You have asked for {PERMISSION_BUDGET} refused commands or directories "
+                    "already. Work inside your lane with the allowed tools, and list what you "
+                    "couldn't do in your final summary.")
+NO_ANSWER = ("No answer arrived in time. Make the most reasonable assumption, carry on, and state "
+             "the assumption in your final summary.")
 
 
 def _permission(q: dict) -> bool:
     return bool(q.get("command") or q.get("path"))
 
 
+def ask_dir(task: store.Task):
+    return task.dir / "ask"
+
+
+def bad_request(command: str, path: str) -> str | None:
+    """Why a `command` or `path` can't go to Claude as it is, or None. One line, so it can't
+    write lines of its own into Claude's notice; an absolute path, which `wb allow --path` would
+    otherwise resolve against Claude's working directory (the 2026-11-16 audit)."""
+    for name, v in (("command", command), ("path", path)):
+        if v and (len(v) > LINE_MAX or any(c in v for c in "\n\r\0")):
+            return f"Give `{name}` as one line of at most {LINE_MAX} characters, and ask again."
+    if path and not os.path.isabs(path):
+        return "Give `path` as one absolute directory path, and ask again."
+    return None
+
+
 def ask(task: store.Task, question: str, context: str = "", command: str = "",
         path: str = "") -> str:
+    if why := bad_request(command, path):
+        return why
     spec = task.spec
-    asked = [store.read_json(p, {}) for p in (task.dir / "ask").glob("*.json")] \
-        if (task.dir / "ask").exists() else []
-    if command or path:
+    asked = [q for q in (read_question(task, n[:-5]) for n in _names(task)) if q]
+    if command or path:  # the runner counts them too, outside the lane (relay): this is a courtesy
         if sum(1 for q in asked if _permission(q)) >= PERMISSION_BUDGET:
-            return (f"You have asked for {PERMISSION_BUDGET} refused commands or directories "
-                    "already. Work inside your lane with the allowed tools, and list what you "
-                    "couldn't do in your final summary.")
+            return PERMISSIONS_USED
     elif sum(1 for q in asked if not _permission(q)) >= int(spec.get("ask_budget", 2)):
-        return ("The question budget for this task is used up. Make the most reasonable "
-                "assumption, carry on, and state the assumption in your final summary.")
+        return BUDGET_USED
     qid = uuid.uuid4().hex[:8]
-    qfile, afile = task.dir / "ask" / f"{qid}.json", task.dir / "ask" / f"{qid}.answer"
+    qfile, afile = ask_dir(task) / f"{qid}.json", ask_dir(task) / f"{qid}.answer"
     store.write_json(qfile, {"id": qid, "ts": store.now(), "round": task.status.get("round"),
                              "question": question, "context": context,
                              **({"command": command} if command else {}),
                              **({"path": path} if path else {})})
-    prev = task.status.get("phase")
-    task.set_status(phase="asking", asking=qid)
-    task.event({"ts": store.now(), "round": task.status.get("round"), "kind": "ask",
-                "id": qid, "text": question})
-    if command:
-        body = (f"PERMISSION to run: `{command}`\nWhy: {question}\nAllow it with `wb allow "
+    deadline = time.time() + float(spec.get("ask_timeout", 1200))
+    watcher = Watcher(afile.parent)  # wakes the moment `wb answer` writes the file
+    try:
+        while time.time() < deadline:
+            answer = _read(afile)  # written whole (write_answer): there means done
+            if answer is not None:
+                return answer.strip()
+            watcher.wait(max(0.0, min(60.0, deadline - time.time())))
+    finally:
+        watcher.close()
+    return NO_ANSWER
+
+
+# --- the runner's side, outside the lane ---------------------------------------------------------
+
+def _names(task: store.Task) -> list[str]:
+    try:
+        return sorted(n for n in os.listdir(ask_dir(task))
+                      if n.endswith(".json") and QID.match(n[:-5]))
+    except OSError:
+        return []
+
+
+def _read(path, limit: int = FILE_MAX) -> str | None:
+    """A regular file's text, never through a link or a FIFO the agent planted in ask/, and
+    None past `limit` bytes."""
+    try:
+        fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_CLOEXEC)
+    except OSError:
+        return None
+    try:
+        if not stat.S_ISREG(os.fstat(fd).st_mode):
+            return None
+        data = b""
+        while len(data) <= limit and (chunk := os.read(fd, limit + 1 - len(data))):
+            data += chunk
+    finally:
+        os.close(fd)
+    return None if len(data) > limit else data.decode(errors="replace")
+
+
+def read_question(task: store.Task, qid: str) -> dict | None:
+    """ask/<qid>.json as the agent wrote it, its fields as strings, or None."""
+    try:
+        q = json.loads(_read(ask_dir(task) / f"{qid}.json") or "")
+    except ValueError:
+        return None
+    if not isinstance(q, dict):
+        return None
+    return {**q, **{k: str(q.get(k) or "") for k in ("question", "context", "command", "path")}}
+
+
+def write_answer(task: store.Task, qid: str, text: str) -> None:
+    """ask/<qid>.answer, whole at once (the ask server watches for it: never half a file) and
+    never through a link: ask/ is in the agent's lane, and a link planted there once made wb
+    write outside it (the 2026-11-16 audit). A new temporary name, then a rename over the
+    answer's, which replaces a link instead of following it."""
+    if not QID.match(qid):
+        raise RuntimeError(f"no question {qid}")
+    d = os.open(ask_dir(task), os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC)
+    try:
+        tmp = f".{qid}.{secrets.token_hex(6)}.tmp"
+        fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW | os.O_CLOEXEC,
+                     0o644, dir_fd=d)
+        with os.fdopen(fd, "w") as fh:
+            fh.write(text.strip() + "\n")
+        os.replace(tmp, f"{qid}.answer", src_dir_fd=d, dst_dir_fd=d)
+    finally:
+        os.close(d)
+
+
+def used(task: store.Task) -> int:
+    """The plain questions the task has asked, as the runner counted them."""
+    return sum(1 for k in (task.status.get("asks") or {}).values() if k == "q")
+
+
+def _quote(text: str, limit: int, qfile) -> str:
+    """The agent's words in Claude's notice: clipped, and every line after the first marked as
+    the agent's, so none can pass for workbench's own."""
+    text = text.strip()
+    if len(text) > limit:
+        text = text[:limit] + f"… ({len(text) - limit} more characters: {qfile})"
+    return text.replace("\n", "\n> ")
+
+
+def notice(task: store.Task, qid: str, q: dict) -> str:
+    """The `question` notice's text; its openings are an API (`Q: `, `PERMISSION to run: `,
+    `PERMISSION to use the directory `)."""
+    qfile = ask_dir(task) / f"{qid}.json"
+    question = _quote(q["question"], QUESTION_CHARS, qfile)
+    if q["command"]:
+        body = (f"PERMISSION to run: `{q['command']}`\nWhy: {question}\nAllow it with `wb allow "
                 f"{task.name} \"<pattern>\"` (--always to keep it), or answer with another way.")
-    elif path:
+    elif q["path"]:
+        path = shlex.quote(q["path"])
         body = (f"PERMISSION to use the directory {path} (outside its lane)\nWhy: {question}\n"
                 f"Allow it with `wb allow {task.name} --path {path}` (--always to keep it), or "
                 "answer with another way.")
     else:
         body = f"Q: {question}"
-    body += f"\nContext: {context}" if context else ""
-    task.notify("question", body, id=qid)
-    deadline = time.time() + float(spec.get("ask_timeout", 1200))
-    watcher = Watcher(afile.parent)  # wakes the moment `wb answer` writes the file
-    while time.time() < deadline:
-        if afile.exists():
-            answer = afile.read_text().strip()
-            task.set_status(phase=prev if prev != "asking" else "running", asking=None)
-            task.event({"ts": store.now(), "round": task.status.get("round"), "kind": "answer",
-                        "id": qid, "text": answer})
-            watcher.close()
-            return answer
-        watcher.wait(max(0.0, min(60.0, deadline - time.time())))
-    watcher.close()
-    task.set_status(phase=prev if prev != "asking" else "running", asking=None)
-    return ("No answer arrived in time. Make the most reasonable assumption, carry on, and state "
-            "the assumption in your final summary.")
+    if q["context"].strip():
+        body += f"\nContext: {_quote(q['context'], CONTEXT_CHARS, qfile)}"
+    return body
+
+
+def _judge(task: store.Task, q: dict | None, asks: dict) -> tuple[str, str | None]:
+    """A new ask file's kind ("q" a question, "p" a permission request, "x" refused) and, when
+    refused, what the agent is told instead."""
+    if q is None or not q["question"].strip():
+        return "x", "Ask with a `question`, and ask again."
+    if why := bad_request(q["command"], q["path"]):
+        return "x", why
+    if _permission(q):
+        if sum(1 for k in asks.values() if k == "p") >= PERMISSION_BUDGET:
+            return "x", PERMISSIONS_USED
+        return "p", None
+    if sum(1 for k in asks.values() if k == "q") >= int(task.spec.get("ask_budget", 2)):
+        return "x", BUDGET_USED
+    return "q", None
+
+
+def relay(task: store.Task, opened: dict) -> None:
+    """The runner's side of the agent's questions, once a tick, outside the lane. Each new
+    ask/<id>.json is checked and counted (status `asks`, which the agent can't write: deleting
+    its ask files gives it no new budget), and raises the `question` notice; a refused one is
+    answered with why. The phase is `asking` while any question is open, `status.asking` the
+    oldest, so two at once keep the task waiting until both are answered (the audit: the first
+    answer set it running, and the silence guard stopped the round). `opened` is the round's
+    open questions, id -> when the runner saw it: a question outlives its round never."""
+    st = task.status
+    asks = dict(st.get("asks") or {})
+    now = time.time()
+    new = [n[:-5] for n in _names(task) if n[:-5] not in asks]
+    for qid in new[:NEW_MAX] if len(asks) < ASKS_MAX else []:
+        q = read_question(task, qid)
+        kind, why = _judge(task, q, asks)
+        asks[qid] = kind
+        if why:
+            try:
+                write_answer(task, qid, why)
+            except OSError:
+                pass
+            continue
+        opened[qid] = now
+        task.event({"ts": store.now(), "round": st.get("round"), "kind": "ask", "id": qid,
+                    "text": q["question"][:QUESTION_CHARS]})
+        task.notify("question", notice(task, qid, q), id=qid)
+    timeout = float(task.spec.get("ask_timeout", 1200))
+    for qid in list(opened):
+        answer = _read(ask_dir(task) / f"{qid}.answer")
+        if answer is not None:
+            task.event({"ts": store.now(), "round": st.get("round"), "kind": "answer",
+                        "id": qid, "text": answer.strip()[:QUESTION_CHARS]})
+            del opened[qid]
+        elif now - opened[qid] > timeout:  # the server has given up on it
+            del opened[qid]
+    if asks != (st.get("asks") or {}):
+        task.set_status(asks=asks)
+    oldest = min(opened, key=lambda k: (opened[k], k)) if opened else None
+    if oldest and (st.get("phase") != "asking" or st.get("asking") != oldest):
+        task.set_status(phase="asking", asking=oldest)
+    elif not oldest and st.get("phase") == "asking":
+        task.set_status(phase="running", asking=None)
 
 
 def handle(msg: dict, task: store.Task):

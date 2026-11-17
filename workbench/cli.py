@@ -267,6 +267,30 @@ def _identity(repo: Path) -> bool:
                for v in ("GIT_AUTHOR_IDENT", "GIT_COMMITTER_IDENT"))
 
 
+def _lane_fits(repo: Path, test: str | None) -> None:
+    """Refuse a task the agent's lane can't hold (the 2026-11-16 audit): a repo that is the home
+    directory (the lane would read all of it) or lies where credentials live (it couldn't read
+    the repo at all), and an acceptance command that is a snap (no-new-privileges, which the
+    lane sets, stops snap-confine, so every test round would fail)."""
+    if not context.lane_on():
+        return
+    real = os.path.realpath(repo)
+    if real in ("/", os.path.realpath(Path.home())):
+        die(f"{repo} is your home directory: the agent's lane would read all of it. Delegate "
+            "from the project's own repository")
+    if any(real == h or real.startswith(h + os.sep) for h in context.secret_paths()):
+        die(f"{repo} lies where credentials live (context.SECRETS), which the agent can't read: "
+            "delegate from a repository outside it")
+    try:
+        first = shlex.split(test)[:1] if test else []
+    except ValueError:
+        first = []
+    if first and sys.platform.startswith("linux") and context.snaps(first):
+        die(f"{first[0]} is a snap, which can't run in the agent's lane (no-new-privileges stops "
+            "snap-confine): install it another way, or turn the lane off with commands.json "
+            '"paths": ["*"]')
+
+
 def cmd_start(a):
     if not store.NAME_RE.match(a.name):
         die("a task name is lowercase letters, digits and hyphens, at most 48")
@@ -289,6 +313,7 @@ def cmd_start(a):
         owner = store.Task(repo.resolve().relative_to(tasks).parts[0])
         die(f"{repo} is task {owner.name}'s worktree, not a project: start from its repo "
             f"(--repo {owner.spec.get('repo', '<the project>')})")
+    _lane_fits(repo, a.test)
     spec_text = Path(a.spec).read_text(encoding="utf-8") if a.spec != "-" else sys.stdin.read()
     if not spec_text.strip():
         die("the spec is empty")
@@ -485,8 +510,8 @@ def cmd_next(a):
     test = a.test if a.test is not None else spec.get("test_cmd")
     test_line = (f"- The acceptance command is `{test}`. Run it before you finish and make it "
                  "pass. Never weaken, skip or delete tests to get there.\n") if test else ""
-    used = sum(1 for p in (task.dir / "ask").glob("*.json")  # the budget is the task's: what's left
-               if not ask_mcp._permission(store.read_json(p, {})))
+    used = ask_mcp.used(task) if "asks" in st else sum(  # the budget is the task's: what's left
+        1 for p in (task.dir / "ask").glob("*.json") if not ask_mcp._permission(store.read_json(p, {})))
     budget = max(0, spec.get("ask_budget", 0) - used)
     n = st.get("round", 1) + 1
     task.round_dir(n).mkdir(parents=True, exist_ok=True)
@@ -522,16 +547,13 @@ def cmd_answer(a):
     qid = a.id or task.status.get("asking")
     if not qid:
         die(f"{a.name} has no open question")
-    q = task.dir / "ask" / f"{qid}.json"
-    if not q.exists():
+    if not ask_mcp.QID.match(qid) or not (task.dir / "ask" / f"{qid}.json").exists():
         die(f"no question {qid} in {a.name}")
     text = a.text if a.text is not None else Path(a.file).read_text(encoding="utf-8")
     if not text.strip():  # the question stays open: an empty answer unblocked the agent (the audit)
         die("the answer is empty")
     handled = store.now()  # the question; a newer notice, raised after the answer, stays news
-    tmp = task.dir / "ask" / f".{qid}.{os.getpid()}.tmp"  # the ask server polls: never half a file
-    tmp.write_text(text.strip() + "\n")
-    os.replace(tmp, task.dir / "ask" / f"{qid}.answer")
+    ask_mcp.write_answer(task, qid, text)  # whole, and never through a link in the lane
     _ack_all(task, upto=handled)
     print(f"answered {a.name}/{qid}")
 
@@ -557,12 +579,6 @@ def _acked(task):
         return 0.0
 
 
-def _notice(row) -> bool:
-    """A whole notify.jsonl row: one half-written or forged must not break every wait."""
-    return (isinstance(row, dict) and isinstance(row.get("task"), str) and "kind" in row
-            and isinstance(row.get("ts"), (int, float)))
-
-
 def _ack_all(task, upto: float | None = None):
     """Claude acted on the task: whatever it was notified about so far is handled, except news
     still true now. A note or a diff run seconds after the task failed must not swallow the
@@ -574,9 +590,8 @@ def _ack_all(task, upto: float | None = None):
     if upto is None:
         phase = task.status.get("phase")
         news = "question" if phase == "asking" else "checkin" if phase in LIVE else phase
-        rows, _ = store.read_jsonl(store.home() / "notify.jsonl")
-        pending = [r["ts"] for r in rows if _notice(r) and r["task"] == task.name
-                   and r["kind"] == news and r["ts"] > acked]
+        pending = [r["ts"] for r in store.notices()
+                   if r["task"] == task.name and r["kind"] == news and r["ts"] > acked]
         upto = min(pending) - 0.001 if pending else store.now()
     _write_ack(task, max(acked, upto))
 
@@ -606,8 +621,7 @@ def cmd_wait(a):
         for t in [need(a.name)] if a.name else store.all_tasks():
             if t.status.get("phase") in LIVE:
                 reap(t)  # a dead runner's task becomes failed, with the notice this wait delivers
-        rows, _ = store.read_jsonl(path)
-        rows = [r for r in rows if _notice(r)]
+        rows = store.notices()
         for row in reversed(rows):
             if a.name and row["task"] != a.name:
                 continue
@@ -867,12 +881,18 @@ def cmd_resume(a):
 
 def _lane_dir(raw: str) -> str:
     """A directory Claude adds to an agent's lane, made if it isn't there yet (the kernel's rule
-    is on a real directory)."""
+    is on a real directory). Not through a link: the agent can plant one in its lane (/tmp/out ->
+    another project), and the grant went to the link's target (the 2026-11-16 audit), so Claude
+    names the real directory itself; nor a place the lane hides (context.lane_refusal)."""
     if raw == "*":
         return raw  # the lane off for this task
-    path = Path(raw).expanduser().resolve()
-    if path == Path(path.anchor) or path == Path.home():
-        die(f"{raw}: not the whole of / or your home; name the directory the task needs")
+    given = os.path.abspath(os.path.expanduser(raw))
+    real = os.path.realpath(given)
+    if real != given:
+        die(f"{raw} is a link to {real}: allow {real} itself if that is what the task needs")
+    if why := context.lane_refusal(real):
+        die(why)
+    path = Path(real)
     if not path.exists():
         path.mkdir(parents=True)
     return str(path)
@@ -889,10 +909,7 @@ def cmd_allow(a):
     if not pats and not dirs:
         die("nothing to allow")
     conf_path = context.commands_path()
-    try:
-        conf = json.loads(conf_path.read_text()) if conf_path.exists() else {}
-    except ValueError as e:  # rewriting it would lose what the user wrote there
-        die(f"{conf_path} doesn't parse ({e}); fix it by hand first")
+    conf = context.commands_conf()  # refused unless it parses: rewriting it would lose the file
     for key, new in (("allow", pats), ("paths", dirs)):
         if not new:
             continue
@@ -909,9 +926,9 @@ def cmd_allow(a):
                 "text": f"allowed {said}" + (" always" if a.always else "")})
     qid = task.status.get("asking")
     handled = None
-    if qid and (task.dir / "ask" / f"{qid}.json").exists():
+    if qid and ask_mcp.QID.match(qid) and (task.dir / "ask" / f"{qid}.json").exists():
         handled = store.now()  # the request is answered: handled, as wb answer does
-        (task.dir / "ask" / f"{qid}.answer").write_text(text + "\n")
+        ask_mcp.write_answer(task, qid, text)  # whole, and never through a link in the lane
     if (phase := task.status.get("phase")) in LIVE and runner_alive(task):
         store.append_jsonl(task.dir / "steer.jsonl", {"ts": store.now(), "text": text, "now": True})
         print(f"allowed {said} on {a.name}" + (" (always)" if a.always else "") + ": "
@@ -1033,6 +1050,7 @@ def cmd_accept(a):
         die(str(e))
     if warn := gitops.remove_worktree(repo, task.worktree):  # committed: the rest is cleanup
         print(f"wb: {warn}", file=sys.stderr)
+    context.drop_runtime_dir(task)
     _spec_gaps(task, a.spec_gap)
     merged = None
     if a.merge:
@@ -1088,6 +1106,7 @@ def cmd_discard(a):
     measured = results.step(task, landed=False)
     if warn := gitops.remove_worktree(repo, task.worktree):  # never stops a discard (the audit)
         print(f"wb: {warn}", file=sys.stderr)
+    context.drop_runtime_dir(task)
     kept = a.keep_branch or not repo.is_dir()
     if not kept:
         gitops.delete_branch(repo, a.name)
@@ -2101,9 +2120,25 @@ def cmd_doctor(a):
                     and not (Path(out) / "x").exists())
         line(held, f"agents write only in their lane (Landlock ABI {v})" if held else
              f"the lane didn't hold a write outside it: {r.stderr.strip()[-200:] or 'the write went through'}")
+        for gap in lane.gaps(v):  # what this kernel's Landlock can't confine (the 2026-11-16 audit)
+            print(f"--  Landlock ABI {v}: {gap}")
     else:
-        print("--  agents' writes outside their lane aren't refused here (no Landlock): only "
-              "OpenCode's file tools keep to it")
+        print("--  agents' writes outside their lane and reads of credentials aren't refused here "
+              "(no Landlock): only OpenCode's file tools keep to it; " +
+              ("sudo still is (no-new-privileges)" if sys.platform.startswith("linux")
+               else "nor is sudo"))
+    try:
+        context.commands_conf()
+        line(True, f"commands.json {context.commands_path()}"
+             + ("" if context.commands_path().exists() else " (none: no standing allowances)"))
+    except RuntimeError as e:
+        line(False, str(e))
+        sys.exit(1)  # every task reads it: nothing runs until it is fixed
+    snapped = context.snaps(context.TOOLCHAINS) if context.lane_on() else []
+    if snapped and sys.platform.startswith("linux"):
+        print(f"--  {', '.join(snapped)}: snaps, which can't run in the agent's lane "
+              "(no-new-privileges stops snap-confine): install them another way, or turn the lane "
+              'off with commands.json "paths": ["*"]')
     skill = context.claude_home() / "skills/delegate/SKILL.md"
     line(skill.exists(), f"/delegate skill at {skill.parent}" if skill.exists() else
          f"/delegate isn't in {skill.parent.parent}: wb setup links it")

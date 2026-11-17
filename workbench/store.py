@@ -12,14 +12,15 @@ Layout of ``$WB_HOME`` (default ``~/.local/state/workbench``)::
                             grants.json
     tasks/<name>/
         task.json           what the task is (static after start, but for `wb next --test`)
-        status.json         what it is doing now (rewritten by the runner and the ask server)
+        status.json         what it is doing now (rewritten by the runner and wb)
         events.jsonl        the agent's normalized events, every round
         steer.jsonl, acked, context.md
         runner.log          the runner's own stdout/stderr
         base-tests.txt      the base check: the acceptance command on the base, before round 1
         rounds/<n>/prompt.md, instructions.md, summary.md, tests.txt
-        ask/<id>.json, ask/<id>.answer
+        ask/<id>.json, ask/<id>.answer   the agent's questions and Claude's answers
         worktree/           the git worktree the agent works in (branch delegate/<name>)
+    Of a task's directory the agent's lane writes only worktree/ and ask/ (context.writable).
 
 Every file and format: ARCHITECTURE.md, *Files and formats*.
 """
@@ -124,6 +125,16 @@ def results(trials: bool = False) -> list[dict]:
     return rows if trials else [r for r in rows if not r.get("trial")]
 
 
+def notices() -> list[dict]:
+    """notify.jsonl's rows that are whole: a dict with a task's name, a kind and a time. One row
+    without a `task` made every command that acknowledges raise (the 2026-11-16 audit, when the
+    agent's lane could still write the file), and a name like ../../x put the ack elsewhere."""
+    return [r for r in read_jsonl(home() / "notify.jsonl")[0]
+            if isinstance(r, dict) and isinstance(r.get("task"), str) and NAME_RE.match(r["task"])
+            and isinstance(r.get("kind"), str) and isinstance(r.get("ts"), (int, float))
+            and isinstance(r.get("text", ""), str)]
+
+
 def mark_trials(names: set[str]) -> list[str]:
     """Mark closed tasks' rows as trial runs; the names that had an unmarked row."""
     path = home() / "results.jsonl"
@@ -184,7 +195,7 @@ class Task:
         return self.dir / "rounds" / str(n)
 
     def set_status(self, **fields) -> dict:
-        # The runner and the ask server both write status; the lock keeps their edits whole.
+        # The runner and wb both write status; the lock keeps their edits whole.
         with locked(self.dir / "status.lock"):
             st = self.status
             st.update(fields, updated_at=now())

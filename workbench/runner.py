@@ -24,7 +24,7 @@ import traceback
 from collections import deque
 from pathlib import Path
 
-from . import context, gitguard, gitops, lane, lessons, models, skills, store, tuning
+from . import ask_mcp, context, gitguard, gitops, lane, lessons, models, skills, store, tuning
 from .events import StuckDetector, normalize
 from .watch import Watcher
 
@@ -92,8 +92,9 @@ def write_config_layer(task: store.Task) -> Path:
     store.write_json(path, {
         "$schema": "https://opencode.ai/config.json",
         **context.layer(task),
+        "share": "disabled",  # a user's `share: "auto"` would publish every agent session
         **({"compaction": {"auto": True, "buffer": buffer}} if buffer else {}),
-        "mcp": {"servers": {"workbench": {  # OpenCode 2.x shape: mcp.servers.<name>
+        "mcp": {"servers": {**users_servers_off(), "workbench": {  # 2.x shape: mcp.servers.<name>
             "type": "local",
             "command": [sys.executable, str(PKG_ROOT / "bin" / "wb-ask-mcp")],
             "environment": {"WB_TASK": task.name, "WB_HOME": str(store.home())},
@@ -105,36 +106,91 @@ def write_config_layer(task: store.Task) -> Path:
     return path
 
 
+def users_servers_off() -> dict:
+    """The user's own MCP servers (their global OpenCode config), each replaced by one that
+    can't run: OpenCode would start them for the agent and connect to a remote one with the
+    user's token (the 2026-11-16 audit). OpenCode 2.3 starts a server whose entry says
+    `"enabled": false` all the same, so the command itself goes. Their tools are denied besides
+    (context.MCP_RULES)."""
+    try:
+        servers = (models.read_config().get("mcp") or {}).get("servers") or {}
+    except (OSError, ValueError, AttributeError):
+        return {}
+    return {name: {"type": "local", "command": ["false"], "enabled": False}
+            for name in servers if name != "workbench"}
+
+
+# The rules again, as OPENCODE_CONFIG_CONTENT, which OpenCode loads after every config file: a
+# project's opencode.json (the worktree's, or one in a directory above it) loads after the layer
+# and its permissions come later, so `{"action": "shell", "resource": "*", "effect": "allow"}`
+# there lifted every deny (the 2026-11-16 audit). OPENCODE_DISABLE_PROJECT_CONFIG would shut it
+# out too, but it drops AGENTS.md and the project's skills with it, so it is only the fallback for
+# rules too long for one environment string (MAX_ARG_STRLEN, 128 KiB).
+CONFIG_CONTENT_MAX = 120_000
+
+
+def rules_env(layer: dict) -> dict:
+    content = json.dumps({"permissions": layer["permissions"], "share": "disabled"},
+                         separators=(",", ":"))
+    if len(content.encode()) <= CONFIG_CONTENT_MAX:
+        return {"OPENCODE_CONFIG_CONTENT": content}
+    return {"OPENCODE_DISABLE_PROJECT_CONFIG": "1"}
+
+
+# What OpenCode's own environment adds to the agent's: npx and `npm exec` run only what the
+# project installed, instead of fetching a package unasked (npm says yes by itself without a
+# terminal; the 2026-11-16 audit). Not the tests' environment: they run as they would for you.
+OPENCODE_ENV = {"npm_config_yes": "false"}
+
+
 # What the agent's environment leaves out of the runner's: credentials (API keys and tokens Claude
 # Code or the user's shell carry, the SSH agent that would sign a push) and the runner's own
 # PYTHONPATH, which would put `python3 -m workbench.cli` in the agent's reach. A provider that
 # needs a key from the environment names it in commands.json `env`, which passes it through.
+# The 2026-11-16 audit added the second line's names (SMTP_PASS, MYSQL_PWD, SENTRY_DSN, BW_SESSION
+# an unlocked Bitwarden vault, OP_SESSION_<acct> 1Password's) and the value rule (USERINFO: a URL
+# with a password, DATABASE_URL=postgres://u:p@h/db, whatever its name).
 SECRET_ENV = re.compile(r"TOKEN|SECRET|PASSW|CREDENTIAL|API_?KEY|ACCESS_KEY|PRIVATE_KEY|"
+                        r"_(PASS|PASSPHRASE|PWD|DSN|JWT|PAT|KEY)$|^(PASS|PASSPHRASE|KEY)$|"
+                        r"(^|_)PASS_|WEBHOOK|^BW_SESSION$|^OP_SESSION_|^KRB5CCNAME$|"
                         r"^(ANTHROPIC|CLAUDE|GH|GITHUB|GITLAB|AWS|AZURE|GOOGLE|OPENAI|HF)_|"
                         r"^(SSH_AUTH_SOCK|SSH_AGENT_PID|GPG_AGENT_INFO|DBUS_SESSION_BUS_ADDRESS|"
-                        r"PYTHONPATH)$", re.I)
+                        r"DBUS_SYSTEM_BUS_ADDRESS|PYTHONPATH)$", re.I)
+USERINFO = re.compile(r"\w+://[^/@\s:]*:[^/@\s]+@")
+# Configuration, not credentials, under the prefixes above: a test that reads Hugging Face models
+# offline from HF_HOME, or a region, behaves in the lane as it does for the user (the audit).
+ENV_KEEP = frozenset({"HF_HOME", "HF_HUB_CACHE", "HF_HUB_OFFLINE", "HF_DATASETS_OFFLINE",
+                      "HF_ENDPOINT", "HF_HUB_DISABLE_TELEMETRY", "TRANSFORMERS_OFFLINE",
+                      "TOKENIZERS_PARALLELISM", "AWS_REGION", "AWS_DEFAULT_REGION",
+                      "GOOGLE_CLOUD_PROJECT", "GOOGLE_CLOUD_REGION"})
 
 
 def agent_env(task: store.Task) -> dict:
     """The agent's environment: its config layer, and git read-only (gitguard.py)."""
-    through = set((store.read_json(context.commands_path(), {}) or {}).get("env") or [])
-    keep = {k: v for k, v in os.environ.items() if k in through or not SECRET_ENV.search(k)}
+    through = set(context.commands_conf().get("env", []))
+    keep = {k: v for k, v in os.environ.items() if k in through or k in ENV_KEEP
+            or not (SECRET_ENV.search(k) or USERINFO.search(v))}
+    layer = write_config_layer(task)
     env = {**keep, "PWD": str(task.worktree),  # opencode finds the project from $PWD
-           "OPENCODE_CONFIG": str(write_config_layer(task)),
+           "OPENCODE_CONFIG": str(layer), **rules_env(json.loads(layer.read_text())),
            "WB_TASK": task.name, "WB_HOME": str(store.home()), **CLEAN_ENV}
+    if context.writable(task) is not None:  # its own: the user's holds their bus and agents
+        env["XDG_RUNTIME_DIR"] = str(context.runtime_dir(task))
     env.update(gitguard.install(context.rules_dir(task) / "bin", Path(task.spec["repo"]), PKG_ROOT,
                                 env.get("PATH") or os.defpath) or {})
     return env
 
 
 def claude_files_changed(files: str) -> list[str]:
-    """The instruction files and .claude/ paths among `git status --short` lines."""
+    """The instruction files, .claude/ paths and OpenCode project config among `git status
+    --short` lines (a project opencode.json loads into the agent's next round)."""
     out = []
     for line in files.splitlines():
         path = line[3:].split(" -> ")[-1].strip('"')
         name = Path(path).name
-        if name in ("CLAUDE.md", "CLAUDE.local.md", "AGENTS.md") or \
-                path.startswith(".claude/") or "/.claude/" in path:
+        if name in ("CLAUDE.md", "CLAUDE.local.md", "AGENTS.md", "opencode.json",
+                    "opencode.jsonc") or path.startswith((".claude/", ".opencode/")) or \
+                "/.claude/" in path or "/.opencode/" in path:
             out.append(path)
     return out
 
@@ -285,10 +341,13 @@ def checkin_text(task: store.Task, n: int, out: dict, since: float) -> str:
 
 def _steer_bell(task: store.Task, proc, q: queue.Queue) -> None:
     """Ring the round's loop the moment Claude writes a steer note, so `wb steer --now`
-    interrupts at once instead of at the loop's next timeout."""
-    with Watcher(task.dir) as w:
+    interrupts at once instead of at the loop's next timeout, and when a question or its answer
+    lands in ask/, so the runner relays it at once (ask_mcp.relay)."""
+    ask = context.ask_dir(task)
+    with Watcher(task.dir, ask) as w:
         while proc.poll() is None:
-            if any(p.name == "steer.jsonl" for p in w.wait(5)):
+            if any(p.name == "steer.jsonl" or p.parent == ask and not p.name.startswith(".")
+                   for p in w.wait(5)):
                 q.put("")
 
 
@@ -351,9 +410,10 @@ def run_round(task: store.Task, n: int, keep: bool = False) -> dict:
     # After `--`: OpenCode reads a message that starts with '-' (a spec opening with a bullet or
     # front matter) as a flag, prints its usage and exits (the 2026-11-16 audit).
     cmd += ["--", note + prompt]
-    env = agent_env(task)
+    env = {**agent_env(task), **OPENCODE_ENV}
     cmd = lane.wrap(context.writable(task), cmd,   # writes stay in the agent's lane (lane.py),
-                    context.readable(task))       # and credentials out of its reach
+                    context.readable(task),       # and credentials out of its reach
+                    context.unix_paths(task))
     log = open(task.dir / "runner.log", "a")
     proc = subprocess.Popen(cmd, cwd=task.worktree, env=env, stdin=subprocess.DEVNULL,
                             stdout=subprocess.PIPE, stderr=log, text=True,
@@ -386,6 +446,7 @@ def run_round(task: store.Task, n: int, keep: bool = False) -> dict:
            "tok_in": 0, "tok_out": 0, "interrupted": False, "full": None}
     window = st.get("window")
     fresh_at = tuning.value(task, "fresh_at")
+    opened: dict = {}  # the questions open this round (ask_mcp.relay)
     while True:
         try:  # woken by the agent's output or a steer note; the timeout runs the clocks below
             line = q.get(timeout=5)
@@ -394,6 +455,7 @@ def run_round(task: store.Task, n: int, keep: bool = False) -> dict:
         if line is None:
             break
         now, mono = time.time(), time.monotonic()
+        ask_mcp.relay(task, opened)  # the agent's questions: checked, counted, raised
         asking = task.status.get("phase") == "asking"  # the agent is waiting on Claude: not silent
         clock.step(mono, asking)
         if line:
@@ -522,8 +584,8 @@ def run_round(task: store.Task, n: int, keep: bool = False) -> dict:
             break
     out["exit"] = proc.wait()
     log.close()
-    if task.status.get("asking"):  # it ended mid-question: nothing will read that answer now
-        task.set_status(asking=None)
+    if task.status.get("asking") or task.status.get("phase") == "asking":  # it ended
+        task.set_status(asking=None, phase="running")  # mid-question: nothing reads that answer now
     out["secs"] = round(time.monotonic() - clock.t0, 1)
     return out
 
@@ -576,7 +638,8 @@ def run_in_lane(task: store.Task, cmd: str, limit: int) -> tuple[int | str, str]
     decoded output (its head and tail when long)."""
     # in the agent's lane and with its environment: the tests run the agent's code, and must
     # pass or fail as they did when the agent ran them
-    argv = lane.wrap(context.writable(task), ["/bin/sh", "-c", cmd], context.readable(task))
+    argv = lane.wrap(context.writable(task), ["/bin/sh", "-c", cmd], context.readable(task),
+                     context.unix_paths(task))
     proc = subprocess.Popen(argv, cwd=task.worktree, stdout=subprocess.PIPE,
                             stderr=subprocess.STDOUT, env=agent_env(task),
                             start_new_session=True)  # its own group: a timeout ends all of it

@@ -37,8 +37,10 @@ from its handbook and will ask (`ask_reviewer`) or say so in its summary when th
 of those; then you do it. Its hard limits: no sudo, git read-only (a `git` of workbench's own on
 its PATH; scratch repos under the temp directory, which tests make, stay writable), no `gh`, and
 no edits to CLAUDE.md, AGENTS.md or `.claude/`. The shell rules refuse the direct forms; behind
-them the kernel refuses root and writes to the repo's git, and no credential is in the agent's
-reach, so `gh` or a push gets no login. The rules stop mistakes, not a determined agent: the
+them, where `wb doctor` reports Landlock, the kernel refuses root and writes to the repo's git,
+and no credential is in the agent's reach, so `gh` or a push gets no login. Without Landlock
+(macOS, old kernels) only the rules hold: read the report's flagged files closely and check
+`git -C <repo> log` after a task. The rules stop mistakes, not a determined agent: the
 round report flags any of your files it changed anyway (through the shell). Talk to it like a teammate: answer its questions, send notes while
 it works, explain the why in feedback.
 
@@ -393,13 +395,17 @@ You are the driver, not a spectator. When something tells you the agent is headi
   with the rule; `--always` keeps it for every task (`~/.config/workbench/commands.json`). Say no
   (`wb answer`, with another way) to what reaches outside the task: deploys, other machines,
   system services, the user's data, a dependency the project shouldn't take on. Knowing a task
-  needs something up front, `wb start … --allow "<pattern>"`. sudo, git writes and `gh` stay
-  refused whatever you allow.
+  needs something up front, `wb start … --allow "<pattern>"`. sudo, git writes, git by its full
+  path and `gh` stay refused whatever you allow. A plain `npx <pkg>` runs only what the project
+  installed; to let it fetch one, allow `npx --yes <pkg>`.
 - **Directories it asks for.** The agent writes only in its lane (worktree, temp, build caches)
   and its file tools keep to it; a request names a `path`. `wb allow <name> --path <dir>` grants
   read and write (`--always`, `wb start --allow-path`). Grant a directory the task's output
   really belongs in (a sibling asset folder, a cache a toolchain wants); never your home, the
-  user's checkout or another project: there, take the file yourself or say no.
+  user's checkout or another project: there, take the file yourself or say no. `wb allow --path`
+  refuses a path through a link (it names the target: allow that only if it is what the task
+  needs; the agent can plant links in its lane) and a place inside credentials or workbench's own
+  state and config.
 - `wb stop <name>`: just stop it. `wb resume <name>` continues it in a fresh session (not a
   review round), e.g. after fixing workbench under it. A task failed with "the runner died" (a
   reboot, a kill) or stuck with "stopped by a signal" resumes the same way.

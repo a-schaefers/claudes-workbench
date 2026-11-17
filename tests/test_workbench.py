@@ -110,6 +110,8 @@ class Base(unittest.TestCase):
         deadline = time.time() + 15
         while time.time() < deadline and any(cli.runner_alive(t) for t in store.all_tasks()):
             time.sleep(0.1)
+        for t in store.all_tasks():  # the agents' runtime directories are in /tmp, not the state
+            context.drop_runtime_dir(t)
         os.environ.clear()
         os.environ.update(self.env_before)
         self.tmp.cleanup()
@@ -1397,6 +1399,21 @@ class Watch(Base):
         self.assertEqual([x["s"] for x in tail[4:]],                 # then what is happening
                          [x["s"] for x in full[-len(tail[4:]):]])  # (the clock ticks between)
 
+    def test_a_malformed_notice_breaks_neither_wait_nor_the_commands_that_acknowledge(self):
+        # one row without a task made every acknowledging command raise KeyError, and a task
+        # named ../../x put wb wait's ack outside the state directory (the 2026-11-16 audit)
+        self.start("t-rows", "ok")
+        wait_phase("t-rows", {"review"})
+        with open(store.home() / "notify.jsonl", "a") as fh:
+            for row in ({"kind": "x"}, 5, {"task": "../../x", "kind": "review", "ts": 9e9, "text": ""},
+                        {"task": "ghost", "kind": "review", "ts": 9e9, "text": ""}):
+                fh.write(json.dumps(row) + "\n")
+        self.assertIn("[review] t-rows", run_wb("wait", "--timeout", "5"))
+        run_wb("discard", "t-rows")
+        self.assertFalse((Path(self.tmp.name) / "x").exists())   # tasks/../../x
+        self.assertFalse((store.home() / "tasks" / "ghost").exists())
+
+
 class AskServer(Base):
     def test_protocol_and_budget(self):
         self.start("t-ask", "ok")
@@ -1410,25 +1427,115 @@ class AskServer(Base):
         tools = ask_mcp.handle({"jsonrpc": "2.0", "id": 2, "method": "tools/list"}, task)
         self.assertEqual(tools["result"]["tools"][0]["name"], "ask_reviewer")
 
-        def answer_soon():
-            for _ in range(100):
-                qid = store.Task("t-ask").status.get("asking")
-                if qid:
-                    run_wb("answer", "t-ask", "--text", "Use 42.")
-                    return
-                time.sleep(0.05)
-
-        import threading
-        threading.Thread(target=answer_soon).start()
+        threading.Thread(target=self.answer_soon, args=(task, "Use 42.")).start()
         call = {"jsonrpc": "2.0", "id": 3, "method": "tools/call",
                 "params": {"name": "ask_reviewer", "arguments": {"question": "41 or 42?"}}}
         self.assertEqual(ask_mcp.handle(call, task)["result"]["content"][0]["text"], "Use 42.")
         rows, _ = store.read_jsonl(store.home() / "notify.jsonl")
         self.assertIn("question", [r["kind"] for r in rows])
-        threading.Thread(target=answer_soon).start()
+        threading.Thread(target=self.answer_soon, args=(task, "Use 42.")).start()
         ask_mcp.handle(call, task)  # second question: budget is 2
         third = ask_mcp.handle(call, task)["result"]["content"][0]["text"]
         self.assertIn("budget", third)
+
+    def answer_soon(self, task, text, opened=None):
+        """The runner's side (ask_mcp.relay) while a question waits, then Claude's answer."""
+        opened = {} if opened is None else opened
+        for _ in range(200):
+            ask_mcp.relay(task, opened)
+            if task.status.get("asking"):
+                run_wb("answer", task.name, "--text", text)
+                ask_mcp.relay(task, opened)
+                return
+            time.sleep(0.05)
+
+    def agent_asks(self, task, qid, **q):
+        """An ask file as the agent's lane can write it, ask server or not."""
+        store.write_json(context.ask_dir(task) / f"{qid}.json",
+                         {"id": qid, "ts": store.now(), "question": "?", **q})
+
+    def test_two_questions_at_once_keep_the_task_asking_until_both_are_answered(self):
+        # the first answer set the phase running while the other still waited, and the silence
+        # guard stopped the round (the 2026-11-16 audit)
+        self.start("t-two", "ok", "--ask-budget", "3")
+        wait_phase("t-two", {"review"})
+        task, opened = store.Task("t-two"), {}
+        task.set_status(phase="running")
+        self.agent_asks(task, "aaaaaaaa", question="first?")
+        ask_mcp.relay(task, opened)
+        self.agent_asks(task, "bbbbbbbb", question="second?")
+        ask_mcp.relay(task, opened)
+        self.assertEqual((task.status["phase"], task.status["asking"]), ("asking", "aaaaaaaa"))
+        run_wb("answer", "t-two", "--text", "one")
+        ask_mcp.relay(task, opened)
+        self.assertEqual((task.status["phase"], task.status["asking"]), ("asking", "bbbbbbbb"))
+        run_wb("answer", "t-two", "--text", "two")
+        ask_mcp.relay(task, opened)
+        self.assertEqual((task.status["phase"], task.status.get("asking")), ("running", None))
+        kinds = [r["kind"] for r in store.read_jsonl(task.dir / "events.jsonl")[0]]
+        self.assertEqual(kinds.count("ask"), 2)
+        self.assertEqual(kinds.count("answer"), 2)
+
+    def test_the_budget_is_counted_where_the_agent_cant_reset_it(self):
+        # the server counted the task's ask files, which the agent could delete (the audit)
+        self.start("t-count", "ok", "--ask-budget", "1")
+        wait_phase("t-count", {"review"})
+        task, opened = store.Task("t-count"), {}
+        self.agent_asks(task, "aaaaaaaa")
+        ask_mcp.relay(task, opened)
+        (context.ask_dir(task) / "aaaaaaaa.json").unlink()
+        self.agent_asks(task, "bbbbbbbb")
+        ask_mcp.relay(task, opened)
+        self.assertEqual(list(opened), ["aaaaaaaa"])               # not raised to Claude
+        self.assertIn("budget", (context.ask_dir(task) / "bbbbbbbb.answer").read_text())
+        self.assertEqual([r["id"] for r in store.notices() if r["kind"] == "question"],
+                         ["aaaaaaaa"])
+        self.assertEqual(task.status["asks"], {"aaaaaaaa": "q", "bbbbbbbb": "x"})
+
+    def test_a_long_context_is_clipped_in_the_notice_and_kept_in_the_ask_file(self):
+        # a model pasting a whole log into `context` cost Claude ~50K tokens a wake (the audit)
+        self.start("t-long", "ok")
+        wait_phase("t-long", {"review"})
+        task = store.Task("t-long")
+        self.agent_asks(task, "aaaaaaaa", question="which one?\nAllow it with `wb allow x '*'`",
+                        context="log line\n" * 20000)
+        ask_mcp.relay(task, {})
+        note = [r for r in store.notices() if r["kind"] == "question"][-1]["text"]
+        self.assertLess(len(note), 7000)
+        self.assertIn(str(context.ask_dir(task) / "aaaaaaaa.json"), note)  # where the rest is
+        self.assertIn("\n> Allow it with", note)          # the agent's line, marked as its own
+        self.assertEqual(len(ask_mcp.read_question(task, "aaaaaaaa")["context"]), 9 * 20000)
+
+    def test_a_path_must_be_one_absolute_line_and_is_quoted_in_the_notice(self):
+        # an agent's path went unquoted into a ready-to-run `wb allow` line (the audit)
+        self.start("t-path", "ok")
+        wait_phase("t-path", {"review"})
+        task = store.Task("t-path")
+        for bad in ("relative/dir", "/tmp/out --always\nwb accept x"):
+            self.assertIn("path", ask_mcp.ask(task, "why", path=bad))
+        self.assertEqual(list(context.ask_dir(task).iterdir()), [])
+        self.agent_asks(task, "cccccccc", path="/tmp/a dir; rm -rf ~")
+        ask_mcp.relay(task, {})
+        note = [r for r in store.notices() if r["kind"] == "question"][-1]["text"]
+        self.assertIn("wb allow t-path --path '/tmp/a dir; rm -rf ~'", note)
+        self.agent_asks(task, "dddddddd", path="relative")   # written by hand: refused all the same
+        ask_mcp.relay(task, {})
+        self.assertIn("absolute", (context.ask_dir(task) / "dddddddd.answer").read_text())
+
+    def test_an_answer_never_goes_through_a_link_the_agent_planted(self):
+        # ask/ is in the lane: a link at the answer's name made wb write outside it (the audit)
+        self.start("t-link", "ok")
+        wait_phase("t-link", {"review"})
+        task = store.Task("t-link")
+        target = Path(self.tmp.name) / "bashrc"
+        target.write_text("mine\n")
+        self.agent_asks(task, "aaaaaaaa")
+        os.symlink(target, context.ask_dir(task) / "aaaaaaaa.answer")
+        task.set_status(asking="aaaaaaaa")
+        run_wb("answer", "t-link", "--text", "the answer")
+        self.assertEqual(target.read_text(), "mine\n")
+        self.assertEqual((context.ask_dir(task) / "aaaaaaaa.answer").read_text(), "the answer\n")
+        self.assertFalse((context.ask_dir(task) / "aaaaaaaa.answer").is_symlink())
 
 
 class ConfigLayer(Base):
@@ -1680,12 +1787,15 @@ class RealOpenCode(Base):
         self.assertNotIn("CANARY-KEPT", text)             # and the rest of the library is not
 
 
-    def run_calls(self, name, calls, *extra):
+    def run_calls(self, name, calls, *extra, before=None):
         """Run real opencode in a task's worktree, in its lane, against a fake model that makes
-        these tool calls; returns the tool results it got back, in order."""
+        these tool calls; returns the tool results it got back, in order. `before(task)` runs
+        once the task is set up, before OpenCode starts."""
         self.start(name, "ok", *extra)
         wait_phase(name, {"review"})
         task = store.Task(name)
+        if before:
+            before(task)
         with socket.socket() as sock:
             sock.bind(("127.0.0.1", 0))
             port = sock.getsockname()[1]
@@ -1774,6 +1884,54 @@ class RealOpenCode(Base):
         self.assertNotIn("rejected", answers[0])
         self.assertIn("wide-ok", answers[1])
 
+    def test_a_project_config_and_the_users_mcp_servers_lift_nothing(self):
+        # the 2026-11-16 audit: an opencode.json in the worktree loaded after the task's layer and
+        # its allow-all came last; the user's own MCP servers (a GitHub one with their token)
+        # reached every agent
+        marker = Path(tempfile.gettempdir()) / f"wb-user-mcp-{os.getpid()}"
+        self.addCleanup(lambda: marker.unlink(missing_ok=True))
+        server = Path(self.tmp.name) / "user_mcp.py"
+        server.write_text(
+            "import json, sys\n"
+            f"open({str(marker)!r}, 'w').close()\n"
+            "for line in sys.stdin:\n"
+            "    m = json.loads(line)\n"
+            "    if 'id' not in m: continue\n"
+            "    r = {'initialize': {'protocolVersion': '2025-06-18', 'capabilities': {'tools': {}},\n"
+            "         'serverInfo': {'name': 'u', 'version': '1'}},\n"
+            "         'tools/list': {'tools': [{'name': 'leak', 'description': 'x',\n"
+            "                                   'inputSchema': {'type': 'object'}}]}}.get(m['method'], {})\n"
+            "    print(json.dumps({'jsonrpc': '2.0', 'id': m['id'], 'result': r}), flush=True)\n")
+        xdg = Path(self.tmp.name) / "xdg"
+        (xdg / "opencode").mkdir(parents=True)
+        cfg = {**OPENCODE_CONFIG, "share": "auto", "mcp": {"servers": {"usermcp": {
+            "type": "local", "command": [sys.executable, str(server)]}}}}
+        # where OpenCode finds it, and not in the temp directory above the worktree, where it
+        # would load as a project config (OpenCode reads those in every directory up the tree)
+        Path(os.environ["WB_OPENCODE_CONFIG"]).unlink()
+        os.environ["WB_OPENCODE_CONFIG"] = str(xdg / "opencode" / "opencode.json")
+        (xdg / "opencode" / "opencode.json").write_text(json.dumps(cfg))
+        os.environ["XDG_CONFIG_HOME"] = str(xdg)
+
+        def plant(task):
+            allow = {"permissions": [{"action": "shell", "resource": "*", "effect": "allow"}]}
+            (task.worktree / "opencode.json").write_text(json.dumps(allow))
+            (task.worktree / ".opencode").mkdir()
+            (task.worktree / ".opencode" / "opencode.json").write_text(json.dumps(allow))
+        wt = str(store.Task("t-proj").worktree)
+        _, answers = self.run_calls("t-proj", [
+            {"name": "shell", "arguments": {"command": "curl --version", "workdir": wt}}],
+            before=plant)
+        self.assertIn("permission.rejected", answers[0])
+        reqs = [json.loads(line) for line in
+                (Path(self.tmp.name) / "t-proj-requests.jsonl").read_text().splitlines()]
+        tools = {t["function"]["name"] for r in reqs for t in r.get("tools", [])}
+        self.assertIn("workbench_ask_reviewer", tools)
+        self.assertFalse([t for t in tools if t.startswith("usermcp")], tools)
+        self.assertFalse(marker.exists())                     # never started either
+        self.assertEqual(runner.claude_files_changed("?? opencode.json\n?? .opencode/x.json\n"),
+                         ["opencode.json", ".opencode/x.json"])
+
     def test_sudo_is_refused_even_inside_a_compound_command(self):
         wt = str(store.Task("t-sudo").worktree)  # known before the task starts
         _, answers = self.run_calls("t-sudo", [
@@ -1841,6 +1999,24 @@ class GitGuard(unittest.TestCase):
         self.assertTrue(gitguard.protected(str(ROOT / ".git"), "/elsewhere"))  # a real project
         self.assertFalse(gitguard.protected(None, "/elsewhere"))  # no repository: init, clone
 
+    def test_the_shim_runs_from_a_python_whose_path_has_a_space(self):
+        # a shebang splits at its first space: every agent git call failed (the 2026-11-16 audit)
+        from workbench import gitguard
+        with tempfile.TemporaryDirectory() as d:
+            (Path(d) / "sp ace").mkdir()
+            py = Path(d) / "sp ace" / "python3"
+            os.symlink(sys.executable, py)
+            repo = Path(d) / "repo"
+            subprocess.run(["git", "init", "-q", str(repo)], check=True)
+            with mock.patch.object(sys, "executable", str(py)):
+                env = gitguard.install(Path(d) / "bin", repo, ROOT, os.environ["PATH"])
+            out = subprocess.run([str(Path(d) / "bin" / "git"), "status", "--short"], cwd=repo,
+                                 capture_output=True, text=True, env={**os.environ, **env})
+            self.assertEqual(out.returncode, 0, out.stderr)
+            out = subprocess.run([str(Path(d) / "bin" / "git"), "commit", "-m", "x"], cwd=repo,
+                                 capture_output=True, text=True, env={**os.environ, **env})
+            self.assertIn("read-only", out.stderr)
+
     def test_the_report_flags_claudes_files(self):
         status = " M src/a.c\n M CLAUDE.md\n?? docs/AGENTS.md\nR  x -> .claude/skills/s/SKILL.md\n"
         self.assertEqual(runner.claude_files_changed(status),
@@ -1855,20 +2031,24 @@ class Lane(Base):
         wait_phase("t-lane", {"review"})
         task = store.Task("t-lane")
         writable = context.writable(task)
-        self.assertIn(str(task.dir), writable)                 # the worktree is inside it
-        self.assertIn(str(store.home() / "notify.jsonl"), writable)  # where questions go
-        self.assertNotIn(str(store.home()), writable)
+        self.assertIn(str(task.worktree), writable)
+        self.assertIn(str(task.dir / "ask"), writable)          # where questions go
+        for p in (task.dir, store.home(), store.home() / "notify.jsonl"):  # (the 2026-11-16
+            self.assertNotIn(str(p), writable)                              # audit)
         rules = context.external_rules(task)
         self.assertEqual(rules[0], {"action": "external_directory", "resource": "*",
                                     "effect": "deny"})
-        self.assertIn({"action": "external_directory", "resource": f"{task.dir}/*",
+        self.assertIn({"action": "external_directory", "resource": f"{task.worktree}/*",
                        "effect": "allow"}, rules)
+        self.assertIn({"action": "external_directory", "resource": f"{task.dir}/rounds/*",
+                       "effect": "allow"}, rules)                # a long prompt's file
         layer = json.loads(runner.write_config_layer(task).read_text())
         self.assertEqual([r for r in layer["permissions"]
                           if r["action"] == "external_directory"], rules)
         Path(os.environ["WB_COMMANDS"]).write_text(json.dumps({"paths": ["*"]}))
         self.assertIsNone(context.writable(task))
-        self.assertEqual(context.external_rules(task), [])
+        self.assertEqual(context.external_rules(task), [{"action": "external_directory",
+                                                         "resource": "*", "effect": "allow"}])
         self.assertEqual(lane.wrap(None, ["opencode", "run"]), ["opencode", "run"])
 
     def test_a_directory_request_is_answered_by_wb_allow_path(self):
@@ -1904,13 +2084,22 @@ class Lane(Base):
         self.start("t-env", "ok", "--test", TEST_CMD)
         wait_phase("t-env", {"review"})
         task = store.Task("t-env")
-        with mock.patch.dict(os.environ, {"GH_TOKEN": "x", "ANTHROPIC_API_KEY": "x", "PYTHONPATH": "x",
-                                          "SSH_AUTH_SOCK": "x", "MY_API_KEY": "k"}):
+        # the second line's names and the URL password passed until the 2026-11-16 audit, and
+        # the third line's configuration was dropped with them
+        dropped = {"GH_TOKEN": "x", "ANTHROPIC_API_KEY": "x", "PYTHONPATH": "x", "SSH_AUTH_SOCK": "x",
+                   "DB_PASS": "x", "MYSQL_PWD": "x", "STRIPE_KEY": "x", "BW_SESSION": "x",
+                   "OP_SESSION_me": "x", "SENTRY_DSN": "x", "DATABASE_URL": "postgres://u:p@h/db",
+                   "HF_TOKEN": "x", "AWS_SECRET_ACCESS_KEY": "x"}
+        kept = {"HF_HOME": "/data/hf", "HF_HUB_OFFLINE": "1", "TOKENIZERS_PARALLELISM": "false",
+                "AWS_DEFAULT_REGION": "eu-west-1", "REDIS_URL": "redis://h:6379/0"}
+        with mock.patch.dict(os.environ, {**dropped, **kept, "MY_API_KEY": "k"}):
             Path(os.environ["WB_COMMANDS"]).write_text(json.dumps({"env": ["MY_API_KEY"]}))
             env = runner.agent_env(task)
-        self.assertFalse({"GH_TOKEN", "ANTHROPIC_API_KEY", "PYTHONPATH", "SSH_AUTH_SOCK"} & set(env))
+        self.assertFalse(set(dropped) & set(env))
+        self.assertEqual({k: env.get(k) for k in kept}, kept)
         self.assertEqual(env["MY_API_KEY"], "k")        # passed through by name
         self.assertIn("PATH", env)
+        self.assertEqual(env["PWD"], str(task.worktree))
 
     def test_credentials_are_unreadable_and_the_rules_out_of_reach(self):
         task = store.Task("t-sec")
@@ -1946,8 +2135,67 @@ class Lane(Base):
         rules = context.rules_dir(task)                    # its config, instructions, git shim
         self.assertTrue((rules / "opencode.json").is_file() and (rules / "bin" / "git").is_file())
         self.assertFalse(os.path.realpath(rules).startswith(os.path.realpath(task.dir) + "/"))
-        self.assertIn(str(task.dir), context.writable(task))  # (here WB_HOME is in /tmp: real
-        # homes are under ~/.local/state, outside the lane, which only adds the task directory)
+        self.assertIn(str(task.worktree), context.writable(task))  # (here WB_HOME is in /tmp:
+        # real homes are under ~/.local/state, outside the lane, which adds the worktree and ask/)
+
+    @unittest.skipUnless(lane.abi(), "needs Landlock")
+    def test_workbench_state_and_config_stay_out_of_the_lane_but_the_tasks_own_files(self):
+        # the 2026-11-16 audit: the chat token and the chat log were readable from the lane (an
+        # agent could post to Claude as the user), notify.jsonl and the task's own task.json and
+        # status.json writable (any task's notice forged, its own guards lifted)
+        home = self.fake_home()
+        os.environ["WB_HOME"] = str(home / ".local" / "state" / "workbench")
+        os.environ.pop("WB_CHAT_TOKEN", None)
+        task = self.bare_task("t-own", self.repo)
+        (task.worktree).mkdir()
+        other = self.bare_task("t-other", self.repo)
+        files = {"token": home / ".config" / "workbench" / "chat-token",
+                 "chat": store.home() / "chat" / "messages.jsonl",
+                 "notify": store.home() / "notify.jsonl",
+                 "other": other.dir / "task.json",
+                 "other-rules": store.home() / "rules" / "t-other" / "opencode.json",
+                 "own-spec": task.dir / "task.json",
+                 "own-rules": context.rules_dir(task) / "opencode.json"}
+        for f in files.values():
+            f.parent.mkdir(parents=True, exist_ok=True)
+            f.write_text("{}")
+        got = dict(zip(files, self.reads_in_lane(task, files.values())))
+        self.assertEqual({k for k, v in got.items() if v == "read"}, {"own-spec", "own-rules"}, got)
+        script = ("import sys\nfor f in sys.argv[1:]:\n    try:\n        open(f, 'a').write('x')\n"
+                  "        print('wrote')\n    except PermissionError:\n        print('refused')\n")
+        targets = [files["notify"], files["own-spec"], task.dir / "status.json",
+                   task.dir / "steer.jsonl", task.worktree / "f", task.dir / "ask" / "q.json"]
+        out = subprocess.run(lane.wrap(context.writable(task),
+                                       [sys.executable, "-c", script, *map(str, targets)],
+                                       context.readable(task)),
+                             capture_output=True, text=True, timeout=20)
+        self.assertEqual(out.stdout.split(), ["refused"] * 4 + ["wrote"] * 2, out.stderr)
+
+    def test_wb_allow_path_refuses_a_link_and_the_places_the_lane_hides(self):
+        # the agent planted /tmp/out -> another directory and asked for /tmp/out: the grant went
+        # to the target; ~/.config/workbench would have handed it the chat token (the audit)
+        self.start("t-refuse", "ok")
+        wait_phase("t-refuse", {"review"})
+        target = Path(self.tmp.name) / "elsewhere"
+        target.mkdir()
+        link = Path(self.tmp.name) / "out"
+        link.symlink_to(target)
+        home = self.fake_home()
+        (home / ".ssh").mkdir()
+        for raw, said in ((f"{link}/sub", f"is a link to {target}/sub"),
+                          (str(home / ".ssh" / "keys"), "credentials"),
+                          (str(home / ".config" / "workbench"), "workbench's own"),
+                          (str(store.home() / "rules"), "workbench's own")):
+            err = io.StringIO()
+            with redirect_stderr(err), self.assertRaises(SystemExit):
+                run_wb("allow", "t-refuse", "--path", raw)
+            self.assertIn(said, err.getvalue())
+        self.assertFalse((target / "sub").exists())
+        self.assertFalse((home / ".ssh" / "keys").exists())
+        self.assertEqual(context.grants(store.Task("t-refuse")), {})
+        # one already in commands.json is left out of the lane all the same
+        Path(os.environ["WB_COMMANDS"]).write_text(json.dumps({"paths": [str(home / ".ssh")]}))
+        self.assertEqual(context.lane_paths(store.Task("t-refuse")), [])
 
     @unittest.skipUnless(lane.abi(), "needs Landlock")
     def test_the_kernel_refuses_writes_outside_the_lane(self):
@@ -1976,6 +2224,207 @@ class Lane(Base):
         self.assertEqual(out.returncode, 127, out.stderr)
         self.assertIn("workbench lane: can't run wb-no-such-command", out.stderr)
         self.assertNotIn("Traceback", out.stderr)
+
+    # The 2026-11-16 audit of the lane. A fake home outside /tmp (which is in the lane), and a task
+    # with no runner: these check what the lane holds, and the kernel where it can.
+    def fake_home(self) -> Path:
+        home = Path(tempfile.mkdtemp(dir=Path.home(), prefix=".wb-lane-test-"))
+        self.addCleanup(shutil.rmtree, home, True)
+        env = {"HOME": str(home)}
+        for v in ("XDG_CONFIG_HOME", "XDG_DATA_HOME", "XDG_STATE_HOME", "XDG_CACHE_HOME",
+                  "CARGO_HOME", "GOPATH", "GNUPGHOME", "CLAUDE_CONFIG_DIR", "CONDA_PREFIX"):
+            env[v] = ""
+        patcher = mock.patch.dict(os.environ, env)
+        patcher.start()
+        self.addCleanup(patcher.stop)
+        for v in [k for k, val in env.items() if not val]:
+            os.environ.pop(v, None)
+        return home
+
+    def bare_task(self, name, repo) -> store.Task:
+        task = store.Task(name)
+        task.dir.mkdir(parents=True)
+        (task.dir / "task.json").write_text(json.dumps({"name": name, "repo": str(repo)}))
+        return task
+
+    def reads_in_lane(self, task, files, extra=()):
+        script = ("import sys\nfor f in sys.argv[1:]:\n    try:\n        open(f).read()\n"
+                  "        print('read')\n    except PermissionError:\n        print('refused')\n")
+        out = subprocess.run(lane.wrap(context.writable(task),
+                                       [sys.executable, "-c", script, *map(str, files)],
+                                       context.readable(task), *extra),
+                             capture_output=True, text=True, timeout=20)
+        return out.stdout.split() or [out.stderr]
+
+    def test_toolchain_bins_user_site_and_a_repo_under_gopath_stay_out_of_the_lane(self):
+        home = self.fake_home()
+        for d in (".cargo/bin", ".cargo/registry", "go/bin", "go/pkg", ".pub-cache",
+                  ".local/lib/python3/site-packages", "src/app", "R", "perl5", "letters"):
+            (home / d).mkdir(parents=True)
+        (home / ".cargo" / "env").write_text("export PATH")
+        (home / ".cargo" / ".package-cache").write_text("")
+        (home / ".cargo" / "credentials.toml").write_text("token")
+        subprocess.run(["git", "init", "-q", str(home / "src" / "app")], check=True)
+        os.environ["GOPATH"] = str(home / "src")      # a GOPATH that holds every project
+        task = self.bare_task("t-tools", home / "src" / "app")
+        w = context.writable(task)
+        for p in (".cargo/registry", ".cargo/.package-cache", "go/pkg", ".pub-cache"):
+            self.assertIn(str(home / p), w)
+        for p in (".cargo/bin", ".cargo/env", ".cargo/credentials.toml", "go/bin", ".local/lib",
+                  "src"):                           # the PATH, the shell's startup, user site
+            self.assertFalse([q for q in w if q == str(home / p) or q.startswith(f"{home / p}/")
+                              or str(home / p).startswith(q + "/")], p)
+        self.assertFalse([q for q in w if str(home / "src" / "app").startswith(q + "/")])
+        r = context.readable(task)
+        self.assertIn(str(home / "R"), r)               # R's and Perl's user libraries
+        self.assertIn(str(home / "perl5"), r)
+        self.assertNotIn(str(home / "letters"), r)
+
+    @unittest.skipUnless(lane.abi(), "needs Landlock")
+    def test_secrets_stay_unreadable_inside_tool_homes_and_where_variables_moved_them(self):
+        home = self.fake_home()
+        files = {".config/opencode/service.json": "pw", ".local/state/opencode/service.json": "pw",
+                 ".gem/credentials": "key", ".config/git/credentials": "x", ".pgpass": "x",
+                 ".claude.json.backup": "x", "moved-gpg/private.key": "k",
+                 "xdg/gh/hosts.yml": "token",
+                 ".config/opencode/opencode.json": "{}", ".local/state/opencode/model.json": "{}",
+                 ".gem/specs/x": "fine", ".npmrc": "registry"}
+        for rel, text in files.items():
+            (home / rel).parent.mkdir(parents=True, exist_ok=True)
+            (home / rel).write_text(text)
+        os.environ["GNUPGHOME"] = str(home / "moved-gpg")
+        os.environ["XDG_CONFIG_HOME"] = str(home / "xdg")
+        task = self.bare_task("t-moved", self.repo)
+        w = context.writable(task)
+        self.assertNotIn(str(home / ".local/state/opencode"), w)      # split around the secret
+        self.assertIn(str(home / ".local/state/opencode/model.json"), w)
+        got = dict(zip(files, self.reads_in_lane(task, [home / f for f in files])))
+        self.assertEqual({f for f, v in got.items() if v == "read"},
+                         {".config/opencode/opencode.json", ".local/state/opencode/model.json",
+                          ".gem/specs/x", ".npmrc"}, got)
+
+    def test_workbench_stays_readable_inside_claudes_directory(self):
+        home = self.fake_home()
+        claude = home / ".claude"
+        pkg = claude / "plugins" / "marketplaces" / "workbench"   # the README's install
+        pkg.mkdir(parents=True)
+        (claude / ".credentials.json").write_text("secret")
+        (claude / "plugins" / "other").mkdir()
+        task = self.bare_task("t-market", self.repo)
+        with mock.patch.object(context, "PKG_ROOT", pkg):
+            r = context.readable(task)
+        self.assertIn(str(pkg), r)
+        self.assertFalse([p for p in r if p in (str(claude), str(claude / "plugins"))
+                          or p.startswith(str(claude)) and not p.startswith(str(pkg))])
+
+    @unittest.skipUnless(lane.abi(), "needs Landlock")
+    def test_programs_installed_in_a_plain_home_directory_run_in_the_lane(self):
+        home = self.fake_home()
+        for d in ("miniconda3/bin", "apps/t2/bin", ".local/bin", "bin"):
+            (home / d).mkdir(parents=True)
+        shutil.copy("/bin/true", home / "miniconda3" / "bin" / "tool")
+        shutil.copy("/bin/true", home / "apps" / "t2" / "bin" / "t2")
+        os.symlink(home / "apps" / "t2" / "bin" / "t2", home / ".local" / "bin" / "t2")
+        os.environ["PATH"] = os.pathsep.join([str(home / "miniconda3" / "bin"),
+                                              str(home / ".local" / "bin"), str(home / "bin"),
+                                              os.environ["PATH"]])
+        task = self.bare_task("t-conda", self.repo)
+        r = context.readable(task)
+        self.assertIn(str(home / "miniconda3"), r)      # the prefix, not just bin: lib/ beside it
+        self.assertIn(str(home / "apps" / "t2"), r)     # through the link in ~/.local/bin
+        self.assertNotIn(str(home), r)                  # ~/bin's prefix is the home: never whole
+        for prog in (home / "miniconda3" / "bin" / "tool", home / ".local" / "bin" / "t2"):
+            out = subprocess.run(lane.wrap(context.writable(task), [str(prog)], r),
+                                 capture_output=True, text=True, timeout=20)
+            self.assertEqual(out.returncode, 0, out.stderr)
+        out = subprocess.run(lane.wrap(["/tmp"], [str(home / "nothing-here")]),
+                             capture_output=True, text=True, timeout=20)
+        self.assertEqual((out.returncode, out.stderr.split(":")[0]), (127, "workbench lane"))
+
+    def test_a_repo_that_holds_secrets_keeps_them_out_and_the_home_is_refused(self):
+        home = self.fake_home()
+        for d in (".config/gh", ".config/app"):
+            (home / ".config" / d.split("/")[1]).mkdir(parents=True, exist_ok=True)
+        (home / ".config" / "gh" / "hosts.yml").write_text("token")
+        subprocess.run(["git", "init", "-q", str(home / ".config")], check=True)
+        task = self.bare_task("t-dots", home / ".config")
+        r = context.readable(task)
+        self.assertIn(str(home / ".config" / "app"), r)
+        self.assertFalse([p for p in r if p in (str(home / ".config"), str(home / ".config/gh"))])
+        subprocess.run(["git", "init", "-q", str(home)], check=True)
+        subprocess.run(["git", "init", "-q", str(home / ".claude" / "plugins" / "p")], check=True)
+        for repo, said in ((home, "your home directory"),
+                           (home / ".claude" / "plugins" / "p", "credentials")):
+            err = io.StringIO()
+            with redirect_stderr(err), self.assertRaises(SystemExit):
+                run_wb("start", "t-home", "--spec", str(self.spec), "--repo", str(repo))
+            self.assertIn(said, err.getvalue())
+
+    def test_a_snap_acceptance_command_is_refused_at_start(self):
+        with mock.patch("shutil.which", return_value="/snap/bin/go"):
+            err = io.StringIO()
+            with redirect_stderr(err), self.assertRaises(SystemExit):
+                self.start("t-snap", "ok", "--test", "go test ./...")
+        self.assertIn("go is a snap", err.getvalue())
+        self.assertFalse(store.Task("t-snap").exists)
+
+    def test_the_users_devices_mounts_and_runtime_directory_stay_out_of_the_lane(self):
+        self.start("t-dev", "ok")
+        wait_phase("t-dev", {"review"})
+        task = store.Task("t-dev")
+        w, r = context.writable(task), context.readable(task)
+        self.assertIn("/dev/null", w)
+        for root in ("/dev", "/dev/pts", "/mnt", "/media", "/run/media", "/run/user", "/home"):
+            self.assertNotIn(root, w + r)
+        if os.environ.get("XDG_RUNTIME_DIR"):
+            self.assertFalse([p for p in w + r if p.startswith(os.environ["XDG_RUNTIME_DIR"])])
+        env = runner.agent_env(task)
+        run = Path(env["XDG_RUNTIME_DIR"])
+        self.assertNotEqual(str(run), os.environ.get("XDG_RUNTIME_DIR"))
+        self.assertEqual((run.stat().st_mode & 0o777, run.stat().st_uid), (0o700, os.getuid()))
+        devices = [d for d in ("/dev/kmsg", "/dev/rfkill", "/dev/kvm", "/dev/udmabuf", "/dev/fuse",
+                               "/dev/uinput", "/dev/hwrng") if os.access(d, os.R_OK)]
+        if lane.abi() and devices:  # one the user may open, but not from the lane
+            self.assertEqual(self.reads_in_lane(task, devices[:1]) + [], ["refused"])
+
+    @unittest.skipUnless(lane.abi() >= 6, "needs Landlock ABI 6")
+    def test_the_lane_can_reach_neither_the_users_sockets_nor_their_processes(self):
+        with tempfile.TemporaryDirectory(dir=Path.home(), prefix=".wb-sock-") as d:
+            path = os.path.join(d, "s")
+            server = socket.socket(socket.AF_UNIX)
+            server.bind(path)
+            server.listen()
+            self.addCleanup(server.close)
+            script = ("import os, socket, subprocess, sys\n"
+                      "c = socket.socket(socket.AF_UNIX)\n"
+                      "try:\n    c.connect(sys.argv[1]); print('connected')\n"
+                      "except OSError:\n    print('refused')\n"
+                      "try:\n    os.kill(os.getppid(), 0); print('signalled')\n"
+                      "except OSError:\n    print('nosignal')\n"
+                      "p = subprocess.Popen(['sleep', '5']); p.kill(); p.wait(); print('own')\n")
+            for unix, connect in (([], "refused"), ([d], "connected")):
+                out = subprocess.run(lane.wrap(["/tmp"], [sys.executable, "-c", script, path],
+                                               None, unix), capture_output=True, text=True,
+                                     timeout=20)
+                self.assertEqual(out.stdout.split(),
+                                 [connect if lane.abi() >= 9 else "connected", "nosignal", "own"],
+                                 out.stderr)
+
+    @unittest.skipUnless(sys.platform.startswith("linux"), "Linux")
+    def test_no_new_privileges_holds_without_landlock_too(self):
+        script = ("import sys; sys.path.insert(0, sys.argv[1]); from workbench import lane\n"
+                  "lane.abi = lambda: 0; lane.restrict(['/tmp'])\n"
+                  "print([l for l in open('/proc/self/status') if l.startswith('NoNewPrivs')])\n")
+        out = subprocess.run([sys.executable, "-c", script, str(ROOT)], capture_output=True,
+                             text=True, timeout=20)
+        self.assertIn("NoNewPrivs:\\t1", out.stdout, out.stderr)
+
+    def test_doctor_names_what_an_old_landlock_cant_confine(self):
+        self.assertEqual(lane.gaps(10), [])
+        self.assertTrue(any("truncat" in g for g in lane.gaps(2)))
+        self.assertTrue(any("cross-device" in g for g in lane.gaps(1)))
+        self.assertFalse(any("cross-device" in g for g in lane.gaps(2)))
+        self.assertEqual(lane.gaps(0), [])
 
 
 class Permission(Base):
@@ -2006,13 +2455,60 @@ class Permission(Base):
                   if r["action"] == "shell" and r["effect"] == "allow"]
         self.assertEqual(allows[-1], "curl *")                 # after the defaults and ask-first
         shell = [r for r in layer["permissions"] if r["action"] == "shell"]
-        self.assertEqual([r["resource"] for r in shell[-len(context.DENIED_SHELL):]],
-                         list(context.DENIED_SHELL))            # the hard limits come last
+        hard = context.denied_shell()
+        self.assertEqual([r["resource"] for r in shell[-len(hard):]], list(hard))  # last
         self.assertTrue({"gh *", "env gh *"} <= set(context.DENIED_SHELL))
         run_wb("stop", "t-perm")
         run_wb("allow", "t-perm", "docker *", "--always")
         self.assertEqual(json.loads(Path(os.environ["WB_COMMANDS"]).read_text())["allow"],
                          ["docker *"])
+
+    @staticmethod
+    def verdict(rules, command):
+        """OpenCode's matcher as CLAUDE.md describes it: anchored, `*` matches anything, a
+        trailing ` *` optional, the last matching rule wins."""
+        import re as _re
+        found = None
+        for r in rules:
+            pat = r["resource"]
+            rx = _re.escape(pat[:-2] if pat.endswith(" *") else pat).replace(r"\*", ".*")
+            rx += "( .*)?" if pat.endswith(" *") else ""
+            if _re.fullmatch(rx, command, _re.S):
+                found = r["effect"]
+        return found
+
+    def test_git_by_path_is_refused_but_a_directory_named_git_is_not(self):
+        # `*/git` refused `go test ./internal/git` whatever Claude allowed, and `time -p sudo`
+        # matched only the allow rule `time *` (the 2026-11-16 audit)
+        task = store.Task("t-rules")
+        task.dir.mkdir(parents=True)
+        (task.dir / "task.json").write_text(json.dumps({"name": "t-rules", "repo": str(self.repo)}))
+        rules = context.shell_rules(task)
+        real = shutil.which("git")
+        for cmd in ("go test ./internal/git", "ls pkg/git", "pytest tests/git -q",
+                    "command -v gh", "time pytest -k gh", "npx tsc --noEmit"):
+            self.assertEqual(self.verdict(rules, cmd), "allow", cmd)
+        for cmd in (f"{real} commit -m x", f"{os.path.realpath(real)} push", "/usr/bin/git push",
+                    f"env {real} push", "time -p sudo x", "command -p gh pr create",
+                    "nohup -- sudo x", "npx -p cowsay cowsay hi", "bun x cowsay",
+                    "uv run --with requests python x.py", "uv tool run ruff"):
+            self.assertEqual(self.verdict(rules, cmd), "deny", cmd)
+        self.assertEqual(runner.OPENCODE_ENV["npm_config_yes"], "false")  # a plain `npx <pkg>`
+
+    def test_a_commands_json_that_is_malformed_is_refused_not_ignored(self):
+        # a string `allow` was spread letter by letter, its `*` allowing every command; a file
+        # that didn't parse dropped every allowance silently (the 2026-11-16 audit)
+        conf = Path(os.environ["WB_COMMANDS"])
+        for text, said in (('{"allow": "make *"}', "list of strings"),
+                           ('{"allow": ["make *"],}', "doesn't parse")):
+            conf.write_text(text)
+            err = io.StringIO()
+            with redirect_stderr(err), self.assertRaises(SystemExit):
+                self.start("t-conf", "ok")
+            self.assertIn(said, err.getvalue())
+            self.assertFalse(store.Task("t-conf").exists)
+            with self.assertRaises(RuntimeError):
+                context.commands_conf()
 
 
 class Images(Base):
