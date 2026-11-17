@@ -67,11 +67,15 @@ def revs(names: list[str]) -> dict[str, str]:
 
 
 def _commit(message: str) -> None:
-    """Commit as the user; a machine without a git identity still gets its history."""
+    """Commit as the user; a machine without a git identity still gets its history. Unsigned and
+    without hooks: the library is workbench's own record, not one of the user's projects, and a
+    signing prompt or a global hook made `wb skill add` fail from Claude's Bash (the 2026-11-16
+    audit). gitops' commits land in the user's projects and keep both."""
     who = [] if subprocess.run(["git", "-C", str(library()), "config", "user.email"],
                                capture_output=True).stdout.strip() else \
         ["-c", "user.name=workbench", "-c", "user.email=workbench@localhost"]
-    r = subprocess.run(["git", "-C", str(library()), *who, "commit", "-q", "-m", message],
+    r = subprocess.run(["git", "-C", str(library()), *who, "-c", "commit.gpgsign=false",
+                        "-c", f"core.hooksPath={os.devnull}", "commit", "-q", "--no-verify", "-m", message],
                        capture_output=True, text=True)
     if r.returncode:
         raise RuntimeError((r.stderr or r.stdout).strip())
@@ -120,7 +124,7 @@ def check(skill_md: Path, name: str) -> tuple[list[str], list[str]]:
     lines = s["body"].count("\n") + 1
     if lines > MAX_LINES:
         warnings.append(f"{lines} lines: a loaded skill spends the agent's context; aim for 20-60")
-    if re.search(r"(?<![\w.])(/home/|~/)", s["text"]):
+    if re.search(r"(?<![\w.])(/home/|/Users/|/root/|/var/home/|~/)", s["text"]):  # Linux, macOS, Silverblue
         warnings.append("names a path outside the repo: agents go looking for such paths; "
                         "describe the thing instead")
     if s["description"] and not re.search(r"\b(when|for|before|after|if)\b", s["description"], re.I):

@@ -16,13 +16,16 @@ it prints is always localhost; reaching it from a phone is the user's own setup.
 """
 from __future__ import annotations
 
+import errno
 import hmac
 import json
 import os
 import secrets
 import select
+import shutil
 import socket
 import subprocess
+import sys
 import threading
 import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -38,6 +41,9 @@ MAX_TEXT = 8000
 MAX_BODY = 32 * 1024
 MAX_STREAMS = 16        # open /api/stream connections (each holds a thread)
 PING_EVERY = 15         # seconds between keep-alive comments on a stream
+TIMEOUT = 30            # seconds a connection may stall (more than PING_EVERY: streams write by then)
+# macOS's App Store and standalone Tailscale apps keep the CLI in the bundle, off PATH
+TAILSCALE_APP = "/Applications/Tailscale.app/Contents/MacOS/Tailscale"
 STATIC = Path(__file__).parent / "chat_static"
 TYPES = {".html": "text/html; charset=utf-8", ".js": "text/javascript; charset=utf-8",
          ".css": "text/css; charset=utf-8", ".svg": "image/svg+xml",
@@ -80,9 +86,14 @@ def token() -> str:
 
 
 def tailscale() -> dict:
-    """This machine on the tailnet: {"ip", "names"}, or {} without Tailscale."""
+    """This machine on the tailnet: {"ip", "names"}; {} when Tailscale isn't up; {"missing": True}
+    when there is no CLI to ask (said apart from "not running": the 2026-11-16 audit)."""
+    cli = shutil.which("tailscale") or (TAILSCALE_APP if sys.platform == "darwin"
+                                        and os.path.isfile(TAILSCALE_APP) else None)
+    if not cli:
+        return {"missing": True}
     try:
-        r = subprocess.run(["tailscale", "status", "--json"], capture_output=True, text=True, timeout=5)
+        r = subprocess.run([cli, "status", "--json"], capture_output=True, text=True, timeout=5)
         me = json.loads(r.stdout)["Self"]
     except (OSError, ValueError, KeyError, subprocess.TimeoutExpired):
         return {}
@@ -194,6 +205,7 @@ class Hub:
 
 class Handler(BaseHTTPRequestHandler):
     server_version = "wb-chat"
+    timeout = TIMEOUT  # an idle or half-open connection holds a thread no longer than this
     hosts: set[str] | None = set()  # None: any Host (the user's `hosts: ["*"]`)
     secret = ""
     hub: "Hub"
@@ -270,10 +282,11 @@ class Handler(BaseHTTPRequestHandler):
             self._security_headers()
             self.send_header("X-Accel-Buffering", "no")
             self.end_headers()
-            hub, seen, last_body = self.hub, -1, None
+            hub, seen, last_body, sent = self.hub, -1, None, time.monotonic()
             while True:
                 with hub.cond:
-                    woke = hub.cond.wait_for(lambda: hub.version != seen, timeout=PING_EVERY)
+                    woke = hub.cond.wait_for(lambda: hub.version != seen,
+                                             timeout=max(0.0, PING_EVERY - (time.monotonic() - sent)))
                     seen = hub.version
                 if woke:
                     snap = snapshot()
@@ -282,9 +295,16 @@ class Handler(BaseHTTPRequestHandler):
                         last_body = body
                         self.wfile.write(f"event: state\ndata: {json.dumps(snap)}\n\n".encode())
                         self.wfile.flush()
+                        sent = time.monotonic()
+                        continue
+                    if time.monotonic() - sent < PING_EVERY:
+                        # Without inotify the hub wakes every second (how a dead listener is
+                        # noticed): a ping only after PING_EVERY of silence, not one a second
+                        # (the 2026-11-16 audit)
                         continue
                 self.wfile.write(b": ping\n\n")  # keeps the line (and the page's watchdog) alive
                 self.wfile.flush()
+                sent = time.monotonic()
         except (BrokenPipeError, ConnectionResetError, OSError):
             pass
         finally:
@@ -299,9 +319,14 @@ class Handler(BaseHTTPRequestHandler):
             return
         if (self.headers.get("Content-Type") or "").split(";")[0] != "application/json":
             return self._json(415, {"error": "json only"})
-        n = int(self.headers.get("Content-Length") or 0)
+        try:  # -1 would read until the client hangs up (the 2026-11-16 audit)
+            n = int(self.headers.get("Content-Length") or 0)
+        except ValueError:
+            n = -1
         if n > MAX_BODY:
             return self._json(413, {"error": "too long"})
+        if n < 0:
+            return self._json(400, {"error": "bad length"})
         try:
             body = json.loads(self.rfile.read(n) or b"{}")
             text, cid = str(body.get("text", "")).strip(), body.get("cid")
@@ -343,7 +368,8 @@ def plan(binds: list[str] | None = None, hosts: list[str] | None = None) -> dict
         if b == "tailscale":  # this machine's tailnet address, when there is one
             ts = tailscale()
             if not ts.get("ip"):
-                skipped.append("tailscale (not running)")
+                skipped.append("tailscale (CLI not found: put `tailscale` on PATH)" if ts.get("missing")
+                               else "tailscale (not running)")
                 continue
             b = ts["ip"]
             allowed |= {n.lower() for n in ts["names"]}
@@ -371,7 +397,16 @@ def make_servers(port: int, binds: list[str] | None = None,
         "streams": threading.BoundedSemaphore(MAX_STREAMS)})
     servers = []
     for addr in p["binds"]:
-        srv = (_Server6 if ":" in addr else ThreadingHTTPServer)((addr, port), handler)
+        try:
+            srv = (_Server6 if ":" in addr else ThreadingHTTPServer)((addr, port), handler)
+        except OSError as e:  # one line, not a traceback (the 2026-11-16 audit)
+            for s in servers:
+                s.server_close()
+            why = ("the port is taken: another wb chat serve (systemctl --user status wb-chat) or "
+                   "another program; --port picks another" if e.errno == errno.EADDRINUSE else
+                   "that address isn't on this machine (chat.json's bind, or --bind)"
+                   if e.errno == errno.EADDRNOTAVAIL else e.strerror or str(e))
+            raise RuntimeError(f"can't listen on {addr}:{port}: {why}") from None
         srv.daemon_threads = True
         servers.append(srv)
     return servers, p

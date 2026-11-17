@@ -1,11 +1,21 @@
 [Unit]
 Description=workbench web chat (wb chat serve): reach Claude's /delegate session from the browser
-After=network-online.target
-Wants=network-online.target
+# A broken install (a python3 older than 3.11 on systemd's PATH, the port held by another program)
+# stops after five tries instead of restarting every 10 s for ever (the 2026-11-16 audit);
+# `systemctl --user reset-failed wb-chat` clears it. (network-online.target was dropped: a user
+# manager has no such unit.)
+StartLimitIntervalSec=300
+StartLimitBurst=5
 
 [Service]
 # localhost, or the addresses in ~/.config/workbench/chat.json (`bind`). The install's link
 # (README): bin/wb finds the package from its real path, wherever the clone is.
+# bin/wb runs `/usr/bin/env python3` with the user manager's PATH (/usr/local/bin:/usr/bin), not
+# your shell's, and without the WB_* variables you export. If your Python 3.11+ comes from pyenv,
+# uv or conda, or you set WB_HOME or WB_CHAT_*: `systemctl --user edit wb-chat` and add
+#   [Service]
+#   Environment=PATH=/path/to/your/python/bin:/usr/local/bin:/usr/bin
+#   Environment=WB_HOME=...
 ExecStart=%h/.local/bin/wb chat serve
 Restart=always
 RestartSec=10

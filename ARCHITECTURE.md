@@ -67,7 +67,11 @@ to see whether the chat listener's pid lives. A crashed piece loses nothing, and
 be inspected with `cat`.
 
 workbench is Python's standard library only (3.11+), plus the TypeScript mod. There is no
-packaging: it runs from its clone. No model is named anywhere in the code: models come from
+packaging: it runs from its clone. `bin/wb` and `bin/wb-ask-mcp` check the interpreter before they
+import the package and exit 1 with one line on Python older than 3.11 (`wb: needs Python 3.11 or
+newer; <python> is <version>. Put a newer python3 first on PATH.`) or on native Windows (`wb:
+native Windows is not supported …; run Claude Code and wb inside WSL2`), not with a traceback from
+deep inside it (the 2026-11-16 audit). Everything else starts from their `sys.executable`. No model is named anywhere in the code: models come from
 OpenCode's config and the router decides, so a new model is one config entry away.
 
 **Where Python processes start.** Five places, and each finds the package by path, not by an
@@ -744,9 +748,17 @@ first session to deliver a notice wins.
 **The transcript** (`transcript.follow`). It merges, every loop, the OpenCode session export of
 the current session and every earlier one (`status.sessions`) with the task's events, sorted by
 time, each entry printed once (keyed by message and part; a part's `start` and `end` print
-separately). `opencode session export <id>` runs from `/` (30 s); with no session id yet,
-`opencode session list` in the worktree finds the one titled `wb: <task>`. The same export feeds
-the runner's between-rounds check and its speed samples (`transcript.export`).
+separately). `opencode session export <id> --standalone` runs from `/` (30 s); with no session
+id yet, `opencode session list --standalone` in the worktree finds the one titled `wb: <task>`.
+Both run standalone, like `opencode run`, so they never depend on the background service's fixed
+port (another user's service there, or one with other XDG dirs, failed every export: the
+2026-11-16 audit); a failure is said once per process on stderr (`opencode session export failed:
+…`, in runner.log under the runner). Earlier sessions are finished, so `follow` exports each once.
+The same export feeds the runner's between-rounds check and its speed samples
+(`transcript.export`). Everything printed for a person passes `transcript.plain` first: control
+characters other than newline and tab (C1 included) become `\xNN`, so an escape sequence in what
+the agent read or wrote (OSC 52 sets the clipboard) never reaches the terminal raw; `--json`
+needs nothing, JSON escapes them. `wb log` and `wb report` do the same on a terminal.
 
 Drawn in Claude Code's own grammar, results under `  ⎿  `:
 - prompts: a label (`Claude → agent · spec`, `· review feedback`, `· next step`, `· INTERRUPT,
@@ -954,7 +966,10 @@ up again (a library's quirk, a pitfall, a check to run), Claude writes a skill. 
 (`skills._git`). A skill is `<lib>/<name>/SKILL.md` plus any files beside it; a retired one is
 `<lib>/retired/<name>/`. Only `<lib>/*/SKILL.md` is live (`available()`: name → {path,
 description}; `resolve()` raises KeyError on an unknown name). Commits go under the user's git
-identity, or `workbench <workbench@localhost>` when none is set (`_commit`). Messages:
+identity, or `workbench <workbench@localhost>` when none is set (`_commit`), unsigned and without
+hooks (`commit.gpgsign=false`, `core.hooksPath` = the null device, `--no-verify`): the library is
+workbench's own record, and the user's signing prompt or a global hook failed `wb skill add` from
+Claude's Bash (the 2026-11-16 audit); commits in the user's projects keep both. Messages:
 `<name>: <message>` (plus `\n\nSource: <source>` from `--source`), `<name>: retired: <message>`,
 `<name>: restored`. `rev(name)` is the last commit touching the skill (`%h`), `revs()` maps
 names to revs, `history()` the last five `%ad %s` lines over `<name>` and `retired/<name>`
@@ -970,7 +985,7 @@ quotes are stripped. Fields used: `name`, `description`, `license`.
   differs; no description, or one over 300 characters (it's all an agent sees before loading);
   the whole file over 8000 UTF-8 bytes; a body path `references/…`, `scripts/…`, `templates/…` or
   `assets/…` that doesn't exist beside the source file.
-- Warned: a body over 120 lines; `/home/` or `~/` anywhere (agents go looking for those paths); a
+- Warned: a body over 120 lines; a home path (`/home/`, `/Users/`, `/root/`, `/var/home/`) or `~/` anywhere (agents go looking for those paths); a
   description without when/for/before/after/if; for a SKILL.md in a directory, clutter
   (README.md, CHANGELOG.md, .env, .gitignore, LICENSE.txt) or more than 10 other files; a body that
   reads like an incident log (3+ of `#NN`, `PR NN`, `issue NN`, `20YY-MM-DD`): a skill states the
@@ -1005,8 +1020,14 @@ high, case-insensitive and multiline:
 - Claude's files (critical: a shell write to AGENTS.md, CLAUDE.md or `.claude/settings*` through
   `>`, `>>`, `sed -i` or `tee`; high: a line telling the agent to edit one).
 
-File rules: a symlink resolving outside the skill and binary extensions are critical; archives,
-NUL bytes and invalid UTF-8 are high; media files aren't scanned. Per line: invisible characters
+File rules: what is scanned is what `skills.add` copies, which follows links. A symlink resolving
+outside the skill, or into its `.git`, and binary extensions are critical; a link to nothing is
+high; a link inside the skill is scanned as its target's bytes under the link's own name and
+suffix (a link to a directory: its files are scanned under their own names), and a lone SKILL.md
+given as a link as its target's text. Archives, NUL bytes and invalid UTF-8 are high. Media
+files (.png .pdf .ttf …) are skipped only when they look binary (a NUL in the first 8 KB, or not
+UTF-8); one that is text is scanned as prose (the 2026-11-16 audit: a link guide.md -> pic.png
+holding an injection, and a linked SKILL.md, got in unscanned). Per line: invisible characters
 (zero-width, bidi controls, tag characters, any other Cf except the soft hyphen) are critical when
 a bidi or tag character is present, else high (a BOM at the very start is fine); 200+ blanks
 followed by code is critical outside prose files (.md .txt .html .xml .tex .css; the pattern
@@ -1270,7 +1291,8 @@ custom-node packs do run their own Python).
 ## The web chat
 
 `wb chat serve` (`workbench/chat.py`; kept up by `systemd/wb-chat.service`, a user unit running
-`%h/.local/bin/wb chat serve` with `Restart=always`) serves a small page on port 1337 for reaching
+`%h/.local/bin/wb chat serve` with `Restart=always`, giving up after five starts in five minutes:
+`StartLimitBurst`) serves a small page on port 1337 for reaching
 the Claude session in delegate mode while the user is away.
 
 - **The path of a message.** The page posts it; the server appends it to `chat/messages.jsonl`.
@@ -1303,18 +1325,23 @@ use with `O_EXCL`, mode 600, `token_urlsafe(32)`; kept at 600; one under 16 char
 with a message), read once when the server starts, so a new token needs a restart. The settings:
 `$WB_CHAT_CONFIG`, else `~/.config/workbench/chat.json`, with two keys. `bind`: addresses to listen
 on, which replace localhost (`localhost`, an address, `tailscale`: the tailnet IPv4 from
-`tailscale status --json`, skipped when tailscale isn't running; `0.0.0.0` or `::`: every
-interface). `hosts`: extra host names to answer to (`*`: any). `--bind` replaces chat.json's
+`tailscale status --json`, the CLI found on PATH or, on macOS, in the app bundle
+(`TAILSCALE_APP`); skipped as `tailscale (not running)`, or `tailscale (CLI not found: …)` when
+neither has it; `0.0.0.0` or `::`: every interface). `hosts`: extra host names to answer to (`*`: any). `--bind` replaces chat.json's
 binds, `--host` adds to its hosts, `--port` changes the port. Answered host names (`chat.plan`,
 worked out once at startup): `localhost`, `127.0.0.1`, `::1` always; for `tailscale` its DNS name,
 first label and host name; for a wildcard the host's name, its first label, its FQDN and whatever
 the host name resolves to; any other bind as itself; plus `hosts`. `serve` prints what it listens
-on, binds it skipped, and warnings for a wildcard bind or `hosts: *`. With a bind skipped (tailscale
+on, binds it skipped, and warnings for a wildcard bind or `hosts: *`; an address it can't listen
+on ends it with one line (`can't listen on <addr>:<port>: the port is taken: another wb chat serve
+… or another program; --port picks another`, or the address isn't on this machine). With a bind skipped (tailscale
 not up yet), it rechecks every `REPLAN_EVERY` 30 s and exits 75 once more binds are available,
 for the service manager (`Restart=always`) to start it again with them. `wb chat url` prints
 `http://localhost:<port>/#token=…` (the fragment never leaves the browser).
 
-**The HTTP API** (`Handler`, HTTP/1.0, no keep-alive, no CORS):
+**The HTTP API** (`Handler`, HTTP/1.0, no keep-alive, no CORS; a connection that stalls for
+`TIMEOUT` 30 s, before its request is in or on a blocked write, is closed, so an idle one holds a
+thread no longer):
 - Every request: the `Host` header (port and brackets stripped, lowercased) must be an answered
   name, else 403 `{"error": "unknown host"}`: this stops other web pages and DNS rebinding.
   Responses carry `Cache-Control: no-store`, `X-Frame-Options: DENY`, `nosniff`, `no-referrer` and
@@ -1329,9 +1356,11 @@ for the service manager (`Restart=always`) to start it again with them. `wb chat
 - `GET /api/stream`: server-sent events (with the security headers), at most 16 open (503 past it): `event: state` with the
   snapshot at once and whenever it changes, `: ping` after 15 s idle. One `Hub` thread watches
   `chat/` (inotify, or `wait()` when it fell back to polling) and a pidfd on the listener and
-  wakes every stream.
-- `POST /api/send`: JSON only (415), at most 32 KB (413), `{text: 1–8000 characters, cid?: 1–64
-  characters}` (400), → 200 `{message, listener, state}`.
+  wakes every stream. Without inotify it wakes them every second (how a dead listener is noticed
+  there); a wake with nothing new writes nothing, so the 15 s ping holds on every platform.
+- `POST /api/send`: JSON only (415), at most 32 KB (413), a `Content-Length` that isn't a number
+  0 or more (400), `{text: 1–8000 characters, cid?: 1–64 characters}` (400), → 200 `{message,
+  listener, state}`.
 
 **The page** (`chat_static/`: `index.html`, `app.js`, `app.css`, `manifest.webmanifest`,
 `icon.svg`; no inline script, as the CSP requires). The token is taken from the address's
@@ -1407,7 +1436,7 @@ the chat key (`<start ms>-<6 base36>`, kept across reloads), registers its `dele
 starts the ears and two timers.
 
 **Ears and timers.** `ears` spawns `wb events` (cli.cmd_events: `{"hello": pid}` first, then
-`{"changed": [...]}` per batch; it skips tasks' `worktree/` and `rounds/`, `imports/`, `images/`,
+`{"changed": [...]}` per batch; it skips tasks' `worktree/` and `rounds/`, closed tasks, `rules/`, `imports/`, `images/`,
 `runner.log`, `*.lock`, `*.tmp` and dotfiles, and exits when its parent changes); every line runs `poll()`; when the child ends
 it is respawned after 2 s. A 1.5 s timer polls when there's no events child, a task is
 queued/running/testing/asking, a turn is queued, or 30 s passed since the last poll (`SAFETY_MS`). A
@@ -1535,7 +1564,8 @@ rewake, Raster vs face, `/delegate` alone, the update check and `/delegate-updat
 question wakes, the one-hour cutoff, scrolling, `WB_COMPACT_AT`, the ears respawn.
 
 **Troubleshooting.** If `wb` isn't on Claude Code's PATH the mod fails quietly (the ears respawn
-every 2 s, the `workbench` context block is left out): set `WB_BIN`. `claude plugin validate mod`
+every 2 s, the `workbench` context block is left out): set `WB_BIN`. That moves only the mod's
+own calls: Claude's Bash runs `wb` by name, so it still has to be on PATH (`wb doctor` says). `claude plugin validate mod`
 lists the hooks, calls and env reads; `claude --debug` shows hook errors.
 
 ## Waiting without polling
@@ -1563,7 +1593,7 @@ Every waiter and its bounded wake (a timeout to re-check what the kernel can't s
 
 | Caller | Waits on | Re-checks every |
 |---|---|---|
-| `wb events` | `$WB_HOME`, recursive, skipping `tasks/*/worktree`, `tasks/*/rounds`, `imports`, `images` | 10 s (exits when its parent changes) |
+| `wb events` | `$WB_HOME`, recursive, skipping `tasks/*/worktree`, `tasks/*/rounds`, `rules`, `imports`, `images` and the tasks already closed when it starts (`EVENT_SKIP`) | 10 s (exits when its parent changes) |
 | `wb wait` | the state directory and the named task's directory | 60 s (a dead runner) |
 | `wb log -f` | the task directory | 30 s |
 | `wb watch` | the task directory | 1.5 s on a terminal, 30 s otherwise |
@@ -1621,7 +1651,7 @@ message, not a traceback.
 | `wb log <task>` | `-n N` (0 all), `-f`, `-v` | The agent's events: tool calls (`HH:MM:SS rN tool brief  ✗ error`), text, questions, answers, stops, auto-fixes, rounds, tests, errors. |
 | `wb report <task>` | `--round N` | The round's summary.md. |
 | `wb diff <task> [paths…]` | `--stat`, `--all` | The worktree against the task's base, or after `wb next` against the last committed step (`--all`: the whole branch); new files included. |
-| `wb events` | | `{"hello": pid}`, then `{"changed": [paths]}` whenever `$WB_HOME` changes (not tasks' worktrees and rounds, `imports/`, `images/`, `runner.log`, `*.lock`, `*.tmp`, dotfiles); exits when its parent does. The mod's ears. |
+| `wb events` | | `{"hello": pid}`, then `{"changed": [paths]}` whenever `$WB_HOME` changes (not tasks' worktrees and rounds, closed tasks, `rules/`, `imports/`, `images/`, `runner.log`, `*.lock`, `*.tmp`, dotfiles); exits when its parent does. The mod's ears. |
 
 ### Models, skills, lessons, notes
 | Command | Flags | What it does |
@@ -1647,9 +1677,9 @@ message, not a traceback.
 | `wb image "<prompt>"` | `--n` (4), `--size WxH` (1024x1024), `--seed`, `--ref <img>…`, `--out DIR`, `--engine`, `--list` | Candidates from a local image engine (see *Images*). |
 | `wb chat [log\|serve\|url\|reply\|ack\|pending]` | `--port` (1337), `--bind` (replaces chat.json's), `--host` (adds), `--text`, `--message <file\|->` (reply reads stdin without either), `-n` (10); `ack <id> --by --how` (the mod) | The web chat: the thread, the server, the link with its token, Claude's reply. |
 | `wb init <dir>` | | A project the way Claude keeps one: git on the default branch, an initial commit, AGENTS.md → CLAUDE.md (refuses inside another repo or without a git identity). |
-| `wb setup` | `--force` (replaces a link that points elsewhere; never a real file) | Links `~/.local/bin/wb` to this copy's `bin/wb` and Claude Code's `skills/delegate` to its `skill/delegate`, warns when `~/.local/bin` isn't on PATH; exit 1 when it left something in the way (see *Installing*). |
+| `wb setup` | `--force` (replaces a link that points elsewhere; never a real file) | Links `~/.local/bin/wb` to this copy's `bin/wb` and Claude Code's `skills/delegate` to its `skill/delegate`, warns when `~/.local/bin` isn't on PATH (Claude and the mod run `wb` by name); exit 1 when it left something in the way (see *Installing*). |
 | `wb update` | `--check` (only say whether origin has news: `update available: N new commit(s)…` or `up to date`), `--if-due` (with `--check`: ask origin at most weekly, `UPDATE_EVERY`, else answer from `update.json`; never with `CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC`) | Updates this copy (see *Installing*): refuses while any runner is live; a marketplace copy runs `claude plugin marketplace update workbench` then `claude plugin update workbench@workbench`; a clone (refusing uncommitted tracked changes) runs `git pull --ff-only` first. Prints `updated <kind> a..b (N commit(s))` or `already up to date`. The fetch never prompts (`GIT_TERMINAL_PROMPT=0`, ssh `BatchMode`). |
-| `wb doctor` | | `opencode --version`, the OpenCode config, git, models found and each one's readiness, each Ollama entry's `options.max_tokens` and context against what Ollama serves, the state directory, a real lane drawn around a test write (`ok agents write only in their lane (Landlock ABI N)`), `wb` on PATH (or `WB_BIN`) for the mod, where the mod lives. `ok`/`BAD` lines set the exit code; `--` lines inform. |
+| `wb doctor` | | `opencode --version` (BAD below 2.x, whose config shape and run flags workbench writes; a version that doesn't parse is a `--` line), the OpenCode config, git, models found and each one's readiness, each Ollama entry's `options.max_tokens` and context against what Ollama serves, the state directory (made if missing, then checked writable), a real lane drawn around a test write (`ok agents write only in their lane (Landlock ABI N)`: the probe's `PermissionError`, not exit 126), `wb` on PATH (Claude's Bash runs it by name: BAD without it, whatever `WB_BIN` says; `WB_BIN` is noted when set), the `/delegate` skill link, a `--` line when `wb` or `/delegate` comes from another copy (`wb setup --force` from the one you want), and whether Claude Code lists `workbench@…` in `plugins/installed_plugins.json` (information only: a mod loaded another way isn't listed). `ok`/`BAD` lines set the exit code; `--` lines inform. |
 
 ## Files and formats
 
@@ -1814,9 +1844,12 @@ one class or test with `python3 -m unittest tests.test_workbench.Context[.test_�
 node tests/e2e_chat.mjs`.
 
 **CI.** `.github/workflows/check.yml` runs `python3 -m unittest` and `claude plugin validate mod
-&& claude plugin test mod` on every push to main and every pull request, with the Claude Code the
+&& claude plugin test mod` on every push to main and every pull request, on Python 3.11 (the
+floor, through `actions/setup-python`: a 3.12+ API can't slip in) with the Claude Code the
 mod was last verified with (`CLAUDE_CODE_VERSION`); `nightly.yml` runs the same once a day on the
-newest Claude Code, so a red nightly means a new release broke the mod, not that main is broken.
+newest Claude Code and the runner's newer python3, so a red nightly means a new release broke the
+mod, not that main is broken. Its `macos` job runs the Python suite on macOS 3.11 with
+`continue-on-error` (a failure there doesn't turn the badge red): look at it before a release.
 The README shows both as badges, beside the floor the mod needs (Claude Code 2.1.287, the floor
 for mods). A GitHub runner has no `opencode` and may lack Landlock, so the RealOpenCode and Lane
 tests skip there: CI is not where they count. Not run in CI: the browser test and a real run.
@@ -1832,8 +1865,8 @@ main (*Shipping to main*).
   holder) and `can_share`.
 - `tests/test_portable.py`: discovery against real HTTP servers on port 0 (the Ollama probe, the
   port guess, multi-model servers, loopback and host names, `local: true`, `opencode.jsonc` under
-  `XDG_CONFIG_HOME`, `CLAUDE_CONFIG_DIR`), the polling watcher (`watch._libc = False`), fit,
-  budgets.
+  `XDG_CONFIG_HOME`, `CLAUDE_CONFIG_DIR`), the polling watcher (`watch._libc = False`), the
+  launchers on an old Python or native Windows, fit, budgets.
 - `tests/test_sizing.py`: the slice guess and its correction from real steps.
 - `tests/test_workflows.py`: the merge gate, in plain text (no YAML library): every action pinned
   to a commit with its version, every workflow with its own permissions, `check` never
@@ -1869,7 +1902,8 @@ sets the fake GPU's size (unset: VRAM unknown, so no sharing). The runner keeps 
 spawned with: a `FAKE_*` change reaches only runners spawned later (feedback, next, resume spawn
 new ones).
 
-**The fake OpenCode** (`fake_opencode.py`). Handles `run …` (prompt = last argument, `--session`
+**The fake OpenCode** (`fake_opencode.py`). Handles `--version` (`FAKE_VERSION`, else
+`opencode v2.3.0`: `wb doctor`), `run …` (prompt = last argument, `--session`
 continues) and `session export <sid>` (a fixed export: one user message, one assistant message
 with tokens `FAKE_FILL` or 1200, an edit of answer.txt 41 → 42, text; a compaction message when
 `FAKE_COMPACTED`). It streams one JSON event per line (`step_start`, `tool_use`, `text`,
@@ -1880,7 +1914,8 @@ continued: an auto-fix round passes), `loop` (the repeat guard stops it), `hang`
 no events), `slow` (hangs in a new session, ok when continued), `fill` (a 25K-token step at 76%
 of 32K, then sleeps: the runner hands over mid-round; the handover prompt turns it into `ok`),
 `read` (25K tokens before any change: it carries on), `floor` (a re-read floor too high to hand
-over: `HANDOVER_ROOM`). `session list` lists nothing. Its
+over: `HANDOVER_ROOM`). `session list` lists nothing. Both session commands fail without
+`--standalone`, as the real ones do when another service holds the managed port. Its
 live tool names are 1.x-style (`bash`, `filePath`); real OpenCode 2.x says `shell`, `path`
 (`events._brief` reads both).
 
@@ -1995,6 +2030,8 @@ push: every change is a pull request that merges once `check` is green and it is
   `claude plugin validate mod` fails.
 - **The Claude Code version** the mod is verified with → `CLAUDE_CODE_VERSION` in
   `.github/workflows/check.yml`; the floor it needs → the README's badge and *What you need*.
+- **The Python floor** (3.11) → the launchers' guard (`bin/wb`, `bin/wb-ask-mcp`), `check.yml`'s
+  and the `macos` job's `python-version`, the README's badge and *What you need*.
 - **The merge gate** (`owner-merge.yml`, the ruleset, `check.yml`'s job name) →
   `tests/test_workflows.py`, `scripts/github-settings.sh apply`, *Shipping to main*.
 - **`mod/` for users** → bump `mod/.claude-plugin/plugin.json`'s `version`, or a marketplace

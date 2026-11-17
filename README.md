@@ -88,7 +88,8 @@ and it works.
 
 - **[Claude Code](https://claude.com/claude-code)** 2.1.287 or newer (the pane is a Claude Code
   mod), with a Claude subscription or an API key
-- **[OpenCode](https://opencode.ai)**, which runs the local models as coding agents
+- **[OpenCode](https://opencode.ai)** 2.x (checked against 2.3), which runs the local models as
+  coding agents
 - **A local model server**, usually [Ollama](https://ollama.com). No models yet? That's fine: the
   first time you use it, Claude looks at your hardware, recommends the best models it can run, and
   sets them up in OpenCode (it asks before downloading anything)
@@ -160,7 +161,7 @@ to read the diff.
 **Away from the computer?** `wb chat serve` runs a small web chat with the running Claude session,
 and `wb chat url` prints its private link (on Linux, `systemctl --user link
 "$PWD/systemd/wb-chat.service" && systemctl --user enable --now wb-chat`, run in the clone, keeps
-it running, and `systemctl --user restart wb-chat` after an upgrade; on macOS, a launchd agent running `~/.local/bin/wb chat serve` does). It's `http://localhost:1337`; to use it from your phone, reach your PC the way you
+it running, and `systemctl --user restart wb-chat` after an upgrade; it runs systemd's `python3`, so if yours comes from pyenv, uv or conda, the unit's comment says how to point it there; on macOS, a launchd agent running `~/.local/bin/wb chat serve` does). It's `http://localhost:1337`; to use it from your phone, reach your PC the way you
 normally do and change the host in the link. It serves only localhost until you say otherwise in
 `~/.config/workbench/chat.json`: `{"bind": ["localhost", "tailscale"]}` adds this machine's
 Tailscale address, `{"bind": ["0.0.0.0"]}` every interface (your LAN, a VPN), and

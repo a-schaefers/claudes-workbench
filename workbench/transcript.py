@@ -12,6 +12,7 @@ from __future__ import annotations
 import difflib
 import json
 import os
+import re
 import subprocess
 import sys
 import time
@@ -32,6 +33,17 @@ class Entry:
     lines: list[tuple[str, str]]  # (style, text)
 
 
+# Control characters other than newline and tab, C1 included (U+009B is CSI). The agent's shell
+# output and messages reach the user's terminal through `wb watch`: an OSC 52 in a file it cats
+# can set the clipboard, others retitle the window or redraw lines (the 2026-11-16 audit).
+_CTRL = re.compile(r"[\x00-\x08\x0b-\x1f\x7f-\x9f]")
+
+
+def plain(text: str) -> str:
+    """Text from the session or the task's files, safe to print: controls shown as \\xNN."""
+    return _CTRL.sub(lambda m: f"\\x{ord(m.group()):02x}", text)
+
+
 class Painter:
     def __init__(self, color: bool):
         self.color = color
@@ -42,10 +54,27 @@ class Painter:
         return f"\033[{STYLE[style]}m{text}\033[0m"
 
 
+# --standalone, like `opencode run`: a private server on the shared session storage. Through the
+# background service an export needs its fixed port (49374), so another user's service there, or
+# one started with other XDG dirs, made every export fail and left the runner's context checks,
+# its speed learning and `wb watch` silently empty (the 2026-11-16 audit).
+_said: set[str] = set()
+
+
+def _complain(what: str, r: subprocess.CompletedProcess) -> None:
+    """A failing session command, said once per process on stderr (runner.log under the runner)."""
+    why = next(iter((r.stderr or "").strip().splitlines()), f"exit {r.returncode}")
+    if why not in _said:
+        _said.add(why)
+        print(f"opencode session {what} failed: {why[:200]}", file=sys.stderr, flush=True)
+
+
 def export(session: str) -> dict:
     try:
-        r = subprocess.run(opencode_bin() + ["session", "export", session], capture_output=True,
-                           text=True, timeout=30, cwd="/")
+        r = subprocess.run(opencode_bin() + ["session", "export", session, "--standalone"],
+                           capture_output=True, text=True, timeout=30, cwd="/")
+        if r.returncode:
+            _complain("export", r)
         return json.loads(r.stdout) if r.returncode == 0 and r.stdout.strip() else {}
     except (OSError, subprocess.TimeoutExpired, ValueError):  # a busy or broken store: nothing known
         return {}
@@ -57,11 +86,13 @@ def find_session(task: store.Task) -> str | None:
     if sid or not task.worktree.exists():
         return sid
     try:
-        r = subprocess.run(opencode_bin() + ["session", "list"], capture_output=True, text=True,
-                           cwd=task.worktree, env={**os.environ, "PWD": str(task.worktree)},
+        r = subprocess.run(opencode_bin() + ["session", "list", "--standalone"], capture_output=True,
+                           text=True, cwd=task.worktree, env={**os.environ, "PWD": str(task.worktree)},
                            timeout=30)
     except (OSError, subprocess.TimeoutExpired):
         return None
+    if r.returncode:
+        _complain("list", r)
     for line in r.stdout.splitlines():
         parts = line.split("\t")
         if len(parts) > 1 and parts[1] == f"wb: {task.name}":
@@ -439,11 +470,11 @@ PHASE_LINE = {
 
 def header(task: store.Task, paint: Painter, data: dict | None = None) -> str:
     sp = task.spec
-    lines = [paint("head", f"task {task.name}") + f" · {model_line(task, data or {})}",
-             paint("out", f"  repo {sp.get('repo')} · branch {sp.get('branch')}"
-                   + (f" · tests `{sp['test_cmd']}`" if sp.get("test_cmd") else ""))]
+    lines = [paint("head", f"task {task.name}") + f" · {plain(model_line(task, data or {}))}",
+             paint("out", plain(f"  repo {sp.get('repo')} · branch {sp.get('branch')}"
+                                + (f" · tests `{sp['test_cmd']}`" if sp.get("test_cmd") else "")))]
     if sp.get("route"):
-        lines.append(paint("out", f"  routed: {sp['route']}"))
+        lines.append(paint("out", plain(f"  routed: {sp['route']}")))
     return "\n".join(lines)
 
 
@@ -458,8 +489,8 @@ def follow(task: store.Task, verbose: bool = False, once: bool = False, color: b
             print(json.dumps({"s": style, "t": text}, ensure_ascii=False), file=out, flush=True)
     else:
         clear = "\r\033[K" if out.isatty() else ""  # over the activity row, redrawn after
-        def emit(style, text):
-            print(clear + paint(style, text), file=out, flush=True)
+        def emit(style, text):  # cleaned before the colours: those are ours
+            print(clear + paint(style, plain(text)), file=out, flush=True)
     sid = find_session(task)
     first = export(sid) if sid else {}
     if as_json:
@@ -467,6 +498,7 @@ def follow(task: store.Task, verbose: bool = False, once: bool = False, color: b
     else:
         print(header(task, paint, first), file=out, flush=True)
     seen: set[str] = set()
+    done: dict[str, list[Entry]] = {}  # earlier sessions are finished: export each once
     watcher = Watcher(task.dir)
     last_phase = None
     worktree = str(task.worktree)
@@ -475,7 +507,12 @@ def follow(task: store.Task, verbose: bool = False, once: bool = False, color: b
         data = export(sid) if sid else {}
         entries = task_entries(task) + session_entries(data, worktree, verbose)
         for old in task.status.get("sessions") or []:  # earlier sessions, before a fresh start
-            entries += session_entries(export(old), worktree, verbose)
+            if old not in done:
+                got = export(old)
+                if not got:
+                    continue  # a busy store: try again next time
+                done[old] = session_entries(got, worktree, verbose)
+            entries += done[old]
         for e in sorted((e for e in entries if e.key not in seen), key=lambda e: e.ts):
             seen.add(e.key)
             if e.key.endswith(":end") and e.key[:-4] + ":start" in seen:
@@ -493,7 +530,7 @@ def follow(task: store.Task, verbose: bool = False, once: bool = False, color: b
         elif out.isatty() and phase not in store.CLOSED:
             now_line = activity(task, data)
             spin = "✻✳✶✢·"[int(time.time() * 2) % 5]
-            row = (paint("claude", f"{spin} {now_line}") + "  " if now_line else "") \
+            row = (paint("claude", f"{spin} {plain(now_line)}") + "  " if now_line else "") \
                 + paint("out", clock_line(task, data=data) or "")
             print("\r\033[K" + row, end="", file=out, flush=True)
         if phase != last_phase and phase in PHASE_LINE and (last_phase is not None or once

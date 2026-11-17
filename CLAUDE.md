@@ -6,8 +6,9 @@ Claude Code mod wakes Claude when a task needs it. Everything talks through plai
 
 The short name, `workbench`, stays on everything inside: the package, the plugin
 (`workbench@workbench`), the state and config directories, and the clone path `~/repos/workbench`
-the README suggests (nothing depends on it: `bin/wb` finds the package from its real path, and
-the systemd unit runs `~/.local/bin/wb`).
+ARCHITECTURE.md's *Installing* suggests for developing (users install from the marketplace; nothing
+depends on it: `bin/wb` finds the package from its real path, and the systemd unit runs
+`~/.local/bin/wb`).
 
 ## Keeping the docs true
 README.md is for people and stays simple: the pitch, a quickstart, then a pointer. ARCHITECTURE.md
@@ -120,13 +121,14 @@ dependencies. No packaging: it runs from the clone.
   `test_workflows.py` (the merge gate),
   `fake_opencode.py`, `capture_llm.py`, `e2e_chat.mjs`.
 - `.github/`: CI (`workflows/check.yml`, the required check, on each push and pull request;
-  `nightly.yml` on the newest Claude Code; README badges show both), `owner-merge.yml` (approves
+  Python 3.11, the floor; `nightly.yml` on the newest Claude Code, plus macOS; README badges show both), `owner-merge.yml` (approves
   the owner's pull requests only), `rulesets/main.json`, dependabot for the actions' pins.
 - `scripts/`: `ship.sh` (the road to main), `github-settings.sh check|apply` (the repo's settings).
 - `systemd/wb-chat.service`: keeps the web chat up. `docs/`: the README's images (a replaced image
   gets a new file name, for GitHub's cache).
 
-Runs on Linux, WSL2 and macOS. Native Windows doesn't (fcntl, `os.killpg`, POSIX signals). Off
+Runs on Linux, WSL2 and macOS. Native Windows doesn't (fcntl, `os.killpg`, POSIX signals): the
+launchers refuse it, and Python before 3.11, before importing the package. Off
 Linux there is no Landlock and watch.py falls back to timed waits.
 
 ## How a task runs
@@ -216,7 +218,8 @@ PATH and the lane; the rest is only imitated by the fake.
 - It resolves the project from `$PWD`, not from the cwd.
 - The 2.x config shape is `mcp.servers.<name>`, with `timeout.{startup,execution}`;
   `codemode: false` exposes a plain tool (listed as `workbench_ask_reviewer`).
-- `--standalone` servers inherit the env and share session storage with the background service.
+- `--standalone` servers inherit the env and share session storage with the background service;
+  `session export`/`list` use it too, so no workbench call needs the service's fixed port.
 - It loads AGENTS.md itself but never CLAUDE.md, which reaches it through `instructions`
   (absolute paths).
 - Skills come from `~/.claude/skills` and `.claude/skills`. A `disable-model-invocation` skill is
@@ -245,16 +248,16 @@ PATH and the lane; the rest is only imitated by the fake.
 - `--worktree` takes `=name`; the runner makes its own worktrees anyway.
 
 ## Troubleshooting
-- `wb doctor`: opencode and its config, git, each model's readiness, each Ollama entry's
+- `wb doctor`: opencode (2.x) and its config, git, each model's readiness, each Ollama entry's
   `max_tokens` and context, the state directory, a real lane around a test write, `wb` on PATH,
-  the mod.
+  the `/delegate` link (and another copy's), whether the mod is listed as installed.
 - A model "can't run": `wb models` says why (server down, not pulled, no `start` command).
 - A task misbehaves: `wb log <t> -v`, `wb watch <t> -v`, `tasks/<t>/runner.log` (the runner's
   output and OpenCode's stderr, including `workbench lane: the kernel refused the lane`).
 - The agent can't see `ask_reviewer`: `PWD=<worktree> OPENCODE_CONFIG=<state>/rules/<task>/opencode.json
   opencode mcp list --print-logs`.
-- The mod does nothing: `wb` must be on Claude Code's PATH (or set `WB_BIN`); `claude --debug`
-  shows hook errors.
+- The mod does nothing: `wb` must be on Claude Code's PATH (`WB_BIN` moves only the mod's calls;
+  Claude's Bash still runs `wb` by name); `claude --debug` shows hook errors.
 - A test fails: the task's `runner.log` is under the test's temp `WB_HOME` (deleted at tearDown);
   `wait_phase` prints the status when it times out. An interrupted run can leave detached runners
   and fakes sleeping.
