@@ -555,6 +555,41 @@ class Watch(Base):
         self.assertRegex(lines[-2]["t"], r"…")
         self.assertRegex(lines[-1]["t"], r"^⏲ task \d")
 
+    def test_wb_events_leaves_out_closed_tasks_and_the_rules(self):
+        # a thousand finished tasks were 4,000 watches per Claude session (the 2026-11-16 audit)
+        home = store.home()
+        for name, phase in (("old", "accepted"), ("live", "running")):
+            (home / "tasks" / name).mkdir(parents=True)
+            (home / "tasks" / name / "status.json").write_text(json.dumps({"phase": phase}))
+            (home / "tasks" / name / "task.json").write_text("{}")
+        (home / "rules" / "live").mkdir(parents=True)
+        p = subprocess.Popen([sys.executable, str(ROOT / "bin" / "wb"), "events"],
+                             stdout=subprocess.PIPE, text=True)
+        lines = []
+        threading.Thread(target=lambda: lines.extend(json.loads(x) for x in p.stdout), daemon=True).start()
+
+        def changed_until(path):
+            deadline = time.time() + 20
+            while time.time() < deadline:
+                got = [c for x in lines for c in x.get("changed", [])]
+                if path in got:
+                    lines.clear()
+                    return got
+                if path.endswith("probe"):  # until the watcher is up
+                    (home / path).write_text("")
+                time.sleep(0.2)
+            self.fail(f"wb events never reported {path}")
+        try:
+            changed_until("tasks/live/probe")
+            (home / "tasks/old/status.json").write_text('{"phase": "accepted", "trial": true}')
+            (home / "rules/live/grants.json").write_text("{}")
+            time.sleep(0.3)
+            (home / "tasks/live/status.json").write_text('{"phase": "review"}')
+            self.assertEqual(changed_until("tasks/live/status.json"), ["tasks/live/status.json"])
+        finally:
+            p.kill()
+            p.wait()
+
     def test_session_commands_never_need_opencodes_background_service(self):
         # the fake, like OpenCode with another service on the managed port, refuses without
         # --standalone (the 2026-11-16 audit)

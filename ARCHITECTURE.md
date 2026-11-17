@@ -1419,7 +1419,7 @@ the chat key (`<start ms>-<6 base36>`, kept across reloads), registers the four 
 starts the ears and two timers.
 
 **Ears and timers.** `ears` spawns `wb events` (cli.cmd_events: `{"hello": pid}` first, then
-`{"changed": [...]}` per batch; it skips tasks' `worktree/` and `rounds/`, `imports/`, `images/`,
+`{"changed": [...]}` per batch; it skips tasks' `worktree/` and `rounds/`, closed tasks, `rules/`, `imports/`, `images/`,
 `runner.log`, `*.lock`, `*.tmp` and dotfiles, and exits when its parent changes); every line runs `poll()`; when the child ends
 it is respawned after 2 s. A 1.5 s timer polls when there's no events child, a task is
 queued/running/testing/asking, a turn is queued, or 30 s passed since the last poll (`SAFETY_MS`). A
@@ -1575,7 +1575,7 @@ Every waiter and its bounded wake (a timeout to re-check what the kernel can't s
 
 | Caller | Waits on | Re-checks every |
 |---|---|---|
-| `wb events` | `$WB_HOME`, recursive, skipping `tasks/*/worktree`, `tasks/*/rounds`, `imports`, `images` | 10 s (exits when its parent changes) |
+| `wb events` | `$WB_HOME`, recursive, skipping `tasks/*/worktree`, `tasks/*/rounds`, `rules`, `imports`, `images` and the tasks already closed when it starts (`EVENT_SKIP`) | 10 s (exits when its parent changes) |
 | `wb wait` | the state directory and the named task's directory | 60 s (a dead runner) |
 | `wb log -f` | the task directory | 30 s |
 | `wb watch` | the task directory | 1.5 s on a terminal, 30 s otherwise |
@@ -1633,7 +1633,7 @@ message, not a traceback.
 | `wb log <task>` | `-n N` (0 all), `-f`, `-v` | The agent's events: tool calls (`HH:MM:SS rN tool brief  ✗ error`), text, questions, answers, stops, auto-fixes, rounds, tests, errors. |
 | `wb report <task>` | `--round N` | The round's summary.md. |
 | `wb diff <task> [paths…]` | `--stat`, `--all` | The worktree against the task's base, or after `wb next` against the last committed step (`--all`: the whole branch); new files included. |
-| `wb events` | | `{"hello": pid}`, then `{"changed": [paths]}` whenever `$WB_HOME` changes (not tasks' worktrees and rounds, `imports/`, `images/`, `runner.log`, `*.lock`, `*.tmp`, dotfiles); exits when its parent does. The mod's ears. |
+| `wb events` | | `{"hello": pid}`, then `{"changed": [paths]}` whenever `$WB_HOME` changes (not tasks' worktrees and rounds, closed tasks, `rules/`, `imports/`, `images/`, `runner.log`, `*.lock`, `*.tmp`, dotfiles); exits when its parent does. The mod's ears. |
 
 ### Models, skills, lessons, notes
 | Command | Flags | What it does |

@@ -1271,8 +1271,11 @@ def cmd_init(a):
              if status == "no CLAUDE.md" else ""))
 
 
-# What `wb events` reports: the state, not the work (worktrees) or the noise.
-EVENT_SKIP = ("tasks/*/worktree", "tasks/*/rounds", "imports", "images")  # clones, outputs
+# What `wb events` reports: the state, not the work (worktrees) or the noise. rules/ (the agents'
+# config layers and shims) is nothing the mod reads; each closed task is skipped too (cmd_events):
+# a thousand finished tasks were 4,000 inotify watches per Claude session, or a rescan of them
+# four times a second without inotify (the 2026-11-16 audit).
+EVENT_SKIP = ("tasks/*/worktree", "tasks/*/rounds", "rules", "imports", "images")  # clones, outputs
 QUIET = (".lock", ".tmp", "runner.log")
 
 
@@ -1284,7 +1287,10 @@ def cmd_events(a):
     chat.chat_dir()
     parent = os.getppid()
     print(json.dumps({"hello": os.getpid()}), flush=True)
-    with Watcher(home, recursive=True, skip=EVENT_SKIP) as w:
+    # accepted and discarded are final and names aren't reused; tasks/ itself stays watched, so a
+    # new task is picked up, and one that closes while this runs simply stays watched
+    closed = tuple(f"tasks/{t.name}" for t in store.all_tasks() if t.status.get("phase") in store.CLOSED)
+    with Watcher(home, recursive=True, skip=EVENT_SKIP + closed) as w:
         while os.getppid() == parent:
             changed = {str(p.relative_to(home)) for p in w.wait(10)
                        if not p.name.endswith(QUIET) and not p.name.startswith(".")}
