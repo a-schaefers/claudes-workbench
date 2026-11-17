@@ -323,7 +323,7 @@ test('the web chat reaches Claude only in /delegate mode, with a receipt, and on
   const files: Record<string, string> = {}
   fakeTasks(on, files, [])
   on('ui.toast', () => ({ value: undefined }))
-  on('session.cwd', () => ({ value: '/home/u/game' }))
+  on('session.cwd', () => ({ value: '/home/u/project' }))
   on('skill.prompt', (_: any, e: any) => ({ text: e.text }))  // the engine's expansion
   const runs: string[][] = []
   on('process.run', (_: any, e: any) => {
@@ -340,7 +340,7 @@ test('the web chat reaches Claude only in /delegate mode, with a receipt, and on
     return { text: e.text }
   })
   files['/wb/chat/messages.jsonl'] = JSON.stringify({ id: 'm1', ts: 1_800_000_000, from: 'user', text: 'status?' }) + '\n'
-  await $.session.start({ cwd: '/home/u/game', surface: 'terminal', isInteractive: true })
+  await $.session.start({ cwd: '/home/u/project', surface: 'terminal', isInteractive: true })
   await clock.advance(3000)
   expect(asked.length).toBe(0)                                   // not in delegate mode: nobody listens
   expect(files['/wb/chat/listener.json']).toBeUndefined()
@@ -349,7 +349,7 @@ test('the web chat reaches Claude only in /delegate mode, with a receipt, and on
   await clock.advance(3000)
   expect(asked.length).toBe(1)
   expect(asked[0]).toBe('[web chat] status?')                    // their words, nothing else
-  expect(JSON.parse(files['/wb/chat/listener.json']).cwd).toBe('/home/u/game')
+  expect(JSON.parse(files['/wb/chat/listener.json']).cwd).toBe('/home/u/project')
   expect(runs.some(a => a.join(' ').startsWith('wb chat ack m1'))).toBe(true)
   await clock.advance(3000)
   expect(asked.length).toBe(1)                                   // once
@@ -371,7 +371,7 @@ test('running wb counts as delegate mode, and a web message reaches a running tu
   const files: Record<string, string> = {}
   fakeTasks(on, files, [])
   on('ui.toast', () => ({ value: undefined }))
-  on('session.cwd', () => ({ value: '/home/u/game' }))
+  on('session.cwd', () => ({ value: '/home/u/project' }))
   on('session.id', () => ({ value: 'sess-1' }))
   const sent: any[] = []
   on('session.send', (_: any, e: any) => { sent.push(e); return { isDelivered: true } })
@@ -381,7 +381,7 @@ test('running wb counts as delegate mode, and a web message reaches a running tu
   on('prompt.submit', (_: any, e: any) => { asked.push(e.text); return { text: e.text } })
   on('tool.call', (_: any, e: any) => ({ result: { stdout: '' }, text: '' }))  // the engine's Bash
   files['/wb/chat/messages.jsonl'] = JSON.stringify({ id: 'm1', ts: 1_800_000_000, from: 'user', text: 'still there?' }) + '\n'
-  await $.session.start({ cwd: '/home/u/game', surface: 'terminal', isInteractive: true })
+  await $.session.start({ cwd: '/home/u/project', surface: 'terminal', isInteractive: true })
   // no turn.start: the module loaded mid-turn; the tool call itself says a turn runs
   await $.tool.call({ tool: 'Bash', command: 'cd ~ && wb start step-2 --spec s.md --repo .' })
   await clock.advance(3000)
@@ -463,13 +463,13 @@ test('/delegate alone turns delegate mode on for the session: the pane opens, an
   const ui: string[] = []
   fakeTasks(on, files, [], true, ui)
   on('ui.toast', () => ({ value: undefined }))
-  on('session.cwd', () => ({ value: '/home/u/game' }))
+  on('session.cwd', () => ({ value: '/home/u/project' }))
   on('skill.prompt', (_: any, e: any) => ({ text: e.text }))
   on('process.run', () => ({ value: { exitCode: 0, stdout: 'no open tasks', stderr: '' } }))
   on('prompt.context', (_: any, e: any) => ({ blocks: e.blocks }))
   const panes = () => ui.filter(l => !l.startsWith('status'))
   const status = () => ui.filter(l => l.startsWith('status')).at(-1)
-  await $.session.start({ cwd: '/home/u/game', surface: 'terminal', isInteractive: true })
+  await $.session.start({ cwd: '/home/u/project', surface: 'terminal', isInteractive: true })
   await clock.advance(2000)
   expect(panes()).toEqual([])                                    // not delegating: no pane
   expect((await $.prompt.context({ blocks: [] })).blocks.map((b: any) => b.name)).not.toContain('delegate-mode')
@@ -500,7 +500,7 @@ test('/delegate alone turns delegate mode on for the session: the pane opens, an
 })
 
 test('the bubble wraps its words into lines that fit, never cutting a line short', () => {
-  const said = 'read /home/me/.local/state/workbench/tasks/ember-5a/worktree/src/tilemap.c and then the tests'
+  const said = 'read /home/me/.local/state/workbench/tasks/fix-parser/worktree/src/parser.c and then the tests'
   const lines = wrapWords(said, 30)
   expect(lines.every(l => l.length <= 30)).toBe(true)
   expect(lines.join(' ').replace(/\s+/g, '')).toBe(said.replace(/\s+/g, ''))  // nothing lost
