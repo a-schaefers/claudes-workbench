@@ -52,9 +52,11 @@ the bulk of the tokens, the reading and writing and test-running, happen on your
 - **Claude keeps the keys; the agents keep to the code.** Everything that shapes or ships the
   project stays with the more capable model: the architecture, every git write (commits, branches,
   merges, pushes, pull requests), CI/CD, deploys and infrastructure, and the project's `CLAUDE.md` /
-  `AGENTS.md`, the instructions every agent reads. The agents write code and use git only to read,
-  and that's enforced, not just asked: a git write or an edit to those files is refused. When a
-  task needs more, they ask Claude, and Claude does it.
+  `AGENTS.md`, the instructions every agent reads. The agents write code, run the everyday tools
+  of the work, write only inside their own worktree (plus the temp directory and build caches),
+  and use git only to read. That's enforced, not just asked: a git write, an edit to those files,
+  a command outside the everyday list or a write outside the worktree is refused. When a task
+  needs more, they ask Claude, and Claude grants it or does it.
 - **Your repo stays yours.** Each agent works in its own git worktree, so your checkout is never
   touched, and nothing is committed (under your name, with no AI credit line) until Claude accepts
   it.
@@ -356,15 +358,32 @@ before every round) gives it:
 - **Hard limits**, checked in every part of a compound command: no `sudo`, `doas`, `pkexec` or
   `su`; no `gh`; and git is read-only (below). No edits to `CLAUDE.md`, `CLAUDE.local.md`,
   `AGENTS.md` or anything under `.claude/`: those are Claude's.
-- **Commands.** The agent's shell runs the everyday tools of software work without asking: files
-  and text, builds and compilers, test runners, interpreters, and package managers installing what
-  the project already lists. Anything else (network tools, system services, a new package) is
-  refused, and the agent asks Claude through `ask_reviewer`; Claude grants it with `wb allow
-  <task> "<pattern>"`, for the task or `--always`, and the agent carries on within seconds. Your
-  standing allowances live in `~/.config/workbench/commands.json` (`{"allow": ["curl *"]}`;
+- **Commands, an allowlist.** The agent's shell is deny-by-default and runs the everyday tools
+  of software work without asking (`ALLOWED_COMMANDS` in `workbench/context.py`): files and text,
+  builds and compilers, test runners, interpreters, and package managers installing what the
+  project already lists. OpenCode checks every command inside a compound line (pipes, `&&`,
+  loops, `$(…)`). Anything else (network tools, system services) is refused, and so is adding a
+  package (`pip install x`, `npm add x`, `cargo add x`...). The agent then asks Claude through
+  `ask_reviewer`; Claude grants it with `wb allow <task> "<pattern>"`, for the task or
+  `--always`, and the agent carries on within seconds (`wb start --allow` grants one up front).
+  Your standing allowances live in `~/.config/workbench/commands.json` (`{"allow": ["curl *"]}`;
   `["*"]` turns the list off). It's a guardrail on the agent's own choices rather than a sandbox
   (make and any interpreter can run anything); the hard limits stay hard: no sudo, git
   read-only, no `gh`.
+- **Paths, a lane.** The agent writes only in its lane: its worktree (the task directory), the
+  temp directory, and the caches and toolchain homes that builds fill (`~/.cache`, `~/.cargo`,
+  `~/go`, `~/.npm`, `~/.gradle` and the like), so builds, tests and installs of what the project
+  lists never ask. On Linux the kernel enforces it (Landlock, no root needed): the runner starts
+  OpenCode through `workbench/lane.py`, so OpenCode, its shell and everything they run, a script
+  or `make` included, get "Permission denied" for a write anywhere else, your own checkout among
+  them. OpenCode's `external_directory` rule keeps its file tools (read, edit, write, grep, glob)
+  and the shell's working directory to the lane and the system's directories (`/usr`, `/etc`,
+  `/opt`...). Reading from the shell stays free (`cat`, a compiler, an interpreter), and so do
+  the network and running programs. When a task needs a directory outside it, the agent asks
+  with `path`; `wb allow <task> --path <dir>` grants read and write (`--always` keeps it,
+  `wb start --allow-path` grants it up front). Standing ones are `"paths"` in `commands.json`;
+  `"paths": ["*"]` turns the lane off. Without Landlock (macOS, an old kernel) only the file-tool
+  rule applies, and `wb doctor` says which you have.
 - **Skills**: the repo's own `.claude/skills`, plus the library skills Claude handed this task.
   Your personal `~/.claude/skills` (including synced Claude app skills) and `/delegate` itself are
   denied: an agent once read a personal skill as a "newer task" and went off into your files.
@@ -777,10 +796,11 @@ back) and the web chat stops listening in that session.
 
 | Command | What it does |
 |---|---|
-| `wb start <task> --spec <file> [--repo] [--size] [--test] [--skill] [--model]` | hand a task to a local agent (more knobs: `--auto-fix`, `--checkin`, `--ask-budget`, `--ask-timeout`, `--round-timeout`, `--silence-timeout`, `--think-timeout`, `--base`, `--force`, `--no-claude-md`) |
+| `wb start <task> --spec <file> [--repo] [--size] [--test] [--skill] [--model]` | hand a task to a local agent (more knobs: `--auto-fix`, `--checkin`, `--ask-budget`, `--ask-timeout`, `--round-timeout`, `--silence-timeout`, `--think-timeout`, `--base`, `--force`, `--no-claude-md`, `--allow`, `--allow-path`) |
 | `wb feedback <task> --message <file> \| --text "…" [--fresh \| --keep-context] [--spec-gap "…"]` | another round with review feedback; `--spec-gap` says the round is the spec's fault, and what it missed |
 | `wb next <task> --spec <file> -m "…" [--test] [--skill] [--fresh]` | commit the approved step, send the next one to the same agent |
 | `wb answer <task> --text "…" \| --file <f>` | answer the agent's question |
+| `wb allow <task> ["<pattern>"…] [--path <dir>] [--always]` | let the agent run a command outside the everyday list, or use a directory outside its lane; answers its request |
 | `wb steer <task> --text "…" [--now]` | a note to a running agent; `--now` interrupts |
 | `wb note <task> --text "…"` | Claude's captain's-log line in the transcript |
 | `wb takeover [<task> \| --all]` | stop the agent and finish by hand |
@@ -807,7 +827,7 @@ back) and the web chat stops listening in that session.
 | `wb chat [serve\|url\|reply\|log]` | the web chat |
 | `wb init <dir>` | set a project up: git with an initial commit, AGENTS.md → CLAUDE.md |
 | `wb events` | a line whenever workbench's state changes (what the mod listens to) |
-| `wb doctor` | check opencode, its config, git, each model, the state directory |
+| `wb doctor` | check opencode, its config, git, each model, the state directory, whether the lane is enforced |
 
 ### Where everything lives
 
@@ -835,6 +855,7 @@ back) and the web chat stops listening in that session.
 ~/.local/share/workbench/skills/ ($WB_SKILLS) the skill library, its own git repo
   images/<when>/                 wb image's candidates (unless --out) and their .json sidecars
 ~/.config/workbench/             models.json ($WB_MODELS), images.json ($WB_IMAGES), chat-token ($WB_CHAT_TOKEN)
+  commands.json                  ($WB_COMMANDS) your standing allowances: commands ("allow") and directories ("paths")
 ~/.config/opencode/opencode.json the models (OpenCode's own config)
 ```
 

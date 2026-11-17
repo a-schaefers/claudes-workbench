@@ -19,7 +19,7 @@ import time
 import traceback
 from pathlib import Path
 
-from . import context, gitguard, gitops, lessons, models, skills, store, tuning
+from . import context, gitguard, gitops, lane, lessons, models, skills, store, tuning
 from .events import StuckDetector, normalize
 from .watch import Watcher
 
@@ -239,6 +239,7 @@ def run_round(task: store.Task, n: int) -> dict:
     note = skills_note(task, n)
     cmd.append(note + prompt)
     env = agent_env(task)
+    cmd = lane.wrap(context.writable(task), cmd)  # writes stay in the agent's lane (lane.py)
     log = open(task.dir / "runner.log", "a")
     proc = subprocess.Popen(cmd, cwd=task.worktree, env=env, stdin=subprocess.DEVNULL,
                             stdout=subprocess.PIPE, stderr=log, text=True,

@@ -52,7 +52,8 @@ you work; take them on board and carry on.
 
 ## Boundaries
 - Stay inside your working directory: everything the task needs is in it or named in the
-  spec. Don't go looking for plans, notes or other projects elsewhere; if you lose the thread,
+  spec. You can write only there, in the temp directory and in build caches; anywhere else is
+  refused ("Permission denied"). Need a directory? Call ask_reviewer with `path`. Don't go looking for plans, notes or other projects elsewhere; if you lose the thread,
   re-read the task at the start of this conversation, or ask with `ask_reviewer`.
 - Only non-interactive commands, and none that run forever (servers, watchers): add a timeout.
 - Do not read or print secrets (.env files, keys, tokens). No sudo or root (it is refused) and no

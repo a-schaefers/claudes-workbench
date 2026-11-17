@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import hashlib
 import os
+import tempfile
 from pathlib import Path
 
 from . import gitops, skills, store
@@ -100,6 +101,72 @@ def shell_rules(task: store.Task) -> list[dict]:
     return rules
 
 
+# The agent's lane: its worktree, the temp directory, and the caches and toolchain homes that
+# builds and package managers fill, so a build or test runs without asking (2026-11-16, the user:
+# keep agents in their lane with the least friction). Writes anywhere else are refused by the
+# kernel (lane.py), file tools and the shell's working directory are kept to the lane and the
+# READABLE places by OpenCode's `external_directory` rule, and the agent asks Claude for the rest
+# (`wb allow --path`). Reading through the shell stays free: `cat`, a compiler, an interpreter.
+TOOL_HOMES = (".cache", ".cargo", ".rustup", "go", ".npm", ".bun", ".deno", ".yarn",
+              ".pnpm-store", ".local/share/pnpm", ".local/share/uv", ".gradle", ".m2", ".nuget",
+              ".dotnet", ".gem", ".julia", ".cabal", ".stack", ".ghcup", ".platformio", ".conan2")
+# what OpenCode and the ask server write themselves, beside the task's directory
+OPENCODE_HOMES = (".local/share/opencode", ".local/state/opencode")
+# the system, for the file tools: headers, man pages, installed packages' sources
+READABLE = ("/usr", "/etc", "/opt", "/lib", "/lib64", "/bin", "/sbin", "/proc", "/sys", "/dev",
+            "/nix", "/run/current-system", "/Library", "/System", "/Applications")
+
+
+def lane_paths(task: store.Task) -> list[str]:
+    """What the user (commands.json `paths`) and Claude (`wb allow --path`) added to the lane."""
+    conf = store.read_json(commands_path(), {}) or {}
+    return [*(conf.get("paths") or []), *(task.status.get("paths") or [])]
+
+
+def _both(paths) -> list[str]:
+    """Each path and its real path (Landlock follows a symlink, OpenCode's rule may not)."""
+    out: list[str] = []
+    for p in paths:
+        for q in (str(p), os.path.realpath(p)):
+            if q not in out:
+                out.append(q)
+    return out
+
+
+def writable(task: store.Task) -> list[str] | None:
+    """The directories (and files) the agent may write to, None when the user turned the lane off
+    (`"paths": ["*"]`). Only those that exist: the kernel's rules are on real files."""
+    extra = lane_paths(task)
+    if "*" in extra:
+        return None
+    home = Path.home()
+    xdg = [os.environ.get(v) for v in ("XDG_CACHE_HOME", "XDG_RUNTIME_DIR")]
+    places = [task.dir, tempfile.gettempdir(), "/tmp", "/var/tmp", "/dev", "/proc",
+              *(home / h for h in TOOL_HOMES + OPENCODE_HOMES), *(x for x in xdg if x),
+              *(Path(p).expanduser() for p in extra)]
+    for name in ("notify.jsonl", "notify.jsonl.lock"):   # the ask server raises its questions
+        f = store.home() / name
+        f.parent.mkdir(parents=True, exist_ok=True)
+        f.touch()
+        places.append(f)
+    return [p for p in _both(places) if os.path.exists(p)]
+
+
+def external_rules(task: store.Task) -> list[dict]:
+    """OpenCode's `external_directory` rule: its file tools and the shell's working directory
+    stay in the lane and READABLE, and the skills handed to the task."""
+    lane = writable(task)
+    if lane is None:
+        return []
+    have = skills.available()
+    places = [*lane, *READABLE, *(have[n]["path"] for n in task.status.get("skills") or []
+                                  if n in have)]
+    rules = [{"action": "external_directory", "resource": "*", "effect": "deny"}]
+    rules += [{"action": "external_directory", "resource": f"{p.rstrip('/')}/*", "effect": "allow"}
+              for p in _both(places) if os.path.isdir(p)]
+    return rules
+
+
 # Claude's files: the instructions every agent reads, and the project's skills and settings.
 # The agent proposes a change to them in its summary; Claude makes it.
 CLAUDE_FILES = ("*CLAUDE.md", "*CLAUDE.local.md", "*AGENTS.md", ".claude/*", "*/.claude/*")
@@ -181,6 +248,7 @@ def layer(task: store.Task) -> dict:
     note = write_map(task, nested)
     rules = [{"action": t, "resource": "*", "effect": "deny"} for t in DENIED_TOOLS]
     rules += shell_rules(task)
+    rules += external_rules(task)
     rules += [{"action": "edit", "resource": f, "effect": "deny"} for f in CLAUDE_FILES]
     rules += [{"action": "skill", "resource": n, "effect": "deny"}
               for n in denied_skills(task.spec.get("deny_skills"))]

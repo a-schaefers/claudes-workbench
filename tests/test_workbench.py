@@ -19,7 +19,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
 
-from workbench import runner, ask_mcp, cli, events, gitops, store, transcript  # noqa: E402
+from workbench import runner, ask_mcp, cli, context, events, gitops, lane, store, transcript  # noqa: E402
 
 FAKE = f"{sys.executable} {ROOT / 'tests' / 'fake_opencode.py'}"
 TEST_CMD = "grep -qx 42 answer.txt"
@@ -770,10 +770,10 @@ class RealOpenCode(Base):
         self.assertNotIn("CANARY-KEPT", text)             # and the rest of the library is not
 
 
-    def run_calls(self, name, calls):
-        """Run real opencode in a task's worktree against a fake model that makes these tool
-        calls; returns the tool results it got back, in order."""
-        self.start(name, "ok")
+    def run_calls(self, name, calls, *extra):
+        """Run real opencode in a task's worktree, in its lane, against a fake model that makes
+        these tool calls; returns the tool results it got back, in order."""
+        self.start(name, "ok", *extra)
         wait_phase(name, {"review"})
         task = store.Task(name)
         with socket.socket() as sock:
@@ -793,8 +793,9 @@ class RealOpenCode(Base):
                                "limit": {"context": 32768, "output": 1024}}}}}
         layer_path.write_text(json.dumps(layer))
         time.sleep(0.5)
-        subprocess.run(["opencode", "run", "--standalone", "-m", "cap/cap", "--auto", "--format",
-                        "json", "go"], cwd=task.worktree, env=env, capture_output=True, timeout=180)
+        cmd = lane.wrap(context.writable(task), ["opencode", "run", "--standalone", "-m",
+                                                 "cap/cap", "--auto", "--format", "json", "go"])
+        subprocess.run(cmd, cwd=task.worktree, env=env, capture_output=True, timeout=180)
         reqs = [json.loads(line) for line in out.read_text().splitlines()]
         last = max(reqs, key=lambda r: len(r.get("messages", [])))
         answers = [json.dumps(m["content"]) for m in last["messages"] if m.get("role") == "tool"]
@@ -825,6 +826,35 @@ class RealOpenCode(Base):
                                                shell("cd . && sudo -n true"), shell("gh --version")])
         refused = ["permission.rejected" in a for a in answers]
         self.assertEqual(refused, [False, True, True], answers)
+
+    @unittest.skipUnless(lane.abi(), "needs Landlock")
+    def test_writes_and_file_tools_stay_in_the_lane_until_claude_widens_it(self):
+        # outside the temp directory, which is in every lane
+        outside = Path(tempfile.mkdtemp(dir=Path.home(), prefix=".wb-lane-test-"))
+        self.addCleanup(shutil.rmtree, outside, True)
+        wt = str(store.Task("t-lane").worktree)
+        def shell(cmd):
+            return {"name": "shell", "arguments": {"command": cmd, "workdir": wt}}
+        _, answers = self.run_calls("t-lane", [
+            {"name": "write", "arguments": {"path": f"{outside}/a.txt", "content": "x"}},
+            shell(f"touch {outside}/b.txt"),
+            shell(f"python3 -c \"open('{outside}/c.txt', 'w')\""),
+            shell(f"cd {outside} && ls"),
+            {"name": "read", "arguments": {"path": "/etc/passwd", "limit": 1}},
+            shell("touch made.txt && rm \"$(mktemp)\" && echo lane-ok"),
+        ])
+        self.assertIn("external_directory", answers[0])       # the file tools keep to the lane
+        self.assertIn("Permission denied", answers[1])        # the kernel refuses the shell
+        self.assertIn("Permission denied", answers[2])        # and whatever it runs
+        self.assertIn("external_directory", answers[3])       # no working elsewhere
+        self.assertNotIn("rejected", answers[4])              # the system stays readable
+        self.assertIn("lane-ok", answers[5])                  # the worktree and temp are its own
+        self.assertEqual(list(outside.iterdir()), [])
+        _, answers = self.run_calls("t-wide", [
+            {"name": "write", "arguments": {"path": f"{outside}/a.txt", "content": "x"}},
+            shell(f"touch {outside}/b.txt && echo wide-ok")], "--allow-path", str(outside))
+        self.assertNotIn("rejected", answers[0])
+        self.assertIn("wide-ok", answers[1])
 
     def test_sudo_is_refused_even_inside_a_compound_command(self):
         wt = str(store.Task("t-sudo").worktree)  # known before the task starts
@@ -897,6 +927,79 @@ class GitGuard(unittest.TestCase):
         status = " M src/a.c\n M CLAUDE.md\n?? docs/AGENTS.md\nR  x -> .claude/skills/s/SKILL.md\n"
         self.assertEqual(runner.claude_files_changed(status),
                          ["CLAUDE.md", "docs/AGENTS.md", ".claude/skills/s/SKILL.md"])
+
+
+class Lane(Base):
+    """Where the agent may write: its worktree, the temp directory and build caches; Claude
+    adds a directory with `wb allow --path`, the user turns the lane off with `"paths": ["*"]`."""
+    def test_the_lane_holds_the_task_and_its_rules_follow_it(self):
+        self.start("t-lane", "ok")
+        wait_phase("t-lane", {"review"})
+        task = store.Task("t-lane")
+        writable = context.writable(task)
+        self.assertIn(str(task.dir), writable)                 # the worktree is inside it
+        self.assertIn(str(store.home() / "notify.jsonl"), writable)  # where questions go
+        self.assertNotIn(str(store.home()), writable)
+        rules = context.external_rules(task)
+        self.assertEqual(rules[0], {"action": "external_directory", "resource": "*",
+                                    "effect": "deny"})
+        self.assertIn({"action": "external_directory", "resource": f"{task.dir}/*",
+                       "effect": "allow"}, rules)
+        layer = json.loads(runner.write_config_layer(task).read_text())
+        self.assertEqual([r for r in layer["permissions"]
+                          if r["action"] == "external_directory"], rules)
+        Path(os.environ["WB_COMMANDS"]).write_text(json.dumps({"paths": ["*"]}))
+        self.assertIsNone(context.writable(task))
+        self.assertEqual(context.external_rules(task), [])
+        self.assertEqual(lane.wrap(None, ["opencode", "run"]), ["opencode", "run"])
+
+    def test_a_directory_request_is_answered_by_wb_allow_path(self):
+        self.start("t-lp", "hang")
+        deadline = time.time() + 20
+        while store.Task("t-lp").status.get("phase") != "running" and time.time() < deadline:
+            time.sleep(0.2)
+        task = store.Task("t-lp")
+        want = Path(self.tmp.name) / "assets" / "shared"
+        got = {}
+        t = threading.Thread(target=lambda: got.update(a=ask_mcp.ask(
+            task, "the spec says to write the atlas there", path=str(want))))
+        t.start()
+        while not task.status.get("asking") and t.is_alive():
+            time.sleep(0.1)
+        note = store.read_jsonl(store.home() / "notify.jsonl")[0][-1]["text"]
+        self.assertIn(f"wb allow t-lp --path {want}", note)
+        run_wb("allow", "t-lp", "--path", str(want))
+        t.join(10)
+        self.assertIn(f"Claude allowed the directory {want}", got["a"])
+        self.assertTrue(want.is_dir())                          # made, so a rule can hold it
+        self.assertEqual(task.status["paths"], [str(want)])
+        self.assertIn(str(want), context.writable(task))
+        run_wb("stop", "t-lp")
+        with self.assertRaises(SystemExit):
+            run_wb("allow", "t-lp", "--path", "~")             # never the whole home
+        run_wb("allow", "t-lp", "--path", str(want), "--always")
+        self.assertEqual(json.loads(Path(os.environ["WB_COMMANDS"]).read_text())["paths"],
+                         [str(want)])
+
+    @unittest.skipUnless(lane.abi(), "needs Landlock")
+    def test_the_kernel_refuses_writes_outside_the_lane(self):
+        with tempfile.TemporaryDirectory() as d:
+            inside, outside = Path(d, "in"), Path(d, "out")
+            inside.mkdir()
+            outside.mkdir()
+            script = ("import os, sys\n"
+                      "open(sys.argv[1] + '/f', 'w').write('x')\n"
+                      "os.rename(sys.argv[1] + '/f', sys.argv[1] + '/g')\n"
+                      "open('/dev/null', 'w').write('x')\n"
+                      "try:\n    open(sys.argv[2] + '/f', 'w')\n"
+                      "except PermissionError:\n    print('refused')\n"
+                      "print(open('/etc/passwd').read(1) and 'read')\n")
+            out = subprocess.run(lane.wrap([str(inside), "/dev/null"],
+                                           [sys.executable, "-c", script, str(inside), str(outside)]),
+                                 capture_output=True, text=True, timeout=20)
+            self.assertEqual(out.stdout.split(), ["refused", "read"], out.stderr)
+            self.assertTrue((inside / "g").exists())
+            self.assertEqual(list(outside.iterdir()), [])
 
 
 class Permission(Base):

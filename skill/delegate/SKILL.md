@@ -342,6 +342,11 @@ You are the driver, not a spectator. When something tells you the agent is headi
   system services, the user's data, a dependency the project shouldn't take on. Knowing a task
   needs something up front, `wb start … --allow "<pattern>"`. sudo, git writes and `gh` stay
   refused whatever you allow.
+- **Directories it asks for.** The agent writes only in its lane (worktree, temp, build caches)
+  and its file tools keep to it; a request names a `path`. `wb allow <name> --path <dir>` grants
+  read and write (`--always`, `wb start --allow-path`). Grant a directory the task's output
+  really belongs in (a sibling asset folder, a cache a toolchain wants); never your home, the
+  user's checkout or another project: there, take the file yourself or say no.
 - `wb stop <name>`: just stop it. `wb resume <name>` continues it in a fresh session (not a
   review round), e.g. after fixing workbench under it.
 - A check-in saying the session "reached N% of its window before it changed a file": the step

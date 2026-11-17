@@ -23,8 +23,10 @@ TOOL = {
         "for permission, for reassurance, or about things you can find out by reading the code "
         "or running it. The question budget is small. Waits for the answer, which can take "
         "minutes. Also how to run a shell command that was refused (\"Permission denied: "
-        "shell\"): put it in `command` and say why in `question`; Claude allows it or suggests "
-        "another way, and these don't use the question budget."
+        "shell\"): put it in `command` and say why in `question`; or a directory outside your "
+        "lane (\"Permission denied\" writing it, or \"Permission denied: external_directory\"): "
+        "put it in `path`. Claude allows it or suggests another way, and these don't use the "
+        "question budget."
     ),
     "inputSchema": {
         "type": "object",
@@ -34,6 +36,8 @@ TOOL = {
                         "description": "What you found and the options you are choosing between."},
             "command": {"type": "string",
                         "description": "Only for a refused shell command: the exact command."},
+            "path": {"type": "string",
+                     "description": "Only for a refused directory: its absolute path."},
         },
         "required": ["question"],
     },
@@ -43,29 +47,43 @@ TOOL = {
 PERMISSION_BUDGET = 8  # requests to run a refused command, per task: a cap on a stuck loop
 
 
-def ask(task: store.Task, question: str, context: str = "", command: str = "") -> str:
+def _permission(q: dict) -> bool:
+    return bool(q.get("command") or q.get("path"))
+
+
+def ask(task: store.Task, question: str, context: str = "", command: str = "",
+        path: str = "") -> str:
     spec = task.spec
     asked = [store.read_json(p, {}) for p in (task.dir / "ask").glob("*.json")] \
         if (task.dir / "ask").exists() else []
-    if command:
-        if sum(1 for q in asked if q.get("command")) >= PERMISSION_BUDGET:
-            return (f"You have asked to run {PERMISSION_BUDGET} refused commands already. Use the "
-                    "allowed tools, and list what you couldn't run in your final summary.")
-    elif sum(1 for q in asked if not q.get("command")) >= int(spec.get("ask_budget", 2)):
+    if command or path:
+        if sum(1 for q in asked if _permission(q)) >= PERMISSION_BUDGET:
+            return (f"You have asked for {PERMISSION_BUDGET} refused commands or directories "
+                    "already. Work inside your lane with the allowed tools, and list what you "
+                    "couldn't do in your final summary.")
+    elif sum(1 for q in asked if not _permission(q)) >= int(spec.get("ask_budget", 2)):
         return ("The question budget for this task is used up. Make the most reasonable "
                 "assumption, carry on, and state the assumption in your final summary.")
     qid = uuid.uuid4().hex[:8]
     qfile, afile = task.dir / "ask" / f"{qid}.json", task.dir / "ask" / f"{qid}.answer"
     store.write_json(qfile, {"id": qid, "ts": store.now(), "round": task.status.get("round"),
                              "question": question, "context": context,
-                             **({"command": command} if command else {})})
+                             **({"command": command} if command else {}),
+                             **({"path": path} if path else {})})
     prev = task.status.get("phase")
     task.set_status(phase="asking", asking=qid)
     task.event({"ts": store.now(), "round": task.status.get("round"), "kind": "ask",
                 "id": qid, "text": question})
-    body = ((f"PERMISSION to run: `{command}`\nWhy: {question}\nAllow it with `wb allow "
-             f"{task.name} \"<pattern>\"` (--always to keep it), or answer with another way.")
-            if command else f"Q: {question}") + (f"\nContext: {context}" if context else "")
+    if command:
+        body = (f"PERMISSION to run: `{command}`\nWhy: {question}\nAllow it with `wb allow "
+                f"{task.name} \"<pattern>\"` (--always to keep it), or answer with another way.")
+    elif path:
+        body = (f"PERMISSION to use the directory {path} (outside its lane)\nWhy: {question}\n"
+                f"Allow it with `wb allow {task.name} --path {path}` (--always to keep it), or "
+                "answer with another way.")
+    else:
+        body = f"Q: {question}"
+    body += f"\nContext: {context}" if context else ""
     task.notify("question", body, id=qid)
     deadline = time.time() + float(spec.get("ask_timeout", 1200))
     watcher = Watcher(afile.parent)  # wakes the moment `wb answer` writes the file
@@ -103,7 +121,7 @@ def handle(msg: dict, task: store.Task):
                     "error": {"code": -32602, "message": f"unknown tool {params.get('name')}"}}
         args = params.get("arguments") or {}
         text = ask(task, str(args.get("question", "")).strip(), str(args.get("context", "")),
-                   str(args.get("command", "")).strip())
+                   str(args.get("command", "")).strip(), str(args.get("path", "")).strip())
         result = {"content": [{"type": "text", "text": text}], "isError": False}
     else:
         return {"jsonrpc": "2.0", "id": mid,

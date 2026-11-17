@@ -14,8 +14,8 @@ import time
 from collections import defaultdict
 from pathlib import Path
 
-from . import (__version__, chat, context, gitops, hardware, images, lessons, models, results,
-               router, scan, skills, store, transcript, tuning)
+from . import (__version__, chat, context, gitops, hardware, images, lane, lessons, models,
+               results, router, scan, skills, store, transcript, tuning)
 from .watch import Watcher, wait_exit
 from . import runner
 from .runner import PKG_ROOT
@@ -120,6 +120,7 @@ def cmd_start(a):
     if not spec_text.strip():
         die("the spec is empty")
     handed = _skill_names(a.skill)
+    lane_dirs = [_lane_dir(p) for p in a.allow_path or []]
     stack = gitops.stack(repo)
     m, state, why = pick_model(a.size, a.model, stack)
     if not state["available"] and not a.force:
@@ -154,7 +155,8 @@ def cmd_start(a):
     task.round_dir(1).joinpath("prompt.md").write_text(prompt)
     task.set_status(phase="queued", round=1, reviews=0, auto_fixes=0, tools=0,
                     tok_in=0, tok_out=0, session=None, last="starting",
-                    skills=handed, skills_ever=handed, skills_rev=skills.revs(handed), allow=a.allow or [])
+                    skills=handed, skills_ever=handed, skills_rev=skills.revs(handed), allow=a.allow or [],
+                    paths=lane_dirs)
     spawn_runner(task)
     print(f"started {a.name} on {m.label} · branch {gitops.branch_name(a.name)} · "
           f"base {base[:8]}" + (f" · tests `{a.test}`, auto-fix {a.auto_fix}" if a.test else ""))
@@ -501,23 +503,42 @@ def cmd_resume(a):
     print(f"resumed {a.name} in a fresh session (round {n + 1})")
 
 
+def _lane_dir(raw: str) -> str:
+    """A directory Claude adds to an agent's lane, made if it isn't there yet (the kernel's rule
+    is on a real directory)."""
+    if raw == "*":
+        return raw  # the lane off for this task
+    path = Path(raw).expanduser().resolve()
+    if path == Path(path.anchor) or path == Path.home():
+        die(f"{raw}: not the whole of / or your home; name the directory the task needs")
+    if not path.exists():
+        path.mkdir(parents=True)
+    return str(path)
+
+
 def cmd_allow(a):
-    """Let a task's agent run commands outside the everyday list (context.ALLOWED_COMMANDS): for
-    this task, or --always for every task. A pending request is answered, and a running agent is
-    restarted on its session at once so the new rule applies (OpenCode reads it at start)."""
+    """Let a task's agent run commands outside the everyday list (context.ALLOWED_COMMANDS), or
+    use a directory outside its lane (--path, context.writable): for this task, or --always for
+    every task. A pending request is answered, and a running agent is restarted on its session at
+    once so the new rule applies (OpenCode reads it at start, the lane is drawn at start)."""
     task = need(a.name)
     pats = [p.strip() for p in a.pattern if p.strip()]
-    if not pats:
+    dirs = [_lane_dir(p) for p in a.path or [] if p.strip()]
+    if not pats and not dirs:
         die("nothing to allow")
-    have = task.status.get("allow") or []
-    task.set_status(allow=have + [p for p in pats if p not in have])
+    conf_path = context.commands_path()
+    conf = store.read_json(conf_path, {}) or {}
+    for key, new in (("allow", pats), ("paths", dirs)):
+        if not new:
+            continue
+        have = task.status.get(key) or []
+        task.set_status(**{key: have + [p for p in new if p not in have]})
+        if a.always:
+            conf[key] = (conf.get(key) or []) + [p for p in new if p not in (conf.get(key) or [])]
     if a.always:
-        path = context.commands_path()
-        conf = store.read_json(path, {}) or {}
-        conf["allow"] = (conf.get("allow") or []) + [p for p in pats if p not in (conf.get("allow") or [])]
-        path.parent.mkdir(parents=True, exist_ok=True)
-        store.write_json(path, conf)
-    said = ", ".join(f"`{p}`" for p in pats)
+        conf_path.parent.mkdir(parents=True, exist_ok=True)
+        store.write_json(conf_path, conf)
+    said = ", ".join([f"`{p}`" for p in pats] + [f"the directory {d}" for d in dirs])
     text = (f"Claude allowed {said}" + (" from now on" if a.always else " for this task")
             + ". Run it again now and carry on." + (f" {a.text.strip()}" if a.text else ""))
     task.event({"ts": store.now(), "round": task.status.get("round"), "kind": "allow",
@@ -1248,6 +1269,10 @@ def cmd_doctor(a):
                 print(f"--  {pid}/{name}: Ollama serves {served // 1024}K, the entry says {said // 1024}K; "
                       f"wb model add {pid}/{name} --context {served} lets its tasks grow")
     line(os.access(store.home().parent, os.W_OK), f"state dir {store.home()}")
+    v = lane.abi()
+    print(f"ok  agents write only in their lane (Landlock ABI {v})" if v else
+          "--  agents' writes outside their lane aren't refused here (no Landlock): only OpenCode's "
+          "file tools keep to it")
     print(f"--  the Claude Code mod lives in {PKG_ROOT / 'mod'} (see README for installing it)")
     sys.exit(0 if ok else 1)
 
@@ -1288,6 +1313,8 @@ def main(argv=None):
                    help="start even though the repo has no CLAUDE.md")
     s.add_argument("--allow", action="append", metavar="PATTERN",
                    help="let the agent run a command outside the everyday list, e.g. \"curl *\"")
+    s.add_argument("--allow-path", action="append", metavar="DIR",
+                   help="let the agent read and write this directory outside its lane")
     s.add_argument("--skill", action="append", metavar="NAME",
                    help="hand the agent this library skill (repeatable; wb skill list)")
     s.set_defaults(f=cmd_start)
@@ -1407,7 +1434,9 @@ def main(argv=None):
     s.set_defaults(f=cmd_diff)
     s = sub.add_parser("allow", help="let a task's agent run a command outside the everyday list "
                        "(a shell pattern, e.g. \"curl *\"); answers its request")
-    s.add_argument("name"); s.add_argument("pattern", nargs="+")
+    s.add_argument("name"); s.add_argument("pattern", nargs="*")
+    s.add_argument("--path", action="append", metavar="DIR",
+                   help="let it read and write this directory outside its lane (repeatable)")
     s.add_argument("--always", action="store_true", help="for every task from now on (commands.json)")
     s.add_argument("--text", help="a word for the agent with it")
     s.set_defaults(f=cmd_allow)

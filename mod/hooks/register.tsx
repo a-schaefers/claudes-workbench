@@ -230,9 +230,9 @@ const NEXT: Record<string, (n: string) => string> = {
   review: n => `Review it as /delegate says: \`wb diff ${n}\`, then \`wb accept ${n} -m "…"\` ` +
     `or \`wb feedback ${n} --message <file>\`.`,
   question: n => `Answer with \`wb answer ${n} --text "…"\`; it is blocked until then. A ` +
-    `PERMISSION request (a refused command): \`wb allow ${n} "<pattern>"\` (\`--always\` to keep ` +
-    `it) when it is reasonable, which answers it and restarts the agent with it; else answer ` +
-    `with another way.`,
+    `PERMISSION request (a refused command or directory): the \`wb allow ${n}\` it names ` +
+    `(\`--always\` to keep it) when it is reasonable, which answers it and restarts the agent ` +
+    `with it; else answer with another way.`,
   stuck: n => `Steer it with \`wb feedback ${n} --message <file>\`, or \`wb discard ${n}\`.`,
   failed: n => `Look at \`wb log ${n}\`; then \`wb feedback ${n} --message <file>\` or ` +
     `\`wb discard ${n}\`.`,

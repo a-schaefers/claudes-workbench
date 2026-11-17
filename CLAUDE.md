@@ -83,6 +83,15 @@ what either says (a command, a flag, a default, a guard, a file) updates it in t
     `~/.config/workbench/commands.json` (`$WB_COMMANDS`) and the task's `status.allow`
     (`wb allow`, `wb start --allow`), then the hard limits. A refused command comes back to Claude
     as an ask_reviewer request with `command` (outside the question budget, capped at 8).
+    And its lane (`writable`, `external_rules`): the task directory, temp, `TOOL_HOMES` (build
+    caches), OpenCode's own data, `notify.jsonl`, plus commands.json `paths` and `status.paths`
+    (`wb allow --path`, `wb start --allow-path`; `"*"` turns it off). The `external_directory`
+    rule holds OpenCode's file tools and the shell's workdir to it and `READABLE`; a refused
+    directory comes back as an ask_reviewer request with `path` (the same cap of 8).
+  - `lane.py`: the kernel side of the lane. The runner starts OpenCode through it
+    (`lane.wrap`): it restricts itself with Landlock (writes only; reads, exec and the network
+    stay open) and execs, so everything the agent runs inherits it. No Landlock: it execs
+    unrestricted and `wb doctor` says so. Standard library only.
 - Runs on Linux, WSL2 and macOS. Native Windows doesn't: store.py needs fcntl and the runner
   `os.killpg` and POSIX signals. Off Linux, watch.py falls back to timed waits without inotify/pidfd.
 - Never name a model in code or the skill. Models come from OpenCode's config and choices from
@@ -111,7 +120,8 @@ what either says (a command, a flag, a default, a guard, a file) updates it in t
    runner, and returns.
 2. The runner takes the GPU (`models.GpuLease`: `gpu.lock` shared beside other tasks when every model
    fits the VRAM, `can_share`; exclusive otherwise), makes the model resident, and runs
-   `opencode run --standalone --auto --format json` with the task's config layer. Events go to
+   `opencode run --standalone --auto --format json` with the task's config layer, inside the
+   task's lane (`lane.wrap`). Events go to
    `events.jsonl`; `status.json` is the live summary.
 3. Guards stop the agent on: one call repeated 4 times, 6 tool errors in a row, 40 calls without
    an edit, silence past `--silence-timeout` (900 s), a round past `--round-timeout` (2400 s).
@@ -226,7 +236,10 @@ Tests only: `WB_OPENCODE_BIN` (a fake opencode), `WB_FAKE_MODELS` (no model serv
     For the `shell` action the resource matches each part of a compound command (`cd x && sudo y`
     is caught), and a later rule overrides an earlier one. The shell limits: sudo, `gh`, and the
     real git by its path (`*/git *`). For `edit` the resource is the file path, so `*CLAUDE.md`,
-    `*AGENTS.md` and `.claude/*` keep Claude's files Claude's. OpenCode's shell inherits the
+    `*AGENTS.md` and `.claude/*` keep Claude's files Claude's. For `external_directory` the
+    resource is `<dir>/*` for each directory outside the session's, from the file tools' paths
+    and the shell's workdir and `cd` targets (not other arguments: `touch ~/x` passes, which
+    is what Landlock is for). `--auto` allows it unless a rule denies it. OpenCode's shell inherits the
     runner's `PATH`, which is how the git shim (`gitguard.py`) gets called first.
     Denying `execute` (code mode) turns the `opencode_*` tools into direct tools, so deny `opencode_*` too.
     `opencode_worktree_remove` stays listed whatever you do; the rule still refuses the call.
