@@ -1304,7 +1304,7 @@ class Steering(Base):
         self.assertEqual(task.status["last"], "Claude took over")
 
     def test_a_sessions_bail_out_and_hand_back_leave_another_projects_tasks_alone(self):
-        # the 2026-11-16 audit: /delegate-quit in one project's session stopped the agents of a
+        # the 2026-11-16 audit: /workbench-quit in one project's session stopped the agents of a
         # session in another project; the mod passes its directory as --repo
         self.start("t-mine", "slow")
         self.wait_session("t-mine")
@@ -1335,7 +1335,7 @@ class Steering(Base):
 
     def test_a_sessions_tasks_are_those_it_started_wherever_they_ran(self):
         # the 0.90 review: by directory alone, a task started from ~ (or any parent) for one repo
-        # was every session's below it, and /delegate-quit-and-hand-back-claude in project b's
+        # was every session's below it, and /workbench-quit-and-hand-back-claude in project b's
         # session took over project a's; one started after a `cd` elsewhere was no session's
         os.environ["CLAUDE_CODE_SESSION_ID"] = "sess-1"
         self.start("t-mine", "slow")
@@ -1798,7 +1798,7 @@ class AgentContext(Base):
         self.assertIn("`web/CLAUDE.md`", Path(loaded[-1]).read_text())  # nested: mapped, not loaded
         denied = {(r["action"], r["resource"]) for r in layer["permissions"]
                   if r["effect"] == "deny"}
-        self.assertLessEqual({("question", "*"), ("execute", "*"), ("opencode_*", "*"), ("skill", "docx"), ("skill", "delegate"),
+        self.assertLessEqual({("question", "*"), ("execute", "*"), ("opencode_*", "*"), ("skill", "docx"), ("skill", "workbench"),
                              ("skill", "publishing-arm")}, denied)
         self.assertNotIn(("skill", "add-level"), denied)
 
@@ -1977,7 +1977,7 @@ class RealOpenCode(Base):
         self.assertIn("workbench_ask_reviewer", tools)
         self.assertTrue({"edit", "read", "shell"} <= tools)
         self.assertFalse({"question", "execute", "subagent"} & tools)
-        self.assertNotIn("<id>delegate</id>", text)
+        self.assertNotIn("<id>workbench</id>", text)
         self.assertIn("CANARY-HANDED", text)              # a handed skill is listed to the model
         self.assertNotIn("CANARY-KEPT", text)             # and the rest of the library is not
 
@@ -3362,7 +3362,7 @@ class Notes(Base):
 
 
 class Setup(Base):
-    """wb setup: the marketplace install copies only mod/, so wb and /delegate are linked from the
+    """wb setup: the marketplace install copies only mod/, so wb and /workbench are linked from the
     clone (2026-11-16); wb doctor says what an install still lacks."""
     def setup(self, *a, cmd="setup"):
         buf = io.StringIO()
@@ -3372,7 +3372,7 @@ class Setup(Base):
 
     def test_doctor_says_what_the_install_lacks_and_never_ok_beside_a_failure(self):
         # the 2026-11-16 audit: a fresh home's state dir was BAD, a home named like "delaney" failed
-        # the lane, WB_BIN made "wb isn't on PATH" ok, /delegate and an old OpenCode went unchecked
+        # the lane, WB_BIN made "wb isn't on PATH" ok, /workbench and an old OpenCode went unchecked
         home = Path(self.tmp.name) / "delaney"
         home.mkdir()
         os.environ.update(HOME=str(home), WB_HOME=str(home / ".local/state/workbench"), WB_BIN="/x/wb",
@@ -3385,7 +3385,7 @@ class Setup(Base):
                      "BAD wb isn't on PATH: Claude runs it by name in Bash",
                      "WB_BIN=/x/wb covers only the mod's calls",
                      f"ok  state dir {home / '.local/state/workbench'}\n",
-                     f"BAD /delegate isn't in {home / '.claude/skills'}: wb setup links it",
+                     f"BAD /workbench isn't in {home / '.claude/skills'}: wb setup links it",
                      "--  the Claude Code mod (the pane, the wake-ups) isn't among"):
             self.assertIn(want, out)
         if lane.abi():
@@ -3398,7 +3398,7 @@ class Setup(Base):
         os.environ.pop("WB_BIN")
         code, out = self.setup(cmd="doctor")
         for want in ("ok  opencode opencode v2.3.0", f"ok  wb on PATH: {home / '.local/bin/wb'}",
-                     f"ok  /delegate skill at {home / '.claude/skills/delegate'}",
+                     f"ok  /workbench skill at {home / '.claude/skills/workbench'}",
                      "ok  the Claude Code mod is installed"):
             self.assertIn(want, out)
         self.assertNotIn("comes from", out)
@@ -3415,7 +3415,7 @@ class Setup(Base):
         os.environ.pop("CLAUDE_CONFIG_DIR", None)
         code, out = self.setup()
         self.assertEqual(code, 0, out)
-        wb, skill = home / ".local/bin/wb", home / ".claude/skills/delegate"
+        wb, skill = home / ".local/bin/wb", home / ".claude/skills/workbench"
         self.assertEqual(wb.resolve(), (runner.PKG_ROOT / "bin/wb").resolve())
         self.assertTrue((skill / "SKILL.md").exists())
         self.assertEqual(self.setup()[0], 0)                  # again: nothing to do
@@ -3429,9 +3429,25 @@ class Setup(Base):
         self.assertEqual(wb.resolve(), (runner.PKG_ROOT / "bin/wb").resolve())
         self.assertTrue(skill.is_dir() and not skill.is_symlink())
 
+    def test_setup_drops_the_old_delegate_link_that_now_leads_nowhere(self):
+        # 2026-11-17: /delegate became /workbench, leaving ~/.claude/skills/delegate dangling
+        home = Path(self.tmp.name) / "home"
+        os.environ["HOME"] = str(home)
+        os.environ.pop("CLAUDE_CONFIG_DIR", None)
+        skills = home / ".claude/skills"
+        skills.mkdir(parents=True)
+        (skills / "delegate").symlink_to(runner.PKG_ROOT / "skill/delegate")
+        (skills / "mine").symlink_to("/elsewhere/skill/mine")  # not ours: left alone
+        code, out = self.setup()
+        self.assertEqual(code, 0, out)
+        self.assertIn("/delegate is now /workbench", out)
+        self.assertFalse((skills / "delegate").is_symlink())
+        self.assertTrue((skills / "mine").is_symlink())
+        self.assertTrue((skills / "workbench/SKILL.md").exists())
+
 
 class Update(Base):
-    """wb update: the weekly check the mod runs, and /delegate-update (2026-11-16). A real origin
+    """wb update: the weekly check the mod runs, and /workbench-update (2026-11-16). A real origin
     and clone stand in for this copy; a fake `claude` records the plugin steps."""
     def setUp(self):
         super().setUp()

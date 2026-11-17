@@ -4,7 +4,7 @@ OpenCode reads AGENTS.md by itself but not CLAUDE.md, and it lists every skill u
 ~/.claude/skills and the project's .claude/skills. This module adds the rest to the task's
 config layer: the workbench handbook, the user's and the repo's Claude instructions, a map of
 the nested CLAUDE.md files to read on the way, and a skill policy (the user's personal skills
-and /delegate itself are hidden, leaving the project's own; so is `question`, which nobody
+and /workbench itself are hidden, leaving the project's own; so is `question`, which nobody
 answers headless).
 """
 from __future__ import annotations
@@ -832,13 +832,13 @@ def denied_skills(extra: list[str] | None = None, project: Path | None = None) -
     theirs, about their other work: an agent sees only the project's own .claude/skills. On
     2026-11-16 an agent, its context full, summarised a personal publishing skill
     into a made-up "newer task" and went off reading the user's private library."""
-    names = {"delegate", *(extra or [])}
+    names = {"workbench", *(extra or [])}
     for home in {claude_home() / "skills", Path.home() / ".claude" / "skills"}:  # OpenCode reads ~/.claude
         names |= {s.parent.name for s in home.glob("*/SKILL.md")}
         names |= {s.parent.name for s in (home / "synced").glob("*/*/SKILL.md")}
     if project:  # a project's own skill keeps its name (the personal ones are unreadable anyway)
         names -= {s.parent.name for s in (project / ".claude" / "skills").glob("*/SKILL.md")}
-    return sorted(names | {"delegate", *(extra or [])})
+    return sorted(names | {"workbench", *(extra or [])})
 
 
 def write_map(task: store.Task, nested: list[str]) -> Path | None:

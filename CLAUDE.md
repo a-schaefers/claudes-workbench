@@ -26,7 +26,7 @@ that again. So before every commit:
    it no longer says what the code does, rewrite it. *Couplings* lists what else must change.
 3. A new command or flag goes in *Every `wb` command*; a new key or file in *Files and formats*;
    a new module in this file's *Layout*; a new environment variable in *State and config*;
-   anything Claude does differently in `skill/delegate/SKILL.md`.
+   anything Claude does differently in `skill/workbench/SKILL.md`.
 4. `tests/test_docs.py` fails when a command, flag, module or environment variable is missing
    from the docs, or this file passes 25,000 characters. It can't see defaults or behaviour:
    steps 1 and 2 are how those stay true.
@@ -122,7 +122,7 @@ dependencies. No packaging: it runs from the clone.
 - `images.py`: `wb image`, local image engines from `images.json`; holds the GPU.
 - `agent/HANDBOOK.md`: Claude's working habits for the agent. Every agent prompt carries it, so
   keep it short: each token costs prefill time.
-- `skill/delegate/SKILL.md`: the `/delegate` procedure (`~/.claude/skills/delegate` links here; `wb setup` makes the link).
+- `skill/workbench/SKILL.md`: the `/workbench` procedure (`~/.claude/skills/workbench` links here; `wb setup` makes the link).
 - `mod/`: the Claude Code plugin (`hooks/register.tsx`, `hooks/apprentice.ts` the pane's
   character, `hooks/register.test.tsx`, `types/index.d.ts`; `.claude-plugin/plugin.json` has its
   own version). The repo root's `.claude-plugin/marketplace.json` makes the repo its marketplace.
@@ -293,7 +293,7 @@ PATH and the lane; the rest is only imitated by the fake.
 - `wb doctor`: opencode (2.x) and its config files, git, each model's readiness (BAD when none
   can run), skipped providers and why, an Ollama baseURL without `/v1`, a missing `limit.context`,
   each Ollama entry's `max_tokens` and context, the state directory, the GPU budget and the devices
-  it counts, a real lane around a test write, `wb` on PATH, the `/delegate` link (and another
+  it counts, a real lane around a test write, `wb` on PATH, the `/workbench` link (and another
   copy's), whether the mod is listed as installed.
 - A model "can't run": `wb models` says why (server down, not pulled, no `start` command), and
   `wb start` adds the next step.

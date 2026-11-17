@@ -23,8 +23,8 @@ Contents: [The pieces](#the-pieces) · [Why it's built this way](#why-its-built-
 
 ```
  user ─▶ Claude Code ────────────────────────────────────────────────────────────┐
-          │ /delegate skill: plan, spec, review          workbench mod: pane,     │
-          │ (skill/delegate/SKILL.md)                    status line, wake-ups,   │
+          │ /workbench skill: plan, spec, review          workbench mod: pane,     │
+          │ (skill/workbench/SKILL.md)                    status line, wake-ups,   │
           ▼                                              web chat, compaction     │
          wb ──────── writes ────▶  $WB_HOME (~/.local/state/workbench) ◀── wb events (inotify)
           │ spawns                   tasks/<name>/…  rules/<name>/  notify.jsonl  results.jsonl  chat/
@@ -38,8 +38,8 @@ Contents: [The pieces](#the-pieces) · [Why it's built this way](#why-its-built-
        local model server (Ollama, or any OpenAI-compatible server on this machine)
 ```
 
-- **`/delegate`** (`skill/delegate/SKILL.md`, linked to `~/.claude/skills/delegate`) turns
-  delegate mode on for the session and is Claude's procedure in it: size the work, write the
+- **`/workbench`** (`skill/workbench/SKILL.md`, linked to `~/.claude/skills/workbench`) turns
+  workbench mode on for the session and is Claude's procedure in it: size the work, write the
   spec, dispatch, drive, review, accept. The user types it once, then asks for things as usual;
   the mod keeps the mode (and reminds Claude of it after a compaction or `/clear`) until a quit
   command. Only the user starts it; Claude never delegates on its own (the mod also counts a
@@ -175,7 +175,7 @@ takes it actually finishes: one concern, no bigger than that model's slice, with
 the code to imitate pointed at, exact names for anything other code relies on, and an acceptance
 command that proves it's done (an existing test, or a new one the agent writes first). Bigger work
 is split into steps run one after another. Planning, in Claude Code's plan mode or not, works the
-same way: in delegate mode the plan the user approves is already that list of steps, each with
+same way: in workbench mode the plan the user approves is already that list of steps, each with
 its size, files, exact interfaces and acceptance command, and what stays Claude's (git,
 CLAUDE.md, the user's decisions, the review checks) marked apart.
 
@@ -876,7 +876,7 @@ of its own into `rules/<task>/bin/` and puts it first on `PATH`.
 directory each in the config's `skills` list). The user's personal `~/.claude/skills` (including
 synced Claude app skills, `synced/*/*/SKILL.md`) are denied by name (`denied_skills`): an agent
 once read a personal skill as a "newer task" and went off into the user's files. A name the
-worktree's own `.claude/skills` also has stays allowed (the project's skill wins); `delegate` and
+worktree's own `.claude/skills` also has stays allowed (the project's skill wins); `workbench` and
 task.json's `deny_skills` are always denied. `wb skill add` refuses the personal names.
 
 **`ask_reviewer`**, an MCP tool for one blocking question to Claude (*Talking to a running agent*).
@@ -1029,7 +1029,7 @@ with `tuning.value(task, name)`.
 compacts Claude's conversation while this session's tasks are open in a session that delegated
 (the engine, `/compact`, the mod), the mod tells the summary to
 keep the user's goals and decisions, the tasks and what each needs next, and to drop finished
-tasks' diffs and reports. At a task boundary in delegate mode (one of this session's just closed,
+tasks' diffs and reports. At a task boundary in workbench mode (one of this session's just closed,
 none waiting for Claude) the mod
 compacts early once Claude is halfway to the engine's own compaction (`WB_COMPACT_AT`, a
 percentage; 0 turns it off), so a long session sheds detail at a clean point instead of
@@ -1042,7 +1042,7 @@ so what Claude learned about how the user likes delegation run in one repo would
 next. When the user says something that holds anywhere (their review bar, whether to merge, how
 much to ask them), Claude keeps it with `wb notes add "…"` (one sentence, at most 300
 characters; at most 20 notes) in `$WB_HOME/notes.md` (`- ` lines, under `notes.lock`). Every
-session in delegate mode, in any project, is handed them in a `user-notes` block. `wb notes`
+session in workbench mode, in any project, is handed them in a `user-notes` block. `wb notes`
 lists them and `wb notes drop N…` removes ones that have stopped holding. A fact about one repo
 goes in its CLAUDE.md instead.
 
@@ -1132,8 +1132,8 @@ nothing until a surface attaches.
 
 ## Seeing what the agent does
 
-- **The pane** (opened by `/delegate`, or once per load when a task runs, and closed by a quit command;
-  `/delegate-pane` opens it any time) lists every task: phase, round, model, test result, age and
+- **The pane** (opened by `/workbench`, or once per load when a task runs, and closed by a quit command;
+  `/workbench` run again brings it back) lists every task: phase, round, model, test result, age and
   its last few events. Under the list it follows one task as a live transcript: the one it
   follows while that one is queued, running, testing or asking, else the newest started that is
   running, testing or asking, then queued, else the newest waiting for Claude (choosing by the
@@ -1144,7 +1144,7 @@ nothing until a surface attaches.
   what it is doing now and how long the task has left. A short pane gets its face on one line
   instead. The web chat's link is pinned at the bottom.
 - **The status line** reads like `⚒ wb · add-scores running r2 · fix-typo asks · 1 awaiting
-  review`, or `⚒ wb · delegate mode` with nothing open.
+  review`, or `⚒ wb · workbench mode` with nothing open.
 - **`wb watch [task]`** (`workbench/transcript.py`) is the same transcript in a terminal.
 - **`wb status`**, **`wb log [-f]`**, **`wb report [--round N]`** and **`wb diff [--stat] [--all]
   [paths]`** are the compact views Claude itself uses. `wb status` reaps a task whose runner died
@@ -1518,7 +1518,7 @@ is passed over), `report()` (the lines `wb scout`
 prints). Unknowns stay unknown; nothing about the machine is hard-coded.
 
 **The weekly model check.** Models change fast. Once a week, in a quiet moment, the mod submits
-SCOUT_NOTE (see *The mod, inside*); `/delegate-models` asks now, and `/delegate` runs one first when
+SCOUT_NOTE (see *The mod, inside*); `/workbench-models` asks now, and `/workbench` runs one first when
 no local model can run. `wb scout` prints the facts, read fresh: the machine (`hardware.report`),
 Ollama's default context, every registered model (size, quantization, context, slice, real-task
 record), installed models that aren't registered, the watch list (`watch.json`: models set aside
@@ -1618,7 +1618,7 @@ not forced.
   copy: a directory source replaces the skill's directory (rmtree + copytree, `.git` ignored); a
   file source replaces only SKILL.md. `git add -A -- <name>`, commit only if something changed
   (an identical re-add prints "updated" and commits nothing). Refuses the names in
-  `context.denied_skills()` (`delegate` and the user's personal skills), because skill denies
+  `context.denied_skills()` (`workbench` and the user's personal skills), because skill denies
   are by name, and `retired` (the library's own directory, refused by `check`); refuses a source
   inside the library (it would be scanned against itself: use `patch`, or add a copy from
   elsewhere). `--lesson` closes those lessons as `skill:<name>`; when every given lesson came from
@@ -1950,7 +1950,7 @@ custom-node packs do run their own Python).
 
 `wb chat serve` (`workbench/chat.py`; kept up by `systemd/wb-chat.service`, a user unit running
 `%h/.local/bin/wb chat serve` with `Restart=always` and no start limit) serves a small page on
-port 1337 for reaching the Claude session in delegate mode while the user is away. The unit
+port 1337 for reaching the Claude session in workbench mode while the user is away. The unit
 retries with a delay growing from 10 s to 5 min (`RestartSteps`, systemd 254+; every 10 s on
 older ones), since retrying is what brings the chat up when a bound address arrives late (a user
 manager has no network-online.target) or the port is briefly held: a start limit gave up for good
@@ -1959,13 +1959,13 @@ Python-version and Windows guards use; never 75, the replan exit below.
 
 - **The path of a message.** The page posts it; the server appends it to `chat/messages.jsonl`.
   The listening session's mod submits it to Claude as `[web chat] <the user's words>`, nothing
-  more, so the terminal shows what the user wrote; how to answer is in the `/delegate` skill. It
+  more, so the terminal shows what the user wrote; how to answer is in the `/workbench` skill. It
   goes into the running turn if Claude is mid-turn (`session.send`, with one line saying it's from
   the user), else as the next prompt. The mod also writes a receipt (`wb chat ack`) that the page
   shows at once (Claude has it now, or will read it after its current step). Claude answers with
   `wb chat reply`, which the page shows. The page says whether a session is listening and whether
   Claude is working.
-- **One listener.** A session listens while delegate mode is on in it (from `/delegate`, or a
+- **One listener.** A session listens while workbench mode is on in it (from `/workbench`, or a
   delegating `wb` command, until a quit command). With several sessions the first live claim on
   `chat/listener.json` listens; it is known by its `wb events` process's pid.
 - **Claude knows where the user is.** A web message carries the same authority as one typed in
@@ -2052,13 +2052,13 @@ A change to `chat.py` or `chat_static/` also needs the browser test (*The tests*
 
 Only the user's two slash commands stop the delegation, never words in a message:
 
-- **`/delegate-quit`** runs `wb stop --all --repo <the session's directory> --session <id>…`
+- **`/workbench-quit`** runs `wb stop --all --repo <the session's directory> --session <id>…`
   (each id the session's process has had): this session's
   running agents stop, every task keeps its worktree for later, and Claude is told not to finish,
   restart or clean up anything unless asked.
-- **`/delegate-quit-and-hand-back-claude`** runs `wb takeover --all` with the same scope and
+- **`/workbench-quit-and-hand-back-claude`** runs `wb takeover --all` with the same scope and
   starts a turn for Claude
-  to leave delegate mode, finish each task taken over itself to its own standard (`wb diff`, the acceptance
+  to leave workbench mode, finish each task taken over itself to its own standard (`wb diff`, the acceptance
   command, `wb accept`), and carry on with the rest of the user's request without delegating.
 
 `--session` and `--repo` keep them to this session's tasks (the mod's `mine`, *Waking Claude,
@@ -2068,8 +2068,8 @@ another session keeps its agents running, and they are listed as left alone (the
 command says so and no hand-back turn starts. Typed in a terminal without a scope, both still
 take every task.
 
-Both end delegate mode: Claude works directly again and the pane closes (`/delegate-pane` brings it
-back).
+Both end workbench mode: Claude works directly again and the pane closes (`/workbench` turns the
+mode back on, pane and all).
 
 ## The mod, inside
 
@@ -2096,7 +2096,7 @@ const bound to one; imports from the module's own files also pass). The helpers 
 and an atom read under an old tag is absent, so change the tag when its type changes:
 `tasks` (`tasks-3`, WbTask[]: name, phase, round, model, label, tests, last, createdAt,
 updatedAt, tokens, recent, repo, cwd, session), `live` (`live-1`, {task, lines: {s, t}[]}: the transcript lines),
-`chat` (`chat-2`, {key, delegating, webAt, url}: delegate mode lives here, plus the session's
+`chat` (`chat-2`, {key, delegating, webAt, url}: workbench mode lives here, plus the session's
 listener key), `sessions` (`sessions-1`, string[]: every Claude Code session id this process
 has had, `mem.ids` while loaded). Everything else is `mem`, a plain object reset by a reload (busy, queued turns,
 this session's open set, the session's resolved `cwd` and `home`, `person`, follow, sawTurn, scoutAsked,
@@ -2105,11 +2105,12 @@ themselves are re-read from `$WB_HOME`; the mod writes `tasks/<n>/acked`, scout.
 `offered_at` and `chat/listener.json`.
 
 **session.start.** Sets `mem.root` (`WB_HOME` or `~/.local/state/workbench`), `mem.wb` (`WB_BIN`
-or `wb`), `mem.skill` (`$CLAUDE_CONFIG_DIR` or `~/.claude`, then `skills/delegate/SKILL.md`),
+or `wb`), `mem.skill` (`$CLAUDE_CONFIG_DIR` or `~/.claude`, then `skills/workbench/SKILL.md`),
 the chat key (`<start ms>-<6 base36>`, kept across reloads), `mem.cwd` and `mem.home` (the
 session's directory and the home directory, resolved: which tasks without a `session` are this
-session's, `mine`), `mem.ids` (the `sessions` atom plus `$.session.id()`), registers its `delegate-*` commands (*Commands*
-below), and, when a person can be at the session (`isInteractive`, or a surface), starts the ears
+session's, `mine`), `mem.ids` (the `sessions` atom plus `$.session.id()`), registers its `workbench-*` commands (*Commands*
+below), runs `wb setup` once with a toast when the `/workbench` skill link is missing
+but the old `skills/delegate` link is there (a copy updated across the 2026-11-17 rename), and, when a person can be at the session (`isInteractive`, or a surface), starts the ears
 and two timers. A `claude -p` run or an SDK session (neither) stays quiet, no poll, no wake, no
 `wb status` context, until `session.attach` (the desktop app attaching) starts them: such a run
 took the terminal session's wakes and the weekly check (the 2026-11-16 audit).
@@ -2135,7 +2136,7 @@ last part through `tail -c`, from a whole line, since `$.fs.read` rejects a file
 `tasks/*/status.json`, then `task.json` for the tasks shown (closed tasks drop out 30 min after
 their last update, and an accepted or discarded one is then never read again in that load; open
 ones get their last 4 event lines as `recent`), sorted by creation; sets the status line; opens
-the pane once per load when a task is queued/running/testing or delegate mode is on (an open the
+the pane once per load when a task is queued/running/testing or workbench mode is on (an open the
 user didn't ask for is placed only on a wide terminal; a pane the user closed stays closed for that
 load); refreshes the live transcript while the pane is shown (`wb watch <task> --json --last
 2000`, at most every 5 s (`LIVE_EVERY_MS`) while the followed task is active, at once when its
@@ -2177,39 +2178,43 @@ the mod runs in every session with the plugin, so each acts only on its own task
 2026-11-16 audit: two projects at once, each session was woken for the other's); among the
 sessions a task belongs to, the first to deliver a notice wins (the `acked` write is not locked).
 
-**Delegate mode** (`delegateMode(on)`, `chat.delegating`). On: the `delegate` skill's prompt
-(`skill.prompt`, which also records its path and opens the pane), or a Bash tool call matching
+**Workbench mode** (`workbenchMode(on)`, `chat.delegating`). On: the `workbench` skill's prompt
+(`skill.prompt`, which also records its path and opens the pane through `showPane`; run again
+while the mode is on and with no task, which `firstTask` reads from the expanded skill's
+"**First task:** \`…\`" line, it returns AGAIN_NOTE in place of the skill: the pane is back,
+reply in one line), or a Bash tool call matching
 `/(^|[\s;&|(])wb (start|next|feedback|steer|answer)\b/` (checked before it runs; a resumed
-session or a /delegate the mod missed; a `wb` named by absolute path isn't seen; not `accept` or
+session or a /workbench the mod missed; a `wb` named by absolute path isn't seen; not `accept` or
 `takeover`, which a done note after a quit asks for). Off:
-either quit command, which also closes the pane. While on: the `delegate-mode` and `user-notes`
+either quit command, which also closes the pane. While on: the `workbench-mode` and `user-notes`
 context blocks, the idle status line, pane auto-open, web chat listening, the apprentice's
-"Delegate mode is on.", the boundary compaction. `mem.delegated` remembers the mode was on in
+"Workbench mode is on.", the boundary compaction. `mem.delegated` remembers the mode was on in
 this load, so a hand-back's compaction still keeps the state. No `$.ui.invalidate`: rewriting
 the first message would cost the conversation's prompt cache.
 
-**Commands.** Every one is `/delegate` or starts with `delegate-`, so typing `/delegate` lists
-them all (2026-11-16: `/workbench` became `/delegate-pane`, no alias). `/delegate-pane` opens the pane and says how many tasks are open; a pane the engine
-still holds but doesn't show (a tab behind another, or undrawn) is closed first, so it comes back,
-and a pane that can't be drawn here says why (`opened.reason`). `/delegate-quit`:
-delegate mode off, `wb stop --all` with `scope()` (`--repo <mem.cwd> --session <id>…`), a toast, and hidden context (QUIT_NOTE:
+**Commands.** Every one is `/workbench` (the skill) or starts with `workbench-`, so typing
+`/workbench` lists them all (2026-11-17: they were `/delegate` and `/delegate-*`, no alias; the
+pane's own command went, as `/workbench` run again brings the pane back). `showPane` closes a
+pane the engine still holds but doesn't show (a tab behind another, or undrawn) first, so it
+comes back. `/workbench-quit`:
+workbench mode off, `wb stop --all` with `scope()` (`--repo <mem.cwd> --session <id>…`), a toast, and hidden context (QUIT_NOTE:
 don't finish, restart or clean up anything unless asked; tasks left alone are another session's;
 or, when wb failed, that the agents may still run); it starts no turn.
-`/delegate-quit-and-hand-back-claude`:
-mode off, `wb takeover --all` with `scope()`, and DONE_NOTE queued as a turn (leave delegate
+`/workbench-quit-and-hand-back-claude`:
+mode off, `wb takeover --all` with `scope()`, and DONE_NOTE queued as a turn (leave workbench
 mode; per task taken over `wb
 diff`, finish in its worktree, run the acceptance command, `wb accept` (`--merge` only if asked);
 leave the tasks left alone; carry on without delegating); when wb failed, no turn, and it says
-so. `/delegate-models` records the check as raised (scout.json `offered_at`, `scoutAsked`: the
-weekly check came straight after it) and queues SCOUT_NOTE now. `/delegate-update` runs
+so. `/workbench-models` records the check as raised (scout.json `offered_at`, `scoutAsked`: the
+weekly check came straight after it) and queues SCOUT_NOTE now. `/workbench-update` runs
 `wb update` and, when it updated, `/reload-plugins` (`$.command.run`; if that throws, it says to
 run it; when wb failed, that /reload-plugins picks up whatever it got as far as). A command can't start a
-turn itself: it pushes onto `mem.queued`, which the next idle poll submits. `/delegate` is the
+turn itself: it pushes onto `mem.queued`, which the next idle poll submits. `/workbench` is the
 skill, not a mod command.
 
 **Context blocks** (`prompt.context`, appended in this order; Claude Code computes them at the
 conversation's first message and after a compaction or `/clear`, not every turn):
-`delegate-mode` while delegating (MODE_NOTE: the mode lasts until a quit, follow the skill,
+`workbench-mode` while delegating (MODE_NOTE: the mode lasts until a quit, follow the skill,
 every plan is a handoff plan, the SKILL.md path); `user-notes` while delegating and notes.md has
 notes; `web-chat` for six hours after a web message, until a prompt is typed in the terminal
 (reply with `wb chat reply`, `wb chat log` shows the thread); `workbench-wake` with the `wake`
@@ -2222,13 +2227,13 @@ instead). None in a session with no person at it.
 open, in a session delegating or that delegated in this load) appends
 KEEP_ON_COMPACT: keep the user's goals and decisions, the tasks and what each needs next, what
 was accepted, merged or discarded; drop finished tasks' diffs, reports and transcripts. At a task
-boundary in delegate mode (a task in the last poll's open set of this session's tasks is gone,
+boundary in workbench mode (a task in the last poll's open set of this session's tasks is gone,
 Claude idle, none of them waiting for Claude) it compacts once usage reaches `WB_COMPACT_AT`% (default `COMPACT_AT` 0.5; 0 off) of the
 auto-compact threshold (or the window when auto-compact is off).
 
 **Status line and pane.** Status: `⚒ wb · <name> <phase> r<round>` for queued/running/testing,
 `<name> asks`, `<N> awaiting review` (review + stuck + failed), joined by ` · `; `⚒ wb ·
-delegate mode` with nothing listed. Pane: one row per task (a mark per phase: spinner running, ◌
+workbench mode` with nothing listed. Pane: one row per task (a mark per phase: spinner running, ◌
 queued, ◐ testing, ? asking, ◆ review, ▲ stuck, ✗ failed, ✓ accepted, – discarded; name, phase,
 round, label or model, tests, age since creation, or "ago" once closed), its recent lines; then
 the followed task's transcript (its newest lines, each cut to `LINE_CHARS` 2000 first, oldest at the top, within `HISTORY_CHARS` 60,000: Claude Code drops pane
@@ -2245,7 +2250,7 @@ last.
 frame in six, other poses blink one in eleven, except `sleep` and `slump`; FACE has the one-line faces (`[•_•]⚒`, `\[^_^]/`,
 …). The bubble says what the agent is doing (`speechOf`) in the phase's colour.
 
-**The web chat listener** (`listen`, delegate mode only, needs the events child): another
+**The web chat listener** (`listen`, workbench mode only, needs the events child): another
 session's live claim (its pid answers `kill -0`, else its `ts` within 15 s) makes this one stand
 by; otherwise it writes `chat/listener.json` `{session, cwd, pid, busy}` when that changes, and
 delivers each user message without a receipt: idle → `prompt.submit('[web chat] <words>', asUser)`,
@@ -2267,20 +2272,21 @@ nothing without a yes, `wb scout --done --notes`).
 the poll rather than in it (a stalled fetch held every wake), `wb update --check
 --if-due` (wb asks origin at most weekly and in between counts locally against the last fetch,
 falling back to `update.json`); an `update
-available` answer becomes a toast naming `/delegate-update`. So a pending update is mentioned once
+available` answer becomes a toast naming `/workbench-update`. So a pending update is mentioned once
 per session until it's installed.
 
 **Tests** (`register.test.tsx`, an in-memory filesystem and a fake `wb events`): the empty pane,
-`/delegate-pane`, a wake held mid-turn and delivered once (and a stale one dropped), the transcript
+`/workbench` run again (the pane back, AGAIN_NOTE; with a task, the skill), the old `delegate`
+link running `wb setup`, a wake held mid-turn and delivered once (and a stale one dropped), the transcript
 and pinned link, both quit commands (typed words stop nothing), KEEP_ON_COMPACT and the boundary
 compaction, the live header label, the weekly check, the chat listener (exact text, receipt,
 standing by, stopping after a quit), Bash `wb start` turning the mode on and mid-turn delivery,
-rewake, Raster vs face, `/delegate` alone, the update check and `/delegate-update`, `wrapWords`;
+rewake, Raster vs face, `/workbench` alone, the update check and `/workbench-update`, `wrapWords`;
 and the 2026-11-16 audit's: another project's task neither woken nor acked, a headless session
 quiet until a surface attaches, a dropped wake retried, no false rewake for a notice delivered
 before, two wakes due in one turn, two open questions, another plugin's tool call, the update
 check beside the wakes, a notify.jsonl read by its tail, the pane read only while shown, a sticky
-focus, a cut transcript, a long line clipped, `/delegate-models` once, wb missing (one toast, a
+focus, a cut transcript, a long line clipped, `/workbench-models` once, wb missing (one toast, a
 backoff, no model check), wb failing (no open-tasks block, quit says so), no compaction without
 delegating, wake off told, closed tasks not re-read. Not covered: check-in wakes, the one-hour
 cutoff, scrolling, `WB_COMPACT_AT`.
@@ -2412,9 +2418,9 @@ delivered as taken (`_stale_notes`, *Notes*).
 | `wb image "<prompt>"` | `--n` (4), `--size WxH` (1024x1024), `--seed`, `--ref <img>…`, `--out DIR`, `--engine`, `--list`, `--wait` | Candidates from a local image engine (see *Images*). While anything holds the GPU it refuses at once, naming the holders; `--wait` queues behind them. A bare `list` or `ls` as the prompt acts as `--list`. |
 | `wb chat [log\|serve\|url\|reply\|ack\|pending]` | `--port` (1337), `--bind` (replaces chat.json's), `--host` (adds), `--text`, `--message <file\|->` (reply reads stdin without either), `-n` (10); `ack <id> --by --how` (the mod) | The web chat: the thread, the server, the link with its token, Claude's reply. |
 | `wb init <dir>` | | A project the way Claude keeps one: git on the default branch, an initial commit, AGENTS.md → CLAUDE.md (a CLAUDE.md → AGENTS.md link is swapped; a gitignored CLAUDE.md isn't linked). Refuses the home directory or above, inside another repo, a repo git refuses (git's reason: no `git init` over it), without a git identity (`git var`, as for `wb start`), and a first commit holding likely secrets or installed directories no .gitignore covers. |
-| `wb setup` | `--force` (replaces a link that points elsewhere; never a real file) | Links `~/.local/bin/wb` to this copy's `bin/wb` and Claude Code's `skills/delegate` to its `skill/delegate`, warns when `~/.local/bin` isn't on PATH (Claude and the mod run `wb` by name); exit 1 when it left something in the way (see *Installing*). |
+| `wb setup` | `--force` (replaces a link that points elsewhere; never a real file) | Links `~/.local/bin/wb` to this copy's `bin/wb` and Claude Code's `skills/workbench` to its `skill/workbench`, removes an old `skills/delegate` link that now leads nowhere (the skill was `/delegate` until 2026-11-17; the mod runs `wb setup` itself when it finds only that), warns when `~/.local/bin` isn't on PATH (Claude and the mod run `wb` by name); exit 1 when it left something in the way (see *Installing*). |
 | `wb update` | `--check` (only say whether origin has news: `update available: N new commit(s)…` or `up to date`), `--if-due` (with `--check`: ask origin at most weekly, `UPDATE_EVERY`, else answer from `update.json`; never with `CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC`) | Updates this copy (see *Installing*): refuses while any runner is live; a marketplace copy runs `claude plugin marketplace update workbench` then `claude plugin update workbench@workbench`; a clone (refusing uncommitted tracked changes) runs `git pull --ff-only` first. Refuses, before anything changes, when `claude` isn't on PATH; a step that can't run or runs past 300 s fails with a line (after a clone's pull: what is left to run), and update.json is written as soon as the pull lands. Prints `updated <kind> a..b (N commit(s))` or `already up to date`. The check's fetch (`cli._fetch_origin`) never prompts and never hangs: no terminal, `GIT_TERMINAL_PROMPT=0`, `SSH_ASKPASS_REQUIRE=never`, at most `FETCH_SECS` = 60 s; the user's own ssh command (`GIT_SSH_COMMAND`, `GIT_SSH`, `core.sshCommand`) is kept, and with none ssh runs with `BatchMode`. In between, `--if-due` recounts `HEAD..@{u}` locally, so a pull made elsewhere shows at once. |
-| `wb doctor` | | `opencode --version` (BAD below 2.x, whose config shape and run flags workbench writes; a version that doesn't parse is a `--` line), the OpenCode config files (and a set `$OPENCODE_CONFIG`), git, models found and each one's readiness (BAD when none can run), the providers skipped and why, an Ollama provider not answering (asked once), a provider's baseURL problem, any entry without `limit.context` (BAD), each Ollama entry's `options.max_tokens` and context against what Ollama serves (or that it can't say), the state directory (made if missing, then checked writable), the GPU budget and the devices it counts (or that the GPU's memory is unknown, or that none was found: a `--` line), a real lane drawn around a test write (`ok agents write only in their lane (Landlock ABI N)`: the probe's `PermissionError`, not exit 126; then a `--  Landlock ABI N: …` line for each of `lane.gaps`, and on WSL with interop on a `--  WSL interop is on: …` line (`context.interop_gap`); without Landlock a `--` line saying writes and credential reads aren't refused and whether sudo still is), `commands.json` (`context.commands_conf`: it must parse and hold lists of strings; `BAD` stops the check), the toolchains on PATH that are snaps (`context.TOOLCHAINS`; they can't run in the lane), `wb` on PATH (Claude's Bash runs it by name: BAD without it, whatever `WB_BIN` says; `WB_BIN` is noted when set), the `/delegate` skill link, a `--` line when `wb` or `/delegate` comes from another copy (`wb setup --force` from the one you want), and whether Claude Code lists `workbench@…` in `plugins/installed_plugins.json` (information only: a mod loaded another way isn't listed). `ok`/`BAD` lines set the exit code; `--` lines inform. |
+| `wb doctor` | | `opencode --version` (BAD below 2.x, whose config shape and run flags workbench writes; a version that doesn't parse is a `--` line), the OpenCode config files (and a set `$OPENCODE_CONFIG`), git, models found and each one's readiness (BAD when none can run), the providers skipped and why, an Ollama provider not answering (asked once), a provider's baseURL problem, any entry without `limit.context` (BAD), each Ollama entry's `options.max_tokens` and context against what Ollama serves (or that it can't say), the state directory (made if missing, then checked writable), the GPU budget and the devices it counts (or that the GPU's memory is unknown, or that none was found: a `--` line), a real lane drawn around a test write (`ok agents write only in their lane (Landlock ABI N)`: the probe's `PermissionError`, not exit 126; then a `--  Landlock ABI N: …` line for each of `lane.gaps`, and on WSL with interop on a `--  WSL interop is on: …` line (`context.interop_gap`); without Landlock a `--` line saying writes and credential reads aren't refused and whether sudo still is), `commands.json` (`context.commands_conf`: it must parse and hold lists of strings; `BAD` stops the check), the toolchains on PATH that are snaps (`context.TOOLCHAINS`; they can't run in the lane), `wb` on PATH (Claude's Bash runs it by name: BAD without it, whatever `WB_BIN` says; `WB_BIN` is noted when set), the `/workbench` skill link, a `--` line when `wb` or `/workbench` comes from another copy (`wb setup --force` from the one you want), and whether Claude Code lists `workbench@…` in `plugins/installed_plugins.json` (information only: a mod loaded another way isn't listed). `ok`/`BAD` lines set the exit code; `--` lines inform. |
 
 ## Files and formats
 
@@ -2580,8 +2586,8 @@ The plugin install copies only `mod/` (the marketplace entry's `source`) into Cl
 cache, but `marketplace add` keeps a full clone of the repo under
 `~/.claude/plugins/marketplaces/<the marketplace's name>` (`installLocation` in
 `known_marketplaces.json`; elsewhere under `CLAUDE_CODE_PLUGIN_CACHE_DIR`). `wb setup` links `wb`
-and the `/delegate` skill from that clone, so `wb` runs from the clone the way it does from a
-developer's. Upgrading is `wb update` (or `/delegate-update`, which reloads the plugins after):
+and the `/workbench` skill from that clone, so `wb` runs from the clone the way it does from a
+developer's. Upgrading is `wb update` (or `/workbench-update`, which reloads the plugins after):
 `claude plugin marketplace update workbench` pulls the clone (the links follow it), `claude plugin
 update workbench@workbench` refreshes the mod. The mod runs `wb update --check --if-due` once per
 session, so a new commit is noticed within a week.
@@ -2599,7 +2605,7 @@ git clone https://github.com/a-schaefers/claudes-workbench ~/repos/workbench
 cd ~/repos/workbench
 mkdir -p ~/.local/bin ~/.claude/skills   # ~/.local/bin must be on your PATH
 ln -s "$PWD/bin/wb" ~/.local/bin/wb
-ln -s "$PWD/skill/delegate" ~/.claude/skills/delegate
+ln -s "$PWD/skill/workbench" ~/.claude/skills/workbench
 claude plugin marketplace add "$PWD"
 claude plugin install workbench@workbench
 wb doctor
@@ -2785,7 +2791,7 @@ push: every change is a pull request that merges once `check` is green and it is
 
 - **Anything a reader looks up** (a command, flag, default, guard, key, file, prompt text,
   environment variable) → this file, CLAUDE.md if it names it, and the skill
-  (`skill/delegate/SKILL.md`) if Claude uses it there; README only for the quickstart. CLAUDE.md's
+  (`skill/workbench/SKILL.md`) if Claude uses it there; README only for the quickstart. CLAUDE.md's
   *Keeping the docs true* is the procedure; `tests/test_docs.py` checks what it can (every command
   and flag here, every module and environment variable in CLAUDE.md, CLAUDE.md's size).
 - **A prompt's opening words** (the heads in *The runner, inside*) → `transcript` labels,
@@ -2806,7 +2812,7 @@ push: every change is a pull request that merges once `check` is green and it is
   interop runs outside it (`windows_drives`, `agent_path`, `interop_gap`) → the lane's *Writes*
   and *Reads* here, README's security bullet, and `wb doctor`'s line.
 - **`wb update`'s flags or output** (`--check --if-due`; `update available…`, `updated …`) → the
-  mod's weekly check, which toasts only an `update available` answer, and `/delegate-update`, which
+  mod's weekly check, which toasts only an `update available` answer, and `/workbench-update`, which
   reloads the plugins only after an `updated` one (register.tsx `poll` and the `UPDATE` command).
 - **A file the runner or wb reads from the task directory, or one the ask server writes** → keep
   the lane's part of it to `worktree/` and `ask/`, and have the runner check what comes from there

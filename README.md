@@ -13,7 +13,7 @@
 <a href="https://github.com/a-schaefers/claudes-workbench/commits/main"><img alt="last commit" src="https://img.shields.io/github/last-commit/a-schaefers/claudes-workbench"></a>
 </p>
 
-<p align="center"><img src="docs/delegate-mode.png" alt="Claude in delegate mode on the left; the Workbench pane on the right, where the apprentice robot says what the local agent is doing"></p>
+<p align="center"><img src="docs/delegate-mode.png" alt="Claude in workbench mode on the left; the Workbench pane on the right, where the apprentice robot says what the local agent is doing"></p>
 
 **Claude plans and reviews. Local models on your GPU write the code.**
 
@@ -121,11 +121,11 @@ come out.
 ```sh
 claude plugin marketplace add a-schaefers/claudes-workbench
 claude plugin install workbench@workbench
-~/.claude/plugins/marketplaces/workbench/bin/wb setup   # puts wb on your PATH and /delegate in your skills
+~/.claude/plugins/marketplaces/workbench/bin/wb setup   # puts wb on your PATH and /workbench in your skills
 wb doctor
 ```
 
-Workbench checks for an update once a week and tells you; `/delegate-update` installs it (or
+Workbench checks for an update once a week and tells you; `/workbench-update` installs it (or
 `wb update` in a terminal). Your state and skills stay as they are. Working on
 Workbench itself? Install from a clone instead ([Installing](ARCHITECTURE.md#installing)).
 
@@ -134,12 +134,12 @@ Workbench itself? Install from a clone instead ([Installing](ARCHITECTURE.md#ins
 Open Claude Code in your project and type:
 
 ```
-/delegate
+/workbench
 ```
 
-The **Workbench** pane opens: delegate mode is on. Now use Claude like normal. Ask for what you
+The **Workbench** pane opens: workbench mode is on. Now use Claude like normal. Ask for what you
 want in your own words, as often as you like; Claude just hands the coding to your local GPU
-from now on, until you type `/delegate-quit`. (`/delegate add a high-score screen` turns it on
+from now on, until you type `/workbench-quit`. (`/workbench add a high-score screen` turns it on
 and starts on that in one go.)
 
 Claude takes it from there:
@@ -165,12 +165,11 @@ to read the diff.
 
 | Command | What it does |
 |---|---|
-| `/delegate [task]` | turn on delegate mode for this session: the pane opens, and from then on Claude hands the coding of what you ask to your local models |
-| `/delegate-pane` | open the pane: every delegated task, and the agent's work live |
-| `/delegate-models` | check now which local models suit your hardware best (it also happens weekly) |
-| `/delegate-update` | update Workbench now: `wb`, the skill and the pane (it checks weekly and tells you) |
-| `/delegate-quit` | leave delegate mode: this session's agents stop now, their work is kept for later |
-| `/delegate-quit-and-hand-back-claude` | leave delegate mode and have Claude finish this session's agents' tasks itself |
+| `/workbench [task]` | turn on workbench mode for this session: the pane opens, and from then on Claude hands the coding of what you ask to your local models; run again, it brings the pane back |
+| `/workbench-models` | check now which local models suit your hardware best (it also happens weekly) |
+| `/workbench-update` | update Workbench now: `wb`, the skill and the pane (it checks weekly and tells you) |
+| `/workbench-quit` | leave workbench mode: this session's agents stop now, their work is kept for later |
+| `/workbench-quit-and-hand-back-claude` | leave workbench mode and have Claude finish this session's agents' tasks itself |
 
 **Away from the computer?** `wb chat serve` runs a small web chat with the running Claude session,
 and `wb chat url` prints its private link (on Linux, `systemctl --user link
