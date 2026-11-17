@@ -2363,6 +2363,34 @@ class Lane(Base):
                              capture_output=True, text=True, timeout=20)
         self.assertEqual((out.returncode, out.stderr.split(":")[0]), (127, "workbench lane"))
 
+    @unittest.skipUnless(lane.abi(), "needs Landlock")
+    def test_linuxbrew_under_a_kept_only_root_runs_in_the_lane_but_other_homes_stay_out(self):
+        # the 0.90 review: with /home ONLY_KEPT, Linuxbrew's bin/ was readable but not the
+        # ../Cellar its links point into, so the tool failed with Permission denied
+        root = Path(tempfile.mkdtemp(dir=Path.home(), prefix=".wb-kept-"))  # not in the lane
+        self.addCleanup(shutil.rmtree, root, True)
+        self.fake_home()                                # beside it, so root isn't in the home
+        brew = root / "linuxbrew" / ".linuxbrew"
+        cellar = brew / "Cellar" / "tool" / "1.0" / "bin"
+        for d in (cellar, brew / "bin", brew / "lib", root / "bob" / "bin"):
+            d.mkdir(parents=True)
+        shutil.copy("/bin/true", cellar / "tool")
+        os.symlink("../Cellar/tool/1.0/bin/tool", brew / "bin" / "tool")
+        (root / "bob" / "letters.txt").write_text("private")
+        os.environ["PATH"] = os.pathsep.join([str(brew / "bin"), str(root / "bob" / "bin"),
+                                              os.environ["PATH"]])
+        task = self.bare_task("t-brew", self.repo)
+        with mock.patch.object(context, "ONLY_KEPT", (str(root),)):
+            r = context.readable(task)
+            self.assertIn(str(brew), r)                 # Cellar and lib beside bin
+            self.assertIn(str(root / "bob" / "bin"), r)  # a user's home: the directory alone
+            self.assertFalse([p for p in r if p in (str(root), str(root / "bob"),
+                                                    str(root / "linuxbrew"))])
+            out = subprocess.run(lane.wrap(context.writable(task), [str(brew / "bin" / "tool")], r),
+                                 capture_output=True, text=True, timeout=20)
+            self.assertEqual(out.returncode, 0, out.stderr)
+            self.assertEqual(self.reads_in_lane(task, [root / "bob" / "letters.txt"]), ["refused"])
+
     def test_a_repo_that_holds_secrets_keeps_them_out_and_the_home_is_refused(self):
         home = self.fake_home()
         for d in (".config/gh", ".config/app"):

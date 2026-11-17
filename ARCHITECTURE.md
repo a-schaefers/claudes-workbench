@@ -698,9 +698,12 @@ deliberately hostile process (the 2026-11-16 audit's list of what it can't stop 
   homes) nothing; beyond those, the task's repo (its secrets left out even when it holds some: a
   repo at `~/.config`), workbench itself (even inside Claude's directory, the marketplace
   install), the lane, and the programs the agent runs (`tool_roots`: each PATH directory, the
-  prefix of one under the home (its parent when it is a `bin`, so `~/miniconda3` or `~/flutter`),
-  the install a link in the home's PATH directories points into, and the Python running
-  workbench; never `/`, the home directory or a parent of a secret), not the user's documents or
+  prefix of one under the home (its parent when it is a `bin`, so `~/miniconda3` or `~/flutter`)
+  or under an `ONLY_KEPT` root short of a user's home or a whole drive (Linuxbrew's
+  `/home/linuxbrew/.linuxbrew`; not `/home/<x>`, `/mnt/<drive>`, `/mnt/c/Users/<x>` or
+  `/media/<user>/<drive>`, which give the PATH directory alone: the 0.90 review found Linuxbrew's
+  `../Cellar` hidden), the install a link in those PATH directories points into, and the Python
+  running workbench; never `/`, the home directory or a parent of a secret), not the user's documents or
   other projects. Running a program reads it, so a program the walk leaves out can't start
   (`workbench lane: can't run <cmd> (Permission denied)`, exit 126; not found, 127): add its
   directory to `commands.json` `paths`. Landlock only allows, so `readable()` walks down from `/`

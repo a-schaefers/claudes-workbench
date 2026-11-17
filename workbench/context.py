@@ -491,16 +491,30 @@ def tool_roots(hidden: set[str]) -> set[str]:
     it is a `bin`), the targets of the links in the home's PATH directories, and the Python
     running workbench (the git shim, the ask server). Running a program reads it, so one under a
     non-dot home directory (~/miniconda3, ~/flutter, ~/apps) failed in the lane (the 2026-11-16
-    audit). Never `/`, the home directory or anything holding a secret: a prefix is kept whole."""
+    audit). The same under an ONLY_KEPT root, short of a user's home or a whole drive: Linuxbrew's
+    bin links into ../Cellar, which the lane hid (the 0.90 review). Never `/`, the home directory
+    or anything holding a secret: a prefix is kept whole."""
     home = os.path.realpath(Path.home())
     prefix = lambda d: os.path.dirname(d) if os.path.basename(d) == "bin" else d  # noqa: E731
+    roots = {os.path.realpath(r) for r in ONLY_KEPT}
+
+    def opens(p: str) -> bool:  # under an ONLY_KEPT root, deeper than a home or a drive
+        for root in roots:
+            if _under(p, root):
+                parts = p[len(root):].strip(os.sep).split(os.sep)
+                deep = 3 if root.endswith("media") else 2       # /media/<user>/<drive>
+                if len(parts) > 1 and parts[1] == "Users":      # /mnt/c/Users/<you>
+                    deep = 4
+                return len(parts) >= deep and not (p == home or _under(home, p))
+        return False
+
     found = set()
     for d in (os.environ.get("PATH") or "").split(os.pathsep):
         if not os.path.isabs(d) or not os.path.isdir(d):
             continue
         real = os.path.realpath(d)
-        if not _under(real, home):  # the directory alone: /mnt/c/Users/<you>/bin isn't a prefix
-            found.add(real)
+        if not _under(real, home) and not opens(prefix(real)):
+            found.add(real)  # the directory alone: /mnt/c/Users/<you>/bin isn't a prefix
             continue
         found.add(prefix(real))
         try:
@@ -511,8 +525,9 @@ def tool_roots(hidden: set[str]) -> set[str]:
             link = os.path.join(d, n)
             if os.path.islink(link):
                 target = os.path.realpath(link)
-                if _under(target, home):
-                    found.add(prefix(os.path.dirname(target)))
+                where = prefix(os.path.dirname(target))
+                if _under(target, home) or opens(where):
+                    found.add(where)
     found |= {prefix(os.path.dirname(os.path.realpath(sys.executable)))}
     found |= {os.path.realpath(p) for p in (sys.prefix, sys.base_prefix, sys.exec_prefix,
                                             os.environ.get("CONDA_PREFIX")) if p}
