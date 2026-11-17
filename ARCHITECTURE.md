@@ -2630,9 +2630,16 @@ mod was last verified with (`CLAUDE_CODE_VERSION`); `nightly.yml` runs the same 
 newest Claude Code and the runner's newer python3, so a red nightly means a new release broke the
 mod, not that main is broken. Its `macos` job runs the Python suite on macOS 3.11 with
 `continue-on-error` (a failure there doesn't turn the badge red): look at it before a release.
-The README shows both as badges, beside the floor the mod needs (Claude Code 2.1.287, the floor
-for mods). A GitHub runner has no `opencode` and may lack Landlock, so the RealOpenCode and Lane
-tests skip there: CI is not where they count. Not run in CI: the browser test and a real run.
+Both install the OpenCode the real-OpenCode tests were last verified with (`OPENCODE_VERSION`,
+from its GitHub release through `scripts/install-opencode.sh`, checked against the tarball's hash
+pinned beside it as `OPENCODE_SHA256`: 2.x isn't on npm), so those tests run there instead of
+skipping. `opencode.yml` runs the Python suite once a day on the newest OpenCode (the highest
+version among the releases, not GitHub's "Latest", which marks the 1.x line's patches), so a red
+run there means a new OpenCode broke the interop. The README shows all three as badges, beside
+the floors (Claude Code 2.1.287, the floor for mods; OpenCode 2.2.7, the oldest release that
+passes the real-OpenCode tests: 2.2.0 never lists `workbench_ask_reviewer`, found 2026-11-17). Each Linux job's `Landlock`
+step prints the runner's Landlock ABI, or that it has none and the Lane tests skip. Not run in
+CI: the browser test and a real run with a real model.
 `.github/dependabot.yml` moves the actions' SHA pins weekly. `check` is the required check on
 main (*Shipping to main*).
 
@@ -2640,7 +2647,7 @@ main (*Shipping to main*).
 - `tests/test_workbench.py`: end to end, one class per feature (Lifecycle, Context, Steering,
   Watch, AskServer, ConfigLayer, AgentContext, SkillLibrary, RealOpenCode, GitGuard, Lane,
   Permission, Images, Discovery, Routing, Tuning, Notes, Setup, Update, Projects, ModelSet,
-  WebChat, Hardware, Detector, SkillLearning, RealOpenCodeSkillFiles, Drift).
+  WebChat, Hardware, Detector, SkillLearning, RealOpenCodeSkillFiles, RealOpenCodeRun, Drift).
 - `tests/test_gpu.py`: sharing the GPU (side by side, taking turns, unknown VRAM, an exclusive
   holder, `wb start` refused or `--queue`d behind a holder, `wb image` refused or `--wait`ing,
   stale holders, a share Ollama couldn't keep), `can_share` (with `OLLAMA_MAX_LOADED_MODELS`) and
@@ -2711,19 +2718,30 @@ without `--standalone`, as the real ones do when another service holds the manag
 live tool names are 1.x-style (`bash`, `filePath`); real OpenCode 2.x says `shell`, `path`
 (`events._brief` reads both).
 
-**Real-OpenCode checks** (`RealOpenCode`, `RealOpenCodeSkillFiles`, skipped without `opencode`
-on PATH; the lane ones also need Landlock, `lane.abi()`). `capture_llm.py <port> <out.jsonl>
-[calls]` is an OpenAI-compatible server that records every request and answers each request
-that offers tools with the next scripted tool call (`{"name", "arguments"}`), so a test sees what
-OpenCode does with it. `run_calls(name, calls, *start_flags)` starts a task, points its config
+**Real-OpenCode checks** (`RealOpenCode`, `RealOpenCodeSkillFiles`, `RealOpenCodeRun`, skipped
+without `opencode` on PATH; the lane ones also need Landlock, `lane.abi()`). `capture_llm.py
+<port> <out.jsonl> [calls] [prompt tokens]` is an OpenAI-compatible server that records every
+request and answers each request that offers tools with the next scripted tool call (`{"name",
+"arguments"}`), so a test sees what OpenCode does with it. Every answer reports `prompt tokens`
+read (default 1), so a test can fill the window without sending it; a request carrying OpenCode's
+compaction template (`<template>`, `## Objective`) gets the template's headings back, which
+OpenCode accepts as a summary (anything else fails the compaction: `compaction.failed`). `run_calls(name, calls, *start_flags)` starts a task, points its config
 layer at the capture server, runs `opencode run --auto` in the worktree through `agent_env` and
 `lane.wrap`, and returns the task and the tool results, in order. Refusals read `permission.rejected` (a
 rule), `external_directory` (the file tools, the workdir) or `Permission denied` (Landlock).
-These tests are the only checks of the OpenCode quirks and the lane: a skip is not a pass, so a
-change to `context.py`, the config layer, `gitguard.py` or `lane.py` needs them run where they
-don't skip. The event stream and the session export are only imitated by the fake: a change to
-how the runner invokes or reads OpenCode updates `fake_opencode.py` in the same commit and needs
-one real run (CLAUDE.md, *Checks before committing*).
+`RealOpenCodeRun` is the runner itself on real OpenCode, for what the fake only imitates: its
+own XDG config, data and state (a `cap` provider in its config, sessions in the test's temp dir),
+`wb start --model cap`, and the capture server writing `answer.txt`. It checks the argv (the round
+passes its test), the `run --format json` events (`sessionID`, the `tool_use` row's tool and brief,
+`step_finish` tokens, the text), `session export` (`context_state`, `wb watch --once`),
+`session list` by title (`find_session`), `--session` (a `wb feedback` round's request carries
+the first round), and a full window then a real compaction (`fresh_reason` says full, then
+`COMPACTED`; `wb watch` shows it). These tests are the only checks of the OpenCode quirks, the
+interop and the lane: a skip is not a pass, so a change to `context.py`, the config layer,
+`gitguard.py` or `lane.py` needs them run where they don't skip (CI does, except the lane where
+the runner lacks Landlock). A change to how the runner invokes or reads OpenCode updates
+`fake_opencode.py` in the same commit, `RealOpenCodeRun` if it reads something new, and needs one
+real run with a real model (CLAUDE.md, *Checks before committing*).
 
 **The browser test** (`e2e_chat.mjs`): the real `bin/wb chat serve` on port 13371 (`WB_E2E_PORT`) against a temp
 `WB_HOME`, a fake listener claim, WebKit as an iPhone 13 and Chromium (`$CHROMIUM`, else
@@ -2801,7 +2819,8 @@ push: every change is a pull request that merges once `check` is green and it is
 - **`agent/HANDBOOK.md`** → every agent prompt carries it; each token costs prefill time.
 - **How OpenCode is invoked or read** (`run_round`'s argv, the event fields `normalize` reads, the
   export fields `context_state`, `measure_speed` and `transcript` read) → `tests/fake_opencode.py`
-  in the same commit, and one real run (`wb start --trial`, CLAUDE.md).
+  in the same commit, `RealOpenCodeRun` for a field it doesn't check yet, and one real run
+  (`wb start --trial`, CLAUDE.md).
 - **A git call on a task's worktree** → through `gitops.git` (pinned to the recorded git dir, no
   hooks), never `git -C <worktree>` by hand; parsed output → a porcelain or `-z` form.
 - **Permissions or the config layer** (`context.py`, `write_config_layer`) → the real-OpenCode
@@ -2840,6 +2859,9 @@ push: every change is a pull request that merges once `check` is green and it is
   `claude plugin validate mod` fails.
 - **The Claude Code version** the mod is verified with → `CLAUDE_CODE_VERSION` in
   `.github/workflows/check.yml`; the floor it needs → the README's badge and *What you need*.
+- **The OpenCode version** the tests are verified with → `OPENCODE_VERSION` and `OPENCODE_SHA256`
+  in `check.yml` and `nightly.yml` together; the floor → the README's badge and *What you need*,
+  and the "checked against" lines here and in CLAUDE.md.
 - **The Python floor** (3.11) → the launchers' guard (`bin/wb`, `bin/wb-ask-mcp`), `check.yml`'s
   and the `macos` job's `python-version`, the README's badge and *What you need*.
 - **The merge gate** (`owner-merge.yml`, the ruleset, `check.yml`'s job name) →
