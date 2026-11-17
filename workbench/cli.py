@@ -773,9 +773,10 @@ def _scope(tasks, where, sessions=None):
 
 
 def _others_line(others, what):
-    if others:
+    if others:  # by name: all_tasks' order follows the file system's (flaky in CI on 0.90's merge)
         return (f"{what} (other sessions'): "
-                + ", ".join(f"{t.name} ({t.spec.get('repo')})" for t in others))
+                + ", ".join(f"{t.name} ({t.spec.get('repo')})"
+                            for t in sorted(others, key=lambda t: t.name)))
     return ""
 
 
