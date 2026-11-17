@@ -456,10 +456,11 @@ class Lifecycle(Base):
     def test_answering_a_question_acknowledges_it(self):
         # The mark stopped short of the question being answered, so wb wait handed it back
         # once the task ran again (the 2026-11-16 audit).
-        t = self.fake_task("t-asked", phase="asking", asking="q1")
+        qid = "0123abcd"  # a real question id (ask_mcp.QID): wb answer refuses any other
+        t = self.fake_task("t-asked", phase="asking", asking=qid)
         (t.dir / "ask").mkdir()
-        (t.dir / "ask" / "q1.json").write_text("{}")
-        t.notify("question", "Q: which?", id="q1")
+        (t.dir / "ask" / f"{qid}.json").write_text("{}")
+        t.notify("question", "Q: which?", id=qid)
         run_wb("answer", "t-asked", "--text", "use A")
         t.set_status(phase="running", asking=None)
         with self.assertRaises(SystemExit) as e, redirect_stderr(io.StringIO()):
