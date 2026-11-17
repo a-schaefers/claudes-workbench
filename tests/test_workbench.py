@@ -1474,6 +1474,7 @@ class Update(Base):
         self.origin = tmp / "origin"
         git(tmp, "clone", "-q", str(self.repo), str(self.origin))
         os.environ["CLAUDE_CONFIG_DIR"] = str(tmp / "cc")
+        os.environ.pop("CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC", None)  # CI sets it (2026-11-17)
         self.copy = tmp / "cc/plugins/marketplaces/workbench"    # where Claude Code keeps its clone
         git(tmp, "clone", "-q", str(self.origin), str(self.copy))
         (self.origin / "new.txt").write_text("x")
