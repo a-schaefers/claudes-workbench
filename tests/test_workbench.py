@@ -2409,6 +2409,19 @@ class Lane(Base):
             self.assertEqual(out.returncode, 0, out.stderr)
             self.assertEqual(self.reads_in_lane(task, [root / "bob" / "letters.txt"]), ["refused"])
 
+    def test_a_grant_that_holds_the_repo_grants_the_places_beside_it(self):
+        # the 0.90 review: `wb allow --path ~/work` with the repo at ~/work/api said "allowed"
+        # and granted nothing, so the agent asked again
+        work = Path(self.tmp.name) / "work"
+        (work / "web").mkdir(parents=True)
+        subprocess.run(["git", "init", "-q", str(work / "api")], check=True)
+        Path(os.environ["WB_COMMANDS"]).write_text(json.dumps({"paths": [str(work)]}))
+        task = self.bare_task("t-beside", work / "api")
+        w = context.writable(task)
+        self.assertIn(str(work / "web"), w)
+        self.assertFalse([p for p in w if p in (str(work), str(work / "api"))
+                          or p.startswith(str(work / "api") + "/")])
+
     @unittest.skipUnless(lane.abi(), "needs Landlock")
     def test_a_repo_that_is_a_linked_worktree_has_git_working_in_the_lane(self):
         # the 0.90 review: the common git directory lay outside every kept path, so git failed

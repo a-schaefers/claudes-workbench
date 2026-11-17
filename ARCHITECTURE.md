@@ -671,7 +671,10 @@ deliberately hostile process (the 2026-11-16 audit's list of what it can't stop 
   refusing every build with a dependency, and any git dependency where `git/` didn't exist yet.
   No entry may resolve to `/` or the home directory, nor contain the task's repo or its git
   directory (`repo_dirs`: with `GOPATH=~/src` or the repo in `~/go/src`, the agent could write a
-  hook or `core.fsmonitor` that wb's own git runs outside the lane); the temp directories are
+  hook or `core.fsmonitor` that wb's own git runs outside the lane): a place holding them is split
+  around them like a secret holder (a grant of `~/work` beside the repo `~/work/api` grants
+  `~/work/web`; until the 0.90 review it was dropped whole while `wb allow` said it was granted),
+  and one naming the repo or a place inside it grants nothing; the temp directories are
   kept whole even so (a repo kept in `/tmp` stays in reach: splitting `/tmp` would refuse every
   new file there). `$XDG_RUNTIME_DIR` isn't in the lane (the user's bus, SSH and GPG agent
   sockets and runtime systemd units live there): the agent gets its own (`runtime_dir`,

@@ -368,8 +368,8 @@ def writable(task: store.Task) -> list[str] | None:
             continue
         if real in temps:  # a secret or repo kept in /tmp stays in reach: splitting /tmp would
             kept.append(str(p))  # refuse every new file there (Java's, Xvfb's)
-        elif not any(g == real or _under(g, real) for g in guard):
-            kept += _split(str(p), out_of)
+        else:  # split around the repo like a secret: a grant of ~/work beside the repo ~/work/api
+            kept += _split(str(p), out_of | guard)  # was dropped whole (the 0.90 review)
     return [p for p in _both(kept) if os.path.exists(p) and os.path.realpath(p) not in whole]
 
 
