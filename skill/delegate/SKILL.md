@@ -57,6 +57,7 @@ types /delegate again: each request is handled the way this skill says, until th
   you may just make.
 - **After a compaction or `/clear`**, a `delegate-mode` context block says the mode is still on
   and where this file is: read it again if its procedure is no longer in your context.
+- **Plans are handoff plans**, in plan mode or not: see "Planning work you will hand off" below.
 
 `wb` is the workbench CLI (`~/repos/workbench`, on PATH as `wb`; `wb --help`). Every command
 prints a short report written for you — don't go digging in raw logs unless a report says to.
@@ -80,6 +81,28 @@ it that way; the agents never write either.
   CLAUDE.md says is next (seen: a compaction summary that recounted CLAUDE.md, and the agent
   built its "Next:" line instead of its spec). `wb start` refuses a repo without one (`--no-claude-md`
   only for throwaway repos).
+
+## Planning work you will hand off
+In delegate mode every plan you write is for agents weaker than you, who see only the spec you
+send, so the plan the user approves is already the list of specs, each sized and checked by §1
+and §2. That holds in plan mode, which is read-only: read the code, `wb models` and `wb status`
+if you can, and start nothing until the plan is approved; then write the first spec and
+`wb start` at once. Per step:
+- **One concern**, no bigger than the slice `wb models` gives the model that will take it, and
+  its size (trivial or significant). A step you can't size is two steps.
+- **The files**: those to read first, those to create or change, and the existing code to imitate.
+- **Exact interfaces** for anything later steps or other code rely on: names, signatures,
+  constants, file formats. Settle them in the plan; agents rename what isn't pinned.
+- **Its acceptance command**, and the worked examples it tests, each number checked against
+  every rule. A step whose done-ness you can't state as a command isn't ready to hand off.
+- **Order**: logic, then its tests, then UI; a step that needs another's interface comes after it,
+  through `wb next` on the same agent when it is the same area.
+- **What stays yours**, marked apart: git, CLAUDE.md, choices and setup only the user can make
+  (downloads, licences, public repos), and the checks you run at review (a screenshot to look at,
+  tests to break on purpose, a grader).
+Keep code out of the plan except those interfaces: the agents write it, you hold the bar. The plan
+lives in your notes or the scratchpad, never in CLAUDE.md: an agent that loses its task takes up
+whatever CLAUDE.md says is next.
 
 ## 1. Size it; the router picks the model
 | Size | Typical task |

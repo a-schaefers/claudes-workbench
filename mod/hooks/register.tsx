@@ -215,7 +215,10 @@ const RUNNING = new Set(['queued', 'running', 'testing'])
 const MODE_NOTE = (skill: string) =>
   'Delegate mode is on in this session: the user ran /delegate, and it lasts until /delegate-quit. ' +
   'Treat each request as the /delegate skill says: hand its coding to local agents with wb, ' +
-  `then review and accept. If that procedure is not in your context, read ${skill} first.`
+  `then review and accept. Every plan you write, in plan mode or not, is a handoff plan: steps ` +
+  `sized to the agents' slice, each with its files, exact interfaces and acceptance command (the ` +
+  `skill's "Planning work you will hand off"). If that procedure is not in your context, read ` +
+  `${skill} first.`
 
 const QUIT = 'delegate-quit'
 const HAND_BACK = 'delegate-quit-and-hand-back-claude'

@@ -230,7 +230,10 @@ config entry away.
 takes it actually finishes: one concern, no bigger than that model's slice, with the files
 named, the code to imitate pointed at, exact names for anything other code relies on, and an
 acceptance command that proves it's done (an existing test, or a new one the agent writes first).
-Bigger work is split into steps run one after another.
+Bigger work is split into steps run one after another. Planning, in Claude Code's plan mode or not,
+works the same way: in delegate mode the plan you approve is already that list of steps, each with
+its size, files, exact interfaces and acceptance command, and what stays Claude's (git, CLAUDE.md,
+your decisions, the review checks) marked apart.
 
 **2. `wb start` sets it up** and returns at once:
 - It checks the task name, that the repo is a git repo, and that it has a committed `CLAUDE.md`
