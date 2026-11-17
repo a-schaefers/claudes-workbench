@@ -12,6 +12,7 @@ Only the standard library here: the shim imports this module on every git call.
 from __future__ import annotations
 
 import os
+import shlex
 import subprocess
 import sys
 import tempfile
@@ -178,12 +179,16 @@ def install(bin_dir: Path, task_repo: Path, pkg_root: Path, path: str) -> dict |
     repo_dir = os.path.realpath(os.path.join(task_repo, common))
     bin_dir.mkdir(parents=True, exist_ok=True)
     shim = bin_dir / "git"
-    shim.write_text(f"#!{sys.executable} -I\n"
+    # a /bin/sh wrapper, not a `#!<python>` line: the kernel splits a shebang at its first space
+    # and (before 5.1) cuts it at 127 bytes, so a Python under "/home/John Smith/" broke every
+    # git call the agent made (the 2026-11-16 audit). -I: no user site, no PYTHONPATH.
+    code = ("import sys\n"
+            f"sys.path.insert(0, {str(pkg_root)!r})\n"
+            "from workbench.gitguard import main\n"
+            f"sys.exit(main({real!r}, {repo_dir!r}, sys.argv[1:], "
+            f"{sorted({tempfile.gettempdir(), '/tmp', '/var/tmp'})!r}))\n")
+    shim.write_text("#!/bin/sh\n"
                     "# workbench: git is read-only for the agent (see workbench/gitguard.py)\n"
-                    "import sys\n"
-                    f"sys.path.insert(0, {str(pkg_root)!r})\n"
-                    "from workbench.gitguard import main\n"
-                    f"sys.exit(main({real!r}, {repo_dir!r}, sys.argv[1:], "
-                    f"{sorted({tempfile.gettempdir(), '/tmp', '/var/tmp'})!r}))\n")
+                    f"exec {shlex.quote(sys.executable)} -I -c {shlex.quote(code)} \"$@\"\n")
     shim.chmod(0o755)
     return {"PATH": f"{bin_dir}{os.pathsep}{path}"}

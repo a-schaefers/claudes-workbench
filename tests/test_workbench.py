@@ -986,6 +986,24 @@ class GitGuard(unittest.TestCase):
         self.assertTrue(gitguard.protected(str(ROOT / ".git"), "/elsewhere"))  # a real project
         self.assertFalse(gitguard.protected(None, "/elsewhere"))  # no repository: init, clone
 
+    def test_the_shim_runs_from_a_python_whose_path_has_a_space(self):
+        # a shebang splits at its first space: every agent git call failed (the 2026-11-16 audit)
+        from workbench import gitguard
+        with tempfile.TemporaryDirectory() as d:
+            (Path(d) / "sp ace").mkdir()
+            py = Path(d) / "sp ace" / "python3"
+            os.symlink(sys.executable, py)
+            repo = Path(d) / "repo"
+            subprocess.run(["git", "init", "-q", str(repo)], check=True)
+            with mock.patch.object(sys, "executable", str(py)):
+                env = gitguard.install(Path(d) / "bin", repo, ROOT, os.environ["PATH"])
+            out = subprocess.run([str(Path(d) / "bin" / "git"), "status", "--short"], cwd=repo,
+                                 capture_output=True, text=True, env={**os.environ, **env})
+            self.assertEqual(out.returncode, 0, out.stderr)
+            out = subprocess.run([str(Path(d) / "bin" / "git"), "commit", "-m", "x"], cwd=repo,
+                                 capture_output=True, text=True, env={**os.environ, **env})
+            self.assertIn("read-only", out.stderr)
+
     def test_the_report_flags_claudes_files(self):
         status = " M src/a.c\n M CLAUDE.md\n?? docs/AGENTS.md\nR  x -> .claude/skills/s/SKILL.md\n"
         self.assertEqual(runner.claude_files_changed(status),

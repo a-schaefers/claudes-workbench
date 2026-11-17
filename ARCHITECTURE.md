@@ -77,7 +77,7 @@ installed module:
 | `wb` | the user, Claude, the mod | `bin/wb` puts its real path's repo root on `sys.path` (so the `~/.local/bin/wb` symlink works) |
 | the runner | `cli.spawn_runner` | `python -m workbench.runner <task>`, cwd and `PYTHONPATH` = the repo root, own session, output to `runner.log` |
 | the ask server | OpenCode, from the config layer's `mcp.servers.workbench` | `[sys.executable, <root>/bin/wb-ask-mcp]`, like `bin/wb` |
-| the git shim | the agent's shell (`<rules>/bin/git`) | `#!<python> -I` plus an explicit `sys.path.insert` |
+| the git shim | the agent's shell (`<rules>/bin/git`) | a `/bin/sh` wrapper that execs `<python> -I -c` (quoted: a shebang splits at a space) with an explicit `sys.path.insert` |
 | the lane | the runner, before OpenCode | `python -I lane.py …`, a standard-library-only script |
 
 `-I` drops `PYTHONPATH`, so it is used only where the path is inserted in code; never rely on
@@ -1267,8 +1267,10 @@ custom-node packs do run their own Python).
   agent so, and to ask through `ask_reviewer` or say so in its summary when the task needs one of
   those.
 - **Git is read-only for the agent, enforced** (`workbench/gitguard.py`). `install` writes
-  `rules/<task>/bin/git` every round (`#!<python> -I`, the package path, then `gitguard.main(<real
-  git>, <the task repo's common dir>, argv)`) and puts its directory first on the agent's `PATH`,
+  `rules/<task>/bin/git` every round (a `/bin/sh` wrapper, `exec '<python>' -I -c '<code>' "$@"`,
+  quoted, since a shebang line splits at a space and a Python under `/home/John Smith/` broke
+  every git call; the code inserts the package path, then `gitguard.main(<real git>, <the task
+  repo's common dir>, argv)`) and puts its directory first on the agent's `PATH`,
   so it's the git called from the shell, a script or `make`. `split` skips git's global options
   (and the values of `-C`, `-c`, `--git-dir`, `--work-tree`, `--namespace`, `--super-prefix`,
   `--attr-source`) to find the subcommand; `reads` decides: no subcommand or one of `READ` (35:
