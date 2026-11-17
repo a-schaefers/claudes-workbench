@@ -107,7 +107,11 @@ def overrides_path() -> Path:
 
 def _overrides() -> dict:
     path = overrides_path()
-    return json.loads(path.read_text()) if path.exists() else {}
+    try:
+        data = json.loads(path.read_text()) if path.exists() else {}
+    except ValueError as e:  # one bad edit must not break every command
+        raise RuntimeError(f"{path} doesn't parse ({e}); fix it by hand") from None
+    return data if isinstance(data, dict) else {}
 
 
 def _this_host(host: str | None) -> bool:
@@ -565,6 +569,8 @@ def ollama_pull(root: str, name: str, say=print) -> None:
             if ev.get("error"):
                 raise RuntimeError(ev["error"])
             status, total, done = ev.get("status", ""), ev.get("total"), ev.get("completed")
+            if status != last:
+                shown = -1  # a new layer counts from 0 again
             if total and done is not None:
                 pct = int(100 * done / total)
                 if pct >= shown + 5 or pct == 100:
@@ -601,12 +607,15 @@ def set_override(model_id: str, key: str, value) -> None:
 def write_entry(provider: str, name: str, entry: dict | None) -> None:
     """Add, replace (entry) or remove (None) one model in OpenCode's config."""
     cfg = read_config()
-    prov = (cfg.get("provider") or {}).get(provider)
+    prov = (cfg.get("provider") or cfg.get("providers") or {}).get(provider)
     if prov is None:
-        raise KeyError(f"OpenCode has no provider {provider!r}")
+        raise RuntimeError(f"OpenCode has no provider {provider!r}")
     entries = prov.setdefault("models", {})
     if entry is None:
         entries.pop(name, None)
-    else:
-        entries[name] = entry
+    else:  # keys added by hand (variants, options) stay
+        old = entries.get(name) or {}
+        entries[name] = {**old, **entry, "options": {**(old.get("options") or {}), **(entry.get("options") or {})}}
+        if not entries[name]["options"]:
+            del entries[name]["options"]
     write_config(cfg)

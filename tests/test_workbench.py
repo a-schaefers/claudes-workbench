@@ -1571,6 +1571,18 @@ class WebChat(Base):
         self.assertEqual(self.call("/api/state", token=tok)[0], 200)
         self.assertEqual(self.call("/api/send", {"text": ""}, token=tok)[0], 400)
         self.assertEqual(self.chat.url(1337), f"http://localhost:1337/#token={tok}")
+        import http.client
+        c = http.client.HTTPConnection("127.0.0.1", self.port, timeout=5)
+        c.request("GET", "/api/state", headers={"Host": f"[::1]", "Authorization": tok})
+        self.assertEqual(c.getresponse().status, 401)                # no "Bearer ": no entry
+        c.close()
+
+    def test_an_empty_token_file_lets_nobody_in(self):
+        Path(os.environ["WB_CHAT_TOKEN"]).write_text("\n")
+        with self.assertRaises(RuntimeError):
+            self.chat.token()
+        with mock.patch.object(self.srv.RequestHandlerClass, "secret", ""):
+            self.assertEqual(self.call("/api/state")[0], 401)         # an empty header: refused
 
     def test_static_files_and_nothing_else(self):
         for path, kind in (("/", "text/html"), ("/app.js", "text/javascript"), ("/app.css", "text/css"),

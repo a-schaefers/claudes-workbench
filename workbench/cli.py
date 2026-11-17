@@ -118,7 +118,8 @@ def cmd_start(a):
         die("a task name is lowercase letters, digits and hyphens, at most 48")
     task = store.Task(a.name)
     if task.exists:
-        die(f"task {a.name!r} exists ({task.status.get('phase')}); discard it or pick a new name")
+        die(f"task {a.name!r} exists ({task.status.get('phase')}): pick a new name"
+            + ("" if task.status.get("phase") in store.CLOSED else f", or wb discard {a.name} first"))
     try:
         repo = gitops.toplevel(Path(a.repo).resolve())
     except gitops.GitError:
@@ -304,7 +305,9 @@ def cmd_answer(a):
     if not q.exists():
         die(f"no question {qid} in {a.name}")
     text = a.text if a.text is not None else Path(a.file).read_text()
-    (task.dir / "ask" / f"{qid}.answer").write_text(text.strip() + "\n")
+    tmp = task.dir / "ask" / f".{qid}.{os.getpid()}.tmp"  # the ask server polls: never half a file
+    tmp.write_text(text.strip() + "\n")
+    os.replace(tmp, task.dir / "ask" / f"{qid}.answer")
     _ack_all(task)
     print(f"answered {a.name}/{qid}")
 
@@ -335,6 +338,7 @@ def cmd_wait(a):
     """Block until a task (or any task) raises a notification nobody has acknowledged yet."""
     deadline = time.time() + a.timeout if a.timeout else None
     path = store.home() / "notify.jsonl"
+    path.parent.mkdir(parents=True, exist_ok=True)
     path.touch()
     watcher = Watcher(store.home(), *([need(a.name).dir] if a.name else []))
     while True:
@@ -343,6 +347,8 @@ def cmd_wait(a):
             if a.name and row["task"] != a.name:
                 continue
             task = store.Task(row["task"])
+            if row["kind"] in ("review", "stuck", "failed") and task.status.get("phase") in LIVE:
+                continue  # no longer true: the task runs again
             if row["ts"] > _acked(task):
                 _ack_file(task).write_text(str(row["ts"]))
                 print(f"[{row['kind']}] {row['task']}\n{row['text']}")
@@ -442,6 +448,9 @@ def cmd_report(a):
 def cmd_diff(a):
     """The work under review: the whole task, or after `wb next` the current step (--all: all)."""
     task = need(a.name)
+    if not task.worktree.is_dir():
+        die(f"{a.name} is {task.status.get('phase')} and its worktree is gone: "
+            f"git -C {task.spec['repo']} diff {task.spec['base'][:12]} {task.spec['branch']}")
     base = "HEAD" if task.status.get("steps", 1) > 1 and not a.all else task.spec["base"]
     print(gitops.diff(task.worktree, base, stat=a.stat, paths=a.paths) or "(no changes)")
 
@@ -469,12 +478,6 @@ def _open_tasks():
             and (runner_alive(t) or t.status.get("phase") in LIVE)]
 
 
-def _alive(pid: int) -> bool:
-    try:
-        os.kill(pid, 0)
-        return True
-    except (ProcessLookupError, PermissionError):
-        return False
 
 
 def stop_everything() -> list[str]:
@@ -503,7 +506,8 @@ def cmd_stop(a):
         die(f"{a.name} is {task.status.get('phase')}, not running")
     _stop_runner(task)
     task.set_status(phase="stuck", last="stopped by the reviewer", pid=None)
-    print(f"stopped {a.name}; wb feedback continues it, wb discard drops it")
+    print(f"stopped {a.name}; wb resume continues it in a fresh session, wb feedback with "
+          "corrections, wb discard drops it")
 
 
 def cmd_resume(a):
@@ -524,7 +528,9 @@ def cmd_resume(a):
     task.event({"ts": store.now(), "round": n + 1, "kind": "resumed",
                 "text": "Claude resumed the task in a fresh session"})
     spawn_runner(task)
+    _ack_all(task)  # the stuck or failed notice is handled: wb wait must not hand it out again
     print(f"resumed {a.name} in a fresh session (round {n + 1})")
+    _say(lessons.nudge(task))
 
 
 def _lane_dir(raw: str) -> str:
@@ -610,7 +616,7 @@ def cmd_note(a):
 def cmd_takeover(a):
     """Stop the agent and hand the worktree to Claude, to finish by hand or hand back."""
     if a.all:  # "just get it done claude"
-        tasks = _open_tasks()
+        tasks = [t for t in store.all_tasks() if t.status.get("phase") not in store.CLOSED]
         if not tasks:
             print("no open delegated tasks to take over")
         for t in tasks:
@@ -1004,7 +1010,13 @@ def _notes() -> list[str]:
         text = (store.home() / "notes.md").read_text()
     except FileNotFoundError:
         return []
-    return [line[2:] for line in text.splitlines() if line.startswith("- ")]
+    notes = []
+    for line in text.splitlines():  # a hand-wrapped line belongs to the note above it
+        if line.startswith("- ") or not notes:
+            notes.append(line.removeprefix("- ").strip())
+        elif line.strip():
+            notes[-1] += " " + line.strip()
+    return [n for n in notes if n]
 
 
 def cmd_notes(a):
@@ -1096,7 +1108,10 @@ def cmd_image(a):
 def cmd_model(a):
     """Add a model to OpenCode's config (pulling it first with --pull), or retire one."""
     if a.action == "sizes":
-        m = models.resolve(a.id)
+        try:
+            m = models.resolve(a.id)
+        except KeyError as e:
+            die(e.args[0] if e.args else f"no model {a.id}")
         bad = set(a.sizes or ()) - set(router.SIZES)
         if bad:
             die(f"sizes are {', '.join(router.SIZES)}")
@@ -1114,7 +1129,10 @@ def cmd_model(a):
             if prov["engine"] != "ollama":
                 die(f"{provider} is not an Ollama provider; install the model the server's own way")
             models.ollama_pull(prov["root"], name, say=lambda m: print(m, flush=True))
-        facts = models.ollama_show(prov["root"], name) if prov["engine"] == "ollama" else {}
+        try:
+            facts = models.ollama_show(prov["root"], name) if prov["engine"] == "ollama" else {}
+        except Exception as e:
+            die(f"{provider} can't describe {name} ({e}): is it pulled? (--pull downloads it)")
         caps = facts.get("capabilities") or []
         # the context the server actually serves: what Ollama says it gives this model, else what
         # this provider's other models are set to, else what the model was trained for
@@ -1148,6 +1166,8 @@ def cmd_model(a):
         models.write_entry(provider, name, None)
     except RuntimeError as e:
         die(str(e))
+    for key in list(models._overrides().get(a.id) or {}):  # its sizes, labels, start/stop
+        models.set_override(a.id, key, None)
     done = f"retired {a.id}: removed from OpenCode's config (its measurements stay in the history)"
     if a.delete:
         if prov["engine"] != "ollama":
@@ -1199,9 +1219,11 @@ def cmd_init(a):
         did.append("AGENTS.md → CLAUDE.md")
     has_commits = bool(gitops.git(d, "rev-parse", "--verify", "-q", "HEAD", check=False).strip())
     if not has_commits:
-        gitops.git(d, "add", "-A")
+        gitops.git(d, "add", "-A")  # the agents work from commits: the project as it is now
+        n = len(gitops.git(d, "diff", "--cached", "--name-only").split())
         gitops.git(d, "commit", "-q", "--allow-empty", "-m", "Initial commit")
-        did.append("initial commit")
+        did.append(f"initial commit of the {n} file(s) here (git show --stat to check)" if n
+                   else "initial commit")
     else:
         touched = [p for p in ("CLAUDE.md", "AGENTS.md")
                    if gitops.git(d, "status", "--porcelain", "--", p).strip()]
@@ -1217,7 +1239,7 @@ def cmd_init(a):
 
 
 # What `wb events` reports: the state, not the work (worktrees) or the noise.
-EVENT_SKIP = ("worktree", "rounds")
+EVENT_SKIP = ("tasks/*/worktree", "tasks/*/rounds", "imports", "images")  # clones, outputs
 QUIET = (".lock", ".tmp", "runner.log")
 
 
@@ -1274,16 +1296,24 @@ def cmd_doctor(a):
         ok &= good
         print(f"{'ok ' if good else 'BAD'} {what}")
 
-    oc = subprocess.run(["opencode", "--version"], capture_output=True, text=True)
-    line(oc.returncode == 0, f"opencode {oc.stdout.strip() or oc.stderr.strip()}")
+    def version(cmd):
+        try:
+            r = subprocess.run([cmd, "--version"], capture_output=True, text=True, timeout=30)
+            return r.returncode == 0, r.stdout.strip() or r.stderr.strip()
+        except (OSError, subprocess.TimeoutExpired) as e:
+            return False, f"not found ({e})"
+
+    good, said = version("opencode")
+    line(good, f"opencode {said}")
     cfg = models.opencode_config_path()
     try:
         models.read_config()
         line(cfg.exists(), f"OpenCode config {cfg}")
     except ValueError as e:
         line(False, f"OpenCode config {cfg} doesn't parse: {e}")
-    g = subprocess.run(["git", "--version"], capture_output=True, text=True)
-    line(g.returncode == 0, g.stdout.strip() or "git not found")
+        sys.exit(1)  # nothing below can read the models
+    good, said = version("git")
+    line(good, said)
     found = models.discover()
     line(bool(found), f"{len(found)} local model(s) in {models.opencode_config_path()}")
     for m in found.values():
@@ -1342,7 +1372,8 @@ def main(argv=None):
                    "word before the runner nudges the agent to act (default 420, or what the "
                    "model's measured speed gives; 0 turns it off)")
     s.add_argument("--base", default="HEAD")
-    s.add_argument("--force", action="store_true", help="queue even if the model can't run now")
+    s.add_argument("--force", action="store_true", help="queue the --model asked for even if it "
+                   "can't run now")
     s.add_argument("--trial", action="store_true", help="a check of workbench itself (a scratch "
                    "repo): its result and lessons don't count as evidence")
     s.add_argument("--no-claude-md", action="store_true",
@@ -1490,7 +1521,7 @@ def main(argv=None):
     s.add_argument("name", nargs="?")
     s.add_argument("--all", action="store_true", help="every open delegated task")
     s.set_defaults(f=cmd_takeover)
-    s = sub.add_parser("stop", help="stop a running task (it can be continued with feedback)")
+    s = sub.add_parser("stop", help="stop a running task (wb resume or wb feedback continues it)")
     s.add_argument("name", nargs="?")
     s.add_argument("--all", action="store_true", help="every running agent")
     s.set_defaults(f=cmd_stop)
@@ -1556,7 +1587,10 @@ def main(argv=None):
     sub.add_parser("doctor", help="check the setup").set_defaults(f=cmd_doctor)
 
     a = ap.parse_args(argv)
-    a.f(a)
+    try:
+        a.f(a)
+    except RuntimeError as e:  # wb's own failures (git, a config that doesn't parse): a message
+        die(str(e))
 
 
 if __name__ == "__main__":

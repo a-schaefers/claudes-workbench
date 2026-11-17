@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import ctypes
 import ctypes.util
+import fnmatch
 import os
 import select
 import struct
@@ -18,8 +19,9 @@ from pathlib import Path
 
 IN_MODIFY, IN_ATTRIB, IN_CLOSE_WRITE = 0x002, 0x004, 0x008
 IN_MOVED_FROM, IN_MOVED_TO, IN_CREATE, IN_DELETE = 0x040, 0x080, 0x100, 0x200
-IN_ISDIR, IN_NONBLOCK, IN_CLOEXEC = 0x40000000, 0o4000, 0o2000000
-MASK = IN_MODIFY | IN_CLOSE_WRITE | IN_MOVED_FROM | IN_MOVED_TO | IN_CREATE | IN_DELETE
+IN_Q_OVERFLOW, IN_IGNORED, IN_ISDIR = 0x4000, 0x8000, 0x40000000
+IN_NONBLOCK, IN_CLOEXEC = os.O_NONBLOCK, os.O_CLOEXEC  # inotify's flags are the open() ones
+MASK = IN_MODIFY | IN_ATTRIB | IN_CLOSE_WRITE | IN_MOVED_FROM | IN_MOVED_TO | IN_CREATE | IN_DELETE
 _EVENT = struct.Struct("iIII")
 POLL_S = 0.25  # without inotify: how often a directory is looked at
 
@@ -59,10 +61,12 @@ class Watcher:
     """Watch directories (and, with recursive=True, the directories made inside them later).
 
     wait(timeout) returns the changed paths, or [] on timeout. fileno() lets a caller select()
-    on it beside other descriptors."""
+    on it beside other descriptors. `skip` leaves directories out, as patterns matched against
+    the path below a watched root ("tasks/*/worktree")."""
 
     def __init__(self, *dirs: Path, recursive: bool = False, skip: tuple[str, ...] = ()):
-        self.recursive, self.skip = recursive, set(skip)
+        self.recursive, self.skip = recursive, tuple(skip)
+        self.roots = [Path(d) for d in dirs]
         self.dirs: dict[int, Path] = {}
         self.polled: dict[Path, dict] = {}  # directories inotify isn't watching: looked at instead
         lib = _lib()
@@ -77,8 +81,15 @@ class Watcher:
     def fileno(self) -> int:
         return self.fd
 
+    def _skipped(self, d: Path) -> bool:
+        for pat in self.skip:
+            for root in self.roots:
+                if d.is_relative_to(root) and fnmatch.fnmatch(d.relative_to(root).as_posix(), pat):
+                    return True
+        return False
+
     def add(self, d: Path) -> None:
-        if not d.is_dir() or d.name in self.skip:
+        if not d.is_dir() or self._skipped(d):
             return
         wd = _lib().inotify_add_watch(self.fd, os.fsencode(d), MASK) if self.native else -1
         if wd >= 0:
@@ -87,7 +98,7 @@ class Watcher:
             self.polled[d] = _scan(d)
         if self.recursive:
             for sub in d.iterdir():
-                if sub.is_dir() and sub.name not in self.skip and sub not in self.dirs.values() \
+                if sub.is_dir() and not self._skipped(sub) and sub not in self.dirs.values() \
                         and sub not in self.polled:
                     self.add(sub)
 
@@ -115,17 +126,27 @@ class Watcher:
                 buf = os.read(self.fd, 64 * 1024)
             except BlockingIOError:
                 return changed
+            except OSError:  # the descriptor went bad: say everything may have changed
+                return changed + list(self.dirs.values())
             i = 0
             while i < len(buf):
                 wd, mask, _, size = _EVENT.unpack_from(buf, i)
                 name = buf[i + _EVENT.size:i + _EVENT.size + size].rstrip(b"\0")
                 i += _EVENT.size + size
+                if mask & IN_Q_OVERFLOW:  # events were lost: every directory may have changed
+                    changed += list(self.dirs.values())
+                    continue
+                if mask & IN_IGNORED:  # the directory went away (deleted, moved, unmounted)
+                    gone = self.dirs.pop(wd, None)
+                    if gone:
+                        changed.append(gone)
+                    continue
                 base = self.dirs.get(wd)
                 if base is None:
                     continue
                 path = base / os.fsdecode(name) if name else base
                 if (self.recursive and mask & IN_ISDIR and mask & (IN_CREATE | IN_MOVED_TO)
-                        and path.name not in self.skip):
+                        and not self._skipped(path)):
                     self.add(path)
                 changed.append(path)
 
@@ -186,6 +207,8 @@ def wait_exit(pid: int, timeout: float) -> bool:
                 os.kill(pid, 0)
             except ProcessLookupError:
                 return True
+            except PermissionError:  # it exists, as someone else's
+                pass
             time.sleep(0.1)
         return False
     try:

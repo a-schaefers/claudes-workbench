@@ -115,7 +115,8 @@ def _guess(size: str):
     """Sort key within the top band: the largest model for significant work, the smallest for
     trivial, then the one already loaded."""
     sign = -1 if size == "significant" else 1
-    return lambda s: (s.fits is False, sign * s.weights, not s.state.get("resident"))
+    return lambda s: (s.fits is False, not s.weights, sign * s.weights,  # unknown size: last
+                      not s.state.get("resident"))
 
 
 def fits(m: models.Model, budget: int | None) -> bool | None:

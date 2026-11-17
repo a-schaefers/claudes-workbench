@@ -45,8 +45,11 @@ def engines() -> dict[str, dict]:
     p = config_path()
     if not p.is_file():
         return {}
-    data = json.loads(p.read_text())
-    return {k: v for k, v in data.items() if isinstance(v, dict)}
+    try:
+        data = json.loads(p.read_text())
+    except ValueError as e:
+        raise RuntimeError(f"{p} doesn't parse ({e}); fix it by hand") from None
+    return {k: v for k, v in data.items() if isinstance(v, dict)} if isinstance(data, dict) else {}
 
 
 def engine(name: str | None) -> tuple[str, dict]:

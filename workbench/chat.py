@@ -70,7 +70,12 @@ def token() -> str:
         fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
         with os.fdopen(fd, "w") as f:
             f.write(secrets.token_urlsafe(32) + "\n")
-    return path.read_text().strip()
+    if path.stat().st_mode & 0o077:
+        path.chmod(0o600)  # the token is the whole of the chat's auth
+    got = path.read_text().strip()
+    if len(got) < 16:  # an empty token would let in any request
+        raise RuntimeError(f"{path} holds no usable token: delete it and wb chat makes a new one")
+    return got
 
 
 def tailscale() -> dict:
@@ -171,7 +176,7 @@ class Hub:
                     pidfd = os.pidfd_open(int(pid)) if pid else None
                 except (OSError, ValueError, AttributeError):
                     pidfd = None
-            if not w.native:
+            if not w.native or w.polled:  # no inotify, or chat/ fell back to looking
                 w.wait(1)
             else:
                 ready, _, _ = select.select([w.fd] + ([pidfd] if pidfd is not None else []), [], [], 60)
@@ -196,10 +201,7 @@ class Handler(BaseHTTPRequestHandler):
     def log_message(self, *args):  # the journal needn't hold every poll
         pass
 
-    def _send(self, code: int, body: bytes, ctype: str) -> None:
-        self.send_response(code)
-        self.send_header("Content-Type", ctype)
-        self.send_header("Content-Length", str(len(body)))
+    def _security_headers(self) -> None:
         self.send_header("Cache-Control", "no-store")
         self.send_header("X-Frame-Options", "DENY")
         self.send_header("X-Content-Type-Options", "nosniff")
@@ -207,6 +209,12 @@ class Handler(BaseHTTPRequestHandler):
         self.send_header("Content-Security-Policy",
                          "default-src 'self'; style-src 'self' 'unsafe-inline'; "
                          "frame-ancestors 'none'; base-uri 'none'; form-action 'none'")
+
+    def _send(self, code: int, body: bytes, ctype: str) -> None:
+        self.send_response(code)
+        self.send_header("Content-Type", ctype)
+        self.send_header("Content-Length", str(len(body)))
+        self._security_headers()
         self.end_headers()
         self.wfile.write(body)
 
@@ -214,15 +222,20 @@ class Handler(BaseHTTPRequestHandler):
         self._send(code, json.dumps(obj).encode(), "application/json")
 
     def _allowed(self) -> bool:
-        host = (self.headers.get("Host") or "").rsplit(":", 1)[0].strip("[]").lower()
+        host = (self.headers.get("Host") or "").strip().lower()
+        if host.startswith("["):  # [v6] or [v6]:port
+            host = host[1:host.find("]")] if "]" in host else host
+        elif host.count(":") == 1:
+            host = host.rsplit(":", 1)[0]
         if self.hosts is not None and host not in self.hosts:
             self._json(403, {"error": "unknown host"})
             return False
         return True
 
     def _authed(self) -> bool:
-        got = (self.headers.get("Authorization") or "").removeprefix("Bearer ").strip()
-        if not hmac.compare_digest(got.encode(), self.secret.encode()):
+        auth = self.headers.get("Authorization") or ""
+        got = auth[len("Bearer "):].strip() if auth.startswith("Bearer ") else ""
+        if not self.secret or not got or not hmac.compare_digest(got.encode(), self.secret.encode()):
             self._json(401, {"error": "bad or missing token: open the link from `wb chat url`"})
             return False
         return True
@@ -253,7 +266,7 @@ class Handler(BaseHTTPRequestHandler):
         try:
             self.send_response(200)
             self.send_header("Content-Type", "text/event-stream")
-            self.send_header("Cache-Control", "no-store")
+            self._security_headers()
             self.send_header("X-Accel-Buffering", "no")
             self.end_headers()
             hub, seen, last_body = self.hub, -1, None
