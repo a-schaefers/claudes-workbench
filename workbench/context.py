@@ -46,8 +46,8 @@ ALLOWED_COMMANDS = (
     # files and text
     "ls", "cat", "head", "tail", "wc", "sort", "uniq", "cut", "tr", "sed", "awk", "gawk", "grep",
     "egrep", "fgrep", "rg", "ag", "find", "fd", "xargs", "tee", "diff", "cmp", "comm", "patch",
-    "file", "stat", "du", "df", "tree", "realpath", "dirname", "basename", "readlink", "touch",
-    "mkdir", "rmdir", "cp", "mv", "rm", "ln", "chmod", "install", "mktemp", "tar", "gzip",
+    "file", "identify", "stat", "du", "df", "tree", "realpath", "dirname", "basename", "readlink",
+    "touch", "mkdir", "rmdir", "cp", "mv", "rm", "ln", "chmod", "install", "mktemp", "tar", "gzip",
     "gunzip", "zcat", "zip", "unzip", "xz", "bzip2", "zstd", "jq", "yq", "column", "nl", "od",
     "xxd", "hexdump", "strings", "md5sum", "sha1sum", "sha256sum", "base64", "seq", "paste",
     "fold", "fmt", "expand", "rev", "tac", "split", "csplit", "join", "iconv", "less", "more",
@@ -95,6 +95,10 @@ def shell_rules(task: store.Task) -> list[dict]:
     rules += [{"action": "shell", "resource": r, "effect": "allow"}
               for c in ALLOWED_COMMANDS for r in (c, f"{c} *")]
     rules += [{"action": "shell", "resource": r, "effect": "allow"} for r in ("./*", "../*")]
+    # and what it built anywhere in its lane, by path: a debug binary in the temp directory was
+    # refused (2026-11-16) though `bash` could run it; the lane, not this list, bounds writes
+    rules += [{"action": "shell", "resource": f"{d}/*", "effect": "allow"}
+              for d in (writable(task) or []) if os.path.isdir(d) and d not in ("/dev", "/proc")]
     rules += [{"action": "shell", "resource": r, "effect": "deny"} for r in ASK_FIRST]
     rules += [{"action": "shell", "resource": r, "effect": "allow"} for r in allowed_patterns(task)]
     rules += [{"action": "shell", "resource": c, "effect": "deny"} for c in DENIED_SHELL]
@@ -152,6 +156,60 @@ def writable(task: store.Task) -> list[str] | None:
     return [p for p in _both(places) if os.path.exists(p)]
 
 
+# Where credentials and the user's own records live, under the home directory: the agent's
+# processes can't read files there (Landlock), so a push, a gh call or a cloud login can't borrow
+# the user's keys, nor can an agent read Claude's own files or the user's mail. Found 2026-11-16:
+# `python3` running gh inside the lane was logged in, and the SSH keys that push were readable.
+SECRETS = (".ssh", ".gnupg", ".password-store", ".netrc", ".git-credentials", ".authinfo",
+           ".authinfo.gpg", ".bitwarden.json", ".secrets.gpg", ".config/gh", ".config/hub",
+           ".local/share/keyrings", ".aws", ".azure", ".config/gcloud", ".kube", ".docker",
+           ".terraform.d", ".pypirc", ".gem/credentials", ".cargo/credentials",
+           ".cargo/credentials.toml", ".config/rclone", ".codex", ".pki", ".mozilla",
+           ".thunderbird", ".config/chromium", ".config/google-chrome", ".config/BraveSoftware",
+           ".camoufox", ".cloakbrowser", ".irssi", ".bash_history", ".zsh_history",
+           ".python_history", ".claude", ".claude.json")
+# Of the home directory's own entries, the dotfiles (tools' configs, caches, toolchains) stay
+# readable, and these; the user's documents and other projects don't, beyond the task's repo,
+# workbench itself and what Claude allowed (`wb allow --path`).
+HOME_READABLE = ("bin", "go")
+
+
+def readable(task: store.Task) -> list[str] | None:
+    """What the agent's processes may read: the system, the home directory's dotfiles but
+    SECRETS, the task's repo and its lane. None with the lane off. Landlock only allows, so this
+    lists the entries beside each excluded one; lane.py adds the lane (writable) itself."""
+    lane = writable(task)
+    if lane is None:
+        return None
+    home = os.path.realpath(Path.home())
+    hidden = {os.path.realpath(p) for p in (*(Path.home() / h for h in SECRETS), claude_home())}
+    keep = {os.path.realpath(p) for p in (task.spec.get("repo"), PKG_ROOT, *lane,  # PKG_ROOT:
+                                          *lane_paths(task)) if p}  # the git shim, the ask server
+    under = lambda a, b: a.startswith(b.rstrip(os.sep) + os.sep)  # noqa: E731
+    out: list[str] = []
+
+    def visit(p: str, default: bool) -> None:
+        real = os.path.realpath(p)
+        if real in hidden or any(under(real, h) for h in hidden):
+            return                                         # a secret, or a link into one
+        if real in keep:
+            out.append(p)
+            return
+        holds = [h for h in hidden | keep if under(h, real)]
+        if default and not any(h in hidden for h in holds):
+            out.append(p)
+        elif holds:                                        # go in: something to skip or keep
+            try:
+                names = sorted(os.listdir(p))
+            except OSError:
+                return
+            for name in names:
+                visit(os.path.join(p, name),
+                      name.startswith(".") or name in HOME_READABLE if real == home else default)
+    visit("/", True)
+    return out
+
+
 def external_rules(task: store.Task) -> list[dict]:
     """OpenCode's `external_directory` rule: its file tools and the shell's working directory
     stay in the lane and READABLE, and the skills handed to the task."""
@@ -170,6 +228,15 @@ def external_rules(task: store.Task) -> list[dict]:
 # Claude's files: the instructions every agent reads, and the project's skills and settings.
 # The agent proposes a change to them in its summary; Claude makes it.
 CLAUDE_FILES = ("*CLAUDE.md", "*CLAUDE.local.md", "*AGENTS.md", ".claude/*", "*/.claude/*")
+
+
+def rules_dir(task: store.Task) -> Path:
+    """Where the agent's rules live (its OpenCode config, its instructions, the git shim): out
+    of its lane, so it can't rewrite them for its next round. The task directory is in the lane
+    (the ask server writes the task's status there)."""
+    d = store.home() / "rules" / task.name
+    d.mkdir(parents=True, exist_ok=True)
+    return d
 
 
 def claude_home() -> Path:
@@ -191,12 +258,14 @@ def instruction_files(task: store.Task) -> tuple[list[Path], list[str]]:
     wt, repo = task.worktree, Path(task.spec["repo"])
     # the agent's own copy: OpenCode shows each instruction file's path, and a path into the
     # workbench repo once led a freshly started agent to go looking there for plans
-    handbook = task.dir / "HANDBOOK.md"
+    handbook = rules_dir(task) / "HANDBOOK.md"
     handbook.write_text(HANDBOOK.read_text())
     load: list[Path] = [handbook]
     user = claude_home() / "CLAUDE.md"
-    if user.is_file():
-        load.append(user)
+    if user.is_file():  # a copy too: the agent can't read Claude's directory (SECRETS)
+        mine = rules_dir(task) / "CLAUDE.md"
+        mine.write_text(user.read_text())
+        load.append(mine)
     for rel in ROOT_FILES:
         # the worktree's copy when the file is committed; the repo's when it is local or uncommitted
         for base in (wt, repo):

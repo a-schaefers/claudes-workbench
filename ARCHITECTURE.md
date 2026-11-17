@@ -189,8 +189,10 @@ before every round) gives it:
   `--always`, and the agent carries on within seconds (`wb start --allow` grants one up front).
   Your standing allowances live in `~/.config/workbench/commands.json` (`{"allow": ["curl *"]}`;
   `["*"]` turns the list off). It's a guardrail on the agent's own choices rather than a sandbox
-  (make and any interpreter can run anything); the hard limits stay hard: no sudo, git
-  read-only, no `gh`.
+  (make and any interpreter can run anything); the hard limits are the kernel's: no sudo (the
+  lane sets no-new-privileges), git read-only (the repo's refs are outside the lane), and no
+  `gh` or push with your keys (credentials are unreadable, below). A program the agent built runs
+  by its path anywhere in its lane (`./a.out`, `/tmp/dbg`).
 - **Paths, a lane.** The agent writes only in its lane: its worktree (the task directory), the
   temp directory, and the caches and toolchain homes that builds fill (`~/.cache`, `~/.cargo`,
   `~/go`, `~/.npm`, `~/.gradle` and the like), so builds, tests and installs of what the project
@@ -199,10 +201,18 @@ before every round) gives it:
   or `make` included, get "Permission denied" for a write anywhere else, your own checkout among
   them. OpenCode's `external_directory` rule keeps its file tools (read, edit, write, grep, glob)
   and the shell's working directory to the lane and the system's directories (`/usr`, `/etc`,
-  `/opt`...). Reading from the shell stays free (`cat`, a compiler, an interpreter), and so do
-  the network and running programs. When a task needs a directory outside it, the agent asks
-  with `path`; `wb allow <task> --path <dir>` grants read and write (`--always` keeps it,
-  `wb start --allow-path` grants it up front). Standing ones are `"paths"` in `commands.json`;
+  `/opt`...). Reading from the shell stays free (`cat`, a compiler, an interpreter) except
+  where credentials and your own records live: the kernel refuses reading `~/.ssh`, `~/.gnupg`,
+  gh's login, keyrings, cloud logins, browser and mail profiles, shell history and Claude's own
+  directory (`context.SECRETS`), and of your home directory's other entries only the dotfiles
+  (tools' configs, caches, toolchains), the task's repo and workbench itself are readable, not
+  your documents or other projects. Found by trying: `python3` running gh inside the lane was
+  logged in, and the SSH keys that push were readable. The network and running programs stay
+  free. The agent's rules (its OpenCode config, instructions and git shim) live outside its lane,
+  in `<state>/rules/<task>/`, so it can't rewrite them for its next round; your
+  `~/.claude/CLAUDE.md` reaches it as a copy there. When a task needs a directory outside it,
+  the agent asks with `path` (for reading one too); `wb allow <task> --path <dir>` grants read
+  and write (`--always` keeps it, `wb start --allow-path` grants it up front). Standing ones are `"paths"` in `commands.json`;
   `"paths": ["*"]` turns the lane off. Without Landlock (macOS, an old kernel) only the file-tool
   rule applies, and `wb doctor` says which you have.
 - **Skills**: the repo's own `.claude/skills`, plus the library skills Claude handed this task.

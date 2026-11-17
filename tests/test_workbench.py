@@ -603,9 +603,11 @@ class AgentContext(Base):
         task = store.Task("t-ctx")
         layer = json.loads(runner.write_config_layer(task).read_text())
         loaded = layer["instructions"]
-        self.assertEqual(loaded[0], str(task.dir / "HANDBOOK.md"))   # a copy: no path into workbench
+        self.assertEqual(loaded[0], str(context.rules_dir(task) / "HANDBOOK.md"))  # a copy
         self.assertEqual(Path(loaded[0]).read_text(), context.HANDBOOK.read_text())
-        self.assertIn(str(tmp / "home" / ".claude" / "CLAUDE.md"), loaded)
+        mine = context.rules_dir(task) / "CLAUDE.md"   # a copy: Claude's directory is unreadable
+        self.assertEqual(loaded[1], str(mine))
+        self.assertEqual(mine.read_text(), (tmp / "home" / ".claude" / "CLAUDE.md").read_text())
         self.assertIn(str(task.worktree / "CLAUDE.md"), loaded)        # committed: worktree copy
         self.assertIn(str(task.worktree / ".claude" / "rules" / "style.md"), loaded)
         self.assertNotIn(str(self.repo / "CLAUDE.local.md"), loaded)   # same text as AGENTS.md
@@ -682,7 +684,7 @@ class SkillLibrary(Base):
         self.assertIn("skills handed: alpha", self.start("t-sk", "fix", "--auto-fix", "0", "--skill", "alpha"))
         wait_phase("t-sk", {"review"})
         task = store.Task("t-sk")
-        layer = json.loads((task.dir / "opencode.json").read_text())
+        layer = json.loads((context.rules_dir(task) / "opencode.json").read_text())
         self.assertEqual(layer["skills"], [str(Path(os.environ["WB_SKILLS"]) / "alpha")])  # not beta
         first = json.loads(prompts.read_text().splitlines()[0])
         self.assertIn("Claude picked these skills", first)
@@ -692,7 +694,7 @@ class SkillLibrary(Base):
         run_wb("skill", "take", "t-sk", "alpha")
         run_wb("feedback", "t-sk", "--text", "1. The answer is 42.")
         wait_phase("t-sk", {"review"})
-        layer = json.loads((task.dir / "opencode.json").read_text())
+        layer = json.loads((context.rules_dir(task) / "opencode.json").read_text())
         self.assertEqual(layer["skills"], [str(Path(os.environ["WB_SKILLS"]) / "beta")])
         second = json.loads(prompts.read_text().splitlines()[1])
         self.assertIn("`beta`: Use when BETA.", second)                  # only what changed
@@ -814,6 +816,8 @@ class RealOpenCode(Base):
 
     def test_everyday_tools_run_and_the_rest_waits_for_claude(self):
         wt = str(store.Task("t-cmds").worktree)
+        built = Path(tempfile.gettempdir()) / f"wb-built-{os.getpid()}"
+        self.addCleanup(lambda: built.unlink(missing_ok=True))
         def shell(cmd):
             return {"name": "shell", "arguments": {"command": cmd, "workdir": wt}}
         _, answers = self.run_calls("t-cmds", [
@@ -822,10 +826,13 @@ class RealOpenCode(Base):
             shell("curl --version"),                                  # not an everyday tool
             shell("echo $(curl --version)"),                          # not hidden in $(…) either
             shell("pip install --no-index nothing-at-all"),           # a new dependency
+            shell(f"printf '#!/bin/sh\\necho built-ok\\n' > {built} && chmod +x {built} "
+                  f"&& {built}"),                                     # its own build, by path
         ])
         refused = ["permission.rejected" in a for a in answers]
-        self.assertEqual(refused, [False, False, True, True, True], answers)
+        self.assertEqual(refused, [False, False, True, True, True, False], answers)
         self.assertIn("42", answers[1])
+        self.assertIn("built-ok", answers[5])
 
     def test_what_claude_allows_runs_and_no_allowance_lifts_the_hard_limits(self):
         Path(os.environ["WB_COMMANDS"]).write_text(json.dumps({"allow": ["*"]}))  # list off
@@ -990,6 +997,44 @@ class Lane(Base):
         run_wb("allow", "t-lp", "--path", str(want), "--always")
         self.assertEqual(json.loads(Path(os.environ["WB_COMMANDS"]).read_text())["paths"],
                          [str(want)])
+
+    @unittest.skipUnless(lane.abi(), "needs Landlock")
+    def test_credentials_are_unreadable_and_the_rules_out_of_reach(self):
+        task = store.Task("t-sec")
+        self.start("t-sec", "ok")
+        wait_phase("t-sec", {"review"})
+        home = Path(tempfile.mkdtemp(dir=Path.home(), prefix=".wb-sec-test-"))  # not in the lane
+        self.addCleanup(shutil.rmtree, home, True)
+        (home / ".ssh").mkdir(parents=True)
+        (home / ".ssh" / "id_ed25519").write_text("key")
+        (home / ".config" / "gh").mkdir(parents=True)
+        (home / ".config" / "gh" / "hosts.yml").write_text("token")
+        (home / ".config" / "app.toml").write_text("fine")
+        (home / ".gitconfig").write_text("fine")
+        (home / "letters.txt").write_text("private")
+        old = os.environ["HOME"]
+        os.environ["HOME"] = str(home)
+        self.addCleanup(os.environ.__setitem__, "HOME", old)
+        reads = context.readable(task)
+        for p in (home / ".gitconfig", home / ".config" / "app.toml"):
+            self.assertIn(str(p), reads)
+        self.assertFalse([p for p in reads
+                          if p.startswith(str(home)) and ("/.ssh" in p or "/gh" in p)])
+        self.assertNotIn(str(home / "letters.txt"), reads)    # the user's own files: not a dotfile
+        script = ("import sys\nfor f in sys.argv[1:]:\n    try:\n        open(f).read()\n"
+                  "        print('read')\n    except PermissionError:\n        print('refused')\n")
+        files = [home / ".ssh" / "id_ed25519", home / ".config" / "gh" / "hosts.yml",
+                 home / ".gitconfig", home / ".config" / "app.toml", home / "letters.txt"]
+        out = subprocess.run(lane.wrap(context.writable(task),
+                                       [sys.executable, "-c", script, *map(str, files)], reads),
+                             capture_output=True, text=True, timeout=20)
+        self.assertEqual(out.stdout.split(), ["refused", "refused", "read", "read", "refused"],
+                         out.stderr)
+        rules = context.rules_dir(task)                    # its config, instructions, git shim
+        self.assertTrue((rules / "opencode.json").is_file() and (rules / "bin" / "git").is_file())
+        self.assertFalse(os.path.realpath(rules).startswith(os.path.realpath(task.dir) + "/"))
+        self.assertIn(str(task.dir), context.writable(task))  # (here WB_HOME is in /tmp: real
+        # homes are under ~/.local/state, outside the lane, which only adds the task directory)
 
     @unittest.skipUnless(lane.abi(), "needs Landlock")
     def test_the_kernel_refuses_writes_outside_the_lane(self):

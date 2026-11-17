@@ -77,7 +77,7 @@ def fresh_ceiling(cfg: dict) -> float | None:
 
 def write_config_layer(task: store.Task) -> Path:
     """The per-task OpenCode config: the agent's context and the ask_reviewer server."""
-    path = task.dir / "opencode.json"
+    path = context.rules_dir(task) / "opencode.json"
     wait_ms = int(task.spec.get("ask_timeout", 1200) + 60) * 1000
     try:
         buffer = compaction_buffer(models.resolve(task.spec["model"]).config)
@@ -104,7 +104,7 @@ def agent_env(task: store.Task) -> dict:
     env = {**os.environ, "PWD": str(task.worktree),  # opencode finds the project from $PWD
            "OPENCODE_CONFIG": str(write_config_layer(task)),
            "WB_TASK": task.name, "WB_HOME": str(store.home()), **CLEAN_ENV}
-    env.update(gitguard.install(task.dir / "bin", Path(task.spec["repo"]), PKG_ROOT,
+    env.update(gitguard.install(context.rules_dir(task) / "bin", Path(task.spec["repo"]), PKG_ROOT,
                                 env.get("PATH") or os.defpath) or {})
     return env
 
@@ -240,7 +240,8 @@ def run_round(task: store.Task, n: int) -> dict:
     note = skills_note(task, n)
     cmd.append(note + prompt)
     env = agent_env(task)
-    cmd = lane.wrap(context.writable(task), cmd)  # writes stay in the agent's lane (lane.py)
+    cmd = lane.wrap(context.writable(task), cmd,   # writes stay in the agent's lane (lane.py),
+                    context.readable(task))       # and credentials out of its reach
     log = open(task.dir / "runner.log", "a")
     proc = subprocess.Popen(cmd, cwd=task.worktree, env=env, stdin=subprocess.DEVNULL,
                             stdout=subprocess.PIPE, stderr=log, text=True,

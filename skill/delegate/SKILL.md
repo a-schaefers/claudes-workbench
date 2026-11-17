@@ -172,6 +172,11 @@ miss:
    Spec plus named files (`wc -c`, ~4 characters a token) well under half the window, since the
    agent reads more than you name. Seen: a step whose reading filled 60% of a 32K window
    before the first edit, twenty sessions in a row.
+8. **The old tests still hold.** A change of behaviour breaks tests that assumed the old one:
+   run the whole suite against your simulated change (or read each test the change touches)
+   and say in the spec which tests change and how. Seen: bats that found paths reached the
+   player sooner, so a test measuring distance to its starting point failed, and walls erased a
+   flipped input a replay test relied on: two of the agent's questions, both the spec's.
 After review, when a round was the spec's fault, say so: `--spec-gap "what it missed"` on
 `wb feedback`, `next`, `accept` or `discard`. `wb start` shows your record from those,
 and a gap that recurs belongs in this list.
