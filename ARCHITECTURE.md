@@ -726,6 +726,10 @@ deliberately hostile process (the 2026-11-16 audit's list of what it can't stop 
   rights: file writes, removes and every make, plus refer (ABI 2: moves inside the lane work)
   and truncate (ABI 3), file reads when `--reads` is given, and from ABI 9 connecting to a UNIX
   socket made outside the lane, granted only beneath `--unix` (`context.unix_paths`: the
+  `SYSTEM_SOCKETS` that exist, the socket files alone, which hold nothing of the user's: the log
+  (`/dev/log`, `/run/systemd/journal/socket` and `stdout`) and name and user lookups (resolved's
+  `io.systemd.Resolve`, userdb's `io.systemd.Multiplexer`, `/run/nscd/socket`, sssd's
+  `pipes/nss`), so `logger` and `resolvectl` work, not the system bus; and the
   `commands.json` and grant `paths`, split around secrets and workbench's own files as the reads
   and writes are, so `wb allow --path /run/postgresql` reaches a test database; a `--unix` rule
   carries the socket right alone, since the 0.90 review found its read right made a granted

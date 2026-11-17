@@ -394,14 +394,26 @@ def snaps(names) -> list[str]:
     return out
 
 
+# System sockets that hold nothing of the user's, which plain programs connect to: the log
+# (logger, syslog) and name and user lookups (resolved, userdb for systemd-homed users, nscd,
+# sssd). The files alone, never their directories (sssd's pipes/private stays out), and not the
+# system bus, which reaches polkit's actions (the 0.90 review: `logger` and `resolvectl` failed).
+SYSTEM_SOCKETS = ("/dev/log", "/run/systemd/journal/socket", "/run/systemd/journal/stdout",
+                  "/run/systemd/resolve/io.systemd.Resolve",
+                  "/run/systemd/userdb/io.systemd.Multiplexer", "/run/nscd/socket",
+                  "/var/lib/sss/pipes/nss")
+
+
 def unix_paths(task: store.Task) -> list[str]:
-    """Where the agent may connect to a UNIX socket made outside its lane (Landlock ABI 9): only
-    what the user and Claude added (`paths`; `wb allow --path /run/postgresql` for a test
-    database), never the session bus or the user's agents, split around secrets like the reads
-    (the 0.90 review: a GPG agent socket under a granted ~/.config was in reach)."""
+    """Where the agent may connect to a UNIX socket made outside its lane (Landlock ABI 9): the
+    SYSTEM_SOCKETS there are, and what the user and Claude added (`paths`; `wb allow --path
+    /run/postgresql` for a test database), never the session bus or the user's agents, split
+    around secrets like the reads (the 0.90 review: a GPG agent socket under a granted ~/.config
+    was in reach)."""
     hidden = _hidden()
-    return _both(q for p in (Path(r).expanduser() for r in lane_paths(task) if r != "*")
-                 if os.path.exists(p) for q in _split(str(p), hidden))
+    return _both([*(s for s in SYSTEM_SOCKETS if os.path.exists(s)),
+                  *(q for p in (Path(r).expanduser() for r in lane_paths(task) if r != "*")
+                    if os.path.exists(p) for q in _split(str(p), hidden))])
 
 
 def ask_dir(task: store.Task) -> Path:

@@ -2530,6 +2530,27 @@ class Lane(Base):
                                  [connect if lane.abi() >= 9 else "connected", "nosignal", "own"],
                                  out.stderr)
 
+    @unittest.skipUnless(lane.abi() >= 9 and os.path.exists("/dev/log"), "needs Landlock ABI 9")
+    def test_the_system_log_stays_in_reach_but_not_a_socket_beside_the_lane(self):
+        # the 0.90 review: `logger` failed in the lane ("Protocol wrong type for socket")
+        task = self.bare_task("t-log", self.repo)
+        task.worktree.mkdir()
+        unix = context.unix_paths(task)
+        self.assertFalse([p for p in unix if os.path.isdir(p)])     # the files, no directory
+        with tempfile.TemporaryDirectory(dir=Path.home(), prefix=".wb-sock-") as d:
+            path = os.path.join(d, "s")
+            server = socket.socket(socket.AF_UNIX, socket.SOCK_DGRAM)
+            server.bind(path)
+            self.addCleanup(server.close)
+            script = ("import socket, sys\nfor p in sys.argv[1:]:\n"
+                      "    c = socket.socket(socket.AF_UNIX, socket.SOCK_DGRAM)\n"
+                      "    try:\n        c.connect(p); print('connected')\n"
+                      "    except OSError:\n        print('refused')\n")
+            out = subprocess.run(lane.wrap(context.writable(task),
+                                           [sys.executable, "-c", script, "/dev/log", path],
+                                           None, unix), capture_output=True, text=True, timeout=20)
+        self.assertEqual(out.stdout.split(), ["connected", "refused"], out.stderr)
+
     @unittest.skipUnless(sys.platform.startswith("linux"), "Linux")
     def test_no_new_privileges_holds_without_landlock_too(self):
         script = ("import sys; sys.path.insert(0, sys.argv[1]); from workbench import lane\n"
