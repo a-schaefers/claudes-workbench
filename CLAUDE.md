@@ -16,7 +16,7 @@ what either says (a command, a flag, a default, a guard, a file) updates it in t
   - `runner.py`: the detached per-task driver. `cli.py`: `wb`. `ask_mcp.py`: the MCP tool server.
   - `gitops.py`: the task's worktree and branch, the review diff (intent-to-add, so new files
     show), commits, the repo's stack (its main languages). `results.py`: results.jsonl rows (`wb accept`/`discard`), each step's size and fit (`step`),
-    and `wb stats`.
+    and `wb stats`. Read them through `store.results()`, which leaves out trial runs.
   - `models.py`: discovers local models from opencode.json, their status, and GPU residency
     (make_resident, free_gpu);
     adds and retires them (Ollama's pull/delete, opencode.json entries) for the weekly model check.
@@ -238,5 +238,6 @@ A change to the web chat (`chat.py`, `chat_static/`) also needs the browser test
 in WebKit as an iPhone and Chromium as a Pixel, through sends, receipts, an outage and a reload.
 Playwright isn't a dependency; point `PLAYWRIGHT` at any install:
 `PLAYWRIGHT=…/node_modules/playwright node tests/e2e_chat.mjs`.
-A change to how OpenCode is invoked also needs one real run: `wb start` on MiMo against a
-scratch repo, as the README describes.
+A change to how OpenCode is invoked also needs one real run: `wb start --trial` on MiMo against a
+scratch repo, as the README describes (`--trial` keeps it out of the router's evidence and the
+lessons; `wb trial <task>` marks one after the fact).

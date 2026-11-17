@@ -3,7 +3,8 @@
 Layout of ``$WB_HOME`` (default ``~/.local/state/workbench``)::
 
     notify.jsonl            events that need Claude (review, stuck, failed, question), all tasks
-    results.jsonl           one row per finished task (accepted / discarded), for `wb stats`
+    results.jsonl           one row per finished task (accepted / discarded), for `wb stats`;
+                            a trial run's (`wb start --trial`, `wb trial`) is kept but not evidence
     gpu.lock                held by every running task: shared beside others, exclusive alone
     gpu.json                who holds it (pid → model, task); gpu.admit serializes admissions
     tasks/<name>/
@@ -80,6 +81,27 @@ def append_jsonl(path: Path, row: dict) -> None:
     with locked(path.with_name(path.name + ".lock")):
         with open(path, "a") as fh:
             fh.write(json.dumps(row, ensure_ascii=False) + "\n")
+
+
+def results(trials: bool = False) -> list[dict]:
+    """results.jsonl's rows: the evidence the router and the skill records learn from, which a
+    trial run (a check of workbench itself on a scratch repo) is not, unless asked for."""
+    rows = read_jsonl(home() / "results.jsonl")[0]
+    return rows if trials else [r for r in rows if not r.get("trial")]
+
+
+def mark_trials(names: set[str]) -> list[str]:
+    """Mark closed tasks' rows as trial runs; the names that had an unmarked row."""
+    path = home() / "results.jsonl"
+    with locked(path.with_name(path.name + ".lock")):
+        rows = read_jsonl(path)[0]
+        hit = [r["task"] for r in rows if r.get("task") in names and not r.get("trial")]
+        if hit:
+            tmp = path.with_name(f".{path.name}.{os.getpid()}.tmp")
+            tmp.write_text("".join(json.dumps({**r, "trial": True} if r.get("task") in names else r,
+                                              ensure_ascii=False) + "\n" for r in rows))
+            os.replace(tmp, path)
+    return sorted(set(hit))
 
 
 def read_jsonl(path: Path, offset: int = 0):

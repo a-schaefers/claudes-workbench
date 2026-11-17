@@ -137,7 +137,8 @@ def cmd_start(a):
     store.write_json(task.dir / "task.json", {
         "name": a.name, "repo": str(repo), "base": base, "base_ref": a.base,
         "branch": gitops.branch_name(a.name), "model": m.id, "model_label": m.label,
-        "opencode_model": m.id, "route": why, "size": a.size, "stack": stack, "test_cmd": a.test,
+        "opencode_model": m.id, "route": why, "size": a.size, "stack": stack,
+        **({"trial": True} if a.trial else {}), "test_cmd": a.test,
         "auto_fix": a.auto_fix, "ask_budget": budget, "ask_timeout": a.ask_timeout,
         "checkin": a.checkin if a.checkin is not None else 10 if a.size == "significant" else 0,
         "round_timeout": a.round_timeout or limits["round"],
@@ -635,6 +636,13 @@ def cmd_stats(a):
     print(results.table())
 
 
+def cmd_trial(a):
+    """Closed tasks that were checks of workbench itself, not work: their results stop counting."""
+    hit = store.mark_trials(set(a.names))
+    print(f"trial runs now, left out of the record: {', '.join(hit)}" if hit
+          else "no unmarked results for those tasks")
+
+
 SCOUT_EVERY_DAYS = 7
 
 
@@ -694,7 +702,7 @@ def cmd_scout(a):
     registered = models.discover()
     print("\nmodels OpenCode can use (opencode.json)")
     real = defaultdict(list)
-    for r in store.read_jsonl(store.home() / "results.jsonl")[0]:
+    for r in store.results():
         real[r.get("model")].append(r)
     for pid, prov in provs.items():
         installed = {x["name"]: x for x in models.ollama_installed(prov["root"])} \
@@ -1230,6 +1238,8 @@ def main(argv=None):
                    "model's measured speed gives; 0 turns it off)")
     s.add_argument("--base", default="HEAD")
     s.add_argument("--force", action="store_true", help="queue even if the model can't run now")
+    s.add_argument("--trial", action="store_true", help="a check of workbench itself (a scratch "
+                   "repo): its result and lessons don't count as evidence")
     s.add_argument("--no-claude-md", action="store_true",
                    help="start even though the repo has no CLAUDE.md")
     s.add_argument("--allow", action="append", metavar="PATTERN",
@@ -1421,6 +1431,9 @@ def main(argv=None):
                                     "AGENTS.md → CLAUDE.md")
     s.add_argument("dir"); s.set_defaults(f=cmd_init)
     sub.add_parser("stats", help="results by model").set_defaults(f=cmd_stats)
+    s = sub.add_parser("trial", help="mark closed tasks as trial runs: their results stop counting")
+    s.add_argument("names", nargs="+")
+    s.set_defaults(f=cmd_trial)
     sub.add_parser("doctor", help="check the setup").set_defaults(f=cmd_doctor)
 
     a = ap.parse_args(argv)

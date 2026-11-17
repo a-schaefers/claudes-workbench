@@ -41,15 +41,17 @@ def record(task: store.Task, outcome: str, last_step: dict | None = None, **extr
            "skills_offered": st.get("skills_ever") or [], "skills_loaded": skills.loaded(task),
            "skills_rev": st.get("skills_rev") or {},  # the version handed: judges each edit
            "steps": (st.get("step_sizes") or []) + ([last_step] if last_step else []),
-           **extra}
+           **({"trial": True} if spec.get("trial") else {}), **extra}
     store.append_jsonl(store.home() / "results.jsonl", row)
     return row
 
 
 def table() -> str:
-    rows = store.read_jsonl(store.home() / "results.jsonl")[0]
+    rows = store.results()
+    trials = len(store.results(trials=True)) - len(rows)
+    left_out = f"\n({trials} trial run{'s' if trials > 1 else ''} left out)" if trials else ""
     if not rows:
-        return "no finished tasks yet"
+        return "no finished tasks yet" + left_out
     by = defaultdict(list)
     for r in rows:
         by[(r["model"], r.get("size") or "?")].append(r)
@@ -62,4 +64,4 @@ def table() -> str:
         out.append(f"{model:34} {size:12} {n:>5} {acc / n:>7.0%} {avg('rounds'):>6.1f} "
                    f"{avg('auto_fixes'):>7.1f} {avg('reviews'):>7.1f} {avg('minutes'):>6.1f} "
                    f"{int(avg('tok_in') + avg('tok_out')):>10}")
-    return "\n".join(out)
+    return "\n".join(out) + left_out

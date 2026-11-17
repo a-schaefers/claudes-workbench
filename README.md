@@ -326,7 +326,9 @@ Then one of:
 
 Every accepted or discarded task leaves a row in `results.jsonl`: the model, the size, the repo and its stack, rounds,
 auto-fixes, reviews, minutes, local tokens, the skills it was offered and loaded, the outcome. The
-router learns from those rows.
+router learns from those rows. A check of workbench itself on a scratch repo isn't evidence of
+how a model does real work: `wb start --trial` marks it (its row is kept but left out, and its
+lessons aren't gathered), and `wb trial <task>…` marks a closed one after the fact.
 
 ### What the agent knows
 
@@ -770,6 +772,7 @@ back) and the web chat stops listening in that session.
 | `wb notes [add "…" \| drop N]` | what Claude learned about how you want delegation run, in any project |
 | `wb image "<prompt>" [--n] [--size] [--seed] [--ref] [--out] [--engine] [--list]` | candidates from a local image model, for Claude to look at and choose from |
 | `wb stats` | real results by model and size |
+| `wb trial <task>…` | mark closed tasks as trial runs: their results stop counting |
 | `wb chat [serve\|url\|reply\|log]` | the web chat |
 | `wb init <dir>` | set a project up: git with an initial commit, AGENTS.md → CLAUDE.md |
 | `wb events` | a line whenever workbench's state changes (what the mod listens to) |

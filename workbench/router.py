@@ -81,8 +81,7 @@ def row_stack(r: dict) -> tuple:
 
 def score(m: models.Model, size: str, state: dict | None = None, stack=()) -> Score:
     state = state or models.status(m)
-    real = [r for r in store.read_jsonl(store.home() / "results.jsonl")[0]
-            if r.get("model") == m.id and r.get("size") == size]
+    real = [r for r in store.results() if r.get("model") == m.id and r.get("size") == size]
     s = Score(model=m, state=state, weights=models.weights(m), stack=tuple(stack))
     s.tries = len(real)
     s.wins = sum(r.get("outcome") == "accepted" for r in real)
@@ -182,7 +181,7 @@ def slice(m: models.Model) -> Slice:
     scale = min(window / BASE_WINDOW, GUESS_MAX) if window else 1
     files, lines = max(1, round(BASE_FILES * scale)), max(50, round(BASE_LINES * scale / 10) * 10)
     basis = f"{window // 1024}K window" if window else "window unknown"
-    steps = [s for r in store.read_jsonl(store.home() / "results.jsonl")[0] if r.get("model") == m.id
+    steps = [s for r in store.results() if r.get("model") == m.id
              for s in r.get("steps") or [] if s.get("files") and (not window or s.get("window") in (None, window))]
     fit = [s for s in steps if s["landed"] and not (s["overflow"] or s["stuck"] or s["took_over"])]
     over = [s for s in steps if s["overflow"] or s["stuck"]]

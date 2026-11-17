@@ -105,7 +105,10 @@ def _all() -> tuple[dict[str, dict], dict[str, dict]]:
 
 
 def harvest(task: store.Task, outcome: str | None = None) -> list[dict]:
-    """Record the task's new lessons; on a discard, drop the agent's own (unresolved: no recipe)."""
+    """Record the task's new lessons; on a discard, drop the agent's own (unresolved: no recipe).
+    A trial run (a check of workbench itself) teaches the agents nothing."""
+    if task.spec.get("trial"):
+        return []
     lessons, closed = _all()
     new = [x for x in gather(task, outcome) if x["id"] not in lessons]
     for x in new:

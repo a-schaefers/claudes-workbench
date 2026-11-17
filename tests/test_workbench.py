@@ -1032,6 +1032,24 @@ class Routing(Base):
         self.start("t-kind", "ok")
         self.assertEqual(store.Task("t-kind").spec["stack"], ["c"])
 
+    def test_a_trial_run_is_kept_but_not_evidence(self):
+        from workbench import router
+        self.result("strata/strata", "significant", "discarded", n=4, task="e2e-a")
+        self.result("strata/strata", "significant", "accepted", n=1, task="real")
+        self.assertEqual(router.choose("significant")[0].model.id, "ollama/qwen3.8-27b")
+        self.assertIn("e2e-a", run_wb("trial", "e2e-a", "nope"))
+        self.assertIn("no unmarked results", run_wb("trial", "e2e-a"))       # once is enough
+        self.assertEqual(router.choose("significant")[0].model.id, "strata/strata")  # 1/1 once the trials are out
+        self.assertEqual(len(store.results(trials=True)), 5)                  # nothing is lost
+        self.assertIn("(4 trial runs left out)", run_wb("stats"))
+        os.environ["FAKE_LESSON"] = "a trial teaches the agents nothing"
+        self.start("t-trial", "ok", "--trial")
+        wait_phase("t-trial", {"review"})
+        out = run_wb("accept", "t-trial", "-m", "feat: check")
+        del os.environ["FAKE_LESSON"]
+        self.assertNotIn("lessons:", out)
+        self.assertTrue(store.read_jsonl(store.home() / "results.jsonl")[0][-1]["trial"])
+
     def test_set_default_writes_the_pick_to_opencode(self):
         out = run_wb("models", "--set-default")
         self.assertIn("→ strata/strata", out)
