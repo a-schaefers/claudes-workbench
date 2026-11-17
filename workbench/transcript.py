@@ -300,7 +300,7 @@ def task_entries(task: store.Task) -> list[Entry]:
             out.append(Entry(ts, key, [("claude", f"■ Claude {r.get('text', '')}")]))
         elif kind == "interrupted":
             out.append(Entry(ts, key, [("bad", "■ the agent was interrupted")]))
-        elif kind in ("fresh", "full"):
+        elif kind in ("fresh", "full", "load"):
             out.append(Entry(ts, key, [("sys", f"■ {r.get('text', '')}")]))
         elif kind == "next_step":
             out.append(Entry(ts, key, [("ok", f"■ {r.get('text', '')}")]))

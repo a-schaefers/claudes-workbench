@@ -243,8 +243,28 @@ def _matches(name: str, names: set[str]) -> bool:
     return name in names or f"{name}:latest" in names
 
 
+# The smallest window a task fits in: OpenCode's system prompt and tools, PROTOCOL and the
+# handbook take ~5K tokens before the spec, and below this OpenCode's compaction comes before the
+# earliest handover point, or before the first request (at 4K its threshold is negative): the
+# 2026-11-16 audit. A model served less can't run; an entry with no limit.context isn't checked.
+MIN_WINDOW = 16384
+
+
+def window_too_small(cfg: dict) -> int | None:
+    """The entry's window when it is under MIN_WINDOW, else None."""
+    ctx = (cfg.get("limit") or {}).get("context")
+    return ctx if isinstance(ctx, int) and 0 < ctx < MIN_WINDOW else None
+
+
+def small_window_why(ctx: int) -> str:
+    return (f"a {ctx // 1024}K window; tasks need {MIN_WINDOW // 1024}K+ (raise "
+            "OLLAMA_CONTEXT_LENGTH or the server's context, then wb model add … --context N)")
+
+
 def status(m: Model) -> dict:
     """``{available, resident, why}``: can the runner get this model onto the GPU, is it there."""
+    if small := window_too_small(m.config):
+        return {"available": False, "resident": False, "why": small_window_why(small)}
     if _fake():
         return {"available": True, "resident": True, "why": "fake"}
     if m.engine == "ollama":

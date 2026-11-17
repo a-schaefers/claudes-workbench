@@ -4,6 +4,8 @@ Every command prints a short, plain report: it is read by Claude, whose tokens a
 resource, and by a person at a terminal.
 """
 import argparse
+import fcntl
+import functools
 import json
 import os
 import shutil
@@ -113,6 +115,48 @@ def reap(task: store.Task) -> bool:
                 f"memory or a reboot); see {task.dir / 'runner.log'}. wb resume {task.name} "
                 "continues it in a fresh session", round=st.get("round"))
     return True
+
+
+def _one_command(fn):
+    """One command at a time acts on a task (feedback, next, resume): two at once both passed
+    their checks and spawned two runners on one worktree and session (the 2026-11-16 audit).
+    The lock is released when the command returns; the runner it spawned holds its own."""
+    @functools.wraps(fn)
+    def acting(a):
+        task = need(a.name)
+        with open(task.dir / "act.lock", "a+") as fh:
+            try:
+                fcntl.flock(fh, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            except BlockingIOError:
+                die(f"another wb command is acting on {a.name}; try again in a moment")
+            return fn(a)
+    return acting
+
+
+def _need_worktree(task: store.Task) -> None:
+    """A worktree removed by hand turned the next round into a runner crash (the 2026-11-16
+    audit). Its committed steps are on the branch; discard --keep-branch keeps them."""
+    if not task.worktree.is_dir():
+        die(f"{task.name}'s worktree is gone ({task.worktree}): its committed work is on branch "
+            f"{task.spec.get('branch')}; wb discard {task.name} --keep-branch drops the task and "
+            "keeps the branch")
+
+
+def _stale_notes(task: store.Task) -> list[dict]:
+    """The notes the last runner never delivered (sent as its round ended, or before a stuck
+    stop), marked taken: else the next runner delivered them first, and a stale --now note cut a
+    feedback round short (the 2026-11-16 audit). Claude's own come back, for the caller to carry
+    or report; the runner's nudges are dropped."""
+    rows = runner.pending_steer(task)
+    if rows:
+        task.set_status(steer_taken=task.status.get("steer_taken", 0) + len(rows))
+    return [r for r in rows if r.get("by") != "workbench"]
+
+
+def _say_dropped(notes: list[dict]) -> None:
+    for r in notes:
+        print("not delivered, dropped (put it in the feedback if it still matters): "
+              + r["text"].strip().replace("\n", " ")[:120])
 
 
 def ago(ts) -> str:
@@ -256,6 +300,7 @@ def _spec_gaps(task: store.Task, gaps: list[str] | None) -> None:
         task.event({"ts": store.now(), "round": rnd, "kind": "spec_gap", "text": g.strip()})
 
 
+@_one_command
 def cmd_feedback(a):
     task = need(a.name)
     reap(task)
@@ -264,9 +309,11 @@ def cmd_feedback(a):
         die(f"{a.name} is {st.get('phase')}; feedback goes to a task waiting for review")
     if runner_alive(task):
         die(f"{a.name}'s runner is still running")
+    _need_worktree(task)
     text = a.text if a.text is not None else \
         sys.stdin.read() if a.message == "-" else Path(a.message).read_text()
     _spec_gaps(task, a.spec_gap)
+    dropped = _stale_notes(task)
     n = st.get("round", 1) + 1
     task.round_dir(n).mkdir(parents=True, exist_ok=True)
     rerun = " re-run the acceptance command and" if task.spec.get("test_cmd") else ""
@@ -283,9 +330,11 @@ def cmd_feedback(a):
     _ack_all(task, upto=handled)
     print(f"feedback round {reviews} sent to {a.name} (round {n})"
           + ("  — that is past the usual 3 review rounds" if reviews > 3 else ""))
+    _say_dropped(dropped)
     _say(lessons.nudge(task))
 
 
+@_one_command
 def cmd_next(a):
     """Commit the approved step on the task's branch and give the same agent the next one: same
     worktree, same session (so it keeps what it has read), unless it is full or --fresh."""
@@ -297,6 +346,7 @@ def cmd_next(a):
     handed = _skill_names(a.skill) if a.skill else None
     if runner_alive(task):
         die(f"{a.name}'s runner is still running")
+    _need_worktree(task)
     step = st.get("steps", 1)
     try:  # read before anything is committed: a bad path must leave the step as it was
         nxt = sys.stdin.read() if a.spec == "-" else Path(a.spec).read_text()
@@ -311,6 +361,7 @@ def cmd_next(a):
     except gitops.GitError as e:
         die(str(e))
     _spec_gaps(task, a.spec_gap)  # after the commit: a retry after a failed one counts them once
+    dropped = _stale_notes(task)
     if a.allow:
         context.grant(task, "allow", [p.strip() for p in a.allow if p.strip()])
     if a.test is not None:  # the one change to task.json after start
@@ -343,6 +394,7 @@ def cmd_next(a):
     _ack_all(task, upto=handled)
     print(f"step {step} of {a.name} committed as {commit}; step {step + 1} sent "
           + (f"to a fresh session ({why})" if why else "to the same session"))
+    _say_dropped(dropped)
     _say(lessons.nudge(task))
 
 
@@ -365,6 +417,16 @@ def cmd_answer(a):
 
 def _ack_file(task):
     return task.dir / "acked"
+
+
+def _write_ack(task, ts: float) -> None:
+    """The mark replaced whole: the mod and wb wait read it on every poll, and a read between a
+    truncate and the write (or a write that failed after it) saw 0, every old notice news again
+    (the 2026-11-16 audit)."""
+    f = _ack_file(task)
+    tmp = f.with_name(f".acked.{os.getpid()}.tmp")
+    tmp.write_text(str(ts))
+    os.replace(tmp, f)
 
 
 def _acked(task):
@@ -395,7 +457,7 @@ def _ack_all(task, upto: float | None = None):
         pending = [r["ts"] for r in rows if _notice(r) and r["task"] == task.name
                    and r["kind"] == news and r["ts"] > acked]
         upto = min(pending) - 0.001 if pending else store.now()
-    _ack_file(task).write_text(str(max(acked, upto)))
+    _write_ack(task, max(acked, upto))
 
 
 def _stale(row, st: dict) -> bool:
@@ -432,7 +494,7 @@ def cmd_wait(a):
             if not task.exists or _stale(row, task.status):
                 continue  # its directory removed by hand, or no longer true
             if row["ts"] > _acked(task):
-                _ack_file(task).write_text(str(row["ts"]))
+                _write_ack(task, row["ts"])
                 print(f"[{row['kind']}] {row['task']}\n{row.get('text', '')}")
                 return
         if a.name:
@@ -611,6 +673,7 @@ def cmd_stop(a):
           "corrections, wb discard drops it")
 
 
+@_one_command
 def cmd_resume(a):
     """Continue a task Claude stopped (wb stop) where the work stands: a fresh session, handed
     the task, the work so far and what the step's rounds asked. Not a review round."""
@@ -621,11 +684,14 @@ def cmd_resume(a):
         die(f"{a.name} is {st.get('phase')}; wb resume continues a stopped task")
     if runner_alive(task):
         die(f"{a.name}'s runner is still running")
+    _need_worktree(task)
     n = st.get("round", 1)
     asks = runner.round_asks(task, n)
+    notes = _stale_notes(task)  # resume means carry on: a note never delivered still applies
     task.round_dir(n + 1).mkdir(parents=True, exist_ok=True)
     task.round_dir(n + 1).joinpath("prompt.md").write_text(runner.RESUME.format(
-        asked=runner.ASKED.format("\n\n".join(asks)).rstrip() if asks else ""))
+        asked=runner.ASKED.format("\n\n".join(asks)).rstrip() if asks else "")
+        + (f"\n\n{runner.steer_prompt(notes, False)}" if notes else ""))
     handled = store.now()
     task.set_status(round=n + 1, context="fresh", phase="queued", last="resumed by the reviewer")
     task.event({"ts": store.now(), "round": n + 1, "kind": "resumed",
@@ -683,10 +749,10 @@ def cmd_allow(a):
     if qid and (task.dir / "ask" / f"{qid}.json").exists():
         handled = store.now()  # the request is answered: handled, as wb answer does
         (task.dir / "ask" / f"{qid}.answer").write_text(text + "\n")
-    if task.status.get("phase") in ("queued", "running", "testing", "asking") and runner_alive(task):
+    if (phase := task.status.get("phase")) in LIVE and runner_alive(task):
         store.append_jsonl(task.dir / "steer.jsonl", {"ts": store.now(), "text": text, "now": True})
-        print(f"allowed {said} on {a.name}" + (" (always)" if a.always else "")
-              + ": the agent restarts on its session with it")
+        print(f"allowed {said} on {a.name}" + (" (always)" if a.always else "") + ": "
+              + _when_delivered(task, phase, "the agent restarts on its session with it"))
     else:
         print(f"allowed {said} on {a.name}" + (" (always)" if a.always else "")
               + ": it applies from the next round")
@@ -706,10 +772,24 @@ def cmd_steer(a):
     store.append_jsonl(task.dir / "steer.jsonl", {"ts": store.now(), "text": text, "now": a.now})
     task.event({"ts": store.now(), "round": task.status.get("round"), "kind": "steer",
                 "now": a.now, "text": text})
-    if a.now:
+    if phase in ("testing", "queued"):
+        print(f"note queued for {a.name}: " + _when_delivered(task, phase, ""))
+    elif a.now:
         print(f"interrupting {a.name}: it stops within a few seconds and continues with your note")
     else:
         print(f"note queued for {a.name}: delivered when its current run ends, before the tests")
+
+
+def _when_delivered(task: store.Task, phase: str, running: str) -> str:
+    """When a note reaches the agent: --now promised "within a few seconds" while the tests ran
+    (up to the test timeout) or the task waited for the GPU (the 2026-11-16 audit)."""
+    if phase == "testing":
+        return (f"its tests are running (up to {int(task.spec.get('test_timeout') or 900)}s); "
+                "the agent gets it when they end")
+    if phase == "queued":
+        return ("its round hasn't started (waiting for the GPU or its model); the agent gets it "
+                "when the round starts")
+    return running
 
 
 def cmd_note(a):
@@ -752,6 +832,13 @@ def cmd_accept(a):
         die(f"{a.name} is already {st.get('phase')}")
     if st.get("phase") != "review" and not a.force:
         die(f"{a.name} is {st.get('phase')}, not waiting for review (--force accepts anyway)")
+    # A doomed accept once stopped the runner first, then died on "nothing to commit", leaving
+    # the task running with no runner (the 2026-11-16 audit): check before stopping anything,
+    # and a stopped task whose commit fails is stuck, for wb resume, feedback or discard.
+    was_live = st.get("phase") in LIVE
+    if (was_live and st.get("steps", 1) == 1 and task.worktree.is_dir()
+            and not gitops.changed(task.worktree)):
+        die(f"{a.name} has no changes to accept yet: wait for it, or wb stop {a.name} first")
     _stop_runner(task)  # under --force it may still be running, and would set its phase back
     repo = Path(spec["repo"])
     rounds, autofix = st.get("round", 1), st.get("auto_fixes_total", 0) + st.get("auto_fixes", 0)
@@ -764,9 +851,16 @@ def cmd_accept(a):
             commit = gitops.commit_all(task.worktree, msg)
         else:  # the last step changed nothing more: the branch is its committed steps
             commit = gitops.git(task.worktree, "rev-parse", "--short", "HEAD").strip()
+    except gitops.GitError as e:
+        if was_live:
+            task.set_status(phase="stuck", last=f"accept failed: {e}"[:200], pid=None)
+            die(f"{e}\n{a.name} is stopped: fix the cause and wb accept again, or wb resume, "
+                "wb feedback or wb discard it")
+        die(str(e))
+    try:  # committed: a worktree that won't go is a note, not a failed accept to retry
         gitops.remove_worktree(repo, task.worktree)
     except gitops.GitError as e:
-        die(str(e))
+        print(f"wb: the worktree stays at {task.worktree}: {e}", file=sys.stderr)
     _spec_gaps(task, a.spec_gap)
     merged = None
     if a.merge:
@@ -1251,6 +1345,8 @@ def cmd_model(a):
         served = models.ollama_served_context(prov["root"], name) if prov["engine"] == "ollama" else None
         siblings = [(e.get("limit") or {}).get("context") for e in prov["models"].values()]
         ctx = a.context or served or next((c for c in siblings if c), None) or facts.get("context_length")
+        if ctx and ctx < models.MIN_WINDOW:
+            die(f"{a.id}: {models.small_window_why(ctx)}")
         entry = {"name": a.label or name,
                  "tool_call": "tools" in caps if caps else True,
                  "reasoning": "thinking" in caps if caps else True}
@@ -1529,8 +1625,11 @@ def cmd_doctor(a):
             said, served = (e.get("limit") or {}).get("context"), models.ollama_served_context(prov["root"], name)
             if said and served and said > served:
                 line(False, f"{pid}/{name} says a {said // 1024}K context but Ollama serves "
-                     f"{served // 1024}K: it would cut prompts off silently (raise OLLAMA_CONTEXT_LENGTH, "
-                     f"or wb model add {pid}/{name} --context {served})")
+                     f"{served // 1024}K: it would cut prompts off silently (raise OLLAMA_CONTEXT_LENGTH"
+                     + (f", or wb model add {pid}/{name} --context {served})" if served >= models.MIN_WINDOW
+                        else f": tasks need {models.MIN_WINDOW // 1024}K+)"))
+            elif said and said < models.MIN_WINDOW:
+                line(False, f"{pid}/{name}: {models.small_window_why(said)}")
             elif said and served and served > said:
                 print(f"--  {pid}/{name}: Ollama serves {served // 1024}K, the entry says {said // 1024}K; "
                       f"wb model add {pid}/{name} --context {served} lets its tasks grow")
@@ -1552,6 +1651,7 @@ def cmd_doctor(a):
 
 
 def main(argv=None):
+    store.absolute_env()  # before anything reads a path from the environment or a child inherits it
     ap = argparse.ArgumentParser(prog="wb", description=__doc__,
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--version", action="version", version=f"wb {__version__}")

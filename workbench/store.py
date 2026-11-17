@@ -34,8 +34,25 @@ NEEDS_CLAUDE = {"review", "stuck", "failed", "asking"}
 CLOSED = {"accepted", "discarded"}
 
 
+# The environment variables that name a path. A relative one, or one with a `~` no shell expanded
+# (a systemd unit, settings.json's env), meant one place to wb and another to the runner, which
+# runs from the package's directory: the task was written under the cwd and looked for under the
+# clone (the 2026-11-16 audit). They are made absolute against wb's cwd, once, before anything
+# reads them or a child inherits them (absolute_env, from cli.main and the runner). Not resolved:
+# a symlinked home stays the path the user named, the one the lane and OpenCode see.
+PATH_VARS = ("WB_HOME", "WB_MODELS", "WB_SKILLS", "WB_IMAGES", "WB_COMMANDS", "WB_CHAT_TOKEN",
+             "WB_CHAT_CONFIG", "WB_OPENCODE_CONFIG")
+
+
+def absolute_env() -> None:
+    for var in PATH_VARS:
+        if os.environ.get(var):
+            os.environ[var] = os.path.abspath(os.path.expanduser(os.environ[var]))
+
+
 def home() -> Path:
-    return Path(os.environ.get("WB_HOME") or Path.home() / ".local/state/workbench")
+    v = os.environ.get("WB_HOME")
+    return Path(os.path.abspath(os.path.expanduser(v))) if v else Path.home() / ".local/state/workbench"
 
 
 def tasks_dir() -> Path:
@@ -79,9 +96,18 @@ def locked(path: Path, shared: bool = False, blocking: bool = True):
 
 
 def append_jsonl(path: Path, row: dict) -> None:
+    line = json.dumps(row, ensure_ascii=False).encode() + b"\n"
     with locked(path.with_name(path.name + ".lock")):
-        with open(path, "a") as fh:
-            fh.write(json.dumps(row, ensure_ascii=False) + "\n")
+        with open(path, "ab+") as fh:
+            # A write cut short (a full disk, a crash) leaves a line with no end, and the next row
+            # appended to it was lost with it (the 2026-11-16 audit): end the fragment first, so
+            # only it is skipped. In append mode the write lands at the end wherever we read.
+            fh.seek(0, os.SEEK_END)
+            if fh.tell():
+                fh.seek(-1, os.SEEK_END)
+                if fh.read(1) != b"\n":
+                    line = b"\n" + line
+            fh.write(line)
 
 
 def results(trials: bool = False) -> list[dict]:

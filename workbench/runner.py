@@ -297,6 +297,38 @@ def _steer_bell(task: store.Task, proc, q: queue.Queue) -> None:
 PROMPT_ARG_MAX = 100_000
 
 
+# The round's guards run on the monotonic clock, which a suspend doesn't advance and NTP never
+# steps: on the wall clock a laptop shut for 20 minutes woke to a round stopped for silence (the
+# 2026-11-16 audit). A loop pass far longer than its 5 s wait means the process was frozen (a
+# host's sleep that the monotonic clock still counted, as WSL2's may): that time isn't the
+# round's either. Check-ins stay on the wall clock: they compare with timestamps in files.
+FROZEN_SECS = 60
+
+
+class _Clock:
+    """The round's time and its silence, less the waits that aren't the agent's: Claude's answer
+    to a question, and a frozen machine."""
+
+    def __init__(self, t: float):
+        self.t0 = self.tick = self.seen = t
+        self.paused = 0.0
+
+    def step(self, t: float, asking: bool) -> None:
+        dt, self.tick = t - self.tick, t
+        if asking:  # waiting on Claude: neither the round's time nor silence
+            self.paused += dt
+            self.seen = t
+        elif dt > FROZEN_SECS:
+            self.paused += dt
+            self.seen += dt
+
+    def ran(self, t: float) -> float:
+        return t - self.t0 - self.paused
+
+    def quiet(self, t: float) -> float:
+        return t - self.seen
+
+
 def run_round(task: store.Task, n: int, keep: bool = False) -> dict:
     """One `opencode run`. keep: Claude asked for this session to carry on (wb feedback
     --keep-context), so the round never hands over mid-way."""
@@ -316,7 +348,9 @@ def run_round(task: store.Task, n: int, keep: bool = False) -> dict:
         prompt = (f"Your instructions for this round are long, so they are in the file "
                   f"{task.round_dir(n) / 'prompt.md'}. Read all of it first (in parts if it is "
                   f"too big for one read), then do what it says.")
-    cmd.append(note + prompt)
+    # After `--`: OpenCode reads a message that starts with '-' (a spec opening with a bullet or
+    # front matter) as a flag, prints its usage and exits (the 2026-11-16 audit).
+    cmd += ["--", note + prompt]
     env = agent_env(task)
     cmd = lane.wrap(context.writable(task), cmd,   # writes stay in the agent's lane (lane.py),
                     context.readable(task))       # and credentials out of its reach
@@ -333,11 +367,21 @@ def run_round(task: store.Task, n: int, keep: bool = False) -> dict:
     detector = StuckDetector(**spec.get("stuck", {}))
     wall, silence = float(spec.get("round_timeout", 2400)), float(spec.get("silence_timeout", 900))
     think = float(spec.get("think_timeout") or 0)
+    # A shell command OpenCode moved to the background (past 2 minutes it does, and the turn
+    # ends waiting on it) prints nothing until it is done: a long test suite counted as thinking,
+    # was nudged and killed every 7 minutes, and rerun (the 2026-11-16 audit). While it waits
+    # (`background_wait`), no nudge, and silence runs to the test timeout; the round's limit holds.
+    wait_hush = max(silence, float(spec.get("test_timeout") or 900))
     nudged = False
     renudge = task.status.get("nudged_round") == n - 1  # the last round ended in our nudge
     edit_mark = gitops.mark(task.worktree)  # shell edits (sed -i, cat >) count as edits too
-    started = last_seen = prev = time.time()
-    paused = 0.0  # time spent waiting on Claude's answer: not the round's own
+    started = time.time()  # the wall clock, for check-ins: they compare with timestamps in files
+    clock = _Clock(time.monotonic())
+    # The think budget starts at the round's first output: until then the model is reading its
+    # prompt, which on the CPU or a model spilled into RAM takes many minutes, and a round nudged
+    # for it was then stopped "even after a nudge" (the 2026-11-16 audit). Silence still applies.
+    heard = False
+    waiting_bg = False
     out = {"exit": None, "stuck": None, "texts": [], "tools": {}, "errors": [],
            "tok_in": 0, "tok_out": 0, "interrupted": False, "full": None}
     window = st.get("window")
@@ -349,20 +393,25 @@ def run_round(task: store.Task, n: int, keep: bool = False) -> dict:
             line = ""
         if line is None:
             break
-        now = time.time()
+        now, mono = time.time(), time.monotonic()
+        asking = task.status.get("phase") == "asking"  # the agent is waiting on Claude: not silent
+        clock.step(mono, asking)
         if line:
-            last_seen = now
+            clock.seen, heard = mono, True
             try:
                 raw = json.loads(line)
             except json.JSONDecodeError:
                 continue
             if not isinstance(raw, dict):  # a stray number or list on stdout isn't an event
                 continue
+            if raw.get("type") == "background_wait":
+                waiting_bg = True
             if raw.get("sessionID") and not task.status.get("session"):
                 task.set_status(session=raw["sessionID"])
             row = normalize(raw, n)
             if row is None:
                 continue
+            waiting_bg = False  # the session moved on
             sig = row.pop("sig", None)
             if row["kind"] == "tool":
                 out["tools"][row["tool"]] = out["tools"].get(row["tool"], 0) + 1
@@ -414,36 +463,41 @@ def run_round(task: store.Task, n: int, keep: bool = False) -> dict:
                     edit_mark, detector.since_edit, why = m, 0, None
             if why:
                 out["stuck"] = why
-        asking = task.status.get("phase") == "asking"  # the agent is waiting on Claude: not silent
-        if asking:  # the wait is neither the round's time nor silence
-            paused += now - prev
-            last_seen = now
-        prev = now
-        if not out["stuck"] and now - started - paused > wall:
+        quiet = clock.quiet(mono)
+        hush = wait_hush if waiting_bg else silence
+        if not out["stuck"] and clock.ran(mono) > wall:
             out["stuck"] = f"the round ran past its {int(wall // 60)}-minute limit"
-        if not out["stuck"] and not asking and now - last_seen > silence:
-            out["stuck"] = f"no output for {int(silence // 60)} minutes"
+        if not out["stuck"] and not asking and quiet > hush:
+            out["stuck"] = (f"no output for {int(hush // 60)} minutes" if heard else
+                            f"no first output in {int(hush // 60)} minutes: the model may be "
+                            "reading its prompt slowly (on the CPU, or partly in RAM?)")
+            if waiting_bg:
+                out["stuck"] += ", waiting on a background job"
         # Generating with nothing to show past the budget: interrupt with a nudge (once a round)
-        # and tell Claude. The nudge starts a new round, so one that again shows nothing at all
-        # is stopped: else a model that never answers would be nudged forever.
-        if think and not nudged and not out["stuck"] and not asking and now - last_seen > think:
-            if renudge and not out["tools"] and not out["texts"]:
-                out["stuck"] = (f"no tool call or word for {int((now - last_seen) // 60)} minutes, "
-                                "even after a nudge")
-        if think and not nudged and not out["stuck"] and not asking and now - last_seen > think:
-            nudged = True
-            mins = int((now - last_seen) // 60)
-            text = NUDGE.format(mins=mins)
-            task.set_status(nudged_round=n)
-            store.append_jsonl(task.dir / "steer.jsonl", {"ts": store.now(), "text": text, "now": True,
-                                                         "by": "workbench"})
-            task.event({"ts": store.now(), "round": n, "kind": "steer", "now": True, "by": "workbench",
-                        "text": text})
-            nudges = task.status.get("nudges", 0) + 1
-            task.set_status(nudges=nudges)
-            task.notify("checkin", checkin_text(task, n, out, max(started, float(
-                task.status.get("checkin_at") or 0))) + f"\nthe runner nudged it: {mins} min of "
-                f"thinking with no tool call (nudge {nudges} this task; budget {int(think)}s)", round=n)
+        # and tell Claude. The nudge starts a new round, and that round stalling again is
+        # stopped, whatever it did first: else a model that never answers, or a command that
+        # prints nothing for longer than the budget, would be nudged and rerun forever.
+        if (think and heard and not waiting_bg and not nudged and not out["stuck"] and not asking
+                and quiet > think):
+            mins = int(quiet // 60)
+            if renudge:
+                out["stuck"] = (f"no tool call or word for {mins} minutes, even after a nudge"
+                                if not out["tools"] and not out["texts"] else
+                                f"{mins} minutes again with no tool call, even after a nudge")
+            else:
+                nudged = True
+                text = NUDGE.format(mins=mins)
+                task.set_status(nudged_round=n)
+                store.append_jsonl(task.dir / "steer.jsonl", {"ts": store.now(), "text": text,
+                                                             "now": True, "by": "workbench"})
+                task.event({"ts": store.now(), "round": n, "kind": "steer", "now": True,
+                            "by": "workbench", "text": text})
+                nudges = task.status.get("nudges", 0) + 1
+                task.set_status(nudges=nudges)
+                task.notify("checkin", checkin_text(task, n, out, max(started, float(
+                    task.status.get("checkin_at") or 0))) + f"\nthe runner nudged it: {mins} min of "
+                    f"thinking with no tool call (nudge {nudges} this task; budget {int(think)}s)",
+                    round=n)
         if out["stuck"]:
             task.event({"ts": store.now(), "round": n, "kind": "stopped", "text": out["stuck"]})
             _stop(proc)
@@ -470,7 +524,7 @@ def run_round(task: store.Task, n: int, keep: bool = False) -> dict:
     log.close()
     if task.status.get("asking"):  # it ended mid-question: nothing will read that answer now
         task.set_status(asking=None)
-    out["secs"] = round(time.time() - started, 1)
+    out["secs"] = round(time.monotonic() - clock.t0, 1)
     return out
 
 
@@ -776,7 +830,17 @@ def _start_fresh(task: store.Task, n: int, why: str) -> None:
     path = task.round_dir(n).joinpath("prompt.md")
     raw = path.read_text().strip()
     path.with_name("instructions.md").write_text(raw)  # round_asks reads it back
-    now = "Start on the task above." if n == (task.status.get("step_round") or 1) else raw
+    # Not this round's prompt alone: what the step's rounds asked, back to the review feedback.
+    # An auto-fix or a steer round after a feedback round, starting fresh, once carried only the
+    # failing tests, and the fresh agent fixed them and reported done with the feedback never
+    # made (the 2026-11-16 audit). A carry-on or a resume carries the asks already.
+    if n == (task.status.get("step_round") or 1):
+        now = "Start on the task above."
+    elif raw.startswith((CARRY_ON[:60], RESUME[:60])):
+        now = raw
+    else:
+        asks = round_asks(task, n)  # ends with this round's own: instructions.md is written
+        now = raw if len(asks) < 2 else ASKED.format("\n\n".join(asks[:-1])).strip() + "\n\nNow:\n\n" + raw
     path.write_text(handoff_prompt(task, why, now))
     st = task.status
     task.set_status(session=None, sessions=(st.get("sessions") or []) + [st["session"]] * bool(st.get("session")),
@@ -833,7 +897,22 @@ def drive(task: store.Task) -> None:
             tuning.tune(task, task.spec["model"], window, {"fresh_at": fresh_ceiling(m.config)})
         except (KeyError, RuntimeError, OSError) as e:
             return _load_failed(task, e)
+        handed = 0  # mid-round handovers in this runner: one review round (HANDOVER_MAX)
+        first = True
         while True:
+            if not first:
+                # Again before every round: each request resets Ollama's keep-alive to its own
+                # default (5 minutes), so after a longer test run the model was unloaded and the
+                # auto-fix round's think budget paid for loading it (the 2026-11-16 audit).
+                # Resident already, this is one look at the server.
+                try:
+                    if (again := lease.load()) > 0:
+                        task.set_status(load_secs=round(task.status.get("load_secs", 0) + again, 1))
+                        task.event({"ts": store.now(), "round": task.status["round"], "kind": "load",
+                                    "text": f"model reloaded ({again:.0f}s)"})
+                except (KeyError, RuntimeError, OSError) as e:
+                    return _load_failed(task, e)
+            first = False
             n = task.status["round"]
             why = fresh_reason(task) if n > 1 else None
             keep = task.status.get("context") == "keep"
@@ -851,13 +930,18 @@ def drive(task: store.Task) -> None:
                 _end_agent(task)
             measure_speed(task, began)
             if rnd["full"]:  # before notes: the handover carries them (_full_round)
-                _full_round(task, n, rnd)
-                continue
+                handed += 1
+                if handed <= HANDOVER_MAX:
+                    _full_round(task, n, rnd, handed)
+                    continue
+                rnd["stuck"] = (f"handed over to a fresh session {HANDOVER_MAX} times in this "
+                                "round without finishing: the step is too big for this model's "
+                                "window; split it (wb next) or take it over")
             if rnd["interrupted"] or (pending_steer(task) and not rnd["stuck"]):
                 _steer_round(task, n, rnd["interrupted"])
                 continue
             if rnd["stuck"] or (rnd["exit"] not in (0, None) and not rnd["texts"]):
-                text = summary_text(task, n, rnd, None)
+                text = summary_text(task, n, rnd, None) + _undelivered(task)
                 task.round_dir(n).joinpath("summary.md").write_text(text)
                 phase = "stuck" if rnd["stuck"] else "failed"
                 task.set_status(phase=phase, last=rnd["stuck"] or f"opencode exited {rnd['exit']}")
@@ -868,6 +952,9 @@ def drive(task: store.Task) -> None:
                 _steer_round(task, n, False)
                 continue
             text = summary_text(task, n, rnd, tests)
+            if pending_steer(task):  # a note that came in while the report was written
+                _steer_round(task, n, False)
+                continue
             task.round_dir(n).joinpath("summary.md").write_text(text)
             used = task.status.get("auto_fixes", 0)
             if tests and not tests["ok"] and used < int(task.spec.get("auto_fix", 0)):
@@ -936,12 +1023,24 @@ def _reading_full(task: store.Task, n: int, used: int, window: int,
     task.notify("checkin", f"task {task.name}: {text}", round=n)
 
 
-def _full_round(task: store.Task, n: int, rnd: dict) -> None:
+# Mid-round handovers in one review round before it is stopped as stuck. A session that changes
+# something early and then fills up reading handed over again and again, for hours, with Claude
+# told nothing (the 2026-11-16 audit). A big step needs a few; past this it is too big for the
+# window. From the second on, each one is a check-in, so Claude can steer or stop it.
+HANDOVER_MAX = 5
+
+
+def _full_round(task: store.Task, n: int, rnd: dict, handed: int = 1) -> None:
     window = task.status["window"]
     pct = 100 * rnd["full"] // window
-    task.event({"ts": store.now(), "round": n, "kind": "full",
-                "text": f"the agent's session reached {pct}% of its window "
-                        f"({rnd['full'] / 1000:.1f}K of {window // 1024}K): a fresh one takes over"})
+    text = (f"the agent's session reached {pct}% of its window "
+            f"({rnd['full'] / 1000:.1f}K of {window // 1024}K): a fresh one takes over")
+    task.event({"ts": store.now(), "round": n, "kind": "full", "text": text})
+    if handed > 1:
+        files = gitops.changed(task.worktree)
+        task.notify("checkin", f"task {task.name}: {text} (handover {handed} this round; "
+                    f"stopped as stuck past {HANDOVER_MAX}); files changed so far: "
+                    + (", ".join(f[3:] for f in files.splitlines()) if files else "none"), round=n)
     last = "\n\n".join(t.strip() for t in rnd["texts"][-2:] if t.strip())[-1200:]
     task.round_dir(n + 1).mkdir(parents=True, exist_ok=True)
     asks = round_asks(task, n)
@@ -953,6 +1052,14 @@ def _full_round(task: store.Task, n: int, rnd: dict) -> None:
     task.set_status(round=n + 1, context="full", full_pct=pct,
                     handovers=task.status.get("handovers", 0) + 1,
                     steer_taken=task.status.get("steer_taken", 0) + len(notes))
+
+
+def _undelivered(task: store.Task) -> str:
+    """Claude's notes a stopped round never delivered, for its report (the runner's own nudges
+    aside): wb feedback and wb next drop them, wb resume carries them (cli._stale_notes)."""
+    notes = [r for r in pending_steer(task) if r.get("by") != "workbench"]
+    return ("\nNOTE: not delivered, the round stopped first: "
+            + " | ".join(r["text"].strip().replace("\n", " ")[:200] for r in notes)) if notes else ""
 
 
 def _steer_round(task: store.Task, n: int, interrupted: bool) -> None:
@@ -968,8 +1075,34 @@ def _steer_round(task: store.Task, n: int, interrupted: bool) -> None:
 SIGNAL_STOP = "the runner was stopped by a signal (a shutdown, a logout or a kill), not by Claude"
 
 
+def _one_runner(task: store.Task):
+    """Hold tasks/<task>/runner.lock for the runner's life, or None when another runner holds it:
+    two wb commands acting on one task at once once spawned two runners on one worktree and
+    session (the 2026-11-16 audit). The holder's pid is in the file."""
+    import fcntl
+    fh = open(task.dir / "runner.lock", "a+")
+    try:
+        fcntl.flock(fh, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except BlockingIOError:
+        fh.seek(0)
+        held = fh.read().strip()
+        fh.close()
+        if held.isdigit():  # spawn_runner wrote this one's pid: put the live runner's back
+            task.set_status_if(lambda st: st.get("pid") == os.getpid(), pid=int(held))
+        return None
+    fh.truncate(0)
+    fh.write(str(os.getpid()))
+    fh.flush()
+    return fh
+
+
 def main():
+    store.absolute_env()
     task = store.Task(sys.argv[1])
+    lock = _one_runner(task)  # noqa: F841 (held until the process exits)
+    if lock is None:
+        print(f"another runner drives {task.name}; this one exits", flush=True)
+        return
     signal.signal(signal.SIGTERM, _on_term)
     try:
         drive(task)

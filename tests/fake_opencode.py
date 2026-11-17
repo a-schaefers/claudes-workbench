@@ -11,11 +11,18 @@
          a fresh session handed the task behaves like ok
   read   reads, a step that fills 76% before any change, then writes "42" like ok
   floor  reads 48% of its window before its first change, then fills to 76%, then writes "42"
+  refill every session changes a file, then fills 76% and works on for an hour
+  bgwait a command OpenCode moved to the background: `background_wait`, quiet for FAKE_BGWAIT
+         seconds (6), then writes "42" like ok
+  toolhang  one tool call, then silent (a command that prints nothing for long)
+A `run` message must follow `--` when it starts with '-', or the fake prints its usage and exits
+1, as OpenCode does. FAKE_LATE: seconds before the first event (a model reading its prompt).
 FAKE_PROMPTS, if set, is a file each run appends its prompt to; FAKE_RUNS one that records
 whether each run continued a session, and its prompt; FAKE_SLEEP pauses each run after its first
 event. FAKE_LESSON ends the agent's text with a `Lesson:` line (what workbench.lessons gathers).
 FAKE_BG, a file: each run starts `sleep` in a session of its own, left running, and writes its pid
-there (what the agent leaves behind). FAKE_STRAY prints a line that is JSON but not an event first.
+there (what the agent leaves behind). FAKE_STRAY prints lines that are JSON but not events, or
+events of the wrong shape, first.
 `session export` prints one finished step: FAKE_FILL sets the context it read, FAKE_COMPACTED
 adds a completed compaction. `session list` lists nothing.
 """
@@ -69,6 +76,9 @@ def finish():
     emit("step_finish", reason="stop", tokens={"input": 120, "output": 30, "cache": {"read": 0}})
 
 
+if args and args[0] == "run" and args[-1].startswith("-") and args[-2:-1] != ["--"]:
+    print("opencode run [flags] [<message...>]", file=sys.stderr)  # OpenCode 2.3 took it for a flag
+    sys.exit(1)
 if os.environ.get("FAKE_PROMPTS") and args and args[0] == "run":
     with open(os.environ["FAKE_PROMPTS"], "a") as fh:
         fh.write(json.dumps(args[-1]) + "\n")
@@ -82,13 +92,17 @@ if scenario == "fill" and "picking this task up in a fresh session" in args[-1]:
 if scenario == "crash":
     sys.exit(1)
 if os.environ.get("FAKE_STRAY"):
-    print("42", flush=True)
+    for stray in ("42", "[1, 2]", "null", '{"type": "step_finish", "part": {"tokens": 5}}',
+                  '{"type": "tool_use", "part": "x"}', '{"type": "text", "part": {"text": 7}}',
+                  '{"type": "error", "error": "boom"}'):
+        print(stray, flush=True)
 if os.environ.get("FAKE_BG") and args and args[0] == "run":
     import subprocess
     bg = subprocess.Popen(["sleep", "300"], start_new_session=True, stdout=subprocess.DEVNULL,
                           stderr=subprocess.DEVNULL)
     with open(os.environ["FAKE_BG"], "w") as fh:
         fh.write(str(bg.pid))
+time.sleep(float(os.environ.get("FAKE_LATE", 0)))  # before any output: reading the prompt
 emit("step_start")
 time.sleep(float(os.environ.get("FAKE_SLEEP", 0)))  # after the first event: the session is known
 if scenario in ("ok", "fix"):
@@ -105,6 +119,30 @@ elif scenario == "loop":
         time.sleep(0.05)
     finish()
 elif scenario == "hang":
+    time.sleep(3600)
+elif scenario == "toolhang":
+    tool("bash", {"command": "make check"})
+    time.sleep(3600)
+elif scenario == "bgwait":
+    tool("bash", {"command": "make test"})
+    emit("text", text="The tests run in the background; waiting for them.")
+    finish()
+    print(json.dumps({"type": "background_wait", "timestamp": t(), "sessionID": session,
+                      "jobs": [{"id": "job1", "kind": "shell", "title": "make test"}]}), flush=True)
+    time.sleep(float(os.environ.get("FAKE_BGWAIT", 6)))
+    with open("answer.txt", "w") as fh:
+        fh.write("42\n")
+    tool("write", {"filePath": os.path.abspath("answer.txt"), "content": "42"})
+    emit("text", text="Wrote answer.txt = 42.")
+    finish()
+elif scenario == "refill":  # every session changes something early, then fills up
+    with open("notes.txt", "a") as fh:
+        fh.write(f"{session}\n")
+    tool("write", {"filePath": os.path.abspath("notes.txt"), "content": session})
+    emit("step_finish", reason="tool-calls", tokens={"input": 2000, "output": 100,
+                                                      "cache": {"read": 900}})
+    emit("step_finish", reason="tool-calls", tokens={"input": 2000, "output": 900,
+                                                      "cache": {"read": 22100}})  # 25000: 76%
     time.sleep(3600)
 elif scenario == "read":
     tool("read", {"filePath": os.path.abspath("answer.txt")})
