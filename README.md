@@ -110,8 +110,8 @@ claude plugin install workbench@workbench
 wb doctor
 ```
 
-To upgrade later: `claude plugin marketplace update workbench && claude plugin update
-workbench@workbench`, then restart Claude Code. Your state and skills stay as they are. Working on
+Workbench checks for an update once a week and tells you; `/delegate-update` installs it (or
+`wb update` in a terminal). Your state and skills stay as they are. Working on
 Workbench itself? Install from a clone instead ([Installing](ARCHITECTURE.md#installing)).
 
 ### Use it
@@ -151,8 +151,9 @@ to read the diff.
 | Command | What it does |
 |---|---|
 | `/delegate [task]` | turn on delegate mode for this session: the pane opens, and from then on Claude hands the coding of what you ask to your local models |
-| `/workbench` | open the pane: every delegated task, and the agent's work live |
+| `/delegate-pane` | open the pane: every delegated task, and the agent's work live |
 | `/delegate-models` | check now which local models suit your hardware best (it also happens weekly) |
+| `/delegate-update` | update Workbench now: `wb`, the skill and the pane (it checks weekly and tells you) |
 | `/delegate-quit` | leave delegate mode: every agent stops now, their work is kept for later |
 | `/delegate-quit-and-hand-back-claude` | leave delegate mode and have Claude finish the agents' tasks itself |
 

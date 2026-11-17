@@ -133,6 +133,10 @@ give it its first few real tasks with `--model` (ones you'd review closely anywa
 **No local model yet?** If `wb models` lists none that can run, do the model check below first:
 recommend models for this hardware and offer to set them up in OpenCode (ask before any download).
 
+**Updating workbench.** The mod checks weekly and tells the user; `/delegate-update` is theirs.
+Asked to update it yourself: `wb update` (it refuses while tasks run; tell the user to restart
+Claude Code or run `/reload-plugins` after).
+
 **The weekly model check.** Once a week the mod asks you (or the user runs `/delegate-models`)
 to check the local models against this machine. `wb scout` gives the facts: GPU and VRAM, RAM,
 disk, what is installed and registered, real-task results, and the watch list

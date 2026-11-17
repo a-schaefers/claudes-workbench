@@ -1464,6 +1464,68 @@ class Setup(Base):
         self.assertTrue(skill.is_dir() and not skill.is_symlink())
 
 
+class Update(Base):
+    """wb update: the weekly check the mod runs, and /delegate-update (2026-11-16). A real origin
+    and clone stand in for this copy; a fake `claude` records the plugin steps."""
+    def setUp(self):
+        super().setUp()
+        tmp = Path(self.tmp.name)
+        git = lambda d, *a: subprocess.run(["git", "-C", str(d), *a], check=True, capture_output=True)
+        self.origin = tmp / "origin"
+        git(tmp, "clone", "-q", str(self.repo), str(self.origin))
+        os.environ["CLAUDE_CONFIG_DIR"] = str(tmp / "cc")
+        self.copy = tmp / "cc/plugins/marketplaces/workbench"    # where Claude Code keeps its clone
+        git(tmp, "clone", "-q", str(self.origin), str(self.copy))
+        (self.origin / "new.txt").write_text("x")
+        git(self.origin, "add", "new.txt"); git(self.origin, "commit", "-qm", "news")
+        self.calls = tmp / "claude-calls"
+        bindir = tmp / "fakebin"; bindir.mkdir()
+        (bindir / "claude").write_text(f'#!/bin/sh\necho "$@" >> {self.calls}\n')
+        (bindir / "claude").chmod(0o755)
+        os.environ["PATH"] = f"{bindir}{os.pathsep}{os.environ['PATH']}"
+        patcher = mock.patch.object(cli, "PKG_ROOT", self.copy)
+        patcher.start(); self.addCleanup(patcher.stop)
+
+    def update(self, *a):
+        buf, err = io.StringIO(), io.StringIO()
+        try:
+            with redirect_stdout(buf), redirect_stderr(err):
+                cli.main(["update", *a])
+        except SystemExit:
+            pass
+        return buf.getvalue() + err.getvalue()
+
+    def test_the_check_counts_new_commits_and_asks_origin_at_most_weekly(self):
+        self.assertIn("update available: 1 new commit(s)", self.update("--check", "--if-due"))
+        (self.origin / "more.txt").write_text("y")
+        subprocess.run(["git", "-C", str(self.origin), "add", "more.txt"], check=True)
+        subprocess.run(["git", "-C", str(self.origin), "commit", "-qm", "more"], check=True)
+        self.assertIn("1 new commit(s)", self.update("--check", "--if-due"))   # this week's answer
+        self.assertIn("2 new commit(s)", self.update("--check"))               # asked now
+        os.environ["CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC"] = "1"
+        store.write_json(store.home() / "update.json", {"checked_at": 0, "behind": 2})
+        self.assertIn("2 new commit(s)", self.update("--check", "--if-due"))   # no network at all
+
+    def test_a_marketplace_copy_updates_through_claude_code(self):
+        out = self.update()
+        self.assertIn("already up to date", out)        # the fake claude pulled nothing
+        self.assertEqual(self.calls.read_text().splitlines(),
+                         ["plugin marketplace update workbench", "plugin update workbench@workbench"])
+
+    def test_a_clone_pulls_unless_it_has_changes_or_tasks_are_running(self):
+        os.environ["CLAUDE_CONFIG_DIR"] = str(Path(self.tmp.name) / "elsewhere")   # not Claude Code's clone
+        (self.copy / "README.md").write_text("mine")
+        self.assertIn("uncommitted changes", self.update())
+        subprocess.run(["git", "-C", str(self.copy), "checkout", "-q", "README.md"], check=True)
+        with mock.patch.object(store, "all_tasks", lambda: [types.SimpleNamespace(name="t-up")]), \
+                mock.patch.object(cli, "runner_alive", lambda t: True):
+            self.assertIn("tasks are running (t-up)", self.update())
+        out = self.update()
+        self.assertIn("updated clone", out)
+        self.assertTrue((self.copy / "new.txt").exists())
+        self.assertIn("up to date", self.update("--check"))
+
+
 class Projects(Base):
     """wb init, and wb start's demand for a CLAUDE.md."""
     def git(self, d, *a):
