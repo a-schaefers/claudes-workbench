@@ -1502,12 +1502,51 @@ class Notes(Base):
 
 class Setup(Base):
     """wb setup: the marketplace install copies only mod/, so wb and /delegate are linked from the
-    clone (2026-11-16)."""
-    def setup(self, *a):
+    clone (2026-11-16); wb doctor says what an install still lacks."""
+    def setup(self, *a, cmd="setup"):
         buf = io.StringIO()
         with redirect_stdout(buf), self.assertRaises(SystemExit) as e:
-            cli.main(["setup", *a])
+            cli.main([cmd, *a])
         return e.exception.code, buf.getvalue()
+
+    def test_doctor_says_what_the_install_lacks_and_never_ok_beside_a_failure(self):
+        # the 2026-11-16 audit: a fresh home's state dir was BAD, a home named like "delaney" failed
+        # the lane, WB_BIN made "wb isn't on PATH" ok, /delegate and an old OpenCode went unchecked
+        home = Path(self.tmp.name) / "delaney"
+        home.mkdir()
+        os.environ.update(HOME=str(home), WB_HOME=str(home / ".local/state/workbench"), WB_BIN="/x/wb",
+                          FAKE_VERSION="opencode v1.9.0",
+                          PATH=os.pathsep.join([str(home / ".local/bin"), os.path.dirname(shutil.which("git"))]))
+        os.environ.pop("CLAUDE_CONFIG_DIR", None)
+        code, out = self.setup(cmd="doctor")
+        self.assertEqual(code, 1)
+        for want in ("BAD opencode opencode v1.9.0: workbench needs OpenCode 2.x",
+                     "BAD wb isn't on PATH: Claude runs it by name in Bash",
+                     "WB_BIN=/x/wb covers only the mod's calls",
+                     f"ok  state dir {home / '.local/state/workbench'}\n",
+                     f"BAD /delegate isn't in {home / '.claude/skills'}: wb setup links it",
+                     "--  the Claude Code mod (the pane, the wake-ups) isn't among"):
+            self.assertIn(want, out)
+        if lane.abi():
+            self.assertIn("ok  agents write only in their lane", out)
+        self.assertEqual(self.setup()[0], 0)
+        (home / ".claude/plugins").mkdir(parents=True)
+        (home / ".claude/plugins/installed_plugins.json").write_text(
+            json.dumps({"version": 2, "plugins": {"workbench@workbench": []}}))
+        os.environ.update(FAKE_VERSION="opencode v2.3.0")
+        os.environ.pop("WB_BIN")
+        code, out = self.setup(cmd="doctor")
+        for want in ("ok  opencode opencode v2.3.0", f"ok  wb on PATH: {home / '.local/bin/wb'}",
+                     f"ok  /delegate skill at {home / '.claude/skills/delegate'}",
+                     "ok  the Claude Code mod is installed"):
+            self.assertIn(want, out)
+        self.assertNotIn("comes from", out)
+        (home / ".local/bin/wb").unlink()
+        (home / ".local/bin/wb").symlink_to("/usr/bin/true")  # another copy's
+        os.environ.update(FAKE_VERSION="nightly")
+        out = self.setup(cmd="doctor")[1]
+        self.assertIn("--  opencode nightly: its version doesn't parse", out)
+        self.assertIn("--  wb comes from /usr, not this copy", out)
 
     def test_setup_links_wb_and_the_skill_and_leaves_what_it_did_not_make(self):
         home = Path(self.tmp.name) / "home"

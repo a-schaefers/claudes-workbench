@@ -16,7 +16,8 @@ whether each run continued a session, and its prompt; FAKE_SLEEP pauses each run
 event. FAKE_LESSON ends the agent's text with a `Lesson:` line (what workbench.lessons gathers).
 `session export` prints one finished step: FAKE_FILL sets the context it read, FAKE_COMPACTED
 adds a completed compaction. `session list` lists nothing. Either fails without `--standalone`,
-as the real one does when another service holds the managed port.
+as the real one does when another service holds the managed port. `--version` says
+`FAKE_VERSION` (2.3.0).
 """
 import json
 import os
@@ -25,6 +26,9 @@ import time
 import uuid
 
 args = sys.argv[1:]
+if args == ["--version"]:  # wb doctor; FAKE_VERSION plays an older or odder build
+    print(os.environ.get("FAKE_VERSION", "opencode v2.3.0"))
+    sys.exit(0)
 if args[:1] == ["session"] and "--standalone" not in args:
     # As real OpenCode does when another service holds the managed port (the 2026-11-16 audit):
     # workbench's session commands must not depend on the background service.

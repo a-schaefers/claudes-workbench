@@ -6,6 +6,7 @@ resource, and by a person at a terminal.
 import argparse
 import json
 import os
+import re
 import shutil
 import signal
 import subprocess
@@ -1350,7 +1351,8 @@ def cmd_setup(a):
         print(f"ok  {at} → {to} (made)")
     bindir = str(Path.home() / ".local/bin")
     if bindir not in os.environ.get("PATH", "").split(os.pathsep):
-        print(f"--  {bindir} isn't on PATH: add it, or the mod can't run wb (or set WB_BIN)")
+        print(f"--  {bindir} isn't on PATH: add it; Claude and the mod run wb by name (WB_BIN moves "
+              "only the mod's calls)")
     print("next: wb doctor")
     sys.exit(1 if bad else 0)
 
@@ -1414,15 +1416,29 @@ def cmd_doctor(a):
         ok &= good
         print(f"{'ok ' if good else 'BAD'} {what}")
 
-    def version(cmd):
+    def elsewhere(what, at, mine):
+        """Another copy's (a clone and a marketplace install both linked once): it runs, not this
+        one, which doctor was checking (the 2026-11-16 audit)."""
+        if at and Path(at).exists() and Path(at).resolve() != mine.resolve():
+            print(f"--  {what} comes from {Path(at).resolve().parent.parent}, not this copy ({PKG_ROOT}): "
+                  "wb setup --force from the copy you want" if Path(at).is_symlink() or what == "wb" else
+                  f"--  {at} is a directory of its own, not a link to this copy's {mine}")
+
+    def version(argv):
         try:
-            r = subprocess.run([cmd, "--version"], capture_output=True, text=True, timeout=30)
+            r = subprocess.run([*argv, "--version"], capture_output=True, text=True, timeout=30)
             return r.returncode == 0, r.stdout.strip() or r.stderr.strip()
         except (OSError, subprocess.TimeoutExpired) as e:
             return False, f"not found ({e})"
 
-    good, said = version("opencode")
-    line(good, f"opencode {said}")
+    good, said = version(runner.opencode_bin())
+    major = re.search(r"(\d+)\.\d+", said) if good else None
+    if good and not major:  # an odd build string: say it, don't fail on it
+        print(f"--  opencode {said}: its version doesn't parse; workbench needs OpenCode 2.x")
+    else:  # the config layer and `run --standalone --auto` are 2.x only (the 2026-11-16 audit)
+        old = bool(major) and int(major[1]) < 2
+        line(good and not old, f"opencode {said}"
+             + (": workbench needs OpenCode 2.x (checked against 2.3); upgrade it" if old else ""))
     cfg = models.opencode_config_path()
     try:
         models.read_config()
@@ -1430,11 +1446,18 @@ def cmd_doctor(a):
     except ValueError as e:
         line(False, f"OpenCode config {cfg} doesn't parse: {e}")
         sys.exit(1)  # nothing below can read the models
-    good, said = version("git")
+    good, said = version(["git"])
     line(good, said)
-    on_path = shutil.which("wb")  # the mod runs `wb` by name (WB_BIN overrides it)
-    line(bool(on_path or os.environ.get("WB_BIN")), f"wb on PATH: {on_path}" if on_path else
-         "wb isn't on PATH, so the Claude Code mod can't run it: link bin/wb into a PATH directory")
+    # Claude's Bash runs `wb` by name whatever WB_BIN says: WB_BIN only moves the mod's own calls
+    # (the 2026-11-16 audit: doctor said ok beside "the mod can't run it")
+    on_path, wb_bin = shutil.which("wb"), os.environ.get("WB_BIN")
+    if on_path:
+        line(True, f"wb on PATH: {on_path}" + (f" (the mod runs WB_BIN={wb_bin})" if wb_bin else ""))
+    else:
+        line(False, "wb isn't on PATH: Claude runs it by name in Bash, and the mod too; link bin/wb "
+             "into a PATH directory (wb setup)" + (f"; WB_BIN={wb_bin} covers only the mod's calls"
+                                                    if wb_bin else ""))
+    elsewhere("wb", wb_bin or on_path, PKG_ROOT / "bin/wb")
     found = models.discover()
     line(bool(found), f"{len(found)} local model(s) in {models.opencode_config_path()}")
     for m in found.values():
@@ -1455,20 +1478,40 @@ def cmd_doctor(a):
             elif said and served and served > said:
                 print(f"--  {pid}/{name}: Ollama serves {served // 1024}K, the entry says {said // 1024}K; "
                       f"wb model add {pid}/{name} --context {served} lets its tasks grow")
-    line(os.access(store.home().parent, os.W_OK), f"state dir {store.home()}")
+    try:  # every wb command makes it: a fresh home has no ~/.local/state yet (the 2026-11-16 audit)
+        store.home().mkdir(parents=True, exist_ok=True)
+        why = "" if os.access(store.home(), os.W_OK | os.X_OK) else "not writable"
+    except OSError as e:
+        why = f"can't make it: {e.strerror or e}"
+    line(not why, f"state dir {store.home()}" + (f": {why}" if why else ""))
     v = lane.abi()
     if v:  # draw a real lane and try a write outside it: the check is the refusal itself
         import tempfile
         with tempfile.TemporaryDirectory() as inside, tempfile.TemporaryDirectory(dir=Path.home()) as out:
             probe = [sys.executable, "-c", f"open({str(Path(out) / 'x')!r}, 'w')"]
             r = subprocess.run(lane.wrap([inside], probe), capture_output=True, text=True, timeout=30)
-            held = r.returncode != 0 and "lane" not in r.stderr and not (Path(out) / "x").exists()
+            # refused by the lane, not by the kernel refusing the lane (exit 126, "workbench
+            # lane: …") and not some other failure; a home named "delaney" holds "lane" in the
+            # PermissionError's path (the 2026-11-16 audit)
+            held = (r.returncode not in (0, 126) and "PermissionError" in r.stderr
+                    and not (Path(out) / "x").exists())
         line(held, f"agents write only in their lane (Landlock ABI {v})" if held else
              f"the lane didn't hold a write outside it: {r.stderr.strip()[-200:] or 'the write went through'}")
     else:
         print("--  agents' writes outside their lane aren't refused here (no Landlock): only "
               "OpenCode's file tools keep to it")
-    print(f"--  the Claude Code mod lives in {PKG_ROOT / 'mod'} (see README for installing it)")
+    skill = context.claude_home() / "skills/delegate/SKILL.md"
+    line(skill.exists(), f"/delegate skill at {skill.parent}" if skill.exists() else
+         f"/delegate isn't in {skill.parent.parent}: wb setup links it")
+    elsewhere("/delegate", skill.parent, PKG_ROOT / "skill/delegate")
+    try:  # information only: a mod loaded another way (--plugin-dir, a dev mod) isn't listed here
+        listed = any(k.startswith("workbench@") for k in json.loads(
+            (context.claude_home() / "plugins/installed_plugins.json").read_text()).get("plugins", {}))
+    except (OSError, ValueError, AttributeError):
+        listed = False
+    print("ok  the Claude Code mod is installed (workbench@workbench)" if listed else
+          "--  the Claude Code mod (the pane, the wake-ups) isn't among Claude Code's installed "
+          "plugins: claude plugin install workbench@workbench, unless it loads another way")
     sys.exit(0 if ok else 1)
 
 

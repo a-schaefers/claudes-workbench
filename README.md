@@ -88,7 +88,8 @@ and it works.
 
 - **[Claude Code](https://claude.com/claude-code)** 2.1.287 or newer (the pane is a Claude Code
   mod), with a Claude subscription or an API key
-- **[OpenCode](https://opencode.ai)**, which runs the local models as coding agents
+- **[OpenCode](https://opencode.ai)** 2.x (checked against 2.3), which runs the local models as
+  coding agents
 - **A local model server**, usually [Ollama](https://ollama.com). No models yet? That's fine: the
   first time you use it, Claude looks at your hardware, recommends the best models it can run, and
   sets them up in OpenCode (it asks before downloading anything)

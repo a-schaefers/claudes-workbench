@@ -247,16 +247,16 @@ PATH and the lane; the rest is only imitated by the fake.
 - `--worktree` takes `=name`; the runner makes its own worktrees anyway.
 
 ## Troubleshooting
-- `wb doctor`: opencode and its config, git, each model's readiness, each Ollama entry's
+- `wb doctor`: opencode (2.x) and its config, git, each model's readiness, each Ollama entry's
   `max_tokens` and context, the state directory, a real lane around a test write, `wb` on PATH,
-  the mod.
+  the `/delegate` link (and another copy's), whether the mod is listed as installed.
 - A model "can't run": `wb models` says why (server down, not pulled, no `start` command).
 - A task misbehaves: `wb log <t> -v`, `wb watch <t> -v`, `tasks/<t>/runner.log` (the runner's
   output and OpenCode's stderr, including `workbench lane: the kernel refused the lane`).
 - The agent can't see `ask_reviewer`: `PWD=<worktree> OPENCODE_CONFIG=<state>/rules/<task>/opencode.json
   opencode mcp list --print-logs`.
-- The mod does nothing: `wb` must be on Claude Code's PATH (or set `WB_BIN`); `claude --debug`
-  shows hook errors.
+- The mod does nothing: `wb` must be on Claude Code's PATH (`WB_BIN` moves only the mod's calls;
+  Claude's Bash still runs `wb` by name); `claude --debug` shows hook errors.
 - A test fails: the task's `runner.log` is under the test's temp `WB_HOME` (deleted at tearDown);
   `wait_phase` prints the status when it times out. An interrupted run can leave detached runners
   and fakes sleeping.

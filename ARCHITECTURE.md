@@ -1554,7 +1554,8 @@ rewake, Raster vs face, `/delegate` alone, the update check and `/delegate-updat
 question wakes, the one-hour cutoff, scrolling, `WB_COMPACT_AT`, the ears respawn.
 
 **Troubleshooting.** If `wb` isn't on Claude Code's PATH the mod fails quietly (the ears respawn
-every 2 s, the `workbench` context block is left out): set `WB_BIN`. `claude plugin validate mod`
+every 2 s, the `workbench` context block is left out): set `WB_BIN`. That moves only the mod's
+own calls: Claude's Bash runs `wb` by name, so it still has to be on PATH (`wb doctor` says). `claude plugin validate mod`
 lists the hooks, calls and env reads; `claude --debug` shows hook errors.
 
 ## Waiting without polling
@@ -1666,9 +1667,9 @@ message, not a traceback.
 | `wb image "<prompt>"` | `--n` (4), `--size WxH` (1024x1024), `--seed`, `--ref <img>…`, `--out DIR`, `--engine`, `--list` | Candidates from a local image engine (see *Images*). |
 | `wb chat [log\|serve\|url\|reply\|ack\|pending]` | `--port` (1337), `--bind` (replaces chat.json's), `--host` (adds), `--text`, `--message <file\|->` (reply reads stdin without either), `-n` (10); `ack <id> --by --how` (the mod) | The web chat: the thread, the server, the link with its token, Claude's reply. |
 | `wb init <dir>` | | A project the way Claude keeps one: git on the default branch, an initial commit, AGENTS.md → CLAUDE.md (refuses inside another repo or without a git identity). |
-| `wb setup` | `--force` (replaces a link that points elsewhere; never a real file) | Links `~/.local/bin/wb` to this copy's `bin/wb` and Claude Code's `skills/delegate` to its `skill/delegate`, warns when `~/.local/bin` isn't on PATH; exit 1 when it left something in the way (see *Installing*). |
+| `wb setup` | `--force` (replaces a link that points elsewhere; never a real file) | Links `~/.local/bin/wb` to this copy's `bin/wb` and Claude Code's `skills/delegate` to its `skill/delegate`, warns when `~/.local/bin` isn't on PATH (Claude and the mod run `wb` by name); exit 1 when it left something in the way (see *Installing*). |
 | `wb update` | `--check` (only say whether origin has news: `update available: N new commit(s)…` or `up to date`), `--if-due` (with `--check`: ask origin at most weekly, `UPDATE_EVERY`, else answer from `update.json`; never with `CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC`) | Updates this copy (see *Installing*): refuses while any runner is live; a marketplace copy runs `claude plugin marketplace update workbench` then `claude plugin update workbench@workbench`; a clone (refusing uncommitted tracked changes) runs `git pull --ff-only` first. Prints `updated <kind> a..b (N commit(s))` or `already up to date`. The fetch never prompts (`GIT_TERMINAL_PROMPT=0`, ssh `BatchMode`). |
-| `wb doctor` | | `opencode --version`, the OpenCode config, git, models found and each one's readiness, each Ollama entry's `options.max_tokens` and context against what Ollama serves, the state directory, a real lane drawn around a test write (`ok agents write only in their lane (Landlock ABI N)`), `wb` on PATH (or `WB_BIN`) for the mod, where the mod lives. `ok`/`BAD` lines set the exit code; `--` lines inform. |
+| `wb doctor` | | `opencode --version` (BAD below 2.x, whose config shape and run flags workbench writes; a version that doesn't parse is a `--` line), the OpenCode config, git, models found and each one's readiness, each Ollama entry's `options.max_tokens` and context against what Ollama serves, the state directory (made if missing, then checked writable), a real lane drawn around a test write (`ok agents write only in their lane (Landlock ABI N)`: the probe's `PermissionError`, not exit 126), `wb` on PATH (Claude's Bash runs it by name: BAD without it, whatever `WB_BIN` says; `WB_BIN` is noted when set), the `/delegate` skill link, a `--` line when `wb` or `/delegate` comes from another copy (`wb setup --force` from the one you want), and whether Claude Code lists `workbench@…` in `plugins/installed_plugins.json` (information only: a mod loaded another way isn't listed). `ok`/`BAD` lines set the exit code; `--` lines inform. |
 
 ## Files and formats
 
@@ -1889,7 +1890,8 @@ sets the fake GPU's size (unset: VRAM unknown, so no sharing). The runner keeps 
 spawned with: a `FAKE_*` change reaches only runners spawned later (feedback, next, resume spawn
 new ones).
 
-**The fake OpenCode** (`fake_opencode.py`). Handles `run …` (prompt = last argument, `--session`
+**The fake OpenCode** (`fake_opencode.py`). Handles `--version` (`FAKE_VERSION`, else
+`opencode v2.3.0`: `wb doctor`), `run …` (prompt = last argument, `--session`
 continues) and `session export <sid>` (a fixed export: one user message, one assistant message
 with tokens `FAKE_FILL` or 1200, an edit of answer.txt 41 → 42, text; a compaction message when
 `FAKE_COMPACTED`). It streams one JSON event per line (`step_start`, `tool_use`, `text`,
