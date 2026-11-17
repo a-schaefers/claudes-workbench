@@ -36,6 +36,7 @@ import json
 import os
 import re
 import shlex
+import shutil
 import socket
 import stat
 import subprocess
@@ -342,9 +343,10 @@ def why_none() -> str:
     skipped = skipped_providers()
     if skipped:
         return "; ".join(f"provider {pid}: {why}" for pid, why in skipped)
-    return (f"OpenCode has no local provider in {opencode_config_path()}: with Ollama running, "
-            "wb model add ollama/<model> adds one; or add an OpenAI-compatible provider whose "
-            "baseURL is on this machine")
+    return (f"OpenCode has no local provider in {opencode_config_path()}: wb model add "
+            "<provider>/<model> --url <baseURL> adds one for any OpenAI-compatible server on this "
+            "machine (llama.cpp, LM Studio, vLLM, ...); with Ollama running, wb model add "
+            "ollama/<model> adds one by itself")
 
 
 def url_problem(url: str, engine: str, npm: str | None = None) -> str:
@@ -1116,22 +1118,74 @@ def ollama_answers(root: str) -> bool:
     return isinstance(body, dict) and "version" in body
 
 
+def _add_provider(cfg: dict, pid: str, name: str, base: str) -> None:
+    key, url = ("providers", "settings") if "providers" in cfg and "provider" not in cfg \
+        else ("provider", "options")  # the first: OpenCode 2.x's own shape
+    entry = {"npm": "@ai-sdk/openai-compatible", "name": name, url: {"baseURL": base}}
+    cfg.setdefault(key, {})[pid] = entry
+    write_config(cfg, f'under "{key}" add "{pid}": {json.dumps(entry)}')
+
+
+def _has_provider(cfg: dict, pid: str) -> bool:
+    return pid in (cfg.get("provider") or {}) or pid in (cfg.get("providers") or {})
+
+
 def add_ollama_provider(pid: str) -> str | None:
     """Give OpenCode a provider ``pid`` for this machine's Ollama when its config has none by that
     id and Ollama answers; its root, or None. A first run had no provider and no command made one
     (the 2026-11-16 audit). A provider the user wrote is never touched."""
     cfg = read_config()
-    if pid in (cfg.get("provider") or {}) or pid in (cfg.get("providers") or {}):
+    if _has_provider(cfg, pid):
         return None
     root = ollama_root_here()
     if not _fake() and not ollama_answers(root):
         return None
-    key, url = ("providers", "settings") if "providers" in cfg and "provider" not in cfg \
-        else ("provider", "options")  # the first: OpenCode 2.x's own shape
-    entry = {"npm": "@ai-sdk/openai-compatible", "name": "Ollama", url: {"baseURL": f"{root}/v1"}}
-    cfg.setdefault(key, {})[pid] = entry
-    write_config(cfg, f'under "{key}" add "{pid}": {json.dumps(entry)}')
+    _add_provider(cfg, pid, "Ollama", f"{root}/v1")
     return root
+
+
+def add_server_provider(pid: str, base: str) -> bool:
+    """Give OpenCode a provider ``pid`` for the OpenAI-compatible server at ``base`` (its
+    baseURL, usually ending in /v1), whatever runs it: llama.cpp, LM Studio, vLLM, Ollama. Only
+    Ollama had a command for it, so every other server meant editing opencode.json by hand. False
+    when the config already has ``pid`` (a provider the user wrote is never touched)."""
+    u = urlparse(base)
+    if u.scheme not in ("http", "https") or not u.hostname:
+        raise RuntimeError(f"--url {base}: give the server's baseURL, e.g. http://127.0.0.1:8080/v1")
+    if not _this_host(u.hostname) and not (_overrides().get(pid) or {}).get("local"):
+        raise RuntimeError(f"{base} isn't on this machine: workbench hands work only to local models. "
+                           f"If it is your own server (WSL2's Windows host, a LAN box), give {pid} "
+                           f"\"local\": true in {overrides_path()} first")
+    cfg = read_config()
+    if _has_provider(cfg, pid):
+        return False
+    _add_provider(cfg, pid, pid, base.rstrip("/"))
+    return True
+
+
+# Where the common local model servers listen by default and what their command is called, for
+# wb scout: Claude works with whatever the user runs, so it needs to see what that is (only
+# Ollama was looked for, and the skill steered every first run to it).
+SERVER_PORTS = ((11434, "Ollama"), (1234, "LM Studio"), (8080, "llama.cpp, llama-swap, LocalAI or MLX"),
+                (8000, "vLLM"), (5001, "KoboldCpp"), (30000, "SGLang"))
+SERVER_COMMANDS = ("ollama", "lms", "llama-server", "llama-swap", "vllm", "sglang", "koboldcpp",
+                   "local-ai", "mlx_lm.server", "jan")
+
+
+def servers_here() -> tuple[list[str], list[dict]]:
+    """The model servers' commands on PATH, and the servers answering on their default ports here:
+    {"root", "usually", "models"} (the ids an OpenAI-compatible /v1/models lists)."""
+    on_path = [c for c in SERVER_COMMANDS if shutil.which(c)]
+    if _fake():
+        return on_path, []
+    answering = []
+    for port, usually in SERVER_PORTS:
+        root = f"http://127.0.0.1:{port}"
+        body = _get(f"{root}/v1/models", timeout=1)
+        if isinstance(body, dict) and isinstance(body.get("data"), list):
+            answering.append({"root": root, "usually": usually,
+                              "models": [str(x.get("id")) for x in body["data"] if isinstance(x, dict)]})
+    return on_path, answering
 
 
 def ollama_cloud(root: str, name: str) -> bool:

@@ -20,7 +20,7 @@
 **Who runs where**
 - **Claude**, on Anthropic's servers (your subscription or API key): plans the work, writes a
   spec for each piece, reviews every diff, commits. It never runs on your GPU.
-- **Your GPU**: the open coding models (through Ollama and OpenCode) that do the coding itself:
+- **Your GPU**: the open coding models (through OpenCode and your model server) that do the coding itself:
   reading the code, editing files, running the tests, fixing what fails. Optionally, an image
   model too.
 
@@ -102,9 +102,11 @@ and it works.
   mod), with a Claude subscription or an API key
 - **[OpenCode](https://opencode.ai)** 2.x (checked against 2.3), which runs the local models as
   coding agents
-- **A local model server**, usually [Ollama](https://ollama.com). No models yet? That's fine: the
-  first time you use it, Claude looks at your hardware, recommends the best models it can run, and
-  sets them up in OpenCode (it asks before downloading anything)
+- **A local model server**, any that speaks the OpenAI API: llama.cpp's `llama-server`, LM Studio,
+  vLLM, Ollama and the like. Claude works with the one you already run. No server or models yet?
+  That's fine: the first time you use it, Claude looks at your hardware, lays out the servers and
+  models that fit it, and sets up the ones you pick in OpenCode (it asks before installing or
+  downloading anything)
 - Linux, macOS, or Windows through WSL2 (native Windows lacks the POSIX file locks and signals
   `wb` uses), with Python 3.11+ and git, which `wb` itself runs on
 - **Optional, for images:** a local image tool and model ([Images](ARCHITECTURE.md#images)).

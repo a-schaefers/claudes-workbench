@@ -1471,7 +1471,16 @@ ollama/<model>` with no provider `ollama` in the config and an Ollama answering 
 `127.0.0.1:11434`) first writes the provider (`add_ollama_provider`): `{"npm":
 "@ai-sdk/openai-compatible", "name": "Ollama", "options": {"baseURL": "<root>/v1"}}` (under
 `providers`, with `settings`, when the config uses that shape); a provider the user wrote is never
-touched. `wb model retire <id>
+touched. Any other server gets the same in one command: `wb model add <provider>/<model> --url
+<baseURL> --context N` writes `{"npm": "@ai-sdk/openai-compatible", "name": "<provider>",
+"options": {"baseURL": "<baseURL>"}}` first (`add_server_provider`; refused for a URL that isn't
+http(s), or that isn't on this machine unless models.json gives the provider `local: true`), and
+`--start CMD`/`--stop CMD` set the model's `start`/`stop` (a server that runs one model a process:
+llama-server, vLLM; LM Studio's `lms load`/`lms unload`). Workbench isn't tied to Ollama: it
+gets more from Ollama (pulls, the served context, sharing the GPU), and any server OpenCode can
+reach works, with `--context` and `start`/`stop` saying what the server can't (only Ollama was
+given a command for its provider, and the skill steered every first run to it: 2026-11-17).
+`wb model retire <id>
 [--delete]` removes the entry (refusing OpenCode's default model) and with `--delete` the weights
 (an Ollama that can't delete them is reported with `ollama rm <name>` after the entry is gone, a
 404 as "had no weights"); its results stay. `wb model sizes <id> trivial|significant|…` sets `sizes`. `wb doctor` asks each
@@ -2383,10 +2392,10 @@ delivered as taken (`_stale_notes`, *Notes*).
 | Command | Flags | What it does |
 |---|---|---|
 | `wb models` | `--set-default` | Each model's state, slice and speeds; the router's ranking per size. `--set-default` writes the significant-work pick as OpenCode's `model`. |
-| `wb model add <provider/model>` | `--pull`, `--label`, `--context N` | Registers a model in opencode.json, merged into any existing entry; on a first run it writes the `ollama` provider too; refuses a cloud model, an unknown served context (a server other than Ollama needs `--context`), a down Ollama, a down server of unknown engine (see *Managing the set*). |
+| `wb model add <provider/model>` | `--pull`, `--label`, `--context N`, `--url URL`, `--start CMD`, `--stop CMD` | Registers a model in opencode.json, merged into any existing entry; `--url` first writes an OpenAI-compatible provider for any server on this machine (`models.add_server_provider`: a provider already there is never touched; a URL off this machine needs models.json `local: true`), and `--start`/`--stop` write the model's models.json `start`/`stop`; on a first run with no `--url` it writes the `ollama` provider when Ollama answers; refuses a cloud model, an unknown served context (a server other than Ollama needs `--context`), a down Ollama, a down server of unknown engine (see *Managing the set*). |
 | `wb model retire <id>` | `--delete` | Unregisters it (not OpenCode's default) and drops its models.json overrides; `--delete` removes Ollama's weights (or says `ollama rm <name>` when it can't). |
 | `wb model sizes <id> [trivial] [significant]` | | Limits the sizes it's routed (none: every size). |
-| `wb scout` | `--done [--notes "…"]`, `--due`, `--watch "…"`, `--unwatch N` | The weekly check's facts (with the GPU budget and the devices it counts, `cli.gpu_line`); `--done` records it; `--due` exits 0 when one is due (7 days); the watch list. |
+| `wb scout` | `--done [--notes "…"]`, `--due`, `--watch "…"`, `--unwatch N` | The weekly check's facts (with the GPU budget and the devices it counts, `cli.gpu_line`; the model servers here, `cli.server_lines`: the server commands on PATH and each usual port whose `/v1/models` answers, flagged when OpenCode has no provider for it); `--done` records it; `--due` exits 0 when one is due (7 days); the watch list. |
 | `wb skill list \| show <n> \| scan <n\|path>` | | The library, a skill with its history, the scan alone. |
 | `wb skill add <n> --from <src> -m "…"` | `--source "<origin>, <license>"`, `--lesson ID…` | Check, scan, copy, commit. |
 | `wb skill patch <n> --old … --new … -m "…"` | `--old-file`, `--new-file`, `--lesson` | An exact, unique replacement, then as add. |

@@ -3792,7 +3792,8 @@ class ModelSet(Base):
         err = io.StringIO()
         with self.assertRaises(SystemExit), redirect_stderr(err):
             run_wb("model", "add", "strata/x")
-        self.assertIn("wb model add ollama/<model> adds one", err.getvalue())
+        self.assertIn("--url <baseURL> adds one for any OpenAI-compatible server", err.getvalue())
+        self.assertIn("wb model add ollama/<model> adds one by itself", err.getvalue())
         from workbench import hardware
         with mock.patch.object(hardware, "ollama_env", return_value={"OLLAMA_HOST": "0.0.0.0:11500"}):
             out = run_wb("model", "add", "ollama/coder:8b", "--context", "32768")
@@ -3801,6 +3802,46 @@ class ModelSet(Base):
         self.assertEqual(prov["npm"], "@ai-sdk/openai-compatible")
         self.assertEqual(prov["options"]["baseURL"], "http://127.0.0.1:11500/v1")  # a bind address: loopback
         self.assertIn("coder:8b", prov["models"])
+
+    def test_add_with_a_url_sets_up_any_server_with_its_start_and_stop(self):
+        # Only Ollama had a command that made its provider; LM Studio, llama.cpp or vLLM meant
+        # editing opencode.json by hand, and the skill steered every first run to Ollama
+        Path(os.environ["WB_OPENCODE_CONFIG"]).write_text("{}")
+        out = run_wb("model", "add", "lms/qwen-coder", "--url", "http://127.0.0.1:1234/v1",
+                     "--context", "32768", "--start", "lms load qwen-coder", "--stop", "lms unload --all")
+        self.assertIn("added provider lms", out)
+        self.assertIn("registered lms/qwen-coder", out)
+        prov = self.config()["provider"]["lms"]
+        self.assertEqual(prov["options"]["baseURL"], "http://127.0.0.1:1234/v1")
+        self.assertEqual(prov["models"]["qwen-coder"]["limit"]["context"], 32768)
+        self.assertNotIn("options", prov["models"]["qwen-coder"])  # Ollama's max_tokens: Ollama only
+        over = json.loads(cli.models.overrides_path().read_text())["lms/qwen-coder"]
+        self.assertEqual((over["start"], over["stop"]), ("lms load qwen-coder", "lms unload --all"))
+        self.assertNotIn("added provider", run_wb("model", "add", "lms/other", "--url",
+                                                  "http://127.0.0.1:9/v1", "--context", "32768"))
+        self.assertEqual(self.config()["provider"]["lms"]["options"]["baseURL"],
+                         "http://127.0.0.1:1234/v1")  # a provider already there is never touched
+        err = io.StringIO()
+        with self.assertRaises(SystemExit), redirect_stderr(err):
+            run_wb("model", "add", "box/coder", "--url", "http://192.0.2.7:8080/v1", "--context", "32768")
+        self.assertIn("isn't on this machine", err.getvalue())
+        self.assertNotIn("box", self.config()["provider"])
+        with self.assertRaises(SystemExit), redirect_stderr(err):
+            run_wb("model", "retire", "lms/qwen-coder", "--url", "http://127.0.0.1:1234/v1")
+
+    def test_scout_names_the_servers_here_and_one_opencode_has_no_provider_for(self):
+        found = (["llama-server", "lms"], [{"root": "http://127.0.0.1:1234", "usually": "LM Studio",
+                                            "models": ["qwen-coder"]}])
+        with mock.patch.object(cli.models, "servers_here", return_value=found):
+            lines = cli.server_lines({})
+        self.assertEqual(lines[0], "  on PATH: llama-server, lms")
+        self.assertIn("127.0.0.1:1234 answers (usually LM Studio): qwen-coder", lines[1])
+        self.assertIn("--url http://127.0.0.1:1234/v1", lines[1])
+        with mock.patch.object(cli.models, "servers_here", return_value=found):
+            lines = cli.server_lines({"lms": {"root": "http://127.0.0.1:1234"}})
+        self.assertNotIn("no provider", lines[1])
+        with mock.patch.object(cli.models, "servers_here", return_value=([], [])):
+            self.assertEqual(cli.server_lines({}), ["  none found on PATH or answering on the usual ports"])
 
     def test_a_window_too_small_for_a_task_is_refused(self):
         # At 8K OpenCode compacted before the earliest handover point, at 4K before the first

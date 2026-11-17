@@ -40,14 +40,16 @@ const SCOUT_NOTE =
   'before it is tried again.\n' +
   '2. Look up what is newest: open-weight coding models with tool calling, their sizes and ' +
   'quantizations, which fit this GPU\'s VRAM (with room for the context) and this RAM, and ' +
-  'recent releases of the runtimes. Prefer primary sources (model cards, the Ollama library, ' +
+  'recent releases of the model server this machine runs (whichever it is: `wb scout` lists ' +
+  'them). Prefer primary sources (model cards, the server\'s own model library, ' +
   'release notes) and recent reports; name nothing you could not verify.\n' +
   '3. Recommend in a few lines: keep, add (the model and quantization, why it should beat what ' +
   'is installed, its size and how it fits), retire (what it replaces, the disk it frees). ' +
   'Aim for the best results first, then efficiency. For each watch-list item, say whether ' +
   'its conditions are met yet; `wb scout --unwatch N` once one is settled.\n' +
-  '4. Ask before downloading or deleting. With a yes: `wb model add <provider/model> --pull` in ' +
-  'the background, `wb model sizes <id> …` if it should only take some task sizes, and ' +
+  '4. Ask before downloading or deleting. With a yes: on Ollama `wb model add <provider/model> ' +
+  '--pull` in the background, on another server its own download then `wb model add`; ' +
+  '`wb model sizes <id> …` if it should only take some task sizes, and ' +
   '`wb model retire <id> [--delete]` for what it replaces. Installed models that are not ' +
   'registered may belong to other tools: ask first.\n' +
   '5. The skill library: rewrite or retire (`wb skill retire`) what `wb scout` flags.\n' +
