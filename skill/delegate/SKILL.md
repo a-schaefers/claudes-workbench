@@ -105,8 +105,9 @@ if you can, and start nothing until the plan is approved; then write the first s
   constants, file formats. Settle them in the plan; agents rename what isn't pinned.
 - **Its acceptance command**, and the worked examples it tests, each number checked against
   every rule. A step whose done-ness you can't state as a command isn't ready to hand off.
-  `wb start` runs it once on the base, in the agent's lane, and prints what it saw: read that
-  before the agent's first round lands. A test that writes outside the lane or races under load
+  The runner runs it once on the base, in the agent's lane, before round 1: what it saw comes in
+  the first report, and a check-in at once when it already passes. Read it before you judge the
+  agent's work. A test that writes outside the lane or races under load
   fails there whatever the agent does, and the agent spends its rounds on failures it didn't
   cause (seen: `whoami` and /tmp probes); a command that already passes can't tell when the
   step is done. Either way, `wb discard` and start again with a better one. It should fail only for
@@ -374,10 +375,15 @@ You are the driver, not a spectator. When something tells you the agent is headi
   tests. For course corrections that can wait a step.
 - `wb steer <name> --now --text "…"`: interrupts it mid-step; the same session continues with
   your note first, marked high priority. For wrong files, a wrong approach, a runaway loop.
+  While its tests run or it waits for the GPU there is nothing to interrupt: the note waits, and
+  `wb steer` says so.
   The runner does this by itself once a round when the agent generates past its thinking
-  budget with no tool call (7 minutes; `--think-timeout` overrides),
-  and the check-in says so. A second nudge on one task means the spec is too big for one
-  step: split it, or name the first file to write.
+  budget with no tool call (7 minutes from its first output; `--think-timeout` overrides),
+  and the check-in says so; a round that stalls again right after is stopped. Two nudges on one
+  task mean the spec is too big for one step: split it, or name the first file to write.
+- A note the runner never delivered (the round stopped first) is in the stuck report. `wb resume`
+  carries it; `wb feedback` and `wb next` drop it and say so: put it in the feedback if it still
+  matters.
 - `wb takeover <name>`: stops it and hands you the worktree. Finish by hand, leaving it
   uncommitted (`wb accept` commits it), then `wb accept`, or hand it back with `wb feedback`. For when explaining would cost more than doing.
 - **Commands it asks for.** The agent's shell runs the everyday tools of software work freely;
@@ -395,7 +401,8 @@ You are the driver, not a spectator. When something tells you the agent is headi
   really belongs in (a sibling asset folder, a cache a toolchain wants); never your home, the
   user's checkout or another project: there, take the file yourself or say no.
 - `wb stop <name>`: just stop it. `wb resume <name>` continues it in a fresh session (not a
-  review round), e.g. after fixing workbench under it.
+  review round), e.g. after fixing workbench under it. A task failed with "the runner died" (a
+  reboot, a kill) or stuck with "stopped by a signal" resumes the same way.
 - A check-in saying the session "reached N% of its window before it changed a file" (or "had
   read N% before its first change": a fresh session would have little room after re-reading it):
   the step needs more reading than the window holds. Let it carry on; next time name fewer files to read,
@@ -470,9 +477,10 @@ If a "trivial" task fails twice, it wasn't trivial: discard and restart it with 
 ## Context, on both sides
 **The agent's.** Rounds of a task continue one OpenCode session, so the agent keeps what it read.
 When that session passes its handover point (60% of the window until `wb tune` learns better
-for that model), the runner hands the task to a fresh session
+for that model; less on windows under ~32K, and a model served under 16K can't take tasks), the runner hands the task to a fresh session
 at once, mid-round if need be: the task, the work so far (the diff), the agent's last words and
-the new instructions. OpenCode's own compaction (the model summarising itself, which can lose the
+the new instructions. A round that hands over 5 times is stopped as stuck (the step is too big for
+the window: split it), and from the second handover each one is a check-in. OpenCode's own compaction (the model summarising itself, which can lose the
 task) is only a backstop past that. Reports show `agent context: …` so you see it coming. A
 check-in or report that says `NOTE: the spec doesn't name …` lists files outside the spec: drift
 until you've looked, so read them and steer (`--now`) if the agent left its task. `NOTE: <dir>: a

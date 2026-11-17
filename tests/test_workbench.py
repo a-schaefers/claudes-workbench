@@ -4,6 +4,7 @@ import json
 import shlex
 import os
 import shutil
+import signal
 import socket
 import subprocess
 import sys
@@ -47,6 +48,35 @@ def wait_phase(name, phases, timeout=30):
             return st
         time.sleep(0.2)
     raise AssertionError(f"{name} never reached {phases}: {store.Task(name).status}")
+
+
+def wait_gone(pid, timeout=10) -> bool:
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        try:
+            os.kill(pid, 0)
+        except ProcessLookupError:
+            return True
+        time.sleep(0.1)
+    return False
+
+
+def running(name, timeout=20) -> dict:
+    """The task once its agent runs: a runner pid and an agent pid."""
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        st = store.Task(name).status
+        if st.get("phase") == "running" and st.get("agent_pid") and st.get("pid"):
+            return st
+        time.sleep(0.2)
+    raise AssertionError(f"{name} never ran: {store.Task(name).status}")
+
+
+def backdate(name, secs=60) -> None:
+    """Age the task's last status change past cli.REAP_GRACE, as if it had happened long ago."""
+    t = store.Task(name)
+    st = t.status
+    store.write_json(t.dir / "status.json", {**st, "updated_at": st["updated_at"] - secs})
 
 
 class Base(unittest.TestCase):
@@ -123,21 +153,74 @@ class Lifecycle(Base):
         self.assertIn("wb-no-such-opencode isn't on PATH", err.getvalue())
         self.assertFalse(store.Task("t-nooc").dir.exists())
 
-    def test_start_runs_the_acceptance_command_on_the_base(self):
+    def test_start_returns_at_once_and_the_runner_checks_the_base(self):
+        # The base check ran inside wb start, which a slow suite pushed past Claude's two-minute
+        # Bash limit, leaving a task queued with no runner (the 2026-11-16 audit).
+        os.environ["FAKE_SLEEP"] = "1"
+        began = time.time()
         out = self.start("t-base", "ok", "--test", TEST_CMD)
-        self.assertIn("on the base the acceptance command fails (exit", out)
-        self.assertIs(store.Task("t-base").status["base_check"]["ok"], False)
+        self.assertLess(time.time() - began, 10)
+        self.assertIn("base check: the runner runs the acceptance command", out)
+        st = wait_phase("t-base", {"review"})
+        self.assertIs(st["base_check"]["ok"], False)
         self.assertTrue((store.Task("t-base").dir / "base-tests.txt").exists())
-        wait_phase("t-base", {"review"})
+        self.assertIn("on the base the acceptance command fails (exit", run_wb("report", "t-base"))
+        self.assertIn("on the base the acceptance command fails", run_wb("wait", "t-base", "--timeout", "1"))
 
-    def test_start_warns_when_the_acceptance_command_already_passes(self):
-        out = self.start("t-pass", "ok", "--test", "true")
-        self.assertIn("already passes on the base", out)
+    def test_the_runner_warns_at_once_when_the_acceptance_command_already_passes(self):
+        self.start("t-pass", "ok", "--test", "true")
         wait_phase("t-pass", {"review"})
-        out = self.start("t-skip", "ok", "--test", "true", "--no-base-check")
-        self.assertNotIn("on the base", out)
-        self.assertIsNone(store.Task("t-skip").status.get("base_check"))
-        wait_phase("t-skip", {"review"})
+        rows, _ = store.read_jsonl(store.home() / "notify.jsonl")
+        self.assertTrue(any(r["kind"] == "checkin" and "already passes on the base" in r["text"]
+                            for r in rows if r["task"] == "t-pass"))
+        self.assertIn("already passes on the base", run_wb("report", "t-pass"))
+        self.start("t-skip", "ok", "--test", "true", "--no-base-check")
+        self.assertTrue(store.Task("t-skip").spec["no_base_check"])
+        self.assertIsNone(wait_phase("t-skip", {"review"}).get("base_check"))
+        self.assertNotIn("on the base", run_wb("report", "t-skip"))
+
+    def test_a_base_check_cut_short_by_the_test_timeout_says_which_limit(self):
+        # It once said "ran past 120s" whatever limit had cut it (the 2026-11-16 audit).
+        self.start("t-slowbase", "ok", "--test", "sleep 5", "--test-timeout", "1", "--auto-fix", "0")
+        st = wait_phase("t-slowbase", {"review"})
+        self.assertEqual((st["base_check"]["exit"], st["base_check"]["limit"]), ("timeout", 1))
+        line = runner.base_check_line(st["base_check"], store.Task("t-slowbase"))
+        self.assertIn("--test-timeout (1s)", line)
+        self.assertNotIn("120s", line)
+
+    def test_a_test_that_floods_its_output_is_stopped_and_clipped(self):
+        # A print loop (gigabytes) or one huge line once went whole into the runner's memory,
+        # status.json and the notice (the 2026-11-16 audit).
+        self.start("t-flood", "ok", "--test", "yes", "--auto-fix", "0", "--no-base-check")
+        st = wait_phase("t-flood", {"review"}, timeout=60)
+        self.assertEqual(st["tests"]["exit"], "output limit")
+        self.assertLess((store.Task("t-flood").round_dir(1) / "tests.txt").stat().st_size, 1 << 20)
+        self.start("t-wide", "ok", "--test", "head -c 3000000 /dev/zero | tr '\\0' x; exit 1",
+                   "--auto-fix", "0", "--no-base-check")
+        st = wait_phase("t-wide", {"review"}, timeout=60)
+        self.assertLess(len(st["tests"]["tail"]), 5000)
+        rows, _ = store.read_jsonl(store.home() / "notify.jsonl")
+        self.assertLess(len([r for r in rows if r["task"] == "t-wide"][-1]["text"]), 10000)
+        self.assertLess(store.Task("t-wide").dir.joinpath("status.json").stat().st_size, 20000)
+
+    def test_a_server_the_tests_leave_running_neither_holds_the_round_nor_outlives_it(self):
+        # A setsid'd child holding the output pipe kept the runner waiting (the 2026-11-16 audit).
+        pidfile = Path(self.tmp.name) / "server.pid"
+        began = time.time()
+        self.start("t-server", "ok", "--test", f"setsid sleep 60 & echo $! > {pidfile}; exit 1",
+                   "--auto-fix", "0", "--no-base-check")
+        wait_phase("t-server", {"review"}, timeout=40)
+        self.assertLess(time.time() - began, 30)
+        self.assertTrue(wait_gone(int(pidfile.read_text())))
+
+    def test_what_the_agent_leaves_running_ends_with_its_round(self):
+        # A writer left running could change the worktree after Claude read the diff (the
+        # 2026-11-16 audit); a stray non-event line on its stdout is no crash either.
+        pidfile = Path(self.tmp.name) / "bg.pid"
+        os.environ.update(FAKE_BG=str(pidfile), FAKE_STRAY="1")
+        self.start("t-bg", "ok")
+        wait_phase("t-bg", {"review"})
+        self.assertTrue(wait_gone(int(pidfile.read_text())))
 
     def test_failing_tests_go_back_to_the_agent_without_claude(self):
         self.start("t-fix", "fix", "--test", TEST_CMD)
@@ -192,6 +275,146 @@ class Lifecycle(Base):
         st = wait_phase("t-hang", {"stuck"}, timeout=40)
         self.assertIn("no output", st["last"])
 
+    def test_a_spec_that_starts_with_a_dash_reaches_the_agent(self):
+        # OpenCode read the message as a flag, printed its usage and exited: the task failed
+        # before the agent started (the 2026-11-16 audit).
+        self.spec.write_text("- write the answer to answer.txt\n- nothing else\n")
+        self.start("t-dash", "ok", "--test", TEST_CMD)
+        self.assertTrue(wait_phase("t-dash", {"review", "failed"})["tests"]["ok"])
+
+    def test_a_command_waiting_in_the_background_is_not_thinking(self):
+        # A test suite OpenCode moved to the background printed nothing, was nudged as
+        # thinking and killed every 7 minutes, and rerun (the 2026-11-16 audit).
+        self.start("t-bgwait", "bgwait", "--test", TEST_CMD, "--think-timeout", "2")
+        st = wait_phase("t-bgwait", {"review", "stuck"}, timeout=40)
+        self.assertEqual((st["phase"], st.get("nudges", 0), st["round"]), ("review", 0, 1))
+
+    def test_a_round_that_stalls_again_after_a_nudge_is_stopped_whatever_it_did_first(self):
+        # A tool call before the stall let the nudged round be nudged again, round after round
+        # with no end (the 2026-11-16 audit).
+        self.start("t-renudge", "toolhang", "--think-timeout", "2", "--silence-timeout", "120")
+        st = wait_phase("t-renudge", {"stuck"}, timeout=40)
+        self.assertIn("even after a nudge", st["last"])
+        self.assertEqual((st["nudges"], st["round"]), (1, 2))
+
+    def test_the_think_budget_starts_at_the_rounds_first_output(self):
+        # A model reading its prompt slowly (on the CPU) was nudged for "thinking" before it
+        # had said a word, then stopped (the 2026-11-16 audit).
+        os.environ["FAKE_LATE"] = "5"
+        self.start("t-late", "ok", "--test", TEST_CMD, "--think-timeout", "2")
+        st = wait_phase("t-late", {"review", "stuck"}, timeout=40)
+        self.assertEqual((st["phase"], st.get("nudges", 0)), ("review", 0))
+
+    def test_a_note_left_when_a_round_stopped_does_not_hijack_the_next(self):
+        # A note sent as the round stopped waited, then cut the next feedback round short (the
+        # 2026-11-16 audit): reported, then dropped by the feedback, which says so.
+        self.start("t-stale", "slow", "--silence-timeout", "3")
+        running("t-stale")
+        run_wb("steer", "t-stale", "--text", "Also tidy the README.")
+        st = wait_phase("t-stale", {"stuck"}, timeout=40)
+        self.assertIn("not delivered, the round stopped first: Also tidy the README.",
+                      run_wb("report", "t-stale"))
+        out = run_wb("feedback", "t-stale", "--text", "1. Write 42.")
+        self.assertIn("not delivered, dropped", out)
+        st = wait_phase("t-stale", {"review", "stuck"}, timeout=40)
+        self.assertEqual((st["phase"], st["round"]), ("review", 2))
+
+    def test_feedback_on_a_task_whose_worktree_is_gone_says_so(self):
+        # A worktree removed by hand turned the next round into a runner crash (the 2026-11-16 audit).
+        self.start("t-nowt", "ok")
+        wait_phase("t-nowt", {"review"})
+        shutil.rmtree(store.Task("t-nowt").worktree)
+        err = io.StringIO()
+        with self.assertRaises(SystemExit), redirect_stderr(err):
+            run_wb("feedback", "t-nowt", "--text", "1. More.")
+        self.assertIn("worktree is gone", err.getvalue())
+        self.assertIn("--keep-branch", err.getvalue())
+        st = store.Task("t-nowt").status
+        self.assertEqual((st["phase"], st["round"], st.get("pid")), ("review", 1, None))
+
+    def test_one_command_and_one_runner_act_on_a_task_at_a_time(self):
+        # Two wb commands at once spawned two runners on one worktree and session (the
+        # 2026-11-16 audit).
+        self.start("t-two", "hang")
+        st = running("t-two")
+        t = store.Task("t-two")
+        dup = subprocess.run([sys.executable, "-m", "workbench.runner", "t-two"], cwd=ROOT,
+                             env={**os.environ, "PYTHONPATH": str(ROOT)}, capture_output=True,
+                             text=True, timeout=20)
+        self.assertIn("another runner drives t-two", dup.stdout)
+        self.assertEqual(t.status["pid"], st["pid"])
+        self.assertTrue(cli.runner_alive(t))
+        run_wb("stop", "t-two")
+        held, release = threading.Event(), threading.Event()
+
+        def first():  # another command, mid-way: it holds the task's command lock
+            with store.locked(store.home() / "rules" / "t-two" / "cmd.lock"):
+                held.set()
+                release.wait(10)
+        th = threading.Thread(target=first)
+        th.start()
+        self.assertTrue(held.wait(5))
+        threading.Timer(1, release.set).start()
+        began = time.time()
+        run_wb("resume", "t-two")  # waits for the first, then acts
+        self.assertGreaterEqual(time.time() - began, 0.9)
+        th.join()
+        err = io.StringIO()
+        with self.assertRaises(SystemExit), redirect_stderr(err):
+            run_wb("resume", "t-two")  # the second sees what the first did
+        self.assertIn("wb resume continues a stopped task", err.getvalue())
+        run_wb("stop", "t-two")
+
+    def test_accept_force_checks_before_it_stops_the_runner(self):
+        # It stopped the runner, then died on "nothing to commit", leaving a task running with
+        # no runner that only wb stop could end (the 2026-11-16 audit).
+        self.start("t-force", "hang")
+        running("t-force")
+        err = io.StringIO()
+        with self.assertRaises(SystemExit), redirect_stderr(err):
+            run_wb("accept", "t-force", "--force", "-m", "x")
+        self.assertIn("no changes to accept yet", err.getvalue())
+        t = store.Task("t-force")
+        self.assertTrue(cli.runner_alive(t))
+        (t.worktree / "answer.txt").write_text("42\n")
+        with mock.patch.object(gitops, "commit_all", side_effect=gitops.GitError("hook said no")), \
+                self.assertRaises(SystemExit), redirect_stderr(io.StringIO()):
+            run_wb("accept", "t-force", "--force", "-m", "x")
+        st = t.status
+        self.assertEqual((st["phase"], st.get("pid")), ("stuck", None))
+        self.assertIn("accept failed: hook said no", st["last"])
+        os.environ["FAKE_SCENARIO"] = "ok"
+        run_wb("resume", "t-force")
+        wait_phase("t-force", {"review"})
+
+    def test_a_relative_state_dir_is_one_place_to_wb_and_the_runner(self):
+        # The task was written under wb's cwd and looked for under the package's (the
+        # 2026-11-16 audit).
+        cwd = os.getcwd()
+        os.chdir(self.tmp.name)
+        try:
+            os.environ["WB_HOME"] = "rel-state"
+            self.start("t-rel", "ok")
+            self.assertEqual(os.environ["WB_HOME"], os.path.join(os.getcwd(), "rel-state"))
+            st = wait_phase("t-rel", {"review", "failed"})
+            self.assertEqual(st["phase"], "review")
+            self.assertTrue((Path(self.tmp.name) / "rel-state/tasks/t-rel/worktree/answer.txt").exists())
+        finally:
+            os.chdir(cwd)
+
+    def test_the_model_is_made_resident_again_before_each_round(self):
+        # After tests longer than Ollama's 5-minute keep-alive, the auto-fix round's think
+        # budget paid for reloading the model (the 2026-11-16 audit).
+        with mock.patch.object(cli, "spawn_runner"):
+            self.start("t-load", "fix", "--test", TEST_CMD, "--no-base-check")
+        calls = []
+        with mock.patch.object(runner.models, "make_resident",
+                               side_effect=lambda *a, **k: calls.append(1) or 0.0):
+            runner.drive(store.Task("t-load"))
+        st = store.Task("t-load").status
+        self.assertEqual((st["phase"], st["round"]), ("review", 2))
+        self.assertEqual(len(calls), 2)
+
     def test_acting_on_a_task_acknowledges_its_notifications(self):
         # A review notice nobody waited for must not resurface after the task is discarded.
         self.start("t-ack", "ok")
@@ -221,6 +444,78 @@ class Lifecycle(Base):
         self.assertIn("[review] t-taken", run_wb("wait", "t-taken", "--timeout", "1"))
         out = run_wb("wait", "t-taken", "--timeout", "1")
         self.assertIn("already delivered", out)
+
+    def fake_task(self, name, **status):
+        t = store.Task(name)
+        store.write_json(t.dir / "task.json", {"name": name, "created_at": store.now()})
+        t.set_status(round=1, **status)
+        return t
+
+    def test_answering_a_question_acknowledges_it(self):
+        # The mark stopped short of the question being answered, so wb wait handed it back
+        # once the task ran again (the 2026-11-16 audit).
+        t = self.fake_task("t-asked", phase="asking", asking="q1")
+        (t.dir / "ask").mkdir()
+        (t.dir / "ask" / "q1.json").write_text("{}")
+        t.notify("question", "Q: which?", id="q1")
+        run_wb("answer", "t-asked", "--text", "use A")
+        t.set_status(phase="running", asking=None)
+        with self.assertRaises(SystemExit) as e, redirect_stderr(io.StringIO()):
+            run_wb("wait", "t-asked", "--timeout", "1")
+        self.assertEqual(e.exception.code, 2)
+
+    def test_a_torn_last_line_loses_only_itself(self):
+        # A write cut short swallowed the next row appended to it: a lost review notice (the
+        # 2026-11-16 audit).
+        path = store.home() / "notify.jsonl"
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text('{"ts": 1, "task": "a", "kind": "rev')
+        store.append_jsonl(path, {"ts": 2, "task": "b", "kind": "review"})
+        self.assertEqual(store.read_jsonl(path)[0], [{"ts": 2, "task": "b", "kind": "review"}])
+
+    def test_the_acknowledged_mark_is_replaced_whole(self):
+        # It was truncated, then written: a read in between saw 0, and every old notice was
+        # news again (the 2026-11-16 audit).
+        t = self.fake_task("t-mark", phase="review")
+        t.notify("review", "done")
+        run_wb("note", "t-mark", "--text", "one")
+        before = (t.dir / "acked").stat().st_ino
+        run_wb("note", "t-mark", "--text", "two")
+        self.assertNotEqual((t.dir / "acked").stat().st_ino, before)
+        self.assertFalse(list(t.dir.glob(".acked.*")))
+
+    def test_wait_skips_notices_of_removed_tasks_and_garbled_rows(self):
+        # A task directory deleted by hand made every bare wb wait crash (the 2026-11-16 audit).
+        t = self.fake_task("t-here", phase="review")
+        t.notify("review", "the real one")
+        store.append_jsonl(store.home() / "notify.jsonl", {"ts": store.now(), "task": "gone",
+                                                           "kind": "review", "text": "old"})
+        store.append_jsonl(store.home() / "notify.jsonl", {"ts": store.now(), "kind": "review"})
+        self.assertIn("[review] t-here\nthe real one", run_wb("wait", "--timeout", "2"))
+
+    def test_a_bare_wait_with_no_open_task_says_so(self):
+        # It blocked until the caller's own timeout (the 2026-11-16 audit).
+        began = time.time()
+        with self.assertRaises(SystemExit) as e, redirect_stderr(io.StringIO()):
+            run_wb("wait")
+        self.assertEqual(e.exception.code, 2)
+        self.assertLess(time.time() - began, 5)
+
+    def test_off_linux_a_live_pid_is_the_runner_only_if_ps_says_so(self):
+        # Trusting any live pid let wb discard, after a reboot, SIGKILL an unrelated process
+        # group (the 2026-11-16 audit).
+        t = self.fake_task("t-x", phase="running", pid=os.getpid())
+        p = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(30)",
+                              "workbench.runner", "t-x"])
+        try:
+            with mock.patch.object(cli, "PROC", Path(self.tmp.name) / "no-proc"):
+                self.assertFalse(cli.runner_alive(t))           # this test process: not a runner
+                t.set_status(pid=p.pid)
+                self.assertTrue(cli.runner_alive(t))
+                self.assertFalse(cli.runner_alive(self.fake_task("t", pid=p.pid)))  # not "t-x"
+        finally:
+            p.kill()
+            p.wait()
 
     def test_thinking_past_the_budget_is_nudged_and_claude_told(self):
         # A model that generates for many minutes with no tool call gets the runner's own --now
@@ -257,13 +552,62 @@ class Lifecycle(Base):
         self.start("t-crash", "crash")
         wait_phase("t-crash", {"failed"})
 
+    def test_a_runner_killed_without_a_word_is_failed_and_resumable(self):
+        # SIGKILL, out of memory or a reboot left a task "running" forever: wb wait blocked,
+        # feedback and resume refused it, and its agent worked on (the 2026-11-16 audit).
+        self.start("t-killed", "hang")
+        st = running("t-killed")
+        os.kill(st["pid"], signal.SIGKILL)
+        self.assertTrue(wait_gone(st["agent_pid"]))   # the kernel takes the agent with it (lane.py)
+        self.assertEqual(store.Task("t-killed").status["phase"], "running")  # within the grace
+        backdate("t-killed")
+        out = run_wb("wait", "t-killed", "--timeout", "5")
+        self.assertIn("[failed] t-killed", out)
+        self.assertIn("the runner died", out)
+        self.assertEqual(store.Task("t-killed").status["last"], cli.RUNNER_DIED)
+        os.environ["FAKE_SCENARIO"] = "ok"
+        run_wb("resume", "t-killed")
+        wait_phase("t-killed", {"review"})
+
+    def test_a_sigterm_from_outside_wb_leaves_the_task_stuck_with_a_notice(self):
+        # A shutdown's SIGTERM was logged "stopped by the reviewer" and left the task live with
+        # no notice (the 2026-11-16 audit).
+        self.start("t-term", "hang")
+        st = running("t-term")
+        os.kill(st["pid"], signal.SIGTERM)
+        st = wait_phase("t-term", {"stuck"})
+        self.assertEqual(st["last"], runner.SIGNAL_STOP)
+        self.assertIn("[stuck] t-term", run_wb("wait", "t-term", "--timeout", "2"))
+        os.environ["FAKE_SCENARIO"] = "ok"
+        run_wb("resume", "t-term")
+        wait_phase("t-term", {"review"})
+
+    def test_stopping_a_task_in_its_tests_stops_the_tests(self):
+        # The test's process group outlived the stop, in a worktree being removed (the
+        # 2026-11-16 audit).
+        pidfile = Path(self.tmp.name) / "test.pid"
+        self.start("t-stoptest", "ok", "--test", f"sleep 300 & echo $! > {pidfile}; wait",
+                   "--no-base-check")
+        deadline = time.time() + 20
+        while not (pidfile.exists() and pidfile.read_text().strip()) and time.time() < deadline:
+            time.sleep(0.1)
+        run_wb("stop", "t-stoptest")
+        self.assertTrue(wait_gone(int(pidfile.read_text())))
+
     def test_stop_and_discard(self):
         self.start("t-stop", "hang")
-        deadline = time.time() + 20
-        while store.Task("t-stop").status.get("phase") != "running" and time.time() < deadline:
-            time.sleep(0.2)
+        running("t-stop")
         run_wb("stop", "t-stop")
-        self.assertEqual(store.Task("t-stop").status["phase"], "stuck")
+        st = store.Task("t-stop").status
+        self.assertEqual(st["phase"], "stuck")
+        # Acknowledged, so the mod's safety net doesn't wake Claude about its own stop, and a
+        # named wait says what happened instead of blocking for a notice that never comes (the
+        # 2026-11-16 audit).
+        self.assertGreaterEqual(float((store.Task("t-stop").dir / "acked").read_text()), st["updated_at"])
+        rows, _ = store.read_jsonl(store.home() / "notify.jsonl")
+        self.assertFalse([r for r in rows if r["task"] == "t-stop"])
+        self.assertIn("[stuck] t-stop (no notice: stopped by the reviewer)",
+                      run_wb("wait", "t-stop", "--timeout", "2"))
         run_wb("discard", "t-stop", "--reason", "test")
         branches = subprocess.run(["git", "-C", str(self.repo), "branch"], capture_output=True,
                                   text=True).stdout
@@ -659,6 +1003,38 @@ class Context(Base):
         from workbench import runner
         self.assertEqual(len(runner.round_asks(store.Task("t-c6"), 4)), 1)  # a carry-on adds nothing
 
+    def test_a_fresh_session_after_a_feedback_round_still_carries_the_feedback(self):
+        # Between rounds, an auto-fix round that started fresh carried only the failing tests:
+        # the agent fixed them and reported done with the feedback never made (the 2026-11-16
+        # incident, on the between-rounds path).
+        self.start("t-c11", "ok", "--test", TEST_CMD)
+        wait_phase("t-c11", {"review"})
+        t = store.Task("t-c11")
+        from workbench import lessons
+        for n, text in ((2, f"{lessons.FEEDBACK_HEAD} Make exactly these changes:\n\nRENAME foo TO bar"),
+                        (3, runner.auto_fix_prompt({"exit": 1, "tail": "FAIL x"}, TEST_CMD)),
+                        (4, runner.CARRY_ON.format(asked="", last="> my last words"))):
+            t.round_dir(n).mkdir(parents=True)
+            t.round_dir(n).joinpath("prompt.md").write_text(text)
+        runner._start_fresh(t, 3, "the last session was 70% full")
+        now = t.round_dir(3).joinpath("prompt.md").read_text().split("## Now")[1]
+        self.assertIn("RENAME foo TO bar", now)
+        self.assertIn("The acceptance tests fail", now)
+        runner._start_fresh(t, 4, "the last session was 70% full")  # a carry-on has its asks
+        self.assertIn("> my last words", t.round_dir(4).joinpath("prompt.md").read_text())
+
+    def test_a_step_that_keeps_filling_up_is_stopped_after_a_few_handovers(self):
+        # A session that changed a file early and then filled up reading handed over again and
+        # again, for hours, with Claude told nothing (the 2026-11-16 audit).
+        self.start("t-c12", "refill")
+        st = wait_phase("t-c12", {"review", "stuck", "failed"}, timeout=120)
+        self.assertEqual((st["phase"], st["handovers"]), ("stuck", runner.HANDOVER_MAX))
+        self.assertIn(f"handed over to a fresh session {runner.HANDOVER_MAX} times", st["last"])
+        rows = [r for r in store.read_jsonl(store.home() / "notify.jsonl")[0] if r["task"] == "t-c12"]
+        self.assertEqual(sum("handover" in r["text"] for r in rows if r["kind"] == "checkin"),
+                         runner.HANDOVER_MAX - 1)
+        self.assertEqual([r["kind"] for r in rows if r["kind"] != "checkin"], ["stuck"])
+
     def test_a_session_that_fills_up_reading_carries_on_instead_of_handing_over(self):
         self.start("t-c7", "read", "--test", TEST_CMD)
         st = wait_phase("t-c7", {"review", "stuck", "failed"}, timeout=60)
@@ -808,6 +1184,18 @@ class Steering(Base):
         self.assertEqual(st["round"], 2)
         self.assertEqual([r["kind"] for r in rows].count("tests"), 1)  # once, after the note
         self.assertTrue(self.sent()[-1].startswith(runner.NOTE_HEAD))
+
+    def test_a_note_sent_during_the_tests_says_it_waits_for_them(self):
+        # --now promised "within a few seconds" while the tests ran for up to their timeout
+        # (the 2026-11-16 audit).
+        self.start("t-tnote", "ok", "--test", "sleep 4; " + TEST_CMD, "--no-base-check")
+        deadline = time.time() + 20
+        while store.Task("t-tnote").status.get("phase") != "testing" and time.time() < deadline:
+            time.sleep(0.1)
+        out = run_wb("steer", "t-tnote", "--now", "--text", "Mention the answer.")
+        self.assertIn("its tests are running (up to 900s); the agent gets it when they end", out)
+        self.assertNotIn("within a few seconds", out)
+        wait_phase("t-tnote", {"review"}, timeout=40)
 
     def test_checkins_wake_claude_with_a_digest_and_notes_reach_the_transcript(self):
         self.start("t-chk", "slow", "--checkin", "0.03")    # every ~2 s
@@ -2425,6 +2813,23 @@ class ModelSet(Base):
         self.assertEqual(prov["options"]["baseURL"], "http://127.0.0.1:11500/v1")  # a bind address: loopback
         self.assertIn("coder:8b", prov["models"])
 
+    def test_a_window_too_small_for_a_task_is_refused(self):
+        # At 8K OpenCode compacted before the earliest handover point, at 4K before the first
+        # request; nothing refused or warned (the 2026-11-16 audit).
+        err = io.StringIO()
+        with self.assertRaises(SystemExit), redirect_stderr(err):
+            run_wb("model", "add", "ollama/tiny:1b", "--context", "8192")
+        self.assertIn("tasks need 16K+", err.getvalue())
+        cfg = self.config()
+        cfg["provider"]["ollama"]["models"]["tiny:1b"] = {"limit": {"context": 8192}}
+        Path(os.environ["WB_OPENCODE_CONFIG"]).write_text(json.dumps(cfg))
+        with self.assertRaises(SystemExit) as e, redirect_stderr(err):
+            run_wb("start", "t-tiny", "--spec", str(self.spec), "--repo", str(self.repo),
+                   "--model", "tiny")
+        self.assertEqual(e.exception.code, 3)
+        self.assertIn("a 8K window", err.getvalue())
+        self.assertFalse(store.Task("t-tiny").dir.exists())
+
     def test_retire_refuses_the_default(self):
         cfg = self.config(); cfg["model"] = "ollama/qwen3.8-27b"
         Path(os.environ["WB_OPENCODE_CONFIG"]).write_text(json.dumps(cfg))
@@ -2783,6 +3188,30 @@ class Detector(unittest.TestCase):
         self.assertIsNone(d.feed(mk("read", 4)))
         self.assertIsNone(d.feed(mk("read", 5)))
         self.assertIn("without changing", d.feed(mk("read", 6)))
+
+
+    def test_events_of_the_wrong_shape_are_skipped_not_a_crash(self):
+        # A plugin's console.log on OpenCode's stdout crashed the runner mid-round (the
+        # 2026-11-16 audit).
+        for raw in (5, [1], None, {"type": "step_finish", "part": {"tokens": 5}},
+                    {"type": "tool_use", "part": {"tool": ["x"], "state": "s"}},
+                    {"type": "error", "error": "boom"}, {"type": "text", "part": "x"}):
+            events.normalize(raw, 1)
+        self.assertEqual(events.normalize({"type": "step_finish", "part": {"tokens": 5}}, 1)["in"], 0)
+        self.assertEqual(events.normalize({"type": "error", "error": "boom"}, 1)["text"], "boom")
+
+    def test_a_suspend_is_neither_silence_nor_the_rounds_time(self):
+        # On the wall clock a laptop shut for 20 minutes woke to a round stopped for silence
+        # (the 2026-11-16 audit). The monotonic clock skips a suspend; a frozen pass is cut out.
+        c = runner._Clock(100.0)
+        c.step(105.0, False)
+        c.step(1305.0, False)                      # the process was frozen for 20 minutes
+        self.assertLess(c.quiet(1305.0), 10)
+        self.assertLess(c.ran(1305.0), 10)
+        c.step(1310.0, True)                       # waiting on Claude's answer: not silence
+        self.assertEqual(c.quiet(1310.0), 0)
+        c.step(1315.0, False)
+        self.assertEqual(c.quiet(1320.0), 10)
 
 
 class SkillLearning(Base):

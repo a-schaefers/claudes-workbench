@@ -237,15 +237,18 @@ def _speed_path():
 
 def record_speed(model_id: str, messages: list[dict]) -> None:
     """Add a session's measured speeds to speed.json: writing (output and reasoning tokens over
-    the time from first token to done) and reading (new input tokens over the time to first token)."""
+    the time from first token to done) and reading (new input tokens over the time to first token).
+    A request cut short (a nudge, a stop) still says how fast it read: on a slow machine the
+    first request is often the one interrupted, and the reading was never learned (the
+    2026-11-16 audit)."""
     write, read = [], []
     for msg in messages:
         t, tk = msg.get("time") or {}, msg.get("tokens") or {}
         made, first, done = t.get("created"), t.get("firstToken"), t.get("completed")
-        if msg.get("type") != "assistant" or not (made and first and done):
+        if msg.get("type") != "assistant" or not (made and first):
             continue
         out = (tk.get("output") or 0) + (tk.get("reasoning") or 0)
-        if out >= 100 and done - first > 1000:
+        if done and out >= 100 and done - first > 1000:
             write.append(round(out / ((done - first) / 1000), 1))
         if (tk.get("input") or 0) >= 1000 and first - made > 500:
             read.append(round(tk["input"] / ((first - made) / 1000)))

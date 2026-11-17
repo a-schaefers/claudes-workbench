@@ -137,22 +137,29 @@ Linux there is no Landlock and watch.py falls back to timed waits.
    (`--no-claude-md`), asks the router for a model (unless `--model`), refuses (exit 4) when the
    GPU's holders leave its model no room (`--queue` waits behind them), makes branch
    `delegate/<task>` in a fresh worktree, writes round 1's prompt (the spec plus `PROTOCOL`),
-   spawns the runner and returns.
+   spawns the runner and returns at once. The runner runs `--test` once on the untouched base
+   first (the base check; the first report says what).
 2. The runner takes the GPU (`GpuLease`: shared beside other tasks when the models fit, else
-   alone), makes the model resident, and runs `opencode run --standalone --auto --format json` in
+   alone), makes the model resident (again before every round), and runs `opencode run
+   --standalone --auto --format json … -- <prompt>` in
    the worktree, through `lane.wrap`, with the config layer `rules/<task>/opencode.json`. Events
    go to `events.jsonl`; `status.json` is the live summary.
 3. Guards stop the agent (`stuck`): one call repeated 4 times, 6 tool errors in a row, 40 calls
-   without an edit, silence past `--silence-timeout`, a round past `--round-timeout`. Past the
-   think budget (`--think-timeout`) without acting it gets a nudge. Limits stretch for a model
+   without an edit, silence past `--silence-timeout`, a round past `--round-timeout`, more than
+   `HANDOVER_MAX` handovers in a round. Past the think budget (`--think-timeout`, from the round's
+   first output, paused while OpenCode waits on a background job) it gets a nudge; the round after
+   it that stalls again is stopped. The guards' clocks are monotonic. Limits stretch for a model
    measured slow (`router.budgets`, written into task.json at start). `wb steer` queues a note;
-   `--now` interrupts. A round after a nudge that again does nothing is stopped.
+   `--now` interrupts. Notes a runner never delivered: `wb resume` carries them, feedback and
+   next drop them and say so.
 4. After a clean round the runner runs `--test`, in the agent's lane and environment; failures go back to the agent up to `--auto-fix`
    times without waking Claude (`--test-timeout`, 900 s). A session that reaches the handover point (`fresh_at`, tuned per
    model) after changing a file, with room left for a successor, is stopped mid-round and a fresh
    session gets the task, the diff and its last words; between rounds, a session over the point
    or compacted is replaced. OpenCode's own compaction is set just past it, as a backstop.
-5. The runner writes the round report and a `review`/`stuck`/`failed` notice and exits.
+5. The runner writes the round report and a `review`/`stuck`/`failed` notice and exits; nothing
+   the agent or the tests started outlives a round (`runner.sweep`). A runner that died without a
+   word is failed by `cli.reap` (status, wait, events and the acting commands call it).
    `ask_reviewer` raises a `question` at any time and blocks until `wb answer` or `wb allow`.
 6. The mod (or `wb wait`) delivers each notice once, while still true, in the session the task
    is `mine` to (task.json `cwd`/`repo` and the session's directory); acting on a task
@@ -170,6 +177,7 @@ notify.jsonl results.jsonl lessons.jsonl notes.md tuning.json speed.json gpu.{lo
 scout.json update.json watch.json imports/ images/ chat/{messages,receipts}.jsonl chat/listener.json
 rules/<task>/  opencode.json HANDBOOK.md CLAUDE.md bin/git grants.json gitdir.json cmd.lock (no lane)
 tasks/<task>/  task.json status.json events.jsonl steer.jsonl acked context.md base-tests.txt runner.log
+               {runner,act}.lock
                rounds/<n>/{prompt,instructions,summary}.md rounds/<n>/tests.txt ask/<id>.{json,answer} worktree/
 ```
 The skill library is `~/.local/share/workbench/skills` (`$WB_SKILLS`). `~/.config/workbench/`
@@ -191,7 +199,8 @@ trained length); every entry needs `limit.context` (a server other than Ollama: 
 --context N`); `wb model add` writes both and `wb doctor` checks them.
 
 Environment: `WB_HOME`, `WB_MODELS`, `WB_SKILLS`, `WB_IMAGES`, `WB_CHAT_TOKEN`, `WB_CHAT_CONFIG`,
-`WB_COMMANDS` (the paths above); `WB_OPENCODE_CONFIG` (OpenCode's config); `WB_COMPACT_AT` (the
+`WB_COMMANDS` (the paths above); `WB_OPENCODE_CONFIG` (OpenCode's config); these may be relative
+or start with `~` (`store.absolute_env` makes them absolute against wb's cwd); `WB_COMPACT_AT` (the
 mod's early compaction, a percentage, 0 off); `WB_BIN` (the `wb` the mod runs); `WB_TASK` (set
 for the ask server and the agent). Tests only: `WB_OPENCODE_BIN` (a command line, split with
 `shlex`: the fake), `WB_FAKE_MODELS` (no model servers), `WB_FAKE_GPU_GB` (the fake GPU's size;
@@ -256,6 +265,9 @@ PATH and the lane; the rest is only imitated by the fake.
   carries (the between-rounds check). The live `step_finish` tokens (input + cache read + cache
   write + output) drive the mid-round check.
 - `--worktree` takes `=name`; the runner makes its own worktrees anyway.
+- `run` reads a message that starts with `-` as a flag (usage, exit 1): the prompt goes after `--`.
+- `run --format json` prints nothing while a tool runs or the model reads its prompt; a shell
+  command past 2 minutes goes to the background and the turn ends with a `background_wait` line.
 
 ## Troubleshooting
 - `wb doctor`: opencode (2.x) and its config files, git, each model's readiness (BAD when none

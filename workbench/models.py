@@ -484,10 +484,30 @@ CLOUD_WHY = ("an Ollama cloud model: it runs on ollama.com, off this machine (mo
              "\"local\": true on {id} allows it)")
 
 
+# The smallest window a task fits in: OpenCode's system prompt and tools, PROTOCOL and the
+# handbook take ~5K tokens before the spec, and below this OpenCode's compaction comes before the
+# earliest handover point, or before the first request (at 4K its threshold is negative): the
+# 2026-11-16 audit. A model served less can't run; an entry with no limit.context isn't checked.
+MIN_WINDOW = 16384
+
+
+def window_too_small(cfg: dict) -> int | None:
+    """The entry's window when it is under MIN_WINDOW, else None."""
+    ctx = (cfg.get("limit") or {}).get("context")
+    return ctx if isinstance(ctx, int) and 0 < ctx < MIN_WINDOW else None
+
+
+def small_window_why(ctx: int) -> str:
+    return (f"a {ctx // 1024}K window; tasks need {MIN_WINDOW // 1024}K+ (raise "
+            "OLLAMA_CONTEXT_LENGTH or the server's context, then wb model add … --context N)")
+
+
 def status(m: Model, down=frozenset()) -> dict:
     """``{available, resident, why}``: can the runner get this model onto the GPU, is it there.
     What the config alone rules out comes first, so the fake models meet it too. ``down``: Ollama
     roots the caller already found not answering, not asked again."""
+    if small := window_too_small(m.config):
+        return _no(small_window_why(small))
     if m.config.get("tool_call") is False:  # the router used to hand it tasks (the 2026-11-16 audit)
         return _no("OpenCode's config says it can't call tools (tool_call: false): agent work needs them")
     if m.problem:
