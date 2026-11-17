@@ -445,10 +445,10 @@ def context_state(task: store.Task) -> dict:
 def fresh_reason(task: store.Task) -> str | None:
     """Why round n should start a fresh session, or None to continue the current one."""
     st = task.status
+    if st.get("context") == "fresh":  # even with no session yet: the prompt still needs the task
+        return ASKED_FRESH
     if not st.get("session") or st.get("context") == "keep":
         return None
-    if st.get("context") == "fresh":
-        return ASKED_FRESH
     if st.get("context") == "full":
         return f"the last session was {st.get('full_pct')}% full"
     c = context_state(task)
@@ -521,7 +521,7 @@ def _start_fresh(task: store.Task, n: int, why: str) -> None:
     now = "Start on the task above." if n == (task.status.get("step_round") or 1) else raw
     path.write_text(handoff_prompt(task, why, now))
     st = task.status
-    task.set_status(session=None, sessions=(st.get("sessions") or []) + [st["session"]],
+    task.set_status(session=None, sessions=(st.get("sessions") or []) + [st["session"]] * bool(st.get("session")),
                     context=None, skills_told=None)  # a new session hears the skills again
     task.event({"ts": store.now(), "round": n, "kind": "fresh", "overflow": why != ASKED_FRESH,
                 "text": f"a fresh session for the agent: {why}"})

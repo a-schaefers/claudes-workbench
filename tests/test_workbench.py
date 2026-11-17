@@ -312,6 +312,20 @@ class Context(Base):
         self.assertIn("Claude stopped your last session", last["prompt"].split("## Now")[1])
         self.assertEqual(runner.round_asks(store.Task("t-c8"), 2), [])  # a resume adds nothing
 
+    def test_a_task_stopped_before_its_session_began_resumes_with_the_task(self):
+        self.start("t-c9", "hang", "--test", TEST_CMD)
+        deadline = time.time() + 30
+        while not store.Task("t-c9").status.get("session") and time.time() < deadline:
+            time.sleep(0.2)
+        run_wb("stop", "t-c9")
+        store.Task("t-c9").set_status(session=None)  # as if stopped before the agent's first word
+        os.environ["FAKE_SCENARIO"] = "ok"
+        run_wb("resume", "t-c9")
+        wait_phase("t-c9", {"review", "stuck", "failed"}, timeout=60)
+        last = self.runs()[-1]["prompt"]
+        self.assertIn("Write the answer to answer.txt.", last)   # the task, not only "carry on"
+        self.assertIn("Claude stopped your last session", last.split("## Now")[1])
+
     def test_the_handover_point_is_the_tasks_tuned_one(self):
         os.environ["FAKE_FILL"] = "25000"          # 76%: past the default 0.6, short of 0.8
         store.home().mkdir(parents=True, exist_ok=True)
