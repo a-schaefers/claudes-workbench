@@ -180,7 +180,7 @@ def line(x: dict) -> str:
 
 
 def nudge(task: store.Task, outcome: str | None = None) -> str:
-    """The one line `wb accept|discard|feedback` ends with when the task taught something."""
+    """The one line `wb feedback|next|resume|accept|discard` ends with when the task taught something."""
     new = harvest(task, outcome)
     if not new:
         return ""

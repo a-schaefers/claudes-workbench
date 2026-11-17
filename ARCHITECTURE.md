@@ -62,8 +62,9 @@ The runner, the agent's `ask_reviewer` server and the chat server never call eac
 mod; they read and write the same files, and anything that waits sleeps in the kernel (inotify on
 directories, pidfd on processes, `workbench/watch.py`) until one of them changes. The mod's only
 calls are `wb` subcommands (`wb events`, `wb watch --json`, `wb status`, `wb chat ack|url|log`,
-`wb stop|takeover --all`). A crashed piece loses nothing, and every piece can be inspected with
-`cat`.
+`wb stop|takeover --all`, `wb update` and its weekly `wb update --check --if-due`), plus `kill -0`
+to see whether the chat listener's pid lives. A crashed piece loses nothing, and every piece can
+be inspected with `cat`.
 
 workbench is Python's standard library only (3.11+), plus the TypeScript mod. There is no
 packaging: it runs from its clone. No model is named anywhere in the code: models come from
@@ -1085,7 +1086,7 @@ knowledge doesn't spread unnoticed.
 ### Lessons
 
 `workbench/lessons.py` gathers what each task taught into `$WB_HOME/lessons.jsonl`, for Claude
-to turn into skills. `wb feedback`, `wb next`, `wb accept` and `wb discard` call `harvest` and end
+to turn into skills. `wb feedback`, `wb next`, `wb resume`, `wb accept` and `wb discard` call `harvest` and end
 with one `nudge` line: `lessons: N from this task[, M seen in other tasks too] (wb lessons: write
 or patch a skill now, while it's fresh)`. A task whose task.json has `trial` gathers nothing, and `wb trial` closes the open lessons of
 the tasks it marks.
@@ -1402,7 +1403,7 @@ themselves are re-read from `$WB_HOME`; the mod writes `tasks/<n>/acked`, scout.
 
 **session.start.** Sets `mem.root` (`WB_HOME` or `~/.local/state/workbench`), `mem.wb` (`WB_BIN`
 or `wb`), `mem.skill` (`$CLAUDE_CONFIG_DIR` or `~/.claude`, then `skills/delegate/SKILL.md`),
-the chat key (`<start ms>-<6 base36>`, kept across reloads), registers the four commands,
+the chat key (`<start ms>-<6 base36>`, kept across reloads), registers its `delegate-*` commands (*Commands* below),
 starts the ears and two timers.
 
 **Ears and timers.** `ears` spawns `wb events` (cli.cmd_events: `{"hello": pid}` first, then
@@ -1672,6 +1673,7 @@ $WB_HOME (~/.local/state/workbench)
   tasks/<task>/                  inside the lane (the ask server writes here)
     task.json  status.json  status.lock
     events.jsonl(.lock)  steer.jsonl(.lock)  acked  context.md  runner.log
+    base-tests.txt               the acceptance command's output on the base (`--test`)
     rounds/<n>/                  prompt.md  instructions.md (before a handover rewrote it)  summary.md  tests.txt
     ask/<id>.json  <id>.answer   questions and permission requests; their answers
     worktree/                    the agent's git worktree, branch delegate/<task>
@@ -1713,6 +1715,7 @@ check-ins off), not `wb start`'s.
 | `reviews` | review rounds in this step (`wb feedback` +1, `wb next` resets) |
 | `auto_fixes`, `auto_fixes_total` | auto-fix rounds since the last review or step; earlier ones |
 | `tests` | `{ok, exit, tail, round}` of the last test run |
+| `base_check` | `{ok, exit, tail}` of the acceptance command run once on the base, in the lane (`runner.base_check`; `exit` is `"timeout"` past `BASE_CHECK_SECS`); `wb start`, only with `--test` and without `--no-base-check` |
 | `tools`, `tok_in`, `tok_out` | task-wide tool calls and tokens (input without cache reads) |
 | `session`, `sessions`, `session_mark`, `session_floor` | the OpenCode session; earlier ones; `gitops.mark` when it began; the context it had read at its first change |
 | `context` | a one-round instruction: `fresh`, `keep`, `full` (a handover happened) |
@@ -1804,7 +1807,7 @@ the copy you want repoints the links; the state directory and the skill library 
 ## The tests
 
 Run from the repo root (`tests/__init__.py` makes `tests` a package; the other modules import
-`tests.test_workbench`): `python3 -m unittest` (about 155 tests in six modules; about two minutes),
+`tests.test_workbench`): `python3 -m unittest` (the whole suite, six modules; about two minutes),
 one class or test with `python3 -m unittest tests.test_workbench.Context[.test_…]`, by name with
 `-k handover`. The mod's tests: `claude plugin validate mod && claude plugin test mod`
 (`mod/hooks/register.test.tsx`). The web chat in real browsers: `PLAYWRIGHT=…/node_modules/playwright
@@ -1823,8 +1826,8 @@ main (*Shipping to main*).
 **Files.**
 - `tests/test_workbench.py`: end to end, one class per feature (Lifecycle, Context, Steering,
   Watch, AskServer, ConfigLayer, AgentContext, SkillLibrary, RealOpenCode, GitGuard, Lane,
-  Permission, Images, Discovery, Routing, Tuning, Notes, Projects, ModelSet, WebChat, Hardware,
-  Detector, SkillLearning, RealOpenCodeSkillFiles, Drift).
+  Permission, Images, Discovery, Routing, Tuning, Notes, Setup, Update, Projects, ModelSet,
+  WebChat, Hardware, Detector, SkillLearning, RealOpenCodeSkillFiles, Drift).
 - `tests/test_gpu.py`: sharing the GPU (side by side, taking turns, unknown VRAM, an exclusive
   holder) and `can_share`.
 - `tests/test_portable.py`: discovery against real HTTP servers on port 0 (the Ollama probe, the
@@ -1975,6 +1978,9 @@ push: every change is a pull request that merges once `check` is green and it is
   tests, run where they don't skip.
 - **The lane** (`context.writable`, `readable`, `SECRETS`, `lane.py`) → the Lane and RealOpenCode
   tests on a Landlock machine; the protocol's lane line and the handbook's boundaries.
+- **`wb update`'s flags or output** (`--check --if-due`; `update available…`, `updated …`) → the
+  mod's weekly check, which toasts only an `update available` answer, and `/delegate-update`, which
+  reloads the plugins only after an `updated` one (register.tsx `poll` and the `UPDATE` command).
 - **`wb watch --json`** (a style, the order, the activity wording) → the mod's `LINE_STYLE`, its
   pose regex, the `live-1` tag.
 - **A `$.state` atom's type** in the mod → its tag (`tasks-1`, `live-1`, `chat-2`).

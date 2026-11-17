@@ -34,7 +34,7 @@ the drift this rule exists to stop.
 
 ## Commands
 ```sh
-python3 -m unittest                                   # from the repo root: ~155 tests, about two minutes
+python3 -m unittest                                   # from the repo root: the whole suite, about two minutes
 python3 -m unittest tests.test_workbench.Context      # one class (or .Context.test_…); -k handover by name
 claude plugin validate mod && claude plugin test mod  # the mod: the $ rule, then mod/hooks/register.test.tsx
 PLAYWRIGHT=…/node_modules/playwright node tests/e2e_chat.mjs   # the web chat in WebKit and Chromium
@@ -102,7 +102,7 @@ dependencies. No packaging: it runs from the clone.
 - `skills.py`: Claude's skill library for the agents (its own git repo): checks, add/patch/
   retire/restore, import, suggestions for a spec, the outcome record. `scan.py`: the security scan
   every skill passes (ported from Hermes Agent's skills guard: keep its MIT notice).
-- `lessons.py`: what each task taught, gathered into lessons.jsonl by feedback/next/accept/discard.
+- `lessons.py`: what each task taught, gathered into lessons.jsonl by feedback/next/resume/accept/discard.
 - `transcript.py`: `wb watch` (the session export merged with the task's events; `--json` feeds
   the mod's pane). `transcript.export` is also the runner's view of the session.
 - `watch.py`: waiting without polling: inotify (ctypes) and pidfd, with a stat fallback.
@@ -163,7 +163,7 @@ ARCHITECTURE.md (*Files and formats*):
 notify.jsonl results.jsonl lessons.jsonl notes.md tuning.json speed.json gpu.{lock,json,admit}
 scout.json update.json watch.json imports/ images/ chat/{messages,receipts}.jsonl chat/listener.json
 rules/<task>/  opencode.json HANDBOOK.md CLAUDE.md bin/git grants.json   (outside the agent's lane)
-tasks/<task>/  task.json status.json events.jsonl steer.jsonl acked context.md runner.log
+tasks/<task>/  task.json status.json events.jsonl steer.jsonl acked context.md base-tests.txt runner.log
                rounds/<n>/{prompt,instructions,summary}.md rounds/<n>/tests.txt ask/<id>.{json,answer} worktree/
 ```
 The skill library is `~/.local/share/workbench/skills` (`$WB_SKILLS`). `~/.config/workbench/`
