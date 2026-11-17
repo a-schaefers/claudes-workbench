@@ -22,7 +22,7 @@ import threading
 import time
 import uuid
 
-from . import store
+from . import __version__, store
 from .watch import Watcher
 
 PROTOCOL = "2025-06-18"
@@ -317,7 +317,7 @@ def handle(msg: dict, task: store.Task):
     if method == "initialize":
         version = (msg.get("params") or {}).get("protocolVersion") or PROTOCOL
         result = {"protocolVersion": version, "capabilities": {"tools": {}},
-                  "serverInfo": {"name": "workbench", "version": "0.1.0"}}
+                  "serverInfo": {"name": "workbench", "version": __version__}}
     elif method == "ping":
         result = {}
     elif method == "tools/list":

@@ -2830,7 +2830,9 @@ push: every change is a pull request that merges once `check` is green and it is
 - **The merge gate** (`owner-merge.yml`, the ruleset, `check.yml`'s job name) →
   `tests/test_workflows.py`, `scripts/github-settings.sh apply`, *Shipping to main*.
 - **`mod/` for users** → bump `mod/.claude-plugin/plugin.json`'s `version`, or a marketplace
-  install keeps the old copy (*Installing*). **`wb setup`'s links** → README's quickstart and
+  install keeps the old copy (*Installing*). **A release** → the same `version` in
+  `workbench/__init__.py` (`wb --version`, task.json's `wb_version`, the ask server's
+  `serverInfo`) and plugin.json, then a `v<major>.<minor>` tag and a GitHub release. **`wb setup`'s links** → README's quickstart and
   *Installing*.
 - **A model name** → never in code or the skill: models come from OpenCode's config, choices from
   the router and the weekly check.
