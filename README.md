@@ -23,7 +23,6 @@
 - **Your GPU**: the open coding models (through Ollama and OpenCode) that do the coding itself:
   reading the code, editing files, running the tests, fixing what fails. Optionally, an image
   model too.
-- **Your CPU**: the tests and tools the agents run, and `wb`, which connects the two.
 
 Claude's Workbench turns the local LLMs on your gaming PC into a crew led by a frontier model.
 Open coding models you can run at home are strong enough to write real code, but left alone they
