@@ -115,7 +115,10 @@ const LINE_STYLE: Record<string, Row> = {
   claude: { color: 'claude', bold: true }, agent: { color: 'suggestion', bold: true },
   think: { dimColor: true, italic: true }, tool: { color: 'warning' }, out: { dimColor: true },
   ok: { color: 'success', bold: true }, bad: { color: 'error', bold: true },
-  sys: { color: 'permission' }, add: { color: 'diffAdded' }, del: { color: 'diffRemoved' },
+  // diff lines as Claude Code draws its own: text on the diff background, readable on any
+  // terminal (diffAdded/diffRemoved as a text colour were dim on a dark one)
+  sys: { color: 'permission' }, add: { color: 'text', backgroundColor: 'diffAdded' },
+  del: { color: 'text', backgroundColor: 'diffRemoved' },
   head: { bold: true }, activity: { color: 'claude' }, clock: { dimColor: true },
 }
 const SPIN = ['✻', '✳', '✶', '✢', '·', '✢', '✶', '✳']

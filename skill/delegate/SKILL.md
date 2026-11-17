@@ -99,9 +99,11 @@ if you can, and start nothing until the plan is approved; then write the first s
   constants, file formats. Settle them in the plan; agents rename what isn't pinned.
 - **Its acceptance command**, and the worked examples it tests, each number checked against
   every rule. A step whose done-ness you can't state as a command isn't ready to hand off.
-  Run it on the base before `wb start`: it runs in the agent's lane, so a test that writes
-  outside it or races under load fails there whatever the agent does, and the agent spends its
-  rounds on failures it didn't cause (seen: `whoami` and /tmp probes). It should fail only for
+  `wb start` runs it once on the base, in the agent's lane, and prints what it saw: read that
+  before the agent's first round lands. A test that writes outside the lane or races under load
+  fails there whatever the agent does, and the agent spends its rounds on failures it didn't
+  cause (seen: `whoami` and /tmp probes); a command that already passes can't tell when the
+  step is done. Either way, `wb discard` and start again with a better one. It should fail only for
   what the step changes, and check every listed change (each old string gone, each new one
   there), not just the theme: a small model skips one item of a list.
 - **Order**: logic, then its tests, then UI; a step that needs another's interface comes after it,
@@ -186,6 +188,10 @@ miss:
    and say in the spec which tests change and how. Seen: a smarter pursuit reached its target
    sooner, so a test measuring distance from the starting point failed, and a new collision rule
    erased an input a replay test relied on: two of the agent's questions, both the spec's.
+9. **Every insertion point is a line to quote.** In a file the agent reads only in part, say
+   where new code goes by the exact line it follows, unique in the file, not "after function
+   X": it can't see where X ends. Seen: new tests put after a test's first `wait` call, its
+   last eleven lines deleted, and the summary claiming otherwise.
 After review, when a round was the spec's fault, say so: `--spec-gap "what it missed"` on
 `wb feedback`, `next`, `accept` or `discard`. `wb start` shows your record from those,
 and a gap that recurs belongs in this list.
