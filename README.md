@@ -141,7 +141,10 @@ to read the diff.
 and `wb chat url` prints its private link (on Linux, `systemctl --user link
 "$PWD/systemd/wb-chat.service" && systemctl --user enable --now wb-chat`, run in the clone, keeps
 it running; on macOS, a launchd agent running `~/.local/bin/wb chat serve` does). It's `http://localhost:1337`; to use it from your phone, reach your PC the way you
-normally do (Tailscale, for example) and change the host in the link.
+normally do and change the host in the link. It serves only localhost until you say otherwise in
+`~/.config/workbench/chat.json`: `{"bind": ["localhost", "tailscale"]}` adds this machine's
+Tailscale address, `{"bind": ["0.0.0.0"]}` every interface (your LAN, a VPN), and
+`"hosts": ["chat.example.org"]` a name a tunnel or proxy sends (`"*"` for any).
 
 <p align="center"><img src="docs/web-chat.png" alt="The web chat: Claude's report on which model takes which tasks, the user's reply, a receipt saying Claude has it and will read it after its current step, and 'Claude is on it'" width="420"></p>
 
@@ -689,9 +692,10 @@ reaching the Claude session in delegate mode while you're away.
 - **Locked down.** What a message can do is what typing in the terminal can do, so: a secret token
   (`~/.config/workbench/chat-token`, mode 600, made on first use) that `wb chat url` puts in the
   link's fragment, which never leaves the browser; the API wants it as a bearer header; the server
-  answers only to the host names it serves (localhost and this machine's Tailscale names), which
-  stops other web pages and DNS rebinding; it binds to localhost and the Tailscale address, never
-  `0.0.0.0`; strict security headers, size limits and a cap on open streams.
+  answers only to the host names it serves, which stops other web pages and DNS rebinding; it
+  binds to localhost unless `chat.json` names more (an address, `tailscale`, or `0.0.0.0`, whose
+  host names are then this machine's names and addresses, plus any `hosts` you list); strict
+  security headers, size limits and a cap on open streams.
 - **Robust on a phone.** The server streams the whole thread on every change, so every reconnect
   is a full resync and nothing arrives half-received. A message goes into a local outbox with its
   own id and is retried until the server has it; the server ignores an id it already holds, so

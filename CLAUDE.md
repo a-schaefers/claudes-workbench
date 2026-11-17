@@ -20,7 +20,9 @@ what either says (a command, a flag, a default, a guard, a file) updates it in t
   - `models.py`: discovers local models from opencode.json, their status, and GPU residency
     (make_resident, free_gpu);
     adds and retires them (Ollama's pull/delete, opencode.json entries) for the weekly model check.
-  - `chat.py`: the web chat (`wb chat serve`, stdlib HTTP, a token and a Host check; `systemd/wb-chat.service`
+  - `chat.py`: the web chat (`wb chat serve`, stdlib HTTP, a token and a Host check; localhost
+    unless `~/.config/workbench/chat.json` (`$WB_CHAT_CONFIG`) lists `bind` addresses (`tailscale`,
+    `0.0.0.0`) and `hosts` (`*`: any), `chat.plan`; `systemd/wb-chat.service`
     keeps it up). The mod hands its messages to the /delegate session as prompts; Claude replies with `wb chat reply`.
   - `watch.py`: waiting without polling: inotify (ctypes) on state directories and pidfd on processes.
     `wb events` streams state changes to the mod; `wb wait`, `log -f`, `watch`, the agent's
@@ -129,7 +131,7 @@ tasks/<name>/  task.json status.json events.jsonl opencode.json HANDBOOK.md cont
                ask/<id>.json|.answer  worktree/
 ```
 The skill library is `~/.local/share/workbench/skills` (`$WB_SKILLS`), a git repo of its own
-(retired skills in `retired/`). The web chat's token is `~/.config/workbench/chat-token`
+(retired skills in `retired/`). The web chat's settings are `~/.config/workbench/chat.json` and its token `~/.config/workbench/chat-token`
 (`$WB_CHAT_TOKEN`, mode 600).
 
 A model is a candidate when its OpenCode provider's `baseURL` is on this machine (loopback,
@@ -145,7 +147,7 @@ than fails on a running server with no `stop`. Ollama entries need `options.max_
 OpenCode's `max_completion_tokens`); `wb model add` writes it and `wb doctor` checks it, and
 that `limit.context` matches what Ollama serves (`models.ollama_served_context`): more cuts prompts off, less shrinks every slice.
 
-Environment: `WB_HOME`, `WB_MODELS`, `WB_SKILLS`, `WB_IMAGES`, `WB_CHAT_TOKEN` (paths above);
+Environment: `WB_HOME`, `WB_MODELS`, `WB_SKILLS`, `WB_IMAGES`, `WB_CHAT_TOKEN`, `WB_CHAT_CONFIG` (paths above);
 `WB_OPENCODE_CONFIG` (OpenCode's config, default `~/.config/opencode/opencode.json`);
 `WB_COMPACT_AT` (the mod's early compaction, a percentage, 0 off); `WB_BIN` (the `wb` the mod runs).
 Tests only: `WB_OPENCODE_BIN` (a fake opencode), `WB_FAKE_MODELS` (no model servers).

@@ -8,9 +8,11 @@ receipt (chat/receipts.jsonl) and submits each to Claude as a prompt. Claude ans
 
 What a message can do is what typing in the terminal can do, so the API wants a secret token
 (~/.config/workbench/chat-token, made on first use; `wb chat url` prints a link carrying it in
-the fragment, which never leaves the browser) and answers only to the host names it serves
-(localhost and this machine's Tailscale names), which stops other web pages and DNS rebinding.
-The link it prints is always localhost; reaching it from a phone is the user's own setup.
+the fragment, which never leaves the browser) and answers only to the host names it serves,
+which stops other web pages and DNS rebinding. It serves localhost unless the user says otherwise
+in ~/.config/workbench/chat.json (`bind`: addresses, `tailscale` for this machine's tailnet
+address, `0.0.0.0` for every interface; `hosts`: more names to answer to, `*` for any). The link
+it prints is always localhost; reaching it from a phone is the user's own setup.
 """
 from __future__ import annotations
 
@@ -19,6 +21,7 @@ import json
 import os
 import secrets
 import select
+import socket
 import subprocess
 import threading
 import time
@@ -49,6 +52,15 @@ def chat_dir() -> Path:
 
 def token_path() -> Path:
     return Path(os.environ.get("WB_CHAT_TOKEN") or Path.home() / ".config" / "workbench" / "chat-token")
+
+
+def config_path() -> Path:
+    return Path(os.environ.get("WB_CHAT_CONFIG") or Path.home() / ".config" / "workbench" / "chat.json")
+
+
+def settings() -> dict:
+    """The user's choices for the server: {"bind": [...], "hosts": [...]}; {} for the defaults."""
+    return store.read_json(config_path(), {}) or {}
 
 
 def token() -> str:
@@ -176,7 +188,7 @@ class Hub:
 
 class Handler(BaseHTTPRequestHandler):
     server_version = "wb-chat"
-    hosts: set[str] = set()
+    hosts: set[str] | None = set()  # None: any Host (the user's `hosts: ["*"]`)
     secret = ""
     hub: "Hub"
     streams: threading.BoundedSemaphore
@@ -203,7 +215,7 @@ class Handler(BaseHTTPRequestHandler):
 
     def _allowed(self) -> bool:
         host = (self.headers.get("Host") or "").rsplit(":", 1)[0].strip("[]").lower()
-        if host not in self.hosts:
+        if self.hosts is not None and host not in self.hosts:
             self._json(403, {"error": "unknown host"})
             return False
         return True
@@ -289,30 +301,79 @@ class Handler(BaseHTTPRequestHandler):
         self._json(200, {"message": msg, "listener": listener(), "state": snapshot()})
 
 
-def make_servers(port: int, binds: list[str] | None = None) -> tuple[list[ThreadingHTTPServer], dict]:
-    """Servers on localhost and the Tailscale address (or the given addresses), not on 0.0.0.0."""
-    ts = tailscale()
-    if binds is None:
-        binds = ["127.0.0.1"] + ([ts["ip"]] if ts.get("ip") else [])
+WILDCARD = ("0.0.0.0", "::")
+
+
+def this_machine() -> set[str]:
+    """The names and addresses other devices may reach this machine by (for a wildcard bind)."""
+    name = socket.gethostname()
+    found = {name, name.split(".")[0], socket.getfqdn()}
+    try:
+        found |= {a[4][0] for a in socket.getaddrinfo(name, None)}
+    except OSError:
+        pass
+    return {n.lower() for n in found if n}
+
+
+def plan(binds: list[str] | None = None, hosts: list[str] | None = None) -> dict:
+    """Where to listen and which Host names to answer: {"binds", "hosts" (None: any), "names"
+    (to show), "skipped"}. Default localhost; the user's chat.json or --bind/--host say more."""
+    conf = settings()
+    binds = list(binds or conf.get("bind") or ["127.0.0.1"])
+    extra = [h.lower() for h in [*(conf.get("hosts") or []), *(hosts or [])]]
+    allowed = {"localhost", "127.0.0.1", "::1"}
+    out, names, skipped = [], [], []
+    for b in binds:
+        if b == "localhost":
+            b = "127.0.0.1"
+        if b == "tailscale":  # this machine's tailnet address, when there is one
+            ts = tailscale()
+            if not ts.get("ip"):
+                skipped.append("tailscale (not running)")
+                continue
+            b = ts["ip"]
+            allowed |= {n.lower() for n in ts["names"]}
+            names += sorted(ts["names"], key=len, reverse=True)[:1]
+        if b in WILDCARD:
+            allowed |= this_machine()
+        else:
+            allowed.add(b)
+        if b not in out:
+            out.append(b)
+    return {"binds": out or ["127.0.0.1"], "hosts": None if "*" in extra else allowed | set(extra),
+            "names": names, "skipped": skipped}
+
+
+class _Server6(ThreadingHTTPServer):
+    address_family = socket.AF_INET6
+
+
+def make_servers(port: int, binds: list[str] | None = None,
+                 hosts: list[str] | None = None) -> tuple[list[ThreadingHTTPServer], dict]:
+    """One server per address the plan names (localhost unless the user chose more)."""
+    p = plan(binds, hosts)
     handler = type("ChatHandler", (Handler,), {
-        "hosts": {"localhost", "127.0.0.1", *binds, *ts.get("names", ())},
-        "secret": token(), "hub": Hub(),
+        "hosts": p["hosts"], "secret": token(), "hub": Hub(),
         "streams": threading.BoundedSemaphore(MAX_STREAMS)})
     servers = []
-    for addr in binds:
-        srv = ThreadingHTTPServer((addr, port), handler)
+    for addr in p["binds"]:
+        srv = (_Server6 if ":" in addr else ThreadingHTTPServer)((addr, port), handler)
         srv.daemon_threads = True
         servers.append(srv)
-    return servers, ts
+    return servers, p
 
 
-def serve(port: int, binds: list[str] | None, say=print) -> None:
-    servers, ts = make_servers(port, binds)
+def serve(port: int, binds: list[str] | None, hosts: list[str] | None = None, say=print) -> None:
+    servers, p = make_servers(port, binds, hosts)
     for srv in servers[1:]:
         threading.Thread(target=srv.serve_forever, daemon=True).start()
-    names = sorted(ts.get("names", ()), key=len, reverse=True)
     say(f"web chat on {', '.join(f'{s.server_address[0]}:{port}' for s in servers)}"
-        + (f" (http://{names[0]}:{port} on the tailnet)" if names else ""))
+        + (f" (http://{p['names'][0]}:{port} on the tailnet)" if p["names"] else "")
+        + (f"; skipped {', '.join(p['skipped'])}" if p["skipped"] else ""))
+    if any(b in WILDCARD for b in p["binds"]):
+        say("every interface: anyone who can reach this machine and has the link can use it")
+    if p["hosts"] is None:
+        say("answering to any host name (hosts: *): the token is the only lock")
     servers[0].serve_forever()
 
 

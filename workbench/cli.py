@@ -1027,7 +1027,7 @@ def cmd_events(a):
 def cmd_chat(a):
     """The web chat: the user's side door to Claude while away from the terminal."""
     if a.action == "serve":
-        chat.serve(a.port, a.bind or None, say=lambda m: print(m, flush=True))
+        chat.serve(a.port, a.bind or None, a.host or None, say=lambda m: print(m, flush=True))
     elif a.action == "url":
         print(chat.url(a.port))  # the token is the key: keep the link private
     elif a.action == "reply":
@@ -1288,7 +1288,9 @@ def main(argv=None):
                    default="log")
     s.add_argument("id", nargs="?", help="ack: the message id")
     s.add_argument("--port", type=int, default=chat.PORT)
-    s.add_argument("--bind", action="append", help="serve: address (default: localhost and Tailscale)")
+    s.add_argument("--bind", action="append", help="serve: an address to listen on, `tailscale` "
+                   "or 0.0.0.0 (default: chat.json's `bind`, else localhost)")
+    s.add_argument("--host", action="append", help="serve: another host name to answer to (* any)")
     s.add_argument("--text", help="reply: the text"); s.add_argument("--message", help="reply: file, or -")
     s.add_argument("--by", help=argparse.SUPPRESS); s.add_argument("-n", type=int, default=10)
     s.add_argument("--how", choices=["now", "queued"], default="now", help=argparse.SUPPRESS)

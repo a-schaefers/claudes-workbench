@@ -10,6 +10,7 @@ import tempfile
 import types
 import time
 import unittest
+from unittest import mock
 import warnings
 from contextlib import redirect_stderr, redirect_stdout
 from pathlib import Path
@@ -1068,6 +1069,7 @@ class WebChat(Base):
     def setUp(self):
         super().setUp()
         os.environ["WB_CHAT_TOKEN"] = str(Path(self.tmp.name) / "chat-token")
+        os.environ["WB_CHAT_CONFIG"] = str(Path(self.tmp.name) / "chat.json")  # not the user's
         from workbench import chat
         self.chat = chat
         servers, _ = chat.make_servers(0, ["127.0.0.1"])
@@ -1095,6 +1097,29 @@ class WebChat(Base):
         data = r.read()
         c.close()
         return r.status, (json.loads(data) if r.getheader("Content-Type") == "application/json" else data)
+
+    def test_it_serves_localhost_unless_the_user_chose_more(self):
+        chat, conf = self.chat, Path(os.environ["WB_CHAT_CONFIG"])
+        self.assertEqual(chat.plan()["binds"], ["127.0.0.1"])         # no Tailscale assumed
+        conf.write_text(json.dumps({"bind": ["localhost", "0.0.0.0"]}))
+        p = chat.plan()
+        self.assertEqual(p["binds"], ["127.0.0.1", "0.0.0.0"])
+        self.assertIn(socket.gethostname().lower(), p["hosts"])      # its names, on any interface
+        self.assertNotIn("evil.example", p["hosts"])
+        conf.write_text(json.dumps({"bind": ["0.0.0.0"], "hosts": ["chat.example.org"]}))
+        self.assertIn("chat.example.org", chat.plan()["hosts"])      # a tunnel's name
+        conf.write_text(json.dumps({"hosts": ["*"]}))
+        self.assertIsNone(chat.plan()["hosts"])                      # any name: the token alone
+        self.assertEqual(chat.plan(["10.0.0.5"])["binds"], ["10.0.0.5"])  # --bind wins
+        conf.write_text("{}")
+        with mock.patch.object(chat, "tailscale", return_value={}):
+            p = chat.plan(["localhost", "tailscale"])
+        self.assertEqual((p["binds"], p["skipped"]), (["127.0.0.1"], ["tailscale (not running)"]))
+        with mock.patch.object(chat, "tailscale",
+                               return_value={"ip": "100.64.0.9", "names": {"box", "box.ts.net"}}):
+            p = chat.plan(["localhost", "tailscale"])
+        self.assertEqual(p["binds"], ["127.0.0.1", "100.64.0.9"])
+        self.assertTrue({"box", "box.ts.net", "100.64.0.9"} <= p["hosts"])
 
     def test_the_page_needs_the_token_and_a_known_host(self):
         tok = self.chat.token()

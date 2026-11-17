@@ -1,11 +1,11 @@
 [Unit]
 Description=workbench web chat (wb chat serve): reach Claude's /delegate session from the browser
-After=network-online.target tailscaled.service
+After=network-online.target
 Wants=network-online.target
 
 [Service]
-# localhost and this machine's Tailscale address; it waits for Tailscale by restarting.
-# The install's link (README): bin/wb finds the package from its real path, wherever the clone is.
+# localhost, or the addresses in ~/.config/workbench/chat.json (`bind`). The install's link
+# (README): bin/wb finds the package from its real path, wherever the clone is.
 ExecStart=%h/.local/bin/wb chat serve
 Restart=always
 RestartSec=10
