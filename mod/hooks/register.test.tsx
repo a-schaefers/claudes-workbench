@@ -25,11 +25,11 @@ test('with no tasks the pane says how to start one, on every surface', async ($,
   }
 })
 
-test('/workbench opens the pane and counts open tasks', async ($, on) => {
+test('/delegate-pane opens the pane and counts open tasks', async ($, on) => {
   let opened = ''
   let closed = ''
   let held: any[] = []
-  on('command.register', () => ({ value: { command: 'workbench' } }))
+  on('command.register', (_: any, e: any) => ({ value: { command: e.name } }))
   on('ui.panes', () => ({ value: held }))
   on('ui.close', (_, e) => {
     closed = e.id
@@ -46,14 +46,14 @@ test('/workbench opens the pane and counts open tasks', async ($, on) => {
   on('session.start', (_, e) => ({ cwd: e.cwd }))
 
   await $.session.start({ cwd: '/', surface: 'terminal', isInteractive: true })
-  const out = await $.command.run({ command: 'workbench', args: '' })
+  const out = await $.command.run({ command: 'delegate-pane', args: '' })
   expect(opened).toBe('workbench')
   expect(closed).toBe('')
   expect(JSON.stringify(out)).toContain('no open tasks')
-  // closed by accident, the engine still holding it out of sight: /workbench brings it back
+  // closed by accident, the engine still holding it out of sight: /delegate-pane brings it back
   held = [{ id: 'workbench', title: 'Workbench', isShown: false, isFocused: false, isPlaced: true }]
   opened = ''
-  await $.command.run({ command: 'workbench', args: '' })
+  await $.command.run({ command: 'delegate-pane', args: '' })
   expect([closed, opened]).toEqual(['workbench', 'workbench'])
 })
 
@@ -73,7 +73,7 @@ function fakeTasks(on: any, files: Record<string, string>, dirs = ['fix-it'], sc
   })
   on('fs.exists', (_: any, e: any) => ({ value: Object.keys(files).some(p => p.startsWith(e.path)) }))
   on('fs.list', () => ({ value: dirs.map(name => ({ name, kind: 'dir' })) }))
-  on('command.register', () => ({ value: { command: 'workbench' } }))
+  on('command.register', (_: any, e: any) => ({ value: { command: e.name } }))
   on('ui.open', (_: any, e: any) => { ui.push(`open ${e.id}`); return { value: { isPlaced: true } } })
   on('ui.close', (_: any, e: any) => { ui.push(`close ${e.id}`); return { value: undefined } })
   on('ui.status', (_: any, e: any) => { ui.push(`status ${e.text ?? ''}`); return { value: undefined } })
@@ -316,6 +316,40 @@ test('the weekly model check comes once, in a quiet moment of a session in use; 
   await clock.advance(2000)
   expect(asked.length).toBe(2)
   expect(asked[1]).toContain('The weekly model check is due')
+})
+
+test('an update is checked once a session is in use, and /delegate-update installs it', async ($, on) => {
+  const clock = mock.clock(on, { now: 1_800_000_000_000 })
+  fakeTasks(on, {}, [])
+  let behind = 3
+  const runs: string[][] = []
+  on('process.run', (_: any, e: any) => {
+    runs.push(e.argv)
+    const said = e.argv[2] === '--check'
+      ? (behind ? `update available: ${behind} new commit(s); /delegate-update (or wb update) installs it` : 'up to date')
+      : behind ? 'updated marketplace 1111111..2222222 (3 commit(s))' : 'already up to date'
+    return { value: { exitCode: 0, stdout: said, stderr: '' } }
+  })
+  const toasts: string[] = []
+  on('ui.toast', (_: any, e: any) => { toasts.push(e.text); return { value: undefined } })
+  on('prompt.submit', (_: any, e: any) => ({ text: e.text }))
+  await $.session.start({ cwd: '/', surface: 'terminal', isInteractive: true })
+  await clock.advance(3000)
+  expect(runs.some(r => r[1] === 'update')).toBe(false)          // nobody has used the session yet
+
+  await $.turn.start({ text: 'hi', turnId: 't1' })
+  await $.turn.complete({ answer: '', durationMs: 1, isAborted: false, turnId: 't1', reason: 'answer' })
+  await clock.advance(2000)
+  expect(runs.filter(r => r[1] === 'update')).toEqual([['wb', 'update', '--check', '--if-due']])  // wb keeps it weekly
+  expect(toasts.at(-1)).toContain('/delegate-update')
+  await clock.advance(5000)
+  expect(runs.filter(r => r[1] === 'update').length).toBe(1)     // once per load
+
+  const out = await $.command.run({ command: 'delegate-update', args: '' })
+  expect(runs.at(-1)).toEqual(['wb', 'update'])
+  expect(out.text).toContain('updated marketplace')
+  behind = 0
+  expect((await $.command.run({ command: 'delegate-update', args: '' })).text).toContain('already up to date')
 })
 
 test('the web chat reaches Claude only in /delegate mode, with a receipt, and one session listens', async ($, on) => {

@@ -262,6 +262,10 @@ const NOTES_NOTE = (notes: string) =>
   '`wb notes add "…"` when they tell you something that holds in any repo, `wb notes drop N` ' +
   `when one no longer does):\n${notes}`
 
+// Every slash command is /delegate or starts with it, so typing /delegate lists them all
+// (2026-11-16: /workbench became /delegate-pane).
+const PANE_CMD = 'delegate-pane'
+const UPDATE = 'delegate-update'
 const QUIT = 'delegate-quit'
 const HAND_BACK = 'delegate-quit-and-hand-back-claude'
 const QUIT_NOTE = (out: string) =>
@@ -295,6 +299,7 @@ const mem = {
   follow: true, // the pane sticks to the newest lines until the person scrolls up
   sawTurn: false, // the person has used this session: a weekly check may follow
   scoutAsked: false, // the weekly model check was raised in this load
+  updateAsked: false, // `wb update --check --if-due` ran in this load (wb keeps it weekly)
   boundary: false, // one closed since: a moment to make room in Claude's context
   toasted: new Set<string>(),
   noticed: new Map<string, number>(), // each task's newest notice (its ts), as deliver last read
@@ -500,6 +505,11 @@ async function poll($: any) {
       await compactAtBoundary($)
     }
     if (mem.sawTurn && !mem.busy && !mem.scoutAsked && open.size === 0) await scoutIfDue($, now)
+    if (mem.sawTurn && !mem.updateAsked) {
+      mem.updateAsked = true
+      const said = await runWb($, ['update', '--check', '--if-due'])
+      if (said.startsWith('update available')) $.ui.toast(`workbench: ${said}`)
+    }
     await deliver($, now)
     await rewake($, now, list)
     await listen($, now)
@@ -669,16 +679,20 @@ export const register: Register = (on, options) => {
       await update($, chat, c => ({ ...c, key }))
     }
     await $.command.register({
-      name: 'workbench',
+      name: PANE_CMD,
       description: 'Show the tasks delegated to local agents in a pane',
-    })
-    await $.command.register({
-      name: QUIT,
-      description: 'Stop every delegated agent now, finishing nothing',
     })
     await $.command.register({
       name: MODELS,
       description: 'Check now which local models suit this machine best (weekly on its own)',
+    })
+    await $.command.register({
+      name: UPDATE,
+      description: 'Update workbench now: wb, the /delegate skill and this pane (checked weekly)',
+    })
+    await $.command.register({
+      name: QUIT,
+      description: 'Stop every delegated agent now, finishing nothing',
     })
     await $.command.register({
       name: HAND_BACK,
@@ -751,6 +765,17 @@ export const register: Register = (on, options) => {
     return { text: 'Claude will check the local models against this machine now.' }
   })
 
+  on('command.run', { command: UPDATE }, async $ => {
+    const out = await runWb($, ['update'])
+    if (!out.startsWith('updated')) return { text: `workbench: ${out}` }
+    try {
+      await $.command.run({ command: 'reload-plugins', args: '' }) // the new pane, now
+      return { text: `workbench: ${out}` }
+    } catch {
+      return { text: `workbench: ${out}. Run /reload-plugins to start using it.` }
+    }
+  })
+
   on('command.run', { command: HAND_BACK }, async $ => {
     await delegateMode($, false)
     const out = await runWb($, ['takeover', '--all'])
@@ -814,9 +839,9 @@ export const register: Register = (on, options) => {
     return next(e)
   })
 
-  on('command.run', { command: 'workbench' }, async $ => {
+  on('command.run', { command: PANE_CMD }, async $ => {
     // A pane the engine still holds but doesn't show (a tab behind another, or left undrawn)
-    // only retitles on open: close it first, so the person's /workbench always brings it up.
+    // only retitles on open: close it first, so the person's /delegate-pane always brings it up.
     const held = (await $.ui.panes()).find(p => p.id === PANE)
     if (held && (!held.isShown || !held.isPlaced)) await $.ui.close({ id: PANE }).catch(() => {})
     mem.paneOpened = true

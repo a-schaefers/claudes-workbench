@@ -1346,6 +1346,57 @@ def cmd_setup(a):
     sys.exit(1 if bad else 0)
 
 
+UPDATE_EVERY = 7 * 24 * 3600  # the mod's weekly check (wb update --check --if-due)
+
+
+def cmd_update(a):
+    """Bring this copy up to date with its origin: the marketplace's clone through Claude Code
+    (which also refreshes the mod's cached copy), a developer's clone with a fast-forward pull.
+    --check only says whether there is news; --if-due asks the network at most weekly."""
+    marketplace = context.claude_home() / "plugins" / "marketplaces"
+    kind = "marketplace" if PKG_ROOT.resolve().is_relative_to(marketplace.resolve()) else "clone"
+    path = store.home() / "update.json"
+    last = store.read_json(path, {})
+    if a.check:
+        quiet = os.environ.get("CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC")
+        if a.if_due and (quiet or time.time() - last.get("checked_at", 0) < UPDATE_EVERY):
+            behind = last.get("behind", 0)  # the last answer stands until the next check
+        else:
+            try:  # never prompts: a check that can't reach origin says so and tries again next week
+                gitops.git(PKG_ROOT, "fetch", "-q", "origin",
+                           env={"GIT_TERMINAL_PROMPT": "0", "GIT_SSH_COMMAND": "ssh -o BatchMode=yes"})
+                behind = int(gitops.git(PKG_ROOT, "rev-list", "--count", "HEAD..@{u}"))
+            except gitops.GitError as e:
+                store.write_json(path, {**last, "checked_at": time.time()})
+                die(f"couldn't check for an update: {e}")
+            store.write_json(path, {"checked_at": time.time(), "behind": behind, "kind": kind})
+        print(f"update available: {behind} new commit(s); /delegate-update (or wb update) installs it"
+              if behind else "up to date")
+        return
+    live = [t.name for t in store.all_tasks() if runner_alive(t)]
+    if live:  # a pull would change the git shim, the lane and the ask server under them
+        die(f"tasks are running ({', '.join(live)}): update when they finish, or wb stop --all first")
+    steps = [["claude", "plugin", "marketplace", "update", "workbench"],
+             ["claude", "plugin", "update", "workbench@workbench"]]
+    if kind == "clone":  # a clone is its own marketplace: pull, then let Claude Code re-read it
+        if gitops.git(PKG_ROOT, "status", "--porcelain", "--untracked-files=no").strip():
+            die(f"{PKG_ROOT} has uncommitted changes: commit or stash them, then wb update")
+        steps.insert(0, ["git", "-C", str(PKG_ROOT), "pull", "-q", "--ff-only"])
+    before = gitops.git(PKG_ROOT, "rev-parse", "HEAD").strip()
+    for step in steps:
+        r = subprocess.run(step, capture_output=True, text=True, timeout=300)
+        if r.returncode:
+            die(f"{' '.join(step[:4])} failed: {(r.stderr or r.stdout).strip()[-300:]}")
+    after = gitops.git(PKG_ROOT, "rev-parse", "HEAD").strip()
+    store.write_json(path, {"checked_at": time.time(), "behind": 0, "kind": kind})
+    if before == after:
+        print("already up to date")
+    else:
+        n = gitops.git(PKG_ROOT, "rev-list", "--count", f"{before}..{after}").strip()
+        print(f"updated {kind} {before[:7]}..{after[:7]} ({n} commit(s)); /reload-plugins or a "
+              "restart picks up the pane")
+
+
 def cmd_doctor(a):
     ok = True
 
@@ -1662,6 +1713,10 @@ def main(argv=None):
                                      "from this copy")
     s.add_argument("--force", action="store_true", help="replace links that point elsewhere")
     s.set_defaults(f=cmd_setup)
+    s = sub.add_parser("update", help="update workbench (wb, the skill and the mod) from its origin")
+    s.add_argument("--check", action="store_true", help="only say whether there is an update")
+    s.add_argument("--if-due", action="store_true", help="with --check: ask origin at most weekly")
+    s.set_defaults(f=cmd_update)
     sub.add_parser("doctor", help="check the setup").set_defaults(f=cmd_doctor)
 
     a = ap.parse_args(argv)

@@ -725,7 +725,7 @@ first session to deliver a notice wins.
 ## Seeing what the agent does
 
 - **The pane** (opened by `/delegate`, or once per load when a task runs, and closed by a quit command;
-  `/workbench` opens it any time) lists every task: phase, round, model, test result, age and
+  `/delegate-pane` opens it any time) lists every task: phase, round, model, test result, age and
   its last few events. Under the list it follows one task (the newest queued, running, testing
   or asking one, else the newest waiting for Claude) as a live transcript, scrolling with the
   newest lines unless the user scrolls up. At its foot stands the apprentice, the local agent
@@ -1366,7 +1366,7 @@ Only the user's two slash commands stop the delegation, never words in a message
   to leave delegate mode, finish each task itself to its own standard (`wb diff`, the acceptance
   command, `wb accept`), and carry on with the rest of the user's request without delegating.
 
-Both end delegate mode: Claude works directly again and the pane closes (`/workbench` brings it
+Both end delegate mode: Claude works directly again and the pane closes (`/delegate-pane` brings it
 back).
 
 ## The mod, inside
@@ -1457,14 +1457,17 @@ context blocks, the idle status line, pane auto-open, web chat listening, the ap
 "Delegate mode is on.". No `$.ui.invalidate`: rewriting the first message would cost the
 conversation's prompt cache.
 
-**Commands.** `/workbench` opens the pane and says how many tasks are open; a pane the engine
+**Commands.** Every one is `/delegate` or starts with `delegate-`, so typing `/delegate` lists
+them all (2026-11-16: `/workbench` became `/delegate-pane`, no alias). `/delegate-pane` opens the pane and says how many tasks are open; a pane the engine
 still holds but doesn't show (a tab behind another, or undrawn) is closed first, so it comes back,
 and a pane that can't be drawn here says why (`opened.reason`). `/delegate-quit`:
 delegate mode off, `wb stop --all`, a toast, and hidden context (QUIT_NOTE: don't finish,
 restart or clean up anything unless asked); it starts no turn. `/delegate-quit-and-hand-back-claude`:
 mode off, `wb takeover --all`, and DONE_NOTE queued as a turn (leave delegate mode; per task `wb
 diff`, finish in its worktree, run the acceptance command, `wb accept` (`--merge` only if asked);
-carry on without delegating). `/delegate-models` queues SCOUT_NOTE now. A command can't start a
+carry on without delegating). `/delegate-models` queues SCOUT_NOTE now. `/delegate-update` runs
+`wb update` and, when it updated, `/reload-plugins` (`$.command.run`; if that throws, it says to
+run it). A command can't start a
 turn itself: it pushes onto `mem.queued`, which the next idle poll submits. `/delegate` is the
 skill, not a mod command.
 
@@ -1517,12 +1520,17 @@ load: when scout.json's `done_at` is 7+ days old and `offered_at` 1+ day old, it
 `offered_at` and submits SCOUT_NOTE (`wb scout`, research, recommend keep/add/retire, change
 nothing without a yes, `wb scout --done --notes`).
 
+**The weekly update check**: after the first main-loop turn of a load, once, `wb update --check
+--if-due` (wb asks origin at most weekly and answers from `update.json` in between); an `update
+available` answer becomes a toast naming `/delegate-update`. So a pending update is mentioned once
+per session until it's installed.
+
 **Tests** (`register.test.tsx`, an in-memory filesystem and a fake `wb events`): the empty pane,
-`/workbench`, a wake held mid-turn and delivered once (and a stale one dropped), the transcript
+`/delegate-pane`, a wake held mid-turn and delivered once (and a stale one dropped), the transcript
 and pinned link, both quit commands (typed words stop nothing), KEEP_ON_COMPACT and the boundary
 compaction, the live header label, the weekly check, the chat listener (exact text, receipt,
 standing by, stopping after a quit), Bash `wb start` turning the mode on and mid-turn delivery,
-rewake, Raster vs face, `/delegate` alone, `wrapWords`. Not covered: wake off, check-in and
+rewake, Raster vs face, `/delegate` alone, the update check and `/delegate-update`, `wrapWords`. Not covered: wake off, check-in and
 question wakes, the one-hour cutoff, scrolling, `WB_COMPACT_AT`, the ears respawn.
 
 **Troubleshooting.** If `wb` isn't on Claude Code's PATH the mod fails quietly (the ears respawn
@@ -1639,6 +1647,7 @@ message, not a traceback.
 | `wb chat [log\|serve\|url\|reply\|ack\|pending]` | `--port` (1337), `--bind` (replaces chat.json's), `--host` (adds), `--text`, `--message <file\|->` (reply reads stdin without either), `-n` (10); `ack <id> --by --how` (the mod) | The web chat: the thread, the server, the link with its token, Claude's reply. |
 | `wb init <dir>` | | A project the way Claude keeps one: git on the default branch, an initial commit, AGENTS.md → CLAUDE.md (refuses inside another repo or without a git identity). |
 | `wb setup` | `--force` (replaces a link that points elsewhere; never a real file) | Links `~/.local/bin/wb` to this copy's `bin/wb` and Claude Code's `skills/delegate` to its `skill/delegate`, warns when `~/.local/bin` isn't on PATH; exit 1 when it left something in the way (see *Installing*). |
+| `wb update` | `--check` (only say whether origin has news: `update available: N new commit(s)…` or `up to date`), `--if-due` (with `--check`: ask origin at most weekly, `UPDATE_EVERY`, else answer from `update.json`; never with `CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC`) | Updates this copy (see *Installing*): refuses while any runner is live; a marketplace copy runs `claude plugin marketplace update workbench` then `claude plugin update workbench@workbench`; a clone (refusing uncommitted tracked changes) runs `git pull --ff-only` first. Prints `updated <kind> a..b (N commit(s))` or `already up to date`. The fetch never prompts (`GIT_TERMINAL_PROMPT=0`, ssh `BatchMode`). |
 | `wb doctor` | | `opencode --version`, the OpenCode config, git, models found and each one's readiness, each Ollama entry's `options.max_tokens` and context against what Ollama serves, the state directory, a real lane drawn around a test write (`ok agents write only in their lane (Landlock ABI N)`), `wb` on PATH (or `WB_BIN`) for the mod, where the mod lives. `ok`/`BAD` lines set the exit code; `--` lines inform. |
 
 ## Files and formats
@@ -1653,6 +1662,7 @@ $WB_HOME (~/.local/state/workbench)
   speed.json  speed.lock         each model's measured write and read speeds
   gpu.lock  gpu.json  gpu.admit  the GPU lease: the lock, who holds or waits for it, the admission lock
   scout.json  watch.json         the weekly model check: when it was done and offered; the watch list
+  update.json                    wb update: when origin was last asked, how far behind this copy was
   imports/<slug>/                skills fetched by wb skill import, for Claude to read
   images/<YYYYmmdd-HHMMSS>/      wb image's candidates (unless --out), their .json sidecars, engine.log
   chat/                          messages.jsonl  receipts.jsonl  listener.json
@@ -1743,6 +1753,8 @@ with overflow), `read_full`, `reviews`, `spec_rounds`, `stuck`, `took_over`.
 - `speed.json`: `{"<model id>": {"write": [tok/s…], "read": [tok/s…]}}`, the last 60 of each.
 - `gpu.json`: `{"<pid>": {model, task, waiting?}}`.
 - `scout.json`: `{done_at, notes, offered_at}` (`offered_at` from the mod); `watch.json`: `[{ts, text}]`.
+- `update.json`: `{checked_at, behind, kind}` (`kind`: `marketplace` or `clone`); a failed check
+  writes only `checked_at`, so it waits a week too.
 - `tuning.json`: `{"<knob>": value}`, a pin for every model.
 - `notes.md`: one `- <note>` line each.
 - The image sidecar: `{prompt, seed, width, height, engine, refs, secs, ts}`.
@@ -1762,8 +1774,10 @@ cache, but `marketplace add` keeps a full clone of the repo under
 `~/.claude/plugins/marketplaces/<the marketplace's name>` (`installLocation` in
 `known_marketplaces.json`; elsewhere under `CLAUDE_CODE_PLUGIN_CACHE_DIR`). `wb setup` links `wb`
 and the `/delegate` skill from that clone, so `wb` runs from the clone the way it does from a
-developer's. Upgrading: `claude plugin marketplace update workbench` pulls the clone (the links
-follow it), `claude plugin update workbench@workbench` refreshes the mod, then restart Claude Code.
+developer's. Upgrading is `wb update` (or `/delegate-update`, which reloads the plugins after):
+`claude plugin marketplace update workbench` pulls the clone (the links follow it), `claude plugin
+update workbench@workbench` refreshes the mod. The mod runs `wb update --check --if-due` once per
+session, so a new commit is noticed within a week.
 The mod's copy moves only when `mod/.claude-plugin/plugin.json`'s `version` does, so a change to
 `mod/` that users should get bumps it. A third-party marketplace doesn't auto-update unless the
 user turns that on (`/plugin` → Marketplaces).
@@ -1783,7 +1797,8 @@ claude plugin marketplace add "$PWD"
 claude plugin install workbench@workbench
 wb doctor
 ```
-(`bin/wb setup` makes the same two links.) Moving from one to the other: `wb setup --force` from
+(`bin/wb setup` makes the same two links; `wb update` pulls with `--ff-only`, then the same two
+`claude plugin` steps, since a path marketplace is copied too.) Moving from one to the other: `wb setup --force` from
 the copy you want repoints the links; the state directory and the skill library don't move.
 
 ## The tests
