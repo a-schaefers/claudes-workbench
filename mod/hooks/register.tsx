@@ -175,6 +175,27 @@ const ago = (ms: number) => {
 
 const clip = (text: string, n: number) => (text.length <= n ? text : text.slice(0, n - 1) + '…')
 
+// Words broken into lines of at most n characters (a longer word is cut across lines). The
+// bubble wraps with this, not with Text's own wrapping: in a row that shares its width, that
+// laid out the rows and drew them empty (seen 2026-11-16).
+export const wrapWords = (text: string, n: number): string[] => {
+  const lines: string[] = []
+  let line = ''
+  for (let word of text.split(/\s+/).filter(Boolean)) {
+    if (line && line.length + 1 + word.length > n) {
+      lines.push(line)
+      line = ''
+    }
+    while (word.length > n) {
+      lines.push(word.slice(0, n))
+      word = word.slice(n)
+    }
+    line = line ? `${line} ${word}` : word
+  }
+  if (line) lines.push(line)
+  return lines.length ? lines : ['']
+}
+
 const eventLine = (r: Row): string | null => {
   switch (r.kind) {
     case 'tool': return `${r.tool} ${r.brief ?? ''}${r.ok ? '' : '  ✗'}`.trim()
@@ -794,18 +815,22 @@ export const register: Register = (on, options) => {
     // The apprentice, in pixels where the pane has the rows for it (it takes six), else its face
     // on the line. Drawing it in pixels arms the timer that animates it. A long history overfills
     // the pane, and anything that may shrink is squeezed: the bubble went down to its border.
-    // So the stage keeps its height, and the bubble takes the width that is left and wraps its
-    // words onto more rows rather than cutting them off: the pane can't be made wider.
+    // So the stage keeps its height, and the bubble wraps its words onto more rows rather than
+    // cutting them off: the pane can't be made wider.
     const focus = focusOf(list)
     const sp = speechOf(focus, doing?.t ?? '', list, delegating)
     const busy = sp.pose === 'work' || sp.pose === 'think'
     const pixels = (e as Row).surface === 'terminal' && Number(props.scroll?.bodyRows ?? 24) >= 20 && cols >= 40
+    // The bubble's inner width beside the apprentice (its columns, the mouth's, the border and
+    // padding), or beside the face on one line; each line drawn whole, never squeezed.
+    const room = Math.max(10, pixels ? cols - COLUMNS - 1 - 4 : cols - 4)
+    const lines = (text: string, props: Record<string, unknown>) =>
+      wrapWords(text, room).map(l => <Text {...props} wrap="truncate-end">{l}</Text>)
     const said = [
-      <Text {...(busy ? LINE_STYLE.activity : { color: sp.color, bold: true })} wrap="wrap">
-        {busy && doing ? `${spin} ` : ''}{sp.say}
-      </Text>,
-      sp.more ? <Text dimColor wrap="wrap">{sp.more}</Text> : null,
-      clock && focus?.name === watched.task ? <Text dimColor wrap="wrap">{clock.t}</Text> : null,
+      ...lines(`${busy && doing ? `${spin} ` : ''}${sp.say}`,
+        busy ? LINE_STYLE.activity : { color: sp.color, bold: true }),
+      ...(sp.more ? lines(sp.more, { dimColor: true }) : []),
+      ...(clock && focus?.name === watched.task ? lines(clock.t, { dimColor: true }) : []),
     ]
     let stage
     if (pixels) {
@@ -822,7 +847,7 @@ export const register: Register = (on, options) => {
               <Text color={sp.color}>{i === MOUTH ? '─' : ' '}</Text>
             ))}
           </Box>
-          <Box flexDirection="column" flexGrow={1} flexShrink={1} minWidth={0} marginTop={MOUTH - 1} borderStyle="round"
+          <Box flexDirection="column" flexGrow={1} flexShrink={0} marginTop={MOUTH - 1} borderStyle="round"
             borderColor={sp.color} paddingX={1}>
             {said}
           </Box>

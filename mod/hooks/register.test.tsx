@@ -1,4 +1,5 @@
 import { expect, mock, test } from 'claude-code/testing'
+import { wrapWords } from './register.js'
 
 const PANE = {
   plugin: 'workbench',
@@ -476,4 +477,13 @@ test('/delegate alone turns delegate mode on for the session: the pane opens, an
   expect(panes()).toEqual(['open workbench', 'close workbench'])
   expect(status()).toBe('status ')
   expect((await $.prompt.context({ blocks: [] })).blocks.map((b: any) => b.name)).not.toContain('delegate-mode')
+})
+
+test('the bubble wraps its words into lines that fit, never cutting a line short', () => {
+  const said = 'read /home/me/.local/state/workbench/tasks/ember-5a/worktree/src/tilemap.c and then the tests'
+  const lines = wrapWords(said, 30)
+  expect(lines.every(l => l.length <= 30)).toBe(true)
+  expect(lines.join(' ').replace(/\s+/g, '')).toBe(said.replace(/\s+/g, ''))  // nothing lost
+  expect(wrapWords('All caught up.', 30)).toEqual(['All caught up.'])
+  expect(wrapWords('', 30)).toEqual([''])
 })
