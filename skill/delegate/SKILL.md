@@ -373,13 +373,16 @@ every check-in costs your tokens.
 Numbered, concrete changes in a file → `wb feedback <name> --message <file>` (or `--text "…"`). Small models need
 explicit instructions ("in parse(), return 0 for an empty string"), not critique. Send back
 everything that falls short in one round, small things included. A nit you let through is a
-standard you just lowered. **Max 3 review rounds.** Still wrong after that: make the small remaining fix yourself in the task's worktree
+standard you just lowered. Confirm or correct each assumption the summary lists, in the same
+message: an assumption left unanswered comes back as a question, and the agent waits for it.
+**Max 3 review rounds.** Still wrong after that: make the small remaining fix yourself in the task's worktree
 (`~/.local/state/workbench/tasks/<name>/worktree`) and accept, or `wb discard <name> --reason …`.
 If a "trivial" task fails twice, it wasn't trivial: discard and restart it with `--size significant`.
 
 ## Context, on both sides
 **The agent's.** Rounds of a task continue one OpenCode session, so the agent keeps what it read.
-When that session passes 60% of the model's window, the runner hands the task to a fresh session
+When that session passes its handover point (60% of the window until `wb tune` learns better
+for that model), the runner hands the task to a fresh session
 at once, mid-round if need be: the task, the work so far (the diff), the agent's last words and
 the new instructions. OpenCode's own compaction (the model summarising itself, which can lose the
 task) is only a backstop past that. Reports show `agent context: …` so you see it coming. A
