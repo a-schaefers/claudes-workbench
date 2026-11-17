@@ -149,6 +149,9 @@ Read just enough of the repo to scope it, then write the spec to a file in the s
 - every number checked against every rule: work each example through the limits the spec sets
   (a clamp, a cap, float rounding) before sending it. An example that breaks a rule sends the
   agent chasing a bug that isn't there, round after round.
+- every fixed size checked against the algorithm the spec asks for: a buffer sized for the items
+  can be too small for the operations. A heap that skips stale entries holds one entry per push,
+  not one per item. Give the bound and why it holds.
 `wb` appends the working protocol itself (no commits, run the tests, stay in scope, ask_reviewer
 budget, the summary format), so don't repeat it. The agent also starts with what you would have:
 the repo's CLAUDE.md / AGENTS.md / CLAUDE.local.md / `.claude/rules`, a map of nested CLAUDE.md
