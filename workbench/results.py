@@ -6,7 +6,7 @@ from . import gitops, skills, store
 
 def step(task: store.Task, landed: bool) -> dict:
     """The step closing now (committed by wb next or accept, or dropped): its size and how it
-    went. A session compacted, an agent stuck, Claude taking over, or review rounds the agent
+    went. A session compacted or filled by reading alone, an agent stuck, Claude taking over, or review rounds the agent
     caused (`reviews` less the `spec_rounds` Claude marked as the spec's) say it was too much; a
     handover to a fresh session is the runner's normal way through a big step, counted, not held
     against it. The router learns each model's slice from these (router.slice)."""
@@ -29,6 +29,7 @@ def step(task: store.Task, landed: bool) -> dict:
     gaps = {g.get("round") for g in st.get("spec_gaps") or [] if (g.get("round") or 0) >= since}
     return {**size, "window": st.get("window"), "landed": landed, "compacted": compacted,
             "handovers": sum(e.get("kind") == "fresh" and bool(e.get("overflow")) for e in evs),
+            "read_full": any(e.get("kind") == "reading_full" for e in evs),  # before any change
             "reviews": reviews, "spec_rounds": min(len(gaps), reviews),
             "stuck": stuck, "took_over": any(e.get("kind") == "takeover" for e in evs)}
 

@@ -17,8 +17,8 @@ is only ever routed trivial tasks, whatever it scores elsewhere (`wb model sizes
 How much one task should hold on a model (its slice) is learned the same way. The guess scales
 with the context window the model is served, from what was measured on a 32K one; each closed
 step then says how a slice that size went (results.step): well when it landed with at most one
-review round the agent caused, badly when a session compacted, the agent got stuck, or it took
-BAD_REVIEWS rounds. Handing over to a fresh session isn't held against a step: that is how the
+review round the agent caused, badly when a session compacted or filled up with reading before
+any change, the agent got stuck, or it took BAD_REVIEWS rounds. Handing over to a fresh session isn't held against a step: that is how the
 runner gets through one. The biggest that went well sets a floor, the smallest that went badly a
 ceiling, so a big window on a strong machine earns big tasks.
 
@@ -204,7 +204,8 @@ def slice(m: models.Model) -> Slice:
 def _went(s: dict) -> str | None:
     """"well", "badly", or None (dropped or taken over, nothing to say about its size). A step
     recorded before handovers were normal has `overflow` set by them alone: it isn't read."""
-    if s.get("compacted") or s.get("stuck") or tuning.agent_reviews(s) >= BAD_REVIEWS:
+    if s.get("compacted") or s.get("read_full") or s.get("stuck") \
+            or tuning.agent_reviews(s) >= BAD_REVIEWS:
         return "badly"
     return "well" if s["landed"] and not s.get("took_over") else None
 

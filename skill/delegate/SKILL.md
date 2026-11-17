@@ -166,6 +166,11 @@ miss:
    and "add it to the Makefile" for a Makefile that finds files by itself.
 6. **Only the task.** Nothing about later steps, in the spec or in CLAUDE.md. An agent takes
    any "next" as its job.
+7. **The reading fits.** Name only the files the agent must read, headers before sources, and
+   put a short fact it needs (a signature, a constant) in the spec instead of a file to read.
+   Spec plus named files (`wc -c`, ~4 characters a token) well under half the window, since the
+   agent reads more than you name. Seen: a step whose reading filled 60% of a 32K window
+   before the first edit, twenty sessions in a row.
 After review, when a round was the spec's fault, say so: `--spec-gap "what it missed"` on
 `wb feedback`, `next`, `accept` or `discard`. `wb start` shows your record from those,
 and a gap that recurs belongs in this list.

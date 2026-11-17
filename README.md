@@ -418,7 +418,7 @@ more round.
 first guess scales with the window it is served: two or three files and about 150 new lines on
 32K (what was measured), proportionally more on a bigger window, up to four times that. Each step
 that closes (`wb next`, `accept`, `discard`) records its files and added lines, and how it went:
-badly when a session was compacted, the agent got stuck, or it needed two review rounds the agent
+badly when a session was compacted or filled up reading before any change, the agent got stuck, or it needed two review rounds the agent
 caused (a round marked `--spec-gap` is Claude's, not the agent's); well when it landed short of
 that. A handover to a fresh session is counted but not held against the step: it is how the
 runner gets through a big one, and its cost shows in the task's time. Check-ins and reports also name changed files the spec never mentions (`NOTE: the spec

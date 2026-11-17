@@ -35,7 +35,7 @@ class Slice(Base):
         self.assertIn("2 of 2 measured steps went well", s.line())
 
     def test_steps_that_went_badly_lower_it(self):
-        for bad in ({"compacted": True}, {"stuck": True}, {"reviews": 2}):
+        for bad in ({"compacted": True}, {"read_full": True}, {"stuck": True}, {"reviews": 2}):
             with self.subTest(bad):
                 (store.home() / "results.jsonl").unlink(missing_ok=True)
                 self.steps({"files": 2, "lines": 120, **bad})
