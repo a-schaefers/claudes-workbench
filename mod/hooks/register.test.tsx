@@ -160,8 +160,12 @@ test('a session wakes for its own project\'s tasks only: another project\'s are 
   task(files, 'ours', 'review', { repo: '/home/u/a', cwd: '/home/u/a' })
   task(files, 'sub', 'review', { repo: '/home/u/a/lib', cwd: '/home/u/a/lib' })   // inside this session's dir
   task(files, 'theirs', 'review', { repo: '/home/u/b', cwd: '/home/u/b' })
-  for (const name of ['ours', 'sub', 'theirs']) notice(files, { ts: ts0, task: name, kind: 'review', text: `REPORT-${name}` })
-  fakeTasks(on, files, ['ours', 'sub', 'theirs'])
+  // the 0.90 review: started from ~ (or a parent) for another repo, it was every session's below
+  task(files, 'fromhome', 'review', { repo: '/home/u/b', cwd: '/home/u' })
+  task(files, 'sibling', 'review', { repo: '/home/u/ab', cwd: '/home/u/ab' })     // not inside /home/u/a
+  const names = ['ours', 'sub', 'theirs', 'fromhome', 'sibling']
+  for (const name of names) notice(files, { ts: ts0, task: name, kind: 'review', text: `REPORT-${name}` })
+  fakeTasks(on, files, names)
   const runs: string[][] = []
   on('process.run', (_: any, e: any) => { runs.push(e.argv); return { value: { exitCode: 0, stdout: 'ours  review', stderr: '' } } })
   on('ui.toast', () => ({ value: undefined }))
@@ -173,12 +177,50 @@ test('a session wakes for its own project\'s tasks only: another project\'s are 
   expect(woken.filter(t => t.includes('REPORT-ours'))).toHaveLength(1)
   expect(woken.filter(t => t.includes('REPORT-sub'))).toHaveLength(1)
   expect(woken.join('\n')).not.toContain('theirs')
+  expect(woken.join('\n')).not.toContain('fromhome')
+  expect(woken.join('\n')).not.toContain('sibling')
   expect(files['/wb/tasks/theirs/acked']).toBe(undefined)        // its own session (or wb wait) still gets it
+  expect(files['/wb/tasks/fromhome/acked']).toBe(undefined)
   await clock.advance(120_000)
   expect(woken.join('\n')).not.toContain('theirs')               // no rewake for it either
   // the open-tasks block asks wb for this session's tasks
   await $.prompt.context({ blocks: [] })
   expect(runs).toContainEqual(['wb', 'status', '--repo', '/home/u/a'])
+})
+
+test('a task wb start ran in this session is its own wherever it ran, also after a /clear', async ($, on) => {
+  // the 0.90 review: `cd /tmp/scratch && wb start` made a task no session woke for, and a session
+  // in ~ woke for every task
+  const clock = mock.clock(on, { now: 1_800_000_000_000 })
+  const files: Record<string, string> = {}
+  task(files, 'scratch', 'review', { repo: '/tmp/scratch', cwd: '/tmp/scratch', session: 'sess-1' })
+  task(files, 'other', 'review', { repo: '/home/u/a', cwd: '/home/u', session: 'sess-x' })
+  task(files, 'byhand', 'review', { repo: '/home/u/a', cwd: '/home/u/a' })   // no session: by directory
+  const names = ['scratch', 'other', 'byhand']
+  for (const name of names) notice(files, { ts: ts0, task: name, kind: 'review', text: `REPORT-${name}` })
+  fakeTasks(on, files, names)
+  let id = 'sess-1'
+  on('session.id', () => ({ value: id }))
+  const runs: string[][] = []
+  on('process.run', (_: any, e: any) => { runs.push(e.argv); return { value: { exitCode: 0, stdout: 'stopped: scratch', stderr: '' } } })
+  on('ui.toast', () => ({ value: undefined }))
+  const woken: string[] = []
+  on('prompt.submit', (_: any, e: any) => { woken.push(e.text); return { text: e.text } })
+  await $.session.start({ cwd: '/home/u', surface: 'terminal', isInteractive: true })   // a session in ~
+  await clock.advance(3000)
+  expect(woken.filter(t => t.includes('REPORT-scratch'))).toHaveLength(1)
+  expect(woken.join('\n')).not.toContain('REPORT-other')       // another session's, under ~ too
+  expect(woken.join('\n')).not.toContain('REPORT-byhand')      // ~ claims nothing by directory
+  expect(files['/wb/tasks/other/acked']).toBe(undefined)
+  expect(files['/wb/tasks/byhand/acked']).toBe(undefined)
+  // /clear: the process goes on under another id, and the first one's tasks are still its own
+  id = 'sess-2'
+  task(files, 'scratch', 'review', { repo: '/tmp/scratch', cwd: '/tmp/scratch', session: 'sess-1' }, ts0 + 60)
+  notice(files, { ts: ts0 + 60, task: 'scratch', kind: 'review', text: 'REPORT-again' })
+  await clock.advance(31_000)                                  // the safety poll reads it
+  expect(woken.filter(t => t.includes('REPORT-again'))).toHaveLength(1)
+  await $.command.run({ command: 'delegate-quit', args: '' })
+  expect(runs.at(-1)).toEqual(['wb', 'stop', '--all', '--repo', '/home/u', '--session', 'sess-1', '--session', 'sess-2'])
 })
 
 test('a scripted session (claude -p, the SDK) takes no wake and runs no wb, until a person attaches', async ($, on) => {

@@ -86,6 +86,8 @@ class Base(unittest.TestCase):
         self.tmp = tempfile.TemporaryDirectory()
         tmp = Path(self.tmp.name)
         self.env_before = dict(os.environ)
+        # the suite may run in Claude Code's Bash: no task is a session's unless a test says so
+        os.environ.pop("CLAUDE_CODE_SESSION_ID", None)
         os.environ.update(WB_HOME=str(tmp / "state"), WB_OPENCODE_BIN=FAKE, WB_FAKE_MODELS="1",
                           WB_OPENCODE_CONFIG=str(tmp / "opencode.json"),
                           WB_MODELS=str(tmp / "wb-models.json"), WB_SKILLS=str(tmp / "skills"),
@@ -1323,6 +1325,45 @@ class Steering(Base):
         with self.assertRaises(SystemExit):
             run_wb("stop", "t-mine", "--repo", here)       # a scope goes with --all
         self.assertIn("stopped: t-theirs", run_wb("stop", "--all"))  # without one: every task
+
+    def test_a_sessions_tasks_are_those_it_started_wherever_they_ran(self):
+        # the 0.90 review: by directory alone, a task started from ~ (or any parent) for one repo
+        # was every session's below it, and /delegate-quit-and-hand-back-claude in project b's
+        # session took over project a's; one started after a `cd` elsewhere was no session's
+        os.environ["CLAUDE_CODE_SESSION_ID"] = "sess-1"
+        self.start("t-mine", "slow")
+        self.wait_session("t-mine")
+        self.assertEqual(store.Task("t-mine").spec["session"], "sess-1")
+        parent = Path(self.tmp.name)
+
+        def task(name, **spec):  # as wb start writes it, never run
+            t = store.Task(name)
+            t.dir.mkdir(parents=True)
+            store.write_json(t.dir / "task.json", {"name": name, "created_at": store.now(), **spec})
+            t.set_status(phase="running", round=1)
+        task("t-theirs", repo=str(self.repo), cwd=str(self.repo), session="sess-x")
+        task("t-parent", repo=str(parent / "a"), cwd=str(parent))      # by hand, from the parent
+        ids = ("--session", "sess-0", "--session", "sess-1")           # /clear: two ids, one process
+
+        def elsewhere(*argv):
+            out = run_wb("status", *argv)
+            return "".join(l for l in out.splitlines() if l.startswith("open elsewhere"))
+        b = str(parent / "b")
+        self.assertEqual(elsewhere("--repo", b, *ids), "open elsewhere (other projects' sessions): "
+                         f"t-parent ({parent / 'a'}), t-theirs ({self.repo})")  # t-mine is its own
+        self.assertNotIn("t-theirs", elsewhere("--repo", str(self.repo)))  # by hand: directories
+        self.assertIn("t-theirs", elsewhere("--repo", str(self.repo), *ids))  # an id outranks them
+        self.assertNotIn("t-parent", elsewhere("--repo", str(parent / "a" / "src")))
+        self.assertNotIn("t-parent", elsewhere("--repo", str(parent)))
+        os.environ["HOME"] = str(parent)                               # a session in ~ claims
+        self.assertIn("t-parent", elsewhere("--repo", str(parent)))   # none by directory
+        out = run_wb("takeover", "--all", "--repo", b, *ids)
+        self.assertIn("took over t-mine", out)
+        self.assertIn("left alone (other projects' sessions): ", out)
+        self.assertEqual([store.Task(n).status["phase"] for n in ("t-theirs", "t-parent")],
+                         ["running", "running"])
+        with self.assertRaises(SystemExit):
+            run_wb("stop", "t-mine", "--session", "sess-1")           # a scope goes with --all
 
     def test_takeover_stops_the_agent_and_hands_over_the_worktree(self):
         self.start("t-take", "slow", "--test", TEST_CMD)

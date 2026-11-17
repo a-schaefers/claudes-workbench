@@ -361,8 +361,8 @@ the session is woken by a `[workbench]` prompt when the task needs you (review, 
 failed) — end your turn and wait for it. Without the mod, run `wb wait <name>` with Bash
 `run_in_background: true` and act on its notification. If the context says wakes are off (the
 plugin's wake setting), none will come: tell the user it runs, and wait only if they ask.
-A session is woken only for its own tasks (started from its directory or a repo in it):
-start a task from the session that will review it. Failing tests go back to the agent on their
+A session is woken only for its own tasks (those `wb start` ran in it, wherever; one started by
+hand, from its directory or a repo in it): start a task from the session that will review it. Failing tests go back to the agent on their
 own for `--auto-fix` rounds before you are woken; `wb log <name>` shows what it is doing.
 A model that reads prompts slowly, or one the runner must load first, can spend minutes before
 its first reply. That is normal, not stuck.
@@ -418,11 +418,11 @@ Notes are instructions, like feedback: concrete and short.
 **The user's two commands.** Only these, never words in a message, stop the delegation and end
 delegate mode; the mod runs them, closes the pane and tells you what it did:
 - **`/delegate-quit-and-hand-back-claude`**: take over. This session's agents are already stopped
-  (`wb takeover --all --repo <here>`). Leave delegate mode and finish the work yourself without pausing: review
+  (`wb takeover --all --repo <here> --session "$CLAUDE_CODE_SESSION_ID"`). Leave delegate mode and finish the work yourself without pausing: review
   what each agent left, complete it in its worktree to your standard, run the acceptance command,
   `wb accept`, then carry on with the rest of the request directly, without delegating.
 - **`/delegate-quit`**: stop. This session's delegated agents are already stopped (`wb stop
-  --all --repo <here>`). Work directly from now on. Don't finish, restart or clean up anything
+  --all --repo <here> --session "$CLAUDE_CODE_SESSION_ID"`). Work directly from now on. Don't finish, restart or clean up anything
   unless asked; worktrees are kept.
 Tasks listed as left alone belong to another project's session: leave them unless asked.
 Without the mod, the user may ask for the same in words; run those commands then.

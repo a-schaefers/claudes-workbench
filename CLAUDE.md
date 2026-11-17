@@ -211,7 +211,8 @@ Environment: `WB_HOME`, `WB_MODELS`, `WB_SKILLS`, `WB_IMAGES`, `WB_CHAT_TOKEN`, 
 `WB_COMMANDS` (the paths above); `WB_OPENCODE_CONFIG` (OpenCode's config); these may be relative
 or start with `~` (`store.absolute_env` makes them absolute against wb's cwd); `WB_COMPACT_AT` (the
 mod's early compaction, a percentage, 0 off); `WB_BIN` (the `wb` the mod runs); `WB_TASK` (set
-for the ask server and the agent). Tests only: `WB_OPENCODE_BIN` (a command line, split with
+for the ask server and the agent); `CLAUDE_CODE_SESSION_ID` (Claude Code's: `wb start` records it,
+which session's task it is). Tests only: `WB_OPENCODE_BIN` (a command line, split with
 `shlex`: the fake), `WB_FAKE_MODELS` (no model servers), `WB_FAKE_GPU_GB` (the fake GPU's size;
 unset: unknown, so no sharing).
 
@@ -233,7 +234,7 @@ unset: unknown, so no sharing).
   Test names read as sentences.
 - The mod keeps no state of its own that matters: it reads the task files. `$` may only be passed
   to functions declared at the top level of `register.tsx`, so `claude plugin validate` can follow
-  it. `$.state` atoms are tagged (`tasks-1`, `live-1`, `chat-2`): change the tag when the type
+  it. `$.state` atoms are tagged (`tasks-3`, `live-1`, `chat-2`, `sessions-1`): change the tag when the type
   changes. A slash command may not start a turn itself: it pushes onto `mem.queued`.
 - Skills for the agents: Claude's library (`wb skill`), handed per task, or a project's own
   `.claude/skills`, committed with it. The user's personal `~/.claude/skills` are denied to agents.

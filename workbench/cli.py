@@ -359,6 +359,8 @@ def cmd_start(a):
     limits = router.budgets(m)  # from the model's measured speed on this machine, else defaults
     store.write_json(task.dir / "task.json", {
         "name": a.name, "repo": str(repo), "cwd": os.getcwd(), "base": base, "base_ref": a.base,
+        # the Claude Code session whose Bash ran this (_scope, the mod's `mine`); none by hand
+        **({"session": sid} if (sid := os.environ.get("CLAUDE_CODE_SESSION_ID")) else {}),
         "base_branch": gitops.start_branch(repo, a.base),  # where wb accept --merge lands
         "branch": gitops.branch_name(a.name), "model": m.id, "model_label": m.label,
         "opencode_model": m.id, "route": why, "size": a.size, "stack": stack,
@@ -700,19 +702,33 @@ def cmd_watch(a):
         sys.stdout = open(os.devnull, "w")
 
 
-def _scope(tasks, where):
-    """The tasks of a Claude Code session started in `where` (`--repo`, which the mod passes):
-    a task whose start directory (task.json `cwd`) or repo is `where`, inside it, or holds it.
-    A task with neither is everyone's. The others belong to another project's session, which
-    its mod wakes and its quit commands stop (the 2026-11-16 audit: two projects at once, one
-    session's /delegate-quit stopped the other's agents). Returns (mine, others)."""
-    if not where:
+def _scope(tasks, where, sessions=None):
+    """The tasks of one Claude Code session, as the mod names it: `sessions` (`--session`, every
+    id its process has had: /clear starts another) and `where` (`--repo`, its directory). A task
+    `wb start` recorded a session for (task.json `session`) is that session's, wherever it ran.
+    One without (started by hand, or before 0.90), or with no `sessions` given (by hand), goes by
+    directory: its `repo` is `where`, inside it or holds it, or its `cwd` (where wb start ran) is
+    `where` or inside it. A session in the home directory or / claims none by directory. A task
+    with neither key is everyone's. The others belong to another project's session, which its
+    mod wakes and its quit commands stop (the 2026-11-16 audit: two projects at once, one
+    session's /delegate-quit stopped the other's agents; the 0.90 review: a task started from ~
+    belonged to every session under it, and one started after a `cd` elsewhere to none).
+    Returns (mine, others)."""
+    if not where and not sessions:
         return list(tasks), []
-    here = Path(where).resolve()
+    here = Path(where).resolve() if where else None
+    broad = here in (Path.home().resolve(), Path("/"))
     mine, others = [], []
     for t in tasks:
-        dirs = [Path(p) for p in (t.spec.get("cwd"), t.spec.get("repo")) if p]
-        ok = not dirs or any(d.is_relative_to(here) or here.is_relative_to(d) for d in dirs)
+        sid, cwd, repo = (t.spec.get(k) for k in ("session", "cwd", "repo"))
+        if sessions and sid:
+            ok = sid in sessions
+        elif here is None or (not cwd and not repo):
+            ok = True
+        else:  # Path.is_relative_to compares whole components: /x/ab isn't inside /x/a
+            ok = not broad and bool(
+                cwd and Path(cwd).is_relative_to(here)
+                or repo and (Path(repo).is_relative_to(here) or here.is_relative_to(repo)))
         (mine if ok else others).append(t)
     return mine, others
 
@@ -727,7 +743,7 @@ def _others_line(others, what):
 def cmd_status(a):
     tasks = [need(a.name)] if a.name else [t for t in store.all_tasks()
                                            if a.all or t.status.get("phase") not in store.CLOSED]
-    tasks, others = _scope(tasks, None if a.name else a.repo)
+    tasks, others = (tasks, []) if a.name else _scope(tasks, a.repo, a.session)
     if not tasks:
         print("no open tasks" + ("" if a.all else " (wb status --all shows closed ones)"))
         _say(_others_line(others, "open elsewhere"))
@@ -856,13 +872,13 @@ def stop_everything(tasks=None) -> list[str]:
 @one_at_a_time
 def cmd_stop(a):
     if a.all:
-        mine, others = _scope(_open_tasks(), a.repo)
+        mine, others = _scope(_open_tasks(), a.repo, a.session)
         stopped = stop_everything(mine)
         print("stopped: " + ("; ".join(stopped) if stopped else "nothing was running"))
         _say(_others_line(others, "left running"))
         return
-    if a.repo:
-        die("--repo goes with --all")
+    if a.repo or a.session:
+        die("--repo and --session go with --all")
     if not a.name:
         die("name a task, or --all")
     task = need(a.name)
@@ -1027,15 +1043,15 @@ def cmd_takeover(a):
     """Stop the agent and hand the worktree to Claude, to finish by hand or hand back."""
     if a.all:  # "just get it done claude"
         tasks, others = _scope([t for t in store.all_tasks()
-                                if t.status.get("phase") not in store.CLOSED], a.repo)
+                                if t.status.get("phase") not in store.CLOSED], a.repo, a.session)
         if not tasks:
             print("no open delegated tasks to take over")
         for t in tasks:
-            cmd_takeover(argparse.Namespace(name=t.name, all=False, repo=None))
+            cmd_takeover(argparse.Namespace(name=t.name, all=False, repo=None, session=None))
         _say(_others_line(others, "left alone"))
         return
-    if getattr(a, "repo", None):
-        die("--repo goes with --all")
+    if getattr(a, "repo", None) or getattr(a, "session", None):
+        die("--repo and --session go with --all")
     if not a.name:
         die("name a task, or --all")
     task = need(a.name)
@@ -2348,6 +2364,8 @@ def main(argv=None):
     s = sub.add_parser("status", help="open tasks at a glance")
     s.add_argument("name", nargs="?"); s.add_argument("--all", action="store_true")
     s.add_argument("--repo", metavar="DIR", help="only the tasks of a session started in DIR")
+    s.add_argument("--session", action="append", metavar="ID",
+                   help="only the tasks of Claude Code session ID (repeatable; the mod passes its ids)")
     s.set_defaults(f=cmd_status)
     s = sub.add_parser("log", help="the agent's events")
     s.add_argument("name"); s.add_argument("-n", type=int, default=0)
@@ -2384,11 +2402,15 @@ def main(argv=None):
     s.add_argument("name", nargs="?")
     s.add_argument("--all", action="store_true", help="every open delegated task")
     s.add_argument("--repo", metavar="DIR", help="with --all: only those of a session started in DIR")
+    s.add_argument("--session", action="append", metavar="ID",
+                   help="with --all: only those of Claude Code session ID (repeatable)")
     s.set_defaults(f=cmd_takeover)
     s = sub.add_parser("stop", help="stop a running task (wb resume or wb feedback continues it)")
     s.add_argument("name", nargs="?")
     s.add_argument("--all", action="store_true", help="every running agent")
     s.add_argument("--repo", metavar="DIR", help="with --all: only those of a session started in DIR")
+    s.add_argument("--session", action="append", metavar="ID",
+                   help="with --all: only those of Claude Code session ID (repeatable)")
     s.set_defaults(f=cmd_stop)
     s = sub.add_parser("resume", help="continue a stopped task in a fresh session (not a review round)")
     s.add_argument("name"); s.set_defaults(f=cmd_resume)

@@ -62,7 +62,7 @@ The runner, the agent's `ask_reviewer` server and the chat server never call eac
 mod; they read and write the same files, and anything that waits sleeps in the kernel (inotify on
 directories, pidfd on processes, `workbench/watch.py`) until one of them changes. The mod's only
 calls are `wb` subcommands (`wb events`, `wb watch --json`, `wb status`, `wb chat ack|url|log`,
-`wb stop|takeover --all --repo`, `wb update` and its weekly `wb update --check --if-due`), plus
+`wb stop|takeover --all --repo … --session …`, `wb update` and its weekly `wb update --check --if-due`), plus
 `kill -0` to see whether the chat listener's pid lives and `tail -c` to read a long file's end. A
 crashed piece loses nothing, and every piece can be inspected with `cat`.
 
@@ -973,7 +973,7 @@ compacts early once Claude is halfway to the engine's own compaction (`WB_COMPAC
 percentage; 0 turns it off), so a long session sheds detail at a clean point instead of
 mid-review. A session that never delegated is never compacted for a task (the 2026-11-16 audit:
 a task closing compacted every session). After a compaction or `/clear`, a context block lists
-this session's open tasks from `wb status --repo <its directory>`.
+this session's open tasks from `wb status --repo <its directory> --session <id>…`.
 
 **What Claude learns about the user** (`wb notes`). Claude Code keeps its own memory per project,
 so what Claude learned about how the user likes delegation run in one repo would be gone in the
@@ -1043,9 +1043,17 @@ command raise. Each task's `acked` file holds the time up to which Claude has ha
   end its turn waiting for one.
 
 The mod runs in every Claude Code session with the plugin and the state directory is global, so
-a session wakes, rewakes and compacts only for its own tasks: those whose task.json `cwd` (where
-`wb start` ran) or `repo` is the session's directory, inside it, or holds it (a task with
-neither, from before `cwd` was kept, is everyone's). Another project's notice is toasted at most
+a session wakes, rewakes and compacts only for its own tasks (`mine`). `wb start` records the
+Claude Code session whose Bash ran it (`CLAUDE_CODE_SESSION_ID`, task.json `session`), and the
+mod keeps every id its process has had (`$.session.id()` at the start and at each poll, since
+/clear and a resume go on under another; the `sessions` atom): a task with a `session` is the
+session's whose ids hold it, wherever it ran. One without (started by hand, or before 0.90) goes
+by directory: its `repo` is the session's directory, inside it or holds it, or its `cwd` (where
+`wb start` ran) is the session's directory or inside it, compared by whole path components; a
+session in the home directory or `/` claims none by directory; a task with neither key is
+everyone's. (The 0.90 review: by directory alone, a task started from `~` for one repo was
+every session's under `~`, and one started after a `cd` elsewhere was no session's, so nothing
+woke Claude for it.) Another project's notice is toasted at most
 and left unacknowledged for its own session or `wb wait`. Among sessions a task belongs to, the
 first to deliver a notice wins. A session with no person at it (`claude -p`, the SDK) does
 nothing until a surface attaches.
@@ -1940,18 +1948,20 @@ A change to `chat.py` or `chat_static/` also needs the browser test (*The tests*
 
 Only the user's two slash commands stop the delegation, never words in a message:
 
-- **`/delegate-quit`** runs `wb stop --all --repo <the session's directory>`: this session's
+- **`/delegate-quit`** runs `wb stop --all --repo <the session's directory> --session <id>…`
+  (each id the session's process has had): this session's
   running agents stop, every task keeps its worktree for later, and Claude is told not to finish,
   restart or clean up anything unless asked.
-- **`/delegate-quit-and-hand-back-claude`** runs `wb takeover --all --repo <the session's
-  directory>` and starts a turn for Claude
+- **`/delegate-quit-and-hand-back-claude`** runs `wb takeover --all` with the same scope and
+  starts a turn for Claude
   to leave delegate mode, finish each task taken over itself to its own standard (`wb diff`, the acceptance
   command, `wb accept`), and carry on with the rest of the user's request without delegating.
 
-`--repo` keeps them to this session's tasks (the mod's rule, *Waking Claude, exactly once*):
+`--session` and `--repo` keep them to this session's tasks (the mod's `mine`, *Waking Claude,
+exactly once*):
 another project's session keeps its agents running, and they are listed as left alone (the
 2026-11-16 audit: one session's quit stopped and handed back the other's). If `wb` fails, the
-command says so and no hand-back turn starts. Typed in a terminal without `--repo`, both still
+command says so and no hand-back turn starts. Typed in a terminal without a scope, both still
 take every task.
 
 Both end delegate mode: Claude works directly again and the pane closes (`/delegate-pane` brings it
@@ -1978,21 +1988,23 @@ const bound to one; imports from the module's own files also pass). The helpers 
 "gating hook without .catch" notes) is the check. Env reads must be string literals: `HOME`,
 `WB_HOME`, `WB_BIN`, `CLAUDE_CONFIG_DIR`, `WB_COMPACT_AT`.
 
-**State.** Three `$.state` atoms survive a module reload within a session; each has a shape tag,
+**State.** Four `$.state` atoms survive a module reload within a session; each has a shape tag,
 and an atom read under an old tag is absent, so change the tag when its type changes:
-`tasks` (`tasks-2`, WbTask[]: name, phase, round, model, label, tests, last, createdAt,
-updatedAt, tokens, recent, repo, cwd), `live` (`live-1`, {task, lines: {s, t}[]}: the transcript lines),
+`tasks` (`tasks-3`, WbTask[]: name, phase, round, model, label, tests, last, createdAt,
+updatedAt, tokens, recent, repo, cwd, session), `live` (`live-1`, {task, lines: {s, t}[]}: the transcript lines),
 `chat` (`chat-2`, {key, delegating, webAt, url}: delegate mode lives here, plus the session's
-listener key). Everything else is `mem`, a plain object reset by a reload (busy, queued turns,
-this session's open set, the session's resolved `cwd`, `person`, follow, sawTurn, scoutAsked,
+listener key), `sessions` (`sessions-1`, string[]: every Claude Code session id this process
+has had, `mem.ids` while loaded). Everything else is `mem`, a plain object reset by a reload (busy, queued turns,
+this session's open set, the session's resolved `cwd` and `home`, `person`, follow, sawTurn, scoutAsked,
 toasts sent, dropped wakes, the closed tasks no longer read, the events pid, …). The task facts
 themselves are re-read from `$WB_HOME`; the mod writes `tasks/<n>/acked`, scout.json's
 `offered_at` and `chat/listener.json`.
 
 **session.start.** Sets `mem.root` (`WB_HOME` or `~/.local/state/workbench`), `mem.wb` (`WB_BIN`
 or `wb`), `mem.skill` (`$CLAUDE_CONFIG_DIR` or `~/.claude`, then `skills/delegate/SKILL.md`),
-the chat key (`<start ms>-<6 base36>`, kept across reloads), `mem.cwd` (the session's directory,
-resolved: which tasks are this session's, `mine`), registers its `delegate-*` commands (*Commands*
+the chat key (`<start ms>-<6 base36>`, kept across reloads), `mem.cwd` and `mem.home` (the
+session's directory and the home directory, resolved: which tasks without a `session` are this
+session's, `mine`), `mem.ids` (the `sessions` atom plus `$.session.id()`), registers its `delegate-*` commands (*Commands*
 below), and, when a person can be at the session (`isInteractive`, or a surface), starts the ears
 and two timers. A `claude -p` run or an SDK session (neither) stays quiet, no poll, no wake, no
 `wb status` context, until `session.attach` (the desktop app attaching) starts them: such a run
@@ -2041,8 +2053,7 @@ row, past the task's `acked`; a row is still true when it's a check-in and the t
 queued/running/testing, a question while the phase is `asking` and (with an id) its
 `ask/<id>.json` has no `<id>.answer`, or the phase equals the kind. A stale one is acked and dropped. A true one is
 toasted once (`workbench: <name> <headline>`); a task that isn't this session's (`mine`: its
-`cwd` or `repo` is, holds or is inside the session's directory; neither key: everyone's) gets
-nothing more; if Claude is busy it waits and leaves the file unseen; else the mod writes `acked
+`session` is one of the process's ids, else by directory as above) gets nothing more; if Claude is busy it waits and leaves the file unseen; else the mod writes `acked
 = row.ts` and submits (`wake`) `[workbench] Task \`<n>\` <headline>.\n\n<row.text>\n\n<NEXT[kind]>`
 (HEADLINE and NEXT are the per-kind texts at the top of register.tsx; NEXT names the commands to
 run: a question's `wb answer <n> --id <id>`, and a PERMISSION request is answered by the `wb
@@ -2077,11 +2088,11 @@ the first message would cost the conversation's prompt cache.
 them all (2026-11-16: `/workbench` became `/delegate-pane`, no alias). `/delegate-pane` opens the pane and says how many tasks are open; a pane the engine
 still holds but doesn't show (a tab behind another, or undrawn) is closed first, so it comes back,
 and a pane that can't be drawn here says why (`opened.reason`). `/delegate-quit`:
-delegate mode off, `wb stop --all --repo <mem.cwd>`, a toast, and hidden context (QUIT_NOTE:
+delegate mode off, `wb stop --all` with `scope()` (`--repo <mem.cwd> --session <id>…`), a toast, and hidden context (QUIT_NOTE:
 don't finish, restart or clean up anything unless asked; tasks left alone are another project's;
 or, when wb failed, that the agents may still run); it starts no turn.
 `/delegate-quit-and-hand-back-claude`:
-mode off, `wb takeover --all --repo <mem.cwd>`, and DONE_NOTE queued as a turn (leave delegate
+mode off, `wb takeover --all` with `scope()`, and DONE_NOTE queued as a turn (leave delegate
 mode; per task taken over `wb
 diff`, finish in its worktree, run the acceptance command, `wb accept` (`--merge` only if asked);
 leave the tasks left alone; carry on without delegating); when wb failed, no turn, and it says
@@ -2099,7 +2110,7 @@ every plan is a handoff plan, the SKILL.md path); `user-notes` while delegating 
 notes; `web-chat` for six hours after a web message, until a prompt is typed in the terminal
 (reply with `wb chat reply`, `wb chat log` shows the thread); `workbench-wake` with the `wake`
 setting off, while delegating or with a task of this session's open (WAKE_OFF_NOTE: no wake will
-come; tell the user, pick it up when asked); `workbench` whenever `wb status --repo <mem.cwd>`
+come; tell the user, pick it up when asked); `workbench` whenever `wb status` with `scope()`
 exits 0 listing open tasks (the status, plus `wb report`/`wb watch`; a failing one toasts once
 instead). None in a session with no person at it.
 
@@ -2249,15 +2260,15 @@ delivered as taken (`_stale_notes`, *Notes*).
 ### Running tasks
 | Command | Flags (defaults) | What it does |
 |---|---|---|
-| `wb start <task> --spec <file\|->` | `--repo` (.), `--size trivial\|significant` (significant), `--model <id or fragment>`, `--test <cmd>`, `--auto-fix N` (2), `--checkin MIN` (10 significant, 0 trivial), `--ask-budget N` (2), `--ask-timeout S` (1200), `--round-timeout S`, `--silence-timeout S`, `--think-timeout S` (0 off; unset or 0 for the other two: the measured budgets), `--test-timeout S` (900), `--no-base-check`, `--base REF` (HEAD), `--skill NAME…`, `--allow PATTERN…`, `--allow-path DIR…`, `--force` (queue a `--model` that can't run now; the hint is offered only when its server is just down), `--queue` (start although the GPU's holders leave no room: wait behind them), `--trial`, `--no-claude-md` | Checks the name (`^[a-z0-9][a-z0-9-]{0,47}$`, never reused), the repo (with the lane on, `_lane_fits` refuses one that is the home directory or lies where credentials live, and a `--test` whose command is a snap), the spec and the skills, and that opencode is on PATH; picks the model (router, or `--model`; none runnable: exit 3, with each model's next step); refuses a repo that is a task's worktree, a `--base` that names no commit (`no commit <base> in <repo>`) and a repo with no git identity; checks `CLAUDE.md` or `.claude/CLAUDE.md` is committed at the base (or CLAUDE.md gitignored: the checkout's copy); refuses when another task (or `wb image`) holds the GPU and the model can't run beside it (exit 4, naming each holder's task, repo and model; `--queue` overrides); makes the worktree and branch `delegate/<task>` (no checkout hook; a failed add leaves nothing); notes submodules it doesn't check out; writes task.json, round 1's prompt (spec + PROTOCOL) and status; spawns the runner and returns at once. Prints the model and why, the slice, Claude's spec record, the handed or suggested skills, notes, `next: wb wait <task>`. With `--test` (and not `--no-base-check`, task.json `no_base_check`) the runner first runs the acceptance command once on the base (*The base check*: at most `BASE_CHECK_SECS` = 120 s, or `--test-timeout` when shorter; `base-tests.txt`, status `base_check`); what it saw comes in the first report, and a check-in at once when it already passes or `--test-timeout` cut it short. |
+| `wb start <task> --spec <file\|->` | `--repo` (.), `--size trivial\|significant` (significant), `--model <id or fragment>`, `--test <cmd>`, `--auto-fix N` (2), `--checkin MIN` (10 significant, 0 trivial), `--ask-budget N` (2), `--ask-timeout S` (1200), `--round-timeout S`, `--silence-timeout S`, `--think-timeout S` (0 off; unset or 0 for the other two: the measured budgets), `--test-timeout S` (900), `--no-base-check`, `--base REF` (HEAD), `--skill NAME…`, `--allow PATTERN…`, `--allow-path DIR…`, `--force` (queue a `--model` that can't run now; the hint is offered only when its server is just down), `--queue` (start although the GPU's holders leave no room: wait behind them), `--trial`, `--no-claude-md` | Checks the name (`^[a-z0-9][a-z0-9-]{0,47}$`, never reused), the repo (with the lane on, `_lane_fits` refuses one that is the home directory or lies where credentials live, and a `--test` whose command is a snap), the spec and the skills, and that opencode is on PATH; picks the model (router, or `--model`; none runnable: exit 3, with each model's next step); refuses a repo that is a task's worktree, a `--base` that names no commit (`no commit <base> in <repo>`) and a repo with no git identity; checks `CLAUDE.md` or `.claude/CLAUDE.md` is committed at the base (or CLAUDE.md gitignored: the checkout's copy); refuses when another task (or `wb image`) holds the GPU and the model can't run beside it (exit 4, naming each holder's task, repo and model; `--queue` overrides); makes the worktree and branch `delegate/<task>` (no checkout hook; a failed add leaves nothing); notes submodules it doesn't check out; writes task.json (with `session` when `CLAUDE_CODE_SESSION_ID` is set: Claude Code's Bash exports it), round 1's prompt (spec + PROTOCOL) and status; spawns the runner and returns at once. Prints the model and why, the slice, Claude's spec record, the handed or suggested skills, notes, `next: wb wait <task>`. With `--test` (and not `--no-base-check`, task.json `no_base_check`) the runner first runs the acceptance command once on the base (*The base check*: at most `BASE_CHECK_SECS` = 120 s, or `--test-timeout` when shorter; `base-tests.txt`, status `base_check`); what it saw comes in the first report, and a check-in at once when it already passes or `--test-timeout` cut it short. |
 | `wb feedback <task> --text "…" \| --message <file\|->` | `--fresh` \| `--keep-context`, `--spec-gap "…"…` | Reaps a dead runner first (`reap`). Phase review/stuck/failed and no live runner; empty text is refused before anything is written. Writes the next round's prompt (FEEDBACK_HEAD + "Make exactly these changes, then re-run the acceptance command and finish with a short summary:" (the re-run only when there is one) + the text), reviews+1, spawns the runner. Warns past three review rounds; prints each undelivered note it dropped ("not delivered, dropped …"). A note names the GPU's holders when it will wait for them. Gathers lessons. |
 | `wb next <task> --spec <file> -m "…"` | `--test` (replaces the acceptance command), `--skill` (replaces the set), `--fresh`, `--allow PATTERN…` (adds to the task's grants), `--spec-gap` | Phase review. Reads the spec (a file or `-`; empty or unreadable: nothing changes), records the step's size and fit, commits the work (`<m>` + `Workbench-Task: <task> (step N)` + `OpenCode-Session:`), writes the next step's prompt ("Step N of this task is done and committed (<sha>). The next step:" + spec + PROTOCOL), records the spec gaps, resets reviews, spawns. Says whether the next step gets a fresh session and why (`runner.fresh_reason`), each undelivered note it dropped, and names the GPU's holders when it will wait for them. Gathers lessons. |
 | `wb answer <task> --text "…" \| --file <f>` | `--id` (the pending question) | Writes `ask/<id>.answer` (atomically, never through a link: `ask_mcp.write_answer`); the blocked `ask_reviewer` returns it. An empty answer is refused: the question stays open. A closed question (answered, or dropped by the runner) is refused. |
 | `wb allow <task> ["<pattern>"…]` | `--path DIR…`, `--always`, `--text "…"` | Adds to the task's grants (`rules/<task>/grants.json`; and commands.json with `--always`, refused when it doesn't parse); answers the oldest open permission request (else the pending question) with "Claude allowed … Run it again now and carry on."; if the agent is live, sends that as a `--now` steer so it restarts on its session with the rule (while the tests run or the task waits for the GPU it says the agent gets it when they end, or when its round starts). `--path` goes through `_lane_dir` (refuses `/` and home, creates the directory; `*` turns the lane off for the task). |
 | `wb steer <task> --text "…" \| --message <file>` | `--now` | Only while queued/running/testing/asking with a live runner. Appends to steer.jsonl: delivered when the current run ends (before the tests), or at once with `--now`. While testing: "its tests are running (up to Ns); the agent gets it when they end"; while queued: when its round starts. |
 | `wb note <task> --text "…"` | | A `captain` event: Claude's log line in the transcript. |
-| `wb takeover [<task> \| --all]` | `--repo DIR` | Stops the runner, phase `review`, "Claude took over"; Claude edits in the worktree and accepts, or hands back with feedback. `--all`: every task that isn't closed. `--repo DIR` (with `--all`; the mod passes its session's directory): only the tasks whose task.json `cwd` or `repo` is DIR, inside it or holds it (`_scope`; neither key: every session's), the rest listed as `left alone (other projects' sessions): …`. |
-| `wb stop [<task> \| --all]` | `--repo DIR` | A live task only. Marks status `stopping`, SIGTERM the runner (15 s, `wait_exit`, then SIGKILL to its session and the agent's), sweeps what the agent left (`runner.sweep`), phase `stuck`, "stopped by the reviewer", and acknowledges the task; the worktree is kept. `--all` (`stop_everything`): every open task, a `stopped` event "bail out: stopped by the user". `--repo DIR` (with `--all`): as for takeover, the rest listed as `left running (other projects' sessions): …`. |
+| `wb takeover [<task> \| --all]` | `--repo DIR`, `--session ID` | Stops the runner, phase `review`, "Claude took over"; Claude edits in the worktree and accepts, or hands back with feedback. `--all`: every task that isn't closed. `--session ID` (repeatable) and `--repo DIR`, with `--all` (the mod passes every session id its process has had and its directory): only that session's tasks (`_scope`): one with a task.json `session` when it is one of the IDs, wherever it ran; else (no `session`, or no `--session` given) when its `repo` is DIR, inside it or holds it, or its `cwd` is DIR or inside it, by whole components, never when DIR is the home directory or `/`; one with no key at all: every session's. The rest are listed as `left alone (other projects' sessions): …`. |
+| `wb stop [<task> \| --all]` | `--repo DIR`, `--session ID` | A live task only. Marks status `stopping`, SIGTERM the runner (15 s, `wait_exit`, then SIGKILL to its session and the agent's), sweeps what the agent left (`runner.sweep`), phase `stuck`, "stopped by the reviewer", and acknowledges the task; the worktree is kept. `--all` (`stop_everything`): every open task, a `stopped` event "bail out: stopped by the user". `--session ID`, `--repo DIR` (with `--all`): as for takeover, the rest listed as `left running (other projects' sessions): …`. |
 | `wb resume <task>` | | Reaps a dead runner first. Phase stuck/failed (a task whose runner died is failed), no live runner: a fresh session (round n+1, `runner.RESUME` + what the step's rounds asked), not a review round; Claude's notes the last runner never delivered follow, as a `NOTE_HEAD` note. A note names the GPU's holders when it will wait for them. Acks the task and gathers lessons. |
 | `wb accept <task> -m "…"` | `--merge`, `--force` (any open phase; stops a live runner), `--spec-gap` | Reaps a dead runner first. Phase review; refuses a closed task. A live task with nothing changed on its first step is refused before its runner is stopped ("no changes to accept yet"); a live task whose commit then fails is left `stuck` ("accept failed: …", for wb accept again, resume, feedback or discard), not live with no runner. Records the step, commits (a worktree with no new changes accepts the branch's commits past the base: earlier steps, or Claude's own after a takeover; a retry after an accept died past its commit takes that commit) (`<m>` + "Delegated to <label> via OpenCode: R round(s), F automatic test-fix, V review round(s)." + `Workbench-Task:` + `OpenCode-Session:`; no AI co-author line), removes the worktree (a failure is a warning: `remove_worktree`), `--merge`s (`merge --no-ff --no-edit` into `base_branch`, which the main checkout must have out, else a branch holding the base; never a detached HEAD; no changes to tracked files; a conflict is backed out; a failure is reported and the accept stands), writes the results row, prints how far CLAUDE.md (or `.claude/CLAUDE.md`) is behind (a failure there never fails the accept). Gathers lessons. |
 | `wb discard <task>` | `--reason "…"`, `--spec-gap`, `--keep-branch` | Stops the runner, records the step, removes the worktree (never fails on it: a warning) and (unless `--keep-branch`, or the repo is gone) the branch, writes the results row. Gathers lessons. Refuses a closed task. |
@@ -2266,7 +2277,7 @@ delivered as taken (`_stale_notes`, *Notes*).
 | Command | Flags | What it does |
 |---|---|---|
 | `wb wait [<task>]` | `--timeout S` (0: none) | Reaps dead runners, then blocks (inotify) until a notice past a task's `acked` arrives, prints `[<kind>] <task>\n<text>` and acks it (skipping notices no longer true, rows that aren't whole and removed tasks'). Named: a closed task exits 2; a task already waiting whose notice was taken elsewhere prints it again "(already delivered once)"; one stopped or taken over by hand prints `[<phase>] <task> (no notice: <last>)`. Bare, with no open task: exits 2. |
-| `wb status [<task>]` | `--all`, `--repo DIR` | Reaps dead runners. One line per open task: name, phase, round, model, age, idle, last action; `?` after queued/running/testing whose runner died within `REAP_GRACE`. Named: also `worktree: <path>` while it exists. `--repo DIR` (the mod's context block): only that session's tasks (as for `wb stop`), then `open elsewhere (other projects' sessions): …`. |
+| `wb status [<task>]` | `--all`, `--repo DIR`, `--session ID` | Reaps dead runners. One line per open task: name, phase, round, model, age, idle, last action; `?` after queued/running/testing whose runner died within `REAP_GRACE`. Named: also `worktree: <path>` while it exists. `--session ID`, `--repo DIR` (the mod's context block): only that session's tasks (as for `wb stop`), then `open elsewhere (other projects' sessions): …`. |
 | `wb watch [<task>]` | `-v`, `--once`, `--no-color`, `--json` (hidden: one pass of JSON lines, the mod's pane), `--last N` (hidden, with `--json`: the newest N transcript lines) | The live transcript (`transcript.follow`); default task: the most recently updated open one, else the most recently updated task. |
 | `wb log <task>` | `-n N` (0 all), `-f`, `-v` | The agent's events: tool calls (`HH:MM:SS rN tool brief  ✗ error`), text, questions, answers, stops, auto-fixes, rounds, tests, errors. |
 | `wb report <task>` | `--round N` | The round's summary.md. |
@@ -2365,8 +2376,9 @@ lock (a compare-and-set: `cli.reap`); never write status.json directly. `all_tas
 task.json, oldest first.
 
 **task.json** (written by `wb start`; `wb next --test` rewrites `test_cmd`): `name`, `repo`,
-`cwd` (the directory `wb start` ran in: with `repo`, which Claude Code session the task is
-`mine` to; `--repo` scoping), `base` (the full sha), `base_ref`, `base_branch` (the branch
+`cwd` (the directory `wb start` ran in), `session` (when set: `CLAUDE_CODE_SESSION_ID`, the
+Claude Code session whose Bash ran `wb start`; with `cwd` and `repo`, which session the task is
+`mine` to, and `_scope`'s `--session`/`--repo`), `base` (the full sha), `base_ref`, `base_branch` (the branch
 `--merge` lands on: the one checked out for `HEAD`, or `--base` when it names a local branch; null
 on a detached HEAD), `branch`, `model`, `model_label`, `opencode_model`, `route` (the
 router's reason), `size`, `stack`, `trial` (when set), `test_cmd`, `no_base_check` (when set), `auto_fix`, `ask_budget`,
@@ -2689,9 +2701,10 @@ push: every change is a pull request that merges once `check` is green and it is
 - **`wb watch --json`** (a style, the order, the activity wording) → the mod's `LINE_STYLE`, its
   pose regex, the `live-1` tag; `--last` and `JSON_LINE_CHARS` with the mod's `KEEP_LINES` and
   `LINE_CHARS`.
-- **A `$.state` atom's type** in the mod → its tag (`tasks-2`, `live-1`, `chat-2`).
-- **Which session a task is** (task.json `cwd`/`repo`) → the mod's `mine` and `cli._scope`
-  (`--repo`), the same containment rule both ways.
+- **A `$.state` atom's type** in the mod → its tag (`tasks-3`, `live-1`, `chat-2`, `sessions-1`).
+- **Which session a task is** (task.json `session`, else `cwd`/`repo`) → the mod's `mine` and
+  `cli._scope` (`--session`, `--repo`): the same rule, the home-or-`/` exception included, and
+  the mod's `scope()` passing every id it has.
 - **A notice kind or its text** → the mod's `HEADLINE` and `NEXT`, `_ack_all`'s still-true rule,
   the mod's still-true rule, `wb wait`.
 - **A task.json or status key** → *Files and formats*; a key the router, tuning or skills read from

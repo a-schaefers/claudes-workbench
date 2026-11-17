@@ -7,11 +7,12 @@
 // through each task's `acked` file, so a notification wakes Claude once, by whichever got it first.
 // A wake is held while Claude's main loop is mid-turn (a prompt submitted then would queue and
 // arrive stale) and checked against the task's phase when it is finally sent.
-// A session acts only on its own tasks (`mine`): those whose task.json `cwd` (where `wb start`
-// ran) or `repo` is the session's directory, inside it, or holds it; an old task with neither is
-// everyone's. Another project's session wakes for, stops and hands back its own (the 2026-11-16
-// audit: two projects at once, each session was woken for and quit the other's). A session with
-// no person at it (`claude -p`, the SDK, until a surface attaches) stays quiet.
+// A session acts only on its own tasks (`mine`): those `wb start` ran in it (task.json `session`,
+// one of the ids this process has had), wherever it ran; a task without one (started by hand, or
+// before 0.90) by directory, and an old task with neither that nor a directory is everyone's.
+// Another project's session wakes for, stops and hands back its own (the 2026-11-16 audit: two
+// projects at once, each session was woken for and quit the other's). A session with no person
+// at it (`claude -p`, the SDK, until a surface attaches) stays quiet.
 // Claude's own context. In delegate mode, whatever compacts it (the engine at its limit, /compact,
 // this mod), the summary is told to keep the delegation state, and after a compaction or /clear
 // the open tasks come back as a context block. At a task boundary (one of this session's just
@@ -55,9 +56,9 @@ const SCOUT_NOTE =
 // The user then asks for things in plain words, and Claude hands the coding to local agents as
 // the skill says. A fresh or compacted conversation is told the mode is still on and where the
 // skill is (`delegate-mode` block). Two slash commands end it: /delegate-quit stops this session's
-// agents at once (`wb stop --all --repo <cwd>`) and tells Claude so;
+// agents at once (`wb stop --all --repo <cwd> --session <id>…`) and tells Claude so;
 // /delegate-quit-and-hand-back-claude stops them and hands their tasks to Claude (`wb takeover
-// --all --repo <cwd>`), starting a turn for Claude to finish them. Either closes the pane.
+// --all`, the same scope), starting a turn for Claude to finish them. Either closes the pane.
 // Under the task list the pane follows one task live: the conversation between Claude and the
 // agent, every tool call and test, as `wb watch --json` prints it.
 import { atom, read, update } from 'claude-code'
@@ -78,7 +79,13 @@ const OLDEST_WAKE_MS = 60 * 60 * 1000 // never wake for a notification older tha
 
 // Change the tag when WbTask's fields change: a reload declines what the earlier shape stored.
 const tasks = atom({ plugin: 'workbench', key: 'tasks' } as const, [] as WbTask[], {
-  shape: 'tasks-2',
+  shape: 'tasks-3',
+})
+
+// Every Claude Code session id this process has had (`$.session.id()`): /clear and a resume go on
+// under another, and a task started before still belongs here. Kept across a reload.
+const sessions = atom({ plugin: 'workbench', key: 'sessions' } as const, [] as string[], {
+  shape: 'sessions-1',
 })
 
 const live = atom({ plugin: 'workbench', key: 'live' } as const, { task: '', lines: [] } as WbLive, {
@@ -316,7 +323,9 @@ const mem = {
   wb: 'wb',
   liveKey: '', // the followed task and its updated_at when last read
   liveAt: 0, // when its transcript was last read
-  cwd: '', // the session's directory, resolved: which tasks are this session's (mine)
+  cwd: '', // the session's directory, resolved: which old tasks are this session's (mine)
+  home: '', // the home directory, resolved: a session there claims no task by directory
+  ids: new Set<string>(), // the `sessions` atom: which tasks are this session's (mine)
   person: false, // someone can be at this session (not a bare `claude -p` or SDK run)
   started: false, // the ears and timers run
   busy: false, // Claude's main loop is mid-turn: a wake would queue and arrive stale
@@ -350,15 +359,36 @@ const mem = {
   skill: '', // the /delegate skill's SKILL.md, for the delegate-mode block
 }
 
-// Whether path b is path a or inside it.
-const within = (a: string, b: string) => a === b || b.startsWith(a.endsWith('/') ? a : `${a}/`)
+// Whether path b is path a or inside it, by whole components: /x/ab is not inside /x/a.
+const parts = (p: string) => p.split('/').filter(c => c && c !== '.')
+const within = (a: string, b: string) => {
+  const [pa, pb] = [parts(a), parts(b)]
+  return pa.length <= pb.length && pa.every((c, i) => c === pb[i])
+}
 
-// Whether a task is this session's: where `wb start` ran (task.json `cwd`) or its repo is the
-// session's directory, inside it, or holds it (a session started in a subdirectory, or in a
-// folder of several repos). A task with neither (from before `cwd` was kept) is everyone's.
-const mine = (t: { repo?: string; cwd?: string }) => {
-  const dirs = [t.cwd, t.repo].filter(Boolean) as string[]
-  return !mem.cwd || !dirs.length || dirs.some(d => within(d, mem.cwd) || within(mem.cwd, d))
+// Whether a task is this session's. One `wb start` ran in this process's sessions (task.json
+// `session`) is, wherever it ran: by directory alone, a `cd /tmp/x && wb start` task was no one's
+// (the 0.90 review). One without (started by hand, or before 0.90) goes by directory: its repo
+// is the session's directory, inside it or holds it (a session in a subdirectory, or in a folder
+// of several repos), or where `wb start` ran (`cwd`) is the session's directory or inside it. A
+// session in the home directory or / claims none by directory: a task started from ~ belonged to
+// every session under it (the 0.90 review). A task with no key at all is everyone's.
+const mine = (t: { session?: string; repo?: string; cwd?: string }) => {
+  if (t.session && mem.ids.size) return mem.ids.has(t.session)
+  if (!mem.cwd || (!t.cwd && !t.repo)) return true
+  const at = parts(mem.cwd).join('/')
+  if (!at || (mem.home && at === parts(mem.home).join('/'))) return false
+  return (!!t.cwd && within(mem.cwd, t.cwd)) ||
+    (!!t.repo && (within(mem.cwd, t.repo) || within(t.repo, mem.cwd)))
+}
+
+// This session's id joins the ids this process has had: at the start and at each poll, so a
+// /clear's new one counts before its first `wb start` is read.
+async function noteSession($: any): Promise<void> {
+  const id = await $.session.id().catch(() => '')
+  if (!id || mem.ids.has(id)) return
+  mem.ids.add(id)
+  await update($, sessions, ids => (ids.includes(id) ? ids : [...ids, id]))
 }
 
 // A toast shown once per load: something is wrong that the person should hear about once.
@@ -435,7 +465,7 @@ async function scan($: any, root: string, now: number): Promise<WbTask[]> {
       tests: st.tests ? (st.tests.ok ? 'pass' : 'fail') : null,
       last: String(st.last ?? ''), createdAt: Number(sp.created_at ?? 0) * 1000, updatedAt,
       tokens: Number(st.tok_in ?? 0) + Number(st.tok_out ?? 0), recent,
-      repo: String(sp.repo ?? ''), cwd: String(sp.cwd ?? ''),
+      repo: String(sp.repo ?? ''), cwd: String(sp.cwd ?? ''), session: String(sp.session ?? ''),
     })
   }
   for (const name of mem.gone) if (!names.has(name)) mem.gone.delete(name) // removed by hand
@@ -498,8 +528,12 @@ async function runWb($: any, args: string[], timeoutMs = 120_000): Promise<{ ok:
   }
 }
 
-// `--repo <the session's directory>`: a quit or the status block takes this session's tasks only.
-const scope = () => (mem.cwd ? ['--repo', mem.cwd] : [])
+// `--session <id>` for each id this process has had, and `--repo <the session's directory>` for
+// tasks without one: a quit or the status block takes this session's tasks only, as `mine` does.
+async function scope($: any): Promise<string[]> {
+  await noteSession($)
+  return [...(mem.cwd ? ['--repo', mem.cwd] : []), ...[...mem.ids].flatMap(id => ['--session', id])]
+}
 
 // The task worth watching. The one followed stays while it runs: with two running, choosing by
 // the latest status write swapped the pane between them on every tool call (the 2026-11-16
@@ -626,6 +660,7 @@ async function poll($: any) {
   mem.again = false
   mem.lastPoll = await $.clock.now()
   try {
+    await noteSession($)
     const now = await $.clock.now()
     const list = await scan($, mem.root, now)
     const drawn = JSON.stringify(list)
@@ -951,7 +986,11 @@ export const register: Register = (on, options) => {
       name: HAND_BACK,
       description: 'Stop this session\'s agents and hand their tasks back to Claude to finish',
     })
-    mem.cwd = (await $.fs.stat(e.cwd, { resolve: true }).catch(() => undefined))?.realPath ?? e.cwd
+    const real = async (p: string) => (await $.fs.stat(p, { resolve: true }).catch(() => undefined))?.realPath ?? p
+    mem.cwd = await real(e.cwd)
+    mem.home = home ? await real(home) : ''
+    mem.ids = new Set(await read($, sessions))
+    await noteSession($)
     // A `claude -p` run or an SDK session has no person at it until a surface attaches: it took
     // other sessions' wakes, the weekly check and a `wb status` before every prompt (the
     // 2026-11-16 audit). It stays quiet until then.
@@ -1010,7 +1049,7 @@ export const register: Register = (on, options) => {
   // This session's tasks only (`--repo`): another project's session keeps its own running.
   on('command.run', { command: QUIT }, async $ => {
     await delegateMode($, false)
-    const { ok, out } = await runWb($, ['stop', '--all', ...scope()])
+    const { ok, out } = await runWb($, ['stop', '--all', ...(await scope($))])
     $.ui.toast(ok ? 'workbench: this session\'s delegated agents are stopped'
       : `workbench: wb stop --all failed: ${brief(out)}`)
     return { text: ok ? `Delegation stopped. ${out}` : `Delegation not stopped: ${out}`, context: [QUIT_NOTE(out, ok)] }
@@ -1037,7 +1076,7 @@ export const register: Register = (on, options) => {
 
   on('command.run', { command: HAND_BACK }, async $ => {
     await delegateMode($, false)
-    const { ok, out } = await runWb($, ['takeover', '--all', ...scope()])
+    const { ok, out } = await runWb($, ['takeover', '--all', ...(await scope($))])
     if (!ok) { // nothing was handed over: no turn telling Claude to finish it
       $.ui.toast(`workbench: wb takeover --all failed: ${brief(out)}`)
       return { text: `wb takeover --all failed; the agents may still be running (wb status):\n${out}` }
@@ -1072,7 +1111,7 @@ export const register: Register = (on, options) => {
         '`wb chat log` shows the thread. Typing in the terminal again ends this.',
     })
     if (!mem.wake && (st.delegating || mem.open.size)) blocks.push({ name: 'workbench-wake', text: WAKE_OFF_NOTE })
-    const { ok, out: status } = await runWb($, ['status', ...scope()])
+    const { ok, out: status } = await runWb($, ['status', ...(await scope($))])
     if (!ok) warnOnce($, 'status', `wb status failed: ${brief(status)}; wb doctor`)
     if (!ok || status.startsWith('no open tasks')) return { blocks }
     return {
