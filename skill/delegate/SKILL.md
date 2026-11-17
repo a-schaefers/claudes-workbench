@@ -61,7 +61,8 @@ types /delegate again: each request is handled the way this skill says, until th
   and where this file is: read it again if its procedure is no longer in your context.
 - **Plans are handoff plans**, in plan mode or not: see "Planning work you will hand off" below.
 
-`wb` is the workbench CLI (`~/repos/workbench`, on PATH as `wb`; `wb --help`). Every command
+`wb` is the workbench CLI (on PATH as `wb`; `wb --help`). Its code, ARCHITECTURE.md included, is
+two directories above `readlink -f "$(command -v wb)"`. Every command
 prints a short report written for you — don't go digging in raw logs unless a report says to.
 
 ## 0. The project: git and CLAUDE.md are yours
@@ -323,7 +324,7 @@ how its output may be used. A generation waits for the running tasks to finish, 
 GPU to itself: tasks started meanwhile wait for it.
 
 **No ready engine? Offer to set one up; never set it up unasked.** This is an optional step, as
-ARCHITECTURE.md's Images section says. Read `wb scout` for the OS and GPU, then propose in one
+ARCHITECTURE.md's Images section (in the workbench code, above) says. Read `wb scout` for the OS and GPU, then propose in one
 message: a runtime that fits (stable-diffusion.cpp on Vulkan for AMD or Intel, CUDA for NVIDIA,
 Metal on macOS; built from its upstream source, with packages from the OS's own repositories),
 and an image model you've just checked. It must fit the VRAM without spilling, and its licence

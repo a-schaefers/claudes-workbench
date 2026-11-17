@@ -6,8 +6,9 @@ Claude Code mod wakes Claude when a task needs it. Everything talks through plai
 
 The short name, `workbench`, stays on everything inside: the package, the plugin
 (`workbench@workbench`), the state and config directories, and the clone path `~/repos/workbench`
-the README suggests (nothing depends on it: `bin/wb` finds the package from its real path, and
-the systemd unit runs `~/.local/bin/wb`).
+ARCHITECTURE.md's *Installing* suggests for developing (users install from the marketplace; nothing
+depends on it: `bin/wb` finds the package from its real path, and the systemd unit runs
+`~/.local/bin/wb`).
 
 ## Keeping the docs true
 README.md is for people and stays simple: the pitch, a quickstart, then a pointer. ARCHITECTURE.md
