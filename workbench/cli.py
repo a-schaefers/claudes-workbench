@@ -816,7 +816,8 @@ def cmd_scout(a):
     print("\nmodels OpenCode can use (opencode.json)")
     real = defaultdict(list)
     for r in store.results():
-        real[r.get("model")].append(r)
+        if tuning.judged(r):  # a discard Claude put down to its own spec says nothing of the model
+            real[r.get("model")].append(r)
     for pid, prov in provs.items():
         installed = {x["name"]: x for x in models.ollama_installed(prov["root"])} \
             if prov["engine"] == "ollama" else {}

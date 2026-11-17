@@ -495,11 +495,11 @@ def summary_text(task: store.Task, n: int, rnd: dict, tests) -> str:
 
 # A round continues the task's OpenCode session, so the agent keeps what it has read. Once that
 # session has filled a share of the model's window (the fresh_at knob, tuning.py: learned per
-# model and window from how tasks went; FRESH_AT is its default), or OpenCode has compacted it
+# model and window from how tasks went), or OpenCode has compacted it
 # (a small model's own summary of a coding session drops details), the next round starts a fresh
 # session that is handed exactly what it needs: the task, the work so far and the new instructions.
-FRESH_AT = tuning.KNOBS["fresh_at"].default
 ASKED_FRESH = "Claude asked for a fresh session"
+COMPACTED = "OpenCode had to compact the last session"
 # The handoff carries the diff while it is under this share of the window (at ~4 characters a
 # token: 12K characters, ~3K tokens, on a 32K one); a bigger diff is listed, for the agent to read.
 HANDOFF_DIFF_SHARE = 0.09
@@ -537,7 +537,7 @@ def fresh_reason(task: store.Task) -> str | None:
         return f"the last session was {st.get('full_pct')}% full"
     c = context_state(task)
     if c.get("compactions"):
-        return "OpenCode had to compact the last session"
+        return COMPACTED
     if c.get("used") and c.get("window") and c["used"] >= tuning.value(task, "fresh_at") * c["window"]:
         return (f"the last session was {100 * c['used'] // c['window']}% full "
                 f"({c['used'] / 1000:.1f}K of {c['window'] // 1024}K tokens)")
@@ -605,6 +605,7 @@ def _start_fresh(task: store.Task, n: int, why: str) -> None:
     task.set_status(session=None, sessions=(st.get("sessions") or []) + [st["session"]] * bool(st.get("session")),
                     context=None, skills_told=None)  # a new session hears the skills again
     task.event({"ts": store.now(), "round": n, "kind": "fresh", "overflow": why != ASKED_FRESH,
+                "compacted": why == COMPACTED,
                 "text": f"a fresh session for the agent: {why}"})
 
 

@@ -113,7 +113,7 @@ class Measured(Base):
         wait_phase("t-m4", {"review"})
         run_wb("feedback", "t-m4", "--message", str(fb))
         wait_phase("t-m4", {"review"})
-        run_wb("discard", "t-m4", "--reason", "enough")      # the fake has nothing more to write
+        run_wb("accept", "t-m4", "-m", "both")               # the fake has nothing more to write
         row = self.row()
         self.assertEqual([(s["reviews"], s["spec_rounds"]) for s in row["steps"]], [(1, 1), (1, 0)])
         self.assertEqual((row["reviews"], row["spec_rounds"]), (2, 1))  # every step's, not the last's

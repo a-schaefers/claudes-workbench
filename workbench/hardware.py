@@ -64,8 +64,9 @@ def _mac_gpus() -> list[dict]:
         vram = g.get("spdisplays_vram") or g.get("spdisplays_vram_shared") or ""
         m = re.match(r"(\d+)\s*(MB|GB)", vram)
         unified = name.startswith("Apple")
+        shared = not g.get("spdisplays_vram") and not unified  # an Intel iGPU's slice of RAM
         found.append({"name": name, "driver": "metal", "unified": unified,
-                      "vram": (_int(_sysctl("hw.memsize")) if unified else
+                      "vram": (_int(_sysctl("hw.memsize")) if unified else None if shared else
                                int(m.group(1)) * (GB if m.group(2) == "GB" else 2 ** 20) if m else None),
                       "vram_used": None,
                       "wired_limit": _int(_sysctl("iogpu.wired_limit_mb")) * 2 ** 20
@@ -95,11 +96,16 @@ def gpus() -> list[dict]:
     if where == "macos":
         return _mac_gpus()
     found = []
-    for line in _run("nvidia-smi", "--query-gpu=name,memory.total,memory.used,driver_version",
-                     "--format=csv,noheader,nounits").splitlines():
-        name, total, used, driver = [x.strip() for x in line.split(",")]
-        found.append({"name": name, "driver": f"nvidia {driver}", "vram": int(total) * 2 ** 20,
-                      "vram_used": int(used) * 2 ** 20})
+    smi = _run("nvidia-smi", "--query-gpu=name,memory.total,memory.used,driver_version",
+               "--format=csv,noheader,nounits").splitlines()
+    for line in smi:
+        parts = [x.strip() for x in line.split(",")]
+        if len(parts) != 4:
+            continue
+        name, total, used, driver = parts
+        mib = lambda v: int(v) * 2 ** 20 if v.isdigit() else None  # noqa: E731 ("[N/A]" on some cards)
+        found.append({"name": name, "driver": f"nvidia {driver}", "vram": mib(total),
+                      "vram_used": mib(used)})
     if where == "wsl":
         nvidia = {g["name"] for g in found}
         return found + [g for g in _windows_gpus()
@@ -110,7 +116,7 @@ def gpus() -> list[dict]:
             continue
         uevent = dict(x.split("=", 1) for x in _read(dev / "uevent").splitlines() if "=" in x)
         slot, driver = uevent.get("PCI_SLOT_NAME"), uevent.get("DRIVER", "")
-        if not slot or slot in seen or driver == "nvidia":  # nvidia-smi spoke for those
+        if not slot or slot in seen or (driver == "nvidia" and smi):  # nvidia-smi spoke for those
             continue
         seen.add(slot)
         name = _run("lspci", "-s", slot).partition(": ")[2] or uevent.get("PCI_ID", "unknown")

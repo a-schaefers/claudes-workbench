@@ -40,7 +40,7 @@ def normalize(raw: dict, round_no: int):
         tok = part.get("tokens") or {}
         return {"ts": ts, "round": round_no, "kind": "step",
                 "in": tok.get("input", 0), "out": tok.get("output", 0),
-                "cache": (tok.get("cache") or {}).get("read", 0)}
+                "cache": (tok.get("cache") or {}).get("read", 0) + (tok.get("cache") or {}).get("write", 0)}
     if kind == "error":
         err = raw.get("error") or {}
         return {"ts": ts, "round": round_no, "kind": "error",

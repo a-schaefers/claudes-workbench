@@ -187,7 +187,7 @@ def slice(m: models.Model) -> Slice:
     scale = min(window / BASE_WINDOW, GUESS_MAX) if window else 1
     files, lines = max(1, round(BASE_FILES * scale)), max(50, round(BASE_LINES * scale / 10) * 10)
     basis = f"{window // 1024}K window" if window else "window unknown"
-    steps = [s for r in store.results() if r.get("model") == m.id
+    steps = [s for r in store.results() if r.get("model") == m.id and tuning.judged(r)
              for s in r.get("steps") or [] if s.get("files") and (not window or s.get("window") in (None, window))]
     went = [_went(s) for s in steps]
     fit = [s for s, w in zip(steps, went) if w == "well"]

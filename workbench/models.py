@@ -28,6 +28,7 @@ waits for the lease, frees nothing here, and nothing here unloads or stops it.
 from __future__ import annotations
 
 import fcntl
+import functools
 import ipaddress
 import json
 import os
@@ -114,6 +115,23 @@ def _overrides() -> dict:
     return data if isinstance(data, dict) else {}
 
 
+@functools.lru_cache(maxsize=1)
+def _own_addresses() -> frozenset:
+    """This machine's own IP addresses (LAN, Tailscale, ...): a provider at one of them is local."""
+    found = set()
+    try:
+        found |= {a[4][0] for a in socket.getaddrinfo(socket.gethostname(), None)}
+    except OSError:
+        pass
+    try:  # every interface's, where `ip` is there (Linux)
+        out = subprocess.run(["ip", "-o", "addr"], capture_output=True, text=True, timeout=5).stdout
+        found |= {w.split("/")[0] for line in out.splitlines() for i, w in enumerate(line.split())
+                  if i and line.split()[i - 1] in ("inet", "inet6")}
+    except (OSError, subprocess.TimeoutExpired):
+        pass
+    return frozenset(found)
+
+
 def _this_host(host: str | None) -> bool:
     """Whether a baseURL's host is this machine: any loopback address, or this host's own name."""
     if not host:
@@ -121,7 +139,8 @@ def _this_host(host: str | None) -> bool:
     if host.lower() in LOCAL_HOSTS:
         return True
     try:
-        return ipaddress.ip_address(host).is_loopback
+        ip = ipaddress.ip_address(host)
+        return ip.is_loopback or str(ip) in _own_addresses()
     except ValueError:
         me = socket.gethostname().lower()
         return host.lower() in (me, me.split(".")[0], f"{me.split('.')[0]}.local")

@@ -6,8 +6,9 @@ from . import gitops, skills, store
 
 def step(task: store.Task, landed: bool) -> dict:
     """The step closing now (committed by wb next or accept, or dropped): its size and how it
-    went. A session compacted or filled by reading alone, an agent stuck, Claude taking over, or review rounds the agent
-    caused (`reviews` less the `spec_rounds` Claude marked as the spec's) say it was too much; a
+    went. A session compacted (now, or before a fresh one took over) or filled by reading alone,
+    an agent stuck, or review rounds the agent caused (`reviews` less the `spec_rounds` Claude
+    marked as the spec's) say it was too much; Claude taking over says nothing of its size; a
     handover to a fresh session is the runner's normal way through a big step, counted, not held
     against it. The router learns each model's slice from these (router.slice)."""
     st = task.status
@@ -25,6 +26,7 @@ def step(task: store.Task, landed: bool) -> dict:
         compacted = bool(context_state(task).get("compactions"))
     except Exception:  # no session to export: nothing was compacted
         compacted = False
+    compacted |= any(e.get("kind") == "fresh" and e.get("compacted") for e in evs)  # an earlier session
     reviews = st.get("reviews", 0)  # wb next starts each step's count afresh
     gaps = {g.get("round") for g in st.get("spec_gaps") or [] if (g.get("round") or 0) >= since}
     return {**size, "window": st.get("window"), "landed": landed, "compacted": compacted,
@@ -76,9 +78,13 @@ def spec_gap_line() -> str | None:
 
 
 def table() -> str:
-    rows = store.results()
-    trials = len(store.results(trials=True)) - len(rows)
-    left_out = f"\n({trials} trial run{'s' if trials > 1 else ''} left out)" if trials else ""
+    from .tuning import judged  # tuning reads results' rows
+    every = store.results()
+    rows = [r for r in every if judged(r)]
+    gaps = len(every) - len(rows)
+    trials = len(store.results(trials=True)) - len(every)
+    left_out = (f"\n({trials} trial run{'s' if trials > 1 else ''} left out)" if trials else "") + \
+        (f"\n({gaps} discard{'s' if gaps > 1 else ''} put down to the spec left out)" if gaps else "")
     if not rows:
         return "no finished tasks yet" + left_out
     by = defaultdict(list)
