@@ -68,10 +68,11 @@ crashed piece loses nothing, and every piece can be inspected with `cat`.
 
 workbench is Python's standard library only (3.11+), plus the TypeScript mod. There is no
 packaging: it runs from its clone. `bin/wb` and `bin/wb-ask-mcp` check the interpreter before they
-import the package and exit 1 with one line on Python older than 3.11 (`wb: needs Python 3.11 or
-newer; <python> is <version>. Put a newer python3 first on PATH.`) or on native Windows (`wb:
-native Windows is not supported …; run Claude Code and wb inside WSL2`), not with a traceback from
-deep inside it (the 2026-11-16 audit). Everything else starts from their `sys.executable`. No model is named anywhere in the code: models come from
+import the package and exit 78 (EX_CONFIG) with one line on Python older than 3.11 (`wb: needs
+Python 3.11 or newer; <python> is <version>. Put a newer python3 first on PATH.`) or on native
+Windows (`wb: native Windows is not supported …; run Claude Code and wb inside WSL2`), not with a
+traceback from deep inside it (the 2026-11-16 audit). The chat's unit stops on 78 instead of
+retrying a broken install (*The web chat*). Everything else starts from their `sys.executable`. No model is named anywhere in the code: models come from
 OpenCode's config and the router decides, so a new model is one config entry away.
 
 **Where Python processes start.** Five places, and each finds the package by path, not by an
@@ -1822,9 +1823,13 @@ custom-node packs do run their own Python).
 ## The web chat
 
 `wb chat serve` (`workbench/chat.py`; kept up by `systemd/wb-chat.service`, a user unit running
-`%h/.local/bin/wb chat serve` with `Restart=always`, giving up after five starts in five minutes:
-`StartLimitBurst`) serves a small page on port 1337 for reaching
-the Claude session in delegate mode while the user is away.
+`%h/.local/bin/wb chat serve` with `Restart=always` and no start limit) serves a small page on
+port 1337 for reaching the Claude session in delegate mode while the user is away. The unit
+retries with a delay growing from 10 s to 5 min (`RestartSteps`, systemd 254+; every 10 s on
+older ones), since retrying is what brings the chat up when a bound address arrives late (a user
+manager has no network-online.target) or the port is briefly held: a start limit gave up for good
+there (the 0.90 review). It stops only on exit 78 (`RestartPreventExitStatus`), which bin/wb's
+Python-version and Windows guards use; never 75, the replan exit below.
 
 - **The path of a message.** The page posts it; the server appends it to `chat/messages.jsonl`.
   The listening session's mod submits it to Claude as `[web chat] <the user's words>`, nothing
