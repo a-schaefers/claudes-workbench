@@ -27,7 +27,15 @@ test('with no tasks the pane says how to start one, on every surface', async ($,
 
 test('/workbench opens the pane and counts open tasks', async ($, on) => {
   let opened = ''
+  let closed = ''
+  let held: any[] = []
   on('command.register', () => ({ value: { command: 'workbench' } }))
+  on('ui.panes', () => ({ value: held }))
+  on('ui.close', (_, e) => {
+    closed = e.id
+    held = []
+    return { value: undefined }
+  })
   on('ui.open', (_, e) => {
     opened = e.id
     return { value: { isPlaced: true } }
@@ -40,7 +48,13 @@ test('/workbench opens the pane and counts open tasks', async ($, on) => {
   await $.session.start({ cwd: '/', surface: 'terminal', isInteractive: true })
   const out = await $.command.run({ command: 'workbench', args: '' })
   expect(opened).toBe('workbench')
+  expect(closed).toBe('')
   expect(JSON.stringify(out)).toContain('no open tasks')
+  // closed by accident, the engine still holding it out of sight: /workbench brings it back
+  held = [{ id: 'workbench', title: 'Workbench', isShown: false, isFocused: false, isPlaced: true }]
+  opened = ''
+  await $.command.run({ command: 'workbench', args: '' })
+  expect([closed, opened]).toEqual(['workbench', 'workbench'])
 })
 
 // A file system in memory: what `wb` and its runner would have written. `ui` records the pane

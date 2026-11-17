@@ -793,11 +793,16 @@ export const register: Register = (on, options) => {
   })
 
   on('command.run', { command: 'workbench' }, async $ => {
-    await $.ui.open({ id: PANE, title: 'Workbench' })
+    // A pane the engine still holds but doesn't show (a tab behind another, or left undrawn)
+    // only retitles on open: close it first, so the person's /workbench always brings it up.
+    const held = (await $.ui.panes()).find(p => p.id === PANE)
+    if (held && (!held.isShown || !held.isPlaced)) await $.ui.close({ id: PANE }).catch(() => {})
+    mem.paneOpened = true
+    const opened = await $.ui.open({ id: PANE, title: 'Workbench' })
     const list = await read($, tasks)
     const open = list.filter(t => ACTIVE.has(t.phase) || NEEDS.has(t.phase))
-
-    return { text: open.length ? `Workbench: ${open.length} open task(s).` : 'Workbench: no open tasks.' }
+    const why = opened.isPlaced ? '' : ` (the pane can't be drawn here: ${opened.reason})`
+    return { text: (open.length ? `Workbench: ${open.length} open task(s).` : 'Workbench: no open tasks.') + why }
   })
 
   on('ui.render', { component: 'Pane', requestId: PANE }, async ($, e) => {
