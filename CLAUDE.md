@@ -37,7 +37,7 @@ the drift this rule exists to stop.
 python3 -m unittest                                   # from the repo root: ~145 tests, about two minutes
 python3 -m unittest tests.test_workbench.Context      # one class (or .Context.test_…); -k handover by name
 claude plugin validate mod && claude plugin test mod  # the mod: the $ rule, then mod/hooks/register.test.tsx
-PLAYWRIGHT=…/node_modules/playwright node tests/e2e_chat.mjs   # the web chat in WebKit and /usr/bin/chromium
+PLAYWRIGHT=…/node_modules/playwright node tests/e2e_chat.mjs   # the web chat in WebKit and Chromium
 wb doctor                                             # opencode, its config, git, each model, the state dir, Landlock
 ```
 The suite runs real git and real runner processes against a fake OpenCode

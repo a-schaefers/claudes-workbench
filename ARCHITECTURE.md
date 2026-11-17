@@ -977,10 +977,11 @@ quotes are stripped. Fields used: `name`, `description`, `license`.
 
 **Scanned on the way in** (`scan.py`, adapted from Hermes Agent's `tools/skills_guard.py` at
 081e8d9, MIT notice kept in its docstring; it keeps the critical and high rules, drops trust tiers
-and the medium rules, and adds Unicode Cf and tag characters). 42 regex rules, 27 critical and 15
+and the medium rules, and adds Unicode Cf and tag characters). 43 regex rules, 27 critical and 16
 high, case-insensitive and multiline:
 - exfiltration (critical: curl/wget sending a `$…KEY|TOKEN|SECRET|PASSWORD|CREDENTIAL` variable
-  to a non-loopback URL, `cat` of .env/credentials/.netrc/.pgpass/.npmrc/.pypirc, staging in /tmp
+  to a non-loopback URL, `cat` reading .env/credentials/.netrc/.pgpass/.npmrc/.pypirc (not a heredoc writing one, not
+  `.env.example`), staging in /tmp
   then piping out; high: `~/.ssh`/`.aws`/`.gnupg`/`.kube`/`.docker`, `printenv`/`env |`, a
   markdown link carrying a variable, "send/post/upload … to http", webhook.site, requestbin,
   pipedream, hookbin, pastebin);
@@ -988,11 +989,15 @@ high, case-insensitive and multiline:
   override, no restrictions, without filters, DAN; high: "you are now", "pretend to be", don't
   tell the user/reviewer, when no one is watching, output the system prompt, instructions in an
   HTML comment, a hidden `display:none` div);
-- destructive (critical: recursive rm under `~`/`$HOME` or of `/`, `> /etc/`, mkfs, `dd of=/dev/`,
+- destructive (critical: recursive rm of the home directory itself (`~`, `~/`, `~/*`, `$HOME`,
+  `${HOME}`, not a directory under it) or of `/`, `> /etc/`, mkfs, `dd of=/dev/`,
   sudoers/visudo);
-- remote code (critical: curl|wget piped to a shell, `/bin/sh -i … >/dev/tcp`, `nc -l|-p`, ncat,
-  socat, `python -c "import socket`; high: ngrok, localtunnel, serveo);
-- obfuscation (critical: base64 decode or echo piped to an interpreter; high: strings built from
+- remote code (critical: curl|wget piped to a shell, `/bin/sh -i … >/dev/tcp`, a reverse shell
+  (`reverse_shell`: nc/ncat/netcat with `-e` or `-c`, socat to `exec:`/`system:`/`pty`),
+  `python -c "import socket`; high: a listener (`listener`: `nc -l`, socat `tcp-listen:`), ngrok,
+  localtunnel, serveo);
+- obfuscation (critical: base64 decode or echo piped to an interpreter that runs
+  what it reads (`| sh`, `| python3 -`; not `| python3 -m json.tool`); high: strings built from
   `chr()`);
 - credentials (critical: PEM private keys, `ghp_`, `github_pat_`, `glpat-`, `sk-ant-`, `sk-`,
   `AKIA`);
@@ -1007,8 +1012,9 @@ followed by code is critical outside prose files (.md .txt .html .xml .tex .css;
 uses a possessive quantifier, so Python 3.11+). `verdict` is dangerous (any critical) / caution /
 clean. On an update only `new_findings` count: the same (file, rule, stripped line) is the same
 finding whatever its line number. `content_hash` is a sha256 over each regular file's relative
-path and bytes (display only). Some critical rules also catch ordinary advice (`cat .env.example`,
-`rm -rf ~/build`, `nc -l 8080`): a refused skill is reworded, not forced.
+path and bytes (display only). The rules are drawn to pass ordinary advice (`cat .env.example`, a heredoc
+writing `.env`, `rm -rf ~/build`; `nc -l 8080` is only high); a skill still refused is reworded,
+not forced.
 
 **The flows.**
 - `wb skill add <name> --from <file|dir> -m "<what review taught>" [--source …] [--lesson ID…]`
@@ -1017,15 +1023,18 @@ path and bytes (display only). Some critical rules also catch ordinary advice (`
   file source replaces only SKILL.md. `git add -A -- <name>`, commit only if something changed
   (an identical re-add prints "updated" and commits nothing). Refuses the names in
   `context.denied_skills()` (`delegate` and the user's personal skills), because skill denies
-  are by name. `--lesson` closes those lessons as `skill:<name>`; when every given lesson came from
+  are by name, and `retired` (the library's own directory, refused by `check`); refuses a source
+  inside the library (it would be scanned against itself: use `patch`, or add a copy from
+  elsewhere). `--lesson` closes those lessons as `skill:<name>`; when every given lesson came from
   one repo, `cli._one_project` warns the skill may belong in that repo's `.claude/skills`.
 - `wb skill patch <name> --old … --new … -m why` (or `--old-file`/`--new-file`): the old text must
   occur exactly once in SKILL.md; the skill is copied to a temp draft, patched and re-added, so it
   is checked, scanned and committed like an add. Patch the passage that misled, in place, rather
   than appending a correction.
 - `wb skill retire <name> -m why`: `git mv <name> retired/<name>` (an older retired copy is
-  replaced; `git add -A` over the whole library first, so stray edits ride along).
-  `wb skill restore <name>`: the reverse.
+  removed first, from the disk and from the index with `git rm --cached`, touching nothing else).
+  `wb skill restore <name>`: the reverse; refused while a live skill has the name (retire it
+  first).
 - `wb skill scan <name|path>`: the scan alone; it exits 0 whatever the verdict.
 - `wb skill show <name>`: the skill and its history (`wb skill list` has the record).
 - `wb skill import <git-url|owner/repo|path> [--path <dir>] [--as <name>]` (`skills.fetch`): a
@@ -1448,7 +1457,9 @@ context blocks, the idle status line, pane auto-open, web chat listening, the ap
 "Delegate mode is on.". No `$.ui.invalidate`: rewriting the first message would cost the
 conversation's prompt cache.
 
-**Commands.** `/workbench` opens the pane and says how many tasks are open. `/delegate-quit`:
+**Commands.** `/workbench` opens the pane and says how many tasks are open; a pane the engine
+still holds but doesn't show (a tab behind another, or undrawn) is closed first, so it comes back,
+and a pane that can't be drawn here says why (`opened.reason`). `/delegate-quit`:
 delegate mode off, `wb stop --all`, a toast, and hidden context (QUIT_NOTE: don't finish,
 restart or clean up anything unless asked); it starts no turn. `/delegate-quit-and-hand-back-claude`:
 mode off, `wb takeover --all`, and DONE_NOTE queued as a turn (leave delegate mode; per task `wb
@@ -1707,7 +1718,8 @@ check-ins off), not `wb start`'s.
 `tool {tool, brief, ok, error?}` (`brief`: the input's command, path, pattern, url, query or
 description, 90 characters; a skill's id), `text {text}` (2000 characters), `step {in, out,
 cache}`, `error {text}`. From the runner: `round`, `stopped {text}`, `steer {now, by:
-"workbench"}` (a nudge), `interrupted`, `tests {ok, text}`, `skills`, `fresh {overflow}`,
+"workbench"}` (a nudge), `interrupted`, `tests {ok, text}`, `skills`, `fresh {overflow,
+compacted}`,
 `autofix`, `reading_full`, `full`. From the ask server: `ask {id}`, `answer {id}`. From `wb`:
 `spec_gap`, `next_step`, `stopped` (bail out), `resumed`, `allow`, `steer {now}`, `captain`,
 `takeover`.
@@ -1718,8 +1730,9 @@ cache}`, `error {text}`. From the runner: `round`, `stopped {text}`, `steer {now
 review included), `tok_in`, `tok_out`, `skills_offered`, `skills_loaded`, `skills_rev`, `steps`
 (one `results.step` per step), `window`, `tuned`, `explored`, `tuned_max`, `spec_gaps`, `trial`
 (when set); `commit` and `merged` on accept, `reason` on discard. A step (`results.step`): `files`,
-`lines` (added, against HEAD, new files included), `window`, `landed`, `compacted`, `handovers`
-(fresh sessions with overflow), `read_full`, `reviews`, `spec_rounds`, `stuck`, `took_over`.
+`lines` (added, against HEAD, new files included), `window`, `landed`, `compacted` (its last
+session, or one a handover replaced: a `fresh` event's `compacted`), `handovers` (fresh sessions
+with overflow), `read_full`, `reviews`, `spec_rounds`, `stuck`, `took_over`.
 
 **Other formats.**
 - `steer.jsonl`: `{ts, text, now}`. `acked`: a float timestamp as text.
@@ -1814,8 +1827,9 @@ don't skip. The event stream and the session export are only imitated by the fak
 how the runner invokes or reads OpenCode updates `fake_opencode.py` in the same commit and needs
 one real run (CLAUDE.md, *Checks before committing*).
 
-**The browser test** (`e2e_chat.mjs`): the real `bin/wb chat serve` on port 13371 against a temp
-`WB_HOME`, a fake listener claim, WebKit as an iPhone 13 and Chromium (`/usr/bin/chromium`) as a
+**The browser test** (`e2e_chat.mjs`): the real `bin/wb chat serve` on port 13371 (`WB_E2E_PORT`) against a temp
+`WB_HOME`, a fake listener claim, WebKit as an iPhone 13 and Chromium (`$CHROMIUM`, else
+`/usr/bin/chromium` when it exists, else Playwright's own) as a
 Pixel 7: the token leaves the address bar, a send lands once with its tick, the receipt, "working"
 then the reply, a message sent during an outage lands exactly once, the stream recovers, a
 reload doubles nothing, no script errors.
