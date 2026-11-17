@@ -1,0 +1,92 @@
+"""The docs say what the code does. Dated 2026-11-16, the user: "I don't want to have to do this
+again", after a whole-codebase audit found CLAUDE.md and ARCHITECTURE.md months behind the code.
+What a test can see is checked here: every command and flag is in ARCHITECTURE.md's command
+reference, every module in CLAUDE.md's layout, every environment variable in CLAUDE.md. What it
+can't (a default, a behaviour) is CLAUDE.md's rule: the commit that changes it updates the docs."""
+import argparse
+import re
+import sys
+import unittest
+from pathlib import Path
+
+ROOT = Path(__file__).resolve().parent.parent
+sys.path.insert(0, str(ROOT))
+
+from workbench import cli  # noqa: E402
+
+CLAUDE = (ROOT / "CLAUDE.md").read_text()
+ARCH = (ROOT / "ARCHITECTURE.md").read_text()
+
+
+class _Built(Exception):
+    pass
+
+
+def wb_parser() -> argparse.ArgumentParser:
+    """The parser cli.main builds, caught before it parses anything."""
+    def catch(self, *a, **k):
+        raise _Built(self)
+    real = argparse.ArgumentParser.parse_args
+    argparse.ArgumentParser.parse_args = catch
+    try:
+        cli.main([])
+    except _Built as e:
+        return e.args[0]
+    finally:
+        argparse.ArgumentParser.parse_args = real
+    raise AssertionError("cli.main never built its parser")
+
+
+def commands(parser, path=()):
+    """(the command's words, each option's spellings) for every command and subcommand."""
+    for action in parser._actions:
+        if isinstance(action, argparse._SubParsersAction):
+            for name, sub in action.choices.items():
+                opts = [a.option_strings for a in sub._actions
+                        if a.option_strings and "--help" not in a.option_strings]
+                yield (*path, name), opts
+                yield from commands(sub, (*path, name))
+
+
+def section(text: str, heading: str) -> str:
+    start = text.index(heading)
+    end = text.find("\n## ", start + len(heading))
+    return text[start:end if end > 0 else None]
+
+
+class DocsMatchTheCode(unittest.TestCase):
+    """CLAUDE.md and ARCHITECTURE.md name everything a reader looks up."""
+
+    def test_every_command_and_flag_is_in_the_command_reference(self):
+        ref = section(ARCH, "## Every `wb` command")
+        missing = []
+        for words, opts in commands(wb_parser()):
+            rows = [line for line in ref.splitlines() if f"wb {words[0]}" in line]
+            if not rows or not all(any(w in r for r in rows) for w in words[1:]):
+                missing.append("wb " + " ".join(words))
+                continue
+            for spellings in opts:  # -m or --message: either will do
+                if not any(re.search(rf"`[^`]*{re.escape(o)}\b", r) for r in rows for o in spellings):
+                    missing.append(f"wb {' '.join(words)} {spellings[-1]}")
+        self.assertEqual(missing, [], "add these to ARCHITECTURE.md's *Every `wb` command*")
+
+    def test_every_module_is_in_the_layout(self):
+        layout = section(CLAUDE, "## Layout")
+        missing = [p.name for p in sorted((ROOT / "workbench").glob("*.py"))
+                   if p.name != "__init__.py" and f"`{p.name}`" not in layout]
+        self.assertEqual(missing, [], "add these to CLAUDE.md's *Layout*")
+
+    def test_every_environment_variable_is_in_claude_md(self):
+        code = [*(ROOT / "workbench").glob("*.py"), ROOT / "mod/hooks/register.tsx"]
+        names = {n for f in code for n in re.findall(r"\bWB_[A-Z_]+\b", f.read_text())}
+        missing = sorted(n for n in names if f"`{n}`" not in CLAUDE)
+        self.assertEqual(missing, [], "add these to CLAUDE.md's *State and config*")
+
+    def test_claude_md_stays_under_claude_codes_size_warning(self):
+        # Claude Code warns past 40,000 characters, and every session that changes the code
+        # loads this file (local agents too, when workbench delegates work on itself)
+        self.assertLess(len(CLAUDE), 25_000, "move detail to ARCHITECTURE.md")
+
+
+if __name__ == "__main__":
+    unittest.main()

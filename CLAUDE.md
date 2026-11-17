@@ -9,16 +9,32 @@ The short name, `workbench`, stays on everything inside: the package, the plugin
 the README suggests (nothing depends on it: `bin/wb` finds the package from its real path, and
 the systemd unit runs `~/.local/bin/wb`).
 
-**The docs.** README.md is for people and stays simple: the pitch, a quickstart, then a pointer.
-ARCHITECTURE.md is for agents and contributors: every feature, how it works and why, every
-command and flag, every file format, the tests, and what to change together (*Couplings*). This
-file is the compact reference for changing the code. A change that alters what any of them says
-(a command, a flag, a default, a guard, a file) updates it in the same commit; new detail goes in
-ARCHITECTURE.md, not here or in README.md.
+## Keeping the docs true
+README.md is for people and stays simple: the pitch, a quickstart, then a pointer. ARCHITECTURE.md
+is for agents and contributors: every feature, how it works and why, every command and flag, every
+file format, the tests, and what to change together (*Couplings*). This file is the compact
+reference for changing the code. New detail goes in ARCHITECTURE.md, not here or in README.md.
+
+**A change isn't done until the docs say what the code now does, in the same commit.** The docs
+once fell months behind and took a whole-codebase audit to fix (2026-11-16); the user doesn't want
+that again. So before every commit:
+1. For each name the diff adds, renames, removes or changes the meaning of (a command, flag,
+   default, constant, guard, status or task.json key, event or notice kind, file, prompt text,
+   environment variable), `grep` both CLAUDE.md and ARCHITECTURE.md for it and fix every hit.
+2. Find the ARCHITECTURE.md section that describes the behaviour you changed and reread it: if
+   it no longer says what the code does, rewrite it. *Couplings* lists what else must change.
+3. A new command or flag goes in *Every `wb` command*; a new key or file in *Files and formats*;
+   a new module in this file's *Layout*; a new environment variable in *State and config*;
+   anything Claude does differently in `skill/delegate/SKILL.md`.
+4. `tests/test_docs.py` fails when a command, flag, module or environment variable is missing
+   from the docs, or this file passes 25,000 characters. It can't see defaults or behaviour:
+   steps 1 and 2 are how those stay true.
+A commit message that describes a behaviour change while the docs still describe the old one is
+the drift this rule exists to stop.
 
 ## Commands
 ```sh
-python3 -m unittest                                   # from the repo root: ~140 tests, about two minutes
+python3 -m unittest                                   # from the repo root: ~145 tests, about two minutes
 python3 -m unittest tests.test_workbench.Context      # one class (or .Context.test_…); -k handover by name
 claude plugin validate mod && claude plugin test mod  # the mod: the $ rule, then mod/hooks/register.test.tsx
 PLAYWRIGHT=…/node_modules/playwright node tests/e2e_chat.mjs   # the web chat in WebKit and /usr/bin/chromium
@@ -31,7 +47,9 @@ PATH, and the lane tests without Landlock: a skip is not a pass, so a change to 
 config layer, `gitguard.py` or `lane.py` needs them run where they don't skip.
 
 ## Checks before committing
-- `python3 -m unittest`, and `claude plugin validate mod && claude plugin test mod`.
+- The docs match the change (*Keeping the docs true*).
+- `python3 -m unittest` (`tests/test_docs.py` included), and `claude plugin validate mod &&
+  claude plugin test mod`.
 - A change to the web chat (`chat.py`, `chat_static/`): the browser test too (sends, receipts, an
   outage, a reload; WebKit as an iPhone, Chromium as a Pixel). Playwright isn't a dependency.
 - A change to how OpenCode is invoked or read (the runner's argv, the event or export fields):
@@ -93,7 +111,8 @@ dependencies. No packaging: it runs from the clone.
   own version). The repo root's `.claude-plugin/marketplace.json` makes the repo its marketplace.
 - `bin/wb`, `bin/wb-ask-mcp`: launchers that find the package from their own real path.
 - `tests/`: `test_workbench.py` (end to end, one class per feature), `test_gpu.py`,
-  `test_portable.py`, `test_sizing.py`, `fake_opencode.py`, `capture_llm.py`, `e2e_chat.mjs`.
+  `test_portable.py`, `test_sizing.py`, `test_docs.py` (the docs cover the code),
+  `fake_opencode.py`, `capture_llm.py`, `e2e_chat.mjs`.
 - `systemd/wb-chat.service`: keeps the web chat up. `docs/`: the README's images (a replaced image
   gets a new file name, for GitHub's cache).
 

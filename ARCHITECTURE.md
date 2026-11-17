@@ -1694,7 +1694,7 @@ review included), `tok_in`, `tok_out`, `skills_offered`, `skills_loaded`, `skill
 ## The tests
 
 Run from the repo root (`tests/__init__.py` makes `tests` a package; the other modules import
-`tests.test_workbench`): `python3 -m unittest` (about 140 tests in four modules; about two minutes),
+`tests.test_workbench`): `python3 -m unittest` (about 145 tests in five modules; about two minutes),
 one class or test with `python3 -m unittest tests.test_workbench.Context[.test_…]`, by name with
 `-k handover`. The mod's tests: `claude plugin validate mod && claude plugin test mod`
 (`mod/hooks/register.test.tsx`). The web chat in real browsers: `PLAYWRIGHT=…/node_modules/playwright
@@ -1712,6 +1712,9 @@ node tests/e2e_chat.mjs`.
   `XDG_CONFIG_HOME`, `CLAUDE_CONFIG_DIR`), the polling watcher (`watch._libc = False`), fit,
   budgets.
 - `tests/test_sizing.py`: the slice guess and its correction from real steps.
+- `tests/test_docs.py`: the docs cover the code: every `wb` command and flag (from `cli.main`'s
+  parser) in *Every `wb` command*, every module in CLAUDE.md's layout, every `WB_*` variable the
+  code or the mod reads in CLAUDE.md, CLAUDE.md under 25,000 characters.
 - `tests/fake_opencode.py`: the fake OpenCode; `tests/capture_llm.py`: a recording model server
   for real-OpenCode checks; `tests/e2e_chat.mjs`: the browser test.
 
@@ -1791,8 +1794,11 @@ touches the real state directory, gpu.lock or a model, so it's safe beside runni
 
 ## Couplings: change one, change the other
 
-- **A command, flag, default, guard or file** → this file, CLAUDE.md if it names it, and the
-  skill (`skill/delegate/SKILL.md`) if Claude uses it there; README only for the quickstart.
+- **Anything a reader looks up** (a command, flag, default, guard, key, file, prompt text,
+  environment variable) → this file, CLAUDE.md if it names it, and the skill
+  (`skill/delegate/SKILL.md`) if Claude uses it there; README only for the quickstart. CLAUDE.md's
+  *Keeping the docs true* is the procedure; `tests/test_docs.py` checks what it can (every command
+  and flag here, every module and environment variable in CLAUDE.md, CLAUDE.md's size).
 - **A prompt's opening words** (the heads in *The runner, inside*) → `transcript` labels,
   `round_asks`, `lessons`, the fake OpenCode, and the tests that quote them.
 - **`cli.PROTOCOL`** → the transcript's fold marker `\n---\nHow to work`, the `Lesson:` parser,
