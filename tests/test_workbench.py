@@ -1728,6 +1728,37 @@ class Update(Base):
         store.write_json(store.home() / "update.json", {"checked_at": 0, "behind": 2})
         self.assertIn("2 new commit(s)", self.update("--check", "--if-due"))   # no network at all
 
+    def test_the_weekly_answer_follows_a_pull_made_elsewhere(self):
+        # the audit: the cached count stood for a week after a hand pull (or Claude Code's own
+        # update) had installed the news, and every load toasted it
+        self.assertIn("1 new commit(s)", self.update("--check"))
+        subprocess.run(["git", "-C", str(self.copy), "pull", "-q", "--ff-only"], check=True)
+        self.assertIn("up to date", self.update("--check", "--if-due"))
+
+    def test_the_check_keeps_the_users_ssh_command(self):
+        # the audit: GIT_SSH_COMMAND='ssh -o BatchMode=yes' replaced core.sshCommand, so a clone
+        # that needs its own key never heard of an update
+        marker = Path(self.tmp.name) / "ssh-ran"
+        ssh = Path(self.tmp.name) / "myssh"
+        ssh.write_text(f"#!/bin/sh\necho \"$@\" > {shlex.quote(str(marker))}\nexit 1\n")
+        ssh.chmod(0o755)
+        git = lambda *a: subprocess.run(["git", "-C", str(self.copy), *a], check=True)  # noqa
+        git("remote", "set-url", "origin", "ssh://git@example.invalid/workbench.git")
+        git("config", "core.sshCommand", str(ssh))
+        os.environ.pop("GIT_SSH_COMMAND", None)
+        self.assertIn("couldn't check for an update", self.update("--check"))
+        self.assertIn("example.invalid", marker.read_text())
+
+    def test_without_claude_on_path_an_update_changes_nothing(self):
+        # the audit: a clone pulled, then died with a traceback at the claude step
+        os.environ["CLAUDE_CONFIG_DIR"] = str(Path(self.tmp.name) / "elsewhere")   # a clone
+        only_git = Path(self.tmp.name) / "only-git"
+        only_git.mkdir()
+        (only_git / "git").symlink_to(shutil.which("git"))
+        os.environ["PATH"] = str(only_git)
+        self.assertIn("claude isn't on PATH", self.update())
+        self.assertFalse((self.copy / "new.txt").exists())
+
     def test_a_marketplace_copy_updates_through_claude_code(self):
         out = self.update()
         self.assertIn("already up to date", out)        # the fake claude pulled nothing

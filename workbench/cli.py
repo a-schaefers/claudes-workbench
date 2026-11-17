@@ -1480,6 +1480,28 @@ def cmd_setup(a):
 UPDATE_EVERY = 7 * 24 * 3600  # the mod's weekly check (wb update --check --if-due)
 
 
+def _fetch_origin() -> None:
+    """The update check's fetch: never prompts and never hangs. The user's own ssh command
+    (GIT_SSH_COMMAND, GIT_SSH, core.sshCommand) is kept, as replacing it picked the wrong key for
+    good; with none, ssh runs in BatchMode. No terminal, so nothing can ask, and a time limit
+    inside the mod's (the 2026-11-16 audit)."""
+    env = {**os.environ, "GIT_TERMINAL_PROMPT": "0", "SSH_ASKPASS_REQUIRE": "never"}
+    if not (env.get("GIT_SSH_COMMAND") or env.get("GIT_SSH")
+            or gitops.git(PKG_ROOT, "config", "core.sshCommand", check=False).strip()):
+        env["GIT_SSH_COMMAND"] = "ssh -o BatchMode=yes -o ConnectTimeout=15"
+    try:
+        r = subprocess.run(["git", "-C", str(PKG_ROOT), "fetch", "-q", "origin"], env=env,
+                           capture_output=True, stdin=subprocess.DEVNULL, start_new_session=True,
+                           timeout=FETCH_SECS)
+    except subprocess.TimeoutExpired:
+        raise gitops.GitError(f"origin didn't answer in {FETCH_SECS}s") from None
+    if r.returncode:
+        raise gitops.GitError(r.stderr.decode("utf-8", "replace").strip() or "git fetch failed")
+
+
+FETCH_SECS = 60  # under the mod's 120 s for a wb command
+
+
 def cmd_update(a):
     """Bring this copy up to date with its origin: the marketplace's clone through Claude Code
     (which also refreshes the mod's cached copy), a developer's clone with a fast-forward pull.
@@ -1491,14 +1513,17 @@ def cmd_update(a):
     if a.check:
         quiet = os.environ.get("CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC")
         if a.if_due and (quiet or time.time() - last.get("checked_at", 0) < UPDATE_EVERY):
-            behind = last.get("behind", 0)  # the last answer stands until the next check
+            try:  # no network: the last fetch's upstream against HEAD as it is now, which a hand
+                # pull or Claude Code's own update moved (a stale count toasted for a week: the audit)
+                behind = int(gitops.git(PKG_ROOT, "rev-list", "--count", "HEAD..@{u}"))
+            except (gitops.GitError, ValueError):
+                behind = last.get("behind", 0)
         else:
-            try:  # never prompts: a check that can't reach origin says so and tries again next week
-                gitops.git(PKG_ROOT, "fetch", "-q", "origin",
-                           env={"GIT_TERMINAL_PROMPT": "0", "GIT_SSH_COMMAND": "ssh -o BatchMode=yes"})
+            store.write_json(path, {**last, "checked_at": time.time()})  # a killed check waits too
+            try:
+                _fetch_origin()
                 behind = int(gitops.git(PKG_ROOT, "rev-list", "--count", "HEAD..@{u}"))
             except gitops.GitError as e:
-                store.write_json(path, {**last, "checked_at": time.time()})
                 die(f"couldn't check for an update: {e}")
             store.write_json(path, {"checked_at": time.time(), "behind": behind, "kind": kind})
         print(f"update available: {behind} new commit(s); /delegate-update (or wb update) installs it"
@@ -1513,11 +1538,23 @@ def cmd_update(a):
         if gitops.git(PKG_ROOT, "status", "--porcelain", "--untracked-files=no").strip():
             die(f"{PKG_ROOT} has uncommitted changes: commit or stash them, then wb update")
         steps.insert(0, ["git", "-C", str(PKG_ROOT), "pull", "-q", "--ff-only"])
+    if not shutil.which("claude"):  # before the pull: a clone once pulled, then died (the audit)
+        die("claude isn't on PATH: wb update refreshes the plugin through it (run /delegate-update "
+            "in Claude Code, or put claude on PATH)")
     before = gitops.git(PKG_ROOT, "rev-parse", "HEAD").strip()
+    pulled = ""
     for step in steps:
-        r = subprocess.run(step, capture_output=True, text=True, timeout=300)
-        if r.returncode:
-            die(f"{' '.join(step[:4])} failed: {(r.stderr or r.stdout).strip()[-300:]}")
+        try:
+            r = subprocess.run(step, capture_output=True, text=True, timeout=300)
+            err = (r.stderr or r.stdout).strip()[-300:] if r.returncode else None
+        except (OSError, subprocess.TimeoutExpired) as e:
+            err = str(e)
+        if err is not None:
+            die(f"{' '.join(step[:4])} failed: {err}" + pulled)
+        if step[0] == "git":  # landed: the count is 0 whatever the claude steps do next
+            store.write_json(path, {"checked_at": time.time(), "behind": 0, "kind": kind})
+            pulled = ("; the pull is done: finish with claude plugin marketplace update workbench "
+                      "&& claude plugin update workbench@workbench, then /reload-plugins")
     after = gitops.git(PKG_ROOT, "rev-parse", "HEAD").strip()
     store.write_json(path, {"checked_at": time.time(), "behind": 0, "kind": kind})
     if before == after:
