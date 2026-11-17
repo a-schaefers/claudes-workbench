@@ -23,7 +23,7 @@ from pathlib import Path
 from . import skills, store
 
 FEEDBACK_HEAD = "Review feedback from the senior reviewer."
-ITEM = re.compile(r"^\s*(?:\d+[.)]|[-*•])\s+")
+ITEM = re.compile(r"^\s*\d+[.)]\s+")
 LESSON = re.compile(r"^\s*(?:[-*]\s*)?\**lesson\**\s*:\**\s*(.+)$", re.I | re.M)
 SIMILAR = 0.35  # word overlap (Jaccard) at which two corrections are the same lesson
 
@@ -37,21 +37,24 @@ def _id(task: str, kind: str, rnd, text: str) -> str:
 
 
 def items(feedback: str) -> list[str]:
-    """A feedback round's corrections, one per numbered or bulleted item (continuation lines
-    joined); the whole text when it isn't a list."""
-    out, cur = [], []
-    for line in feedback.splitlines():
+    """A feedback round's corrections, one per numbered item (the lines under it joined, its
+    bullets too: they are the evidence for it, not corrections of their own); the whole text,
+    as one, when nothing is numbered."""
+    lines = feedback.splitlines()
+    if not any(ITEM.match(line) for line in lines):
+        whole = " ".join(line.strip() for line in lines if line.strip())
+        return [whole[:600]] if len(whole) > 8 else []
+    out, cur = [], None
+    for line in lines:
         if ITEM.match(line):
             if cur:
                 out.append(" ".join(cur))
             cur = [ITEM.sub("", line).strip()]
-        elif line.strip() and cur:
+        elif line.strip() and cur is not None:
             cur.append(line.strip())
-        elif line.strip() and not out:
-            cur = [line.strip()]
     if cur:
         out.append(" ".join(cur))
-    return [x[:400] for x in out if len(x) > 8]
+    return [x[:600] for x in out if len(x) > 8]
 
 
 def gather(task: store.Task, outcome: str | None = None) -> list[dict]:

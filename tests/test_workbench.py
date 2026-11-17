@@ -1530,6 +1530,17 @@ class SkillLearning(Base):
         self.assertIn("closed:", run_wb("lessons", "close", ids[0], "-m", "a one-task detail"))
         self.assertNotIn(ids[0], [x["id"] for x in lessons.survey()])
 
+    def test_a_correction_is_one_lesson_with_its_evidence(self):
+        from workbench import lessons
+        prose = ("One bug in the parser remains: a blank line is skipped when rows are counted.\n\n"
+                 "- `\"a\\n\\nb\"` returns true with two rows.\n- `\"a\\n\\n\"` is accepted.\n\n"
+                 "Reject an empty row unless it is the single trailing newline.")
+        self.assertEqual(len(lessons.items(prose)), 1)
+        self.assertIn("Reject an empty row", lessons.items(prose)[0])
+        listed = "Two things:\n1. Close the file.\n   - it leaks on error\n2. Check the return value of read."
+        self.assertEqual(lessons.items(listed), ["Close the file. - it leaks on error",
+                                                 "Check the return value of read."])
+
     def test_an_agents_lesson_from_a_discarded_task_is_not_kept(self):
         from workbench import lessons
         os.environ["FAKE_LESSON"] = "retry the build three times until it passes"

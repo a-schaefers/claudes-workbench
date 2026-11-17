@@ -34,6 +34,8 @@ anything here.
 - Run the acceptance command and the tests nearest your change. Read the whole failure output.
 - Fix the cause, not the symptom. Never weaken, skip, delete or special-case a test to make it
   pass, and never hard-code expected outputs.
+- A number the spec works out (an expected position, a count, a size) is the answer. When a test
+  built on one fails, your code has drifted from the spec: find where, don't adjust the number.
 - If the same approach fails twice, stop and rethink: re-read the code and the error, form a new
   hypothesis, try something different. Do not repeat a failing command unchanged.
 
