@@ -156,6 +156,22 @@ class Lifecycle(Base):
         self.assertTrue(st["tests"]["ok"])
         self.assertEqual(st["reviews"], 1)
 
+    def test_empty_feedback_or_an_empty_answer_is_refused_and_sends_nothing(self):
+        # the audit: an empty --text (or a heredoc gone wrong) cost a round with nothing to do, and
+        # an empty answer unblocked the agent's question with nothing
+        self.start("t-empty", "ok")
+        before = wait_phase("t-empty", {"review"})
+        for argv in (("feedback", "t-empty", "--text", "  "), ("answer", "t-empty", "--id", "q1",
+                                                               "--text", "\n")):
+            (store.Task("t-empty").dir / "ask").mkdir(exist_ok=True)
+            (store.Task("t-empty").dir / "ask/q1.json").write_text("{}")
+            with self.assertRaises(SystemExit), redirect_stderr(io.StringIO()):
+                run_wb(*argv)
+        st = store.Task("t-empty").status
+        self.assertEqual((st["round"], st["reviews"], st["phase"]),
+                         (before["round"], before["reviews"], "review"))
+        self.assertFalse((store.Task("t-empty").dir / "ask/q1.answer").exists())
+
     def test_loop_is_stopped_as_stuck(self):
         self.start("t-loop", "loop")
         st = wait_phase("t-loop", {"stuck"})
@@ -1547,6 +1563,20 @@ class Routing(Base):
         del os.environ["FAKE_LESSON"]
         self.assertNotIn("lessons:", out)
         self.assertTrue(store.read_jsonl(store.home() / "results.jsonl")[0][-1]["trial"])
+
+    def test_wb_trial_refuses_an_open_task_and_keeps_its_lessons(self):
+        # the audit: on an open task it marked nothing (no results row yet), dropped its lessons,
+        # and the task's accept later counted as evidence
+        from workbench import lessons
+        self.start("t-open", "ok")
+        wait_phase("t-open", {"review"})
+        store.append_jsonl(lessons.path(), {"ts": 0, "task": "t-open", "id": "aaaaaa",
+                                            "kind": "feedback", "round": 2, "text": "keep me"})
+        err = io.StringIO()
+        with self.assertRaises(SystemExit), redirect_stderr(err):
+            run_wb("trial", "t-open", "nope")
+        self.assertIn("t-open still open", err.getvalue())
+        self.assertNotIn("aaaaaa", lessons._all()[1])
 
     def test_set_default_writes_the_pick_to_opencode(self):
         out = run_wb("models", "--set-default")

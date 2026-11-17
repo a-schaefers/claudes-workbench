@@ -282,6 +282,8 @@ def cmd_feedback(a):
         die(f"{a.name}'s runner is still running")
     text = a.text if a.text is not None else \
         sys.stdin.read() if a.message == "-" else Path(a.message).read_text(encoding="utf-8")
+    if not text.strip():  # before anything is written: an empty one cost a round (the audit)
+        die("the feedback is empty")
     _spec_gaps(task, a.spec_gap)
     n = st.get("round", 1) + 1
     task.round_dir(n).mkdir(parents=True, exist_ok=True)
@@ -369,7 +371,9 @@ def cmd_answer(a):
     q = task.dir / "ask" / f"{qid}.json"
     if not q.exists():
         die(f"no question {qid} in {a.name}")
-    text = a.text if a.text is not None else Path(a.file).read_text()
+    text = a.text if a.text is not None else Path(a.file).read_text(encoding="utf-8")
+    if not text.strip():  # the question stays open: an empty answer unblocked the agent (the audit)
+        die("the answer is empty")
     tmp = task.dir / "ask" / f".{qid}.{os.getpid()}.tmp"  # the ask server polls: never half a file
     tmp.write_text(text.strip() + "\n")
     os.replace(tmp, task.dir / "ask" / f"{qid}.answer")
@@ -848,7 +852,14 @@ def cmd_tune(a):
 
 
 def cmd_trial(a):
-    """Closed tasks that were checks of workbench itself, not work: their results stop counting."""
+    """Closed tasks that were checks of workbench itself, not work: their results stop counting.
+    An open task is refused: it has no results row yet, so it was marked as nothing while its
+    lessons were dropped, and its accept later counted (the 2026-11-16 audit)."""
+    live = [n for n in a.names if store.Task(n).exists
+            and store.Task(n).status.get("phase") not in store.CLOSED]
+    if live:
+        die(f"{', '.join(live)} still open: wb trial marks closed tasks (wb start --trial marks "
+            "one up front)")
     hit = store.mark_trials(set(a.names))
     open_ = [i for i, x in lessons._all()[0].items() if x["task"] in a.names]
     shut = lessons.close(open_, "dropped", "a trial run: a check of workbench, not work")
