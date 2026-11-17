@@ -641,7 +641,10 @@ deliberately hostile process (the 2026-11-16 audit's list of what it can't stop 
   there (the 2026-11-16 audit). Then the temp directories (`gettempdir()`, `TEMP_ROOTS`: `/tmp`, `/var/tmp`), the device nodes builds
   use (`DEV_NODES`: `/dev/null`, `/dev/zero`, `/dev/full`, `/dev/random`, `/dev/urandom`,
   `/dev/tty`, `/dev/ptmx`, `/dev/shm`; not the rest of `/dev`, the user's terminals and input
-  devices, and not `/dev/pts`: a task that needs it or a GPU asks), `/proc`, the build caches and
+  devices, and not `/dev/pts`: a task that needs it or a GPU asks; `/dev/ptmx` alone opens no
+  pty, since Landlock checks the `/dev/pts/N` it hands out ("out of pty devices"), and is kept
+  so that a `/dev/pts` grant is all a pty-driven test needs, which the skill and the handbook
+  say), `/proc`, the build caches and
   toolchain homes under `$HOME` (`TOOL_HOMES`: `.cache`, `.cargo`, `.rustup`, `go/pkg`, `.npm`,
   `.bun/install/cache`, `.yarn`, `.pnpm-store`, `.local/share/pnpm/store`, `.local/share/uv`,
   `.gradle`, `.m2`, `.nuget`, `.dotnet`, `.gem`, `.julia`, `.cabal`, `.stack`, `.ghcup`,
@@ -662,9 +665,16 @@ deliberately hostile process (the 2026-11-16 audit's list of what it can't stop 
   `wb allow --path`. A place holding one of those, an existing secret or workbench's own files
   (`private_paths`, below) is split: its other
   entries are granted one by one (Landlock only allows), so a new top-level file there is refused.
+  So before the split, a cargo home (`~/.cargo`, `$CARGO_HOME`) holding `bin` or `env` gets what
+  cargo makes at its top made for it (`CARGO_MADE`: `registry/`, `git/`, `.package-cache`,
+  `.package-cache-mutate`, `.global-cache`): the 0.90 review found a fresh rustup install
+  refusing every build with a dependency, and any git dependency where `git/` didn't exist yet.
   No entry may resolve to `/` or the home directory, nor contain the task's repo or its git
   directory (`repo_dirs`: with `GOPATH=~/src` or the repo in `~/go/src`, the agent could write a
-  hook or `core.fsmonitor` that wb's own git runs outside the lane); the temp directories are
+  hook or `core.fsmonitor` that wb's own git runs outside the lane): a place holding them is split
+  around them like a secret holder (a grant of `~/work` beside the repo `~/work/api` grants
+  `~/work/web`; until the 0.90 review it was dropped whole while `wb allow` said it was granted),
+  and one naming the repo or a place inside it grants nothing; the temp directories are
   kept whole even so (a repo kept in `/tmp` stays in reach: splitting `/tmp` would refuse every
   new file there). `$XDG_RUNTIME_DIR` isn't in the lane (the user's bus, SSH and GPG agent
   sockets and runtime systemd units live there): the agent gets its own (`runtime_dir`,
@@ -696,11 +706,15 @@ deliberately hostile process (the 2026-11-16 audit's list of what it can't stop 
   `HOME_READABLE` (`bin`, `go`, `R`, `perl5`) are readable, and of `ONLY_KEPT` (`/dev`, `/mnt`,
   the Windows drives on WSL2, `/media`, `/run/media`, `/run/user`, `/home`, the other users'
   homes) nothing; beyond those, the task's repo (its secrets left out even when it holds some: a
-  repo at `~/.config`), workbench itself (even inside Claude's directory, the marketplace
+  repo at `~/.config`) and its git common directory (`repo_dirs`: outside the repo when it is a
+  linked worktree, where git failed in the lane before the 0.90 review; read-only), workbench itself (even inside Claude's directory, the marketplace
   install), the lane, and the programs the agent runs (`tool_roots`: each PATH directory, the
-  prefix of one under the home (its parent when it is a `bin`, so `~/miniconda3` or `~/flutter`),
-  the install a link in the home's PATH directories points into, and the Python running
-  workbench; never `/`, the home directory or a parent of a secret), not the user's documents or
+  prefix of one under the home (its parent when it is a `bin`, so `~/miniconda3` or `~/flutter`)
+  or under an `ONLY_KEPT` root short of a user's home or a whole drive (Linuxbrew's
+  `/home/linuxbrew/.linuxbrew`; not `/home/<x>`, `/mnt/<drive>`, `/mnt/c/Users/<x>` or
+  `/media/<user>/<drive>`, which give the PATH directory alone: the 0.90 review found Linuxbrew's
+  `../Cellar` hidden), the install a link in those PATH directories points into, and the Python
+  running workbench; never `/`, the home directory or a parent of a secret), not the user's documents or
   other projects. Running a program reads it, so a program the walk leaves out can't start
   (`workbench lane: can't run <cmd> (Permission denied)`, exit 126; not found, 127): add its
   directory to `commands.json` `paths`. Landlock only allows, so `readable()` walks down from `/`
@@ -712,8 +726,14 @@ deliberately hostile process (the 2026-11-16 audit's list of what it can't stop 
   rights: file writes, removes and every make, plus refer (ABI 2: moves inside the lane work)
   and truncate (ABI 3), file reads when `--reads` is given, and from ABI 9 connecting to a UNIX
   socket made outside the lane, granted only beneath `--unix` (`context.unix_paths`: the
-  `commands.json` and grant `paths`, so `wb allow --path /run/postgresql` reaches a test
-  database), so the session bus (and through it `systemd-run`), the keyring and the SSH and GPG
+  `SYSTEM_SOCKETS` that exist, the socket files alone, which hold nothing of the user's: the log
+  (`/dev/log`, `/run/systemd/journal/socket` and `stdout`) and name and user lookups (resolved's
+  `io.systemd.Resolve`, userdb's `io.systemd.Multiplexer`, `/run/nscd/socket`, sssd's
+  `pipes/nss`), so `logger` and `resolvectl` work, not the system bus; and the
+  `commands.json` and grant `paths`, split around secrets and workbench's own files as the reads
+  and writes are, so `wb allow --path /run/postgresql` reaches a test database; a `--unix` rule
+  carries the socket right alone, since the 0.90 review found its read right made a granted
+  `~/.config`'s gh token readable again), so the session bus (and through it `systemd-run`), the keyring and the SSH and GPG
   agents are out of reach; sockets the lane's own processes make stay theirs. From ABI 6 it also
   scopes signals and abstract UNIX sockets: the agent can signal only what it started, not its
   runner, other tasks, the chat or Claude Code, while the runner can still stop it. Directories
@@ -2242,7 +2262,7 @@ delivered as taken (`_stale_notes`, *Notes*).
 ### Running tasks
 | Command | Flags (defaults) | What it does |
 |---|---|---|
-| `wb start <task> --spec <file\|->` | `--repo` (.), `--size trivial\|significant` (significant), `--model <id or fragment>`, `--test <cmd>`, `--auto-fix N` (2), `--checkin MIN` (10 significant, 0 trivial), `--ask-budget N` (2), `--ask-timeout S` (1200), `--round-timeout S`, `--silence-timeout S`, `--think-timeout S` (0 off; unset or 0 for the other two: the measured budgets), `--test-timeout S` (900), `--no-base-check`, `--base REF` (HEAD), `--skill NAME…`, `--allow PATTERN…`, `--allow-path DIR…`, `--force` (queue a `--model` that can't run now; the hint is offered only when its server is just down), `--queue` (start although the GPU's holders leave no room: wait behind them), `--trial`, `--no-claude-md` | Checks the name (`^[a-z0-9][a-z0-9-]{0,47}$`, never reused), the repo (with the lane on, `_lane_fits` refuses one that is the home directory or lies where credentials live, and a `--test` whose command is a snap), the spec and the skills, and that opencode is on PATH; picks the model (router, or `--model`; none runnable: exit 3, with each model's next step); refuses a repo that is a task's worktree, a `--base` that names no commit (`no commit <base> in <repo>`) and a repo with no git identity; checks `CLAUDE.md` or `.claude/CLAUDE.md` is committed at the base (or CLAUDE.md gitignored: the checkout's copy); refuses when another task (or `wb image`) holds the GPU and the model can't run beside it (exit 4, naming each holder's task, repo and model; `--queue` overrides); makes the worktree and branch `delegate/<task>` (no checkout hook; a failed add leaves nothing); notes submodules it doesn't check out; writes task.json, round 1's prompt (spec + PROTOCOL) and status; spawns the runner and returns at once. Prints the model and why, the slice, Claude's spec record, the handed or suggested skills, notes, `next: wb wait <task>`. With `--test` (and not `--no-base-check`, task.json `no_base_check`) the runner first runs the acceptance command once on the base (*The base check*: at most `BASE_CHECK_SECS` = 120 s, or `--test-timeout` when shorter; `base-tests.txt`, status `base_check`); what it saw comes in the first report, and a check-in at once when it already passes or `--test-timeout` cut it short. |
+| `wb start <task> --spec <file\|->` | `--repo` (.), `--size trivial\|significant` (significant), `--model <id or fragment>`, `--test <cmd>`, `--auto-fix N` (2), `--checkin MIN` (10 significant, 0 trivial), `--ask-budget N` (2), `--ask-timeout S` (1200), `--round-timeout S`, `--silence-timeout S`, `--think-timeout S` (0 off; unset or 0 for the other two: the measured budgets), `--test-timeout S` (900), `--no-base-check`, `--base REF` (HEAD), `--skill NAME…`, `--allow PATTERN…`, `--allow-path DIR…`, `--force` (queue a `--model` that can't run now; the hint is offered only when its server is just down), `--queue` (start although the GPU's holders leave no room: wait behind them), `--trial`, `--no-claude-md` | Checks the name (`^[a-z0-9][a-z0-9-]{0,47}$`, never reused), the repo (with the lane on, neither commands.json `"paths": ["*"]` nor `--allow-path '*'` turning it off, `_lane_fits` refuses one that is the home directory or lies where credentials live, and a `--test` whose command is a snap), the spec and the skills, and that opencode is on PATH; picks the model (router, or `--model`; none runnable: exit 3, with each model's next step); refuses a repo that is a task's worktree, a `--base` that names no commit (`no commit <base> in <repo>`) and a repo with no git identity; checks `CLAUDE.md` or `.claude/CLAUDE.md` is committed at the base (or CLAUDE.md gitignored: the checkout's copy); refuses when another task (or `wb image`) holds the GPU and the model can't run beside it (exit 4, naming each holder's task, repo and model; `--queue` overrides); makes the worktree and branch `delegate/<task>` (no checkout hook; a failed add leaves nothing); notes submodules it doesn't check out; writes task.json, round 1's prompt (spec + PROTOCOL) and status; spawns the runner and returns at once. Prints the model and why, the slice, Claude's spec record, the handed or suggested skills, notes, `next: wb wait <task>`. With `--test` (and not `--no-base-check`, task.json `no_base_check`) the runner first runs the acceptance command once on the base (*The base check*: at most `BASE_CHECK_SECS` = 120 s, or `--test-timeout` when shorter; `base-tests.txt`, status `base_check`); what it saw comes in the first report, and a check-in at once when it already passes or `--test-timeout` cut it short. |
 | `wb feedback <task> --text "…" \| --message <file\|->` | `--fresh` \| `--keep-context`, `--spec-gap "…"…` | Reaps a dead runner first (`reap`). Phase review/stuck/failed and no live runner; empty text is refused before anything is written. Writes the next round's prompt (FEEDBACK_HEAD + "Make exactly these changes, then re-run the acceptance command and finish with a short summary:" (the re-run only when there is one) + the text), reviews+1, spawns the runner. Warns past three review rounds; prints each undelivered note it dropped ("not delivered, dropped …"). A note names the GPU's holders when it will wait for them. Gathers lessons. |
 | `wb next <task> --spec <file> -m "…"` | `--test` (replaces the acceptance command), `--skill` (replaces the set), `--fresh`, `--allow PATTERN…` (adds to the task's grants), `--spec-gap` | Phase review. Reads the spec (a file or `-`; empty or unreadable: nothing changes), records the step's size and fit, commits the work (`<m>` + `Workbench-Task: <task> (step N)` + `OpenCode-Session:`), writes the next step's prompt ("Step N of this task is done and committed (<sha>). The next step:" + spec + PROTOCOL), records the spec gaps, resets reviews, spawns. Says whether the next step gets a fresh session and why (`runner.fresh_reason`), each undelivered note it dropped, and names the GPU's holders when it will wait for them. Gathers lessons. |
 | `wb answer <task> --text "…" \| --file <f>` | `--id` (the pending question) | Writes `ask/<id>.answer` (atomically, never through a link: `ask_mcp.write_answer`); the blocked `ask_reviewer` returns it. An empty answer is refused: the question stays open. |

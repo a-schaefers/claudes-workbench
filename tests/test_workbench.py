@@ -2172,6 +2172,27 @@ class Lane(Base):
                              capture_output=True, text=True, timeout=20)
         self.assertEqual(out.stdout.split(), ["refused"] * 4 + ["wrote"] * 2, out.stderr)
 
+    @unittest.skipUnless(lane.abi(), "needs Landlock")
+    def test_a_granted_directory_that_holds_secrets_keeps_them_unreadable_through_the_socket_rule(self):
+        # the 0.90 review: the --unix rule gave READ_FILE to the whole grant, so a granted
+        # ~/.config handed the agent the gh token and the chat token again
+        home = self.fake_home()
+        os.environ.pop("WB_CHAT_TOKEN", None)
+        files = {"gh": home / ".config" / "gh" / "hosts.yml",
+                 "token": home / ".config" / "workbench" / "chat-token",
+                 "app": home / ".config" / "app.toml"}
+        for f in files.values():
+            f.parent.mkdir(parents=True, exist_ok=True)
+            f.write_text("x")
+        Path(os.environ["WB_COMMANDS"]).write_text(json.dumps({"paths": [str(home / ".config")]}))
+        task = self.bare_task("t-unix", self.repo)
+        unix = context.unix_paths(task)
+        self.assertIn(str(home / ".config" / "app.toml"), unix)
+        self.assertFalse([p for p in unix if p in (str(home / ".config"), str(files["gh"].parent))
+                          or "workbench" in p])
+        got = dict(zip(files, self.reads_in_lane(task, files.values(), (unix,))))
+        self.assertEqual(got, {"gh": "refused", "token": "refused", "app": "read"})
+
     def test_wb_allow_path_refuses_a_link_and_the_places_the_lane_hides(self):
         # the agent planted /tmp/out -> another directory and asked for /tmp/out: the grant went
         # to the target; ~/.config/workbench would have handed it the chat token (the audit)
@@ -2281,6 +2302,24 @@ class Lane(Base):
         self.assertIn(str(home / "perl5"), r)
         self.assertNotIn(str(home / "letters"), r)
 
+    def test_a_fresh_cargo_home_gets_its_caches_made_so_the_split_grants_them(self):
+        # the 0.90 review: ~/.cargo split around bin/ and env granted only what existed, so a
+        # fresh rustup install couldn't make registry/ and a git dependency couldn't make git/
+        home = self.fake_home()
+        moved = home / "cargohome"
+        for c in (home / ".cargo", moved):
+            (c / "bin").mkdir(parents=True)
+            (c / "env").write_text("export PATH")
+        os.environ["CARGO_HOME"] = str(moved)
+        (home / ".dotnet").mkdir()                      # no bin or env: never made
+        task = self.bare_task("t-cargo", self.repo)
+        w = context.writable(task)
+        for c in (home / ".cargo", moved):
+            for n in ("registry", "git", ".package-cache", ".package-cache-mutate", ".global-cache"):
+                self.assertIn(str(c / n), w)
+            self.assertFalse([q for q in w if q in (str(c), str(c / "bin"), str(c / "env"))])
+        self.assertEqual(os.listdir(home / ".dotnet"), [])
+
     @unittest.skipUnless(lane.abi(), "needs Landlock")
     def test_secrets_stay_unreadable_inside_tool_homes_and_where_variables_moved_them(self):
         home = self.fake_home()
@@ -2342,6 +2381,69 @@ class Lane(Base):
                              capture_output=True, text=True, timeout=20)
         self.assertEqual((out.returncode, out.stderr.split(":")[0]), (127, "workbench lane"))
 
+    @unittest.skipUnless(lane.abi(), "needs Landlock")
+    def test_linuxbrew_under_a_kept_only_root_runs_in_the_lane_but_other_homes_stay_out(self):
+        # the 0.90 review: with /home ONLY_KEPT, Linuxbrew's bin/ was readable but not the
+        # ../Cellar its links point into, so the tool failed with Permission denied
+        root = Path(tempfile.mkdtemp(dir=Path.home(), prefix=".wb-kept-"))  # not in the lane
+        self.addCleanup(shutil.rmtree, root, True)
+        self.fake_home()                                # beside it, so root isn't in the home
+        brew = root / "linuxbrew" / ".linuxbrew"
+        cellar = brew / "Cellar" / "tool" / "1.0" / "bin"
+        for d in (cellar, brew / "bin", brew / "lib", root / "bob" / "bin"):
+            d.mkdir(parents=True)
+        shutil.copy("/bin/true", cellar / "tool")
+        os.symlink("../Cellar/tool/1.0/bin/tool", brew / "bin" / "tool")
+        (root / "bob" / "letters.txt").write_text("private")
+        os.environ["PATH"] = os.pathsep.join([str(brew / "bin"), str(root / "bob" / "bin"),
+                                              os.environ["PATH"]])
+        task = self.bare_task("t-brew", self.repo)
+        with mock.patch.object(context, "ONLY_KEPT", (str(root),)):
+            r = context.readable(task)
+            self.assertIn(str(brew), r)                 # Cellar and lib beside bin
+            self.assertIn(str(root / "bob" / "bin"), r)  # a user's home: the directory alone
+            self.assertFalse([p for p in r if p in (str(root), str(root / "bob"),
+                                                    str(root / "linuxbrew"))])
+            out = subprocess.run(lane.wrap(context.writable(task), [str(brew / "bin" / "tool")], r),
+                                 capture_output=True, text=True, timeout=20)
+            self.assertEqual(out.returncode, 0, out.stderr)
+            self.assertEqual(self.reads_in_lane(task, [root / "bob" / "letters.txt"]), ["refused"])
+
+    def test_a_grant_that_holds_the_repo_grants_the_places_beside_it(self):
+        # the 0.90 review: `wb allow --path ~/work` with the repo at ~/work/api said "allowed"
+        # and granted nothing, so the agent asked again
+        work = Path(self.tmp.name) / "work"
+        (work / "web").mkdir(parents=True)
+        subprocess.run(["git", "init", "-q", str(work / "api")], check=True)
+        Path(os.environ["WB_COMMANDS"]).write_text(json.dumps({"paths": [str(work)]}))
+        task = self.bare_task("t-beside", work / "api")
+        w = context.writable(task)
+        self.assertIn(str(work / "web"), w)
+        self.assertFalse([p for p in w if p in (str(work), str(work / "api"))
+                          or p.startswith(str(work / "api") + "/")])
+
+    @unittest.skipUnless(lane.abi(), "needs Landlock")
+    def test_a_repo_that_is_a_linked_worktree_has_git_working_in_the_lane(self):
+        # the 0.90 review: the common git directory lay outside every kept path, so git failed
+        # with "gitfile does not point to a valid repository" (a fake home: /tmp is in the lane)
+        home = self.fake_home()
+        main, linked = home / "proj", home / "proj-feature"
+        g = lambda *a: subprocess.run(["git", *a], check=True, capture_output=True)  # noqa: E731
+        g("init", "-q", str(main))
+        (main / "a.txt").write_text("a\n")
+        g("-C", str(main), "add", ".")
+        g("-C", str(main), "-c", "user.email=t@t", "-c", "user.name=t", "commit", "-qm", "init")
+        g("-C", str(main), "worktree", "add", "-q", str(linked))
+        task = self.bare_task("t-linked", linked)
+        r = context.readable(task)
+        self.assertIn(str(main / ".git"), r)
+        self.assertNotIn(str(main), r)                  # the git directory, not the main checkout
+        self.assertFalse([p for p in context.writable(task) if p.startswith(str(main))])
+        out = subprocess.run(lane.wrap(context.writable(task), ["git", "-C", str(linked), "status",
+                                                                "--short"], r),
+                             capture_output=True, text=True, timeout=20)
+        self.assertEqual(out.returncode, 0, out.stderr)
+
     def test_a_repo_that_holds_secrets_keeps_them_out_and_the_home_is_refused(self):
         home = self.fake_home()
         for d in (".config/gh", ".config/app"):
@@ -2367,7 +2469,15 @@ class Lane(Base):
             with redirect_stderr(err), self.assertRaises(SystemExit):
                 self.start("t-snap", "ok", "--test", "go test ./...")
         self.assertIn("go is a snap", err.getvalue())
+        self.assertIn("--allow-path '*'", err.getvalue())
         self.assertFalse(store.Task("t-snap").exists)
+
+    def test_a_task_started_with_its_lane_off_is_not_refused_for_the_lane(self):
+        # the 0.90 review: `wb start --allow-path '*'` (the lane off for this task) was refused
+        # a snap --test or a home-directory repo all the same, pointing only at commands.json
+        with mock.patch.object(context, "snaps", return_value=["go"]):
+            self.start("t-snap-off", "ok", "--test", "go test ./...", "--allow-path", "*")
+        self.assertEqual(context.grants(store.Task("t-snap-off"))["paths"], ["*"])
 
     def test_the_users_devices_mounts_and_runtime_directory_stay_out_of_the_lane(self):
         self.start("t-dev", "ok")
@@ -2387,6 +2497,23 @@ class Lane(Base):
                                "/dev/uinput", "/dev/hwrng") if os.access(d, os.R_OK)]
         if lane.abi() and devices:  # one the user may open, but not from the lane
             self.assertEqual(self.reads_in_lane(task, devices[:1]) + [], ["refused"])
+
+    @unittest.skipUnless(lane.abi() and os.path.isdir("/dev/pts"), "needs Landlock")
+    def test_a_pty_needs_dev_pts_granted_and_then_needs_nothing_more(self):
+        # the 0.90 review: /dev/ptmx alone opens no pty ("out of pty devices"); the skill and
+        # the handbook say to grant /dev/pts, and that grant must be enough
+        task = self.bare_task("t-pty", self.repo)
+        task.worktree.mkdir()
+        script = ("import pty\ntry:\n    pty.openpty(); print('pty')\n"
+                  "except OSError:\n    print('refused')\n")
+        got = []
+        for paths in ([], ["/dev/pts"]):
+            Path(os.environ["WB_COMMANDS"]).write_text(json.dumps({"paths": paths}))
+            out = subprocess.run(lane.wrap(context.writable(task), [sys.executable, "-c", script],
+                                           context.readable(task), context.unix_paths(task)),
+                                 capture_output=True, text=True, timeout=20)
+            got.append(out.stdout.strip() or out.stderr)
+        self.assertEqual(got, ["refused", "pty"])
 
     @unittest.skipUnless(lane.abi() >= 6, "needs Landlock ABI 6")
     def test_the_lane_can_reach_neither_the_users_sockets_nor_their_processes(self):
@@ -2410,6 +2537,27 @@ class Lane(Base):
                 self.assertEqual(out.stdout.split(),
                                  [connect if lane.abi() >= 9 else "connected", "nosignal", "own"],
                                  out.stderr)
+
+    @unittest.skipUnless(lane.abi() >= 9 and os.path.exists("/dev/log"), "needs Landlock ABI 9")
+    def test_the_system_log_stays_in_reach_but_not_a_socket_beside_the_lane(self):
+        # the 0.90 review: `logger` failed in the lane ("Protocol wrong type for socket")
+        task = self.bare_task("t-log", self.repo)
+        task.worktree.mkdir()
+        unix = context.unix_paths(task)
+        self.assertFalse([p for p in unix if os.path.isdir(p)])     # the files, no directory
+        with tempfile.TemporaryDirectory(dir=Path.home(), prefix=".wb-sock-") as d:
+            path = os.path.join(d, "s")
+            server = socket.socket(socket.AF_UNIX, socket.SOCK_DGRAM)
+            server.bind(path)
+            self.addCleanup(server.close)
+            script = ("import socket, sys\nfor p in sys.argv[1:]:\n"
+                      "    c = socket.socket(socket.AF_UNIX, socket.SOCK_DGRAM)\n"
+                      "    try:\n        c.connect(p); print('connected')\n"
+                      "    except OSError:\n        print('refused')\n")
+            out = subprocess.run(lane.wrap(context.writable(task),
+                                           [sys.executable, "-c", script, "/dev/log", path],
+                                           None, unix), capture_output=True, text=True, timeout=20)
+        self.assertEqual(out.stdout.split(), ["connected", "refused"], out.stderr)
 
     @unittest.skipUnless(sys.platform.startswith("linux"), "Linux")
     def test_no_new_privileges_holds_without_landlock_too(self):

@@ -208,13 +208,19 @@ VAR_CACHES = {"GOPATH": "pkg", "BUN_INSTALL": "install/cache"}
 # inside a toolchain home in the lane, what stays out of it: the programs on the user's PATH and
 # what their shell sources (relative to the home, or to CARGO_HOME for cargo's)
 NOT_WRITABLE = (".cargo/bin", ".cargo/env", ".dotnet/tools", ".cabal/bin", ".ghcup/bin")
+# and what cargo makes at the top of its split home, made first so the split grants it: a split
+# home refuses a new entry (the 0.90 review: a fresh rustup's ~/.cargo, only bin/ and env, failed
+# every build with a dependency, and a git dependency failed wherever git/ didn't exist yet)
+CARGO_MADE = ("registry/", "git/", ".package-cache", ".package-cache-mutate", ".global-cache")
 # what OpenCode and the ask server write themselves, beside the task's directory
 OPENCODE_HOMES = (".local/share/opencode", ".local/state/opencode")
 # The device nodes builds use, not /dev: the user's terminals, input devices (/dev/uinput) and
 # security keys were open to the agent (the 2026-11-16 audit). /dev/shm stays, a trade-off:
 # multiprocessing's semaphores, Chromium and many test runners need it, and Landlock can't tell
 # one program's segments from another's. /dev/pts stays out (every terminal of the user's); a
-# task that needs it, or a GPU, asks (`wb allow --path`).
+# task that needs it, or a GPU, asks (`wb allow --path`). /dev/ptmx alone opens no pty (Landlock
+# checks the /dev/pts/N it hands out: "out of pty devices"); it is here so that a /dev/pts grant
+# is all a pty-driven test needs (the 0.90 review).
 DEV_NODES = ("/dev/null", "/dev/zero", "/dev/full", "/dev/random", "/dev/urandom", "/dev/tty",
              "/dev/ptmx", "/dev/shm")
 # the system, for the file tools: headers, man pages, installed packages' sources
@@ -293,6 +299,11 @@ def repo_dirs(task: store.Task) -> set[str]:
     return {real, _COMMON[real]}
 
 
+def _hidden() -> set[str]:
+    """The secrets and workbench's own files that exist: what a lane entry is split around."""
+    return {h for h in secret_paths() | private_paths() if os.path.lexists(h)}
+
+
 def _split(place: str, out_of: set[str]) -> list[str]:
     """`place`, or when something in `out_of` lies beneath it, its other entries one by one
     (Landlock only allows: the way to leave one file out of a directory is to grant the rest)."""
@@ -331,7 +342,17 @@ def writable(task: store.Task) -> list[str] | None:
     temps = {os.path.realpath(t) for t in (tempfile.gettempdir(), *TEMP_ROOTS)}
     guard = repo_dirs(task)  # a repo kept in /tmp is the user's choice: the temp dirs stay
     cargo = os.environ.get("CARGO_HOME")
-    out_of = {h for h in secret_paths() | private_paths() if os.path.lexists(h)} | \
+    for c in {os.path.realpath(c) for c in (home / ".cargo", cargo) if c}:
+        if os.path.isdir(c) and any(os.path.lexists(os.path.join(c, n)) for n in ("bin", "env")):
+            for n in CARGO_MADE:
+                try:
+                    if n.endswith("/"):
+                        os.makedirs(os.path.join(c, n), exist_ok=True)
+                    elif not os.path.lexists(os.path.join(c, n)):
+                        Path(c, n).touch()
+                except OSError:  # a read-only home: the task starts all the same
+                    pass
+    out_of = _hidden() | \
         {os.path.realpath(p) for p in (*(home / h for h in NOT_WRITABLE),
                                        *((Path(cargo) / "bin", Path(cargo) / "env") if cargo else ()))
          if os.path.lexists(p)}
@@ -347,8 +368,8 @@ def writable(task: store.Task) -> list[str] | None:
             continue
         if real in temps:  # a secret or repo kept in /tmp stays in reach: splitting /tmp would
             kept.append(str(p))  # refuse every new file there (Java's, Xvfb's)
-        elif not any(g == real or _under(g, real) for g in guard):
-            kept += _split(str(p), out_of)
+        else:  # split around the repo like a secret: a grant of ~/work beside the repo ~/work/api
+            kept += _split(str(p), out_of | guard)  # was dropped whole (the 0.90 review)
     return [p for p in _both(kept) if os.path.exists(p) and os.path.realpath(p) not in whole]
 
 
@@ -373,12 +394,26 @@ def snaps(names) -> list[str]:
     return out
 
 
+# System sockets that hold nothing of the user's, which plain programs connect to: the log
+# (logger, syslog) and name and user lookups (resolved, userdb for systemd-homed users, nscd,
+# sssd). The files alone, never their directories (sssd's pipes/private stays out), and not the
+# system bus, which reaches polkit's actions (the 0.90 review: `logger` and `resolvectl` failed).
+SYSTEM_SOCKETS = ("/dev/log", "/run/systemd/journal/socket", "/run/systemd/journal/stdout",
+                  "/run/systemd/resolve/io.systemd.Resolve",
+                  "/run/systemd/userdb/io.systemd.Multiplexer", "/run/nscd/socket",
+                  "/var/lib/sss/pipes/nss")
+
+
 def unix_paths(task: store.Task) -> list[str]:
-    """Where the agent may connect to a UNIX socket made outside its lane (Landlock ABI 9): only
-    what the user and Claude added (`paths`; `wb allow --path /run/postgresql` for a test
-    database), never the session bus or the user's agents."""
-    return _both(p for p in (Path(q).expanduser() for q in lane_paths(task) if q != "*")
-                 if os.path.exists(p))
+    """Where the agent may connect to a UNIX socket made outside its lane (Landlock ABI 9): the
+    SYSTEM_SOCKETS there are, and what the user and Claude added (`paths`; `wb allow --path
+    /run/postgresql` for a test database), never the session bus or the user's agents, split
+    around secrets like the reads (the 0.90 review: a GPG agent socket under a granted ~/.config
+    was in reach)."""
+    hidden = _hidden()
+    return _both([*(s for s in SYSTEM_SOCKETS if os.path.exists(s)),
+                  *(q for p in (Path(r).expanduser() for r in lane_paths(task) if r != "*")
+                    if os.path.exists(p) for q in _split(str(p), hidden))])
 
 
 def ask_dir(task: store.Task) -> Path:
@@ -484,16 +519,30 @@ def tool_roots(hidden: set[str]) -> set[str]:
     it is a `bin`), the targets of the links in the home's PATH directories, and the Python
     running workbench (the git shim, the ask server). Running a program reads it, so one under a
     non-dot home directory (~/miniconda3, ~/flutter, ~/apps) failed in the lane (the 2026-11-16
-    audit). Never `/`, the home directory or anything holding a secret: a prefix is kept whole."""
+    audit). The same under an ONLY_KEPT root, short of a user's home or a whole drive: Linuxbrew's
+    bin links into ../Cellar, which the lane hid (the 0.90 review). Never `/`, the home directory
+    or anything holding a secret: a prefix is kept whole."""
     home = os.path.realpath(Path.home())
     prefix = lambda d: os.path.dirname(d) if os.path.basename(d) == "bin" else d  # noqa: E731
+    roots = {os.path.realpath(r) for r in ONLY_KEPT}
+
+    def opens(p: str) -> bool:  # under an ONLY_KEPT root, deeper than a home or a drive
+        for root in roots:
+            if _under(p, root):
+                parts = p[len(root):].strip(os.sep).split(os.sep)
+                deep = 3 if root.endswith("media") else 2       # /media/<user>/<drive>
+                if len(parts) > 1 and parts[1] == "Users":      # /mnt/c/Users/<you>
+                    deep = 4
+                return len(parts) >= deep and not (p == home or _under(home, p))
+        return False
+
     found = set()
     for d in (os.environ.get("PATH") or "").split(os.pathsep):
         if not os.path.isabs(d) or not os.path.isdir(d):
             continue
         real = os.path.realpath(d)
-        if not _under(real, home):  # the directory alone: /mnt/c/Users/<you>/bin isn't a prefix
-            found.add(real)
+        if not _under(real, home) and not opens(prefix(real)):
+            found.add(real)  # the directory alone: /mnt/c/Users/<you>/bin isn't a prefix
             continue
         found.add(prefix(real))
         try:
@@ -504,8 +553,9 @@ def tool_roots(hidden: set[str]) -> set[str]:
             link = os.path.join(d, n)
             if os.path.islink(link):
                 target = os.path.realpath(link)
-                if _under(target, home):
-                    found.add(prefix(os.path.dirname(target)))
+                where = prefix(os.path.dirname(target))
+                if _under(target, home) or opens(where):
+                    found.add(where)
     found |= {prefix(os.path.dirname(os.path.realpath(sys.executable)))}
     found |= {os.path.realpath(p) for p in (sys.prefix, sys.base_prefix, sys.exec_prefix,
                                             os.environ.get("CONDA_PREFIX")) if p}
@@ -515,7 +565,7 @@ def tool_roots(hidden: set[str]) -> set[str]:
 
 def readable(task: store.Task) -> list[str] | None:
     """What the agent's processes may read: the system, the home directory's dotfiles but
-    SECRETS, the task's repo, its lane and the programs it runs. None with the lane off. Landlock
+    SECRETS, the task's repo and its git directory, its lane and the programs it runs. None with the lane off. Landlock
     only allows, so this lists the entries beside each excluded one; lane.py adds the lane
     (writable) itself."""
     lane = writable(task)
@@ -526,6 +576,9 @@ def readable(task: store.Task) -> list[str] | None:
     keep = {os.path.realpath(p) for p in (task.spec.get("repo"), PKG_ROOT, *lane,  # PKG_ROOT:
                                           *lane_paths(task)) if p}  # the git shim, the ask server
     keep |= tool_roots(hidden)
+    # the git directory too, outside the repo when it is a linked worktree: git failed there
+    # ("gitfile does not point to a valid repository", the 0.90 review); writable() keeps it out
+    keep |= repo_dirs(task)
     # Inside a hidden directory, only these come out: workbench itself (the marketplace install
     # puts it in ~/.claude/plugins, the 2026-11-16 audit), and of workbench's state the task's own
     # directory (its prompts, the ask server's spec) and its rules (its OpenCode config, its

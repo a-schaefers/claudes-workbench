@@ -405,7 +405,10 @@ You are the driver, not a spectator. When something tells you the agent is headi
   user's checkout or another project: there, take the file yourself or say no. `wb allow --path`
   refuses a path through a link (it names the target: allow that only if it is what the task
   needs; the agent can plant links in its lane) and a place inside credentials or workbench's own
-  state and config.
+  state and config. A test driving a program through a pseudo-terminal (pexpect, Python's pty,
+  `script`, node-pty) fails in the lane ("out of pty devices", "failed to create
+  pseudo-terminal"): grant `/dev/pts` (`wb start --allow-path /dev/pts`), which also opens the
+  user's other terminals to the agent.
 - `wb stop <name>`: just stop it. `wb resume <name>` continues it in a fresh session (not a
   review round), e.g. after fixing workbench under it. A task failed with "the runner died" (a
   reboot, a kill) or stuck with "stopped by a signal" resumes the same way.
