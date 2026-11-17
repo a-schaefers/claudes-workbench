@@ -747,9 +747,17 @@ first session to deliver a notice wins.
 **The transcript** (`transcript.follow`). It merges, every loop, the OpenCode session export of
 the current session and every earlier one (`status.sessions`) with the task's events, sorted by
 time, each entry printed once (keyed by message and part; a part's `start` and `end` print
-separately). `opencode session export <id>` runs from `/` (30 s); with no session id yet,
-`opencode session list` in the worktree finds the one titled `wb: <task>`. The same export feeds
-the runner's between-rounds check and its speed samples (`transcript.export`).
+separately). `opencode session export <id> --standalone` runs from `/` (30 s); with no session
+id yet, `opencode session list --standalone` in the worktree finds the one titled `wb: <task>`.
+Both run standalone, like `opencode run`, so they never depend on the background service's fixed
+port (another user's service there, or one with other XDG dirs, failed every export: the
+2026-11-16 audit); a failure is said once per process on stderr (`opencode session export failed:
+…`, in runner.log under the runner). Earlier sessions are finished, so `follow` exports each once.
+The same export feeds the runner's between-rounds check and its speed samples
+(`transcript.export`). Everything printed for a person passes `transcript.plain` first: control
+characters other than newline and tab (C1 included) become `\xNN`, so an escape sequence in what
+the agent read or wrote (OSC 52 sets the clipboard) never reaches the terminal raw; `--json`
+needs nothing, JSON escapes them. `wb log` and `wb report` do the same on a terminal.
 
 Drawn in Claude Code's own grammar, results under `  ⎿  `:
 - prompts: a label (`Claude → agent · spec`, `· review feedback`, `· next step`, `· INTERRUPT,
@@ -1885,7 +1893,8 @@ continued: an auto-fix round passes), `loop` (the repeat guard stops it), `hang`
 no events), `slow` (hangs in a new session, ok when continued), `fill` (a 25K-token step at 76%
 of 32K, then sleeps: the runner hands over mid-round; the handover prompt turns it into `ok`),
 `read` (25K tokens before any change: it carries on), `floor` (a re-read floor too high to hand
-over: `HANDOVER_ROOM`). `session list` lists nothing. Its
+over: `HANDOVER_ROOM`). `session list` lists nothing. Both session commands fail without
+`--standalone`, as the real ones do when another service holds the managed port. Its
 live tool names are 1.x-style (`bash`, `filePath`); real OpenCode 2.x says `shell`, `path`
 (`events._brief` reads both).
 

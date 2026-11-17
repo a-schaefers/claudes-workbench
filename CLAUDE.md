@@ -217,7 +217,8 @@ PATH and the lane; the rest is only imitated by the fake.
 - It resolves the project from `$PWD`, not from the cwd.
 - The 2.x config shape is `mcp.servers.<name>`, with `timeout.{startup,execution}`;
   `codemode: false` exposes a plain tool (listed as `workbench_ask_reviewer`).
-- `--standalone` servers inherit the env and share session storage with the background service.
+- `--standalone` servers inherit the env and share session storage with the background service;
+  `session export`/`list` use it too, so no workbench call needs the service's fixed port.
 - It loads AGENTS.md itself but never CLAUDE.md, which reaches it through `instructions`
   (absolute paths).
 - Skills come from `~/.claude/skills` and `.claude/skills`. A `disable-model-invocation` skill is

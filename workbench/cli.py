@@ -435,18 +435,20 @@ def cmd_log(a):
     task = need(a.name)
     off = 0
     rows, off = store.read_jsonl(task.dir / "events.jsonl", off)
+    # the agent's words and output, on a terminal: no raw escape sequences (transcript.plain)
+    shown = transcript.plain if sys.stdout.isatty() else str
 
     def show(r):
         t = time.strftime("%H:%M:%S", time.localtime(r["ts"]))
         k = r["kind"]
         if k == "tool":
             mark = "" if r["ok"] else "  ✗ " + r.get("error", "")[:100]
-            print(f"{t} r{r['round']} {r['tool']:8} {r['brief']}{mark}")
+            print(shown(f"{t} r{r['round']} {r['tool']:8} {r['brief']}{mark}"))
         elif k in ("text", "ask", "answer", "stopped", "autofix", "round", "tests", "error"):
             body = r.get("text", "")
             if k == "text" and not a.verbose:
                 body = body.strip().splitlines()[0][:110] if body.strip() else ""
-            print(f"{t} r{r['round']} {k:8} {body}")
+            print(shown(f"{t} r{r['round']} {k:8} {body}"))
 
     for r in rows[-a.n:] if a.n else rows:
         show(r)
@@ -464,8 +466,9 @@ def cmd_report(a):
     task = need(a.name)
     n = a.round or task.status.get("round", 1)
     p = task.round_dir(n) / "summary.md"
-    print(p.read_text() if p.exists() else f"round {n} has no report yet "
-          f"({task.status.get('phase')}: {task.status.get('last')})")
+    text = p.read_text() if p.exists() else (f"round {n} has no report yet "
+                                             f"({task.status.get('phase')}: {task.status.get('last')})")
+    print(transcript.plain(text) if sys.stdout.isatty() else text)  # it quotes the agent's words
 
 
 def cmd_diff(a):

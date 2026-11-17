@@ -555,6 +555,33 @@ class Watch(Base):
         self.assertRegex(lines[-2]["t"], r"…")
         self.assertRegex(lines[-1]["t"], r"^⏲ task \d")
 
+    def test_session_commands_never_need_opencodes_background_service(self):
+        # the fake, like OpenCode with another service on the managed port, refuses without
+        # --standalone (the 2026-11-16 audit)
+        self.assertEqual(transcript.export("ses_x")["info"]["id"], "ses_x")
+        os.environ["WB_OPENCODE_BIN"] = shlex.join(
+            [sys.executable, "-c", "import sys; sys.exit('store is locked')"])
+        err = io.StringIO()
+        with redirect_stderr(err):
+            self.assertEqual(transcript.export("ses_x"), {})
+            self.assertEqual(transcript.export("ses_y"), {})
+        self.assertEqual(err.getvalue().count("opencode session export failed: store is locked"), 1)
+
+    def test_escape_sequences_from_the_agent_never_reach_the_terminal_raw(self):
+        self.start("t-esc", "ok")
+        wait_phase("t-esc", {"review"})
+        clip = "\x1b]52;c;cm0gLXJmIH4=\x07"  # OSC 52: sets the clipboard (the 2026-11-16 audit)
+        data = {"messages": [{"type": "assistant", "id": "m1", "finish": "stop", "time": {"created": 1000},
+                              "content": [{"type": "text", "text": f"done {clip} \x9b2J"}]}]}
+        out = io.StringIO()
+        with mock.patch.object(transcript, "find_session", return_value="ses_x"), \
+                mock.patch.object(transcript, "export", return_value=data):
+            transcript.follow(store.Task("t-esc"), once=True, color=True, out=out)
+        text = out.getvalue()
+        self.assertIn("done \\x1b]52;c;cm0gLXJmIH4=\\x07 \\x9b2J", text)
+        self.assertNotIn("\x9b", text)
+        self.assertNotRegex(text.replace("\x1b[0m", "").replace("\x1b[", "<sgr>"), "\x1b")
+
 
 class AskServer(Base):
     def test_protocol_and_budget(self):
