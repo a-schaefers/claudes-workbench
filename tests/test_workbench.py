@@ -1291,6 +1291,7 @@ class Routing(Base):
         self.assertEqual(router.row_stack({"repo": str(self.repo), "stack": []}), ())  # recorded wins
         self.start("t-kind", "ok")
         self.assertEqual(store.Task("t-kind").spec["stack"], ["c"])
+        wait_phase("t-kind", {"review"})  # before tearDown deletes what its runner writes (CI, 2026-11-17)
 
     def test_a_trial_run_is_kept_but_not_evidence(self):
         from workbench import router
@@ -1415,6 +1416,36 @@ class Notes(Base):
         with self.assertRaises(SystemExit):
             run_wb("notes", "drop", "3")
         self.assertEqual(run_wb("notes", "drop", "1"), "1. Never merge without asking\n")
+
+
+class Setup(Base):
+    """wb setup: the marketplace install copies only mod/, so wb and /delegate are linked from the
+    clone (2026-11-16)."""
+    def setup(self, *a):
+        buf = io.StringIO()
+        with redirect_stdout(buf), self.assertRaises(SystemExit) as e:
+            cli.main(["setup", *a])
+        return e.exception.code, buf.getvalue()
+
+    def test_setup_links_wb_and_the_skill_and_leaves_what_it_did_not_make(self):
+        home = Path(self.tmp.name) / "home"
+        os.environ["HOME"] = str(home)
+        os.environ.pop("CLAUDE_CONFIG_DIR", None)
+        code, out = self.setup()
+        self.assertEqual(code, 0, out)
+        wb, skill = home / ".local/bin/wb", home / ".claude/skills/delegate"
+        self.assertEqual(wb.resolve(), (runner.PKG_ROOT / "bin/wb").resolve())
+        self.assertTrue((skill / "SKILL.md").exists())
+        self.assertEqual(self.setup()[0], 0)                  # again: nothing to do
+        wb.unlink(); wb.symlink_to("/elsewhere/wb")           # a link of the user's own
+        skill.unlink(); skill.mkdir()                         # or a real directory
+        code, out = self.setup()
+        self.assertEqual(code, 1)
+        self.assertEqual(os.readlink(wb), "/elsewhere/wb")
+        code, out = self.setup("--force")                     # replaces the link, never the directory
+        self.assertEqual(code, 1)
+        self.assertEqual(wb.resolve(), (runner.PKG_ROOT / "bin/wb").resolve())
+        self.assertTrue(skill.is_dir() and not skill.is_symlink())
 
 
 class Projects(Base):
@@ -1938,6 +1969,8 @@ class SkillLearning(Base):
         self.assertIn("loaded in 1 repo", run_wb("skill", "list"))
         self.spec.write_text("Parse the rows of the table; no charts in this file.\n")
         self.assertNotIn("may fit", self.start("t-sug0", "ok"))   # one shared word is chance
+        for t in ("t-sug", "t-sug2", "t-sug0"):  # tearDown's rmtree raced a runner still writing (CI, 2026-11-17)
+            wait_phase(t, {"review"})
 
 
 @unittest.skipUnless(shutil.which("opencode"), "needs the real opencode")
