@@ -152,6 +152,35 @@ class Real(unittest.TestCase):
         self.assertFalse(st["available"] or st["resident"])
         self.assertIn("is serving /models/coder.gguf, not general", st["why"])
 
+    def test_a_shared_port_is_known_by_the_file_in_each_start_command_and_switched(self):
+        # names that differ from the file left both models unavailable, the served one too, and a
+        # task failed right after wb started the right server (the 0.90 review)
+        served = Path(self.tmp.name) / "served"
+        llama = self.server({"/v1/models": lambda h: {"data": [{"id": served.read_text().strip()}]}
+                             if served.exists() else None})
+        start = lambda f: f"echo /models/{f} > {served}"  # noqa: E731
+        self.config({"l": {"options": {"baseURL": llama + "/v1"},
+                           "models": {"qwen3-coder-30b": {}, "devstral-24b": {}}}},
+                    {"l": {"engine": "server", "stop": f"rm -f {served}"},
+                     "l/qwen3-coder-30b": {"start": start("Qwen3-Coder-30B-A3B-Instruct-Q4_K_M.gguf")},
+                     "l/devstral-24b": {"start": start("Devstral-Small-24B-Q4_K_M.gguf")}})
+        qwen, dev = models.resolve("l/qwen3-coder-30b"), models.resolve("l/devstral-24b")
+        said = []
+        self.assertEqual(models.status(dev)["why"], "stopped (wb starts it)")
+        self.assertGreater(models.make_resident(dev, say=said.append), 0)     # a cold start
+        self.assertEqual(models.status(dev)["why"], "running")
+        self.assertEqual(models.status(qwen), {"available": True, "resident": False, "why":
+                         "the port serves l/devstral-24b; wb stops it and starts l/qwen3-coder-30b"})
+        models.make_resident(qwen, say=said.append)                            # the switch
+        self.assertEqual(said, ["starting l/devstral-24b", "stopping l/devstral-24b",
+                                "starting l/qwen3-coder-30b"])
+        self.assertTrue(models.status(qwen)["resident"])
+        self.assertFalse(models.status(dev)["resident"])
+        served.write_text("/models/something-else.gguf")                      # nobody's file
+        st = models.status(qwen)
+        self.assertFalse(st["available"])
+        self.assertIn("can't tell which model it is", st["why"])
+
     def own(self, loaded, tags, fail=None):
         """Two providers reaching one fake Ollama, as localhost and as 127.0.0.1."""
         posts = []

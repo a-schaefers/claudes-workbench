@@ -1218,17 +1218,22 @@ an Ollama cloud model not allowed. Then Ollama: not answering / `<name>` is not 
 model by its tags row / pulled / loaded (`/api/tags`, `/api/ps`). A server (`GET <base>/models`):
 running (a server listing several models must list this one: "the server lists N models, not …"; a
 server listing one answers to any name, except on a port that several models share, each with its
-own `start` (`_contended`: one llama-server per model), where the listed id must be the model's
-name or its file's basename without `.gguf` (`_serves`), else it is unavailable, "<root> is serving
-<id>, not <name> …": the task would run on the other model, recorded under this one); a 401 or 403
-is running too ("it wants an API key"), so wb never starts a second copy; stopped with a `start`
-("wb starts it"); not running with no start command. `wb models` and `wb doctor` print the reason.
-`status(m, down)` takes the Ollama roots a caller already found not answering (doctor) and doesn't
-ask them again. `remedy(m, state)` is the next step for a reason (none when the reason says it
-already), and `may_come_up(state)` whether the model may run by the time a queued task gets the GPU
-(Ollama not answering, a server not running). `weights()`: `weights_gb`, else Ollama's size (0 for
-a cloud model), else 0; the router weighs only a model that can run (and `fits` only that one), so
-a down server isn't asked again per model.
+own `start` (`_contended`: one llama-server per model), where the listed id says which model it is
+(`_owners`): the model whose name is the id or its file's basename without `.gguf` (`_serves`), or
+whose start command names that file (`-m <path>`). The model it is reads running; another model on
+the port, when the one served has a `stop`, reads available but not resident ("the port serves
+<id>; wb stops it and starts <id>"), so `make_resident` switches them; an id no model (or more than
+one) accounts for, or a served model with no `stop`, leaves it unavailable, "<root> is serving
+<id>, not <name> …": the task would run on the other model, recorded under this one (names that
+differ from the file once left every model on the port unavailable, the served one too: the 0.90
+review); a 401 or 403 is running too ("it wants an API key"), so wb never starts a second copy;
+stopped with a `start` ("wb starts it"); not running with no start command. `wb models` and `wb
+doctor` print the reason. `status(m, down)` takes the Ollama roots a caller already found not
+answering (doctor) and doesn't ask them again. `remedy(m, state)` is the next step for a reason
+(none when the reason says it already), and `may_come_up(state)` whether the model may run by the
+time a queued task gets the GPU (Ollama not answering, a server not running). `weights()`:
+`weights_gb`, else Ollama's size (0 for a cloud model), else 0; the router weighs only a model that
+can run (and `fits` only that one), so a down server isn't asked again per model.
 
 **Residency** (`make_resident(m, keep, warn)`, called by the runner under the lease). A model
 `status` says can't run raises `RuntimeError` (its reason and remedy) before anything is freed: a

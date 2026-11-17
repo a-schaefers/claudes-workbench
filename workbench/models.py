@@ -35,6 +35,7 @@ import ipaddress
 import json
 import os
 import re
+import shlex
 import socket
 import stat
 import subprocess
@@ -475,10 +476,28 @@ def _contended(m: Model) -> bool:
     return len(starts) > 1
 
 
+def _base(s: str) -> str:
+    return re.sub(r"\.gguf$", "", s.rsplit("/", 1)[-1], flags=re.I).lower()
+
+
 def _serves(served: str, name: str) -> bool:
     """Whether a one-model server's id is this model: llama-server lists the file's path."""
-    base = lambda s: re.sub(r"\.gguf$", "", s.rsplit("/", 1)[-1], flags=re.I).lower()  # noqa: E731
-    return served == name or base(served) == base(name)
+    return served == name or _base(served) == _base(name)
+
+
+def _owners(m: Model, served: str) -> list[Model]:
+    """The models on m's contended port that a one-model server's id may be: by name, or by the
+    served file in its start command (`-m <path>`). Names that differ from the file left every
+    model on the port unavailable, the one being served too (the 0.90 review)."""
+    def started(o: Model) -> bool:
+        try:
+            words = shlex.split(o.start or "")
+        except ValueError:
+            words = (o.start or "").split()
+        return any(w.rsplit("=", 1)[-1] == served or _base(w.rsplit("=", 1)[-1]) == _base(served)
+                   for w in words)
+    return [o for o in discover().values() if o.engine == "server" and o.server == m.server
+            and (_serves(served, o.name) or started(o))]
 
 
 def _no(why: str) -> dict:
@@ -555,11 +574,20 @@ def status(m: Model, down=frozenset()) -> dict:
         served = {x.get("id") for x in (body.get("data") or []) if isinstance(x, dict)}
         if len(served) > 1 and m.name not in served:
             return _no(f"the server lists {len(served)} models, not {m.name}")
-        if len(served) == 1 and m.start and _contended(m) and not _serves(str(next(iter(served))), m.name):
+        sid = str(next(iter(served))) if len(served) == 1 else ""
+        if sid and m.start and _contended(m) and not _serves(sid, m.name):
             # the task would run on the other model, recorded under this one (the 2026-11-16 audit)
-            return _no(f"{m.root} is serving {next(iter(served))}, not {m.name}, and other models "
-                       "with their own start commands share that port, so wb can't tell or switch "
-                       "them: give each its own port (or --alias it as its name), or use one "
+            owners = _owners(m, sid)
+            if [o.id for o in owners] == [m.id]:
+                return {"available": True, "resident": True, "why": "running"}
+            if len(owners) == 1 and owners[0].stop:  # free_gpu stops it (the 0.90 review)
+                return {"available": True, "resident": False,
+                        "why": f"the port serves {owners[0].id}; wb stops it and starts {m.id}"}
+            why = (f"it is {owners[0].id}, which has no stop command, so wb can't switch them"
+                   if len(owners) == 1 else "so wb can't tell which model it is")
+            return _no(f"{m.root} is serving {sid}, not {m.name}, and other models with their own "
+                       f"start commands share that port; {why}: give each model a stop command and "
+                       "its file's name (or --alias it as its name), or its own port, or use one "
                        "server that swaps models (llama-swap)")
         return {"available": True, "resident": True, "why": "running"}
     if m.start:
