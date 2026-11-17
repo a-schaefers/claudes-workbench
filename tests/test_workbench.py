@@ -519,6 +519,36 @@ class Steering(Base):
         self.assertFalse(cli.runner_alive(task))
         self.assertEqual(task.status["last"], "Claude took over")
 
+    def test_a_sessions_bail_out_and_hand_back_leave_another_projects_tasks_alone(self):
+        # the 2026-11-16 audit: /delegate-quit in one project's session stopped the agents of a
+        # session in another project; the mod passes its directory as --repo
+        self.start("t-mine", "slow")
+        self.wait_session("t-mine")
+        self.assertEqual(store.Task("t-mine").spec["cwd"], os.getcwd())   # where wb start ran
+        other = Path(self.tmp.name) / "elsewhere"
+        theirs = store.Task("t-theirs")
+        theirs.dir.mkdir(parents=True)
+        store.write_json(theirs.dir / "task.json", {"name": "t-theirs", "repo": str(other),
+                                                    "cwd": str(other), "created_at": store.now()})
+        theirs.set_status(phase="running", round=1)
+        here = str(self.repo / "src")                       # a session started in a subdirectory
+        status = run_wb("status", "--repo", here)
+        self.assertIn("t-mine", status)
+        self.assertEqual([l for l in status.splitlines() if "t-theirs" in l],
+                         [f"open elsewhere (other projects' sessions): t-theirs ({other})"])
+        out = run_wb("stop", "--all", "--repo", here)
+        self.assertIn("t-mine", out)
+        self.assertIn("left running (other projects' sessions): t-theirs", out)
+        self.assertEqual(store.Task("t-theirs").status["phase"], "running")
+        self.assertEqual(store.Task("t-mine").status["phase"], "stuck")
+        out = run_wb("takeover", "--all", "--repo", here)
+        self.assertIn("took over t-mine", out)
+        self.assertIn("left alone (other projects' sessions): t-theirs", out)
+        self.assertEqual(store.Task("t-theirs").status["phase"], "running")
+        with self.assertRaises(SystemExit):
+            run_wb("stop", "t-mine", "--repo", here)       # a scope goes with --all
+        self.assertIn("stopped: t-theirs", run_wb("stop", "--all"))  # without one: every task
+
     def test_takeover_stops_the_agent_and_hands_over_the_worktree(self):
         self.start("t-take", "slow", "--test", TEST_CMD)
         self.wait_session("t-take")
@@ -626,6 +656,27 @@ class Watch(Base):
         self.assertNotIn("\x9b", text)
         self.assertNotRegex(text.replace("\x1b[0m", "").replace("\x1b[", "<sgr>"), "\x1b")
 
+
+    def test_json_for_the_pane_is_its_newest_lines_cut_short_from_one_export(self):
+        # the 2026-11-16 audit: past the engine's 4 MiB read the pane lost the newest lines, one
+        # long line took the pane's whole budget, and each read ran two OpenCode exports
+        self.start("t-last", "fix", "--test", TEST_CMD)
+        wait_phase("t-last", {"review"})
+        run_wb("note", "t-last", "--text", "x" * 5000)
+        full = [json.loads(x) for x in run_wb("watch", "t-last", "--json").splitlines()]
+        exports = []
+        real = transcript.export
+        with mock.patch.object(transcript, "export", lambda sid: exports.append(sid) or real(sid)):
+            tail = [json.loads(x) for x in run_wb("watch", "t-last", "--json", "--last", "3").splitlines()]
+        self.assertEqual(len(exports), 1)
+        self.assertTrue(all(len(x["t"]) <= transcript.JSON_LINE_CHARS for x in full))
+        self.assertTrue(any(x["t"].endswith("…") for x in full))   # the note, cut
+        kept = ("meta", "activity", "clock")
+        body = [x for x in full if x["s"] not in kept and x["t"] != transcript.PHASE_LINE["review"][1]]
+        self.assertEqual(tail[0]["s"], "meta")
+        self.assertEqual(tail[1:4], body[-3:])                       # the newest three, in order
+        self.assertEqual([x["s"] for x in tail[4:]],                 # then what is happening
+                         [x["s"] for x in full[-len(tail[4:]):]])  # (the clock ticks between)
 
 class AskServer(Base):
     def test_protocol_and_budget(self):

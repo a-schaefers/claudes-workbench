@@ -12,6 +12,10 @@ export type WbTask = {
   tokens: number
   /** the last few events of an active task, already formatted */
   recent: string[]
+  /** task.json's repo and the directory `wb start` ran in ('' when an old task has none): whose
+   * session's task it is */
+  repo: string
+  cwd: string
 }
 
 /** One line of `wb watch --json`: a style name and the text. */

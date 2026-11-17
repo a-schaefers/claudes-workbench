@@ -152,7 +152,8 @@ Linux there is no Landlock and watch.py falls back to timed waits.
    or compacted is replaced. OpenCode's own compaction is set just past it, as a backstop.
 5. The runner writes the round report and a `review`/`stuck`/`failed` notice and exits.
    `ask_reviewer` raises a `question` at any time and blocks until `wb answer` or `wb allow`.
-6. The mod (or `wb wait`) delivers each notice once, while still true; acting on a task
+6. The mod (or `wb wait`) delivers each notice once, while still true, in the session the task
+   is `mine` to (task.json `cwd`/`repo` and the session's directory); acting on a task
    acknowledges it (`_ack_all`, which stops short of news still true).
 7. `wb accept` commits with provenance trailers (no AI co-author line), optionally merging;
    `wb next` commits a step and gives the same agent the next; `wb feedback` sends another round;
@@ -267,7 +268,9 @@ PATH and the lane; the rest is only imitated by the fake.
 - The agent can't see `ask_reviewer`: `PWD=<worktree> OPENCODE_CONFIG=<state>/rules/<task>/opencode.json
   opencode mcp list --print-logs`.
 - The mod does nothing: `wb` must be on Claude Code's PATH (`WB_BIN` moves only the mod's calls;
-  Claude's Bash still runs `wb` by name); `claude --debug` shows hook errors.
+  Claude's Bash still runs `wb` by name; the mod toasts once when it can't run `wb events`); a
+  task started from another project's directory wakes that session, not this one; `claude --debug`
+  shows hook errors.
 - A test fails: the task's `runner.log` is under the test's temp `WB_HOME` (deleted at tearDown);
   `wait_phase` prints the status when it times out. An interrupted run can leave detached runners
   and fakes sleeping.

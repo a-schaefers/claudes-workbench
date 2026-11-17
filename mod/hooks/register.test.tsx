@@ -59,11 +59,13 @@ test('/delegate-pane opens the pane and counts open tasks', async ($, on) => {
 
 // A file system in memory: what `wb` and its runner would have written. `ui` records the pane
 // opening and closing and each status line.
-function fakeTasks(on: any, files: Record<string, string>, dirs = ['fix-it'], scouted = true, ui: string[] = []) {
+function fakeTasks(on: any, files: Record<string, string>, dirs = ['fix-it'], scouted = true, ui: string[] = [], ears = true) {
   // the weekly model check was done just now, unless the test is about it
   if (scouted) files['/wb/scout.json'] = JSON.stringify({ done_at: 1_800_000_000 })
   on('env.get', (_: any, e: any) => ({ value: ({ WB_HOME: '/wb', HOME: '/home/u' } as any)[e.name] }))
+  const reads: string[] = []
   on('fs.read', (_: any, e: any) => {
+    reads.push(e.path)
     if (!(e.path in files)) throw new Error(`ENOENT: ${e.path}`)
     return { value: files[e.path] }
   })
@@ -72,13 +74,20 @@ function fakeTasks(on: any, files: Record<string, string>, dirs = ['fix-it'], sc
     return { value: undefined }
   })
   on('fs.exists', (_: any, e: any) => ({ value: Object.keys(files).some(p => p.startsWith(e.path)) }))
+  on('fs.stat', (_: any, e: any) => {
+    if (!(e.path in files)) throw new Error(`ENOENT: ${e.path}`)
+    return { value: { kind: 'file', size: files[e.path].length, mtimeMs: 0, isLink: false } }
+  })
   on('fs.list', () => ({ value: dirs.map(name => ({ name, kind: 'dir' })) }))
   on('command.register', (_: any, e: any) => ({ value: { command: e.name } }))
-  on('ui.open', (_: any, e: any) => { ui.push(`open ${e.id}`); return { value: { isPlaced: true } } })
-  on('ui.close', (_: any, e: any) => { ui.push(`close ${e.id}`); return { value: undefined } })
+  // the pane is shown from its open until its close
+  let shown = false
+  on('ui.panes', () => ({ value: shown ? [{ id: 'workbench', title: 'Workbench', isShown: true, isFocused: false, isPlaced: true }] : [] }))
+  on('ui.open', (_: any, e: any) => { ui.push(`open ${e.id}`); shown = true; return { value: { isPlaced: true } } })
+  on('ui.close', (_: any, e: any) => { ui.push(`close ${e.id}`); shown = false; return { value: undefined } })
   on('ui.status', (_: any, e: any) => { ui.push(`status ${e.text ?? ''}`); return { value: undefined } })
   // `wb events`: says hello and then stays open, as the real watcher does
-  on('process.spawn', async function* () {
+  if (ears) on('process.spawn', async function* () {
     yield { stream: 'stdout', text: '{"hello": 4242}\n' }
     await new Promise(() => {})
     return { code: 0, signal: null }
@@ -86,6 +95,7 @@ function fakeTasks(on: any, files: Record<string, string>, dirs = ['fix-it'], sc
   on('session.start', (_: any, e: any) => ({ cwd: e.cwd }))
   on('turn.start', (_: any, e: any) => ({ turnId: e.turnId }))
   on('turn.complete', () => ({ text: '' }))
+  return { show: (is: boolean) => { shown = is }, reads } // the person closing or opening the pane; what was read
 }
 
 test('a review notice waits for the turn to end, and is dropped if it went stale', async ($, on) => {
@@ -132,6 +142,247 @@ test('a review notice waits for the turn to end, and is dropped if it went stale
   expect(files['/wb/tasks/fix-it/acked']).toBe(String(ts + 60))
 })
 
+// A task's files as wb writes them: task.json, status.json, and its notices in notify.jsonl.
+const ts0 = 1_800_000_000
+function task(files: Record<string, string>, name: string, phase: string, extra: Record<string, any> = {}, updated = ts0) {
+  files[`/wb/tasks/${name}/task.json`] = JSON.stringify({ name, model: 'm', created_at: ts0 - 60, ...extra })
+  files[`/wb/tasks/${name}/status.json`] = JSON.stringify({ phase, round: 1, updated_at: updated })
+}
+const notice = (files: Record<string, string>, row: Record<string, any>) => {
+  files['/wb/notify.jsonl'] = (files['/wb/notify.jsonl'] ?? '') + JSON.stringify(row) + '\n'
+}
+const endTurn = (turnId: string) => ({ answer: '', durationMs: 1, isAborted: false, turnId, reason: 'answer' } as const)
+
+test('a session wakes for its own project\'s tasks only: another project\'s are left for their session', async ($, on) => {
+  // the 2026-11-16 audit: two projects at once, each session was woken for the other's tasks
+  const clock = mock.clock(on, { now: 1_800_000_000_000 })
+  const files: Record<string, string> = {}
+  task(files, 'ours', 'review', { repo: '/home/u/a', cwd: '/home/u/a' })
+  task(files, 'sub', 'review', { repo: '/home/u/a/lib', cwd: '/home/u/a/lib' })   // inside this session's dir
+  task(files, 'theirs', 'review', { repo: '/home/u/b', cwd: '/home/u/b' })
+  for (const name of ['ours', 'sub', 'theirs']) notice(files, { ts: ts0, task: name, kind: 'review', text: `REPORT-${name}` })
+  fakeTasks(on, files, ['ours', 'sub', 'theirs'])
+  const runs: string[][] = []
+  on('process.run', (_: any, e: any) => { runs.push(e.argv); return { value: { exitCode: 0, stdout: 'ours  review', stderr: '' } } })
+  on('ui.toast', () => ({ value: undefined }))
+  on('prompt.context', (_: any, e: any) => ({ blocks: e.blocks }))
+  const woken: string[] = []
+  on('prompt.submit', (_: any, e: any) => { woken.push(e.text); return { text: e.text } })
+  await $.session.start({ cwd: '/home/u/a', surface: 'terminal', isInteractive: true })
+  await clock.advance(3000)
+  expect(woken.filter(t => t.includes('REPORT-ours'))).toHaveLength(1)
+  expect(woken.filter(t => t.includes('REPORT-sub'))).toHaveLength(1)
+  expect(woken.join('\n')).not.toContain('theirs')
+  expect(files['/wb/tasks/theirs/acked']).toBe(undefined)        // its own session (or wb wait) still gets it
+  await clock.advance(120_000)
+  expect(woken.join('\n')).not.toContain('theirs')               // no rewake for it either
+  // the open-tasks block asks wb for this session's tasks
+  await $.prompt.context({ blocks: [] })
+  expect(runs).toContainEqual(['wb', 'status', '--repo', '/home/u/a'])
+})
+
+test('a scripted session (claude -p, the SDK) takes no wake and runs no wb, until a person attaches', async ($, on) => {
+  // the 2026-11-16 audit: a `claude -p` run took the terminal session's review wake
+  const clock = mock.clock(on, { now: 1_800_000_000_000 })
+  const files: Record<string, string> = {}
+  task(files, 'fix-it', 'review')
+  notice(files, { ts: ts0, task: 'fix-it', kind: 'review', text: 'REPORT' })
+  fakeTasks(on, files, ['fix-it'], false)
+  const runs: string[][] = []
+  on('process.run', (_: any, e: any) => { runs.push(e.argv); return { value: { exitCode: 0, stdout: 'fix-it review', stderr: '' } } })
+  on('ui.toast', () => ({ value: undefined }))
+  on('prompt.context', (_: any, e: any) => ({ blocks: e.blocks }))
+  on('session.attach', (_: any, e: any) => ({ clientId: e.clientId }))
+  const woken: string[] = []
+  on('prompt.submit', (_: any, e: any) => { woken.push(e.text); return { text: e.text } })
+  await $.session.start({ cwd: '/', surface: null, isInteractive: false })
+  await $.turn.start({ text: 'scripted', turnId: 't1' })
+  await $.turn.complete(endTurn('t1'))
+  const ctx = await $.prompt.context({ blocks: [] })
+  await clock.advance(120_000)
+  expect(woken).toEqual([])
+  expect(files['/wb/tasks/fix-it/acked']).toBe(undefined)
+  expect(files['/wb/scout.json']).toBe(undefined)               // nor the weekly check
+  expect(runs).toEqual([])                                      // no wb status before each prompt
+  expect(ctx.blocks.map((b: any) => b.name)).not.toContain('workbench')
+
+  await $.session.attach({ surface: 'desktop', clientId: 'desktop:default' })
+  await clock.advance(3000)
+  expect(woken.filter(t => t.includes('REPORT'))).toHaveLength(1)
+})
+
+test('a wake the engine drops is not acknowledged, and comes again a minute later', async ($, on) => {
+  // the 2026-11-16 audit: a settings hook blocked the wake, the notice was acked, and lost for good
+  const clock = mock.clock(on, { now: 1_800_000_000_000 })
+  const files: Record<string, string> = {}
+  task(files, 'fix-it', 'review')
+  notice(files, { ts: ts0, task: 'fix-it', kind: 'review', text: 'REPORT' })
+  fakeTasks(on, files)
+  on('process.run', () => ({ value: { exitCode: 0, stdout: '', stderr: '' } }))
+  const toasts: string[] = []
+  on('ui.toast', (_: any, e: any) => { toasts.push(e.text); return { value: undefined } })
+  const tried: string[] = []
+  on('prompt.submit', (_: any, e: any) => {
+    tried.push(e.text)
+    return tried.length === 1 ? { drop: 'blocked by a hook' } : { text: e.text }
+  })
+  await $.session.start({ cwd: '/', surface: 'terminal', isInteractive: true })
+  await clock.advance(3000)
+  expect(tried).toHaveLength(1)
+  expect(Number(files['/wb/tasks/fix-it/acked'] ?? 0)).toBeLessThan(ts0)   // not acknowledged
+  expect(toasts.join('\n')).toContain('dropped (blocked by a hook)')
+  await clock.advance(70_000)
+  expect(tried).toHaveLength(2)                                 // the safety net tries again
+  expect(tried[1]).toContain('Task `fix-it` is ready for review')
+  await clock.advance(120_000)
+  expect(tried).toHaveLength(2)                                 // once it went through
+})
+
+test('a notice already delivered (before a reload, or by wb wait) is not rewoken as lost', async ($, on) => {
+  // the 2026-11-16 audit: after /reload-plugins, "no notice reached Claude" for a review it had
+  const clock = mock.clock(on, { now: 1_800_000_000_000 })
+  const files: Record<string, string> = {}
+  task(files, 'fix-it', 'review', {}, ts0 + 0.05)               // the runner's last write lands after its notice
+  notice(files, { ts: ts0, task: 'fix-it', kind: 'review', text: 'REPORT' })
+  files['/wb/tasks/fix-it/acked'] = String(ts0)
+  task(files, 'older', 'stuck', {}, ts0 - 7200 + 0.05)          // two hours ago: past the wake's hour
+  notice(files, { ts: ts0 - 7200, task: 'older', kind: 'stuck', text: 'STUCK' })
+  files['/wb/tasks/older/acked'] = String(ts0 - 7200)
+  fakeTasks(on, files, ['fix-it', 'older'])
+  on('process.run', () => ({ value: { exitCode: 0, stdout: '', stderr: '' } }))
+  on('ui.toast', () => ({ value: undefined }))
+  const woken: string[] = []
+  on('prompt.submit', (_: any, e: any) => { woken.push(e.text); return { text: e.text } })
+  await $.session.start({ cwd: '/', surface: 'terminal', isInteractive: true })
+  await clock.advance(120_000)
+  expect(woken).toEqual([])
+})
+
+test('two wakes due in one turn both arrive, the second after the first one\'s turn', async ($, on) => {
+  // the 2026-11-16 audit: the second report never came, only a rewake a minute later
+  const clock = mock.clock(on, { now: 1_800_000_000_000 })
+  const files: Record<string, string> = {}
+  task(files, 'a', 'review')
+  task(files, 'b', 'review')
+  fakeTasks(on, files, ['a', 'b'])
+  on('process.run', () => ({ value: { exitCode: 0, stdout: '', stderr: '' } }))
+  on('ui.toast', () => ({ value: undefined }))
+  const woken: string[] = []
+  on('prompt.submit', (_: any, e: any) => {
+    woken.push(e.text)
+    if (woken.length === 1) void $.turn.start({ text: e.text, turnId: 'w1' }) // the engine starts it at once
+    return { text: e.text }
+  })
+  await $.session.start({ cwd: '/', surface: 'terminal', isInteractive: true })
+  await $.turn.start({ text: 'busy', turnId: 't1' })
+  notice(files, { ts: ts0, task: 'a', kind: 'review', text: 'REPORT-A' })
+  notice(files, { ts: ts0 + 1, task: 'b', kind: 'review', text: 'REPORT-B' })
+  await clock.advance(3000)
+  await $.turn.complete(endTurn('t1'))
+  await clock.advance(3000)
+  await $.turn.complete(endTurn('w1'))
+  await clock.advance(3000)
+  expect(woken.filter(t => t.includes('REPORT-A'))).toHaveLength(1)
+  expect(woken.filter(t => t.includes('REPORT-B'))).toHaveLength(1)
+  expect(woken.join('\n')).not.toContain('no notice reached Claude')
+})
+
+test('two questions asked at once both reach Claude, each with its own id', async ($, on) => {
+  // the 2026-11-16 audit: the newest alone was delivered, and the first stayed blocked
+  const clock = mock.clock(on, { now: 1_800_000_000_000 })
+  const files: Record<string, string> = {}
+  task(files, 'fix-it', 'asking')
+  for (const id of ['q1', 'q2']) {
+    files[`/wb/tasks/fix-it/ask/${id}.json`] = JSON.stringify({ id })
+    notice(files, { ts: ts0 + (id === 'q1' ? 0 : 1), task: 'fix-it', kind: 'question', id, text: `Q: ${id}?` })
+  }
+  fakeTasks(on, files)
+  on('process.run', () => ({ value: { exitCode: 0, stdout: '', stderr: '' } }))
+  on('ui.toast', () => ({ value: undefined }))
+  const woken: string[] = []
+  on('prompt.submit', (_: any, e: any) => { woken.push(e.text); return { text: e.text } })
+  await $.session.start({ cwd: '/', surface: 'terminal', isInteractive: true })
+  await clock.advance(3000)
+  expect(woken.filter(t => t.includes('Q: q1?') && t.includes('wb answer fix-it --id q1'))).toHaveLength(1)
+  expect(woken.filter(t => t.includes('Q: q2?') && t.includes('wb answer fix-it --id q2'))).toHaveLength(1)
+})
+
+test('another plugin\'s tool call between turns does not hold the wakes', {
+  plugins: [{
+    name: 'peek',
+    register(on) {
+      on('session.start', async ($, e, next) => {
+        await $.command.register({ name: 'peek', description: 'reads a file' })
+        return next(e)
+      })
+      on('command.run', { command: 'peek' }, async $ => {
+        await $.tool.call({ tool: 'Read', file_path: '/x' } as any).catch(() => {})
+        return { text: '' }
+      })
+    },
+  }],
+}, async ($, on) => {
+  // the 2026-11-16 audit: a plugin's $.tool.call marked Claude busy until a turn the user started
+  const clock = mock.clock(on, { now: 1_800_000_000_000 })
+  const files: Record<string, string> = {}
+  task(files, 'fix-it', 'review')
+  fakeTasks(on, files)
+  on('process.run', () => ({ value: { exitCode: 0, stdout: '', stderr: '' } }))
+  on('ui.toast', () => ({ value: undefined }))
+  on('tool.call', () => ({ result: {}, text: '' }))
+  const woken: string[] = []
+  on('prompt.submit', (_: any, e: any) => { woken.push(e.text); return { text: e.text } })
+  await $.session.start({ cwd: '/', surface: 'terminal', isInteractive: true })
+  await $.command.run({ command: 'peek', args: '' })
+  notice(files, { ts: ts0, task: 'fix-it', kind: 'review', text: 'REPORT' })
+  await clock.advance(3000)
+  expect(woken.filter(t => t.includes('REPORT'))).toHaveLength(1)
+})
+
+test('the weekly update check runs beside the wakes, not in front of them', async ($, on) => {
+  // the 2026-11-16 audit: a stalled fetch held every wake for up to two minutes
+  const clock = mock.clock(on, { now: 1_800_000_000_000 })
+  const files: Record<string, string> = {}
+  task(files, 'fix-it', 'review')
+  fakeTasks(on, files)
+  on('process.run', async (_: any, e: any) => {
+    if (e.argv[1] === 'update') await new Promise(() => {})    // the network hangs
+    return { value: { exitCode: 0, stdout: '', stderr: '' } }
+  })
+  on('ui.toast', () => ({ value: undefined }))
+  const woken: string[] = []
+  on('prompt.submit', (_: any, e: any) => { woken.push(e.text); return { text: e.text } })
+  await $.session.start({ cwd: '/', surface: 'terminal', isInteractive: true })
+  await $.turn.start({ text: 'hi', turnId: 't1' })
+  notice(files, { ts: ts0, task: 'fix-it', kind: 'review', text: 'REPORT' })
+  await $.turn.complete(endTurn('t1'))
+  await clock.advance(3000)
+  expect(woken.filter(t => t.includes('REPORT'))).toHaveLength(1)
+})
+
+test('a notify.jsonl past what one read takes is read from its end, and still wakes Claude', async ($, on) => {
+  // the 2026-11-16 audit: past 4 MiB the read failed, deliver read '' and no wake came again
+  const clock = mock.clock(on, { now: 1_800_000_000_000 })
+  const files: Record<string, string> = {}
+  task(files, 'fix-it', 'review')
+  files['/wb/notify.jsonl'] = (JSON.stringify({ ts: ts0 - 86400, task: 'gone', kind: 'review', text: 'old' }) + '\n').repeat(30_000)
+  notice(files, { ts: ts0, task: 'fix-it', kind: 'review', text: 'REPORT' })
+  fakeTasks(on, files)
+  const runs: string[][] = []
+  on('process.run', (_: any, e: any) => {
+    runs.push(e.argv)
+    if (e.argv[0] === 'tail') return { value: { exitCode: 0, stdout: files[e.argv[3]].slice(-Number(e.argv[2])), stderr: '' } }
+    return { value: { exitCode: 0, stdout: '', stderr: '' } }
+  })
+  on('ui.toast', () => ({ value: undefined }))
+  const woken: string[] = []
+  on('prompt.submit', (_: any, e: any) => { woken.push(e.text); return { text: e.text } })
+  await $.session.start({ cwd: '/', surface: 'terminal', isInteractive: true })
+  await clock.advance(3000)
+  expect(runs).toContainEqual(['tail', '-c', String(1 << 20), '/wb/notify.jsonl'])
+  expect(woken.filter(t => t.includes('REPORT'))).toHaveLength(1)
+})
+
 test('the pane follows the running task: its whole history, then what it is doing now', async ($, on) => {
   const clock = mock.clock(on, { now: 1_800_000_000_000 })
   const ts = 1_800_000_000
@@ -159,7 +410,8 @@ test('the pane follows the running task: its whole history, then what it is doin
 
   await $.session.start({ cwd: '/', surface: 'terminal', isInteractive: true })
   await clock.advance(3000)
-  expect(runs[0]).toEqual(['wb', 'watch', 'fix-it', '--json'])
+  const watches = () => runs.filter(r => r[1] === 'watch')
+  expect(watches()[0]).toEqual(['wb', 'watch', 'fix-it', '--json', '--last', '2000'])
 
   const ui = await $.ui.mount({ ...PANE, surface: 'terminal' })
   expect(await ui.find({ type: 'Text', text: /── fix-it · ↑↓ scrolls/ })).toBeTruthy()
@@ -174,9 +426,9 @@ test('the pane follows the running task: its whole history, then what it is doin
   expect(texts[texts.length - 2].text).toBe('web chat ')
   await ui.unmount()
 
-  // a running task is re-read every poll, since its session moves between status writes
-  await clock.advance(3000)
-  expect(runs.length).toBeGreaterThan(1)
+  // a running task is re-read every few seconds, since its session moves between status writes
+  await clock.advance(6000)
+  expect(watches().length).toBeGreaterThan(1)
 })
 
 test('/delegate-quit stops everything; /delegate-quit-and-hand-back-claude hands the tasks to Claude', async ($, on) => {
@@ -196,13 +448,13 @@ test('/delegate-quit stops everything; /delegate-quit-and-hand-back-claude hands
   await $.session.start({ cwd: '/', surface: 'terminal', isInteractive: true })
 
   const quit = await $.command.run({ command: 'delegate-quit', args: '' })
-  expect(runs.at(-1)).toEqual(['wb', 'stop', '--all'])
+  expect(runs.at(-1)).toEqual(['wb', 'stop', '--all', '--repo', '/'])  // this session's tasks
   expect(quit.text).toContain('stopped: fix-it')
   expect(JSON.stringify(quit.context)).toContain("Don't finish, restart")  // Claude is told
   expect(submitted.length).toBe(0)                                         // without a turn
 
   await $.command.run({ command: 'delegate-quit-and-hand-back-claude', args: '' })
-  expect(runs.at(-1)).toEqual(['wb', 'takeover', '--all'])
+  expect(runs.at(-1)).toEqual(['wb', 'takeover', '--all', '--repo', '/'])
   await clock.advance(2000)
   expect(submitted.at(-1)).toContain('took over fix-it')                  // Claude starts now
   expect(submitted.at(-1)).toContain('Leave delegate mode')
@@ -211,6 +463,31 @@ test('/delegate-quit stops everything; /delegate-quit-and-hand-back-claude hands
   const before = runs.length
   await $.prompt.submit({ text: 'if I said bail out claude, would it stop?' })
   expect(runs.length).toBe(before)
+})
+
+test('wb failing is said as a failure: not open tasks, not agents stopped', async ($, on) => {
+  // the 2026-11-16 audit: a broken wb's traceback reached Claude as "Tasks … are open"
+  const clock = mock.clock(on, { now: 1_800_000_000_000 })
+  fakeTasks(on, {})
+  const trace = 'Traceback (most recent call last):\n  File "wb"\nSyntaxError: invalid syntax'
+  on('process.run', () => ({ value: { exitCode: 1, stdout: '', stderr: trace } }))
+  const toasts: string[] = []
+  on('ui.toast', (_: any, e: any) => { toasts.push(e.text); return { value: undefined } })
+  on('prompt.context', (_: any, e: any) => ({ blocks: e.blocks }))
+  const submitted: string[] = []
+  on('prompt.submit', (_: any, e: any) => { submitted.push(e.text); return { text: e.text } })
+  await $.session.start({ cwd: '/', surface: 'terminal', isInteractive: true })
+  const ctx = await $.prompt.context({ blocks: [] })
+  expect(ctx.blocks.map((b: any) => b.name)).not.toContain('workbench')
+  expect(toasts.join('\n')).toContain('wb status failed: SyntaxError: invalid syntax')
+
+  const quit = await $.command.run({ command: 'delegate-quit', args: '' })
+  expect(quit.text).toContain('not stopped')
+  expect(JSON.stringify(quit.context)).toContain('failed, so its agents may still be running')
+  const back = await $.command.run({ command: 'delegate-quit-and-hand-back-claude', args: '' })
+  expect(back.text).toContain('wb takeover --all failed')
+  await clock.advance(3000)
+  expect(submitted.join('\n')).not.toContain('Leave delegate mode')   // no turn to finish what wasn't handed over
 })
 
 test('a closed task compacts Claude early, keeping the delegation state; open tasks come back after', async ($, on) => {
@@ -233,7 +510,9 @@ test('a closed task compacts Claude early, keeping the delegation state; open ta
     compactions.push(e.instructions)
     return { messages: [{ role: 'user', text: 'summary', toolUses: [] }] }
   })
+  on('skill.prompt', (_: any, e: any) => ({ text: e.text }))
   await $.session.start({ cwd: '/', surface: 'terminal', isInteractive: true })
+  await $.skill.prompt({ skill: 'delegate', text: 'x', frontmatter: {}, source: 'userSettings' })
   await clock.advance(2000)
   expect(compactions.length).toBe(0)              // the task is still running
 
@@ -263,6 +542,31 @@ test('a closed task compacts Claude early, keeping the delegation state; open ta
   expect(compactions.length).toBe(2)
 })
 
+test('a session that never delegated is not compacted when a task closes', async ($, on) => {
+  // the 2026-11-16 audit: a task closing compacted every session's context, delegating or not
+  const clock = mock.clock(on, { now: 1_800_000_000_000 })
+  const files: Record<string, string> = {}
+  task(files, 'fix-it', 'running')
+  fakeTasks(on, files)
+  on('process.run', () => ({ value: { exitCode: 0, stdout: 'fix-it   running', stderr: '' } }))
+  on('ui.toast', () => ({ value: undefined }))
+  on('session.usage', () => ({ value: { startedAt: 0, rateLimits: [], context: {
+    tokens: 300_000, window: 1_000_000, percent: 30,
+    breakdown: { isAutoCompactEnabled: true, autoCompactThreshold: 400_000 } } } }))
+  const compactions: (string | undefined)[] = []
+  on('session.compact', (_: any, e: any) => {
+    compactions.push(e.instructions)
+    return { messages: [{ role: 'user', text: 'summary', toolUses: [] }] }
+  })
+  await $.session.start({ cwd: '/', surface: 'terminal', isInteractive: true })
+  await clock.advance(2000)
+  task(files, 'fix-it', 'accepted', {}, ts0 + 5)
+  await clock.advance(4000)
+  expect(compactions).toEqual([])
+  await $.session.compact({ instructions: 'the plan', trigger: 'manual', messages: [{ role: 'user', text: 'hi', toolUses: [] }] } as any)
+  expect(compactions).toEqual(['the plan'])                     // a /compact of its own, untouched
+})
+
 test('the live header names the followed task', async ($, on) => {
   const clock = mock.clock(on, { now: 1_800_000_000_000 })
   const ts = 1_800_000_000
@@ -285,6 +589,86 @@ test('the live header names the followed task', async ($, on) => {
   await ui.unmount()
 })
 
+test('the transcript is read only while the pane is shown', async ($, on) => {
+  // the 2026-11-16 audit: every session ran OpenCode exports back to back, pane open or not
+  const clock = mock.clock(on, { now: 1_800_000_000_000 })
+  const files: Record<string, string> = {}
+  task(files, 'fix-it', 'running')
+  const pane = fakeTasks(on, files)
+  const watches: string[][] = []
+  on('process.run', (_: any, e: any) => {
+    if (e.argv[1] === 'watch') watches.push(e.argv)
+    return { value: { exitCode: 0, stdout: JSON.stringify({ s: 'tool', t: '⏺ Read(f.py)' }), stderr: '' } }
+  })
+  await $.session.start({ cwd: '/', surface: 'terminal', isInteractive: true })
+  await clock.advance(3000)
+  expect(watches.length).toBe(1)
+  pane.show(false)                                              // the person closes it
+  const before = watches.length
+  await clock.advance(30_000)
+  expect(watches.length).toBe(before)
+  pane.show(true)
+  await clock.advance(6000)
+  expect(watches.length).toBeGreaterThan(before)
+})
+
+test('with two tasks running the pane keeps following the one it follows', async ($, on) => {
+  // the 2026-11-16 audit: it swapped to whichever agent made the latest tool call
+  const clock = mock.clock(on, { now: 1_800_000_000_000 })
+  const files: Record<string, string> = {}
+  task(files, 'a', 'running')
+  task(files, 'b', 'running')
+  fakeTasks(on, files, ['a', 'b'])
+  const watched: string[] = []
+  on('process.run', (_: any, e: any) => {
+    if (e.argv[1] === 'watch') watched.push(e.argv[2])
+    return { value: { exitCode: 0, stdout: JSON.stringify({ s: 'tool', t: `⏺ ${e.argv[2]}` }), stderr: '' } }
+  })
+  await $.session.start({ cwd: '/', surface: 'terminal', isInteractive: true })
+  for (let i = 1; i <= 8; i++) {                                // each agent's tool calls in turn
+    task(files, i % 2 ? 'a' : 'b', 'running', {}, ts0 + i)
+    await clock.advance(1600)
+  }
+  expect(new Set(watched).size).toBe(1)
+  expect(watched.length).toBeGreaterThan(1)
+})
+
+test('a transcript cut at the engine\'s limit keeps the lines shown and says so', async ($, on) => {
+  // the 2026-11-16 audit: the pane froze on old lines, with no hint why
+  const clock = mock.clock(on, { now: 1_800_000_000_000 })
+  const files: Record<string, string> = {}
+  task(files, 'fix-it', 'running')
+  fakeTasks(on, files)
+  let cut = false
+  on('process.run', () => ({
+    value: { exitCode: 0, stdout: JSON.stringify({ s: 'tool', t: cut ? '⏺ OLD-START' : '⏺ Read(f.py)' }), stderr: '', isStdoutTruncated: cut },
+  }))
+  await $.session.start({ cwd: '/', surface: 'terminal', isInteractive: true })
+  await clock.advance(3000)
+  cut = true
+  await clock.advance(6000)
+  const ui = await $.ui.mount({ ...PANE, surface: 'terminal' })
+  expect(await ui.find({ type: 'Text', text: '⏺ Read(f.py)' })).toBeTruthy()
+  expect(await ui.find({ type: 'Text', text: 'transcript too long for the pane: wb watch fix-it' })).toBeTruthy()
+  await ui.unmount()
+})
+
+test('one very long transcript line is cut, and the lines before it still show', async ($, on) => {
+  // the 2026-11-16 audit: a heredoc command took the whole history budget alone
+  const clock = mock.clock(on, { now: 1_800_000_000_000 })
+  const files: Record<string, string> = {}
+  task(files, 'fix-it', 'running')
+  fakeTasks(on, files)
+  const lines = [{ s: 'tool', t: '⏺ Read(early.py)' }, { s: 'tool', t: `⏺ Bash(cat > f <<'EOF' ${'x'.repeat(70_000)})` }]
+  on('process.run', () => ({ value: { exitCode: 0, stdout: lines.map(l => JSON.stringify(l)).join('\n'), stderr: '' } }))
+  await $.session.start({ cwd: '/', surface: 'terminal', isInteractive: true })
+  await clock.advance(3000)
+  const ui = await $.ui.mount({ ...PANE, surface: 'terminal' })
+  expect(await ui.find({ type: 'Text', text: '⏺ Read(early.py)' })).toBeTruthy()
+  expect((await ui.find({ type: 'Text', text: /^⏺ Bash\(cat/ }))?.text.length).toBeLessThanOrEqual(2000)
+  await ui.unmount()
+})
+
 test('the weekly model check comes once, in a quiet moment of a session in use; /delegate-models asks now', async ($, on) => {
   const clock = mock.clock(on, { now: 1_800_000_000_000 })
   const files: Record<string, string> = {}
@@ -302,6 +686,8 @@ test('the weekly model check comes once, in a quiet moment of a session in use; 
   await $.turn.start({ text: 'hi', turnId: 't1' })
   await $.turn.complete({ answer: '', durationMs: 1, isAborted: false, turnId: 't1', reason: 'answer' })
   await clock.advance(2000)
+  expect(asked.length).toBe(0)                       // not at once: Claude may have just asked something
+  await clock.advance(90_000)                        // a quiet minute later
   expect(asked.length).toBe(1)
   expect(asked[0]).toContain('The weekly model check is due')
   expect(asked[0]).toContain('`wb scout`')
@@ -318,13 +704,53 @@ test('the weekly model check comes once, in a quiet moment of a session in use; 
   expect(asked[1]).toContain('The weekly model check is due')
 })
 
+test('/delegate-models when the weekly check is due raises it once, not twice', async ($, on) => {
+  // the 2026-11-16 audit: the weekly check followed at once, burying Claude's question to the user
+  const clock = mock.clock(on, { now: 1_800_000_000_000 })
+  const files: Record<string, string> = {}
+  fakeTasks(on, files, [], false)
+  on('ui.toast', () => ({ value: undefined }))
+  const asked: string[] = []
+  on('prompt.submit', (_: any, e: any) => { asked.push(e.text); return { text: e.text } })
+  await $.session.start({ cwd: '/', surface: 'terminal', isInteractive: true })
+  await $.command.run({ command: 'delegate-models', args: '' })
+  await clock.advance(2000)
+  await $.turn.start({ text: 'the check', turnId: 't1' })
+  await $.turn.complete(endTurn('t1'))                          // Claude asks "shall I pull it?"
+  await clock.advance(120_000)
+  expect(asked.filter(t => t.includes('The weekly model check is due'))).toHaveLength(1)
+})
+
+test('when wb can\'t run the mod says so once, backs off, and raises no model check', async ($, on) => {
+  // the 2026-11-16 audit: `wb events` was respawned every 2 s for good, and nobody was told
+  const clock = mock.clock(on, { now: 1_800_000_000_000 })
+  const files: Record<string, string> = {}
+  fakeTasks(on, files, [], false, [], false)
+  let spawns = 0
+  on('process.spawn', async function* () { spawns += 1; throw new Error('spawn wb ENOENT') })
+  on('process.run', () => { throw new Error('spawn wb ENOENT') })
+  const toasts: string[] = []
+  on('ui.toast', (_: any, e: any) => { toasts.push(e.text); return { value: undefined } })
+  const asked: string[] = []
+  on('prompt.submit', (_: any, e: any) => { asked.push(e.text); return { text: e.text } })
+  await $.session.start({ cwd: '/', surface: 'terminal', isInteractive: true })
+  await $.turn.start({ text: 'hi', turnId: 't1' })
+  await $.turn.complete(endTurn('t1'))
+  await clock.advance(120_000)
+  expect(toasts.filter(t => t.includes("can't run `wb events`"))).toHaveLength(1)
+  expect(spawns).toBeLessThan(10)                               // 2 s, 4 s, … up to a minute
+  expect(asked).toEqual([])
+})
+
 test('an update is checked once a session is in use, and /delegate-update installs it', async ($, on) => {
   const clock = mock.clock(on, { now: 1_800_000_000_000 })
   fakeTasks(on, {}, [])
   let behind = 3
   const runs: string[][] = []
+  const limits: Record<string, number> = {}
   on('process.run', (_: any, e: any) => {
     runs.push(e.argv)
+    limits[e.argv.slice(1).join(' ')] = e.init?.timeoutMs
     const said = e.argv[2] === '--check'
       ? (behind ? `update available: ${behind} new commit(s); /delegate-update (or wb update) installs it` : 'up to date')
       : behind ? 'updated marketplace 1111111..2222222 (3 commit(s))' : 'already up to date'
@@ -347,6 +773,7 @@ test('an update is checked once a session is in use, and /delegate-update instal
 
   const out = await $.command.run({ command: 'delegate-update', args: '' })
   expect(runs.at(-1)).toEqual(['wb', 'update'])
+  expect(limits.update).toBe(600_000)                            // its steps take up to 300 s each
   expect(out.text).toContain('updated marketplace')
   behind = 0
   expect((await $.command.run({ command: 'delegate-update', args: '' })).text).toContain('already up to date')
@@ -451,6 +878,26 @@ test('a task left waiting with no notice reaching Claude wakes it anyway, once',
   expect(asked.filter(t => t.includes('no notice reached Claude'))).toHaveLength(1)
 })
 
+test('a task closed long ago is not read again', async ($, on) => {
+  // the 2026-11-16 audit: every poll read both files of every task ever created
+  const clock = mock.clock(on, { now: 1_800_000_000_000 })
+  const files: Record<string, string> = {}
+  task(files, 'old', 'accepted', {}, ts0 - 7200)
+  task(files, 'waits', 'review', {}, ts0 - 7200)                // waiting on Claude: shown however old
+  const { reads } = fakeTasks(on, files, ['old', 'waits'])
+  on('process.run', () => ({ value: { exitCode: 0, stdout: '', stderr: '' } }))
+  on('ui.toast', () => ({ value: undefined }))
+  on('prompt.submit', (_: any, e: any) => ({ text: e.text }))
+  await $.session.start({ cwd: '/', surface: 'terminal', isInteractive: true })
+  await clock.advance(70_000)
+  expect(reads.filter(r => r === '/wb/tasks/old/status.json')).toHaveLength(1)
+  expect(reads.filter(r => r === '/wb/tasks/old/task.json')).toHaveLength(0)
+  const ui = await $.ui.mount({ ...PANE, surface: 'terminal' })
+  expect(await ui.find({ type: 'Text', text: 'waits' })).toBeTruthy()
+  expect(await ui.find({ type: 'Text', text: 'old' })).toBeFalsy()
+  await ui.unmount()
+})
+
 test('the apprentice says how the followed task stands: in pixels in a terminal, by its face elsewhere', async ($, on) => {
   const clock = mock.clock(on, { now: 1_800_000_000_000 })
   const ts = 1_800_000_000
@@ -531,6 +978,22 @@ test('/delegate alone turns delegate mode on for the session: the pane opens, an
   expect(status()).toBe('status ')
   expect((await $.prompt.context({ blocks: [] })).blocks.map((b: any) => b.name)).not.toContain('delegate-mode')
   expect((await $.prompt.context({ blocks: [] })).blocks.map((b: any) => b.name)).not.toContain('user-notes')
+})
+
+test('with wakes off, Claude is told no wake will come', { options: { wake: 'off' } }, async ($, on) => {
+  // the 2026-11-16 audit: the skill said to end the turn and wait for a wake that never came
+  const clock = mock.clock(on, { now: 1_800_000_000_000 })
+  fakeTasks(on, {}, [])
+  on('ui.toast', () => ({ value: undefined }))
+  on('skill.prompt', (_: any, e: any) => ({ text: e.text }))
+  on('process.run', () => ({ value: { exitCode: 0, stdout: 'no open tasks', stderr: '' } }))
+  on('prompt.context', (_: any, e: any) => ({ blocks: e.blocks }))
+  await $.session.start({ cwd: '/', surface: 'terminal', isInteractive: true })
+  expect((await $.prompt.context({ blocks: [] })).blocks.map((b: any) => b.name)).not.toContain('workbench-wake')
+  await $.skill.prompt({ skill: 'delegate', text: 'x', frontmatter: {}, source: 'userSettings' })
+  await clock.advance(2000)
+  const block = (await $.prompt.context({ blocks: [] })).blocks.find((b: any) => b.name === 'workbench-wake')
+  expect(block?.text).toContain('Wakes are off')
 })
 
 test('the bubble wraps its words into lines that fit, never cutting a line short', () => {
