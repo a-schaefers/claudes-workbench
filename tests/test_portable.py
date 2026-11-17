@@ -85,7 +85,7 @@ class Real(unittest.TestCase):
         tmp = Path(self.tmp.name)
         os.environ.pop("WB_FAKE_MODELS", None)
         os.environ.update(WB_HOME=str(tmp / "state"), WB_OPENCODE_CONFIG=str(tmp / "opencode.json"),
-                          WB_MODELS=str(tmp / "models.json"))
+                          WB_MODELS=str(tmp / "models.json"), WB_COMMANDS=str(tmp / "commands.json"))
         models._ENGINES.clear()
         self.servers = []
 
@@ -368,6 +368,7 @@ class Real(unittest.TestCase):
         # the 2026-11-16 audit: a 401 read as "not running", and with a start command wb started a
         # second copy and waited 20 minutes for it
         os.environ["WB_TEST_KEY"] = "sekret"
+        Path(os.environ["WB_COMMANDS"]).write_text(json.dumps({"env": ["WB_TEST_KEY"]}))
         keyed = self.server({"/v1/models": lambda h: {"data": [{"id": "a"}, {"id": "b"}]}
                              if h.get("Authorization") == "Bearer sekret" else 401})
         self.config({"k": {"options": {"baseURL": keyed + "/v1", "apiKey": "{env:WB_TEST_KEY}"},
@@ -380,6 +381,21 @@ class Real(unittest.TestCase):
         self.assertTrue(st["available"] and st["resident"])
         self.assertIn("API key", st["why"])
         self.assertNotIn("sekret", repr(found["k/a"]))
+
+    def test_an_api_key_the_agent_wont_get_makes_the_model_unavailable_with_the_fix(self):
+        # probed with wb's own key it read running, and the agent, its key dropped, had every
+        # request refused (the 0.90 review)
+        os.environ["LLAMA_API_KEY"] = "sekret"
+        keyed = self.server({"/v1/models": lambda h: {"data": [{"id": "a"}]}
+                             if h.get("Authorization") == "Bearer sekret" else 401})
+        self.config({"k": {"options": {"baseURL": keyed + "/v1", "apiKey": "{env:LLAMA_API_KEY}"},
+                           "models": {"a": {}}}})
+        st = models.status(models.resolve("k/a"))
+        self.assertFalse(st["available"])
+        self.assertIn("its apiKey reads {env:LLAMA_API_KEY}, which agents don't get: add "
+                      "LLAMA_API_KEY to commands.json env", st["why"])
+        Path(os.environ["WB_COMMANDS"]).write_text(json.dumps({"env": ["LLAMA_API_KEY"]}))
+        self.assertEqual(models.status(models.resolve("k/a"))["why"], "running")
 
     def test_a_proxy_in_the_environment_never_carries_probes_to_this_machine(self):
         # the 2026-11-16 audit: behind a proxy without no_proxy, every local model was "not answering"

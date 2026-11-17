@@ -376,7 +376,16 @@ def discover() -> dict[str, Model]:
     for pid, prov, url, engine, remote in _local_providers(read_config(), extra):
         opts = prov.get("options") or prov.get("settings") or {}
         problem = url_problem(url, engine, prov.get("npm"))
-        key = _expand(str(opts.get("apiKey") or ""), agent=False)
+        # the key the agent's OpenCode will send: probed with wb's own, a key the agent never got
+        # read as running and every request of the task was refused (the 0.90 review)
+        raw_key = str(opts.get("apiKey") or "")
+        key = _expand(raw_key)
+        hidden = [n.strip() for k, n in _TEMPLATE.findall(raw_key)
+                  if k == "env" and n.strip() in os.environ and not _agent_sees(n.strip())]
+        if hidden and not problem:
+            from . import context
+            problem = (f"its apiKey reads {{env:{hidden[0]}}}, which agents don't get: add "
+                       f"{hidden[0]} to commands.json env ({context.commands_path()})")
         for name, spec in (prov.get("models") or {}).items():
             mid = f"{pid}/{name}"
             over = {**extra.get(pid, {}), **extra.get(mid, {})}

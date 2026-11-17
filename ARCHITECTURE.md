@@ -1180,9 +1180,12 @@ substring.
 Every request to a server on this machine (`_open`: probes, loads, pulls, the image engines) goes
 direct, never through an `http_proxy` in the environment, which urllib would otherwise use for
 loopback too (the 2026-11-16 audit: every model read "not answering" behind a proxy); a provider
-on another host keeps the environment's proxy. A provider's `options.apiKey` (its `{env:}` or
-`{file:}` resolved from wb's own environment) is sent as a bearer token on a server's `/models`
-probe; it is never printed or stored.
+on another host keeps the environment's proxy. A provider's `options.apiKey`, resolved as the
+agent will see it (`_expand`: a `{env:}` name the agent's environment drops is empty), is sent as a
+bearer token on a server's `/models` probe; it is never printed or stored. A key whose `{env:NAME}`
+is set for wb but dropped for the agent is a provider problem, so the model is unavailable: "its
+apiKey reads {env:NAME}, which agents don't get: add NAME to commands.json env" (probed with wb's
+own key it read running, and every request of the agent's was refused: the 0.90 review).
 
 **Ollama cloud models** (`ollama/<name>:cloud`, `…-cloud`, or an `/api/tags` row with
 `remote_host`/`remote_model`): Ollama forwards them to ollama.com, so they are not candidates:
@@ -1205,26 +1208,26 @@ model id; a model's entry is merged over its provider's (`{**provider, **model}`
 - `local: true`: on a provider, counts it although it is on another host; on an Ollama cloud
   model's own id, allows that model.
 
-**Status** (`status` → {available, resident, why}). First what the config alone rules out, so
-the fake models meet it too: an entry with `tool_call: false` ("OpenCode's config says it can't
-call tools": the router never picks it, `wb start --model` refuses it; a missing key is OpenCode's
+**Status** (`status` → {available, resident, why}). First what the config alone rules out, so the
+fake models meet it too: an entry with `tool_call: false` ("OpenCode's config says it can't call
+tools": the router never picks it, `wb start --model` refuses it; a missing key is OpenCode's
 default and counts as capable), a provider problem (`url_problem`: an Ollama provider, plain
 OpenAI-compatible, whose baseURL doesn't end in `/v1`, where Ollama's OpenAI API lives; OpenCode
-would get 404 on every request after the model loaded), an Ollama cloud model not allowed. Then
-Ollama: not answering / `<name>` is not pulled / a cloud model by its tags row / pulled / loaded
-(`/api/tags`, `/api/ps`). A server (`GET <base>/models`): running (a server listing several models
-must list this one: "the server lists N models, not …"; a server listing one answers to any name,
-except on a port that several models share, each with its own `start` (`_contended`: one
-llama-server per model), where the listed id must be the model's name or its file's basename
-without `.gguf` (`_serves`), else it is unavailable, "<root> is serving <id>, not <name> …": the
-task would run on the other model, recorded under this one); a 401 or 403 is running too ("it
-wants an API key"), so wb never starts a second copy; stopped with a `start` ("wb starts it");
-not running with no start command. `wb models` and `wb doctor` print the reason. `status(m,
-down)` takes the Ollama roots a caller already found not answering (doctor) and doesn't ask them
-again. `remedy(m, state)` is the next step for a reason (none when the reason says it already),
-and `may_come_up(state)` whether the model may run by the time a queued task gets the GPU (Ollama
-not answering, a server not running). `weights()`: `weights_gb`, else Ollama's size (0 for a
-cloud model), else 0; the router weighs only a model that can run (and `fits` only that one), so
+would get 404 on every request after the model loaded; or an `apiKey` the agent won't get, above),
+an Ollama cloud model not allowed. Then Ollama: not answering / `<name>` is not pulled / a cloud
+model by its tags row / pulled / loaded (`/api/tags`, `/api/ps`). A server (`GET <base>/models`):
+running (a server listing several models must list this one: "the server lists N models, not …"; a
+server listing one answers to any name, except on a port that several models share, each with its
+own `start` (`_contended`: one llama-server per model), where the listed id must be the model's
+name or its file's basename without `.gguf` (`_serves`), else it is unavailable, "<root> is serving
+<id>, not <name> …": the task would run on the other model, recorded under this one); a 401 or 403
+is running too ("it wants an API key"), so wb never starts a second copy; stopped with a `start`
+("wb starts it"); not running with no start command. `wb models` and `wb doctor` print the reason.
+`status(m, down)` takes the Ollama roots a caller already found not answering (doctor) and doesn't
+ask them again. `remedy(m, state)` is the next step for a reason (none when the reason says it
+already), and `may_come_up(state)` whether the model may run by the time a queued task gets the GPU
+(Ollama not answering, a server not running). `weights()`: `weights_gb`, else Ollama's size (0 for
+a cloud model), else 0; the router weighs only a model that can run (and `fits` only that one), so
 a down server isn't asked again per model.
 
 **Residency** (`make_resident(m, keep, warn)`, called by the runner under the lease). A model
