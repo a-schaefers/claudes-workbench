@@ -406,7 +406,10 @@ You are the driver, not a spectator. When something tells you the agent is headi
   user's checkout or another project: there, take the file yourself or say no. `wb allow --path`
   refuses a path through a link (it names the target: allow that only if it is what the task
   needs; the agent can plant links in its lane) and a place inside credentials or workbench's own
-  state and config. A test driving a program through a pseudo-terminal (pexpect, Python's pty,
+  state and config. A toolchain the build wants installed (a Python uv must download, a
+  `rust-toolchain.toml` toolchain, `uv tool install`, `cargo install`) is refused there: install
+  it yourself rather than grant `~/.local/share/uv` or `~/.rustup/toolchains`, whose programs
+  run later outside the lane. A test driving a program through a pseudo-terminal (pexpect, Python's pty,
   `script`, node-pty) fails in the lane ("out of pty devices", "failed to create
   pseudo-terminal"): grant `/dev/pts` (`wb start --allow-path /dev/pts`), which also opens the
   user's other terminals to the agent.

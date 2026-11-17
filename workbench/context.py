@@ -12,13 +12,14 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import re
 import shutil
 import stat
 import sys
 import tempfile
 from pathlib import Path
 
-from . import chat, gitops, images, models, skills, store
+from . import chat, gitops, hardware, images, models, skills, store
 
 PKG_ROOT = Path(__file__).resolve().parent.parent
 HANDBOOK = PKG_ROOT / "agent" / "HANDBOOK.md"
@@ -193,8 +194,13 @@ def shell_rules(task: store.Task) -> list[dict]:
 # A toolchain's caches, not the directories on the user's PATH or in their shell's startup: a file
 # the agent plants there runs later outside the lane (the 2026-11-16 audit: ~/.local/lib's user
 # site-packages, whose .pth files every python runs; ~/.cargo/bin; GOPATH holding the repo itself).
+# Nor uv's tools and Pythons (~/.local/share/uv: every `uv run` and `uv tool` program runs from
+# there; its cache is ~/.cache/uv) or rustup's toolchains (what ~/.cargo/bin's proxies exec), the
+# 0.90 review. The rest is a trade, documented: a home kept whole (.dotnet, .ghcup, .julia,
+# .cache with pre-commit's hooks and poetry's virtualenvs) can hold a program the user's own tools
+# run later, and splitting it would refuse the first new entry every build makes there.
 TOOL_HOMES = (".cache", ".cargo", ".rustup", "go/pkg", ".npm", ".bun/install/cache", ".yarn",
-              ".pnpm-store", ".local/share/pnpm/store", ".local/share/uv", ".gradle", ".m2",
+              ".pnpm-store", ".local/share/pnpm/store", ".gradle", ".m2",
               ".nuget", ".dotnet", ".gem", ".julia", ".cabal", ".stack", ".ghcup", ".platformio",
               ".conan2", ".hex", ".mix", ".sbt", ".ivy2", ".pub-cache", ".konan",
               ".local/share/hatch", ".local/share/virtualenvs")
@@ -206,8 +212,11 @@ TOOL_HOME_VARS = ("CARGO_HOME", "RUSTUP_HOME", "GOPATH", "GOMODCACHE", "GOCACHE"
                   "WORKON_HOME")
 VAR_CACHES = {"GOPATH": "pkg", "BUN_INSTALL": "install/cache"}
 # inside a toolchain home in the lane, what stays out of it: the programs on the user's PATH and
-# what their shell sources (relative to the home, or to CARGO_HOME for cargo's)
-NOT_WRITABLE = (".cargo/bin", ".cargo/env", ".dotnet/tools", ".cabal/bin", ".ghcup/bin")
+# what their shell sources, and the toolchains rustup's proxies run (relative to the home, or to
+# CARGO_HOME and RUSTUP_HOME for theirs); a toolchain a rust-toolchain.toml names that isn't
+# installed yet asks first (`wb allow --path`)
+NOT_WRITABLE = (".cargo/bin", ".cargo/env", ".dotnet/tools", ".cabal/bin", ".ghcup/bin",
+                ".rustup/toolchains")
 # and what cargo makes at the top of its split home, made first so the split grants it: a split
 # home refuses a new entry (the 0.90 review: a fresh rustup's ~/.cargo, only bin/ and env, failed
 # every build with a dependency, and a git dependency failed wherever git/ didn't exist yet)
@@ -352,9 +361,17 @@ def writable(task: store.Task) -> list[str] | None:
                         Path(c, n).touch()
                 except OSError:  # a read-only home: the task starts all the same
                     pass
+    rustup = os.environ.get("RUSTUP_HOME")
+    for r in {os.path.realpath(r) for r in (home / ".rustup", rustup) if r}:
+        if os.path.isdir(r):  # made, so it is split out: else the agent could make it and plant one
+            try:
+                os.makedirs(os.path.join(r, "toolchains"), exist_ok=True)
+            except OSError:
+                pass
     out_of = _hidden() | \
         {os.path.realpath(p) for p in (*(home / h for h in NOT_WRITABLE),
-                                       *((Path(cargo) / "bin", Path(cargo) / "env") if cargo else ()))
+                                       *((Path(cargo) / "bin", Path(cargo) / "env") if cargo else ()),
+                                       *((Path(rustup) / "toolchains",) if rustup else ()))
          if os.path.lexists(p)}
     # Of the task's directory only its worktree and ask/, where the ask server writes its
     # questions: the rest (task.json, status.json, steer.jsonl, the rounds, runner.log) steers
@@ -492,6 +509,69 @@ HOME_READABLE = ("bin", "go", "R", "perl5")
 # entries, only what is kept (the repo, the lane, a grant) is readable beneath them. /mnt holds
 # the Windows drives on WSL2, /home the other users' homes (the 2026-11-16 audit).
 ONLY_KEPT = ("/dev", "/mnt", "/media", "/run/media", "/run/user", "/home")
+# WSL2's Windows drives (DrvFs, /mnt/<letter> unless wsl.conf moved them): a Windows program there
+# runs through interop as a Windows process, as the user, outside Landlock and no-new-privileges.
+# The read lane let the agent start one: python3 running cmd.exe, or the allowed `npm` resolving to
+# a Windows-only Node (the 0.90 review). So on WSL they are left out of the agent's PATH
+# (agent_path) and of tool_roots: out of the read lane, the exec itself is refused, since execve
+# opens the program for reading. A Windows program inside the lane still runs (`wb doctor` says
+# so, interop_gap): only turning interop off closes that.
+MOUNTS = "/proc/self/mounts"
+DRIVE_LETTER = re.compile(r"/mnt/[a-zA-Z](/|$)")
+WINDOWS_DEVICE = re.compile(r"[a-zA-Z]:")
+BINFMT = "/proc/sys/fs/binfmt_misc"
+
+
+def windows_drives() -> list[str] | None:
+    """On WSL, where the Windows drives are mounted (DrvFs, from the mount table), real paths;
+    None elsewhere."""
+    if hardware.system() != "wsl":
+        return None
+    try:
+        lines = Path(MOUNTS).read_text().splitlines()
+    except OSError:
+        lines = []
+    out = []
+    for line in lines:
+        f = line.split()  # a space in a mount point is \040; "C:\134" is C:\ (9p, drvfs, ...)
+        if len(f) >= 4 and (f[2] == "drvfs" or "aname=drvfs" in f[3] or WINDOWS_DEVICE.match(f[0])):
+            out.append(os.path.realpath(re.sub(r"\\([0-7]{3})", lambda m: chr(int(m[1], 8)), f[1])))
+    return out
+
+
+def on_windows(path: str, drives: list[str] | None) -> bool:
+    """Whether `path` is on a Windows drive (`drives`: windows_drives(); None off WSL)."""
+    if drives is None:
+        return False
+    real = os.path.realpath(path)
+    return bool(DRIVE_LETTER.match(real)) or any(real == d or _under(real, d) for d in drives)
+
+
+def agent_path(path: str) -> str:
+    """The agent's PATH: on WSL, without the Windows drives' directories (WSL appends the
+    Windows PATH: System32, Git for Windows, a Windows Node)."""
+    drives = windows_drives()
+    if drives is None:
+        return path
+    return os.pathsep.join(d for d in path.split(os.pathsep) if not (d and on_windows(d, drives)))
+
+
+def interop_gap() -> str | None:
+    """What WSL's interop leaves open, for `wb doctor`, or None (not WSL, or interop off)."""
+    if hardware.system() != "wsl":
+        return None
+    for name in ("WSLInterop", "WSLInterop-late"):
+        try:
+            if Path(BINFMT, name).read_text().split("\n")[0].strip() == "enabled":
+                break
+        except OSError:
+            continue
+    else:
+        return None
+    return ("WSL interop is on: a Windows program runs as you outside the agent's lane. The "
+            "Windows drives are out of its PATH and reads, but a Windows program in its lane or "
+            "repo still runs; [interop] enabled=false in /etc/wsl.conf (then wsl --shutdown) "
+            "closes it")
 
 
 def secret_paths() -> set[str]:
@@ -521,10 +601,11 @@ def tool_roots(hidden: set[str]) -> set[str]:
     non-dot home directory (~/miniconda3, ~/flutter, ~/apps) failed in the lane (the 2026-11-16
     audit). The same under an ONLY_KEPT root, short of a user's home or a whole drive: Linuxbrew's
     bin links into ../Cellar, which the lane hid (the 0.90 review). Never `/`, the home directory
-    or anything holding a secret: a prefix is kept whole."""
+    or anything holding a secret: a prefix is kept whole; never a Windows drive on WSL."""
     home = os.path.realpath(Path.home())
     prefix = lambda d: os.path.dirname(d) if os.path.basename(d) == "bin" else d  # noqa: E731
     roots = {os.path.realpath(r) for r in ONLY_KEPT}
+    drives = windows_drives()
 
     def opens(p: str) -> bool:  # under an ONLY_KEPT root, deeper than a home or a drive
         for root in roots:
@@ -536,15 +617,24 @@ def tool_roots(hidden: set[str]) -> set[str]:
                 return len(parts) >= deep and not (p == home or _under(home, p))
         return False
 
-    found = set()
+    found, seen = set(), set()
     for d in (os.environ.get("PATH") or "").split(os.pathsep):
         if not os.path.isabs(d) or not os.path.isdir(d):
             continue
         real = os.path.realpath(d)
+        # each directory once (a PATH often names one twice, or by a link), and never a Windows
+        # drive's on WSL (above): their programs run outside the lane
+        if real in seen or on_windows(real, drives):
+            continue
+        seen.add(real)
         if not _under(real, home) and not opens(prefix(real)):
-            found.add(real)  # the directory alone: /mnt/c/Users/<you>/bin isn't a prefix
+            found.add(real)  # the directory alone: /media/<user>/<drive>/bin isn't a prefix
             continue
         found.add(prefix(real))
+        # links only in the home's PATH directories and a `bin` (Linuxbrew's): each entry is an
+        # lstat, and a big directory elsewhere has thousands for no link (the 0.90 review)
+        if not (_under(real, home) or os.path.basename(real) == "bin"):
+            continue
         try:
             names = os.listdir(d)
         except OSError:
@@ -554,6 +644,8 @@ def tool_roots(hidden: set[str]) -> set[str]:
             if os.path.islink(link):
                 target = os.path.realpath(link)
                 where = prefix(os.path.dirname(target))
+                if on_windows(target, drives):
+                    continue
                 if _under(target, home) or opens(where):
                     found.add(where)
     found |= {prefix(os.path.dirname(os.path.realpath(sys.executable)))}

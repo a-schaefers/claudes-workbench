@@ -174,10 +174,15 @@ def agent_env(task: store.Task) -> dict:
     env = {**keep, "PWD": str(task.worktree),  # opencode finds the project from $PWD
            "OPENCODE_CONFIG": str(layer), **rules_env(json.loads(layer.read_text())),
            "WB_TASK": task.name, "WB_HOME": str(store.home()), **CLEAN_ENV}
+    env["PATH"] = env.get("PATH") or os.defpath
     if context.writable(task) is not None:  # its own: the user's holds their bus and agents
         env["XDG_RUNTIME_DIR"] = str(context.runtime_dir(task))
+        # On WSL, not the Windows PATH, whose programs run outside the lane (context.agent_path),
+        # nor the interop socket's name (the 0.90 review; /init finds it without: interop_gap)
+        env.pop("WSL_INTEROP", None)
+        env["PATH"] = context.agent_path(env["PATH"])
     env.update(gitguard.install(context.rules_dir(task) / "bin", Path(task.spec["repo"]), PKG_ROOT,
-                                env.get("PATH") or os.defpath) or {})
+                                env["PATH"]) or {})
     return env
 
 
