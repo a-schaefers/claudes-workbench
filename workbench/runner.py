@@ -710,7 +710,8 @@ BASE_CHECK_SECS = 120
 
 def base_check(task: store.Task) -> dict | None:
     """The acceptance command run once on the base, before the agent starts: it should fail, and
-    only for what the step changes. Passing already, it can't tell when the step is done."""
+    only for what the step changes, which Claude checks from the tail (the runner can't tell).
+    Passing already, it can't tell when the step is done."""
     cmd = task.spec.get("test_cmd")
     if not cmd:
         return None
@@ -734,8 +735,10 @@ def base_check_line(r: dict, task: store.Task) -> str:
                 "when the step is done: make it check what the step changes (wb discard, then "
                 "start again)")
     tail = "\n".join("    " + line for line in r["tail"].splitlines())
-    return (f"on the base the acceptance command fails (exit {r['exit']}), as it should, but "
-            f"only for what the step changes ({task.dir / 'base-tests.txt'}):\n{tail}")
+    # an instruction, not a claim: the runner can't know why it fails (the 0.90 review: "as it
+    # should, but only for what the step changes" read as checked, for a broken build too)
+    return (f"on the base the acceptance command fails (exit {r['exit']}): check the tail shows it "
+            f"failing only for what the step changes ({task.dir / 'base-tests.txt'}):\n{tail}")
 
 
 def _base_check(task: store.Task) -> None:

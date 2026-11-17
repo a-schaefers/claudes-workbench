@@ -169,7 +169,9 @@ class Lifecycle(Base):
         st = wait_phase("t-base", {"review"})
         self.assertIs(st["base_check"]["ok"], False)
         self.assertTrue((store.Task("t-base").dir / "base-tests.txt").exists())
-        self.assertIn("on the base the acceptance command fails (exit", run_wb("report", "t-base"))
+        report = run_wb("report", "t-base")
+        self.assertIn("on the base the acceptance command fails (exit", report)
+        self.assertIn("check the tail shows it failing only for what the step changes", report)
         self.assertIn("on the base the acceptance command fails", run_wb("wait", "t-base", "--timeout", "1"))
 
     def test_the_pane_says_the_base_check_runs_not_that_the_task_waits_for_the_gpu(self):
