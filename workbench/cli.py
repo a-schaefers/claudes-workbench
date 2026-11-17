@@ -166,9 +166,14 @@ def cmd_start(a):
                     skills=handed, skills_ever=handed, skills_rev=skills.revs(handed))
     context.grant(task, "allow", [p.strip() for p in a.allow or [] if p.strip()])
     context.grant(task, "paths", lane_dirs)
+    checked = runner.base_check(task) if a.test and not a.no_base_check else None
+    if checked:
+        task.set_status(base_check=checked)
     spawn_runner(task)
     print(f"started {a.name} on {m.label} · branch {gitops.branch_name(a.name)} · "
           f"base {base[:8]}" + (f" · tests `{a.test}`, auto-fix {a.auto_fix}" if a.test else ""))
+    if checked:
+        print(_base_check_line(checked, task))
     if dirty:
         print("note: the repo has uncommitted changes; the agent's worktree starts from "
               f"{a.base}, without them")
@@ -187,6 +192,20 @@ def cmd_start(a):
     elif not state["resident"]:
         print("note: the runner loads it onto the GPU first, unloading what is there")
     print(f"next: wb wait {a.name}   (the workbench mod wakes Claude by itself when loaded)")
+
+
+def _base_check_line(r: dict, task: store.Task) -> str:
+    """What the acceptance command did on the base, for Claude to judge before the agent's round."""
+    if r["exit"] == "timeout":
+        return (f"note: the acceptance command ran past {runner.BASE_CHECK_SECS}s on the base; "
+                "not checked")
+    if r["ok"]:
+        return ("warning: the acceptance command already passes on the base, so it can't tell "
+                "when the step is done: make it check what the step changes (wb discard, then "
+                "start again)")
+    tail = "\n".join("    " + line for line in r["tail"].splitlines())
+    return (f"on the base the acceptance command fails (exit {r['exit']}), as it should, but "
+            f"only for what the step changes ({task.dir / 'base-tests.txt'}):\n{tail}")
 
 
 def _elsewhere(name: str, u: dict | None, repo: Path, stack: list[str]) -> str:
@@ -1395,6 +1414,8 @@ def main(argv=None):
                    "model's measured speed gives; 0 turns it off)")
     s.add_argument("--test-timeout", type=int, default=900, metavar="SECS",
                    help="seconds the acceptance command may run (default 900)")
+    s.add_argument("--no-base-check", action="store_true",
+                   help="don't run the acceptance command once on the base before the agent starts")
     s.add_argument("--base", default="HEAD")
     s.add_argument("--force", action="store_true", help="queue the --model asked for even if it "
                    "can't run now")
