@@ -421,12 +421,9 @@ def run_round(task: store.Task, n: int, keep: bool = False) -> dict:
     return out
 
 
-def run_tests(task: store.Task, n: int):
-    cmd = task.spec.get("test_cmd")
-    if not cmd:
-        return None
-    task.set_status(phase="testing", last=f"tests: {cmd}")
-    limit = int(task.spec.get("test_timeout") or 900)
+def run_in_lane(task: store.Task, cmd: str, limit: int) -> tuple[int | str, str]:
+    """Run `cmd` in the task's worktree, in the agent's lane and with its environment; the
+    exit code ("timeout" when it ran past `limit` seconds) and the decoded output."""
     # in the agent's lane and with its environment: the tests run the agent's code, and must
     # pass or fail as they did when the agent ran them
     argv = lane.wrap(context.writable(task), ["/bin/sh", "-c", cmd], context.readable(task))
@@ -444,12 +441,37 @@ def run_tests(task: store.Task, n: int):
         output, _ = proc.communicate()
         code, output = "timeout", (output or b"") + f"\n[timed out after {limit}s]".encode()
     output = output.decode(errors="replace")
+    return code, output
+
+
+def run_tests(task: store.Task, n: int):
+    cmd = task.spec.get("test_cmd")
+    if not cmd:
+        return None
+    task.set_status(phase="testing", last=f"tests: {cmd}")
+    limit = int(task.spec.get("test_timeout") or 900)
+    code, output = run_in_lane(task, cmd, limit)
     tail = "\n".join(output.strip().splitlines()[-40:])
     task.round_dir(n).joinpath("tests.txt").write_text(f"$ {cmd}\nexit: {code}\n\n{output}")
     result = {"ok": code == 0, "exit": code, "tail": tail, "round": n}
     task.event({"ts": store.now(), "round": n, "kind": "tests", "ok": result["ok"],
                 "text": f"exit {code}"})
     return result
+
+
+BASE_CHECK_SECS = 120  # longer than this on the base and wb start doesn't wait for it
+
+
+def base_check(task: store.Task) -> dict | None:
+    """The acceptance command run once on the base, before the agent starts: it should fail, and
+    only for what the step changes. Passing already, it can't tell when the step is done."""
+    cmd = task.spec.get("test_cmd")
+    if not cmd:
+        return None
+    code, output = run_in_lane(task, cmd,
+                               min(BASE_CHECK_SECS, int(task.spec.get("test_timeout") or 900)))
+    task.dir.joinpath("base-tests.txt").write_text(f"$ {cmd}\nexit: {code}\n\n{output}")
+    return {"ok": code == 0, "exit": code, "tail": "\n".join(output.strip().splitlines()[-8:])}
 
 
 def summary_text(task: store.Task, n: int, rnd: dict, tests) -> str:
