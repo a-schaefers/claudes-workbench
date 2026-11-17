@@ -13,6 +13,7 @@ Layout of ``$WB_HOME`` (default ``~/.local/state/workbench``)::
         events.jsonl        the agent's normalized events, every round
         runner.log          the runner's own stdout/stderr
         opencode.json       the per-task OpenCode config layer (the ask_reviewer MCP server)
+        base-tests.txt      the base check: the acceptance command on the base, before round 1
         rounds/<n>/prompt.md, summary.md, tests.txt
         ask/<id>.json, ask/<id>.answer
         worktree/           the git worktree the agent works in (branch delegate/<name>)
@@ -152,6 +153,18 @@ class Task:
         # The runner and the ask server both write status; the lock keeps their edits whole.
         with locked(self.dir / "status.lock"):
             st = self.status
+            st.update(fields, updated_at=now())
+            write_json(self.dir / "status.json", st)
+            return st
+
+    def set_status_if(self, check, **fields) -> dict | None:
+        """set_status only while check(status) holds, under the same lock: a compare-and-set,
+        so two processes acting on the same news (two waiters reaping one dead runner) act
+        once. The new status, or None when the check failed."""
+        with locked(self.dir / "status.lock"):
+            st = self.status
+            if not check(st):
+                return None
             st.update(fields, updated_at=now())
             write_json(self.dir / "status.json", st)
             return st

@@ -14,6 +14,8 @@
 FAKE_PROMPTS, if set, is a file each run appends its prompt to; FAKE_RUNS one that records
 whether each run continued a session, and its prompt; FAKE_SLEEP pauses each run after its first
 event. FAKE_LESSON ends the agent's text with a `Lesson:` line (what workbench.lessons gathers).
+FAKE_BG, a file: each run starts `sleep` in a session of its own, left running, and writes its pid
+there (what the agent leaves behind). FAKE_STRAY prints a line that is JSON but not an event first.
 `session export` prints one finished step: FAKE_FILL sets the context it read, FAKE_COMPACTED
 adds a completed compaction. `session list` lists nothing.
 """
@@ -79,6 +81,14 @@ if scenario == "fill" and "picking this task up in a fresh session" in args[-1]:
     scenario = "ok"
 if scenario == "crash":
     sys.exit(1)
+if os.environ.get("FAKE_STRAY"):
+    print("42", flush=True)
+if os.environ.get("FAKE_BG") and args and args[0] == "run":
+    import subprocess
+    bg = subprocess.Popen(["sleep", "300"], start_new_session=True, stdout=subprocess.DEVNULL,
+                          stderr=subprocess.DEVNULL)
+    with open(os.environ["FAKE_BG"], "w") as fh:
+        fh.write(str(bg.pid))
 emit("step_start")
 time.sleep(float(os.environ.get("FAKE_SLEEP", 0)))  # after the first event: the session is known
 if scenario in ("ok", "fix"):

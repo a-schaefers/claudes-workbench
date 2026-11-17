@@ -18,6 +18,7 @@ from __future__ import annotations
 import ctypes
 import os
 import platform
+import signal
 import struct
 import sys
 
@@ -28,6 +29,7 @@ UNIFIED = ("x86_64", "amd64", "i386", "i686", "aarch64", "arm64", "armv7l", "arm
            "ppc64le", "ppc64", "s390x", "loongarch64")
 RULE_PATH_BENEATH = 1
 PR_SET_NO_NEW_PRIVS = 38
+PR_SET_PDEATHSIG = 1
 WRITE_FILE, READ_FILE, REMOVE_DIR, REMOVE_FILE = 1 << 1, 1 << 2, 1 << 4, 1 << 5
 MAKE = sum(1 << b for b in range(6, 13))        # char, dir, reg, sock, fifo, block, sym
 REFER, TRUNCATE = 1 << 13, 1 << 14               # ABI 2 and 3
@@ -102,7 +104,23 @@ def wrap(writable: list[str] | None, cmd: list[str],
             *(a for p in readable or [] for a in ("--read", p)), "--", *cmd]
 
 
+def die_with_parent() -> None:
+    """Linux: the kernel kills this process (and so the command it execs) when the runner that
+    started it dies, even by SIGKILL, so an agent never works on with no runner to stop it (the
+    2026-11-16 audit). Its own children are the runner's to sweep (runner.sweep)."""
+    if not sys.platform.startswith("linux"):
+        return
+    parent = os.getppid()
+    try:
+        _libc().prctl(PR_SET_PDEATHSIG, signal.SIGKILL, 0, 0, 0)
+    except (OSError, AttributeError):
+        return
+    if os.getppid() != parent:  # the runner died before the line above
+        sys.exit(1)
+
+
 def main(argv: list[str]) -> None:
+    die_with_parent()
     sep = argv.index("--")
     writable = [argv[i + 1] for i in range(sep) if argv[i] == "--write"]
     readable = [argv[i + 1] for i in range(sep) if argv[i] == "--read"] \

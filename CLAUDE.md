@@ -132,7 +132,8 @@ Linux there is no Landlock and watch.py falls back to timed waits.
 ## How a task runs
 1. `wb start` refuses a repo without a committed CLAUDE.md (`--no-claude-md`), asks the router
    for a model (unless `--model`), makes branch `delegate/<task>` in a fresh worktree, writes
-   round 1's prompt (the spec plus `PROTOCOL`), spawns the runner and returns.
+   round 1's prompt (the spec plus `PROTOCOL`), spawns the runner and returns at once. The runner
+   runs `--test` once on the untouched base first (the base check; the first report says what).
 2. The runner takes the GPU (`GpuLease`: shared beside other tasks when the models fit, else
    alone), makes the model resident, and runs `opencode run --standalone --auto --format json` in
    the worktree, through `lane.wrap`, with the config layer `rules/<task>/opencode.json`. Events
@@ -147,7 +148,9 @@ Linux there is no Landlock and watch.py falls back to timed waits.
    model) after changing a file, with room left for a successor, is stopped mid-round and a fresh
    session gets the task, the diff and its last words; between rounds, a session over the point
    or compacted is replaced. OpenCode's own compaction is set just past it, as a backstop.
-5. The runner writes the round report and a `review`/`stuck`/`failed` notice and exits.
+5. The runner writes the round report and a `review`/`stuck`/`failed` notice and exits; nothing
+   the agent or the tests started outlives a round (`runner.sweep`). A runner that died without a
+   word is failed by `cli.reap` (status, wait, events and the acting commands call it).
    `ask_reviewer` raises a `question` at any time and blocks until `wb answer` or `wb allow`.
 6. The mod (or `wb wait`) delivers each notice once, while still true; acting on a task
    acknowledges it (`_ack_all`, which stops short of news still true).

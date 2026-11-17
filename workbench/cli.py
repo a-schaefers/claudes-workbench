@@ -52,12 +52,17 @@ def need(name: str) -> store.Task:
 
 def spawn_runner(task: store.Task) -> int:
     env = {**os.environ, "PYTHONPATH": str(PKG_ROOT), "WB_HOME": str(store.home())}
+    env.pop("WB_TASK", None)  # the agent's mark (runner.sweep kills what carries it), not the runner's
+    task.set_status(stopping=None)  # a stop wb made earlier says nothing about this runner
     with open(task.dir / "runner.log", "a") as log:
         proc = subprocess.Popen([sys.executable, "-m", "workbench.runner", task.name],
                                 cwd=PKG_ROOT, env=env, stdin=subprocess.DEVNULL, stdout=log,
                                 stderr=log, start_new_session=True)  # outlives this command
     task.set_status(pid=proc.pid)
     return proc.pid
+
+
+PROC = Path("/proc")
 
 
 def runner_alive(task: store.Task) -> bool:
@@ -68,11 +73,46 @@ def runner_alive(task: store.Task) -> bool:
         os.kill(pid, 0)
     except (ProcessLookupError, PermissionError):  # gone, or a recycled pid that isn't ours
         return False
-    cmdline = Path(f"/proc/{pid}/cmdline")  # a recycled pid of ours runs something else
-    try:
-        return f"workbench.runner\0{task.name}\0".encode() in cmdline.read_bytes()
+    try:  # a recycled pid of ours runs something else
+        return f"workbench.runner\0{task.name}\0".encode() in (PROC / str(pid) / "cmdline").read_bytes()
     except OSError:
-        return not cmdline.parent.parent.joinpath("self").exists()  # no /proc: trust the pid
+        if PROC.joinpath("self").exists():
+            return False
+    # No /proc (macOS): ask ps. Trusting any live pid let wb discard, after a reboot, SIGKILL an
+    # unrelated process group that had been given the dead runner's pid (the 2026-11-16 audit).
+    # -ww: BSD ps cuts the column at 79 characters, and a framework Python's path alone is longer.
+    try:
+        out = subprocess.run(["ps", "-ww", "-o", "command=", "-p", str(pid)], capture_output=True,
+                             text=True, timeout=5).stdout
+    except (OSError, subprocess.SubprocessError):
+        return True  # no ps either: trust the pid
+    toks = out.split()  # whole words: task "a" isn't the runner of task "ab"
+    return any(x == "workbench.runner" and y == task.name for x, y in zip(toks, toks[1:]))
+
+
+# A live task whose runner is gone without a word (SIGKILL, out of memory, a reboot) would sit
+# in its phase forever: `wb wait` blocked, feedback and resume refused it (the 2026-11-16
+# audit). After REAP_GRACE seconds with no status change (feedback, resume and next set phase
+# queued a moment before spawn_runner writes the new pid) it is failed, with one notice.
+REAP_GRACE = 15
+RUNNER_DIED = "the runner died (see runner.log)"
+
+
+def reap(task: store.Task) -> bool:
+    """Fail a live task whose runner is dead; True when this call did it."""
+    st = task.set_status_if(  # one reaper wins: two waiters, one notice
+        lambda st: st.get("phase") in LIVE and not runner_alive(task)
+        and time.time() - (st.get("updated_at") or 0) >= REAP_GRACE,
+        phase="failed", last=RUNNER_DIED, pid=None, agent_pid=None)
+    if st is None:
+        return False
+    runner.sweep(task)  # the agent it left, if the kernel didn't take it with the runner
+    task.event({"ts": store.now(), "round": st.get("round"), "kind": "error",
+                "text": "the runner died without a report"})
+    task.notify("failed", f"task {task.name}: the runner died without a report (killed, out of "
+                f"memory or a reboot); see {task.dir / 'runner.log'}. wb resume {task.name} "
+                "continues it in a fresh session", round=st.get("round"))
+    return True
 
 
 def ago(ts) -> str:
@@ -149,6 +189,7 @@ def cmd_start(a):
         "branch": gitops.branch_name(a.name), "model": m.id, "model_label": m.label,
         "opencode_model": m.id, "route": why, "size": a.size, "stack": stack,
         **({"trial": True} if a.trial else {}), "test_cmd": a.test, "test_timeout": a.test_timeout,
+        **({"no_base_check": True} if a.no_base_check else {}),
         "auto_fix": a.auto_fix, "ask_budget": budget, "ask_timeout": a.ask_timeout,
         "checkin": a.checkin if a.checkin is not None else 10 if a.size == "significant" else 0,
         "round_timeout": a.round_timeout or limits["round"],
@@ -166,14 +207,12 @@ def cmd_start(a):
                     skills=handed, skills_ever=handed, skills_rev=skills.revs(handed))
     context.grant(task, "allow", [p.strip() for p in a.allow or [] if p.strip()])
     context.grant(task, "paths", lane_dirs)
-    checked = runner.base_check(task) if a.test and not a.no_base_check else None
-    if checked:
-        task.set_status(base_check=checked)
     spawn_runner(task)
     print(f"started {a.name} on {m.label} · branch {gitops.branch_name(a.name)} · "
           f"base {base[:8]}" + (f" · tests `{a.test}`, auto-fix {a.auto_fix}" if a.test else ""))
-    if checked:
-        print(_base_check_line(checked, task))
+    if a.test and not a.no_base_check:
+        print("base check: the runner runs the acceptance command once on the base first; what "
+              "it saw comes with the first report (a check-in at once if it already passes)")
     if dirty:
         print("note: the repo has uncommitted changes; the agent's worktree starts from "
               f"{a.base}, without them")
@@ -192,20 +231,6 @@ def cmd_start(a):
     elif not state["resident"]:
         print("note: the runner loads it onto the GPU first, unloading what is there")
     print(f"next: wb wait {a.name}   (the workbench mod wakes Claude by itself when loaded)")
-
-
-def _base_check_line(r: dict, task: store.Task) -> str:
-    """What the acceptance command did on the base, for Claude to judge before the agent's round."""
-    if r["exit"] == "timeout":
-        return (f"note: the acceptance command ran past {runner.BASE_CHECK_SECS}s on the base; "
-                "not checked")
-    if r["ok"]:
-        return ("warning: the acceptance command already passes on the base, so it can't tell "
-                "when the step is done: make it check what the step changes (wb discard, then "
-                "start again)")
-    tail = "\n".join("    " + line for line in r["tail"].splitlines())
-    return (f"on the base the acceptance command fails (exit {r['exit']}), as it should, but "
-            f"only for what the step changes ({task.dir / 'base-tests.txt'}):\n{tail}")
 
 
 def _elsewhere(name: str, u: dict | None, repo: Path, stack: list[str]) -> str:
@@ -233,6 +258,7 @@ def _spec_gaps(task: store.Task, gaps: list[str] | None) -> None:
 
 def cmd_feedback(a):
     task = need(a.name)
+    reap(task)
     st = task.status
     if st.get("phase") not in ("review", "stuck", "failed"):
         die(f"{a.name} is {st.get('phase')}; feedback goes to a task waiting for review")
@@ -248,12 +274,13 @@ def cmd_feedback(a):
         f"{lessons.FEEDBACK_HEAD} Make exactly these changes, then{rerun} finish with a short "
         "summary:\n\n" + text.strip())
     reviews = st.get("reviews", 0) + 1
+    handled = store.now()  # everything before the new round; what its runner raises stays news
     task.set_status(context="fresh" if a.fresh else "keep" if a.keep_context else None)
     task.set_status(round=n, reviews=reviews, phase="queued",
                     auto_fixes_total=st.get("auto_fixes_total", 0) + st.get("auto_fixes", 0),
                     auto_fixes=0)
     spawn_runner(task)
-    _ack_all(task)
+    _ack_all(task, upto=handled)
     print(f"feedback round {reviews} sent to {a.name} (round {n})"
           + ("  — that is past the usual 3 review rounds" if reviews > 3 else ""))
     _say(lessons.nudge(task))
@@ -263,6 +290,7 @@ def cmd_next(a):
     """Commit the approved step on the task's branch and give the same agent the next one: same
     worktree, same session (so it keeps what it has read), unless it is full or --fresh."""
     task = need(a.name)
+    reap(task)
     spec, st = task.spec, task.status
     if st.get("phase") != "review":
         die(f"{a.name} is {st.get('phase')}; wb next follows an approved step under review")
@@ -304,6 +332,7 @@ def cmd_next(a):
     if handed is not None:
         task.set_status(skills=handed, skills_ever=_union(st.get("skills_ever"), handed),
                         skills_rev={**(st.get("skills_rev") or {}), **skills.revs(handed)})
+    handled = store.now()
     task.set_status(round=n, steps=step + 1, step_round=n, phase="queued", reviews=0,
                     step_sizes=(st.get("step_sizes") or []) + [measured],
                     context="fresh" if a.fresh else None,
@@ -311,7 +340,7 @@ def cmd_next(a):
                     auto_fixes=0, last=f"step {step} committed; next step queued")
     why = runner.fresh_reason(task)
     spawn_runner(task)
-    _ack_all(task)
+    _ack_all(task, upto=handled)
     print(f"step {step} of {a.name} committed as {commit}; step {step + 1} sent "
           + (f"to a fresh session ({why})" if why else "to the same session"))
     _say(lessons.nudge(task))
@@ -326,10 +355,11 @@ def cmd_answer(a):
     if not q.exists():
         die(f"no question {qid} in {a.name}")
     text = a.text if a.text is not None else Path(a.file).read_text()
+    handled = store.now()  # the question; a newer notice, raised after the answer, stays news
     tmp = task.dir / "ask" / f".{qid}.{os.getpid()}.tmp"  # the ask server polls: never half a file
     tmp.write_text(text.strip() + "\n")
     os.replace(tmp, task.dir / "ask" / f"{qid}.answer")
-    _ack_all(task)
+    _ack_all(task, upto=handled)
     print(f"answered {a.name}/{qid}")
 
 
@@ -338,21 +368,48 @@ def _ack_file(task):
 
 
 def _acked(task):
-    f = _ack_file(task)
-    return float((f.read_text() if f.exists() else "0") or 0)
+    try:
+        return float(_ack_file(task).read_text() or 0)
+    except (OSError, ValueError):  # none yet, or garbled: nothing acknowledged
+        return 0.0
 
 
-def _ack_all(task):
+def _notice(row) -> bool:
+    """A whole notify.jsonl row: one half-written or forged must not break every wait."""
+    return (isinstance(row, dict) and isinstance(row.get("task"), str) and "kind" in row
+            and isinstance(row.get("ts"), (int, float)))
+
+
+def _ack_all(task, upto: float | None = None):
     """Claude acted on the task: whatever it was notified about so far is handled, except news
     still true now. A note or a diff run seconds after the task failed must not swallow the
-    failure notice Claude hasn't seen: the mark stops just short of it."""
-    phase = task.status.get("phase")
-    news = "question" if phase == "asking" else "checkin" if phase in LIVE else phase
+    failure notice Claude hasn't seen: the mark stops just short of it. A command that handles
+    the news itself (answer, feedback, next, resume) passes `upto`, the moment it acted: all
+    before it is handled, even news still true then (an answered question once came back from
+    wb wait, the 2026-11-16 audit), and what its runner raises after it isn't."""
     acked = _acked(task)
-    rows, _ = store.read_jsonl(store.home() / "notify.jsonl")
-    pending = [r["ts"] for r in rows if r["task"] == task.name and r["kind"] == news and r["ts"] > acked]
-    mark = min(pending) - 0.001 if pending else store.now()
-    _ack_file(task).write_text(str(max(acked, mark)))
+    if upto is None:
+        phase = task.status.get("phase")
+        news = "question" if phase == "asking" else "checkin" if phase in LIVE else phase
+        rows, _ = store.read_jsonl(store.home() / "notify.jsonl")
+        pending = [r["ts"] for r in rows if _notice(r) and r["task"] == task.name
+                   and r["kind"] == news and r["ts"] > acked]
+        upto = min(pending) - 0.001 if pending else store.now()
+    _ack_file(task).write_text(str(max(acked, upto)))
+
+
+def _stale(row, st: dict) -> bool:
+    """A notice no longer true, as the mod judges it: a review, stuck or failed notice for a task
+    since sent back, resumed or closed, a question no longer asked, a check-in for a task no
+    longer running."""
+    phase = st.get("phase")
+    if row["kind"] in ("review", "stuck", "failed"):
+        return phase != row["kind"]
+    if row["kind"] == "question":
+        return phase != "asking" or row.get("id", st.get("asking")) != st.get("asking")
+    if row["kind"] == "checkin":
+        return phase not in ("queued", "running", "testing")
+    return False
 
 
 def cmd_wait(a):
@@ -363,29 +420,42 @@ def cmd_wait(a):
     path.touch()
     watcher = Watcher(store.home(), *([need(a.name).dir] if a.name else []))
     while True:
+        for t in [need(a.name)] if a.name else store.all_tasks():
+            if t.status.get("phase") in LIVE:
+                reap(t)  # a dead runner's task becomes failed, with the notice this wait delivers
         rows, _ = store.read_jsonl(path)
+        rows = [r for r in rows if _notice(r)]
         for row in reversed(rows):
             if a.name and row["task"] != a.name:
                 continue
             task = store.Task(row["task"])
-            if row["kind"] in ("review", "stuck", "failed") and task.status.get("phase") in LIVE:
-                continue  # no longer true: the task runs again
+            if not task.exists or _stale(row, task.status):
+                continue  # its directory removed by hand, or no longer true
             if row["ts"] > _acked(task):
                 _ack_file(task).write_text(str(row["ts"]))
-                print(f"[{row['kind']}] {row['task']}\n{row['text']}")
+                print(f"[{row['kind']}] {row['task']}\n{row.get('text', '')}")
                 return
         if a.name:
             task = need(a.name)
-            phase = task.status.get("phase")
+            st = task.status
+            phase = st.get("phase")
             if phase in store.CLOSED:
                 die(f"{a.name} is closed", 2)
             # Already waiting on Claude, its notice taken by the mod or another waiter: say so
-            # now rather than block until a notice that will never come.
-            mine = [r for r in rows if r["task"] == a.name]
-            if (phase in store.NEEDS_CLAUDE and mine and (phase == "asking" or not runner_alive(task))
-                    and mine[-1]["kind"] == ("question" if phase == "asking" else phase)):
-                print(f"[{mine[-1]['kind']}] {a.name} (already delivered once)\n{mine[-1]['text']}")
-                return
+            # now rather than block until a notice that will never come. A task stopped or taken
+            # over by hand has none at all (the 2026-11-16 audit: a wait on it blocked forever).
+            if phase in store.NEEDS_CLAUDE and (phase == "asking" or not runner_alive(task)):
+                want = "question" if phase == "asking" else phase
+                mine = [r for r in rows if r["task"] == a.name and r["kind"] == want
+                        and not _stale(r, st) and r.get("round", st.get("round")) == st.get("round")]
+                if mine:
+                    print(f"[{want}] {a.name} (already delivered once)\n{mine[-1].get('text', '')}")
+                    return
+                if phase != "asking":  # a question always has its notice, which carries its id
+                    print(f"[{phase}] {a.name} (no notice: {st.get('last') or phase})")
+                    return
+        elif not any(t.status.get("phase") not in store.CLOSED for t in store.all_tasks()):
+            die("no open tasks to wait for (wb status --all)", 2)
         if deadline and time.time() > deadline:
             die("timed out waiting", 2)
         # woken by the change itself; the minute bound re-checks the runner is alive
@@ -419,10 +489,12 @@ def cmd_status(a):
         return
     print(f"{'task':22} {'phase':9} {'rnd':>3} {'model':16} {'age':>5} {'idle':>5}  last")
     for t in tasks:
+        if t.status.get("phase") in LIVE:
+            reap(t)
         st, sp = t.status, t.spec
         phase = st.get("phase", "?")
         if phase in store.ACTIVE and not runner_alive(t) and phase != "asking":
-            phase += "?"  # the runner died without saying so
+            phase += "?"  # the runner died seconds ago (reap waits REAP_GRACE)
         short = sp.get("model", "").split("/")[-1][:16]
         print(f"{t.name:22} {phase:9} {st.get('round', 1):>3} {short:16} "
               f"{ago(sp.get('created_at')):>5} {ago(st.get('updated_at')):>5}  "
@@ -481,17 +553,20 @@ def cmd_diff(a):
 def _stop_runner(task):
     pid = task.status.get("pid")
     if pid and runner_alive(task):
+        task.set_status(stopping=True)  # wb's stop, not a shutdown's (runner.SIGNAL_STOP)
         try:
             os.kill(pid, signal.SIGTERM)  # the runner stops its agent's process group itself
         except ProcessLookupError:
-            return
-        if not wait_exit(pid, 15):  # it stops its agent first; past that, end it all
-            for group in (pid, task.status.get("agent_pid")):  # the agent has a session of its own
-                try:
-                    if group:
-                        os.killpg(group, signal.SIGKILL)
-                except (ProcessLookupError, PermissionError):
-                    pass
+            pass
+        else:
+            if not wait_exit(pid, 15):  # it stops its agent first; past that, end it all
+                for group in (pid, task.status.get("agent_pid")):  # the agent has a session of its own
+                    try:
+                        if group:
+                            os.killpg(group, signal.SIGKILL)
+                    except (ProcessLookupError, PermissionError):
+                        pass
+    runner.sweep(task)  # whatever the agent left running, the runner dead or alive
 
 
 LIVE = ("queued", "running", "testing", "asking")
@@ -531,6 +606,7 @@ def cmd_stop(a):
         die(f"{a.name} is {task.status.get('phase')}, not running")
     _stop_runner(task)
     task.set_status(phase="stuck", last="stopped by the reviewer", pid=None)
+    _ack_all(task)  # else the mod's safety net wakes Claude about the stop it just made
     print(f"stopped {a.name}; wb resume continues it in a fresh session, wb feedback with "
           "corrections, wb discard drops it")
 
@@ -539,6 +615,7 @@ def cmd_resume(a):
     """Continue a task Claude stopped (wb stop) where the work stands: a fresh session, handed
     the task, the work so far and what the step's rounds asked. Not a review round."""
     task = need(a.name)
+    reap(task)
     st = task.status
     if st.get("phase") not in ("stuck", "failed"):
         die(f"{a.name} is {st.get('phase')}; wb resume continues a stopped task")
@@ -549,11 +626,12 @@ def cmd_resume(a):
     task.round_dir(n + 1).mkdir(parents=True, exist_ok=True)
     task.round_dir(n + 1).joinpath("prompt.md").write_text(runner.RESUME.format(
         asked=runner.ASKED.format("\n\n".join(asks)).rstrip() if asks else ""))
+    handled = store.now()
     task.set_status(round=n + 1, context="fresh", phase="queued", last="resumed by the reviewer")
     task.event({"ts": store.now(), "round": n + 1, "kind": "resumed",
                 "text": "Claude resumed the task in a fresh session"})
     spawn_runner(task)
-    _ack_all(task)  # the stuck or failed notice is handled: wb wait must not hand it out again
+    _ack_all(task, upto=handled)  # the stuck or failed notice is handled: wb wait must not hand it out again
     print(f"resumed {a.name} in a fresh session (round {n + 1})")
     _say(lessons.nudge(task))
 
@@ -601,7 +679,9 @@ def cmd_allow(a):
     task.event({"ts": store.now(), "round": task.status.get("round"), "kind": "allow",
                 "text": f"allowed {said}" + (" always" if a.always else "")})
     qid = task.status.get("asking")
+    handled = None
     if qid and (task.dir / "ask" / f"{qid}.json").exists():
+        handled = store.now()  # the request is answered: handled, as wb answer does
         (task.dir / "ask" / f"{qid}.answer").write_text(text + "\n")
     if task.status.get("phase") in ("queued", "running", "testing", "asking") and runner_alive(task):
         store.append_jsonl(task.dir / "steer.jsonl", {"ts": store.now(), "text": text, "now": True})
@@ -610,12 +690,13 @@ def cmd_allow(a):
     else:
         print(f"allowed {said} on {a.name}" + (" (always)" if a.always else "")
               + ": it applies from the next round")
-    _ack_all(task)
+    _ack_all(task, upto=handled)
 
 
 def cmd_steer(a):
     """A note to a running agent: delivered when its current run ends, or at once with --now."""
     task = need(a.name)
+    reap(task)
     phase = task.status.get("phase")
     if phase not in ("queued", "running", "testing", "asking") or not runner_alive(task):
         die(f"{a.name} is {phase}, not running: use wb feedback (or wb answer for a question)")
@@ -665,6 +746,7 @@ def cmd_takeover(a):
 
 def cmd_accept(a):
     task = need(a.name)
+    reap(task)
     spec, st = task.spec, task.status
     if st.get("phase") in store.CLOSED:
         die(f"{a.name} is already {st.get('phase')}")
@@ -1281,10 +1363,16 @@ def cmd_events(a):
     chat.chat_dir()
     parent = os.getppid()
     print(json.dumps({"hello": os.getpid()}), flush=True)
+    reaped = time.time()
     with Watcher(home, recursive=True, skip=EVENT_SKIP) as w:
         while os.getppid() == parent:
             changed = {str(p.relative_to(home)) for p in w.wait(10)
                        if not p.name.endswith(QUIET) and not p.name.startswith(".")}
+            if time.time() - reaped > 60:  # a runner that died silently: its failed notice
+                reaped = time.time()       # wakes the mod like any other (reap)
+                for t in store.all_tasks():
+                    if t.status.get("phase") in LIVE:
+                        reap(t)
             if changed:
                 try:
                     print(json.dumps({"changed": sorted(changed)}), flush=True)

@@ -4,6 +4,7 @@ import json
 import shlex
 import os
 import shutil
+import signal
 import socket
 import subprocess
 import sys
@@ -47,6 +48,35 @@ def wait_phase(name, phases, timeout=30):
             return st
         time.sleep(0.2)
     raise AssertionError(f"{name} never reached {phases}: {store.Task(name).status}")
+
+
+def wait_gone(pid, timeout=10) -> bool:
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        try:
+            os.kill(pid, 0)
+        except ProcessLookupError:
+            return True
+        time.sleep(0.1)
+    return False
+
+
+def running(name, timeout=20) -> dict:
+    """The task once its agent runs: a runner pid and an agent pid."""
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        st = store.Task(name).status
+        if st.get("phase") == "running" and st.get("agent_pid") and st.get("pid"):
+            return st
+        time.sleep(0.2)
+    raise AssertionError(f"{name} never ran: {store.Task(name).status}")
+
+
+def backdate(name, secs=60) -> None:
+    """Age the task's last status change past cli.REAP_GRACE, as if it had happened long ago."""
+    t = store.Task(name)
+    st = t.status
+    store.write_json(t.dir / "status.json", {**st, "updated_at": st["updated_at"] - secs})
 
 
 class Base(unittest.TestCase):
@@ -114,21 +144,74 @@ class Lifecycle(Base):
         rows, _ = store.read_jsonl(store.home() / "results.jsonl")
         self.assertEqual(rows[-1]["outcome"], "accepted")
 
-    def test_start_runs_the_acceptance_command_on_the_base(self):
+    def test_start_returns_at_once_and_the_runner_checks_the_base(self):
+        # The base check ran inside wb start, which a slow suite pushed past Claude's two-minute
+        # Bash limit, leaving a task queued with no runner (the 2026-11-16 audit).
+        os.environ["FAKE_SLEEP"] = "1"
+        began = time.time()
         out = self.start("t-base", "ok", "--test", TEST_CMD)
-        self.assertIn("on the base the acceptance command fails (exit", out)
-        self.assertIs(store.Task("t-base").status["base_check"]["ok"], False)
+        self.assertLess(time.time() - began, 10)
+        self.assertIn("base check: the runner runs the acceptance command", out)
+        st = wait_phase("t-base", {"review"})
+        self.assertIs(st["base_check"]["ok"], False)
         self.assertTrue((store.Task("t-base").dir / "base-tests.txt").exists())
-        wait_phase("t-base", {"review"})
+        self.assertIn("on the base the acceptance command fails (exit", run_wb("report", "t-base"))
+        self.assertIn("on the base the acceptance command fails", run_wb("wait", "t-base", "--timeout", "1"))
 
-    def test_start_warns_when_the_acceptance_command_already_passes(self):
-        out = self.start("t-pass", "ok", "--test", "true")
-        self.assertIn("already passes on the base", out)
+    def test_the_runner_warns_at_once_when_the_acceptance_command_already_passes(self):
+        self.start("t-pass", "ok", "--test", "true")
         wait_phase("t-pass", {"review"})
-        out = self.start("t-skip", "ok", "--test", "true", "--no-base-check")
-        self.assertNotIn("on the base", out)
-        self.assertIsNone(store.Task("t-skip").status.get("base_check"))
-        wait_phase("t-skip", {"review"})
+        rows, _ = store.read_jsonl(store.home() / "notify.jsonl")
+        self.assertTrue(any(r["kind"] == "checkin" and "already passes on the base" in r["text"]
+                            for r in rows if r["task"] == "t-pass"))
+        self.assertIn("already passes on the base", run_wb("report", "t-pass"))
+        self.start("t-skip", "ok", "--test", "true", "--no-base-check")
+        self.assertTrue(store.Task("t-skip").spec["no_base_check"])
+        self.assertIsNone(wait_phase("t-skip", {"review"}).get("base_check"))
+        self.assertNotIn("on the base", run_wb("report", "t-skip"))
+
+    def test_a_base_check_cut_short_by_the_test_timeout_says_which_limit(self):
+        # It once said "ran past 120s" whatever limit had cut it (the 2026-11-16 audit).
+        self.start("t-slowbase", "ok", "--test", "sleep 5", "--test-timeout", "1", "--auto-fix", "0")
+        st = wait_phase("t-slowbase", {"review"})
+        self.assertEqual((st["base_check"]["exit"], st["base_check"]["limit"]), ("timeout", 1))
+        line = runner.base_check_line(st["base_check"], store.Task("t-slowbase"))
+        self.assertIn("--test-timeout (1s)", line)
+        self.assertNotIn("120s", line)
+
+    def test_a_test_that_floods_its_output_is_stopped_and_clipped(self):
+        # A print loop (gigabytes) or one huge line once went whole into the runner's memory,
+        # status.json and the notice (the 2026-11-16 audit).
+        self.start("t-flood", "ok", "--test", "yes", "--auto-fix", "0", "--no-base-check")
+        st = wait_phase("t-flood", {"review"}, timeout=60)
+        self.assertEqual(st["tests"]["exit"], "output limit")
+        self.assertLess((store.Task("t-flood").round_dir(1) / "tests.txt").stat().st_size, 1 << 20)
+        self.start("t-wide", "ok", "--test", "head -c 3000000 /dev/zero | tr '\\0' x; exit 1",
+                   "--auto-fix", "0", "--no-base-check")
+        st = wait_phase("t-wide", {"review"}, timeout=60)
+        self.assertLess(len(st["tests"]["tail"]), 5000)
+        rows, _ = store.read_jsonl(store.home() / "notify.jsonl")
+        self.assertLess(len([r for r in rows if r["task"] == "t-wide"][-1]["text"]), 10000)
+        self.assertLess(store.Task("t-wide").dir.joinpath("status.json").stat().st_size, 20000)
+
+    def test_a_server_the_tests_leave_running_neither_holds_the_round_nor_outlives_it(self):
+        # A setsid'd child holding the output pipe kept the runner waiting (the 2026-11-16 audit).
+        pidfile = Path(self.tmp.name) / "server.pid"
+        began = time.time()
+        self.start("t-server", "ok", "--test", f"setsid sleep 60 & echo $! > {pidfile}; exit 1",
+                   "--auto-fix", "0", "--no-base-check")
+        wait_phase("t-server", {"review"}, timeout=40)
+        self.assertLess(time.time() - began, 30)
+        self.assertTrue(wait_gone(int(pidfile.read_text())))
+
+    def test_what_the_agent_leaves_running_ends_with_its_round(self):
+        # A writer left running could change the worktree after Claude read the diff (the
+        # 2026-11-16 audit); a stray non-event line on its stdout is no crash either.
+        pidfile = Path(self.tmp.name) / "bg.pid"
+        os.environ.update(FAKE_BG=str(pidfile), FAKE_STRAY="1")
+        self.start("t-bg", "ok")
+        wait_phase("t-bg", {"review"})
+        self.assertTrue(wait_gone(int(pidfile.read_text())))
 
     def test_failing_tests_go_back_to_the_agent_without_claude(self):
         self.start("t-fix", "fix", "--test", TEST_CMD)
@@ -197,6 +280,58 @@ class Lifecycle(Base):
         out = run_wb("wait", "t-taken", "--timeout", "1")
         self.assertIn("already delivered", out)
 
+    def fake_task(self, name, **status):
+        t = store.Task(name)
+        store.write_json(t.dir / "task.json", {"name": name, "created_at": store.now()})
+        t.set_status(round=1, **status)
+        return t
+
+    def test_answering_a_question_acknowledges_it(self):
+        # The mark stopped short of the question being answered, so wb wait handed it back
+        # once the task ran again (the 2026-11-16 audit).
+        t = self.fake_task("t-asked", phase="asking", asking="q1")
+        (t.dir / "ask").mkdir()
+        (t.dir / "ask" / "q1.json").write_text("{}")
+        t.notify("question", "Q: which?", id="q1")
+        run_wb("answer", "t-asked", "--text", "use A")
+        t.set_status(phase="running", asking=None)
+        with self.assertRaises(SystemExit) as e, redirect_stderr(io.StringIO()):
+            run_wb("wait", "t-asked", "--timeout", "1")
+        self.assertEqual(e.exception.code, 2)
+
+    def test_wait_skips_notices_of_removed_tasks_and_garbled_rows(self):
+        # A task directory deleted by hand made every bare wb wait crash (the 2026-11-16 audit).
+        t = self.fake_task("t-here", phase="review")
+        t.notify("review", "the real one")
+        store.append_jsonl(store.home() / "notify.jsonl", {"ts": store.now(), "task": "gone",
+                                                           "kind": "review", "text": "old"})
+        store.append_jsonl(store.home() / "notify.jsonl", {"ts": store.now(), "kind": "review"})
+        self.assertIn("[review] t-here\nthe real one", run_wb("wait", "--timeout", "2"))
+
+    def test_a_bare_wait_with_no_open_task_says_so(self):
+        # It blocked until the caller's own timeout (the 2026-11-16 audit).
+        began = time.time()
+        with self.assertRaises(SystemExit) as e, redirect_stderr(io.StringIO()):
+            run_wb("wait")
+        self.assertEqual(e.exception.code, 2)
+        self.assertLess(time.time() - began, 5)
+
+    def test_off_linux_a_live_pid_is_the_runner_only_if_ps_says_so(self):
+        # Trusting any live pid let wb discard, after a reboot, SIGKILL an unrelated process
+        # group (the 2026-11-16 audit).
+        t = self.fake_task("t-x", phase="running", pid=os.getpid())
+        p = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(30)",
+                              "workbench.runner", "t-x"])
+        try:
+            with mock.patch.object(cli, "PROC", Path(self.tmp.name) / "no-proc"):
+                self.assertFalse(cli.runner_alive(t))           # this test process: not a runner
+                t.set_status(pid=p.pid)
+                self.assertTrue(cli.runner_alive(t))
+                self.assertFalse(cli.runner_alive(self.fake_task("t", pid=p.pid)))  # not "t-x"
+        finally:
+            p.kill()
+            p.wait()
+
     def test_thinking_past_the_budget_is_nudged_and_claude_told(self):
         # A model that generates for many minutes with no tool call gets the runner's own --now
         # steer (seen 2026-11-16: 20K-token plans, no edits), and Claude a check-in saying so.
@@ -232,13 +367,62 @@ class Lifecycle(Base):
         self.start("t-crash", "crash")
         wait_phase("t-crash", {"failed"})
 
+    def test_a_runner_killed_without_a_word_is_failed_and_resumable(self):
+        # SIGKILL, out of memory or a reboot left a task "running" forever: wb wait blocked,
+        # feedback and resume refused it, and its agent worked on (the 2026-11-16 audit).
+        self.start("t-killed", "hang")
+        st = running("t-killed")
+        os.kill(st["pid"], signal.SIGKILL)
+        self.assertTrue(wait_gone(st["agent_pid"]))   # the kernel takes the agent with it (lane.py)
+        self.assertEqual(store.Task("t-killed").status["phase"], "running")  # within the grace
+        backdate("t-killed")
+        out = run_wb("wait", "t-killed", "--timeout", "5")
+        self.assertIn("[failed] t-killed", out)
+        self.assertIn("the runner died", out)
+        self.assertEqual(store.Task("t-killed").status["last"], cli.RUNNER_DIED)
+        os.environ["FAKE_SCENARIO"] = "ok"
+        run_wb("resume", "t-killed")
+        wait_phase("t-killed", {"review"})
+
+    def test_a_sigterm_from_outside_wb_leaves_the_task_stuck_with_a_notice(self):
+        # A shutdown's SIGTERM was logged "stopped by the reviewer" and left the task live with
+        # no notice (the 2026-11-16 audit).
+        self.start("t-term", "hang")
+        st = running("t-term")
+        os.kill(st["pid"], signal.SIGTERM)
+        st = wait_phase("t-term", {"stuck"})
+        self.assertEqual(st["last"], runner.SIGNAL_STOP)
+        self.assertIn("[stuck] t-term", run_wb("wait", "t-term", "--timeout", "2"))
+        os.environ["FAKE_SCENARIO"] = "ok"
+        run_wb("resume", "t-term")
+        wait_phase("t-term", {"review"})
+
+    def test_stopping_a_task_in_its_tests_stops_the_tests(self):
+        # The test's process group outlived the stop, in a worktree being removed (the
+        # 2026-11-16 audit).
+        pidfile = Path(self.tmp.name) / "test.pid"
+        self.start("t-stoptest", "ok", "--test", f"sleep 300 & echo $! > {pidfile}; wait",
+                   "--no-base-check")
+        deadline = time.time() + 20
+        while not (pidfile.exists() and pidfile.read_text().strip()) and time.time() < deadline:
+            time.sleep(0.1)
+        run_wb("stop", "t-stoptest")
+        self.assertTrue(wait_gone(int(pidfile.read_text())))
+
     def test_stop_and_discard(self):
         self.start("t-stop", "hang")
-        deadline = time.time() + 20
-        while store.Task("t-stop").status.get("phase") != "running" and time.time() < deadline:
-            time.sleep(0.2)
+        running("t-stop")
         run_wb("stop", "t-stop")
-        self.assertEqual(store.Task("t-stop").status["phase"], "stuck")
+        st = store.Task("t-stop").status
+        self.assertEqual(st["phase"], "stuck")
+        # Acknowledged, so the mod's safety net doesn't wake Claude about its own stop, and a
+        # named wait says what happened instead of blocking for a notice that never comes (the
+        # 2026-11-16 audit).
+        self.assertGreaterEqual(float((store.Task("t-stop").dir / "acked").read_text()), st["updated_at"])
+        rows, _ = store.read_jsonl(store.home() / "notify.jsonl")
+        self.assertFalse([r for r in rows if r["task"] == "t-stop"])
+        self.assertIn("[stuck] t-stop (no notice: stopped by the reviewer)",
+                      run_wb("wait", "t-stop", "--timeout", "2"))
         run_wb("discard", "t-stop", "--reason", "test")
         branches = subprocess.run(["git", "-C", str(self.repo), "branch"], capture_output=True,
                                   text=True).stdout

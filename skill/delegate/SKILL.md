@@ -99,8 +99,9 @@ if you can, and start nothing until the plan is approved; then write the first s
   constants, file formats. Settle them in the plan; agents rename what isn't pinned.
 - **Its acceptance command**, and the worked examples it tests, each number checked against
   every rule. A step whose done-ness you can't state as a command isn't ready to hand off.
-  `wb start` runs it once on the base, in the agent's lane, and prints what it saw: read that
-  before the agent's first round lands. A test that writes outside the lane or races under load
+  The runner runs it once on the base, in the agent's lane, before round 1: what it saw comes in
+  the first report, and a check-in at once when it already passes. Read it before you judge the
+  agent's work. A test that writes outside the lane or races under load
   fails there whatever the agent does, and the agent spends its rounds on failures it didn't
   cause (seen: `whoami` and /tmp probes); a command that already passes can't tell when the
   step is done. Either way, `wb discard` and start again with a better one. It should fail only for
@@ -373,7 +374,8 @@ You are the driver, not a spectator. When something tells you the agent is headi
   really belongs in (a sibling asset folder, a cache a toolchain wants); never your home, the
   user's checkout or another project: there, take the file yourself or say no.
 - `wb stop <name>`: just stop it. `wb resume <name>` continues it in a fresh session (not a
-  review round), e.g. after fixing workbench under it.
+  review round), e.g. after fixing workbench under it. A task failed with "the runner died" (a
+  reboot, a kill) or stuck with "stopped by a signal" resumes the same way.
 - A check-in saying the session "reached N% of its window before it changed a file" (or "had
   read N% before its first change": a fresh session would have little room after re-reading it):
   the step needs more reading than the window holds. Let it carry on; next time name fewer files to read,
