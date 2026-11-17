@@ -1,6 +1,7 @@
 """Sharing the GPU: tasks run side by side when their models fit it together, else one at a time."""
 import json
 import os
+import threading
 import time
 from pathlib import Path
 
@@ -61,12 +62,34 @@ class Sharing(Base):
 
     def test_whatever_takes_the_whole_gpu_waits_for_and_holds_off_the_tasks(self):
         os.environ["WB_FAKE_GPU_GB"] = "48"
-        with store.locked(store.home() / "gpu.lock"):  # what wb image does
+        with models.GpuLease(None, "wb image"):  # what wb image does
             self.start("t-small", "ok", "--model", SMALL, "--test", TEST_CMD)
             time.sleep(1.5)
             self.assertEqual(store.Task("t-small").status["phase"], "queued")
         wait_phase("t-small", {"review"})
         self.assertEqual(store.read_json(store.home() / "gpu.json"), {})
+
+    def test_a_waiting_image_holds_off_tasks_that_would_share(self):
+        os.environ["WB_FAKE_GPU_GB"] = "48"           # small would fit beside big
+        self.start("t-big", "hang", "--model", BIG)
+        wait_running("t-big")
+        got = []
+        t = threading.Thread(target=lambda: got.append(models.GpuLease(None, "wb image").__enter__()))
+        t.start()
+        deadline = time.time() + 10
+        while not any(h.get("waiting") for h in store.read_json(store.home() / "gpu.json", {}).values()):
+            self.assertLess(time.time(), deadline)
+            time.sleep(0.05)
+        self.start("t-small", "ok", "--model", SMALL, "--test", TEST_CMD)
+        time.sleep(1.5)
+        self.assertEqual(store.Task("t-small").status["phase"], "queued")  # behind the image
+        run_wb("stop", "t-big")
+        t.join(30)
+        self.assertEqual(len(got), 1)                 # the image's turn came first
+        time.sleep(1)
+        self.assertEqual(store.Task("t-small").status["phase"], "queued")
+        got[0].__exit__(None, None, None)
+        wait_phase("t-small", {"review"})
 
 
 class CanShare(Base):

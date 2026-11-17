@@ -300,7 +300,8 @@ Agents can't make images; one that needs an asset asks you, and you make it.
    asset directory. For a sprite on a black background drawn additively, black is see-through
    and no alpha channel is needed.
 Mind the engine's `notes` in `wb image --list`: an image model's licence can restrict where and
-how its output may be used. A generation holds the GPU: running tasks wait their turn.
+how its output may be used. A generation waits for the running tasks to finish, then has the
+GPU to itself: tasks started meanwhile wait for it.
 
 **No ready engine? Offer to set one up; never set it up unasked.** This is an optional step, as
 ARCHITECTURE.md's Images section says. Read `wb scout` for the OS and GPU, then propose in one

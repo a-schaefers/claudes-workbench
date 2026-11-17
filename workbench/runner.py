@@ -718,7 +718,7 @@ def main():
         drive(task)
     except Stopped:
         task.event({"ts": store.now(), "round": task.status.get("round"), "kind": "stopped",
-                    "text": "stopped by the reviewer"})
+                    "by": "reviewer", "text": "stopped by the reviewer"})
     except Exception:
         err = traceback.format_exc()
         (task.dir / "runner.log").open("a").write(err)

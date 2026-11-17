@@ -66,9 +66,13 @@ def runner_alive(task: store.Task) -> bool:
         return False
     try:
         os.kill(pid, 0)
-        return True
-    except ProcessLookupError:
+    except (ProcessLookupError, PermissionError):  # gone, or a recycled pid that isn't ours
         return False
+    cmdline = Path(f"/proc/{pid}/cmdline")  # a recycled pid of ours runs something else
+    try:
+        return f"workbench.runner\0{task.name}\0".encode() in cmdline.read_bytes()
+    except OSError:
+        return not cmdline.parent.parent.joinpath("self").exists()  # no /proc: trust the pid
 
 
 def ago(ts) -> str:
@@ -218,9 +222,10 @@ def cmd_feedback(a):
     _spec_gaps(task, a.spec_gap)
     n = st.get("round", 1) + 1
     task.round_dir(n).mkdir(parents=True, exist_ok=True)
+    rerun = " re-run the acceptance command and" if task.spec.get("test_cmd") else ""
     task.round_dir(n).joinpath("prompt.md").write_text(
-        f"{lessons.FEEDBACK_HEAD} Make exactly these changes, then re-run the "
-        "acceptance command and finish with a short summary:\n\n" + text.strip())
+        f"{lessons.FEEDBACK_HEAD} Make exactly these changes, then{rerun} finish with a short "
+        "summary:\n\n" + text.strip())
     reviews = st.get("reviews", 0) + 1
     task.set_status(context="fresh" if a.fresh else "keep" if a.keep_context else None)
     task.set_status(round=n, reviews=reviews, phase="queued",
@@ -244,14 +249,23 @@ def cmd_next(a):
     if runner_alive(task):
         die(f"{a.name}'s runner is still running")
     step = st.get("steps", 1)
-    _spec_gaps(task, a.spec_gap)
+    try:  # read before anything is committed: a bad path must leave the step as it was
+        nxt = sys.stdin.read() if a.spec == "-" else Path(a.spec).read_text()
+    except OSError as e:
+        die(f"can't read the next step's spec: {e}")
+    if not nxt.strip():
+        die("the next step's spec is empty")
     measured = results.step(task, landed=True)
     try:
         commit = gitops.commit_all(task.worktree, f"{a.message}\n\nWorkbench-Task: {a.name} "
                                    f"(step {step})\nOpenCode-Session: {st.get('session')}")
     except gitops.GitError as e:
         die(str(e))
-    if a.test is not None:
+    _spec_gaps(task, a.spec_gap)  # after the commit: a retry after a failed one counts them once
+    if a.allow:
+        have = st.get("allow") or []
+        task.set_status(allow=have + [p for p in a.allow if p.strip() and p not in have])
+    if a.test is not None:  # the one change to task.json after start
         store.write_json(task.dir / "task.json", {**spec, "test_cmd": a.test})
     test = a.test if a.test is not None else spec.get("test_cmd")
     test_line = (f"- The acceptance command is `{test}`. Run it before you finish and make it "
@@ -261,7 +275,7 @@ def cmd_next(a):
     task.round_dir(n).mkdir(parents=True, exist_ok=True)
     task.round_dir(n).joinpath("prompt.md").write_text(
         f"Step {step} of this task is done and committed ({commit}). The next step:\n\n"
-        + Path(a.spec).read_text().rstrip()
+        + nxt.rstrip()
         + PROTOCOL.format(branch=spec["branch"], test_line=test_line, budget=budget))
     task.event({"ts": store.now(), "round": n, "kind": "next_step",
                 "text": f"step {step} committed as {commit}; next step sent"})
@@ -309,7 +323,7 @@ def _ack_all(task):
     still true now. A note or a diff run seconds after the task failed must not swallow the
     failure notice Claude hasn't seen: the mark stops just short of it."""
     phase = task.status.get("phase")
-    news = "question" if phase == "asking" else phase
+    news = "question" if phase == "asking" else "checkin" if phase in LIVE else phase
     acked = _acked(task)
     rows, _ = store.read_jsonl(store.home() / "notify.jsonl")
     pending = [r["ts"] for r in rows if r["task"] == task.name and r["kind"] == news and r["ts"] > acked]
@@ -439,7 +453,11 @@ def _stop_runner(task):
             os.kill(pid, signal.SIGTERM)  # the runner stops its agent's process group itself
         except ProcessLookupError:
             return
-        wait_exit(pid, 15)
+        if not wait_exit(pid, 15):  # it stops its agent first; past that, end it all
+            try:
+                os.killpg(pid, signal.SIGKILL)  # its own session: the agent and MCP servers too
+            except (ProcessLookupError, PermissionError):
+                pass
 
 
 LIVE = ("queued", "running", "testing", "asking")
@@ -460,13 +478,13 @@ def _alive(pid: int) -> bool:
 
 
 def stop_everything() -> list[str]:
-    """"bail out claude": every agent. Nothing is finished or thrown away: tasks keep their
+    """`wb stop --all`: every agent. Nothing is finished or thrown away: tasks keep their
     worktrees (stopped, for wb feedback or wb discard later)."""
     stopped = []
     for t in _open_tasks():
         _stop_runner(t)
         t.event({"ts": store.now(), "round": t.status.get("round"), "kind": "stopped",
-                 "text": "bail out: stopped by the user"})
+                 "by": "user", "text": "bail out: stopped by the user"})
         t.set_status(phase="stuck", last="bail out: stopped", pid=None)
         _ack_all(t)
         stopped.append(f"{t.name} (worktree kept: {t.worktree})")
@@ -481,6 +499,8 @@ def cmd_stop(a):
     if not a.name:
         die("name a task, or --all")
     task = need(a.name)
+    if task.status.get("phase") not in LIVE and not runner_alive(task):
+        die(f"{a.name} is {task.status.get('phase')}, not running")
     _stop_runner(task)
     task.set_status(phase="stuck", last="stopped by the reviewer", pid=None)
     print(f"stopped {a.name}; wb feedback continues it, wb discard drops it")
@@ -613,31 +633,37 @@ def cmd_takeover(a):
 def cmd_accept(a):
     task = need(a.name)
     spec, st = task.spec, task.status
+    if st.get("phase") in store.CLOSED:
+        die(f"{a.name} is already {st.get('phase')}")
     if st.get("phase") != "review" and not a.force:
         die(f"{a.name} is {st.get('phase')}, not waiting for review (--force accepts anyway)")
+    _stop_runner(task)  # under --force it may still be running, and would set its phase back
     repo = Path(spec["repo"])
     rounds, autofix = st.get("round", 1), st.get("auto_fixes_total", 0) + st.get("auto_fixes", 0)
     msg = (f"{a.message}\n\nDelegated to {spec['model_label']} via OpenCode: {rounds} round(s), "
            f"{autofix} automatic test-fix, {st.get('reviews', 0)} review round(s)."
            f"\n\nWorkbench-Task: {a.name}\nOpenCode-Session: {st.get('session')}")
-    _spec_gaps(task, a.spec_gap)
     measured = results.step(task, landed=True)
     try:
-        commit = gitops.commit_all(task.worktree, msg)
+        if gitops.changed(task.worktree) or st.get("steps", 1) == 1:
+            commit = gitops.commit_all(task.worktree, msg)
+        else:  # the last step changed nothing more: the branch is its committed steps
+            commit = gitops.git(task.worktree, "rev-parse", "--short", "HEAD").strip()
         gitops.remove_worktree(repo, task.worktree)
     except gitops.GitError as e:
         die(str(e))
+    _spec_gaps(task, a.spec_gap)
     merged = None
     if a.merge:
         try:
-            merged = gitops.merge(repo, a.name)
+            merged = gitops.merge(repo, a.name, spec.get("base_ref"))
         except gitops.GitError as e:
             print(f"wb: not merged: {e}", file=sys.stderr)
     task.set_status(phase="accepted", last=f"accepted as {commit}" +
                     (f", merged {merged}" if merged else ""))
     results.record(task, "accepted", measured, commit=commit, merged=bool(merged))
     _ack_all(task)
-    note = claude_md_status(repo, spec["branch"])
+    note = claude_md_status(repo, spec["branch"])  # the task's own commit counts: the reminder
     print(f"{note}: keep it current (update and commit it if this change alters what it says)"
           if note != "no CLAUDE.md" else "the repo has no CLAUDE.md: write one (wb init)")
     print(f"accepted {a.name}: commit {commit} on {spec['branch']}" +
@@ -649,6 +675,8 @@ def cmd_accept(a):
 def cmd_discard(a):
     task = need(a.name)
     spec = task.spec
+    if task.status.get("phase") in store.CLOSED:
+        die(f"{a.name} is already {task.status.get('phase')}")
     _stop_runner(task)
     _spec_gaps(task, a.spec_gap)
     repo = Path(spec["repo"])
@@ -708,8 +736,12 @@ def cmd_tune(a):
 def cmd_trial(a):
     """Closed tasks that were checks of workbench itself, not work: their results stop counting."""
     hit = store.mark_trials(set(a.names))
+    open_ = [i for i, x in lessons._all()[0].items() if x["task"] in a.names]
+    shut = lessons.close(open_, "dropped", "a trial run: a check of workbench, not work")
     print(f"trial runs now, left out of the record: {', '.join(hit)}" if hit
           else "no unmarked results for those tasks")
+    if shut:
+        print(f"lessons dropped with them: {len(shut)}")
 
 
 SCOUT_EVERY_DAYS = 7
@@ -1336,7 +1368,7 @@ def main(argv=None):
                    help="this round is the spec's fault: what it missed (repeatable)")
     s.set_defaults(f=cmd_feedback)
     s = sub.add_parser("next", help="commit the approved step and send the same agent the next one")
-    s.add_argument("name"); s.add_argument("--spec", required=True)
+    s.add_argument("name"); s.add_argument("--spec", required=True, help="the next step's spec file, or - for stdin")
     s.add_argument("--message", "-m", required=True, help="commit subject for the approved step")
     s.add_argument("--test", help="the next step's acceptance command (default: unchanged)")
     s.add_argument("--fresh", action="store_true", help="a fresh session instead of the same one")
@@ -1460,8 +1492,7 @@ def main(argv=None):
     s.set_defaults(f=cmd_takeover)
     s = sub.add_parser("stop", help="stop a running task (it can be continued with feedback)")
     s.add_argument("name", nargs="?")
-    s.add_argument("--all", action="store_true",
-                   help="every agent (\"bail out claude\")")
+    s.add_argument("--all", action="store_true", help="every running agent")
     s.set_defaults(f=cmd_stop)
     s = sub.add_parser("resume", help="continue a stopped task in a fresh session (not a review round)")
     s.add_argument("name"); s.set_defaults(f=cmd_resume)

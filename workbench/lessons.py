@@ -70,7 +70,8 @@ def gather(task: store.Task, outcome: str | None = None) -> list[dict]:
 
     for d in sorted(task.dir.glob("rounds/*"), key=lambda p: int(p.name) if p.name.isdigit() else 0):
         rnd = int(d.name) if d.name.isdigit() else 0
-        prompt = d / "prompt.md"
+        prompt = d / "instructions.md"  # a fresh session's handoff took prompt.md's place
+        prompt = prompt if prompt.is_file() else d / "prompt.md"
         if prompt.is_file() and prompt.read_text().startswith(FEEDBACK_HEAD):
             body = prompt.read_text().split("\n\n", 1)[-1]
             for item in items(body):
@@ -81,7 +82,7 @@ def gather(task: store.Task, outcome: str | None = None) -> list[dict]:
             for m in LESSON.finditer(said):
                 add("agent", rnd, m.group(1).strip()[:400])
     for e in store.read_jsonl(task.dir / "events.jsonl")[0]:
-        if e.get("kind") == "stopped" and e.get("text"):
+        if e.get("kind") == "stopped" and e.get("text") and not e.get("by"):  # the guard's, not a person's
             add("stopped", e.get("round"), f"the guard stopped the agent: {e['text'][:300]}")
     for q in sorted(task.dir.glob("ask/*.json")):
         a = q.with_suffix(".answer")

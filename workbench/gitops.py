@@ -114,8 +114,18 @@ def delete_branch(repo: Path, task: str) -> None:
     git(repo, "branch", "-D", branch_name(task), check=False)
 
 
-def merge(repo: Path, task: str) -> str:
+def merge(repo: Path, task: str, into: str | None = None) -> str:
+    """Merge the task's branch into ``into`` (the branch it started from), which the main
+    checkout must have out and clean; a conflict is backed out, leaving the repo as it was."""
     if git(repo, "status", "--porcelain", "--untracked-files=no").strip():
         raise GitError(f"{repo} has uncommitted changes; merge {branch_name(task)} by hand")
-    git(repo, "merge", "--no-ff", "--no-edit", branch_name(task))
+    have = git(repo, "branch", "--show-current").strip()
+    if into and into != "HEAD" and have != into:
+        raise GitError(f"{repo} has {have or 'a detached HEAD'} out, not {into}; "
+                       f"merge {branch_name(task)} by hand")
+    try:
+        git(repo, "merge", "--no-ff", "--no-edit", branch_name(task))
+    except GitError as e:
+        git(repo, "merge", "--abort", check=False)
+        raise GitError(f"merging {branch_name(task)} failed and was backed out: {e}") from None
     return git(repo, "rev-parse", "--short", "HEAD").strip()

@@ -8,7 +8,7 @@ Layout of ``$WB_HOME`` (default ``~/.local/state/workbench``)::
     gpu.lock                held by every running task: shared beside others, exclusive alone
     gpu.json                who holds it (pid → model, task); gpu.admit serializes admissions
     tasks/<name>/
-        task.json           what the task is (static after start)
+        task.json           what the task is (static after start, but for `wb next --test`)
         status.json         what it is doing now (rewritten by the runner and the ask server)
         events.jsonl        the agent's normalized events, every round
         runner.log          the runner's own stdout/stderr

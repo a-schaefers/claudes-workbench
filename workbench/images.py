@@ -148,7 +148,7 @@ def generate(prompt: str, out_dir: Path, n: int = 4, size: tuple[int, int] = (10
     out_dir.mkdir(parents=True, exist_ok=True)
     seed = int(time.time()) % 1_000_000 if seed is None else seed
     made = []
-    with store.locked(store.home() / "gpu.lock"):  # one model on the GPU at a time
+    with models.GpuLease(None, "wb image", say):  # the GPU to itself, queued with the tasks
         models.free_gpu(say=say)
         _settle(say)
         for i in range(n):

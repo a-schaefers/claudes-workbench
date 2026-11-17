@@ -21,7 +21,9 @@ The runner makes the task's model resident before it starts (make_resident): it 
 models and stops servers that have a stop command, then loads or starts the one it needs. A
 GpuLease decides first whether it may instead run beside the tasks already running: when every
 model fits the GPU's memory at once (a big card, several GPUs, Apple's unified memory), it loads
-its own and leaves theirs; otherwise it waits for the GPU to itself.
+its own and leaves theirs; otherwise it waits for the GPU to itself. A model on another host
+(`remote`) is left out of all of it: this machine's GPU is not the one it runs on, so it never
+waits for the lease, frees nothing here, and nothing here unloads or stops it.
 """
 from __future__ import annotations
 
@@ -272,10 +274,11 @@ def _ollama_loaded(root: str) -> list[str]:
 def make_resident(m: Model, say=print, keep=()) -> float:
     """Free the GPU for ``m`` and load it, leaving the models in ``keep`` (ids) loaded. Returns
     the seconds it took (0 if already there)."""
-    if _fake() or status(m)["resident"] and not _others_resident(m, keep):
+    if _fake() or status(m)["resident"] and (m.remote or not _others_resident(m, keep)):
         return 0.0
     t0 = time.time()
-    free_gpu(keep={m.id, *keep}, say=say)
+    if not m.remote:
+        free_gpu(keep={m.id, *keep}, say=say)
     if m.engine == "ollama":
         say(f"loading {m.name} into ollama")
         _post(f"{m.root}/api/generate", {"model": m.name, "prompt": "", "keep_alive": "30m"},
@@ -299,9 +302,10 @@ def free_gpu(keep=(), say=print) -> None:
     in ``keep`` (ids): the task's own, and those of tasks running beside it."""
     if _fake():
         return
-    kept = [o for o in discover().values() if o.id in keep]
+    local = [o for o in discover().values() if not o.remote]  # another host's GPU isn't ours to free
+    kept = [o for o in local if o.id in keep]
     done = {o.root for o in kept if o.engine == "server"}  # a server swaps its own models
-    for other in discover().values():
+    for other in local:
         if other.engine != "server" or other.root in done or not status(other)["resident"]:
             continue
         done.add(other.root)
@@ -313,8 +317,15 @@ def free_gpu(keep=(), say=print) -> None:
         while not _server_idle(other) and time.time() < deadline:  # never cut off someone's reply
             time.sleep(5)
         say(f"stopping {other.id}")
-        subprocess.run(other.stop, shell=True, capture_output=True, timeout=300)
-    roots = {o.root for o in discover().values() if o.engine == "ollama"}
+        try:
+            r = subprocess.run(other.stop, shell=True, capture_output=True, text=True, timeout=300)
+        except subprocess.TimeoutExpired:
+            say(f"{other.id}'s stop command ran past 5 min; it may still hold GPU memory")
+            continue
+        if r.returncode:
+            say(f"{other.id}'s stop command failed (exit {r.returncode}): "
+                f"{(r.stderr or r.stdout).strip()[-200:]}")
+    roots = {o.root for o in local if o.engine == "ollama"}
     for root in roots:  # every model Ollama has loaded, ours or another tool's
         for name in _ollama_loaded(root):
             if any(o.engine == "ollama" and root == o.root and _matches(o.name, {name}) for o in kept):
@@ -327,11 +338,12 @@ def free_gpu(keep=(), say=print) -> None:
 
 
 def _others_resident(m: Model, keep=()) -> bool:
-    ours = [m, *(o for o in discover().values() if o.id in keep)]
+    local = [o for o in discover().values() if not o.remote]
+    ours = [m, *(o for o in local if o.id in keep)]
     if any(o.engine == "server" and o.stop and o.root not in {x.root for x in ours}
-           and status(o)["resident"] for o in discover().values()):
+           and status(o)["resident"] for o in local):
         return True
-    roots = {o.root for o in discover().values() if o.engine == "ollama"}
+    roots = {o.root for o in local if o.engine == "ollama"}
     return any(not any(o.engine == "ollama" and r == o.root and _matches(o.name, {n}) for o in ours)
                for r in roots for n in _ollama_loaded(r))
 
@@ -398,13 +410,15 @@ def can_share(m: Model, running: list[Model], budget: int | None) -> bool:
 
 
 class GpuLease:
-    """A task's hold on the GPU, beside other tasks' models when all fit, else alone."""
+    """A task's hold on the GPU, beside other tasks' models when all fit, else alone. With no
+    model (an image generation) it is always alone, and queues in gpu.json like a task, so
+    tasks that come after it wait instead of joining the ones it waits for (flock would grant
+    them a shared lock while its exclusive one waits). A remote model holds nothing."""
 
-    def __init__(self, m: Model, task: str, say=print):
+    def __init__(self, m: Model | None, task: str, say=print):
         self.m, self.task, self.say = m, task, say
         self.home = store.home()
         self.fh = None
-        self.alone = False
 
     def _holders(self) -> dict:
         """gpu.json's live entries: pid → {model, task}."""
@@ -415,30 +429,33 @@ class GpuLease:
         store.write_json(self.home / "gpu.json", held)
 
     def __enter__(self):
+        if self.m and self.m.remote:
+            return self
+        self.home.mkdir(parents=True, exist_ok=True)
         self.fh = open(self.home / "gpu.lock", "a+")
+        model = self.m.id if self.m else None
         try:
             with store.locked(self.home / "gpu.admit"):
                 held = self._holders()
                 running = [o for o in (discover().get(h["model"]) for h in held.values()) if o]
                 waiting = any(h.get("waiting") for h in held.values())  # first come, first served
-                if not waiting and len(running) == len(held) and (
+                if self.m and not waiting and len(running) == len(held) and (
                         not held or can_share(self.m, running, gpu_budget())):
                     try:
                         fcntl.flock(self.fh, fcntl.LOCK_SH | fcntl.LOCK_NB)
                     except BlockingIOError:
                         pass  # something has the GPU to itself: wait below
                     else:
-                        self._set({**held, str(os.getpid()): {"model": self.m.id, "task": self.task}})
+                        self._set({**held, str(os.getpid()): {"model": model, "task": self.task}})
                         if held:
                             self.say("sharing the GPU with " + ", ".join(sorted({o.id for o in running})))
                         return self
             with store.locked(self.home / "gpu.admit"):
-                self._set({**self._holders(), str(os.getpid()): {"model": self.m.id, "task": self.task,
+                self._set({**self._holders(), str(os.getpid()): {"model": model, "task": self.task,
                                                                  "waiting": True}})
             fcntl.flock(self.fh, fcntl.LOCK_EX)  # until the running tasks finish; none join us
-            self.alone = True
             with store.locked(self.home / "gpu.admit"):
-                self._set({**self._holders(), str(os.getpid()): {"model": self.m.id, "task": self.task}})
+                self._set({**self._holders(), str(os.getpid()): {"model": model, "task": self.task}})
             return self
         except BaseException:
             self.fh.close()
@@ -446,12 +463,16 @@ class GpuLease:
 
     def load(self) -> float:
         """Make the model resident, leaving the other holders' models loaded."""
+        if self.m.remote:
+            return make_resident(self.m, say=self.say)
         with store.locked(self.home / "gpu.admit"):
             keep = {h["model"] for p, h in self._holders().items()
                     if p != str(os.getpid()) and not h.get("waiting")}
             return make_resident(self.m, say=self.say, keep=keep)
 
     def __exit__(self, *exc):
+        if not self.fh:
+            return
         try:
             with store.locked(self.home / "gpu.admit"):
                 held = self._holders()

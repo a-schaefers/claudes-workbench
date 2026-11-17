@@ -370,6 +370,9 @@ class Context(Base):
         wait_phase("t-n", {"review"})
         step2 = Path(self.tmp.name) / "step2.md"
         step2.write_text("Now also write the question to question.txt.\n")
+        with self.assertRaises(SystemExit):                # a bad path commits nothing
+            run_wb("next", "t-n", "--spec", str(step2) + ".typo", "-m", "feat: the answer")
+        self.assertTrue(gitops.changed(store.Task("t-n").worktree))
         out = run_wb("next", "t-n", "--spec", str(step2), "-m", "feat: the answer")
         self.assertIn("step 1 of t-n committed", out)
         st = wait_phase("t-n", {"review"})
@@ -383,6 +386,12 @@ class Context(Base):
         log = subprocess.run(["git", "-C", str(self.repo), "log", "--format=%s", "delegate/t-n"],
                              capture_output=True, text=True).stdout
         self.assertIn("feat: the answer", log)
+        out = run_wb("accept", "t-n", "-m", "feat: both steps")  # the last step changed nothing
+        self.assertIn("accepted t-n", out)
+        with self.assertRaises(SystemExit):                # closed: the branch stays
+            run_wb("discard", "t-n")
+        self.assertTrue(subprocess.run(["git", "-C", str(self.repo), "rev-parse", "delegate/t-n"],
+                                       capture_output=True).returncode == 0)
 
 
 class Steering(Base):
