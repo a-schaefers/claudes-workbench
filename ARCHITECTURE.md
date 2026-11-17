@@ -98,7 +98,8 @@ installed module:
 - **The agent is a teammate with limits, not a prisoner.** The everyday tools of software work
   run without asking; what's outside (a new dependency, another directory, a network tool) is
   asked for and granted in seconds (`wb allow`). The limits that matter (git writes, credentials,
-  Claude's own files, writes outside the lane) are enforced by the kernel where it can.
+  Claude's own files, writes outside the lane) are enforced by the kernel where it can, and the
+  acceptance tests run under the same limits.
 - **Learned, not configured.** Which model takes which size, how big a task can be, how fast a
   model is, when to hand over: each starts as a guess and is corrected by real results on this
   machine (`results.jsonl`), so a new model or a new machine needs no code change.
@@ -310,8 +311,9 @@ A prompt (with its skills note) over `PROMPT_ARG_MAX` (100K bytes) is sent as a 
 
 **A fresh session's prompt** (`_start_fresh`, `handoff_prompt`). The raw prompt is kept as
 `rounds/<n>/instructions.md`, and `prompt.md` becomes: "You are picking this task up in a fresh
-session (why)…", `## The task` (the current step's prompt: `rounds/<step_round>/prompt.md`, the
-spec plus the protocol), `## The work so far` (the committed steps, `git log --oneline
+session (why)…", `## The task` (the current step's prompt, `current_task_prompt`: `rounds/<step_round>/`
+`instructions.md` when the step began in a fresh session, else its `prompt.md`; the spec plus the
+protocol), `## The work so far` (the committed steps, `git log --oneline
 base..HEAD`, and the uncommitted diff, `git diff HEAD` with new files; a diff over
 `HANDOFF_DIFF_SHARE` (9%) of the window at 4 characters a token, about 12K characters on 32K, and never
 over `HANDOFF_DIFF_MAX` (60K characters), is replaced by its `--stat` and "read the changed files"), and `## Now`: "Start on the task above"
@@ -351,8 +353,8 @@ characters), the files changed so far, and a NOTE naming changed files the spec 
 (`outside_spec`: a changed path or its basename that the step's prompt doesn't contain; silent
 when the spec names none of them).
 
-**Tests** (`run_tests`): `shell=True` in the worktree, the runner's environment (not the agent's:
-no lane, no git shim), its own process group (killed whole on a timeout), timeout `test_timeout` (`wb start
+**Tests** (`run_tests`): `/bin/sh -c` in the worktree, inside the agent's lane with the agent's
+environment (`agent_env`: the git shim, credentials dropped), its own process group (killed whole on a timeout), timeout `test_timeout` (`wb start
 --test-timeout`, 900 s), the output decoded, the last 40 lines kept as `status.tests`
 `{ok, exit, tail, round}`, the whole output in `rounds/<n>/tests.txt` (`$ cmd`, `exit: N`, output).
 
@@ -418,15 +420,15 @@ prompt, in this order:
   directories, read its file and follow it", instead of loading them all.
 
 OpenCode reads `AGENTS.md` itself but never `CLAUDE.md`. Files are deduplicated by content
-(SHA-256), seeded with the worktree's and the checkout's `AGENTS.md`, so a `CLAUDE.md` identical
+(SHA-256), seeded with the worktree's `AGENTS.md`, so a `CLAUDE.md` identical
 to `AGENTS.md` (or to an earlier file) isn't loaded twice.
 
 **Denied tools** (`DENIED_TOOLS`), which also leave the prompt (it shrinks from about 9K to 3.5K
 tokens, which a local model reads on every request): `question` (nobody answers it headless),
 code mode (`execute`) and the `opencode_*` tools (they can move the session or remove worktrees;
 denying `execute` turns the `opencode_*` tools into direct tools, so they are denied too), `subagent`
-(a second agent inside the task, beside the GPU accounting), `*worktree*`, web search and image
-generation. `webfetch` is not denied.
+(a second agent inside the task, beside the GPU accounting), `*worktree*`, web search, web fetch and
+image generation.
 
 **Commands, an allowlist** (`context.shell_rules`). OpenCode's `shell` permission rules are
 checked against each simple command of a line (pipes, `&&`, loops, `$(…)`), its raw text as the
@@ -436,37 +438,54 @@ wins; no match means ask, which `--auto` allows. The rules, in order:
 1. deny `*`;
 2. allow `c` and `c *` for each of `ALLOWED_COMMANDS` (about 215: the shell's builtins and
    everyday tools, files and text, archivers, builds and compilers, test runners, interpreters,
-   package managers, `bash`/`sh`, `sqlite3`, `git` (the shim), `opencode`); not on it: `curl`,
-   `wget`, `ssh`, `rsync`, `docker`, `systemctl`;
+   package managers, `bash`/`sh`, `sqlite3`, `git` (the shim)); not on it: `curl`, `wget`, `ssh`,
+   `rsync`, `docker`, `systemctl`, `opencode`;
 3. allow `./*`, `../*`, and `<dir>/*` for every directory of the lane but `/dev` and `/proc` (a program the agent built
    runs by its path anywhere it can write: a debug binary in the temp directory was refused
    though `bash` could run it);
-4. deny `ASK_FIRST`: adding a dependency (`pip install *`, `npm install *`, `npm add *`,
-   `cargo add *`, `go get *`, …; with the optional trailing ` *`, these also refuse the bare forms);
-5. allow the user's standing patterns (`commands.json` `allow`) and the task's grants
-   (`rules/<task>/grants.json` `allow`: `wb allow`, `wb start|next --allow`); a `*` there lifts everything above;
-6. deny the hard limits (`DENIED_SHELL`): `sudo`, `doas`, `pkexec`, `su`, `gh`, and the real git by
-   its path (`*/git`, `*/git *`).
+4. allow `PROJECT_BINS`, what a project builds or installs for itself, by its path:
+   `.venv/bin/*`, `venv/bin/*`, `node_modules/.bin/*`, `build/*`, `target/debug/*`,
+   `target/release/*`, `bin/*`, `out/*`, `dist/*`, `zig-out/bin/*`;
+5. deny `ASK_FIRST`: adding a dependency (`pip install *`, `npm install *`, `npm add *`,
+   `pnpm i *`, `yarn global add *`, `bun i *`, `deno add *`, `deno install *`, `cargo add *`,
+   `go get *`, `dotnet add * package *`, …) and fetching a package to run it (`npx -y *`,
+   `npx --yes *`, `npm exec *`, `pnpm dlx *`, `yarn dlx *`, `bunx *`, `uvx *`);
+6. allow `INSTALL_LISTED`, installing what the project already lists, because with the optional
+   trailing ` *` the rules above also refuse the bare forms: `npm install`, `npm i`, `npm ci`,
+   `pnpm install`, `pnpm i`, `bun install`, `bun i`, `yarn`, `yarn install`, `pip install -r *`,
+   `pip install -e .` (and `pip3`, `python -m pip`, `python3 -m pip`, `uv pip` forms);
+7. allow the user's standing patterns (`commands.json` `allow`) and the task's grants
+   (`rules/<task>/grants.json` `allow`: `wb allow`, `wb start|next --allow`); a `*` there lifts
+   everything above;
+8. deny the hard limits (`DENIED_SHELL`): `_HARD` (`sudo`, `doas`, `pkexec`, `su`, `gh`, and the
+   real git by its path, `*/git`), each bare and with ` *`, and each again behind the
+   `_WRAPPERS` (`env`, `env *`, `xargs`, `xargs *`, `nohup`, `nice`, `nice *`, `time`, `command`,
+   `exec`, `timeout *`, `stdbuf *`, `setsid`), so `env gh …` and `timeout 5 sudo …` are refused.
 
 A refused command comes back to the agent as "Permission denied"; the handbook and the
 `ask_reviewer` tool tell it to ask with `command` set, which raises a PERMISSION question naming
 the `wb allow` that grants it. These patterns are a guardrail on the agent's own choices, not a
-sandbox: they match the command as written, so a wrapper that is itself allowed (`env`, `xargs`,
-`timeout`, `nohup`, `bash -c`) can run something the list refuses, and make or any interpreter can
-run anything. What must hold is held by the kernel where it can be: no sudo (the lane sets
-no-new-privileges), git read-only (the shim, and the repo's refs are outside the lane), no push or
-`gh` with the user's keys (credentials are unreadable).
+sandbox: they match the command as written, so `bash -c '…'`, make or any interpreter can still
+run something the list refuses. What must hold is held below the patterns: no sudo (the lane sets
+no-new-privileges), git read-only (the shim, and the repo's git directory is outside the lane), no
+push or `gh` with the user's keys (credentials are unreadable and dropped from the environment, so
+gh finds no login).
 
 **Paths, a lane** (`context.writable`, `context.readable`, `context.external_rules`, `lane.py`).
 - *Writes.* The lane is the task directory (the worktree and the files the ask server writes),
   the temp directories (`gettempdir()`, `/tmp`, `/var/tmp`), `/dev`, `/proc`, the build caches and
   toolchain homes under `$HOME` (`TOOL_HOMES`: `.cache`, `.cargo`, `.rustup`, `go`, `.npm`, `.bun`,
   `.deno`, `.yarn`, `.pnpm-store`, `.local/share/pnpm`, `.local/share/uv`, `.gradle`, `.m2`,
-  `.nuget`, `.dotnet`, `.gem`, `.julia`, `.cabal`, `.stack`, `.ghcup`, `.platformio`, `.conan2`),
-  OpenCode's own data (`.local/share/opencode`, `.local/state/opencode`), `$XDG_CACHE_HOME`,
-  `$XDG_RUNTIME_DIR`, `$WB_HOME/notify.jsonl` and its lock (the ask server raises questions), and
+  `.nuget`, `.dotnet`, `.gem`, `.julia`, `.cabal`, `.stack`, `.ghcup`, `.platformio`, `.conan2`,
+  `.hex`, `.mix`, `.sbt`, `.ivy2`, `.local/lib`) and wherever the environment moved them
+  (`TOOL_HOME_VARS`, each that is set: `CARGO_HOME`, `RUSTUP_HOME`, `GOPATH`'s first entry,
+  `GOMODCACHE`, `GOCACHE`, `npm_config_cache`, `PIP_CACHE_DIR`, `UV_CACHE_DIR`,
+  `GRADLE_USER_HOME`, `BUN_INSTALL`, `DENO_DIR`, `MIX_HOME`, `HEX_HOME`), OpenCode's own data
+  (`.local/share/opencode`, `.local/state/opencode`, and `opencode` under `$XDG_DATA_HOME` and
+  `$XDG_STATE_HOME` when set), `$XDG_CACHE_HOME`, `$XDG_RUNTIME_DIR`, `$WB_HOME/notify.jsonl` and its lock (the ask server raises questions), and
   the extra paths (`commands.json` `paths`, the task's grants `paths`), each with its real path too, keeping
-  only those that exist.
+  only those that exist. No entry may resolve to `/` or the home directory (this covers
+  `commands.json` `paths` and the grants too).
 - *Reads.* Everything is readable except where credentials and the user's own records live:
   `context.SECRETS` under `$HOME` (`.ssh`, `.gnupg`, `.password-store`, `.netrc`,
   `.git-credentials`, `.config/gh`, keyrings, `.aws`, `.azure`, `.config/gcloud`, `.kube`,
@@ -482,9 +501,14 @@ no-new-privileges), git read-only (the shim, and the repo's refs are outside the
   removes and every make, plus refer (ABI 2: moves inside the lane work) and truncate (ABI 3), and
   file reads when `--reads` is given. Directories get every right; files only write, read and
   truncate. It also sets no-new-privileges, which disables setuid programs (sudo, su). Execution,
-  directory listing and the network stay free. A lane that can't be drawn doesn't stop the task:
-  it prints `workbench lane: not enforced (…)` to `runner.log` and execs unrestricted. Without
-  Landlock (macOS, an old kernel) it execs unrestricted and `wb doctor` says so.
+  directory listing and the network stay free. It fails closed: when Landlock is there but the
+  lane can't be drawn, it prints `workbench lane: the kernel refused the lane (<error>); not
+  running <cmd>` to `runner.log` and exits 126. Without Landlock (macOS, an old kernel, or an
+  architecture whose syscall numbers differ: `lane.UNIFIED` lists the ones it runs on, x86_64,
+  i386/i686, aarch64, armv7l/armv6l, riscv64, ppc64/ppc64le, s390x, loongarch64) it execs
+  unrestricted. `wb doctor` draws a real lane and tries a write outside it: `ok agents write only
+  in their lane (Landlock ABI N)`, `BAD the lane didn't hold a write outside it: …`, or a `--` line
+  without Landlock.
 - *OpenCode's side* (`external_rules`): its `external_directory` permission, checked for its file
   tools' paths and the shell's working directory and `cd` targets (not other arguments), is deny
   `*`, then allow `<dir>/*` for the lane, `READABLE` (`/usr`, `/etc`, `/opt`, `/lib*`, `/bin`,
@@ -508,13 +532,13 @@ no-new-privileges), git read-only (the shim, and the repo's refs are outside the
 needs a key from the environment names it in `commands.json` `"env": [names]`, which passes it
 through.
 
-**Not confined.** The acceptance command runs in the runner (no lane, no shim), so code the agent
-wrote runs with the user's full rights after each round. The task directory is writable (the ask
-server writes the task's status there), which is why the grants and the rules live in
-`rules/<task>/`.
+**The task directory is writable** (the ask server writes the task's status there), which is why
+the grants and the rules live in `rules/<task>/`. The acceptance command runs in the same lane and
+environment as the agent, so code the agent wrote gets no more rights when the runner tests it.
 
 **Claude's files.** The `edit` permission denies `*CLAUDE.md`, `*CLAUDE.local.md`, `*AGENTS.md`,
-`.claude/*` and `*/.claude/*`, so OpenCode's file tools can't change them; a change made from the
+`.claude/*` and `*/.claude/*`, and the skill library (`<library>/*`), so OpenCode's file tools
+can't change them; a change made from the
 shell shows in the round report.
 
 **Git, read-only** (`gitguard.py`; *Git, commits and projects*). `runner.agent_env` writes a `git`
@@ -522,10 +546,10 @@ of its own into `rules/<task>/bin/` and puts it first on `PATH`.
 
 **Skills**: the repo's own `.claude/skills`, plus the library skills Claude handed this task (one
 directory each in the config's `skills` list). The user's personal `~/.claude/skills` (including
-synced Claude app skills, `synced/*/*/SKILL.md`) and `delegate` itself are denied by name
-(`denied_skills`): an agent once read a personal skill as a "newer task" and went off into the
-user's files. A personal skill's name therefore also hides a project skill of the same name, and
-`wb skill add` refuses those names.
+synced Claude app skills, `synced/*/*/SKILL.md`) are denied by name (`denied_skills`): an agent
+once read a personal skill as a "newer task" and went off into the user's files. A name the
+worktree's own `.claude/skills` also has stays allowed (the project's skill wins); `delegate` and
+task.json's `deny_skills` are always denied. `wb skill add` refuses the personal names.
 
 **`ask_reviewer`**, an MCP tool for one blocking question to Claude (*Talking to a running agent*).
 OpenCode lists it as `workbench_ask_reviewer`.
@@ -1553,7 +1577,7 @@ message, not a traceback.
 | Command | Flags | What it does |
 |---|---|---|
 | `wb wait [<task>]` | `--timeout S` (0: none) | Blocks (inotify) until a notice past a task's `acked` arrives, prints `[<kind>] <task>\n<text>` and acks it (skipping a review, stuck or failed notice for a task live again). Named: a closed task exits 2; a task already waiting whose notice was taken elsewhere prints it again "(already delivered once)". |
-| `wb status [<task>]` | `--all` | One line per open task: name, phase, round, model, age, idle, last action; `?` after queued/running/testing whose runner died. |
+| `wb status [<task>]` | `--all` | One line per open task: name, phase, round, model, age, idle, last action; `?` after queued/running/testing whose runner died. Named: also `worktree: <path>` while it exists. |
 | `wb watch [<task>]` | `-v`, `--once`, `--no-color`, `--json` (hidden: one pass of JSON lines, the mod's pane) | The live transcript (`transcript.follow`); default task: the most recently updated open one, else the most recently updated task. |
 | `wb log <task>` | `-n N` (0 all), `-f`, `-v` | The agent's events: tool calls (`HH:MM:SS rN tool brief  ✗ error`), text, questions, answers, stops, auto-fixes, rounds, tests, errors. |
 | `wb report <task>` | `--round N` | The round's summary.md. |
@@ -1584,7 +1608,7 @@ message, not a traceback.
 | `wb image "<prompt>"` | `--n` (4), `--size WxH` (1024x1024), `--seed`, `--ref <img>…`, `--out DIR`, `--engine`, `--list` | Candidates from a local image engine (see *Images*). |
 | `wb chat [log\|serve\|url\|reply\|ack\|pending]` | `--port` (1337), `--bind` (replaces chat.json's), `--host` (adds), `--text`, `--message <file\|->` (reply reads stdin without either), `-n` (10); `ack <id> --by --how` (the mod) | The web chat: the thread, the server, the link with its token, Claude's reply. |
 | `wb init <dir>` | | A project the way Claude keeps one: git on the default branch, an initial commit, AGENTS.md → CLAUDE.md (refuses inside another repo or without a git identity). |
-| `wb doctor` | | `opencode --version`, the OpenCode config, git, models found and each one's readiness, each Ollama entry's `options.max_tokens` and context against what Ollama serves, the state directory, whether Landlock enforces the lane, where the mod lives. `ok`/`BAD` lines set the exit code; `--` lines inform. |
+| `wb doctor` | | `opencode --version`, the OpenCode config, git, models found and each one's readiness, each Ollama entry's `options.max_tokens` and context against what Ollama serves, the state directory, a real lane drawn around a test write (`ok agents write only in their lane (Landlock ABI N)`), where the mod lives. `ok`/`BAD` lines set the exit code; `--` lines inform. |
 
 ## Files and formats
 

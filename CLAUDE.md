@@ -74,12 +74,14 @@ dependencies. No packaging: it runs from the clone.
 - `ask_mcp.py` (+ `bin/wb-ask-mcp`): the `ask_reviewer` MCP server; questions and permission
   requests, budgeted.
 - `context.py`: what the agent knows and may do: instructions, denied tools and skills, the shell
-  allowlist (`shell_rules`), the lane (`writable`, `readable`, `SECRETS`, `external_rules`),
+  allowlist (`shell_rules`: `ALLOWED_COMMANDS`, `PROJECT_BINS`, `ASK_FIRST`, `INSTALL_LISTED`,
+  `DENIED_SHELL` with its wrappers), the lane (`writable`, `readable`, `SECRETS`, `external_rules`),
   `rules_dir` (the agent's rules, outside its lane), `grants`/`grant` (what Claude allowed the
   task: `rules/<task>/grants.json`).
 - `lane.py`: Landlock: the runner starts OpenCode through it (`wrap`); restricts writes and reads,
-  sets no-new-privileges, execs. Without Landlock it runs unrestricted (`wb doctor` says so); a
-  Landlock call that fails runs unrestricted with a note in runner.log. Standard library only.
+  sets no-new-privileges, execs. Fails closed: Landlock present but refusing the lane exits 126
+  (`workbench lane: the kernel refused the lane`); without Landlock (or off `lane.UNIFIED`'s
+  architectures) it runs unrestricted and `wb doctor` says so. Standard library only.
 - `gitguard.py`: the read-only `git` shim first on the agent's PATH. Standard library only: it's
   imported on every git call.
 - `gitops.py`: worktrees and branches, the review diff (intent-to-add, so new files show),
@@ -132,7 +134,7 @@ Linux there is no Landlock and watch.py falls back to timed waits.
    think budget (`--think-timeout`) without acting it gets a nudge. Limits stretch for a model
    measured slow (`router.budgets`, written into task.json at start). `wb steer` queues a note;
    `--now` interrupts. A round after a nudge that again does nothing is stopped.
-4. After a clean round the runner runs `--test`; failures go back to the agent up to `--auto-fix`
+4. After a clean round the runner runs `--test`, in the agent's lane and environment; failures go back to the agent up to `--auto-fix`
    times without waking Claude (`--test-timeout`, 900 s). A session that reaches the handover point (`fresh_at`, tuned per
    model) after changing a file, with room left for a successor, is stopped mid-round and a fresh
    session gets the task, the diff and its last words; between rounds, a session over the point
@@ -217,8 +219,8 @@ PATH and the lane; the rest is only imitated by the fake.
 - `permissions: [{action, resource, effect}]`: a `deny` removes a tool or skill from the prompt.
   Patterns are anchored, `*` matches anything (spaces and `/` too), a trailing ` *` is optional,
   and the last matching rule wins; no match is "ask", which `--auto` allows. For `shell` the
-  resource is each simple command's raw text in a compound line (`cd x && sudo y` is caught; `env
-  sudo` is not). For `edit` it is the file path. For `external_directory` it is `<dir>/*` for each
+  resource is each simple command's raw text in a compound line (`cd x && sudo y` is caught; a
+  wrapper isn't unwrapped, so `DENIED_SHELL` lists `env sudo *` and the like itself). For `edit` it is the file path. For `external_directory` it is `<dir>/*` for each
   directory outside the session's, from the file tools' paths and the shell's workdir and `cd`
   targets only (`touch ~/x` passes, which is what Landlock is for).
 - Denying `execute` (code mode) turns the `opencode_*` tools into direct tools, so deny
@@ -236,10 +238,10 @@ PATH and the lane; the rest is only imitated by the fake.
 
 ## Troubleshooting
 - `wb doctor`: opencode and its config, git, each model's readiness, each Ollama entry's
-  `max_tokens` and context, the state directory, whether Landlock enforces the lane, the mod.
+  `max_tokens` and context, the state directory, a real lane around a test write, the mod.
 - A model "can't run": `wb models` says why (server down, not pulled, no `start` command).
 - A task misbehaves: `wb log <t> -v`, `wb watch <t> -v`, `tasks/<t>/runner.log` (the runner's
-  output and OpenCode's stderr, including `workbench lane: not enforced`).
+  output and OpenCode's stderr, including `workbench lane: the kernel refused the lane`).
 - The agent can't see `ask_reviewer`: `PWD=<worktree> OPENCODE_CONFIG=<state>/rules/<task>/opencode.json
   opencode mcp list --print-logs`.
 - The mod does nothing: `wb` must be on Claude Code's PATH (or set `WB_BIN`); `claude --debug`
