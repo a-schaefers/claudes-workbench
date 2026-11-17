@@ -79,6 +79,11 @@ const live = atom({ plugin: 'workbench', key: 'live' } as const, { task: '', lin
   shape: 'live-1',
 })
 const KEEP_LINES = 2000 // the pane scrolls back through this much history
+// The engine draws a pane's first 100,000 characters of text and drops the rest, and the
+// apprentice comes after the history: a long task's history pushed its words (and its mouth)
+// past the cut, leaving an empty bubble (seen 2026-11-16, 119,728 characters). So the history
+// drawn is its newest lines within this budget, leaving the rest of the pane room.
+const HISTORY_CHARS = 60000
 
 // The web chat (`wb chat serve`): the user's side door while away from the terminal. A session
 // listens while delegate mode is on in it (`delegating`), from /delegate until a quit command;
@@ -809,17 +814,21 @@ export const register: Register = (on, options) => {
     const recentOf = (t: WbTask) => (t.name === watched.task ? [] : t.recent)
     const when = (t: WbTask) =>
       ACTIVE.has(t.phase) || NEEDS.has(t.phase) ? `for ${ago(now - t.createdAt)}` : `${ago(now - t.updatedAt)} ago`
-    // The whole history is drawn: the engine scrolls the pane (arrows, while focused) and
-    // follows the end as lines arrive. What the agent is doing now is the apprentice's to say.
-    const history = watched.lines.filter(l => !['activity', 'clock', 'meta'].includes(l.s))
+    // The history is drawn, newest within HISTORY_CHARS: the engine scrolls the pane (arrows,
+    // while focused) and follows the end as lines arrive. What the agent is doing now is the
+    // apprentice's to say.
+    const all = watched.lines.filter(l => !['activity', 'clock', 'meta'].includes(l.s))
+    let from = all.length
+    for (let used = 0; from > 0 && used + (all[from - 1].t?.length ?? 0) + 1 <= HISTORY_CHARS; from--)
+      used += (all[from - 1].t?.length ?? 0) + 1
+    const history = all.slice(from)
     const doing = watched.lines.find(l => l.s === 'activity')
     const clock = watched.lines.find(l => l.s === 'clock')
     const meta = watched.lines.find(l => l.s === 'meta')
 
     // The apprentice, in pixels where the pane has the rows for it (it takes six), else its face
-    // on the line. Drawing it in pixels arms the timer that animates it. A long history overfills
-    // the pane, and anything that may shrink is squeezed: the bubble went down to its border.
-    // So the stage keeps its height, and the bubble wraps its words onto more rows rather than
+    // on the line. Drawing it in pixels arms the timer that animates it. The stage keeps its
+    // height beside a long history, and the bubble wraps its words onto more rows rather than
     // cutting them off: the pane can't be made wider.
     const focus = focusOf(list)
     const sp = speechOf(focus, doing?.t ?? '', list, delegating)
@@ -895,6 +904,7 @@ export const register: Register = (on, options) => {
           <Box flexDirection="column">
             <Text dimColor>{clip(`── ${watched.task} · ↑↓ scrolls ` + '─'.repeat(cols), cols)}</Text>
             {meta && <Text dimColor>{meta.t}</Text>}
+            {from > 0 && <Text dimColor>… {from} earlier lines: `wb watch {watched.task}` has them all</Text>}
             {history.map(l => (
               <Text {...(LINE_STYLE[l.s] ?? {})}>{l.t || ' '}</Text>
             ))}
