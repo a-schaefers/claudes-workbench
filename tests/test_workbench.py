@@ -76,6 +76,10 @@ class Base(unittest.TestCase):
         self.spec.write_text("Write the answer to answer.txt.\n")
 
     def tearDown(self):
+        # A runner still writing its last status races the rmtree (CI, 2026-11-17): let it finish.
+        deadline = time.time() + 15
+        while time.time() < deadline and any(cli.runner_alive(t) for t in store.all_tasks()):
+            time.sleep(0.1)
         os.environ.clear()
         os.environ.update(self.env_before)
         self.tmp.cleanup()
