@@ -1292,8 +1292,9 @@ itself", unloads its own model, marks itself waiting and takes `LOCK_EX` (flock 
 shared lock goes first), then loads alone. `gpu.json` is `{"<pid>": {model, task, start,
 waiting?}}`. `wb image` takes `gpu.lock` through `GpuLease(None, "wb image", wait=…)`: with
 `--wait` it queues in `gpu.json` like a task with no model, waits for the running tasks to finish,
-then has the GPU to itself, and tasks started meanwhile wait for it; without, any live holder makes
-it refuse at once (`models.busy` names them). A remote model (`local: true`) takes no lease at
+then has the GPU to itself; while it holds or waits for the GPU, `wb start` refuses a new task
+(exit 4, see *Two projects, one GPU*) unless `--queue`, and `wb feedback`/`next`/`resume` queue
+behind it; without `--wait`, any live holder makes it refuse at once (`models.busy` names them). A remote model (`local: true`) takes no lease at
 all, and `free_gpu` never unloads or stops a remote provider's models.
 
 **Routing** (`router.rank`, `choose`). Rows: `store.results()` (no trials) that `tuning.judged`
@@ -1674,7 +1675,8 @@ custom-node packs do run their own Python).
   PATH or a file; a url whose server answers a GET (any status) within 2 s.
 - `generate`: holds the GPU for the whole batch through `models.GpuLease(None, "wb image",
   wait=…)` (any live holder in gpu.json: a RuntimeError naming them, unless `--wait`; then it
-  queues in gpu.json behind the running tasks, and tasks started meanwhile wait for it), calls
+  queues in gpu.json behind the running tasks; while it holds or waits, `wb start` refuses a new
+  task (exit 4) unless `--queue`, and `wb feedback`/`next`/`resume` queue behind it), calls
   `models.free_gpu()` with nothing kept, then `_settle` (up to 90 s for what free_gpu can release,
   `models.releasable`: local Ollama models and servers with a stop command, to go, and used VRAM
   to stop falling, after an engine started a second after the unload found 1.1 GB of 16 free; a
