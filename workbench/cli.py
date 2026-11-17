@@ -152,15 +152,15 @@ def one_at_a_time(cmd):
     """Run a command that changes a task under the task's command lock, so two at once (two
     sessions woken by one review, the chat and the terminal) run one after the other, the second
     seeing what the first did: an accept racing a discard once deleted the accepted commit and
-    wrote two results rows (the 2026-11-16 audit). The lock is in rules/<task>/, outside the
-    agent's lane: an agent holding it would wedge every command. The runner never takes it."""
+    wrote two results rows (the 2026-11-16 audit). The lock (runner.lock_file) is where no lane
+    reads it: an agent holding it would wedge every command. The runner never takes it."""
     @functools.wraps(cmd)
     def run(a):
         name = getattr(a, "name", None)
         if getattr(a, "all", False) or not name or not store.NAME_RE.match(name) \
                 or not store.Task(name).exists:
             return cmd(a)
-        with store.locked(store.home() / "rules" / name / "cmd.lock"):  # context.rules_dir
+        with store.locked(runner.lock_file(name, "cmd")):
             return cmd(a)
     return run
 

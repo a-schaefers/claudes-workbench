@@ -1811,7 +1811,8 @@ custom-node packs do run their own Python).
   deleted by hand and `wb` warns: accept and discard once wedged there for good (the audit).
   `delete_branch` (`branch -D`) unless `--keep-branch` or the repo is gone.
 - **One command per task at a time** (`cli.one_at_a_time`): accept, discard, next, feedback,
-  resume, takeover and stop hold the task's `rules/<task>/cmd.lock` (outside the lane), so a
+  resume, takeover and stop hold the task's `locks/<task>.cmd.lock` (`runner.lock_file`, where no
+  lane reads: an agent holding a lock with flock would wedge every command), so a
   second one waits and then sees what the first did (an accept racing a discard once deleted the
   accepted commit and wrote two results rows: the audit). The runner never takes it.
 - **The repo's stack** (`gitops.stack`): from `git ls-files -z`, the top two languages by file
@@ -2317,12 +2318,14 @@ $WB_HOME (~/.local/state/workbench)
   rules/<task>/                  outside the lane: opencode.json (the config layer), HANDBOOK.md,
                                  CLAUDE.md (a copy of the user's), bin/git (the shim),
                                  grants.json grants.lock (what Claude allowed: {"allow", "paths"}),
-                                 gitdir.json (the worktree's real git dir and its .git's text: {"gitdir", "dotgit"}),
-                                 cmd.lock (one wb command on the task at a time)
+                                 gitdir.json (the worktree's real git dir and its .git's text: {"gitdir", "dotgit"})
+  locks/<task>.runner.lock       held by the task's runner for its life (its pid inside): one runner a task
+  locks/<task>.cmd.lock          one wb command on the task at a time (runner.lock_file: no lane reads
+                                 locks/; in the task's directory an agent held runner.lock with flock
+                                 and every later runner exited at once)
   tasks/<task>/                  readable from the lane; only worktree/ and ask/ writable
     task.json  status.json  status.lock
     events.jsonl(.lock)  steer.jsonl(.lock)  acked  context.md  runner.log
-    runner.lock                  held by the task's runner for its life (its pid inside): one runner a task
     base-tests.txt               the base check's output: the acceptance command on the base (`--test`)
     rounds/<n>/                  prompt.md  instructions.md (before a handover rewrote it)  summary.md  tests.txt
     ask/<id>.json  <id>.answer   questions and permission requests; their answers (all the lane writes here, with worktree/)

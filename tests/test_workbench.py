@@ -350,7 +350,7 @@ class Lifecycle(Base):
         held, release = threading.Event(), threading.Event()
 
         def first():  # another command, mid-way: it holds the task's command lock
-            with store.locked(store.home() / "rules" / "t-two" / "cmd.lock"):
+            with store.locked(runner.lock_file("t-two", "cmd")):
                 held.set()
                 release.wait(10)
         th = threading.Thread(target=first)
@@ -2378,6 +2378,18 @@ class Lane(Base):
         self.assertEqual({f for f, v in got.items() if v == "read"},
                          {".config/opencode/opencode.json", ".local/state/opencode/model.json",
                           ".gem/specs/x", ".npmrc"}, got)
+
+    @unittest.skipUnless(lane.abi(), "needs Landlock")
+    def test_the_agent_cannot_read_the_locks_its_runner_and_wb_commands_take(self):
+        # runner.lock was in the task's directory, which the lane reads: an agent holding it
+        # with flock made every later runner exit at once, and reap fail the task (the 0.90 review)
+        os.environ["WB_HOME"] = str(self.fake_home() / "state")  # out of /tmp, which the lane writes
+        task = self.bare_task("t-locks", self.repo)
+        locks = [runner.lock_file(task.name, kind) for kind in ("runner", "cmd")]
+        for path in locks:
+            with store.locked(path):
+                pass
+        self.assertEqual(self.reads_in_lane(task, locks), ["refused", "refused"])
 
     def test_workbench_stays_readable_inside_claudes_directory(self):
         home = self.fake_home()
