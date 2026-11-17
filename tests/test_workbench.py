@@ -245,6 +245,53 @@ class Lifecycle(Base):
         self.assertNotIn("delegate/t-stop", branches)
         self.assertFalse(store.Task("t-stop").worktree.exists())
 
+    def hook(self, path: Path, marker: Path) -> Path:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(f"#!/bin/sh\necho $0 >> {shlex.quote(str(marker))}\n")
+        path.chmod(0o755)
+        return path
+
+    def test_a_rewritten_dot_git_never_points_workbench_at_another_git_dir(self):
+        # the 2026-11-16 audit: the agent can rewrite worktree/.git; pointed at a git dir it made
+        # under /tmp, that dir's core.fsmonitor ran from the runner's mark() outside the lane
+        self.start("t-dotgit", "ok")
+        wait_phase("t-dotgit", {"review"})
+        wt, tmp = store.Task("t-dotgit").worktree, Path(self.tmp.name)
+        marker = tmp / "pwned"
+        evil = tmp / "evil"
+        subprocess.run(["git", "init", "-q", str(evil)], check=True)
+        hook = self.hook(tmp / "fsmonitor", marker)
+        subprocess.run(["git", "-C", str(evil), "config", "core.fsmonitor", str(hook)], check=True)
+        subprocess.run(["git", "-C", str(evil), "config", "diff.external", str(hook)], check=True)
+        (wt / ".git").write_text(f"gitdir: {evil / '.git'}\n")
+        with self.assertRaises(gitops.GitError):
+            gitops.mark(wt)
+        self.assertFalse(marker.exists())
+        with self.assertRaises(SystemExit):
+            run_wb("accept", "t-dotgit", "-m", "x")
+        run_wb("feedback", "t-dotgit", "--text", "1. Again.")
+        self.assertIn(".git was rewritten", wait_phase("t-dotgit", {"failed", "review"})["last"])
+        self.assertFalse(marker.exists())
+
+    def test_accept_runs_no_git_hook_the_agent_could_have_written(self):
+        # the audit: with a relative core.hooksPath (husky's gitignored .husky/_) the hooks live in
+        # the worktree, in no diff, and wb accept's commit ran them as the user outside the lane
+        g = lambda *a: subprocess.run(["git", "-C", str(self.repo), *a], check=True)  # noqa
+        (self.repo / ".gitignore").write_text(".husky/_\n")
+        g("add", ".gitignore")
+        g("commit", "-qm", "husky")
+        g("config", "core.hooksPath", ".husky/_")
+        self.start("t-hooks", "ok")
+        wait_phase("t-hooks", {"review"})
+        wt, marker = store.Task("t-hooks").worktree, Path(self.tmp.name) / "pwned"
+        for name in ("pre-commit", "commit-msg", "post-commit", "post-index-change"):
+            self.hook(wt / ".husky/_" / name, marker)
+        self.assertIn("accepted t-hooks", run_wb("accept", "t-hooks", "-m", "feat: answer"))
+        self.assertFalse(marker.exists() and marker.read_text())
+        self.assertIn("Workbench-Task: t-hooks", subprocess.run(
+            ["git", "-C", str(self.repo), "log", "-1", "--format=%B", "delegate/t-hooks"],
+            capture_output=True, text=True).stdout)
+
     def test_a_latin1_file_in_the_worktree_does_not_crash_the_runner(self):
         # the 2026-11-16 audit: git's output was decoded strictly, so an edited Latin-1 source
         # file crashed the runner at its next mark() and `wb diff` with it

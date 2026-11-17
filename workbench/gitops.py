@@ -10,6 +10,8 @@ import tempfile
 from collections import Counter
 from pathlib import Path
 
+from . import store
+
 
 class GitError(RuntimeError):
     pass
@@ -23,8 +25,50 @@ PLAIN = ("-c", "color.ui=never", "-c", "color.diff=never", "-c", "color.status=n
          "-c", "color.branch=never", "-c", "core.quotePath=false")
 
 
+# No git hook runs from workbench in a task's worktree: with a relative core.hooksPath (husky's
+# `.husky/_`, gitignored, so in no diff) the hooks live in the worktree, written by the agent, and
+# wb accept ran them as the user outside the lane (the 2026-11-16 audit). The checks belong in
+# --test, which runs in the lane.
+NO_HOOKS = ("-c", "core.hooksPath=/dev/null")
+
+
+def _record(worktree) -> Path | None:
+    """Where a task worktree's real git dir is kept: rules/<task>/gitdir.json (context.rules_dir),
+    outside the agent's lane. None for any other directory."""
+    p = Path(os.path.abspath(worktree))  # not resolved: a worktree swapped for a link still pins
+    tasks = Path(os.path.abspath(store.tasks_dir()))
+    if p.name == "worktree" and p.parent.parent == tasks:
+        return tasks.parent / "rules" / p.parent.name / "gitdir.json"
+    return None
+
+
+def _pinned(cwd) -> list[str]:
+    """The options that hold git to a task worktree's own git dir, recorded at start. The
+    worktree's `.git` is a file the agent can rewrite: pointed at a git dir it made under /tmp,
+    that dir's config (core.fsmonitor, diff.external, hooks) ran from the runner's mark() outside
+    the lane (the 2026-11-16 audit). Pinned, git reads only the real repo's config, and a `.git`
+    that no longer says what it said at start stops the call."""
+    rec = _record(cwd)
+    if rec is None or not Path(cwd).is_dir():
+        return []
+    want = store.read_json(rec)
+    if not want:  # a task started before the record
+        return []
+    dotgit = Path(cwd) / ".git"
+    try:
+        same = (stat.S_ISREG(os.lstat(dotgit).st_mode)
+                and dotgit.read_bytes() == want["dotgit"].encode())
+    except OSError:
+        same = False
+    if not same:
+        raise GitError(f"the worktree's .git was rewritten: git was not run there ({dotgit} "
+                       f"must say gitdir: {want['gitdir']})")
+    return [f"--git-dir={want['gitdir']}", f"--work-tree={os.path.abspath(cwd)}",
+            *NO_HOOKS, "-c", "core.fsmonitor=false"]
+
+
 def _run(cwd, args, env=None, check=True) -> subprocess.CompletedProcess:
-    r = subprocess.run(["git", "-C", str(cwd), *PLAIN, *args], capture_output=True,
+    r = subprocess.run(["git", "-C", str(cwd), *PLAIN, *_pinned(cwd), *args], capture_output=True,
                        env={**os.environ, **env} if env else None)
     if check and r.returncode:
         err = (r.stderr or r.stdout).decode("utf-8", "replace").strip()
@@ -59,6 +103,10 @@ def create_worktree(repo: Path, task: str, dest: Path, base: str = "HEAD") -> st
     if git(repo, "branch", "--list", branch_name(task)).strip():
         raise GitError(f"branch {branch_name(task)} already exists in {repo}")
     git(repo, "worktree", "add", "-q", "-b", branch_name(task), str(dest), commit)
+    if rec := _record(dest):  # before any agent has run there: see _pinned
+        rec.parent.mkdir(parents=True, exist_ok=True)
+        store.write_json(rec, {"gitdir": git(dest, "rev-parse", "--absolute-git-dir").strip(),
+                               "dotgit": (Path(dest) / ".git").read_text()})
     return commit
 
 
@@ -161,16 +209,19 @@ def stack(repo) -> list[str]:
 
 
 def commit_all(worktree: Path, message: str) -> str:
-    git(worktree, "add", "-A")
+    """Commit everything in the worktree, without git hooks (NO_HOOKS; also for a task started
+    before its git dir was recorded)."""
+    git(worktree, *NO_HOOKS, "add", "-A")
     if not git(worktree, "diff", "--cached", "--name-only").strip():
         raise GitError("nothing to commit: the agent's worktree has no changes")
-    git(worktree, "commit", "-q", "-m", message)
+    git(worktree, *NO_HOOKS, "commit", "-q", "-m", message)
     return git(worktree, "rev-parse", "--short", "HEAD").strip()
 
 
 def remove_worktree(repo: Path, worktree: Path, force=False) -> None:
-    if worktree.exists():
-        git(repo, "worktree", "remove", *(["--force"] if force else []), str(worktree))
+    if worktree.exists():  # without --force, git runs `status` in the worktree: no hooks there
+        git(repo, *NO_HOOKS, "-c", "core.fsmonitor=false", "worktree", "remove",
+            *(["--force"] if force else []), str(worktree))
     git(repo, "worktree", "prune", check=False)
 
 

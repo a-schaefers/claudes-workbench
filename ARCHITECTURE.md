@@ -172,7 +172,8 @@ CLAUDE.md, the user's decisions, the review checks) marked apart.
   think nudge off); `--checkin` defaults to 10 minutes for significant tasks, 0 for trivial.
 - It makes branch `delegate/<task>` in a fresh worktree under the task directory from `--base`
   (default `HEAD`). The user's own checkout is never touched, and uncommitted changes in it stay
-  out of the agent's copy (it says so).
+  out of the agent's copy (it says so). The worktree's real git dir is recorded in
+  `rules/<task>/gitdir.json` before any agent runs there (*Git, commits and projects*).
 - It writes `task.json`, round 1's prompt (the spec plus the working protocol, `cli.PROTOCOL`:
   git is read-only, the acceptance command and never weaken a test, the `ask_reviewer` budget,
   stay in scope, where it can write and how to ask for a directory, finish with a summary and any
@@ -1210,6 +1211,22 @@ custom-node packs do run their own Python).
   symlink counts by its target, anything not a regular file by its type, a file past
   `MARK_READ_MAX` (1 MiB) by its size and time, so a link to `/dev/zero` or a FIFO, or a core dump,
   can't hang or swamp the runner.
+- **Pinned to the task's git dir** (`gitops._pinned`). A worktree's `.git` is a file the agent can
+  rewrite; pointed at a git dir it made under /tmp, that dir's config (`core.fsmonitor`,
+  `diff.external`, its hooks) ran from the runner's `mark()` outside the lane (the 2026-11-16
+  audit). So `create_worktree` records the real git dir (`rev-parse --absolute-git-dir`) and the
+  `.git` file's text in `rules/<task>/gitdir.json`, outside the lane, and every `gitops.git` call
+  on a task's worktree, the runner's and wb's, runs with `--git-dir` and `--work-tree` set from it
+  (so git reads only the real repo's config), `core.hooksPath=/dev/null` and
+  `core.fsmonitor=false`. A `.git` that isn't a regular file holding the recorded text stops the
+  call with a `GitError` ("the worktree's .git was rewritten"): the runner fails the task, `wb
+  accept` refuses. A task started before the record runs unpinned.
+- **No git hooks from the worktree.** With a relative `core.hooksPath` (husky's gitignored
+  `.husky/_`) the hooks live in the worktree, written by the agent and in no diff, and `wb accept`
+  ran them as the user (the audit). The commits `wb accept` and `wb next` make
+  (`gitops.commit_all`), and `worktree remove` (which runs `git status` in the worktree), run with
+  `core.hooksPath=/dev/null` (`gitops.NO_HOOKS`): no pre-commit, commit-msg or post-commit hook
+  runs, the user's own included. Checks belong in `--test`, which runs in the lane.
 - **The split of roles.** The agent writes code and reads git freely (`status`, `diff`, `log`,
   `show`, `blame`). Everything that leaves its working tree is Claude's: commits, branches,
   merges, pushes, pull requests, CI/CD, deploys and infrastructure (`gh`, `wrangler` and the like),
@@ -1679,7 +1696,8 @@ $WB_HOME (~/.local/state/workbench)
   chat/                          messages.jsonl  receipts.jsonl  listener.json
   rules/<task>/                  outside the lane: opencode.json (the config layer), HANDBOOK.md,
                                  CLAUDE.md (a copy of the user's), bin/git (the shim),
-                                 grants.json grants.lock (what Claude allowed: {"allow", "paths"})
+                                 grants.json grants.lock (what Claude allowed: {"allow", "paths"}),
+                                 gitdir.json (the worktree's real git dir and its .git's text: {"gitdir", "dotgit"})
   tasks/<task>/                  inside the lane (the ask server writes here)
     task.json  status.json  status.lock
     events.jsonl(.lock)  steer.jsonl(.lock)  acked  context.md  runner.log
@@ -1982,6 +2000,8 @@ push: every change is a pull request that merges once `check` is green and it is
 - **How OpenCode is invoked or read** (`run_round`'s argv, the event fields `normalize` reads, the
   export fields `context_state`, `measure_speed` and `transcript` read) → `tests/fake_opencode.py`
   in the same commit, and one real run (`wb start --trial`, CLAUDE.md).
+- **A git call on a task's worktree** → through `gitops.git` (pinned to the recorded git dir, no
+  hooks), never `git -C <worktree>` by hand; parsed output → a porcelain or `-z` form.
 - **Permissions or the config layer** (`context.py`, `write_config_layer`) → the real-OpenCode
   tests, run where they don't skip.
 - **The lane** (`context.writable`, `readable`, `SECRETS`, `lane.py`) → the Lane and RealOpenCode
