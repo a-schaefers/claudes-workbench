@@ -9,8 +9,9 @@
 // arrive stale) and checked against the task's phase when it is finally sent.
 // A session acts only on its own tasks (`mine`): those `wb start` ran in it (task.json `session`,
 // one of the ids this process has had), wherever it ran; a task without one (started by hand, or
-// before 0.90) by directory, and an old task with neither that nor a directory is everyone's.
-// Another project's session wakes for, stops and hands back its own (the 2026-11-16 audit: two
+// before 0.90), or whose Claude Code process is gone, by directory, and an old task with neither
+// that nor a directory is everyone's.
+// Another session wakes for, stops and hands back its own (the 2026-11-16 audit: two
 // projects at once, each session was woken for and quit the other's). A session with no person
 // at it (`claude -p`, the SDK, until a surface attaches) stays quiet.
 // Claude's own context. In delegate mode, whatever compacts it (the engine at its limit, /compact,
@@ -286,21 +287,21 @@ const PANE_CMD = 'delegate-pane'
 const UPDATE = 'delegate-update'
 const QUIT = 'delegate-quit'
 const HAND_BACK = 'delegate-quit-and-hand-back-claude'
-// Tasks of another project's session are listed as left alone: theirs to stop or finish.
+// Tasks of another session are listed as left alone: theirs to stop or finish.
 const QUIT_NOTE = (out: string, ok: boolean) =>
   `[workbench] The user ran /${QUIT}: ` + (ok
     ? `this session's delegated agents were stopped (\`wb stop --all\`):\n`
     : `but \`wb stop --all\` failed, so its agents may still be running (\`wb status\`):\n`) +
   `${out}\nDelegate mode is off: from now on work directly, without delegating. Don't finish, ` +
   `restart or clean up any of the stopped work unless they ask; real tasks keep their ` +
-  `worktrees (\`wb status --all\`). Tasks left alone belong to another project's session.`
+  `worktrees (\`wb status --all\`). Tasks left alone belong to another session.`
 const DONE_NOTE = (out: string) =>
   `[workbench] The user ran /${HAND_BACK}: this session's agents were stopped and their tasks ` +
   `handed to you (\`wb takeover --all\`):\n${out}\n\nLeave delegate mode and finish the work ` +
   `yourself, without pausing to ask. For each task taken over: read what the agent left (\`wb diff <name>\`), ` +
   `complete it in its worktree to your own standard, run its acceptance command, then ` +
   `\`wb accept <name> -m "…"\` (add --merge only if the user asked for merging). Tasks left ` +
-  `alone belong to another project's session: don't touch them unless the user asks. Then carry on ` +
+  `alone belong to another session: don't touch them unless the user asks. Then carry on ` +
   `with the rest of the user's request directly, without delegating, and report briefly at the end.`
 // With the plugin's wake setting off, no [workbench] prompt comes: Claude must not end its turn
 // waiting for one (the 2026-11-16 audit).
@@ -326,6 +327,8 @@ const mem = {
   cwd: '', // the session's directory, resolved: which old tasks are this session's (mine)
   home: '', // the home directory, resolved: a session there claims no task by directory
   ids: new Set<string>(), // the `sessions` atom: which tasks are this session's (mine)
+  deadPids: new Set<number>(), // Claude Code processes tasks recorded that are gone: final (mine)
+  pidAt: new Map<number, number>(), // when a live one was last checked (noteClaude)
   person: false, // someone can be at this session (not a bare `claude -p` or SDK run)
   started: false, // the ears and timers run
   busy: false, // Claude's main loop is mid-turn: a wake would queue and arrive stale
@@ -370,16 +373,39 @@ const within = (a: string, b: string) => {
 // `session`) is, wherever it ran: by directory alone, a `cd /tmp/x && wb start` task was no one's
 // (the 0.90 review). One without (started by hand, or before 0.90) goes by directory: its repo
 // is the session's directory, inside it or holds it (a session in a subdirectory, or in a folder
-// of several repos), or where `wb start` ran (`cwd`) is the session's directory or inside it. A
-// session in the home directory or / claims none by directory: a task started from ~ belonged to
-// every session under it (the 0.90 review). A task with no key at all is everyone's.
-const mine = (t: { session?: string; repo?: string; cwd?: string }) => {
-  if (t.session && mem.ids.size) return mem.ids.has(t.session)
-  if (!mem.cwd || (!t.cwd && !t.repo)) return true
+// of several repos), or where `wb start` ran (`cwd`) is the session's directory or inside it. So
+// does another session's whose Claude Code process (`claude_pid`) is gone: a new process in the
+// project adopts it (the 0.90 review: after a crash or an update, plain `claude` in the same repo
+// was woken for none of them). A session in the home directory or / claims none by directory: a
+// task started from ~ belonged to every session under it (the 0.90 review). A task with no key
+// at all is everyone's. `wb`'s _scope judges the same.
+const near = (t: { repo?: string; cwd?: string }) => {
   const at = parts(mem.cwd).join('/')
   if (!at || (mem.home && at === parts(mem.home).join('/'))) return false
   return (!!t.cwd && within(mem.cwd, t.cwd)) ||
     (!!t.repo && (within(mem.cwd, t.repo) || within(t.repo, mem.cwd)))
+}
+const mine = (t: { session?: string; repo?: string; cwd?: string; claude_pid?: number }) => {
+  if (t.session && mem.ids.size) {
+    return mem.ids.has(t.session) || (mem.deadPids.has(Number(t.claude_pid ?? 0)) && near(t))
+  }
+  if (!mem.cwd || (!t.cwd && !t.repo)) return true
+  return near(t)
+}
+
+// Whether another session's task's Claude Code process is gone (mem.deadPids, for `mine`): `kill
+// -0`, a live one at most every PID_CHECK_MS. A gone one stays gone; one wb can't ask about
+// (kill failed to run) stays unknown, so its task stays the other session's.
+const PID_CHECK_MS = 30_000
+async function noteClaude($: any, t: { session?: string; claude_pid?: number }, now: number): Promise<void> {
+  const pid = Number(t.claude_pid ?? 0)
+  if (!pid || !t.session || mem.ids.has(t.session) || mem.deadPids.has(pid)) return
+  if (now - (mem.pidAt.get(pid) ?? -Infinity) < PID_CHECK_MS) return
+  mem.pidAt.set(pid, now)
+  try {
+    const r = await $.process.run(['kill', '-0', String(pid)], { timeoutMs: 5000 })
+    if (r.exitCode !== 0) mem.deadPids.add(pid)
+  } catch {}
 }
 
 // This session's id joins the ids this process has had: at the start and at each poll, so a
@@ -456,6 +482,7 @@ async function scan($: any, root: string, now: number): Promise<WbTask[]> {
     if (!sp.name) continue
     let recent: string[] = []
     if (ACTIVE.has(phase) || NEEDS.has(phase)) {
+      await noteClaude($, sp, now)
       const text = (await readTail($, `${base}/events.jsonl`, EVENTS_TAIL))?.text ?? ''
       recent = parseLines(text).map(eventLine).filter(Boolean).slice(-4) as string[]
     }
@@ -466,6 +493,7 @@ async function scan($: any, root: string, now: number): Promise<WbTask[]> {
       last: String(st.last ?? ''), createdAt: Number(sp.created_at ?? 0) * 1000, updatedAt,
       tokens: Number(st.tok_in ?? 0) + Number(st.tok_out ?? 0), recent,
       repo: String(sp.repo ?? ''), cwd: String(sp.cwd ?? ''), session: String(sp.session ?? ''),
+      claude_pid: Number(sp.claude_pid ?? 0),
     })
   }
   for (const name of mem.gone) if (!names.has(name)) mem.gone.delete(name) // removed by hand
@@ -804,7 +832,7 @@ async function sendWeb($: any, id: string, text: string, how: string, by: string
 }
 
 // Notifications nobody has acknowledged yet: one toast each, and, for this session's tasks, a
-// turn for Claude if waking. Another project's task is left for its own session (or `wb wait`):
+// turn for Claude if waking. Another session's task is left for its own session (or `wb wait`):
 // not acknowledged here.
 async function deliver($: any, now: number) {
   const root = mem.root
@@ -833,7 +861,9 @@ async function deliver($: any, now: number) {
     const ackPath = `${root}/tasks/${name}/acked`
     let acked = Number(await $.fs.read(ackPath).catch(() => '0')) || 0
     if (rows.every(r => r.ts <= acked)) continue
-    const own = mine(await readJson($, `${root}/tasks/${name}/task.json`))
+    const spec = await readJson($, `${root}/tasks/${name}/task.json`)
+    await noteClaude($, spec, now)
+    const own = mine(spec)
     // Only wake for news still true: a review notice for a task since discarded, accepted or
     // sent back is acknowledged and dropped.
     const status = await readJson($, `${root}/tasks/${name}/status.json`)
@@ -1046,7 +1076,7 @@ export const register: Register = (on, options) => {
     return next(e)
   })
 
-  // This session's tasks only (`--repo`): another project's session keeps its own running.
+  // This session's tasks only (`--repo`): another session keeps its own running.
   on('command.run', { command: QUIT }, async $ => {
     await delegateMode($, false)
     const { ok, out } = await runWb($, ['stop', '--all', ...(await scope($))])

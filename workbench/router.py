@@ -206,7 +206,8 @@ def slice(m: models.Model) -> Slice:
     if fit:  # at least the biggest that went well
         files, lines = max(files, max(s["files"] for s in fit)), max(lines, max(s["lines"] for s in fit))
     if not steps:
-        return Slice(files, lines, f"a guess from its {basis}; no steps measured yet")
+        return Slice(files, lines, f"a guess from its {basis}; no steps measured yet" if window
+                     else "a guess, its window unknown; no steps measured yet")  # not "from its window unknown" (the 0.90 review)
     return Slice(files, lines, f"{basis}; {len(fit)} of {len(steps)} measured steps went well, "
                  f"{len(over)} badly")
 

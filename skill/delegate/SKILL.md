@@ -363,7 +363,7 @@ failed) — end your turn and wait for it. Without the mod, run `wb wait <name>`
 `run_in_background: true` and act on its notification. If the context says wakes are off (the
 plugin's wake setting), none will come: tell the user it runs, and wait only if they ask.
 A session is woken only for its own tasks (those `wb start` ran in it, wherever; one started by
-hand, from its directory or a repo in it): start a task from the session that will review it. Failing tests go back to the agent on their
+hand, or one whose Claude Code process has exited, from its directory or a repo in it): start a task from the session that will review it. Failing tests go back to the agent on their
 own for `--auto-fix` rounds before you are woken; `wb log <name>` shows what it is doing.
 A model that reads prompts slowly, or one the runner must load first, can spend minutes before
 its first reply. That is normal, not stuck.
@@ -405,8 +405,9 @@ You are the driver, not a spectator. When something tells you the agent is headi
   really belongs in (a sibling asset folder, a cache a toolchain wants); never your home, the
   user's checkout or another project: there, take the file yourself or say no. `wb allow --path`
   refuses a path through a link (it names the target: allow that only if it is what the task
-  needs; the agent can plant links in its lane) and a place inside credentials or workbench's own
-  state and config. A toolchain the build wants installed (a Python uv must download, a
+  needs; the agent can plant links in its lane), a place inside credentials or workbench's own
+  state and config, and one in the task's own repo (the user's checkout: take that file yourself).
+  A toolchain the build wants installed (a Python uv must download, a
   `rust-toolchain.toml` toolchain, `uv tool install`, `cargo install`) is refused there: install
   it yourself rather than grant `~/.local/share/uv` or `~/.rustup/toolchains`, whose programs
   run later outside the lane. A test driving a program through a pseudo-terminal (pexpect, Python's pty,
@@ -431,7 +432,7 @@ delegate mode; the mod runs them, closes the pane and tells you what it did:
 - **`/delegate-quit`**: stop. This session's delegated agents are already stopped (`wb stop
   --all --repo <here> --session "$CLAUDE_CODE_SESSION_ID"`). Work directly from now on. Don't finish, restart or clean up anything
   unless asked; worktrees are kept.
-Tasks listed as left alone belong to another project's session: leave them unless asked.
+Tasks listed as left alone belong to another live session: leave them unless asked.
 Without the mod, the user may ask for the same in words; run those commands then.
 
 **The web chat.** While delegate mode is on in a session, the user can reach you from their phone

@@ -17,6 +17,7 @@ import sys
 import time
 from collections import defaultdict
 from pathlib import Path
+from types import SimpleNamespace
 
 from . import (__version__, ask_mcp, chat, context, gitops, hardware, images, lane, lessons, models,
                results, router, scan, skills, store, transcript, tuning)
@@ -110,10 +111,11 @@ def reap(task: store.Task) -> bool:
     st = task.set_status_if(  # one reaper wins: two waiters, one notice
         lambda st: st.get("phase") in LIVE and not runner_alive(task)
         and time.time() - (st.get("updated_at") or 0) >= REAP_GRACE,
-        phase="failed", last=RUNNER_DIED, pid=None, agent_pid=None)
+        phase="failed", last=RUNNER_DIED, pid=None, agent_pid=None, asking=None)
     if st is None:
         return False
     runner.sweep(task)  # the agent it left, if the kernel didn't take it with the runner
+    ask_mcp.close_all(task)  # and its questions, which nothing will relay (the 0.90 review)
     task.event({"ts": store.now(), "round": st.get("round"), "kind": "error",
                 "text": "the runner died without a report"})
     task.notify("failed", f"task {task.name}: the runner died without a report (killed, out of "
@@ -320,7 +322,9 @@ def cmd_start(a):
     if not spec_text.strip():
         die("the spec is empty")
     handed = _skill_names(a.skill)
-    lane_dirs = [_lane_dir(p) for p in a.allow_path or []]
+    # the repo's own directories (context.repo_dirs reads only the spec's repo: task.json is to come)
+    guard = context.repo_dirs(SimpleNamespace(spec={"repo": str(repo)}))
+    lane_dirs = [_lane_dir(p, guard) for p in a.allow_path or []]
     if not shutil.which(exe := runner.opencode_bin()[0]):  # else the runner emptied the GPU, then
         # the round died as "opencode exited 1" (the 2026-11-16 audit)
         die(f"{exe} isn't on PATH: install OpenCode (https://opencode.ai), or put it on the PATH "
@@ -360,8 +364,10 @@ def cmd_start(a):
     limits = router.budgets(m)  # from the model's measured speed on this machine, else defaults
     store.write_json(task.dir / "task.json", {
         "name": a.name, "repo": str(repo), "cwd": os.getcwd(), "base": base, "base_ref": a.base,
-        # the Claude Code session whose Bash ran this (_scope, the mod's `mine`); none by hand
+        # the Claude Code session whose Bash ran this (_scope, the mod's `mine`); none by hand.
+        # And its process: once that is gone, the directory rule may hand the task to a new one
         **({"session": sid} if (sid := os.environ.get("CLAUDE_CODE_SESSION_ID")) else {}),
+        **({"claude_pid": int(pid)} if (pid := os.environ.get("CLAUDE_PID", "")).isdigit() else {}),
         "base_branch": gitops.start_branch(repo, a.base),  # where wb accept --merge lands
         "branch": gitops.branch_name(a.name), "model": m.id, "model_label": m.label,
         "opencode_model": m.id, "route": why, "size": a.size, "stack": stack,
@@ -613,15 +619,26 @@ def _ack_all(task, upto: float | None = None):
     _write_ack(task, max(acked, upto))
 
 
-def _stale(row, st: dict) -> bool:
+def _oldest_open(task: store.Task, rows: list[dict]) -> str | None:
+    """The id of the task's oldest question still open, by its notice: the one a wait delivers
+    next. status.asking lags an answer until the runner's next tick (the 0.90 review)."""
+    asked = [r for r in rows if r["task"] == task.name and r["kind"] == "question" and r.get("id")
+             and ask_mcp.is_open(task, str(r["id"]))]
+    return min(asked, key=lambda r: r["ts"])["id"] if asked else None
+
+
+def _stale(row, st: dict, oldest: str | None = None) -> bool:
     """A notice no longer true, as the mod judges it: a review, stuck or failed notice for a task
     since sent back, resumed or closed, a question no longer asked, a check-in for a task no
-    longer running."""
+    longer running. Of the questions, only the oldest still open (`oldest`, _oldest_open) is
+    news: oldest first, as the runner's status.asking orders them, but judged by the answer
+    files, so the second of two is delivered once the first is answered, not the first again
+    (the 0.90 review). An old notice without an id stands for whatever is asked."""
     phase = st.get("phase")
     if row["kind"] in ("review", "stuck", "failed"):
         return phase != row["kind"]
     if row["kind"] == "question":
-        return phase != "asking" or row.get("id", st.get("asking")) != st.get("asking")
+        return phase != "asking" or ("id" in row and row["id"] != oldest)
     if row["kind"] == "checkin":
         return phase not in ("queued", "running", "testing")
     return False
@@ -643,7 +660,8 @@ def cmd_wait(a):
             if a.name and row["task"] != a.name:
                 continue
             task = store.Task(row["task"])
-            if not task.exists or _stale(row, task.status):
+            if not task.exists or _stale(row, task.status, _oldest_open(task, rows)
+                                         if row["kind"] == "question" else None):
                 continue  # its directory removed by hand, or no longer true
             if row["ts"] > _acked(task):
                 _write_ack(task, row["ts"])
@@ -661,7 +679,8 @@ def cmd_wait(a):
             if phase in store.NEEDS_CLAUDE and (phase == "asking" or not runner_alive(task)):
                 want = "question" if phase == "asking" else phase
                 mine = [r for r in rows if r["task"] == a.name and r["kind"] == want
-                        and not _stale(r, st) and r.get("round", st.get("round")) == st.get("round")]
+                        and not _stale(r, st, _oldest_open(task, rows))
+                        and r.get("round", st.get("round")) == st.get("round")]
                 if mine:
                     print(f"[{want}] {a.name} (already delivered once)\n{mine[-1].get('text', '')}")
                     return
@@ -703,18 +722,35 @@ def cmd_watch(a):
         sys.stdout = open(os.devnull, "w")
 
 
+def _gone(pid) -> bool:
+    """Whether the Claude Code process a task recorded (task.json `claude_pid`) has exited. One we
+    can't signal isn't it either: it ran as this user. Unknown (no pid) is not gone."""
+    if not isinstance(pid, int) or isinstance(pid, bool) or pid <= 0:
+        return False
+    try:
+        os.kill(pid, 0)
+    except (ProcessLookupError, PermissionError):
+        return True
+    except OSError:
+        return False
+    return False
+
+
 def _scope(tasks, where, sessions=None):
     """The tasks of one Claude Code session, as the mod names it: `sessions` (`--session`, every
     id its process has had: /clear starts another) and `where` (`--repo`, its directory). A task
-    `wb start` recorded a session for (task.json `session`) is that session's, wherever it ran.
-    One without (started by hand, or before 0.90), or with no `sessions` given (by hand), goes by
-    directory: its `repo` is `where`, inside it or holds it, or its `cwd` (where wb start ran) is
-    `where` or inside it. A session in the home directory or / claims none by directory. A task
-    with neither key is everyone's. The others belong to another project's session, which its
-    mod wakes and its quit commands stop (the 2026-11-16 audit: two projects at once, one
-    session's /delegate-quit stopped the other's agents; the 0.90 review: a task started from ~
-    belonged to every session under it, and one started after a `cd` elsewhere to none).
-    Returns (mine, others)."""
+    `wb start` recorded a session for (task.json `session`) is that session's, wherever it ran;
+    once the Claude Code process it ran in is gone (`claude_pid`, `_gone`), the directory rule
+    claims it too, so a new process in the project adopts the old one's tasks (the 0.90 review:
+    after a crash or an update, plain `claude` in the same repo was woken for none of them, and
+    its quit left them running for nobody). One without a session (started by hand, or before
+    0.90), or with no `sessions` given (by hand), goes by directory: its `repo` is `where`,
+    inside it or holds it, or its `cwd` (where wb start ran) is `where` or inside it. A session
+    in the home directory or / claims none by directory. A task with neither key is everyone's.
+    The others belong to another session, which its mod wakes and its quit commands stop (the
+    2026-11-16 audit: two projects at once, one session's /delegate-quit stopped the other's
+    agents; the 0.90 review: a task started from ~ belonged to every session under it, and one
+    started after a `cd` elsewhere to none). Returns (mine, others)."""
     if not where and not sessions:
         return list(tasks), []
     here = Path(where).resolve() if where else None
@@ -722,21 +758,23 @@ def _scope(tasks, where, sessions=None):
     mine, others = [], []
     for t in tasks:
         sid, cwd, repo = (t.spec.get(k) for k in ("session", "cwd", "repo"))
+        # Path.is_relative_to compares whole components: /x/ab isn't inside /x/a
+        near = here is not None and not broad and bool(
+            cwd and Path(cwd).is_relative_to(here)
+            or repo and (Path(repo).is_relative_to(here) or here.is_relative_to(repo)))
         if sessions and sid:
-            ok = sid in sessions
+            ok = sid in sessions or near and _gone(t.spec.get("claude_pid"))
         elif here is None or (not cwd and not repo):
             ok = True
-        else:  # Path.is_relative_to compares whole components: /x/ab isn't inside /x/a
-            ok = not broad and bool(
-                cwd and Path(cwd).is_relative_to(here)
-                or repo and (Path(repo).is_relative_to(here) or here.is_relative_to(repo)))
+        else:
+            ok = near
         (mine if ok else others).append(t)
     return mine, others
 
 
 def _others_line(others, what):
     if others:
-        return (f"{what} (other projects' sessions): "
+        return (f"{what} (other sessions'): "
                 + ", ".join(f"{t.name} ({t.spec.get('repo')})" for t in others))
     return ""
 
@@ -923,11 +961,14 @@ def cmd_resume(a):
     _say(lessons.nudge(task))
 
 
-def _lane_dir(raw: str) -> str:
+def _lane_dir(raw: str, guard: set[str] = frozenset()) -> str:
     """A directory Claude adds to an agent's lane, made if it isn't there yet (the kernel's rule
     is on a real directory). Not through a link: the agent can plant one in its lane (/tmp/out ->
     another project), and the grant went to the link's target (the 2026-11-16 audit), so Claude
-    names the real directory itself; nor a place the lane hides (context.lane_refusal)."""
+    names the real directory itself; nor a place the lane hides (context.lane_refusal); nor a
+    place in the task's repo or its git directory (`guard`, context.repo_dirs), which
+    context.writable leaves out of every lane: the grant was said "allowed", the agent restarted,
+    and its retry was refused again (the 0.90 review). One that holds the repo is split around it."""
     if raw == "*":
         return raw  # the lane off for this task
     given = os.path.abspath(os.path.expanduser(raw))
@@ -936,6 +977,10 @@ def _lane_dir(raw: str) -> str:
         die(f"{raw} is a link to {real}: allow {real} itself if that is what the task needs")
     if why := context.lane_refusal(real):
         die(why)
+    if any(real == g or context._under(real, g) for g in guard):
+        die(f"{raw}: inside the task's own repo or its git directory, which no lane may write (wb's "
+            "git runs there, and a hook planted in it would run outside the lane); take what the "
+            "task needs there yourself")
     path = Path(real)
     if not path.exists():
         path.mkdir(parents=True)
@@ -963,7 +1008,7 @@ def cmd_allow(a):
     once so the new rule applies (OpenCode reads it at start, the lane is drawn at start)."""
     task = need(a.name)
     pats = [p.strip() for p in a.pattern if p.strip()]
-    dirs = [_lane_dir(p) for p in a.path or [] if p.strip()]
+    dirs = [_lane_dir(p, context.repo_dirs(task)) for p in a.path or [] if p.strip()]
     if not pats and not dirs:
         die("nothing to allow")
     conf_path = context.commands_path()

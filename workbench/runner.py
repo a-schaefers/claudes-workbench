@@ -262,6 +262,10 @@ def _end_agent(task: store.Task) -> None:
     try:
         if task.status.get("agent_pid"):
             task.set_status(agent_pid=None)
+        ask_mcp.close_all(task)  # its questions died with it: a stop unwound past run_round's close
+        st = task.status
+        if st.get("asking") or st.get("phase") == "asking":
+            task.set_status(asking=None, **({"phase": "running"} if st.get("phase") == "asking" else {}))
     except OSError:  # a full disk must not hide the error that brought us here
         pass
 
@@ -711,7 +715,8 @@ BASE_CHECK_SECS = 120
 
 def base_check(task: store.Task) -> dict | None:
     """The acceptance command run once on the base, before the agent starts: it should fail, and
-    only for what the step changes. Passing already, it can't tell when the step is done."""
+    only for what the step changes, which Claude checks from the tail (the runner can't tell).
+    Passing already, it can't tell when the step is done."""
     cmd = task.spec.get("test_cmd")
     if not cmd:
         return None
@@ -735,8 +740,10 @@ def base_check_line(r: dict, task: store.Task) -> str:
                 "when the step is done: make it check what the step changes (wb discard, then "
                 "start again)")
     tail = "\n".join("    " + line for line in r["tail"].splitlines())
-    return (f"on the base the acceptance command fails (exit {r['exit']}), as it should, but "
-            f"only for what the step changes ({task.dir / 'base-tests.txt'}):\n{tail}")
+    # an instruction, not a claim: the runner can't know why it fails (the 0.90 review: "as it
+    # should, but only for what the step changes" read as checked, for a broken build too)
+    return (f"on the base the acceptance command fails (exit {r['exit']}): check the tail shows it "
+            f"failing only for what the step changes ({task.dir / 'base-tests.txt'}):\n{tail}")
 
 
 def _base_check(task: store.Task) -> None:
@@ -1147,11 +1154,8 @@ SIGNAL_STOP = "the runner was stopped by a signal (a shutdown, a logout or a kil
 
 
 def lock_file(name: str, kind: str):
-    """Task `name`'s lock of `kind` ("runner": one runner a task; "cmd": one wb command at a
-    time), in $WB_HOME/locks/, which no lane reads. In the task's directory or its rules (both
-    readable), an agent could hold one with flock from a process sweep misses and wedge every
-    later runner or command (the 0.90 review)."""
-    return store.home() / "locks" / f"{name}.{kind}.lock"
+    """Task `name`'s lock of `kind`, in $WB_HOME/locks/, which no lane reads (store.task_lock)."""
+    return store.task_lock(name, kind)
 
 
 def _one_runner(task: store.Task):

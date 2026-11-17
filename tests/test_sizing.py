@@ -31,6 +31,9 @@ class Slice(Base):
         huge = router.slice(self.model(1 << 20))
         self.assertEqual(huge.files, 12)                      # past that, only fitting steps earn more
         self.assertEqual(router.slice(self.model(None)).files, 3)
+        # it read "a guess from its window unknown" (the 0.90 review)
+        self.assertIn("a guess, its window unknown; no steps measured yet",
+                      router.slice(self.model(None)).line())
 
     def test_steps_that_fit_raise_it(self):
         self.steps({"files": 6, "lines": 400}, {"files": 5, "lines": 520})

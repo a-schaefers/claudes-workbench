@@ -88,6 +88,7 @@ class Base(unittest.TestCase):
         self.env_before = dict(os.environ)
         # the suite may run in Claude Code's Bash: no task is a session's unless a test says so
         os.environ.pop("CLAUDE_CODE_SESSION_ID", None)
+        os.environ.pop("CLAUDE_PID", None)
         os.environ.update(WB_HOME=str(tmp / "state"), WB_OPENCODE_BIN=FAKE, WB_FAKE_MODELS="1",
                           WB_OPENCODE_CONFIG=str(tmp / "opencode.json"),
                           WB_MODELS=str(tmp / "wb-models.json"), WB_SKILLS=str(tmp / "skills"),
@@ -168,7 +169,9 @@ class Lifecycle(Base):
         st = wait_phase("t-base", {"review"})
         self.assertIs(st["base_check"]["ok"], False)
         self.assertTrue((store.Task("t-base").dir / "base-tests.txt").exists())
-        self.assertIn("on the base the acceptance command fails (exit", run_wb("report", "t-base"))
+        report = run_wb("report", "t-base")
+        self.assertIn("on the base the acceptance command fails (exit", report)
+        self.assertIn("check the tail shows it failing only for what the step changes", report)
         self.assertIn("on the base the acceptance command fails", run_wb("wait", "t-base", "--timeout", "1"))
 
     def test_the_pane_says_the_base_check_runs_not_that_the_task_waits_for_the_gpu(self):
@@ -1312,15 +1315,15 @@ class Steering(Base):
         status = run_wb("status", "--repo", here)
         self.assertIn("t-mine", status)
         self.assertEqual([l for l in status.splitlines() if "t-theirs" in l],
-                         [f"open elsewhere (other projects' sessions): t-theirs ({other})"])
+                         [f"open elsewhere (other sessions'): t-theirs ({other})"])
         out = run_wb("stop", "--all", "--repo", here)
         self.assertIn("t-mine", out)
-        self.assertIn("left running (other projects' sessions): t-theirs", out)
+        self.assertIn("left running (other sessions'): t-theirs", out)
         self.assertEqual(store.Task("t-theirs").status["phase"], "running")
         self.assertEqual(store.Task("t-mine").status["phase"], "stuck")
         out = run_wb("takeover", "--all", "--repo", here)
         self.assertIn("took over t-mine", out)
-        self.assertIn("left alone (other projects' sessions): t-theirs", out)
+        self.assertIn("left alone (other sessions'): t-theirs", out)
         self.assertEqual(store.Task("t-theirs").status["phase"], "running")
         with self.assertRaises(SystemExit):
             run_wb("stop", "t-mine", "--repo", here)       # a scope goes with --all
@@ -1349,7 +1352,7 @@ class Steering(Base):
             out = run_wb("status", *argv)
             return "".join(l for l in out.splitlines() if l.startswith("open elsewhere"))
         b = str(parent / "b")
-        self.assertEqual(elsewhere("--repo", b, *ids), "open elsewhere (other projects' sessions): "
+        self.assertEqual(elsewhere("--repo", b, *ids), "open elsewhere (other sessions'): "
                          f"t-parent ({parent / 'a'}), t-theirs ({self.repo})")  # t-mine is its own
         self.assertNotIn("t-theirs", elsewhere("--repo", str(self.repo)))  # by hand: directories
         self.assertIn("t-theirs", elsewhere("--repo", str(self.repo), *ids))  # an id outranks them
@@ -1359,11 +1362,36 @@ class Steering(Base):
         self.assertIn("t-parent", elsewhere("--repo", str(parent)))   # none by directory
         out = run_wb("takeover", "--all", "--repo", b, *ids)
         self.assertIn("took over t-mine", out)
-        self.assertIn("left alone (other projects' sessions): ", out)
+        self.assertIn("left alone (other sessions'): ", out)
         self.assertEqual([store.Task(n).status["phase"] for n in ("t-theirs", "t-parent")],
                          ["running", "running"])
         with self.assertRaises(SystemExit):
             run_wb("stop", "t-mine", "--session", "sess-1")           # a scope goes with --all
+
+    def test_a_new_claude_code_process_in_the_project_adopts_the_tasks_of_one_that_is_gone(self):
+        # the 0.90 review: Claude Code exited (a crash, an update) and plain `claude` in the same
+        # repo got a new session id: none of the tasks were its own, so no wake, and its quit
+        # left them running for nobody
+        claude = subprocess.Popen(["sleep", "60"])               # the first Claude Code process
+        self.addCleanup(claude.kill)
+        os.environ.update(CLAUDE_CODE_SESSION_ID="sess-1", CLAUDE_PID=str(claude.pid))
+        self.start("t-old", "slow")
+        self.wait_session("t-old")
+        self.assertEqual(store.Task("t-old").spec["claude_pid"], claude.pid)
+        here, new = str(self.repo), ("--session", "sess-2")
+
+        def elsewhere(*argv):
+            return "".join(l for l in run_wb("status", *argv).splitlines()
+                           if l.startswith("open elsewhere"))
+        self.assertIn("t-old", elsewhere("--repo", here, *new))   # its process lives: its own
+        claude.kill()
+        claude.wait()
+        self.assertEqual(elsewhere("--repo", here, *new), "")      # gone: the project's session's
+        self.assertIn("t-old", elsewhere("--repo", str(Path(self.tmp.name) / "b"), *new))
+        os.environ["HOME"] = here                                  # a session in ~ adopts none
+        self.assertIn("t-old", elsewhere("--repo", here, *new))
+        os.environ["HOME"] = self.env_before.get("HOME", "/")
+        self.assertIn("stopped: t-old", run_wb("stop", "--all", "--repo", here, *new))
 
     def test_takeover_stops_the_agent_and_hands_over_the_worktree(self):
         self.start("t-take", "slow", "--test", TEST_CMD)
@@ -1584,8 +1612,14 @@ class AskServer(Base):
         ask_mcp.relay(task, opened)
         self.assertIn("Q: first?", run_wb("wait", "--timeout", "5"))
         run_wb("answer", "t-twoq", "--id", "aaaaaaaa", "--text", "one")
+        # before the runner's next tick, status.asking still names the first: wb wait skipped
+        # the second as stale and gave the answered first "again" (the 0.90 review)
+        self.assertEqual(task.status["asking"], "aaaaaaaa")
+        out = run_wb("wait", "t-twoq", "--timeout", "5")
+        self.assertIn("Q: second?", out)
+        self.assertNotIn("already delivered", out)
         ask_mcp.relay(task, opened)
-        self.assertIn("Q: second?", run_wb("wait", "--timeout", "5"))
+        self.assertIn("Q: second?", run_wb("wait", "t-twoq", "--timeout", "5"))  # once more: named
 
     def test_a_question_the_runner_drops_is_closed_and_wb_answer_refuses_it(self):
         # one that timed out, or whose round ended, kept looking open: Claude was woken for it
@@ -1611,6 +1645,27 @@ class AskServer(Base):
         self.assertFalse(ask_mcp.is_open(task, "bbbbbbbb"))
         from workbench import lessons
         self.assertFalse(any("first?" in r["text"] for r in lessons.gather(task, "accepted")))
+
+    def test_a_stop_closes_the_question_the_agent_waits_on(self):
+        # wb stop (or a signal) unwound past run_round's close: the question stayed open, status
+        # still named it, and `wb answer` said "answered" to nobody (the 0.90 review)
+        self.start("t-stopq", "slow")
+        task = store.Task("t-stopq")
+        deadline = time.time() + 15
+        while not task.status.get("session"):
+            self.assertLess(time.time(), deadline, "the agent never started")
+            time.sleep(0.1)
+        self.agent_asks(task, "aaaaaaaa", question="first?")
+        while task.status.get("asking") != "aaaaaaaa":          # the runner relays it
+            self.assertLess(time.time(), deadline + 15, task.status)
+            time.sleep(0.1)
+        run_wb("stop", "t-stopq")
+        self.assertEqual((task.status["phase"], task.status.get("asking")), ("stuck", None))
+        self.assertFalse(ask_mcp.is_open(task, "aaaaaaaa"))
+        err = io.StringIO()
+        with redirect_stderr(err), self.assertRaises(SystemExit):
+            run_wb("answer", "t-stopq", "--id", "aaaaaaaa", "--text", "late")
+        self.assertIn("closed", err.getvalue())
 
     def test_the_budget_is_counted_where_the_agent_cant_reset_it(self):
         # the server counted the task's ask files, which the agent could delete (the audit)
@@ -2339,17 +2394,27 @@ class Lane(Base):
         link.symlink_to(target)
         home = self.fake_home()
         (home / ".ssh").mkdir()
+        # the 0.90 review: a place in the task's repo said "allowed" and restarted the agent,
+        # and the lane, which leaves the repo out, held nothing new
         for raw, said in ((f"{link}/sub", f"is a link to {target}/sub"),
                           (str(home / ".ssh" / "keys"), "credentials"),
                           (str(home / ".config" / "workbench"), "workbench's own"),
-                          (str(store.home() / "rules"), "workbench's own")):
+                          (str(store.home() / "rules"), "workbench's own"),
+                          (str(self.repo / "build"), "inside the task's own repo"),
+                          (str(self.repo / ".git" / "hooks"), "inside the task's own repo")):
             err = io.StringIO()
             with redirect_stderr(err), self.assertRaises(SystemExit):
                 run_wb("allow", "t-refuse", "--path", raw)
             self.assertIn(said, err.getvalue())
         self.assertFalse((target / "sub").exists())
         self.assertFalse((home / ".ssh" / "keys").exists())
+        self.assertFalse((self.repo / "build").exists())
         self.assertEqual(context.grants(store.Task("t-refuse")), {})
+        err = io.StringIO()
+        with redirect_stderr(err), self.assertRaises(SystemExit):
+            self.start("t-refuse2", "ok", "--allow-path", str(self.repo / "build"))
+        self.assertIn("inside the task's own repo", err.getvalue())
+        self.assertFalse(store.Task("t-refuse2").exists)
         # one already in commands.json is left out of the lane all the same
         Path(os.environ["WB_COMMANDS"]).write_text(json.dumps({"paths": [str(home / ".ssh")]}))
         self.assertEqual(context.lane_paths(store.Task("t-refuse")), [])
@@ -2503,14 +2568,23 @@ class Lane(Base):
     @unittest.skipUnless(lane.abi(), "needs Landlock")
     def test_the_agent_cannot_read_the_locks_its_runner_and_wb_commands_take(self):
         # runner.lock was in the task's directory, which the lane reads: an agent holding it
-        # with flock made every later runner exit at once, and reap fail the task (the 0.90 review)
+        # with flock made every later runner exit at once, and reap fail the task; then
+        # status.lock, held through an O_RDONLY fd, froze the runner's next status write and
+        # wb stop with it (the 0.90 review). Every lock a task's writers take is out of reach.
         os.environ["WB_HOME"] = str(self.fake_home() / "state")  # out of /tmp, which the lane writes
         task = self.bare_task("t-locks", self.repo)
-        locks = [runner.lock_file(task.name, kind) for kind in ("runner", "cmd")]
+        task.set_status(phase="running")
+        task.event({"type": "x"})
+        store.append_jsonl(task.dir / "steer.jsonl", {"text": "x"})
+        context.grant(task, "allow", ["make *"])
+        kinds = ("runner", "cmd", "status", "events", "steer", "grants")
+        locks = [runner.lock_file(task.name, kind) for kind in kinds]
         for path in locks:
             with store.locked(path):
                 pass
-        self.assertEqual(self.reads_in_lane(task, locks), ["refused", "refused"])
+        self.assertEqual(self.reads_in_lane(task, locks), ["refused"] * len(kinds))
+        self.assertEqual([p for d in (task.dir, context.rules_dir(task))
+                          for p in d.rglob("*.lock")], [])
 
     def test_workbench_stays_readable_inside_claudes_directory(self):
         home = self.fake_home()

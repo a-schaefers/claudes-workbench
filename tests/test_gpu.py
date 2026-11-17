@@ -286,6 +286,16 @@ class Budget(unittest.TestCase):
         self.assertEqual(self.budget([tiny]), (None, []))      # an APU alone: unknown, no sharing
         self.assertEqual(self.budget([{"name": "Arc", "driver": "xe", "vram": None}]), (None, []))
 
+    def test_an_apus_carve_out_never_outranks_or_adds_to_a_discrete_card(self):
+        # the 0.90 review: a Radeon 780M set to 16 GiB beside an 8 GiB RTX became the budget, and
+        # a 4 GiB one was added to an RX 7600S's 8 (amdgpu reports both as VRAM)
+        rtx = {"name": "RTX 4060", "driver": "nvidia 560.94", "vram": 8 * 2 ** 30, "discrete": True}
+        apu = lambda gib: {"name": "Radeon 780M", "driver": "amdgpu", "vram": gib * 2 ** 30}  # noqa
+        rx = {"name": "RX 7600S", "driver": "amdgpu", "vram": 8 * 2 ** 30, "discrete": True}
+        self.assertEqual(self.budget([apu(16), rtx]), (8 * 2 ** 30, [rtx]))
+        self.assertEqual(self.budget([apu(4), rx]), (8 * 2 ** 30, [rx]))
+        self.assertEqual(self.budget([apu(16)])[0], 16 * 2 ** 30)   # alone, its carve-out counts
+
     def test_apple_silicon_gets_macos_default_share_not_three_quarters(self):
         # 75% of a 16 GB Mac let a model's context spill to the CPU (the 2026-11-16 audit)
         mac = lambda ram, wired=None: {"name": "Apple M3", "driver": "metal", "unified": True,  # noqa

@@ -223,6 +223,41 @@ test('a task wb start ran in this session is its own wherever it ran, also after
   expect(runs.at(-1)).toEqual(['wb', 'stop', '--all', '--repo', '/home/u', '--session', 'sess-1', '--session', 'sess-2'])
 })
 
+test('a new Claude Code process in the project adopts the tasks of one that is gone', async ($, on) => {
+  // the 0.90 review: Claude Code exited (a crash, an update) and plain `claude` in the same repo
+  // got a new session id: none of the earlier process's tasks woke it, and its quit skipped them
+  const clock = mock.clock(on, { now: 1_800_000_000_000 })
+  const files: Record<string, string> = {}
+  task(files, 'orphan', 'review', { repo: '/home/u/a', cwd: '/home/u/a', session: 'sess-old', claude_pid: 4242 })
+  task(files, 'live', 'review', { repo: '/home/u/a', cwd: '/home/u/a', session: 'sess-other', claude_pid: 4343 })
+  task(files, 'far', 'review', { repo: '/home/u/b', cwd: '/home/u/b', session: 'sess-old', claude_pid: 4242 })
+  const names = ['orphan', 'live', 'far']
+  for (const name of names) notice(files, { ts: ts0, task: name, kind: 'review', text: `REPORT-${name}` })
+  fakeTasks(on, files, names)
+  on('session.id', () => ({ value: 'sess-new' }))
+  const kills: string[] = []
+  on('process.run', (_: any, e: any) => {
+    if (e.argv[0] === 'kill') {
+      kills.push(e.argv[2])
+      return { value: { exitCode: e.argv[2] === '4242' ? 1 : 0, stdout: '', stderr: '' } }
+    }
+    return { value: { exitCode: 0, stdout: '', stderr: '' } }
+  })
+  on('ui.toast', () => ({ value: undefined }))
+  const woken: string[] = []
+  on('prompt.submit', (_: any, e: any) => { woken.push(e.text); return { text: e.text } })
+  await $.session.start({ cwd: '/home/u/a', surface: 'terminal', isInteractive: true })
+  await clock.advance(3000)
+  expect(woken.filter(t => t.includes('REPORT-orphan'))).toHaveLength(1)  // its process is gone
+  expect(woken.join('\n')).not.toContain('REPORT-live')       // a live session's stays its own
+  expect(woken.join('\n')).not.toContain('REPORT-far')        // another project's: not by directory
+  expect(files['/wb/tasks/live/acked']).toBe(undefined)
+  const asked = kills.length
+  await clock.advance(6000)
+  expect(kills.filter(p => p === '4242')).toHaveLength(1)      // gone is final: asked once
+  expect(kills.length - asked).toBeLessThanOrEqual(1)          // a live one, not at every poll
+})
+
 test('a scripted session (claude -p, the SDK) takes no wake and runs no wb, until a person attaches', async ($, on) => {
   // the 2026-11-16 audit: a `claude -p` run took the terminal session's review wake
   const clock = mock.clock(on, { now: 1_800_000_000_000 })
