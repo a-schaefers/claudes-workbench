@@ -1016,8 +1016,14 @@ high, case-insensitive and multiline:
 - Claude's files (critical: a shell write to AGENTS.md, CLAUDE.md or `.claude/settings*` through
   `>`, `>>`, `sed -i` or `tee`; high: a line telling the agent to edit one).
 
-File rules: a symlink resolving outside the skill and binary extensions are critical; archives,
-NUL bytes and invalid UTF-8 are high; media files aren't scanned. Per line: invisible characters
+File rules: what is scanned is what `skills.add` copies, which follows links. A symlink resolving
+outside the skill, or into its `.git`, and binary extensions are critical; a link to nothing is
+high; a link inside the skill is scanned as its target's bytes under the link's own name and
+suffix (a link to a directory: its files are scanned under their own names), and a lone SKILL.md
+given as a link as its target's text. Archives, NUL bytes and invalid UTF-8 are high. Media
+files (.png .pdf .ttf …) are skipped only when they look binary (a NUL in the first 8 KB, or not
+UTF-8); one that is text is scanned as prose (the 2026-11-16 audit: a link guide.md -> pic.png
+holding an injection, and a linked SKILL.md, got in unscanned). Per line: invisible characters
 (zero-width, bidi controls, tag characters, any other Cf except the soft hyphen) are critical when
 a bidi or tag character is present, else high (a BOM at the very start is fine); 200+ blanks
 followed by code is critical outside prose files (.md .txt .html .xml .tex .css; the pattern

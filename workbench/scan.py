@@ -167,16 +167,26 @@ def files(path: Path) -> list[tuple[str, Path]]:
 
 
 def scan(path: Path) -> list[dict]:
-    """Every finding in a skill (a directory or a SKILL.md), most severe first."""
+    """Every finding in a skill (a directory or a SKILL.md), most severe first. What is scanned is
+    what `skills.add` copies: links are followed (copytree and copyfile dereference them), so a
+    link's target is scanned under the link's own name and suffix. Before the 2026-11-16 audit an
+    in-skill link was skipped: a SKILL.md given as a link, or guide.md -> pic.png holding text,
+    reached the library unscanned."""
     out = []
-    root = path.resolve() if path.is_dir() else path.resolve().parent
+    root = path.resolve() if path.is_dir() else None  # a lone file has no skill around it
     for rel, p in files(path):
-        if p.is_symlink():
+        if p.is_symlink() and root:
             target = p.resolve()
-            if not target.is_relative_to(root):
+            if not target.is_relative_to(root) or ".git" in target.relative_to(root).parts:
                 out.append(finding("symlink_escape", "critical", rel, 0, f"-> {target}",
                                    "a symlink out of the skill"))
-            continue
+                continue
+            if not target.exists():
+                out.append(finding("symlink_dangling", "high", rel, 0, f"-> {target}",
+                                   "a symlink to nothing"))
+                continue
+            if target.is_dir():
+                continue  # its files are scanned under their own names
         if p.suffix.lower() in BINARY:
             out.append(finding("binary_file", "critical", rel, 0, p.suffix,
                                "a binary or executable has no place in a skill"))
@@ -185,9 +195,13 @@ def scan(path: Path) -> list[dict]:
             out.append(finding("archive", "high", rel, 0, p.suffix,
                                "an archive hides its contents from review: unpack it"))
             continue
-        if p.suffix.lower() in MEDIA:
-            continue
+        if p.suffix.lower() in MEDIA:  # real images, fonts and audio hold NUL bytes early
+            with open(p, "rb") as f:
+                if b"\x00" in f.read(8192):
+                    continue
         raw = p.read_bytes()
+        if p.suffix.lower() in MEDIA and not _utf8(raw):
+            continue  # binary all the same; text named .png is scanned as prose
         if b"\x00" in raw:
             out.append(finding("nul_bytes", "high", rel, 0, "", "NUL bytes in a text file"))
             continue
@@ -196,8 +210,16 @@ def scan(path: Path) -> list[dict]:
         except UnicodeDecodeError:
             out.append(finding("not_utf8", "high", rel, 0, "", "not valid UTF-8"))
             continue
-        out += scan_text(text, rel, prose=p.suffix.lower() in PROSE)
+        out += scan_text(text, rel, prose=p.suffix.lower() in PROSE | MEDIA)
     return sorted(out, key=lambda f: (ORDER[f["severity"]], f["file"], f["line"]))
+
+
+def _utf8(raw: bytes) -> bool:
+    try:
+        raw.decode("utf-8")
+        return True
+    except UnicodeDecodeError:
+        return False
 
 
 def scan_text(text: str, rel: str = "SKILL.md", prose: bool = True) -> list[dict]:
