@@ -6,9 +6,11 @@ the README suggests (nothing depends on it: `bin/wb` finds the package from its 
 the systemd unit runs `~/.local/bin/wb`). The CLI is `wb`.
 
 Claude delegates coding tasks to local models in OpenCode and reviews the results. README.md is
-for people: the pitch and a quickstart, then (below its rule) "How it works", the full account of
-every feature. This file is the technical reference for changing the code. A change that alters
-what either says (a command, a flag, a default, a guard, a file) updates it in the same commit.
+for people and stays simple: the pitch, a quickstart and what we found, then a pointer.
+ARCHITECTURE.md is for agents (and contributors): the full account of every feature, how it
+works and why. This file is the technical reference for changing the code. A change that alters
+what any of them says (a command, a flag, a default, a guard, a file) updates it in the same
+commit; new feature detail goes in ARCHITECTURE.md, not README.md.
 
 ## Layout
 - `workbench/` is the Python package, standard library only (Python 3.11+, developed on 3.14). Do not add dependencies.
@@ -96,7 +98,8 @@ what either says (a command, a flag, a default, a guard, a file) updates it in t
   `os.killpg` and POSIX signals. Off Linux, watch.py falls back to timed waits without inotify/pidfd.
 - Never name a model in code or the skill. Models come from OpenCode's config and choices from
   the router and the weekly model check, so newer models slot in without code changes. (README's
-  quickstart and findings are the only places that name what this machine runs.)
+  quickstart and findings are the only places that name what this machine runs;
+  ARCHITECTURE.md's image setup names the example engine's files.)
 - `agent/HANDBOOK.md`: Claude's working habits for the local agent. Every agent prompt carries it
   (a copy in the task directory), so keep it short: each token costs prefill time.
 - `bin/wb`, `bin/wb-ask-mcp`: launchers that find the package from their own real path. Never
@@ -262,5 +265,5 @@ in WebKit as an iPhone and Chromium as a Pixel, through sends, receipts, an outa
 Playwright isn't a dependency; point `PLAYWRIGHT` at any install:
 `PLAYWRIGHT=…/node_modules/playwright node tests/e2e_chat.mjs`.
 A change to how OpenCode is invoked also needs one real run: `wb start --trial` on MiMo against a
-scratch repo, as the README describes (`--trial` keeps it out of the router's evidence and the
+scratch repo, as ARCHITECTURE.md describes (`--trial` keeps it out of the router's evidence and the
 lessons; `wb trial <task>` marks one after the fact).

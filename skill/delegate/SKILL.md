@@ -298,7 +298,7 @@ Mind the engine's `notes` in `wb image --list`: an image model's licence can res
 how its output may be used. A generation holds the GPU: running tasks wait their turn.
 
 **No ready engine? Offer to set one up; never set it up unasked.** This is an optional step, as
-the README's Images section says. Read `wb scout` for the OS and GPU, then propose in one
+ARCHITECTURE.md's Images section says. Read `wb scout` for the OS and GPU, then propose in one
 message: a runtime that fits (stable-diffusion.cpp on Vulkan for AMD or Intel, CUDA for NVIDIA,
 Metal on macOS; built from its upstream source, with packages from the OS's own repositories),
 and an image model you've just checked. It must fit the VRAM without spilling, and its licence
