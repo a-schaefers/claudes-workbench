@@ -232,13 +232,14 @@ PATH and the lane; the rest is only imitated by the fake.
   own worktree (rounds, `wb next`), never to a new task.
 - `session export` lists compactions as messages `{type: "compaction", status, summary}`; an
   assistant message's `tokens` (input + cache read/write + output) is the context the next request
-  carries (the between-rounds check). The live `step_finish` tokens (input + cache read + output)
-  drive the mid-round check.
+  carries (the between-rounds check). The live `step_finish` tokens (input + cache read + cache
+  write + output) drive the mid-round check.
 - `--worktree` takes `=name`; the runner makes its own worktrees anyway.
 
 ## Troubleshooting
 - `wb doctor`: opencode and its config, git, each model's readiness, each Ollama entry's
-  `max_tokens` and context, the state directory, a real lane around a test write, the mod.
+  `max_tokens` and context, the state directory, a real lane around a test write, `wb` on PATH,
+  the mod.
 - A model "can't run": `wb models` says why (server down, not pulled, no `start` command).
 - A task misbehaves: `wb log <t> -v`, `wb watch <t> -v`, `tasks/<t>/runner.log` (the runner's
   output and OpenCode's stderr, including `workbench lane: the kernel refused the lane`).

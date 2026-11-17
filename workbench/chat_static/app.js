@@ -37,7 +37,7 @@
   let skew = 0                                  // server clock − ours, seconds
   let outbox = load(K.outbox, [])               // [{cid, text, ts, error?}]
   let seen = new Set(load(K.seen, null) || [])  // Claude's messages already shown in full
-  const firstVisit = load(K.seen, null) === null
+  let firstVisit = load(K.seen, null) === null  // the backlog shows whole; what comes after flows
   const nodes = new Map()                       // key → row element
   const flows = new Map()                       // message id → {text, shown, el}
   let unread = 0
@@ -222,17 +222,19 @@
     drawWorking(list, anchor)
     drawPresence()
     toEnd()
+    if (list.length) firstVisit = false
   }
 
   function makeRow(m) {
     const row = document.createElement('div')
     const b = document.createElement('div'); b.className = 'bubble'
     if (m.from === 'user') b.textContent = m.text
-    else if (seen.has(m.id) || firstVisit || document.hidden || reduced.matches) { rich(b, m.text); seen.add(m.id) }
-    else {
+    else if (seen.has(m.id) || firstVisit || document.hidden || reduced.matches) {
+      if (!seen.has(m.id) && !firstVisit && document.hidden) { unread++; document.title = `(${unread}) Claude` }
+      rich(b, m.text); seen.add(m.id); save(K.seen, [...seen].slice(-500))
+    } else {
       b.classList.add('flowing'); flows.set(m.id, { text: m.text, shown: 0, el: b })
       if (!flowTimer) flowTimer = setInterval(flowTick, FLOW_MS)
-      if (document.hidden) { unread++; document.title = `(${unread}) Claude` }
     }
     row.append(b, document.createElement('div'))
     row.lastChild.className = 'meta'

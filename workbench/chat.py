@@ -32,6 +32,7 @@ from . import store
 from .watch import Watcher
 
 PORT = 1337
+REPLAN_EVERY = 30       # seconds between looks at a skipped bind address
 LISTENING_FOR = 15      # seconds: a listener.json older than this means nobody is listening
 MAX_TEXT = 8000
 MAX_BODY = 32 * 1024
@@ -387,6 +388,14 @@ def serve(port: int, binds: list[str] | None, hosts: list[str] | None = None, sa
         say("every interface: anyone who can reach this machine and has the link can use it")
     if p["hosts"] is None:
         say("answering to any host name (hosts: *): the token is the only lock")
+    if p["skipped"]:  # an address not up yet (tailscaled after login): serve what is, and once
+        def replan():  # it comes up, end so the service manager starts the server with it
+            while True:
+                time.sleep(REPLAN_EVERY)
+                if len(plan(binds, hosts)["binds"]) > len(p["binds"]):
+                    say("an address this server skipped is up now: restarting to bind it")
+                    os._exit(75)
+        threading.Thread(target=replan, daemon=True).start()
     servers[0].serve_forever()
 
 

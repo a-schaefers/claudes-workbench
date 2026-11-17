@@ -14,7 +14,7 @@ import time
 from collections import defaultdict
 from pathlib import Path
 
-from . import (__version__, chat, context, gitops, hardware, images, lane, lessons, models,
+from . import (__version__, ask_mcp, chat, context, gitops, hardware, images, lane, lessons, models,
                results, router, scan, skills, store, transcript, tuning)
 from .watch import Watcher, wait_exit
 from . import runner
@@ -271,7 +271,9 @@ def cmd_next(a):
     test = a.test if a.test is not None else spec.get("test_cmd")
     test_line = (f"- The acceptance command is `{test}`. Run it before you finish and make it "
                  "pass. Never weaken, skip or delete tests to get there.\n") if test else ""
-    budget = spec.get("ask_budget", 0)
+    used = sum(1 for p in (task.dir / "ask").glob("*.json")  # the budget is the task's: what's left
+               if not ask_mcp._permission(store.read_json(p, {})))
+    budget = max(0, spec.get("ask_budget", 0) - used)
     n = st.get("round", 1) + 1
     task.round_dir(n).mkdir(parents=True, exist_ok=True)
     task.round_dir(n).joinpath("prompt.md").write_text(
@@ -1434,7 +1436,7 @@ def main(argv=None):
     s.set_defaults(f=cmd_next)
 
     s = sub.add_parser("skill", help="Claude's skill library for the agents: list, show, add, "
-                       "retire, restore; hand a task a skill or take it back")
+                       "patch, scan, import, retire, restore; hand a task a skill or take it back")
     ss = s.add_subparsers(dest="action", required=True)
     ss.add_parser("list", help="every skill, how often it was offered, loaded and helped")
     x = ss.add_parser("show"); x.add_argument("name")
@@ -1586,7 +1588,8 @@ def main(argv=None):
     s.set_defaults(f=cmd_scout)
     s = sub.add_parser("events", help="print a line whenever workbench's state changes (the mod's ears)")
     s.set_defaults(f=cmd_events)
-    s = sub.add_parser("chat", help="the web chat: serve it, its link, reply to the user there")
+    s = sub.add_parser("chat", help="the web chat: serve it, its link, reply to the user there, "
+                       "the thread (log), receipts (ack), what waits (pending)")
     s.add_argument("action", choices=["serve", "url", "reply", "log", "ack", "pending"], nargs="?",
                    default="log")
     s.add_argument("id", nargs="?", help="ack: the message id")

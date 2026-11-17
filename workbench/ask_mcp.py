@@ -1,13 +1,15 @@
 """MCP server (stdio, newline-delimited JSON-RPC) giving the local agent one tool: ask_reviewer.
 
-OpenCode starts it per task through the task's config layer, with WB_TASK naming the task. A call
+OpenCode starts it for each round (each `opencode run`) through the task's config layer, with WB_TASK naming the task. A call
 writes the question into the task directory, raises a "question" notification (the Claude Code mod
 wakes Claude with it; `wb wait` returns on it), and blocks until Claude's answer file appears or
 the wait times out. Questions are budgeted per task so a chatty model can't lean on the reviewer.
+A question is served on a thread of its own, so the server answers pings while it waits.
 """
 import json
 import os
 import sys
+import threading
 import time
 import uuid
 
@@ -44,7 +46,7 @@ TOOL = {
 }
 
 
-PERMISSION_BUDGET = 8  # requests to run a refused command, per task: a cap on a stuck loop
+PERMISSION_BUDGET = 8  # requests for a refused command or directory, per task: a cap on a stuck loop
 
 
 def _permission(q: dict) -> bool:
@@ -131,17 +133,26 @@ def handle(msg: dict, task: store.Task):
 
 def main():
     task = store.Task(os.environ["WB_TASK"])
-    for line in sys.stdin:
-        line = line.strip()
-        if not line:
-            continue
+    out = threading.Lock()
+
+    def serve(line: str) -> None:
         try:
             reply = handle(json.loads(line), task)
         except Exception as exc:  # never let one bad message take the agent's tool away
             reply = {"jsonrpc": "2.0", "id": None, "error": {"code": -32603, "message": str(exc)}}
         if reply is not None:
-            sys.stdout.write(json.dumps(reply) + "\n")
-            sys.stdout.flush()
+            with out:
+                sys.stdout.write(json.dumps(reply) + "\n")
+                sys.stdout.flush()
+
+    for line in sys.stdin:
+        line = line.strip()
+        if not line:
+            continue
+        if '"tools/call"' in line:  # a question blocks until Claude answers: pings go on meanwhile
+            threading.Thread(target=serve, args=(line,), daemon=True).start()
+        else:
+            serve(line)
 
 
 if __name__ == "__main__":

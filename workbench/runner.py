@@ -3,9 +3,10 @@
     python3 -m workbench.runner <task>
 
 Each round sends rounds/<n>/prompt.md to the agent (`opencode run`, continuing the task's session
-after the first, unless that session is full: see fresh_reason), streams its events into events.jsonl and status.json, and stops it if it loops,
-errors repeatedly, goes silent or runs too long. After a clean round the task's test command runs
-in the worktree; a failure goes back to the agent on its own while auto-fix rounds remain, so
+after the first, unless that session is full: see fresh_reason), with the skills note
+(skills_note) before it, streams its events into events.jsonl and status.json, and stops it if it
+loops, errors repeatedly, goes silent or runs too long. After a clean round the task's test
+command runs in the worktree, in the agent's lane; a failure goes back to the agent on its own while auto-fix rounds remain, so
 Claude is only woken for work that passes, or for a task that has run out of road.
 """
 import json

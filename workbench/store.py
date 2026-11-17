@@ -2,7 +2,7 @@
 
 Layout of ``$WB_HOME`` (default ``~/.local/state/workbench``)::
 
-    notify.jsonl            events that need Claude (review, stuck, failed, question), all tasks
+    notify.jsonl            events for Claude (review, stuck, failed, question, checkin), all tasks
     results.jsonl           one row per finished task (accepted / discarded), for `wb stats`;
                             a trial run's (`wb start --trial`, `wb trial`) is kept but not evidence
     gpu.lock                held by every running task: shared beside others, exclusive alone

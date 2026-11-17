@@ -2,7 +2,7 @@
 // real `wb chat serve`, and `wb chat` on the Claude side. Run: node tests/e2e_chat.mjs
 // Needs Playwright: PLAYWRIGHT=/path/to/node_modules/playwright (it isn't a workbench dependency).
 import { spawn, execFileSync } from 'node:child_process'
-import { mkdtempSync, writeFileSync, readFileSync, existsSync } from 'node:fs'
+import { mkdtempSync, writeFileSync, readFileSync, existsSync, rmSync } from 'node:fs'
 import { createRequire } from 'node:module'
 import { tmpdir } from 'node:os'
 import { join, dirname } from 'node:path'
@@ -12,7 +12,9 @@ const ROOT = join(dirname(fileURLToPath(import.meta.url)), '..')
 const pw = createRequire(import.meta.url)(process.env.PLAYWRIGHT || 'playwright')
 const home = mkdtempSync(join(tmpdir(), 'wbchat-'))
 const env = { ...process.env, WB_HOME: join(home, 'state'), WB_CHAT_TOKEN: join(home, 'token') }
-const PORT = 13371
+// a system Chromium when there is one (CHROMIUM names another), else Playwright's own
+const CHROMIUM = process.env.CHROMIUM || (existsSync('/usr/bin/chromium') ? '/usr/bin/chromium' : '')
+const PORT = Number(process.env.WB_E2E_PORT || 13371)
 const wb = (...args) => execFileSync(join(ROOT, 'bin', 'wb'), args, { env, encoding: 'utf8' })
 const sleep = ms => new Promise(r => setTimeout(r, ms))
 
@@ -53,7 +55,7 @@ async function run(engine, device) {
   writeFileSync(join(home, 'state/chat/listener.json'), '{}')
   const token = readFileSync(env.WB_CHAT_TOKEN, 'utf8').trim()
   startServer(); await sleep(800)
-  const browser = await pw[engine].launch(engine === 'chromium' ? { executablePath: '/usr/bin/chromium' } : {})
+  const browser = await pw[engine].launch(engine === 'chromium' && CHROMIUM ? { executablePath: CHROMIUM } : {})
   const ctx = await browser.newContext(device ? pw.devices[device] : {})
   const page = await ctx.newPage()
   const errors = []
@@ -80,7 +82,7 @@ async function run(engine, device) {
     wb('chat', 'ack', messages()[0].id, '--by', 's1')
     await until(async () => (await page.locator('.row.user .meta').last().textContent()).includes('read by Claude'))
   })
-  await check('working shows while the turn runs, then Claude\'s reply appears whole', async () => {
+  await check('working shows while the turn runs, then Claude\'s reply is revealed in full', async () => {
     listen(true)
     await until(async () => (await page.locator('.thread .working').count()) === 1)
     wb('chat', 'reply', '--text', 'On it.\n\n- **step 2** in review\n- `make test` passes')
@@ -123,6 +125,7 @@ try {
   await run('chromium', 'Pixel 7')
 } finally {
   if (server && server.exitCode === null) server.kill('SIGTERM')
+  rmSync(home, { recursive: true, force: true })
 }
 console.log(failed ? `\n${failed} failed` : '\nall passed')
 process.exit(failed ? 1 : 0)

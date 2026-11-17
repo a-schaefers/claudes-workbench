@@ -278,7 +278,7 @@ server too), stdin `/dev/null`, stderr to `runner.log`. A reader thread queues s
 steer bell (`_steer_bell`, a `Watcher` on the task directory) queues a wake when `steer.jsonl`
 changes. The loop wakes on a line or every 5 s. Per line: `events.normalize` (dropping the rest),
 the session id from the first `sessionID`, the tool tally and `status.last`, every text kept, and
-for each `step` the context in use (input + cache read + output) against the handover point.
+for each `step` the context in use (input + cache read + cache write + output) against the handover point.
 Then, every pass, in this order: asking (phase `asking`) or not, and time spent asking is
 neither the round's nor silence; the round's wall clock; silence; the think nudge; a guard stop (`stopped` event; before a no-edit stop it checks
 `gitops.mark`, so an edit made through the shell, `sed -i` or `cat >`, resets that guard); a handover; a check-in; a
@@ -385,12 +385,14 @@ by prefix; rewording one silently changes those:
 | `You are picking this task up in a fresh session` | `handoff_prompt` | `transcript`, the fake OpenCode (`fill`) |
 | `Step N of this task is done and committed` | `wb next` | `transcript` |
 | `INTERRUPT_HEAD`, `NOTE_HEAD` | `_steer_round` | `transcript` |
+| `NUDGE` (`without a tool call. Stop planning`) | the think nudge | `transcript` (labelled the workbench's, not Claude's) |
+| `Claude picked these skills`, `Claude handed you more skills`, `Claude took back:` | `skills_note` | `transcript.SKILLS_HEADS` (skips the note to label what follows) |
 | `CARRY_ON`, `RESUME` (first 60 characters) | `_full_round`, `wb resume` | `round_asks` skips them |
 | `agent's summary:` | `summary_text` | `lessons` |
 | `--title "wb: <task>"` | `run_round` | `transcript.find_session` |
 
-The skills note is prepended to the prompt argument, so a prompt that carries one is labelled
-`spec` in the transcript whatever it is.
+The skills note is prepended to the prompt argument; the transcript skips past it (to its first
+blank line) before matching the label, so the prompt keeps its own.
 
 ## What the agent knows
 
@@ -573,7 +575,9 @@ ask timeout passes (`--ask-timeout`, 20 minutes). Then it restores the phase and
 answer (with an `answer` event), or, on timeout, "No answer arrived in time. Make the most reasonable
 assumption…". Budgets count the task's `ask/*.json` files, across all steps: plain questions up to
 `--ask-budget` (2), and command or path requests together up to `PERMISSION_BUDGET` (8), apart
-from the questions; past either, the tool returns a refusal without asking. The silence guard
+from the questions; past either, the tool returns a refusal without asking. The prompt `wb next`
+writes names the questions left, not the whole budget. A `tools/call` runs on its own thread
+(replies written under a lock), so `ping` and the rest are answered while a question waits. The silence guard
 doesn't count the wait. `wb answer <task> --text|--file` answers; `wb allow` answers a pending
 question too.
 
@@ -765,7 +769,8 @@ Drawn in Claude Code's own grammar, results under `  ⎿  `:
 `-v` raises the caps (400 lines of output, diffs and reasoning) but still caps. Under the
 transcript (on a terminal, one row rewritten in place): what's happening now (`activity`) and a
 clock line:
-- *Now:* queued: `Waiting for the GPU… <status.last>` (which shows the model loading); testing:
+- *Now:* queued: `Waiting for the GPU…`, or `status.last` itself while it loads, starts, stops,
+  unloads or shares a model (`Loading …`); testing:
   ``Running the acceptance tests… `cmd` ``; asking: `Waiting for Claude's answer…`; running: from
   the model server's `GET <root>/metrics` when it returns a `live` object (`{state, phase,
   prompt_tokens, generated, tok_s}`): `Reading the prompt… t · N tokens`, `Thinking|Writing… t · ↓
@@ -789,7 +794,7 @@ or `""` for prompt bodies), `activity` if any, `clock` (always), then the phase 
 re-runs it on every poll while the followed task is active (else once per `name@updatedAt`),
 keeps the last 2000 lines, shows the newest 60,000 characters of history, puts `meta` under the
 rule and `clock` under the speech, and uses `activity` as the apprentice's speech (the pose is
-`think` when it starts `Thinking`, `Reading`, `Waiting` or `Model server`). A new style needs an
+`work` when it starts `Writing` or `Running`, else `think`). A new style needs an
 entry in the mod's `LINE_STYLE`; changing the shape needs a new `live-1` tag.
 
 ## Models: found, loaded, chosen
@@ -808,7 +813,8 @@ reformats the file (atomic, indent 2).
 **Discovery** (`discover`). A model is a candidate when it is an entry under a provider
 (`provider` or `providers`; `options`/`settings` with a `baseURL`) whose host is this machine:
 `localhost`, `0.0.0.0`, `host.docker.internal`, any loopback IP, the host name, its first label,
-or `<label>.local` (`_this_host`; the machine's own LAN or Tailscale address doesn't count). A
+or `<label>.local`, or any of the machine's own addresses (`_own_addresses`: the host name's
+`getaddrinfo` and `ip -o addr`, so a LAN or Tailscale IP counts) (`_this_host`). A
 provider elsewhere counts when models.json gives it `"local": true`; it is then `remote` and never
 shares the GPU. The id is `provider/name`; `root` is the baseURL without `/v1`. The engine
 (`_engine`): models.json `engine`, else a cached probe of `GET <root>/api/version` (a JSON
@@ -881,7 +887,7 @@ its first tasks by hand (`--model`).
 scales with the window (`limit.context`; unknown → 32K): files = max(1, round(3s)), new lines =
 max(50, round(15s)·10), s = min(window/32768, `GUESS_MAX` 4): 3 files/150 lines on 32K (measured
 2026-11-16), 12/600 from 128K. Correction from every closed step on that model and window
-(results rows' `steps`, with files ≥ 1): `_went` is badly when the step compacted, filled up
+(results rows' `steps`, with files ≥ 1, from rows `tuning.judged` keeps): `_went` is badly when the step compacted (in its last session, or in one a handover replaced: the `fresh` event's `compacted`), filled up
 reading (`read_full`), got stuck, or needed ≥ `BAD_REVIEWS` 2 agent-caused review rounds; well
 when it landed and wasn't taken over; else no evidence. A bad step caps the slice below its size
 (files − 1, lines × 3/4); the biggest good step raises it to its size and wins over the cap.
@@ -915,10 +921,12 @@ BAD: prompts would be cut off silently; less is a note: tasks could be bigger).
 **The machine** (`hardware.py`, read fresh on each call; it is also on the hot path:
 `gpu_budget` runs in routing and in the lease). `system()`: `macos`, `wsl` (`/proc/version`
 contains "microsoft"), `linux`. `gpus()`: `nvidia-smi` (name, MiB total/used, driver) on Linux and
-WSL; WSL adds Windows' adapters from `powershell.exe Get-CimInstance Win32_VideoController` (no
+WSL (`[N/A]` reads as unknown; a line that isn't four fields is skipped); WSL adds Windows' adapters from `powershell.exe Get-CimInstance Win32_VideoController` (no
 VRAM: AdapterRAM caps at 4 GB); Linux scans `/sys/class/drm/card*/device` (amdgpu's
-`mem_info_vram_total`/`_used`; names from `lspci`; NVIDIA left to nvidia-smi); macOS reads
-`system_profiler SPDisplaysDataType -json` (Apple Silicon: unified memory, `wired_limit`).
+`mem_info_vram_total`/`_used`; names from `lspci`; NVIDIA left to nvidia-smi when it answered,
+else listed from sysfs, VRAM unknown); macOS reads `system_profiler SPDisplaysDataType -json`
+(Apple Silicon: unified memory, `wired_limit`; an adapter with only shared memory, an Intel iGPU,
+has VRAM unknown).
 `memory()`: `/proc/meminfo` or `vm_stat`/`vm.swapusage`. `cpu()`, `ollama_env()` (systemctl or
 launchctl, then the process env), `ollama_models_dir()`, `report()` (the lines `wb scout`
 prints). Unknowns stay unknown; nothing about the machine is hard-coded.
@@ -1291,7 +1299,9 @@ binds, `--host` adds to its hosts, `--port` changes the port. Answered host name
 worked out once at startup): `localhost`, `127.0.0.1`, `::1` always; for `tailscale` its DNS name,
 first label and host name; for a wildcard the host's name, its first label, its FQDN and whatever
 the host name resolves to; any other bind as itself; plus `hosts`. `serve` prints what it listens
-on, binds it skipped, and warnings for a wildcard bind or `hosts: *`. `wb chat url` prints
+on, binds it skipped, and warnings for a wildcard bind or `hosts: *`. With a bind skipped (tailscale
+not up yet), it rechecks every `REPLAN_EVERY` 30 s and exits 75 once more binds are available,
+for the service manager (`Restart=always`) to start it again with them. `wb chat url` prints
 `http://localhost:<port>/#token=…` (the fragment never leaves the browser).
 
 **The HTTP API** (`Handler`, HTTP/1.0, no keep-alive, no CORS):
@@ -1326,7 +1336,10 @@ three failures) and a reconnect when the page or the network comes back keep it 
 hidden for a minute drops its stream. Rendering is DOM only (inline code, bold, links, fenced code,
 lists); receipts read "✓ delivered", "✓ waiting for a Claude session", "✓✓ read by Claude",
 "✓✓ Claude has it, reading after its current step"; "Claude is on it" shows while the listener is
-busy with the user's latest message. Light and dark follow `prefers-color-scheme` (tokens on
+busy with the user's latest message. Claude's messages flow in at a reading pace (`flows`) once
+the first render is done; the backlog a first visit loads, a message that arrives while the page
+is hidden (it counts as unread in the title) and reduced motion show whole, and each shown message
+is remembered (`wb-chat-seen`, the last 500) so a reload doesn't replay it. Light and dark follow `prefers-color-scheme` (tokens on
 `:root`, `color-scheme` meta, a theme colour per scheme); reduced motion turns animations off. It
 can be added to a home screen (a manifest and an SVG icon; no service worker). Away from
 localhost over plain HTTP the page isn't a secure context, so the browser's UUID and clipboard
@@ -1402,9 +1415,9 @@ runs, else once per `name@updatedAt`; the last 2000 lines kept; the focus is the
 task, else the newest one waiting for Claude); submits one queued turn when idle; detects a task
 boundary and compacts; offers the weekly check; then `deliver`, `rewake`, `listen`.
 
-**Busy.** `mem.busy` is set by `turn.start` (main loop) and by any `tool.call` (any agent; a
-module reloaded mid-turn never saw `turn.start`), and cleared only by the main loop's
-`turn.complete`. Held wakes are rechecked on every poll.
+**Busy.** `mem.busy` is set by `turn.start` (main loop) and by a main-loop `tool.call` (a
+module reloaded mid-turn never saw `turn.start`; a subagent's call doesn't count), and cleared
+only by the main loop's `turn.complete`. Held wakes are rechecked on every poll.
 
 **Waking** (`deliver`). Only when notify.jsonl's length changed or Claude is busy. Per task, the
 newest notify row under an hour old and past the task's `acked`; it is still true when it's a
@@ -1414,18 +1427,22 @@ check-in and the task is queued/running/testing, or the phase equals the kind (`
 `[workbench] Task \`<n>\` <headline>.\n\n<row.text>\n\n<NEXT[kind]>` (HEADLINE and NEXT are the
 per-kind texts at the top of register.tsx; NEXT names the commands to run, and the question text
 says a PERMISSION request is answered by the `wb allow` it names). With the `wake` setting off
-nothing is submitted (but `acked` is still written). `rewake`: when idle, a task waiting on Claude
-(review/asking/stuck/failed) whose status changed over 60 s ago and after its `acked` gets
-`acked = now` and a prompt saying no notice reached Claude, with `wb report <n>` and NEXT (no age
-cap: a session opened later wakes at once). `cli._ack_all` stops the mark short of news still
+it is only toasted: `acked` isn't written, so `wb wait` still gets it. `deliver` remembers each
+task's newest notice ts (`mem.noticed`). `rewake`: when idle, with wake on, a task waiting on
+Claude (review/asking/stuck/failed) whose status changed between 60 s (`REWAKE_MS`) and 12 h
+(`REWAKE_MAX_MS`) ago and whose news Claude hasn't had gets `acked = now` and a prompt saying no
+notice reached Claude, with `wb report <n>` and NEXT. Had the news: `acked` is at or past the
+newest notice the mod read (the runner's last status write, clearing its pid, lands just after
+its notice, so `updated_at` alone woke Claude twice), else `acked` is past `updated_at`. `cli._ack_all` stops the mark short of news still
 true. Wake prompts are submitted as the plugin, not `asUser`. The mod runs in every session with
 the plugin installed and the state directory is global: the first session to deliver a notice
 wins (the `acked` write is not locked).
 
 **Delegate mode** (`delegateMode(on)`, `chat.delegating`). On: the `delegate` skill's prompt
 (`skill.prompt`, which also records its path and opens the pane), or a Bash tool call matching
-`/(^|[\s;&|(])wb (start|next|feedback|accept|steer|answer|takeover)\b/` (checked before it runs;
-a resumed session or a /delegate the mod missed; a `wb` named by absolute path isn't seen). Off:
+`/(^|[\s;&|(])wb (start|next|feedback|steer|answer)\b/` (checked before it runs; a resumed
+session or a /delegate the mod missed; a `wb` named by absolute path isn't seen; not `accept` or
+`takeover`, which a done note after a quit asks for). Off:
 either quit command, which also closes the pane. While on: the `delegate-mode` and `user-notes`
 context blocks, the idle status line, pane auto-open, web chat listening, the apprentice's
 "Delegate mode is on.". No `$.ui.invalidate`: rewriting the first message would cost the
@@ -1480,7 +1497,9 @@ by; otherwise it writes `chat/listener.json` `{session, cwd, pid, busy}` when th
 delivers each user message without a receipt: idle → `prompt.submit('[web chat] <words>', asUser)`,
 receipt `how=now`; busy → `session.send` into the running turn with WEB_NOTE, else a queued
 prompt (`how=queued`); then `wb chat ack <id> --by <key> --how …`, `webAt = now`, a toast.
-Quitting stops delivery but doesn't remove listener.json.
+A web message over 6 h old (`CHAT_EXPIRE_MS`) isn't submitted. Quitting stops delivery and, when
+this session holds listener.json, writes it empty, so the page and other sessions see nobody
+listening at once.
 
 **The weekly model check** (`scoutIfDue`): after a main-loop turn, idle, no task open, once per
 load: when scout.json's `done_at` is 7+ days old and `offered_at` 1+ day old, it writes
@@ -1600,7 +1619,7 @@ message, not a traceback.
 | `wb skill hand\|take <task> <n…>` | | Change a task's skills from its next run. |
 | `wb lessons` / `wb lessons close <id…> -m "…"` | `--task`, `--all` | Open lessons, recurring first (12 unless `--all`); close with why. |
 | `wb notes` / `add "…"` / `drop N…` | | The user's standing delegation preferences (`notes.md`, `- ` lines, at most 20 of 300 characters). |
-| `wb stats` / `wb tune` / `wb trial <task…>` | | Results by model and size; the tuned settings; mark closed tasks as trials (results rows only). |
+| `wb stats` / `wb tune` / `wb trial <task…>` | | Results by model and size (judged rows: it says how many spec-gap discards and trials it left out); the tuned settings; mark closed tasks as trials (results rows only). |
 
 ### Other
 | Command | Flags | What it does |
@@ -1608,7 +1627,7 @@ message, not a traceback.
 | `wb image "<prompt>"` | `--n` (4), `--size WxH` (1024x1024), `--seed`, `--ref <img>…`, `--out DIR`, `--engine`, `--list` | Candidates from a local image engine (see *Images*). |
 | `wb chat [log\|serve\|url\|reply\|ack\|pending]` | `--port` (1337), `--bind` (replaces chat.json's), `--host` (adds), `--text`, `--message <file\|->` (reply reads stdin without either), `-n` (10); `ack <id> --by --how` (the mod) | The web chat: the thread, the server, the link with its token, Claude's reply. |
 | `wb init <dir>` | | A project the way Claude keeps one: git on the default branch, an initial commit, AGENTS.md → CLAUDE.md (refuses inside another repo or without a git identity). |
-| `wb doctor` | | `opencode --version`, the OpenCode config, git, models found and each one's readiness, each Ollama entry's `options.max_tokens` and context against what Ollama serves, the state directory, a real lane drawn around a test write (`ok agents write only in their lane (Landlock ABI N)`), where the mod lives. `ok`/`BAD` lines set the exit code; `--` lines inform. |
+| `wb doctor` | | `opencode --version`, the OpenCode config, git, models found and each one's readiness, each Ollama entry's `options.max_tokens` and context against what Ollama serves, the state directory, a real lane drawn around a test write (`ok agents write only in their lane (Landlock ABI N)`), `wb` on PATH (or `WB_BIN`) for the mod, where the mod lives. `ok`/`BAD` lines set the exit code; `--` lines inform. |
 
 ## Files and formats
 
