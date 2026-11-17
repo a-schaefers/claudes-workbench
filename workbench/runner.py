@@ -109,7 +109,7 @@ def write_config_layer(task: store.Task) -> Path:
 SECRET_ENV = re.compile(r"TOKEN|SECRET|PASSW|CREDENTIAL|API_?KEY|ACCESS_KEY|PRIVATE_KEY|"
                         r"^(ANTHROPIC|CLAUDE|GH|GITHUB|GITLAB|AWS|AZURE|GOOGLE|OPENAI|HF)_|"
                         r"^(SSH_AUTH_SOCK|SSH_AGENT_PID|GPG_AGENT_INFO|DBUS_SESSION_BUS_ADDRESS|"
-                        r"PYTHONPATH)$", re.I)
+                        r"DBUS_SYSTEM_BUS_ADDRESS|PYTHONPATH)$", re.I)
 
 
 def agent_env(task: store.Task) -> dict:
@@ -119,6 +119,8 @@ def agent_env(task: store.Task) -> dict:
     env = {**keep, "PWD": str(task.worktree),  # opencode finds the project from $PWD
            "OPENCODE_CONFIG": str(write_config_layer(task)),
            "WB_TASK": task.name, "WB_HOME": str(store.home()), **CLEAN_ENV}
+    if context.writable(task) is not None:  # its own: the user's holds their bus and agents
+        env["XDG_RUNTIME_DIR"] = str(context.runtime_dir(task))
     env.update(gitguard.install(context.rules_dir(task) / "bin", Path(task.spec["repo"]), PKG_ROOT,
                                 env.get("PATH") or os.defpath) or {})
     return env
@@ -267,7 +269,8 @@ def run_round(task: store.Task, n: int, keep: bool = False) -> dict:
     cmd.append(note + prompt)
     env = agent_env(task)
     cmd = lane.wrap(context.writable(task), cmd,   # writes stay in the agent's lane (lane.py),
-                    context.readable(task))       # and credentials out of its reach
+                    context.readable(task),       # and credentials out of its reach
+                    context.unix_paths(task))
     log = open(task.dir / "runner.log", "a")
     proc = subprocess.Popen(cmd, cwd=task.worktree, env=env, stdin=subprocess.DEVNULL,
                             stdout=subprocess.PIPE, stderr=log, text=True,
@@ -426,7 +429,8 @@ def run_in_lane(task: store.Task, cmd: str, limit: int) -> tuple[int | str, str]
     exit code ("timeout" when it ran past `limit` seconds) and the decoded output."""
     # in the agent's lane and with its environment: the tests run the agent's code, and must
     # pass or fail as they did when the agent ran them
-    argv = lane.wrap(context.writable(task), ["/bin/sh", "-c", cmd], context.readable(task))
+    argv = lane.wrap(context.writable(task), ["/bin/sh", "-c", cmd], context.readable(task),
+                     context.unix_paths(task))
     proc = subprocess.Popen(argv, cwd=task.worktree, stdout=subprocess.PIPE,
                             stderr=subprocess.STDOUT, env=agent_env(task),
                             start_new_session=True)  # its own group: a timeout ends all of it

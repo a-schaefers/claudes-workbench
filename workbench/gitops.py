@@ -4,6 +4,7 @@ The agent never commits; everything it does stays in the worktree's working tree
 """
 import hashlib
 import os
+import shutil
 import subprocess
 import tempfile
 from collections import Counter
@@ -62,20 +63,20 @@ def mark(worktree: Path) -> str:
 def with_new_files(worktree: Path, *args) -> str:
     """`git <args>` with new files counted as changes (intent-to-add), in a scratch index: the
     worktree's own index, and anything a concurrent git command holds, are left alone."""
-    fd, index = tempfile.mkstemp(prefix="wb-index-")
-    os.close(fd)
-    os.unlink(index)  # git wants to create it
+    # in a private directory of the state dir, not the temp dir: /tmp is in the agent's lane, and
+    # an agent process still running could rewrite the index between `add -N` and the diff, so
+    # files dropped out of the diff Claude reviews (the 2026-11-16 audit)
+    from . import store
+    store.home().mkdir(parents=True, exist_ok=True)
+    scratch = tempfile.mkdtemp(prefix="wb-index-", dir=store.home())
+    index = os.path.join(scratch, "index")
     env = {"GIT_INDEX_FILE": index}
     try:
         git(worktree, "read-tree", "HEAD", env=env)
         git(worktree, "add", "-A", "-N", env=env)
         return git(worktree, *args, env=env)
     finally:
-        for p in (index, index + ".lock"):
-            try:
-                os.unlink(p)
-            except FileNotFoundError:
-                pass
+        shutil.rmtree(scratch, ignore_errors=True)
 
 
 def diff(worktree: Path, base: str, stat=False, paths=(), numstat=False) -> str:

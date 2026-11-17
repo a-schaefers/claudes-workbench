@@ -78,11 +78,13 @@ dependencies. No packaging: it runs from the clone.
   requests, budgeted.
 - `context.py`: what the agent knows and may do: instructions, denied tools and skills, the shell
   allowlist (`shell_rules`: `ALLOWED_COMMANDS`, `PROJECT_BINS`, `ASK_FIRST`, `INSTALL_LISTED`,
-  `DENIED_SHELL` with its wrappers), the lane (`writable`, `readable`, `SECRETS`, `external_rules`),
+  `DENIED_SHELL` with its wrappers), the lane (`writable`, `readable`, `SECRETS`, `tool_roots`,
+  `runtime_dir`, `unix_paths`, `external_rules`),
   `rules_dir` (the agent's rules, outside its lane), `grants`/`grant` (what Claude allowed the
   task: `rules/<task>/grants.json`).
-- `lane.py`: Landlock: the runner starts OpenCode through it (`wrap`); restricts writes and reads,
-  sets no-new-privileges, execs. Fails closed: Landlock present but refusing the lane exits 126
+- `lane.py`: Landlock: the runner starts OpenCode through it (`wrap`); restricts writes, reads,
+  connecting to outside UNIX sockets (ABI 9) and signals (ABI 6), sets no-new-privileges (on any
+  Linux), execs. Fails closed: Landlock present but refusing the lane exits 126
   (`workbench lane: the kernel refused the lane`); without Landlock (or off `lane.UNIFIED`'s
   architectures) it runs unrestricted and `wb doctor` says so. Standard library only.
 - `gitguard.py`: the read-only `git` shim first on the agent's PATH. Standard library only: it's

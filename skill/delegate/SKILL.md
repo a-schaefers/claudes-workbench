@@ -37,8 +37,10 @@ from its handbook and will ask (`ask_reviewer`) or say so in its summary when th
 of those; then you do it. Its hard limits: no sudo, git read-only (a `git` of workbench's own on
 its PATH; scratch repos under the temp directory, which tests make, stay writable), no `gh`, and
 no edits to CLAUDE.md, AGENTS.md or `.claude/`. The shell rules refuse the direct forms; behind
-them the kernel refuses root and writes to the repo's git, and no credential is in the agent's
-reach, so `gh` or a push gets no login. The rules stop mistakes, not a determined agent: the
+them, where `wb doctor` reports Landlock, the kernel refuses root and writes to the repo's git,
+and no credential is in the agent's reach, so `gh` or a push gets no login. Without Landlock
+(macOS, old kernels) only the rules hold: read the report's flagged files closely and check
+`git -C <repo> log` after a task. The rules stop mistakes, not a determined agent: the
 round report flags any of your files it changed anyway (through the shell). Talk to it like a teammate: answer its questions, send notes while
 it works, explain the why in feedback.
 

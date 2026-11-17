@@ -80,6 +80,8 @@ class Base(unittest.TestCase):
         deadline = time.time() + 15
         while time.time() < deadline and any(cli.runner_alive(t) for t in store.all_tasks()):
             time.sleep(0.1)
+        for t in store.all_tasks():  # the agents' runtime directories are in /tmp, not the state
+            context.drop_runtime_dir(t)
         os.environ.clear()
         os.environ.update(self.env_before)
         self.tmp.cleanup()
@@ -1111,6 +1113,207 @@ class Lane(Base):
             self.assertEqual(out.stdout.split(), ["refused", "read"], out.stderr)
             self.assertTrue((inside / "g").exists())
             self.assertEqual(list(outside.iterdir()), [])
+
+    # The 2026-11-16 audit of the lane. A fake home outside /tmp (which is in the lane), and a task
+    # with no runner: these check what the lane holds, and the kernel where it can.
+    def fake_home(self) -> Path:
+        home = Path(tempfile.mkdtemp(dir=Path.home(), prefix=".wb-lane-test-"))
+        self.addCleanup(shutil.rmtree, home, True)
+        env = {"HOME": str(home)}
+        for v in ("XDG_CONFIG_HOME", "XDG_DATA_HOME", "XDG_STATE_HOME", "XDG_CACHE_HOME",
+                  "CARGO_HOME", "GOPATH", "GNUPGHOME", "CLAUDE_CONFIG_DIR", "CONDA_PREFIX"):
+            env[v] = ""
+        patcher = mock.patch.dict(os.environ, env)
+        patcher.start()
+        self.addCleanup(patcher.stop)
+        for v in [k for k, val in env.items() if not val]:
+            os.environ.pop(v, None)
+        return home
+
+    def bare_task(self, name, repo) -> store.Task:
+        task = store.Task(name)
+        task.dir.mkdir(parents=True)
+        (task.dir / "task.json").write_text(json.dumps({"name": name, "repo": str(repo)}))
+        return task
+
+    def reads_in_lane(self, task, files, extra=()):
+        script = ("import sys\nfor f in sys.argv[1:]:\n    try:\n        open(f).read()\n"
+                  "        print('read')\n    except PermissionError:\n        print('refused')\n")
+        out = subprocess.run(lane.wrap(context.writable(task),
+                                       [sys.executable, "-c", script, *map(str, files)],
+                                       context.readable(task), *extra),
+                             capture_output=True, text=True, timeout=20)
+        return out.stdout.split() or [out.stderr]
+
+    def test_toolchain_bins_user_site_and_a_repo_under_gopath_stay_out_of_the_lane(self):
+        home = self.fake_home()
+        for d in (".cargo/bin", ".cargo/registry", "go/bin", "go/pkg", ".pub-cache",
+                  ".local/lib/python3/site-packages", "src/app", "R", "perl5", "letters"):
+            (home / d).mkdir(parents=True)
+        (home / ".cargo" / "env").write_text("export PATH")
+        (home / ".cargo" / ".package-cache").write_text("")
+        (home / ".cargo" / "credentials.toml").write_text("token")
+        subprocess.run(["git", "init", "-q", str(home / "src" / "app")], check=True)
+        os.environ["GOPATH"] = str(home / "src")      # a GOPATH that holds every project
+        task = self.bare_task("t-tools", home / "src" / "app")
+        w = context.writable(task)
+        for p in (".cargo/registry", ".cargo/.package-cache", "go/pkg", ".pub-cache"):
+            self.assertIn(str(home / p), w)
+        for p in (".cargo/bin", ".cargo/env", ".cargo/credentials.toml", "go/bin", ".local/lib",
+                  "src"):                           # the PATH, the shell's startup, user site
+            self.assertFalse([q for q in w if q == str(home / p) or q.startswith(f"{home / p}/")
+                              or str(home / p).startswith(q + "/")], p)
+        self.assertFalse([q for q in w if str(home / "src" / "app").startswith(q + "/")])
+        r = context.readable(task)
+        self.assertIn(str(home / "R"), r)               # R's and Perl's user libraries
+        self.assertIn(str(home / "perl5"), r)
+        self.assertNotIn(str(home / "letters"), r)
+
+    @unittest.skipUnless(lane.abi(), "needs Landlock")
+    def test_secrets_stay_unreadable_inside_tool_homes_and_where_variables_moved_them(self):
+        home = self.fake_home()
+        files = {".config/opencode/service.json": "pw", ".local/state/opencode/service.json": "pw",
+                 ".gem/credentials": "key", ".config/git/credentials": "x", ".pgpass": "x",
+                 ".claude.json.backup": "x", "moved-gpg/private.key": "k",
+                 "xdg/gh/hosts.yml": "token",
+                 ".config/opencode/opencode.json": "{}", ".local/state/opencode/model.json": "{}",
+                 ".gem/specs/x": "fine", ".npmrc": "registry"}
+        for rel, text in files.items():
+            (home / rel).parent.mkdir(parents=True, exist_ok=True)
+            (home / rel).write_text(text)
+        os.environ["GNUPGHOME"] = str(home / "moved-gpg")
+        os.environ["XDG_CONFIG_HOME"] = str(home / "xdg")
+        task = self.bare_task("t-moved", self.repo)
+        w = context.writable(task)
+        self.assertNotIn(str(home / ".local/state/opencode"), w)      # split around the secret
+        self.assertIn(str(home / ".local/state/opencode/model.json"), w)
+        got = dict(zip(files, self.reads_in_lane(task, [home / f for f in files])))
+        self.assertEqual({f for f, v in got.items() if v == "read"},
+                         {".config/opencode/opencode.json", ".local/state/opencode/model.json",
+                          ".gem/specs/x", ".npmrc"}, got)
+
+    def test_workbench_stays_readable_inside_claudes_directory(self):
+        home = self.fake_home()
+        claude = home / ".claude"
+        pkg = claude / "plugins" / "marketplaces" / "workbench"   # the README's install
+        pkg.mkdir(parents=True)
+        (claude / ".credentials.json").write_text("secret")
+        (claude / "plugins" / "other").mkdir()
+        task = self.bare_task("t-market", self.repo)
+        with mock.patch.object(context, "PKG_ROOT", pkg):
+            r = context.readable(task)
+        self.assertIn(str(pkg), r)
+        self.assertFalse([p for p in r if p in (str(claude), str(claude / "plugins"))
+                          or p.startswith(str(claude)) and not p.startswith(str(pkg))])
+
+    @unittest.skipUnless(lane.abi(), "needs Landlock")
+    def test_programs_installed_in_a_plain_home_directory_run_in_the_lane(self):
+        home = self.fake_home()
+        for d in ("miniconda3/bin", "apps/t2/bin", ".local/bin", "bin"):
+            (home / d).mkdir(parents=True)
+        shutil.copy("/bin/true", home / "miniconda3" / "bin" / "tool")
+        shutil.copy("/bin/true", home / "apps" / "t2" / "bin" / "t2")
+        os.symlink(home / "apps" / "t2" / "bin" / "t2", home / ".local" / "bin" / "t2")
+        os.environ["PATH"] = os.pathsep.join([str(home / "miniconda3" / "bin"),
+                                              str(home / ".local" / "bin"), str(home / "bin"),
+                                              os.environ["PATH"]])
+        task = self.bare_task("t-conda", self.repo)
+        r = context.readable(task)
+        self.assertIn(str(home / "miniconda3"), r)      # the prefix, not just bin: lib/ beside it
+        self.assertIn(str(home / "apps" / "t2"), r)     # through the link in ~/.local/bin
+        self.assertNotIn(str(home), r)                  # ~/bin's prefix is the home: never whole
+        for prog in (home / "miniconda3" / "bin" / "tool", home / ".local" / "bin" / "t2"):
+            out = subprocess.run(lane.wrap(context.writable(task), [str(prog)], r),
+                                 capture_output=True, text=True, timeout=20)
+            self.assertEqual(out.returncode, 0, out.stderr)
+        out = subprocess.run(lane.wrap(["/tmp"], [str(home / "nothing-here")]),
+                             capture_output=True, text=True, timeout=20)
+        self.assertEqual((out.returncode, out.stderr.split(":")[0]), (127, "workbench lane"))
+
+    def test_a_repo_that_holds_secrets_keeps_them_out_and_the_home_is_refused(self):
+        home = self.fake_home()
+        for d in (".config/gh", ".config/app"):
+            (home / ".config" / d.split("/")[1]).mkdir(parents=True, exist_ok=True)
+        (home / ".config" / "gh" / "hosts.yml").write_text("token")
+        subprocess.run(["git", "init", "-q", str(home / ".config")], check=True)
+        task = self.bare_task("t-dots", home / ".config")
+        r = context.readable(task)
+        self.assertIn(str(home / ".config" / "app"), r)
+        self.assertFalse([p for p in r if p in (str(home / ".config"), str(home / ".config/gh"))])
+        subprocess.run(["git", "init", "-q", str(home)], check=True)
+        subprocess.run(["git", "init", "-q", str(home / ".claude" / "plugins" / "p")], check=True)
+        for repo, said in ((home, "your home directory"),
+                           (home / ".claude" / "plugins" / "p", "credentials")):
+            err = io.StringIO()
+            with redirect_stderr(err), self.assertRaises(SystemExit):
+                run_wb("start", "t-home", "--spec", str(self.spec), "--repo", str(repo))
+            self.assertIn(said, err.getvalue())
+
+    def test_a_snap_acceptance_command_is_refused_at_start(self):
+        with mock.patch("shutil.which", return_value="/snap/bin/go"):
+            err = io.StringIO()
+            with redirect_stderr(err), self.assertRaises(SystemExit):
+                self.start("t-snap", "ok", "--test", "go test ./...")
+        self.assertIn("go is a snap", err.getvalue())
+        self.assertFalse(store.Task("t-snap").exists)
+
+    def test_the_users_devices_mounts_and_runtime_directory_stay_out_of_the_lane(self):
+        self.start("t-dev", "ok")
+        wait_phase("t-dev", {"review"})
+        task = store.Task("t-dev")
+        w, r = context.writable(task), context.readable(task)
+        self.assertIn("/dev/null", w)
+        for root in ("/dev", "/dev/pts", "/mnt", "/media", "/run/media", "/run/user", "/home"):
+            self.assertNotIn(root, w + r)
+        if os.environ.get("XDG_RUNTIME_DIR"):
+            self.assertFalse([p for p in w + r if p.startswith(os.environ["XDG_RUNTIME_DIR"])])
+        env = runner.agent_env(task)
+        run = Path(env["XDG_RUNTIME_DIR"])
+        self.assertNotEqual(str(run), os.environ.get("XDG_RUNTIME_DIR"))
+        self.assertEqual((run.stat().st_mode & 0o777, run.stat().st_uid), (0o700, os.getuid()))
+        devices = [d for d in ("/dev/kmsg", "/dev/rfkill", "/dev/kvm", "/dev/udmabuf", "/dev/fuse",
+                               "/dev/uinput", "/dev/hwrng") if os.access(d, os.R_OK)]
+        if lane.abi() and devices:  # one the user may open, but not from the lane
+            self.assertEqual(self.reads_in_lane(task, devices[:1]) + [], ["refused"])
+
+    @unittest.skipUnless(lane.abi() >= 6, "needs Landlock ABI 6")
+    def test_the_lane_can_reach_neither_the_users_sockets_nor_their_processes(self):
+        with tempfile.TemporaryDirectory(dir=Path.home(), prefix=".wb-sock-") as d:
+            path = os.path.join(d, "s")
+            server = socket.socket(socket.AF_UNIX)
+            server.bind(path)
+            server.listen()
+            self.addCleanup(server.close)
+            script = ("import os, socket, subprocess, sys\n"
+                      "c = socket.socket(socket.AF_UNIX)\n"
+                      "try:\n    c.connect(sys.argv[1]); print('connected')\n"
+                      "except OSError:\n    print('refused')\n"
+                      "try:\n    os.kill(os.getppid(), 0); print('signalled')\n"
+                      "except OSError:\n    print('nosignal')\n"
+                      "p = subprocess.Popen(['sleep', '5']); p.kill(); p.wait(); print('own')\n")
+            for unix, connect in (([], "refused"), ([d], "connected")):
+                out = subprocess.run(lane.wrap(["/tmp"], [sys.executable, "-c", script, path],
+                                               None, unix), capture_output=True, text=True,
+                                     timeout=20)
+                self.assertEqual(out.stdout.split(),
+                                 [connect if lane.abi() >= 9 else "connected", "nosignal", "own"],
+                                 out.stderr)
+
+    @unittest.skipUnless(sys.platform.startswith("linux"), "Linux")
+    def test_no_new_privileges_holds_without_landlock_too(self):
+        script = ("import sys; sys.path.insert(0, sys.argv[1]); from workbench import lane\n"
+                  "lane.abi = lambda: 0; lane.restrict(['/tmp'])\n"
+                  "print([l for l in open('/proc/self/status') if l.startswith('NoNewPrivs')])\n")
+        out = subprocess.run([sys.executable, "-c", script, str(ROOT)], capture_output=True,
+                             text=True, timeout=20)
+        self.assertIn("NoNewPrivs:\\t1", out.stdout, out.stderr)
+
+    def test_doctor_names_what_an_old_landlock_cant_confine(self):
+        self.assertEqual(lane.gaps(10), [])
+        self.assertTrue(any("truncat" in g for g in lane.gaps(2)))
+        self.assertTrue(any("cross-device" in g for g in lane.gaps(1)))
+        self.assertFalse(any("cross-device" in g for g in lane.gaps(2)))
+        self.assertEqual(lane.gaps(0), [])
 
 
 class Permission(Base):

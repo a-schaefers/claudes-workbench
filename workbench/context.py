@@ -11,6 +11,9 @@ from __future__ import annotations
 
 import hashlib
 import os
+import shutil
+import stat
+import sys
 import tempfile
 from pathlib import Path
 
@@ -32,7 +35,8 @@ DENIED_TOOLS = ("question", "experimental_image_generate", "execute", "subagent"
 # `cd x && sudo ...` is refused too. Everything else is the agent's, guided by the handbook.
 # The plain wrappers are covered too (`env gh`, `timeout 5 sudo …`). A command built some other
 # way (`bash -c`, an interpreter) still gets past these patterns; behind them, the kernel refuses
-# sudo (no_new_privs, lane.py) and gh finds no login (its config and tokens are out of reach).
+# sudo (no_new_privs, lane.py, on any Linux) and, with Landlock, gh finds no login (its config and
+# tokens are out of reach). On macOS only these patterns stand.
 _HARD = ("sudo", "doas", "pkexec", "su", "gh", "*/git")
 _WRAPPERS = ("env", "env *", "xargs", "xargs *", "nohup", "nice", "nice *", "time", "command",
              "exec", "timeout *", "stdbuf *", "setsid")
@@ -119,7 +123,8 @@ def shell_rules(task: store.Task) -> list[dict]:
     # and what it built anywhere in its lane, by path: a debug binary in the temp directory was
     # refused (2026-11-16) though `bash` could run it; the lane, not this list, bounds writes
     rules += [{"action": "shell", "resource": f"{d}/*", "effect": "allow"}
-              for d in (writable(task) or []) if os.path.isdir(d) and d not in ("/dev", "/proc")]
+              for d in (writable(task) or []) if os.path.isdir(d)
+              and not d.startswith(("/dev", "/proc"))]
     rules += [{"action": "shell", "resource": r, "effect": "allow"} for r in PROJECT_BINS]
     rules += [{"action": "shell", "resource": r, "effect": "deny"} for r in ASK_FIRST]
     rules += [{"action": "shell", "resource": r, "effect": "allow"} for r in INSTALL_LISTED]
@@ -134,19 +139,37 @@ def shell_rules(task: store.Task) -> list[dict]:
 # kernel (lane.py), file tools and the shell's working directory are kept to the lane and the
 # READABLE places by OpenCode's `external_directory` rule, and the agent asks Claude for the rest
 # (`wb allow --path`). Reading through the shell stays free: `cat`, a compiler, an interpreter.
-TOOL_HOMES = (".cache", ".cargo", ".rustup", "go", ".npm", ".bun", ".deno", ".yarn",
-              ".pnpm-store", ".local/share/pnpm", ".local/share/uv", ".gradle", ".m2", ".nuget",
-              ".dotnet", ".gem", ".julia", ".cabal", ".stack", ".ghcup", ".platformio", ".conan2",
-              ".hex", ".mix", ".sbt", ".ivy2", ".local/lib")
-# where the user moved them: a toolchain follows its variable, not the default path
+# A toolchain's caches, not the directories on the user's PATH or in their shell's startup: a file
+# the agent plants there runs later outside the lane (the 2026-11-16 audit: ~/.local/lib's user
+# site-packages, whose .pth files every python runs; ~/.cargo/bin; GOPATH holding the repo itself).
+TOOL_HOMES = (".cache", ".cargo", ".rustup", "go/pkg", ".npm", ".bun/install/cache", ".yarn",
+              ".pnpm-store", ".local/share/pnpm/store", ".local/share/uv", ".gradle", ".m2",
+              ".nuget", ".dotnet", ".gem", ".julia", ".cabal", ".stack", ".ghcup", ".platformio",
+              ".conan2", ".hex", ".mix", ".sbt", ".ivy2", ".pub-cache", ".konan",
+              ".local/share/hatch", ".local/share/virtualenvs")
+# where the user moved them: a toolchain follows its variable, not the default path; GOPATH and
+# BUN_INSTALL name a whole home (GOPATH may hold every project), so only their caches
 TOOL_HOME_VARS = ("CARGO_HOME", "RUSTUP_HOME", "GOPATH", "GOMODCACHE", "GOCACHE", "npm_config_cache",
                   "PIP_CACHE_DIR", "UV_CACHE_DIR", "GRADLE_USER_HOME", "BUN_INSTALL", "DENO_DIR",
-                  "MIX_HOME", "HEX_HOME")
+                  "MIX_HOME", "HEX_HOME", "PUB_CACHE", "KONAN_DATA_DIR", "HATCH_DATA_DIR",
+                  "WORKON_HOME")
+VAR_CACHES = {"GOPATH": "pkg", "BUN_INSTALL": "install/cache"}
+# inside a toolchain home in the lane, what stays out of it: the programs on the user's PATH and
+# what their shell sources (relative to the home, or to CARGO_HOME for cargo's)
+NOT_WRITABLE = (".cargo/bin", ".cargo/env", ".dotnet/tools", ".cabal/bin", ".ghcup/bin")
 # what OpenCode and the ask server write themselves, beside the task's directory
 OPENCODE_HOMES = (".local/share/opencode", ".local/state/opencode")
+# The device nodes builds use, not /dev: the user's terminals, input devices (/dev/uinput) and
+# security keys were open to the agent (the 2026-11-16 audit). /dev/shm stays, a trade-off:
+# multiprocessing's semaphores, Chromium and many test runners need it, and Landlock can't tell
+# one program's segments from another's. /dev/pts stays out (every terminal of the user's); a
+# task that needs it, or a GPU, asks (`wb allow --path`).
+DEV_NODES = ("/dev/null", "/dev/zero", "/dev/full", "/dev/random", "/dev/urandom", "/dev/tty",
+             "/dev/ptmx", "/dev/shm")
 # the system, for the file tools: headers, man pages, installed packages' sources
-READABLE = ("/usr", "/etc", "/opt", "/lib", "/lib64", "/bin", "/sbin", "/proc", "/sys", "/dev",
+READABLE = ("/usr", "/etc", "/opt", "/lib", "/lib64", "/bin", "/sbin", "/proc", "/sys",
             "/nix", "/run/current-system", "/Library", "/System", "/Applications")
+TEMP_ROOTS = ("/tmp", "/var/tmp")
 
 
 def lane_paths(task: store.Task) -> list[str]:
@@ -170,6 +193,45 @@ def _both(paths) -> list[str]:
     return out
 
 
+def _under(a: str, b: str) -> bool:
+    return a.startswith(b.rstrip(os.sep) + os.sep)
+
+
+_COMMON: dict[str, str] = {}
+
+
+def repo_dirs(task: store.Task) -> set[str]:
+    """The task's repo and its git directory, real paths: no lane entry may hold either, or the
+    agent could write a hook or core.fsmonitor that wb's own git runs outside the lane (the
+    2026-11-16 audit: GOPATH=~/src, or ~/go with the repo in ~/go/src)."""
+    repo = task.spec.get("repo")
+    if not repo:
+        return set()
+    real = os.path.realpath(repo)
+    if real not in _COMMON:
+        try:
+            _COMMON[real] = os.path.realpath(os.path.join(real, gitops.git(
+                Path(real), "rev-parse", "--git-common-dir").strip()))
+        except (gitops.GitError, OSError):
+            return {real, os.path.join(real, ".git")}
+    return {real, _COMMON[real]}
+
+
+def _split(place: str, out_of: set[str]) -> list[str]:
+    """`place`, or when something in `out_of` lies beneath it, its other entries one by one
+    (Landlock only allows: the way to leave one file out of a directory is to grant the rest)."""
+    real = os.path.realpath(place)
+    if real in out_of or any(_under(real, h) for h in out_of):
+        return []
+    if not any(_under(h, real) for h in out_of):
+        return [place]
+    try:
+        names = sorted(os.listdir(real))
+    except OSError:
+        return []
+    return [q for n in names for q in _split(os.path.join(real, n), out_of)]
+
+
 def writable(task: store.Task) -> list[str] | None:
     """The directories (and files) the agent may write to, None when the user turned the lane off
     (`"paths": ["*"]`). Only those that exist: the kernel's rules are on real files."""
@@ -177,11 +239,16 @@ def writable(task: store.Task) -> list[str] | None:
     if "*" in extra:
         return None
     home = Path.home()
-    xdg = [os.environ.get(v) for v in ("XDG_CACHE_HOME", "XDG_RUNTIME_DIR")]
+    # XDG_RUNTIME_DIR isn't here: it holds the user's bus, SSH and GPG agent sockets and their
+    # runtime systemd units (the 2026-11-16 audit); the agent gets its own (runtime_dir)
+    xdg = [os.environ.get("XDG_CACHE_HOME")]
     xdg += [os.path.join(os.environ[v], "opencode") for v in ("XDG_DATA_HOME", "XDG_STATE_HOME")
             if os.environ.get(v)]  # OpenCode's own data, when the user moved those
-    xdg += [os.environ[v].split(os.pathsep)[0] for v in TOOL_HOME_VARS if os.environ.get(v)]
-    places = [task.dir, tempfile.gettempdir(), "/tmp", "/var/tmp", "/dev", "/proc",
+    for v in TOOL_HOME_VARS:
+        if os.environ.get(v):
+            first = os.environ[v].split(os.pathsep)[0]
+            xdg.append(os.path.join(first, VAR_CACHES[v]) if v in VAR_CACHES else first)
+    places = [task.dir, tempfile.gettempdir(), *TEMP_ROOTS, *DEV_NODES, "/proc",
               *(home / h for h in TOOL_HOMES + OPENCODE_HOMES), *(x for x in xdg if x),
               *(Path(p).expanduser() for p in extra)]
     for name in ("notify.jsonl", "notify.jsonl.lock"):   # the ask server raises its questions
@@ -190,13 +257,94 @@ def writable(task: store.Task) -> list[str] | None:
         f.touch()
         places.append(f)
     whole = {"/", os.path.realpath(home)}  # a GOPATH=~ must not hand over the home directory
-    return [p for p in _both(places) if os.path.exists(p) and os.path.realpath(p) not in whole]
+    temps = {os.path.realpath(t) for t in (tempfile.gettempdir(), *TEMP_ROOTS)}
+    guard = repo_dirs(task)  # a repo kept in /tmp is the user's choice: the temp dirs stay
+    cargo = os.environ.get("CARGO_HOME")
+    out_of = {h for h in secret_paths() if os.path.lexists(h)} | \
+        {os.path.realpath(p) for p in (*(home / h for h in NOT_WRITABLE),
+                                       *((Path(cargo) / "bin", Path(cargo) / "env") if cargo else ()))
+         if os.path.lexists(p)}
+    kept = []
+    for p in places:
+        real = os.path.realpath(p)
+        if not os.path.exists(p) or real in whole:
+            continue
+        if real in temps:  # a secret or repo kept in /tmp stays in reach: splitting /tmp would
+            kept.append(str(p))  # refuse every new file there (Java's, Xvfb's)
+        elif not any(g == real or _under(g, real) for g in guard):
+            kept += _split(str(p), out_of)
+    return [p for p in _both(kept) if os.path.exists(p) and os.path.realpath(p) not in whole]
+
+
+# the toolchains `wb doctor` checks for snaps
+TOOLCHAINS = ("go", "node", "npm", "npx", "yarn", "pnpm", "dotnet", "java", "cmake", "flutter",
+              "dart", "kotlin", "cargo", "rustc", "python3", "opencode")
+
+
+def lane_on() -> bool:
+    """Whether the lane is on for every task (commands.json `"paths": ["*"]` turns it off)."""
+    return "*" not in ((store.read_json(commands_path(), {}) or {}).get("paths") or [])
+
+
+def snaps(names) -> list[str]:
+    """The commands among `names` that resolve to a snap: snap-confine needs the privilege that
+    the lane's no-new-privileges takes away, so a snap can't run in the lane."""
+    out = []
+    for n in names:
+        p = shutil.which(n)
+        if p and (p.startswith("/snap/") or os.path.realpath(p) == "/usr/bin/snap"):
+            out.append(n)
+    return out
+
+
+def unix_paths(task: store.Task) -> list[str]:
+    """Where the agent may connect to a UNIX socket made outside its lane (Landlock ABI 9): only
+    what the user and Claude added (`paths`; `wb allow --path /run/postgresql` for a test
+    database), never the session bus or the user's agents."""
+    return _both(p for p in (Path(q).expanduser() for q in lane_paths(task) if q != "*")
+                 if os.path.exists(p))
+
+
+def _runtime_path(task: store.Task) -> Path:
+    tag = hashlib.sha256(f"{store.home()}\0{task.name}".encode()).hexdigest()[:12]
+    base = Path("/tmp") if os.path.isdir("/tmp") else Path(tempfile.gettempdir())
+    return base / f"wb-run-{os.getuid()}-{tag}"
+
+
+def runtime_dir(task: store.Task) -> Path:
+    """The agent's own XDG_RUNTIME_DIR, private (0700) and short (a socket path has ~107 bytes),
+    in /tmp, which is in the lane: tools that want one (pnpm's locks, bun) get it, and nothing
+    finds the user's session bus or agents there."""
+    d = _runtime_path(task)
+    try:
+        d.mkdir(mode=0o700)
+    except FileExistsError:
+        pass
+    st = os.lstat(d)
+    if not stat.S_ISDIR(st.st_mode) or st.st_uid != os.getuid():  # someone else's: not this one
+        return Path(tempfile.mkdtemp(prefix="wb-run-"))
+    return d
+
+
+def drop_runtime_dir(task: store.Task) -> None:
+    """Remove the agent's runtime directory once the task is closed (accept, discard)."""
+    d = _runtime_path(task)
+    try:
+        st = os.lstat(d)
+    except OSError:
+        return
+    if stat.S_ISDIR(st.st_mode) and st.st_uid == os.getuid():
+        shutil.rmtree(d, ignore_errors=True)
 
 
 # Where credentials and the user's own records live, under the home directory: the agent's
 # processes can't read files there (Landlock), so a push, a gh call or a cloud login can't borrow
 # the user's keys, nor can an agent read Claude's own files or the user's mail. Found 2026-11-16:
 # `python3` running gh inside the lane was logged in, and the SSH keys that push were readable.
+# The audit that day added the rest below `.claude.json` (OpenCode's service password among
+# them: its background service runs outside the lane). Left readable on purpose: `.npmrc` and
+# `.yarnrc.yml` (the package managers read them to install) and OpenCode's own `auth.json`
+# (OpenCode runs in the lane and needs it).
 SECRETS = (".ssh", ".gnupg", ".password-store", ".netrc", ".git-credentials", ".authinfo",
            ".authinfo.gpg", ".bitwarden.json", ".secrets.gpg", ".config/gh", ".config/hub",
            ".local/share/keyrings", ".aws", ".azure", ".config/gcloud", ".kube", ".docker",
@@ -204,45 +352,137 @@ SECRETS = (".ssh", ".gnupg", ".password-store", ".netrc", ".git-credentials", ".
            ".cargo/credentials.toml", ".config/rclone", ".codex", ".pki", ".mozilla",
            ".thunderbird", ".config/chromium", ".config/google-chrome", ".config/BraveSoftware",
            ".camoufox", ".cloakbrowser", ".irssi", ".bash_history", ".zsh_history",
-           ".python_history", ".claude", ".claude.json")
+           ".python_history", ".claude", ".claude.json",
+           ".config/opencode/service.json", ".local/state/opencode/service.json",
+           ".config/git/credentials", ".gcm", ".pgpass", ".my.cnf", ".vault-token", ".s3cfg",
+           ".boto", ".config/glab-cli", ".config/github-copilot", ".config/op",
+           ".config/Bitwarden CLI", ".config/doctl", ".config/sops", ".config/age", ".fly",
+           ".kaggle", ".oci", ".gemini", ".config/containers/auth.json",
+           ".local/share/fish/fish_history", ".var/app", ".config/vivaldi",
+           ".config/microsoft-edge", ".config/opera")
+# where the user moved them (a file, a directory, or a path list)
+SECRET_VARS = ("GNUPGHOME", "PASSWORD_STORE_DIR", "GH_CONFIG_DIR", "DOCKER_CONFIG", "KUBECONFIG",
+               "AWS_SHARED_CREDENTIALS_FILE", "AWS_CONFIG_FILE", "CLOUDSDK_CONFIG",
+               "AZURE_CONFIG_DIR", "HISTFILE")
 # Of the home directory's own entries, the dotfiles (tools' configs, caches, toolchains) stay
-# readable, and these; the user's documents and other projects don't, beyond the task's repo,
-# workbench itself and what Claude allowed (`wb allow --path`).
-HOME_READABLE = ("bin", "go")
+# readable, and these (R's and Perl's user libraries); the user's documents and other projects
+# don't, beyond the task's repo, workbench itself, the programs on PATH and what Claude allowed.
+HOME_READABLE = ("bin", "go", "R", "perl5")
+# Outside the home directory, these hold the user's data, not the system: like the home's own
+# entries, only what is kept (the repo, the lane, a grant) is readable beneath them. /mnt holds
+# the Windows drives on WSL2, /home the other users' homes (the 2026-11-16 audit).
+ONLY_KEPT = ("/dev", "/mnt", "/media", "/run/media", "/run/user", "/home")
+
+
+def secret_paths() -> set[str]:
+    """SECRETS and Claude's directory, real paths, where the environment says they are too."""
+    home = Path.home()
+    paths = [*(home / h for h in SECRETS), claude_home()]
+    for var, base in (("XDG_CONFIG_HOME", ".config/"), ("XDG_DATA_HOME", ".local/share/"),
+                      ("XDG_STATE_HOME", ".local/state/")):
+        if os.environ.get(var):
+            paths += [Path(os.environ[var]) / h[len(base):] for h in SECRETS if h.startswith(base)]
+    paths += [Path(p).expanduser() for v in SECRET_VARS
+              for p in (os.environ.get(v) or "").split(os.pathsep) if p]
+    if os.environ.get("CARGO_HOME"):
+        paths += [Path(os.environ["CARGO_HOME"]) / n for n in ("credentials", "credentials.toml")]
+    try:  # .claude.json's backups and temporary copies
+        paths += [home / n for n in os.listdir(home) if n.startswith(".claude.json")]
+    except OSError:
+        pass
+    whole = {"/", os.path.realpath(home)}  # a variable set to ~ must not hide the whole home
+    return {r for r in map(os.path.realpath, paths) if r not in whole}
+
+
+def tool_roots(hidden: set[str]) -> set[str]:
+    """The installs the agent's programs run from: each PATH directory's prefix (its parent when
+    it is a `bin`), the targets of the links in the home's PATH directories, and the Python
+    running workbench (the git shim, the ask server). Running a program reads it, so one under a
+    non-dot home directory (~/miniconda3, ~/flutter, ~/apps) failed in the lane (the 2026-11-16
+    audit). Never `/`, the home directory or anything holding a secret: a prefix is kept whole."""
+    home = os.path.realpath(Path.home())
+    prefix = lambda d: os.path.dirname(d) if os.path.basename(d) == "bin" else d  # noqa: E731
+    found = set()
+    for d in (os.environ.get("PATH") or "").split(os.pathsep):
+        if not os.path.isabs(d) or not os.path.isdir(d):
+            continue
+        real = os.path.realpath(d)
+        if not _under(real, home):  # the directory alone: /mnt/c/Users/<you>/bin isn't a prefix
+            found.add(real)
+            continue
+        found.add(prefix(real))
+        try:
+            names = os.listdir(d)
+        except OSError:
+            continue
+        for n in names:
+            link = os.path.join(d, n)
+            if os.path.islink(link):
+                target = os.path.realpath(link)
+                if _under(target, home):
+                    found.add(prefix(os.path.dirname(target)))
+    found |= {prefix(os.path.dirname(os.path.realpath(sys.executable)))}
+    found |= {os.path.realpath(p) for p in (sys.prefix, sys.base_prefix, sys.exec_prefix,
+                                            os.environ.get("CONDA_PREFIX")) if p}
+    return {r for r in found if r not in ("/", home)
+            and not any(h == r or _under(h, r) for h in hidden)}
 
 
 def readable(task: store.Task) -> list[str] | None:
     """What the agent's processes may read: the system, the home directory's dotfiles but
-    SECRETS, the task's repo and its lane. None with the lane off. Landlock only allows, so this
-    lists the entries beside each excluded one; lane.py adds the lane (writable) itself."""
+    SECRETS, the task's repo, its lane and the programs it runs. None with the lane off. Landlock
+    only allows, so this lists the entries beside each excluded one; lane.py adds the lane
+    (writable) itself."""
     lane = writable(task)
     if lane is None:
         return None
     home = os.path.realpath(Path.home())
-    hidden = {os.path.realpath(p) for p in (*(Path.home() / h for h in SECRETS), claude_home())}
+    hidden = secret_paths()
     keep = {os.path.realpath(p) for p in (task.spec.get("repo"), PKG_ROOT, *lane,  # PKG_ROOT:
                                           *lane_paths(task)) if p}  # the git shim, the ask server
-    under = lambda a, b: a.startswith(b.rstrip(os.sep) + os.sep)  # noqa: E731
+    keep |= tool_roots(hidden)
+    # workbench itself inside a hidden directory: the marketplace install puts it in
+    # ~/.claude/plugins (the 2026-11-16 audit); only it comes out, the rest stays hidden
+    inner = {r for r in {os.path.realpath(PKG_ROOT)} if any(_under(r, h) for h in hidden)}
+    only_kept = {os.path.realpath(p) for p in ONLY_KEPT}
+    under = _under
     out: list[str] = []
 
     def visit(p: str, default: bool) -> None:
         real = os.path.realpath(p)
         if real in hidden or any(under(real, h) for h in hidden):
+            if real in inner:
+                out.append(p)
+            elif any(under(i, real) for i in inner):
+                try:
+                    names = sorted(os.listdir(p))
+                except OSError:
+                    names = []
+                for name in names:
+                    visit(os.path.join(p, name), False)
             return                                         # a secret, or a link into one
-        if real in keep:
+        inside = real in keep
+        holds = [h for h in hidden | keep | only_kept if under(h, real)]
+        hides = any(h in hidden or h in only_kept for h in holds)
+        if inside and not hides:
             out.append(p)
             return
-        holds = [h for h in hidden | keep if under(h, real)]
-        if default and not any(h in hidden for h in holds):
+        if default and not hides:
             out.append(p)
-        elif holds:                                        # go in: something to skip or keep
-            try:
+        elif holds:                    # go in: something to skip or keep (a repo at ~/.config
+            try:                       # keeps the rest of itself, not its secrets)
                 names = sorted(os.listdir(p))
             except OSError:
                 return
             for name in names:
-                visit(os.path.join(p, name),
-                      name.startswith(".") or name in HOME_READABLE if real == home else default)
+                child = os.path.join(p, name)
+                if inside:
+                    visit(child, True)
+                elif os.path.realpath(child) in only_kept:
+                    visit(child, False)
+                else:
+                    visit(child, name.startswith(".") or name in HOME_READABLE
+                          if real == home else default)
     visit("/", True)
     return out
 

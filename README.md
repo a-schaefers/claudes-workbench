@@ -66,8 +66,11 @@ the bulk of the tokens, the reading and writing and test-running, happen on your
   `AGENTS.md`, the instructions every agent reads. The agents write code, run the everyday tools
   of the work, write only inside their own worktree (plus the temp directory and build caches),
   and use git only to read. That's enforced, not just asked: a git write, an edit to those files,
-  a command outside the everyday list or a write outside the worktree is refused. When a task
-  needs more, they ask Claude, and Claude grants it or does it.
+  a command outside the everyday list or a write outside the worktree is refused, by the kernel
+  on Linux with Landlock (`wb doctor` says whether yours has it). On macOS, and on Linux without
+  it, only the direct forms are refused (OpenCode's rules and the read-only git shim): a
+  guardrail there, not a wall. When a task needs more, they ask Claude, and Claude grants it or
+  does it.
 - **Your repo stays yours.** Each agent works in its own git worktree, so your checkout is never
   touched, and nothing is committed (under your name, with no AI credit line) until Claude accepts
   it.

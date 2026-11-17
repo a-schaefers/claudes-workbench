@@ -6,6 +6,7 @@ resource, and by a person at a terminal.
 import argparse
 import json
 import os
+import shlex
 import shutil
 import signal
 import subprocess
@@ -113,6 +114,30 @@ def _need_claude_md(repo: Path, base: str, a) -> None:
             f"wb init {repo} to link AGENTS.md; --no-claude-md skips this check")
 
 
+def _lane_fits(repo: Path, test: str | None) -> None:
+    """Refuse a task the agent's lane can't hold (the 2026-11-16 audit): a repo that is the home
+    directory (the lane would read all of it) or lies where credentials live (it couldn't read
+    the repo at all), and an acceptance command that is a snap (no-new-privileges, which the
+    lane sets, stops snap-confine, so every test round would fail)."""
+    if not context.lane_on():
+        return
+    real = os.path.realpath(repo)
+    if real in ("/", os.path.realpath(Path.home())):
+        die(f"{repo} is your home directory: the agent's lane would read all of it. Delegate "
+            "from the project's own repository")
+    if any(real == h or real.startswith(h + os.sep) for h in context.secret_paths()):
+        die(f"{repo} lies where credentials live (context.SECRETS), which the agent can't read: "
+            "delegate from a repository outside it")
+    try:
+        first = shlex.split(test)[:1] if test else []
+    except ValueError:
+        first = []
+    if first and sys.platform.startswith("linux") and context.snaps(first):
+        die(f"{first[0]} is a snap, which can't run in the agent's lane (no-new-privileges stops "
+            "snap-confine): install it another way, or turn the lane off with commands.json "
+            '"paths": ["*"]')
+
+
 def cmd_start(a):
     if not store.NAME_RE.match(a.name):
         die("a task name is lowercase letters, digits and hyphens, at most 48")
@@ -124,6 +149,7 @@ def cmd_start(a):
         repo = gitops.toplevel(Path(a.repo).resolve())
     except gitops.GitError:
         die(f"{a.repo} is not inside a git repository: wb init {a.repo} sets the project up")
+    _lane_fits(repo, a.test)
     spec_text = Path(a.spec).read_text() if a.spec != "-" else sys.stdin.read()
     if not spec_text.strip():
         die("the spec is empty")
@@ -685,6 +711,7 @@ def cmd_accept(a):
         gitops.remove_worktree(repo, task.worktree)
     except gitops.GitError as e:
         die(str(e))
+    context.drop_runtime_dir(task)
     _spec_gaps(task, a.spec_gap)
     merged = None
     if a.merge:
@@ -715,6 +742,7 @@ def cmd_discard(a):
     repo = Path(spec["repo"])
     measured = results.step(task, landed=False)
     gitops.remove_worktree(repo, task.worktree, force=True)
+    context.drop_runtime_dir(task)
     if not a.keep_branch:
         gitops.delete_branch(repo, a.name)
     task.set_status(phase="discarded", last=a.reason or "discarded", pid=None)
@@ -1456,9 +1484,18 @@ def cmd_doctor(a):
             held = r.returncode != 0 and "lane" not in r.stderr and not (Path(out) / "x").exists()
         line(held, f"agents write only in their lane (Landlock ABI {v})" if held else
              f"the lane didn't hold a write outside it: {r.stderr.strip()[-200:] or 'the write went through'}")
+        for gap in lane.gaps(v):  # what this kernel's Landlock can't confine (the 2026-11-16 audit)
+            print(f"--  Landlock ABI {v}: {gap}")
     else:
-        print("--  agents' writes outside their lane aren't refused here (no Landlock): only "
-              "OpenCode's file tools keep to it")
+        print("--  agents' writes outside their lane and reads of credentials aren't refused here "
+              "(no Landlock): only OpenCode's file tools keep to it; " +
+              ("sudo still is (no-new-privileges)" if sys.platform.startswith("linux")
+               else "nor is sudo"))
+    snapped = context.snaps(context.TOOLCHAINS) if context.lane_on() else []
+    if snapped and sys.platform.startswith("linux"):
+        print(f"--  {', '.join(snapped)}: snaps, which can't run in the agent's lane "
+              "(no-new-privileges stops snap-confine): install them another way, or turn the lane "
+              'off with commands.json "paths": ["*"]')
     print(f"--  the Claude Code mod lives in {PKG_ROOT / 'mod'} (see README for installing it)")
     sys.exit(0 if ok else 1)
 

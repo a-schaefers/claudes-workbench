@@ -98,8 +98,9 @@ installed module:
 - **The agent is a teammate with limits, not a prisoner.** The everyday tools of software work
   run without asking; what's outside (a new dependency, another directory, a network tool) is
   asked for and granted in seconds (`wb allow`). The limits that matter (git writes, credentials,
-  Claude's own files, writes outside the lane) are enforced by the kernel where it can, and the
-  acceptance tests run under the same limits.
+  Claude's own files, writes outside the lane) are enforced by the kernel where it can (Linux
+  with Landlock; file contents, not their permission bits), and the acceptance tests run under
+  the same limits.
 - **Learned, not configured.** Which model takes which size, how big a task can be, how fast a
   model is, when to hand over: each starts as a guess and is corrected by real results on this
   machine (`results.jsonl`), so a new model or a new machine needs no code change.
@@ -442,7 +443,7 @@ wins; no match means ask, which `--auto` allows. The rules, in order:
    everyday tools, files and text, archivers, builds and compilers, test runners, interpreters,
    package managers, `bash`/`sh`, `sqlite3`, `git` (the shim)); not on it: `curl`, `wget`, `ssh`,
    `rsync`, `docker`, `systemctl`, `opencode`;
-3. allow `./*`, `../*`, and `<dir>/*` for every directory of the lane but `/dev` and `/proc` (a program the agent built
+3. allow `./*`, `../*`, and `<dir>/*` for every directory of the lane but those under `/dev` and `/proc` (a program the agent built
    runs by its path anywhere it can write: a debug binary in the temp directory was refused
    though `bash` could run it);
 4. allow `PROJECT_BINS`, what a project builds or installs for itself, by its path:
@@ -468,53 +469,112 @@ A refused command comes back to the agent as "Permission denied"; the handbook a
 `ask_reviewer` tool tell it to ask with `command` set, which raises a PERMISSION question naming
 the `wb allow` that grants it. These patterns are a guardrail on the agent's own choices, not a
 sandbox: they match the command as written, so `bash -c '…'`, make or any interpreter can still
-run something the list refuses. What must hold is held below the patterns: no sudo (the lane sets
-no-new-privileges), git read-only (the shim, and the repo's git directory is outside the lane), no
-push or `gh` with the user's keys (credentials are unreadable and dropped from the environment, so
-gh finds no login).
+run something the list refuses. What must hold is held below the patterns, on Linux with Landlock:
+no sudo (the lane sets no-new-privileges, on any Linux), git read-only (the shim, and the repo's git
+directory is outside the lane), no push or `gh` with the user's keys (credentials are unreadable and
+dropped from the environment, so gh finds no login). Without Landlock (macOS, old kernels, other
+architectures) only the patterns, the git shim and the dropped environment (`SECRET_ENV`) remain,
+so `bash -c` can still write the repo's `.git` and read `~/.ssh`; on macOS nothing refuses sudo.
 
 **Paths, a lane** (`context.writable`, `context.readable`, `context.external_rules`, `lane.py`).
+The lane keeps an agent's mistakes and its use of the user's credentials in; it is not a jail for a
+deliberately hostile process (the 2026-11-16 audit's list of what it can't stop is below).
 - *Writes.* The lane is the task directory (the worktree and the files the ask server writes),
-  the temp directories (`gettempdir()`, `/tmp`, `/var/tmp`), `/dev`, `/proc`, the build caches and
-  toolchain homes under `$HOME` (`TOOL_HOMES`: `.cache`, `.cargo`, `.rustup`, `go`, `.npm`, `.bun`,
-  `.deno`, `.yarn`, `.pnpm-store`, `.local/share/pnpm`, `.local/share/uv`, `.gradle`, `.m2`,
-  `.nuget`, `.dotnet`, `.gem`, `.julia`, `.cabal`, `.stack`, `.ghcup`, `.platformio`, `.conan2`,
-  `.hex`, `.mix`, `.sbt`, `.ivy2`, `.local/lib`) and wherever the environment moved them
+  the temp directories (`gettempdir()`, `TEMP_ROOTS`: `/tmp`, `/var/tmp`), the device nodes builds
+  use (`DEV_NODES`: `/dev/null`, `/dev/zero`, `/dev/full`, `/dev/random`, `/dev/urandom`,
+  `/dev/tty`, `/dev/ptmx`, `/dev/shm`; not the rest of `/dev`, the user's terminals and input
+  devices, and not `/dev/pts`: a task that needs it or a GPU asks), `/proc`, the build caches and
+  toolchain homes under `$HOME` (`TOOL_HOMES`: `.cache`, `.cargo`, `.rustup`, `go/pkg`, `.npm`,
+  `.bun/install/cache`, `.yarn`, `.pnpm-store`, `.local/share/pnpm/store`, `.local/share/uv`,
+  `.gradle`, `.m2`, `.nuget`, `.dotnet`, `.gem`, `.julia`, `.cabal`, `.stack`, `.ghcup`,
+  `.platformio`, `.conan2`, `.hex`, `.mix`, `.sbt`, `.ivy2`, `.pub-cache`, `.konan`,
+  `.local/share/hatch`, `.local/share/virtualenvs`) and wherever the environment moved them
   (`TOOL_HOME_VARS`, each that is set: `CARGO_HOME`, `RUSTUP_HOME`, `GOPATH`'s first entry,
   `GOMODCACHE`, `GOCACHE`, `npm_config_cache`, `PIP_CACHE_DIR`, `UV_CACHE_DIR`,
-  `GRADLE_USER_HOME`, `BUN_INSTALL`, `DENO_DIR`, `MIX_HOME`, `HEX_HOME`), OpenCode's own data
-  (`.local/share/opencode`, `.local/state/opencode`, and `opencode` under `$XDG_DATA_HOME` and
-  `$XDG_STATE_HOME` when set), `$XDG_CACHE_HOME`, `$XDG_RUNTIME_DIR`, `$WB_HOME/notify.jsonl` and its lock (the ask server raises questions), and
-  the extra paths (`commands.json` `paths`, the task's grants `paths`), each with its real path too, keeping
-  only those that exist. No entry may resolve to `/` or the home directory (this covers
-  `commands.json` `paths` and the grants too).
+  `GRADLE_USER_HOME`, `BUN_INSTALL`, `DENO_DIR`, `MIX_HOME`, `HEX_HOME`, `PUB_CACHE`,
+  `KONAN_DATA_DIR`, `HATCH_DATA_DIR`, `WORKON_HOME`; of `GOPATH` and `BUN_INSTALL` only their
+  caches, `VAR_CACHES`: `pkg`, `install/cache`), OpenCode's own data (`.local/share/opencode`,
+  `.local/state/opencode`, and `opencode` under `$XDG_DATA_HOME` and `$XDG_STATE_HOME` when set),
+  `$XDG_CACHE_HOME`, `$WB_HOME/notify.jsonl` and its lock (the ask server raises questions), and
+  the extra paths (`commands.json` `paths`, the task's grants `paths`), each with its real path
+  too, keeping only those that exist. Not the toolchains' programs or what a shell sources, where
+  a planted file runs later outside the lane: `~/.local/lib` (user site-packages, whose `.pth`
+  files every python runs) is out, `go`, `.bun`, `.deno` and pnpm's home give only their caches,
+  and `NOT_WRITABLE` (`.cargo/bin`, `.cargo/env`, `.dotnet/tools`, `.cabal/bin`, `.ghcup/bin`, and
+  `$CARGO_HOME`'s `bin` and `env`) are left out of their homes; `cargo install` and the like need
+  `wb allow --path`. A place holding one of those or an existing secret is split: its other
+  entries are granted one by one (Landlock only allows), so a new top-level file there is refused.
+  No entry may resolve to `/` or the home directory, nor contain the task's repo or its git
+  directory (`repo_dirs`: with `GOPATH=~/src` or the repo in `~/go/src`, the agent could write a
+  hook or `core.fsmonitor` that wb's own git runs outside the lane); the temp directories are
+  kept whole even so (a repo kept in `/tmp` stays in reach: splitting `/tmp` would refuse every
+  new file there). `$XDG_RUNTIME_DIR` isn't in the lane (the user's bus, SSH and GPG agent
+  sockets and runtime systemd units live there): the agent gets its own (`runtime_dir`,
+  `/tmp/wb-run-<uid>-<hash>`, 0700, short for socket paths). The temp directories are a
+  documented trade-off: Java's temp files, Xvfb's `/tmp/.X11-unix` and many test suites write
+  there directly, so other programs' files in `/tmp` stay writable; the review diff's scratch
+  index lives in `$WB_HOME`, not there.
 - *Reads.* Everything is readable except where credentials and the user's own records live:
   `context.SECRETS` under `$HOME` (`.ssh`, `.gnupg`, `.password-store`, `.netrc`,
-  `.git-credentials`, `.config/gh`, keyrings, `.aws`, `.azure`, `.config/gcloud`, `.kube`,
-  `.docker`, `.pypirc`, cargo and gem credentials, browser and mail profiles, shell history,
-  `.claude`, `.claude.json`, and the like) and Claude's directory; and of the home directory's own
-  entries only the dotfiles, `bin` and `go` are readable, plus the task's repo, workbench itself
-  and the lane, not the user's documents or other projects. Landlock only allows, so `readable()`
-  walks down from `/` listing the entries beside each excluded one. Found by trying: `python3`
-  running gh inside the lane was logged in, and the SSH keys that push were readable.
+  `.git-credentials`, `.config/git/credentials`, `.gcm`, `.config/gh`, keyrings, `.aws`, `.azure`,
+  `.config/gcloud`, `.kube`, `.docker`, `.pypirc`, `.pgpass`, `.my.cnf`, `.vault-token`, cargo and
+  gem credentials, OpenCode's service password (`.config/opencode/service.json`,
+  `.local/state/opencode/service.json`: its background service runs outside the lane), password
+  managers, cloud CLIs, browser and mail profiles (Flatpak's `.var/app` too), shell history,
+  `.claude`, `.claude.json` and its backups, and the like), the same under `$XDG_CONFIG_HOME`,
+  `$XDG_DATA_HOME` and `$XDG_STATE_HOME`, wherever `SECRET_VARS` moved them (`GNUPGHOME`,
+  `PASSWORD_STORE_DIR`, `GH_CONFIG_DIR`, `DOCKER_CONFIG`, `KUBECONFIG`, `AWS_SHARED_CREDENTIALS_FILE`,
+  `AWS_CONFIG_FILE`, `CLOUDSDK_CONFIG`, `AZURE_CONFIG_DIR`, `HISTFILE`, `$CARGO_HOME`'s
+  credentials) and Claude's directory (`secret_paths`). Left readable on purpose: `.npmrc` and
+  `.yarnrc.yml` (the package managers read them to install) and OpenCode's `auth.json` and
+  session database in `.local/share/opencode` (OpenCode runs in the lane and needs them: keep
+  cloud keys out of it). Of the home directory's own entries only the dotfiles and
+  `HOME_READABLE` (`bin`, `go`, `R`, `perl5`) are readable, and of `ONLY_KEPT` (`/dev`, `/mnt`,
+  the Windows drives on WSL2, `/media`, `/run/media`, `/run/user`, `/home`, the other users'
+  homes) nothing; beyond those, the task's repo (its secrets left out even when it holds some: a
+  repo at `~/.config`), workbench itself (even inside Claude's directory, the marketplace
+  install), the lane, and the programs the agent runs (`tool_roots`: each PATH directory, the
+  prefix of one under the home (its parent when it is a `bin`, so `~/miniconda3` or `~/flutter`),
+  the install a link in the home's PATH directories points into, and the Python running
+  workbench; never `/`, the home directory or a parent of a secret), not the user's documents or
+  other projects. Running a program reads it, so a program the walk leaves out can't start
+  (`workbench lane: can't run <cmd>: Permission denied`, exit 126; not found, 127): add its
+  directory to `commands.json` `paths`. Landlock only allows, so `readable()` walks down from `/`
+  listing the entries beside each excluded one. Found by trying: `python3` running gh inside the
+  lane was logged in, and the SSH keys that push were readable.
 - *The kernel's side* (`lane.py`, Linux Landlock, no root): the runner starts OpenCode as
-  `python -I lane.py --write P… [--reads --read P…] -- opencode …`; it restricts itself and execs,
-  so OpenCode, its shell and everything they run inherit the limit. Handled rights: file writes,
-  removes and every make, plus refer (ABI 2: moves inside the lane work) and truncate (ABI 3), and
-  file reads when `--reads` is given. Directories get every right; files only write, read and
-  truncate. It also sets no-new-privileges, which disables setuid programs (sudo, su). Execution,
-  directory listing and the network stay free. It fails closed: when Landlock is there but the
-  lane can't be drawn, it prints `workbench lane: the kernel refused the lane (<error>); not
-  running <cmd>` to `runner.log` and exits 126. Without Landlock (macOS, an old kernel, or an
-  architecture whose syscall numbers differ: `lane.UNIFIED` lists the ones it runs on, x86_64,
-  i386/i686, aarch64, armv7l/armv6l, riscv64, ppc64/ppc64le, s390x, loongarch64) it execs
-  unrestricted. `wb doctor` draws a real lane and tries a write outside it: `ok agents write only
-  in their lane (Landlock ABI N)`, `BAD the lane didn't hold a write outside it: …`, or a `--` line
-  without Landlock.
+  `python -I lane.py --write P… [--reads --read P…] [--unix P…] -- opencode …`; it restricts
+  itself and execs, so OpenCode, its shell and everything they run inherit the limit. Handled
+  rights: file writes, removes and every make, plus refer (ABI 2: moves inside the lane work)
+  and truncate (ABI 3), file reads when `--reads` is given, and from ABI 9 connecting to a UNIX
+  socket made outside the lane, granted only beneath `--unix` (`context.unix_paths`: the
+  `commands.json` and grant `paths`, so `wb allow --path /run/postgresql` reaches a test
+  database), so the session bus (and through it `systemd-run`), the keyring and the SSH and GPG
+  agents are out of reach; sockets the lane's own processes make stay theirs. From ABI 6 it also
+  scopes signals and abstract UNIX sockets: the agent can signal only what it started, not its
+  runner, other tasks, the chat or Claude Code, while the runner can still stop it. Directories
+  get every right; files only write, read, truncate and the socket right. No-new-privileges,
+  which disables setuid programs (sudo, su, and snap-confine, so a snap can't run in the lane:
+  `wb start` refuses a `--test` that is one, `wb doctor` names those on PATH), is set on every
+  Linux machine, Landlock or not, before the lane. Directory listing and the network stay free;
+  so does metadata: Landlock doesn't cover chmod, chown, utimes or xattrs, so those still succeed
+  on a file outside the lane (only the shell patterns stand in their way). It fails closed: when
+  Landlock is there but the lane can't be drawn, it prints `workbench lane: the kernel refused
+  the lane (<error>); not running <cmd>` to `runner.log` and exits 126. Without Landlock (macOS,
+  an old kernel, or an architecture whose syscall numbers differ: `lane.UNIFIED` lists the ones
+  it runs on, x86_64, i386/i686, aarch64, armv7l/armv6l, riscv64, ppc64/ppc64le, s390x,
+  loongarch64) it execs unrestricted but for no-new-privileges on Linux. Older ABIs hold less
+  (`lane.gaps`): before ABI 3 (Linux 6.2) truncating a file outside the lane isn't refused; on
+  ABI 1 (Linux < 5.19) moving or hard-linking a file between directories fails even inside it
+  (EXDEV, "Invalid cross-device link"; most tools fall back to a copy); before ABI 6 signals and
+  before ABI 9 the user's sockets aren't scoped. `wb doctor` draws a real lane and tries a write
+  outside it: `ok agents write only in their lane (Landlock ABI N)`, `BAD the lane didn't hold a
+  write outside it: …`, or a `--` line without Landlock; then a `--  Landlock ABI N: …` line for
+  each gap.
 - *OpenCode's side* (`external_rules`): its `external_directory` permission, checked for its file
   tools' paths and the shell's working directory and `cd` targets (not other arguments), is deny
   `*`, then allow `<dir>/*` for the lane, `READABLE` (`/usr`, `/etc`, `/opt`, `/lib*`, `/bin`,
-  `/sbin`, `/proc`, `/sys`, `/dev`, `/nix`, `/run/current-system`, and macOS's `/Library`,
+  `/sbin`, `/proc`, `/sys`, `/nix`, `/run/current-system`, and macOS's `/Library`,
   `/System`, `/Applications`) and the handed skills' directories. This is all that applies
   without Landlock.
 - *Asking for more.* A refused write is "Permission denied" (the protocol says so, and not to
@@ -529,7 +589,8 @@ gh finds no login).
 (`SECRET_ENV`: names containing `TOKEN`, `SECRET`, `PASSW`, `CREDENTIAL`, `API_KEY`, `ACCESS_KEY`,
 `PRIVATE_KEY`; the `ANTHROPIC_`, `CLAUDE_`, `GH_`, `GITHUB_`, `GITLAB_`, `AWS_`, `AZURE_`,
 `GOOGLE_`, `OPENAI_`, `HF_` prefixes; `SSH_AUTH_SOCK`, `SSH_AGENT_PID`, `GPG_AGENT_INFO`,
-`DBUS_SESSION_BUS_ADDRESS`), plus `PWD` (the worktree), `OPENCODE_CONFIG`, `WB_TASK`, `WB_HOME`,
+`DBUS_SESSION_BUS_ADDRESS`, `DBUS_SYSTEM_BUS_ADDRESS`), plus `PWD` (the worktree), `OPENCODE_CONFIG`,
+`WB_TASK`, `WB_HOME`, its own `XDG_RUNTIME_DIR` (`context.runtime_dir`, with the lane on),
 `PYTHONDONTWRITEBYTECODE=1` (no `__pycache__` in the diff) and the shim's `PATH`. A provider that
 needs a key from the environment names it in `commands.json` `"env": [names]`, which passes it
 through.
@@ -1598,7 +1659,7 @@ message, not a traceback.
 ### Running tasks
 | Command | Flags (defaults) | What it does |
 |---|---|---|
-| `wb start <task> --spec <file\|->` | `--repo` (.), `--size trivial\|significant` (significant), `--model <id or fragment>`, `--test <cmd>`, `--auto-fix N` (2), `--checkin MIN` (10 significant, 0 trivial), `--ask-budget N` (2), `--ask-timeout S` (1200), `--round-timeout S`, `--silence-timeout S`, `--think-timeout S` (0 off; unset or 0 for the other two: the measured budgets), `--test-timeout S` (900), `--no-base-check`, `--base REF` (HEAD), `--skill NAME…`, `--allow PATTERN…`, `--allow-path DIR…`, `--force` (queue a `--model` that can't run now), `--trial`, `--no-claude-md` | Checks the name (`^[a-z0-9][a-z0-9-]{0,47}$`, never reused), the repo, the spec and the skills; picks the model (router, or `--model`; none runnable: exit 3); checks `CLAUDE.md` is committed at the base; makes the worktree and branch `delegate/<task>`; writes task.json, round 1's prompt (spec + PROTOCOL) and status; spawns the runner. Prints the model and why, the slice, Claude's spec record, the handed or suggested skills, notes, `next: wb wait <task>`. With `--test` (and not `--no-base-check`) it first runs the acceptance command once in the fresh worktree, the base, inside the agent's lane (`runner.base_check`, at most `BASE_CHECK_SECS` = 120 s, the output in `base-tests.txt`, the result in status `base_check`) and prints what it saw: a warning when it already passes (it can't tell when the step is done), else its exit and last 8 lines, for Claude to check it fails only for what the step changes; past the limit, a note that it wasn't checked. |
+| `wb start <task> --spec <file\|->` | `--repo` (.), `--size trivial\|significant` (significant), `--model <id or fragment>`, `--test <cmd>`, `--auto-fix N` (2), `--checkin MIN` (10 significant, 0 trivial), `--ask-budget N` (2), `--ask-timeout S` (1200), `--round-timeout S`, `--silence-timeout S`, `--think-timeout S` (0 off; unset or 0 for the other two: the measured budgets), `--test-timeout S` (900), `--no-base-check`, `--base REF` (HEAD), `--skill NAME…`, `--allow PATTERN…`, `--allow-path DIR…`, `--force` (queue a `--model` that can't run now), `--trial`, `--no-claude-md` | Checks the name (`^[a-z0-9][a-z0-9-]{0,47}$`, never reused), the repo (with the lane on, `_lane_fits` refuses one that is the home directory or lies where credentials live, and a `--test` whose command is a snap), the spec and the skills; picks the model (router, or `--model`; none runnable: exit 3); checks `CLAUDE.md` is committed at the base; makes the worktree and branch `delegate/<task>`; writes task.json, round 1's prompt (spec + PROTOCOL) and status; spawns the runner. Prints the model and why, the slice, Claude's spec record, the handed or suggested skills, notes, `next: wb wait <task>`. With `--test` (and not `--no-base-check`) it first runs the acceptance command once in the fresh worktree, the base, inside the agent's lane (`runner.base_check`, at most `BASE_CHECK_SECS` = 120 s, the output in `base-tests.txt`, the result in status `base_check`) and prints what it saw: a warning when it already passes (it can't tell when the step is done), else its exit and last 8 lines, for Claude to check it fails only for what the step changes; past the limit, a note that it wasn't checked. |
 | `wb feedback <task> --text "…" \| --message <file\|->` | `--fresh` \| `--keep-context`, `--spec-gap "…"…` | Phase review/stuck/failed and no live runner. Writes the next round's prompt (FEEDBACK_HEAD + "Make exactly these changes, then re-run the acceptance command and finish with a short summary:" (the re-run only when there is one) + the text), reviews+1, spawns the runner. Warns past three review rounds. Gathers lessons. |
 | `wb next <task> --spec <file> -m "…"` | `--test` (replaces the acceptance command), `--skill` (replaces the set), `--fresh`, `--allow PATTERN…` (adds to the task's grants), `--spec-gap` | Phase review. Reads the spec (a file or `-`; empty or unreadable: nothing changes), records the step's size and fit, commits the work (`<m>` + `Workbench-Task: <task> (step N)` + `OpenCode-Session:`), writes the next step's prompt ("Step N of this task is done and committed (<sha>). The next step:" + spec + PROTOCOL), records the spec gaps, resets reviews, spawns. Says whether the next step gets a fresh session and why (`runner.fresh_reason`). Gathers lessons. |
 | `wb answer <task> --text "…" \| --file <f>` | `--id` (the pending question) | Writes `ask/<id>.answer` (atomically); the blocked `ask_reviewer` returns it. |
@@ -1648,7 +1709,7 @@ message, not a traceback.
 | `wb init <dir>` | | A project the way Claude keeps one: git on the default branch, an initial commit, AGENTS.md → CLAUDE.md (refuses inside another repo or without a git identity). |
 | `wb setup` | `--force` (replaces a link that points elsewhere; never a real file) | Links `~/.local/bin/wb` to this copy's `bin/wb` and Claude Code's `skills/delegate` to its `skill/delegate`, warns when `~/.local/bin` isn't on PATH; exit 1 when it left something in the way (see *Installing*). |
 | `wb update` | `--check` (only say whether origin has news: `update available: N new commit(s)…` or `up to date`), `--if-due` (with `--check`: ask origin at most weekly, `UPDATE_EVERY`, else answer from `update.json`; never with `CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC`) | Updates this copy (see *Installing*): refuses while any runner is live; a marketplace copy runs `claude plugin marketplace update workbench` then `claude plugin update workbench@workbench`; a clone (refusing uncommitted tracked changes) runs `git pull --ff-only` first. Prints `updated <kind> a..b (N commit(s))` or `already up to date`. The fetch never prompts (`GIT_TERMINAL_PROMPT=0`, ssh `BatchMode`). |
-| `wb doctor` | | `opencode --version`, the OpenCode config, git, models found and each one's readiness, each Ollama entry's `options.max_tokens` and context against what Ollama serves, the state directory, a real lane drawn around a test write (`ok agents write only in their lane (Landlock ABI N)`), `wb` on PATH (or `WB_BIN`) for the mod, where the mod lives. `ok`/`BAD` lines set the exit code; `--` lines inform. |
+| `wb doctor` | | `opencode --version`, the OpenCode config, git, models found and each one's readiness, each Ollama entry's `options.max_tokens` and context against what Ollama serves, the state directory, a real lane drawn around a test write (`ok agents write only in their lane (Landlock ABI N)`, then a `--  Landlock ABI N: …` line for each of `lane.gaps`; without Landlock a `--` line saying writes and credential reads aren't refused and whether sudo still is), the toolchains on PATH that are snaps (`context.TOOLCHAINS`; they can't run in the lane), `wb` on PATH (or `WB_BIN`) for the mod, where the mod lives. `ok`/`BAD` lines set the exit code; `--` lines inform. |
 
 ## Files and formats
 
@@ -1913,7 +1974,8 @@ subclassing a class that has tests; new classes go above the `__main__` block (e
 runs as a script).
 
 **Not hermetic.** The real HOME is used (`~/.claude/CLAUDE.md` enters task instructions; the lane
-test makes and removes `~/.wb-lane-test-*`), the real-OpenCode tests use OpenCode's own session
+tests make and remove `~/.wb-sec-test-*`, `~/.wb-lane-test-*` and `~/.wb-sock-*`, and each task's
+`/tmp/wb-run-<uid>-<hash>`), the real-OpenCode tests use OpenCode's own session
 storage, test_portable probes 127.0.0.1:11434, `wb scout` reads the real hardware. It never
 touches the real state directory, gpu.lock or a model, so it's safe beside running tasks.
 
