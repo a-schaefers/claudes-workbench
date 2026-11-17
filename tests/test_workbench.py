@@ -332,7 +332,7 @@ class Lifecycle(Base):
                                       capture_output=True)
         g("switch", "-q", "-c", "feature")
         self.start("t-feat", "ok")
-        self.start("t-det", "ok")
+        self.start("t-det", "ok", "--queue")  # behind t-feat on the one GPU
         wait_phase("t-feat", {"review"})
         wait_phase("t-det", {"review"})
         self.assertEqual(store.Task("t-feat").spec["base_branch"], "feature")
