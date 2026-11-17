@@ -595,7 +595,10 @@ up again (a library's quirk, a pitfall, a check to run), Claude writes a skill.
   with what review taught), one whose tasks go no better than those without it, one whose last
   edit hasn't helped, and one not offered in 60 days. Too few tasks is no evidence either way.
   `wb start` without `--skill` names the library skills a spec seems to need, for Claude to hand
-  or not. `wb skill retire` moves one to `retired/`; `wb skill restore` brings it back.
+  or not. One that has so far been loaded only in other projects says where (and on what stack,
+  when that differs), so one project's knowledge doesn't spread unnoticed; `wb skill list` says
+  how many repos each was loaded in. Adding a skill whose lessons all came from one repo warns that
+  it may belong in that repo's `.claude/skills`. `wb skill retire` moves one to `retired/`; `wb skill restore` brings it back.
 
 ### Images
 

@@ -1506,6 +1506,7 @@ class SkillLearning(Base):
         out = run_wb("skill", "add", "answers", "--from", str(draft), "-m", "the same correction twice",
                      "--lesson", top["id"])
         self.assertIn(f"lessons closed: {top['id']}", out)
+        self.assertIn(f"every lesson behind it came from {self.repo.name}: if only that project needs it", out)
         self.assertNotIn(top["id"], run_wb("lessons"))
         ids = [x["id"] for x in lessons.survey()]
         self.assertIn("closed:", run_wb("lessons", "close", ids[0], "-m", "a one-task detail"))
@@ -1528,6 +1529,12 @@ class SkillLearning(Base):
         out = self.start("t-sug", "ok")
         self.assertIn("library skills that may fit: raylib-2d (wb skill hand t-sug <name>)", out)
         self.assertNotIn("sql-migrations", out)
+        store.append_jsonl(store.home() / "results.jsonl", {          # it has worked in one other repo
+            "repo": "/elsewhere/game", "outcome": "accepted", "skills_offered": ["raylib-2d"],
+            "skills_loaded": ["raylib-2d"]})
+        out = self.start("t-sug2", "ok")
+        self.assertIn("may fit: raylib-2d (loaded so far only in game)", out)
+        self.assertIn("loaded in 1 repo", run_wb("skill", "list"))
 
 
 @unittest.skipUnless(shutil.which("opencode"), "needs the real opencode")

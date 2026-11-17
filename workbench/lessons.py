@@ -126,6 +126,12 @@ def close(ids: list[str], how: str, why: str = "") -> list[str]:
     return done
 
 
+def repos(ids: list[str]) -> set:
+    """The repos the given lessons came from."""
+    lessons = _all()[0]
+    return {lessons[i].get("repo") for i in ids if i in lessons}
+
+
 def _similar(a: set, b: set) -> bool:
     return len(a & b) >= 3 and len(a & b) / len(a | b) >= SIMILAR
 

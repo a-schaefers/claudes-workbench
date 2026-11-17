@@ -164,12 +164,25 @@ def cmd_start(a):
     if handed:
         print("skills handed: " + ", ".join(handed))
     elif fits := skills.suggest(spec_text):
-        print(f"library skills that may fit: {', '.join(fits)} (wb skill hand {a.name} <name>)")
+        use = skills.usage()
+        print(f"library skills that may fit: {', '.join(_elsewhere(n, use.get(n), repo, stack) for n in fits)}"
+              f" (wb skill hand {a.name} <name>)")
     if not state["available"]:
         print(f"note: queued although {state['why']}")
     elif not state["resident"]:
         print("note: the runner loads it onto the GPU first, unloading what is there")
     print(f"next: wb wait {a.name}   (the workbench mod wakes Claude by itself when loaded)")
+
+
+def _elsewhere(name: str, u: dict | None, repo: Path, stack: list[str]) -> str:
+    """A suggested skill, and where it has worked so far when that was only other projects: one
+    project's knowledge in the library shouldn't spread unnoticed."""
+    seen = {r for r in (u or {}).get("repos") or () if r}
+    if not seen or str(repo) in seen:
+        return name
+    kinds = {k for r in seen for k in router.row_stack({"repo": r})}
+    other = f", {'/'.join(sorted(kinds))} work" if kinds and not kinds & set(stack) else ""
+    return f"{name} (loaded so far only in {', '.join(sorted(Path(r).name for r in seen))}{other})"
 
 
 def cmd_feedback(a):
@@ -733,6 +746,17 @@ def _say(line: str) -> None:
         print(line)
 
 
+def _one_project(ids, name: str) -> list[str]:
+    """A warning when every lesson behind a new skill came from one repo: the library is for
+    every project, and a rule only that one needs belongs in it."""
+    from_ = lessons.repos([x for i in ids or [] for x in i.split(",") if x])
+    if len(from_) != 1 or None in from_:
+        return []
+    repo = next(iter(from_))
+    return [f"every lesson behind it came from {Path(repo).name}: if only that project needs it, "
+            f"move it to {repo}/.claude/skills/{name}/ (committed there) and wb skill retire {name}"]
+
+
 def _closed_by(ids, name: str) -> str:
     """Close the lessons a skill change took in; the line saying so."""
     done = lessons.close([x for i in ids or [] for x in i.split(",") if x], f"skill:{name}")
@@ -768,7 +792,7 @@ def cmd_skill(a):
             verb, warns = skills.add(Path(a.source), a.name, a.message, a.origin or "")
         except ValueError as e:
             die(f"not added: {e}")
-        print(f"{verb} {a.name}" + "".join(f"\nwarning: {w}" for w in warns)
+        print(f"{verb} {a.name}" + "".join(f"\nwarning: {w}" for w in warns + _one_project(a.lesson, a.name))
               + _closed_by(a.lesson, a.name))
         return
     if a.action == "patch":

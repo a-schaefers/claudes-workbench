@@ -47,8 +47,10 @@ what either says (a command, a flag, a default, a guard, a file) updates it in t
     events. Its `--json` lines feed the mod's pane.
   - `skills.py`: Claude's skill library for the agents (`$WB_SKILLS`, default
     ~/.local/share/workbench/skills, its own git repo): checks, add/patch/retire/restore, import
-    (`fetch` into `imports/`, never into the library), suggestions for a spec, and the record
-    (offered, loaded, outcome against the same repos without it, per version). `wb skill` drives
+    (`fetch` into `imports/`, never into the library), suggestions for a spec (`wb start` marks
+    one loaded only in other repos, `cli._elsewhere`; `wb skill add` warns when its lessons all came
+    from one, `cli._one_project`), and the record (offered, loaded, outcome against the same repos
+    without it, per version, the repos it was loaded in). `wb skill` drives
     it; a task holds the skills in `status.skills` and the version handed in `status.skills_rev`.
   - `lessons.py`: what each task taught (feedback items, guard stops, questions, a loaded skill
     that still needed reviews, the agent's `Lesson:` lines), gathered by `wb feedback`/`next`/

@@ -344,6 +344,8 @@ def record_line(u: dict | None) -> str:
                 f"{wo['reviews'] / wo['n']:.1f} review rounds ({wo['n']} tasks)")
     if s["n"] and s["n"] < w["n"]:
         out += f" · since its last edit: {s['accepted']} of {s['n']} accepted"
+    if u["repos"]:
+        out += f" · loaded in {len(u['repos'])} repo{'s' if len(u['repos']) > 1 else ''}"
     return out
 
 

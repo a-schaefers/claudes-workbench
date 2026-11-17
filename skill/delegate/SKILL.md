@@ -212,8 +212,10 @@ Not a lesson (close it):
 4. Only then a new skill, named for the kind of work (`raylib-2d`), never for one task or error.
    Write the SKILL.md in the scratchpad, then
    `wb skill add <name> --from <file> -m "<what review taught>"` (it checks, scans and commits it).
-Knowledge of one project that only some of its tasks need goes in `<repo>/.claude/skills/<name>/`,
-committed with the project; the agents there always see it. Never `~/.claude/skills`, the user's.
+The library follows the user into every project, so it holds only what holds beyond one. Knowledge
+of one project that only some of its tasks need goes in `<repo>/.claude/skills/<name>/`, committed
+with the project; the agents there always see it. Never `~/.claude/skills`, the user's. When
+`wb skill add` warns that every lesson came from one repo, decide which it is before moving on.
 
 A good skill: front matter `name` (the directory's) and a `description` that says when to use it
 ("Use when drawing with raylib ...": it is all the agent sees before it decides to load it); then
@@ -226,7 +228,9 @@ new step gets its own set with `wb next … --skill <name>`. The agent is told w
 once that part of the work is done (from the agent's next run; `wb steer --now` starts that run).
 
 **Hand out** with the record in mind. `wb start` without `--skill` names library skills the spec
-seems to need; it's a hint, so hand one only if it fits (`wb skill hand <task> <name>`).
+seems to need; it's a hint, so hand one only if it fits (`wb skill hand <task> <name>`). One marked
+`loaded so far only in <repo>` was written from another project: read it first, and if it is that
+project's alone, move it there and retire it from the library.
 
 **Keep it honest.** Results record which skills each task was offered, which the agent loaded,
 and the version of each it held. `wb skill list` shows each skill's tasks against the same repos'
