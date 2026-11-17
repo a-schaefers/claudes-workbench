@@ -2392,17 +2392,27 @@ class Lane(Base):
         link.symlink_to(target)
         home = self.fake_home()
         (home / ".ssh").mkdir()
+        # the 0.90 review: a place in the task's repo said "allowed" and restarted the agent,
+        # and the lane, which leaves the repo out, held nothing new
         for raw, said in ((f"{link}/sub", f"is a link to {target}/sub"),
                           (str(home / ".ssh" / "keys"), "credentials"),
                           (str(home / ".config" / "workbench"), "workbench's own"),
-                          (str(store.home() / "rules"), "workbench's own")):
+                          (str(store.home() / "rules"), "workbench's own"),
+                          (str(self.repo / "build"), "inside the task's own repo"),
+                          (str(self.repo / ".git" / "hooks"), "inside the task's own repo")):
             err = io.StringIO()
             with redirect_stderr(err), self.assertRaises(SystemExit):
                 run_wb("allow", "t-refuse", "--path", raw)
             self.assertIn(said, err.getvalue())
         self.assertFalse((target / "sub").exists())
         self.assertFalse((home / ".ssh" / "keys").exists())
+        self.assertFalse((self.repo / "build").exists())
         self.assertEqual(context.grants(store.Task("t-refuse")), {})
+        err = io.StringIO()
+        with redirect_stderr(err), self.assertRaises(SystemExit):
+            self.start("t-refuse2", "ok", "--allow-path", str(self.repo / "build"))
+        self.assertIn("inside the task's own repo", err.getvalue())
+        self.assertFalse(store.Task("t-refuse2").exists)
         # one already in commands.json is left out of the lane all the same
         Path(os.environ["WB_COMMANDS"]).write_text(json.dumps({"paths": [str(home / ".ssh")]}))
         self.assertEqual(context.lane_paths(store.Task("t-refuse")), [])

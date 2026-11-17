@@ -17,6 +17,7 @@ import sys
 import time
 from collections import defaultdict
 from pathlib import Path
+from types import SimpleNamespace
 
 from . import (__version__, ask_mcp, chat, context, gitops, hardware, images, lane, lessons, models,
                results, router, scan, skills, store, transcript, tuning)
@@ -321,7 +322,9 @@ def cmd_start(a):
     if not spec_text.strip():
         die("the spec is empty")
     handed = _skill_names(a.skill)
-    lane_dirs = [_lane_dir(p) for p in a.allow_path or []]
+    # the repo's own directories (context.repo_dirs reads only the spec's repo: task.json is to come)
+    guard = context.repo_dirs(SimpleNamespace(spec={"repo": str(repo)}))
+    lane_dirs = [_lane_dir(p, guard) for p in a.allow_path or []]
     if not shutil.which(exe := runner.opencode_bin()[0]):  # else the runner emptied the GPU, then
         # the round died as "opencode exited 1" (the 2026-11-16 audit)
         die(f"{exe} isn't on PATH: install OpenCode (https://opencode.ai), or put it on the PATH "
@@ -958,11 +961,14 @@ def cmd_resume(a):
     _say(lessons.nudge(task))
 
 
-def _lane_dir(raw: str) -> str:
+def _lane_dir(raw: str, guard: set[str] = frozenset()) -> str:
     """A directory Claude adds to an agent's lane, made if it isn't there yet (the kernel's rule
     is on a real directory). Not through a link: the agent can plant one in its lane (/tmp/out ->
     another project), and the grant went to the link's target (the 2026-11-16 audit), so Claude
-    names the real directory itself; nor a place the lane hides (context.lane_refusal)."""
+    names the real directory itself; nor a place the lane hides (context.lane_refusal); nor a
+    place in the task's repo or its git directory (`guard`, context.repo_dirs), which
+    context.writable leaves out of every lane: the grant was said "allowed", the agent restarted,
+    and its retry was refused again (the 0.90 review). One that holds the repo is split around it."""
     if raw == "*":
         return raw  # the lane off for this task
     given = os.path.abspath(os.path.expanduser(raw))
@@ -971,6 +977,10 @@ def _lane_dir(raw: str) -> str:
         die(f"{raw} is a link to {real}: allow {real} itself if that is what the task needs")
     if why := context.lane_refusal(real):
         die(why)
+    if any(real == g or context._under(real, g) for g in guard):
+        die(f"{raw}: inside the task's own repo or its git directory, which no lane may write (wb's "
+            "git runs there, and a hook planted in it would run outside the lane); take what the "
+            "task needs there yourself")
     path = Path(real)
     if not path.exists():
         path.mkdir(parents=True)
@@ -998,7 +1008,7 @@ def cmd_allow(a):
     once so the new rule applies (OpenCode reads it at start, the lane is drawn at start)."""
     task = need(a.name)
     pats = [p.strip() for p in a.pattern if p.strip()]
-    dirs = [_lane_dir(p) for p in a.path or [] if p.strip()]
+    dirs = [_lane_dir(p, context.repo_dirs(task)) for p in a.path or [] if p.strip()]
     if not pats and not dirs:
         die("nothing to allow")
     conf_path = context.commands_path()
