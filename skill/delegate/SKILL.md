@@ -358,8 +358,8 @@ You are the driver, not a spectator. When something tells you the agent is headi
   budget with no tool call (7 minutes; `--think-timeout` overrides),
   and the check-in says so. A second nudge on one task means the spec is too big for one
   step: split it, or name the first file to write.
-- `wb takeover <name>`: stops it and hands you the worktree. Finish by hand, then `wb accept`,
-  or hand it back with `wb feedback`. For when explaining would cost more than doing.
+- `wb takeover <name>`: stops it and hands you the worktree. Finish by hand, leaving it
+  uncommitted (`wb accept` commits it), then `wb accept`, or hand it back with `wb feedback`. For when explaining would cost more than doing.
 - **Commands it asks for.** The agent's shell runs the everyday tools of software work freely;
   anything else, and adding a package, is refused, and the agent asks you (a `PERMISSION`
   question). Lean to yes: their work is hard enough. `wb allow <name> "<pattern>"` (e.g.

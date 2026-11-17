@@ -5,6 +5,7 @@ resource, and by a person at a terminal.
 """
 import argparse
 import fnmatch
+import functools
 import json
 import os
 import shutil
@@ -78,6 +79,23 @@ def runner_alive(task: store.Task) -> bool:
         return not cmdline.parent.parent.joinpath("self").exists()  # no /proc: trust the pid
 
 
+def one_at_a_time(cmd):
+    """Run a command that changes a task under the task's command lock, so two at once (two
+    sessions woken by one review, the chat and the terminal) run one after the other, the second
+    seeing what the first did: an accept racing a discard once deleted the accepted commit and
+    wrote two results rows (the 2026-11-16 audit). The lock is in rules/<task>/, outside the
+    agent's lane: an agent holding it would wedge every command. The runner never takes it."""
+    @functools.wraps(cmd)
+    def run(a):
+        name = getattr(a, "name", None)
+        if getattr(a, "all", False) or not name or not store.NAME_RE.match(name) \
+                or not store.Task(name).exists:
+            return cmd(a)
+        with store.locked(store.home() / "rules" / name / "cmd.lock"):  # context.rules_dir
+            return cmd(a)
+    return run
+
+
 def ago(ts) -> str:
     if not ts:
         return "-"
@@ -141,6 +159,11 @@ def cmd_start(a):
         repo = gitops.toplevel(Path(a.repo).resolve())
     except gitops.GitError:
         die(f"{a.repo} is not inside a git repository: wb init {a.repo} sets the project up")
+    tasks = store.tasks_dir().resolve()
+    if repo.resolve().is_relative_to(tasks):  # gone at that task's accept, wedging this one (the audit)
+        owner = store.Task(repo.resolve().relative_to(tasks).parts[0])
+        die(f"{repo} is task {owner.name}'s worktree, not a project: start from its repo "
+            f"(--repo {owner.spec.get('repo', '<the project>')})")
     spec_text = Path(a.spec).read_text(encoding="utf-8") if a.spec != "-" else sys.stdin.read()
     if not spec_text.strip():
         die("the spec is empty")
@@ -163,6 +186,7 @@ def cmd_start(a):
     limits = router.budgets(m)  # from the model's measured speed on this machine, else defaults
     store.write_json(task.dir / "task.json", {
         "name": a.name, "repo": str(repo), "base": base, "base_ref": a.base,
+        "base_branch": gitops.start_branch(repo, a.base),  # where wb accept --merge lands
         "branch": gitops.branch_name(a.name), "model": m.id, "model_label": m.label,
         "opencode_model": m.id, "route": why, "size": a.size, "stack": stack,
         **({"trial": True} if a.trial else {}), "test_cmd": a.test, "test_timeout": a.test_timeout,
@@ -248,6 +272,7 @@ def _spec_gaps(task: store.Task, gaps: list[str] | None) -> None:
         task.event({"ts": store.now(), "round": rnd, "kind": "spec_gap", "text": g.strip()})
 
 
+@one_at_a_time
 def cmd_feedback(a):
     task = need(a.name)
     st = task.status
@@ -276,6 +301,7 @@ def cmd_feedback(a):
     _say(lessons.nudge(task))
 
 
+@one_at_a_time
 def cmd_next(a):
     """Commit the approved step on the task's branch and give the same agent the next one: same
     worktree, same session (so it keeps what it has read), unless it is full or --fresh."""
@@ -493,7 +519,11 @@ def cmd_diff(a):
         die(f"{a.name} is {task.status.get('phase')} and its worktree is gone: "
             f"git -C {task.spec['repo']} diff {task.spec['base'][:12]} {task.spec['branch']}")
     base = "HEAD" if task.status.get("steps", 1) > 1 and not a.all else task.spec["base"]
-    print(gitops.diff(task.worktree, base, stat=a.stat, paths=a.paths) or "(no changes)")
+    try:
+        print(gitops.diff(task.worktree, base, stat=a.stat, paths=a.paths) or "(no changes)")
+    except gitops.GitError as e:
+        die(f"{e}\nthe branch's commits: git -C {task.spec['repo']} diff {task.spec['base'][:12]} "
+            f"{task.spec['branch']}")
 
 
 def _stop_runner(task):
@@ -537,6 +567,7 @@ def stop_everything() -> list[str]:
     return stopped
 
 
+@one_at_a_time
 def cmd_stop(a):
     if a.all:
         stopped = stop_everything()
@@ -553,6 +584,7 @@ def cmd_stop(a):
           "corrections, wb discard drops it")
 
 
+@one_at_a_time
 def cmd_resume(a):
     """Continue a task Claude stopped (wb stop) where the work stands: a fresh session, handed
     the task, the work so far and what the step's rounds asked. Not a review round."""
@@ -658,6 +690,7 @@ def cmd_note(a):
     print(f"noted on {a.name}")
 
 
+@one_at_a_time
 def cmd_takeover(a):
     """Stop the agent and hand the worktree to Claude, to finish by hand or hand back."""
     if a.all:  # "just get it done claude"
@@ -677,10 +710,12 @@ def cmd_takeover(a):
                 "text": "Claude took over"})
     task.set_status(phase="review", last="Claude took over", pid=None)
     _ack_all(task)
-    print(f"took over {a.name}: the agent is stopped. Edit in {task.worktree}, then "
-          f"wb accept {a.name} -m \"…\", or hand it back with wb feedback {a.name} --message <file>")
+    print(f"took over {a.name}: the agent is stopped. Edit in {task.worktree} and leave it "
+          f"uncommitted, then wb accept {a.name} -m \"…\" (it commits), or hand it back with "
+          f"wb feedback {a.name} --message <file>")
 
 
+@one_at_a_time
 def cmd_accept(a):
     task = need(a.name)
     spec, st = task.spec, task.status
@@ -696,18 +731,24 @@ def cmd_accept(a):
            f"\n\nWorkbench-Task: {a.name}\nOpenCode-Session: {st.get('session')}")
     measured = results.step(task, landed=True)
     try:
-        if gitops.changed(task.worktree) or st.get("steps", 1) == 1:
-            commit = gitops.commit_all(task.worktree, msg)
-        else:  # the last step changed nothing more: the branch is its committed steps
-            commit = gitops.git(task.worktree, "rev-parse", "--short", "HEAD").strip()
-        gitops.remove_worktree(repo, task.worktree)
+        commit = _landed(task)
+        if not commit:
+            head = gitops.git(task.worktree, "rev-parse", "HEAD").strip()
+            if gitops.changed(task.worktree) or head == spec["base"]:
+                commit = gitops.commit_all(task.worktree, msg)
+            else:  # nothing new: the branch's commits past the base are the work (the steps
+                # wb next committed, or Claude's own after a takeover: the audit)
+                commit = gitops.git(task.worktree, "rev-parse", "--short", "HEAD").strip()
     except gitops.GitError as e:
-        die(str(e))
+        die(str(e))  # nothing removed: the uncommitted work is still in the worktree
+    if warn := gitops.remove_worktree(repo, task.worktree):  # committed: the rest is cleanup
+        print(f"wb: {warn}", file=sys.stderr)
     _spec_gaps(task, a.spec_gap)
     merged = None
     if a.merge:
         try:
-            merged = gitops.merge(repo, a.name, spec.get("base_ref"))
+            merged = gitops.merge(repo, a.name, spec.get("base_branch") or spec.get("base_ref"),
+                                  spec["base"])
         except gitops.GitError as e:
             print(f"wb: not merged: {e}", file=sys.stderr)
     task.set_status(phase="accepted", last=f"accepted as {commit}" +
@@ -725,6 +766,23 @@ def cmd_accept(a):
     _say(lessons.nudge(task, "accepted"))
 
 
+def _landed(task: store.Task) -> str | None:
+    """The commit an earlier wb accept made before its cleanup failed: the worktree is gone or
+    broken and the branch's tip carries accept's own trailer (a step's says "(step N)"). A retry
+    then finishes the job; it once died on "nothing to commit" for good (the 2026-11-16 audit)."""
+    try:
+        gitops.git(task.worktree, "rev-parse", "HEAD")
+        return None  # a working worktree: commit from it
+    except gitops.GitError:
+        pass
+    repo, branch = task.spec["repo"], task.spec["branch"]
+    if f"Workbench-Task: {task.name}" in gitops.git(repo, "log", "-1", "--format=%B", branch,
+                                                    check=False).splitlines():
+        return gitops.git(repo, "rev-parse", "--short", branch).strip()
+    return None
+
+
+@one_at_a_time
 def cmd_discard(a):
     task = need(a.name)
     spec = task.spec
@@ -734,13 +792,16 @@ def cmd_discard(a):
     _spec_gaps(task, a.spec_gap)
     repo = Path(spec["repo"])
     measured = results.step(task, landed=False)
-    gitops.remove_worktree(repo, task.worktree, force=True)
-    if not a.keep_branch:
+    if warn := gitops.remove_worktree(repo, task.worktree):  # never stops a discard (the audit)
+        print(f"wb: {warn}", file=sys.stderr)
+    kept = a.keep_branch or not repo.is_dir()
+    if not kept:
         gitops.delete_branch(repo, a.name)
     task.set_status(phase="discarded", last=a.reason or "discarded", pid=None)
     results.record(task, "discarded", measured, reason=a.reason)
     _ack_all(task)
-    print(f"discarded {a.name}" + ("" if a.keep_branch else f"; branch {spec['branch']} deleted"))
+    print(f"discarded {a.name}" + ("" if a.keep_branch else f"; branch {spec['branch']} deleted"
+                                   if not kept else f"; {repo} is gone, so its branch with it"))
     _say(lessons.nudge(task, "discarded"))
 
 

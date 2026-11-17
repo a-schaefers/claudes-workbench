@@ -4,6 +4,7 @@ The agent never commits; everything it does stays in the worktree's working tree
 """
 import hashlib
 import os
+import shutil
 import stat
 import subprocess
 import tempfile
@@ -218,25 +219,71 @@ def commit_all(worktree: Path, message: str) -> str:
     return git(worktree, "rev-parse", "--short", "HEAD").strip()
 
 
-def remove_worktree(repo: Path, worktree: Path, force=False) -> None:
-    if worktree.exists():  # without --force, git runs `status` in the worktree: no hooks there
-        git(repo, *NO_HOOKS, "-c", "core.fsmonitor=false", "worktree", "remove",
-            *(["--force"] if force else []), str(worktree))
-    git(repo, "worktree", "prune", check=False)
+def _rmtree(path: Path) -> None:
+    for d, dirs, _ in os.walk(path):  # a read-only directory keeps its entries from deletion
+        for x in (d, *(os.path.join(d, n) for n in dirs)):
+            if not os.path.islink(x):
+                try:
+                    os.chmod(x, os.stat(x).st_mode | stat.S_IRWXU)
+                except OSError:
+                    pass
+    shutil.rmtree(path, ignore_errors=True)
+    if os.path.islink(path):
+        os.unlink(path)
+
+
+def remove_worktree(repo: Path, worktree: Path) -> str:
+    """Remove a task's worktree and its registration; a warning when git couldn't, else "".
+    Always --force: after accept's commit only ignored files are left, which git deletes anyway,
+    and without it git runs `status` in the worktree. When git fails (a read-only directory, an
+    embedded repo, a repo moved or deleted), a task's own worktree is deleted by hand: accept and
+    discard once wedged there for good (the 2026-11-16 audit)."""
+    worktree, warn = Path(worktree), ""
+    if worktree.exists() or worktree.is_symlink():
+        try:
+            if not Path(repo).is_dir():
+                raise GitError(f"{repo} is gone")
+            git(repo, *NO_HOOKS, "-c", "core.fsmonitor=false", "worktree", "remove", "--force",
+                str(worktree))
+        except GitError as e:
+            if _record(worktree) is None:  # only ever a task's own worktree by hand
+                return f"the worktree wasn't removed: {e}"
+            _rmtree(worktree)
+            warn = f"git couldn't remove the worktree ({e}); it was deleted"
+    if Path(repo).is_dir():
+        git(repo, "worktree", "prune", check=False)
+    return warn
 
 
 def delete_branch(repo: Path, task: str) -> None:
     git(repo, "branch", "-D", branch_name(task), check=False)
 
 
-def merge(repo: Path, task: str, into: str | None = None) -> str:
-    """Merge the task's branch into ``into`` (the branch it started from), which the main
-    checkout must have out and clean; a conflict is backed out, leaving the repo as it was."""
+def start_branch(repo: Path, base: str) -> str | None:
+    """The branch a task starts from: the one checked out for HEAD, else ``base`` when it names a
+    local branch; None for a detached HEAD or a commit."""
+    if base == "HEAD":
+        return git(repo, "symbolic-ref", "--short", "-q", "HEAD", check=False).strip() or None
+    return base if _run(repo, ("rev-parse", "--verify", "-q", f"refs/heads/{base}"),
+                        check=False).returncode == 0 else None
+
+
+def merge(repo: Path, task: str, into: str | None = None, base: str | None = None) -> str:
+    """Merge the task's branch into ``into`` (the branch it started from: task.json's
+    base_branch), which the main checkout must have out and clean; a conflict is backed out,
+    leaving the repo as it was. With no branch recorded, the checkout's branch must contain
+    ``base``, the task's base commit. Never onto a detached HEAD, where the merge is lost at the
+    next checkout, nor onto another branch than the task's (both happened: the 2026-11-16 audit)."""
     if git(repo, "status", "--porcelain", "--untracked-files=no").strip():
         raise GitError(f"{repo} has uncommitted changes; merge {branch_name(task)} by hand")
     have = git(repo, "branch", "--show-current").strip()
+    if not have:
+        raise GitError(f"{repo} has a detached HEAD out; merge {branch_name(task)} by hand")
     if into and into != "HEAD" and have != into:
-        raise GitError(f"{repo} has {have or 'a detached HEAD'} out, not {into}; "
+        raise GitError(f"{repo} has {have} out, not {into}; merge {branch_name(task)} by hand")
+    if (not into or into == "HEAD") and base and _run(
+            repo, ("merge-base", "--is-ancestor", base, "HEAD"), check=False).returncode:
+        raise GitError(f"{repo} has {have} out, which doesn't hold the task's base; "
                        f"merge {branch_name(task)} by hand")
     try:
         git(repo, "merge", "--no-ff", "--no-edit", branch_name(task))

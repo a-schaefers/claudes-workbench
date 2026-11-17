@@ -245,6 +245,124 @@ class Lifecycle(Base):
         self.assertNotIn("delegate/t-stop", branches)
         self.assertFalse(store.Task("t-stop").worktree.exists())
 
+    def branch(self, name):
+        return subprocess.run(["git", "-C", str(self.repo), "rev-parse", "-q", "--verify", name],
+                              capture_output=True, text=True).stdout.strip()
+
+    def test_a_worktree_git_cannot_remove_still_closes_the_task(self):
+        # the 2026-11-16 audit: a read-only ignored directory made `git worktree remove` fail
+        # after the commit, and accept, a retried accept and discard all died from then on
+        (self.repo / ".gitignore").write_text("build/\n")
+        subprocess.run(["git", "-C", str(self.repo), "add", ".gitignore"], check=True)
+        subprocess.run(["git", "-C", str(self.repo), "commit", "-qm", "ignore build"], check=True)
+        for name in ("t-ro1", "t-ro2"):
+            self.start(name, "ok")
+            wait_phase(name, {"review"})
+            ro = store.Task(name).worktree / "build" / "mod"
+            ro.mkdir(parents=True)
+            (ro / "x.o").write_text("x")
+            ro.chmod(0o555)
+        self.addCleanup(lambda: [p.chmod(0o755) for p in Path(self.tmp.name).rglob("mod")])
+        self.assertIn("accepted t-ro1", run_wb("accept", "t-ro1", "-m", "feat: answer"))
+        run_wb("discard", "t-ro2")
+        for name, phase in (("t-ro1", "accepted"), ("t-ro2", "discarded")):
+            self.assertEqual(store.Task(name).status["phase"], phase)
+            self.assertFalse(store.Task(name).worktree.exists())
+
+    def test_an_accept_that_died_after_its_commit_finishes_on_a_retry(self):
+        self.start("t-retry", "ok")
+        wait_phase("t-retry", {"review"})
+        with mock.patch.object(cli.gitops, "remove_worktree", side_effect=OSError("killed")), \
+                self.assertRaises(OSError):
+            run_wb("accept", "t-retry", "-m", "feat: answer")
+        tip = self.branch("delegate/t-retry")
+        shutil.rmtree(store.Task("t-retry").worktree)          # and the worktree went with it
+        self.assertIn("accepted t-retry", run_wb("accept", "t-retry", "-m", "feat: answer"))
+        self.assertEqual(self.branch("delegate/t-retry"), tip)  # the same commit, not a new one
+
+    def test_a_task_whose_repo_moved_can_still_be_discarded(self):
+        self.start("t-moved", "ok")
+        wait_phase("t-moved", {"review"})
+        self.repo.rename(self.repo.with_name("elsewhere"))
+        self.assertIn("is gone", run_wb("discard", "t-moved"))
+        self.assertEqual(store.Task("t-moved").status["phase"], "discarded")
+        self.assertFalse(store.Task("t-moved").worktree.exists())
+
+    def test_accept_takes_what_claude_committed_by_hand_after_a_takeover(self):
+        # the audit: a hand commit left accept with "nothing to commit", and discard deleted it
+        self.start("t-hand", "ok")
+        wait_phase("t-hand", {"review"})
+        run_wb("takeover", "t-hand")
+        wt = store.Task("t-hand").worktree
+        subprocess.run(["git", "-C", str(wt), "add", "-A"], check=True)
+        subprocess.run(["git", "-C", str(wt), "commit", "-qm", "by hand"], check=True)
+        head = subprocess.run(["git", "-C", str(wt), "rev-parse", "--short", "HEAD"],
+                              capture_output=True, text=True).stdout.strip()
+        self.assertIn(f"commit {head}", run_wb("accept", "t-hand", "-m", "feat: answer"))
+
+    def test_merge_lands_only_on_the_branch_the_task_started_from(self):
+        # the audit: a task started on `feature` merged into the main checkout's `main`, and one
+        # on a detached HEAD left its merge commit orphaned
+        g = lambda *a: subprocess.run(["git", "-C", str(self.repo), *a], check=True,  # noqa
+                                      capture_output=True)
+        g("switch", "-q", "-c", "feature")
+        self.start("t-feat", "ok")
+        self.start("t-det", "ok")
+        wait_phase("t-feat", {"review"})
+        wait_phase("t-det", {"review"})
+        self.assertEqual(store.Task("t-feat").spec["base_branch"], "feature")
+        g("switch", "-q", "main")
+        err = io.StringIO()
+        with redirect_stderr(err):
+            run_wb("accept", "t-feat", "-m", "feat: answer", "--merge")
+        self.assertIn("not feature", err.getvalue())
+        g("switch", "-q", "--detach", "feature")
+        with redirect_stderr(err):
+            run_wb("accept", "t-det", "-m", "feat: answer", "--merge")
+        self.assertIn("detached HEAD", err.getvalue())
+        self.assertEqual(self.branch("main"), self.branch("feature"))  # neither merged
+
+    def test_a_tasks_worktree_is_not_a_repo_to_start_from(self):
+        # the audit: --repo . from a taken-over worktree made it the new task's repo, removed
+        # at the first task's accept
+        self.start("t-a", "ok")
+        wait_phase("t-a", {"review"})
+        with self.assertRaises(SystemExit):
+            run_wb("start", "t-b", "--spec", str(self.spec), "--repo",
+                   str(store.Task("t-a").worktree), "--model", "mimo")
+        self.assertFalse(store.Task("t-b").dir.exists())
+
+    def test_an_accept_and_a_discard_at_once_run_one_after_the_other(self):
+        # the audit: both passed the phase check; the discard deleted the accepted branch and
+        # results.jsonl learnt from both
+        self.start("t-race", "ok")
+        wait_phase("t-race", {"review"})
+        outcome, real = [], cli.gitops.remove_worktree
+
+        def discard():
+            try:
+                cli.main(["discard", "t-race"])
+                outcome.append("discarded")
+            except SystemExit:
+                outcome.append("refused")
+
+        def slow_remove(*args):
+            t = threading.Thread(target=discard)
+            t.start()
+            t.join(1)                                # the discard waits on the lock
+            outcome.append("accepting")
+            return real(*args)
+        with mock.patch.object(cli.gitops, "remove_worktree", side_effect=slow_remove), \
+                redirect_stderr(io.StringIO()):
+            run_wb("accept", "t-race", "-m", "feat: answer")
+            deadline = time.time() + 10
+            while len(outcome) < 2 and time.time() < deadline:
+                time.sleep(0.05)
+        self.assertEqual(outcome, ["accepting", "refused"])
+        self.assertTrue(self.branch("delegate/t-race"))
+        rows, _ = store.read_jsonl(store.home() / "results.jsonl")
+        self.assertEqual([r["outcome"] for r in rows if r["task"] == "t-race"], ["accepted"])
+
     def hook(self, path: Path, marker: Path) -> Path:
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text(f"#!/bin/sh\necho $0 >> {shlex.quote(str(marker))}\n")
