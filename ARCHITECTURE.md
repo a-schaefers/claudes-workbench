@@ -1034,7 +1034,9 @@ command raise. Each task's `acked` file holds the time up to which Claude has ha
   dead runners first (`reap`), so their `failed` notice is what it delivers. A named wait on a
   closed task exits 2; on a task already waiting whose notice was taken elsewhere it prints it
   again "(already delivered once)" rather than block forever, and one stopped or taken over by
-  hand, which has no notice, prints `[<phase>] <task> (no notice: <last>)`. A bare wait with no
+  hand, which has no notice, prints `[<phase>] <task> (no notice: <last>)`; a task failed as dead
+  under 10 s ago without its notice yet is another `wb` reaping it, and the wait waits for the
+  notice (it said "no notice", and the notice came again on the next wait). A bare wait with no
   open task exits 2. `--timeout` exits 2 when it passes.
 - **Off switch.** The plugin's `wake` setting (`on`/`off`) stops the prompts and keeps the pane
   and the toasts; a `workbench-wake` context block tells Claude no wake will come, so it doesn't

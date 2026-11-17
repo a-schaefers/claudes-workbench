@@ -572,6 +572,20 @@ class Lifecycle(Base):
         run_wb("resume", "t-killed")
         wait_phase("t-killed", {"review"})
 
+    def test_a_wait_that_meets_a_reap_in_progress_delivers_its_notice_once(self):
+        # the reaper writes the phase, sweeps, then the notice: a wait in between said "no
+        # notice", and the next one delivered the notice again (the 0.90 review)
+        self.start("t-reaping", "ok")
+        wait_phase("t-reaping", {"review"})
+        task = store.Task("t-reaping")
+        task.set_status(phase="failed", last=cli.RUNNER_DIED, pid=None)
+        later = threading.Timer(0.3, task.notify, ("failed", "task t-reaping: the runner died"))
+        later.start()
+        out = run_wb("wait", "t-reaping", "--timeout", "5")
+        later.join()
+        self.assertIn("[failed] t-reaping\ntask t-reaping: the runner died", out)
+        self.assertNotIn("no notice", out)
+
     def test_a_sigterm_from_outside_wb_leaves_the_task_stuck_with_a_notice(self):
         # A shutdown's SIGTERM was logged "stopped by the reviewer" and left the task live with
         # no notice (the 2026-11-16 audit).

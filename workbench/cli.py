@@ -662,6 +662,14 @@ def cmd_wait(a):
                 if mine:
                     print(f"[{want}] {a.name} (already delivered once)\n{mine[-1].get('text', '')}")
                     return
+                if phase == "failed" and st.get("last") == RUNNER_DIED \
+                        and time.time() - (st.get("updated_at") or 0) < 10 \
+                        and not (deadline and time.time() > deadline):
+                    # another wb is reaping it (reap writes the phase, then sweeps, then the
+                    # notice): said "no notice", and the notice came again on the next wait (the
+                    # 0.90 review). Bounded: a reaper killed meanwhile ends in "no notice".
+                    watcher.wait(1.0)
+                    continue
                 if phase != "asking":  # a question always has its notice, which carries its id
                     print(f"[{phase}] {a.name} (no notice: {st.get('last') or phase})")
                     return
