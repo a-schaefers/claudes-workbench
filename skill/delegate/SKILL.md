@@ -67,7 +67,9 @@ prints a short report written for you — don't go digging in raw logs unless a 
 ## 0. The project: git and CLAUDE.md are yours
 Every project you delegate in is a git repo with a CLAUDE.md that tells the truth, and you keep
 it that way; the agents never write either.
-- **New project**: `wb init <dir>` makes the repo (git's default branch, an initial commit). Never add a
+- **New project**: `wb init <dir>` makes the repo (git's default branch, an initial commit); `<dir>`
+  is the project's own directory, never ~. When it refuses likely secrets or installed directories,
+  write a `.gitignore` for them (ask the user about a secret it names) and run it again. Never add a
   remote or create a GitHub repo until the user gives the name and says private or public; you
   may ask once the project has a shape.
 - **CLAUDE.md**: before the first task, write it from what you know and what you read (what the

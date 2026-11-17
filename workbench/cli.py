@@ -4,6 +4,7 @@ Every command prints a short, plain report: it is read by Claude, whose tokens a
 resource, and by a person at a terminal.
 """
 import argparse
+import fnmatch
 import json
 import os
 import shutil
@@ -106,10 +107,24 @@ def _has_file(repo: Path, ref: str, path: str) -> bool:
                           capture_output=True).returncode == 0
 
 
+def _ignored(repo: Path, path: str) -> bool:
+    """Whether git ignores ``path`` in ``repo`` (a tracked file never is)."""
+    return subprocess.run(["git", "-C", str(repo), "check-ignore", "-q", path],
+                          capture_output=True).returncode == 0
+
+
+def _local_claude_md(repo: Path) -> bool:
+    """A CLAUDE.md kept out of git on purpose: the agents get the checkout's copy
+    (context.instruction_files), so it is never to be committed (the 2026-11-16 audit)."""
+    return (repo / "CLAUDE.md").is_file() and _ignored(repo, "CLAUDE.md")
+
+
 def _need_claude_md(repo: Path, base: str, a) -> None:
     if a.no_claude_md:
         return
-    if not _has_file(repo, base, "CLAUDE.md"):
+    if not _has_file(repo, base, "CLAUDE.md") and _local_claude_md(repo):
+        print("note: CLAUDE.md is gitignored: the agent gets your checkout's copy")
+    elif not _has_file(repo, base, "CLAUDE.md"):
         die(f"{repo} has no CLAUDE.md at {base}: the agent would start blind. Write it (what the "
             "project is, how to build and test it, its conventions), commit it, and run "
             f"wb init {repo} to link AGENTS.md; --no-claude-md skips this check")
@@ -700,8 +715,10 @@ def cmd_accept(a):
     results.record(task, "accepted", measured, commit=commit, merged=bool(merged))
     _ack_all(task)
     note = claude_md_status(repo, spec["branch"])  # the task's own commit counts: the reminder
-    print(f"{note}: keep it current (update and commit it if this change alters what it says)"
-          if note != "no CLAUDE.md" else "the repo has no CLAUDE.md: write one (wb init)")
+    print("the repo has no CLAUDE.md: write one (wb init)" if note == "no CLAUDE.md" else
+          f"{note}: keep it current (update it if this change alters what it says)"
+          if note == LOCAL_CLAUDE_MD else
+          f"{note}: keep it current (update and commit it if this change alters what it says)")
     print(f"accepted {a.name}: commit {commit} on {spec['branch']}" +
           (f", merged into {gitops.git(repo, 'branch', '--show-current').strip()} as {merged}"
            if merged else f"\nmerge with: git -C {repo} merge --no-ff {spec['branch']}"))
@@ -1211,10 +1228,14 @@ def cmd_model(a):
     print(done)
 
 
+LOCAL_CLAUDE_MD = "CLAUDE.md is gitignored: agents get the checkout's copy"
+
+
 def claude_md_status(repo: Path, ref: str = "HEAD") -> str:
-    """One line on the repo's CLAUDE.md at ref: missing, or how far behind the code it may be."""
+    """One line on the repo's CLAUDE.md at ref: missing, local, or how far behind the code it
+    may be."""
     if not _has_file(repo, ref, "CLAUDE.md"):
-        return "no CLAUDE.md"
+        return LOCAL_CLAUDE_MD if _local_claude_md(repo) else "no CLAUDE.md"
     last = gitops.git(repo, "log", "-1", "--format=%h", ref, "--", "CLAUDE.md").strip()
     since = int(gitops.git(repo, "rev-list", "--count", f"{last}..{ref}", "--", ".",
                            ":!CLAUDE.md", ":!AGENTS.md").strip() or 0)  # commits that changed code
@@ -1222,10 +1243,37 @@ def claude_md_status(repo: Path, ref: str = "HEAD") -> str:
             f"CLAUDE.md last changed {since} commit(s) before {ref} ({last})")
 
 
+# What wb init won't put in a project's first commit (the 2026-11-16 audit: an .env with an API
+# key, node_modules and .venv all went in). Matched on a file's name, and on a path's directories.
+SECRET_FILES = (".env", ".env.*", "*.pem", "*.key", "*.p12", "*.pfx", "id_rsa", "id_ed25519",
+                "id_ecdsa", "id_dsa", "credentials.json", ".npmrc", ".pypirc", ".netrc")
+NOT_SECRET = (".env.example", ".env.sample", ".env.template")
+VENDORED = ("node_modules", ".venv", "venv", "__pycache__", ".tox", ".mypy_cache")
+
+
+def _unfit_for_commit(d: Path) -> tuple[list[str], list[str]]:
+    """(likely secrets, vendored or generated directories) among the files `git add -A` would
+    take; `target/` counts only beside a Cargo.toml."""
+    secrets, vendored = [], set()
+    for n in gitops.git(d, "ls-files", "--others", "--exclude-standard", "-z").split("\0"):
+        if not n:
+            continue
+        parts = n.rstrip("/").split("/")
+        if parts[-1] not in NOT_SECRET and any(fnmatch.fnmatch(parts[-1], p) for p in SECRET_FILES):
+            secrets.append(n)
+        for i, c in enumerate(parts[:-1] if not n.endswith("/") else parts):
+            if c in VENDORED or c == "target" and (d.joinpath(*parts[:i]) / "Cargo.toml").is_file():
+                vendored.add("/".join(parts[:i + 1]) + "/")
+                break
+    return secrets, sorted(vendored)
+
+
 def cmd_init(a):
     """Set a project up as Claude keeps every project: a git repo (on git's init.defaultBranch)
     with an initial commit, AGENTS.md a symlink to CLAUDE.md. Safe to run again; no remote is ever added."""
     d = Path(a.dir).expanduser().resolve()
+    if Path.home().resolve().is_relative_to(d):  # the home directory, or above it (/ included)
+        die(f"wb init takes a project's own directory, not {d}: make one (e.g. ~/projects/<name>)")
     d.mkdir(parents=True, exist_ok=True)
     inside = gitops.git(d, "rev-parse", "--show-toplevel", check=False).strip()
     if inside and Path(inside) != d:
@@ -1237,23 +1285,40 @@ def cmd_init(a):
         gitops.git(d, "init", "-q")  # on the user's init.defaultBranch
         did.append("git repo on " + (gitops.git(d, "symbolic-ref", "--short", "HEAD",
                                                 check=False).strip() or "its default branch"))
+    has_commits = bool(gitops.git(d, "rev-parse", "--verify", "-q", "HEAD", check=False).strip())
+    if not has_commits:  # before anything is changed: a run after the fix starts clean
+        secrets, vendored = _unfit_for_commit(d)
+        if secrets or vendored:
+            die(f"not committing {d} as it is: "
+                + (f"these look like secrets, which never go in git: {', '.join(secrets[:10])}"
+                   + (f" (+{len(secrets) - 10})" if len(secrets) > 10 else "") + "; " if secrets else "")
+                + (f"these are installed or generated: {', '.join(vendored[:10])}; " if vendored else "")
+                + f"add them to {d / '.gitignore'} (or remove them) and run wb init again")
     claude, agents = d / "CLAUDE.md", d / "AGENTS.md"
+    if claude.is_symlink() and agents.is_file() and not agents.is_symlink() \
+            and claude.resolve() == agents.resolve():
+        # CLAUDE.md -> AGENTS.md, the reverse convention: swap them. Comparing the two names'
+        # text once deleted AGENTS.md, the only copy (the audit)
+        claude.unlink()
+        agents.rename(claude)
+        agents.symlink_to("CLAUDE.md")
+        did.append("AGENTS.md moved to CLAUDE.md, which it now links to")
     if agents.is_file() and not agents.is_symlink() and not claude.exists():
         agents.rename(claude)  # the project's instructions live in CLAUDE.md, AGENTS.md points at it
         did.append("AGENTS.md moved to CLAUDE.md")
     if claude.is_file() and agents.is_file() and not agents.is_symlink():
-        if agents.read_text() == claude.read_text():
+        if not os.path.samefile(claude, agents) and agents.read_bytes() == claude.read_bytes():
             agents.unlink()
         else:
             print("AGENTS.md and CLAUDE.md differ: merge them into CLAUDE.md, delete AGENTS.md, "
                   "and run wb init again")
-    if claude.is_file() and not agents.exists() and not agents.is_symlink():
+    local = _local_claude_md(d)  # kept out of git: a link to it would dangle in every clone
+    if claude.is_file() and not local and not agents.exists() and not agents.is_symlink():
         agents.symlink_to("CLAUDE.md")
         did.append("AGENTS.md → CLAUDE.md")
-    has_commits = bool(gitops.git(d, "rev-parse", "--verify", "-q", "HEAD", check=False).strip())
     if not has_commits:
         gitops.git(d, "add", "-A")  # the agents work from commits: the project as it is now
-        n = len(gitops.git(d, "diff", "--cached", "--name-only").split())
+        n = len(gitops.git(d, "diff", "--cached", "--name-only", "-z").split("\0")) - 1
         gitops.git(d, "commit", "-q", "--allow-empty", "-m", "Initial commit")
         did.append(f"initial commit of the {n} file(s) here (git show --stat to check)" if n
                    else "initial commit")
@@ -1266,6 +1331,8 @@ def cmd_init(a):
             did.append("committed")
     status = claude_md_status(d)
     print(f"{d}: " + (", ".join(did) if did else "already set up") + f"; {status}"
+          + (" (AGENTS.md not linked)" if local else "")
+          + ("\nnote: CLAUDE.md is a link to a missing file" if claude.is_symlink() and not claude.exists() else "")
           + ("\nnext: write CLAUDE.md (what the project is, how to build and test it, its "
              "conventions), commit it, then wb init again to link AGENTS.md"
              if status == "no CLAUDE.md" else ""))

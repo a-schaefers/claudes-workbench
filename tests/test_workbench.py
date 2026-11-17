@@ -1666,6 +1666,80 @@ class Projects(Base):
         self.assertEqual((self.repo / "CLAUDE.md").read_text(), "# rules\n")
         self.assertTrue((self.repo / "AGENTS.md").is_symlink())
 
+    def identity(self):
+        cfg = Path(self.tmp.name) / "gitconfig"
+        cfg.write_text("[user]\n\temail = t@t\n\tname = t\n")
+        os.environ["GIT_CONFIG_GLOBAL"] = str(cfg)
+
+    def test_init_swaps_a_claude_md_that_links_to_agents_md_and_loses_nothing(self):
+        # the 2026-11-16 audit: CLAUDE.md -> AGENTS.md compared equal to itself, and wb init
+        # deleted AGENTS.md, the only copy, uncommitted edits and all
+        self.identity()
+        g = lambda d, *a: subprocess.run(["git", "-C", str(d), *a], check=True)  # noqa
+        (self.repo / "CLAUDE.md").unlink()
+        (self.repo / "AGENTS.md").write_text("# rules\n")
+        (self.repo / "CLAUDE.md").symlink_to("AGENTS.md")
+        g(self.repo, "add", "-A")
+        g(self.repo, "commit", "-qm", "agents first")
+        (self.repo / "AGENTS.md").write_text("# rules\nuncommitted\n")
+        run_wb("init", str(self.repo))
+        self.assertFalse((self.repo / "CLAUDE.md").is_symlink())
+        self.assertEqual((self.repo / "CLAUDE.md").read_text(), "# rules\nuncommitted\n")
+        self.assertEqual(os.readlink(self.repo / "AGENTS.md"), "CLAUDE.md")
+        d = Path(self.tmp.name) / "fresh"
+        d.mkdir()
+        (d / "AGENTS.md").write_text("# fresh\n")
+        (d / "CLAUDE.md").symlink_to("AGENTS.md")
+        run_wb("init", str(d))
+        self.assertEqual(self.git(d, "show", "HEAD:CLAUDE.md"), "# fresh")
+        self.assertEqual(self.git(d, "show", "HEAD:AGENTS.md"), "CLAUDE.md")  # the link
+
+    def test_init_will_not_commit_secrets_or_installed_directories(self):
+        # the audit: a first commit took .env (an API key), node_modules and .venv
+        self.identity()
+        d = Path(self.tmp.name) / "app"
+        (d / "node_modules/x").mkdir(parents=True)
+        (d / "node_modules/x/i.js").write_text("x")
+        (d / "app.py").write_text("print(1)\n")
+        (d / ".env").write_text("API_KEY=sk-123\n")
+        (d / ".env.example").write_text("API_KEY=\n")
+        err = io.StringIO()
+        with self.assertRaises(SystemExit), redirect_stderr(err):
+            run_wb("init", str(d))
+        self.assertIn(".env,", err.getvalue().replace(";", ","))
+        self.assertIn("node_modules/", err.getvalue())
+        self.assertNotIn(".env.example", err.getvalue())
+        self.assertEqual(self.git(d, "rev-parse", "-q", "--verify", "HEAD"), "")  # nothing committed
+        (d / ".gitignore").write_text(".env\nnode_modules/\n")
+        run_wb("init", str(d))
+        self.assertEqual(sorted(self.git(d, "ls-files").split()), [".env.example", ".gitignore", "app.py"])
+
+    def test_init_refuses_the_home_directory(self):
+        # the audit: `wb init .` from ~ would have committed ~/.ssh and every other project
+        self.identity()
+        home = Path(self.tmp.name) / "home"
+        home.mkdir()
+        os.environ["HOME"] = str(home)
+        for d in (home, Path("/")):
+            with self.assertRaises(SystemExit):
+                run_wb("init", str(d))
+        self.assertFalse((home / ".git").exists())
+
+    def test_a_gitignored_claude_md_is_not_linked_and_does_not_stop_a_start(self):
+        # the audit: init committed an AGENTS.md link to an ignored file, dangling in every clone,
+        # and wb start sent Claude off to commit a file the user keeps out of git
+        g = lambda *a: subprocess.run(["git", "-C", str(self.repo), *a], check=True)  # noqa
+        g("rm", "-q", "--cached", "CLAUDE.md")
+        (self.repo / ".gitignore").write_text("CLAUDE.md\n")
+        g("add", ".gitignore")
+        g("commit", "-qm", "private CLAUDE.md")
+        out = run_wb("init", str(self.repo))
+        self.assertIn("CLAUDE.md is gitignored", out)
+        self.assertNotIn("next: write CLAUDE.md", out)
+        self.assertFalse((self.repo / "AGENTS.md").exists() or (self.repo / "AGENTS.md").is_symlink())
+        self.assertIn("CLAUDE.md is gitignored", self.start("t-local", "ok"))
+        wait_phase("t-local", {"review"})
+
     def test_start_wants_a_claude_md(self):
         (self.repo / "CLAUDE.md").unlink()
         subprocess.run(["git", "-C", str(self.repo), "commit", "-qam", "no docs"], check=True)
