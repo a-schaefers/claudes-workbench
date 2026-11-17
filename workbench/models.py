@@ -850,11 +850,14 @@ def holders(home: Path | None = None) -> dict:
     return {p: h for p, h in held.items() if p.isdigit() and _alive(int(p), h.get("start"))}
 
 
-def _fits_beside(m: Model, keep: set) -> bool:
+def _fits_beside(m: Model, keep: set, before=None) -> bool:
     """After a shared load: Ollama kept every other holder's model and has all of ``m`` in VRAM.
     need() guesses a model's context before it loads; when the guess is short, Ollama evicts a
     model or splits one onto the CPU, and two tasks then reload their models on every request
-    (the 2026-11-16 audit). Unknown (Ollama didn't answer) counts as fitting."""
+    (the 2026-11-16 audit). Unknown (Ollama didn't answer) counts as fitting. ``before``: the
+    names /api/ps listed before the load. A kept model missing from it was unloaded idle (its task
+    in a long test run or waiting on a question past the keep-alive), not evicted: counted as one,
+    the other task unloaded itself and waited for that task to finish (the 0.90 review)."""
     if _fake() or m.engine != "ollama":
         return True
     body = _get(f"{m.root}/api/ps")
@@ -863,7 +866,8 @@ def _fits_beside(m: Model, keep: set) -> bool:
     ps = body.get("models") or []
     names = {x.get("name") for x in ps}
     found = discover()
-    others = [o for o in (found.get(k) for k in keep) if o and o.server == m.server]
+    others = [o for o in (found.get(k) for k in keep) if o and o.server == m.server
+              and (before is None or _matches(o.name, before))]
     whole = any(_matches(m.name, {x.get("name")}) and x.get("size") and x.get("size_vram") == x["size"]
                 for x in ps)
     return whole and all(_matches(o.name, names) for o in others)
@@ -956,12 +960,18 @@ class GpuLease:
                 held = self._holders()
                 keep = {h["model"] for p, h in held.items()
                         if p != self.me and not h.get("waiting") and h.get("model")}
+            before = set(_ollama_loaded(self.m.root)) if keep and self.m.engine == "ollama" \
+                and not _fake() else None
             secs = make_resident(self.m, say=self.say, keep=keep, warn=self.warn)
-            if not keep or _fits_beside(self.m, keep):
+            # a load that loaded nothing evicted nothing (the 0.90 review)
+            if not keep or not secs or _fits_beside(self.m, keep, before):
                 return secs
             self.warn(f"ollama could not fit {self.m.id} beside {', '.join(sorted(keep))}; "
                       "waiting for the GPU to itself")
-            _unload(self.m)  # or the holders' next requests swap it in and out
+            found = discover()
+            if _key(self.m) not in {_key(o) for o in (found.get(k) for k in keep) if o}:
+                _unload(self.m)  # or the holders' next requests swap it in and out; a model a
+                # holder runs too is theirs as well, and stops being asked for once we wait
             with store.locked(self.home / "gpu.admit"):
                 held = self._holders()
                 self._set({**held, self.me: self._entry(waiting=True)})

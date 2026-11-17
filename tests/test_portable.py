@@ -194,7 +194,9 @@ class Real(unittest.TestCase):
         self.assertIn("x is 40% on the CPU", warned[0])
         self.assertFalse(models._fits_beside(found["a/x"], {"b/y"}))   # partly on the CPU
         found, posts = self.own([{"name": "x", "size": 10, "size_vram": 10}], ["x", "y"])
-        self.assertFalse(models._fits_beside(found["a/x"], {"b/y"}))   # y was evicted
+        self.assertFalse(models._fits_beside(found["a/x"], {"b/y"}, {"y"}))   # y was evicted
+        # y was already unloaded idle before the load: not an eviction (the 0.90 review)
+        self.assertTrue(models._fits_beside(found["a/x"], {"b/y"}, set()))
         found, posts = self.own([{"name": "x", "size": 10, "size_vram": 10},
                                  {"name": "y", "size": 10, "size_vram": 10}], ["x", "y"])
         self.assertTrue(models._fits_beside(found["a/x"], {"b/y"}))
