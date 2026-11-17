@@ -107,6 +107,8 @@ def check(skill_md: Path, name: str) -> tuple[list[str], list[str]]:
     s = parse(skill_md)
     if not NAME.match(name):
         problems.append(f"name {name!r}: lowercase words joined by hyphens")
+    elif name == "retired":
+        problems.append("`retired` is where the library keeps retired skills; pick another name")
     if s["name"] != name:
         problems.append(f"front matter name is {s['name']!r}, the directory is {name!r}")
     if not s["description"]:
@@ -168,6 +170,9 @@ def add(src: Path, name: str, message: str, source: str = "") -> tuple[str, list
     scan refuses a critical finding; on an update only what the change brought in counts.
     `source` (where an imported skill came from: url@commit, license) goes in the commit."""
     src_md = src / "SKILL.md" if src.is_dir() else src
+    if src.resolve().is_relative_to(library().resolve()):  # it would be scanned against itself
+        raise ValueError(f"{src} is in the library: edit a copy elsewhere and add that, or use "
+                         "wb skill patch")
     problems, warnings = check(src_md, name)
     dest = library() / name
     found = scan.scan(src)
@@ -260,8 +265,8 @@ def retire(name: str, message: str) -> None:
     if name not in available():
         raise KeyError(name)
     (library() / "retired").mkdir(exist_ok=True)
-    shutil.rmtree(library() / "retired" / name, ignore_errors=True)
-    _git("add", "-A")
+    shutil.rmtree(library() / "retired" / name, ignore_errors=True)  # an older retired copy
+    _git("rm", "-r", "-q", "--cached", "--ignore-unmatch", "--", f"retired/{name}")  # only that
     _git("mv", name, f"retired/{name}")
     _commit(f"{name}: retired: {message}")
 
@@ -269,6 +274,8 @@ def retire(name: str, message: str) -> None:
 def restore(name: str) -> None:
     if not (library() / "retired" / name / "SKILL.md").is_file():
         raise KeyError(name)
+    if (library() / name).exists():
+        raise ValueError(f"{name} is in the library already: retire it first")
     _git("mv", f"retired/{name}", name)
     _commit(f"{name}: restored")
 

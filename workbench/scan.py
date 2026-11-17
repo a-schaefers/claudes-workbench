@@ -38,6 +38,9 @@ SECRET = r"\$\{?\w*(?:KEY|TOKEN|SECRET|PASSWORD|CREDENTIAL)S?\b"
 LOOPBACK = r"(?![^\n]*https?://(?:localhost|127\.0\.0\.1|\[::1\]))"
 AGENT_FILES = r"(?:AGENTS\.md|CLAUDE\.md|\.claude/settings[\w.]*)"
 SHELLS = r"(?:bash|sh|zsh|ksh|dash)"
+# an interpreter that runs what it reads (`| sh`, `| python3 -`), not one running a module or
+# a file of its own on the piped data (`| python3 -m json.tool`)
+RUNS_STDIN = r"(?=\s*(?:$|[;&|)`]|-\s|-$|-s\b|-i\b))"
 
 # (regex, rule, severity, what it means); compiled case-insensitive, (?-i:) where case matters
 PATTERNS = [
@@ -46,7 +49,8 @@ PATTERNS = [
      "curl sends a secret environment variable"),
     (rf"wget\s+{LOOPBACK}[^\n]*{SECRET}", "env_exfil_wget", "critical",
      "wget sends a secret environment variable"),
-    (r"cat\s+(?!>)[^\n]*(\.env\b|credentials|\.netrc|\.pgpass|\.npmrc|\.pypirc)", "read_secrets_file",
+    # reading one: not writing it (`cat <<EOF > .env`), not the template (`.env.example`)
+    (r"cat\s+(?!<<)[^\n>|]*(\.env(?![\w.-])|credentials|\.netrc|\.pgpass|\.npmrc|\.pypirc)", "read_secrets_file",
      "critical", "reads a known secrets file"),
     (r"(?:\$HOME|~)/\.(?:ssh|aws|gnupg|kube|docker)\b", "credential_dir", "high",
      "points at the user's credential directories"),
@@ -88,8 +92,8 @@ PATTERNS = [
     (r"<\s*div\s+style\s*=\s*[\"'][\s\S]*?display\s*:\s*none", "hidden_div", "high",
      "an invisible HTML block"),
     # destructive
-    (r"(?<![A-Za-z0-9])rm\s+(-[^\s]*)?r[^\n]*(?:\$HOME|~[/\s*]|~$)", "destructive_home_rm",
-     "critical", "recursive delete in the home directory"),
+    (r"(?<![A-Za-z0-9])rm\s+(-[^\s]*)?r[^\n]*\s[\"']?(?:\$HOME|\$\{HOME\}|~)/?\*?[\"']?(?:\s|$)",
+     "destructive_home_rm", "critical", "recursive delete of the home directory"),
     (r"(?<![A-Za-z0-9])rm\s+-[a-z]*r[a-z]*\s+(?:--no-preserve-root\s+)?/(?:\s|\*|$)",
      "destructive_root_rm", "critical", "recursive delete from the root"),
     (r">\s*/etc/", "system_overwrite", "critical", "overwrites system configuration"),
@@ -101,17 +105,19 @@ PATTERNS = [
      "critical", "downloads a script and runs it"),
     (rf"/bin/{SHELLS}\b\s+-i\s+.*>/dev/tcp/", "bash_reverse_shell", "critical",
      "an interactive reverse shell"),
-    (r"\bnc\s+-[lp]|ncat\s+-[lp]|\bsocat\b[^\n]*\b(?:tcp|udp|exec|system|pty)[\w-]*:",
-     "reverse_shell", "critical", "a network listener or reverse shell"),
+    (r"\b(?:nc|ncat|netcat)\b[^\n]*\s-[a-z]*[ec]\b|\bsocat\b[^\n]*\b(?:exec|system|pty)[\w-]*:",
+     "reverse_shell", "critical", "a reverse shell (a listener that runs a program)"),
+    (r"\b(?:nc|ncat|netcat)\s+-[a-z]*l|\bsocat\b[^\n]*\b(?:tcp|udp)[\w-]*-listen:",
+     "listener", "high", "a network listener"),
     (r"python[23]?\s+-c\s+[\"']import\s+socket", "python_socket_oneliner", "critical",
      "a one-line Python socket (likely a reverse shell)"),
     (r"\bngrok\b|\blocaltunnel\b|\bserveo\b", "tunnel_service", "high",
      "opens a tunnel from outside to this machine"),
     # obfuscation
-    (rf"\bbase64\s+(?:-[^\s|]+\s+)*?(?:-[a-z]*d[a-z]*|--decode)\b[^\n]*\|\s*(?:{SHELLS}|python3?|perl|ruby|node)\b",
+    (rf"\bbase64\s+(?:-[^\s|]+\s+)*?(?:-[a-z]*d[a-z]*|--decode)\b[^\n]*\|\s*(?:{SHELLS}|python3?|perl|ruby|node)\b{RUNS_STDIN}",
      "base64_decode_pipe", "critical", "decodes base64 and runs it"),
-    (rf"echo\s+[^\n]*\|\s*(?:{SHELLS}|python3?|perl|ruby|node)\b", "echo_pipe_exec", "critical",
-     "echoes text into an interpreter"),
+    (rf"echo\s+[^\n]*\|\s*(?:{SHELLS}|python3?|perl|ruby|node)\b{RUNS_STDIN}", "echo_pipe_exec",
+     "critical", "echoes text into an interpreter"),
     (r"chr\s*\(\s*\d+\s*\)\s*\+\s*chr\s*\(\s*\d+", "chr_building", "high",
      "builds a string from chr() calls"),
     # credentials in the skill itself

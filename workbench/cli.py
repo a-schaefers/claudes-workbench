@@ -952,6 +952,8 @@ def cmd_skill(a):
             skills.restore(a.name)
         except KeyError:
             die(f"no retired skill {a.name}")
+        except ValueError as e:
+            die(str(e))
         print(f"restored {a.name}")
         return
     # hand / take: change what one task's agent holds, from its next run on
