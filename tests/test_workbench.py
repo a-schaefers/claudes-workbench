@@ -1702,7 +1702,7 @@ class SkillLearning(Base):
             "raylib-2d", "Use when drawing 2D shapes or text with raylib.")), "-m", "a")
         run_wb("skill", "add", "sql-migrations", "--from", str(self.draft(
             "sql-migrations", "Use when writing database migrations.")), "-m", "b")
-        self.spec.write_text("Draw the score with raylib in the top corner.\n")
+        self.spec.write_text("Draw the score as text with raylib in the top corner.\n")
         out = self.start("t-sug", "ok")
         self.assertIn("library skills that may fit: raylib-2d (wb skill hand t-sug <name>)", out)
         self.assertNotIn("sql-migrations", out)
@@ -1712,6 +1712,8 @@ class SkillLearning(Base):
         out = self.start("t-sug2", "ok")
         self.assertIn("may fit: raylib-2d (loaded so far only in game)", out)
         self.assertIn("loaded in 1 repo", run_wb("skill", "list"))
+        self.spec.write_text("Parse the rows of the map; no raylib in this file.\n")
+        self.assertNotIn("may fit", self.start("t-sug0", "ok"))   # one shared word is chance
 
 
 @unittest.skipUnless(shutil.which("opencode"), "needs the real opencode")

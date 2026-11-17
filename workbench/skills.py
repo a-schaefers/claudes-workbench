@@ -372,22 +372,47 @@ def advice(u: dict | None, now: float) -> str:
 WORD = re.compile(r"[a-z][a-z0-9]{3,}")
 STOP = {"when", "with", "that", "this", "from", "into", "your", "what", "them", "then", "they",
         "have", "uses", "using", "used", "each", "only", "file", "files", "code", "make", "should",
-        "must", "write", "task", "tasks", "agent", "skill", "test", "tests", "before", "after"}
+        "must", "write", "task", "tasks", "agent", "skill", "test", "tests", "before", "after",
+        # words any spec or skill says, whatever it is about (seen matching a pathfinding spec to
+        # a parsing skill on "rows", "keep", "step", "passes")
+        "check", "keep", "step", "steps", "rule", "rules", "never", "like", "stop", "need",
+        "also", "same", "still", "where", "which", "work", "change", "first", "exactly", "every",
+        "pass", "passes", "there", "other", "than", "more", "less", "does", "just"}
+SUFFIXES = ("ing", "ers", "er", "es", "ed", "s", "e")
+
+
+def _stem(w: str) -> str:
+    """Crude, but enough that "parse", "parser" and "parsing" meet."""
+    for suf in SUFFIXES:
+        if w.endswith(suf) and len(w) - len(suf) >= 4:
+            return w[:-len(suf)]
+    return w
 
 
 def words(text: str) -> set[str]:
-    return {w for w in WORD.findall(text.lower()) if w not in STOP}
+    return {_stem(w) for w in WORD.findall(text.lower()) if w not in STOP} - STOP
+
+
+def trigger(description: str) -> str:
+    """A description's "Use when ..." part, before what the skill gives: what it is for."""
+    return description.split(":", 1)[0]
+
+
+SUGGEST_MIN = 3  # distinct shared words: one ("raylib" in a spec that only says not to use it) is chance
 
 
 def suggest(text: str, held: list[str] | None = None, n: int = 3) -> list[str]:
-    """Library skills a spec seems to need, by the words it shares with each one's name and
-    description (a name word counts double). A hint for Claude, who decides."""
+    """Library skills a spec seems to need: at least SUGGEST_MIN distinct words it shares with a
+    skill's name and trigger, ranked by them (a name word counts double). A hint for Claude, who
+    decides."""
     spec = words(text)
     scored = []
     for name, info in available().items():
         if name in (held or []):
             continue
-        score = 2 * len(spec & words(name.replace("-", " "))) + len(spec & words(info["description"]))
-        if score >= 2:
+        named = spec & words(name.replace("-", " "))
+        shared = named | (spec & words(trigger(info["description"])))
+        score = len(shared) + len(named)
+        if len(shared) >= SUGGEST_MIN:
             scored.append((-score, name))
     return [name for _, name in sorted(scored)[:n]]
