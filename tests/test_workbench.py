@@ -2389,7 +2389,8 @@ class Lane(Base):
         self.addCleanup(shutil.rmtree, home, True)
         env = {"HOME": str(home)}
         for v in ("XDG_CONFIG_HOME", "XDG_DATA_HOME", "XDG_STATE_HOME", "XDG_CACHE_HOME",
-                  "CARGO_HOME", "GOPATH", "GNUPGHOME", "CLAUDE_CONFIG_DIR", "CONDA_PREFIX"):
+                  "CARGO_HOME", "RUSTUP_HOME", "GOPATH", "GNUPGHOME", "CLAUDE_CONFIG_DIR",
+                  "CONDA_PREFIX"):
             env[v] = ""
         patcher = mock.patch.dict(os.environ, env)
         patcher.start()
@@ -2454,6 +2455,27 @@ class Lane(Base):
                 self.assertIn(str(c / n), w)
             self.assertFalse([q for q in w if q in (str(c), str(c / "bin"), str(c / "env"))])
         self.assertEqual(os.listdir(home / ".dotnet"), [])
+
+    def test_uvs_tools_and_pythons_and_rustups_toolchains_stay_out_of_the_lane(self):
+        # the 0.90 review: ~/.local/share/uv (what `uv tool` programs and every uv venv's python
+        # run from) and ~/.rustup/toolchains (what ~/.cargo/bin's proxies exec) were writable, so a
+        # planted program ran the next time the user ran ruff, cargo or `uv run`
+        home = self.fake_home()
+        moved = home / "rustuphome"
+        for d in (".local/share/uv/tools/ruff/bin", ".local/share/uv/python/cpython-3.13/bin",
+                  ".cache/uv", ".rustup/toolchains/stable/bin", ".rustup/downloads",
+                  "rustuphome/downloads"):
+            (home / d).mkdir(parents=True)
+        (home / ".rustup" / "settings.toml").write_text("")
+        os.environ["RUSTUP_HOME"] = str(moved)          # no toolchains/ yet: made, so split out
+        task = self.bare_task("t-uv", self.repo)
+        w = context.writable(task)
+        for p in (".cache", ".rustup/downloads", ".rustup/settings.toml", "rustuphome/downloads"):
+            self.assertIn(str(home / p), w)             # the caches and rustup's own state
+        for p in (".local/share/uv", ".rustup/toolchains", "rustuphome/toolchains"):
+            self.assertFalse([q for q in w if q == str(home / p) or q.startswith(f"{home / p}/")
+                              or str(home / p).startswith(q + "/")], p)
+        self.assertTrue((moved / "toolchains").is_dir())
 
     @unittest.skipUnless(lane.abi(), "needs Landlock")
     def test_secrets_stay_unreadable_inside_tool_homes_and_where_variables_moved_them(self):
@@ -2556,6 +2578,28 @@ class Lane(Base):
             self.assertEqual(out.returncode, 0, out.stderr)
             self.assertEqual(self.reads_in_lane(task, [root / "bob" / "letters.txt"]), ["refused"])
 
+    def test_only_the_homes_and_bin_path_directories_are_walked_for_links_each_once(self):
+        # the 0.90 review: every PATH directory under an ONLY_KEPT root was listed, an lstat per
+        # entry, on each lane drawn (WSL2's System32: thousands over 9p), and a twice-named one twice
+        root = Path(tempfile.mkdtemp(dir=Path.home(), prefix=".wb-kept-"))
+        self.addCleanup(shutil.rmtree, root, True)
+        home = self.fake_home()
+        big, brew = root / "data" / "apps" / "tool", root / "linuxbrew" / ".linuxbrew" / "bin"
+        for d in (big, brew, home / ".local" / "bin"):
+            d.mkdir(parents=True)
+        for i in range(50):
+            (big / f"f{i}").write_text("")
+        path = [str(big), str(brew), str(home / ".local" / "bin"), str(home / ".local" / "bin")]
+        listed = []
+        real_listdir = os.listdir
+        with mock.patch.dict(os.environ, {"PATH": os.pathsep.join(path)}), \
+                mock.patch.object(context, "ONLY_KEPT", (str(root),)), \
+                mock.patch("os.listdir", side_effect=lambda p=".": listed.append(str(p)) or real_listdir(p)):
+            roots = context.tool_roots(set())
+        self.assertIn(str(big), roots)                  # still readable: its prefix
+        self.assertNotIn(str(big), listed)
+        self.assertEqual(sorted(listed), sorted([str(brew), str(home / ".local" / "bin")]))
+
     def test_a_grant_that_holds_the_repo_grants_the_places_beside_it(self):
         # the 0.90 review: `wb allow --path ~/work` with the repo at ~/work/api said "allowed"
         # and granted nothing, so the agent asked again
@@ -2645,6 +2689,50 @@ class Lane(Base):
         if lane.abi() and devices:  # one the user may open, but not from the lane
             self.assertEqual(self.reads_in_lane(task, devices[:1]) + [], ["refused"])
 
+    def test_on_wsl_the_windows_drives_stay_out_of_the_agents_path_and_reads(self):
+        # the 0.90 review: on WSL2 the Windows PATH (System32, a Windows-only Node's npm) was on
+        # the agent's PATH and in its read lane, and a Windows program runs through interop as a
+        # Windows process, outside Landlock
+        self.start("t-wsl", "ok")
+        wait_phase("t-wsl", {"review"})
+        task = store.Task("t-wsl")
+        home = self.fake_home()
+        drive = home / "c drive"                        # a mount point with a space: \040
+        system32, node = drive / "Windows" / "system32", drive / "Program Files" / "nodejs"
+        tools, local = home / "tools" / "bin", home / ".local" / "bin"
+        for d in (system32, node, tools, local):
+            d.mkdir(parents=True)
+        shutil.copy("/bin/true", system32 / "cmd.exe")
+        shutil.copy("/bin/true", node / "npm")
+        os.symlink(node / "npm", local / "npm")        # a link into the drive
+        mounts = home / "mounts"
+        mounts.write_text("none /mnt/wsl tmpfs rw 0 0\n"
+                          f"C:\\134 {str(drive).replace(' ', chr(92) + '040')} 9p "
+                          "rw,noatime,aname=drvfs;path=C:\\;uid=1000 0 0\n")
+        path = os.pathsep.join(map(str, [system32, node, tools, local, *os.environ["PATH"].split(os.pathsep)]))
+        on_drive = lambda ps: [p for p in ps if p == str(drive) or p.startswith(f"{drive}/")]  # noqa: E731
+        with mock.patch.dict(os.environ, {"PATH": path, "WSL_INTEROP": "/run/WSL/1_interop"}):
+            self.assertTrue(on_drive(context.tool_roots(set())))   # off WSL: as before
+            with mock.patch("workbench.hardware.system", return_value="wsl"), \
+                    mock.patch.object(context, "MOUNTS", str(mounts)):
+                self.assertEqual(context.windows_drives(), [str(drive)])
+                roots = context.tool_roots(set())
+                self.assertEqual(on_drive(roots), [])
+                self.assertIn(str(home / "tools"), roots)
+                env = runner.agent_env(task)
+                self.assertEqual(on_drive(env["PATH"].split(os.pathsep)), [])
+                self.assertIn(str(tools), env["PATH"].split(os.pathsep))
+                self.assertNotIn("WSL_INTEROP", env)
+                self.assertTrue(context.on_windows("/mnt/d/x", []))   # the default, unlisted
+                self.assertFalse(context.on_windows("/mnt/wsl/x", []))
+                r = context.readable(task)
+                self.assertEqual(on_drive(r), [])
+                if lane.abi():  # out of the read lane, the exec itself is refused
+                    out = subprocess.run(lane.wrap(context.writable(task), [str(system32 / "cmd.exe")], r),
+                                         capture_output=True, text=True, timeout=20)
+                    self.assertEqual(out.returncode, 126, out.stderr)
+                    self.assertIn("Permission denied", out.stderr)
+
     @unittest.skipUnless(lane.abi() and os.path.isdir("/dev/pts"), "needs Landlock")
     def test_a_pty_needs_dev_pts_granted_and_then_needs_nothing_more(self):
         # the 0.90 review: /dev/ptmx alone opens no pty ("out of pty devices"); the skill and
@@ -2721,6 +2809,18 @@ class Lane(Base):
         self.assertTrue(any("cross-device" in g for g in lane.gaps(1)))
         self.assertFalse(any("cross-device" in g for g in lane.gaps(2)))
         self.assertEqual(lane.gaps(0), [])
+
+    def test_doctor_says_wsl_interop_runs_windows_programs_outside_the_lane(self):
+        # the 0.90 review: on WSL2 doctor said the lane held while interop ran Windows programs
+        binfmt = Path(self.tmp.name) / "binfmt"
+        binfmt.mkdir()
+        (binfmt / "WSLInterop").write_text("enabled\ninterpreter /init\nflags: PF\n")
+        with mock.patch.object(context, "BINFMT", str(binfmt)):
+            self.assertIsNone(context.interop_gap())   # not WSL
+            with mock.patch("workbench.hardware.system", return_value="wsl"):
+                self.assertIn("[interop] enabled=false in /etc/wsl.conf", context.interop_gap())
+                (binfmt / "WSLInterop").write_text("disabled\ninterpreter /init\n")
+                self.assertIsNone(context.interop_gap())
 
 
 class Permission(Base):

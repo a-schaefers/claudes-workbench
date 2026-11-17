@@ -84,7 +84,8 @@ dependencies. No packaging: it runs from the clone.
   allowlist (`shell_rules`: `ALLOWED_COMMANDS`, `PROJECT_BINS`, `ASK_FIRST`, `INSTALL_LISTED`,
   `DENIED_SHELL` with its wrappers, `denied_shell()` adding git by path), the lane (`writable`:
   the worktree and `ask/`, not the rest of the task directory; `readable`, `SECRETS`,
-  `private_paths` (workbench's own state and config), `lane_refusal`, `tool_roots`,
+  `private_paths` (workbench's own state and config), `lane_refusal`, `tool_roots`, on WSL
+  `windows_drives`/`agent_path`/`interop_gap` (Windows programs run outside the lane),
   `runtime_dir`, `unix_paths`, `external_rules`), `commands_conf` (commands.json, checked),
   `rules_dir` (the agent's rules, outside its lane), `grants`/`grant` (what Claude allowed the
   task: `rules/<task>/grants.json`).

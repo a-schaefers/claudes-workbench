@@ -69,8 +69,10 @@ the bulk of the tokens, the reading and writing and test-running, happen on your
   a command outside the everyday list or a write outside the worktree is refused, by the kernel
   on Linux with Landlock (`wb doctor` says whether yours has it). On macOS, and on Linux without
   it, only the direct forms are refused (OpenCode's rules and the read-only git shim): a
-  guardrail there, not a wall. When a task needs more, they ask Claude, and Claude grants it or
-  does it.
+  guardrail there, not a wall. Two gaps, said plainly: the build caches and toolchain homes the
+  lane leaves writable (so builds work without asking) can hold programs your own tools run later,
+  outside it; and on WSL2 a Windows program runs outside it while interop is on (`wb doctor` says
+  how to turn that off). When a task needs more, they ask Claude, and Claude grants it or does it.
 - **Your repo stays yours.** Each agent works in its own git worktree, so your checkout is never
   touched, and nothing is committed (under your name, with no AI credit line) until Claude accepts
   it.

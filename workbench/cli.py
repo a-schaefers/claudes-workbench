@@ -2180,6 +2180,8 @@ def cmd_doctor(a):
              f"the lane didn't hold a write outside it: {r.stderr.strip()[-200:] or 'the write went through'}")
         for gap in lane.gaps(v):  # what this kernel's Landlock can't confine (the 2026-11-16 audit)
             print(f"--  Landlock ABI {v}: {gap}")
+        if gap := context.interop_gap():  # WSL: a Windows program escapes it (the 0.90 review)
+            print(f"--  {gap}")
     else:
         print("--  agents' writes outside their lane and reads of credentials aren't refused here "
               "(no Landlock): only OpenCode's file tools keep to it; " +

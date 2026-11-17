@@ -649,7 +649,7 @@ deliberately hostile process (the 2026-11-16 audit's list of what it can't stop 
   so that a `/dev/pts` grant is all a pty-driven test needs, which the skill and the handbook
   say), `/proc`, the build caches and
   toolchain homes under `$HOME` (`TOOL_HOMES`: `.cache`, `.cargo`, `.rustup`, `go/pkg`, `.npm`,
-  `.bun/install/cache`, `.yarn`, `.pnpm-store`, `.local/share/pnpm/store`, `.local/share/uv`,
+  `.bun/install/cache`, `.yarn`, `.pnpm-store`, `.local/share/pnpm/store`,
   `.gradle`, `.m2`, `.nuget`, `.dotnet`, `.gem`, `.julia`, `.cabal`, `.stack`, `.ghcup`,
   `.platformio`, `.conan2`, `.hex`, `.mix`, `.sbt`, `.ivy2`, `.pub-cache`, `.konan`,
   `.local/share/hatch`, `.local/share/virtualenvs`) and wherever the environment moved them
@@ -660,12 +660,24 @@ deliberately hostile process (the 2026-11-16 audit's list of what it can't stop 
   caches, `VAR_CACHES`: `pkg`, `install/cache`), OpenCode's own data (`.local/share/opencode`,
   `.local/state/opencode`, and `opencode` under `$XDG_DATA_HOME` and `$XDG_STATE_HOME` when set),
   `$XDG_CACHE_HOME`, and the extra paths (`commands.json` `paths`, the task's grants `paths`), each with its real path
-  too, keeping only those that exist. Not the toolchains' programs or what a shell sources, where
-  a planted file runs later outside the lane: `~/.local/lib` (user site-packages, whose `.pth`
-  files every python runs) is out, `go`, `.bun`, `.deno` and pnpm's home give only their caches,
-  and `NOT_WRITABLE` (`.cargo/bin`, `.cargo/env`, `.dotnet/tools`, `.cabal/bin`, `.ghcup/bin`, and
-  `$CARGO_HOME`'s `bin` and `env`) are left out of their homes; `cargo install` and the like need
-  `wb allow --path`. A place holding one of those, an existing secret or workbench's own files
+  too, keeping only those that exist. Left out, where a planted file runs later outside the
+  lane: what's on the user's PATH or sourced by their shell, and the toolchains those run.
+  `~/.local/lib` (user site-packages, whose `.pth` files every python runs) is out; `go`, `.bun`,
+  `.deno` and pnpm's home give only their caches; `.local/share/uv` is out (`uv tool` programs and
+  the Pythons every uv venv links to; uv's cache is `~/.cache/uv`, the 0.90 review), so a Python
+  uv must download first, like `uv tool install`, asks; and `NOT_WRITABLE` (`.cargo/bin`,
+  `.cargo/env`, `.dotnet/tools`, `.cabal/bin`, `.ghcup/bin`, `.rustup/toolchains`, and
+  `$CARGO_HOME`'s `bin` and `env` and `$RUSTUP_HOME`'s `toolchains`) are left out of their homes;
+  `cargo install`, `rustup toolchain install` (or a `rust-toolchain.toml` naming one not
+  installed yet) and the like need `wb allow --path`. A rustup home gets `toolchains/` made first,
+  so the split keeps it out even before rustup made it. What stays in the lane is a documented
+  trade, like `/tmp`, for letting builds and package managers work without asking: a home kept
+  whole can hold a program the user's own tools run later outside the lane: `.dotnet` (the
+  `dotnet` host and SDKs when installed there), `.ghcup`'s toolchains, `.julia` (juliaup),
+  `~/.cache` (pre-commit's hook repos, which the user's `git commit` runs; poetry's virtualenvs;
+  corepack's package managers), `.local/share/virtualenvs` (pipenv), cargo's registry sources
+  (built into the user's next build), `~/.m2` and the like. Splitting them would refuse the first
+  new entry a build makes there. A place holding one of those, an existing secret or workbench's own files
   (`private_paths`, below) is split: its other
   entries are granted one by one (Landlock only allows), so a new top-level file there is refused.
   So before the split, a cargo home (`~/.cargo`, `$CARGO_HOME`) holding `bin` or `env` gets what
@@ -716,9 +728,23 @@ deliberately hostile process (the 2026-11-16 audit's list of what it can't stop 
   or under an `ONLY_KEPT` root short of a user's home or a whole drive (Linuxbrew's
   `/home/linuxbrew/.linuxbrew`; not `/home/<x>`, `/mnt/<drive>`, `/mnt/c/Users/<x>` or
   `/media/<user>/<drive>`, which give the PATH directory alone: the 0.90 review found Linuxbrew's
-  `../Cellar` hidden), the install a link in those PATH directories points into, and the Python
-  running workbench; never `/`, the home directory or a parent of a secret), not the user's documents or
-  other projects. Running a program reads it, so a program the walk leaves out can't start (in
+  `../Cellar` hidden), the install a link in the home's PATH directories or in a `bin` one points
+  into (only those are listed, each directory once: an lstat per entry, and the 0.90 review found
+  every PATH directory under an `ONLY_KEPT` root listed on each lane drawn, WSL2's System32
+  among them), and the Python running workbench; never `/`, the home directory or a parent of a
+  secret), not the user's documents or other projects. On WSL (`hardware.system()`), never the
+  Windows drives either (`windows_drives`: the DrvFs mounts in `/proc/self/mounts`, and any
+  `/mnt/<letter>`): a Windows program runs through interop as a Windows process, as the user,
+  outside Landlock and no-new-privileges, and the 0.90 review found the Windows PATH (System32,
+  Git for Windows, a Windows-only Node, whose `npm` the allowed `npm` resolved to) on the agent's
+  PATH and in its read lane. With the lane on, their directories are dropped from the agent's
+  `PATH` (`context.agent_path`, in `runner.agent_env`, which also drops `WSL_INTEROP`) and from
+  `tool_roots`, so `/mnt/<drive>` stays unreadable beyond the repo and grants; a Windows program
+  there can't be run even by full path, since `execve` opens it for reading and the read lane
+  refuses that (the Lane test runs a program outside the read lane and gets `Permission denied`).
+  A Windows program inside the lane (one the agent writes, or in a repo on a Windows drive) still
+  runs outside it: `wb doctor` says so while interop is on (`interop_gap`), and `[interop]
+  enabled=false` in `/etc/wsl.conf` closes it. Running a program reads it, so a program the walk leaves out can't start (in
   the agent's shell a plain `Permission denied`; OpenCode itself gets `workbench lane: can't run
   <cmd> (Permission denied)`, exit 126; not found, 127): add its
   directory to `commands.json` `paths`. Landlock only allows, so `readable()` walks down from `/`
@@ -760,7 +786,9 @@ deliberately hostile process (the 2026-11-16 audit's list of what it can't stop 
   before ABI 9 the user's sockets aren't scoped. `wb doctor` draws a real lane and tries a write
   outside it: `ok agents write only in their lane (Landlock ABI N)`, `BAD the lane didn't hold a
   write outside it: …`, or a `--` line without Landlock; then a `--  Landlock ABI N: …` line for
-  each gap.
+  each gap, and on WSL with interop on (`/proc/sys/fs/binfmt_misc/WSLInterop` or
+  `WSLInterop-late` reading `enabled`) a `--  WSL interop is on: …` line: a Windows program in
+  the lane or the repo runs outside it; `[interop] enabled=false` in `/etc/wsl.conf` closes it.
 - *OpenCode's side* (`external_rules`): its `external_directory` permission, checked for its file
   tools' paths and the shell's working directory and `cd` targets (not other arguments), is deny
   `*`, then allow `<dir>/*` for the lane, `READABLE` (`/usr`, `/etc`, `/opt`, `/lib*`, `/bin`,
@@ -794,7 +822,8 @@ prefixes; `SSH_AUTH_SOCK`, `SSH_AGENT_PID`, `GPG_AGENT_INFO`, `DBUS_SESSION_BUS_
 `AWS_DEFAULT_REGION`, `GOOGLE_CLOUD_PROJECT`, `GOOGLE_CLOUD_REGION`); plus `PWD` (the worktree),
 `OPENCODE_CONFIG`, `OPENCODE_CONFIG_CONTENT` (the rules again, below), `WB_TASK`, `WB_HOME`, its
 own `XDG_RUNTIME_DIR` (`context.runtime_dir`, with the lane on), `PYTHONDONTWRITEBYTECODE=1` (no
-`__pycache__` in the diff) and the shim's `PATH`. A provider that needs a key from the
+`__pycache__` in the diff) and the shim's `PATH` (on WSL with the lane on, without the Windows
+drives' directories, and without `WSL_INTEROP`: `context.agent_path`). A provider that needs a key from the
 environment, or tests that need `DATABASE_URL` and the like, name it in `commands.json` `"env":
 [names]`, which passes it through. OpenCode's own environment adds `OPENCODE_ENV`
 (`npm_config_yes=false`); the tests' doesn't.
@@ -2351,7 +2380,7 @@ delivered as taken (`_stale_notes`, *Notes*).
 | `wb init <dir>` | | A project the way Claude keeps one: git on the default branch, an initial commit, AGENTS.md → CLAUDE.md (a CLAUDE.md → AGENTS.md link is swapped; a gitignored CLAUDE.md isn't linked). Refuses the home directory or above, inside another repo, a repo git refuses (git's reason: no `git init` over it), without a git identity (`git var`, as for `wb start`), and a first commit holding likely secrets or installed directories no .gitignore covers. |
 | `wb setup` | `--force` (replaces a link that points elsewhere; never a real file) | Links `~/.local/bin/wb` to this copy's `bin/wb` and Claude Code's `skills/delegate` to its `skill/delegate`, warns when `~/.local/bin` isn't on PATH (Claude and the mod run `wb` by name); exit 1 when it left something in the way (see *Installing*). |
 | `wb update` | `--check` (only say whether origin has news: `update available: N new commit(s)…` or `up to date`), `--if-due` (with `--check`: ask origin at most weekly, `UPDATE_EVERY`, else answer from `update.json`; never with `CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC`) | Updates this copy (see *Installing*): refuses while any runner is live; a marketplace copy runs `claude plugin marketplace update workbench` then `claude plugin update workbench@workbench`; a clone (refusing uncommitted tracked changes) runs `git pull --ff-only` first. Refuses, before anything changes, when `claude` isn't on PATH; a step that can't run or runs past 300 s fails with a line (after a clone's pull: what is left to run), and update.json is written as soon as the pull lands. Prints `updated <kind> a..b (N commit(s))` or `already up to date`. The check's fetch (`cli._fetch_origin`) never prompts and never hangs: no terminal, `GIT_TERMINAL_PROMPT=0`, `SSH_ASKPASS_REQUIRE=never`, at most `FETCH_SECS` = 60 s; the user's own ssh command (`GIT_SSH_COMMAND`, `GIT_SSH`, `core.sshCommand`) is kept, and with none ssh runs with `BatchMode`. In between, `--if-due` recounts `HEAD..@{u}` locally, so a pull made elsewhere shows at once. |
-| `wb doctor` | | `opencode --version` (BAD below 2.x, whose config shape and run flags workbench writes; a version that doesn't parse is a `--` line), the OpenCode config files (and a set `$OPENCODE_CONFIG`), git, models found and each one's readiness (BAD when none can run), the providers skipped and why, an Ollama provider not answering (asked once), a provider's baseURL problem, any entry without `limit.context` (BAD), each Ollama entry's `options.max_tokens` and context against what Ollama serves (or that it can't say), the state directory (made if missing, then checked writable), the GPU budget and the devices it counts (or that the GPU's memory is unknown, or that none was found: a `--` line), a real lane drawn around a test write (`ok agents write only in their lane (Landlock ABI N)`: the probe's `PermissionError`, not exit 126; then a `--  Landlock ABI N: …` line for each of `lane.gaps`; without Landlock a `--` line saying writes and credential reads aren't refused and whether sudo still is), `commands.json` (`context.commands_conf`: it must parse and hold lists of strings; `BAD` stops the check), the toolchains on PATH that are snaps (`context.TOOLCHAINS`; they can't run in the lane), `wb` on PATH (Claude's Bash runs it by name: BAD without it, whatever `WB_BIN` says; `WB_BIN` is noted when set), the `/delegate` skill link, a `--` line when `wb` or `/delegate` comes from another copy (`wb setup --force` from the one you want), and whether Claude Code lists `workbench@…` in `plugins/installed_plugins.json` (information only: a mod loaded another way isn't listed). `ok`/`BAD` lines set the exit code; `--` lines inform. |
+| `wb doctor` | | `opencode --version` (BAD below 2.x, whose config shape and run flags workbench writes; a version that doesn't parse is a `--` line), the OpenCode config files (and a set `$OPENCODE_CONFIG`), git, models found and each one's readiness (BAD when none can run), the providers skipped and why, an Ollama provider not answering (asked once), a provider's baseURL problem, any entry without `limit.context` (BAD), each Ollama entry's `options.max_tokens` and context against what Ollama serves (or that it can't say), the state directory (made if missing, then checked writable), the GPU budget and the devices it counts (or that the GPU's memory is unknown, or that none was found: a `--` line), a real lane drawn around a test write (`ok agents write only in their lane (Landlock ABI N)`: the probe's `PermissionError`, not exit 126; then a `--  Landlock ABI N: …` line for each of `lane.gaps`, and on WSL with interop on a `--  WSL interop is on: …` line (`context.interop_gap`); without Landlock a `--` line saying writes and credential reads aren't refused and whether sudo still is), `commands.json` (`context.commands_conf`: it must parse and hold lists of strings; `BAD` stops the check), the toolchains on PATH that are snaps (`context.TOOLCHAINS`; they can't run in the lane), `wb` on PATH (Claude's Bash runs it by name: BAD without it, whatever `WB_BIN` says; `WB_BIN` is noted when set), the `/delegate` skill link, a `--` line when `wb` or `/delegate` comes from another copy (`wb setup --force` from the one you want), and whether Claude Code lists `workbench@…` in `plugins/installed_plugins.json` (information only: a mod loaded another way isn't listed). `ok`/`BAD` lines set the exit code; `--` lines inform. |
 
 ## Files and formats
 
@@ -2730,7 +2759,10 @@ push: every change is a pull request that merges once `check` is green and it is
 - **Permissions or the config layer** (`context.py`, `write_config_layer`) → the real-OpenCode
   tests, run where they don't skip.
 - **The lane** (`context.writable`, `readable`, `SECRETS`, `lane.py`) → the Lane and RealOpenCode
-  tests on a Landlock machine; the protocol's lane line and the handbook's boundaries.
+  tests on a Landlock machine; the protocol's lane line and the handbook's boundaries. What it
+  leaves writable that runs later outside it (`TOOL_HOMES`, `NOT_WRITABLE`) and what WSL's
+  interop runs outside it (`windows_drives`, `agent_path`, `interop_gap`) → the lane's *Writes*
+  and *Reads* here, README's security bullet, and `wb doctor`'s line.
 - **`wb update`'s flags or output** (`--check --if-due`; `update available…`, `updated …`) → the
   mod's weekly check, which toasts only an `update available` answer, and `/delegate-update`, which
   reloads the plugins only after an `updated` one (register.tsx `poll` and the `UPDATE` command).
