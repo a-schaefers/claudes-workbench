@@ -16,7 +16,10 @@ An engine is whatever runs an image model on this machine, described in
 plus optional "label", "notes" (licence, what it is good at: shown to Claude), "timeout" (s).
 The first entry is the default. No model is named here: the user installs one and describes it.
 
-A generation holds the GPU lock and first unloads the coding models, as a task does.
+A generation holds the GPU lock and first unloads the coding models, as a task does; while a task
+holds the GPU it refuses at once, unless asked to wait. A command engine exits when it's done, so
+its memory is free again; a url engine is a server the user runs, which keeps its model in GPU
+memory for as long as it is up: workbench can't stop it.
 """
 from __future__ import annotations
 
@@ -86,11 +89,12 @@ def _slug(prompt: str) -> str:
 
 def _argv(e: dict, values: dict, refs: list[Path]) -> list[str]:
     argv = []
+    fill = re.compile(r"\{(" + "|".join(PLACEHOLDERS) + r")\}")
     for tok in shlex.split(e["command"]):
         tok = os.path.expanduser(tok)  # no shell expands ~ for us; the prompt is filled in after
-        for k in PLACEHOLDERS:
-            tok = tok.replace("{" + k + "}", str(values[k]))
-        argv.append(tok)
+        # one pass: a filled-in value is never scanned again, so a prompt that says "{seed}"
+        # reaches the engine verbatim (the 2026-11-16 audit: it got the seed and the out path)
+        argv.append(fill.sub(lambda m: str(values[m.group(1)]), tok))
     for r in refs:
         argv += [e["ref_arg"], str(r)]
     return argv
@@ -119,26 +123,31 @@ def _server(e: dict, values: dict) -> None:
 
 def _settle(say, timeout: float = 90) -> None:
     """Wait until the unloaded models have let go of the VRAM. free_gpu's unload returns before
-    the memory does: seen 2026-11-16, an engine starting a second later found 1.1 GB free of 16."""
+    the memory does: seen 2026-11-16, an engine starting a second later found 1.1 GB free of 16.
+    Only what free_gpu can release is waited for: a server it can't stop, or another host's
+    model, used to cost every generation the whole timeout (the 2026-11-16 audit)."""
     if models._fake():
         return
     deadline = time.time() + timeout
-    while models.resident() and time.time() < deadline:
+    while any(models.releasable(m) for m in models.resident()) and time.time() < deadline:
         time.sleep(1)
     last = None
     while time.time() < deadline:  # then until the GPU's used VRAM stops falling
-        used = sum(g["vram_used"] for g in hardware.gpus() if g.get("vram_used") is not None)
+        used = sum(g["vram_used"] for g in hardware.gpus(windows=False) if g.get("vram_used") is not None)
         if last is not None and last - used < 64 * 2 ** 20:
             return
         last = used
         time.sleep(1)
-    say("the GPU's memory was still being released after 90 s; generating anyway")
+    say(f"the GPU's memory was still being released after {timeout:.0f} s; generating anyway")
 
 
 def generate(prompt: str, out_dir: Path, n: int = 4, size: tuple[int, int] = (1024, 1024),
              seed: int | None = None, name: str | None = None, refs: list[Path] = (),
-             say=print) -> list[Path]:
-    """Make n images (seeds seed, seed+1, …); returns their paths, each with a .json sidecar."""
+             say=print, wait: bool = False) -> list[Path]:
+    """Make n images (seeds seed, seed+1, …); returns their paths, each with a .json sidecar.
+    While anything holds the GPU it refuses at once (RuntimeError), unless ``wait``: queued
+    behind a running task, it used to block silently past the Bash tool's limit, and Claude
+    couldn't answer that task's question meanwhile (the 2026-11-16 audit)."""
     name, e = engine(name)
     if why := ready(e):
         raise RuntimeError(f"image engine {name}: {why}")
@@ -151,7 +160,7 @@ def generate(prompt: str, out_dir: Path, n: int = 4, size: tuple[int, int] = (10
     out_dir.mkdir(parents=True, exist_ok=True)
     seed = int(time.time()) % 1_000_000 if seed is None else seed
     made = []
-    with models.GpuLease(None, "wb image", say):  # the GPU to itself, queued with the tasks
+    with models.GpuLease(None, "wb image", say, wait=wait):  # the GPU to itself, queued with the tasks
         models.free_gpu(say=say)
         _settle(say)
         for i in range(n):

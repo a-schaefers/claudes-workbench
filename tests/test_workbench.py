@@ -490,7 +490,7 @@ class Steering(Base):
 
     def test_bail_out_stops_every_agent_and_keeps_the_work(self):
         self.start("t-b1", "slow")
-        self.start("t-b2", "slow")
+        self.start("t-b2", "slow", "--queue")  # behind t-b1, which holds the GPU
         self.wait_session("t-b1")
         self.assertEqual(store.Task("t-b2").status["phase"], "queued")  # behind the GPU lock
         out = run_wb("stop", "--all")
@@ -1186,6 +1186,22 @@ class Images(Base):
         self.assertIn("fake: ", run_wb("image", "--list"))
         self.assertIn("ready", run_wb("image", "--list"))
 
+    def test_wb_image_list_as_a_word_lists_the_engines_instead_of_drawing(self):
+        # like `wb skill list`: it took the GPU and drew four pictures of "list" (the 2026-11-16 audit)
+        tmp = Path(self.tmp.name)
+        self.engines({"fake": {"command": f"{sys.executable} {tmp / 'never.py'} {{out}}"}})
+        for word in ("list", "ls", " List "):
+            self.assertIn("fake: ", run_wb("image", word))
+        self.assertFalse((store.home() / "images").exists())
+
+    def test_a_prompt_that_names_a_placeholder_reaches_the_engine_verbatim(self):
+        # "{seed}" and "{out}" in the prompt became the seed and the out path (the 2026-11-16 audit)
+        from workbench import images
+        prompt = "a neon sign that reads {seed} and {out}"
+        argv = images._argv({"command": "gen --prompt {prompt} -o {out} --seed={seed}"},
+                            {"prompt": prompt, "out": "/x.png", "width": 1, "height": 1, "seed": 7}, [])
+        self.assertEqual(argv, ["gen", "--prompt", prompt, "-o", "/x.png", "--seed=7"])
+
     def test_a_server_engine_and_the_failures(self):
         import base64, threading
         from http.server import BaseHTTPRequestHandler, HTTPServer
@@ -1853,6 +1869,16 @@ class Hardware(unittest.TestCase):
         self.assertEqual([g["name"] for g in gpus], ["NVIDIA GeForce RTX 4090"])
         self.assertEqual(gpus[0]["vram"], 24564 * 2 ** 20)
 
+    def test_the_gpu_budget_on_wsl_never_starts_powershell(self):
+        # every admission and routing paid a PowerShell start of seconds (the 2026-11-16 audit)
+        asked = []
+        hw = self.fake("Linux", files={"/proc/version": "microsoft-standard-WSL2"},
+                       runs={("nvidia-smi",): "NVIDIA GeForce RTX 4090, 24564, 1000, 560.94"})
+        run = hw._run
+        with mock.patch.object(hw, "_run", lambda *argv: asked.append(argv[0]) or run(*argv)):
+            self.assertEqual([g["name"] for g in hw.gpus(windows=False)], ["NVIDIA GeForce RTX 4090"])
+        self.assertNotIn("powershell.exe", asked)
+
 
 class Detector(unittest.TestCase):
     def test_edits_reset_the_no_edit_counter(self):
@@ -2041,17 +2067,17 @@ class SkillLearning(Base):
         run_wb("skill", "add", "sql-migrations", "--from", str(self.draft(
             "sql-migrations", "Use when writing database migrations.")), "-m", "b")
         self.spec.write_text("Draw the totals as labels in an SVG chart in the top corner.\n")
-        out = self.start("t-sug", "ok")
+        out = self.start("t-sug", "ok", "--queue")  # one after another on one GPU
         self.assertIn("library skills that may fit: svg-charts (wb skill hand t-sug <name>)", out)
         self.assertNotIn("sql-migrations", out)
         store.append_jsonl(store.home() / "results.jsonl", {          # it has worked in one other repo
             "repo": "/elsewhere/dashboard", "outcome": "accepted", "skills_offered": ["svg-charts"],
             "skills_loaded": ["svg-charts"]})
-        out = self.start("t-sug2", "ok")
+        out = self.start("t-sug2", "ok", "--queue")
         self.assertIn("may fit: svg-charts (loaded so far only in dashboard)", out)
         self.assertIn("loaded in 1 repo", run_wb("skill", "list"))
         self.spec.write_text("Parse the rows of the table; no charts in this file.\n")
-        self.assertNotIn("may fit", self.start("t-sug0", "ok"))   # one shared word is chance
+        self.assertNotIn("may fit", self.start("t-sug0", "ok", "--queue"))   # one shared word is chance
         for t in ("t-sug", "t-sug2", "t-sug0"):  # tearDown's rmtree raced a runner still writing (CI, 2026-11-17)
             wait_phase(t, {"review"})
 

@@ -131,7 +131,8 @@ Linux there is no Landlock and watch.py falls back to timed waits.
 
 ## How a task runs
 1. `wb start` refuses a repo without a committed CLAUDE.md (`--no-claude-md`), asks the router
-   for a model (unless `--model`), makes branch `delegate/<task>` in a fresh worktree, writes
+   for a model (unless `--model`), refuses (exit 4) when the GPU's holders leave its model no room
+   (`--queue` waits behind them), makes branch `delegate/<task>` in a fresh worktree, writes
    round 1's prompt (the spec plus `PROTOCOL`), spawns the runner and returns.
 2. The runner takes the GPU (`GpuLease`: shared beside other tasks when the models fit, else
    alone), makes the model resident, and runs `opencode run --standalone --auto --format json` in
@@ -160,7 +161,7 @@ Linux there is no Landlock and watch.py falls back to timed waits.
 Plain files under `$WB_HOME` (`~/.local/state/workbench`); the full tree and every format are in
 ARCHITECTURE.md (*Files and formats*):
 ```
-notify.jsonl results.jsonl lessons.jsonl notes.md tuning.json speed.json gpu.{lock,json,admit}
+notify.jsonl results.jsonl lessons.jsonl notes.md tuning.json speed.json gpu.{lock,json,admit,load}
 scout.json update.json watch.json imports/ images/ chat/{messages,receipts}.jsonl chat/listener.json
 rules/<task>/  opencode.json HANDBOOK.md CLAUDE.md bin/git grants.json   (outside the agent's lane)
 tasks/<task>/  task.json status.json events.jsonl steer.jsonl acked context.md runner.log
@@ -246,7 +247,7 @@ PATH and the lane; the rest is only imitated by the fake.
 
 ## Troubleshooting
 - `wb doctor`: opencode and its config, git, each model's readiness, each Ollama entry's
-  `max_tokens` and context, the state directory, a real lane around a test write, `wb` on PATH,
+  `max_tokens` and context, the state directory, the GPU budget and the devices it counts, a real lane around a test write, `wb` on PATH,
   the mod.
 - A model "can't run": `wb models` says why (server down, not pulled, no `start` command).
 - A task misbehaves: `wb log <t> -v`, `wb watch <t> -v`, `tasks/<t>/runner.log` (the runner's
