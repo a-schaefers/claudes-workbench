@@ -7,6 +7,7 @@ import socket
 import subprocess
 import sys
 import tempfile
+import types
 import time
 import unittest
 import warnings
@@ -250,6 +251,24 @@ class Context(Base):
         self.assertIn("a fresh session for the agent", out)
         self.assertIn("fresh session: the task, the work so far",  # the fake's export is fixed,
                       transcript._user_message(p, False)[0])      # so read the head directly
+
+    def test_a_session_filling_mid_round_hands_over_at_once(self):
+        """The runner, not OpenCode's own summary, decides what a filling session keeps."""
+        self.start("t-c4", "fill", "--test", TEST_CMD)
+        st = wait_phase("t-c4", {"review", "stuck", "failed"}, timeout=60)
+        self.assertEqual(st["phase"], "review")
+        first, second = self.runs()[:2]
+        self.assertFalse(second["session"])
+        p = second["prompt"]
+        self.assertTrue(p.startswith("You are picking this task up in a fresh session (the last "
+                                     "session was 76% full"), p[:200])
+        self.assertIn("Write the answer to answer.txt.", p)       # the task itself, verbatim
+        self.assertIn("+41", p)                                   # the work so far
+        self.assertIn("Your last session filled up", p.split("## Now")[1])
+        self.assertIn("> Wrote 41 so far", p)                     # where it was
+        self.assertEqual(st["handovers"], 1)
+        self.assertIn("42", store.Task("t-c4").worktree.joinpath("answer.txt").read_text())
+        self.assertIn("reached 76% of its window", run_wb("watch", "t-c4", "--once", "--no-color"))
 
     def test_keep_context_overrides_and_fresh_forces(self):
         os.environ["FAKE_FILL"] = "25000"
@@ -1405,3 +1424,28 @@ class RealOpenCodeSkillFiles(Base):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class Drift(unittest.TestCase):
+    """What keeps a small model on its task: the compaction backstop and the scope note."""
+    def test_compaction_buffer_leaves_room_for_a_reply_and_a_step(self):
+        # 32K window, input limit 28K, replies capped at 8K: OpenCode compacts at 28672 - 8192
+        # = 20480, where 20480 + 8192 + 4096 of growth = 32768 still fits
+        cfg = {"limit": {"context": 32768, "input": 28672, "output": 4096},
+               "options": {"max_tokens": 8192}}
+        self.assertEqual(runner.compaction_buffer(cfg), 8192)
+        self.assertEqual(runner.compaction_buffer({"limit": {"context": 65536, "output": 8192}}),
+                         4096)                     # input defaults to context - output
+        self.assertIsNone(runner.compaction_buffer({}))
+
+    def test_outside_spec_names_files_the_spec_never_mentions(self):
+        with tempfile.TemporaryDirectory() as d:
+            Path(d, "prompt.md").write_text("Write `src/tilemap.c`, `tests/test_tilemap.c` "
+                                             "and their Makefile lines.")
+            task = types.SimpleNamespace(status={}, round_dir=lambda n: Path(d))
+            files = ("?? src/tilemap.c\n?? tests/test_tilemap.c\n M Makefile\n"
+                     "?? src/flow.c\n M src/main.c")
+            self.assertEqual(runner.outside_spec(task, files), ["src/flow.c", "src/main.c"])
+            # a spec that names no file at all says nothing about scope
+            Path(d, "prompt.md").write_text("Make the bats smarter.")
+            self.assertEqual(runner.outside_spec(task, files), [])

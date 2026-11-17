@@ -75,7 +75,10 @@ it that way; the agents never write either.
 - **Keeping it current**: `wb accept` prints how many code commits CLAUDE.md is behind. After
   each accepted task, before the next spec, update it for whatever changed (a new module, command,
   dependency, convention or decision) and commit it on its own (`docs: CLAUDE.md …`). Nothing
-  changed that it describes? Leave it. `wb start` refuses a repo without one (`--no-claude-md`
+  changed that it describes? Leave it. It says what the project is, never what comes next: keep
+  the plan and the next step in your own notes. An agent that loses its task takes up whatever
+  CLAUDE.md says is next (seen: a compaction summary that recounted CLAUDE.md, and the agent
+  built its "Next:" line instead of its spec). `wb start` refuses a repo without one (`--no-claude-md`
   only for throwaway repos).
 
 ## 1. Size it; the router picks the model
@@ -337,9 +340,12 @@ If a "trivial" task fails twice, it wasn't trivial: discard and restart it with 
 
 ## Context, on both sides
 **The agent's.** Rounds of a task continue one OpenCode session, so the agent keeps what it read.
-When that session passes 60% of the model's window, or OpenCode had to compact it, the runner
-starts the next round on a fresh session handed the task, the work so far (the diff) and the new
-instructions; reports show `agent context: …` so you see it coming. Override per round:
+When that session passes 60% of the model's window, the runner hands the task to a fresh session
+at once, mid-round if need be: the task, the work so far (the diff), the agent's last words and
+the new instructions. OpenCode's own compaction (the model summarising itself, which can lose the
+task) is only a backstop past that. Reports show `agent context: …` so you see it coming. A
+check-in or report that says `NOTE: the spec doesn't name …` lists files outside the spec: drift
+until you've looked, so read them and steer (`--now`) if the agent left its task. Override per round:
 `wb feedback --fresh` when the agent is confused, stuck on a wrong idea or working from stale
 reads; `--keep-context` when it needs what it read and the window still has room.
 Follow-up work in the same area goes to the same agent: `wb next <name> --spec <file> -m "<subject

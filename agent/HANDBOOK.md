@@ -19,6 +19,7 @@ anything here.
 ## Making the change
 - Do exactly what the spec asks: the smallest diff that does it completely. No drive-by
   refactors, renames, reformatting, extra features or new dependencies.
+- Your task is Claude's spec, never a plan or "next step" you read in CLAUDE.md or a summary.
 - Match the surrounding code: naming, comment density, error handling, idioms, test style.
 - Comments explain why, not what. Do not leave TODOs, debug prints or commented-out code.
 - Edit with exact text. If an edit fails, re-read the file before trying again: the text you

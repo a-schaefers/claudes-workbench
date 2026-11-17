@@ -7,6 +7,8 @@
   hang   print one event, then go silent (the silence timeout should stop it)
   crash  exit 1 with no events
   slow   a first run that takes an hour; a continued session behaves like ok
+  fill   writes "41", then a step that fills 76% of a 32K window, then works on for an hour;
+         a fresh session handed the task behaves like ok
 FAKE_PROMPTS, if set, is a file each run appends its prompt to; FAKE_SLEEP pauses each run after its first event.
 FAKE_LESSON, if set, ends the agent's text with a `Lesson:` line (what workbench.lessons gathers).
 """
@@ -66,6 +68,8 @@ if os.environ.get("FAKE_RUNS") and args and args[0] == "run":  # which runs cont
         fh.write(json.dumps({"session": "--session" in args, "prompt": args[-1]}) + "\n")
 if scenario == "slow":
     scenario = "ok" if "--session" in args else "hang"
+if scenario == "fill" and "picking this task up in a fresh session" in args[-1]:
+    scenario = "ok"
 if scenario == "crash":
     sys.exit(1)
 emit("step_start")
@@ -84,4 +88,12 @@ elif scenario == "loop":
         time.sleep(0.05)
     finish()
 elif scenario == "hang":
+    time.sleep(3600)
+elif scenario == "fill":
+    with open("answer.txt", "w") as fh:
+        fh.write("41\n")
+    tool("write", {"filePath": os.path.abspath("answer.txt"), "content": "41"})
+    emit("text", text="Wrote 41 so far; next I fix it to the real answer.")
+    emit("step_finish", reason="tool-calls", tokens={"input": 2000, "output": 900,
+                                                      "cache": {"read": 22100}})  # 25000: 76%
     time.sleep(3600)

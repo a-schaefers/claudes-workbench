@@ -45,13 +45,38 @@ def opencode_bin() -> list[str]:
     return fake.split() if fake else ["opencode"]
 
 
+# OpenCode compacts a session once its context passes the model's input limit less
+# `compaction.buffer`, and its compaction is the model's own summary, which a small model can get
+# wrong: seen 2026-11-16, a summary that recounted CLAUDE.md instead of the task, and the agent
+# built what CLAUDE.md said came next. So the runner hands a filling session to a fresh one first
+# (FRESH_AT, checked at every step), and OpenCode's compaction is only the backstop past that:
+# its buffer leaves room for one reply at the model's output cap, plus one step's growth.
+STEP_GROWTH = 4096
+
+
+def compaction_buffer(cfg: dict) -> int | None:
+    """The buffer that puts OpenCode's compaction where a request still fits the window."""
+    lim, opts = cfg.get("limit") or {}, cfg.get("options") or {}
+    window = lim.get("context")
+    if not window:
+        return None
+    usable = lim.get("input") or window - (lim.get("output") or 0)
+    reply = opts.get("max_tokens") or lim.get("output") or 0
+    return max(usable + reply - window, 0) + STEP_GROWTH
+
+
 def write_config_layer(task: store.Task) -> Path:
     """The per-task OpenCode config: the agent's context and the ask_reviewer server."""
     path = task.dir / "opencode.json"
     wait_ms = int(task.spec.get("ask_timeout", 1200) + 60) * 1000
+    try:
+        buffer = compaction_buffer(models.resolve(task.spec["model"]).config)
+    except KeyError:
+        buffer = None
     store.write_json(path, {
         "$schema": "https://opencode.ai/config.json",
         **context.layer(task),
+        **({"compaction": {"auto": True, "buffer": buffer}} if buffer else {}),
         "mcp": {"servers": {"workbench": {  # OpenCode 2.x shape: mcp.servers.<name>
             "type": "local",
             "command": [sys.executable, str(PKG_ROOT / "bin" / "wb-ask-mcp")],
@@ -131,6 +156,16 @@ def steer_prompt(notes: list[dict], interrupted: bool) -> str:
             "and finish with a short summary as before.")
 
 
+def outside_spec(task: store.Task, files: str) -> list[str]:
+    """Changed files the current spec never names, when it names any: the agent's drift shows
+    here first (seen 2026-11-16: a flow-field module nobody asked for). Matched by path or name."""
+    spec = current_task_prompt(task)
+    paths = [line[3:].split(" -> ")[-1].strip('"') for line in files.splitlines()]
+    if not any(p in spec or Path(p).name in spec for p in paths):
+        return []
+    return [p for p in paths if p not in spec and Path(p).name not in spec]
+
+
 def _clock(secs: float) -> str:
     return f"{int(secs // 60)}m{int(secs % 60):02d}s"
 
@@ -165,6 +200,9 @@ def checkin_text(task: store.Task, n: int, out: dict, since: float) -> str:
     files = gitops.changed(task.worktree)
     lines.append("files changed so far: "
                  + (", ".join(f[3:] for f in files.splitlines()) if files else "none"))
+    if extra := outside_spec(task, files):
+        lines.append("NOTE: the spec doesn't name " + ", ".join(extra)
+                     + ": check it is still on its task")
     return "\n".join(lines)
 
 
@@ -202,7 +240,8 @@ def run_round(task: store.Task, n: int) -> dict:
     nudged = False
     started = last_seen = time.time()
     out = {"exit": None, "stuck": None, "texts": [], "tools": {}, "errors": [],
-           "tok_in": 0, "tok_out": 0, "interrupted": False}
+           "tok_in": 0, "tok_out": 0, "interrupted": False, "full": None}
+    window = st.get("window")
     while True:
         try:  # woken by the agent's output or a steer note; the timeout runs the clocks below
             line = q.get(timeout=5)
@@ -237,6 +276,11 @@ def run_round(task: store.Task, n: int) -> dict:
                 out["tok_out"] += row["out"]
                 task.set_status(tok_in=task.status.get("tok_in", 0) + row["in"],
                                 tok_out=task.status.get("tok_out", 0) + row["out"])
+                used = row["in"] + row.get("cache", 0) + row["out"]
+                # Full: a fresh session takes over (drive), never OpenCode's own summary. Only
+                # after some work, so a handoff that is itself large can't loop.
+                if window and used >= FRESH_AT * window and sum(out["tools"].values()):
+                    out["full"] = used
             elif row["kind"] == "error":
                 out["errors"].append(f"opencode: {row['text']}")
             task.event(row)
@@ -264,6 +308,9 @@ def run_round(task: store.Task, n: int) -> dict:
                 f"thinking with no tool call (nudge {nudges} this task; budget {int(think)}s)", round=n)
         if out["stuck"]:
             task.event({"ts": store.now(), "round": n, "kind": "stopped", "text": out["stuck"]})
+            _stop(proc)
+            break
+        if out["full"]:
             _stop(proc)
             break
         every = float(spec.get("checkin") or 0) * 60
@@ -333,6 +380,9 @@ def summary_text(task: store.Task, n: int, rnd: dict, tests) -> str:
     lines += ["", "agent's summary:", final[:2500], ""]
     files = gitops.changed(task.worktree)
     lines += ["files changed:", files or "(none)"]
+    if extra := outside_spec(task, files):
+        lines.append("NOTE: the spec doesn't name " + ", ".join(extra)
+                     + ": needed for the task, or drift?")
     if mine := claude_files_changed(files):
         lines.append(f"NOTE: the agent changed your files ({', '.join(mine)}): instructions and "
                      ".claude/ are yours to write; keep, rewrite or revert them")
@@ -377,6 +427,8 @@ def fresh_reason(task: store.Task) -> str | None:
         return None
     if st.get("context") == "fresh":
         return ASKED_FRESH
+    if st.get("context") == "full":
+        return f"the last session was {st.get('full_pct')}% full"
     c = context_state(task)
     if c.get("compactions"):
         return "OpenCode had to compact the last session"
@@ -510,6 +562,9 @@ def drive(task: store.Task) -> None:
             if rnd["interrupted"] or (pending_steer(task) and not rnd["stuck"]):
                 _steer_round(task, n, rnd["interrupted"])
                 continue
+            if rnd["full"]:
+                _full_round(task, n, rnd)
+                continue
             if rnd["stuck"] or (rnd["exit"] not in (0, None) and not rnd["texts"]):
                 text = summary_text(task, n, rnd, None)
                 task.round_dir(n).joinpath("summary.md").write_text(text)
@@ -537,6 +592,26 @@ def drive(task: store.Task) -> None:
                             else "waiting for review")
             task.notify("review", text, round=n)
             return
+
+
+# What the fresh session is told after the runner took over from a full one.
+CARRY_ON = ("Your last session filled up, so you are continuing in a fresh one. Carry on with "
+            "the task above from where the work stands: re-read the files you are changing, then "
+            "finish them and run the tests. Your last words before the switch:\n\n{last}")
+
+
+def _full_round(task: store.Task, n: int, rnd: dict) -> None:
+    window = task.status["window"]
+    pct = 100 * rnd["full"] // window
+    task.event({"ts": store.now(), "round": n, "kind": "full",
+                "text": f"the agent's session reached {pct}% of its window "
+                        f"({rnd['full'] / 1000:.1f}K of {window // 1024}K): a fresh one takes over"})
+    last = "\n\n".join(t.strip() for t in rnd["texts"][-2:] if t.strip())[-1200:]
+    task.round_dir(n + 1).mkdir(parents=True, exist_ok=True)
+    task.round_dir(n + 1).joinpath("prompt.md").write_text(
+        CARRY_ON.format(last="> " + last.replace("\n", "\n> ") if last else "(none)"))
+    task.set_status(round=n + 1, context="full", full_pct=pct,
+                    handovers=task.status.get("handovers", 0) + 1)
 
 
 def _steer_round(task: store.Task, n: int, interrupted: bool) -> None:

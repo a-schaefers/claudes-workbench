@@ -371,12 +371,15 @@ Claude is the driver, not a spectator, and the agent is a teammate it can reach 
 
 Local models work in a small context window, and so, in its own way, does Claude.
 
-**The agent's.** Rounds continue one OpenCode session. Before each round the runner reads the
-session's export: once it's 60% full, or OpenCode had to compact it (a small model's summary of a
-coding session drops details), the next round starts a fresh session instead, handed exactly what
-it needs: the task (the current step's spec), the steps already committed, the uncommitted diff
-(or the list of changed files when the diff is over 9% of the window, about 3K tokens on 32K),
-and the new instructions.
+**The agent's.** Rounds continue one OpenCode session. The runner reads the context every step
+reports: once it's 60% full, it stops the agent, mid-round if need be, and a fresh session takes
+over, handed exactly what it needs: the task (the current step's spec), the steps already
+committed, the uncommitted diff (or the list of changed files when the diff is over 9% of the
+window, about 3K tokens on 32K), the agent's last words and the new instructions. OpenCode's own
+compaction is a small model's summary of its session, which drops details and can lose the task
+itself (seen: an agent that built CLAUDE.md's "next step" after one), so the task's config sets it
+only as a backstop just past that point: room for one reply at the model's output cap and one
+step's growth. A session OpenCode compacted anyway is replaced at the next round too.
 Reports show the fill (`agent context: 19.4K of 32K (60%)`) so Claude sees it coming.
 `wb feedback --fresh` forces a fresh session (a confused agent), `--keep-context` keeps it for one
 more round.
@@ -386,7 +389,9 @@ first guess scales with the window it is served: two or three files and about 15
 32K (what was measured), proportionally more on a bigger window, up to four times that. Each step
 that closes (`wb next`, `accept`, `discard`) records its files and added lines, and whether it fit:
 no session filled past 60% or was compacted, the agent didn't get stuck, and Claude didn't take
-over. The biggest step that fit raises the slice past the guess; the smallest that didn't lowers
+over. Check-ins and reports also name changed files the spec never mentions (`NOTE: the spec
+doesn't name src/flow.c`), where an agent's drift shows first. The biggest step that fit raises
+the slice past the guess; the smallest that didn't lowers
 it. `wb models`, `wb start` and `wb scout` show it (`slice: ~3 files, ~150 new lines per task (32K
 window; 4 of 5 measured steps fit, 1 overflowed or stuck)`). The window itself comes from what
 Ollama serves the model (the loaded model, its Modelfile's `num_ctx`, or `OLLAMA_CONTEXT_LENGTH`);

@@ -101,8 +101,12 @@ what either says (a command, a flag, a default, a guard, a file) updates it in t
    (`router.budgets`); `wb start` writes them into task.json. `wb steer` queues a note for the end of the run; `--now`
    interrupts it (`_steer_bell` wakes the round on steer.jsonl). Either continues the session.
 4. After each round the runner runs `--test`; failures go back to the agent up to `--auto-fix`
-   times (2) without waking Claude. Rounds continue one session until it is 60% full or OpenCode
-   compacted it; then a fresh session gets the task, the diff and the instructions.
+   times (2) without waking Claude. Rounds continue one session until it is 60% full (`FRESH_AT`,
+   read from every `step_finish`: the runner stops the agent mid-round, `_full_round`) or OpenCode
+   compacted it; then a fresh session gets the task, the diff, the agent's last words and the
+   instructions. The config layer sets `compaction.buffer` (`compaction_buffer`: one reply at the
+   output cap plus `STEP_GROWTH`) so OpenCode's own lossy summary is only a backstop.
+   `outside_spec` puts changed files the spec never names into check-ins and reports.
 5. It writes the round report and a `review`/`stuck`/`failed` notification; `ask_reviewer` (MCP,
    budgeted) raises a `question` at any time and blocks until `wb answer`.
 6. The mod (or `wb wait`) delivers each notification once, while still true; acting on a task
