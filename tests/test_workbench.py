@@ -1145,6 +1145,26 @@ class Context(Base):
                                        capture_output=True).returncode == 0)
 
 
+    def test_wb_next_is_not_reaped_while_it_reads_the_session(self):
+        # it set phase queued, then exported the session (up to 30 s) before spawning the runner,
+        # and a wb status meanwhile failed the task as dead (the 0.90 review)
+        self.start("t-nr", "ok")
+        wait_phase("t-nr", {"review"})
+        step2 = Path(self.tmp.name) / "step2.md"
+        step2.write_text("Now also write the question to question.txt.\n")
+        task, reaped = store.Task("t-nr"), []
+        real = runner.fresh_reason
+        def slow_export(t):  # another wb reaping while the export runs
+            reaped.append(cli.reap(t))
+            return real(t)
+        with mock.patch.object(cli, "REAP_GRACE", 0), \
+                mock.patch.object(cli.runner, "fresh_reason", slow_export):
+            run_wb("next", "t-nr", "--spec", str(step2), "-m", "feat: the answer")
+        self.assertEqual(reaped, [False])
+        wait_phase("t-nr", {"review"})
+        self.assertNotIn("failed", [r["kind"] for r in store.notices() if r["task"] == "t-nr"])
+
+
 class Steering(Base):
     def setUp(self):
         super().setUp()

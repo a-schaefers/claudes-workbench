@@ -99,7 +99,8 @@ def runner_alive(task: store.Task) -> bool:
 # A live task whose runner is gone without a word (SIGKILL, out of memory, a reboot) would sit
 # in its phase forever: `wb wait` blocked, feedback and resume refused it (the 2026-11-16
 # audit). After REAP_GRACE seconds with no status change (feedback, resume and next set phase
-# queued a moment before spawn_runner writes the new pid) it is failed, with one notice.
+# queued just before spawn_runner writes the new pid, their slow work done first) it is failed,
+# with one notice.
 REAP_GRACE = 15
 RUNNER_DIED = "the runner died (see runner.log)"
 
@@ -462,10 +463,10 @@ def cmd_feedback(a):
     reviews = st.get("reviews", 0) + 1
     handled = store.now()  # everything before the new round; what its runner raises stays news
     task.set_status(context="fresh" if a.fresh else "keep" if a.keep_context else None)
+    gpu = _gpu_note(task)  # before the task looks live (REAP_GRACE): it may probe model servers
     task.set_status(round=n, reviews=reviews, phase="queued",
                     auto_fixes_total=st.get("auto_fixes_total", 0) + st.get("auto_fixes", 0),
                     auto_fixes=0)
-    gpu = _gpu_note(task)
     spawn_runner(task)
     _ack_all(task, upto=handled)
     print(f"feedback round {reviews} sent to {a.name} (round {n})"
@@ -526,13 +527,16 @@ def cmd_next(a):
         task.set_status(skills=handed, skills_ever=_union(st.get("skills_ever"), handed),
                         skills_rev={**(st.get("skills_rev") or {}), **skills.revs(handed)})
     handled = store.now()
-    task.set_status(round=n, steps=step + 1, step_round=n, phase="queued", reviews=0,
+    task.set_status(round=n, steps=step + 1, step_round=n, reviews=0,
                     step_sizes=(st.get("step_sizes") or []) + [measured],
                     context="fresh" if a.fresh else None,
                     auto_fixes_total=st.get("auto_fixes_total", 0) + st.get("auto_fixes", 0),
-                    auto_fixes=0, last=f"step {step} committed; next step queued")
+                    auto_fixes=0)
+    # before the task looks live: fresh_reason exports the session (up to 30 s), and a task
+    # queued with no runner that long was reaped as dead under wb next (the 0.90 review)
     why = runner.fresh_reason(task)
     gpu = _gpu_note(task)
+    task.set_status(phase="queued", last=f"step {step} committed; next step queued")
     spawn_runner(task)
     _ack_all(task, upto=handled)
     print(f"step {step} of {a.name} committed as {commit}; step {step + 1} sent "
@@ -878,10 +882,10 @@ def cmd_resume(a):
         asked=runner.ASKED.format("\n\n".join(asks)).rstrip() if asks else "")
         + (f"\n\n{runner.steer_prompt(notes, False)}" if notes else ""))
     handled = store.now()
+    gpu = _gpu_note(task)  # before the task looks live (REAP_GRACE): it may probe model servers
     task.set_status(round=n + 1, context="fresh", phase="queued", last="resumed by the reviewer")
     task.event({"ts": store.now(), "round": n + 1, "kind": "resumed",
                 "text": "Claude resumed the task in a fresh session"})
-    gpu = _gpu_note(task)
     spawn_runner(task)
     _ack_all(task, upto=handled)  # the stuck or failed notice is handled: wb wait must not hand it out again
     print(f"resumed {a.name} in a fresh session (round {n + 1})")

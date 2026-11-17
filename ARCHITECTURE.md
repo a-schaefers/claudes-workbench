@@ -159,7 +159,9 @@ only on review, stuck or failed, a SIGTERM, or a crash.
 task would sit in a live phase forever: `wb wait` blocked on it, feedback and resume refused it
 (the 2026-11-16 audit). `cli.reap(task)` ends that: a task in a live phase (queued, running,
 testing, asking) whose runner isn't alive and whose status hasn't changed for `REAP_GRACE` (15 s,
-since feedback, resume and next set `queued` a moment before `spawn_runner` writes the new pid)
+since feedback, resume and next set `queued` a moment before `spawn_runner` writes the new pid;
+their slow work, `wb next`'s session export and the GPU note, comes before it: a `wb next` was
+reaped as dead while it read the session)
 becomes `failed`, `last` "the runner died (see runner.log)", with an `error` event and one
 `failed` notice ("wb resume continues it"), and `runner.sweep` kills what its agent left. The
 check-and-set is `Task.set_status_if`, under `status.lock`, so of two reapers one notifies. `wb status`, `wait`,
