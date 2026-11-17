@@ -2481,14 +2481,23 @@ class Lane(Base):
     @unittest.skipUnless(lane.abi(), "needs Landlock")
     def test_the_agent_cannot_read_the_locks_its_runner_and_wb_commands_take(self):
         # runner.lock was in the task's directory, which the lane reads: an agent holding it
-        # with flock made every later runner exit at once, and reap fail the task (the 0.90 review)
+        # with flock made every later runner exit at once, and reap fail the task; then
+        # status.lock, held through an O_RDONLY fd, froze the runner's next status write and
+        # wb stop with it (the 0.90 review). Every lock a task's writers take is out of reach.
         os.environ["WB_HOME"] = str(self.fake_home() / "state")  # out of /tmp, which the lane writes
         task = self.bare_task("t-locks", self.repo)
-        locks = [runner.lock_file(task.name, kind) for kind in ("runner", "cmd")]
+        task.set_status(phase="running")
+        task.event({"type": "x"})
+        store.append_jsonl(task.dir / "steer.jsonl", {"text": "x"})
+        context.grant(task, "allow", ["make *"])
+        kinds = ("runner", "cmd", "status", "events", "steer", "grants")
+        locks = [runner.lock_file(task.name, kind) for kind in kinds]
         for path in locks:
             with store.locked(path):
                 pass
-        self.assertEqual(self.reads_in_lane(task, locks), ["refused", "refused"])
+        self.assertEqual(self.reads_in_lane(task, locks), ["refused"] * len(kinds))
+        self.assertEqual([p for d in (task.dir, context.rules_dir(task))
+                          for p in d.rglob("*.lock")], [])
 
     def test_workbench_stays_readable_inside_claudes_directory(self):
         home = self.fake_home()

@@ -10,6 +10,7 @@ Layout of ``$WB_HOME`` (default ``~/.local/state/workbench``)::
     rules/<name>/           the agent's rules, kept outside its lane (context.rules_dir):
                             opencode.json (the config layer), HANDBOOK.md, CLAUDE.md, bin/git,
                             grants.json
+    locks/<name>.<kind>.lock  the task's locks (task_lock): runner, cmd, status, events, steer, grants
     tasks/<name>/
         task.json           what the task is (static after start, but for `wb next --test`)
         status.json         what it is doing now (rewritten by the runner and wb)
@@ -103,9 +104,27 @@ def locked(path: Path, shared: bool = False, blocking: bool = True):
             fcntl.flock(fh, fcntl.LOCK_UN)
 
 
+def task_lock(name: str, kind: str) -> Path:
+    """Task `name`'s lock of `kind` ("runner": one runner a task; "cmd": one wb command at a
+    time; "status", "events", "steer", "grants": one writer of that file), in $WB_HOME/locks/,
+    which no lane reads. In the task's directory or its rules (both readable), an agent could
+    hold one with flock (an O_RDONLY fd is enough) from a process sweep misses and wedge every
+    later runner or command: runner.lock first, then status.lock, which froze the runner at its
+    next status write and `wb stop` with it (the 0.90 review)."""
+    return home() / "locks" / f"{name}.{kind}.lock"
+
+
+def _lock_of(path: Path) -> Path:
+    # a task's own JSONL (events, steer) takes its lock outside the lane; the shared files
+    # (notify, results, lessons, chat) aren't in any lane and keep theirs beside them
+    if path.parent.parent == tasks_dir():
+        return task_lock(path.parent.name, path.stem)
+    return path.with_name(path.name + ".lock")
+
+
 def append_jsonl(path: Path, row: dict) -> None:
     line = json.dumps(row, ensure_ascii=False).encode() + b"\n"
-    with locked(path.with_name(path.name + ".lock")):
+    with locked(_lock_of(path)):
         with open(path, "ab+") as fh:
             # A write cut short (a full disk, a crash) leaves a line with no end, and the next row
             # appended to it was lost with it (the 2026-11-16 audit): end the fragment first, so
@@ -196,7 +215,7 @@ class Task:
 
     def set_status(self, **fields) -> dict:
         # The runner and wb both write status; the lock keeps their edits whole.
-        with locked(self.dir / "status.lock"):
+        with locked(task_lock(self.name, "status")):
             st = self.status
             st.update(fields, updated_at=now())
             write_json(self.dir / "status.json", st)
@@ -206,7 +225,7 @@ class Task:
         """set_status only while check(status) holds, under the same lock: a compare-and-set,
         so two processes acting on the same news (two waiters reaping one dead runner) act
         once. The new status, or None when the check failed."""
-        with locked(self.dir / "status.lock"):
+        with locked(task_lock(self.name, "status")):
             st = self.status
             if not check(st):
                 return None

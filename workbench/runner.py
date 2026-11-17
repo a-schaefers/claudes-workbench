@@ -1142,11 +1142,8 @@ SIGNAL_STOP = "the runner was stopped by a signal (a shutdown, a logout or a kil
 
 
 def lock_file(name: str, kind: str):
-    """Task `name`'s lock of `kind` ("runner": one runner a task; "cmd": one wb command at a
-    time), in $WB_HOME/locks/, which no lane reads. In the task's directory or its rules (both
-    readable), an agent could hold one with flock from a process sweep misses and wedge every
-    later runner or command (the 0.90 review)."""
-    return store.home() / "locks" / f"{name}.{kind}.lock"
+    """Task `name`'s lock of `kind`, in $WB_HOME/locks/, which no lane reads (store.task_lock)."""
+    return store.task_lock(name, kind)
 
 
 def _one_runner(task: store.Task):

@@ -677,7 +677,7 @@ def grants(task: store.Task) -> dict:
 
 def grant(task: store.Task, key: str, new: list[str]) -> list[str]:
     """Add to one of the task's grants; returns the ones it didn't have."""
-    with store.locked(rules_dir(task) / "grants.lock"):
+    with store.locked(store.task_lock(task.name, "grants")):  # not in rules/, which the lane reads
         have = grants(task)
         added = [p for p in new if p not in (have.get(key) or [])]
         if added:

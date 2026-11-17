@@ -165,7 +165,7 @@ their slow work, `wb next`'s session export and the GPU note, comes before it: a
 reaped as dead while it read the session)
 becomes `failed`, `last` "the runner died (see runner.log)", with an `error` event and one
 `failed` notice ("wb resume continues it"), and `runner.sweep` kills what its agent left. The
-check-and-set is `Task.set_status_if`, under `status.lock`, so of two reapers one notifies. `wb status`, `wait`,
+check-and-set is `Task.set_status_if`, under the task's status lock (`locks/<task>.status.lock`), so of two reapers one notifies. `wb status`, `wait`,
 `feedback`, `resume`, `next`, `steer` and `accept` call it, and `wb events` once a minute, so the
 mod wakes Claude. On Linux the agent dies with its runner anyway: `lane.py` sets
 `PR_SET_PDEATHSIG` (SIGKILL) before it execs OpenCode or the tests.
@@ -1857,7 +1857,7 @@ custom-node packs do run their own Python).
   deleted by hand and `wb` warns: accept and discard once wedged there for good (the audit).
   `delete_branch` (`branch -D`) unless `--keep-branch` or the repo is gone.
 - **One command per task at a time** (`cli.one_at_a_time`): accept, discard, next, feedback,
-  resume, takeover and stop hold the task's `locks/<task>.cmd.lock` (`runner.lock_file`, where no
+  resume, takeover and stop hold the task's `locks/<task>.cmd.lock` (`runner.lock_file`, `store.task_lock`, where no
   lane reads: an agent holding a lock with flock would wedge every command), so a
   second one waits and then sees what the first did (an accept racing a discard once deleted the
   accepted commit and wrote two results rows: the audit). `stop --all` takes each task's in turn
@@ -2372,15 +2372,18 @@ $WB_HOME (~/.local/state/workbench)
   chat/                          messages.jsonl  receipts.jsonl  listener.json
   rules/<task>/                  outside the lane: opencode.json (the config layer), HANDBOOK.md,
                                  CLAUDE.md (a copy of the user's), bin/git (the shim),
-                                 grants.json grants.lock (what Claude allowed: {"allow", "paths"}),
+                                 grants.json (what Claude allowed: {"allow", "paths"}),
                                  gitdir.json (the worktree's real git dir and its .git's text: {"gitdir", "dotgit"})
   locks/<task>.runner.lock       held by the task's runner for its life (its pid inside): one runner a task
-  locks/<task>.cmd.lock          one wb command on the task at a time (runner.lock_file: no lane reads
-                                 locks/; in the task's directory an agent held runner.lock with flock
-                                 and every later runner exited at once)
+  locks/<task>.cmd.lock          one wb command on the task at a time
+  locks/<task>.<file>.lock       one writer of the task's status, events, steer and grants files
+                                 (store.task_lock: every lock a task's writers take is here, where no
+                                 lane reads; in the task's directory an agent held runner.lock, then
+                                 status.lock, with flock, and every later runner exited at once, then
+                                 the runner and wb stop froze at their next status write: the 0.90 review)
   tasks/<task>/                  readable from the lane; only worktree/ and ask/ writable
-    task.json  status.json  status.lock
-    events.jsonl(.lock)  steer.jsonl(.lock)  acked  context.md  runner.log
+    task.json  status.json
+    events.jsonl  steer.jsonl  acked  context.md  runner.log
     base-tests.txt               the base check's output: the acceptance command on the base (`--test`)
     rounds/<n>/                  prompt.md  instructions.md (before a handover rewrote it)  summary.md  tests.txt
     ask/<id>.json  <id>.answer   questions and permission requests; their answers (all the lane writes here, with worktree/)
@@ -2404,14 +2407,14 @@ against wb's cwd (not resolved: a symlinked home stays as named), so every child
 same place (a relative `WB_HOME` once had wb write the task under its cwd and the runner, which
 runs from the package's directory, look for it there: the 2026-11-16 audit). `write_json` writes `.<name>.<pid>.tmp` beside the file and renames it
 (no fsync); `read_json` returns the default for a missing or broken file. `append_jsonl` appends
-one line under `<file>.lock` (flock), first ending a last line a write cut short (a full disk, a
+one line under `<file>.lock` (flock; a task's own events and steer files under `locks/<task>.<file>.lock`, `store.task_lock`, out of the lane), first ending a last line a write cut short (a full disk, a
 crash), so only that fragment is lost, not the row after it; `read_jsonl(path, offset)` returns
 the whole lines and the offset after the last one, skipping bad lines (bad JSON, or bytes that
 aren't UTF-8). All of them read and write UTF-8 whatever the locale (the 2026-11-16 audit: under a
 legacy one an em dash in a spec failed to write), as do `wb start|next|feedback`'s specs and
 prompts, and the runner runs under `-X utf8`. `results(trials=False)` leaves out trial rows;
 `mark_trials` rewrites results.jsonl under its lock. `Task(name)`: `spec` (task.json) and `status`
-are re-read on every access; `set_status(**kw)` is a locked read-modify-write that adds
+are re-read on every access; `set_status(**kw)` is a read-modify-write under `locks/<task>.status.lock` that adds
 `updated_at`; `set_status_if(check, **kw)` writes only while `check(status)` holds under that
 lock (a compare-and-set: `cli.reap`); never write status.json directly. `all_tasks()` lists task directories with a
 task.json, oldest first.
