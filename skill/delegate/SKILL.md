@@ -282,7 +282,10 @@ Agents can't make images; one that needs an asset asks you, and you make it.
 3. Keep one, or rewrite the prompt for what was wrong and go again. A seed you liked comes back
    with `--seed` and a changed prompt. Stop after three rounds and show the user the best.
 4. Copy the keeper into the project (resized or cropped as needed), commit it, and say which
-   engine, prompt and seed made it (its `.json` sidecar has them).
+   engine, prompt and seed made it (its `.json` sidecar has them). A project often ignores
+   `*.png` for its screenshots: `git check-ignore -v <file>`, and add an exception for the
+   asset directory. For a sprite on a black background drawn additively, black is see-through
+   and no alpha channel is needed.
 Mind the engine's `notes` in `wb image --list`: an image model's licence can restrict where and
 how its output may be used. A generation holds the GPU: running tasks wait their turn.
 
