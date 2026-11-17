@@ -1765,6 +1765,46 @@ class WebChat(Base):
         self.assertEqual(p["binds"], ["127.0.0.1", "100.64.0.9"])
         self.assertTrue({"box", "box.ts.net", "100.64.0.9"} <= p["hosts"])
 
+    def test_a_missing_tailscale_cli_is_said_apart_from_tailscale_not_running(self):
+        # macOS's App Store app keeps its CLI in the bundle, off PATH (the 2026-11-16 audit)
+        chat = self.chat
+        with mock.patch.object(chat.shutil, "which", return_value=None), \
+                mock.patch.object(chat.sys, "platform", "linux"):
+            self.assertEqual(chat.plan(["localhost", "tailscale"])["skipped"],
+                             ["tailscale (CLI not found: put `tailscale` on PATH)"])
+        me = {"Self": {"TailscaleIPs": ["100.64.0.9"], "DNSName": "box.ts.net.", "HostName": "box"}}
+        ran = mock.Mock(return_value=types.SimpleNamespace(stdout=json.dumps(me)))
+        with mock.patch.object(chat.shutil, "which", return_value=None), \
+                mock.patch.object(chat.sys, "platform", "darwin"), \
+                mock.patch.object(chat.os.path, "isfile", return_value=True), \
+                mock.patch.object(chat.subprocess, "run", ran):
+            self.assertEqual(chat.tailscale()["ip"], "100.64.0.9")
+        self.assertEqual(ran.call_args[0][0][0], chat.TAILSCALE_APP)
+
+    def test_a_taken_port_is_one_line_not_a_traceback(self):
+        with self.assertRaisesRegex(RuntimeError, f"can't listen on 127.0.0.1:{self.port}: the port is taken"):
+            self.chat.make_servers(self.port, ["127.0.0.1"])
+
+    def test_a_bad_length_or_a_stalled_connection_is_turned_away(self):
+        import http.client
+        tok = self.chat.token()
+        for length in ("-1", "abc"):  # -1 read until the client hung up (the 2026-11-16 audit)
+            c = http.client.HTTPConnection("127.0.0.1", self.port, timeout=5)
+            c.putrequest("POST", "/api/send", skip_host=True)
+            for k, v in (("Host", "localhost"), ("Authorization", f"Bearer {tok}"),
+                         ("Content-Type", "application/json"), ("Content-Length", length)):
+                c.putheader(k, v)
+            c.endheaders()
+            self.assertEqual(c.getresponse().status, 400, length)
+            c.close()
+        with mock.patch.object(self.srv.RequestHandlerClass, "timeout", 0.5):
+            s = socket.create_connection(("127.0.0.1", self.port), timeout=5)
+            s.sendall(b"GET / HTTP/1.0\r\n")  # and then nothing: before, a thread for ever
+            t0 = time.time()
+            self.assertEqual(s.recv(100), b"")
+            self.assertLess(time.time() - t0, 4)
+            s.close()
+
     def test_the_page_needs_the_token_and_a_known_host(self):
         tok = self.chat.token()
         self.assertEqual(oct(Path(os.environ["WB_CHAT_TOKEN"]).stat().st_mode & 0o777), "0o600")
@@ -1834,6 +1874,32 @@ class WebChat(Base):
         self.assertEqual([m["text"] for m in json.loads(second[1][6:])["messages"]], ["first", "On it."])
         c.close()
         self.assertEqual(self.call("/api/stream")[0], 401)
+
+    def test_without_inotify_the_stream_stays_quiet_between_changes(self):
+        # the fallback hub wakes every second; each wake was a ping (the 2026-11-16 audit)
+        from workbench import watch
+        saved, watch._libc = watch._libc, False
+        try:
+            servers, _ = self.chat.make_servers(0, ["127.0.0.1"])
+        finally:
+            watch._libc = saved
+        srv = servers[0]
+        threading.Thread(target=srv.serve_forever, daemon=True).start()
+        try:
+            s = socket.create_connection(srv.server_address, timeout=10)
+            s.sendall(f"GET /api/stream HTTP/1.0\r\nHost: localhost\r\n"
+                      f"Authorization: Bearer {self.chat.token()}\r\n\r\n".encode())
+            f = s.makefile("rb")
+            while f.readline() != b"event: state\n":  # past the headers, to the first state
+                pass
+            f.readline(), f.readline()
+            s.settimeout(3)
+            with self.assertRaises(TimeoutError):
+                f.readline()  # a ping would come within a second or two
+            s.close()
+        finally:
+            srv.shutdown()
+            srv.server_close()
 
     def test_a_message_its_receipt_and_the_reply(self):
         tok = self.chat.token()

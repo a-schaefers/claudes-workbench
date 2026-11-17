@@ -1315,18 +1315,23 @@ use with `O_EXCL`, mode 600, `token_urlsafe(32)`; kept at 600; one under 16 char
 with a message), read once when the server starts, so a new token needs a restart. The settings:
 `$WB_CHAT_CONFIG`, else `~/.config/workbench/chat.json`, with two keys. `bind`: addresses to listen
 on, which replace localhost (`localhost`, an address, `tailscale`: the tailnet IPv4 from
-`tailscale status --json`, skipped when tailscale isn't running; `0.0.0.0` or `::`: every
-interface). `hosts`: extra host names to answer to (`*`: any). `--bind` replaces chat.json's
+`tailscale status --json`, the CLI found on PATH or, on macOS, in the app bundle
+(`TAILSCALE_APP`); skipped as `tailscale (not running)`, or `tailscale (CLI not found: …)` when
+neither has it; `0.0.0.0` or `::`: every interface). `hosts`: extra host names to answer to (`*`: any). `--bind` replaces chat.json's
 binds, `--host` adds to its hosts, `--port` changes the port. Answered host names (`chat.plan`,
 worked out once at startup): `localhost`, `127.0.0.1`, `::1` always; for `tailscale` its DNS name,
 first label and host name; for a wildcard the host's name, its first label, its FQDN and whatever
 the host name resolves to; any other bind as itself; plus `hosts`. `serve` prints what it listens
-on, binds it skipped, and warnings for a wildcard bind or `hosts: *`. With a bind skipped (tailscale
+on, binds it skipped, and warnings for a wildcard bind or `hosts: *`; an address it can't listen
+on ends it with one line (`can't listen on <addr>:<port>: the port is taken: another wb chat serve
+… or another program; --port picks another`, or the address isn't on this machine). With a bind skipped (tailscale
 not up yet), it rechecks every `REPLAN_EVERY` 30 s and exits 75 once more binds are available,
 for the service manager (`Restart=always`) to start it again with them. `wb chat url` prints
 `http://localhost:<port>/#token=…` (the fragment never leaves the browser).
 
-**The HTTP API** (`Handler`, HTTP/1.0, no keep-alive, no CORS):
+**The HTTP API** (`Handler`, HTTP/1.0, no keep-alive, no CORS; a connection that stalls for
+`TIMEOUT` 30 s, before its request is in or on a blocked write, is closed, so an idle one holds a
+thread no longer):
 - Every request: the `Host` header (port and brackets stripped, lowercased) must be an answered
   name, else 403 `{"error": "unknown host"}`: this stops other web pages and DNS rebinding.
   Responses carry `Cache-Control: no-store`, `X-Frame-Options: DENY`, `nosniff`, `no-referrer` and
@@ -1341,9 +1346,11 @@ for the service manager (`Restart=always`) to start it again with them. `wb chat
 - `GET /api/stream`: server-sent events (with the security headers), at most 16 open (503 past it): `event: state` with the
   snapshot at once and whenever it changes, `: ping` after 15 s idle. One `Hub` thread watches
   `chat/` (inotify, or `wait()` when it fell back to polling) and a pidfd on the listener and
-  wakes every stream.
-- `POST /api/send`: JSON only (415), at most 32 KB (413), `{text: 1–8000 characters, cid?: 1–64
-  characters}` (400), → 200 `{message, listener, state}`.
+  wakes every stream. Without inotify it wakes them every second (how a dead listener is noticed
+  there); a wake with nothing new writes nothing, so the 15 s ping holds on every platform.
+- `POST /api/send`: JSON only (415), at most 32 KB (413), a `Content-Length` that isn't a number
+  0 or more (400), `{text: 1–8000 characters, cid?: 1–64 characters}` (400), → 200 `{message,
+  listener, state}`.
 
 **The page** (`chat_static/`: `index.html`, `app.js`, `app.css`, `manifest.webmanifest`,
 `icon.svg`; no inline script, as the CSP requires). The token is taken from the address's
