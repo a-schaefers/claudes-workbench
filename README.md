@@ -104,17 +104,15 @@ come out.
 ### Install
 
 ```sh
-git clone https://github.com/a-schaefers/claudes-workbench ~/repos/workbench
-# to upgrade later: git -C ~/repos/workbench pull, then restart Claude Code (or /reload-plugins);
-# the links and the plugin read from the clone, and your state and skills stay as they are
-cd ~/repos/workbench
-mkdir -p ~/.local/bin ~/.claude/skills   # ~/.local/bin must be on your PATH
-ln -s "$PWD/bin/wb" ~/.local/bin/wb
-ln -s "$PWD/skill/delegate" ~/.claude/skills/delegate
-claude plugin marketplace add "$PWD"
+claude plugin marketplace add a-schaefers/claudes-workbench
 claude plugin install workbench@workbench
+~/.claude/plugins/marketplaces/workbench/bin/wb setup   # puts wb on your PATH and /delegate in your skills
 wb doctor
 ```
+
+To upgrade later: `claude plugin marketplace update workbench && claude plugin update
+workbench@workbench`, then restart Claude Code. Your state and skills stay as they are. Working on
+Workbench itself? Install from a clone instead ([Installing](ARCHITECTURE.md#installing)).
 
 ### Use it
 

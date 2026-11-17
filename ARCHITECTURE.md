@@ -1638,6 +1638,7 @@ message, not a traceback.
 | `wb image "<prompt>"` | `--n` (4), `--size WxH` (1024x1024), `--seed`, `--ref <img>…`, `--out DIR`, `--engine`, `--list` | Candidates from a local image engine (see *Images*). |
 | `wb chat [log\|serve\|url\|reply\|ack\|pending]` | `--port` (1337), `--bind` (replaces chat.json's), `--host` (adds), `--text`, `--message <file\|->` (reply reads stdin without either), `-n` (10); `ack <id> --by --how` (the mod) | The web chat: the thread, the server, the link with its token, Claude's reply. |
 | `wb init <dir>` | | A project the way Claude keeps one: git on the default branch, an initial commit, AGENTS.md → CLAUDE.md (refuses inside another repo or without a git identity). |
+| `wb setup` | `--force` (replaces a link that points elsewhere; never a real file) | Links `~/.local/bin/wb` to this copy's `bin/wb` and Claude Code's `skills/delegate` to its `skill/delegate`, warns when `~/.local/bin` isn't on PATH; exit 1 when it left something in the way (see *Installing*). |
 | `wb doctor` | | `opencode --version`, the OpenCode config, git, models found and each one's readiness, each Ollama entry's `options.max_tokens` and context against what Ollama serves, the state directory, a real lane drawn around a test write (`ok agents write only in their lane (Landlock ABI N)`), `wb` on PATH (or `WB_BIN`) for the mod, where the mod lives. `ok`/`BAD` lines set the exit code; `--` lines inform. |
 
 ## Files and formats
@@ -1746,6 +1747,44 @@ with overflow), `read_full`, `reviews`, `spec_rounds`, `stuck`, `took_over`.
 - `notes.md`: one `- <note>` line each.
 - The image sidecar: `{prompt, seed, width, height, engine, refs, secs, ts}`.
 - The chat files: *The web chat*.
+
+## Installing
+
+**Users** install from the marketplace (README's quickstart):
+```sh
+claude plugin marketplace add a-schaefers/claudes-workbench
+claude plugin install workbench@workbench
+~/.claude/plugins/marketplaces/workbench/bin/wb setup
+wb doctor
+```
+The plugin install copies only `mod/` (the marketplace entry's `source`) into Claude Code's plugin
+cache, but `marketplace add` keeps a full clone of the repo under
+`~/.claude/plugins/marketplaces/<the marketplace's name>` (`installLocation` in
+`known_marketplaces.json`; elsewhere under `CLAUDE_CODE_PLUGIN_CACHE_DIR`). `wb setup` links `wb`
+and the `/delegate` skill from that clone, so `wb` runs from the clone the way it does from a
+developer's. Upgrading: `claude plugin marketplace update workbench` pulls the clone (the links
+follow it), `claude plugin update workbench@workbench` refreshes the mod, then restart Claude Code.
+The mod's copy moves only when `mod/.claude-plugin/plugin.json`'s `version` does, so a change to
+`mod/` that users should get bumps it. A third-party marketplace doesn't auto-update unless the
+user turns that on (`/plugin` → Marketplaces).
+
+**Developing**: a clone, with the links pointing into it and the clone itself as the marketplace,
+so the plugin, `wb` and the skill all read the working tree (the README's install until
+2026-11-16):
+```sh
+git clone https://github.com/a-schaefers/claudes-workbench ~/repos/workbench
+# to upgrade later: git -C ~/repos/workbench pull, then restart Claude Code (or /reload-plugins);
+# the links and the plugin read from the clone, and your state and skills stay as they are
+cd ~/repos/workbench
+mkdir -p ~/.local/bin ~/.claude/skills   # ~/.local/bin must be on your PATH
+ln -s "$PWD/bin/wb" ~/.local/bin/wb
+ln -s "$PWD/skill/delegate" ~/.claude/skills/delegate
+claude plugin marketplace add "$PWD"
+claude plugin install workbench@workbench
+wb doctor
+```
+(`bin/wb setup` makes the same two links.) Moving from one to the other: `wb setup --force` from
+the copy you want repoints the links; the state directory and the skill library don't move.
 
 ## The tests
 
@@ -1937,5 +1976,8 @@ push: every change is a pull request that merges once `check` is green and it is
   `.github/workflows/check.yml`; the floor it needs → the README's badge and *What you need*.
 - **The merge gate** (`owner-merge.yml`, the ruleset, `check.yml`'s job name) →
   `tests/test_workflows.py`, `scripts/github-settings.sh apply`, *Shipping to main*.
+- **`mod/` for users** → bump `mod/.claude-plugin/plugin.json`'s `version`, or a marketplace
+  install keeps the old copy (*Installing*). **`wb setup`'s links** → README's quickstart and
+  *Installing*.
 - **A model name** → never in code or the skill: models come from OpenCode's config, choices from
   the router and the weekly check.

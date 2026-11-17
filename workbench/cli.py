@@ -1299,6 +1299,34 @@ def cmd_chat(a):
         print(f"listening: {lst['cwd']}" if lst else "no session is listening")
 
 
+def cmd_setup(a):
+    """Link `wb` onto PATH and /delegate into Claude Code's skills, from wherever this copy lives:
+    the marketplace's clone (~/.claude/plugins/marketplaces/workbench) for users, a git clone for
+    development (2026-11-16: the plugin install copies only mod/, so these two come from here)."""
+    links = [(Path.home() / ".local/bin/wb", PKG_ROOT / "bin/wb"),
+             (context.claude_home() / "skills/delegate", PKG_ROOT / "skill/delegate")]
+    bad = False
+    for at, to in links:
+        if at.is_symlink() and at.resolve() == to.resolve():
+            print(f"ok  {at} → {to}")
+            continue
+        if at.is_symlink() and a.force:
+            at.unlink()
+        elif at.is_symlink() or at.exists():
+            bad = True
+            print(f"BAD {at} is already {'a link to ' + os.readlink(at) if at.is_symlink() else 'there'}: "
+                  f"left as it is{' (--force replaces a link)' if at.is_symlink() else ''}")
+            continue
+        at.parent.mkdir(parents=True, exist_ok=True)
+        at.symlink_to(to)
+        print(f"ok  {at} → {to} (made)")
+    bindir = str(Path.home() / ".local/bin")
+    if bindir not in os.environ.get("PATH", "").split(os.pathsep):
+        print(f"--  {bindir} isn't on PATH: add it, or the mod can't run wb (or set WB_BIN)")
+    print("next: wb doctor")
+    sys.exit(1 if bad else 0)
+
+
 def cmd_doctor(a):
     ok = True
 
@@ -1609,6 +1637,10 @@ def main(argv=None):
     s = sub.add_parser("trial", help="mark closed tasks as trial runs: their results stop counting")
     s.add_argument("names", nargs="+")
     s.set_defaults(f=cmd_trial)
+    s = sub.add_parser("setup", help="link wb onto PATH and /delegate into Claude Code's skills, "
+                                     "from this copy")
+    s.add_argument("--force", action="store_true", help="replace links that point elsewhere")
+    s.set_defaults(f=cmd_setup)
     sub.add_parser("doctor", help="check the setup").set_defaults(f=cmd_doctor)
 
     a = ap.parse_args(argv)
