@@ -54,7 +54,8 @@ jobs:
           git config --global user.email "ci@invalid"
       - run: scripts/install-opencode.sh "$OPENCODE_VERSION" "$OPENCODE_SHA256" >> "$GITHUB_PATH"
       - name: Landlock
-        run: python3 -c 'from workbench import lane; print("Landlock ABI", lane.abi() or "none here: the Lane tests skip")'
+        run: |
+          python3 -c 'from workbench import lane; print("Landlock ABI", lane.abi() or "none here: the Lane tests skip")'
       - run: python3 -m unittest
       - run: npm install -g @anthropic-ai/claude-code@$CLAUDE_CODE_VERSION
       - run: claude --version

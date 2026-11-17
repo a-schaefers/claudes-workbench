@@ -41,5 +41,6 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
       - name: Landlock
-        run: python3 -c 'from workbench import lane; print("Landlock ABI", lane.abi() or "none here: the Lane tests skip")'
+        run: |
+          python3 -c 'from workbench import lane; print("Landlock ABI", lane.abi() or "none here: the Lane tests skip")'
       - run: python3 -m unittest
