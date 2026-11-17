@@ -270,10 +270,11 @@ def cmd_next(a):
                     context="fresh" if a.fresh else None,
                     auto_fixes_total=st.get("auto_fixes_total", 0) + st.get("auto_fixes", 0),
                     auto_fixes=0, last=f"step {step} committed; next step queued")
+    why = runner.fresh_reason(task)
     spawn_runner(task)
     _ack_all(task)
     print(f"step {step} of {a.name} committed as {commit}; step {step + 1} sent "
-          + ("to a fresh session" if a.fresh else "to the same session"))
+          + (f"to a fresh session ({why})" if why else "to the same session"))
     _say(lessons.nudge(task))
 
 
