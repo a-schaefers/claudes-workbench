@@ -235,7 +235,8 @@ def run_round(task: store.Task, n: int) -> dict:
         cmd += ["--session", st["session"]]
         marks.add(st.get("session_mark"))
     else:
-        task.set_status(session_mark=next(iter(marks)))
+        task.set_status(session_mark=next(iter(marks)), session_floor=None)
+    floor = task.status.get("session_floor")  # the context the session had read when it began work
     note = skills_note(task, n)
     cmd.append(note + prompt)
     env = agent_env(task)
@@ -297,12 +298,28 @@ def run_round(task: store.Task, n: int) -> dict:
                 # once this session has changed a file: one that filled up reading would hand
                 # the same reading to the next, which fills up too (seen 2026-11-16: twenty
                 # handovers in twelve minutes, no edit made). It carries on instead.
+                # And only when a successor, re-reading what this one read before its first
+                # change (its floor), would have room left to work: seen the same day, a step
+                # whose reading came to 16K of a 19K handover point handed over three times in
+                # four minutes, each fresh session getting 3K of work. It carries on instead.
+                changed = None
+                if floor is None and window:
+                    changed = marks != {gitops.mark(task.worktree)}
+                    if changed:
+                        floor = used
+                        task.set_status(session_floor=floor)
                 if window and used >= fresh_at * window and not out["full"]:
-                    if marks != {gitops.mark(task.worktree)}:  # changed since either began
+                    if changed is None:
+                        changed = marks != {gitops.mark(task.worktree)}  # since either began
+                    if not changed:
+                        if not out.get("reading_full"):
+                            out["reading_full"] = used
+                            _reading_full(task, n, used, window)
+                    elif fresh_at * window - floor >= HANDOVER_ROOM * window:
                         out["full"] = used
                     elif not out.get("reading_full"):
                         out["reading_full"] = used
-                        _reading_full(task, n, used, window)
+                        _reading_full(task, n, used, window, floor)
             elif row["kind"] == "error":
                 out["errors"].append(f"opencode: {row['text']}")
             task.event(row)
@@ -650,12 +667,22 @@ def round_asks(task: store.Task, n: int) -> list[str]:
     return out
 
 
-def _reading_full(task: store.Task, n: int, used: int, window: int) -> None:
+# A handover needs a successor with room to work: at least this share of the window between
+# the reading it repeats (the floor) and the handover point. Less, and the session carries on.
+HANDOVER_ROOM = 0.25
+
+
+def _reading_full(task: store.Task, n: int, used: int, window: int,
+                  floor: int | None = None) -> None:
     pct = 100 * used // window
-    text = (f"the agent's session reached {pct}% of its window before it changed a file: the "
-            f"reading this step needs fills the handover point, so it carries on in this session "
-            f"(OpenCode compacts it if it must). Name fewer files to read, or put what it needs "
-            f"in the spec.")
+    if floor is None:
+        what = "before it changed a file: the reading this step needs fills the handover point"
+    else:
+        what = (f"and had read {100 * floor // window}% before its first change: a fresh session "
+                f"re-reading that would have little room to work")
+    text = (f"the agent's session reached {pct}% of its window {what}, so it carries on in this "
+            f"session (OpenCode compacts it if it must). Name fewer files to read, or put what "
+            f"it needs in the spec.")
     task.event({"ts": store.now(), "round": n, "kind": "reading_full", "text": text})
     task.notify("checkin", f"task {task.name}: {text}", round=n)
 

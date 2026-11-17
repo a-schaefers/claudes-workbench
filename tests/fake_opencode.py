@@ -100,10 +100,31 @@ elif scenario == "read":
     tool("write", {"filePath": os.path.abspath("answer.txt"), "content": "42"})
     emit("text", text="Wrote answer.txt = 42.")
     finish()
+elif scenario == "floor":  # read half its window before its first change, then filled up
+    tool("read", {"filePath": os.path.abspath("answer.txt")})
+    emit("step_finish", reason="tool-calls", tokens={"input": 2000, "output": 100,
+                                                      "cache": {"read": 13900}})  # 16000: 48%
+    time.sleep(1)  # the runner sees that step before the change
+    with open("answer.txt", "w") as fh:
+        fh.write("41\n")
+    tool("write", {"filePath": os.path.abspath("answer.txt"), "content": "41"})
+    emit("step_finish", reason="tool-calls", tokens={"input": 2000, "output": 100,
+                                                      "cache": {"read": 14900}})  # began at 17000
+    time.sleep(1)
+    emit("step_finish", reason="tool-calls", tokens={"input": 2000, "output": 900,
+                                                      "cache": {"read": 22100}})  # 25000: 76%
+    time.sleep(1)
+    with open("answer.txt", "w") as fh:
+        fh.write("42\n")
+    tool("write", {"filePath": os.path.abspath("answer.txt"), "content": "42"})
+    emit("text", text="Wrote answer.txt = 42.")
+    finish()
 elif scenario == "fill":
     with open("answer.txt", "w") as fh:
         fh.write("41\n")
     tool("write", {"filePath": os.path.abspath("answer.txt"), "content": "41"})
+    emit("step_finish", reason="tool-calls", tokens={"input": 2000, "output": 100,
+                                                      "cache": {"read": 900}})  # began work at 3000
     emit("text", text="Wrote 41 so far; next I fix it to the real answer.")
     emit("step_finish", reason="tool-calls", tokens={"input": 2000, "output": 900,
                                                       "cache": {"read": 22100}})  # 25000: 76%

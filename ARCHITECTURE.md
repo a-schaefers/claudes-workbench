@@ -249,7 +249,9 @@ step's growth. A session OpenCode compacted anyway is replaced at the next round
 the handover point before it has changed a file isn't handed over: the next one would re-read
 the same files and fill up too (seen: twenty handovers in twelve minutes, no edit made). It
 carries on, with compaction as the backstop, and Claude hears that the step needs more reading
-than the window holds.
+than the window holds. Nor is one whose reading before its first change (its floor) leaves a
+successor, which re-reads it, less than a quarter of the window before the handover point (seen:
+a 16K floor under a 19K handover point, three handovers in four minutes, 3K of work each).
 Reports show the fill (`agent context: 19.4K of 32K (60%)`) so Claude sees it coming.
 `wb feedback --fresh` forces a fresh session (a confused agent), `--keep-context` keeps it for one
 more round.

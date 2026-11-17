@@ -296,6 +296,16 @@ class Context(Base):
         self.assertIn("reached 76% of its window before it changed a file", notes[0]["text"])
         self.assertIn("Name fewer files to read", notes[0]["text"])
 
+    def test_a_session_whose_reading_leaves_a_successor_no_room_carries_on(self):
+        self.start("t-c10", "floor", "--test", TEST_CMD)
+        st = wait_phase("t-c10", {"review", "stuck", "failed"}, timeout=60)
+        self.assertEqual((st["phase"], st.get("handovers", 0), len(self.runs())), ("review", 0, 1))
+        self.assertEqual(st["session_floor"], 17000)
+        notes = [r for r in store.read_jsonl(store.home() / "notify.jsonl")[0]
+                 if r["task"] == "t-c10" and r["kind"] == "checkin"]
+        self.assertIn("reached 76% of its window and had read 51% before its first change",
+                      notes[0]["text"])
+
     def test_a_stopped_task_resumes_in_a_fresh_session_without_a_review_round(self):
         self.start("t-c8", "hang", "--test", TEST_CMD)
         deadline = time.time() + 30

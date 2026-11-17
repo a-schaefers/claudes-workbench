@@ -349,8 +349,9 @@ You are the driver, not a spectator. When something tells you the agent is headi
   user's checkout or another project: there, take the file yourself or say no.
 - `wb stop <name>`: just stop it. `wb resume <name>` continues it in a fresh session (not a
   review round), e.g. after fixing workbench under it.
-- A check-in saying the session "reached N% of its window before it changed a file": the step
-  needs more reading than the window holds. Let it carry on; next time name fewer files to read,
+- A check-in saying the session "reached N% of its window before it changed a file" (or "had
+  read N% before its first change": a fresh session would have little room after re-reading it):
+  the step needs more reading than the window holds. Let it carry on; next time name fewer files to read,
   or put what it needs (a signature, a constant) in the spec.
 Notes are instructions, like feedback: concrete and short.
 
