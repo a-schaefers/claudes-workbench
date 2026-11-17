@@ -168,6 +168,7 @@ miss:
    any "next" as its job.
 7. **The reading fits.** Name only the files the agent must read, headers before sources, and
    put a short fact it needs (a signature, a constant) in the spec instead of a file to read.
+   The repo's CLAUDE.md is already in its instructions: asking it to read that is reading twice.
    Spec plus named files (`wc -c`, ~4 characters a token) well under half the window, since the
    agent reads more than you name. Seen: a step whose reading filled 60% of a 32K window
    before the first edit, twenty sessions in a row.
