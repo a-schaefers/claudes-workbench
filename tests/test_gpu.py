@@ -166,8 +166,9 @@ class Sharing(Base):
         os.environ["WB_FAKE_GPU_GB"] = "48"           # small would fit beside big
         self.start("t-big", "hang", "--model", BIG)
         wait_running("t-big")
-        got = []
-        t = threading.Thread(target=lambda: got.append(models.GpuLease(None, "wb image").__enter__()))
+        got, said = [], []  # not print: its line reached the suite's output (the 0.90 review)
+        t = threading.Thread(target=lambda: got.append(
+            models.GpuLease(None, "wb image", said.append).__enter__()))
         t.start()
         deadline = time.time() + 10
         while not any(h.get("waiting") for h in store.read_json(store.home() / "gpu.json", {}).values()):
@@ -179,6 +180,7 @@ class Sharing(Base):
         run_wb("stop", "t-big")
         t.join(30)
         self.assertEqual(len(got), 1)                 # the image's turn came first
+        self.assertEqual(said, ["waiting for the GPU (held by t-big)"])
         time.sleep(1)
         self.assertEqual(store.Task("t-small").status["phase"], "queued")
         got[0].__exit__(None, None, None)
