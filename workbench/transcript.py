@@ -43,9 +43,12 @@ class Painter:
 
 
 def export(session: str) -> dict:
-    r = subprocess.run(opencode_bin() + ["session", "export", session], capture_output=True,
-                       text=True, timeout=30, cwd="/")
-    return json.loads(r.stdout) if r.returncode == 0 and r.stdout.strip() else {}
+    try:
+        r = subprocess.run(opencode_bin() + ["session", "export", session], capture_output=True,
+                           text=True, timeout=30, cwd="/")
+        return json.loads(r.stdout) if r.returncode == 0 and r.stdout.strip() else {}
+    except (OSError, subprocess.TimeoutExpired, ValueError):  # a busy or broken store: nothing known
+        return {}
 
 
 def find_session(task: store.Task) -> str | None:
@@ -53,9 +56,12 @@ def find_session(task: store.Task) -> str | None:
     sid = task.status.get("session")
     if sid or not task.worktree.exists():
         return sid
-    r = subprocess.run(opencode_bin() + ["session", "list"], capture_output=True, text=True,
-                       cwd=task.worktree, env={**os.environ, "PWD": str(task.worktree)},
-                       timeout=30)
+    try:
+        r = subprocess.run(opencode_bin() + ["session", "list"], capture_output=True, text=True,
+                           cwd=task.worktree, env={**os.environ, "PWD": str(task.worktree)},
+                           timeout=30)
+    except (OSError, subprocess.TimeoutExpired):
+        return None
     for line in r.stdout.splitlines():
         parts = line.split("\t")
         if len(parts) > 1 and parts[1] == f"wb: {task.name}":

@@ -2,12 +2,15 @@
 import json
 import os
 import socket
+import sys
 import tempfile
 import threading
 import time
 import unittest
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))  # run as a script too
 
 from workbench import context, models, router, store, watch
 from tests.test_workbench import Base, wait_phase

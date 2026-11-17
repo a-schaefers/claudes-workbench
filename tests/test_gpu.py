@@ -1,9 +1,13 @@
 """Sharing the GPU: tasks run side by side when their models fit it together, else one at a time."""
 import json
 import os
+import sys
 import threading
 import time
+import unittest
 from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))  # run as a script too
 
 from workbench import models, store
 from tests.test_workbench import Base, TEST_CMD, run_wb, wait_phase
@@ -107,3 +111,7 @@ class CanShare(Base):
         self.assertFalse(models.can_share(b, [self.model("ollama/u", gb=0)], int(99e9)))  # unknown size
         os.environ["OLLAMA_NUM_PARALLEL"] = "1"
         self.assertFalse(models.can_share(a, [a], int(99e9)))     # the same model would take turns
+
+
+if __name__ == "__main__":
+    unittest.main()

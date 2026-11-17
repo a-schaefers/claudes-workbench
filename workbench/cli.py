@@ -148,7 +148,7 @@ def cmd_start(a):
         "name": a.name, "repo": str(repo), "base": base, "base_ref": a.base,
         "branch": gitops.branch_name(a.name), "model": m.id, "model_label": m.label,
         "opencode_model": m.id, "route": why, "size": a.size, "stack": stack,
-        **({"trial": True} if a.trial else {}), "test_cmd": a.test,
+        **({"trial": True} if a.trial else {}), "test_cmd": a.test, "test_timeout": a.test_timeout,
         "auto_fix": a.auto_fix, "ask_budget": budget, "ask_timeout": a.ask_timeout,
         "checkin": a.checkin if a.checkin is not None else 10 if a.size == "significant" else 0,
         "round_timeout": a.round_timeout or limits["round"],
@@ -163,8 +163,9 @@ def cmd_start(a):
     task.round_dir(1).joinpath("prompt.md").write_text(prompt)
     task.set_status(phase="queued", round=1, reviews=0, auto_fixes=0, tools=0,
                     tok_in=0, tok_out=0, session=None, last="starting",
-                    skills=handed, skills_ever=handed, skills_rev=skills.revs(handed), allow=a.allow or [],
-                    paths=lane_dirs)
+                    skills=handed, skills_ever=handed, skills_rev=skills.revs(handed))
+    context.grant(task, "allow", [p.strip() for p in a.allow or [] if p.strip()])
+    context.grant(task, "paths", lane_dirs)
     spawn_runner(task)
     print(f"started {a.name} on {m.label} · branch {gitops.branch_name(a.name)} · "
           f"base {base[:8]}" + (f" · tests `{a.test}`, auto-fix {a.auto_fix}" if a.test else ""))
@@ -264,8 +265,7 @@ def cmd_next(a):
         die(str(e))
     _spec_gaps(task, a.spec_gap)  # after the commit: a retry after a failed one counts them once
     if a.allow:
-        have = st.get("allow") or []
-        task.set_status(allow=have + [p for p in a.allow if p.strip() and p not in have])
+        context.grant(task, "allow", [p.strip() for p in a.allow if p.strip()])
     if a.test is not None:  # the one change to task.json after start
         store.write_json(task.dir / "task.json", {**spec, "test_cmd": a.test})
     test = a.test if a.test is not None else spec.get("test_cmd")
@@ -463,10 +463,12 @@ def _stop_runner(task):
         except ProcessLookupError:
             return
         if not wait_exit(pid, 15):  # it stops its agent first; past that, end it all
-            try:
-                os.killpg(pid, signal.SIGKILL)  # its own session: the agent and MCP servers too
-            except (ProcessLookupError, PermissionError):
-                pass
+            for group in (pid, task.status.get("agent_pid")):  # the agent has a session of its own
+                try:
+                    if group:
+                        os.killpg(group, signal.SIGKILL)
+                except (ProcessLookupError, PermissionError):
+                    pass
 
 
 LIVE = ("queued", "running", "testing", "asking")
@@ -557,12 +559,14 @@ def cmd_allow(a):
     if not pats and not dirs:
         die("nothing to allow")
     conf_path = context.commands_path()
-    conf = store.read_json(conf_path, {}) or {}
+    try:
+        conf = json.loads(conf_path.read_text()) if conf_path.exists() else {}
+    except ValueError as e:  # rewriting it would lose what the user wrote there
+        die(f"{conf_path} doesn't parse ({e}); fix it by hand first")
     for key, new in (("allow", pats), ("paths", dirs)):
         if not new:
             continue
-        have = task.status.get(key) or []
-        task.set_status(**{key: have + [p for p in new if p not in have]})
+        context.grant(task, key, new)
         if a.always:
             conf[key] = (conf.get(key) or []) + [p for p in new if p not in (conf.get(key) or [])]
     if a.always:
@@ -1371,6 +1375,8 @@ def main(argv=None):
     s.add_argument("--think-timeout", type=int, help="seconds of generating with no tool call or "
                    "word before the runner nudges the agent to act (default 420, or what the "
                    "model's measured speed gives; 0 turns it off)")
+    s.add_argument("--test-timeout", type=int, default=900, metavar="SECS",
+                   help="seconds the acceptance command may run (default 900)")
     s.add_argument("--base", default="HEAD")
     s.add_argument("--force", action="store_true", help="queue the --model asked for even if it "
                    "can't run now")

@@ -11,6 +11,8 @@ Claude is only woken for work that passes, or for a task that has run out of roa
 import json
 import os
 import queue
+import re
+import shlex
 import signal
 import subprocess
 import sys
@@ -29,7 +31,7 @@ CURRENT: dict = {}  # the agent process of the round in flight, for the SIGTERM 
 CLEAN_ENV = {"PYTHONDONTWRITEBYTECODE": "1"}
 
 
-class Stopped(Exception):
+class Stopped(BaseException):  # not an Exception: no `except Exception` on the way may swallow a stop
     pass
 
 
@@ -42,7 +44,7 @@ def _on_term(signum, frame):
 
 def opencode_bin() -> list[str]:
     fake = os.environ.get("WB_OPENCODE_BIN")
-    return fake.split() if fake else ["opencode"]
+    return shlex.split(fake) if fake else ["opencode"]
 
 
 # OpenCode compacts a session once its context passes the model's input limit less
@@ -99,9 +101,21 @@ def write_config_layer(task: store.Task) -> Path:
     return path
 
 
+# What the agent's environment leaves out of the runner's: credentials (API keys and tokens Claude
+# Code or the user's shell carry, the SSH agent that would sign a push) and the runner's own
+# PYTHONPATH, which would put `python3 -m workbench.cli` in the agent's reach. A provider that
+# needs a key from the environment names it in commands.json `env`, which passes it through.
+SECRET_ENV = re.compile(r"TOKEN|SECRET|PASSW|CREDENTIAL|API_?KEY|ACCESS_KEY|PRIVATE_KEY|"
+                        r"^(ANTHROPIC|CLAUDE|GH|GITHUB|GITLAB|AWS|AZURE|GOOGLE|OPENAI|HF)_|"
+                        r"^(SSH_AUTH_SOCK|SSH_AGENT_PID|GPG_AGENT_INFO|DBUS_SESSION_BUS_ADDRESS|"
+                        r"PYTHONPATH)$", re.I)
+
+
 def agent_env(task: store.Task) -> dict:
     """The agent's environment: its config layer, and git read-only (gitguard.py)."""
-    env = {**os.environ, "PWD": str(task.worktree),  # opencode finds the project from $PWD
+    through = set((store.read_json(context.commands_path(), {}) or {}).get("env") or [])
+    keep = {k: v for k, v in os.environ.items() if k in through or not SECRET_ENV.search(k)}
+    env = {**keep, "PWD": str(task.worktree),  # opencode finds the project from $PWD
            "OPENCODE_CONFIG": str(write_config_layer(task)),
            "WB_TASK": task.name, "WB_HOME": str(store.home()), **CLEAN_ENV}
     env.update(gitguard.install(context.rules_dir(task) / "bin", Path(task.spec["repo"]), PKG_ROOT,
@@ -225,7 +239,14 @@ def _steer_bell(task: store.Task, proc, q: queue.Queue) -> None:
                 q.put("")
 
 
-def run_round(task: store.Task, n: int) -> dict:
+# Linux takes at most 128 KiB in one argv string (MAX_ARG_STRLEN); a longer prompt is sent as a
+# pointer to its file in the round's directory, which the agent can read.
+PROMPT_ARG_MAX = 100_000
+
+
+def run_round(task: store.Task, n: int, keep: bool = False) -> dict:
+    """One `opencode run`. keep: Claude asked for this session to carry on (wb feedback
+    --keep-context), so the round never hands over mid-way."""
     spec, st = task.spec, task.status
     prompt = task.round_dir(n).joinpath("prompt.md").read_text()
     cmd = opencode_bin() + ["run", "--standalone", "-m", spec["opencode_model"], "--auto",
@@ -238,6 +259,10 @@ def run_round(task: store.Task, n: int) -> dict:
         task.set_status(session_mark=next(iter(marks)), session_floor=None)
     floor = task.status.get("session_floor")  # the context the session had read when it began work
     note = skills_note(task, n)
+    if len((note + prompt).encode()) > PROMPT_ARG_MAX:
+        prompt = (f"Your instructions for this round are long, so they are in the file "
+                  f"{task.round_dir(n) / 'prompt.md'}. Read all of it first (in parts if it is "
+                  f"too big for one read), then do what it says.")
     cmd.append(note + prompt)
     env = agent_env(task)
     cmd = lane.wrap(context.writable(task), cmd,   # writes stay in the agent's lane (lane.py),
@@ -247,6 +272,7 @@ def run_round(task: store.Task, n: int) -> dict:
                             stdout=subprocess.PIPE, stderr=log, text=True,
                             start_new_session=True)  # its own group, so a stop takes MCP too
     CURRENT["proc"] = proc
+    task.set_status(agent_pid=proc.pid)  # its own session: wb stop ends it if the runner can't
     q: queue.Queue = queue.Queue()
     threading.Thread(target=_reader, args=(proc.stdout, q), daemon=True).start()
     threading.Thread(target=_steer_bell, args=(task, proc, q), daemon=True).start()
@@ -255,7 +281,10 @@ def run_round(task: store.Task, n: int) -> dict:
     wall, silence = float(spec.get("round_timeout", 2400)), float(spec.get("silence_timeout", 900))
     think = float(spec.get("think_timeout") or 0)
     nudged = False
-    started = last_seen = time.time()
+    renudge = task.status.get("nudged_round") == n - 1  # the last round ended in our nudge
+    edit_mark = gitops.mark(task.worktree)  # shell edits (sed -i, cat >) count as edits too
+    started = last_seen = prev = time.time()
+    paused = 0.0  # time spent waiting on Claude's answer: not the round's own
     out = {"exit": None, "stuck": None, "texts": [], "tools": {}, "errors": [],
            "tok_in": 0, "tok_out": 0, "interrupted": False, "full": None}
     window = st.get("window")
@@ -309,7 +338,7 @@ def run_round(task: store.Task, n: int) -> dict:
                     if changed:
                         floor = used
                         task.set_status(session_floor=floor)
-                if window and used >= fresh_at * window and not out["full"]:
+                if window and not keep and used >= fresh_at * window and not out["full"]:
                     if changed is None:
                         changed = marks != {gitops.mark(task.worktree)}  # since either began
                     if not changed:
@@ -325,20 +354,34 @@ def run_round(task: store.Task, n: int) -> dict:
                 out["errors"].append(f"opencode: {row['text']}")
             task.event(row)
             why = detector.feed({**row, "sig": sig}) if sig else None
+            if why and detector.since_edit >= detector.no_edit:
+                if (m := gitops.mark(task.worktree)) != edit_mark:  # it edited through the shell
+                    edit_mark, detector.since_edit, why = m, 0, None
             if why:
                 out["stuck"] = why
         asking = task.status.get("phase") == "asking"  # the agent is waiting on Claude: not silent
-        if not out["stuck"] and now - started > wall:
+        if asking:  # the wait is neither the round's time nor silence
+            paused += now - prev
+            last_seen = now
+        prev = now
+        if not out["stuck"] and now - started - paused > wall:
             out["stuck"] = f"the round ran past its {int(wall // 60)}-minute limit"
         if not out["stuck"] and not asking and now - last_seen > silence:
             out["stuck"] = f"no output for {int(silence // 60)} minutes"
-        # Generating with nothing to show past the budget: interrupt with a nudge (once a round;
-        # the silence limit above still stops a model that never answers) and tell Claude.
+        # Generating with nothing to show past the budget: interrupt with a nudge (once a round)
+        # and tell Claude. The nudge starts a new round, so one that again shows nothing at all
+        # is stopped: else a model that never answers would be nudged forever.
+        if think and not nudged and not out["stuck"] and not asking and now - last_seen > think:
+            if renudge and not out["tools"] and not out["texts"]:
+                out["stuck"] = (f"no tool call or word for {int((now - last_seen) // 60)} minutes, "
+                                "even after a nudge")
         if think and not nudged and not out["stuck"] and not asking and now - last_seen > think:
             nudged = True
             mins = int((now - last_seen) // 60)
             text = NUDGE.format(mins=mins)
-            store.append_jsonl(task.dir / "steer.jsonl", {"ts": store.now(), "text": text, "now": True})
+            task.set_status(nudged_round=n)
+            store.append_jsonl(task.dir / "steer.jsonl", {"ts": store.now(), "text": text, "now": True,
+                                                         "by": "workbench"})
             task.event({"ts": store.now(), "round": n, "kind": "steer", "now": True, "by": "workbench",
                         "text": text})
             nudges = task.status.get("nudges", 0) + 1
@@ -358,14 +401,21 @@ def run_round(task: store.Task, n: int) -> dict:
         if every and now - since >= every and not asking:
             task.set_status(checkin_at=now)
             task.notify("checkin", checkin_text(task, n, out, since), round=n)
-        if any(r.get("now") for r in pending_steer(task)):
+        notes = pending_steer(task)
+        if any(r.get("now") for r in notes):
+            ours = all(r.get("by") == "workbench" for r in notes)
             task.event({"ts": store.now(), "round": n, "kind": "interrupted",
-                        "text": "Claude interrupted the agent"})
+                        **({"by": "workbench"} if ours else {}),
+                        "text": "the runner interrupted the agent with a nudge" if ours
+                        else "Claude interrupted the agent"})
             out["interrupted"] = True
             _stop(proc)
             break
     out["exit"] = proc.wait()
     log.close()
+    if task.status.get("asking"):  # it ended mid-question: nothing will read that answer now
+        task.set_status(asking=None)
+    task.set_status(agent_pid=None)
     out["secs"] = round(time.time() - started, 1)
     return out
 
@@ -375,13 +425,21 @@ def run_tests(task: store.Task, n: int):
     if not cmd:
         return None
     task.set_status(phase="testing", last=f"tests: {cmd}")
+    limit = int(task.spec.get("test_timeout") or 900)
+    proc = subprocess.Popen(cmd, shell=True, cwd=task.worktree, stdout=subprocess.PIPE,
+                            stderr=subprocess.STDOUT, env={**os.environ, **CLEAN_ENV},
+                            start_new_session=True)  # its own group: a timeout ends all of it
     try:
-        r = subprocess.run(cmd, shell=True, cwd=task.worktree, capture_output=True, text=True,
-                           env={**os.environ, **CLEAN_ENV},
-                           timeout=int(task.spec.get("test_timeout", 900)))
-        code, output = r.returncode, (r.stdout + r.stderr)
-    except subprocess.TimeoutExpired as e:
-        code, output = "timeout", f"{e.stdout or ''}{e.stderr or ''}\n[timed out]"
+        output, _ = proc.communicate(timeout=limit)
+        code = proc.returncode
+    except subprocess.TimeoutExpired:
+        try:
+            os.killpg(proc.pid, signal.SIGKILL)
+        except ProcessLookupError:
+            pass
+        output, _ = proc.communicate()
+        code, output = "timeout", (output or b"") + f"\n[timed out after {limit}s]".encode()
+    output = output.decode(errors="replace")
     tail = "\n".join(output.strip().splitlines()[-40:])
     task.round_dir(n).joinpath("tests.txt").write_text(f"$ {cmd}\nexit: {code}\n\n{output}")
     result = {"ok": code == 0, "exit": code, "tail": tail, "round": n}
@@ -442,6 +500,7 @@ ASKED_FRESH = "Claude asked for a fresh session"
 # The handoff carries the diff while it is under this share of the window (at ~4 characters a
 # token: 12K characters, ~3K tokens, on a 32K one); a bigger diff is listed, for the agent to read.
 HANDOFF_DIFF_SHARE = 0.09
+HANDOFF_DIFF_MAX = 60_000  # characters, whatever the window: the prompt is one argv string (see run_round)
 
 
 def context_state(task: store.Task) -> dict:
@@ -466,7 +525,10 @@ def fresh_reason(task: store.Task) -> str | None:
     st = task.status
     if st.get("context") == "fresh":  # even with no session yet: the prompt still needs the task
         return ASKED_FRESH
-    if not st.get("session") or st.get("context") == "keep":
+    if not st.get("session"):  # the step's first round, or one whose session never started
+        first = (st.get("step_round") or 1) == st.get("round", 1)
+        return None if first else "the last session ended before it began"
+    if st.get("context") == "keep":
         return None
     if st.get("context") == "full":
         return f"the last session was {st.get('full_pct')}% full"
@@ -482,13 +544,9 @@ def fresh_reason(task: store.Task) -> str | None:
 def handoff_prompt(task: store.Task, why: str, instructions: str) -> str:
     wt, spec = task.worktree, task.spec
     steps = gitops.git(wt, "log", "--oneline", f"{spec['base']}..HEAD").strip()
-    gitops.git(wt, "add", "-A", "-N")
-    try:
-        diff = gitops.git(wt, "diff", "HEAD").rstrip()
-        stat = gitops.git(wt, "diff", "HEAD", "--stat").rstrip()
-    finally:
-        gitops.git(wt, "reset", "-q")
-    room = int(HANDOFF_DIFF_SHARE * (task.status.get("window") or 32768) * 4)
+    diff = gitops.diff(wt, "HEAD")
+    stat = gitops.diff(wt, "HEAD", stat=True)
+    room = min(int(HANDOFF_DIFF_SHARE * (task.status.get("window") or 32768) * 4), HANDOFF_DIFF_MAX)
     work = (f"```diff\n{diff}\n```" if len(diff) <= room else
             f"The diff is too long to include; read the changed files:\n```\n{stat}\n```")
     return (f"You are picking this task up in a fresh session ({why}). Nothing from the earlier "
@@ -592,21 +650,22 @@ def drive(task: store.Task) -> None:
         while True:
             n = task.status["round"]
             why = fresh_reason(task) if n > 1 else None
+            keep = task.status.get("context") == "keep"
             if why:
                 _start_fresh(task, n, why)
-            elif task.status.get("context") == "keep":
-                task.set_status(context=None)  # a one-round instruction
+            elif keep:
+                task.set_status(context=None)  # a one-round instruction, held by run_round
             task.set_status(phase="running", round=n, round_started_at=store.now(),
                             last="agent started")  # not "starting…": the pane shows its progress
             task.event({"ts": store.now(), "round": n, "kind": "round", "text": "started"})
             began = time.time()
-            rnd = run_round(task, n)
+            rnd = run_round(task, n, keep=keep)
             measure_speed(task, began)
+            if rnd["full"]:  # before notes: the handover carries them (_full_round)
+                _full_round(task, n, rnd)
+                continue
             if rnd["interrupted"] or (pending_steer(task) and not rnd["stuck"]):
                 _steer_round(task, n, rnd["interrupted"])
-                continue
-            if rnd["full"]:
-                _full_round(task, n, rnd)
                 continue
             if rnd["stuck"] or (rnd["exit"] not in (0, None) and not rnd["texts"]):
                 text = summary_text(task, n, rnd, None)
@@ -697,11 +756,14 @@ def _full_round(task: store.Task, n: int, rnd: dict) -> None:
     last = "\n\n".join(t.strip() for t in rnd["texts"][-2:] if t.strip())[-1200:]
     task.round_dir(n + 1).mkdir(parents=True, exist_ok=True)
     asks = round_asks(task, n)
+    notes = pending_steer(task)  # Claude's notes that came in as it filled: the successor's too
     task.round_dir(n + 1).joinpath("prompt.md").write_text(CARRY_ON.format(
         asked=ASKED.format("\n\n".join(asks)) if asks else "",
-        last="> " + last.replace("\n", "\n> ") if last else "(none)"))
+        last="> " + last.replace("\n", "\n> ") if last else "(none)")
+        + (f"\n\n{steer_prompt(notes, False)}" if notes else ""))
     task.set_status(round=n + 1, context="full", full_pct=pct,
-                    handovers=task.status.get("handovers", 0) + 1)
+                    handovers=task.status.get("handovers", 0) + 1,
+                    steer_taken=task.status.get("steer_taken", 0) + len(notes))
 
 
 def _steer_round(task: store.Task, n: int, interrupted: bool) -> None:

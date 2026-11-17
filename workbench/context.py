@@ -81,7 +81,7 @@ def allowed_patterns(task: store.Task) -> list[str]:
     """What this task's agent may run beyond ALLOWED_COMMANDS: the user's standing allowances
     (commands.json `allow`; "*" turns the list off) and what Claude granted this task."""
     conf = store.read_json(commands_path(), {}) or {}
-    return [*(conf.get("allow") or []), *(task.status.get("allow") or [])]
+    return [*(conf.get("allow") or []), *(grants(task).get("allow") or [])]
 
 
 def commands_path() -> Path:
@@ -124,7 +124,7 @@ READABLE = ("/usr", "/etc", "/opt", "/lib", "/lib64", "/bin", "/sbin", "/proc", 
 def lane_paths(task: store.Task) -> list[str]:
     """What the user (commands.json `paths`) and Claude (`wb allow --path`) added to the lane."""
     conf = store.read_json(commands_path(), {}) or {}
-    return [*(conf.get("paths") or []), *(task.status.get("paths") or [])]
+    return [*(conf.get("paths") or []), *(grants(task).get("paths") or [])]
 
 
 def _both(paths) -> list[str]:
@@ -237,6 +237,24 @@ def rules_dir(task: store.Task) -> Path:
     d = store.home() / "rules" / task.name
     d.mkdir(parents=True, exist_ok=True)
     return d
+
+
+def grants(task: store.Task) -> dict:
+    """What Claude allowed this task beyond the everyday rules: {"allow": [patterns], "paths":
+    [dirs]}. Kept with the rules, not in the status the agent's lane can write: an agent that
+    edited its own grants would widen its next round."""
+    return store.read_json(rules_dir(task) / "grants.json", {}) or {}
+
+
+def grant(task: store.Task, key: str, new: list[str]) -> list[str]:
+    """Add to one of the task's grants; returns the ones it didn't have."""
+    with store.locked(rules_dir(task) / "grants.lock"):
+        have = grants(task)
+        added = [p for p in new if p not in (have.get(key) or [])]
+        if added:
+            store.write_json(rules_dir(task) / "grants.json",
+                             {**have, key: (have.get(key) or []) + added})
+    return added
 
 
 def claude_home() -> Path:

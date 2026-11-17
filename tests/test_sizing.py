@@ -1,7 +1,11 @@
 """How much one task holds: the window's guess, and the record of each closed step correcting it."""
 import json
 import os
+import sys
+import unittest
 from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))  # run as a script too
 
 from workbench import models, router, store
 from tests.test_workbench import Base, TEST_CMD, run_wb, wait_phase
@@ -128,3 +132,7 @@ class Measured(Base):
         self.assertEqual(self.row()["steps"][0]["handovers"], 0)
         self.assertIn("1 of 1 measured steps went well",
                       router.slice(models.resolve("ollama/mimo-v2.6:9b-q8_0")).line())
+
+
+if __name__ == "__main__":
+    unittest.main()

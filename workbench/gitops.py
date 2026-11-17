@@ -3,7 +3,9 @@
 The agent never commits; everything it does stays in the worktree's working tree until `wb accept`.
 """
 import hashlib
+import os
 import subprocess
+import tempfile
 from collections import Counter
 from pathlib import Path
 
@@ -12,8 +14,9 @@ class GitError(RuntimeError):
     pass
 
 
-def git(cwd, *args, check=True) -> str:
-    r = subprocess.run(["git", "-C", str(cwd), *args], capture_output=True, text=True)
+def git(cwd, *args, check=True, env=None) -> str:
+    r = subprocess.run(["git", "-C", str(cwd), *args], capture_output=True, text=True,
+                       env={**os.environ, **env} if env else None)
     if check and r.returncode:
         raise GitError(f"git {' '.join(args)}: {r.stderr.strip() or r.stdout.strip()}")
     return r.stdout
@@ -37,6 +40,8 @@ def create_worktree(repo: Path, task: str, dest: Path, base: str = "HEAD") -> st
 
 
 def changed(worktree: Path) -> str:
+    if not Path(worktree).is_dir():  # removed under us (an accept, a discard)
+        return ""
     return git(worktree, "status", "--short", "--untracked-files=all").rstrip()
 
 
@@ -54,15 +59,29 @@ def mark(worktree: Path) -> str:
     return h.hexdigest()
 
 
-def diff(worktree: Path, base: str, stat=False, paths=(), numstat=False) -> str:
-    # intent-to-add makes new files part of the diff; the reset leaves the index as it was
-    git(worktree, "add", "-A", "-N")
+def with_new_files(worktree: Path, *args) -> str:
+    """`git <args>` with new files counted as changes (intent-to-add), in a scratch index: the
+    worktree's own index, and anything a concurrent git command holds, are left alone."""
+    fd, index = tempfile.mkstemp(prefix="wb-index-")
+    os.close(fd)
+    os.unlink(index)  # git wants to create it
+    env = {"GIT_INDEX_FILE": index}
     try:
-        args = (["diff", base] + (["--stat"] if stat else []) + (["--numstat"] if numstat else [])
-                + (["--", *paths] if paths else []))
-        return git(worktree, *args).rstrip()
+        git(worktree, "read-tree", "HEAD", env=env)
+        git(worktree, "add", "-A", "-N", env=env)
+        return git(worktree, *args, env=env)
     finally:
-        git(worktree, "reset", "-q")
+        for p in (index, index + ".lock"):
+            try:
+                os.unlink(p)
+            except FileNotFoundError:
+                pass
+
+
+def diff(worktree: Path, base: str, stat=False, paths=(), numstat=False) -> str:
+    args = (["diff", base] + (["--stat"] if stat else []) + (["--numstat"] if numstat else [])
+            + (["--", *paths] if paths else []))
+    return with_new_files(worktree, *args).rstrip()
 
 
 def footprint(worktree: Path, base: str) -> dict:

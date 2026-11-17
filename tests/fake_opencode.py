@@ -10,8 +10,12 @@
   fill   writes "41", then a step that fills 76% of a 32K window, then works on for an hour;
          a fresh session handed the task behaves like ok
   read   reads, a step that fills 76% before any change, then writes "42" like ok
-FAKE_PROMPTS, if set, is a file each run appends its prompt to; FAKE_SLEEP pauses each run after its first event.
-FAKE_LESSON, if set, ends the agent's text with a `Lesson:` line (what workbench.lessons gathers).
+  floor  reads 48% of its window before its first change, then fills to 76%, then writes "42"
+FAKE_PROMPTS, if set, is a file each run appends its prompt to; FAKE_RUNS one that records
+whether each run continued a session, and its prompt; FAKE_SLEEP pauses each run after its first
+event. FAKE_LESSON ends the agent's text with a `Lesson:` line (what workbench.lessons gathers).
+`session export` prints one finished step: FAKE_FILL sets the context it read, FAKE_COMPACTED
+adds a completed compaction. `session list` lists nothing.
 """
 import json
 import os
@@ -39,6 +43,8 @@ if args[:2] == ["session", "export"]:  # `wb watch`: one finished step, as OpenC
              {"type": "tool", "name": "edit", "state": {"status": "completed", "input": {
                  "path": "answer.txt", "oldString": "41", "newString": "42"}}},
              {"type": "text", "text": "Wrote 42."}]}]}))
+    sys.exit(0)
+if args[:2] == ["session", "list"]:  # transcript.find_session before the first event: none yet
     sys.exit(0)
 session = args[args.index("--session") + 1] if "--session" in args else f"ses_{uuid.uuid4().hex[:12]}"
 scenario = os.environ.get("FAKE_SCENARIO", "ok")

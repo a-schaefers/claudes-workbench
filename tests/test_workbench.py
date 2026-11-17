@@ -1,6 +1,7 @@
 """End-to-end tests: real git, real runner processes, a fake opencode. Run: python3 -m unittest"""
 import io
 import json
+import shlex
 import os
 import shutil
 import socket
@@ -21,7 +22,7 @@ sys.path.insert(0, str(ROOT))
 
 from workbench import runner, ask_mcp, cli, context, events, gitops, lane, store, transcript  # noqa: E402
 
-FAKE = f"{sys.executable} {ROOT / 'tests' / 'fake_opencode.py'}"
+FAKE = shlex.join([sys.executable, str(ROOT / "tests" / "fake_opencode.py")])  # a path may hold spaces
 TEST_CMD = "grep -qx 42 answer.txt"
 OPENCODE_CONFIG = {"provider": {
     "ollama": {"options": {"baseURL": "http://127.0.0.1:11434/v1"},
@@ -189,7 +190,18 @@ class Lifecycle(Base):
         notes, _ = store.read_jsonl(store.home() / "notify.jsonl")
         self.assertTrue(any(r["task"] == "t-think" and "the runner nudged it" in r["text"] for r in notes))
         self.assertEqual(store.Task("t-think").status.get("nudges"), 1)
-        run_wb("stop", "t-think")
+        st = wait_phase("t-think", {"stuck"})       # the nudged round shows nothing either: stopped,
+        self.assertIn("even after a nudge", st["last"])  # not nudged again and again
+        self.assertEqual(st.get("nudges"), 1)
+
+    def test_a_prompt_too_long_for_one_argument_is_sent_as_its_file(self):
+        os.environ["FAKE_PROMPTS"] = str(Path(self.tmp.name) / "prompts.jsonl")
+        self.spec.write_text("Write the answer.\n" + "Context line.\n" * 9000)  # ~126K
+        self.start("t-long", "ok", "--test", TEST_CMD)
+        wait_phase("t-long", {"review"})
+        sent = json.loads(Path(os.environ["FAKE_PROMPTS"]).read_text().splitlines()[0])
+        self.assertIn(str(store.Task("t-long").round_dir(1) / "prompt.md"), sent)
+        self.assertLess(len(sent), 5000)
 
     def test_the_thinking_budget_has_a_default(self):
         self.start("t-budget", "ok")
@@ -924,13 +936,13 @@ class GitGuard(unittest.TestCase):
         reads = ["status", "-C x log --oneline", "diff HEAD~1", "branch", "branch -a",
                  "branch --show-current", "branch --contains HEAD", "tag", "tag -l v*",
                  "config --get user.name", "config user.name", "stash list", "worktree list",
-                 "remote -v", "reflog", "reflog -n 3", "--no-pager show HEAD:src/x.c",
+                 "remote -v", "remote -v show o", "reflog", "reflog -n 3", "--no-pager show HEAD:src/x.c",
                  "-c core.pager=cat grep foo", "--version", ""]
         writes = ["commit -m x", "push", "reset --hard", "checkout main", "switch -c x",
                   "restore .", "stash", "stash pop", "clean -fd", "add -A", "rm x", "mv a b",
                   "merge x", "rebase main", "cherry-pick x", "revert x", "fetch", "pull",
                   "branch new", "branch -D x", "tag v1", "tag -d v1", "config user.name x",
-                  "config --unset user.name", "worktree add ../x", "remote add o u",
+                  "config --unset user.name", "worktree add ../x", "remote add o u", "remote -v add o u",
                   "reflog expire --all", "apply p.diff", "am p", "gc", "notes add -m x",
                   "symbolic-ref HEAD refs/heads/x", "update-ref HEAD x", "st", "-C . commit"]
         for line in reads:
@@ -998,7 +1010,7 @@ class Lane(Base):
         t.join(10)
         self.assertIn(f"Claude allowed the directory {want}", got["a"])
         self.assertTrue(want.is_dir())                          # made, so a rule can hold it
-        self.assertEqual(task.status["paths"], [str(want)])
+        self.assertEqual(context.grants(task)["paths"], [str(want)])
         self.assertIn(str(want), context.writable(task))
         run_wb("stop", "t-lp")
         with self.assertRaises(SystemExit):
@@ -1008,6 +1020,18 @@ class Lane(Base):
                          [str(want)])
 
     @unittest.skipUnless(lane.abi(), "needs Landlock")
+    def test_the_agent_gets_no_credentials_from_the_environment(self):
+        self.start("t-env", "ok", "--test", TEST_CMD)
+        wait_phase("t-env", {"review"})
+        task = store.Task("t-env")
+        with mock.patch.dict(os.environ, {"GH_TOKEN": "x", "ANTHROPIC_API_KEY": "x", "PYTHONPATH": "x",
+                                          "SSH_AUTH_SOCK": "x", "MY_API_KEY": "k"}):
+            Path(os.environ["WB_COMMANDS"]).write_text(json.dumps({"env": ["MY_API_KEY"]}))
+            env = runner.agent_env(task)
+        self.assertFalse({"GH_TOKEN", "ANTHROPIC_API_KEY", "PYTHONPATH", "SSH_AUTH_SOCK"} & set(env))
+        self.assertEqual(env["MY_API_KEY"], "k")        # passed through by name
+        self.assertIn("PATH", env)
+
     def test_credentials_are_unreadable_and_the_rules_out_of_reach(self):
         task = store.Task("t-sec")
         self.start("t-sec", "ok")
@@ -1088,7 +1112,7 @@ class Permission(Base):
         t.join(10)
         self.assertIn("Claude allowed `curl *` for this task", got["a"])
         self.assertIn("restarts on its session", out)
-        self.assertEqual(task.status["allow"], ["curl *"])
+        self.assertEqual(context.grants(task)["allow"], ["curl *"])
         layer = json.loads(Path(runner.write_config_layer(task)).read_text())
         allows = [r["resource"] for r in layer["permissions"]
                   if r["action"] == "shell" and r["effect"] == "allow"]
@@ -1935,8 +1959,6 @@ class RealOpenCodeSkillFiles(Base):
         self.assertIn("CANARY-REFERENCE", answers[1])                         # and readable from the worktree
 
 
-if __name__ == "__main__":
-    unittest.main()
 
 
 class Drift(unittest.TestCase):
@@ -1962,3 +1984,7 @@ class Drift(unittest.TestCase):
             # a spec that names no file at all says nothing about scope
             Path(d, "prompt.md").write_text("Make the bats smarter.")
             self.assertEqual(runner.outside_spec(task, files), [])
+
+
+if __name__ == "__main__":
+    unittest.main()

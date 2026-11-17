@@ -36,6 +36,11 @@ TAG_WRITES = {"-a", "-s", "-u", "-d", "-f", "-m", "-F", "--annotate", "--sign", 
               "--force", "--message", "--file"}
 CONFIG_READS = {"--get", "--get-all", "--get-regexp", "--get-urlmatch", "--list", "-l", "get",
                 "list"}
+# init's and clone's options that take the next argument as their value
+DEST_VALUED = {"-b", "--branch", "-o", "--origin", "--depth", "-c", "--config", "--reference",
+               "--reference-if-able", "--separate-git-dir", "-u", "--upload-pack", "--template",
+               "--shallow-since", "--shallow-exclude", "-j", "--jobs", "--filter", "--bundle-uri",
+               "--server-option", "--initial-branch", "--object-format", "--ref-format"}
 CONFIG_WRITES = {"--add", "--unset", "--unset-all", "--replace-all", "--rename-section",
                  "--remove-section", "-e", "--edit", "set", "unset", "rename-section",
                  "remove-section", "edit"}
@@ -74,7 +79,8 @@ def reads(sub: str | None, rest: list[str]) -> bool:
     if sub == "worktree":
         return first == "list"
     if sub == "remote":
-        return first in (None, "-v", "--verbose", "get-url", "show")
+        words = [a for a in rest if a not in ("-v", "--verbose")]
+        return (words[0] if words else None) in (None, "get-url", "show")
     if sub == "reflog":
         return first is None or first in ("show", "exists") or first.startswith("-")
     if sub in ("notes", "submodule"):
@@ -84,8 +90,10 @@ def reads(sub: str | None, rest: list[str]) -> bool:
     return False
 
 
-def _temp_roots() -> list[str]:
-    roots = {tempfile.gettempdir(), "/tmp", "/var/tmp", os.environ.get("TMPDIR") or "/tmp"}
+def _temp_roots(temps=()) -> list[str]:
+    """The temp directories: fixed when the shim was written (`temps`), so an agent that sets
+    TMPDIR can't make a real project count as scratch."""
+    roots = {"/tmp", "/var/tmp", *temps} if temps else {tempfile.gettempdir(), "/tmp", "/var/tmp"}
     return [os.path.realpath(r) for r in roots]
 
 
@@ -110,7 +118,14 @@ def _where(opts: list[str]) -> str:
 def destination(sub: str, rest: list[str], opts: list[str]) -> list[str]:
     """For `init` and `clone`, global options aimed at the nearest existing directory of the new
     repository, which is what decides whether it lands inside a protected one."""
-    plain = [a for a in rest if not a.startswith("-")]
+    plain, skip = [], False
+    for a in rest:  # the arguments that aren't options or their values
+        if skip:
+            skip = False
+        elif a.startswith("-"):
+            skip = a in DEST_VALUED
+        else:
+            plain.append(a)
     if sub == "init":
         dest = plain[0] if plain else "."
     else:  # clone <url> [<dir>]
@@ -123,12 +138,12 @@ def destination(sub: str, rest: list[str], opts: list[str]) -> list[str]:
         ["-C", path]
 
 
-def protected(common: str | None, task_git: str) -> bool:
+def protected(common: str | None, task_git: str, temps=()) -> bool:
     if common is None:
         return False
     if common == os.path.realpath(task_git):
         return True
-    return not any(common == t or common.startswith(t + os.sep) for t in _temp_roots())
+    return not any(common == t or common.startswith(t + os.sep) for t in _temp_roots(temps))
 
 
 REFUSAL = """\
@@ -140,13 +155,13 @@ with ask_reviewer or in your summary.
 """
 
 
-def main(real: str, task_git: str, args: list[str]) -> int:
+def main(real: str, task_git: str, args: list[str], temps=()) -> int:
     opts, sub, rest = split(args)
     if reads(sub, rest):
         # no index refresh in the task's repo, which Claude may be diffing at the same moment
         os.execve(real, [real, *args], {**os.environ, "GIT_OPTIONAL_LOCKS": "0"})
     target = destination(sub, rest, opts) if sub in ("init", "clone") else opts
-    if not protected(common_dir(real, target), task_git):
+    if not protected(common_dir(real, target), task_git, temps):
         os.execv(real, [real, *args])
     sys.stderr.write(REFUSAL.format(sub=sub))
     return 1
@@ -168,6 +183,7 @@ def install(bin_dir: Path, task_repo: Path, pkg_root: Path, path: str) -> dict |
                     "import sys\n"
                     f"sys.path.insert(0, {str(pkg_root)!r})\n"
                     "from workbench.gitguard import main\n"
-                    f"sys.exit(main({real!r}, {repo_dir!r}, sys.argv[1:]))\n")
+                    f"sys.exit(main({real!r}, {repo_dir!r}, sys.argv[1:], "
+                    f"{sorted({tempfile.gettempdir(), '/tmp', '/var/tmp'})!r}))\n")
     shim.chmod(0o755)
     return {"PATH": f"{bin_dir}{os.pathsep}{path}"}
