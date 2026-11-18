@@ -49,6 +49,12 @@ KNOBS = {
     # Earlier: more handovers, each re-reading files. Later: work in a crowded context, closer to
     # OpenCode's compaction. Which costs more depends on the model.
     "fresh_at": Knob((0.4, 0.5, 0.6, 0.7, 0.8), 0.6, "share of the window at which a fresh session takes over"),
+    # Whether the agent reviews its own change in one more round once the tests pass, before
+    # Claude is woken (runner.SELF_REVIEW). It costs local time; a bug it catches saves Claude a
+    # feedback round, a whole extra wake (2026-11-18: a trivial handoff came in under Claude
+    # writing it only when the first change Claude saw was right). On by default; a model whose
+    # own reviews don't spare Claude's rounds learns it off.
+    "self_review": Knob((0, 1), 1, "whether the agent reviews its own change before Claude is woken"),
 }
 
 
@@ -142,14 +148,17 @@ def value(task: store.Task, name: str):
     return (task.status.get("tuned") or {}).get(name, KNOBS[name].default)
 
 
-def tune(task: store.Task, model: str, window, ceilings: dict | None = None) -> None:
-    """Fix every knob for this task once (a restarted runner keeps them)."""
+def tune(task: store.Task, model: str, window, ceilings: dict | None = None,
+         fixed: dict | None = None) -> None:
+    """Fix every knob for this task once (a restarted runner keeps them). `fixed`: what Claude
+    set for this task itself (a flag), which wins over the record and a pin."""
     if task.status.get("tuned") is not None:
         return
-    ceilings = ceilings or {}
+    ceilings, fixed = ceilings or {}, fixed or {}
     tuned, explored = {}, []
     for name in KNOBS:
-        v, e = choose(name, model, window, task.name, ceilings.get(name))
+        v, e = (fixed[name], False) if name in fixed else \
+            choose(name, model, window, task.name, ceilings.get(name))
         tuned[name] = v
         if e:
             explored.append(name)

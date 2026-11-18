@@ -1051,7 +1051,9 @@ def drive(task: store.Task) -> None:
             secs = lease.load()
             window = (m.config.get("limit") or {}).get("context")
             task.set_status(load_secs=round(secs, 1), window=window)
-            tuning.tune(task, task.spec["model"], window, {"fresh_at": fresh_ceiling(m.config)})
+            own = task.spec.get("self_review")  # --self-review / --no-self-review, else learned
+            tuning.tune(task, task.spec["model"], window, {"fresh_at": fresh_ceiling(m.config)},
+                        {} if own is None else {"self_review": int(own)})
         except (KeyError, RuntimeError, OSError) as e:
             return _load_failed(task, e)
         handed = 0  # mid-round handovers in this runner: one review round (HANDOVER_MAX)
@@ -1123,7 +1125,7 @@ def drive(task: store.Task) -> None:
                             "text": "tests failed; sent the output back to the agent"})
                 continue
             mark = [task.status.get("steps", 1), task.status.get("reviews", 0)]
-            if task.spec.get("self_review") and tests and tests["ok"] \
+            if tuning.value(task, "self_review") and tests and tests["ok"] \
                     and task.status.get("self_reviewed") != mark:
                 task.round_dir(n + 1).mkdir(parents=True, exist_ok=True)
                 task.round_dir(n + 1).joinpath("prompt.md").write_text(

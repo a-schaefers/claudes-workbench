@@ -2422,9 +2422,10 @@ def parser() -> argparse.ArgumentParser:
     s.add_argument("--checkin", type=float, metavar="MIN",
                    help="wake Claude every MIN minutes while it runs, with a digest of progress "
                    "(default off: each wake costs Claude its whole context)")
-    s.add_argument("--self-review", action="store_true",
+    s.add_argument("--self-review", action=argparse.BooleanOptionalAction, default=None,
                    help="once the tests pass, one more automatic round in which the agent "
-                   "reviews its own change against Claude's checks, before Claude is woken")
+                   "reviews its own change against Claude's checks, before Claude is woken "
+                   "(default: learned per model, on until its record says otherwise)")
     s.add_argument("--auto-fix", type=int, default=2,
                    help="rounds that send failing tests back without waking Claude (default 2)")
     s.add_argument("--ask-budget", type=int, default=2)

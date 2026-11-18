@@ -251,10 +251,10 @@ art-direct (`wb image --list`); read `reference/images.md` first.
 ## 3. Dispatch
 ```
 wb start <kebab-name> --spec <file|-> --repo <repo> --size significant|trivial \
-   --test "<acceptance command>" [--skill <name>] [--model …] [--auto-fix 2] [--self-review]
+   --test "<acceptance command>" [--skill <name>] [--model …] [--auto-fix 2]
 ```
-`--self-review` (being measured): once the tests pass, the agent checks its own change against
-your review checks in one more round, at local cost only, before you are woken.
+Once the tests pass, the agent checks its own change against your review checks in one more
+round, at local cost only, before you are woken (learned per model; `--no-self-review` skips it).
 It returns at once; a detached runner does the work. **Don't poll.** With the workbench mod loaded
 the session is woken by a `[workbench]` prompt when the task needs you (review, question, stuck,
 failed) — end your turn and wait for it. Without the mod, run `wb wait <name>` with Bash
