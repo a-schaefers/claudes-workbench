@@ -35,8 +35,7 @@ until it's right. Frontier compute goes where it counts, into planning, architec
 the bulk of the work, the reading and writing and test-running, happens on your own hardware.
 Today that costs Claude about what writing the code itself would, sometimes a little less,
 sometimes more when it has to step in and fix things. Local models get better every few months,
-and Claude's share shrinks with them. `wb stats` shows what each task cost Claude, so you can
-watch yours.
+and Claude's share shrinks with them.
 
 - **Claude architects the work.** It reads your codebase, decides the design, and writes a precise
   spec for every piece: the files to touch and the code to imitate, the exact names other code
