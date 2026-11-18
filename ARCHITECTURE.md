@@ -454,8 +454,10 @@ A prompt (with its skills note) over `PROMPT_ARG_MAX` (100K bytes) is sent as a 
   with no edit made; and a 16K floor under a 19K handover point handing over three times in four
   minutes, 3K of work each. A runner (one review round) hands over at most `HANDOVER_MAX` (5)
   times; the next one is a stuck round, since a session that changed something early and then
-  filled up reading handed over for hours with Claude told nothing (the 2026-11-16 audit). From
-  the second handover on, each raises a `checkin` (the fill, the count, the files changed).
+  filled up reading handed over for hours with Claude told nothing (the 2026-11-16 audit). The
+  handover before the last raises a `checkin` (the fill, the count, the files changed), so Claude
+  can steer or stop it; one for each from the second on woke Claude to read "on course" and wait
+  again (2026-11-17).
 - *Between rounds* (`fresh_reason`, for n > 1, also used by `wb next` to say what will happen):
   Claude asked (`--fresh`, `wb resume`) → fresh, even with no session yet; no session → continue
   on the step's first round, else fresh ("the last session ended before it began", so a session
@@ -1131,7 +1133,7 @@ goes in its CLAUDE.md instead.
 The runner appends notices to `$WB_HOME/notify.jsonl` (`Task.notify`: `{ts,
 task, kind, text, round?, id?}`). Kinds: `review` (the round report and `review_diff`), `stuck`, `failed` (the round report as text;
 a load failure or crash without a round), `question` (with the question's `id`), `checkin`
-(periodic, a nudge, a mid-round handover from the second in a round on, a
+(periodic, a nudge, the mid-round handover before the last a round allows, a
 base check whose `--test-timeout` cut it short). `wb` itself writes only
 one: `reap`'s `failed` for a runner that died without a report. The agent never writes one: the
 file is out of its lane (the 2026-11-16 audit: it could forge any task's wake, or wipe them

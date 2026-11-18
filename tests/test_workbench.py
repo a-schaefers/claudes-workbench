@@ -1102,8 +1102,11 @@ class Context(Base):
         self.assertEqual((st["phase"], st["handovers"]), ("stuck", runner.HANDOVER_MAX))
         self.assertIn(f"handed over to a fresh session {runner.HANDOVER_MAX} times", st["last"])
         rows = [r for r in store.read_jsonl(store.home() / "notify.jsonl")[0] if r["task"] == "t-c12"]
-        self.assertEqual(sum("handover" in r["text"] for r in rows if r["kind"] == "checkin"),
-                         runner.HANDOVER_MAX - 1)
+        # one warning, at the handover before the last: one per handover from the second on woke
+        # Claude to read "on course" and wait again (2026-11-17)
+        warned = [r for r in rows if r["kind"] == "checkin" and "handover" in r["text"]]
+        self.assertEqual(len(warned), 1)
+        self.assertIn(f"handover {runner.HANDOVER_MAX - 1} this round", warned[0]["text"])
         self.assertEqual([r["kind"] for r in rows if r["kind"] != "checkin"], ["stuck"])
 
     def test_a_session_that_fills_up_reading_carries_on_instead_of_handing_over(self):
