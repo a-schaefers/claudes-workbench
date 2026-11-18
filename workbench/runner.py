@@ -1019,14 +1019,18 @@ def _start_fresh(task: store.Task, n: int, why: str) -> None:
 # also short, and an "exact bytes" test that never compared the whole file, cost a review round
 # on 2026-11-18: point 1 asks for each. Its rerun's review round was a `static` in a file whose
 # CLAUDE.md forbids globals and a proposed CLAUDE.md line describing the wrong flag: point 4 asks
-# for the project's rules and for docs that say what the code does. One automatic round, before
-# Claude is woken, costs local time only.
+# for the project's rules and for docs that say what the code does. The third run's agent was
+# asked point 1 and called its count test fine; it wasn't (a short file, rejected for that): so
+# the rejections are now checked by doing it, removing each check and watching a test fail. One
+# automatic round, before Claude is woken, costs local time only.
 SELF_REVIEW = (
     "Before Claude reviews this, review your own change as a strict senior reviewer would: `git "
     "diff`, and `git status` for new files. Check each point, and fix what fails:\n"
     "1. Every rule in the task (each must, only, at most, rejects, limit and error message) has a "
-    "test that fails if that rule alone breaks: a rejection's input is valid in every other way, "
-    "so deleting that one check fails it. A rule without one: write the test. Each test the task "
+    "test that fails if that rule alone breaks. A rule without one: write the test. Check each "
+    "rejection and limit by doing it, one at a time: comment out its check in the code, run the "
+    "acceptance command, see a test fail, then put the check back exactly. No test failed: the "
+    "test's input breaks another rule too; make it valid in every other way. Each test the task "
     "names checks what it says (exact output: the whole of it, length too, against a literal "
     "written out by hand).\n"
     "2. Every expected value in the tests: work it out by hand from the rule, not from what your "
@@ -1040,7 +1044,8 @@ SELF_REVIEW = (
     "used as declared; every doc line you wrote (a proposed CLAUDE.md too) says what the code "
     "does.\n"
     "Then run the acceptance command (`{cmd}`). Do not commit. Finish with a short summary: what "
-    "you found and fixed, and for each rule the test that covers it.")
+    "you found and fixed, and for each rule the test that covers it (and, for each rejection, "
+    "that removing its check failed it).")
 
 
 # An agent whose change compared the wrong way round spent 40 minutes sure the compiler was
