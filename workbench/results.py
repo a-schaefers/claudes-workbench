@@ -1,7 +1,7 @@
 """results.jsonl: one row per closed task, so the models can be compared on real work."""
 from collections import defaultdict
 
-from . import gitops, skills, store
+from . import gitops, skills, spend, store
 
 
 def step(task: store.Task, landed: bool) -> dict:
@@ -56,6 +56,7 @@ def record(task: store.Task, outcome: str, last_step: dict | None = None, **extr
            "tuned": st.get("tuned") or {}, "explored": st.get("explored") or [],  # tuning.py
            "tuned_max": st.get("tuned_max") or {},
            "spec_gaps": [g["text"] for g in st.get("spec_gaps") or []],
+           **({"claude": u} if (u := spend.usage(task)) else {}),  # what it cost Claude
            **({"trial": True} if spec.get("trial") else {}), **extra}
     store.append_jsonl(store.home() / "results.jsonl", row)
     return row
@@ -90,13 +91,27 @@ def table() -> str:
     by = defaultdict(list)
     for r in rows:
         by[(r["model"], r.get("size") or "?")].append(r)
+    claude = any("claude" in r for r in rows)
     out = [f"{'model':34} {'size':12} {'tasks':>5} {'accepted':>8} {'rounds':>6} "
-           f"{'autofix':>7} {'reviews':>7} {'min':>6} {'local tok':>10}"]
+           f"{'autofix':>7} {'reviews':>7} {'min':>6} {'local tok':>10}"
+           + (f" {'claude':>9}" if claude else "")]
     for (model, size), rs in sorted(by.items()):
         n = len(rs)
         acc = sum(r["outcome"] == "accepted" for r in rs)
         avg = lambda k: sum(r.get(k) or 0 for r in rs) / n  # noqa: E731
         out.append(f"{model:34} {size:12} {n:>5} {acc / n:>7.0%} {avg('rounds'):>6.1f} "
                    f"{avg('auto_fixes'):>7.1f} {avg('reviews'):>7.1f} {avg('minutes'):>6.1f} "
-                   f"{int(avg('tok_in') + avg('tok_out')):>10}")
+                   f"{int(avg('tok_in') + avg('tok_out')):>10}"
+                   + (f" {_claude_avg(rs):>9}" if claude else ""))
+    if claude:
+        unknown = sum("claude" not in r for r in rows)
+        left_out = ("\nclaude: what a task cost Claude, its calls in the session that ran it, in "
+                    "input-equivalent tokens; averaged over the tasks that recorded it"
+                    + (f" ({unknown} had no session or transcript)" if unknown else "")
+                    + left_out)
     return "\n".join(out) + left_out
+
+
+def _claude_avg(rows: list[dict]) -> str:
+    known = [spend.weighted(r["claude"]) for r in rows if isinstance(r.get("claude"), dict)]
+    return f"{sum(known) / len(known) / 1000:.0f}K" if known else "-"

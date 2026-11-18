@@ -20,7 +20,7 @@ from pathlib import Path
 from types import SimpleNamespace
 
 from . import (__version__, ask_mcp, chat, context, gitops, hardware, images, lane, lessons, models,
-               results, router, scan, skills, store, transcript, tuning)
+               results, router, scan, skills, spend, store, transcript, tuning)
 from .watch import Watcher, wait_exit
 from . import runner
 from .runner import PKG_ROOT
@@ -1165,7 +1165,7 @@ def cmd_accept(a):
             print(f"wb: not merged: {e}", file=sys.stderr)
     task.set_status(phase="accepted", last=f"accepted as {commit}" +
                     (f", merged {merged}" if merged else ""))
-    results.record(task, "accepted", measured, commit=commit, merged=bool(merged))
+    row = results.record(task, "accepted", measured, commit=commit, merged=bool(merged))
     _ack_all(task)
     try:  # a reminder: it once turned a finished accept into exit 1 (the 2026-11-16 audit)
         note = claude_md_status(repo, spec["branch"])  # the task's own commit counts
@@ -1179,6 +1179,7 @@ def cmd_accept(a):
     print(f"accepted {a.name}: commit {commit} on {spec['branch']}" +
           (f", merged into {gitops.current_branch(repo)} as {merged}" if merged else
            f"\nmerge with: git -C {shlex.quote(str(repo))} merge --no-ff {spec['branch']}"))
+    _say(spend.line(row.get("claude")))
     _say(lessons.nudge(task, "accepted"))
 
 
@@ -1215,10 +1216,11 @@ def cmd_discard(a):
     if not kept:
         gitops.delete_branch(repo, a.name)
     task.set_status(phase="discarded", last=a.reason or "discarded", pid=None)
-    results.record(task, "discarded", measured, reason=a.reason)
+    row = results.record(task, "discarded", measured, reason=a.reason)
     _ack_all(task)
     print(f"discarded {a.name}" + ("" if a.keep_branch else f"; branch {spec['branch']} deleted"
                                    if not kept else f"; {repo} is gone, so its branch with it"))
+    _say(spend.line(row.get("claude")))
     _say(lessons.nudge(task, "discarded"))
 
 
@@ -1425,7 +1427,7 @@ def _union(a, b) -> list[str]:
     return list(dict.fromkeys([*(a or []), *(b or [])]))
 
 
-def _say(line: str) -> None:
+def _say(line: str | None) -> None:
     if line:
         print(line)
 

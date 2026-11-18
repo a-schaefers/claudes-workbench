@@ -577,5 +577,5 @@ goes in that repo's CLAUDE.md instead. Drop a note that has stopped holding (`wb
 ## Report to the user
 Short and honest: what was built, on which model, rounds (automatic and review), test result,
 what you fixed, sent back or flagged, the branch. Report the agent's misses plainly; they are
-evidence about the model, and the router learns from accept and discard. Mention the local tokens from the report next to the rough size of
-your own review, so the saving is visible.
+evidence about the model, and the router learns from accept and discard. Mention the local tokens from the report next to the
+`claude:` line `wb accept` prints (what the task cost you, measured), so the saving is visible.
