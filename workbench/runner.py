@@ -1131,7 +1131,8 @@ def _reading_full(task: store.Task, n: int, used: int, window: int,
 # Mid-round handovers in one review round before it is stopped as stuck. A session that changes
 # something early and then fills up reading handed over again and again, for hours, with Claude
 # told nothing (the 2026-11-16 audit). A big step needs a few; past this it is too big for the
-# window. From the second on, each one is a check-in, so Claude can steer or stop it.
+# window. The one before the last is a check-in, so Claude can steer or stop it; each before it
+# woke Claude to read "on course" and wait again (2026-11-17), and the last is a stuck report.
 HANDOVER_MAX = 5
 
 
@@ -1141,7 +1142,7 @@ def _full_round(task: store.Task, n: int, rnd: dict, handed: int = 1) -> None:
     text = (f"the agent's session reached {pct}% of its window "
             f"({rnd['full'] / 1000:.1f}K of {window // 1024}K): a fresh one takes over")
     task.event({"ts": store.now(), "round": n, "kind": "full", "text": text})
-    if handed > 1:
+    if handed == HANDOVER_MAX - 1:
         files = gitops.changed(task.worktree)
         task.notify("checkin", f"task {task.name}: {text} (handover {handed} this round; "
                     f"stopped as stuck past {HANDOVER_MAX}); files changed so far: "
