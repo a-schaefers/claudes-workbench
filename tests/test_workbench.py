@@ -182,13 +182,16 @@ class Lifecycle(Base):
         task.set_status(phase="queued", last="checking the acceptance command on the base")
         self.assertEqual(transcript.activity(task, {}), "Checking the acceptance command on the base…")
 
-    def test_the_runner_warns_at_once_when_the_acceptance_command_already_passes(self):
+    def test_an_acceptance_command_that_already_passes_is_a_note_in_the_report_not_a_wake(self):
+        # the usual case when the agent writes the tests: the check-in that said to discard and
+        # start again cost a whole restart in one task of two (the 2026-11-17 measurement)
         self.start("t-pass", "ok", "--test", "true")
         wait_phase("t-pass", {"review"})
         rows, _ = store.read_jsonl(store.home() / "notify.jsonl")
-        self.assertTrue(any(r["kind"] == "checkin" and "already passes on the base" in r["text"]
-                            for r in rows if r["task"] == "t-pass"))
-        self.assertIn("already passes on the base", run_wb("report", "t-pass"))
+        self.assertFalse([r for r in rows if r["task"] == "t-pass" and r["kind"] == "checkin"])
+        report = run_wb("report", "t-pass")
+        self.assertIn("already passes on the base, so only the tests this step adds", report)
+        self.assertNotIn("discard", report)
         self.start("t-skip", "ok", "--test", "true", "--no-base-check")
         self.assertTrue(store.Task("t-skip").spec["no_base_check"])
         self.assertIsNone(wait_phase("t-skip", {"review"}).get("base_check"))
@@ -247,6 +250,22 @@ class Lifecycle(Base):
         self.assertIn("acceptance tests fail", prompt2)
         rows, _ = store.read_jsonl(store.home() / "notify.jsonl")
         self.assertEqual([r["kind"] for r in rows if r["task"] == "t-fix"], ["review"])
+
+    def test_the_review_notice_carries_a_small_diff_and_only_the_stat_of_a_big_one(self):
+        # each call Claude makes to fetch the diff re-reads its whole session (2026-11-17)
+        from workbench import runner
+        self.start("t-show", "ok", "--test", TEST_CMD)
+        wait_phase("t-show", {"review"})
+        rows, _ = store.read_jsonl(store.home() / "notify.jsonl")
+        text = [r["text"] for r in rows if r["task"] == "t-show" and r["kind"] == "review"][-1]
+        self.assertIn("the diff (all of it", text)
+        self.assertIn("+42", text)                                     # the fake's answer.txt
+        task = store.Task("t-show")
+        (task.worktree / "big.txt").write_text("x\n" * runner.REVIEW_DIFF_MAX)
+        big = runner.review_diff(task)
+        self.assertIn("too big to include", big)
+        self.assertIn("big.txt", big)
+        self.assertNotIn("+x", big)
 
     def test_auto_fix_budget_exhausted_wakes_claude_with_fail(self):
         self.start("t-nofix", "fix", "--test", TEST_CMD, "--auto-fix", "0")

@@ -736,14 +736,35 @@ def base_check_line(r: dict, task: store.Task) -> str:
                     "narrow the command (wb discard, then start again)")
         return f"note: the acceptance command ran past {limit}s on the base; not checked"
     if r["ok"]:
-        return ("warning: the acceptance command already passes on the base, so it can't tell "
-                "when the step is done: make it check what the step changes (wb discard, then "
-                "start again)")
+        # the usual case when the agent writes the step's tests: a warning that said to discard
+        # and start again cost a whole restart in one task of two (the 2026-11-17 measurement)
+        return ("note: the acceptance command already passes on the base, so only the tests this "
+                "step adds can fail it: check the diff adds tests that fail without the change")
     tail = "\n".join("    " + line for line in r["tail"].splitlines())
     # an instruction, not a claim: the runner can't know why it fails (the 0.90 review: "as it
     # should, but only for what the step changes" read as checked, for a broken build too)
     return (f"on the base the acceptance command fails (exit {r['exit']}): check the tail shows it "
             f"failing only for what the step changes ({task.dir / 'base-tests.txt'}):\n{tail}")
+
+
+REVIEW_DIFF_MAX = 12000  # characters (~3K tokens): a diff this size comes with the review notice
+
+
+def review_diff(task: store.Task) -> str:
+    """The diff under review, for the review notice, when it is small; else its stat. Claude reads
+    it anyway, and each call to fetch it re-reads the whole session: a wake that carries it saves
+    the review one to three calls (the 2026-11-17 measurement)."""
+    base = "HEAD" if task.status.get("steps", 1) > 1 else task.spec["base"]
+    try:
+        full = gitops.diff(task.worktree, base)
+        if not full:
+            return "\n\nthe diff: (no changes)"
+        if len(full) <= REVIEW_DIFF_MAX:
+            return f"\n\nthe diff (all of it; wb diff {task.name} again only after a change):\n{full}"
+        return (f"\n\nthe diff is {len(full)} characters, too big to include: "
+                f"its stat:\n{gitops.diff(task.worktree, base, stat=True)}")
+    except (gitops.GitError, OSError):
+        return ""
 
 
 def _base_check(task: store.Task) -> None:
@@ -752,7 +773,7 @@ def _base_check(task: store.Task) -> None:
     task.set_status(last="checking the acceptance command on the base")
     r = base_check(task)
     task.set_status(base_check=r, last="waiting for the GPU")
-    if r["ok"] or (r["exit"] == "timeout" and r["limit"] < BASE_CHECK_SECS):
+    if r["exit"] == "timeout" and r["limit"] < BASE_CHECK_SECS:  # every round's tests will too
         task.notify("checkin", f"task {task.name}: {base_check_line(r, task)}", round=1)
 
 
@@ -1046,7 +1067,7 @@ def drive(task: store.Task) -> None:
             task.set_status(phase="review", tests=tests,
                             last="tests passed, waiting for review" if tests and tests["ok"]
                             else "waiting for review")
-            task.notify("review", text, round=n)
+            task.notify("review", text + review_diff(task), round=n)
             return
 
 

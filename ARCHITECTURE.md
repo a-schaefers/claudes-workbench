@@ -40,7 +40,11 @@ Contents: [The pieces](#the-pieces) · [Why it's built this way](#why-its-built-
 
 - **`/workbench`** (`skill/workbench/SKILL.md`, linked to `~/.claude/skills/workbench`) turns
   workbench mode on for the session and is Claude's procedure in it: size the work, write the
-  spec, dispatch, drive, review, accept. The user types it once, then asks for things as usual;
+  spec, dispatch, drive, review, accept. SKILL.md holds what every session needs; what only some
+  do (model servers and the weekly check, the agents' skill library, images, permissions, the web
+  and the web chat) is in `reference/*.md` beside it, read when it comes up: every line of SKILL.md
+  rides along on each of Claude's calls (it was 46KB; the 2026-11-17 measurement). The review is in
+  proportion to the task's size. The user types it once, then asks for things as usual;
   the mod keeps the mode (and reminds Claude of it after a compaction or `/clear`) until a quit
   command. Only the user starts it; Claude never delegates on its own (the mod also counts a
   delegating `wb` command as the mode, for a session resumed mid-delegation).
@@ -383,7 +387,10 @@ once more and `pid` and `stopping` are cleared.
    `stuck`/`failed`, a notice, exit. Otherwise `run_tests`; a note that arrived meanwhile, or while
    the report was being written → `_steer_round`. The report
    goes to `rounds/<n>/summary.md`. Failing tests with auto-fix left → an auto-fix round (round
-   n+1's prompt is the failure). Otherwise phase `review`, a `review` notice, exit.
+   n+1's prompt is the failure). Otherwise phase `review`, a `review` notice (the report, then
+   `review_diff`: the whole diff under review when it is at most `REVIEW_DIFF_MAX` = 12,000
+   characters, else its stat; each call Claude makes to fetch it re-reads its session, 2026-11-17),
+   exit.
 
 **`run_round(task, n)`.** Writes the config layer and the agent's environment (*What the agent
 knows*), prepends the skills note (`skills_note`) to the prompt argument (not to `prompt.md`),
@@ -535,11 +542,14 @@ holds `$ cmd`, `exit: N` and the kept output.
 command once on the untouched base, the same way, at most `min(BASE_CHECK_SECS (120 s),
 --test-timeout)`. The output goes to `base-tests.txt`, the result to status `base_check` `{ok,
 exit, tail (clip_tail: 8 lines, 1500 characters), limit}`, and `base_check_line` words it for the
-report (*The round report*, below): a warning when it already passes (it can't tell when the step
-is done), a warning when `--test-timeout` cut it short (every round's tests will time out too),
-a note when it ran past 120 s (not checked), else its exit and tail, for Claude to check it fails
-only for what the step changes. Both warnings also raise a `checkin` at once, so Claude can
-discard before round 1 lands. `wb start --no-base-check` (task.json `no_base_check`) skips it.
+report (*The round report*, below): a note when it already passes (the usual case when the agent
+writes the step's tests: only those can fail it, so Claude checks the diff adds tests that fail
+without the change), a warning when `--test-timeout` cut it short (every round's tests will time
+out too), a note when it ran past 120 s (not checked), else its exit and tail, for Claude to check
+it fails only for what the step changes. The warning also raises a `checkin` at once, so Claude
+can discard before round 1 lands. A passing base once did too, telling Claude to discard and start
+again: that cost a whole restart in one task of two (the 2026-11-17 measurement), so it is a note.
+`wb start --no-base-check` (task.json `no_base_check`) skips it.
 
 **The round report** (`summary_text`), line by line:
 1. `task X · label · round n · M.m min · local tokens IN in / OUT out` (this round; input
@@ -1114,10 +1124,10 @@ goes in its CLAUDE.md instead.
 ## Waking Claude, exactly once
 
 The runner appends notices to `$WB_HOME/notify.jsonl` (`Task.notify`: `{ts,
-task, kind, text, round?, id?}`). Kinds: `review`, `stuck`, `failed` (the round report as text;
+task, kind, text, round?, id?}`). Kinds: `review` (the round report and `review_diff`), `stuck`, `failed` (the round report as text;
 a load failure or crash without a round), `question` (with the question's `id`), `checkin`
 (periodic, a nudge, a reading-full session, a mid-round handover from the second in a round on, a
-base check that warns). `wb` itself writes only
+base check whose `--test-timeout` cut it short). `wb` itself writes only
 one: `reap`'s `failed` for a runner that died without a report. The agent never writes one: the
 file is out of its lane (the 2026-11-16 audit: it could forge any task's wake, or wipe them
 all). Readers take its rows through `store.notices()`, which keeps only whole ones (a dict with a
@@ -2539,7 +2549,7 @@ delivered as taken (`_stale_notes`, *Notes*).
 ### Running tasks
 | Command | Flags (defaults) | What it does |
 |---|---|---|
-| `wb start <task> --spec <file\|->` | `--repo` (.), `--size trivial\|significant` (significant), `--model <id or fragment>`, `--test <cmd>`, `--auto-fix N` (2), `--checkin MIN` (10 significant, 0 trivial), `--ask-budget N` (2), `--ask-timeout S` (1200), `--round-timeout S`, `--silence-timeout S`, `--think-timeout S` (0 off; unset or 0 for the other two: the measured budgets), `--test-timeout S` (900), `--no-base-check`, `--base REF` (HEAD), `--skill NAME…`, `--allow PATTERN…`, `--allow-path DIR…`, `--force` (queue a `--model` that can't run now; the hint is offered only when its server is just down), `--queue` (start although the GPU's holders leave no room: wait behind them), `--trial`, `--no-claude-md` | Checks the name (`^[a-z0-9][a-z0-9-]{0,47}$`, never reused), the repo (with the lane on, neither commands.json `"paths": ["*"]` nor `--allow-path '*'` turning it off, `_lane_fits` refuses one that is the home directory or lies where credentials live, and a `--test` whose command is a snap), the spec and the skills, and that opencode is on PATH; picks the model (router, or `--model`; none runnable: exit 3, with each model's next step); refuses a repo that is a task's worktree, a `--base` that names no commit (`no commit <base> in <repo>`) and a repo with no git identity; checks `CLAUDE.md` or `.claude/CLAUDE.md` is committed at the base (or CLAUDE.md gitignored: the checkout's copy); refuses when another task (or `wb image`) holds the GPU and the model can't run beside it (exit 4, naming each holder's task, repo and model; `--queue` overrides); makes the worktree and branch `delegate/<task>` (no checkout hook; a failed add leaves nothing); notes submodules it doesn't check out; writes task.json (with `session` when `CLAUDE_CODE_SESSION_ID` is set and `claude_pid` when `CLAUDE_PID` is: Claude Code's Bash exports both), round 1's prompt (spec + PROTOCOL) and status; spawns the runner and returns at once. Prints the model and why, the slice, Claude's spec record, the handed or suggested skills, notes, `next: wb wait <task>`. With `--test` (and not `--no-base-check`, task.json `no_base_check`) the runner first runs the acceptance command once on the base (*The base check*: at most `BASE_CHECK_SECS` = 120 s, or `--test-timeout` when shorter; `base-tests.txt`, status `base_check`); what it saw comes in the first report, and a check-in at once when it already passes or `--test-timeout` cut it short. |
+| `wb start <task> --spec <file\|->` | `--repo` (.), `--size trivial\|significant` (significant), `--model <id or fragment>`, `--test <cmd>`, `--auto-fix N` (2), `--checkin MIN` (10 significant, 0 trivial), `--ask-budget N` (2), `--ask-timeout S` (1200), `--round-timeout S`, `--silence-timeout S`, `--think-timeout S` (0 off; unset or 0 for the other two: the measured budgets), `--test-timeout S` (900), `--no-base-check`, `--base REF` (HEAD), `--skill NAME…`, `--allow PATTERN…`, `--allow-path DIR…`, `--force` (queue a `--model` that can't run now; the hint is offered only when its server is just down), `--queue` (start although the GPU's holders leave no room: wait behind them), `--trial`, `--no-claude-md` | Checks the name (`^[a-z0-9][a-z0-9-]{0,47}$`, never reused), the repo (with the lane on, neither commands.json `"paths": ["*"]` nor `--allow-path '*'` turning it off, `_lane_fits` refuses one that is the home directory or lies where credentials live, and a `--test` whose command is a snap), the spec and the skills, and that opencode is on PATH; picks the model (router, or `--model`; none runnable: exit 3, with each model's next step); refuses a repo that is a task's worktree, a `--base` that names no commit (`no commit <base> in <repo>`) and a repo with no git identity; checks `CLAUDE.md` or `.claude/CLAUDE.md` is committed at the base (or CLAUDE.md gitignored: the checkout's copy); refuses when another task (or `wb image`) holds the GPU and the model can't run beside it (exit 4, naming each holder's task, repo and model; `--queue` overrides); makes the worktree and branch `delegate/<task>` (no checkout hook; a failed add leaves nothing); notes submodules it doesn't check out; writes task.json (with `session` when `CLAUDE_CODE_SESSION_ID` is set and `claude_pid` when `CLAUDE_PID` is: Claude Code's Bash exports both), round 1's prompt (spec + PROTOCOL) and status; spawns the runner and returns at once. Prints the model and why, the slice, Claude's spec record, the handed or suggested skills, notes, `next: wb wait <task>`. With `--test` (and not `--no-base-check`, task.json `no_base_check`) the runner first runs the acceptance command once on the base (*The base check*: at most `BASE_CHECK_SECS` = 120 s, or `--test-timeout` when shorter; `base-tests.txt`, status `base_check`); what it saw comes in the first report, and a check-in at once when `--test-timeout` cut it short. |
 | `wb feedback <task> --text "…" \| --message <file\|->` | `--fresh` \| `--keep-context`, `--spec-gap "…"…` | Reaps a dead runner first (`reap`). Phase review/stuck/failed and no live runner; empty text is refused before anything is written. Writes the next round's prompt (FEEDBACK_HEAD + "Make exactly these changes, then re-run the acceptance command and finish with a short summary:" (the re-run only when there is one) + the text), reviews+1, spawns the runner. Warns past three review rounds; prints each undelivered note it dropped ("not delivered, dropped …"). A note names the GPU's holders when it will wait for them. Gathers lessons. |
 | `wb next <task> --spec <file> -m "…"` | `--test` (replaces the acceptance command), `--skill` (replaces the set), `--fresh`, `--allow PATTERN…` (adds to the task's grants), `--spec-gap` | Phase review. Reads the spec (a file or `-`; empty or unreadable: nothing changes), records the step's size and fit, commits the work (`<m>` + `Workbench-Task: <task> (step N)` + `OpenCode-Session:`), writes the next step's prompt ("Step N of this task is done and committed (<sha>). The next step:" + spec + PROTOCOL), records the spec gaps, resets reviews, spawns. Says whether the next step gets a fresh session and why (`runner.fresh_reason`), each undelivered note it dropped, and names the GPU's holders when it will wait for them. Gathers lessons. |
 | `wb answer <task> --text "…" \| --file <f>` | `--id` (the pending question) | Writes `ask/<id>.answer` (atomically, never through a link: `ask_mcp.write_answer`); the blocked `ask_reviewer` returns it. An empty answer is refused: the question stays open. A closed question (answered, or dropped by the runner) is refused. |

@@ -124,7 +124,7 @@ dependencies. No packaging: it runs from the clone.
 - `images.py`: `wb image`, local image engines from `images.json`; holds the GPU.
 - `agent/HANDBOOK.md`: Claude's working habits for the agent. Every agent prompt carries it, so
   keep it short: each token costs prefill time.
-- `skill/workbench/SKILL.md`: the `/workbench` procedure (`~/.claude/skills/workbench` links here; `wb setup` makes the link).
+- `skill/workbench/`: the `/workbench` procedure, `SKILL.md` and the `reference/` it reads when needed (`wb setup` links it).
 - `mod/`: the Claude Code plugin (`hooks/register.tsx`, `hooks/apprentice.ts` the pane's
   character, `hooks/register.test.tsx`, `types/index.d.ts`; `.claude-plugin/plugin.json` has no
   version: installs track main's commits). The repo root's `.claude-plugin/marketplace.json` makes the repo its marketplace.

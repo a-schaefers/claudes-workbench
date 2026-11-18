@@ -253,8 +253,8 @@ const HEADLINE: Record<string, string> = {
   checkin: 'check-in (still running)',
 }
 const NEXT: Record<string, (n: string, id?: string) => string> = {
-  review: n => `Review it as /workbench says: \`wb diff ${n}\`, then \`wb accept ${n} -m "…"\` ` +
-    `or \`wb feedback ${n} --message <file>\`.`,
+  review: n => `Review it as /workbench says, from the diff above (\`wb diff ${n}\` when it was too ` +
+    `big to include), then \`wb accept ${n} -m "…"\` or \`wb feedback ${n} --message <file>\`.`,
   question: (n, id) => `Answer with \`wb answer ${n}${id ? ` --id ${id}` : ''} --text "…"\`; it is blocked until then. A ` +
     `PERMISSION request (a refused command or directory): the \`wb allow ${n}\` it names ` +
     `(\`--always\` to keep it) when it is reasonable, which answers it and restarts the agent ` +
