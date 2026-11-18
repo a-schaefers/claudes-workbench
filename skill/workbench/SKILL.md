@@ -148,7 +148,15 @@ Model servers (none runnable, which server, a model on another machine), updatin
 `reference/models.md` beside this file first.
 
 ## 2. Spec (the most valuable thing you write)
-Read just enough of the repo to scope it, then write the spec to a file in the scratchpad:
+**A trivial task's spec is short:** the request as the user gave it, plus only what the agent
+can't find out alone (names other code calls, exactly; an insertion line; anything you computed).
+Spec tokens are output, the dearest you spend: a trivial spec as long as the code it asks for
+costs more than writing the code (measured 2026-11-17: 1.3–2.3K tokens of spec for 1–2K of
+code). Of the checks below, a trivial spec needs 1 and 5; the rest are for significant steps.
+Write it and start in one call: `wb start <name> … --spec - <<'EOF'` … `EOF`.
+
+For a significant step, read just enough of the repo to scope it, then write the spec to a file
+in the scratchpad:
 - the goal in 1–2 sentences; the exact files/functions to touch, and what not to touch
 - conventions to follow (point at an existing file to imitate)
 - acceptance criteria, and an **acceptance command** that proves them (an existing test command,
@@ -242,7 +250,7 @@ art-direct (`wb image --list`); read `reference/images.md` first.
 
 ## 3. Dispatch
 ```
-wb start <kebab-name> --spec <file> --repo <repo> --size significant|trivial \
+wb start <kebab-name> --spec <file|-> --repo <repo> --size significant|trivial \
    --test "<acceptance command>" [--skill <name>] [--model …] [--auto-fix 2]
 ```
 It returns at once; a detached runner does the work. **Don't poll.** With the workbench mod loaded
