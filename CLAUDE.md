@@ -232,8 +232,8 @@ unset: unknown, so no sharing).
 - State changes go through `Task.set_status` (locked read-modify-write) and `append_jsonl`.
   Never write status.json directly.
 - Never name a model in code or the skill. Models come from OpenCode's config and choices from
-  the router and the weekly model check, so newer models slot in without code changes. (README's
-  quickstart, the test fixtures, the real-run instruction above and ARCHITECTURE.md's image setup
+  the router and the weekly model check, so newer models slot in without code changes. (The test
+  fixtures, the real-run instruction above and ARCHITECTURE.md's image setup
   are the only places that name one.)
 - The launchers and the runner find the package by path. `-I` drops `PYTHONPATH`, so use it only
   where the path is inserted in code (the git shim) or nothing outside the standard library is
