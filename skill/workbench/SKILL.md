@@ -165,7 +165,8 @@ disk, what is installed and registered, real-task results, and the watch list
 new). Then research what is
 newest and best: open-weight coding models with reliable tool calls, the sizes and quantizations
 that fit the VRAM with room for the context, and runtime releases worth having. Use primary
-sources and its reputation in recent reports, verify before you name anything. Fit the models to the machine `wb scout` describes, whatever
+sources (their APIs first; a blocked page is not checked: *The web is yours*, below) and its
+reputation in recent reports, verify before you name anything. Fit the models to the machine `wb scout` describes, whatever
 its size: a model that fits entirely in VRAM (or the GPU's share of unified memory) beats a bigger
 one that spills into RAM, and on a big card the best is a larger model, a longer context, or both.
 The window sets the slice of every task (`slice:` in the report), so where the VRAM has room past
@@ -234,6 +235,19 @@ verify, honest summary) and the repo's own `.claude/skills` (never the user's pe
 in `~/.claude/skills`). So don't restate project conventions; spend the spec on what is specific
 to this task: the files to read first, the existing code to imitate, and the skills to hand it
 (below).
+
+**The web is yours; the agent tests in a browser but doesn't browse.** Research (for a spec, an
+agent's question, the model check) uses the browsing tools this session gives you, and the one the
+user prefers where they have said (their CLAUDE.md, your memory); workbench brings none. Read the
+installed source before the web, and a JSON API before a page (Hugging Face's `/api/models`,
+GitHub's releases API): they rarely block a plain fetch. A 403, a CAPTCHA, a login wall or a page
+empty without JavaScript means not checked: try another primary source, then say what you
+couldn't verify; never fill the gap from memory or a copy. Put what the agent needs in the spec
+(the signature, the few lines of docs), not a URL: its web tools are denied. A browser check of
+its own work is a test: name one (Playwright, or the project's) that prints the console's and the
+page's errors as text, and make it `--test` or part of it; screenshots are for you. A bare browser
+(`chromium`, `google-chrome`, a global `lighthouse`) asks first, as `curl` does, since it fetches
+any URL: allow it for the task, `--always` when the user wants it for every task.
 
 **Size every task to what the model that takes it finishes, as measured.** One concern, with the
 files named, and no bigger than its slice: `wb models` (and `wb start`) give each model's, e.g.
@@ -478,7 +492,8 @@ every check-in costs your tokens.
   - **Safety**: injection, secrets, unsafe file or shell use.
 
   If anything is doubtful, check it yourself: run the tests or a quick probe in the worktree
-  (`wb status <name>` prints its path). Accept only what you would have written.
+  (`wb status <name>` prints its path); a UI change, run it from the worktree and look with your
+  own browser tool. Accept only what you would have written.
 - **question** — answer it briefly and decisively: `wb answer <name> --text "…"`. The agent is
   blocked until you do.
 - **stuck / failed** — `wb log <name> -n 30` if the report isn't enough; then feedback that unblocks

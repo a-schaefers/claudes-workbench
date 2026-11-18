@@ -882,6 +882,29 @@ task.json's `deny_skills` are always denied. `wb skill add` refuses the personal
 **`ask_reviewer`**, an MCP tool for one blocking question to Claude (*Talking to a running agent*).
 OpenCode lists it as `workbench_ask_reviewer`.
 
+**Browsers and the web.** Workbench brings no browser, for Claude or the agent. Claude's are the
+ones Claude Code gives its session (WebFetch and WebSearch, a browser extension or pane, an MCP
+server the user added), the user's stated preference first (their CLAUDE.md, Claude's memory),
+and the skill's rule makes a blocked fetch (a 403, a CAPTCHA, a login wall, a page empty without
+JavaScript) "not checked", never a finding. Research is Claude's: the agent's web search and fetch
+are denied (*Denied tools*), `curl` and `wget` aren't on the list, and what it needs to know comes
+in the spec or as an answer to `ask_reviewer`. Those are rules on its tools, not the network: the
+lane leaves the network open (a dev server on localhost, a test that calls one), so an interpreter
+or a program it built can reach any host; what keeps that cheap is that credentials stay out
+(`SECRET_ENV`, `SECRETS`). A browser MCP server the user set up for OpenCode stays out with the
+rest (above). A browser as a test tool runs in the lane: `playwright` is on the list and a
+project's `node_modules/.bin` runs freely, Playwright's browsers live in `~/.cache` (a build
+cache), `/dev/shm` is in `DEV_NODES` for them, and Chrome's own sandbox (namespaces and
+seccomp-BPF) works inside the lane (checked 2026-11-17 on Landlock ABI 10, with Playwright's
+Chromium and the system's). A bare `chromium --headless` can't make its default profile
+(`~/.config`, outside the lane: "Failed to create a unique user data directory for headless"), so
+the handbook says `--user-data-dir=$(mktemp -d)`. A bare browser (`chromium`, `google-chrome`, a
+global `lighthouse`) is not on the list: it fetches any URL, like `curl`, so it asks, and `wb allow <task>
+"chromium *" --always` is how a user hands every task the browser they prefer (`commands.json`
+`paths` for one installed outside the lane). A snap browser can't run (no-new-privileges). The
+skill has Claude make a browser check part of `--test`, its console and page errors printed as
+text; screenshots are Claude's to look at.
+
 
 ## Talking to a running agent
 
