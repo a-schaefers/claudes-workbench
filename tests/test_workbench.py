@@ -94,6 +94,9 @@ class Base(unittest.TestCase):
                           WB_MODELS=str(tmp / "wb-models.json"), WB_SKILLS=str(tmp / "skills"),
                           WB_COMMANDS=str(tmp / "commands.json"))
         (tmp / "opencode.json").write_text(json.dumps(OPENCODE_CONFIG))
+        # self-review is on by default (tuning.py); the tests that count rounds don't want it
+        (tmp / "state").mkdir()
+        (tmp / "state" / "tuning.json").write_text('{"self_review": 0}')
         self.repo = tmp / "repo"
         self.repo.mkdir()
         g = lambda *a: subprocess.run(["git", "-C", str(self.repo), *a], check=True,  # noqa
@@ -1151,6 +1154,20 @@ class Context(Base):
         self.start("t-nsr", "ok", "--test", TEST_CMD)
         self.assertEqual(wait_phase("t-nsr", {"review"})["round"], 1)
 
+    def test_self_review_is_on_by_default_and_a_flag_turns_it_off(self):
+        # a handoff beat Claude writing it only when the first change Claude saw was right
+        # (2026-11-18), so the agent's own review is the default, learned off per model (tuning.py)
+        from workbench import tuning
+        store.home().joinpath("tuning.json").unlink()
+        name = next(f"t-d{i}" for i in range(100)
+                    if tuning.choose("self_review", "x", 1, f"t-d{i}") == (1, False))
+        self.start(name, "ok", "--test", TEST_CMD)
+        st = wait_phase(name, {"review"})
+        self.assertEqual((st["round"], st["tuned"]["self_review"]), (2, 1))
+        self.start("t-off", "ok", "--test", TEST_CMD, "--no-self-review")
+        st = wait_phase("t-off", {"review"})
+        self.assertEqual((st["round"], st["tuned"]["self_review"], st["explored"]), (1, 0, []))
+
     def test_a_session_that_fills_up_reading_carries_on_instead_of_handing_over(self):
         self.start("t-c7", "read", "--test", TEST_CMD)
         st = wait_phase("t-c7", {"review", "stuck", "failed"}, timeout=60)
@@ -1206,13 +1223,13 @@ class Context(Base):
     def test_the_handover_point_is_the_tasks_tuned_one(self):
         os.environ["FAKE_FILL"] = "25000"          # 76%: past the default 0.6, short of 0.8
         store.home().mkdir(parents=True, exist_ok=True)
-        store.home().joinpath("tuning.json").write_text('{"fresh_at": 0.8}')
+        store.home().joinpath("tuning.json").write_text('{"fresh_at": 0.8, "self_review": 0}')
         st = self.review_then_feedback("t-c5")
         self.assertEqual([r["session"] for r in self.runs()], [False, True])
-        self.assertEqual(st["tuned"], {"fresh_at": 0.8})
+        self.assertEqual(st["tuned"], {"fresh_at": 0.8, "self_review": 0})
         run_wb("accept", "t-c5", "-m", "feat: answer")
         row = store.read_jsonl(store.home() / "results.jsonl")[0][-1]
-        self.assertEqual((row["tuned"], row["window"]), ({"fresh_at": 0.8}, 32768))
+        self.assertEqual((row["tuned"], row["window"]), ({"fresh_at": 0.8, "self_review": 0}, 32768))
 
     def test_keep_context_overrides_and_fresh_forces(self):
         os.environ["FAKE_FILL"] = "25000"
@@ -3659,6 +3676,19 @@ class Tuning(Base):
         self.assertEqual(tuning.choose("fresh_at", self.M, self.W, "any"), (0.5, False))
         out = run_wb("tune")
         self.assertIn("pinned to 0.5 in tuning.json", out)
+
+    def test_self_review_is_learned_off_for_a_model_whose_own_reviews_spare_claude_nothing(self):
+        from workbench import tuning
+        self.assertEqual(tuning.best("self_review", self.M, self.W), 1)
+        row = lambda v, reviews: {"model": self.M, "window": self.W, "outcome": "accepted",  # noqa
+                                  "reviews": reviews, "minutes": 10 if v == 0 else 14,
+                                  "tuned": {"self_review": v}}
+        for v, reviews in [(1, 1)] * 3 + [(0, 1)] * 3:   # reviewed itself, Claude still sent it back
+            store.append_jsonl(store.home() / "results.jsonl", row(v, reviews))
+        self.assertEqual(tuning.best("self_review", self.M, self.W), 0)   # the time was for nothing
+        for _ in range(6):                                # where it spares Claude's rounds, it's on
+            store.append_jsonl(store.home() / "results.jsonl", row(1, 0))
+        self.assertEqual(tuning.best("self_review", self.M, self.W), 1)
 
     def test_wb_tune_shows_the_record_and_the_pick(self):
         self.result(0.6, n=2)
