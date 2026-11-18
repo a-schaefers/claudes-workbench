@@ -151,10 +151,10 @@ on the left; Claude talks to the local agent, which does the work on the right:
 
 <p align="center"><img src="docs/driver-and-agent_2.jpg" alt="Claude Code with the Workbench pane: on the left Claude at work in the session; on the right the local agent's summary of its fix, its passing tests and 'done: waiting for Claude's review', and the apprentice saying the task is ready for review" width="900"></p>
 
-Here Claude (left) has just sent the agent review feedback on a step: two exact changes, and
-why. On the right the agent made them, built the project, ran the tests, and summed up its work;
-the tests passed, so the task now says **done: waiting for Claude's review**, and Claude is woken
-to read the diff.
+Claude is the captain on the left: it keeps working with you while the local models it handed
+tasks to do the coding on the right. Here an agent has finished its fix and summed it up; its
+tests passed, so the task says **done: waiting for Claude's review**, and Claude is woken to read
+the diff.
 
 | Command | What it does |
 |---|---|
