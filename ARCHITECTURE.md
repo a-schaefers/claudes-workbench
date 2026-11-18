@@ -2448,8 +2448,8 @@ clipboard are missing (the page falls back), and it can't install or notify: the
 and that `tailscale serve --bg 1337` gives it an https address on the tailnet.
 
 **The app and notifications** (the user, 2026-11-18: like their other site's, but no new
-infrastructure). The manifest (named "Claude's Workbench", like `apple-mobile-web-app-title`, which
-iOS reads; standalone, PNG icons at 192 and 512, maskable, and an
+infrastructure). The manifest (named "Claude's Workbench"; its `short_name` and
+`apple-mobile-web-app-title`, which iOS reads, "Workbench", since a home screen cuts long names; standalone, PNG icons at 192 and 512, maskable, and an
 apple-touch icon at 180, rendered full-bleed from icon.svg) makes the page installable. The gear's
 *Install the app* section says "Installed ✓" when it runs standalone (`display-mode: standalone`
 or `navigator.standalone`); otherwise an Install button where the browser offered
