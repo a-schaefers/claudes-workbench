@@ -35,7 +35,7 @@
   }
 
   // ---- state ----
-  let state = { messages: [], asks: [], listener: null }
+  let state = { messages: [], asks: [], prefs: {}, push: {}, listener: null }
   let skew = 0                                  // server clock − ours, seconds
   let outbox = load(K.outbox, [])               // [{cid, text, ts, error?}]
   let seen = new Set(load(K.seen, null) || [])  // Claude's messages already shown in full
@@ -396,8 +396,10 @@
     if (typeof s.now === 'number') skew = s.now - Date.now() / 1000
     if (s.build && build && s.build !== build && reloadOnce()) return  // updated: the new page
     if (s.build) build = s.build
-    state = { messages: s.messages || [], asks: s.asks || [], prefs: s.prefs || {}, listener: s.listener || null }
+    state = { messages: s.messages || [], asks: s.asks || [], prefs: s.prefs || {}, push: s.push || {}, listener: s.listener || null }
     if (!sheet.hidden) drawSettings()
+    if (state.push.key && !pushSynced) { pushSynced = true; syncPush() }
+    reportSeen()
     const onServer = new Set(state.messages.map(m => m.cid).filter(Boolean))
     if (outbox.some(o => onServer.has(o.cid))) { outbox = outbox.filter(o => !onServer.has(o.cid)); save(K.outbox, outbox) }
     render()
@@ -582,7 +584,7 @@
     const field = document.createElement('input'); field.placeholder = 'https://…/#token=…'
     field.addEventListener('change', () => {
       const m = field.value.match(/token=([\w-]+)/) || field.value.trim().match(/^([\w-]{20,})$/)
-      if (m) { token = m[1]; save(K.token, token); box.remove(); $('composer').hidden = false; render(); connect(); flush(true) }
+      if (m) { token = m[1]; save(K.token, token); box.remove(); $('composer').hidden = false; render(); connect(); flush(true); keepKey() }
     })
     box.append(h, p, field)
     for (const el of nodes.values()) el.remove()
@@ -605,6 +607,7 @@
     allow: "Claude runs what it would have asked about, and each one is listed here. Your deny rules still hold, and plans and questions still come to you.",
   }
   function drawSettings() {
+    drawApp(); drawNotify()
     const away = (state.prefs && state.prefs.away) || 'ask'
     sheet.querySelectorAll('[data-away]').forEach(b => b.setAttribute('aria-checked', String(b.dataset.away === away)))
     $('away-note').textContent = AWAY_NOTE[away]
@@ -621,8 +624,122 @@
       state.prefs = was; drawSettings(); $('away-note').textContent = 'Not saved: try again.'
     }
   })
-  $('forget').onclick = () => { showSettings(false); save(K.token, ''); keyless('', true) }
+  $('forget').onclick = async () => {
+    if (pushOn) await setPush(false)  // a device without the key can't read what a push is about
+    showSettings(false); save(K.token, ''); keyless('', true); keepKey()
+  }
+
+  // ---- the app: installing it, and notifications (sw.js; webpush.py on the computer) ----
+  const standalone = () => matchMedia('(display-mode: standalone)').matches || navigator.standalone === true
+  const ios = /iphone|ipad|ipod/i.test(navigator.userAgent) || (navigator.platform === 'MacIntel' && navigator.maxTouchPoints > 1)
+  const iosSafari = ios && !/CriOS|FxiOS|EdgiOS|OPiOS/.test(navigator.userAgent)
+  const canPush = window.isSecureContext && 'serviceWorker' in navigator && 'PushManager' in window && 'Notification' in window
+  let installEvt = null, swReg = null, pushOn = false, pushBusy = false, pushNote = '', pushSynced = false
+  addEventListener('beforeinstallprompt', e => { e.preventDefault(); installEvt = e; if (!sheet.hidden) drawSettings() })
+  addEventListener('appinstalled', () => { installEvt = null; if (!sheet.hidden) drawSettings() })
+  if (window.isSecureContext && 'serviceWorker' in navigator) {
+    navigator.serviceWorker.register('/sw.js', { updateViaCache: 'none' }).then(r => { swReg = r; syncPush() }).catch(() => {})
+  }
+  async function keepKey() {  // the worker reads the key from here when a push comes
+    try {
+      const c = await caches.open('wb-chat')
+      await c.delete('/key')  // WebKit drops a put over an entry a reloaded page wrote (2026-11-18)
+      if (token) await c.put('/key', new Response(token))
+    } catch {}
+  }
+  const b64u = buf => btoa(String.fromCharCode(...new Uint8Array(buf))).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '')
+  const unb64u = s => Uint8Array.from(atob(s.replace(/-/g, '+').replace(/_/g, '/')), c => c.charCodeAt(0))
+  async function syncPush() {
+    // Is this device subscribed? Told to the computer again on each load (it may have dropped it),
+    // and moved to the computer's key if that changed
+    const key = state.push && state.push.key
+    if (!canPush || !swReg || !token || !key) return
+    try {
+      let sub = await swReg.pushManager.getSubscription()
+      if (sub && sub.options.applicationServerKey && b64u(sub.options.applicationServerKey) !== key) {
+        await sub.unsubscribe()
+        sub = Notification.permission === 'granted'
+          ? await swReg.pushManager.subscribe({ userVisibleOnly: true, applicationServerKey: unb64u(key) }) : null
+      }
+      pushOn = !!sub && Notification.permission === 'granted'
+      if (sub) await post('/api/push', { endpoint: sub.endpoint, on: true })
+    } catch {}
+    if (!sheet.hidden) drawSettings()
+  }
+  async function setPush(on) {
+    pushBusy = true; pushNote = ''; drawSettings()
+    try {
+      if (on) {
+        if (Notification.permission !== 'granted' && (await Notification.requestPermission()) !== 'granted') throw new Error('Notifications were not allowed.')
+        let sub = await swReg.pushManager.getSubscription()
+        if (!sub) sub = await swReg.pushManager.subscribe({ userVisibleOnly: true, applicationServerKey: unb64u(state.push.key) })
+        const r = await post('/api/push', { endpoint: sub.endpoint, on: true })
+        if (!r.ok) throw new Error((await r.json().catch(() => ({}))).error || 'The computer refused it.')
+        pushOn = true
+      } else {
+        const sub = await swReg.pushManager.getSubscription()
+        if (sub) { await post('/api/push', { endpoint: sub.endpoint, on: false }).catch(() => {}); await sub.unsubscribe() }
+        pushOn = false
+      }
+    } catch (e) { pushNote = String((e && e.message) || e) }
+    pushBusy = false; drawSettings()
+  }
+  const para = (box, text, cls) => { const p = document.createElement('p'); if (cls) p.className = cls; p.textContent = text; box.append(p); return p }
+  const HTTPS = "This page is open over plain http, so it can't be installed or send notifications. Over https it can: " +
+    'on the computer, `tailscale serve --bg 1337` gives the chat an https address on your tailnet.'
+  function drawApp() {
+    const box = $('app'); box.replaceChildren()
+    $('app-h').textContent = standalone() ? 'The app' : 'Install the app'
+    if (standalone()) return para(box, "Installed ✓ — you're using the chat as an app.")
+    if (!window.isSecureContext) return para(box, HTTPS, 'small')
+    if (installEvt) {
+      const b = document.createElement('button'); b.type = 'button'; b.className = 'plain'; b.textContent = 'Install this app'
+      b.onclick = async () => { installEvt.prompt(); try { await installEvt.userChoice } catch {} installEvt = null; drawSettings() }
+      box.append(b); return para(box, 'Adds Claude to your home screen, with its own window.', 'small')
+    }
+    if (iosSafari) return para(box, "Tap the Share button ⎋ in Safari's toolbar, then Add to Home Screen. Open Claude from its new icon: on iPhone and iPad, that's what lets it send notifications.")
+    if (ios) return para(box, 'On iPhone and iPad the app installs from Safari: open this page in Safari, then Share ⎋ → Add to Home Screen.')
+    para(box, "Look for Install in your browser's menu or address bar; on a phone, Add to Home Screen.")
+  }
+  function drawNotify() {
+    const box = $('notify'); box.replaceChildren()
+    if (!window.isSecureContext) return para(box, 'They need the page over https too (see above).', 'small')
+    if (ios && !standalone()) return para(box, 'On iPhone and iPad, notifications come only to the installed app: install it above in Safari, open it from its icon, and turn them on here.', 'small')
+    if (!canPush) return para(box, "This browser can't take notifications from a page.", 'small')
+    if (Notification.permission === 'denied') return para(box, "Notifications are blocked for this page: allow them in the browser's site settings, then come back here.", 'small')
+    const row = document.createElement('label'); row.className = 'switch'
+    const t = document.createElement('span'); t.textContent = 'When Claude answers or needs you'
+    const sw = document.createElement('input'); sw.type = 'checkbox'; sw.setAttribute('role', 'switch'); sw.id = 'push'
+    sw.checked = pushOn; sw.disabled = pushBusy || !swReg || !(state.push && state.push.key)
+    sw.onchange = () => setPush(sw.checked)
+    row.append(t, sw); box.append(row)
+    para(box, pushBusy ? 'Working…' : pushNote || (pushOn ? 'On: this device hears from Claude even with the page closed, unless the page already showed it.'
+      : 'Off. Nothing you and Claude write passes through the push service: the phone fetches it from your computer.'), 'small')
+    if (pushOn && !pushBusy) {
+      const b = document.createElement('button'); b.type = 'button'; b.className = 'plain'; b.textContent = 'Send a test'
+      b.onclick = async () => {
+        b.disabled = true
+        try {
+          const j = await (await post('/api/push', { test: true })).json()
+          pushNote = j.ok ? 'Sent: it should arrive in a few seconds.' : "The push service didn't take it: turn notifications off and on again."
+        } catch { pushNote = 'Not sent: try again.' }
+        drawSettings()
+      }
+      box.append(b)
+    }
+  }
+  // What the page showed while on screen: the computer pushes only what no page has
+  const reported = new Set()
+  function reportSeen() {
+    if (document.hidden || !token) return
+    const ids = [...state.messages.filter(m => m.from === 'claude').slice(-20).map(m => m.id),
+      ...state.asks.filter(a => !a.answer).map(a => a.id)].filter(i => !reported.has(i))
+    if (!ids.length) return
+    ids.forEach(i => reported.add(i))
+    post('/api/seen', { ids }).catch(() => ids.forEach(i => reported.delete(i)))
+  }
+  document.addEventListener('visibilitychange', reportSeen)
 
   if (!token) keyless('')
-  else { render(); connect(); flush(true) }
+  else { render(); connect(); flush(true); keepKey() }
 })()

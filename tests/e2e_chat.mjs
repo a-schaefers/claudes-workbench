@@ -170,8 +170,19 @@ async function run(engine, device) {
     await until(async () => (await page.locator('.row.ask .meta').last().textContent()).includes('allowed by your setting'))
     await page.click('[data-away="ask"]')
     await until(() => JSON.parse(readFileSync(join(home, 'state/chat/prefs.json'), 'utf8')).away === 'ask')
+  })
+  await check('the app: its worker runs, holds the key, and the gear says how to install it and get notifications', async () => {
+    await until(() => page.evaluate(async () => !!(await navigator.serviceWorker.getRegistration())))
+    await until(() => page.evaluate(async () => (await (await caches.open('wb-chat')).match('/key')) !== undefined))
+    if (!(await page.textContent('#app')).includes('Add to Home Screen')) throw new Error('no install steps')
+    const notify = await page.textContent('#notify')
+    if (engine === 'webkit' ? !notify.includes('installed app') : !(await page.locator('#push').count())) throw new Error('notifications: ' + notify)
     await page.keyboard.press('Escape')
     await until(async () => await page.locator('#settings').isHidden())
+  })
+  await check('what the page showed on screen is reported, so it is not pushed', async () => {
+    const shown = JSON.parse(readFileSync(join(home, 'state/chat/messages.jsonl'), 'utf8').trim().split('\n').filter(l => l.includes('"claude"')).at(-1)).id
+    await until(() => existsSync(join(home, 'state/chat/seen.jsonl')) && readFileSync(join(home, 'state/chat/seen.jsonl'), 'utf8').includes(shown))
   })
   await check('a server that takes calls and never answers: the page heals itself once it is back, no reload', async () => {
     // the 2026-11-18 report: "Reconnecting" until a hard refresh

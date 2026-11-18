@@ -1,4 +1,5 @@
 """End-to-end tests: real git, real runner processes, a fake opencode. Run: python3 -m unittest"""
+import base64
 import io
 import json
 import shlex
@@ -4636,6 +4637,108 @@ class WebChat(Base):
         self.assertEqual(chat.asks()[-1]["by"], "setting")           # listed, so the user sees what ran
         self.assertEqual(run_wb("chat", "ask", "--tool", "ExitPlanMode", "--kind", "plan",
                                 "--detail", '{"plan": "x"}').split()[1], "open")
+
+    def test_vapid_signatures_are_es256_that_openssl_and_push_services_can_check(self):
+        from workbench import webpush as wp
+        # RFC 6979 A.2.5, P-256 with SHA-256, "sample": the known key, nonce and signature
+        d = 0xC9AFA9D845BA75166B5C215767B1D6934E50C3DB36E89B127B8A622B120F6721
+        k = 0xA6E3C57DD01ABE90086538398355DD4C3B17AA873382B0F24D6129493D8AAD60
+        self.assertEqual(wp.sign(d, b"sample", k).hex().upper(),
+                         "EFD48B2AACB6A8FD1140DD9CD45E81D69D2C877B56AAF991C34D0EA84EAF3716"
+                         "F7CB1C942D657C41D436C7A1B6E29F65F3E900DBB9AFF4064DC4AB2F843ACDA8")
+        q = wp._mul(d, wp.G)
+        self.assertEqual(q[0], 0x60FED4BA255A9D31C961EB74C6356D68C049B8923B61FA6CE669622E60F29FB6)
+        sig = wp.sign(d, b"hello")
+        self.assertTrue(wp.verify(q, b"hello", sig))
+        self.assertFalse(wp.verify(q, b"hellO", sig))
+        if not shutil.which("openssl"):
+            return
+        # openssl checks ours: the key as SubjectPublicKeyInfo, the signature as DER
+        tmp = Path(self.tmp.name)
+        point = base64.urlsafe_b64decode(wp.public_key(d) + "=")
+        (tmp / "pub.der").write_bytes(bytes.fromhex("3059301306072a8648ce3d020106082a8648ce3d030107034200") + point)
+
+        def der_int(b):
+            b = b.lstrip(b"\0")
+            b = b"\0" + b if b[0] & 0x80 else b
+            return b"\x02" + bytes([len(b)]) + b
+        body = der_int(sig[:32]) + der_int(sig[32:])
+        (tmp / "sig.der").write_bytes(b"\x30" + bytes([len(body)]) + body)
+        (tmp / "msg").write_bytes(b"hello")
+        r = subprocess.run(["openssl", "dgst", "-sha256", "-verify", tmp / "pub.der", "-keyform", "DER",
+                            "-signature", tmp / "sig.der", tmp / "msg"], capture_output=True, text=True)
+        self.assertIn("Verified OK", r.stdout, r.stderr)
+
+    def test_a_push_carries_no_payload_and_a_vapid_header_its_key_checks(self):
+        from workbench import webpush as wp
+        import http.server
+        import threading
+        got = []
+
+        class Svc(http.server.BaseHTTPRequestHandler):
+            def do_POST(self):
+                got.append((self.headers, self.rfile.read(int(self.headers["Content-Length"]))))
+                self.send_response(201)
+                self.end_headers()
+
+            def log_message(self, *a):
+                pass
+        svc = http.server.HTTPServer(("127.0.0.1", 0), Svc)
+        threading.Thread(target=svc.serve_forever, daemon=True).start()
+        self.addCleanup(svc.server_close)
+        self.addCleanup(svc.shutdown)
+        d = wp.private_key(self.chat.token_path())
+        self.assertEqual(wp.send(d, f"http://127.0.0.1:{svc.server_address[1]}/sub/1"), 201)
+        headers, body = got[0]
+        self.assertEqual(body, b"")
+        self.assertEqual(headers["TTL"], str(wp.TTL))
+        jwt, key = headers["Authorization"].removeprefix("vapid t=").split(", k=")
+        self.assertEqual(key, wp.public_key(d))
+        head, body64, sig = jwt.split(".")
+        claims = json.loads(base64.urlsafe_b64decode(body64 + "=="))
+        self.assertEqual(claims["aud"], f"http://127.0.0.1:{svc.server_address[1]}")
+        q = base64.urlsafe_b64decode(key + "=")
+        q = (int.from_bytes(q[1:33], "big"), int.from_bytes(q[33:], "big"))
+        self.assertTrue(wp.verify(q, f"{head}.{body64}".encode(),
+                                  base64.urlsafe_b64decode(sig + "==")))
+        self.assertEqual(oct(wp.key_path(self.chat.token_path()).stat().st_mode & 0o777), "0o600")
+
+    def test_devices_subscribe_only_with_a_push_services_address_and_hear_of_news_once(self):
+        chat, tok = self.chat, self.chat.token()
+        from workbench import webpush as wp
+        key = self.call("/api/state", token=tok)[1]["push"]["key"]
+        self.assertEqual(len(base64.urlsafe_b64decode(key + "=")), 65)   # an uncompressed P-256 point
+        for bad in ("http://fcm.googleapis.com/x", "https://example.com/x", "https://googleapis.com.evil.io/x",
+                    "https://127.0.0.1/x", "https://fcm.googleapis.com:8443/x"):
+            self.assertEqual(self.call("/api/push", {"endpoint": bad, "on": True}, token=tok)[0], 400, bad)
+        good = "https://fcm.googleapis.com/fcm/send/abc"
+        self.assertEqual(self.call("/api/push", {"endpoint": good, "on": True})[0], 401)
+        self.assertEqual(self.call("/api/push", {"endpoint": good, "on": True}, token=tok)[0], 200)
+        self.assertEqual([s["endpoint"] for s in wp.subscriptions()], [good])
+
+        sent = []
+        pusher = chat.Pusher(chat.Hub(), send=lambda: sent.append(1))
+        seen = chat.send("I saw this one on the page", "claude")
+        missed = chat.send("Done: the tests pass.", "claude")
+        self.assertEqual(self.call("/api/seen", {"ids": [seen["id"]]}, token=tok)[0], 200)
+        self.assertEqual(pusher.tick(missed["ts"] + 1), [])                 # an open page may show it yet
+        self.assertEqual(pusher.tick(missed["ts"] + chat.PUSH_DELAY + 1), [missed["id"]])
+        self.assertEqual(pusher.tick(missed["ts"] + chat.PUSH_DELAY + 2), [])   # once
+        self.assertEqual(len(sent), 1)
+        ask = chat.ask("Bash", "make")
+        self.assertEqual(pusher.tick(ask["ts"] + chat.PUSH_DELAY + 1), [ask["id"]])
+        late = chat.send("old news", "claude")
+        self.assertEqual(pusher.tick(late["ts"] + chat.PUSH_WINDOW + 1), [])  # never a backlog
+
+        self.assertEqual(self.call("/api/push", {"endpoint": good, "on": False}, token=tok)[0], 200)
+        self.assertEqual(wp.subscriptions(), [])
+        wp.subscribe(good)
+        with mock.patch.object(wp, "send", return_value=410):           # the service says it's gone
+            self.assertEqual(wp.push_all(1), {good: 410})
+        self.assertEqual(wp.subscriptions(), [])
+        page = self.call("/sw.js")
+        self.assertEqual(page[0], 200)
+        self.assertEqual(self.call("/icon-192.png")[0], 200)
 
     def test_a_plan_with_none_given_is_read_from_claude_codes_newest_plan_file(self):
         plans = Path(self.tmp.name) / "claude" / "plans"

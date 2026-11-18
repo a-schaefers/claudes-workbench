@@ -61,7 +61,8 @@ Contents: [The pieces](#the-pieces) · [Why it's built this way](#why-its-built-
 - **The workbench mod** (`mod/`) is a Claude Code plugin. It draws the pane, keeps a status line,
   and starts a turn for Claude the moment a task needs it, so Claude never polls.
 - **The web chat** (`workbench/chat.py`, `workbench/chat_static/`) is a small page and server for
-  reaching the same Claude session from a phone.
+  reaching the same Claude session from a phone; it installs as an app and notifies
+  (`workbench/webpush.py`).
 
 Everything talks through plain files in one state directory (`$WB_HOME`, `workbench/store.py`).
 The runner, the agent's `ask_reviewer` server and the chat server never call each other or the
@@ -2319,6 +2320,11 @@ VPN), `"hosts": ["chat.example.org"]` a name a tunnel or proxy sends.
   A row without `kind` reads as a permission.
 - `prefs.json`: `{away: "ask"|"allow"}` (anything else reads as `ask`), from the gear menu
   (`/api/prefs`), read by `chat.ask` (`allow` answers a new permission at once, by `setting`).
+- `push.json`: `{subs: [{endpoint, ts, ua}]}`, the devices with notifications on (the last 20,
+  `MAX_SUBS`), locked by `push.lock`; `seen.jsonl`: `{id, ts, by: "page"|"push"}`, each message or
+  ask id once, what a page showed on screen or a push announced; `push-test.json`: `{ts}`, the
+  last test push. The VAPID key is beside the token (`<token file>-push`, mode 600, made on first
+  use).
 
 **Settings.** The token: `$WB_CHAT_TOKEN`, else `~/.config/workbench/chat-token` (created on first
 use with `O_EXCL`, mode 600, `token_urlsafe(32)`; kept at 600; one under 16 characters is refused
@@ -2351,13 +2357,14 @@ thread no longer):
   name, else 403 `{"error": "unknown host"}`: this stops other web pages and DNS rebinding.
   Responses carry `Cache-Control: no-store`, `X-Frame-Options: DENY`, `nosniff`, `no-referrer` and
   a CSP (`default-src 'self'`, inline styles only, no framing, no forms).
-- `GET /`, `/index.html`, `/<name>` with a known suffix (html, js, css, svg, webmanifest) from
-  `chat_static/`; anything else 404.
+- `GET /`, `/index.html`, `/<name>` with a known suffix (html, js, css, svg, png, webmanifest)
+  from `chat_static/`; anything else 404.
 - The API wants `Authorization: Bearer <token>` (the `Bearer ` prefix required, compared in
   constant time); else 401 "bad or
   missing token: open the link from `wb chat url`".
 - `GET /api/state`: `{messages (the last 200, each user row with its receipt as `received`),
-  asks (the last 20, each with `answer` (null while open), `answered`, `by`), prefs, listener, build,
+  asks (the last 20, each with `answer` (null while open), `answered`, `by`), prefs, push (`{key:
+  the VAPID public key, test: the last test push's ts}`), listener, build,
   now}`. `build` (`chat.build`, a crc32 of the page's files' names, mtimes and sizes) changes
   when the page does: a page that loaded other files reloads itself.
 - `GET /api/stream`: server-sent events (with the security headers): `event: state` with the
@@ -2383,6 +2390,11 @@ thread no longer):
   stands (an earlier one, when the prompt was already answered).
 - `POST /api/prefs`: the same checks, `{away: "ask"|"allow"}` and nothing else (400) → 200
   `{state}`.
+- `POST /api/seen`: `{ids: up to 200 ids}` (400 otherwise) → 200; the ids go in seen.jsonl.
+- `POST /api/push`: `{endpoint, on: true|false}` subscribes or drops a device (400 unless the
+  endpoint is `https` on port 443 at a push service, `webpush.PUSH_HOSTS`, so the token alone
+  can't make this machine post where it likes); `{test: true}` pushes every device now → 200
+  `{sent, ok}`.
 
 **The page** (`chat_static/`: `index.html`, `app.js`, `app.css`, `manifest.webmanifest`,
 `icon.svg`; no inline script, as the CSP requires). The token is taken from the address's
@@ -2422,10 +2434,35 @@ no restoring of the old one). Claude's messages flow in at a reading pace (`flow
 the first render is done; the backlog a first visit loads, a message that arrives while the page
 is hidden (it counts as unread in the title) and reduced motion show whole, and each shown message
 is remembered (`wb-chat-seen`, the last 500) so a reload doesn't replay it. Light and dark follow `prefers-color-scheme` (tokens on
-`:root`, `color-scheme` meta, a theme colour per scheme); reduced motion turns animations off. It
-can be added to a home screen (a manifest and an SVG icon; no service worker). Away from
-localhost over plain HTTP the page isn't a secure context, so the browser's UUID and clipboard
-are missing (the page falls back) and it won't install as an app.
+`:root`, `color-scheme` meta, a theme colour per scheme); reduced motion turns animations off.
+Away from localhost over plain HTTP the page isn't a secure context, so the browser's UUID and
+clipboard are missing (the page falls back), and it can't install or notify: the gear says so,
+and that `tailscale serve --bg 1337` gives it an https address on the tailnet.
+
+**The app and notifications** (the user, 2026-11-18: like their other site's, but no new
+infrastructure). The manifest (standalone, PNG icons at 192 and 512, maskable, and an
+apple-touch icon at 180, rendered full-bleed from icon.svg) makes the page installable. The gear's
+*Install the app* section says "Installed ✓" when it runs standalone (`display-mode: standalone`
+or `navigator.standalone`); otherwise an Install button where the browser offered
+`beforeinstallprompt`, Safari's Share → Add to Home Screen on iOS (another iOS browser is sent to
+Safari), else the browser's menu. *Notifications*: a switch (iOS: only in the installed app,
+which is Apple's rule; blocked: where to allow them), on asks permission (only on that tap) and
+subscribes with the server's VAPID key, re-subscribing when the key changed; on shows Send a test.
+`sw.js` (registered with `updateViaCache: 'none'`) caches nothing and answers no fetch (another
+app's offline cache gave iOS installed apps white screens). Pushes carry no payload (RFC 8030)
+and are signed with VAPID (RFC 8292: ES256, done in plain integers in `webpush.py`, checked
+against RFC 6979's vectors and openssl), so nothing needs encrypting and nothing the user and
+Claude write passes through Apple's, Google's or Mozilla's service: the worker fetches
+`/api/state` with the key the page left it in Cache Storage (`wb-chat` `/key`, deleted before
+each write: WebKit drops a put over an entry a reloaded page wrote) and shows the newest open
+dialog, else Claude's latest message (or "Notifications work" for a test), tagged `wb-chat`; a
+tap focuses the chat or opens it. Which news is pushed: a visible page posts what it showed to
+`/api/seen`; the server's `Pusher` thread (woken by each change, and every `PUSH_DELAY`/2) sends
+one push to every device for Claude's messages and open dialogs that no page showed within
+`PUSH_DELAY` 10 s and that are under `PUSH_WINDOW` 15 min old (never a backlog), and marks them
+`push`; a device the service says is gone (404, 410) is dropped. Checked live: Chromium's push
+service is `jmt17.google.com` (Chrome's `fcm.googleapis.com`), and a reply reached the worker as
+a notification with its text (2026-11-18).
 
 A change to `chat.py` or `chat_static/` also needs the browser test (*The tests*).
 
@@ -3185,7 +3222,9 @@ then the reply, a message sent during an outage lands exactly once, the stream r
 reload doubles nothing, a permission prompt's card (Allow at least 44 px tall, a tap answers it,
 the buttons go) and one left to expire, a long plan folded and sent back with a note, a question
 answered (Answer disabled until a pick), the gear's sheet (what this lane is; Let Claude go
-ahead saved, the next prompt allowed at once and listed), a server frozen (SIGSTOP) past the 40 s watchdog and then
+ahead saved, the next prompt allowed at once and listed), the app (its worker runs and holds the
+key; install steps; notifications offered, or on iPhone sent to the installed app), what a page
+showed reported to `/api/seen`, a server frozen (SIGSTOP) past the 40 s watchdog and then
 let go (the page heals with no reload; a message sent meanwhile lands once), a changed page file
 (the page reloads itself, keyed, with the thread), no script errors.
 
@@ -3306,6 +3345,7 @@ push: every change is a pull request that merges once `check` is green and it is
 - **A new tuned knob** → `tuning.KNOBS`, read with `tuning.value(task, name)`, a ceiling in
   `drive` if it has one.
 - **`chat.py` or `chat_static/`** → the browser test.
+- **`/api/state`'s asks or messages** → `sw.js`, which builds the notification from them.
 - **`wb chat ask|wait|answer`'s output** (`<id> <state>` on the last line, `wait --json`'s ask) → `askOnChat` and `waitOnChat` in register.tsx, which parse it.
 - **AskUserQuestion's or ExitPlanMode's input shape** → `askOnChat` (`--detail`) and `makeAsk` in app.js.
 - **The `$` uses in `register.tsx`** → only through functions declared at its top level, or
