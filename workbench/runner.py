@@ -788,6 +788,10 @@ def summary_text(task: store.Task, n: int, rnd: dict, tests) -> str:
                      f"({100 * c['used'] // c['window']}%)"
                      + (f", compacted {c['compactions']}x" if c.get("compactions") else "")
                      + ("; the next round starts a fresh session" if fresh_reason(task) else ""))
+    full = [e for e in store.read_jsonl(task.dir / "events.jsonl")[0]
+            if e.get("kind") == "reading_full" and e.get("round") == n]
+    if full:
+        lines.append("reading: " + full[-1]["text"])
     if rnd["stuck"]:
         lines.append(f"STOPPED: {rnd['stuck']}")
     elif rnd["exit"] not in (0, None):
@@ -1118,13 +1122,10 @@ def _reading_full(task: store.Task, n: int, used: int, window: int,
     text = (f"the agent's session reached {pct}% of its window {what}, so it carries on in this "
             f"session (OpenCode compacts it if it must). Name fewer files to read, or put what "
             f"it needs in the spec.")
-    # Claude is told once a task: the advice is for the next spec, and on a step that needs the
-    # reading every round said it again, each a wake over Claude's whole context (2026-11-17)
-    told = any(e.get("kind") == "reading_full"
-               for e in store.read_jsonl(task.dir / "events.jsonl")[0])
+    # Not a wake: the advice is for the next spec, which Claude reads in the round's report.
+    # As a check-in it woke Claude mid-round with nothing to do, every round of a step, and then
+    # once even on a trivial task (2026-11-17)
     task.event({"ts": store.now(), "round": n, "kind": "reading_full", "text": text})
-    if not told:
-        task.notify("checkin", f"task {task.name}: {text}", round=n)
 
 
 # Mid-round handovers in one review round before it is stopped as stuck. A session that changes
