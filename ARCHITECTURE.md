@@ -300,7 +300,7 @@ the agent first; that test result is dropped. With self-review on (the `self_rev
 `self_review`, set it for one task), the first time the tests pass in a review round (status `self_reviewed`, the `[steps, reviews]` it
 ran at) the agent gets one more round, `runner.SELF_REVIEW`: Claude's own review checks (each
 rule has a test that fails when that rule alone breaks, each rejection checked by commenting
-out its check and watching a test fail; each test the task names checking what it says, exact output whole against a literal
+out its check and watching a test fail, the file copied aside first and copied back after; each test the task names checking what it says, exact output whole against a literal
 written by hand; expected values worked out by hand, every error path handled and each error
 message tested for every input that can cause it; the project's CLAUDE.md rules kept, and docs it
 wrote saying what the code does; nothing extra), from what Claude's reviews kept catching on

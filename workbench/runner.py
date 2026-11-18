@@ -1021,15 +1021,18 @@ def _start_fresh(task: store.Task, n: int, why: str) -> None:
 # CLAUDE.md forbids globals and a proposed CLAUDE.md line describing the wrong flag: point 4 asks
 # for the project's rules and for docs that say what the code does. The third run's agent was
 # asked point 1 and called its count test fine; it wasn't (a short file, rejected for that): so
-# the rejections are now checked by doing it, removing each check and watching a test fail. One
+# the rejections are now checked by doing it, removing each check and watching a test fail. The
+# next task's agent "restored" a check by retyping it and rebuilt the loop wrong, then spent
+# its round debugging its own restore (2026-11-18): it copies the file back instead. One
 # automatic round, before Claude is woken, costs local time only.
 SELF_REVIEW = (
     "Before Claude reviews this, review your own change as a strict senior reviewer would: `git "
     "diff`, and `git status` for new files. Check each point, and fix what fails:\n"
     "1. Every rule in the task (each must, only, at most, rejects, limit and error message) has a "
     "test that fails if that rule alone breaks. A rule without one: write the test. Check each "
-    "rejection and limit by doing it, one at a time: comment out its check in the code, run the "
-    "acceptance command, see a test fail, then put the check back exactly. No test failed: the "
+    "rejection and limit by doing it, one at a time: copy the file aside (`cp f.c /tmp/f.c`), "
+    "comment out its check, run the acceptance command, see a test fail, then copy the file back "
+    "(never retype it), and run the command again to see it pass. No test failed: the "
     "test's input breaks another rule too; make it valid in every other way. Each test the task "
     "names checks what it says (exact output: the whole of it, length too, against a literal "
     "written out by hand).\n"
