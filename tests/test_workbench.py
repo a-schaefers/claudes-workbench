@@ -15,7 +15,7 @@ import time
 import unittest
 from unittest import mock
 import warnings
-from contextlib import redirect_stderr, redirect_stdout
+from contextlib import nullcontext, redirect_stderr, redirect_stdout
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -3538,7 +3538,11 @@ class Bench(Base):
         while time.time() < deadline and not any(
                 t.spec.get("bench") and t.status.get("agent_pid") for t in store.all_tasks()):
             time.sleep(0.2)
-        out = self.start("t-real", "ok", "--model", "qwen")              # the only GPU, unshared
+        # The replay runs in a thread here, not its own process: its cleanup's redirect_stdout
+        # swapped sys.stdout under this start's prints, and CI saw '' (2026-11-18)
+        with mock.patch.object(bench, "redirect_stdout", lambda f: nullcontext()):
+            out = self.start("t-real", "ok", "--model", "qwen")          # the only GPU, unshared
+            th.join(60)
         self.assertIn("stopped the bench's replay", out)
         th.join(60)
         self.assertEqual(rows[0]["outcome"], "preempted")
