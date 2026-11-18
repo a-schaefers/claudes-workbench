@@ -402,8 +402,9 @@ once more and `pid` and `stopping` are cleared.
    the report was being written → `_steer_round`. The report
    goes to `rounds/<n>/summary.md`. Failing tests with auto-fix left → an auto-fix round (round
    n+1's prompt is the failure). Otherwise phase `review`, a `review` notice (the report, then
-   `review_diff`: the whole diff under review when it is at most `REVIEW_DIFF_MAX` = 12,000
-   characters, else its stat; each call Claude makes to fetch it re-reads its session, 2026-11-17;
+   `review_diff`: the whole diff under review when it is at most `REVIEW_DIFF_MAX` = 32,000
+   characters (~8K tokens), else its stat; each call Claude makes to fetch it re-reads its session,
+   2026-11-17, and at 12,000 both significant tasks of 2026-11-18 (13K and 15K) cost that call;
    then the agent's proposed instruction files as diffs, *Claude's files*), exit.
 
 **`run_round(task, n)`.** Writes the config layer and the agent's environment (*What the agent
