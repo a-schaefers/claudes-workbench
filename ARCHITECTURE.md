@@ -2254,7 +2254,8 @@ Python-version and Windows guards use; never 75, the replan exit below.
 **Keeping it up, and reaching it** (moved here from the README, 2026-11-17). On Linux, link the
 unit from the copy `wb` runs from (`~/.claude/plugins/marketplaces/workbench` for a marketplace
 install, else the clone): `systemctl --user link <that copy>/systemd/wb-chat.service &&
-systemctl --user enable --now wb-chat`, and `systemctl --user restart wb-chat` after an upgrade.
+systemctl --user enable --now wb-chat`. An upgrade needs no restart: the server restarts itself with
+new code (below); `systemctl --user daemon-reload` picks up a changed unit file.
 The unit runs systemd's `python3`; a Python from pyenv, uv or conda goes in with `systemctl --user
 edit wb-chat` (the unit's comment says how). On macOS, a launchd agent running `~/.local/bin/wb
 chat serve` does the same. `wb chat url` prints the link, `http://localhost:1337/#token=…`; from a phone, reach the PC the way you normally do and change the host in the link. It
@@ -2316,7 +2317,12 @@ on, binds it skipped, and warnings for a wildcard bind or `hosts: *`; an address
 on ends it with one line (`can't listen on <addr>:<port>: the port is taken: another wb chat serve
 … or another program; --port picks another`, or the address isn't on this machine). With a bind skipped (tailscale
 not up yet), it rechecks every `REPLAN_EVERY` 30 s and exits 75 once more binds are available,
-for the service manager (`Restart=always`) to start it again with them. `wb chat url` prints
+for the service manager (`Restart=always`) to start it again with them. Every `RELOAD_EVERY` 10 s
+it looks at its package's `*.py` (`code_stamp`: names, mtimes, sizes; `watch_code`); once they
+have changed and held still for a look (a pull writes files one by one), it says so and re-execs
+the same command line (`sys.orig_argv`) in the same process, so systemd and launchd see no exit
+and a hand-started server keeps running: one left up across an update served the new page from
+the old code for a day and a half (2026-11-18). `wb chat url` prints
 `http://localhost:<port>/#token=…` (the fragment never leaves the browser).
 
 **The HTTP API** (`Handler`, HTTP/1.0, no keep-alive, no CORS; a connection that stalls for
@@ -2332,12 +2338,22 @@ thread no longer):
   constant time); else 401 "bad or
   missing token: open the link from `wb chat url`".
 - `GET /api/state`: `{messages (the last 200, each user row with its receipt as `received`),
-  asks (the last 20, each with `answer` (null while open), `answered`, `by`), listener, now}`.
-- `GET /api/stream`: server-sent events (with the security headers), at most 16 open (503 past it): `event: state` with the
-  snapshot at once and whenever it changes, `: ping` after 15 s idle. One `Hub` thread watches
+  asks (the last 20, each with `answer` (null while open), `answered`, `by`), listener, build,
+  now}`. `build` (`chat.build`, a crc32 of the page's files' names, mtimes and sizes) changes
+  when the page does: a page that loaded other files reloads itself.
+- `GET /api/stream`: server-sent events (with the security headers): `event: state` with the
+  snapshot at once and whenever it changes, `: ping` after 15 s idle. At most `MAX_STREAMS` 16
+  open: past it the oldest stream gives way (its handler's `evicted`, then a wake) and the new one
+  waits up to 5 s for its slot (503 after), since a stream a phone dropped without a word (asleep,
+  a new network) lingers while the live page can't get in; with the cap full of those, the page
+  said "Reconnecting" until a hard refresh (2026-11-18). On Linux a stream's socket gets
+  `TCP_USER_TIMEOUT` `UNACKED_MS` 45 s, so a write the peer never acknowledges fails within a
+  minute rather than the kernel's quarter of an hour. One `Hub` thread watches
   `chat/` (inotify, or `wait()` when it fell back to polling) and a pidfd on the listener and
   wakes every stream. Without inotify it wakes them every second (how a dead listener is noticed
-  there); a wake with nothing new writes nothing, so the 15 s ping holds on every platform.
+  there); a wake with nothing new writes nothing, so the 15 s ping holds on every platform. A
+  failure in the hub's watching (`_watch`) is printed and the watching starts again a second
+  later: a dead hub would have left every page without news.
 - `POST /api/send`: JSON only (415), at most 32 KB (413), a `Content-Length` that isn't a number
   0 or more (400), `{text: 1–8000 characters, cid?: 1–64 characters}` (400), → 200 `{message,
   listener, state}`.
@@ -2353,9 +2369,18 @@ bearer header (EventSource can't send one), parsed by hand; every state event is
 nothing arrives half-received. A message goes into a local outbox (`wb-chat-outbox`, each with a
 `crypto.randomUUID()` cid) and is sent in order until the server has it; the server ignores a cid
 it already holds, so nothing is sent twice; a 4xx other than 401 marks it not sent, with retry,
-edit and delete. A 40 s watchdog (pings count), jittered backoff (0.5 s to 30 s, a banner after
-three failures) and a reconnect when the page or the network comes back keep it connected; a page
-hidden for a minute drops its stream. Rendering is DOM only (inline code, bold, links, fenced code,
+edit and delete. Each send gives up after `POST_MS` 15 s and is tried again, so a dead line
+can't hold the outbox. Staying connected: a 40 s watchdog (`DEAD_MS`; pings count) aborts a silent
+stream, and that counts as a failure, backing off like any other (reconnecting at once kept the
+count at one, so a server that took the call and never answered showed "Reconnecting…" for ever;
+2026-11-18); jittered backoff, 0.5 s to 30 s, a banner after three failures; aborting a stream
+also cancels its body's reader, since WebKit can keep the socket (and the server's slot) open
+otherwise; offline, it still tries every 30 s or so, since a phone doesn't always fire `online`;
+back on screen or from the back-forward cache with nothing heard for `STALE_MS` 20 s, it dials at
+once rather than waiting out the watchdog; a page hidden for a minute drops its stream. When a
+state's `build` differs from the one the page loaded with, the page reloads (`reloadOnce`, at
+most once a minute, else it carries on with the new build; the draft and the outbox are in
+localStorage). Rendering is DOM only (inline code, bold, links, fenced code,
 lists); receipts read "✓ delivered", "✓ waiting for a Claude session", "✓✓ read by Claude",
 "✓✓ Claude has it, reading after its current step"; "Claude is on it" shows while the listener is
 busy with the user's latest message. A permission prompt is a card in the thread by its time
@@ -3121,7 +3146,9 @@ real run with a real model (CLAUDE.md, *Checks before committing*).
 Pixel 7: the token leaves the address bar, a send lands once with its tick, the receipt, "working"
 then the reply, a message sent during an outage lands exactly once, the stream recovers, a
 reload doubles nothing, a permission prompt's card (Allow at least 44 px tall, a tap answers it,
-the buttons go) and one left to expire, no script errors.
+the buttons go) and one left to expire, a server frozen (SIGSTOP) past the 40 s watchdog and then
+let go (the page heals with no reload; a message sent meanwhile lands once), a changed page file
+(the page reloads itself, keyed, with the thread), no script errors.
 
 **Conventions for a new test.** Names read as sentences (`test_a_note_does_not_swallow_a_failure_claude_has_not_seen`);
 one class per feature with a one-line docstring; end to end through `self.start`/`wait_phase`/

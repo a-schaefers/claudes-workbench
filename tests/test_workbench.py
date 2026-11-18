@@ -4619,6 +4619,68 @@ class WebChat(Base):
         self.assertEqual(run_wb("chat", "answer", b, "expired", "--by", "interrupted").strip(), "expired")
         self.assertEqual(chat.find_ask(b)["by"], "interrupted")
 
+    def open_stream(self, tok):
+        import http.client
+        c = http.client.HTTPConnection("127.0.0.1", self.port, timeout=10)
+        c.request("GET", "/api/stream", headers={"Host": "localhost", "Authorization": f"Bearer {tok}"})
+        r = c.getresponse()
+        self.assertEqual(r.status, 200)
+        self.assertTrue(r.fp.readline().startswith(b"event: state"))
+        return c, r
+
+    def test_a_full_server_drops_its_oldest_stream_for_a_new_page(self):
+        # streams a sleeping phone dropped without a word filled the cap, and the page said
+        # "Reconnecting" until a hard refresh (2026-11-18)
+        import threading
+        tok = self.chat.token()
+        with mock.patch.object(self.srv.RequestHandlerClass, "streams", threading.BoundedSemaphore(1)):
+            c1, old = self.open_stream(tok)
+            c2, new = self.open_stream(tok)             # let in, not a 503
+            old.fp.readline()                           # the data line
+            old.fp.readline()
+            self.assertEqual(old.fp.readline(), b"")    # the old one was closed
+            c1.close()
+            self.call("/api/send", {"text": "still live"}, token=tok)
+            lines = [new.fp.readline() for _ in range(5)]  # the first state's rest, then the next
+            self.assertTrue(any(b"still live" in line for line in lines), lines)
+            c2.close()
+
+    def test_the_file_watcher_starts_again_after_a_failure(self):
+        chat, real, calls = self.chat, self.chat.Watcher, []
+        def flaky(d):
+            calls.append(d)
+            if len(calls) == 1:
+                raise OSError("inotify: too many instances")
+            return real(d)
+        with mock.patch.object(chat, "Watcher", flaky), redirect_stderr(io.StringIO()) as err:
+            hub = chat.Hub()
+            deadline = time.time() + 10
+            while len(calls) < 2 and time.time() < deadline:
+                time.sleep(0.05)
+            v = hub.version
+            chat.send("hello", "claude")
+            while hub.version == v and time.time() < deadline:
+                time.sleep(0.05)
+        self.assertGreater(hub.version, v)                # it still wakes the streams
+        self.assertIn("starting it again", err.getvalue())
+
+    def test_the_server_restarts_itself_once_its_code_has_changed_and_settled(self):
+        chat, restarted = self.chat, []
+        stamps = iter([("a",), ("a",), ("b",), ("c",), ("c",)])  # b, c: a pull writing files
+        with mock.patch.object(chat, "code_stamp", lambda: next(stamps)):
+            chat.watch_code(lambda: restarted.append(1), every=0)
+        self.assertEqual(restarted, [1])
+
+    def test_the_build_changes_with_the_page_files_so_an_old_page_reloads(self):
+        chat, d = self.chat, Path(self.tmp.name) / "static"
+        shutil.copytree(chat.STATIC, d)
+        with mock.patch.object(chat, "STATIC", d):
+            first = chat.build()
+            self.assertEqual(chat.build(), first)
+            self.assertEqual(chat.snapshot()["build"], first)
+            (d / "app.js").write_text((d / "app.js").read_text() + "\n")
+            self.assertNotEqual(chat.build(), first)
+
     def test_a_retried_send_lands_once(self):
         tok = self.chat.token()
         a = self.call("/api/send", {"text": "hi", "cid": "c-1"}, token=tok)[1]

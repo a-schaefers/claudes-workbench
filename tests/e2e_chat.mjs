@@ -2,7 +2,7 @@
 // real `wb chat serve`, and `wb chat` on the Claude side. Run: node tests/e2e_chat.mjs
 // Needs Playwright: PLAYWRIGHT=/path/to/node_modules/playwright (it isn't a workbench dependency).
 import { spawn, execFileSync } from 'node:child_process'
-import { mkdtempSync, writeFileSync, readFileSync, existsSync, rmSync } from 'node:fs'
+import { mkdtempSync, writeFileSync, readFileSync, existsSync, rmSync, statSync, utimesSync } from 'node:fs'
 import { createRequire } from 'node:module'
 import { tmpdir } from 'node:os'
 import { join, dirname } from 'node:path'
@@ -134,6 +134,31 @@ async function run(engine, device) {
     wb('chat', 'answer', id, 'expired', '--by', 'timeout')
     await until(async () => (await page.locator('.row.ask .meta').last().textContent()).includes('waits in the terminal'))
     if (await page.locator('.row.ask .choices').count()) throw new Error('the buttons are still there')
+  })
+  await check('a server that takes calls and never answers: the page heals itself once it is back, no reload', async () => {
+    // the 2026-11-18 report: "Reconnecting" until a hard refresh
+    await page.evaluate(() => { window.sameLoad = true })
+    server.kill('SIGSTOP')  // accepts at the kernel, answers nothing: past the page's 40 s watchdog
+    await page.fill('#input', 'sent while it hung')
+    await page.click('#send')
+    await sleep(46000)
+    server.kill('SIGCONT')
+    await until(() => messages().filter(m => m.text === 'sent while it hung').length === 1, 40000)
+    wb('chat', 'reply', '--text', 'Healed.')
+    await until(async () => (await page.locator('.row.claude .bubble').last().textContent()).includes('Healed.'), 40000)
+    await until(async () => await page.locator('#net').isHidden(), 20000)
+    if (!(await page.evaluate(() => window.sameLoad))) throw new Error('the page reloaded')
+    if (messages().filter(m => m.text === 'sent while it hung').length !== 1) throw new Error('landed twice')
+  })
+  await check('an updated page reloads itself, keyed, with the thread', async () => {
+    await page.evaluate(() => { window.sameLoad = true })
+    const css = join(ROOT, 'workbench/chat_static/app.css'), was = statSync(css)
+    try {
+      utimesSync(css, was.atime, new Date())
+      wb('chat', 'reply', '--text', 'After the update.')  // any change sends the new build
+      await until(async () => !(await page.evaluate(() => window.sameLoad)), 20000)
+      await until(async () => (await page.locator('.row.claude .bubble').last().textContent()).includes('After the update.'))
+    } finally { utimesSync(css, was.atime, was.mtime) }
   })
   await check('no script errors', async () => { if (errors.length) throw new Error(errors.join('; ')) })
   await browser.close()
