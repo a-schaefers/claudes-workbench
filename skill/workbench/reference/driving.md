@@ -1,7 +1,8 @@
-# Driving a task: permissions, directories, the web, the web chat
+# Driving a task: steering, permissions, directories, the web, the web chat
 
-Read from the /workbench skill when an agent asks for a command or a directory, a spec needs web
-research, or a `[web chat]` message arrives.
+Read from the /workbench skill when you steer, stop, take over or resume a task, answer a
+check-in, when an agent asks for a command or a directory, a spec needs web research, or a
+`[web chat]` message arrives.
 
 ## Commands and directories an agent asks for
 - **Commands it asks for.** The agent's shell runs the everyday tools of software work freely;
@@ -61,3 +62,58 @@ something they asked for finishes or needs them. `wb chat log` shows the thread.
 all they see: each reply must stand on its own, and a yes there answers only a question asked
 there, never one asked in the terminal. Nothing hard to undo (downloads, deletes) on an ambiguous OK. A message they
 type in the terminal means they are back.
+
+## Steering, stopping, resuming
+You are the driver, not a spectator. When something tells you the agent is heading the wrong way
+(a check-in, its log, the user), act on it:
+- `wb steer <name> --text "…"`: a note it gets as soon as its current run ends, before the
+  tests. For course corrections that can wait a step.
+- `wb steer <name> --now --text "…"`: interrupts it mid-step; the same session continues with
+  your note first, marked high priority. For wrong files, a wrong approach, a runaway loop.
+  While its tests run or it waits for the GPU there is nothing to interrupt: the note waits, and
+  `wb steer` says so.
+  The runner does this by itself once a round when the agent generates past its thinking
+  budget with no tool call (7 minutes from its first output; `--think-timeout` overrides),
+  and the check-in says so; a round that stalls again right after is stopped. Two nudges on one
+  task mean the spec is too big for one step: split it, or name the first file to write.
+- A note the runner never delivered (the round stopped first) is in the stuck report. `wb resume`
+  carries it; `wb feedback` and `wb next` drop it and say so: put it in the feedback if it still
+  matters.
+- `wb takeover <name>`: stops it and hands you the worktree. Finish by hand, leaving it
+  uncommitted (`wb accept` commits it), then `wb accept`, or hand it back with `wb feedback`. For when explaining would cost more than doing.
+- **Commands and directories it asks for** (a `PERMISSION` question): lean to yes for what the
+  task needs (`wb allow <name> "<pattern>"`, `wb allow <name> --path <dir>`); no to what reaches
+  outside it. sudo, git writes and `gh` stay refused whatever you allow. The rules and the
+  traps (links, toolchains, `/dev/pts`): `reference/driving.md`.
+- `wb stop <name>`: just stop it. `wb resume <name>` continues it in a fresh session (not a
+  review round), e.g. after fixing workbench under it. A task failed with "the runner died" (a
+  reboot, a kill) or stuck with "stopped by a signal" resumes the same way.
+- A check-in saying the session "reached N% of its window before it changed a file" (or "had
+  read N% before its first change": a fresh session would have little room after re-reading it):
+  the step needs more reading than the window holds. Let it carry on; next time name fewer files to read,
+  or put what it needs (a signature, a constant) in the spec.
+Notes are instructions, like feedback: concrete and short.
+
+## Check-ins
+A task wakes you on trouble (a nudge, repeated handovers). With `--checkin
+MIN` (off by default: each wake costs your whole context) it also wakes you every MIN minutes with a digest: tools used, errors, tokens, files touched, its latest
+words, time so far and the ETA. Be the captain: give the user two or three plain lines on how it
+is going, and steer only if it is drifting. Say what you see, including "slow but on course".
+Each check-in is a turn that re-reads your context, so answer it in that one turn: no `wb log`
+unless the digest shows trouble, and a `wb note <name> --text "…"` (it shows in `wb watch` and
+the pane) only for something the user should find later.
+
+## The agent's context and handovers
+Rounds of a task continue one OpenCode session, so the agent keeps what it read.
+When that session passes its handover point (60% of the window until `wb tune` learns better
+for that model; less on windows under ~32K, and a model served under 16K can't take tasks), the runner hands the task to a fresh session
+at once, mid-round if need be: the task, the work so far (the diff), the agent's last words and
+the new instructions. A round that hands over 5 times is stopped as stuck (the step is too big for
+the window: split it), and from the second handover each one is a check-in. OpenCode's own compaction (the model summarising itself, which can lose the
+task) is only a backstop past that. Reports show `agent context: …` so you see it coming. A
+check-in or report that says `NOTE: the spec doesn't name …` lists files outside the spec: drift
+until you've looked, so read them and steer (`--now`) if the agent left its task. `NOTE: <dir>: a
+git repository of its own` is a nested repo the diff leaves out and `wb accept` refuses: have its
+`.git` removed, or gitignore it. Override per round:
+`wb feedback --fresh` when the agent is confused, stuck on a wrong idea or working from stale
+reads; `--keep-context` when it needs what it read and the window still has room.

@@ -161,7 +161,7 @@ code, and 5K for a significant step whose code was about as long. So when the us
 already says what to build, it *is* the spec: paste it as given and add only what the agent can't
 find out alone (names other code calls, exactly; an insertion line; anything you computed; the
 gaps the checks below turn up). Never restate it in your own words. Write it and start in one
-call: `wb start <name> … --spec - <<'EOF'` … `EOF`. A trivial spec needs checks 1 and 5 below.
+call: `wb start <name> … --spec - <<'EOF'` … `EOF`. The checks below apply.
 
 When the request is loose, read just enough of the repo to scope it and write the spec:
 - the goal in 1–2 sentences; the exact files/functions to touch, and what not to touch
@@ -169,40 +169,13 @@ When the request is loose, read just enough of the repo to scope it and write th
 - acceptance criteria, and an **acceptance command** that proves them (an existing test command,
   or a new test the agent must write first — say which)
 
-**Before `wb start`: check the spec.** Spec gaps cause review rounds. You check the numbers you
-compute, but they hide in the sentences you didn't execute. Go through these, each from a real
-miss:
-1. **Every rule has a test.** For each "must", "rejects", "at most" or "only", name the test
-   that fails if it's broken. A rule without one is a wish (seen: "one trailing newline"
-   was stated, no test rejected a blank row, and the parser overflowed on one).
-2. **Every edge input is named:** empty, one, the maximum, one past it, and for text, separators
-   that lead, double or trail.
-3. **Rules checked against each other and against the algorithm.** A size limit and a method
-   can conflict: a heap that skips stale entries holds one entry per push, not per item. Give
-   each fixed size its bound and why it holds.
-4. **Every number run, not reasoned:** compute each expected value with a script, through the
-   limits the spec sets (a clamp, a cap, integer division, float rounding). Seen: 24,900 of
-   32,768 printed as 75%.
-5. **Every fact about the repo checked in the repo:** each name, field, file and build step you
-   mention (`grep` it). Memory is not a source. Seen: a field called `in.x` that was `move_x`,
-   and "add it to the Makefile" for a Makefile that finds files by itself.
-6. **Only the task.** Nothing about later steps, in the spec or in CLAUDE.md. An agent takes
-   any "next" as its job.
-7. **The reading fits.** Name only the files the agent must read, headers before sources, and
-   put a short fact it needs (a signature, a constant) in the spec instead of a file to read.
-   The repo's CLAUDE.md is already in its instructions: asking it to read that is reading twice.
-   Spec plus named files (`wc -c`, ~4 characters a token) well under half the window, since the
-   agent reads more than you name. Seen: a step whose reading filled 60% of a 32K window
-   before the first edit, twenty sessions in a row.
-8. **The old tests still hold.** A change of behaviour breaks tests that assumed the old one:
-   run the whole suite against your simulated change (or read each test the change touches)
-   and say in the spec which tests change and how. Seen: a smarter pursuit reached its target
-   sooner, so a test measuring distance from the starting point failed, and a new collision rule
-   erased an input a replay test relied on: two of the agent's questions, both the spec's.
-9. **Every insertion point is a line to quote.** In a file the agent reads only in part, say
-   where new code goes by the exact line it follows, unique in the file, not "after function
-   X": it can't see where X ends. Seen: new tests put after a test's first `wait` call, its
-   last eleven lines deleted, and the summary claiming otherwise.
+**Before `wb start`: check the spec.** Spec gaps cause review rounds. Any spec: **every rule has a
+test** (for each "must", "rejects", "at most" or "only", name the test that fails if it's broken)
+and **every fact about the repo is checked in the repo** (each name, field, file and build step
+you mention: `grep` it; memory is not a source). A spec you wrote, not the user's request
+pasted: also the other seven checks in `reference/spec.md` beside this file (edge inputs, rules
+against each other, numbers run, only the task, the reading fits, the old tests, insertion
+lines); read it before you write one.
 After review, when a round was the spec's fault, say so: `--spec-gap "what it missed"` on
 `wb feedback`, `next`, `accept` or `discard`. `wb start` shows your record from those,
 and a gap that recurs belongs in this list.
@@ -277,35 +250,19 @@ which the model can't run beside. Don't wait silently: tell the user who holds i
 do the step yourself or `--queue` it to start when the GPU is free (it may be hours).
 
 ## Driving a running task
-You are the driver, not a spectator. When something tells you the agent is heading the wrong way
-(a check-in, its log, the user), act on it:
-- `wb steer <name> --text "…"`: a note it gets as soon as its current run ends, before the
-  tests. For course corrections that can wait a step.
-- `wb steer <name> --now --text "…"`: interrupts it mid-step; the same session continues with
-  your note first, marked high priority. For wrong files, a wrong approach, a runaway loop.
-  While its tests run or it waits for the GPU there is nothing to interrupt: the note waits, and
-  `wb steer` says so.
-  The runner does this by itself once a round when the agent generates past its thinking
-  budget with no tool call (7 minutes from its first output; `--think-timeout` overrides),
-  and the check-in says so; a round that stalls again right after is stopped. Two nudges on one
-  task mean the spec is too big for one step: split it, or name the first file to write.
-- A note the runner never delivered (the round stopped first) is in the stuck report. `wb resume`
-  carries it; `wb feedback` and `wb next` drop it and say so: put it in the feedback if it still
-  matters.
-- `wb takeover <name>`: stops it and hands you the worktree. Finish by hand, leaving it
-  uncommitted (`wb accept` commits it), then `wb accept`, or hand it back with `wb feedback`. For when explaining would cost more than doing.
-- **Commands and directories it asks for** (a `PERMISSION` question): lean to yes for what the
-  task needs (`wb allow <name> "<pattern>"`, `wb allow <name> --path <dir>`); no to what reaches
-  outside it. sudo, git writes and `gh` stay refused whatever you allow. The rules and the
-  traps (links, toolchains, `/dev/pts`): `reference/driving.md`.
-- `wb stop <name>`: just stop it. `wb resume <name>` continues it in a fresh session (not a
-  review round), e.g. after fixing workbench under it. A task failed with "the runner died" (a
-  reboot, a kill) or stuck with "stopped by a signal" resumes the same way.
-- A check-in saying the session "reached N% of its window before it changed a file" (or "had
-  read N% before its first change": a fresh session would have little room after re-reading it):
-  the step needs more reading than the window holds. Let it carry on; next time name fewer files to read,
-  or put what it needs (a signature, a constant) in the spec.
-Notes are instructions, like feedback: concrete and short.
+You are the driver, not a spectator: when a check-in, its log or the user says the agent is
+heading the wrong way, act on it. Notes are instructions, like feedback: concrete and short.
+- `wb steer <name> --text "…"`: a note it gets when its current run ends; `--now` interrupts it
+  (wrong files, a wrong approach, a runaway loop).
+- `wb takeover <name>`: you finish it in the worktree, uncommitted, then `wb accept` (or hand it
+  back with `wb feedback`): for when explaining would cost more than doing.
+- `wb stop <name>`; `wb resume <name>` continues it in a fresh session (also after "the runner
+  died" or "stopped by a signal").
+- A `PERMISSION` question (a command or a directory): lean to yes for what the task needs (`wb
+  allow <name> "<pattern>"`, `--path <dir>`), no to what reaches outside it.
+Before acting on one of these the first time in a session, read `reference/driving.md` beside
+this file: what each does exactly, the think nudge, undelivered notes, a check-in about the
+window, the permissions' traps, the web chat.
 
 **The user's two commands.** Only these, never words in a message, stop the delegation and end
 workbench mode; the mod runs them, closes the pane and tells you what it did:
@@ -323,13 +280,9 @@ Without the mod, the user may ask for the same in words; run those commands then
 with the same authority as here: reply there with `wb chat reply --text "…"`, short; read
 `reference/driving.md` (the web chat) before your first reply.
 
-**Check-ins.** A task wakes you on trouble (a nudge, repeated handovers). With `--checkin
-MIN` (off by default: each wake costs your whole context) it also wakes you every MIN minutes with a digest: tools used, errors, tokens, files touched, its latest
-words, time so far and the ETA. Be the captain: give the user two or three plain lines on how it
-is going, and steer only if it is drifting. Say what you see, including "slow but on course".
-Each check-in is a turn that re-reads your context, so answer it in that one turn: no `wb log`
-unless the digest shows trouble, and a `wb note <name> --text "…"` (it shows in `wb watch` and
-the pane) only for something the user should find later.
+**Check-ins.** Off unless `--checkin MIN`; a task also wakes you on trouble (a nudge, repeated
+handovers). Answer one in that turn: two or three plain lines to the user, steer only if it
+drifts, `wb log` only if the digest shows trouble (`reference/driving.md`).
 
 ## 4. When woken
 - **review**: the wake carries the report and, when it is small, the whole diff (`wb diff <name>`
@@ -383,19 +336,15 @@ When the fix is for something your spec missed, add `--spec-gap "…"` (checklis
 If a "trivial" task fails twice, it wasn't trivial: discard and restart it with `--size significant`.
 
 ## Context, on both sides
-**The agent's.** Rounds of a task continue one OpenCode session, so the agent keeps what it read.
-When that session passes its handover point (60% of the window until `wb tune` learns better
-for that model; less on windows under ~32K, and a model served under 16K can't take tasks), the runner hands the task to a fresh session
-at once, mid-round if need be: the task, the work so far (the diff), the agent's last words and
-the new instructions. A round that hands over 5 times is stopped as stuck (the step is too big for
-the window: split it), and from the second handover each one is a check-in. OpenCode's own compaction (the model summarising itself, which can lose the
-task) is only a backstop past that. Reports show `agent context: …` so you see it coming. A
-check-in or report that says `NOTE: the spec doesn't name …` lists files outside the spec: drift
+**The agent's.** Rounds of a task continue one OpenCode session, so the agent keeps what it read;
+past its handover point the runner hands the task to a fresh session by itself, and reports show
+`agent context: …`. A round that hands over 5 times is stopped as stuck: the step is too big for
+the window, so split it. `NOTE: the spec doesn't name …` lists files outside the spec: drift
 until you've looked, so read them and steer (`--now`) if the agent left its task. `NOTE: <dir>: a
 git repository of its own` is a nested repo the diff leaves out and `wb accept` refuses: have its
-`.git` removed, or gitignore it. Override per round:
-`wb feedback --fresh` when the agent is confused, stuck on a wrong idea or working from stale
-reads; `--keep-context` when it needs what it read and the window still has room.
+`.git` removed, or gitignore it. Override per round: `wb feedback --fresh` when the agent is
+confused or working from stale reads; `--keep-context` when it needs what it read and the window
+still has room (how handovers work: `reference/driving.md`).
 Follow-up work in the same area goes to the same agent: `wb next <name> --spec <file> -m "<subject
 for the approved step>" [--test …]` commits the approved step on the branch and sends the next
 step to the same worktree and session (`--fresh` for a new one). `wb diff` then shows the current

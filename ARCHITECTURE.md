@@ -41,9 +41,11 @@ Contents: [The pieces](#the-pieces) · [Why it's built this way](#why-its-built-
 - **`/workbench`** (`skill/workbench/SKILL.md`, linked to `~/.claude/skills/workbench`) turns
   workbench mode on for the session and is Claude's procedure in it: size the work, write the
   spec, dispatch, drive, review, accept. SKILL.md holds what every session needs; what only some
-  do (model servers and the weekly check, the agents' skill library, images, permissions, the web
-  and the web chat) is in `reference/*.md` beside it, read when it comes up: every line of SKILL.md
-  rides along on each of Claude's calls (it was 46KB; the 2026-11-17 measurement). The review is in
+  do (model servers and the weekly check, the agents' skill library, images, steering and
+  check-ins, handovers, permissions, the web and the web chat, the checks for a spec Claude
+  wrote) is in `reference/*.md` beside it, read when it comes up: every line of SKILL.md rides
+  along on each of Claude's calls (it was 46KB; the 2026-11-17 measurement; 34KB to 30KB on
+  2026-11-18). The review is in
   proportion to the task's size. The user types it once, then asks for things as usual;
   the mod keeps the mode (and reminds Claude of it after a compaction or `/clear`) until a quit
   command. Only the user starts it; Claude never delegates on its own (the mod also counts a
