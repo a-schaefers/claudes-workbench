@@ -220,7 +220,10 @@ is registered without tools and gets no tasks.
 **Can the models run on another machine?** Yes. Give that provider `"local": true` in
 `~/.config/workbench/models.json`. Workbench doesn't measure that machine's GPU, so its tasks never
 wait for yours. Ollama's cloud models (`:cloud`) run on ollama.com and aren't counted as local
-unless you mark them the same way.
+unless you mark them the same way. Set the flag before `wb model add --url`, make the server listen
+on your network (firewalled to this machine: model servers have no login), and know that plain
+`http://` carries your code unencrypted; Tailscale encrypts it, and its address still needs the
+flag. A second machine runs its own model beside yours; it doesn't make one model faster.
 
 **My server wants an API key.** Put it in the provider's `options.apiKey` in OpenCode's config. If
 it reads `{env:NAME}`, add `NAME` to `env` in `~/.config/workbench/commands.json`: the agents get

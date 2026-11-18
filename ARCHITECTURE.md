@@ -1283,8 +1283,10 @@ their own layer in its place (`runner.agent_env`), so `wb doctor` notes it when 
 or `<label>.local`, or any of the machine's own addresses (`_own_addresses`: the host name's
 `getaddrinfo` and `ip -o addr`, so a LAN or Tailscale IP counts) (`_this_host`). A
 provider elsewhere counts when models.json gives it `"local": true`; it is then `remote`: it
-takes no GPU lease here, so tasks on it run at once and the remote server schedules them. The
-baseURL's `{env:NAME}` and `{file:path}` are resolved first, as OpenCode does (`_expand`: unset or
+takes no GPU lease here, so tasks on it run at once and the remote server schedules them.
+OpenCode talks to it directly at the baseURL (plain `http://` is unencrypted and the prompts carry
+the code: README's FAQ suggests a firewall and Tailscale); nothing of workbench runs there, and no
+model is split across machines. The baseURL's `{env:NAME}` and `{file:path}` are resolved first, as OpenCode does (`_expand`: unset or
 unreadable is empty, a relative path is the config directory's, and a name the agent's
 environment drops, `runner.SECRET_ENV` unless commands.json `env` passes it, is empty too, since
 the agent's OpenCode won't see it). A provider with a baseURL that is skipped (disabled, not

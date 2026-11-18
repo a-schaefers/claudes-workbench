@@ -154,7 +154,10 @@ agents: a window of 32K or more (16K at the least), tool calls on (vLLM `--enabl
 model a process (llama-server, vLLM). Ollama running with no provider: `wb model add
 ollama/<model>` writes it itself. `wb doctor` names each provider it skipped and why; one on
 another host that is the user's own server (WSL2's Windows host, a LAN box) needs their yes for
-`local: true`. Ollama cloud models (`:cloud`) run off this machine: never register one without
+`local: true`, set in models.json before `wb model add --url` (which refuses an address off this
+machine without it). Its server must listen on the LAN, firewalled to this machine (model servers
+have no login); plain HTTP carries the code unencrypted (Tailscale encrypts; its address still
+needs the flag). Another machine adds a model beside this GPU's, never speed to one model. Ollama cloud models (`:cloud`) run off this machine: never register one without
 the user's explicit yes.
 
 **Updating workbench.** The mod checks weekly and tells the user; `/workbench-update` is theirs.
