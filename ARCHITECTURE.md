@@ -877,7 +877,12 @@ directory each in the config's `skills` list). The user's personal `~/.claude/sk
 synced Claude app skills, `synced/*/*/SKILL.md`) are denied by name (`denied_skills`): an agent
 once read a personal skill as a "newer task" and went off into the user's files. A name the
 worktree's own `.claude/skills` also has stays allowed (the project's skill wins); `workbench` and
-task.json's `deny_skills` are always denied. `wb skill add` refuses the personal names.
+task.json's `deny_skills` are always denied. `wb skill add` refuses the personal names. Claude's
+own skills and plugins (under `~/.claude`, outside the lane) never reach the agent either: the
+skill has Claude apply the ones that fit a task itself and carry the result into the spec as
+decisions and concrete rules, review against them, and turn a correction that recurs into a
+short library skill (*The skill library*). Workbench names no plugin and no field: which skills
+the user has is Claude Code's, and only the driver sees them.
 
 **`ask_reviewer`**, an MCP tool for one blocking question to Claude (*Talking to a running agent*).
 OpenCode lists it as `workbench_ask_reviewer`.

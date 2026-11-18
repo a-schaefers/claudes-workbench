@@ -1,6 +1,6 @@
 {
   "name": "workbench",
-  "version": "0.90.3",
+  "version": "0.90.4",
   "description": "Live pane, status line and wake-ups for tasks Claude delegates to local OpenCode agents (wb).",
   "author": {
     "name": "Adam Schaefers"

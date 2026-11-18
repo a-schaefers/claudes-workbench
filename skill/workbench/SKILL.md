@@ -257,6 +257,16 @@ page's errors as text, and make it `--test` or part of it; screenshots are for y
 (`chromium`, `google-chrome`, a global `lighthouse`) asks first, as `curl` does, since it fetches
 any URL: allow it for the task, `--always` when the user wants it for every task.
 
+**Your skills reach the agent as decisions.** Before writing a spec, check which skills and tools
+in your own session fit the task, whatever the field: a design plugin for a UI, a writing guide
+for docs, a security checklist for auth code, the user's own. Apply them yourself and put the
+result in the spec: the decisions and the concrete rules this task must meet (the palette as
+tokens, the terms and tone, the checks the code must pass), never the skill itself or "follow X":
+the agent can't load your skills, and they are written for you. Review the diff against them too.
+When the same correction from one of your skills comes up in a second task, it is a lesson: give
+the agents a short library skill of just its rules for doing the work (`wb skill add`, or `wb
+skill import` from the original when its license allows), handed out on the tasks it fits.
+
 **Size every task to what the model that takes it finishes, as measured.** One concern, with the
 files named, and no bigger than its slice: `wb models` (and `wb start`) give each model's, e.g.
 `~3 files, ~150 new lines per task`. The slice comes from the context window the model is served
