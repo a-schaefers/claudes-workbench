@@ -509,6 +509,27 @@ test('a notify.jsonl past what one read takes is read from its end, and still wa
   expect(woken.filter(t => t.includes('REPORT'))).toHaveLength(1)
 })
 
+test('outside workbench mode another session\'s running task opens no pane and fills no status line', async ($, on) => {
+  // 2026-11-17: a session opened in another project showed the pane and the task's status line for
+  // a task this session never started, and /workbench-quit couldn't clear it
+  const clock = mock.clock(on, { now: 1_800_000_000_000 })
+  const files: Record<string, string> = {}
+  task(files, 'theirs', 'running', { repo: '/home/u/b', cwd: '/home/u/b' })
+  const ui: string[] = []
+  const dirs = ['theirs']
+  fakeTasks(on, files, dirs, true, ui)
+  await $.session.start({ cwd: '/home/u/a', surface: 'terminal', isInteractive: true })
+  await clock.advance(3000)
+  expect(ui).not.toContain('open workbench')
+  expect(ui.filter(u => u.includes('theirs'))).toEqual([])
+  // its own task does both
+  task(files, 'ours', 'running', { repo: '/home/u/a', cwd: '/home/u/a' })
+  dirs.push('ours')
+  await clock.advance(6000)
+  expect(ui).toContain('open workbench')
+  expect(ui.filter(u => u.startsWith('status ')).at(-1)).toBe('status ⚒ wb · ours running r1')
+})
+
 test('the pane follows the running task: its whole history, then what it is doing now', async ($, on) => {
   const clock = mock.clock(on, { now: 1_800_000_000_000 })
   const ts = 1_800_000_000

@@ -707,17 +707,21 @@ async function poll($: any) {
       await update($, tasks, () => list)
     }
     const on = (await read($, chat)).delegating
-    const live = list.filter(t => ACTIVE.has(t.phase) && t.phase !== 'asking')
     mem.hasActive = list.some(t => ACTIVE.has(t.phase))
-    const asking = list.filter(t => t.phase === 'asking')
-    const waiting = list.filter(t => NEEDS.has(t.phase) && t.phase !== 'asking')
+    // Outside workbench mode, only this session's tasks show: another session's task running
+    // opened the pane and filled the status line in a session the user kept off workbench, and
+    // /workbench-quit couldn't clear it (2026-11-17)
+    const shown = on ? list : list.filter(t => mine(t))
+    const live = shown.filter(t => ACTIVE.has(t.phase) && t.phase !== 'asking')
+    const asking = shown.filter(t => t.phase === 'asking')
+    const waiting = shown.filter(t => NEEDS.has(t.phase) && t.phase !== 'asking')
     const parts = [
       ...live.map(t => `${t.name} ${t.phase} r${t.round}`),
       ...asking.map(t => `${t.name} asks`),
       ...(waiting.length ? [`${waiting.length} awaiting review`] : []),
     ]
     $.ui.status(parts.length ? `⚒ wb · ${parts.join(' · ')}` : on ? '⚒ wb · workbench mode' : undefined)
-    if ((live.length || on) && !mem.paneOpened) { // open once per load, in workbench mode or when work starts
+    if ((live.length || on) && !mem.paneOpened) { // open once per load, in workbench mode or when its work starts
       mem.paneOpened = true
       void $.ui.open({ id: PANE, title: 'Workbench' })
     }
