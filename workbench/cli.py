@@ -2300,6 +2300,8 @@ def cmd_doctor(a):
             capped = "max_tokens" in (e.get("options") or {})
             line(capped, f"{pid}/{name} caps its output on Ollama (options.max_tokens; Ollama ignores "
                  "the max_completion_tokens OpenCode sends)" + ("" if capped else f": wb model add {pid}/{name}"))
+            if stall := router.thinking_stall(f"{pid}/{name}", e):
+                print(f"--  {stall}")
             if prov["root"] in down:
                 continue
             served = models.ollama_served_context(prov["root"], name)

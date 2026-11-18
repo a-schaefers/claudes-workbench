@@ -745,6 +745,23 @@ class Budgets(Base):
         self.assertEqual((spec["think_timeout"], spec["silence_timeout"]), (b["think"], b["silence"]))
         wait_phase("t-slow", {"review"})
 
+    def test_a_thinking_model_that_would_outlast_its_budget_on_this_machine_is_flagged(self):
+        # a 64K entry left thinking with a 16K cap, spilled to 21 tok/s, sat silent 14 minutes
+        # at a time (2026-11-18); the same settings on a fast card are fine
+        m = models.resolve("mimo")
+        entry = {"reasoning": True, "limit": {"context": 32768}, "options": {"max_tokens": 16384}}
+        self.assertEqual(router.thinking_stall(m.id, entry), "")          # unmeasured: no claim
+        router.record_speed(m.id, self.session(60, 2800))                  # fast: 16384/60 < 420 s
+        self.assertEqual(router.thinking_stall(m.id, entry), "")
+        router.record_speed(m.id, self.session(10, 2800))
+        router.record_speed(m.id, self.session(10, 2800))                  # now the median is slow
+        why = router.thinking_stall(m.id, entry)
+        self.assertIn("16384-token output cap", why)
+        self.assertIn('reasoningEffort to "none"', why)
+        self.assertEqual(router.thinking_stall(m.id, {**entry, "options": {
+            "max_tokens": 16384, "reasoningEffort": "none"}}), "")      # thinking off: fine
+        self.assertEqual(router.thinking_stall(m.id, {**entry, "reasoning": False}), "")
+
 
 if __name__ == "__main__":
     unittest.main()
