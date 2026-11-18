@@ -1353,16 +1353,21 @@ def cmd_scout(a):
         if prov["engine"] == "ollama" and not up:
             print(f"  {pid}: Ollama isn't answering at {prov['root']}, so what it has and serves is unknown")
         installed = {x["name"]: x for x in models.ollama_installed(prov["root"])} if up else {}
+        other = prov["engine"] != "ollama" and not models._fake() and \
+            models._ask(f"{prov['url'].rstrip('/')}/models", prov["key"], timeout=1) is not None
         for name in prov["models"]:
             m = registered.get(f"{pid}/{name}")
             disk = installed.get(name) or installed.get(f"{name}:latest") or {}
-            served = models.ollama_served_context(prov["root"], name) if up else None
+            said = models.server_facts(prov["root"], name, prov["key"]) if other else {}
+            if said.get("weights"):
+                disk = {"size": said["weights"]}
+            served = models.ollama_served_context(prov["root"], name) if up else said.get("context")
             ctx = ((m.config.get("limit") or {}).get("context") or 0) if m else 0
             facts = " · ".join(x for x in (
                 f"{hardware.size(disk.get('size'))} on disk" if disk.get("size") else "",
                 disk.get("params") or "", disk.get("quant") or "",
                 f"{ctx // 1024}K context" if ctx else "no limit.context" if m else "",
-                f"Ollama serves {served // 1024}K" if served else "") if x)
+                f"{'Ollama' if up else 'the server'} serves {served // 1024}K" if served else "") if x)
             rs = real.get(f"{pid}/{name}", [])
             used = (f"{len(rs)} real task(s), {sum(r['outcome'] == 'accepted' for r in rs)} accepted, "
                     f"last {time.strftime('%Y-%m-%d', time.localtime(max(r['ts'] for r in rs)))}"
@@ -1747,10 +1752,13 @@ def cmd_model(a):
         except Exception as e:
             die(f"{provider} can't describe {name} ({e}): is it pulled? (--pull downloads it)")
         caps = facts.get("capabilities") or []
-        # the context the server actually serves: what Ollama says it gives this model, else what
+        # the context the server actually serves: what it says it gives this model, else what
         # this provider's other models are set to. Never Ollama's trained length: it serves its
         # own small default then, and the prompt was cut off silently (the 2026-11-16 audit)
-        served = models.ollama_served_context(prov["root"], name) if prov["engine"] == "ollama" else None
+        other = {} if prov["engine"] == "ollama" or models._fake() else \
+            models.server_facts(prov["root"], name, prov["key"])
+        served = models.ollama_served_context(prov["root"], name) if prov["engine"] == "ollama" \
+            else other.get("context")
         siblings = [(e.get("limit") or {}).get("context") for e in prov["models"].values()]
         ctx = a.context or served or next((c for c in siblings if c), None)
         if prov["engine"] == "ollama":
@@ -1763,13 +1771,17 @@ def cmd_model(a):
         elif not ctx and not ((prov["models"].get(name) or {}).get("limit") or {}).get("context"):
             # an entry with no window: no handovers, no compaction, and the server cut the
             # session off mid-task (the 2026-11-16 audit)
-            die(f"{provider} isn't Ollama, so wb can't ask it what window it serves {name}: pass "
-                "--context N, the context the server was started with (llama.cpp -c, LM Studio's "
-                "context length, vLLM --max-model-len)")
+            die(f"{provider} doesn't say what window it serves {name} (LM Studio: not loaded yet): "
+                "pass --context N, the context the server was started with (llama.cpp -c, LM "
+                "Studio's context length, vLLM --max-model-len)")
         if ctx and ctx < models.MIN_WINDOW:
             die(f"{a.id}: {models.small_window_why(ctx)}")
+        if a.context and other.get("context") and a.context > other["context"]:
+            print(f"--  {provider} serves {name} a {other['context'] // 1024}K window, below --context "
+                  f"{a.context}: it would cut prompts off until the server is started with more")
+        tools = "tools" in caps if caps else other.get("tools") is not False  # LM Studio says
         entry = {"name": a.label or name,
-                 "tool_call": "tools" in caps if caps else True,
+                 "tool_call": tools,
                  "reasoning": "thinking" in caps if caps else True}
         if ctx:
             out = ctx // 8  # 4K on a 32K window; a bigger window writes bigger files in one call
@@ -2218,6 +2230,16 @@ def cmd_doctor(a):
                      "nothing compacts before the server cuts them off: wb model add "
                      f"{pid}/{name}" + ("" if ollama else " --context N (the window it serves)"))
             if not ollama:
+                # only a server running this model is asked: a down one cost seconds a model
+                served = models.server_facts(prov["root"], name, prov["key"])["context"] \
+                    if (states.get(f"{pid}/{name}") or {}).get("resident") else None
+                if said and served and said > served:
+                    line(False, f"{pid}/{name} says a {said // 1024}K context but the server serves "
+                         f"{served // 1024}K: it would cut prompts off (start it with a bigger "
+                         f"window, or wb model add {pid}/{name} --context {served})")
+                elif said and served and served > said:
+                    print(f"--  {pid}/{name}: the server serves {served // 1024}K, the entry says "
+                          f"{said // 1024}K; wb model add {pid}/{name} --context {served} lets its tasks grow")
                 continue
             capped = "max_tokens" in (e.get("options") or {})
             line(capped, f"{pid}/{name} caps its output on Ollama (options.max_tokens; Ollama ignores "

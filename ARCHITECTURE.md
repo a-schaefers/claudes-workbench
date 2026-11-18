@@ -993,9 +993,9 @@ the slice past the guess; the smallest that went badly lowers it below its size.
 measured steps went well, 1 badly)`). Check-ins and reports name changed files the spec never
 mentions (`NOTE: the spec doesn't name src/util.c`), where an agent's drift shows first.
 
-The window itself comes from what Ollama serves the model (*Managing the set*): `wb model add`
+The window itself comes from what the server serves the model (*Managing the set*): `wb model add`
 writes it, with an output budget of an eighth, and `wb doctor` flags an entry that claims more
-than Ollama serves (prompts would be cut off) or less (tasks could be bigger), or has none.
+than the server serves (prompts would be cut off) or less (tasks could be bigger), or has none.
 
 **Claude's record as a spec writer.** Most review rounds trace back to the spec: a rule with no
 test, two rules that conflict, a name taken from memory. The skill has a checklist to go through
@@ -1296,7 +1296,7 @@ model id; a model's entry is merged over its provider's (`{**provider, **model}`
 - `skip`: leave the model (or every model of the provider) out;
 - `sizes`: the task sizes it may take (`wb model sizes`; empty means both);
 - `vram_gb`: the GPU memory it takes (decimal GB), for sharing and for `fits`;
-- `weights_gb`: its size, which always overrides Ollama's figure (servers can't report one);
+- `weights_gb`: its size, which always overrides the server's figure (for one that can't report it);
 - `label`: the display name (also in `wb accept`'s commit message);
 - `engine` (`ollama`/`server`): per provider only;
 - `local: true`: on a provider, counts it although it is on another host; on an Ollama cloud
@@ -1326,8 +1326,24 @@ doctor` print the reason. `status(m, down)` takes the Ollama roots a caller alre
 answering (doctor) and doesn't ask them again. `remedy(m, state)` is the next step for a reason
 (none when the reason says it already), and `may_come_up(state)` whether the model may run by the
 time a queued task gets the GPU (Ollama not answering, a server not running). `weights()`:
-`weights_gb`, else Ollama's size (0 for a cloud model), else 0; the router weighs only a model that
-can run (and `fits` only that one), so a down server isn't asked again per model.
+`weights_gb`, else Ollama's size (0 for a cloud model), else what another server says
+(`server_facts`), else 0; the router weighs only a model that can run (and `fits` only that one),
+so a down server isn't asked again per model.
+
+**What other servers say** (`server_facts(root, name, key)` → `{context, weights, tools}`, each
+None when unsaid; cached `FACTS_TTL`, 30 s, misses too, since `weights()` runs on every routing).
+Only Ollama's API was read, so on any other server the router ranked models without their sizes,
+checked no fit, and every window had to be typed in (2026-11-17). Each server answers its own
+call (the fields as each project's docs and source gave them, 2026-11-17): LM Studio 0.4+'s
+`GET /api/v1/models` (`size_bytes`, a loaded instance's `config.context_length`, so a model it
+hasn't loaded has no window yet, and `capabilities.trained_for_tool_use`); llama-server's
+`/v1/models` card (`meta.size`) and `GET /props?model=<id>&autoload=false`
+(`default_generation_settings.n_ctx`: one slot's window, `-c` split across an explicit
+`--parallel` unless the KV cache is unified;
+`autoload=false` so a router-mode server isn't made to load the model to answer); vLLM's and
+SGLang's `max_model_len` on the `/v1/models` card. A server listing one model answers for any
+name (`_serves` otherwise). Sharing the GPU stays Ollama's (`can_share`): the others can't say
+what they hold.
 
 **Residency** (`make_resident(m, keep, warn)`, called by the runner under the lease). A model
 `status` says can't run raises `RuntimeError` (its reason and remedy) before anything is freed: a
@@ -1455,10 +1471,12 @@ Modelfile's `num_ctx`, `OLLAMA_CONTEXT_LENGTH`), else the provider's other model
 never the trained length: with none of those, Ollama serves its own default (often 4K-8K, below
 OpenCode's ~10K-token prompt), so add refuses and says to set `OLLAMA_CONTEXT_LENGTH` or pass
 `--context` (the 2026-11-16 audit: a stock Ollama got a 256K entry and cut prompts off silently);
-the trained length only caps the result. A provider that isn't Ollama can't be asked, so add
-needs `--context N` there (the window the server was started with) unless a sibling or the
-entry itself already has one: an entry with no window gets no handovers and no compaction (the
-2026-11-16 audit). An Ollama provider must answer first (`ollama_answers`), so a down Ollama is
+the trained length only caps the result. Another server's window is what it says
+(`server_facts`), else `--context N` (the window it was started with), else a sibling's or the
+entry's own; with none add refuses ("doesn't say what window it serves", LM Studio's case before
+it loads the model): an entry with no window gets no handovers and no compaction (the 2026-11-16
+audit). A `--context` past what the server says gets a `--` line (prompts would be cut off), and
+LM Studio's `trained_for_tool_use: false` writes `tool_call: false`. An Ollama provider must answer first (`ollama_answers`), so a down Ollama is
 named ("Ollama isn't answering at <root>: start it") rather than a pull's traceback or a describe
 blamed on a missing pull; a failed pull is "pulling <name> failed: <reason>". It merges into an existing entry, so hand-added keys and options stay; a config with
 `providers` instead of `provider` is read too. A model Ollama can't describe gets "is it pulled?
@@ -1476,10 +1494,11 @@ touched. Any other server gets the same in one command: `wb model add <provider>
 "options": {"baseURL": "<baseURL>"}}` first (`add_server_provider`; refused for a URL that isn't
 http(s), or that isn't on this machine unless models.json gives the provider `local: true`), and
 `--start CMD`/`--stop CMD` set the model's `start`/`stop` (a server that runs one model a process:
-llama-server, vLLM; LM Studio's `lms load`/`lms unload`). Workbench isn't tied to Ollama: it
-gets more from Ollama (pulls, the served context, sharing the GPU), and any server OpenCode can
-reach works, with `--context` and `start`/`stop` saying what the server can't (only Ollama was
-given a command for its provider, and the skill steered every first run to it: 2026-11-17).
+llama-server, vLLM; LM Studio's `lms load`/`lms unload`). Workbench isn't tied to Ollama: any
+server OpenCode can reach works, its size and window read where it says them (`server_facts`),
+with `--context` and `start`/`stop` saying what it can't (only Ollama was given a command for its
+provider, and the skill steered every first run to it: 2026-11-17). Ollama keeps pulls, deletes
+and sharing the GPU.
 `wb model retire <id>
 [--delete]` removes the entry (refusing OpenCode's default model) and with `--delete` the weights
 (an Ollama that can't delete them is reported with `ollama rm <name>` after the entry is gone, a
@@ -1492,9 +1511,11 @@ entry of any engine with no `limit.context` (no handovers, no compaction: `wb mo
 with `--context N` for a server), an Ollama entry without `options.max_tokens` (`wb model add
 <id>` writes it), and a provider with a `url_problem`; it compares `limit.context` with what
 Ollama serves (more is BAD: prompts would be cut off silently; less is a note: tasks could be
-bigger; unknown is a note). `ollama_served_context` skips `/api/show` (10 s, not 30) when
+bigger; unknown is a note), and the same for another server running the model (`server_facts`;
+one not running isn't asked). `ollama_served_context` skips `/api/show` (10 s, not 30) when
 `/api/ps` had no answer, and uses `OLLAMA_CONTEXT_LENGTH` only for an Ollama on this machine.
-`wb scout` likewise asks each Ollama provider once and says when it isn't answering. It names each
+`wb scout` likewise asks each Ollama provider once and says when it isn't answering, and asks
+another server once whether it answers before reading each model's size and window from it. It names each
 config file it read, each skipped provider with its reason, a set `$OPENCODE_CONFIG`, and an
 Ollama that answers while OpenCode has no provider at all.
 
@@ -2834,6 +2855,9 @@ push: every change is a pull request that merges once `check` is green and it is
   export fields `context_state`, `measure_speed` and `transcript` read) → `tests/fake_opencode.py`
   in the same commit, `RealOpenCodeRun` for a field it doesn't check yet, and one real run
   (`wb start --trial`, CLAUDE.md).
+- **A model server's API fields** (`models.server_facts`: LM Studio, llama-server, vLLM/SGLang;
+  `ollama_served_context`, `weights` for Ollama) → the `Real` tests in `tests/test_portable.py`
+  that imitate them, and the README's FAQ where it says what each server needs set.
 - **A git call on a task's worktree** → through `gitops.git` (pinned to the recorded git dir, no
   hooks), never `git -C <worktree>` by hand; parsed output → a porcelain or `-z` form.
 - **Permissions or the config layer** (`context.py`, `write_config_layer`) → the real-OpenCode
