@@ -433,7 +433,7 @@ def run_round(task: store.Task, n: int, keep: bool = False) -> dict:
     threading.Thread(target=_reader, args=(proc.stdout, q), daemon=True).start()
     threading.Thread(target=_steer_bell, args=(task, proc, q), daemon=True).start()
 
-    detector = StuckDetector(**spec.get("stuck", {}))
+    detector = StuckDetector(**spec.get("stuck", {}), worktree=task.worktree)
     wall, silence = float(spec.get("round_timeout", 2400)), float(spec.get("silence_timeout", 900))
     think = float(spec.get("think_timeout") or 0)
     # A shell command OpenCode moved to the background (past 2 minutes it does, and the turn
