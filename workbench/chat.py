@@ -28,6 +28,7 @@ import subprocess
 import sys
 import threading
 import time
+import zlib
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
@@ -42,6 +43,8 @@ MAX_BODY = 32 * 1024
 MAX_STREAMS = 16        # open /api/stream connections (each holds a thread)
 PING_EVERY = 15         # seconds between keep-alive comments on a stream
 TIMEOUT = 30            # seconds a connection may stall (more than PING_EVERY: streams write by then)
+UNACKED_MS = 45_000     # a stream whose writes go unacknowledged this long is dead (Linux)
+RELOAD_EVERY = 10       # seconds between looks at the server's own code
 # macOS's App Store and standalone Tailscale apps keep the CLI in the bundle, off PATH
 TAILSCALE_APP = "/Applications/Tailscale.app/Contents/MacOS/Tailscale"
 STATIC = Path(__file__).parent / "chat_static"
@@ -137,7 +140,15 @@ def pending() -> list[dict]:
 
 
 def snapshot() -> dict:
-    return {"messages": thread(), "asks": asks(), "listener": listener(), "now": store.now()}
+    return {"messages": thread(), "asks": asks(), "listener": listener(), "build": build(),
+            "now": store.now()}
+
+
+def build() -> str:
+    """The page's files as served now: a page that loaded other ones reloads itself, so an update
+    never leaves a phone running the old page against the new server."""
+    files = [(f.name, f.stat().st_mtime_ns, f.stat().st_size) for f in sorted(STATIC.iterdir())]
+    return format(zlib.crc32(repr(files).encode()), "x")  # not hash(): it differs per process
 
 
 # ---- permission prompts ----
@@ -234,6 +245,7 @@ class Hub:
     def __init__(self):
         self.cond = threading.Condition()
         self.version = 0
+        self.open: list = []  # the open streams' handlers, oldest first
         threading.Thread(target=self._run, daemon=True).start()
 
     def bump(self) -> None:
@@ -242,29 +254,44 @@ class Hub:
             self.cond.notify_all()
 
     def _run(self) -> None:
+        while True:  # a hub that died would leave every page without news: start it again
+            try:
+                self._watch()
+            except Exception as e:
+                print(f"web chat: the file watcher failed ({e!r}); starting it again",
+                      file=sys.stderr, flush=True)
+                time.sleep(1)
+            self.bump()
+
+    def _watch(self) -> None:
         w = Watcher(chat_dir())
         pid, pidfd = None, None
-        while True:
-            st = store.read_json(chat_dir() / "listener.json", None) or {}
-            if st.get("pid") != pid:
-                if pidfd is not None:
-                    os.close(pidfd)
-                pid, pidfd = st.get("pid"), None
-                try:
-                    pidfd = os.pidfd_open(int(pid)) if pid else None
-                except (OSError, ValueError, AttributeError):
-                    pidfd = None
-            if not w.native or w.polled:  # no inotify, or chat/ fell back to looking
-                w.wait(1)
-            else:
-                ready, _, _ = select.select([w.fd] + ([pidfd] if pidfd is not None else []), [], [], 60)
-                w.read()
-                if pidfd is not None and pidfd in ready:  # the listener is gone
-                    os.close(pidfd)
-                    pidfd = None
-                time.sleep(0.02)  # gather a burst of writes into one wake
-                w.read()
-            self.bump()
+        try:
+            while True:
+                st = store.read_json(chat_dir() / "listener.json", None) or {}
+                if st.get("pid") != pid:
+                    if pidfd is not None:
+                        os.close(pidfd)
+                    pid, pidfd = st.get("pid"), None
+                    try:
+                        pidfd = os.pidfd_open(int(pid)) if pid else None
+                    except (OSError, ValueError, AttributeError):
+                        pidfd = None
+                if not w.native or w.polled:  # no inotify, or chat/ fell back to looking
+                    w.wait(1)
+                else:
+                    ready, _, _ = select.select([w.fd] + ([pidfd] if pidfd is not None else []), [], [], 60)
+                    w.read()
+                    if pidfd is not None and pidfd in ready:  # the listener is gone
+                        os.close(pidfd)
+                        pidfd = None
+                    time.sleep(0.02)  # gather a burst of writes into one wake
+                    w.read()
+                self.bump()
+        finally:
+            w.close()
+            if pidfd is not None:
+                os.close(pidfd)
 
 
 # ---- the server ----
@@ -340,20 +367,40 @@ class Handler(BaseHTTPRequestHandler):
     def _stream(self):
         """Server-sent events: the whole state on connect and on every change, a ping between.
         The client takes each state as the truth, so a reconnect is a resync."""
+        hub = self.hub
         if not self.streams.acquire(blocking=False):
-            return self._json(503, {"error": "too many open streams"})
+            # Full: the oldest stream gives way, since a stream the phone dropped without a word
+            # (asleep, a new network) lingers while a live page can't get in; once the cap filled
+            # with those, the page said "Reconnecting" until a hard refresh (2026-11-18)
+            with hub.cond:
+                if hub.open:
+                    hub.open[0].evicted = True
+                hub.version += 1
+                hub.cond.notify_all()
+            if not self.streams.acquire(timeout=5):
+                return self._json(503, {"error": "too many open streams"})
+        self.evicted = False
+        with hub.cond:
+            hub.open.append(self)
+        if hasattr(socket, "TCP_USER_TIMEOUT"):  # a peer gone silent fails the next write
+            try:
+                self.connection.setsockopt(socket.IPPROTO_TCP, socket.TCP_USER_TIMEOUT, UNACKED_MS)
+            except OSError:
+                pass
         try:
             self.send_response(200)
             self.send_header("Content-Type", "text/event-stream")
             self._security_headers()
             self.send_header("X-Accel-Buffering", "no")
             self.end_headers()
-            hub, seen, last_body, sent = self.hub, -1, None, time.monotonic()
+            seen, last_body, sent = -1, None, time.monotonic()
             while True:
                 with hub.cond:
                     woke = hub.cond.wait_for(lambda: hub.version != seen,
                                              timeout=max(0.0, PING_EVERY - (time.monotonic() - sent)))
                     seen = hub.version
+                if self.evicted:
+                    return
                 if woke:
                     snap = snapshot()
                     body = json.dumps({k: v for k, v in snap.items() if k != "now"})
@@ -374,6 +421,8 @@ class Handler(BaseHTTPRequestHandler):
         except (BrokenPipeError, ConnectionResetError, OSError):
             pass
         finally:
+            with hub.cond:
+                hub.open.remove(self)
             self.streams.release()
 
     def do_POST(self):
@@ -505,7 +554,33 @@ def serve(port: int, binds: list[str] | None, hosts: list[str] | None = None, sa
                     say("an address this server skipped is up now: restarting to bind it")
                     os._exit(75)
         threading.Thread(target=replan, daemon=True).start()
+
+    def restart():  # the same command again, in this process: systemd and launchd see no exit
+        say("the web chat's code changed: restarting with it")
+        os.execv(sys.executable, [sys.executable, *sys.orig_argv[1:]])
+    threading.Thread(target=watch_code, args=(restart,), daemon=True).start()
     servers[0].serve_forever()
+
+
+def code_stamp() -> tuple:
+    return tuple(sorted((f.name, f.stat().st_mtime_ns, f.stat().st_size)
+                        for f in Path(__file__).parent.glob("*.py")))
+
+
+def watch_code(restart, every: float = RELOAD_EVERY) -> None:
+    """Restart once the package's code has changed and settled (a pull writes files one by one):
+    a server left running across an update served the new page from old code for days, and no
+    doc's `systemctl --user restart wb-chat` was ever run (2026-11-18)."""
+    first = prev = code_stamp()
+    while True:
+        time.sleep(every)
+        try:
+            now = code_stamp()
+        except OSError:  # a file mid-replace
+            continue
+        if now != first and now == prev:
+            return restart()
+        prev = now
 
 
 def url(port: int) -> str:

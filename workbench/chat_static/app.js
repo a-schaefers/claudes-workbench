@@ -15,6 +15,8 @@
   const DEAD_MS = 40000          // the server pings every 15 s: this long silent means the line is dead
   const CONNECT_MS = 12000       // a connection that never answers: dial again
   const HIDDEN_GRACE_MS = 60000  // a hidden page keeps its stream this long, then lets go
+  const STALE_MS = 20000         // back on screen with nothing heard this long: the line is likely dead
+  const POST_MS = 15000          // a send that hasn't answered by now is tried again
   const FLOW_MS = 40
 
   const $ = id => document.getElementById(id)
@@ -250,9 +252,7 @@
       const answer = async verdict => {
         yes.disabled = no.disabled = true; said.textContent = ''
         try {
-          const r = await fetch('/api/answer', { method: 'POST', cache: 'no-store',
-            headers: { Authorization: 'Bearer ' + token, 'Content-Type': 'application/json' },
-            body: JSON.stringify({ id: a.id, answer: verdict }) })
+          const r = await post('/api/answer', { id: a.id, answer: verdict })
           const j = await r.json().catch(() => ({}))
           if (r.ok && j.state) return apply(j.state)
           if (r.status === 401) return keyless('That key was not accepted.')
@@ -314,16 +314,36 @@
 
   // ---- the connection ----
   let online = navigator.onLine, conn = null, failures = 0, retryTimer = 0, lastRx = 0, hiddenTimer = 0
+  let build = ''  // the page's files when this page loaded (the server's `build`)
   function banner(text, bad) {
     if (!text) { net.hidden = true; return }
     net.textContent = text; net.className = 'net' + (bad ? ' bad' : ''); net.hidden = false
   }
   function apply(s) {
     if (typeof s.now === 'number') skew = s.now - Date.now() / 1000
+    if (s.build && build && s.build !== build && reloadOnce()) return  // updated: the new page
+    if (s.build) build = s.build
     state = { messages: s.messages || [], asks: s.asks || [], listener: s.listener || null }
     const onServer = new Set(state.messages.map(m => m.cid).filter(Boolean))
     if (outbox.some(o => onServer.has(o.cid))) { outbox = outbox.filter(o => !onServer.has(o.cid)); save(K.outbox, outbox) }
     render()
+  }
+  function reloadOnce() {
+    // at most once a minute, so a page whose files keep changing can't reload for ever; the draft
+    // and the outbox are in localStorage already
+    let last = 0
+    try { last = Number(sessionStorage.getItem('wb-chat-reloaded')) || 0 } catch {}
+    if (Date.now() - last < 60000) return false  // carry on with this page, taking the new build
+    try { sessionStorage.setItem('wb-chat-reloaded', String(Date.now())) } catch {}
+    location.reload()
+    return true
+  }
+  async function post(path, body) {  // a POST that gives up after POST_MS, so a dead line can't hold it
+    const ctrl = new AbortController(), timer = setTimeout(() => ctrl.abort(), POST_MS)
+    try {
+      return await fetch(path, { method: 'POST', cache: 'no-store', signal: ctrl.signal,
+        headers: { Authorization: 'Bearer ' + token, 'Content-Type': 'application/json' }, body: JSON.stringify(body) })
+    } finally { clearTimeout(timer) }
   }
   async function connect() {
     if (conn || !token || document.hidden) return
@@ -338,6 +358,9 @@
       if (r.status === 401) { conn = null; keyless('That key was not accepted.'); return }
       if (!r.ok || !r.body) throw new Error('HTTP ' + r.status)
       const reader = r.body.getReader(), dec = new TextDecoder()
+      // aborting the fetch alone can leave WebKit's socket open, and the server's stream slot
+      // with it: cancel the body too
+      ctrl.signal.addEventListener('abort', () => { reader.cancel().catch(() => {}) }, { once: true })
       let buf = ''
       lastRx = Date.now()
       for (;;) {
@@ -366,15 +389,22 @@
   }
   function retry() {
     if (document.hidden) return  // the return resyncs
-    if (!online) { banner('Offline. Messages will send when the connection is back.', true); return }
-    const base = BACKOFF[Math.min(failures, BACKOFF.length - 1)]
+    // offline: still try, slowly, since a phone doesn't always say when it's back online
+    const base = online ? BACKOFF[Math.min(failures, BACKOFF.length - 1)] : BACKOFF[BACKOFF.length - 1]
     failures++
     const wait = Math.round(base * (0.8 + Math.random() * 0.4))
-    if (failures > 2) banner(`Can't reach the computer. Trying again in ${Math.ceil(wait / 1000)}s…`, true)
+    if (!online) banner('Offline. Messages will send when the connection is back.', true)
+    else if (failures > 2) banner(`Can't reach the computer. Trying again in ${Math.ceil(wait / 1000)}s…`, true)
     retryTimer = setTimeout(connect, wait)
   }
   const reconnectNow = () => { if (conn) { conn.abort(); conn = null } failures = Math.min(failures, 1); connect() }
-  setInterval(() => { if (conn && Date.now() - lastRx > DEAD_MS) reconnectNow() }, 5000)
+  // A silent line counts as a failure (its own retry, backing off): reconnecting at once kept
+  // failures at 1, so a server that took the call and never answered left "Reconnecting…" up for
+  // ever, never the banner that says the computer can't be reached (2026-11-18)
+  setInterval(() => { if (conn && Date.now() - lastRx > DEAD_MS) conn.abort() }, 5000)
+  // back on screen (or from the back-forward cache) with a line that's likely dead from the sleep:
+  // dial now rather than wait out the watchdog
+  const freshen = () => { if (conn && Date.now() - lastRx > STALE_MS) reconnectNow() }
   addEventListener('online', () => { online = true; banner(''); reconnectNow(); flush(true); render() })
   addEventListener('offline', () => { online = false; banner('Offline. Messages will send when the connection is back.', true); render() })
   document.addEventListener('visibilitychange', () => {
@@ -384,13 +414,17 @@
     } else {
       clearTimeout(hiddenTimer)
       unread = 0; document.title = 'Claude'
-      if (!conn) { failures = 0; connect() }
+      if (!conn) { failures = 0; connect() } else freshen()
       flush(true)
     }
   })
 
   const letGo = () => { finishAll(); if (conn) { conn.abort(); conn = null } }
-  const comeBack = () => { if (!document.hidden && !conn && token) { failures = 0; connect(); flush(true) } }
+  const comeBack = () => {
+    if (document.hidden || !token) return
+    if (!conn) { failures = 0; connect() } else freshen()
+    flush(true)
+  }
   addEventListener('pagehide', letGo)
   document.addEventListener('freeze', letGo)
   addEventListener('pageshow', comeBack)
@@ -427,9 +461,7 @@
     for (const o of [...outbox]) {
       if (o.error) continue
       try {
-        const r = await fetch('/api/send', { method: 'POST', cache: 'no-store',
-          headers: { Authorization: 'Bearer ' + token, 'Content-Type': 'application/json' },
-          body: JSON.stringify({ text: o.text, cid: o.cid }) })
+        const r = await post('/api/send', { text: o.text, cid: o.cid })
         const j = await r.json().catch(() => ({}))
         if (r.ok) { if (j.state) apply(j.state); continue }
         if (r.status === 401) { keyless('That key was not accepted.'); break }
