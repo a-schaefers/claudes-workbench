@@ -147,6 +147,11 @@ real tasks with `--model` (ones you'd review closely anyway).
 Model servers (none runnable, which server, a model on another machine), updating workbench, and
 **the weekly model check** (the mod asks once a week; `/workbench-models`): read
 `reference/models.md` beside this file first.
+When the user asks you to optimize or tune their setup (in any words): run `wb optimize
+estimate` (`--bench` too if they want models compared overnight), tell them how long it holds
+the GPU and that a task they start stops it, then `wb optimize start [--bench]`; it runs
+detached and wakes no one. Next time, read `wb optimize report` and ask before `wb optimize
+apply <id>`: a bigger window compacts less, a window all on the GPU writes faster.
 
 ## 2. Spec (the most valuable thing you write)
 **Spec tokens are output, the dearest you spend: a spec as long as the code it asks for costs

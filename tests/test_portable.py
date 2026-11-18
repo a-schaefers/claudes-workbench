@@ -620,6 +620,97 @@ class Real(unittest.TestCase):
         self.assertEqual(store.read_json(p, "default"), "default")
 
 
+class Optimize(unittest.TestCase):
+    """wb optimize against an Ollama whose placement depends on the window: 10 GB of weights and
+    32 KB a token of context, on a card that holds 12 GB (so up to 64K fits whole)."""
+    WEIGHTS, PER_TOKEN, CARD = 10_000_000_000, 32_000, 12_100_000_000
+    setUp, tearDown, config = Real.setUp, Real.tearDown, Real.config  # not Real's tests again
+
+    def ollama(self, window, entry=None):
+        loaded, posts = [], []
+        test = self
+
+        class H(BaseHTTPRequestHandler):
+            def reply(self, body):
+                self.send_response(200)
+                self.end_headers()
+                self.wfile.write(json.dumps(body).encode())
+
+            def do_GET(self):
+                self.reply({"/api/version": {"version": "0.40.0"}, "/api/tags": {"models": [{"name": "m"}]},
+                            "/api/ps": {"models": loaded}}.get(self.path) or {})
+
+            def do_POST(self):
+                body = json.loads(self.rfile.read(int(self.headers["Content-Length"])))
+                posts.append((self.path, body))
+                if self.path == "/api/show":
+                    return self.reply({"model_info": {"x.context_length": 262144}, "capabilities": ["tools"]})
+                if self.path == "/api/generate":
+                    loaded.clear()
+                    if body.get("keep_alive") != 0:
+                        size = test.WEIGHTS + test.PER_TOKEN * body["options"]["num_ctx"]
+                        loaded.append({"name": "m", "size": size, "size_vram": min(size, test.CARD)})
+                self.reply({"status": "success"} if self.path == "/api/create" else {})
+
+            def log_message(self, *a):
+                pass
+        srv = ThreadingHTTPServer(("127.0.0.1", 0), H)
+        threading.Thread(target=srv.serve_forever, daemon=True).start()
+        self.servers.append(srv)
+        self.config({"ollama": {"options": {"baseURL": f"http://127.0.0.1:{srv.server_address[1]}/v1"},
+                                "models": {"m": entry or {"limit": {"context": window, "output": 4096},
+                                                          "options": {"reasoningEffort": "none"}}}}})
+        return posts
+
+    def test_a_window_that_spills_is_measured_down_to_the_largest_that_fits_whole(self):
+        # a 64K window put a tenth of a 27B model in RAM and halved its writing speed (2026-11-18)
+        self.ollama(98304)
+        m = models.discover()["ollama/m"]
+        from workbench import optimize
+        row = optimize.fit(m, 262144)
+        self.assertEqual((row["window"], row["fits"]), (98304, 65536))
+        self.assertGreater(row["spill"], 0)
+        self.assertLessEqual(len(row["tried"]), optimize.loads(m))
+        self.assertIn("puts", optimize.advice(m.id, row))
+        self.assertIn("64K fits all on the GPU", optimize.advice(m.id, row))
+
+    def test_a_window_with_room_to_spare_is_measured_up_and_applied_with_its_settings(self):
+        posts = self.ollama(32768)
+        m = models.discover()["ollama/m"]
+        from workbench import optimize
+        optimize._record(m.id, optimize.fit(m, 262144))
+        row = optimize.state()["models"][m.id]
+        self.assertEqual((row["window"], row["fits"], row["spill"]), (32768, 65536, 0))
+        self.assertIn("more than the 32K it serves", optimize.advice(m.id, row))
+        out = optimize.apply(m)
+        self.assertIn("registered ollama/m-64k", out)
+        self.assertIn(("/api/create", {"model": "m-64k", "from": "m", "stream": False,
+                                       "parameters": {"num_ctx": 65536}}), posts)
+        entry = models.read_config()["provider"]["ollama"]["models"]["m-64k"]
+        self.assertEqual(entry["options"], {"reasoningEffort": "none"})       # thinking stays off
+        self.assertEqual(entry["limit"], {"context": 65536, "input": 65536 - 4096, "output": 4096})
+
+    def test_nothing_to_change_says_nothing_and_a_task_on_the_gpu_keeps_it(self):
+        self.ollama(65536)
+        m = models.discover()["ollama/m"]
+        from workbench import optimize
+        row = optimize.fit(m, 65536)                   # trained on no more: nothing above it
+        self.assertEqual((row["fits"], optimize.advice(m.id, row)), (65536, ""))
+        with mock.patch.object(models, "holders", lambda *a: {"1": {"task": "t", "model": m.id}}):
+            with self.assertRaisesRegex(RuntimeError, "real work first"):
+                optimize.start()
+
+    def test_real_work_stops_it_and_what_it_measured_stays(self):
+        self.ollama(32768)
+        m = models.discover()["ollama/m"]
+        from workbench import cli, optimize
+        held = {"123": {"task": optimize.HOLDER, "model": None, "start": None}}
+        with mock.patch.object(cli, "_gpu_holders", lambda me=None: held), \
+                mock.patch.object(optimize, "stop", lambda: 123) as stop:
+            self.assertEqual(cli._preempt_bench(m, "t"),
+                             "note: stopped wb optimize (what it measured is kept) to make room")
+
+
 class Fallback(unittest.TestCase):
     """watch.Watcher without inotify (macOS): it still says what changed."""
     def setUp(self):
