@@ -91,11 +91,6 @@ and Claude's share shrinks with them.
   the way it always has. Workbench only moves as much of the work as it can onto your hardware;
   the conveniences stay with Claude.
 
-The payoff is a smaller Claude bill for the same quality bar: a cheaper subscription, or one day
-just the API for the lead and local models for everything else. How much you save depends on how
-much you use it and what your electricity costs (a busy GPU isn't free). But it's a fun project,
-and it works.
-
 ## Quickstart
 
 ### What you need
