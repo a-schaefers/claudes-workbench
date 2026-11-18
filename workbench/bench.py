@@ -347,9 +347,9 @@ def drive(run: str) -> None:
             if not case:
                 continue
             while True:
-                watcher = Watcher(store.tasks_dir(), recursive=False)
-                while not _idle():  # a real task runs, or waits for the GPU: after it
-                    watcher.wait(60.0)
+                with Watcher(store.tasks_dir()) as watcher:
+                    while not _idle():  # a real task runs, or waits for the GPU: after it
+                        watcher.wait(60.0)
                 row = replay(case, model, rep, run, label, p.get("skills") or [])
                 store.append_jsonl(runs_file(), row)
                 if row["outcome"] != "preempted":
@@ -437,18 +437,18 @@ def _wait(task: store.Task) -> tuple[dict, int]:
     """Until the replay needs Claude: refuse what it asks for (no one is there to grant it)."""
     from . import cli
     refused = 0
-    watcher = Watcher(task.dir)
-    while True:
-        st = task.status
-        phase = st.get("phase")
-        if phase in cli.LIVE:
-            cli.reap(task)
-        if phase == "asking" and (qid := st.get("asking")) and ask_mcp.is_open(task, qid):
-            ask_mcp.write_answer(task, qid, REFUSED)
-            refused += 1
-        elif phase in ("review", "stuck", "failed") and not cli.runner_alive(task):
-            return st, refused
-        watcher.wait(30.0)
+    with Watcher(task.dir) as watcher:
+        while True:
+            st = task.status
+            phase = st.get("phase")
+            if phase in cli.LIVE:
+                cli.reap(task)
+            if phase == "asking" and (qid := st.get("asking")) and ask_mcp.is_open(task, qid):
+                ask_mcp.write_answer(task, qid, REFUSED)
+                refused += 1
+            elif phase in ("review", "stuck", "failed") and not cli.runner_alive(task):
+                return st, refused
+            watcher.wait(30.0)
 
 
 # --- reading the results ------------------------------------------------------------------------
