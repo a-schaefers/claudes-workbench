@@ -750,19 +750,52 @@ def base_check_line(r: dict, task: store.Task) -> str:
 REVIEW_DIFF_MAX = 12000  # characters (~3K tokens): a diff this size comes with the review notice
 
 
+# The instruction files an agent may propose a new version of (`<name>.proposed`, beside it): it
+# can't edit them (context.CLAUDE_FILES), and Claude making each change itself was a call over its
+# whole context on most tasks (2026-11-18). `wb accept --take-claude-md` takes them.
+PROPOSABLE = ("CLAUDE.md", "AGENTS.md")
+
+
+def proposals(worktree: Path) -> list[tuple[Path, Path]]:
+    """(the instruction file, the agent's proposed new version) for each proposal in the
+    worktree; a link is never one (it could point anywhere)."""
+    out = []
+    for name in PROPOSABLE:
+        for prop in sorted(worktree.rglob(name + ".proposed")):
+            if not prop.is_symlink() and prop.is_file() and ".git" not in prop.parts:
+                out.append((prop.with_name(name), prop))
+    return out
+
+
+def proposal_diff(task: store.Task) -> str:
+    import difflib
+    parts = []
+    for real, prop in proposals(task.worktree):
+        old = real.read_text(errors="replace").splitlines(keepends=True) if real.is_file() and \
+            not real.is_symlink() else []
+        rel = real.relative_to(task.worktree)
+        d = "".join(difflib.unified_diff(old, prop.read_text(errors="replace").splitlines(
+            keepends=True), f"a/{rel}", f"b/{rel}"))
+        parts.append(f"\n\nthe agent proposes this change to {rel} (wb accept --take-claude-md "
+                     f"takes it; without it, accept drops it):\n{d or '(no change)'}")
+    return "".join(parts)
+
+
 def review_diff(task: store.Task) -> str:
     """The diff under review, for the review notice, when it is small; else its stat. Claude reads
     it anyway, and each call to fetch it re-reads the whole session: a wake that carries it saves
     the review one to three calls (the 2026-11-17 measurement)."""
     base = "HEAD" if task.status.get("steps", 1) > 1 else task.spec["base"]
     try:
-        full = gitops.diff(task.worktree, base)
+        full = gitops.diff(task.worktree, base, paths=(".", ":(exclude)*.proposed"))
+        prop = proposal_diff(task)
         if not full:
-            return "\n\nthe diff: (no changes)"
+            return "\n\nthe diff: (no changes)" + prop
         if len(full) <= REVIEW_DIFF_MAX:
-            return f"\n\nthe diff (all of it; wb diff {task.name} again only after a change):\n{full}"
+            return (f"\n\nthe diff (all of it; wb diff {task.name} again only after a change):"
+                    f"\n{full}" + prop)
         return (f"\n\nthe diff is {len(full)} characters, too big to include: "
-                f"its stat:\n{gitops.diff(task.worktree, base, stat=True)}")
+                f"its stat:\n{gitops.diff(task.worktree, base, stat=True)}" + prop)
     except (gitops.GitError, OSError):
         return ""
 

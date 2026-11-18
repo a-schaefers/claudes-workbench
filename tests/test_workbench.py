@@ -274,6 +274,27 @@ class Lifecycle(Base):
         self.start("t-loud", "ok", "--size", "significant", "--checkin", "15", "--queue")
         self.assertEqual(store.Task("t-loud").spec["checkin"], 15)
 
+    def test_a_proposed_claude_md_is_shown_as_a_diff_and_taken_only_when_claude_says(self):
+        # Claude making each CLAUDE.md change itself was a call over its whole context on most
+        # tasks (2026-11-18): the agent proposes the file, accept takes it
+        for name, flags, kept in (("t-take", ("--take-claude-md",), True), ("t-drop", (), False)):
+            self.start(name, "ok", "--test", TEST_CMD)
+            wait_phase(name, {"review"})
+            t = store.Task(name)
+            old = (t.worktree / "CLAUDE.md").read_text()
+            (t.worktree / "CLAUDE.md.proposed").write_text(old + "Answers live in answer.txt.\n")
+            shown = runner.review_diff(t)
+            self.assertIn("the agent proposes this change to CLAUDE.md", shown)
+            self.assertIn("+Answers live in answer.txt.", shown)
+            self.assertNotIn("CLAUDE.md.proposed", shown.split("the agent proposes")[0])
+            out = run_wb("accept", name, "-m", "feat: answer", *flags)
+            self.assertIn("took" if kept else "dropped", out)
+            files = subprocess.run(["git", "-C", str(self.repo), "show", "--name-only",
+                                    "--format=", f"delegate/{name}"], capture_output=True,
+                                   text=True).stdout.split()
+            self.assertNotIn("CLAUDE.md.proposed", files)
+            self.assertEqual("CLAUDE.md" in files, kept)
+
     def test_auto_fix_budget_exhausted_wakes_claude_with_fail(self):
         self.start("t-nofix", "fix", "--test", TEST_CMD, "--auto-fix", "0")
         st = wait_phase("t-nofix", {"review"})
