@@ -447,8 +447,10 @@ A prompt (with its skills note) over `PROMPT_ARG_MAX` (100K bytes) is sent as a 
   from when the session began) and a successor would have room to work: the context the session
   had read when it first changed something (`status.session_floor`) must sit at least
   `HANDOVER_ROOM` (a quarter of the window) below the handover point. Otherwise it carries on
-  (OpenCode compacts it if it must), and Claude gets a `checkin` saying the step needs more reading
-  than the window holds (`_reading_full`, once a round). Seen: twenty handovers in twelve minutes
+  (OpenCode compacts it if it must), and a `reading_full` event says the step needs more reading
+  than the window holds (`_reading_full`, once a round); the first in a task is a `checkin` too,
+  later ones only events, since the advice is for the next spec and every round of a mote-combo
+  step on a 32K window repeated it, each a wake (2026-11-17). Seen: twenty handovers in twelve minutes
   with no edit made; and a 16K floor under a 19K handover point handing over three times in four
   minutes, 3K of work each. A runner (one review round) hands over at most `HANDOVER_MAX` (5)
   times; the next one is a stuck round, since a session that changed something early and then

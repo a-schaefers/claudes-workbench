@@ -1118,8 +1118,13 @@ def _reading_full(task: store.Task, n: int, used: int, window: int,
     text = (f"the agent's session reached {pct}% of its window {what}, so it carries on in this "
             f"session (OpenCode compacts it if it must). Name fewer files to read, or put what "
             f"it needs in the spec.")
+    # Claude is told once a task: the advice is for the next spec, and on a step that needs the
+    # reading every round said it again, each a wake over Claude's whole context (2026-11-17)
+    told = any(e.get("kind") == "reading_full"
+               for e in store.read_jsonl(task.dir / "events.jsonl")[0])
     task.event({"ts": store.now(), "round": n, "kind": "reading_full", "text": text})
-    task.notify("checkin", f"task {task.name}: {text}", round=n)
+    if not told:
+        task.notify("checkin", f"task {task.name}: {text}", round=n)
 
 
 # Mid-round handovers in one review round before it is stopped as stuck. A session that changes
