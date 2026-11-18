@@ -3339,6 +3339,27 @@ class Routing(Base):
         self.result("strata/strata", "significant", "discarded", n=1)
         self.assertEqual(router.choose("significant")[0].model.id, "strata/strata")
 
+    def test_a_model_measured_to_cost_claude_less_beats_the_guess(self):
+        # the smaller model the guess sends trivial work to cost Claude more in review and fixes
+        # than a larger one whose first change was right (2026-11-18)
+        from workbench import router
+        cost = lambda k: {"input": 0, "cache_read": 0, "output": 0, "cache_write_5m": 0,  # noqa
+                          "cache_write_1h": k * 500}                                  # k thousand
+        small, big = "ollama/mimo-v2.6:9b-q8_0", "ollama/qwen3.8-27b"
+        self.result(small, "trivial", "accepted", n=3, claude=cost(100))
+        self.result(big, "trivial", "accepted", n=2, claude=cost(50))
+        self.assertEqual(router.choose("trivial")[0].model.id, small)     # 2 tasks: not evidence
+        self.result(big, "trivial", "accepted", n=1, claude=cost(50))
+        top, why = router.choose("trivial")
+        self.assertEqual(top.model.id, big)
+        self.assertIn("costs Claude least on trivial work", why)
+        self.assertIn("~50K Claude tokens a task", why)
+        self.result(big, "trivial", "accepted", n=6, claude=cost(110))    # now ~90K: within 15%
+        self.assertEqual(router.choose("trivial")[0].model.id, small)
+        self.result(big, "trivial", "discarded", n=9)                      # out of the band
+        self.result(small, "trivial", "accepted", n=9, claude=cost(100))
+        self.assertEqual(router.choose("trivial")[0].model.id, small)
+
     def test_the_record_on_the_same_kind_of_work_counts_most(self):
         from workbench import router
         self.result("strata/strata", "significant", "accepted", n=4, stack=["python"])

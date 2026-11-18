@@ -7,7 +7,12 @@ task doesn't crown a model. Work of the same kind counts most: a task in a repo 
 overall record as the prior worth LIKE_PRIOR tasks, so a model strong in one language and weak in
 another is routed by the one at hand once there is evidence, and by its whole record until then. Among the models within QUALITY_MARGIN of the best, the guess
 decides: for significant work the largest model (more parameters, better judgment), for trivial
-work the smallest (faster), and at equal size the one already on the GPU. A model too big for
+work the smallest (faster), and at equal size the one already on the GPU. Claude's tokens are
+what workbench saves, so once two of those models each have COST_MIN tasks of the size with what
+they cost Claude recorded (results' `claude`: the session's calls on the task), one that costs
+Claude COST_MARGIN less a task than the guess's pick goes first: on 2026-11-18 the smaller,
+faster model the guess sends trivial work to cost Claude more, in its review and fixes, than a
+larger one whose first change was right. A model too big for
 the GPU (models.need over its budget) spills into RAM and runs several times slower, so in that
 band every model that fits comes first.
 
@@ -33,9 +38,11 @@ import types
 from dataclasses import dataclass
 from pathlib import Path
 
-from . import gitops, models, store, tuning
+from . import gitops, models, spend, store, tuning
 
 QUALITY_MARGIN = 0.15
+COST_MIN = 3        # tasks of a size with Claude's spend recorded before it can move the pick
+COST_MARGIN = 0.15  # how much less a task must cost Claude to beat the guess
 LIKE_PRIOR = 2  # how many tasks of the same stack the overall record weighs as
 SIZES = ("trivial", "significant")
 # Measured 2026-11-16 on a 32K window: 2-3 files and ~150 new lines landed in one session; eight
@@ -58,6 +65,9 @@ class Score:
     stack: tuple = ()              # the kind of work asked about, and the record on it
     like_tries: int = 0
     like_wins: int = 0
+    claude: float | None = None    # mean input-equivalent tokens a task cost Claude (spend.py)
+    claude_n: int = 0              # the tasks it is the mean of
+    cheaper: bool = False          # put ahead of the guess for costing Claude less (_cheaper)
 
     @property
     def quality(self) -> float:
@@ -69,7 +79,8 @@ class Score:
             return "no real tasks yet"
         t = f", ~{self.minutes:.1f} min" if self.minutes is not None else ""
         like = f", {self.like_wins}/{self.like_tries} on {'/'.join(self.stack)}" if self.like_tries else ""
-        return f"{self.wins}/{self.tries} real tasks accepted{like}{t}"
+        c = f", ~{self.claude / 1000:.0f}K Claude tokens a task" if self.claude_n >= COST_MIN else ""
+        return f"{self.wins}/{self.tries} real tasks accepted{like}{t}{c}"
 
 
 @functools.cache
@@ -100,7 +111,25 @@ def score(m: models.Model, size: str, state: dict | None = None, stack=()) -> Sc
         s.like_wins = sum(r.get("outcome") == "accepted" for r in like)
     times = [r["minutes"] for r in real if r.get("minutes") is not None]
     s.minutes = sum(times) / len(times) if times else None
+    spent = [spend.weighted(r["claude"]) for r in real if isinstance(r.get("claude"), dict)]
+    s.claude, s.claude_n = (statistics.fmean(spent) if spent else None), len(spent)
     return s
+
+
+def _cheaper(close: list[Score]) -> list[Score]:
+    """The band with the model measured to cost Claude least first, when it beats the guess's
+    pick by COST_MARGIN and both have COST_MIN tasks of evidence; else as the guess ordered it.
+    A model that would spill out of the GPU never jumps one that fits."""
+    if not close or close[0].claude_n < COST_MIN:
+        return close
+    head = close[0]
+    rivals = [s for s in close[1:] if s.claude_n >= COST_MIN
+              and (s.fits is not False or head.fits is False)]
+    best = min(rivals, key=lambda s: s.claude, default=None)
+    if best is None or best.claude > (1 - COST_MARGIN) * head.claude:
+        return close
+    best.cheaper = True
+    return [best] + [s for s in close if s is not best]
 
 
 def expected_minutes(model_id: str, size: str) -> float | None:
@@ -145,7 +174,7 @@ def rank(size: str, stack=()) -> list[Score]:
         s.fits = fits(s.model, budget) if s.state["available"] else None
     usable = [s for s in scores if s.state["available"]]
     best = max((s.quality for s in usable), default=0)
-    close = sorted((s for s in usable if s.quality >= best - QUALITY_MARGIN), key=_guess(size))
+    close = _cheaper(sorted((s for s in usable if s.quality >= best - QUALITY_MARGIN), key=_guess(size)))
     rest = sorted((s for s in usable if s not in close), key=lambda s: -s.quality)
     blocked = [s for s in scores if not s.state["available"]]
     return close + rest + blocked
@@ -168,6 +197,8 @@ def choose(size: str, stack=()) -> tuple[Score | None, str]:
     sizes = [s.weights for s in usable if s.fits is not False or top.fits is False]
     if len(usable) == 1:
         pick = f"the only model allowed {size} work"
+    elif top.cheaper:
+        pick = f"costs Claude least on {size} work"
     elif size == "significant" and top.weights == max(sizes):
         pick = "the largest model allowed significant work" + (
             " that fits the GPU" if top.fits and any(s.fits is False for s in usable) else "")

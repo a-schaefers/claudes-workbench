@@ -1532,7 +1532,14 @@ The available models within `QUALITY_MARGIN` 0.15 of the best are ordered by the
 (`_guess`): those that fit the GPU before those that would spill (`fits`: Ollama says it's all in
 VRAM, or `vram_gb`/weights within 90% of the budget; unknown is neither), then the largest by
 weight bytes for `significant` work, the smallest for `trivial` (a model of unknown size ranks last), then
-the one already resident. The rest follow by quality, unavailable models last. `allowed()`:
+the one already resident. Then what Claude spends (`_cheaper`): once the guess's pick and another
+model in the band each have `COST_MIN` 3 tasks of the size with a results `claude` (spend.py), the
+one whose mean costs Claude `COST_MARGIN` 15% less goes first ("costs Claude least on <size>
+work"; a model that would spill never jumps one that fits). Claude's tokens are what workbench
+saves, and on 2026-11-18 the smaller model the guess sends trivial work to cost Claude more in
+review and fixes than a larger one whose first change was right. With no spend recorded the guess
+stands, so a new install routes as before. `Score.line` adds `~NK Claude tokens a task` once
+it is evidence. The rest follow by quality, unavailable models last. `allowed()`:
 models.json `sizes`; when it leaves no model, `choose` says "no local model takes <size> tasks
 (…: limited by wb model sizes; …, or pass --model)", not that there are none. `choose` returns the pick and a reason ("the largest … that fits the GPU",
 "the best record on significant C work", … "(vs …)"). `wb models` prints the ranking per size;

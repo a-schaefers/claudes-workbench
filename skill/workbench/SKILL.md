@@ -135,7 +135,8 @@ whatever CLAUDE.md says is next.
 
 `wb start` asks the router, which makes an educated guess and corrects it with real results:
 the largest model allowed significant work, the smallest allowed trivial work, unless a model's
-record of accepted tasks at that size is clearly worse. It prints why; the runner then loads that
+record of accepted tasks at that size is clearly worse, or another with as good a record has
+been measured to cost you less a task (once each has three with your spend recorded). It prints why; the runner then loads that
 model, unloading whatever is there. `wb models` shows the ranking per size. Pass
 `--model <id or fragment>` only if the user names one, or when the record argues against the guess.
 Which sizes a model takes is set with `wb model sizes <id> trivial|significant`: set it when you
