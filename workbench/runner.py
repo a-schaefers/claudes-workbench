@@ -994,8 +994,10 @@ def _start_fresh(task: store.Task, n: int, why: str) -> None:
 # wrong comment). An error naming the wrong one of two inputs got past it twice (2026-11-18): the
 # prompt now asks for that case by name. A rejection test that passed only because its file was
 # also short, and an "exact bytes" test that never compared the whole file, cost a review round
-# on 2026-11-18: point 1 asks for each. One automatic round, before Claude is woken, costs local
-# time only.
+# on 2026-11-18: point 1 asks for each. Its rerun's review round was a `static` in a file whose
+# CLAUDE.md forbids globals and a proposed CLAUDE.md line describing the wrong flag: point 4 asks
+# for the project's rules and for docs that say what the code does. One automatic round, before
+# Claude is woken, costs local time only.
 SELF_REVIEW = (
     "Before Claude reviews this, review your own change as a strict senior reviewer would: `git "
     "diff`, and `git status` for new files. Check each point, and fix what fails:\n"
@@ -1010,8 +1012,10 @@ SELF_REVIEW = (
     "handled as the task says. Each error message is tested once for every input that can cause "
     "it (with two inputs, the first valid and the second bad too), checking the exact text, which "
     "names the input that failed.\n"
-    "4. Nothing the task didn't ask for; no dead code, debug output, unused names or wrong "
-    "comments; each type used as declared.\n"
+    "4. The project's rules (CLAUDE.md, AGENTS.md) hold for every line you changed. Nothing the "
+    "task didn't ask for; no dead code, debug output, unused names or wrong comments; each type "
+    "used as declared; every doc line you wrote (a proposed CLAUDE.md too) says what the code "
+    "does.\n"
     "Then run the acceptance command (`{cmd}`). Do not commit. Finish with a short summary: what "
     "you found and fixed, and for each rule the test that covers it.")
 
