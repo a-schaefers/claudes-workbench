@@ -148,15 +148,15 @@ Model servers (none runnable, which server, a model on another machine), updatin
 `reference/models.md` beside this file first.
 
 ## 2. Spec (the most valuable thing you write)
-**A trivial task's spec is short:** the request as the user gave it, plus only what the agent
-can't find out alone (names other code calls, exactly; an insertion line; anything you computed).
-Spec tokens are output, the dearest you spend: a trivial spec as long as the code it asks for
-costs more than writing the code (measured 2026-11-17: 1.3–2.3K tokens of spec for 1–2K of
-code). Of the checks below, a trivial spec needs 1 and 5; the rest are for significant steps.
-Write it and start in one call: `wb start <name> … --spec - <<'EOF'` … `EOF`.
+**Spec tokens are output, the dearest you spend: a spec as long as the code it asks for costs
+more than writing the code.** Measured 2026-11-17: 1.3–2.3K tokens of spec for 1–2K of trivial
+code, and 5K for a significant step whose code was about as long. So when the user's request
+already says what to build, it *is* the spec: paste it as given and add only what the agent can't
+find out alone (names other code calls, exactly; an insertion line; anything you computed; the
+gaps the checks below turn up). Never restate it in your own words. Write it and start in one
+call: `wb start <name> … --spec - <<'EOF'` … `EOF`. A trivial spec needs checks 1 and 5 below.
 
-For a significant step, read just enough of the repo to scope it, then write the spec to a file
-in the scratchpad:
+When the request is loose, read just enough of the repo to scope it and write the spec:
 - the goal in 1–2 sentences; the exact files/functions to touch, and what not to touch
 - conventions to follow (point at an existing file to imitate)
 - acceptance criteria, and an **acceptance command** that proves them (an existing test command,
@@ -345,6 +345,9 @@ the pane) only for something the user should find later.
     safer, only dearer: twelve breaks cost more than the task's own review (2026-11-17). A UI change:
     run it from the worktree and look with your own browser tool.
   - Put the checks you do run in one Bash call (`wb status <name>` prints the worktree's path).
+  - **Fix small things yourself in one call**: every edit (a script or `sed` over the worktree),
+    the CLAUDE.md update, the tests and `wb accept`, in one Bash call. Each separate edit is a
+    call over your whole context: five of them cost more than the agent's round (2026-11-17).
   Accept only what you would have written.
 - **question** — answer it briefly and decisively: `wb answer <name> --text "…"`. The agent is
   blocked until you do.
