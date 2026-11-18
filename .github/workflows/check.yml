@@ -27,7 +27,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 20
     env:
-      # The Claude Code the mod was last verified with; the README's "needs" badge is the floor.
+      # The Claude Code the mod was last verified with; the floor is in ARCHITECTURE.md, *The tests*.
       CLAUDE_CODE_VERSION: '2.1.311'
       CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC: '1'
       DISABLE_TELEMETRY: '1'

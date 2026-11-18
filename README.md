@@ -7,9 +7,7 @@
 <a href="https://github.com/a-schaefers/claudes-workbench/actions/workflows/nightly.yml"><img alt="newest Claude Code" src="https://img.shields.io/github/actions/workflow/status/a-schaefers/claudes-workbench/nightly.yml?branch=main&label=newest%20Claude%20Code"></a>
 <a href="https://github.com/a-schaefers/claudes-workbench/actions/workflows/opencode.yml"><img alt="newest OpenCode" src="https://img.shields.io/github/actions/workflow/status/a-schaefers/claudes-workbench/opencode.yml?branch=main&label=newest%20OpenCode"></a>
 <a href="mod/.claude-plugin/plugin.json"><img alt="version" src="https://img.shields.io/badge/dynamic/json?url=https%3A%2F%2Fraw.githubusercontent.com%2Fa-schaefers%2Fclaudes-workbench%2Fmain%2Fmod%2F.claude-plugin%2Fplugin.json&query=%24.version&label=version&color=blue"></a>
-<a href="https://code.claude.com/docs/en/plugins/mods/overview"><img alt="needs Claude Code 2.1.287+" src="https://img.shields.io/badge/Claude%20Code-2.1.287%2B-d97757"></a>
-<a href="#what-you-need"><img alt="needs OpenCode 2.2.7+" src="https://img.shields.io/badge/OpenCode-2.2.7%2B-333"></a>
-<a href="#what-you-need"><img alt="Python 3.11+, standard library only" src="https://img.shields.io/badge/Python-3.11%2B%20%C2%B7%20stdlib%20only-3776ab"></a>
+<a href="#what-you-need"><img alt="Python, standard library only" src="https://img.shields.io/badge/Python-stdlib%20only-3776ab"></a>
 <a href="#what-you-need"><img alt="Linux, macOS, WSL2" src="https://img.shields.io/badge/runs%20on-Linux%20%C2%B7%20macOS%20%C2%B7%20WSL2-555"></a>
 <a href="LICENSE"><img alt="MIT license" src="https://img.shields.io/github/license/a-schaefers/claudes-workbench"></a>
 <a href="https://github.com/a-schaefers/claudes-workbench/commits/main"><img alt="last commit" src="https://img.shields.io/github/last-commit/a-schaefers/claudes-workbench"></a>
@@ -39,14 +37,13 @@ the bulk of the tokens, the reading and writing and test-running, happen on your
 - **Claude architects the work.** It reads your codebase, decides the design, and writes a precise
   spec for every piece: the files to touch and the code to imitate, the exact names other code
   relies on, and a test that proves it's done.
-- **Pieces sized to what your models actually finish.** A local model in a 32K context falls
+- **Pieces sized to what your models actually finish.** A local model with a small context falls
   apart on an eight-file task and shines on a two-file one, so Claude cuts every project down to
   one concern per task, sized to the model that takes it, and runs the pieces in order. A step
   that never finished in an hour as one big task landed in half an hour as three small ones. The
-  size isn't fixed: it scales with the context window your hardware serves (about two or three
-  files and 150 lines on 32K, more on a bigger one), and every finished step corrects it, so a
-  strong machine gets bigger tasks. The next piece in the same area goes to the same agent, which
-  already knows the code.
+  size isn't fixed: it scales with the context window your hardware serves, and every finished
+  step corrects it, so a strong machine gets bigger tasks. The next piece in the same area goes
+  to the same agent, which already knows the code.
 - **A skill library that improves itself, with Claude holding the pen.** Every task leaves its
   lessons behind: each correction Claude sent back, what stopped the agent, what it had to ask,
   and what the agent itself says the next one would trip on. Claude is shown them when the task
@@ -100,23 +97,18 @@ and it works.
 
 ### What you need
 
-- **[Claude Code](https://claude.com/claude-code)** 2.1.287 or newer (the pane is a Claude Code
-  mod), with a Claude subscription or an API key
-- **[OpenCode](https://opencode.ai)** 2.2.7 or newer (CI tests 2.3 and the newest release), which
-  runs the local models as coding agents
-- **A local model server**, any that speaks the OpenAI API: llama.cpp's `llama-server`, LM Studio,
-  vLLM, Ollama and the like. Claude works with the one you already run. No server or models yet?
-  That's fine: the first time you use it, Claude looks at your hardware, lays out the servers and
-  models that fit it, and sets up the ones you pick in OpenCode (it asks before installing or
-  downloading anything). Want it as hands-off as possible, or run your own? See the [FAQ](#faq)
-- Linux, macOS, or Windows through WSL2 (native Windows lacks the POSIX file locks and signals
-  `wb` uses), with Python 3.11+ and git, which `wb` itself runs on
-- **Optional, for images:** a local image tool and model ([Images](ARCHITECTURE.md#images)).
-  Claude offers to set one up the first time a project needs a picture, and asks before
-  installing or downloading anything
+- **[Claude Code](https://claude.com/claude-code)**, with a Claude subscription or an API key
+- **[OpenCode](https://opencode.ai)**, which runs the local models as coding agents
+- **A local model server**, any that speaks the OpenAI API. Claude works with the one you already
+  run. None yet? Claude looks at your hardware, suggests a server and models that fit it, and sets
+  up the ones you pick (it asks before installing or downloading anything). Want it as hands-off
+  as possible, or run your own? See the [FAQ](#faq)
+- Linux, macOS, or Windows through WSL2, with Python 3 and git
 
-Whatever your machine, Claude picks models that fit it, and checks again every week as new ones
-come out.
+Keep Claude Code and OpenCode up to date; `wb doctor` checks the rest of your setup.
+Whatever your machine, Claude picks models that fit it, and checks again as new ones come out.
+Images are optional: Claude offers to set up a local image model the first time a project needs a
+picture ([Images](ARCHITECTURE.md#images)).
 
 ### Install
 
@@ -127,7 +119,7 @@ claude plugin install workbench@workbench
 wb doctor
 ```
 
-Workbench checks for an update once a week and tells you; `/workbench-update` installs it (or
+Workbench tells you when there's an update; `/workbench-update` installs it (or
 `wb update` in a terminal). Your state and skills stay as they are. Working on
 Workbench itself? Install from a clone instead ([Installing](ARCHITECTURE.md#installing)).
 
@@ -150,9 +142,8 @@ Claude takes it from there:
    GPU, it recommends them and offers to set them up (it always asks before downloading).
 2. It plans the work and splits it into small pieces a local model can finish.
 3. It decides how hard each piece is and hands it to the right local model: chores (a rename, a
-   config tweak, a small test) to a small fast model like MiMo 9B, real work (features,
-   refactors, tricky bugs) to the strongest model your GPU runs, like Qwen 27B. Then it watches
-   the agent work.
+   config tweak, a small test) to a small fast one, real work (features, refactors, tricky bugs)
+   to the strongest one your GPU runs. Then it watches the agent work.
 4. It reviews every change, sends it back with notes until it's right, and only then commits it.
 
 The pane shows the agents working live. You talk to the driver, Claude,
@@ -168,19 +159,15 @@ to read the diff.
 | Command | What it does |
 |---|---|
 | `/workbench [task]` | turn on workbench mode for this session: the pane opens, and from then on Claude hands the coding of what you ask to your local models; run again, it brings the pane back |
-| `/workbench-models` | check now which local models suit your hardware best (it also happens weekly) |
-| `/workbench-update` | update Workbench now: `wb`, the skill and the pane (it checks weekly and tells you) |
+| `/workbench-models` | check now which local models suit your hardware best (it also checks on its own) |
+| `/workbench-update` | update Workbench now: `wb`, the skill and the pane (it tells you when there's one) |
 | `/workbench-quit` | leave workbench mode: this session's agents stop now, their work is kept for later |
 | `/workbench-quit-and-hand-back-claude` | leave workbench mode and have Claude finish this session's agents' tasks itself |
 
 **Away from the computer?** `wb chat serve` runs a small web chat with the running Claude session,
-and `wb chat url` prints its private link (on Linux, `systemctl --user link
-"$PWD/systemd/wb-chat.service" && systemctl --user enable --now wb-chat`, run in the clone, keeps
-it running, and `systemctl --user restart wb-chat` after an upgrade; it runs systemd's `python3`, so if yours comes from pyenv, uv or conda, the unit's comment says how to point it there; on macOS, a launchd agent running `~/.local/bin/wb chat serve` does). It's `http://localhost:1337`; to use it from your phone, reach your PC the way you
-normally do and change the host in the link. It serves only localhost until you say otherwise in
-`~/.config/workbench/chat.json`: `{"bind": ["localhost", "tailscale"]}` adds this machine's
-Tailscale address, `{"bind": ["0.0.0.0"]}` every interface (your LAN, a VPN), and
-`"hosts": ["chat.example.org"]` a name a tunnel or proxy sends (`"*"` for any).
+and `wb chat url` prints its private link. It listens only on this machine until you say
+otherwise; reaching it from your phone and keeping it running are in
+[The web chat](ARCHITECTURE.md#the-web-chat).
 
 <p align="center"><img src="docs/web-chat.png" alt="The web chat: Claude's report on which model takes which tasks, the user's reply, a receipt saying Claude has it and will read it after its current step, and 'Claude is on it'" width="420"></p>
 
@@ -198,7 +185,7 @@ The full account of every piece, what it does and why, is in [ARCHITECTURE.md](A
 **Do I have to set any of this up myself?** No. The first time you use it, Claude reads your
 hardware, suggests a model server and models that fit, and with your yes installs them, sets the
 context window and tool calls, and registers each model. It checks the setup with `wb doctor`, and
-checks the models again every week. You answer its questions; it asks before installing or
+checks the models again as new ones come out. You answer its questions; it asks before installing or
 downloading anything. The rest of this FAQ is for people who run a server already, or set one up
 themselves.
 
@@ -211,12 +198,12 @@ llama.cpp's `llama-server`, LM Studio and vLLM too. On those, you download model
 own way, and tasks take turns on the GPU.
 
 **How big a context window do the models need?** 16K tokens at the least; 32K or more is better.
-OpenCode's instructions and tools alone take about 10K, and the window sets how much of a task one
+OpenCode's instructions and tools take a good part of it, and the window sets how much of a task one
 agent can take on. Claude sets it when it sets up the server. On a server you run yourself,
 `wb doctor` flags a window that's too small or doesn't match the model's entry. Most servers start
 small, so here is where each one sets it:
 
-- Ollama: `OLLAMA_CONTEXT_LENGTH` in the service's environment. Its default, often 4K to 8K, cuts
+- Ollama: `OLLAMA_CONTEXT_LENGTH` in the service's environment. Its default is small and cuts
   the prompt off without a word.
 - llama.cpp: `-c` on `llama-server`. With `--parallel N` set, each slot gets an Nth of it (unless
   you add `--kv-unified`), and one agent uses one slot.

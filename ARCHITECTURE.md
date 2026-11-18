@@ -2001,6 +2001,17 @@ manager has no network-online.target) or the port is briefly held: a start limit
 there (the 0.90 review). It stops only on exit 78 (`RestartPreventExitStatus`), which bin/wb's
 Python-version and Windows guards use; never 75, the replan exit below.
 
+**Keeping it up, and reaching it** (moved here from the README, 2026-11-17). On Linux, link the
+unit from the copy `wb` runs from (`~/.claude/plugins/marketplaces/workbench` for a marketplace
+install, else the clone): `systemctl --user link <that copy>/systemd/wb-chat.service &&
+systemctl --user enable --now wb-chat`, and `systemctl --user restart wb-chat` after an upgrade.
+The unit runs systemd's `python3`; a Python from pyenv, uv or conda goes in with `systemctl --user
+edit wb-chat` (the unit's comment says how). On macOS, a launchd agent running `~/.local/bin/wb
+chat serve` does the same. `wb chat url` prints the link, `http://localhost:1337/#token=…`; from a phone, reach the PC the way you normally do and change the host in the link. It
+serves only localhost until chat.json says otherwise (*Settings* below): `{"bind": ["localhost",
+"tailscale"]}` adds the Tailscale address, `{"bind": ["0.0.0.0"]}` every interface (the LAN, a
+VPN), `"hosts": ["chat.example.org"]` a name a tunnel or proxy sends.
+
 - **The path of a message.** The page posts it; the server appends it to `chat/messages.jsonl`.
   The listening session's mod submits it to Claude as `[web chat] <the user's words>`, nothing
   more, so the terminal shows what the user wrote; how to answer is in the `/workbench` skill. It
@@ -2680,9 +2691,11 @@ from its GitHub release through `scripts/install-opencode.sh`, checked against t
 pinned beside it as `OPENCODE_SHA256`: 2.x isn't on npm), so those tests run there instead of
 skipping. `opencode.yml` runs the Python suite once a day on the newest OpenCode (the highest
 version among the releases, not GitHub's "Latest", which marks the 1.x line's patches), so a red
-run there means a new OpenCode broke the interop. The README shows all three as badges, beside
-the floors (Claude Code 2.1.287, the floor for mods; OpenCode 2.2.7, the oldest release that
-passes the real-OpenCode tests: 2.2.0 never lists `workbench_ask_reviewer`, found 2026-11-17). Each Linux job's `Landlock`
+run there means a new OpenCode broke the interop. The README shows all three as badges. The
+floors are kept here, not in the README, which names no versions so it can't fall behind
+(2026-11-17): Claude Code 2.1.287, the floor for mods; OpenCode 2.2.7, the oldest release that
+passes the real-OpenCode tests (2.2.0 never lists `workbench_ask_reviewer`, found 2026-11-17);
+Python 3.11. Each Linux job's `Landlock`
 step prints the runner's Landlock ABI, or that it has none and the Lane tests skip. Not run in
 CI: the browser test and a real run with a real model.
 `.github/dependabot.yml` moves the actions' SHA pins weekly. `check` is the required check on
@@ -2919,12 +2932,12 @@ push: every change is a pull request that merges once `check` is green and it is
 - **The `$` uses in `register.tsx`** → only through functions declared at its top level, or
   `claude plugin validate mod` fails.
 - **The Claude Code version** the mod is verified with → `CLAUDE_CODE_VERSION` in
-  `.github/workflows/check.yml`; the floor it needs → the README's badge and *What you need*.
+  `.github/workflows/check.yml`; the floor it needs → *The tests* (the README names no versions).
 - **The OpenCode version** the tests are verified with → `OPENCODE_VERSION` and `OPENCODE_SHA256`
-  in `check.yml` and `nightly.yml` together; the floor → the README's badge and *What you need*,
-  and the "checked against" lines here and in CLAUDE.md.
+  in `check.yml` and `nightly.yml` together; the floor → *The tests*, and the "checked against"
+  lines here and in CLAUDE.md.
 - **The Python floor** (3.11) → the launchers' guard (`bin/wb`, `bin/wb-ask-mcp`), `check.yml`'s
-  and the `macos` job's `python-version`, the README's badge and *What you need*.
+  and the `macos` job's `python-version`, *The tests*.
 - **The merge gate** (`owner-merge.yml`, the ruleset, `check.yml`'s job name) →
   `tests/test_workflows.py`, `scripts/github-settings.sh apply`, *Shipping to main*.
 - **`mod/` for users** → bump `mod/.claude-plugin/plugin.json`'s `version`, or a marketplace
