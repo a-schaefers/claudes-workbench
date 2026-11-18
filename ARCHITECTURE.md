@@ -1099,7 +1099,8 @@ through a big one, and its cost shows in the task's time. The biggest step that 
 the slice past the guess; the smallest that went badly lowers it below its size. `wb models`,
 `wb start` and `wb scout` show it (`slice: ~3 files, ~150 new lines per task (32K window; 4 of 5
 measured steps went well, 1 badly)`). Check-ins and reports name changed files the spec never
-mentions (`NOTE: the spec doesn't name src/util.c`), where an agent's drift shows first.
+mentions (`NOTE: the spec doesn't name src/util.c`; a brace form like `src/io.{h,c}` names each
+file), where an agent's drift shows first.
 
 The window itself comes from what the server serves the model (*Managing the set*): `wb model add`
 writes it, with an output budget of an eighth, and `wb doctor` flags an entry that claims more
