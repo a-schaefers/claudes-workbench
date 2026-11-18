@@ -2836,8 +2836,11 @@ push: every change is a pull request that merges once `check` is green and it is
 
 - **The ruleset** (`.github/rulesets/main.json`, on the default branch): no deletion, no force
   push, a pull request with one approval (stale approvals dismissed on push), and `check` green
-  from GitHub Actions (integration 15368, so a status posted by anyone else doesn't count). No
-  bypass actor: the owner and every agent get the same rule.
+  from GitHub Actions (integration 15368, so a status posted by anyone else doesn't count) on a
+  branch up to date with main (`strict_required_status_checks_policy`, 2026-11-18: two pull
+  requests raising the version to the same number each passed against the main they started
+  from; the rerun on the newer main is what fails the second). No bypass actor: the owner and
+  every agent get the same rule.
 - **Auto-merge for the owner only.** `.github/workflows/owner-merge.yml` (`pull_request_target`)
   approves a pull request whose author and event sender are both user id 26800291 (a-schaefers;
   ids, since a login can be renamed and taken), from this repository, not a draft, at the head it
@@ -2856,7 +2859,12 @@ push: every change is a pull request that merges once `check` is green and it is
   as you with `--match-head-commit`, and waits for the merge or names the failing check. It
   refuses to ship from main and acts only on this repository's own pull request at the commit it
   pushed. `--title`, `--body-file`, `--squash`, `--no-wait`, `--draft`. A red check leaves
-  auto-merge armed: fix, commit, run it again.
+  auto-merge armed: fix, commit, run it again. Auto-merge never updates a branch that fell
+  behind, so while it waits and main moves, it merges main into the pull request (`gh pr
+  update-branch`, as the owner, so `owner-merge.yml` approves the new head) and the check runs
+  again; a check that then fails says to `git pull --ff-only` the branch first (a version main
+  took meanwhile: raise it), and a merge that conflicts says to merge `origin/main` locally. It
+  never force-pushes, so it never says to rebase a pushed branch.
 - **Versions and releases.** `scripts/check-version.sh [base]` (default `origin/main`), in
   `check` on every pull request and in `ship.sh` before it pushes: plugin.json's `version` must be
   `workbench/__init__.py`'s `__version__`, and a branch that changes what ships must raise it

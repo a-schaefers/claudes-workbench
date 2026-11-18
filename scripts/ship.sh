@@ -17,6 +17,12 @@
 # A red check leaves auto-merge armed: fix, commit, run this again (the same
 # branch, the same pull request).
 #
+# main moving while it waits: the ruleset wants the branch up to date, and
+# auto-merge never updates one, so this merges main into the pull request
+# (`gh pr update-branch`) and the check runs again. A version another pull
+# request took meanwhile fails it there (scripts/check-version.sh): pull the
+# branch, raise the version, commit, run this again.
+#
 # IT ARMS ONLY ITS OWN PULL REQUEST, AT ITS OWN COMMIT. A fork can open a pull
 # request from a branch of any name, and this runs with your write access: found
 # by branch name alone, a stranger's pull request could be armed to merge
@@ -113,7 +119,7 @@ esac
 
 echo "waiting for #$n: the check, an approval, then the merge"
 for _ in $(seq 1 180); do
-  verdict=$(gh pr view "$n" --json state,mergeCommit,statusCheckRollup,reviewDecision | python3 -c '
+  verdict=$(gh pr view "$n" --json state,mergeCommit,statusCheckRollup,reviewDecision,mergeStateStatus | python3 -c '
 import json, sys
 p = json.load(sys.stdin)
 if p["state"] == "MERGED":
@@ -125,6 +131,8 @@ bad = [c for c in p.get("statusCheckRollup") or []
           ("FAILURE", "ERROR", "CANCELLED", "TIMED_OUT", "STARTUP_FAILURE", "ACTION_REQUIRED")]
 if bad:
     print("failed " + " ".join("%s(%s)" % (c.get("name") or c.get("context"), c.get("detailsUrl") or c.get("targetUrl") or "") for c in bad))
+elif p.get("mergeStateStatus") == "BEHIND":
+    print("behind")
 else:
     print("pending " + (p.get("reviewDecision") or ""))
 ')
@@ -133,7 +141,16 @@ else:
              echo "merged #$n as ${sha:0:7}"
              exit 0 ;;
     closed) echo "#$n was closed without merging" >&2; exit 1 ;;
+    behind) if ! gh pr update-branch "$n" > /dev/null; then
+              echo "#$n: main moved and does not merge into $branch cleanly:" >&2
+              echo "  git merge origin/main, resolve (raise the version if main's is as high), commit, run this again" >&2
+              exit 1
+            fi
+            updated=1
+            echo "main moved: merged it into #$n; the check runs again" ;;
     failed*) echo "#$n: a check failed: ${verdict#failed }" >&2
+             [ -z "${updated:-}" ] || echo "  main was merged into it here first: git pull --ff-only origin $branch" \
+                                          "(a version main took meanwhile? raise it)" >&2
              echo "auto-merge stays armed: fix, commit, run scripts/ship.sh again (same branch, same PR)" >&2
              exit 1 ;;
   esac
