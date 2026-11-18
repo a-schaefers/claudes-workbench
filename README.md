@@ -108,7 +108,7 @@ and it works.
   vLLM, Ollama and the like. Claude works with the one you already run. No server or models yet?
   That's fine: the first time you use it, Claude looks at your hardware, lays out the servers and
   models that fit it, and sets up the ones you pick in OpenCode (it asks before installing or
-  downloading anything). Using your own? The [FAQ](#faq) has a few things to set on it
+  downloading anything). Want it as hands-off as possible, or run your own? See the [FAQ](#faq)
 - Linux, macOS, or Windows through WSL2 (native Windows lacks the POSIX file locks and signals
   `wb` uses), with Python 3.11+ and git, which `wb` itself runs on
 - **Optional, for images:** a local image tool and model ([Images](ARCHITECTURE.md#images)).
@@ -195,31 +195,40 @@ The full account of every piece, what it does and why, is in [ARCHITECTURE.md](A
 
 ## FAQ
 
-**Which model server should I use?** The one you already run: Claude works with any server that
-speaks the OpenAI API. A few things differ. With Ollama, Claude can download and delete models for
-you, and two tasks can share the GPU when both models fit. With any other server you download
-models the server's own way, and tasks take turns on the GPU. Size-aware routing, fit checks and
-context detection work on Ollama, llama.cpp's `llama-server`, LM Studio and vLLM.
+**Do I have to set any of this up myself?** No. The first time you use it, Claude reads your
+hardware, suggests a model server and models that fit, and with your yes installs them, sets the
+context window and tool calls, and registers each model. It checks the setup with `wb doctor`, and
+checks the models again every week. You answer its questions; it asks before installing or
+downloading anything. The rest of this FAQ is for people who run a server already, or set one up
+themselves.
+
+**I want the most hands-off setup. Which server?** If you have none yet, Ollama. It's where
+Workbench automates the most: Claude downloads and removes models for you, reads each model's
+context window from it, and lets two tasks share the GPU when both fit. If you'd rather have a
+desktop app to manage models, LM Studio comes next. Already run another server? Keep it: Claude
+works with any server that speaks the OpenAI API, and reads each model's size and window from
+llama.cpp's `llama-server`, LM Studio and vLLM too. On those, you download models the server's
+own way, and tasks take turns on the GPU.
 
 **How big a context window do the models need?** 16K tokens at the least; 32K or more is better.
 OpenCode's instructions and tools alone take about 10K, and the window sets how much of a task one
-agent can take on. Most servers start small or split the window, so set it:
-- Ollama: `OLLAMA_CONTEXT_LENGTH` in the service's environment. Its own default, often 4K to 8K,
-  cuts the prompt off without a word.
+agent can take on. Claude sets it when it sets up the server. On a server you run yourself,
+`wb doctor` flags a window that's too small or doesn't match the model's entry. Most servers start
+small, so here is where each one sets it:
+
+- Ollama: `OLLAMA_CONTEXT_LENGTH` in the service's environment. Its default, often 4K to 8K, cuts
+  the prompt off without a word.
 - llama.cpp: `-c` on `llama-server`. With `--parallel N` set, each slot gets an Nth of it (unless
   you add `--kv-unified`), and one agent uses one slot.
-- LM Studio: the context length when you load the model (`lms load <model> --context-length 32768`).
-  Load it before `wb model add`, so LM Studio can say what it gave it.
+- LM Studio: the context length when you load the model (`lms load <model> --context-length
+  32768`). Load it before registering it, so LM Studio can say what it gave it.
 - vLLM: `--max-model-len`.
 
-`wb model add` reads the window from the server where it can, and `wb doctor` flags an entry whose
-window doesn't match what the server serves.
-
 **The agent says it can't call tools, or its tool calls come out as plain text.** The server has to
-turn the model's tool calls into the API's form. vLLM does that only with
-`--enable-auto-tool-choice --tool-call-parser <the model's parser>`. llama.cpp uses the model's
-chat template, which a few models need replaced with `--chat-template-file`. A model LM Studio says
-wasn't trained for tool use is registered without tools and gets no tasks.
+turn the model's tool calls into the API's form. vLLM does that only with `--enable-auto-tool-choice
+--tool-call-parser <the model's parser>`. llama.cpp uses the model's chat template, which a few
+models need replaced with `--chat-template-file`. A model LM Studio says wasn't trained for tool use
+is registered without tools and gets no tasks.
 
 **Can the models run on another machine?** Yes. Give that provider `"local": true` in
 `~/.config/workbench/models.json`. Workbench doesn't measure that machine's GPU, so its tasks never

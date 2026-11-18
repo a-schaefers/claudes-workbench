@@ -146,7 +146,10 @@ recommend models for this hardware and offer to set them up in OpenCode (ask bef
 commands on PATH and the servers answering here. Never steer them to one they don't use. With
 none at all, lay out the options that fit the machine in a line each (llama.cpp's `llama-server`,
 alone or behind llama-swap; LM Studio; Ollama; vLLM on NVIDIA; MLX on Apple Silicon) and let the
-user pick; install nothing unasked. For a server OpenCode has no provider for: `wb model add
+user pick; install nothing unasked. Asked which is most hands-off: Ollama (you download and remove
+its models, its tasks can share the GPU), then LM Studio. Whatever you set up, set it up for
+agents: a window of 32K or more (16K at the least), tool calls on (vLLM `--enable-auto-tool-choice
+--tool-call-parser <the model's>`), and `wb doctor` after. For a server OpenCode has no provider for: `wb model add
 <provider>/<model> --url <its baseURL> --context N`, plus `--start`/`--stop` for one that runs one
 model a process (llama-server, vLLM). Ollama running with no provider: `wb model add
 ollama/<model>` writes it itself. `wb doctor` names each provider it skipped and why; one on
