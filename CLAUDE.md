@@ -114,7 +114,8 @@ dependencies. No packaging: it runs from the clone.
 - `skills.py`: Claude's skill library for the agents (its own git repo): checks, add/patch/
   retire/restore, import, suggestions for a spec, the outcome record. `scan.py`: the security scan
   every skill passes (ported from Hermes Agent's skills guard: keep its MIT notice).
-- `spend.py`: what a task cost Claude, from its session's transcript (results row `claude`).
+- `spend.py`: what a task cost Claude, from its session's transcript.
+- `bench.py`: `wb bench`: accepted tasks replayed on any model, graded by their own tests.
 - `lessons.py`: what each task taught, gathered into lessons.jsonl by feedback/next/resume/accept/discard.
 - `transcript.py`: `wb watch` (the session export merged with the task's events; `--json` feeds
   the mod's pane). `transcript.export` is also the runner's view of the session.
@@ -189,6 +190,7 @@ ARCHITECTURE.md (*Files and formats*):
 ```
 notify.jsonl results.jsonl lessons.jsonl notes.md tuning.json speed.json gpu.{lock,json,admit,load}
 scout.json update.json watch.json imports/ images/ chat/{messages,receipts}.jsonl chat/listener.json
+bench/{cases/<case>,runs/<run>}/ bench/runs.jsonl bench/driver.json
 rules/<task>/  opencode.json HANDBOOK.md CLAUDE.md bin/git grants.json gitdir.json (no lane)
 locks/<task>.{runner,cmd,status,events,steer,grants}.lock   (store.task_lock: no lane reads them)
 tasks/<task>/  task.json status.json events.jsonl steer.jsonl acked context.md base-tests.txt runner.log

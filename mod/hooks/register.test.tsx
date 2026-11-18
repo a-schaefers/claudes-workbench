@@ -1004,6 +1004,20 @@ test('a task left waiting with no notice reaching Claude wakes it anyway, once',
   expect(asked.filter(t => t.includes('no notice reached Claude'))).toHaveLength(1)
 })
 
+test('a bench replay is no one\'s: not shown, and no wake even when it waits with no notice', async ($, on) => {
+  const clock = mock.clock(on, { now: 1_800_000_000_000 })
+  const files: Record<string, string> = {}
+  task(files, 'bench-case-1', 'failed', { bench: { case: 'case', run: 'r1' } }, ts0 - 600)
+  fakeTasks(on, files, ['bench-case-1'])
+  on('process.run', () => ({ value: { exitCode: 0, stdout: '', stderr: '' } }))
+  const asked: string[] = []
+  on('prompt.submit', (_: any, e: any) => { asked.push(e.text); return { text: e.text } })
+  await $.session.start({ cwd: '/', surface: 'terminal', isInteractive: true })
+  await clock.advance(3000)
+  await clock.advance(120_000)
+  expect(asked.join('\n')).not.toContain('bench-case-1')
+})
+
 test('a task closed long ago is not read again', async ($, on) => {
   // the 2026-11-16 audit: every poll read both files of every task ever created
   const clock = mock.clock(on, { now: 1_800_000_000_000 })

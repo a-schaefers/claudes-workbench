@@ -38,6 +38,8 @@ def step(task: store.Task, landed: bool) -> dict:
 
 def record(task: store.Task, outcome: str, last_step: dict | None = None, **extra) -> dict:
     spec, st = task.spec, task.status
+    if spec.get("bench"):  # a replay: its row is bench/runs.jsonl's
+        return {}
     earlier = st.get("step_sizes") or []
     reviews = sum(s.get("reviews") or 0 for s in earlier) + st.get("reviews", 0)  # every step's
     row = {"ts": store.now(), "task": task.name, "outcome": outcome, "model": spec.get("model"),

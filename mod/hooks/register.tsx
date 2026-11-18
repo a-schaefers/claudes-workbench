@@ -489,7 +489,7 @@ async function scan($: any, root: string, now: number): Promise<WbTask[]> {
       continue
     }
     const sp = await readJson($, `${base}/task.json`)
-    if (!sp.name) continue
+    if (!sp.name || sp.bench) continue // a replay of wb bench's: no one's task, never shown or woken
     let recent: string[] = []
     if (ACTIVE.has(phase) || NEEDS.has(phase)) {
       await noteClaude($, sp, now)

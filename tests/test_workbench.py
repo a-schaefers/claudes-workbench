@@ -3363,6 +3363,149 @@ class Routing(Base):
         self.assertIn("provider", cfg)                # the rest of the config is kept
 
 
+class Bench(Base):
+    """wb bench: accepted tasks replayed and graded by the tests they were accepted with."""
+
+    def accepted(self, name: str, test: str = "sh tests/check.sh", notes: bool = False) -> store.Task:
+        """An accepted task whose step added tests/check.sh (written here, as the agent's), and
+        notes.txt with `notes`: one more thing the fake's replay never writes."""
+        self.start(name, "ok", "--test", test)
+        wait_phase(name, {"review"})
+        wt = store.Task(name).worktree
+        (wt / "tests").mkdir()
+        (wt / "tests" / "check.sh").write_text("grep -qx 42 answer.txt\n")
+        if notes:
+            (wt / "notes.txt").write_text("the original's\n")
+        run_wb("accept", name, "-m", "feat: the answer")
+        return store.Task(name)
+
+    def test_a_case_holds_the_base_alone_the_spec_and_the_hidden_tests(self):
+        from workbench import bench
+        task = self.accepted("t-src")
+        out = run_wb("bench", "add", "t-src")
+        self.assertIn("hidden checks: tests/check.sh", out)
+        self.assertIn("on the base: fails", out)
+        case = bench.cases()["t-src"]
+        self.assertEqual(case["base"], task.spec["base"])
+        self.assertEqual(case["test_cmd"], "sh tests/check.sh")
+        self.assertEqual((bench.case_dir("t-src") / "spec.md").read_text(), self.spec.read_text())
+        clone = Path(self.tmp.name) / "c"
+        bench.checkout(case, clone)
+        self.assertFalse((clone / "answer.txt").exists())
+        # the answer is not in the bundle: only the base's history, one branch
+        self.assertEqual(gitops.git(clone, "rev-list", "--all").split(), [case["base"]])
+        with self.assertRaises(SystemExit):
+            run_wb("bench", "add", "t-src")                               # once
+        self.assertIn("t-src", run_wb("bench", "list"))
+
+    def test_a_case_is_refused_without_an_accepted_task_tests_or_a_failing_base(self):
+        from workbench import bench
+        self.start("t-open", "ok", "--test", TEST_CMD)
+        wait_phase("t-open", {"review"})
+        with self.assertRaisesRegex(RuntimeError, "review: a case is made from an accepted task"):
+            bench.add("t-open")
+        run_wb("accept", "t-open", "-m", "feat: x")
+        with self.assertRaisesRegex(RuntimeError, "changed no test files"):
+            bench.add("t-open")                                           # answer.txt only
+        with self.assertRaisesRegex(RuntimeError, "already pass on the base"):
+            bench.add("t-open", hidden=["answer.txt"])                    # the answer itself
+        self.assertIn("t-open", bench.add("t-open", check="true")[0])    # the acceptance fails there
+        with self.assertRaisesRegex(RuntimeError, "a path inside the repo"):
+            bench.add("t-open", hidden=["../x"], case_name="t-open-2")
+        # a check its own commit fails can't grade a replay: clean-fixtures' suite needed git
+        # writes, which the lane's git refuses, and every replay failed (2026-11-17)
+        with self.assertRaisesRegex(RuntimeError, "fails on step 1's own commit .* no replay could pass"):
+            bench.add("t-open", check="test -f never.txt", case_name="t-open-3")
+        self.assertNotIn("t-open-3", bench.cases())
+        self.start("t-none", "ok")
+        wait_phase("t-none", {"review"})
+        run_wb("accept", "t-none", "-m", "feat: x")
+        with self.assertRaisesRegex(RuntimeError, "no acceptance command"):
+            bench.add("t-none")
+
+    def test_a_case_from_a_later_step_starts_where_that_step_did(self):
+        from workbench import bench
+        self.start("t-steps", "ok", "--test", TEST_CMD)
+        wait_phase("t-steps", {"review"})
+        step2 = Path(self.tmp.name) / "step2.md"
+        step2.write_text("Now add the check.\n")
+        run_wb("next", "t-steps", "--spec", str(step2), "-m", "feat: the answer",
+               "--test", "sh tests/check.sh")
+        wait_phase("t-steps", {"review"})
+        wt = store.Task("t-steps").worktree
+        (wt / "tests").mkdir()
+        (wt / "tests" / "check.sh").write_text("grep -qx 42 answer.txt && test -f notes.txt\n")
+        (wt / "notes.txt").write_text("step 2\n")
+        run_wb("accept", "t-steps", "-m", "test: the check")
+        bench.add("t-steps", step=2)
+        case = bench.cases()["t-steps-s2"]
+        first = gitops.git(self.repo, "log", "-1", "--format=%H", "--grep", "(step 1)",
+                           "delegate/t-steps").strip()
+        self.assertEqual(case["base"], first)                             # after step 1
+        self.assertEqual((bench.case_dir("t-steps-s2") / "spec.md").read_text(), "Now add the check.\n")
+        self.assertEqual(case["test_cmd"], "sh tests/check.sh")
+
+    def test_a_replay_is_graded_by_the_hidden_checks_and_leaves_no_trace_in_real_work(self):
+        from workbench import bench
+        self.accepted("t-src")
+        bench.add("t-src")
+        self.accepted("t-plain", test=TEST_CMD, notes=True)
+        bench.add("t-plain", hidden=[], check="test -f notes.txt", case_name="t-strict")
+        os.environ["FAKE_SCENARIO"] = "ok"
+        good = bench.replay(bench.cases()["t-src"], "ollama/mimo-v2.6:9b-q8_0", 1, "r1", "", [])
+        self.assertEqual(good["outcome"], "passed", good)
+        self.assertFalse(good["visible_ok"])      # it never wrote tests/check.sh; the hidden one passes
+        # its own run of the acceptance command passes, the hidden --check doesn't
+        bad = bench.replay(bench.cases()["t-strict"], "ollama/mimo-v2.6:9b-q8_0", 1, "r1", "", [])
+        self.assertEqual(bad["outcome"], "failed")
+        self.assertIn("hidden checks failed", bad["why"])
+        for row in (good, bad):
+            t = store.Task(row["task"])
+            self.assertEqual(t.status["phase"], "discarded")
+            self.assertTrue(t.spec["trial"])
+        self.assertFalse([r for r in store.notices() if r["task"].startswith("bench-")])
+        self.assertFalse([r for r in store.results(trials=True) if r["task"].startswith("bench-")])
+        self.assertTrue((bench.home() / "runs" / "r1" / good["task"] / "diff.patch").exists())
+        self.assertNotIn("bench-", run_wb("status"))
+
+    def test_a_run_replays_in_the_background_and_a_second_run_skips_what_is_done(self):
+        from workbench import bench
+        self.accepted("t-src")
+        bench.add("t-src")
+        os.environ["FAKE_SCENARIO"] = "ok"
+        out = run_wb("bench", "run", "--model", "mimo", "--label", "base")
+        run = out.split()[2].rstrip(":")
+        deadline = time.time() + 60
+        while time.time() < deadline and (bench.driver() or not bench.rows(run)):
+            time.sleep(0.3)
+        self.assertEqual([r["outcome"] for r in bench.rows(run)], ["passed"])
+        report = run_wb("bench", "report")
+        self.assertIn("100%", report)
+        self.assertIn("t-src: mimo-v2.6:9b-q8_0 PASS", report)
+        self.assertIn("bench: 1 of 1 case(s) passed", run_wb("models"))
+        bench.drive(run)                                                  # nothing left to do
+        self.assertEqual(len(bench.rows()), 1)
+
+    def test_a_real_task_that_needs_the_gpu_stops_the_bench_replay(self):
+        from workbench import bench
+        self.accepted("t-src")
+        bench.add("t-src")
+        os.environ["FAKE_SCENARIO"] = "hang"
+        rows = []
+        th = threading.Thread(target=lambda: rows.append(
+            bench.replay(bench.cases()["t-src"], "ollama/mimo-v2.6:9b-q8_0", 1, "r2", "", [])))
+        th.start()
+        deadline = time.time() + 30
+        while time.time() < deadline and not any(
+                t.spec.get("bench") and t.status.get("agent_pid") for t in store.all_tasks()):
+            time.sleep(0.2)
+        out = self.start("t-real", "ok", "--model", "qwen")              # the only GPU, unshared
+        self.assertIn("stopped the bench's replay", out)
+        th.join(60)
+        self.assertEqual(rows[0]["outcome"], "preempted")
+        wait_phase("t-real", {"review"})
+
+
 class Tuning(Base):
     """Settings learned per model and window from how tasks went (tuning.py)."""
     M, W = "ollama/m", 32768

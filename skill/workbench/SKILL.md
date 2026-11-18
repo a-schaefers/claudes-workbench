@@ -139,7 +139,8 @@ model, unloading whatever is there. `wb models` shows the ranking per size. Pass
 Which sizes a model takes is set with `wb model sizes <id> trivial|significant`: set it when you
 add a model you judge fit only for small work, and otherwise change it only when the user asks.
 A newly added model has no record, so the router won't pick it over one with a good record:
-give it its first few real tasks with `--model` (ones you'd review closely anyway).
+replay the bench on it first (`wb bench run --model <id>`, below), then give it its first few
+real tasks with `--model` (ones you'd review closely anyway).
 **No local model yet?** If `wb models` lists none that can run, do the model check below first:
 recommend models for this hardware and offer to set them up in OpenCode (ask before any download).
 **Work with the model server the user already runs**, whichever it is: `wb scout` lists the server
@@ -186,7 +187,8 @@ only with a yes: on Ollama `wb model add <provider/model> --pull` (background); 
 download it the server's own way (`lms get`, a GGUF from Hugging Face) and `wb model add`; `wb model sizes` for what it
 should take, `wb model retire <id> [--delete]`. Installed but unregistered models may belong to other tools: ask before touching
 them. When you set a model aside, `wb scout --watch "…"` records what would bring it back:
-the change to look for, and the test it must pass. Finish with `wb scout --done --notes "…"`. Nothing worth changing: one line, and done.
+the change to look for, and the test it must pass. A model you add: offer an overnight
+`wb bench run --model <id>` before its first real task. Finish with `wb scout --done --notes "…"`. Nothing worth changing: one line, and done.
 
 ## 2. Spec (the most valuable thing you write)
 Read just enough of the repo to scope it, then write the spec to a file in the scratchpad:
@@ -573,6 +575,15 @@ goes in that repo's CLAUDE.md instead. Drop a note that has stopped holding (`wb
   said to merge; otherwise give them the merge command it prints.
 - `wb discard <name> --reason "…"` drops it. `wb status` lists open tasks (e.g. after a context
   reset); `wb stats` compares the models on finished work.
+- **Keep the good ones as bench cases.** An accepted step whose spec pinned the names its tests
+  call, and whose tests fail on its base and pass in the agent's lane (one that commits or writes
+  outside it never can: add refuses it), is a case: `wb bench add <name>` (`--step N` for a
+  `wb next` step; `--hidden <paths>` or `--check "<cmd>"` when the tests it changed aren't the
+  ones that tell). `wb bench run [--model <id>…] [--label <variant>]` replays the cases in the
+  background, one at a time, after any real task and stopped by one; it wakes no one and costs
+  you nothing. `wb bench report` compares models (or a `--label`, such as a workbench branch or
+  a skill handed with `--skill`) on the same work. It is evidence for your `--model` and the
+  weekly check, never a reason to skip review: the router doesn't read it.
 
 ## Report to the user
 Short and honest: what was built, on which model, rounds (automatic and review), test result,

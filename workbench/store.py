@@ -237,6 +237,8 @@ class Task:
         append_jsonl(self.dir / "events.jsonl", row)
 
     def notify(self, kind: str, text: str, **extra) -> None:
+        if self.spec.get("bench"):  # a replay of wb bench's: no one is to be woken
+            return
         append_jsonl(home() / "notify.jsonl",
                      {"ts": now(), "task": self.name, "kind": kind, "text": text, **extra})
 

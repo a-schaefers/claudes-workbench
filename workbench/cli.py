@@ -19,7 +19,7 @@ from collections import defaultdict
 from pathlib import Path
 from types import SimpleNamespace
 
-from . import (__version__, ask_mcp, chat, context, gitops, hardware, images, lane, lessons, models,
+from . import (__version__, ask_mcp, bench, chat, context, gitops, hardware, images, lane, lessons, models,
                results, router, scan, skills, spend, store, transcript, tuning)
 from .watch import Watcher, wait_exit
 from . import runner
@@ -212,9 +212,30 @@ def _gpu_wait(m: models.Model, me: str | None = None) -> tuple[dict, bool]:
     return held, bool(held) and not models.admits(m, held)
 
 
+def _preempt_bench(m: models.Model, me: str | None = None) -> str:
+    """Real work first: the bench's replays that keep `m` off the GPU are stopped (the driver
+    records them preempted and replays them once no real task runs). An overnight run must
+    never make the morning's task queue."""
+    if m.remote:
+        return ""
+    held, waits = _gpu_wait(m, me)
+    names = sorted({h["task"] for h in held.values() if h.get("task")
+                    and store.Task(h["task"]).spec.get("bench")}) if waits else []
+    for name in names:
+        t = store.Task(name)
+        with store.locked(runner.lock_file(name, "cmd")):
+            if t.status.get("phase") in store.CLOSED:
+                continue
+            _stop_runner(t)
+            t.set_status(phase="stuck", last=bench.PREEMPTED, pid=None)
+    return f"note: stopped the bench's replay ({', '.join(names)}) to make room" if names else ""
+
+
 def _gpu_note(task: store.Task) -> str:
     """For wb feedback/next/resume, which queue the task anyway: who it will wait for."""
     m = models.discover().get(task.spec.get("model") or "")
+    if m and not task.spec.get("bench"):
+        _say(_preempt_bench(m, task.name))
     held, waits = _gpu_wait(m, task.name) if m else ({}, False)
     return (f"note: the GPU is busy with {', '.join(sorted({h['task'] for h in held.values()}))}; "
             f"{task.name} waits as queued until it's free") if waits else ""
@@ -344,6 +365,8 @@ def cmd_start(a):
     _need_claude_md(repo, a.base, a)
     # Two projects, one GPU: a task that can't run beside the GPU's holders used to queue in
     # silence behind them, maybe for hours (the 2026-11-16 audit). Say so before any worktree.
+    if not getattr(a, "bench", None):
+        _say(_preempt_bench(m, a.name))
     held, waits = _gpu_wait(m, a.name)
     if waits and not a.queue:
         die(models.busy(held, f"{m.id} can't run beside {'it' if len(held) == 1 else 'them'}. "
@@ -372,6 +395,8 @@ def cmd_start(a):
         "branch": gitops.branch_name(a.name), "model": m.id, "model_label": m.label,
         "opencode_model": m.id, "route": why, "size": a.size, "stack": stack,
         **({"trial": True} if a.trial else {}), "test_cmd": a.test, "test_timeout": a.test_timeout,
+        # a replay of the bench driver's (bench.replay): no notices, no results row, not listed
+        **({"bench": b} if (b := getattr(a, "bench", None)) else {}),
         **({"no_base_check": True} if a.no_base_check else {}),
         "auto_fix": a.auto_fix, "ask_budget": budget, "ask_timeout": a.ask_timeout,
         "checkin": a.checkin if a.checkin is not None else 10 if a.size == "significant" else 0,
@@ -781,8 +806,9 @@ def _others_line(others, what):
 
 
 def cmd_status(a):
-    tasks = [need(a.name)] if a.name else [t for t in store.all_tasks()
-                                           if a.all or t.status.get("phase") not in store.CLOSED]
+    tasks = [need(a.name)] if a.name else [t for t in store.all_tasks()  # replays: wb bench report
+                                           if a.all or (t.status.get("phase") not in store.CLOSED
+                                                        and not t.spec.get("bench"))]
     tasks, others = (tasks, []) if a.name else _scope(tasks, a.repo, a.session)
     if not tasks:
         print("no open tasks" + ("" if a.all else " (wb status --all shows closed ones)"))
@@ -912,8 +938,10 @@ def stop_everything(tasks=None) -> list[str]:
 @one_at_a_time
 def cmd_stop(a):
     if a.all:
+        # everything, without --repo/--session: the bench's driver too, first, so it starts nothing
+        driver = None if a.repo or a.session else bench.stop_driver()
         mine, others = _scope(_open_tasks(), a.repo, a.session)
-        stopped = stop_everything(mine)
+        stopped = ([f"wb bench (pid {driver})"] if driver else []) + stop_everything(mine)
         print("stopped: " + ("; ".join(stopped) if stopped else "nothing was running"))
         _say(_others_line(others, "left running"))
         return
@@ -1236,6 +1264,8 @@ def cmd_models(a):
         print(f"{'':36}slice: {router.slice(m).line()}")
         if sp := router.speed_line(m.id):
             print(f"{'':36}speed: {sp} on this machine")
+        if b := bench.model_line(m.id):
+            print(f"{'':36}bench: {b} (wb bench report)")
     for size in router.SIZES:
         print(f"\n{size}:")
         for i, sc in enumerate(router.rank(size)):
@@ -1282,6 +1312,25 @@ def cmd_trial(a):
           else "no unmarked results for those tasks")
     if shut:
         print(f"lessons dropped with them: {len(shut)}")
+
+
+def cmd_bench(a):
+    """Replays of accepted tasks, graded by their hidden checks (bench.py)."""
+    if a.bench_cmd == "add":
+        print("\n".join(bench.add(a.task, a.step, a.hidden, a.check, a.name)))
+    elif a.bench_cmd == "list":
+        print("\n".join(bench.list_lines()))
+    elif a.bench_cmd == "run":
+        if a.repeat < 1:
+            die("--repeat is at least 1")
+        _, lines = bench.start(a.model or [], a.case or [], _skill_names(a.skill), a.label or "",
+                               a.repeat)
+        print("\n".join(lines))
+    elif a.bench_cmd == "stop":
+        pid = bench.stop_driver()
+        print(f"stopped the bench run (pid {pid})" if pid else "no bench run is running")
+    else:
+        print(bench.report(a.run, a.label))
 
 
 SCOUT_EVERY_DAYS = 7
@@ -1374,7 +1423,9 @@ def cmd_scout(a):
             used = (f"{len(rs)} real task(s), {sum(r['outcome'] == 'accepted' for r in rs)} accepted, "
                     f"last {time.strftime('%Y-%m-%d', time.localtime(max(r['ts'] for r in rs)))}"
                     if rs else "no real tasks yet")
+            replayed = bench.model_line(f"{pid}/{name}")
             print(f"  {pid}/{name}: {facts or prov['engine']} · {used}"
+                  + (f" · bench: {replayed}" if replayed else "")
                   + (f"\n    slice: {router.slice(m).line()}" if m else ""))
         extra = [x for x in installed if x not in prov["models"] and x.removesuffix(":latest")
                  not in prov["models"]]
@@ -2321,6 +2372,17 @@ def cmd_doctor(a):
 
 def main(argv=None):
     store.absolute_env()  # before anything reads a path from the environment or a child inherits it
+    a = parser().parse_args(argv)
+    try:
+        a.f(a)
+    except RuntimeError as e:  # wb's own failures (git, a config that doesn't parse): a message
+        die(str(e))
+    except OSError as e:  # a --spec, --message or --file that isn't there: a line, not a traceback
+        die(f"{e.filename}: {e.strerror}" if e.filename else str(e))  # (the 2026-11-16 audit)
+
+
+def parser() -> argparse.ArgumentParser:
+    """wb's commands and flags (main; the bench driver starts its replays through it)."""
     ap = argparse.ArgumentParser(prog="wb", description=__doc__,
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--version", action="version", version=f"wb {__version__}")
@@ -2580,6 +2642,28 @@ def main(argv=None):
     s = sub.add_parser("init", help="set a project up: git with an initial commit, "
                                     "AGENTS.md → CLAUDE.md")
     s.add_argument("dir"); s.set_defaults(f=cmd_init)
+    s = sub.add_parser("bench", help="replay accepted tasks on any model, graded by the tests they "
+                                     "were accepted with")
+    bs = s.add_subparsers(dest="bench_cmd", required=True)
+    x = bs.add_parser("add", help="make a case of one step of an accepted task")
+    x.add_argument("task")
+    x.add_argument("--step", type=int, help="which step of a wb next task (default: the last)")
+    x.add_argument("--hidden", nargs="+", metavar="PATH",
+                   help="the files graded with (default: the test files the step changed)")
+    x.add_argument("--check", help="a command run after the acceptance command, to pass too")
+    x.add_argument("--name", help="the case's name (default: the task's)")
+    bs.add_parser("list", help="the cases")
+    x = bs.add_parser("run", help="replay the cases in the background, one at a time")
+    x.add_argument("--model", nargs="+", help="default: every model that can run and takes the case's size")
+    x.add_argument("--case", nargs="+", help="default: every case")
+    x.add_argument("--skill", nargs="+", help="hand these library skills to every replay")
+    x.add_argument("--label", help="a name for this variant (a workbench branch, a skill), to compare by")
+    x.add_argument("--repeat", type=int, default=1, help="replay each N times")
+    bs.add_parser("stop", help="stop the run, closing its replay")
+    x = bs.add_parser("report", help="pass rates by model and label, and each case")
+    x.add_argument("--run")
+    x.add_argument("--label")
+    s.set_defaults(f=cmd_bench)
     sub.add_parser("stats", help="results by model").set_defaults(f=cmd_stats)
     sub.add_parser("tune", help="the settings tuned from results, per model and window").set_defaults(f=cmd_tune)
     s = sub.add_parser("trial", help="mark closed tasks as trial runs: their results stop counting")
@@ -2594,14 +2678,7 @@ def main(argv=None):
     s.add_argument("--if-due", action="store_true", help="with --check: ask origin at most weekly")
     s.set_defaults(f=cmd_update)
     sub.add_parser("doctor", help="check the setup").set_defaults(f=cmd_doctor)
-
-    a = ap.parse_args(argv)
-    try:
-        a.f(a)
-    except RuntimeError as e:  # wb's own failures (git, a config that doesn't parse): a message
-        die(str(e))
-    except OSError as e:  # a --spec, --message or --file that isn't there: a line, not a traceback
-        die(f"{e.filename}: {e.strerror}" if e.filename else str(e))  # (the 2026-11-16 audit)
+    return ap
 
 
 if __name__ == "__main__":
