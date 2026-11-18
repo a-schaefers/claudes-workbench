@@ -10,9 +10,7 @@
 # What it holds:
 #   - main's ruleset (.github/rulesets/main.json): no direct push, no force push,
 #     no deletion; a pull request with `check` green (from GitHub Actions only)
-#     on a branch up to date with main (so two pull requests can't both pass
-#     with the same new version: scripts/check-version.sh) and one approval,
-#     stale approvals dismissed. No bypass actor: the owner
+#     and one approval, stale approvals dismissed. No bypass actor: the owner
 #     and every agent get the same rule. owner-merge.yml approves the owner's
 #     pull requests; anyone else's waits for the owner.
 #   - Actions may approve pull requests (owner-merge.yml's approval), and the
