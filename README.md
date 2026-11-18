@@ -165,7 +165,9 @@ the diff.
 **Away from the computer?** `wb chat serve` runs a small web chat with the running Claude session,
 and `wb chat url` prints its private link. Claude's permission prompts and questions come to it
 too. Over https (`tailscale serve --bg 1337` gives it an address on your tailnet) it installs as
-an app on your phone and notifies you when Claude answers or needs you.
+an app on your phone and notifies you when Claude answers or needs you. It does less than Claude
+Code's own Remote Control (`claude rc`) with the Claude app; what it adds is a lane to the session
+in your terminal, the one the workbench mod runs, reachable over your own network.
 
 <p align="center"><img src="docs/web-chat.png" alt="The web chat: Claude's report on which model takes which tasks, the user's reply, a receipt saying Claude has it and will read it after its current step, and 'Claude is on it'" width="420"></p>
 
