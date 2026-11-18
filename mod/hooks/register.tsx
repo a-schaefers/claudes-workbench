@@ -351,6 +351,7 @@ const mem = {
   sawTurn: false, // the person has used this session: a weekly check may follow
   scoutAsked: false, // the weekly model check was raised in this load
   updateAsked: false, // `wb update --check --if-due` ran in this load (wb keeps it weekly)
+  optimizeAsked: false, // `wb optimize start --if-due` ran in this load (wb says when it's due)
   boundary: false, // one closed since: a moment to make room in Claude's context
   toasted: new Set<string>(),
   noticed: new Map<string, number>(), // each task's newest notice (its ts), as deliver last read
@@ -745,6 +746,10 @@ async function poll($: any) {
       mem.updateAsked = true
       void checkUpdate($) // off the poll's path: a stalled fetch held every wake (the 2026-11-16 audit)
     }
+    if (mem.sawTurn && mem.earsOk && !mem.optimizeAsked && !list.some(isOpen)) {
+      mem.optimizeAsked = true
+      void measureIfDue($)
+    }
     await deliver($, now)
     await rewake($, now, list)
     await listen($, now)
@@ -758,6 +763,13 @@ async function poll($: any) {
     mem.polling = false
   }
   if (mem.again) void poll($)
+}
+
+// A minute or two of measuring the GPU for the local models, when wb says it's due (never run,
+// the GPU changed, a new model); the user is told, Claude is not woken (the user, 2026-11-18).
+async function measureIfDue($: any) {
+  const { ok, out } = await runWb($, ['optimize', 'start', '--if-due'])
+  if (ok && out.startsWith('measuring')) $.ui.toast(`workbench: ${out.trim()}`)  // else not due
 }
 
 async function checkUpdate($: any) {

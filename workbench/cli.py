@@ -455,6 +455,9 @@ def cmd_start(a):
         print(f"note: it runs beside {holding} on the GPU (their models fit together)")
     elif not state["resident"]:
         print("note: the runner loads it onto the GPU first, unloading what is there")
+    measured = (optimize.state().get("models") or {}).get(m.id)
+    if measured and (fit := optimize.advice(m.id, measured)):
+        print(f"note: {fit} (ask the user first: it adds to their OpenCode config)")
     print(f"next: wb wait {a.name}   (the workbench mod wakes Claude by itself when loaded)")
 
 
@@ -1375,7 +1378,8 @@ def cmd_optimize(a):
                 print(f"--bench then replays the bench's {len(cases)} case(s) on each model: about "
                       f"{hours:.1f} h more, best overnight")
         elif a.action == "start":
-            print("\n".join(optimize.start(a.bench)))
+            if lines := optimize.start(a.bench, a.if_due):
+                print("\n".join(lines))
         elif a.action == "stop":
             pid = optimize.stop()
             print(f"stopped wb optimize (pid {pid}); what it measured is kept" if pid
@@ -2144,6 +2148,11 @@ def cmd_setup(a):
     if bindir not in os.environ.get("PATH", "").split(os.pathsep):
         print(f"--  {bindir} isn't on PATH: add it; Claude and the mod run wb by name (WB_BIN moves "
               "only the mod's calls)")
+    try:  # a minute or two, said up front; a task started meanwhile goes first
+        for line in optimize.start(if_due=True):
+            print(f"--  {line}")
+    except (RuntimeError, OSError):
+        pass
     print("next: wb doctor")
     sys.exit(1 if bad else 0)
 
@@ -2720,6 +2729,9 @@ def parser() -> argparse.ArgumentParser:
     s.add_argument("ids", nargs="*", help="apply: the models whose measured window to add")
     s.add_argument("--bench", action="store_true",
                    help="start: then replay the bench's cases on every model (wb bench run)")
+    s.add_argument("--if-due", action="store_true",
+                   help="start: only when due (never measured, the GPU changed, a new model), "
+                   "and quietly when not or when a task holds the GPU (wb setup and the mod)")
     s.set_defaults(f=cmd_optimize)
     s = sub.add_parser("init", help="set a project up: git with an initial commit, "
                                     "AGENTS.md → CLAUDE.md")

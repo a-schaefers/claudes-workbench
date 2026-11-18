@@ -122,7 +122,7 @@ dependencies. No packaging: it runs from the clone.
 - `watch.py`: waiting without polling: inotify (ctypes) and pidfd, with a stat fallback.
 - `chat.py` + `chat_static/`: the web chat (stdlib HTTP, a token and a Host check).
 - `images.py`: `wb image`, local image engines from `images.json`; holds the GPU.
-- `optimize.py`: `wb optimize`, only when asked: each Ollama model's largest window all on the GPU.
+- `optimize.py`: `wb optimize` (when due, or asked): each Ollama model's largest window all on the GPU.
 - `agent/HANDBOOK.md`: Claude's working habits for the agent. Every agent prompt carries it, so
   keep it short: each token costs prefill time.
 - `skill/workbench/`: the `/workbench` procedure, `SKILL.md` and the `reference/` it reads when needed (`wb setup` links it).

@@ -150,7 +150,8 @@ Model servers (none runnable, which server, a model on another machine), updatin
 When the user asks you to optimize or tune their setup (in any words): run `wb optimize
 estimate` (`--bench` too if they want models compared overnight), tell them how long it holds
 the GPU and that a task they start stops it, then `wb optimize start [--bench]`; it runs
-detached and wakes no one. Next time, read `wb optimize report` and ask before `wb optimize
+detached and wakes no one (a short measuring run also starts by itself when due: the mod says so).
+When `wb optimize report`, or a `note:` from `wb start`, offers a window, ask before `wb optimize
 apply <id>`: a bigger window compacts less, a window all on the GPU writes faster.
 
 ## 2. Spec (the most valuable thing you write)
