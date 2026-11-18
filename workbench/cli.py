@@ -2111,21 +2111,37 @@ def cmd_chat(a):
     elif a.action == "pending":
         for r in chat.pending():
             print(json.dumps(r))
-    elif a.action == "ask":  # the mod: a permission prompt for the away user; prints its id
-        if not a.tool or not a.text:
-            die("wb chat ask needs --tool and --text")
-        print(chat.ask(a.tool, a.text)["id"])
-    elif a.action == "wait":  # the mod: allow, deny or expired once answered; open at the timeout
+    elif a.action == "ask":  # the mod: a dialog for the away user; prints its id and its state
+        if not a.tool or a.kind not in chat.KINDS:
+            die("wb chat ask needs --tool, and --kind permission|plan|question")
+        try:
+            detail = json.loads(a.detail) if a.detail else None
+        except ValueError:
+            die("--detail is JSON")
+        if a.kind == "plan" and not (detail or {}).get("plan"):
+            detail = {"plan": chat.latest_plan()}  # ExitPlanMode's input holds no plan
+        if not (a.text or a.kind != "permission"):
+            die("wb chat ask --kind permission needs --text")
+        try:
+            row = chat.ask(a.tool, a.text or "", a.kind, detail)
+        except ValueError as e:
+            die(f"wb chat ask: {e}")
+        print(row["id"], row["answer"] or "open")
+    elif a.action == "wait":  # the mod: the answer once there is one; open at the timeout
         if not a.id:
             die("wb chat wait <ask id>")
         try:
-            print(chat.wait_answer(a.id, a.timeout) or "open")
+            got = chat.wait_answer(a.id, a.timeout)
         except KeyError:
             die(f"no permission prompt {a.id}")
+        print(json.dumps(chat.find_ask(a.id)) if a.json else got or "open")
     elif a.action == "answer":
         if not a.id or a.verdict not in chat.ANSWERS:
             die("wb chat answer <ask id> allow|deny|expired")
-        cur = chat.answer(a.id, a.verdict, a.by or "cli")
+        try:
+            cur = chat.answer(a.id, a.verdict, a.by or "cli", note=a.note)
+        except ValueError:
+            die("a question is answered on the page, with its choices")
         if cur is None:
             die(f"no permission prompt {a.id}")
         print(cur["answer"])
@@ -2734,7 +2750,11 @@ def parser() -> argparse.ArgumentParser:
     s.add_argument("id", nargs="?", help="ack: the message id; wait, answer: the prompt's id")
     s.add_argument("verdict", nargs="?", help="answer: allow, deny or expired")
     s.add_argument("--tool", help="ask: the tool asking")
+    s.add_argument("--kind", default="permission", help="ask: permission, plan or question")
+    s.add_argument("--detail", help="ask: JSON, a question's {questions} or a plan's {plan}")
+    s.add_argument("--note", help="answer: words to pass on with it")
     s.add_argument("--timeout", type=float, default=30, help="wait: seconds")
+    s.add_argument("--json", action="store_true", help="wait: the whole ask, answered or not")
     s.add_argument("--port", type=int, default=chat.PORT)
     s.add_argument("--bind", action="append", help="serve: an address to listen on, `tailscale` "
                    "or 0.0.0.0 (default: chat.json's `bind`, else localhost)")

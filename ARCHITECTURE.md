@@ -2279,14 +2279,25 @@ VPN), `"hosts": ["chat.example.org"]` a name a tunnel or proxy sends.
   answers only a question asked there; nothing hard to undo on an ambiguous OK. For six hours after
   a web message (until the user types in the terminal again) Claude also tells the user there
   when something they asked for finishes or needs them.
-- **Permission prompts** (the user, 2026-11-18: the terminal's dialog waited for nobody). While
+- **Claude Code's dialogs** (the user, 2026-11-18: the terminal's dialog waited for nobody). While
   the user is away (a web message within 6 h, none typed in the terminal since), the listening
-  session's mod puts Claude Code's permission prompts on the page as a card, the tool and what it
-  would run, with Deny and Allow. A tap settles the prompt in the terminal; unanswered for 30
-  minutes, or the turn interrupted, the card says it waits in the terminal and the dialog comes up
-  there as usual. Questions and plans (AskUserQuestion, EnterPlanMode, ExitPlanMode) stay in the
-  terminal: they are the person's to answer. A deny tells Claude to ask the user in the chat what
-  to do instead. How the mod does it: *The web chat listener*, under *The mod*.
+  session's mod puts them on the page as cards (`kind`):
+  - `permission`: the tool and what it would run, with Deny and Allow. A deny tells Claude to ask
+    the user in the chat what to do instead, with their words when they gave any.
+  - `question` (AskUserQuestion): each question with its options as buttons (one, or several for
+    a multi-select), a box for their own words, Skip and Answer; the picks reach Claude as the
+    tool's `answers`.
+  - `plan` (ExitPlanMode): the plan (folded past 900 characters or 14 lines), and Keep planning
+    with an optional note, which Claude gets as the reason to revise. Approving stays in the
+    terminal: Claude Code ignores a hook's allow on that dialog, with or without a `setMode`, though
+    it takes a deny (checked in a live session, 2026-11-18); the card says so.
+
+  A tap settles the dialog in the terminal; unanswered for 30 minutes, or the turn interrupted,
+  the card says so and the dialog stays in the terminal as usual. The gear's *While you're away*
+  setting (`prefs.json` `away`) can instead let Claude go ahead: a permission is allowed at once
+  and listed in the thread ("allowed by your setting"); questions and plans still ask, and deny
+  rules still hold (they never reach a dialog). How the mod does it: *The web chat listener*,
+  under *The mod*.
 
 **Files** (`$WB_HOME/chat/`):
 - `messages.jsonl`: `{id: "<ms>-<6 hex>", ts, from: "user"|"claude", text, cid?}`. A post whose
@@ -2295,11 +2306,19 @@ VPN), `"hosts": ["chat.example.org"]` a name a tunnel or proxy sends.
   `queued`: a mid-turn delivery didn't go through, so it was submitted as a prompt.
 - `listener.json`: `{session, cwd, pid, busy}`, written by the mod when it changes. A listener
   counts while its pid answers `kill -0` (or, with no pid, its `ts` is under 15 s old).
-- `asks.jsonl`: permission prompts. An ask row `{id: "ask-<ms>-<8 hex>", ts, tool (200
-  characters), text (2000)}` from `wb chat ask`, then answer rows `{id, ts, answer:
-  "allow"|"deny"|"expired", by: "web"|"timeout"|"interrupted"|"cli"}`. The first answer row wins
-  (`chat.asks` ignores later ones), so the page's tap and the mod's expiry, two processes, can't
-  both stand; `wb chat answer` prints the answer that stands.
+- `asks.jsonl`: the dialogs. An ask row `{id: "ask-<ms>-<8 hex>", ts, tool (200 characters),
+  text (2000), kind: "permission"|"plan"|"question", detail?}` from `wb chat ask` (`detail`, at
+  most 40,000 characters of JSON: a question's `{questions}`, the tool's own; a plan's `{plan}`,
+  from the tool's input, else `chat.latest_plan`: the newest `*.md` under
+  `$CLAUDE_CONFIG_DIR/plans` from the last day, since ExitPlanMode's input carries none), then
+  answer rows `{id, ts, answer: "allow"|"deny"|"expired", by:
+  "web"|"setting"|"timeout"|"interrupted"|"cli", note?, answers?}` (`note` up to 2000 characters;
+  `answers` only for a question allowed, keyed by its own questions' text, each a non-empty
+  string). The first answer row wins (`chat.asks` ignores later ones), so the page's tap and the
+  mod's expiry, two processes, can't both stand; `wb chat answer` prints the answer that stands.
+  A row without `kind` reads as a permission.
+- `prefs.json`: `{away: "ask"|"allow"}` (anything else reads as `ask`), from the gear menu
+  (`/api/prefs`), read by `chat.ask` (`allow` answers a new permission at once, by `setting`).
 
 **Settings.** The token: `$WB_CHAT_TOKEN`, else `~/.config/workbench/chat-token` (created on first
 use with `O_EXCL`, mode 600, `token_urlsafe(32)`; kept at 600; one under 16 characters is refused
@@ -2338,7 +2357,7 @@ thread no longer):
   constant time); else 401 "bad or
   missing token: open the link from `wb chat url`".
 - `GET /api/state`: `{messages (the last 200, each user row with its receipt as `received`),
-  asks (the last 20, each with `answer` (null while open), `answered`, `by`), listener, build,
+  asks (the last 20, each with `answer` (null while open), `answered`, `by`), prefs, listener, build,
   now}`. `build` (`chat.build`, a crc32 of the page's files' names, mtimes and sizes) changes
   when the page does: a page that loaded other files reloads itself.
 - `GET /api/stream`: server-sent events (with the security headers): `event: state` with the
@@ -2357,9 +2376,13 @@ thread no longer):
 - `POST /api/send`: JSON only (415), at most 32 KB (413), a `Content-Length` that isn't a number
   0 or more (400), `{text: 1–8000 characters, cid?: 1–64 characters}` (400), → 200 `{message,
   listener, state}`.
-- `POST /api/answer`: the same checks, `{id: 1–64 characters, answer: "allow"|"deny"}` (400;
-  `expired` is the mod's alone), an unknown id 404 "no such prompt", → 200 `{ask, state}`, the ask
-  with the answer that stands (an earlier one, when the prompt was already answered).
+- `POST /api/answer`: the same checks, `{id: 1–64 characters, answer: "allow"|"deny", note?: up
+  to 2000 characters, answers?: up to 4}` (400; `expired` is the mod's alone; answers that don't
+  fit the question, or answers on anything but a question, or a question allowed without them,
+  400), an unknown id 404 "no such prompt", → 200 `{ask, state}`, the ask with the answer that
+  stands (an earlier one, when the prompt was already answered).
+- `POST /api/prefs`: the same checks, `{away: "ask"|"allow"}` and nothing else (400) → 200
+  `{state}`.
 
 **The page** (`chat_static/`: `index.html`, `app.js`, `app.css`, `manifest.webmanifest`,
 `icon.svg`; no inline script, as the CSP requires). The token is taken from the address's
@@ -2383,12 +2406,19 @@ most once a minute, else it carries on with the new build; the draft and the out
 localStorage). Rendering is DOM only (inline code, bold, links, fenced code,
 lists); receipts read "✓ delivered", "✓ waiting for a Claude session", "✓✓ read by Claude",
 "✓✓ Claude has it, reading after its current step"; "Claude is on it" shows while the listener is
-busy with the user's latest message. A permission prompt is a card in the thread by its time
-(`makeAsk`): "Claude wants to use <tool>", the text in monospace, Deny and Allow (46 px tall) that
-post `/api/answer` and render the state it returns; while it waits, the meta line says "Claude is
-waiting for your answer" and a hidden page's title "Claude asks: allow?"; answered, the buttons go
-and the meta says "you allowed it", "you said no", "stopped in the terminal" or "no answer in
-time: it waits in the terminal". Claude's messages flow in at a reading pace (`flows`) once
+busy with the user's latest message. A dialog is a card in the thread by its time (`makeAsk`,
+the three kinds above; buttons and option rows at least 44 px tall) whose answer posts
+`/api/answer` and renders the state it returns; while it waits, the meta line says "Claude is
+waiting for your answer" and a hidden page's title "Claude asks: allow?" (a permission) or
+"Claude needs you"; answered, the buttons go and the meta says "you allowed it", "allowed by
+your setting", "you said no", "you answered" (the picks shown), "you passed", "you asked for
+changes" (the note shown), "settled in the terminal" (an interrupt, or the dialog answered
+there) or "no answer in time: it waits in the terminal". The gear in the header drops a settings
+sheet (`#settings`; closed by the gear, Escape or a tap outside): *This chat* (what this lane is:
+a second lane to the session, not a copy of the terminal; Claude sends here what matters, and
+keeps the user posted here when asked), *While you're away* (Ask me here / Let Claude go ahead,
+posting `/api/prefs`, with what each means), *This device* (forget the key: the key screen, with
+no restoring of the old one). Claude's messages flow in at a reading pace (`flows`) once
 the first render is done; the backlog a first visit loads, a message that arrives while the page
 is hidden (it counts as unread in the title) and reduced motion show whole, and each shown message
 is remembered (`wb-chat-seen`, the last 500) so a reload doesn't replay it. Light and dark follow `prefers-color-scheme` (tokens on
@@ -2608,18 +2638,24 @@ by; otherwise it writes `chat/listener.json` `{session, cwd, pid, busy}` when th
 delivers each user message without a receipt: idle → `prompt.submit('[web chat] <words>', asUser)`,
 receipt `how=now`; busy → `session.send` into the running turn with WEB_NOTE, else a queued
 prompt (`how=queued`); `wb chat ack <id> --by <key> --how …` once it entered (a dropped prompt
-gets no receipt and is tried again a minute later), `webAt = now`, a toast. Permission prompts
-(`classic.PermissionRequest`, the moment the dialog would show): unless a settings hook already
-decided, the tool is in PERSON_TOOLS (AskUserQuestion, EnterPlanMode, ExitPlanMode), or the
-session isn't delegating with `webAt` within AWAY_MS (6 h; a prompt typed in the terminal sets it
-to 0), `askOnChat` runs `wb chat ask --tool <t> --text <the input's command, file_path, url, path
-or pattern, else its JSON, cut at 1500>`, toasts that a prompt waits in the web chat, and then
-`wb chat wait <id> --timeout 20` (ASK_CHUNK_S) again and again, so an interrupt (`next.signal`)
-is seen within 20 s, until ASK_WAIT_MS (30 min). `allow` answers `{behavior: 'allow'}`; `deny`
-answers `{behavior: 'deny', message}` telling Claude to ask the user there (`wb chat reply`) what
-to do instead; anything else (the time up, an interrupt, `wb` failing) writes `wb chat answer
-<id> expired --by timeout|interrupted` and passes the event on, so the dialog shows. A hook that
-fails is skipped, which also leaves the dialog.
+gets no receipt and is tried again a minute later), `webAt = now`, a toast. Dialogs
+(`classic.PermissionRequest`; the terminal shows its dialog meanwhile, and the hook's answer
+settles it): unless a settings hook already decided, or the session isn't delegating with
+`webAt` within AWAY_MS (6 h; a prompt typed in the terminal sets it to 0), `askOnChat` runs `wb
+chat ask --tool <t> --kind <KIND[tool], else permission> --text <a permission's: the input's
+command, file_path, url, path or pattern, else its JSON, cut at 1500>` (`--detail` with a
+question's `{questions}` or a plan's `{plan}` when the input has one). It prints `<id> <state>`:
+`allow` (the user's setting) answers `{behavior: 'allow'}` at once; else the id goes in
+`mem.asksOpen`, a toast says what waits in the web chat, and `waitOnChat` runs `wb chat wait <id>
+--timeout 20 --json` (ASK_CHUNK_S) again and again, so an interrupt (`next.signal`) is seen
+within 20 s, until ASK_WAIT_MS (30 min). An answer `allow` is `{behavior: 'allow'}`, for a
+question with `updatedInput: {...input, answers}`; `deny` is `{behavior: 'deny', message}` with
+the note: a plan's says revise and present it again, a question's and a permission's say ask the
+user there (`wb chat reply`). Anything else (the time up, an interrupt, `wb` failing) writes `wb
+chat answer <id> expired --by timeout|interrupted` and passes the event on, so the dialog stays.
+An interrupt (Esc) drops a waiting hook outright, so its own expiry never runs (seen live,
+2026-11-18): `turn.complete` expires every id left in `mem.asksOpen`, by `interrupted`. A hook
+that fails is skipped, which also leaves the dialog.
 A web message over 6 h old (`CHAT_EXPIRE_MS`) isn't submitted. Quitting stops delivery and, when
 this session holds listener.json, writes it empty, so the page and other sessions see nobody
 listening at once.
@@ -2643,8 +2679,9 @@ per session until it's installed.
 link running `wb setup`, a wake held mid-turn and delivered once (and a stale one dropped), the transcript
 and pinned link, both quit commands (typed words stop nothing), KEEP_ON_COMPACT and the boundary
 compaction, the live header label, the weekly check, the chat listener (exact text, receipt,
-standing by, stopping after a quit), permission prompts on the chat (only while away, allow
-and deny, a question left to the terminal, an expiry, back in the terminal), Bash `wb start` turning the mode on and mid-turn delivery,
+standing by, stopping after a quit), dialogs on the chat (only while away, allow and deny with
+a note, a plan sent back, a question's answers, the go-ahead setting, an expiry, back in the
+terminal), Bash `wb start` turning the mode on and mid-turn delivery,
 rewake, Raster vs face, `/workbench` alone, the update check and `/workbench-update`, `wrapWords`;
 and the 2026-11-16 audit's: another project's task neither woken nor acked, a headless session
 quiet until a surface attaches, a dropped wake retried, no false rewake for a notice delivered
@@ -2784,7 +2821,7 @@ delivered as taken (`_stale_notes`, *Notes*).
 | Command | Flags | What it does |
 |---|---|---|
 | `wb image "<prompt>"` | `--n` (4), `--size WxH` (1024x1024), `--seed`, `--ref <img>…`, `--out DIR`, `--engine`, `--list`, `--wait` | Candidates from a local image engine (see *Images*). While anything holds the GPU it refuses at once, naming the holders; `--wait` queues behind them. A bare `list` or `ls` as the prompt acts as `--list`. |
-| `wb chat [log\|serve\|url\|reply\|ack\|pending\|ask\|wait\|answer]` | `--port` (1337), `--bind` (replaces chat.json's), `--host` (adds), `--text`, `--message <file\|->` (reply reads stdin without either), `-n` (10); `ack <id> --by --how`, `ask --tool --text` (prints the id), `wait <id> --timeout` (30 s; prints allow, deny, expired, or `open` at the timeout), `answer <id> allow\|deny\|expired --by` (prints the answer that stands) (the mod) | The web chat: the thread, the server, the link with its token, Claude's reply, permission prompts. |
+| `wb chat [log\|serve\|url\|reply\|ack\|pending\|ask\|wait\|answer]` | `--port` (1337), `--bind` (replaces chat.json's), `--host` (adds), `--text`, `--message <file\|->` (reply reads stdin without either), `-n` (10); `ack <id> --by --how`, `ask --tool --kind permission\|plan\|question --text --detail <json>` (prints `<id> open`, or `<id> allow` when the user's setting answered it), `wait <id> --timeout` (30 s; prints allow, deny, expired, or `open` at the timeout; `--json`: the whole ask), `answer <id> allow\|deny\|expired --by --note` (prints the answer that stands) (the mod) | The web chat: the thread, the server, the link with its token, Claude's reply, permission prompts. |
 | `wb init <dir>` | | A project the way Claude keeps one: git on the default branch, an initial commit, AGENTS.md → CLAUDE.md (a CLAUDE.md → AGENTS.md link is swapped; a gitignored CLAUDE.md isn't linked). Refuses the home directory or above, inside another repo, a repo git refuses (git's reason: no `git init` over it), without a git identity (`git var`, as for `wb start`), and a first commit holding likely secrets or installed directories no .gitignore covers. |
 | `wb setup` | `--force` (replaces a link that points elsewhere; never a real file) | Links `~/.local/bin/wb` to this copy's `bin/wb` and Claude Code's `skills/workbench` to its `skill/workbench`, removes an old `skills/delegate` link that now leads nowhere (the skill was `/delegate` until 2026-11-17; the mod runs `wb setup` itself when it finds only that), warns when `~/.local/bin` isn't on PATH (Claude and the mod run `wb` by name); exit 1 when it left something in the way (see *Installing*). Then, when due (*Optimize*), starts the minute or two of measuring the GPU and prints its line as `--`. |
 | `wb update` | `--check` (only say whether origin has news: `update available: N new commit(s)…` or `up to date`), `--if-due` (with `--check`: ask origin at most weekly, `UPDATE_EVERY`, else answer from `update.json`; never with `CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC`) | Updates this copy (see *Installing*): refuses while any runner is live; a marketplace copy runs `claude plugin marketplace update workbench` then `claude plugin update workbench@workbench`; a clone (refusing uncommitted tracked changes) runs `git pull --ff-only` first. Refuses, before anything changes, when `claude` isn't on PATH; a step that can't run or runs past 300 s fails with a line (after a clone's pull: what is left to run), and update.json is written as soon as the pull lands. Prints `updated <kind> a..b (N commit(s))` or `already up to date`. The check's fetch (`cli._fetch_origin`) never prompts and never hangs: no terminal, `GIT_TERMINAL_PROMPT=0`, `SSH_ASKPASS_REQUIRE=never`, at most `FETCH_SECS` = 60 s; the user's own ssh command (`GIT_SSH_COMMAND`, `GIT_SSH`, `core.sshCommand`) is kept, and with none ssh runs with `BatchMode`. In between, `--if-due` recounts `HEAD..@{u}` locally, so a pull made elsewhere shows at once. |
@@ -2813,7 +2850,7 @@ $WB_HOME (~/.local/state/workbench)
                                  size, vram}], ts}}}; the run's output
   imports/<slug>/                skills fetched by wb skill import, for Claude to read
   images/<YYYYmmdd-HHMMSS>/      wb image's candidates (unless --out), their .json sidecars, engine.log
-  chat/                          messages.jsonl  receipts.jsonl  asks.jsonl  listener.json
+  chat/                          messages.jsonl  receipts.jsonl  asks.jsonl  prefs.json  listener.json
   rules/<task>/                  outside the lane: opencode.json (the config layer), HANDBOOK.md,
                                  CLAUDE.md (a copy of the user's), bin/git (the shim),
                                  grants.json (what Claude allowed: {"allow", "paths"}),
@@ -3146,7 +3183,9 @@ real run with a real model (CLAUDE.md, *Checks before committing*).
 Pixel 7: the token leaves the address bar, a send lands once with its tick, the receipt, "working"
 then the reply, a message sent during an outage lands exactly once, the stream recovers, a
 reload doubles nothing, a permission prompt's card (Allow at least 44 px tall, a tap answers it,
-the buttons go) and one left to expire, a server frozen (SIGSTOP) past the 40 s watchdog and then
+the buttons go) and one left to expire, a long plan folded and sent back with a note, a question
+answered (Answer disabled until a pick), the gear's sheet (what this lane is; Let Claude go
+ahead saved, the next prompt allowed at once and listed), a server frozen (SIGSTOP) past the 40 s watchdog and then
 let go (the page heals with no reload; a message sent meanwhile lands once), a changed page file
 (the page reloads itself, keyed, with the thread), no script errors.
 
@@ -3267,7 +3306,8 @@ push: every change is a pull request that merges once `check` is green and it is
 - **A new tuned knob** → `tuning.KNOBS`, read with `tuning.value(task, name)`, a ceiling in
   `drive` if it has one.
 - **`chat.py` or `chat_static/`** → the browser test.
-- **`wb chat ask|wait|answer`'s output** (the id last, the answer words) → `askOnChat` in register.tsx, which parses it.
+- **`wb chat ask|wait|answer`'s output** (`<id> <state>` on the last line, `wait --json`'s ask) → `askOnChat` and `waitOnChat` in register.tsx, which parse it.
+- **AskUserQuestion's or ExitPlanMode's input shape** → `askOnChat` (`--detail`) and `makeAsk` in app.js.
 - **The `$` uses in `register.tsx`** → only through functions declared at its top level, or
   `claude plugin validate mod` fails.
 - **The Claude Code version** the mod is verified with → `CLAUDE_CODE_VERSION` in

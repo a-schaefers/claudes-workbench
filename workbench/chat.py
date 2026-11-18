@@ -140,8 +140,8 @@ def pending() -> list[dict]:
 
 
 def snapshot() -> dict:
-    return {"messages": thread(), "asks": asks(), "listener": listener(), "build": build(),
-            "now": store.now()}
+    return {"messages": thread(), "asks": asks(), "listener": listener(), "prefs": prefs(),
+            "build": build(), "now": store.now()}
 
 
 def build() -> str:
@@ -151,32 +151,50 @@ def build() -> str:
     return format(zlib.crc32(repr(files).encode()), "x")  # not hash(): it differs per process
 
 
-# ---- permission prompts ----
-# While the user is away on the web chat, the mod puts Claude Code's permission prompts here: the
-# terminal's dialog would wait for nobody (the user, 2026-11-18). asks.jsonl holds an ask row
-# {id, ts, tool, text}, then answer rows {id, ts, answer, by}; the first answer row wins, so the
-# page's answer and the mod's expiry, written by two processes, can't both stand.
+# ---- asks: permission prompts, plans, questions ----
+# While the user is away on the web chat, the mod puts Claude Code's dialogs here: the terminal's
+# would wait for nobody (the user, 2026-11-18). A `permission` (allow or deny the tool), a `plan`
+# (ExitPlanMode: approve it, or keep planning with a note), a `question` (AskUserQuestion: the
+# chosen options, `answers` keyed by question). asks.jsonl holds an ask row {id, ts, tool, text,
+# kind, detail?}, then answer rows {id, ts, answer, by, note?, answers?}; the first answer row
+# wins, so the page's answer and the mod's expiry, written by two processes, can't both stand.
 ANSWERS = ("allow", "deny", "expired")
+KINDS = ("permission", "plan", "question")
 ASK_TEXT = 2000
+DETAIL_MAX = 40_000   # a plan or four questions with previews
+NOTE_MAX = 2000
+AWAY = ("ask", "allow")  # prefs.json `away`: ask the user here, or let Claude go ahead
 
 
-def ask(tool: str, text: str) -> dict:
+def ask(tool: str, text: str, kind: str = "permission", detail: dict | None = None) -> dict:
+    """A new ask. A permission while the user's setting says `allow` is answered at once, by
+    `setting`, and stays in the thread so they see what ran."""
+    if kind not in KINDS:
+        raise ValueError(kind)
     row = {"id": f"ask-{int(time.time() * 1000)}-{secrets.token_hex(4)}", "ts": store.now(),
-           "tool": tool[:200], "text": text[:ASK_TEXT]}
+           "tool": tool[:200], "text": text[:ASK_TEXT], "kind": kind}
+    if detail is not None:
+        if len(json.dumps(detail)) > DETAIL_MAX:
+            raise ValueError("detail too long")
+        row["detail"] = detail
     store.append_jsonl(chat_dir() / "asks.jsonl", row)
-    return row
+    if kind == "permission" and prefs()["away"] == "allow":
+        return answer(row["id"], "allow", "setting")
+    return {**row, "answer": None}
 
 
 def asks(limit: int = 20) -> list[dict]:
-    """The latest asks, each with its answer (None while open), `answered` and `by`."""
+    """The latest asks, each with its answer (None while open), `answered`, `by`, and the answer's
+    `note` and `answers` when it has them."""
     seen: dict[str, dict] = {}
     for r in store.read_jsonl(chat_dir() / "asks.jsonl")[0]:
         a = seen.get(r.get("id"))
         if "answer" in r:
             if a and a["answer"] is None and r["answer"] in ANSWERS:
                 a.update(answer=r["answer"], answered=r["ts"], by=r.get("by"))
+                a.update({k: r[k] for k in ("note", "answers") if k in r})
         elif "tool" in r and r.get("id"):
-            seen[r["id"]] = {**r, "answer": None}
+            seen[r["id"]] = {"kind": "permission", **r, "answer": None}
     return list(seen.values())[-limit:]
 
 
@@ -184,17 +202,57 @@ def find_ask(ask_id: str) -> dict | None:
     return next((a for a in reversed(asks(10_000)) if a["id"] == ask_id), None)
 
 
-def answer(ask_id: str, verdict: str, by: str) -> dict | None:
+def answer(ask_id: str, verdict: str, by: str, note: str | None = None,
+           answers: dict | None = None) -> dict | None:
     """Answer an open ask (a later answer changes nothing). The ask as it now stands, None when
-    there is no such ask."""
+    there is no such ask. `answers` only for a question, and only its own questions."""
     if verdict not in ANSWERS:
         raise ValueError(verdict)
     cur = find_ask(ask_id)
     if cur and cur["answer"] is None:
-        store.append_jsonl(chat_dir() / "asks.jsonl",
-                           {"id": ask_id, "ts": store.now(), "answer": verdict, "by": by})
+        row = {"id": ask_id, "ts": store.now(), "answer": verdict, "by": by}
+        if note:
+            row["note"] = note[:NOTE_MAX]
+        if answers is not None:
+            asked = {q.get("question") for q in (cur.get("detail") or {}).get("questions") or []}
+            if cur["kind"] != "question" or verdict != "allow" or not answers \
+                    or not set(answers) <= asked or not all(isinstance(v, str) and 0 < len(v) <= NOTE_MAX
+                                                            for v in answers.values()):
+                raise ValueError("answers")
+            row["answers"] = answers
+        elif cur["kind"] == "question" and verdict == "allow":
+            raise ValueError("answers")  # a question is answered with its answers
+        store.append_jsonl(chat_dir() / "asks.jsonl", row)
         cur = find_ask(ask_id)
     return cur
+
+
+def latest_plan() -> str:
+    """The plan Claude Code just wrote: the newest of its plan files, from the last day (the
+    ExitPlanMode call names none)."""
+    d = Path(os.environ.get("CLAUDE_CONFIG_DIR") or Path.home() / ".claude").expanduser() / "plans"
+    try:
+        f = max(d.glob("*.md"), key=lambda p: p.stat().st_mtime)
+    except (ValueError, OSError):
+        return ""
+    if time.time() - f.stat().st_mtime > 86400:
+        return ""
+    return f.read_text(errors="replace")[:DETAIL_MAX - 100]
+
+
+def prefs() -> dict:
+    """The user's choices on the page: {"away": "ask"|"allow"} (chat/prefs.json)."""
+    p = store.read_json(chat_dir() / "prefs.json", None) or {}
+    return {"away": p.get("away") if p.get("away") in AWAY else "ask"}
+
+
+def set_prefs(**changes) -> dict:
+    with store.locked(chat_dir() / "prefs.lock"):
+        p = {**prefs(), **changes}
+        if p["away"] not in AWAY:
+            raise ValueError("away")
+        store.write_json(chat_dir() / "prefs.json", p)
+    return p
 
 
 def wait_answer(ask_id: str, timeout: float) -> str | None:
@@ -428,7 +486,7 @@ class Handler(BaseHTTPRequestHandler):
     def do_POST(self):
         if not self._allowed():
             return
-        if self.path not in ("/api/send", "/api/answer"):
+        if self.path not in ("/api/send", "/api/answer", "/api/prefs"):
             return self._json(404, {"error": "not found"})
         if not self._authed():
             return
@@ -447,14 +505,25 @@ class Handler(BaseHTTPRequestHandler):
             text, cid = str(body.get("text", "")).strip(), body.get("cid")
         except (ValueError, AttributeError):
             return self._json(400, {"error": "bad json"})
-        if self.path == "/api/answer":  # a permission prompt: allow or deny, from the page
+        if self.path == "/api/answer":  # an ask: allow or deny, a note, a question's answers
             ask_id, verdict = body.get("id"), body.get("answer")
-            if not (isinstance(ask_id, str) and 0 < len(ask_id) <= 64) or verdict not in ("allow", "deny"):
-                return self._json(400, {"error": "an answer is {id, answer: allow|deny}"})
-            cur = answer(ask_id, verdict, "web")
+            note, answers = body.get("note"), body.get("answers")
+            if not (isinstance(ask_id, str) and 0 < len(ask_id) <= 64) or verdict not in ("allow", "deny") \
+                    or not (note is None or isinstance(note, str) and len(note) <= NOTE_MAX) \
+                    or not (answers is None or isinstance(answers, dict) and len(answers) <= 4):
+                return self._json(400, {"error": "an answer is {id, answer: allow|deny, note?, answers?}"})
+            try:
+                cur = answer(ask_id, verdict, "web", note=note or None, answers=answers)
+            except ValueError:
+                return self._json(400, {"error": "those answers don't fit the question"})
             if cur is None:
                 return self._json(404, {"error": "no such prompt"})
             return self._json(200, {"ask": cur, "state": snapshot()})
+        if self.path == "/api/prefs":  # the page's settings
+            if set(body) - {"away"} or body.get("away") not in AWAY:
+                return self._json(400, {"error": "prefs are {away: ask|allow}"})
+            set_prefs(**body)
+            return self._json(200, {"state": snapshot()})
         if not text or len(text) > MAX_TEXT:
             return self._json(400, {"error": f"a message is 1 to {MAX_TEXT} characters"})
         if cid is not None and not (isinstance(cid, str) and 0 < len(cid) <= 64):

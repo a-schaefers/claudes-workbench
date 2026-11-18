@@ -987,13 +987,13 @@ test('a permission prompt while the user is away goes to the web chat, and their
   on('session.cwd', () => ({ value: '/home/u/project' }))
   on('skill.prompt', (_: any, e: any) => ({ text: e.text }))
   on('prompt.submit', (_: any, e: any) => ({ text: e.text }))
-  let said = 'allow'
+  let said: any = { answer: 'allow' }, posted = 'ask-1-ab open'
   const runs: string[][] = []
   on('process.run', (_: any, e: any) => {
     runs.push(e.argv)
     const [, cmd, act] = e.argv
-    if (cmd === 'chat' && act === 'ask') return { value: { exitCode: 0, stdout: 'ask-1-ab\n', stderr: '' } }
-    if (cmd === 'chat' && act === 'wait') return { value: { exitCode: said ? 0 : 1, stdout: said, stderr: '' } }
+    if (cmd === 'chat' && act === 'ask') return { value: { exitCode: 0, stdout: posted + '\n', stderr: '' } }
+    if (cmd === 'chat' && act === 'wait') return { value: { exitCode: said ? 0 : 1, stdout: JSON.stringify(said), stderr: '' } }
     return { value: { exitCode: 0, stdout: 'no open tasks', stderr: '' } }
   })
   on('classic.PermissionRequest', () => ({}))                 // no settings hook decides: the dialog
@@ -1008,19 +1008,38 @@ test('a permission prompt while the user is away goes to the web chat, and their
   files['/wb/chat/messages.jsonl'] = JSON.stringify({ id: 'm1', ts: 1_800_000_003, from: 'user', text: 'hi' }) + '\n'
   await clock.advance(3000)                                     // a web message: the user is away
   expect((await ask('Bash', { command: 'git push origin main' })).decision).toEqual({ behavior: 'allow' })
-  expect(runs.find(a => a[2] === 'ask')).toEqual(['wb', 'chat', 'ask', '--tool', 'Bash', '--text', 'git push origin main'])
+  expect(runs.find(a => a[2] === 'ask')).toEqual(['wb', 'chat', 'ask', '--tool', 'Bash', '--kind', 'permission', '--text', 'git push origin main'])
   expect(runs.find(a => a[2] === 'wait')?.slice(0, 4)).toEqual(['wb', 'chat', 'wait', 'ask-1-ab'])
   expect(toasts.some(t => t.includes('waiting for you in the web chat'))).toBe(true)
 
-  said = 'deny'
+  said = { answer: 'deny', note: 'not on main' }
   const no = (await ask('Write', { file_path: '/etc/hosts', content: 'x' })).decision
   expect(no.behavior).toBe('deny')
   expect(no.message).toContain('wb chat reply')                  // Claude asks the user what instead
+  expect(no.message).toContain('not on main')                    // with their words
   expect(runs.filter(a => a[2] === 'ask').at(-1)?.at(-1)).toBe('/etc/hosts')
 
-  const before = runs.length
-  expect((await ask('AskUserQuestion', { questions: [] })).decision).toBeUndefined()  // the person's own
-  expect(runs.length).toBe(before)
+  // a finished plan: approved, or sent back with a note
+  said = { answer: 'allow' }
+  expect((await ask('ExitPlanMode', {})).decision).toEqual({ behavior: 'allow' })
+  expect(runs.filter(a => a[2] === 'ask').at(-1)?.slice(3, 7)).toEqual(['--tool', 'ExitPlanMode', '--kind', 'plan'])
+  said = { answer: 'deny', note: 'split step 2' }
+  const back = (await ask('ExitPlanMode', {})).decision
+  expect([back.behavior, back.message.includes('split step 2'), back.message.includes('Revise the plan')]).toEqual(['deny', true, true])
+
+  // a question: the options they picked become the tool's answers
+  const questions = [{ question: 'Which DB?', header: 'DB', options: [{ label: 'SQLite', description: '' }, { label: 'Postgres', description: '' }], multiSelect: false }]
+  said = { answer: 'allow', answers: { 'Which DB?': 'SQLite' } }
+  const picked = (await ask('AskUserQuestion', { questions })).decision
+  expect(picked).toEqual({ behavior: 'allow', updatedInput: { questions, answers: { 'Which DB?': 'SQLite' } } })
+  expect(JSON.parse(runs.filter(a => a[2] === 'ask').at(-1)!.at(-1)!)).toEqual({ questions })
+
+  // their setting says go ahead while away: allowed at once, no wait, no toast
+  posted = 'ask-2-cd allow'
+  const [waits, toastsBefore] = [runs.filter(a => a[2] === 'wait').length, toasts.length]
+  expect((await ask('Bash', { command: 'make' })).decision).toEqual({ behavior: 'allow' })
+  expect([runs.filter(a => a[2] === 'wait').length, toasts.length]).toEqual([waits, toastsBefore])
+  posted = 'ask-1-ab open'
 
   said = ''                                                     // wb can't wait: it expires, the dialog comes
   expect((await ask('Bash', { command: 'rm -rf build' })).decision).toBeUndefined()
@@ -1028,7 +1047,7 @@ test('a permission prompt while the user is away goes to the web chat, and their
 
   await $.prompt.submit({ text: 'back now' } as any)            // typed in the terminal: back
   const n = runs.length
-  said = 'allow'
+  said = { answer: 'allow' }
   expect((await ask('Bash', { command: 'git push' })).decision).toBeUndefined()
   expect(runs.slice(n).some(a => a[2] === 'ask')).toBe(false)
 })
