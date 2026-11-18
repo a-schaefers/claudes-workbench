@@ -311,6 +311,34 @@ itself on a scratch repo isn't evidence of how a model does real work: `wb start
 it (its row is kept but left out by `store.results()`, and its lessons aren't gathered), and
 `wb trial <task>…` marks a closed one after the fact.
 
+**What a task cost Claude** (`workbench/spend.py`). The pitch is that Claude's tokens are the
+scarce resource, so each row also records what the task cost the Claude Code session that ran it
+(task.json `session`), read from that session's transcript at accept or discard:
+`${CLAUDE_CONFIG_DIR:-~/.claude}/projects/*/<session>.jsonl`, plus its subagents' files under
+`<session>/subagents/`. Usage is per API call (an assistant message: one row per content block,
+the same `usage` on each, so counted once by `message.id`), and a call is charged to tasks of that
+session only:
+- a call whose Bash runs `wb … <task>` (each `wb` in the command, split with `shlex`) is that
+  task's, and so are the turn's calls after it, until a `wb` names other tasks or `wb
+  accept|discard` closes it (`CLOSING`);
+- a turn's calls before its first such `wb` are those first named tasks' (the reading and the
+  spec before `wb start`), or the task's whose wake opened the turn (`` [workbench] Task `<name>` ``,
+  the mod's opening, `WAKE`); a turn that names none is no task's (planning, other work);
+- a call naming several tasks is split evenly; a subagent's call is charged as the session's
+  call before it.
+
+Charging whole turns was the first design and was wrong: one long autonomous turn that also ran a
+task put 5.5M cached tokens of other work on it (2026-11-17). What is missed: the accept's own
+turn after the `wb accept` call is written, and planning turns that name no task. The row keeps
+the raw counts (`input`, `cache_write_5m`, `cache_write_1h`, `cache_read`, `output`, `turns`);
+`spend.weighted` makes one number of them in input-equivalent tokens, from the API's price
+multipliers on input (`WEIGHTS`: output 5, a cache write 1.25 for 5 minutes or 2 for an hour, a
+cache read 0.1, which errs high for the models whose reads cost less: no model is named in code).
+`wb accept` and `wb discard` print it (`claude: ~N K input-equivalent tokens over T turn(s)`), and
+`wb stats` averages it per model and size. A task with no session (started by hand, or before
+0.90) or whose transcript Claude Code has cleaned up records none. Shown only: the router doesn't
+read it.
+
 ## The runner, inside
 
 `workbench/runner.py`, started as `python -X utf8 -m workbench.runner <task>` by `cli.spawn_runner` (cwd
@@ -2446,8 +2474,8 @@ delivered as taken (`_stale_notes`, *Notes*).
 | `wb takeover [<task> \| --all]` | `--repo DIR`, `--session ID` | Stops the runner, phase `review`, "Claude took over"; Claude edits in the worktree and accepts, or hands back with feedback. `--all`: every task that isn't closed. `--session ID` (repeatable) and `--repo DIR`, with `--all` (the mod passes every session id its process has had and its directory): only that session's tasks (`_scope`): one with a task.json `session` when it is one of the IDs, wherever it ran, or when its `claude_pid` is gone and DIR claims it as below; else (no `session`, or no `--session` given) when its `repo` is DIR, inside it or holds it, or its `cwd` is DIR or inside it, by whole components, never when DIR is the home directory or `/`; one with no key at all: every session's. The rest are listed as `left alone (other sessions'): …`. |
 | `wb stop [<task> \| --all]` | `--repo DIR`, `--session ID` | A live task only. Marks status `stopping`, SIGTERM the runner (15 s, `wait_exit`, then SIGKILL to its session and the agent's), sweeps what the agent left (`runner.sweep`), phase `stuck`, "stopped by the reviewer", and acknowledges the task; the worktree is kept. `--all` (`stop_everything`): every open task, a `stopped` event "bail out: stopped by the user". `--session ID`, `--repo DIR` (with `--all`): as for takeover, the rest listed as `left running (other sessions'): …`. |
 | `wb resume <task>` | | Reaps a dead runner first. Phase stuck/failed (a task whose runner died is failed), no live runner: a fresh session (round n+1, `runner.RESUME` + what the step's rounds asked), not a review round; Claude's notes the last runner never delivered follow, as a `NOTE_HEAD` note. A note names the GPU's holders when it will wait for them. Acks the task and gathers lessons. |
-| `wb accept <task> -m "…"` | `--merge`, `--force` (any open phase; stops a live runner), `--spec-gap` | Reaps a dead runner first. Phase review; refuses a closed task. A live task with nothing changed on its first step is refused before its runner is stopped ("no changes to accept yet"); a live task whose commit then fails is left `stuck` ("accept failed: …", for wb accept again, resume, feedback or discard), not live with no runner. Records the step, commits (a worktree with no new changes accepts the branch's commits past the base: earlier steps, or Claude's own after a takeover; a retry after an accept died past its commit takes that commit) (`<m>` + "Delegated to <label> via OpenCode: R round(s), F automatic test-fix, V review round(s)." + `Workbench-Task:` + `OpenCode-Session:`; no AI co-author line), removes the worktree (a failure is a warning: `remove_worktree`) and the agent's runtime directory (`drop_runtime_dir`), `--merge`s (`merge --no-ff --no-edit` into `base_branch`, which the main checkout must have out, else a branch holding the base; never a detached HEAD; no changes to tracked files; a conflict is backed out; a failure is reported and the accept stands), writes the results row, prints how far CLAUDE.md (or `.claude/CLAUDE.md`) is behind (a failure there never fails the accept). Gathers lessons. |
-| `wb discard <task>` | `--reason "…"`, `--spec-gap`, `--keep-branch` | Stops the runner, records the step, removes the worktree (never fails on it: a warning), the agent's runtime directory (`drop_runtime_dir`) and (unless `--keep-branch`, or the repo is gone) the branch, writes the results row. Gathers lessons. Refuses a closed task. |
+| `wb accept <task> -m "…"` | `--merge`, `--force` (any open phase; stops a live runner), `--spec-gap` | Reaps a dead runner first. Phase review; refuses a closed task. A live task with nothing changed on its first step is refused before its runner is stopped ("no changes to accept yet"); a live task whose commit then fails is left `stuck` ("accept failed: …", for wb accept again, resume, feedback or discard), not live with no runner. Records the step, commits (a worktree with no new changes accepts the branch's commits past the base: earlier steps, or Claude's own after a takeover; a retry after an accept died past its commit takes that commit) (`<m>` + "Delegated to <label> via OpenCode: R round(s), F automatic test-fix, V review round(s)." + `Workbench-Task:` + `OpenCode-Session:`; no AI co-author line), removes the worktree (a failure is a warning: `remove_worktree`) and the agent's runtime directory (`drop_runtime_dir`), `--merge`s (`merge --no-ff --no-edit` into `base_branch`, which the main checkout must have out, else a branch holding the base; never a detached HEAD; no changes to tracked files; a conflict is backed out; a failure is reported and the accept stands), writes the results row, prints how far CLAUDE.md (or `.claude/CLAUDE.md`) is behind (a failure there never fails the accept) and what the task cost Claude (`claude:`, when known). Gathers lessons. |
+| `wb discard <task>` | `--reason "…"`, `--spec-gap`, `--keep-branch` | Stops the runner, records the step, removes the worktree (never fails on it: a warning), the agent's runtime directory (`drop_runtime_dir`) and (unless `--keep-branch`, or the repo is gone) the branch, writes the results row, prints what the task cost Claude (`claude:`, when known). Gathers lessons. Refuses a closed task. |
 
 ### Watching
 | Command | Flags | What it does |
@@ -2476,7 +2504,7 @@ delivered as taken (`_stale_notes`, *Notes*).
 | `wb skill hand\|take <task> <n…>` | | Change a task's skills from its next run. |
 | `wb lessons` / `wb lessons close <id…> -m "…"` | `--task`, `--all` | Open lessons, recurring first (12 unless `--all`); close with why. |
 | `wb notes` / `add "…"` / `drop N…` | | The user's standing delegation preferences (`notes.md`, `- ` lines, at most 20 of 300 characters). |
-| `wb stats` / `wb tune` / `wb trial <task…>` | | Results by model and size (judged rows: it says how many spec-gap discards and trials it left out); the tuned settings; mark closed tasks as trials: their results rows, and their open lessons are dropped; an open task is refused (it has no row yet, so it was marked as nothing while its lessons went). |
+| `wb stats` / `wb tune` / `wb trial <task…>` | | Results by model and size (judged rows: it says how many spec-gap discards and trials it left out), with a `claude` column (the average input-equivalent tokens a task cost Claude) once a row records one; the tuned settings; mark closed tasks as trials: their results rows, and their open lessons are dropped; an open task is refused (it has no row yet, so it was marked as nothing while its lessons went). |
 
 ### Other
 | Command | Flags | What it does |
@@ -2613,8 +2641,10 @@ questions `ask {id}`, `answer {id}`. From `wb`:
 (`accepted`/`discarded`), `model`, `size`, `repo`, `stack`, `rounds`, `auto_fixes`, `reviews`
 (every step's), `spec_rounds`, `tests_ok`, `minutes` (wall clock since `wb start`, queueing and
 review included), `tok_in`, `tok_out`, `skills_offered`, `skills_loaded`, `skills_rev`, `steps`
-(one `results.step` per step), `window`, `tuned`, `explored`, `tuned_max`, `spec_gaps`, `trial`
-(when set); `commit` and `merged` on accept, `reason` on discard. A step (`results.step`): `files`,
+(one `results.step` per step), `window`, `tuned`, `explored`, `tuned_max`, `spec_gaps`, `claude`
+(when known: `spend.usage`, `{turns, input, cache_write_5m, cache_write_1h, cache_read, output}`,
+*What a task cost Claude*), `trial` (when set); `commit` and `merged` on accept, `reason` on
+discard. A step (`results.step`): `files`,
 `lines` (added, against HEAD, new files included), `window`, `landed`, `compacted` (its last
 session, or one a handover replaced: a `fresh` event's `compacted`), `handovers` (fresh sessions
 with overflow), `read_full`, `reviews`, `spec_rounds`, `stuck`, `took_over`.
@@ -2887,6 +2917,9 @@ push: every change is a pull request that merges once `check` is green and it is
   and flag here, every module and environment variable in CLAUDE.md, CLAUDE.md's size).
 - **A prompt's opening words** (the heads in *The runner, inside*) → `transcript` labels,
   `round_asks`, `lessons`, the fake OpenCode, and the tests that quote them.
+- **The mod's wake opening** (`` [workbench] Task `<name>` ``, register.tsx) **or Claude Code's
+  transcript rows** (`type`, `message.id`, `message.usage`, a Bash `tool_use`'s `command`,
+  `timestamp`, `subagents/`) → `spend.py` (`WAKE`, `calls`) and the ClaudeSpend tests' rows.
 - **`cli.PROTOCOL`** → the transcript's fold marker `\n---\nHow to work`, the `Lesson:` parser,
   the handbook (they shouldn't contradict), and every agent's prefill (keep it short).
 - **`agent/HANDBOOK.md`** → every agent prompt carries it; each token costs prefill time.

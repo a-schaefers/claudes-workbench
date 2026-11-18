@@ -3446,6 +3446,120 @@ class Tuning(Base):
         self.assertIn("0.6: 2×1.00←", out)
 
 
+def _turn(text: str, at: str) -> dict:
+    return {"type": "user", "timestamp": at, "message": {"role": "user", "content": text}}
+
+
+def _call(mid: str, at: str, out: int, command: str | None = None, read: int = 0) -> list[dict]:
+    """One API call as Claude Code writes it: a row per content block, each with the usage."""
+    usage = {"input_tokens": 1, "cache_creation_input_tokens": 0, "cache_read_input_tokens": read,
+             "output_tokens": out}
+    blocks = [{"type": "text", "text": "…"}] + (
+        [{"type": "tool_use", "name": "Bash", "input": {"command": command}}] if command else [])
+    return [{"type": "assistant", "timestamp": at,
+             "message": {"id": mid, "role": "assistant", "content": [b], "usage": usage}}
+            for b in blocks]
+
+
+class ClaudeSpend(Base):
+    SID = "sess-cost"
+
+    def setUp(self):
+        super().setUp()
+        os.environ["CLAUDE_CONFIG_DIR"] = str(Path(self.tmp.name) / "claude")  # never the user's
+
+    def transcript(self, rows: list[dict], torn: bool = False) -> Path:
+        d = Path(os.environ["CLAUDE_CONFIG_DIR"]) / "projects" / "-some-project"
+        d.mkdir(parents=True, exist_ok=True)
+        path = d / f"{self.SID}.jsonl"
+        path.write_text("".join(json.dumps(r) + "\n" for r in rows)
+                        + ('{"type": "assistant", "mess' if torn else ""))
+        return path
+
+    def task(self, name: str, session: str | None = SID) -> store.Task:
+        t = store.Task(name)
+        store.write_json(t.dir / "task.json", {"name": name, **({"session": session} if session else {})})
+        return t
+
+    def test_a_task_is_charged_the_calls_that_name_it_and_its_wakes_and_no_others(self):
+        from workbench import spend
+        t1, t2 = self.task("t1"), self.task("t2")
+        self.task("theirs", session="another-session")
+        main = self.transcript([
+            _turn("add the thing", "2026-11-17T10:00:00Z"),
+            *_call("m1", "2026-11-17T10:00:01Z", 10),                      # reading for the spec
+            *_call("m2", "2026-11-17T10:00:02Z", 20, "cd /r && wb start t1 --spec s.md"),
+            *_call("m3", "2026-11-17T10:00:03Z", 30),                      # still t1's
+            _turn("what time is it?", "2026-11-17T10:05:00Z"),
+            *_call("m4", "2026-11-17T10:05:01Z", 1000),                    # nobody's
+            _turn("[workbench] Task `t1` is ready for review.", "2026-11-17T10:20:00Z"),
+            *_call("m5", "2026-11-17T10:20:01Z", 40),
+            *_call("m6", "2026-11-17T10:20:02Z", 50, "wb feedback t1 --text a && wb diff t2 | head"),
+            *_call("m7", "2026-11-17T10:20:03Z", 60, "wb accept t1 -m 'feat: x'"),
+            *_call("m8", "2026-11-17T10:20:04Z", 70),                      # after the accept
+            _turn("check theirs", "2026-11-17T10:30:00Z"),
+            *_call("m9", "2026-11-17T10:30:01Z", 80, "wb diff theirs"),    # another session's task
+        ], torn=True)
+        sub = main.parent / self.SID / "subagents" / "agent-1.jsonl"
+        sub.parent.mkdir(parents=True)
+        sub.write_text("".join(json.dumps(r) + "\n" for r in _call("s1", "2026-11-17T10:00:04Z", 5)))
+        u = spend.usage(t1)
+        # m1-m3 and the subagent in turn 1, the wake's m5, half of m6, m7; m2 counted once
+        self.assertEqual(u["output"], 10 + 20 + 30 + 5 + 40 + 25 + 60)
+        self.assertEqual(u["turns"], 2)
+        self.assertEqual(spend.usage(t2)["output"], 25)
+        self.assertEqual(spend.usage(t2)["turns"], 1)
+        self.assertEqual(spend.usage(self.task("never-named"))["output"], 0)
+        self.assertEqual(spend.usage(store.Task("theirs")), None)   # its session has no transcript
+
+    def test_the_weights_count_writes_reads_and_output_against_input(self):
+        from workbench import spend
+        self.assertEqual(spend.weighted({"input": 100, "cache_write_5m": 100, "cache_write_1h": 100,
+                                         "cache_read": 1000, "output": 100}),
+                         100 + 125 + 200 + 100 + 500)
+        row = {"message": {"usage": {"cache_creation_input_tokens": 30,
+                                     "cache_creation": {"ephemeral_1h_input_tokens": 20}}}}
+        self.assertEqual(spend._usage(row)["cache_write_5m"], 10)
+        self.assertEqual(spend._usage(row)["cache_write_1h"], 20)
+        self.assertEqual(spend._wb_calls("a; /x/bin/wb next t -m 'a b' >/dev/null && wb status"),
+                         [["next", "t", "-m", "a b"], ["status"]])
+
+    def test_no_session_or_no_transcript_records_no_claude_cost(self):
+        from workbench import spend
+        self.assertIsNone(spend.usage(self.task("t-none", session=None)))
+        self.assertIsNone(spend.usage(self.task("t-gone")))         # Claude Code cleaned it up
+        self.assertIsNone(spend.line(None))
+
+    def test_accept_records_and_reports_what_the_task_cost_claude(self):
+        os.environ["CLAUDE_CODE_SESSION_ID"] = self.SID
+        self.start("t-cost", "ok")
+        wait_phase("t-cost", {"review"})
+        self.transcript([_turn("make it", "2026-11-17T10:00:00Z"),
+                         *_call("m1", "2026-11-17T10:00:01Z", 300, "wb start t-cost", read=20000),
+                         _turn("[workbench] Task `t-cost` is ready for review.", "2026-11-17T10:09:00Z"),
+                         *_call("m2", "2026-11-17T10:09:01Z", 700, "wb accept t-cost -m x")])
+        out = run_wb("accept", "t-cost", "-m", "feat: answer")
+        self.assertIn("claude: ~7K input-equivalent tokens over 2 turn(s) (1000 output)", out)
+        row = store.results()[-1]
+        self.assertEqual(row["claude"]["cache_read"], 20000)
+        stats = run_wb("stats")
+        self.assertIn("claude", stats.splitlines()[0])
+        self.assertIn("7K", stats)
+
+    def test_stats_shows_the_claude_column_only_once_a_task_has_it(self):
+        self.start("t-old", "ok")
+        wait_phase("t-old", {"review"})
+        run_wb("accept", "t-old", "-m", "feat: answer")
+        self.assertNotIn("claude", run_wb("stats"))
+        store.append_jsonl(store.home() / "results.jsonl", {
+            **store.results()[-1], "task": "t-new",
+            "claude": {"turns": 1, "input": 2000, "cache_write_5m": 0, "cache_write_1h": 0,
+                       "cache_read": 0, "output": 0}})
+        stats = run_wb("stats")
+        self.assertIn("2K", stats)
+        self.assertIn("(1 had no session or transcript)", stats)
+
+
 class Notes(Base):
     def test_notes_about_the_user_are_kept_short_and_numbered(self):
         self.assertIn("no notes yet", run_wb("notes"))
