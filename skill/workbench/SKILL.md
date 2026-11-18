@@ -306,8 +306,8 @@ Without the mod, the user may ask for the same in words; run those commands then
 with the same authority as here: reply there with `wb chat reply --text "…"`, short; read
 `reference/driving.md` (the web chat) before your first reply.
 
-**Check-ins.** A significant task wakes you every 10 minutes while it runs (`--checkin MIN`
-changes it, `0` turns it off) with a digest: tools used, errors, tokens, files touched, its latest
+**Check-ins.** A task wakes you on trouble (a nudge, a full window, a handover). With `--checkin
+MIN` (off by default: each wake costs your whole context) it also wakes you every MIN minutes with a digest: tools used, errors, tokens, files touched, its latest
 words, time so far and the ETA. Be the captain: give the user two or three plain lines on how it
 is going, and steer only if it is drifting. Say what you see, including "slow but on course".
 Each check-in is a turn that re-reads your context, so answer it in that one turn: no `wb log`
