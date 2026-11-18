@@ -130,6 +130,30 @@ installed module:
   - Models change fast, so once a week Claude checks what's new for the hardware and recommends
     changes; nothing is downloaded without the user's yes.
 
+### What a handoff costs Claude, measured
+The README's "roughly half on bigger tasks, about even on small ones" comes from paired runs on
+2026-11-18: the same request done by Claude alone and handed off, in Claude Code subagents on
+the same model, each result graded by hidden tests it never saw (all passed), Claude's tokens
+weighted by price (input 1, cache write 2 at the main session's 1-hour cache, cache read 0.1,
+output 5). One 16 GB card, a 27B model at the 40K window `wb optimize` found all on the GPU,
+self-review on, the request pasted as the spec and a one-call sign-off:
+
+| Task | Claude writes it | Handed off |
+|---|---|---|
+| Save and load replay files (C, significant) | 166K | 150K (−10%) |
+| Score combos (C, significant) | 176K | 145K (−18%) |
+| A date range for a report (Python, trivial) | 50K | 67K (+34%) |
+| Rank a high score (C, trivial) | 54K | 83K (+54%: one round sent back) |
+
+The significant pairs start from a fresh session, so the handoff includes reading the skill
+(about 29K) and both pay the session's base context (about 50K). Without those, the clean
+replay-files handoff was about 48K (dispatch 9K, the review wake 31K, accept 8K) against about
+116K for writing it: the "roughly half". The trivial pairs are warm (a task before them in the
+session); about 10K of each handed-off figure is the harness waiting on `wb wait`, which the mod's
+wake replaces. A run varies by about 0.2× from the next, and one round sent back costs about
+25K: replay files measured 1.18×, 1.40×, 1.38× and 0.90× as the self-review learned what the
+review rounds had been about.
+
 ## A task, start to finish
 
 ```
