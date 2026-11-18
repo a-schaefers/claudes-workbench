@@ -88,6 +88,8 @@ def fingerprint() -> list:
 def due(ms: list[models.Model] | None = None) -> str:
     """Why a run is due, or "": never run, the GPU changed, a model came since, or the last run
     was stopped before it finished."""
+    if models._fake():  # the tests' fake models have no server; a detached run there outlived a
+        return ""       # test and failed its tearDown (CI, 2026-11-18)
     st = state()
     ms = candidates() if ms is None else ms
     if not ms:
