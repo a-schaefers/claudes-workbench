@@ -1110,33 +1110,23 @@ class Context(Base):
         self.start("t-c7", "read", "--test", TEST_CMD)
         st = wait_phase("t-c7", {"review", "stuck", "failed"}, timeout=60)
         self.assertEqual((st["phase"], st.get("handovers", 0), len(self.runs())), ("review", 0, 1))
-        notes = [r for r in store.read_jsonl(store.home() / "notify.jsonl")[0]
-                 if r["task"] == "t-c7" and r["kind"] == "checkin"]
-        self.assertIn("reached 76% of its window before it changed a file", notes[0]["text"])
-        self.assertIn("Name fewer files to read", notes[0]["text"])
-
-    def test_a_step_that_fills_up_reading_every_round_tells_claude_once(self):
-        # every round of one step said it again, each a wake over Claude's context (2026-11-17)
-        self.start("t-c13", "ok")
-        wait_phase("t-c13", {"review", "stuck", "failed"}, timeout=60)
-        t = store.Task("t-c13")
-        for n in (2, 3):
-            runner._reading_full(t, n, 21000, 32768)
-        rows = [r for r in store.read_jsonl(store.home() / "notify.jsonl")[0]
-                if r["task"] == "t-c13" and "Name fewer files" in r["text"]]
-        self.assertEqual(len(rows), 1)
-        evs = store.read_jsonl(t.dir / "events.jsonl")[0]
-        self.assertEqual(sum(e.get("kind") == "reading_full" for e in evs), 2)
+        # the report says it, and nothing woke Claude mid-round for advice meant for the next
+        # spec: as a check-in it came every round, even on a trivial task (2026-11-17)
+        rows = [r for r in store.read_jsonl(store.home() / "notify.jsonl")[0] if r["task"] == "t-c7"]
+        self.assertEqual([r["kind"] for r in rows], ["review"])
+        self.assertIn("reading: the agent's session reached 76% of its window before it changed a "
+                      "file", rows[0]["text"])
+        self.assertIn("Name fewer files to read", rows[0]["text"])
 
     def test_a_session_whose_reading_leaves_a_successor_no_room_carries_on(self):
         self.start("t-c10", "floor", "--test", TEST_CMD)
         st = wait_phase("t-c10", {"review", "stuck", "failed"}, timeout=60)
         self.assertEqual((st["phase"], st.get("handovers", 0), len(self.runs())), ("review", 0, 1))
         self.assertEqual(st["session_floor"], 17000)
-        notes = [r for r in store.read_jsonl(store.home() / "notify.jsonl")[0]
-                 if r["task"] == "t-c10" and r["kind"] == "checkin"]
+        rows = [r for r in store.read_jsonl(store.home() / "notify.jsonl")[0] if r["task"] == "t-c10"]
+        self.assertEqual([r["kind"] for r in rows], ["review"])
         self.assertIn("reached 76% of its window and had read 51% before its first change",
-                      notes[0]["text"])
+                      rows[0]["text"])
 
     def test_a_stopped_task_resumes_in_a_fresh_session_without_a_review_round(self):
         self.start("t-c8", "hang", "--test", TEST_CMD)

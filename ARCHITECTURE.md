@@ -448,9 +448,9 @@ A prompt (with its skills note) over `PROMPT_ARG_MAX` (100K bytes) is sent as a 
   had read when it first changed something (`status.session_floor`) must sit at least
   `HANDOVER_ROOM` (a quarter of the window) below the handover point. Otherwise it carries on
   (OpenCode compacts it if it must), and a `reading_full` event says the step needs more reading
-  than the window holds (`_reading_full`, once a round); the first in a task is a `checkin` too,
-  later ones only events, since the advice is for the next spec and every round of a mote-combo
-  step on a 32K window repeated it, each a wake (2026-11-17). Seen: twenty handovers in twelve minutes
+  than the window holds (`_reading_full`, once a round). It wakes no one: the round's report
+  carries it as a `reading:` line, since the advice is for the next spec, and as a check-in it
+  woke Claude mid-round with nothing to do, every round of a step (2026-11-17). Seen: twenty handovers in twelve minutes
   with no edit made; and a 16K floor under a 19K handover point handing over three times in four
   minutes, 3K of work each. A runner (one review round) hands over at most `HANDOVER_MAX` (5)
   times; the next one is a stuck round, since a session that changed something early and then
@@ -1033,8 +1033,9 @@ tells the user how it's going in two or three lines, logs anything worth finding
 `wb note` (a `captain` event: a "captain's log" line in the transcript), and steers if it's
 drifting. They are off by default: each one wakes Claude, re-reading its whole context, and the
 10-minute default of significant tasks was 500K of one task's 1.2M input-equivalent tokens (the
-2026-11-17 measurement); the pane shows the same progress to the user. Nudges, a reading-full
-session, handovers and a base check cut short raise check-ins whatever the setting.
+2026-11-17 measurement); the pane shows the same progress to the user. Nudges, repeated
+handovers and a base check cut short raise check-ins whatever the setting; a session that fills up
+reading is a `reading:` line in the round's report instead.
 
 **Taking over.** `wb takeover <task>` stops the agent and sets `review` ("Claude took over"):
 Claude finishes in the worktree, leaving it uncommitted (accept commits it with the provenance
@@ -1130,7 +1131,7 @@ goes in its CLAUDE.md instead.
 The runner appends notices to `$WB_HOME/notify.jsonl` (`Task.notify`: `{ts,
 task, kind, text, round?, id?}`). Kinds: `review` (the round report and `review_diff`), `stuck`, `failed` (the round report as text;
 a load failure or crash without a round), `question` (with the question's `id`), `checkin`
-(periodic, a nudge, a reading-full session, a mid-round handover from the second in a round on, a
+(periodic, a nudge, a mid-round handover from the second in a round on, a
 base check whose `--test-timeout` cut it short). `wb` itself writes only
 one: `reap`'s `failed` for a runner that died without a report. The agent never writes one: the
 file is out of its lane (the 2026-11-16 audit: it could forge any task's wake, or wipe them
