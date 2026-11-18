@@ -295,7 +295,7 @@ the agent first; that test result is dropped. With `--self-review` (task.json `s
 first time the tests pass in a review round (status `self_reviewed`, the `[steps, reviews]` it
 ran at) the agent gets one more round, `runner.SELF_REVIEW`: Claude's own review checks (each
 rule has a test that fails without it, expected values worked out by hand, every error path
-handled, nothing extra), from what Claude's reviews kept catching on 2026-11-17. It costs local
+handled and each error message tested for every input that can cause it, nothing extra), from what Claude's reviews kept catching on 2026-11-17. It costs local
 time only; Claude is woken after it, with its tests. Opt-in while it is measured.
 
 **7. Claude is woken with a report** (`runner.summary_text`, *The round report* below). When the
