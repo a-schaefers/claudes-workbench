@@ -104,6 +104,11 @@ if you can, and start nothing until the plan is approved; then write the first s
   its size (trivial or significant). A step you can't size is two steps. Size it by the bytes the
   agent will read (`wc -c`), not the files: a two-line edit in a 2,000-line file still gets the
   file read (seen: 39% of a 32K window gone before the first edit, then a compaction).
+- **Small ones together.** A handoff costs you about 50K tokens whatever its size (the dispatch,
+  one review, the accept; measured 2026-11-18), as much as writing a trivial change yourself
+  does. So trivial requests in the same area, asked together or queued up, go as one task: one
+  spec with numbered items, one acceptance command that checks each item, sized by the total.
+  On its own, a trivial handoff only breaks even; bundled, each one after the first is cheap.
 - **The files**: those to read first, those to create or change, and the existing code to imitate.
 - **Exact interfaces** for anything later steps or other code rely on: names, signatures,
   constants, file formats. Settle them in the plan; agents rename what isn't pinned.
