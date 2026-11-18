@@ -2824,10 +2824,11 @@ push: every change is a pull request that merges once `check` is green and it is
   `.github/workflows/release.yml` runs `scripts/release.sh` on every push to main, daily (a merge
   armed with Actions' token starts no push workflow) and by hand: a version without its tag gets
   one, `v<version>` with a trailing `.0` dropped (0.90.0 was `v0.90`), on the first commit of
-  main's first-parent history that carried it, and a GitHub release with GitHub's generated notes
-  (rewrite them with `gh release edit` when a release deserves more). A version already tagged
-  does nothing. It's the one workflow with `contents: write`, and it never runs on a pull request
-  (`tests/test_workflows.py`). `--dry-run` says what it would release.
+  main's first-parent history that carried it (or on HEAD when that commit's workflows differ
+  from HEAD's: the workflow token may not create a ref there, a 403), and a GitHub release with
+  GitHub's generated notes (rewrite them with `gh release edit` when a release deserves more).
+  A version already tagged does nothing. It's the one workflow with `contents: write`, and it
+  never runs on a pull request (`tests/test_workflows.py`). `--dry-run` says what it would release.
 - **`scripts/github-settings.sh check|apply`** keeps the repository's settings in git (`check`
   names any drift, `apply` writes them; `gh` as admin): the ruleset; Actions may approve pull
   requests, the default token read only; auto-merge, merge commits, delete branch on merge, update

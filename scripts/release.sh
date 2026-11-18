@@ -7,7 +7,9 @@
 #
 # The tag is v<version> with a trailing ".0" dropped (0.90.0 was v0.90, 0.90.1 is v0.90.1), on
 # the first commit of main's first-parent history that carried the version: the merge that
-# bumped it, not whatever came after. The notes are GitHub's, generated from the pull requests
+# bumped it, not whatever came after. Unless that commit's workflows differ from HEAD's: the
+# workflow token may not create a ref there (GitHub counts it as changing workflows: HTTP 403,
+# "Resource not accessible by integration", tried 2026-11-18), so the tag goes on HEAD. The notes are GitHub's, generated from the pull requests
 # since the previous release; the owner can rewrite them afterwards (`gh release edit`).
 set -euo pipefail
 
@@ -24,6 +26,7 @@ fi
 at=$(git log --first-parent --diff-merges=first-parent --no-patch --format=%H \
        -S"\"version\": \"$v\"" -- "$plugin" | tail -1)
 [ -n "$at" ] || { echo "release.sh: no commit on this history sets version $v" >&2; exit 1; }
+git diff --quiet "$at" HEAD -- .github/workflows || at=$(git rev-parse HEAD)
 if [ -n "$dry" ]; then
   echo "would release $tag at $(git log -1 --format='%h %s' "$at")"
   exit 0
