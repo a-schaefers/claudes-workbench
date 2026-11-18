@@ -4603,6 +4603,50 @@ class WebChat(Base):
         self.assertEqual(chat.answer(a["id"], "expired", "timeout")["answer"], "deny")
         self.assertEqual(chat.wait_answer(a["id"], 0), "deny")
 
+    def test_a_plan_and_a_question_are_answered_from_the_page(self):
+        chat, tok = self.chat, self.chat.token()
+        plan = chat.ask("ExitPlanMode", "", "plan", {"plan": "1. Read\n2. Write"})
+        code, r = self.call("/api/answer", {"id": plan["id"], "answer": "deny", "note": "split step 2"}, token=tok)
+        self.assertEqual((code, r["ask"]["answer"], r["ask"]["note"]), (200, "deny", "split step 2"))
+        qs = [{"question": "Which DB?", "header": "DB", "multiSelect": False,
+               "options": [{"label": "SQLite", "description": ""}, {"label": "Postgres", "description": ""}]}]
+        q = chat.ask("AskUserQuestion", "", "question", {"questions": qs})
+        for bad in ({"id": q["id"], "answer": "allow"},                               # no answers
+                    {"id": q["id"], "answer": "allow", "answers": {"Other?": "x"}},     # not its question
+                    {"id": q["id"], "answer": "allow", "answers": {"Which DB?": ""}},   # empty
+                    {"id": q["id"], "answer": "allow", "answers": {"Which DB?": 7}}):
+            self.assertEqual(self.call("/api/answer", bad, token=tok)[0], 400, bad)
+        perm = chat.ask("Bash", "ls")
+        self.assertEqual(self.call("/api/answer", {"id": perm["id"], "answer": "allow",
+                                                   "answers": {"Which DB?": "SQLite"}}, token=tok)[0], 400)
+        code, r = self.call("/api/answer", {"id": q["id"], "answer": "allow",
+                                            "answers": {"Which DB?": "SQLite"}}, token=tok)
+        self.assertEqual((code, r["ask"]["answers"]), (200, {"Which DB?": "SQLite"}))
+        got = json.loads(run_wb("chat", "wait", q["id"], "--timeout", "0", "--json"))
+        self.assertEqual((got["kind"], got["answer"], got["answers"]), ("question", "allow", {"Which DB?": "SQLite"}))
+
+    def test_go_ahead_while_away_allows_permissions_at_once_and_still_asks_plans(self):
+        chat, tok = self.chat, self.chat.token()
+        self.assertEqual(self.call("/api/state", token=tok)[1]["prefs"], {"away": "ask"})
+        self.assertEqual(self.call("/api/prefs", {"away": "always"}, token=tok)[0], 400)
+        self.assertEqual(self.call("/api/prefs", {"away": "allow", "x": 1}, token=tok)[0], 400)
+        self.assertEqual(self.call("/api/prefs", {"away": "allow"})[0], 401)
+        self.assertEqual(self.call("/api/prefs", {"away": "allow"}, token=tok)[1]["state"]["prefs"], {"away": "allow"})
+        self.assertEqual(run_wb("chat", "ask", "--tool", "Bash", "--text", "make").split()[1], "allow")
+        self.assertEqual(chat.asks()[-1]["by"], "setting")           # listed, so the user sees what ran
+        self.assertEqual(run_wb("chat", "ask", "--tool", "ExitPlanMode", "--kind", "plan",
+                                "--detail", '{"plan": "x"}').split()[1], "open")
+
+    def test_a_plan_with_none_given_is_read_from_claude_codes_newest_plan_file(self):
+        plans = Path(self.tmp.name) / "claude" / "plans"
+        plans.mkdir(parents=True)
+        (plans / "old.md").write_text("old plan")
+        os.utime(plans / "old.md", (time.time() - 60, time.time() - 60))
+        (plans / "new.md").write_text("# The plan\n1. Do it")
+        with mock.patch.dict(os.environ, {"CLAUDE_CONFIG_DIR": str(plans.parent)}):
+            ask_id = run_wb("chat", "ask", "--tool", "ExitPlanMode", "--kind", "plan").split()[0]
+        self.assertEqual(self.chat.find_ask(ask_id)["detail"], {"plan": "# The plan\n1. Do it"})
+
     def test_wb_chat_wait_blocks_until_the_answer_or_says_open(self):
         chat = self.chat
         a = chat.ask("Write", "/etc/hosts")
@@ -4615,7 +4659,8 @@ class WebChat(Base):
         self.assertEqual(run_wb("chat", "answer", a["id"], "expired", "--by", "timeout").strip(), "allow")
         with self.assertRaises(SystemExit):
             run_wb("chat", "wait", "ask-nope")
-        b = run_wb("chat", "ask", "--tool", "Bash", "--text", "make deploy").strip()
+        b, state = run_wb("chat", "ask", "--tool", "Bash", "--text", "make deploy").split()
+        self.assertEqual(state, "open")
         self.assertEqual(run_wb("chat", "answer", b, "expired", "--by", "interrupted").strip(), "expired")
         self.assertEqual(chat.find_ask(b)["by"], "interrupted")
 

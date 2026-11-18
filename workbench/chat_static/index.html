@@ -22,14 +22,40 @@
     <div class="name">Claude</div>
     <div class="presence" id="presence"><span class="dot"></span><span id="presence-text">connecting…</span></div>
   </div>
+  <button class="gear" id="gear" type="button" aria-label="Settings" aria-expanded="false" aria-controls="settings">
+    <svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.7 1.7 0 0 0 .3 1.8l.1.1a2 2 0 1 1-2.8 2.8l-.1-.1a1.7 1.7 0 0 0-1.8-.3 1.7 1.7 0 0 0-1 1.5V21a2 2 0 1 1-4 0v-.1a1.7 1.7 0 0 0-1.1-1.5 1.7 1.7 0 0 0-1.8.3l-.1.1a2 2 0 1 1-2.8-2.8l.1-.1a1.7 1.7 0 0 0 .3-1.8 1.7 1.7 0 0 0-1.5-1H3a2 2 0 1 1 0-4h.1a1.7 1.7 0 0 0 1.5-1.1 1.7 1.7 0 0 0-.3-1.8l-.1-.1a2 2 0 1 1 2.8-2.8l.1.1a1.7 1.7 0 0 0 1.8.3H9a1.7 1.7 0 0 0 1-1.5V3a2 2 0 1 1 4 0v.1a1.7 1.7 0 0 0 1 1.5 1.7 1.7 0 0 0 1.8-.3l.1-.1a2 2 0 1 1 2.8 2.8l-.1.1a1.7 1.7 0 0 0-.3 1.8V9a1.7 1.7 0 0 0 1.5 1H21a2 2 0 1 1 0 4h-.1a1.7 1.7 0 0 0-1.5 1z"/></svg>
+  </button>
 </header>
+<section class="settings" id="settings" hidden aria-label="Settings">
+  <div class="set">
+    <h3>This chat</h3>
+    <p>A second lane to Claude, not a copy of the terminal. What you send here reaches the Claude Code
+    session running <code>/workbench</code> on your computer; Claude answers here with what matters:
+    results, questions, its plans and permission prompts. The terminal's full output stays on
+    the computer. Ask Claude to keep you posted here, and it will.</p>
+  </div>
+  <div class="set">
+    <h3>While you're away</h3>
+    <p class="small">You're away from your first message here until you type in the terminal again.</p>
+    <div class="seg" role="radiogroup" aria-label="While you're away">
+      <button type="button" role="radio" data-away="ask">Ask me here</button>
+      <button type="button" role="radio" data-away="allow">Let Claude go ahead</button>
+    </div>
+    <p class="small" id="away-note"></p>
+  </div>
+  <div class="set">
+    <h3>This device</h3>
+    <button type="button" class="plain" id="forget">Forget the key on this device</button>
+    <p class="small">Open the link from <code>wb chat url</code> again to come back.</p>
+  </div>
+</section>
 <div class="net" id="net" hidden></div>
 <main id="scroll" aria-live="polite" aria-relevant="additions">
   <div class="thread" id="thread">
     <div class="intro" id="intro">
       <div class="intro-mark" aria-hidden="true"><svg viewBox="0 0 24 24"><use href="/icon.svg#spark"/></svg></div>
-      <p>Messages you send here reach Claude in your terminal while <code>/workbench</code> runs there.
-      Claude answers here.</p>
+      <p>A second lane to Claude in your terminal, while <code>/workbench</code> runs there: what you send
+      reaches it, and it answers here with what matters, including what it needs from you while you're away.</p>
       <div class="chips"><button class="chip" type="button">Status?</button><button class="chip" type="button">What needs me?</button><button class="chip" type="button">What are you working on?</button></div>
     </div>
   </div>

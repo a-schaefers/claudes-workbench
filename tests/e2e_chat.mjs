@@ -117,7 +117,7 @@ async function run(engine, device) {
     if (new Set(texts).size !== texts.length) throw new Error('duplicates: ' + texts.join(' | '))
   })
   await check('a permission prompt shows Allow and Deny, and a tap answers it once', async () => {
-    const id = wb('chat', 'ask', '--tool', 'Bash', '--text', 'git push origin main').trim()
+    const id = wb('chat', 'ask', '--tool', 'Bash', '--text', 'git push origin main').split(' ')[0]
     await until(async () => (await page.locator('.row.ask .choices button').count()) === 2)
     const card = await page.locator('.row.ask .card').last().textContent()
     if (!card.includes('Claude wants to use Bash') || !card.includes('git push origin main')) throw new Error(card)
@@ -129,11 +129,49 @@ async function run(engine, device) {
     if (await page.locator('.row.ask .choices').count()) throw new Error('the buttons are still there')
   })
   await check('a prompt left unanswered says it waits in the terminal', async () => {
-    const id = wb('chat', 'ask', '--tool', 'Write', '--text', '/etc/hosts').trim()
+    const id = wb('chat', 'ask', '--tool', 'Write', '--text', '/etc/hosts').split(' ')[0]
     await until(async () => (await page.locator('.row.ask .choices').count()) === 1)
     wb('chat', 'answer', id, 'expired', '--by', 'timeout')
     await until(async () => (await page.locator('.row.ask .meta').last().textContent()).includes('waits in the terminal'))
     if (await page.locator('.row.ask .choices').count()) throw new Error('the buttons are still there')
+  })
+  await check('a plan shows folded, and Keep planning sends a note back', async () => {
+    const plan = '# The plan\n\n' + Array.from({ length: 30 }, (_, i) => `${i + 1}. step ${i + 1}`).join('\n')
+    const id = wb('chat', 'ask', '--tool', 'ExitPlanMode', '--kind', 'plan', '--detail', JSON.stringify({ plan })).split(' ')[0]
+    await until(async () => (await page.locator('.row.ask').last().locator('.plan').count()) === 1)
+    const last = page.locator('.row.ask').last()
+    if (!(await last.locator('.plan.folded').count())) throw new Error('a long plan is not folded')
+    await last.locator('.more').click()
+    await last.locator('.choices .deny').click()            // opens the note
+    await last.locator('.note').fill('split step 2')
+    await last.locator('.choices .deny').click()            // sends it back
+    await until(() => { const a = JSON.parse(wb('chat', 'wait', id, '--timeout', '0', '--json')); return a.answer === 'deny' && a.note === 'split step 2' })
+    await until(async () => (await page.locator('.row.ask .meta').last().textContent()).includes('you asked for changes'))
+  })
+  await check("Claude's question: pick an option, answer", async () => {
+    const questions = [{ question: 'Which DB?', header: 'DB', multiSelect: false,
+      options: [{ label: 'SQLite', description: 'one file' }, { label: 'Postgres', description: 'a server' }] }]
+    const id = wb('chat', 'ask', '--tool', 'AskUserQuestion', '--kind', 'question', '--detail', JSON.stringify({ questions })).split(' ')[0]
+    await until(async () => (await page.locator('.row.ask').last().locator('.opt').count()) === 2)
+    const card = page.locator('.row.ask').last()
+    if (!(await card.locator('.choices .allow').isDisabled())) throw new Error('Answer is enabled with nothing picked')
+    await card.locator('.opt', { hasText: 'SQLite' }).click()
+    await card.locator('.choices .allow').click()
+    await until(() => JSON.parse(wb('chat', 'wait', id, '--timeout', '0', '--json')).answers?.['Which DB?'] === 'SQLite')
+    await until(async () => (await page.locator('.row.ask .picked').last().textContent()) === 'SQLite')
+  })
+  await check('the gear opens the settings; "Let Claude go ahead" is saved and allows the next prompt', async () => {
+    await page.click('#gear')
+    await until(async () => await page.locator('#settings').isVisible())
+    if (!(await page.textContent('#settings')).includes('second lane')) throw new Error('no word on what this chat is')
+    await page.click('[data-away="allow"]')
+    await until(() => JSON.parse(readFileSync(join(home, 'state/chat/prefs.json'), 'utf8')).away === 'allow')
+    if (wb('chat', 'ask', '--tool', 'Bash', '--text', 'make').split(' ')[1].trim() !== 'allow') throw new Error('not allowed at once')
+    await until(async () => (await page.locator('.row.ask .meta').last().textContent()).includes('allowed by your setting'))
+    await page.click('[data-away="ask"]')
+    await until(() => JSON.parse(readFileSync(join(home, 'state/chat/prefs.json'), 'utf8')).away === 'ask')
+    await page.keyboard.press('Escape')
+    await until(async () => await page.locator('#settings').isHidden())
   })
   await check('a server that takes calls and never answers: the page heals itself once it is back, no reload', async () => {
     // the 2026-11-18 report: "Reconnecting" until a hard refresh

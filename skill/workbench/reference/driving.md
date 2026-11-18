@@ -62,8 +62,10 @@ something they asked for finishes or needs them. `wb chat log` shows the thread.
 all they see: each reply must stand on its own, and a yes there answers only a question asked
 there, never one asked in the terminal. Nothing hard to undo (downloads, deletes) on an ambiguous OK. A message they
 type in the terminal means they are back. While they're away, your permission prompts go to the
-chat as Allow/Deny cards; a deny comes back saying so: ask them there what to do instead, don't
-retry the same call another way.
+chat as Allow/Deny cards (or, by their setting, are allowed and listed there); a deny comes back
+saying so, with their words: ask them there what to do instead, don't retry the same call another
+way. Your AskUserQuestion questions reach them as buttons. A plan can be sent back from the chat
+with a note, but only approved in the terminal: when one waits, say so in the chat.
 
 ## Steering, stopping, resuming
 You are the driver, not a spectator. When something tells you the agent is heading the wrong way
