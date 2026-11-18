@@ -81,10 +81,11 @@ it that way; the agents never write either.
   and things deliberately not done), commit it, and run `wb init <dir>` again: AGENTS.md becomes
   a symlink to it, so OpenCode's agents read the same file. Keep it short and factual; it goes
   into every agent prompt. An existing AGENTS.md is moved to CLAUDE.md by `wb init`.
-- **Keeping it current**: `wb accept` prints how many code commits CLAUDE.md is behind. After
-  each accepted task, before the next spec, update it for whatever changed (a new module, command,
-  dependency, convention or decision) and commit it on its own (`docs: CLAUDE.md …`). Nothing
-  changed that it describes? Leave it. It says what the project is, never what comes next: keep
+- **Keeping it current**: when a task changes something CLAUDE.md describes (a new module,
+  command, dependency, convention or decision), edit CLAUDE.md in the task's worktree at review,
+  before `wb accept`, so it lands in the same commit as the code (one edit, no commit of its own).
+  `wb accept` prints how many code commits CLAUDE.md is behind. Nothing changed that it describes?
+  Leave it. It says what the project is, never what comes next: keep
   the plan and the next step in your own notes. An agent that loses its task takes up whatever
   CLAUDE.md says is next (seen: a compaction summary that recounted CLAUDE.md, and the agent
   built its "Next:" line instead of its spec). `wb start` refuses a repo without one (CLAUDE.md or
@@ -108,14 +109,15 @@ if you can, and start nothing until the plan is approved; then write the first s
   constants, file formats. Settle them in the plan; agents rename what isn't pinned.
 - **Its acceptance command**, and the worked examples it tests, each number checked against
   every rule. A step whose done-ness you can't state as a command isn't ready to hand off.
-  The runner runs it once on the base, in the agent's lane, before round 1: what it saw comes in
-  the first report, and a check-in at once when it already passes. Read it before you judge the
-  agent's work. A test that writes outside the lane or races under load
-  fails there whatever the agent does, and the agent spends its rounds on failures it didn't
-  cause (seen: `whoami` and /tmp probes); a command that already passes can't tell when the
-  step is done. Either way, `wb discard` and start again with a better one. It should fail only for
-  what the step changes, and check every listed change (each old string gone, each new one
-  there), not just the theme: a small model skips one item of a list.
+  The runner runs it once on the base, in the agent's lane, before round 1; what it saw comes in
+  the first report. A test that writes outside the lane or races under load fails there whatever
+  the agent does, and the agent spends its rounds on failures it didn't cause (seen: `whoami` and
+  /tmp probes): `wb discard` and start again with a better one. A command that already passes on
+  the base is normal when the agent writes the step's tests (the report says so; don't restart):
+  then those tests are the check, so the spec names what they must cover, and at review you see
+  they fail without the change. Otherwise the command should fail only for what the step changes,
+  and check every listed change (each old string gone, each new one there), not just the theme: a
+  small model skips one item of a list.
 - **Order**: logic, then its tests, then UI; a step that needs another's interface comes after it,
   through `wb next` on the same agent when it is the same area.
 - **What stays yours**, marked apart: git, CLAUDE.md, choices and setup only the user can make
@@ -139,56 +141,11 @@ model, unloading whatever is there. `wb models` shows the ranking per size. Pass
 Which sizes a model takes is set with `wb model sizes <id> trivial|significant`: set it when you
 add a model you judge fit only for small work, and otherwise change it only when the user asks.
 A newly added model has no record, so the router won't pick it over one with a good record:
-replay the bench on it first (`wb bench run --model <id>`, below), then give it its first few
+replay the bench on it first (`wb bench run --model <id>`, §6), then give it its first few
 real tasks with `--model` (ones you'd review closely anyway).
-**No local model yet?** If `wb models` lists none that can run, do the model check below first:
-recommend models for this hardware and offer to set them up in OpenCode (ask before any download).
-**Work with the model server the user already runs**, whichever it is: `wb scout` lists the server
-commands on PATH and the servers answering here. Never steer them to one they don't use. With
-none at all, lay out the options that fit the machine in a line each (llama.cpp's `llama-server`,
-alone or behind llama-swap; LM Studio; Ollama; vLLM on NVIDIA; MLX on Apple Silicon) and let the
-user pick; install nothing unasked. Asked which is most hands-off: Ollama (you download and remove
-its models, its tasks can share the GPU), then LM Studio. Whatever you set up, set it up for
-agents: a window of 32K or more (16K at the least), tool calls on (vLLM `--enable-auto-tool-choice
---tool-call-parser <the model's>`), and `wb doctor` after. For a server OpenCode has no provider for: `wb model add
-<provider>/<model> --url <its baseURL> --context N`, plus `--start`/`--stop` for one that runs one
-model a process (llama-server, vLLM). Ollama running with no provider: `wb model add
-ollama/<model>` writes it itself. `wb doctor` names each provider it skipped and why; one on
-another host that is the user's own server (WSL2's Windows host, a LAN box) needs their yes for
-`local: true`, set in models.json before `wb model add --url` (which refuses an address off this
-machine without it). Its server must listen on the LAN, firewalled to this machine (model servers
-have no login); plain HTTP carries the code unencrypted (Tailscale encrypts; its address still
-needs the flag). Another machine adds a model beside this GPU's, never speed to one model. Ollama cloud models (`:cloud`) run off this machine: never register one without
-the user's explicit yes.
-
-**Updating workbench.** The mod checks weekly and tells the user; `/workbench-update` is theirs.
-Asked to update it yourself: `wb update` (it refuses while tasks run; tell the user to restart
-Claude Code or run `/reload-plugins` after).
-
-**The weekly model check.** Once a week the mod asks you (or the user runs `/workbench-models`)
-to check the local models against this machine. `wb scout` gives the facts: GPU and VRAM, RAM,
-disk, what is installed and registered, real-task results, and the watch list
-(models set aside, with what each needs before it is tried again: check each against what is
-new). Then research what is
-newest and best: open-weight coding models with reliable tool calls, the sizes and quantizations
-that fit the VRAM with room for the context, and runtime releases worth having. Use primary
-sources (their APIs first; a blocked page is not checked: *The web is yours*, below) and its
-reputation in recent reports, verify before you name anything. Fit the models to the machine `wb scout` describes, whatever
-its size: a model that fits entirely in VRAM (or the GPU's share of unified memory) beats a bigger
-one that spills into RAM, and on a big card the best is a larger model, a longer context, or both.
-The window sets the slice of every task (`slice:` in the report), so where the VRAM has room past
-the weights, raise the context the server serves (llama-server `-c`, LM Studio's context length,
-vLLM `--max-model-len`, Ollama's `OLLAMA_CONTEXT_LENGTH`), then `wb model add … --context N`;
-`wb model add` reads the window from the server (Ollama, llama-server, LM Studio once the model
-is loaded, vLLM) and refuses when it can't say: then `--context N`, the window it was started
-with; ask the user if you don't know it. `wb doctor` flags an entry whose
-context differs from what the server serves, or that has none. Results first, then speed. Recommend briefly (keep / add / retire, with sizes and why), and
-only with a yes: on Ollama `wb model add <provider/model> --pull` (background); on another server,
-download it the server's own way (`lms get`, a GGUF from Hugging Face) and `wb model add`; `wb model sizes` for what it
-should take, `wb model retire <id> [--delete]`. Installed but unregistered models may belong to other tools: ask before touching
-them. When you set a model aside, `wb scout --watch "…"` records what would bring it back:
-the change to look for, and the test it must pass. A model you add: offer an overnight
-`wb bench run --model <id>` before its first real task. Finish with `wb scout --done --notes "…"`. Nothing worth changing: one line, and done.
+Model servers (none runnable, which server, a model on another machine), updating workbench, and
+**the weekly model check** (the mod asks once a week; `/workbench-models`): read
+`reference/models.md` beside this file first.
 
 ## 2. Spec (the most valuable thing you write)
 Read just enough of the repo to scope it, then write the spec to a file in the scratchpad:
@@ -244,23 +201,10 @@ in `~/.claude/skills`). So don't restate project conventions; spend the spec on 
 to this task: the files to read first, the existing code to imitate, and the skills to hand it
 (below).
 
-**The web is yours; the agent tests in a browser but doesn't browse.** Research (for a spec, an
-agent's question, the model check) uses the browsing tools this session gives you, and the one the
-user prefers where they have said (`~/.claude/CLAUDE.md`, `wb notes`, the repo's CLAUDE.md);
-workbench brings none. A browsing preference the user tells you holds in every project, workbench
-or not: offer to add it to `~/.claude/CLAUDE.md`, which every session reads (`wb notes` reach only
-workbench mode, your memory only this project). Read the
-installed source before the web, and a JSON API before a page (Hugging Face's `/api/models`,
-GitHub's releases API): they rarely block a plain fetch. A 403, a CAPTCHA, a login wall or a page
-empty without JavaScript means not checked: try another primary source, then say what you
-couldn't verify; never fill the gap from memory or a copy. When a block cost an answer and this
-session has no browser tool, say so in that report: a browser tool (Claude in Chrome, the desktop
-app's browser, a browser MCP server) would reach it, and which is the user's choice. Put what the agent needs in the spec
-(the signature, the few lines of docs), not a URL: its web tools are denied. A browser check of
-its own work is a test: name one (Playwright, or the project's) that prints the console's and the
-page's errors as text, and make it `--test` or part of it; screenshots are for you. A bare browser
-(`chromium`, `google-chrome`, a global `lighthouse`) asks first, as `curl` does, since it fetches
-any URL: allow it for the task, `--always` when the user wants it for every task.
+**The web is yours**: research for a spec, a question or the model check uses this session's
+browsing tools; a 403, a CAPTCHA or an empty page is not checked: say so, never fill it from
+memory. Put what the agent needs in the spec, not a URL (its web tools are denied). How, and a
+browser check of the agent's work as a test: `reference/driving.md`.
 
 **Your skills reach the agent as decisions.** Before writing a spec, check which skills and tools
 in your own session fit the task, whatever the field: a design plugin for a UI, a writing guide
@@ -290,114 +234,11 @@ in ~30 minutes as three, every hidden check passing.)
   "exactly"; agents otherwise rename them to fit their own taste.
 - The agent cannot see what it draws. For anything visual, look at the screenshot yourself;
   after one miss on a visual detail, fix it yourself rather than describing it again.
-- Check the tests catch bugs, not just that they pass: break the code in a scratch copy a few
-  ways and see each break fail a test.
 
-## Skills for the agents: you write them, you hand them out
-The agents learn nothing between tasks; you do. A skill carries what you learned to the next
-agent that needs it, and only to that one, so a growing library never crowds a small model's
-prompt. You are the only author. Agents may propose a lesson (a `Lesson:` line in their summary),
-but an agent writing its own skills would record its mistakes as rules, so you vet each one.
-
-**Lessons come to you.** `wb feedback`, `next`, `resume`, `accept` and `discard` end with
-`lessons: N from this task` when the task taught something. That covers your numbered corrections,
-guard stops, its questions, a loaded skill that still needed review rounds, and the agent's own
-`Lesson:` lines. Run `wb lessons` then, while it's fresh. The ones seen in more than one task come
-first: the next agent will get those wrong too. Each one ends in a skill
-(`wb skill patch|add … --lesson <id>`) or is closed with why (`wb lessons close <id> -m …`).
-
-**What a lesson is.** A rule an agent can follow, plus one clause of why: "Use DrawTextEx with
-the loaded font: DrawText ignores it." Not the story of the task, no issue numbers or dates.
-Not a lesson (close it):
-- a one-task detail
-- an environment problem (a missing tool, a server down: fix the setup instead)
-- a negative claim about a tool ("X doesn't work"; that hardens into a refusal long after X is
-  fixed)
-- a transient error that a retry cured
-- the attempts of a task that never worked (dead ends are not a recipe)
-- what every task in a repo needs (that repo's CLAUDE.md, which every agent reads)
-- a working habit (the handbook)
-
-**Patch first**, in this order:
-1. The skill that was in play: the task held it. `wb skill show` it first, then
-   `wb skill patch <name> --old "<the passage that misled>" --new "…" -m why`. Fix the sentence
-   in place; never append "update: actually…".
-2. An existing skill that covers this kind of work (wb lessons names a likely one).
-3. A `references/<topic>.md` beside one of those, for depth only some tasks need, with a
-   one-line pointer in its SKILL.md.
-4. Only then a new skill, named for the kind of work (`svg-charts`), never for one task or error.
-   Write the SKILL.md in the scratchpad, then
-   `wb skill add <name> --from <file> -m "<what review taught>"` (it checks, scans and commits it).
-The library follows the user into every project, so it holds only what holds beyond one. Knowledge
-of one project that only some of its tasks need goes in `<repo>/.claude/skills/<name>/`, committed
-with the project; the agents there always see it. Never `~/.claude/skills`, the user's. When
-`wb skill add` warns that every lesson came from one repo, decide which it is before moving on.
-
-A good skill: front matter `name` (the directory's) and a `description` that says when to use it
-("Use when drawing charts as SVG ...": it is all the agent sees before it decides to load it); then
-20–60 lines of imperative steps, the pitfall with the right and wrong form, and how to check the
-result. No paths outside the repo (agents go looking for them), no model names.
-
-**Hand out** 0–2 skills per task, only ones that fit this task: `wb start … --skill <name>`; a
-new step gets its own set with `wb next … --skill <name>`. The agent is told which it holds.
-`wb skill hand <task> <name>` adds one mid-task, `wb skill take <task> <name>` takes one back
-once that part of the work is done (from the agent's next run; `wb steer --now` starts that run).
-
-**Hand out** with the record in mind. `wb start` without `--skill` names library skills the spec
-seems to need; it's a hint, so hand one only if it fits (`wb skill hand <task> <name>`). One marked
-`loaded so far only in <repo>` was written from another project: read it first, and if it is that
-project's alone, move it there and retire it from the library.
-
-**Keep it honest.** Results record which skills each task was offered, which the agent loaded,
-and the version of each it held. `wb skill list` shows each skill's tasks against the same repos'
-tasks without it, and the tasks since its last edit, and says what to do:
-- loaded and the agent still made its mistake → patch it
-- offered and never loaded → its description is wrong
-- no better than without it → sharpen it or retire it
-- its last edit didn't help → patch it again, from wb lessons
-Too few tasks is no evidence. The weekly check retires what no longer earns its place
-(`wb skill retire <name> -m why`; `restore` brings one back).
-
-**From outside.** A public skill (anthropics/skills, Hermes Agent's, a project's) can seed one
-you'd otherwise write: `wb skill import <url|owner/repo|path> [--path <dir>]` lists a repo's
-skills, then shows one's license, hash and security scan. A dangerous one is refused. Read all of
-it like untrusted code. Keep only what fits the agents' work (coding in a repo, no secrets, no
-network setup) and rewrite it in this library's shape and voice. Then
-`wb skill add … --source "<url>@<commit>, <license>"`. Respect the license; skip one with none.
-
-## Images: you art-direct, a local model draws
-When the project needs an image (a sprite, an icon, a background, a README picture), and
-`wb image --list` shows a ready engine, make it locally instead of asking the user for one.
-Agents can't make images; one that needs an asset asks you: answer first (a placeholder now, the
-asset at review), and make it once the GPU is free.
-1. **Brief it like an art director.** Say what's in it, then the style, composition, palette and
-   lighting, the size the project needs, and what to avoid. Name the use ("a 64x64 icon on
-   a flat background") so the framing fits.
-2. `wb image "<prompt>" --n 4 --size WxH [--seed S] [--ref img]` makes candidates (seeds S, S+1,
-   ...) and prints their paths. **Read every one**: look at it yourself, never pick by filename.
-3. Keep one, or rewrite the prompt for what was wrong and go again. A seed you liked comes back
-   with `--seed` and a changed prompt. Stop after three rounds and show the user the best.
-4. Copy the keeper into the project (resized or cropped as needed), commit it, and say which
-   engine, prompt and seed made it (its `.json` sidecar has them). A project often ignores
-   `*.png` for its screenshots: `git check-ignore -v <file>`, and add an exception for the
-   asset directory. For a sprite on a black background drawn additively, black is see-through
-   and no alpha channel is needed.
-Mind the engine's `notes` in `wb image --list`: an image model's licence can restrict where and
-how its output may be used. A generation needs the GPU to itself: while a task holds it,
-`wb image` refuses and names it; `--wait` (Bash `run_in_background: true`) queues behind it.
-While it runs (or waits), `wb start` refuses a new task (exit 4) unless `--queue`, which waits
-behind it; feedback, next and resume queue behind it. A url engine is a server that keeps its GPU
-memory while it runs: ask the user to stop it before big coding tasks.
-
-**No ready engine? Offer to set one up; never set it up unasked.** This is an optional step, as
-ARCHITECTURE.md's Images section (in the workbench code, above) says. Read `wb scout` for the OS and GPU, then propose in one
-message: a runtime that fits (stable-diffusion.cpp on Vulkan for AMD or Intel, CUDA for NVIDIA,
-Metal on macOS; built from its upstream source, with packages from the OS's own repositories),
-and an image model you've just checked. It must fit the VRAM without spilling, and its licence
-must allow the user's use and country. Some licences exclude whole regions, so read the licence
-text, not the tag. Give the download size. Wait for a yes, then install, write
-`~/.config/workbench/images.json` (the licence goes in `notes`), make one test image, and look at
-it before saying it works.
+**Skills for the agents** are yours to write, hand out (`wb start … --skill <name>`, 0–2 that fit
+the task) and keep honest. `reference/skills.md` has how: read it before you write, patch, import
+or retire one, or triage lessons. **Images** (a sprite, an icon): a local engine draws them, you
+art-direct (`wb image --list`); read `reference/images.md` first.
 
 ## 3. Dispatch
 ```
@@ -436,31 +277,10 @@ You are the driver, not a spectator. When something tells you the agent is headi
   matters.
 - `wb takeover <name>`: stops it and hands you the worktree. Finish by hand, leaving it
   uncommitted (`wb accept` commits it), then `wb accept`, or hand it back with `wb feedback`. For when explaining would cost more than doing.
-- **Commands it asks for.** The agent's shell runs the everyday tools of software work freely;
-  anything else, and adding a package, is refused, and the agent asks you (a `PERMISSION`
-  question). Lean to yes: their work is hard enough. `wb allow <name> "<pattern>"` (e.g.
-  `"curl *"`) grants it for the task, answers the request and restarts the agent on its session
-  with the rule; `--always` keeps it for every task (`~/.config/workbench/commands.json`). Say no
-  (`wb answer`, with another way) to what reaches outside the task: deploys, other machines,
-  system services, the user's data, a dependency the project shouldn't take on. Knowing a task
-  needs something up front, `wb start … --allow "<pattern>"`. sudo, git writes, git by its full
-  path and `gh` stay refused whatever you allow. A plain `npx <pkg>` runs only what the project
-  installed; to let it fetch one, allow `npx --yes <pkg>`.
-- **Directories it asks for.** The agent writes only in its lane (worktree, temp, build caches)
-  and its file tools keep to it; a request names a `path`. `wb allow <name> --path <dir>` grants
-  read and write (`--always`, `wb start --allow-path`). Grant a directory the task's output
-  really belongs in (a sibling asset folder, a cache a toolchain wants); never your home, the
-  user's checkout or another project: there, take the file yourself or say no. `wb allow --path`
-  refuses a path through a link (it names the target: allow that only if it is what the task
-  needs; the agent can plant links in its lane), a place inside credentials or workbench's own
-  state and config, and one in the task's own repo (the user's checkout: take that file yourself).
-  A toolchain the build wants installed (a Python uv must download, a
-  `rust-toolchain.toml` toolchain, `uv tool install`, `cargo install`) is refused there: install
-  it yourself rather than grant `~/.local/share/uv` or `~/.rustup/toolchains`, whose programs
-  run later outside the lane. A test driving a program through a pseudo-terminal (pexpect, Python's pty,
-  `script`, node-pty) fails in the lane ("out of pty devices", "failed to create
-  pseudo-terminal"): grant `/dev/pts` (`wb start --allow-path /dev/pts`), which also opens the
-  user's other terminals to the agent.
+- **Commands and directories it asks for** (a `PERMISSION` question): lean to yes for what the
+  task needs (`wb allow <name> "<pattern>"`, `wb allow <name> --path <dir>`); no to what reaches
+  outside it. sudo, git writes and `gh` stay refused whatever you allow. The rules and the
+  traps (links, toolchains, `/dev/pts`): `reference/driving.md`.
 - `wb stop <name>`: just stop it. `wb resume <name>` continues it in a fresh session (not a
   review round), e.g. after fixing workbench under it. A task failed with "the runner died" (a
   reboot, a kill) or stuck with "stopped by a signal" resumes the same way.
@@ -482,29 +302,21 @@ workbench mode; the mod runs them, closes the pane and tells you what it did:
 Tasks listed as left alone belong to another live session: leave them unless asked.
 Without the mod, the user may ask for the same in words; run those commands then.
 
-**The web chat.** While workbench mode is on in a session, the user can reach you from their phone
-(`wb chat serve` on port 1337; the link is localhost, and reaching it from a phone is the user's own setup). Their message arrives as a prompt that is
-just `[web chat] <their words>` (or, while you're mid-turn, delivered into the turn by the mod,
-with one line saying so); it has the same authority as one typed here. They read your answers on a phone, so
-reply there with `wb chat reply --text "…"`: a one-line acknowledgement first when the work will
-take a while, then the outcome, short (what was done, what needs them). Don't stream progress or
-paste diffs. While a `web-chat` context block says they are away, also tell them there when
-something they asked for finishes or needs them. `wb chat log` shows the thread. The web thread is
-all they see: each reply must stand on its own, and a yes there answers only a question asked
-there, never one asked in the terminal. Nothing hard to undo (downloads, deletes) on an ambiguous OK. A message they
-type in the terminal means they are back.
+**The web chat.** A prompt that is just `[web chat] <their words>` is the user on their phone,
+with the same authority as here: reply there with `wb chat reply --text "…"`, short; read
+`reference/driving.md` (the web chat) before your first reply.
 
 **Check-ins.** A significant task wakes you every 10 minutes while it runs (`--checkin MIN`
 changes it, `0` turns it off) with a digest: tools used, errors, tokens, files touched, its latest
 words, time so far and the ETA. Be the captain: give the user two or three plain lines on how it
-is going, log them with `wb note <name> --text "…"` (they show in `wb watch` and the pane), and
-steer only if it is drifting. Say what you see, including "slow but on course". Keep it short;
-every check-in costs your tokens.
+is going, and steer only if it is drifting. Say what you see, including "slow but on course".
+Each check-in is a turn that re-reads your context, so answer it in that one turn: no `wb log`
+unless the digest shows trouble, and a `wb note <name> --text "…"` (it shows in `wb watch` and
+the pane) only for something the user should find later.
 
 ## 4. When woken
-- **review**: the report gives the test result, the agent's summary and the files. Read
-  `wb diff <name> --stat`, then the full `wb diff <name>` (`wb diff <name> <path>` for big
-  ones). Read every line. Check:
+- **review**: the wake carries the report and, when it is small, the whole diff (`wb diff <name>`
+  only when it says the diff was too big, or after you change something). Read every line. Check:
   - **Correctness**: trace the logic, including edge cases, error paths and inputs the tests
     don't cover.
   - **The spec**: every requirement met, nothing missing, nothing added.
@@ -514,22 +326,30 @@ every check-in costs your tokens.
   - **Hygiene**: no stray files, debug output, dead code or TODOs.
   - **Safety**: injection, secrets, unsafe file or shell use.
 
-  If anything is doubtful, check it yourself: run the tests or a quick probe in the worktree
-  (`wb status <name>` prints its path); a UI change, run it from the worktree and look with your
-  own browser tool. Accept only what you would have written.
+  **The bar is the same for every task; the checking is in proportion to it.** Each call you make
+  re-reads your whole context, so a review of a dozen calls can cost more than writing the code
+  (measured 2026-11-17: a trivial task cost 4.5 times as much handed off, mostly in review extras).
+  - **Trivial**: reading the diff against the spec and the report's test result is the review. Run
+    something only when a line leaves you in doubt.
+  - **Significant**: also check the tests catch bugs: break the code in a scratch copy a few ways,
+    in one script that applies each break and runs the tests, and see each one fail. A UI change:
+    run it from the worktree and look with your own browser tool.
+  - Put the checks you do run in one Bash call (`wb status <name>` prints the worktree's path).
+  Accept only what you would have written.
 - **question** — answer it briefly and decisively: `wb answer <name> --text "…"`. The agent is
   blocked until you do.
 - **stuck / failed** — `wb log <name> -n 30` if the report isn't enough; then feedback that unblocks
   it, or discard.
-- **After every review**, one question: did I just correct something the next agent will get
-  wrong too? The `lessons:` line and `wb lessons` put the candidates in front of you; turn each
-  into a skill or close it (above), now, while the lesson is fresh.
+- **Lessons**: when the `lessons:` line says one was seen in more than one task, or you just
+  corrected something the next agent will get wrong too, triage it now (`reference/skills.md`).
+  A one-task detail needs no call.
 
 ## 5. Feedback
 Numbered, concrete changes in a file → `wb feedback <name> --message <file>` (or `--text "…"`). Small models need
 explicit instructions ("in parse(), return 0 for an empty string"), not critique. Send back
-everything that falls short in one round, small things included. A nit you let through is a
-standard you just lowered. Confirm or correct each assumption the summary lists, in the same
+everything the agent must redo in one round. A nit you can fix in less than it takes to describe
+it (a name, a blank line, a duplicated test line), fix yourself in the worktree and accept: the
+bar holds, and a round costs a wake and a second review. Confirm or correct each assumption the summary lists, in the same
 message: an assumption left unanswered comes back as a question, and the agent waits for it.
 When the fix is for something your spec missed, add `--spec-gap "…"` (checklist item it broke).
 **Max 3 review rounds.** Still wrong after that: make the small remaining fix yourself in the task's worktree
