@@ -149,6 +149,8 @@ def _user_message(text: str, verbose: bool) -> tuple[str, list[tuple[str, str]]]
         text = text.split("\n\n", 1)[1]
     if text.startswith("Review feedback from the senior reviewer"):
         head = "Claude → agent · review feedback"
+    elif text.startswith("Before Claude reviews this"):  # runner.SELF_REVIEW
+        head = "workbench → agent · its own review first, before Claude's"
     elif text.startswith("The acceptance tests fail"):  # runner.auto_fix_prompt
         head = "workbench → agent · tests failed, sent back automatically"
     elif text.startswith("You are picking this task up in a fresh session"):  # runner.handoff_prompt
@@ -312,6 +314,9 @@ def task_entries(task: store.Task) -> list[Entry]:
             out.append(Entry(ts, key, lines))
         elif kind == "autofix":
             out.append(Entry(ts, key, [("sys", "■ workbench sends the failures back to the agent")]))
+        elif kind == "self_review":
+            out.append(Entry(ts, key, [("sys", "■ tests pass: the agent does its own review first, "
+                                               "before Claude's")]))
         elif kind == "ask":
             out.append(Entry(ts, key, [("claude", "agent → Claude · question")]
                              + _block("", r.get("text", ""), 40, "  ")))
