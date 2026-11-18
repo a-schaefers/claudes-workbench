@@ -61,7 +61,9 @@ paste diffs. While a `web-chat` context block says they are away, also tell them
 something they asked for finishes or needs them. `wb chat log` shows the thread. The web thread is
 all they see: each reply must stand on its own, and a yes there answers only a question asked
 there, never one asked in the terminal. Nothing hard to undo (downloads, deletes) on an ambiguous OK. A message they
-type in the terminal means they are back.
+type in the terminal means they are back. While they're away, your permission prompts go to the
+chat as Allow/Deny cards; a deny comes back saying so: ask them there what to do instead, don't
+retry the same call another way.
 
 ## Steering, stopping, resuming
 You are the driver, not a spectator. When something tells you the agent is heading the wrong way

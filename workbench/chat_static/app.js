@@ -33,7 +33,7 @@
   }
 
   // ---- state ----
-  let state = { messages: [], listener: null }
+  let state = { messages: [], asks: [], listener: null }
   let skew = 0                                  // server clock − ours, seconds
   let outbox = load(K.outbox, [])               // [{cid, text, ts, error?}]
   let seen = new Set(load(K.seen, null) || [])  // Claude's messages already shown in full
@@ -145,11 +145,21 @@
     const onServer = new Set(state.messages.map(m => m.cid).filter(Boolean))
     const pending = outbox.filter(o => !onServer.has(o.cid))
       .map(o => ({ id: 'local-' + o.cid, cid: o.cid, from: 'user', text: o.text, ts: o.ts, local: true, error: o.error }))
-    return [...state.messages, ...pending]
+    // permission prompts sit in the thread where they were asked
+    const asks = state.asks.map(a => ({ id: a.id, from: 'ask', ts: a.ts, ask: a }))
+    return [...state.messages, ...asks].sort((x, y) => x.ts - y.ts).concat(pending)
   }
 
   function metaFor(m) {
     const meta = document.createElement('div'); meta.className = 'meta'
+    if (m.ask) {
+      const a = m.ask
+      meta.append(span('', clock(a.ts) + (a.answer === 'allow' ? ' · you allowed it ' + clock(a.answered)
+        : a.answer === 'deny' ? ' · you said no ' + clock(a.answered)
+        : a.answer === 'expired' ? (a.by === 'interrupted' ? ' · stopped in the terminal' : ' · no answer in time: it waits in the terminal')
+        : ' · Claude is waiting for your answer')))
+      return meta
+    }
     if (m.from === 'claude') {
       meta.append(span('', 'Claude · ' + clock(m.ts) + ' · '))
       const c = document.createElement('button'); c.textContent = 'copy'
@@ -198,7 +208,7 @@
     for (const m of list) {
       const day = dayName(m.ts)
       if (!prev || dayName(prev.ts) !== day) want.push({ key: 'day-' + day, day })
-      want.push({ key: m.local ? 'local-' + m.cid : (m.cid && nodes.has('local-' + m.cid) ? 'local-' + m.cid : m.id), m,
+      want.push({ key: m.ask ? m.id + ':' + (m.ask.answer || 'open') : m.local ? 'local-' + m.cid : (m.cid && nodes.has('local-' + m.cid) ? 'local-' + m.cid : m.id), m,
                   same: prev && prev.from === m.from && m.ts - prev.ts < 120 })
       prev = m
     }
@@ -213,7 +223,7 @@
         nodes.set(w.key, el)
       }
       if (w.m) {
-        el.className = `row ${w.m.from}${w.same ? ' same' : ''}${w.m.local ? ' pending' : ''}${w.m.error ? ' failed' : ''}`
+        el.className = `row ${w.m.from}${w.same ? ' same' : ''}${w.m.local ? ' pending' : ''}${w.m.error ? ' failed' : ''}${w.m.ask && w.m.ask.answer ? ' done' : ''}`
         el.querySelector('.meta').replaceWith(metaFor(w.m))
       }
       if (anchor.nextSibling !== el) anchor.after(el)
@@ -225,7 +235,43 @@
     if (list.length) firstVisit = false
   }
 
+  function makeAsk(a) {
+    const row = document.createElement('div')
+    const card = document.createElement('div'); card.className = 'card'
+    const head = document.createElement('div'); head.className = 'asks'
+    head.textContent = a.answer ? 'Claude asked to use ' + a.tool : 'Claude wants to use ' + a.tool
+    const what = document.createElement('pre'); what.textContent = a.text
+    card.append(head, what)
+    if (!a.answer) {
+      const choices = document.createElement('div'); choices.className = 'choices'
+      const yes = document.createElement('button'); yes.className = 'allow'; yes.textContent = 'Allow'
+      const no = document.createElement('button'); no.className = 'deny'; no.textContent = 'Deny'
+      const said = span('said', '')
+      const answer = async verdict => {
+        yes.disabled = no.disabled = true; said.textContent = ''
+        try {
+          const r = await fetch('/api/answer', { method: 'POST', cache: 'no-store',
+            headers: { Authorization: 'Bearer ' + token, 'Content-Type': 'application/json' },
+            body: JSON.stringify({ id: a.id, answer: verdict }) })
+          const j = await r.json().catch(() => ({}))
+          if (r.ok && j.state) return apply(j.state)
+          if (r.status === 401) return keyless('That key was not accepted.')
+          said.textContent = j.error || 'not sent: try again'
+        } catch { said.textContent = 'not sent: try again' }
+        yes.disabled = no.disabled = false
+      }
+      yes.onclick = () => answer('allow'); no.onclick = () => answer('deny')
+      choices.append(no, yes)
+      card.append(choices, said)
+      if (document.hidden) document.title = 'Claude asks: allow?'
+    }
+    row.append(card, document.createElement('div'))
+    row.lastChild.className = 'meta'
+    return row
+  }
+
   function makeRow(m) {
+    if (m.ask) return makeAsk(m.ask)
     const row = document.createElement('div')
     const b = document.createElement('div'); b.className = 'bubble'
     if (m.from === 'user') b.textContent = m.text
@@ -274,7 +320,7 @@
   }
   function apply(s) {
     if (typeof s.now === 'number') skew = s.now - Date.now() / 1000
-    state = { messages: s.messages || [], listener: s.listener || null }
+    state = { messages: s.messages || [], asks: s.asks || [], listener: s.listener || null }
     const onServer = new Set(state.messages.map(m => m.cid).filter(Boolean))
     if (outbox.some(o => onServer.has(o.cid))) { outbox = outbox.filter(o => !onServer.has(o.cid)); save(K.outbox, outbox) }
     render()

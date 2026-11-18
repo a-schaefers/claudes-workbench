@@ -2111,6 +2111,24 @@ def cmd_chat(a):
     elif a.action == "pending":
         for r in chat.pending():
             print(json.dumps(r))
+    elif a.action == "ask":  # the mod: a permission prompt for the away user; prints its id
+        if not a.tool or not a.text:
+            die("wb chat ask needs --tool and --text")
+        print(chat.ask(a.tool, a.text)["id"])
+    elif a.action == "wait":  # the mod: allow, deny or expired once answered; open at the timeout
+        if not a.id:
+            die("wb chat wait <ask id>")
+        try:
+            print(chat.wait_answer(a.id, a.timeout) or "open")
+        except KeyError:
+            die(f"no permission prompt {a.id}")
+    elif a.action == "answer":
+        if not a.id or a.verdict not in chat.ANSWERS:
+            die("wb chat answer <ask id> allow|deny|expired")
+        cur = chat.answer(a.id, a.verdict, a.by or "cli")
+        if cur is None:
+            die(f"no permission prompt {a.id}")
+        print(cur["answer"])
     else:  # log
         for r in chat.thread()[-a.n:]:
             who = "you" if r["from"] == "user" else "Claude"
@@ -2709,15 +2727,19 @@ def parser() -> argparse.ArgumentParser:
     s = sub.add_parser("events", help="print a line whenever workbench's state changes (the mod's ears)")
     s.set_defaults(f=cmd_events)
     s = sub.add_parser("chat", help="the web chat: serve it, its link, reply to the user there, "
-                       "the thread (log), receipts (ack), what waits (pending)")
-    s.add_argument("action", choices=["serve", "url", "reply", "log", "ack", "pending"], nargs="?",
-                   default="log")
-    s.add_argument("id", nargs="?", help="ack: the message id")
+                       "the thread (log), receipts (ack), what waits (pending), permission "
+                       "prompts for the away user (ask, wait, answer: the mod's)")
+    s.add_argument("action", choices=["serve", "url", "reply", "log", "ack", "pending", "ask",
+                                      "wait", "answer"], nargs="?", default="log")
+    s.add_argument("id", nargs="?", help="ack: the message id; wait, answer: the prompt's id")
+    s.add_argument("verdict", nargs="?", help="answer: allow, deny or expired")
+    s.add_argument("--tool", help="ask: the tool asking")
+    s.add_argument("--timeout", type=float, default=30, help="wait: seconds")
     s.add_argument("--port", type=int, default=chat.PORT)
     s.add_argument("--bind", action="append", help="serve: an address to listen on, `tailscale` "
                    "or 0.0.0.0 (default: chat.json's `bind`, else localhost)")
     s.add_argument("--host", action="append", help="serve: another host name to answer to (* any)")
-    s.add_argument("--text", help="reply: the text"); s.add_argument("--message", help="reply: file, or -")
+    s.add_argument("--text", help="reply, ask: the text"); s.add_argument("--message", help="reply: file, or -")
     s.add_argument("--by", help=argparse.SUPPRESS); s.add_argument("-n", type=int, default=10)
     s.add_argument("--how", choices=["now", "queued"], default="now", help=argparse.SUPPRESS)
     s.set_defaults(f=cmd_chat)

@@ -4583,6 +4583,42 @@ class WebChat(Base):
         for path in ("/../chat.py", "/chat.py", "/nope.js", "/%2e%2e/store.py"):
             self.assertEqual(self.call(path)[0], 404, path)
 
+    def test_a_permission_prompt_is_answered_once_from_the_page_with_the_token(self):
+        # the mod puts Claude Code's prompts here while the user is away (the user, 2026-11-18)
+        chat, tok = self.chat, self.chat.token()
+        a = chat.ask("Bash", "git push origin main")
+        st = self.call("/api/state", token=tok)[1]
+        self.assertEqual([(x["id"], x["tool"], x["answer"]) for x in st["asks"]], [(a["id"], "Bash", None)])
+        self.assertEqual(self.call("/api/answer", {"id": a["id"], "answer": "allow"})[0], 401)
+        self.assertEqual(self.call("/api/answer", {"id": a["id"], "answer": "allow"}, token=tok,
+                                   host="evil.example")[0], 403)
+        self.assertEqual(self.call("/api/answer", {"id": a["id"], "answer": "maybe"}, token=tok)[0], 400)
+        self.assertEqual(self.call("/api/answer", {"id": a["id"], "answer": "expired"}, token=tok)[0], 400)
+        self.assertEqual(self.call("/api/answer", {"id": "ask-nope", "answer": "allow"}, token=tok)[0], 404)
+        code, r = self.call("/api/answer", {"id": a["id"], "answer": "deny"}, token=tok)
+        self.assertEqual((code, r["ask"]["answer"], r["ask"]["by"]), (200, "deny", "web"))
+        self.assertEqual(r["state"]["asks"][0]["answer"], "deny")
+        # the first answer stands: a late tap, or the mod's expiry, changes nothing
+        self.assertEqual(self.call("/api/answer", {"id": a["id"], "answer": "allow"}, token=tok)[1]["ask"]["answer"], "deny")
+        self.assertEqual(chat.answer(a["id"], "expired", "timeout")["answer"], "deny")
+        self.assertEqual(chat.wait_answer(a["id"], 0), "deny")
+
+    def test_wb_chat_wait_blocks_until_the_answer_or_says_open(self):
+        chat = self.chat
+        a = chat.ask("Write", "/etc/hosts")
+        self.assertEqual(run_wb("chat", "wait", a["id"], "--timeout", "0.2").strip(), "open")
+        import threading
+        threading.Timer(0.3, chat.answer, (a["id"], "allow", "web")).start()
+        t0 = time.time()
+        self.assertEqual(run_wb("chat", "wait", a["id"], "--timeout", "20").strip(), "allow")
+        self.assertLess(time.time() - t0, 10)                  # woken by the answer, not the timeout
+        self.assertEqual(run_wb("chat", "answer", a["id"], "expired", "--by", "timeout").strip(), "allow")
+        with self.assertRaises(SystemExit):
+            run_wb("chat", "wait", "ask-nope")
+        b = run_wb("chat", "ask", "--tool", "Bash", "--text", "make deploy").strip()
+        self.assertEqual(run_wb("chat", "answer", b, "expired", "--by", "interrupted").strip(), "expired")
+        self.assertEqual(chat.find_ask(b)["by"], "interrupted")
+
     def test_a_retried_send_lands_once(self):
         tok = self.chat.token()
         a = self.call("/api/send", {"text": "hi", "cid": "c-1"}, token=tok)[1]

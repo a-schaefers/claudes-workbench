@@ -163,7 +163,8 @@ the diff.
 | `/workbench-quit-and-hand-back-claude` | leave workbench mode and have Claude finish this session's agents' tasks itself |
 
 **Away from the computer?** `wb chat serve` runs a small web chat with the running Claude session,
-and `wb chat url` prints its private link.
+and `wb chat url` prints its private link. Claude's permission prompts come to it too, with Allow
+and Deny.
 
 <p align="center"><img src="docs/web-chat.png" alt="The web chat: Claude's report on which model takes which tasks, the user's reply, a receipt saying Claude has it and will read it after its current step, and 'Claude is on it'" width="420"></p>
 
