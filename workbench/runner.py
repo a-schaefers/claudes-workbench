@@ -747,7 +747,10 @@ def base_check_line(r: dict, task: store.Task) -> str:
             f"failing only for what the step changes ({task.dir / 'base-tests.txt'}):\n{tail}")
 
 
-REVIEW_DIFF_MAX = 12000  # characters (~3K tokens): a diff this size comes with the review notice
+# characters (~8K tokens): a diff this size comes with the review notice. Claude reads all of it
+# anyway, and fetching it is a call over its whole session: at 12,000 both significant tasks of
+# 2026-11-18 (13K and 15K characters) cost that extra call.
+REVIEW_DIFF_MAX = 32000
 
 
 # The instruction files an agent may propose a new version of (`<name>.proposed`, beside it): it
