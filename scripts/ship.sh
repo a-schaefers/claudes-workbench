@@ -38,6 +38,7 @@ while [ $# -gt 0 ]; do
 done
 
 git fetch -q origin main
+scripts/check-version.sh origin/main > /dev/null  # check.yml would refuse it anyway
 ahead=$(git rev-list --count origin/main..HEAD)
 [ "$ahead" -gt 0 ] || { echo "nothing to ship: HEAD is already in origin/main"; exit 1; }
 if ! git diff --quiet || ! git diff --cached --quiet; then

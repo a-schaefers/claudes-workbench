@@ -3,8 +3,9 @@
 
 Plain text checks (no YAML library): every action pinned to a commit, every
 workflow with its own permissions, `check` never path-filtered and required by
-main's ruleset, and owner-merge.yml approving only the owner's pull requests
-without ever running their code.
+main's ruleset, check.yml holding pull requests to the version rule,
+release.yml writing only from main, and owner-merge.yml approving only the
+owner's pull requests without ever running their code.
 """
 import json
 import re
@@ -51,6 +52,18 @@ class RequiredCheck(unittest.TestCase):
         rules = {r["type"]: r.get("parameters", {}) for r in json.loads(RULESET.read_text())["rules"]}
         checks = rules["required_status_checks"]["required_status_checks"]
         self.assertIn({"context": "check", "integration_id": GITHUB_ACTIONS_APP}, checks)
+
+
+class Versions(unittest.TestCase):
+    def test_check_holds_every_pull_request_to_the_version_rule(self):
+        self.assertIn("run: scripts/check-version.sh", text("check.yml"))
+
+    def test_release_writes_only_from_main(self):
+        code = "\n".join(l for l in text("release.yml").splitlines() if not l.lstrip().startswith("#"))
+        on = code.split("\npermissions:")[0]
+        self.assertNotIn("pull_request", on, "a write token must never run a pull request's code")
+        self.assertIn("branches: [main]", on)
+        self.assertRegex(code, r"(?m)^permissions:\n  contents: write$")
 
 
 class Ruleset(unittest.TestCase):

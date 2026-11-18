@@ -2592,8 +2592,9 @@ developer's. Upgrading is `wb update` (or `/workbench-update`, which reloads the
 update workbench@workbench` refreshes the mod. The mod runs `wb update --check --if-due` once per
 session, so a new commit is noticed within a week.
 The mod's copy moves only when `mod/.claude-plugin/plugin.json`'s `version` does, so a change to
-`mod/` that users should get bumps it. A third-party marketplace doesn't auto-update unless the
-user turns that on (`/plugin` → Marketplaces).
+`mod/` bumps it, and `scripts/check-version.sh` holds every pull request to that (*Shipping to
+main*). There is nothing to publish: main is the marketplace, so a merge ships. A third-party
+marketplace doesn't auto-update unless the user turns that on (`/plugin` → Marketplaces).
 
 **Developing**: a clone, with the links pointing into it and the clone itself as the marketplace,
 so the plugin, `wb` and the skill all read the working tree (the README's install until
@@ -2661,8 +2662,9 @@ main (*Shipping to main*).
 - `tests/test_sizing.py`: the slice guess and its correction from real steps.
 - `tests/test_workflows.py`: the merge gate, in plain text (no YAML library): every action pinned
   to a commit with its version, every workflow with its own permissions, `check` never
-  path-filtered and required by the ruleset from GitHub Actions, the ruleset with no bypass, and
-  `owner-merge.yml` approving only the owner's pull requests without running their code.
+  path-filtered and required by the ruleset from GitHub Actions, the ruleset with no bypass,
+  `check` running the version rule, `release.yml` writing only from main, and `owner-merge.yml`
+  approving only the owner's pull requests without running their code.
 - `tests/test_docs.py`: the docs cover the code: every `wb` command and flag (from `cli.main`'s
   parser) in *Every `wb` command*, every module in CLAUDE.md's layout, every `WB_*` variable the
   code or the mod reads in CLAUDE.md, CLAUDE.md under 25,000 characters.
@@ -2794,6 +2796,17 @@ push: every change is a pull request that merges once `check` is green and it is
   refuses to ship from main and acts only on this repository's own pull request at the commit it
   pushed. `--title`, `--body-file`, `--squash`, `--no-wait`, `--draft`. A red check leaves
   auto-merge armed: fix, commit, run it again.
+- **Versions and releases.** `scripts/check-version.sh [base]` (default `origin/main`), in
+  `check` on every pull request and in `ship.sh` before it pushes: plugin.json's `version` must be
+  `workbench/__init__.py`'s `__version__`, and a branch that changes `mod/` (its `*.test.*` files
+  aside) must raise it above the base's (`sort -V`), or users' copies never move. Then
+  `.github/workflows/release.yml` runs `scripts/release.sh` on every push to main, daily (a merge
+  armed with Actions' token starts no push workflow) and by hand: a version without its tag gets
+  one, `v<version>` with a trailing `.0` dropped (0.90.0 was `v0.90`), on the first commit of
+  main's first-parent history that carried it, and a GitHub release with GitHub's generated notes
+  (rewrite them with `gh release edit` when a release deserves more). A version already tagged
+  does nothing. It's the one workflow with `contents: write`, and it never runs on a pull request
+  (`tests/test_workflows.py`). `--dry-run` says what it would release.
 - **`scripts/github-settings.sh check|apply`** keeps the repository's settings in git (`check`
   names any drift, `apply` writes them; `gh` as admin): the ruleset; Actions may approve pull
   requests, the default token read only; auto-merge, merge commits, delete branch on merge, update
@@ -2869,7 +2882,8 @@ push: every change is a pull request that merges once `check` is green and it is
 - **`mod/` for users** → bump `mod/.claude-plugin/plugin.json`'s `version`, or a marketplace
   install keeps the old copy (*Installing*). **A release** → the same `version` in
   `workbench/__init__.py` (`wb --version`, task.json's `wb_version`, the ask server's
-  `serverInfo`) and plugin.json, then a `v<major>.<minor>` tag and a GitHub release. **`wb setup`'s links** → README's quickstart and
+  `serverInfo`) and plugin.json (`check-version.sh` holds them equal); `release.yml` tags and
+  releases it once merged (*Shipping to main*). **`wb setup`'s links** → README's quickstart and
   *Installing*.
 - **A model name** → never in code or the skill: models come from OpenCode's config, choices from
   the router and the weekly check.
