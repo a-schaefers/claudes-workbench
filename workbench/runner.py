@@ -300,8 +300,12 @@ def steer_prompt(notes: list[dict], interrupted: bool) -> str:
 
 def outside_spec(task: store.Task, files: str) -> list[str]:
     """Changed files the current spec never names, when it names any: the agent's drift shows
-    here first (seen 2026-11-16: a flow-field module nobody asked for). Matched by path or name."""
+    here first (seen 2026-11-16: a flow-field module nobody asked for). Matched by path or name;
+    a brace form names each (`src/replay_io.{h,c}`: flagged as unnamed on 2026-11-18)."""
     spec = current_task_prompt(task)
+    spec += "\n" + " ".join(a + part + b for a, parts, b in
+                             re.findall(r"([\w./-]*)\{([\w.-]+(?:,[\w.-]+)+)\}([\w./-]*)", spec)
+                             for part in parts.split(","))
     paths = [line[3:].split(" -> ")[-1].strip('"') for line in files.splitlines()]
     if not any(p in spec or Path(p).name in spec for p in paths):
         return []

@@ -5069,6 +5069,9 @@ class Drift(unittest.TestCase):
             files = ("?? src/parser.c\n?? tests/test_parser.c\n M Makefile\n"
                      "?? src/flow.c\n M src/main.c")
             self.assertEqual(runner.outside_spec(task, files), ["src/flow.c", "src/main.c"])
+            Path(d, "prompt.md").write_text("A new src/parse.{h,c}, and tests/test_parse.c.")
+            self.assertEqual(runner.outside_spec(task, "?? src/parse.h\n?? src/parse.c\n?? "
+                                                 "tests/test_parse.c\n M src/main.c"), ["src/main.c"])
             # a spec that names no file at all says nothing about scope
             Path(d, "prompt.md").write_text("Make the search faster.")
             self.assertEqual(runner.outside_spec(task, files), [])
