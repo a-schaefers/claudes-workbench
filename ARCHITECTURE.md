@@ -299,9 +299,11 @@ the agent first; that test result is dropped. With self-review on (the `self_rev
 *Self-tuning*: on by default, learned per model; `--self-review`/`--no-self-review`, task.json
 `self_review`, set it for one task), the first time the tests pass in a review round (status `self_reviewed`, the `[steps, reviews]` it
 ran at) the agent gets one more round, `runner.SELF_REVIEW`: Claude's own review checks (each
-rule has a test that fails without it, expected values worked out by hand, every error path
-handled and each error message tested for every input that can cause it, nothing extra), from
-what Claude's reviews kept catching on 2026-11-17. It costs local time only; Claude is woken
+rule has a test that fails when that rule alone breaks, a rejection's input valid in every
+other way; each test the task names checking what it says, exact output whole against a literal
+written by hand; expected values worked out by hand, every error path handled and each error
+message tested for every input that can cause it, nothing extra), from what Claude's reviews kept
+catching on 2026-11-17 and 2026-11-18. It costs local time only; Claude is woken
 after it, with its tests. On by default because a feedback round costs Claude a whole wake: on
 2026-11-18 a trivial handoff came in under Claude writing it only when the first change Claude
 saw was right. A model whose own reviews don't spare Claude's rounds scores worse for the time
