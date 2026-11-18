@@ -331,8 +331,10 @@ the pane) only for something the user should find later.
   (measured 2026-11-17: a trivial task cost 4.5 times as much handed off, mostly in review extras).
   - **Trivial**: reading the diff against the spec and the report's test result is the review. Run
     something only when a line leaves you in doubt.
-  - **Significant**: also check the tests catch bugs: break the code in a scratch copy a few ways,
-    in one script that applies each break and runs the tests, and see each one fail. A UI change:
+  - **Significant**: also check the tests catch bugs: break the code in a scratch copy two or
+    three ways, the bugs you would most expect (an off-by-one, a missed case from the spec), in
+    one script that applies each break and runs the tests, and see each one fail. More is not
+    safer, only dearer: twelve breaks cost more than the task's own review (2026-11-17). A UI change:
     run it from the worktree and look with your own browser tool.
   - Put the checks you do run in one Bash call (`wb status <name>` prints the worktree's path).
   Accept only what you would have written.
