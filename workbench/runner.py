@@ -1007,11 +1007,17 @@ SELF_REVIEW = (
     "you found and fixed, and for each rule the test that covers it.")
 
 
+# An agent whose change compared the wrong way round spent 40 minutes sure the compiler was
+# broken, compiling test programs in /tmp, until Claude pointed at its loop (2026-11-18). A test
+# it wrote this task can be the wrong half too, so it checks that one by hand first.
 def auto_fix_prompt(tests: dict, cmd: str) -> str:
     return (f"The acceptance tests fail. Command: `{cmd}` (exit {tests['exit']}). Output:\n\n"
-            f"```\n{tests['tail']}\n```\n\nFix the code so the tests pass. Do not weaken, skip or "
-            "delete tests to make them pass. Do not commit. Finish with a short summary of what "
-            "you changed and the test result.")
+            f"```\n{tests['tail']}\n```\n\nFix the code so the tests pass. When a failing check is "
+            "one you wrote for this task, first work its expected value out by hand from the task: "
+            "if the test was wrong, correct it (that isn't weakening it). The compiler, libraries "
+            "and system work; the bug is in this change. Do not weaken, skip or delete tests to "
+            "make them pass. Do not commit. Finish with a short summary of what you changed and "
+            "the test result.")
 
 
 def measure_speed(task: store.Task, since: float) -> None:
