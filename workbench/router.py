@@ -29,6 +29,7 @@ from __future__ import annotations
 
 import functools
 import statistics
+import types
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -281,6 +282,30 @@ def budgets(m: models.Model) -> dict:
     scale = max(1.0, think / THINK_DEFAULT_S)
     return {"think": think, "silence": int(SILENCE_DEFAULT_S * scale),
             "round": int(ROUND_DEFAULT_S * scale)}
+
+
+def thinking_stall(model_id: str, entry: dict) -> str:
+    """Why this model may sit silent until its think budget runs out on this machine, or "".
+
+    A reasoning model left thinking can spend its whole output cap (options.max_tokens) before
+    it acts; at this machine's measured write speed that can outlast the think budget. Seen
+    2026-11-18: a 64K entry, thinking, capped at 16K and partly in system RAM at 21 tok/s, went
+    silent for 14 minutes at a time until nudged and stopped. The same settings are harmless on a
+    card that writes fast, so it is measured here, not ruled out everywhere."""
+    opts = entry.get("options") or {}
+    cap, sp = opts.get("max_tokens"), speed(model_id)
+    if not (entry.get("reasoning") and cap and sp.get("write")) or \
+            str(opts.get("reasoningEffort", "")).lower() in ("none", "minimal"):
+        return ""
+    secs = cap / sp["write"]
+    m = types.SimpleNamespace(id=model_id, config=entry)
+    think = budgets(m)["think"]
+    if secs <= think:
+        return ""
+    return (f"{model_id} thinks before it acts and may spend its {cap}-token output cap doing it: "
+            f"at its ~{sp['write']:.0f} tok/s here that is {secs / 60:.0f} min, past its "
+            f"{think / 60:.0f}-min think budget, so it can sit silent until nudged and stopped. "
+            f"Set its options.reasoningEffort to \"none\" (or a lower max_tokens) in OpenCode's config")
 
 
 def speed_line(model_id: str) -> str:
