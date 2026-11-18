@@ -34,7 +34,7 @@ piece to the right model with the knowledge it needs, and reviews the result to 
 until it's right. Frontier compute goes where it counts, into planning, architecture and judgment;
 the bulk of the work, the reading and writing and test-running, happens on your own hardware.
 On bigger tasks, Claude spends roughly half the tokens it would writing the code itself. Small
-tasks come out about even, so Claude hands them over in batches. A bigger GPU or a stronger model
+tasks come out about even, so Claude hands them over in batches ([how we measured it](THESIS.md)). A bigger GPU or a stronger model
 saves more, and local models keep getting better.
 
 - **Claude architects the work.** It reads your codebase, decides the design, and writes a precise
