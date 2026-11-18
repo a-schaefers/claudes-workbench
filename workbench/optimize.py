@@ -3,6 +3,12 @@ never on its own: an automatic run could be cut short and alarm people (the user
 Everything else learns passively from real tasks (the router, tuning.py, speed.json); this is the
 part that has to load a model to know.
 
+It runs on its own only where the user expects a short wait and is told: at setup (`wb setup`)
+and when a Claude Code session opens (the mod), each time only when it is due (`due`: never
+measured, the GPU changed, or a model came since), never while a task holds the GPU; each run
+takes a minute or two (the user, 2026-11-18). Anything heavier (`--bench`) waits for the user to
+ask, through Claude.
+
 What it measures, for each Ollama model: the largest window that keeps the model and its context
 all in VRAM, by Ollama's own placement (/api/ps `size_vram` against `size`) after a load at each
 window tried. On 2026-11-18 a 64K window that put a tenth of a 27B model in system RAM wrote at
@@ -26,11 +32,11 @@ import sys
 import time
 from pathlib import Path
 
-from . import models, store
+from . import hardware, models, store
 
 HOLDER = "wb optimize"   # its name in gpu.json, which tells real work it may stop it
 STEP = 4096              # windows tried are multiples of this
-LOAD_GUESS = 45          # seconds a load takes when no task on the model has measured one
+LOAD_GUESS = 20          # seconds a load takes when nothing has measured one (a 27B: 10 s from cache)
 MAX_WINDOW = 131072      # never asked past this: a long context's cache could fill system RAM
 PKG_ROOT = Path(__file__).resolve().parent.parent
 
@@ -70,7 +76,30 @@ def loads(m: models.Model) -> int:
 
 
 def estimate(ms: list[models.Model]) -> float:
-    return sum(loads(m) * (load_secs(m) + 5) for m in ms)
+    took = state().get("secs_per_load")  # what the last run measured here
+    return sum(loads(m) * (took or load_secs(m) + 5) for m in ms)
+
+
+def fingerprint() -> list:
+    """What a fit depends on that can change under it: each GPU and its memory."""
+    return sorted([g.get("name"), g.get("vram")] for g in hardware.gpus(windows=False))
+
+
+def due(ms: list[models.Model] | None = None) -> str:
+    """Why a run is due, or "": never run, the GPU changed, a model came since, or the last run
+    was stopped before it finished."""
+    st = state()
+    ms = candidates() if ms is None else ms
+    if not ms:
+        return ""
+    if not st.get("done"):
+        return "never measured"
+    if st.get("hardware") is not None and st["hardware"] != fingerprint():
+        return "the GPU changed"
+    if st.get("stopped"):
+        return "the last run was stopped before it finished"
+    new = [m.id for m in ms if m.id not in (st.get("models") or {})]
+    return f"new model{'s' if len(new) > 1 else ''}: {', '.join(new)}" if new else ""
 
 
 def probe(m: models.Model, window: int) -> dict:
@@ -161,17 +190,24 @@ def apply(m: models.Model) -> str:
         entry["name"] = f"{entry['name']} ({fits // 1024}K)"
     provider = m.id.split("/", 1)[0]
     models.write_entry(provider, name, entry)
+    # measured already: it is the window that fit, so its arrival doesn't make a run due
+    _record(f"{provider}/{name}", {**row, "window": fits, "spill": 0, "tried": [], "ts": store.now()})
     return (f"registered {provider}/{name}: {m.id}'s settings at a {fits // 1024}K window, all on "
             f"the GPU here. The router weighs both by their records; wb model retire {m.id} when "
             "you'd rather it never runs")
 
 
-def start(bench: bool = False) -> list[str]:
-    """Detach the run (it outlives Claude's session) and say what it will take."""
+def start(bench: bool = False, if_due: bool = False) -> list[str]:
+    """Detach the run (it outlives Claude's session) and say what it will take. ``if_due``: only
+    when due() says why, and quietly ([]) when it isn't or the GPU is busy (the next session
+    tries again)."""
     st = state()
     if st.get("pid") and models._alive(st["pid"], st.get("start")):
-        return [f"wb optimize is already running (pid {st['pid']}): wb optimize report"]
+        return [] if if_due else [f"wb optimize is already running (pid {st['pid']}): wb optimize report"]
     ms = candidates()
+    why = due(ms) if if_due else ""
+    if if_due and (not why or models.holders()):
+        return []
     if not ms:
         raise RuntimeError("no Ollama model here to measure (wb models)")
     if models.holders():
@@ -180,13 +216,17 @@ def start(bench: bool = False) -> list[str]:
     for k in ("WB_TASK", "CLAUDE_CODE_SESSION_ID", "CLAUDE_PID"):
         env.pop(k, None)
     with open(store.home() / "optimize.log", "a") as log:
-        proc = subprocess.Popen([sys.executable, "-X", "utf8", "-m", "workbench.optimize",
-                                 *(["--bench"] if bench else [])], env=env, stdin=subprocess.DEVNULL,
-                                stdout=log, stderr=log, start_new_session=True)
+        argv = ["--bench"] * bench + ["--all"] * (not why)  # asked for: every model again
+        proc = subprocess.Popen([sys.executable, "-X", "utf8", "-m", "workbench.optimize", *argv],
+                                env=env, stdin=subprocess.DEVNULL, stdout=log, stderr=log,
+                                start_new_session=True)
     store.write_json(path(), {**st, "pid": proc.pid, "start": models._started(proc.pid),
                               "began": store.now(), "done": None, "stopped": None})
-    mins = estimate(ms) / 60
-    return [f"wb optimize: measuring {len(ms)} model(s), about {max(1, round(mins))} min, holding "
+    mins = max(1, round(estimate(ms) / 60))
+    if why:
+        return [f"measuring the GPU for {len(ms)} local model(s) ({why}): about {mins} min; a task "
+                "you start goes first"]
+    return [f"wb optimize: measuring {len(ms)} model(s), about {mins} min, holding "
             "the GPU alone (a task that wants it stops it; what's measured is kept)"
             + ("; then wb bench run replays the bench's cases on them" if bench else ""),
             "follow: wb optimize report   stop: wb optimize stop"]
@@ -224,22 +264,30 @@ def _on_term(*_):
 def main() -> None:
     signal.signal(signal.SIGTERM, _on_term)
     store.absolute_env()
-    why = None
+    why, began, n = None, time.monotonic(), 0
     try:
+        st = state()
+        every = "--all" in sys.argv or st.get("stopped") or st.get("hardware") != fingerprint()
         with models.GpuLease(None, HOLDER, say=print, wait=False):
             models.free_gpu()
             for m in candidates():
+                if not every and m.id in (st.get("models") or {}):
+                    continue  # due for a new model only: the others' fits still hold
                 try:
                     trained = models.ollama_show(m.root, m.name).get("context_length")
                 except Exception:
                     trained = None
                 print(f"{m.id}: measuring", flush=True)
-                _record(m.id, fit(m, trained))
+                row = fit(m, trained)
+                n += len(row["tried"])
+                _record(m.id, row)
     except (Stopped, RuntimeError) as e:
         why = str(e)
     finally:
         st = state()
-        store.write_json(path(), {**st, "pid": None, "done": store.now(), "stopped": why})
+        took = (time.monotonic() - began) / n if n else st.get("secs_per_load")
+        store.write_json(path(), {**st, "pid": None, "done": store.now(), "stopped": why,
+                                  "hardware": fingerprint(), "secs_per_load": took})
     if "--bench" in sys.argv and not why:
         from . import bench
         try:

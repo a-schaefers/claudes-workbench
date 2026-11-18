@@ -700,6 +700,35 @@ class Optimize(unittest.TestCase):
             with self.assertRaisesRegex(RuntimeError, "real work first"):
                 optimize.start()
 
+    def test_it_is_due_when_never_run_the_gpu_changes_or_a_model_comes(self):
+        # a run takes a minute or two, so it runs at setup and session start when due (the user,
+        # 2026-11-18), quietly otherwise
+        self.ollama(32768)
+        from workbench import optimize
+        gpu = [{"name": "Card A", "vram": 16e9}]
+        with mock.patch.object(optimize.hardware, "gpus", lambda windows=True: gpu):
+            self.assertEqual(optimize.due(), "never measured")
+            m = models.discover()["ollama/m"]
+            optimize._record(m.id, optimize.fit(m, 262144))
+            store.write_json(optimize.path(), {**optimize.state(), "done": 1, "stopped": None,
+                                               "hardware": optimize.fingerprint()})
+            self.assertEqual(optimize.due(), "")
+            with mock.patch.object(optimize.subprocess, "Popen") as popen:
+                self.assertEqual(optimize.start(if_due=True), [])            # nothing to do: quiet
+                popen.assert_not_called()
+            optimize.apply(m)                                    # its own entry: measured already
+            self.assertEqual(optimize.due(), "")
+            gpu[0] = {"name": "Card B", "vram": 24e9}
+            self.assertEqual(optimize.due(), "the GPU changed")
+            with mock.patch.object(models, "holders", lambda *a: {"1": {"task": "t"}}):
+                self.assertEqual(optimize.start(if_due=True), [])            # busy: next session
+            with mock.patch.object(optimize.subprocess, "Popen") as popen:
+                popen.return_value.pid = os.getpid()
+                out = optimize.start(if_due=True)
+            self.assertIn("measuring the GPU for 1 local model(s) (the GPU changed)", out[0])
+            self.assertIn("a task you start goes first", out[0])
+            self.assertNotIn("--all", popen.call_args[0][0])
+
     def test_real_work_stops_it_and_what_it_measured_stays(self):
         self.ollama(32768)
         m = models.discover()["ollama/m"]

@@ -898,6 +898,7 @@ test('an update is checked once a session is in use, and /workbench-update insta
   on('process.run', (_: any, e: any) => {
     runs.push(e.argv)
     limits[e.argv.slice(1).join(' ')] = e.init?.timeoutMs
+    if (e.argv[1] === 'optimize') return { value: { exitCode: 0, stdout: '', stderr: '' } }  // not due
     const said = e.argv[2] === '--check'
       ? (behind ? `update available: ${behind} new commit(s); /workbench-update (or wb update) installs it` : 'up to date')
       : behind ? 'updated marketplace 1111111..2222222 (3 commit(s))' : 'already up to date'
@@ -917,6 +918,8 @@ test('an update is checked once a session is in use, and /workbench-update insta
   expect(toasts.at(-1)).toContain('/workbench-update')
   await clock.advance(5000)
   expect(runs.filter(r => r[1] === 'update').length).toBe(1)     // once per load
+  expect(runs.filter(r => r[1] === 'optimize')).toEqual([['wb', 'optimize', 'start', '--if-due']])
+  expect(toasts.some(t => t.includes('measuring'))).toBe(false)  // not due: nothing said
 
   const out = await $.command.run({ command: 'workbench-update', args: '' })
   expect(runs.at(-1)).toEqual(['wb', 'update'])
