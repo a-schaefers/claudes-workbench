@@ -4748,6 +4748,23 @@ class Detector(unittest.TestCase):
         self.assertIsNone(d.feed(mk("read", 5)))
         self.assertIn("without changing", d.feed(mk("read", 6)))
 
+    def test_only_edits_to_the_tasks_files_count(self):
+        # sure the compiler was broken, an agent wrote test programs in /tmp for 20 minutes, each
+        # write resetting the count, while its own change still failed its test (2026-11-18)
+        with tempfile.TemporaryDirectory() as wt:
+            d = events.StuckDetector(no_edit=3, worktree=wt)
+            mk = lambda tool, i, path=None: {"kind": "tool", "tool": tool, "ok": True, "brief": "",  # noqa
+                                             "sig": f"{tool}:{i}", **({"path": path} if path else {})}
+            self.assertIsNone(d.feed(mk("write", 1, "/tmp/opencode/dbg/x.c")))
+            self.assertIsNone(d.feed(mk("write", 2, "/tmp/opencode/dbg/y.c")))
+            self.assertIn("without changing a file in the task", d.feed(mk("write", 3, f"{wt}/../z.c")))
+            self.assertIsNone(d.feed(mk("edit", 4, f"{wt}/src/a.c")))
+            self.assertIsNone(d.feed(mk("edit", 5, "src/b.c")))           # relative: the worktree's
+            self.assertEqual(d.since_edit, 0)
+        row = events.normalize({"type": "tool_use", "part": {"tool": "write", "state": {
+            "status": "completed", "input": {"filePath": "/a/" + "x" * 120}}}}, 1)
+        self.assertEqual(row["path"], "/a/" + "x" * 120)                 # whole, not the brief
+
 
     def test_events_of_the_wrong_shape_are_skipped_not_a_crash(self):
         # A plugin's console.log on OpenCode's stdout crashed the runner mid-round (the

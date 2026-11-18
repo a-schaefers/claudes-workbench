@@ -2,6 +2,7 @@
 and the detector that decides a run is going nowhere.
 """
 import json
+import os
 from collections import deque
 
 EDIT_TOOLS = {"edit", "write", "patch", "multiedit", "apply_patch"}
@@ -40,6 +41,9 @@ def normalize(raw: dict, round_no: int):
                "brief": _brief(tool, state.get("input")), "ok": state.get("status") != "error"}
         if state.get("status") == "error":
             row["error"] = str(state.get("error"))[:240]
+        inp = state.get("input") if isinstance(state.get("input"), dict) else {}
+        if tool in EDIT_TOOLS and (inp.get("filePath") or inp.get("path")):
+            row["path"] = str(inp.get("filePath") or inp.get("path"))  # whole: brief is cut at 90
         # The signature is what "the same call again" means to the stuck detector.
         row["sig"] = f"{tool}:{json.dumps(state.get('input'), sort_keys=True)[:400]}"
         return row
@@ -67,8 +71,9 @@ class StuckDetector:
     limits are the runner's (it owns the clock); this looks only at the stream of tool calls.
     """
 
-    def __init__(self, repeat=4, error_streak=6, no_edit=40):
+    def __init__(self, repeat=4, error_streak=6, no_edit=40, worktree=None):
         self.repeat, self.error_streak, self.no_edit = repeat, error_streak, no_edit
+        self.worktree = os.path.realpath(worktree) if worktree else None
         self.recent = deque(maxlen=repeat)
         self.errors = 0
         self.since_edit = 0
@@ -78,11 +83,21 @@ class StuckDetector:
             return None
         self.recent.append(row["sig"])
         self.errors = 0 if row["ok"] else self.errors + 1
-        self.since_edit = 0 if (row["tool"] in EDIT_TOOLS and row["ok"]) else self.since_edit + 1
+        changed = row["tool"] in EDIT_TOOLS and row["ok"] and self._ours(row.get("path"))
+        self.since_edit = 0 if changed else self.since_edit + 1
         if len(self.recent) == self.repeat and len(set(self.recent)) == 1:
             return f"the same call {self.repeat} times in a row: {row['tool']} {row['brief']}"
         if self.errors >= self.error_streak:
             return f"{self.errors} failing tool calls in a row (last: {row.get('error', '')[:120]})"
         if self.since_edit >= self.no_edit:
-            return f"{self.since_edit} tool calls without changing a file"
+            return f"{self.since_edit} tool calls without changing a file in the task"
         return None
+
+    def _ours(self, path) -> bool:
+        """Whether an edit was to the task's files. Scratch files elsewhere aren't progress: an
+        agent sure the compiler was broken wrote 20 minutes of test programs in /tmp, each write
+        resetting the count, while its own change still failed its test (2026-11-18)."""
+        if not (self.worktree and path):
+            return True
+        full = os.path.realpath(os.path.join(self.worktree, path))
+        return full == self.worktree or full.startswith(self.worktree + os.sep)

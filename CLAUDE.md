@@ -159,10 +159,10 @@ Linux there is no Landlock and watch.py falls back to timed waits.
    the worktree, through `lane.wrap`, with the config layer `rules/<task>/opencode.json`. Events
    go to `events.jsonl`; `status.json` is the live summary.
 3. Guards stop the agent (`stuck`): one call repeated 4 times, 6 tool errors in a row, 40 calls
-   without an edit, silence past `--silence-timeout`, a round past `--round-timeout`, more than
+   without a worktree edit, silence past `--silence-timeout`, a round past `--round-timeout`, more than
    `HANDOVER_MAX` handovers in a round. Past the think budget (`--think-timeout`, from the round's
    first output, paused while OpenCode waits on a background job) it gets a nudge; the round after
-   it that stalls again is stopped. The guards' clocks are monotonic. Limits stretch for a model
+   it that stalls again is stopped. Limits stretch for a model
    measured slow (`router.budgets`, written into task.json at start). `wb steer` queues a note;
    `--now` interrupts. Notes a runner never delivered: `wb resume` carries them, feedback and
    next drop them and say so.

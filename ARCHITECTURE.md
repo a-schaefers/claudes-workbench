@@ -268,7 +268,7 @@ themselves, so the runner stops the agent:
 |---|---|---|
 | the same tool call (same input) in a row | 4 | `events.StuckDetector` |
 | failing tool calls in a row | 6 | |
-| tool calls since the last successful edit (an edit through the shell counts) | 40 | |
+| tool calls since the last successful edit to the task's files (an edit through the shell counts; a file written outside the worktree doesn't: an agent sure the compiler was broken wrote 20 minutes of test programs in /tmp, each resetting the count, 2026-11-18) | 40 | |
 | no output at all (not counted while it waits on Claude; while a background job runs, the test timeout if longer) | 15 min | `--silence-timeout` |
 | one round running too long (not counting waits on Claude) | 40 min | `--round-timeout` |
 | more than `HANDOVER_MAX` (5) mid-round handovers in one review round | | `runner.drive` |
