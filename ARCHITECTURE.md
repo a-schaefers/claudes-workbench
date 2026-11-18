@@ -1646,7 +1646,12 @@ It is refused when the task isn't accepted or is a trial, the repo or the step's
 the step had no acceptance command, there are neither hidden files nor `--check`, or the hidden
 checks already pass on the base (a replay that changed nothing would pass): that is run once, in a
 scratch clone of the bundle, outside the lane (the user's own accepted code), for at most
-`BASE_CHECK_SECS` = 120 s; past that, `base_check` says not checked. A case is worth keeping when
+`BASE_CHECK_SECS` = 120 s; past that, `base_check` says not checked. It is refused too when the
+checks fail on the step's own commit run as a replay's grade is: a scratch checkout under
+`bench/` (in /tmp the git shim would allow writes), in the original task's lane and environment
+(`runner.run_in_lane` on `_At`, the task with that worktree), up to the case's test timeout. A
+suite that commits or writes outside the lane can never pass there: `clean-fixtures` (workbench's
+own suite) failed every replay before this check (2026-11-17). A case is worth keeping when
 the spec pinned what the hidden tests call: tests of names the spec left open fail a replay that
 chose others.
 
@@ -2574,7 +2579,7 @@ delivered as taken (`_stale_notes`, *Notes*).
 | `wb skill hand\|take <task> <n…>` | | Change a task's skills from its next run. |
 | `wb lessons` / `wb lessons close <id…> -m "…"` | `--task`, `--all` | Open lessons, recurring first (12 unless `--all`); close with why. |
 | `wb notes` / `add "…"` / `drop N…` | | The user's standing delegation preferences (`notes.md`, `- ` lines, at most 20 of 300 characters). |
-| `wb bench add <task>` | `--step N` (the last), `--hidden PATH…` (the test files the step changed), `--check CMD`, `--name CASE` (the task's; `<task>-sN` for a step of several) | Makes a case of one step of an accepted task (*Bench*): the base as a bundle, the spec, the acceptance command, the hidden checks, the grants. Refused: not accepted or a trial, the repo or commit gone, no acceptance command, no hidden checks, or ones that pass on the base already. |
+| `wb bench add <task>` | `--step N` (the last), `--hidden PATH…` (the test files the step changed), `--check CMD`, `--name CASE` (the task's; `<task>-sN` for a step of several) | Makes a case of one step of an accepted task (*Bench*): the base as a bundle, the spec, the acceptance command, the hidden checks, the grants. Refused: not accepted or a trial, the repo or commit gone, no acceptance command, no hidden checks, ones that pass on the base already, or ones its own commit fails in the agent's lane (no replay could pass them). |
 | `wb bench list` / `wb bench report` / `wb bench stop` | `report`: `--run ID`, `--label TEXT` | The cases; pass rates, rounds, auto-fixes, minutes and local tokens per label and model, then each case against the original's model and review rounds (with the running run's progress); stop the driver, which closes its replay. |
 | `wb bench run` | `--model ID…` (every model that can run and takes the case's size), `--case NAME…` (every case), `--skill NAME…`, `--label TEXT`, `--repeat N` (1) | Writes the run's plan and detaches its driver, then returns: one replay at a time, after any real task, preempted by one; refuses while another run runs. Skips what an earlier run with the same label already replayed. |
 | `wb stats` / `wb tune` / `wb trial <task…>` | | Results by model and size (judged rows: it says how many spec-gap discards and trials it left out), with a `claude` column (the average input-equivalent tokens a task cost Claude) once a row records one; the tuned settings; mark closed tasks as trials: their results rows, and their open lessons are dropped; an open task is refused (it has no row yet, so it was marked as nothing while its lessons went). |

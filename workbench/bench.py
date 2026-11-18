@@ -145,6 +145,18 @@ def overlay(case: dict, worktree: Path) -> None:
         shutil.copyfile(case_dir(case["name"]) / "hidden" / rel, worktree / rel)
 
 
+class _At(store.Task):
+    """A task whose worktree is somewhere else: the original's lane and environment around a
+    scratch checkout of its reference (add's check)."""
+    def __init__(self, name: str, worktree: Path):
+        super().__init__(name)
+        self._worktree = worktree
+
+    @property
+    def worktree(self) -> Path:
+        return self._worktree
+
+
 def add(name: str, step: int | None = None, hidden: list[str] | None = None,
         check: str | None = None, case_name: str | None = None) -> list[str]:
     """Make a case of one step of an accepted task; the report's lines. RuntimeError refuses."""
@@ -226,6 +238,20 @@ def add(name: str, step: int | None = None, hidden: list[str] | None = None,
             raise RuntimeError("the hidden checks already pass on the base: a replay that changed "
                                "nothing would pass. Name others (--hidden, --check)")
         case["base_check"] = "not checked (timed out)" if "timeout" in codes else "fails"
+        # and pass on the step's own commit, run as a replay's grade is (the lane, read-only
+        # git): workbench's suite commits, so clean-fixtures failed every replay (2026-11-17)
+        home().mkdir(parents=True, exist_ok=True)  # not in /tmp, where the git shim allows writes
+        with tempfile.TemporaryDirectory(prefix=".check-", dir=home()) as scratch:
+            work = Path(scratch) / "repo"
+            gitops.git(scratch, "clone", "-q", "--shared", "--no-checkout", str(repo), str(work))
+            gitops.git(work, "checkout", "-q", "--detach", ref)
+            at = _At(name, work)
+            for c in (case["test_cmd"], check):
+                code = c and runner.run_in_lane(at, c, case["test_timeout"])[0]
+                if c and code != 0:
+                    raise RuntimeError(
+                        f"`{c}` fails on step {step}'s own commit (exit {code}) when run as a "
+                        "replay is graded, in the agent's lane: no replay could pass it")
         store.write_json(tmp / "case.json", case)
         os.replace(tmp, d)
     finally:

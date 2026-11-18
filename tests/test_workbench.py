@@ -3366,13 +3366,16 @@ class Routing(Base):
 class Bench(Base):
     """wb bench: accepted tasks replayed and graded by the tests they were accepted with."""
 
-    def accepted(self, name: str, test: str = "sh tests/check.sh") -> store.Task:
-        """An accepted task whose step added tests/check.sh (written here, as the agent's)."""
+    def accepted(self, name: str, test: str = "sh tests/check.sh", notes: bool = False) -> store.Task:
+        """An accepted task whose step added tests/check.sh (written here, as the agent's), and
+        notes.txt with `notes`: one more thing the fake's replay never writes."""
         self.start(name, "ok", "--test", test)
         wait_phase(name, {"review"})
         wt = store.Task(name).worktree
         (wt / "tests").mkdir()
         (wt / "tests" / "check.sh").write_text("grep -qx 42 answer.txt\n")
+        if notes:
+            (wt / "notes.txt").write_text("the original's\n")
         run_wb("accept", name, "-m", "feat: the answer")
         return store.Task(name)
 
@@ -3409,6 +3412,11 @@ class Bench(Base):
         self.assertIn("t-open", bench.add("t-open", check="true")[0])    # the acceptance fails there
         with self.assertRaisesRegex(RuntimeError, "a path inside the repo"):
             bench.add("t-open", hidden=["../x"], case_name="t-open-2")
+        # a check its own commit fails can't grade a replay: clean-fixtures' suite needed git
+        # writes, which the lane's git refuses, and every replay failed (2026-11-17)
+        with self.assertRaisesRegex(RuntimeError, "fails on step 1's own commit .* no replay could pass"):
+            bench.add("t-open", check="test -f never.txt", case_name="t-open-3")
+        self.assertNotIn("t-open-3", bench.cases())
         self.start("t-none", "ok")
         wait_phase("t-none", {"review"})
         run_wb("accept", "t-none", "-m", "feat: x")
@@ -3441,7 +3449,7 @@ class Bench(Base):
         from workbench import bench
         self.accepted("t-src")
         bench.add("t-src")
-        self.accepted("t-plain", test=TEST_CMD)
+        self.accepted("t-plain", test=TEST_CMD, notes=True)
         bench.add("t-plain", hidden=[], check="test -f notes.txt", case_name="t-strict")
         os.environ["FAKE_SCENARIO"] = "ok"
         good = bench.replay(bench.cases()["t-src"], "ollama/mimo-v2.6:9b-q8_0", 1, "r1", "", [])
