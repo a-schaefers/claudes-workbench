@@ -209,6 +209,12 @@ small, so here is where each one sets it:
   32768`). Load it before registering it, so LM Studio can say what it gave it.
 - vLLM: `--max-model-len`.
 
+Bigger is better, as long as it fits on the GPU. A window too big for the card pushes part of the
+model into system memory, and it runs about half as fast. With Ollama, ask Claude to optimize your
+setup: it measures the largest window that stays on the GPU. On another server, raise the window
+until part of the model lands on the CPU, then step back: llama.cpp's log says how many layers it
+put on the GPU, LM Studio shows its GPU offload, and vLLM won't start when the window doesn't fit.
+
 **The agent says it can't call tools, or its tool calls come out as plain text.** The server has to
 turn the model's tool calls into the API's form. vLLM does that only with `--enable-auto-tool-choice
 --tool-call-parser <the model's parser>`. llama.cpp uses the model's chat template, which a few

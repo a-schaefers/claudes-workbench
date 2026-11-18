@@ -852,6 +852,8 @@ class Budgets(Base):
         self.assertEqual(router.thinking_stall(m.id, {**entry, "options": {
             "max_tokens": 16384, "reasoningEffort": "none"}}), "")      # thinking off: fine
         self.assertEqual(router.thinking_stall(m.id, {**entry, "reasoning": False}), "")
+        server = {"reasoning": True, "limit": {"context": 32768, "output": 16384}}  # not Ollama
+        self.assertIn("16384-token output cap", router.thinking_stall(m.id, server))
 
 
 if __name__ == "__main__":
