@@ -1,7 +1,7 @@
 {
   "id": "/",
-  "name": "Claude, away",
-  "short_name": "Claude",
+  "name": "Claude's Workbench",
+  "short_name": "Workbench",
   "description": "A second lane to the Claude Code session on your computer.",
   "start_url": "/",
   "scope": "/",
