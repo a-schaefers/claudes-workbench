@@ -1115,6 +1115,19 @@ class Context(Base):
         self.assertIn("reached 76% of its window before it changed a file", notes[0]["text"])
         self.assertIn("Name fewer files to read", notes[0]["text"])
 
+    def test_a_step_that_fills_up_reading_every_round_tells_claude_once(self):
+        # every round of one step said it again, each a wake over Claude's context (2026-11-17)
+        self.start("t-c13", "ok")
+        wait_phase("t-c13", {"review", "stuck", "failed"}, timeout=60)
+        t = store.Task("t-c13")
+        for n in (2, 3):
+            runner._reading_full(t, n, 21000, 32768)
+        rows = [r for r in store.read_jsonl(store.home() / "notify.jsonl")[0]
+                if r["task"] == "t-c13" and "Name fewer files" in r["text"]]
+        self.assertEqual(len(rows), 1)
+        evs = store.read_jsonl(t.dir / "events.jsonl")[0]
+        self.assertEqual(sum(e.get("kind") == "reading_full" for e in evs), 2)
+
     def test_a_session_whose_reading_leaves_a_successor_no_room_carries_on(self):
         self.start("t-c10", "floor", "--test", TEST_CMD)
         st = wait_phase("t-c10", {"review", "stuck", "failed"}, timeout=60)
