@@ -267,6 +267,13 @@ class Lifecycle(Base):
         self.assertIn("big.txt", big)
         self.assertNotIn("+x", big)
 
+    def test_periodic_check_ins_are_off_unless_asked_for(self):
+        # each wakes Claude over its whole context: 500K of one task's 1.2M (2026-11-17)
+        self.start("t-quiet", "ok", "--size", "significant")
+        self.assertEqual(store.Task("t-quiet").spec["checkin"], 0)
+        self.start("t-loud", "ok", "--size", "significant", "--checkin", "15", "--queue")
+        self.assertEqual(store.Task("t-loud").spec["checkin"], 15)
+
     def test_auto_fix_budget_exhausted_wakes_claude_with_fail(self):
         self.start("t-nofix", "fix", "--test", TEST_CMD, "--auto-fix", "0")
         st = wait_phase("t-nofix", {"review"})
