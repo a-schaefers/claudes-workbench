@@ -32,7 +32,7 @@ import zlib
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
-from . import store
+from . import store, webpush
 from .watch import Watcher
 
 PORT = 1337
@@ -45,12 +45,14 @@ PING_EVERY = 15         # seconds between keep-alive comments on a stream
 TIMEOUT = 30            # seconds a connection may stall (more than PING_EVERY: streams write by then)
 UNACKED_MS = 45_000     # a stream whose writes go unacknowledged this long is dead (Linux)
 RELOAD_EVERY = 10       # seconds between looks at the server's own code
+PUSH_DELAY = 10         # seconds news waits for an open page to show it before a push goes
+PUSH_WINDOW = 900       # only news this recent is pushed, never a backlog
 # macOS's App Store and standalone Tailscale apps keep the CLI in the bundle, off PATH
 TAILSCALE_APP = "/Applications/Tailscale.app/Contents/MacOS/Tailscale"
 STATIC = Path(__file__).parent / "chat_static"
 TYPES = {".html": "text/html; charset=utf-8", ".js": "text/javascript; charset=utf-8",
          ".css": "text/css; charset=utf-8", ".svg": "image/svg+xml",
-         ".webmanifest": "application/manifest+json"}
+         ".webmanifest": "application/manifest+json", ".png": "image/png"}
 _send_lock = threading.Lock()
 
 
@@ -141,7 +143,72 @@ def pending() -> list[dict]:
 
 def snapshot() -> dict:
     return {"messages": thread(), "asks": asks(), "listener": listener(), "prefs": prefs(),
+            "push": {"key": push_key(), "test": (store.read_json(chat_dir() / "push-test.json", None)
+                                                 or {}).get("ts")},
             "build": build(), "now": store.now()}
+
+
+# ---- notifications: web push with no payload (webpush.py) ----
+# The page reports what it showed while visible (/api/seen); news no page showed within
+# PUSH_DELAY gets one push to every subscribed device, whose service worker then fetches the state
+# and shows the newest open ask, else Claude's latest message. seen.jsonl: {id, ts, by: page|push}.
+
+_keys: dict[str, str] = {}
+
+
+def push_key() -> str:
+    """This machine's VAPID public key (the applicationServerKey)."""
+    path = str(token_path())
+    if path not in _keys:
+        _keys[path] = webpush.public_key(webpush.private_key(token_path()))
+    return _keys[path]
+
+
+def _seen() -> set:
+    return {r.get("id") for r in store.read_jsonl(chat_dir() / "seen.jsonl")[0]}
+
+
+def mark_seen(ids, by: str) -> None:
+    done = _seen()
+    for i in dict.fromkeys(ids):
+        if i not in done:
+            store.append_jsonl(chat_dir() / "seen.jsonl", {"id": i, "ts": store.now(), "by": by})
+
+
+def news(now: float | None = None) -> list[str]:
+    """Ids of Claude's messages and open asks old enough to push and recent enough to matter,
+    not yet shown or pushed."""
+    now = now or store.now()
+    done = _seen()
+    items = [(m["id"], m["ts"]) for m in thread() if m.get("from") == "claude"]
+    items += [(a["id"], a["ts"]) for a in asks() if a["answer"] is None]
+    return [i for i, ts in items if now - PUSH_WINDOW < ts <= now - PUSH_DELAY and i not in done]
+
+
+class Pusher:
+    """Sends the pushes: woken by the hub, and every PUSH_DELAY/2 so news ripens on time."""
+
+    def __init__(self, hub: "Hub", send=None):
+        self.hub, self.send = hub, send or (lambda: webpush.push_all(webpush.private_key(token_path())))
+
+    def tick(self, now: float | None = None) -> list[str]:
+        due = news(now)
+        if due and webpush.subscriptions():
+            self.send()
+            mark_seen(due, "push")
+            return due
+        return []
+
+    def run(self) -> None:
+        seen = -1
+        while True:
+            with self.hub.cond:
+                self.hub.cond.wait_for(lambda: self.hub.version != seen, timeout=PUSH_DELAY / 2)
+                seen = self.hub.version
+            try:
+                self.tick()
+            except Exception as e:  # a push service down must not end the pushing
+                print(f"web chat: a push failed ({e!r})", file=sys.stderr, flush=True)
 
 
 def build() -> str:
@@ -486,7 +553,7 @@ class Handler(BaseHTTPRequestHandler):
     def do_POST(self):
         if not self._allowed():
             return
-        if self.path not in ("/api/send", "/api/answer", "/api/prefs"):
+        if self.path not in ("/api/send", "/api/answer", "/api/prefs", "/api/seen", "/api/push"):
             return self._json(404, {"error": "not found"})
         if not self._authed():
             return
@@ -519,6 +586,24 @@ class Handler(BaseHTTPRequestHandler):
             if cur is None:
                 return self._json(404, {"error": "no such prompt"})
             return self._json(200, {"ask": cur, "state": snapshot()})
+        if self.path == "/api/seen":  # what the page showed while visible: no push for it
+            ids = body.get("ids")
+            if not (isinstance(ids, list) and len(ids) <= 200
+                    and all(isinstance(x, str) and 0 < len(x) <= 64 for x in ids)):
+                return self._json(400, {"error": "seen is {ids: [up to 200 ids]}"})
+            mark_seen(ids, "page")
+            return self._json(200, {})
+        if self.path == "/api/push":  # this device's notifications: on, off, or a test
+            if body.get("test") is True:
+                store.write_json(chat_dir() / "push-test.json", {"ts": store.now()})
+                sent = webpush.push_all(webpush.private_key(token_path()))
+                return self._json(200, {"sent": len(sent), "ok": sum(1 for s in sent.values() if 200 <= s < 300)})
+            endpoint, on = body.get("endpoint"), body.get("on")
+            if not webpush.accepted(endpoint) or not isinstance(on, bool):
+                return self._json(400, {"error": "push is {endpoint: a push service's https URL, on: true|false}"})
+            (webpush.subscribe(endpoint, self.headers.get("User-Agent") or "") if on
+             else webpush.unsubscribe(endpoint))
+            return self._json(200, {"on": on})
         if self.path == "/api/prefs":  # the page's settings
             if set(body) - {"away"} or body.get("away") not in AWAY:
                 return self._json(400, {"error": "prefs are {away: ask|allow}"})
@@ -628,6 +713,7 @@ def serve(port: int, binds: list[str] | None, hosts: list[str] | None = None, sa
         say("the web chat's code changed: restarting with it")
         os.execv(sys.executable, [sys.executable, *sys.orig_argv[1:]])
     threading.Thread(target=watch_code, args=(restart,), daemon=True).start()
+    threading.Thread(target=Pusher(servers[0].RequestHandlerClass.hub).run, daemon=True).start()
     servers[0].serve_forever()
 
 

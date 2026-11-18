@@ -54,8 +54,8 @@ anyone else's wait for the owner (ARCHITECTURE.md, *Shipping to main*).
 - The docs match the change (*Keeping the docs true*).
 - `python3 -m unittest` (`tests/test_docs.py` included), and `claude plugin validate mod &&
   claude plugin test mod`.
-- A change to the web chat (`chat.py`, `chat_static/`): the browser test too (sends, receipts, an
-  outage, a reload; WebKit as an iPhone, Chromium as a Pixel). Playwright isn't a dependency.
+- A change to the web chat (`chat.py`, `chat_static/`): the browser test too (WebKit as an
+  iPhone, Chromium as a Pixel). Playwright isn't a dependency.
 - A change to how OpenCode is invoked or read (the runner's argv, the event or export fields):
   update `tests/fake_opencode.py` in the same commit, and do one real run: a scratch repo from
   `wb init` with a committed CLAUDE.md, `wb start <t> --trial --size trivial --spec <f> --repo
@@ -120,7 +120,8 @@ dependencies. No packaging: it runs from the clone.
 - `transcript.py`: `wb watch` (the session export merged with the task's events; `--json` feeds
   the mod's pane). `transcript.export` is also the runner's view of the session.
 - `watch.py`: waiting without polling: inotify (ctypes) and pidfd, with a stat fallback.
-- `chat.py` + `chat_static/`: the web chat (stdlib HTTP, a token and a Host check).
+- `chat.py` + `chat_static/`: the web chat (stdlib HTTP, a token and a Host check); `webpush.py`,
+  its notifications.
 - `images.py`: `wb image`, local image engines from `images.json`; holds the GPU.
 - `optimize.py`: `wb optimize` (when due, or asked): each Ollama model's largest window all on the GPU.
 - `agent/HANDBOOK.md`: Claude's working habits for the agent. Every agent prompt carries it, so
@@ -189,7 +190,7 @@ Plain files under `$WB_HOME` (`~/.local/state/workbench`); the full tree and eve
 ARCHITECTURE.md (*Files and formats*):
 ```
 notify.jsonl results.jsonl lessons.jsonl notes.md tuning.json speed.json gpu.{lock,json,admit,load}
-scout.json update.json watch.json optimize.json imports/ images/ chat/{messages,receipts,asks}.jsonl chat/{listener,prefs}.json
+scout.json update.json watch.json optimize.json imports/ images/ chat/{messages,receipts,asks,seen}.jsonl chat/{listener,prefs,push}.json
 bench/{cases/<case>,runs/<run>}/ bench/runs.jsonl bench/driver.json
 rules/<task>/  opencode.json HANDBOOK.md CLAUDE.md bin/git grants.json gitdir.json (no lane)
 locks/<task>.{runner,cmd,status,events,steer,grants}.lock   (store.task_lock: no lane reads them)
