@@ -54,8 +54,6 @@ anyone else's wait for the owner (ARCHITECTURE.md, *Shipping to main*).
 - The docs match the change (*Keeping the docs true*).
 - `python3 -m unittest` (`tests/test_docs.py` included), and `claude plugin validate mod &&
   claude plugin test mod`.
-- A change to anything that ships (not tests, CI, scripts, docs) raises the version in
-  plugin.json and `__init__.py` together, a patch at least (`check-version.sh`).
 - A change to the web chat (`chat.py`, `chat_static/`): the browser test too (sends, receipts, an
   outage, a reload; WebKit as an iPhone, Chromium as a Pixel). Playwright isn't a dependency.
 - A change to how OpenCode is invoked or read (the runner's argv, the event or export fields):
@@ -126,8 +124,8 @@ dependencies. No packaging: it runs from the clone.
   keep it short: each token costs prefill time.
 - `skill/workbench/SKILL.md`: the `/workbench` procedure (`~/.claude/skills/workbench` links here; `wb setup` makes the link).
 - `mod/`: the Claude Code plugin (`hooks/register.tsx`, `hooks/apprentice.ts` the pane's
-  character, `hooks/register.test.tsx`, `types/index.d.ts`; `.claude-plugin/plugin.json` has its
-  own version). The repo root's `.claude-plugin/marketplace.json` makes the repo its marketplace.
+  character, `hooks/register.test.tsx`, `types/index.d.ts`; `.claude-plugin/plugin.json` has no
+  version: installs track main's commits). The repo root's `.claude-plugin/marketplace.json` makes the repo its marketplace.
 - `bin/wb`, `bin/wb-ask-mcp`: launchers that find the package from their own real path.
 - `tests/`: `test_workbench.py` (end to end, one class per feature), `test_gpu.py`,
   `test_portable.py`, `test_sizing.py`, `test_docs.py` (the docs cover the code),
@@ -136,10 +134,9 @@ dependencies. No packaging: it runs from the clone.
 - `.github/`: CI (`workflows/check.yml`, the required check, on each push and pull request;
   Python 3.11, the floor; OpenCode `OPENCODE_VERSION`; `nightly.yml` on the newest Claude Code,
   plus macOS; `opencode.yml` on the newest OpenCode; README badges), `owner-merge.yml` (approves
-  the owner's pull requests only), `release.yml`, `rulesets/main.json`, dependabot for the pins.
+  the owner's pull requests only), `rulesets/main.json`, dependabot for the actions' pins.
 - `scripts/`: `ship.sh` (the road to main), `github-settings.sh check|apply` (the repo's settings),
-  `install-opencode.sh` (CI's OpenCode, from its release, hash-checked), `check-version.sh` (a
-  shipping change raises the version), `release.sh` (`release.yml`: tags each new version).
+  `install-opencode.sh` (CI's OpenCode, from its release, hash-checked).
 - `systemd/wb-chat.service`: keeps the web chat up. `docs/`: the README's images (a replaced image
   gets a new file name, for GitHub's cache).
 

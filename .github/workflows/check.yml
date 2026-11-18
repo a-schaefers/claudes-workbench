@@ -38,7 +38,6 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
-          fetch-depth: 0  # the version check diffs the branch against its base
       - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
           node-version: 24
@@ -53,10 +52,6 @@ jobs:
       - run: |
           git config --global user.name "workbench CI"
           git config --global user.email "ci@invalid"
-      # A change to mod/ must raise the version, or users' marketplace copies never move.
-      - run: scripts/check-version.sh "origin/${BASE:-main}"
-        env:
-          BASE: ${{ github.base_ref }}
       - run: scripts/install-opencode.sh "$OPENCODE_VERSION" "$OPENCODE_SHA256" >> "$GITHUB_PATH"
       - name: Landlock
         run: |

@@ -2655,10 +2655,13 @@ developer's. Upgrading is `wb update` (or `/workbench-update`, which reloads the
 `claude plugin marketplace update workbench` pulls the clone (the links follow it), `claude plugin
 update workbench@workbench` refreshes the mod. The mod runs `wb update --check --if-due` once per
 session, so a new commit is noticed within a week.
-The mod's copy moves only when `mod/.claude-plugin/plugin.json`'s `version` does, while `wb`
-moves with every pull; so the product has one version, and every change to what ships raises it
-(`scripts/check-version.sh` holds every pull request to that: *Shipping to main*). There is nothing to publish: main is the marketplace, so a merge ships. A third-party
-marketplace doesn't auto-update unless the user turns that on (`/plugin` → Marketplaces).
+`mod/.claude-plugin/plugin.json` has no `version`, on purpose: Claude Code then versions the plugin
+by commit (the commit SHA of the installed directory), so a fresh install gets main as it is and
+every merge to main is an update. A `version` there would hold every install on its cached copy
+until someone changed the string (2026-11-18: that took a bump in every pull request, which
+doesn't scale to outside contributors). `claude plugin validate` warns that it's missing; that's
+expected. There is nothing to publish: main is the marketplace. A third-party marketplace doesn't
+auto-update unless the user turns that on (`/plugin` → Marketplaces).
 
 **Developing**: a clone, with the links pointing into it and the clone itself as the marketplace,
 so the plugin, `wb` and the skill all read the working tree (the README's install until
@@ -2728,9 +2731,9 @@ main (*Shipping to main*).
 - `tests/test_sizing.py`: the slice guess and its correction from real steps.
 - `tests/test_workflows.py`: the merge gate, in plain text (no YAML library): every action pinned
   to a commit with its version, every workflow with its own permissions, `check` never
-  path-filtered and required by the ruleset from GitHub Actions, the ruleset with no bypass,
-  `check` running the version rule, `release.yml` writing only from main, and `owner-merge.yml`
-  approving only the owner's pull requests without running their code.
+  path-filtered and required by the ruleset from GitHub Actions, the ruleset with no bypass, the
+  plugin with no `version` (so installs track main), and `owner-merge.yml` approving only the
+  owner's pull requests without running their code.
 - `tests/test_docs.py`: the docs cover the code: every `wb` command and flag (from `cli.main`'s
   parser) in *Every `wb` command*, every module in CLAUDE.md's layout, every `WB_*` variable the
   code or the mod reads in CLAUDE.md, CLAUDE.md under 25,000 characters.
@@ -2841,11 +2844,8 @@ push: every change is a pull request that merges once `check` is green and it is
 
 - **The ruleset** (`.github/rulesets/main.json`, on the default branch): no deletion, no force
   push, a pull request with one approval (stale approvals dismissed on push), and `check` green
-  from GitHub Actions (integration 15368, so a status posted by anyone else doesn't count) on a
-  branch up to date with main (`strict_required_status_checks_policy`, 2026-11-18: two pull
-  requests raising the version to the same number each passed against the main they started
-  from; the rerun on the newer main is what fails the second). No bypass actor: the owner and
-  every agent get the same rule.
+  from GitHub Actions (integration 15368, so a status posted by anyone else doesn't count). No
+  bypass actor: the owner and every agent get the same rule.
 - **Auto-merge for the owner only.** `.github/workflows/owner-merge.yml` (`pull_request_target`)
   approves a pull request whose author and event sender are both user id 26800291 (a-schaefers;
   ids, since a login can be renamed and taken), from this repository, not a draft, at the head it
@@ -2864,27 +2864,7 @@ push: every change is a pull request that merges once `check` is green and it is
   as you with `--match-head-commit`, and waits for the merge or names the failing check. It
   refuses to ship from main and acts only on this repository's own pull request at the commit it
   pushed. `--title`, `--body-file`, `--squash`, `--no-wait`, `--draft`. A red check leaves
-  auto-merge armed: fix, commit, run it again. Auto-merge never updates a branch that fell
-  behind, so while it waits and main moves, it merges main into the pull request (`gh pr
-  update-branch`, as the owner, so `owner-merge.yml` approves the new head) and the check runs
-  again; a check that then fails says to `git pull --ff-only` the branch first (a version main
-  took meanwhile: raise it), and a merge that conflicts says to merge `origin/main` locally. It
-  never force-pushes, so it never says to rebase a pushed branch.
-- **Versions and releases.** `scripts/check-version.sh [base]` (default `origin/main`), in
-  `check` on every pull request and in `ship.sh` before it pushes: plugin.json's `version` must be
-  `workbench/__init__.py`'s `__version__`, and a branch that changes what ships must raise it
-  above the base's (`sort -V`; a patch is enough). What ships is everything but `tests/`, the
-  mod's `*.test.*` files, `.github/`, `scripts/`, `docs/`, README.md, ARCHITECTURE.md, CLAUDE.md,
-  LICENSE and `.gitignore`: the code, the mod, the handbook and the skill are one product with one
-  number, so a pane, a `wb` and an agent prompt that differ never claim the same version. Then
-  `.github/workflows/release.yml` runs `scripts/release.sh` on every push to main, daily (a merge
-  armed with Actions' token starts no push workflow) and by hand: a version without its tag gets
-  one, `v<version>` with a trailing `.0` dropped (0.90.0 was `v0.90`), on the first commit of
-  main's first-parent history that carried it (or on HEAD when that commit's workflows differ
-  from HEAD's: the workflow token may not create a ref there, a 403), and a GitHub release with
-  GitHub's generated notes (rewrite them with `gh release edit` when a release deserves more).
-  A version already tagged does nothing. It's the one workflow with `contents: write`, and it
-  never runs on a pull request (`tests/test_workflows.py`). `--dry-run` says what it would release.
+  auto-merge armed: fix, commit, run it again.
 - **`scripts/github-settings.sh check|apply`** keeps the repository's settings in git (`check`
   names any drift, `apply` writes them; `gh` as admin): the ruleset; Actions may approve pull
   requests, the default token read only; auto-merge, merge commits, delete branch on merge, update
@@ -2960,11 +2940,11 @@ push: every change is a pull request that merges once `check` is green and it is
   and the `macos` job's `python-version`, *The tests*.
 - **The merge gate** (`owner-merge.yml`, the ruleset, `check.yml`'s job name) →
   `tests/test_workflows.py`, `scripts/github-settings.sh apply`, *Shipping to main*.
-- **Anything that ships** (all but the tests, CI, `scripts/` and the docs) → raise the version
-  (a marketplace install keeps its old copy of `mod/` until it moves: *Installing*), the same in
-  `workbench/__init__.py` (`wb --version`, task.json's `wb_version`, the ask server's
-  `serverInfo`) and plugin.json (`check-version.sh` holds both); `release.yml` tags and
-  releases it once merged (*Shipping to main*). **`wb setup`'s links** → README's quickstart and
+- **`mod/` for users** → nothing: plugin.json has no `version`, so every merge reaches them
+  (*Installing*); adding one would freeze them on it. **A release** (by hand, when the owner
+  calls it one) → `__version__` in `workbench/__init__.py` (`wb --version`, task.json's
+  `wb_version`, the ask server's `serverInfo`), then a `v<version>` tag (a trailing `.0` dropped,
+  as `v0.90`) and a GitHub release (`gh release create v<version> --generate-notes`). **`wb setup`'s links** → README's quickstart and
   *Installing*.
 - **A model name** → never in code or the skill: models come from OpenCode's config, choices from
   the router and the weekly check.

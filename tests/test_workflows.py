@@ -3,9 +3,9 @@
 
 Plain text checks (no YAML library): every action pinned to a commit, every
 workflow with its own permissions, `check` never path-filtered and required by
-main's ruleset, check.yml holding pull requests to the version rule,
-release.yml writing only from main, and owner-merge.yml approving only the
-owner's pull requests without ever running their code.
+main's ruleset, the plugin without a version (so installs track main), and
+owner-merge.yml approving only the owner's pull requests without ever running
+their code.
 """
 import json
 import re
@@ -54,16 +54,14 @@ class RequiredCheck(unittest.TestCase):
         self.assertIn({"context": "check", "integration_id": GITHUB_ACTIONS_APP}, checks)
 
 
-class Versions(unittest.TestCase):
-    def test_check_holds_every_pull_request_to_the_version_rule(self):
-        self.assertIn("run: scripts/check-version.sh", text("check.yml"))
-
-    def test_release_writes_only_from_main(self):
-        code = "\n".join(l for l in text("release.yml").splitlines() if not l.lstrip().startswith("#"))
-        on = code.split("\npermissions:")[0]
-        self.assertNotIn("pull_request", on, "a write token must never run a pull request's code")
-        self.assertIn("branches: [main]", on)
-        self.assertRegex(code, r"(?m)^permissions:\n  contents: write$")
+class Marketplace(unittest.TestCase):
+    def test_the_plugin_has_no_version_so_installs_track_main(self):
+        # a version would hold every install on its cached copy until the string changed, which
+        # took a bump in every pull request (2026-11-18); without one, Claude Code uses the commit
+        manifest = json.loads((ROOT / "mod" / ".claude-plugin" / "plugin.json").read_text())
+        entries = json.loads((ROOT / ".claude-plugin" / "marketplace.json").read_text())["plugins"]
+        self.assertNotIn("version", manifest)
+        self.assertFalse([e for e in entries if "version" in e])
 
 
 class Ruleset(unittest.TestCase):
@@ -77,12 +75,6 @@ class Ruleset(unittest.TestCase):
         self.assertIn("non_fast_forward", rules)
         self.assertEqual(rules["pull_request"]["required_approving_review_count"], 1)
         self.assertTrue(rules["pull_request"]["dismiss_stale_reviews_on_push"])
-
-    def test_a_pull_request_is_checked_against_the_newest_main(self):
-        # two pull requests that both raise the version to the same number each pass against
-        # the main they started from; only the second's rerun on the newer main fails (2026-11-18)
-        rules = {r["type"]: r.get("parameters", {}) for r in json.loads(RULESET.read_text())["rules"]}
-        self.assertTrue(rules["required_status_checks"]["strict_required_status_checks_policy"])
 
 
 class OwnerMerge(unittest.TestCase):
