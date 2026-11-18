@@ -241,11 +241,16 @@ to this task: the files to read first, the existing code to imitate, and the ski
 
 **The web is yours; the agent tests in a browser but doesn't browse.** Research (for a spec, an
 agent's question, the model check) uses the browsing tools this session gives you, and the one the
-user prefers where they have said (their CLAUDE.md, your memory); workbench brings none. Read the
+user prefers where they have said (`~/.claude/CLAUDE.md`, `wb notes`, the repo's CLAUDE.md);
+workbench brings none. A browsing preference the user tells you holds in every project, workbench
+or not: offer to add it to `~/.claude/CLAUDE.md`, which every session reads (`wb notes` reach only
+workbench mode, your memory only this project). Read the
 installed source before the web, and a JSON API before a page (Hugging Face's `/api/models`,
 GitHub's releases API): they rarely block a plain fetch. A 403, a CAPTCHA, a login wall or a page
 empty without JavaScript means not checked: try another primary source, then say what you
-couldn't verify; never fill the gap from memory or a copy. Put what the agent needs in the spec
+couldn't verify; never fill the gap from memory or a copy. When a block cost an answer and this
+session has no browser tool, say so in that report: a browser tool (Claude in Chrome, the desktop
+app's browser, a browser MCP server) would reach it, and which is the user's choice. Put what the agent needs in the spec
 (the signature, the few lines of docs), not a URL: its web tools are denied. A browser check of
 its own work is a test: name one (Playwright, or the project's) that prints the console's and the
 page's errors as text, and make it `--test` or part of it; screenshots are for you. A bare browser

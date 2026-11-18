@@ -884,9 +884,13 @@ OpenCode lists it as `workbench_ask_reviewer`.
 
 **Browsers and the web.** Workbench brings no browser, for Claude or the agent. Claude's are the
 ones Claude Code gives its session (WebFetch and WebSearch, a browser extension or pane, an MCP
-server the user added), the user's stated preference first (their CLAUDE.md, Claude's memory),
-and the skill's rule makes a blocked fetch (a 403, a CAPTCHA, a login wall, a page empty without
-JavaScript) "not checked", never a finding. Research is Claude's: the agent's web search and fetch
+server the user added), the user's stated preference first: `~/.claude/CLAUDE.md`, which every
+session reads, so the skill has Claude offer to write one there, then `wb notes` (workbench mode
+only) and the repo's CLAUDE.md; not Claude's memory, which stays in one project. The skill's rule
+makes a blocked fetch (a 403, a CAPTCHA, a login wall, a page empty without JavaScript) "not
+checked", never a finding, and when that cost an answer in a session with no browser tool, Claude
+says so and that one would reach it (Claude in Chrome, the desktop app's browser, a browser MCP
+server), the choice left to the user. Research is Claude's: the agent's web search and fetch
 are denied (*Denied tools*), `curl` and `wget` aren't on the list, and what it needs to know comes
 in the spec or as an answer to `ask_reviewer`. Those are rules on its tools, not the network: the
 lane leaves the network open (a dev server on localhost, a test that calls one), so an interpreter
