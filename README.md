@@ -169,9 +169,6 @@ and `wb chat url` prints its private link.
 
 <p align="center"><img src="docs/web-chat.png" alt="The web chat: Claude's report on which model takes which tasks, the user's reply, a receipt saying Claude has it and will read it after its current step, and 'Claude is on it'" width="420"></p>
 
-**Watching from a terminal?** `wb watch` follows the newest task live, and `wb status` lists the
-open ones.
-
 <hr>
 
 ## How it works
