@@ -76,17 +76,46 @@ def _wb_calls(command: str) -> list[list[str]]:
 CLOSING = {"accept", "discard"}  # past these, the session's work is no longer the task's
 
 
-def _named(row: dict, names: set[str]) -> tuple[set[str], set[str]]:
-    """The session's tasks an assistant message's Bash calls name, and those it closes."""
-    hit, shut = set(), set()
+EDITS = ("Edit", "Write", "NotebookEdit")  # Claude Code's tools that change a file
+
+
+def _named(row: dict, names: set[str]) -> dict:
+    """What an assistant message does that charging needs: the session's tasks its `wb` calls
+    name (`hit`) and close (`shut`), whether it ran `wb` at all, the files it edited, and the
+    specs it handed over (`wb start|next --spec`)."""
+    out = {"hit": set(), "shut": set(), "wb": False, "edits": set(), "specs": set()}
     for c in (row.get("message") or {}).get("content") or []:
-        if isinstance(c, dict) and c.get("type") == "tool_use" and c.get("name") == "Bash":
-            for words in _wb_calls(str((c.get("input") or {}).get("command", ""))):
-                these = set(words) & names
-                hit |= these
-                if words and words[0] in CLOSING:
-                    shut |= these
-    return hit, shut
+        if not (isinstance(c, dict) and c.get("type") == "tool_use"):
+            continue
+        given = c.get("input") or {}
+        if c.get("name") in EDITS:
+            out["edits"].add(str(given.get("file_path") or given.get("notebook_path") or ""))
+        if c.get("name") != "Bash":
+            continue
+        for words in _wb_calls(str(given.get("command", ""))):
+            out["wb"] = True
+            these = set(words) & names
+            out["hit"] |= these
+            if words and words[0] in CLOSING:
+                out["shut"] |= these
+            for i, w in enumerate(words):
+                flag, _, val = w.partition("=")
+                if flag in HANDED:
+                    if val:
+                        out["specs"].add(val)
+                    elif i + 1 < len(words):
+                        out["specs"].add(words[i + 1])
+    return out
+
+
+HANDED = ("--spec", "--message", "--file")  # files Claude writes for wb to hand over
+
+
+def _theirs(path: str, tasks: set[str], handed: set[str]) -> bool:
+    """Whether an edit is the tasks' work: in one's worktree (a takeover), or a file handed to
+    `wb` (a spec, feedback, an answer)."""
+    return any(path == s or path.endswith("/" + s.removeprefix("./")) for s in handed) or any(
+        path.startswith(str(store.task_dir(t) / "worktree") + "/") for t in tasks)
 
 
 def _usage(row: dict) -> dict:
@@ -104,8 +133,11 @@ def calls(main: Path, subagents: list[Path], names: set[str]) -> list[dict]:
     """Every API call of the session, {at, turn, names, usage}, `names` being the tasks it is
     charged to. A call that runs `wb … <task>` is that task's, and so are the calls after it in
     the turn, until another `wb` names other tasks or `wb accept|discard` closes it; the calls
-    of a turn before its first `wb` are the first named ones' (the reading and the spec before
-    `wb start`), or the wake's. A subagent's call is charged as the session's call before it.
+    just before a turn's first such `wb` are its tasks' too (the reading and the spec before
+    `wb start`), back to the last call that ran `wb` or edited a file other than its `--spec`;
+    a wake's turn is the wake's task's. An edit to a file outside the tasks' worktrees, and not
+    one handed to `wb` (`HANDED`), ends the charge: that is other work. A subagent's call is
+    charged as the session's call before it.
     Charging whole turns was wrong: one long turn that also ran a task put 5.5M cached tokens
     of other work on it (rel090-check, 2026-11-17)."""
     events, by_id = [], {}  # an assistant message is a row per content block, each with its usage
@@ -113,13 +145,14 @@ def calls(main: Path, subagents: list[Path], names: set[str]) -> list[dict]:
         if (text := _prompt(row)) is not None:
             events.append(set(WAKE.findall(text)) & names)
         elif row.get("type") == "assistant":
-            hit, shut = _named(row, names)
+            does = _named(row, names)
             mid = (row.get("message") or {}).get("id") or f"row {len(events)}"
             if mid in by_id:
-                by_id[mid]["hit"] |= hit
-                by_id[mid]["shut"] |= shut
+                for k in ("hit", "shut", "edits", "specs"):
+                    by_id[mid][k] |= does[k]
+                by_id[mid]["wb"] |= does["wb"]
                 continue
-            by_id[mid] = {"at": _ts(row), "usage": _usage(row), "hit": hit, "shut": shut}
+            by_id[mid] = {"at": _ts(row), "usage": _usage(row), **does}
             events.append(by_id[mid])
     out, turn, current, waiting = [], 0, set(), []
     for ev in events:
@@ -129,11 +162,19 @@ def calls(main: Path, subagents: list[Path], names: set[str]) -> list[dict]:
         c = {"at": ev["at"], "turn": turn, "names": set(ev["hit"] or current), "usage": ev["usage"]}
         out.append(c)
         if ev["hit"]:
-            for w in waiting:
+            # the calls just before it are the reading and the spec for it, back to the last
+            # one that ran `wb` or edited something else: a long turn of other work that ends
+            # in `wb start` put all of that work on the task (82K output, 2026-11-17)
+            for w, wev in reversed(waiting):
+                if wev["wb"] or not all(_theirs(p, ev["hit"], ev["specs"]) for p in wev["edits"]):
+                    break
                 w["names"] = set(ev["hit"])
             waiting, current = [], ev["hit"] - ev["shut"]
-        elif not current:
-            waiting.append(c)  # charged to the turn's first named tasks, if it names any
+        elif current and all(_theirs(p, current, set()) for p in ev["edits"]):
+            pass  # still the task's: reading its diff, its worktree, writing its feedback
+        else:  # another file edited: other work, until a `wb` names a task again
+            c["names"], current = set(), set()
+            waiting.append((c, ev))
     seen = set(by_id)
     starts = [c["at"] for c in out]
     for path in subagents:
