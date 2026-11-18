@@ -37,6 +37,9 @@ question(s) for this task). Otherwise make reasonable choices and say what you a
 - You can write only in this worktree, the temp directory and build caches: "Permission denied"
   anywhere else is that limit, so don't probe it. Need a directory outside? Call `ask_reviewer`
   with `path` set to it (this doesn't use the question budget).
+- CLAUDE.md and AGENTS.md are Claude's, and you can't edit them. When the task asks for a change
+  to one, write the whole new file next to it as `<name>.proposed` (`CLAUDE.md.proposed`); Claude
+  reads the difference and takes it.
 - Finish with a short summary: the files you changed, the test result, and any assumptions.
   If you hit something the next agent would trip on too (a library's quirk, a pitfall, a check
   worth running), add a line `Lesson: <the rule, and why>` to it.
@@ -513,6 +516,19 @@ def cmd_feedback(a):
     _say(lessons.nudge(task))
 
 
+def _settle_proposals(task: store.Task, take: bool) -> None:
+    """The agent's proposed instruction files (runner.proposals) are never committed as they are:
+    --take-claude-md puts each over its file, else it is dropped."""
+    for real, prop in runner.proposals(task.worktree):
+        rel = real.relative_to(task.worktree)
+        if take:
+            prop.replace(real)
+            print(f"took the agent's proposed {rel}")
+        else:
+            prop.unlink()
+            print(f"dropped the agent's proposed {rel} (--take-claude-md takes it)")
+
+
 @one_at_a_time
 def cmd_next(a):
     """Commit the approved step on the task's branch and give the same agent the next one: same
@@ -534,6 +550,7 @@ def cmd_next(a):
     if not nxt.strip():
         die("the next step's spec is empty")
     measured = results.step(task, landed=True)
+    _settle_proposals(task, a.take_claude_md)
     try:
         commit = gitops.commit_all(task.worktree, f"{a.message}\n\nWorkbench-Task: {a.name} "
                                    f"(step {step})\nOpenCode-Session: {st.get('session')}")
@@ -1162,6 +1179,7 @@ def cmd_accept(a):
             and not gitops.changed(task.worktree)):
         die(f"{a.name} has no changes to accept yet: wait for it, or wb stop {a.name} first")
     _stop_runner(task)  # under --force it may still be running, and would set its phase back
+    _settle_proposals(task, a.take_claude_md)
     repo = Path(spec["repo"])
     rounds, autofix = st.get("round", 1), st.get("auto_fixes_total", 0) + st.get("auto_fixes", 0)
     msg = (f"{a.message}\n\nDelegated to {spec['model_label']} via OpenCode: {rounds} round(s), "
@@ -2454,6 +2472,9 @@ def parser() -> argparse.ArgumentParser:
     s.add_argument("--message", "-m", required=True, help="commit subject for the approved step")
     s.add_argument("--test", help="the next step's acceptance command (default: unchanged)")
     s.add_argument("--fresh", action="store_true", help="a fresh session instead of the same one")
+    s.add_argument("--take-claude-md", action="store_true",
+                   help="put the agent's proposed CLAUDE.md/AGENTS.md (<name>.proposed) over the "
+                   "file before committing; without it they are dropped")
     s.add_argument("--spec-gap", action="append", metavar="WHAT",
                    help="a round this step took was the spec's fault: what it missed (repeatable)")
     s.add_argument("--allow", action="append", metavar="PATTERN",
@@ -2593,6 +2614,9 @@ def parser() -> argparse.ArgumentParser:
     s = sub.add_parser("accept", help="commit the work on its branch and close the task")
     s.add_argument("name"); s.add_argument("--message", "-m", required=True)
     s.add_argument("--merge", action="store_true"); s.add_argument("--force", action="store_true")
+    s.add_argument("--take-claude-md", action="store_true",
+                   help="put the agent's proposed CLAUDE.md/AGENTS.md (<name>.proposed) over the "
+                   "file before committing; without it they are dropped")
     s.add_argument("--spec-gap", action="append", metavar="WHAT",
                    help="a round this task took was the spec's fault: what it missed (repeatable)")
     s.set_defaults(f=cmd_accept)

@@ -347,6 +347,9 @@ the pane) only for something the user should find later.
     safer, only dearer: twelve breaks cost more than the task's own review (2026-11-17). A UI change:
     run it from the worktree and look with your own browser tool.
   - Put the checks you do run in one Bash call (`wb status <name>` prints the worktree's path).
+  - **CLAUDE.md**: the agent can't edit it, so a task that changes it has the agent write
+    `CLAUDE.md.proposed`; the wake shows it as a diff. Good: `wb accept … --take-claude-md`.
+    Ask for it in the spec ("propose the CLAUDE.md change") instead of writing it yourself.
   - **Fix small things yourself in one call**: every edit (a script or `sed` over the worktree),
     the CLAUDE.md update, the tests and `wb accept`, in one Bash call. Each separate edit is a
     call over your whole context: five of them cost more than the agent's round (2026-11-17).
