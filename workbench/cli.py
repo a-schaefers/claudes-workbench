@@ -402,7 +402,7 @@ def cmd_start(a):
         # periodic check-ins are opt-in: each wakes Claude, re-reading its whole context, and they
         # were 500K of one task's 1.2M (2026-11-17); the pane shows progress, and the warnings
         # (a nudge, a full window, handovers, a cut base check) still wake
-        "checkin": a.checkin or 0,
+        "checkin": a.checkin or 0, "self_review": a.self_review,
         "round_timeout": a.round_timeout or limits["round"],
         "silence_timeout": a.silence_timeout or limits["silence"],
         "think_timeout": a.think_timeout if a.think_timeout is not None else limits["think"],
@@ -2402,6 +2402,9 @@ def parser() -> argparse.ArgumentParser:
     s.add_argument("--checkin", type=float, metavar="MIN",
                    help="wake Claude every MIN minutes while it runs, with a digest of progress "
                    "(default off: each wake costs Claude its whole context)")
+    s.add_argument("--self-review", action="store_true",
+                   help="once the tests pass, one more automatic round in which the agent "
+                   "reviews its own change against Claude's checks, before Claude is woken")
     s.add_argument("--auto-fix", type=int, default=2,
                    help="rounds that send failing tests back without waking Claude (default 2)")
     s.add_argument("--ask-budget", type=int, default=2)

@@ -953,6 +953,24 @@ def _start_fresh(task: store.Task, n: int, why: str) -> None:
                 "text": f"a fresh session for the agent: {why}"})
 
 
+# The checks Claude's reviews kept making on 2026-11-17: a rule with no test, a test's expected
+# value that passed by luck, an unchecked error path, small things (a float function on an int, a
+# wrong comment). One automatic round of them, before Claude is woken, costs local time only.
+SELF_REVIEW = (
+    "Before Claude reviews this, review your own change as a strict senior reviewer would: `git "
+    "diff`, and `git status` for new files. Check each point, and fix what fails:\n"
+    "1. Every rule in the task (each must, only, at most, rejects, limit and error message) has a "
+    "test that fails if the rule breaks. A rule without one: write the test.\n"
+    "2. Every expected value in the tests: work it out by hand from the rule, not from what your "
+    "code prints. A test that passes only because of the values it happens to try is a bug.\n"
+    "3. Every error path: each write, read, allocation and parse that can fail is checked and "
+    "handled as the task says.\n"
+    "4. Nothing the task didn't ask for; no dead code, debug output, unused names or wrong "
+    "comments; each type used as declared.\n"
+    "Then run the acceptance command (`{cmd}`). Do not commit. Finish with a short summary: what "
+    "you found and fixed, and for each rule the test that covers it.")
+
+
 def auto_fix_prompt(tests: dict, cmd: str) -> str:
     return (f"The acceptance tests fail. Command: `{cmd}` (exit {tests['exit']}). Output:\n\n"
             f"```\n{tests['tail']}\n```\n\nFix the code so the tests pass. Do not weaken, skip or "
@@ -1067,6 +1085,16 @@ def drive(task: store.Task) -> None:
                 task.set_status(round=n + 1, auto_fixes=used + 1, tests=tests)
                 task.event({"ts": store.now(), "round": n, "kind": "autofix",
                             "text": "tests failed; sent the output back to the agent"})
+                continue
+            mark = [task.status.get("steps", 1), task.status.get("reviews", 0)]
+            if task.spec.get("self_review") and tests and tests["ok"] \
+                    and task.status.get("self_reviewed") != mark:
+                task.round_dir(n + 1).mkdir(parents=True, exist_ok=True)
+                task.round_dir(n + 1).joinpath("prompt.md").write_text(
+                    SELF_REVIEW.format(cmd=task.spec["test_cmd"]))
+                task.set_status(round=n + 1, self_reviewed=mark, tests=tests)
+                task.event({"ts": store.now(), "round": n, "kind": "self_review",
+                            "text": "tests pass; the agent reviews its own change first"})
                 continue
             task.set_status(phase="review", tests=tests,
                             last="tests passed, waiting for review" if tests and tests["ok"]

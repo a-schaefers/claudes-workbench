@@ -1109,6 +1109,27 @@ class Context(Base):
         self.assertIn(f"handover {runner.HANDOVER_MAX - 1} this round", warned[0]["text"])
         self.assertEqual([r["kind"] for r in rows if r["kind"] != "checkin"], ["stuck"])
 
+    def test_self_review_is_one_more_round_before_claude_is_woken_and_again_after_feedback(self):
+        # Claude's reviews kept catching the same things (2026-11-17); the agent checks them
+        # first, at local cost, and Claude is woken once, after it
+        self.start("t-sr", "ok", "--test", TEST_CMD, "--self-review")
+        st = wait_phase("t-sr", {"review"})
+        self.assertEqual((st["round"], len(self.runs())), (2, 2))
+        t = store.Task("t-sr")
+        self.assertTrue(t.round_dir(2).joinpath("prompt.md").read_text().startswith(
+            "Before Claude reviews this"))
+        self.assertIn(f"`{TEST_CMD}`", t.round_dir(2).joinpath("prompt.md").read_text())
+        rows = [r for r in store.read_jsonl(store.home() / "notify.jsonl")[0] if r["task"] == "t-sr"]
+        self.assertEqual([r["kind"] for r in rows], ["review"])
+        self.assertIn("its own review first", run_wb("watch", "t-sr", "--once", "--no-color"))
+        run_wb("feedback", "t-sr", "--message", str(self.feedback))
+        st = wait_phase("t-sr", {"review"})
+        self.assertEqual(len(self.runs()), 4)                      # feedback, then its own review
+
+    def test_without_self_review_claude_is_woken_after_the_first_clean_round(self):
+        self.start("t-nsr", "ok", "--test", TEST_CMD)
+        self.assertEqual(wait_phase("t-nsr", {"review"})["round"], 1)
+
     def test_a_session_that_fills_up_reading_carries_on_instead_of_handing_over(self):
         self.start("t-c7", "read", "--test", TEST_CMD)
         st = wait_phase("t-c7", {"review", "stuck", "failed"}, timeout=60)
