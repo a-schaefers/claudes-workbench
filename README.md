@@ -33,22 +33,9 @@ So Claude is both. It plans the project, breaks it into pieces a local model can
 piece to the right model with the knowledge it needs, and reviews the result to its own standard
 until it's right. Frontier compute goes where it counts, into planning, architecture and judgment;
 the bulk of the work, the reading and writing and test-running, happens on your own hardware.
-On a bigger task that costs Claude less than writing the code itself; on a small one it comes out
-about even or a little worse, so Claude hands small requests over together. Measured on one 16 GB
-card with a 27B open model (Claude's tokens for each task, the code passing the same hidden tests
-either way):
-
-| Task | Claude writes it | Claude hands it off |
-|---|---|---|
-| Save and load replay files (C) | 166K | 150K (−10%) |
-| Score combos (C) | 176K | 145K (−18%) |
-| A date range for a report (Python, small) | 50K | 67K (+34%) |
-| Rank a high score (C, small) | 54K | 83K (+54%: one round sent back) |
-
-Each of those started from a fresh session, so it includes Claude reading the workbench skill;
-in a session that is already handing work off, a bigger task costs Claude about half of writing
-it. A bigger card or a stronger model does better, since Claude has fewer rounds to send back.
-Local models get better every few months, and Claude's share shrinks with them.
+On bigger tasks, Claude spends roughly half the tokens it would writing the code itself. Small
+tasks come out about even, so Claude hands them over in batches. A bigger GPU or a stronger model
+saves more, and local models keep getting better.
 
 - **Claude architects the work.** It reads your codebase, decides the design, and writes a precise
   spec for every piece: the files to touch and the code to imitate, the exact names other code
