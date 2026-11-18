@@ -324,7 +324,8 @@ def thinking_stall(model_id: str, entry: dict) -> str:
     silent for 14 minutes at a time until nudged and stopped. The same settings are harmless on a
     card that writes fast, so it is measured here, not ruled out everywhere."""
     opts = entry.get("options") or {}
-    cap, sp = opts.get("max_tokens"), speed(model_id)
+    # Ollama honours options.max_tokens; other servers get OpenCode's limit.output
+    cap, sp = opts.get("max_tokens") or (entry.get("limit") or {}).get("output"), speed(model_id)
     if not (entry.get("reasoning") and cap and sp.get("write")) or \
             str(opts.get("reasoningEffort", "")).lower() in ("none", "minimal"):
         return ""
@@ -336,7 +337,7 @@ def thinking_stall(model_id: str, entry: dict) -> str:
     return (f"{model_id} thinks before it acts and may spend its {cap}-token output cap doing it: "
             f"at its ~{sp['write']:.0f} tok/s here that is {secs / 60:.0f} min, past its "
             f"{think / 60:.0f}-min think budget, so it can sit silent until nudged and stopped. "
-            f"Set its options.reasoningEffort to \"none\" (or a lower max_tokens) in OpenCode's config")
+            f"Set its options.reasoningEffort to \"none\" (or a lower output cap) in OpenCode's config")
 
 
 def speed_line(model_id: str) -> str:

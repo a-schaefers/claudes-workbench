@@ -1728,12 +1728,51 @@ A replay is kept out of real work: task.json `bench` makes `Task.notify` write n
 no notice), `results.record` write no row, `wb status` leave it out (unless `--all` or named), and
 the mod skip it; `--trial` keeps its lessons out. Its speeds do go to speed.json: they are
 measured on this machine. When `wb start`, feedback, next or resume would wait for the GPU behind a
-replay, `cli._preempt_bench` stops it (phase stuck, `PREEMPTED`), says so in one line, and the
+replay (or `wb optimize`, *Optimize*), `cli._preempt_bench` stops it (phase stuck, `PREEMPTED`), says so in one line, and the
 driver records `preempted` and replays it later. `wb bench stop` (or `wb stop --all` without
 `--repo`/`--session`) ends the driver, which closes its replay. `wb bench run` again skips each
 (case, model, label, repeat) already passed or failed, so a stopped run picks up where it was.
 Each row has `wb_commit` (the workbench clone's HEAD) and `label`: run a branch of workbench with
 `--label` and compare it with main's rows in `wb bench report --label`.
+
+## Optimize: measuring this machine, when asked
+
+`wb optimize` (`workbench/optimize.py`) is the one place workbench loads a model only to learn
+about the machine, so it runs only when the user asks (through Claude, in plain words: "optimize
+my setup", "tune workbench overnight"), never on its own: an automatic run could be cut short and
+alarm people (the user, 2026-11-18). Everything else learns passively from real tasks (the router,
+`tuning.py`, `speed.json`) and from estimates (`wb doctor`'s checks).
+
+What it measures, per Ollama model that can run (`candidates`): the largest window that keeps the
+model and its context all in VRAM, by Ollama's own placement after a load at each window tried
+(`probe`: `/api/generate` with `options.num_ctx`, then `/api/ps` `size_vram` against `size`, then
+unloaded). `fit` loads the served window first (`limit.context`); when it spills it searches down
+from there to `models.MIN_WINDOW`, else up to twice it (never past what Ollama says the model was
+trained on, nor `MAX_WINDOW` 128K, whose cache could fill system RAM), halving the gap in
+multiples of `STEP` 4K: at most `loads(m)` loads, about six. Why it matters: on 2026-11-18 a 64K
+window that put a tenth of a 27B model in system RAM wrote at ~17-21 tok/s where its 32K window,
+all on the GPU, wrote at ~37, while the bigger window spared Claude review rounds (no
+compactions). Where the line falls depends on the card, the model and the server, so it is
+measured, and Claude and the user choose with both facts (`advice`): a spilling window and the
+largest whole one, or a whole window with room for more.
+
+`wb optimize estimate` says how long (`estimate`: loads × the model's median measured
+`status.load_secs`, else `LOAD_GUESS` 45 s; with `--bench`, the bench's cases × models × each
+case's original minutes). `wb optimize start [--bench]` detaches the run (`python -m
+workbench.optimize`, its output in `optimize.log`, its pid in `optimize.json`) so it outlives
+Claude's session; it refuses while a task holds the GPU. The run holds the GPU alone (a
+`GpuLease` with no model, named `HOLDER` "wb optimize") after `free_gpu`. Real work stops it:
+`cli._preempt_bench` sends it SIGTERM when a task would wait behind it, and the fits measured so
+far stay in `optimize.json`. With `--bench` it then starts `wb bench run` on every model, labelled
+`optimize`. `wb optimize report` (the default) gives a line per model; `wb doctor` adds the same
+line (`--`) for each measured model with something to change. `wb optimize stop` ends it.
+
+`wb optimize apply <id>…`, after the user says yes: makes the measured window an entry of its own
+beside the model, never in place of it: an Ollama model `<name>-<N>k` from it with
+`num_ctx` N (`/api/create` `from`: no download, no GPU) and OpenCode's entry copied from the
+model's (its options, such as `reasoningEffort: "none"`, and output cap kept; `limit.context`
+and `limit.input` set to the new window). The router weighs both by their records; retiring the
+old one is the user's call (`wb model retire`).
 
 ## The skill library
 
@@ -2619,6 +2658,7 @@ delivered as taken (`_stale_notes`, *Notes*).
 |---|---|---|
 | `wb models` | `--set-default` | Each model's state, slice and speeds (and `bench:`, its cases passed, when replayed); the router's ranking per size. `--set-default` writes the significant-work pick as OpenCode's `model`. |
 | `wb model add <provider/model>` | `--pull`, `--label`, `--context N`, `--url URL`, `--start CMD`, `--stop CMD` | Registers a model in opencode.json, merged into any existing entry; `--url` first writes an OpenAI-compatible provider for any server on this machine (`models.add_server_provider`: a provider already there is never touched; a URL off this machine needs models.json `local: true`), and `--start`/`--stop` write the model's models.json `start`/`stop`; on a first run with no `--url` it writes the `ollama` provider when Ollama answers; refuses a cloud model, an unknown served context (a server other than Ollama needs `--context`), a down Ollama, a down server of unknown engine (see *Managing the set*). |
+| `wb optimize [start\|estimate\|report\|stop\|apply] [<id>…]` | `--bench` | Only when the user asks (*Optimize*). `estimate`: how long a run would hold the GPU. `start`: detached; measures each Ollama model's largest window all on the GPU (refused while a task holds it; a task that wants it stops it); `--bench` then starts `wb bench run` on every model. `report` (the default): a line per model. `stop`. `apply <id>…`: adds the measured window as an entry of its own beside the model (an Ollama `<name>-<N>k` with that `num_ctx`, the entry's settings copied). |
 | `wb model retire <id>` | `--delete` | Unregisters it (not OpenCode's default) and drops its models.json overrides; `--delete` removes Ollama's weights (or says `ollama rm <name>` when it can't). |
 | `wb model sizes <id> [trivial] [significant]` | | Limits the sizes it's routed (none: every size). |
 | `wb scout` | `--done [--notes "…"]`, `--due`, `--watch "…"`, `--unwatch N` | The weekly check's facts (with the GPU budget and the devices it counts, `cli.gpu_line`; the model servers here, `cli.server_lines`: the server commands on PATH and each usual port whose `/v1/models` answers, flagged when OpenCode has no provider for it); `--done` records it; `--due` exits 0 when one is due (7 days); the watch list; each model's bench cases passed, when replayed. |
@@ -2643,7 +2683,7 @@ delivered as taken (`_stale_notes`, *Notes*).
 | `wb init <dir>` | | A project the way Claude keeps one: git on the default branch, an initial commit, AGENTS.md → CLAUDE.md (a CLAUDE.md → AGENTS.md link is swapped; a gitignored CLAUDE.md isn't linked). Refuses the home directory or above, inside another repo, a repo git refuses (git's reason: no `git init` over it), without a git identity (`git var`, as for `wb start`), and a first commit holding likely secrets or installed directories no .gitignore covers. |
 | `wb setup` | `--force` (replaces a link that points elsewhere; never a real file) | Links `~/.local/bin/wb` to this copy's `bin/wb` and Claude Code's `skills/workbench` to its `skill/workbench`, removes an old `skills/delegate` link that now leads nowhere (the skill was `/delegate` until 2026-11-17; the mod runs `wb setup` itself when it finds only that), warns when `~/.local/bin` isn't on PATH (Claude and the mod run `wb` by name); exit 1 when it left something in the way (see *Installing*). |
 | `wb update` | `--check` (only say whether origin has news: `update available: N new commit(s)…` or `up to date`), `--if-due` (with `--check`: ask origin at most weekly, `UPDATE_EVERY`, else answer from `update.json`; never with `CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC`) | Updates this copy (see *Installing*): refuses while any runner is live; a marketplace copy runs `claude plugin marketplace update workbench` then `claude plugin update workbench@workbench`; a clone (refusing uncommitted tracked changes) runs `git pull --ff-only` first. Refuses, before anything changes, when `claude` isn't on PATH; a step that can't run or runs past 300 s fails with a line (after a clone's pull: what is left to run), and update.json is written as soon as the pull lands. Prints `updated <kind> a..b (N commit(s))` or `already up to date`. The check's fetch (`cli._fetch_origin`) never prompts and never hangs: no terminal, `GIT_TERMINAL_PROMPT=0`, `SSH_ASKPASS_REQUIRE=never`, at most `FETCH_SECS` = 60 s; the user's own ssh command (`GIT_SSH_COMMAND`, `GIT_SSH`, `core.sshCommand`) is kept, and with none ssh runs with `BatchMode`. In between, `--if-due` recounts `HEAD..@{u}` locally, so a pull made elsewhere shows at once. |
-| `wb doctor` | | `opencode --version` (BAD below 2.x, whose config shape and run flags workbench writes; a version that doesn't parse is a `--` line), the OpenCode config files (and a set `$OPENCODE_CONFIG`), git, models found and each one's readiness (BAD when none can run), the providers skipped and why, an Ollama provider not answering (asked once), a provider's baseURL problem, any entry without `limit.context` (BAD), each Ollama entry's `options.max_tokens` and context against what Ollama serves (or that it can't say), a `--` line for a model left thinking whose output cap at its measured write speed here outlasts its think budget (`router.thinking_stall`: it can sit silent until nudged and stopped; seen 2026-11-18 on a spilled 64K entry; harmless on a fast card, so measured per machine), the state directory (made if missing, then checked writable), the GPU budget and the devices it counts (or that the GPU's memory is unknown, or that none was found: a `--` line), a real lane drawn around a test write (`ok agents write only in their lane (Landlock ABI N)`: the probe's `PermissionError`, not exit 126; then a `--  Landlock ABI N: …` line for each of `lane.gaps`, and on WSL with interop on a `--  WSL interop is on: …` line (`context.interop_gap`); without Landlock a `--` line saying writes and credential reads aren't refused and whether sudo still is), `commands.json` (`context.commands_conf`: it must parse and hold lists of strings; `BAD` stops the check), the toolchains on PATH that are snaps (`context.TOOLCHAINS`; they can't run in the lane), `wb` on PATH (Claude's Bash runs it by name: BAD without it, whatever `WB_BIN` says; `WB_BIN` is noted when set), the `/workbench` skill link, a `--` line when `wb` or `/workbench` comes from another copy (`wb setup --force` from the one you want), and whether Claude Code lists `workbench@…` in `plugins/installed_plugins.json` (information only: a mod loaded another way isn't listed). `ok`/`BAD` lines set the exit code; `--` lines inform. |
+| `wb doctor` | | `opencode --version` (BAD below 2.x, whose config shape and run flags workbench writes; a version that doesn't parse is a `--` line), the OpenCode config files (and a set `$OPENCODE_CONFIG`), git, models found and each one's readiness (BAD when none can run), the providers skipped and why, an Ollama provider not answering (asked once), a provider's baseURL problem, any entry without `limit.context` (BAD), each Ollama entry's `options.max_tokens` and context against what Ollama serves (or that it can't say), a `--` line for each model `wb optimize` measured with a window to change (`optimize.advice`), a `--` line for a model left thinking whose output cap (`options.max_tokens`, else `limit.output`: any server) at its measured write speed here outlasts its think budget (`router.thinking_stall`: it can sit silent until nudged and stopped; seen 2026-11-18 on a spilled 64K entry; harmless on a fast card, so measured per machine), the state directory (made if missing, then checked writable), the GPU budget and the devices it counts (or that the GPU's memory is unknown, or that none was found: a `--` line), a real lane drawn around a test write (`ok agents write only in their lane (Landlock ABI N)`: the probe's `PermissionError`, not exit 126; then a `--  Landlock ABI N: …` line for each of `lane.gaps`, and on WSL with interop on a `--  WSL interop is on: …` line (`context.interop_gap`); without Landlock a `--` line saying writes and credential reads aren't refused and whether sudo still is), `commands.json` (`context.commands_conf`: it must parse and hold lists of strings; `BAD` stops the check), the toolchains on PATH that are snaps (`context.TOOLCHAINS`; they can't run in the lane), `wb` on PATH (Claude's Bash runs it by name: BAD without it, whatever `WB_BIN` says; `WB_BIN` is noted when set), the `/workbench` skill link, a `--` line when `wb` or `/workbench` comes from another copy (`wb setup --force` from the one you want), and whether Claude Code lists `workbench@…` in `plugins/installed_plugins.json` (information only: a mod loaded another way isn't listed). `ok`/`BAD` lines set the exit code; `--` lines inform. |
 
 ## Files and formats
 
@@ -2663,6 +2703,8 @@ $WB_HOME (~/.local/state/workbench)
   bench/runs/<run>/              plan.json  driver.log  <task>/{wb.log,diff.patch,grade.txt} (repo/ while it runs)
   bench/runs.jsonl  driver.json  one row per replay; the driver's {pid, run}
                                  (bench.jsonl and bench/repos/ are the old suite's: nothing reads them)
+  optimize.json  optimize.log    wb optimize: {pid, start, began, done, stopped, models: {<id>: {window,
+                                 fits, spill, tried: [{window, size, vram}], ts}}}; the run's output
   imports/<slug>/                skills fetched by wb skill import, for Claude to read
   images/<YYYYmmdd-HHMMSS>/      wb image's candidates (unless --out), their .json sidecars, engine.log
   chat/                          messages.jsonl  receipts.jsonl  listener.json

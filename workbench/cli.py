@@ -20,7 +20,7 @@ from pathlib import Path
 from types import SimpleNamespace
 
 from . import (__version__, ask_mcp, bench, chat, context, gitops, hardware, images, lane, lessons, models,
-               results, router, scan, skills, spend, store, transcript, tuning)
+               optimize, results, router, scan, skills, spend, store, transcript, tuning)
 from .watch import Watcher, wait_exit
 from . import runner
 from .runner import PKG_ROOT
@@ -231,7 +231,10 @@ def _preempt_bench(m: models.Model, me: str | None = None) -> str:
                 continue
             _stop_runner(t)
             t.set_status(phase="stuck", last=bench.PREEMPTED, pid=None)
-    return f"note: stopped the bench's replay ({', '.join(names)}) to make room" if names else ""
+    out = [f"the bench's replay ({', '.join(names)})"] if names else []
+    if waits and any(h.get("task") == optimize.HOLDER for h in held.values()) and optimize.stop():
+        out.append("wb optimize (what it measured is kept)")  # real work first, here too
+    return f"note: stopped {' and '.join(out)} to make room" if out else ""
 
 
 def _gpu_note(task: store.Task) -> str:
@@ -1354,6 +1357,40 @@ def cmd_bench(a):
         print(bench.report(a.run, a.label))
 
 
+def cmd_optimize(a):
+    """On request only: measure each Ollama model's window fit here (optimize.py)."""
+    try:
+        if a.action == "estimate":
+            ms = optimize.candidates()
+            if not ms:
+                die("no Ollama model here to measure (wb models)")
+            mins = optimize.estimate(ms) / 60
+            print(f"wb optimize would load {len(ms)} model(s) at a few windows each: about "
+                  f"{max(1, round(mins))} min, holding the GPU alone (a task that wants it stops it). "
+                  "Nothing wakes Claude.")
+            cases = bench.cases()
+            if a.bench and cases:
+                hours = sum(((c.get("original") or {}).get("minutes") or 30)
+                            for c in cases.values()) * len(ms) / 60
+                print(f"--bench then replays the bench's {len(cases)} case(s) on each model: about "
+                      f"{hours:.1f} h more, best overnight")
+        elif a.action == "start":
+            print("\n".join(optimize.start(a.bench)))
+        elif a.action == "stop":
+            pid = optimize.stop()
+            print(f"stopped wb optimize (pid {pid}); what it measured is kept" if pid
+                  else "wb optimize is not running")
+        elif a.action == "apply":
+            if not a.ids:
+                die("name the model(s): wb optimize apply <id>…")
+            for i in a.ids:
+                print(optimize.apply(models.resolve(i)))
+        else:
+            print("\n".join(optimize.report()))
+    except (KeyError, RuntimeError, OSError) as e:
+        die(e.args[0] if e.args else str(e))
+
+
 SCOUT_EVERY_DAYS = 7
 
 
@@ -2320,6 +2357,9 @@ def cmd_doctor(a):
                  "the max_completion_tokens OpenCode sends)" + ("" if capped else f": wb model add {pid}/{name}"))
             if stall := router.thinking_stall(f"{pid}/{name}", e):
                 print(f"--  {stall}")
+            measured = (optimize.state().get("models") or {}).get(f"{pid}/{name}")
+            if measured and (fit := optimize.advice(f"{pid}/{name}", measured)):
+                print(f"--  {fit}")
             if prov["root"] in down:
                 continue
             served = models.ollama_served_context(prov["root"], name)
@@ -2672,6 +2712,15 @@ def parser() -> argparse.ArgumentParser:
     s.add_argument("--by", help=argparse.SUPPRESS); s.add_argument("-n", type=int, default=10)
     s.add_argument("--how", choices=["now", "queued"], default="now", help=argparse.SUPPRESS)
     s.set_defaults(f=cmd_chat)
+    s = sub.add_parser("optimize", help="measure this machine for its models when the user asks: "
+                       "the largest window each Ollama model keeps all on the GPU (detached; real "
+                       "work stops it), then apply one")
+    s.add_argument("action", choices=["start", "estimate", "report", "stop", "apply"], nargs="?",
+                   default="report")
+    s.add_argument("ids", nargs="*", help="apply: the models whose measured window to add")
+    s.add_argument("--bench", action="store_true",
+                   help="start: then replay the bench's cases on every model (wb bench run)")
+    s.set_defaults(f=cmd_optimize)
     s = sub.add_parser("init", help="set a project up: git with an initial commit, "
                                     "AGENTS.md → CLAUDE.md")
     s.add_argument("dir"); s.set_defaults(f=cmd_init)

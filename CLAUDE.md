@@ -122,12 +122,13 @@ dependencies. No packaging: it runs from the clone.
 - `watch.py`: waiting without polling: inotify (ctypes) and pidfd, with a stat fallback.
 - `chat.py` + `chat_static/`: the web chat (stdlib HTTP, a token and a Host check).
 - `images.py`: `wb image`, local image engines from `images.json`; holds the GPU.
+- `optimize.py`: `wb optimize`, only when asked: each Ollama model's largest window all on the GPU.
 - `agent/HANDBOOK.md`: Claude's working habits for the agent. Every agent prompt carries it, so
   keep it short: each token costs prefill time.
 - `skill/workbench/`: the `/workbench` procedure, `SKILL.md` and the `reference/` it reads when needed (`wb setup` links it).
 - `mod/`: the Claude Code plugin (`hooks/register.tsx`, `hooks/apprentice.ts` the pane's
   character, `hooks/register.test.tsx`, `types/index.d.ts`; `.claude-plugin/plugin.json` has no
-  version: installs track main's commits). The repo root's `.claude-plugin/marketplace.json` makes the repo its marketplace.
+  version: installs track main's commits). The root's `.claude-plugin/marketplace.json` makes the repo a marketplace.
 - `bin/wb`, `bin/wb-ask-mcp`: launchers that find the package from their own real path.
 - `tests/`: `test_workbench.py` (end to end, one class per feature), `test_gpu.py`,
   `test_portable.py`, `test_sizing.py`, `test_docs.py` (the docs cover the code),
@@ -164,8 +165,7 @@ Linux there is no Landlock and watch.py falls back to timed waits.
    first output, paused while OpenCode waits on a background job) it gets a nudge; the round after
    it that stalls again is stopped. Limits stretch for a model
    measured slow (`router.budgets`, written into task.json at start). `wb steer` queues a note;
-   `--now` interrupts. Notes a runner never delivered: `wb resume` carries them, feedback and
-   next drop them and say so.
+   `--now` interrupts.
 4. After a clean round the runner runs `--test`, in the agent's lane and environment; failures go back to the agent up to `--auto-fix`
    times without waking Claude (`--test-timeout`, 900 s). A session that reaches the handover point (`fresh_at`, tuned per
    model) after changing a file, with room left for a successor, is stopped mid-round and a fresh
@@ -189,7 +189,7 @@ Plain files under `$WB_HOME` (`~/.local/state/workbench`); the full tree and eve
 ARCHITECTURE.md (*Files and formats*):
 ```
 notify.jsonl results.jsonl lessons.jsonl notes.md tuning.json speed.json gpu.{lock,json,admit,load}
-scout.json update.json watch.json imports/ images/ chat/{messages,receipts}.jsonl chat/listener.json
+scout.json update.json watch.json optimize.json imports/ images/ chat/{messages,receipts}.jsonl chat/listener.json
 bench/{cases/<case>,runs/<run>}/ bench/runs.jsonl bench/driver.json
 rules/<task>/  opencode.json HANDBOOK.md CLAUDE.md bin/git grants.json gitdir.json (no lane)
 locks/<task>.{runner,cmd,status,events,steer,grants}.lock   (store.task_lock: no lane reads them)
@@ -298,8 +298,7 @@ PATH, the lane, and (RealOpenCodeRun) the events, the export, `--session` and co
 ## Troubleshooting
 - `wb doctor`: opencode (2.x) and its config files, git, each model's readiness (BAD when none
   can run), skipped providers and why, an Ollama baseURL without `/v1`, a missing `limit.context`,
-  each Ollama entry's `max_tokens` and context, the state directory, the GPU budget and the devices
-  it counts, a real lane around a test write, `wb` on PATH, the `/workbench` link (and another
+  each Ollama entry's `max_tokens` and context, the state directory, the GPU budget, a real lane around a test write, `wb` on PATH, the `/workbench` link (and another
   copy's), whether the mod is listed as installed.
 - A model "can't run": `wb models` says why (server down, not pulled, no `start` command), and
   `wb start` adds the next step.
