@@ -115,6 +115,17 @@ async function run(engine, device) {
     await until(async () => (await page.locator('.row').count()) === 4)
     const texts = await page.locator('.row .bubble').allTextContents()
     if (new Set(texts).size !== texts.length) throw new Error('duplicates: ' + texts.join(' | '))
+    const href = await page.getAttribute('link[rel=manifest]', 'href')
+    if (!href.endsWith('?k=' + token)) throw new Error('the manifest is not keyed: ' + href)
+  })
+  // Playwright's WebKit doesn't route a page's requests once a service worker is registered
+  if (engine === 'chromium') await check('a reload whose state is slow to come shows the last thread, connecting', async () => {
+    await ctx.route('**/api/**', r => r.abort())
+    await page.reload()
+    await until(async () => (await page.locator('.row').count()) === 4)
+    if (!(await page.textContent('#presence-text')).includes('connecting')) throw new Error(await page.textContent('#presence-text'))
+    await ctx.unroute('**/api/**')
+    await until(async () => (await page.textContent('#presence-text')).includes('listening'), 40000)
   })
   await check('a permission prompt shows Allow and Deny, and a tap answers it once', async () => {
     const id = wb('chat', 'ask', '--tool', 'Bash', '--text', 'git push origin main').split(' ')[0]

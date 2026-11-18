@@ -10,7 +10,7 @@
      instant resync on return or when the network comes back. */
 (() => {
   'use strict'
-  const K = { token: 'wb-chat-token', seen: 'wb-chat-seen', outbox: 'wb-chat-outbox', draft: 'wb-chat-draft' }
+  const K = { token: 'wb-chat-token', seen: 'wb-chat-seen', outbox: 'wb-chat-outbox', draft: 'wb-chat-draft', thread: 'wb-chat-thread' }
   const BACKOFF = [500, 1000, 2000, 4000, 8000, 15000, 30000]
   const DEAD_MS = 40000          // the server pings every 15 s: this long silent means the line is dead
   const CONNECT_MS = 12000       // a connection that never answers: dial again
@@ -29,13 +29,23 @@
   // ---- the key ----
   let token = ''
   {
-    const m = location.hash.match(/token=([\w-]+)/)
-    if (m) { token = m[1]; save(K.token, token); history.replaceState(null, '', location.pathname + location.search) }
+    // the link's fragment, or the installed app's start_url (`?token=`, from the keyed manifest)
+    const m = location.hash.match(/token=([\w-]+)/) || location.search.match(/[?&]token=([\w-]+)/)
+    if (m) { token = m[1]; save(K.token, token); history.replaceState(null, '', location.pathname) }
     else token = load(K.token, '')
   }
+  function keyManifest() {
+    // An installed app on iPhone has its own storage, not Safari's: the manifest it's installed
+    // from carries the key, so it opens keyed (the user, 2026-11-18: no key to paste in the app)
+    const link = document.querySelector('link[rel=manifest]')
+    if (link) link.href = '/manifest.webmanifest' + (token ? '?k=' + encodeURIComponent(token) : '')
+  }
+  keyManifest()
 
   // ---- state ----
-  let state = { messages: [], asks: [], prefs: {}, push: {}, listener: null }
+  // Until the first live state, the thread this page last had, so a reload shows it at once
+  let state = { messages: token ? load(K.thread, []) : [], asks: [], prefs: {}, push: {}, listener: null }
+  let live = false
   let skew = 0                                  // server clock − ours, seconds
   let outbox = load(K.outbox, [])               // [{cid, text, ts, error?}]
   let seen = new Set(load(K.seen, null) || [])  // Claude's messages already shown in full
@@ -381,7 +391,7 @@
     const l = state.listener
     const where = l ? l.cwd.replace(/^\/home\/[^/]+/, '~') : ''
     presence.className = 'presence ' + (!l ? 'away' : l.busy ? 'working' : 'listening')
-    presenceText.textContent = !token ? 'not connected' : !l ? 'no session listening · messages wait' :
+    presenceText.textContent = !token ? 'not connected' : !live ? 'connecting…' : !l ? 'no session listening · messages wait' :
       (l.busy ? 'working in ' : 'listening in ') + where
   }
 
@@ -396,6 +406,8 @@
     if (typeof s.now === 'number') skew = s.now - Date.now() / 1000
     if (s.build && build && s.build !== build && reloadOnce()) return  // updated: the new page
     if (s.build) build = s.build
+    live = true
+    save(K.thread, (s.messages || []).slice(-50))
     state = { messages: s.messages || [], asks: s.asks || [], prefs: s.prefs || {}, push: s.push || {}, listener: s.listener || null }
     if (!sheet.hidden) drawSettings()
     if (state.push.key && !pushSynced) { pushSynced = true; syncPush() }
@@ -584,7 +596,7 @@
     const field = document.createElement('input'); field.placeholder = 'https://…/#token=…'
     field.addEventListener('change', () => {
       const m = field.value.match(/token=([\w-]+)/) || field.value.trim().match(/^([\w-]{20,})$/)
-      if (m) { token = m[1]; save(K.token, token); box.remove(); $('composer').hidden = false; render(); connect(); flush(true); keepKey() }
+      if (m) { token = m[1]; save(K.token, token); box.remove(); $('composer').hidden = false; render(); connect(); flush(true); keepKey(); keyManifest() }
     })
     box.append(h, p, field)
     for (const el of nodes.values()) el.remove()
@@ -626,7 +638,7 @@
   })
   $('forget').onclick = async () => {
     if (pushOn) await setPush(false)  // a device without the key can't read what a push is about
-    showSettings(false); save(K.token, ''); keyless('', true); keepKey()
+    showSettings(false); save(K.token, ''); save(K.thread, []); keyless('', true); keepKey(); keyManifest()
   }
 
   // ---- the app: installing it, and notifications (sw.js; webpush.py on the computer) ----
@@ -740,6 +752,13 @@
   }
   document.addEventListener('visibilitychange', reportSeen)
 
+  async function firstState() {  // at once, without waiting for a stream slot to free up
+    try {
+      const r = await fetch('/api/state', { headers: { Authorization: 'Bearer ' + token }, cache: 'no-store' })
+      if (r.ok && !live) apply(await r.json())
+    } catch {}
+  }
+
   if (!token) keyless('')
-  else { render(); connect(); flush(true); keepKey() }
+  else { render(); firstState(); connect(); flush(true); keepKey() }
 })()

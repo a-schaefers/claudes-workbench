@@ -2358,7 +2358,9 @@ thread no longer):
   Responses carry `Cache-Control: no-store`, `X-Frame-Options: DENY`, `nosniff`, `no-referrer` and
   a CSP (`default-src 'self'`, inline styles only, no framing, no forms).
 - `GET /`, `/index.html`, `/<name>` with a known suffix (html, js, css, svg, png, webmanifest)
-  from `chat_static/`; anything else 404.
+  from `chat_static/`; anything else 404. `/manifest.webmanifest?k=<the token>` (compared in
+  constant time) gives `start_url: "/?token=<it>"`, so the app installed from it opens keyed;
+  any other `k`, the plain `/`.
 - The API wants `Authorization: Bearer <token>` (the `Bearer ` prefix required, compared in
   constant time); else 401 "bad or
   missing token: open the link from `wb chat url`".
@@ -2398,8 +2400,14 @@ thread no longer):
 
 **The page** (`chat_static/`: `index.html`, `app.js`, `app.css`, `manifest.webmanifest`,
 `icon.svg`; no inline script, as the CSP requires). The token is taken from the address's
-fragment into `localStorage` (`wb-chat-token`) and stripped from the address bar; a missing or
-refused one shows a screen that accepts a pasted link or token. The stream is a `fetch` with the
+fragment (or `?token=`, the installed app's start URL) into `localStorage` (`wb-chat-token`) and
+stripped from the address bar; a missing or refused one shows a screen that accepts a pasted link
+or token. It never expires (it is the token file). A keyed page points its manifest link at
+`?k=<token>`, since an app installed on iPhone gets storage of its own, not Safari's (the user,
+2026-11-18: no key to paste in the app). A reload shows the thread the page last had (the last
+50 messages, `wb-chat-thread`) and "connecting…" until the first live state, which it asks
+`/api/state` for at once as well as opening the stream (a refresh showed "no session listening"
+and an empty thread for seconds while the stream waited for a slot, 2026-11-18). The stream is a `fetch` with the
 bearer header (EventSource can't send one), parsed by hand; every state event is a full resync, so
 nothing arrives half-received. A message goes into a local outbox (`wb-chat-outbox`, each with a
 `crypto.randomUUID()` cid) and is sent in order until the server has it; the server ignores a cid
@@ -3222,7 +3230,9 @@ then the reply, a message sent during an outage lands exactly once, the stream r
 reload doubles nothing, a permission prompt's card (Allow at least 44 px tall, a tap answers it,
 the buttons go) and one left to expire, a long plan folded and sent back with a note, a question
 answered (Answer disabled until a pick), the gear's sheet (what this lane is; Let Claude go
-ahead saved, the next prompt allowed at once and listed), the app (its worker runs and holds the
+ahead saved, the next prompt allowed at once and listed), a reload whose state is slow to come (the last thread, "connecting…"; Chromium only, as
+Playwright's WebKit routes no requests once a service worker is registered), a keyed manifest
+link, the app (its worker runs and holds the
 key; install steps; notifications offered, or on iPhone sent to the installed app), what a page
 showed reported to `/api/seen`, a server frozen (SIGSTOP) past the 40 s watchdog and then
 let go (the page heals with no reload; a message sent meanwhile lands once), a changed page file

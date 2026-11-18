@@ -4736,6 +4736,10 @@ class WebChat(Base):
         with mock.patch.object(wp, "send", return_value=410):           # the service says it's gone
             self.assertEqual(wp.push_all(1), {good: 410})
         self.assertEqual(wp.subscriptions(), [])
+        app = self.call("/manifest.webmanifest?k=" + tok)[1]                # the installed app opens keyed
+        self.assertEqual(json.loads(app)["start_url"], "/?token=" + tok)
+        self.assertEqual(json.loads(self.call("/manifest.webmanifest?k=wrong")[1])["start_url"], "/")
+        self.assertEqual(json.loads(self.call("/manifest.webmanifest")[1])["start_url"], "/")
         page = self.call("/sw.js")
         self.assertEqual(page[0], 200)
         self.assertEqual(self.call("/icon-192.png")[0], 200)
