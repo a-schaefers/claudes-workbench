@@ -988,7 +988,8 @@ def _start_fresh(task: store.Task, n: int, why: str) -> None:
 
 # The checks Claude's reviews kept making on 2026-11-17: a rule with no test, a test's expected
 # value that passed by luck, an unchecked error path, small things (a float function on an int, a
-# wrong comment). One automatic round of them, before Claude is woken, costs local time only.
+# wrong comment). An error naming the wrong one of two inputs got past it twice (2026-11-18): the
+# prompt now asks for that case by name. One automatic round of them, before Claude is woken, costs local time only.
 SELF_REVIEW = (
     "Before Claude reviews this, review your own change as a strict senior reviewer would: `git "
     "diff`, and `git status` for new files. Check each point, and fix what fails:\n"
@@ -997,7 +998,9 @@ SELF_REVIEW = (
     "2. Every expected value in the tests: work it out by hand from the rule, not from what your "
     "code prints. A test that passes only because of the values it happens to try is a bug.\n"
     "3. Every error path: each write, read, allocation and parse that can fail is checked and "
-    "handled as the task says.\n"
+    "handled as the task says. Each error message is tested once for every input that can cause "
+    "it (with two inputs, the first valid and the second bad too), checking the exact text, which "
+    "names the input that failed.\n"
     "4. Nothing the task didn't ask for; no dead code, debug output, unused names or wrong "
     "comments; each type used as declared.\n"
     "Then run the acceptance command (`{cmd}`). Do not commit. Finish with a short summary: what "
