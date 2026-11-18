@@ -195,12 +195,13 @@ def mark(worktree: Path) -> str:
     return h.hexdigest()
 
 
-def with_new_files(worktree: Path, *args) -> str:
+def with_new_files(worktree: Path, *args, whole: bool = False) -> str:
     """`git <args>` with new files counted as changes (intent-to-add), in a scratch index: the
     worktree's own index, and anything a concurrent git command holds, are left alone. The
     scratch index starts as a copy of the worktree's, so sparse-checkout's skip-worktree entries
     aren't read as deletions (read-tree listed a monorepo's every file outside the cone as
-    deleted: the 2026-11-16 audit). Nested repositories are left out (nested_repos)."""
+    deleted: the 2026-11-16 audit). Nested repositories are left out (nested_repos). ``whole``
+    adds new files' contents too, not just their intent (for write-tree: snapshot)."""
     # in a private directory of the state dir, not the temp dir: /tmp is in the agent's lane, and
     # an agent process still running could rewrite the index between `add -N` and the diff, so
     # files dropped out of the diff Claude reviews (the 2026-11-16 audit)
@@ -216,10 +217,17 @@ def with_new_files(worktree: Path, *args) -> str:
         except (GitError, OSError):
             git(worktree, "read-tree", "HEAD", env=env)
         skip = [f":(exclude){p}" for p in nested_repos(worktree)]
-        git(worktree, "add", "-A", "-N", *(["--", ".", *skip] if skip else []), env=env)
+        git(worktree, "add", "-A", *([] if whole else ["-N"]), *(["--", ".", *skip] if skip else []),
+            env=env)
         return git(worktree, *args, env=env)
     finally:
         shutil.rmtree(scratch, ignore_errors=True)
+
+
+def snapshot(worktree: Path) -> str:
+    """The working tree as it is now, new files included, as a tree object: a base to diff
+    against later. The worktree's own index is left alone."""
+    return with_new_files(worktree, "write-tree", whole=True).strip()
 
 
 def diff(worktree: Path, base: str, stat=False, paths=(), numstat=False) -> str:

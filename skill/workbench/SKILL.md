@@ -333,7 +333,8 @@ the pane) only for something the user should find later.
 
 ## 4. When woken
 - **review**: the wake carries the report and, when it is small, the whole diff (`wb diff <name>`
-  only when it says the diff was too big, or after you change something). Read every line. Check:
+  only when it says the diff was too big, or after you change something); after your feedback,
+  only the diff since your last review. Read every line. Check:
   - **Correctness**: trace the logic, including edge cases, error paths and inputs the tests
     don't cover.
   - **The spec**: every requirement met, nothing missing, nothing added.
