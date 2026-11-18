@@ -408,6 +408,10 @@ once more and `pid` and `stopping` are cleared.
    `review_diff`: the whole diff under review when it is at most `REVIEW_DIFF_MAX` = 32,000
    characters (~8K tokens), else its stat; each call Claude makes to fetch it re-reads its session,
    2026-11-17, and at 12,000 both significant tasks of 2026-11-18 (13K and 15K) cost that call;
+   after a review of the same step, only the diff since that review notice (`gitops.snapshot`,
+   a tree object recorded as status `reviewed`), with a proposed instruction file shown again only
+   when it changed: the wake after a feedback round carried the whole 14K-character diff again,
+   2026-11-18;
    then the agent's proposed instruction files as diffs, *Claude's files*), exit.
 
 **`run_round(task, n)`.** Writes the config layer and the agent's environment (*What the agent
@@ -2803,6 +2807,7 @@ check-ins off), not `wb start`'s.
 | `reviews` | review rounds in this step (`wb feedback` +1, `wb next` resets) |
 | `auto_fixes`, `auto_fixes_total` | auto-fix rounds since the last review or step; earlier ones |
 | `self_reviewed` | `[steps, reviews]` when the self-review round last ran (`tuned.self_review` on: once per review round) |
+| `reviewed` | `{step, tree}`: the working tree the last review notice showed, a tree object (`gitops.snapshot`); the next review notice of the same step shows the diff since it |
 | `tests` | `{ok, exit, tail, round}` of the last test run (`exit`: a code, `timeout` or `output limit`) |
 | `base_check` | `{ok, exit, tail, limit}` of the acceptance command run once on the base, in the lane (`runner.base_check`; `exit` is `"timeout"` past `limit`); the runner, before round 1, only with `--test` and without `--no-base-check` |
 | `stopping` | wb is stopping the runner (`cli._stop_runner`); cleared by `spawn_runner` and the runner's exit |

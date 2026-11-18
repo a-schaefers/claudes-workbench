@@ -270,6 +270,26 @@ class Lifecycle(Base):
         self.assertIn("big.txt", big)
         self.assertNotIn("+x", big)
 
+    def test_after_feedback_the_review_notice_carries_only_what_changed_since(self):
+        # the wake after a feedback round carried the whole 14K-character diff again, which
+        # Claude already had from the first (2026-11-18)
+        from workbench import runner
+        self.start("t-since", "ok", "--test", TEST_CMD)
+        wait_phase("t-since", {"review"})
+        task = store.Task("t-since")
+        (task.worktree / "CLAUDE.md.proposed").write_text("# rules\n")
+        first = runner.review_diff(task)               # what the feedback round answers
+        self.assertIn("the agent proposes this change", first)
+        (task.worktree / "fixed.txt").write_text("the fix\n")
+        again = runner.review_diff(task)
+        self.assertIn("the diff since your last review", again)
+        self.assertIn("+the fix", again)
+        self.assertNotIn("+42", again)                 # the first round's answer.txt: seen already
+        self.assertIn("proposed instruction files: unchanged", again)
+        self.assertIn("since your last review: (no changes)", runner.review_diff(task))
+        task.set_status(steps=2)                       # a new step is reviewed whole
+        self.assertNotIn("since your last review", runner.review_diff(task))
+
     def test_periodic_check_ins_are_off_unless_asked_for(self):
         # each wakes Claude over its whole context: 500K of one task's 1.2M (2026-11-17)
         self.start("t-quiet", "ok", "--size", "significant")

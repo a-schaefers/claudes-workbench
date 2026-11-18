@@ -791,10 +791,29 @@ def proposal_diff(task: store.Task) -> str:
 def review_diff(task: store.Task) -> str:
     """The diff under review, for the review notice, when it is small; else its stat. Claude reads
     it anyway, and each call to fetch it re-reads the whole session: a wake that carries it saves
-    the review one to three calls (the 2026-11-17 measurement)."""
-    base = "HEAD" if task.status.get("steps", 1) > 1 else task.spec["base"]
+    the review one to three calls (the 2026-11-17 measurement). After Claude's feedback on the
+    same step, only what changed since the last review notice: the wake after a feedback round
+    carried the whole 14K-character diff again, which Claude already had (2026-11-18). Records
+    the snapshot it showed (status `reviewed`)."""
+    steps = task.status.get("steps", 1)
+    base = "HEAD" if steps > 1 else task.spec["base"]
+    last = task.status.get("reviewed") or {}
+    since = last.get("tree") if last.get("step") == steps else None
+    code = (".", ":(exclude)*.proposed")
     try:
-        full = gitops.diff(task.worktree, base, paths=(".", ":(exclude)*.proposed"))
+        task.set_status(reviewed={"step": steps, "tree": gitops.snapshot(task.worktree)})
+        if since:
+            full = gitops.diff(task.worktree, since, paths=code)
+            same = not gitops.diff(task.worktree, since, paths=("*.proposed",))
+            prop = ("\n\nthe agent's proposed instruction files: unchanged since your last review"
+                    if same and proposals(task.worktree) else proposal_diff(task))
+            if not full:
+                return "\n\nthe diff since your last review: (no changes)" + prop
+            if len(full) <= REVIEW_DIFF_MAX:
+                return (f"\n\nthe diff since your last review (wb diff {task.name} for all of "
+                        f"it):\n{full}" + prop)
+            base = since
+        full = gitops.diff(task.worktree, base, paths=code)
         prop = proposal_diff(task)
         if not full:
             return "\n\nthe diff: (no changes)" + prop
