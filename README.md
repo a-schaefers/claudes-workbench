@@ -149,7 +149,7 @@ Claude takes it from there:
 The pane shows the agents working live. You talk to the driver, Claude,
 on the left; Claude talks to the local agent, which does the work on the right:
 
-<p align="center"><img src="docs/driver-and-agent.jpg" alt="Claude Code with the Workbench pane: on the left Claude writes review feedback for a task; on the right the local agent's live transcript shows its build, its passing tests and 'done: waiting for Claude's review'" width="900"></p>
+<p align="center"><img src="docs/driver-and-agent_2.jpg" alt="Claude Code with the Workbench pane: on the left Claude at work in the session; on the right the local agent's summary of its fix, its passing tests and 'done: waiting for Claude's review', and the apprentice saying the task is ready for review" width="900"></p>
 
 Here Claude (left) has just sent the agent review feedback on a step: two exact changes, and
 why. On the right the agent made them, built the project, ran the tests, and summed up its work;
