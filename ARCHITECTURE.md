@@ -2635,9 +2635,9 @@ developer's. Upgrading is `wb update` (or `/workbench-update`, which reloads the
 `claude plugin marketplace update workbench` pulls the clone (the links follow it), `claude plugin
 update workbench@workbench` refreshes the mod. The mod runs `wb update --check --if-due` once per
 session, so a new commit is noticed within a week.
-The mod's copy moves only when `mod/.claude-plugin/plugin.json`'s `version` does, so a change to
-`mod/` bumps it, and `scripts/check-version.sh` holds every pull request to that (*Shipping to
-main*). There is nothing to publish: main is the marketplace, so a merge ships. A third-party
+The mod's copy moves only when `mod/.claude-plugin/plugin.json`'s `version` does, while `wb`
+moves with every pull; so the product has one version, and every change to what ships raises it
+(`scripts/check-version.sh` holds every pull request to that: *Shipping to main*). There is nothing to publish: main is the marketplace, so a merge ships. A third-party
 marketplace doesn't auto-update unless the user turns that on (`/plugin` → Marketplaces).
 
 **Developing**: a clone, with the links pointing into it and the clone itself as the marketplace,
@@ -2842,8 +2842,11 @@ push: every change is a pull request that merges once `check` is green and it is
   auto-merge armed: fix, commit, run it again.
 - **Versions and releases.** `scripts/check-version.sh [base]` (default `origin/main`), in
   `check` on every pull request and in `ship.sh` before it pushes: plugin.json's `version` must be
-  `workbench/__init__.py`'s `__version__`, and a branch that changes `mod/` (its `*.test.*` files
-  aside) must raise it above the base's (`sort -V`), or users' copies never move. Then
+  `workbench/__init__.py`'s `__version__`, and a branch that changes what ships must raise it
+  above the base's (`sort -V`; a patch is enough). What ships is everything but `tests/`, the
+  mod's `*.test.*` files, `.github/`, `scripts/`, `docs/`, README.md, ARCHITECTURE.md, CLAUDE.md,
+  LICENSE and `.gitignore`: the code, the mod, the handbook and the skill are one product with one
+  number, so a pane, a `wb` and an agent prompt that differ never claim the same version. Then
   `.github/workflows/release.yml` runs `scripts/release.sh` on every push to main, daily (a merge
   armed with Actions' token starts no push workflow) and by hand: a version without its tag gets
   one, `v<version>` with a trailing `.0` dropped (0.90.0 was `v0.90`), on the first commit of
@@ -2927,10 +2930,10 @@ push: every change is a pull request that merges once `check` is green and it is
   and the `macos` job's `python-version`, the README's badge and *What you need*.
 - **The merge gate** (`owner-merge.yml`, the ruleset, `check.yml`'s job name) →
   `tests/test_workflows.py`, `scripts/github-settings.sh apply`, *Shipping to main*.
-- **`mod/` for users** → bump `mod/.claude-plugin/plugin.json`'s `version`, or a marketplace
-  install keeps the old copy (*Installing*). **A release** → the same `version` in
+- **Anything that ships** (all but the tests, CI, `scripts/` and the docs) → raise the version
+  (a marketplace install keeps its old copy of `mod/` until it moves: *Installing*), the same in
   `workbench/__init__.py` (`wb --version`, task.json's `wb_version`, the ask server's
-  `serverInfo`) and plugin.json (`check-version.sh` holds them equal); `release.yml` tags and
+  `serverInfo`) and plugin.json (`check-version.sh` holds both); `release.yml` tags and
   releases it once merged (*Shipping to main*). **`wb setup`'s links** → README's quickstart and
   *Installing*.
 - **A model name** → never in code or the skill: models come from OpenCode's config, choices from

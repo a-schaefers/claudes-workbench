@@ -54,7 +54,8 @@ anyone else's wait for the owner (ARCHITECTURE.md, *Shipping to main*).
 - The docs match the change (*Keeping the docs true*).
 - `python3 -m unittest` (`tests/test_docs.py` included), and `claude plugin validate mod &&
   claude plugin test mod`.
-- A change to `mod/` raises the version in plugin.json and `__init__.py` (`check-version.sh`).
+- A change to anything that ships (not tests, CI, scripts, docs) raises the version in
+  plugin.json and `__init__.py` together, a patch at least (`check-version.sh`).
 - A change to the web chat (`chat.py`, `chat_static/`): the browser test too (sends, receipts, an
   outage, a reload; WebKit as an iPhone, Chromium as a Pixel). Playwright isn't a dependency.
 - A change to how OpenCode is invoked or read (the runner's argv, the event or export fields):
@@ -138,7 +139,7 @@ dependencies. No packaging: it runs from the clone.
   the owner's pull requests only), `release.yml`, `rulesets/main.json`, dependabot for the pins.
 - `scripts/`: `ship.sh` (the road to main), `github-settings.sh check|apply` (the repo's settings),
   `install-opencode.sh` (CI's OpenCode, from its release, hash-checked), `check-version.sh` (a
-  change to `mod/` raises the version), `release.sh` (`release.yml`: tags each new version).
+  shipping change raises the version), `release.sh` (`release.yml`: tags each new version).
 - `systemd/wb-chat.service`: keeps the web chat up. `docs/`: the README's images (a replaced image
   gets a new file name, for GitHub's cache).
 
