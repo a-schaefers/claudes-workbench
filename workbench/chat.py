@@ -31,6 +31,7 @@ import time
 import zlib
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
+from urllib.parse import parse_qs, urlsplit
 
 from . import store, webpush
 from .watch import Watcher
@@ -475,6 +476,12 @@ class Handler(BaseHTTPRequestHandler):
         if not self._allowed():
             return
         path = self.path.split("?")[0]
+        if path == "/manifest.webmanifest":  # with the key, it opens the installed app keyed
+            k = (parse_qs(urlsplit(self.path).query).get("k") or [""])[0]
+            m = json.loads((STATIC / "manifest.webmanifest").read_text())
+            if self.secret and k and hmac.compare_digest(k.encode(), self.secret.encode()):
+                m["start_url"] = f"/?token={k}"
+            return self._send(200, json.dumps(m).encode(), TYPES[".webmanifest"])
         if path == "/api/state":
             if self._authed():
                 self._json(200, snapshot())
