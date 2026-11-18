@@ -977,6 +977,62 @@ test('the web chat reaches Claude only in /workbench mode, with a receipt, and o
   expect(asked.length).toBe(1)
 })
 
+test('a permission prompt while the user is away goes to the web chat, and their answer settles it', async ($, on) => {
+  // the dialog would wait for nobody (the user, 2026-11-18)
+  const clock = mock.clock(on, { now: 1_800_000_000_000 })
+  const files: Record<string, string> = {}
+  fakeTasks(on, files, [])
+  const toasts: string[] = []
+  on('ui.toast', (_: any, e: any) => { toasts.push(e.text); return { value: undefined } })
+  on('session.cwd', () => ({ value: '/home/u/project' }))
+  on('skill.prompt', (_: any, e: any) => ({ text: e.text }))
+  on('prompt.submit', (_: any, e: any) => ({ text: e.text }))
+  let said = 'allow'
+  const runs: string[][] = []
+  on('process.run', (_: any, e: any) => {
+    runs.push(e.argv)
+    const [, cmd, act] = e.argv
+    if (cmd === 'chat' && act === 'ask') return { value: { exitCode: 0, stdout: 'ask-1-ab\n', stderr: '' } }
+    if (cmd === 'chat' && act === 'wait') return { value: { exitCode: said ? 0 : 1, stdout: said, stderr: '' } }
+    return { value: { exitCode: 0, stdout: 'no open tasks', stderr: '' } }
+  })
+  on('classic.PermissionRequest', () => ({}))                 // no settings hook decides: the dialog
+  const ask = (tool_name: string, tool_input: unknown) =>
+    $.classic.PermissionRequest({ tool_name, tool_input } as any) as Promise<any>
+  await $.session.start({ cwd: '/home/u/project', surface: 'terminal', isInteractive: true })
+  await clock.advance(3000)
+  expect((await ask('Bash', { command: 'git push' })).decision).toBeUndefined()  // at the terminal: the dialog
+  expect(runs.some(a => a[2] === 'ask')).toBe(false)
+
+  await $.skill.prompt({ skill: 'workbench', text: 'x', frontmatter: {}, source: 'userSettings' })
+  files['/wb/chat/messages.jsonl'] = JSON.stringify({ id: 'm1', ts: 1_800_000_003, from: 'user', text: 'hi' }) + '\n'
+  await clock.advance(3000)                                     // a web message: the user is away
+  expect((await ask('Bash', { command: 'git push origin main' })).decision).toEqual({ behavior: 'allow' })
+  expect(runs.find(a => a[2] === 'ask')).toEqual(['wb', 'chat', 'ask', '--tool', 'Bash', '--text', 'git push origin main'])
+  expect(runs.find(a => a[2] === 'wait')?.slice(0, 4)).toEqual(['wb', 'chat', 'wait', 'ask-1-ab'])
+  expect(toasts.some(t => t.includes('waiting for you in the web chat'))).toBe(true)
+
+  said = 'deny'
+  const no = (await ask('Write', { file_path: '/etc/hosts', content: 'x' })).decision
+  expect(no.behavior).toBe('deny')
+  expect(no.message).toContain('wb chat reply')                  // Claude asks the user what instead
+  expect(runs.filter(a => a[2] === 'ask').at(-1)?.at(-1)).toBe('/etc/hosts')
+
+  const before = runs.length
+  expect((await ask('AskUserQuestion', { questions: [] })).decision).toBeUndefined()  // the person's own
+  expect(runs.length).toBe(before)
+
+  said = ''                                                     // wb can't wait: it expires, the dialog comes
+  expect((await ask('Bash', { command: 'rm -rf build' })).decision).toBeUndefined()
+  expect(runs.at(-1)).toEqual(['wb', 'chat', 'answer', 'ask-1-ab', 'expired', '--by', 'timeout'])
+
+  await $.prompt.submit({ text: 'back now' } as any)            // typed in the terminal: back
+  const n = runs.length
+  said = 'allow'
+  expect((await ask('Bash', { command: 'git push' })).decision).toBeUndefined()
+  expect(runs.slice(n).some(a => a[2] === 'ask')).toBe(false)
+})
+
 test('running wb counts as workbench mode, and a web message reaches a running turn', async ($, on) => {
   const clock = mock.clock(on, { now: 1_800_000_000_000 })
   const files: Record<string, string> = {}

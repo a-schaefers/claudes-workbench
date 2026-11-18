@@ -772,6 +772,44 @@ async function measureIfDue($: any) {
   if (ok && out.startsWith('measuring')) $.ui.toast(`workbench: ${out.trim()}`)  // else not due
 }
 
+// Claude Code's permission prompts while the user is away on the web chat: the dialog would wait
+// for nobody, so the prompt goes to the chat and the user's Allow or Deny there settles it (the
+// user, 2026-11-18). Unanswered in ASK_WAIT_MS, or the turn interrupted, it expires there and the
+// dialog comes up as usual. It waits one `wb chat wait` at a time (a hook's budget stands still
+// while a `$` call runs, and one may take ten minutes at most), so an interrupt is seen soon.
+const ASK_WAIT_MS = 30 * 60_000
+const ASK_CHUNK_S = 20
+// Questions and plans are the person's own to answer, in the terminal, not a permission
+const PERSON_TOOLS = new Set(['AskUserQuestion', 'ExitPlanMode', 'EnterPlanMode'])
+
+function askText(input: unknown): string {
+  const i = (input && typeof input === 'object' ? input : {}) as Record<string, unknown>
+  const what = [i.command, i.file_path, i.url, i.path, i.pattern].find(v => typeof v === 'string')
+  const text = typeof what === 'string' ? what : JSON.stringify(i)
+  return text.length > 1500 ? text.slice(0, 1500) + '…' : text
+}
+
+// The PermissionRequest answer: allow or deny from the user's tap, else undefined (the dialog)
+async function askOnChat($: any, tool: string, input: unknown, signal?: AbortSignal) {
+  const posted = await runWb($, ['chat', 'ask', '--tool', tool, '--text', askText(input)], 15_000)
+  const id = posted.out.split('\n').pop() || ''
+  if (!posted.ok || !id.startsWith('ask-')) return undefined
+  $.ui.toast('workbench: a permission prompt is waiting for you in the web chat')
+  const deadline = (await $.clock.now()) + ASK_WAIT_MS
+  while (!signal?.aborted) {
+    const left = deadline - (await $.clock.now())
+    if (left <= 0) break
+    const secs = Math.max(1, Math.min(ASK_CHUNK_S, Math.ceil(left / 1000)))
+    const { ok, out } = await runWb($, ['chat', 'wait', id, '--timeout', String(secs)], (secs + 15) * 1000)
+    if (out === 'allow') return { behavior: 'allow' as const }
+    if (out === 'deny') return { behavior: 'deny' as const,
+      message: 'The user said no in the web chat: ask them there (wb chat reply) what to do instead.' }
+    if (!ok || out !== 'open') break
+  }
+  await runWb($, ['chat', 'answer', id, 'expired', '--by', signal?.aborted ? 'interrupted' : 'timeout'], 15_000)
+  return undefined
+}
+
 async function checkUpdate($: any) {
   const { ok, out } = await runWb($, ['update', '--check', '--if-due'])
   if (ok && out.startsWith('update available')) $.ui.toast(`workbench: ${out}`)
@@ -1091,6 +1129,18 @@ export const register: Register = (on, options) => {
       void poll($)
     }
     return next(e)
+  })
+
+  // A permission prompt while the user is away on the web chat goes there (askOnChat): the
+  // moment the dialog would come up, in the session the chat listens to. A settings hook's own
+  // answer stands, and a failed hook leaves the dialog to come up as usual.
+  on('classic.PermissionRequest', async ($, e, next) => {
+    const r = await next(e)
+    if (r.decision || PERSON_TOOLS.has(e.tool_name)) return r
+    const st = await read($, chat)
+    if (!st.delegating || !st.webAt || (await $.clock.now()) - st.webAt >= AWAY_MS) return r
+    const decision = await askOnChat($, e.tool_name, e.tool_input, next.signal)
+    return decision ? { ...r, decision } : r
   })
 
   // Delegating with wb counts as workbench mode too (a session resumed mid-delegation, or one

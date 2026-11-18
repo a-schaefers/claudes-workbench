@@ -83,6 +83,24 @@ main { flex: 1; overflow-y: auto; overscroll-behavior: contain; -webkit-overflow
   border-radius: 20px 20px 20px 6px; font: 16.5px/1.55 var(--serif); box-shadow: var(--shadow);
 }
 .claude .bubble.flowing { white-space: pre-wrap; }
+.row.ask { align-items: stretch; }
+.ask .card {
+  max-width: 620px; background: var(--accent-soft); border: 1px solid var(--accent); padding: 12px 14px;
+  border-radius: 18px; box-shadow: var(--shadow); font: 15px/1.45 var(--sans);
+}
+.ask.done .card { background: var(--panel); border-color: var(--line); opacity: .8; }
+.ask .asks { font-weight: 600; }
+.ask pre { font: 13.5px/1.45 var(--mono); white-space: pre-wrap; overflow-wrap: anywhere; margin: 6px 0 10px; }
+.ask.done pre { margin-bottom: 0; }
+.ask .choices { display: flex; gap: 10px; }
+.ask .choices button {
+  flex: 1; min-height: 46px; font: 600 16px var(--sans); border-radius: 12px; cursor: pointer;
+  border: 1px solid var(--line); background: var(--panel); color: var(--fg);
+}
+.ask .choices .allow { background: var(--ok); border-color: var(--ok); color: #fff; }
+.ask .choices button:disabled { opacity: .5; cursor: default; }
+.ask .said { display: block; color: var(--bad); font-size: 13px; margin-top: 6px; }
+.ask .said:empty { display: none; }
 .claude .bubble.flowing::after {
   content: ""; display: inline-block; width: .5em; height: 1em; margin-left: 2px; vertical-align: -2px;
   background: var(--accent); border-radius: 2px; animation: blink 1s steps(2) infinite;

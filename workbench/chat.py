@@ -137,7 +137,73 @@ def pending() -> list[dict]:
 
 
 def snapshot() -> dict:
-    return {"messages": thread(), "listener": listener(), "now": store.now()}
+    return {"messages": thread(), "asks": asks(), "listener": listener(), "now": store.now()}
+
+
+# ---- permission prompts ----
+# While the user is away on the web chat, the mod puts Claude Code's permission prompts here: the
+# terminal's dialog would wait for nobody (the user, 2026-11-18). asks.jsonl holds an ask row
+# {id, ts, tool, text}, then answer rows {id, ts, answer, by}; the first answer row wins, so the
+# page's answer and the mod's expiry, written by two processes, can't both stand.
+ANSWERS = ("allow", "deny", "expired")
+ASK_TEXT = 2000
+
+
+def ask(tool: str, text: str) -> dict:
+    row = {"id": f"ask-{int(time.time() * 1000)}-{secrets.token_hex(4)}", "ts": store.now(),
+           "tool": tool[:200], "text": text[:ASK_TEXT]}
+    store.append_jsonl(chat_dir() / "asks.jsonl", row)
+    return row
+
+
+def asks(limit: int = 20) -> list[dict]:
+    """The latest asks, each with its answer (None while open), `answered` and `by`."""
+    seen: dict[str, dict] = {}
+    for r in store.read_jsonl(chat_dir() / "asks.jsonl")[0]:
+        a = seen.get(r.get("id"))
+        if "answer" in r:
+            if a and a["answer"] is None and r["answer"] in ANSWERS:
+                a.update(answer=r["answer"], answered=r["ts"], by=r.get("by"))
+        elif "tool" in r and r.get("id"):
+            seen[r["id"]] = {**r, "answer": None}
+    return list(seen.values())[-limit:]
+
+
+def find_ask(ask_id: str) -> dict | None:
+    return next((a for a in reversed(asks(10_000)) if a["id"] == ask_id), None)
+
+
+def answer(ask_id: str, verdict: str, by: str) -> dict | None:
+    """Answer an open ask (a later answer changes nothing). The ask as it now stands, None when
+    there is no such ask."""
+    if verdict not in ANSWERS:
+        raise ValueError(verdict)
+    cur = find_ask(ask_id)
+    if cur and cur["answer"] is None:
+        store.append_jsonl(chat_dir() / "asks.jsonl",
+                           {"id": ask_id, "ts": store.now(), "answer": verdict, "by": by})
+        cur = find_ask(ask_id)
+    return cur
+
+
+def wait_answer(ask_id: str, timeout: float) -> str | None:
+    """Block until the ask is answered (its answer) or the timeout passes (None), woken by the
+    file's change; KeyError when there is no such ask."""
+    deadline = time.monotonic() + timeout
+    w = Watcher(chat_dir())  # before the first look, so an answer between the two isn't missed
+    try:
+        while True:
+            cur = find_ask(ask_id)
+            if cur is None:
+                raise KeyError(ask_id)
+            if cur["answer"]:
+                return cur["answer"]
+            left = deadline - time.monotonic()
+            if left <= 0:
+                return None
+            w.wait(min(left, 5))
+    finally:
+        w.close()
 
 
 def _alive(pid) -> bool:
@@ -313,7 +379,7 @@ class Handler(BaseHTTPRequestHandler):
     def do_POST(self):
         if not self._allowed():
             return
-        if self.path != "/api/send":
+        if self.path not in ("/api/send", "/api/answer"):
             return self._json(404, {"error": "not found"})
         if not self._authed():
             return
@@ -332,6 +398,14 @@ class Handler(BaseHTTPRequestHandler):
             text, cid = str(body.get("text", "")).strip(), body.get("cid")
         except (ValueError, AttributeError):
             return self._json(400, {"error": "bad json"})
+        if self.path == "/api/answer":  # a permission prompt: allow or deny, from the page
+            ask_id, verdict = body.get("id"), body.get("answer")
+            if not (isinstance(ask_id, str) and 0 < len(ask_id) <= 64) or verdict not in ("allow", "deny"):
+                return self._json(400, {"error": "an answer is {id, answer: allow|deny}"})
+            cur = answer(ask_id, verdict, "web")
+            if cur is None:
+                return self._json(404, {"error": "no such prompt"})
+            return self._json(200, {"ask": cur, "state": snapshot()})
         if not text or len(text) > MAX_TEXT:
             return self._json(400, {"error": f"a message is 1 to {MAX_TEXT} characters"})
         if cid is not None and not (isinstance(cid, str) and 0 < len(cid) <= 64):
