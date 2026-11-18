@@ -319,11 +319,16 @@ scarce resource, so each row also records what the task cost the Claude Code ses
 the same `usage` on each, so counted once by `message.id`), and a call is charged to tasks of that
 session only:
 - a call whose Bash runs `wb … <task>` (each `wb` in the command, split with `shlex`) is that
-  task's, and so are the turn's calls after it, until a `wb` names other tasks or `wb
-  accept|discard` closes it (`CLOSING`);
-- a turn's calls before its first such `wb` are those first named tasks' (the reading and the
-  spec before `wb start`), or the task's whose wake opened the turn (`` [workbench] Task `<name>` ``,
-  the mod's opening, `WAKE`); a turn that names none is no task's (planning, other work);
+  task's, and so are the turn's calls after it, until a `wb` names other tasks, `wb
+  accept|discard` closes it (`CLOSING`), or a call edits (`EDITS`) a file outside the task's
+  worktree that is not a file handed to `wb` (`HANDED`: `--spec`, `--message`, `--file`): that
+  is other work;
+- a turn's calls just before its first such `wb` are that call's tasks' (the reading and the
+  spec before `wb start`), back to the last call that ran any `wb` or edited a file other than
+  one the naming call hands over or one in the task's worktree: a long turn of other work that ended
+  in `wb start` once put all of it on the task (82K output, 2026-11-17); a turn a wake opened
+  (`` [workbench] Task `<name>` ``, the mod's opening, `WAKE`) is that task's from its start; a
+  turn that names none is no task's (planning, other work);
 - a call naming several tasks is split evenly; a subagent's call is charged as the session's
   call before it.
 

@@ -3512,6 +3512,32 @@ class ClaudeSpend(Base):
         self.assertEqual(spend.usage(self.task("never-named"))["output"], 0)
         self.assertEqual(spend.usage(store.Task("theirs")), None)   # its session has no transcript
 
+    def test_a_turn_of_other_work_ending_in_wb_start_charges_only_the_spec_before_it(self):
+        from workbench import spend
+        t3 = self.task("t3")
+
+        def edit(mid, at, out, path):
+            return [{"type": "assistant", "timestamp": at, "message": {
+                "id": mid, "role": "assistant", "usage": {"output_tokens": out},
+                "content": [{"type": "tool_use", "name": "Write", "input": {"file_path": path}}]}}]
+        self.transcript([
+            _turn("build the feature, then hand the next step off", "2026-11-17T10:00:00Z"),
+            *edit("e1", "2026-11-17T10:00:01Z", 1000, "/r/src/feature.py"),   # Claude's own work
+            *_call("w1", "2026-11-17T10:00:02Z", 7, "wb status"),
+            *_call("r0", "2026-11-17T10:00:03Z", 300),                          # after wb: still other work
+            *edit("e2", "2026-11-17T10:00:04Z", 500, "/r/src/other.py"),
+            *_call("r1", "2026-11-17T10:00:05Z", 3),                            # reading for the spec
+            *edit("s1", "2026-11-17T10:00:06Z", 5, "/tmp/s/spec.md"),           # the spec itself
+            *_call("st", "2026-11-17T10:00:07Z", 11, "cd /tmp/s && wb start t3 --spec spec.md"),
+            *_call("r2", "2026-11-17T10:00:08Z", 13),                           # still t3's
+            *edit("e3", "2026-11-17T10:00:09Z", 700, "/r/src/feature.py"),     # back to other work
+            *_call("r3", "2026-11-17T10:00:10Z", 400),                          # reading for the feedback
+            *edit("f1", "2026-11-17T10:00:11Z", 17, "/tmp/s/fb.md"),            # feedback for it
+            *edit("f2", "2026-11-17T10:00:12Z", 19, str(t3.worktree / "a.py")),  # its worktree
+            *_call("fb", "2026-11-17T10:00:13Z", 23, "wb feedback t3 --message=/tmp/s/fb.md"),
+        ])
+        self.assertEqual(spend.usage(t3)["output"], 3 + 5 + 11 + 13 + 400 + 17 + 19 + 23)
+
     def test_the_weights_count_writes_reads_and_output_against_input(self):
         from workbench import spend
         self.assertEqual(spend.weighted({"input": 100, "cache_write_5m": 100, "cache_write_1h": 100,
