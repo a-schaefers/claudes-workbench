@@ -289,8 +289,11 @@ longer ones, learned per model (*Budgets and speed* below); none goes below its 
 interrupted, not handed over) the runner runs the acceptance command (`--test`) in the worktree,
 through the shell, with a 15-minute limit (`--test-timeout`); the output is saved per round (`tests.txt`). If it
 fails and auto-fix rounds remain (`--auto-fix`, default 2, counted since the last review round or
-step), the failure goes straight back to the agent as the next round's prompt (fix the code,
-don't weaken the tests), and Claude isn't woken. A note that arrives during the tests goes to
+step), the failure goes straight back to the agent as the next round's prompt (`auto_fix_prompt`: fix
+the code, don't weaken the tests; a failing check it wrote this task, work its expected value out
+by hand first and correct the test if that was wrong; never blame the compiler or system: an
+agent whose change compared the wrong way round spent 40 minutes sure gcc was broken,
+2026-11-18), and Claude isn't woken. A note that arrives during the tests goes to
 the agent first; that test result is dropped. With self-review on (the `self_review` knob,
 *Self-tuning*: on by default, learned per model; `--self-review`/`--no-self-review`, task.json
 `self_review`, set it for one task), the first time the tests pass in a review round (status `self_reviewed`, the `[steps, reviews]` it
