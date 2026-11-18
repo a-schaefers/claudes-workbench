@@ -78,6 +78,12 @@ class Ruleset(unittest.TestCase):
         self.assertEqual(rules["pull_request"]["required_approving_review_count"], 1)
         self.assertTrue(rules["pull_request"]["dismiss_stale_reviews_on_push"])
 
+    def test_a_pull_request_is_checked_against_the_newest_main(self):
+        # two pull requests that both raise the version to the same number each pass against
+        # the main they started from; only the second's rerun on the newer main fails (2026-11-18)
+        rules = {r["type"]: r.get("parameters", {}) for r in json.loads(RULESET.read_text())["rules"]}
+        self.assertTrue(rules["required_status_checks"]["strict_required_status_checks_policy"])
+
 
 class OwnerMerge(unittest.TestCase):
     def setUp(self):
