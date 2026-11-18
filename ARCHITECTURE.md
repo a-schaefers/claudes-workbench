@@ -1219,7 +1219,9 @@ nothing until a surface attaches.
   what it is doing now and how long the task has left. A short pane gets its face on one line
   instead. The web chat's link is pinned at the bottom.
 - **The status line** reads like `⚒ wb · add-scores running r2 · fix-typo asks · 1 awaiting
-  review`, or `⚒ wb · workbench mode` with nothing open.
+  review`, or `⚒ wb · workbench mode` with nothing open. Outside workbench mode it counts only
+  the session's own tasks (`mine`), and shows nothing without one: another session's running task
+  filled it, and opened the pane, in a session the user kept off workbench (2026-11-17).
 - **`wb watch [task]`** (`workbench/transcript.py`) is the same transcript in a terminal.
 - **`wb status`**, **`wb log [-f]`**, **`wb report [--round N]`** and **`wb diff [--stat] [--all]
   [paths]`** are the compact views Claude itself uses. `wb status` reaps a task whose runner died
@@ -2315,7 +2317,8 @@ last part through `tail -c`, from a whole line, since `$.fs.read` rejects a file
 `tasks/*/status.json`, then `task.json` for the tasks shown (closed tasks drop out 30 min after
 their last update, and an accepted or discarded one is then never read again in that load; open
 ones get their last 4 event lines as `recent`), sorted by creation; sets the status line; opens
-the pane once per load when a task is queued/running/testing or workbench mode is on (an open the
+the pane once per load when one of the session's own tasks (any task, in workbench mode) is
+queued/running/testing or workbench mode is on (an open the
 user didn't ask for is placed only on a wide terminal; a pane the user closed stays closed for that
 load); refreshes the live transcript while the pane is shown (`wb watch <task> --json --last
 2000`, at most every 5 s (`LIVE_EVERY_MS`) while the followed task is active, at once when its
