@@ -3805,6 +3805,20 @@ class Bench(Base):
         bench.drive(run)                                                  # nothing left to do
         self.assertEqual(len(bench.rows()), 1)
 
+    def test_the_report_says_why_replays_never_started_and_where_their_logs_are(self):
+        # #89 (the 2026-11-18 audit): a run whose every replay failed to start said "no replays yet"
+        from workbench import bench
+        base = {"ts": 1, "run": "r1", "label": "", "rep": 1, "model": "local/m"}
+        store.append_jsonl(bench.runs_file(), {**base, "case": "c1", "task": "bench-c1-1",
+                                               "outcome": "error", "why": "wb start refused"})
+        store.append_jsonl(bench.runs_file(), {**base, "case": "c2", "task": "bench-c2-1",
+                                               "outcome": "preempted"})
+        out = run_wb("bench", "report")
+        self.assertIn("no replay finished; 1 didn't start:", out)
+        self.assertIn("c1 on local/m: didn't start: wb start refused", out)
+        self.assertIn(str(bench.home() / "runs" / "r1" / "bench-c1-1" / "wb.log"), out)
+        self.assertNotIn("no replays yet", out)
+
     def test_a_real_task_that_needs_the_gpu_stops_the_bench_replay(self):
         from workbench import bench
         self.accepted("t-src")
