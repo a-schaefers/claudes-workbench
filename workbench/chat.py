@@ -41,6 +41,7 @@ REPLAN_EVERY = 30       # seconds between looks at a skipped bind address
 LISTENING_FOR = 15      # seconds: a listener.json older than this means nobody is listening
 MAX_TEXT = 8000
 MAX_BODY = 32 * 1024
+SHOT_MAX = 16 << 20  # a screenshot served whole up to this
 MAX_STREAMS = 16        # open /api/stream connections (each holds a thread)
 PING_EVERY = 15         # seconds between keep-alive comments on a stream
 TIMEOUT = 30            # seconds a connection may stall (more than PING_EVERY: streams write by then)
@@ -112,16 +113,45 @@ def tailscale() -> dict:
 
 # ---- the thread ----
 
-def send(text: str, frm: str, cid: str | None = None) -> dict:
+def shots(task: str, n) -> dict | None:
+    """What a pair of wb shot's screenshots is of (tasks/<task>/shots/<n>/shots.json, #99): the
+    task, step, round, viewport and each side's revision and image; None when there is none."""
+    if not (isinstance(task, str) and store.NAME_RE.match(task) and isinstance(n, int) and n > 0):
+        return None
+    m = store.read_json(store.Task(task).dir / "shots" / str(n) / "shots.json", None)
+    if not isinstance(m, dict):
+        return None
+    return {"task": task, "n": n, "step": m.get("step"), "round": m.get("round"),
+            "viewport": m.get("viewport"),
+            **{s: {"rev": (m.get(s) or {}).get("rev"), "image": bool((m.get(s) or {}).get("image"))}
+               for s in ("base", "candidate")}}
+
+
+def shot_png(task: str, n: int, side: str) -> bytes | None:
+    """One side's screenshot, never through a link: it is wb shot's own copy."""
+    if side not in ("base", "candidate") or not shots(task, n):
+        return None
+    p = store.Task(task).dir / "shots" / str(n) / f"{side}.png"
+    try:
+        fd = os.open(p, os.O_RDONLY | os.O_NOFOLLOW)
+    except OSError:
+        return None
+    with os.fdopen(fd, "rb") as f:
+        return f.read(SHOT_MAX + 1)[:SHOT_MAX]
+
+
+def send(text: str, frm: str, cid: str | None = None, **extra) -> dict:
     """Append a message. A client id (cid) already in the thread returns that message instead,
-    so a retried send never lands twice."""
+    so a retried send never lands twice. ``extra``: a pair of screenshots (``shots``), or what a
+    reply is about (``about``)."""
     with _send_lock:
         if cid:
             for r in store.read_jsonl(chat_dir() / "messages.jsonl")[0][-500:]:
                 if r.get("cid") == cid:
                     return r
         row = {"id": f"{int(time.time() * 1000)}-{secrets.token_hex(3)}", "ts": store.now(),
-               "from": frm, "text": text, **({"cid": cid} if cid else {})}
+               "from": frm, "text": text, **({"cid": cid} if cid else {}),
+               **{k: v for k, v in extra.items() if v}}
         store.append_jsonl(chat_dir() / "messages.jsonl", row)
         return row
 
@@ -518,7 +548,7 @@ class Handler(BaseHTTPRequestHandler):
         self.send_header("X-Content-Type-Options", "nosniff")
         self.send_header("Referrer-Policy", "no-referrer")
         self.send_header("Content-Security-Policy",
-                         "default-src 'self'; style-src 'self' 'unsafe-inline'; "
+                         "default-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' blob:; "
                          "frame-ancestors 'none'; base-uri 'none'; form-action 'none'")
 
     def _send(self, code: int, body: bytes, ctype: str) -> None:
@@ -561,6 +591,17 @@ class Handler(BaseHTTPRequestHandler):
             if self.secret and k and hmac.compare_digest(k.encode(), self.secret.encode()):
                 m["start_url"] = f"/?token={k}"
             return self._send(200, json.dumps(m).encode(), TYPES[".webmanifest"])
+        if path == "/api/shot":  # one side of wb shot's pair (#99), behind the token like the rest
+            if self._authed():
+                q = parse_qs(urlsplit(self.path).query)
+                n = (q.get("n") or [""])[0]
+                body = shot_png((q.get("task") or [""])[0], int(n) if n.isdigit() else 0,
+                                (q.get("side") or [""])[0])
+                if body is None:
+                    self._json(404, {"error": "no such screenshot"})
+                else:
+                    self._send(200, body, "image/png")
+            return
         if path == "/api/state":
             if self._authed():
                 self._json(200, snapshot())
@@ -699,7 +740,13 @@ class Handler(BaseHTTPRequestHandler):
             return self._json(400, {"error": f"a message is 1 to {MAX_TEXT} characters"})
         if cid is not None and not (isinstance(cid, str) and 0 < len(cid) <= 64):
             return self._json(400, {"error": "bad cid"})
-        msg = send(text, "user", cid)
+        about = body.get("about")
+        if about is not None:  # a reply to a pair of screenshots: its task and step, from the pair
+            pair = shots(about.get("task"), about.get("n")) if isinstance(about, dict) else None
+            if not pair:
+                return self._json(400, {"error": "no such screenshots"})
+            about = {k: pair[k] for k in ("task", "n", "step", "round")}
+        msg = send(text, "user", cid, about=about)
         self._json(200, {"message": msg, "listener": listener(), "state": snapshot()})
 
 

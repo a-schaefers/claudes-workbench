@@ -10,7 +10,7 @@
      instant resync on return or when the network comes back. */
 (() => {
   'use strict'
-  const K = { token: 'wb-chat-token', seen: 'wb-chat-seen', outbox: 'wb-chat-outbox', draft: 'wb-chat-draft', thread: 'wb-chat-thread' }
+  const K = { token: 'wb-chat-token', seen: 'wb-chat-seen', outbox: 'wb-chat-outbox', draft: 'wb-chat-draft', thread: 'wb-chat-thread', about: 'wb-chat-about' }
   const BACKOFF = [500, 1000, 2000, 4000, 8000, 15000, 30000]
   const DEAD_MS = 40000          // the server pings every 15 s: this long silent means the line is dead
   const CONNECT_MS = 12000       // a connection that never answers: dial again
@@ -162,7 +162,7 @@
   function items() {
     const onServer = new Set(state.messages.map(m => m.cid).filter(Boolean))
     const pending = outbox.filter(o => !onServer.has(o.cid))
-      .map(o => ({ id: 'local-' + o.cid, cid: o.cid, from: 'user', text: o.text, ts: o.ts, local: true, error: o.error }))
+      .map(o => ({ id: 'local-' + o.cid, cid: o.cid, from: 'user', text: o.text, ts: o.ts, local: true, error: o.error, about: o.about }))
     // permission prompts sit in the thread where they were asked
     const asks = state.asks.map(a => ({ id: a.id, from: 'ask', ts: a.ts, ask: a }))
     return [...state.messages, ...asks].sort((x, y) => x.ts - y.ts).concat(pending)
@@ -363,10 +363,51 @@
     return row
   }
 
+  // ---- wb shot's pairs (#99): images behind the token, so fetched with it, shown as blobs ----
+  const shotOf = s => `${s.task} · step ${s.step} · round ${s.round}`
+  function shotImage(s, side, fig) {
+    if (!s[side].image) { fig.prepend(span('missing', 'No image: the capture failed. The code review stands on its own.')); return }
+    const img = document.createElement('img')
+    img.alt = `${side === 'base' ? 'Base' : 'Candidate'} of ${shotOf(s)}`
+    fig.prepend(img)
+    fetch(`/api/shot?task=${encodeURIComponent(s.task)}&n=${s.n}&side=${side}`,
+          { headers: { Authorization: 'Bearer ' + token }, cache: 'no-store' })
+      .then(r => r.ok ? r.blob() : Promise.reject(r.status))
+      .then(b => { img.src = URL.createObjectURL(b) })
+      .catch(() => img.replaceWith(span('missing', 'This image could not be loaded.')))
+  }
+  function makeShots(s) {
+    const box = document.createElement('div')
+    const grid = document.createElement('div'); grid.className = 'shots'
+    for (const side of ['base', 'candidate']) {
+      const fig = document.createElement('figure')
+      const cap = document.createElement('figcaption')
+      cap.append(Object.assign(document.createElement('b'), { textContent: side === 'base' ? 'Base' : 'Candidate' }),
+                 span('', ' · ' + String(s[side].rev || '').slice(0, 10)))
+      fig.append(cap); shotImage(s, side, fig); grid.append(fig)
+    }
+    const of = document.createElement('div'); of.className = 'shots-of'
+    const reply = document.createElement('button'); reply.type = 'button'; reply.textContent = 'Reply about these'
+    reply.onclick = () => { setAbout({ task: s.task, n: s.n, step: s.step }); input.focus() }
+    of.append(span('', `${shotOf(s)} · ${s.viewport} · `), reply)
+    box.append(grid, of)
+    return box
+  }
+  // what the next message is about: a pair of screenshots, so the reply reaches its task and step
+  let about = load(K.about, null)
+  function setAbout(a) {
+    about = a; save(K.about, a)
+    $('about').hidden = !a
+    $('about-text').textContent = a ? `Replying about ${a.task}, step ${a.step}` : ''
+  }
+  $('about-x').onclick = () => setAbout(null)
+  setAbout(about)
+
   function makeRow(m) {
     if (m.ask) return makeAsk(m.ask)
     const row = document.createElement('div')
     const b = document.createElement('div'); b.className = 'bubble'
+    if (m.about) row.append(span('about-tag', `About ${m.about.task}, step ${m.about.step}`))
     if (m.from === 'user') b.textContent = m.text
     else if (seen.has(m.id) || firstVisit || document.hidden || reduced.matches) {
       if (!seen.has(m.id) && !firstVisit && document.hidden) { unread++; document.title = `(${unread}) Workbench` }
@@ -375,7 +416,9 @@
       b.classList.add('flowing'); flows.set(m.id, { text: m.text, shown: 0, el: b })
       if (!flowTimer) flowTimer = setInterval(flowTick, FLOW_MS)
     }
-    row.append(b, document.createElement('div'))
+    row.append(b)
+    if (m.shots) row.append(makeShots(m.shots))
+    row.append(document.createElement('div'))
     row.lastChild.className = 'meta'
     return row
   }
@@ -560,7 +603,7 @@
     for (const o of [...outbox]) {
       if (o.error) continue
       try {
-        const r = await post('/api/send', { text: o.text, cid: o.cid })
+        const r = await post('/api/send', { text: o.text, cid: o.cid, ...(o.about ? { about: { task: o.about.task, n: o.about.n } } : {}) })
         const j = await r.json().catch(() => ({}))
         if (r.ok) { if (j.state) apply(j.state); continue }
         if (r.status === 401) { keyless('That key was not accepted.'); break }
@@ -577,7 +620,8 @@
   function send() {
     const text = input.value.trim()
     if (!text || !token) return
-    outbox.push({ cid: newId(), text, ts: now() }); save(K.outbox, outbox)
+    outbox.push({ cid: newId(), text, ts: now(), ...(about ? { about } : {}) }); save(K.outbox, outbox)
+    setAbout(null)
     input.value = ''; save(K.draft, ''); grow(); sendBtn.disabled = true
     render(); toEnd(true); flush(true)
   }

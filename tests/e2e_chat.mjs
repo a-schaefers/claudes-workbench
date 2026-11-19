@@ -2,7 +2,7 @@
 // real `wb chat serve`, and `wb chat` on the Claude side. Run: node tests/e2e_chat.mjs
 // Needs Playwright: PLAYWRIGHT=/path/to/node_modules/playwright (it isn't a workbench dependency).
 import { spawn, execFileSync } from 'node:child_process'
-import { mkdtempSync, writeFileSync, readFileSync, existsSync, rmSync, statSync, utimesSync } from 'node:fs'
+import { mkdtempSync, mkdirSync, writeFileSync, appendFileSync, copyFileSync, readFileSync, existsSync, rmSync, statSync, utimesSync } from 'node:fs'
 import { createRequire } from 'node:module'
 import { tmpdir } from 'node:os'
 import { join, dirname } from 'node:path'
@@ -259,6 +259,36 @@ async function run(engine, device) {
       await until(async () => !(await page.evaluate(() => window.sameLoad)), 20000)
       await until(async () => (await page.locator('.row.claude .bubble').last().textContent()).includes('After the update.'))
     } finally { utimesSync(css, was.atime, was.mtime) }
+  })
+  await check("wb shot's pair: both images labelled, one above the other on a phone, a reply tied to their step", async () => {
+    const d = join(home, 'state/tasks/fix-nav/shots/1')
+    mkdirSync(d, { recursive: true })
+    for (const side of ['base', 'candidate']) copyFileSync(join(ROOT, 'workbench/chat_static/icon-192.png'), join(d, side + '.png'))
+    const of = side => ({ rev: side === 'base' ? '1a2b3c4d5e6f' : '9f8e7d6c5b4a', image: join(d, side + '.png') })
+    writeFileSync(join(d, 'shots.json'), JSON.stringify({ step: 1, round: 2, viewport: '390x844', base: of('base'), candidate: of('candidate') }))
+    const shots = { task: 'fix-nav', n: 1, step: 1, round: 2, viewport: '390x844',
+      base: { rev: '1a2b3c4d5e6f', image: true }, candidate: { rev: '9f8e7d6c5b4a', image: true } }
+    appendFileSync(join(home, 'state/chat/messages.jsonl'), JSON.stringify({ id: 'shots-1', ts: Date.now() / 1000, from: 'claude',
+      text: 'screenshots of fix-nav. Reply here to send feedback on it.', shots }) + '\n')
+    await page.reload()
+    await until(async () => (await page.$$eval('.shots img', im => im.filter(i => i.complete && i.naturalWidth > 0).length)) === 2)
+    const caps = await page.$$eval('.shots figcaption', c => c.map(x => x.textContent))
+    if (caps.join('|') !== 'Base · 1a2b3c4d5e|Candidate · 9f8e7d6c5b') throw new Error(caps.join('|'))
+    const said = await page.textContent('.shots-of')
+    if (!said.includes('fix-nav · step 1 · round 2 · 390x844')) throw new Error(said)
+    const [a, b] = await page.$$eval('.shots figure', f => f.map(x => x.getBoundingClientRect().toJSON()))
+    if (!(b.top >= a.bottom)) throw new Error('side by side on a phone')
+    const width = await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)
+    if (!width) throw new Error('the page scrolls sideways')
+    await page.click('text=Reply about these')
+    await until(async () => (await page.textContent('#about-text')) === 'Replying about fix-nav, step 1')
+    await page.fill('#input', 'the menu overlaps the logo')
+    await page.click('#send')
+    await until(() => { const rows = messages(); const r = rows.at(-1); return r && r.text === 'the menu overlaps the logo' && r.about })
+    const r = messages().at(-1)
+    if (JSON.stringify(r.about) !== JSON.stringify({ task: 'fix-nav', n: 1, step: 1, round: 2 })) throw new Error(JSON.stringify(r.about))
+    if (!(await page.locator('#about').isHidden())) throw new Error('still replying about them')
+    await until(async () => (await page.$$eval('.about-tag', t => t.at(-1)?.textContent)) === 'About fix-nav, step 1')
   })
   await check('no script errors', async () => { if (errors.length) throw new Error(errors.join('; ')) })
   await browser.close()

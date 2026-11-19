@@ -4597,6 +4597,17 @@ class Shot(Base):
             run_wb("shot", "t", "--capture", "true", "--viewport", "big")
         self.assertIn("give it as WIDTHxHEIGHT", err.getvalue())
 
+    def test_the_pair_goes_to_the_web_chat_with_what_each_image_is_of(self):
+        out = run_wb("shot", "t", "--capture", self.CAPTURE, "--chat")
+        self.assertIn("sent to the web chat", out)
+        from workbench import chat
+        m = chat.thread()[-1]
+        self.assertEqual((m["from"], m["shots"]["task"], m["shots"]["step"], m["shots"]["n"]),
+                         ("claude", "t", 1, 1))
+        self.assertTrue(m["shots"]["base"]["image"] and m["shots"]["candidate"]["image"])
+        self.assertEqual(m["shots"]["base"]["rev"], store.Task("t").spec["base"])
+        self.assertIn("Reply here to send feedback on it.", m["text"])
+
     def test_a_new_capture_script_reaches_the_base_through_files(self):
         (self.wt / "shoot.sh").write_text(self.CAPTURE + "\n")
         out = run_wb("shot", "t", "--capture", "sh shoot.sh", "--files", "shoot.sh")
@@ -5246,6 +5257,29 @@ class WebChat(Base):
         data = r.read()
         c.close()
         return r.status, (json.loads(data) if r.getheader("Content-Type") == "application/json" else data)
+
+    def test_screenshots_are_served_behind_the_token_and_a_reply_keeps_their_step(self):
+        # #99: the pair on the phone, and a reply tied to the task and step the images were of
+        d = store.Task("t").dir / "shots" / "1"
+        d.mkdir(parents=True)
+        (d / "base.png").write_bytes(b"\x89PNG\r\n\x1a\nbase")
+        store.write_json(d / "shots.json", {"step": 2, "round": 3, "viewport": "390x844",
+                                            "base": {"rev": "abc", "image": str(d / "base.png")},
+                                            "candidate": {"rev": "def", "image": None}})
+        tok = self.chat.token()
+        q = "/api/shot?task=t&n=1&side=base"
+        self.assertEqual(self.call(q)[0], 401)                                 # the token, as ever
+        self.assertEqual(self.call(q, token=tok), (200, b"\x89PNG\r\n\x1a\nbase"))
+        for bad in ("task=t&n=1&side=candidate", "task=t&n=2&side=base", "task=../t&n=1&side=base",
+                    "task=t&n=1&side=shots.json"):
+            self.assertEqual(self.call("/api/shot?" + bad, token=tok)[0], 404, bad)
+        (d / "candidate.png").symlink_to(Path(os.environ["WB_CHAT_TOKEN"]))  # never through a link
+        self.assertEqual(self.call("/api/shot?task=t&n=1&side=candidate", token=tok)[0], 404)
+        code, r = self.call("/api/send", {"text": "the button moved", "cid": "c1",
+                                          "about": {"task": "t", "n": 1, "step": 9}}, tok)
+        self.assertEqual(code, 200)
+        self.assertEqual(r["message"]["about"], {"task": "t", "n": 1, "step": 2, "round": 3})  # the pair's
+        self.assertEqual(self.call("/api/send", {"text": "x", "about": {"task": "t", "n": 7}}, tok)[0], 400)
 
     def test_it_serves_localhost_unless_the_user_chose_more(self):
         chat, conf = self.chat, Path(os.environ["WB_CHAT_CONFIG"])

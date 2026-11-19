@@ -1333,6 +1333,11 @@ def cmd_shot(a):
     except (RuntimeError, gitops.GitError) as e:
         die(str(e))
     print("\n".join(verify.shot_lines(m)))
+    if a.chat:  # to the web chat, for a review from the phone (#99)
+        n = int(Path(m["dir"]).name)
+        chat.send(" ".join(verify.shot_lines(m)[:1]) + " Reply here to send feedback on it.",
+                  "claude", shots=chat.shots(task.name, n))
+        print("sent to the web chat")
 
 
 @one_at_a_time
@@ -3084,6 +3089,8 @@ def parser() -> argparse.ArgumentParser:
     s.add_argument("--files", nargs="+", metavar="PATH", help="the candidate's files the capture "
                    "needs on the base too (a new fixture or script)")
     s.add_argument("--timeout", type=int, default=verify.LIMIT, help="seconds for each capture (300)")
+    s.add_argument("--chat", action="store_true", help="post the pair to the web chat, where a "
+                   "reply is tied to this task and step")
     s.set_defaults(f=cmd_shot)
     s = sub.add_parser("takeover", help="stop the agent and finish the task by hand")
     s.add_argument("name", nargs="?")

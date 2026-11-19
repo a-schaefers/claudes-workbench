@@ -180,6 +180,20 @@ main { flex: 1; overflow-y: auto; overscroll-behavior: contain; -webkit-overflow
 }
 .jump svg, .composer button svg { fill: none; stroke: currentColor; stroke-width: 2.2; stroke-linecap: round; stroke-linejoin: round; }
 
+/* wb shot's pair (#99): side by side where there is room, one above the other on a phone */
+.shots { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; margin-top: 8px; width: min(100%, 760px); }
+@media (max-width: 600px) { .shots { grid-template-columns: 1fr; } }
+.shots figure { margin: 0; background: var(--panel); border: 1px solid var(--line); border-radius: 12px; overflow: hidden; }
+.shots img { display: block; width: 100%; height: auto; }
+.shots figcaption { padding: 6px 10px; font: 13px/1.4 var(--sans); color: var(--fg); }
+.shots figcaption b { font-weight: 600; }
+.shots .missing { padding: 18px 10px; font: 13px/1.4 var(--sans); color: var(--faint); }
+.shots-of { margin-top: 6px; font: 13px/1.4 var(--sans); color: var(--faint); }
+.shots-of button, .about button { font: inherit; color: var(--fg); background: none; border: 0; padding: 8px 4px; text-decoration: underline; cursor: pointer; }
+.about-tag { font: 12.5px/1.4 var(--sans); color: var(--faint); margin-bottom: 3px; }
+.about { display: flex; align-items: center; gap: 6px; max-width: 760px; width: 100%; margin: 0 auto; padding: 0 16px; font: 13.5px/1.4 var(--sans); color: var(--fg); }
+.about[hidden] { display: none; }
+
 /* composer */
 .composer {
   display: flex; align-items: flex-end; gap: 8px; max-width: 760px; width: 100%; margin: 0 auto;

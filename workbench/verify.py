@@ -179,7 +179,7 @@ def shot(task: store.Task, cmd: str, files: list[str] | None = None, viewport: s
             meta[side]["error"] = (f"exit {code}" if code != 0 else "no PNG at $WB_SHOT_OUT") + \
                 f": {out / (side + '.txt')}"
     store.write_json(out / "shots.json", meta)
-    return meta
+    return {**meta, "dir": str(out)}
 
 
 def shot_lines(m: dict) -> list[str]:
