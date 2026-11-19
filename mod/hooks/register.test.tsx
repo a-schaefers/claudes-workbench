@@ -544,7 +544,6 @@ test('the pane follows the running task: its whole history, then what it is doin
     '/wb/tasks/fix-it/status.json': JSON.stringify({ phase: 'running', round: 1, updated_at: ts }),
   }
   fakeTasks(on, files)
-  chatOn(files)                                                   // the user turned the web chat on
   const runs: string[][] = []
   on('process.run', (_: any, e: any) => {
     runs.push(e.argv)
@@ -574,10 +573,6 @@ test('the pane follows the running task: its whole history, then what it is doin
   expect(await ui.find({ type: 'Text', text: /Writing… 3\.0s · ↓ 45 tokens/ })).toBeTruthy()
   expect(await ui.find({ type: 'Text', text: /reasoning on/ })).toBeTruthy()
   expect(await ui.find({ type: 'Text', text: /~5m left/ })).toBeTruthy()
-  // the web chat's link is the last line, so it stays in view while the pane follows the end
-  const texts = await ui.findAll({ type: 'Text' })
-  expect(texts[texts.length - 1].text).toBe('https://box.tail.ts.net/#token=abc')
-  expect(texts[texts.length - 2].text).toBe('web chat ')
   await ui.unmount()
 
   // a running task is re-read every few seconds, since its session moves between status writes
@@ -1305,7 +1300,7 @@ test('the bubble wraps its words into lines that fit, never cutting a line short
   expect(wrapWords('', 30)).toEqual([''])
 })
 
-test('the pane ends with the week\'s saving, read from wb savings, above the web chat link', async ($, on) => {
+test('the Tasks tab ends with the week\'s saving, read from wb savings; the web chat link is the Settings tab\'s', async ($, on) => {
   const clock = mock.clock(on, { now: 1_800_000_000_000 })
   fakeTasks(on, chatOn({}))
   const week = { period: 'week', tasks: 3, claude: 160000, self_est: 1390000, saved: 1230000, wh: 900, cost: null }
@@ -1321,8 +1316,11 @@ test('the pane ends with the week\'s saving, read from wb savings, above the web
   const texts = (await ui.findAll({ type: 'Text' })).map(t => t.text)
   const at = texts.indexOf('this week: saved ~1.2M Claude tokens (88%, estimate) · 900 Wh')
   expect(at).toBeGreaterThan(-1)
-  expect(texts.slice(at + 1)).toEqual(['web chat https://box.tail.ts.net/#token=abc', 'web chat ',
-    'https://box.tail.ts.net/#token=abc'])
+  expect(texts.slice(at + 1)).toEqual([])                                     // never under the tasks (the user, 2026-11-19)
+  await ui.press({ key: 'tab-settings' })
+  expect((await ui.findAll({ type: 'Text' })).map(t => t.text).slice(-3)).toEqual(['web chat https://box.tail.ts.net/#token=abc',
+    'web chat ', 'https://box.tail.ts.net/#token=abc'])
+  await ui.press({ key: 'tab-tasks' })
   await ui.unmount()
 })
 
@@ -1403,8 +1401,8 @@ test('the settings rows open to Buttons, pick through wb, and say the sentence o
     expect(await ui.find({ key: 'coding' })).toBeUndefined()                                           // a tab of their own
     expect((await ui.findAll({ type: 'Button' })).slice(-2).map(b => b.props.label)).toEqual(['Tasks', 'Settings'])  // last
     await ui.press({ key: 'tab-settings' })
-    expect((await ui.find({ key: 'coding' }))?.props.label).toBe('▸ Claude coding: Let Claude decide')  // no saved choice
-    expect((await ui.find({ key: 'chat' }))?.props.label).toBe('▸ Web chat: Off')                      // off by default
+    expect((await ui.find({ key: 'coding' }))?.props.label).toBe('▸ Claude coding: Let Claude decide (default)')  // no saved choice
+    expect((await ui.find({ key: 'chat' }))?.props.label).toBe('▸ Web chat: Off (default)')                      // off by default
     expect(await ui.find({ key: 'coding:ask' })).toBeUndefined()                                       // one row each at rest
     expect(await ui.find({ type: 'Text', text: /web chat / })).toBeUndefined()                         // and no link
     await ui.press({ key: 'tab-tasks' })
@@ -1414,7 +1412,7 @@ test('the settings rows open to Buttons, pick through wb, and say the sentence o
   await ui.press({ key: 'tab-settings' })
   await ui.press({ key: 'coding' })
   expect((await ui.findAll({ type: 'Button' })).map(b => b.props.label).filter((l: string) => / {2}[❯ ] /.test(l)))
-    .toEqual(['    Only when I say', '    Ask me first', '  ❯ Let Claude decide'])
+    .toEqual(['    Only when I say', '    Ask me first', '  ❯ Let Claude decide (default)'])
   const says = async () => ((await ui.find({ key: 'coding-says' })) as any)?.children?.[0]?.children?.[0]?.trim()
   expect(await says()).toBe('Claude uses its judgment to guide the local agent or make a fix itself.')  // the chosen one's
   await $.ui.focus({ component: 'Pane', requestId: 'workbench', element: 'coding:only', origin: { kind: 'person' } } as any)  // the person's Tab, as the engine raises it
@@ -1430,7 +1428,7 @@ test('the settings rows open to Buttons, pick through wb, and say the sentence o
   const texts = (await ui.findAll({ type: 'Text' })).map(t => t.text)
   expect(texts.at(-1)).toBe('http://localhost:1337/#token=abc')                                   // the link, at once
   await ui.press({ key: 'tab-tasks' })
-  expect((await ui.findAll({ type: 'Text' })).map(t => t.text).at(-1)).toBe('http://localhost:1337/#token=abc')  // there too
+  expect(await ui.find({ type: 'Text', text: /token=abc/ })).toBeUndefined()                    // not under the tasks
   await ui.press({ key: 'tab-settings' })
   await ui.unmount()
   const phone = await $.ui.mount({ ...PANE, surface: 'mobile' })    // the same rows there
