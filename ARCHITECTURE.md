@@ -1327,7 +1327,12 @@ nothing until a surface attaches.
   passed on <task>." / "Claude reviews next.", "Claude answers next.": #103, where "done" read as
   tests passed, accepted or landed alike). The transcript's last line says the same once
   (`■ done: Claude reviews next`), and status `last` (`tests passed: Claude reviews next`). A short pane gets its face on one line
-  instead. Below it, the week's saving (`savedLine` of `wb savings --json`, read every 10 minutes
+  instead. Right below it, the **Claude coding** slider (#93, *Claude coding*): one row,
+  `Claude coding  ‹ Let Claude decide ›`, a `Select` (key `coding`) whose stops run left to right
+  `Only when I say`, `Ask me first`, `Let Claude decide` (`CODING_STOPS`); a pick runs `wb coding
+  <mode>`, and each draw reads `coding.json` again, so the pane reopens on the saved choice. The
+  focused pane adds the choice's sentence under it. Mobile draws no Select: there it is a line
+  that reads the choice. Then the week's saving (`savedLine` of `wb savings --json`, read every 10 minutes
   and again when a task closes: `this week: saved ~1.2M Claude tokens (46%, estimate) · 0.9 kWh`;
   nothing until a task can be compared), and the web chat's link, pinned at the bottom.
 - **The status line** reads like `⚒ wb · add-scores running r2 · fix-typo asks · 1 awaiting
@@ -3513,6 +3518,9 @@ push: every change is a pull request that merges once `check` is green and it is
   pose regex, the `live-1` tag; `--last` and `JSON_LINE_CHARS` with the mod's `KEEP_LINES` and
   `LINE_CHARS`.
 - **A `$.state` atom's type** in the mod → its tag (`tasks-4`, `live-1`, `chat-2`, `sessions-1`, `savings-1`).
+- **The Claude coding choices** (`cli.CODING`: modes, labels, sentences) → the mod's
+  `CODING_STOPS` (the slider) and `CODING_RULES` (the context block), and the skill's *Claude
+  coding* bullet.
 - **`savings.totals`' keys** → the mod's `savedLine` and the chat page's `drawSaved`, which read them.
 - **Which session a task is** (task.json `session`, else `cwd`/`repo`) → the mod's `mine` and
   `cli._scope` (`--session`, `--repo`): the same rule, the home-or-`/` exception included, and

@@ -330,6 +330,14 @@ const CODING_RULES: Record<string, string> = {
     '"…" --said "<their words>"`.',
 }
 
+// The pane's Claude coding slider (#93), left to right; the choice is wb's (`wb coding`), the
+// sentence is what the pane shows for it while focused
+const CODING_STOPS: [string, string, string][] = [
+  ['only', 'Only when I say', 'You tell Claude when to write code.'],
+  ['ask', 'Ask me first', 'Claude can ask to make a specific fix and waits for your yes.'],
+  ['decide', 'Let Claude decide', 'Claude uses its judgment to guide the local agent or make a fix itself.'],
+]
+
 // The file tools' path fields: an edit in a task's worktree is writing that task's code
 const EDIT_TOOLS: Record<string, string> = { Edit: 'file_path', MultiEdit: 'file_path', Write: 'file_path', NotebookEdit: 'notebook_path' }
 
@@ -1411,11 +1419,27 @@ export const register: Register = (on, options) => {
   })
 
   on('ui.render', { component: 'Pane', requestId: PANE }, async ($, e) => {
-    const { Box, Text, Raster } = $.ui.resolve(e) as Row
+    const { Box, Text, Raster, Select } = $.ui.resolve(e) as Row
     const list = await read($, tasks)
     const watched = await read($, live)
     const { url, delegating } = await read($, chat)
     const saved = await read($, savings)
+    // Claude coding (#93): right below the apprentice (the week's saving, then the link, after it). One row at rest, the
+    // focused pane adds the choice's sentence; mobile draws no Select, so it reads the choice there
+    const mode = await codingMode($)
+    const stop = CODING_STOPS.find(s => s[0] === mode) ?? CODING_STOPS[2]
+    const coding = (
+      <Box flexDirection="column" marginTop={1}>
+        {Select && (e as Row).surface !== 'mobile' ? (
+          <Select key="coding" label="Claude coding  " value={stop[0]}
+            options={CODING_STOPS.map(([value, label]) => ({ value, label }))}
+            onSelect={(value: string) => { void runWb($, ['coding', value]) }} />
+        ) : (
+          <Text>{`Claude coding  ${stop[1]}`}</Text>
+        )}
+        {(e.props as Row | undefined)?.isFocused && <Text dimColor>{stop[2]}</Text>}
+      </Box>
+    )
     // the web chat's link, always at hand to copy: last, since the pane follows its end
     const pinned = url ? (
       <Box marginTop={1}>
@@ -1531,6 +1555,7 @@ export const register: Register = (on, options) => {
           </Box>
         )}
         {stage}
+        {coding}
         {saved && <Text dimColor>{saved}</Text>}
         {pinned}
       </Box>

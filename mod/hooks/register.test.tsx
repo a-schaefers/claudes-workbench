@@ -1347,3 +1347,35 @@ test('Claude coding: its own edit in a task\'s worktree waits for the user\'s ye
   const w = await $.tool.call({ tool: 'Write', file_path: '/wb/tasks/fix-it/worktree/new.py', content: '' } as any) as any
   expect(w.deny).toContain('"Only when I say"')
 })
+
+test('the Claude coding slider sits under the apprentice, saves through wb, and reads the choice back', async ($, on) => {
+  // #93: one row at rest, the sentence while focused, in the full and compact layouts
+  const clock = mock.clock(on, { now: 1_800_000_000_000 })
+  const files: Record<string, string> = {}
+  fakeTasks(on, files, [])
+  const runs: string[][] = []
+  on('process.run', (_: any, e: any) => { runs.push(e.argv); return { value: { exitCode: 0, stdout: '', stderr: '' } } })
+  await $.session.start({ cwd: '/', surface: 'terminal', isInteractive: true })
+  await clock.advance(1000)
+  for (const rows of [24, 8]) {                                      // the apprentice in pixels, then its face
+    const ui = await $.ui.mount({ ...PANE, surface: 'terminal', props: { ...PANE.props, scroll: { offset: 0, bodyRows: rows } } })
+    const slider = await ui.find({ key: 'coding' }) as any
+    expect(slider?.type).toBe('Select')
+    expect(slider?.props.value).toBe('decide')                             // no saved choice
+    expect((slider?.props.options as any[]).map((o: any) => o.label)).toEqual(['Only when I say', 'Ask me first', 'Let Claude decide'])
+    expect(await ui.find({ type: 'Text', text: /guide the local agent/ })).toBeUndefined()  // one row at rest
+    await ui.unmount()
+  }
+  const ui = await $.ui.mount({ ...PANE, surface: 'terminal' })
+  await ui.select({ key: 'coding', value: 'ask' })
+  expect(runs.at(-1)).toEqual(['wb', 'coding', 'ask'])
+  await ui.unmount()
+  files['/wb/coding.json'] = JSON.stringify({ mode: 'ask' })      // what wb wrote: the pane reopens on it
+  const focused = await $.ui.mount({ ...PANE, surface: 'terminal', props: { ...PANE.props, isFocused: true } })
+  expect(((await focused.find({ key: 'coding' })) as any)?.props.value).toBe('ask')
+  expect((await focused.find({ type: 'Text', text: /waits for your yes/ }))?.text).toBe('Claude can ask to make a specific fix and waits for your yes.')
+  await focused.unmount()
+  const phone = await $.ui.mount({ ...PANE, surface: 'mobile' })    // no Select there: the choice, read
+  expect(await phone.find({ type: 'Text', text: /Ask me first/ })).toBeDefined()
+  await phone.unmount()
+})
