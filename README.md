@@ -16,14 +16,13 @@ Claude Code plugin that connects the two inside your normal Claude Code session.
 <a href="https://github.com/a-schaefers/claudes-workbench/commits/main"><img alt="last commit" src="https://img.shields.io/github/last-commit/a-schaefers/claudes-workbench"></a>
 </p>
 
-- **Claude reads every diff before accepting it**, and sends it back with exact notes until it's
-  right.
-- **Pieces sized to your models:** chores to a small fast model, real work to the strongest one
-  your GPU runs.
-- **Recurring corrections become instructions** for future tasks
-  ([the skill library](ARCHITECTURE.md#the-skill-library)).
-- **Your repo stays yours:** each agent works in its own git worktree, and your other plugins,
-  skills and settings keep working.
+- **Claude is the lead, your local models are the crew:** Claude assigns each step to a model
+  sized for it, reviews what comes back, and returns it until it's right.
+- **Agents get Claude's know-how:** a library of skills Claude keeps and grows, handed out per
+  task ([the skill library](ARCHITECTURE.md#the-skill-library)).
+- **It's still just Claude Code.** You talk to Claude as usual, your plugins, skills and settings
+  keep working, and the agents work on their own branches, so your checkout is untouched until
+  you accept.
 
 ## Quickstart
 
