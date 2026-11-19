@@ -68,7 +68,7 @@ Everything talks through plain files in one state directory (`$WB_HOME`, `workbe
 The runner, the agent's `ask_reviewer` server and the chat server never call each other or the
 mod; they read and write the same files, and anything that waits sleeps in the kernel (inotify on
 directories, pidfd on processes, `workbench/watch.py`) until one of them changes. The mod's only
-calls are `wb` subcommands (`wb events`, `wb watch --json`, `wb status`, `wb chat ack|url|log|ask|wait|answer`,
+calls are `wb` subcommands (`wb events`, `wb watch --json`, `wb status`, `wb chat ack|claim|url|log|ask|wait|answer`,
 `wb stop|takeover --all --repo … --session …`, `wb update` and its weekly `wb update --check --if-due`,
 `wb optimize start --if-due` once per session (*Optimize*)), plus
 `kill -0` to see whether the chat listener's pid lives and `tail -c` to read a long file's end. A
@@ -2365,6 +2365,9 @@ VPN), `"hosts": ["chat.example.org"]` a name a tunnel or proxy sends.
   `cid` is among the last 500 messages returns that row instead of adding one.
 - `receipts.jsonl`: `{id, ts, by, how: "now"|"queued"}`, written by `wb chat ack` (the mod).
   `queued`: a mid-turn delivery didn't go through, so it was submitted as a prompt.
+- `claims.json`: `{<message id>: {by, ts}}` (a day's), under `claims.lock`: `wb chat claim` gives
+  a message to the first session that asks and to it again, or to another once the claim is
+  `CLAIM_STALE` (120 s) old (its session gone); exit 1 otherwise.
 - `listener.json`: `{session, cwd, pid, busy}`, written by the mod when it changes. A listener
   counts while its pid answers `kill -0` (or, with no pid, its `ts` is under 15 s old).
 - `asks.jsonl`: the dialogs. An ask row `{id: "ask-<ms>-<8 hex>", ts, tool (200 characters),
@@ -2750,7 +2753,9 @@ frame in six, other poses blink one in eleven, except `sleep` and `slump`; FACE 
 **The web chat listener** (`listen`, workbench mode only, needs the events child): another
 session's live claim (its pid answers `kill -0`, else its `ts` within 15 s) makes this one stand
 by; otherwise it writes `chat/listener.json` `{session, cwd, pid, busy}` when that changes, and
-delivers each user message without a receipt: idle → `prompt.submit('[web chat] <words>', asUser)`,
+delivers each user message without a receipt, once `wb chat claim <id> --by <key>` gives it the
+message (refused: another session's, looked at again a minute later; two sessions starting
+together both took the chat and both submitted it, #84): idle → `prompt.submit('[web chat] <words>', asUser)`,
 receipt `how=now`; busy → `session.send` into the running turn with WEB_NOTE, else a queued
 prompt (`how=queued`); `wb chat ack <id> --by <key> --how …` once it entered (a dropped prompt
 gets no receipt and is tried again a minute later), `webAt = now`, a toast. Dialogs
@@ -2939,7 +2944,7 @@ delivered as taken (`_stale_notes`, *Notes*).
 | Command | Flags | What it does |
 |---|---|---|
 | `wb image "<prompt>"` | `--n` (4), `--size WxH` (1024x1024), `--seed`, `--ref <img>…`, `--out DIR`, `--engine`, `--list`, `--wait` | Candidates from a local image engine (see *Images*). While anything holds the GPU it refuses at once, naming the holders; `--wait` queues behind them. A bare `list` or `ls` as the prompt acts as `--list`. |
-| `wb chat [log\|serve\|url\|reply\|ack\|pending\|ask\|wait\|answer]` | `--port` (1337), `--bind` (replaces chat.json's), `--host` (adds), `--text`, `--message <file\|->` (reply reads stdin without either), `-n` (10); `ack <id> --by --how`, `ask --tool --kind permission\|plan\|question --text --detail <json>` (prints `<id> open`, or `<id> allow` when the user's setting answered it), `wait <id> --timeout` (30 s; prints allow, deny, expired, or `open` at the timeout; `--json`: the whole ask), `answer <id> allow\|deny\|expired --by --note` (prints the answer that stands) (the mod) | The web chat: the thread, the server, the link with its token, Claude's reply, permission prompts. |
+| `wb chat [log\|serve\|url\|reply\|ack\|claim\|pending\|ask\|wait\|answer]` | `--port` (1337), `--bind` (replaces chat.json's), `--host` (adds), `--text`, `--message <file\|->` (reply reads stdin without either), `-n` (10); `ack <id> --by --how`, `claim <id> --by` (exit 1: another session's), `ask --tool --kind permission\|plan\|question --text --detail <json>` (prints `<id> open`, or `<id> allow` when the user's setting answered it), `wait <id> --timeout` (30 s; prints allow, deny, expired, or `open` at the timeout; `--json`: the whole ask), `answer <id> allow\|deny\|expired --by --note` (prints the answer that stands) (the mod) | The web chat: the thread, the server, the link with its token, Claude's reply, permission prompts. |
 | `wb init <dir>` | | A project the way Claude keeps one: git on the default branch, an initial commit, AGENTS.md → CLAUDE.md (a CLAUDE.md → AGENTS.md link is swapped; a gitignored CLAUDE.md isn't linked). Refuses the home directory or above, inside another repo, a repo git refuses (git's reason: no `git init` over it), without a git identity (`git var`, as for `wb start`), and a first commit holding likely secrets or installed directories no .gitignore covers. |
 | `wb setup` | `--force` (replaces a link that points elsewhere; never a real file) | Links `~/.local/bin/wb` to this copy's `bin/wb` and Claude Code's `skills/workbench` to its `skill/workbench`, removes an old `skills/delegate` link that now leads nowhere (the skill was `/delegate` until 2026-11-17; the mod runs `wb setup` itself when it finds only that), warns when `~/.local/bin` isn't on PATH (Claude and the mod run `wb` by name); exit 1 when it left something in the way (see *Installing*). Then, when due (*Optimize*), starts the minute or two of measuring the GPU and prints its line as `--`. |
 | `wb update` | `--check` (only say whether origin has news: `update available: N new commit(s)…` or `up to date`), `--if-due` (with `--check`: ask origin at most weekly, `UPDATE_EVERY`, else answer from `update.json`; never with `CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC`) | Updates this copy (see *Installing*): refuses while any runner is live; a marketplace copy runs `claude plugin marketplace update workbench` then `claude plugin update workbench@workbench`; a clone (refusing uncommitted tracked changes) runs `git pull --ff-only` first. Refuses, before anything changes, when `claude` isn't on PATH; a step that can't run or runs past 300 s fails with a line (after a clone's pull: what is left to run), and update.json is written as soon as the pull lands. Prints `updated <kind> a..b (N commit(s))` or `already up to date`. The check's fetch (`cli._fetch_origin`) never prompts and never hangs: no terminal, `GIT_TERMINAL_PROMPT=0`, `SSH_ASKPASS_REQUIRE=never`, at most `FETCH_SECS` = 60 s; the user's own ssh command (`GIT_SSH_COMMAND`, `GIT_SSH`, `core.sshCommand`) is kept, and with none ssh runs with `BatchMode`. In between, `--if-due` recounts `HEAD..@{u}` locally, so a pull made elsewhere shows at once. |
@@ -2968,7 +2973,7 @@ $WB_HOME (~/.local/state/workbench)
                                  size, vram}], ts}}}; the run's output
   imports/<slug>/                skills fetched by wb skill import, for Claude to read
   images/<YYYYmmdd-HHMMSS>/      wb image's candidates (unless --out), their .json sidecars, engine.log
-  chat/                          messages.jsonl  receipts.jsonl  asks.jsonl  prefs.json  listener.json
+  chat/                          messages.jsonl  receipts.jsonl  asks.jsonl  prefs.json  listener.json  claims.json
   rules/<task>/                  outside the lane: opencode.json (the config layer), HANDBOOK.md,
                                  CLAUDE.md (a copy of the user's), bin/git (the shim),
                                  grants.json (what Claude allowed: {"allow", "paths"}),

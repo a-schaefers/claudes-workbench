@@ -977,6 +977,34 @@ test('the web chat reaches Claude only in /workbench mode, with a receipt, and o
   expect(asked.length).toBe(1)
 })
 
+test('a web message another session claimed first is not submitted here', async ($, on) => {
+  // #84: two sessions starting together both took the chat and both submitted the message
+  const clock = mock.clock(on, { now: 1_800_000_000_000 })
+  const files: Record<string, string> = {}
+  fakeTasks(on, files, [])
+  on('ui.toast', () => ({ value: undefined }))
+  on('session.cwd', () => ({ value: '/home/u/project' }))
+  on('skill.prompt', (_: any, e: any) => ({ text: e.text }))
+  let theirs = true
+  on('process.run', (_: any, e: any) => {
+    const refused = e.argv[1] === 'chat' && e.argv[2] === 'claim' && theirs
+    return { value: { exitCode: refused ? 1 : 0, stdout: refused ? '' : 'no open tasks', stderr: '' } }
+  })
+  const asked: string[] = []
+  on('prompt.submit', (_: any, e: any) => {
+    asked.push(e.text)
+    return { text: e.text }
+  })
+  files['/wb/chat/messages.jsonl'] = JSON.stringify({ id: 'm1', ts: 1_800_000_000, from: 'user', text: 'status?' }) + '\n'
+  await $.session.start({ cwd: '/home/u/project', surface: 'terminal', isInteractive: true })
+  await $.skill.prompt({ skill: 'workbench', text: 'x', frontmatter: {}, source: 'userSettings' })
+  await clock.advance(3000)
+  expect(asked.length).toBe(0)                                   // the other session submits it
+  theirs = false                                                 // gone, its claim stale
+  await clock.advance(61_000)
+  expect(asked).toEqual(['[web chat] status?'])
+})
+
 test('a permission prompt while the user is away goes to the web chat, and their answer settles it', async ($, on) => {
   // the dialog would wait for nobody (the user, 2026-11-18)
   const clock = mock.clock(on, { now: 1_800_000_000_000 })
