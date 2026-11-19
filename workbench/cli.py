@@ -230,9 +230,15 @@ def _preempt_bench(m: models.Model, me: str | None = None) -> str:
             _stop_runner(t)
             t.set_status(phase="stuck", last=bench.PREEMPTED, pid=None)
     out = [f"the bench's replay ({', '.join(names)})"] if names else []
-    if waits and any(h.get("task") == optimize.HOLDER for h in held.values()) and optimize.stop():
+    if waits and any(h.get("task") == optimize.HOLDER for h in held.values()) and (pid := optimize.stop()):
         out.append("wb optimize (what it measured is kept)")  # real work first, here too
+        # and gone before the caller reads the GPU's holders: a stop is a SIGTERM, and wb try
+        # right after wb setup's run was refused by the entry it hadn't yet let go (#161)
+        wait_exit(pid, OPTIMIZE_EXIT)
     return f"note: stopped {' and '.join(out)} to make room" if out else ""
+
+
+OPTIMIZE_EXIT = 30  # seconds a stopped wb optimize gets to let go of the GPU (it stops between requests)
 
 
 def _gpu_note(task: store.Task) -> str:
@@ -2335,7 +2341,7 @@ def first_run() -> list[str]:
     elif major and int(major[1]) < 2:
         out.append(f"--  opencode {said}: workbench needs OpenCode 2.x; upgrade it")
     else:
-        out.append(f"ok  opencode {said}")
+        out.append(f"ok  {said if said.lower().startswith('opencode') else 'opencode ' + said}")
     try:
         found = models.discover()
     except RuntimeError:  # an OpenCode config that doesn't parse: wb doctor says which

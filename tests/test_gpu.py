@@ -113,6 +113,28 @@ class Sharing(Base):
         self.assertEqual(self.runs_in_order(*(f"delegate/{n}" for n in names)),
                          [f"delegate/{n}" for n in names])
 
+    def test_a_task_started_while_wb_optimize_measures_runs_once_it_has_let_go(self):
+        # #161 (2026-11-19): wb try right after wb setup's measuring run said it stopped the run
+        # "to make room" and was refused anyway: the stop is a SIGTERM, and the run's lease entry
+        # was still there when wb start read the holders
+        os.environ["WB_FAKE_GPU_GB"] = "24"
+        holder = subprocess.Popen([sys.executable, "-c", f"""
+import os, signal, sys, time
+sys.path.insert(0, {str(Path(__file__).resolve().parent.parent)!r})
+from workbench import models, optimize, store
+signal.signal(signal.SIGTERM, lambda *a: (time.sleep(1), sys.exit(0)))  # lets go a second late
+with models.GpuLease(None, optimize.HOLDER, wait=False):
+    store.write_json(optimize.path(), {{"pid": os.getpid()}})
+    print("held", flush=True)
+    time.sleep(60)
+""", "-m", "workbench.optimize"], stdout=subprocess.PIPE, text=True)  # its cmdline names it
+        self.addCleanup(holder.kill)
+        self.assertEqual(holder.stdout.readline().strip(), "held")
+        out = self.start("t-now", "ok", "--model", SMALL)            # no --queue: no exit 4
+        self.assertIn("stopped wb optimize", out)
+        self.assertIsNotNone(holder.poll())
+        wait_phase("t-now", {"review"})
+
     def test_a_task_sent_back_goes_ahead_of_one_started_after_it(self):
         # its review waits on that round: behind a night's backlog, it would wait for all of it
         os.environ["WB_FAKE_GPU_GB"] = "24"

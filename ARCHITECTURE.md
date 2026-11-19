@@ -1871,8 +1871,10 @@ case's original minutes). `wb optimize start [--bench]` detaches the run (`pytho
 workbench.optimize`, its output in `optimize.log`, its pid in `optimize.json`) so it outlives
 Claude's session; it refuses while a task holds the GPU. The run holds the GPU alone (a
 `GpuLease` with no model, named `HOLDER` "wb optimize") after `free_gpu`. Real work stops it:
-`cli._preempt_bench` sends it SIGTERM when a task would wait behind it, and the fits measured so
-far stay in `optimize.json`. With `--bench` it then starts `wb bench run` on every model, labelled
+`cli._preempt_bench` sends it SIGTERM when a task would wait behind it and waits for it to exit
+(`OPTIMIZE_EXIT`, 30 s at most) before the GPU's holders are read: `wb try` right after `wb
+setup`'s run was refused by the entry it hadn't yet let go (#161). The fits measured so far stay
+in `optimize.json`. With `--bench` it then starts `wb bench run` on every model, labelled
 `optimize`. `wb optimize report` (the default) gives a line per model; `wb doctor` adds the same
 line (`--`) for each measured model with something to change. `wb optimize stop` ends it, only if
 state.json's pid is still alive, started when it did, and runs `-m workbench.optimize`
