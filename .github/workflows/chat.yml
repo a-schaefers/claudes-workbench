@@ -1,0 +1,53 @@
+# The web chat in real browsers (tests/e2e_chat.mjs: WebKit as an iPhone, Chromium as a Pixel:
+# reloads, receipts, reconnecting, dialogs) on each pull request and push to main that changes the
+# chat, its server, its page or the test. Not a required check: check.yml is the merge gate; this
+# says whether the page still works where the Python tests can't look (#91, 2026-11-19).
+# Playwright isn't a workbench dependency: the version pinned here is installed beside the run.
+
+name: chat
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'workbench/chat.py'
+      - 'workbench/webpush.py'
+      - 'workbench/chat_static/**'
+      - 'tests/e2e_chat.mjs'
+      - '.github/workflows/chat.yml'
+  pull_request:
+    paths:
+      - 'workbench/chat.py'
+      - 'workbench/webpush.py'
+      - 'workbench/chat_static/**'
+      - 'tests/e2e_chat.mjs'
+      - '.github/workflows/chat.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: chat-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  browsers:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    env:
+      # The Playwright the browser test was last verified with.
+      PLAYWRIGHT_VERSION: '1.62.1'
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: 24
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
+        with:
+          python-version: '3.11'
+      - run: npm install --prefix "$RUNNER_TEMP/pw" "playwright@$PLAYWRIGHT_VERSION"
+      - run: '"$RUNNER_TEMP/pw/node_modules/.bin/playwright" install --with-deps chromium webkit'
+      - run: PLAYWRIGHT="$RUNNER_TEMP/pw/node_modules/playwright" node tests/e2e_chat.mjs

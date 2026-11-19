@@ -3221,8 +3221,11 @@ floors are kept here, not in the README, which names no versions so it can't fal
 (2026-11-17): Claude Code 2.1.287, the floor for mods; OpenCode 2.2.7, the oldest release that
 passes the real-OpenCode tests (2.2.0 never lists `workbench_ask_reviewer`, found 2026-11-17);
 Python 3.11. Each Linux job's `Landlock`
-step prints the runner's Landlock ABI, or that it has none and the Lane tests skip. Not run in
-CI: the browser test and a real run with a real model.
+step prints the runner's Landlock ABI, or that it has none and the Lane tests skip. `chat.yml`
+runs the browser test (WebKit and Chromium, through the Playwright pinned there as
+`PLAYWRIGHT_VERSION`) on each pull request and push to main that changes `chat.py`, `webpush.py`,
+`chat_static/`, the test or itself; it is not a required check (#91). Not run in CI: a real run
+with a real model.
 `.github/dependabot.yml` moves the actions' SHA pins weekly. `check` is the required check on
 main (*Shipping to main*).
 
@@ -3464,7 +3467,7 @@ push: every change is a pull request that merges once `check` is green and it is
   event kind** → `transcript.task_entries` (an unknown kind is never shown) and *Files and formats*.
 - **A new tuned knob** → `tuning.KNOBS`, read with `tuning.value(task, name)`, a ceiling in
   `drive` if it has one.
-- **`chat.py` or `chat_static/`** → the browser test.
+- **`chat.py` or `chat_static/`** → the browser test (`chat.yml` runs it on the pull request too).
 - **`/api/state`'s asks or messages** → `sw.js`, which builds the notification from them.
 - **`wb chat ask|wait|answer`'s output** (`<id> <state>` on the last line, `wait --json`'s ask) → `askOnChat` and `waitOnChat` in register.tsx, which parse it.
 - **AskUserQuestion's or ExitPlanMode's input shape** → `askOnChat` (`--detail`) and `makeAsk` in app.js.
