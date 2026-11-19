@@ -132,7 +132,7 @@ installed module:
     changes; nothing is downloaded without the user's yes.
 
 ### What a handoff costs Claude, measured
-The README's "roughly half on bigger tasks, about even on small ones" comes from paired runs on
+The README's "can cost Claude fewer tokens; small tasks can cost more" comes from paired runs on
 2026-11-18: the same request done by Claude alone and handed off, in Claude Code subagents on
 the same model, each result graded by hidden tests it never saw (all passed), Claude's tokens
 weighted by price (input 1, cache write 2 at the main session's 1-hour cache, cache read 0.1,
@@ -1476,6 +1476,68 @@ Code: `workbench/models.py` (discovery, status, residency, the GPU lease, adding
 `workbench/router.py` (choice, slice, budgets, speeds), `workbench/hardware.py` (the machine),
 `cli.cmd_models`, `cmd_model`, `cmd_scout`.
 
+### Running your own server
+For people who run a model server already, or set one up themselves (moved here from the
+README's FAQ, #102). Everyone else can leave it to Claude, which suggests a server and models
+that fit the hardware and sets up the ones the user picks.
+
+#### Which server
+For the most hands-off setup, Ollama. It's where Workbench automates the most: Claude downloads
+and removes models, reads each model's context window from it, and lets two tasks share the GPU
+when both fit. For a desktop app to manage models, LM Studio comes next. Any server that speaks
+the OpenAI API works, and Workbench reads each model's size and window from llama.cpp's
+`llama-server`, LM Studio and vLLM too. On those, models are downloaded the server's own way, and
+tasks take turns on the GPU. A server OpenCode has no provider for: `wb model add <provider>/<model>
+--url <baseURL>` (`--context N` when it doesn't say its window).
+
+#### The context window
+16K tokens at the least; 32K or more is better. OpenCode's instructions and tools take a good
+part of it, and the window sets how much of a task one agent can take on. `wb doctor` flags a
+window that's too small or doesn't match the model's entry. Most servers start small:
+- Ollama: `OLLAMA_CONTEXT_LENGTH` in the service's environment. Its default is small and cuts
+  the prompt off without a word.
+- llama.cpp: `-c` on `llama-server`. With `--parallel N` set, each slot gets an Nth of it (unless
+  `--kv-unified`), and one agent uses one slot.
+- LM Studio: the context length when the model is loaded (`lms load <model> --context-length
+  32768`). Load it before registering it, so LM Studio can say what it gave it.
+- vLLM: `--max-model-len`.
+
+Bigger is better while it fits on the GPU. A window too big for the card pushes part of the model
+into system memory, and it runs about half as fast. With Ollama, `wb optimize` measures the
+largest window that stays on the GPU. On another server, raise the window until part of the model
+lands on the CPU, then step back: llama.cpp's log says how many layers it put on the GPU, LM
+Studio shows its GPU offload, and vLLM won't start when the window doesn't fit.
+
+#### Tool calls
+The agent says it can't call tools, or its tool calls come out as plain text: the server has to
+turn the model's tool calls into the API's form. vLLM does that only with
+`--enable-auto-tool-choice --tool-call-parser <the model's parser>`. llama.cpp uses the model's
+chat template, which a few models need replaced with `--chat-template-file`. A model LM Studio
+says wasn't trained for tool use is registered without tools and gets no tasks.
+
+#### A model on another machine
+A gaming PC can do the work for a laptop.
+1. On the PC, run Ollama listening on the network: set `OLLAMA_HOST=0.0.0.0` for its service,
+   restart it, and pull a model. Ollama has no login, so let only the laptop reach its port
+   (11434): a firewall rule, or Tailscale, which also encrypts it (plain `http://` carries the
+   code in the clear).
+2. On the laptop: `wb remote <pc>`, with the PC's Tailscale name or LAN address. It registers the
+   PC's models that can call tools (`--context N` when its Ollama doesn't say what window it
+   serves); `wb remote <pc> --remove` undoes it.
+
+Tasks on the PC take turns on its GPU, apart from the laptop's, and `wb optimize` measures its
+models too. Their energy isn't measured, and the savings lines say so. A second machine adds a
+model beside this one's; it doesn't make one model faster. Another server there (llama.cpp, LM
+Studio, vLLM): give its provider `"local": true` in `~/.config/workbench/models.json`, then `wb
+model add <provider>/<model> --url <baseURL>`. Ollama's cloud models (`:cloud`) run on ollama.com
+and aren't counted as local unless marked the same way.
+
+#### A server that wants an API key
+Put it in the provider's `options.apiKey` in OpenCode's config. If it reads `{env:NAME}`, add
+`NAME` to `env` in `~/.config/workbench/commands.json`: the agents get none of the environment's
+secrets by default.
+
+### Found, loaded, chosen
 **OpenCode's config.** `models.opencode_config_files()`: `$WB_OPENCODE_CONFIG` alone, else
 whichever of `$XDG_CONFIG_HOME/opencode/` (default `~/.config/opencode/`) `opencode.json` and
 `opencode.jsonc` exist, in that order: OpenCode 2.3 layers both, the later winning, and
@@ -1501,7 +1563,7 @@ or `<label>.local`, or any of the machine's own addresses (`_own_addresses`: the
 provider elsewhere counts when models.json gives it `"local": true`; it is then `remote`: it
 takes no lease on this machine's GPU, but one on its server's (tasks there take turns: *Sharing the GPU*).
 OpenCode talks to it directly at the baseURL (plain `http://` is unencrypted and the prompts carry
-the code: README's FAQ suggests a firewall and Tailscale); nothing of workbench runs there, and no
+the code: *A model on another machine* above suggests a firewall and Tailscale); nothing of workbench runs there, and no
 model is split across machines. `wb remote HOST` sets one up for an Ollama there (#114,
 `models.add_remote`): it checks `/api/version`, writes provider `ollama-<host>` (`remote_pid`:
 the host in id characters; baseURL `http://HOST:PORT/v1`) and its `local: true`, then registers
@@ -2502,6 +2564,16 @@ pairs arrive. The mod gives it to Claude as `[web chat] (about <task>, step <s>,
 
 ## The web chat
 
+**For people** (moved here from the README, #102): `wb chat serve` runs a small web chat with the
+running Claude session, and `wb chat url` prints its private link; keep that link to yourself, it
+is the key. Claude's permission prompts and questions come to it too. Over https (`tailscale
+serve --bg 1337` gives it an address on your tailnet) it installs as an app on your phone and
+notifies you when Claude answers or needs you. It does less than Claude Code's own Remote
+Control (`claude rc`) with the Claude app; what it adds is a lane to the session in your
+terminal, the one the workbench mod runs, reachable over your own network.
+
+<p align="center"><img src="docs/web-chat.png" alt="The web chat: Claude's report on which model takes which tasks, the user's reply, a receipt saying Claude has it and will read it after its current step, and 'Claude is on it'" width="420"></p>
+
 `wb chat serve` (`workbench/chat.py`; kept up by `systemd/wb-chat.service`, a user unit running
 `%h/.local/bin/wb chat serve` with `Restart=always` and no start limit) serves a small page on
 port 1337 for reaching the Claude session in workbench mode while the user is away. The unit
@@ -3447,8 +3519,8 @@ pinned beside it as `OPENCODE_SHA256`: 2.x isn't on npm), so those tests run the
 skipping. `opencode.yml` runs the Python suite once a day on the newest OpenCode (the highest
 version among the releases, not GitHub's "Latest", which marks the 1.x line's patches), so a red
 run there means a new OpenCode broke the interop. The README shows all three as badges. The
-floors are kept here, not in the README, which names no versions so it can't fall behind
-(2026-11-17): Claude Code 2.1.287, the floor for mods; OpenCode 2.2.7, the oldest release that
+exact floors are kept here; the README names only the majors (Python 3.11, OpenCode 2.x) so it
+can't fall behind (2026-11-17, #102): Claude Code 2.1.287, the floor for mods; OpenCode 2.2.7, the oldest release that
 passes the real-OpenCode tests (2.2.0 never lists `workbench_ask_reviewer`, found 2026-11-17);
 Python 3.11. Each Linux job's `Landlock`
 step prints the runner's Landlock ABI, or that it has none and the Lane tests skip. `chat.yml`
@@ -3636,7 +3708,7 @@ push: every change is a pull request that merges once `check` is green and it is
 ## Couplings: change one, change the other
 
 - **What a handoff costs Claude, measured** → THESIS.md (the case for users, with the same
-  numbers) and the README's "roughly half".
+  numbers), the README's savings line and its roadmap.
 - **Anything a reader looks up** (a command, flag, default, guard, key, file, prompt text,
   environment variable) → this file, CLAUDE.md if it names it, and the skill
   (`skill/workbench/SKILL.md`) if Claude uses it there; README only for the quickstart. CLAUDE.md's
@@ -3662,7 +3734,7 @@ push: every change is a pull request that merges once `check` is green and it is
   (`wb start --trial`, CLAUDE.md).
 - **A model server's API fields** (`models.server_facts`: LM Studio, llama-server, vLLM/SGLang;
   `ollama_served_context`, `weights` for Ollama) → the `Real` tests in `tests/test_portable.py`
-  that imitate them, and the README's FAQ where it says what each server needs set.
+  that imitate them, and *Running your own server* where it says what each server needs set.
 - **A git call on a task's worktree** → through `gitops.git` (pinned to the recorded git dir, no
   hooks), never `git -C <worktree>` by hand; parsed output → a porcelain or `-z` form.
 - **Permissions or the config layer** (`context.py`, `write_config_layer`) → the real-OpenCode
@@ -3671,7 +3743,7 @@ push: every change is a pull request that merges once `check` is green and it is
   tests on a Landlock machine; the protocol's lane line and the handbook's boundaries. What it
   leaves writable that runs later outside it (`TOOL_HOMES`, `NOT_WRITABLE`) and what WSL's
   interop runs outside it (`windows_drives`, `agent_path`, `interop_gap`) → the lane's *Writes*
-  and *Reads* here, README's security bullet, and `wb doctor`'s line.
+  and *Reads* here, the README's *Where the work runs*, and `wb doctor`'s line.
 - **`wb update`'s flags or output** (`--check --if-due`; `update available…`, `updated …`) → the
   mod's weekly check, which toasts only an `update available` answer, and `/workbench-update`, which
   reloads the plugins only after an `updated` one (register.tsx `poll` and the `UPDATE` command).
@@ -3707,12 +3779,13 @@ push: every change is a pull request that merges once `check` is green and it is
 - **The `$` uses in `register.tsx`** → only through functions declared at its top level, or
   `claude plugin validate mod` fails.
 - **The Claude Code version** the mod is verified with → `CLAUDE_CODE_VERSION` in
-  `.github/workflows/check.yml`; the floor it needs → *The tests* (the README names no versions).
+  `.github/workflows/check.yml`; the floor it needs → *The tests* (the README names no Claude Code version).
 - **The OpenCode version** the tests are verified with → `OPENCODE_VERSION` and `OPENCODE_SHA256`
   in `check.yml` and `nightly.yml` together; the floor → *The tests*, and the "checked against"
   lines here and in CLAUDE.md.
 - **The Python floor** (3.11) → the launchers' guard (`bin/wb`, `bin/wb-ask-mcp`), `check.yml`'s
-  and the `macos` job's `python-version`, *The tests*.
+  and the `macos` job's `python-version`, *The tests*, the README's *What you need*. A new
+  OpenCode major → the README's *What you need* too.
 - **The merge gate** (`owner-merge.yml`, the ruleset, `check.yml`'s job name) →
   `tests/test_workflows.py`, `scripts/github-settings.sh apply`, *Shipping to main*.
 - **`mod/` for users** → nothing: plugin.json has no `version`, so every merge reaches them
