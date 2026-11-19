@@ -1438,7 +1438,7 @@ their own layer in its place (`runner.agent_env`), so `wb doctor` notes it when 
 or `<label>.local`, or any of the machine's own addresses (`_own_addresses`: the host name's
 `getaddrinfo` and `ip -o addr`, so a LAN or Tailscale IP counts) (`_this_host`). A
 provider elsewhere counts when models.json gives it `"local": true`; it is then `remote`: it
-takes no GPU lease here, so tasks on it run at once and the remote server schedules them.
+takes no lease on this machine's GPU, but one on its server's (tasks there take turns: *Sharing the GPU*).
 OpenCode talks to it directly at the baseURL (plain `http://` is unencrypted and the prompts carry
 the code: README's FAQ suggests a firewall and Tailscale); nothing of workbench runs there, and no
 model is split across machines. `wb remote HOST` sets one up for an Ollama there (#114,
@@ -1622,8 +1622,13 @@ waiting and takes its turn as above (flock converts: the shared lock goes first)
 model, waits for the running tasks to finish, then has the GPU to itself; while it holds or waits
 for the GPU, `wb start` refuses a new task (exit 4, see *Two projects, one GPU*) unless `--queue`,
 and `wb feedback`/`next`/`resume` queue behind it; without `--wait`, any live holder makes it
-refuse at once (`models.busy` names them). A remote model (`local: true`) takes no lease at all,
-and `free_gpu` never unloads or stops a remote provider's models.
+refuse at once (`models.busy` names them). A remote model (`local: true`) takes turns on its
+server (#116): its lease uses that server's own files, `gpu-<host>-<port>.{lock,json,admit,load}`
+(`models.pool`), in the same first-come order, one task at a time, since nothing here knows its
+memory (before, tasks on one server ran at once and its Ollama swapped their models on every
+request). It never waits on this machine's GPU, nor this machine's tasks on it; `wb start`'s
+exit 4 and `--queue`, and the bench's preemption, apply per server alike. `free_gpu` never
+unloads or stops a remote provider's models.
 
 **Routing** (`router.rank`, `choose`). Rows: `store.results()` (no trials) that `tuning.judged`
 keeps, for this model and size. Quality is the acceptance rate with a uniform prior, overall =
@@ -3002,6 +3007,7 @@ $WB_HOME (~/.local/state/workbench)
   speed.json  speed.lock         each model's measured write and read speeds
   gpu.lock  gpu.json  gpu.admit  the GPU lease: the lock, who holds or waits for it, the admission lock,
   gpu.load                       and the lock that takes model loads one at a time
+  gpu-<host>-<port>.{lock,json,admit,load}   the same for a remote server's models (models.pool)
   scout.json  watch.json         the weekly model check: when it was done and offered; the watch list
   update.json                    wb update: when origin was last asked, how far behind this copy was
   bench/cases/<case>/            case.json  spec.md  base.bundle  hidden/<path>…  reference.patch

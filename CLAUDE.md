@@ -190,7 +190,7 @@ signals) and Python before 3.11. Off Linux: no Landlock, and watch.py waits on t
 Plain files under `$WB_HOME` (`~/.local/state/workbench`); the full tree and every format are in
 ARCHITECTURE.md (*Files and formats*):
 ```
-notify.jsonl results.jsonl lessons.jsonl notes.md tuning.json speed.json gpu.{lock,json,admit,load}
+notify.jsonl results.jsonl lessons.jsonl notes.md tuning.json speed.json gpu*.{lock,json,admit,load}
 scout.json update.json watch.json optimize.json imports/ images/ chat/{messages,receipts,asks,seen}.jsonl chat/{listener,prefs,push,claims}.json
 bench/{cases/<case>,runs/<run>}/ bench/runs.jsonl bench/driver.json
 rules/<task>/  opencode.json HANDBOOK.md CLAUDE.md bin/git grants.json gitdir.json (no lane)

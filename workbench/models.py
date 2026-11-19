@@ -23,9 +23,8 @@ models and stops servers that have a stop command, then loads or starts the one 
 GpuLease decides first whether it may instead run beside the tasks already running: when every
 model fits the GPU's memory at once (a big card, several GPUs, Apple's unified memory), it loads
 its own and leaves theirs; otherwise it waits for the GPU to itself. A model on another host
-(`remote`) is left out of all of it: this machine's GPU is not the one it runs on, so it takes no
-lease (tasks on one remote server run at once, and that server schedules them), frees nothing
-here, and nothing here unloads or stops it.
+(`remote`) takes turns on its server instead (its own lease files, `pool`): this machine's GPU
+is not the one it runs on, so it frees nothing here, and nothing here unloads or stops it.
 """
 from __future__ import annotations
 
@@ -958,19 +957,21 @@ def can_share(m: Model, running: list[Model], budget: int | None) -> bool:
 def admits(m: Model | None, held: dict) -> bool:
     """Whether ``m`` may take the GPU now beside the live holders ``held`` (gpu.json's entries):
     nobody waits ahead of it (first come, first served), every holder's model is known, and they
-    all fit together (can_share). Nothing (an image, ``m`` None) joins anyone."""
+    all fit together (can_share). Nothing (an image, ``m`` None) joins anyone, and on a remote
+    server, whose memory nothing here measures, nobody shares: tasks take turns (#116)."""
     if not held:
         return m is not None
-    if m is None or any(h.get("waiting") for h in held.values()):
+    if m is None or m.remote or any(h.get("waiting") for h in held.values()):
         return False
     found = discover()
     running = [o for o in (found.get(h.get("model") or "") for h in held.values()) if o]
     return len(running) == len(held) and can_share(m, running, gpu_budget())
 
 
-def holders(home: Path | None = None) -> dict:
-    """gpu.json's live entries: pid → {model, task, start, waiting?}."""
-    held = store.read_json((home or store.home()) / "gpu.json", {}) or {}
+def holders(home: Path | None = None, pool: str = "gpu") -> dict:
+    """gpu.json's live entries (a remote server's: ``pool`` gpu-<host>): pid → {model, task,
+    start, waiting?}."""
+    held = store.read_json((home or store.home()) / f"{pool}.json", {}) or {}
     return {p: h for p, h in held.items() if p.isdigit() and _alive(int(p), h.get("start"))}
 
 
@@ -1002,11 +1003,15 @@ class GpuLease:
     model (an image generation) it is always alone, and queues in gpu.json like a task, so
     tasks that come after it wait instead of joining the ones it waits for (flock would grant
     them a shared lock while its exclusive one waits); with ``wait`` False it refuses at once
-    when anything holds the GPU. A remote model holds nothing."""
+    when anything holds the GPU. A remote model takes turns on its server, under that server's own
+    files (gpu-<host>.*, ``pool``), in the same first-come order, one task at a time: nothing here
+    knows its memory (#116). Before, tasks on one remote server all ran at once, and its Ollama
+    swapped their models in and out on every request."""
 
     def __init__(self, m: Model | None, task: str, say=print, wait: bool = True):
         self.m, self.task, self.say, self.wait = m, task, say, wait
         self.home = store.home()
+        self.pool = pool(m)
         self.fh = None
         self.me = str(os.getpid())
         # its place in the queue: when the task started, so one sent back for another round
@@ -1015,10 +1020,10 @@ class GpuLease:
         self.since = (t.spec.get("created_at") if t and t.exists else None) or store.now()
 
     def _holders(self) -> dict:
-        return holders(self.home)
+        return holders(self.home, self.pool)
 
     def _set(self, held: dict) -> None:
-        store.write_json(self.home / "gpu.json", held)
+        store.write_json(self.home / f"{self.pool}.json", held)
 
     def _entry(self, waiting: bool = False) -> dict:
         # the start time tells this runner from a later process given its pid (after a reboot)
@@ -1035,12 +1040,10 @@ class GpuLease:
                         "text": msg})
 
     def __enter__(self):
-        if self.m and self.m.remote:
-            return self
         self.home.mkdir(parents=True, exist_ok=True)
-        self.fh = open(self.home / "gpu.lock", "a+")
+        self.fh = open(self.home / f"{self.pool}.lock", "a+")
         try:
-            with store.locked(self.home / "gpu.admit"):
+            with store.locked(self.home / f"{self.pool}.admit"):
                 held = self._holders()
                 if held and self.m is None and not self.wait:
                     raise RuntimeError(busy(held, "wb image needs it to itself. Run it once they "
@@ -1082,7 +1085,7 @@ class GpuLease:
                     except BlockingIOError:
                         pass  # the holders are still running (or still letting go)
                 w.wait(QUEUE_POLL)
-        with store.locked(self.home / "gpu.admit"):
+        with store.locked(self.home / f"{self.pool}.admit"):
             # nobody else can hold gpu.lock now: any other non-waiting entry is stale
             self._set({**{p: h for p, h in self._holders().items() if h.get("waiting")},
                        self.me: self._entry()})
@@ -1101,8 +1104,8 @@ class GpuLease:
         2026-11-16 audit). Lock order: gpu.load, then gpu.admit."""
         if self.m.remote:
             return make_resident(self.m, say=self.say, warn=self.warn)
-        with store.locked(self.home / "gpu.load"):
-            with store.locked(self.home / "gpu.admit"):
+        with store.locked(self.home / f"{self.pool}.load"):
+            with store.locked(self.home / f"{self.pool}.admit"):
                 held = self._holders()
                 keep = {h["model"] for p, h in held.items()
                         if p != self.me and not h.get("waiting") and h.get("model")}
@@ -1118,18 +1121,18 @@ class GpuLease:
             if _key(self.m) not in {_key(o) for o in (found.get(k) for k in keep) if o}:
                 _unload(self.m)  # or the holders' next requests swap it in and out; a model a
                 # holder runs too is theirs as well, and stops being asked for once we wait
-            with store.locked(self.home / "gpu.admit"):
+            with store.locked(self.home / f"{self.pool}.admit"):
                 held = self._holders()
                 self._set({**held, self.me: self._entry(waiting=True)})
         self._take_alone(held)  # flock converts: drops the shared lock, then waits for the others
-        with store.locked(self.home / "gpu.load"):
+        with store.locked(self.home / f"{self.pool}.load"):
             return secs + make_resident(self.m, say=self.say, warn=self.warn)
 
     def _leave(self) -> None:
         if not self.fh:
             return
         try:
-            with store.locked(self.home / "gpu.admit"):
+            with store.locked(self.home / f"{self.pool}.admit"):
                 held = self._holders()
                 held.pop(self.me, None)
                 self._set(held)
@@ -1151,6 +1154,15 @@ def busy(held: dict, why: str) -> str:
         return (f"task {task.name} (repo {spec.get('repo')}, {h.get('model') or spec.get('model')}"
                 + (f", {phase}" if phase else "") + (", waiting for it" if h.get("waiting") else "") + ")")
     return f"the GPU is in use by {', '.join(one(h) for h in held.values())}: {why}"
+
+
+def pool(m: Model | None) -> str:
+    """The lease files a model takes turns under: gpu.* for this machine's GPU, gpu-<host>.* for
+    a remote server's (its host and port in file-name characters)."""
+    if not (m and m.remote):
+        return "gpu"
+    u = urlparse(m.root)
+    return "gpu-" + re.sub(r"[^a-z0-9]+", "-", f"{u.hostname or 'host'}-{u.port or ''}".lower()).strip("-")
 
 
 def _started(pid: int) -> str | None:

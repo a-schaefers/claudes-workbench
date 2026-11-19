@@ -857,7 +857,7 @@ class Optimize(unittest.TestCase):
         m = models.discover()["ollama/m"]
         from workbench import cli, optimize
         held = {"123": {"task": optimize.HOLDER, "model": None, "start": None}}
-        with mock.patch.object(cli, "_gpu_holders", lambda me=None: held), \
+        with mock.patch.object(cli, "_gpu_holders", lambda me=None, of=None: held), \
                 mock.patch.object(optimize, "stop", lambda: 123) as stop:
             self.assertEqual(cli._preempt_bench(m, "t"),
                              "note: stopped wb optimize (what it measured is kept) to make room")

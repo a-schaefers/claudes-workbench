@@ -135,6 +135,36 @@ with models.GpuLease(None, optimize.HOLDER, wait=False):
         self.assertIsNotNone(holder.poll())
         wait_phase("t-now", {"review"})
 
+    def test_tasks_on_one_remote_server_take_turns_while_this_gpu_runs_its_own(self):
+        # #116: tasks on a remote server all ran at once, and its Ollama swapped their models in
+        # and out on every request; it has its own lease now, apart from this machine's GPU
+        os.environ["WB_FAKE_GPU_GB"] = "24"
+        cfg = json.loads(Path(os.environ["WB_OPENCODE_CONFIG"]).read_text())
+        cfg["provider"]["ollama-pc"] = {"options": {"baseURL": "http://gpu-pc.invalid:11434/v1"},
+                                        "models": {"coder": {"limit": {"context": 32768}}}}
+        Path(os.environ["WB_OPENCODE_CONFIG"]).write_text(json.dumps(cfg))
+        Path(os.environ["WB_MODELS"]).write_text(json.dumps({"ollama-pc": {"local": True},
+                                                             BIG: {"weights_gb": 20}}))
+        remote = models.discover()["ollama-pc/coder"]
+        self.assertTrue(remote.remote)
+        self.assertEqual(models.pool(remote), "gpu-gpu-pc-invalid-11434")
+        self.start("t-r1", "hang", "--model", remote.id)
+        wait_running("t-r1")
+        self.assertIn("exit 4", self.refused("start", "t-r0", "--spec", str(self.spec), "--repo",
+                                             str(self.repo), "--model", remote.id))   # it would wait
+        self.start("t-r2", "ok", "--model", remote.id, "--queue")
+        self.start("t-here", "ok", "--model", BIG)     # this machine's GPU is free: no wait
+        wait_phase("t-here", {"review"})
+        deadline = time.time() + 30
+        while "waiting for the GPU" not in store.Task("t-r2").status.get("last", ""):
+            self.assertLess(time.time(), deadline, store.Task("t-r2").status)
+            time.sleep(0.1)
+        held = store.read_json(store.home() / "gpu-gpu-pc-invalid-11434.json")
+        self.assertEqual(sorted(h["task"] for h in held.values()), ["t-r1", "t-r2"])
+        self.assertEqual(models.holders(), {})        # this machine's gpu.json never saw them
+        run_wb("stop", "t-r1")
+        wait_phase("t-r2", {"review"})
+
     def test_a_task_sent_back_goes_ahead_of_one_started_after_it(self):
         # its review waits on that round: behind a night's backlog, it would wait for all of it
         os.environ["WB_FAKE_GPU_GB"] = "24"
