@@ -4408,6 +4408,26 @@ class Setup(Base):
         self.assertEqual(wb.resolve(), (runner.PKG_ROOT / "bin/wb").resolve())
         self.assertTrue(skill.is_dir() and not skill.is_symlink())
 
+    def test_setup_ends_with_a_first_run_checklist_that_names_each_fix_and_no_model(self):
+        # #111: what a working setup still needs, each line with its fix
+        home = Path(self.tmp.name) / "home"
+        os.environ["HOME"] = str(home)
+        os.environ.pop("CLAUDE_CONFIG_DIR", None)
+        out = self.setup()[1]
+        tail = out[out.index("first run:"):]
+        self.assertRegex(tail, r"ok  opencode .*2\.3\.0")
+        self.assertIn("ok  a model server answers", tail)
+        self.assertIn("local model(s) registered", tail)
+        self.assertRegex(tail, r"(ok  Landlock ABI \d+|--  no Landlock here)")
+        os.environ["WB_OPENCODE_BIN"] = str(Path(self.tmp.name) / "no-such-opencode")
+        with mock.patch.object(cli.models, "discover", return_value={}):
+            lines = cli.first_run()
+        self.assertTrue(lines[0].startswith("--  OpenCode isn't installed: install OpenCode 2.x"))
+        self.assertIn("no model server answers here", lines[1])
+        self.assertIn("no local model registered yet: run /workbench", lines[2])
+        for mid in cli.models.discover():
+            self.assertNotIn(mid.split("/")[-1], tail + "\n".join(lines))  # names no model
+
     def test_setup_drops_the_old_delegate_link_that_now_leads_nowhere(self):
         # 2026-11-17: /delegate became /workbench, leaving ~/.claude/skills/delegate dangling
         home = Path(self.tmp.name) / "home"
