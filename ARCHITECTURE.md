@@ -1394,20 +1394,21 @@ nothing until a surface attaches.
   (`■ done: Claude reviews next`), and status `last` (`tests passed: Claude reviews next`). A short pane gets its face on one line
   instead. Then the week's saving (`savedLine` of `wb savings --json`, read every 10 minutes
   and again when a task closes: `this week: saved ~1.2M Claude tokens (46%, estimate) · 0.9 kWh`;
-  nothing until a task can be compared), and, while the web chat is on, its link, above the tabs
-  on either tab, to copy.
+  nothing until a task can be compared). The web chat's link is the Settings tab's alone, under
+  its rows while the chat is on (never under the tasks: the user, 2026-11-19).
   The Settings tab (`settingRow`, after backseat-driver's: a Select there opened on a click and
   could pick nothing, and its sentence followed only the saved choice, the user 2026-11-19) has
-  one row per setting, a Button naming its value (`▸ Claude coding: Let Claude decide`, key
-  `coding`; `▸ Web chat: Off`, key `chat`); a press opens its options under it as Buttons (keys
+  one row per setting, a Button naming its value (`▸ Claude coding: Let Claude decide (default)`, key
+  `coding`; `▸ Web chat: Off (default)`, key `chat`; the default option says so, to show how it was at
+  the start, the user 2026-11-19); a press opens its options under it as Buttons (keys
   `coding:only|ask|decide`, `chat:off|on`, the chosen one marked `❯`), picked by a click or Enter
   on the ring, and a pick folds the row again. Under them, the sentence of the option the ring is
   on (the `ui.focus` hook keeps it in the `pane` atom), else the chosen one's; the pointer on an
   option lays its own sentence over it (a hover reveal: `display: "none"` Boxes, absolute, under
   the option's hover scope, since no hook runs on hover). **Claude coding** (#93, *Claude coding*):
-  `Only when I say`, `Ask me first`, `Let Claude decide` (`CODING_STOPS`); a pick runs `wb coding
-  <mode>`, and each draw reads `coding.json` again. **Web chat** (`CHAT_STOPS`): `Off` (the
-  default) and `On`; a pick runs `wb chat on|off` and reads the switch and the link back at once.
+  `Only when I say`, `Ask me first`, `Let Claude decide (default)` (`CODING_STOPS`); a pick runs `wb coding
+  <mode>`, and each draw reads `coding.json` again. **Web chat** (`CHAT_STOPS`, both saying what it
+  is: `A localhost web server to interact with Claude.`): `Off (default)` and `On`; a pick runs `wb chat on|off` and reads the switch and the link back at once.
 - **The status line** reads like `⚒ wb · add-scores running r2 · fix-typo asks · 1 awaiting
   review`, or `⚒ wb · workbench mode` with nothing open. Outside workbench mode it counts only
   the session's own tasks (`mine`), and shows nothing without one: another session's running task
@@ -3081,8 +3082,8 @@ the followed task's transcript (its newest lines, each cut to `LINE_CHARS` 2000 
 text past 100,000 characters, which once left the bubble empty), scrolling with the newest lines
 unless the user scrolled up (`ui.scroll`); then the stage (the apprentice with a speech bubble,
 pixels on a terminal at least 20 rows by 40 columns, else its one-line face; text wrapped by
-`wrapWords` because Text's own wrapping beside the raster drew empty rows); the saving, the web
-chat link while on, and the tabs last. The Settings tab and the minimized strip (`AbovePrompt`)
+`wrapWords` because Text's own wrapping beside the raster drew empty rows); the saving and the
+tabs last. The Settings tab and the minimized strip (`AbovePrompt`)
 are under *Seeing what the agent does*.
 
 **The apprentice** (`apprentice.ts`): 16×12 pixel art as letters, drawn with half blocks

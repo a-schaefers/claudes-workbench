@@ -345,17 +345,18 @@ const CODING_RULES: Record<string, string> = {
 }
 
 // The pane's Claude coding row (#93), in order; the choice is wb's (`wb coding`), the sentence is
-// what the pane shows for the option under the ring or the pointer
+// what the pane shows for the option under the ring or the pointer. The default says so, to show
+// how it was at the start (the user, 2026-11-19)
 const CODING_STOPS: [string, string, string][] = [
   ['only', 'Only when I say', 'You tell Claude when to write code.'],
   ['ask', 'Ask me first', 'Claude can ask to make a specific fix and waits for your yes.'],
-  ['decide', 'Let Claude decide', 'Claude uses its judgment to guide the local agent or make a fix itself.'],
+  ['decide', 'Let Claude decide (default)', 'Claude uses its judgment to guide the local agent or make a fix itself.'],
 ]
 
 // The web chat's row: the choice is wb's (`wb chat on|off`, chat/switch.json), off by default
 const CHAT_STOPS: [string, string, string][] = [
-  ['off', 'Off', 'No link, and no session reads the web chat: what you write there waits.'],
-  ['on', 'On', 'Its link shows here to open on your phone; in /workbench, Claude reads it.'],
+  ['off', 'Off (default)', 'A localhost web server to interact with Claude.'],
+  ['on', 'On', 'A localhost web server to interact with Claude.'],
 ]
 
 // One settings row: a Button naming the choice, which opens its options under it, each a Button
@@ -1582,8 +1583,9 @@ export const register: Register = (on, options) => {
     const { url, web, delegating } = await read($, chat)
     const saved = await read($, savings)
     const view = await read($, pane)
-    // the web chat's link while it is on, at hand to copy on either tab, then the tabs: last, since the
-    // pane follows its end (a row at the top scrolled away under a long transcript)
+    // the web chat's link while it is on, on the Settings tab only (the user, 2026-11-19: never under
+    // the tasks), then the tabs: last, since the pane follows its end (a row at the top scrolled away
+    // under a long transcript)
     const pinned = web && url ? (
       <Box marginTop={1}>
         <Text>
@@ -1721,7 +1723,6 @@ export const register: Register = (on, options) => {
         )}
         {stage}
         {saved && <Text dimColor>{saved}</Text>}
-        {pinned}
         {tabs}
       </Box>
     )
