@@ -794,6 +794,40 @@ class Lifecycle(Base):
         return subprocess.run(["git", "-C", str(self.repo), "rev-parse", "-q", "--verify", name],
                               capture_output=True, text=True).stdout.strip()
 
+    def test_an_accept_or_discard_that_fails_to_write_its_result_is_finished_by_a_retry(self):
+        # #88 (the 2026-11-18 audit): the phase was written before the results row, so a full
+        # disk left a closed task out of the stats and the router's evidence, and a retry said
+        # only "already accepted"
+        import errno
+        real = store.append_jsonl
+        def full_once(path, row, *rest, **kw):
+            if Path(path).name == "results.jsonl" and not failed:
+                failed.append(path)
+                raise OSError(errno.ENOSPC, "No space left on device")
+            return real(path, row, *rest, **kw)
+        for name, verb in (("t-acc", ("accept", "-m", "feat: x")), ("t-dis", ("discard",))):
+            failed = []
+            self.start(name, "ok")
+            wait_phase(name, {"review"})
+            with mock.patch.object(store, "append_jsonl", full_once), \
+                    self.assertRaises(SystemExit), redirect_stderr(io.StringIO()) as err:
+                run_wb(verb[0], name, *verb[1:])
+            self.assertIn("No space left", err.getvalue())
+            task = store.Task(name)
+            self.assertIn(task.status["phase"], store.CLOSED)
+            self.assertFalse([r for r in store.results(trials=True) if r["task"] == name])
+            commit = task.status["unrecorded"]["extra"].get("commit")
+            out = run_wb(verb[0], name, *verb[1:])                    # the retry finishes it
+            self.assertIn("its result is recorded now", out)
+            rows = [r for r in store.results(trials=True) if r["task"] == name]
+            self.assertEqual(len(rows), 1)
+            self.assertEqual(rows[0].get("commit"), commit)          # the original commit
+            self.assertIsNone(store.Task(name).status.get("unrecorded"))
+            with self.assertRaises(SystemExit), redirect_stderr(io.StringIO()):
+                run_wb(verb[0], name, *verb[1:])                    # and once only
+            self.assertEqual(len([r for r in store.results(trials=True) if r["task"] == name]), 1)
+        self.assertTrue(rows[0]["outcome"] == "discarded")
+
     def test_a_worktree_git_cannot_remove_still_closes_the_task(self):
         # the 2026-11-16 audit: a read-only ignored directory made `git worktree remove` fail
         # after the commit, and accept, a retried accept and discard all died from then on

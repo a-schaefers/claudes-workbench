@@ -1185,6 +1185,8 @@ def cmd_accept(a):
     reap(task)
     spec, st = task.spec, task.status
     if st.get("phase") in store.CLOSED:
+        if _finish_record(task):
+            return
         die(f"{a.name} is already {st.get('phase')}")
     if st.get("phase") != "review" and not a.force:
         die(f"{a.name} is {st.get('phase')}, not waiting for review (--force accepts anyway)")
@@ -1229,9 +1231,12 @@ def cmd_accept(a):
                                   spec["base"])
         except gitops.GitError as e:
             print(f"wb: not merged: {e}", file=sys.stderr)
+    extra = {"commit": commit, "merged": bool(merged)}
     task.set_status(phase="accepted", last=f"accepted as {commit}" +
-                    (f", merged {merged}" if merged else ""))
-    row = results.record(task, "accepted", measured, commit=commit, merged=bool(merged))
+                    (f", merged {merged}" if merged else ""),
+                    unrecorded={"outcome": "accepted", "step": measured, "extra": extra})
+    row = results.record(task, "accepted", measured, **extra)
+    task.set_status(unrecorded=None)
     _ack_all(task)
     try:  # a reminder: it once turned a finished accept into exit 1 (the 2026-11-16 audit)
         note = claude_md_status(repo, spec["branch"])  # the task's own commit counts
@@ -1247,6 +1252,24 @@ def cmd_accept(a):
            f"\nmerge with: git -C {shlex.quote(str(repo))} merge --no-ff {spec['branch']}"))
     _say(savings.line(row) or spend.line(row.get("claude")))
     _say(lessons.nudge(task, "accepted"))
+
+
+def _finish_record(task: store.Task) -> bool:
+    """A closed task whose results row an interrupted accept or discard never wrote (status
+    `unrecorded`, set with the phase): write it now, from what that run measured. The
+    task was missing from stats and the router's evidence for good, and a retry said only "already
+    accepted" (the 2026-11-18 audit, #88)."""
+    todo = task.status.get("unrecorded")
+    if not todo:
+        return False
+    if not any(r.get("task") == task.name for r in store.results(trials=True)):  # once
+        results.record(task, todo["outcome"], todo.get("step"), **(todo.get("extra") or {}))
+    task.set_status(unrecorded=None)
+    _ack_all(task)
+    commit = (todo.get("extra") or {}).get("commit")
+    print(f"{task.name} was {todo['outcome']}" + (f" as {commit}" if commit else "")
+          + "; its result is recorded now")
+    return True
 
 
 def _landed(task: store.Task) -> str | None:
@@ -1270,6 +1293,8 @@ def cmd_discard(a):
     task = need(a.name)
     spec = task.spec
     if task.status.get("phase") in store.CLOSED:
+        if _finish_record(task):
+            return
         die(f"{a.name} is already {task.status.get('phase')}")
     _stop_runner(task)
     _spec_gaps(task, a.spec_gap)
@@ -1281,8 +1306,11 @@ def cmd_discard(a):
     kept = a.keep_branch or not repo.is_dir()
     if not kept:
         gitops.delete_branch(repo, a.name)
-    task.set_status(phase="discarded", last=a.reason or "discarded", pid=None)
+    task.set_status(phase="discarded", last=a.reason or "discarded", pid=None,
+                    unrecorded={"outcome": "discarded", "step": measured,
+                                "extra": {"reason": a.reason}})
     row = results.record(task, "discarded", measured, reason=a.reason)
+    task.set_status(unrecorded=None)
     _ack_all(task)
     print(f"discarded {a.name}" + ("" if a.keep_branch else f"; branch {spec['branch']} deleted"
                                    if not kept else f"; {repo} is gone, so its branch with it"))
