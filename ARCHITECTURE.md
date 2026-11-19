@@ -2260,7 +2260,10 @@ custom-node packs do run their own Python).
   holding the task's base commit, with no changes to tracked files: a task started on `feature`
   once merged into the `main` checked out since, and one on a detached HEAD left its merge commit
   orphaned, the 2026-11-16 audit; a conflict is backed out with `merge --abort` and reported as not
-  merged); otherwise it prints the merge command.
+  merged); otherwise it prints the merge command. A task started from a tag or a commit has a null
+  `base_branch`, so any branch holding its base takes it (`cli._merge_into`: the tag was taken for
+  a branch name and every such merge refused, #87; a record from before `base_branch` resolves its
+  `base_ref` the same way).
 - **The worktree** (`gitops.create_worktree`): `worktree add -b delegate/<task> <task
   dir>/worktree <base sha>` (the base peeled to its commit, so an annotated tag's object id is
   never the base), refused when the branch exists. A failed add (a required smudge filter) removes
@@ -3034,7 +3037,7 @@ Claude Code session whose Bash ran `wb start`; with `cwd` and `repo`, which sess
 `mine` to, and `_scope`'s `--session`/`--repo`), `claude_pid` (when set: `CLAUDE_PID`, that
 session's Claude Code process; once it is gone the directory rule adopts the task), `base` (the full sha), `base_ref`, `base_branch` (the branch
 `--merge` lands on: the one checked out for `HEAD`, or `--base` when it names a local branch; null
-on a detached HEAD), `branch`, `model`, `model_label`, `opencode_model`, `route` (the
+on a detached HEAD, a tag or a commit), `branch`, `model`, `model_label`, `opencode_model`, `route` (the
 router's reason), `size`, `stack`, `trial` (when set), `backlog` (`--backlog`), `bench` (a replay's `{case, run, label}`:
 *Bench*), `test_cmd`, `no_base_check` (when set), `auto_fix`, `self_review` (true/false from the flags; null: learned), `ask_budget`,
 `ask_timeout`, `checkin`, `round_timeout`, `silence_timeout`, `think_timeout`, `test_timeout`,
