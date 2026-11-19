@@ -414,7 +414,7 @@
     if (s.build) build = s.build
     live = true
     save(K.thread, (s.messages || []).slice(-50))
-    state = { messages: s.messages || [], asks: s.asks || [], prefs: s.prefs || {}, push: s.push || {}, listener: s.listener || null }
+    state = { messages: s.messages || [], asks: s.asks || [], prefs: s.prefs || {}, push: s.push || {}, listener: s.listener || null, savings: s.savings || null }
     if (!sheet.hidden) drawSettings()
     if (state.push.key && !pushSynced) { pushSynced = true; syncPush() }
     reportSeen()
@@ -624,8 +624,22 @@
     ask: 'Permission prompts come here for Allow or Deny. Unanswered for 30 minutes, they wait in the terminal.',
     allow: "Claude runs what it would have asked about, and each one is listed here. Your deny rules still hold, and plans and questions still come to you.",
   }
+  // `wb savings` for the week, from the state (chat.week_saved)
+  const tokens = n => Math.abs(n) >= 1e6 ? `${(n / 1e6).toFixed(1)}M` : `${Math.round(n / 1e3)}K`
+  function drawSaved() {
+    const t = state.savings
+    if (!t || !t.tasks) {
+      $('saved').textContent = 'Nothing to compare yet. Once a delegated task is accepted, this shows what it saved Claude this week.'
+      return
+    }
+    const saved = t.saved >= 0
+      ? `Saved about ${tokens(t.saved)}${t.self_est > 0 ? ` (${Math.round(100 * t.saved / t.self_est)}%)` : ''}.`
+      : `It cost about ${tokens(-t.saved)} more.`
+    const gpu = t.wh ? ` The GPU used ${t.wh >= 1000 ? `${(t.wh / 1000).toFixed(1)} kWh` : `${Math.round(t.wh)} Wh`}${t.cost != null ? ` ($${t.cost.toFixed(2)})` : ''}.` : ''
+    $('saved').textContent = `In the last 7 days, ${t.tasks} task${t.tasks === 1 ? '' : 's'}: Claude used ${tokens(t.claude)} tokens where writing them itself would have taken about ${tokens(t.self_est)} (an estimate). ${saved}${gpu}`
+  }
   function drawSettings() {
-    drawApp(); drawNotify()
+    drawApp(); drawNotify(); drawSaved()
     const away = (state.prefs && state.prefs.away) || 'ask'
     sheet.querySelectorAll('[data-away]').forEach(b => b.setAttribute('aria-checked', String(b.dataset.away === away)))
     $('away-note').textContent = AWAY_NOTE[away]

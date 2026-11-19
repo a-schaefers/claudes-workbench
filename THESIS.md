@@ -130,3 +130,9 @@ Install workbench (the [README](README.md#quickstart) has the steps), run `/work
 Code, and give it a real feature. `wb optimize` sizes the window for your card on its own, and the
 router learns from each task you accept which model suits which size of work. A bigger GPU or a
 stronger local model shifts every number above in your favour, and local models keep improving.
+
+You see the result on your own tasks. `wb accept` prints what each one cost Claude beside an
+estimate of Claude writing it, and the GPU energy it used. `wb savings` adds up the week (or
+`--month`, `--all`), and the Workbench pane and the web chat's settings show the same total. The
+estimate is fitted from the paired runs above, so treat any single task as within about half
+either way, and a week of tasks as the better guide.

@@ -33,7 +33,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import parse_qs, urlsplit
 
-from . import store, webpush
+from . import savings, store, webpush
 from .watch import Watcher
 
 PORT = 1337
@@ -146,7 +146,12 @@ def snapshot() -> dict:
     return {"messages": thread(), "asks": asks(), "listener": listener(), "prefs": prefs(),
             "push": {"key": push_key(), "test": (store.read_json(chat_dir() / "push-test.json", None)
                                                  or {}).get("ts")},
-            "build": build(), "now": store.now()}
+            "savings": week_saved(), "build": build(), "now": store.now()}
+
+
+def week_saved() -> dict:
+    """The gear sheet's Savings: `wb savings` for the last 7 days (savings.totals)."""
+    return savings.totals(store.results(), since=store.now() - savings.PERIODS["week"])
 
 
 # ---- notifications: web push with no payload (webpush.py) ----
