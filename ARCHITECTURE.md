@@ -1321,7 +1321,10 @@ nothing until a surface attaches.
   newest lines unless the user scrolls up. At its foot stands the apprentice, the local agent
   drawn as a small robot in a hard hat: it swings a wrench while it works and raises its arms when
   a task is ready for review; its chest lamp is the phase's colour, and its speech bubble says
-  what it is doing now and how long the task has left. A short pane gets its face on one line
+  what it is doing now and how long the task has left, or at a handoff who acts next ("Local tests
+  passed on <task>." / "Claude reviews next.", "Claude answers next.": #103, where "done" read as
+  tests passed, accepted or landed alike). The transcript's last line says the same once
+  (`■ done: Claude reviews next`), and status `last` (`tests passed: Claude reviews next`). A short pane gets its face on one line
   instead. Below it, the week's saving (`savedLine` of `wb savings --json`, read every 10 minutes
   and again when a task closes: `this week: saved ~1.2M Claude tokens (46%, estimate) · 0.9 kWh`;
   nothing until a task can be compared), and the web chat's link, pinned at the bottom.

@@ -1240,8 +1240,8 @@ def drive(task: store.Task) -> None:
                             "text": "tests pass; the agent reviews its own change first"})
                 continue
             task.set_status(phase="review", tests=tests,
-                            last="tests passed, waiting for review" if tests and tests["ok"]
-                            else "waiting for review")
+                            last="tests passed: Claude reviews next" if tests and tests["ok"]
+                            else "Claude reviews next")
             task.notify("review", text + review_diff(task), round=n)
             return
 

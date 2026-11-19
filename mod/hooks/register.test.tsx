@@ -1195,7 +1195,8 @@ test('the apprentice says how the followed task stands: in pixels in a terminal,
   files['/wb/tasks/fix-it/status.json'] = JSON.stringify({ phase: 'review', round: 1, updated_at: ts + 5 })
   await clock.advance(1600)
   ui = await $.ui.mount({ ...PANE, surface: 'terminal' })
-  expect(await ui.find({ type: 'Text', text: 'fix-it is ready for review.' })).toBeTruthy()
+  expect(await ui.find({ type: 'Text', text: 'fix-it is done.' })).toBeTruthy()
+  expect(await ui.find({ type: 'Text', text: 'Claude reviews next.' })).toBeTruthy()  // who acts next (#103)
   expect(await ui.find({ type: 'Text', text: /^◆/ })).toBeTruthy()
   await ui.unmount()
 
