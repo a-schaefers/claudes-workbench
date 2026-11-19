@@ -48,7 +48,7 @@ clearly been through several audits, and most edges probed there were already ha
 - **Fix:** merge with `--no-overwrite-ignore`, or check the incoming paths first. Refuse and name
   the path, and keep the task commit available.
 
-**2. Removing a remote can delete a hand-configured provider.** Codex; source.
+**2. ~~Removing a remote can delete a hand-configured provider.~~** **Fixed (#197).** Codex; source.
 - `remote_pid` derives the provider id from the hostname alone (`models.py:1303`).
 - `add_remote` keeps an existing provider of that id even when its endpoint or port differs, yet
   returns the new endpoint (`models.py:1317`).
@@ -113,7 +113,7 @@ clearly been through several audits, and most edges probed there were already ha
   `--round-timeout`, ignore `wb steer --now` and hold the GPU lease.
 - **Fix:** run the clocks and the steer check on every pass, whatever the line was.
 
-**10. The optimizer can unload the remote model an active task is using.** Codex; source.
+**10. ~~The optimizer can unload the remote model an active task is using.~~** **Fixed (#198).** Codex; source.
 - `optimize.main` takes the local lease (`GpuLease(None, …)` is pool `gpu`), not the remote
   server's `gpu-<host>` pool (`optimize.py:327`, `models.py:1159`).
 - `busy()` lists only other models on that server, leaving out the same model (`optimize.py:124`).
@@ -301,7 +301,7 @@ loaded" list.
 **30. A repo on WSL's `/mnt/c` gets no warning.** Claude; source. git, and `gitops.mark()` at
 every step, are much slower on the Windows filesystem. **Fix:** a note at `wb start`.
 
-**31. The first automatic optimize on a fresh state directory crashes.** Codex; source.
+**31. ~~The first automatic optimize on a fresh state directory crashes.~~** **Fixed (#198).** Codex; source.
 `optimize.start` opens `optimize.log` in `WB_HOME` without creating the directory first
 (`optimize.py:265`). `wb setup` catches the error and carries on (`cli.py:2522`), so the first
 measurement silently doesn't happen. **Fix:** create the directory first, and test first run with

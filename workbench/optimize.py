@@ -22,6 +22,7 @@ kept. Nothing it does wakes Claude.
 """
 from __future__ import annotations
 
+import contextlib
 import math
 import os
 import re
@@ -262,6 +263,7 @@ def start(bench: bool = False, if_due: bool = False) -> list[str]:
     env = {**os.environ, "PYTHONPATH": str(PKG_ROOT), "WB_HOME": str(store.home())}
     for k in ("WB_TASK", "CLAUDE_CODE_SESSION_ID", "CLAUDE_PID"):
         env.pop(k, None)
+    store.home().mkdir(parents=True, exist_ok=True)  # a fresh profile's first wb setup (#198)
     with open(store.home() / "optimize.log", "a") as log:
         argv = ["--bench"] * bench + ["--all"] * (not why)  # asked for: every model again
         proc = subprocess.Popen([sys.executable, "-X", "utf8", "-m", "workbench.optimize", *argv],
@@ -329,17 +331,26 @@ def main() -> None:
             for m in candidates():
                 if not every and m.id in (st.get("models") or {}):
                     continue  # due for a new model only: the others' fits still hold
-                if others := busy(m):
-                    print(f"{m.id}: not measured, {m.root} has {', '.join(others)} loaded", flush=True)
-                    continue
-                try:
-                    trained = models.ollama_show(m.root, m.name).get("context_length")
-                except Exception:
-                    trained = None
-                print(f"{m.id}: measuring", flush=True)
-                row = fit(m, trained)
-                n += len(row["tried"])
-                _record(m.id, row)
+                with contextlib.ExitStack() as turn:
+                    if m.remote:  # its server's own lease too: a task there may be using this very
+                        try:      # model, and probe unloads it (#198, the 2026-11-19 audit)
+                            turn.enter_context(models.GpuLease(None, HOLDER, say=print, wait=False,
+                                                               on=m))
+                        except RuntimeError:
+                            print(f"{m.id}: not measured, a task is using {m.root}", flush=True)
+                            continue
+                    if others := busy(m):
+                        print(f"{m.id}: not measured, {m.root} has {', '.join(others)} loaded",
+                              flush=True)
+                        continue
+                    try:
+                        trained = models.ollama_show(m.root, m.name).get("context_length")
+                    except Exception:
+                        trained = None
+                    print(f"{m.id}: measuring", flush=True)
+                    row = fit(m, trained)
+                    n += len(row["tried"])
+                    _record(m.id, row)
     except (Stopped, RuntimeError) as e:
         why = str(e)
     finally:
