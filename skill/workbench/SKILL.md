@@ -319,7 +319,8 @@ coding choice is the user's (`wb coding`), never changed by a check.
   - **Tests**: they test the behaviour and would fail on a bug; none weakened, skipped or
     special-cased; expected values not just copied from the output. For a bug fix with its own
     regression test, `wb verify <name> --test '<that test>'` shows whether it fails on the base
-    and passes on the change; only `proven` is proof (`wb report` repeats it, and `wb accept`
+    and passes on the change (add `--expect '<the assertion's message>'` when you know what the
+    bug's failure prints); only `proven` is proof (`wb report` repeats it, and `wb accept`
     says when it proves nothing about what you accept). For a visual change, `wb shot <name>
     --capture '<the project's screenshot command>'` captures the base and the candidate the same
     way: look at both images, and if a capture failed, review the code as usual. `--chat` shows the

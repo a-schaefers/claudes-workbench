@@ -26,10 +26,20 @@ LIMIT = 300  # seconds for each run; past it, that run is inconclusive
 TEST_PATH = re.compile(r"(^|/)(tests?|spec|__tests__)/|(^|/)test_[^/]*$|_test\.[A-Za-z]+$"
                        r"|\.(test|spec)\.[A-Za-z]+$")
 # an assertion failing, as the common runners print one: what went wrong first (pytest's `E
-# assert`, unittest's AssertionError, jest's expect), then a failed test's header
-ASSERTION = re.compile(r"AssertionError|^E\s+assert|\bassert(ion)?\b|Expected|expected|Error: expect\("
-                       r"|panic: ", re.I)
+# assert`, unittest's AssertionError, jest's Expected:/expect(, Go's "expected … got"), then a
+# failed test's header. Not a bare "expected": Python's `SyntaxError: expected ':'` matched it,
+# and a base that never ran an assertion was called proven (#193, the 2026-11-19 audit).
+ASSERTION = re.compile(r"AssertionError|^E\s+assert|\bassert(ion)?\b|^\s*Expected\b"
+                       r"|\bexpected\b.*\b(but|got|received|to (be|equal|have))\b"
+                       r"|Error: expect\(|panic: ", re.I)
 FAILED_TEST = re.compile(r"^(FAIL[:\s]|--- FAIL|\s*✕)")
+# a run that failed before any test could: the code didn't parse, import, build or collect. A
+# failed test's header beside one of these is the setup's failure, not an assertion's (Go prints
+# `FAIL pkg [build failed]`)
+SETUP = re.compile(r"\b(SyntaxError|IndentationError|TabError|ImportError|ModuleNotFoundError)\b"
+                   r"|errors? (during collection|collecting)|\bfixture '[^']*' not found"
+                   r"|Cannot find module|\[(build|setup) failed\]|could not compile"
+                   r"|error TS\d{4}:|^\S+\.go:\d+:\d+: ", re.M)
 
 
 class _At(store.Task):
@@ -44,10 +54,14 @@ class _At(store.Task):
 
 
 def test_files(task: store.Task, tree: str) -> list[str]:
-    """The candidate's changed files that look like tests: what the base run borrows."""
-    names = gitops.git(task.worktree, "diff", "--name-only", "--no-renames",
-                       task.spec["base"], tree).split("\n")
-    return [n for n in names if n and TEST_PATH.search(n)]
+    """The candidate's changed files that look like tests, as they are in the candidate: what the
+    base run borrows. Not the deleted ones: a renamed test listed its old name too, the overlay
+    asked the candidate for it, and git stopped on the pathspec before any test ran (#194, the
+    2026-11-19 audit). NUL-separated, so a name with a tab or newline survives."""
+    raw = gitops.git(task.worktree, "diff", "--name-status", "--no-renames", "-z",
+                     task.spec["base"], tree).split("\0")
+    pairs = zip(raw[0::2], raw[1::2])
+    return [p for st, p in pairs if p and not st.startswith("D") and TEST_PATH.search(p)]
 
 
 def assertion(text: str) -> str:
@@ -74,14 +88,21 @@ def _run(task: store.Task, checkout, cmd: str, limit: int, keep=None) -> tuple[i
         return out
 
 
+def on_base(task: store.Task, cmd: str, limit: int) -> tuple[int | str, str]:
+    """``cmd`` on the task's base commit alone, in a scratch checkout under its lane (the runner's
+    base check): nothing it writes reaches the task's worktree."""
+    return _run(task, lambda work: gitops.git(work, "checkout", "-q", "--detach", task.spec["base"]),
+                cmd, limit)
+
+
 def _checkouts(task: store.Task, tree: str, files: list[str]):
     """The base, with the candidate's ``files`` copied in, and the candidate as the worktree is."""
     head = gitops.git(task.worktree, "rev-parse", "HEAD").strip()
 
     def base(work: Path) -> None:
         gitops.git(work, "checkout", "-q", "--detach", task.spec["base"])
-        if files:
-            gitops.git(work, "checkout", "-q", tree, "--", *files)  # the candidate's, alone
+        if files:  # the candidate's, alone; literal, so a `*` in a name is no glob
+            gitops.git(work, "checkout", "-q", tree, "--", *(f":(literal){f}" for f in files))
 
     def candidate(work: Path) -> None:
         gitops.git(work, "checkout", "-q", "--detach", head)
@@ -89,18 +110,27 @@ def _checkouts(task: store.Task, tree: str, files: list[str]):
     return base, candidate
 
 
-def verdict(base: int | str, base_out: str, cand: int | str) -> str:
-    """proven, base-passes, candidate-fails or inconclusive."""
+def verdict(base: int | str, base_out: str, cand: int | str, expect: str = "") -> str:
+    """proven, base-passes, candidate-fails or inconclusive. Proven only on positive evidence:
+    ``expect`` (the failure Claude names, `wb verify --expect`) in the base's output, else an
+    assertion line, else a failed test's header with no setup error beside it."""
     if "timeout" in (base, cand) or "output limit" in (base, cand):
         return "inconclusive"
     if cand != 0:
         return "candidate-fails"
     if base == 0:
         return "base-passes"
+    if expect:
+        return "proven" if expect in base_out else "inconclusive"
+    if any(ASSERTION.search(x) for x in base_out.splitlines()):
+        return "proven"
+    if SETUP.search(base_out):
+        return "inconclusive"
     return "proven" if assertion(base_out) else "inconclusive"
 
 
-def run(task: store.Task, cmd: str, files: list[str] | None = None, limit: int = LIMIT) -> dict:
+def run(task: store.Task, cmd: str, files: list[str] | None = None, limit: int = LIMIT,
+        expect: str = "") -> dict:
     """Run ``cmd`` on the base (with the candidate's test files) and on the candidate; the
     result, also kept in tasks/<task>/verify/<n>/ with both outputs."""
     tree = gitops.snapshot(task.worktree)
@@ -120,7 +150,8 @@ def run(task: store.Task, cmd: str, files: list[str] | None = None, limit: int =
     result = {"cmd": cmd, "files": files, "tree": tree, "ts": store.now(),
               "base": {"exit": b_code, "assertion": assertion(b_out)},
               "candidate": {"exit": c_code, "assertion": assertion(c_out)},
-              "verdict": verdict(b_code, b_out, c_code), "dir": str(out)}
+              "verdict": verdict(b_code, b_out, c_code, expect), "dir": str(out),
+              **({"expect": expect} if expect else {})}
     store.write_json(out / "result.json", result)
     return result
 
@@ -128,8 +159,9 @@ def run(task: store.Task, cmd: str, files: list[str] | None = None, limit: int =
 SAY = {"proven": "proven: it fails on the base and passes on the candidate",
        "base-passes": "not proven: it already passes on the base, so it doesn't show the bug",
        "candidate-fails": "the candidate fails it",
-       "inconclusive": "inconclusive: the base run didn't fail on an assertion (a setup error, a "
-                       "missing module) or a run timed out"}
+       "inconclusive": "inconclusive: the base run didn't fail on an assertion (a setup error: "
+                       "syntax, import, build or collection; or not the --expect text) or a run "
+                       "timed out"}
 
 
 def lines(r: dict) -> list[str]:
