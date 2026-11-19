@@ -2369,11 +2369,18 @@ def first_run() -> list[str]:
 TRY = PKG_ROOT / "workbench" / "try"  # wb try's sample: project/, spec.md, check.py (the hidden check)
 
 
+def try_dir() -> Path:
+    """Where wb try's samples go: beside the skill library, never in the state directory, which
+    the lane hides from agents: the first real run's agent had no git there, its worktree's git
+    directory being the sample's (#164)."""
+    return skills.library().parent / "try"
+
+
 def cmd_try(a):
-    """A sample task that proves the setup: a tiny project copied into $WB_HOME/try/<n>, set up
+    """A sample task that proves the setup: a tiny project copied into try_dir()/<n>, set up
     as wb init sets any project up, its spec started as a trivial trial (never the router's
     evidence), and the hidden check printed for Claude to run at review (#112)."""
-    base = store.home() / "try"
+    base = try_dir()
     n = 1 + max((int(p.name) for p in base.glob("*") if p.name.isdigit()), default=0)
     while store.Task(f"try-{n}").exists:  # task names are never reused
         n += 1

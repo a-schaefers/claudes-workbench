@@ -4352,7 +4352,14 @@ class Try(Base):
         check = out.split("hidden check, at review: ")[1].split()
         self.assertEqual(check[-1], str(task.worktree))
         wait_phase("try-1", {"review"})
-        repo = store.home() / "try" / "1"
+        repo = cli.try_dir() / "1"
+        self.assertFalse(any(os.path.realpath(repo).startswith(p + os.sep)
+                             for p in context.private_paths()))            # the lane shows it (#164)
+        seen = context.readable(task)
+        if seen is not None:                                              # Landlock here: its git dir
+            git_dir = os.path.realpath(repo / ".git")
+            self.assertTrue(any(git_dir == os.path.realpath(p) or git_dir.startswith(os.path.realpath(p) + os.sep)
+                                for p in seen))
         self.assertTrue((repo / "CLAUDE.md").exists())
         self.assertEqual(gitops.git(repo, "status", "--porcelain").strip(), "")   # wb init committed it
         base = subprocess.run(check[:-1] + [str(repo)], capture_output=True, text=True)
@@ -4369,12 +4376,12 @@ class Try(Base):
         self.assertFalse((task.worktree / "__pycache__").exists())        # it leaves no trace
         run_wb("discard", "try-1")
         run_wb("try", "--model", "mimo")                                  # the next gets its own
-        self.assertTrue(store.Task("try-2").exists and (store.home() / "try" / "2").is_dir())
+        self.assertTrue(store.Task("try-2").exists and (cli.try_dir() / "2").is_dir())
         wait_phase("try-2", {"review"})
         run_wb("discard", "try-2")
         with self.assertRaises(SystemExit), redirect_stderr(io.StringIO()):
             run_wb("try", "--model", "no-such-model")                     # refused: nothing left
-        self.assertFalse((store.home() / "try" / "3").exists())          # (#161)
+        self.assertFalse((cli.try_dir() / "3").exists())          # (#161)
 
 
 class Setup(Base):
