@@ -2387,7 +2387,11 @@ def cmd_try(a):
     argv = ["start", name, "--spec", str(TRY / "spec.md"), "--repo", str(d), "--size", "trivial",
             "--trial", "--test", "python3 -m unittest", *(["--model", a.model] if a.model else [])]
     s = parser().parse_args(argv)
-    s.f(s)
+    try:
+        s.f(s)
+    except SystemExit:  # refused (the GPU busy, no model): no sample left behind without a task
+        shutil.rmtree(d, ignore_errors=True)
+        raise
     print(f"the sample project: {d}")
     print(f"hidden check, at review: python3 {TRY / 'check.py'} {store.Task(name).worktree}")
 
