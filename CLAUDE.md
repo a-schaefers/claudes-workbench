@@ -35,7 +35,7 @@ the drift this rule exists to stop.
 
 ## Commands
 ```sh
-python3 -m unittest                                   # from the repo root: the whole suite, about two minutes
+python3 -m unittest                                   # the whole suite, about four minutes
 python3 -m unittest tests.test_workbench.Context      # one class (or .Context.test_…); -k handover by name
 claude plugin validate mod && claude plugin test mod  # the mod: the $ rule, then mod/hooks/register.test.tsx
 PLAYWRIGHT=…/node_modules/playwright node tests/e2e_chat.mjs   # the web chat in WebKit and Chromium
@@ -114,7 +114,8 @@ dependencies. No packaging: it runs from the clone.
 - `skills.py`: Claude's skill library for the agents (its own git repo): checks, add/patch/
   retire/restore, import, suggestions for a spec, the outcome record. `scan.py`: the security scan
   every skill passes (ported from Hermes Agent's skills guard: keep its MIT notice).
-- `spend.py`: what a task cost Claude, from its session's transcript.
+- `spend.py`: what a task cost Claude, from its session's transcript; `savings.py`, against Claude
+  writing it (an estimate).
 - `bench.py`: `wb bench`: accepted tasks replayed on any model, graded by their own tests.
 - `lessons.py`: what each task taught, gathered into lessons.jsonl by feedback/next/resume/accept/discard.
 - `transcript.py`: `wb watch` (the session export merged with the task's events; `--json` feeds
@@ -144,9 +145,8 @@ dependencies. No packaging: it runs from the clone.
 - `systemd/wb-chat.service`: keeps the web chat up. `docs/`: the README's images (a replaced image
   gets a new file name, for GitHub's cache).
 
-Runs on Linux, WSL2 and macOS. Native Windows doesn't (fcntl, `os.killpg`, POSIX signals): the
-launchers refuse it, and Python before 3.11, before importing the package. Off
-Linux there is no Landlock and watch.py falls back to timed waits.
+Runs on Linux, WSL2 and macOS; the launchers refuse native Windows (fcntl, `os.killpg`, POSIX
+signals) and Python before 3.11. Off Linux: no Landlock, and watch.py waits on timers.
 
 ## How a task runs
 1. `wb start` refuses a repo without a committed CLAUDE.md or `.claude/CLAUDE.md`
@@ -201,7 +201,8 @@ tasks/<task>/  task.json status.json events.jsonl steer.jsonl acked context.md b
 The skill library is `~/.local/share/workbench/skills` (`$WB_SKILLS`). `~/.config/workbench/`
 holds `models.json` (what OpenCode can't say: `start`/`stop`, `skip`, `sizes`, `vram_gb`,
 `weights_gb`, `label`, `engine`, `local`), `commands.json` (standing `allow` patterns, lane
-`paths`, and `env` names passed to the agent), `images.json`, `chat.json`, `chat-token`.
+`paths`, and `env` names passed to the agent), `images.json`, `chat.json`, `chat-token`,
+`savings.json` (`kwh_price`).
 
 A model is a candidate when OpenCode loads its provider (`disabled_providers`/`enabled_providers`
 followed) and the provider's `baseURL` (`{env:}`/`{file:}` resolved) is on this machine (loopback,
@@ -219,7 +220,7 @@ server works: `wb model add <p>/<m> --url <baseURL>` writes its provider, `--sta
 its models.json commands; never steer a user to one server.
 
 Environment: `WB_HOME`, `WB_MODELS`, `WB_SKILLS`, `WB_IMAGES`, `WB_CHAT_TOKEN`, `WB_CHAT_CONFIG`,
-`WB_COMMANDS` (the paths above); `WB_OPENCODE_CONFIG` (OpenCode's config); `CLAUDE_CONFIG_DIR` (where
+`WB_COMMANDS`, `WB_SAVINGS` (the paths above); `WB_OPENCODE_CONFIG` (OpenCode's config); `CLAUDE_CONFIG_DIR` (where
 `spend.py` reads Claude Code's transcripts); these may be relative
 or start with `~` (`store.absolute_env` makes them absolute against wb's cwd); `WB_COMPACT_AT` (the
 mod's early compaction, a percentage, 0 off); `WB_BIN` (the `wb` the mod runs); `WB_TASK` (set

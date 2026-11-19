@@ -3800,8 +3800,10 @@ class ClaudeSpend(Base):
         # m1-m3 and the subagent in turn 1, the wake's m5, half of m6, m7; m2 counted once
         self.assertEqual(u["output"], 10 + 20 + 30 + 5 + 40 + 25 + 60)
         self.assertEqual(u["turns"], 2)
+        self.assertEqual(u["calls"], 6.5)
         self.assertEqual(spend.usage(t2)["output"], 25)
         self.assertEqual(spend.usage(t2)["turns"], 1)
+        self.assertEqual(spend.usage(t2)["calls"], 0.5)
         self.assertEqual(spend.usage(self.task("never-named"))["output"], 0)
         self.assertEqual(spend.usage(store.Task("theirs")), None)   # its session has no transcript
 
@@ -3877,6 +3879,88 @@ class ClaudeSpend(Base):
         stats = run_wb("stats")
         self.assertIn("2K", stats)
         self.assertIn("(1 had no session or transcript)", stats)
+
+
+class Savings(Base):
+    def setUp(self):
+        super().setUp()
+        os.environ["WB_SAVINGS"] = str(Path(self.tmp.name) / "savings.json")
+
+    def test_a_task_row_compared_with_claude_writing_it_itself(self):
+        from workbench import savings, spend
+        usage = {"turns": 2, "calls": 5, "input": 1000, "cache_write_5m": 0,
+                 "cache_write_1h": 10000, "cache_read": 200000, "output": 3000}
+        self.assertEqual(spend.weighted(usage), 56000)
+        self.assertEqual(savings.per_call(usage), 8200.0)
+        self.assertEqual(savings.estimate_self(62, 8200.0), 58708)
+        row = {"claude": usage, "diff": {"files": 4, "added": 61, "removed": 1}}
+        self.assertEqual(savings.of_row(row),
+                         {"claude": 56000, "self_est": 58708, "saved": 2708, "wh": None})
+        self.assertEqual(savings.line(row),
+                         "claude: 56K · writing it yourself: ~59K (estimate) · saved ~3K")
+
+    def test_a_row_with_energy_reads_its_watt_hours_and_a_negative_saving_reads_more(self):
+        from workbench import savings
+        usage = {"turns": 1, "calls": 2, "input": 500, "cache_write_5m": 0,
+                 "cache_write_1h": 4000, "cache_read": 80000, "output": 1000}
+        row = {"claude": usage, "diff": {"files": 1, "added": 0, "removed": 0}, "gpu_wh": 12.4}
+        self.assertEqual(savings.of_row(row),
+                         {"claude": 21500, "self_est": 40425, "saved": 18925, "wh": 12.4})
+        self.assertTrue(savings.line(row).endswith("· GPU 12 Wh"))
+        # A mostly-output row has a tiny per-call cost, so writing it yourself
+        # is cheaper: the saving goes negative and reads "cost … more".
+        costly = {"turns": 1, "calls": 1, "input": 0, "cache_write_5m": 0,
+                  "cache_write_1h": 0, "cache_read": 0, "output": 1000}
+        big = {"claude": costly, "diff": {"files": 1, "added": 0, "removed": 0}}
+        self.assertIn("cost ~5K more", savings.line(big))
+
+    def test_of_row_is_none_without_both_sides_or_a_call_count(self):
+        from workbench import savings
+        usage = {"turns": 1, "calls": 2, "input": 500, "cache_write_5m": 0,
+                 "cache_write_1h": 4000, "cache_read": 80000, "output": 1000}
+        self.assertIsNone(savings.of_row({"diff": {"added": 1, "removed": 0}}))
+        self.assertIsNone(savings.of_row({"claude": usage}))
+        self.assertIsNone(savings.of_row({"claude": dict(usage, calls=0),
+                                          "diff": {"added": 1, "removed": 0}}))
+        self.assertIsNone(savings.per_call(None))
+        self.assertIsNone(savings.line({"diff": {"added": 1, "removed": 0}}))
+        self.assertIsNone(savings.line({"claude": usage}))
+        self.assertIsNone(savings.line({"claude": dict(usage, calls=0),
+                                        "diff": {"added": 1, "removed": 0}}))
+
+    def test_the_kwh_price_lives_only_in_the_config_file(self):
+        from workbench import savings
+        self.assertIsNone(savings.price())  # no file yet
+        (Path(self.tmp.name) / "savings.json").write_text(json.dumps({"kwh_price": 0.3}))
+        self.assertEqual(savings.price(), 0.3)
+        (Path(self.tmp.name) / "savings.json").write_text(json.dumps({"kwh_price": -1}))
+        self.assertIsNone(savings.price())
+        savings.set_price(0.25)
+        self.assertEqual(savings.price(), 0.25)
+
+    def test_totals_adds_the_saved_tokens_energy_and_money_over_measured_rows(self):
+        from workbench import savings
+        u1 = {"turns": 2, "calls": 5, "input": 1000, "cache_write_5m": 0,
+              "cache_write_1h": 10000, "cache_read": 200000, "output": 3000}
+        u2 = {"turns": 1, "calls": 2, "input": 500, "cache_write_5m": 0,
+              "cache_write_1h": 4000, "cache_read": 80000, "output": 1000}
+        rows = [
+            {"ts": 1000.0, "claude": u1, "diff": {"added": 61, "removed": 1}, "gpu_wh": 30.0},
+            {"ts": 2000.0, "claude": u2, "diff": {"added": 0, "removed": 0}, "gpu_wh": 12.4},
+            {"ts": 3000.0, "diff": {"added": 10, "removed": 0}},  # no claude: not counted
+        ]
+        t = savings.totals(rows, since=1500)
+        self.assertEqual(t["tasks"], 1)
+        self.assertEqual(t, {"tasks": 1, "claude": 21500, "self_est": 40425,
+                             "saved": 18925, "wh": 12.4, "cost": None})
+        savings.set_price(0.25)
+        self.assertEqual(savings.totals(rows, since=1500)["cost"], 0.0)
+        t2 = savings.totals(rows, since=0)
+        self.assertEqual(t2["tasks"], 2)
+        self.assertEqual(t2["claude"], 56000 + 21500)
+        self.assertEqual(t2["self_est"], 58708 + 40425)
+        self.assertEqual(t2["wh"], 42.4)
+        self.assertEqual(t2["cost"], round(42.4 / 1000 * 0.25, 2))
 
 
 class Notes(Base):

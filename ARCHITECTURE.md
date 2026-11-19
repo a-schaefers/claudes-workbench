@@ -383,14 +383,31 @@ session only:
 Charging whole turns was the first design and was wrong: one long autonomous turn that also ran a
 task put 5.5M cached tokens of other work on it (2026-11-17). What is missed: the accept's own
 turn after the `wb accept` call is written, and planning turns that name no task. The row keeps
-the raw counts (`input`, `cache_write_5m`, `cache_write_1h`, `cache_read`, `output`, `turns`);
+the raw counts (`input`, `cache_write_5m`, `cache_write_1h`, `cache_read`, `output`, `turns`,
+and `calls`, the task's share of the calls charged, split like the tokens);
 `spend.weighted` makes one number of them in input-equivalent tokens, from the API's price
 multipliers on input (`WEIGHTS`: output 5, a cache write 1.25 for 5 minutes or 2 for an hour, a
 cache read 0.1, which errs high for the models whose reads cost less: no model is named in code).
 `wb accept` and `wb discard` print it (`claude: ~N K input-equivalent tokens over T turn(s)`), and
 `wb stats` averages it per model and size. A task with no session (started by hand, or before
-0.90) or whose transcript Claude Code has cleaned up records none. Shown only: the router doesn't
-read it.
+0.90) or whose transcript Claude Code has cleaned up records none. The router reads it
+(`_cheaper`, *Choosing a model*).
+
+### What a task saved: an estimate of Claude writing it
+`workbench/savings.py` sets a task's cost beside an estimate of what Claude would have spent
+writing the same change itself (the user, 2026-11-18: nothing in the product showed the saving).
+The estimate comes from 8 paired runs on 2026-11-17 (Claude writing a task, graded by hidden
+tests): it made about `SELF_CALLS` 4.9 + lines changed / `SELF_LINES_PER_CALL` 69 calls, and wrote
+about `SELF_OUT_PER_LINE` 36 output tokens per line changed. Each of those calls is priced at what
+this task's own calls cost per call less their output (`per_call`: the session's context, as it
+stood), so a big session's handoff is compared with writing it in the same big session.
+`estimate_self(lines, per_call)` is that sum, weighted; `of_row(row)` needs the results row's
+`claude` (with `calls`) and `diff`, and gives `{claude, self_est, saved, wh}`; `line(row)` reads
+`claude: 56K · writing it yourself: ~59K (estimate) · saved ~3K · GPU 41 Wh` (a negative saving
+reads `cost ~3K more`); `totals(rows, since)` adds them up, with the energy's `cost` at the
+user's electricity price (`price()`, from `$WB_SAVINGS`, else `~/.config/workbench/savings.json`
+`{"kwh_price": …}`; `set_price` writes it). The fit's mean error is 19%, single tasks −36% to
++48%, so it is always called an estimate.
 
 ## The runner, inside
 

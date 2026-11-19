@@ -48,7 +48,7 @@ CLOSED = {"accepted", "discarded"}
 # reads them or a child inherits them (absolute_env, from cli.main and the runner). Not resolved:
 # a symlinked home stays the path the user named, the one the lane and OpenCode see.
 PATH_VARS = ("WB_HOME", "WB_MODELS", "WB_SKILLS", "WB_IMAGES", "WB_COMMANDS", "WB_CHAT_TOKEN",
-             "WB_CHAT_CONFIG", "WB_OPENCODE_CONFIG")
+             "WB_CHAT_CONFIG", "WB_OPENCODE_CONFIG", "WB_SAVINGS")
 
 
 def absolute_env() -> None:
