@@ -17,7 +17,7 @@ import subprocess
 import sys
 import time
 from collections import defaultdict
-from contextlib import redirect_stdout
+from contextlib import redirect_stderr, redirect_stdout
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -2386,6 +2386,37 @@ def cmd_try(a):
     print(f"hidden check, at review: python3 {TRY / 'check.py'} {store.Task(name).worktree}")
 
 
+def cmd_remote(a):
+    """Another machine's Ollama as this one's models: its provider, marked local, and each
+    tool-capable model it has pulled registered as wb model add would (#114); --remove undoes it."""
+    if a.remove:
+        try:
+            pid, names = models.remove_remote(a.host)
+        except RuntimeError as e:
+            die(str(e))
+        print(f"removed {pid} from OpenCode's config" + (f", with {', '.join(names)}" if names else ""))
+        return
+    try:
+        pid, root, names = models.add_remote(a.host, a.port)
+    except RuntimeError as e:
+        die(str(e))
+    print(f"{pid}: the Ollama at {root}, marked local in {models.overrides_path()}")
+    if not names:
+        print(f"--  it has no model with tool calls pulled: pull one there, then wb remote {a.host} again")
+        return
+    for name in names:
+        out, err = io.StringIO(), io.StringIO()
+        try:
+            with redirect_stdout(out), redirect_stderr(err):
+                cmd_model(argparse.Namespace(action="add", id=f"{pid}/{name}", sizes=[], pull=False,
+                                             url=None, start=None, stop=None, label=None,
+                                             context=a.context, delete=False))
+            print(out.getvalue().splitlines()[0])
+        except SystemExit:  # die: why this one wasn't registered, and the rest go on
+            print(f"--  {pid}/{name}: {err.getvalue().strip().removeprefix('wb: ')}")
+    print("next: wb models (where each one ranks); wb optimize measures them")
+
+
 UPDATE_EVERY = 7 * 24 * 3600  # the mod's weekly check (wb update --check --if-due)
 
 
@@ -2970,6 +3001,14 @@ def parser() -> argparse.ArgumentParser:
                        "started as a trivial trial, and the hidden check to run at review")
     s.add_argument("--model", help="a model id or fragment (default: the router's pick)")
     s.set_defaults(f=cmd_try)
+    s = sub.add_parser("remote", help="use the Ollama on another machine (LAN, tailnet): its "
+                       "provider, marked local, and its tool-capable models registered")
+    s.add_argument("host", help="its host name or address")
+    s.add_argument("--port", type=int, default=models.OLLAMA_PORT, help="Ollama's port (11434)")
+    s.add_argument("--context", type=int, help="context tokens for each model, when its Ollama "
+                   "doesn't say (its OLLAMA_CONTEXT_LENGTH)")
+    s.add_argument("--remove", action="store_true", help="retire its models and drop the provider")
+    s.set_defaults(f=cmd_remote)
     s = sub.add_parser("init", help="set a project up: git with an initial commit, "
                                     "AGENTS.md → CLAUDE.md")
     s.add_argument("dir"); s.set_defaults(f=cmd_init)

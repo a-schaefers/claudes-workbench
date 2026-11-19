@@ -1288,6 +1288,59 @@ def add_server_provider(pid: str, base: str) -> bool:
     return True
 
 
+def remote_pid(host: str) -> str:
+    """The provider id wb remote gives another machine's Ollama: ollama-<host>, in id characters."""
+    return "ollama-" + (re.sub(r"[^a-z0-9]+", "-", host.lower()).strip("-") or "host")
+
+
+def add_remote(host: str, port: int = OLLAMA_PORT) -> tuple[str, str, list[str]]:
+    """Give OpenCode a provider for the Ollama on another machine (a gaming PC on the LAN or
+    tailnet), marked local in models.json: (its provider id, its root, the tool-capable models it
+    has pulled, cloud models left out). Raises RuntimeError when it doesn't answer (#114)."""
+    root = f"http://{host}:{port}"
+    if not ollama_answers(root):
+        raise RuntimeError(f"no Ollama answers at {root}: on {host}, have Ollama listen on the "
+                           "network (OLLAMA_HOST=0.0.0.0, then restart it), and check the port")
+    pid = remote_pid(host)
+    set_override(pid, "local", True)  # the user's own machine: its models count as local
+    cfg = read_config()
+    if not _has_provider(cfg, pid):
+        _add_provider(cfg, pid, f"Ollama on {host}", f"{root}/v1")
+    names = []
+    for row in (_get(f"{root}/api/tags") or {}).get("models", []):
+        name = row.get("name")
+        if not name or _cloud_row(row):
+            continue
+        try:
+            caps = ollama_show(root, name, timeout=10).get("capabilities") or []
+        except Exception:  # a model it can't describe is one wb model add would refuse anyway
+            continue
+        if "tools" in caps:
+            names.append(name)
+    return pid, root, names
+
+
+def remove_remote(host: str) -> tuple[str, list[str]]:
+    """Undo add_remote: its models out of OpenCode's config with their models.json entries, the
+    provider and its local mark gone. (provider id, the models removed)."""
+    pid = remote_pid(host)
+    cfg = read_config()
+    key = "provider" if pid in (cfg.get("provider") or {}) else "providers"
+    prov = (cfg.get(key) or {}).get(pid)
+    if prov is None:
+        raise RuntimeError(f"no provider {pid} in {opencode_config_path()}: nothing to remove")
+    if str(cfg.get("model") or "").startswith(pid + "/"):
+        raise RuntimeError(f"{cfg['model']} is OpenCode's default model; wb models --set-default "
+                           "picks another first")
+    names = sorted(prov.get("models") or {})
+    del cfg[key][pid]
+    write_config(cfg, f'under "{key}" remove "{pid}"')
+    for mid in [f"{pid}/{n}" for n in names] + [pid]:
+        for k in list(_overrides().get(mid) or {}):
+            set_override(mid, k, None)
+    return pid, names
+
+
 # Where the common local model servers listen by default and what their command is called, for
 # wb scout: Claude works with whatever the user runs, so it needs to see what that is (only
 # Ollama was looked for, and the skill steered every first run to it).

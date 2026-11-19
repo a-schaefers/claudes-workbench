@@ -620,6 +620,104 @@ class Real(unittest.TestCase):
         self.assertEqual(store.read_json(p, "default"), "default")
 
 
+def free_port() -> int:
+    with socket.socket() as sk:
+        sk.bind(("127.0.0.1", 0))
+        return sk.getsockname()[1]
+
+
+def fake_remote_ollama(tags: list[dict], shows: dict[str, dict]):
+    """An Ollama on another machine (a free port here): /api/tags lists ``tags``, POST /api/show
+    answers ``shows[name]``."""
+    class H(BaseHTTPRequestHandler):
+        def reply(self, body):
+            self.send_response(200 if body is not None else 404)
+            self.end_headers()
+            self.wfile.write(json.dumps(body if body is not None else {"error": "no"}).encode())
+
+        def do_GET(self):
+            self.reply({"/api/version": {"version": "0.40.0"}, "/api/tags": {"models": tags},
+                        "/api/ps": {"models": []}}.get(self.path))
+
+        def do_POST(self):
+            body = json.loads(self.rfile.read(int(self.headers["Content-Length"])))
+            self.reply(shows.get(body.get("model")) if self.path == "/api/show" else {})
+
+        def log_message(self, *a):
+            pass
+    srv = ThreadingHTTPServer(("127.0.0.1", 0), H)
+    threading.Thread(target=srv.serve_forever, daemon=True).start()
+    return srv, srv.server_address[1]
+
+
+class Remote(unittest.TestCase):
+    """wb remote HOST: another machine's Ollama as this one's models (#114). The stub listens on
+    loopback, so this machine's own OLLAMA_CONTEXT_LENGTH is kept out of it."""
+    setUp, tearDown, server, config = Real.setUp, Real.tearDown, Real.server, Real.config
+
+    def run(self, result=None):
+        with mock.patch.object(models.hardware, "ollama_env", return_value={}):
+            return super().run(result)
+
+    def wb(self, *argv) -> tuple[int, str]:
+        from workbench import cli
+        out, err = io.StringIO(), io.StringIO()
+        code = 0
+        with redirect_stdout(out), redirect_stderr(err):
+            try:
+                a = cli.parser().parse_args(list(argv))
+                a.f(a)
+            except SystemExit as e:
+                code = e.code or 0
+        return code, out.getvalue() + err.getvalue()
+
+    def test_wb_remote_registers_the_tool_models_of_another_machines_ollama_and_remove_undoes_it(self):
+        ctx = {"llama.context_length": 131072}
+        srv, port = fake_remote_ollama(
+            [{"name": "coder:7b"}, {"name": "embed:1b"}, {"name": "big:cloud", "remote_host": "https://ollama.com"}],
+            {"coder:7b": {"capabilities": ["completion", "tools"], "model_info": ctx},
+             "embed:1b": {"capabilities": ["embedding"], "model_info": ctx},
+             "big:cloud": {"capabilities": ["tools"], "model_info": ctx}})
+        self.servers.append(srv)
+        self.config({}, {"keep/me": {"sizes": ["trivial"]}})
+        code, out = self.wb("remote", "127.0.0.1", "--port", str(port), "--context", "32768")
+        self.assertEqual(code, 0, out)
+        pid = models.remote_pid("127.0.0.1")
+        self.assertEqual(pid, "ollama-127-0-0-1")
+        self.assertIn(f"registered {pid}/coder:7b: tools", out)
+        self.assertNotIn("big:cloud", out)                               # runs on ollama.com, not there
+        cfg = json.loads(Path(os.environ["WB_OPENCODE_CONFIG"]).read_text())
+        prov = cfg["provider"][pid]
+        self.assertEqual(prov["options"]["baseURL"], f"http://127.0.0.1:{port}/v1")
+        self.assertEqual(list(prov["models"]), ["coder:7b"])            # no embedding, no cloud model
+        entry = prov["models"]["coder:7b"]
+        self.assertEqual(entry["limit"]["context"], 32768)
+        self.assertIn("max_tokens", entry["options"])                    # an Ollama entry's output cap
+        self.assertTrue(json.loads(Path(os.environ["WB_MODELS"]).read_text())[pid]["local"])
+        self.assertIn(f"{pid}/coder:7b", models.discover())
+        self.assertEqual(self.wb("remote", "127.0.0.1", "--port", str(port), "--context", "32768")[0], 0)
+        code, out = self.wb("remote", "127.0.0.1", "--remove")
+        self.assertEqual(code, 0, out)
+        self.assertIn(f"removed {pid}", out)
+        self.assertNotIn(pid, json.loads(Path(os.environ["WB_OPENCODE_CONFIG"]).read_text())["provider"])
+        self.assertEqual(json.loads(Path(os.environ["WB_MODELS"]).read_text()),
+                         {"keep/me": {"sizes": ["trivial"]}})            # only its own entries go
+
+    def test_wb_remote_says_how_to_open_an_ollama_that_doesnt_answer_and_why_a_model_was_left_out(self):
+        code, out = self.wb("remote", "127.0.0.1", "--port", str(free_port()))
+        self.assertEqual(code, 1)
+        self.assertIn("OLLAMA_HOST=0.0.0.0", out)
+        self.assertFalse(Path(os.environ["WB_OPENCODE_CONFIG"]).exists())   # nothing written
+        srv, port = fake_remote_ollama([{"name": "coder:7b"}],
+                                       {"coder:7b": {"capabilities": ["tools"], "model_info": {}}})
+        self.servers.append(srv)
+        self.config({})
+        code, out = self.wb("remote", "127.0.0.1", "--port", str(port))  # no --context: it can't say
+        self.assertEqual(code, 0, out)
+        self.assertIn("--  ollama-127-0-0-1/coder:7b: Ollama would serve coder:7b its own default context", out)
+        self.assertEqual(self.wb("remote", "nowhere", "--remove")[0], 1)
+
+
 class Optimize(unittest.TestCase):
     """wb optimize against an Ollama whose placement depends on the window: 10 GB of weights and
     32 KB a token of context, on a card that holds 12 GB (so up to 64K fits whole)."""
