@@ -220,13 +220,21 @@ turn the model's tool calls into the API's form. vLLM does that only with `--ena
 models need replaced with `--chat-template-file`. A model LM Studio says wasn't trained for tool use
 is registered without tools and gets no tasks.
 
-**Can the models run on another machine?** Yes. Give that provider `"local": true` in
-`~/.config/workbench/models.json`. Workbench doesn't measure that machine's GPU, so its tasks never
-wait for yours. Ollama's cloud models (`:cloud`) run on ollama.com and aren't counted as local
-unless you mark them the same way. Set the flag before `wb model add --url`, make the server listen
-on your network (firewalled to this machine: model servers have no login), and know that plain
-`http://` carries your code unencrypted; Tailscale encrypts it, and its address still needs the
-flag. A second machine runs its own model beside yours; it doesn't make one model faster.
+**Can the models run on another machine?** Yes: a gaming PC can do the work for a laptop.
+1. On the PC, run Ollama listening on the network: set `OLLAMA_HOST=0.0.0.0` for its service,
+   restart it, and pull a model. Ollama has no login, so let only your laptop reach its port
+   (11434): a firewall rule, or Tailscale, which also encrypts it (plain `http://` carries your
+   code in the clear).
+2. On the laptop: `wb remote <pc>`, with the PC's Tailscale name or LAN address. It registers
+   the PC's models that can call tools (`--context N` when its Ollama doesn't say what window it
+   serves); `wb remote <pc> --remove` undoes it.
+
+Tasks on the PC take turns on its GPU, apart from your laptop's, and `wb optimize` measures its
+models too. Their energy isn't measured, and the savings lines say so. A second machine adds a
+model beside yours; it doesn't make one model faster. Another server there (llama.cpp, LM Studio,
+vLLM): give its provider `"local": true` in `~/.config/workbench/models.json`, then `wb model add
+<provider>/<model> --url <baseURL>`. Ollama's cloud models (`:cloud`) run on ollama.com and
+aren't counted as local unless you mark them the same way.
 
 **My server wants an API key.** Put it in the provider's `options.apiKey` in OpenCode's config. If
 it reads `{env:NAME}`, add `NAME` to `env` in `~/.config/workbench/commands.json`: the agents get

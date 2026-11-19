@@ -421,7 +421,9 @@ is the saving's share of the estimate, the number the savings badge scores (#101
 
 The inputs come from the task. The energy: while OpenCode runs a round, the runner's `_Power`
 thread samples `hardware.gpu_power_w()` every `POWER_EVERY` (10) s and adds the watt-hours to
-status `gpu_wh` (not for a remote model: `CURRENT["remote"]`, set in `drive`; nor for the suite's
+status `gpu_wh` (not for a remote model: `CURRENT["remote"]`, set in `drive`, which marks status
+`remote_gpu` instead, so its savings line ends `GPU energy not measured (another machine's)` and
+`savings.summary` counts such tasks, #117; nor for the suite's
 fake models, `WB_FAKE_MODELS`, which would read this machine's GPU; a None reading adds
 nothing; the tests after the round aren't counted). It is the whole GPU's draw, so tasks sharing
 the GPU each count all of it. The size: `gitops.footprint` gives `files`, `lines` (added) and
@@ -3105,6 +3107,7 @@ check-ins off), not `wb start`'s.
 | `stopping` | wb is stopping the runner (`cli._stop_runner`); cleared by `spawn_runner` and the runner's exit |
 | `tools`, `tok_in`, `tok_out` | task-wide tool calls and tokens (input without cache reads) |
 | `gpu_wh` | the GPU energy its rounds used so far, in Wh (the runner's `_Power`; absent for a remote model or no reading) |
+| `remote_gpu` | true when its model runs on another machine (set in `drive`): the results row carries it, and the savings say the energy wasn't measured |
 | `unrecorded` | set with an accept's or discard's closing phase, cleared once its results row is written: `{outcome, step, extra}`, what a retried accept or discard writes the row from |
 | `session`, `sessions`, `session_mark`, `session_floor` | the OpenCode session; earlier ones; `gitops.mark` when it began; the context it had read at its first change |
 | `context` | a one-round instruction: `fresh`, `keep`, `full` (a handover happened) |
@@ -3137,7 +3140,8 @@ questions `ask {id}`, `answer {id}`. From `wb`:
 review included), `tok_in`, `tok_out`, `skills_offered`, `skills_loaded`, `skills_rev`, `steps`
 (one `results.step` per step), `window`, `tuned`, `explored`, `tuned_max`, `spec_gaps`, `claude`
 (when known: `spend.usage`, `{turns, calls, input, cache_write_5m, cache_write_1h, cache_read,
-output}`, *What a task cost Claude*), `gpu_wh` (status's, when measured), `diff` (accepted only:
+output}`, *What a task cost Claude*), `gpu_wh` (status's, when measured), `remote_gpu` (true
+when its model ran on another machine, whose energy nothing here measures), `diff` (accepted only:
 `{files, added, removed}` summed over the steps; *What a task saved*), `backlog` (task.json's), `trial` (when set); `commit` and `merged` on accept, `reason` on
 discard. A step (`results.step`): `files`,
 `lines` (added, against HEAD, new files included), `removed`, `window`, `landed`, `compacted` (its last

@@ -4096,7 +4096,8 @@ class Savings(Base):
         self.assertEqual(savings.estimate_self(62, 8200.0), 58708)
         row = {"claude": usage, "diff": {"files": 4, "added": 61, "removed": 1}}
         self.assertEqual(savings.of_row(row),
-                         {"claude": 56000, "self_est": 58708, "saved": 2708, "wh": None})
+                         {"claude": 56000, "self_est": 58708, "saved": 2708, "wh": None,
+                          "remote": False})
         self.assertEqual(savings.line(row),
                          "claude: 56K · writing it yourself: ~59K (estimate) · saved ~3K")
 
@@ -4106,7 +4107,8 @@ class Savings(Base):
                  "cache_write_1h": 4000, "cache_read": 80000, "output": 1000}
         row = {"claude": usage, "diff": {"files": 1, "added": 0, "removed": 0}, "gpu_wh": 12.4}
         self.assertEqual(savings.of_row(row),
-                         {"claude": 21500, "self_est": 40425, "saved": 18925, "wh": 12.4})
+                         {"claude": 21500, "self_est": 40425, "saved": 18925, "wh": 12.4,
+                          "remote": False})
         self.assertTrue(savings.line(row).endswith("· GPU 12 Wh"))
         # A mostly-output row has a tiny per-call cost, so writing it yourself
         # is cheaper: the saving goes negative and reads "cost … more".
@@ -4114,6 +4116,19 @@ class Savings(Base):
                   "cache_write_1h": 0, "cache_read": 0, "output": 1000}
         big = {"claude": costly, "diff": {"files": 1, "added": 0, "removed": 0}}
         self.assertIn("cost ~5K more", savings.line(big))
+
+    def test_a_task_on_another_machines_gpu_says_its_energy_was_not_measured(self):
+        # #117: nothing here reads a remote GPU's power, and a line without energy read as free
+        from workbench import savings
+        usage = {"turns": 1, "calls": 2, "input": 500, "cache_write_5m": 0,
+                 "cache_write_1h": 4000, "cache_read": 80000, "output": 1000}
+        row = {"claude": usage, "diff": {"files": 1, "added": 0, "removed": 0}, "remote_gpu": True,
+               "ts": 1}
+        self.assertTrue(savings.line(row).endswith("· GPU energy not measured (another machine's)"))
+        self.assertIn("not measured", savings.line({**row, "outcome": "discarded"}))
+        t = savings.totals([row, {**row, "remote_gpu": False, "gpu_wh": 5}])
+        self.assertEqual((t["remote"], t["wh"]), (1, 5))
+        self.assertIn("1 on another machine's GPU, not measured", savings.summary(t, "week"))
 
     def test_of_row_is_none_without_both_sides_or_a_call_count(self):
         from workbench import savings
@@ -4153,7 +4168,7 @@ class Savings(Base):
         t = savings.totals(rows, since=1500)
         self.assertEqual(t["tasks"], 1)
         self.assertEqual(t, {"tasks": 1, "claude": 21500, "self_est": 40425,
-                             "saved": 18925, "wh": 12.4, "cost": None})
+                             "saved": 18925, "wh": 12.4, "cost": None, "remote": 0})
         savings.set_price(0.25)
         self.assertEqual(savings.totals(rows, since=1500)["cost"], 0.0)
         t2 = savings.totals(rows, since=0)
@@ -4250,7 +4265,7 @@ class Savings(Base):
               "cache_write_1h": 4000, "cache_read": 80000, "output": 1000}
         row = {"outcome": "discarded", "claude": u2, "gpu_wh": 12.4}
         self.assertEqual(savings.of_row(row),
-                         {"claude": 21500, "self_est": 0, "saved": -21500, "wh": 12.4})
+                         {"claude": 21500, "self_est": 0, "saved": -21500, "wh": 12.4, "remote": False})
         self.assertEqual(savings.line(row),
                          "claude: 22K · discarded, nothing saved · GPU 12 Wh")
         # no energy measured: the line drops the GPU part

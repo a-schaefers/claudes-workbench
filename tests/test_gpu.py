@@ -164,6 +164,8 @@ with models.GpuLease(None, optimize.HOLDER, wait=False):
         self.assertEqual(models.holders(), {})        # this machine's gpu.json never saw them
         run_wb("stop", "t-r1")
         wait_phase("t-r2", {"review"})
+        self.assertTrue(store.Task("t-r2").status.get("remote_gpu"))    # its savings: unmeasured (#117)
+        self.assertNotIn("remote_gpu", store.Task("t-here").status)
 
     def test_a_task_sent_back_goes_ahead_of_one_started_after_it(self):
         # its review waits on that round: behind a night's backlog, it would wait for all of it

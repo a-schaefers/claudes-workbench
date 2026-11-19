@@ -45,7 +45,8 @@ def of_row(row: dict) -> dict | None:
         if not isinstance(u, dict):
             return None
         c = spend.weighted(u)
-        return {"claude": c, "self_est": 0, "saved": -c, "wh": row.get("gpu_wh")}
+        return {"claude": c, "self_est": 0, "saved": -c, "wh": row.get("gpu_wh"),
+                "remote": bool(row.get("remote_gpu"))}
     if "claude" not in row or "diff" not in row:
         return None
     pc = per_call(row["claude"])
@@ -55,7 +56,7 @@ def of_row(row: dict) -> dict | None:
     self_est = estimate_self(lines, pc)
     claude = spend.weighted(row["claude"])
     return {"claude": claude, "self_est": self_est, "saved": self_est - claude,
-            "wh": row.get("gpu_wh")}
+            "wh": row.get("gpu_wh"), "remote": bool(row.get("remote_gpu"))}
 
 
 def _path() -> Path:
@@ -99,7 +100,15 @@ def totals(rows: list[dict], since: float = 0) -> dict:
             "claude": sum(p["claude"] for p in parts),
             "self_est": sum(p["self_est"] for p in parts),
             "saved": sum(p["saved"] for p in parts),
-            "wh": wh, "cost": cost}
+            "wh": wh, "cost": cost, "remote": sum(p["remote"] for p in parts)}
+
+
+def _gpu(est: dict) -> str:
+    """The energy part of a line: a remote model's GPU is another machine's, which nothing here
+    reads, so it says so instead of showing nothing (#117)."""
+    if est["remote"]:
+        return " · GPU energy not measured (another machine's)"
+    return f" · GPU {est['wh']:.0f} Wh" if est["wh"] is not None else ""
 
 
 def line(row: dict) -> str | None:
@@ -113,12 +122,10 @@ def line(row: dict) -> str | None:
     k = lambda n: f"{n / 1000:.0f}K"  # noqa: E731
     if row.get("outcome") == "discarded":
         mid = " · discarded, nothing saved"
-        if wh is not None:
-            mid += f" · GPU {wh:.0f} Wh"
+        mid += _gpu(est)
         return f"claude: {k(est['claude'])}{mid}"
     mid = f" · saved ~{k(saved)}" if saved >= 0 else f" · cost ~{k(-saved)} more"
-    if wh is not None:
-        mid += f" · GPU {wh:.0f} Wh"
+    mid += _gpu(est)
     return f"claude: {k(est['claude'])} · writing it yourself: ~{k(est['self_est'])} (estimate){mid}"
 
 
@@ -143,5 +150,6 @@ def summary(t: dict, period: str) -> str:
     pct = f" ({100 * t['saved'] / t['self_est']:.0f}%)" if t["self_est"] > 0 else ""
     gpu = f" · GPU {energy(t['wh'])}" if t["wh"] else ""
     cost = f" (${t['cost']:.2f})" if gpu and t["cost"] is not None else ""
+    away = (f" · {t['remote']} on another machine's GPU, not measured" if t.get("remote") else "")
     return (f"{when}: {t['tasks']} task(s) · claude {k(t['claude'])} · writing it yourself "
-            f"~{k(t['self_est'])} (estimate) · {saved}{pct}{gpu}{cost}")
+            f"~{k(t['self_est'])} (estimate) · {saved}{pct}{gpu}{cost}{away}")

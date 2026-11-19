@@ -1146,6 +1146,8 @@ def drive(task: store.Task) -> None:
     except KeyError as e:
         return _load_failed(task, e)
     CURRENT["remote"] = m.remote  # the GPU is not ours to measure when the model is remote
+    if m.remote:
+        task.set_status(remote_gpu=True)  # so its savings say the energy wasn't measured (#117)
     st = task.status
     if (task.spec.get("test_cmd") and not task.spec.get("no_base_check")
             and "base_check" not in st and st.get("round", 1) == 1):
