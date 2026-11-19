@@ -2305,8 +2305,59 @@ def cmd_setup(a):
             print(f"--  {line}")
     except (RuntimeError, OSError):
         pass
+    print("first run:")  # what a working setup still needs, each with its fix (#111)
+    for line in first_run():
+        print(line)
     print("next: wb doctor")
     sys.exit(1 if bad else 0)
+
+
+def _tool_version(argv: list[str]) -> tuple[bool, str]:
+    try:
+        r = subprocess.run([*argv, "--version"], capture_output=True, text=True, timeout=30)
+        return r.returncode == 0, r.stdout.strip() or r.stderr.strip()
+    except (OSError, subprocess.TimeoutExpired) as e:
+        return False, f"not found ({e})"
+
+
+def first_run() -> list[str]:
+    """wb setup's checklist, one line each: OpenCode 2.x, a model server answering, a registered
+    model, Landlock; a missing one says how to get it. It names no model: Claude picks one for this
+    machine (wb scout), so a newer one slots in without a code change."""
+    out = []
+    good, said = _tool_version(runner.opencode_bin())
+    major = re.search(r"(\d+)\.\d+", said) if good else None
+    if not good:
+        out.append("--  OpenCode isn't installed: install OpenCode 2.x from https://opencode.ai "
+                   "(its own instructions)")
+    elif major and int(major[1]) < 2:
+        out.append(f"--  opencode {said}: workbench needs OpenCode 2.x; upgrade it")
+    else:
+        out.append(f"ok  opencode {said}")
+    try:
+        found = models.discover()
+    except RuntimeError:  # an OpenCode config that doesn't parse: wb doctor says which
+        found = {}
+    if models._fake():
+        answering = bool(found)
+    else:
+        answering = any(models.ollama_answers(p["root"]) or
+                        isinstance(models._get(f"{p['root']}/v1/models", timeout=1), dict)
+                        for p in models.providers().values())
+        answering = answering or models.ollama_answers(models.ollama_root_here()) or \
+            bool(models.servers_here()[1])
+    out.append("ok  a model server answers" if answering else
+               "--  no model server answers here: start yours, or run /workbench and Claude lays out "
+               "the ones that fit this machine; any OpenAI-compatible server works "
+               "(wb model add <p>/<m> --url <baseURL>)")
+    out.append(f"ok  {len(found)} local model(s) registered" if found else
+               "--  no local model registered yet: run /workbench in Claude Code, and Claude picks one "
+               "for this machine (wb scout)")
+    v = lane.abi()
+    out.append(f"ok  Landlock ABI {v}: each agent writes only inside its task" if v else
+               "--  no Landlock here: agents run unconfined (on Linux, a 5.13+ kernel with Landlock "
+               "on; none on macOS)")
+    return out
 
 
 UPDATE_EVERY = 7 * 24 * 3600  # the mod's weekly check (wb update --check --if-due)
@@ -2428,13 +2479,7 @@ def cmd_doctor(a):
                   "wb setup --force from the copy you want" if Path(at).is_symlink() or what == "wb" else
                   f"--  {at} is a directory of its own, not a link to this copy's {mine}")
 
-    def version(argv):
-        try:
-            r = subprocess.run([*argv, "--version"], capture_output=True, text=True, timeout=30)
-            return r.returncode == 0, r.stdout.strip() or r.stderr.strip()
-        except (OSError, subprocess.TimeoutExpired) as e:
-            return False, f"not found ({e})"
-
+    version = _tool_version
     good, said = version(runner.opencode_bin())
     major = re.search(r"(\d+)\.\d+", said) if good else None
     if good and not major:  # an odd build string: say it, don't fail on it
