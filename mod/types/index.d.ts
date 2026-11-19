@@ -35,6 +35,8 @@ declare module 'claude-code' {
   interface PluginState {
     workbench: {
       tasks: Shaped<WbTask[]>; live: Shaped<WbLive>; chat: Shaped<WbChat>; sessions: Shaped<string[]>
+      /** the pane's footer: the week's saving, `savedLine` of `wb savings --json` ('' for none) */
+      savings: Shaped<string>
     }
   }
 }

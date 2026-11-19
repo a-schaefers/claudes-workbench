@@ -247,8 +247,8 @@ unset: unknown, so no sharing).
   Test names read as sentences.
 - The mod keeps no state of its own that matters: it reads the task files. `$` may only be passed
   to functions declared at the top level of `register.tsx`, so `claude plugin validate` can follow
-  it. `$.state` atoms are tagged (`tasks-3`, `live-1`, `chat-2`, `sessions-1`): change the tag when the type
-  changes. A slash command may not start a turn itself: it pushes onto `mem.queued`.
+  it. Each `$.state` atom has a shape tag (ARCHITECTURE.md, *Couplings*, lists them): change it
+  when its type changes. A slash command may not start a turn itself: it pushes onto `mem.queued`.
 - Skills for the agents: Claude's library (`wb skill`), handed per task, or a project's own
   `.claude/skills`, committed with it. The user's personal `~/.claude/skills` are denied to agents.
 

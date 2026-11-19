@@ -1320,7 +1320,9 @@ nothing until a surface attaches.
   drawn as a small robot in a hard hat: it swings a wrench while it works and raises its arms when
   a task is ready for review; its chest lamp is the phase's colour, and its speech bubble says
   what it is doing now and how long the task has left. A short pane gets its face on one line
-  instead. The web chat's link is pinned at the bottom.
+  instead. Below it, the week's saving (`savedLine` of `wb savings --json`, read every 10 minutes
+  and again when a task closes: `this week: saved ~1.2M Claude tokens (46%, estimate) · 0.9 kWh`;
+  nothing until a task can be compared), and the web chat's link, pinned at the bottom.
 - **The status line** reads like `⚒ wb · add-scores running r2 · fix-typo asks · 1 awaiting
   review`, or `⚒ wb · workbench mode` with nothing open. Outside workbench mode it counts only
   the session's own tasks (`mine`), and shows nothing without one: another session's running task
@@ -2405,8 +2407,8 @@ thread no longer):
   missing token: open the link from `wb chat url`".
 - `GET /api/state`: `{messages (the last 200, each user row with its receipt as `received`),
   asks (the last 20, each with `answer` (null while open), `answered`, `by`), prefs, push (`{key:
-  the VAPID public key, test: the last test push's ts}`), listener, build,
-  now}`. `build` (`chat.build`, a crc32 of the page's files' names, mtimes and sizes) changes
+  the VAPID public key, test: the last test push's ts}`), listener, savings (`chat.week_saved`:
+  `savings.totals` over the last 7 days, as `wb savings --json` without `period`), build, now}`. `build` (`chat.build`, a crc32 of the page's files' names, mtimes and sizes) changes
   when the page does: a page that loaded other files reloads itself.
 - `GET /api/stream`: server-sent events (with the security headers): `event: state` with the
   snapshot at once and whenever it changes, `: ping` after 15 s idle. At most `MAX_STREAMS` 16
@@ -2475,7 +2477,8 @@ changes" (the note shown), "settled in the terminal" (an interrupt, or the dialo
 there) or "no answer in time: it waits in the terminal". The gear in the header drops a settings
 sheet (`#settings`; closed by the gear, Escape or a tap outside): *This chat* (what this lane is:
 a second lane to the session, not a copy of the terminal; Claude sends here what matters, and
-keeps the user posted here when asked), *While you're away* (Ask me here / Let Claude go ahead,
+keeps the user posted here when asked), *What it saved* (`drawSaved`: the week's `savings`, in a
+sentence, called an estimate; "Nothing to compare yet" before a task can be), *While you're away* (Ask me here / Let Claude go ahead,
 posting `/api/prefs`, with what each means), *This device* (forget the key: the key screen, with
 no restoring of the old one). Claude's messages flow in at a reading pace (`flows`) once
 the first render is done; the backlog a first visit loads, a message that arrives while the page
@@ -2562,13 +2565,14 @@ const bound to one; imports from the module's own files also pass). The helpers 
 "gating hook without .catch" notes) is the check. Env reads must be string literals: `HOME`,
 `WB_HOME`, `WB_BIN`, `CLAUDE_CONFIG_DIR`, `WB_COMPACT_AT`.
 
-**State.** Four `$.state` atoms survive a module reload within a session; each has a shape tag,
+**State.** Five `$.state` atoms survive a module reload within a session; each has a shape tag,
 and an atom read under an old tag is absent, so change the tag when its type changes:
 `tasks` (`tasks-3`, WbTask[]: name, phase, round, model, label, tests, last, createdAt,
 updatedAt, tokens, recent, repo, cwd, session), `live` (`live-1`, {task, lines: {s, t}[]}: the transcript lines),
 `chat` (`chat-2`, {key, delegating, webAt, url}: workbench mode lives here, plus the session's
 listener key), `sessions` (`sessions-1`, string[]: every Claude Code session id this process
-has had, `mem.ids` while loaded). Everything else is `mem`, a plain object reset by a reload (busy, queued turns,
+has had, `mem.ids` while loaded), `savings` (`savings-1`, string: the pane's saving line, '' for
+none). Everything else is `mem`, a plain object reset by a reload (busy, queued turns,
 this session's open set, the session's resolved `cwd` and `home`, `person`, follow, sawTurn, scoutAsked,
 toasts sent, dropped wakes, the closed tasks no longer read, the events pid, …). The task facts
 themselves are re-read from `$WB_HOME`; the mod writes `tasks/<n>/acked`, scout.json's
@@ -3392,7 +3396,8 @@ push: every change is a pull request that merges once `check` is green and it is
 - **`wb watch --json`** (a style, the order, the activity wording) → the mod's `LINE_STYLE`, its
   pose regex, the `live-1` tag; `--last` and `JSON_LINE_CHARS` with the mod's `KEEP_LINES` and
   `LINE_CHARS`.
-- **A `$.state` atom's type** in the mod → its tag (`tasks-3`, `live-1`, `chat-2`, `sessions-1`).
+- **A `$.state` atom's type** in the mod → its tag (`tasks-3`, `live-1`, `chat-2`, `sessions-1`, `savings-1`).
+- **`savings.totals`' keys** → the mod's `savedLine` and the chat page's `drawSaved`, which read them.
 - **Which session a task is** (task.json `session`, else `cwd`/`repo`) → the mod's `mine` and
   `cli._scope` (`--session`, `--repo`): the same rule, the home-or-`/` exception included, and
   the mod's `scope()` passing every id it has.

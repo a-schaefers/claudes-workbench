@@ -1,5 +1,5 @@
 import { expect, mock, test } from 'claude-code/testing'
-import { wrapWords } from './register.js'
+import { savedLine, wrapWords } from './register.js'
 
 const PANE = {
   plugin: 'workbench',
@@ -1242,4 +1242,34 @@ test('the bubble wraps its words into lines that fit, never cutting a line short
   expect(lines.join(' ').replace(/\s+/g, '')).toBe(said.replace(/\s+/g, ''))  // nothing lost
   expect(wrapWords('All caught up.', 30)).toEqual(['All caught up.'])
   expect(wrapWords('', 30)).toEqual([''])
+})
+
+test('the pane ends with the week\'s saving, read from wb savings, above the web chat link', async ($, on) => {
+  const clock = mock.clock(on, { now: 1_800_000_000_000 })
+  fakeTasks(on, {})
+  const week = { period: 'week', tasks: 3, claude: 160000, self_est: 1390000, saved: 1230000, wh: 900, cost: null }
+  on('process.run', (_: any, e: any) => {
+    if (e.argv[1] === 'savings') return { value: { exitCode: 0, stdout: JSON.stringify(week), stderr: '' } }
+    if (e.argv[1] === 'chat' && e.argv[2] === 'url')
+      return { value: { exitCode: 0, stdout: 'https://box.tail.ts.net/#token=abc\n', stderr: '' } }
+    return { value: { exitCode: 0, stdout: '', stderr: '' } }
+  })
+  await $.session.start({ cwd: '/', surface: 'terminal', isInteractive: true })
+  await clock.advance(3000)
+  const ui = await $.ui.mount({ ...PANE, surface: 'terminal' })
+  const texts = (await ui.findAll({ type: 'Text' })).map(t => t.text)
+  const at = texts.indexOf('this week: saved ~1.2M Claude tokens (88%, estimate) · 900 Wh')
+  expect(at).toBeGreaterThan(-1)
+  expect(texts.slice(at + 1)).toEqual(['web chat https://box.tail.ts.net/#token=abc', 'web chat ',
+    'https://box.tail.ts.net/#token=abc'])
+  await ui.unmount()
+})
+
+test('the saving reads in thousands or millions, says when it cost more, and is empty with nothing to show', () => {
+  const t = (o: object) => JSON.stringify({ tasks: 1, claude: 50000, self_est: 80000, saved: 30000, wh: 0, ...o })
+  expect(savedLine(t({}))).toBe('this week: saved ~30K Claude tokens (38%, estimate)')
+  expect(savedLine(t({ wh: 1500 }))).toBe('this week: saved ~30K Claude tokens (38%, estimate) · 1.5 kWh')
+  expect(savedLine(t({ saved: -4000 }))).toBe('this week: cost ~4K more Claude tokens (estimate)')
+  expect(savedLine(t({ tasks: 0 }))).toBe('')
+  expect(savedLine('usage: wb …')).toBe('')
 })

@@ -94,6 +94,10 @@ const sessions = atom({ plugin: 'workbench', key: 'sessions' } as const, [] as s
 const live = atom({ plugin: 'workbench', key: 'live' } as const, { task: '', lines: [] } as WbLive, {
   shape: 'live-1',
 })
+
+// The week's saving, the pane's last line (`wb savings --json`, read as the chat link is, and
+// again when a task closes): the user, 2026-11-18, nothing in the product showed it (#107).
+const savings = atom({ plugin: 'workbench', key: 'savings' } as const, '', { shape: 'savings-1' })
 const KEEP_LINES = 2000 // the pane scrolls back through this much history (`wb watch --last`)
 // One heredoc command or minified write is a single line of 100 KB or more, and alone it took the
 // whole HISTORY_CHARS budget, hiding everything before it (the 2026-11-16 audit): each line is
@@ -361,6 +365,7 @@ const mem = {
   chatSent: new Set<string>(), // web messages submitted by this load, awaiting their receipt
   chatRetry: new Map<string, number>(), // a web message whose prompt was dropped: tried again from then
   chatUrlAt: 0, // when the web chat's link was last looked up
+  savingsAt: 0, // when the week's saving was last read
   eventsPid: 0, // the `wb events` child: its lines wake poll(); the chat counts it as this session
   earsOk: false, // `wb events` has said hello in this load: wb runs
   gone: new Set<string>(), // task directories closed past KEEP_CLOSED_MS: final, never read again
@@ -690,6 +695,19 @@ async function ears($: any) {
 // it buried the question Claude had just asked the person (the 2026-11-16 audit).
 const SCOUT_QUIET_MS = 60_000
 
+// `wb savings --json` as the pane's footer: "this week: saved ~1.2M Claude tokens (46%, estimate) · 0.9 kWh";
+// '' until a task can be compared, or when the output isn't wb's.
+export function savedLine(out: string): string {
+  let t: any
+  try { t = JSON.parse(out) } catch { return '' }
+  if (!t || typeof t.tasks !== 'number' || !t.tasks || typeof t.saved !== 'number') return ''
+  const n = (x: number) => (Math.abs(x) >= 1e6 ? `${(x / 1e6).toFixed(1)}M` : `${Math.round(x / 1e3)}K`)
+  const pct = t.self_est > 0 ? ` (${Math.round((100 * t.saved) / t.self_est)}%, estimate)` : ' (estimate)'
+  const what = t.saved >= 0 ? `saved ~${n(t.saved)} Claude tokens${pct}` : `cost ~${n(-t.saved)} more Claude tokens (estimate)`
+  const gpu = t.wh ? ` · ${t.wh >= 1000 ? `${(t.wh / 1000).toFixed(1)} kWh` : `${Math.round(t.wh)} Wh`}` : ''
+  return `this week: ${what}${gpu}`
+}
+
 async function poll($: any) {
   if (!mem.root || !mem.person) return
   if (mem.polling) { // a slow file system must not stack polls, but no change may be missed
@@ -734,6 +752,7 @@ async function poll($: any) {
     // compacted every session's context, delegating or not (the 2026-11-16 audit).
     const open = new Set(list.filter(t => isOpen(t) && mine(t)).map(t => t.name))
     if (on && [...mem.open].some(name => !open.has(name))) mem.boundary = true
+    if ([...mem.open].some(name => !open.has(name))) mem.savingsAt = 0 // one closed: its row is new
     if (!on) mem.boundary = false
     mem.open = open
     if (mem.boundary && !mem.busy && !list.some(t => NEEDS.has(t.phase) && mine(t))) {
@@ -759,6 +778,12 @@ async function poll($: any) {
       const { ok, out } = await runWb($, ['chat', 'url'])
       const link = ok && /^https?:\/\/\S+#token=\S+$/.test(out) ? out : ''
       if (link !== (await read($, chat)).url) await update($, chat, c => ({ ...c, url: link }))
+    }
+    if (now - mem.savingsAt > 10 * 60_000) {
+      mem.savingsAt = now
+      const { ok, out } = await runWb($, ['savings', '--json'])
+      const said = ok ? savedLine(out) : ''
+      if (said !== (await read($, savings))) await update($, savings, () => said)
     }
   } finally {
     mem.polling = false
@@ -1315,6 +1340,7 @@ export const register: Register = (on, options) => {
     const list = await read($, tasks)
     const watched = await read($, live)
     const { url, delegating } = await read($, chat)
+    const saved = await read($, savings)
     // the web chat's link, always at hand to copy: last, since the pane follows its end
     const pinned = url ? (
       <Box marginTop={1}>
@@ -1430,6 +1456,7 @@ export const register: Register = (on, options) => {
           </Box>
         )}
         {stage}
+        {saved && <Text dimColor>{saved}</Text>}
         {pinned}
       </Box>
     )

@@ -54,6 +54,7 @@ async function run(engine, device) {
   writeFileSync(join(home, 'state/chat/receipts.jsonl'), '')
   writeFileSync(join(home, 'state/chat/asks.jsonl'), '')
   writeFileSync(join(home, 'state/chat/listener.json'), '{}')
+  writeFileSync(join(home, 'state/results.jsonl'), '')
   const token = readFileSync(env.WB_CHAT_TOKEN, 'utf8').trim()
   startServer(); await sleep(800)
   const browser = await pw[engine].launch(engine === 'chromium' && CHROMIUM ? { executablePath: CHROMIUM } : {})
@@ -187,12 +188,25 @@ async function run(engine, device) {
     await page.click('#gear')
     await until(async () => await page.locator('#settings').isVisible())
     if (!(await page.textContent('#settings')).includes('second lane')) throw new Error('no word on what this chat is')
+    if (!(await page.textContent('#saved')).includes('Nothing to compare yet')) throw new Error('a saving shown with no task')
     await page.click('[data-away="allow"]')
     await until(() => JSON.parse(readFileSync(join(home, 'state/chat/prefs.json'), 'utf8')).away === 'allow')
     if (wb('chat', 'ask', '--tool', 'Bash', '--text', 'make').split(' ')[1].trim() !== 'allow') throw new Error('not allowed at once')
     await until(async () => (await page.locator('.row.ask .meta').last().textContent()).includes('allowed by your setting'))
     await page.click('[data-away="ask"]')
     await until(() => JSON.parse(readFileSync(join(home, 'state/chat/prefs.json'), 'utf8')).away === 'ask')
+  })
+  await check('the gear shows what the week\'s tasks saved Claude, as an estimate', async () => {
+    const usage = { turns: 2, calls: 5, input: 1000, cache_write_5m: 0, cache_write_1h: 10000, cache_read: 200000, output: 3000 }
+    writeFileSync(join(home, 'state/results.jsonl'), JSON.stringify({ ts: Date.now() / 1000, outcome: 'accepted',
+      claude: usage, diff: { files: 4, added: 61, removed: 1 }, gpu_wh: 600 }) + '\n')
+    await page.reload()
+    await page.click('#gear')
+    await until(async () => (await page.textContent('#saved')).includes('In the last 7 days, 1 task: Claude used 56K tokens'))
+    const said = await page.textContent('#saved')
+    if (!said.includes('about 59K (an estimate). Saved about 3K (5%). The GPU used 600 Wh.')) throw new Error(said)
+    await page.click('#gear')
+    await until(async () => await page.locator('#settings').isHidden())
   })
   await check('the app: its worker runs, holds the key, and the gear says how to install it and get notifications', async () => {
     await until(() => page.evaluate(async () => !!(await navigator.serviceWorker.getRegistration())))
