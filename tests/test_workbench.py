@@ -117,6 +117,11 @@ class Base(unittest.TestCase):
         deadline = time.time() + 15
         while time.time() < deadline and any(cli.runner_alive(t) for t in store.all_tasks()):
             time.sleep(0.1)
+        # A runner a failed test left running (blocked on a question, a hang) held CI's output open
+        # until the job was cancelled, 15 minutes after the suite ended (#141): stop it.
+        for t in store.all_tasks():
+            if cli.runner_alive(t):
+                cli._stop_runner(t)
         for t in store.all_tasks():  # the agents' runtime directories are in /tmp, not the state
             context.drop_runtime_dir(t)
         os.environ.clear()
@@ -3148,10 +3153,12 @@ class Permission(Base):
         t = threading.Thread(target=lambda: got.update(a=ask_mcp.ask(
             task, "to fetch the fixture the spec names", command="curl -sO https://x/f.json")))
         t.start()
-        while not task.status.get("asking") and t.is_alive():
+        # the relay sets status asking, then writes the notice: wait for the notice (#141)
+        deadline = time.time() + 20
+        notices = lambda: store.read_jsonl(store.home() / "notify.jsonl")[0]  # noqa: E731
+        while not (notices() and "PERMISSION" in notices()[-1]["text"]) and time.time() < deadline:
             time.sleep(0.1)
-        self.assertIn("PERMISSION to run: `curl -sO https://x/f.json`",
-                      store.read_jsonl(store.home() / "notify.jsonl")[0][-1]["text"])
+        self.assertIn("PERMISSION to run: `curl -sO https://x/f.json`", notices()[-1]["text"])
         out = run_wb("allow", "t-perm", "curl *")
         t.join(10)
         self.assertIn("Claude allowed `curl *` for this task", got["a"])
@@ -5113,17 +5120,20 @@ class WebChat(Base):
         # "Reconnecting" until a hard refresh (2026-11-18)
         import threading
         tok = self.chat.token()
-        with mock.patch.object(self.srv.RequestHandlerClass, "streams", threading.BoundedSemaphore(1)):
-            c1, old = self.open_stream(tok)
-            c2, new = self.open_stream(tok)             # let in, not a 503
-            old.fp.readline()                           # the data line
-            old.fp.readline()
-            self.assertEqual(old.fp.readline(), b"")    # the old one was closed
-            c1.close()
-            self.call("/api/send", {"text": "still live"}, token=tok)
-            lines = [new.fp.readline() for _ in range(5)]  # the first state's rest, then the next
-            self.assertTrue(any(b"still live" in line for line in lines), lines)
-            c2.close()
+        # set, not patched: each test has its own handler class, and a patch restored while the
+        # last stream's handler was still leaving had it release the real semaphore, one it
+        # never took ("released too many times", CI on #139)
+        self.srv.RequestHandlerClass.streams = threading.BoundedSemaphore(1)
+        c1, old = self.open_stream(tok)
+        c2, new = self.open_stream(tok)             # let in, not a 503
+        old.fp.readline()                           # the data line
+        old.fp.readline()
+        self.assertEqual(old.fp.readline(), b"")    # the old one was closed
+        c1.close()
+        self.call("/api/send", {"text": "still live"}, token=tok)
+        lines = [new.fp.readline() for _ in range(5)]  # the first state's rest, then the next
+        self.assertTrue(any(b"still live" in line for line in lines), lines)
+        c2.close()
 
     def test_the_file_watcher_starts_again_after_a_failure(self):
         chat, real, calls = self.chat, self.chat.Watcher, []
