@@ -103,14 +103,6 @@ def _safe(path: str) -> bool:
     return bool(path) and not p.is_absolute() and ".." not in p.parts
 
 
-def _run(cmd: str, cwd: Path, limit: int) -> int | str:
-    try:
-        return subprocess.run(["/bin/sh", "-c", cmd], cwd=cwd, capture_output=True,
-                              timeout=limit, start_new_session=True).returncode
-    except subprocess.TimeoutExpired:
-        return "timeout"
-
-
 def bundle(repo: Path, commit: str, dest: Path) -> None:
     """A bundle of `commit`'s history alone, as branch main: made in a scratch clone, so the
     user's repo gets no ref, and the commits after it (the answer) aren't in it."""
@@ -226,14 +218,20 @@ def add(name: str, step: int | None = None, hidden: list[str] | None = None,
                              "reviews": step_row.get("reviews", row.get("reviews")),
                              "minutes": row.get("minutes"), "steps": steps},
                 "created_at": store.now()}
-        # the hidden checks must fail on the base, or a replay that does nothing passes
-        with tempfile.TemporaryDirectory(prefix="wb-bench-") as scratch:
+        # the hidden checks must fail on the base, or a replay that does nothing passes. Run as
+        # the reference check and a replay's grade are, in the agent's lane: in a plain shell
+        # with the caller's environment the same test saw other files, other variables and no
+        # cleanup (#81, the 2026-11-18 audit)
+        home().mkdir(parents=True, exist_ok=True)  # not in /tmp, where the git shim allows writes
+        with tempfile.TemporaryDirectory(prefix=".base-", dir=home()) as scratch:
             work = Path(scratch) / "repo"
             gitops.git(scratch, "clone", "-q", "-b", "main", str(tmp / "base.bundle"), str(work))
             for p in picked:
                 (work / p).parent.mkdir(parents=True, exist_ok=True)
                 shutil.copyfile(tmp / "hidden" / p, work / p)
-            codes = [_run(c, work, BASE_CHECK_SECS) for c in (case["test_cmd"], check) if c]
+            at = _At(name, work)
+            codes = [runner.run_in_lane(at, c, BASE_CHECK_SECS)[0]
+                     for c in (case["test_cmd"], check) if c]
         if all(c == 0 for c in codes):
             raise RuntimeError("the hidden checks already pass on the base: a replay that changed "
                                "nothing would pass. Name others (--hidden, --check)")
