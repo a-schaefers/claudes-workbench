@@ -2,7 +2,11 @@
 
 The estimate comes from eight paired runs on 2026-11-17: Claude made roughly 4.9 +
 lines/69 calls, each costing the session's context cost per call, and wrote about 36
-output tokens per line changed. Mean error 19%, single tasks -36% to +48%."""
+output tokens per line changed. Mean error 19%, single tasks -36% to +48%.
+
+Checked on 2026-11-19 against five new runs (`wb bench self` on the bench cases, #120): mean
+error 19% again, -32% to +21%, low on four, so it understates the saving. A refit on those five
+did better on them (15%) but worse on each one left out (32%), so the constants stand."""
 
 from __future__ import annotations
 
