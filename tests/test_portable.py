@@ -626,8 +626,8 @@ class Optimize(unittest.TestCase):
     WEIGHTS, PER_TOKEN, CARD = 10_000_000_000, 32_000, 12_100_000_000
     setUp, tearDown, config = Real.setUp, Real.tearDown, Real.config  # not Real's tests again
 
-    def ollama(self, window, entry=None):
-        loaded, posts = [], []
+    def ollama(self, window, entry=None, loaded=None, extra=None):
+        loaded, posts = loaded if loaded is not None else [], []
         test = self
 
         class H(BaseHTTPRequestHandler):
@@ -659,8 +659,33 @@ class Optimize(unittest.TestCase):
         self.servers.append(srv)
         self.config({"ollama": {"options": {"baseURL": f"http://127.0.0.1:{srv.server_address[1]}/v1"},
                                 "models": {"m": entry or {"limit": {"context": window, "output": 4096},
-                                                          "options": {"reasoningEffort": "none"}}}}})
+                                                          "options": {"reasoningEffort": "none"}}}}}, extra)
         return posts
+
+    def test_a_remote_ollama_is_measured_and_its_models_are_in_the_fingerprint_while_it_answers(self):
+        # #115: wb remote's models fit another card, read by the same /api/ps placement
+        from workbench import optimize
+        loaded = [{"name": "theirs", "size": 5, "size_vram": 5}]           # the other machine's own
+        self.ollama(32768, loaded=loaded, extra={"ollama": {"local": True}})
+        srv = self.servers[-1]
+        with mock.patch.object(models, "_this_host", lambda h: False), \
+                mock.patch.object(optimize.hardware, "gpus", lambda windows=True: [{"name": "Card", "vram": 1}]):
+            m, = optimize.candidates()
+            self.assertTrue(m.remote)
+            self.assertEqual(optimize.busy(m), ["theirs"])                  # not ours to unload
+            loaded.clear()
+            self.assertEqual(optimize.busy(m), [])
+            fp = optimize.fingerprint()
+            self.assertEqual(fp[-1], ["remote", m.root, [["m", None]]])
+            self.assertEqual(optimize.changed(fp), "")
+            self.assertEqual(optimize.changed(fp[:-1] + [["remote", m.root, [["m", 123]]]]),
+                             f"the models at {m.root} changed")             # re-pulled: another fit
+            self.assertEqual(optimize.changed(fp[:-1]), "")                 # a server new since
+            srv.shutdown()
+            srv.server_close()
+            self.servers.remove(srv)
+            self.assertEqual(optimize.changed(fp), "")                      # asleep: not due again
+            self.assertEqual(optimize.remembered(fp), fp)                   # and still known
 
     def test_a_window_that_spills_is_measured_down_to_the_largest_that_fits_whole(self):
         # a 64K window put a tenth of a 27B model in RAM and halved its writing speed (2026-11-18)

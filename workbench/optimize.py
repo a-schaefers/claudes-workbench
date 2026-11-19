@@ -54,8 +54,10 @@ def state() -> dict:
 
 
 def candidates() -> list[models.Model]:
+    """The Ollama models that can be measured: this machine's and those on another machine's
+    Ollama (wb remote), where the same /api/ps placement says what fits its card (#115)."""
     return [m for m in models.discover().values()
-            if m.engine == "ollama" and not m.remote and models.status(m)["available"]]
+            if m.engine == "ollama" and models.status(m)["available"]]
 
 
 def served(m: models.Model) -> int:
@@ -81,8 +83,51 @@ def estimate(ms: list[models.Model]) -> float:
 
 
 def fingerprint() -> list:
-    """What a fit depends on that can change under it: each GPU and its memory."""
-    return sorted([g.get("name"), g.get("vram")] for g in hardware.gpus(windows=False))
+    """What a fit depends on that can change under it: each GPU here and its memory, then each
+    remote Ollama that answers, with the models it has pulled and their sizes (a re-pull under the
+    same name can be another quantization: another fit)."""
+    here = sorted([g.get("name"), g.get("vram")] for g in hardware.gpus(windows=False))
+    roots = sorted({m.root for m in models.discover().values() if m.engine == "ollama" and m.remote})
+    there = []
+    for root in roots:
+        tags = models._get(f"{root}/api/tags", timeout=2)
+        if isinstance(tags, dict):
+            there.append(["remote", root, sorted([x.get("name"), x.get("size")]
+                                                 for x in tags.get("models") or [])])
+    return here + there
+
+
+def _split(fp) -> tuple[list, dict]:
+    return [e for e in fp if e[:1] != ["remote"]], {e[1]: e[2] for e in fp if e[:1] == ["remote"]}
+
+
+def changed(old) -> str:
+    """What differs from the fingerprint ``old``, or "": this machine's GPUs, and each remote
+    server both know. One asleep now, or new since (its models are new models), changes nothing,
+    so a gaming PC switched off doesn't make every session's run due."""
+    if old is None:
+        return ""
+    (here, there), (was_here, was_there) = _split(fingerprint()), _split(old)
+    if here != was_here:
+        return "the GPU changed"
+    moved = sorted(r for r in there.keys() & was_there.keys() if there[r] != was_there[r])
+    return f"the models at {', '.join(moved)} changed" if moved else ""
+
+
+def remembered(old) -> list:
+    """The fingerprint to store: now's, keeping what ``old`` knew of a server that didn't answer."""
+    now = fingerprint()
+    _, there = _split(now)
+    return now + [e for e in old or [] if e[:1] == ["remote"] and e[1] not in there]
+
+
+def busy(m: models.Model) -> list[str]:
+    """Other models its remote server has loaded: what else is using that card. A fit measured
+    beside them would come out small, and they aren't this machine's to unload."""
+    if not m.remote:
+        return []  # free_gpu has emptied this machine's
+    ps = models._get(f"{m.root}/api/ps", timeout=2) or {}
+    return [x.get("name") for x in ps.get("models") or [] if not models._matches(m.name, {x.get("name")})]
 
 
 def due(ms: list[models.Model] | None = None) -> str:
@@ -96,8 +141,8 @@ def due(ms: list[models.Model] | None = None) -> str:
         return ""
     if not st.get("done"):
         return "never measured"
-    if st.get("hardware") is not None and st["hardware"] != fingerprint():
-        return "the GPU changed"
+    if why := changed(st.get("hardware")):
+        return why
     if st.get("stopped"):
         return "the last run was stopped before it finished"
     new = [m.id for m in ms if m.id not in (st.get("models") or {})]
@@ -277,12 +322,16 @@ def main() -> None:
     why, began, n = None, time.monotonic(), 0
     try:
         st = state()
-        every = "--all" in sys.argv or st.get("stopped") or st.get("hardware") != fingerprint()
+        every = "--all" in sys.argv or st.get("stopped") or st.get("hardware") is None or \
+            changed(st["hardware"])
         with models.GpuLease(None, HOLDER, say=print, wait=False):
             models.free_gpu()
             for m in candidates():
                 if not every and m.id in (st.get("models") or {}):
                     continue  # due for a new model only: the others' fits still hold
+                if others := busy(m):
+                    print(f"{m.id}: not measured, {m.root} has {', '.join(others)} loaded", flush=True)
+                    continue
                 try:
                     trained = models.ollama_show(m.root, m.name).get("context_length")
                 except Exception:
@@ -297,7 +346,7 @@ def main() -> None:
         st = state()
         took = (time.monotonic() - began) / n if n else st.get("secs_per_load")
         store.write_json(path(), {**st, "pid": None, "done": store.now(), "stopped": why,
-                                  "hardware": fingerprint(), "secs_per_load": took})
+                                  "hardware": remembered(st.get("hardware")), "secs_per_load": took})
     if "--bench" in sys.argv and not why:
         from . import bench
         try:

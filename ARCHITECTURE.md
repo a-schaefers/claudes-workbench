@@ -1831,13 +1831,20 @@ Each row has `wb_commit` (the workbench clone's HEAD) and `label`: run a branch 
 `wb optimize` (`workbench/optimize.py`) is the one place workbench loads a model only to learn
 about the machine. A run takes a minute or two (62 s for three models on the 2026-11-18 card), so
 it runs on its own only where the user is told and expects a short wait, and only when it is due
-(`due`: never measured, the GPU changed (`fingerprint`: each GPU's name and memory), a model came
-since, or the last run was stopped): at the end of `wb setup`, and once per Claude Code session
+(`due`: never measured, the GPU changed (`fingerprint`: each GPU's name and memory), a remote
+server's models changed, a model came since, or the last run was stopped): at the end of `wb setup`, and once per Claude Code session
 opened, after its first turn while no task is open (the mod's `measureIfDue`, which toasts
 "workbench: measuring the GPU for N local model(s) (<why>): about M min; a task you start goes
 first" and wakes no one). `wb optimize start --if-due` is that check: quiet when nothing is due or
 a task holds the GPU (the next session tries again). Due for a new model only, it measures only
 the models it hasn't (`--all`, which a `start` without `--if-due` passes, measures every one).
+A remote Ollama's models (`wb remote`) are measured too (#115), by the same `/api/ps` placement on
+their own card, while this machine's lease is held: one whose server has another model loaded is
+skipped with a line (`busy`: that card is in use, and its models aren't this machine's to unload),
+and due again next time. The fingerprint adds each remote server that answers, with the names and
+sizes `/api/tags` gives (a re-pull can be another quantization); `changed` compares only the
+servers both fingerprints know, so a gaming PC asleep, or new since, makes nothing due, and
+`remembered` keeps what was known of one that didn't answer.
 Anything heavier (`--bench`) waits for the user to ask, through Claude, in plain words ("optimize
 my setup", "tune workbench overnight"): an unannounced long run could be cut short and alarm
 people (the user, 2026-11-18). Everything else learns passively from real tasks (the router,
@@ -2990,7 +2997,7 @@ $WB_HOME (~/.local/state/workbench)
   bench/runs/<run>/              plan.json  driver.log  <task>/{wb.log,diff.patch,grade.txt} (repo/ while it runs)
   bench/runs.jsonl  driver.json  one row per replay; the driver's {pid, run}
                                  (bench.jsonl and bench/repos/ are the old suite's: nothing reads them)
-  optimize.json  optimize.log    wb optimize: {pid, start, began, done, stopped, hardware (fingerprint),
+  optimize.json  optimize.log    wb optimize: {pid, start, began, done, stopped, hardware (fingerprint: [name, vram] per GPU, then ["remote", root, [[name, size]…]] per remote Ollama),
                                  secs_per_load, models: {<id>: {window, fits, spill, tried: [{window,
                                  size, vram}], ts}}}; the run's output
   imports/<slug>/                skills fetched by wb skill import, for Claude to read
