@@ -615,7 +615,8 @@ class Lifecycle(Base):
         p = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(30)",
                               "workbench.runner", "t-x"])
         try:
-            with mock.patch.object(cli, "PROC", Path(self.tmp.name) / "no-proc"):
+            from workbench import models
+            with mock.patch.object(models, "PROC", Path(self.tmp.name) / "no-proc"):
                 self.assertFalse(cli.runner_alive(t))           # this test process: not a runner
                 t.set_status(pid=p.pid)
                 self.assertTrue(cli.runner_alive(t))
@@ -623,6 +624,28 @@ class Lifecycle(Base):
         finally:
             p.kill()
             p.wait()
+
+    def test_off_linux_the_bench_and_optimize_stops_signal_only_their_own_worker(self):
+        # #82 (the 2026-11-18 audit): without /proc, a stale driver.json or optimize state.json
+        # whose pid a reboot gave to another program got that program SIGTERMed
+        from workbench import bench, models, optimize
+        other = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(30)"])
+        worker = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(30)", "-m",
+                                   "workbench.bench"])
+        try:
+            with mock.patch.object(models, "PROC", Path(self.tmp.name) / "no-proc"):
+                store.write_json(bench.home() / "driver.json", {"pid": other.pid, "run": "r1"})
+                self.assertEqual(bench.driver(), {})
+                self.assertIsNone(bench.stop_driver())
+                store.write_json(optimize.path(), {"pid": other.pid, "start": None})
+                self.assertIsNone(optimize.stop())
+                self.assertIsNone(other.poll())                   # still running: not signalled
+                store.write_json(bench.home() / "driver.json", {"pid": worker.pid, "run": "r1"})
+                self.assertEqual(bench.driver()["pid"], worker.pid)  # its own worker still counts
+        finally:
+            for p in (other, worker):
+                p.kill()
+                p.wait()
 
     def test_thinking_past_the_budget_is_nudged_and_claude_told(self):
         # A model that generates for many minutes with no tool call gets the runner's own --now
