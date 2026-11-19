@@ -82,7 +82,7 @@ const OLDEST_WAKE_MS = 60 * 60 * 1000 // never wake for a notification older tha
 
 // Change the tag when WbTask's fields change: a reload declines what the earlier shape stored.
 const tasks = atom({ plugin: 'workbench', key: 'tasks' } as const, [] as WbTask[], {
-  shape: 'tasks-4',
+  shape: 'tasks-5',
 })
 
 // Every Claude Code session id this process has had (`$.session.id()`): /clear and a resume go on
@@ -330,6 +330,14 @@ const CODING_RULES: Record<string, string> = {
     '"…" --said "<their words>"`.',
 }
 
+// The pane's Claude coding slider (#93), left to right; the choice is wb's (`wb coding`), the
+// sentence is what the pane shows for it while focused
+const CODING_STOPS: [string, string, string][] = [
+  ['only', 'Only when I say', 'You tell Claude when to write code.'],
+  ['ask', 'Ask me first', 'Claude can ask to make a specific fix and waits for your yes.'],
+  ['decide', 'Let Claude decide', 'Claude uses its judgment to guide the local agent or make a fix itself.'],
+]
+
 // The file tools' path fields: an edit in a task's worktree is writing that task's code
 const EDIT_TOOLS: Record<string, string> = { Edit: 'file_path', MultiEdit: 'file_path', Write: 'file_path', NotebookEdit: 'notebook_path' }
 
@@ -350,11 +358,20 @@ async function codingRefusal($: any, path: string): Promise<string> {
   if (!task) return ''
   const mode = await codingMode($)
   if (mode === 'decide') return ''
+  const file = `${mem.root}/tasks/${task}/coding.json`
   let allowed: Row[] = []
   try {
-    allowed = JSON.parse(await $.fs.read(`${mem.root}/tasks/${task}/coding.json`)).allowed || []
+    allowed = JSON.parse(await $.fs.read(file)).allowed || []
   } catch {}
-  if (allowed.some(x => !x.used)) return ''
+  const open = allowed.find(x => !x.used)
+  if (open) {
+    // a one-task exception (#94) is under way from its first edit: the next hand-back spends it
+    if (open.when && !open.started) {
+      open.started = (await $.clock.now()) / 1000
+      await $.fs.write(file, JSON.stringify({ allowed })).catch(() => {})
+    }
+    return ''
+  }
   return `workbench: not edited: ${task} is the local agent's. ${CODING_RULES[mode]}`
 }
 // Tasks of another session are listed as left alone: theirs to stop or finish.
@@ -568,11 +585,20 @@ async function scan($: any, root: string, now: number): Promise<WbTask[]> {
       repo: String(sp.repo ?? ''), cwd: String(sp.cwd ?? ''), session: String(sp.session ?? ''),
       claude_pid: Number(sp.claude_pid ?? 0),
       backlog: String(sp.backlog ?? ''),
+      allowed: allowedLine((await readJson($, `${base}/coding.json`)).allowed),
     })
   }
   for (const name of mem.gone) if (!names.has(name)) mem.gone.delete(name) // removed by hand
 
   return list.sort((a, b) => a.createdAt - b.createdAt)
+}
+
+// The user's unspent allowance for a task (`wb coding allow`), for its line in the pane: what
+// Claude may edit, and when, for a one-task exception (#94); '' for none
+export function allowedLine(rows: unknown): string {
+  const x = Array.isArray(rows) ? rows.find((r: Row) => r && !r.used) : undefined
+  if (!x) return ''
+  return x.when ? `Claude may, once, if ${x.when}: ${x.edit}` : `Claude may: ${x.edit}`
 }
 
 async function scoutIfDue($: any, now: number): Promise<void> {
@@ -1411,11 +1437,27 @@ export const register: Register = (on, options) => {
   })
 
   on('ui.render', { component: 'Pane', requestId: PANE }, async ($, e) => {
-    const { Box, Text, Raster } = $.ui.resolve(e) as Row
+    const { Box, Text, Raster, Select } = $.ui.resolve(e) as Row
     const list = await read($, tasks)
     const watched = await read($, live)
     const { url, delegating } = await read($, chat)
     const saved = await read($, savings)
+    // Claude coding (#93): right below the apprentice (the week's saving, then the link, after it). One row at rest, the
+    // focused pane adds the choice's sentence; mobile draws no Select, so it reads the choice there
+    const mode = await codingMode($)
+    const stop = CODING_STOPS.find(s => s[0] === mode) ?? CODING_STOPS[2]
+    const coding = (
+      <Box flexDirection="column" marginTop={1}>
+        {Select && (e as Row).surface !== 'mobile' ? (
+          <Select key="coding" label="Claude coding  " value={stop[0]}
+            options={CODING_STOPS.map(([value, label]) => ({ value, label }))}
+            onSelect={(value: string) => { void runWb($, ['coding', value]) }} />
+        ) : (
+          <Text>{`Claude coding  ${stop[1]}`}</Text>
+        )}
+        {(e.props as Row | undefined)?.isFocused && <Text dimColor>{stop[2]}</Text>}
+      </Box>
+    )
     // the web chat's link, always at hand to copy: last, since the pane follows its end
     const pinned = url ? (
       <Box marginTop={1}>
@@ -1515,6 +1557,7 @@ export const register: Register = (on, options) => {
             {recentOf(t).map(line => (
               <Text dimColor>  {clip(line, cols - 2)}</Text>
             ))}
+            {t.allowed && wrapWords(t.allowed, cols - 2).map(l => <Text color="claude">  {l}</Text>)}
             {t.name !== watched.task && t.recent.length === 0 && (
               <Text dimColor>  {clip(t.last, cols - 2)}</Text>
             )}
@@ -1531,6 +1574,7 @@ export const register: Register = (on, options) => {
           </Box>
         )}
         {stage}
+        {coding}
         {saved && <Text dimColor>{saved}</Text>}
         {pinned}
       </Box>

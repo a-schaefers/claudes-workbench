@@ -88,11 +88,12 @@ def _allowances(task: store.Task) -> list[dict]:
     return (store.read_json(task.dir / "coding.json", {}) or {}).get("allowed") or []
 
 
-def _allow(task: store.Task, edit: str, said: str) -> None:
-    rows = _allowances(task) + [{"edit": edit, "said": said, "ts": store.now(), "used": None}]
+def _allow(task: store.Task, edit: str, said: str, when: str | None = None) -> None:
+    rows = _allowances(task) + [{"edit": edit, "said": said, "ts": store.now(), "used": None,
+                                 **({"when": when} if when else {})}]
     store.write_json(task.dir / "coding.json", {"allowed": rows})
     task.event({"ts": store.now(), "round": task.status.get("round"), "kind": "coding",
-                "text": f"the user allowed Claude: {edit}"})
+                "text": f"the user allowed Claude: {edit}" + (f", if {when}" if when else "")})
 
 
 def coding_allowed(task: store.Task) -> dict | None:
@@ -100,13 +101,20 @@ def coding_allowed(task: store.Task) -> dict | None:
     return next((x for x in _allowances(task) if not x.get("used")), None)
 
 
+def _spent(x: dict) -> bool:
+    """Whether handing the work back spends this allowance: a plain yes always; a one-task
+    exception (#94, its `when`) only once Claude has started on it (the mod stamps `started` at
+    its first edit), so one granted for "if the next try still fails" waits through that try."""
+    return not x.get("when") or bool(x.get("started"))
+
+
 def _coding_used(task: store.Task) -> None:
     """An allowance ends when the work goes back to the agent: a retried or resumed task
     remembers it was used, and the next edit needs the user again."""
     rows = _allowances(task)
-    if any(not x.get("used") for x in rows):
-        store.write_json(task.dir / "coding.json",
-                         {"allowed": [{**x, "used": x.get("used") or store.now()} for x in rows]})
+    if any(not x.get("used") and _spent(x) for x in rows):
+        store.write_json(task.dir / "coding.json", {"allowed": [
+            {**x, "used": x.get("used") or (store.now() if _spent(x) else None)} for x in rows]})
 
 
 def spawn_runner(task: store.Task) -> int:
@@ -1219,24 +1227,42 @@ def _coding_gate(task: store.Task, user: bool) -> None:
 def cmd_coding(a):
     """Show or set when Claude may write code for a delegated task, or record the user's yes
     for one task (#92)."""
+    if a.what == "used":
+        if not a.task or not a.did:
+            die("wb coding used <task> --did \"<what Claude changed>\"")
+        task = need(a.task)
+        rows = _allowances(task)
+        i = next((i for i, x in enumerate(rows) if not x.get("used")), None)
+        if i is None:
+            die(f"{a.task} has no allowance to use: the user's yes comes first (wb coding allow)")
+        rows[i] = {**rows[i], "used": store.now(), "did": a.did}
+        store.write_json(task.dir / "coding.json", {"allowed": rows})
+        task.event({"ts": store.now(), "round": task.status.get("round"), "kind": "coding",
+                    "text": f"Claude used the user's allowance: {a.did}"})
+        print(f"{a.task}: recorded. Hand the testing back to the agent: wb feedback {a.task} "
+              "--message <file> (what you changed, and what it checks next)")
+        return
     if a.what == "allow":
         if not a.task or not a.edit or not a.said:
-            die("wb coding allow <task> --edit \"<the exact edit>\" --said \"<the user's words>\"")
+            die("wb coding allow <task> --edit \"<the exact edit>\" --said \"<the user's words>\" "
+                "[--when \"<the condition>\"]")
         task = need(a.task)
         if task.status.get("phase") in store.CLOSED:
             die(f"{a.task} is {task.status.get('phase')}")
-        _allow(task, a.edit, a.said)
-        print(f"{a.task}: Claude may make this edit until it hands the task back: {a.edit}")
+        _allow(task, a.edit, a.said, a.when)
+        print(f"{a.task}: Claude may make this edit " + (f"once, if {a.when}" if a.when else
+              "until it hands the task back") + f": {a.edit}")
         return
-    if a.task or a.edit or a.said:
-        die("a task, --edit and --said go with wb coding allow")
+    if a.task or a.edit or a.said or a.when or a.did:
+        die("a task, --edit, --said and --when go with wb coding allow; --did with wb coding used")
     if a.what:
         store.write_json(store.home() / "coding.json", {"mode": a.what, "ts": store.now()})
     label, why = CODING[coding_mode()]
     print(f"Claude coding: {label}. {why}")
     for t in store.all_tasks():
         if t.status.get("phase") not in store.CLOSED and (x := coding_allowed(t)):
-            print(f"  {t.name}: allowed until handed back: {x['edit']} (the user: \"{x['said']}\")")
+            print(f"  {t.name}: " + (f"allowed once, if {x['when']}: " if x.get("when") else
+                  "allowed until handed back: ") + f"{x['edit']} (the user: \"{x['said']}\")")
 
 
 @one_at_a_time
@@ -3013,10 +3039,13 @@ def parser() -> argparse.ArgumentParser:
     s.set_defaults(f=cmd_takeover)
     s = sub.add_parser("coding", help="when Claude may write code for a delegated task: show, "
                        "set (only, ask, decide), or allow one task's edit on the user's yes")
-    s.add_argument("what", nargs="?", choices=[*CODING, "allow"])
-    s.add_argument("task", nargs="?", help="allow: the task")
+    s.add_argument("what", nargs="?", choices=[*CODING, "allow", "used"])
+    s.add_argument("task", nargs="?", help="allow, used: the task")
     s.add_argument("--edit", help="allow: the exact edit the user agreed to")
     s.add_argument("--said", help="allow: the user's words")
+    s.add_argument("--when", help="allow: a one-task exception granted ahead, for when this holds "
+                   "(e.g. the next try still gets the units wrong)")
+    s.add_argument("--did", help="used: what Claude changed under the allowance")
     s.set_defaults(f=cmd_coding)
     s = sub.add_parser("stop", help="stop a running task (wb resume or wb feedback continues it)")
     s.add_argument("name", nargs="?")

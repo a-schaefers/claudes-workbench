@@ -4433,6 +4433,36 @@ class Coding(Base):
         rows = json.loads((store.Task("t").dir / "coding.json").read_text())["allowed"]
         self.assertTrue(rows[0]["used"])                             # a retry remembers it
 
+    def test_a_one_task_exception_waits_for_its_condition_and_is_spent_once_used(self):
+        # #94: "if the next try still gets the units wrong, Claude may fix the conversion once"
+        run_wb("coding", "only")
+        self.start("t", "ok")
+        wait_phase("t", {"review"})
+        out = run_wb("coding", "allow", "t", "--edit", "divide by 1000 in power.py", "--said", "ok",
+                     "--when", "the next try still shows kW as W")
+        self.assertIn("once, if the next try still shows kW as W", out)
+        self.assertIn("t: allowed once, if the next try still shows kW as W: divide by 1000",
+                      run_wb("coding"))
+        os.environ["FAKE_SCENARIO"] = "ok"
+        run_wb("feedback", "t", "--text", "one more try")            # the try it was granted for
+        wait_phase("t", {"review"})
+        self.assertIn("took over t", run_wb("takeover", "t"))        # still there: not spent
+        f = store.Task("t").dir / "coding.json"
+        rows = json.loads(f.read_text())["allowed"]
+        f.write_text(json.dumps({"allowed": [{**rows[0], "started": 1}]}))   # the mod, at Claude's edit
+        out = run_wb("coding", "used", "t", "--did", "power.py: watts = raw / 1000")
+        self.assertIn("Hand the testing back to the agent: wb feedback t", out)
+        run_wb("feedback", "t", "--text", "I fixed the units; check the tests")
+        wait_phase("t", {"review"})
+        row = json.loads(f.read_text())["allowed"][0]
+        self.assertEqual(row["did"], "power.py: watts = raw / 1000")   # what it changed, kept
+        self.assertEqual(self.refused("takeover", "t")[0], 3)        # used up
+        self.assertIn("Only when I say", run_wb("coding"))           # the slider never moved
+        self.start("t2", "ok")                                       # nor does the next task get it
+        wait_phase("t2", {"review"})
+        self.assertEqual(self.refused("takeover", "t2")[0], 3)
+        self.assertEqual(self.refused("coding", "used", "t2", "--did", "x")[0], 1)
+
     def test_only_when_i_say_keeps_the_work_local_but_the_users_hand_back_still_works(self):
         run_wb("coding", "only")
         self.start("t", "ok")
