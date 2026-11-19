@@ -3293,9 +3293,11 @@ hidden files), `handovers` (fresh sessions). A `wb bench self` row (`bench.self_
 claude plugin marketplace add a-schaefers/claudes-workbench
 claude plugin install workbench@workbench
 ~/.claude/plugins/marketplaces/workbench/bin/wb setup
-wb doctor
 ```
-The plugin install copies only `mod/` (the marketplace entry's `source`) into Claude Code's plugin
+then `/workbench` in Claude Code, inside a project: the first time, the skill walks the first run
+in order (`wb setup`'s checklist, `wb scout` and `wb model add`, `wb optimize`, `wb try`, its
+review and accept, the savings line; #113). `wb setup` ends with the `first run:` checklist, so
+the quickstart no longer runs `wb doctor` itself. The plugin install copies only `mod/` (the marketplace entry's `source`) into Claude Code's plugin
 cache, but `marketplace add` keeps a full clone of the repo under
 `~/.claude/plugins/marketplaces/<the marketplace's name>` (`installLocation` in
 `known_marketplaces.json`; elsewhere under `CLAUDE_CODE_PLUGIN_CACHE_DIR`). `wb setup` links `wb`

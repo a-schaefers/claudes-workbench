@@ -109,41 +109,38 @@ Whatever your machine, Claude picks models that fit it, and checks again as new 
 Images are optional: Claude offers to set up a local image model the first time a project needs a
 picture ([Images](ARCHITECTURE.md#images)).
 
-### Install
+### In your terminal
 
 ```sh
 claude plugin marketplace add a-schaefers/claudes-workbench
 claude plugin install workbench@workbench
 ~/.claude/plugins/marketplaces/workbench/bin/wb setup   # puts wb on your PATH and /workbench in your skills
-wb doctor
 ```
 
-Workbench tells you when there's an update; `/workbench-update` installs it (or
-`wb update` in a terminal). Your state and skills stay as they are. Working on
-Workbench itself? Install from a clone instead ([Installing](ARCHITECTURE.md#installing)).
+`wb setup` ends with a short checklist of what's still missing; Claude takes care of it next.
+Workbench tells you when there's an update; `/workbench-update` installs it. Working on Workbench
+itself? Install from a clone instead ([Installing](ARCHITECTURE.md#installing)).
 
-### Use it
-
-Open Claude Code in your project and type:
+### In Claude Code, inside your project
 
 ```
 /workbench
 ```
 
-The **Workbench** pane opens: workbench mode is on. Now use Claude like normal. Ask for what you
-want in your own words, as often as you like; Claude just hands the coding to your local GPU
-from now on, until you type `/workbench-quit`. (`/workbench add a high-score screen` turns it on
-and starts on that in one go.)
+The first time, Claude does the rest: it checks your setup and your hardware, recommends local
+models that fit it and sets up the ones you pick (it asks before installing or downloading
+anything), measures them on your GPU, and proves it all on a tiny sample task. Then ask for what
+you want in your own words, as often as you like: the **Workbench** pane opens, and Claude hands
+the coding to your local GPU until you type `/workbench-quit`. (`/workbench add a high-score
+screen` turns it on and starts on that in one go.)
 
-Claude takes it from there:
+Each time you ask:
 
-1. The first time, it checks your hardware and your local models. If you have none, or better ones would fit your
-   GPU, it recommends them and offers to set them up (it always asks before downloading).
-2. It plans the work and splits it into small pieces a local model can finish.
-3. It decides how hard each piece is and hands it to the right local model: chores (a rename, a
+1. Claude plans the work and splits it into small pieces a local model can finish.
+2. It decides how hard each piece is and hands it to the right local model: chores (a rename, a
    config tweak, a small test) to a small fast one, real work (features, refactors, tricky bugs)
    to the strongest one your GPU runs. Then it watches the agent work.
-4. It reviews every change, sends it back with notes until it's right, and only then commits it.
+3. It reviews every change, sends it back with notes until it's right, and only then commits it.
 
 The pane shows the agents working live. You talk to the driver, Claude,
 on the left; Claude talks to the local agent, which does the work on the right:
