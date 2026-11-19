@@ -206,6 +206,9 @@ def _reader(stream, q):
     q.put(None)
 
 
+EXIT_GRACE = 30  # seconds OpenCode has to exit once its output closes; past that, it's stopped
+
+
 def _stop(proc: subprocess.Popen):
     try:
         os.killpg(proc.pid, signal.SIGTERM)
@@ -599,7 +602,17 @@ def run_round(task: store.Task, n: int, keep: bool = False) -> dict:
             out["interrupted"] = True
             _stop(proc)
             break
-    out["exit"] = proc.wait()
+    # Its output closed: it exits now. One hung in its shutdown held the task and the GPU lease
+    # for good (the 2026-11-18 audit, #83), so the silence limit still holds, at most EXIT_GRACE.
+    grace = min(EXIT_GRACE, silence)
+    try:
+        out["exit"] = proc.wait(timeout=grace)
+    except subprocess.TimeoutExpired:
+        log.write(f"workbench: opencode closed its output but was still running {grace:.0f}s "
+                  "later: stopped\n")
+        log.flush()
+        _stop(proc)
+        out["exit"] = proc.wait()
     log.close()
     ask_mcp.close(task, opened)  # its server is gone: closed, so nothing takes them for open
     if task.status.get("asking") or task.status.get("phase") == "asking":  # it ended

@@ -244,6 +244,18 @@ class Lifecycle(Base):
         wait_phase("t-bg", {"review"})
         self.assertTrue(wait_gone(int(pidfile.read_text())))
 
+    def test_an_agent_that_closes_its_output_and_lingers_is_stopped(self):
+        # #83 (the 2026-11-18 audit): EOF left the watchdog loop for an unbounded wait, so an
+        # OpenCode hung in its shutdown held the task and the GPU lease for good
+        os.environ["FAKE_LINGER"] = "1"
+        began = time.time()
+        self.start("t-linger", "ok", "--silence-timeout", "2")
+        st = wait_phase("t-linger", {"review"})
+        self.assertLess(time.time() - began, 30)
+        self.assertIn("closed its output but was still running 2s later: stopped",
+                      (store.Task("t-linger").dir / "runner.log").read_text())
+        self.assertNotIn("stuck", st["phase"])
+
     def test_failing_tests_go_back_to_the_agent_without_claude(self):
         self.start("t-fix", "fix", "--test", TEST_CMD)
         st = wait_phase("t-fix", {"review"})
