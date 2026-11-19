@@ -85,27 +85,27 @@ clearly been through several audits, and most edges probed there were already ha
 - **Fix:** record the pending transition and resume it on retry. Accept must notice a step that
   never started.
 
-**6. The base check runs in the agent's own worktree.** Codex; source.
+**6. ~~The base check runs in the agent's own worktree.~~** **Fixed (#192).** Codex; source.
 - `base_check` runs the acceptance command in `task.worktree` before round 1 (`runner.py:784`,
   `runner.py:1168`). Whatever it writes stays for the agent: a build stamp, generated fixtures,
   updated snapshots.
 - That can make a later test pass that shouldn't, and the files show up in the review diff.
 - **Fix:** run the base check in a disposable checkout, as `wb verify` already does.
 
-**7. `wb verify` calls a setup error a "proven" regression.** Codex; reproduced.
+**7. ~~`wb verify` calls a setup error a "proven" regression.~~** **Fixed (#193).** Codex; reproduced.
 - `ASSERTION` (`verify.py:29`) matches `expected`, so `SyntaxError: expected ':'` counts as an
   assertion. `verdict(1, "SyntaxError: expected ':'", 0)` returns `proven` here.
 - A failed-test header also qualifies without any assertion (`verify.py:54`, `verify.py:92`).
 - **Fix:** syntax, import, collection and fixture errors are inconclusive. "Proven" needs an
   assertion line or a failure signature the caller supplies.
 
-**8. `wb verify` breaks on a renamed test.** Codex; source.
+**8. ~~`wb verify` breaks on a renamed test.~~** **Fixed (#194).** Codex; source.
 - `test_files` uses `--no-renames` (`verify.py:46`), so a renamed test lists both names. The base
   overlay then runs `git checkout <tree> -- <deleted name>` (`verify.py:79`), which stops on a
   pathspec error before any test runs.
 - **Fix:** build the overlay from name-status, skipping deletions and handling renames.
 
-**9. A stream of unrecognized events defeats the round's time limits.** Codex; source.
+**9. ~~A stream of unrecognized events defeats the round's time limits.~~** **Fixed (#195).** Codex; source.
 - In `run_round`, an unparsable line, a JSON line that isn't an object, or an event `normalize`
   drops all `continue` before the wall-clock, silence, think and steer checks (`runner.py:475`,
   `runner.py:496`, `runner.py:549`).
@@ -121,7 +121,7 @@ clearly been through several audits, and most edges probed there were already ha
 - **Fix:** take the target server's lease before probing, and make an automatically due run skip
   a busy remote server.
 
-**11. Tests run in `/bin/sh`, the agent in bash.** Claude; source.
+**11. ~~Tests run in `/bin/sh`, the agent in bash.~~** **Fixed (#196).** Claude; source.
 - `run_in_lane` runs `/bin/sh -c` (`runner.py:719`), and `verify.py` and `bench.py` go through
   it. The agent's OpenCode shell is bash or `$SHELL`.
 - On Debian and Ubuntu `/bin/sh` is dash: `source .venv/bin/activate && pytest`, `[[ ]]` and

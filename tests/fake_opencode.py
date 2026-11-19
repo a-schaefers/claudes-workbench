@@ -130,6 +130,10 @@ elif scenario == "loop":
     finish()
 elif scenario == "hang":
     time.sleep(3600)
+elif scenario == "chatter":  # a newer OpenCode's progress event, unknown here, ten times a second
+    for _ in range(600):
+        print(json.dumps({"type": "progress", "timestamp": t(), "sessionID": session}), flush=True)
+        time.sleep(0.1)
 elif scenario == "toolhang":
     tool("bash", {"command": "make check"})
     time.sleep(3600)

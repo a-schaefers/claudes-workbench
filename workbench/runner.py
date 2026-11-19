@@ -15,6 +15,7 @@ import queue
 import re
 import select
 import shlex
+import shutil
 import signal
 import subprocess
 import sys
@@ -316,6 +317,15 @@ def outside_spec(task: store.Task, files: str) -> list[str]:
     return [p for p in paths if p not in spec and Path(p).name not in spec]
 
 
+def _event(line: str) -> list[dict]:
+    """[the JSON object on this line of OpenCode's output], or [] for anything else."""
+    try:
+        raw = json.loads(line) if line else None
+    except json.JSONDecodeError:
+        return []
+    return [raw] if isinstance(raw, dict) else []
+
+
 def _clock(secs: float) -> str:
     return f"{int(secs // 60)}m{int(secs % 60):02d}s"
 
@@ -483,12 +493,12 @@ def run_round(task: store.Task, n: int, keep: bool = False) -> dict:
         clock.step(mono, asking)
         if line:
             clock.seen, heard = mono, True
-            try:
-                raw = json.loads(line)
-            except json.JSONDecodeError:
-                continue
-            if not isinstance(raw, dict):  # a stray number or list on stdout isn't an event
-                continue
+        # The line's event, when it is one (0 or 1 of them): a line that isn't (a stray print, a
+        # number or list) or an event normalize drops skips only this body, never the clocks and
+        # the steer check below. Those `continue`d past them, and a stream of unknown progress
+        # events ran past the round's limit, ignored `wb steer --now` and held the GPU lease
+        # (#195, the 2026-11-19 audit).
+        for raw in _event(line):
             if raw.get("type") == "background_wait":
                 waiting_bg = True
             if raw.get("sessionID") and not task.status.get("session"):
@@ -710,13 +720,29 @@ class _Power(threading.Thread):
         self.done.set()
 
 
+# Shells OpenCode won't run a command in (it takes $SHELL, else bash): not POSIX `-c` shells
+NOT_POSIX = {"fish", "nu", "xonsh", "elvish", "pwsh", "powershell", "tcsh", "csh"}
+
+
+def test_shell() -> str:
+    """The shell the agent's commands run in, so the tests run in it too: OpenCode 2.3 runs each
+    command as `$SHELL -c`, or bash's when SHELL is unset (tests/RealOpenCode checks it). The
+    runner used /bin/sh, which is dash on Debian and Ubuntu: `source .venv/bin/activate &&
+    pytest` passed for the agent and failed for the runner, and each false failure cost an
+    auto-fix round (#196, the 2026-11-19 audit)."""
+    sh = os.environ.get("SHELL") or ""
+    if os.path.isabs(sh) and os.access(sh, os.X_OK) and Path(sh).name not in NOT_POSIX:
+        return sh
+    return shutil.which("bash") or "/bin/sh"
+
+
 def run_in_lane(task: store.Task, cmd: str, limit: int) -> tuple[int | str, str]:
     """Run `cmd` in the task's worktree, in the agent's lane and with its environment; the
     exit code ("timeout" past `limit` seconds, "output limit" past TEST_OUTPUT_CAP bytes) and the
     decoded output (its head and tail when long)."""
-    # in the agent's lane and with its environment: the tests run the agent's code, and must
-    # pass or fail as they did when the agent ran them
-    argv = lane.wrap(context.writable(task), ["/bin/sh", "-c", cmd], context.readable(task),
+    # in the agent's lane, environment and shell: the tests run the agent's code, and must pass
+    # or fail as they did when the agent ran them
+    argv = lane.wrap(context.writable(task), [test_shell(), "-c", cmd], context.readable(task),
                      context.unix_paths(task))
     proc = subprocess.Popen(argv, cwd=task.worktree, stdout=subprocess.PIPE,
                             stderr=subprocess.STDOUT, env=agent_env(task),
@@ -769,7 +795,8 @@ def run_tests(task: store.Task, n: int):
     task.set_status(phase="testing", last=f"tests: {cmd}")
     limit = int(task.spec.get("test_timeout") or 900)
     code, output = run_in_lane(task, cmd, limit)
-    task.round_dir(n).joinpath("tests.txt").write_text(f"$ {cmd}\nexit: {code}\n\n{output}")
+    task.round_dir(n).joinpath("tests.txt").write_text(
+        f"$ {cmd}\nexit: {code}\nshell: {test_shell()}\n\n{output}")
     result = {"ok": code == 0, "exit": code, "tail": clip_tail(output, 40), "round": n}
     task.event({"ts": store.now(), "round": n, "kind": "tests", "ok": result["ok"],
                 "text": f"exit {code}"})
@@ -784,13 +811,18 @@ BASE_CHECK_SECS = 120
 def base_check(task: store.Task) -> dict | None:
     """The acceptance command run once on the base, before the agent starts: it should fail, and
     only for what the step changes, which Claude checks from the tail (the runner can't tell).
-    Passing already, it can't tell when the step is done."""
+    Passing already, it can't tell when the step is done. In a scratch checkout of the base, not
+    the task's worktree: what it wrote there (a build stamp, a fixture, an updated snapshot)
+    stayed for the agent, could make a later test pass, and showed in the review diff (#192,
+    the 2026-11-19 audit)."""
     cmd = task.spec.get("test_cmd")
     if not cmd:
         return None
     limit = min(BASE_CHECK_SECS, int(task.spec.get("test_timeout") or 900))
-    code, output = run_in_lane(task, cmd, limit)
-    task.dir.joinpath("base-tests.txt").write_text(f"$ {cmd}\nexit: {code}\n\n{output}")
+    from . import verify  # verify imports this module
+    code, output = verify.on_base(task, cmd, limit)
+    task.dir.joinpath("base-tests.txt").write_text(
+        f"$ {cmd}\nexit: {code}\nshell: {test_shell()}\n\n{output}")
     return {"ok": code == 0, "exit": code, "tail": clip_tail(output, 8, total=1500), "limit": limit}
 
 

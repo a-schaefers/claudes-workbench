@@ -532,6 +532,12 @@ clears `asking`. A stdout line that is JSON but not an object is skipped, not a 
 The prompt goes after `--`: OpenCode 2.3 reads a message that starts with `-` (a spec opening with
 a bullet or front matter) as a flag, prints its usage and exits (the 2026-11-16 audit).
 
+Every pass of the round's loop runs the clocks, the guards and the steer check, whatever the
+line was: only the event handling is skipped for a line that isn't an event (`_event`: stray
+output, a number or list) or one `normalize` drops. Those once `continue`d past them, and a
+stream of a newer OpenCode's unknown progress events ran past `--round-timeout`, ignored `wb
+steer --now` and held the GPU lease (#195, the 2026-11-19 audit).
+
 The guards' clocks (`_Clock`) run on `time.monotonic()`, which a suspend doesn't advance and NTP
 never steps (on the wall clock a laptop shut for 20 minutes woke to a round stopped for silence:
 the 2026-11-16 audit); a loop pass longer than `FROZEN_SECS` (60 s, against its 5 s wait) means
@@ -649,7 +655,7 @@ characters), the files changed so far, and a NOTE naming changed files the spec 
 (`outside_spec`: a changed path or its basename that the step's prompt doesn't contain; silent
 when the spec names none of them).
 
-**Tests** (`run_tests`, through `run_in_lane`): `/bin/sh -c` in the worktree, inside the agent's
+**Tests** (`run_tests`, through `run_in_lane`): `<shell> -c` in the worktree, inside the agent's
 lane with the agent's environment (`agent_env`: the git shim, credentials dropped), its own process
 group, timeout `test_timeout` (`wb start --test-timeout`, 900 s). While it runs it is the runner's
 `CURRENT` process, so a stop takes its group down too. Its output is read as it comes
@@ -660,11 +666,20 @@ Only its first `KEEP_HEAD` (64 KB) and last `KEEP_TAIL` (256 KB) are kept, with 
 output cut ...]` line between, decoded. `status.tests` is `{ok, exit, tail, round}`, the tail
 `clip_tail(output, 40)`: the last 40 lines, each cut to 300 characters, the whole to 4000 (one
 multi-megabyte line once went whole into status.json and the notice). `rounds/<n>/tests.txt`
-holds `$ cmd`, `exit: N` and the kept output.
+holds `$ cmd`, `exit: N`, `shell: <path>` and the kept output. The shell (`test_shell`) is the
+agent's: OpenCode 2.3 runs each command as `$SHELL -c`, or bash's when SHELL is unset (checked
+by hand against 2.3; a `$SHELL` that isn't a `-c` shell, `NOT_POSIX` (fish, nu, …), or isn't an
+executable absolute path gives bash, else `/bin/sh`). It was `/bin/sh`, dash on Debian and
+Ubuntu: `source .venv/bin/activate && pytest` passed for the agent and failed for the runner,
+each false failure an auto-fix round (#196, the 2026-11-19 audit).
 
 **The base check** (`_base_check`, `base_check`, before round 1 and the GPU): the acceptance
-command once on the untouched base, the same way, at most `min(BASE_CHECK_SECS (120 s),
---test-timeout)`. The output goes to `base-tests.txt`, the result to status `base_check` `{ok,
+command once on the untouched base, the same way but in a scratch checkout of the base
+(`verify.on_base`: a `--shared` clone under the state directory, in the task's lane), at most
+`min(BASE_CHECK_SECS (120 s), --test-timeout)`. It ran in the task's worktree, and what it wrote
+there (a build stamp, a fixture, an updated snapshot) stayed for the agent, could make a later
+test pass, and showed in the review diff (#192, the 2026-11-19 audit). The output goes to
+`base-tests.txt` (as tests.txt, with its shell), the result to status `base_check` `{ok,
 exit, tail (clip_tail: 8 lines, 1500 characters), limit}`, and `base_check_line` words it for the
 report (*The round report*, below): a note when it already passes (the usual case when the agent
 writes the step's tests: only those can fail it, so Claude checks the diff adds tests that fail
@@ -2535,12 +2550,15 @@ delegating or with a task open. A shell edit isn't seen: the block says the rule
 
 ## Verifying a fix against the base
 
-`wb verify <task> [--test CMD] [--files PATH…] [--timeout N]` (`workbench/verify.py`, #96) runs
+`wb verify <task> [--test CMD] [--files PATH…] [--expect TEXT] [--timeout N]` (`workbench/verify.py`, #96) runs
 one regression test twice, at review, each run in its own scratch checkout under the state
 directory and in the task's own lane and environment (`runner.run_in_lane` on a `verify._At`):
 - **The base**: a `--shared` clone checked out at the task's base, with the candidate's test files
-  copied in (`--files`, else the changed files whose path looks like a test, `TEST_PATH`). That
-  copy is what makes a test separable from the change; with no test file it refuses.
+  copied in (`--files`, else the changed files whose path looks like a test, `TEST_PATH`, as
+  they are in the candidate: a deleted one, such as a renamed test's old name, is left out, and
+  each path goes to git `:(literal)`; the old name once stopped git on its pathspec before either
+  run, #194). That copy is what makes a test separable from the change; with no test file it
+  refuses.
 - **The candidate**: the same clone at the worktree's HEAD, then `read-tree -u` of a snapshot of
   the worktree (`gitops.snapshot`), new files included.
 
@@ -2548,11 +2566,17 @@ Neither run touches the user's checkout or the worktree under review. The verdic
 `proven` (the base fails on an assertion and the candidate passes), `base-passes` (the test
 doesn't show the bug), `candidate-fails`, or `inconclusive`: a run timed out or overran its
 output, or the base failed without an assertion. A missing module or a command not found says
-nothing about the bug, so it can never count as proof. `assertion` picks the line that says what
-a failed assertion found (`AssertionError`, pytest's `E assert`, `Expected`, jest's `expect(`),
-else a failed test's header. Each run is kept in `tasks/<task>/verify/<n>/`: `base.txt`,
+nothing about the bug, so it can never count as proof. Proof is positive evidence only: with
+`--expect TEXT`, that text in the base's output; else an assertion line (`ASSERTION`:
+`AssertionError`, pytest's `E assert`, a line opening `Expected`, an "expected … but/got/
+received/to be" phrase, jest's `expect(`, a Go `panic:`); else a failed test's header, unless a
+setup error (`SETUP`: a syntax, import or module error, pytest's collection errors, a fixture
+not found, a failed build or compile) says the tests never ran. A bare "expected" once matched
+Python's `SyntaxError: expected ':'`, and a base that never ran an assertion was called proven
+(#193, the 2026-11-19 audit). `assertion` picks the line the report shows: the first assertion
+line, else a failed test's header. Each run is kept in `tasks/<task>/verify/<n>/`: `base.txt`,
 `candidate.txt` and `result.json` `{cmd, files, tree, ts, base: {exit, assertion}, candidate:
-{exit, assertion}, verdict, dir}`. `verify.last` reads the newest, with `stale` once the worktree
+{exit, assertion}, verdict, dir, expect (when given)}`. `verify.last` reads the newest, with `stale` once the worktree
 has changed since.
 
 The comparison reaches the review (#97): `wb report <task>` (the latest round's) ends with the
@@ -3253,7 +3277,7 @@ delivered as taken (`_stale_notes`, *Notes*).
 | `wb coding [only\|ask\|decide]` | `allow <task> --edit "…" --said "…" [--when "…"]`, `used <task> --did "…"` | When Claude may write a delegated task's code (*Claude coding*): with no argument, the choice and its sentence, then each open task's unspent allowance; a mode saves it. `allow` records the user's yes for one task's edit, until the task goes back to the agent; with `--when`, a one-task exception granted ahead, spent only once Claude has started on it. `used` records what Claude changed under it and says to hand the testing back; exit 1 with none. |
 | `wb shot <task>` | `--capture CMD` (required), `--viewport WxH` (1280x800), `--files PATH…`, `--timeout N` (300), `--chat` (post the pair to the web chat) | At review, for a visual task: the project's capture command run on the base and on the candidate, each in a scratch checkout under the task's lane; where each PNG is, or why a side has none (*Screenshots of the base and the candidate*). |
 | `wb takeover [<task> \| --all]` | `--repo DIR`, `--session ID`, `--user` | Stops the runner, phase `review`, "Claude took over"; Claude edits in the worktree and accepts, or hands back with feedback. Outside "Let Claude decide" it needs the user's recorded yes for the task, else exit 3; `--user` (the mod's hand-back command) is the user's own ask, and records one (*Claude coding*). `--all`: every task that isn't closed. `--session ID` (repeatable) and `--repo DIR`, with `--all` (the mod passes every session id its process has had and its directory): only that session's tasks (`_scope`): one with a task.json `session` when it is one of the IDs, wherever it ran, or when its `claude_pid` is gone and DIR claims it as below; else (no `session`, or no `--session` given) when its `repo` is DIR, inside it or holds it, or its `cwd` is DIR or inside it, by whole components, never when DIR is the home directory or `/`; one with no key at all: every session's. The rest are listed as `left alone (other sessions'): …`. |
-| `wb verify <task>` | `--test CMD` (the task's `--test`), `--files PATH…`, `--timeout N` (300) | At review: a regression test on the base (with the candidate's test files) and on the candidate, each in a scratch checkout under the task's lane; the verdict, each run's exit and assertion, and where both outputs are (*Verifying a fix against the base*). Refuses while the agent runs. |
+| `wb verify <task>` | `--test CMD` (the task's `--test`), `--files PATH…`, `--expect TEXT` (the failure the base must print to be proven), `--timeout N` (300) | At review: a regression test on the base (with the candidate's test files) and on the candidate, each in a scratch checkout under the task's lane; the verdict, each run's exit and assertion, and where both outputs are (*Verifying a fix against the base*). Refuses while the agent runs. |
 | `wb stop [<task> \| --all]` | `--repo DIR`, `--session ID` | A live task only. Marks status `stopping`, SIGTERM the runner (15 s, `wait_exit`, then SIGKILL to its session and the agent's), sweeps what the agent left (`runner.sweep`), phase `stuck`, "stopped by the reviewer", and acknowledges the task; the worktree is kept. `--all` (`stop_everything`): every open task, a `stopped` event "bail out: stopped by the user"; without `--repo`/`--session`, the bench's driver first (`bench.stop_driver`), so it starts no replay. `--session ID`, `--repo DIR` (with `--all`): as for takeover, the rest listed as `left running (other sessions'): …`. |
 | `wb resume <task>` | | Reaps a dead runner first. Phase stuck/failed (a task whose runner died is failed), no live runner: a fresh session (round n+1, `runner.RESUME` + what the step's rounds asked), not a review round; Claude's notes the last runner never delivered follow, as a `NOTE_HEAD` note. A note names the GPU's holders when it will wait for them. Acks the task and gathers lessons. |
 | `wb accept <task> -m "…"` | `--merge`, `--force` (any open phase; stops a live runner), `--spec-gap`, `--take-claude-md` (the agent's `<name>.proposed` CLAUDE.md/AGENTS.md over the file; without it they are dropped: *Claude's files*) | Reaps a dead runner first. Phase review; refuses a closed task, unless an earlier accept or discard closed it without writing its results row (status `unrecorded`): then it writes that row, once, from what the earlier run measured, and says so (`_finish_record`, #88). A live task with nothing changed on its first step is refused before its runner is stopped ("no changes to accept yet"); a live task whose commit then fails is left `stuck` ("accept failed: …", for wb accept again, resume, feedback or discard), not live with no runner. Records the step, commits (a worktree with no new changes accepts the branch's commits past the base: earlier steps, or Claude's own after a takeover; a retry after an accept died past its commit takes that commit) (`<m>` + "Delegated to <label> via OpenCode: R round(s), F automatic test-fix, V review round(s)." + `Workbench-Task:` + `OpenCode-Session:`; no AI co-author line), removes the worktree (a failure is a warning: `remove_worktree`) and the agent's runtime directory (`drop_runtime_dir`), `--merge`s (`merge --no-ff --no-edit --commit --no-squash` into `base_branch`, which the main checkout must have out, else a branch holding the base; never a detached HEAD; no changes to tracked files, no merge under way, no untracked or ignored file where the branch adds one (#189); a conflict, or a merge git left unfinished, is backed out (#190); a failure is reported and the accept stands), writes the results row, prints how far CLAUDE.md (or `.claude/CLAUDE.md`) is behind (a failure there never fails the accept) and what the task cost Claude (`claude:`, when known). Gathers lessons. |

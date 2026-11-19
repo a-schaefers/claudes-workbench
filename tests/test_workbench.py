@@ -184,6 +184,47 @@ class Lifecycle(Base):
         self.assertIn("check the tail shows it failing only for what the step changes", report)
         self.assertIn("on the base the acceptance command fails", run_wb("wait", "t-base", "--timeout", "1"))
 
+    def test_what_the_base_check_writes_never_reaches_the_agents_worktree(self):
+        # #192 (the 2026-11-19 audit): the base check ran in the task's worktree, and a stamp it
+        # wrote made the same failing command pass after the agent's unrelated edit
+        cmd = "test -f build.stamp || { touch build.stamp; exit 1; }"
+        self.start("t-stamp", "ok", "--test", cmd, "--auto-fix", "0", "--no-self-review")
+        st = wait_phase("t-stamp", {"review"})
+        self.assertIs(st["base_check"]["ok"], False)
+        self.assertIs(st["tests"]["ok"], False)                   # it still fails for the agent
+        files = gitops.changed(store.Task("t-stamp").worktree)
+        self.assertIn("answer.txt", files)
+        self.assertIn("build.stamp", files)                       # this round's own, not the base's
+        self.assertIn("shell: ", (store.Task("t-stamp").dir / "base-tests.txt").read_text())
+
+    def test_the_tests_run_in_the_agents_shell(self):
+        # #196 (the 2026-11-19 audit): the runner ran them in /bin/sh (dash on Debian and Ubuntu),
+        # the agent in $SHELL, so `source venv/bin/activate && pytest` passed for one, not the other
+        shell = Path(self.tmp.name) / "myshell"
+        shell.write_text(f"#!/bin/sh\necho RAN-IN-MYSHELL\nexec /bin/sh \"$@\"\n")
+        shell.chmod(0o755)
+        os.environ["SHELL"] = str(shell)
+        self.assertEqual(runner.test_shell(), str(shell))
+        self.start("t-sh", "ok", "--test", "true", "--auto-fix", "0", "--no-self-review",
+                   "--no-base-check")
+        wait_phase("t-sh", {"review"})
+        tests = (store.Task("t-sh").round_dir(1) / "tests.txt").read_text()
+        self.assertIn("RAN-IN-MYSHELL", tests)
+        self.assertIn(f"shell: {shell}", tests)
+        os.environ["SHELL"] = "/usr/bin/fish"                     # not a -c shell OpenCode takes
+        self.assertEqual(runner.test_shell(), shutil.which("bash") or "/bin/sh")
+        del os.environ["SHELL"]
+        self.assertEqual(runner.test_shell(), shutil.which("bash") or "/bin/sh")
+
+    def test_unknown_events_never_hold_a_round_past_its_limit(self):
+        # #195 (the 2026-11-19 audit): a line that wasn't a known event `continue`d past the
+        # round's clocks, so a stream of them ran on past --round-timeout and held the GPU
+        began = time.time()
+        self.start("t-chat", "chatter", "--round-timeout", "2")
+        st = wait_phase("t-chat", {"stuck"}, timeout=30)
+        self.assertLess(time.time() - began, 30)
+        self.assertIn("limit", st["last"])
+
     def test_the_pane_says_the_base_check_runs_not_that_the_task_waits_for_the_gpu(self):
         # the 0.90 review: queued, it read "Waiting for the GPU…" on an idle GPU
         self.start("t-basenow", "ok")
@@ -4748,6 +4789,45 @@ class Verify(Base):
             "    def test_kw(self):\n        self.assertEqual(kw(250000), 250)\n")
         self.assertIn("the candidate fails it",
                       run_wb("verify", "t", "--test", "python3 -m unittest tests.test_calc"))
+
+    def test_only_an_assertion_or_the_named_failure_proves_a_regression(self):
+        # #193 (the 2026-11-19 audit): Python's `SyntaxError: expected ':'` matched "expected", and
+        # a base that never ran an assertion was called proven
+        from workbench import verify
+        self.assertEqual(verify.verdict(1, "  def f()\n         ^\nSyntaxError: expected ':'", 0),
+                         "inconclusive")
+        self.assertEqual(verify.verdict(1, "ModuleNotFoundError: No module named 'units'", 0),
+                         "inconclusive")
+        self.assertEqual(verify.verdict(1, "FAIL\texample.com/x [build failed]", 0), "inconclusive")
+        self.assertEqual(verify.verdict(1, "--- FAIL: TestKw (0.00s)\n    kw_test.go:9: expected 250, got 250000", 0),
+                         "proven")                                          # the positive control
+        self.assertEqual(verify.verdict(1, "E       assert 250000 == 250", 0), "proven")
+        out = run_wb("verify", "t", "--test", "python3 -m unittest tests.test_calc",
+                     "--expect", "250000 != 250")
+        self.assertIn("proven", out)
+        out = run_wb("verify", "t", "--test", "python3 -m unittest tests.test_calc",
+                     "--expect", "a failure it never prints")
+        self.assertIn("inconclusive", out)
+
+    def test_a_renamed_test_is_checked_under_its_new_name(self):
+        # #194 (the 2026-11-19 audit): the old name was listed too, the overlay asked the
+        # candidate for it, and git stopped on the pathspec before either run
+        g = lambda *a: subprocess.run(["git", "-C", str(self.repo), *a], check=True)  # noqa
+        (self.repo / "tests").mkdir()
+        (self.repo / "tests" / "__init__.py").write_text("")
+        (self.repo / "tests" / "test_old.py").write_text("import unittest\n")
+        g("add", "-A")
+        g("commit", "-qm", "an old test")
+        self.start("t-mv", "ok", "--queue")
+        wait_phase("t-mv", {"review"})
+        wt = store.Task("t-mv").worktree
+        subprocess.run(["git", "-C", str(wt), "mv", "tests/test_old.py", "tests/test_new.py"], check=True)
+        (wt / "tests" / "test_new.py").write_text(
+            "import unittest\nfrom calc import kw\n\n\nclass T(unittest.TestCase):\n"
+            "    def test_kw(self):\n        self.assertEqual(kw(250000), 250)\n")
+        (wt / "calc.py").write_text("def kw(watts):\n    return watts / 1000\n")
+        out = run_wb("verify", "t-mv", "--test", "python3 -m unittest tests.test_new")
+        self.assertIn("(tests/test_new.py): proven", out)
 
     def test_the_review_shows_the_comparison_and_accept_flags_one_that_proves_nothing(self):
         # #97: the base's failure and the candidate's pass, in the review, before acceptance

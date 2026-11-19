@@ -154,7 +154,7 @@ Runs on Linux, WSL2 and macOS; the launchers refuse native Windows and Python be
    GPU's holders leave its model no room (`--queue` waits behind them), makes branch
    `delegate/<task>` in a fresh worktree, writes round 1's prompt (the spec plus `PROTOCOL`),
    spawns the runner and returns at once. The runner runs `--test` once on the untouched base
-   first (the base check; the first report says what).
+   first, in a scratch clone (the base check; the first report says what).
 2. The runner takes the GPU (`GpuLease`: shared beside other tasks when the models fit, else
    alone), makes the model resident (again before every round), and runs `opencode run
    --standalone --auto --format json … -- <prompt>` in
@@ -167,7 +167,7 @@ Runs on Linux, WSL2 and macOS; the launchers refuse native Windows and Python be
    it that stalls again is stopped. Limits stretch for a model
    measured slow (`router.budgets`, written into task.json at start). `wb steer` queues a note;
    `--now` interrupts.
-4. After a clean round the runner runs `--test`, in the agent's lane and environment; failures go back to the agent up to `--auto-fix`
+4. After a clean round the runner runs `--test`, in the agent's lane, environment and shell; failures go back to the agent up to `--auto-fix`
    times without waking Claude (`--test-timeout`, 900 s). A session that reaches the handover point (`fresh_at`, tuned per
    model) after changing a file, with room left for a successor, is stopped mid-round and a fresh
    session gets the task, the diff and its last words; between rounds, a session over the point

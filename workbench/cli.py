@@ -1340,7 +1340,7 @@ def cmd_verify(a):
     if not cmd:
         die("name the regression test's command: --test '<cmd>'")
     try:
-        r = verify.run(task, cmd, a.files, a.timeout)
+        r = verify.run(task, cmd, a.files, a.timeout, a.expect or "")
     except (RuntimeError, gitops.GitError) as e:
         die(str(e))
     print("\n".join(verify.lines(r)))
@@ -3149,6 +3149,8 @@ def parser() -> argparse.ArgumentParser:
                    "task's --test)")
     s.add_argument("--files", nargs="+", metavar="PATH", help="the test's files, copied from the "
                    "candidate onto the base (default: the changed files that look like tests)")
+    s.add_argument("--expect", metavar="TEXT", help="the failure the base must print to be "
+                   "proven (an assertion's message); without it, any assertion line")
     s.add_argument("--timeout", type=int, default=verify.LIMIT, help="seconds for each run (300)")
     s.set_defaults(f=cmd_verify)
     s = sub.add_parser("shot", help="capture the same interaction on the base and the candidate "
