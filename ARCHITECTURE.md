@@ -409,7 +409,17 @@ stood), so a big session's handoff is compared with writing it in the same big s
 reads `cost ~3K more`); `totals(rows, since)` adds them up, with the energy's `cost` at the
 user's electricity price (`price()`, from `$WB_SAVINGS`, else `~/.config/workbench/savings.json`
 `{"kwh_price": …}`; `set_price` writes it). The fit's mean error is 19%, single tasks −36% to
-+48%, so it is always called an estimate.
++48%, so it is always called an estimate. A discarded task saved nothing: its row (with
+`claude`, no `diff` needed) gives `self_est` 0 and `saved` −claude, and reads `claude: 21K ·
+discarded, nothing saved · GPU 12 Wh`; `totals` counts it too.
+
+The inputs come from the task. The energy: while OpenCode runs a round, the runner's `_Power`
+thread samples `hardware.gpu_power_w()` every `POWER_EVERY` (10) s and adds the watt-hours to
+status `gpu_wh` (not for a remote model: `CURRENT["remote"]`, set in `drive`; a None reading adds
+nothing; the tests after the round aren't counted). It is the whole GPU's draw, so tasks sharing
+the GPU each count all of it. The size: `gitops.footprint` gives `files`, `lines` (added) and
+`removed`; each step records them (`results.step`), and an accepted task's row sums them as
+`diff`.
 
 ## The runner, inside
 
@@ -3006,6 +3016,7 @@ check-ins off), not `wb start`'s.
 | `base_check` | `{ok, exit, tail, limit}` of the acceptance command run once on the base, in the lane (`runner.base_check`; `exit` is `"timeout"` past `limit`); the runner, before round 1, only with `--test` and without `--no-base-check` |
 | `stopping` | wb is stopping the runner (`cli._stop_runner`); cleared by `spawn_runner` and the runner's exit |
 | `tools`, `tok_in`, `tok_out` | task-wide tool calls and tokens (input without cache reads) |
+| `gpu_wh` | the GPU energy its rounds used so far, in Wh (the runner's `_Power`; absent for a remote model or no reading) |
 | `session`, `sessions`, `session_mark`, `session_floor` | the OpenCode session; earlier ones; `gitops.mark` when it began; the context it had read at its first change |
 | `context` | a one-round instruction: `fresh`, `keep`, `full` (a handover happened) |
 | `full_pct`, `handovers` | the fill at the last mid-round handover; how many |
@@ -3036,10 +3047,11 @@ questions `ask {id}`, `answer {id}`. From `wb`:
 (every step's), `spec_rounds`, `tests_ok`, `minutes` (wall clock since `wb start`, queueing and
 review included), `tok_in`, `tok_out`, `skills_offered`, `skills_loaded`, `skills_rev`, `steps`
 (one `results.step` per step), `window`, `tuned`, `explored`, `tuned_max`, `spec_gaps`, `claude`
-(when known: `spend.usage`, `{turns, input, cache_write_5m, cache_write_1h, cache_read, output}`,
-*What a task cost Claude*), `trial` (when set); `commit` and `merged` on accept, `reason` on
+(when known: `spend.usage`, `{turns, calls, input, cache_write_5m, cache_write_1h, cache_read,
+output}`, *What a task cost Claude*), `gpu_wh` (status's, when measured), `diff` (accepted only:
+`{files, added, removed}` summed over the steps; *What a task saved*), `trial` (when set); `commit` and `merged` on accept, `reason` on
 discard. A step (`results.step`): `files`,
-`lines` (added, against HEAD, new files included), `window`, `landed`, `compacted` (its last
+`lines` (added, against HEAD, new files included), `removed`, `window`, `landed`, `compacted` (its last
 session, or one a handover replaced: a `fresh` event's `compacted`), `handovers` (fresh sessions
 with overflow), `read_full`, `reviews`, `spec_rounds`, `stuck`, `took_over`.
 

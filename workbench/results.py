@@ -42,6 +42,7 @@ def record(task: store.Task, outcome: str, last_step: dict | None = None, **extr
         return {}
     earlier = st.get("step_sizes") or []
     reviews = sum(s.get("reviews") or 0 for s in earlier) + st.get("reviews", 0)  # every step's
+    steps = earlier + ([last_step] if last_step else [])
     row = {"ts": store.now(), "task": task.name, "outcome": outcome, "model": spec.get("model"),
            "size": spec.get("size"), "repo": spec.get("repo"), "stack": spec.get("stack"),
            "rounds": st.get("round", 1),
@@ -53,12 +54,17 @@ def record(task: store.Task, outcome: str, last_step: dict | None = None, **extr
            "tok_in": st.get("tok_in", 0), "tok_out": st.get("tok_out", 0),
            "skills_offered": st.get("skills_ever") or [], "skills_loaded": skills.loaded(task),
            "skills_rev": st.get("skills_rev") or {},  # the version handed: judges each edit
-           "steps": earlier + ([last_step] if last_step else []),
+           "steps": steps,
            "window": st.get("window"),
            "tuned": st.get("tuned") or {}, "explored": st.get("explored") or [],  # tuning.py
            "tuned_max": st.get("tuned_max") or {},
            "spec_gaps": [g["text"] for g in st.get("spec_gaps") or []],
            **({"claude": u} if (u := spend.usage(task)) else {}),  # what it cost Claude
+           **({"gpu_wh": st["gpu_wh"]} if "gpu_wh" in st else {}),  # the runner's GPU energy
+           **({"diff": {"files": sum(s.get("files", 0) for s in steps),  # what savings.py prices
+                        "added": sum(s.get("lines", 0) for s in steps),
+                        "removed": sum(s.get("removed", 0) for s in steps)}}
+              if outcome == "accepted" else {}),
            **({"trial": True} if spec.get("trial") else {}), **extra}
     store.append_jsonl(store.home() / "results.jsonl", row)
     return row
