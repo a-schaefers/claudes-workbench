@@ -48,6 +48,7 @@ UNACKED_MS = 45_000     # a stream whose writes go unacknowledged this long is d
 RELOAD_EVERY = 10       # seconds between looks at the server's own code
 PUSH_DELAY = 10         # seconds news waits for an open page to show it before a push goes
 PUSH_WINDOW = 900       # only news this recent is pushed, never a backlog
+PUSH_RETRY = 30         # seconds before a device whose push failed for now is tried again
 # macOS's App Store and standalone Tailscale apps keep the CLI in the bundle, off PATH
 TAILSCALE_APP = "/Applications/Tailscale.app/Contents/MacOS/Tailscale"
 STATIC = Path(__file__).parent / "chat_static"
@@ -178,7 +179,8 @@ def week_saved() -> dict:
 # ---- notifications: web push with no payload (webpush.py) ----
 # The page reports what it showed while visible (/api/seen); news no page showed within
 # PUSH_DELAY gets one push to every subscribed device, whose service worker then fetches the state
-# and shows the newest open ask, else Claude's latest message. seen.jsonl: {id, ts, by: page|push}.
+# and shows the newest open ask, else Claude's latest message. seen.jsonl: {id, ts, by: page|push,
+# endpoint (push: the device that took it)}.
 
 _keys: dict[str, str] = {}
 
@@ -192,7 +194,22 @@ def push_key() -> str:
 
 
 def _seen() -> set:
-    return {r.get("id") for r in store.read_jsonl(chat_dir() / "seen.jsonl")[0]}
+    """Ids no push is owed for: shown on a page (or pushed before pushes were counted per device)."""
+    return {r.get("id") for r in store.read_jsonl(chat_dir() / "seen.jsonl")[0] if not r.get("endpoint")}
+
+
+def _pushed() -> dict[str, set]:
+    """Each id's devices (endpoints) that took its push."""
+    out: dict[str, set] = {}
+    for r in store.read_jsonl(chat_dir() / "seen.jsonl")[0]:
+        if r.get("endpoint"):
+            out.setdefault(r.get("id"), set()).add(r["endpoint"])
+    return out
+
+
+def _transient(status: int) -> bool:
+    """A push that may go through if tried again: not reached, rate-limited, the service's fault."""
+    return status == 0 or status == 429 or status >= 500
 
 
 def mark_seen(ids, by: str) -> None:
@@ -213,18 +230,42 @@ def news(now: float | None = None) -> list[str]:
 
 
 class Pusher:
-    """Sends the pushes: woken by the hub, and every PUSH_DELAY/2 so news ripens on time."""
+    """Sends the pushes: woken by the hub, and every PUSH_DELAY/2 so news ripens on time. Each
+    device is counted on its own: every due push was marked sent whatever the services said, so a
+    phone whose service was down for seconds missed a permission prompt (the 2026-11-18 audit,
+    #86). One that failed for now is tried again after PUSH_RETRY, within PUSH_WINDOW."""
 
     def __init__(self, hub: "Hub", send=None):
-        self.hub, self.send = hub, send or (lambda: webpush.push_all(webpush.private_key(token_path())))
+        self.hub = hub
+        self.send = send or (lambda eps: webpush.push_all(webpush.private_key(token_path()), eps))
+        self.retry_at: dict[str, float] = {}  # endpoint: when a failed one may be tried again
 
     def tick(self, now: float | None = None) -> list[str]:
+        """The ids pushed now, to at least one device."""
+        now = now or store.now()
         due = news(now)
-        if due and webpush.subscriptions():
-            self.send()
-            mark_seen(due, "push")
-            return due
-        return []
+        subs = [x["endpoint"] for x in webpush.subscriptions()]
+        if not due or not subs:
+            return []
+        pushed = _pushed()
+        due = [i for i in due if any(e not in pushed.get(i, ()) for e in subs)]  # owed to a device
+        owed = [e for e in subs if self.retry_at.get(e, 0) <= now
+                and any(e not in pushed.get(i, ()) for i in due)]
+        if not owed:
+            return []
+        got = self.send(owed) or {}
+        took = False
+        for e in owed:
+            if _transient(got.get(e, 0)):
+                self.retry_at[e] = now + PUSH_RETRY
+                continue
+            self.retry_at.pop(e, None)  # delivered, or refused for good (gone: unsubscribed)
+            took = True
+            for i in due:
+                if e not in pushed.get(i, ()):
+                    store.append_jsonl(chat_dir() / "seen.jsonl",
+                                       {"id": i, "ts": store.now(), "by": "push", "endpoint": e})
+        return due if took else []
 
     def run(self) -> None:
         seen = -1

@@ -2387,8 +2387,9 @@ VPN), `"hosts": ["chat.example.org"]` a name a tunnel or proxy sends.
 - `prefs.json`: `{away: "ask"|"allow"}` (anything else reads as `ask`), from the gear menu
   (`/api/prefs`), read by `chat.ask` (`allow` answers a new permission at once, by `setting`).
 - `push.json`: `{subs: [{endpoint, ts, ua}]}`, the devices with notifications on (the last 20,
-  `MAX_SUBS`), locked by `push.lock`; `seen.jsonl`: `{id, ts, by: "page"|"push"}`, each message or
-  ask id once, what a page showed on screen or a push announced; `push-test.json`: `{ts}`, the
+  `MAX_SUBS`), locked by `push.lock`; `seen.jsonl`: `{id, ts, by: "page"|"push", endpoint?}`: what a
+  page showed on screen (each id once), or a push one device took (`endpoint`, each id once per
+  device; a push row without one, from before, counts for every device); `push-test.json`: `{ts}`, the
   last test push. The VAPID key is beside the token (`<token file>-push`, mode 600, made on first
   use).
 
@@ -2540,9 +2541,13 @@ each write: WebKit drops a put over an entry a reloaded page wrote) and shows th
 dialog, else Claude's latest message (or "Notifications work" for a test), tagged `wb-chat`; a
 tap focuses the chat or opens it. Which news is pushed: a visible page posts what it showed to
 `/api/seen`; the server's `Pusher` thread (woken by each change, and every `PUSH_DELAY`/2) sends
-one push to every device for Claude's messages and open dialogs that no page showed within
+one push to each device still owed Claude's messages and open dialogs that no page showed within
 `PUSH_DELAY` 10 s and that are under `PUSH_WINDOW` 15 min old (never a backlog), and marks them
-`push`; a device the service says is gone (404, 410) is dropped. Checked live: Chromium's push
+`push` for each device that took it. A device its service failed for now (not reached, 429, 5xx:
+`_transient`) is tried again after `PUSH_RETRY` (30 s) while the news is in the window: every
+due push was marked sent whatever the services said, and a phone whose service was down for
+seconds missed a permission prompt (#86). A device the service says is gone (404, 410) is
+dropped; another refusal is not retried. Checked live: Chromium's push
 service is `jmt17.google.com` (Chrome's `fcm.googleapis.com`), and a reply reached the worker as
 a notification with its text (2026-11-18).
 
