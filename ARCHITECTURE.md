@@ -2327,7 +2327,9 @@ VPN), `"hosts": ["chat.example.org"]` a name a tunnel or proxy sends.
   a web message (until the user types in the terminal again) Claude also tells the user there
   when something they asked for finishes or needs them.
 - **Claude Code's dialogs** (the user, 2026-11-18: the terminal's dialog waited for nobody). While
-  the user is away (a web message within 6 h, none typed in the terminal since), the listening
+  the user is away (a web message within 6 h, or since then while one of this session's
+  `--backlog` tasks is open: a night's batch outlasts six hours, #110; none typed in the terminal
+  since), the listening
   session's mod puts them on the page as cards (`kind`):
   - `permission`: the tool and what it would run, with Deny and Allow. A deny tells Claude to ask
     the user in the chat what to do instead, with their words when they gave any.
@@ -2574,8 +2576,8 @@ const bound to one; imports from the module's own files also pass). The helpers 
 
 **State.** Five `$.state` atoms survive a module reload within a session; each has a shape tag,
 and an atom read under an old tag is absent, so change the tag when its type changes:
-`tasks` (`tasks-3`, WbTask[]: name, phase, round, model, label, tests, last, createdAt,
-updatedAt, tokens, recent, repo, cwd, session), `live` (`live-1`, {task, lines: {s, t}[]}: the transcript lines),
+`tasks` (`tasks-4`, WbTask[]: name, phase, round, model, label, tests, last, createdAt,
+updatedAt, tokens, recent, repo, cwd, session, claude_pid, backlog), `live` (`live-1`, {task, lines: {s, t}[]}: the transcript lines),
 `chat` (`chat-2`, {key, delegating, webAt, url}: workbench mode lives here, plus the session's
 listener key), `sessions` (`sessions-1`, string[]: every Claude Code session id this process
 has had, `mem.ids` while loaded), `savings` (`savings-1`, string: the pane's saving line, '' for
@@ -2698,7 +2700,8 @@ skill, not a mod command.
 conversation's first message and after a compaction or `/clear`, not every turn):
 `workbench-mode` while delegating (MODE_NOTE: the mode lasts until a quit, follow the skill,
 every plan is a handoff plan, the SKILL.md path); `user-notes` while delegating and notes.md has
-notes; `web-chat` for six hours after a web message, until a prompt is typed in the terminal
+notes; `web-chat` for six hours after a web message (longer while a backlog task of this
+session's is open: `awayNow`), until a prompt is typed in the terminal
 (reply with `wb chat reply`, `wb chat log` shows the thread); `workbench-wake` with the `wake`
 setting off, while delegating or with a task of this session's open (WAKE_OFF_NOTE: no wake will
 come; tell the user, pick it up when asked); `workbench` whenever `wb status` with `scope()`
@@ -2741,7 +2744,8 @@ prompt (`how=queued`); `wb chat ack <id> --by <key> --how …` once it entered (
 gets no receipt and is tried again a minute later), `webAt = now`, a toast. Dialogs
 (`classic.PermissionRequest`; the terminal shows its dialog meanwhile, and the hook's answer
 settles it): unless a settings hook already decided, or the session isn't delegating with
-`webAt` within AWAY_MS (6 h; a prompt typed in the terminal sets it to 0), `askOnChat` runs `wb
+`webAt` within AWAY_MS (6 h; a prompt typed in the terminal sets it to 0) or this session with a
+backlog task open (`awayNow`), `askOnChat` runs `wb
 chat ask --tool <t> --kind <KIND[tool], else permission> --text <a permission's: the input's
 command, file_path, url, path or pattern, else its JSON, cut at 1500>` (`--detail` with a
 question's `{questions}` or a plan's `{plan}` when the input has one). It prints `<id> <state>`:
@@ -3405,7 +3409,7 @@ push: every change is a pull request that merges once `check` is green and it is
 - **`wb watch --json`** (a style, the order, the activity wording) → the mod's `LINE_STYLE`, its
   pose regex, the `live-1` tag; `--last` and `JSON_LINE_CHARS` with the mod's `KEEP_LINES` and
   `LINE_CHARS`.
-- **A `$.state` atom's type** in the mod → its tag (`tasks-3`, `live-1`, `chat-2`, `sessions-1`, `savings-1`).
+- **A `$.state` atom's type** in the mod → its tag (`tasks-4`, `live-1`, `chat-2`, `sessions-1`, `savings-1`).
 - **`savings.totals`' keys** → the mod's `savedLine` and the chat page's `drawSaved`, which read them.
 - **Which session a task is** (task.json `session`, else `cwd`/`repo`) → the mod's `mine` and
   `cli._scope` (`--session`, `--repo`): the same rule, the home-or-`/` exception included, and

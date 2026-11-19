@@ -1,5 +1,5 @@
 import { expect, mock, test } from 'claude-code/testing'
-import { savedLine, wrapWords } from './register.js'
+import { awayNow, savedLine, wrapWords } from './register.js'
 
 const PANE = {
   plugin: 'workbench',
@@ -1272,4 +1272,20 @@ test('the saving reads in thousands or millions, says when it cost more, and is 
   expect(savedLine(t({ saved: -4000 }))).toBe('this week: cost ~4K more Claude tokens (estimate)')
   expect(savedLine(t({ tasks: 0 }))).toBe('')
   expect(savedLine('usage: wb …')).toBe('')
+})
+
+test('a night\'s backlog keeps the user away past six hours; without one, away lapses', () => {
+  // #110 (2026-11-18): away lapsed after 6 h, and an overnight batch's permission prompts then
+  // waited in the terminal until morning
+  const t0 = 1_800_000_000_000, hour = 3600_000
+  const night = (phase: string, backlog = 'night-1') => ({ name: 'n', phase, backlog } as any)
+  const ours = () => true
+  expect(awayNow(t0, t0 + 5 * hour, [], ours)).toBe(true)                          // within six hours
+  expect(awayNow(t0, t0 + 7 * hour, [], ours)).toBe(false)                         // lapsed
+  expect(awayNow(t0, t0 + 7 * hour, [night('running')], ours)).toBe(true)          // the batch runs on
+  expect(awayNow(t0, t0 + 7 * hour, [night('review')], ours)).toBe(true)           // or waits on Claude
+  expect(awayNow(t0, t0 + 7 * hour, [night('accepted')], ours)).toBe(false)        // done: lapsed
+  expect(awayNow(t0, t0 + 7 * hour, [night('running', '')], ours)).toBe(false)     // not a backlog task
+  expect(awayNow(t0, t0 + 7 * hour, [night('running')], () => false)).toBe(false)  // another session's
+  expect(awayNow(0, t0, [night('running')], ours)).toBe(false)                     // never wrote from the web
 })

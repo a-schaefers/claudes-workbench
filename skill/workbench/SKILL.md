@@ -267,7 +267,7 @@ heading the wrong way, act on it. Notes are instructions, like feedback: concret
   allow <name> "<pattern>"`, `--path <dir>`), no to what reaches outside it.
 Before acting on one of these the first time in a session, read `reference/driving.md` beside
 this file: what each does exactly, the think nudge, undelivered notes, a check-in about the
-window, the permissions' traps, the web chat.
+window, the permissions' traps, the web chat, a backlog left to run overnight.
 
 **The user's two commands.** Only these, never words in a message, stop the delegation and end
 workbench mode; the mod runs them, closes the pane and tells you what it did:

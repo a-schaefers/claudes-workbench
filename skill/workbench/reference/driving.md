@@ -1,4 +1,4 @@
-# Driving a task: steering, permissions, directories, the web, the web chat
+# Driving a task: steering, permissions, directories, the web, the web chat, overnight
 
 Read from the /workbench skill when you steer, stop, take over or resume a task, answer a
 check-in, when an agent asks for a command or a directory, a spec needs web research, or a
@@ -106,6 +106,22 @@ is going, and steer only if it is drifting. Say what you see, including "slow bu
 Each check-in is a turn that re-reads your context, so answer it in that one turn: no `wb log`
 unless the digest shows trouble, and a `wb note <name> --text "…"` (it shows in `wb watch` and
 the pane) only for something the user should find later.
+
+## Overnight: a backlog left to run
+When the user hands you a batch to run while they're away (a night's work, a list of issues),
+run it as a backlog. Each task still gets the same review it would by day.
+- Spec everything up front, before the first start, while you have the user's intent fresh.
+  Bundle trivial items into one task. When the user names GitHub issues, read each one (`gh issue
+  view`) and spec from it.
+- Start each with `wb start … --queue --backlog <name>`. They take the GPU in the order you
+  started them, and a task you send back goes ahead of the rest.
+- Review each wake as usual: accept, feedback, or discard. Accept without `--merge`: nothing
+  reaches the user's branches unattended. Leave a hard call for the morning (`wb note`) rather
+  than guessing.
+- The user stays away while a backlog task of this session's is open, so permission prompts
+  keep going to the web chat (*The web chat*).
+- When the batch is done, run `wb backlog <name>` and post it with `wb chat reply`: each task's
+  outcome and branch, and the batch's saving. That is the morning summary.
 
 ## The agent's context and handovers
 Rounds of a task continue one OpenCode session, so the agent keeps what it read.
