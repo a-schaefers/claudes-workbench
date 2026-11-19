@@ -406,6 +406,11 @@ tests): it made about `SELF_CALLS` 4.9 + lines changed / `SELF_LINES_PER_CALL` 6
 about `SELF_OUT_PER_LINE` 36 output tokens per line changed. Each of those calls is priced at what
 this task's own calls cost per call less their output (`per_call`: the session's context, as it
 stood), so a big session's handoff is compared with writing it in the same big session.
+Checked on 2026-11-19 against five new runs, one per bench case (`wb bench self`, fresh
+`claude -p` sessions; lines changed from each run's `diff.patch`, calls counted by message): mean
+error 19% again, −32% to +21%, low on four of the five, so it understates the saving. A refit of
+the three constants on those five fit them better (15%) but missed each one left out by 32% on
+average, so the constants stand until there are more runs to fit (#120).
 `estimate_self(lines, per_call)` is that sum, weighted; `of_row(row)` needs the results row's
 `claude` (with `calls`) and `diff`, and gives `{claude, self_est, saved, wh}`; `line(row)` reads
 `claude: 56K · writing it yourself: ~59K (estimate) · saved ~3K · GPU 41 Wh` (a negative saving

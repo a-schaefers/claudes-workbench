@@ -134,5 +134,30 @@ stronger local model shifts every number above in your favour, and local models 
 You see the result on your own tasks. `wb accept` prints what each one cost Claude beside an
 estimate of Claude writing it, and the GPU energy it used. `wb savings` adds up the week (or
 `--month`, `--all`), and the Workbench pane and the web chat's settings show the same total. The
-estimate is fitted from the paired runs above, so treat any single task as within about half
-either way, and a week of tasks as the better guide.
+estimate is fitted from eight paired runs on 2026-11-17, and five new runs on 2026-11-19 missed it
+by 19% on average (−32% to +21%), mostly low. Treat any single task as within about half either
+way, and a week of tasks as the better guide.
+
+Claude writing the same tasks again on 2026-11-19, each in a fresh session (`wb bench self`):
+replay files 178K, score combos 160K, the date range 90K, the high score 83K. The significant ones
+are close to the table above; the small ones cost more from a fresh session than warm.
+
+## Add your own evidence
+
+Four tasks on one machine is a demonstration. More machines, models and projects make it
+evidence, and each of these runs on yours, with nothing sent anywhere:
+
+1. **Share your totals.** `wb savings --share` (`--month`, `--all`) prints a summary to paste:
+   your OS and GPU, how many local models and their sizes, the tasks, Claude's tokens against the
+   estimate, by task size, and the GPU energy. It names no model, repo or task. Paste it into a
+   [new issue](https://github.com/a-schaefers/claudes-workbench/issues/new) titled
+   "Evidence:" and your GPU.
+2. **Make a bench case** from a task you accepted that added tests: `wb bench add <task>`. Its
+   tests become hidden checks the agent never sees.
+3. **Replay it** on your models with `wb bench run`, and **have Claude write it** with
+   `wb bench self <case> --yes`, graded by the same hidden checks. That one spends Claude tokens,
+   which is why it asks for `--yes`.
+4. **Paste `wb bench report`** into the same issue: pass rates per model, and Claude writing each
+   case against what handing it off cost, where that was measured.
+
+The estimate gets refitted from what people send.
