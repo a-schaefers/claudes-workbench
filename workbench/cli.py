@@ -633,22 +633,26 @@ def cmd_next(a):
         + nxt.rstrip()
         + PROTOCOL.format(branch=spec["branch"], test_line=test_line(test), budget=budget),
         encoding="utf-8")
+    handled = store.now()
+    advance = dict(round=n, steps=step + 1, step_round=n, reviews=0,
+                   step_sizes=(st.get("step_sizes") or []) + [measured],
+                   context="fresh" if a.fresh else None,
+                   auto_fixes_total=st.get("auto_fixes_total", 0) + st.get("auto_fixes", 0),
+                   auto_fixes=0, phase="queued", last=f"step {step} committed; next step queued",
+                   **({} if handed is None else dict(
+                       skills=handed, skills_ever=_union(st.get("skills_ever"), handed),
+                       skills_rev={**(st.get("skills_rev") or {}), **skills.revs(handed)})))
+    # The slow part first, the step's whole advance then in one status write right before the
+    # runner: fresh_reason exports the session (up to 30 s), and a task queued with no runner
+    # that long was reaped as dead (the 0.90 review); written before it, the counters moved
+    # while the phase stayed review, and an interrupt there left step 2 sent to no runner, a
+    # retry dying on "nothing to commit" and accept closing the task on step 1 (#191, the
+    # 2026-11-19 audit). Interrupted before the write, a retry advances from the step's commit.
+    why = runner.fresh_reason(task, {**task.status, **advance})
+    gpu = _gpu_note(task)
+    task.set_status(**advance)
     task.event({"ts": store.now(), "round": n, "kind": "next_step",
                 "text": f"step {step} committed as {commit}; next step sent"})
-    if handed is not None:
-        task.set_status(skills=handed, skills_ever=_union(st.get("skills_ever"), handed),
-                        skills_rev={**(st.get("skills_rev") or {}), **skills.revs(handed)})
-    handled = store.now()
-    task.set_status(round=n, steps=step + 1, step_round=n, reviews=0,
-                    step_sizes=(st.get("step_sizes") or []) + [measured],
-                    context="fresh" if a.fresh else None,
-                    auto_fixes_total=st.get("auto_fixes_total", 0) + st.get("auto_fixes", 0),
-                    auto_fixes=0)
-    # before the task looks live: fresh_reason exports the session (up to 30 s), and a task
-    # queued with no runner that long was reaped as dead under wb next (the 0.90 review)
-    why = runner.fresh_reason(task)
-    gpu = _gpu_note(task)
-    task.set_status(phase="queued", last=f"step {step} committed; next step queued")
     spawn_runner(task)
     _ack_all(task, upto=handled)
     print(f"step {step} of {a.name} committed as {commit}; step {step + 1} sent "

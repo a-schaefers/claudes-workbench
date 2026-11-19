@@ -911,6 +911,61 @@ class Lifecycle(Base):
         self.assertIn("detached HEAD", err.getvalue())
         self.assertEqual(self.branch("main"), self.branch("feature"))  # neither merged
 
+    def test_an_ignored_file_in_the_checkout_survives_an_accept_merge(self):
+        # #189 (the 2026-11-19 audit): the task un-ignored settings.ini and committed a default,
+        # and accept --merge replaced the user's own copy (git's merge overwrites ignored files)
+        g = lambda *a: subprocess.run(["git", "-C", str(self.repo), *a], check=True,  # noqa
+                                      capture_output=True, text=True).stdout.strip()
+        (self.repo / ".gitignore").write_text("settings.ini\n")
+        g("add", ".gitignore")
+        g("commit", "-qm", "ignore settings")
+        (self.repo / "settings.ini").write_text("PERSONAL\n")
+        before = g("rev-parse", "main")
+        self.start("t-ign", "ok")
+        wait_phase("t-ign", {"review"})
+        wt = store.Task("t-ign").worktree
+        (wt / ".gitignore").write_text("")
+        (wt / "settings.ini").write_text("DEFAULT\n")
+        err = io.StringIO()
+        with redirect_stderr(err):
+            out = run_wb("accept", "t-ign", "-m", "feat: default settings", "--merge")
+        self.assertIn("not merged", err.getvalue())
+        self.assertIn("settings.ini", err.getvalue())             # git names the file in the way
+        self.assertEqual((self.repo / "settings.ini").read_text(), "PERSONAL\n")
+        self.assertEqual(g("rev-parse", "main"), before)          # main untouched
+        self.assertEqual(g("show", "delegate/t-ign:settings.ini"), "DEFAULT")  # the work is kept
+        self.assertIn("merge with: git", out)
+        self.assertFalse(subprocess.run(["git", "-C", str(self.repo), "rev-parse", "-q", "--verify",
+                                         "MERGE_HEAD"], capture_output=True).returncode == 0)
+
+    def test_accept_merge_completes_the_merge_or_says_it_did_not(self):
+        # #190 (the 2026-11-19 audit): with branch.main.mergeOptions=--no-commit, git left the
+        # merge pending, HEAD unmoved, and accept said merged
+        g = lambda *a, check=True: subprocess.run(["git", "-C", str(self.repo), *a], check=check,  # noqa
+                                                  capture_output=True, text=True)
+        g("config", "branch.main.mergeOptions", "--no-commit --squash")
+        self.start("t-nc", "ok")
+        self.start("t-mid", "ok", "--queue")
+        wait_phase("t-nc", {"review"})
+        wait_phase("t-mid", {"review"})
+        self.assertIn("merged into main", run_wb("accept", "t-nc", "-m", "feat: a", "--merge"))
+        self.assertEqual(g("merge-base", "--is-ancestor", "delegate/t-nc", "main", check=False)
+                         .returncode, 0)                            # really in main
+        self.assertNotEqual(g("rev-parse", "-q", "--verify", "MERGE_HEAD", check=False).returncode, 0)
+        # a merge of the user's own under way (nothing staged, so the checkout looks clean): wb
+        # refuses, and its --abort never throws the user's merge away
+        g("config", "--unset", "branch.main.mergeOptions")
+        g("switch", "-q", "-c", "theirs")
+        g("commit", "-q", "--allow-empty", "-m", "theirs")
+        g("switch", "-q", "main")
+        g("merge", "--no-ff", "--no-commit", "theirs")
+        theirs = g("rev-parse", "theirs").stdout.strip()
+        err = io.StringIO()
+        with redirect_stderr(err):
+            run_wb("accept", "t-mid", "-m", "feat: b", "--merge")
+        self.assertIn("middle of a merge", err.getvalue())
+        self.assertEqual(g("rev-parse", "MERGE_HEAD").stdout.strip(), theirs)
+
     def test_a_task_started_from_a_tag_or_a_commit_merges_into_a_branch_holding_its_base(self):
         # #87 (the 2026-11-18 audit): the tag was taken for the branch to merge into, so every
         # such merge was refused
@@ -1454,6 +1509,30 @@ class Context(Base):
         self.assertEqual(log.count("feat: the answer"), 1)
         self.assertIn("question.txt", self.runs()[1]["prompt"])
 
+    def test_a_wb_next_interrupted_while_it_reads_the_session_sends_the_step_once(self):
+        # #191 (the 2026-11-19 audit): the step's counters were written before the session export,
+        # so an interrupt there left step 2 "under review" with no runner, a retry died on
+        # "nothing to commit", and accept closed the task on step 1's commit
+        self.start("t-nx", "ok", "--test", TEST_CMD)
+        wait_phase("t-nx", {"review"})
+        spec = "Now also write the question to question.txt.\n"
+        with mock.patch.object(cli.runner, "fresh_reason", side_effect=KeyboardInterrupt), \
+                mock.patch("sys.stdin", io.StringIO(spec)), self.assertRaises(KeyboardInterrupt):
+            run_wb("next", "t-nx", "--spec", "-", "-m", "feat: the answer")
+        task = store.Task("t-nx")
+        self.assertEqual((task.status["phase"], task.status.get("steps", 1), task.status["round"]),
+                         ("review", 1, 1))                         # nothing advanced
+        with mock.patch("sys.stdin", io.StringIO(spec)):
+            self.assertIn("step 1 of t-nx committed",
+                          run_wb("next", "t-nx", "--spec", "-", "-m", "feat: the answer"))
+        st = wait_phase("t-nx", {"review"})
+        self.assertEqual((st["steps"], st["step_round"]), (2, 2))
+        self.assertEqual(len(self.runs()), 2)                      # step 2 ran, once
+        self.assertIn("question.txt", self.runs()[1]["prompt"])
+        log = subprocess.run(["git", "-C", str(self.repo), "log", "--format=%s", "delegate/t-nx"],
+                             capture_output=True, text=True).stdout.splitlines()
+        self.assertEqual(log.count("feat: the answer"), 1)
+
     def test_wb_next_is_not_reaped_while_it_reads_the_session(self):
         # it set phase queued, then exported the session (up to 30 s) before spawning the runner,
         # and a wb status meanwhile failed the task as dead (the 0.90 review)
@@ -1463,9 +1542,9 @@ class Context(Base):
         step2.write_text("Now also write the question to question.txt.\n")
         task, reaped = store.Task("t-nr"), []
         real = runner.fresh_reason
-        def slow_export(t):  # another wb reaping while the export runs
+        def slow_export(t, st=None):  # another wb reaping while the export runs
             reaped.append(cli.reap(t))
-            return real(t)
+            return real(t, st)
         with mock.patch.object(cli, "REAP_GRACE", 0), \
                 mock.patch.object(cli.runner, "fresh_reason", slow_export):
             run_wb("next", "t-nr", "--spec", str(step2), "-m", "feat: the answer")
