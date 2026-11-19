@@ -1227,8 +1227,7 @@ def cmd_accept(a):
     merged = None
     if a.merge:
         try:
-            merged = gitops.merge(repo, a.name, spec.get("base_branch") or spec.get("base_ref"),
-                                  spec["base"])
+            merged = gitops.merge(repo, a.name, _merge_into(spec, repo), spec["base"])
         except gitops.GitError as e:
             print(f"wb: not merged: {e}", file=sys.stderr)
     extra = {"commit": commit, "merged": bool(merged)}
@@ -1252,6 +1251,16 @@ def cmd_accept(a):
            f"\nmerge with: git -C {shlex.quote(str(repo))} merge --no-ff {spec['branch']}"))
     _say(savings.line(row) or spend.line(row.get("claude")))
     _say(lessons.nudge(task, "accepted"))
+
+
+def _merge_into(spec: dict, repo: Path) -> str | None:
+    """The branch wb accept --merge lands on: the one the task started from, or None (a tag or a
+    commit: any checked-out branch holding the base). The tag itself was passed for a branch
+    name, and every merge of a task started from one was refused (the 2026-11-18 audit, #87)."""
+    if "base_branch" in spec:
+        return spec["base_branch"]
+    ref = spec.get("base_ref") or "HEAD"  # a task from before base_branch was recorded
+    return ref if ref == "HEAD" else gitops.start_branch(repo, ref)
 
 
 def _finish_record(task: store.Task) -> bool:

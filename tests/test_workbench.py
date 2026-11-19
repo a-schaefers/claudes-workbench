@@ -901,6 +901,34 @@ class Lifecycle(Base):
         self.assertIn("detached HEAD", err.getvalue())
         self.assertEqual(self.branch("main"), self.branch("feature"))  # neither merged
 
+    def test_a_task_started_from_a_tag_or_a_commit_merges_into_a_branch_holding_its_base(self):
+        # #87 (the 2026-11-18 audit): the tag was taken for the branch to merge into, so every
+        # such merge was refused
+        g = lambda *a: subprocess.run(["git", "-C", str(self.repo), *a], check=True,  # noqa
+                                      capture_output=True, text=True).stdout.strip()
+        g("tag", "v1")
+        sha = g("rev-parse", "HEAD")
+        self.start("t-tag", "ok", "--base", "v1")
+        self.start("t-sha", "ok", "--base", sha, "--queue")
+        self.start("t-off", "ok", "--base", "v1", "--queue")
+        for name in ("t-tag", "t-sha", "t-off"):
+            wait_phase(name, {"review"})
+            self.assertIsNone(store.Task(name).spec["base_branch"])
+        self.assertIn("merged into main", run_wb("accept", "t-tag", "-m", "feat: a", "--merge"))
+        g("reset", "-q", "--hard", sha)  # the next one merges cleanly on the same base
+        self.assertIn("merged into main", run_wb("accept", "t-sha", "-m", "feat: b", "--merge"))
+        g("switch", "-q", "--orphan", "unrelated")
+        g("commit", "-q", "--allow-empty", "-m", "another history")
+        err = io.StringIO()
+        with redirect_stderr(err):
+            run_wb("accept", "t-off", "-m", "feat: c", "--merge")
+        self.assertIn("doesn't hold the task's base", err.getvalue())
+        # a record from before base_branch: a tag still merges, a local branch is still held to
+        spec = {"base_ref": "v1"}
+        self.assertIsNone(cli._merge_into(spec, self.repo))
+        self.assertEqual(cli._merge_into({"base_ref": "main"}, self.repo), "main")
+        self.assertEqual(cli._merge_into({}, self.repo), "HEAD")
+
     def test_a_tasks_worktree_is_not_a_repo_to_start_from(self):
         # the audit: --repo . from a taken-over worktree made it the new task's repo, removed
         # at the first task's accept
