@@ -141,7 +141,7 @@ dependencies. No packaging: it runs from the clone.
   Python 3.11; OpenCode `OPENCODE_VERSION`; `nightly.yml` on the newest Claude Code,
   plus macOS; `opencode.yml` on the newest OpenCode; README badges), `owner-merge.yml` (approves
   the owner's pull requests only), `rulesets/main.json`, dependabot for the actions' pins.
-- `scripts/`: `ship.sh` (the road to main), `github-settings.sh check|apply` (the repo's settings),
+- `scripts/`: `ship.sh` (the road to main), `github-settings.sh check|apply`,
   `install-opencode.sh` (CI's OpenCode, from its release, hash-checked).
 - `systemd/wb-chat.service`: keeps the web chat up. `docs/`: the README's images (a replaced image
   gets a new file name, for GitHub's cache).
