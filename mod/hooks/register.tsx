@@ -182,8 +182,10 @@ const speechOf = (focus: WbTask | undefined, doing: string, list: WbTask[], on: 
   }
   const n = focus.name
   switch (focus.phase) {
-    case 'review': return { pose: 'tada', say: `${n} is ready for review.`, more: 'Over to you, Claude.', color: 'success' }
-    case 'asking': return { pose: 'ask', say: `I asked Claude about ${n}.`, more: 'Waiting for the answer…', color: 'warning' }
+    // each handoff names who acts next: "done" read as tests passed, accepted or landed (#103)
+    case 'review': return { pose: 'tada', say: focus.tests === 'pass' ? `Local tests passed on ${n}.` : `${n} is done.`,
+      more: 'Claude reviews next.', color: 'success' }
+    case 'asking': return { pose: 'ask', say: `I asked Claude about ${n}.`, more: 'Claude answers next.', color: 'warning' }
     case 'stuck': return { pose: 'slump', say: `I'm stuck on ${n}.`, more: focus.last, color: 'error' }
     case 'failed': return { pose: 'slump', say: `${n} failed.`, more: focus.last, color: 'error' }
   }

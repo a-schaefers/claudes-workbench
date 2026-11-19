@@ -468,7 +468,7 @@ def clock_line(task: store.Task, now: float | None = None, data: dict | None = N
 
 PHASE_LINE = {
     "queued": ("sys", "■ waiting for the GPU"),
-    "review": ("ok", "■ done: waiting for Claude's review"),
+    "review": ("ok", "■ done: Claude reviews next"),
     "stuck": ("bad", "■ stuck: waiting for Claude"),
     "failed": ("bad", "■ failed: waiting for Claude"),
     "asking": ("claude", "■ waiting for Claude's answer"),

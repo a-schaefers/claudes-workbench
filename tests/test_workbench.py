@@ -1688,7 +1688,7 @@ class Watch(Base):
                      "⏺ Wrote 42.",                                   # its own words
                      "1.2k tokens in, read in 1.0s · 80 out in 2.0s · 40 tok/s",
                      "■ tests FAIL", "⎿  $ grep -qx 42 answer.txt", "round 2", "■ tests PASS",
-                     "waiting for Claude's review"):
+                     "■ done: Claude reviews next"):
             self.assertIn(want, out)
         lines = [json.loads(x) for x in run_wb("watch", "t-watch", "--json").splitlines()]
         clock = next(x["t"] for x in lines if x["s"] == "clock")

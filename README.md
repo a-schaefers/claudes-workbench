@@ -152,8 +152,7 @@ on the left; Claude talks to the local agent, which does the work on the right:
 
 Claude is the captain on the left: it keeps working with you while the local models it handed
 tasks to do the coding on the right. Here an agent has finished its fix and summed it up; its
-tests passed, so the task says **done: waiting for Claude's review**, and Claude is woken to read
-the diff.
+tests passed, so the task says **done: Claude reviews next**, and Claude is woken to read the diff.
 
 | Command | What it does |
 |---|---|
