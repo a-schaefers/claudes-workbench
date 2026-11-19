@@ -437,7 +437,7 @@ def run_round(task: store.Task, n: int, keep: bool = False) -> dict:
     threading.Thread(target=_reader, args=(proc.stdout, q), daemon=True).start()
     threading.Thread(target=_steer_bell, args=(task, proc, q), daemon=True).start()
     power = None
-    if not CURRENT.get("remote"):
+    if not CURRENT.get("remote") and not models._fake():  # the suite's fakes: the GPU isn't theirs
         power = _Power()
         power.start()
 

@@ -120,3 +120,27 @@ def line(row: dict) -> str | None:
     if wh is not None:
         mid += f" · GPU {wh:.0f} Wh"
     return f"claude: {k(est['claude'])} · writing it yourself: ~{k(est['self_est'])} (estimate){mid}"
+
+
+PERIODS = {"week": 7 * 86400, "month": 30 * 86400, "all": None}  # wb savings --week|--month|--all
+
+
+def energy(wh: float) -> str:
+    return f"{wh / 1000:.1f} kWh" if wh >= 1000 else f"{wh:.0f} Wh"
+
+
+def summary(t: dict, period: str) -> str:
+    """`wb savings`' one line over ``totals``: what the tasks cost Claude, the estimate of
+    writing them, the saving and its share of that estimate (the badge's score, #101), the
+    energy and what it cost."""
+    when = {"week": "the last 7 days", "month": "the last 30 days", "all": "all time"}[period]
+    if not t["tasks"]:
+        return (f"{when}: no task to compare yet (an accepted task needs its Claude usage and "
+                "its diff, recorded since 0.95)")
+    k = lambda n: f"{n / 1000:.0f}K"  # noqa: E731
+    saved = (f"saved ~{k(t['saved'])}" if t["saved"] >= 0 else f"cost ~{k(-t['saved'])} more")
+    pct = f" ({100 * t['saved'] / t['self_est']:.0f}%)" if t["self_est"] > 0 else ""
+    gpu = f" · GPU {energy(t['wh'])}" if t["wh"] else ""
+    cost = f" (${t['cost']:.2f})" if gpu and t["cost"] is not None else ""
+    return (f"{when}: {t['tasks']} task(s) · claude {k(t['claude'])} · writing it yourself "
+            f"~{k(t['self_est'])} (estimate) · {saved}{pct}{gpu}{cost}")
