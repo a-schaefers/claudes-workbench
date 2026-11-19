@@ -1379,3 +1379,29 @@ test('the Claude coding slider sits under the apprentice, saves through wb, and 
   expect(await phone.find({ type: 'Text', text: /Ask me first/ })).toBeDefined()
   await phone.unmount()
 })
+
+test('a one-task exception shows beside its task and is under way from Claude\'s first edit', async ($, on) => {
+  // #94: the next hand-back spends it once Claude has started on it
+  const clock = mock.clock(on, { now: 1_800_000_000_000 })
+  const ts = 1_800_000_000
+  const files: Record<string, string> = {
+    '/wb/coding.json': JSON.stringify({ mode: 'only' }),
+    '/wb/tasks/fix-it/task.json': JSON.stringify({ name: 'fix-it', model: 'm', created_at: ts }),
+    '/wb/tasks/fix-it/status.json': JSON.stringify({ phase: 'review', round: 2, updated_at: ts }),
+    '/wb/tasks/fix-it/coding.json': JSON.stringify({ allowed: [
+      { edit: 'divide by 1000', said: 'ok', when: 'the next try still shows kW as W', used: null }] }),
+  }
+  fakeTasks(on, files)
+  on('process.run', () => ({ value: { exitCode: 0, stdout: '', stderr: '' } }))
+  on('tool.call', () => ({ result: {}, text: '' }))
+  await $.session.start({ cwd: '/', surface: 'terminal', isInteractive: true })
+  await clock.advance(3000)
+  const ui = await $.ui.mount({ ...PANE, surface: 'terminal' })
+  const said = (await ui.findAll({ type: 'Text' })).map(t => t.text.trim()).join(' ')
+  expect(said).toContain('Claude may, once, if the next try still shows kW as W: divide by 1000')  // whole, wrapped
+  await ui.unmount()
+  const r = await $.tool.call({ tool: 'Edit', file_path: '/wb/tasks/fix-it/worktree/power.py', old_string: 'w', new_string: 'w / 1000' } as any) as any
+  expect(r.deny).toBeUndefined()
+  expect(JSON.parse(files['/wb/tasks/fix-it/coding.json']).allowed[0].started).toBe(1_800_000_003)
+  await clock.advance(1000)                                        // the poll the call started settles
+})

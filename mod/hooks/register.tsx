@@ -82,7 +82,7 @@ const OLDEST_WAKE_MS = 60 * 60 * 1000 // never wake for a notification older tha
 
 // Change the tag when WbTask's fields change: a reload declines what the earlier shape stored.
 const tasks = atom({ plugin: 'workbench', key: 'tasks' } as const, [] as WbTask[], {
-  shape: 'tasks-4',
+  shape: 'tasks-5',
 })
 
 // Every Claude Code session id this process has had (`$.session.id()`): /clear and a resume go on
@@ -358,11 +358,20 @@ async function codingRefusal($: any, path: string): Promise<string> {
   if (!task) return ''
   const mode = await codingMode($)
   if (mode === 'decide') return ''
+  const file = `${mem.root}/tasks/${task}/coding.json`
   let allowed: Row[] = []
   try {
-    allowed = JSON.parse(await $.fs.read(`${mem.root}/tasks/${task}/coding.json`)).allowed || []
+    allowed = JSON.parse(await $.fs.read(file)).allowed || []
   } catch {}
-  if (allowed.some(x => !x.used)) return ''
+  const open = allowed.find(x => !x.used)
+  if (open) {
+    // a one-task exception (#94) is under way from its first edit: the next hand-back spends it
+    if (open.when && !open.started) {
+      open.started = (await $.clock.now()) / 1000
+      await $.fs.write(file, JSON.stringify({ allowed })).catch(() => {})
+    }
+    return ''
+  }
   return `workbench: not edited: ${task} is the local agent's. ${CODING_RULES[mode]}`
 }
 // Tasks of another session are listed as left alone: theirs to stop or finish.
@@ -576,11 +585,20 @@ async function scan($: any, root: string, now: number): Promise<WbTask[]> {
       repo: String(sp.repo ?? ''), cwd: String(sp.cwd ?? ''), session: String(sp.session ?? ''),
       claude_pid: Number(sp.claude_pid ?? 0),
       backlog: String(sp.backlog ?? ''),
+      allowed: allowedLine((await readJson($, `${base}/coding.json`)).allowed),
     })
   }
   for (const name of mem.gone) if (!names.has(name)) mem.gone.delete(name) // removed by hand
 
   return list.sort((a, b) => a.createdAt - b.createdAt)
+}
+
+// The user's unspent allowance for a task (`wb coding allow`), for its line in the pane: what
+// Claude may edit, and when, for a one-task exception (#94); '' for none
+export function allowedLine(rows: unknown): string {
+  const x = Array.isArray(rows) ? rows.find((r: Row) => r && !r.used) : undefined
+  if (!x) return ''
+  return x.when ? `Claude may, once, if ${x.when}: ${x.edit}` : `Claude may: ${x.edit}`
 }
 
 async function scoutIfDue($: any, now: number): Promise<void> {
@@ -1539,6 +1557,7 @@ export const register: Register = (on, options) => {
             {recentOf(t).map(line => (
               <Text dimColor>  {clip(line, cols - 2)}</Text>
             ))}
+            {t.allowed && wrapWords(t.allowed, cols - 2).map(l => <Text color="claude">  {l}</Text>)}
             {t.name !== watched.task && t.recent.length === 0 && (
               <Text dimColor>  {clip(t.last, cols - 2)}</Text>
             )}

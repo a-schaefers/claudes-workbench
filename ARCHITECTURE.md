@@ -2348,9 +2348,18 @@ keeps it; without one it is `decide`:
   agent stays stuck, reports the blocker and keeps the work. The user says when; Claude records
   their words the same way.
 
-An allowance (`tasks/<task>/coding.json` `{allowed: [{edit, said, ts, used}]}`, a `coding` event)
-lasts until the work goes back to the agent: `spawn_runner` (feedback, next, resume) marks it
-`used`, so a retried or resumed task remembers it, and the next edit needs the user again. Two
+An allowance (`tasks/<task>/coding.json` `{allowed: [{edit, said, ts, used, when?, started?,
+did?}]}`, a `coding` event) lasts until the work goes back to the agent: `spawn_runner`
+(feedback, next, resume) marks it `used`, so a retried or resumed task remembers it, and the next
+edit needs the user again. A **one-task exception** (#94) is one the user grants ahead, with a
+condition: `wb coding allow <task> --edit "…" --said "…" --when "<the next try still gets the
+units wrong>"`. Claude shows the user the task, the condition and the exact edit first. A
+hand-back doesn't spend it until Claude has started on it: the mod stamps `started` at Claude's
+first edit under it, so it waits through the try it was granted for. Claude then records what it
+changed (`wb coding used <task> --did "…"`) and hands the testing back with `wb feedback`. It is
+the task's alone: the slider never moves, and the next task needs its own. The pane shows an
+unspent allowance under its task's line, wrapped whole (`allowedLine`: `Claude may, once, if
+<when>: <edit>`). Two
 places hold Claude to it. `wb takeover` refuses (exit 3, saying what to do instead) without one
 (`_coding_gate`), unless `--user`: the mod's hand-back command passes it, and records an allowance
 for each task it hands over, since the user asked for exactly that. The mod denies Claude's own
@@ -2667,8 +2676,8 @@ const bound to one; imports from the module's own files also pass). The helpers 
 
 **State.** Five `$.state` atoms survive a module reload within a session; each has a shape tag,
 and an atom read under an old tag is absent, so change the tag when its type changes:
-`tasks` (`tasks-4`, WbTask[]: name, phase, round, model, label, tests, last, createdAt,
-updatedAt, tokens, recent, repo, cwd, session, claude_pid, backlog), `live` (`live-1`, {task, lines: {s, t}[]}: the transcript lines),
+`tasks` (`tasks-5`, WbTask[]: name, phase, round, model, label, tests, last, createdAt,
+updatedAt, tokens, recent, repo, cwd, session, claude_pid, backlog, allowed), `live` (`live-1`, {task, lines: {s, t}[]}: the transcript lines),
 `chat` (`chat-2`, {key, delegating, webAt, url}: workbench mode lives here, plus the session's
 listener key), `sessions` (`sessions-1`, string[]: every Claude Code session id this process
 has had, `mem.ids` while loaded), `savings` (`savings-1`, string: the pane's saving line, '' for
@@ -2975,7 +2984,7 @@ delivered as taken (`_stale_notes`, *Notes*).
 | `wb allow <task> ["<pattern>"…]` | `--path DIR…`, `--always`, `--text "…"` | Adds to the task's grants (`rules/<task>/grants.json`; and commands.json with `--always`, refused when it doesn't parse or has the wrong shape: `context.commands_conf`); answers the oldest open permission request (else the pending question) with "Claude allowed … Run it again now and carry on."; if the agent is live, sends that as a `--now` steer so it restarts on its session with the rule (while the tests run or the task waits for the GPU it says the agent gets it when they end, or when its round starts). `--path` goes through `_lane_dir` (refuses a path through a link, naming its target, and what `context.lane_refusal` refuses: `/`, home, a place inside credentials, workbench's state or config, or the skill library, and a place in the task's repo or its git directory; creates the directory; `*` turns the lane off for the task). |
 | `wb steer <task> --text "…" \| --message <file>` | `--now` | Only while queued/running/testing/asking with a live runner. Appends to steer.jsonl: delivered when the current run ends (before the tests), or at once with `--now`. While testing: "its tests are running (up to Ns); the agent gets it when they end"; while queued: when its round starts. |
 | `wb note <task> --text "…"` | | A `captain` event: Claude's log line in the transcript. |
-| `wb coding [only\|ask\|decide]` | `allow <task> --edit "…" --said "…"` | When Claude may write a delegated task's code (*Claude coding*): with no argument, the choice and its sentence, then each open task's unspent allowance; a mode saves it. `allow` records the user's yes for one task's edit, until the task goes back to the agent. |
+| `wb coding [only\|ask\|decide]` | `allow <task> --edit "…" --said "…" [--when "…"]`, `used <task> --did "…"` | When Claude may write a delegated task's code (*Claude coding*): with no argument, the choice and its sentence, then each open task's unspent allowance; a mode saves it. `allow` records the user's yes for one task's edit, until the task goes back to the agent; with `--when`, a one-task exception granted ahead, spent only once Claude has started on it. `used` records what Claude changed under it and says to hand the testing back; exit 1 with none. |
 | `wb takeover [<task> \| --all]` | `--repo DIR`, `--session ID`, `--user` | Stops the runner, phase `review`, "Claude took over"; Claude edits in the worktree and accepts, or hands back with feedback. Outside "Let Claude decide" it needs the user's recorded yes for the task, else exit 3; `--user` (the mod's hand-back command) is the user's own ask, and records one (*Claude coding*). `--all`: every task that isn't closed. `--session ID` (repeatable) and `--repo DIR`, with `--all` (the mod passes every session id its process has had and its directory): only that session's tasks (`_scope`): one with a task.json `session` when it is one of the IDs, wherever it ran, or when its `claude_pid` is gone and DIR claims it as below; else (no `session`, or no `--session` given) when its `repo` is DIR, inside it or holds it, or its `cwd` is DIR or inside it, by whole components, never when DIR is the home directory or `/`; one with no key at all: every session's. The rest are listed as `left alone (other sessions'): …`. |
 | `wb stop [<task> \| --all]` | `--repo DIR`, `--session ID` | A live task only. Marks status `stopping`, SIGTERM the runner (15 s, `wait_exit`, then SIGKILL to its session and the agent's), sweeps what the agent left (`runner.sweep`), phase `stuck`, "stopped by the reviewer", and acknowledges the task; the worktree is kept. `--all` (`stop_everything`): every open task, a `stopped` event "bail out: stopped by the user"; without `--repo`/`--session`, the bench's driver first (`bench.stop_driver`), so it starts no replay. `--session ID`, `--repo DIR` (with `--all`): as for takeover, the rest listed as `left running (other sessions'): …`. |
 | `wb resume <task>` | | Reaps a dead runner first. Phase stuck/failed (a task whose runner died is failed), no live runner: a fresh session (round n+1, `runner.RESUME` + what the step's rounds asked), not a review round; Claude's notes the last runner never delivered follow, as a `NOTE_HEAD` note. A note names the GPU's holders when it will wait for them. Acks the task and gathers lessons. |
@@ -3069,7 +3078,7 @@ $WB_HOME (~/.local/state/workbench)
   tasks/<task>/                  readable from the lane; only worktree/ and ask/ writable
     task.json  status.json
     events.jsonl  steer.jsonl  acked  context.md  runner.log
-    coding.json                  what the user allowed Claude to edit: {allowed: [{edit, said, ts, used}]} (*Claude coding*)
+    coding.json                  what the user allowed Claude to edit: {allowed: [{edit, said, ts, used, when?, started?, did?}]} (*Claude coding*)
     base-tests.txt               the base check's output: the acceptance command on the base (`--test`)
     rounds/<n>/                  prompt.md  instructions.md (before a handover rewrote it)  summary.md  tests.txt
     ask/<id>.json  <id>.answer   questions and permission requests; their answers (all the lane writes here, with worktree/)
@@ -3517,7 +3526,7 @@ push: every change is a pull request that merges once `check` is green and it is
 - **`wb watch --json`** (a style, the order, the activity wording) → the mod's `LINE_STYLE`, its
   pose regex, the `live-1` tag; `--last` and `JSON_LINE_CHARS` with the mod's `KEEP_LINES` and
   `LINE_CHARS`.
-- **A `$.state` atom's type** in the mod → its tag (`tasks-4`, `live-1`, `chat-2`, `sessions-1`, `savings-1`).
+- **A `$.state` atom's type** in the mod → its tag (`tasks-5`, `live-1`, `chat-2`, `sessions-1`, `savings-1`).
 - **The Claude coding choices** (`cli.CODING`: modes, labels, sentences) → the mod's
   `CODING_STOPS` (the slider) and `CODING_RULES` (the context block), and the skill's *Claude
   coding* bullet.

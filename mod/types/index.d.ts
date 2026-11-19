@@ -22,6 +22,9 @@ export type WbTask = {
   claude_pid: number
   /** task.json's backlog ('' for none): while one of this session's is open, the user stays away */
   backlog: string
+  /** the user's unspent allowance for Claude to edit it (`wb coding allow`), as the pane says it;
+   * '' for none */
+  allowed: string
 }
 
 /** One line of `wb watch --json`: a style name and the text. */
