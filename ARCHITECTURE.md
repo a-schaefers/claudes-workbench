@@ -1583,8 +1583,13 @@ time, `/proc/<pid>/stat` field 22, must match the entry's `start`), so a pid rec
 reboot doesn't hold the GPU forever. `admits(m, held)`: no holder is waiting, every holder's
 model still resolves, and there are no holders or `can_share` passes; then a runner joins with
 `LOCK_SH|LOCK_NB` on `gpu.lock` (so a task alone holds the lock shared). Otherwise it marks
-itself `waiting`, says "waiting for the GPU (held by <task>…)" and blocks on `LOCK_EX`, first
-come first served; once it holds the lock exclusively nobody joins it, and gpu.json is rewritten
+itself `waiting`, says "waiting for the GPU (held by <task>…)" and waits its turn: first come,
+first served by the entry's `since` (when its task started, `task.json` `created_at`; a `wb image`,
+when it asked), then task name. Only the first waiting entry tries `LOCK_EX|LOCK_NB`; the others
+wait for gpu.json to change (`watch.Watcher`, at least every `QUEUE_POLL` 1 s). A blocking flock
+promised no order among its waiters, and since a task sent back (`wb feedback`, `next`, `resume`)
+keeps its start, its round goes ahead of tasks started after it instead of waiting out a night's
+backlog while its review waits on it (#108). Once it holds the lock exclusively nobody joins it, and gpu.json is rewritten
 to its own entry plus the waiting ones (any other is stale by construction). A lease that fails
 or is stopped while queued removes its entry (a stale `waiting` entry used to make every later
 task wait alone). `load()` serializes loads under `gpu.load`, reading the other holders' models
@@ -1599,8 +1604,8 @@ already gone before the load was unloaded idle by Ollama's keep-alive (its task 
 or waiting on a question), not evicted (the 0.90 review: the other task unloaded itself and waited
 for that one to finish). If not, it warns "ollama could not fit … waiting for the GPU to itself",
 unloads its own model (unless a holder runs the same model: it is theirs too), marks itself
-waiting and takes `LOCK_EX` (flock converts: the shared lock goes first), then loads alone.
-`gpu.json` is `{"<pid>": {model, task, start, waiting?}}`. `wb image` takes `gpu.lock` through
+waiting and takes its turn as above (flock converts: the shared lock goes first), then loads alone.
+`gpu.json` is `{"<pid>": {model, task, since, start, waiting?}}`. `wb image` takes `gpu.lock` through
 `GpuLease(None, "wb image", wait=…)`: with `--wait` it queues in `gpu.json` like a task with no
 model, waits for the running tasks to finish, then has the GPU to itself; while it holds or waits
 for the GPU, `wb start` refuses a new task (exit 4, see *Two projects, one GPU*) unless `--queue`,
@@ -3087,8 +3092,9 @@ hidden files), `handovers` (fresh sessions).
 - `lessons.jsonl`: `{ts, task, repo, skills, id, kind, round, text}`; a close is `{close: id, ts,
   how: "skill:<name>"|"dropped", why}` (*Lessons*).
 - `speed.json`: `{"<model id>": {"write": [tok/s…], "read": [tok/s…]}}`, the last 60 of each.
-- `gpu.json`: `{"<pid>": {model, task, start, waiting?}}` (`start`: the holder's start time on
-  Linux, `/proc/<pid>/stat` field 22, so a recycled pid isn't taken for it; null elsewhere).
+- `gpu.json`: `{"<pid>": {model, task, since, start, waiting?}}` (`since`: its place in the queue,
+  the task's `created_at`; `start`: the holder's start time on Linux, `/proc/<pid>/stat` field 22,
+  so a recycled pid isn't taken for it; null elsewhere).
 - `scout.json`: `{done_at, notes, offered_at}` (`offered_at` from the mod); `watch.json`: `[{ts, text}]`.
 - `update.json`: `{checked_at, behind, kind}` (`kind`: `marketplace` or `clone`); `checked_at`
   is written before the fetch, so a failed, timed-out or killed check waits a week too.

@@ -93,6 +93,46 @@ class Sharing(Base):
         run_wb("stop", "t-big")
         wait_phase("t-small", {"review"})
 
+    def runs_in_order(self, *marks):
+        """Each mark's first fake run, in the order the runs came (FAKE_RUNS)."""
+        runs = [json.loads(line)["prompt"] for line in Path(os.environ["FAKE_RUNS"]).read_text().splitlines()]
+        return sorted(marks, key=lambda m: next(i for i, p in enumerate(runs) if m in p))
+
+    def test_queued_tasks_take_the_gpu_in_the_order_they_were_started(self):
+        # #108 (2026-11-18): a blocking flock hands the lock to any waiter, so a backlog queued
+        # behind a running task ran in no particular order
+        os.environ["WB_FAKE_GPU_GB"] = "24"
+        self.start("t-big", "hang", "--model", BIG)
+        wait_running("t-big")
+        names = ["t-3", "t-1", "t-2"]  # names sorting otherwise: the order is the start's
+        for name in names:
+            self.start(name, "ok", "--model", BIG, "--queue")
+        run_wb("stop", "t-big")
+        for name in names:
+            wait_phase(name, {"review"})
+        self.assertEqual(self.runs_in_order(*(f"delegate/{n}" for n in names)),
+                         [f"delegate/{n}" for n in names])
+
+    def test_a_task_sent_back_goes_ahead_of_one_started_after_it(self):
+        # its review waits on that round: behind a night's backlog, it would wait for all of it
+        os.environ["WB_FAKE_GPU_GB"] = "24"
+        self.start("t-a", "ok", "--model", BIG)
+        wait_phase("t-a", {"review"})
+        self.start("t-big", "hang", "--model", BIG)
+        wait_running("t-big")
+        self.start("t-new", "ok", "--model", BIG, "--queue")
+        os.environ["FAKE_SCENARIO"] = "ok"
+        run_wb("feedback", "t-a", "--text", "feedback-for-t-a")
+        deadline = time.time() + 30
+        while "waiting for the GPU" not in store.Task("t-a").status.get("last", ""):
+            self.assertLess(time.time(), deadline, store.Task("t-a").status)
+            time.sleep(0.1)
+        run_wb("stop", "t-big")
+        wait_phase("t-a", {"review"})
+        wait_phase("t-new", {"review"})
+        self.assertEqual(self.runs_in_order("delegate/t-new", "feedback-for-t-a"),
+                         ["feedback-for-t-a", "delegate/t-new"])
+
     def test_a_task_stopped_while_queued_leaves_no_waiting_entry_behind(self):
         # a stale waiting entry made every later task wait alone (the 2026-11-16 audit)
         os.environ["WB_FAKE_GPU_GB"] = "24"
