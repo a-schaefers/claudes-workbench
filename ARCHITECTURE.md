@@ -1971,8 +1971,10 @@ followed by `SELF_PROMPT` (the acceptance command, run before finishing).
 - **Grading.** It is graded as a replay is: the hidden checks overlaid, then the acceptance and
   check commands in the original task's lane and environment (refused when that task is gone).
 - **The cost.** claude -p's JSON `usage` becomes spend's shape (`_self_usage`: input, 5-minute
-  and 1-hour cache writes, cache reads, output, turns), so `spend.weighted` prices it as it
-  prices a handoff.
+  and 1-hour cache writes, cache reads, output, turns, calls), so `spend.weighted` prices it as it
+  prices a handoff. Claude Code 2.1.311 prints every event as a list ending in the result
+  (`_self_result` takes either); from the list, `calls` is the assistant messages' distinct ids,
+  as spend counts a session's, since `num_turns` counts one per tool call made in parallel.
 - **The row.** It goes to runs.jsonl with `arm: "claude"`, `model: "claude"`, `label: "claude"`,
   `claude`, `turns`, `claude_model`. `wb bench report` keeps those rows out of the per-model
   table and lists each one under "Claude writing it": PASS or fail, its weighted tokens, and the
