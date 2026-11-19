@@ -116,6 +116,7 @@ dependencies. No packaging: it runs from the clone.
   writing it (an estimate).
 - `bench.py`: `wb bench`: accepted tasks replayed on any model, graded by their own tests.
 - `verify.py`: `wb verify`, `wb shot`: the base and the candidate run alike, in scratch checkouts.
+- `progress.py`: opt-in progress checks: active work, a hint or a smaller step, what helped.
 - `lessons.py`: what each task taught, gathered into lessons.jsonl by feedback/next/resume/accept/discard.
 - `transcript.py`: `wb watch` (the session export merged with the task's events; `--json` feeds
   the mod's pane). `transcript.export` is also the runner's view of the session.
@@ -188,7 +189,7 @@ Runs on Linux, WSL2 and macOS; the launchers refuse native Windows and Python be
 Plain files under `$WB_HOME` (`~/.local/state/workbench`); the full tree and every format are in
 ARCHITECTURE.md (*Files and formats*):
 ```
-notify.jsonl results.jsonl lessons.jsonl notes.md coding.json tuning.json speed.json gpu*.{lock,json,admit,load}
+notify.jsonl results.jsonl lessons.jsonl notes.md coding.json progress.json tuning.json speed.json gpu*.{lock,json,admit,load}
 scout.json update.json watch.json optimize.json imports/ images/ chat/{messages,receipts,asks,seen}.jsonl chat/{listener,prefs,push,claims}.json
 bench/{cases/<case>,runs/<run>}/ bench/runs.jsonl bench/driver.json
 rules/<task>/  opencode.json HANDBOOK.md CLAUDE.md bin/git grants.json gitdir.json (no lane)
@@ -297,10 +298,8 @@ PATH, the lane, and (RealOpenCodeRun) the events, the export, `--session` and co
   command past 2 minutes goes to the background and the turn ends with a `background_wait` line.
 
 ## Troubleshooting
-- `wb doctor`: opencode (2.x) and its config files, git, each model's readiness (BAD when none
-  can run), skipped providers and why, an Ollama baseURL without `/v1`, a missing `limit.context`,
-  each Ollama entry's `max_tokens` and context, the state directory, the GPU budget, a real lane around a test write, `wb` on PATH, the `/workbench` link (and another
-  copy's), whether the mod is listed as installed.
+- `wb doctor`: what an install lacks, each with its fix (every check: ARCHITECTURE.md, *Every
+  `wb` command*).
 - A model "can't run": `wb models` says why (server down, not pulled, no `start` command), and
   `wb start` adds the next step.
 - A task misbehaves: `wb log <t> -v`, `wb watch <t> -v`, `tasks/<t>/runner.log` (the runner's

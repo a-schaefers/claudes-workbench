@@ -4614,6 +4614,61 @@ class Shot(Base):
         self.assertNotIn("no image", out)
 
 
+class Progress(Base):
+    """Opt-in progress checks (#95): active work, evidence, a hint or a smaller step, and what
+    helped, learned; the coding choice untouched."""
+    def checks(self):
+        return [r for r in store.read_jsonl(store.home() / "notify.jsonl")[0] if r.get("progress")]
+
+    def test_off_by_default_the_timing_is_todays_and_active_work_is_still_counted(self):
+        self.assertIn("off (the default)", run_wb("progress"))
+        os.environ["FAKE_SLEEP"] = "1"
+        self.start("t", "ok")
+        wait_phase("t", {"review"})
+        self.assertEqual(self.checks(), [])
+        self.assertGreater(store.Task("t").status["active_s"], 0)
+        run_wb("accept", "t", "-m", "x")
+        self.assertIn("active_minutes", store.results()[-1])
+
+    def test_a_check_recommends_and_a_steer_that_answers_it_is_learned_from(self):
+        run_wb("coding", "only")
+        self.assertIn("on: a task past 0.05 min of active work", run_wb("progress", "on", "--after", "0.05"))
+        self.start("t", "slow")                     # hangs until steered, then finishes
+        wait_for = time.time() + 30
+        while not self.checks() and time.time() < wait_for:
+            time.sleep(0.2)
+        [c] = self.checks()
+        self.assertEqual(c["kind"], "checkin")
+        self.assertIn("progress check (on: wb progress): ", c["text"])
+        self.assertIn("past the 3 s the user set (waits for the GPU and for answers left out)", c["text"])
+        self.assertIn("evidence: 0 file(s) changed, none since the last check", c["text"])
+        self.assertIn("recommended: a smaller step: wb steer t --now --step --text", c["text"])  # nothing moved
+        self.assertIn("the coding choice stays as the user set it", c["text"])
+        out = run_wb("steer", "t", "--now", "--step", "--text", "write answer.txt only")
+        self.assertIn("recorded as the answer to the progress check", out)
+        self.assertNotIn("recorded", run_wb("steer", "t", "--text", "and nothing else"))  # once a check
+        wait_phase("t", {"review"})
+        self.assertEqual([i["kind"] for i in store.Task("t").status["interventions"]], ["smaller"])
+        self.assertIn("Only when I say", run_wb("coding"))                # time made nothing Claude's
+        self.assertFalse((store.Task("t").dir / "coding.json").exists())
+        steer = store.read_jsonl(store.Task("t").dir / "steer.jsonl")[0][0]["text"]
+        self.assertTrue(steer.startswith("A smaller step: do only this now"))
+        run_wb("accept", "t", "-m", "x")
+        from workbench import progress
+        self.assertEqual(progress.helped(store.Task("t").spec["model"]), {"hint": [0, 0], "smaller": [1, 1]})
+
+    def test_what_helped_more_on_the_model_decides_once_both_were_tried_enough(self):
+        from workbench import progress
+        self.assertEqual(progress.recommend(True, {"hint": [0, 0], "smaller": [0, 0]}), "hint")
+        self.assertEqual(progress.recommend(False, {"hint": [0, 0], "smaller": [0, 0]}), "smaller")
+        self.assertEqual(progress.recommend(True, {"hint": [0, 3], "smaller": [2, 2]}), "smaller")
+        self.assertEqual(progress.recommend(False, {"hint": [3, 3], "smaller": [1, 1]}), "smaller")  # 1 try
+        t = store.Task("x")
+        self.assertFalse(progress.due(t, 500, None))                   # off: never
+        self.assertFalse(progress.due(t, 59, 1))
+        self.assertTrue(progress.due(t, 61, 1))
+
+
 class Setup(Base):
     """wb setup: the marketplace install copies only mod/, so wb and /workbench are linked from the
     clone (2026-11-16); wb doctor says what an install still lacks."""

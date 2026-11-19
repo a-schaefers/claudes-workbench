@@ -24,7 +24,8 @@ import traceback
 from collections import deque
 from pathlib import Path
 
-from . import ask_mcp, context, gitguard, gitops, hardware, lane, lessons, models, skills, store, tuning
+from . import (ask_mcp, context, gitguard, gitops, hardware, lane, lessons, models, progress, skills,
+               store, tuning)
 from .events import StuckDetector, normalize
 from .watch import Watcher
 
@@ -457,6 +458,8 @@ def run_round(task: store.Task, n: int, keep: bool = False) -> dict:
     edit_mark = gitops.mark(task.worktree)  # shell edits (sed -i, cat >) count as edits too
     started = time.time()  # the wall clock, for check-ins: they compare with timestamps in files
     clock = _Clock(time.monotonic())
+    prior = float(task.status.get("active_s") or 0)  # earlier rounds' active work
+    typical = progress.threshold(spec)  # the user's opt-in (#95); off (None), today's timing
     # The think budget starts at the round's first output: until then the model is reading its
     # prompt, which on the CPU or a model spilled into RAM takes many minutes, and a round nudged
     # for it was then stopped "even after a nudge" (the 2026-11-16 audit). Silence still applies.
@@ -592,6 +595,16 @@ def run_round(task: store.Task, n: int, keep: bool = False) -> dict:
         if every and now - since >= every and not asking:
             task.set_status(checkin_at=now)
             task.notify("checkin", checkin_text(task, n, out, since), round=n)
+        active = prior + clock.ran(mono)
+        if typical and not asking and progress.due(task, active, typical):
+            mark = gitops.mark(task.worktree)
+            files = gitops.changed(task.worktree)
+            moved = mark != task.status.get("progress_mark", edit_mark)
+            task.set_status(progress_checks=int(active // (typical * 60)), progress_mark=mark,
+                            progress_open=True)
+            task.notify("checkin", checkin_text(task, n, out, since) + "\n" + progress.text(
+                task, active, typical, moved, len(files.splitlines()) if files else 0,
+                len(out["errors"])), round=n, progress=True)
         notes = pending_steer(task)
         if any(r.get("now") for r in notes):
             ours = all(r.get("by") == "workbench" for r in notes)
@@ -622,6 +635,8 @@ def run_round(task: store.Task, n: int, keep: bool = False) -> dict:
         power.join(timeout=1)
         task.set_status(gpu_wh=round((task.status.get("gpu_wh") or 0) + power.wh, 2))
     out["secs"] = round(time.monotonic() - clock.t0, 1)
+    # the agent's own working time, less Claude's answers and a frozen machine (#95)
+    task.set_status(active_s=round(prior + clock.ran(time.monotonic()), 1))
     return out
 
 

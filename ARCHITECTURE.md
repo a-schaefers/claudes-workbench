@@ -1135,6 +1135,32 @@ drifting. They are off by default: each one wakes Claude, re-reading its whole c
 handovers and a base check cut short raise check-ins whatever the setting; a session that fills up
 reading is a `reading:` line in the round's report instead.
 
+**Progress checks** (`workbench/progress.py`, #95) are the user's opt-in: `wb progress on
+[--after MIN]`, `wb progress off`, kept in `$WB_HOME/progress.json` `{on, after?, ts}`. Off, the
+default, nothing below runs and the timing is the check-ins'.
+- **Active work.** Each round adds its time, less Claude's answers and a frozen machine
+  (`_Clock.ran`), to status `active_s`, on or off. Waiting for the GPU happens before a round,
+  so it never counts. The results row carries `active_minutes`.
+- **The check.** It fires at each whole multiple of the threshold of active work, once
+  (`progress.due`, status `progress_checks`), and never while asking. The threshold is `--after`,
+  else `router.expected_minutes` for the task's size and model (`progress.threshold`). The check
+  is a `checkin` notice (`progress: true`): the check-in digest, then `progress.text`. That is
+  the active minutes against the threshold, the evidence (files changed, whether any changed
+  since the last check: status `progress_mark`, a `gitops.mark`), the round's failed tool calls
+  and the last tests, and one recommendation with its command. The recommendation is a targeted
+  hint (`wb steer --text`) or a smaller step (`wb steer --now --step --text`: the note opens with
+  `STEP_NOTE`, do only this, then stop and report).
+- **The recommendation.** Once both kinds were tried `MIN_TRIES` (2) times on the model, it is
+  whichever helped more there (`progress.recommend`). Before that, it is a smaller step when no
+  file changed since the last check, else a hint.
+- **What it never does.** It never authorizes an edit: the check says the coding choice stays
+  as the user set it, and nothing in it reads or writes `coding.json`. Only `wb coding` changes
+  it.
+- **Learning.** The first `wb steer` after a check (status `progress_open`) is recorded in status
+  `interventions` `[{kind: hint|smaller, ts, round, step}]`, and from there in the results row.
+  `progress.helped(model)` counts, per kind, the tasks it was tried on and those accepted without
+  a takeover; the next check cites them ("on this model before: a hint helped 3 of 4").
+
 **Taking over.** `wb takeover <task>` stops the agent and sets `review` ("Claude took over"):
 Claude finishes in the worktree, leaving it uncommitted (accept commits it with the provenance
 trailers), and accepts, or hands back with `wb feedback`. A commit Claude made there by hand is
@@ -3051,7 +3077,8 @@ delivered as taken (`_stale_notes`, *Notes*).
 | `wb next <task> --spec <file> -m "…"` | `--test` (replaces the acceptance command), `--skill` (replaces the set), `--fresh`, `--allow PATTERN…` (adds to the task's grants), `--spec-gap`, `--take-claude-md` (*Claude's files*) | Phase review. Reads the spec (a file or `-`; empty or unreadable: nothing changes), records the step's size and fit, commits the work (`<m>` + `Workbench-Task: <task> (step N)` + `OpenCode-Session:`), writes the next step's prompt ("Step N of this task is done and committed (<sha>). The next step:" + spec + PROTOCOL), records the spec gaps, resets reviews, spawns. A retry after one interrupted past its commit (the worktree's tip carries this step's trailer and nothing changed since: `cli._step_landed`) takes that commit and measures the step from `HEAD~1`, so the task advances once; it died on "nothing to commit" (#85). The spec is read again, so give it again (`-` reads stdin). Says whether the next step gets a fresh session and why (`runner.fresh_reason`), each undelivered note it dropped, and names the GPU's holders when it will wait for them. Gathers lessons. |
 | `wb answer <task> --text "…" \| --file <f>` | `--id` (the pending question) | Writes `ask/<id>.answer` (atomically, never through a link: `ask_mcp.write_answer`); the blocked `ask_reviewer` returns it. An empty answer is refused: the question stays open. A closed question (answered, or dropped by the runner) is refused. |
 | `wb allow <task> ["<pattern>"…]` | `--path DIR…`, `--always`, `--text "…"` | Adds to the task's grants (`rules/<task>/grants.json`; and commands.json with `--always`, refused when it doesn't parse or has the wrong shape: `context.commands_conf`); answers the oldest open permission request (else the pending question) with "Claude allowed … Run it again now and carry on."; if the agent is live, sends that as a `--now` steer so it restarts on its session with the rule (while the tests run or the task waits for the GPU it says the agent gets it when they end, or when its round starts). `--path` goes through `_lane_dir` (refuses a path through a link, naming its target, and what `context.lane_refusal` refuses: `/`, home, a place inside credentials, workbench's state or config, or the skill library, and a place in the task's repo or its git directory; creates the directory; `*` turns the lane off for the task). |
-| `wb steer <task> --text "…" \| --message <file>` | `--now` | Only while queued/running/testing/asking with a live runner. Appends to steer.jsonl: delivered when the current run ends (before the tests), or at once with `--now`. While testing: "its tests are running (up to Ns); the agent gets it when they end"; while queued: when its round starts. |
+| `wb progress [on\|off]` | `--after MIN` (with `on`; default: the task's typical length on its model) | The user's opt-in to progress checks; with no argument, what it is (*Progress checks*). |
+| `wb steer <task> --text "…" \| --message <file>` | `--now`, `--step` (a smaller step: the note opens with `STEP_NOTE`; after a progress check, recorded as a `smaller` intervention, else a `hint`) | Only while queued/running/testing/asking with a live runner. Appends to steer.jsonl: delivered when the current run ends (before the tests), or at once with `--now`. While testing: "its tests are running (up to Ns); the agent gets it when they end"; while queued: when its round starts. |
 | `wb note <task> --text "…"` | | A `captain` event: Claude's log line in the transcript. |
 | `wb coding [only\|ask\|decide]` | `allow <task> --edit "…" --said "…" [--when "…"]`, `used <task> --did "…"` | When Claude may write a delegated task's code (*Claude coding*): with no argument, the choice and its sentence, then each open task's unspent allowance; a mode saves it. `allow` records the user's yes for one task's edit, until the task goes back to the agent; with `--when`, a one-task exception granted ahead, spent only once Claude has started on it. `used` records what Claude changed under it and says to hand the testing back; exit 1 with none. |
 | `wb shot <task>` | `--capture CMD` (required), `--viewport WxH` (1280x800), `--files PATH…`, `--timeout N` (300), `--chat` (post the pair to the web chat) | At review, for a visual task: the project's capture command run on the base and on the candidate, each in a scratch checkout under the task's lane; where each PNG is, or why a side has none (*Screenshots of the base and the candidate*). |
@@ -3115,6 +3142,7 @@ delivered as taken (`_stale_notes`, *Notes*).
 $WB_HOME (~/.local/state/workbench)
   notify.jsonl                   notices that need Claude, all tasks (the runner writes them)
   coding.json                    Claude coding, the user's choice: {mode: only|ask|decide, ts}; none: decide
+  progress.json                  progress checks, the user's opt-in: {on, after?, ts}; none: off
   results.jsonl                  one row per closed task: what the router, slices, tuning and skill records learn from
   lessons.jsonl                  what each task taught, open until written into a skill or closed
   notes.md  notes.lock           wb notes: how the user wants delegation run
@@ -3232,6 +3260,8 @@ check-ins off), not `wb start`'s.
 | `window`, `load_secs` | the model's context window; the load time (and any reloads before later rounds) |
 | `tuned`, `explored`, `tuned_max` | the knob values this task runs at (`tuning.tune`) |
 | `steer_taken`, `nudges`, `nudged_round`, `checkin_at` | notes delivered; nudges sent; the round that ended in one; the last check-in |
+| `active_s` | the agent's active work so far, in seconds: rounds less answers and a frozen machine (*Progress checks*) |
+| `progress_checks`, `progress_mark`, `progress_open`, `interventions` | progress checks raised; the worktree's mark at the last; a check not yet answered; the steers that answered one, `[{kind, ts, round, step}]` |
 | `skills`, `skills_ever`, `skills_rev`, `skills_told` | the handed set; every skill held; the library rev of each; what this session was told |
 | `asking`, `agent_pid` | the oldest open question's id; the agent's pid while a round runs (cleared by `_end_agent`, or `reap`) |
 | `asks` | the runner's count of the task's ask files, `{id: "q" \| "p" \| "x"}` (question, permission request, refused): the budgets |
@@ -3258,7 +3288,8 @@ review included), `tok_in`, `tok_out`, `skills_offered`, `skills_loaded`, `skill
 (one `results.step` per step), `window`, `tuned`, `explored`, `tuned_max`, `spec_gaps`, `claude`
 (when known: `spend.usage`, `{turns, calls, input, cache_write_5m, cache_write_1h, cache_read,
 output}`, *What a task cost Claude*), `gpu_wh` (status's, when measured), `remote_gpu` (true
-when its model ran on another machine, whose energy nothing here measures), `diff` (accepted only:
+when its model ran on another machine, whose energy nothing here measures), `active_minutes`
+(status `active_s`), `interventions` (status's, when a progress check was answered), `diff` (accepted only:
 `{files, added, removed}` summed over the steps; *What a task saved*), `backlog` (task.json's), `trial` (when set); `commit` and `merged` on accept, `reason` on
 discard. A step (`results.step`): `files`,
 `lines` (added, against HEAD, new files included), `removed`, `window`, `landed`, `compacted` (its last

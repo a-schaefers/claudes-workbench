@@ -22,8 +22,8 @@ from pathlib import Path
 from types import SimpleNamespace
 
 from . import (__version__, ask_mcp, bench, chat, context, gitops, hardware, images, lane, lessons, models,
-               optimize, results, router, savings, scan, skills, spend, store, transcript, tuning,
-               verify)
+               optimize, progress, results, router, savings, scan, skills, spend, store, transcript,
+               tuning, verify)
 from .watch import Watcher, wait_exit
 from . import runner
 from .runner import PKG_ROOT
@@ -1180,15 +1180,35 @@ def cmd_steer(a):
     text = (Path(a.message).read_text() if a.message else a.text).strip()
     if not text:
         die("empty note")
+    if a.step:  # a smaller step: the agent finishes this part and stops (#95)
+        text = STEP_NOTE + text
     store.append_jsonl(task.dir / "steer.jsonl", {"ts": store.now(), "text": text, "now": a.now})
     task.event({"ts": store.now(), "round": task.status.get("round"), "kind": "steer",
                 "now": a.now, "text": text})
+    if progress.record(task, "smaller" if a.step else "hint"):
+        print("recorded as the answer to the progress check: whether it helped is learned at "
+              "accept or discard")
     if phase in ("testing", "queued"):
         print(f"note queued for {a.name}: " + _when_delivered(task, phase, ""))
     elif a.now:
         print(f"interrupting {a.name}: it stops within a few seconds and continues with your note")
     else:
         print(f"note queued for {a.name}: delivered when its current run ends, before the tests")
+
+
+STEP_NOTE = ("A smaller step: do only this now, then stop and report; the rest of the task waits "
+             "for the next step.\n\n")  # what a smaller step's note says first (#95)
+
+
+def cmd_progress(a):
+    """The user's opt-in to progress checks (#95): on, off, or what it is."""
+    if a.state:
+        progress.set_enabled(a.state == "on", a.after if a.state == "on" else None)
+    s = progress.settings()
+    print("progress checks: " + (f"on: a task past {s['after']:g} min of active work" if s.get("after")
+                                  else "on: a task past its typical length of active work")
+          + " gets a check and a recommendation" if s.get("on") else
+          "progress checks: off (the default): check-ins only as --checkin sets them")
 
 
 def _when_delivered(task: store.Task, phase: str, running: str) -> str:
@@ -3068,7 +3088,15 @@ def parser() -> argparse.ArgumentParser:
     g.add_argument("--text"); g.add_argument("--message", help="a file")
     s.add_argument("--now", action="store_true",
                    help="interrupt the agent mid-step; the note goes first, marked high priority")
+    s.add_argument("--step", action="store_true", help="a smaller step: the agent does only this, "
+                   "then stops and reports")
     s.set_defaults(f=cmd_steer)
+    s = sub.add_parser("progress", help="the user's opt-in to progress checks: a task past its "
+                       "typical length of active work gets a check and a recommendation")
+    s.add_argument("state", nargs="?", choices=["on", "off"])
+    s.add_argument("--after", type=float, metavar="MIN", help="check after this many minutes of "
+                   "active work (default: the task's typical length on its model)")
+    s.set_defaults(f=cmd_progress)
     s = sub.add_parser("note", help="Claude's captain's-log line in the task's transcript")
     s.add_argument("name"); s.add_argument("--text", required=True); s.set_defaults(f=cmd_note)
     s = sub.add_parser("verify", help="run a regression test on the base and on the candidate, "
