@@ -59,6 +59,7 @@ def record(task: store.Task, outcome: str, last_step: dict | None = None, **extr
            "tuned": st.get("tuned") or {}, "explored": st.get("explored") or [],  # tuning.py
            "tuned_max": st.get("tuned_max") or {},
            "spec_gaps": [g["text"] for g in st.get("spec_gaps") or []],
+           **({"backlog": spec["backlog"]} if spec.get("backlog") else {}),  # wb backlog
            **({"claude": u} if (u := spend.usage(task)) else {}),  # what it cost Claude
            **({"gpu_wh": st["gpu_wh"]} if "gpu_wh" in st else {}),  # the runner's GPU energy
            **({"diff": {"files": sum(s.get("files", 0) for s in steps),  # what savings.py prices

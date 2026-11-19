@@ -130,10 +130,11 @@ def energy(wh: float) -> str:
 
 
 def summary(t: dict, period: str) -> str:
-    """`wb savings`' one line over ``totals``: what the tasks cost Claude, the estimate of
+    """`wb savings`' one line over ``totals`` (``period`` a PERIODS key, or a label: `wb
+    backlog`'s "the batch"): what the tasks cost Claude, the estimate of
     writing them, the saving and its share of that estimate (the badge's score, #101), the
     energy and what it cost."""
-    when = {"week": "the last 7 days", "month": "the last 30 days", "all": "all time"}[period]
+    when = {"week": "the last 7 days", "month": "the last 30 days", "all": "all time"}.get(period, period)
     if not t["tasks"]:
         return (f"{when}: no task to compare yet (an accepted task needs its Claude usage and "
                 "its diff, recorded since 0.95)")
