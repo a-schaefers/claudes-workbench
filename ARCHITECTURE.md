@@ -1700,6 +1700,10 @@ VRAM: AdapterRAM caps at 4 GB), but only for the report (`wb scout`, `wb doctor`
 else listed from sysfs, VRAM unknown); macOS reads `system_profiler SPDisplaysDataType -json`
 (Apple Silicon: unified memory, `wired_limit`; an adapter with only shared memory, an Intel iGPU,
 has VRAM unknown).
+`gpu_power_w()`: the cards' draw right now, in watts (None on macOS, or when nothing reads):
+nvidia-smi's `power.draw` summed over the cards that report it, else each sysfs card's
+`device/hwmon/hwmon*/power1_average` (microwatts; a connector, `card0-DP-1`, is skipped). It is
+the GPU energy each task's savings line shows.
 `memory()`: `/proc/meminfo` or `vm_stat`/`vm.swapusage`. `cpu()`, `ollama_env()` (`OLLAMA_KEYS`:
 `OLLAMA_MODELS`, `OLLAMA_CONTEXT_LENGTH`, `OLLAMA_NUM_PARALLEL`, `OLLAMA_MAX_LOADED_MODELS`,
 `OLLAMA_HOST`: systemctl's `Environment`, split as a shell would, since systemd quotes a value

@@ -136,6 +136,31 @@ def gpus(windows: bool = True) -> list[dict]:
     return found
 
 
+def gpu_power_w(drm: Path = Path("/sys/class/drm")) -> float | None:
+    """Power draw of the discrete cards, in watts: nvidia-smi's power.draw, or hwmon's power1_average."""
+    if system() == "macos":
+        return None
+    total = 0.0
+    nvidia = False
+    for line in _run("nvidia-smi", "--query-gpu=power.draw", "--format=csv,noheader,nounits").splitlines():
+        try:
+            total += float(line.strip())
+        except ValueError:
+            continue  # "[N/A]" on cards with no driver
+        nvidia = True  # at least one card reported a value
+    if nvidia:
+        return round(total, 1)
+    for card in sorted(drm.glob("card[0-9]*/device/hwmon/hwmon*/power1_average")):
+        if "-" in card.parent.parent.parent.parent.name:  # a connector (card0-DP-1), not a card
+            continue
+        value = _read(card)
+        try:
+            total += int(value) / 1e6
+        except ValueError:
+            continue  # a card reporting nothing, or non-numeric text
+    return round(total, 1) if total else None
+
+
 def memory() -> dict:
     if system() == "macos":
         page = _int(_sysctl("hw.pagesize")) or 4096

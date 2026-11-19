@@ -5089,6 +5089,41 @@ class Hardware(unittest.TestCase):
             self.assertEqual([g["name"] for g in hw.gpus(windows=False)], ["NVIDIA GeForce RTX 4090"])
         self.assertNotIn("powershell.exe", asked)
 
+    def test_gpu_power_hwmon_sums_the_cards_and_skips_connectors(self):
+        from workbench import hardware
+        cards = [
+            ("card0", "hwmon9", "120500000\n"),
+            ("card1", "hwmon10", "120000000\n"),
+            ("card0-DP-1", "hwmon11", "99900000\n"),  # a connector, not a card
+        ]
+        with tempfile.TemporaryDirectory() as d:
+            for card, hwmon, text in cards:
+                path = Path(d, card, "device", "hwmon", hwmon, "power1_average")
+                path.parent.mkdir(parents=True, exist_ok=True)
+                path.write_text(text)
+            with mock.patch("platform.system", lambda: "Linux"):
+                self.assertEqual(hardware.gpu_power_w(Path(d)), 240.5)
+
+    def test_gpu_power_nvidia_adds_every_card_and_skips_n_a(self):
+        from workbench import hardware
+        with tempfile.TemporaryDirectory() as d:
+            with mock.patch("platform.system", lambda: "Linux"), \
+                    mock.patch("workbench.hardware._run", lambda *argv:
+                               "120.50\n[N/A]\n80.25" if argv[:3] == ("nvidia-smi", "--query-gpu=power.draw", "--format=csv,noheader,nounits") else ""):
+                self.assertEqual(hardware.gpu_power_w(Path(d)), 200.8)
+
+    def test_gpu_power_returns_none_when_nothing_reads(self):
+        from workbench import hardware
+        with tempfile.TemporaryDirectory() as d:
+            with mock.patch("platform.system", lambda: "Linux"), \
+                    mock.patch("workbench.hardware._run", lambda *argv: ""):
+                self.assertIsNone(hardware.gpu_power_w(Path(d)))
+
+    def test_gpu_power_is_unknown_on_macos(self):
+        from workbench import hardware
+        with mock.patch("platform.system", lambda: "Darwin"):
+            self.assertIsNone(hardware.gpu_power_w())
+
 
 class Detector(unittest.TestCase):
     def test_edits_reset_the_no_edit_counter(self):
