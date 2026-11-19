@@ -6,9 +6,7 @@ Claude Code mod wakes Claude when a task needs it. Everything talks through plai
 
 The short name, `workbench`, stays on everything inside: the package, the plugin
 (`workbench@workbench`), the state and config directories, and the clone path `~/repos/workbench`
-ARCHITECTURE.md's *Installing* suggests for developing (users install from the marketplace; nothing
-depends on it: `bin/wb` finds the package from its real path, and the systemd unit runs
-`~/.local/bin/wb`).
+ARCHITECTURE.md's *Installing* suggests for developing (nothing depends on that path).
 
 ## Keeping the docs true
 README.md is for people and stays simple: the pitch, a quickstart, then a pointer. ARCHITECTURE.md
@@ -117,6 +115,7 @@ dependencies. No packaging: it runs from the clone.
 - `spend.py`: what a task cost Claude, from its session's transcript; `savings.py`, against Claude
   writing it (an estimate).
 - `bench.py`: `wb bench`: accepted tasks replayed on any model, graded by their own tests.
+- `verify.py`: `wb verify`: a regression test run on the base and the candidate, in scratch checkouts.
 - `lessons.py`: what each task taught, gathered into lessons.jsonl by feedback/next/resume/accept/discard.
 - `transcript.py`: `wb watch` (the session export merged with the task's events; `--json` feeds
   the mod's pane). `transcript.export` is also the runner's view of the session.

@@ -309,7 +309,10 @@ drifts, `wb log` only if the digest shows trouble (`reference/driving.md`).
     don't cover.
   - **The spec**: every requirement met, nothing missing, nothing added.
   - **Tests**: they test the behaviour and would fail on a bug; none weakened, skipped or
-    special-cased; expected values not just copied from the output.
+    special-cased; expected values not just copied from the output. For a bug fix with its own
+    regression test, `wb verify <name> --test '<that test>'` shows whether it fails on the base
+    and passes on the change; only `proven` is proof (`wb report` repeats it, and `wb accept`
+    says when it proves nothing about what you accept).
   - **Fit**: the repo's conventions, naming, idioms and existing helpers; no duplicated code.
   - **Hygiene**: no stray files, debug output, dead code or TODOs.
   - **Safety**: injection, secrets, unsafe file or shell use.

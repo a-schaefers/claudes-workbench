@@ -22,7 +22,8 @@ from pathlib import Path
 from types import SimpleNamespace
 
 from . import (__version__, ask_mcp, bench, chat, context, gitops, hardware, images, lane, lessons, models,
-               optimize, results, router, savings, scan, skills, spend, store, transcript, tuning)
+               optimize, results, router, savings, scan, skills, spend, store, transcript, tuning,
+               verify)
 from .watch import Watcher, wait_exit
 from . import runner
 from .runner import PKG_ROOT
@@ -964,6 +965,9 @@ def cmd_report(a):
     text = p.read_text() if p.exists() else (f"round {n} has no report yet "
                                              f"({task.status.get('phase')}: {task.status.get('last')})")
     print(transcript.plain(text) if sys.stdout.isatty() else text)  # it quotes the agent's words
+    if (r := verify.last(task)) and not a.round:  # the live comparison, at review (#97)
+        print("\n" + "\n".join(verify.lines(r)) + (
+            "\n  (stale: the worktree has changed since; run wb verify again)" if r["stale"] else ""))
 
 
 def cmd_diff(a):
@@ -1299,6 +1303,25 @@ def cmd_takeover(a):
           f"wb feedback {a.name} --message <file>")
 
 
+def cmd_verify(a):
+    """A regression test on the base and on the candidate, each in a scratch checkout under the
+    task's lane (#96): whether the test shows the bug the change fixes."""
+    task = need(a.name)
+    reap(task)
+    if task.status.get("phase") in store.CLOSED:
+        die(f"{a.name} is {task.status.get('phase')}")
+    if task.status.get("phase") in store.ACTIVE:
+        die(f"{a.name} is {task.status.get('phase')}: verify it at review, once the agent has stopped")
+    cmd = a.test or task.spec.get("test_cmd")
+    if not cmd:
+        die("name the regression test's command: --test '<cmd>'")
+    try:
+        r = verify.run(task, cmd, a.files, a.timeout)
+    except (RuntimeError, gitops.GitError) as e:
+        die(str(e))
+    print("\n".join(verify.lines(r)))
+
+
 @one_at_a_time
 def cmd_accept(a):
     task = need(a.name)
@@ -1318,6 +1341,7 @@ def cmd_accept(a):
             and not gitops.changed(task.worktree)):
         die(f"{a.name} has no changes to accept yet: wait for it, or wb stop {a.name} first")
     _stop_runner(task)  # under --force it may still be running, and would set its phase back
+    checked = verify.note(task)  # before the commit: what Claude accepts it on (#97)
     _settle_proposals(task, a.take_claude_md)
     repo = Path(spec["repo"])
     rounds, autofix = st.get("round", 1), st.get("auto_fixes_total", 0) + st.get("auto_fixes", 0)
@@ -1370,6 +1394,7 @@ def cmd_accept(a):
           (f", merged into {gitops.current_branch(repo)} as {merged}" if merged else
            f"\nmerge with: git -C {shlex.quote(str(repo))} merge --no-ff {spec['branch']}"))
     _say(savings.line(row) or spend.line(row.get("claude")))
+    _say(checked)
     _say(lessons.nudge(task, "accepted"))
 
 
@@ -3028,6 +3053,15 @@ def parser() -> argparse.ArgumentParser:
     s.set_defaults(f=cmd_steer)
     s = sub.add_parser("note", help="Claude's captain's-log line in the task's transcript")
     s.add_argument("name"); s.add_argument("--text", required=True); s.set_defaults(f=cmd_note)
+    s = sub.add_parser("verify", help="run a regression test on the base and on the candidate, "
+                       "each in a scratch checkout under the task's lane: does it show the bug?")
+    s.add_argument("name")
+    s.add_argument("--test", metavar="CMD", help="the regression test's command (default: the "
+                   "task's --test)")
+    s.add_argument("--files", nargs="+", metavar="PATH", help="the test's files, copied from the "
+                   "candidate onto the base (default: the changed files that look like tests)")
+    s.add_argument("--timeout", type=int, default=verify.LIMIT, help="seconds for each run (300)")
+    s.set_defaults(f=cmd_verify)
     s = sub.add_parser("takeover", help="stop the agent and finish the task by hand")
     s.add_argument("name", nargs="?")
     s.add_argument("--all", action="store_true", help="every open delegated task")
