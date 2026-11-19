@@ -835,12 +835,17 @@ def review_diff(task: store.Task) -> str:
     base = "HEAD" if steps > 1 else task.spec["base"]
     last = task.status.get("reviewed") or {}
     since = last.get("tree") if last.get("step") == steps else None
-    code = (".", ":(exclude)*.proposed")
+    # Only the proposals accept settles (proposals()) are left out of the code's diff: every
+    # `*.proposed` was, so an ordinary schema.proposed read as "no changes" and was committed
+    # all the same (#79, the 2026-11-18 audit).
+    props = [str(p.relative_to(task.worktree)) for _, p in proposals(task.worktree)]
+    code = (".", *(f":(exclude,literal){p}" for p in props))
     try:
         task.set_status(reviewed={"step": steps, "tree": gitops.snapshot(task.worktree)})
         if since:
             full = gitops.diff(task.worktree, since, paths=code)
-            same = not gitops.diff(task.worktree, since, paths=("*.proposed",))
+            same = not props or not gitops.diff(task.worktree, since,
+                                                 paths=tuple(f":(literal){p}" for p in props))
             prop = ("\n\nthe agent's proposed instruction files: unchanged since your last review"
                     if same and proposals(task.worktree) else proposal_diff(task))
             if not full:
