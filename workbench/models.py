@@ -49,6 +49,7 @@ from pathlib import Path
 from urllib.parse import urlparse
 
 from . import hardware, store
+from .watch import Watcher
 
 LOCAL_HOSTS = {"localhost", "0.0.0.0", "host.docker.internal"}
 OLLAMA_PORT = 11434  # Ollama's default: the guess while its server is down
@@ -865,6 +866,7 @@ IGPU_UNDER = 2 ** 30  # Ollama's own cutoff: a device with less is an integrated
 # the safe side, since too low only stops sharing and too high spills a model to the CPU.
 UNIFIED_SMALL = 36 * 2 ** 30
 OLLAMA_MAX_LOADED = 3  # Ollama's own default (3 per GPU) when OLLAMA_MAX_LOADED_MODELS is unset
+QUEUE_POLL = 1.0  # a queued task looks again this often; gpu.json changing wakes it sooner
 
 
 def unified_default(ram: int) -> int:
@@ -1007,6 +1009,10 @@ class GpuLease:
         self.home = store.home()
         self.fh = None
         self.me = str(os.getpid())
+        # its place in the queue: when the task started, so one sent back for another round
+        # (feedback, next, resume) goes ahead of tasks started after it; an image, from now
+        t = store.Task(task) if task else None
+        self.since = (t.spec.get("created_at") if t and t.exists else None) or store.now()
 
     def _holders(self) -> dict:
         return holders(self.home)
@@ -1016,7 +1022,7 @@ class GpuLease:
 
     def _entry(self, waiting: bool = False) -> dict:
         # the start time tells this runner from a later process given its pid (after a reboot)
-        return {"model": self.m.id if self.m else None, "task": self.task,
+        return {"model": self.m.id if self.m else None, "task": self.task, "since": self.since,
                 "start": _started(os.getpid()), **({"waiting": True} if waiting else {})}
 
     def warn(self, msg: str) -> None:
@@ -1064,11 +1070,29 @@ class GpuLease:
         others = sorted({h["task"] for p, h in held.items() if p != self.me})
         if others:  # a queued task used to wait in silence, its holder unnamed (the 2026-11-16 audit)
             self.say(f"waiting for the GPU (held by {', '.join(others)})")
-        fcntl.flock(self.fh, fcntl.LOCK_EX)  # until the running tasks finish; none join us
+        # First come, first served: a blocking flock hands the lock to any of its waiters, so three
+        # queued tasks started in no particular order (#108). Each waits its turn in gpu.json
+        # (oldest `since` first, then task name) and only the first tries the lock.
+        with Watcher(self.home) as w:
+            while True:
+                if self._first():
+                    try:
+                        fcntl.flock(self.fh, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                        break
+                    except BlockingIOError:
+                        pass  # the holders are still running (or still letting go)
+                w.wait(QUEUE_POLL)
         with store.locked(self.home / "gpu.admit"):
             # nobody else can hold gpu.lock now: any other non-waiting entry is stale
             self._set({**{p: h for p, h in self._holders().items() if h.get("waiting")},
                        self.me: self._entry()})
+
+    def _first(self) -> bool:
+        """Whether this lease is first among the waiting entries (or the only one)."""
+        waiting = {p: h for p, h in self._holders().items() if h.get("waiting")}
+        order = sorted(waiting, key=lambda p: (waiting[p].get("since") or 0,
+                                               waiting[p].get("task") or ""))
+        return not order or order[0] == self.me or self.me not in waiting
 
     def load(self) -> float:
         """Make the model resident, leaving the other holders' models loaded. Loads take turns
