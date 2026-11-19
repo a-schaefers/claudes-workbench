@@ -1779,8 +1779,10 @@ a closed, accepted task, not a trial:
 It is refused when the task isn't accepted or is a trial, the repo or the step's commit is gone,
 the step had no acceptance command, there are neither hidden files nor `--check`, or the hidden
 checks already pass on the base (a replay that changed nothing would pass): that is run once, in a
-scratch clone of the bundle, outside the lane (the user's own accepted code), for at most
-`BASE_CHECK_SECS` = 120 s; past that, `base_check` says not checked. It is refused too when the
+scratch clone of the bundle under `bench/`, in the original task's lane and environment as the
+reference check below is (`runner.run_in_lane` on `_At`: a plain shell with the caller's
+environment saw other files and variables, and left a hung check's children running, #81), for at
+most `BASE_CHECK_SECS` = 120 s; past that, `base_check` says not checked. It is refused too when the
 checks fail on the step's own commit run as a replay's grade is: a scratch checkout under
 `bench/` (in /tmp the git shim would allow writes), in the original task's lane and environment
 (`runner.run_in_lane` on `_At`, the task with that worktree), up to the case's test timeout. A

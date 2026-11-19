@@ -3584,6 +3584,28 @@ class Bench(Base):
         with self.assertRaisesRegex(RuntimeError, "no acceptance command"):
             bench.add("t-none")
 
+    def test_the_base_check_runs_in_the_lane_and_a_hung_one_leaves_nothing_running(self):
+        # #81 (the 2026-11-18 audit): add's base check ran in a plain shell with the caller's
+        # environment, unlike the reference check and a replay's grade, and with no cleanup
+        from workbench import bench
+        pidfile = Path(self.tmp.name) / "child.pid"
+        self.start("t-hang", "ok", "--test", "sh tests/check.sh")
+        wait_phase("t-hang", {"review"})
+        wt = store.Task("t-hang").worktree
+        (wt / "tests").mkdir()
+        (wt / "tests" / "check.sh").write_text(  # on the base (no answer yet): a child, then a hang
+            "[ -f answer.txt ] && exec grep -qx 42 answer.txt\n"
+            f"sleep 300 & echo $! > {pidfile}\nsleep 300\n")
+        run_wb("accept", "t-hang", "-m", "feat: the answer")
+        with mock.patch.object(bench, "BASE_CHECK_SECS", 2):
+            out = bench.add("t-hang")
+        self.assertIn("on the base: not checked (timed out)", out)
+        pid = int(pidfile.read_text())
+        deadline = time.time() + 5
+        while time.time() < deadline and Path(f"/proc/{pid}").exists():
+            time.sleep(0.1)
+        self.assertFalse(Path(f"/proc/{pid}").exists(), "the check's child outlived it")
+
     def test_a_case_from_a_later_step_starts_where_that_step_did(self):
         from workbench import bench
         self.start("t-steps", "ok", "--test", TEST_CMD)
