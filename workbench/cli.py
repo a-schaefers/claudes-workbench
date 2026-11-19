@@ -70,7 +70,47 @@ def need(name: str) -> store.Task:
     return t
 
 
+# When Claude may write code for a delegated task (#92): the user's choice, `wb coding`. The local
+# agent gets the first shot in all three; Claude can always review and advise. Without a saved
+# choice it is "decide", which is how Claude worked before there was a choice.
+CODING = {"only": ("Only when I say", "You tell Claude when to write code."),
+          "ask": ("Ask me first", "Claude can ask to make a specific fix and waits for your yes."),
+          "decide": ("Let Claude decide",
+                     "Claude uses its judgment to guide the local agent or make a fix itself.")}
+
+
+def coding_mode() -> str:
+    mode = (store.read_json(store.home() / "coding.json", {}) or {}).get("mode")
+    return mode if mode in CODING else "decide"
+
+
+def _allowances(task: store.Task) -> list[dict]:
+    return (store.read_json(task.dir / "coding.json", {}) or {}).get("allowed") or []
+
+
+def _allow(task: store.Task, edit: str, said: str) -> None:
+    rows = _allowances(task) + [{"edit": edit, "said": said, "ts": store.now(), "used": None}]
+    store.write_json(task.dir / "coding.json", {"allowed": rows})
+    task.event({"ts": store.now(), "round": task.status.get("round"), "kind": "coding",
+                "text": f"the user allowed Claude: {edit}"})
+
+
+def coding_allowed(task: store.Task) -> dict | None:
+    """What the user allowed Claude to edit in this task and Claude hasn't handed back yet."""
+    return next((x for x in _allowances(task) if not x.get("used")), None)
+
+
+def _coding_used(task: store.Task) -> None:
+    """An allowance ends when the work goes back to the agent: a retried or resumed task
+    remembers it was used, and the next edit needs the user again."""
+    rows = _allowances(task)
+    if any(not x.get("used") for x in rows):
+        store.write_json(task.dir / "coding.json",
+                         {"allowed": [{**x, "used": x.get("used") or store.now()} for x in rows]})
+
+
 def spawn_runner(task: store.Task) -> int:
+    _coding_used(task)  # work handed (back) to the agent: Claude's allowance, if any, is spent
     env = {**os.environ, "PYTHONPATH": str(PKG_ROOT), "WB_HOME": str(store.home())}
     env.pop("WB_TASK", None)  # the agent's mark (runner.sweep kills what carries it), not the runner's
     task.set_status(stopping=None)  # a stop wb made earlier says nothing about this runner
@@ -1160,6 +1200,45 @@ def cmd_note(a):
     print(f"noted on {a.name}")
 
 
+def _coding_gate(task: store.Task, user: bool) -> None:
+    """Claude coding (#92): taking a task over is writing its code, so outside "Let Claude decide"
+    it needs the user: their yes recorded for this task (wb coding allow), or their own command
+    (the hand-back, which passes --user)."""
+    mode = coding_mode()
+    if mode == "decide" or user or coding_allowed(task):
+        return
+    if mode == "ask":
+        die(f"Claude coding is {CODING['ask'][0]}: ask the user, naming the exact edit; on their "
+            f"yes, wb coding allow {task.name} --edit \"…\" --said \"<their words>\", then take it "
+            "over. Unanswered, the work stays with the agent", 3)
+    die(f"Claude coding is {CODING['only'][0]}: report the blocker to the user and keep the work "
+        f"with the agent (wb feedback, a smaller step); they say when Claude writes code "
+        f"(then wb coding allow {task.name} --edit \"…\" --said \"<their words>\")", 3)
+
+
+def cmd_coding(a):
+    """Show or set when Claude may write code for a delegated task, or record the user's yes
+    for one task (#92)."""
+    if a.what == "allow":
+        if not a.task or not a.edit or not a.said:
+            die("wb coding allow <task> --edit \"<the exact edit>\" --said \"<the user's words>\"")
+        task = need(a.task)
+        if task.status.get("phase") in store.CLOSED:
+            die(f"{a.task} is {task.status.get('phase')}")
+        _allow(task, a.edit, a.said)
+        print(f"{a.task}: Claude may make this edit until it hands the task back: {a.edit}")
+        return
+    if a.task or a.edit or a.said:
+        die("a task, --edit and --said go with wb coding allow")
+    if a.what:
+        store.write_json(store.home() / "coding.json", {"mode": a.what, "ts": store.now()})
+    label, why = CODING[coding_mode()]
+    print(f"Claude coding: {label}. {why}")
+    for t in store.all_tasks():
+        if t.status.get("phase") not in store.CLOSED and (x := coding_allowed(t)):
+            print(f"  {t.name}: allowed until handed back: {x['edit']} (the user: \"{x['said']}\")")
+
+
 @one_at_a_time
 def cmd_takeover(a):
     """Stop the agent and hand the worktree to Claude, to finish by hand or hand back."""
@@ -1169,7 +1248,8 @@ def cmd_takeover(a):
         if not tasks:
             print("no open delegated tasks to take over")
         for t in tasks:
-            cmd_takeover(argparse.Namespace(name=t.name, all=False, repo=None, session=None))
+            cmd_takeover(argparse.Namespace(name=t.name, all=False, repo=None, session=None,
+                                            user=a.user))
         _say(_others_line(others, "left alone"))
         return
     if getattr(a, "repo", None) or getattr(a, "session", None):
@@ -1179,6 +1259,10 @@ def cmd_takeover(a):
     task = need(a.name)
     if task.status.get("phase") in store.CLOSED:
         die(f"{a.name} is {task.status.get('phase')}")
+    _coding_gate(task, getattr(a, "user", False))
+    if getattr(a, "user", False) and coding_mode() != "decide":  # the user's hand-back: Claude
+        _allow(task, "the whole task: the user handed it to Claude",  # finishes it (the mod's
+               "/workbench-quit-and-hand-back-claude")               # gate reads this)
     _stop_runner(task)
     task.event({"ts": store.now(), "round": task.status.get("round"), "kind": "takeover",
                 "text": "Claude took over"})
@@ -2924,7 +3008,16 @@ def parser() -> argparse.ArgumentParser:
     s.add_argument("--repo", metavar="DIR", help="with --all: only those of a session started in DIR")
     s.add_argument("--session", action="append", metavar="ID",
                    help="with --all: only those of Claude Code session ID (repeatable)")
+    s.add_argument("--user", action="store_true", help="the user's own command asked for it (the "
+                   "mod's hand-back): past the Claude coding choice")
     s.set_defaults(f=cmd_takeover)
+    s = sub.add_parser("coding", help="when Claude may write code for a delegated task: show, "
+                       "set (only, ask, decide), or allow one task's edit on the user's yes")
+    s.add_argument("what", nargs="?", choices=[*CODING, "allow"])
+    s.add_argument("task", nargs="?", help="allow: the task")
+    s.add_argument("--edit", help="allow: the exact edit the user agreed to")
+    s.add_argument("--said", help="allow: the user's words")
+    s.set_defaults(f=cmd_coding)
     s = sub.add_parser("stop", help="stop a running task (wb resume or wb feedback continues it)")
     s.add_argument("name", nargs="?")
     s.add_argument("--all", action="store_true", help="every running agent")

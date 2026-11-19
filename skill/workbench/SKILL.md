@@ -64,6 +64,11 @@ the pane back (the mod answers it; with a task, the task is yours to take as usu
   run:` lines say what is missing; fix each with the user's yes (a model: reference/models.md).
   Then `wb try` proves the setup on a tiny sample: review it as any task, run the hidden check it
   printed, show the user the result, and `wb discard` it.
+- **Claude coding** (the user's choice, `wb coding`): when you may write a task's code yourself,
+  a one-line fix in review or `wb takeover` alike. "Let Claude decide" (the default) is this
+  skill as written. Otherwise a `claude-coding` context block gives the rule: "Ask me first", or
+  "Only when I say". It covers shell edits too; the mod refuses your file edits in a task's
+  worktree, and `wb takeover`, until the user's yes is recorded (`wb coding allow`).
 - **After a compaction or `/clear`**, a `workbench-mode` context block says the mode is still on
   and where this file is: read it again if its procedure is no longer in your context.
 - **Plans are handoff plans**, in plan mode or not: see "Planning work you will hand off" below.

@@ -4399,6 +4399,54 @@ class Try(Base):
         self.assertFalse((cli.try_dir() / "3").exists())          # (#161)
 
 
+class Coding(Base):
+    """When Claude may write code for a delegated task: the user's choice (#92)."""
+    def refused(self, *argv) -> tuple[int, str]:
+        err = io.StringIO()
+        with self.assertRaises(SystemExit) as e, redirect_stderr(err):
+            run_wb(*argv)
+        return e.exception.code, err.getvalue()
+
+    def test_without_a_saved_choice_claude_decides_as_before(self):
+        self.assertIn("Claude coding: Let Claude decide.", run_wb("coding"))
+        self.start("t", "ok")
+        wait_phase("t", {"review"})
+        self.assertIn("took over t", run_wb("takeover", "t"))
+
+    def test_ask_me_first_takes_the_users_yes_for_that_task_until_it_goes_back_to_the_agent(self):
+        self.assertIn("Ask me first. Claude can ask", run_wb("coding", "ask"))
+        self.start("t", "ok")
+        wait_phase("t", {"review"})
+        code, err = self.refused("takeover", "t")
+        self.assertEqual(code, 3)
+        self.assertIn("ask the user, naming the exact edit", err)
+        out = run_wb("coding", "allow", "t", "--edit", "divide the reading by 1000 in power.py",
+                     "--said", "yes, fix it")
+        self.assertIn("Claude may make this edit", out)
+        self.assertIn('t: allowed until handed back: divide the reading by 1000 in power.py '
+                      '(the user: "yes, fix it")', run_wb("coding"))
+        self.assertIn("took over t", run_wb("takeover", "t"))
+        os.environ["FAKE_SCENARIO"] = "ok"
+        run_wb("feedback", "t", "--text", "tests next")              # handed back: spent
+        wait_phase("t", {"review"})
+        self.assertEqual(self.refused("takeover", "t")[0], 3)        # the next edit asks again
+        rows = json.loads((store.Task("t").dir / "coding.json").read_text())["allowed"]
+        self.assertTrue(rows[0]["used"])                             # a retry remembers it
+
+    def test_only_when_i_say_keeps_the_work_local_but_the_users_hand_back_still_works(self):
+        run_wb("coding", "only")
+        self.start("t", "ok")
+        wait_phase("t", {"review"})
+        code, err = self.refused("takeover", "t")
+        self.assertEqual(code, 3)
+        self.assertIn("report the blocker to the user", err)
+        self.assertEqual(self.refused("takeover", "--all")[0], 3)
+        self.assertIn("took over t", run_wb("takeover", "--all", "--user"))   # /workbench-quit-and-hand-back
+        self.assertIn("the user handed it to Claude", run_wb("coding"))     # so the mod lets Claude edit
+        self.assertIn("Only when I say", run_wb("coding"))           # kept: a restart reads it again
+        self.assertEqual(self.refused("coding", "allow", "t", "--edit", "x")[0], 1)  # needs their words
+
+
 class Setup(Base):
     """wb setup: the marketplace install copies only mod/, so wb and /workbench are linked from the
     clone (2026-11-16); wb doctor says what an install still lacks."""

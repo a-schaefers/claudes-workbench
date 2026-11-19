@@ -313,6 +313,50 @@ const SKILL = 'workbench'
 const UPDATE = 'workbench-update'
 const QUIT = 'workbench-quit'
 const HAND_BACK = 'workbench-quit-and-hand-back-claude'
+
+// Claude coding (#92), the user's choice (`wb coding`): when Claude may write code for a delegated
+// task. "decide" (no saved choice) adds nothing, so Claude works as before there was a choice.
+const CODING_RULES: Record<string, string> = {
+  ask: 'Claude coding is "Ask me first" (the user\'s choice; `wb coding` shows it). The local agent ' +
+    'gets the first shot; review and advise as always. Before you write any of a task\'s code (an ' +
+    'edit in its worktree, `wb takeover`), help the agent first (feedback, a smaller step). If it ' +
+    'still falls short, ask the user for one specific edit, naming the task and the exact change, ' +
+    'and wait: only their yes allows it. Record it with `wb coding allow <task> --edit "…" --said ' +
+    '"<their words>"`; it lasts until you hand the task back. Unanswered, the work stays local.',
+  only: 'Claude coding is "Only when I say" (the user\'s choice; `wb coding` shows it). Never write ' +
+    'a task\'s code yourself, not a one-line fix in review nor `wb takeover`: guide the agent, ' +
+    'and when it stays stuck, report the blocker to the user and keep the work with the agent. ' +
+    'They say when you write code; then record their words with `wb coding allow <task> --edit ' +
+    '"…" --said "<their words>"`.',
+}
+
+// The file tools' path fields: an edit in a task's worktree is writing that task's code
+const EDIT_TOOLS: Record<string, string> = { Edit: 'file_path', MultiEdit: 'file_path', Write: 'file_path', NotebookEdit: 'notebook_path' }
+
+async function codingMode($: any): Promise<string> {
+  try {
+    const mode = JSON.parse(await $.fs.read(`${mem.root}/coding.json`)).mode
+    return mode in CODING_RULES ? mode : 'decide'
+  } catch {
+    return 'decide'
+  }
+}
+
+// Why Claude may not make this edit now, or '': outside a task's worktree, under "decide", or
+// with the user's yes recorded for that task and not yet handed back (`wb coding allow`).
+async function codingRefusal($: any, path: string): Promise<string> {
+  const task = path.startsWith(`${mem.root}/tasks/`)
+    ? /^([^/]+)\/worktree\//.exec(path.slice(mem.root.length + 7))?.[1] : undefined
+  if (!task) return ''
+  const mode = await codingMode($)
+  if (mode === 'decide') return ''
+  let allowed: Row[] = []
+  try {
+    allowed = JSON.parse(await $.fs.read(`${mem.root}/tasks/${task}/coding.json`)).allowed || []
+  } catch {}
+  if (allowed.some(x => !x.used)) return ''
+  return `workbench: not edited: ${task} is the local agent's. ${CODING_RULES[mode]}`
+}
 // Tasks of another session are listed as left alone: theirs to stop or finish.
 const QUIT_NOTE = (out: string, ok: boolean) =>
   `[workbench] The user ran /${QUIT}: ` + (ok
@@ -1206,6 +1250,13 @@ export const register: Register = (on, options) => {
       mem.busy = true
       void poll($)
     }
+    // Claude coding (#92): Claude's own edit in a task's worktree waits for the user's choice
+    const field = EDIT_TOOLS[e.tool]
+    const path = field ? (e as any)[field] : undefined
+    if (typeof path === 'string') {
+      const why = await codingRefusal($, path)
+      if (why) return { deny: why }
+    }
     return next(e)
   })
 
@@ -1281,7 +1332,7 @@ export const register: Register = (on, options) => {
 
   on('command.run', { command: HAND_BACK }, async $ => {
     await workbenchMode($, false)
-    const { ok, out } = await runWb($, ['takeover', '--all', ...(await scope($))])
+    const { ok, out } = await runWb($, ['takeover', '--all', '--user', ...(await scope($))])
     if (!ok) { // nothing was handed over: no turn telling Claude to finish it
       $.ui.toast(`workbench: wb takeover --all failed: ${brief(out)}`)
       return { text: `wb takeover --all failed; the agents may still be running (wb status):\n${out}` }
@@ -1307,6 +1358,8 @@ export const register: Register = (on, options) => {
     const isAway = await away($, st)
     const blocks = [...r.blocks]
     if (st.delegating) blocks.push({ name: 'workbench-mode', text: MODE_NOTE(mem.skill) })
+    const coding = st.delegating || mem.open.size ? await codingMode($) : 'decide'
+    if (coding !== 'decide') blocks.push({ name: 'claude-coding', text: CODING_RULES[coding] })
     const notes = st.delegating ? (await $.fs.read(`${mem.root}/notes.md`).catch(() => '')).trim() : ''
     if (notes) blocks.push({ name: 'user-notes', text: NOTES_NOTE(notes) })
     if (isAway) blocks.push({
