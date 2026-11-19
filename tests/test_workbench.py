@@ -4411,6 +4411,26 @@ class Projects(Base):
         run_wb("init", str(d))
         self.assertEqual(sorted(self.git(d, "ls-files").split()), [".env.example", ".gitignore", "app.py"])
 
+    def test_init_will_not_commit_a_secret_already_staged(self):
+        # #80 (the 2026-11-18 audit): the check read only untracked files, so a staged .env went
+        # into the first commit, whatever .gitignore said
+        self.identity()
+        d = Path(self.tmp.name) / "staged"
+        d.mkdir()
+        self.git(d, "init", "-q")
+        (d / "app.py").write_text("print(1)\n")
+        (d / ".env").write_text("API_KEY=sk-123\n")
+        self.git(d, "add", ".env")
+        (d / ".gitignore").write_text(".env\n")
+        err = io.StringIO()
+        with self.assertRaises(SystemExit), redirect_stderr(err):
+            run_wb("init", str(d))
+        self.assertIn(".env", err.getvalue())
+        self.assertEqual(self.git(d, "rev-parse", "-q", "--verify", "HEAD"), "")  # nothing committed
+        self.git(d, "rm", "-q", "--cached", ".env")
+        run_wb("init", str(d))
+        self.assertEqual(sorted(self.git(d, "ls-files").split()), [".gitignore", "app.py"])
+
     def test_init_refuses_the_home_directory(self):
         # the audit: `wb init .` from ~ would have committed ~/.ssh and every other project
         self.identity()
