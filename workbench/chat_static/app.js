@@ -573,24 +573,58 @@
   document.addEventListener('resume', comeBack)
 
   // ---- the phone keyboard: keep the composer above it (iOS ignores dvh for the keyboard) ----
+  // As merecatholicity.com's DM composer does it (2026-11-19, the owner: the swipe didn't put the
+  // keyboard away, a tap outside didn't either, and once the composer stayed halfway up the app).
   const vv = window.visualViewport
-  if (vv) {
-    const fit = () => {
+  const typing = () => document.activeElement === input
+  let kbOpen = false
+  function fit() {
+    if (!vv) return
+    kbOpen = innerHeight - vv.height > 120     // a keyboard is tall; a toolbar showing is not
+    if (kbOpen) {
+      // the body is the visible part of the page: pageTop counts iOS's own scroll of the document
+      // on focus as well as the visual viewport's, where offsetTop alone left the composer
+      // stranded mid-screen once that scroll outlived the keyboard
       document.body.style.height = vv.height + 'px'
-      document.body.style.transform = vv.offsetTop ? `translateY(${vv.offsetTop}px)` : ''
-      document.body.classList.toggle('kb-open', innerHeight - vv.height > 120)
-      toEnd()
+      document.body.style.transform = vv.pageTop ? `translateY(${vv.pageTop}px)` : ''
+    } else {
+      document.body.style.height = document.body.style.transform = ''
+      if (scrollX || scrollY) scrollTo(0, 0)    // the page never scrolls: its thread does
     }
+    document.body.classList.toggle('kb-open', kbOpen)
+    toEnd()
+  }
+  // the keyboard takes ~300 ms to stand or fall, and iOS scrolls the page after it has: fit again
+  // on a ladder, and once more when it all settles
+  let ladder = []
+  const settle = () => { ladder.forEach(clearTimeout); ladder = [0, 120, 300, 520, 800, 1200].map(ms => setTimeout(fit, ms)) }
+  if (vv) {
     vv.addEventListener('resize', fit)
     vv.addEventListener('scroll', fit)
+    addEventListener('scroll', fit, { passive: true })
+    input.addEventListener('focus', settle)
+    input.addEventListener('blur', settle)
+    addEventListener('orientationchange', settle)
   }
-  // a downward swipe outside the composer puts the keyboard away
-  let swipeY = null
+  // with the keyboard up: a downward swipe outside the composer puts it away, and so does a tap
+  // that lands on nothing that takes one. Measured on the screen: iOS pans the page with the
+  // finger, so clientY barely moved and the swipe never counted
+  const TAPPABLE = 'button, a, input, textarea, select, label, summary, [contenteditable], [role=button], .composer'
+  let touch0 = null
   document.addEventListener('touchstart', e => {
-    swipeY = document.activeElement === input && !e.target.closest('.composer') ? e.touches[0].clientY : null
+    const t = e.touches[0]
+    touch0 = typing() && e.touches.length === 1 && !e.target.closest('.composer')
+      ? { y: t.screenY, x: t.screenX, at: Date.now(), target: e.target } : null
   }, { passive: true })
   document.addEventListener('touchmove', e => {
-    if (swipeY !== null && e.touches[0].clientY - swipeY > 48) { input.blur(); swipeY = null }
+    const t = e.touches[0]
+    if (!touch0 || !t) return
+    if (t.screenY - touch0.y > 48) { input.blur(); touch0 = null }
+    else if (Math.abs(t.screenY - touch0.y) > 10 || Math.abs(t.screenX - touch0.x) > 10) touch0.moved = true
+  }, { passive: true })
+  document.addEventListener('touchend', () => {
+    const t = touch0; touch0 = null
+    if (t && !t.moved && Date.now() - t.at < 500 && typing() && !t.target.closest?.(TAPPABLE)) input.blur()
   }, { passive: true })
 
   // ---- sending: the outbox ----
