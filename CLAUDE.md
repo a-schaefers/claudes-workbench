@@ -54,8 +54,8 @@ anyone else's wait for the owner (ARCHITECTURE.md, *Shipping to main*).
 - The docs match the change (*Keeping the docs true*).
 - `python3 -m unittest` (`tests/test_docs.py` included), and `claude plugin validate mod &&
   claude plugin test mod`.
-- A change to the web chat (`chat.py`, `chat_static/`): the browser test too (WebKit as an
-  iPhone, Chromium as a Pixel). Playwright isn't a dependency.
+- A change to the web chat (`chat.py`, `chat_static/`): the browser test too (WebKit,
+  Chromium; `chat.yml` in CI). Playwright isn't a dependency.
 - A change to how OpenCode is invoked or read (the runner's argv, the event or export fields):
   update `tests/fake_opencode.py` in the same commit, and do one real run: a scratch repo from
   `wb init` with a committed CLAUDE.md, `wb start <t> --trial --size trivial --spec <f> --repo
@@ -136,7 +136,8 @@ dependencies. No packaging: it runs from the clone.
   `test_portable.py`, `test_sizing.py`, `test_docs.py` (the docs cover the code),
   `test_workflows.py` (the merge gate),
   `fake_opencode.py`, `capture_llm.py`, `e2e_chat.mjs`.
-- `.github/`: CI (`workflows/check.yml`, the required check, on each push and pull request;
+- `.github/`: CI (`workflows/check.yml`, the required check, on each push and pull request; `chat.yml`, the
+  browser test when the chat changes;
   Python 3.11, the floor; OpenCode `OPENCODE_VERSION`; `nightly.yml` on the newest Claude Code,
   plus macOS; `opencode.yml` on the newest OpenCode; README badges), `owner-merge.yml` (approves
   the owner's pull requests only), `rulesets/main.json`, dependabot for the actions' pins.
