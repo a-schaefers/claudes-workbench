@@ -77,12 +77,12 @@ async function run(engine, device) {
     await page.fill('#input', 'hello from the phone')
     await page.click('#send')
     await until(() => messages().length === 1)
-    await until(async () => (await page.locator('.row.user .meta').last().textContent()).includes('delivered'))
+    await until(async () => (await page.locator('.row.user .meta').last().textContent()).includes('Delivered'))
     if (await page.inputValue('#input')) throw new Error('the box was not cleared')
   })
   await check('a receipt shows as read', async () => {
     wb('chat', 'ack', messages()[0].id, '--by', 's1')
-    await until(async () => (await page.locator('.row.user .meta').last().textContent()).includes('read by Claude'))
+    await until(async () => (await page.locator('.row.user .meta').last().textContent()).includes('Read by Claude'))
   })
   await check('working shows while the turn runs, then Claude\'s reply is revealed in full', async () => {
     listen(true)
@@ -151,6 +151,20 @@ async function run(engine, device) {
     await until(() => wb('chat', 'wait', id, '--timeout', '0').trim() === 'allow')
     await until(async () => (await page.locator('.row.ask .meta').last().textContent()).includes('you allowed it'))
     if (await page.locator('.row.ask .choices').count()) throw new Error('the buttons are still there')
+  })
+  await check('a prompt whose purpose Claude gave leads with it, the command under it', async () => {
+    // #103: the tool's name said less than the decision asked
+    const id = wb('chat', 'ask', '--tool', 'Bash', '--text', 'make test-gpu', '--detail',
+      JSON.stringify({ purpose: 'Run the GPU tests.' })).split(' ')[0]
+    await until(async () => (await page.locator('.row.ask .choices').count()) === 1)
+    const head = await page.locator('.row.ask .asks').last().textContent()
+    if (head !== 'Allow Claude to run the GPU tests? (Bash)') throw new Error(head)
+    if (!(await page.locator('.row.ask pre').last().textContent()).includes('make test-gpu')) throw new Error('no command')
+    const [allow, deny] = await Promise.all(['.allow', '.deny'].map(c => page.locator('.row.ask .choices ' + c).last()
+      .evaluate(b => getComputedStyle(b).backgroundColor)))
+    if (allow !== deny) throw new Error(`Allow ${allow} and Deny ${deny} differ`)
+    wb('chat', 'answer', id, 'deny', '--by', 'cli')
+    await until(async () => (await page.locator('.row.ask .choices').count()) === 0)
   })
   await check('a prompt left unanswered says it waits in the terminal', async () => {
     const id = wb('chat', 'ask', '--tool', 'Write', '--text', '/etc/hosts').split(' ')[0]

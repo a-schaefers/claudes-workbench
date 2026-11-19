@@ -1,6 +1,6 @@
 :root {
-  --bg: #f5f3ec; --panel: #fbfaf6; --fg: #23211e; --dim: #77746c; --faint: #a3a097;
-  --line: #e4e0d4; --accent: #d97757; --accent-fg: #fff; --accent-soft: #f3dfd4;
+  --bg: #f5f3ec; --panel: #fbfaf6; --fg: #23211e; --dim: #6c6962; --faint: #a3a097;
+  --line: #e4e0d4; --accent: #d97757; --accent-fg: #23211e; --on-bad: #fff; --accent-soft: #f3dfd4;
   --claude: #fffefb; --claude-line: #e9e5da; --ok: #4c8a59; --warn: #b07f22; --bad: #b3462f;
   --shadow: 0 1px 2px rgb(40 30 20 / .06), 0 4px 16px rgb(40 30 20 / .05);
   --serif: "Iowan Old Style", "Palatino Linotype", Palatino, "Source Serif Pro", Georgia, ui-serif, serif;
@@ -11,7 +11,7 @@
 @media (prefers-color-scheme: dark) {
   :root {
     --bg: #1c1b19; --panel: #23221f; --fg: #ece9e1; --dim: #a29e94; --faint: #6f6c65;
-    --line: #34322e; --accent: #d97757; --accent-fg: #fff; --accent-soft: #4a3026;
+    --line: #34322e; --accent: #d97757; --accent-fg: #1c1b19; --on-bad: #1c1b19; --accent-soft: #4a3026;
     --claude: #262522; --claude-line: #34322e; --ok: #7dbb88; --warn: #d8ae5c; --bad: #e07a63;
     --shadow: 0 1px 2px rgb(0 0 0 / .3), 0 6px 20px rgb(0 0 0 / .25);
     color-scheme: dark;
@@ -101,7 +101,7 @@ main { flex: 1; overflow-y: auto; overscroll-behavior: contain; -webkit-overflow
   white-space: pre-wrap; box-shadow: var(--shadow);
 }
 .user.pending .bubble { opacity: .72; }
-.user.failed .bubble { background: var(--bad); }
+.user.failed .bubble { background: var(--bad); color: var(--on-bad); }
 .claude .bubble {
   background: var(--claude); border: 1px solid var(--claude-line); padding: 11px 15px;
   border-radius: 20px 20px 20px 6px; font: 16.5px/1.55 var(--serif); box-shadow: var(--shadow);
@@ -121,7 +121,7 @@ main { flex: 1; overflow-y: auto; overscroll-behavior: contain; -webkit-overflow
   flex: 1; min-height: 46px; font: 600 16px var(--sans); border-radius: 12px; cursor: pointer;
   border: 1px solid var(--line); background: var(--panel); color: var(--fg);
 }
-.ask .choices .allow { background: var(--ok); border-color: var(--ok); color: #fff; }
+.ask .choices .allow { border: 2px solid var(--fg); }
 .ask .choices button:disabled { opacity: .5; cursor: default; }
 .ask .said { display: block; color: var(--bad); font-size: 13px; margin-top: 6px; }
 .ask .plan { margin: 6px 0 10px; }
@@ -148,15 +148,16 @@ main { flex: 1; overflow-y: auto; overscroll-behavior: contain; -webkit-overflow
 .bubble p { margin: 0 0 .65em; } .bubble p:last-child { margin-bottom: 0; }
 .bubble ul, .bubble ol { margin: .2em 0 .65em; padding-left: 1.3em; } .bubble li { margin: .15em 0; }
 .bubble code { font: .86em var(--mono); background: color-mix(in srgb, var(--fg) 8%, transparent); padding: .08em .35em; border-radius: 5px; }
-.user .bubble code { background: rgb(255 255 255 / .2); }
+.user .bubble code { background: rgb(0 0 0 / .1); }
 .bubble pre { margin: .3em 0 .7em; padding: 10px 12px; background: color-mix(in srgb, var(--fg) 6%, transparent);
   border-radius: 10px; overflow-x: auto; font: 13.5px/1.45 var(--mono); white-space: pre; }
 .bubble pre code { background: none; padding: 0; font-size: inherit; }
 .bubble a { color: inherit; text-decoration-color: color-mix(in srgb, currentColor 45%, transparent); text-underline-offset: 2px; }
 .bubble strong { font-weight: 650; }
-.meta { font-size: 11.5px; color: var(--faint); margin: 4px 6px 0; display: flex; gap: 5px; align-items: center; }
+.meta { font-size: 12.5px; color: var(--dim); margin: 4px 6px 0; display: flex; flex-wrap: wrap; gap: 0 5px; align-items: center; }
+.meta span { white-space: nowrap; }
 .meta .tick { color: var(--ok); }
-.meta button { font: inherit; color: var(--accent); background: none; border: 0; padding: 0; cursor: pointer; text-decoration: underline; }
+.meta button { font: inherit; color: var(--fg); background: none; border: 0; padding: 10px 8px; margin: -10px -4px; cursor: pointer; text-decoration: underline; }
 
 /* Claude at work */
 .working span:last-child { font-variant-numeric: tabular-nums; }

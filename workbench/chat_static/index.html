@@ -29,11 +29,17 @@
 </header>
 <section class="settings" id="settings" hidden aria-label="Settings">
   <div class="set">
-    <h3>This chat</h3>
-    <p>A second lane to Claude, not a copy of the terminal. What you send here reaches the Claude Code
-    session running <code>/workbench</code> on your computer; Claude answers here with what matters:
-    results, questions, its plans and permission prompts. The terminal's full output stays on
-    the computer. Ask Claude to keep you posted here, and it will.</p>
+    <h3>Tool permissions while you're away</h3>
+    <p class="small">You're away from your first message here until you type in the terminal again.</p>
+    <div class="seg" role="radiogroup" aria-label="Tool permissions while you're away">
+      <button type="button" role="radio" data-away="ask">Ask me here</button>
+      <button type="button" role="radio" data-away="allow">Let Claude go ahead</button>
+    </div>
+    <p class="small" id="away-note"></p>
+  </div>
+  <div class="set">
+    <h3>Notifications</h3>
+    <div id="notify"></div>
   </div>
   <div class="set">
     <h3>What it saved</h3>
@@ -44,17 +50,11 @@
     <div id="app"></div>
   </div>
   <div class="set">
-    <h3>Notifications</h3>
-    <div id="notify"></div>
-  </div>
-  <div class="set">
-    <h3>While you're away</h3>
-    <p class="small">You're away from your first message here until you type in the terminal again.</p>
-    <div class="seg" role="radiogroup" aria-label="While you're away">
-      <button type="button" role="radio" data-away="ask">Ask me here</button>
-      <button type="button" role="radio" data-away="allow">Let Claude go ahead</button>
-    </div>
-    <p class="small" id="away-note"></p>
+    <h3>This chat</h3>
+    <p>A second lane to Claude, not a copy of the terminal. What you send here reaches the Claude Code
+    session running <code>/workbench</code> on your computer; Claude answers here with what matters:
+    results, questions, its plans and permission prompts. The terminal's full output stays on
+    the computer. Ask Claude to keep you posted here, and it will.</p>
   </div>
   <div class="set">
     <h3>This device</h3>

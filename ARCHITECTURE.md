@@ -2346,7 +2346,10 @@ VPN), `"hosts": ["chat.example.org"]` a name a tunnel or proxy sends.
   `--backlog` tasks is open: a night's batch outlasts six hours, #110; none typed in the terminal
   since), the listening
   session's mod puts them on the page as cards (`kind`):
-  - `permission`: the tool and what it would run, with Deny and Allow. A deny tells Claude to ask
+  - `permission`: the tool and what it would run, with Deny and Allow, alike in weight (green made
+    allowing look like the right answer, #103). When Claude said what the call is for (Bash's
+    `description`, which the mod sends as `detail.purpose`), the card leads with the decision,
+    "Allow Claude to <purpose>? (Bash)", the exact command under it. A deny tells Claude to ask
     the user in the chat what to do instead, with their words when they gave any.
   - `question` (AskUserQuestion): each question with its options as buttons (one, or several for
     a multi-select), a box for their own words, Skip and Answer; the picks reach Claude as the
@@ -2357,7 +2360,7 @@ VPN), `"hosts": ["chat.example.org"]` a name a tunnel or proxy sends.
     it takes a deny (checked in a live session, 2026-11-18); the card says so.
 
   A tap settles the dialog in the terminal; unanswered for 30 minutes, or the turn interrupted,
-  the card says so and the dialog stays in the terminal as usual. The gear's *While you're away*
+  the card says so and the dialog stays in the terminal as usual. The gear's *Tool permissions while you're away*
   setting (`prefs.json` `away`) can instead let Claude go ahead: a permission is allowed at once
   and listed in the thread ("allowed by your setting"); questions and plans still ask, and deny
   rules still hold (they never reach a dialog). How the mod does it: *The web chat listener*,
@@ -2493,8 +2496,12 @@ once rather than waiting out the watchdog; a page hidden for a minute drops its 
 state's `build` differs from the one the page loaded with, the page reloads (`reloadOnce`, at
 most once a minute, else it carries on with the new build; the draft and the outbox are in
 localStorage). Rendering is DOM only (inline code, bold, links, fenced code,
-lists); receipts read "✓ delivered", "✓ waiting for a Claude session", "✓✓ read by Claude",
-"✓✓ Claude has it, reading after its current step"; "Claude is on it" shows while the listener is
+lists); a receipt is one short line with one time (#103: it wrapped, and showed the time twice):
+"✓ Delivered · <sent>", "✓ Waiting for a Claude session · <sent>", "✓✓ Read by Claude · <read>",
+"✓✓ Queued for Claude · <read>" (mid-turn, read after the current step); the meta line is
+`--dim` (4.9:1 on the background; it was `--faint`, 2.4:1), its buttons (copy, retry, edit,
+delete) padded to a thumb's target. The user's bubbles are dark text on coral (5.1:1; white was
+3.1:1). "Claude is on it" shows while the listener is
 busy with the user's latest message. A dialog is a card in the thread by its time (`makeAsk`,
 the three kinds above; buttons and option rows at least 44 px tall) whose answer posts
 `/api/answer` and renders the state it returns; while it waits, the meta line says "Claude is
@@ -2503,12 +2510,13 @@ waiting for your answer" and a hidden page's title "Claude asks: allow?" (a perm
 your setting", "you said no", "you answered" (the picks shown), "you passed", "you asked for
 changes" (the note shown), "settled in the terminal" (an interrupt, or the dialog answered
 there) or "no answer in time: it waits in the terminal". The gear in the header drops a settings
-sheet (`#settings`; closed by the gear, Escape or a tap outside): *This chat* (what this lane is:
-a second lane to the session, not a copy of the terminal; Claude sends here what matters, and
-keeps the user posted here when asked), *What it saved* (`drawSaved`: the week's `savings`, in a
-sentence, called an estimate; "Nothing to compare yet" before a task can be), *While you're away* (Ask me here / Let Claude go ahead,
-posting `/api/prefs`, with what each means), *This device* (forget the key: the key screen, with
-no restoring of the old one). Claude's messages flow in at a reading pace (`flows`) once
+sheet (`#settings`; closed by the gear, Escape or a tap outside), what people come back for first
+(#103): *Tool permissions while you're away* (Ask me here / Let Claude go ahead, posting
+`/api/prefs`, with what each means), *Notifications* and *What it saved* (`drawSaved`: the week's
+`savings`, in a sentence, called an estimate; "Nothing to compare yet" before a task can be), then
+*The app*, *This chat* (what this lane is: a second lane to the session, not a copy of the
+terminal; Claude sends here what matters, and keeps the user posted here when asked) and *This
+device* (forget the key: the key screen, with no restoring of the old one). Claude's messages flow in at a reading pace (`flows`) once
 the first render is done; the backlog a first visit loads, a message that arrives while the page
 is hidden (it counts as unread in the title) and reduced motion show whole, and each shown message
 is remembered (`wb-chat-seen`, the last 500) so a reload doesn't replay it. Light and dark follow `prefers-color-scheme` (tokens on

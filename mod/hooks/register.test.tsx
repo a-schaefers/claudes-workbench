@@ -1035,8 +1035,9 @@ test('a permission prompt while the user is away goes to the web chat, and their
   await $.skill.prompt({ skill: 'workbench', text: 'x', frontmatter: {}, source: 'userSettings' })
   files['/wb/chat/messages.jsonl'] = JSON.stringify({ id: 'm1', ts: 1_800_000_003, from: 'user', text: 'hi' }) + '\n'
   await clock.advance(3000)                                     // a web message: the user is away
-  expect((await ask('Bash', { command: 'git push origin main' })).decision).toEqual({ behavior: 'allow' })
-  expect(runs.find(a => a[2] === 'ask')).toEqual(['wb', 'chat', 'ask', '--tool', 'Bash', '--kind', 'permission', '--text', 'git push origin main'])
+  expect((await ask('Bash', { command: 'git push origin main', description: 'Push the fix' })).decision).toEqual({ behavior: 'allow' })
+  expect(runs.find(a => a[2] === 'ask')).toEqual(['wb', 'chat', 'ask', '--tool', 'Bash', '--kind', 'permission', '--text',
+    'git push origin main', '--detail', '{"purpose":"Push the fix"}'])  // the card leads with it (#103)
   expect(runs.find(a => a[2] === 'wait')?.slice(0, 4)).toEqual(['wb', 'chat', 'wait', 'ask-1-ab'])
   expect(toasts.some(t => t.includes('waiting for you in the web chat'))).toBe(true)
 

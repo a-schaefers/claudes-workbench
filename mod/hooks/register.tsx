@@ -835,6 +835,9 @@ async function askOnChat($: any, tool: string, input: unknown, signal?: AbortSig
   const i = (input && typeof input === 'object' ? input : {}) as Record<string, unknown>
   const args = ['chat', 'ask', '--tool', tool, '--kind', kind, '--text', kind === 'permission' ? askText(input) : '']
   if (kind === 'question') args.push('--detail', JSON.stringify({ questions: i.questions }))
+  // what the call is for, as Claude described it (Bash's description): the card leads with it
+  if (kind === 'permission' && typeof i.description === 'string' && i.description.trim())
+    args.push('--detail', JSON.stringify({ purpose: i.description.trim().slice(0, 300) }))
   if (kind === 'plan' && typeof i.plan === 'string') args.push('--detail', JSON.stringify({ plan: i.plan }))
   const posted = await runWb($, args, 15_000)
   const [id, state] = (posted.out.split('\n').pop() || '').split(' ')
