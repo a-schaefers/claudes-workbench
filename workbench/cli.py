@@ -335,6 +335,8 @@ def _lane_fits(repo: Path, test: str | None, *, off: bool = False) -> None:
 def cmd_start(a):
     if not store.NAME_RE.match(a.name):
         die("a task name is lowercase letters, digits and hyphens, at most 48")
+    if a.backlog is not None and not store.NAME_RE.match(a.backlog):
+        die("a backlog name is lowercase letters, digits and hyphens, at most 48")
     task = store.Task(a.name)
     if task.exists:  # discarding never frees a name, so the refusal doesn't suggest it (the audit)
         die(f"task {a.name!r} exists ({task.status.get('phase')}): task names are never reused, "
@@ -411,6 +413,7 @@ def cmd_start(a):
         "branch": gitops.branch_name(a.name), "model": m.id, "model_label": m.label,
         "opencode_model": m.id, "route": why, "size": a.size, "stack": stack,
         **({"trial": True} if a.trial else {}), "test_cmd": a.test, "test_timeout": a.test_timeout,
+        **({"backlog": a.backlog} if a.backlog else {}),  # a batch left to run: wb backlog
         # a replay of the bench driver's (bench.replay): no notices, no results row, not listed
         **({"bench": b} if (b := getattr(a, "bench", None)) else {}),
         **({"no_base_check": True} if a.no_base_check else {}),
@@ -1339,6 +1342,49 @@ def cmd_savings(a):
         print(json.dumps({"period": period, **t}))
     else:
         print(savings.summary(t, period))
+
+
+def cmd_backlog(a):
+    """A batch of tasks started with `--backlog`: each one's phase, rounds, minutes, branch and
+    saving, and the batch's saving (the morning summary). Without a name, the batches."""
+    tasks = [t for t in store.all_tasks() if t.spec.get("backlog")]
+    if not a.name:
+        names = {}
+        for t in tasks:
+            names.setdefault(t.spec["backlog"], []).append(t)
+        if not names:
+            print("no backlogs (wb start --backlog NAME starts one)")
+        for name, ts in names.items():
+            left = sum(1 for t in ts if t.status.get("phase") not in store.CLOSED)
+            print(f"{name}: {len(ts)} task(s), {left} open")
+        return
+    tasks = [t for t in tasks if t.spec["backlog"] == a.name]
+    if not tasks:
+        die(f"no backlog {a.name!r} (wb backlog lists them)")
+    rows = {r.get("task"): r for r in store.results(trials=True)}
+    out = []
+    for t in tasks:
+        if t.status.get("phase") in LIVE:
+            reap(t)
+        st, row = t.status, rows.get(t.name) or {}
+        since = t.spec.get("created_at") or store.now()
+        out.append({"task": t.name, "phase": st.get("phase", "?"), "rounds": st.get("round", 1),
+                    "minutes": row.get("minutes") or round((store.now() - since) / 60, 1),
+                    "branch": t.spec.get("branch") if st.get("phase") == "accepted" else None,
+                    "saving": savings.line(row) if row else None})
+    batch = savings.totals([r for t in tasks if (r := rows.get(t.name)) and not r.get("trial")])
+    if a.json:
+        print(json.dumps({"backlog": a.name, "tasks": out, "totals": batch}))
+        return
+    phases = {}
+    for o in out:
+        phases[o["phase"]] = phases.get(o["phase"], 0) + 1
+    print(f"backlog {a.name}: {len(out)} task(s) · "
+          + " · ".join(f"{n} {p}" for p, n in phases.items()))
+    for o in out:
+        tail = " · ".join(x for x in (o["branch"], o["saving"]) if x)
+        print(f"{o['task']:22} {o['phase']:9} {o['rounds']:>3} {o['minutes']:>5.0f}m  {tail}".rstrip())
+    print(savings.summary(batch, "the batch"))
 
 
 def cmd_tune(a):
@@ -2553,6 +2599,8 @@ def parser() -> argparse.ArgumentParser:
                    "no room for its model: it waits behind them (else exit 4)")
     s.add_argument("--trial", action="store_true", help="a check of workbench itself (a scratch "
                    "repo): its result and lessons don't count as evidence")
+    s.add_argument("--backlog", metavar="NAME", help="one of a batch left to run (overnight): "
+                   "wb backlog NAME reports on the batch")
     s.add_argument("--no-claude-md", action="store_true",
                    help="start even though the repo has no CLAUDE.md (or .claude/CLAUDE.md)")
     s.add_argument("--allow", action="append", metavar="PATTERN",
@@ -2823,6 +2871,10 @@ def parser() -> argparse.ArgumentParser:
     x.add_argument("--label")
     s.set_defaults(f=cmd_bench)
     sub.add_parser("stats", help="results by model").set_defaults(f=cmd_stats)
+    s = sub.add_parser("backlog", help="a batch started with --backlog: each task and the batch's saving")
+    s.add_argument("name", nargs="?")
+    s.add_argument("--json", action="store_true")
+    s.set_defaults(f=cmd_backlog)
     s = sub.add_parser("savings", help="what delegating saved Claude: the week, by default")
     g = s.add_mutually_exclusive_group()
     g.add_argument("--week", action="store_true", help="the last 7 days (the default)")

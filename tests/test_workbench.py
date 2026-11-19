@@ -4095,6 +4095,43 @@ class Savings(Base):
     def test_wb_savings_with_nothing_to_compare_says_why(self):
         self.assertIn("no task to compare yet", run_wb("savings"))
 
+
+class Backlog(Base):
+    """A batch left to run (overnight): wb start --backlog, then wb backlog in the morning (#109)."""
+
+    def test_a_batch_lists_each_task_and_the_batch_saving(self):
+        from workbench import store
+        self.start("t-a", "ok", "--backlog", "night-1", "--queue")
+        self.start("t-b", "ok", "--backlog", "night-1", "--queue")
+        self.start("t-other", "ok", "--queue")
+        for n in ("t-a", "t-b", "t-other"):
+            wait_phase(n, {"review"})
+        self.assertEqual(store.Task("t-a").spec["backlog"], "night-1")
+        self.assertNotIn("backlog", store.Task("t-other").spec)
+        run_wb("accept", "t-a", "-m", "feat: answer")
+        run_wb("discard", "t-b")
+        self.assertEqual(store.results()[-1]["backlog"], "night-1")
+        out = run_wb("backlog", "night-1")
+        lines = out.splitlines()
+        self.assertEqual(lines[0], "backlog night-1: 2 task(s) · 1 accepted · 1 discarded")
+        self.assertTrue(lines[1].startswith("t-a"), out)
+        self.assertIn("delegate/t-a", lines[1])
+        self.assertTrue(lines[2].startswith("t-b") and "delegate/t-b" not in lines[2], out)
+        self.assertTrue(lines[-1].startswith("the batch: "), out)
+        self.assertNotIn("t-other", out)
+        got = json.loads(run_wb("backlog", "night-1", "--json"))
+        self.assertEqual([x["task"] for x in got["tasks"]], ["t-a", "t-b"])
+        self.assertEqual(got["tasks"][0]["branch"], "delegate/t-a")
+        self.assertIn("saved", got["totals"])
+        self.assertEqual(run_wb("backlog").strip(), "night-1: 2 task(s), 0 open")
+
+    def test_names_are_checked_and_an_unknown_backlog_is_refused(self):
+        with self.assertRaises(SystemExit), redirect_stderr(io.StringIO()):
+            self.start("t-x", "ok", "--backlog", "Night One")
+        with self.assertRaises(SystemExit), redirect_stderr(io.StringIO()):
+            run_wb("backlog", "nope")
+        self.assertEqual(run_wb("backlog").strip(), "no backlogs (wb start --backlog NAME starts one)")
+
 class Notes(Base):
     def test_notes_about_the_user_are_kept_short_and_numbered(self):
         self.assertIn("no notes yet", run_wb("notes"))
