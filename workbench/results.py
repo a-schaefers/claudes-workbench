@@ -4,22 +4,23 @@ from collections import defaultdict
 from . import gitops, skills, spend, store
 
 
-def step(task: store.Task, landed: bool) -> dict:
+def step(task: store.Task, landed: bool, since: str = "HEAD") -> dict:
     """The step closing now (committed by wb next or accept, or dropped): its size and how it
     went. A session compacted (now, or before a fresh one took over) or filled by reading alone,
     an agent stuck, or review rounds the agent caused (`reviews` less the `spec_rounds` Claude
     marked as the spec's) say it was too much; Claude taking over says nothing of its size; a
     handover to a fresh session is the runner's normal way through a big step, counted, not held
-    against it. The router learns each model's slice from these (router.slice)."""
+    against it. The router learns each model's slice from these (router.slice). ``since``: where
+    the step began (HEAD~1 once its commit has landed: a retried wb next)."""
     st = task.status
-    since = st.get("step_round") or 1
+    first = st.get("step_round") or 1
     try:
-        size = gitops.footprint(task.worktree, "HEAD")  # the step's work is uncommitted until now
+        size = gitops.footprint(task.worktree, since)  # the step's work is uncommitted until now
     except (gitops.GitError, OSError):
         size = {}
-    evs = [e for e in store.read_jsonl(task.dir / "events.jsonl")[0] if (e.get("round") or 0) >= since]
+    evs = [e for e in store.read_jsonl(task.dir / "events.jsonl")[0] if (e.get("round") or 0) >= first]
     stuck = any(r.get("task") == task.name and r.get("kind") in ("stuck", "failed")
-                and (r.get("round") or 0) >= since
+                and (r.get("round") or 0) >= first
                 for r in store.notices())
     from .runner import context_state  # the runner imports what this module does
     try:
@@ -28,7 +29,7 @@ def step(task: store.Task, landed: bool) -> dict:
         compacted = False
     compacted |= any(e.get("kind") == "fresh" and e.get("compacted") for e in evs)  # an earlier session
     reviews = st.get("reviews", 0)  # wb next starts each step's count afresh
-    gaps = {g.get("round") for g in st.get("spec_gaps") or [] if (g.get("round") or 0) >= since}
+    gaps = {g.get("round") for g in st.get("spec_gaps") or [] if (g.get("round") or 0) >= first}
     return {**size, "window": st.get("window"), "landed": landed, "compacted": compacted,
             "handovers": sum(e.get("kind") == "fresh" and bool(e.get("overflow")) for e in evs),
             "read_full": any(e.get("kind") == "reading_full" for e in evs),  # before any change

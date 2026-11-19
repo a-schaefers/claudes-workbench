@@ -552,13 +552,15 @@ def cmd_next(a):
         die(f"can't read the next step's spec: {e}")
     if not nxt.strip():
         die("the next step's spec is empty")
-    measured = results.step(task, landed=True)
-    _settle_proposals(task, a.take_claude_md)
-    try:
-        commit = gitops.commit_all(task.worktree, f"{a.message}\n\nWorkbench-Task: {a.name} "
-                                   f"(step {step})\nOpenCode-Session: {st.get('session')}")
-    except gitops.GitError as e:
-        die(str(e))
+    commit = _step_landed(task, step)
+    measured = results.step(task, landed=True, since="HEAD~1" if commit else "HEAD")
+    if not commit:
+        _settle_proposals(task, a.take_claude_md)
+        try:
+            commit = gitops.commit_all(task.worktree, f"{a.message}\n\nWorkbench-Task: {a.name} "
+                                       f"(step {step})\nOpenCode-Session: {st.get('session')}")
+        except gitops.GitError as e:
+            die(str(e))
     _spec_gaps(task, a.spec_gap)  # after the commit: a retry after a failed one counts them once
     dropped = _stale_notes(task)
     if a.allow:
@@ -599,6 +601,20 @@ def cmd_next(a):
     _say(gpu)
     _say_dropped(dropped)
     _say(lessons.nudge(task))
+
+
+def _step_landed(task: store.Task, step: int) -> str | None:
+    """The commit an interrupted wb next made for this step before it recorded the next one: the
+    worktree's tip carries the step's trailer and nothing has changed since. A retry then
+    advances from it once; it died on "nothing to commit" (the 2026-11-18 audit, #85)."""
+    try:
+        body = gitops.git(task.worktree, "log", "-1", "--format=%B", "HEAD")
+        if (f"Workbench-Task: {task.name} (step {step})" not in body.splitlines()
+                or gitops.changed(task.worktree)):
+            return None
+        return gitops.git(task.worktree, "rev-parse", "--short", "HEAD").strip()
+    except gitops.GitError:
+        return None
 
 
 def cmd_answer(a):
