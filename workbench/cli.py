@@ -1568,8 +1568,12 @@ def cmd_savings(a):
                              if m in found}, hardware.system()))
         return
     t = savings.totals(store.results(), since=since)
-    if a.json:
-        print(json.dumps({"period": period, **t}))
+    if a.card:  # made here, from the totals alone: the user decides where it goes (#101)
+        Path(a.card).write_text(savings.card(t, period), encoding="utf-8")
+        s = savings.score(t)
+        print(f"wrote {a.card}: " + (f"{s['score']}/100. {s['sentence']}" if s else savings.NO_SCORE))
+    elif a.json:
+        print(json.dumps({"period": period, **t, "score": savings.score(t)}))
     else:
         print(savings.summary(t, period))
 
@@ -3299,6 +3303,8 @@ def parser() -> argparse.ArgumentParser:
     s.add_argument("--json", action="store_true")
     s.add_argument("--share", action="store_true", help="a plain summary to paste into a "
                    "discussion: the machine, model sizes (no names), tasks, ratios, energy")
+    s.add_argument("--card", metavar="FILE.svg", help="write the savings badge as an image to keep "
+                   "or post: the score out of 100, the period, the counts (made here; nothing sent)")
     s.add_argument("--price", type=float, help="set the electricity price per kWh, then report")
     s.set_defaults(f=cmd_savings)
     sub.add_parser("tune", help="the settings tuned from results, per model and window").set_defaults(f=cmd_tune)

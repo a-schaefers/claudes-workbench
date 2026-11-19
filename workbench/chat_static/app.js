@@ -676,7 +676,13 @@
   // `wb savings` for the week, from the state (chat.week_saved)
   const tokens = n => Math.abs(n) >= 1e6 ? `${(n / 1e6).toFixed(1)}M` : `${Math.round(n / 1e3)}K`
   function drawSaved() {
-    const t = state.savings
+    const t = state.savings, s = t && t.score
+    $('badge').hidden = !s
+    if (s) {
+      const n = $('badge-n'); n.className = 'badge-n ' + s.color
+      n.textContent = String(s.score); n.append(Object.assign(document.createElement('small'), { textContent: ' / 100' }))
+      $('badge-s').textContent = s.sentence
+    }
     if (!t || !t.tasks) {
       $('saved').textContent = 'Nothing to compare yet. Once a delegated task is accepted, this shows what it saved Claude this week.'
       return

@@ -92,15 +92,92 @@ def totals(rows: list[dict], since: float = 0) -> dict:
     ``tasks`` is how many of them have both sides; ``claude``/``self_est``/``saved``
     are the token sums (weighted); ``wh`` is their GPU energy in watt-hours; ``cost``
     is what that energy is worth at the set price, rounded to a cent."""
-    parts = [of_row(r) for r in rows if r.get("ts", 0) >= since]
-    parts = [p for p in parts if p is not None]
+    period = [(r, of_row(r)) for r in rows if r.get("ts", 0) >= since]
+    parts = [p for _, p in period if p is not None]
     wh = round(sum(p["wh"] for p in parts if p["wh"] is not None), 1)
     cost = round(wh / 1000 * price(), 2) if parts and price() is not None else None
     return {"tasks": len(parts),
+            # the coverage: every closed task of the period, compared or not (#101)
+            "of": sum(p is not None or r.get("outcome") in ("accepted", "discarded") for r, p in period),
             "claude": sum(p["claude"] for p in parts),
             "self_est": sum(p["self_est"] for p in parts),
             "saved": sum(p["saved"] for p in parts),
             "wh": wh, "cost": cost, "remote": sum(p["remote"] for p in parts)}
+
+
+# #101's badge: one number from 1 to 100, about the percent of Claude's usage saved, from the
+# totals (summed before dividing, so a big task weighs as its baseline does). Its colour bands,
+# low to high; the colour is never the only signal, the number and the sentence say it too.
+BANDS = ((50, "green"), (25, "yellow"), (10, "orange"), (1, "red"))
+QUESTION = "How much Claude did my GPU save me?"
+NO_SCORE = "No score yet: we need a task we can compare."
+
+
+def score(t: dict) -> dict | None:
+    """{score, color, pct, sentence} for ``totals``; None with nothing to compare. GPU energy,
+    its price and the acceptance rate stay out of it."""
+    if not t["tasks"] or t["self_est"] <= 0:
+        return None
+    pct = 100 * (t["self_est"] - t["claude"]) / t["self_est"]
+    n, r = min(100, max(1, round(pct))), round(pct)
+    return {"score": n, "color": next(c for lo, c in BANDS if n >= lo), "pct": round(pct, 1),
+            "sentence": (f"I used about {r}% less Claude than if Claude had done this work alone."
+                         if r >= 1 else "I used about the same amount of Claude." if r == 0
+                         else f"I used about {-r}% more Claude.")}
+
+
+def _tokens(n: int) -> str:
+    return f"{n / 1e6:.1f} million" if n >= 1e6 else f"{n / 1000:,.0f},000" if n >= 1000 else str(n)
+
+
+# fill and text per band: the number is large, so 3:1 is the floor; each pair is past 4.5:1
+CARD_COLORS = {"green": ("#1a7f37", "#ffffff"), "yellow": ("#f2c94c", "#1f1f1f"),
+               "orange": ("#d9480f", "#ffffff"), "red": ("#b42318", "#ffffff")}
+
+
+def _wrapped(text: str, y: int, size: int, width: int, style: str) -> tuple[list[str], int]:
+    """``text`` as SVG lines of at most ``width`` characters (SVG text doesn't wrap), from
+    baseline ``y``; the lines and the baseline after them."""
+    rows, row = [], ""
+    for w in text.split():
+        if row and len(row) + len(w) >= width:
+            rows.append(row)
+            row = ""
+        row += (" " if row else "") + w
+    rows.append(row)
+    out = [f'<text x="24" y="{y + i * round(size * 1.4)}" font-size="{size}" {style}>{r}</text>'
+           for i, r in enumerate(rows)]
+    return out, y + len(rows) * round(size * 1.4)
+
+
+def card(t: dict, period: str) -> str:
+    """The badge as a card to keep or post (#101): an SVG made here from the totals alone, with
+    no name, path, host or account in it, and nothing fetched. 360 wide: legible at phone width."""
+    when = {"week": "Last 7 days", "month": "Last 30 days", "all": "All time"}.get(period, period)
+    s = score(t)
+    ink, grey = 'fill="#1f1f1f"', 'fill="#444"'
+    lines, y = _wrapped(QUESTION, 44, 19, 26, f'font-weight="700" {ink}')
+    if s:
+        fill, on = CARD_COLORS[s["color"]]
+        y += 2
+        lines += [f'<rect x="24" y="{y}" width="312" height="108" rx="18" fill="{fill}"/>',
+                  f'<text x="180" y="{y + 76}" text-anchor="middle" font-size="64" font-weight="800" '
+                  f'fill="{on}">{s["score"]}<tspan font-size="26" font-weight="600"> / 100</tspan></text>']
+        more, y = _wrapped(s["sentence"], y + 140, 17, 36, ink)
+        lines += more
+        more, y = _wrapped(f"Claude alone: about {_tokens(t['self_est'])} weighted tokens. With "
+                           f"Workbench: {_tokens(t['claude'])}.", y + 6, 14, 44, grey)
+        lines += more
+    else:
+        more, y = _wrapped(NO_SCORE, y + 10, 17, 34, ink)
+        lines += more
+    more, y = _wrapped(f"{when} · {t['tasks']} of {t.get('of', t['tasks'])} tasks counted · "
+                       "estimated", y + 6, 13, 48, 'fill="#555"')
+    lines += more
+    h = y + 10
+    return (f'<svg xmlns="http://www.w3.org/2000/svg" width="360" height="{h}" viewBox="0 0 360 {h}" '
+            'font-family="system-ui, -apple-system, Segoe UI, Roboto, sans-serif">'
+            f'<rect width="360" height="{h}" rx="20" fill="#fbf8f3"/>' + "".join(lines) + "</svg>\n")
 
 
 def _gpu(est: dict) -> str:
@@ -151,8 +228,10 @@ def summary(t: dict, period: str) -> str:
     gpu = f" · GPU {energy(t['wh'])}" if t["wh"] else ""
     cost = f" (${t['cost']:.2f})" if gpu and t["cost"] is not None else ""
     away = (f" · {t['remote']} on another machine's GPU, not measured" if t.get("remote") else "")
+    s = score(t)
     return (f"{when}: {t['tasks']} task(s) · claude {k(t['claude'])} · writing it yourself "
-            f"~{k(t['self_est'])} (estimate) · {saved}{pct}{gpu}{cost}{away}")
+            f"~{k(t['self_est'])} (estimate) · {saved}{pct}{gpu}{cost}{away}"
+            + (f" · score {s['score']}/100" if s else ""))
 
 
 def share(rows: list[dict], period: str, since: float, gpus: list[dict],
@@ -179,6 +258,8 @@ def share(rows: list[dict], period: str, since: float, gpus: list[dict],
     out.append(f"- tasks: {t['tasks']}; Claude used {k(t['claude'])} input-equivalent tokens, "
                f"writing them itself ~{k(t['self_est'])} (estimate)"
                + (f"; handoff/self {t['claude'] / t['self_est']:.2f}" if t["self_est"] else ""))
+    s = score(t)  # the badge's number and its words, as the card says them (#101)
+    out.append(f"- score: {s['score']}/100. {s['sentence']}" if s else f"- {NO_SCORE}")
     by: dict = {}
     for r in used:
         p = of_row(r)
