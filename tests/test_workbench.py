@@ -4340,6 +4340,40 @@ class Notes(Base):
         self.assertEqual(run_wb("notes", "drop", "1"), "1. Never merge without asking\n")
 
 
+class Try(Base):
+    def test_wb_try_starts_the_sample_and_its_hidden_check_fails_until_median_is_written(self):
+        # #112: a sample task that proves the setup, graded by a check the agent never sees
+        os.environ["FAKE_SCENARIO"] = "ok"
+        out = run_wb("try", "--model", "mimo")
+        task = store.Task("try-1")
+        self.assertTrue(task.spec["trial"])                               # never the evidence
+        self.assertEqual(task.spec["size"], "trivial")
+        self.assertIn("hidden check, at review: python3 ", out)
+        check = out.split("hidden check, at review: ")[1].split()
+        self.assertEqual(check[-1], str(task.worktree))
+        wait_phase("try-1", {"review"})
+        repo = store.home() / "try" / "1"
+        self.assertTrue((repo / "CLAUDE.md").exists())
+        self.assertEqual(gitops.git(repo, "status", "--porcelain").strip(), "")   # wb init committed it
+        base = subprocess.run(check[:-1] + [str(repo)], capture_output=True, text=True)
+        self.assertEqual(base.returncode, 1, base.stdout)                 # fails on the untouched base
+        self.assertIn("no stats.median", base.stdout + base.stderr)
+        with open(task.worktree / "stats.py", "a") as fh:                 # what the spec asks
+            fh.write("\n\ndef median(xs: list[float]) -> float:\n    \"\"\"The middle value of xs.\"\"\"\n"
+                     "    if not xs:\n        raise ValueError(\"median of no values\")\n"
+                     "    s, n = sorted(xs), len(xs)\n"
+                     "    return s[n // 2] if n % 2 else (s[n // 2 - 1] + s[n // 2]) / 2\n")
+        done = subprocess.run(check, capture_output=True, text=True)
+        self.assertEqual(done.returncode, 0, done.stdout)
+        self.assertIn("hidden check: PASS", done.stdout)
+        self.assertFalse((task.worktree / "__pycache__").exists())        # it leaves no trace
+        run_wb("discard", "try-1")
+        run_wb("try", "--model", "mimo")                                  # the next gets its own
+        self.assertTrue(store.Task("try-2").exists and (store.home() / "try" / "2").is_dir())
+        wait_phase("try-2", {"review"})
+        run_wb("discard", "try-2")
+
+
 class Setup(Base):
     """wb setup: the marketplace install copies only mod/, so wb and /workbench are linked from the
     clone (2026-11-16); wb doctor says what an install still lacks."""

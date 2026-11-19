@@ -60,6 +60,10 @@ the pane back (the mod answers it; with a task, the task is yours to take as usu
   Answer questions, read code, plan, and do what is yours (git, CLAUDE.md, `.claude/`, anything
   outward) yourself, as always. An edit that costs less to make than to spec (a typo, one line)
   you may just make.
+- **First run** (no model can run yet, or the user wants to see it work): `wb setup`'s `first
+  run:` lines say what is missing; fix each with the user's yes (a model: reference/models.md).
+  Then `wb try` proves the setup on a tiny sample: review it as any task, run the hidden check it
+  printed, show the user the result, and `wb discard` it.
 - **After a compaction or `/clear`**, a `workbench-mode` context block says the mode is still on
   and where this file is: read it again if its procedure is no longer in your context.
 - **Plans are handoff plans**, in plan mode or not: see "Planning work you will hand off" below.
