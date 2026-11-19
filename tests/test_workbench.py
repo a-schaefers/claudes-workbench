@@ -5207,6 +5207,31 @@ class WebChat(Base):
         self.assertTrue(r.fp.readline().startswith(b"event: state"))
         return c, r
 
+    def test_one_session_of_several_claiming_a_message_at_once_submits_it(self):
+        # #84 (the 2026-11-18 audit): two sessions starting together both read an empty
+        # listener.json and both submitted the same message
+        import threading
+        chat, row = self.chat, self.chat.send("status?", "user")
+        go, won = threading.Barrier(8), []
+        def one(n):
+            go.wait()
+            if chat.claim(row["id"], f"s{n}"):
+                won.append(n)
+        threads = [threading.Thread(target=one, args=(n,)) for n in range(8)]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join(10)
+        self.assertEqual(len(won), 1)
+        self.assertTrue(chat.claim(row["id"], f"s{won[0]}"))          # its own retry
+        with self.assertRaises(SystemExit), redirect_stderr(io.StringIO()) as err:
+            run_wb("chat", "claim", row["id"], "--by", "late")
+        self.assertIn("another session's to submit", err.getvalue())
+        claims = Path(os.environ["WB_HOME"]) / "chat" / "claims.json"
+        aged = {row["id"]: {"by": f"s{won[0]}", "ts": store.now() - chat.CLAIM_STALE - 1}}
+        store.write_json(claims, aged)
+        self.assertTrue(chat.claim(row["id"], "late"))             # a claim left by a gone session
+
     def test_a_full_server_drops_its_oldest_stream_for_a_new_page(self):
         # streams a sleeping phone dropped without a word filled the cap, and the page said
         # "Reconnecting" until a hard refresh (2026-11-18)

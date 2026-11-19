@@ -933,6 +933,12 @@ async function listen($: any, now: number) {
     if (m.from !== 'user' || !id || got.has(id) || mem.chatSent.has(id)) continue
     if (now - Number(m.ts ?? 0) * 1000 > CHAT_EXPIRE_MS) continue // stale: the page shows it undelivered
     if ((mem.chatRetry.get(id) ?? 0) > now) continue // its prompt was dropped: again in a minute
+    // Claimed under wb's lock: two sessions starting together both took the chat and both
+    // submitted it, each guard knowing only its own sends (#84). Refused: another session's.
+    if (!(await runWb($, ['chat', 'claim', id, '--by', st.key])).ok) {
+      mem.chatRetry.set(id, now + REWAKE_MS)
+      continue
+    }
     mem.chatSent.add(id)
     // The terminal shows only `[web chat] <their words>`: how to answer is the skill's to say.
     const text = `${WEB} ${String(m.text ?? '')}`

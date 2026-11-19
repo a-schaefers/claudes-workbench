@@ -125,6 +125,27 @@ def send(text: str, frm: str, cid: str | None = None) -> dict:
         return row
 
 
+CLAIM_STALE = 120  # seconds: a claim its session never followed with a receipt gives way
+
+
+def claim(msg_id: str, by: str) -> bool:
+    """Whether session `by` may submit message `msg_id` as a prompt: the first session to ask, under
+    a lock (chat/claims.json), or the same one again (a retry). Two sessions starting together
+    both read an empty listener.json, both claimed the chat, and both submitted the same message
+    (the 2026-11-18 audit, #84); each mod's own guard knew only its own sends."""
+    path = chat_dir() / "claims.json"
+    with store.locked(chat_dir() / "claims.lock"):
+        now = store.now()
+        claims = {k: v for k, v in (store.read_json(path, {}) or {}).items()
+                  if isinstance(v, dict) and now - v.get("ts", 0) < 86400}  # a day's
+        cur = claims.get(msg_id)
+        if cur and cur.get("by") != by and now - cur.get("ts", 0) < CLAIM_STALE:
+            return False
+        claims[msg_id] = {"by": by, "ts": now}
+        store.write_json(path, claims)
+    return True
+
+
 def ack(msg_id: str, by: str, how: str = "now") -> None:
     """Claude has the message: read at once ("now"), or queued until its current step ends."""
     store.append_jsonl(chat_dir() / "receipts.jsonl",

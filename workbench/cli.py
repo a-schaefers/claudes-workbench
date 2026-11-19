@@ -2210,6 +2210,9 @@ def cmd_chat(a):
         print("sent to the web chat")
     elif a.action == "ack":
         chat.ack(a.id, a.by or "claude", a.how)
+    elif a.action == "claim":  # the mod, before it submits a message: exit 1 if another has it
+        if not a.id or not chat.claim(a.id, a.by or "claude"):
+            die(f"{a.id} is another session's to submit")
     elif a.action == "pending":
         for r in chat.pending():
             print(json.dumps(r))
@@ -2847,11 +2850,11 @@ def parser() -> argparse.ArgumentParser:
     s = sub.add_parser("events", help="print a line whenever workbench's state changes (the mod's ears)")
     s.set_defaults(f=cmd_events)
     s = sub.add_parser("chat", help="the web chat: serve it, its link, reply to the user there, "
-                       "the thread (log), receipts (ack), what waits (pending), permission "
+                       "the thread (log), receipts (ack, claim), what waits (pending), permission "
                        "prompts for the away user (ask, wait, answer: the mod's)")
-    s.add_argument("action", choices=["serve", "url", "reply", "log", "ack", "pending", "ask",
-                                      "wait", "answer"], nargs="?", default="log")
-    s.add_argument("id", nargs="?", help="ack: the message id; wait, answer: the prompt's id")
+    s.add_argument("action", choices=["serve", "url", "reply", "log", "ack", "claim", "pending",
+                                      "ask", "wait", "answer"], nargs="?", default="log")
+    s.add_argument("id", nargs="?", help="ack, claim: the message id; wait, answer: the prompt's id")
     s.add_argument("verdict", nargs="?", help="answer: allow, deny or expired")
     s.add_argument("--tool", help="ask: the tool asking")
     s.add_argument("--kind", default="permission", help="ask: permission, plan or question")
