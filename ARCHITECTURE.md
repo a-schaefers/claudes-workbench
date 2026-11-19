@@ -2786,7 +2786,15 @@ back on screen or from the back-forward cache with nothing heard for `STALE_MS` 
 once rather than waiting out the watchdog; a page hidden for a minute drops its stream. When a
 state's `build` differs from the one the page loaded with, the page reloads (`reloadOnce`, at
 most once a minute, else it carries on with the new build; the draft and the outbox are in
-localStorage). Rendering is DOM only (inline code, bold, links, fenced code,
+localStorage). The phone keyboard (as merecatholicity.com's DM composer handles it, 2026-11-19):
+with one up (the visual viewport over 120 px short of the window), the body is sized to the
+visual viewport and moved to its `pageTop`, which counts iOS's own scroll of the page on focus
+(with `offsetTop` alone, that scroll outlived the keyboard and left the composer halfway up the
+app); with none, the inline size goes and the page is scrolled back to 0. It is fitted on every
+viewport resize or scroll and on a ladder after focus and blur (0 to 1200 ms), since the keyboard
+takes ~300 ms and iOS scrolls after it. A swipe down from outside the composer (48 px, measured
+in screen coordinates, since iOS pans the page with the finger and `clientY` barely moves) or a
+tap on nothing that takes one puts the keyboard away. Rendering is DOM only (inline code, bold, links, fenced code,
 lists); a receipt is one short line with one time (#103: it wrapped, and showed the time twice):
 "✓ Delivered · <sent>", "✓ Waiting for a Claude session · <sent>", "✓✓ Read by Claude · <read>",
 "✓✓ Queued for Claude · <read>" (mid-turn, read after the current step); the meta line is
@@ -3658,7 +3666,10 @@ the app (its worker runs and holds the
 key; the gear sends the install to https; notifications offered, or on iPhone sent to the installed app), what a page
 showed reported to `/api/seen`, a server frozen (SIGSTOP) past the 40 s watchdog and then
 let go (the page heals with no reload; a message sent meanwhile lands once), a changed page file
-(the page reloads itself, keyed, with the thread), no script errors.
+(the page reloads itself, keyed, with the thread), the phone keyboard (a swipe down or a tap on
+the thread puts it away, a tap on the composer or a button doesn't: touches made by hand, Chromium
+only, since no headless browser raises a keyboard; once it is down the composer is back at the
+foot), no script errors.
 
 **Conventions for a new test.** Names read as sentences (`test_a_note_does_not_swallow_a_failure_claude_has_not_seen`);
 one class per feature with a one-line docstring; end to end through `self.start`/`wait_phase`/

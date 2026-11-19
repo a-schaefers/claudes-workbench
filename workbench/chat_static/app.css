@@ -209,6 +209,8 @@ main { flex: 1; overflow-y: auto; overscroll-behavior: contain; -webkit-overflow
   display: flex; align-items: flex-end; gap: 8px; max-width: 760px; width: 100%; margin: 0 auto;
   padding: 10px max(12px, env(safe-area-inset-right)) calc(10px + env(safe-area-inset-bottom)) max(12px, env(safe-area-inset-left));
 }
+/* the keyboard covers the home indicator: no safe-area gap between it and the composer */
+body.kb-open .composer { padding-bottom: 10px; }
 .composer textarea {
   flex: 1; resize: none; font: 16px/1.4 var(--sans); color: var(--fg); background: var(--panel);
   border: 1px solid var(--line); border-radius: 22px; padding: 11px 16px; min-height: 46px; max-height: 38vh;
