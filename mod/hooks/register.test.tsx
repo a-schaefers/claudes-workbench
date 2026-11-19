@@ -601,7 +601,7 @@ test('/workbench-quit stops everything; /workbench-quit-and-hand-back-claude han
   expect(submitted.length).toBe(0)                                         // without a turn
 
   await $.command.run({ command: 'workbench-quit-and-hand-back-claude', args: '' })
-  expect(runs.at(-1)).toEqual(['wb', 'takeover', '--all', '--repo', '/'])
+  expect(runs.at(-1)).toEqual(['wb', 'takeover', '--all', '--user', '--repo', '/'])
   await clock.advance(2000)
   expect(submitted.at(-1)).toContain('took over fix-it')                  // Claude starts now
   expect(submitted.at(-1)).toContain('Leave workbench mode')
@@ -1318,4 +1318,32 @@ test('a night\'s backlog keeps the user away past six hours; without one, away l
   expect(awayNow(t0, t0 + 7 * hour, [night('running', '')], ours)).toBe(false)     // not a backlog task
   expect(awayNow(t0, t0 + 7 * hour, [night('running')], () => false)).toBe(false)  // another session's
   expect(awayNow(0, t0, [night('running')], ours)).toBe(false)                     // never wrote from the web
+})
+
+test('Claude coding: its own edit in a task\'s worktree waits for the user\'s yes, unless Claude decides', async ($, on) => {
+  // #92: the user's choice of when Claude writes a delegated task's code
+  const clock = mock.clock(on, { now: 1_800_000_000_000 })
+  const ts = 1_800_000_000
+  const files: Record<string, string> = {
+    '/wb/tasks/fix-it/task.json': JSON.stringify({ name: 'fix-it', model: 'm', created_at: ts }),
+    '/wb/tasks/fix-it/status.json': JSON.stringify({ phase: 'review', round: 1, updated_at: ts }),
+  }
+  fakeTasks(on, files)
+  on('process.run', () => ({ value: { exitCode: 0, stdout: '', stderr: '' } }))
+  on('tool.call', () => ({ result: {}, text: '' }))                // the engine's own tool
+  await $.session.start({ cwd: '/', surface: 'terminal', isInteractive: true })
+  await clock.advance(1000)
+  const edit = (path = '/wb/tasks/fix-it/worktree/power.py') =>
+    $.tool.call({ tool: 'Edit', file_path: path, old_string: 'w', new_string: 'w / 1000' } as any) as Promise<any>
+  expect((await edit()).deny).toBeUndefined()                      // no saved choice: as before
+  files['/wb/coding.json'] = JSON.stringify({ mode: 'ask' })
+  expect((await edit()).deny).toContain('"Ask me first"')
+  expect((await edit('/home/u/project/power.py')).deny).toBeUndefined()   // not a task's: Claude's own
+  files['/wb/tasks/fix-it/coding.json'] = JSON.stringify({ allowed: [{ edit: 'w / 1000', used: null }] })
+  expect((await edit()).deny).toBeUndefined()                      // the user said yes
+  files['/wb/tasks/fix-it/coding.json'] = JSON.stringify({ allowed: [{ edit: 'w / 1000', used: ts }] })
+  files['/wb/coding.json'] = JSON.stringify({ mode: 'only' })
+  expect((await edit()).deny).toContain('report the blocker to the user')   // handed back: spent
+  const w = await $.tool.call({ tool: 'Write', file_path: '/wb/tasks/fix-it/worktree/new.py', content: '' } as any) as any
+  expect(w.deny).toContain('"Only when I say"')
 })

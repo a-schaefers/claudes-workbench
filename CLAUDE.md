@@ -146,8 +146,7 @@ dependencies. No packaging: it runs from the clone.
 - `systemd/wb-chat.service`: keeps the web chat up. `docs/`: the README's images (a replaced image
   gets a new file name, for GitHub's cache).
 
-Runs on Linux, WSL2 and macOS; the launchers refuse native Windows (fcntl, `os.killpg`, POSIX
-signals) and Python before 3.11. Off Linux: no Landlock, and watch.py waits on timers.
+Runs on Linux, WSL2 and macOS; the launchers refuse native Windows and Python before 3.11. Off Linux: no Landlock, and watch.py waits on timers.
 
 ## How a task runs
 1. `wb start` refuses a repo without a committed CLAUDE.md or `.claude/CLAUDE.md`
@@ -183,14 +182,14 @@ signals) and Python before 3.11. Off Linux: no Landlock, and watch.py waits on t
    acknowledges it (`_ack_all`, which stops short of news still true).
 7. `wb accept` commits with provenance trailers (no AI co-author line), optionally merging;
    `wb next` commits a step and gives the same agent the next; `wb feedback` sends another round;
-   `wb discard` drops it; `wb takeover` leaves it to Claude. `results.jsonl` gets a row, which the
+   `wb discard` drops it; `wb takeover` leaves it to Claude (when `wb coding` allows). `results.jsonl` gets a row, which the
    router, the slices, the tuning and the skill records learn from; lessons are gathered.
 
 ## State and config
 Plain files under `$WB_HOME` (`~/.local/state/workbench`); the full tree and every format are in
 ARCHITECTURE.md (*Files and formats*):
 ```
-notify.jsonl results.jsonl lessons.jsonl notes.md tuning.json speed.json gpu*.{lock,json,admit,load}
+notify.jsonl results.jsonl lessons.jsonl notes.md coding.json tuning.json speed.json gpu*.{lock,json,admit,load}
 scout.json update.json watch.json optimize.json imports/ images/ chat/{messages,receipts,asks,seen}.jsonl chat/{listener,prefs,push,claims}.json
 bench/{cases/<case>,runs/<run>}/ bench/runs.jsonl bench/driver.json
 rules/<task>/  opencode.json HANDBOOK.md CLAUDE.md bin/git grants.json gitdir.json (no lane)

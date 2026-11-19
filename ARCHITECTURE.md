@@ -2328,6 +2328,32 @@ custom-node packs do run their own Python).
   commits it's behind (`cli.claude_md_status`), and the skill has Claude update it after each
   accepted task that changes what it describes.
 
+## Claude coding: when Claude writes a task's code
+
+The user chooses when Claude may write code for a delegated task (#92, `wb coding`; the pane's
+slider is #93). The local agent gets the first shot in all three, and Claude can always review and
+advise. The choice is `$WB_HOME/coding.json` `{mode, ts}`, read fresh each time, so a restart
+keeps it; without one it is `decide`:
+- **Let Claude decide** (`decide`): as before there was a choice. Nothing is added to Claude's
+  context and nothing is gated.
+- **Ask me first** (`ask`): Claude helps the agent first, then may ask the user for one specific
+  edit, naming the task and the change. Only the user's yes allows it, which Claude records with
+  `wb coding allow <task> --edit "…" --said "<their words>"`; unanswered, the work stays local.
+- **Only when I say** (`only`): Claude never writes a task's code; it guides the agent and, when the
+  agent stays stuck, reports the blocker and keeps the work. The user says when; Claude records
+  their words the same way.
+
+An allowance (`tasks/<task>/coding.json` `{allowed: [{edit, said, ts, used}]}`, a `coding` event)
+lasts until the work goes back to the agent: `spawn_runner` (feedback, next, resume) marks it
+`used`, so a retried or resumed task remembers it, and the next edit needs the user again. Two
+places hold Claude to it. `wb takeover` refuses (exit 3, saying what to do instead) without one
+(`_coding_gate`), unless `--user`: the mod's hand-back command passes it, and records an allowance
+for each task it hands over, since the user asked for exactly that. The mod denies Claude's own
+Edit, MultiEdit, Write and NotebookEdit calls on a path under `$WB_HOME/tasks/<task>/worktree/`
+without one (`codingRefusal`, in the one unmatched `tool.call` hook; the deny names the rule), and
+outside `decide` adds a `claude-coding` context block with the rule (`CODING_RULES`) while
+delegating or with a task open. A shell edit isn't seen: the block says the rule covers it too.
+
 ## The web chat
 
 `wb chat serve` (`workbench/chat.py`; kept up by `systemd/wb-chat.service`, a user unit running
@@ -2598,7 +2624,7 @@ Only the user's two slash commands stop the delegation, never words in a message
   (each id the session's process has had): this session's
   running agents stop, every task keeps its worktree for later, and Claude is told not to finish,
   restart or clean up anything unless asked.
-- **`/workbench-quit-and-hand-back-claude`** runs `wb takeover --all` with the same scope and
+- **`/workbench-quit-and-hand-back-claude`** runs `wb takeover --all --user` with the same scope and
   starts a turn for Claude
   to leave workbench mode, finish each task taken over itself to its own standard (`wb diff`, the acceptance
   command, `wb accept`), and carry on with the rest of the user's request without delegating.
@@ -2731,7 +2757,7 @@ reply in one line), or a Bash tool call matching
 session or a /workbench the mod missed; a `wb` named by absolute path isn't seen; not `accept` or
 `takeover`, which a done note after a quit asks for). Off:
 either quit command, which also closes the pane. While on: the `workbench-mode` and `user-notes`
-context blocks, the idle status line, pane auto-open, web chat listening, the apprentice's
+context blocks (and `claude-coding` outside "Let Claude decide", with a task open too), the idle status line, pane auto-open, web chat listening, the apprentice's
 "Workbench mode is on.", the boundary compaction. `mem.delegated` remembers the mode was on in
 this load, so a hand-back's compaction still keeps the state. No `$.ui.invalidate`: rewriting
 the first message would cost the conversation's prompt cache.
@@ -2745,7 +2771,7 @@ workbench mode off, `wb stop --all` with `scope()` (`--repo <mem.cwd> --session 
 don't finish, restart or clean up anything unless asked; tasks left alone are another session's;
 or, when wb failed, that the agents may still run); it starts no turn.
 `/workbench-quit-and-hand-back-claude`:
-mode off, `wb takeover --all` with `scope()`, and DONE_NOTE queued as a turn (leave workbench
+mode off, `wb takeover --all --user` with `scope()`, and DONE_NOTE queued as a turn (leave workbench
 mode; per task taken over `wb
 diff`, finish in its worktree, run the acceptance command, `wb accept` (`--merge` only if asked);
 leave the tasks left alone; carry on without delegating); when wb failed, no turn, and it says
@@ -2944,7 +2970,8 @@ delivered as taken (`_stale_notes`, *Notes*).
 | `wb allow <task> ["<pattern>"…]` | `--path DIR…`, `--always`, `--text "…"` | Adds to the task's grants (`rules/<task>/grants.json`; and commands.json with `--always`, refused when it doesn't parse or has the wrong shape: `context.commands_conf`); answers the oldest open permission request (else the pending question) with "Claude allowed … Run it again now and carry on."; if the agent is live, sends that as a `--now` steer so it restarts on its session with the rule (while the tests run or the task waits for the GPU it says the agent gets it when they end, or when its round starts). `--path` goes through `_lane_dir` (refuses a path through a link, naming its target, and what `context.lane_refusal` refuses: `/`, home, a place inside credentials, workbench's state or config, or the skill library, and a place in the task's repo or its git directory; creates the directory; `*` turns the lane off for the task). |
 | `wb steer <task> --text "…" \| --message <file>` | `--now` | Only while queued/running/testing/asking with a live runner. Appends to steer.jsonl: delivered when the current run ends (before the tests), or at once with `--now`. While testing: "its tests are running (up to Ns); the agent gets it when they end"; while queued: when its round starts. |
 | `wb note <task> --text "…"` | | A `captain` event: Claude's log line in the transcript. |
-| `wb takeover [<task> \| --all]` | `--repo DIR`, `--session ID` | Stops the runner, phase `review`, "Claude took over"; Claude edits in the worktree and accepts, or hands back with feedback. `--all`: every task that isn't closed. `--session ID` (repeatable) and `--repo DIR`, with `--all` (the mod passes every session id its process has had and its directory): only that session's tasks (`_scope`): one with a task.json `session` when it is one of the IDs, wherever it ran, or when its `claude_pid` is gone and DIR claims it as below; else (no `session`, or no `--session` given) when its `repo` is DIR, inside it or holds it, or its `cwd` is DIR or inside it, by whole components, never when DIR is the home directory or `/`; one with no key at all: every session's. The rest are listed as `left alone (other sessions'): …`. |
+| `wb coding [only\|ask\|decide]` | `allow <task> --edit "…" --said "…"` | When Claude may write a delegated task's code (*Claude coding*): with no argument, the choice and its sentence, then each open task's unspent allowance; a mode saves it. `allow` records the user's yes for one task's edit, until the task goes back to the agent. |
+| `wb takeover [<task> \| --all]` | `--repo DIR`, `--session ID`, `--user` | Stops the runner, phase `review`, "Claude took over"; Claude edits in the worktree and accepts, or hands back with feedback. Outside "Let Claude decide" it needs the user's recorded yes for the task, else exit 3; `--user` (the mod's hand-back command) is the user's own ask, and records one (*Claude coding*). `--all`: every task that isn't closed. `--session ID` (repeatable) and `--repo DIR`, with `--all` (the mod passes every session id its process has had and its directory): only that session's tasks (`_scope`): one with a task.json `session` when it is one of the IDs, wherever it ran, or when its `claude_pid` is gone and DIR claims it as below; else (no `session`, or no `--session` given) when its `repo` is DIR, inside it or holds it, or its `cwd` is DIR or inside it, by whole components, never when DIR is the home directory or `/`; one with no key at all: every session's. The rest are listed as `left alone (other sessions'): …`. |
 | `wb stop [<task> \| --all]` | `--repo DIR`, `--session ID` | A live task only. Marks status `stopping`, SIGTERM the runner (15 s, `wait_exit`, then SIGKILL to its session and the agent's), sweeps what the agent left (`runner.sweep`), phase `stuck`, "stopped by the reviewer", and acknowledges the task; the worktree is kept. `--all` (`stop_everything`): every open task, a `stopped` event "bail out: stopped by the user"; without `--repo`/`--session`, the bench's driver first (`bench.stop_driver`), so it starts no replay. `--session ID`, `--repo DIR` (with `--all`): as for takeover, the rest listed as `left running (other sessions'): …`. |
 | `wb resume <task>` | | Reaps a dead runner first. Phase stuck/failed (a task whose runner died is failed), no live runner: a fresh session (round n+1, `runner.RESUME` + what the step's rounds asked), not a review round; Claude's notes the last runner never delivered follow, as a `NOTE_HEAD` note. A note names the GPU's holders when it will wait for them. Acks the task and gathers lessons. |
 | `wb accept <task> -m "…"` | `--merge`, `--force` (any open phase; stops a live runner), `--spec-gap`, `--take-claude-md` (the agent's `<name>.proposed` CLAUDE.md/AGENTS.md over the file; without it they are dropped: *Claude's files*) | Reaps a dead runner first. Phase review; refuses a closed task, unless an earlier accept or discard closed it without writing its results row (status `unrecorded`): then it writes that row, once, from what the earlier run measured, and says so (`_finish_record`, #88). A live task with nothing changed on its first step is refused before its runner is stopped ("no changes to accept yet"); a live task whose commit then fails is left `stuck` ("accept failed: …", for wb accept again, resume, feedback or discard), not live with no runner. Records the step, commits (a worktree with no new changes accepts the branch's commits past the base: earlier steps, or Claude's own after a takeover; a retry after an accept died past its commit takes that commit) (`<m>` + "Delegated to <label> via OpenCode: R round(s), F automatic test-fix, V review round(s)." + `Workbench-Task:` + `OpenCode-Session:`; no AI co-author line), removes the worktree (a failure is a warning: `remove_worktree`) and the agent's runtime directory (`drop_runtime_dir`), `--merge`s (`merge --no-ff --no-edit` into `base_branch`, which the main checkout must have out, else a branch holding the base; never a detached HEAD; no changes to tracked files; a conflict is backed out; a failure is reported and the accept stands), writes the results row, prints how far CLAUDE.md (or `.claude/CLAUDE.md`) is behind (a failure there never fails the accept) and what the task cost Claude (`claude:`, when known). Gathers lessons. |
@@ -3002,6 +3029,7 @@ delivered as taken (`_stale_notes`, *Notes*).
 ```
 $WB_HOME (~/.local/state/workbench)
   notify.jsonl                   notices that need Claude, all tasks (the runner writes them)
+  coding.json                    Claude coding, the user's choice: {mode: only|ask|decide, ts}; none: decide
   results.jsonl                  one row per closed task: what the router, slices, tuning and skill records learn from
   lessons.jsonl                  what each task taught, open until written into a skill or closed
   notes.md  notes.lock           wb notes: how the user wants delegation run
@@ -3036,6 +3064,7 @@ $WB_HOME (~/.local/state/workbench)
   tasks/<task>/                  readable from the lane; only worktree/ and ask/ writable
     task.json  status.json
     events.jsonl  steer.jsonl  acked  context.md  runner.log
+    coding.json                  what the user allowed Claude to edit: {allowed: [{edit, said, ts, used}]} (*Claude coding*)
     base-tests.txt               the base check's output: the acceptance command on the base (`--test`)
     rounds/<n>/                  prompt.md  instructions.md (before a handover rewrote it)  summary.md  tests.txt
     ask/<id>.json  <id>.answer   questions and permission requests; their answers (all the lane writes here, with worktree/)
@@ -3133,7 +3162,7 @@ compacted}`,
 can't stop, a model partly on the CPU, a share Ollama couldn't keep), and relaying the agent's
 questions `ask {id}`, `answer {id}`. From `wb`:
 `spec_gap`, `next_step`, `stopped` (bail out), `resumed`, `allow`, `steer {now}`, `captain`,
-`takeover`, `error` (`reap`: the runner died without a report).
+`takeover`, `coding` (the user allowed Claude an edit), `error` (`reap`: the runner died without a report).
 
 **results.jsonl** (`results.record`, on accept and discard): `ts`, `task`, `outcome`
 (`accepted`/`discarded`), `model`, `size`, `repo`, `stack`, `rounds`, `auto_fixes`, `reviews`
