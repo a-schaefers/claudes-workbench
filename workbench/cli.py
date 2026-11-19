@@ -46,6 +46,16 @@ question(s) for this task). Otherwise make reasonable choices and say what you a
 """
 
 
+def test_line(test: str | None) -> str:
+    """The protocol's acceptance line (bench.TEST_LINE reads it back). It names the command and
+    keeps the agent to it: two agents in a row ran the whole suite for half an hour after theirs
+    passed (2026-11-18, #127), and the runner runs the command after each round anyway."""
+    return (f"- The acceptance command is `{test}`. Run it before you finish and make it pass. "
+            "Never weaken, skip or delete tests to get there. Don't run the whole suite unless the "
+            "spec asks: it can outlast your round, and Claude runs it at review.\n") if test else ""
+
+
+
 def die(msg: str, code: int = 1):
     print(f"wb: {msg}", file=sys.stderr)
     sys.exit(code)
@@ -413,10 +423,8 @@ def cmd_start(a):
         "silence_timeout": a.silence_timeout or limits["silence"],
         "think_timeout": a.think_timeout if a.think_timeout is not None else limits["think"],
         "created_at": store.now(), "wb_version": __version__})
-    test_line = (f"- The acceptance command is `{a.test}`. Run it before you finish and make it "
-                 "pass. Never weaken, skip or delete tests to get there.\n") if a.test else ""
     prompt = spec_text.rstrip() + PROTOCOL.format(branch=gitops.branch_name(a.name),
-                                                  test_line=test_line, budget=budget)
+                                                  test_line=test_line(a.test), budget=budget)
     task.round_dir(1).mkdir(parents=True)
     task.round_dir(1).joinpath("prompt.md").write_text(prompt, encoding="utf-8")
     task.set_status(phase="queued", round=1, reviews=0, auto_fixes=0, tools=0,
@@ -569,8 +577,6 @@ def cmd_next(a):
     if a.test is not None:  # the one change to task.json after start
         store.write_json(task.dir / "task.json", {**spec, "test_cmd": a.test})
     test = a.test if a.test is not None else spec.get("test_cmd")
-    test_line = (f"- The acceptance command is `{test}`. Run it before you finish and make it "
-                 "pass. Never weaken, skip or delete tests to get there.\n") if test else ""
     used = ask_mcp.used(task) if "asks" in st else sum(  # the budget is the task's: what's left
         1 for p in (task.dir / "ask").glob("*.json") if not ask_mcp._permission(store.read_json(p, {})))
     budget = max(0, spec.get("ask_budget", 0) - used)
@@ -579,7 +585,7 @@ def cmd_next(a):
     task.round_dir(n).joinpath("prompt.md").write_text(
         f"Step {step} of this task is done and committed ({commit}). The next step:\n\n"
         + nxt.rstrip()
-        + PROTOCOL.format(branch=spec["branch"], test_line=test_line, budget=budget),
+        + PROTOCOL.format(branch=spec["branch"], test_line=test_line(test), budget=budget),
         encoding="utf-8")
     task.event({"ts": store.now(), "round": n, "kind": "next_step",
                 "text": f"step {step} committed as {commit}; next step sent"})

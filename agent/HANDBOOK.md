@@ -34,7 +34,8 @@ anything here.
   remembered is wrong. An edit that "changes nothing" means you are already done or confused.
 
 ## Verifying
-- Run the acceptance command and the tests nearest your change. Read the whole failure output.
+- Run the acceptance command, and the one test file nearest your change if the command misses
+  it; not the whole suite. Read the whole failure output.
 - Fix the cause, not the symptom. Never weaken, skip, delete or special-case a test to make it
   pass, and never hard-code expected outputs.
 - A number the spec works out (an expected position, a count, a size) is the answer. When a test

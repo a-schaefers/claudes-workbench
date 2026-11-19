@@ -3499,6 +3499,14 @@ class Routing(Base):
 class Bench(Base):
     """wb bench: accepted tasks replayed and graded by the tests they were accepted with."""
 
+    def test_the_protocol_keeps_the_agent_to_its_command_and_bench_can_read_it_back(self):
+        # #127 (2026-11-18): two agents ran the whole suite for half an hour after theirs passed.
+        from workbench import bench
+        line = cli.test_line("python3 -m unittest tests.test_x")
+        self.assertIn("Don't run the whole suite", line)
+        self.assertEqual(bench.TEST_LINE.search(line).group(1), "python3 -m unittest tests.test_x")
+        self.assertEqual(cli.test_line(None), "")
+
     def accepted(self, name: str, test: str = "sh tests/check.sh", notes: bool = False) -> store.Task:
         """An accepted task whose step added tests/check.sh (written here, as the agent's), and
         notes.txt with `notes`: one more thing the fake's replay never writes."""
