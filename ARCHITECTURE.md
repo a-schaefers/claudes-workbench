@@ -430,6 +430,16 @@ the GPU each count all of it. The size: `gitops.footprint` gives `files`, `lines
 `removed`; each step records them (`results.step`), and an accepted task's row sums them as
 `diff`.
 
+**Sharing it** (`wb savings --share`, `savings.share`, #119) prints a plain summary for the user
+to paste into a discussion, where users pool their evidence. Nothing is sent anywhere. It covers
+the period's rows with both sides to compare:
+- the machine: `hardware.system()`, each GPU's name and VRAM (`hardware.gpus(windows=False)`);
+- the local models used: their count and weights (`models.weights`), never a name;
+- the tasks: Claude's tokens, the estimate, handoff/self overall and by task size;
+- the GPU energy, saying when some ran on another machine's GPU.
+
+No model name, repo, task name or price appears in it.
+
 ## The runner, inside
 
 `workbench/runner.py`, started as `python -X utf8 -m workbench.runner <task>` by `cli.spawn_runner` (cwd
@@ -1871,6 +1881,26 @@ driver records `preempted` and replays it later. `wb bench stop` (or `wb stop --
 Each row has `wb_commit` (the workbench clone's HEAD) and `label`: run a branch of workbench with
 `--label` and compare it with main's rows in `wb bench report --label`.
 
+**Claude writing it** (`wb bench self <case> --yes [--turns N]`, `bench.self_run`, #118) is the
+other side of the handoff's cost. It runs Claude Code on the case: `claude -p --output-format
+json --max-turns N` (40, `SELF_TURNS`) in a scratch checkout of the case's base. The spec is
+followed by `SELF_PROMPT` (the acceptance command, run before finishing).
+- **What Claude may do.** Edits are allowed (`--permission-mode acceptEdits`), and of the shell
+  only the acceptance command (`--allowedTools Bash(<cmd>:*)`, one rule per simple command of
+  a compound line, which Claude Code checks part by part), since no one is there to ask.
+- **Grading.** It is graded as a replay is: the hidden checks overlaid, then the acceptance and
+  check commands in the original task's lane and environment (refused when that task is gone).
+- **The cost.** claude -p's JSON `usage` becomes spend's shape (`_self_usage`: input, 5-minute
+  and 1-hour cache writes, cache reads, output, turns), so `spend.weighted` prices it as it
+  prices a handoff.
+- **The row.** It goes to runs.jsonl with `arm: "claude"`, `model: "claude"`, `label: "claude"`,
+  `claude`, `turns`, `claude_model`. `wb bench report` keeps those rows out of the per-model
+  table and lists each one under "Claude writing it": PASS or fail, its weighted tokens, and the
+  original task's handoff cost to Claude (its results row's `claude`, every step's;
+  `handoff_cost`) with the ratio handoff/self.
+- **The yes.** It refuses without `--yes`, because it spends Claude tokens, and nothing runs it
+  on its own.
+
 ## Optimize: measuring this machine, when asked
 
 `wb optimize` (`workbench/optimize.py`) is the one place workbench loads a model only to learn
@@ -3120,9 +3150,10 @@ delivered as taken (`_stale_notes`, *Notes*).
 | `wb notes` / `add "…"` / `drop N…` | | The user's standing delegation preferences (`notes.md`, `- ` lines, at most 20 of 300 characters). |
 | `wb bench add <task>` | `--step N` (the last), `--hidden PATH…` (the test files the step changed), `--check CMD`, `--name CASE` (the task's; `<task>-sN` for a step of several) | Makes a case of one step of an accepted task (*Bench*): the base as a bundle, the spec, the acceptance command, the hidden checks, the grants. Refused: not accepted or a trial, the repo or commit gone, no acceptance command, no hidden checks, ones that pass on the base already, or ones its own commit fails in the agent's lane (no replay could pass them). |
 | `wb bench list` / `wb bench report` / `wb bench stop` | `report`: `--run ID`, `--label TEXT` | The cases; pass rates, rounds, auto-fixes, minutes and local tokens per label and model, then each case against the original's model and review rounds (with the running run's progress), the preempted count, and each replay that didn't start with why and its `wb.log` (the last 10; a run of only those said "no replays yet", #89); stop the driver, which closes its replay. |
+| `wb bench self <case>` | `--yes` (required: it spends Claude tokens), `--turns N` (40) | Claude Code writes the case (`claude -p`, edits and the acceptance command only), graded by its hidden checks in the original task's lane; one runs.jsonl row (`arm: claude`) and its line: PASS or fail, the weighted tokens, the handoff's cost and the ratio (*Bench*). |
 | `wb bench run` | `--model ID…` (every model that can run and takes the case's size), `--case NAME…` (every case), `--skill NAME…`, `--label TEXT`, `--repeat N` (1) | Writes the run's plan and detaches its driver, then returns: one replay at a time, after any real task, preempted by one; refuses while another run runs. Skips what an earlier run with the same label already replayed. |
 | `wb backlog [NAME]` | `--json` | A batch started with `wb start --backlog NAME` (the morning summary of a night's run): `backlog NAME: N task(s) · 2 accepted · 1 review`, then a line per task (phase, rounds, minutes: the results row's, or since start while open; the branch when accepted; `savings.line` of its row once closed), then `savings.summary` over the batch's non-trial rows (`the batch: …`). An unknown name: exit 1. Without a name, each batch with its task count and how many are open. `--json`: `{backlog, tasks: [{task, phase, rounds, minutes, branch, saving}], totals}`. |
-| `wb savings` | `--week` (default) \| `--month` \| `--all`, `--json`, `--price X` | What the delegated tasks saved Claude over the period against the estimate of writing them (`savings.totals`, `summary`; trials left out): tasks, Claude's tokens, the estimate, the saving and its percentage, the GPU energy and, with a price, its cost. `--price` (per kWh, positive, else exit 1) writes savings.json first. `--json`: `{period, tasks, claude, self_est, saved, wh, cost}`. |
+| `wb savings` | `--week` (default) \| `--month` \| `--all`, `--json`, `--share` (a summary to paste: the machine, model sizes, no names; *Sharing it*), `--price X` | What the delegated tasks saved Claude over the period against the estimate of writing them (`savings.totals`, `summary`; trials left out): tasks, Claude's tokens, the estimate, the saving and its percentage, the GPU energy and, with a price, its cost. `--price` (per kWh, positive, else exit 1) writes savings.json first. `--json`: `{period, tasks, claude, self_est, saved, wh, cost}`. |
 | `wb stats` / `wb tune` / `wb trial <task…>` | | Results by model and size (judged rows: it says how many spec-gap discards and trials it left out), with a `claude` column (the average input-equivalent tokens a task cost Claude) once a row records one; the tuned settings; mark closed tasks as trials: their results rows, and their open lessons are dropped; an open task is refused (it has no row yet, so it was marked as nothing while its lessons went). |
 
 ### Other
@@ -3304,7 +3335,9 @@ files in `hidden/`), `allow`, `paths`, `skills` (the original's), `original` (`m
 `model`, `task`, `wb_commit`, `skills`, `outcome` (`passed`, `failed`, `preempted`, `error`),
 `why`, and from the replay's status `phase`, `rounds`, `auto_fixes`, `tok_in`, `tok_out`,
 `minutes`, `asks_refused`, `visible_ok` (its own last run of the acceptance command, before the
-hidden files), `handovers` (fresh sessions).
+hidden files), `handovers` (fresh sessions). A `wb bench self` row (`bench.self_run`) has `arm:
+"claude"`, `model` and `label` `"claude"`, `claude` (spend's usage shape), `turns`,
+`claude_model`, `minutes`, `outcome` and `why`.
 
 **Other formats.**
 - `steer.jsonl`: `{ts, text, now}`. `acked`: a float timestamp as text, replaced whole
@@ -3334,9 +3367,11 @@ hidden files), `handovers` (fresh sessions).
 claude plugin marketplace add a-schaefers/claudes-workbench
 claude plugin install workbench@workbench
 ~/.claude/plugins/marketplaces/workbench/bin/wb setup
-wb doctor
 ```
-The plugin install copies only `mod/` (the marketplace entry's `source`) into Claude Code's plugin
+then `/workbench` in Claude Code, inside a project: the first time, the skill walks the first run
+in order (`wb setup`'s checklist, `wb scout` and `wb model add`, `wb optimize`, `wb try`, its
+review and accept, the savings line; #113). `wb setup` ends with the `first run:` checklist, so
+the quickstart no longer runs `wb doctor` itself. The plugin install copies only `mod/` (the marketplace entry's `source`) into Claude Code's plugin
 cache, but `marketplace add` keeps a full clone of the repo under
 `~/.claude/plugins/marketplaces/<the marketplace's name>` (`installLocation` in
 `known_marketplaces.json`; elsewhere under `CLAUDE_CODE_PLUGIN_CACHE_DIR`). `wb setup` links `wb`

@@ -26,7 +26,7 @@ from contextlib import redirect_stdout
 from pathlib import Path
 from types import SimpleNamespace
 
-from . import ask_mcp, context, gitops, models, router, runner, store
+from . import ask_mcp, context, gitops, models, router, runner, spend, store
 from .runner import PKG_ROOT
 from .watch import Watcher
 
@@ -472,6 +472,107 @@ def _wait(task: store.Task) -> tuple[dict, int]:
             watcher.wait(30.0)
 
 
+# --- Claude writing it (#118): the other side of the handoff's cost ------------------------------
+
+SELF_TURNS = 40  # claude -p's turn cap for one case
+SELF_PROMPT = ("{spec}\n\nThe acceptance command is `{test}`: run it before you finish, and finish "
+               "only when it passes. Change only what the task needs.")
+
+
+def _self_usage(result: dict) -> dict:
+    """claude -p's JSON usage in spend's shape, so spend.weighted prices it as it prices a handoff."""
+    u = result.get("usage") or {}
+    made = u.get("cache_creation") or {}
+    one_h = made.get("ephemeral_1h_input_tokens") or 0
+    return {"turns": result.get("num_turns") or 0, "calls": result.get("num_turns") or 0,
+            "input": u.get("input_tokens") or 0,
+            "cache_write_5m": made.get("ephemeral_5m_input_tokens",
+                                       (u.get("cache_creation_input_tokens") or 0) - one_h),
+            "cache_write_1h": one_h, "cache_read": u.get("cache_read_input_tokens") or 0,
+            "output": u.get("output_tokens") or 0}
+
+
+def handoff_cost(case: dict) -> int | None:
+    """What handing the case's original task off cost Claude (its results row; every step's)."""
+    row = next((r for r in reversed(store.results(trials=True)) if r.get("task") == case.get("task")), {})
+    return spend.weighted(row["claude"]) if row.get("claude") else None
+
+
+def self_run(case_name: str, turns: int = SELF_TURNS) -> dict:
+    """One case written by Claude (`claude -p`) in a scratch checkout of its base, graded by its
+    hidden checks in the original task's lane, as a replay is; its runs.jsonl row (arm: claude)."""
+    case = cases().get(case_name)
+    if not case:
+        raise RuntimeError(f"no case named {case_name!r} (wb bench list)")
+    original = store.Task(case["task"])
+    if not original.exists:
+        raise RuntimeError(f"{case['task']}, the task {case_name} was made from, is gone: its lane "
+                           "is what grades a run, so this case can't be graded as replays are")
+    claude = shutil.which("claude")
+    if not claude:
+        raise RuntimeError("claude (Claude Code) isn't on PATH")
+    stamp = f"{int(time.time() * 1000) % 10 ** 9:09d}"
+    run, name = f"self-{stamp}", f"self-{case_name[:30]}-{stamp}"
+    d = home() / "runs" / run / name
+    d.mkdir(parents=True)
+    row = {"ts": store.now(), "run": run, "label": "claude", "rep": 1, "case": case_name,
+           "model": "claude", "arm": "claude", "task": name, "wb_commit": wb_commit()}
+    began = time.time()
+    try:
+        checkout(case, d / "repo")
+        prompt = SELF_PROMPT.format(spec=(case_dir(case_name) / "spec.md").read_text(),
+                                    test=case["test_cmd"])
+        # edits and the acceptance command only: nothing else is allowed without someone to ask.
+        # Claude Code checks each simple command of a compound line on its own, so each gets a rule
+        allow = [f"Bash({c.strip()}:*)" for c in re.split(r"&&|\|\||;", case["test_cmd"]) if c.strip()]
+        argv = [claude, "-p", "--output-format", "json", "--max-turns", str(turns),
+                "--permission-mode", "acceptEdits", "--allowedTools", *allow, "--", prompt]
+        try:
+            p = subprocess.run(argv, cwd=d / "repo", capture_output=True, text=True,
+                               timeout=int(case.get("test_timeout") or 900) * 4)
+        except subprocess.TimeoutExpired:
+            return {**row, "outcome": "error", "why": "claude -p timed out"}
+        (d / "claude.json").write_text(p.stdout)
+        try:
+            result = json.loads(p.stdout)
+        except ValueError:
+            return {**row, "outcome": "error", "why": f"claude -p exited {p.returncode} without a "
+                    f"JSON result: {(p.stderr or p.stdout).strip()[:200]}"}
+        usage = _self_usage(result)
+        row.update(claude=usage, minutes=round((time.time() - began) / 60, 1),
+                   turns=usage["turns"], claude_model=next(iter(result.get("modelUsage") or {}), None))
+        (d / "diff.patch").write_text(gitops.diff(d / "repo", "HEAD"))
+        overlay(case, d / "repo")
+        out, ok = [], True
+        for cmd in (case["test_cmd"], case.get("check_cmd")):
+            if cmd:
+                code, text = runner.run_in_lane(_At(original.name, d / "repo"), cmd,
+                                                int(case.get("test_timeout") or 900))
+                out.append(f"$ {cmd}\nexit: {code}\n\n{text}")
+                ok = ok and code == 0
+        (d / "grade.txt").write_text("\n\n".join(out))
+        return {**row, "outcome": "passed" if ok else "failed",
+                **({} if ok else {"why": "the hidden checks failed (grade.txt)"})}
+    finally:
+        shutil.rmtree(d / "repo", ignore_errors=True)
+
+
+def self_lines(rs: list[dict]) -> list[str]:
+    """Claude writing each case against handing it off: weighted tokens, and the ratio."""
+    if not rs:
+        return []
+    out = ["", "Claude writing it (wb bench self), against the handoff's cost to Claude:"]
+    have = cases()
+    for r in rs:
+        mine = spend.weighted(r["claude"]) if r.get("claude") else None
+        hand = handoff_cost(have.get(r["case"]) or {"task": None})
+        ratio = f", handoff/self {hand / mine:.2f}" if hand and mine else ""
+        out.append(f"{r['case']}: {'PASS' if r['outcome'] == 'passed' else 'fail'}, self "
+                   + (f"~{mine / 1000:.0f}K" if mine else "?") + ", handoff "
+                   + (f"~{hand / 1000:.0f}K" if hand else "not measured") + ratio)
+    return out
+
+
 # --- reading the results ------------------------------------------------------------------------
 
 def rows(run: str | None = None, label: str | None = None) -> list[dict]:
@@ -482,6 +583,8 @@ def rows(run: str | None = None, label: str | None = None) -> list[dict]:
 
 def report(run: str | None = None, label: str | None = None) -> str:
     rs = rows(run, label)
+    mine = [r for r in rs if r.get("arm") == "claude"]
+    rs = [r for r in rs if r.get("arm") != "claude"]
     every = store.read_jsonl(runs_file())[0]
     other = [r for r in every if (run is None or r.get("run") == run) and not _done(r)]
     head = []
@@ -500,7 +603,7 @@ def report(run: str | None = None, label: str | None = None) -> str:
         return "\n".join(head + ([f"no replay finished; {len(errors)} didn't start:"] + unstarted
                                  if errors else
                                  ["no replays yet" + (" (wb bench add, then wb bench run)"
-                                                      if not cases() else "")]))
+                                                      if not cases() else "")]) + self_lines(mine))
     by: dict = {}
     for r in rs:
         by.setdefault((r.get("label") or "-", r["model"]), []).append(r)
@@ -523,7 +626,7 @@ def report(run: str | None = None, label: str | None = None) -> str:
                    f"{o.get('reviews', '?')} review round(s))")
     if len(other) > len(errors):
         out.append(f"({len(other) - len(errors)} replay(s) preempted, left out)")
-    out += unstarted
+    out += unstarted + self_lines(mine)
     return "\n".join(out)
 
 

@@ -1559,7 +1559,15 @@ def cmd_savings(a):
         savings.set_price(a.price)
     period = "month" if a.month else "all" if a.all else "week"
     span = savings.PERIODS[period]
-    t = savings.totals(store.results(), since=store.now() - span if span else 0)
+    since = store.now() - span if span else 0
+    if a.share:  # to paste into a discussion: sizes, never names (#119)
+        found = models.discover()
+        rows = store.results()
+        print(savings.share(rows, period, since, hardware.gpus(windows=False),
+                            {m: models.weights(found[m]) for m in {r.get("model") for r in rows}
+                             if m in found}, hardware.system()))
+        return
+    t = savings.totals(store.results(), since=since)
     if a.json:
         print(json.dumps({"period": period, **t}))
     else:
@@ -1643,6 +1651,16 @@ def cmd_bench(a):
         _, lines = bench.start(a.model or [], a.case or [], _skill_names(a.skill), a.label or "",
                                a.repeat)
         print("\n".join(lines))
+    elif a.bench_cmd == "self":  # spends Claude's tokens: the user's yes, every time (#118)
+        if not a.yes:
+            die("wb bench self runs Claude Code on the case and spends Claude tokens: add --yes")
+        try:
+            row = bench.self_run(a.case, a.turns)
+        except RuntimeError as e:
+            die(str(e))
+        store.append_jsonl(bench.runs_file(), row)
+        print("\n".join(bench.self_lines([row])[1:]) if row.get("outcome") != "error" else
+              f"{a.case}: didn't run: {row['why']}")
     elif a.bench_cmd == "stop":
         pid = bench.stop_driver()
         print(f"stopped the bench run (pid {pid})" if pid else "no bench run is running")
@@ -3258,6 +3276,11 @@ def parser() -> argparse.ArgumentParser:
     x.add_argument("--skill", nargs="+", help="hand these library skills to every replay")
     x.add_argument("--label", help="a name for this variant (a workbench branch, a skill), to compare by")
     x.add_argument("--repeat", type=int, default=1, help="replay each N times")
+    x = bs.add_parser("self", help="the case written by Claude (claude -p), graded alike: what "
+                      "writing it cost Claude, against the handoff")
+    x.add_argument("case")
+    x.add_argument("--yes", action="store_true", help="spend Claude tokens on it (required)")
+    x.add_argument("--turns", type=int, default=bench.SELF_TURNS, help="claude -p's turn cap (40)")
     bs.add_parser("stop", help="stop the run, closing its replay")
     x = bs.add_parser("report", help="pass rates by model and label, and each case")
     x.add_argument("--run")
@@ -3274,6 +3297,8 @@ def parser() -> argparse.ArgumentParser:
     g.add_argument("--month", action="store_true", help="the last 30 days")
     g.add_argument("--all", action="store_true", help="every task recorded")
     s.add_argument("--json", action="store_true")
+    s.add_argument("--share", action="store_true", help="a plain summary to paste into a "
+                   "discussion: the machine, model sizes (no names), tasks, ratios, energy")
     s.add_argument("--price", type=float, help="set the electricity price per kWh, then report")
     s.set_defaults(f=cmd_savings)
     sub.add_parser("tune", help="the settings tuned from results, per model and window").set_defaults(f=cmd_tune)

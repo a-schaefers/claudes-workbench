@@ -3695,6 +3695,50 @@ class Bench(Base):
             run_wb("bench", "add", "t-src")                               # once
         self.assertIn("t-src", run_wb("bench", "list"))
 
+    def fake_claude(self, answer: str) -> Path:
+        """A `claude` on PATH that writes answer.txt and prints claude -p's JSON result."""
+        bin_ = Path(self.tmp.name) / "claude-bin"
+        bin_.mkdir(exist_ok=True)
+        args = Path(self.tmp.name) / "claude-args.json"
+        (bin_ / "claude").write_text(
+            "#!/usr/bin/env python3\nimport json, sys\n"
+            f"open({str(args)!r}, 'w').write(json.dumps(sys.argv[1:]))\n"
+            f"open('answer.txt', 'w').write({answer!r} + '\\n')\n"
+            "print(json.dumps({'type': 'result', 'num_turns': 6, 'result': 'done', 'modelUsage': {'m': {}},"
+            " 'usage': {'input_tokens': 1000, 'cache_read_input_tokens': 200000, 'output_tokens': 3000,"
+            " 'cache_creation_input_tokens': 10000, 'cache_creation': {'ephemeral_5m_input_tokens': 0,"
+            " 'ephemeral_1h_input_tokens': 10000}}}))\n")
+        (bin_ / "claude").chmod(0o755)
+        os.environ["PATH"] = f"{bin_}{os.pathsep}{os.environ['PATH']}"
+        return args
+
+    def test_claude_writing_a_case_is_graded_alike_and_set_against_the_handoffs_cost(self):
+        # #118: the other side of the handoff's cost, measured as spend measures a handoff
+        from workbench import bench
+        self.accepted("t-src")
+        run_wb("bench", "add", "t-src")
+        err = io.StringIO()
+        with self.assertRaises(SystemExit), redirect_stderr(err):
+            run_wb("bench", "self", "t-src")                          # spends Claude's tokens: --yes
+        self.assertIn("spends Claude tokens: add --yes", err.getvalue())
+        args = self.fake_claude("42")
+        store.append_jsonl(store.home() / "results.jsonl", {"ts": store.now(), "task": "t-src",
+            "outcome": "accepted", "claude": {"turns": 3, "calls": 9, "input": 2000, "cache_write_5m": 0,
+            "cache_write_1h": 20000, "cache_read": 400000, "output": 6000}})   # the handoff's, ~112K
+        out = run_wb("bench", "self", "t-src", "--yes")
+        self.assertIn("t-src: PASS, self ~56K, handoff ~112K, handoff/self 2.00", out)
+        argv = json.loads(args.read_text())
+        self.assertEqual(argv[:6], ["-p", "--output-format", "json", "--max-turns", "40", "--permission-mode"])
+        self.assertIn("Bash(sh tests/check.sh:*)", argv)                  # edits and its command only
+        self.assertEqual(argv[argv.index("--allowedTools") + 1:argv.index("--")], ["Bash(sh tests/check.sh:*)"])
+        self.assertIn("The acceptance command is `sh tests/check.sh`", argv[-1])
+        [row] = [r for r in bench.rows() if r.get("arm") == "claude"]
+        self.assertEqual((row["model"], row["turns"], row["claude"]["cache_write_1h"]), ("claude", 6, 10000))
+        self.assertNotIn("claude ", run_wb("bench", "report").split("\n\n")[0])  # not a model's row
+        self.assertIn("Claude writing it (wb bench self)", run_wb("bench", "report"))
+        self.fake_claude("41")
+        self.assertIn("t-src: fail", run_wb("bench", "self", "t-src", "--yes"))  # graded by the hidden checks
+
     def test_a_case_is_refused_without_an_accepted_task_tests_or_a_failing_base(self):
         from workbench import bench
         self.start("t-open", "ok", "--test", TEST_CMD)
@@ -4116,6 +4160,33 @@ class Savings(Base):
                   "cache_write_1h": 0, "cache_read": 0, "output": 1000}
         big = {"claude": costly, "diff": {"files": 1, "added": 0, "removed": 0}}
         self.assertIn("cost ~5K more", savings.line(big))
+
+    def test_the_shared_summary_has_the_machine_and_model_sizes_but_never_a_name(self):
+        # #119: users pool evidence by pasting it; a model's name and the repo stay here
+        from workbench import savings
+        usage = {"turns": 2, "calls": 5, "input": 1000, "cache_write_5m": 0,
+                 "cache_write_1h": 10000, "cache_read": 200000, "output": 3000}
+        now = store.now()
+        rows = [{"ts": now, "model": "ollama/secret-coder:27b", "size": "significant", "repo": "/home/u/acme",
+                 "task": "fix-acme-billing", "claude": usage, "diff": {"files": 4, "added": 61, "removed": 1},
+                 "gpu_wh": 600},
+                {"ts": now, "model": "ollama/other:9b", "size": "trivial", "claude": usage,
+                 "diff": {"files": 1, "added": 3, "removed": 0}, "remote_gpu": True},
+                {"ts": 1, "model": "ollama/old:1b", "size": "trivial", "claude": usage,
+                 "diff": {"files": 1, "added": 3, "removed": 0}}]   # before the period
+        out = savings.share(rows, "week", now - 7 * 86400,
+                            [{"name": "Radeon RX 7900 XTX", "vram": 24 * 10 ** 9}],
+                            {"ollama/secret-coder:27b": 17 * 10 ** 9}, "linux")
+        self.assertEqual(out.splitlines(), [
+            "workbench savings, the last 7 days (an estimate: `wb savings --share`)",
+            "- machine: linux; GPU: Radeon RX 7900 XTX (24 GB VRAM)",
+            "- local models: 2 (size unknown, 17 GB of weights)",
+            "- tasks: 2; Claude used 112K input-equivalent tokens, writing them itself ~100K (estimate); handoff/self 1.12",
+            "- by size: significant 0.95 (1), trivial 1.36 (1)",
+            "- GPU energy: 600 Wh (1 task(s) on another machine's GPU, not measured)"])
+        for private in ("secret", "acme", "fix-", "other:9b"):
+            self.assertNotIn(private, out)
+        self.assertIn("workbench savings, the last 7 days", run_wb("savings", "--share"))
 
     def test_a_task_on_another_machines_gpu_says_its_energy_was_not_measured(self):
         # #117: nothing here reads a remote GPU's power, and a line without energy read as free

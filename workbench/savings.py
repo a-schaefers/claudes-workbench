@@ -153,3 +153,41 @@ def summary(t: dict, period: str) -> str:
     away = (f" · {t['remote']} on another machine's GPU, not measured" if t.get("remote") else "")
     return (f"{when}: {t['tasks']} task(s) · claude {k(t['claude'])} · writing it yourself "
             f"~{k(t['self_est'])} (estimate) · {saved}{pct}{gpu}{cost}{away}")
+
+
+def share(rows: list[dict], period: str, since: float, gpus: list[dict],
+          weights: dict[str, int], system: str) -> str:
+    """`wb savings --share` (#119): a plain summary to paste into a discussion, where users pool
+    their evidence. The machine (its OS, each GPU's name and VRAM), the local models' sizes and no
+    names, the tasks, the ratios by size, and the energy. ``weights`` is the models' weights in
+    bytes by id; nothing leaves this machine but what the user pastes."""
+    when = {"week": "the last 7 days", "month": "the last 30 days", "all": "all time"}.get(period, period)
+    used = [r for r in rows if r.get("ts", 0) >= since and of_row(r) is not None]
+    t = totals(used)
+    gb = lambda n: f"{n / 1e9:.0f} GB"  # noqa: E731
+    cards = ", ".join(f"{g['name']}" + (f" ({gb(g['vram'])} VRAM)" if g.get("vram") else "")
+                      for g in gpus) or "none found"
+    sizes = sorted(weights.get(m) or 0 for m in {r.get("model") for r in used})
+    out = [f"workbench savings, {when} (an estimate: `wb savings --share`)",
+           f"- machine: {system}; GPU: {cards}",
+           f"- local models: {len(sizes)}" + (" (" + ", ".join(gb(s) if s else "size unknown"
+                                                              for s in sizes) + " of weights)"
+                                               if sizes else "")]
+    if not t["tasks"]:
+        return "\n".join(out + ["- no task to compare yet"])
+    k = lambda n: f"{n / 1000:.0f}K"  # noqa: E731
+    out.append(f"- tasks: {t['tasks']}; Claude used {k(t['claude'])} input-equivalent tokens, "
+               f"writing them itself ~{k(t['self_est'])} (estimate)"
+               + (f"; handoff/self {t['claude'] / t['self_est']:.2f}" if t["self_est"] else ""))
+    by: dict = {}
+    for r in used:
+        p = of_row(r)
+        b = by.setdefault(r.get("size") or "?", [0, 0, 0])
+        b[0], b[1], b[2] = b[0] + 1, b[1] + p["claude"], b[2] + p["self_est"]
+    out.append("- by size: " + ", ".join(
+        f"{size} {c / s:.2f} ({n})" if s else f"{size} discarded ({n})"
+        for size, (n, c, s) in sorted(by.items())))
+    out.append(f"- GPU energy: {energy(t['wh'])}" if t["wh"] else "- GPU energy: not measured")
+    if t["remote"]:
+        out[-1] += f" ({t['remote']} task(s) on another machine's GPU, not measured)"
+    return "\n".join(out)

@@ -60,10 +60,15 @@ the pane back (the mod answers it; with a task, the task is yours to take as usu
   Answer questions, read code, plan, and do what is yours (git, CLAUDE.md, `.claude/`, anything
   outward) yourself, as always. An edit that costs less to make than to spec (a typo, one line)
   you may just make.
-- **First run** (no model can run yet, or the user wants to see it work): `wb setup`'s `first
-  run:` lines say what is missing; fix each with the user's yes (a model: reference/models.md).
-  Then `wb try` proves the setup on a tiny sample: review it as any task, run the hidden check it
-  printed, show the user the result, and `wb discard` it.
+- **First run** (no model can run yet, or the user wants to see it work), in this order, each
+  install or download on the user's yes:
+  1. `wb setup`: its `first run:` lines say what is missing.
+  2. No model yet: `wb scout`, then recommend what fits the machine (reference/models.md, which
+     names no server for them); `wb model add <provider/model> [--pull]`.
+  3. `wb optimize` (a minute or two): each model's window, measured on this GPU.
+  4. `wb try` proves it on a tiny sample: review it as any task and run the hidden check it
+     printed. Then `wb accept` it (the sample is a scratch repo of its own) and show the user the
+     result and the savings line accept prints. Then ask what they'd like built.
 - **Claude coding** (the user's choice, `wb coding`): when you may write a task's code yourself,
   a one-line fix in review or `wb takeover` alike. "Let Claude decide" (the default) is this
   skill as written. Otherwise a `claude-coding` context block gives the rule: "Ask me first", or
@@ -405,7 +410,9 @@ goes in that repo's CLAUDE.md instead. Drop a note that has stopped holding (`wb
   background, one at a time, after any real task and stopped by one; it wakes no one and costs
   you nothing. `wb bench report` compares models (or a `--label`, such as a workbench branch or
   a skill handed with `--skill`) on the same work. It is evidence for your `--model` and the
-  weekly check, never a reason to skip review: the router doesn't read it.
+  weekly check, never a reason to skip review: the router doesn't read it. `wb bench self <case>
+  --yes` has you write a case yourself, to set the handoff's cost against yours; it spends your
+  tokens, so run it only when the user says yes.
 
 ## Report to the user
 Short and honest: what was built, on which model, rounds (automatic and review), test result,
