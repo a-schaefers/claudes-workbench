@@ -143,7 +143,7 @@ dependencies. No packaging: it runs from the clone.
   the owner's pull requests only), `rulesets/main.json`, dependabot for the actions' pins.
 - `scripts/`: `ship.sh` (the road to main), `github-settings.sh check|apply`,
   `install-opencode.sh` (CI's OpenCode, from its release, hash-checked).
-- `systemd/wb-chat.service`: keeps the web chat up. `docs/`: the README's images (a replaced image
+- `systemd/wb-chat.service`: keeps the web chat up. `docs/`: the images the README and ARCHITECTURE.md show (a replaced image
   gets a new file name, for GitHub's cache).
 
 Runs on Linux, WSL2 and macOS; the launchers refuse native Windows and Python before 3.11. Off Linux: no Landlock, and watch.py waits on timers.
