@@ -64,6 +64,8 @@ def record(task: store.Task, outcome: str, last_step: dict | None = None, **extr
            **({"claude": u} if (u := spend.usage(task)) else {}),  # what it cost Claude
            **({"gpu_wh": st["gpu_wh"]} if "gpu_wh" in st else {}),  # the runner's GPU energy
            **({"remote_gpu": True} if st.get("remote_gpu") else {}),  # another machine's: unmeasured
+           **({"active_minutes": round(st["active_s"] / 60, 1)} if st.get("active_s") else {}),
+           **({"interventions": st["interventions"]} if st.get("interventions") else {}),  # #95
            **({"diff": {"files": sum(s.get("files", 0) for s in steps),  # what savings.py prices
                         "added": sum(s.get("lines", 0) for s in steps),
                         "removed": sum(s.get("removed", 0) for s in steps)}}
