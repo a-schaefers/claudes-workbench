@@ -22,7 +22,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
 
-from workbench import runner, ask_mcp, cli, context, events, gitops, lane, store, transcript  # noqa: E402
+from workbench import runner, ask_mcp, cli, context, events, gitops, hardware, lane, store, transcript  # noqa: E402
 
 FAKE = shlex.join([sys.executable, str(ROOT / "tests" / "fake_opencode.py")])  # a path may hold spaces
 TEST_CMD = "grep -qx 42 answer.txt"
@@ -3961,6 +3961,103 @@ class Savings(Base):
         self.assertEqual(t2["self_est"], 58708 + 40425)
         self.assertEqual(t2["wh"], 42.4)
         self.assertEqual(t2["cost"], round(42.4 / 1000 * 0.25, 2))
+
+    def test_footprint_counts_removed_lines_as_well_as_added(self):
+        repo = Path(self.tmp.name) / "foot-repo"
+        repo.mkdir()
+        g = lambda *a: subprocess.run(["git", "-C", str(repo), "-c", "user.name=t",
+                                       "-c", "user.email=t@t", *a], check=True,
+                                      capture_output=True)
+        g("init", "-q", "-b", "main")
+        (repo / "f.txt").write_text("a\nb\nc\n")
+        g("add", ".")
+        g("commit", "-qm", "init")
+        (repo / "f.txt").write_text("d\ne\n")  # 2 added, 3 removed
+        (repo / "n.txt").write_text("1\n2\n3\n4\n")  # a new file: 4 added
+        g("add", ".")
+        self.assertEqual(gitops.footprint(repo, "HEAD"),
+                         {"files": 2, "lines": 6, "removed": 3})
+
+    def test_power_thread_integrates_watts_into_watt_hours(self):
+        # A deterministic clock so the result is exactly 300 W x the elapsed fake seconds.
+        t = {"now": 100.0}
+        fake_time = lambda: (t.__setitem__("now", t["now"] + 0.1) or t["now"])
+        with mock.patch.object(hardware, "gpu_power_w", return_value=300.0), \
+             mock.patch.object(runner, "POWER_EVERY", 0.1), \
+             mock.patch.object(runner.time, "time", side_effect=fake_time):
+            p = runner._Power()
+            p.start()
+            t0 = fake_time()
+            for _ in range(3):  # wait until the third sample: 0.3 s of fake time
+                time.sleep(0.05)
+            p.stop()
+            p.join(timeout=1)
+            elapsed = fake_time() - t0  # the fake seconds the thread integrated
+        self.assertFalse(p.is_alive())
+        self.assertGreater(elapsed, 0)
+        self.assertAlmostEqual(p.wh, 300 * elapsed / 3600, places=6)
+
+    def test_power_thread_a_none_reading_adds_nothing_for_its_interval(self):
+        # The reader can come back None (no GPU, or it closed): that interval adds no energy,
+        # and the thread keeps counting afterwards. The clock is deterministic, so the answer
+        # is fixed: readings r0..r6, each 0.1 s apart, integrate r_i over the interval after it.
+        t = {"now": 100.0}
+        fake_time = lambda: (t.__setitem__("now", t["now"] + 0.1) or t["now"])
+        readings = [300.0, None, 300.0, None, 300.0, None, 300.0]
+        with mock.patch.object(hardware, "gpu_power_w", side_effect=list(readings)), \
+             mock.patch.object(runner, "POWER_EVERY", 0.1), \
+             mock.patch.object(runner.time, "time", side_effect=fake_time):
+            p = runner._Power()
+            p.start()
+            time.sleep(0.3)  # the thread takes one reading per 0.1 s of fake time
+            p.stop()
+            p.join(timeout=2)
+        # the thread ran 2 to 4 intervals; each 300 W reading covers the next 0.1 s of
+        # fake time, so p.wh is 300 W times 2 to 4 tenths of a second
+        self.assertGreaterEqual(p.wh, 300.0 * 0.2 / 3600 - 1e-12)
+        self.assertLess(p.wh, 300.0 * 0.4 / 3600 + 1e-12)
+
+    def test_accepted_row_records_energy_and_diff_and_discarded_row_neither(self):
+        from workbench import store, results
+        # the runner copies the user's CLAUDE.md; in the suite that is an empty fake home,
+        # so the real one (unreadable from the lane) never stands in for it
+        os.environ["CLAUDE_CONFIG_DIR"] = str(Path(self.tmp.name) / "claude-home")
+        self.start("t-a", "ok", "--test", TEST_CMD)
+        wait_phase("t-a", {"review"})
+        store.Task("t-a").set_status(gpu_wh=41.5)
+        run_wb("accept", "t-a", "-m", "feat: answer")
+        rows, _ = store.read_jsonl(store.home() / "results.jsonl")
+        a = rows[-1]
+        self.assertEqual(a["outcome"], "accepted")
+        self.assertEqual(a["gpu_wh"], 41.5)
+        self.assertGreaterEqual(a["diff"]["files"], 1)
+        self.assertGreaterEqual(a["diff"]["added"], 1)
+        self.assertGreaterEqual(a["diff"]["removed"], 0)
+        self.start("t-d", "ok", "--test", TEST_CMD)
+        wait_phase("t-d", {"review"})
+        store.Task("t-d").set_status(gpu_wh=7.0)
+        run_wb("discard", "t-d")
+        rows, _ = store.read_jsonl(store.home() / "results.jsonl")
+        d = rows[-1]
+        self.assertEqual(d["outcome"], "discarded")
+        self.assertEqual(d["gpu_wh"], 7.0)
+        self.assertNotIn("diff", d)
+
+    def test_a_discarded_row_saves_nothing_and_reads_as_discarded(self):
+        from workbench import savings
+        u2 = {"turns": 1, "calls": 2, "input": 500, "cache_write_5m": 0,
+              "cache_write_1h": 4000, "cache_read": 80000, "output": 1000}
+        row = {"outcome": "discarded", "claude": u2, "gpu_wh": 12.4}
+        self.assertEqual(savings.of_row(row),
+                         {"claude": 21500, "self_est": 0, "saved": -21500, "wh": 12.4})
+        self.assertEqual(savings.line(row),
+                         "claude: 22K · discarded, nothing saved · GPU 12 Wh")
+        # no energy measured: the line drops the GPU part
+        self.assertEqual(savings.line({"outcome": "discarded", "claude": u2}),
+                         "claude: 22K · discarded, nothing saved")
+        # a discarded row with no claude usage is not comparable
+        self.assertIsNone(savings.of_row({"outcome": "discarded", "gpu_wh": 1.0}))
+        self.assertIsNone(savings.line({"outcome": "discarded", "gpu_wh": 1.0}))
 
 
 class Notes(Base):

@@ -24,7 +24,7 @@ import traceback
 from collections import deque
 from pathlib import Path
 
-from . import ask_mcp, context, gitguard, gitops, lane, lessons, models, skills, store, tuning
+from . import ask_mcp, context, gitguard, gitops, hardware, lane, lessons, models, skills, store, tuning
 from .events import StuckDetector, normalize
 from .watch import Watcher
 
@@ -436,6 +436,10 @@ def run_round(task: store.Task, n: int, keep: bool = False) -> dict:
     q: queue.Queue = queue.Queue()
     threading.Thread(target=_reader, args=(proc.stdout, q), daemon=True).start()
     threading.Thread(target=_steer_bell, args=(task, proc, q), daemon=True).start()
+    power = None
+    if not CURRENT.get("remote"):
+        power = _Power()
+        power.start()
 
     detector = StuckDetector(**spec.get("stuck", {}), worktree=task.worktree)
     wall, silence = float(spec.get("round_timeout", 2400)), float(spec.get("silence_timeout", 900))
@@ -600,6 +604,10 @@ def run_round(task: store.Task, n: int, keep: bool = False) -> dict:
     ask_mcp.close(task, opened)  # its server is gone: closed, so nothing takes them for open
     if task.status.get("asking") or task.status.get("phase") == "asking":  # it ended
         task.set_status(asking=None, phase="running")  # mid-question: nothing reads that answer now
+    if power:
+        power.stop()
+        power.join(timeout=1)
+        task.set_status(gpu_wh=round((task.status.get("gpu_wh") or 0) + power.wh, 2))
     out["secs"] = round(time.monotonic() - clock.t0, 1)
     return out
 
@@ -644,6 +652,34 @@ class _Capture(threading.Thread):
         cut = self.total - len(self.head) - len(tail)
         return (bytes(self.head) + (f"\n[... {cut} bytes of output cut ...]\n".encode() if cut > 0 else b"")
                 + tail).decode(errors="replace")
+
+
+POWER_EVERY = 10  # seconds between GPU power samples: fine enough for a round, cheap to read
+
+
+class _Power(threading.Thread):
+    """Samples the GPU's power draw every POWER_EVERY seconds while OpenCode runs a round and
+    integrates it into watt-hours (the tests after it aren't counted). A None reading adds nothing
+    for that interval. It is the whole GPU's draw: tasks sharing the GPU each count all of it."""
+
+    def __init__(self):
+        super().__init__(daemon=True)
+        self.done = threading.Event()
+        self.wh = 0.0
+
+    def run(self):
+        last = time.time()  # the first sample is taken at once; it adds nothing yet
+        watts = hardware.gpu_power_w()
+        while not self.done.is_set():
+            self.done.wait(POWER_EVERY)
+            now = time.time()
+            if watts is not None:
+                self.wh += watts * (now - last) / 3600
+            last = now
+            watts = hardware.gpu_power_w()
+
+    def stop(self):
+        self.done.set()
 
 
 def run_in_lane(task: store.Task, cmd: str, limit: int) -> tuple[int | str, str]:
@@ -1091,6 +1127,7 @@ def drive(task: store.Task) -> None:
         m = models.resolve(task.spec["model"])
     except KeyError as e:
         return _load_failed(task, e)
+    CURRENT["remote"] = m.remote  # the GPU is not ours to measure when the model is remote
     st = task.status
     if (task.spec.get("test_cmd") and not task.spec.get("no_base_check")
             and "base_check" not in st and st.get("round", 1) == 1):

@@ -37,7 +37,15 @@ def of_row(row: dict) -> dict | None:
 
     ``claude`` is the task's share of its session, weighted; ``self_est`` is what
     Claude would spend on the same change; ``saved`` is their difference (positive:
-    the agent saved that much); ``wh`` is the task's GPU energy when measured."""
+    the agent saved that much); ``wh`` is the task's GPU energy when measured.
+    A discarded task has no change to compare; it saved nothing on Claude's side
+    but its GPU energy was still spent, so it records a negative saving."""
+    if row.get("outcome") == "discarded":
+        u = row.get("claude")
+        if not isinstance(u, dict):
+            return None
+        c = spend.weighted(u)
+        return {"claude": c, "self_est": 0, "saved": -c, "wh": row.get("gpu_wh")}
     if "claude" not in row or "diff" not in row:
         return None
     pc = per_call(row["claude"])
@@ -96,12 +104,18 @@ def totals(rows: list[dict], since: float = 0) -> dict:
 
 def line(row: dict) -> str | None:
     """One row's savings, readable: claude: 56K · writing it yourself: ~59K
-    (estimate) · saved ~3K · GPU 41 Wh; None when there is no comparison."""
+    (estimate) · saved ~3K · GPU 41 Wh; None when there is no comparison.
+    A discarded row reads: claude: 21K · discarded, nothing saved · GPU 12 Wh."""
     est = of_row(row)
     if est is None:
         return None
     saved, wh = est["saved"], est["wh"]
     k = lambda n: f"{n / 1000:.0f}K"  # noqa: E731
+    if row.get("outcome") == "discarded":
+        mid = " · discarded, nothing saved"
+        if wh is not None:
+            mid += f" · GPU {wh:.0f} Wh"
+        return f"claude: {k(est['claude'])}{mid}"
     mid = f" · saved ~{k(saved)}" if saved >= 0 else f" · cost ~{k(-saved)} more"
     if wh is not None:
         mid += f" · GPU {wh:.0f} Wh"

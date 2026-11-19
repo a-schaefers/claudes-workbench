@@ -237,9 +237,11 @@ def diff(worktree: Path, base: str, stat=False, paths=(), numstat=False) -> str:
 
 
 def footprint(worktree: Path, base: str) -> dict:
-    """What a change spans since ``base``: files touched and lines added, new files included."""
+    """What a change spans since ``base``: files touched and lines added or removed, new files
+    included."""
     rows = [r.split("\t") for r in diff(worktree, base, numstat=True).splitlines() if r]
-    return {"files": len(rows), "lines": sum(int(r[0]) for r in rows if r[0].isdigit())}
+    return {"files": len(rows), "lines": sum(int(r[0]) for r in rows if r[0].isdigit()),
+            "removed": sum(int(r[1]) for r in rows if len(r) > 1 and r[1].isdigit())}
 
 
 # Source files by extension, for the kind of work a repo holds (stack). Markup, data and docs
