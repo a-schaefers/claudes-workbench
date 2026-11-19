@@ -1521,7 +1521,15 @@ def cmd_savings(a):
         savings.set_price(a.price)
     period = "month" if a.month else "all" if a.all else "week"
     span = savings.PERIODS[period]
-    t = savings.totals(store.results(), since=store.now() - span if span else 0)
+    since = store.now() - span if span else 0
+    if a.share:  # to paste into a discussion: sizes, never names (#119)
+        found = models.discover()
+        rows = store.results()
+        print(savings.share(rows, period, since, hardware.gpus(windows=False),
+                            {m: models.weights(found[m]) for m in {r.get("model") for r in rows}
+                             if m in found}, hardware.system()))
+        return
+    t = savings.totals(store.results(), since=since)
     if a.json:
         print(json.dumps({"period": period, **t}))
     else:
@@ -3231,6 +3239,8 @@ def parser() -> argparse.ArgumentParser:
     g.add_argument("--month", action="store_true", help="the last 30 days")
     g.add_argument("--all", action="store_true", help="every task recorded")
     s.add_argument("--json", action="store_true")
+    s.add_argument("--share", action="store_true", help="a plain summary to paste into a "
+                   "discussion: the machine, model sizes (no names), tasks, ratios, energy")
     s.add_argument("--price", type=float, help="set the electricity price per kWh, then report")
     s.set_defaults(f=cmd_savings)
     sub.add_parser("tune", help="the settings tuned from results, per model and window").set_defaults(f=cmd_tune)

@@ -4161,6 +4161,33 @@ class Savings(Base):
         big = {"claude": costly, "diff": {"files": 1, "added": 0, "removed": 0}}
         self.assertIn("cost ~5K more", savings.line(big))
 
+    def test_the_shared_summary_has_the_machine_and_model_sizes_but_never_a_name(self):
+        # #119: users pool evidence by pasting it; a model's name and the repo stay here
+        from workbench import savings
+        usage = {"turns": 2, "calls": 5, "input": 1000, "cache_write_5m": 0,
+                 "cache_write_1h": 10000, "cache_read": 200000, "output": 3000}
+        now = store.now()
+        rows = [{"ts": now, "model": "ollama/secret-coder:27b", "size": "significant", "repo": "/home/u/acme",
+                 "task": "fix-acme-billing", "claude": usage, "diff": {"files": 4, "added": 61, "removed": 1},
+                 "gpu_wh": 600},
+                {"ts": now, "model": "ollama/other:9b", "size": "trivial", "claude": usage,
+                 "diff": {"files": 1, "added": 3, "removed": 0}, "remote_gpu": True},
+                {"ts": 1, "model": "ollama/old:1b", "size": "trivial", "claude": usage,
+                 "diff": {"files": 1, "added": 3, "removed": 0}}]   # before the period
+        out = savings.share(rows, "week", now - 7 * 86400,
+                            [{"name": "Radeon RX 7900 XTX", "vram": 24 * 10 ** 9}],
+                            {"ollama/secret-coder:27b": 17 * 10 ** 9}, "linux")
+        self.assertEqual(out.splitlines(), [
+            "workbench savings, the last 7 days (an estimate: `wb savings --share`)",
+            "- machine: linux; GPU: Radeon RX 7900 XTX (24 GB VRAM)",
+            "- local models: 2 (size unknown, 17 GB of weights)",
+            "- tasks: 2; Claude used 112K input-equivalent tokens, writing them itself ~100K (estimate); handoff/self 1.12",
+            "- by size: significant 0.95 (1), trivial 1.36 (1)",
+            "- GPU energy: 600 Wh (1 task(s) on another machine's GPU, not measured)"])
+        for private in ("secret", "acme", "fix-", "other:9b"):
+            self.assertNotIn(private, out)
+        self.assertIn("workbench savings, the last 7 days", run_wb("savings", "--share"))
+
     def test_a_task_on_another_machines_gpu_says_its_energy_was_not_measured(self):
         # #117: nothing here reads a remote GPU's power, and a line without energy read as free
         from workbench import savings
