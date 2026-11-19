@@ -2474,7 +2474,10 @@ thread no longer):
   `{sent, ok}`.
 
 **The page** (`chat_static/`: `index.html`, `app.js`, `app.css`, `manifest.webmanifest`,
-`icon.svg`; no inline script, as the CSP requires). The token is taken from the address's
+`icon.svg`; no inline script, as the CSP requires). Its header and title say Workbench (the app),
+and the presence line whom you talk to: "Claude · listening in ~/project", "Claude · working in
+…", "no session listening · messages wait" (#103: a notification opened on "Claude" said
+nothing of which app). The token is taken from the address's
 fragment (or `?token=`, the installed app's start URL) into `localStorage` (`wb-chat-token`) and
 stripped from the address bar; a missing or refused one shows a screen that accepts a pasted link
 or token. It never expires (it is the token file). A keyed page over https points its manifest link at

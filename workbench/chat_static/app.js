@@ -369,7 +369,7 @@
     const b = document.createElement('div'); b.className = 'bubble'
     if (m.from === 'user') b.textContent = m.text
     else if (seen.has(m.id) || firstVisit || document.hidden || reduced.matches) {
-      if (!seen.has(m.id) && !firstVisit && document.hidden) { unread++; document.title = `(${unread}) Claude` }
+      if (!seen.has(m.id) && !firstVisit && document.hidden) { unread++; document.title = `(${unread}) Workbench` }
       rich(b, m.text); seen.add(m.id); save(K.seen, [...seen].slice(-500))
     } else {
       b.classList.add('flowing'); flows.set(m.id, { text: m.text, shown: 0, el: b })
@@ -402,7 +402,8 @@
     const where = l ? l.cwd.replace(/^\/home\/[^/]+/, '~') : ''
     presence.className = 'presence ' + (!l ? 'away' : l.busy ? 'working' : 'listening')
     presenceText.textContent = !token ? 'not connected' : !live ? 'connecting…' : !l ? 'no session listening · messages wait' :
-      (l.busy ? 'working in ' : 'listening in ') + where
+      // the app's name above, whom you talk to here (#103: a notification opened on "Claude")
+      'Claude · ' + (l.busy ? 'working in ' : 'listening in ') + where
   }
 
   // ---- the connection ----
@@ -511,7 +512,7 @@
       hiddenTimer = setTimeout(() => { if (document.hidden && conn) { conn.abort(); conn = null } }, HIDDEN_GRACE_MS)
     } else {
       clearTimeout(hiddenTimer)
-      unread = 0; document.title = 'Claude'
+      unread = 0; document.title = 'Workbench'
       if (!conn) { failures = 0; connect() } else freshen()
       flush(true)
     }
