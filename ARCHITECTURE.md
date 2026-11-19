@@ -2396,6 +2396,25 @@ newest check's lines, marked stale when the worktree has changed since. `wb acce
 not `proven`, or stale. A proven check adds nothing, and with none run the review is the ordinary
 one.
 
+### Screenshots of the base and the candidate
+
+`wb shot <task> --capture CMD [--viewport WxH] [--files PATH…] [--timeout N]` (`verify.shot`,
+#98) runs the project's own capture command (a headless browser script, a test that saves a
+screenshot) once on the base and once on the candidate. Each run uses the same scratch checkouts,
+lane and environment as `wb verify`. The command writes a PNG to `$WB_SHOT_OUT` (`.wb-shot.png`
+in its checkout) at the size in `$WB_SHOT_VIEWPORT` (1280x800 by default). The same command,
+fixture and viewport on both sides make the two images comparable; `--files` copies the
+candidate's new capture script or fixture onto the base. workbench ships no browser: the capture
+is the project's.
+
+Each pair is kept in `tasks/<task>/shots/<n>/`: `base.png`, `candidate.png`, each run's output
+(`base.txt`, `candidate.txt`), and `shots.json` `{task, step, round, cmd, viewport, files, ts,
+base: {rev, exit, image, error?}, candidate: {rev, exit, image, error?}}`, where the candidate's
+`rev` is the worktree snapshot's tree. A run that exits non-zero or leaves no PNG (checked by its
+signature, never through a link) gets an `error` naming its output file. The report says the
+capture failed and that the code review stands on its own: a missing image never blocks or passes
+a review.
+
 ## The web chat
 
 `wb chat serve` (`workbench/chat.py`; kept up by `systemd/wb-chat.service`, a user unit running
@@ -3013,6 +3032,7 @@ delivered as taken (`_stale_notes`, *Notes*).
 | `wb steer <task> --text "…" \| --message <file>` | `--now` | Only while queued/running/testing/asking with a live runner. Appends to steer.jsonl: delivered when the current run ends (before the tests), or at once with `--now`. While testing: "its tests are running (up to Ns); the agent gets it when they end"; while queued: when its round starts. |
 | `wb note <task> --text "…"` | | A `captain` event: Claude's log line in the transcript. |
 | `wb coding [only\|ask\|decide]` | `allow <task> --edit "…" --said "…" [--when "…"]`, `used <task> --did "…"` | When Claude may write a delegated task's code (*Claude coding*): with no argument, the choice and its sentence, then each open task's unspent allowance; a mode saves it. `allow` records the user's yes for one task's edit, until the task goes back to the agent; with `--when`, a one-task exception granted ahead, spent only once Claude has started on it. `used` records what Claude changed under it and says to hand the testing back; exit 1 with none. |
+| `wb shot <task>` | `--capture CMD` (required), `--viewport WxH` (1280x800), `--files PATH…`, `--timeout N` (300) | At review, for a visual task: the project's capture command run on the base and on the candidate, each in a scratch checkout under the task's lane; where each PNG is, or why a side has none (*Screenshots of the base and the candidate*). |
 | `wb takeover [<task> \| --all]` | `--repo DIR`, `--session ID`, `--user` | Stops the runner, phase `review`, "Claude took over"; Claude edits in the worktree and accepts, or hands back with feedback. Outside "Let Claude decide" it needs the user's recorded yes for the task, else exit 3; `--user` (the mod's hand-back command) is the user's own ask, and records one (*Claude coding*). `--all`: every task that isn't closed. `--session ID` (repeatable) and `--repo DIR`, with `--all` (the mod passes every session id its process has had and its directory): only that session's tasks (`_scope`): one with a task.json `session` when it is one of the IDs, wherever it ran, or when its `claude_pid` is gone and DIR claims it as below; else (no `session`, or no `--session` given) when its `repo` is DIR, inside it or holds it, or its `cwd` is DIR or inside it, by whole components, never when DIR is the home directory or `/`; one with no key at all: every session's. The rest are listed as `left alone (other sessions'): …`. |
 | `wb verify <task>` | `--test CMD` (the task's `--test`), `--files PATH…`, `--timeout N` (300) | At review: a regression test on the base (with the candidate's test files) and on the candidate, each in a scratch checkout under the task's lane; the verdict, each run's exit and assertion, and where both outputs are (*Verifying a fix against the base*). Refuses while the agent runs. |
 | `wb stop [<task> \| --all]` | `--repo DIR`, `--session ID` | A live task only. Marks status `stopping`, SIGTERM the runner (15 s, `wait_exit`, then SIGKILL to its session and the agent's), sweeps what the agent left (`runner.sweep`), phase `stuck`, "stopped by the reviewer", and acknowledges the task; the worktree is kept. `--all` (`stop_everything`): every open task, a `stopped` event "bail out: stopped by the user"; without `--repo`/`--session`, the bench's driver first (`bench.stop_driver`), so it starts no replay. `--session ID`, `--repo DIR` (with `--all`): as for takeover, the rest listed as `left running (other sessions'): …`. |
@@ -3109,6 +3129,7 @@ $WB_HOME (~/.local/state/workbench)
     events.jsonl  steer.jsonl  acked  context.md  runner.log
     coding.json                  what the user allowed Claude to edit: {allowed: [{edit, said, ts, used, when?, started?, did?}]} (*Claude coding*)
     verify/<n>/                  wb verify's runs: base.txt  candidate.txt  result.json
+    shots/<n>/                   wb shot's pairs: base.png  candidate.png  base.txt  candidate.txt  shots.json
     base-tests.txt               the base check's output: the acceptance command on the base (`--test`)
     rounds/<n>/                  prompt.md  instructions.md (before a handover rewrote it)  summary.md  tests.txt
     ask/<id>.json  <id>.answer   questions and permission requests; their answers (all the lane writes here, with worktree/)

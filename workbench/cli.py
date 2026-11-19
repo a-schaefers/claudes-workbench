@@ -1322,6 +1322,19 @@ def cmd_verify(a):
     print("\n".join(verify.lines(r)))
 
 
+def cmd_shot(a):
+    """The same interaction captured on the base and on the candidate, for a visual task (#98)."""
+    task = need(a.name)
+    reap(task)
+    if task.status.get("phase") in store.CLOSED | store.ACTIVE:
+        die(f"{a.name} is {task.status.get('phase')}: capture it at review")
+    try:
+        m = verify.shot(task, a.capture, a.files, a.viewport, a.timeout)
+    except (RuntimeError, gitops.GitError) as e:
+        die(str(e))
+    print("\n".join(verify.shot_lines(m)))
+
+
 @one_at_a_time
 def cmd_accept(a):
     task = need(a.name)
@@ -3062,6 +3075,16 @@ def parser() -> argparse.ArgumentParser:
                    "candidate onto the base (default: the changed files that look like tests)")
     s.add_argument("--timeout", type=int, default=verify.LIMIT, help="seconds for each run (300)")
     s.set_defaults(f=cmd_verify)
+    s = sub.add_parser("shot", help="capture the same interaction on the base and the candidate "
+                       "(the project's own capture command), for a visual task's review")
+    s.add_argument("name")
+    s.add_argument("--capture", metavar="CMD", required=True, help="writes a PNG to $WB_SHOT_OUT, "
+                   "at the size in $WB_SHOT_VIEWPORT")
+    s.add_argument("--viewport", default="1280x800", help="WIDTHxHEIGHT (1280x800)")
+    s.add_argument("--files", nargs="+", metavar="PATH", help="the candidate's files the capture "
+                   "needs on the base too (a new fixture or script)")
+    s.add_argument("--timeout", type=int, default=verify.LIMIT, help="seconds for each capture (300)")
+    s.set_defaults(f=cmd_shot)
     s = sub.add_parser("takeover", help="stop the agent and finish the task by hand")
     s.add_argument("name", nargs="?")
     s.add_argument("--all", action="store_true", help="every open delegated task")

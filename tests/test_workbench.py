@@ -4480,7 +4480,7 @@ class Coding(Base):
 class Verify(Base):
     """wb verify: a regression test on the base and on the candidate (#96)."""
     def setUp(self):
-        super().setUp()
+        Base.setUp(self)  # not super(): Shot borrows this setUp
         (self.repo / "calc.py").write_text("def kw(watts):\n    return watts\n")    # the bug
         subprocess.run(["git", "-C", str(self.repo), "add", "-A"], check=True)
         subprocess.run(["git", "-C", str(self.repo), "commit", "-qm", "calc"], check=True)
@@ -4562,6 +4562,45 @@ class Verify(Base):
         with self.assertRaises(SystemExit), redirect_stderr(err):
             run_wb("verify", "t", "--test", "true")
         self.assertIn("no test file among the candidate's changes", err.getvalue())
+
+
+class Shot(Base):
+    """wb shot: the same capture on the base and the candidate, for a visual task (#98)."""
+    setUp = Verify.setUp  # its task under review; inheriting would run Verify's tests again
+    PNG = b"\x89PNG\r\n\x1a\n"
+    # the project's own capture: a "screenshot" of calc.py at the asked size
+    CAPTURE = ("python3 -c \"import os; open(os.environ['WB_SHOT_OUT'], 'wb').write("
+               "b'\\x89PNG\\r\\n\\x1a\\n' + os.environ['WB_SHOT_VIEWPORT'].encode() + "
+               "open('calc.py', 'rb').read())\"")
+
+    def test_one_capture_runs_on_both_sides_at_one_viewport_and_says_what_each_image_is(self):
+        before = (gitops.mark(self.wt), gitops.changed(self.repo))
+        out = run_wb("shot", "t", "--capture", self.CAPTURE, "--viewport", "390x844")
+        self.assertIn("screenshots of t, step 1 round 1 at 390x844", out)
+        m = json.loads(next((store.Task("t").dir / "shots").glob("*/shots.json")).read_text())
+        base, cand = (Path(m[s]["image"]).read_bytes() for s in ("base", "candidate"))
+        self.assertTrue(base.startswith(self.PNG + b"390x844def kw"))     # the same viewport
+        self.assertIn(b"return watts\n", base)                             # the base's code
+        self.assertIn(b"watts / 1000", cand)                                # the candidate's
+        self.assertEqual(m["base"]["rev"], store.Task("t").spec["base"])   # which revision
+        self.assertEqual((gitops.mark(self.wt), gitops.changed(self.repo)), before)  # neither touched
+
+    def test_a_failed_capture_is_said_and_the_review_stands_without_it(self):
+        out = run_wb("shot", "t", "--capture", "test -f units.py && " + self.CAPTURE)
+        self.assertIn("base ", out)
+        self.assertIn("no image: exit 1", out)                     # the base has no units.py
+        self.assertIn("a capture failed: the code review stands on its own", out)
+        out = run_wb("shot", "t", "--capture", "echo not a png > \"$WB_SHOT_OUT\"")
+        self.assertIn("no PNG at $WB_SHOT_OUT", out)
+        err = io.StringIO()
+        with self.assertRaises(SystemExit), redirect_stderr(err):
+            run_wb("shot", "t", "--capture", "true", "--viewport", "big")
+        self.assertIn("give it as WIDTHxHEIGHT", err.getvalue())
+
+    def test_a_new_capture_script_reaches_the_base_through_files(self):
+        (self.wt / "shoot.sh").write_text(self.CAPTURE + "\n")
+        out = run_wb("shot", "t", "--capture", "sh shoot.sh", "--files", "shoot.sh")
+        self.assertNotIn("no image", out)
 
 
 class Setup(Base):
