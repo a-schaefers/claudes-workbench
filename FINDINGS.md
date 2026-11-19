@@ -57,7 +57,7 @@ clearly been through several audits, and most edges probed there were already ha
 - **Fix:** record what wb created and refuse a name collision. Add and remove must leave unrelated
   provider settings alone.
 
-**3. Two offline web-chat tabs lose a queued message.** Codex; source.
+**3. ~~Two offline web-chat tabs lose a queued message.~~** **Fixed (#199).** Codex; source.
 - Each tab loads the outbox from localStorage once (`app.js:56`), then saves its own in-memory
   copy over the shared key (`app.js:657`). The last tab to write wins.
 - Codex: after reconnecting, only the second tab's message reached the server.
@@ -261,12 +261,12 @@ admitted.
 - **Fix:** kill the saved agent's group in `reap` (checked with `models.runs()`), fall back to
   `ifconfig`, and add a native macOS stop-and-recover test.
 
-**24. `wb chat on` reports success when another program owns the port.** Codex; source.
+**24. ~~`wb chat on` reports success when another program owns the port.~~** **Fixed (#200).** Codex; source.
 `chat.running()` only tries a TCP connect (`chat.py:437`). The start path prints the URL after a
 fixed half-second sleep (`cli.py:2420`). **Fix:** check for an identifiable workbench response,
 and wait a bounded time for the started server before reporting.
 
-**25. A VPN-only chat stays on loopback after the VPN comes up.** Codex; reproduced.
+**25. ~~A VPN-only chat stays on loopback after the VPN comes up.~~** **Fixed (#200).** Codex; reproduced.
 - With `bind: ["tailscale"]`, `plan()` returns `['127.0.0.1']` while Tailscale is down and
   `['100.64.0.1']` once it's up. Reproduced here.
 - The replan thread restarts only when the list gets longer (`chat.py:887`), so the change is

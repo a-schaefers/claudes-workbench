@@ -329,6 +329,34 @@ async function run(engine, device) {
       foot: Math.round(document.getElementById('composer').getBoundingClientRect().bottom), vh: innerHeight, y: scrollY }))
     if (at.t || at.h || at.y || Math.abs(at.foot - at.vh) > 2) throw new Error(JSON.stringify(at))
   })
+  await check('two tabs offline, both closed, reopened: each message lands exactly once', async () => {
+    // #199 (the 2026-11-19 audit): each tab saved its own copy of one outbox array over the
+    // other's, and only the second tab's message ever reached the server
+    const a = await ctx.newPage(), b = await ctx.newPage()
+    for (const t of [a, b]) { t.on('pageerror', e => errors.push(String(e))); await t.goto(base); await until(async () => await t.locator('#input').isEditable()) }
+    await stopServer()
+    for (const [t, text] of [[a, 'queued in tab one'], [b, 'queued in tab two']]) {
+      await t.fill('#input', text)
+      await t.click('#send')
+      await until(async () => (await t.locator('.row.user.pending', { hasText: text }).count()) === 1)
+    }
+    await a.close(); await b.close()
+    startServer()
+    await until(async () => (await fetch(base)).status > 0)  // listening (WebKit's worker hid the wait)
+    const c = await ctx.newPage()
+    c.on('pageerror', e => errors.push(String(e)))
+    await c.goto(base)
+    for (const text of ['queued in tab one', 'queued in tab two']) {
+      await until(() => messages().filter(m => m.text === text).length === 1, 20000)
+    }
+    await until(async () => (await c.locator('.row.user.pending').count()) === 0, 20000)
+    await sleep(1500)
+    for (const text of ['queued in tab one', 'queued in tab two']) {
+      const n = messages().filter(m => m.text === text).length
+      if (n !== 1) throw new Error(`${text}: landed ${n} times`)
+    }
+    await c.close()
+  })
   await check('no script errors', async () => { if (errors.length) throw new Error(errors.join('; ')) })
   await browser.close()
   await stopServer()

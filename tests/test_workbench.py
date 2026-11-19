@@ -6066,6 +6066,74 @@ class WebChat(Base):
         self.assertEqual(len(b["state"]["messages"]), 1)
         self.assertEqual(self.call("/api/send", {"text": "x", "cid": 7}, token=tok)[0], 400)
 
+    def test_a_send_retried_after_many_messages_still_lands_once(self):
+        # #199 (the 2026-11-19 audit): only the last 500 rows were checked for the client id, so a
+        # tab offline longer than that sent its queued message twice
+        tok = self.chat.token()
+        first = self.call("/api/send", {"text": "queued offline", "cid": "old-1"}, token=tok)[1]
+        with open(self.chat.chat_dir() / "messages.jsonl", "a") as f:
+            for i in range(800):
+                f.write(json.dumps({"id": f"m{i}", "ts": 1, "from": "claude", "text": "x", "cid": f"c{i}"}) + "\n")
+        again = self.call("/api/send", {"text": "queued offline", "cid": "old-1"}, token=tok)[1]
+        self.assertEqual(again["message"]["id"], first["message"]["id"])
+        rows = store.read_jsonl(self.chat.chat_dir() / "messages.jsonl")[0]
+        self.assertEqual(sum(r.get("cid") == "old-1" for r in rows), 1)
+
+    def test_wb_chat_on_never_shows_a_link_to_another_programs_server(self):
+        # #200 (the 2026-11-19 audit): a bare connect counted any program on the port as the chat,
+        # and a started server was reported after a fixed half second, up or not
+        from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+
+        class Other(BaseHTTPRequestHandler):
+            def do_GET(self):
+                self.send_response(200)
+                self.end_headers()
+
+            def log_message(self, *a):
+                pass
+        other = ThreadingHTTPServer(("127.0.0.1", 0), Other)
+        threading.Thread(target=other.serve_forever, daemon=True).start()
+        self.addCleanup(other.server_close)
+        self.addCleanup(other.shutdown)
+        port = other.server_address[1]
+        self.assertEqual(self.chat.who_answers(self.port), "workbench")
+        self.assertEqual(self.chat.who_answers(port), "other")
+        err = io.StringIO()
+        with redirect_stderr(err), self.assertRaises(SystemExit):
+            run_wb("chat", "on", "--port", str(port))
+        self.assertIn(f"another program answers on port {port}", err.getvalue())
+        dead = subprocess.Popen([sys.executable, "-c", "raise SystemExit(1)"])  # a server that dies
+        with socket.socket() as sk:
+            sk.bind(("127.0.0.1", 0))
+            free = sk.getsockname()[1]
+        self.assertFalse(self.chat.wait_up(free, dead.pid, limit=5))
+
+    def test_a_chat_on_an_address_that_comes_and_goes_rebinds_in_place_when_it_changes(self):
+        # #200 (the 2026-11-19 audit): with bind ["tailscale"] the plan was loopback while the
+        # tailnet was down and its address once up, but only a longer list restarted, and the
+        # restart was an exit 75 that ended a chat with no service manager
+        chat = self.chat
+        ts = {"value": {}}
+        execs = []
+        with mock.patch.object(chat, "tailscale", side_effect=lambda: ts["value"]), \
+                mock.patch.object(chat, "REPLAN_EVERY", 0.05), \
+                mock.patch.object(chat.os, "execv", side_effect=lambda *a: (execs.append(a), sys.exit())), \
+                mock.patch.object(chat, "make_servers", return_value=(
+                    [types.SimpleNamespace(server_address=("127.0.0.1", 1),
+                                           serve_forever=lambda: time.sleep(1),
+                                           RequestHandlerClass=types.SimpleNamespace(hub=None))],
+                    chat.plan(["tailscale"]))), \
+                mock.patch.object(chat, "Pusher"), mock.patch.object(chat, "watch_code"):
+            threading.Thread(target=chat.serve, args=(0, ["tailscale"]), kwargs={"say": lambda m: None},
+                             daemon=True).start()
+            time.sleep(0.3)
+            self.assertEqual(execs, [])                                  # the same set: kept
+            ts["value"] = {"ip": "100.64.0.9", "names": {"box"}}        # same length, other address
+            deadline = time.time() + 5
+            while not execs and time.time() < deadline:
+                time.sleep(0.05)
+        self.assertTrue(execs)                                           # re-exec'd, not exit 75
+
     def test_the_stream_sends_the_whole_state_then_each_change(self):
         import http.client
         tok = self.chat.token()

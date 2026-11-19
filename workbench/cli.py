@@ -2421,12 +2421,19 @@ def cmd_chat(a):
         print(chat.url(a.port))  # the token is the key: keep the link private
     elif a.action == "on":  # the pane's switch, kept: the link shows and a session listens
         chat.set_on(True)
-        if chat.running(a.port):
+        who = chat.who_answers(a.port)
+        if who == "workbench":
             print(f"web chat on: {chat.url(a.port)}")
+        elif who == "other":  # its link would open someone else's page (#200)
+            die(f"web chat on, but another program answers on port {a.port}: wb chat on --port "
+                "<free port> (and the same --port in chat.json's service, if any)")
         else:
             pid = chat.start(a.port)
-            time.sleep(0.5)
-            print(f"web chat on: started its server (pid {pid}, {chat.chat_dir() / 'serve.log'}): {chat.url(a.port)}")
+            log = chat.chat_dir() / "serve.log"
+            if not chat.wait_up(a.port, pid):
+                tail = (log.read_text(errors="replace").strip().splitlines() or ["(nothing)"])[-1]
+                die(f"web chat on, but its server didn't start: {tail} ({log})")
+            print(f"web chat on: started its server (pid {pid}, {log}): {chat.url(a.port)}")
     elif a.action == "off":
         chat.set_on(False)
         if chat.stop_started():
