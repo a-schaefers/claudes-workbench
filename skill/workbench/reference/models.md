@@ -20,7 +20,8 @@ another host that is the user's own server (WSL2's Windows host, a LAN box) need
 `local: true`, set in models.json before `wb model add --url` (which refuses an address off this
 machine without it). Its server must listen on the LAN, firewalled to this machine (model servers
 have no login); plain HTTP carries the code unencrypted (Tailscale encrypts; its address still
-needs the flag). Another machine adds a model beside this GPU's, never speed to one model. Ollama cloud models (`:cloud`) run off this machine: never register one without
+needs the flag). An Ollama there: `wb remote <host> [--context N]` does all of it, with the
+user's yes (`--remove` undoes it). Another machine adds a model beside this GPU's, never speed to one model. Ollama cloud models (`:cloud`) run off this machine: never register one without
 the user's explicit yes.
 
 **Updating workbench.** The mod checks weekly and tells the user; `/workbench-update` is theirs.
