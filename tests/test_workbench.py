@@ -759,6 +759,15 @@ class Lifecycle(Base):
         run_wb("stop", "t-stoptest")
         self.assertTrue(wait_gone(int(pidfile.read_text())))
 
+    def test_following_the_log_of_a_finished_task_prints_it_and_returns_at_once(self):
+        # #90 (the 2026-11-18 audit): it printed the history, then waited 30 s to look at the phase
+        self.start("t-logf", "ok")
+        wait_phase("t-logf", {"review"})
+        began = time.time()
+        out = run_wb("log", "t-logf", "-f")
+        self.assertLess(time.time() - began, 5)
+        self.assertIn("write", out)
+
     def test_stop_and_discard(self):
         self.start("t-stop", "hang")
         running("t-stop")

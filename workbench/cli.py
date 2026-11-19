@@ -891,11 +891,15 @@ def cmd_log(a):
         show(r)
     watcher = Watcher(task.dir) if a.follow else None
     while a.follow:
-        watcher.wait(30)
+        # the phase before the wait, then the events after it: a finished task's follow waited 30 s
+        # before it looked (the 2026-11-18 audit, #90), and the last events still print
+        done = task.status.get("phase") in store.NEEDS_CLAUDE | store.CLOSED
+        if not done:
+            watcher.wait(30)
         more, off = store.read_jsonl(task.dir / "events.jsonl", off)
         for r in more:
             show(r)
-        if task.status.get("phase") in store.NEEDS_CLAUDE | store.CLOSED and not more:
+        if done:
             break
 
 
