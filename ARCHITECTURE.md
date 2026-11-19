@@ -1794,7 +1794,8 @@ chose others.
 **A run** (`wb bench run`) writes its plan (`bench/runs/<run>/plan.json`: each case paired with
 each `--model`, by default every model that can run and takes the case's size) and detaches a
 driver (`python -m workbench.bench <run>`, cwd its run directory, no Claude Code session in its
-environment; `bench/driver.json` holds its pid). For each pair and `--repeat`, one at a time:
+environment; `bench/driver.json` holds its pid, which counts only while that process runs `-m
+workbench.bench`: `models.runs`, below). For each pair and `--repeat`, one at a time:
 1. It waits while any real task is active (queued for the GPU too): real work comes first.
 2. It clones the bundle into `bench/runs/<run>/<task>/repo` (an identity of its own: nothing
    commits) and starts a task there through `cli.parser()` and `cmd_start`: `--trial`, task.json
@@ -1862,7 +1863,12 @@ Claude's session; it refuses while a task holds the GPU. The run holds the GPU a
 `cli._preempt_bench` sends it SIGTERM when a task would wait behind it, and the fits measured so
 far stay in `optimize.json`. With `--bench` it then starts `wb bench run` on every model, labelled
 `optimize`. `wb optimize report` (the default) gives a line per model; `wb doctor` adds the same
-line (`--`) for each measured model with something to change. `wb optimize stop` ends it.
+line (`--`) for each measured model with something to change. `wb optimize stop` ends it, only if
+state.json's pid is still alive, started when it did, and runs `-m workbench.optimize`
+(`optimize.running`). `models.runs(pid, *words)` is the one identity check behind every stop
+(the runner's `cli.runner_alive` too): the words in a row in `/proc/<pid>/cmdline`, else in `ps
+-ww -o command=` (macOS, where the bench and optimize stops trusted any live pid, so a pid a
+reboot gave to another program got its SIGTERM: #82); with neither, the pid is trusted.
 
 `wb optimize apply <id>…`, after the user says yes: makes the measured window an entry of its own
 beside the model, never in place of it: an Ollama model `<name>-<N>k` from it with

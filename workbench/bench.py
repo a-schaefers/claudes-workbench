@@ -278,10 +278,7 @@ def driver() -> dict:
         os.kill(pid, 0)
     except (ProcessLookupError, PermissionError):
         return {}
-    try:  # a recycled pid runs something else; without /proc (macOS) the pid is trusted
-        return d if b"workbench.bench\0" in (Path("/proc") / str(pid) / "cmdline").read_bytes() else {}
-    except OSError:
-        return {} if Path("/proc/self").exists() else d
+    return d if models.runs(pid, "-m", "workbench.bench") else {}  # a recycled pid runs something else
 
 
 def stop_driver() -> int | None:

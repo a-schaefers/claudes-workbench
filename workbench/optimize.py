@@ -204,7 +204,7 @@ def start(bench: bool = False, if_due: bool = False) -> list[str]:
     when due() says why, and quietly ([]) when it isn't or the GPU is busy (the next session
     tries again)."""
     st = state()
-    if st.get("pid") and models._alive(st["pid"], st.get("start")):
+    if running(st):
         return [] if if_due else [f"wb optimize is already running (pid {st['pid']}): wb optimize report"]
     ms = candidates()
     why = due(ms) if if_due else ""
@@ -234,10 +234,18 @@ def start(bench: bool = False, if_due: bool = False) -> list[str]:
             "follow: wb optimize report   stop: wb optimize stop"]
 
 
+def running(st: dict) -> bool:
+    """Whether state.json's pid is still the measuring process: alive, started when it did (Linux),
+    and running workbench.optimize (a recycled pid runs something else: #82)."""
+    pid = st.get("pid")
+    return bool(pid) and models._alive(pid, st.get("start")) and models.runs(pid, "-m",
+                                                                             "workbench.optimize")
+
+
 def stop() -> int | None:
     st = state()
     pid = st.get("pid")
-    if pid and models._alive(pid, st.get("start")):
+    if running(st):
         os.kill(pid, signal.SIGTERM)
         return pid
     return None
@@ -246,7 +254,7 @@ def stop() -> int | None:
 def report() -> list[str]:
     st = state()
     out = []
-    if st.get("pid") and models._alive(st["pid"], st.get("start")):
+    if running(st):
         out.append(f"running since {time.strftime('%H:%M', time.localtime(st['began']))} (pid {st['pid']})")
     elif st.get("stopped"):
         out.append(f"stopped: {st['stopped']}")

@@ -1161,6 +1161,30 @@ def _started(pid: int) -> str | None:
         return None
 
 
+PROC = Path("/proc")
+
+
+def runs(pid: int, *words: str) -> bool:
+    """Whether process ``pid`` runs a command line holding these words in a row (`-m`,
+    `workbench.bench`): a pid recycled after an unclean shutdown runs something else, and a stop
+    would signal it. /proc's cmdline, else `ps` (macOS: there the bench and optimize stops trusted
+    any live pid, #82, the 2026-11-18 audit); with neither, the pid is trusted."""
+    try:
+        raw = (PROC / str(pid) / "cmdline").read_bytes()
+        toks = [a.decode(errors="replace") for a in raw.split(b"\0")]
+    except OSError:
+        if (PROC / "self").exists():
+            return False  # /proc works: the pid is gone
+        # -ww: BSD ps cuts the column at 79 characters, and a framework Python's path alone is longer
+        try:
+            toks = subprocess.run(["ps", "-ww", "-o", "command=", "-p", str(pid)],
+                                  capture_output=True, text=True, timeout=5).stdout.split()
+        except (OSError, subprocess.SubprocessError):
+            return True
+    n = len(words)
+    return any(toks[i:i + n] == list(words) for i in range(len(toks) - n + 1))
+
+
 def _alive(pid: int, start: str | None = None) -> bool:
     """Whether the holder is still running: its pid is this user's (a recycled pid of another
     user's is not), and on Linux it started when the holder did (a recycled pid of ours didn't).

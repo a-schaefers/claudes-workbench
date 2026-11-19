@@ -82,9 +82,6 @@ def spawn_runner(task: store.Task) -> int:
     return proc.pid
 
 
-PROC = Path("/proc")
-
-
 def runner_alive(task: store.Task) -> bool:
     pid = task.status.get("pid")
     if not pid:
@@ -93,21 +90,10 @@ def runner_alive(task: store.Task) -> bool:
         os.kill(pid, 0)
     except (ProcessLookupError, PermissionError):  # gone, or a recycled pid that isn't ours
         return False
-    try:  # a recycled pid of ours runs something else
-        return f"workbench.runner\0{task.name}\0".encode() in (PROC / str(pid) / "cmdline").read_bytes()
-    except OSError:
-        if PROC.joinpath("self").exists():
-            return False
-    # No /proc (macOS): ask ps. Trusting any live pid let wb discard, after a reboot, SIGKILL an
-    # unrelated process group that had been given the dead runner's pid (the 2026-11-16 audit).
-    # -ww: BSD ps cuts the column at 79 characters, and a framework Python's path alone is longer.
-    try:
-        out = subprocess.run(["ps", "-ww", "-o", "command=", "-p", str(pid)], capture_output=True,
-                             text=True, timeout=5).stdout
-    except (OSError, subprocess.SubprocessError):
-        return True  # no ps either: trust the pid
-    toks = out.split()  # whole words: task "a" isn't the runner of task "ab"
-    return any(x == "workbench.runner" and y == task.name for x, y in zip(toks, toks[1:]))
+    # A recycled pid of ours runs something else: trusting any live pid let wb discard, after a
+    # reboot, SIGKILL an unrelated process group given the dead runner's pid (the 2026-11-16
+    # audit). Whole words: task "a" isn't the runner of task "ab".
+    return models.runs(pid, "workbench.runner", task.name)
 
 
 # A live task whose runner is gone without a word (SIGKILL, out of memory, a reboot) would sit
