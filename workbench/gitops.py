@@ -339,8 +339,9 @@ def start_branch(repo: Path, base: str) -> str | None:
 
 def merge(repo: Path, task: str, into: str | None = None, base: str | None = None) -> str:
     """Merge the task's branch into ``into`` (the branch it started from: task.json's
-    base_branch), which the main checkout must have out and clean; a conflict is backed out,
-    leaving the repo as it was. With no branch recorded, the checkout's branch must contain
+    base_branch), which the main checkout must have out, clean and not mid-merge; a conflict, an
+    ignored file in the way, or a merge git left unfinished is backed out, leaving the repo as it
+    was, and success means the branch is in HEAD. With no branch recorded, the checkout's branch must contain
     ``base``, the task's base commit. Never onto a detached HEAD, where the merge is lost at the
     next checkout, nor onto another branch than the task's (both happened: the 2026-11-16 audit)."""
     if git(repo, "status", "--porcelain", "--untracked-files=no").strip():
@@ -354,9 +355,54 @@ def merge(repo: Path, task: str, into: str | None = None, base: str | None = Non
             repo, ("merge-base", "--is-ancestor", base, "HEAD"), check=False).returncode:
         raise GitError(f"{repo} has {have} out, which doesn't hold the task's base; "
                        f"merge {branch_name(task)} by hand")
+    if _merging(repo):  # an --abort below would throw away the user's own merge
+        raise GitError(f"{repo} is in the middle of a merge; finish it, then merge "
+                       f"{branch_name(task)} by hand")
+    if in_the_way := _overwritten(repo, branch_name(task)):
+        raise GitError(f"the merge would overwrite {', '.join(in_the_way)} in {repo}, untracked "
+                       f"there (yours, maybe ignored): move it aside, then merge "
+                       f"{branch_name(task)} by hand")
+    # --commit and --no-squash outrank a branch.<name>.mergeOptions of --no-commit or --squash,
+    # which left the merge pending while accept said merged (#190, the 2026-11-19 audit)
     try:
-        git(repo, "merge", "--no-ff", "--no-edit", branch_name(task))
+        git(repo, "merge", "--no-ff", "--no-edit", "--commit", "--no-squash", branch_name(task))
     except GitError as e:
-        git(repo, "merge", "--abort", check=False)
+        if _merging(repo):
+            git(repo, "merge", "--abort", check=False)
         raise GitError(f"merging {branch_name(task)} failed and was backed out: {e}") from None
+    if _merging(repo) or _run(repo, ("merge-base", "--is-ancestor", branch_name(task), "HEAD"),
+                              check=False).returncode:
+        if _merging(repo):
+            git(repo, "merge", "--abort", check=False)
+        raise GitError(f"git didn't complete the merge of {branch_name(task)} (a merge setting "
+                       "of yours?); it was backed out: merge it by hand")
     return git(repo, "rev-parse", "--short", "HEAD").strip()
+
+
+def _overwritten(repo: Path, branch: str) -> list[str]:
+    """The files the branch adds that are already in the checkout untracked: git's merge silently
+    replaces an ignored one, so a task that un-ignored and committed settings.ini overwrote the
+    user's own copy (#189, the 2026-11-19 audit). Its --no-overwrite-ignore doesn't stop it (git
+    2.56's ort merge ignores it), so the paths are checked first, and a parent that is a file
+    counts too."""
+    base = git(repo, "merge-base", "HEAD", branch, check=False).strip()
+    if not base:
+        return []
+    added = [p for p in git(repo, "diff", "--name-only", "--no-renames", "--diff-filter=A", "-z",
+                            base, branch).split("\0") if p]
+    tracked = set(git(repo, "ls-tree", "-r", "--name-only", "-z", "HEAD").split("\0"))
+    out = []
+    for p in added:
+        if p in tracked:
+            continue
+        parts = p.split("/")
+        if any(os.path.lexists(os.path.join(repo, *parts[:i])) and (
+                i == len(parts) or not os.path.isdir(os.path.join(repo, *parts[:i])))
+               for i in range(1, len(parts) + 1)):
+            out.append(p)
+    return out
+
+
+def _merging(repo: Path) -> bool:
+    """Whether a merge is under way in ``repo`` (MERGE_HEAD is there)."""
+    return _run(repo, ("rev-parse", "-q", "--verify", "MERGE_HEAD"), check=False).returncode == 0

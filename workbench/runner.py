@@ -985,9 +985,10 @@ def context_state(task: store.Task) -> dict:
                                for m in msgs)}
 
 
-def fresh_reason(task: store.Task) -> str | None:
-    """Why round n should start a fresh session, or None to continue the current one."""
-    st = task.status
+def fresh_reason(task: store.Task, st: dict | None = None) -> str | None:
+    """Why round n should start a fresh session, or None to continue the current one. ``st``: the
+    status to judge by, when it isn't written yet (wb next, before its one status write)."""
+    st = task.status if st is None else st
     if st.get("context") == "fresh":  # even with no session yet: the prompt still needs the task
         return ASKED_FRESH
     if not st.get("session"):  # the step's first round, or one whose session never started
