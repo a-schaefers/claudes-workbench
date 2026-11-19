@@ -4372,6 +4372,9 @@ class Try(Base):
         self.assertTrue(store.Task("try-2").exists and (store.home() / "try" / "2").is_dir())
         wait_phase("try-2", {"review"})
         run_wb("discard", "try-2")
+        with self.assertRaises(SystemExit), redirect_stderr(io.StringIO()):
+            run_wb("try", "--model", "no-such-model")                     # refused: nothing left
+        self.assertFalse((store.home() / "try" / "3").exists())          # (#161)
 
 
 class Setup(Base):
