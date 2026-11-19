@@ -82,7 +82,7 @@ const OLDEST_WAKE_MS = 60 * 60 * 1000 // never wake for a notification older tha
 
 // Change the tag when WbTask's fields change: a reload declines what the earlier shape stored.
 const tasks = atom({ plugin: 'workbench', key: 'tasks' } as const, [] as WbTask[], {
-  shape: 'tasks-3',
+  shape: 'tasks-4',
 })
 
 // Every Claude Code session id this process has had (`$.session.id()`): /clear and a resume go on
@@ -119,6 +119,16 @@ const chat = atom({ plugin: 'workbench', key: 'chat' } as const,
 const CHAT_EXPIRE_MS = 6 * 3600_000 // a web message older than this isn't submitted to a new listener
 const CHAT_STALE_MS = 15_000 // as wb's LISTENING_FOR: a listener silent this long has gone
 const AWAY_MS = 6 * 3600 * 1000 // the user counts as away this long after a web message
+// ...or for as long as this session has a backlog task open: a night's batch outlasts six hours,
+// and its permission prompts then waited in the terminal until morning (#110, 2026-11-18)
+export function awayNow(webAt: number, now: number, list: WbTask[], isMine: (t: WbTask) => boolean): boolean {
+  if (!webAt) return false
+  if (now - webAt < AWAY_MS) return true
+  return list.some(t => t.backlog && isMine(t) && (ACTIVE.has(t.phase) || NEEDS.has(t.phase)))
+}
+async function away($: any, st: WbChat): Promise<boolean> {
+  return awayNow(st.webAt, await $.clock.now(), await read($, tasks), mine)
+}
 const WEB = '[web chat]'
 // Only for a delivery into a running turn, which the engine frames as another session's message:
 // the rules for answering live in the /workbench skill (The web chat), loaded whenever this listens.
@@ -511,6 +521,7 @@ async function scan($: any, root: string, now: number): Promise<WbTask[]> {
       tokens: Number(st.tok_in ?? 0) + Number(st.tok_out ?? 0), recent,
       repo: String(sp.repo ?? ''), cwd: String(sp.cwd ?? ''), session: String(sp.session ?? ''),
       claude_pid: Number(sp.claude_pid ?? 0),
+      backlog: String(sp.backlog ?? ''),
     })
   }
   for (const name of mem.gone) if (!names.has(name)) mem.gone.delete(name) // removed by hand
@@ -1194,7 +1205,7 @@ export const register: Register = (on, options) => {
     const r = await next(e)
     if (r.decision) return r
     const st = await read($, chat)
-    if (!st.delegating || !st.webAt || (await $.clock.now()) - st.webAt >= AWAY_MS) return r
+    if (!st.delegating || !(await away($, st))) return r
     const decision = await askOnChat($, e.tool_name, e.tool_input, next.signal)
     return decision ? { ...r, decision } : r
   })
@@ -1282,12 +1293,12 @@ export const register: Register = (on, options) => {
     const r = await next(e)
     if (!mem.person) return r // a scripted run: no `wb status` before every prompt
     const st = await read($, chat)
-    const away = st.webAt && (await $.clock.now()) - st.webAt < AWAY_MS
+    const isAway = await away($, st)
     const blocks = [...r.blocks]
     if (st.delegating) blocks.push({ name: 'workbench-mode', text: MODE_NOTE(mem.skill) })
     const notes = st.delegating ? (await $.fs.read(`${mem.root}/notes.md`).catch(() => '')).trim() : ''
     if (notes) blocks.push({ name: 'user-notes', text: NOTES_NOTE(notes) })
-    if (away) blocks.push({
+    if (isAway) blocks.push({
       name: 'web-chat',
       text: 'The user is away from the terminal and last wrote from the web chat. Tell them ' +
         'there (`wb chat reply --text "…"`) when something they asked for is done or needs them; ' +
