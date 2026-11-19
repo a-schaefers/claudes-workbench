@@ -265,7 +265,9 @@ CLAUDE.md, the user's decisions, the review checks) marked apart.
   runner (the 2026-11-16 audit). With `--test` it prints that the base check comes with the first
   report.
 - It writes `task.json`, round 1's prompt (the spec plus the working protocol, `cli.PROTOCOL`:
-  git is read-only, the acceptance command and never weaken a test, the `ask_reviewer` budget,
+  git is read-only, the acceptance command (`cli.test_line`: run it, never weaken a test, and not
+  the whole suite unless the spec asks: agents spent half an hour on it after theirs passed, #127),
+  the `ask_reviewer` budget,
   stay in scope, where it can write and how to ask for a directory, finish with a summary and any
   `Lesson:` lines), the initial status (with `--skill`), the grants (`--allow`, `--allow-path`, in
   `rules/<task>/grants.json`), and spawns the runner.
