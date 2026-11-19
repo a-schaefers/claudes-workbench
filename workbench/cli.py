@@ -2347,8 +2347,9 @@ def first_run() -> list[str]:
         answering = answering or models.ollama_answers(models.ollama_root_here()) or \
             bool(models.servers_here()[1])
     out.append("ok  a model server answers" if answering else
-               "--  no model server answers here: install one (Ollama: https://ollama.com/download), "
-               "or start yours; any OpenAI-compatible server works (wb model add <p>/<m> --url <baseURL>)")
+               "--  no model server answers here: start yours, or run /workbench and Claude lays out "
+               "the ones that fit this machine; any OpenAI-compatible server works "
+               "(wb model add <p>/<m> --url <baseURL>)")
     out.append(f"ok  {len(found)} local model(s) registered" if found else
                "--  no local model registered yet: run /workbench in Claude Code, and Claude picks one "
                "for this machine (wb scout)")
