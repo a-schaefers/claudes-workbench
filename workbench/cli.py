@@ -2033,10 +2033,14 @@ VENDORED = ("node_modules", ".venv", "venv", "__pycache__", ".tox", ".mypy_cache
 
 
 def _unfit_for_commit(d: Path) -> tuple[list[str], list[str]]:
-    """(likely secrets, vendored or generated directories) among the files `git add -A` would
-    take; `target/` counts only beside a Cargo.toml."""
+    """(likely secrets, vendored or generated directories) among the files the first commit
+    would take: the untracked ones `git add -A` adds, and what is already staged (a staged .env
+    went in, whatever .gitignore said: #80, the 2026-11-18 audit); `target/` counts only beside
+    a Cargo.toml."""
     secrets, vendored = [], set()
-    for n in gitops.git(d, "ls-files", "--others", "--exclude-standard", "-z").split("\0"):
+    files = gitops.git(d, "ls-files", "--others", "--exclude-standard", "-z").split("\0")
+    files += gitops.git(d, "ls-files", "--cached", "-z").split("\0")
+    for n in dict.fromkeys(files):
         if not n:
             continue
         parts = n.rstrip("/").split("/")

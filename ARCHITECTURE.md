@@ -2282,8 +2282,10 @@ custom-node packs do run their own Python).
   a remote. Before a first commit it refuses, naming them, files that look like secrets
   (`cli.SECRET_FILES`: `.env*` but `.env.example`, keys, `credentials.json`, `.npmrc`, …) and
   installed or generated directories (`cli.VENDORED`: `node_modules`, `.venv`, `__pycache__`, …,
-  `target` beside a Cargo.toml) that no `.gitignore` covers, before changing anything: add them to
-  `.gitignore` and run it again (the audit: a first commit took an `.env` with an API key).
+  `target` beside a Cargo.toml) that no `.gitignore` covers, or that are already staged (a staged
+  file is committed whatever `.gitignore` says, #80), before changing anything: add them to
+  `.gitignore` (unstaging a staged one) and run it again (the audit: a first commit took an `.env`
+  with an API key).
 - **CLAUDE.md stays true.** It goes into every agent prompt, so `wb accept` prints how many code
   commits it's behind (`cli.claude_md_status`), and the skill has Claude update it after each
   accepted task that changes what it describes.
