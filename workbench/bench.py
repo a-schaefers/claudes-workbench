@@ -479,12 +479,25 @@ SELF_PROMPT = ("{spec}\n\nThe acceptance command is `{test}`: run it before you 
                "only when it passes. Change only what the task needs.")
 
 
-def _self_usage(result: dict) -> dict:
+def _self_result(out) -> tuple[dict, int | None]:
+    """claude -p's JSON result, and its API calls when they can be counted. Claude Code 2.1.311
+    prints every event as a list ending in the result (the 0.99 runs for #120 died on it); its
+    calls are the assistant messages' distinct ids, as spend counts a session's: num_turns
+    counts more (13 for 7 calls), one per tool call made in parallel."""
+    if not isinstance(out, list):
+        return out, None
+    result = next((e for e in reversed(out) if isinstance(e, dict) and e.get("type") == "result"), {})
+    ids = {(e.get("message") or {}).get("id") for e in out
+           if isinstance(e, dict) and e.get("type") == "assistant"} - {None}
+    return result, len(ids) or None
+
+
+def _self_usage(result: dict, calls: int | None = None) -> dict:
     """claude -p's JSON usage in spend's shape, so spend.weighted prices it as it prices a handoff."""
     u = result.get("usage") or {}
     made = u.get("cache_creation") or {}
     one_h = made.get("ephemeral_1h_input_tokens") or 0
-    return {"turns": result.get("num_turns") or 0, "calls": result.get("num_turns") or 0,
+    return {"turns": result.get("num_turns") or 0, "calls": calls or result.get("num_turns") or 0,
             "input": u.get("input_tokens") or 0,
             "cache_write_5m": made.get("ephemeral_5m_input_tokens",
                                        (u.get("cache_creation_input_tokens") or 0) - one_h),
@@ -538,7 +551,8 @@ def self_run(case_name: str, turns: int = SELF_TURNS) -> dict:
         except ValueError:
             return {**row, "outcome": "error", "why": f"claude -p exited {p.returncode} without a "
                     f"JSON result: {(p.stderr or p.stdout).strip()[:200]}"}
-        usage = _self_usage(result)
+        result, calls = _self_result(result)
+        usage = _self_usage(result, calls)
         row.update(claude=usage, minutes=round((time.time() - began) / 60, 1),
                    turns=usage["turns"], claude_model=next(iter(result.get("modelUsage") or {}), None))
         (d / "diff.patch").write_text(gitops.diff(d / "repo", "HEAD"))

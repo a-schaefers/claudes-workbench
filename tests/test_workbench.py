@@ -3695,8 +3695,9 @@ class Bench(Base):
             run_wb("bench", "add", "t-src")                               # once
         self.assertIn("t-src", run_wb("bench", "list"))
 
-    def fake_claude(self, answer: str) -> Path:
-        """A `claude` on PATH that writes answer.txt and prints claude -p's JSON result."""
+    def fake_claude(self, answer: str, events: bool = False) -> Path:
+        """A `claude` on PATH that writes answer.txt and prints claude -p's JSON result (with
+        ``events``, as Claude Code 2.1.311 does: every event, in a list ending with it)."""
         bin_ = Path(self.tmp.name) / "claude-bin"
         bin_.mkdir(exist_ok=True)
         args = Path(self.tmp.name) / "claude-args.json"
@@ -3704,10 +3705,15 @@ class Bench(Base):
             "#!/usr/bin/env python3\nimport json, sys\n"
             f"open({str(args)!r}, 'w').write(json.dumps(sys.argv[1:]))\n"
             f"open('answer.txt', 'w').write({answer!r} + '\\n')\n"
-            "print(json.dumps({'type': 'result', 'num_turns': 6, 'result': 'done', 'modelUsage': {'m': {}},"
+            "r = {'type': 'result', 'num_turns': 6, 'result': 'done', 'modelUsage': {'m': {}},"
             " 'usage': {'input_tokens': 1000, 'cache_read_input_tokens': 200000, 'output_tokens': 3000,"
             " 'cache_creation_input_tokens': 10000, 'cache_creation': {'ephemeral_5m_input_tokens': 0,"
-            " 'ephemeral_1h_input_tokens': 10000}}}))\n")
+            " 'ephemeral_1h_input_tokens': 10000}}}\n"
+            f"if {events!r}:\n"
+            "    say = lambda i: {'type': 'assistant', 'message': {'id': f'msg_{i}'}}\n"
+            "    r = [{'type': 'system', 'subtype': 'init'}, say(1), say(1), {'type': 'user'}, say(2),"
+            " {'type': 'rate_limit_event'}, r]\n"
+            "print(json.dumps(r))\n")
         (bin_ / "claude").chmod(0o755)
         os.environ["PATH"] = f"{bin_}{os.pathsep}{os.environ['PATH']}"
         return args
@@ -3738,6 +3744,11 @@ class Bench(Base):
         self.assertIn("Claude writing it (wb bench self)", run_wb("bench", "report"))
         self.fake_claude("41")
         self.assertIn("t-src: fail", run_wb("bench", "self", "t-src", "--yes"))  # graded by the hidden checks
+        # Claude Code 2.1.311 prints a list of events: the result is the last, and the calls are
+        # the assistant messages' ids (two here, though it says 6 turns), as spend counts them
+        self.fake_claude("42", events=True)
+        self.assertIn("t-src: PASS, self ~56K", run_wb("bench", "self", "t-src", "--yes"))
+        self.assertEqual(bench.rows()[-1]["claude"]["calls"], 2)
 
     def test_a_case_is_refused_without_an_accepted_task_tests_or_a_failing_base(self):
         from workbench import bench
