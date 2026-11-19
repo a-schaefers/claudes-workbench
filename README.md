@@ -44,8 +44,6 @@ claude plugin install workbench@workbench
 ~/.claude/plugins/marketplaces/workbench/bin/wb setup   # puts wb on your PATH and /workbench in your skills
 ```
 
-`wb setup` ends with a checklist of what's still missing.
-
 ### In Claude Code, inside your project
 
 ```
