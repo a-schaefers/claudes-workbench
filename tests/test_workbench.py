@@ -3695,6 +3695,50 @@ class Bench(Base):
             run_wb("bench", "add", "t-src")                               # once
         self.assertIn("t-src", run_wb("bench", "list"))
 
+    def fake_claude(self, answer: str) -> Path:
+        """A `claude` on PATH that writes answer.txt and prints claude -p's JSON result."""
+        bin_ = Path(self.tmp.name) / "claude-bin"
+        bin_.mkdir(exist_ok=True)
+        args = Path(self.tmp.name) / "claude-args.json"
+        (bin_ / "claude").write_text(
+            "#!/usr/bin/env python3\nimport json, sys\n"
+            f"open({str(args)!r}, 'w').write(json.dumps(sys.argv[1:]))\n"
+            f"open('answer.txt', 'w').write({answer!r} + '\\n')\n"
+            "print(json.dumps({'type': 'result', 'num_turns': 6, 'result': 'done', 'modelUsage': {'m': {}},"
+            " 'usage': {'input_tokens': 1000, 'cache_read_input_tokens': 200000, 'output_tokens': 3000,"
+            " 'cache_creation_input_tokens': 10000, 'cache_creation': {'ephemeral_5m_input_tokens': 0,"
+            " 'ephemeral_1h_input_tokens': 10000}}}))\n")
+        (bin_ / "claude").chmod(0o755)
+        os.environ["PATH"] = f"{bin_}{os.pathsep}{os.environ['PATH']}"
+        return args
+
+    def test_claude_writing_a_case_is_graded_alike_and_set_against_the_handoffs_cost(self):
+        # #118: the other side of the handoff's cost, measured as spend measures a handoff
+        from workbench import bench
+        self.accepted("t-src")
+        run_wb("bench", "add", "t-src")
+        err = io.StringIO()
+        with self.assertRaises(SystemExit), redirect_stderr(err):
+            run_wb("bench", "self", "t-src")                          # spends Claude's tokens: --yes
+        self.assertIn("spends Claude tokens: add --yes", err.getvalue())
+        args = self.fake_claude("42")
+        store.append_jsonl(store.home() / "results.jsonl", {"ts": store.now(), "task": "t-src",
+            "outcome": "accepted", "claude": {"turns": 3, "calls": 9, "input": 2000, "cache_write_5m": 0,
+            "cache_write_1h": 20000, "cache_read": 400000, "output": 6000}})   # the handoff's, ~112K
+        out = run_wb("bench", "self", "t-src", "--yes")
+        self.assertIn("t-src: PASS, self ~56K, handoff ~112K, handoff/self 2.00", out)
+        argv = json.loads(args.read_text())
+        self.assertEqual(argv[:6], ["-p", "--output-format", "json", "--max-turns", "40", "--permission-mode"])
+        self.assertIn("Bash(sh tests/check.sh:*)", argv)                  # edits and its command only
+        self.assertEqual(argv[argv.index("--allowedTools") + 1:argv.index("--")], ["Bash(sh tests/check.sh:*)"])
+        self.assertIn("The acceptance command is `sh tests/check.sh`", argv[-1])
+        [row] = [r for r in bench.rows() if r.get("arm") == "claude"]
+        self.assertEqual((row["model"], row["turns"], row["claude"]["cache_write_1h"]), ("claude", 6, 10000))
+        self.assertNotIn("claude ", run_wb("bench", "report").split("\n\n")[0])  # not a model's row
+        self.assertIn("Claude writing it (wb bench self)", run_wb("bench", "report"))
+        self.fake_claude("41")
+        self.assertIn("t-src: fail", run_wb("bench", "self", "t-src", "--yes"))  # graded by the hidden checks
+
     def test_a_case_is_refused_without_an_accepted_task_tests_or_a_failing_base(self):
         from workbench import bench
         self.start("t-open", "ok", "--test", TEST_CMD)

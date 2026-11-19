@@ -1605,6 +1605,16 @@ def cmd_bench(a):
         _, lines = bench.start(a.model or [], a.case or [], _skill_names(a.skill), a.label or "",
                                a.repeat)
         print("\n".join(lines))
+    elif a.bench_cmd == "self":  # spends Claude's tokens: the user's yes, every time (#118)
+        if not a.yes:
+            die("wb bench self runs Claude Code on the case and spends Claude tokens: add --yes")
+        try:
+            row = bench.self_run(a.case, a.turns)
+        except RuntimeError as e:
+            die(str(e))
+        store.append_jsonl(bench.runs_file(), row)
+        print("\n".join(bench.self_lines([row])[1:]) if row.get("outcome") != "error" else
+              f"{a.case}: didn't run: {row['why']}")
     elif a.bench_cmd == "stop":
         pid = bench.stop_driver()
         print(f"stopped the bench run (pid {pid})" if pid else "no bench run is running")
@@ -3200,6 +3210,11 @@ def parser() -> argparse.ArgumentParser:
     x.add_argument("--skill", nargs="+", help="hand these library skills to every replay")
     x.add_argument("--label", help="a name for this variant (a workbench branch, a skill), to compare by")
     x.add_argument("--repeat", type=int, default=1, help="replay each N times")
+    x = bs.add_parser("self", help="the case written by Claude (claude -p), graded alike: what "
+                      "writing it cost Claude, against the handoff")
+    x.add_argument("case")
+    x.add_argument("--yes", action="store_true", help="spend Claude tokens on it (required)")
+    x.add_argument("--turns", type=int, default=bench.SELF_TURNS, help="claude -p's turn cap (40)")
     bs.add_parser("stop", help="stop the run, closing its replay")
     x = bs.add_parser("report", help="pass rates by model and label, and each case")
     x.add_argument("--run")

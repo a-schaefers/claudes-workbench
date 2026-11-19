@@ -398,7 +398,9 @@ goes in that repo's CLAUDE.md instead. Drop a note that has stopped holding (`wb
   background, one at a time, after any real task and stopped by one; it wakes no one and costs
   you nothing. `wb bench report` compares models (or a `--label`, such as a workbench branch or
   a skill handed with `--skill`) on the same work. It is evidence for your `--model` and the
-  weekly check, never a reason to skip review: the router doesn't read it.
+  weekly check, never a reason to skip review: the router doesn't read it. `wb bench self <case>
+  --yes` has you write a case yourself, to set the handoff's cost against yours; it spends your
+  tokens, so run it only when the user says yes.
 
 ## Report to the user
 Short and honest: what was built, on which model, rounds (automatic and review), test result,
