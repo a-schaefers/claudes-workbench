@@ -3525,7 +3525,10 @@ from its GitHub release through `scripts/install-opencode.sh`, checked against t
 pinned beside it as `OPENCODE_SHA256`: 2.x isn't on npm), so those tests run there instead of
 skipping. `opencode.yml` runs the Python suite once a day on the newest OpenCode (the highest
 version among the releases, not GitHub's "Latest", which marks the 1.x line's patches), so a red
-run there means a new OpenCode broke the interop. The README shows all three as badges. The
+run there means a new OpenCode broke the interop. The README shows all three as badges. A
+newer push cancels a workflow's run on a branch, never on main (`cancel-in-progress` is off
+there): shields.io shows a cancelled run as failing, and two merges a minute apart turned the
+tests badge red with nothing broken (2026-11-19). The
 exact floors are kept here; the README names only the majors (Python 3.11, OpenCode 2.x) so it
 can't fall behind (2026-11-17, #102): Claude Code 2.1.287, the floor for mods; OpenCode 2.2.7, the oldest release that
 passes the real-OpenCode tests (2.2.0 never lists `workbench_ask_reviewer`, found 2026-11-17);

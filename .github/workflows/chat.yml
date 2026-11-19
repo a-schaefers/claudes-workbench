@@ -29,7 +29,9 @@ permissions:
 
 concurrency:
   group: chat-${{ github.ref }}
-  cancel-in-progress: true
+  # never on main: shields.io's badge reads a cancelled run as failing, and two merges a minute
+  # apart cancelled the first one's (2026-11-19)
+  cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
 
 jobs:
   browsers:
