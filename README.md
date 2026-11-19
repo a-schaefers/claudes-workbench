@@ -2,8 +2,8 @@
 
 # Claude's Workbench
 
-**Claude plans and reviews. A model on your GPU writes and tests the code.** Workbench connects
-the two inside your Claude Code session.
+**Claude orchestrates. An OpenCode local LLM on your GPU writes the code.** Workbench is a
+Claude Code plugin that connects the two inside your normal Claude Code session.
 
 <p align="center">
 <a href="https://github.com/a-schaefers/claudes-workbench/actions/workflows/check.yml"><img alt="tests" src="https://img.shields.io/github/actions/workflow/status/a-schaefers/claudes-workbench/check.yml?branch=main&label=tests"></a>
@@ -16,17 +16,14 @@ the two inside your Claude Code session.
 <a href="https://github.com/a-schaefers/claudes-workbench/commits/main"><img alt="last commit" src="https://img.shields.io/github/last-commit/a-schaefers/claudes-workbench"></a>
 </p>
 
-Claude runs on Anthropic's servers, on your subscription or API key. The coding agents run on your
-machine, through [OpenCode](https://opencode.ai) and your model server.
-
 - **Claude reads every diff before accepting it**, and sends it back with exact notes until it's
   right.
 - **Pieces sized to your models:** chores to a small fast model, real work to the strongest one
   your GPU runs.
 - **Recurring corrections become instructions** for future tasks
   ([the skill library](ARCHITECTURE.md#the-skill-library)).
-- **Your repo stays yours:** each agent works in its own git worktree, and your plugins, skills
-  and settings keep working.
+- **Your repo stays yours:** each agent works in its own git worktree, and your other plugins,
+  skills and settings keep working.
 
 ## Quickstart
 
@@ -47,7 +44,7 @@ claude plugin install workbench@workbench
 ~/.claude/plugins/marketplaces/workbench/bin/wb setup   # puts wb on your PATH and /workbench in your skills
 ```
 
-`wb setup` ends with a checklist of what's still missing; Claude takes care of it next.
+`wb setup` ends with a checklist of what's still missing.
 
 ### In Claude Code, inside your project
 
@@ -55,17 +52,16 @@ claude plugin install workbench@workbench
 /workbench
 ```
 
-The first time, Claude finishes the setup and proves it on a tiny sample task. If `wb doctor`
-reports no model that can run, `wb models` says why (the server is down, the model isn't pulled).
+The first time, Claude finishes the setup and proves it on a tiny sample task.
 
-Then ask for what you want. The **Workbench** pane opens beside the chat, and the agent's work
-streams into it. When its tests pass, the apprentice says the task is ready for review, and Claude
-reads the diff, then tells you it committed the change or what it sent back.
+Then work as you always do. On the left is Claude, as usual; on the right, the local agents it's
+directing for you.
 
-<p align="center"><img src="docs/first-task.png" alt="Claude Code with the Workbench pane. On the left, Claude says it handed a new test to a local 9B model and will review the change when the runner wakes it, and asks before changing the model's context window. On the right, the agent reads the test file, adds test_empty_input_gives_empty_dict, runs the tests (OK), and the apprentice shows the task's time and context; below it, the Claude coding setting." width="900"></p>
+<p align="center"><img src="docs/first-task.png" alt="Claude Code on the left; on the right, the Workbench pane with a local agent at work." width="900"></p>
 
 `/workbench-quit` stops the agents and keeps their work for later.
 `/workbench-quit-and-hand-back-claude` has Claude finish their tasks itself.
+`/workbench-update` installs the latest workbench (Claude Code tells you when there's one).
 
 ## License
 
