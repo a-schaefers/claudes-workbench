@@ -5172,7 +5172,7 @@ class WebChat(Base):
         self.assertEqual([s["endpoint"] for s in wp.subscriptions()], [good])
 
         sent = []
-        pusher = chat.Pusher(chat.Hub(), send=lambda: sent.append(1))
+        pusher = chat.Pusher(chat.Hub(), send=lambda eps: sent.append(1) or {e: 201 for e in eps})
         seen = chat.send("I saw this one on the page", "claude")
         missed = chat.send("Done: the tests pass.", "claude")
         self.assertEqual(self.call("/api/seen", {"ids": [seen["id"]]}, token=tok)[0], 200)
@@ -5191,6 +5191,23 @@ class WebChat(Base):
         with mock.patch.object(wp, "send", return_value=410):           # the service says it's gone
             self.assertEqual(wp.push_all(1), {good: 410})
         self.assertEqual(wp.subscriptions(), [])
+        # #86: each device on its own; one its service failed for now is tried again, alone
+        flaky = "https://web.push.apple.com/QF"
+        wp.subscribe(good)
+        wp.subscribe(flaky)
+        calls, down = [], [True]
+        pusher = chat.Pusher(chat.Hub(), send=lambda eps: calls.append(eps) or {
+            e: (503 if down[0] and e == flaky else 201) for e in eps})
+        news = chat.send("PERMISSION: may I push?", "claude")
+        t = news["ts"] + chat.PUSH_DELAY + 1
+        self.assertIn(news["id"], pusher.tick(t))        # with what the new device never had
+        self.assertEqual(calls, [[good, flaky]])
+        self.assertEqual(pusher.tick(t + 1), [])                           # not before PUSH_RETRY
+        down[0] = False
+        self.assertIn(news["id"], pusher.tick(t + chat.PUSH_RETRY + 1))
+        self.assertEqual(calls[1:], [[flaky]])                             # the phone alone, again
+        self.assertEqual(pusher.tick(t + chat.PUSH_RETRY + 2), [])
+        self.assertEqual(len(calls), 2)                                    # each device once
         app = self.call("/manifest.webmanifest?k=" + tok)[1]                # the installed app opens keyed
         self.assertEqual(json.loads(app)["start_url"], "/?token=" + tok)
         self.assertEqual(json.loads(self.call("/manifest.webmanifest?k=wrong")[1])["start_url"], "/")

@@ -170,10 +170,13 @@ def unsubscribe(endpoint: str) -> None:
                          {"subs": [s for s in subscriptions() if s.get("endpoint") != endpoint]})
 
 
-def push_all(d: int) -> dict:
-    """Push every subscription; one the service says is gone (404, 410) is dropped."""
+def push_all(d: int, endpoints: list[str] | None = None) -> dict:
+    """Push every subscription (or these of them); one the service says is gone (404, 410) is
+    dropped. Each endpoint's status (0: not reached)."""
     out = {}
     for s in subscriptions():
+        if endpoints is not None and s["endpoint"] not in endpoints:
+            continue
         status = send(d, s["endpoint"])
         out[s["endpoint"]] = status
         if status in (404, 410):
