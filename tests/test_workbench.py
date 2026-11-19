@@ -4685,7 +4685,20 @@ class WebChat(Base):
     def tearDown(self):
         self.srv.shutdown()
         self.srv.server_close()
+        self.srv.RequestHandlerClass.hub.close()  # or it outlives the test (#134)
         super().tearDown()
+
+    def test_a_closed_hub_makes_nothing_in_the_next_home(self):
+        # #134 (CI, 2026-11-19): a test's hub outlived it and made the next test's state/ in its
+        # setUp's way. It keeps its own directory, and close() ends it.
+        hub = self.chat.Hub()
+        self.assertEqual(hub.dir, Path(os.environ["WB_HOME"]) / "chat")
+        hub.close()
+        nxt = Path(self.tmp.name) / "next"
+        os.environ["WB_HOME"] = str(nxt)
+        hub.bump()
+        time.sleep(1.5)  # past the restart's pause, had it gone on
+        self.assertFalse(nxt.exists())
 
     def call(self, path, body=None, token=None, host="localhost"):
         import http.client
