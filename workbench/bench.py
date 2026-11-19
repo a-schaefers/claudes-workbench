@@ -415,7 +415,7 @@ def replay(case: dict, model: str, rep: int, run: str, label: str, skills: list[
                 pass
         task = store.Task(name)
         if not task.exists:
-            return {**row, "outcome": "error", "why": "wb start refused (wb.log)"}
+            return {**row, "outcome": "error", "why": "wb start refused"}
         CURRENT["task"] = task
         st, asks_refused = _wait(task)
         phase = st.get("phase")
@@ -490,9 +490,17 @@ def report(run: str | None = None, label: str | None = None) -> str:
         n = len(p.get("pairs") or []) * int(p.get("repeat") or 1)
         head.append(f"running: {d['run']}, {len([r for r in every if r.get('run') == d['run'] and _done(r)])}"
                     f" of {n} replayed")
+    # why a replay never started, and where its log is: a run whose every replay failed to start
+    # said only "no replays yet" (the 2026-11-18 audit, #89)
+    errors = [r for r in other if r.get("outcome") == "error"]
+    unstarted = [f"{r.get('case')} on {r.get('model')}: didn't start: {r.get('why') or '?'} "
+                 f"({home() / 'runs' / str(r.get('run')) / str(r.get('task')) / 'wb.log'})"
+                 for r in errors[-10:]]
     if not rs:
-        return "\n".join(head + ["no replays yet" + (" (wb bench add, then wb bench run)"
-                                                     if not cases() else "")])
+        return "\n".join(head + ([f"no replay finished; {len(errors)} didn't start:"] + unstarted
+                                 if errors else
+                                 ["no replays yet" + (" (wb bench add, then wb bench run)"
+                                                      if not cases() else "")]))
     by: dict = {}
     for r in rs:
         by.setdefault((r.get("label") or "-", r["model"]), []).append(r)
@@ -513,8 +521,9 @@ def report(run: str | None = None, label: str | None = None) -> str:
                           for r in rs if r["case"] == c)
         out.append(f"{c}: {marks}  (accepted from {str(o.get('model') or '?').split('/')[-1]}, "
                    f"{o.get('reviews', '?')} review round(s))")
-    if other:
-        out.append(f"({len(other)} replay(s) preempted or not started, left out)")
+    if len(other) > len(errors):
+        out.append(f"({len(other) - len(errors)} replay(s) preempted, left out)")
+    out += unstarted
     return "\n".join(out)
 
 
