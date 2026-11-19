@@ -6,6 +6,7 @@ resource, and by a person at a terminal.
 import argparse
 import fnmatch
 import functools
+import io
 import json
 import os
 import re
@@ -16,6 +17,7 @@ import subprocess
 import sys
 import time
 from collections import defaultdict
+from contextlib import redirect_stdout
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -2360,6 +2362,30 @@ def first_run() -> list[str]:
     return out
 
 
+TRY = PKG_ROOT / "workbench" / "try"  # wb try's sample: project/, spec.md, check.py (the hidden check)
+
+
+def cmd_try(a):
+    """A sample task that proves the setup: a tiny project copied into $WB_HOME/try/<n>, set up
+    as wb init sets any project up, its spec started as a trivial trial (never the router's
+    evidence), and the hidden check printed for Claude to run at review (#112)."""
+    base = store.home() / "try"
+    n = 1 + max((int(p.name) for p in base.glob("*") if p.name.isdigit()), default=0)
+    while store.Task(f"try-{n}").exists:  # task names are never reused
+        n += 1
+    d = base / str(n)
+    shutil.copytree(TRY / "project", d)
+    with redirect_stdout(io.StringIO()):
+        cmd_init(argparse.Namespace(dir=str(d)))
+    name = f"try-{n}"
+    argv = ["start", name, "--spec", str(TRY / "spec.md"), "--repo", str(d), "--size", "trivial",
+            "--trial", "--test", "python3 -m unittest", *(["--model", a.model] if a.model else [])]
+    s = parser().parse_args(argv)
+    s.f(s)
+    print(f"the sample project: {d}")
+    print(f"hidden check, at review: python3 {TRY / 'check.py'} {store.Task(name).worktree}")
+
+
 UPDATE_EVERY = 7 * 24 * 3600  # the mod's weekly check (wb update --check --if-due)
 
 
@@ -2940,6 +2966,10 @@ def parser() -> argparse.ArgumentParser:
                    help="start: only when due (never measured, the GPU changed, a new model), "
                    "and quietly when not or when a task holds the GPU (wb setup and the mod)")
     s.set_defaults(f=cmd_optimize)
+    s = sub.add_parser("try", help="a sample task that proves the setup: a tiny project, its spec "
+                       "started as a trivial trial, and the hidden check to run at review")
+    s.add_argument("--model", help="a model id or fragment (default: the router's pick)")
+    s.set_defaults(f=cmd_try)
     s = sub.add_parser("init", help="set a project up: git with an initial commit, "
                                     "AGENTS.md → CLAUDE.md")
     s.add_argument("dir"); s.set_defaults(f=cmd_init)
