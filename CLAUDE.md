@@ -6,7 +6,7 @@ Claude Code mod wakes Claude when a task needs it. Everything talks through plai
 
 The short name, `workbench`, stays on everything inside: the package, the plugin
 (`workbench@workbench`), the state and config directories, and the clone path `~/repos/workbench`
-ARCHITECTURE.md's *Installing* suggests for developing (nothing depends on that path).
+ARCHITECTURE.md's *Installing* suggests for developing (nothing depends on it).
 
 ## Keeping the docs true
 README.md is for people and stays simple: the pitch, a quickstart, then a pointer. ARCHITECTURE.md
@@ -104,7 +104,7 @@ dependencies. No packaging: it runs from the clone.
   trials.
 - `router.py`: the model per task size and stack, each model's slice, its time budgets and speeds.
 - `tuning.py`: knobs learned per model and window (`KNOBS`: `fresh_at`, the handover point; `self_review`).
-  A new knob: add it to `KNOBS`, read it with `tuning.value(task, name)`.
+  A new knob goes in `KNOBS`; read it with `tuning.value`.
 - `models.py`: discovers local models from OpenCode's config, their status, residency
   (`make_resident`, `free_gpu`), GPU sharing (`GpuLease`, `can_share`), adding and retiring them.
 - `hardware.py`: OS, GPU/VRAM, RAM, CPU, disk, read fresh for `wb scout` and the GPU budget
@@ -115,7 +115,7 @@ dependencies. No packaging: it runs from the clone.
 - `spend.py`: what a task cost Claude, from its session's transcript; `savings.py`, against Claude
   writing it (an estimate).
 - `bench.py`: `wb bench`: accepted tasks replayed on any model, graded by their own tests.
-- `verify.py`: `wb verify`: a regression test run on the base and the candidate, in scratch checkouts.
+- `verify.py`: `wb verify`, `wb shot`: the base and the candidate run alike, in scratch checkouts.
 - `lessons.py`: what each task taught, gathered into lessons.jsonl by feedback/next/resume/accept/discard.
 - `transcript.py`: `wb watch` (the session export merged with the task's events; `--json` feeds
   the mod's pane). `transcript.export` is also the runner's view of the session.
@@ -223,7 +223,7 @@ Environment: `WB_HOME`, `WB_MODELS`, `WB_SKILLS`, `WB_IMAGES`, `WB_CHAT_TOKEN`, 
 `spend.py` reads Claude Code's transcripts); these may be relative
 or start with `~` (`store.absolute_env` makes them absolute against wb's cwd); `WB_COMPACT_AT` (the
 mod's early compaction, a percentage, 0 off); `WB_BIN` (the `wb` the mod runs); `WB_TASK` (set
-for the ask server and the agent); `CLAUDE_CODE_SESSION_ID` (Claude Code's: `wb start` records it,
+for the ask server and the agent); `WB_SHOT_OUT`, `WB_SHOT_VIEWPORT` (`wb shot`); `CLAUDE_CODE_SESSION_ID` (Claude Code's: `wb start` records it,
 which session's task it is) and `CLAUDE_PID` (its process: once gone, the directory rule adopts the task). Tests only: `WB_OPENCODE_BIN` (a command line, split with
 `shlex`: the fake), `WB_FAKE_MODELS` (no model servers), `WB_FAKE_GPU_GB` (the fake GPU's size;
 unset: unknown, so no sharing).

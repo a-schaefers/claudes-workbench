@@ -12,6 +12,8 @@ from __future__ import annotations
 
 import json
 import re
+import shlex
+import shutil
 import tempfile
 from pathlib import Path
 
@@ -58,13 +60,33 @@ def assertion(text: str) -> str:
     return ""
 
 
-def _run(task: store.Task, checkout, cmd: str, limit: int) -> tuple[int | str, str]:
+def _run(task: store.Task, checkout, cmd: str, limit: int, keep=None) -> tuple[int | str, str]:
+    """``cmd`` in a scratch clone that ``checkout`` sets up, under the task's lane; ``keep(work)``
+    takes what the run left before the clone goes."""
     store.home().mkdir(parents=True, exist_ok=True)  # not in /tmp, where the git shim allows writes
     with tempfile.TemporaryDirectory(prefix=".verify-", dir=store.home()) as scratch:
         work = Path(scratch) / "repo"
         gitops.git(scratch, "clone", "-q", "--shared", "--no-checkout", task.spec["repo"], str(work))
         checkout(work)
-        return runner.run_in_lane(_At(task.name, work), cmd, limit)
+        out = runner.run_in_lane(_At(task.name, work), cmd, limit)
+        if keep:
+            keep(work)
+        return out
+
+
+def _checkouts(task: store.Task, tree: str, files: list[str]):
+    """The base, with the candidate's ``files`` copied in, and the candidate as the worktree is."""
+    head = gitops.git(task.worktree, "rev-parse", "HEAD").strip()
+
+    def base(work: Path) -> None:
+        gitops.git(work, "checkout", "-q", "--detach", task.spec["base"])
+        if files:
+            gitops.git(work, "checkout", "-q", tree, "--", *files)  # the candidate's, alone
+
+    def candidate(work: Path) -> None:
+        gitops.git(work, "checkout", "-q", "--detach", head)
+        gitops.git(work, "read-tree", "-u", "--reset", tree)  # the worktree as it is, new files too
+    return base, candidate
 
 
 def verdict(base: int | str, base_out: str, cand: int | str) -> str:
@@ -82,20 +104,11 @@ def run(task: store.Task, cmd: str, files: list[str] | None = None, limit: int =
     """Run ``cmd`` on the base (with the candidate's test files) and on the candidate; the
     result, also kept in tasks/<task>/verify/<n>/ with both outputs."""
     tree = gitops.snapshot(task.worktree)
-    head = gitops.git(task.worktree, "rev-parse", "HEAD").strip()
     files = test_files(task, tree) if files is None else files
     if not files:
         raise RuntimeError("no test file among the candidate's changes: name the regression "
                            "test's files with --files (or review it as usual)")
-
-    def base(work: Path) -> None:
-        gitops.git(work, "checkout", "-q", "--detach", task.spec["base"])
-        gitops.git(work, "checkout", "-q", tree, "--", *files)  # the candidate's tests, alone
-
-    def candidate(work: Path) -> None:
-        gitops.git(work, "checkout", "-q", "--detach", head)
-        gitops.git(work, "read-tree", "-u", "--reset", tree)  # the worktree as it is, new files too
-
+    base, candidate = _checkouts(task, tree, files)
     b_code, b_out = _run(task, base, cmd, limit)
     c_code, c_out = _run(task, candidate, cmd, limit)
     d = task.dir / "verify"
@@ -126,6 +139,58 @@ def lines(r: dict) -> list[str]:
         x = r[side]
         out.append(f"  {side}: exit {x['exit']}" + (f": {x['assertion']}" if x["assertion"] else ""))
     out.append(f"  outputs: {r['dir']}/{{base,candidate}}.txt")
+    return out
+
+
+SHOT = ".wb-shot.png"  # where a capture command writes, in its checkout ($WB_SHOT_OUT)
+
+
+def shot(task: store.Task, cmd: str, files: list[str] | None = None, viewport: str = "1280x800",
+         limit: int = LIMIT) -> dict:
+    """Run one capture command on the base and on the candidate (#98), each in a scratch
+    checkout under the task's lane: the same command, fixture and viewport, so the two images
+    show the same interaction. The command is the project's own (a headless browser script, a
+    test that saves a screenshot): it writes a PNG to $WB_SHOT_OUT and reads the size from
+    $WB_SHOT_VIEWPORT. Kept in tasks/<task>/shots/<n>/ with what each image is of."""
+    if not re.fullmatch(r"\d{2,5}x\d{2,5}", viewport):
+        raise RuntimeError(f"--viewport {viewport}: give it as WIDTHxHEIGHT, e.g. 390x844")
+    tree = gitops.snapshot(task.worktree)
+    base, candidate = _checkouts(task, tree, files or [])
+    d = task.dir / "shots"
+    n = 1 + max((int(p.name) for p in d.glob("*") if p.name.isdigit()), default=0)
+    out = d / str(n)
+    out.mkdir(parents=True)
+    st = task.status
+    meta = {"task": task.name, "step": st.get("steps", 1), "round": st.get("round", 1),
+            "cmd": cmd, "viewport": viewport, "files": files or [], "ts": store.now(),
+            "base": {"rev": task.spec["base"]}, "candidate": {"rev": tree}}
+    for side, checkout in (("base", base), ("candidate", candidate)):
+        dest = out / f"{side}.png"
+
+        def keep(work: Path, dest=dest) -> None:
+            p = work / SHOT
+            if p.is_file() and not p.is_symlink() and p.read_bytes()[:8] == b"\x89PNG\r\n\x1a\n":
+                shutil.copyfile(p, dest)
+        env = f"WB_SHOT_OUT=./{SHOT} WB_SHOT_VIEWPORT={viewport} "
+        code, text = _run(task, checkout, env + f"sh -c {shlex.quote(cmd)}", limit, keep)
+        (out / f"{side}.txt").write_text(text, encoding="utf-8")
+        meta[side].update(exit=code, image=str(dest) if dest.exists() else None)
+        if not dest.exists():  # said, never hidden: the ordinary code review still stands
+            meta[side]["error"] = (f"exit {code}" if code != 0 else "no PNG at $WB_SHOT_OUT") + \
+                f": {out / (side + '.txt')}"
+    store.write_json(out / "shots.json", meta)
+    return {**meta, "dir": str(out)}
+
+
+def shot_lines(m: dict) -> list[str]:
+    out = [f"screenshots of {m['task']}, step {m['step']} round {m['round']} at {m['viewport']} "
+           f"(`{m['cmd']}`):"]
+    for side in ("base", "candidate"):
+        x = m[side]
+        out.append(f"  {side} {x['rev'][:10]}: " + (x["image"] if x.get("image") else
+                                                    f"no image: {x['error']}"))
+    if not (m["base"].get("image") and m["candidate"].get("image")):
+        out.append("  a capture failed: the code review stands on its own")
     return out
 
 

@@ -1015,8 +1015,11 @@ async function listen($: any, now: number) {
       continue
     }
     mem.chatSent.add(id)
-    // The terminal shows only `[web chat] <their words>`: how to answer is the skill's to say.
-    const text = `${WEB} ${String(m.text ?? '')}`
+    // The terminal shows only `[web chat] <their words>`: how to answer is the skill's to say. A
+    // reply to wb shot's pair says which task and step it's about, whichever is active now (#99).
+    const a = m.about && typeof m.about === 'object' ? m.about : null
+    const about = a ? `(about ${String(a.task)}, step ${Number(a.step)}, screenshots ${Number(a.n)}) ` : ''
+    const text = `${WEB} ${about}${String(m.text ?? '')}`
     // Mid-turn, into the running turn, as a message typed mid-turn would be; else, or if that is
     // refused, as a prompt of its own (which waits for the turn to end).
     if (mem.busy) {

@@ -312,7 +312,11 @@ drifts, `wb log` only if the digest shows trouble (`reference/driving.md`).
     special-cased; expected values not just copied from the output. For a bug fix with its own
     regression test, `wb verify <name> --test '<that test>'` shows whether it fails on the base
     and passes on the change; only `proven` is proof (`wb report` repeats it, and `wb accept`
-    says when it proves nothing about what you accept).
+    says when it proves nothing about what you accept). For a visual change, `wb shot <name>
+    --capture '<the project's screenshot command>'` captures the base and the candidate the same
+    way: look at both images, and if a capture failed, review the code as usual. `--chat` shows the
+    pair to a user away from the terminal; their reply arrives as `[web chat] (about <task>, step
+    <s>, …)`, and that task's feedback is `wb feedback <task>`, whatever task is active.
   - **Fit**: the repo's conventions, naming, idioms and existing helpers; no duplicated code.
   - **Hygiene**: no stray files, debug output, dead code or TODOs.
   - **Safety**: injection, secrets, unsafe file or shell use.
