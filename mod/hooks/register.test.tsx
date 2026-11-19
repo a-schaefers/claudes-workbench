@@ -90,6 +90,12 @@ test('a copy updated from /delegate gets its /workbench link from wb setup', asy
 
 // A file system in memory: what `wb` and its runner would have written. `ui` records the pane
 // opening and closing and each status line.
+// The web chat as the user turned it on (`wb chat on`): off by default (the user, 2026-11-19)
+function chatOn(files: Record<string, string>) {
+  files['/wb/chat/switch.json'] = JSON.stringify({ on: true })
+  return files
+}
+
 function fakeTasks(on: any, files: Record<string, string>, dirs = ['fix-it'], scouted = true, ui: string[] = [], ears = true) {
   // the weekly model check was done just now, unless the test is about it
   if (scouted) files['/wb/scout.json'] = JSON.stringify({ done_at: 1_800_000_000 })
@@ -538,6 +544,7 @@ test('the pane follows the running task: its whole history, then what it is doin
     '/wb/tasks/fix-it/status.json': JSON.stringify({ phase: 'running', round: 1, updated_at: ts }),
   }
   fakeTasks(on, files)
+  chatOn(files)                                                   // the user turned the web chat on
   const runs: string[][] = []
   on('process.run', (_: any, e: any) => {
     runs.push(e.argv)
@@ -933,6 +940,7 @@ test('a reply to a pair of screenshots reaches Claude with its task and step (#9
   const clock = mock.clock(on, { now: 1_800_000_000_000 })
   const files: Record<string, string> = {}
   fakeTasks(on, files, [])
+  chatOn(files)                                                   // the user turned the web chat on
   on('ui.toast', () => ({ value: undefined }))
   on('session.cwd', () => ({ value: '/home/u/project' }))
   on('skill.prompt', (_: any, e: any) => ({ text: e.text }))
@@ -952,6 +960,7 @@ test('the web chat reaches Claude only in /workbench mode, with a receipt, and o
   const clock = mock.clock(on, { now: 1_800_000_000_000 })
   const files: Record<string, string> = {}
   fakeTasks(on, files, [])
+  chatOn(files)                                                   // the user turned the web chat on
   on('ui.toast', () => ({ value: undefined }))
   on('session.cwd', () => ({ value: '/home/u/project' }))
   on('skill.prompt', (_: any, e: any) => ({ text: e.text }))  // the engine's expansion
@@ -1001,6 +1010,7 @@ test('a web message another session claimed first is not submitted here', async 
   const clock = mock.clock(on, { now: 1_800_000_000_000 })
   const files: Record<string, string> = {}
   fakeTasks(on, files, [])
+  chatOn(files)                                                   // the user turned the web chat on
   on('ui.toast', () => ({ value: undefined }))
   on('session.cwd', () => ({ value: '/home/u/project' }))
   on('skill.prompt', (_: any, e: any) => ({ text: e.text }))
@@ -1029,6 +1039,7 @@ test('a permission prompt while the user is away goes to the web chat, and their
   const clock = mock.clock(on, { now: 1_800_000_000_000 })
   const files: Record<string, string> = {}
   fakeTasks(on, files, [])
+  chatOn(files)                                                   // the user turned the web chat on
   const toasts: string[] = []
   on('ui.toast', (_: any, e: any) => { toasts.push(e.text); return { value: undefined } })
   on('session.cwd', () => ({ value: '/home/u/project' }))
@@ -1104,6 +1115,7 @@ test('running wb counts as workbench mode, and a web message reaches a running t
   const clock = mock.clock(on, { now: 1_800_000_000_000 })
   const files: Record<string, string> = {}
   fakeTasks(on, files, [])
+  chatOn(files)                                                   // the user turned the web chat on
   on('ui.toast', () => ({ value: undefined }))
   on('session.cwd', () => ({ value: '/home/u/project' }))
   on('session.id', () => ({ value: 'sess-1' }))
@@ -1295,7 +1307,7 @@ test('the bubble wraps its words into lines that fit, never cutting a line short
 
 test('the pane ends with the week\'s saving, read from wb savings, above the web chat link', async ($, on) => {
   const clock = mock.clock(on, { now: 1_800_000_000_000 })
-  fakeTasks(on, {})
+  fakeTasks(on, chatOn({}))
   const week = { period: 'week', tasks: 3, claude: 160000, self_est: 1390000, saved: 1230000, wh: 900, cost: null }
   on('process.run', (_: any, e: any) => {
     if (e.argv[1] === 'savings') return { value: { exitCode: 0, stdout: JSON.stringify(week), stderr: '' } }
@@ -1367,35 +1379,62 @@ test('Claude coding: its own edit in a task\'s worktree waits for the user\'s ye
   expect(w.deny).toContain('"Only when I say"')
 })
 
-test('the Claude coding slider sits under the apprentice, saves through wb, and reads the choice back', async ($, on) => {
-  // #93: one row at rest, the sentence while focused, in the full and compact layouts
+test('the settings rows open to Buttons, pick through wb, and say the sentence of the option the ring is on', async ($, on) => {
+  // #93, and the user, 2026-11-19: a Select's sentence followed only the saved choice, and the options
+  // should take a click or the keys
   const clock = mock.clock(on, { now: 1_800_000_000_000 })
   const files: Record<string, string> = {}
   fakeTasks(on, files, [])
   const runs: string[][] = []
-  on('process.run', (_: any, e: any) => { runs.push(e.argv); return { value: { exitCode: 0, stdout: '', stderr: '' } } })
+  const ring: any[] = []
+  on('ui.focus', (_: any, e: any) => { ring.push(e); return { value: {} } })   // the engine, beneath: the ring moves
+  on('process.run', (_: any, e: any) => {
+    runs.push(e.argv)
+    if (e.argv[1] === 'chat' && e.argv[2] === 'on') files['/wb/chat/switch.json'] = JSON.stringify({ on: true })
+    if (e.argv[1] === 'coding') files['/wb/coding.json'] = JSON.stringify({ mode: e.argv[2] })  // what wb writes
+    if (e.argv[1] === 'chat' && e.argv[2] === 'url')
+      return { value: { exitCode: 0, stdout: 'http://localhost:1337/#token=abc\n', stderr: '' } }
+    return { value: { exitCode: 0, stdout: '', stderr: '' } }
+  })
   await $.session.start({ cwd: '/', surface: 'terminal', isInteractive: true })
   await clock.advance(1000)
   for (const rows of [24, 8]) {                                      // the apprentice in pixels, then its face
     const ui = await $.ui.mount({ ...PANE, surface: 'terminal', props: { ...PANE.props, scroll: { offset: 0, bodyRows: rows } } })
-    const slider = await ui.find({ key: 'coding' }) as any
-    expect(slider?.type).toBe('Select')
-    expect(slider?.props.value).toBe('decide')                             // no saved choice
-    expect((slider?.props.options as any[]).map((o: any) => o.label)).toEqual(['Only when I say', 'Ask me first', 'Let Claude decide'])
-    expect(await ui.find({ type: 'Text', text: /guide the local agent/ })).toBeUndefined()  // one row at rest
+    expect(await ui.find({ key: 'coding' })).toBeUndefined()                                           // a tab of their own
+    expect((await ui.findAll({ type: 'Button' })).slice(-2).map(b => b.props.label)).toEqual(['Tasks', 'Settings'])  // last
+    await ui.press({ key: 'tab-settings' })
+    expect((await ui.find({ key: 'coding' }))?.props.label).toBe('▸ Claude coding: Let Claude decide')  // no saved choice
+    expect((await ui.find({ key: 'chat' }))?.props.label).toBe('▸ Web chat: Off')                      // off by default
+    expect(await ui.find({ key: 'coding:ask' })).toBeUndefined()                                       // one row each at rest
+    expect(await ui.find({ type: 'Text', text: /web chat / })).toBeUndefined()                         // and no link
+    await ui.press({ key: 'tab-tasks' })
     await ui.unmount()
   }
   const ui = await $.ui.mount({ ...PANE, surface: 'terminal' })
-  await ui.select({ key: 'coding', value: 'ask' })
+  await ui.press({ key: 'tab-settings' })
+  await ui.press({ key: 'coding' })
+  expect((await ui.findAll({ type: 'Button' })).map(b => b.props.label).filter((l: string) => / {2}[❯ ] /.test(l)))
+    .toEqual(['    Only when I say', '    Ask me first', '  ❯ Let Claude decide'])
+  const says = async () => ((await ui.find({ key: 'coding-says' })) as any)?.children?.[0]?.children?.[0]?.trim()
+  expect(await says()).toBe('Claude uses its judgment to guide the local agent or make a fix itself.')  // the chosen one's
+  await $.ui.focus({ component: 'Pane', requestId: 'workbench', element: 'coding:only', origin: { kind: 'person' } } as any)  // the person's Tab, as the engine raises it
+  expect(await says()).toBe('You tell Claude when to write code.')                                         // the ring's
+  await ui.press({ key: 'coding:ask' })
   expect(runs.at(-1)).toEqual(['wb', 'coding', 'ask'])
+  expect((await ui.find({ key: 'coding' }))?.props.label).toBe('▸ Claude coding: Ask me first')
+  expect(await ui.find({ key: 'coding:ask' })).toBeUndefined()
+  await ui.press({ key: 'chat' })
+  await ui.press({ key: 'chat:on' })
+  expect(runs.some(r => r.join(' ') === 'wb chat on')).toBe(true)
+  expect((await ui.find({ key: 'chat' }))?.props.label).toBe('▸ Web chat: On')
+  const texts = (await ui.findAll({ type: 'Text' })).map(t => t.text)
+  expect(texts.at(-1)).toBe('http://localhost:1337/#token=abc')                                   // the link, at once
+  await ui.press({ key: 'tab-tasks' })
+  expect((await ui.findAll({ type: 'Text' })).map(t => t.text).at(-1)).toBe('http://localhost:1337/#token=abc')  // there too
+  await ui.press({ key: 'tab-settings' })
   await ui.unmount()
-  files['/wb/coding.json'] = JSON.stringify({ mode: 'ask' })      // what wb wrote: the pane reopens on it
-  const focused = await $.ui.mount({ ...PANE, surface: 'terminal', props: { ...PANE.props, isFocused: true } })
-  expect(((await focused.find({ key: 'coding' })) as any)?.props.value).toBe('ask')
-  expect((await focused.find({ type: 'Text', text: /waits for your yes/ }))?.text).toBe('Claude can ask to make a specific fix and waits for your yes.')
-  await focused.unmount()
-  const phone = await $.ui.mount({ ...PANE, surface: 'mobile' })    // no Select there: the choice, read
-  expect(await phone.find({ type: 'Text', text: /Ask me first/ })).toBeDefined()
+  const phone = await $.ui.mount({ ...PANE, surface: 'mobile' })    // the same rows there
+  expect((await phone.find({ key: 'coding' }))?.props.label).toBe('▸ Claude coding: Ask me first')
   await phone.unmount()
 })
 
@@ -1423,4 +1462,22 @@ test('a one-task exception shows beside its task and is under way from Claude\'s
   expect(r.deny).toBeUndefined()
   expect(JSON.parse(files['/wb/tasks/fix-it/coding.json']).allowed[0].started).toBe(1_800_000_003)
   await clock.advance(1000)                                        // the poll the call started settles
+})
+
+test('the strip above the prompt stays the engine\'s until the user closes the pane', async ($, on) => {
+  // the user, 2026-11-19: closed by hand the pane minimizes to a strip, as backseat-driver's. A test
+  // can't raise the person's ui.close, so this holds the other half: no strip while it is up
+  const clock = mock.clock(on, { now: 1_800_000_000_000 })
+  fakeTasks(on, {}, [])
+  on('skill.prompt', (_: any, e: any) => ({ text: e.text }))
+  on('process.run', () => ({ value: { exitCode: 0, stdout: '', stderr: '' } }))
+  on('ui.render', { component: 'AbovePrompt' }, ($: any, e: any) => { const { Text } = $.ui.resolve(e); return <Text>engine</Text> })
+  const BAND = { plugin: 'workbench', component: 'AbovePrompt', requestId: 'above-prompt', props: { bodyColumns: 120 } } as any
+  await $.session.start({ cwd: '/', surface: 'terminal', isInteractive: true })
+  await $.skill.prompt({ skill: 'workbench', text: 'x', frontmatter: {}, source: 'userSettings' })
+  await clock.advance(1000)
+  const band = await $.ui.mount({ ...BAND, surface: 'terminal' })
+  expect(await band.find({ key: 'restore' })).toBeUndefined()
+  expect((await band.find({ type: 'Text' }))?.text).toBe('engine')
+  await band.unmount()
 })

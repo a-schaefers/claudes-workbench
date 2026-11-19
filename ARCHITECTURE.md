@@ -68,7 +68,7 @@ Everything talks through plain files in one state directory (`$WB_HOME`, `workbe
 The runner, the agent's `ask_reviewer` server and the chat server never call each other or the
 mod; they read and write the same files, and anything that waits sleeps in the kernel (inotify on
 directories, pidfd on processes, `workbench/watch.py`) until one of them changes. The mod's only
-calls are `wb` subcommands (`wb events`, `wb watch --json`, `wb status`, `wb chat ack|claim|url|log|ask|wait|answer`,
+calls are `wb` subcommands (`wb events`, `wb watch --json`, `wb status`, `wb chat ack|claim|url|log|ask|wait|answer|on|off`,
 `wb stop|takeover --all --repo … --session …`, `wb update` and its weekly `wb update --check --if-due`,
 `wb optimize start --if-due` once per session (*Optimize*)), plus
 `kill -0` to see whether the chat listener's pid lives and `tail -c` to read a long file's end. A
@@ -1374,7 +1374,13 @@ nothing until a surface attaches.
 ## Seeing what the agent does
 
 - **The pane** (opened by `/workbench`, or once per load when a task runs, and closed by a quit command;
-  `/workbench` run again brings it back) lists every task: phase, round, model, test result, age and
+  `/workbench` run again brings it back) has two tabs, **Tasks** and **Settings** (Buttons on its
+  last line, keys `1` and `2`: last, since the pane follows its end and a row at the top scrolled
+  away under a long transcript). Closed by the user (its mark, Esc), it is minimized, as
+  backseat-driver's is (2026-11-19): a strip above the prompt stands in for it while workbench mode
+  is on or the session has tasks, `▸ Workbench`, `Tasks`, `Settings` (each a way back, to that tab)
+  and the status line's summary; a press there or `/workbench` brings it back; a quit command
+  clears it, and a module reload doesn't reopen a minimized pane. The Tasks tab lists every task: phase, round, model, test result, age and
   its last few events. Under the list it follows one task as a live transcript: the one it
   follows while that one is queued, running, testing or asking, else the newest started that is
   running, testing or asking, then queued, else the newest waiting for Claude (choosing by the
@@ -1386,14 +1392,22 @@ nothing until a surface attaches.
   passed on <task>." / "Claude reviews next.", "Claude answers next.": #103, where "done" read as
   tests passed, accepted or landed alike). The transcript's last line says the same once
   (`■ done: Claude reviews next`), and status `last` (`tests passed: Claude reviews next`). A short pane gets its face on one line
-  instead. Right below it, the **Claude coding** slider (#93, *Claude coding*): one row,
-  `Claude coding  ‹ Let Claude decide ›`, a `Select` (key `coding`) whose stops run left to right
-  `Only when I say`, `Ask me first`, `Let Claude decide` (`CODING_STOPS`); a pick runs `wb coding
-  <mode>`, and each draw reads `coding.json` again, so the pane reopens on the saved choice. The
-  focused pane adds the choice's sentence under it. Mobile draws no Select: there it is a line
-  that reads the choice. Then the week's saving (`savedLine` of `wb savings --json`, read every 10 minutes
+  instead. Then the week's saving (`savedLine` of `wb savings --json`, read every 10 minutes
   and again when a task closes: `this week: saved ~1.2M Claude tokens (46%, estimate) · 0.9 kWh`;
-  nothing until a task can be compared), and the web chat's link, pinned at the bottom.
+  nothing until a task can be compared), and, while the web chat is on, its link, above the tabs
+  on either tab, to copy.
+  The Settings tab (`settingRow`, after backseat-driver's: a Select there opened on a click and
+  could pick nothing, and its sentence followed only the saved choice, the user 2026-11-19) has
+  one row per setting, a Button naming its value (`▸ Claude coding: Let Claude decide`, key
+  `coding`; `▸ Web chat: Off`, key `chat`); a press opens its options under it as Buttons (keys
+  `coding:only|ask|decide`, `chat:off|on`, the chosen one marked `❯`), picked by a click or Enter
+  on the ring, and a pick folds the row again. Under them, the sentence of the option the ring is
+  on (the `ui.focus` hook keeps it in the `pane` atom), else the chosen one's; the pointer on an
+  option lays its own sentence over it (a hover reveal: `display: "none"` Boxes, absolute, under
+  the option's hover scope, since no hook runs on hover). **Claude coding** (#93, *Claude coding*):
+  `Only when I say`, `Ask me first`, `Let Claude decide` (`CODING_STOPS`); a pick runs `wb coding
+  <mode>`, and each draw reads `coding.json` again. **Web chat** (`CHAT_STOPS`): `Off` (the
+  default) and `On`; a pick runs `wb chat on|off` and reads the switch and the link back at once.
 - **The status line** reads like `⚒ wb · add-scores running r2 · fix-typo asks · 1 awaiting
   review`, or `⚒ wb · workbench mode` with nothing open. Outside workbench mode it counts only
   the session's own tasks (`mine`), and shows nothing without one: another session's running task
@@ -2479,7 +2493,7 @@ custom-node packs do run their own Python).
 ## Claude coding: when Claude writes a task's code
 
 The user chooses when Claude may write code for a delegated task (#92, `wb coding`; the pane's
-slider is #93). The local agent gets the first shot in all three, and Claude can always review and
+Settings row is #93). The local agent gets the first shot in all three, and Claude can always review and
 advise. The choice is `$WB_HOME/coding.json` `{mode, ts}`, read fresh each time, so a restart
 keeps it; without one it is `decide`:
 - **Let Claude decide** (`decide`): as before there was a choice. Nothing is added to Claude's
@@ -2500,7 +2514,7 @@ units wrong>"`. Claude shows the user the task, the condition and the exact edit
 hand-back doesn't spend it until Claude has started on it: the mod stamps `started` at Claude's
 first edit under it, so it waits through the try it was granted for. Claude then records what it
 changed (`wb coding used <task> --did "…"`) and hands the testing back with `wb feedback`. It is
-the task's alone: the slider never moves, and the next task needs its own. The pane shows an
+the task's alone: the setting never moves, and the next task needs its own. The pane shows an
 unspent allowance under its task's line, wrapped whole (`allowedLine`: `Claude may, once, if
 <when>: <edit>`). Two
 places hold Claude to it. `wb takeover` refuses (exit 3, saying what to do instead) without one
@@ -2571,9 +2585,11 @@ pairs arrive. The mod gives it to Claude as `[web chat] (about <task>, step <s>,
 
 ## The web chat
 
-**For people** (moved here from the README, #102): `wb chat serve` runs a small web chat with the
-running Claude session, and `wb chat url` prints its private link; keep that link to yourself, it
-is the key. Claude's permission prompts and questions come to it too. Over https (`tailscale
+**For people** (moved here from the README, #102): the web chat is off until you turn it on, in
+the pane's Settings tab or with `wb chat on` (`wb chat off` again; the choice is kept, the user
+2026-11-19). On, it starts a server if none answers, and the pane shows its private link; keep
+that link to yourself, it is the key. `wb chat serve` runs the server in the foreground, and `wb
+chat url` prints the link. Claude's permission prompts and questions come to it too. Over https (`tailscale
 serve --bg 1337` gives it an address on your tailnet) it installs as an app on your phone and
 notifies you when Claude answers or needs you. It does less than Claude Code's own Remote
 Control (`claude rc`) with the Claude app; what it adds is a lane to the session in your
@@ -2611,8 +2627,16 @@ VPN), `"hosts": ["chat.example.org"]` a name a tunnel or proxy sends.
   shows at once (Claude has it now, or will read it after its current step). Claude answers with
   `wb chat reply`, which the page shows. The page says whether a session is listening and whether
   Claude is working.
+- **The switch.** `chat/switch.json` `{on}`, written by `wb chat on|off` (the pane's row runs
+  them); absent is off. Off, no session listens or sends the chat a dialog, the pane shows no link,
+  the away state ends, and `wb chat off` removes `listener.json`, so the page says nobody listens.
+  A server already running is left up (systemd's: `systemctl --user disable --now wb-chat` stops
+  it), its messages waiting for the chat to be on again. `wb chat on` starts `bin/wb chat serve
+  --port <port>` detached (`chat.start`: `chat/serve.log`, `chat/serve.pid` `{pid, port}`) when
+  nothing answers on the port at an address the plan binds (`chat.running`); `wb chat off` stops
+  only that process (`chat.stop_started`, by its pid and command line), never one wb didn't start.
 - **One listener.** A session listens while workbench mode is on in it (from `/workbench`, or a
-  delegating `wb` command, until a quit command). With several sessions the first live claim on
+  delegating `wb` command, until a quit command) and the chat is on. With several sessions the first live claim on
   `chat/listener.json` listens; it is known by its `wb events` process's pid.
 - **Claude knows where the user is.** A web message carries the same authority as one typed in
   the terminal, with a note: reply there, briefly; the web thread is all the user sees; a yes there
@@ -2904,12 +2928,13 @@ const bound to one; imports from the module's own files also pass). The helpers 
 "gating hook without .catch" notes) is the check. Env reads must be string literals: `HOME`,
 `WB_HOME`, `WB_BIN`, `CLAUDE_CONFIG_DIR`, `WB_COMPACT_AT`.
 
-**State.** Five `$.state` atoms survive a module reload within a session; each has a shape tag,
+**State.** Six `$.state` atoms survive a module reload within a session; each has a shape tag,
 and an atom read under an old tag is absent, so change the tag when its type changes:
 `tasks` (`tasks-5`, WbTask[]: name, phase, round, model, label, tests, last, createdAt,
 updatedAt, tokens, recent, repo, cwd, session, claude_pid, backlog, allowed), `live` (`live-1`, {task, lines: {s, t}[]}: the transcript lines),
-`chat` (`chat-2`, {key, delegating, webAt, url}: workbench mode lives here, plus the session's
-listener key), `sessions` (`sessions-1`, string[]: every Claude Code session id this process
+`chat` (`chat-3`, {key, delegating, webAt, url, web}: workbench mode lives here, plus the session's
+listener key and the web chat's switch as last read), `pane` (`pane-1`, {tab, open, focus,
+minimized}: the pane's tab, the open settings row, the option under the ring, the strip), `sessions` (`sessions-1`, string[]: every Claude Code session id this process
 has had, `mem.ids` while loaded), `savings` (`savings-1`, string: the pane's saving line, '' for
 none). Everything else is `mem`, a plain object reset by a reload (busy, queued turns,
 this session's open set, the session's resolved `cwd` and `home`, `person`, follow, sawTurn, scoutAsked,
@@ -2935,9 +2960,10 @@ it is respawned after 2 s. Until a child has said hello in this load (`mem.earsO
 a failure toasts once (`can't run \`wb events\` (<why>)…: put wb on Claude Code's PATH or set
 WB_BIN`) and the wait doubles up to a minute. A 1.5 s timer polls when there's no events child, a task is
 queued/running/testing/asking, a turn is queued, or 30 s passed since the last poll (`SAFETY_MS`). A
-450 ms timer animates the apprentice, blitting only changed frames. Every 10 minutes `wb chat
-url` refreshes the pinned link (only a `…#token=…` URL is pinned; the call creates the token file
-if missing). Subprocess limits: `wb` 120 s (`wb update` 600 s, the engine's most: its steps
+450 ms timer animates the apprentice, blitting only changed frames. Each poll reads
+`chat/switch.json` (`readSwitch`: off clears the link and `webAt`); while the chat is on, every
+10 minutes `wb chat url` refreshes the pinned link (`chatLink`; only a `…#token=…` URL is pinned;
+the call creates the token file if missing). Subprocess limits: `wb` 120 s (`wb update` 600 s, the engine's most: its steps
 take up to 300 s each), `wb watch` 30 s, `tail` 30 s, `kill -0` 5 s. `runWb` returns the exit
 status with the output: a failing `wb` is said as a failure (`brief`, its last line), never
 passed on as its answer. Files that only grow (notify.jsonl, the chat's messages and receipts,
@@ -3055,8 +3081,9 @@ the followed task's transcript (its newest lines, each cut to `LINE_CHARS` 2000 
 text past 100,000 characters, which once left the bubble empty), scrolling with the newest lines
 unless the user scrolled up (`ui.scroll`); then the stage (the apprentice with a speech bubble,
 pixels on a terminal at least 20 rows by 40 columns, else its one-line face; text wrapped by
-`wrapWords` because Text's own wrapping beside the raster drew empty rows); the web chat link
-last.
+`wrapWords` because Text's own wrapping beside the raster drew empty rows); the saving, the web
+chat link while on, and the tabs last. The Settings tab and the minimized strip (`AbovePrompt`)
+are under *Seeing what the agent does*.
 
 **The apprentice** (`apprentice.ts`): 16×12 pixel art as letters, drawn with half blocks
 (▀/▄) into a `Raster` (cells encoded as little-endian u32 triplets, base64); a pose per state
@@ -3065,7 +3092,7 @@ last.
 frame in six, other poses blink one in eleven, except `sleep` and `slump`; FACE has the one-line faces (`[•_•]⚒`, `\[^_^]/`,
 …). The bubble says what the agent is doing (`speechOf`) in the phase's colour.
 
-**The web chat listener** (`listen`, workbench mode only, needs the events child): another
+**The web chat listener** (`listen`, workbench mode with the chat on, needs the events child): another
 session's live claim (its pid answers `kill -0`, else its `ts` within 15 s) makes this one stand
 by; otherwise it writes `chat/listener.json` `{session, cwd, pid, busy}` when that changes, and
 delivers each user message without a receipt, once `wb chat claim <id> --by <key>` gives it the
@@ -3265,7 +3292,7 @@ delivered as taken (`_stale_notes`, *Notes*).
 | Command | Flags | What it does |
 |---|---|---|
 | `wb image "<prompt>"` | `--n` (4), `--size WxH` (1024x1024), `--seed`, `--ref <img>…`, `--out DIR`, `--engine`, `--list`, `--wait` | Candidates from a local image engine (see *Images*). While anything holds the GPU it refuses at once, naming the holders; `--wait` queues behind them. A bare `list` or `ls` as the prompt acts as `--list`. |
-| `wb chat [log\|serve\|url\|reply\|ack\|claim\|pending\|ask\|wait\|answer]` | `--port` (1337), `--bind` (replaces chat.json's), `--host` (adds), `--text`, `--message <file\|->` (reply reads stdin without either), `-n` (10); `ack <id> --by --how`, `claim <id> --by` (exit 1: another session's), `ask --tool --kind permission\|plan\|question --text --detail <json>` (prints `<id> open`, or `<id> allow` when the user's setting answered it), `wait <id> --timeout` (30 s; prints allow, deny, expired, or `open` at the timeout; `--json`: the whole ask), `answer <id> allow\|deny\|expired --by --note` (prints the answer that stands) (the mod) | The web chat: the thread, the server, the link with its token, Claude's reply, permission prompts. |
+| `wb chat [log\|on\|off\|serve\|url\|reply\|ack\|claim\|pending\|ask\|wait\|answer]` | `on`, `off` (the switch, kept; `on` starts a server when none answers on `--port` and prints the link, `off` stops only one it started), `--port` (1337), `--bind` (replaces chat.json's), `--host` (adds), `--text`, `--message <file\|->` (reply reads stdin without either), `-n` (10); `ack <id> --by --how`, `claim <id> --by` (exit 1: another session's), `ask --tool --kind permission\|plan\|question --text --detail <json>` (prints `<id> open`, or `<id> allow` when the user's setting answered it), `wait <id> --timeout` (30 s; prints allow, deny, expired, or `open` at the timeout; `--json`: the whole ask), `answer <id> allow\|deny\|expired --by --note` (prints the answer that stands) (the mod) | The web chat: the thread, the server, the link with its token, Claude's reply, permission prompts. |
 | `wb try` | `--model <id or fragment>` (the router's pick) | A sample task that proves the setup (#112): copies `workbench/try/project/` (a tiny `stats.py` with its tests and a committed CLAUDE.md) into `~/.local/share/workbench/try/<n>` (beside `$WB_SKILLS`: the state directory is hidden from the lane, and its agent had no git there, #164), sets it up as `wb init` does, and starts `workbench/try/spec.md` (add `median`) as `try-<n>`, `--size trivial --trial --test 'python3 -m unittest'`: never the router's evidence or the lessons. Prints what `wb start` does, the project's path and the hidden check for review, `python3 <pkg>/workbench/try/check.py <worktree>` (the agent never sees it; it fails on the untouched base, passes once `median` meets the spec, and leaves no `__pycache__`). A refused start (the GPU busy without `--queue`, no model) removes the copy again (#161). |
 | `wb init <dir>` | | A project the way Claude keeps one: git on the default branch, an initial commit, AGENTS.md → CLAUDE.md (a CLAUDE.md → AGENTS.md link is swapped; a gitignored CLAUDE.md isn't linked). Refuses the home directory or above, inside another repo, a repo git refuses (git's reason: no `git init` over it), without a git identity (`git var`, as for `wb start`), and a first commit holding likely secrets or installed directories no .gitignore covers. |
 | `wb setup` | `--force` (replaces a link that points elsewhere; never a real file) | Links `~/.local/bin/wb` to this copy's `bin/wb` and Claude Code's `skills/workbench` to its `skill/workbench`, removes an old `skills/delegate` link that now leads nowhere (the skill was `/delegate` until 2026-11-17; the mod runs `wb setup` itself when it finds only that), warns when `~/.local/bin` isn't on PATH (Claude and the mod run `wb` by name); exit 1 when it left something in the way (see *Installing*). Then, when due (*Optimize*), starts the minute or two of measuring the GPU and prints its line as `--`. Ends with a `first run:` checklist (`cli.first_run`, #111), one line each, `ok` or `--` with the fix: OpenCode 2.x (else where to get it), a model server answering (a configured provider, this machine's Ollama, or a server on a default port; else: start yours, or run /workbench and Claude lays out the ones that fit the machine, never steering to one; `wb model add --url`), a local model registered (else: run /workbench, and Claude picks one for the machine), Landlock. It names no model, and changes no exit code. |
@@ -3299,6 +3326,7 @@ $WB_HOME (~/.local/state/workbench)
   imports/<slug>/                skills fetched by wb skill import, for Claude to read
   images/<YYYYmmdd-HHMMSS>/      wb image's candidates (unless --out), their .json sidecars, engine.log
   chat/                          messages.jsonl  receipts.jsonl  asks.jsonl  prefs.json  listener.json  claims.json
+                                 switch.json ({on}: wb chat on|off)  serve.pid ({pid, port})  serve.log (the server wb chat on started)
   rules/<task>/                  outside the lane: opencode.json (the config layer), HANDBOOK.md,
                                  CLAUDE.md (a copy of the user's), bin/git (the shim),
                                  grants.json (what Claude allowed: {"allow", "paths"}),
@@ -3776,9 +3804,9 @@ push: every change is a pull request that merges once `check` is green and it is
 - **`wb watch --json`** (a style, the order, the activity wording) → the mod's `LINE_STYLE`, its
   pose regex, the `live-1` tag; `--last` and `JSON_LINE_CHARS` with the mod's `KEEP_LINES` and
   `LINE_CHARS`.
-- **A `$.state` atom's type** in the mod → its tag (`tasks-5`, `live-1`, `chat-2`, `sessions-1`, `savings-1`).
+- **A `$.state` atom's type** in the mod → its tag (`tasks-5`, `live-1`, `chat-3`, `sessions-1`, `savings-1`, `pane-1`).
 - **The Claude coding choices** (`cli.CODING`: modes, labels, sentences) → the mod's
-  `CODING_STOPS` (the slider) and `CODING_RULES` (the context block), and the skill's *Claude
+  `CODING_STOPS` (the Settings row) and `CODING_RULES` (the context block), and the skill's *Claude
   coding* bullet.
 - **`savings.totals`' keys** → the mod's `savedLine` and the chat page's `drawSaved`, which read them.
 - **Which session a task is** (task.json `session`, else `cwd`/`repo`) → the mod's `mine` and

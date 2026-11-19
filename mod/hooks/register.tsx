@@ -67,7 +67,7 @@ const SCOUT_NOTE =
 import { atom, read, update } from 'claude-code'
 import type { Register } from 'claude-code'
 
-import type { WbChat, WbLine, WbLive, WbTask } from '../types'
+import type { WbChat, WbLine, WbLive, WbPane, WbTask } from '../types'
 import { cells, COLUMNS, FACE, MOUTH, ROWS } from './apprentice'
 import type { Pose } from './apprentice'
 
@@ -114,8 +114,22 @@ const HISTORY_CHARS = 60000
 // listens while workbench mode is on in it (`delegating`), from /workbench until a quit command;
 // with several, the first to claim chat/listener.json does, and the others stand by. A message is
 // submitted as a prompt (so the terminal shows it too) with a receipt the page shows at once.
+// The user turns it on or off (`wb chat on|off`, or the pane's row; chat/switch.json): off by
+// default, and then no session listens, sends it prompts or shows its link (the user, 2026-11-19).
 const chat = atom({ plugin: 'workbench', key: 'chat' } as const,
-  { key: '', delegating: false, webAt: 0, url: '' } as WbChat, { shape: 'chat-2' })
+  { key: '', delegating: false, webAt: 0, url: '', web: false } as WbChat, { shape: 'chat-3' })
+// The pane's view: a Tasks tab and a Settings tab, as backseat-driver's (the user, 2026-11-19: the
+// settings belong on a page of their own). A settings row names its value, a press opens its
+// options under it as Buttons (a click or the ring's Enter picks), the option under the ring or the
+// pointer shows its sentence. A Select there opened on a click and could pick nothing (2026-10-05),
+// and its sentence followed only the saved choice (the user, 2026-11-19).
+// Closed by the user (its mark, Esc), the pane is minimized, as backseat-driver's is (the user,
+// 2026-11-19): a strip above the prompt stands in for it, a press there or /workbench brings it back.
+const pane = atom({ plugin: 'workbench', key: 'pane' } as const,
+  { tab: 'tasks', open: '', focus: '', minimized: false } as WbPane, { shape: 'pane-1' })
+const STRIP_HINT = 'minimized · restore: click, or Ctrl+X Tab then Enter'
+const TABS: [string, string, string][] = [['tasks', 'Tasks', '1'], ['settings', 'Settings', '2']]
+const SETTINGS_HINT = 'Click a row to see its options, then click one; or Tab to it and press Enter. A change applies at once.'
 const CHAT_EXPIRE_MS = 6 * 3600_000 // a web message older than this isn't submitted to a new listener
 const CHAT_STALE_MS = 15_000 // as wb's LISTENING_FOR: a listener silent this long has gone
 const AWAY_MS = 6 * 3600 * 1000 // the user counts as away this long after a web message
@@ -330,13 +344,60 @@ const CODING_RULES: Record<string, string> = {
     '"…" --said "<their words>"`.',
 }
 
-// The pane's Claude coding slider (#93), left to right; the choice is wb's (`wb coding`), the
-// sentence is what the pane shows for it while focused
+// The pane's Claude coding row (#93), in order; the choice is wb's (`wb coding`), the sentence is
+// what the pane shows for the option under the ring or the pointer
 const CODING_STOPS: [string, string, string][] = [
   ['only', 'Only when I say', 'You tell Claude when to write code.'],
   ['ask', 'Ask me first', 'Claude can ask to make a specific fix and waits for your yes.'],
   ['decide', 'Let Claude decide', 'Claude uses its judgment to guide the local agent or make a fix itself.'],
 ]
+
+// The web chat's row: the choice is wb's (`wb chat on|off`, chat/switch.json), off by default
+const CHAT_STOPS: [string, string, string][] = [
+  ['off', 'Off', 'No link, and no session reads the web chat: what you write there waits.'],
+  ['on', 'On', 'Its link shows here to open on your phone; in /workbench, Claude reads it.'],
+]
+
+// One settings row: a Button naming the choice, which opens its options under it, each a Button
+// (a click, or Enter on the ring), the chosen one marked. Under them the sentence of the option
+// the ring is on, else the chosen one's; the pointer on an option lays its own over it (a hover
+// reveal: no hook runs on hover). A pick folds the row again, which redraws it.
+function settingRow(kit: Row, $: any, name: string, title: string, stops: [string, string, string][],
+  value: string, view: WbPane, pick: (value: string) => Promise<unknown>) {
+  const { Box, Text, Button } = kit
+  const chosen = stops.find(s => s[0] === value) ?? stops[stops.length - 1]
+  if (view.open !== name)
+    return <Button key={name} label={`▸ ${title}: ${chosen[1]}`} plain onPress={() => { void update($, pane, p => ({ ...p, open: name, focus: '' })) }} />
+  const ringed = stops.find(s => `${name}:${s[0]}` === view.focus) ?? chosen
+  const width = Math.max(...stops.map(s => s[2].length))
+  return (
+    <Box flexDirection="column">
+      <Button key={name} label={`▾ ${title}: ${chosen[1]}`} plain onPress={() => { void update($, pane, p => ({ ...p, open: '', focus: '' })) }} />
+      {stops.map(([v, label]) => (
+        <Button key={`${name}:${v}`} label={`  ${v === chosen[0] ? '❯' : ' '} ${label}`} plain dimColor={v !== chosen[0]}
+          hover={{ scope: `wb-${name}-${v}` }}
+          onPress={() => { void pick(v).then(() => update($, pane, p => ({ ...p, open: '', focus: '' }))) }} />
+      ))}
+      <Box key={`${name}-says`}>
+        <Text dimColor>{`    ${ringed[2].padEnd(width)}`}</Text>
+        {stops.map(([v, , said]) => (
+          <Box position="absolute" top={0} left={0} display="none" hover={{ display: 'flex', scope: `wb-${name}-${v}` }}>
+            <Text dimColor>{`    ${said.padEnd(width)}`}</Text>
+          </Box>
+        ))}
+      </Box>
+    </Box>
+  )
+}
+
+// Turns the web chat on or off through wb, which keeps the choice (and starts a server for on),
+// then reads it back at once: the link shows (or goes) with the pick, not at the next poll
+async function setWeb($: any, value: string) {
+  await runWb($, ['chat', value], 15_000)
+  mem.chatUrlAt = 0
+  await readSwitch($)
+  await chatLink($)
+}
 
 // The file tools' path fields: an edit in a task's worktree is writing that task's code
 const EDIT_TOOLS: Record<string, string> = { Edit: 'file_path', MultiEdit: 'file_path', Write: 'file_path', NotebookEdit: 'notebook_path' }
@@ -811,22 +872,11 @@ async function poll($: any) {
     }
     const on = (await read($, chat)).delegating
     mem.hasActive = list.some(t => ACTIVE.has(t.phase))
-    // Outside workbench mode, only this session's tasks show: another session's task running
-    // opened the pane and filled the status line in a session the user kept off workbench, and
-    // /workbench-quit couldn't clear it (2026-11-17)
-    const shown = on ? list : list.filter(t => mine(t))
-    const live = shown.filter(t => ACTIVE.has(t.phase) && t.phase !== 'asking')
-    const asking = shown.filter(t => t.phase === 'asking')
-    const waiting = shown.filter(t => NEEDS.has(t.phase) && t.phase !== 'asking')
-    const parts = [
-      ...live.map(t => `${t.name} ${t.phase} r${t.round}`),
-      ...asking.map(t => `${t.name} asks`),
-      ...(waiting.length ? [`${waiting.length} awaiting review`] : []),
-    ]
+    const { live, parts } = taskParts(list, on)
     $.ui.status(parts.length ? `⚒ wb · ${parts.join(' · ')}` : on ? '⚒ wb · workbench mode' : undefined)
     if ((live.length || on) && !mem.paneOpened) { // open once per load, in workbench mode or when its work starts
       mem.paneOpened = true
-      void $.ui.open({ id: PANE, title: 'Workbench' })
+      if (!(await read($, pane)).minimized) void $.ui.open({ id: PANE, title: 'Workbench' }) // put away stays away
     }
     void refreshLive($, list, now)
     if (!mem.busy && mem.queued.length && now >= mem.queuedRetryAt) void sendQueued($, mem.queued.shift()!)
@@ -856,12 +906,8 @@ async function poll($: any) {
     await deliver($, now)
     await rewake($, now, list)
     await listen($, now)
-    if (now - mem.chatUrlAt > 10 * 60_000) { // the link changes only with the token
-      mem.chatUrlAt = now
-      const { ok, out } = await runWb($, ['chat', 'url'])
-      const link = ok && /^https?:\/\/\S+#token=\S+$/.test(out) ? out : ''
-      if (link !== (await read($, chat)).url) await update($, chat, c => ({ ...c, url: link }))
-    }
+    await readSwitch($)
+    await chatLink($)
     if (now - mem.savingsAt > 10 * 60_000) {
       mem.savingsAt = now
       const { ok, out } = await runWb($, ['savings', '--json'])
@@ -977,9 +1023,29 @@ async function alive($: any, pid: number): Promise<boolean> {
   }
 }
 
+// The web chat's switch, as the user left it (chat/switch.json, written by `wb chat on|off`): turned
+// off, the link goes and the away state with it, so no prompt is sent where nobody reads; turned
+// on, the link is looked up at once.
+async function readSwitch($: any) {
+  const web = !!(await readJson($, `${mem.root}/chat/switch.json`)).on
+  if (web === (await read($, chat)).web) return
+  if (web) mem.chatUrlAt = 0
+  await update($, chat, c => ({ ...c, web, ...(web ? {} : { url: '', webAt: 0 }) }))
+}
+
+// The web chat's link while it is on, looked up again every ten minutes (it changes only with the token)
+async function chatLink($: any) {
+  const now = await $.clock.now()
+  if (!(await read($, chat)).web || now - mem.chatUrlAt <= 10 * 60_000) return
+  mem.chatUrlAt = now
+  const { ok, out } = await runWb($, ['chat', 'url'])
+  const link = ok && /^https?:\/\/\S+#token=\S+$/.test(out) ? out : ''
+  if (link !== (await read($, chat)).url) await update($, chat, c => ({ ...c, url: link }))
+}
+
 async function listen($: any, now: number) {
   const st = await read($, chat)
-  if (!st.delegating) return
+  if (!st.delegating || !st.web) return
   const dir = `${mem.root}/chat`
   if (!mem.eventsPid) return // the chat knows a listener by its live `wb events` process
   const claim = await readJson($, `${dir}/listener.json`)
@@ -1186,6 +1252,7 @@ async function workbenchMode($: any, on: boolean) {
   if ((await read($, chat)).delegating === on) return
   await update($, chat, c => ({ ...c, delegating: on }))
   if (!on) {
+    await update($, pane, p => ({ ...p, minimized: false })) // quit: no strip either
     await $.ui.close({ id: PANE }).catch(() => {})
     const path = `${mem.root}/chat/listener.json` // stop listening: the page and other sessions see it now
     const claim = await readJson($, path)
@@ -1203,7 +1270,36 @@ async function showPane($: any) {
   const held = (await $.ui.panes()).find((p: any) => p.id === PANE)
   if (held && (!held.isShown || !held.isPlaced)) await $.ui.close({ id: PANE }).catch(() => {})
   mem.paneOpened = true
-  return $.ui.open({ id: PANE, title: 'Workbench' })
+  const opening = $.ui.open({ id: PANE, title: 'Workbench' })
+  if ((await read($, pane)).minimized) await update($, pane, p => ({ ...p, minimized: false }))
+  return opening
+}
+
+// Brings the pane back from the strip, on the tab asked for. Opened first, while the press is still
+// the person's: backseat-driver's opened after its awaits counted as its own, and an open the mod
+// makes after a close by hand waits for a wide terminal (2026-10-07).
+async function restorePane($: any, tab: string) {
+  const opening = $.ui.open({ id: PANE, title: 'Workbench' })
+  mem.paneOpened = true
+  await update($, pane, p => ({ ...p, tab: tab || p.tab, minimized: false }))
+  $.ui.invalidate('ui.render')
+  return opening
+}
+
+// What the status line and the strip say of the tasks: the running ones, those asking, how many wait.
+// Outside workbench mode only this session's: another session's task running opened the pane and
+// filled the status line in a session the user kept off workbench, and /workbench-quit couldn't
+// clear it (2026-11-17)
+function taskParts(list: WbTask[], on: boolean) {
+  const shown = on ? list : list.filter(t => mine(t))
+  const live = shown.filter(t => ACTIVE.has(t.phase) && t.phase !== 'asking')
+  const asking = shown.filter(t => t.phase === 'asking')
+  const waiting = shown.filter(t => NEEDS.has(t.phase) && t.phase !== 'asking')
+  return { live, parts: [
+    ...live.map(t => `${t.name} ${t.phase} r${t.round}`),
+    ...asking.map(t => `${t.name} asks`),
+    ...(waiting.length ? [`${waiting.length} awaiting review`] : []),
+  ] }
 }
 
 // The task /workbench was given, as the skill's text has it after expansion ("**First task:**
@@ -1439,30 +1535,56 @@ export const register: Register = (on, options) => {
     return next(e)
   })
 
-  on('ui.render', { component: 'Pane', requestId: PANE }, async ($, e) => {
-    const { Box, Text, Raster, Select } = $.ui.resolve(e) as Row
-    const list = await read($, tasks)
-    const watched = await read($, live)
-    const { url, delegating } = await read($, chat)
-    const saved = await read($, savings)
-    // Claude coding (#93): right below the apprentice (the week's saving, then the link, after it). One row at rest, the
-    // focused pane adds the choice's sentence; mobile draws no Select, so it reads the choice there
-    const mode = await codingMode($)
-    const stop = CODING_STOPS.find(s => s[0] === mode) ?? CODING_STOPS[2]
-    const coding = (
-      <Box flexDirection="column" marginTop={1}>
-        {Select && (e as Row).surface !== 'mobile' ? (
-          <Select key="coding" label="Claude coding  " value={stop[0]}
-            options={CODING_STOPS.map(([value, label]) => ({ value, label }))}
-            onSelect={(value: string) => { void runWb($, ['coding', value]) }} />
-        ) : (
-          <Text>{`Claude coding  ${stop[1]}`}</Text>
-        )}
-        {(e.props as Row | undefined)?.isFocused && <Text dimColor>{stop[2]}</Text>}
+  // The user's own close (its mark, Esc) puts the pane away: the strip above the prompt stands in
+  on('ui.close', async ($, e, next) => {
+    if (e.id === PANE && e.origin?.kind === 'person') {
+      await update($, pane, p => ({ ...p, minimized: true }))
+      $.ui.invalidate('ui.render')
+    }
+    return next(e)
+  })
+
+  // Minimized: the strip, while there is something to bring back (workbench mode, or this session's
+  // tasks): its name, what the tasks are doing, and its tabs, each a way back
+  on('ui.render', { component: 'AbovePrompt' }, async ($, e, next) => {
+    if (!(await read($, pane)).minimized || e.props?.hasSurvey) return next(e)
+    const { delegating } = await read($, chat)
+    const { parts } = taskParts(await read($, tasks), delegating)
+    if (!delegating && !parts.length) return next(e)
+    const { Box, Text, Button } = $.ui.resolve(e) as Row
+    return (
+      <Box flexDirection="row" columnGap={2}>
+        <Box flexShrink={0}>
+          <Button key="restore" label="▸ Workbench" plain onPress={() => { void restorePane($, '') }} />
+        </Box>
+        {TABS.map(([tab, label]) => (
+          <Box flexShrink={0}>
+            <Button key={`restore-${tab}`} label={label} plain dimColor onPress={() => { void restorePane($, tab) }} />
+          </Box>
+        ))}
+        <Text dimColor wrap="truncate-end">{parts.length ? `${parts.join(' · ')} · ${STRIP_HINT}` : STRIP_HINT}</Text>
       </Box>
     )
-    // the web chat's link, always at hand to copy: last, since the pane follows its end
-    const pinned = url ? (
+  })
+
+  // Where the ring is in the pane, so an open settings row shows that option's sentence; let through
+  on('ui.focus', { requestId: PANE }, async ($, e, next) => {
+    const focus = e.element && /^(coding|chat):/.test(e.element) ? e.element : ''
+    if (focus !== (await read($, pane)).focus) await update($, pane, p => ({ ...p, focus }))
+    return next(e)
+  })
+
+  on('ui.render', { component: 'Pane', requestId: PANE }, async ($, e) => {
+    const kit = $.ui.resolve(e) as Row
+    const { Box, Text, Raster, Button } = kit
+    const list = await read($, tasks)
+    const watched = await read($, live)
+    const { url, web, delegating } = await read($, chat)
+    const saved = await read($, savings)
+    const view = await read($, pane)
+    // the web chat's link while it is on, at hand to copy on either tab, then the tabs: last, since the
+    // pane follows its end (a row at the top scrolled away under a long transcript)
+    const pinned = web && url ? (
       <Box marginTop={1}>
         <Text>
           <Text bold color="claude">web chat </Text>
@@ -1470,6 +1592,27 @@ export const register: Register = (on, options) => {
         </Text>
       </Box>
     ) : null
+    const tabs = (
+      <Box flexDirection="row" columnGap={2} marginTop={1}>
+        {TABS.map(([tab, label, hotkey]) => (
+          <Button key={`tab-${tab}`} label={label} hotkey={hotkey} plain dimColor={view.tab !== tab}
+            onPress={() => { void update($, pane, p => ({ ...p, tab, open: '', focus: '' })) }} />
+        ))}
+      </Box>
+    )
+    // the Settings tab: Claude coding (#93) and the web chat, one row each at rest
+    if (view.tab === 'settings') return (
+      <Box flexDirection="column">
+        <Text dimColor>{SETTINGS_HINT}</Text>
+        <Box flexDirection="column" marginTop={1}>
+          {settingRow(kit, $, 'coding', 'Claude coding', CODING_STOPS, await codingMode($), view,
+            v => runWb($, ['coding', v]))}
+          {settingRow(kit, $, 'chat', 'Web chat', CHAT_STOPS, web ? 'on' : 'off', view, v => setWeb($, v))}
+        </Box>
+        {pinned}
+        {tabs}
+      </Box>
+    )
     const props = (e.props ?? {}) as Row
     const cols = Math.max(30, Number(props.bodyColumns ?? e.viewport?.columns ?? 60))
     const now = await $.clock.now()
@@ -1577,9 +1720,9 @@ export const register: Register = (on, options) => {
           </Box>
         )}
         {stage}
-        {coding}
         {saved && <Text dimColor>{saved}</Text>}
         {pinned}
+        {tabs}
       </Box>
     )
   })

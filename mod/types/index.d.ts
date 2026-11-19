@@ -33,8 +33,14 @@ export type WbLine = { s: string; t: string }
 /** The task the pane follows live, and its transcript so far (the newest lines). */
 export type WbLive = { task: string; lines: WbLine[] }
 
-/** This session and the web chat: whether it listens, and when the user last wrote from there. */
-export type WbChat = { key: string; delegating: boolean; webAt: number; url: string }
+/** This session and the web chat: whether it listens, when the user last wrote from there, and
+ * whether the user has it on (`wb chat on|off`: off, no link and no listening). */
+export type WbChat = { key: string; delegating: boolean; webAt: number; url: string; web: boolean }
+
+/** The pane's view: its tab ('tasks' or 'settings'), the settings row open ('' none, 'coding',
+ * 'chat'), the option the focus ring is on ('' none), so its sentence shows, and whether the user
+ * closed it (a strip above the prompt stands in for it). */
+export type WbPane = { tab: string; open: string; focus: string; minimized: boolean }
 
 declare module 'claude-code' {
   interface PluginState {
@@ -42,6 +48,8 @@ declare module 'claude-code' {
       tasks: Shaped<WbTask[]>; live: Shaped<WbLive>; chat: Shaped<WbChat>; sessions: Shaped<string[]>
       /** the pane's footer: the week's saving, `savedLine` of `wb savings --json` ('' for none) */
       savings: Shaped<string>
+      /** the pane's settings rows (WbPane) */
+      pane: Shaped<WbPane>
     }
   }
 }
