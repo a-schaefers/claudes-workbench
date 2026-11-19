@@ -2,6 +2,8 @@
 
 # Claude's Workbench
 
+**Claude plans and reviews. Local models on your GPU write the code.**
+
 <p align="center">
 <a href="https://github.com/a-schaefers/claudes-workbench/actions/workflows/check.yml"><img alt="tests" src="https://img.shields.io/github/actions/workflow/status/a-schaefers/claudes-workbench/check.yml?branch=main&label=tests"></a>
 <a href="https://github.com/a-schaefers/claudes-workbench/actions/workflows/nightly.yml"><img alt="newest Claude Code" src="https://img.shields.io/github/actions/workflow/status/a-schaefers/claudes-workbench/nightly.yml?branch=main&label=newest%20Claude%20Code"></a>
@@ -14,8 +16,6 @@
 </p>
 
 <p align="center"><img src="docs/delegate-mode.png" alt="Claude in workbench mode on the left; the Workbench pane on the right, where the apprentice robot says what the local agent is doing"></p>
-
-**Claude plans and reviews. Local models on your GPU write the code.**
 
 **Who runs where**
 - **Claude**, on Anthropic's servers (your subscription or API key): plans the work, writes a
