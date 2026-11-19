@@ -421,6 +421,56 @@ def set_prefs(**changes) -> dict:
     return p
 
 
+# The web chat's switch (the user, 2026-11-19): off unless they turn it on, from the pane or `wb chat
+# on`, and kept as they left it. Off, the pane shows no link and no session listens or sends it
+# their prompts; a server already running (systemd's) is left alone, its messages waiting.
+def is_on() -> bool:
+    return bool((store.read_json(chat_dir() / "switch.json", None) or {}).get("on"))
+
+
+def set_on(on: bool) -> None:
+    store.write_json(chat_dir() / "switch.json", {"on": bool(on)})
+    if not on:  # nobody listens now: the page would say a live session does
+        (chat_dir() / "listener.json").unlink(missing_ok=True)
+
+
+def running(port: int) -> bool:
+    """Whether a server answers on the port at an address this machine's plan binds."""
+    for addr in plan()["binds"]:
+        try:
+            with socket.create_connection(("127.0.0.1" if addr in WILDCARD else addr, port), timeout=1):
+                return True
+        except OSError:
+            continue
+    return False
+
+
+def start(port: int) -> int:
+    """`wb chat serve` detached, its output in chat/serve.log, its pid in chat/serve.pid: for a
+    machine without the systemd unit, so turning the chat on is enough to reach it."""
+    root = Path(__file__).resolve().parent.parent
+    with open(chat_dir() / "serve.log", "a") as log:
+        proc = subprocess.Popen([sys.executable, "-X", "utf8", str(root / "bin" / "wb"), "chat", "serve",
+                                 "--port", str(port)], cwd=root, stdin=subprocess.DEVNULL,
+                                stdout=log, stderr=log, start_new_session=True)  # outlives wb
+    store.write_json(chat_dir() / "serve.pid", {"pid": proc.pid, "port": port})
+    return proc.pid
+
+
+def stop_started() -> bool:
+    """Stop the server `start` made, if it still runs; never one wb didn't start (systemd's)."""
+    from . import models  # only here: chat is imported by the server, which needs none of it
+    pid = (store.read_json(chat_dir() / "serve.pid", None) or {}).get("pid")
+    (chat_dir() / "serve.pid").unlink(missing_ok=True)
+    if not pid or not _alive(pid) or not models.runs(int(pid), "chat", "serve"):
+        return False
+    try:
+        os.kill(int(pid), 15)
+    except OSError:
+        return False
+    return True
+
+
 def wait_answer(ask_id: str, timeout: float) -> str | None:
     """Block until the ask is answered (its answer) or the timeout passes (None), woken by the
     file's change; KeyError when there is no such ask."""

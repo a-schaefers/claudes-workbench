@@ -2415,6 +2415,23 @@ def cmd_chat(a):
         chat.serve(a.port, a.bind or None, a.host or None, say=lambda m: print(m, flush=True))
     elif a.action == "url":
         print(chat.url(a.port))  # the token is the key: keep the link private
+    elif a.action == "on":  # the pane's switch, kept: the link shows and a session listens
+        chat.set_on(True)
+        if chat.running(a.port):
+            print(f"web chat on: {chat.url(a.port)}")
+        else:
+            pid = chat.start(a.port)
+            time.sleep(0.5)
+            print(f"web chat on: started its server (pid {pid}, {chat.chat_dir() / 'serve.log'}): {chat.url(a.port)}")
+    elif a.action == "off":
+        chat.set_on(False)
+        if chat.stop_started():
+            print("web chat off: stopped the server it started")
+        elif chat.running(a.port):
+            print("web chat off: no link in the pane and no session listens; a server still runs "
+                  "(systemd's wb-chat: systemctl --user disable --now wb-chat stops it)")
+        else:
+            print("web chat off")
     elif a.action == "reply":
         text = (a.text if a.text is not None else
                 Path(a.message).read_text() if a.message and a.message != "-" else sys.stdin.read()).strip()
@@ -3215,11 +3232,12 @@ def parser() -> argparse.ArgumentParser:
     s.set_defaults(f=cmd_scout)
     s = sub.add_parser("events", help="print a line whenever workbench's state changes (the mod's ears)")
     s.set_defaults(f=cmd_events)
-    s = sub.add_parser("chat", help="the web chat: serve it, its link, reply to the user there, "
+    s = sub.add_parser("chat", help="the web chat: turn it on or off (on starts a server; kept as "
+                       "left), serve it, its link, reply to the user there, "
                        "the thread (log), receipts (ack, claim), what waits (pending), permission "
                        "prompts for the away user (ask, wait, answer: the mod's)")
-    s.add_argument("action", choices=["serve", "url", "reply", "log", "ack", "claim", "pending",
-                                      "ask", "wait", "answer"], nargs="?", default="log")
+    s.add_argument("action", choices=["serve", "url", "on", "off", "reply", "log", "ack", "claim",
+                                      "pending", "ask", "wait", "answer"], nargs="?", default="log")
     s.add_argument("id", nargs="?", help="ack, claim: the message id; wait, answer: the prompt's id")
     s.add_argument("verdict", nargs="?", help="answer: allow, deny or expired")
     s.add_argument("--tool", help="ask: the tool asking")

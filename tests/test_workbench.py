@@ -1,5 +1,6 @@
 """End-to-end tests: real git, real runner processes, a fake opencode. Run: python3 -m unittest"""
 import base64
+import contextlib
 import io
 import json
 import shlex
@@ -5424,6 +5425,37 @@ class WebChat(Base):
         self.srv.server_close()
         self.srv.RequestHandlerClass.hub.close()  # or it outlives the test (#134)
         super().tearDown()
+
+    def test_the_web_chat_is_off_until_turned_on_and_stays_as_left(self):
+        # The user, 2026-11-19: off by default, a switch in the pane, remembered across /workbench runs.
+        # On starts a server when none answers; off stops only one wb started, and nobody listens.
+        self.assertFalse(self.chat.is_on())
+        out = run_wb("chat", "on", "--port", str(self.port))           # one runs already: kept
+        self.assertIn(f"web chat on: http://localhost:{self.port}/#token=", out)
+        self.assertTrue(self.chat.is_on())
+        self.assertFalse((self.chat.chat_dir() / "serve.pid").exists())
+        store.write_json(self.chat.chat_dir() / "listener.json", {"session": "s", "pid": os.getpid()})
+        self.assertIn("a server still runs", run_wb("chat", "off", "--port", str(self.port)))
+        self.assertFalse(self.chat.is_on())
+        self.assertIsNone(self.chat.listener())                        # the page says nobody listens
+        with socket.socket() as sk:
+            sk.bind(("127.0.0.1", 0))
+            free = sk.getsockname()[1]
+        self.assertIn("started its server", run_wb("chat", "on", "--port", str(free)))
+        pid = store.read_json(self.chat.chat_dir() / "serve.pid")["pid"]
+        try:
+            deadline = time.time() + 10
+            while not self.chat.running(free) and time.time() < deadline:
+                time.sleep(0.1)
+            self.assertTrue(self.chat.running(free))
+            self.assertIn("stopped the server it started", run_wb("chat", "off", "--port", str(free)))
+            deadline = time.time() + 10                                # this process is its parent here
+            while os.waitpid(pid, os.WNOHANG) == (0, 0) and time.time() < deadline:
+                time.sleep(0.1)
+            self.assertTrue(wait_gone(pid))
+        finally:
+            with contextlib.suppress(ProcessLookupError):
+                os.kill(pid, signal.SIGKILL)
 
     def test_a_closed_hub_makes_nothing_in_the_next_home(self):
         # #134 (CI, 2026-11-19): a test's hub outlived it and made the next test's state/ in its
