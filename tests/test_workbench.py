@@ -4182,11 +4182,68 @@ class Savings(Base):
             "- machine: linux; GPU: Radeon RX 7900 XTX (24 GB VRAM)",
             "- local models: 2 (size unknown, 17 GB of weights)",
             "- tasks: 2; Claude used 112K input-equivalent tokens, writing them itself ~100K (estimate); handoff/self 1.12",
+            "- score: 1/100. I used about 12% more Claude.",
             "- by size: significant 0.95 (1), trivial 1.36 (1)",
             "- GPU energy: 600 Wh (1 task(s) on another machine's GPU, not measured)"])
         for private in ("secret", "acme", "fix-", "other:9b"):
             self.assertNotIn(private, out)
         self.assertIn("workbench savings, the last 7 days", run_wb("savings", "--share"))
+
+    def test_the_badge_scores_the_summed_saving_from_1_to_100_and_says_it_in_words(self):
+        # #101: one number, about the percent of Claude saved; the colour never says it alone
+        from workbench import savings
+        tot = lambda c, b, n=1: {"tasks": n, "of": n, "claude": c, "self_est": b, "saved": b - c,  # noqa: E731
+                                 "wh": 0, "cost": None, "remote": 0}
+        s = savings.score(tot(380_000, 1_000_000))
+        self.assertEqual((s["score"], s["color"]), (62, "green"))
+        self.assertEqual(s["sentence"], "I used about 62% less Claude than if Claude had done this work alone.")
+        s = savings.score(tot(1_200_000, 1_000_000))
+        self.assertEqual((s["score"], s["color"], s["sentence"]), (1, "red", "I used about 20% more Claude."))
+        self.assertEqual(savings.score(tot(1_000_000, 1_000_000))["sentence"],
+                         "I used about the same amount of Claude.")
+        self.assertIsNone(savings.score(tot(0, 0, 0)))                       # nothing to compare
+        self.assertIsNone(savings.score(tot(5000, 0)))                       # a baseline of zero
+        for pct, color in ((9, "red"), (10, "orange"), (24, "orange"), (25, "yellow"),
+                           (49, "yellow"), (50, "green"), (100, "green")):
+            self.assertEqual(savings.score(tot(100 * (100 - pct), 10_000))["color"], color, pct)
+        self.assertEqual(savings.score(tot(0, 10_000))["score"], 100)
+        # summed before dividing: a small win and a big loss weigh as their baselines do
+        usage = lambda out: {"turns": 1, "calls": 1, "input": 0, "cache_write_5m": 0,  # noqa: E731
+                             "cache_write_1h": 0, "cache_read": 0, "output": out}
+        rows = [{"ts": 1, "outcome": "accepted", "claude": usage(1000), "diff": {"added": 1, "removed": 0}},
+                {"ts": 1, "outcome": "accepted", "claude": usage(40000), "diff": {"added": 400, "removed": 0}},
+                {"ts": 1, "outcome": "accepted"}]                             # nothing to compare
+        t = savings.totals(rows)
+        parts = [savings.of_row(r) for r in rows[:2]]
+        self.assertEqual((t["tasks"], t["of"]), (2, 3))                       # coverage
+        want = round(100 * sum(p["saved"] for p in parts) / sum(p["self_est"] for p in parts))
+        self.assertEqual(savings.score(t)["pct"], round(100 * t["saved"] / t["self_est"], 1))
+        self.assertEqual(round(savings.score(t)["pct"]), want)
+        self.assertTrue(savings.summary(t, "week").endswith(f" · score {savings.score(t)['score']}/100"))
+
+    def test_the_card_is_made_here_with_the_counts_and_no_name_in_it(self):
+        from workbench import savings
+        usage = {"turns": 2, "calls": 5, "input": 1000, "cache_write_5m": 0,
+                 "cache_write_1h": 10000, "cache_read": 200000, "output": 3000}
+        store.append_jsonl(store.home() / "results.jsonl", {
+            "ts": store.now(), "outcome": "accepted", "task": "fix-acme-billing", "repo": "/home/u/acme",
+            "model": "ollama/secret:27b", "claude": usage, "diff": {"files": 4, "added": 61, "removed": 1}})
+        store.append_jsonl(store.home() / "results.jsonl", {"ts": store.now(), "outcome": "discarded",
+                                                            "task": "t2"})
+        card = Path(self.tmp.name) / "badge.svg"
+        out = run_wb("savings", "--card", str(card))
+        self.assertIn("5/100. I used about 5% less Claude", out)
+        svg = card.read_text()
+        self.assertTrue(svg.startswith('<svg xmlns="http://www.w3.org/2000/svg" width="360"'))
+        for said in (">How much Claude did my GPU</text>", ">save me?</text>", ">5<tspan", "Last 7 days · 1 of 2 tasks counted · estimated",
+                     "Claude alone: about 59,000 weighted tokens.", "With Workbench: 56,000."):
+            self.assertIn(said, svg)
+        for private in ("acme", "secret", "fix-", "/home", socket.gethostname(), "http://", "https://www.w3.org/2000/svg\" "):
+            self.assertNotIn(private, svg.replace('xmlns="http://www.w3.org/2000/svg"', ""))
+        self.assertIn("score 5/100", run_wb("savings"))                     # the text agrees
+        self.assertEqual(json.loads(run_wb("savings", "--json"))["score"]["score"], 5)
+        self.assertIn(">No score yet: we need a task we</text>", savings.card(savings.totals([]), "month"))
+        self.assertNotIn("/ 100", savings.card(savings.totals([]), "month"))
 
     def test_a_task_on_another_machines_gpu_says_its_energy_was_not_measured(self):
         # #117: nothing here reads a remote GPU's power, and a line without energy read as free
@@ -4238,7 +4295,7 @@ class Savings(Base):
         ]
         t = savings.totals(rows, since=1500)
         self.assertEqual(t["tasks"], 1)
-        self.assertEqual(t, {"tasks": 1, "claude": 21500, "self_est": 40425,
+        self.assertEqual(t, {"tasks": 1, "of": 1, "claude": 21500, "self_est": 40425,
                              "saved": 18925, "wh": 12.4, "cost": None, "remote": 0})
         savings.set_price(0.25)
         self.assertEqual(savings.totals(rows, since=1500)["cost"], 0.0)
@@ -4359,13 +4416,13 @@ class Savings(Base):
         store.append_jsonl(store.home() / "results.jsonl", {**row, "ts": now, "trial": True})
         self.assertEqual(run_wb("savings").strip(),
                          "the last 7 days: 1 task(s) · claude 56K · writing it yourself ~59K "
-                         "(estimate) · saved ~3K (5%) · GPU 600 Wh")
+                         "(estimate) · saved ~3K (5%) · GPU 600 Wh · score 5/100")
         self.assertIn("2 task(s)", run_wb("savings", "--month"))
         self.assertIn("GPU 1.2 kWh", run_wb("savings", "--all"))
         out = json.loads(run_wb("savings", "--price", "0.25", "--json"))
         self.assertEqual((out["period"], out["tasks"], out["cost"]), ("week", 1, 0.15))
         self.assertEqual(savings.price(), 0.25)
-        self.assertTrue(run_wb("savings").strip().endswith("GPU 600 Wh ($0.15)"))
+        self.assertTrue(run_wb("savings").strip().endswith("GPU 600 Wh ($0.15) · score 5/100"))
         with self.assertRaises(SystemExit), redirect_stderr(io.StringIO()):
             run_wb("savings", "--price", "0")
         self.assertEqual(savings.price(), 0.25)

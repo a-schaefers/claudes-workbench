@@ -180,6 +180,16 @@ main { flex: 1; overflow-y: auto; overscroll-behavior: contain; -webkit-overflow
 }
 .jump svg, .composer button svg { fill: none; stroke: currentColor; stroke-width: 2.2; stroke-linecap: round; stroke-linejoin: round; }
 
+/* the savings badge (#101): the number and the sentence say it, the colour only underlines it */
+.badge { margin: 4px 0 10px; }
+.badge[hidden] { display: none; }
+.badge-q { font: 600 14px/1.4 var(--sans); color: var(--fg); margin-bottom: 6px; }
+.badge-n { display: inline-block; padding: 10px 18px; border-radius: 14px; font: 800 40px/1 var(--sans); }
+.badge-n small { font-size: 18px; font-weight: 600; }
+.badge-n.green { background: #1a7f37; color: #fff; } .badge-n.yellow { background: #f2c94c; color: #1f1f1f; }
+.badge-n.orange { background: #d9480f; color: #fff; } .badge-n.red { background: #b42318; color: #fff; }
+.badge-s { margin-top: 6px; font: 15px/1.4 var(--sans); color: var(--fg); }
+
 /* wb shot's pair (#99): side by side where there is room, one above the other on a phone */
 .shots { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; margin-top: 8px; width: min(100%, 760px); }
 @media (max-width: 600px) { .shots { grid-template-columns: 1fr; } }

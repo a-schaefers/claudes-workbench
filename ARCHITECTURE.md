@@ -411,7 +411,24 @@ stood), so a big session's handoff is compared with writing it in the same big s
 `claude: 56K · writing it yourself: ~59K (estimate) · saved ~3K · GPU 41 Wh` (a negative saving
 reads `cost ~3K more`); `totals(rows, since)` adds them up, with the energy's `cost` at the
 user's electricity price (`price()`, from `$WB_SAVINGS`, else `~/.config/workbench/savings.json`
-`{"kwh_price": …}`; `set_price` writes it). The fit's mean error is 19%, single tasks −36% to
+`{"kwh_price": …}`; `set_price` writes it), and `of`, every closed task of the period, compared
+or not (the coverage).
+
+**The badge** (`savings.score`, #101) is one number from 1 to 100 over those totals. B is the
+estimate of Claude writing the tasks alone (`self_est`), A what delegating them cost Claude
+(`claude`), both summed before dividing, so a big task weighs as its baseline does. The percent
+saved is 100·(B−A)/B, and the score is that rounded, held between 1 and 100. Its bands
+(`BANDS`): 1–9 red, 10–24 orange, 25–49 yellow, 50–100 green. Its sentence is the signed
+result: "I used about 62% less Claude than if Claude had done this work alone", "about the same
+amount", or "about 20% more" (a score of 1 for both of those). With no comparable task or a zero
+baseline there is no score (`NO_SCORE`). GPU energy, its price and the acceptance rate stay out
+of it. `wb savings` ends its line with `score N/100`, `--json` carries `score`
+(`{score, color, pct, sentence}`), and the web chat's gear shows the badge.
+`wb savings --card FILE.svg` (`savings.card`) writes it as a 360-wide SVG to keep or post. The
+card has the question "How much Claude did my GPU save me?", the number on its band's color
+(`CARD_COLORS`, each pair past 4.5:1), the sentence, both totals, the period and "N of M tasks
+counted · estimated". Every line is wrapped by hand (`_wrapped`). It is made here, fetches
+nothing, and holds no name, path, host or account; the user decides where it goes. The fit's mean error is 19%, single tasks −36% to
 +48%, so it is always called an estimate. A discarded task saved nothing: its row (with
 `claude`, no `diff` needed) gives `self_est` 0 and `saved` −claude, and reads `claude: 21K ·
 discarded, nothing saved · GPU 12 Wh`; `totals` counts it too. `wb savings` prints `summary`
@@ -436,6 +453,7 @@ the period's rows with both sides to compare:
 - the machine: `hardware.system()`, each GPU's name and VRAM (`hardware.gpus(windows=False)`);
 - the local models used: their count and weights (`models.weights`), never a name;
 - the tasks: Claude's tokens, the estimate, handoff/self overall and by task size;
+- the badge's score and sentence (*The badge*), or `NO_SCORE`;
 - the GPU energy, saying when some ran on another machine's GPU.
 
 No model name, repo, task name or price appears in it.
@@ -2622,7 +2640,7 @@ thread no longer):
 - `GET /api/state`: `{messages (the last 200, each user row with its receipt as `received`),
   asks (the last 20, each with `answer` (null while open), `answered`, `by`), prefs, push (`{key:
   the VAPID public key, test: the last test push's ts}`), listener, savings (`chat.week_saved`:
-  `savings.totals` over the last 7 days, as `wb savings --json` without `period`), build, now}`. `build` (`chat.build`, a crc32 of the page's files' names, mtimes and sizes) changes
+  `savings.totals` over the last 7 days with its `score`, as `wb savings --json` without `period`), build, now}`. `build` (`chat.build`, a crc32 of the page's files' names, mtimes and sizes) changes
   when the page does: a page that loaded other files reloads itself.
 - `GET /api/shot?task=&n=&side=base|candidate`: one side of a `wb shot` pair as `image/png`,
   behind the token (401). It is read only when the task name passes `store.NAME_RE`, `n` is a
@@ -3153,7 +3171,7 @@ delivered as taken (`_stale_notes`, *Notes*).
 | `wb bench self <case>` | `--yes` (required: it spends Claude tokens), `--turns N` (40) | Claude Code writes the case (`claude -p`, edits and the acceptance command only), graded by its hidden checks in the original task's lane; one runs.jsonl row (`arm: claude`) and its line: PASS or fail, the weighted tokens, the handoff's cost and the ratio (*Bench*). |
 | `wb bench run` | `--model ID…` (every model that can run and takes the case's size), `--case NAME…` (every case), `--skill NAME…`, `--label TEXT`, `--repeat N` (1) | Writes the run's plan and detaches its driver, then returns: one replay at a time, after any real task, preempted by one; refuses while another run runs. Skips what an earlier run with the same label already replayed. |
 | `wb backlog [NAME]` | `--json` | A batch started with `wb start --backlog NAME` (the morning summary of a night's run): `backlog NAME: N task(s) · 2 accepted · 1 review`, then a line per task (phase, rounds, minutes: the results row's, or since start while open; the branch when accepted; `savings.line` of its row once closed), then `savings.summary` over the batch's non-trial rows (`the batch: …`). An unknown name: exit 1. Without a name, each batch with its task count and how many are open. `--json`: `{backlog, tasks: [{task, phase, rounds, minutes, branch, saving}], totals}`. |
-| `wb savings` | `--week` (default) \| `--month` \| `--all`, `--json`, `--share` (a summary to paste: the machine, model sizes, no names; *Sharing it*), `--price X` | What the delegated tasks saved Claude over the period against the estimate of writing them (`savings.totals`, `summary`; trials left out): tasks, Claude's tokens, the estimate, the saving and its percentage, the GPU energy and, with a price, its cost. `--price` (per kWh, positive, else exit 1) writes savings.json first. `--json`: `{period, tasks, claude, self_est, saved, wh, cost}`. |
+| `wb savings` | `--week` (default) \| `--month` \| `--all`, `--json`, `--share` (a summary to paste: the machine, model sizes, no names; *Sharing it*), `--card FILE.svg`, `--price X` | What the delegated tasks saved Claude over the period against the estimate of writing them (`savings.totals`, `summary`; trials left out): tasks, Claude's tokens, the estimate, the saving and its percentage, the GPU energy and, with a price, its cost. `--price` (per kWh, positive, else exit 1) writes savings.json first. `--json`: `{period, tasks, of, claude, self_est, saved, wh, cost, remote, score}`. `--card FILE.svg`: the badge as an image (*The badge*). |
 | `wb stats` / `wb tune` / `wb trial <task…>` | | Results by model and size (judged rows: it says how many spec-gap discards and trials it left out), with a `claude` column (the average input-equivalent tokens a task cost Claude) once a row records one; the tuned settings; mark closed tasks as trials: their results rows, and their open lessons are dropped; an open task is refused (it has no row yet, so it was marked as nothing while its lessons went). |
 
 ### Other

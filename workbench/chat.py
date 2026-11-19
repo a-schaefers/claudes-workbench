@@ -203,7 +203,8 @@ def snapshot() -> dict:
 
 def week_saved() -> dict:
     """The gear sheet's Savings: `wb savings` for the last 7 days (savings.totals)."""
-    return savings.totals(store.results(), since=store.now() - savings.PERIODS["week"])
+    t = savings.totals(store.results(), since=store.now() - savings.PERIODS["week"])
+    return {**t, "score": savings.score(t)}  # the badge (#101)
 
 
 # ---- notifications: web push with no payload (webpush.py) ----

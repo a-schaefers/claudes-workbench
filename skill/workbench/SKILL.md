@@ -420,4 +420,5 @@ what you fixed, sent back or flagged, the branch. Report the agent's misses plai
 evidence about the model, and the router learns from accept and discard. Pass on the
 `claude:` line `wb accept` prints: what the task cost you, measured, beside the estimate of
 writing it yourself and the GPU energy. Call the estimate an estimate. `wb savings` gives the
-week's total when the user asks what it's saving.
+week's total and its score out of 100 when the user asks what it's saving; `wb savings --card
+<file>.svg` makes the badge as an image for them to keep or post (made here, nothing sent).
