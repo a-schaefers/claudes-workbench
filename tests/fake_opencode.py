@@ -22,7 +22,8 @@ whether each run continued a session, and its prompt; FAKE_SLEEP pauses each run
 event. FAKE_LESSON ends the agent's text with a `Lesson:` line (what workbench.lessons gathers).
 FAKE_BG, a file: each run starts `sleep` in a session of its own, left running, and writes its pid
 there (what the agent leaves behind). FAKE_STRAY prints lines that are JSON but not events, or
-events of the wrong shape, first.
+events of the wrong shape, first. FAKE_LINGER: after its last event a run closes its output and
+stays alive (a shutdown that hangs).
 `session export` prints one finished step: FAKE_FILL sets the context it read, FAKE_COMPACTED
 adds a completed compaction. `session list` lists nothing. Either fails without `--standalone`,
 as the real one does when another service holds the managed port. `--version` says
@@ -191,4 +192,8 @@ elif scenario == "fill":
     emit("text", text="Wrote 41 so far; next I fix it to the real answer.")
     emit("step_finish", reason="tool-calls", tokens={"input": 2000, "output": 900,
                                                       "cache": {"read": 22100}})  # 25000: 76%
+    time.sleep(3600)
+if os.environ.get("FAKE_LINGER") and args and args[0] == "run":
+    sys.stdout.flush()
+    os.close(1)
     time.sleep(3600)

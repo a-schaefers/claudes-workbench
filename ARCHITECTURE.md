@@ -302,6 +302,7 @@ themselves, so the runner stops the agent:
 | no output at all (not counted while it waits on Claude; while a background job runs, the test timeout if longer) | 15 min | `--silence-timeout` |
 | one round running too long (not counting waits on Claude) | 40 min | `--round-timeout` |
 | more than `HANDOVER_MAX` (5) mid-round handovers in one review round | | `runner.drive` |
+| OpenCode still running after it closed its output (a shutdown that hangs held the task and the GPU lease for good, #83): SIGTERM, then SIGKILL, a line in runner.log; the round ends as its events say | the silence limit, at most `EXIT_GRACE` (30 s) | `runner.run_round` |
 
 A model generating for minutes with no tool call is usually planning instead of doing. Past the
 think budget (7 minutes, `--think-timeout`; 0 turns it off) the runner interrupts it with a nudge
@@ -3261,7 +3262,8 @@ prompt}` to `FAKE_RUNS`; `FAKE_LATE` pauses before its first event (a model read
 `FAKE_SLEEP` after `step_start`; `FAKE_LESSON` adds a `Lesson:`
 line; `FAKE_BG` (a file) starts a `sleep` in a session of its own, left running, and writes its pid
 there (what `sweep` must end); `FAKE_STRAY` first prints lines that are JSON but not events
-(`42`, a list, `null`) and events whose parts have the wrong shape. Scenarios (`FAKE_SCENARIO`): `ok` (writes 42), `fix` (41 in a new session, 42 when
+(`42`, a list, `null`) and events whose parts have the wrong shape; `FAKE_LINGER` closes its
+output after its last event and stays alive. Scenarios (`FAKE_SCENARIO`): `ok` (writes 42), `fix` (41 in a new session, 42 when
 continued: an auto-fix round passes), `loop` (the repeat guard stops it), `hang`, `crash` (exit 1,
 no events), `slow` (hangs in a new session, ok when continued), `fill` (a 25K-token step at 76%
 of 32K, then sleeps: the runner hands over mid-round; the handover prompt turns it into `ok`),
