@@ -58,59 +58,14 @@ claude plugin install workbench@workbench
 The first time, Claude finishes the setup and proves it on a tiny sample task. If `wb doctor`
 reports no model that can run, `wb models` says why (the server is down, the model isn't pulled).
 
-### Try one task
+Then ask for what you want. The **Workbench** pane opens beside the chat, and the agent's work
+streams into it. When its tests pass, the apprentice says the task is ready for review, and Claude
+reads the diff, then tells you it committed the change or what it sent back.
 
-```
-/workbench add a test for an empty input to the parser
-```
-
-The **Workbench** pane opens beside the chat, and the agent's work streams into it. When its tests
-pass, the apprentice says the task is ready for review, and Claude reads the diff, then tells you
-it committed the change or what it sent back.
-
-<p align="center"><img src="docs/first-task.png" alt="Claude Code with the Workbench pane. On the left, Claude says it handed the test to a local 9B model and will review the change when the runner wakes it, and asks before changing the model's context window. On the right, the agent reads the test file, adds test_empty_input_gives_empty_dict, runs the tests (OK), and the apprentice shows the task's time and context; below it, the Claude coding setting." width="900"></p>
+<p align="center"><img src="docs/first-task.png" alt="Claude Code with the Workbench pane. On the left, Claude says it handed a new test to a local 9B model and will review the change when the runner wakes it, and asks before changing the model's context window. On the right, the agent reads the test file, adds test_empty_input_gives_empty_dict, runs the tests (OK), and the apprentice shows the task's time and context; below it, the Claude coding setting." width="900"></p>
 
 `/workbench-quit` stops the agents and keeps their work for later.
 `/workbench-quit-and-hand-back-claude` has Claude finish their tasks itself.
-
-## Where the work runs
-
-The agents write only inside their own worktree and use git only to read. Commits, branches,
-pushes, deploys and your `CLAUDE.md` stay with Claude. On Linux with Landlock the kernel enforces
-that; on macOS, or Linux without it, it's a guardrail rather than a wall. `wb doctor` says which
-you have, and [What the agent knows](ARCHITECTURE.md#what-the-agent-knows) gives the details and
-the gaps.
-
-## Roadmap and goals
-
-The goal is for your own machine to finish more of your work. Today Claude plans, reviews and can
-step in to fix code; your local agent writes and tests it. As local models improve, you can hand
-them more: the pane's **Claude coding** setting runs from *Let Claude decide* to *Ask me first*
-and *Only when I say*.
-
-You should be able to walk away and come back to a change you can judge: a test that failed
-before the fix and passes after (`wb verify`), or both versions of a visual change on your phone
-(`wb shot`).
-[Reliability](https://github.com/a-schaefers/claudes-workbench/issues/75) ·
-[Delegation and review](https://github.com/a-schaefers/claudes-workbench/issues/77)
-
-Next we measure on everyday projects and machines: how often local work is accepted, how often
-Claude has to write code, and how much of your time each change takes. Our first paired runs, on
-one machine, used fewer Claude tokens on two substantial tasks and more on two small ones
-([how we measured it](THESIS.md)); `wb savings` shows yours.
-
-## Where to go next
-
-- **Use it from your phone:** [the web chat](ARCHITECTURE.md#the-web-chat)
-- **Running your own server:** [connect it](ARCHITECTURE.md#which-server),
-  [size its context window](ARCHITECTURE.md#the-context-window),
-  [fix tool calls](ARCHITECTURE.md#tool-calls),
-  [use a GPU on another machine](ARCHITECTURE.md#a-model-on-another-machine),
-  [pass an API key](ARCHITECTURE.md#a-server-that-wants-an-api-key)
-- **Every command:** [Every `wb` command](ARCHITECTURE.md#every-wb-command)
-- **Updates:** Workbench tells you when there's one; `/workbench-update` installs it. Working on
-  Workbench itself? [Installing](ARCHITECTURE.md#installing)
-- **How it all works:** [ARCHITECTURE.md](ARCHITECTURE.md)
 
 ## License
 

@@ -3715,7 +3715,7 @@ push: every change is a pull request that merges once `check` is green and it is
 ## Couplings: change one, change the other
 
 - **What a handoff costs Claude, measured** → THESIS.md (the case for users, with the same
-  numbers), the README's savings line and its roadmap.
+  numbers).
 - **Anything a reader looks up** (a command, flag, default, guard, key, file, prompt text,
   environment variable) → this file, CLAUDE.md if it names it, and the skill
   (`skill/workbench/SKILL.md`) if Claude uses it there; README only for the quickstart. CLAUDE.md's
@@ -3750,7 +3750,7 @@ push: every change is a pull request that merges once `check` is green and it is
   tests on a Landlock machine; the protocol's lane line and the handbook's boundaries. What it
   leaves writable that runs later outside it (`TOOL_HOMES`, `NOT_WRITABLE`) and what WSL's
   interop runs outside it (`windows_drives`, `agent_path`, `interop_gap`) → the lane's *Writes*
-  and *Reads* here, the README's *Where the work runs*, and `wb doctor`'s line.
+  and *Reads* here, and `wb doctor`'s line.
 - **`wb update`'s flags or output** (`--check --if-due`; `update available…`, `updated …`) → the
   mod's weekly check, which toasts only an `update available` answer, and `/workbench-update`, which
   reloads the plugins only after an `updated` one (register.tsx `poll` and the `UPDATE` command).
