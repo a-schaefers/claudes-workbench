@@ -190,15 +190,17 @@ def pick_model(size: str, wanted: str | None, stack=()) -> tuple[models.Model, d
     return top.model, top.state, why
 
 
-def _gpu_holders(me: str | None = None) -> dict:
-    """Who holds or waits for the GPU, but ``me``: gpu.json's live entries, plus each task whose
-    runner is alive but hasn't reached the lease yet (one just started), as an entry of its own."""
-    held = {p: h for p, h in models.holders().items() if h.get("task") != me}
+def _gpu_holders(me: str | None = None, of: models.Model | None = None) -> dict:
+    """Who holds or waits for the GPU (``of``'s: a remote model's server, else this machine's),
+    but ``me``: its gpu.json's live entries, plus each task whose runner is alive but hasn't
+    reached the lease yet (one just started), as an entry of its own."""
+    pool = models.pool(of)
+    held = {p: h for p, h in models.holders(pool=pool).items() if h.get("task") != me}
     named = {h.get("task") for h in held.values()}
     found = models.discover()
     for t in store.all_tasks():
         m = found.get(t.spec.get("model") or "")
-        if t.name not in named and t.name != me and m and not m.remote \
+        if t.name not in named and t.name != me and m and models.pool(m) == pool \
                 and t.status.get("phase") in store.ACTIVE and runner_alive(t):
             held[f"task {t.name}"] = {"model": m.id, "task": t.name}
     return held
@@ -206,10 +208,8 @@ def _gpu_holders(me: str | None = None) -> dict:
 
 def _gpu_wait(m: models.Model, me: str | None = None) -> tuple[dict, bool]:
     """The GPU's other holders, and whether ``m`` would have to wait for them (queued) rather
-    than run beside them. A remote model takes no lease: it never waits."""
-    if m.remote:
-        return {}, False
-    held = _gpu_holders(me)
+    than run beside them. A remote model waits for the other tasks on its server (#116)."""
+    held = _gpu_holders(me, m)
     return held, bool(held) and not models.admits(m, held)
 
 
@@ -217,8 +217,6 @@ def _preempt_bench(m: models.Model, me: str | None = None) -> str:
     """Real work first: the bench's replays that keep `m` off the GPU are stopped (the driver
     records them preempted and replays them once no real task runs). An overnight run must
     never make the morning's task queue."""
-    if m.remote:
-        return ""
     held, waits = _gpu_wait(m, me)
     names = sorted({h["task"] for h in held.values() if h.get("task")
                     and store.Task(h["task"]).spec.get("bench")}) if waits else []
