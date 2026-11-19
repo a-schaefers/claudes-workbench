@@ -3868,7 +3868,8 @@ class ClaudeSpend(Base):
                          _turn("[workbench] Task `t-cost` is ready for review.", "2026-11-17T10:09:00Z"),
                          *_call("m2", "2026-11-17T10:09:01Z", 700, "wb accept t-cost -m x")])
         out = run_wb("accept", "t-cost", "-m", "feat: answer")
-        self.assertIn("claude: ~7K input-equivalent tokens over 2 turn(s) (1000 output)", out)
+        # beside the estimate of writing it; no GPU part: a fake model's energy isn't measured
+        self.assertIn("claude: 7K · writing it yourself: ~5K (estimate) · cost ~2K more\n", out)
         row = store.results()[-1]
         self.assertEqual(row["claude"]["cache_read"], 20000)
         stats = run_wb("stats")
@@ -4067,6 +4068,32 @@ class Savings(Base):
         self.assertIsNone(savings.of_row({"outcome": "discarded", "gpu_wh": 1.0}))
         self.assertIsNone(savings.line({"outcome": "discarded", "gpu_wh": 1.0}))
 
+
+    def test_wb_savings_sums_the_period_and_sets_the_price(self):
+        from workbench import savings, store
+        u = {"turns": 2, "calls": 5, "input": 1000, "cache_write_5m": 0,
+             "cache_write_1h": 10000, "cache_read": 200000, "output": 3000}
+        row = {"outcome": "accepted", "claude": u, "diff": {"files": 4, "added": 61, "removed": 1},
+               "gpu_wh": 600.0}
+        now = store.now()
+        for ts in (now - 3600, now - 20 * 86400):  # this week, and earlier this month
+            store.append_jsonl(store.home() / "results.jsonl", {**row, "ts": ts})
+        store.append_jsonl(store.home() / "results.jsonl", {**row, "ts": now, "trial": True})
+        self.assertEqual(run_wb("savings").strip(),
+                         "the last 7 days: 1 task(s) · claude 56K · writing it yourself ~59K "
+                         "(estimate) · saved ~3K (5%) · GPU 600 Wh")
+        self.assertIn("2 task(s)", run_wb("savings", "--month"))
+        self.assertIn("GPU 1.2 kWh", run_wb("savings", "--all"))
+        out = json.loads(run_wb("savings", "--price", "0.25", "--json"))
+        self.assertEqual((out["period"], out["tasks"], out["cost"]), ("week", 1, 0.15))
+        self.assertEqual(savings.price(), 0.25)
+        self.assertTrue(run_wb("savings").strip().endswith("GPU 600 Wh ($0.15)"))
+        with self.assertRaises(SystemExit), redirect_stderr(io.StringIO()):
+            run_wb("savings", "--price", "0")
+        self.assertEqual(savings.price(), 0.25)
+
+    def test_wb_savings_with_nothing_to_compare_says_why(self):
+        self.assertIn("no task to compare yet", run_wb("savings"))
 
 class Notes(Base):
     def test_notes_about_the_user_are_kept_short_and_numbered(self):

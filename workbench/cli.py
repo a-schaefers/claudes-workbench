@@ -20,7 +20,7 @@ from pathlib import Path
 from types import SimpleNamespace
 
 from . import (__version__, ask_mcp, bench, chat, context, gitops, hardware, images, lane, lessons, models,
-               optimize, results, router, scan, skills, spend, store, transcript, tuning)
+               optimize, results, router, savings, scan, skills, spend, store, transcript, tuning)
 from .watch import Watcher, wait_exit
 from . import runner
 from .runner import PKG_ROOT
@@ -1240,7 +1240,7 @@ def cmd_accept(a):
     print(f"accepted {a.name}: commit {commit} on {spec['branch']}" +
           (f", merged into {gitops.current_branch(repo)} as {merged}" if merged else
            f"\nmerge with: git -C {shlex.quote(str(repo))} merge --no-ff {spec['branch']}"))
-    _say(spend.line(row.get("claude")))
+    _say(savings.line(row) or spend.line(row.get("claude")))
     _say(lessons.nudge(task, "accepted"))
 
 
@@ -1281,7 +1281,7 @@ def cmd_discard(a):
     _ack_all(task)
     print(f"discarded {a.name}" + ("" if a.keep_branch else f"; branch {spec['branch']} deleted"
                                    if not kept else f"; {repo} is gone, so its branch with it"))
-    _say(spend.line(row.get("claude")))
+    _say(savings.line(row) or spend.line(row.get("claude")))
     _say(lessons.nudge(task, "discarded"))
 
 
@@ -1323,6 +1323,22 @@ def cmd_models(a):
 
 def cmd_stats(a):
     print(results.table())
+
+
+def cmd_savings(a):
+    """What the delegated tasks saved Claude over a period, against the estimate of writing them
+    (savings.py). `--price` sets the electricity price the energy is costed at."""
+    if a.price is not None:
+        if not a.price > 0:
+            die("--price is the electricity price per kWh: a positive number")
+        savings.set_price(a.price)
+    period = "month" if a.month else "all" if a.all else "week"
+    span = savings.PERIODS[period]
+    t = savings.totals(store.results(), since=store.now() - span if span else 0)
+    if a.json:
+        print(json.dumps({"period": period, **t}))
+    else:
+        print(savings.summary(t, period))
 
 
 def cmd_tune(a):
@@ -2807,6 +2823,14 @@ def parser() -> argparse.ArgumentParser:
     x.add_argument("--label")
     s.set_defaults(f=cmd_bench)
     sub.add_parser("stats", help="results by model").set_defaults(f=cmd_stats)
+    s = sub.add_parser("savings", help="what delegating saved Claude: the week, by default")
+    g = s.add_mutually_exclusive_group()
+    g.add_argument("--week", action="store_true", help="the last 7 days (the default)")
+    g.add_argument("--month", action="store_true", help="the last 30 days")
+    g.add_argument("--all", action="store_true", help="every task recorded")
+    s.add_argument("--json", action="store_true")
+    s.add_argument("--price", type=float, help="set the electricity price per kWh, then report")
+    s.set_defaults(f=cmd_savings)
     sub.add_parser("tune", help="the settings tuned from results, per model and window").set_defaults(f=cmd_tune)
     s = sub.add_parser("trial", help="mark closed tasks as trial runs: their results stop counting")
     s.add_argument("names", nargs="+")

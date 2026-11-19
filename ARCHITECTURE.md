@@ -390,7 +390,9 @@ and `calls`, the task's share of the calls charged, split like the tokens);
 `spend.weighted` makes one number of them in input-equivalent tokens, from the API's price
 multipliers on input (`WEIGHTS`: output 5, a cache write 1.25 for 5 minutes or 2 for an hour, a
 cache read 0.1, which errs high for the models whose reads cost less: no model is named in code).
-`wb accept` and `wb discard` print it (`claude: ~N K input-equivalent tokens over T turn(s)`), and
+`wb accept` and `wb discard` print it beside the estimate of writing it (`savings.line`, *What a
+task saved*), or alone when there is no estimate (`claude: ~N K input-equivalent tokens over T
+turn(s)`), and
 `wb stats` averages it per model and size. A task with no session (started by hand, or before
 0.90) or whose transcript Claude Code has cleaned up records none. The router reads it
 (`_cheaper`, *Choosing a model*).
@@ -411,11 +413,15 @@ user's electricity price (`price()`, from `$WB_SAVINGS`, else `~/.config/workben
 `{"kwh_price": …}`; `set_price` writes it). The fit's mean error is 19%, single tasks −36% to
 +48%, so it is always called an estimate. A discarded task saved nothing: its row (with
 `claude`, no `diff` needed) gives `self_est` 0 and `saved` −claude, and reads `claude: 21K ·
-discarded, nothing saved · GPU 12 Wh`; `totals` counts it too.
+discarded, nothing saved · GPU 12 Wh`; `totals` counts it too. `wb savings` prints `summary`
+over a period (the last 7 days by default; `PERIODS`): `the last 7 days: 3 task(s) · claude 160K ·
+writing it yourself ~390K (estimate) · saved ~230K (59%) · GPU 1.2 kWh ($0.36)`. The percentage
+is the saving's share of the estimate, the number the savings badge scores (#101).
 
 The inputs come from the task. The energy: while OpenCode runs a round, the runner's `_Power`
 thread samples `hardware.gpu_power_w()` every `POWER_EVERY` (10) s and adds the watt-hours to
-status `gpu_wh` (not for a remote model: `CURRENT["remote"]`, set in `drive`; a None reading adds
+status `gpu_wh` (not for a remote model: `CURRENT["remote"]`, set in `drive`; nor for the suite's
+fake models, `WB_FAKE_MODELS`, which would read this machine's GPU; a None reading adds
 nothing; the tests after the round aren't counted). It is the whole GPU's draw, so tasks sharing
 the GPU each count all of it. The size: `gitops.footprint` gives `files`, `lines` (added) and
 `removed`; each step records them (`results.step`), and an accepted task's row sums them as
@@ -2898,6 +2904,7 @@ delivered as taken (`_stale_notes`, *Notes*).
 | `wb bench add <task>` | `--step N` (the last), `--hidden PATH…` (the test files the step changed), `--check CMD`, `--name CASE` (the task's; `<task>-sN` for a step of several) | Makes a case of one step of an accepted task (*Bench*): the base as a bundle, the spec, the acceptance command, the hidden checks, the grants. Refused: not accepted or a trial, the repo or commit gone, no acceptance command, no hidden checks, ones that pass on the base already, or ones its own commit fails in the agent's lane (no replay could pass them). |
 | `wb bench list` / `wb bench report` / `wb bench stop` | `report`: `--run ID`, `--label TEXT` | The cases; pass rates, rounds, auto-fixes, minutes and local tokens per label and model, then each case against the original's model and review rounds (with the running run's progress); stop the driver, which closes its replay. |
 | `wb bench run` | `--model ID…` (every model that can run and takes the case's size), `--case NAME…` (every case), `--skill NAME…`, `--label TEXT`, `--repeat N` (1) | Writes the run's plan and detaches its driver, then returns: one replay at a time, after any real task, preempted by one; refuses while another run runs. Skips what an earlier run with the same label already replayed. |
+| `wb savings` | `--week` (default) \| `--month` \| `--all`, `--json`, `--price X` | What the delegated tasks saved Claude over the period against the estimate of writing them (`savings.totals`, `summary`; trials left out): tasks, Claude's tokens, the estimate, the saving and its percentage, the GPU energy and, with a price, its cost. `--price` (per kWh, positive, else exit 1) writes savings.json first. `--json`: `{period, tasks, claude, self_est, saved, wh, cost}`. |
 | `wb stats` / `wb tune` / `wb trial <task…>` | | Results by model and size (judged rows: it says how many spec-gap discards and trials it left out), with a `claude` column (the average input-equivalent tokens a task cost Claude) once a row records one; the tuned settings; mark closed tasks as trials: their results rows, and their open lessons are dropped; an open task is refused (it has no row yet, so it was marked as nothing while its lessons went). |
 
 ### Other
@@ -2960,6 +2967,7 @@ $WB_HOME (~/.local/state/workbench)
                                  (each a list of strings, or the file is refused: context.commands_conf)
   chat.json ($WB_CHAT_CONFIG)    the web chat's {"bind": [...], "hosts": [...]}
   chat-token ($WB_CHAT_TOKEN)    the web chat's token, mode 600
+  savings.json ($WB_SAVINGS)     {"kwh_price": N}, the electricity price the energy is costed at (wb savings --price)
 ~/.config/opencode/opencode.json + .jsonc (layered, under $XDG_CONFIG_HOME; $WB_OPENCODE_CONFIG) the models
 /tmp/wb-run-<uid>-<hash>/        the agent's XDG_RUNTIME_DIR (lane on; context.runtime_dir), 0700: kept while
                                  the task is open (stuck or in review too), removed by wb accept and wb discard
