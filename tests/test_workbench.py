@@ -1359,6 +1359,29 @@ class Context(Base):
                                        capture_output=True).returncode == 0)
 
 
+    def test_a_wb_next_interrupted_after_its_commit_advances_once_when_retried(self):
+        # #85 (the 2026-11-18 audit): the step was committed before the next one was recorded,
+        # and a retry died on "nothing to commit", the task stuck in review
+        self.start("t-ni", "ok", "--test", TEST_CMD)
+        wait_phase("t-ni", {"review"})
+        spec = "Now also write the question to question.txt.\n"
+        with mock.patch.object(cli, "_spec_gaps", side_effect=KeyboardInterrupt), \
+                mock.patch("sys.stdin", io.StringIO(spec)), self.assertRaises(KeyboardInterrupt):
+            run_wb("next", "t-ni", "--spec", "-", "-m", "feat: the answer")
+        task = store.Task("t-ni")
+        self.assertEqual((task.status["phase"], task.status.get("steps", 1)), ("review", 1))
+        with mock.patch("sys.stdin", io.StringIO(spec)):  # the spec again, on stdin
+            out = run_wb("next", "t-ni", "--spec", "-", "-m", "feat: the answer")
+        self.assertIn("step 1 of t-ni committed", out)
+        st = wait_phase("t-ni", {"review"})
+        self.assertEqual(st["steps"], 2)
+        self.assertEqual(len(st["step_sizes"]), 1)
+        self.assertGreaterEqual(st["step_sizes"][0]["files"], 1)  # measured from before the commit
+        log = subprocess.run(["git", "-C", str(self.repo), "log", "--format=%s", "delegate/t-ni"],
+                             capture_output=True, text=True).stdout.splitlines()
+        self.assertEqual(log.count("feat: the answer"), 1)
+        self.assertIn("question.txt", self.runs()[1]["prompt"])
+
     def test_wb_next_is_not_reaped_while_it_reads_the_session(self):
         # it set phase queued, then exported the session (up to 30 s) before spawning the runner,
         # and a wb status meanwhile failed the task as dead (the 0.90 review)
