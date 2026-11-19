@@ -193,14 +193,15 @@ def calls(main: Path, subagents: list[Path], names: set[str]) -> list[dict]:
 
 
 def usage(task: store.Task) -> dict | None:
-    """The task's share of its session: {turns, input, cache_write_5m, cache_write_1h,
-    cache_read, output}; None without a session or its transcript."""
+    """The task's share of its session: {turns, calls, input, cache_write_5m,
+    cache_write_1h, cache_read, output}; None without a session or its transcript.
+    ``calls`` is the task's share of each charged call, each counting 1/len(names)."""
     sid = task.spec.get("session")
     main, subs = transcript_paths(sid) if sid else (None, [])
     if main is None:
         return None
     names = {t.name for t in store.all_tasks() if t.spec.get("session") == sid} | {task.name}
-    total, turns = dict.fromkeys(KINDS, 0.0), set()
+    total, turns, call_count = dict.fromkeys(KINDS, 0.0), set(), 0.0
     try:
         charged = calls(main, subs, names)
     except OSError:  # unreadable: a measurement never stops an accept
@@ -208,9 +209,11 @@ def usage(task: store.Task) -> dict | None:
     for c in charged:
         if task.name in c["names"]:
             turns.add(c["turn"])
+            call_count += 1 / len(c["names"])
             for k in KINDS:
                 total[k] += c["usage"][k] / len(c["names"])
-    return {"turns": len(turns), **{k: round(v) for k, v in total.items()}}
+    return {"turns": len(turns), "calls": round(call_count, 1),
+            **{k: round(v) for k, v in total.items()}}
 
 
 def weighted(u: dict) -> int:
