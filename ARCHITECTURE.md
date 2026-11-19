@@ -2427,7 +2427,9 @@ thread no longer):
   wakes every stream. Without inotify it wakes them every second (how a dead listener is noticed
   there); a wake with nothing new writes nothing, so the 15 s ping holds on every platform. A
   failure in the hub's watching (`_watch`) is printed and the watching starts again a second
-  later: a dead hub would have left every page without news.
+  later: a dead hub would have left every page without news. It keeps the `chat/` it started with
+  (`Hub.dir`) and stops at `close()`: a test's hub, resolving `WB_HOME` again on each restart,
+  made the next test's state directory in its setUp's way (#134).
 - `POST /api/send`: JSON only (415), at most 32 KB (413), a `Content-Length` that isn't a number
   0 or more (400), `{text: 1–8000 characters, cid?: 1–64 characters}` (400), → 200 `{message,
   listener, state}`.

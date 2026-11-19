@@ -377,7 +377,17 @@ class Hub:
         self.cond = threading.Condition()
         self.version = 0
         self.open: list = []  # the open streams' handlers, oldest first
+        # the directory it started with: resolved again on each restart, a hub outliving its
+        # server (a test's) made the next WB_HOME's chat/ before that test's setUp did (#134)
+        self.dir = chat_dir()
+        self.closed = threading.Event()
         threading.Thread(target=self._run, daemon=True).start()
+
+    def close(self) -> None:
+        """Stop watching: the next look ends the loop (within the watch's 60 s, or at once on a
+        change), and nothing is made again."""
+        self.closed.set()
+        self.bump()
 
     def bump(self) -> None:
         with self.cond:
@@ -385,21 +395,23 @@ class Hub:
             self.cond.notify_all()
 
     def _run(self) -> None:
-        while True:  # a hub that died would leave every page without news: start it again
+        while not self.closed.is_set():  # a hub that died would leave every page without news
             try:
                 self._watch()
             except Exception as e:
+                if self.closed.is_set():
+                    break
                 print(f"web chat: the file watcher failed ({e!r}); starting it again",
                       file=sys.stderr, flush=True)
                 time.sleep(1)
             self.bump()
 
     def _watch(self) -> None:
-        w = Watcher(chat_dir())
+        w = Watcher(self.dir)
         pid, pidfd = None, None
         try:
-            while True:
-                st = store.read_json(chat_dir() / "listener.json", None) or {}
+            while not self.closed.is_set():
+                st = store.read_json(self.dir / "listener.json", None) or {}
                 if st.get("pid") != pid:
                     if pidfd is not None:
                         os.close(pidfd)
