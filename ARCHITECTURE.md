@@ -2419,7 +2419,7 @@ thread no longer):
 `icon.svg`; no inline script, as the CSP requires). The token is taken from the address's
 fragment (or `?token=`, the installed app's start URL) into `localStorage` (`wb-chat-token`) and
 stripped from the address bar; a missing or refused one shows a screen that accepts a pasted link
-or token. It never expires (it is the token file). A keyed page points its manifest link at
+or token. It never expires (it is the token file). A keyed page over https points its manifest link at
 `?k=<token>`, since an app installed on iPhone gets storage of its own, not Safari's (the user,
 2026-11-18: no key to paste in the app). A reload shows the thread the page last had (the last
 50 messages, `wb-chat-thread`) and "connecting…" until the first live state, which it asks
@@ -2467,8 +2467,12 @@ and that `tailscale serve --bg 1337` gives it an https address on the tailnet.
 **The app and notifications** (the user, 2026-11-18: like their other site's, but no new
 infrastructure). The manifest (named "Claude's Workbench"; its `short_name` and
 `apple-mobile-web-app-title`, which iOS reads, "Workbench", since a home screen cuts long names; standalone, PNG icons at 192 and 512, maskable, and an
-apple-touch icon at 180, rendered full-bleed from icon.svg) makes the page installable. The gear's
-*Install the app* section says "Installed ✓" when it runs standalone (`display-mode: standalone`
+apple-touch icon at 180, rendered full-bleed from icon.svg) makes the page installable, over https
+only: `http://localhost` is a secure context too, so Chromium offered the install there as well and
+one computer got two apps of one name, the localhost one useless away from it (the user,
+2026-11-18); over http `app.js` removes the manifest link, so no browser offers it, and the gear
+points at the https address (`tailscale serve --bg 1337`). Notifications still work over localhost.
+The gear's *Install the app* section says "Installed ✓" when it runs standalone (`display-mode: standalone`
 or `navigator.standalone`); otherwise an Install button where the browser offered
 `beforeinstallprompt`, Safari's Share → Add to Home Screen on iOS (another iOS browser is sent to
 Safari), else the browser's menu. *Notifications*: a switch (iOS: only in the installed app,
@@ -3249,9 +3253,10 @@ reload doubles nothing, a permission prompt's card (Allow at least 44 px tall, a
 the buttons go) and one left to expire, a long plan folded and sent back with a note, a question
 answered (Answer disabled until a pick), the gear's sheet (what this lane is; Let Claude go
 ahead saved, the next prompt allowed at once and listed), a reload whose state is slow to come (the last thread, "connecting…"; Chromium only, as
-Playwright's WebKit routes no requests once a service worker is registered), a keyed manifest
-link, the app (its worker runs and holds the
-key; install steps; notifications offered, or on iPhone sent to the installed app), what a page
+Playwright's WebKit routes no requests once a service worker is registered), the install only
+over https (no manifest link over localhost; a keyed one on an https origin routed to the server),
+the app (its worker runs and holds the
+key; the gear sends the install to https; notifications offered, or on iPhone sent to the installed app), what a page
 showed reported to `/api/seen`, a server frozen (SIGSTOP) past the 40 s watchdog and then
 let go (the page heals with no reload; a message sent meanwhile lands once), a changed page file
 (the page reloads itself, keyed, with the thread), no script errors.

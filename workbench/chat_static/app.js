@@ -34,11 +34,17 @@
     if (m) { token = m[1]; save(K.token, token); history.replaceState(null, '', location.pathname) }
     else token = load(K.token, '')
   }
+  // The app installs only from https. http://localhost is a secure context too, so Chromium
+  // offered the install there as well, and one computer ended up with two apps of the same name,
+  // the localhost one useless away from it (the user, 2026-11-18): over http the page has no
+  // manifest, so no browser offers it
+  const https = location.protocol === 'https:'
   function keyManifest() {
     // An installed app on iPhone has its own storage, not Safari's: the manifest it's installed
     // from carries the key, so it opens keyed (the user, 2026-11-18: no key to paste in the app)
     const link = document.querySelector('link[rel=manifest]')
-    if (link) link.href = '/manifest.webmanifest' + (token ? '?k=' + encodeURIComponent(token) : '')
+    if (link && !https) link.remove()
+    else if (link) link.href = '/manifest.webmanifest' + (token ? '?k=' + encodeURIComponent(token) : '')
   }
   keyManifest()
 
@@ -704,6 +710,8 @@
     $('app-h').textContent = standalone() ? 'The app' : 'Install the app'
     if (standalone()) return para(box, "Installed ✓ — you're using the chat as an app.")
     if (!window.isSecureContext) return para(box, HTTPS, 'small')
+    if (!https) return para(box, 'The app installs from the https address, so the one app works on every device: ' +
+      'on the computer, `tailscale serve --bg 1337` gives the chat one on your tailnet.', 'small')
     if (installEvt) {
       const b = document.createElement('button'); b.type = 'button'; b.className = 'plain'; b.textContent = 'Install this app'
       b.onclick = async () => { installEvt.prompt(); try { await installEvt.userChoice } catch {} installEvt = null; drawSettings() }

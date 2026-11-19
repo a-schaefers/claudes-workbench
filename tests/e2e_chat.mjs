@@ -115,8 +115,20 @@ async function run(engine, device) {
     await until(async () => (await page.locator('.row').count()) === 4)
     const texts = await page.locator('.row .bubble').allTextContents()
     if (new Set(texts).size !== texts.length) throw new Error('duplicates: ' + texts.join(' | '))
-    const href = await page.getAttribute('link[rel=manifest]', 'href')
-    if (!href.endsWith('?k=' + token)) throw new Error('the manifest is not keyed: ' + href)
+  })
+  await check('the app installs only over https: no manifest over localhost, a keyed one over https', async () => {
+    // a localhost install beside the tailnet's left two apps of one name (2026-11-18)
+    if (await page.locator('link[rel=manifest]').count()) throw new Error('a manifest over http://localhost')
+    const sec = await browser.newContext(device ? pw.devices[device] : {})
+    await sec.route('https://chat.test/**', async r => {  // an https origin, served by the real server
+      const url = r.request().url().replace('https://chat.test/', base)
+      if (url.includes('/api/')) return r.abort()
+      await r.fulfill({ response: await r.fetch({ url }) })
+    })
+    const p = await sec.newPage()
+    await p.goto('https://chat.test/#token=' + token)
+    await until(async () => ((await p.getAttribute('link[rel=manifest]', 'href')) || '').endsWith('?k=' + token))
+    await sec.unrouteAll({ behavior: 'ignoreErrors' }); await sec.close()
   })
   // Playwright's WebKit doesn't route a page's requests once a service worker is registered
   if (engine === 'chromium') await check('a reload whose state is slow to come shows the last thread, connecting', async () => {
@@ -185,7 +197,7 @@ async function run(engine, device) {
   await check('the app: its worker runs, holds the key, and the gear says how to install it and get notifications', async () => {
     await until(() => page.evaluate(async () => !!(await navigator.serviceWorker.getRegistration())))
     await until(() => page.evaluate(async () => (await (await caches.open('wb-chat')).match('/key')) !== undefined))
-    if (!(await page.textContent('#app')).includes('Add to Home Screen')) throw new Error('no install steps')
+    if (!(await page.textContent('#app')).includes('installs from the https address')) throw new Error('install offered over http')
     const notify = await page.textContent('#notify')
     if (engine === 'webkit' ? !notify.includes('installed app') : !(await page.locator('#push').count())) throw new Error('notifications: ' + notify)
     await page.keyboard.press('Escape')
