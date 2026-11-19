@@ -2368,6 +2368,28 @@ without one (`codingRefusal`, in the one unmatched `tool.call` hook; the deny na
 outside `decide` adds a `claude-coding` context block with the rule (`CODING_RULES`) while
 delegating or with a task open. A shell edit isn't seen: the block says the rule covers it too.
 
+## Verifying a fix against the base
+
+`wb verify <task> [--test CMD] [--files PATH…] [--timeout N]` (`workbench/verify.py`, #96) runs
+one regression test twice, at review, each run in its own scratch checkout under the state
+directory and in the task's own lane and environment (`runner.run_in_lane` on a `verify._At`):
+- **The base**: a `--shared` clone checked out at the task's base, with the candidate's test files
+  copied in (`--files`, else the changed files whose path looks like a test, `TEST_PATH`). That
+  copy is what makes a test separable from the change; with no test file it refuses.
+- **The candidate**: the same clone at the worktree's HEAD, then `read-tree -u` of a snapshot of
+  the worktree (`gitops.snapshot`), new files included.
+
+Neither run touches the user's checkout or the worktree under review. The verdict (`verdict`):
+`proven` (the base fails on an assertion and the candidate passes), `base-passes` (the test
+doesn't show the bug), `candidate-fails`, or `inconclusive`: a run timed out or overran its
+output, or the base failed without an assertion. A missing module or a command not found says
+nothing about the bug, so it can never count as proof. `assertion` picks the line that says what
+a failed assertion found (`AssertionError`, pytest's `E assert`, `Expected`, jest's `expect(`),
+else a failed test's header. Each run is kept in `tasks/<task>/verify/<n>/`: `base.txt`,
+`candidate.txt` and `result.json` `{cmd, files, tree, ts, base: {exit, assertion}, candidate:
+{exit, assertion}, verdict, dir}`. `verify.last` reads the newest, with `stale` once the worktree
+has changed since.
+
 ## The web chat
 
 `wb chat serve` (`workbench/chat.py`; kept up by `systemd/wb-chat.service`, a user unit running
@@ -2986,6 +3008,7 @@ delivered as taken (`_stale_notes`, *Notes*).
 | `wb note <task> --text "…"` | | A `captain` event: Claude's log line in the transcript. |
 | `wb coding [only\|ask\|decide]` | `allow <task> --edit "…" --said "…" [--when "…"]`, `used <task> --did "…"` | When Claude may write a delegated task's code (*Claude coding*): with no argument, the choice and its sentence, then each open task's unspent allowance; a mode saves it. `allow` records the user's yes for one task's edit, until the task goes back to the agent; with `--when`, a one-task exception granted ahead, spent only once Claude has started on it. `used` records what Claude changed under it and says to hand the testing back; exit 1 with none. |
 | `wb takeover [<task> \| --all]` | `--repo DIR`, `--session ID`, `--user` | Stops the runner, phase `review`, "Claude took over"; Claude edits in the worktree and accepts, or hands back with feedback. Outside "Let Claude decide" it needs the user's recorded yes for the task, else exit 3; `--user` (the mod's hand-back command) is the user's own ask, and records one (*Claude coding*). `--all`: every task that isn't closed. `--session ID` (repeatable) and `--repo DIR`, with `--all` (the mod passes every session id its process has had and its directory): only that session's tasks (`_scope`): one with a task.json `session` when it is one of the IDs, wherever it ran, or when its `claude_pid` is gone and DIR claims it as below; else (no `session`, or no `--session` given) when its `repo` is DIR, inside it or holds it, or its `cwd` is DIR or inside it, by whole components, never when DIR is the home directory or `/`; one with no key at all: every session's. The rest are listed as `left alone (other sessions'): …`. |
+| `wb verify <task>` | `--test CMD` (the task's `--test`), `--files PATH…`, `--timeout N` (300) | At review: a regression test on the base (with the candidate's test files) and on the candidate, each in a scratch checkout under the task's lane; the verdict, each run's exit and assertion, and where both outputs are (*Verifying a fix against the base*). Refuses while the agent runs. |
 | `wb stop [<task> \| --all]` | `--repo DIR`, `--session ID` | A live task only. Marks status `stopping`, SIGTERM the runner (15 s, `wait_exit`, then SIGKILL to its session and the agent's), sweeps what the agent left (`runner.sweep`), phase `stuck`, "stopped by the reviewer", and acknowledges the task; the worktree is kept. `--all` (`stop_everything`): every open task, a `stopped` event "bail out: stopped by the user"; without `--repo`/`--session`, the bench's driver first (`bench.stop_driver`), so it starts no replay. `--session ID`, `--repo DIR` (with `--all`): as for takeover, the rest listed as `left running (other sessions'): …`. |
 | `wb resume <task>` | | Reaps a dead runner first. Phase stuck/failed (a task whose runner died is failed), no live runner: a fresh session (round n+1, `runner.RESUME` + what the step's rounds asked), not a review round; Claude's notes the last runner never delivered follow, as a `NOTE_HEAD` note. A note names the GPU's holders when it will wait for them. Acks the task and gathers lessons. |
 | `wb accept <task> -m "…"` | `--merge`, `--force` (any open phase; stops a live runner), `--spec-gap`, `--take-claude-md` (the agent's `<name>.proposed` CLAUDE.md/AGENTS.md over the file; without it they are dropped: *Claude's files*) | Reaps a dead runner first. Phase review; refuses a closed task, unless an earlier accept or discard closed it without writing its results row (status `unrecorded`): then it writes that row, once, from what the earlier run measured, and says so (`_finish_record`, #88). A live task with nothing changed on its first step is refused before its runner is stopped ("no changes to accept yet"); a live task whose commit then fails is left `stuck` ("accept failed: …", for wb accept again, resume, feedback or discard), not live with no runner. Records the step, commits (a worktree with no new changes accepts the branch's commits past the base: earlier steps, or Claude's own after a takeover; a retry after an accept died past its commit takes that commit) (`<m>` + "Delegated to <label> via OpenCode: R round(s), F automatic test-fix, V review round(s)." + `Workbench-Task:` + `OpenCode-Session:`; no AI co-author line), removes the worktree (a failure is a warning: `remove_worktree`) and the agent's runtime directory (`drop_runtime_dir`), `--merge`s (`merge --no-ff --no-edit` into `base_branch`, which the main checkout must have out, else a branch holding the base; never a detached HEAD; no changes to tracked files; a conflict is backed out; a failure is reported and the accept stands), writes the results row, prints how far CLAUDE.md (or `.claude/CLAUDE.md`) is behind (a failure there never fails the accept) and what the task cost Claude (`claude:`, when known). Gathers lessons. |
@@ -3079,6 +3102,7 @@ $WB_HOME (~/.local/state/workbench)
     task.json  status.json
     events.jsonl  steer.jsonl  acked  context.md  runner.log
     coding.json                  what the user allowed Claude to edit: {allowed: [{edit, said, ts, used, when?, started?, did?}]} (*Claude coding*)
+    verify/<n>/                  wb verify's runs: base.txt  candidate.txt  result.json
     base-tests.txt               the base check's output: the acceptance command on the base (`--test`)
     rounds/<n>/                  prompt.md  instructions.md (before a handover rewrote it)  summary.md  tests.txt
     ask/<id>.json  <id>.answer   questions and permission requests; their answers (all the lane writes here, with worktree/)

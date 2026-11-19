@@ -4477,6 +4477,68 @@ class Coding(Base):
         self.assertEqual(self.refused("coding", "allow", "t", "--edit", "x")[0], 1)  # needs their words
 
 
+class Verify(Base):
+    """wb verify: a regression test on the base and on the candidate (#96)."""
+    def setUp(self):
+        super().setUp()
+        (self.repo / "calc.py").write_text("def kw(watts):\n    return watts\n")    # the bug
+        subprocess.run(["git", "-C", str(self.repo), "add", "-A"], check=True)
+        subprocess.run(["git", "-C", str(self.repo), "commit", "-qm", "calc"], check=True)
+        self.start("t", "ok")
+        wait_phase("t", {"review"})
+        self.wt = store.Task("t").worktree
+        (self.wt / "calc.py").write_text("def kw(watts):\n    return watts / 1000\n")   # the fix
+        (self.wt / "tests").mkdir()
+        (self.wt / "tests" / "__init__.py").write_text("")
+        (self.wt / "tests" / "test_calc.py").write_text(
+            "import unittest\nfrom calc import kw\n\n\nclass T(unittest.TestCase):\n"
+            "    def test_kw(self):\n        self.assertEqual(kw(250000), 250)\n")
+
+    def test_a_proven_fix_fails_on_the_base_and_passes_on_the_candidate_touching_neither(self):
+        before = (gitops.mark(self.wt), gitops.changed(self.repo))
+        out = run_wb("verify", "t", "--test", "python3 -m unittest tests.test_calc")
+        self.assertIn("(tests/__init__.py, tests/test_calc.py): proven: it fails on the base", out)
+        self.assertIn("base: exit 1: AssertionError: 250000 != 250", out)
+        self.assertIn("candidate: exit 0", out)
+        self.assertEqual((gitops.mark(self.wt), gitops.changed(self.repo)), before)  # neither touched
+        from workbench import verify
+        r = verify.last(store.Task("t"))
+        self.assertEqual((r["verdict"], r["stale"]), ("proven", False))
+        self.assertIn("AssertionError", Path(r["dir"], "base.txt").read_text())   # both outputs kept
+        (self.wt / "calc.py").write_text("def kw(watts):\n    return watts // 1000\n")
+        self.assertTrue(verify.last(store.Task("t"))["stale"])     # the candidate moved on since
+
+    def test_a_test_that_passes_on_the_base_or_fails_to_set_up_proves_nothing(self):
+        (self.wt / "tests" / "test_calc.py").write_text(
+            "import unittest\nfrom calc import kw\n\n\nclass T(unittest.TestCase):\n"
+            "    def test_kw(self):\n        self.assertEqual(kw(0), 0)\n")
+        self.assertIn("not proven: it already passes on the base",
+                      run_wb("verify", "t", "--test", "python3 -m unittest tests.test_calc"))
+        (self.wt / "units.py").write_text("K = 1000\n")                # new on the candidate only
+        (self.wt / "tests" / "test_calc.py").write_text(
+            "import unittest\nfrom units import K\n\n\nclass T(unittest.TestCase):\n"
+            "    def test_k(self):\n        self.assertEqual(K, 1000)\n")
+        out = run_wb("verify", "t", "--test", "python3 -m unittest tests.test_calc")
+        self.assertIn("inconclusive: the base run didn't fail on an assertion", out)  # a missing module
+        out = run_wb("verify", "t", "--test", "sleep 5", "--timeout", "1", "--files", "tests/test_calc.py")
+        self.assertIn("inconclusive", out)
+        self.assertIn("base: exit timeout", out)
+        (self.wt / "calc.py").write_text("def kw(watts):\n    return watts\n")
+        (self.wt / "tests" / "test_calc.py").write_text(
+            "import unittest\nfrom calc import kw\n\n\nclass T(unittest.TestCase):\n"
+            "    def test_kw(self):\n        self.assertEqual(kw(250000), 250)\n")
+        self.assertIn("the candidate fails it",
+                      run_wb("verify", "t", "--test", "python3 -m unittest tests.test_calc"))
+
+    def test_without_a_test_file_among_the_changes_it_says_to_name_one(self):
+        for p in ("tests/test_calc.py", "tests/__init__.py"):
+            (self.wt / p).unlink()
+        err = io.StringIO()
+        with self.assertRaises(SystemExit), redirect_stderr(err):
+            run_wb("verify", "t", "--test", "true")
+        self.assertIn("no test file among the candidate's changes", err.getvalue())
+
+
 class Setup(Base):
     """wb setup: the marketplace install copies only mod/, so wb and /workbench are linked from the
     clone (2026-11-16); wb doctor says what an install still lacks."""
