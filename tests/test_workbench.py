@@ -4530,6 +4530,31 @@ class Verify(Base):
         self.assertIn("the candidate fails it",
                       run_wb("verify", "t", "--test", "python3 -m unittest tests.test_calc"))
 
+    def test_the_review_shows_the_comparison_and_accept_flags_one_that_proves_nothing(self):
+        # #97: the base's failure and the candidate's pass, in the review, before acceptance
+        self.assertNotIn("regression check", run_wb("report", "t"))   # none run: ordinary review
+        run_wb("verify", "t", "--test", "python3 -m unittest tests.test_calc")
+        rep = run_wb("report", "t")
+        self.assertIn("proven: it fails on the base and passes on the candidate", rep)
+        self.assertIn("base: exit 1: AssertionError: 250000 != 250", rep)
+        self.assertIn("/verify/1/{base,candidate}.txt", rep)               # each run's output
+        (self.wt / "calc.py").write_text("def kw(watts):\n    return watts / 1000.0\n")
+        self.assertIn("stale: the worktree has changed since", run_wb("report", "t"))
+        out = run_wb("accept", "t", "-m", "kW from W")
+        self.assertIn("ran before the worktree last changed: it proves nothing", out)
+
+    def test_accept_says_when_the_test_already_passed_on_the_base(self):
+        (self.wt / "tests" / "test_calc.py").write_text(
+            "import unittest\nfrom calc import kw\n\n\nclass T(unittest.TestCase):\n"
+            "    def test_kw(self):\n        self.assertEqual(kw(0), 0)\n")
+        run_wb("verify", "t", "--test", "python3 -m unittest tests.test_calc")
+        out = run_wb("accept", "t", "-m", "kW from W")
+        self.assertIn("is not proven: it already passes on the base", out)
+
+    def test_a_proven_check_adds_nothing_at_accept(self):
+        run_wb("verify", "t", "--test", "python3 -m unittest tests.test_calc")
+        self.assertNotIn("regression check", run_wb("accept", "t", "-m", "kW from W"))
+
     def test_without_a_test_file_among_the_changes_it_says_to_name_one(self):
         for p in ("tests/test_calc.py", "tests/__init__.py"):
             (self.wt / p).unlink()

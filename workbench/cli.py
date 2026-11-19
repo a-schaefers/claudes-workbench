@@ -965,6 +965,9 @@ def cmd_report(a):
     text = p.read_text() if p.exists() else (f"round {n} has no report yet "
                                              f"({task.status.get('phase')}: {task.status.get('last')})")
     print(transcript.plain(text) if sys.stdout.isatty() else text)  # it quotes the agent's words
+    if (r := verify.last(task)) and not a.round:  # the live comparison, at review (#97)
+        print("\n" + "\n".join(verify.lines(r)) + (
+            "\n  (stale: the worktree has changed since; run wb verify again)" if r["stale"] else ""))
 
 
 def cmd_diff(a):
@@ -1338,6 +1341,7 @@ def cmd_accept(a):
             and not gitops.changed(task.worktree)):
         die(f"{a.name} has no changes to accept yet: wait for it, or wb stop {a.name} first")
     _stop_runner(task)  # under --force it may still be running, and would set its phase back
+    checked = verify.note(task)  # before the commit: what Claude accepts it on (#97)
     _settle_proposals(task, a.take_claude_md)
     repo = Path(spec["repo"])
     rounds, autofix = st.get("round", 1), st.get("auto_fixes_total", 0) + st.get("auto_fixes", 0)
@@ -1390,6 +1394,7 @@ def cmd_accept(a):
           (f", merged into {gitops.current_branch(repo)} as {merged}" if merged else
            f"\nmerge with: git -C {shlex.quote(str(repo))} merge --no-ff {spec['branch']}"))
     _say(savings.line(row) or spend.line(row.get("claude")))
+    _say(checked)
     _say(lessons.nudge(task, "accepted"))
 
 

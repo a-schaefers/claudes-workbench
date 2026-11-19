@@ -129,6 +129,20 @@ def lines(r: dict) -> list[str]:
     return out
 
 
+def note(task: store.Task) -> str:
+    """For wb accept and the report: the newest check when it isn't proof of the change being
+    accepted (not proven, or run on an earlier state of the worktree); '' when it is, or none ran."""
+    r = last(task)
+    if not r:
+        return ""
+    if r["stale"]:
+        return (f"note: the last regression check (`{r['cmd']}`, {r['verdict']}) ran before the "
+                "worktree last changed: it proves nothing about this state")
+    if r["verdict"] != "proven":
+        return f"note: the last regression check (`{r['cmd']}`) is {SAY[r['verdict']]}"
+    return ""
+
+
 def last(task: store.Task) -> dict | None:
     """The task's newest regression check, with ``stale`` when the worktree has changed since."""
     runs = sorted((p for p in (task.dir / "verify").glob("*") if p.name.isdigit()),

@@ -2390,6 +2390,12 @@ else a failed test's header. Each run is kept in `tasks/<task>/verify/<n>/`: `ba
 {exit, assertion}, verdict, dir}`. `verify.last` reads the newest, with `stale` once the worktree
 has changed since.
 
+The comparison reaches the review (#97): `wb report <task>` (the latest round's) ends with the
+newest check's lines, marked stale when the worktree has changed since. `wb accept` prints
+`verify.note`, read before its commit, when that check proves nothing about what is accepted:
+not `proven`, or stale. A proven check adds nothing, and with none run the review is the ordinary
+one.
+
 ## The web chat
 
 `wb chat serve` (`workbench/chat.py`; kept up by `systemd/wb-chat.service`, a user unit running
