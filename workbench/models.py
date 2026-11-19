@@ -1008,10 +1008,11 @@ class GpuLease:
     knows its memory (#116). Before, tasks on one remote server all ran at once, and its Ollama
     swapped their models in and out on every request."""
 
-    def __init__(self, m: Model | None, task: str, say=print, wait: bool = True):
+    def __init__(self, m: Model | None, task: str, say=print, wait: bool = True,
+                 on: Model | None = None):
         self.m, self.task, self.say, self.wait = m, task, say, wait
         self.home = store.home()
-        self.pool = pool(m)
+        self.pool = pool(m or on)  # ``on``: whose server a lease with no model takes (wb optimize)
         self.fh = None
         self.me = str(os.getpid())
         # its place in the queue: when the task started, so one sent back for another round
@@ -1264,7 +1265,17 @@ def _add_provider(cfg: dict, pid: str, name: str, base: str) -> None:
 
 
 def _has_provider(cfg: dict, pid: str) -> bool:
-    return pid in (cfg.get("provider") or {}) or pid in (cfg.get("providers") or {})
+    return _provider(cfg, pid) is not None
+
+
+def _provider(cfg: dict, pid: str) -> dict | None:
+    """Provider ``pid``'s entry in OpenCode's config, under either shape's key."""
+    return (cfg.get("provider") or {}).get(pid) or (cfg.get("providers") or {}).get(pid)
+
+
+def _provider_url(prov: dict) -> str:
+    """A provider entry's raw baseURL (options, or the 1.x shape's settings), or ""."""
+    return str((prov.get("options") or prov.get("settings") or {}).get("baseURL") or "")
 
 
 def add_ollama_provider(pid: str) -> str | None:
@@ -1314,10 +1325,19 @@ def add_remote(host: str, port: int = OLLAMA_PORT) -> tuple[str, str, list[str]]
         raise RuntimeError(f"no Ollama answers at {root}: on {host}, have Ollama listen on the "
                            "network (OLLAMA_HOST=0.0.0.0, then restart it), and check the port")
     pid = remote_pid(host)
-    set_override(pid, "local", True)  # the user's own machine: its models count as local
     cfg = read_config()
-    if not _has_provider(cfg, pid):
+    prov = _provider(cfg, pid)
+    if prov is None:
         _add_provider(cfg, pid, f"Ollama on {host}", f"{root}/v1")
+        set_override(pid, "remote", root)  # wb made it, so --remove may delete it
+    elif _provider_url(prov).rstrip("/") != f"{root}/v1":
+        # a provider of that id for another endpoint (a port of its own, or the user's): kept,
+        # and its models were reported as the new endpoint's (#197, the 2026-11-19 audit)
+        raise RuntimeError(f"OpenCode's config has a provider {pid} already, for "
+                           f"{_provider_url(prov) or 'no baseURL'}, not {root}/v1: wb remote leaves it "
+                           f"alone. Rename or remove it, or add that server's models with wb model "
+                           f"add <provider>/<model> --url {root}/v1")
+    set_override(pid, "local", True)  # the user's own machine: its models count as local
     names = []
     for row in (_get(f"{root}/api/tags") or {}).get("models", []):
         name = row.get("name")
@@ -1341,6 +1361,14 @@ def remove_remote(host: str) -> tuple[str, list[str]]:
     prov = (cfg.get(key) or {}).get(pid)
     if prov is None:
         raise RuntimeError(f"no provider {pid} in {opencode_config_path()}: nothing to remove")
+    # only the provider wb remote made: models.json's `remote` mark, or (made before the mark)
+    # its name and host as add_remote writes them. A hand-written provider of that id was deleted
+    # with its models and their settings (#197, the 2026-11-19 audit)
+    if not ((_overrides().get(pid) or {}).get("remote") or (
+            prov.get("name") == f"Ollama on {host}"
+            and (urlparse(_provider_url(prov)).hostname or "") == host.lower())):
+        raise RuntimeError(f"{pid} in {opencode_config_path()} isn't one wb remote added (it "
+                           f"points at {_provider_url(prov) or 'no baseURL'}): remove it by hand")
     if str(cfg.get("model") or "").startswith(pid + "/"):
         raise RuntimeError(f"{cfg['model']} is OpenCode's default model; wb models --set-default "
                            "picks another first")

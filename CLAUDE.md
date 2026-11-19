@@ -200,7 +200,7 @@ tasks/<task>/  task.json status.json events.jsonl steer.jsonl acked context.md b
 ```
 The skill library is `~/.local/share/workbench/skills` (`$WB_SKILLS`). `~/.config/workbench/`
 holds `models.json` (what OpenCode can't say: `start`/`stop`, `skip`, `sizes`, `vram_gb`,
-`weights_gb`, `label`, `engine`, `local`), `commands.json` (standing `allow` patterns, lane
+`weights_gb`, `label`, `engine`, `local`, `remote`), `commands.json` (standing `allow` patterns, lane
 `paths`, and `env` names passed to the agent), `images.json`, `chat.json`, `chat-token`,
 `savings.json` (`kwh_price`).
 

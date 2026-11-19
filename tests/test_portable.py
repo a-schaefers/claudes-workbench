@@ -703,6 +703,32 @@ class Remote(unittest.TestCase):
         self.assertEqual(json.loads(Path(os.environ["WB_MODELS"]).read_text()),
                          {"keep/me": {"sizes": ["trivial"]}})            # only its own entries go
 
+    def test_wb_remote_never_takes_over_or_deletes_a_provider_it_didnt_add(self):
+        # #197 (the 2026-11-19 audit): the provider id comes from the host alone, so a provider of
+        # that id the user wrote (or one for another port) was reported as the new endpoint's,
+        # and --remove deleted it with its models and their settings
+        srv, port = fake_remote_ollama([{"name": "coder:7b"}],
+                                       {"coder:7b": {"capabilities": ["tools"], "model_info": {}}})
+        self.servers.append(srv)
+        pid = models.remote_pid("127.0.0.1")
+        mine = {pid: {"name": "Mine", "options": {"baseURL": "http://127.0.0.1:9/v1"},
+                      "models": {"x": {"limit": {"context": 8192}}}}}
+        self.config(mine, {f"{pid}/x": {"sizes": ["trivial"]}})
+        before = (Path(os.environ["WB_OPENCODE_CONFIG"]).read_text(),
+                  Path(os.environ["WB_MODELS"]).read_text())
+        code, out = self.wb("remote", "127.0.0.1", "--port", str(port), "--context", "32768")
+        self.assertEqual(code, 1)
+        self.assertIn("leaves it alone", out)
+        code, out = self.wb("remote", "127.0.0.1", "--remove")
+        self.assertEqual(code, 1)
+        self.assertIn("isn't one wb remote added", out)
+        self.assertEqual((Path(os.environ["WB_OPENCODE_CONFIG"]).read_text(),
+                          Path(os.environ["WB_MODELS"]).read_text()), before)   # both untouched
+        # one wb remote added before it marked its own (1.0): its name and host say so
+        self.config({pid: {"name": "Ollama on 127.0.0.1", "options": {"baseURL": f"http://127.0.0.1:{port}/v1"},
+                           "models": {"coder:7b": {}}}}, {pid: {"local": True}})
+        self.assertEqual(self.wb("remote", "127.0.0.1", "--remove")[0], 0)
+
     def test_wb_remote_says_how_to_open_an_ollama_that_doesnt_answer_and_why_a_model_was_left_out(self):
         code, out = self.wb("remote", "127.0.0.1", "--port", str(free_port()))
         self.assertEqual(code, 1)
@@ -784,6 +810,44 @@ class Optimize(unittest.TestCase):
             self.servers.remove(srv)
             self.assertEqual(optimize.changed(fp), "")                      # asleep: not due again
             self.assertEqual(optimize.remembered(fp), fp)                   # and still known
+
+    def test_a_remote_model_a_task_is_using_is_never_unloaded_to_measure_it(self):
+        # #198 (the 2026-11-19 audit): the run held this machine's lease only, and busy() leaves
+        # out the model being measured, so it unloaded the model a task on that server was using
+        from workbench import optimize
+        posts = self.ollama(32768, extra={"ollama": {"local": True}})
+        with mock.patch.object(models, "_this_host", lambda h: False), \
+                mock.patch.object(optimize.hardware, "gpus", lambda windows=True: [{"name": "Card", "vram": 1}]), \
+                mock.patch.object(sys, "argv", ["optimize", "--all"]):
+            m, = optimize.candidates()
+            task = subprocess.Popen(["sleep", "60"])                          # the task's runner
+            self.addCleanup(task.kill)
+            store.write_json(store.home() / f"{models.pool(m)}.json",
+                             {str(task.pid): {"task": "t", "model": m.id, "start": models._started(task.pid)}})
+            out = io.StringIO()
+            with redirect_stdout(out):
+                optimize.main()
+            self.assertIn(f"{m.id}: not measured, a task is using {m.root}", out.getvalue())
+            self.assertEqual([p for p in posts if p[0] == "/api/generate"], [])   # nothing unloaded
+            self.assertIn(str(task.pid), models.holders(pool=models.pool(m)))      # its turn kept
+            task.kill()
+            task.wait()
+            with redirect_stdout(io.StringIO()):
+                optimize.main()                                                # free: measured
+            self.assertTrue([p for p in posts if p[0] == "/api/generate"])
+            self.assertIn(m.id, optimize.state()["models"])
+            self.assertEqual(models.holders(pool=models.pool(m)), {})          # and let go
+
+    def test_the_first_run_on_a_fresh_profile_starts(self):
+        # #198 (the 2026-11-19 audit): optimize.log was opened before the state directory existed,
+        # and wb setup swallowed the error, so the first measurement never ran
+        from workbench import optimize
+        self.ollama(32768)
+        os.environ["WB_HOME"] = str(Path(os.environ["WB_HOME"]) / "fresh")
+        with mock.patch.object(optimize.subprocess, "Popen") as popen:
+            popen.return_value.pid = os.getpid()
+            self.assertIn("wb optimize: measuring 1 model(s)", optimize.start()[0])
+        self.assertTrue((store.home() / "optimize.log").exists())
 
     def test_a_window_that_spills_is_measured_down_to_the_largest_that_fits_whole(self):
         # a 64K window put a tenth of a 27B model in RAM and halved its writing speed (2026-11-18)

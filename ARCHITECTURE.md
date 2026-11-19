@@ -1601,12 +1601,17 @@ OpenCode talks to it directly at the baseURL (plain `http://` is unencrypted and
 the code: *A model on another machine* above suggests a firewall and Tailscale); nothing of workbench runs there, and no
 model is split across machines. `wb remote HOST` sets one up for an Ollama there (#114,
 `models.add_remote`): it checks `/api/version`, writes provider `ollama-<host>` (`remote_pid`:
-the host in id characters; baseURL `http://HOST:PORT/v1`) and its `local: true`, then registers
+the host in id characters; baseURL `http://HOST:PORT/v1`), its `local: true` and `remote: <root>`
+(the mark that wb made it), then registers
 each model `/api/tags` lists that `/api/show` gives `tools`, cloud rows left out, through `wb
 model add`'s own path (a model it refuses gets a `--` line with why, and the rest go on). Ollama
 there says nothing of the window it serves until a model is loaded (this machine's
-`OLLAMA_CONTEXT_LENGTH` isn't that host's), so `--context N` gives it. `--remove`
-(`remove_remote`) drops the provider and every models.json entry under it. The baseURL's `{env:NAME}` and `{file:path}` are resolved first, as OpenCode does (`_expand`: unset or
+`OLLAMA_CONTEXT_LENGTH` isn't that host's), so `--context N` gives it. A provider of that id
+already in the config for another baseURL (the user's own, or one for another port) is refused,
+never reused: its models were reported as the new endpoint's (#197, the 2026-11-19 audit).
+`--remove` (`remove_remote`) drops the provider and every models.json entry under it, only when
+wb made it (the `remote` mark, or, made before the mark, its name `Ollama on <host>` and its
+baseURL's host): it once deleted a hand-written provider of that id with its models. The baseURL's `{env:NAME}` and `{file:path}` are resolved first, as OpenCode does (`_expand`: unset or
 unreadable is empty, a relative path is the config directory's, and a name the agent's
 environment drops, `runner.SECRET_ENV` unless commands.json `env` passes it, is empty too, since
 the agent's OpenCode won't see it). A provider with a baseURL that is skipped (disabled, not
@@ -1655,6 +1660,8 @@ model id; a model's entry is merged over its provider's (`{**provider, **model}`
 - `engine` (`ollama`/`server`): per provider only;
 - `local: true`: on a provider, counts it although it is on another host; on an Ollama cloud
   model's own id, allows that model.
+- `remote: <root>`: on a provider, `wb remote` made it (for the Ollama at that root), so `wb
+  remote --remove` may delete it (#197).
 
 **Status** (`status` → {available, resident, why}). First what the config alone rules out, so the
 fake models meet it too: an entry with `tool_call: false` ("OpenCode's config says it can't call
@@ -2031,9 +2038,12 @@ first" and wakes no one). `wb optimize start --if-due` is that check: quiet when
 a task holds the GPU (the next session tries again). Due for a new model only, it measures only
 the models it hasn't (`--all`, which a `start` without `--if-due` passes, measures every one).
 A remote Ollama's models (`wb remote`) are measured too (#115), by the same `/api/ps` placement on
-their own card, while this machine's lease is held: one whose server has another model loaded is
-skipped with a line (`busy`: that card is in use, and its models aren't this machine's to unload),
-and due again next time. The fingerprint adds each remote server that answers, with the names and
+their own card, while this machine's lease is held and that server's too (`GpuLease(None, HOLDER,
+wait=False, on=m)`, pool `gpu-<host>`): one whose server a task holds is skipped with a line ("a
+task is using …"), since `probe` unloads the model it measures and the task may be using that very
+model (#198, the 2026-11-19 audit); one whose server has another model loaded is skipped too
+(`busy`: that card is in use, and its models aren't this machine's to unload). Either is due
+again next time. A task that wants the server meanwhile stops the run, as on this machine. The fingerprint adds each remote server that answers, with the names and
 sizes `/api/tags` gives (a re-pull can be another quantization); `changed` compares only the
 servers both fingerprints know, so a gaming PC asleep, or new since, makes nothing due, and
 `remembered` keeps what was known of one that didn't answer.
@@ -2060,7 +2070,8 @@ largest whole one, or a whole window with room for more.
 `wb optimize estimate` says how long (`estimate`: loads × the last run's measured seconds a load
 (`secs_per_load`), else the model's median measured `status.load_secs`, else `LOAD_GUESS` 20 s; with `--bench`, the bench's cases × models × each
 case's original minutes). `wb optimize start [--bench]` detaches the run (`python -m
-workbench.optimize`, its output in `optimize.log`, its pid in `optimize.json`) so it outlives
+workbench.optimize`, its output in `optimize.log`, its pid in `optimize.json`; it makes the state
+directory first, which a fresh profile's `wb setup` hadn't, #198) so it outlives
 Claude's session; it refuses while a task holds the GPU. The run holds the GPU alone (a
 `GpuLease` with no model, named `HOLDER` "wb optimize") after `free_gpu`. Real work stops it:
 `cli._preempt_bench` sends it SIGTERM when a task would wait behind it and waits for it to exit
@@ -3300,7 +3311,7 @@ delivered as taken (`_stale_notes`, *Notes*).
 | `wb models` | `--set-default` | Each model's state, slice and speeds (and `bench:`, its cases passed, when replayed); the router's ranking per size. `--set-default` writes the significant-work pick as OpenCode's `model`. |
 | `wb model add <provider/model>` | `--pull`, `--label`, `--context N`, `--url URL`, `--start CMD`, `--stop CMD` | Registers a model in opencode.json, merged into any existing entry; `--url` first writes an OpenAI-compatible provider for any server on this machine (`models.add_server_provider`: a provider already there is never touched; a URL off this machine needs models.json `local: true`), and `--start`/`--stop` write the model's models.json `start`/`stop`; on a first run with no `--url` it writes the `ollama` provider when Ollama answers; refuses a cloud model, an unknown served context (a server other than Ollama needs `--context`), a down Ollama, a down server of unknown engine (see *Managing the set*). |
 | `wb optimize [start\|estimate\|report\|stop\|apply] [<id>…]` | `--bench`, `--if-due` | Asked for, or when due at setup and session start (*Optimize*). `start --if-due`: only when due, else nothing printed. `estimate`: how long a run would hold the GPU. `start`: detached; measures each Ollama model's largest window all on the GPU (refused while a task holds it; a task that wants it stops it); `--bench` then starts `wb bench run` on every model. `report` (the default): a line per model. `stop`. `apply <id>…`: adds the measured window as an entry of its own beside the model (an Ollama `<name>-<N>k` with that `num_ctx`, the entry's settings copied). |
-| `wb remote <host>` | `--port N` (11434), `--context N`, `--remove` | Another machine's Ollama as this one's models: provider `ollama-<host>` marked `local: true`, each tool-capable model it has pulled registered as `wb model add` would, one line each (see *Models*); exit 1 when it doesn't answer (with `OLLAMA_HOST=0.0.0.0` to try). `--remove` undoes it; not while OpenCode's default model is one of them. |
+| `wb remote <host>` | `--port N` (11434), `--context N`, `--remove` | Another machine's Ollama as this one's models: provider `ollama-<host>` marked `local: true`, each tool-capable model it has pulled registered as `wb model add` would, one line each (see *Models*); exit 1 when it doesn't answer (with `OLLAMA_HOST=0.0.0.0` to try). Refuses a provider of that id already there for another baseURL. `--remove` undoes it; not while OpenCode's default model is one of them, nor for a provider wb didn't add. |
 | `wb model retire <id>` | `--delete` | Unregisters it (not OpenCode's default) and drops its models.json overrides; `--delete` removes Ollama's weights (or says `ollama rm <name>` when it can't). |
 | `wb model sizes <id> [trivial] [significant]` | | Limits the sizes it's routed (none: every size). |
 | `wb scout` | `--done [--notes "…"]`, `--due`, `--watch "…"`, `--unwatch N` | The weekly check's facts (with the GPU budget and the devices it counts, `cli.gpu_line`; the model servers here, `cli.server_lines`: the server commands on PATH and each usual port whose `/v1/models` answers, flagged when OpenCode has no provider for it); `--done` records it; `--due` exits 0 when one is due (7 days); the watch list; each model's bench cases passed, when replayed. |
