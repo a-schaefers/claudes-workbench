@@ -208,11 +208,11 @@
       } else meta.append(span('', online ? 'Sending…' : 'Waiting for the connection…'))
       return meta
     }
-    meta.append(span('', clock(m.ts)))
-    if (m.received) meta.append(span('tick', '✓✓'), span('', m.received.how === 'queued'
-      ? 'Claude has it, reading after its current step · ' + clock(m.received.ts)
-      : 'read by Claude ' + clock(m.received.ts)))
-    else meta.append(span('tick', '✓'), span('', state.listener ? 'delivered' : 'waiting for a Claude session'))
+    // one short line, one time: the receipt's once Claude has it (#103)
+    if (m.received) meta.append(span('tick', '✓✓'), span('', (m.received.how === 'queued'
+      ? 'Queued for Claude · ' : 'Read by Claude · ') + clock(m.received.ts)))
+    else meta.append(span('tick', '✓'), span('', (state.listener ? 'Delivered · ' : 'Waiting for a Claude session · ')
+      + clock(m.ts)))
     return meta
   }
 
@@ -262,8 +262,12 @@
     const card = document.createElement('div'); card.className = 'card'
     const head = document.createElement('div'); head.className = 'asks'
     const open = !a.answer, d = a.detail || {}
+    // the decision first, when Claude said what the call is for; the exact command under it (#103)
+    const purpose = typeof d.purpose === 'string' ? d.purpose.trim().replace(/\.$/, '') : ''
     head.textContent = a.kind === 'plan' ? (open ? "Claude's plan is ready" : "Claude's plan")
       : a.kind === 'question' ? (open ? 'Claude asks' : 'Claude asked')
+      : purpose ? (open ? 'Allow Claude to ' : 'Claude asked to ') + purpose.charAt(0).toLowerCase() + purpose.slice(1)
+        + (open ? '?' : '') + ' (' + a.tool + ')'
       : (open ? 'Claude wants to use ' : 'Claude asked to use ') + a.tool
     card.append(head)
     if (a.kind === 'plan') {
