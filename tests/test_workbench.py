@@ -319,6 +319,26 @@ class Lifecycle(Base):
             self.assertNotIn("CLAUDE.md.proposed", files)
             self.assertEqual("CLAUDE.md" in files, kept)
 
+    def test_the_review_notice_shows_every_file_accept_would_commit(self):
+        # #79 (the 2026-11-18 audit): every *.proposed was left out of the notice, so an ordinary
+        # schema.proposed, the only change, read as "no changes" and was committed all the same
+        self.start("t-prop", "ok", "--test", TEST_CMD)
+        wait_phase("t-prop", {"review"})
+        t = store.Task("t-prop")
+        (t.worktree / "answer.txt").unlink()
+        (t.worktree / "schema.proposed").write_text("draft\n")
+        (t.worktree / "CLAUDE.md.proposed").write_text("# rules\n")
+        shown = runner.review_diff(t)
+        code = shown.split("the agent proposes")[0]
+        self.assertIn("schema.proposed", code)
+        self.assertIn("+draft", code)
+        self.assertNotIn("CLAUDE.md.proposed", code)
+        run_wb("accept", "t-prop", "-m", "feat: schema")
+        files = subprocess.run(["git", "-C", str(self.repo), "show", "--name-only", "--format=",
+                                "delegate/t-prop"], capture_output=True, text=True).stdout.split()
+        self.assertIn("schema.proposed", files)          # what the notice showed is what landed
+        self.assertNotIn("CLAUDE.md.proposed", files)
+
     def test_auto_fix_budget_exhausted_wakes_claude_with_fail(self):
         self.start("t-nofix", "fix", "--test", TEST_CMD, "--auto-fix", "0")
         st = wait_phase("t-nofix", {"review"})

@@ -1002,8 +1002,9 @@ can't change them; a change made from the
 shell shows in the round report. When a task asks for a change to CLAUDE.md or AGENTS.md, the
 protocol has the agent write the whole new file beside it as `<name>.proposed`
 (`runner.PROPOSABLE`, `runner.proposals`: never a link). The review notice shows each as a diff
-against the file (`proposal_diff`; `review_diff` leaves the `.proposed` files out of the main
-diff), and `wb accept`/`wb next` settle them before committing (`cli._settle_proposals`):
+against the file (`proposal_diff`; `review_diff` leaves exactly those proposals out of the main
+diff, by literal path: an ordinary `schema.proposed` is code, shown and committed like any file,
+#79), and `wb accept`/`wb next` settle them before committing (`cli._settle_proposals`):
 `--take-claude-md` puts each over its file, else it is dropped, so one is never committed as it
 is. Claude making each change itself was a call over its whole context on most tasks
 (2026-11-18).
