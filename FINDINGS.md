@@ -131,7 +131,7 @@ clearly been through several audits, and most edges probed there were already ha
 
 ## P1: making the core workflow work for more users
 
-**12. A task's worktree isn't the project as the user has it.** Both; source.
+**12. ~~A task's worktree isn't the project as the user has it.~~** **Fixed (#201).** Both; source.
 - The worktree checks out only committed files (`gitops.py:107`/`120`). It has no
   `node_modules`, `.venv`, `target/`, build directories, `.env`, generated fixtures or local
   tools.
@@ -298,7 +298,7 @@ user's Open WebUI or IDE autocomplete model, and an embedding model the project'
 **Fix:** evict only when what's needed plus what's resident exceeds the budget, and add a "keep
 loaded" list.
 
-**30. A repo on WSL's `/mnt/c` gets no warning.** Claude; source. git, and `gitops.mark()` at
+**30. ~~A repo on WSL's `/mnt/c` gets no warning.~~** **Fixed (#201).** Claude; source. git, and `gitops.mark()` at
 every step, are much slower on the Windows filesystem. **Fix:** a note at `wb start`.
 
 **31. ~~The first automatic optimize on a fresh state directory crashes.~~** **Fixed (#198).** Codex; source.

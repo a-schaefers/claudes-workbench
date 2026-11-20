@@ -162,7 +162,28 @@ def commands_conf() -> dict:
         v = conf.get(key)
         if v is not None and not (isinstance(v, list) and all(isinstance(x, str) for x in v)):
             raise RuntimeError(f'{path}: "{key}" must be a list of strings, e.g. ["make *"]')
+    repos = conf.get("repos")
+    if repos is not None and not isinstance(repos, dict):
+        raise RuntimeError(f'{path}: "repos" must map a repo\'s path to its settings, e.g. '
+                           '{"~/src/app": {"setup": "npm ci"}}')
+    for repo, v in (repos or {}).items():
+        ok = isinstance(v, dict) and isinstance(v.get("setup", ""), str) and all(
+            isinstance(v.get(k, []), list) and all(isinstance(x, str) for x in v.get(k, []))
+            for k in ("copy", "siblings"))
+        if not ok:
+            raise RuntimeError(f'{path}: "repos" → {repo!r}: "setup" is a command, "copy" and '
+                               '"siblings" lists of strings')
     return conf
+
+
+def repo_conf(repo: str | Path) -> dict:
+    """commands.json's `repos` entry for this repo (matched by real path), or {}: its `setup`
+    command, the ignored paths to `copy` into a task's worktree, its `siblings` (#201)."""
+    real = os.path.realpath(repo)
+    for k, v in (commands_conf().get("repos") or {}).items():
+        if os.path.realpath(Path(k).expanduser()) == real:
+            return v
+    return {}
 
 
 def shell_rules(task: store.Task) -> list[dict]:
@@ -306,6 +327,22 @@ def repo_dirs(task: store.Task) -> set[str]:
         except (gitops.GitError, OSError):
             return {real, os.path.join(real, ".git")}
     return {real, _COMMON[real]}
+
+
+# What a task's directory holds beside its worktree: a sibling's link (`../<name>` from the
+# worktree) may not take one of these names. A new file in the task directory goes here too.
+TASK_FILES = ("acked", "ask", "base-tests.txt", "context.md", "events.jsonl", "rounds",
+              "runner.log", "setup.txt", "shots", "status.json", "steer.jsonl", "task.json",
+              "verify", "worktree")
+
+
+def siblings(task: store.Task) -> list[str]:
+    """The real paths of the directories beside the repo the task reads at `../<name>` (#201:
+    Cargo's `path = "../lib"`, Go's `replace ../lib`, npm's `file:../lib` broke in a worktree
+    under the state directory). Read-only: the agent's lane reads them, never writes them."""
+    repo = task.spec.get("repo")
+    return [os.path.realpath(Path(repo).parent / n) for n in task.spec.get("siblings") or ()
+            if repo]
 
 
 def _hidden() -> set[str]:
@@ -666,7 +703,8 @@ def readable(task: store.Task) -> list[str] | None:
     home = os.path.realpath(Path.home())
     hidden = secret_paths() | private_paths()
     keep = {os.path.realpath(p) for p in (task.spec.get("repo"), PKG_ROOT, *lane,  # PKG_ROOT:
-                                          *lane_paths(task)) if p}  # the git shim, the ask server
+                                          *lane_paths(task), *siblings(task))  # the git shim,
+            if p}                                                              # the ask server
     keep |= tool_roots(hidden)
     # the git directory too, outside the repo when it is a linked worktree: git failed there
     # ("gitfile does not point to a valid repository", the 0.90 review); writable() keeps it out
@@ -728,7 +766,8 @@ def external_rules(task: store.Task) -> list[dict]:
         return [{"action": "external_directory", "resource": "*", "effect": "allow"}]
     have = skills.available()
     # and the rounds' prompts, read-only, where a prompt too long for one argument waits
-    places = [*lane, *READABLE, task.dir / "rounds",
+    places = [*lane, *READABLE, task.dir / "rounds", *siblings(task),
+              *(task.worktree.parent / n for n in task.spec.get("siblings") or ()),
               *(have[n]["path"] for n in task.status.get("skills") or [] if n in have)]
     rules = [{"action": "external_directory", "resource": "*", "effect": "deny"}]
     rules += [{"action": "external_directory", "resource": f"{p.rstrip('/')}/*", "effect": "allow"}

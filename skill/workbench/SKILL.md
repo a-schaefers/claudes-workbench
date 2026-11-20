@@ -255,6 +255,10 @@ art-direct (`wb image --list`); read `reference/images.md` first.
 wb start <kebab-name> --spec <file|-> --repo <repo> --size significant|trivial \
    --test "<acceptance command>" [--skill <name>] [--model …] [--auto-fix 2]
 ```
+The worktree holds only committed files. When the acceptance command needs what the user
+installed (node_modules, a .venv, a build), add `--setup '<install command>'` (or `--copy <ignored
+path>`; `--sibling <name>` for a `../<name>` the project uses): `wb start` names the ignored
+directories it lacks, and a failing setup fails the task before any round.
 Once the tests pass, the agent checks its own change against your review checks in one more
 round, at local cost only, before you are woken (learned per model; `--no-self-review` skips it).
 It returns at once; a detached runner does the work. **Don't poll.** With the workbench mod loaded

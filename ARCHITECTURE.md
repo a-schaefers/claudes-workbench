@@ -264,6 +264,10 @@ CLAUDE.md, the user's decisions, the review checks) marked apart.
   slow suite pushed `wb start` past Claude's two-minute Bash limit, leaving a task queued with no
   runner (the 2026-11-16 audit). With `--test` it prints that the base check comes with the first
   report.
+- Nor does it set the worktree up: the runner runs the setup (`--setup 'npm ci'`, `--copy`,
+  `--sibling`, or commands.json `repos` for every task) before the base check (*Setting the
+  worktree up*), and `wb start` says so; with none, it names the checkout's ignored directories
+  the worktree lacks.
 - It writes `task.json`, round 1's prompt (the spec plus the working protocol, `cli.PROTOCOL`:
   git is read-only, the acceptance command (`cli.test_line`: run it, never weaken a test, and not
   the whole suite unless the spec asks: agents spent half an hour on it after theirs passed, #127),
@@ -479,8 +483,10 @@ resumable rather than live forever. Any other exception writes the traceback to 
 once more and `pid` and `stopping` are cleared.
 
 **`drive(task)`**, the loop:
-1. Phase `queued`, `pid`; resolve the model (unknown: `failed`). With `--test`, on round 1 and
-   no `base_check` in status yet (and not `no_base_check`): the base check, before the GPU.
+1. Phase `queued`, `pid`; resolve the model (unknown: `failed`). With a `setup`, `copy` or
+   `siblings` and no `prepared` in status: the worktree set up (`_prepare`; a failure: `failed`,
+   before any round). With `--test`, on round 1 and no `base_check` in status yet (and not
+   `no_base_check`): the base check, before the GPU.
 2. Hold one `GpuLease` for everything that follows: `lease.load()` (the seconds go to
    `status.load_secs`), the window (`limit.context`) into `status.window`, and `tuning.tune` picks
    the task's knob values once (`status.tuned`). A load error: `failed`, with a notice.
@@ -673,6 +679,27 @@ executable absolute path gives bash, else `/bin/sh`). It was `/bin/sh`, dash on 
 Ubuntu: `source .venv/bin/activate && pytest` passed for the agent and failed for the runner,
 each false failure an auto-fix round (#196, the 2026-11-19 audit).
 
+**Setting the worktree up** (`prepare`, `_prepare`, before the base check and the GPU; #201, the
+2026-11-19 audit). A worktree holds only committed files, under the state directory: no
+node_modules, .venv or target/, no ignored local file, and `../lib` is not the user's `../lib`. A
+check that needed them failed on the base and in every round for that, not for the step. So
+`prepare(task)` makes `task.worktree` the project as the user has it, in this order:
+- a link beside it, `../<name>` → the real `<repo's parent>/<name>`, for each of task.json
+  `siblings` (`--sibling`): Cargo's `path = "../lib"`, Go's `replace ../lib`, npm's
+  `file:../lib`. The read lane holds each one (`context.siblings`, also in `external_rules`), the
+  write lane doesn't.
+- each of `copy` (`--copy`) from the user's checkout as it is now (`_copy`: `cp -a
+  --reflink=auto`, macOS's `cp -cRp`, else a plain copy, replacing what is there).
+- `setup` (`--setup`), in the lane and the agent's shell, as the tests run (`run_in_lane`), for
+  at most `SETUP_SECS` (1800 s).
+
+Its output goes to `setup.txt` (as tests.txt). Done, status `prepared` is set and it isn't run
+again; failing, the task is `failed` before any round, with a `failed` notice holding the exit
+and the output's tail ("the setup command failed (exit N)", or "setting up the worktree failed
+(copy failed)" for a link or copy). Each scratch checkout (the base check, `wb verify`, `wb shot`:
+`verify._run`) is prepared the same way, its links beside it, before its command; failing there,
+the run's exit is `"setup failed"`.
+
 **The base check** (`_base_check`, `base_check`, before round 1 and the GPU): the acceptance
 command once on the untouched base, the same way but in a scratch checkout of the base
 (`verify.on_base`: a `--shared` clone under the state directory, in the task's lane), at most
@@ -684,8 +711,9 @@ exit, tail (clip_tail: 8 lines, 1500 characters), limit}`, and `base_check_line`
 report (*The round report*, below): a note when it already passes (the usual case when the agent
 writes the step's tests: only those can fail it, so Claude checks the diff adds tests that fail
 without the change), a warning when `--test-timeout` cut it short (every round's tests will time
-out too), a note when it ran past 120 s (not checked), else its exit and tail, for Claude to check
-it fails only for what the step changes. The warning also raises a `checkin` at once, so Claude
+out too), a note when it ran past 120 s (not checked), a note when setting the scratch checkout
+up failed (not checked), else its exit and tail, for Claude to check it fails only for what the
+step changes. The warning also raises a `checkin` at once, so Claude
 can discard before round 1 lands. A passing base once did too, telling Claude to discard and start
 again: that cost a whole restart in one task of two (the 2026-11-17 measurement), so it is a note.
 `wb start --no-base-check` (task.json `no_base_check`) skips it.
@@ -910,7 +938,7 @@ deliberately hostile process (the 2026-11-16 audit's list of what it can't stop 
   `HOME_READABLE` (`bin`, `go`, `R`, `perl5`) are readable, and of `ONLY_KEPT` (`/dev`, `/mnt`,
   the Windows drives on WSL2, `/media`, `/run/media`, `/run/user`, `/home`, the other users'
   homes) nothing; beyond those, the task's repo (its secrets left out even when it holds some: a
-  repo at `~/.config`) and its git common directory (`repo_dirs`: outside the repo when it is a
+  repo at `~/.config`), its `siblings` (read-only: *Setting the worktree up*) and its git common directory (`repo_dirs`: outside the repo when it is a
   linked worktree, where git failed in the lane before the 0.90 review; read-only), workbench itself (even inside Claude's directory, the marketplace
   install), the lane, and the programs the agent runs (`tool_roots`: each PATH directory, the
   prefix of one under the home (its parent when it is a `bin`, so `~/miniconda3` or `~/flutter`)
@@ -2573,10 +2601,13 @@ directory and in the task's own lane and environment (`runner.run_in_lane` on a 
 - **The candidate**: the same clone at the worktree's HEAD, then `read-tree -u` of a snapshot of
   the worktree (`gitops.snapshot`), new files included.
 
+Each is set up as the task's worktree was (`runner.prepare`: its siblings, copies and setup
+command) before the test runs.
+
 Neither run touches the user's checkout or the worktree under review. The verdict (`verdict`):
 `proven` (the base fails on an assertion and the candidate passes), `base-passes` (the test
-doesn't show the bug), `candidate-fails`, or `inconclusive`: a run timed out or overran its
-output, or the base failed without an assertion. A missing module or a command not found says
+doesn't show the bug), `candidate-fails`, or `inconclusive`: a run timed out, overran its
+output or couldn't be set up, or the base failed without an assertion. A missing module or a command not found says
 nothing about the bug, so it can never count as proof. Proof is positive evidence only: with
 `--expect TEXT`, that text in the base's output; else an assertion line (`ASSERTION`:
 `AssertionError`, pytest's `E assert`, a line opening `Expected`, an "expected … but/got/
@@ -3292,7 +3323,7 @@ delivered as taken (`_stale_notes`, *Notes*).
 ### Running tasks
 | Command | Flags (defaults) | What it does |
 |---|---|---|
-| `wb start <task> --spec <file\|->` | `--repo` (.), `--size trivial\|significant` (significant), `--model <id or fragment>`, `--test <cmd>`, `--auto-fix N` (2), `--self-review`/`--no-self-review` (default: the learned `self_review` knob), `--checkin MIN` (0: off), `--ask-budget N` (2), `--ask-timeout S` (1200), `--round-timeout S`, `--silence-timeout S`, `--think-timeout S` (0 off; unset or 0 for the other two: the measured budgets), `--test-timeout S` (900), `--no-base-check`, `--base REF` (HEAD), `--skill NAME…`, `--allow PATTERN…`, `--allow-path DIR…`, `--force` (queue a `--model` that can't run now; the hint is offered only when its server is just down), `--queue` (start although the GPU's holders leave no room: wait behind them), `--trial`, `--backlog NAME` (one of a batch left to run: task.json `backlog`, same name rules), `--no-claude-md` | Checks the name (`^[a-z0-9][a-z0-9-]{0,47}$`, never reused), the repo (with the lane on, neither commands.json `"paths": ["*"]` nor `--allow-path '*'` turning it off, `_lane_fits` refuses one that is the home directory or lies where credentials live, and a `--test` whose command is a snap), the spec and the skills, and that opencode is on PATH; picks the model (router, or `--model`; none runnable: exit 3, with each model's next step); refuses a repo that is a task's worktree, a `--base` that names no commit (`no commit <base> in <repo>`) and a repo with no git identity; checks `CLAUDE.md` or `.claude/CLAUDE.md` is committed at the base (or CLAUDE.md gitignored: the checkout's copy); refuses when another task (or `wb image`) holds the GPU and the model can't run beside it (exit 4, naming each holder's task, repo and model; `--queue` overrides); makes the worktree and branch `delegate/<task>` (no checkout hook; a failed add leaves nothing); notes submodules it doesn't check out; writes task.json (with `session` when `CLAUDE_CODE_SESSION_ID` is set and `claude_pid` when `CLAUDE_PID` is: Claude Code's Bash exports both), round 1's prompt (spec + PROTOCOL) and status; spawns the runner and returns at once. Prints the model and why, the slice, Claude's spec record, the handed or suggested skills, notes, `next: wb wait <task>`. With `--test` (and not `--no-base-check`, task.json `no_base_check`) the runner first runs the acceptance command once on the base (*The base check*: at most `BASE_CHECK_SECS` = 120 s, or `--test-timeout` when shorter; `base-tests.txt`, status `base_check`); what it saw comes in the first report, and a check-in at once when `--test-timeout` cut it short. |
+| `wb start <task> --spec <file\|->` | `--repo` (.), `--size trivial\|significant` (significant), `--model <id or fragment>`, `--test <cmd>`, `--auto-fix N` (2), `--self-review`/`--no-self-review` (default: the learned `self_review` knob), `--checkin MIN` (0: off), `--ask-budget N` (2), `--ask-timeout S` (1200), `--round-timeout S`, `--silence-timeout S`, `--think-timeout S` (0 off; unset or 0 for the other two: the measured budgets), `--test-timeout S` (900), `--no-base-check`, `--base REF` (HEAD), `--skill NAME…`, `--allow PATTERN…`, `--allow-path DIR…`, `--setup CMD`, `--copy PATH…`, `--sibling NAME…` (*Setting the worktree up*; with commands.json `repos`), `--force` (queue a `--model` that can't run now; the hint is offered only when its server is just down), `--queue` (start although the GPU's holders leave no room: wait behind them), `--trial`, `--backlog NAME` (one of a batch left to run: task.json `backlog`, same name rules), `--no-claude-md` | Checks the name (`^[a-z0-9][a-z0-9-]{0,47}$`, never reused), the repo (with the lane on, neither commands.json `"paths": ["*"]` nor `--allow-path '*'` turning it off, `_lane_fits` refuses one that is the home directory or lies where credentials live, and a `--test` whose command is a snap), the spec and the skills, and that opencode is on PATH; picks the model (router, or `--model`; none runnable: exit 3, with each model's next step); refuses a repo that is a task's worktree, a `--base` that names no commit (`no commit <base> in <repo>`) and a repo with no git identity; checks `CLAUDE.md` or `.claude/CLAUDE.md` is committed at the base (or CLAUDE.md gitignored: the checkout's copy); checks the worktree setup (`_worktree_setup`: a `--copy` path inside the repo, there, ignored in the checkout and no `SECRET_FILES` name; a `--sibling` a directory beside the repo, not one of `context.TASK_FILES`, not refused by `lane_refusal`, not holding the repo); refuses when another task (or `wb image`) holds the GPU and the model can't run beside it (exit 4, naming each holder's task, repo and model; `--queue` overrides); makes the worktree and branch `delegate/<task>` (no checkout hook; a failed add leaves nothing); notes submodules it doesn't check out; says what the setup will do (`setup: …`), or, with none and no commands.json `repos` entry, notes the checkout's ignored top-level directories (`_missing_dirs`, not `CACHE_DIRS`) the worktree lacks; notes a repo on a Windows drive (`context.on_windows`: git is many times slower there; finding 30); writes task.json (with `session` when `CLAUDE_CODE_SESSION_ID` is set and `claude_pid` when `CLAUDE_PID` is: Claude Code's Bash exports both), round 1's prompt (spec + PROTOCOL) and status; spawns the runner and returns at once. Prints the model and why, the slice, Claude's spec record, the handed or suggested skills, notes, `next: wb wait <task>`. With `--test` (and not `--no-base-check`, task.json `no_base_check`) the runner first runs the acceptance command once on the base (*The base check*: at most `BASE_CHECK_SECS` = 120 s, or `--test-timeout` when shorter; `base-tests.txt`, status `base_check`); what it saw comes in the first report, and a check-in at once when `--test-timeout` cut it short. |
 | `wb feedback <task> --text "…" \| --message <file\|->` | `--fresh` \| `--keep-context`, `--spec-gap "…"…` | Reaps a dead runner first (`reap`). Phase review/stuck/failed and no live runner; empty text is refused before anything is written. Writes the next round's prompt (FEEDBACK_HEAD + "Make exactly these changes, then re-run the acceptance command and finish with a short summary:" (the re-run only when there is one) + the text), reviews+1, spawns the runner. Warns past three review rounds; prints each undelivered note it dropped ("not delivered, dropped …"). A note names the GPU's holders when it will wait for them. Gathers lessons. |
 | `wb next <task> --spec <file> -m "…"` | `--test` (replaces the acceptance command), `--skill` (replaces the set), `--fresh`, `--allow PATTERN…` (adds to the task's grants), `--spec-gap`, `--take-claude-md` (*Claude's files*) | Phase review. Reads the spec (a file or `-`; empty or unreadable: nothing changes), records the step's size and fit, commits the work (`<m>` + `Workbench-Task: <task> (step N)` + `OpenCode-Session:`), writes the next step's prompt ("Step N of this task is done and committed (<sha>). The next step:" + spec + PROTOCOL), records the spec gaps, says what `runner.fresh_reason` makes of the status to come, then advances the step (round, steps, step_round, reviews reset, phase queued) in one status write right before it spawns: written before that slow export, an interrupt left step 2 under review with no runner, a retry dying on "nothing to commit" and accept closing the task on step 1 (#191). A retry after one interrupted past its commit (the worktree's tip carries this step's trailer and nothing changed since: `cli._step_landed`) takes that commit and measures the step from `HEAD~1`, so the task advances once; it died on "nothing to commit" (#85). The spec is read again, so give it again (`-` reads stdin). Says whether the next step gets a fresh session and why (`runner.fresh_reason`), each undelivered note it dropped, and names the GPU's holders when it will wait for them. Gathers lessons. |
 | `wb answer <task> --text "…" \| --file <f>` | `--id` (the pending question) | Writes `ask/<id>.answer` (atomically, never through a link: `ask_mcp.write_answer`); the blocked `ask_reviewer` returns it. An empty answer is refused: the question stays open. A closed question (answered, or dropped by the runner) is refused. |
@@ -3355,7 +3386,7 @@ delivered as taken (`_stale_notes`, *Notes*).
 | `wb init <dir>` | | A project the way Claude keeps one: git on the default branch, an initial commit, AGENTS.md → CLAUDE.md (a CLAUDE.md → AGENTS.md link is swapped; a gitignored CLAUDE.md isn't linked). Refuses the home directory or above, inside another repo, a repo git refuses (git's reason: no `git init` over it), without a git identity (`git var`, as for `wb start`), and a first commit holding likely secrets or installed directories no .gitignore covers. |
 | `wb setup` | `--force` (replaces a link that points elsewhere; never a real file) | Links `~/.local/bin/wb` to this copy's `bin/wb` and Claude Code's `skills/workbench` to its `skill/workbench`, removes an old `skills/delegate` link that now leads nowhere (the skill was `/delegate` until 2026-11-17; the mod runs `wb setup` itself when it finds only that), warns when `~/.local/bin` isn't on PATH (Claude and the mod run `wb` by name); exit 1 when it left something in the way (see *Installing*). Then, when due (*Optimize*), starts the minute or two of measuring the GPU and prints its line as `--`. Ends with a `first run:` checklist (`cli.first_run`, #111), one line each, `ok` or `--` with the fix: OpenCode 2.x (else where to get it), a model server answering (a configured provider, this machine's Ollama, or a server on a default port; else: start yours, or run /workbench and Claude lays out the ones that fit the machine, never steering to one; `wb model add --url`), a local model registered (else: run /workbench, and Claude picks one for the machine), Landlock. It names no model, and changes no exit code. |
 | `wb update` | `--check` (only say whether origin has news: `update available: N new commit(s)…` or `up to date`), `--if-due` (with `--check`: ask origin at most weekly, `UPDATE_EVERY`, else answer from `update.json`; never with `CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC`) | Updates this copy (see *Installing*): refuses while any runner is live; a marketplace copy runs `claude plugin marketplace update workbench` then `claude plugin update workbench@workbench`; a clone (refusing uncommitted tracked changes) runs `git pull --ff-only` first. Refuses, before anything changes, when `claude` isn't on PATH; a step that can't run or runs past 300 s fails with a line (after a clone's pull: what is left to run), and update.json is written as soon as the pull lands. Prints `updated <kind> a..b (N commit(s))` or `already up to date`. The check's fetch (`cli._fetch_origin`) never prompts and never hangs: no terminal, `GIT_TERMINAL_PROMPT=0`, `SSH_ASKPASS_REQUIRE=never`, at most `FETCH_SECS` = 60 s; the user's own ssh command (`GIT_SSH_COMMAND`, `GIT_SSH`, `core.sshCommand`) is kept, and with none ssh runs with `BatchMode`. In between, `--if-due` recounts `HEAD..@{u}` locally, so a pull made elsewhere shows at once. |
-| `wb doctor` | | `opencode --version` (BAD below 2.x, whose config shape and run flags workbench writes; a version that doesn't parse is a `--` line), the OpenCode config files (and a set `$OPENCODE_CONFIG`), git, models found and each one's readiness (BAD when none can run), the providers skipped and why, an Ollama provider not answering (asked once), a provider's baseURL problem, any entry without `limit.context` (BAD), each Ollama entry's `options.max_tokens` and context against what Ollama serves (or that it can't say), a `--` line for each model `wb optimize` measured with a window to change (`optimize.advice`), a `--` line for a model left thinking whose output cap (`options.max_tokens`, else `limit.output`: any server) at its measured write speed here outlasts its think budget (`router.thinking_stall`: it can sit silent until nudged and stopped; seen 2026-11-18 on a spilled 64K entry; harmless on a fast card, so measured per machine), the state directory (made if missing, then checked writable), the GPU budget and the devices it counts (or that the GPU's memory is unknown, or that none was found: a `--` line), a real lane drawn around a test write (`ok agents write only in their lane (Landlock ABI N)`: the probe's `PermissionError`, not exit 126; then a `--  Landlock ABI N: …` line for each of `lane.gaps`, and on WSL with interop on a `--  WSL interop is on: …` line (`context.interop_gap`); without Landlock a `--` line saying writes and credential reads aren't refused and whether sudo still is), `commands.json` (`context.commands_conf`: it must parse and hold lists of strings; `BAD` stops the check), the toolchains on PATH that are snaps (`context.TOOLCHAINS`; they can't run in the lane), `wb` on PATH (Claude's Bash runs it by name: BAD without it, whatever `WB_BIN` says; `WB_BIN` is noted when set), the `/workbench` skill link, a `--` line when `wb` or `/workbench` comes from another copy (`wb setup --force` from the one you want), and whether Claude Code lists `workbench@…` in `plugins/installed_plugins.json` (information only: a mod loaded another way isn't listed). `ok`/`BAD` lines set the exit code; `--` lines inform. |
+| `wb doctor` | | `opencode --version` (BAD below 2.x, whose config shape and run flags workbench writes; a version that doesn't parse is a `--` line), the OpenCode config files (and a set `$OPENCODE_CONFIG`), git, models found and each one's readiness (BAD when none can run), the providers skipped and why, an Ollama provider not answering (asked once), a provider's baseURL problem, any entry without `limit.context` (BAD), each Ollama entry's `options.max_tokens` and context against what Ollama serves (or that it can't say), a `--` line for each model `wb optimize` measured with a window to change (`optimize.advice`), a `--` line for a model left thinking whose output cap (`options.max_tokens`, else `limit.output`: any server) at its measured write speed here outlasts its think budget (`router.thinking_stall`: it can sit silent until nudged and stopped; seen 2026-11-18 on a spilled 64K entry; harmless on a fast card, so measured per machine), the state directory (made if missing, then checked writable), the GPU budget and the devices it counts (or that the GPU's memory is unknown, or that none was found: a `--` line), a real lane drawn around a test write (`ok agents write only in their lane (Landlock ABI N)`: the probe's `PermissionError`, not exit 126; then a `--  Landlock ABI N: …` line for each of `lane.gaps`, and on WSL with interop on a `--  WSL interop is on: …` line (`context.interop_gap`); without Landlock a `--` line saying writes and credential reads aren't refused and whether sudo still is), `commands.json` (`context.commands_conf`: it must parse and hold lists of strings, and `repos` its settings; `BAD` stops the check), the toolchains on PATH that are snaps (`context.TOOLCHAINS`; they can't run in the lane), `wb` on PATH (Claude's Bash runs it by name: BAD without it, whatever `WB_BIN` says; `WB_BIN` is noted when set), the `/workbench` skill link, a `--` line when `wb` or `/workbench` comes from another copy (`wb setup --force` from the one you want), and whether Claude Code lists `workbench@…` in `plugins/installed_plugins.json` (information only: a mod loaded another way isn't listed). `ok`/`BAD` lines set the exit code; `--` lines inform. |
 
 ## Files and formats
 
@@ -3403,6 +3434,8 @@ $WB_HOME (~/.local/state/workbench)
     verify/<n>/                  wb verify's runs: base.txt  candidate.txt  result.json
     shots/<n>/                   wb shot's pairs: base.png  candidate.png  base.txt  candidate.txt  shots.json
     base-tests.txt               the base check's output: the acceptance command on the base (`--test`)
+    setup.txt                    the setup's output (`--setup`, *Setting the worktree up*)
+    <name> → ../<name>           a sibling's link, beside the worktree (`--sibling`; not one of context.TASK_FILES)
     rounds/<n>/                  prompt.md  instructions.md (before a handover rewrote it)  summary.md  tests.txt
     ask/<id>.json  <id>.answer   questions and permission requests; their answers (all the lane writes here, with worktree/)
     worktree/                    the agent's git worktree, branch delegate/<task>
@@ -3413,7 +3446,10 @@ $WB_HOME (~/.local/state/workbench)
   models.json ($WB_MODELS)       what OpenCode can't say about each model or provider
   images.json ($WB_IMAGES)       image engines
   commands.json ($WB_COMMANDS)   the user's standing allowances: {"allow": [patterns], "paths": [dirs], "env": [names]}
-                                 (each a list of strings, or the file is refused: context.commands_conf)
+                                 (each a list of strings, or the file is refused: context.commands_conf), and
+                                 "repos": {"<repo path>": {"setup": cmd, "copy": [paths], "siblings": [names]}},
+                                 each repo's worktree setup (context.repo_conf, by real path; --setup replaces
+                                 its setup, --copy and --sibling add)
   chat.json ($WB_CHAT_CONFIG)    the web chat's {"bind": [...], "hosts": [...]}
   chat-token ($WB_CHAT_TOKEN)    the web chat's token, mode 600
   savings.json ($WB_SAVINGS)     {"kwh_price": N}, the electricity price the energy is costed at (wb savings --price)
@@ -3452,7 +3488,8 @@ session's Claude Code process; once it is gone the directory rule adopts the tas
 `--merge` lands on: the one checked out for `HEAD`, or `--base` when it names a local branch; null
 on a detached HEAD, a tag or a commit), `branch`, `model`, `model_label`, `opencode_model`, `route` (the
 router's reason), `size`, `stack`, `trial` (when set), `backlog` (`--backlog`), `bench` (a replay's `{case, run, label}`:
-*Bench*), `test_cmd`, `no_base_check` (when set), `auto_fix`, `self_review` (true/false from the flags; null: learned), `ask_budget`,
+*Bench*), `test_cmd`, `no_base_check` (when set), `setup`, `copy`, `siblings` (when set: the
+flags with commands.json `repos`, *Setting the worktree up*), `auto_fix`, `self_review` (true/false from the flags; null: learned), `ask_budget`,
 `ask_timeout`, `checkin`, `round_timeout`, `silence_timeout`, `think_timeout`, `test_timeout`,
 `created_at`, `wb_version`. Read but written by no command: `stuck` (the guards' thresholds),
 `deny_skills`. A missing key takes the runner's own default (auto-fix 0, think and
@@ -3470,7 +3507,8 @@ check-ins off), not `wb start`'s.
 | `self_reviewed` | `[steps, reviews]` when the self-review round last ran (`tuned.self_review` on: once per review round) |
 | `reviewed` | `{step, tree}`: the working tree the last review notice showed, a tree object (`gitops.snapshot`); the next review notice of the same step shows the diff since it |
 | `tests` | `{ok, exit, tail, round}` of the last test run (`exit`: a code, `timeout` or `output limit`) |
-| `base_check` | `{ok, exit, tail, limit}` of the acceptance command run once on the base, in the lane (`runner.base_check`; `exit` is `"timeout"` past `limit`); the runner, before round 1, only with `--test` and without `--no-base-check` |
+| `base_check` | `{ok, exit, tail, limit}` of the acceptance command run once on the base, in the lane (`runner.base_check`; `exit` is `"timeout"` past `limit`, `"setup failed"` when its scratch checkout couldn't be set up); the runner, before round 1, only with `--test` and without `--no-base-check` |
+| `prepared` | true once the worktree is set up (`runner._prepare`: `setup`, `copy`, `siblings`), so a later run of the runner doesn't again |
 | `stopping` | wb is stopping the runner (`cli._stop_runner`); cleared by `spawn_runner` and the runner's exit |
 | `tools`, `tok_in`, `tok_out` | task-wide tool calls and tokens (input without cache reads) |
 | `gpu_wh` | the GPU energy its rounds used so far, in Wh (the runner's `_Power`; absent for a remote model or no reading) |
@@ -3637,7 +3675,7 @@ main (*Shipping to main*).
 
 **Files.**
 - `tests/test_workbench.py`: end to end, one class per feature (Lifecycle, Context, Steering,
-  Watch, AskServer, ConfigLayer, AgentContext, SkillLibrary, RealOpenCode, GitGuard, Lane,
+  WorktreeSetup, Watch, AskServer, ConfigLayer, AgentContext, SkillLibrary, RealOpenCode, GitGuard, Lane,
   Permission, Images, Discovery, Routing, Tuning, Notes, Setup, Update, Projects, ModelSet,
   WebChat, Hardware, Detector, SkillLearning, RealOpenCodeSkillFiles, RealOpenCodeRun, Drift).
 - `tests/test_gpu.py`: sharing the GPU (side by side, taking turns, unknown VRAM, an exclusive
@@ -3821,6 +3859,8 @@ push: every change is a pull request that merges once `check` is green and it is
   (`skill/workbench/SKILL.md`) if Claude uses it there; README only for the quickstart. CLAUDE.md's
   *Keeping the docs true* is the procedure; `tests/test_docs.py` checks what it can (every command
   and flag here, every module and environment variable in CLAUDE.md, CLAUDE.md's size).
+- **A file in a task's directory** → `context.TASK_FILES`, the names a `--sibling` can't take
+  (its link sits beside the worktree).
 - **A prompt's opening words** (the heads in *The runner, inside*) → `transcript` labels,
   `round_asks`, `lessons`, the fake OpenCode, and the tests that quote them.
 - **A task.json `bench` key** → `Task.notify`, `results.record`, `cmd_status`, `_preempt_bench`

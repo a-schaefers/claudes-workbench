@@ -1274,6 +1274,121 @@ class Lifecycle(Base):
         self.assertNotEqual(gitops.mark(wt), out[0])
 
 
+
+class WorktreeSetup(Base):
+    """#201 (the 2026-11-19 audit): a task's worktree holds only committed files, under the state
+    directory, so a project's check that needs its installed dependencies, an ignored local file
+    or a sibling directory failed on the base and in every round, for that, not for the step."""
+
+    def ignore(self, *names):
+        (self.repo / ".gitignore").write_text("".join(f"{n}\n" for n in names))
+        subprocess.run(["git", "-C", str(self.repo), "add", ".gitignore"], check=True)
+        subprocess.run(["git", "-C", str(self.repo), "commit", "-qm", "ignore"], check=True)
+
+    def refused(self, name, *extra) -> str:
+        err = io.StringIO()
+        with self.assertRaises(SystemExit), redirect_stderr(err):
+            self.start(name, "ok", *extra)
+        self.assertFalse(store.Task(name).dir.exists())
+        return err.getvalue()
+
+    # fails with exit 3 when deps/ is missing: the project's own failure, not the step's
+    NEEDS_DEPS = "test -f deps/installed || { echo NO-DEPS; exit 3; }; grep -qx 42 answer.txt"
+
+    def test_the_setup_command_runs_in_the_worktree_before_the_base_check_and_the_rounds(self):
+        self.ignore("deps/")
+        self.start("t-setup", "ok", "--test", self.NEEDS_DEPS, "--setup",
+                   "mkdir -p deps && touch deps/installed && echo INSTALLED",
+                   "--auto-fix", "0", "--no-self-review")
+        st = wait_phase("t-setup", {"review"})
+        t = store.Task("t-setup")
+        self.assertEqual(st["base_check"]["exit"], 2)       # grep: no answer.txt yet; not NO-DEPS's 3
+        self.assertNotIn("NO-DEPS", (t.dir / "base-tests.txt").read_text().split("\n\n", 1)[1])
+        self.assertIs(st["tests"]["ok"], True)
+        self.assertIn("INSTALLED", (t.dir / "setup.txt").read_text())
+        self.assertTrue((t.worktree / "deps" / "installed").exists())
+        self.assertNotIn("deps", gitops.changed(t.worktree))  # ignored: not in the review diff
+
+    def test_commands_json_gives_a_repo_its_setup_for_every_task(self):
+        self.ignore("deps/")
+        Path(os.environ["WB_COMMANDS"]).write_text(json.dumps({"repos": {str(self.repo): {
+            "setup": "mkdir -p deps && touch deps/installed"}}}))
+        self.start("t-conf", "ok", "--test", self.NEEDS_DEPS, "--auto-fix", "0", "--no-self-review")
+        st = wait_phase("t-conf", {"review"})
+        self.assertEqual(st["base_check"]["exit"], 2)
+        self.assertIs(st["tests"]["ok"], True)
+        self.assertEqual(store.Task("t-conf").spec["setup"], "mkdir -p deps && touch deps/installed")
+
+    def test_a_failing_setup_fails_the_task_before_any_round_and_says_so(self):
+        self.start("t-broke", "ok", "--test", TEST_CMD, "--setup", "echo NO-NETWORK; exit 5")
+        st = wait_phase("t-broke", {"failed"})
+        t = store.Task("t-broke")
+        self.assertIsNone(st.get("session"))                 # the agent never ran
+        self.assertNotIn("base_check", st)
+        note = [r for r in store.notices() if r["task"] == "t-broke"][-1]
+        self.assertEqual(note["kind"], "failed")
+        self.assertIn("the setup command failed (exit 5)", note["text"])
+        self.assertIn("NO-NETWORK", note["text"])
+        self.assertIn("NO-NETWORK", (t.dir / "setup.txt").read_text())
+
+    def test_copy_brings_an_ignored_path_from_the_checkout_and_refuses_secrets_and_tracked_files(self):
+        self.ignore("vendor/", ".env", "local.cfg")
+        (self.repo / "vendor").mkdir()
+        (self.repo / "vendor" / "lib.txt").write_text("vendored\n")
+        (self.repo / ".env").write_text("API_KEY=secret\n")
+        self.start("t-copy", "ok", "--test", "test -f vendor/lib.txt", "--copy", "vendor/",
+                   "--auto-fix", "0", "--no-self-review")
+        st = wait_phase("t-copy", {"review"})
+        t = store.Task("t-copy")
+        self.assertIs(st["base_check"]["ok"], True)          # the base's scratch checkout has it too
+        self.assertEqual((t.worktree / "vendor" / "lib.txt").read_text(), "vendored\n")
+        self.assertNotIn("vendor", gitops.changed(t.worktree))
+        self.assertIn(".env", self.refused("t-c1", "--copy", ".env"))          # a secret
+        self.assertIn("not ignored", self.refused("t-c2", "--copy", "README.md"))  # in the diff
+        self.assertIn("inside the repo", self.refused("t-c3", "--copy", "../x"))
+        self.assertIn("no local.cfg", self.refused("t-c4", "--copy", "local.cfg"))
+
+    def test_a_sibling_directory_is_readable_at_the_same_relative_path(self):
+        lib = self.repo.parent / "lib"
+        lib.mkdir()
+        (lib / "VERSION").write_text("7\n")
+        cmd = "grep -qx 7 ../lib/VERSION || { echo NO-SIBLING; exit 3; }"
+        self.start("t-sib", "ok", "--test", cmd, "--sibling", "lib",
+                   "--auto-fix", "0", "--no-self-review")
+        st = wait_phase("t-sib", {"review"})
+        t = store.Task("t-sib")
+        self.assertIs(st["base_check"]["ok"], True)          # in the scratch checkout too
+        self.assertIs(st["tests"]["ok"], True)
+        # read, never written: in the read lane, not the write lane (which /tmp, where this test
+        # runs, is in anyway)
+        real = os.path.realpath(lib)
+        self.assertEqual(context.siblings(t), [real])
+        self.assertNotIn(real, context.writable(t))
+        self.assertIn(f"{t.worktree.parent / 'lib'}/*",
+                      [r["resource"] for r in context.external_rules(t) if r["effect"] == "allow"])
+        self.assertIn("beside the repo", self.refused("t-s1", "--sibling", "nope"))
+        self.assertIn("a directory's name", self.refused("t-s2", "--sibling", "../lib"))
+        (self.repo.parent / "rounds").mkdir()
+        self.assertIn("task's own", self.refused("t-s3", "--sibling", "rounds"))
+
+    def test_start_says_which_ignored_directories_the_worktree_will_lack(self):
+        self.ignore("node_modules/", "__pycache__/")
+        (self.repo / "node_modules" / "left-pad").mkdir(parents=True)
+        (self.repo / "__pycache__").mkdir()
+        out = self.start("t-lack", "ok")
+        line = next(x for x in out.splitlines() if "node_modules/" in x)
+        self.assertIn("--setup", line)
+        self.assertNotIn("__pycache__", line)                # a cache, nothing to install
+        wait_phase("t-lack", {"review"})
+        out = self.start("t-lack2", "ok", "--setup", "true")  # set up: no note
+        self.assertNotIn("node_modules/", out)
+
+    def test_a_repo_on_a_windows_drive_gets_a_note(self):
+        # #201's finding 30: git is much slower on WSL's /mnt/c, and wb checks the worktree every step
+        with mock.patch.object(context, "on_windows", return_value=True):
+            out = self.start("t-win", "ok")
+        self.assertIn("on a Windows drive", out)
+
 class Context(Base):
     """The agent's context: continued round to round, handed to a fresh session when full."""
     def setUp(self):

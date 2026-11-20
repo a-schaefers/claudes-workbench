@@ -82,7 +82,11 @@ def _run(task: store.Task, checkout, cmd: str, limit: int, keep=None) -> tuple[i
         work = Path(scratch) / "repo"
         gitops.git(scratch, "clone", "-q", "--shared", "--no-checkout", task.spec["repo"], str(work))
         checkout(work)
-        out = runner.run_in_lane(_At(task.name, work), cmd, limit)
+        at = _At(task.name, work)
+        code, setup = runner.prepare(at)  # its setup, copies and siblings, as the worktree (#201)
+        if code != 0:
+            return "setup failed", f"[setting up the scratch checkout failed: {code}]\n{setup}"
+        out = runner.run_in_lane(at, cmd, limit)
         if keep:
             keep(work)
         return out
@@ -114,7 +118,7 @@ def verdict(base: int | str, base_out: str, cand: int | str, expect: str = "") -
     """proven, base-passes, candidate-fails or inconclusive. Proven only on positive evidence:
     ``expect`` (the failure Claude names, `wb verify --expect`) in the base's output, else an
     assertion line, else a failed test's header with no setup error beside it."""
-    if "timeout" in (base, cand) or "output limit" in (base, cand):
+    if isinstance(base, str) or isinstance(cand, str):  # a timeout, an output limit, the setup
         return "inconclusive"
     if cand != 0:
         return "candidate-fails"
@@ -160,8 +164,8 @@ SAY = {"proven": "proven: it fails on the base and passes on the candidate",
        "base-passes": "not proven: it already passes on the base, so it doesn't show the bug",
        "candidate-fails": "the candidate fails it",
        "inconclusive": "inconclusive: the base run didn't fail on an assertion (a setup error: "
-                       "syntax, import, build or collection; or not the --expect text) or a run "
-                       "timed out"}
+                       "syntax, import, build or collection; or not the --expect text), a run "
+                       "timed out, or the setup command failed"}
 
 
 def lines(r: dict) -> list[str]:

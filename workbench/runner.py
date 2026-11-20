@@ -803,6 +803,81 @@ def run_tests(task: store.Task, n: int):
     return result
 
 
+# seconds the setup command may run (npm ci, a first cargo build), in the worktree and again in
+# each scratch checkout (the base check, wb verify, wb shot)
+SETUP_SECS = 1800
+
+
+def _copy(src: Path, dest: Path) -> None:
+    """`src` to `dest` whole, links kept, as a reflink where the filesystem has them (btrfs, XFS:
+    node_modules in an instant), else a plain copy; anything already at `dest` replaced."""
+    def clear():
+        if dest.is_symlink() or dest.is_file():
+            dest.unlink()
+        elif dest.is_dir():
+            shutil.rmtree(dest)
+    clear()
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    # GNU's, then macOS's (-c clones on APFS); their own error when neither runs
+    for argv in (["cp", "-a", "--reflink=auto"], ["cp", "-cRp"]):
+        try:
+            if subprocess.run([*argv, str(src), str(dest)], capture_output=True).returncode == 0:
+                return
+        except OSError:
+            pass
+        clear()
+    if src.is_dir() and not src.is_symlink():
+        shutil.copytree(src, dest, symlinks=True)
+    else:
+        shutil.copy2(src, dest, follow_symlinks=False)
+
+
+def prepare(task: store.Task) -> tuple[int | str, str]:
+    """Make `task.worktree` the project as the user has it, before anything runs there: the
+    links beside it to the repo's `siblings`, the ignored paths to `copy` from the user's
+    checkout, then the `setup` command in the lane (#201, the 2026-11-19 audit: a worktree holds
+    only committed files, so a check that needed node_modules, a .venv or ../lib failed on the
+    base and in every round, for that and not for the step). The setup's exit code and output;
+    (0, "") with nothing to do. The task's worktree and each scratch checkout alike."""
+    spec, wt = task.spec, task.worktree
+    repo = Path(spec["repo"])
+    try:
+        for name in spec.get("siblings") or ():
+            if not (wt.parent / name).is_symlink():
+                (wt.parent / name).symlink_to(os.path.realpath(repo.parent / name))
+        for p in spec.get("copy") or ():
+            _copy(repo / p, wt / p)
+    except OSError as e:
+        return "copy failed", str(e)
+    if not (cmd := spec.get("setup")):
+        return 0, ""
+    return run_in_lane(task, cmd, SETUP_SECS)
+
+
+def _prepare(task: store.Task) -> bool:
+    """Once, before the base check and the GPU: prepare() the worktree, its output in
+    setup.txt. Failing, the task fails before any round, saying what the setup printed."""
+    spec = task.spec
+    if task.status.get("prepared") or not any(spec.get(k) for k in ("setup", "copy", "siblings")):
+        return True
+    task.set_status(last="setting up the worktree"
+                    + (f": {spec['setup']}" if spec.get("setup") else ""))
+    code, output = prepare(task)
+    task.dir.joinpath("setup.txt").write_text(
+        f"$ {spec.get('setup') or ''}\nexit: {code}\nshell: {test_shell()}\n\n{output}")
+    if code == 0:
+        task.set_status(prepared=True)
+        return True
+    what = f"the setup command failed (exit {code})" if isinstance(code, int) else \
+        f"setting up the worktree failed ({code})"
+    tail = "\n".join("    " + x for x in clip_tail(output, 8, total=1500).splitlines())
+    task.set_status(phase="failed", last=what)
+    task.notify("failed", f"task {task.name}: {what} before any round "
+                f"({task.dir / 'setup.txt'}):\n{tail}\nfix it, then wb discard {task.name} and "
+                "start again")
+    return False
+
+
 # The base check runs in the runner before round 1 (it once ran inside `wb start`, which a slow
 # suite pushed past Claude's two-minute Bash limit: the 2026-11-16 audit). Past this, not checked.
 BASE_CHECK_SECS = 120
@@ -828,6 +903,10 @@ def base_check(task: store.Task) -> dict | None:
 
 def base_check_line(r: dict, task: store.Task) -> str:
     """What the acceptance command did on the base, for Claude to judge (the first report)."""
+    if r["exit"] == "setup failed":
+        tail = "\n".join("    " + line for line in r["tail"].splitlines())
+        return (f"note: setting up the base's scratch checkout failed, so the base wasn't checked "
+                f"({task.dir / 'base-tests.txt'}):\n{tail}")
     if r["exit"] == "timeout":
         limit = r.get("limit", BASE_CHECK_SECS)
         if limit < BASE_CHECK_SECS:  # --test-timeout set it: every round's tests stop there too
@@ -1196,6 +1275,8 @@ def drive(task: store.Task) -> None:
     CURRENT["remote"] = m.remote  # the GPU is not ours to measure when the model is remote
     if m.remote:
         task.set_status(remote_gpu=True)  # so its savings say the energy wasn't measured (#117)
+    if not _prepare(task):  # the project as the user has it, before the base check (#201)
+        return
     st = task.status
     if (task.spec.get("test_cmd") and not task.spec.get("no_base_check")
             and "base_check" not in st and st.get("round", 1) == 1):
