@@ -847,14 +847,21 @@ resource. OpenCode anchors each pattern, lets `*` match anything (spaces and `/`
 trailing ` *` as optional (`npm install *` also matches `npm install`), and the last matching rule
 wins; no match means ask, which `--auto` allows. The rules, in order:
 1. deny `*`;
-2. allow `c` and `c *` for each of `ALLOWED_COMMANDS` (about 215: the shell's builtins and
+2. allow `c`, `c *` and `*=* c *` (`ASSIGN`: a variable set before it, `PYTHONPATH=. pytest`)
+   for each of `ALLOWED_COMMANDS` (about 215: the shell's builtins and
    everyday tools, files and text, archivers, builds and compilers, test runners, interpreters,
    package managers, `bash`/`sh`, `sqlite3`, `git` (the shim)); not on it: `curl`, `wget`, `ssh`,
-   `rsync`, `docker`, `systemctl`, `opencode`;
+   `rsync`, `docker`, `systemctl`, `opencode`. OpenCode matches each simple command's raw text,
+   so `FOO=1 ls` was refused while `ls` and `env FOO=1 ls` ran, and a small model copying the
+   project's own `CI=1 npm test` spent a Claude wake asking or stopped running the tests (#258, the
+   audit of 1.2). `*` matches spaces, so the prefix form also passes a line with an `=` anywhere
+   before an allowed command's name: no more than `env *` already runs. Steps 4 to 6 and 8 get the
+   prefix form too;
 3. allow `./*`, `../*`, and `<dir>/*` for every directory of the lane but those under `/dev` and `/proc` (a program the agent built
    runs by its path anywhere it can write: a debug binary in the temp directory was refused
    though `bash` could run it);
-4. allow `PROJECT_BINS`, what a project builds or installs for itself, by its path:
+4. allow `PROJECT_BINS` (and `./*`, `../*`, each also behind `*=*`), what a project builds or
+   installs for itself, by its path:
    `.venv/bin/*`, `venv/bin/*`, `node_modules/.bin/*`, `build/*`, `target/debug/*`,
    `target/release/*`, `bin/*`, `out/*`, `dist/*`, `zig-out/bin/*`;
 5. deny `ASK_FIRST`: adding a dependency (`pip install *`, `npm install *`, `npm add *`,
@@ -879,7 +886,8 @@ wins; no match means ask, which `--auto` allows. The rules, in order:
    `/usr/local/bin/git`, `/opt/homebrew/bin/git`), each bare and with ` *`, and each again behind
    the `_WRAPPERS` (`env`, `env *`, `xargs`, `xargs *`, `nohup`, `nohup --`, `nice`, `nice *`,
    `time`, `time -p`, `time --`, `command`, `command -p`, `command --`, `exec`, `timeout *`,
-   `stdbuf *`, `setsid`), so `env gh …`, `time -p sudo …` and `timeout 5 sudo …` are refused.
+   `stdbuf *`, `setsid`, `*=*`), so `env gh …`, `time -p sudo …`, `timeout 5 sudo …` and
+   `FOO=1 sudo …` are refused.
    Not `*/git`, which also refused `go test ./internal/git` whatever Claude allowed, and not
    `time *`, which would refuse `time pytest -k gh` (the 2026-11-16 audit).
 
