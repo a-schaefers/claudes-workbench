@@ -3010,6 +3010,44 @@ class ConfigLayer(Base):
         layer = json.loads(runner.write_config_layer(store.Task("t-alt")).read_text())
         self.assertNotIn("provider", layer)        # the global files: OpenCode loads them itself
 
+    def test_the_users_own_config_content_reaches_wb_and_the_agent_under_the_rules(self):
+        # #347, the audit of 1.4: rules_env replaced the user's OPENCODE_CONFIG_CONTENT with the
+        # rules alone, and wb never read it, so a provider kept there was lost to both
+        from workbench import models, runner
+        prov = {"strata": OPENCODE_CONFIG["provider"]["strata"]}
+        cfg = json.loads(Path(os.environ["WB_OPENCODE_CONFIG"]).read_text())
+        del cfg["provider"]["strata"]
+        tmp = Path(self.tmp.name)
+        (tmp / "xdg" / "opencode").mkdir(parents=True)
+        (tmp / "xdg" / "opencode" / "opencode.json").write_text(json.dumps(cfg))
+        del os.environ["WB_OPENCODE_CONFIG"]
+        mine = {"action": "edit", "resource": "*", "effect": "allow"}
+        os.environ.update(XDG_CONFIG_HOME=str(tmp / "xdg"), OPENCODE_CONFIG_CONTENT=json.dumps(
+            {"provider": prov, "instructions": ["/x/rules.md"], "permissions": [mine],
+             "share": "auto", "mcp": {"servers": {"usermcp": {"command": ["true"]}}}}))
+        try:
+            self.assertIn("strata/strata", models.discover())
+            env = runner.rules_env({"permissions": [{"action": "shell", "resource": "sudo *",
+                                                     "effect": "deny"}]})
+            got = json.loads(env["OPENCODE_CONFIG_CONTENT"])
+            self.assertEqual(got["provider"], prov)
+            self.assertEqual(got["instructions"], ["/x/rules.md"])
+            self.assertEqual(got["permissions"][0], mine)              # theirs first,
+            self.assertEqual(got["permissions"][-1]["effect"], "deny")  # the rules last
+            self.assertEqual(got["share"], "disabled")
+            self.assertNotIn("mcp", got)
+            def doctor():
+                buf = io.StringIO()
+                with redirect_stdout(buf), self.assertRaises(SystemExit):
+                    cli.main(["doctor"])
+                return next(ln for ln in buf.getvalue().splitlines() if "CONFIG_CONTENT" in ln)
+            self.assertIn("OPENCODE_CONFIG_CONTENT is set", doctor())
+            self.assertNotIn("strata", doctor())                  # never its keys or values
+            os.environ["OPENCODE_CONFIG_CONTENT"] = "not json"
+            self.assertIn("doesn't parse", doctor())
+        finally:
+            os.environ.pop("OPENCODE_CONFIG_CONTENT")
+
     def test_launcher_answers_initialize(self):
         out = subprocess.run(
             [sys.executable, str(ROOT / "bin" / "wb-ask-mcp")], capture_output=True, text=True,

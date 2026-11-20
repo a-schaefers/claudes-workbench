@@ -1157,7 +1157,11 @@ its permissions after the layer's, so an allow-all there won (the 2026-11-16 aud
 could write one for its next round). `rules_env` passes the layer's permissions again as
 `OPENCODE_CONFIG_CONTENT`, which loads after every file; a list past `CONFIG_CONTENT_MAX`
 (120,000 bytes; one environment string holds 128 KiB) sets `OPENCODE_DISABLE_PROJECT_CONFIG=1`
-instead, which also drops AGENTS.md and the project's skills. The layer's `edit` rule also denies
+instead, which also drops AGENTS.md and the project's skills. The user's own
+`OPENCODE_CONFIG_CONTENT` (`models.users_config_content`) goes under the rules, not away (#347,
+the audit of 1.4): its keys are kept but `mcp` (the user's MCP servers stay off), its
+`permissions` come before the layer's (the last match wins), and `share` is `disabled`; past
+the limit it goes alone, without its permissions. The layer's `edit` rule also denies
 `OPENCODE_FILES` (`*opencode.json`, `*opencode.jsonc`, `.opencode/*`, `*/.opencode/*`), and the
 round report flags them with Claude's files.
 
@@ -1725,7 +1729,10 @@ whichever of `$XDG_CONFIG_HOME/opencode/` (default `~/.config/opencode/`) `openc
 `opencode.jsonc` exist, in that order, then the user's own `$OPENCODE_CONFIG` (`_users_config`;
 never a path under the state directory, which is a task's layer): OpenCode 2.3 layers them, the
 later winning, and `read_config` merges them the same way (dicts recursively), each parsed
-through `_strip_jsonc` (comments and trailing commas removed). A provider's relative
+through `_strip_jsonc` (comments and trailing commas removed), then the user's
+`OPENCODE_CONFIG_CONTENT` last, as OpenCode loads it (`users_config_content`; ignored beside
+`$WB_OPENCODE_CONFIG` or when it isn't a JSON object, which `wb doctor` says: it says when the
+variable is set, never its keys; #347). A provider's relative
 `{file:path}` starts in the directory of the file that defines it (`_provider_dirs`).
 `opencode_config_path()` is the global file wb names: `opencode.json` if it exists, else
 `opencode.jsonc` if it exists, else `opencode.json`; `write_config` writes the one file there is,

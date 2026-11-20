@@ -163,12 +163,22 @@ def users_servers_off() -> dict:
 CONFIG_CONTENT_MAX = 120_000
 
 
+# The user's own OPENCODE_CONFIG_CONTENT goes under the rules, not away: replaced, the providers,
+# instructions or permissions kept there were lost to the agent (#347, the audit of 1.4). Its
+# permissions come first, so the rules' (the last match wins) still decide; its MCP servers stay
+# off like the global files' ones (the layer's `mcp`, which this would load after).
 def rules_env(layer: dict) -> dict:
-    content = json.dumps({"permissions": layer["permissions"], "share": "disabled"},
-                         separators=(",", ":"))
+    users = {k: v for k, v in models.users_config_content().items() if k != "mcp"}
+    theirs = users.pop("permissions", None)
+    rules = {"permissions": [*(theirs if isinstance(theirs, list) else []),
+                             *layer["permissions"]], "share": "disabled"}
+    content = json.dumps({**users, **rules}, separators=(",", ":"))
     if len(content.encode()) <= CONFIG_CONTENT_MAX:
         return {"OPENCODE_CONFIG_CONTENT": content}
-    return {"OPENCODE_DISABLE_PROJECT_CONFIG": "1"}
+    # too long: the rules stay in the layer, so the user's content may not lift them either
+    rest = json.dumps({**users, "share": "disabled"}, separators=(",", ":"))
+    return {"OPENCODE_DISABLE_PROJECT_CONFIG": "1",
+            "OPENCODE_CONFIG_CONTENT": rest if len(rest.encode()) <= CONFIG_CONTENT_MAX else "{}"}
 
 
 # What OpenCode's own environment adds to the agent's: npx and `npm exec` run only what the

@@ -3168,6 +3168,10 @@ def cmd_doctor(a):
     except RuntimeError as e:  # "<file> doesn't parse (…)"
         line(False, str(e))
         sys.exit(1)  # nothing below can read the models
+    if os.environ.get("OPENCODE_CONFIG_CONTENT"):  # loaded after the files (#347, the audit of 1.4)
+        print("--  OPENCODE_CONFIG_CONTENT is set: OpenCode loads it last, wb and the agents too"
+              + ("" if models.users_config_content() or os.environ.get("WB_OPENCODE_CONFIG")
+                 else "; it doesn't parse as a JSON object, so wb ignores it"))
     # the Python wb runs on, and when the launcher handed over from an older python3 (#259)
     handed = "wb-python" in sys._xoptions
     print(f"ok  python {sys.version.split()[0]} ({sys.executable})"
