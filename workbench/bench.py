@@ -257,6 +257,8 @@ def add(name: str, step: int | None = None, hidden: list[str] | None = None,
         with tempfile.TemporaryDirectory(prefix=".check-", dir=home()) as scratch:
             work = Path(scratch) / "repo"
             gitops.git(scratch, "clone", "-q", "--shared", "--no-checkout", str(repo), str(work))
+            if sparse := gitops.sparse_of(Path(repo)):  # as the task's worktree was (#263)
+                gitops.apply_sparse(work, sparse)
             gitops.git(work, "checkout", "-q", "--detach", ref)
             at = _At(name, work)
             _prepared(at, f"step {step}'s own commit")
