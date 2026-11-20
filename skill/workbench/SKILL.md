@@ -404,7 +404,9 @@ goes in that repo's CLAUDE.md instead. Drop a note that has stopped holding (`wb
 ## 6. Finish
 - Approved: `wb accept <name> -m "<conventional commit subject>"` commits on `delegate/<name>`
   with the task and OpenCode session recorded. Add `--merge` only if the user passed `--merge` or
-  said to merge; otherwise give them the merge command it prints.
+  said to merge; otherwise give them the merge command it prints. Exit 5 means accepted but
+  not merged (its stderr says why): tell the user and give them the merge command; main
+  doesn't have the change. An accept that was interrupted finishes when run again.
 - `wb discard <name> --reason "…"` drops it. `wb status` lists open tasks (e.g. after a context
   reset); `wb stats` compares the models on finished work.
 - **Keep the good ones as bench cases.** An accepted step whose spec pinned the names its tests

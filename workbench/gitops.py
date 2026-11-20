@@ -360,7 +360,8 @@ def start_branch(repo: Path, base: str) -> str | None:
                         check=False).returncode == 0 else None
 
 
-def merge(repo: Path, task: str, into: str | None = None, base: str | None = None) -> str:
+def merge(repo: Path, task: str, into: str | None = None, base: str | None = None,
+          *, tip: str | None = None) -> str:
     """Merge the task's branch into ``into`` (the branch it started from: task.json's
     base_branch), which the main checkout must have out, clean and not mid-merge; a conflict, an
     ignored file in the way, or a merge git left unfinished is backed out, leaving the repo as it
@@ -374,26 +375,27 @@ def merge(repo: Path, task: str, into: str | None = None, base: str | None = Non
         raise GitError(f"{repo} has a detached HEAD out; merge {branch_name(task)} by hand")
     if into and into != "HEAD" and have != into:
         raise GitError(f"{repo} has {have} out, not {into}; merge {branch_name(task)} by hand")
-    if (not into or into == "HEAD") and base and _run(
+    if (tip or not into or into == "HEAD") and base and _run(
             repo, ("merge-base", "--is-ancestor", base, "HEAD"), check=False).returncode:
         raise GitError(f"{repo} has {have} out, which doesn't hold the task's base; "
                        f"merge {branch_name(task)} by hand")
     if _merging(repo):  # an --abort below would throw away the user's own merge
         raise GitError(f"{repo} is in the middle of a merge; finish it, then merge "
                        f"{branch_name(task)} by hand")
-    if in_the_way := _overwritten(repo, branch_name(task)):
+    source = tip or branch_name(task)  # the reviewed commit survives a moved delegate ref (#246)
+    if in_the_way := _overwritten(repo, source):
         raise GitError(f"the merge would overwrite {', '.join(in_the_way)} in {repo}, untracked "
                        f"there (yours, maybe ignored): move it aside, then merge "
                        f"{branch_name(task)} by hand")
     # --commit and --no-squash outrank a branch.<name>.mergeOptions of --no-commit or --squash,
     # which left the merge pending while accept said merged (#190, the 2026-11-19 audit)
     try:
-        git(repo, "merge", "--no-ff", "--no-edit", "--commit", "--no-squash", branch_name(task))
+        git(repo, "merge", "--no-ff", "--no-edit", "--commit", "--no-squash", source)
     except GitError as e:
         if _merging(repo):
             git(repo, "merge", "--abort", check=False)
         raise GitError(f"merging {branch_name(task)} failed and was backed out: {e}") from None
-    if _merging(repo) or _run(repo, ("merge-base", "--is-ancestor", branch_name(task), "HEAD"),
+    if _merging(repo) or _run(repo, ("merge-base", "--is-ancestor", source, "HEAD"),
                               check=False).returncode:
         if _merging(repo):
             git(repo, "merge", "--abort", check=False)
@@ -431,6 +433,12 @@ def _overwritten(repo: Path, branch: str) -> list[str]:
                for i in range(1, len(parts) + 1)):
             out.append(p.decode("utf-8", "replace"))
     return out
+
+
+def contains(repo: Path, ref: str, commit: str) -> bool:
+    """Whether ``ref`` holds ``commit`` (its ancestry): a merge already made, whatever the branch
+    is called now."""
+    return _run(repo, ("merge-base", "--is-ancestor", commit, ref), check=False).returncode == 0
 
 
 def _merging(repo: Path) -> bool:
