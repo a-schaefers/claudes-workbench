@@ -697,6 +697,21 @@ class Lifecycle(Base):
         finally:
             os.chdir(cwd)
 
+    def test_a_relative_opencode_config_is_one_file_to_wb_and_the_runner(self):
+        # #328 (the audit of 1.4, reproduced): wb start found the models in my-providers.json,
+        # and the runner, started in the package directory, failed the task: "unknown model"
+        cwd = os.getcwd()
+        os.chdir(self.tmp.name)
+        try:
+            os.environ["OPENCODE_CONFIG"] = os.path.basename(os.environ.pop("WB_OPENCODE_CONFIG"))
+            self.start("t-relcfg", "ok")
+            self.assertEqual(os.environ["OPENCODE_CONFIG"], os.path.join(os.getcwd(), "opencode.json"))
+            st = wait_phase("t-relcfg", {"review", "failed"})
+            self.assertEqual(st["phase"], "review", st.get("last"))
+        finally:
+            os.chdir(cwd)
+            os.environ.pop("OPENCODE_CONFIG", None)
+
     def test_the_model_is_made_resident_again_before_each_round(self):
         # After tests longer than Ollama's 5-minute keep-alive, the auto-fix round's think
         # budget paid for reloading the model (the 2026-11-16 audit).
