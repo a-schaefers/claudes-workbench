@@ -1733,7 +1733,10 @@ direct, never through an `http_proxy` in the environment, which urllib would oth
 loopback too (the 2026-11-16 audit: every model read "not answering" behind a proxy); a provider
 on another host keeps the environment's proxy. A provider's `options.apiKey`, resolved as the
 agent will see it (`_expand`: a `{env:}` name the agent's environment drops is empty), is sent as a
-bearer token on a server's `/models` probe; it is never printed or stored. A key whose `{env:NAME}`
+bearer token on every probe to its server's root (`_KEYS`, filled by `discover`, added in
+`_open`): `/models`, and Ollama's own `/api/version`, `/api/tags`, `/api/ps`, loads and unloads,
+which sent none, so an Ollama behind a key read as unavailable (#256, the audit of 1.2); it is
+never printed or stored. A key whose `{env:NAME}`
 is set for wb but dropped for the agent is a provider problem, so the model is unavailable: "its
 apiKey reads {env:NAME}, which agents don't get: add NAME to commands.json env" (probed with wb's
 own key it read running, and every request of the agent's was refused: the 0.90 review).
@@ -1773,9 +1776,14 @@ OpenAI-compatible, whose baseURL doesn't end in `/v1`, where Ollama's OpenAI API
 would get 404 on every request after the model loaded; or an `apiKey` the agent won't get, above),
 an Ollama cloud model not allowed. Then Ollama: not answering / `<name>` is not pulled / a cloud
 model by its tags row / pulled / loaded (`/api/tags`, `/api/ps`). A server (`GET <base>/models`):
-running (a server listing several models must list this one: "the server lists N models, not …"; a
-server listing one answers to any name, except on a port that several models share, each with its
-own `start` (`_contended`: one llama-server per model), where the listed id says which model it is
+running (a server listing several models must list this one: "the server lists N models, not …";
+one listing none (`data: []`) is unavailable, "the server answers but lists no model" (it read as
+running and resident, #256); a llama-server listing one (a row `owned_by: llamacpp` or with a
+`meta` field) answers to any name; any other server listing one is strict, as vLLM, SGLang and TGI
+are (a wrong `model` is a 404, and the round died at its first request as "opencode exited 1":
+#256, the audit of 1.2), so an id that isn't this model's (`_serves`) is unavailable, "the server
+serves <id>, not <name>: set the entry's id to <id>"; except on a port that several models share,
+each with its own `start` (`_contended`: one llama-server per model), where the listed id says which model it is
 (`_owners`): the model whose name is the id or its file's basename without `.gguf` (`_serves`), or
 whose start command names that file (`-m <path>`). The model it is reads running; another model on
 the port, when the one served has a `stop`, reads available but not resident ("the port serves

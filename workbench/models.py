@@ -312,8 +312,19 @@ _ENGINES: dict[str, str] = {}  # root -> engine, once its server has answered
 _DIRECT = urllib.request.build_opener(urllib.request.ProxyHandler({}))
 
 
+# Each provider's resolved apiKey by its server's root, so every probe sends what the agent will:
+# an Ollama behind a key served the model, but the native /api probes sent none and it read as
+# unavailable (#256, the audit of 1.2). discover() fills it.
+_KEYS: dict[str, str] = {}
+
+
 def _open(target, timeout: float):
     url = target.full_url if isinstance(target, urllib.request.Request) else target
+    key = next((k for root, k in _KEYS.items() if url == root or url.startswith(root + "/")), "")
+    if key and not isinstance(target, urllib.request.Request):
+        target = urllib.request.Request(url)
+    if key and not target.has_header("Authorization"):
+        target.add_header("Authorization", f"Bearer {key}")
     opener = _DIRECT.open if _this_host(urlparse(url).hostname) else urllib.request.urlopen
     return opener(target, timeout=timeout)
 
@@ -472,6 +483,8 @@ def discover() -> dict[str, Model]:
             from . import context
             problem = (f"its apiKey reads {{env:{hidden[0]}}}, which agents don't get: add "
                        f"{hidden[0]} to commands.json env ({context.commands_path()})")
+        if key:
+            _KEYS[url.rstrip("/").removesuffix("/v1")] = key
         for name, spec in (prov.get("models") or {}).items():
             mid = f"{pid}/{name}"
             over = {**extra.get(pid, {}), **extra.get(mid, {})}
@@ -660,11 +673,20 @@ def status(m: Model, down=frozenset()) -> dict:
     except Exception:
         body = None
     if isinstance(body, dict):
-        # one listed model: a one-model server answers to any name; several: it routes by name
-        served = {x.get("id") for x in (body.get("data") or []) if isinstance(x, dict)}
+        # one listed model: llama-server answers to any name; several: it routes by name
+        rows = [x for x in (body.get("data") or []) if isinstance(x, dict)]
+        served = {x.get("id") for x in rows}
+        if isinstance(body.get("data"), list) and not served:  # it read as running (#256)
+            return _no("the server answers but lists no model: load it there")
         if len(served) > 1 and m.name not in served:
             return _no(f"the server lists {len(served)} models, not {m.name}")
         sid = str(next(iter(served))) if len(served) == 1 else ""
+        # vLLM, SGLang and TGI refuse any other name with a 404: the round died at its first
+        # request as "opencode exited 1", and a vLLM name is a long HF path, easy to miss (#256,
+        # the audit of 1.2). llama-server says it is one (owned_by llamacpp, a `meta` field).
+        llamacpp = any(x.get("owned_by") == "llamacpp" or "meta" in x for x in rows)
+        if sid and not _serves(sid, m.name) and not llamacpp and not (m.start and _contended(m)):
+            return _no(f"the server serves {sid}, not {m.name}: set the entry's id to {sid}")
         if sid and m.start and _contended(m) and not _serves(sid, m.name):
             # the task would run on the other model, recorded under this one (the 2026-11-16 audit)
             owners = _owners(m, sid)
@@ -694,7 +716,7 @@ def remedy(m: Model, state: dict) -> str:
         return f"start Ollama at {m.root} (ollama serve, or its service or app)"
     if why.endswith(" is not pulled"):
         return f"wb model add {m.id} --pull downloads it"
-    if why.startswith("the server lists"):
+    if why.startswith(("the server lists", "the server answers but lists no model")):
         return f"load {m.name} in that server, or fix the model's name in OpenCode's config"
     if why.startswith("not running, and no start command"):
         return f"start its server, or give {m.id} a \"start\" command there"
