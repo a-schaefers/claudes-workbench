@@ -178,6 +178,65 @@ def changed(worktree: Path) -> str:
     return git(worktree, "status", "--porcelain", "--untracked-files=all").rstrip()
 
 
+# A changed-file list goes into every report and check-in Claude reads: whole, a build/ the
+# project doesn't ignore added a line per file, thousands a wake (#251, the audit of 1.2)
+CHANGED_SHOWN = 40  # lines listed as they are; the rest are counted by top-level directory
+BUILD_FILES = 50    # new files in one new top-level directory: likely build output
+NEW_FILES_MAX = 300  # wb accept and wb next commit no more new files than this without --include
+BINARY_MAX = 1 << 20  # nor a new binary file this big
+
+
+def _top(path: str) -> str:
+    path = path.strip('"')
+    return path.split("/", 1)[0] + "/" if "/" in path else "(top level)"
+
+
+def brief(lines: list[str], *, status: bool = False) -> list[str]:
+    """Show the first paths and count the rest by directory, with a bound on both lists."""
+    rest = Counter(_top(line[3:] if status else line) for line in lines[CHANGED_SHOWN:])
+    out = lines[:CHANGED_SHOWN]
+    for directory, count in rest.most_common(CHANGED_SHOWN):
+        out.append(f"{directory} ({count:,} more file{'s' if count != 1 else ''})")
+    if len(rest) > CHANGED_SHOWN:
+        out.append(f"… {len(rest) - CHANGED_SHOWN:,} other directories")
+    return out
+
+
+def brief_paths(files: str) -> str:
+    """Status paths as one bounded line for a check-in."""
+    return ", ".join(brief([line[3:] for line in files.splitlines()])) or "none"
+
+
+def build_dirs(worktree: Path, files: str) -> list[tuple[str, int]]:
+    """New top-level directories (none at HEAD) holding BUILD_FILES or more untracked files:
+    likely build output the project doesn't ignore. [(dir/, files)]."""
+    counts = Counter(_top(x[3:]) for x in files.splitlines() if x.startswith("??") and "/" in x[3:])
+    if not counts or counts.most_common(1)[0][1] < BUILD_FILES:
+        return []
+    tracked = set(git_bytes(worktree, "ls-tree", "--name-only", "-z", "HEAD").split(b"\0"))
+    return [(d, n) for d, n in counts.most_common()
+            if n >= BUILD_FILES and os.fsencode(d[:-1]) not in tracked]
+
+
+def _bulk(worktree: Path, tree: str) -> str | None:
+    """Check the prospective tree, including binary paths that cannot be decoded as UTF-8."""
+    rows = git_bytes(worktree, "diff", "--numstat", "--no-renames", "--diff-filter=A",
+                     "-z", "HEAD", tree).split(b"\0")
+    added = [r.split(b"\t", 2) for r in rows if r]
+    why = []
+    if len(added) > NEW_FILES_MAX:
+        tops = Counter(_top(p.decode("utf-8", "replace")) for _, _, p in added).most_common(3)
+        why.append(f"{len(added):,} new files ({', '.join(f'{d} {n:,}' for d, n in tops)})")
+    for insertions, _, path in added:
+        if insertions == b"-":
+            size = int(git_bytes(worktree, "cat-file", "-s", os.fsencode(tree) + b":" + path))
+            if size >= BINARY_MAX:
+                why.append(f"a {size / (1 << 20):.0f} MB binary file, {path.decode('utf-8', 'replace')}")
+                if len(why) == 4:
+                    break
+    return "; ".join(why) or None
+
+
 MARK_READ_MAX = 1 << 20  # a new file past this counts by its size and time, not its bytes
 
 
@@ -247,9 +306,9 @@ def snapshot(worktree: Path) -> str:
     return with_new_files(worktree, "write-tree", whole=True).strip()
 
 
-def diff(worktree: Path, base: str, stat=False, paths=(), numstat=False) -> str:
+def diff(worktree: Path, base: str, stat=False, paths=(), numstat=False, stat_count=None) -> str:
     args = (["diff", "--no-ext-diff", "--no-color", base] + (["--stat"] if stat else []) + (["--numstat"] if numstat else [])
-            + (["--", *paths] if paths else []))
+            + ([f"--stat-count={stat_count}"] if stat_count else []) + (["--", *paths] if paths else []))
     return with_new_files(worktree, *args).rstrip()
 
 
@@ -286,13 +345,17 @@ def stack(repo) -> list[str]:
     return [lang for lang, n in langs.most_common(2) if n >= STACK_SHARE * total]
 
 
-def commit_all(worktree: Path, message: str) -> str:
+def commit_all(worktree: Path, message: str, include: bool = False) -> str:
     """Commit everything in the worktree, without git hooks (NO_HOOKS; also for a task started
     before its git dir was recorded) but signed if the user signs. Refuses a nested repository: committed, it was a gitlink to
-    a commit that exists nowhere else."""
+    a commit that exists nowhere else. Refuses, unless ``include``, more than NEW_FILES_MAX new
+    files or a large new binary: `add -A` committed a build/ the project didn't ignore (#251)."""
     if nested := nested_repos(worktree):
         raise GitError(f"{', '.join(nested)}: a git repository of its own, so not committed: "
                        "remove its .git or gitignore it, then try again")
+    if not include and (why := _bulk(worktree, snapshot(worktree))):
+        raise GitError(f"not committed: {why}. Build output? Gitignore or remove it in "
+                       f"{worktree}, or --include to commit it anyway")
     git(worktree, *NO_HOOKS, "add", "-A")
     if not git(worktree, "diff", "--cached", "--name-only").strip():
         raise GitError("nothing to commit: the agent's worktree has no changes")

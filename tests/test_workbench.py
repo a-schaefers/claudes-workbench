@@ -987,6 +987,46 @@ class Lifecycle(Base):
             self.assertEqual(store.Task(name).status["phase"], phase)
             self.assertFalse(store.Task(name).worktree.exists())
 
+    def test_build_output_is_counted_in_the_report_and_not_committed_without_include(self):
+        # #251 (the audit of 1.2): a build/ the project didn't ignore put a line per file in
+        # every report and check-in, and wb accept committed all of it
+        self.start("t-build", "ok")
+        wait_phase("t-build", {"review"})
+        t = store.Task("t-build")
+        (t.worktree / "build").mkdir()
+        for i in range(gitops.NEW_FILES_MAX + 20):
+            (t.worktree / "build" / f"o{i}.o").write_text("x")
+        run_wb("feedback", "t-build", "--text", "1. Keep it.")
+        wait_phase("t-build", {"review"})
+        report = run_wb("report", "t-build")
+        self.assertLess(len(report.splitlines()), gitops.CHANGED_SHOWN + 40)
+        self.assertIn("build/ (", report)
+        self.assertIn("NOTE: build/ holds 320 new files the project doesn't ignore", report)
+        self.assertIn("more files)", gitops.brief_paths(gitops.changed(t.worktree)))
+        # The stat and a drift note both go in the wake, even when the paths dwarfed the diff.
+        t.set_status(reviewed=None)
+        notice = runner.review_diff(t)
+        self.assertIn("too big to include", notice)
+        self.assertLess(len(notice.splitlines()), gitops.CHANGED_SHOWN + 10)
+        gitops.git(t.worktree, "add", "answer.txt")
+        staged = gitops.git_bytes(t.worktree, "diff", "--cached")
+        err = io.StringIO()
+        with self.assertRaises(SystemExit), redirect_stderr(err):
+            run_wb("accept", "t-build", "-m", "feat: answer")
+        self.assertIn("not committed: 321 new files (build/ 320", err.getvalue())
+        self.assertEqual(self.branch("delegate/t-build"), t.spec["base"])   # nothing committed
+        self.assertIn("?? build/", gitops.changed(t.worktree))               # and nothing staged
+        self.assertEqual(gitops.git_bytes(t.worktree, "diff", "--cached"), staged)
+        shutil.rmtree(t.worktree / "build")
+        (t.worktree / "blob.bin").write_bytes(b"\0" * gitops.BINARY_MAX)
+        with self.assertRaises(SystemExit), redirect_stderr(err):
+            run_wb("accept", "t-build", "-m", "feat: answer")
+        self.assertIn("a 1 MB binary file, blob.bin", err.getvalue())
+        self.assertIn("accepted t-build", run_wb("accept", "t-build", "-m", "feat: answer", "--include"))
+        tree = subprocess.run(["git", "-C", str(self.repo), "ls-tree", "-r", "--name-only", "delegate/t-build"],
+                              capture_output=True, text=True).stdout
+        self.assertIn("blob.bin", tree)
+
     def test_an_accept_that_died_after_its_commit_finishes_on_a_retry(self):
         self.start("t-retry", "ok")
         wait_phase("t-retry", {"review"})
