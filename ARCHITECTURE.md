@@ -2052,7 +2052,14 @@ tasks every model passed in one round in a minute, so it told them apart by noth
 `wb models`, `wb scout` and `wb bench report` print it, and the router doesn't read it.
 
 **A case** (`wb bench add <task> [--step N]`, by default a `wb next` task's last step) comes from
-a closed, accepted task, not a trial:
+a closed, accepted task, not a trial. It keeps the task's setup, copies, siblings and grants, and
+its base check, its reference check, each replay (`wb start --setup/--copy/--sibling/--allow`,
+the copies and siblings put beside the replay's checkout first, `bench._inputs`) and `wb bench
+self` run with them; a setup that fails there refuses the case, saying it can't reproduce the
+task's dependencies. A task's `--setup` once made an ignored stamp its tests needed, and its
+own commit was rejected, and its grants, deleted with its rules at the close, were empty
+(#250, the audit of 1.2; `cli._keep_grants` keeps them in status `grants_kept`, which
+`context.grants` reads once the rules are gone). It holds:
 - its reference: the step's commit on `delegate/<task>` (trailer `Workbench-Task: <task> (step N)`
   from `wb next`, or `Workbench-Task: <task>` from `wb accept` for the last), and its base, the
   reference's parent;
@@ -3625,6 +3632,7 @@ check-ins off), not `wb start`'s.
 | `gpu_wh` | the GPU energy its rounds used so far, in Wh (the runner's `_Power`; absent for a remote model or no reading) |
 | `remote_gpu` | true when its model runs on another machine (set in `drive`): the results row carries it, and the savings say the energy wasn't measured |
 | `unrecorded` | set with an accept's or discard's closing phase, cleared once its results row is written: `{outcome, step, extra}`, what a retried accept or discard writes the row from |
+| `grants_kept` | the task's grants (`{allow, paths}`), set when it closes, before its rules directory goes: what `context.grants` reads afterwards, for `wb bench add` (#250) |
 | `session`, `sessions`, `session_mark`, `session_floor` | the OpenCode session; earlier ones; `gitops.mark` when it began; the context it had read at its first change |
 | `context` | a one-round instruction: `fresh`, `keep`, `full` (a handover happened) |
 | `full_pct`, `handovers` | the fill at the last mid-round handover; how many |
@@ -3670,7 +3678,8 @@ with overflow), `read_full`, `reviews`, `spec_rounds`, `stuck`, `took_over`.
 
 **bench/cases/<case>/case.json** (`bench.add`): `name`, `task`, `step`, `repo`, `base`,
 `reference`, `size`, `stack`, `test_cmd`, `test_timeout`, `check_cmd`, `hidden` (paths, their
-files in `hidden/`), `allow`, `paths`, `skills` (the original's), `original` (`model`, `rounds`,
+files in `hidden/`), `allow`, `paths` (the task's grants, from status `grants_kept` once its
+rules are gone), `setup`, `copy`, `siblings` (its worktree's setup: #250), `skills` (the original's), `original` (`model`, `rounds`,
 `reviews`, `minutes`, `steps`), `base_check` (`fails` or `not checked (timed out)`),
 `created_at`. **bench/runs.jsonl** (`bench.replay`): `ts`, `run`, `label`, `rep`, `case`,
 `model`, `task`, `wb_commit`, `skills`, `outcome` (`passed`, `failed`, `preempted`, `error`),

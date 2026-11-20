@@ -4360,6 +4360,35 @@ class Bench(Base):
             run_wb("bench", "add", "t-src")                               # once
         self.assertIn("t-src", run_wb("bench", "list"))
 
+    def test_a_case_keeps_the_tasks_setup_and_grants_for_its_checks_and_replays(self):
+        # #250 (the audit of 1.2): a task's --setup made an ignored stamp its tests need, and
+        # bench add rejected the accepted commit itself, its scratch clone without the stamp;
+        # and the task's grants, deleted with its rules at the close, were empty in the case
+        from workbench import bench
+        (self.repo / ".gitignore").write_text("deps/\n")
+        subprocess.run(["git", "-C", str(self.repo), "add", ".gitignore"], check=True)
+        subprocess.run(["git", "-C", str(self.repo), "commit", "-qm", "ignore deps"], check=True)
+        test = "test -f deps/stamp && sh tests/check.sh"
+        self.start("t-dep", "ok", "--test", test, "--setup", "mkdir -p deps && touch deps/stamp",
+                   "--allow", "make check*")
+        wait_phase("t-dep", {"review"})
+        wt = store.Task("t-dep").worktree
+        (wt / "tests").mkdir()
+        (wt / "tests" / "check.sh").write_text("grep -qx 42 answer.txt\n")
+        run_wb("accept", "t-dep", "-m", "feat: the answer")
+        self.assertIn("make check*", context.grants(store.Task("t-dep"))["allow"])  # its rules are gone
+        out = run_wb("bench", "add", "t-dep", "--hidden", "tests/check.sh")
+        self.assertIn("on the base: fails", out)
+        case = bench.cases()["t-dep"]
+        self.assertEqual(case["setup"], "mkdir -p deps && touch deps/stamp")
+        self.assertIn("make check*", case["allow"])
+        argv = []
+        with mock.patch.object(cli, "parser") as parser:
+            parser.return_value.parse_args.side_effect = lambda a: argv.extend(a) or mock.Mock()
+            bench._start_task(case, "m", "bench-x", Path(self.tmp.name), [], {})
+        self.assertEqual(argv[argv.index("--setup") + 1], "mkdir -p deps && touch deps/stamp")
+        self.assertEqual(argv[argv.index("--allow") + 1], "make check*")
+
     def fake_claude(self, answer: str, events: bool = False) -> Path:
         """A `claude` on PATH that writes answer.txt and prints claude -p's JSON result (with
         ``events``, as Claude Code 2.1.311 does: every event, in a list ending with it)."""
