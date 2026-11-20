@@ -134,7 +134,8 @@ installed module:
     changes; nothing is downloaded without the user's yes.
 
 ### What a handoff costs Claude, measured
-The README's "can cost Claude fewer tokens; small tasks can cost more" comes from paired runs on
+The README's "about half the tokens of writing the code itself" on bigger tasks, once the
+session is open, comes from paired runs on
 2026-11-18: the same request done by Claude alone and handed off, in Claude Code subagents on
 the same model, each result graded by hidden tests it never saw (all passed), Claude's tokens
 weighted by price (input 1, cache write 2 at the main session's 1-hour cache, cache read 0.1,
@@ -3969,7 +3970,7 @@ push: every change is a pull request that merges once `check` is green and it is
 ## Couplings: change one, change the other
 
 - **What a handoff costs Claude, measured** → THESIS.md (the case for users, with the same
-  numbers).
+  numbers) and the README's sentence on it, which links there.
 - **Anything a reader looks up** (a command, flag, default, guard, key, file, prompt text,
   environment variable) → this file, CLAUDE.md if it names it, and the skill
   (`skill/workbench/SKILL.md`) if Claude uses it there; README only for the quickstart. CLAUDE.md's
