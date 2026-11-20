@@ -6130,6 +6130,25 @@ class Setup(Base):
         self.assertEqual(wb.resolve(), (runner.PKG_ROOT / "bin/wb").resolve())
         self.assertTrue(skill.is_dir() and not skill.is_symlink())
 
+    def test_setup_says_the_path_line_for_the_users_shell_and_to_restart_claude_code(self):
+        # #274 (the audit of 1.2): "add it" was all it said, and on macOS or in a Claude Code
+        # started from the Dock or an IDE, PATH comes from places users don't know
+        home = Path(self.tmp.name) / "home"
+        os.environ.update(HOME=str(home), PATH="/usr/bin:/bin")
+        os.environ.pop("CLAUDE_CONFIG_DIR", None)
+        for shell, want in (("/bin/zsh", ">> ~/.zshrc"), ("/usr/bin/fish", "fish_add_path ~/.local/bin"),
+                            ("/bin/dash", ">> ~/.profile")):
+            os.environ["SHELL"] = shell
+            out = self.setup()[1]
+            line = next(x for x in out.splitlines() if "isn't on PATH" in x)
+            self.assertIn(want, line)
+            self.assertIn("start it again from a new terminal", line)
+        os.environ["SHELL"] = "/bin/bash"
+        with mock.patch.object(cli.sys, "platform", "darwin"):
+            self.assertIn(">> ~/.bash_profile", cli.path_advice())
+        with mock.patch.object(cli.sys, "platform", "linux"):
+            self.assertIn(">> ~/.bashrc", cli.path_advice())
+
     def test_setup_ends_with_a_first_run_checklist_that_names_each_fix_and_no_model(self):
         # #111: what a working setup still needs, each line with its fix
         home = Path(self.tmp.name) / "home"
