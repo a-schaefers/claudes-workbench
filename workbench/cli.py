@@ -1740,7 +1740,7 @@ def cmd_accept(a):
         else:
             try:
                 if not into:
-                    raise gitops.GitError(f"{repo} had a detached HEAD out; merge {spec['branch']} by hand")
+                    raise gitops.GitError(gitops.detached(repo, spec["branch"], had=True))
                 merged = gitops.merge(repo, a.name, into, spec["base"] if close["check_base"] else None,
                                       tip=tip, how=close.get("merge_as", "merge"))
             except gitops.GitError as e:
@@ -1777,6 +1777,7 @@ def cmd_accept(a):
               f"{note}: keep it current (update and commit it if this change alters what it says)")
     print(f"accepted {a.name}: commit {commit} on {spec['branch']}" +
           (f", merged into {close['merge_into']} as {merged}" if merged else
+           f"\nmerge with: {gitops.jj_merge(repo, spec['branch'])}" if gitops.jj_colocated(repo) else
            f"\nmerge with: git -C {shlex.quote(str(repo))} merge --no-ff {spec['branch']}"))
     _say(savings.line(row) or spend.line(row.get("claude")))
     _say(checked)

@@ -2857,7 +2857,12 @@ custom-node packs do run their own Python).
   of `--no-commit` or `--squash`, and success means the branch is in HEAD with no `MERGE_HEAD`
   left, else it is backed out: such a merge was left pending while accept said merged (#190). A
   conflict is backed out with `merge --abort` and reported as not merged); otherwise it prints the
-  merge command. A task started from a tag or a commit has a null
+  merge command. A colocated Jujutsu repo (`gitops.jj_colocated`: `.jj/` beside `.git`) has git's
+  HEAD detached whenever jj has moved the working copy, so its tasks record no `base_branch` and
+  `--merge` meets a detached HEAD: the refusal (`gitops.detached`) says so and names jj's merge,
+  `jj -R <repo> new @- delegate/<task>` (`gitops.jj_merge`, a merge change on the working copy's
+  parent), which the `merge with:` line gives too in place of git's: a git merge there lands on
+  the detached HEAD (#385, the audit of 1.6; checked against jj 0.47.1). A task started from a tag or a commit has a null
   `base_branch`, so any branch holding its base takes it (`cli._merge_into`: the tag was taken for
   a branch name and every such merge refused, #87; a record from before `base_branch` resolves its
   `base_ref` the same way).

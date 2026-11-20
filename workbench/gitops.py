@@ -6,6 +6,7 @@ import contextlib
 import functools
 import hashlib
 import os
+import shlex
 import shutil
 import stat
 import subprocess
@@ -662,6 +663,26 @@ def current_branch(repo: Path) -> str:
     return git(repo, "symbolic-ref", "--short", "-q", "HEAD", check=False).strip()
 
 
+def jj_colocated(repo: Path) -> bool:
+    """A Jujutsu repo colocated with git's (`.jj/` beside `.git`): jj keeps git's HEAD detached
+    once it has moved the working copy, so no task there records a branch and `wb accept --merge`
+    refused "a detached HEAD", with a git merge as the way out (#385, the audit of 1.6)."""
+    return (Path(repo) / ".jj").is_dir() and (Path(repo) / ".git").exists()
+
+
+def jj_merge(repo: Path, branch: str) -> str:
+    """The jj command that merges ``branch`` onto the working copy's parent, as a new change."""
+    return f"jj -R {shlex.quote(str(repo))} new @- {branch}"
+
+
+def detached(repo: Path, branch: str, had: bool = False) -> str:
+    """Why a merge onto the checkout's detached HEAD is refused, and how to merge instead."""
+    if jj_colocated(repo):
+        return (f"{repo} is a colocated Jujutsu repo, whose git HEAD jj keeps detached; merge "
+                f"{branch} with jj: {jj_merge(repo, branch)}")
+    return f"{repo} {'had' if had else 'has'} a detached HEAD out; merge {branch} by hand"
+
+
 def start_branch(repo: Path, base: str) -> str | None:
     """The branch a task starts from: the one checked out for HEAD, else ``base`` when it names a
     local branch; None for a detached HEAD or a commit."""
@@ -686,7 +707,7 @@ def merge(repo: Path, task: str, into: str | None = None, base: str | None = Non
         raise GitError(f"{repo} has uncommitted changes; merge {branch_name(task)} by hand")
     have = current_branch(repo)
     if not have:
-        raise GitError(f"{repo} has a detached HEAD out; merge {branch_name(task)} by hand")
+        raise GitError(detached(repo, branch_name(task)))
     if into and into != "HEAD" and have != into:
         raise GitError(f"{repo} has {have} out, not {into}; merge {branch_name(task)} by hand")
     if (tip or not into or into == "HEAD") and base and _run(

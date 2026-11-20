@@ -1339,6 +1339,36 @@ class Lifecycle(Base):
         self.assertIn("detached HEAD", err.getvalue())
         self.assertEqual(self.branch("main"), self.branch("feature"))  # neither merged
 
+    def test_a_colocated_jujutsu_repo_is_told_to_merge_with_jj(self):
+        # #385 (the audit of 1.6): jj keeps git's HEAD detached once it has moved the working
+        # copy, so accept --merge refused "a detached HEAD" and offered a git merge, whose commit
+        # a detached HEAD orphans. Built from what git sees of a colocated repo (jj 0.47.1's: a
+        # .jj/ beside .git, ignoring itself, and HEAD detached at the working copy's parent),
+        # with no jj needed
+        g = lambda *a: subprocess.run(["git", "-C", str(self.repo), *a], check=True,  # noqa
+                                      capture_output=True)
+        (self.repo / ".jj" / "repo").mkdir(parents=True)
+        (self.repo / ".jj" / ".gitignore").write_text("/*\n")
+        g("switch", "-q", "--detach", "main")
+        self.start("t-jj", "ok")
+        st = store.Task("t-jj")
+        self.assertIsNone(st.spec["base_branch"])
+        wait_phase("t-jj", {"review"})
+        err = io.StringIO()
+        with redirect_stderr(err):
+            out = not_merged("accept", "t-jj", "-m", "feat: answer", "--merge")
+        self.assertIn("colocated Jujutsu repo", err.getvalue())
+        self.assertIn(f"merge with: jj -R {self.repo} new @- delegate/t-jj", out)
+        self.assertNotIn("git -C", out)
+        # a branch recorded at start (--base main), with jj's detached HEAD out at accept
+        self.start("t-jj2", "ok", "--base", "main")
+        self.assertEqual(store.Task("t-jj2").spec["base_branch"], "main")
+        wait_phase("t-jj2", {"review"})
+        with redirect_stderr(err):
+            not_merged("accept", "t-jj2", "-m", "feat: answer", "--merge")
+        self.assertIn("merge delegate/t-jj2 with jj: jj -R", err.getvalue())
+        self.assertEqual(g("rev-parse", "HEAD").stdout, g("rev-parse", "main").stdout)
+
     def test_an_ignored_file_in_the_checkout_survives_an_accept_merge(self):
         # #189 (the 2026-11-19 audit): the task un-ignored settings.ini and committed a default,
         # and accept --merge replaced the user's own copy (git's merge overwrites ignored files)
