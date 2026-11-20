@@ -19,7 +19,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))  # run as a scri
 from unittest import mock
 
 from workbench import context, images, models, router, store, watch
-from tests.test_workbench import Base, wait_phase
+from tests.test_workbench import Base, TEST_CMD, run_wb, wait_phase
 
 
 def serve(routes: dict) -> tuple[ThreadingHTTPServer, str]:
@@ -44,23 +44,36 @@ def serve(routes: dict) -> tuple[ThreadingHTTPServer, str]:
     return srv, f"http://127.0.0.1:{srv.server_address[1]}"
 
 
-def fake_ollama(loaded: list, tags: list, posts: list, fail: dict | None = None):
+def fake_ollama(loaded: list, tags: list, posts: list, fail: dict | None = None,
+                down: Path | None = None):
     """An Ollama on a free port: /api/tags lists ``tags``, /api/ps ``loaded`` (dicts with name,
     size, size_vram); POST /api/generate is recorded in ``posts`` and loads or unloads, unless
-    ``fail`` (status, body) answers it."""
+    ``fail`` (status, body) answers it. While the file ``down`` exists it answers nothing but 503
+    (a restart), and comes back with nothing loaded."""
     class H(BaseHTTPRequestHandler):
         def reply(self, code, body):
             self.send_response(code)
             self.end_headers()
             self.wfile.write(json.dumps(body).encode())
 
+        def away(self):
+            if down and down.exists():
+                loaded.clear()
+                self.reply(503, {"error": "restarting"})
+                return True
+            return False
+
         def do_GET(self):
+            if self.away():
+                return
             body = {"/api/version": {"version": "0.40.0"}, "/api/tags": {"models": [{"name": n} for n in tags]},
                     "/api/ps": {"models": loaded}}.get(self.path)
             self.reply(200 if body is not None else 404, body or {})
 
         def do_POST(self):
             body = json.loads(self.rfile.read(int(self.headers["Content-Length"])))
+            if self.away():
+                return
             posts.append(body)
             if fail:
                 return self.reply(*fail)
@@ -456,6 +469,19 @@ class Real(unittest.TestCase):
             models.make_resident(found["nokey/a"], say=lambda m: None)
         self.assertFalse((Path(self.tmp.name) / "started").exists())   # no second copy started
         self.assertNotIn("sekret", repr(found["k/a"]))
+
+    def test_a_start_command_that_exits_at_once_paces_its_readiness_probes(self):
+        # the 2026-11-19 audit (finding 20): a start that daemonizes (systemctl, docker, cmd &)
+        # exits 0 at once, p.wait returned at once on every pass, and the loop probed back to
+        # back: 3,095 requests in 0.8 s
+        asked = []
+        url = self.server({"/v1/models": lambda h: asked.append(1) or 503})
+        self.config({"s": {"options": {"baseURL": url + "/v1"}, "models": {"a": {}}}},
+                    {"s/a": {"start": "true"}})
+        with mock.patch.object(models, "START_TIMEOUT", 3), \
+                self.assertRaisesRegex(RuntimeError, "did not come up"):
+            models.make_resident(models.resolve("s/a"), say=lambda m: None)
+        self.assertLess(len(asked), 8, len(asked))
 
     def test_an_api_key_the_agent_wont_get_makes_the_model_unavailable_with_the_fix(self):
         # probed with wb's own key it read running, and the agent, its key dropped, had every
@@ -1025,6 +1051,99 @@ class Launchers(unittest.TestCase):
         r = self.launch("wb", "pass")
         self.assertEqual(r.returncode, 0, r.stderr)
         self.assertTrue(r.stdout.startswith("wb "))
+
+
+class ServerAway(Base):
+    """A model server that is only briefly away: the 2026-11-19 audit (finding 17). make_resident
+    raised at once, so a task wb start --force queued "to wait for it" failed on its first check,
+    and an Ollama restart between rounds or under a round failed the task for good."""
+    def setUp(self):
+        super().setUp()
+        os.environ.pop("WB_FAKE_MODELS")
+        self.down = Path(self.tmp.name) / "down"
+        self.posts, self.tags = [], ["m"]
+        srv, port = fake_ollama([], self.tags, self.posts, down=self.down)
+        self.addCleanup(srv.server_close)
+        self.addCleanup(srv.shutdown)
+        Path(os.environ["WB_OPENCODE_CONFIG"]).write_text(json.dumps({"provider": {"o": {
+            "options": {"baseURL": f"http://127.0.0.1:{port}/v1"},
+            "models": {"m": {"limit": {"context": 32768}, "options": {"max_tokens": 4096}}}}}}))
+        # down, it can't say it is Ollama: models.json does
+        Path(os.environ["WB_MODELS"]).write_text(json.dumps({"o": {"engine": "ollama"}}))
+
+    def back_up(self, after: float, once_down: bool = False):
+        """Bring the server back ``after`` seconds from now, or with ``once_down`` each time it
+        goes down, ``after`` seconds later."""
+        def run():
+            if not once_down:
+                time.sleep(after)
+                return self.down.unlink(missing_ok=True)
+            deadline = time.monotonic() + 90
+            while time.monotonic() < deadline:
+                if self.down.exists():
+                    time.sleep(after)
+                    self.down.unlink(missing_ok=True)
+                time.sleep(0.1)
+        threading.Thread(target=run, daemon=True).start()
+
+    def waits(self, name):
+        rows, _ = store.read_jsonl(store.Task(name).dir / "events.jsonl")
+        return [r["text"] for r in rows if r.get("kind") == "load"
+                and not r["text"].startswith("model reloaded")]   # a wait, or a round run again
+
+    def test_a_task_forced_onto_a_server_that_is_down_waits_for_it_then_runs(self):
+        self.down.touch()
+        with self.assertRaises(SystemExit):      # wb start says --force queues it, to wait for it
+            self.start("t-down", "ok", "--test", TEST_CMD)
+        self.start("t-down", "ok", "--test", TEST_CMD, "--model", "o/m", "--force")
+        deadline = time.monotonic() + 30
+        while "waiting for" not in (store.Task("t-down").status.get("last") or "") \
+                and time.monotonic() < deadline:
+            time.sleep(0.1)
+        self.assertNotIn("t-down", str(models.holders()))     # it holds no GPU while it waits
+        self.back_up(1)
+        st = wait_phase("t-down", {"review", "stuck", "failed"}, timeout=90)
+        self.assertEqual(st["phase"], "review", st.get("last"))
+        self.assertTrue(st["tests"]["ok"])
+        self.assertIn("m", [p["model"] for p in self.posts])               # loaded once it was up
+        self.assertTrue(self.waits("t-down"))
+
+    def test_a_round_lost_with_its_server_runs_again_once_the_server_is_back(self):
+        os.environ["FAKE_DOWN"] = str(self.down)                      # the round takes it down
+        self.back_up(3, once_down=True)
+        self.start("t-crash", "crash", "--test", TEST_CMD, "--model", "o/m")
+        st = wait_phase("t-crash", {"review", "stuck", "failed"}, timeout=90)
+        self.assertEqual(st["phase"], "review", st.get("last"))
+        self.assertTrue(st["tests"]["ok"])                              # the round, run again
+        self.assertTrue(Path(f"{self.down}.crashed").exists())
+        self.assertTrue(self.waits("t-crash"))
+        self.assertEqual(st["round"], 1)
+
+    def test_a_server_gone_between_rounds_is_waited_for_and_the_model_loaded_again(self):
+        # the tests take it down after round 1 (an Ollama restart while they ran)
+        self.back_up(3, once_down=True)
+        self.start("t-fix", "fix", "--model", "o/m", "--auto-fix", "1", "--no-self-review",
+                   "--test", f"grep -qx 42 answer.txt || {{ touch {self.down}; exit 1; }}")
+        st = wait_phase("t-fix", {"review", "stuck", "failed"}, timeout=90)
+        self.assertEqual(st["phase"], "review", st.get("last"))
+        self.assertTrue(st["tests"]["ok"])
+        self.assertEqual(st["round"], 2)
+        self.assertTrue(self.waits("t-fix"))
+        self.assertEqual([p["model"] for p in self.posts if p.get("keep_alive") != 0], ["m", "m"])
+
+    def test_a_crash_with_the_server_up_and_a_model_not_pulled_still_fail_at_once(self):
+        self.start("t-crash", "crash", "--test", TEST_CMD, "--model", "o/m")
+        st = wait_phase("t-crash", {"review", "stuck", "failed"}, timeout=30)
+        self.assertEqual((st["phase"], st["last"]), ("failed", "opencode exited 1"))
+        self.assertFalse(self.waits("t-crash"))
+        self.tags.clear()                                            # a config error: no wait
+        began = time.monotonic()
+        self.start("t-gone", "ok", "--test", TEST_CMD, "--model", "o/m", "--force")
+        st = wait_phase("t-gone", {"review", "stuck", "failed"}, timeout=30)
+        self.assertEqual(st["phase"], "failed")
+        self.assertIn("m is not pulled", st["last"])
+        self.assertLess(time.monotonic() - began, 20)
+        self.assertFalse(self.waits("t-gone"))
 
 
 class Fit(Base):

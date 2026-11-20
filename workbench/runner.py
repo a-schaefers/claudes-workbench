@@ -1268,6 +1268,56 @@ def _load_failed(task: store.Task, e: Exception) -> None:
     task.notify("failed", f"task {task.name}: could not load {task.spec['model']}: {e}")
 
 
+# A model whose server is only down (models.may_come_up: Ollama not answering, a server with no
+# start command not running) is waited for, looking again after 2 s, 4 s, ... up to a minute
+# apart, for as long as a server's first start may take. Failing at once, a task wb start --force
+# queued "to wait for it" failed on its first check, and an Ollama restart or an out-of-memory
+# kill between rounds failed the task for good (the 2026-11-19 audit). A configuration error
+# (not pulled, a refused key) still fails at once. wb stop ends the runner, and the wait with it.
+DOWN_WAIT = models.START_TIMEOUT
+DOWN_PAUSES = (2, 60)
+
+
+def _down(m: models.Model) -> bool:
+    try:
+        return models.may_come_up(models.status(m))
+    except Exception:  # the config can't be read: not a server that is down
+        return False
+
+
+def _wait_up(task: store.Task, m: models.Model) -> None:
+    """Wait, backing off, until the model's server is no longer only down; RuntimeError past
+    DOWN_WAIT. Whatever it is then, the caller's load says."""
+    deadline, pause = time.monotonic() + DOWN_WAIT, DOWN_PAUSES[0]
+    said = False
+    while (st := models.status(m)) and models.may_come_up(st):
+        left = deadline - time.monotonic()
+        if left <= 0:
+            raise RuntimeError(f"{m.id} can't run: {st['why']}, for {DOWN_WAIT // 60} min"
+                               + (f": {fix}" if (fix := models.remedy(m, st)) else ""))
+        msg = (f"waiting for {m.id}: {st['why']} (up to {left / 60:.0f} min more; wb stop gives "
+               "up)")
+        task.set_status(last=msg)
+        if not said:
+            task.event({"ts": store.now(), "round": task.status.get("round", 1), "kind": "load",
+                        "text": msg})
+            said = True
+        time.sleep(min(pause, left))
+        pause = min(pause * 2, DOWN_PAUSES[1])
+
+
+def _load(task: store.Task, lease, m: models.Model) -> float:
+    """``lease.load()``, and once more after waiting when it failed because the server is only
+    down (an Ollama restarting between rounds)."""
+    try:
+        return lease.load()
+    except (KeyError, RuntimeError, OSError):
+        if not _down(m):
+            raise
+    _wait_up(task, m)
+    return lease.load()
+
+
 def drive(task: store.Task) -> None:
     task.set_status(phase="queued", last="waiting for the GPU", pid=os.getpid())
     say = lambda msg: task.set_status(last=msg)  # noqa: E731
@@ -1280,6 +1330,11 @@ def drive(task: store.Task) -> None:
         task.set_status(remote_gpu=True)  # so its savings say the energy wasn't measured (#117)
     if not _prepare(task):  # the project as the user has it, before the base check (#201)
         return
+    if _down(m):  # before the lease: a server that is down holds no GPU from other tasks
+        try:
+            _wait_up(task, m)
+        except RuntimeError as e:
+            return _load_failed(task, e)
     st = task.status
     if (task.spec.get("test_cmd") and not task.spec.get("no_base_check")
             and "base_check" not in st and st.get("round", 1) == 1):
@@ -1287,7 +1342,7 @@ def drive(task: store.Task) -> None:
     # beside the running tasks' models when all fit the GPU, else alone once they finish
     with models.GpuLease(m, task.name, say) as lease:
         try:
-            secs = lease.load()
+            secs = _load(task, lease, m)
             window = (m.config.get("limit") or {}).get("context")
             task.set_status(load_secs=round(secs, 1), window=window)
             own = task.spec.get("self_review")  # --self-review / --no-self-review, else learned
@@ -1297,6 +1352,7 @@ def drive(task: store.Task) -> None:
             return _load_failed(task, e)
         handed = 0  # mid-round handovers in this runner: one review round (HANDOVER_MAX)
         first = True
+        revived = None  # the round run again after its server went away under it
         while True:
             if not first:
                 # Again before every round: each request resets Ollama's keep-alive to its own
@@ -1304,7 +1360,7 @@ def drive(task: store.Task) -> None:
                 # auto-fix round's think budget paid for loading it (the 2026-11-16 audit).
                 # Resident already, this is one look at the server.
                 try:
-                    if (again := lease.load()) > 0:
+                    if (again := _load(task, lease, m)) > 0:
                         task.set_status(load_secs=round(task.status.get("load_secs", 0) + again, 1))
                         task.event({"ts": store.now(), "round": task.status["round"], "kind": "load",
                                     "text": f"model reloaded ({again:.0f}s)"})
@@ -1337,6 +1393,20 @@ def drive(task: store.Task) -> None:
                                 "window; split it (wb next) or take it over")
             if rnd["interrupted"] or (pending_steer(task) and not rnd["stuck"]):
                 _steer_round(task, n, rnd["interrupted"])
+                continue
+            if not rnd["stuck"] and rnd["exit"] not in (0, None) and not rnd["texts"] \
+                    and revived != n and _down(m):
+                # OpenCode died without a word while the model's server is down (restarted, or
+                # killed out of memory): the round never reached the model. Once it is back, the
+                # loop's load reloads it and the round runs again, once (the 2026-11-19 audit).
+                revived = n
+                task.event({"ts": store.now(), "round": n, "kind": "load",
+                            "text": f"opencode exited {rnd['exit']} with the model's server down: "
+                                    "the round runs again once it is back"})
+                try:
+                    _wait_up(task, m)
+                except RuntimeError as e:
+                    return _load_failed(task, e)
                 continue
             if rnd["stuck"] or (rnd["exit"] not in (0, None) and not rnd["texts"]):
                 text = summary_text(task, n, rnd, None) + _undelivered(task)

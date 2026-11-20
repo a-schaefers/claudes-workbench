@@ -838,24 +838,30 @@ def make_resident(m: Model, say=print, keep=(), warn=None) -> float:
         say(f"starting {m.id}")
         p = subprocess.Popen(m.start, shell=True, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
                              stderr=subprocess.DEVNULL, start_new_session=True)
-        began, failed_at = time.time(), None
+        began, failed_at = time.monotonic(), None
         deadline = began + START_TIMEOUT
         while not (now := status(m))["resident"]:
-            if not now["available"] and time.time() >= began + START_GRACE:
+            if not now["available"] and time.monotonic() >= began + START_GRACE:
                 raise RuntimeError(f"{m.id}: {now['why']}")  # it answers as something else
             # a start command that fails at once used to be waited on for 20 min (the 2026-11-16
             # audit); exit 0 is a start that daemonizes (systemctl start, docker start, cmd &)
             if failed_at is None and p.poll():
-                failed_at = time.time()
-            if failed_at and time.time() >= failed_at + START_GRACE:
+                failed_at = time.monotonic()
+            if failed_at and time.monotonic() >= failed_at + START_GRACE:
                 raise RuntimeError(f"{m.id}'s start command exited {p.returncode} and nothing "
                                    f"answers; run it by hand to see why: {m.start}")
-            if time.time() > deadline:
+            if time.monotonic() > deadline:
                 raise RuntimeError(f"{m.id} did not come up within {START_TIMEOUT // 60} min")
-            try:
-                p.wait(timeout=1 if failed_at else 5)  # returns at once when the command exits
-            except subprocess.TimeoutExpired:
-                pass
+            # the next probe on a clock of its own: p.wait returns at once once the command has
+            # exited, and a start that daemonizes left the loop probing back to back (3,095
+            # requests in 0.8 s: the 2026-11-19 audit)
+            due = min(time.monotonic() + (1 if failed_at else 5), deadline + 0.01)
+            if p.poll() is None:
+                try:
+                    p.wait(timeout=max(due - time.monotonic(), 0))
+                except subprocess.TimeoutExpired:
+                    pass
+            time.sleep(max(due - time.monotonic(), 0))
     return time.time() - t0
 
 
