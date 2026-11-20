@@ -17,7 +17,7 @@ import subprocess
 import sys
 import time
 from collections import defaultdict
-from contextlib import redirect_stderr, redirect_stdout
+from contextlib import contextmanager, redirect_stderr, redirect_stdout
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -396,13 +396,25 @@ def _local_claude_md(repo: Path) -> bool:
 PROJECT_MEMORY = ("CLAUDE.md", ".claude/CLAUDE.md")
 
 
-def _claude_md_at(repo: Path, ref: str) -> str | None:
-    """The first of PROJECT_MEMORY committed at ``ref``, or None."""
-    return next((p for p in PROJECT_MEMORY if _has_file(repo, ref, p)), None)
+def _claude_md_at(repo: Path, ref: str, under: str = "") -> str | None:
+    """The first of PROJECT_MEMORY committed at ``ref`` (in directory ``under``), or None."""
+    return next((p for p in PROJECT_MEMORY if _has_file(repo, ref, f"{under}/{p}".lstrip("/"))), None)
 
 
-def _need_claude_md(repo: Path, base: str, a) -> None:
-    if a.no_claude_md:
+def _package(repo: Path, given: Path, base: str) -> str | None:
+    """``given`` below the repo's top, when it has a CLAUDE.md of its own at ``base``: a monorepo's
+    package, where the agent, the setup and the tests then run (task.json `subdir`). From
+    packages/app, wb start refused the repo for a CLAUDE.md at its root, and the agent worked
+    from the root (#375, the audit of 1.6). A plain subdirectory still means the whole repo."""
+    try:
+        sub = given.relative_to(repo).as_posix()
+    except ValueError:
+        return None
+    return sub if sub != "." and _claude_md_at(repo, base, sub) else None
+
+
+def _need_claude_md(repo: Path, base: str, a, sub: str | None = None) -> None:
+    if a.no_claude_md or sub:  # a package's own CLAUDE.md counts
         return
     if not _claude_md_at(repo, base) and _local_claude_md(repo):
         print("note: CLAUDE.md is gitignored: the agent gets your checkout's copy")
@@ -419,6 +431,12 @@ def _identity(repo: Path) -> bool:
     length and only wb accept found out (the 2026-11-16 audit)."""
     return all(gitops.git(repo, "var", v, check=False).strip()
                for v in ("GIT_AUTHOR_IDENT", "GIT_COMMITTER_IDENT"))
+
+
+def _signed(spec: dict, a) -> bool:
+    """Whether accept's or next's commit is signed as the user's git says: not after --no-sign,
+    given at start (task.json `sign`) or now (#374)."""
+    return spec.get("sign", True) and not getattr(a, "no_sign", False)
 
 
 def _lane_fits(repo: Path, test: str | None, *, off: bool = False) -> None:
@@ -614,7 +632,12 @@ def cmd_start(a):
     if not _identity(repo):
         die("git has no user.name/user.email here: the user's identity signs the commits "
             "(git config --global user.name/user.email)")
-    _need_claude_md(repo, a.base, a)
+    sub = _package(repo, Path(a.repo).resolve(), a.base)
+    _need_claude_md(repo, a.base, a, sub)
+    if sub:
+        print(f"package: {sub} (its own CLAUDE.md): the agent, the setup and the tests run there")
+    if not a.no_sign:  # said now, not after the whole task at wb accept (#374)
+        _say(gitops.sign_problem(repo, a.base))
     setup = _worktree_setup(repo, a)
     _disk_room(repo, a.base, setup)
     # Two projects, one GPU: a task that can't run beside the GPU's holders used to queue in
@@ -629,11 +652,16 @@ def cmd_start(a):
     try:
         task.dir.mkdir(parents=True)
     except FileExistsError:  # a start under way, or one that died before task.json
-        die(f"{task.dir} exists without a task.json: another wb start {a.name} is under way or "
-            "one failed; pick a new name")
+        if (half := _dead_start(task)) is None:
+            die(f"{task.dir} exists without a task.json: another wb start {a.name} is under way; "
+                "pick a new name")
+        _drop_start(task, half)  # killed (Claude's Bash limit): its name was refused for good (#376)
+        task.dir.mkdir(parents=True)
     try:
         wt = context.tree(task.dir, repo, setup.get("siblings"), "worktree")  # #261
         wt.parent.mkdir(parents=True, exist_ok=True)
+        store.write_json(task.dir / STARTING, {"repo": str(repo), "worktree": str(wt),
+                                               "pid": os.getpid(), "at": store.now()})
         base = gitops.create_worktree(repo, a.name, wt, a.base)
     except gitops.GitError as e:
         shutil.rmtree(task.dir, ignore_errors=True)  # create_worktree removed its own leftovers
@@ -671,6 +699,8 @@ def cmd_start(a):
         **({"bench": b} if (b := getattr(a, "bench", None)) else {}),
         **({"no_base_check": True} if a.no_base_check else {}),
         **({"unload_for_tests": True} if getattr(a, "unload_for_tests", False) else {}),
+        **({"sign": False} if a.no_sign else {}),
+        **({"subdir": sub} if sub else {}),
         "auto_fix": a.auto_fix, "ask_budget": budget, "ask_timeout": a.ask_timeout,
         # periodic check-ins are opt-in: each wakes Claude, re-reading its whole context, and they
         # were 500K of one task's 1.2M (2026-11-17); the pane shows progress, and the warnings
@@ -680,6 +710,7 @@ def cmd_start(a):
         "silence_timeout": a.silence_timeout or limits["silence"],
         "think_timeout": a.think_timeout if a.think_timeout is not None else limits["think"],
         "created_at": store.now(), "wb_version": __version__})
+    (task.dir / STARTING).unlink(missing_ok=True)  # a task now: wb discard drops it from here on
     prompt = spec_text.rstrip() + PROTOCOL.format(branch=gitops.branch_name(a.name),
                                                   test_line=test_line(a.test), budget=budget)
     task.round_dir(1).mkdir(parents=True)
@@ -849,7 +880,7 @@ def cmd_next(a):
         try:
             commit = gitops.commit_all(task.worktree, f"{a.message}\n\nWorkbench-Task: {a.name} "
                                        f"(step {step})\nOpenCode-Session: {st.get('session')}",
-                                       a.include)
+                                       a.include, _signed(spec, a))
         except gitops.GitError as e:
             die(str(e))
     _spec_gaps(task, a.spec_gap)  # after the commit: a retry after a failed one counts them once
@@ -1579,6 +1610,21 @@ def cmd_takeover(a):
           f"wb feedback {a.name} --message <file>")
 
 
+@contextmanager
+def _ends_cleanly():
+    """SIGTERM and SIGHUP end the command as an error would, so its cleanups run: the tests' group
+    killed and swept (run_in_lane's finally), the scratch clone removed. Killed by Claude's Bash at
+    its 2 minutes, wb verify left a clone and a test still running (#372, the audit of 1.6)."""
+    def end(signum, _frame):
+        raise SystemExit(128 + signum)
+    old = {s: signal.signal(s, end) for s in (signal.SIGTERM, signal.SIGHUP)}
+    try:
+        yield
+    finally:
+        for s, h in old.items():
+            signal.signal(s, h)
+
+
 def cmd_verify(a):
     """A regression test on the base and on the candidate, each in a scratch checkout under the
     task's lane (#96): whether the test shows the bug the change fixes."""
@@ -1592,7 +1638,8 @@ def cmd_verify(a):
     if not cmd:
         die("name the regression test's command: --test '<cmd>'")
     try:
-        r = verify.run(task, cmd, a.files, a.timeout, a.expect or "", a.setup)
+        with _ends_cleanly():
+            r = verify.run(task, cmd, a.files, a.timeout, a.expect or "", a.setup)
     except (RuntimeError, gitops.GitError) as e:
         die(str(e))
     print("\n".join(verify.lines(r)))
@@ -1605,7 +1652,8 @@ def cmd_shot(a):
     if task.status.get("phase") in store.CLOSED | store.ACTIVE:
         die(f"{a.name} is {task.status.get('phase')}: capture it at review")
     try:
-        m = verify.shot(task, a.capture, a.files, a.viewport, a.timeout, a.setup)
+        with _ends_cleanly():
+            m = verify.shot(task, a.capture, a.files, a.viewport, a.timeout, a.setup)
     except (RuntimeError, gitops.GitError) as e:
         die(str(e))
     print("\n".join(verify.shot_lines(m)))
@@ -1663,7 +1711,7 @@ def cmd_accept(a):
             if not commit:
                 head = gitops.git(task.worktree, "rev-parse", "HEAD").strip()
                 if gitops.changed(task.worktree) or head == spec["base"]:
-                    commit = gitops.commit_all(task.worktree, msg, a.include)
+                    commit = gitops.commit_all(task.worktree, msg, a.include, _signed(spec, a))
                 else:  # nothing new: the branch's commits past the base are the work (the steps
                     # wb next committed, or Claude's own after a takeover: the audit)
                     commit = gitops.git(task.worktree, "rev-parse", "--short", "HEAD").strip()
@@ -1772,6 +1820,53 @@ def _finish_record(task: store.Task) -> bool:
 
 GC_EVERY = 86400  # a close runs gc at most once a day (gc.json): a task closed is a moment's work
 RULES_GRACE = 3600  # a rules directory with no task yet may be a start in progress
+STARTING = "starting.json"  # a start's repo, worktree and pid, until its task.json is written (#376)
+
+
+def _dead_start(task: store.Task) -> dict | None:
+    """A half-made start of ``task`` whose wb start is gone: its starting.json ({} when it died
+    before writing one and RULES_GRACE has passed), or None while it may still be under way."""
+    if task.exists or not task.dir.is_dir():
+        return None
+    info = store.read_json(task.dir / STARTING)
+    if isinstance(info, dict) and isinstance(info.get("pid"), int):
+        return None if models._alive(info["pid"]) else info
+    try:
+        young = time.time() - task.dir.stat().st_mtime < RULES_GRACE
+    except OSError:
+        return None
+    return None if young else {}
+
+
+def _drop_start(task: store.Task, info: dict) -> None:
+    """Undo a half-made start: its worktree and registration, its branch (it holds no work: the
+    agent never ran), its directory and its rules."""
+    repo = Path(info.get("repo") or "/nonexistent")
+    if repo.is_dir():
+        if info.get("worktree"):
+            gitops.remove_worktree(repo, Path(info["worktree"]))
+        gitops.git(repo, "worktree", "prune", check=False)
+        gitops.delete_branch(repo, task.name)
+    gitops._rmtree(task.dir)
+    shutil.rmtree(context.rules_dir(task), ignore_errors=True)
+
+
+def _drop_scratches() -> int:
+    """The scratch directories (store.SCRATCH_PREFIXES) SCRATCH_AGE old whose maker is gone (#376)."""
+    n = 0
+    for d in sorted(store.home().iterdir()) if store.home().is_dir() else []:
+        pre = next((p for p in store.SCRATCH_PREFIXES if d.name.startswith(p)), None)
+        if not pre or not d.is_dir() or d.is_symlink():
+            continue
+        pid = d.name[len(pre):].split("-")[0]
+        try:
+            old = time.time() - d.stat().st_mtime > store.SCRATCH_AGE
+        except OSError:
+            continue
+        if old and not (pid.isdigit() and models._alive(int(pid))):
+            gitops._rmtree(d)
+            n += 1
+    return n
 
 
 def _keep_grants(task: store.Task) -> None:
@@ -1811,6 +1906,13 @@ def gc(days: float = store.ARCHIVE_DAYS, branches: bool = False) -> dict:
             shutil.rmtree(d, ignore_errors=True)
             out["rules"] += 1
     out["runtime"] = context.drop_stale_runtime_dirs(store.all_tasks())
+    out["scratch"] = _drop_scratches()
+    out["starts"] = 0
+    for d in sorted(store.tasks_dir().iterdir()) if store.tasks_dir().is_dir() else []:
+        t = store.Task(d.name)
+        if store.NAME_RE.match(d.name) and (half := _dead_start(t)) is not None:
+            _drop_start(t, half)
+            out["starts"] += 1
     out["branches"] = _merged_branches() if branches else 0
     store.write_json(store.home() / "gc.json", {"at": store.now(), **out})
     return out
@@ -1874,7 +1976,8 @@ def cmd_gc(a):
     out = gc(a.days, branches=True)
     print(f"archived {out['archived']} task(s) closed over {a.days:g} days ago; moved "
           f"{out['notices']} old notice(s) to notify.old.jsonl; removed {out['rules']} rules "
-          f"dir(s), {out['runtime']} runtime dir(s), {out['branches']} merged branch(es)")
+          f"dir(s), {out['runtime']} runtime dir(s), {out['scratch']} scratch dir(s), "
+          f"{out['starts']} half-made start(s), {out['branches']} merged branch(es)")
 
 
 def _landed(task: store.Task) -> str | None:
@@ -2808,8 +2911,19 @@ def cmd_init(a):
 # a thousand finished tasks were 4,000 inotify watches per Claude session, or a rescan of them
 # four times a second without inotify (the 2026-11-16 audit).
 EVENT_SKIP = ("tasks/*/worktree", "tasks/*/tree", "tasks/*/rounds", "rules", "imports", "images",
-              "archive")  # clones (tree/: one nested for a sibling further up, #261), outputs
+              "archive",  # clones (tree/: one nested for a sibling further up, #261), outputs
+              # and the scratch clones and indexes (the base check, verify, shot, bench, a
+              # submodule fill, a merge): one with a copied node_modules took a wb events from 2
+              # watched directories to 605, and each write there woke the mod (#373, the audit
+              # of 1.6)
+              *(SCRATCH := (".?*", "wb-index-*", "wb-merge-*")))  # .?*: not "." (the home itself)
 QUIET = (".lock", ".tmp", "runner.log")
+
+
+def _scratch(rel: str) -> bool:
+    """Whether a path under the state directory is in a scratch clone or index (SCRATCH)."""
+    top = rel.split("/")[0]
+    return any(fnmatch.fnmatch(top, pat) for pat in SCRATCH)
 
 
 def cmd_events(a):
@@ -2826,8 +2940,9 @@ def cmd_events(a):
     reaped = time.time()
     with Watcher(home, recursive=True, skip=EVENT_SKIP + closed) as w:
         while os.getppid() == parent:
-            changed = {str(p.relative_to(home)) for p in w.wait(10)
-                       if not p.name.endswith(QUIET) and not p.name.startswith(".")}
+            changed = {rel for p in w.wait(10)
+                       if not p.name.endswith(QUIET) and not p.name.startswith(".")
+                       and not _scratch(rel := str(p.relative_to(home)))}
             if time.time() - reaped > 60:  # a runner that died silently: its failed notice
                 reaped = time.time()       # wakes the mod like any other (reap)
                 for t in store.all_tasks():
@@ -3495,6 +3610,8 @@ def parser() -> argparse.ArgumentParser:
                    help="seconds the acceptance command may run (default 900)")
     s.add_argument("--unload-for-tests", action="store_true",
                    help="unload the model before each test run, for tests that need the GPU")
+    s.add_argument("--no-sign", action="store_true",
+                   help="commit this task's work unsigned, whatever commit.gpgsign says")
     s.add_argument("--no-base-check", action="store_true",
                    help="don't run the acceptance command once on the base before the agent starts")
     s.add_argument("--base", default="HEAD")
@@ -3544,6 +3661,8 @@ def parser() -> argparse.ArgumentParser:
     s.add_argument("--test", help="the next step's acceptance command (default: unchanged)")
     s.add_argument("--include", action="store_true", help="commit it even with more than "
                    f"{gitops.NEW_FILES_MAX} new files or a large new binary (build output?)")
+    s.add_argument("--no-sign", action="store_true",
+                   help="commit it unsigned, whatever commit.gpgsign says (a key that needs unlocking)")
     s.add_argument("--fresh", action="store_true", help="a fresh session instead of the same one")
     s.add_argument("--take-claude-md", action="store_true",
                    help="put the agent's proposed CLAUDE.md/AGENTS.md (<name>.proposed) over the "
@@ -3739,6 +3858,8 @@ def parser() -> argparse.ArgumentParser:
                    "only, or one squashed commit, for a repo kept to linear history")
     s.add_argument("--include", action="store_true", help="commit it even with more than "
                    f"{gitops.NEW_FILES_MAX} new files or a large new binary (build output?)")
+    s.add_argument("--no-sign", action="store_true",
+                   help="commit it unsigned, whatever commit.gpgsign says (a key that needs unlocking)")
     s.add_argument("--take-claude-md", action="store_true",
                    help="put the agent's proposed CLAUDE.md/AGENTS.md (<name>.proposed) over the "
                    "file before committing; without it they are dropped")

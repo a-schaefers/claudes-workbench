@@ -39,6 +39,7 @@ import shutil
 import socket
 import stat
 import subprocess
+import sys
 import time
 import urllib.error
 import urllib.parse
@@ -103,12 +104,28 @@ def server_key(url: str, remote: bool = False) -> tuple:
 
 
 def _config_dir() -> Path:
+    """OpenCode's global directory as OpenCode 2.3 takes it: $OPENCODE_CONFIG_DIR, else
+    $XDG_CONFIG_HOME/opencode. A user keeping it in a dotfiles directory had "no local models"
+    (#370, the audit of 1.6)."""
+    if os.environ.get("OPENCODE_CONFIG_DIR"):
+        return Path(os.environ["OPENCODE_CONFIG_DIR"]).expanduser().absolute()
     return Path(os.environ.get("XDG_CONFIG_HOME") or Path.home() / ".config") / "opencode"
 
 
+def _system_dir() -> Path:
+    """The system config OpenCode layers first: an admin's, or a managed install's (#370)."""
+    return Path("/Library/Application Support/opencode" if sys.platform == "darwin" else "/etc/opencode")
+
+
+def _system_files() -> list[Path]:
+    d = _system_dir()
+    return [d / "opencode.json", d / "opencode.jsonc"]
+
+
 def opencode_config_path() -> Path:
-    """OpenCode's global config, where OpenCode reads it: $XDG_CONFIG_HOME/opencode (default
-    ~/.config/opencode, on macOS too), opencode.json or opencode.jsonc: the one wb writes."""
+    """OpenCode's global config, where OpenCode reads it: $OPENCODE_CONFIG_DIR, else
+    $XDG_CONFIG_HOME/opencode (default ~/.config/opencode, on macOS too), opencode.json or
+    opencode.jsonc: the one wb writes."""
     if os.environ.get("WB_OPENCODE_CONFIG"):
         return Path(os.environ["WB_OPENCODE_CONFIG"])
     d = _config_dir()
@@ -131,12 +148,13 @@ def _users_config() -> Path | None:
 
 
 def opencode_config_files() -> list[Path]:
-    """Every file OpenCode layers, in its order: opencode.json, then opencode.jsonc (both when
-    both exist: checked on OpenCode 2.3, the 2026-11-16 audit), then the user's OPENCODE_CONFIG.
-    $WB_OPENCODE_CONFIG alone. Unread, the user's OPENCODE_CONFIG hid its providers from wb (the
-    2026-11-19 audit)."""
+    """Every file OpenCode layers, in its order: the system directory's, then the global
+    directory's opencode.json, then opencode.jsonc (both when both exist: checked on OpenCode 2.3,
+    the 2026-11-16 audit), then the user's OPENCODE_CONFIG. $WB_OPENCODE_CONFIG alone. Unread, the
+    user's OPENCODE_CONFIG hid its providers from wb (the 2026-11-19 audit), and so did the system
+    file (#370)."""
     paths = [Path(os.environ["WB_OPENCODE_CONFIG"])] if os.environ.get("WB_OPENCODE_CONFIG") else \
-        [*_global_files(), *filter(None, [_users_config()])]
+        [*_system_files(), *_global_files(), *filter(None, [_users_config()])]
     return [p for p in paths if p.exists()]
 
 
@@ -226,7 +244,7 @@ def agent_providers() -> dict:
     global files itself. Left out, a model wb found ready was "Model unavailable" to the agent
     before any request reached its server (the 2026-11-19 audit). Templates stay templates, a
     relative {file:} made absolute: the layer lives elsewhere."""
-    own = {p.resolve() for p in _global_files() if p.exists()}
+    own = {p.resolve() for p in (*_system_files(), *_global_files()) if p.exists()}
     out: dict = {}
     for path, layer in _layers():
         if path.resolve() in own:
@@ -242,7 +260,8 @@ def config_target(change: str) -> Path:
     """The file write_config would write, or RuntimeError saying why it won't (and ``change``, to
     make by hand). Asked first by a change that does something else before writing: wb optimize
     made its Ollama variant, then the config refused it (#266, the audit of 1.2)."""
-    files = opencode_config_files()
+    system = {p.resolve() for p in _system_files() if p.exists()}  # an admin's: never written (#370)
+    files = [f for f in opencode_config_files() if f.resolve() not in system]
     if len(files) > 1:
         raise RuntimeError(f"OpenCode layers {' and '.join(map(str, files))}; wb won't rewrite "
                            f"either: make this change by hand: {change}")

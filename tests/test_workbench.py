@@ -2845,12 +2845,35 @@ class Watch(Base):
             changed_until("tasks/live/probe")
             (home / "tasks/old/status.json").write_text('{"phase": "accepted", "trial": true}')
             (home / "rules/live/grants.json").write_text("{}")
+            # #373 (the audit of 1.6): a scratch clone with a copied node_modules added a watch
+            # per directory, and each write there woke the mod
+            mods = home / ".verify-abc" / "repo" / "node_modules"
+            for i in range(30):
+                (mods / f"p{i}").mkdir(parents=True)
+                (mods / f"p{i}" / "index.js").write_text("x")
+            (home / "wb-index-x").mkdir()
+            (home / "wb-index-x" / "index").write_text("x")
+            time.sleep(0.3)
+            for i in range(30):
+                (mods / f"p{i}" / "index.js").write_text("y")
             time.sleep(0.3)
             (home / "tasks/live/status.json").write_text('{"phase": "review"}')
             self.assertEqual(changed_until("tasks/live/status.json"), ["tasks/live/status.json"])
         finally:
             p.kill()
             p.wait()
+
+    def test_wb_events_watches_no_scratch_clone(self):
+        # #373: 300 package directories under .verify-abc took the watcher from 2 to 605
+        from workbench.watch import Watcher
+        home = store.home()
+        (home / "tasks").mkdir(parents=True, exist_ok=True)
+        for scratch in (".verify-abc/repo", ".base-x", "wb-merge-y", "wb-index-z"):
+            for i in range(20):
+                (home / scratch / "node_modules" / f"p{i}").mkdir(parents=True)
+        with Watcher(home, recursive=True, skip=cli.EVENT_SKIP) as w:
+            watched = {str(d.relative_to(home)) for d in w.dirs.values()}
+        self.assertEqual(watched, {".", "tasks"})
 
     def test_session_commands_never_need_opencodes_background_service(self):
         # the fake, like OpenCode with another service on the managed port, refuses without
@@ -3164,6 +3187,32 @@ class ConfigLayer(Base):
         layer = json.loads(runner.write_config_layer(store.Task("t-alt")).read_text())
         self.assertNotIn("provider", layer)        # the global files: OpenCode loads them itself
 
+    def test_opencodes_config_is_read_from_its_config_dir_and_the_system_file_first(self):
+        # #370 (the audit of 1.6, reproduced): OPENCODE_CONFIG_DIR held the user's providers and
+        # wb said "no local models"; an admin's /etc/opencode was never read either
+        from workbench import models
+        tmp = Path(self.tmp.name)
+        mine, system = tmp / "dotfiles" / "opencode", tmp / "etc-opencode"
+        mine.mkdir(parents=True)
+        system.mkdir()
+        (system / "opencode.json").write_text(json.dumps({"provider": {
+            "strata": OPENCODE_CONFIG["provider"]["strata"]}, "model": "strata/strata"}))
+        (mine / "opencode.json").write_text(json.dumps({"provider": {
+            "ollama": OPENCODE_CONFIG["provider"]["ollama"]}, "model": "ollama/qwen3.8-27b"}))
+        del os.environ["WB_OPENCODE_CONFIG"]
+        os.environ["OPENCODE_CONFIG_DIR"] = str(mine)
+        with mock.patch.object(models, "_system_dir", return_value=system):
+            self.assertEqual(models.opencode_config_files(),
+                             [system / "opencode.json", mine / "opencode.json"])
+            found = models.discover()
+            self.assertIn("strata/strata", found)                          # the admin's
+            self.assertIn("ollama/qwen3.8-27b", found)                     # the user's
+            self.assertEqual(models.read_config()["model"], "ollama/qwen3.8-27b")  # the user's wins
+            self.assertEqual(models.config_target("x"), mine / "opencode.json")   # never the system's
+            (mine / "opencode.json").unlink()
+            self.assertEqual(models.config_target("x"), mine / "opencode.json")
+            self.assertFalse(models.agent_providers())    # OpenCode loads both itself
+
     def test_the_users_own_config_content_reaches_wb_and_the_agent_under_the_rules(self):
         # #347, the audit of 1.4: rules_env replaced the user's OPENCODE_CONFIG_CONTENT with the
         # rules alone, and wb never read it, so a provider kept there was lost to both
@@ -3446,6 +3495,71 @@ class RealOpenCode(Base):
         self.assertNotIn("<id>workbench</id>", text)
         self.assertIn("CANARY-HANDED", text)              # a handed skill is listed to the model
         self.assertNotIn("CANARY-KEPT", text)             # and the rest of the library is not
+
+    def test_wb_reads_the_config_files_opencode_reads_under_opencode_config_dir(self):
+        # #370 (the audit of 1.6): OpenCode 2.3 takes its global directory from
+        # OPENCODE_CONFIG_DIR, and wb read ~/.config/opencode
+        from workbench import models
+        mine = Path(self.tmp.name) / "dotfiles"
+        mine.mkdir()
+        (mine / "opencode.json").write_text(json.dumps({"provider": {
+            "ollama": OPENCODE_CONFIG["provider"]["ollama"]}}))
+        (mine / "opencode.jsonc").write_text("{// a comment\n}")
+        del os.environ["WB_OPENCODE_CONFIG"]
+        os.environ.pop("OPENCODE_CONFIG", None)
+        os.environ["OPENCODE_CONFIG_DIR"] = str(mine)
+        empty = Path(tempfile.mkdtemp())    # no project config there or above (OpenCode looks up)
+        self.addCleanup(shutil.rmtree, empty, True)
+        out = subprocess.run(["opencode", "debug", "config", "--standalone"], cwd=empty,
+                             env={**os.environ, "PWD": str(empty)}, capture_output=True, text=True,
+                             timeout=60).stdout
+        theirs = [Path(x["path"]) for x in json.loads(out[out.index("["):])
+                  if x.get("type") == "document"]
+        self.assertEqual(models.opencode_config_files(), theirs)
+        self.assertIn("ollama/qwen3.8-27b", models.discover())
+
+    def test_personal_skills_in_agents_stay_out_and_the_projects_stay_in(self):
+        # #371 (the audit of 1.6, reproduced): OpenCode reads ~/.agents/skills as well as
+        # ~/.claude/skills, and the first reached every agent
+        from workbench import runner
+        home = Path(self.tmp.name) / "home"
+        for where, name in ((home / ".agents" / "skills", "personal-agents"),
+                            (home / ".claude" / "skills", "personal-claude"),
+                            (self.repo / ".agents" / "skills", "project-agents")):
+            write_skill(where / name, name, f"Use when CANARY-{name.upper()}.")
+        subprocess.run(["git", "-C", str(self.repo), "add", ".agents"], check=True)
+        subprocess.run(["git", "-C", str(self.repo), "commit", "-qm", "a skill"], check=True)
+        env = {k: v for k, v in os.environ.items() if not k.startswith("XDG_")}
+        with mock.patch.dict(os.environ, {"HOME": str(home)}, clear=False):
+            for k in [k for k in os.environ if k.startswith("XDG_")]:
+                os.environ.pop(k)
+            self.start("t-skl", "ok")
+            wait_phase("t-skl", {"review"})
+            task = store.Task("t-skl")
+            layer_path = runner.write_config_layer(task)
+        with socket.socket() as sock:
+            sock.bind(("127.0.0.1", 0))
+            port = sock.getsockname()[1]
+        out = Path(self.tmp.name) / "skills-requests.jsonl"
+        server = subprocess.Popen([sys.executable, str(ROOT / "tests" / "capture_llm.py"),
+                                   str(port), str(out)])
+        self.addCleanup(server.kill)
+        layer = json.loads(layer_path.read_text())
+        layer["provider"] = {"cap": {
+            "npm": "@ai-sdk/openai-compatible",
+            "options": {"baseURL": f"http://127.0.0.1:{port}/v1", "apiKey": "x"},
+            "models": {"cap": {"name": "capture", "tool_call": True,
+                               "limit": {"context": 32768, "output": 1024}}}}}
+        layer_path.write_text(json.dumps(layer))
+        time.sleep(0.5)
+        env.update(HOME=str(home), PWD=str(task.worktree), OPENCODE_CONFIG=str(layer_path))
+        subprocess.run(["opencode", "run", "--standalone", "-m", "cap/cap", "--format", "json",
+                        "say ok"], cwd=task.worktree, env=env, capture_output=True, timeout=120)
+        reqs = [json.loads(line) for line in out.read_text().splitlines()]
+        text = json.dumps(max(reqs, key=lambda r: len(r.get("tools", []))))
+        self.assertTrue("CANARY-PROJECT-AGENTS" in text)   # the project's own: kept
+        self.assertFalse("CANARY-PERSONAL-AGENTS" in text)  # (not assertIn: a prompt per failure)
+        self.assertFalse("CANARY-PERSONAL-CLAUDE" in text)
 
 
     def run_calls(self, name, calls, *extra, before=None):
@@ -3958,6 +4072,11 @@ class Lane(Base):
         self.assertFalse([p for p in reads
                           if p.startswith(str(home)) and ("/.ssh" in p or "/gh" in p)])
         self.assertNotIn(str(home / "letters.txt"), reads)    # the user's own files: not a dotfile
+        (home / "dotfiles" / "opencode").mkdir(parents=True)      # #370: OpenCode's config moved
+        with mock.patch.dict(os.environ, {"OPENCODE_CONFIG_DIR": str(home / "dotfiles" / "opencode")}):
+            moved = context.readable(task)
+        self.assertIn(str(home / "dotfiles" / "opencode"), moved)
+        self.assertNotIn(str(home / "dotfiles"), moved)
         script = ("import sys\nfor f in sys.argv[1:]:\n    try:\n        open(f).read()\n"
                   "        print('read')\n    except PermissionError:\n        print('refused')\n")
         files = [home / ".ssh" / "id_ed25519", home / ".config" / "gh" / "hosts.yml",
@@ -5038,6 +5157,58 @@ class Cleanup(Base):
         self.assertEqual(self.git("merge-base", "--is-ancestor", tip, "HEAD").returncode, 0)
         self.assertEqual(gitops.step_commit(task, 1, 1), tip)
         self.assertFalse((store.home() / "rules" / "t-merged").exists())
+
+    def test_a_start_killed_in_worktree_add_frees_its_name_and_gc_its_scratches(self):
+        # #376 (the audit of 1.6): a wb start killed by Claude's Bash limit left tasks/<name>/
+        # without a task.json, its branch and worktree, and the name was refused for good; killed
+        # commands' scratch clones stayed in the state directory, counted against every new task
+        shim = Path(self.tmp.name) / "slow-git"
+        shim.mkdir()
+        real = shutil.which("git")
+        (shim / "git").write_text(f'#!/bin/sh\ncase " $* " in *" worktree add "*) '
+                                  f'{real} "$@"; sleep 300;; esac\nexec {real} "$@"\n')
+        (shim / "git").chmod(0o755)
+        g = lambda *a: subprocess.run(["git", "-C", str(self.repo), *a], capture_output=True,  # noqa
+                                      text=True).stdout
+
+        def killed_start(name):  # killed once its worktree and branch exist: no cleanup at all
+            proc = subprocess.Popen([str(ROOT / "bin" / "wb"), "start", name, "--spec",
+                                     str(self.spec), "--repo", str(self.repo), "--model", "mimo"],
+                                    env={**os.environ, "PATH": f"{shim}:{os.environ['PATH']}"},
+                                    stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                                    start_new_session=True)
+            end = time.monotonic() + 60
+            while f"delegate/{name}" not in g("branch", "--list") and time.monotonic() < end:
+                time.sleep(0.1)
+            os.killpg(proc.pid, signal.SIGKILL)
+            proc.wait()
+            task = store.Task(name)
+            self.assertTrue(task.dir.is_dir() and not task.exists)
+            self.assertIn(name, g("worktree", "list"))
+
+        killed_start("t-half")
+        self.start("t-half", "ok")                      # the same name again: it cleans up first
+        task = store.Task("t-half")
+        self.assertTrue(task.exists)
+        self.assertFalse((task.dir / cli.STARTING).exists())
+        wait_phase("t-half", {"review"})
+
+        killed_start("t-half2")                         # and wb gc cleans up one left alone
+        home = store.home()
+        dead = home / ".verify-999999999-x"             # its maker gone, an hour old: removed
+        mine = home / f".verify-{os.getpid()}-y"        # its maker alive: kept
+        young = home / "wb-merge-999999999-z"           # its maker gone, but just made: kept
+        for d in (dead, mine, young):
+            (d / "repo" / "node_modules").mkdir(parents=True)
+        for d in (dead, mine):
+            os.utime(d, (time.time() - 7200, time.time() - 7200))
+        out = run_wb("gc")
+        self.assertIn("1 scratch dir(s), 1 half-made start(s)", out)
+        self.assertEqual([d.exists() for d in (dead, mine, young)], [False, True, True])
+        self.assertFalse(store.Task("t-half2").dir.exists())
+        self.assertNotIn("delegate/t-half2", g("branch", "--list"))
+        self.assertNotIn("t-half2", g("worktree", "list"))
+        self.assertTrue(store.Task("t-half").exists)    # a real task is no half-made start
 
     def test_wb_gc_deletes_branches_merged_before_and_keeps_the_rest(self):
         self.start("t-old", "ok")
@@ -6251,6 +6422,24 @@ class Verify(Base):
         (self.wt / "calc.py").write_text("def kw(watts):\n    return watts // 1000\n")
         self.assertTrue(verify.last(store.Task("t"))["stale"])     # the candidate moved on since
 
+    def test_a_killed_verify_leaves_no_scratch_clone_and_no_test_running(self):
+        # #372 (the audit of 1.6): Claude's Bash killed wb verify at 2 minutes, and its clone and
+        # the test (in a session of its own) were left behind
+        marker = f"sleep {3000 + os.getpid() % 1000}"
+        proc = subprocess.Popen([str(ROOT / "bin" / "wb"), "verify", "t", "--test", marker],
+                                stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
+        def running():
+            return subprocess.run(["pgrep", "-f", f"^{marker}$"], capture_output=True).returncode == 0
+        end = time.monotonic() + 60
+        while not running() and time.monotonic() < end:
+            time.sleep(0.1)
+        self.assertTrue(running(), "the test never started")
+        self.assertTrue(list(store.home().glob(".verify-*")))
+        proc.terminate()
+        self.assertEqual(proc.wait(30), 128 + signal.SIGTERM)
+        self.assertFalse(running())
+        self.assertEqual(list(store.home().glob(".verify-*")), [])
+
     def test_verify_credits_the_step_that_fixed_the_bug(self):
         # #252 (the audit of 1.2): step two's test passed on step one's commit already.
         from workbench import verify
@@ -6916,6 +7105,80 @@ class Projects(Base):
                            "--model", "mimo")
         self.assertIn("no user.name/user.email", err)
         self.assertFalse(store.Task("t-anon").dir.exists())
+
+    @unittest.skipUnless(shutil.which("ssh-keygen"), "needs ssh-keygen")
+    def test_a_key_that_needs_unlocking_is_said_at_start_and_accept_says_how(self):
+        # #374 (the audit of 1.6, reproduced): with commit.gpgsign and a passphrase no agent
+        # held, wb accept failed after the whole task, blaming an "incorrect passphrase"
+        key = Path(self.tmp.name) / "signing"
+        subprocess.run(["ssh-keygen", "-q", "-t", "ed25519", "-N", "a passphrase", "-f", str(key)],
+                       check=True)
+        for k, v in (("gpg.format", "ssh"), ("user.signingkey", str(key)), ("commit.gpgsign", "true")):
+            subprocess.run(["git", "-C", str(self.repo), "config", k, v], check=True)
+        os.environ.pop("SSH_AUTH_SOCK", None)
+        out = self.start("t-sign", "ok")
+        self.assertIn("commits here are signed and the key needs unlocking first: ssh-add", out)
+        wait_phase("t-sign", {"review"})
+        t0 = time.monotonic()
+        err = self.refused("accept", "t-sign", "-m", "feat: answer")
+        self.assertLess(time.monotonic() - t0, 30)                 # no waiting on a prompt
+        self.assertIn("not committed: commits here are signed", err)
+        self.assertIn("--no-sign", err)
+        run_wb("accept", "t-sign", "-m", "feat: answer", "--no-sign")
+        branch = store.Task("t-sign").spec["branch"]
+        body = subprocess.run(["git", "-C", str(self.repo), "cat-file", "commit", branch],
+                              capture_output=True, text=True, check=True).stdout
+        self.assertNotIn("gpgsig", body)
+        # a key that signs unattended: no word at start, and the commit is signed
+        bare = Path(self.tmp.name) / "signing-bare"
+        subprocess.run(["ssh-keygen", "-q", "-t", "ed25519", "-N", "", "-f", str(bare)], check=True)
+        subprocess.run(["git", "-C", str(self.repo), "config", "user.signingkey", str(bare)], check=True)
+        out = self.start("t-sign2", "ok")
+        self.assertNotIn("needs unlocking", out)
+        wait_phase("t-sign2", {"review"})
+        run_wb("accept", "t-sign2", "-m", "feat: answer")
+        body = subprocess.run(["git", "-C", str(self.repo), "cat-file", "commit",
+                               store.Task("t-sign2").spec["branch"]],
+                              capture_output=True, text=True, check=True).stdout
+        self.assertIn("gpgsig", body)
+
+    def test_a_monorepo_package_with_its_own_claude_md_is_where_the_agent_and_tests_run(self):
+        # #375 (the audit of 1.6, reproduced): from packages/app, whose CLAUDE.md Claude Code reads,
+        # wb start refused the repo for a CLAUDE.md at its root, and the agent worked from the root
+        g = lambda *a: subprocess.run(["git", "-C", str(self.repo), *a], check=True)  # noqa
+        app, lib = self.repo / "packages" / "app", self.repo / "packages" / "lib"
+        for d in (app, lib):
+            d.mkdir(parents=True)
+        (app / "CLAUDE.md").write_text("# app\nThe app package.\n")
+        (app / "app.marker").write_text("")
+        (lib / "lib.txt").write_text("")
+        g("rm", "-q", "CLAUDE.md")
+        g("add", "-A")
+        g("commit", "-qm", "two packages, no root CLAUDE.md")
+        runs = Path(self.tmp.name) / "runs.jsonl"
+        os.environ["FAKE_RUNS"] = str(runs)
+        os.environ["FAKE_SCENARIO"] = "ok"
+        out = run_wb("start", "t-pkg", "--spec", str(self.spec), "--repo", str(app), "--model", "mimo",
+                     "--test", "test -f app.marker && test -f answer.txt")
+        self.assertIn("package: packages/app", out)
+        st = wait_phase("t-pkg", {"review"})
+        task = store.Task("t-pkg")
+        self.assertEqual(task.spec["subdir"], "packages/app")
+        first = json.loads(runs.read_text().splitlines()[0])
+        self.assertEqual((first["cwd"], first["pwd"]), (str(task.workdir), str(task.workdir)))
+        self.assertTrue(st["tests"]["ok"])                     # the tests ran in the package
+        from workbench import context
+        files, nested = context.instruction_files(task)
+        self.assertIn(task.worktree / "packages" / "app" / "CLAUDE.md", files)
+        self.assertNotIn("packages/app/CLAUDE.md", nested)
+        (task.workdir / "AGENTS.md").write_text((app / "CLAUDE.md").read_text())  # OpenCode loads it
+        self.assertNotIn(task.workdir / "CLAUDE.md", context.instruction_files(task)[0])
+        self.assertIn("packages/app/answer.txt", run_wb("diff", "t-pkg"))  # the diff: the whole repo's
+        # a plain subdirectory still means the whole repo
+        g("checkout", "-q", "HEAD~1", "--", "CLAUDE.md")
+        g("commit", "-qm", "root CLAUDE.md again")
+        run_wb("start", "t-lib", "--spec", str(self.spec), "--repo", str(lib), "--model", "mimo")
+        self.assertNotIn("subdir", store.Task("t-lib").spec)
 
     def test_instructions_in_dot_claude_count_and_hints_quote_their_paths(self):
         # the audit: a repo with only .claude/CLAUDE.md (Claude Code reads it, and so does the

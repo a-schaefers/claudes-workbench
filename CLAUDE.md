@@ -6,7 +6,7 @@ Claude Code mod wakes Claude when a task needs it. Everything talks through plai
 
 The short name, `workbench`, stays on everything inside: the package, the plugin
 (`workbench@workbench`), the state and config directories, and the clone path `~/repos/workbench`
-ARCHITECTURE.md's *Installing* suggests (nothing depends on it).
+(ARCHITECTURE.md's *Installing*; nothing needs it).
 
 ## Keeping the docs true
 README.md is for people and stays simple: the pitch, a quickstart, then a pointer. ARCHITECTURE.md
@@ -33,7 +33,7 @@ the drift this rule exists to stop.
 
 ## Commands
 ```sh
-python3 -m unittest                                   # the whole suite, about 4 minutes
+python3 -m unittest                                   # the whole suite, about 8 minutes
 python3 -m unittest tests.test_workbench.Context      # one class (or .Context.test_…); -k handover by name
 claude plugin validate mod && claude plugin test mod  # the mod: the $ rule, then mod/hooks/register.test.tsx
 PLAYWRIGHT=…/node_modules/playwright node tests/e2e_chat.mjs   # the web chat in WebKit and Chromium
@@ -109,7 +109,7 @@ dependencies. No packaging: it runs from the clone.
 - `models.py`: discovers local models from OpenCode's config, their status, residency
   (`make_resident`, `free_gpu`), GPU sharing (`GpuLease`, `can_share`), adding and retiring them.
 - `hardware.py`: OS, GPU/VRAM, RAM, CPU, disk, read fresh for `wb scout` and the GPU budget
-  (Linux sysfs and /proc, WSL2, macOS). Unknowns stay unknown; nothing is hard-coded.
+  (Linux sysfs and /proc, WSL2, macOS). Unknowns stay unknown, nothing hard-coded.
 - `skills.py`: Claude's skill library for the agents (its own git repo): checks, add/patch/
   retire/restore, import, suggestions for a spec, the outcome record. `scan.py`: the security scan
   every skill passes (ported from Hermes Agent's skills guard: keep its MIT notice).
@@ -137,7 +137,7 @@ dependencies. No packaging: it runs from the clone.
   `test_portable.py`, `test_sizing.py`, `test_docs.py` (the docs cover the code),
   `test_workflows.py` (the merge gate),
   `fake_opencode.py`, `capture_llm.py`, `e2e_chat.mjs`.
-- `.github/`: CI (`workflows/check.yml`, the required check, on each push and pull request,
+- `.github/`: CI (`workflows/check.yml`, the required check, on each push and PR,
   Python 3.11, OpenCode `OPENCODE_VERSION`; `chat.yml`, the browser test; `nightly.yml`: the
   newest Claude Code, macOS, WSL2; `opencode.yml`: the newest OpenCode), `owner-merge.yml` (approves
   the owner's pull requests only), `rulesets/main.json`, dependabot for the actions' pins.
@@ -150,7 +150,7 @@ Runs on Linux, WSL2 and macOS; the launchers refuse native Windows and Python be
 
 ## How a task runs
 1. `wb start` refuses a repo without a committed CLAUDE.md or `.claude/CLAUDE.md`
-   (`--no-claude-md`), asks the router for a model (unless `--model`), refuses (exit 4) when the
+   (`--no-claude-md`; or a package's: `subdir`), asks the router for a model (unless `--model`), refuses (exit 4) when the
    GPU's holders leave its model no room (`--queue` waits behind them), makes branch
    `delegate/<task>` in a fresh worktree, writes round 1's prompt (the spec plus `PROTOCOL`),
    spawns the runner and returns at once. The runner sets the worktree up (`--setup`, `--copy`,
@@ -208,12 +208,12 @@ A model is a candidate when OpenCode loads its provider (`disabled_providers`/`e
 followed) and the provider's `baseURL` (`{env:}`/`{file:}` resolved) is on this machine (loopback,
 `localhost`, this host's name) or models.json marks the provider `local: true`. Not an Ollama
 cloud model (`:cloud`, `-cloud`, a tags row with `remote_host`) unless models.json marks that
-model's id `local: true`, nor an entry with `tool_call: false`. OpenCode's config is
-`$XDG_CONFIG_HOME/opencode/opencode.json` and `.jsonc`, then `$OPENCODE_CONFIG`, layered in that
-order and merged by `models.read_config`; the layer adds what agents won't load (`agent_providers`).
-Written only when one file holds it and it has no comments (through a symlink, keeping its mode;
-a refusal never prints the config). Probes to this
-machine skip any HTTP proxy. Ollama entries need `options.max_tokens` (Ollama ignores
+model's id `local: true`, nor an entry with `tool_call: false`. OpenCode's config: `opencode.json`
+and `.jsonc` in `/etc/opencode`, then `$OPENCODE_CONFIG_DIR` (else `$XDG_CONFIG_HOME/opencode`),
+then `$OPENCODE_CONFIG`, merged by `models.read_config`; the layer adds what agents won't load
+(`agent_providers`). Written only when one file holds it and it has no comments (through a
+symlink, keeping its mode; a refusal prints no config). Probes to this machine skip any
+HTTP proxy. Ollama entries need `options.max_tokens` (Ollama ignores
 OpenCode's `max_completion_tokens`) and a `limit.context` matching what Ollama serves (never the
 trained length); every entry needs `limit.context` (a server other than Ollama: `wb model add
 --context N`); `wb model add` writes both and `wb doctor` checks them. Any OpenAI-compatible
@@ -251,7 +251,7 @@ unset: unknown, so no sharing).
   it. Each `$.state` atom has a shape tag (ARCHITECTURE.md, *Couplings*, lists them): change it
   when its type changes. A slash command may not start a turn itself: it pushes onto `mem.queued`.
 - Skills for the agents: Claude's library (`wb skill`), handed per task, or a project's own
-  `.claude/skills`, committed with it. The user's personal `~/.claude/skills` are denied to agents.
+  `.claude/skills`, committed with it. Personal skills (`~/.claude/skills`, `~/.agents/skills`) are denied to agents.
 
 ## OpenCode quirks this code relies on
 Checked against OpenCode 2.3 with `tests/capture_llm.py` (a recording model server: it shows
@@ -270,10 +270,10 @@ denials, compound shell commands, rule order, git by path, the edit rule, PATH, 
   entry says `"enabled": false` still starts: the layer swaps its command for `false`.
 - It loads AGENTS.md itself but never CLAUDE.md, which reaches it through `instructions`
   (absolute paths).
-- Skills come from `~/.claude/skills` and `.claude/skills`. A `disable-model-invocation` skill is
-  not listed. The config's `skills` list adds more: a path to one skill's directory lists that
-  skill, a parent directory lists every skill in it, a path to the SKILL.md itself lists nothing,
-  so handed skills go in one directory each. Loading one (the `skill` tool, argument `id`) returns
+- Skills come from `skills/` in `~/.claude`, `~/.agents`, `.claude`, `.agents`. A
+  `disable-model-invocation` skill isn't listed. The config's `skills` list adds more: a skill's
+  directory lists it, a parent lists every skill in it, its SKILL.md lists nothing, so handed
+  skills go in one directory each. Loading one (the `skill` tool, argument `id`) returns
   its body, its base directory and its files, readable from the worktree.
 - `permissions: [{action, resource, effect}]`: a `deny` removes a tool or skill from the prompt.
   Patterns are anchored, `*` matches anything (spaces and `/` too), a trailing ` *` is optional,
@@ -311,5 +311,5 @@ denials, compound shell commands, rule order, git by path, the edit rule, PATH, 
   task started in another live session wakes that session, not this one; `claude --debug`
   shows hook errors.
 - A test fails: the task's `runner.log` is under the test's temp `WB_HOME`;
-  `wait_phase` prints the status when it times out. An interrupted run can leave detached runners
-  and fakes sleeping.
+  `wait_phase` prints the status when it times out. An interrupted run can leave runners and
+  fakes behind.

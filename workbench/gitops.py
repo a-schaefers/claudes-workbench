@@ -2,6 +2,7 @@
 
 The agent never commits; everything it does stays in the worktree's working tree until `wb accept`.
 """
+import contextlib
 import functools
 import hashlib
 import os
@@ -107,9 +108,13 @@ def _modes_hold(d: str) -> bool:
             pass
 
 
-def _run(cwd, args, env=None, check=True) -> subprocess.CompletedProcess:
-    r = subprocess.run(["git", "-C", str(cwd), *PLAIN, *_pinned(cwd), *args], capture_output=True,
-                       env={**os.environ, **env} if env else None)
+def _run(cwd, args, env=None, check=True, timeout=None) -> subprocess.CompletedProcess:
+    try:
+        r = subprocess.run(["git", "-C", str(cwd), *PLAIN, *_pinned(cwd), *args], capture_output=True,
+                           env={**os.environ, **env} if env else None, timeout=timeout,
+                           stdin=subprocess.DEVNULL if timeout else None)
+    except subprocess.TimeoutExpired:
+        raise GitError(f"git {' '.join(args)}: no answer in {timeout}s") from None
     if check and r.returncode:
         err = (r.stderr or r.stdout).decode("utf-8", "replace").strip()
         raise GitError(f"git {' '.join(args)}: {err}")
@@ -242,7 +247,7 @@ def fill_submodules(repo: Path, commit: str, checkout: Path) -> list[str]:
             left.append(path)
             continue
         store.home().mkdir(parents=True, exist_ok=True)  # the scratch index: never in the lane
-        with tempfile.TemporaryDirectory(prefix=".submodule-", dir=store.home()) as scratch:
+        with tempfile.TemporaryDirectory(prefix=store.scratch(".submodule-"), dir=store.home()) as scratch:
             env = {"GIT_INDEX_FILE": os.path.join(scratch, "index")}
             try:
                 dest.mkdir(parents=True, exist_ok=True)
@@ -387,7 +392,7 @@ def with_new_files(worktree: Path, *args, whole: bool = False, limit: int | None
     # files dropped out of the diff Claude reviews (the 2026-11-16 audit)
     from . import store
     store.home().mkdir(parents=True, exist_ok=True)
-    scratch = tempfile.mkdtemp(prefix="wb-index-", dir=store.home())
+    scratch = tempfile.mkdtemp(prefix=store.scratch("wb-index-"), dir=store.home())
     index = os.path.join(scratch, "index")
     env = {"GIT_INDEX_FILE": index}
     try:
@@ -489,7 +494,32 @@ def step_commit(task: store.Task, step: int, steps: int) -> str | None:
     return None
 
 
-def commit_all(worktree: Path, message: str, include: bool = False) -> str:
+SIGN_SECS = 10    # the dry signature at wb start: an unlocked key answers at once
+COMMIT_SECS = 90  # a signed commit at accept: a pinentry nobody answers, under Claude's 2 minutes
+UNLOCK = ("commits here are signed and the key needs unlocking first: ssh-add for an SSH key, or "
+          "sign once in a terminal for GPG (echo x | gpg -s >/dev/null); or --no-sign")
+NO_TERMINAL = {"GPG_TTY": "", "DISPLAY": "", "WAYLAND_DISPLAY": "", "SSH_ASKPASS_REQUIRE": "never"}
+
+
+def signs(repo: Path) -> bool:
+    return git(repo, "config", "--bool", "commit.gpgsign", check=False).strip() == "true"
+
+
+def sign_problem(repo: Path, rev: str) -> str | None:
+    """UNLOCK when ``repo``'s commits are signed and signing can't happen unattended (a key with a
+    passphrase no agent holds, a pinentry that needs a terminal), else None. A dry commit-tree -S
+    of ``rev``'s tree, with no terminal or display: wb accept failed at the very end of the task
+    with "incorrect passphrase supplied" (#374, the audit of 1.6). It leaves a loose object."""
+    if not signs(repo):
+        return None
+    r = None
+    with contextlib.suppress(GitError):
+        r = _run(repo, ["commit-tree", "-S", "-m", "workbench: can it sign?", f"{rev}^{{tree}}"],
+                 NO_TERMINAL, check=False, timeout=SIGN_SECS)
+    return None if r is not None and r.returncode == 0 else UNLOCK
+
+
+def commit_all(worktree: Path, message: str, include: bool = False, sign: bool = True) -> str:
     """Commit everything in the worktree, without git hooks (NO_HOOKS; also for a task started
     before its git dir was recorded) but signed if the user signs. Refuses a nested repository: committed, it was a gitlink to
     a commit that exists nowhere else. Refuses, unless ``include``, more than NEW_FILES_MAX new
@@ -503,7 +533,19 @@ def commit_all(worktree: Path, message: str, include: bool = False) -> str:
     git(worktree, *NO_HOOKS, "add", "-A")
     if not git(worktree, "diff", "--cached", "--name-only").strip():
         raise GitError("nothing to commit: the agent's worktree has no changes")
-    git(worktree, *NO_HOOKS, "commit", "-q", "-m", message)
+    if not sign:  # --no-sign, at start or now: the task's commits go unsigned (#374)
+        git(worktree, *NO_HOOKS, "-c", "commit.gpgsign=false", "commit", "-q", "-m", message)
+    elif signs(worktree):  # no terminal, a time limit, and git's error said plainly (#374)
+        try:
+            r = _run(worktree, [*NO_HOOKS, "commit", "-q", "-m", message], NO_TERMINAL,
+                     check=False, timeout=COMMIT_SECS)
+        except GitError as e:  # no answer: a pinentry waiting on an unattended desktop
+            raise GitError(f"not committed: {UNLOCK} ({e})") from None
+        if r.returncode:
+            said = (r.stderr or r.stdout).decode("utf-8", "replace").strip().splitlines()
+            raise GitError(f"not committed: {UNLOCK} (git: {said[0] if said else r.returncode})")
+    else:
+        git(worktree, *NO_HOOKS, "commit", "-q", "-m", message)
     return git(worktree, "rev-parse", "--short", "HEAD").strip()
 
 
@@ -699,7 +741,7 @@ def _trial_merge(repo: Path, branch: str) -> bytes:
     missed a modify/delete conflict whose abort deleted the developer's ignored copy on Git
     2.34.1, Ubuntu 22.04's (#320, the audit of 1.4). A trial that can't run refuses the merge."""
     store.home().mkdir(parents=True, exist_ok=True)
-    scratch = tempfile.mkdtemp(prefix="wb-merge-", dir=store.home())
+    scratch = tempfile.mkdtemp(prefix=store.scratch("wb-merge-"), dir=store.home())
     wt = os.path.join(scratch, "w")
     try:
         _run(repo, (*NO_HOOKS, "worktree", "add", "-q", "--detach", wt, "HEAD"))

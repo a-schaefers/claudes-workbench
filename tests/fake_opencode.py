@@ -96,7 +96,8 @@ if os.environ.get("FAKE_PROMPTS") and args and args[0] == "run":
         fh.write(json.dumps(args[-1]) + "\n")
 if os.environ.get("FAKE_RUNS") and args and args[0] == "run":  # which runs continued a session
     with open(os.environ["FAKE_RUNS"], "a") as fh:
-        fh.write(json.dumps({"session": "--session" in args, "prompt": args[-1]}) + "\n")
+        fh.write(json.dumps({"session": "--session" in args, "prompt": args[-1],
+                             "cwd": os.getcwd(), "pwd": os.environ.get("PWD")}) + "\n")
 if scenario == "slow":
     scenario = "ok" if "--session" in args else "hang"
 if scenario == "fill" and "picking this task up in a fresh session" in args[-1]:

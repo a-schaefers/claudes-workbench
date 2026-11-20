@@ -307,6 +307,12 @@ class Task:
         # deeper, under tree/, for a sibling more than one level up (task.json `worktree`, #261)
         return self.dir / self.spec.get("worktree", "worktree")
 
+    @property
+    def workdir(self) -> Path:
+        """Where the agent, the setup and the tests run: the package wb start was given in a
+        monorepo (task.json `subdir`, #375), else the worktree's top."""
+        return self.worktree / self.spec.get("subdir", "")
+
     def round_dir(self, n: int) -> Path:
         return self.dir / "rounds" / str(n)
 
@@ -338,6 +344,19 @@ class Task:
             return
         append_jsonl(home() / "notify.jsonl",
                      {"ts": now(), "task": self.name, "kind": kind, "text": text, **extra})
+
+
+# The scratch directories workbench makes in its home, each named <prefix><maker's pid>-…: wb gc
+# removes one SCRATCH_AGE old whose maker is gone. Killed commands left full clones there, with
+# their copied dependencies, that _disk_room then counted against every new task (#376, the
+# audit of 1.6).
+SCRATCH_PREFIXES = (".verify-", ".base-", ".check-", ".submodule-", "wb-index-", "wb-merge-")
+SCRATCH_AGE = 3600
+
+
+def scratch(prefix: str) -> str:
+    """``prefix`` (one of SCRATCH_PREFIXES) with this process's pid, for tempfile."""
+    return f"{prefix}{os.getpid()}-"
 
 
 def all_tasks(archived: bool = False):

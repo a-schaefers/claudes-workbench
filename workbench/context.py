@@ -846,6 +846,10 @@ def readable(task: store.Task) -> list[str] | None:
                                           *lane_paths(task), *siblings(task))  # the git shim,
             if p}                                                              # the ask server
     keep |= tool_roots(hidden)
+    # OpenCode's global config where OPENCODE_CONFIG_DIR keeps it, outside the dotfiles: the
+    # agent's OpenCode loads it itself (#370, the audit of 1.6)
+    if os.environ.get("OPENCODE_CONFIG_DIR"):
+        keep.add(os.path.realpath(Path(os.environ["OPENCODE_CONFIG_DIR"]).expanduser()))
     # the git directory too, outside the repo when it is a linked worktree: git failed there
     # ("gitfile does not point to a valid repository", the 0.90 review); writable() keeps it out
     keep |= repo_dirs(task)
@@ -993,10 +997,17 @@ def instruction_files(task: store.Task) -> tuple[list[Path], list[str]]:
             if (base / rel).is_file():
                 load.append(base / rel)
                 break
+    if sub := task.spec.get("subdir"):  # the package's own, as Claude Code loads it there (#375)
+        for rel in ROOT_FILES:
+            for base in (wt / sub, repo / sub):
+                if (base / rel).is_file():
+                    load.append(base / rel)
+                    break
     load += [wt / p for p in _tracked(wt, ".claude/rules/*.md")]
     # OpenCode already loads the worktree's AGENTS.md: skip a CLAUDE.md with the same text (one
     # only in the user's checkout isn't loaded, so it can't stand in for CLAUDE.md)
-    agents = {_digest(wt / "AGENTS.md")} if (wt / "AGENTS.md").is_file() else set()
+    # (and, started in a package, the package's too: checked on OpenCode 2.3, #375)
+    agents = {_digest(a) for a in {wt / "AGENTS.md", wt / (sub or "") / "AGENTS.md"} if a.is_file()}
     seen, files = set(agents), []
     for p in load:
         d = _digest(p)
@@ -1005,7 +1016,7 @@ def instruction_files(task: store.Task) -> tuple[list[Path], list[str]]:
             files.append(p)
     nested = [p for p in _tracked(wt, "*CLAUDE.md", "*AGENTS.md")
               if "/" in p and Path(p).name in ("CLAUDE.md", "AGENTS.md")
-              and not p.startswith(".claude/")]
+              and not p.startswith(".claude/") and Path(p).parent.as_posix() != sub]
     return files, nested
 
 
@@ -1046,11 +1057,15 @@ def denied_skills(extra: list[str] | None = None, project: Path | None = None) -
     2026-11-16 an agent, its context full, summarised a personal publishing skill
     into a made-up "newer task" and went off reading the user's private library."""
     names = {"workbench", *(extra or [])}
-    for home in {claude_home() / "skills", Path.home() / ".claude" / "skills"}:  # OpenCode reads ~/.claude
+    # OpenCode reads ~/.claude/skills and ~/.agents/skills, the cross-tool place other agents read
+    # too: the second reached every agent, prefill on every round (#371, the audit of 1.6)
+    for home in {claude_home() / "skills", Path.home() / ".claude" / "skills",
+                 Path.home() / ".agents" / "skills"}:
         names |= {s.parent.name for s in home.glob("*/SKILL.md")}
         names |= {s.parent.name for s in (home / "synced").glob("*/*/SKILL.md")}
     if project:  # a project's own skill keeps its name (the personal ones are unreadable anyway)
-        names -= {s.parent.name for s in (project / ".claude" / "skills").glob("*/SKILL.md")}
+        for own in (".claude", ".agents"):
+            names -= {s.parent.name for s in (project / own / "skills").glob("*/SKILL.md")}
     return sorted(names | {"workbench", *(extra or [])})
 
 
