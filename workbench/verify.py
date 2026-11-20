@@ -138,8 +138,9 @@ def verdict(base: int | str, base_out: str, cand: int | str, expect: str = "") -
         return "base-passes"
     if expect:
         return "proven" if expect in base_out else "inconclusive"
-    if any(ASSERTION.search(x) for x in base_out.splitlines()):
-        return "proven"
+    # The setup's failure first: a SyntaxError's traceback prints the bad source line, and an
+    # `assert 2 = 2` there matched ASSERTION, so a base that never ran a test was called proven
+    # (#326, the audit of 1.4)
     if SETUP.search(base_out):
         return "inconclusive"
     return "proven" if assertion(base_out) else "inconclusive"

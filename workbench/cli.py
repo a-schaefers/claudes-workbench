@@ -425,7 +425,7 @@ def _worktree_setup(repo: Path, a) -> dict:
         # a virtualenv can't move: its activate and its scripts' shebangs name the checkout, so a
         # copied .venv ran the developer's environment, and its writes left the lane (#260, the
         # audit of 1.2)
-        if venv := _venv_in(repo / p):
+        if venv := runner.venv_in(repo / p):
             die(f"--copy {raw}: {venv.relative_to(repo)} is a Python virtualenv, which still runs "
                 f"from {repo} once copied; recreate it with --setup instead, e.g. --setup "
                 f"'python3 -m venv {venv.relative_to(repo)} && {venv.relative_to(repo)}/bin/pip "
@@ -475,19 +475,6 @@ def _worktree_setup(repo: Path, a) -> dict:
                 die(f"--sibling {n}: " + (f"it overlaps --sibling {other}: name one of them"
                                           if other else "its link would be the task's worktree"))
     return {k: v for k, v in (("setup", setup), ("copy", copy), ("siblings", sibs)) if v}
-
-
-def _venv_in(path: Path) -> Path | None:
-    """The virtualenv at ``path`` or one level inside it (its pyvenv.cfg), else None."""
-    if not path.is_dir() or path.is_symlink():
-        return None
-    if (path / "pyvenv.cfg").is_file():
-        return path
-    try:
-        return next((d for d in sorted(path.iterdir()) if d.is_dir() and not d.is_symlink()
-                     and (d / "pyvenv.cfg").is_file()), None)
-    except OSError:
-        return None
 
 
 def _missing_dirs(repo: Path) -> list[str]:
@@ -572,6 +559,19 @@ def cmd_start(a):
     except gitops.GitError as e:
         shutil.rmtree(task.dir, ignore_errors=True)  # create_worktree removed its own leftovers
         die(str(e))
+    # Ignored in the checkout isn't ignored where the task starts: at a tag older than the ignore
+    # rule, a copied local-input.dat was a new file in the worktree, and wb accept committed it
+    # (#322, the audit of 1.4). The task's worktree has the base's own .gitignore files.
+    # (a directory as `dir/`: nothing is there yet to tell a `dir/` rule it is one)
+    if loose := [p for p in setup.get("copy", ())
+                 if not gitops.ignored(wt, p + "/" * (repo / p).is_dir())]:
+        gitops.remove_worktree(repo, wt)
+        gitops.delete_branch(repo, a.name)
+        shutil.rmtree(task.dir, ignore_errors=True)
+        shutil.rmtree(context.rules_dir(task), ignore_errors=True)
+        die(f"--copy {loose[0]}: ignored in {repo}, but not at {a.base}, where the task starts: a "
+            "copy would show in the review diff and be committed. Ignore it in a commit the base "
+            "holds, or start from a newer --base")
     subs = gitops.submodules(repo, base)
     budget = a.ask_budget
     limits = router.budgets(m)  # from the model's measured speed on this machine, else defaults

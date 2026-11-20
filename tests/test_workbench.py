@@ -353,6 +353,26 @@ class Lifecycle(Base):
                 child.kill()
                 survivor.kill()
 
+    def test_a_test_run_ends_what_it_started_and_no_other_run_of_the_task(self):
+        # #324 (the audit of 1.4, reproduced): a wb verify's cleanup killed every process of the
+        # task, the agent wb feedback had just started among them (opencode exited -9)
+        self.start("t-runs", "ok", "--no-base-check")
+        wait_phase("t-runs", {"review"})
+        task = store.Task("t-runs")
+        sleeper = [sys.executable, "-c", "import time; time.sleep(60)"]
+        agent = subprocess.Popen(sleeper, env=runner.agent_env(task, "another-run"),
+                                 start_new_session=True)
+        pidfile = Path(self.tmp.name) / "left.pid"
+        try:
+            code, _ = runner.run_in_lane(task, f"setsid sleep 60 & echo $! > {pidfile}", 30)
+            self.assertEqual(code, 0)
+            self.assertTrue(wait_gone(int(pidfile.read_text())))  # what the run left: ended
+            self.assertIsNone(agent.poll())                         # the other run: untouched
+            self.assertEqual(runner.sweep(task), 1)                 # a whole-task sweep ends it
+            self.assertEqual(agent.wait(timeout=5), -signal.SIGKILL)
+        finally:
+            agent.kill()
+
     def test_what_the_agent_leaves_running_ends_with_its_round(self):
         # A writer left running could change the worktree after Claude read the diff (the
         # 2026-11-16 audit); a stray non-event line on its stdout is no crash either.
@@ -427,6 +447,23 @@ class Lifecycle(Base):
         self.assertEqual(store.Task("t-quiet").spec["checkin"], 0)
         self.start("t-loud", "ok", "--size", "significant", "--checkin", "15", "--queue")
         self.assertEqual(store.Task("t-loud").spec["checkin"], 15)
+
+    def test_a_script_made_executable_in_the_task_is_committed_executable(self):
+        # #323 (the audit of 1.4, reproduced): the repo said core.filemode=false (its drive
+        # distrusts modes: WSL's /mnt/c), so run-tool, 0755 in the task's worktree where it ran,
+        # was committed 100644, and a fresh checkout couldn't run it
+        subprocess.run(["git", "-C", str(self.repo), "config", "core.filemode", "false"], check=True)
+        self.start("t-exec", "ok", "--test", TEST_CMD)
+        wait_phase("t-exec", {"review"})
+        t = store.Task("t-exec")
+        tool = t.worktree / "run-tool"
+        tool.write_text("#!/bin/sh\necho ran\n")
+        tool.chmod(0o755)
+        self.assertIn("new file mode 100755", runner.review_diff(t))  # what Claude reviews
+        run_wb("accept", "t-exec", "-m", "feat: run-tool")
+        row = subprocess.run(["git", "-C", str(self.repo), "ls-tree", "delegate/t-exec", "run-tool"],
+                             capture_output=True, text=True).stdout
+        self.assertTrue(row.startswith("100755"), row)                # is what lands
 
     def test_a_proposed_claude_md_is_shown_as_a_diff_and_taken_only_when_claude_says(self):
         # Claude making each CLAUDE.md change itself was a call over its whole context on most
@@ -659,6 +696,21 @@ class Lifecycle(Base):
             self.assertTrue((Path(self.tmp.name) / "rel-state/tasks/t-rel/worktree/answer.txt").exists())
         finally:
             os.chdir(cwd)
+
+    def test_a_relative_opencode_config_is_one_file_to_wb_and_the_runner(self):
+        # #328 (the audit of 1.4, reproduced): wb start found the models in my-providers.json,
+        # and the runner, started in the package directory, failed the task: "unknown model"
+        cwd = os.getcwd()
+        os.chdir(self.tmp.name)
+        try:
+            os.environ["OPENCODE_CONFIG"] = os.path.basename(os.environ.pop("WB_OPENCODE_CONFIG"))
+            self.start("t-relcfg", "ok")
+            self.assertEqual(os.environ["OPENCODE_CONFIG"], os.path.join(os.getcwd(), "opencode.json"))
+            st = wait_phase("t-relcfg", {"review", "failed"})
+            self.assertEqual(st["phase"], "review", st.get("last"))
+        finally:
+            os.chdir(cwd)
+            os.environ.pop("OPENCODE_CONFIG", None)
 
     def test_the_model_is_made_resident_again_before_each_round(self):
         # After tests longer than Ollama's 5-minute keep-alive, the auto-fix round's think
@@ -1764,6 +1816,22 @@ class WorktreeSetup(Base):
         run_wb("verify", "t-once", "--test", "sh test_answer.sh", "--files", "test_answer.sh", "--setup")
         self.assertEqual(count.read_text().count("run"), 3)     # asked: in each checkout
 
+    def test_a_virtualenv_the_setup_made_is_made_again_in_each_scratch_checkout(self):
+        # #325 (the audit of 1.4, reproduced): copied from the task's worktree, a .venv's scripts
+        # ran the worktree's interpreter and code, so the base check and wb verify failed there
+        self.ignore(".venv/")
+        here = 'test "$(cat .venv/made-in)" = "$PWD"'          # what a shebang would name
+        self.start("t-venv", "ok", "--test", f"{here} && grep -qx 42 answer.txt", "--setup",
+                   "mkdir -p .venv && touch .venv/pyvenv.cfg && echo \"$PWD\" > .venv/made-in",
+                   "--auto-fix", "0", "--no-self-review")
+        st = wait_phase("t-venv", {"review"})
+        t = store.Task("t-venv")
+        self.assertIs(st["tests"]["ok"], True)
+        self.assertEqual(st["base_check"]["exit"], 2)          # grep: no answer.txt; the venv's own
+        (t.worktree / "test_venv.sh").write_text(here + "\n")
+        out = run_wb("verify", "t-venv", "--test", "sh test_venv.sh", "--files", "test_venv.sh")
+        self.assertIn("base: exit 0\n  candidate: exit 0", out)  # both sides ran their own
+
     def test_commands_json_gives_a_repo_its_setup_for_every_task(self):
         self.ignore("deps/")
         Path(os.environ["WB_COMMANDS"]).write_text(json.dumps({"repos": {str(self.repo): {
@@ -1849,6 +1917,25 @@ class WorktreeSetup(Base):
         self.start("t-c7", "ok", "--copy", "generated")             # untracked at HEAD: fine
         wait_phase("t-c7", {"review"})
         self.assertEqual((store.Task("t-c7").worktree / "generated" / "config").read_text(), "LOCAL\n")
+
+    def test_copy_refuses_a_path_the_base_does_not_ignore(self):
+        # #322 (the audit of 1.4, reproduced): the ignore rule came after the tag the task
+        # started from, so the copied local-input.dat was a new file there, and accept committed it
+        g = lambda *a: subprocess.run(["git", "-C", str(self.repo), *a], check=True,  # noqa
+                                      capture_output=True)
+        g("tag", "v0")
+        self.ignore("local-input.dat")
+        (self.repo / "local-input.dat").write_text("LOCAL\n")
+        err = self.refused("t-c8", "--copy", "local-input.dat", "--base", "v0")
+        self.assertIn("not at v0", err)
+        self.assertFalse(subprocess.run(["git", "-C", str(self.repo), "branch", "--list",
+                                         "delegate/t-c8"], capture_output=True, text=True).stdout.strip())
+        self.assertEqual(subprocess.run(["git", "-C", str(self.repo), "worktree", "list",
+                                         "--porcelain"], capture_output=True).stdout.count(b"worktree "), 1)
+        self.assertFalse((store.home() / "rules" / "t-c8").exists())
+        self.start("t-c9", "ok", "--copy", "local-input.dat")           # at HEAD it's ignored: fine
+        wait_phase("t-c9", {"review"})
+        self.assertNotIn("local-input.dat", gitops.changed(store.Task("t-c9").worktree))
 
     def test_copy_refuses_a_virtualenv_and_says_to_recreate_it_with_setup(self):
         # #260 (the audit of 1.2): a copied .venv's activate and shebangs named the checkout, so
@@ -5929,6 +6016,9 @@ class Verify(Base):
         self.assertEqual(verify.verdict(1, "--- FAIL: TestKw (0.00s)\n    kw_test.go:9: expected 250, got 250000", 0),
                          "proven")                                          # the positive control
         self.assertEqual(verify.verdict(1, "E       assert 250000 == 250", 0), "proven")
+        # #326 (the audit of 1.4, reproduced): the traceback quoted the line that didn't parse
+        self.assertEqual(verify.verdict(1, '  File "calc.py", line 3\n    assert 2 = 2\n           ^\n'
+                                           "SyntaxError: cannot assign to literal", 0), "inconclusive")
         out = run_wb("verify", "t", "--test", "python3 -m unittest tests.test_calc",
                      "--expect", "250000 != 250")
         self.assertIn("proven", out)
@@ -7654,7 +7744,9 @@ class Hardware(unittest.TestCase):
             hardware._ENERGY.clear()
             with mock.patch("platform.system", lambda: "Linux"), \
                     mock.patch("workbench.hardware._run", lambda *argv: ""), \
-                    mock.patch.object(hardware.time, "monotonic", side_effect=[100.0, 110.0, 120.0]):
+                    mock.patch.object(hardware, "time", mock.Mock(wraps=time, monotonic=mock.Mock(
+                        side_effect=[100.0, 110.0, 120.0]))):  # hardware's clock alone: a thread
+                # an earlier test left reading time.monotonic took a reading (CI, PR #357)
                 self.assertEqual(hardware.gpu_power_w(Path(d)), 50.0)   # the counter's first reading
                 (intel / "energy1_input").write_text("1300000000\n")    # 300 J in 10 s
                 self.assertEqual(hardware.gpu_power_w(Path(d)), 80.0)

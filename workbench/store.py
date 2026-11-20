@@ -51,8 +51,12 @@ CLOSED = {"accepted", "discarded"}
 # clone (the 2026-11-16 audit). They are made absolute against wb's cwd, once, before anything
 # reads them or a child inherits them (absolute_env, from cli.main and the runner). Not resolved:
 # a symlinked home stays the path the user named, the one the lane and OpenCode see.
+# OPENCODE_CONFIG too: relative, wb start found its models, and the runner, started in the
+# package directory, found none and failed the task with "unknown model" (#328, the audit of 1.4);
+# and CLAUDE_CONFIG_DIR, which the runner reads for the lane and spend.py for the transcripts.
 PATH_VARS = ("WB_HOME", "WB_MODELS", "WB_SKILLS", "WB_IMAGES", "WB_COMMANDS", "WB_CHAT_TOKEN",
-             "WB_CHAT_CONFIG", "WB_OPENCODE_CONFIG", "WB_SAVINGS")
+             "WB_CHAT_CONFIG", "WB_OPENCODE_CONFIG", "WB_SAVINGS", "OPENCODE_CONFIG",
+             "CLAUDE_CONFIG_DIR")
 
 
 def absolute_env() -> None:

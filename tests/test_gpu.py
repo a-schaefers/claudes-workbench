@@ -5,6 +5,7 @@ import os
 import subprocess
 import sys
 import tempfile
+import textwrap
 import threading
 import time
 import unittest
@@ -373,6 +374,38 @@ with models.GpuLease(None, optimize.HOLDER, wait=False):
         self.assertIn(f"ollama could not fit {SMALL} beside {SMALL}", said[-1])
         self.assertNotIn(f"unload {SMALL}", said)      # t-a is using it
 
+
+    def test_a_task_stepping_aside_never_unloads_the_model_the_next_task_was_let_in_with(self):
+        # #327 (the audit of 1.4, reproduced): A let go of the lease, B took the GPU and loaded
+        # the same model, then A, deciding from the holders it saw before, sent keep_alive 0
+        admitted = Path(self.tmp.name) / "b-admitted"
+        b = textwrap.dedent(f"""
+            import sys, time
+            from pathlib import Path
+            sys.path.insert(0, {str(Path(__file__).resolve().parent.parent)!r})
+            from workbench import models
+            with models.GpuLease(models.resolve({SMALL!r}), "t-b", lambda s: None):
+                Path({str(admitted)!r}).write_text("in")
+                time.sleep(0.5)
+            """)
+        said = []
+        started = []
+        with models.GpuLease(models.resolve(SMALL), "t-a", said.append) as lease:
+            def let_b_in_if_it_can():            # where A used to pause after letting go
+                started.append(subprocess.Popen([sys.executable, "-c", b]))
+                self.addCleanup(started[0].kill)
+                end = time.time() + 5
+                while time.time() < end and not admitted.exists():
+                    time.sleep(0.05)
+                return set()
+            with mock.patch.object(models, "_fake", lambda: False), \
+                    mock.patch.object(models, "keep_loaded", let_b_in_if_it_can), \
+                    mock.patch.object(models, "_unload",
+                                      lambda m: said.append(("unload", admitted.exists()))):
+                lease.step_aside(unload=True)
+        self.assertEqual(started[0].wait(timeout=20), 0)
+        self.assertIn(("unload", False), said)      # sent before t-b was let in, which loads again
+        self.assertTrue(admitted.exists())
 
 class Budget(unittest.TestCase):
     """The GPU budget: one runtime's GPUs, an iGPU's carve-out left out, Apple's real default."""
