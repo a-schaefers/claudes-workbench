@@ -18,6 +18,13 @@ class GitError(RuntimeError):
     pass
 
 
+class NotARepo(GitError):
+    """The path is in no git repository (toplevel), in whatever language git said it."""
+
+
+C_LOCALE = {"LC_ALL": "C", "LANGUAGE": ""}  # git's messages in English, to be matched
+
+
 # The user's settings that would change what we read: found in the 2026-11-16 audit, a
 # `diff.external = difft` made the review diff difftastic's screen, color.ui=always put escape
 # codes in the changed-files list, and core.quotePath escaped every non-ASCII file name.
@@ -93,7 +100,17 @@ def git_bytes(cwd, *args) -> bytes:
 
 
 def toplevel(path) -> Path:
-    return Path(git(path, "rev-parse", "--show-toplevel").strip())
+    """The repo's top directory; NotARepo when ``path`` is in none."""
+    try:
+        return Path(git(path, "rev-parse", "--show-toplevel").strip())
+    except GitError as e:
+        # git's messages follow the user's language: "not a git repository" matched in English
+        # missed a French git's, and wb init refused an empty directory (the 2026-11-19 audit).
+        # Asked again in the C locale to classify; the user still reads their own language
+        again = _run(path, ["rev-parse", "--show-toplevel"], env=C_LOCALE, check=False)
+        if again.returncode and b"not a git repository" in again.stderr:
+            raise NotARepo(str(e)) from None
+        raise
 
 
 def branch_name(task: str) -> str:

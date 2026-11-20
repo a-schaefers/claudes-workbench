@@ -275,12 +275,18 @@ def _own_addresses() -> frozenset:
         found |= {a[4][0] for a in socket.getaddrinfo(socket.gethostname(), None)}
     except OSError:
         pass
-    try:  # every interface's, where `ip` is there (Linux)
-        out = subprocess.run(["ip", "-o", "addr"], capture_output=True, text=True, timeout=5).stdout
-        found |= {w.split("/")[0] for line in out.splitlines() for i, w in enumerate(line.split())
+    # Every interface's: `ip` on Linux, else `ifconfig` (macOS has no `ip`, so a provider at the
+    # Mac's own LAN address counted as remote and its model was left out: the 2026-11-19 audit)
+    for argv in (["ip", "-o", "addr"], ["ifconfig", "-a"]):
+        try:
+            out = subprocess.run(argv, capture_output=True, text=True, timeout=5).stdout
+        except (OSError, subprocess.TimeoutExpired):
+            continue
+        # 10.0.0.5/24 (ip), fe80::1%en0 (ifconfig's scope), addr:10.0.0.5 (old net-tools)
+        found |= {w.split("/")[0].split("%")[0].removeprefix("addr:")
+                  for line in out.splitlines() for i, w in enumerate(line.split())
                   if i and line.split()[i - 1] in ("inet", "inet6")}
-    except (OSError, subprocess.TimeoutExpired):
-        pass
+        break
     return frozenset(found)
 
 
