@@ -1,0 +1,56 @@
+# Release checklist
+
+Every release, before `gh release create`. Copy this file to `docs/releases/<version>.md`, fill
+it in on the release commit, commit it with the version bump, and link it from the release
+notes. Mark each line **pass**, **skip** (with why) or **fail** (with its issue), and keep the
+three apart: a skip is not a pass. A release may ship with a skip only when its notes say so.
+(The 2026-11-19 audit: the platforms the README names were never all run before a release.)
+
+## CI on the release commit
+
+- [ ] `check` green (the required check: Ubuntu, dash as `/bin/sh`, Python 3.11, the pinned
+      Claude Code and OpenCode).
+- [ ] `nightly` green on the commit: `gh workflow run nightly.yml --ref main`, then
+      `gh run watch`. Its three jobs:
+  - [ ] `check`: the newest Claude Code, the runner's newer Python.
+  - [ ] `macos`: Apple silicon, Python 3.11, OpenCode (no /proc, no inotify, no Landlock).
+  - [ ] `wsl`: WSL2's Debian, dash, a user who isn't root, OpenCode.
+- [ ] `opencode`: the newest OpenCode, or the break it found has an issue.
+- [ ] `chat`, when the web chat changed since the last release.
+
+## By hand, on real machines
+
+The whole road, as a `--trial` task on a scratch repo from `wb init`: install, sample (`wb try`),
+delegate (`wb start`), answer a question (`wb answer`), review, interrupt (`wb steer --now` or
+`wb stop`), resume (`wb feedback`), then `wb accept --merge`. Check the merged file and commit
+yourself, not only what `wb` reports.
+
+| Where | Result | Notes |
+|---|---|---|
+| Linux (Debian or Ubuntu) | | |
+| macOS on Apple silicon, natively | | |
+| WSL2, the repo in WSL's own file system | | |
+| WSL2, the repo on a Windows drive (`/mnt/c`) | | |
+
+On at least one of them:
+
+- [ ] Python 3.11.
+- [ ] git in another language (`LANGUAGE=fr`).
+- [ ] A repo path with spaces.
+- [ ] A laptop's sleep and wake during a round.
+
+## Models and long runs
+
+| Setup | Result | Notes |
+|---|---|---|
+| CPU only, or little VRAM | | |
+| A discrete GPU | | |
+| Metal | | |
+| Unified memory on Linux (an APU, a DGX Spark) | | |
+| Several GPUs, Ollama limited to some (`CUDA_VISIBLE_DEVICES`) | | |
+| A remote Ollama (`wb remote`) | | |
+| A server with an API key and several models (`wb model add --url`) | | |
+
+- [ ] More tasks than fit, queued (`--queue`), each run in turn.
+- [ ] A model load interrupted (`wb stop` while it loads), and the next task runs.
+- [ ] The web chat in two tabs, with reconnects and a long history.

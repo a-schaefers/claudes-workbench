@@ -433,6 +433,18 @@ TOOLCHAINS = ("go", "node", "npm", "npx", "yarn", "pnpm", "dotnet", "java", "cma
               "dart", "kotlin", "cargo", "rustc", "python3", "opencode")
 
 
+def home_gap() -> str:
+    """A line when the home directory lies in a temp root, which every lane writes whole (see
+    writable): the credentials there are then the agent's to read. Seen in sandboxes that put the
+    profile under /tmp (the 2026-11-19 audit), else ""."""
+    home = os.path.realpath(Path.home())
+    temps = {os.path.realpath(t) for t in (tempfile.gettempdir(), *TEMP_ROOTS)}
+    inside = next((t for t in sorted(temps) if _under(home, t)), None)
+    return (f"your home directory {home} is inside {inside}, which every agent's lane writes "
+            "whole: its credentials there are readable to agents; give this user a home outside "
+            "it") if inside else ""
+
+
 def lane_on() -> bool:
     """Whether the lane is on for every task (commands.json `"paths": ["*"]` turns it off)."""
     return "*" not in commands_conf().get("paths", [])

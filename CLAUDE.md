@@ -136,15 +136,14 @@ dependencies. No packaging: it runs from the clone.
   `test_portable.py`, `test_sizing.py`, `test_docs.py` (the docs cover the code),
   `test_workflows.py` (the merge gate),
   `fake_opencode.py`, `capture_llm.py`, `e2e_chat.mjs`.
-- `.github/`: CI (`workflows/check.yml`, the required check, on each push and pull request; `chat.yml`, the
-  browser test;
-  Python 3.11; OpenCode `OPENCODE_VERSION`; `nightly.yml` on the newest Claude Code,
-  plus macOS; `opencode.yml` on the newest OpenCode; README badges), `owner-merge.yml` (approves
+- `.github/`: CI (`workflows/check.yml`, the required check, on each push and pull request,
+  Python 3.11, OpenCode `OPENCODE_VERSION`; `chat.yml`, the browser test; `nightly.yml`: the
+  newest Claude Code, macOS, WSL2; `opencode.yml`: the newest OpenCode), `owner-merge.yml` (approves
   the owner's pull requests only), `rulesets/main.json`, dependabot for the actions' pins.
 - `scripts/`: `ship.sh` (the road to main), `github-settings.sh check|apply`,
   `install-opencode.sh` (CI's OpenCode, from its release, hash-checked).
-- `systemd/wb-chat.service`: keeps the web chat up. `docs/`: the images the README and ARCHITECTURE.md show (a replaced image
-  gets a new file name, for GitHub's cache).
+- `systemd/wb-chat.service`: keeps the web chat up. `docs/`: the README's and ARCHITECTURE.md's images (a replaced one
+  gets a new name, for GitHub's cache), `release-checklist.md`, `releases/`.
 
 Runs on Linux, WSL2 and macOS; the launchers refuse native Windows and Python before 3.11. Off Linux: no Landlock, and watch.py waits on timers.
 
