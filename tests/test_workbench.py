@@ -58,6 +58,15 @@ def not_merged(*argv) -> str:
     return buf.getvalue()
 
 
+def fake_probe(tmp: Path) -> None:
+    """A `probe` first on PATH, as `cargo install probe-code` puts one (PROBE_EXPERIMENT.md)."""
+    bin_ = tmp / "probe-bin"
+    bin_.mkdir()
+    (bin_ / "probe").write_text("#!/bin/sh\necho probe-code 0.6.0\n")
+    (bin_ / "probe").chmod(0o755)
+    os.environ["PATH"] = f"{bin_}{os.pathsep}{os.environ['PATH']}"
+
+
 def wait_phase(name, phases, timeout=30):
     deadline = time.time() + timeout
     while time.time() < deadline:
@@ -3629,6 +3638,18 @@ class RealOpenCode(Base):
                                                shell("env gh --version"), shell("timeout 5 sudo -n true")])
         refused = ["permission.rejected" in a for a in answers]
         self.assertEqual(refused, [False, True, True, True, True], answers)
+
+    def test_the_probe_experiment_lets_the_agent_run_probe_and_only_while_on(self):
+        # PROBE_EXPERIMENT.md: the rule and the PATH reach the agent's shell, in its lane
+        fake_probe(Path(self.tmp.name))
+        def shell(name):
+            return [{"name": "shell", "arguments": {"command": "probe symbols README.md",
+                                                    "workdir": str(store.Task(name).worktree)}}]
+        _, on = self.run_calls("t-probe-on", shell("t-probe-on"))
+        self.assertIn("probe-code 0.6.0", on[0])
+        run_wb("experiment", "probe", "off")
+        _, off = self.run_calls("t-probe-off", shell("t-probe-off"))
+        self.assertIn("permission.rejected", off[0])
 
     @unittest.skipUnless(lane.abi(), "needs Landlock")
     @home_outside_the_lane
@@ -8939,6 +8960,66 @@ class Drift(unittest.TestCase):
             # a spec that names no file at all says nothing about scope
             Path(d, "prompt.md").write_text("Make the search faster.")
             self.assertEqual(runner.outside_spec(task, files), [])
+
+
+class ProbeExperiment(Base):
+    """The probe experiment (PROBE_EXPERIMENT.md): on by default while measured, recorded per task,
+    and nothing at all where it is off or probe isn't installed."""
+
+    def fake_probe(self):
+        fake_probe(Path(self.tmp.name))
+
+    def probe_rules(self, task):
+        return [r["resource"] for r in context.shell_rules(task) if "probe" in r["resource"].split()]
+
+    def test_with_probe_installed_the_agent_may_run_it_and_its_handbook_says_how(self):
+        self.fake_probe()
+        self.start("t-probe", "ok")
+        wait_phase("t-probe", {"review"})
+        task = store.Task("t-probe")
+        self.assertEqual(task.spec["experiments"], {"probe": True})
+        self.assertEqual(self.probe_rules(task), ["probe", "probe *", f"{context.ASSIGN} probe *"])
+        handbook = (context.rules_dir(task) / "HANDBOOK.md").read_text()
+        self.assertTrue(handbook.startswith(context.HANDBOOK.read_text()))
+        self.assertTrue(handbook.endswith(context.EXPERIMENT_NOTES["probe"]))
+        self.assertIn("probe: on, found (probe-code 0.6.0)", cli.experiment_lines())
+
+    def test_without_probe_installed_the_task_runs_as_main_does(self):
+        with mock.patch.object(context, "probe_bin", return_value=None):
+            self.start("t-noprobe", "ok")
+            self.assertIn("isn't on PATH", cli.experiment_lines()[0])
+        wait_phase("t-noprobe", {"review"})
+        task = store.Task("t-noprobe")
+        self.assertEqual(task.spec["experiments"], {"probe": False})
+        self.assertEqual(self.probe_rules(task), [])
+        self.assertEqual((context.rules_dir(task) / "HANDBOOK.md").read_text(), context.HANDBOOK.read_text())
+
+    def test_turned_off_it_changes_only_the_tasks_started_after(self):
+        self.fake_probe()
+        self.start("t-before", "ok")
+        wait_phase("t-before", {"review"})   # its rules are written again each round: still on
+        out = run_wb("experiment", "probe", "off")
+        self.assertIn("probe: off", out)
+        self.assertIn("tasks already started keep theirs", out)
+        self.start("t-after", "ok")
+        wait_phase("t-after", {"review"})
+        before, after = store.Task("t-before"), store.Task("t-after")
+        self.assertEqual(before.spec["experiments"], {"probe": True})
+        self.assertEqual(after.spec["experiments"], {"probe": False})
+        self.assertTrue(self.probe_rules(before))
+        self.assertEqual(self.probe_rules(after), [])
+        self.assertEqual(json.loads(context.experiments_path().read_text()), {"probe": "off"})
+        run_wb("accept", "t-before", "-m", "feat: answer")
+        run_wb("accept", "t-after", "-m", "feat: answer")
+        rows = {r["task"]: r for r in store.results()}
+        self.assertEqual(rows["t-before"]["experiments"], ["probe"])   # the results rows say which
+        self.assertNotIn("experiments", rows["t-after"])
+        self.assertIn("probe: on", run_wb("experiment", "probe", "on"))
+
+    def test_an_unknown_experiment_is_refused(self):
+        with self.assertRaises(SystemExit):
+            run_wb("experiment", "telepathy", "on")
+        self.assertFalse(context.experiments_path().exists())
 
 
 if __name__ == "__main__":

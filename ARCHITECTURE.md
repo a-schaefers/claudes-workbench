@@ -1598,7 +1598,7 @@ nothing until a surface attaches.
   one row per setting, a Button naming its value (`▸ Claude coding: Let Claude decide (default)`, key
   `coding`; `▸ Web chat: Off (default)`, key `chat`; the default option says so, to show how it was at
   the start, the user 2026-11-19); a press opens its options under it as Buttons (keys
-  `coding:only|ask|decide`, `chat:off|on`, the chosen one marked `❯`), picked by a click or Enter
+  `coding:only|ask|decide`, `chat:off|on`, `probe:off|on`, the chosen one marked `❯`), picked by a click or Enter
   on the ring, and a pick folds the row again. Under them, the sentence of the option the ring is
   on (the `ui.focus` hook keeps it in the `pane` atom), else the chosen one's; the pointer on an
   option lays its own sentence over it (a hover reveal: `display: "none"` Boxes, absolute, under
@@ -1606,6 +1606,9 @@ nothing until a surface attaches.
   `Only when I say`, `Ask me first`, `Let Claude decide (default)` (`CODING_STOPS`); a pick runs `wb coding
   <mode>`, and each draw reads `coding.json` again. **Web chat** (`CHAT_STOPS`, both saying what it
   is: `A localhost web server to interact with Claude.`): `Off (default)` and `On`; a pick runs `wb chat on|off` and reads the switch and the link back at once.
+  **Agent code navigation (experiment)** (`PROBE_STOPS`, key `probe`, options `probe:off|on`,
+  *Experiments*): `Off` and `On (default)`; a pick runs `wb experiment probe off|on`, and each
+  draw reads `experiments.json` again (`probeMode`; no file or no `probe` key: on).
 - **The status line** reads like `⚒ wb · add-scores running r2 · fix-typo asks · 1 awaiting
   review`, or `⚒ wb · workbench mode` with nothing open. Outside workbench mode it counts only
   the session's own tasks (`mine`), and shows nothing without one: another session's running task
@@ -2920,6 +2923,26 @@ without one (`codingRefusal`, in the one unmatched `tool.call` hook; the deny na
 outside `decide` adds a `claude-coding` context block with the rule (`CODING_RULES`) while
 delegating or with a task open. A shell edit isn't seen: the block says the rule covers it too.
 
+## Experiments
+
+An experiment is a change to what the agent may do, measured before it is supported: it lives on
+its branch (a draft pull request, never shipped by `scripts/ship.sh`) until the bench says it
+pays. `context.EXPERIMENTS` names each with its purpose; each is on by default while it is
+measured. `wb experiment <name> on|off` (or the pane's Settings row) sets it in
+`$WB_HOME/experiments.json`, and `wb start` records what the task's agent has in task.json
+`experiments` (`context.task_experiments`: on only when set on and able to work), so a flip
+changes only the tasks started after it, a replay's task records which arm it ran in, and a
+results row lists the ones that were on. Off, or unable to work, the agent's prompt and rules are
+exactly those without the experiment.
+
+**probe** (`probe-code`, an outside program, like opencode, not a dependency): the agent reads
+a file's outline (`probe symbols <file>`) and one function (`probe extract <file>#<name>`)
+instead of the whole file, where its context fills (about half the measured steps compacted or
+handed over, 2026-11-20). It needs probe on the agent's PATH (`context.probe_bin`, through
+`agent_path`). On, the task's shell rules allow `probe` (`shell_rules`, after `ALLOWED_COMMANDS`),
+and its copy of the handbook ends with `EXPERIMENT_NOTES["probe"]` (`instruction_files`;
+`agent/HANDBOOK.md` itself is unchanged). It is read-only: no index, no daemon, no network.
+
 ## Verifying a fix against the base
 
 `wb verify <task> [--test CMD] [--files PATH…] [--expect TEXT] [--timeout N]` (`workbench/verify.py`, #96) runs
@@ -3719,6 +3742,7 @@ delivered as taken (`_stale_notes`, *Notes*).
 | `wb progress [on\|off]` | `--after MIN` (with `on`; default: the task's typical length on its model) | The user's opt-in to progress checks; with no argument, what it is (*Progress checks*). |
 | `wb steer <task> --text "…" \| --message <file>` | `--now`, `--step` (a smaller step: the note opens with `STEP_NOTE`; after a progress check, recorded as a `smaller` intervention, else a `hint`) | Only while queued/running/testing/asking with a live runner. Appends to steer.jsonl: delivered when the current run ends (before the tests), or at once with `--now`. While testing: "its tests are running (up to Ns); the agent gets it when they end"; while queued: when its round starts. |
 | `wb note <task> --text "…"` | | A `captain` event: Claude's log line in the transcript. |
+| `wb experiment [<name> [on\|off]]` | | The experiments (*Experiments*): with no argument, each one's purpose and state (`cli.experiment_lines`: `probe: on, found (probe-code 0.6.0)`, `probe: on, but probe isn't on PATH, so it changes nothing yet (cargo install probe-code --locked)`, `probe: off (wb experiment probe on)`); with a name, its state; with `on`/`off`, sets it in `experiments.json` for the tasks started from then (`; tasks already started keep theirs`). An unknown name is refused. |
 | `wb coding [only\|ask\|decide]` | `allow <task> --edit "…" --said "…" [--when "…"]`, `used <task> --did "…"` | When Claude may write a delegated task's code (*Claude coding*): with no argument, the choice and its sentence, then each open task's unspent allowance; a mode saves it. `allow` records the user's yes for one task's edit, until the task goes back to the agent; with `--when`, a one-task exception granted ahead, spent only once Claude has started on it. `used` records what Claude changed under it and says to hand the testing back; exit 1 with none. |
 | `wb shot <task>` | `--capture CMD` (required), `--viewport WxH` (1280x800), `--files PATH…`, `--timeout N` (300), `--chat` (post the pair to the web chat), `--setup` (run the setup in each checkout) | At review, for a visual task: the project's capture command run on the base and on the candidate, each in a scratch checkout under the task's lane; where each PNG is, or why a side has none (*Screenshots of the base and the candidate*). |
 | `wb takeover [<task> \| --all]` | `--repo DIR`, `--session ID`, `--user` | Stops the runner, phase `review`, "Claude took over"; Claude edits in the worktree and accepts, or hands back with feedback. Outside "Let Claude decide" it needs the user's recorded yes for the task, else exit 3; `--user` (the mod's hand-back command) is the user's own ask, and records one (*Claude coding*). `--all`: every task that isn't closed. `--session ID` (repeatable) and `--repo DIR`, with `--all` (the mod passes every session id its process has had and its directory): only that session's tasks (`_scope`): one with a task.json `session` when it is one of the IDs, wherever it ran, or when its `claude_pid` is gone and DIR claims it as below; else (no `session`, or no `--session` given) when its `repo` is DIR, inside it or holds it, or its `cwd` is DIR or inside it, by whole components of real paths (in lower case where the file system ignores case), never when DIR is the home directory or `/`; one with no key at all: every session's. The rest are listed as `left alone (other sessions'): …`. |
@@ -3775,7 +3799,7 @@ delivered as taken (`_stale_notes`, *Notes*).
 | `wb init <dir>` | | A project the way Claude keeps one: git on the default branch, an initial commit, AGENTS.md → CLAUDE.md (a CLAUDE.md → AGENTS.md link is swapped; a gitignored CLAUDE.md isn't linked). Refuses the home directory or above, inside another repo, a repo git refuses (git's reason: no `git init` over it; "not a repo" is told apart in any language, `gitops.NotARepo`), without a git identity (`git var`, as for `wb start`), and a first commit holding likely secrets or installed directories no .gitignore covers. |
 | `wb setup` | `--force` (replaces a link that points elsewhere; never a real file) | Links `~/.local/bin/wb` to this copy's `bin/wb` and Claude Code's `skills/workbench` to its `skill/workbench`, removes an old `skills/delegate` link that now leads nowhere (the skill was `/delegate` until 2026-11-17; the mod runs `wb setup` itself when it finds only that), warns when `~/.local/bin` isn't on PATH (Claude and the mod run `wb` by name) with the line for the user's `$SHELL` (`cli.path_advice`: zsh's `~/.zshrc`, bash's `~/.bashrc`, on macOS `~/.bash_profile`, fish's `fish_add_path`, else `~/.profile`) and to start Claude Code again from a new terminal (the desktop app or an IDE too); "add it" was all it said (#274, the audit of 1.2), and `wb doctor`'s "wb isn't on PATH" gives the same line when that link is there; exit 1 when it left something in the way (see *Installing*). Then, when due (*Optimize*), starts the minute or two of measuring the GPU and prints its line as `--`. Ends with a `first run:` checklist (`cli.first_run`, #111), one line each, `ok` or `--` with the fix: OpenCode 2.x (else where to get it), a model server answering (a configured provider, this machine's Ollama, or a server on a default port; else: start yours, or run /workbench and Claude lays out the ones that fit the machine, never steering to one; `wb model add --url`), a local model registered (else: run /workbench, and Claude picks one for the machine), Landlock. It names no model, and changes no exit code. |
 | `wb update` | `--check` (only say whether origin has news: `update available: N new commit(s)…` or `up to date`), `--if-due` (with `--check`: ask origin at most weekly, `UPDATE_EVERY`, else answer from `update.json`; never with `CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC`) | Updates this copy (see *Installing*): refuses while any runner is live; a marketplace copy runs `claude plugin marketplace update workbench` then `claude plugin update workbench@workbench`; a clone (refusing uncommitted tracked changes) runs `git pull --ff-only` first. Refuses, before anything changes, when `claude` isn't on PATH; a step that can't run or runs past 300 s fails with a line (after a clone's pull: what is left to run), and update.json is written as soon as the pull lands. Prints `updated <kind> a..b (N commit(s))` or `already up to date`; without the count when `a` is gone, as in Claude Code's marketplace clone, which is one commit deep and replaced by its update (the count once failed an update that had landed, 2026-11-20). The check's fetch (`cli._fetch_origin`) never prompts and never hangs: no terminal, `GIT_TERMINAL_PROMPT=0`, `SSH_ASKPASS_REQUIRE=never`, at most `FETCH_SECS` = 60 s; the user's own ssh command (`GIT_SSH_COMMAND`, `GIT_SSH`, `core.sshCommand`) is kept, and with none ssh runs with `BatchMode`. In between, `--if-due` recounts `HEAD..@{u}` locally, so a pull made elsewhere shows at once. |
-| `wb doctor` | | `opencode --version` (BAD below 2.x, whose config shape and run flags workbench writes; a version that doesn't parse is a `--` line; one outside `runner.OPENCODE_TESTED` another `--` line), the OpenCode config files (the user's `$OPENCODE_CONFIG` among them), the Python wb runs on (its version and path, and when the launcher handed over from an older `python3`, #259), git, models found and each one's readiness (BAD when none can run), the providers skipped and why, an Ollama provider not answering (asked once), a provider's baseURL problem, any entry without `limit.context` (BAD), each Ollama entry's `options.max_tokens` and context against what Ollama serves (or that it can't say), a `--` line for each model `wb optimize` measured with a window to change (`optimize.advice`), a `--` line for a model left thinking whose output cap (`options.max_tokens`, else `limit.output`: any server) at its measured write speed here outlasts its think budget (`router.thinking_stall`: it can sit silent until nudged and stopped; seen 2026-11-18 on a spilled 64K entry; harmless on a fast card, so measured per machine), the state directory (made if missing, then checked writable; what it holds, counted for at most 3 s, and the free space beside it: BAD under 2 GB, #342), the GPU budget and the devices it counts (or that the GPU's memory is unknown, or that none was found: a `--` line), a real lane drawn around a test write (`ok agents write only in their lane (Landlock ABI N)`: the probe's `PermissionError`, not exit 126; then a `--  Landlock ABI N: …` line for each of `lane.gaps`, and on WSL with interop on a `--  WSL interop is on: …` line (`context.interop_gap`), and a `--` line when the home directory lies in a temp root, which the lane writes whole (`context.home_gap`: its credentials are then readable to agents; the 2026-11-19 audit, a sandbox's profile under `/tmp`); without Landlock a `--` line saying writes and credential reads aren't refused and whether sudo still is), `commands.json` (`context.commands_conf`: it must parse and hold lists of strings, and `repos` its settings; `BAD` stops the check), the toolchains on PATH that are snaps (`context.TOOLCHAINS`; they can't run in the lane), `wb` on PATH (Claude's Bash runs it by name: BAD without it, whatever `WB_BIN` says; `WB_BIN` is noted when set), the `/workbench` skill link, a `--` line when `wb` or `/workbench` comes from another copy (`wb setup --force` from the one you want), and whether Claude Code lists `workbench@…` in `plugins/installed_plugins.json` (information only: a mod loaded another way isn't listed). `ok`/`BAD` lines set the exit code; `--` lines inform. |
+| `wb doctor` | | `opencode --version` (BAD below 2.x, whose config shape and run flags workbench writes; a version that doesn't parse is a `--` line; one outside `runner.OPENCODE_TESTED` another `--` line), the OpenCode config files (the user's `$OPENCODE_CONFIG` among them), the Python wb runs on (its version and path, and when the launcher handed over from an older `python3`, #259), git, models found and each one's readiness (BAD when none can run), the providers skipped and why, an Ollama provider not answering (asked once), a provider's baseURL problem, any entry without `limit.context` (BAD), each Ollama entry's `options.max_tokens` and context against what Ollama serves (or that it can't say), a `--` line for each model `wb optimize` measured with a window to change (`optimize.advice`), a `--` line for a model left thinking whose output cap (`options.max_tokens`, else `limit.output`: any server) at its measured write speed here outlasts its think budget (`router.thinking_stall`: it can sit silent until nudged and stopped; seen 2026-11-18 on a spilled 64K entry; harmless on a fast card, so measured per machine), the state directory (made if missing, then checked writable; what it holds, counted for at most 3 s, and the free space beside it: BAD under 2 GB, #342), the GPU budget and the devices it counts (or that the GPU's memory is unknown, or that none was found: a `--` line), a real lane drawn around a test write (`ok agents write only in their lane (Landlock ABI N)`: the probe's `PermissionError`, not exit 126; then a `--  Landlock ABI N: …` line for each of `lane.gaps`, and on WSL with interop on a `--  WSL interop is on: …` line (`context.interop_gap`), and a `--` line when the home directory lies in a temp root, which the lane writes whole (`context.home_gap`: its credentials are then readable to agents; the 2026-11-19 audit, a sandbox's profile under `/tmp`); without Landlock a `--` line saying writes and credential reads aren't refused and whether sudo still is), `commands.json` (`context.commands_conf`: it must parse and hold lists of strings, and `repos` its settings; `BAD` stops the check), the toolchains on PATH that are snaps (`context.TOOLCHAINS`; they can't run in the lane), `wb` on PATH (Claude's Bash runs it by name: BAD without it, whatever `WB_BIN` says; `WB_BIN` is noted when set), the `/workbench` skill link, a `--` line when `wb` or `/workbench` comes from another copy (`wb setup --force` from the one you want), and whether Claude Code lists `workbench@…` in `plugins/installed_plugins.json` (information only: a mod loaded another way isn't listed), and one `--  experiment …` line per experiment (`wb experiment`'s). `ok`/`BAD` lines set the exit code; `--` lines inform. |
 
 ## Files and formats
 
@@ -3786,6 +3810,7 @@ $WB_HOME (~/.local/state/workbench)
   gc.json                        the last gc: {at, archived, notices, rules, runtime, branches}
   archive/<task>/                a task closed and untouched for ARCHIVE_DAYS (30), moved from tasks/ by gc
   coding.json                    Claude coding, the user's choice: {mode: only|ask|decide, ts}; none: decide
+  experiments.json  .lock        wb experiment: {<name>: "on"|"off"}; a missing name is on (*Experiments*)
   progress.json                  progress checks, the user's opt-in: {on, after?, ts}; none: off
   results.jsonl                  one row per closed task: what the router, slices, tuning and skill records learn from
   lessons.jsonl                  what each task taught, open until written into a skill or closed
@@ -3904,7 +3929,8 @@ monorepo package, *Instructions*) (each when set), `setup`, `copy`, `siblings` (
 flags with commands.json `repos`, *Setting the worktree up*; `lib` one level up, `../../a/b` further),
 `worktree` (when nested: the worktree's path in the task's directory, `tree/…/worktree`, #261), `auto_fix`, `self_review` (true/false from the flags; null: learned), `ask_budget`,
 `ask_timeout`, `checkin`, `round_timeout`, `silence_timeout`, `think_timeout`, `test_timeout`,
-`created_at`, `wb_version`. Read but written by no command: `stuck` (the guards' thresholds),
+`created_at`, `wb_version`, `experiments` (`{probe: true|false}`: what this task's agent has,
+`context.task_experiments`; missing on a task from before them: all off). Read but written by no command: `stuck` (the guards' thresholds),
 `deny_skills`. A missing key takes the runner's own default (auto-fix 0, think and
 check-ins off), not `wb start`'s.
 
@@ -3962,8 +3988,8 @@ questions `ask {id}`, `answer {id}`. From `wb`:
 **results.jsonl** (`results.record`, on accept and discard): `ts`, `task`, `outcome`
 (`accepted`/`discarded`), `model`, `size`, `repo`, `stack`, `rounds`, `auto_fixes`, `reviews`
 (every step's), `spec_rounds`, `tests_ok`, `minutes` (wall clock since `wb start`, queueing and
-review included), `tok_in`, `tok_out`, `skills_offered`, `skills_loaded`, `skills_rev`, `steps`
-(one `results.step` per step), `window`, `tuned`, `explored`, `tuned_max`, `spec_gaps`, `claude`
+review included), `tok_in`, `tok_out`, `skills_offered`, `skills_loaded`, `skills_rev`, `experiments` (the
+names on for the task, when any), `steps` (one `results.step` per step), `window`, `tuned`, `explored`, `tuned_max`, `spec_gaps`, `claude`
 (when known: `spend.usage`, `{turns, calls, input, cache_write_5m, cache_write_1h, cache_read,
 output}`, *What a task cost Claude*), `gpu_wh` (status's, when measured), `remote_gpu` (true
 when its model ran on another machine, whose energy nothing here measures), `active_minutes`
@@ -4289,6 +4315,9 @@ push: every change is a pull request that merges once `check` is green and it is
 
 ## Couplings: change one, change the other
 
+- **An experiment** (`context.EXPERIMENTS`) → its effects (`shell_rules`, `EXPERIMENT_NOTES`),
+  `task_experiments` (when it can work), `cli.experiment_lines`, the pane's Settings row
+  (`PROBE_STOPS`, `probeMode`), and *Experiments*.
 - **What a handoff costs Claude, measured** → THESIS.md (the case for users, with the same
   numbers) and the README's sentence on it, which links there.
 - **Anything a reader looks up** (a command, flag, default, guard, key, file, prompt text,
