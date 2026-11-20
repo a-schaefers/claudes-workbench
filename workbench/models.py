@@ -1601,6 +1601,37 @@ def ollama_show(root: str, name: str, timeout: float = 30) -> dict:
     return {"capabilities": body.get("capabilities") or [], "context_length": ctx, "num_ctx": num}
 
 
+def served_window(m: Model) -> int | None:
+    """The window the server gives ``m`` now that it is loaded: Ollama's /api/ps
+    context_length, else what server_facts reads (llama-server's n_ctx, vLLM's max_model_len,
+    LM Studio's loaded instance). None when the server doesn't say."""
+    if _fake():
+        return None
+    if m.engine == "ollama":
+        for x in (_get(f"{m.root}/api/ps") or {}).get("models", []):
+            if _matches(m.name, {x.get("name")}) and x.get("context_length"):
+                return int(x["context_length"])
+        return None
+    _FACTS.pop((m.root, m.name), None)  # fresh: this is what the round will meet
+    return server_facts(m.root, m.name, m.api_key)["context"]
+
+
+def short_window(m: Model) -> str | None:
+    """Why ``m`` can't run as OpenCode is told: the server serves less than its limit.context,
+    so it would cut prompts off silently while OpenCode, thinking there is room, never compacts
+    (#248, the audit of 1.2). None when it serves enough, or doesn't say."""
+    said = (m.config.get("limit") or {}).get("context")
+    served = served_window(m)
+    if not said or not served or served >= said:
+        return None
+    fix = ("raise OLLAMA_CONTEXT_LENGTH (Ollama restarted without it?)" if m.engine == "ollama"
+           else "start the server with a bigger window")
+    return (f"the server serves {m.id} a {served // 1024}K window, but OpenCode is told "
+            f"{said // 1024}K (limit.context): it would cut the prompt off silently. Fix: {fix}, "
+            + (f"or wb model add {m.id} --context {served}" if served >= MIN_WINDOW
+               else f"tasks need {MIN_WINDOW // 1024}K+"))
+
+
 def ollama_served_context(root: str, name: str) -> int | None:
     """The window Ollama gives this model over OpenCode's API, which can't ask for one: what it
     runs with if loaded, else its Modelfile's num_ctx, else OLLAMA_CONTEXT_LENGTH. None when only

@@ -1341,14 +1341,19 @@ def _wait_up(task: store.Task, m: models.Model) -> None:
 
 def _load(task: store.Task, lease, m: models.Model) -> float:
     """``lease.load()``, and once more after waiting when it failed because the server is only
-    down (an Ollama restarting between rounds)."""
+    down (an Ollama restarting between rounds). Loaded, the window it serves is checked against
+    the one OpenCode is told: only doctor, scout and wb model add compared them, and a server
+    restarted without its setting trimmed every prompt silently (#248, the audit of 1.2)."""
     try:
-        return lease.load()
+        secs = lease.load()
     except (KeyError, RuntimeError, OSError):
         if not _down(m):
             raise
-    _wait_up(task, m)
-    return lease.load()
+        _wait_up(task, m)
+        secs = lease.load()
+    if why := models.short_window(m):
+        raise RuntimeError(why)
+    return secs
 
 
 def drive(task: store.Task) -> None:
