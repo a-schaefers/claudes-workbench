@@ -2277,7 +2277,10 @@ What it measures, per Ollama model that can run (`candidates`; not one in models
 autocomplete model to measure it, #254, the audit of 1.2): the largest window that keeps the
 model and its context all in VRAM, by Ollama's own placement after a load at each window tried
 (`probe`: `/api/generate` with `options.num_ctx`, then `/api/ps` `size_vram` against `size`, then
-unloaded). `fit` loads the served window first (`limit.context`); when it spills it searches down
+unloaded). A load counts as whole only when `/api/ps` `context_length` (`served`) is at least the
+window asked: a server that clamps every load (Ollama served 16K, all in VRAM, and a 64K fit was
+recorded: #338, the audit of 1.4) records `clamped`, the largest window it did serve, and
+`advice` says to fix the server's window or tell OpenCode that one. `fit` loads the served window first (`limit.context`); when it spills it searches down
 from there to `models.MIN_WINDOW`, else up to twice it (never past what Ollama says the model was
 trained on, nor `MAX_WINDOW` 128K, whose cache could fill system RAM), halving the gap in
 multiples of `STEP` 4K: at most `loads(m)` loads, about six. Why it matters: on 2026-11-18 a 64K
@@ -3684,8 +3687,8 @@ $WB_HOME (~/.local/state/workbench)
   bench/runs.jsonl  driver.json  one row per replay; the driver's {pid, run}
                                  (bench.jsonl and bench/repos/ are the old suite's: nothing reads them)
   optimize.json  optimize.log    wb optimize: {pid, start, began, done, stopped, hardware (fingerprint: [name, vram] per GPU, then ["remote", root, [[name, size]…]] per remote Ollama),
-                                 secs_per_load, models: {<id>: {window, fits, spill, tried: [{window,
-                                 size, vram}], ts}}, made: {<provider>/<name>: <source id>} (a variant
+                                 secs_per_load, models: {<id>: {window, fits, spill, clamped, tried:
+                                 [{window, size, vram, served}], ts}}, made: {<provider>/<name>: <source id>} (a variant
                                  apply made and hasn't registered yet: #266)}; the run's output
   imports/<slug>/                skills fetched by wb skill import, for Claude to read
   images/<YYYYmmdd-HHMMSS>/      wb image's candidates (unless --out), their .json sidecars, engine.log

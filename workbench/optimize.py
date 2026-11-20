@@ -157,14 +157,16 @@ def due(ms: list[models.Model] | None = None) -> str:
 
 
 def probe(m: models.Model, window: int) -> dict:
-    """Load ``m`` at ``window`` and read where Ollama put it: {window, size, vram}."""
+    """Load ``m`` at ``window`` and read where Ollama put it: {window, size, vram, served}, served
+    being the window it actually gave (/api/ps context_length; None when it doesn't say)."""
     models._unload(m)
     try:
         models._post(f"{m.root}/api/generate", {"model": m.name, "prompt": "", "keep_alive": "2m",
                                                 "options": {"num_ctx": window}}, timeout=900)
         for x in (models._get(f"{m.root}/api/ps") or {}).get("models", []):
             if models._matches(m.name, {x.get("name")}) and x.get("size"):
-                return {"window": window, "size": x["size"], "vram": x.get("size_vram") or 0}
+                return {"window": window, "size": x["size"], "vram": x.get("size_vram") or 0,
+                        "served": int(x["context_length"]) if x.get("context_length") else None}
         raise RuntimeError(f"Ollama loaded {m.name} but doesn't list it")
     finally:
         models._unload(m)
@@ -180,7 +182,10 @@ def fit(m: models.Model, trained: int | None, check=lambda: None) -> dict:
         check()
         r = probe(m, w)
         tried.append(r)
-        return r["vram"] >= r["size"]
+        # a server that serves less than was asked (Ollama clamped to 16K at every load) hasn't
+        # shown that ``w`` fits: placement alone recorded a 64K fit it never served (#338, the
+        # audit of 1.4)
+        return r["vram"] >= r["size"] and not (r.get("served") and r["served"] < w)
 
     now = served(m)
     top = min(trained or MAX_WINDOW, 2 * now, MAX_WINDOW) // STEP * STEP
@@ -201,8 +206,10 @@ def fit(m: models.Model, trained: int | None, check=lambda: None) -> dict:
             break
         good, bad = (mid, bad) if whole(mid) else (good, mid)
     at = next((r for r in tried if r["window"] == now), None)
+    short = [r["served"] for r in tried if r.get("served") and r["served"] < r["window"]]
     return {"window": now, "fits": good, "spill": round(100 * (1 - at["vram"] / at["size"]))
-            if at and at["size"] else None, "tried": tried, "ts": store.now()}
+            if at and at["size"] else None, "clamped": max(short) if short else None,
+            "tried": tried, "ts": store.now()}
 
 
 def _record(model_id: str, row: dict) -> None:
@@ -224,6 +231,10 @@ def advice(model_id: str, row: dict) -> str:
     k = lambda n: f"{n // 1024}K"  # noqa
     if fits is None:
         return f"{model_id}: doesn't fit the GPU whole even at {k(models.MIN_WINDOW)}"
+    if row.get("clamped") and row["clamped"] < w:  # #338: the window it runs at, not the one asked
+        return (f"{model_id}: the server served it {k(row['clamped'])} whatever was asked (OpenCode "
+                f"is told {k(w)}); {k(fits)} is what was seen to fit. Fix the server's window "
+                f"(OLLAMA_CONTEXT_LENGTH?) or wb model add {model_id} --context {row['clamped']}")
     if spill:
         return (f"{model_id}: its {k(w)} window puts {spill}% of it in system RAM here (slower); "
                 f"{k(fits)} fits all on the GPU. A bigger window compacts less, a whole one writes "

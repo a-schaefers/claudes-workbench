@@ -976,7 +976,7 @@ class Optimize(unittest.TestCase):
     WEIGHTS, PER_TOKEN, CARD = 10_000_000_000, 32_000, 12_100_000_000
     setUp, tearDown, config = Real.setUp, Real.tearDown, Real.config  # not Real's tests again
 
-    def ollama(self, window, entry=None, loaded=None, extra=None):
+    def ollama(self, window, entry=None, loaded=None, extra=None, served=None):
         loaded, posts = loaded if loaded is not None else [], []
         test, tags = self, [{"name": "m"}]
 
@@ -999,7 +999,8 @@ class Optimize(unittest.TestCase):
                     loaded.clear()
                     if body.get("keep_alive") != 0:
                         size = test.WEIGHTS + test.PER_TOKEN * body["options"]["num_ctx"]
-                        loaded.append({"name": "m", "size": size, "size_vram": min(size, test.CARD)})
+                        loaded.append({"name": "m", "size": size, "size_vram": min(size, test.CARD),
+                                       **({"context_length": served} if served else {})})
                 if self.path == "/api/create":
                     tags.append({"name": body["model"]})
                 self.reply({"status": "success"} if self.path == "/api/create" else {})
@@ -1180,6 +1181,16 @@ class Optimize(unittest.TestCase):
         models.write_entry("ollama", "m:64k", None)
         with self.assertRaisesRegex(RuntimeError, "exists already"):
             optimize.apply(m)
+
+    def test_a_window_the_server_never_served_is_not_recorded_as_a_fit(self):
+        # #338 (the audit of 1.4): Ollama served 16K at every load, all in VRAM, and the fit
+        # copied the asked-for 64K into its result, checking only placement
+        self.ollama(65536, served=16384)
+        m = models.discover()["ollama/m"]
+        from workbench import optimize
+        row = optimize.fit(m, 262144)
+        self.assertEqual((row["window"], row["fits"], row["clamped"]), (65536, 16384, 16384))
+        self.assertIn("served it 16K whatever was asked", optimize.advice(m.id, row))
 
     def test_nothing_to_change_says_nothing_and_a_task_on_the_gpu_keeps_it(self):
         self.ollama(65536)
