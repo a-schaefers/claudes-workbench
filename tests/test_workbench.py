@@ -1542,6 +1542,29 @@ class Lifecycle(Base):
         self.assertEqual((self.repo / "answer.txt").read_text().strip(), "42")
         self.assertEqual(git("branch", "--list", "delegate/t-sq"), "")
 
+    def test_a_repo_says_once_in_commands_json_how_its_merges_land(self):
+        # #352: a repo kept to linear history needed --merge-as on every accept
+        git = lambda *a: subprocess.run(["git", "-C", str(self.repo), *a], check=True,  # noqa
+                                        capture_output=True, text=True).stdout.strip()
+        Path(os.environ["WB_COMMANDS"]).write_text(json.dumps({"repos": {str(self.repo): {
+            "merge": "squash"}}}))
+        self.start("t-kept", "ok")
+        wait_phase("t-kept", {"review"})
+        head = git("rev-parse", "HEAD")
+        self.assertNotIn("merged into", run_wb("accept", "t-kept", "-m", "feat: kept"))  # no --merge
+        self.assertEqual(git("rev-parse", "HEAD"), head)
+        git("branch", "-D", "delegate/t-kept")
+        self.start("t-sq", "ok")
+        wait_phase("t-sq", {"review"})
+        run_wb("accept", "t-sq", "--merge", "-m", "feat: answer")
+        self.assertEqual(git("rev-list", "--min-parents=2", "--count", "HEAD"), "0")
+        self.assertEqual(git("log", "-1", "--format=%s"), "feat: answer")
+        self.assertEqual(git("branch", "--list", "delegate/t-sq"), "")
+        Path(os.environ["WB_COMMANDS"]).write_text(json.dumps({"repos": {str(self.repo): {
+            "merge": "rebase"}}}))
+        with self.assertRaisesRegex(RuntimeError, '"merge" is one of merge, ff, squash'):
+            context.commands_conf()
+
     def test_accept_merge_completes_the_merge_or_says_it_did_not(self):
         # #190 (the 2026-11-19 audit): with branch.main.mergeOptions=--no-commit, git left the
         # merge pending, HEAD unmoved, and accept said merged

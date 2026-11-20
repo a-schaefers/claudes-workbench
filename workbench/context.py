@@ -182,12 +182,19 @@ def commands_conf() -> dict:
         if not ok:
             raise RuntimeError(f'{path}: "repos" → {repo!r}: "setup" is a command, "copy" and '
                                '"siblings" lists of strings')
+        if v.get("merge", "merge") not in MERGE_AS:
+            raise RuntimeError(f'{path}: "repos" → {repo!r}: "merge" is one of {", ".join(MERGE_AS)}')
     return conf
+
+
+# How wb accept --merge lands: a merge commit, fast-forward only, or one squashed commit (#352)
+MERGE_AS = ("merge", "ff", "squash")
 
 
 def repo_conf(repo: str | Path) -> dict:
     """commands.json's `repos` entry for this repo (matched by real path), or {}: its `setup`
-    command, the ignored paths to `copy` into a task's worktree, its `siblings` (#201)."""
+    command, the ignored paths to `copy` into a task's worktree, its `siblings` (#201), how
+    `--merge` lands there (`merge`, #352)."""
     real = os.path.realpath(repo)
     for k, v in (commands_conf().get("repos") or {}).items():
         if os.path.realpath(Path(k).expanduser()) == real:

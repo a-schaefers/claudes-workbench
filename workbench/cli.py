@@ -1541,6 +1541,8 @@ def cmd_shot(a):
 def cmd_accept(a):
     a.merge = a.merge or bool(a.merge_as)  # --merge-as says how, so it merges (#352)
     task = need(a.name)
+    # a repo kept to linear history says so once, in commands.json `repos` (#352)
+    a.merge_as = a.merge_as or (a.merge and context.repo_conf(task.spec["repo"]).get("merge")) or None
     reap(task)
     spec, st = task.spec, task.status
     if st.get("phase") in store.CLOSED:
@@ -3644,9 +3646,9 @@ def parser() -> argparse.ArgumentParser:
     s = sub.add_parser("accept", help="commit the work on its branch and close the task")
     s.add_argument("name"); s.add_argument("--message", "-m", required=True)
     s.add_argument("--merge", action="store_true"); s.add_argument("--force", action="store_true")
-    s.add_argument("--merge-as", choices=("merge", "ff", "squash"), help="how --merge lands "
-                   "(implies it): a merge commit (the default), fast-forward only, or one squashed "
-                   "commit, for a repo kept to linear history")
+    s.add_argument("--merge-as", choices=context.MERGE_AS, help="how --merge lands (implies "
+                   "it): a merge commit (the default, or commands.json repos' merge), fast-forward "
+                   "only, or one squashed commit, for a repo kept to linear history")
     s.add_argument("--include", action="store_true", help="commit it even with more than "
                    f"{gitops.NEW_FILES_MAX} new files or a large new binary (build output?)")
     s.add_argument("--take-claude-md", action="store_true",
