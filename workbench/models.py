@@ -1536,7 +1536,8 @@ def add_server_provider(pid: str, base: str) -> bool:
     """Give OpenCode a provider ``pid`` for the OpenAI-compatible server at ``base`` (its
     baseURL, usually ending in /v1), whatever runs it: llama.cpp, LM Studio, vLLM, Ollama. Only
     Ollama had a command for it, so every other server meant editing opencode.json by hand. False
-    when the config already has ``pid`` (a provider the user wrote is never touched)."""
+    when the config already has ``pid`` for that same endpoint (a provider the user wrote is never
+    touched); RuntimeError when it has ``pid`` for another one."""
     u = urlparse(base)
     if u.scheme not in ("http", "https") or not u.hostname:
         raise RuntimeError(f"--url {base}: give the server's baseURL, e.g. http://127.0.0.1:8080/v1")
@@ -1545,8 +1546,17 @@ def add_server_provider(pid: str, base: str) -> bool:
                            f"If it is your own server (WSL2's Windows host, a LAN box), give {pid} "
                            f"\"local\": true in {overrides_path()} first")
     cfg = read_config()
-    if _has_provider(cfg, pid):
-        return False
+    prov = _provider(cfg, pid)
+    if prov is not None:
+        have = _provider_url(prov)
+        if base.rstrip("/") in (have.rstrip("/"), _expand(have, base=_provider_dirs().get(pid)).rstrip("/")):
+            return False
+        # the model was registered under the old endpoint and wb said it was added: two servers
+        # serving one model name then did plausible work on the wrong machine (#334, the audit of 1.4)
+        raise RuntimeError(f"OpenCode's config has a provider {pid} already, for "
+                           f"{have or 'no baseURL'}, not {base}: wb leaves it alone. Give this server "
+                           f"a provider id of its own (wb model add <provider>/<model> --url {base}), "
+                           f"or change {pid}'s baseURL in {opencode_config_path()} by hand")
     _add_provider(cfg, pid, pid, base.rstrip("/"))
     return True
 

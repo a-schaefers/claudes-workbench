@@ -6786,9 +6786,8 @@ class ModelSet(Base):
         over = json.loads(cli.models.overrides_path().read_text())["lms/qwen-coder"]
         self.assertEqual((over["start"], over["stop"]), ("lms load qwen-coder", "lms unload --all"))
         self.assertNotIn("added provider", run_wb("model", "add", "lms/other", "--url",
-                                                  "http://127.0.0.1:9/v1", "--context", "32768"))
-        self.assertEqual(self.config()["provider"]["lms"]["options"]["baseURL"],
-                         "http://127.0.0.1:1234/v1")  # a provider already there is never touched
+                                                  "http://127.0.0.1:1234/v1/", "--context", "32768"))
+        self.assertIn("other", self.config()["provider"]["lms"]["models"])  # same endpoint: fine
         err = io.StringIO()
         with self.assertRaises(SystemExit), redirect_stderr(err):
             run_wb("model", "add", "box/coder", "--url", "http://192.0.2.7:8080/v1", "--context", "32768")
@@ -6796,6 +6795,20 @@ class ModelSet(Base):
         self.assertNotIn("box", self.config()["provider"])
         with self.assertRaises(SystemExit), redirect_stderr(err):
             run_wb("model", "retire", "lms/qwen-coder", "--url", "http://127.0.0.1:1234/v1")
+
+    def test_add_with_another_url_for_a_provider_already_there_is_refused(self):
+        # wb said the model was added, and it kept the provider's old endpoint: two servers with
+        # one model name then did plausible work on the wrong machine (#334, the audit of 1.4)
+        Path(os.environ["WB_OPENCODE_CONFIG"]).write_text("{}")
+        run_wb("model", "add", "lms/qwen-coder", "--url", "http://127.0.0.1:1234/v1", "--context", "32768")
+        err = io.StringIO()
+        with self.assertRaises(SystemExit), redirect_stderr(err):
+            run_wb("model", "add", "lms/other", "--url", "http://127.0.0.1:9/v1", "--context", "32768")
+        self.assertIn("has a provider lms already, for http://127.0.0.1:1234/v1", err.getvalue())
+        self.assertIn("a provider id of its own", err.getvalue())
+        prov = self.config()["provider"]["lms"]
+        self.assertEqual(prov["options"]["baseURL"], "http://127.0.0.1:1234/v1")  # never touched
+        self.assertNotIn("other", prov["models"])
 
     def test_scout_names_the_servers_here_and_one_opencode_has_no_provider_for(self):
         found = (["llama-server", "lms"], [{"root": "http://127.0.0.1:1234", "usually": "LM Studio",
