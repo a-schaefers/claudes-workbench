@@ -70,15 +70,19 @@ def _complain(what: str, r: subprocess.CompletedProcess) -> None:
         print(f"opencode session {what} failed: {why[:200]}", file=sys.stderr, flush=True)
 
 
-def export(session: str) -> dict:
+def export(session: str, strict: bool = False) -> dict | None:
+    """The session as OpenCode exports it; {} when that fails, or None with ``strict``: the
+    runner tells a failure from an empty session (#262)."""
     try:
         r = subprocess.run(opencode_bin() + ["session", "export", session, "--standalone"],
                            capture_output=True, text=True, timeout=30, cwd="/")
         if r.returncode:
             _complain("export", r)
-        return json.loads(r.stdout) if r.returncode == 0 and r.stdout.strip() else {}
+        if r.returncode == 0 and r.stdout.strip():
+            return json.loads(r.stdout)
     except (OSError, subprocess.TimeoutExpired, ValueError):  # a busy or broken store: nothing known
-        return {}
+        pass
+    return None if strict else {}
 
 
 def find_session(task: store.Task) -> str | None:

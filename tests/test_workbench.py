@@ -1846,6 +1846,22 @@ class Context(Base):
         run_wb("feedback", name, "--message", str(self.feedback), *flags)
         return wait_phase(name, {"review"})
 
+
+    def test_a_failed_export_is_judged_by_the_rounds_last_step_not_read_as_an_empty_session(self):
+        # #262 (the audit of 1.2): export returned {} on a timeout or a busy store, so a full or
+        # compacted session carried on: no usage, no compactions
+        from workbench import transcript
+        self.start("t-exp", "ok")
+        st = wait_phase("t-exp", {"review"})
+        task = store.Task("t-exp")
+        self.assertEqual(st["live_used"], {"session": st["session"], "used": 150})  # the fake's step
+        task.set_status(window=160, live_used={"session": st["session"], "used": 150})
+        with mock.patch.object(transcript, "export", side_effect=lambda sid, strict=False: None if strict else {}):
+            self.assertIn("full", runner.fresh_reason(task) or "")
+            task.set_status(live_used={"session": "an-older-one", "used": 150})
+            self.assertIsNone(runner.fresh_reason(task))                  # another session's count
+        events = [json.loads(x) for x in (task.dir / "events.jsonl").read_text().splitlines()]
+        self.assertIn("export failed", [e for e in events if e["kind"] == "export"][-1]["text"])
     def test_a_roomy_session_is_continued(self):
         self.review_then_feedback("t-c1")
         self.assertEqual([r["session"] for r in self.runs()], [False, True])
