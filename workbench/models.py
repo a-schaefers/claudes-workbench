@@ -698,10 +698,12 @@ def status(m: Model, down=frozenset()) -> dict:
         # pick that model over a working one (the 2026-11-19 audit). Not "not running" either,
         # which started a second copy and waited 20 minutes for it (the 2026-11-16 audit).
         if e.code in (401, 403):
+            # where else a key may be kept: opencode auth login's auth.json (#336, the audit of 1.4)
             return _no(f"the server refuses its API key (HTTP {e.code}): set the provider's "
-                       "options.apiKey to the key it wants" if m.api_key else
+                       f"options.apiKey, or `opencode auth login` for {m.provider}, to the key it "
+                       "wants" if m.api_key else
                        f"the server answers, but it wants an API key (HTTP {e.code}): set the "
-                       "provider's options.apiKey")
+                       f"provider's options.apiKey, or `opencode auth login` for {m.provider}")
         body = None
     except Exception:
         body = None

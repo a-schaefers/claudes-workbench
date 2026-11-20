@@ -1862,7 +1862,8 @@ one) accounts for, or a served model with no `stop`, leaves it unavailable, "<ro
 <id>, not <name> …": the task would run on the other model, recorded under this one (names that
 differ from the file once left every model on the port unavailable, the served one too: the 0.90
 review); a 401 or 403 to the key the agent will send is unavailable ("the server refuses its API
-key", or with no key "it wants an API key", each naming `options.apiKey`): neither running, which
+key", or with no key "it wants an API key", each naming `options.apiKey` and `opencode auth login`,
+#336): neither running, which
 let a wrong key pass and the router pick that model over a working one (the 2026-11-19 audit), nor
 stopped, which once started a second copy and waited 20 minutes for it (the 2026-11-16 audit);
 stopped with a `start` ("wb starts it"); not running with no start command. `wb models` and `wb
