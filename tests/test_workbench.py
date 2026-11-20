@@ -7501,6 +7501,34 @@ class WebChat(Base):
         self.assertEqual([m["id"] for m in chat.pending()], [unread["id"]])
         self.assertIn(unread["id"], run_wb("chat", "pending"))
 
+    def test_open_work_outlasts_a_burst_past_the_files_tails(self):
+        # #329 (the audit of 1.4, reproduced): 540 replies of 7,900 characters pushed an unread
+        # message out of the 4 MiB tail, and 120 plan cards an open question, which then could
+        # no longer be answered
+        chat = self.chat
+        unread = chat.send("are you there?", "user", "c-burst")
+        question = chat.ask("AskUserQuestion", "which?", "question",
+                            {"questions": [{"question": "Which?", "options": []}]})
+        for i in range(540):
+            chat.send(f"reply {i} " + "x" * 7900, "claude")
+        for i in range(120):
+            chat.ask("ExitPlanMode", f"plan {i}", "plan", {"plan": "p" * 39_000})
+        self.assertGreater((chat.chat_dir() / "messages.jsonl").stat().st_size, chat.THREAD_BYTES)
+        self.assertGreater((chat.chat_dir() / "asks.jsonl").stat().st_size, chat.THREAD_BYTES)
+        self.assertEqual([m["id"] for m in chat.pending()], [unread["id"]])
+        self.assertEqual(chat.find_ask(question["id"])["answer"], None)
+        self.assertIn(question["id"], [a["id"] for a in chat.asks()])
+        done = chat.answer(question["id"], "allow", "web", answers={"Which?": "this"})
+        self.assertEqual(done["answer"], "allow")
+        self.assertNotIn(question["id"], chat.open_work()["asks"])
+        chat.ack(unread["id"], "s-1")
+        self.assertEqual(chat.pending(), [])
+        # a state directory from before the index: built once from the whole files
+        late = chat.send("still there?", "user", "c-late")
+        (chat.chat_dir() / "open.json").unlink()
+        self.assertEqual([m["id"] for m in chat.pending()], [late["id"]])
+        self.assertEqual(len(chat.open_work()["asks"]), 120)       # the plan cards, still open
+
     def test_wb_chat_wait_blocks_until_the_answer_or_says_open(self):
         chat = self.chat
         a = chat.ask("Write", "/etc/hosts")

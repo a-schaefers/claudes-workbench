@@ -3055,6 +3055,10 @@ VPN), `"hosts": ["chat.example.org"]` a name a tunnel or proxy sends.
   to a pair) is `{task, n, step, round}`, taken from the pair's shots.json and not from the page.
 - `receipts.jsonl`: `{id, ts, by, how: "now"|"queued"}`, written by `wb chat ack` (the mod).
   `queued`: a mid-turn delivery didn't go through, so it was submitted as a prompt.
+- `open.json`: `{messages: {<id>: row}, asks: {<id>: row}}`, the user's messages without a
+  receipt and the asks without an answer (`chat.open_work`), under `open.lock`: `send` and `ack`,
+  `ask` and `answer` keep it, and a state directory without it gets it built once from the whole
+  files (`_open_rebuild`). The mod reads its messages to deliver them (#329).
 - `claims.json`: `{<message id>: {by, ts}}` (a day's), under `claims.lock`: `wb chat claim` gives
   a message to the first session that asks and to it again, or to another once the claim is
   `CLAIM_STALE` (120 s) old (its session gone); exit 1 otherwise.
@@ -3076,9 +3080,11 @@ VPN), `"hosts": ["chat.example.org"]` a name a tunnel or proxy sends.
   mod's expiry, two processes, can't both stand; `wb chat answer` prints the answer that stands.
   A row without `kind` reads as a permission. The page's list (`chat.asks`, in the snapshot) is
   the newest 20 plus every open one older than those, and `wb chat pending` every message of the
-  user's without a receipt in the bounded tail, not only the newest 200: an open question
-  vanished behind 20 newer answered ones, and an unread message behind 200 replies (#265, the
-  audit of 1.2). An ask open past `ASK_STALE` (an hour; the mod waits 30 minutes) and a message
+  user's without a receipt, not only the newest 200: an open question vanished behind 20 newer
+  answered ones, and an unread message behind 200 replies (#265, the audit of 1.2). Both read
+  `open.json` for what is still open, not the files' tails: an unread message behind 540 long
+  replies, and an open question behind 120 plan cards, fell out of the 4 MiB tails, and the
+  question could no longer be answered (#329, the audit of 1.4). An ask open past `ASK_STALE` (an hour; the mod waits 30 minutes) and a message
   unread past `PENDING_STALE` (a day) carry `stale: true`; the page shows a stale ask as waiting in
   the terminal, with no buttons.
 - `prefs.json`: `{away: "ask"|"allow"}` (anything else reads as `ask`), from the gear menu
@@ -3530,7 +3536,9 @@ chat answer <id> expired --by timeout|interrupted` and passes the event on, so t
 An interrupt (Esc) drops a waiting hook outright, so its own expiry never runs (seen live,
 2026-11-18): `turn.complete` expires every id left in `mem.asksOpen`, by `interrupted`. A hook
 that fails is skipped, which also leaves the dialog.
-A web message over 6 h old (`CHAT_EXPIRE_MS`) isn't submitted. Quitting stops delivery and, when
+The messages come from `open.json` (the tails of messages.jsonl and receipts.jsonl only for a
+`wb` from before it: #329). A web message over 6 h old (`CHAT_EXPIRE_MS`) isn't submitted; a
+toast says so once, and that `wb chat pending` lists it. Quitting stops delivery and, when
 this session holds listener.json, writes it empty, so the page and other sessions see nobody
 listening at once.
 

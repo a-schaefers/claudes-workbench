@@ -157,6 +157,8 @@ def send(text: str, frm: str, cid: str | None = None, **extra) -> dict:
                "from": frm, "text": text, **({"cid": cid} if cid else {}),
                **{k: v for k, v in extra.items() if v}}
         store.append_jsonl(chat_dir() / "messages.jsonl", row)
+        if frm == "user":
+            _open_update(lambda w: w["messages"].__setitem__(row["id"], row))
         return row
 
 
@@ -221,6 +223,50 @@ def ack(msg_id: str, by: str, how: str = "now") -> None:
     """Claude has the message: read at once ("now"), or queued until its current step ends."""
     store.append_jsonl(chat_dir() / "receipts.jsonl",
                        {"id": msg_id, "ts": store.now(), "by": by, "how": how})
+    _open_update(lambda w: w["messages"].pop(msg_id, None))
+
+
+# Work still waiting, kept apart from the files the page reads by their tails: an unread message
+# behind 540 long replies, and an open question behind 120 plan cards, fell out of the 4 MiB
+# tails, so `wb chat pending` lost the one and the other could no longer be answered (#329, the
+# audit of 1.4). chat/open.json, {messages: {id: row}, asks: {id: row}}: the user's messages
+# without a receipt and the asks without an answer, kept under open.lock by send and ack, ask and
+# answer, and built from the whole files once where it is missing (an older wb's state).
+def _open_path() -> Path:
+    return chat_dir() / "open.json"
+
+
+def _open_rebuild() -> dict:
+    got = {r.get("id") for r in store.read_jsonl(chat_dir() / "receipts.jsonl")[0]}
+    msgs = {r["id"]: r for r in store.read_jsonl(chat_dir() / "messages.jsonl")[0]
+            if r.get("from") == "user" and r.get("id") and r["id"] not in got}
+    open_asks: dict = {}
+    for r in store.read_jsonl(chat_dir() / "asks.jsonl")[0]:
+        if "answer" in r:
+            if r.get("answer") in ANSWERS:
+                open_asks.pop(r.get("id"), None)
+        elif "tool" in r and r.get("id"):
+            open_asks[r["id"]] = {"kind": "permission", **r}
+    return {"messages": msgs, "asks": open_asks}
+
+
+def _open_update(change) -> dict:
+    with store.locked(chat_dir() / "open.lock"):
+        cur = store.read_json(_open_path(), None)
+        if not (isinstance(cur, dict) and isinstance(cur.get("messages"), dict)
+                and isinstance(cur.get("asks"), dict)):
+            cur = _open_rebuild()
+        change(cur)
+        store.write_json(_open_path(), cur)
+        return cur
+
+
+def open_work() -> dict:
+    """What still waits: {messages, asks}, each {id: row}."""
+    cur = store.read_json(_open_path(), None)
+    if isinstance(cur, dict) and isinstance(cur.get("messages"), dict) and isinstance(cur.get("asks"), dict):
+        return cur
+    return _open_update(lambda w: None)
 
 
 THREAD_BYTES = 4 << 20  # the last 200 messages fit with room to spare (a reply is a few KB)
@@ -244,13 +290,11 @@ PENDING_STALE = 86400
 
 
 def pending() -> list[dict]:
-    """Every message of the user's without a receipt, in the bounded tail: not only among the
-    newest 200."""
-    rows = store.read_jsonl_tail(chat_dir() / "messages.jsonl", THREAD_BYTES)
-    got = {r["id"] for r in store.read_jsonl_tail(chat_dir() / "receipts.jsonl", THREAD_BYTES)}
+    """Every message of the user's without a receipt, however far back (open_work, #329)."""
     now = store.now()
-    return [{**r, "received": None, **({"stale": True} if now - r["ts"] > PENDING_STALE else {})}
-            for r in rows if r.get("from") == "user" and r.get("id") not in got]
+    rows = sorted(open_work()["messages"].values(), key=lambda r: (r.get("ts", 0), r.get("id", "")))
+    return [{**r, "received": None, **({"stale": True} if now - r.get("ts", 0) > PENDING_STALE else {})}
+            for r in rows]
 
 
 def snapshot() -> dict:
@@ -403,6 +447,7 @@ def ask(tool: str, text: str, kind: str = "permission", detail: dict | None = No
             raise ValueError("detail too long")
         row["detail"] = detail
     store.append_jsonl(chat_dir() / "asks.jsonl", row)
+    _open_update(lambda w: w["asks"].__setitem__(row["id"], row))
     if kind == "permission" and prefs()["away"] == "allow":
         return answer(row["id"], "allow", "setting")
     return {**row, "answer": None}
@@ -421,14 +466,21 @@ def asks(limit: int = 20) -> list[dict]:
                 a.update({k: r[k] for k in ("note", "answers") if k in r})
         elif "tool" in r and r.get("id"):
             seen[r["id"]] = {"kind": "permission", **r, "answer": None}
+    # an open ask older than the tail is still open (#329)
+    older = sorted(({**a, "answer": None} for i, a in open_work()["asks"].items() if i not in seen),
+                   key=lambda a: (a.get("ts", 0), a.get("id", "")))
     rows, now = list(seen.values()), store.now()
-    out = [a for a in rows[:max(0, len(rows) - limit)] if a["answer"] is None] + rows[-limit:]
+    out = older + [a for a in rows[:max(0, len(rows) - limit)] if a["answer"] is None] + rows[-limit:]
     return [{**a, "stale": True} if a["answer"] is None and now - a["ts"] > ASK_STALE else a
             for a in out]
 
 
 def find_ask(ask_id: str) -> dict | None:
     return next((a for a in reversed(asks(10_000)) if a["id"] == ask_id), None)
+
+
+def _answered(ask_id: str) -> None:
+    _open_update(lambda w: w["asks"].pop(ask_id, None))
 
 
 def answer(ask_id: str, verdict: str, by: str, note: str | None = None,
@@ -452,7 +504,8 @@ def answer(ask_id: str, verdict: str, by: str, note: str | None = None,
         elif cur["kind"] == "question" and verdict == "allow":
             raise ValueError("answers")  # a question is answered with its answers
         store.append_jsonl(chat_dir() / "asks.jsonl", row)
-        cur = find_ask(ask_id)
+        _answered(ask_id)
+        cur = find_ask(ask_id) or {**cur, "answer": verdict, "answered": row["ts"], "by": by}
     return cur
 
 

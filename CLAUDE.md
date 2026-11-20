@@ -189,7 +189,7 @@ Plain files under `$WB_HOME` (`~/.local/state/workbench`); the full tree and eve
 ARCHITECTURE.md (*Files and formats*):
 ```
 notify{,.old}.jsonl results.jsonl lessons.jsonl notes.md coding.json progress.json tuning.json speed.json gpu*.{lock,json,admit,load}
-scout.json update.json watch.json optimize.json gc.json archive/ imports/ images/ chat/{messages,receipts,asks,seen}.jsonl chat/{listener,prefs,push,claims,switch}.json
+scout.json update.json watch.json optimize.json gc.json archive/ imports/ images/ chat/{messages,receipts,asks,seen}.jsonl chat/{listener,prefs,push,claims,switch,open}.json
 bench/{cases/<case>,runs/<run>}/ bench/runs.jsonl bench/driver.json
 rules/<task>/  opencode.json HANDBOOK.md CLAUDE.md bin/git grants.json gitdir.json (no lane)
 locks/<task>.{runner,cmd,status,events,steer,grants}.lock   (store.task_lock: no lane reads them)

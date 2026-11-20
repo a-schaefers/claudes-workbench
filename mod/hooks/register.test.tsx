@@ -1106,6 +1106,35 @@ test('the web chat reaches Claude only in /workbench mode, with a receipt, and o
   expect(asked.length).toBe(1)
 })
 
+test('a web message wb holds open is delivered past the files tails, and an old one is named', async ($, on) => {
+  // #329: an unread message behind 4 MiB of replies fell out of the tail the mod read
+  const clock = mock.clock(on, { now: 1_800_000_000_000 })
+  const files: Record<string, string> = {}
+  fakeTasks(on, files, [])
+  chatOn(files)
+  const toasts: string[] = []
+  on('ui.toast', (_: any, e: any) => { toasts.push(String(e.text ?? e.message ?? JSON.stringify(e))); return { value: undefined } })
+  on('session.cwd', () => ({ value: '/home/u/project' }))
+  on('skill.prompt', (_: any, e: any) => ({ text: e.text }))
+  on('process.run', () => ({ value: { exitCode: 0, stdout: 'no open tasks', stderr: '' } }))
+  const asked: string[] = []
+  on('prompt.submit', (_: any, e: any) => {
+    asked.push(e.text)
+    return { text: e.text }
+  })
+  files['/wb/chat/messages.jsonl'] = JSON.stringify({ id: 'r1', ts: 1_800_000_000, from: 'claude', text: 'x' }) + '\n'
+  files['/wb/chat/open.json'] = JSON.stringify({ asks: {}, messages: {
+    m1: { id: 'm1', ts: 1_800_000_000, from: 'user', text: 'are you there?' },
+    m0: { id: 'm0', ts: 1_800_000_000 - 7 * 3600, from: 'user', text: 'from this morning' } } })
+  await $.session.start({ cwd: '/home/u/project', surface: 'terminal', isInteractive: true })
+  await $.skill.prompt({ skill: 'workbench', text: 'x', frontmatter: {}, source: 'userSettings' })
+  await clock.advance(3000)
+  expect(asked).toEqual(['[web chat] are you there?'])              // only in wb's index: delivered
+  expect(toasts.filter(t => t.includes('wb chat pending')).length).toBe(1)  // the old one, named once
+  await clock.advance(3000)
+  expect(toasts.filter(t => t.includes('wb chat pending')).length).toBe(1)
+})
+
 test('a web message another session claimed first is not submitted here', async ($, on) => {
   // #84: two sessions starting together both took the chat and both submitted the message
   const clock = mock.clock(on, { now: 1_800_000_000_000 })
