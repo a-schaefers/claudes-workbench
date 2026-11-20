@@ -102,6 +102,8 @@ class Real(unittest.TestCase):
         os.environ.update(WB_HOME=str(tmp / "state"), WB_OPENCODE_CONFIG=str(tmp / "opencode.json"),
                           WB_MODELS=str(tmp / "models.json"), WB_COMMANDS=str(tmp / "commands.json"))
         models._ENGINES.clear()
+        models._DOWN.clear()
+        models._KEYS.clear()
         models._FACTS.clear()
         self.servers = []
         no_gpu = mock.patch.object(models.hardware, "gpus", lambda windows=True: [])  # this machine's
@@ -124,6 +126,51 @@ class Real(unittest.TestCase):
     def config(self, providers: dict, extra: dict | None = None):
         Path(os.environ["WB_OPENCODE_CONFIG"]).write_text(json.dumps({"provider": providers}))
         Path(os.environ["WB_MODELS"]).write_text(json.dumps(extra or {}))
+
+    def test_a_server_that_is_down_is_probed_once_a_minute_not_on_every_discover(self):
+        # a wb remote box asleep cost 1.5 s on every discover(): wb models took 12 s (#337)
+        dead = socket.socket()
+        dead.bind(("127.0.0.1", 0))
+        port = dead.getsockname()[1]
+        dead.close()  # nothing listens there now
+        self.config({"o": {"options": {"baseURL": f"http://127.0.0.1:{port}/v1"}, "models": {"m": {}}}})
+        probes = []
+        real = models._open
+        def counting(target, timeout):
+            url = target.full_url if hasattr(target, "full_url") else target
+            if url.endswith("/api/version"):
+                probes.append(url)
+            return real(target, timeout)
+        with mock.patch.object(models, "_open", counting):
+            for _ in range(3):
+                found = models.discover()
+        self.assertEqual(len(probes), 1)
+        self.assertEqual(found["o/m"].engine, "server")
+        self.assertFalse(models.engine_known(f"http://127.0.0.1:{port}/v1", {}))
+        later = time.monotonic() + models.DOWN_SECS              # a runner hours on: asked again
+        with mock.patch.object(models, "_open", counting), \
+                mock.patch.object(models.time, "monotonic", lambda: later):
+            models.discover()
+        self.assertEqual(len(probes), 2)
+
+    def test_an_ollama_behind_a_key_is_probed_with_it_and_known_as_ollama(self):
+        class H(BaseHTTPRequestHandler):
+            def do_GET(self):
+                ok = self.headers.get("Authorization") == "Bearer sekrit"
+                body = {"/api/version": {"version": "0.40.0"}, "/api/tags": {"models": []}}.get(self.path)
+                data = json.dumps(body or {}).encode()
+                self.send_response(200 if ok and body is not None else 401 if not ok else 404)
+                self.send_header("Content-Length", str(len(data)))
+                self.end_headers()
+                self.wfile.write(data)
+            def log_message(self, *a):
+                pass
+        srv = ThreadingHTTPServer(("127.0.0.1", 0), H)
+        threading.Thread(target=srv.serve_forever, daemon=True).start()
+        self.servers.append(srv)
+        url = f"http://127.0.0.1:{srv.server_address[1]}"
+        self.config({"k": {"options": {"baseURL": url + "/v1", "apiKey": "sekrit"}, "models": {"m": {}}}})
+        self.assertEqual(models.discover()["k/m"].engine, "ollama")
 
     def test_ollama_is_known_by_its_api_on_any_port(self):
         ollama = self.server({"/api/version": {"version": "0.40.0"}, "/api/tags": {"models": []}})
@@ -176,6 +223,17 @@ class Real(unittest.TestCase):
         st = models.status(models.resolve("e/x"))                              # it read as resident
         self.assertEqual((st["available"], st["resident"]), (False, False))
         self.assertIn("lists no model", st["why"])
+
+    def test_a_strict_server_takes_its_exact_id_not_one_ending_in_the_same_name(self):
+        # #339 (the audit of 1.4): a vLLM serving studio/coder read as serving personal/coder,
+        # a basename match meant for llama-server's file paths
+        vllm = self.server({"/v1/models": {"data": [{"id": "studio/coder", "owned_by": "vllm"}]}})
+        self.config({"v": {"options": {"baseURL": vllm + "/v1"},
+                           "models": {"personal/coder": {}, "studio/coder": {}}}})
+        st = models.status(models.resolve("v/personal/coder"))
+        self.assertEqual((st["available"], st["why"]), (False, "the server serves studio/coder, "
+                                                                "not personal/coder: set the entry's id to studio/coder"))
+        self.assertTrue(models.status(models.resolve("v/studio/coder"))["available"])
 
     def test_a_keyed_ollama_is_probed_with_the_providers_key(self):
         # #256 (the audit of 1.2): it served the model to the key, but the native /api probes
@@ -551,6 +609,27 @@ class Real(unittest.TestCase):
             models.make_resident(found["nokey/a"], say=lambda m: None)
         self.assertFalse((Path(self.tmp.name) / "started").exists())   # no second copy started
         self.assertNotIn("sekret", repr(found["k/a"]))
+
+    def test_a_key_kept_by_opencode_auth_login_is_sent_when_the_config_has_no_api_key(self):
+        # #336, the audit of 1.4: OpenCode's docs keep a custom provider's key in auth.json, with
+        # no options.apiKey; the probes sent none and a model OpenCode would run read "it wants
+        # an API key"
+        keyed = self.server({"/v1/models": lambda h: {"data": [{"id": "a"}]}
+                             if h.get("Authorization") == "Bearer authkey" else 401})
+        data = Path(self.tmp.name) / "xdgdata"
+        (data / "opencode").mkdir(parents=True)
+        (data / "opencode" / "auth.json").write_text(json.dumps(
+            {"ak": {"type": "api", "key": "authkey"}, "wrong": {"type": "api", "key": "authkey"}}))
+        self.config({"ak": {"options": {"baseURL": keyed + "/v1"}, "models": {"a": {}}},
+                     "wrong": {"options": {"baseURL": keyed + "/v1", "apiKey": "nope"},
+                               "models": {"a": {}}}})
+        with mock.patch.dict(os.environ, {"XDG_DATA_HOME": str(data)}):
+            found = models.discover()
+            self.assertEqual(models.status(found["ak/a"])["why"], "running")
+            self.assertEqual(models.providers()["ak"]["key"], "authkey")
+            # a key in the config is still the one probed
+            self.assertIn("refuses its API key", models.status(found["wrong/a"])["why"])
+        self.assertNotIn("authkey", repr(found["ak/a"]))
 
     def test_a_start_command_that_exits_at_once_paces_its_readiness_probes(self):
         # the 2026-11-19 audit (finding 20): a start that daemonizes (systemctl, docker, cmd &)
@@ -976,7 +1055,7 @@ class Optimize(unittest.TestCase):
     WEIGHTS, PER_TOKEN, CARD = 10_000_000_000, 32_000, 12_100_000_000
     setUp, tearDown, config = Real.setUp, Real.tearDown, Real.config  # not Real's tests again
 
-    def ollama(self, window, entry=None, loaded=None, extra=None):
+    def ollama(self, window, entry=None, loaded=None, extra=None, served=None):
         loaded, posts = loaded if loaded is not None else [], []
         test, tags = self, [{"name": "m"}]
 
@@ -999,7 +1078,8 @@ class Optimize(unittest.TestCase):
                     loaded.clear()
                     if body.get("keep_alive") != 0:
                         size = test.WEIGHTS + test.PER_TOKEN * body["options"]["num_ctx"]
-                        loaded.append({"name": "m", "size": size, "size_vram": min(size, test.CARD)})
+                        loaded.append({"name": "m", "size": size, "size_vram": min(size, test.CARD),
+                                       **({"context_length": served} if served else {})})
                 if self.path == "/api/create":
                     tags.append({"name": body["model"]})
                 self.reply({"status": "success"} if self.path == "/api/create" else {})
@@ -1119,6 +1199,25 @@ class Optimize(unittest.TestCase):
         self.assertEqual(entry["options"], {"reasoningEffort": "none"})       # thinking stays off
         self.assertEqual(entry["limit"], {"context": 65536, "input": 65536 - 4096, "output": 4096})
 
+    def test_a_smaller_window_cuts_the_output_cap_and_max_tokens_so_input_stays_positive(self):
+        # #332 (the audit of 1.4): a 16K fit of a 128K entry wrote an input limit of -16384 and
+        # kept its 32K output cap and its 64K max_tokens
+        self.ollama(131072, entry={"limit": {"context": 131072, "output": 32768},
+                                   "options": {"max_tokens": 65536}})
+        m = models.discover()["ollama/m"]
+        from workbench import optimize
+        optimize._record(m.id, {"window": 131072, "fits": 16384, "spill": 40, "tried": []})
+        self.assertIn("registered ollama/m:16k", optimize.apply(m))
+        entry = models.read_config()["provider"]["ollama"]["models"]["m:16k"]
+        self.assertEqual(entry["limit"], {"context": 16384, "input": 16384 - 4096, "output": 4096})
+        self.assertEqual(entry["options"], {"max_tokens": 4096})
+        from workbench import runner
+        self.assertGreater(runner.compaction_buffer(entry), 0)
+        self.assertLess(runner.compaction_buffer(entry), 16384)
+        self.assertEqual(optimize.budget({"limit": {"context": 8192, "output": 1024}}, 8192)[0]["input"], 7168)
+        kept = optimize.budget({"limit": {"output": 32768}, "options": {"max_tokens": 32768}}, 65536)
+        self.assertEqual((kept[0]["output"], kept[1]["max_tokens"]), (32768, 32768))  # half: room left
+
     def test_two_tags_of_one_model_get_names_of_their_own_and_a_taken_name_is_refused(self):
         # the 2026-11-19 audit: family:7b and family:32b both became family-16k, the second
         # overwriting the first in Ollama and in OpenCode's config
@@ -1161,6 +1260,16 @@ class Optimize(unittest.TestCase):
         models.write_entry("ollama", "m:64k", None)
         with self.assertRaisesRegex(RuntimeError, "exists already"):
             optimize.apply(m)
+
+    def test_a_window_the_server_never_served_is_not_recorded_as_a_fit(self):
+        # #338 (the audit of 1.4): Ollama served 16K at every load, all in VRAM, and the fit
+        # copied the asked-for 64K into its result, checking only placement
+        self.ollama(65536, served=16384)
+        m = models.discover()["ollama/m"]
+        from workbench import optimize
+        row = optimize.fit(m, 262144)
+        self.assertEqual((row["window"], row["fits"], row["clamped"]), (65536, 16384, 16384))
+        self.assertIn("served it 16K whatever was asked", optimize.advice(m.id, row))
 
     def test_nothing_to_change_says_nothing_and_a_task_on_the_gpu_keeps_it(self):
         self.ollama(65536)

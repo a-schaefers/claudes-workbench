@@ -313,6 +313,12 @@ def _this_host(host: str | None) -> bool:
 
 
 _ENGINES: dict[str, str] = {}  # root -> engine, once its server has answered
+# Roots whose probe got no answer, and when: a provider whose server is down (a wb remote box
+# asleep) cost 1.5 s on every discover(), which runs many times per command, so wb models took
+# 12 s instead of 0.1 s (#337, the audit of 1.4). Asked again after DOWN_SECS, so a runner or the
+# chat server, which live for hours, learn the engine once the server is back.
+_DOWN: dict[str, float] = {}
+DOWN_SECS = 60
 
 # A server on this machine is asked directly, never through a proxy: urllib honours http_proxy and
 # exempts loopback only when no_proxy says so, so behind a corporate proxy every local model read
@@ -348,7 +354,7 @@ def _engine(url: str, over: dict, pid: str = "") -> str:
     if root in _ENGINES:
         return _ENGINES[root]
     guess = "ollama" if urlparse(url).port == OLLAMA_PORT or "ollama" in pid.lower() else "server"
-    if _fake():
+    if _fake() or time.monotonic() - _DOWN.get(root, -DOWN_SECS) < DOWN_SECS:
         return guess
     try:
         with _open(f"{root}/api/version", timeout=1.5) as r:
@@ -357,6 +363,7 @@ def _engine(url: str, over: dict, pid: str = "") -> str:
     except urllib.error.HTTPError:  # it answered, without Ollama's API
         _ENGINES[root] = "server"
     except Exception:  # down, or not speaking JSON: the port is the best guess
+        _DOWN[root] = time.monotonic()
         return guess
     return _ENGINES[root]
 
@@ -432,6 +439,13 @@ def _local_providers(cfg: dict, extra: dict, dirs: dict | None = None):
     or opted in with models.json "local": true."""
     for pid, prov, url, why, remote in _scan(cfg, extra, dirs):
         if not why:
+            # the key before the probe: an Ollama that wants one on /api/version answered the
+            # keyless probe with an error, was cached as a server, and its Ollama management
+            # (load, unload, pull, the window check) was skipped (#337, the audit of 1.4)
+            raw = str((prov.get("options") or prov.get("settings") or {}).get("apiKey") or "")
+            key = _expand(raw, base=(dirs or {}).get(pid)) if raw else auth_key(pid)  # #336
+            if key:
+                _KEYS[url.rstrip("/").removesuffix("/v1")] = key
             yield pid, prov, url, _engine(url, extra.get(pid) or {}, pid), remote
 
 
@@ -474,6 +488,19 @@ def cloud_allowed(model_id: str) -> bool:
     return (_overrides().get(model_id) or {}).get("local") is True
 
 
+def auth_key(pid: str) -> str:
+    """The key `opencode auth login` keeps for a provider, in OpenCode's auth.json: OpenCode's
+    docs set a custom provider's key there, with no options.apiKey, and the probes sent none, so
+    a model OpenCode would run read "it wants an API key" (#336, the audit of 1.4). The lane keeps
+    auth.json readable, so the agent's OpenCode sends the same key. Never printed."""
+    base = os.environ.get("XDG_DATA_HOME") or str(Path.home() / ".local/share")
+    try:
+        row = json.loads((Path(base) / "opencode" / "auth.json").read_text()).get(pid)
+    except (OSError, ValueError, AttributeError):
+        return ""
+    return str(row.get("key") or "") if isinstance(row, dict) and row.get("type") == "api" else ""
+
+
 def discover() -> dict[str, Model]:
     """Every local model OpenCode knows, by OpenCode id, in config order."""
     extra, dirs = _overrides(), _provider_dirs()
@@ -484,15 +511,13 @@ def discover() -> dict[str, Model]:
         # the key the agent's OpenCode will send: probed with wb's own, a key the agent never got
         # read as running and every request of the task was refused (the 0.90 review)
         raw_key = str(opts.get("apiKey") or "")
-        key = _expand(raw_key, base=dirs.get(pid))
+        key = _expand(raw_key, base=dirs.get(pid)) or (auth_key(pid) if not raw_key else "")
         hidden = [n.strip() for k, n in _TEMPLATE.findall(raw_key)
                   if k == "env" and n.strip() in os.environ and not _agent_sees(n.strip())]
         if hidden and not problem:
             from . import context
             problem = (f"its apiKey reads {{env:{hidden[0]}}}, which agents don't get: add "
                        f"{hidden[0]} to commands.json env ({context.commands_path()})")
-        if key:
-            _KEYS[url.rstrip("/").removesuffix("/v1")] = key
         for name, spec in (prov.get("models") or {}).items():
             mid = f"{pid}/{name}"
             over = {**extra.get(pid, {}), **extra.get(mid, {})}
@@ -673,10 +698,12 @@ def status(m: Model, down=frozenset()) -> dict:
         # pick that model over a working one (the 2026-11-19 audit). Not "not running" either,
         # which started a second copy and waited 20 minutes for it (the 2026-11-16 audit).
         if e.code in (401, 403):
+            # where else a key may be kept: opencode auth login's auth.json (#336, the audit of 1.4)
             return _no(f"the server refuses its API key (HTTP {e.code}): set the provider's "
-                       "options.apiKey to the key it wants" if m.api_key else
+                       f"options.apiKey, or `opencode auth login` for {m.provider}, to the key it "
+                       "wants" if m.api_key else
                        f"the server answers, but it wants an API key (HTTP {e.code}): set the "
-                       "provider's options.apiKey")
+                       f"provider's options.apiKey, or `opencode auth login` for {m.provider}")
         body = None
     except Exception:
         body = None
@@ -693,9 +720,12 @@ def status(m: Model, down=frozenset()) -> dict:
         # request as "opencode exited 1", and a vLLM name is a long HF path, easy to miss (#256,
         # the audit of 1.2). llama-server says it is one (owned_by llamacpp, a `meta` field).
         llamacpp = any(x.get("owned_by") == "llamacpp" or "meta" in x for x in rows)
-        if sid and not _serves(sid, m.name) and not llamacpp and not (m.start and _contended(m)):
+        # the file's basename is llama-server's spelling only: a strict server takes its exact
+        # id, so studio/coder read as serving personal/coder (#339, the audit of 1.4)
+        same = sid == m.name or (llamacpp and _serves(sid, m.name))
+        if sid and not same and not llamacpp and not (m.start and _contended(m)):
             return _no(f"the server serves {sid}, not {m.name}: set the entry's id to {sid}")
-        if sid and m.start and _contended(m) and not _serves(sid, m.name):
+        if sid and m.start and _contended(m) and not same:
             # the task would run on the other model, recorded under this one (the 2026-11-16 audit)
             owners = _owners(m, sid)
             if [o.id for o in owners] == [m.id]:
@@ -858,6 +888,16 @@ def make_resident(m: Model, say=print, keep=(), warn=None) -> float:
         # first and failed after (the 2026-11-16 audit): fail before freeing anything
         raise RuntimeError(f"{m.id} can't run: {st['why']}"
                            + (f": {fix}" if (fix := remedy(m, st)) else ""))
+    if m.engine == "server" and (key := lmstudio_unloaded(m)):
+        # LM Studio's just-in-time loading lists every downloaded model as served, so nothing
+        # was loaded, and OpenCode's first request loaded it with LM Studio's default window
+        # (often 4K): the prompt was refused and round 1 failed as "opencode exited 1" (#335,
+        # the audit of 1.4). Load it here with the window OpenCode is told.
+        t0 = time.time()
+        if not m.remote and not _room_beside(m):
+            free_gpu(keep={m.id, *keep}, say=say, warn=warn)
+        _lmstudio_load(m, key, say)
+        return time.time() - t0
     if st["resident"] and (m.remote or not _others_resident(m, keep) or _room_beside(m)):
         return 0.0
     t0 = time.time()
@@ -899,6 +939,38 @@ def make_resident(m: Model, say=print, keep=(), warn=None) -> float:
                     pass
             time.sleep(max(due - time.monotonic(), 0))
     return time.time() - t0
+
+
+def lmstudio_unloaded(m: Model) -> str | None:
+    """The LM Studio key of ``m`` when LM Studio lists it but has no instance of it loaded (it
+    would load on the first request, with its default window: #335); else None."""
+    if _fake():
+        return None
+    lms = _ask(f"{m.root}/api/v1/models", m.api_key)
+    rows = lms.get("models") if isinstance(lms, dict) else None
+    for x in rows if isinstance(rows, list) else []:
+        if not isinstance(x, dict):
+            continue
+        loaded = [i for i in x.get("loaded_instances") or [] if isinstance(i, dict)]
+        if any(i.get("id") == m.name for i in loaded):
+            return None
+        if _serves(str(x.get("key") or ""), m.name):
+            return None if loaded else str(x["key"])
+    return None
+
+
+def _lmstudio_load(m: Model, key: str, say) -> None:
+    """Load ``key`` into LM Studio with OpenCode's window (limit.context); a refusal names the
+    command that does it by hand."""
+    ctx = (m.config.get("limit") or {}).get("context")
+    body = {"model": key, **({"context_length": ctx} if isinstance(ctx, int) and ctx > 0 else {})}
+    say(f"loading {key} into LM Studio" + (f" with a {ctx // 1024}K window" if "context_length" in body else ""))
+    try:
+        _post(f"{m.root}/api/v1/models/load", body, timeout=START_TIMEOUT)
+    except Exception as e:
+        raise RuntimeError(f"{m.id} isn't loaded in LM Studio and loading it failed ({e}): run "
+                           f"lms load {key}" + (f" --context-length {ctx}" if "context_length" in body else ""))
+    _FACTS.pop((m.root, m.name), None)  # the window it now serves, for short_window
 
 
 def _placement(m: Model, warn) -> None:
@@ -1465,12 +1537,14 @@ def ollama_cap(entry: dict) -> int:
 
 def providers() -> dict[str, dict]:
     """OpenCode's local providers: id → {"root", "url", "engine", "engine_known", "start",
-    "problem", "key" (its apiKey, resolved: never printed), "models"} (the config's model entries)."""
+    "problem", "key" (its apiKey, resolved, else auth.json's: never printed), "models"} (the config's model entries)."""
     extra, dirs = _overrides(), _provider_dirs()
+    def key(pid, prov):
+        raw = str((prov.get("options") or prov.get("settings") or {}).get("apiKey") or "")
+        return _expand(raw, base=dirs.get(pid)) if raw else auth_key(pid)   # #336, the audit of 1.4
     return {pid: {"root": url.rstrip("/").removesuffix("/v1"), "url": url,
                   "models": prov.get("models") or {}, "engine": engine,
-                  "key": _expand(str((prov.get("options") or prov.get("settings") or {}).get("apiKey") or ""),
-                                 base=dirs.get(pid)),
+                  "key": key(pid, prov),
                   "engine_known": engine_known(url, extra.get(pid) or {}),
                   "start": (extra.get(pid) or {}).get("start"),
                   "problem": url_problem(url, engine, prov.get("npm"))}
@@ -1536,7 +1610,8 @@ def add_server_provider(pid: str, base: str) -> bool:
     """Give OpenCode a provider ``pid`` for the OpenAI-compatible server at ``base`` (its
     baseURL, usually ending in /v1), whatever runs it: llama.cpp, LM Studio, vLLM, Ollama. Only
     Ollama had a command for it, so every other server meant editing opencode.json by hand. False
-    when the config already has ``pid`` (a provider the user wrote is never touched)."""
+    when the config already has ``pid`` for that same endpoint (a provider the user wrote is never
+    touched); RuntimeError when it has ``pid`` for another one."""
     u = urlparse(base)
     if u.scheme not in ("http", "https") or not u.hostname:
         raise RuntimeError(f"--url {base}: give the server's baseURL, e.g. http://127.0.0.1:8080/v1")
@@ -1545,8 +1620,17 @@ def add_server_provider(pid: str, base: str) -> bool:
                            f"If it is your own server (WSL2's Windows host, a LAN box), give {pid} "
                            f"\"local\": true in {overrides_path()} first")
     cfg = read_config()
-    if _has_provider(cfg, pid):
-        return False
+    prov = _provider(cfg, pid)
+    if prov is not None:
+        have = _provider_url(prov)
+        if base.rstrip("/") in (have.rstrip("/"), _expand(have, base=_provider_dirs().get(pid)).rstrip("/")):
+            return False
+        # the model was registered under the old endpoint and wb said it was added: two servers
+        # serving one model name then did plausible work on the wrong machine (#334, the audit of 1.4)
+        raise RuntimeError(f"OpenCode's config has a provider {pid} already, for "
+                           f"{have or 'no baseURL'}, not {base}: wb leaves it alone. Give this server "
+                           f"a provider id of its own (wb model add <provider>/<model> --url {base}), "
+                           f"or change {pid}'s baseURL in {opencode_config_path()} by hand")
     _add_provider(cfg, pid, pid, base.rstrip("/"))
     return True
 

@@ -157,14 +157,16 @@ def due(ms: list[models.Model] | None = None) -> str:
 
 
 def probe(m: models.Model, window: int) -> dict:
-    """Load ``m`` at ``window`` and read where Ollama put it: {window, size, vram}."""
+    """Load ``m`` at ``window`` and read where Ollama put it: {window, size, vram, served}, served
+    being the window it actually gave (/api/ps context_length; None when it doesn't say)."""
     models._unload(m)
     try:
         models._post(f"{m.root}/api/generate", {"model": m.name, "prompt": "", "keep_alive": "2m",
                                                 "options": {"num_ctx": window}}, timeout=900)
         for x in (models._get(f"{m.root}/api/ps") or {}).get("models", []):
             if models._matches(m.name, {x.get("name")}) and x.get("size"):
-                return {"window": window, "size": x["size"], "vram": x.get("size_vram") or 0}
+                return {"window": window, "size": x["size"], "vram": x.get("size_vram") or 0,
+                        "served": int(x["context_length"]) if x.get("context_length") else None}
         raise RuntimeError(f"Ollama loaded {m.name} but doesn't list it")
     finally:
         models._unload(m)
@@ -180,7 +182,10 @@ def fit(m: models.Model, trained: int | None, check=lambda: None) -> dict:
         check()
         r = probe(m, w)
         tried.append(r)
-        return r["vram"] >= r["size"]
+        # a server that serves less than was asked (Ollama clamped to 16K at every load) hasn't
+        # shown that ``w`` fits: placement alone recorded a 64K fit it never served (#338, the
+        # audit of 1.4)
+        return r["vram"] >= r["size"] and not (r.get("served") and r["served"] < w)
 
     now = served(m)
     top = min(trained or MAX_WINDOW, 2 * now, MAX_WINDOW) // STEP * STEP
@@ -201,8 +206,10 @@ def fit(m: models.Model, trained: int | None, check=lambda: None) -> dict:
             break
         good, bad = (mid, bad) if whole(mid) else (good, mid)
     at = next((r for r in tried if r["window"] == now), None)
+    short = [r["served"] for r in tried if r.get("served") and r["served"] < r["window"]]
     return {"window": now, "fits": good, "spill": round(100 * (1 - at["vram"] / at["size"]))
-            if at and at["size"] else None, "tried": tried, "ts": store.now()}
+            if at and at["size"] else None, "clamped": max(short) if short else None,
+            "tried": tried, "ts": store.now()}
 
 
 def _record(model_id: str, row: dict) -> None:
@@ -224,6 +231,10 @@ def advice(model_id: str, row: dict) -> str:
     k = lambda n: f"{n // 1024}K"  # noqa
     if fits is None:
         return f"{model_id}: doesn't fit the GPU whole even at {k(models.MIN_WINDOW)}"
+    if row.get("clamped") and row["clamped"] < w:  # #338: the window it runs at, not the one asked
+        return (f"{model_id}: the server served it {k(row['clamped'])} whatever was asked (OpenCode "
+                f"is told {k(w)}); {k(fits)} is what was seen to fit. Fix the server's window "
+                f"(OLLAMA_CONTEXT_LENGTH?) or wb model add {model_id} --context {row['clamped']}")
     if spill:
         return (f"{model_id}: its {k(w)} window puts {spill}% of it in system RAM here (slower); "
                 f"{k(fits)} fits all on the GPU. A bigger window compacts less, a whole one writes "
@@ -246,10 +257,31 @@ def entry_name(source: str, window: int) -> str:
     return f"{base}:{tag + '-' if tag else ''}{window // 1024}k"
 
 
+def budget(entry: dict, fits: int) -> tuple[dict, dict]:
+    """The entry's limits and options at a ``fits`` window, its caps recomputed together: the
+    source's output cap kept while it is at most half the window, else cut to a quarter of it,
+    and ``max_tokens`` never past it. A 16K fit of a 128K entry with a 32K output cap and ``max_tokens`` 64K once
+    wrote an input limit of -16384 and kept both caps (#332, the audit of 1.4)."""
+    lim, opts = dict(entry.get("limit") or {}), dict(entry.get("options") or {})
+    out = lim.get("output") or fits // 8
+    if out > fits // 2:
+        out = fits // 4
+    lim.update(context=fits, input=fits - out, output=out)
+    if opts.get("max_tokens"):
+        opts["max_tokens"] = min(opts["max_tokens"], out)
+    # checked before anything is written: a request inside these limits must fit the window
+    if not (0 < out <= lim["input"] and lim["input"] + out <= fits
+            and 0 < (opts.get("max_tokens") or out) <= out):
+        raise RuntimeError(f"no workable budget at a {fits}-token window: limit {lim}, "
+                           f"max_tokens {opts.get('max_tokens')}")
+    return lim, opts
+
+
 def apply(m: models.Model) -> str:
     """Make the measured window an entry of its own beside ``m``: an Ollama model with that
     num_ctx (from ``m``, no download) and OpenCode's entry, copied from ``m``'s (its options,
-    such as thinking off, and output cap kept), with the new window."""
+    such as thinking off, and output cap kept while the window leaves room: ``budget``), with
+    the new window."""
     row = (state().get("models") or {}).get(m.id) or {}
     fits = row.get("fits")
     if not fits or fits == row.get("window"):
@@ -258,8 +290,9 @@ def apply(m: models.Model) -> str:
     provider = m.id.split("/", 1)[0]
     entry = dict(m.config)
     entry.pop("id", None)  # an alias's id names m at the server: the new entry is its own model
-    out = (entry.get("limit") or {}).get("output") or fits // 8
-    entry["limit"] = {**(entry.get("limit") or {}), "context": fits, "input": fits - out, "output": out}
+    entry["limit"], entry["options"] = budget(entry, fits)
+    if not entry["options"]:
+        del entry["options"]
     if entry.get("name"):
         entry["name"] = f"{entry['name']} ({fits // 1024}K)"
     # the config first: the variant was made, then a config with comments refused its entry, and

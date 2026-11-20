@@ -1672,7 +1672,8 @@ window that's too small or doesn't match the model's entry. Most servers start s
 - llama.cpp: `-c` on `llama-server`. With `--parallel N` set, each slot gets an Nth of it (unless
   `--kv-unified`), and one agent uses one slot.
 - LM Studio: the context length when the model is loaded (`lms load <model> --context-length
-  32768`). Load it before registering it, so LM Studio can say what it gave it.
+  32768`). Load it before registering it, so LM Studio can say what it gave it. A task loads an
+  unloaded one itself with the entry's `limit.context` (*Residency*).
 - vLLM: `--max-model-len`.
 
 Bigger is better while it fits on the GPU. A window too big for the card pushes part of the model
@@ -1709,6 +1710,8 @@ and aren't counted as local unless marked the same way.
 Put it in the provider's `options.apiKey` in OpenCode's config. If it reads `{env:NAME}`, add
 `NAME` to `env` in `~/.config/workbench/commands.json`: the agents get none of the environment's
 secrets by default. A key the server refuses makes its models unavailable (`wb models` says so).
+A key kept with `opencode auth login` (OpenCode's `auth.json`) works too, when the config has no
+`options.apiKey`.
 
 ### Found, loaded, chosen
 **OpenCode's config.** `models.opencode_config_files()`: `$WB_OPENCODE_CONFIG` alone, else
@@ -1777,7 +1780,11 @@ one server everywhere roots are compared (`free_gpu`, `_others_resident`, `can_s
 free_gpu unloaded the models it was told to keep (the 2026-11-16 audit). The engine (`_engine`):
 models.json `engine`, else a cached probe of `GET <root>/api/version` (a JSON `version` →
 `ollama`, an HTTP error → `server`), else a guess: Ollama's port 11434 or a provider id containing
-`ollama` → ollama (`engine_known` says whether it was said or probed rather than guessed).
+`ollama` → ollama (`engine_known` says whether it was said or probed rather than guessed). The
+probe sends the provider's `apiKey` (`_KEYS` is filled before it), so an Ollama that wants a key
+isn't classed a server; a probe that gets no answer is remembered for `DOWN_SECS` (60 s, `_DOWN`), so a
+server that is down costs one 1.5 s timeout a minute, not one per `discover()`, and a runner or the
+chat server, which live for hours, learn the engine once it is back (#337).
 `resolve()` takes an exact id, an exact model or provider name (the entry's key or its server
 name), or a unique case-insensitive substring.
 
@@ -1794,7 +1801,10 @@ agent will see it (`_expand`: a `{env:}` name the agent's environment drops is e
 bearer token on every probe to its server's root (`_KEYS`, filled by `discover`, added in
 `_open`): `/models`, and Ollama's own `/api/version`, `/api/tags`, `/api/ps`, loads and unloads,
 which sent none, so an Ollama behind a key read as unavailable (#256, the audit of 1.2); it is
-never printed or stored. A key whose `{env:NAME}`
+never printed or stored. With no `options.apiKey`, the provider's key from OpenCode's own
+`$XDG_DATA_HOME/opencode/auth.json` (`opencode auth login`, a `{"type": "api", "key"}` row:
+`auth_key`) is the one sent, as OpenCode's docs keep a custom provider's key there and the lane
+leaves the file readable for the agent's OpenCode (#336, the audit of 1.4). A key whose `{env:NAME}`
 is set for wb but dropped for the agent is a provider problem, so the model is unavailable: "its
 apiKey reads {env:NAME}, which agents don't get: add NAME to commands.json env" (probed with wb's
 own key it read running, and every request of the agent's was refused: the 0.90 review).
@@ -1839,8 +1849,10 @@ one listing none (`data: []`) is unavailable, "the server answers but lists no m
 running and resident, #256); a llama-server listing one (a row `owned_by: llamacpp` or with a
 `meta` field) answers to any name; any other server listing one is strict, as vLLM, SGLang and TGI
 are (a wrong `model` is a 404, and the round died at its first request as "opencode exited 1":
-#256, the audit of 1.2), so an id that isn't this model's (`_serves`) is unavailable, "the server
-serves <id>, not <name>: set the entry's id to <id>"; except on a port that several models share,
+#256, the audit of 1.2), so an id that isn't exactly this model's name is unavailable, "the server
+serves <id>, not <name>: set the entry's id to <id>" (the file's basename, `_serves`, is matched
+only on a llama-server: a strict server listing `studio/coder` read as serving `personal/coder`,
+#339, the audit of 1.4); except on a port that several models share,
 each with its own `start` (`_contended`: one llama-server per model), where the listed id says which model it is
 (`_owners`): the model whose name is the id or its file's basename without `.gguf` (`_serves`), or
 whose start command names that file (`-m <path>`). The model it is reads running; another model on
@@ -1850,7 +1862,8 @@ one) accounts for, or a served model with no `stop`, leaves it unavailable, "<ro
 <id>, not <name> …": the task would run on the other model, recorded under this one (names that
 differ from the file once left every model on the port unavailable, the served one too: the 0.90
 review); a 401 or 403 to the key the agent will send is unavailable ("the server refuses its API
-key", or with no key "it wants an API key", each naming `options.apiKey`): neither running, which
+key", or with no key "it wants an API key", each naming `options.apiKey` and `opencode auth login`,
+#336): neither running, which
 let a wrong key pass and the router pick that model over a working one (the 2026-11-19 audit), nor
 stopped, which once started a second copy and waited 20 minutes for it (the 2026-11-16 audit);
 stopped with a `start` ("wb starts it"); not running with no start command. `wb models` and `wb
@@ -1881,7 +1894,12 @@ what they hold.
 `status` says can't run raises `RuntimeError` (its reason and remedy) before anything is freed: a
 `--force` task for an unpulled model once emptied the GPU and then failed its load. Nothing to do
 when `m` is resident and nothing else is, or all of it is in VRAM with room beside the rest.
-Nothing is freed when `m` fits beside every model resident now (`_room_beside`: Ollama only, a
+An LM Studio model listed but with no loaded instance (`lmstudio_unloaded`: just-in-time loading
+lists every downloaded model, so `status` says running) is loaded first, after `free_gpu` as
+below, with `POST /api/v1/models/load` and `context_length` set to its `limit.context`; a refused
+load raises, naming `lms load <key> --context-length N`. Left to OpenCode's first request, LM
+Studio loaded it with its default window (often 4K), refused the prompt, and round 1 failed
+(#335, the audit of 1.4). Nothing is freed when `m` fits beside every model resident now (`_room_beside`: Ollama only, a
 known budget, no other server resident, `m` all in VRAM if loaded, Ollama's loaded-model limit not
 reached, and the loaded sizes from `/api/ps` plus `need(m)` within `SHARE_AT` of the budget):
 every round once unloaded the user's Open WebUI, autocomplete or embedding model, fits or not
@@ -2062,7 +2080,10 @@ ollama/<model>` with no provider `ollama` in the config and an Ollama answering 
 touched. Any other server gets the same in one command: `wb model add <provider>/<model> --url
 <baseURL> --context N` writes `{"npm": "@ai-sdk/openai-compatible", "name": "<provider>",
 "options": {"baseURL": "<baseURL>"}}` first (`add_server_provider`; refused for a URL that isn't
-http(s), or that isn't on this machine unless models.json gives the provider `local: true`), and
+http(s), or that isn't on this machine unless models.json gives the provider `local: true`; a
+provider of that id already there is kept as it is: the same baseURL, a trailing slash aside, goes
+on to register the model, another is refused, naming both, so the model never lands on the old
+endpoint while wb reports success (#334): give the server a provider id of its own), and
 `--start CMD`/`--stop CMD` set the model's `start`/`stop` (a server that runs one model a process:
 llama-server, vLLM; LM Studio's `lms load`/`lms unload`). Workbench isn't tied to Ollama: any
 server OpenCode can reach works, its size and window read where it says them (`server_facts`),
@@ -2072,7 +2093,9 @@ and sharing the GPU.
 `wb model retire <id>
 [--delete]` removes the entry (refusing OpenCode's default model) and with `--delete` the weights
 (an Ollama that can't delete them is reported with `ollama rm <name>` after the entry is gone, a
-404 as "had no weights"); its results stay. `wb model sizes <id> trivial|significant|…` sets `sizes`. `wb doctor` asks each
+404 as "had no weights", and `--delete` refused, naming them, while another entry on the same
+Ollama still resolves to those weights: an alias's `id`, untagged read as `:latest`; #333, the
+audit of 1.4); its results stay. `wb model sizes <id> trivial|significant|…` sets `sizes`. `wb doctor` asks each
 Ollama provider once whether it answers (`ollama_answers`; a sleeping LAN box once cost 35 s a
 model and ran doctor past Claude's 2-minute Bash limit): one that doesn't gets one `--` line, its
 models read "ollama is not answering" without another probe, and their served-context checks are
@@ -2277,7 +2300,10 @@ What it measures, per Ollama model that can run (`candidates`; not one in models
 autocomplete model to measure it, #254, the audit of 1.2): the largest window that keeps the
 model and its context all in VRAM, by Ollama's own placement after a load at each window tried
 (`probe`: `/api/generate` with `options.num_ctx`, then `/api/ps` `size_vram` against `size`, then
-unloaded). `fit` loads the served window first (`limit.context`); when it spills it searches down
+unloaded). A load counts as whole only when `/api/ps` `context_length` (`served`) is at least the
+window asked: a server that clamps every load (Ollama served 16K, all in VRAM, and a 64K fit was
+recorded: #338, the audit of 1.4) records `clamped`, the largest window it did serve, and
+`advice` says to fix the server's window or tell OpenCode that one. `fit` loads the served window first (`limit.context`); when it spills it searches down
 from there to `models.MIN_WINDOW`, else up to twice it (never past what Ollama says the model was
 trained on, nor `MAX_WINDOW` 128K, whose cache could fill system RAM), halving the gap in
 multiples of `STEP` 4K: at most `loads(m)` loads, about six. Why it matters: on 2026-11-18 a 64K
@@ -2313,8 +2339,12 @@ whole name, tag and quantization kept, the window as the tag's suffix: `family:3
 `family:7b` and `family:32b` both `family-16k`, the second overwriting the first, the 2026-11-19
 audit; a name already in OpenCode's config or Ollama is refused: retire it first) from it with
 `num_ctx` N (`/api/create` `from`: no download, no GPU) and OpenCode's entry copied from the
-model's (its options, such as `reasoningEffort: "none"`, and output cap kept; `limit.context`
-and `limit.input` set to the new window; an alias's `id` dropped, since it would name the old model). The router weighs both by their records; retiring the
+model's (its options, such as `reasoningEffort: "none"`, kept; `limit.context` set to the new
+window, and the caps recomputed together by `budget`: `limit.output` and `options.max_tokens`
+kept while the output cap is at most half the window, else cut to a quarter of it, `limit.input` the window less the
+output cap, and an entry no request could fit refused before anything is made: a 16K fit of a
+128K entry once wrote an input limit of -16384 and kept its 32K and 64K caps, #332, the audit of
+1.4; an alias's `id` dropped, since it would name the old model). The router weighs both by their records; retiring the
 old one is the user's call (`wb model retire`). The config is checked first (`models.config_target`,
 the checks `write_config` makes: one file, no comments, writable), before anything is made: the
 variant was made, then a config with comments refused its entry, and once the config was plain
@@ -3621,7 +3651,7 @@ delivered as taken (`_stale_notes`, *Notes*).
 | Command | Flags | What it does |
 |---|---|---|
 | `wb models` | `--set-default` | Each model's state, slice and speeds (and `bench:`, its cases passed, when replayed); the router's ranking per size. `--set-default` writes the significant-work pick as OpenCode's `model`. |
-| `wb model add <provider/model>` | `--pull`, `--label`, `--context N`, `--url URL`, `--start CMD`, `--stop CMD` | Registers a model in opencode.json, merged into any existing entry; `--url` first writes an OpenAI-compatible provider for any server on this machine (`models.add_server_provider`: a provider already there is never touched; a URL off this machine needs models.json `local: true`), and `--start`/`--stop` write the model's models.json `start`/`stop`; on a first run with no `--url` it writes the `ollama` provider when Ollama answers; refuses a cloud model, an unknown served context (a server other than Ollama needs `--context`), a down Ollama, a down server of unknown engine (see *Managing the set*). |
+| `wb model add <provider/model>` | `--pull`, `--label`, `--context N`, `--url URL`, `--start CMD`, `--stop CMD` | Registers a model in opencode.json, merged into any existing entry; `--url` first writes an OpenAI-compatible provider for any server on this machine (`models.add_server_provider`: a provider already there is never touched, and one for another baseURL refuses the add; a URL off this machine needs models.json `local: true`), and `--start`/`--stop` write the model's models.json `start`/`stop`; on a first run with no `--url` it writes the `ollama` provider when Ollama answers; refuses a cloud model, an unknown served context (a server other than Ollama needs `--context`), a down Ollama, a down server of unknown engine (see *Managing the set*). |
 | `wb optimize [start\|estimate\|report\|stop\|apply] [<id>…]` | `--bench`, `--if-due` | Asked for, or when due at setup and session start (*Optimize*). `start --if-due`: only when due, else nothing printed. `estimate`: how long a run would hold the GPU. `start`: detached; measures each Ollama model's largest window all on the GPU (refused while a task holds it; a task that wants it stops it); `--bench` then starts `wb bench run` on every model. `report` (the default): a line per model. `stop`. `apply <id>…`: adds the measured window as an entry of its own beside the model (an Ollama `<name>:<tag>-<N>k`, `optimize.entry_name`, with that `num_ctx`, the entry's settings copied; refused when that name exists). |
 | `wb remote <host>` | `--port N` (11434), `--context N`, `--remove` | Another machine's Ollama as this one's models: provider `ollama-<host>` marked `local: true`, each tool-capable model it has pulled registered as `wb model add` would, one line each (see *Models*); exit 1 when it doesn't answer (with `OLLAMA_HOST=0.0.0.0` to try). Refuses a provider of that id already there for another baseURL. `--remove` undoes it; not while OpenCode's default model is one of them, nor for a provider wb didn't add or that now points elsewhere. |
 | `wb model retire <id>` | `--delete` | Unregisters it (not OpenCode's default) and drops its models.json overrides; `--delete` removes Ollama's weights (or says `ollama rm <name>` when it can't). |
@@ -3680,8 +3710,8 @@ $WB_HOME (~/.local/state/workbench)
   bench/runs.jsonl  driver.json  one row per replay; the driver's {pid, run}
                                  (bench.jsonl and bench/repos/ are the old suite's: nothing reads them)
   optimize.json  optimize.log    wb optimize: {pid, start, began, done, stopped, hardware (fingerprint: [name, vram] per GPU, then ["remote", root, [[name, size]…]] per remote Ollama),
-                                 secs_per_load, models: {<id>: {window, fits, spill, tried: [{window,
-                                 size, vram}], ts}}, made: {<provider>/<name>: <source id>} (a variant
+                                 secs_per_load, models: {<id>: {window, fits, spill, clamped, tried:
+                                 [{window, size, vram, served}], ts}}, made: {<provider>/<name>: <source id>} (a variant
                                  apply made and hasn't registered yet: #266)}; the run's output
   imports/<slug>/                skills fetched by wb skill import, for Claude to read
   images/<YYYYmmdd-HHMMSS>/      wb image's candidates (unless --out), their .json sidecars, engine.log

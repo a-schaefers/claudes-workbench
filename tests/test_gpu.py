@@ -1,4 +1,5 @@
 """Sharing the GPU: tasks run side by side when their models fit it together, else one at a time."""
+import contextlib
 import io
 import json
 import os
@@ -595,6 +596,54 @@ class ServedWindow(unittest.TestCase):
         self.assertIn("cut the prompt off", str(e.exception))
         with self.ps(65536):
             self.assertEqual(runner._load(None, lease, self.model()), 3.0)
+
+
+class LmStudioJustInTime(unittest.TestCase):
+    """#335 (the audit of 1.4): LM Studio's just-in-time loading lists every downloaded model, so
+    status() said running and nothing was loaded; OpenCode's first request loaded it with LM
+    Studio's default window (often 4K), which refused the prompt, and round 1 failed."""
+
+    def model(self):
+        return models.Model(id="lms/coder", provider="lms", name="coder", base_url="http://127.0.0.1:9/v1",
+                            engine="server", label="coder", config={"limit": {"context": 65536}},
+                            stop="true")
+
+    def setUp(self):
+        fake = mock.patch.dict(os.environ, {"WB_FAKE_MODELS": ""})
+        fake.start()
+        self.addCleanup(fake.stop)
+        models._FACTS.clear()
+
+    def serve(self, loaded):
+        rows = {"models": [{"key": "coder", "loaded_instances": loaded}]}
+        return [mock.patch.object(models, "status", return_value={"available": True, "resident": True, "why": "running"}),
+                mock.patch.object(models, "_ask", lambda url, *a, **kw: rows if url.endswith("/api/v1/models") else None),
+                mock.patch.object(models, "free_gpu"), mock.patch.object(models, "_others_resident", return_value=False)]
+
+    def test_a_listed_model_not_yet_loaded_is_loaded_with_opencodes_window(self):
+        posts = []
+        with contextlib.ExitStack() as st:
+            for p in self.serve([]):
+                st.enter_context(p)
+            st.enter_context(mock.patch.object(models, "_post", lambda url, body, **kw: posts.append((url, body))))
+            models.make_resident(self.model(), say=lambda *_: None)
+        self.assertEqual(posts, [("http://127.0.0.1:9/api/v1/models/load",
+                                  {"model": "coder", "context_length": 65536})])
+
+    def test_a_loaded_one_is_left_alone_and_a_failed_load_names_lms_load(self):
+        with contextlib.ExitStack() as st:
+            for p in self.serve([{"id": "coder", "config": {"context_length": 65536}}]):
+                st.enter_context(p)
+            post = st.enter_context(mock.patch.object(models, "_post"))
+            self.assertEqual(models.make_resident(self.model(), say=lambda *_: None), 0.0)
+        post.assert_not_called()
+        with contextlib.ExitStack() as st:
+            for p in self.serve([]):
+                st.enter_context(p)
+            st.enter_context(mock.patch.object(models, "_post", side_effect=RuntimeError("HTTP 500")))
+            with self.assertRaises(RuntimeError) as e:
+                models.make_resident(self.model(), say=lambda *_: None)
+        self.assertIn("lms load coder --context-length 65536", str(e.exception))
 
 
 if __name__ == "__main__":
