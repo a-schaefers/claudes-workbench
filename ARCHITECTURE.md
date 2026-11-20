@@ -1898,7 +1898,11 @@ let go of (a local Ollama model, a local server with `stop`).
 The budget (`budget_devices`, which also returns the devices it counts and where the number
 comes from, for `wb doctor` and `wb scout`'s `cli.gpu_line`) is models.json's top-level `gpu_gb`
 when set (decimal GB, the escape hatch for hardware this can't read; not a number: an error, as a
-malformed file), else it comes from one runtime's GPUs: the GPUs are grouped by driver (`nvidia`, `amdgpu`,
+malformed file; `gpu_line` names the file and the key whenever a GPU publishes no memory size,
+Intel's i915 and xe, whose sysfs has none: alone, as the fix for "GPU memory unknown here", and
+beside a budget from another device, as the card that budget leaves out. Nothing pointed there,
+so tasks never shared and the user's other Ollama models were unloaded every round: #272, the
+audit of 1.2), else it comes from one runtime's GPUs: the GPUs are grouped by driver (`nvidia`, `amdgpu`,
 `metal`…) and the largest group's sum is taken, so several NVIDIA cards (which Ollama splits a
 model across) add up but another vendor's GPU beside them doesn't; a discrete device under
 `IGPU_UNDER` 1 GiB (an integrated GPU's carve-out, Ollama's own cutoff) is left out. Summing
