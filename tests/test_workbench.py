@@ -4249,20 +4249,39 @@ class Cleanup(Base):
         starting = store.home() / "rules" / "t-starting"  # a start in progress: no task.json yet
         starting.mkdir()
         base = context._runtime_base()
-        stale, fresh = (Path(tempfile.mkdtemp(prefix="wb-run-", dir=base)) for _ in range(2))
-        self.addCleanup(lambda: [shutil.rmtree(d, ignore_errors=True) for d in (stale, fresh)])
-        os.utime(stale, (time.time() - 8 * 86400,) * 2)
+        old = time.time() - 8 * 86400
+        stale, fresh, other, notes, fifo = (
+            Path(tempfile.mkdtemp(prefix="wb-run-", dir=base)) for _ in range(5))
+        self.addCleanup(lambda: [shutil.rmtree(d, ignore_errors=True)
+                                 for d in (stale, fresh, other, notes, fifo)])
+        mark = lambda d, home, task: store.write_json(d / context.RUNTIME_OWNER,  # noqa
+                                                     {"home": str(home), "task": task})
+        mark(stale, store.home(), "t-gone")                    # this profile's, its task gone
+        mark(fresh, store.home(), "t-gone")
+        # #243 (the audit of 1.2): another profile's open task, nine days in review, lost its
+        # own, and so did a wb-run-* wb never made
+        mark(other, Path(self.tmp.name) / "other-profile", "t-review")
+        os.mkfifo(fifo / context.RUNTIME_OWNER)                # the agent's lane: no hang
+        for d in (stale, other, notes, fifo):
+            os.utime(d, (old,) * 2)
         live = context.runtime_dir(store.Task("t-live"))
-        os.utime(live, (time.time() - 8 * 86400,) * 2)  # an open task's, however old
+        self.assertEqual(store.read_json(live / context.RUNTIME_OWNER)["task"], "t-live")
+        os.utime(live, (old,) * 2)  # an open task's, however old
         out = cli.gc()
         self.assertEqual(out["rules"], 1)
         self.assertFalse(ghost.exists())
         self.assertTrue(starting.exists())
         self.assertTrue(context.rules_dir(store.Task("t-live")).exists())
-        self.assertGreaterEqual(out["runtime"], 1)
+        self.assertEqual(out["runtime"], 1)
         self.assertFalse(stale.exists())
-        self.assertTrue(fresh.exists())
-        self.assertTrue(live.exists())
+        for kept in (fresh, live, other, notes, fifo):
+            self.assertTrue(kept.exists(), kept)
+        run_wb("discard", "t-live")                            # a closed task's goes once stale
+        live.mkdir(exist_ok=True)
+        os.utime(live, (old,) * 2)
+        store.write_json(store.home() / "gc.json", {})
+        self.assertEqual(cli.gc()["runtime"], 1)
+        self.assertFalse(live.exists())
 
     def test_a_close_runs_gc_at_most_once_a_day(self):
         self.start("t-a", "ok")
