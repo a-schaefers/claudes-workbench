@@ -26,7 +26,7 @@ Claude Code plugin that connects the two inside your normal Claude Code session.
 
 On bigger coding tasks, once the session is already open, handing the coding off to the local
 model typically costs Claude about half the tokens of writing the code itself
-([measured](ARCHITECTURE.md#what-a-handoff-costs-claude-measured)).
+([how we measured it](THESIS.md)).
 
 ## Quickstart
 

@@ -3964,7 +3964,7 @@ push: every change is a pull request that merges once `check` is green and it is
 ## Couplings: change one, change the other
 
 - **What a handoff costs Claude, measured** → THESIS.md (the case for users, with the same
-  numbers).
+  numbers) and the README's sentence on it, which links there.
 - **Anything a reader looks up** (a command, flag, default, guard, key, file, prompt text,
   environment variable) → this file, CLAUDE.md if it names it, and the skill
   (`skill/workbench/SKILL.md`) if Claude uses it there; README only for the quickstart. CLAUDE.md's
