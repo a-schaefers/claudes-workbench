@@ -4607,6 +4607,35 @@ class Lane(Base):
         self.assertIn("the lane refused /dev/kvm: wb allow t-dev --path /dev/kvm", report)
         self.assertNotIn("refused /dev/null", report)      # in the lane: not the lane's doing
 
+    def test_a_proxy_with_a_password_stays_out_of_the_agents_environment_and_is_said_with_its_way_through(self):
+        # #380 (the audit of 1.6): https_proxy=http://user:pass@proxy:3128 is a URL with a
+        # password, so the agent's environment leaves it out, and a setup's `npm ci` or the tests
+        # failed with network errors that read as the project's, with nothing said
+        proxy = {"https_proxy": "http://user:pass@proxy.example:3128", "no_proxy": "localhost",
+                 "HTTP_PROXY": "http://proxy.example:3128"}       # no password: kept, unsaid
+        said = ('note: the agent\'s environment leaves out https_proxy (a URL with a password): '
+                'commands.json "env": ["https_proxy"] passes it through')
+        with mock.patch.dict(os.environ, proxy):
+            out = self.start("t-px", "ok", "--auto-fix", "0", "--no-base-check", "--test",
+                             "echo 'curl: (6) Could not resolve host: example.org'; exit 6")
+            self.assertIn(said, out)
+            st = wait_phase("t-px", {"review"})
+            self.assertEqual(st["tests"]["proxy"], ["https_proxy"])
+            self.assertIn(said[len("note: "):] + ", if the tests need the network",
+                          run_wb("report", "t-px"))
+            env = runner.agent_env(store.Task("t-px"))
+            self.assertNotIn("https_proxy", env)                  # still a credential
+            self.assertEqual(env["HTTP_PROXY"], proxy["HTTP_PROXY"])
+            self.start("t-px-setup", "ok", "--setup", "echo 'npm ERR! code ECONNREFUSED'; exit 1")
+            wait_phase("t-px-setup", {"failed"})
+            note = [r for r in store.notices() if r["task"] == "t-px-setup"][-1]
+            self.assertIn(said[len("note: "):] + ", if the setup needed it", note["text"])
+            # named in commands.json, it passes and nothing is said
+            Path(os.environ["WB_COMMANDS"]).write_text(json.dumps({"env": ["https_proxy"]}))
+            self.assertNotIn("leaves out", self.start("t-px-named", "ok"))
+            self.assertEqual(runner.agent_env(store.Task("t-px-named"))["https_proxy"],
+                             proxy["https_proxy"])
+
     def test_a_task_unloading_for_its_tests_gets_the_gpus_device_nodes_and_no_other_does(self):
         # #331, the audit of 1.4: --unload-for-tests freed the GPU, but its nodes stayed out of
         # the lane, so CUDA, ROCm and Vulkan found no device and the agent chased its own "bug"
