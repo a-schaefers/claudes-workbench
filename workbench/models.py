@@ -313,6 +313,12 @@ def _this_host(host: str | None) -> bool:
 
 
 _ENGINES: dict[str, str] = {}  # root -> engine, once its server has answered
+# Roots whose probe got no answer, and when: a provider whose server is down (a wb remote box
+# asleep) cost 1.5 s on every discover(), which runs many times per command, so wb models took
+# 12 s instead of 0.1 s (#337, the audit of 1.4). Asked again after DOWN_SECS, so a runner or the
+# chat server, which live for hours, learn the engine once the server is back.
+_DOWN: dict[str, float] = {}
+DOWN_SECS = 60
 
 # A server on this machine is asked directly, never through a proxy: urllib honours http_proxy and
 # exempts loopback only when no_proxy says so, so behind a corporate proxy every local model read
@@ -348,7 +354,7 @@ def _engine(url: str, over: dict, pid: str = "") -> str:
     if root in _ENGINES:
         return _ENGINES[root]
     guess = "ollama" if urlparse(url).port == OLLAMA_PORT or "ollama" in pid.lower() else "server"
-    if _fake():
+    if _fake() or time.monotonic() - _DOWN.get(root, -DOWN_SECS) < DOWN_SECS:
         return guess
     try:
         with _open(f"{root}/api/version", timeout=1.5) as r:
@@ -357,6 +363,7 @@ def _engine(url: str, over: dict, pid: str = "") -> str:
     except urllib.error.HTTPError:  # it answered, without Ollama's API
         _ENGINES[root] = "server"
     except Exception:  # down, or not speaking JSON: the port is the best guess
+        _DOWN[root] = time.monotonic()
         return guess
     return _ENGINES[root]
 
@@ -432,6 +439,13 @@ def _local_providers(cfg: dict, extra: dict, dirs: dict | None = None):
     or opted in with models.json "local": true."""
     for pid, prov, url, why, remote in _scan(cfg, extra, dirs):
         if not why:
+            # the key before the probe: an Ollama that wants one on /api/version answered the
+            # keyless probe with an error, was cached as a server, and its Ollama management
+            # (load, unload, pull, the window check) was skipped (#337, the audit of 1.4)
+            opts = prov.get("options") or prov.get("settings") or {}
+            key = _expand(str(opts.get("apiKey") or ""), base=(dirs or {}).get(pid))
+            if key:
+                _KEYS[url.rstrip("/").removesuffix("/v1")] = key
             yield pid, prov, url, _engine(url, extra.get(pid) or {}, pid), remote
 
 
@@ -491,8 +505,6 @@ def discover() -> dict[str, Model]:
             from . import context
             problem = (f"its apiKey reads {{env:{hidden[0]}}}, which agents don't get: add "
                        f"{hidden[0]} to commands.json env ({context.commands_path()})")
-        if key:
-            _KEYS[url.rstrip("/").removesuffix("/v1")] = key
         for name, spec in (prov.get("models") or {}).items():
             mid = f"{pid}/{name}"
             over = {**extra.get(pid, {}), **extra.get(mid, {})}

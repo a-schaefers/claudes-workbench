@@ -1777,7 +1777,11 @@ one server everywhere roots are compared (`free_gpu`, `_others_resident`, `can_s
 free_gpu unloaded the models it was told to keep (the 2026-11-16 audit). The engine (`_engine`):
 models.json `engine`, else a cached probe of `GET <root>/api/version` (a JSON `version` →
 `ollama`, an HTTP error → `server`), else a guess: Ollama's port 11434 or a provider id containing
-`ollama` → ollama (`engine_known` says whether it was said or probed rather than guessed).
+`ollama` → ollama (`engine_known` says whether it was said or probed rather than guessed). The
+probe sends the provider's `apiKey` (`_KEYS` is filled before it), so an Ollama that wants a key
+isn't classed a server; a probe that gets no answer is remembered for `DOWN_SECS` (60 s, `_DOWN`), so a
+server that is down costs one 1.5 s timeout a minute, not one per `discover()`, and a runner or the
+chat server, which live for hours, learn the engine once it is back (#337).
 `resolve()` takes an exact id, an exact model or provider name (the entry's key or its server
 name), or a unique case-insensitive substring.
 

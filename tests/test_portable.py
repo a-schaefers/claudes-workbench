@@ -102,6 +102,8 @@ class Real(unittest.TestCase):
         os.environ.update(WB_HOME=str(tmp / "state"), WB_OPENCODE_CONFIG=str(tmp / "opencode.json"),
                           WB_MODELS=str(tmp / "models.json"), WB_COMMANDS=str(tmp / "commands.json"))
         models._ENGINES.clear()
+        models._DOWN.clear()
+        models._KEYS.clear()
         models._FACTS.clear()
         self.servers = []
         no_gpu = mock.patch.object(models.hardware, "gpus", lambda windows=True: [])  # this machine's
@@ -124,6 +126,51 @@ class Real(unittest.TestCase):
     def config(self, providers: dict, extra: dict | None = None):
         Path(os.environ["WB_OPENCODE_CONFIG"]).write_text(json.dumps({"provider": providers}))
         Path(os.environ["WB_MODELS"]).write_text(json.dumps(extra or {}))
+
+    def test_a_server_that_is_down_is_probed_once_a_minute_not_on_every_discover(self):
+        # a wb remote box asleep cost 1.5 s on every discover(): wb models took 12 s (#337)
+        dead = socket.socket()
+        dead.bind(("127.0.0.1", 0))
+        port = dead.getsockname()[1]
+        dead.close()  # nothing listens there now
+        self.config({"o": {"options": {"baseURL": f"http://127.0.0.1:{port}/v1"}, "models": {"m": {}}}})
+        probes = []
+        real = models._open
+        def counting(target, timeout):
+            url = target.full_url if hasattr(target, "full_url") else target
+            if url.endswith("/api/version"):
+                probes.append(url)
+            return real(target, timeout)
+        with mock.patch.object(models, "_open", counting):
+            for _ in range(3):
+                found = models.discover()
+        self.assertEqual(len(probes), 1)
+        self.assertEqual(found["o/m"].engine, "server")
+        self.assertFalse(models.engine_known(f"http://127.0.0.1:{port}/v1", {}))
+        later = time.monotonic() + models.DOWN_SECS              # a runner hours on: asked again
+        with mock.patch.object(models, "_open", counting), \
+                mock.patch.object(models.time, "monotonic", lambda: later):
+            models.discover()
+        self.assertEqual(len(probes), 2)
+
+    def test_an_ollama_behind_a_key_is_probed_with_it_and_known_as_ollama(self):
+        class H(BaseHTTPRequestHandler):
+            def do_GET(self):
+                ok = self.headers.get("Authorization") == "Bearer sekrit"
+                body = {"/api/version": {"version": "0.40.0"}, "/api/tags": {"models": []}}.get(self.path)
+                data = json.dumps(body or {}).encode()
+                self.send_response(200 if ok and body is not None else 401 if not ok else 404)
+                self.send_header("Content-Length", str(len(data)))
+                self.end_headers()
+                self.wfile.write(data)
+            def log_message(self, *a):
+                pass
+        srv = ThreadingHTTPServer(("127.0.0.1", 0), H)
+        threading.Thread(target=srv.serve_forever, daemon=True).start()
+        self.servers.append(srv)
+        url = f"http://127.0.0.1:{srv.server_address[1]}"
+        self.config({"k": {"options": {"baseURL": url + "/v1", "apiKey": "sekrit"}, "models": {"m": {}}}})
+        self.assertEqual(models.discover()["k/m"].engine, "ollama")
 
     def test_ollama_is_known_by_its_api_on_any_port(self):
         ollama = self.server({"/api/version": {"version": "0.40.0"}, "/api/tags": {"models": []}})
