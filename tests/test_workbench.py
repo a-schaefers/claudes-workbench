@@ -1559,6 +1559,28 @@ class WorktreeSetup(Base):
         self.assertTrue((t.worktree / "deps" / "installed").exists())
         self.assertNotIn("deps", gitops.changed(t.worktree))  # ignored: not in the review diff
 
+    def test_the_setup_runs_once_and_the_scratch_checkouts_copy_what_it_made(self):
+        # #249 (the audit of 1.2): the base check, wb verify (twice) and wb shot each cloned
+        # afresh and ran the setup again, up to 30 minutes each: a first build three to five times
+        self.ignore("deps/")
+        count = Path(self.tmp.name) / "setup-runs"
+        self.start("t-once", "ok", "--test", self.NEEDS_DEPS, "--setup",
+                   f"mkdir -p deps && touch deps/installed && echo run >> {count}",
+                   "--auto-fix", "0", "--no-self-review")
+        st = wait_phase("t-once", {"review"})
+        t = store.Task("t-once")
+        self.assertEqual(st["base_check"]["exit"], 2)          # deps there: not NO-DEPS's 3
+        self.assertEqual(count.read_text().count("run"), 1)     # the base check copied them
+        self.assertEqual(st["prepared_paths"], ["deps"])
+        self.assertIn("setup: ", run_wb("report", "t-once"))
+        (t.worktree / "test_answer.sh").write_text(self.NEEDS_DEPS + "\n")
+        out = run_wb("verify", "t-once", "--test", "sh test_answer.sh", "--files", "test_answer.sh")
+        self.assertNotIn("setup failed", out)
+        self.assertNotIn("NO-DEPS", "".join(p.read_text() for p in (t.dir / "verify").rglob("*.txt")))
+        self.assertEqual(count.read_text().count("run"), 1)     # nor wb verify's two runs
+        run_wb("verify", "t-once", "--test", "sh test_answer.sh", "--files", "test_answer.sh", "--setup")
+        self.assertEqual(count.read_text().count("run"), 3)     # asked: in each checkout
+
     def test_commands_json_gives_a_repo_its_setup_for_every_task(self):
         self.ignore("deps/")
         Path(os.environ["WB_COMMANDS"]).write_text(json.dumps({"repos": {str(self.repo): {

@@ -862,19 +862,36 @@ def _copy(src: Path, dest: Path) -> None:
         shutil.copy2(src, dest, follow_symlinks=False)
 
 
-def prepare(task: store.Task) -> tuple[int | str, str]:
+def prepare(task: store.Task, prepared: Path | None = None) -> tuple[int | str, str]:
     """Make `task.worktree` the project as the user has it, before anything runs there: the
     links beside it to the repo's `siblings`, the ignored paths to `copy` from the user's
     checkout, then the `setup` command in the lane (#201, the 2026-11-19 audit: a worktree holds
     only committed files, so a check that needed node_modules, a .venv or ../lib failed on the
     base and in every round, for that and not for the step). The setup's exit code and output;
-    (0, "") with nothing to do. The task's worktree and each scratch checkout alike."""
+    (0, "") with nothing to do. A scratch checkout passes the task's ``prepared`` worktree: the
+    ignored paths its preparation left (status `prepared_paths`, the setup's work and the copies)
+    are copied from there, and the setup isn't run again. The base check, wb verify (twice) and
+    wb shot each ran it from nothing, up to SETUP_SECS: a first build compiled three to five
+    times a task (#249, the audit of 1.2)."""
     spec, wt = task.spec, task.worktree
     repo = Path(spec["repo"])
+    made = task.status.get("prepared_paths") if prepared else None
     try:
         for name in spec.get("siblings") or ():
             if not (wt.parent / name).is_symlink():
                 (wt.parent / name).symlink_to(os.path.realpath(repo.parent / name))
+        if made is not None:
+            for p in made:
+                src, dest = prepared / p, wt / p
+                # A later step can track an earlier build path or change its parent to a link.
+                # Keep that checkout's own file and confine copies to the two worktrees (#249).
+                if os.path.lexists(dest):
+                    continue
+                if (src.parent.resolve() != src.parent or dest.parent.resolve() != dest.parent
+                        or not os.path.lexists(src)):
+                    return "copy failed", f"prepared input {p} changed; use --setup for a fresh checkout"
+                _copy(src, dest)
+            return 0, ""
         for p in spec.get("copy") or ():
             _copy(repo / p, wt / p)
     except OSError as e:
@@ -882,6 +899,12 @@ def prepare(task: store.Task) -> tuple[int | str, str]:
     if not (cmd := spec.get("setup")):
         return 0, ""
     return run_in_lane(task, cmd, SETUP_SECS)
+
+
+def _ignored_paths(wt: Path) -> list[str]:
+    """The worktree's ignored files and directories (a directory once, not its files)."""
+    out = gitops.git(wt, "ls-files", "--others", "--ignored", "--exclude-standard", "--directory", "-z")
+    return [p.rstrip("/") for p in out.split("\0") if p.rstrip("/")]
 
 
 def _prepare(task: store.Task) -> bool:
@@ -892,11 +915,17 @@ def _prepare(task: store.Task) -> bool:
         return True
     task.set_status(last="setting up the worktree"
                     + (f": {spec['setup']}" if spec.get("setup") else ""))
+    began = time.monotonic()
     code, output = prepare(task)
+    secs = round(time.monotonic() - began, 1)
     task.dir.joinpath("setup.txt").write_text(
-        f"$ {spec.get('setup') or ''}\nexit: {code}\nshell: {test_shell()}\n\n{output}")
+        f"$ {spec.get('setup') or ''}\nexit: {code}\nseconds: {secs}\nshell: {test_shell()}\n\n{output}")
     if code == 0:
-        task.set_status(prepared=True)
+        try:
+            made = _ignored_paths(task.worktree)  # what the scratch checkouts copy (#249)
+        except gitops.GitError:
+            made = None
+        task.set_status(prepared=True, prepared_paths=made, setup_secs=secs)
         return True
     what = f"the setup command failed (exit {code})" if isinstance(code, int) else \
         f"setting up the worktree failed ({code})"
@@ -1076,6 +1105,8 @@ def summary_text(task: store.Task, n: int, rnd: dict, tests) -> str:
                      f"exit {tests['exit']})")
         if not tests["ok"]:
             lines.append("```\n" + "\n".join(tests["tail"].splitlines()[-25:]) + "\n```")
+    if st.get("setup_secs") is not None and not st.get("reviews") and st.get("steps", 1) == 1:
+        lines.append(f"setup: {st['setup_secs']:.0f}s, once; the scratch checkouts copy what it made")
     if st.get("base_check") and not st.get("reviews") and st.get("steps", 1) == 1:
         lines.append("base check: " + base_check_line(st["base_check"], task))
     if st.get("auto_fixes"):
