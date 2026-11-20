@@ -20,6 +20,11 @@ three apart: a skip is not a pass. A release may ship with a skip only when its 
 
 ## By hand, on real machines
 
+Best effort, never a gate: the project has neither the users nor the hardware nor the funding to
+run every platform, server and surface by hand before a release, so other hardware is supported
+from the source, its docs and CI, and from what users report (`wb doctor`'s output, the OS, the
+GPU, the model server). Run what is at hand and mark the rest **skip** (#275, closed 2026-11-20).
+
 The whole road, as a `--trial` task on a scratch repo from `wb init`: install, sample (`wb try`),
 delegate (`wb start`), answer a question (`wb answer`), review, interrupt (`wb steer --now` or
 `wb stop`), resume (`wb feedback`), then `wb accept --merge`. Check the merged file and commit
