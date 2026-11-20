@@ -6,7 +6,7 @@ Claude Code mod wakes Claude when a task needs it. Everything talks through plai
 
 The short name, `workbench`, stays on everything inside: the package, the plugin
 (`workbench@workbench`), the state and config directories, and the clone path `~/repos/workbench`
-ARCHITECTURE.md's *Installing* suggests for developing (nothing depends on it).
+ARCHITECTURE.md's *Installing* suggests (nothing depends on it).
 
 ## Keeping the docs true
 README.md is for people and stays simple: the pitch, a quickstart, then a pointer. ARCHITECTURE.md
@@ -48,7 +48,8 @@ PATH (CI installs it), and the lane tests without Landlock: a skip is not a pass
 ## Checks before committing
 main takes no direct push: commit on a branch or worktree, then `scripts/ship.sh` (pushes, opens
 the pull request, arms auto-merge, waits). The owner's pull requests merge once `check` is green;
-anyone else's wait for the owner (ARCHITECTURE.md, *Shipping to main*).
+anyone else's wait for the owner (ARCHITECTURE.md, *Shipping to main*). Versions: after 1.8
+comes 1.90 (not 1.9), then 1.90.1, 1.90.2…, until a change big enough for 2.0.
 - The docs match the change (*Keeping the docs true*).
 - `python3 -m unittest` (`tests/test_docs.py` included), and `claude plugin validate mod &&
   claude plugin test mod`.
@@ -130,8 +131,8 @@ dependencies. No packaging: it runs from the clone.
 - `skill/workbench/`: the `/workbench` procedure (`SKILL.md`, `reference/`; `wb setup` links it).
 - `mod/`: the Claude Code plugin (`hooks/register.tsx`, `hooks/apprentice.ts` the pane's
   character, `hooks/register.test.tsx`, `types/index.d.ts`; `.claude-plugin/plugin.json` has no
-  version: installs track main's commits). The root's `.claude-plugin/marketplace.json` makes the repo a marketplace.
-- `bin/wb`, `bin/wb-ask-mcp`: launchers that find the package from their own real path.
+  version: installs track main's commits). The root's `.claude-plugin/marketplace.json` makes it a marketplace.
+- `bin/wb`, `bin/wb-ask-mcp`: launchers that find the package from their real path.
 - `tests/`: `test_workbench.py` (end to end, one class per feature), `test_gpu.py`,
   `test_portable.py`, `test_sizing.py`, `test_docs.py` (the docs cover the code),
   `test_workflows.py` (the merge gate),
@@ -142,8 +143,8 @@ dependencies. No packaging: it runs from the clone.
   the owner's pull requests only), `rulesets/main.json`, dependabot for the actions' pins.
 - `scripts/`: `ship.sh` (the road to main), `github-settings.sh check|apply`,
   `install-opencode.sh` (CI's OpenCode, from its release, hash-checked).
-- `systemd/wb-chat.service`: keeps the web chat up. `docs/`: the README's and ARCHITECTURE.md's images (a replaced one
-  gets a new name, for GitHub's cache), `release-checklist.md`, `releases/`.
+- `systemd/wb-chat.service`: keeps the web chat up. `docs/`: the docs' images (a replaced one gets a
+  new name, for GitHub's cache), `release-checklist.md`, `releases/`.
 
 Runs on Linux, WSL2 and macOS; the launchers refuse native Windows and Python before 3.11. Off Linux: no Landlock, and watch.py waits on timers.
 
@@ -253,10 +254,10 @@ unset: unknown, so no sharing).
   `.claude/skills`, committed with it. The user's personal `~/.claude/skills` are denied to agents.
 
 ## OpenCode quirks this code relies on
-Checked against OpenCode 2.3 with `tests/capture_llm.py` (a recording model server: point a
-provider at it and read the system prompt, tools and tool results). The real-OpenCode tests cover
-the MCP shape, skills, denials, compound shell commands, rule order, git by path, the edit rule,
-PATH, the lane, and (RealOpenCodeRun) the events, the export, `--session` and compaction.
+Checked against OpenCode 2.3 with `tests/capture_llm.py` (a recording model server: it shows
+the system prompt, tools and tool results). The real-OpenCode tests cover the MCP shape, skills,
+denials, compound shell commands, rule order, git by path, the edit rule, PATH, the lane, and
+(RealOpenCodeRun) the events, the export, `--session` and compaction.
 - It resolves the project from `$PWD`, not from the cwd.
 - The 2.x config shape is `mcp.servers.<name>`, with `timeout.{startup,execution}`;
   `codemode: false` exposes a plain tool (listed as `workbench_ask_reviewer`).
@@ -309,6 +310,6 @@ PATH, the lane, and (RealOpenCodeRun) the events, the export, `--session` and co
   Claude's Bash still runs `wb` by name; the mod toasts once when it can't run `wb events`); a
   task started in another live session wakes that session, not this one; `claude --debug`
   shows hook errors.
-- A test fails: the task's `runner.log` is under the test's temp `WB_HOME` (deleted at tearDown);
+- A test fails: the task's `runner.log` is under the test's temp `WB_HOME`;
   `wait_phase` prints the status when it times out. An interrupted run can leave detached runners
   and fakes sleeping.
