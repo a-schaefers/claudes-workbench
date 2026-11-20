@@ -572,7 +572,7 @@ def cmd_start(a):
         die(f"--copy {loose[0]}: ignored in {repo}, but not at {a.base}, where the task starts: a "
             "copy would show in the review diff and be committed. Ignore it in a commit the base "
             "holds, or start from a newer --base")
-    subs = gitops.submodules(repo, base)
+    subs = gitops.fill_submodules(repo, base, wt)
     budget = a.ask_budget
     limits = router.budgets(m)  # from the model's measured speed on this machine, else defaults
     store.write_json(task.dir / "task.json", {
@@ -621,8 +621,8 @@ def cmd_start(a):
         print("note: the repo has uncommitted changes; the agent's worktree starts from "
               f"{a.base}, without them")
     if subs:
-        print(f"note: submodules ({', '.join(subs[:5])}) are not checked out in the agent's "
-              "worktree: a build or test that needs them fails there")
+        print(f"note: submodules ({', '.join(subs[:5])}) are empty in the agent's worktree (your "
+              "checkout lacks them at the base's commit): a build or test that needs them fails there")
     if setup:
         does = [*(["links " + ", ".join(n if n.startswith("../") else f"../{n}" for n in setup["siblings"])]
                   if setup.get("siblings") else []),

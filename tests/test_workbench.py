@@ -6782,9 +6782,10 @@ class Projects(Base):
         self.assertIn("never reused", err)
         self.assertNotIn("discard", err)
 
-    def test_start_says_submodules_are_not_checked_out_for_the_agent(self):
-        # the audit: a submodule stayed empty in the worktree and the build failed for no reason
-        # the spec gave; populated, its .git would be a file the agent could repoint (see _pinned)
+    def test_submodules_are_filled_read_only_from_the_checkout_and_never_committed(self):
+        # #350 (the audit of 1.4): a submodule stayed empty in the worktree and in the base
+        # check's checkout, so a C/C++ or vendored build failed on the base and in every round;
+        # given a .git, it would be a file the agent could repoint (see _pinned)
         lib = Path(self.tmp.name) / "lib"
         subprocess.run(["git", "init", "-q", str(lib)], check=True)
         (lib / "lib.c").write_text("int x;\n")
@@ -6795,8 +6796,25 @@ class Projects(Base):
                                       capture_output=True)
         g("-c", "protocol.file.allow=always", "submodule", "add", "-q", str(lib), "vendor/lib")
         g("commit", "-qm", "a submodule")
-        self.assertIn("note: submodules (vendor/lib) are not checked out", self.start("t-sub", "ok"))
-        wait_phase("t-sub", {"review"})
+        out = self.start("t-sub", "ok", "--test", "test -f vendor/lib/lib.c && " + TEST_CMD)
+        self.assertNotIn("submodules", out)
+        st = wait_phase("t-sub", {"review"})
+        self.assertEqual(st["base_check"]["exit"], 2)   # lib.c there (test -f: 1): grep, no answer
+        t = store.Task("t-sub")
+        lib_c = t.worktree / "vendor" / "lib" / "lib.c"
+        self.assertEqual(lib_c.read_text(), "int x;\n")
+        self.assertFalse(lib_c.stat().st_mode & 0o222)     # an edit fails out loud
+        self.assertFalse((t.worktree / "vendor" / "lib" / ".git").exists())
+        self.assertIs(st["tests"]["ok"], True)
+        self.assertNotIn("lib.c", runner.review_diff(t))
+        run_wb("accept", "t-sub", "-m", "feat: answer")
+        tree = g("ls-tree", "-r", "--name-only", "delegate/t-sub").stdout.decode()
+        self.assertNotIn("vendor/lib/lib.c", tree)
+        self.assertIn("answer.txt", tree)
+        # a checkout without the submodule: said, and the worktree's stays empty
+        g("-c", "protocol.file.allow=always", "submodule", "deinit", "-q", "-f", "vendor/lib")
+        self.assertIn("note: submodules (vendor/lib) are empty", self.start("t-sub2", "ok"))
+        wait_phase("t-sub2", {"review"})
 
     def test_accept_says_whether_claude_md_kept_up(self):
         self.start("t-ok", "ok", "--test", TEST_CMD)

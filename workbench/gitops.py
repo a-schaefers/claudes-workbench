@@ -222,6 +222,43 @@ def submodules(repo: Path, commit: str) -> list[str]:
     return [line.split(" ", 1)[1] for line in out.splitlines() if " " in line]
 
 
+def fill_submodules(repo: Path, commit: str, checkout: Path) -> list[str]:
+    """Each submodule of ``commit`` filled in ``checkout`` (a task's worktree or a scratch one)
+    with its files at the commit ``commit`` records, from the user's own checkout of it: written
+    by git itself (a scratch index, `checkout-index`), with no `.git` for the agent to repoint
+    (see submodules) and read-only, since the gitlink keeps an edit there out of the diff and the
+    commit. The ones it couldn't fill come back (the checkout lacks the submodule or that commit).
+    Empty, a C/C++ or vendored project's build failed on the base and in every round (#350, the
+    audit of 1.4). A directory already holding files is left as it is."""
+    left = []
+    for path in submodules(repo, commit):
+        row = git(repo, "ls-tree", commit, "--", path, check=False).split()
+        sha = row[2] if len(row) >= 3 and row[1] == "commit" else ""
+        src, dest = Path(repo) / path, Path(checkout) / path
+        if dest.is_dir() and any(dest.iterdir()):
+            continue
+        if not sha or not (src / ".git").exists() or \
+                _run(src, ("cat-file", "-e", f"{sha}^{{commit}}"), check=False).returncode:
+            left.append(path)
+            continue
+        store.home().mkdir(parents=True, exist_ok=True)  # the scratch index: never in the lane
+        with tempfile.TemporaryDirectory(prefix=".submodule-", dir=store.home()) as scratch:
+            env = {"GIT_INDEX_FILE": os.path.join(scratch, "index")}
+            try:
+                dest.mkdir(parents=True, exist_ok=True)
+                _run(src, ("read-tree", sha), env=env)
+                _run(src, (f"--work-tree={dest}", "checkout-index", "-a", "-f"), env=env)
+            except (GitError, OSError):
+                left.append(path)
+                continue
+        for root, _, files in os.walk(dest):
+            for name in files:
+                f = os.path.join(root, name)
+                if not os.path.islink(f):
+                    os.chmod(f, os.stat(f).st_mode & ~0o222)
+    return left
+
+
 def nested_repos(worktree: Path) -> list[str]:
     """New directories with a git repository of their own (a scaffolder's, a test fixture's): git
     lists only those as `dir/` among untracked files. Diffed, one failed or showed one line;
