@@ -1510,6 +1510,28 @@ class Lifecycle(Base):
                     ignore={b"pkg/init.pyc": b"PERSONAL\n"})
                 self._assert_refused_and_kept(repo, g, b"pkg/init.pyc", b"PERSONAL\n")
 
+    def test_a_merge_never_replaces_an_ignored_link_it_would_write_under(self):
+        # #367 (the audit of 1.6, reproduced on Git 2.56): the user's ignored `data`, a link to a
+        # dataset elsewhere, became a plain directory holding only the task's added.txt
+        outside = Path(self.tmp.name) / "dataset"
+        outside.mkdir()
+        (outside / "keep.txt").write_text("KEEP\n")
+        (Path(self.tmp.name) / "notes.txt").write_text("NOTES\n")
+        for target in (outside, Path(self.tmp.name) / "notes.txt", Path("src")):  # dir, file, tracked dir
+            repo, g = self._merge_case(base={b"src/x.py": b"x\n", b".gitignore": b"data\n"},
+                                       main={b"c.txt": b"c\n"},
+                                       task={b".gitignore": b"", b"data/added.txt": b"new\n"}, ignore={})
+            (repo / "data").symlink_to(target)
+            before = g("rev-parse", "main")
+            with self.assertRaises(gitops.GitError) as e:
+                gitops.merge(repo, "t", "main")
+            self.assertIn("would overwrite", str(e.exception))
+            self.assertIn("data", str(e.exception))
+            self.assertTrue((repo / "data").is_symlink())                   # still the link
+            self.assertEqual(os.readlink(repo / "data"), str(target))
+            self.assertEqual(g("rev-parse", "main"), before)
+        self.assertEqual(sorted(p.name for p in outside.iterdir()), ["keep.txt"])
+
     def test_a_merge_as_ff_or_squash_keeps_the_history_linear(self):
         # #352 (the audit of 1.4): --no-ff made a merge commit a linear-history repo refused
         git = lambda r, *a: subprocess.run(["git", "-C", str(r), *a], check=True,  # noqa

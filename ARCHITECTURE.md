@@ -2790,7 +2790,10 @@ custom-node packs do run their own Python).
   (`gitops._overwritten`, naming each). A tracked file the merge turns into a directory
   (`pkg` to `pkg/init.py`) is the merge's to replace, and a directory it turns into a file is in
   the way only through what it holds untracked, ignored files included: a clean file-to-directory
-  refactor was refused (#343, the audit of 1.4). Git's merge silently replaced an ignored `settings.ini`
+  refactor was refused (#343, the audit of 1.4). An untracked link where the merge writes beneath
+  it is in the way whatever it points at (named itself): `os.path.isdir` followed it, and git
+  replaced a user's ignored link to a dataset with a plain directory (#367, the audit of 1.6).
+  Git's merge silently replaced an ignored `settings.ini`
   the task had un-ignored and committed, and its `--no-overwrite-ignore` doesn't stop the ort
   merge (#189). The paths come from the merge itself, done first in memory (`git merge-tree
   --write-tree`, git 2.38+; an older git does the same merge with `--no-commit` in a scratch
