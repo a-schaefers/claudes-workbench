@@ -209,9 +209,10 @@ followed) and the provider's `baseURL` (`{env:}`/`{file:}` resolved) is on this 
 `localhost`, this host's name) or models.json marks the provider `local: true`. Not an Ollama
 cloud model (`:cloud`, `-cloud`, a tags row with `remote_host`) unless models.json marks that
 model's id `local: true`, nor an entry with `tool_call: false`. OpenCode's config is
-`$XDG_CONFIG_HOME/opencode/opencode.json` and `.jsonc`, layered in that order and merged by
-`models.read_config`; written only when one file holds it and it has no comments (through a
-symlink, keeping its mode; a refusal prints the change, never the config's keys). Probes to this
+`$XDG_CONFIG_HOME/opencode/opencode.json` and `.jsonc`, then `$OPENCODE_CONFIG`, layered in that
+order and merged by `models.read_config`; the layer adds what agents won't load (`agent_providers`).
+Written only when one file holds it and it has no comments (through a symlink, keeping its mode;
+a refusal never prints the config). Probes to this
 machine skip any HTTP proxy. Ollama entries need `options.max_tokens` (Ollama ignores
 OpenCode's `max_completion_tokens`) and a `limit.context` matching what Ollama serves (never the
 trained length); every entry needs `limit.context` (a server other than Ollama: `wb model add

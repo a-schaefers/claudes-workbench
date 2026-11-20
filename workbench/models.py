@@ -60,7 +60,10 @@ START_GRACE = 10  # after a start command fails: another process may be bringing
 class Model:
     id: str            # the OpenCode model id, "provider/model": the one name used everywhere
     provider: str
-    name: str          # the model's name at its server
+    # The model's name at its server: the entry's "id" when it has one (an alias: OpenCode sends
+    # that), else its key. Taken from the key, an alias OpenCode ran was "the server lists N
+    # models, not friendly" (the 2026-11-19 audit). The id keeps the key: it routes and selects.
+    name: str
     base_url: str      # the provider's OpenAI-compatible base URL, ending in /v1
     engine: str        # "ollama" (loads models on demand) or "server" (an OpenAI-compatible one)
     label: str
@@ -107,12 +110,27 @@ def opencode_config_path() -> Path:
                 d / "opencode.json")
 
 
-def opencode_config_files() -> list[Path]:
-    """Every global file OpenCode layers, in its order: opencode.json, then opencode.jsonc (both
-    when both exist: checked on OpenCode 2.3, the 2026-11-16 audit). $WB_OPENCODE_CONFIG alone."""
+def _global_files() -> list[Path]:
     d = _config_dir()
+    return [d / "opencode.json", d / "opencode.jsonc"]
+
+
+def _users_config() -> Path | None:
+    """The user's own OPENCODE_CONFIG, never a task's layer (the agent's, set in its environment)."""
+    raw = os.environ.get("OPENCODE_CONFIG")
+    if not raw:
+        return None
+    path = Path(os.path.expanduser(raw)).absolute()
+    return None if path.resolve().is_relative_to(store.home().resolve()) else path
+
+
+def opencode_config_files() -> list[Path]:
+    """Every file OpenCode layers, in its order: opencode.json, then opencode.jsonc (both when
+    both exist: checked on OpenCode 2.3, the 2026-11-16 audit), then the user's OPENCODE_CONFIG.
+    $WB_OPENCODE_CONFIG alone. Unread, the user's OPENCODE_CONFIG hid its providers from wb (the
+    2026-11-19 audit)."""
     paths = [Path(os.environ["WB_OPENCODE_CONFIG"])] if os.environ.get("WB_OPENCODE_CONFIG") else \
-        [d / "opencode.json", d / "opencode.jsonc"]
+        [*_global_files(), *filter(None, [_users_config()])]
     return [p for p in paths if p.exists()]
 
 
@@ -131,18 +149,73 @@ def _merge(base: dict, over: dict) -> dict:
     return out
 
 
-def read_config() -> dict:
-    """OpenCode's global config as OpenCode sees it: its files merged, the later winning. Read
-    one file only, a provider kept in opencode.jsonc beside an opencode.json holding a theme was
-    invisible (the 2026-11-16 audit)."""
-    cfg: dict = {}
+def _layers() -> list[tuple[Path, dict]]:
+    """Each config file OpenCode layers, parsed, in its order."""
+    out = []
     for path in opencode_config_files():
         try:
-            cfg = _merge(cfg, json.loads(_strip_jsonc(path.read_text())))
+            out.append((path, json.loads(_strip_jsonc(path.read_text()))))
         except ValueError as e:  # one bad hand edit crashed every model command with a traceback
             raise RuntimeError(f"{path} doesn't parse ({e}); fix it by hand "
                                "(wb doctor checks it)") from None  # (the 2026-11-16 audit)
+    return out
+
+
+def read_config() -> dict:
+    """OpenCode's config as OpenCode sees it: its files merged, the later winning. Read one file
+    only, a provider kept in opencode.jsonc beside an opencode.json holding a theme was invisible
+    (the 2026-11-16 audit)."""
+    cfg: dict = {}
+    for _, layer in _layers():
+        cfg = _merge(cfg, layer)
     return cfg
+
+
+def _providers_of(layer: dict) -> dict:
+    return layer.get("provider") or layer.get("providers") or {}
+
+
+def _provider_dirs() -> dict[str, Path]:
+    """Each provider's config file's directory, where its relative {file:} paths start."""
+    return {pid: path.parent for path, layer in _layers() for pid in _providers_of(layer)}
+
+
+def _absolute_files(value, base: Path):
+    """``value`` with each relative {file:path} made absolute against ``base``."""
+    if isinstance(value, dict):
+        return {k: _absolute_files(v, base) for k, v in value.items()}
+    if isinstance(value, list):
+        return [_absolute_files(v, base) for v in value]
+    if not isinstance(value, str):
+        return value
+    def one(mt):
+        arg = mt.group(2).strip()
+        if mt.group(1) != "file" or arg.startswith("~") or Path(arg).is_absolute():
+            return mt.group(0)
+        return f"{{file:{base / arg}}}"
+    return _TEMPLATE.sub(one, value)
+
+
+# What a task's layer copies from the files the agent's OpenCode won't load by itself
+PROVIDER_KEYS = ("provider", "enabled_providers", "disabled_providers")
+
+
+def agent_providers() -> dict:
+    """The providers wb read from files the agent's OpenCode won't load: $WB_OPENCODE_CONFIG, or
+    the user's OPENCODE_CONFIG, which the task's layer takes the place of. OpenCode loads its
+    global files itself. Left out, a model wb found ready was "Model unavailable" to the agent
+    before any request reached its server (the 2026-11-19 audit). Templates stay templates, a
+    relative {file:} made absolute: the layer lives elsewhere."""
+    own = {p.resolve() for p in _global_files() if p.exists()}
+    out: dict = {}
+    for path, layer in _layers():
+        if path.resolve() in own:
+            continue
+        picked = {k: layer[k] for k in PROVIDER_KEYS if k in layer}
+        if "providers" in layer and "provider" not in layer:
+            picked["provider"] = layer["providers"]
+        out = _merge(out, _absolute_files(picked, path.parent))
+    return out
 
 
 def write_config(cfg: dict, change: str) -> None:
@@ -156,7 +229,7 @@ def write_config(cfg: dict, change: str) -> None:
     if len(files) > 1:
         raise RuntimeError(f"OpenCode layers {' and '.join(map(str, files))}; wb won't rewrite "
                            f"either: make this change by hand: {change}")
-    path = opencode_config_path()
+    path = files[0] if files else opencode_config_path()  # the user's OPENCODE_CONFIG, if it's that
     try:
         json.loads(path.read_text() if path.exists() else "{}")
     except ValueError:
@@ -279,35 +352,38 @@ def _agent_sees(name: str) -> bool:
     return name in through or not runner.SECRET_ENV.search(name)
 
 
-def _expand(value: str, agent: bool = True) -> str:
+def _expand(value: str, agent: bool = True, base: Path | None = None) -> str:
     """OpenCode's `{env:NAME}` and `{file:path}` in a config string, resolved as OpenCode does:
-    an unset name or an unreadable file is empty; a relative path is the config's directory's.
-    With ``agent``, a name the agent's environment drops is empty too: its OpenCode won't see it.
-    Taken raw, such a baseURL had no host and its provider vanished (the 2026-11-16 audit)."""
+    an unset name or an unreadable file is empty; a relative path is the directory of the config
+    file it is in (``base``). With ``agent``, a name the agent's environment drops is empty too:
+    its OpenCode won't see it. Taken raw, such a baseURL had no host and its provider vanished
+    (the 2026-11-16 audit)."""
     def one(mt):
         kind, arg = mt.group(1), mt.group(2).strip()
         if kind == "env":
             return os.environ.get(arg, "") if not agent or _agent_sees(arg) else ""
         path = Path(os.path.expanduser(arg))
         try:
-            return (path if path.is_absolute() else opencode_config_path().parent / path).read_text().strip()
+            return (path if path.is_absolute() else (base or opencode_config_path().parent) / path
+                    ).read_text().strip()
         except OSError:
             return ""
     return _TEMPLATE.sub(one, value or "")
 
 
-def _scan(cfg: dict, extra: dict):
+def _scan(cfg: dict, extra: dict, dirs: dict | None = None):
     """(provider id, its config, its baseURL resolved, why it is skipped or "", remote) for each
     provider with a baseURL, as OpenCode loads them: disabled_providers and enabled_providers
     followed (the router used to pick a provider OpenCode wouldn't load: the 2026-11-16 audit).
     A provider with no baseURL is one of OpenCode's own cloud providers: not listed."""
     enabled, disabled = cfg.get("enabled_providers"), set(cfg.get("disabled_providers") or [])
-    for pid, prov in (cfg.get("provider") or cfg.get("providers") or {}).items():
+    dirs = _provider_dirs() if dirs is None else dirs
+    for pid, prov in _providers_of(cfg).items():
         opts = prov.get("options") or prov.get("settings") or {}
         raw = opts.get("baseURL") or ""
         if not raw:
             continue
-        url = _expand(raw)
+        url = _expand(raw, base=dirs.get(pid))
         host = urlparse(url).hostname
         here = _this_host(host)
         if pid in disabled:
@@ -326,10 +402,10 @@ def _scan(cfg: dict, extra: dict):
         yield pid, prov, url, why, not here
 
 
-def _local_providers(cfg: dict, extra: dict):
+def _local_providers(cfg: dict, extra: dict, dirs: dict | None = None):
     """(provider id, its config, its baseURL, engine, remote) for each provider on this machine,
     or opted in with models.json "local": true."""
-    for pid, prov, url, why, remote in _scan(cfg, extra):
+    for pid, prov, url, why, remote in _scan(cfg, extra, dirs):
         if not why:
             yield pid, prov, url, _engine(url, extra.get(pid) or {}, pid), remote
 
@@ -375,15 +451,15 @@ def cloud_allowed(model_id: str) -> bool:
 
 def discover() -> dict[str, Model]:
     """Every local model OpenCode knows, by OpenCode id, in config order."""
-    extra = _overrides()
+    extra, dirs = _overrides(), _provider_dirs()
     found: dict[str, Model] = {}
-    for pid, prov, url, engine, remote in _local_providers(read_config(), extra):
+    for pid, prov, url, engine, remote in _local_providers(read_config(), extra, dirs):
         opts = prov.get("options") or prov.get("settings") or {}
         problem = url_problem(url, engine, prov.get("npm"))
         # the key the agent's OpenCode will send: probed with wb's own, a key the agent never got
         # read as running and every request of the task was refused (the 0.90 review)
         raw_key = str(opts.get("apiKey") or "")
-        key = _expand(raw_key)
+        key = _expand(raw_key, base=dirs.get(pid))
         hidden = [n.strip() for k, n in _TEMPLATE.findall(raw_key)
                   if k == "env" and n.strip() in os.environ and not _agent_sees(n.strip())]
         if hidden and not problem:
@@ -398,7 +474,8 @@ def discover() -> dict[str, Model]:
             # an Ollama cloud model was routed trivial work as "the smallest" (the 2026-11-16 audit)
             cloud = engine == "ollama" and _cloud_name(name)
             cloud_ok = cloud and (extra.get(mid) or {}).get("local") is True
-            found[mid] = Model(id=mid, provider=pid, name=name, base_url=url, engine=engine,
+            found[mid] = Model(id=mid, provider=pid, name=str(spec.get("id") or name),
+                               base_url=url, engine=engine,
                                label=over.get("label") or spec.get("name") or mid,
                                start=over.get("start"), stop=over.get("stop"), extra=over,
                                config=spec, remote=remote or cloud_ok, cloud=cloud,
@@ -411,7 +488,7 @@ def resolve(wanted: str) -> Model:
     models = discover()
     if wanted in models:
         return models[wanted]
-    exact = [m for m in models.values() if wanted in (m.name, m.provider)]
+    exact = [m for m in models.values() if wanted in (m.name, m.id.split("/", 1)[1], m.provider)]
     hits = exact or [m for m in models.values() if wanted.lower() in m.id.lower()]
     if len(hits) == 1:
         return hits[0]
@@ -564,11 +641,15 @@ def status(m: Model, down=frozenset()) -> dict:
             body = json.loads(r.read() or b"{}")
     except urllib.error.HTTPError as e:
         e.close()
-        # a server behind a key answered: it runs, and starting a second copy would only wait
-        # 20 minutes for it (the 2026-11-16 audit)
+        # a server behind a key answered, with the key the agent will send: refused, every
+        # request of the task would be. Not "running": a wrong key passed, and the router could
+        # pick that model over a working one (the 2026-11-19 audit). Not "not running" either,
+        # which started a second copy and waited 20 minutes for it (the 2026-11-16 audit).
         if e.code in (401, 403):
-            return {"available": True, "resident": True,
-                    "why": "running (it wants an API key: the provider's options.apiKey)"}
+            return _no(f"the server refuses its API key (HTTP {e.code}): set the provider's "
+                       "options.apiKey to the key it wants" if m.api_key else
+                       f"the server answers, but it wants an API key (HTTP {e.code}): set the "
+                       "provider's options.apiKey")
         body = None
     except Exception:
         body = None
@@ -1227,14 +1308,15 @@ def ollama_cap(entry: dict) -> int:
 def providers() -> dict[str, dict]:
     """OpenCode's local providers: id → {"root", "url", "engine", "engine_known", "start",
     "problem", "key" (its apiKey, resolved: never printed), "models"} (the config's model entries)."""
-    extra = _overrides()
+    extra, dirs = _overrides(), _provider_dirs()
     return {pid: {"root": url.rstrip("/").removesuffix("/v1"), "url": url,
                   "models": prov.get("models") or {}, "engine": engine,
-                  "key": _expand(str((prov.get("options") or prov.get("settings") or {}).get("apiKey") or "")),
+                  "key": _expand(str((prov.get("options") or prov.get("settings") or {}).get("apiKey") or ""),
+                                 base=dirs.get(pid)),
                   "engine_known": engine_known(url, extra.get(pid) or {}),
                   "start": (extra.get(pid) or {}).get("start"),
                   "problem": url_problem(url, engine, prov.get("npm"))}
-            for pid, prov, url, engine, _ in _local_providers(read_config(), extra)}
+            for pid, prov, url, engine, _ in _local_providers(read_config(), extra, dirs)}
 
 
 def ollama_root_here() -> str:

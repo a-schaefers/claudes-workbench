@@ -2325,7 +2325,8 @@ def cmd_model(a):
         if prov["engine"] != "ollama":
             done += f"; {provider} is not Ollama, so delete its weights the server's own way"
         else:  # the entry is gone already: say what's left rather than crash (the 2026-11-16 audit)
-            try:
+            try:  # an alias's weights are its id's (the 2026-11-19 audit)
+                name = str((prov["models"].get(name) or {}).get("id") or name)
                 models.ollama_delete(prov["root"], name)
                 done += "; its weights were deleted from Ollama"
             except OSError as e:  # URLError and HTTPError are OSErrors
@@ -2870,10 +2871,6 @@ def cmd_doctor(a):
     except RuntimeError as e:  # "<file> doesn't parse (…)"
         line(False, str(e))
         sys.exit(1)  # nothing below can read the models
-    if os.environ.get("OPENCODE_CONFIG"):
-        print(f"--  OPENCODE_CONFIG is set ({os.environ['OPENCODE_CONFIG']}): wb reads only "
-              f"{models.opencode_config_path().parent}, and agents get their own layer in its "
-              "place, so providers there are invisible to both")
     good, said = version(["git"])
     line(good, said)
     # Claude's Bash runs `wb` by name whatever WB_BIN says: WB_BIN only moves the mod's own calls

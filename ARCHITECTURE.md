@@ -764,7 +764,8 @@ blank line) before matching the label, so the prompt keeps its own.
 An agent should start a task knowing what Claude would know in the same repo, and nothing that
 would distract it. The per-task OpenCode config layer (`<state>/rules/<task>/opencode.json`,
 written before every round by `runner.write_config_layer` from `context.layer`) gives it
-`instructions`, `permissions`, `skills`, the `compaction` setting and the `ask_reviewer` server.
+`instructions`, `permissions`, `skills`, the `compaction` setting, the `ask_reviewer` server, and
+the providers OpenCode wouldn't load by itself (`models.agent_providers`, *Found, loaded, chosen*).
 Everything in `rules/<task>/` (the config, the instruction copies, the git shim) lives outside the
 agent's lane, so it can't rewrite its own rules for its next round.
 
@@ -1598,15 +1599,19 @@ and aren't counted as local unless marked the same way.
 #### A server that wants an API key
 Put it in the provider's `options.apiKey` in OpenCode's config. If it reads `{env:NAME}`, add
 `NAME` to `env` in `~/.config/workbench/commands.json`: the agents get none of the environment's
-secrets by default.
+secrets by default. A key the server refuses makes its models unavailable (`wb models` says so).
 
 ### Found, loaded, chosen
 **OpenCode's config.** `models.opencode_config_files()`: `$WB_OPENCODE_CONFIG` alone, else
 whichever of `$XDG_CONFIG_HOME/opencode/` (default `~/.config/opencode/`) `opencode.json` and
-`opencode.jsonc` exist, in that order: OpenCode 2.3 layers both, the later winning, and
-`read_config` merges them the same way (dicts recursively), each parsed through `_strip_jsonc`
-(comments and trailing commas removed). `opencode_config_path()` is the one file wb writes and
-names: `opencode.json` if it exists, else `opencode.jsonc` if it exists, else `opencode.json`.
+`opencode.jsonc` exist, in that order, then the user's own `$OPENCODE_CONFIG` (`_users_config`;
+never a path under the state directory, which is a task's layer): OpenCode 2.3 layers them, the
+later winning, and `read_config` merges them the same way (dicts recursively), each parsed
+through `_strip_jsonc` (comments and trailing commas removed). A provider's relative
+`{file:path}` starts in the directory of the file that defines it (`_provider_dirs`).
+`opencode_config_path()` is the global file wb names: `opencode.json` if it exists, else
+`opencode.jsonc` if it exists, else `opencode.json`; `write_config` writes the one file there is,
+else that one.
 A file that doesn't parse is a `RuntimeError` naming it (every command prints it as a message;
 `wb doctor` prints it as BAD and stops). `write_config(cfg, change)` refuses while two files are
 layered (one merged file would undo the layering), unless the file is strict JSON (no comments,
@@ -1614,8 +1619,14 @@ no trailing commas), and when the file (or a symlink's target) isn't writable (a
 then prints only `change`, what to do by hand (the keys wb sets, or the key to delete or set),
 never the config, which can hold a provider's `apiKey` (the 2026-11-16 audit). A write reformats
 the file (atomic, indent 2), through a symlink to its target (dotfiles stay linked), keeping the
-file's mode (0600 for a new file; the temporary file is never readable by others). `$OPENCODE_CONFIG` is not read: agents get
-their own layer in its place (`runner.agent_env`), so `wb doctor` notes it when set.
+file's mode (0600 for a new file; the temporary file is never readable by others).
+
+The agent's OpenCode loads the global files itself, but its `OPENCODE_CONFIG` is the task's layer
+(`runner.agent_env`), so a provider defined only in `$WB_OPENCODE_CONFIG` or the user's
+`$OPENCODE_CONFIG` was "Model unavailable" to it while wb called the model ready (the 2026-11-19
+audit). `models.agent_providers()` copies those files' `provider`, `enabled_providers` and
+`disabled_providers` (`PROVIDER_KEYS`) into the layer, templates kept as templates and a relative
+`{file:}` made absolute; the layer is written 0600, since a copied provider may carry its key.
 
 **Discovery** (`discover`, `_scan`). A model is a candidate when it is an entry under a provider
 (`provider` or `providers`; `options`/`settings` with a `baseURL`) that OpenCode loads (not in
@@ -1655,8 +1666,13 @@ free_gpu unloaded the models it was told to keep (the 2026-11-16 audit). The eng
 models.json `engine`, else a cached probe of `GET <root>/api/version` (a JSON `version` →
 `ollama`, an HTTP error → `server`), else a guess: Ollama's port 11434 or a provider id containing
 `ollama` → ollama (`engine_known` says whether it was said or probed rather than guessed).
-`resolve()` takes an exact id, an exact model or provider name, or a unique case-insensitive
-substring.
+`resolve()` takes an exact id, an exact model or provider name (the entry's key or its server
+name), or a unique case-insensitive substring.
+
+A model's `name` is its name at the server: the entry's `"id"` when it has one (an alias, which
+OpenCode sends in its place), else the entry's key. Every probe, load, unload and placement uses
+it; the model's id (`<provider>/<key>`) routes and selects. Read as the key, an alias OpenCode ran
+was "the server lists N models, not friendly" (the 2026-11-19 audit).
 
 Every request to a server on this machine (`_open`: probes, loads, pulls, the image engines) goes
 direct, never through an `http_proxy` in the environment, which urllib would otherwise use for
@@ -1709,7 +1725,10 @@ the port, when the one served has a `stop`, reads available but not resident ("t
 one) accounts for, or a served model with no `stop`, leaves it unavailable, "<root> is serving
 <id>, not <name> …": the task would run on the other model, recorded under this one (names that
 differ from the file once left every model on the port unavailable, the served one too: the 0.90
-review); a 401 or 403 is running too ("it wants an API key"), so wb never starts a second copy;
+review); a 401 or 403 to the key the agent will send is unavailable ("the server refuses its API
+key", or with no key "it wants an API key", each naming `options.apiKey`): neither running, which
+let a wrong key pass and the router pick that model over a working one (the 2026-11-19 audit), nor
+stopped, which once started a second copy and waited 20 minutes for it (the 2026-11-16 audit);
 stopped with a `start` ("wb starts it"); not running with no start command. `wb models` and `wb
 doctor` print the reason. `status(m, down)` takes the Ollama roots a caller already found not
 answering (doctor) and doesn't ask them again. `remedy(m, state)` is the next step for a reason
@@ -1922,7 +1941,7 @@ one not running isn't asked). `ollama_served_context` skips `/api/show` (10 s, n
 `/api/ps` had no answer, and uses `OLLAMA_CONTEXT_LENGTH` only for an Ollama on this machine.
 `wb scout` likewise asks each Ollama provider once and says when it isn't answering, and asks
 another server once whether it answers before reading each model's size and window from it. It names each
-config file it read, each skipped provider with its reason, a set `$OPENCODE_CONFIG`, and an
+config file it read, each skipped provider with its reason, and an
 Ollama that answers while OpenCode has no provider at all.
 
 **The machine** (`hardware.py`, read fresh on each call; it is also on the hot path:
@@ -2118,7 +2137,7 @@ reboot gave to another program got its SIGTERM: #82); with neither, the pid is t
 beside the model, never in place of it: an Ollama model `<name>-<N>k` from it with
 `num_ctx` N (`/api/create` `from`: no download, no GPU) and OpenCode's entry copied from the
 model's (its options, such as `reasoningEffort: "none"`, and output cap kept; `limit.context`
-and `limit.input` set to the new window). The router weighs both by their records; retiring the
+and `limit.input` set to the new window; an alias's `id` dropped, since it would name the old model). The router weighs both by their records; retiring the
 old one is the user's call (`wb model retire`).
 
 ## The skill library
@@ -3386,7 +3405,7 @@ delivered as taken (`_stale_notes`, *Notes*).
 | `wb init <dir>` | | A project the way Claude keeps one: git on the default branch, an initial commit, AGENTS.md → CLAUDE.md (a CLAUDE.md → AGENTS.md link is swapped; a gitignored CLAUDE.md isn't linked). Refuses the home directory or above, inside another repo, a repo git refuses (git's reason: no `git init` over it), without a git identity (`git var`, as for `wb start`), and a first commit holding likely secrets or installed directories no .gitignore covers. |
 | `wb setup` | `--force` (replaces a link that points elsewhere; never a real file) | Links `~/.local/bin/wb` to this copy's `bin/wb` and Claude Code's `skills/workbench` to its `skill/workbench`, removes an old `skills/delegate` link that now leads nowhere (the skill was `/delegate` until 2026-11-17; the mod runs `wb setup` itself when it finds only that), warns when `~/.local/bin` isn't on PATH (Claude and the mod run `wb` by name); exit 1 when it left something in the way (see *Installing*). Then, when due (*Optimize*), starts the minute or two of measuring the GPU and prints its line as `--`. Ends with a `first run:` checklist (`cli.first_run`, #111), one line each, `ok` or `--` with the fix: OpenCode 2.x (else where to get it), a model server answering (a configured provider, this machine's Ollama, or a server on a default port; else: start yours, or run /workbench and Claude lays out the ones that fit the machine, never steering to one; `wb model add --url`), a local model registered (else: run /workbench, and Claude picks one for the machine), Landlock. It names no model, and changes no exit code. |
 | `wb update` | `--check` (only say whether origin has news: `update available: N new commit(s)…` or `up to date`), `--if-due` (with `--check`: ask origin at most weekly, `UPDATE_EVERY`, else answer from `update.json`; never with `CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC`) | Updates this copy (see *Installing*): refuses while any runner is live; a marketplace copy runs `claude plugin marketplace update workbench` then `claude plugin update workbench@workbench`; a clone (refusing uncommitted tracked changes) runs `git pull --ff-only` first. Refuses, before anything changes, when `claude` isn't on PATH; a step that can't run or runs past 300 s fails with a line (after a clone's pull: what is left to run), and update.json is written as soon as the pull lands. Prints `updated <kind> a..b (N commit(s))` or `already up to date`. The check's fetch (`cli._fetch_origin`) never prompts and never hangs: no terminal, `GIT_TERMINAL_PROMPT=0`, `SSH_ASKPASS_REQUIRE=never`, at most `FETCH_SECS` = 60 s; the user's own ssh command (`GIT_SSH_COMMAND`, `GIT_SSH`, `core.sshCommand`) is kept, and with none ssh runs with `BatchMode`. In between, `--if-due` recounts `HEAD..@{u}` locally, so a pull made elsewhere shows at once. |
-| `wb doctor` | | `opencode --version` (BAD below 2.x, whose config shape and run flags workbench writes; a version that doesn't parse is a `--` line), the OpenCode config files (and a set `$OPENCODE_CONFIG`), git, models found and each one's readiness (BAD when none can run), the providers skipped and why, an Ollama provider not answering (asked once), a provider's baseURL problem, any entry without `limit.context` (BAD), each Ollama entry's `options.max_tokens` and context against what Ollama serves (or that it can't say), a `--` line for each model `wb optimize` measured with a window to change (`optimize.advice`), a `--` line for a model left thinking whose output cap (`options.max_tokens`, else `limit.output`: any server) at its measured write speed here outlasts its think budget (`router.thinking_stall`: it can sit silent until nudged and stopped; seen 2026-11-18 on a spilled 64K entry; harmless on a fast card, so measured per machine), the state directory (made if missing, then checked writable), the GPU budget and the devices it counts (or that the GPU's memory is unknown, or that none was found: a `--` line), a real lane drawn around a test write (`ok agents write only in their lane (Landlock ABI N)`: the probe's `PermissionError`, not exit 126; then a `--  Landlock ABI N: …` line for each of `lane.gaps`, and on WSL with interop on a `--  WSL interop is on: …` line (`context.interop_gap`); without Landlock a `--` line saying writes and credential reads aren't refused and whether sudo still is), `commands.json` (`context.commands_conf`: it must parse and hold lists of strings, and `repos` its settings; `BAD` stops the check), the toolchains on PATH that are snaps (`context.TOOLCHAINS`; they can't run in the lane), `wb` on PATH (Claude's Bash runs it by name: BAD without it, whatever `WB_BIN` says; `WB_BIN` is noted when set), the `/workbench` skill link, a `--` line when `wb` or `/workbench` comes from another copy (`wb setup --force` from the one you want), and whether Claude Code lists `workbench@…` in `plugins/installed_plugins.json` (information only: a mod loaded another way isn't listed). `ok`/`BAD` lines set the exit code; `--` lines inform. |
+| `wb doctor` | | `opencode --version` (BAD below 2.x, whose config shape and run flags workbench writes; a version that doesn't parse is a `--` line), the OpenCode config files (the user's `$OPENCODE_CONFIG` among them), git, models found and each one's readiness (BAD when none can run), the providers skipped and why, an Ollama provider not answering (asked once), a provider's baseURL problem, any entry without `limit.context` (BAD), each Ollama entry's `options.max_tokens` and context against what Ollama serves (or that it can't say), a `--` line for each model `wb optimize` measured with a window to change (`optimize.advice`), a `--` line for a model left thinking whose output cap (`options.max_tokens`, else `limit.output`: any server) at its measured write speed here outlasts its think budget (`router.thinking_stall`: it can sit silent until nudged and stopped; seen 2026-11-18 on a spilled 64K entry; harmless on a fast card, so measured per machine), the state directory (made if missing, then checked writable), the GPU budget and the devices it counts (or that the GPU's memory is unknown, or that none was found: a `--` line), a real lane drawn around a test write (`ok agents write only in their lane (Landlock ABI N)`: the probe's `PermissionError`, not exit 126; then a `--  Landlock ABI N: …` line for each of `lane.gaps`, and on WSL with interop on a `--  WSL interop is on: …` line (`context.interop_gap`); without Landlock a `--` line saying writes and credential reads aren't refused and whether sudo still is), `commands.json` (`context.commands_conf`: it must parse and hold lists of strings, and `repos` its settings; `BAD` stops the check), the toolchains on PATH that are snaps (`context.TOOLCHAINS`; they can't run in the lane), `wb` on PATH (Claude's Bash runs it by name: BAD without it, whatever `WB_BIN` says; `WB_BIN` is noted when set), the `/workbench` skill link, a `--` line when `wb` or `/workbench` comes from another copy (`wb setup --force` from the one you want), and whether Claude Code lists `workbench@…` in `plugins/installed_plugins.json` (information only: a mod loaded another way isn't listed). `ok`/`BAD` lines set the exit code; `--` lines inform. |
 
 ## Files and formats
 
@@ -3453,7 +3472,7 @@ $WB_HOME (~/.local/state/workbench)
   chat.json ($WB_CHAT_CONFIG)    the web chat's {"bind": [...], "hosts": [...]}
   chat-token ($WB_CHAT_TOKEN)    the web chat's token, mode 600
   savings.json ($WB_SAVINGS)     {"kwh_price": N}, the electricity price the energy is costed at (wb savings --price)
-~/.config/opencode/opencode.json + .jsonc (layered, under $XDG_CONFIG_HOME; $WB_OPENCODE_CONFIG) the models
+~/.config/opencode/opencode.json + .jsonc (layered, under $XDG_CONFIG_HOME; then $OPENCODE_CONFIG; $WB_OPENCODE_CONFIG) the models
 /tmp/wb-run-<uid>-<hash>/        the agent's XDG_RUNTIME_DIR (lane on; context.runtime_dir), 0700: kept while
                                  the task is open (stuck or in review too), removed by wb accept and wb discard
                                  (drop_runtime_dir); taken by another user, a mkdtemp wb-run-* is used instead,

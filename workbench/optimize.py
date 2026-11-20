@@ -232,6 +232,7 @@ def apply(m: models.Model) -> str:
     models._post(f"{m.root}/api/create", {"model": name, "from": m.name, "stream": False,
                                           "parameters": {"num_ctx": fits}}, timeout=300)
     entry = dict(m.config)
+    entry.pop("id", None)  # an alias's id names m at the server: the new entry is its own model
     out = (entry.get("limit") or {}).get("output") or fits // 8
     entry["limit"] = {**(entry.get("limit") or {}), "context": fits, "input": fits - out, "output": out}
     if entry.get("name"):

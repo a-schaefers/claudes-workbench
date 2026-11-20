@@ -2251,6 +2251,43 @@ class ConfigLayer(Base):
         self.assertGreater(server["timeout"]["execution"], 1200 * 1000)
         self.assertEqual(server["environment"]["WB_TASK"], "t-cfg")
 
+    def test_providers_from_a_config_opencode_wont_load_by_itself_reach_the_agent(self):
+        # the 2026-11-19 audit (finding 13): wb read $WB_OPENCODE_CONFIG (or ignored the user's
+        # OPENCODE_CONFIG), the agent's OpenCode got the layer in its place, and a model wb called
+        # ready was "Model unavailable" before a request reached its server
+        from workbench import models, runner
+        tmp = Path(self.tmp.name)
+        (tmp / "keys").mkdir()
+        (tmp / "keys" / "k.txt").write_text("sekret\n")
+        alt = json.loads(Path(os.environ["WB_OPENCODE_CONFIG"]).read_text())
+        alt["provider"]["strata"]["options"]["apiKey"] = "{file:keys/k.txt}"
+        alt["disabled_providers"] = ["cloud"]
+        Path(os.environ["WB_OPENCODE_CONFIG"]).write_text(json.dumps(alt))
+        self.start("t-alt", "ok")
+        wait_phase("t-alt", {"review"})
+        layer = json.loads(runner.write_config_layer(store.Task("t-alt")).read_text())
+        self.assertEqual(sorted(layer["provider"]), ["cloud", "ollama", "strata"])
+        self.assertEqual(layer["disabled_providers"], ["cloud"])
+        self.assertEqual(layer["provider"]["strata"]["options"]["apiKey"],   # still a template,
+                         f"{{file:{tmp / 'keys' / 'k.txt'}}}")                 # now absolute
+        self.assertEqual(models.resolve("strata").api_key, "sekret")    # wb reads it there too
+        # the user's own OPENCODE_CONFIG: OpenCode layers it after its global files, wb too
+        xdg = tmp / "xdg"
+        (xdg / "opencode").mkdir(parents=True)
+        (xdg / "opencode" / "opencode.json").write_text(json.dumps({"provider": {
+            "ollama": OPENCODE_CONFIG["provider"]["ollama"]}}))
+        del os.environ["WB_OPENCODE_CONFIG"]
+        os.environ.update(XDG_CONFIG_HOME=str(xdg), OPENCODE_CONFIG=str(tmp / "opencode.json"))
+        self.assertIn("strata/strata", models.discover())
+        self.assertEqual(models.resolve("strata").api_key, "sekret")    # its own file's directory
+        layer = json.loads(runner.write_config_layer(store.Task("t-alt")).read_text())
+        self.assertEqual(sorted(layer["provider"]), ["cloud", "ollama", "strata"])
+        os.environ["OPENCODE_CONFIG"] = str(runner.write_config_layer(store.Task("t-alt")))
+        self.assertNotIn("strata/strata", models.discover())   # a task's layer is never the user's
+        os.environ.pop("OPENCODE_CONFIG")
+        layer = json.loads(runner.write_config_layer(store.Task("t-alt")).read_text())
+        self.assertNotIn("provider", layer)        # the global files: OpenCode loads them itself
+
     def test_launcher_answers_initialize(self):
         out = subprocess.run(
             [sys.executable, str(ROOT / "bin" / "wb-ask-mcp")], capture_output=True, text=True,
@@ -2745,6 +2782,28 @@ class RealOpenCodeRun(Base):
         text = json.dumps(agent["messages"])
         self.assertIn("Write the answer to answer.txt", text)
         self.assertIn("Now say done.", text)
+
+    def test_a_provider_only_in_wbs_config_file_runs_an_alias_by_its_id(self):
+        # the 2026-11-19 audit (findings 13, 14): a provider in $WB_OPENCODE_CONFIG alone was
+        # "Model unavailable" to the agent's OpenCode, which loads only its global files and the
+        # layer; and the entry's key is not the name the server knows
+        conf = Path(os.environ["WB_OPENCODE_CONFIG"])
+        cfg = json.loads(conf.read_text())
+        cfg["provider"]["cap"]["models"] = {"friendly": {**cfg["provider"]["cap"]["models"]["cap"],
+                                                         "id": "cap"}}
+        alt = Path(self.tmp.name) / "elsewhere" / "oc.json"
+        alt.parent.mkdir()
+        alt.write_text(json.dumps(cfg))
+        conf.unlink()
+        os.environ["WB_OPENCODE_CONFIG"] = str(alt)
+        self.serve([WRITE_42])
+        run_wb("start", "t-alt", "--spec", str(self.spec), "--repo", str(self.repo),
+               "--model", "friendly", "--test", TEST_CMD)
+        st = wait_phase("t-alt", {"review", "stuck", "failed"}, timeout=180)
+        self.assertEqual(st["phase"], "review", (store.Task("t-alt").dir / "runner.log").read_text())
+        self.assertTrue(st["tests"]["ok"])
+        sent = {json.loads(x).get("model") for x in self.requests.read_text().splitlines()}
+        self.assertEqual(sent, {"cap"})
 
     def test_a_full_window_and_a_compaction_are_read_from_the_real_export(self):
         task, st = self.answered([WRITE_42])

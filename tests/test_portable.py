@@ -204,6 +204,26 @@ class Real(unittest.TestCase):
         with mock.patch.object(models.hardware, "ollama_env", lambda: {"OLLAMA_NUM_PARALLEL": "1"}):
             self.assertFalse(models.can_share(twin, [found["a/x"]], int(99e9)))  # the same model
 
+    def test_an_alias_is_checked_loaded_and_placed_by_the_id_its_server_knows(self):
+        # the 2026-11-19 audit (finding 14): an entry keyed `friendly` with "id": "cap" was "the
+        # server lists 2 models, not friendly", while OpenCode sends cap and it runs
+        two = self.server({"/v1/models": {"data": [{"id": "cap"}, {"id": "other"}]}})
+        posts = []
+        srv, port = fake_ollama([], ["coder:7b"], posts)
+        self.servers.append(srv)
+        self.config({"s": {"options": {"baseURL": two + "/v1"},
+                           "models": {"friendly": {"id": "cap"}}},
+                     "o": {"options": {"baseURL": f"http://127.0.0.1:{port}/v1"},
+                           "models": {"small": {"id": "coder:7b"}}}})
+        found = models.discover()
+        self.assertEqual(sorted(found), ["o/small", "s/friendly"])   # routed by the key
+        self.assertEqual(models.status(found["s/friendly"])["why"], "running")
+        self.assertEqual(models.status(found["o/small"])["why"], "pulled")
+        self.assertEqual(models.resolve("friendly").id, "s/friendly")
+        models.make_resident(found["o/small"], say=lambda m: None)
+        self.assertEqual([p["model"] for p in posts], ["coder:7b"])  # loaded by its id
+        self.assertTrue(models.status(found["o/small"])["resident"])
+
     def test_a_failed_ollama_load_says_why_and_a_missing_model_unloads_nothing(self):
         found, posts = self.own([{"name": "y", "size": 10, "size_vram": 10}], ["x", "y"],
                                 fail=(500, {"error": "model requires more system memory (24.1 GiB)"}))
@@ -409,22 +429,32 @@ class Real(unittest.TestCase):
         self.assertTrue(m.remote)          # opted in: it holds no GPU lease here
         self.assertTrue(models.status(m)["available"])
 
-    def test_a_server_that_wants_an_api_key_is_running_and_gets_the_providers_key(self):
+    def test_a_server_that_wants_an_api_key_gets_the_providers_key_and_refuses_a_wrong_one(self):
         # the 2026-11-16 audit: a 401 read as "not running", and with a start command wb started a
-        # second copy and waited 20 minutes for it
+        # second copy and waited 20 minutes for it. The 2026-11-19 audit (finding 19): read as
+        # running instead, a wrong key passed too, and the router could pick that model over a
+        # working one; it is now unavailable, so nothing is started and the router passes it by.
         os.environ["WB_TEST_KEY"] = "sekret"
         Path(os.environ["WB_COMMANDS"]).write_text(json.dumps({"env": ["WB_TEST_KEY"]}))
         keyed = self.server({"/v1/models": lambda h: {"data": [{"id": "a"}, {"id": "b"}]}
                              if h.get("Authorization") == "Bearer sekret" else 401})
         self.config({"k": {"options": {"baseURL": keyed + "/v1", "apiKey": "{env:WB_TEST_KEY}"},
                            "models": {"a": {}, "c": {}}},
-                     "nokey": {"options": {"baseURL": keyed + "/v1"}, "models": {"a": {}}}})
+                     "nokey": {"options": {"baseURL": keyed + "/v1"}, "models": {"a": {}}},
+                     "wrong": {"options": {"baseURL": keyed + "/v1", "apiKey": "nope"},
+                               "models": {"a": {}}}},
+                    {"nokey/a": {"start": f"touch {self.tmp.name}/started"}})
         found = models.discover()
         self.assertEqual(models.status(found["k/a"])["why"], "running")
         self.assertIn("not c", models.status(found["k/c"])["why"])     # the list was read with the key
-        st = models.status(found["nokey/a"])
-        self.assertTrue(st["available"] and st["resident"])
-        self.assertIn("API key", st["why"])
+        for mid, why in (("nokey/a", "it wants an API key"), ("wrong/a", "refuses its API key")):
+            st = models.status(found[mid])
+            self.assertFalse(st["available"] or st["resident"], mid)
+            self.assertIn(why, st["why"])
+            self.assertIn("options.apiKey", st["why"])
+        with self.assertRaisesRegex(RuntimeError, "nokey/a can't run: the server"):
+            models.make_resident(found["nokey/a"], say=lambda m: None)
+        self.assertFalse((Path(self.tmp.name) / "started").exists())   # no second copy started
         self.assertNotIn("sekret", repr(found["k/a"]))
 
     def test_an_api_key_the_agent_wont_get_makes_the_model_unavailable_with_the_fix(self):
