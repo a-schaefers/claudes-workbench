@@ -422,6 +422,25 @@ class Lifecycle(Base):
         self.assertIn("big.txt", big)
         self.assertNotIn("+x", big)
 
+    def test_a_big_diff_is_never_held_whole_just_to_show_its_stat(self):
+        # a 19 MB generated file's patch was captured and decoded whole (a 55 MiB peak) for a
+        # 182-character notice (#348, the audit of 1.4)
+        import tracemalloc
+        from workbench import runner
+        self.start("t-huge", "ok", "--test", TEST_CMD)
+        wait_phase("t-huge", {"review"})
+        task = store.Task("t-huge")
+        (task.worktree / "huge.txt").write_text("generated line\n" * 400_000)   # 6 MB
+        tracemalloc.start()
+        try:
+            text = runner.review_diff(task)
+            peak = tracemalloc.get_traced_memory()[1]
+        finally:
+            tracemalloc.stop()
+        self.assertIn("too big to include", text)
+        self.assertIn("huge.txt", text)
+        self.assertLess(peak, 2 * 1024 * 1024)
+
     def test_after_feedback_the_review_notice_carries_only_what_changed_since(self):
         # the wake after a feedback round carried the whole 14K-character diff again, which
         # Claude already had from the first (2026-11-18)
@@ -1359,6 +1378,9 @@ class Lifecycle(Base):
                 f = repo / os.fsdecode(name)
                 if data is None:
                     g("rm", "-q", "--cached", "--", os.fsdecode(name))
+                    f.unlink(missing_ok=True)  # pkg's file gone, so pkg/ can be made (#343)
+                    if f.parent != repo and not any(f.parent.iterdir()):
+                        f.parent.rmdir()       # and pkg/ gone, so pkg can be (#343)
                     continue
                 f.parent.mkdir(parents=True, exist_ok=True)
                 f.write_bytes(data)
@@ -1459,6 +1481,89 @@ class Lifecycle(Base):
         gitops.merge(repo, "t", "main")
         self.assertEqual((repo / "b.txt").read_bytes(), b"b\n")
         self.assertEqual((repo / "local.ini").read_bytes(), b"PERSONAL\n")
+
+    def test_a_file_turned_into_a_directory_and_back_merges_beside_ignored_files(self):
+        # #343 (the audit of 1.4, reproduced on Git 2.56): the task replaced the tracked file pkg
+        # with pkg/init.py, and accept --merge called pkg an untracked obstruction; a plain git
+        # merge of the kept branch succeeded. Both directions, beside real ignored files
+        for old_git in (False, True):
+            with (mock.patch.object(gitops, "_merge_tree", return_value=None) if old_git
+                  else contextlib.nullcontext()):
+                repo, g = self._merge_case(
+                    base={b"pkg": b"one\n"}, main={b".gitignore": b"*.pyc\nlocal.ini\n"},
+                    task={b"pkg": None, b"pkg/init.py": b"two\n"},
+                    ignore={b"local.ini": b"PERSONAL\n", b"x.pyc": b"c"})
+                gitops.merge(repo, "t", "main")
+                self.assertEqual((repo / "pkg" / "init.py").read_bytes(), b"two\n")
+                self.assertEqual((repo / "local.ini").read_bytes(), b"PERSONAL\n")
+                repo, g = self._merge_case(
+                    base={b"pkg/init.py": b"one\n"}, main={b".gitignore": b"local.ini\n"},
+                    task={b"pkg/init.py": None, b"pkg": b"two\n"},
+                    ignore={b"local.ini": b"PERSONAL\n"})
+                gitops.merge(repo, "t", "main")
+                self.assertEqual((repo / "pkg").read_bytes(), b"two\n")
+                self.assertEqual((repo / "local.ini").read_bytes(), b"PERSONAL\n")
+                # an ignored file inside the directory the merge turns into a file is in the way
+                repo, g = self._merge_case(
+                    base={b"pkg/init.py": b"one\n"}, main={b".gitignore": b"*.pyc\n"},
+                    task={b"pkg/init.py": None, b"pkg": b"two\n"},
+                    ignore={b"pkg/init.pyc": b"PERSONAL\n"})
+                self._assert_refused_and_kept(repo, g, b"pkg/init.pyc", b"PERSONAL\n")
+
+    def test_a_merge_as_ff_or_squash_keeps_the_history_linear(self):
+        # #352 (the audit of 1.4): --no-ff made a merge commit a linear-history repo refused
+        git = lambda r, *a: subprocess.run(["git", "-C", str(r), *a], check=True,  # noqa
+                                           capture_output=True, text=True).stdout.strip()
+        repo, g = self._merge_case(base={b"a.txt": b"a\n"}, main={b"c.txt": b"c\n"},
+                                   task={b"b.txt": b"b\n"}, ignore={})
+        tip = git(repo, "rev-parse", gitops.branch_name("t"))
+        with self.assertRaisesRegex(gitops.GitError, "backed out"):  # main moved: no ff
+            gitops.merge(repo, "t", "main", how="ff")
+        head = gitops.merge(repo, "t", "main", how="squash")
+        self.assertEqual(git(repo, "rev-list", "--min-parents=2", "--count", "HEAD"), "0")
+        self.assertEqual((repo / "b.txt").read_bytes(), b"b\n")
+        self.assertEqual(git(repo, "log", "-1", "--format=%s", head), git(repo, "log", "-1",
+                                                                         "--format=%s", tip))
+        git(repo, "reset", "-q", "--hard", f"{tip}~1")  # the base: a fast-forward lands the tip
+        self.assertTrue(tip.startswith(gitops.merge(repo, "t", "main", how="ff")))
+        self.assertEqual(git(repo, "rev-list", "--min-parents=2", "--count", "HEAD"), "0")
+
+    def test_accept_merge_as_squash_lands_one_commit_and_drops_the_branch(self):
+        # #352: branch -d keeps a squashed branch (never an ancestor of the squash), and merged
+        # delegate branches once piled up, 8 in one repo (the 2026-11-19 audit)
+        self.start("t-sq", "ok", "--test", TEST_CMD)
+        wait_phase("t-sq", {"review"})
+        out = run_wb("accept", "t-sq", "--merge-as", "squash", "-m", "feat: answer")
+        self.assertIn("merged into", out)
+        git = lambda *a: subprocess.run(["git", "-C", str(self.repo), *a], check=True,  # noqa
+                                        capture_output=True, text=True).stdout.strip()
+        self.assertEqual(git("rev-list", "--min-parents=2", "--count", "HEAD"), "0")
+        self.assertEqual(git("log", "-1", "--format=%s"), "feat: answer")
+        self.assertEqual((self.repo / "answer.txt").read_text().strip(), "42")
+        self.assertEqual(git("branch", "--list", "delegate/t-sq"), "")
+
+    def test_a_repo_says_once_in_commands_json_how_its_merges_land(self):
+        # #352: a repo kept to linear history needed --merge-as on every accept
+        git = lambda *a: subprocess.run(["git", "-C", str(self.repo), *a], check=True,  # noqa
+                                        capture_output=True, text=True).stdout.strip()
+        Path(os.environ["WB_COMMANDS"]).write_text(json.dumps({"repos": {str(self.repo): {
+            "merge": "squash"}}}))
+        self.start("t-kept", "ok")
+        wait_phase("t-kept", {"review"})
+        head = git("rev-parse", "HEAD")
+        self.assertNotIn("merged into", run_wb("accept", "t-kept", "-m", "feat: kept"))  # no --merge
+        self.assertEqual(git("rev-parse", "HEAD"), head)
+        git("branch", "-D", "delegate/t-kept")
+        self.start("t-sq", "ok")
+        wait_phase("t-sq", {"review"})
+        run_wb("accept", "t-sq", "--merge", "-m", "feat: answer")
+        self.assertEqual(git("rev-list", "--min-parents=2", "--count", "HEAD"), "0")
+        self.assertEqual(git("log", "-1", "--format=%s"), "feat: answer")
+        self.assertEqual(git("branch", "--list", "delegate/t-sq"), "")
+        Path(os.environ["WB_COMMANDS"]).write_text(json.dumps({"repos": {str(self.repo): {
+            "merge": "rebase"}}}))
+        with self.assertRaisesRegex(RuntimeError, '"merge" is one of merge, ff, squash'):
+            context.commands_conf()
 
     def test_accept_merge_completes_the_merge_or_says_it_did_not(self):
         # #190 (the 2026-11-19 audit): with branch.main.mergeOptions=--no-commit, git left the
@@ -1832,6 +1937,30 @@ class WorktreeSetup(Base):
         (t.worktree / "test_venv.sh").write_text(here + "\n")
         out = run_wb("verify", "t-venv", "--test", "sh test_venv.sh", "--files", "test_venv.sh")
         self.assertIn("base: exit 0\n  candidate: exit 0", out)  # both sides ran their own
+
+    def test_a_symlinked_state_directory_still_copies_the_prepared_inputs_but_a_link_inside_refuses(self):
+        # #345 (the audit of 1.4): WB_HOME a link to another volume made every prepared input
+        # "changed", since each parent was compared with its own resolution, the home's link too
+        real = Path(self.tmp.name) / "volume"
+        (real / "task" / "deps").mkdir(parents=True)
+        (real / "task" / "deps" / "stamp").write_text("built\n")
+        (real / "scratch").mkdir()
+        home = Path(self.tmp.name) / "linked-home"
+        home.symlink_to(real)
+        at = types.SimpleNamespace(spec={"repo": str(self.repo)}, worktree=home / "scratch",
+                                   status={"prepared_paths": ["deps/stamp"]})
+        self.assertEqual(runner.prepare(at, home / "task"), (0, ""))
+        self.assertEqual((real / "scratch" / "deps" / "stamp").read_text(), "built\n")
+        elsewhere = Path(self.tmp.name) / "elsewhere"
+        elsewhere.mkdir()
+        (elsewhere / "stamp").write_text("planted\n")
+        shutil.rmtree(real / "task" / "deps")
+        (real / "task" / "deps").symlink_to(elsewhere)     # a link inside the task: still refused
+        shutil.rmtree(real / "scratch" / "deps")
+        code, said = runner.prepare(at, home / "task")
+        self.assertEqual(code, "copy failed")
+        self.assertIn("prepared input deps/stamp changed", said)
+        self.assertFalse((real / "scratch" / "deps" / "stamp").exists())
 
     def test_commands_json_gives_a_repo_its_setup_for_every_task(self):
         self.ignore("deps/")
@@ -5233,6 +5362,26 @@ class Bench(Base):
         self.assertEqual((bench.case_dir("t-steps-s2") / "spec.md").read_text(), "Now add the check.\n")
         self.assertEqual(case["test_cmd"], "sh tests/check.sh")
 
+    def test_an_executable_hidden_check_stays_executable_on_the_reference_and_every_replay(self):
+        # #346 (the audit of 1.4): the overlay wrote ./test_check.sh at 0644, so the right answer
+        # exited 126, and the reference, graded from its commit, never saw it
+        from workbench import bench
+        self.start("t-exec", "ok", "--test", "./tests/check.sh")
+        wait_phase("t-exec", {"review"})
+        wt = store.Task("t-exec").worktree
+        (wt / "tests").mkdir()
+        (wt / "tests" / "check.sh").write_text("#!/bin/sh\ngrep -qx 42 answer.txt\n")
+        (wt / "tests" / "check.sh").chmod(0o755)
+        run_wb("accept", "t-exec", "-m", "feat: the answer")
+        self.assertIn("on the base: fails", "\n".join(bench.add("t-exec")))
+        case = bench.cases()["t-exec"]
+        replay = Path(self.tmp.name) / "replay"
+        (replay / "tests").mkdir(parents=True)
+        (replay / "tests" / "check.sh").write_text("exit 0\n")   # the agent's own, at 0644
+        bench.overlay(case, replay)
+        self.assertTrue(os.access(replay / "tests" / "check.sh", os.X_OK))
+        self.assertIn("grep -qx 42", (replay / "tests" / "check.sh").read_text())
+
     def test_a_replay_is_graded_by_the_hidden_checks_and_leaves_no_trace_in_real_work(self):
         from workbench import bench
         self.accepted("t-src")
@@ -7028,13 +7177,28 @@ class ModelSet(Base):
 
 class LogoutStops(Base):
     """What a logout stops: logind's Linger and KillUserProcesses, said by wb chat on and wb doctor."""
-    def fake_loginctl(self, linger, kill):
+    @contextlib.contextmanager
+    def fake_loginctl(self, linger, kill, scope=None):
+        """loginctl answering Linger and KillUserProcesses; with ``scope`` ("ok" or "fails"), a
+        systemd-run that logs its argv and execs the command, or refuses."""
+        from workbench import cli
         bin_dir = Path(self.tmp.name) / "fakebin"
         bin_dir.mkdir(exist_ok=True)
         exe = bin_dir / "loginctl"
-        exe.write_text(f"#!/bin/sh\ncase \"$1\" in show-user) echo {linger};; show) echo {kill};; esac\n")
+        exe.write_text(f"#!/bin/sh\ncase \"$1\" in show-user) echo {linger};; show-session) echo {kill};;"
+                       " *) exit 1;; esac\n")
         exe.chmod(0o755)
-        return mock.patch.dict(os.environ, {"PATH": f"{bin_dir}:{os.environ['PATH']}"})
+        run = bin_dir / "systemd-run"
+        log = Path(self.tmp.name) / "systemd-run.log"
+        run.write_text("#!/bin/sh\n" + (f'echo "$*" >> {log}\nshift 4\nexec "$@"\n' if scope == "ok"
+                                         else "exit 1\n"))
+        run.chmod(0o755)
+        cli.runner_scope.cache_clear()
+        try:
+            with mock.patch.dict(os.environ, {"PATH": f"{bin_dir}:{os.environ['PATH']}"}):
+                yield log
+        finally:
+            cli.runner_scope.cache_clear()
 
     def test_a_user_without_linger_hears_how_to_keep_the_chat_up_past_logout(self):
         # #351, the audit of 1.4: wb-chat.service stopped at the last logout and nothing said why
@@ -7044,12 +7208,26 @@ class LogoutStops(Base):
         self.assertEqual(len(said), 1)
         self.assertIn("loginctl enable-linger", said[0])
 
-    def test_kill_user_processes_is_named_as_killing_running_tasks(self):
+    def test_kill_user_processes_is_named_as_killing_running_tasks_without_a_scope_for_them(self):
         from workbench import cli
-        with self.fake_loginctl("yes", "yes"):
+        with self.fake_loginctl("yes", "yes", scope="fails"):
             said = cli.logout_stops()
         self.assertEqual(len(said), 1)
         self.assertIn("KillUserProcesses=yes", said[0])
+
+    def test_where_logind_kills_sessions_the_runner_starts_in_a_scope_of_its_own(self):
+        # #351 (the audit of 1.4): a runner started from an SSH or desktop session died at logout
+        from workbench import cli
+        with self.fake_loginctl("yes", "yes", scope="ok") as log:
+            self.assertEqual(cli.logout_stops(), [])        # nothing the user need do
+            self.start("t-scope", "ok")
+            wait_phase("t-scope", {"review"})
+        self.assertIn("--user --scope --quiet --collect", log.read_text())
+        self.assertIn("workbench.runner t-scope", log.read_text())
+        with self.fake_loginctl("no", "yes", scope="ok"):
+            said = cli.logout_stops()
+        self.assertEqual(len(said), 1)                      # the manager stops too: linger
+        self.assertIn("runners", said[0])
 
     def test_doctor_names_the_chats_linger_only_with_the_chat_on(self):
         # most desktops linger off, and the chat is off until turned on: no warning for that

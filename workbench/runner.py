@@ -981,13 +981,19 @@ def prepare(task: store.Task, prepared: Path | None = None) -> tuple[int | str, 
                 at.parent.mkdir(parents=True, exist_ok=True)
                 at.symlink_to(context.sibling_real(repo, name))
         if made is not None:
+            # The two worktrees resolved first: a symlinked state directory (WB_HOME a link to
+            # another volume, which store.absolute_env keeps) is trusted, and only a link inside
+            # a worktree refuses the copy. Comparing each parent with its own resolution refused
+            # every prepared input under a linked home (#345, the audit of 1.4).
+            roots = prepared.resolve(), wt.resolve()
             for p in made:
                 src, dest = prepared / p, wt / p
                 # A later step can track an earlier build path or change its parent to a link.
                 # Keep that checkout's own file and confine copies to the two worktrees (#249).
                 if os.path.lexists(dest):
                     continue
-                if (src.parent.resolve() != src.parent or dest.parent.resolve() != dest.parent
+                if (src.parent.resolve() != (roots[0] / p).parent
+                        or dest.parent.resolve() != (roots[1] / p).parent
                         or not os.path.lexists(src)):
                     return "copy failed", f"prepared input {p} changed; use --setup for a fresh checkout"
                 _copy(src, dest)
@@ -1162,25 +1168,26 @@ def review_diff(task: store.Task) -> str:
     try:
         task.set_status(reviewed={"step": steps, "tree": gitops.snapshot(task.worktree)})
         if since:
-            full = gitops.diff(task.worktree, since, paths=code)
+            # bounded: a big diff is never read whole only to show its stat (#348, the audit of 1.4)
+            full = gitops.diff(task.worktree, since, paths=code, limit=REVIEW_DIFF_MAX)
             same = not props or not gitops.diff(task.worktree, since,
                                                  paths=tuple(f":(literal){p}" for p in props))
             prop = ("\n\nthe agent's proposed instruction files: unchanged since your last review"
                     if same and proposals(task.worktree) else proposal_diff(task))
-            if not full:
+            if full == "":
                 return "\n\nthe diff since your last review: (no changes)" + prop
-            if len(full) <= REVIEW_DIFF_MAX:
+            if full is not None:
                 return (f"\n\nthe diff since your last review (wb diff {task.name} for all of "
                         f"it):\n{full}" + prop)
             base = since
-        full = gitops.diff(task.worktree, base, paths=code)
+        full = gitops.diff(task.worktree, base, paths=code, limit=REVIEW_DIFF_MAX)
         prop = proposal_diff(task)
-        if not full:
+        if full == "":
             return "\n\nthe diff: (no changes)" + prop
-        if len(full) <= REVIEW_DIFF_MAX:
+        if full is not None:
             return (f"\n\nthe diff (all of it; wb diff {task.name} again only after a change):"
                     f"\n{full}" + prop)
-        return (f"\n\nthe diff is {len(full)} characters, too big to include: "
+        return (f"\n\nthe diff is over {REVIEW_DIFF_MAX} characters, too big to include: "
                 f"its stat:\n{gitops.diff(task.worktree, base, stat=True, stat_count=gitops.CHANGED_SHOWN)}" + prop)
     except (gitops.GitError, OSError):
         return ""

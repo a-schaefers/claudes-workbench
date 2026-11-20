@@ -95,7 +95,7 @@ installed module:
 | Process | Started by | How it finds `workbench` |
 |---|---|---|
 | `wb` | the user, Claude, the mod | `bin/wb` puts its real path's repo root on `sys.path` (so the `~/.local/bin/wb` symlink works) |
-| the runner | `cli.spawn_runner` | `python -X utf8 -m workbench.runner <task>`, cwd and `PYTHONPATH` = the repo root, own session, output to `runner.log` |
+| the runner | `cli.spawn_runner` | `python -X utf8 -m workbench.runner <task>`, cwd and `PYTHONPATH` = the repo root, own session (and its own systemd scope where logind kills sessions at logout: `cli.runner_scope`, #351), output to `runner.log` |
 | the ask server | OpenCode, from the config layer's `mcp.servers.workbench` | `[sys.executable, <root>/bin/wb-ask-mcp]`, like `bin/wb` |
 | the git shim | the agent's shell (`<rules>/bin/git`) | a `/bin/sh` wrapper that execs `<python> -I -c` (quoted: a shebang splits at a space) with an explicit `sys.path.insert` |
 | the lane | the runner, before OpenCode | `python -I lane.py …`, a standard-library-only script |
@@ -554,7 +554,9 @@ once more and `pid` and `stopping` are cleared.
    goes to `rounds/<n>/summary.md`. Failing tests with auto-fix left → an auto-fix round (round
    n+1's prompt is the failure). Otherwise phase `review`, a `review` notice (the report, then
    `review_diff`: the whole diff under review when it is at most `REVIEW_DIFF_MAX` = 32,000
-   characters (~8K tokens), else its stat; each call Claude makes to fetch it re-reads its session,
+   characters (~8K tokens), else its stat (the diff read as it streams, `gitops.diff(limit=)`,
+   git stopped past the limit: a 19 MB generated file's patch was held whole, a 55 MiB peak, for a
+   182-character notice, #348); each call Claude makes to fetch it re-reads its session,
    2026-11-17, and at 12,000 both significant tasks of 2026-11-18 (13K and 15K) cost that call;
    after a review of the same step, only the diff since that review notice (`gitops.snapshot`,
    a tree object recorded as status `reviewed`), with a proposed instruction file shown again only
@@ -780,7 +782,7 @@ is set and it isn't run again, with `prepared_paths` (the worktree's ignored pat
 and the output's tail ("the setup command failed (exit N)", or "setting up the worktree failed
 (copy failed)" for a link or copy). Each scratch checkout (the base check, `wb verify`, `wb shot`:
 `verify._run`) gets the same links beside it and a copy of the task's `prepared_paths` from its
-worktree (`prepare(at, prepared)`, as a reflink where the filesystem has them). A file already present in the scratch checkout takes precedence. A missing prepared input or a changed parent link requires fresh setup. The setup
+worktree (`prepare(at, prepared)`, as a reflink where the filesystem has them). A file already present in the scratch checkout takes precedence. A missing prepared input or a changed parent link requires fresh setup: each input's parent must resolve to the same path under the two worktrees' resolved roots, so a link inside a worktree refuses the copy while a symlinked state directory (`WB_HOME` a link to another volume) doesn't (#345). The setup
 isn't run there: each ran it from nothing, up to `SETUP_SECS`, and a first build compiled three
 to five times a task (#249, the audit of 1.2). `wb verify --setup` and `wb shot --setup` run it in
 each checkout as before; so does a task prepared before the paths were recorded, and one whose
@@ -2215,8 +2217,10 @@ own commit was rejected, and its grants, deleted with its rules at the close, we
   can change it per step);
 - the hidden checks: `--hidden` paths, by default the files the step added or changed that look
   like tests (`TESTISH`: under `tests/`, `test/`, `spec/`, `__tests__/`, or `test_*`, `*_test.*`,
-  `*.test.*`, `*.spec.*`), copied from the reference into `hidden/`; and `--check`, a command
-  that must pass too;
+  `*.test.*`, `*.spec.*`), copied from the reference into `hidden/` with their Git mode (a
+  100755 file stays executable: written at 0644, an executable `./test_check.sh` exited 126 on the
+  right answer, #346), and overlaid with it on the base, the reference and every replay alike
+  (`overlay`); and `--check`, a command that must pass too;
 - the task's grants (`allow`, `paths`) and the original's model, rounds, reviews and minutes.
 
 It is refused when the task isn't accepted or is a trial, the repo or the step's commit is gone,
@@ -2226,7 +2230,7 @@ scratch clone of the bundle under `bench/`, in the original task's lane and envi
 reference check below is (`runner.run_in_lane` on `_At`: a plain shell with the caller's
 environment saw other files and variables, and left a hung check's children running, #81), for at
 most `BASE_CHECK_SECS` = 120 s; past that, `base_check` says not checked. It is refused too when the
-checks fail on the step's own commit run as a replay's grade is: a scratch checkout under
+checks fail on the step's own commit run as a replay's grade is: the hidden checks overlaid on a scratch checkout under
 `bench/` (in /tmp the git shim would allow writes), in the original task's lane and environment
 (`runner.run_in_lane` on `_At`, the task with that worktree), up to the case's test timeout. A
 suite that commits or writes outside the lane can never pass there: `clean-fixtures` (workbench's
@@ -2768,7 +2772,10 @@ custom-node packs do run their own Python).
   into the `main` checked out since, and one on a detached HEAD left its merge commit orphaned,
   the 2026-11-16 audit. It refuses when a file the merge would write is already in the checkout
   untracked, ignored or not, or has an untracked file where its directory goes
-  (`gitops._overwritten`, naming each): git's merge silently replaced an ignored `settings.ini`
+  (`gitops._overwritten`, naming each). A tracked file the merge turns into a directory
+  (`pkg` to `pkg/init.py`) is the merge's to replace, and a directory it turns into a file is in
+  the way only through what it holds untracked, ignored files included: a clean file-to-directory
+  refactor was refused (#343, the audit of 1.4). Git's merge silently replaced an ignored `settings.ini`
   the task had un-ignored and committed, and its `--no-overwrite-ignore` doesn't stop the ort
   merge (#189). The paths come from the merge itself, done first in memory (`git merge-tree
   --write-tree`, git 2.38+; an older git does the same merge with `--no-commit` in a scratch
@@ -2979,10 +2986,14 @@ new code (below); `systemctl --user daemon-reload` picks up a changed unit file.
 A user unit stops with the user's last session unless the user lingers (a headless box
 reached by SSH, a desktop logged out overnight): `loginctl enable-linger $USER` keeps it up.
 `wb chat on` says so when logind reports `Linger=no`, and `wb doctor` too while the chat is on
-(most desktops linger off, and the chat is off until turned on); `wb doctor` also warns when
-logind's `KillUserProcesses=yes` would kill the session's runners at logout (`cli.logout_stops`;
-quiet where `loginctl` is absent; #351, the audit of 1.4). The runners still start in the
-caller's session: moving them into their own `systemd-run --user --scope` is not done yet.
+(most desktops linger off, and the chat is off until turned on). Where logind's
+`KillUserProcesses=yes` would kill the session's runners at logout (`cli.kills_sessions`, the
+manager's property through `loginctl show-session`: systemd 262 has no `show` verb), each runner
+starts in a scope of its own under the user's manager (`cli.runner_scope`: `systemd-run --user
+--scope --quiet --collect`, which execs it, so the pid is the runner's; probed once per `wb`
+call), and the linger line names the runners too, with or without the chat; `wb doctor` warns
+only when that scope can't be had (`cli.logout_stops`; quiet where `loginctl` is absent; #351,
+the audit of 1.4).
 The unit runs systemd's `python3`; a Python from pyenv, uv or conda goes in with `systemctl --user
 edit wb-chat` (the unit's comment says how). On macOS, a launchd agent running `~/.local/bin/wb
 chat serve` does the same. `wb chat url` prints the link, `http://localhost:1337/#token=…` (the
@@ -3671,7 +3682,7 @@ delivered as taken (`_stale_notes`, *Notes*).
 | `wb verify <task>` | `--test CMD` (the task's `--test`), `--files PATH…`, `--expect TEXT` (the failure the base must print to be proven), `--timeout N` (300), `--setup` (run the setup in each checkout, not copy what it made) | At review: a regression test on the base (with the candidate's test files) and on the candidate, each in a scratch checkout under the task's lane; the verdict, each run's exit and assertion, and where both outputs are (*Verifying a fix against the base*). Refuses while the agent runs. |
 | `wb stop [<task> \| --all]` | `--repo DIR`, `--session ID` | A live task only. Marks status `stopping`, SIGTERM the runner (15 s, `wait_exit`, then SIGKILL to its session and the agent's), sweeps what the agent left (`runner.sweep`), phase `stuck`, "stopped by the reviewer", and acknowledges the task; the worktree is kept. `--all` (`stop_everything`): every open task, a `stopped` event "bail out: stopped by the user"; without `--repo`/`--session`, the bench's driver first (`bench.stop_driver`), so it starts no replay. `--session ID`, `--repo DIR` (with `--all`): as for takeover, the rest listed as `left running (other sessions'): …`. |
 | `wb resume <task>` | | Reaps a dead runner first. Phase stuck/failed (a task whose runner died is failed), no live runner: a fresh session (round n+1, `runner.RESUME` + what the step's rounds asked), not a review round; Claude's notes the last runner never delivered follow, as a `NOTE_HEAD` note. A note names the GPU's holders when it will wait for them. Acks the task and gathers lessons. |
-| `wb accept <task> -m "…"` | `--include` (approve bulk additions and large binaries), `--merge`, `--force` (any open phase; stops a live runner), `--spec-gap`, `--take-claude-md` (the agent's `<name>.proposed` CLAUDE.md/AGENTS.md over the file; without it they are dropped: *Claude's files*) | Reaps a dead runner first. Phase review; refuses a closed task, unless an earlier accept or discard closed it without writing its results row (status `unrecorded`): then it writes that row, once, from what the earlier run measured, and says so (`_finish_record`, #88). A live task with nothing changed on its first step is refused before its runner is stopped ("no changes to accept yet"); a live task whose commit then fails is left `stuck` ("accept failed: …", for wb accept again, resume, feedback or discard), not live with no runner. Records the step, commits (a worktree with no new changes accepts the branch's commits past the base: earlier steps, or Claude's own after a takeover; a retry after an accept died past its commit takes that commit) (`<m>` + "Delegated to <label> via OpenCode: R round(s), F automatic test-fix, V review round(s)." + `Workbench-Task:` + `OpenCode-Session:`; no AI co-author line), removes the worktree (a failure is a warning: `remove_worktree`) and the agent's runtime directory (`drop_runtime_dir`), records the branch's tip (status `tip`), `--merge`s (`merge --no-ff --no-edit --commit --no-squash` into `base_branch`, which the main checkout must have out, else a branch holding the base; never a detached HEAD; no changes to tracked files, no merge under way, no untracked or ignored file where the merge, done first in memory, would write one (#189, #241); a conflict, or a merge git left unfinished, is backed out (#190); a failure is reported and the accept stands, exit 5, `NOT_MERGED`: it exited 0, and a script went on as if main had the change, #247; a merged branch is then deleted, `drop_merged_branch`). A retry after an interruption resumes from status `closing` (#246): a merge already made is found by the commit's ancestry in the target branch (`gitops.contains`), not by the branch's name, writes the results row, removes the task's rules (`_closed`, and `gc` once a day), prints how far CLAUDE.md (or `.claude/CLAUDE.md`) is behind (a failure there never fails the accept) and what the task cost Claude (`claude:`, when known). Gathers lessons. |
+| `wb accept <task> -m "…"` | `--include` (approve bulk additions and large binaries), `--merge`, `--merge-as merge|ff|squash` (how `--merge` lands, implying it: a merge commit, the default; fast-forward only, refused when the branch has moved; or one squashed commit with the tip's message, for a repo kept to linear history, #352; commands.json `repos` `merge` sets a repo's default for `--merge`, which it doesn't imply), `--force` (any open phase; stops a live runner), `--spec-gap`, `--take-claude-md` (the agent's `<name>.proposed` CLAUDE.md/AGENTS.md over the file; without it they are dropped: *Claude's files*) | Reaps a dead runner first. Phase review; refuses a closed task, unless an earlier accept or discard closed it without writing its results row (status `unrecorded`): then it writes that row, once, from what the earlier run measured, and says so (`_finish_record`, #88). A live task with nothing changed on its first step is refused before its runner is stopped ("no changes to accept yet"); a live task whose commit then fails is left `stuck` ("accept failed: …", for wb accept again, resume, feedback or discard), not live with no runner. Records the step, commits (a worktree with no new changes accepts the branch's commits past the base: earlier steps, or Claude's own after a takeover; a retry after an accept died past its commit takes that commit) (`<m>` + "Delegated to <label> via OpenCode: R round(s), F automatic test-fix, V review round(s)." + `Workbench-Task:` + `OpenCode-Session:`; no AI co-author line), removes the worktree (a failure is a warning: `remove_worktree`) and the agent's runtime directory (`drop_runtime_dir`), records the branch's tip (status `tip`), `--merge`s (`merge --no-ff --no-edit --commit --no-squash`, or with `--merge-as` `merge --ff-only` or `merge --squash` then `commit -C <tip>` (a squash conflict backed out with `reset --merge`; the squashed branch isn't an ancestor, so it is deleted with `branch -D` once the merge is recorded, and a retry interrupted between the squash and that record can't find it by ancestry and refuses, "left nothing to commit"), into `base_branch`, which the main checkout must have out, else a branch holding the base; never a detached HEAD; no changes to tracked files, no merge under way, no untracked or ignored file where the merge, done first in memory, would write one (#189, #241); a conflict, or a merge git left unfinished, is backed out (#190); a failure is reported and the accept stands, exit 5, `NOT_MERGED`: it exited 0, and a script went on as if main had the change, #247; a merged branch is then deleted, `drop_merged_branch`). A retry after an interruption resumes from status `closing` (#246): a merge already made is found by the commit's ancestry in the target branch (`gitops.contains`), not by the branch's name, writes the results row, removes the task's rules (`_closed`, and `gc` once a day), prints how far CLAUDE.md (or `.claude/CLAUDE.md`) is behind (a failure there never fails the accept) and what the task cost Claude (`claude:`, when known). Gathers lessons. |
 | `wb discard <task>` | `--reason "…"`, `--spec-gap`, `--keep-branch` | Stops the runner, records the step, removes the worktree (never fails on it: a warning), the agent's runtime directory (`drop_runtime_dir`), its rules (`_closed`, which also runs `gc` when the last was over `GC_EVERY` a day ago, as accept does) and (unless `--keep-branch`, or the repo is gone) the branch, writes the results row, prints what the task cost Claude (`claude:`, when known). Gathers lessons. Refuses a closed task, unless its row is unwritten (as for accept). |
 
 ### Watching
@@ -3789,9 +3800,10 @@ $WB_HOME (~/.local/state/workbench)
   images.json ($WB_IMAGES)       image engines
   commands.json ($WB_COMMANDS)   the user's standing allowances: {"allow": [patterns], "paths": [dirs], "env": [names]}
                                  (each a list of strings, or the file is refused: context.commands_conf), and
-                                 "repos": {"<repo path>": {"setup": cmd, "copy": [paths], "siblings": [paths]}},
-                                 each repo's worktree setup (context.repo_conf, by real path; --setup replaces
-                                 its setup, --copy and --sibling add)
+                                 "repos": {"<repo path>": {"setup": cmd, "copy": [paths], "siblings": [paths],
+                                 "merge": "merge|ff|squash"}}, each repo's worktree setup (context.repo_conf, by
+                                 real path; --setup replaces its setup, --copy and --sibling add) and how wb
+                                 accept --merge lands there (context.MERGE_AS; --merge-as overrides, #352)
   chat.json ($WB_CHAT_CONFIG)    the web chat's {"bind": [...], "hosts": [...]}
   chat-token ($WB_CHAT_TOKEN)    the web chat's token, mode 600
   savings.json ($WB_SAVINGS)     {"kwh_price": N}, the electricity price the energy is costed at (wb savings --price)

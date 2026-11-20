@@ -374,13 +374,14 @@ def mark(worktree: Path) -> str:
     return h.hexdigest()
 
 
-def with_new_files(worktree: Path, *args, whole: bool = False) -> str:
+def with_new_files(worktree: Path, *args, whole: bool = False, limit: int | None = None) -> str | None:
     """`git <args>` with new files counted as changes (intent-to-add), in a scratch index: the
     worktree's own index, and anything a concurrent git command holds, are left alone. The
     scratch index starts as a copy of the worktree's, so sparse-checkout's skip-worktree entries
     aren't read as deletions (read-tree listed a monorepo's every file outside the cone as
     deleted: the 2026-11-16 audit). Nested repositories are left out (nested_repos). ``whole``
-    adds new files' contents too, not just their intent (for write-tree: snapshot)."""
+    adds new files' contents too, not just their intent (for write-tree: snapshot). ``limit``:
+    at most that many characters of output, else None (_bounded)."""
     # in a private directory of the state dir, not the temp dir: /tmp is in the agent's lane, and
     # an agent process still running could rewrite the index between `add -N` and the diff, so
     # files dropped out of the diff Claude reviews (the 2026-11-16 audit)
@@ -398,9 +399,32 @@ def with_new_files(worktree: Path, *args, whole: bool = False) -> str:
         skip = [f":(exclude){p}" for p in nested_repos(worktree)]
         git(worktree, "add", "-A", *([] if whole else ["-N"]), *(["--", ".", *skip] if skip else []),
             env=env)
-        return git(worktree, *args, env=env)
+        return _bounded(worktree, args, env, limit) if limit else git(worktree, *args, env=env)
     finally:
         shutil.rmtree(scratch, ignore_errors=True)
+
+
+def _bounded(cwd, args, env, limit: int) -> str | None:
+    """git's output as text when it is at most ``limit`` characters, else None, read as it
+    streams and git stopped past the limit: a 19 MB generated file's patch was captured and
+    decoded whole (a 55 MiB peak) only for the review notice to show its stat (#348, the audit
+    of 1.4). A character is at most 4 bytes, so past 4 * limit bytes it can't fit."""
+    with tempfile.TemporaryFile() as err:
+        p = subprocess.Popen(["git", "-C", str(cwd), *PLAIN, *_pinned(cwd), *args],
+                             stdout=subprocess.PIPE, stderr=err, env={**os.environ, **env})
+        out = p.stdout.read(4 * limit + 1)
+        over = len(out) > 4 * limit
+        if over:
+            p.kill()
+        p.stdout.close()
+        p.wait()
+        if over:
+            return None
+        if p.returncode:
+            err.seek(0)
+            raise GitError(f"git {' '.join(args)}: {err.read().decode('utf-8', 'replace').strip()}")
+    text = out.decode("utf-8", "replace")
+    return text if len(text) <= limit else None
 
 
 def snapshot(worktree: Path) -> str:
@@ -409,10 +433,14 @@ def snapshot(worktree: Path) -> str:
     return with_new_files(worktree, "write-tree", whole=True).strip()
 
 
-def diff(worktree: Path, base: str, stat=False, paths=(), numstat=False, stat_count=None) -> str:
+def diff(worktree: Path, base: str, stat=False, paths=(), numstat=False, stat_count=None,
+         limit: int | None = None) -> str | None:
+    """The diff since ``base``, new files included. ``limit``: None when it is longer than that
+    many characters, never held whole in memory (#348, the audit of 1.4)."""
     args = (["diff", "--no-ext-diff", "--no-color", base] + (["--stat"] if stat else []) + (["--numstat"] if numstat else [])
             + ([f"--stat-count={stat_count}"] if stat_count else []) + (["--", *paths] if paths else []))
-    return with_new_files(worktree, *args).rstrip()
+    out = with_new_files(worktree, *args, limit=limit)
+    return None if out is None else out.rstrip()
 
 
 def footprint(worktree: Path, base: str) -> dict:
@@ -540,13 +568,16 @@ def start_branch(repo: Path, base: str) -> str | None:
 
 
 def merge(repo: Path, task: str, into: str | None = None, base: str | None = None,
-          *, tip: str | None = None) -> str:
+          *, tip: str | None = None, how: str = "merge") -> str:
     """Merge the task's branch into ``into`` (the branch it started from: task.json's
     base_branch), which the main checkout must have out, clean and not mid-merge; a conflict, an
     ignored file in the way, or a merge git left unfinished is backed out, leaving the repo as it
     was, and success means the branch is in HEAD. With no branch recorded, the checkout's branch must contain
     ``base``, the task's base commit. Never onto a detached HEAD, where the merge is lost at the
-    next checkout, nor onto another branch than the task's (both happened: the 2026-11-16 audit)."""
+    next checkout, nor onto another branch than the task's (both happened: the 2026-11-16 audit).
+    ``how``: "merge" (a merge commit, the default), "ff" (fast-forward only, refused when the
+    branch has moved) or "squash" (one new commit with the tip's message): a repo kept to linear
+    history refused every --no-ff merge (#352, the audit of 1.4). The same guards hold for each."""
     if git(repo, "status", "--porcelain", "--untracked-files=no").strip():
         raise GitError(f"{repo} has uncommitted changes; merge {branch_name(task)} by hand")
     have = current_branch(repo)
@@ -568,8 +599,20 @@ def merge(repo: Path, task: str, into: str | None = None, base: str | None = Non
                        f"{branch_name(task)} by hand")
     # --commit and --no-squash outrank a branch.<name>.mergeOptions of --no-commit or --squash,
     # which left the merge pending while accept said merged (#190, the 2026-11-19 audit)
+    if how == "squash":  # no MERGE_HEAD to abort: a conflict is backed out with reset --merge
+        before = git(repo, "rev-parse", "HEAD").strip()
+        try:
+            git(repo, "merge", "--squash", "--no-commit", source)
+            git(repo, *NO_HOOKS, "commit", "--no-verify", "-q", "-C", source)
+        except GitError as e:
+            git(repo, "reset", "-q", "--merge", before, check=False)
+            raise GitError(f"squashing {branch_name(task)} failed and was backed out: {e}") from None
+        if git(repo, "rev-parse", "HEAD").strip() == before:  # a no-op squash committed nothing
+            raise GitError(f"squashing {branch_name(task)} left nothing to commit: merge it by hand")
+        return git(repo, "rev-parse", "--short", "HEAD").strip()
+    args = ("--ff-only",) if how == "ff" else ("--no-ff", "--commit", "--no-squash")
     try:
-        git(repo, "merge", "--no-ff", "--no-edit", "--commit", "--no-squash", source)
+        git(repo, "merge", *args, "--no-edit", source)
     except GitError as e:
         if _merging(repo):
             git(repo, "merge", "--abort", check=False)
@@ -600,11 +643,38 @@ def _overwritten(repo: Path, branch: str) -> list[str]:
     out = []
     for p in (p for p in written.split(b"\0") if p and p not in tracked):
         parts = p.split(b"/")
-        if any(os.path.lexists(os.path.join(top, *parts[:i])) and (
-                i == len(parts) or not os.path.isdir(os.path.join(top, *parts[:i])))
-               for i in range(1, len(parts) + 1)):
+        for i in range(1, len(parts) + 1):
+            here = os.path.join(top, *parts[:i])
+            if b"/".join(parts[:i]) in tracked or not os.path.lexists(here):
+                # a tracked file where the merge puts a directory is the merge's to replace: a
+                # clean file-to-directory refactor (pkg to pkg/init.py) was refused (#343, the
+                # audit of 1.4)
+                continue
+            if i < len(parts) and os.path.isdir(here):
+                continue
+            if i == len(parts) and os.path.isdir(here) and not os.path.islink(here):
+                # a tracked directory the merge turns into a file is in the way only through
+                # what it holds untracked (#343)
+                inside = _untracked_under(here, top, tracked)
+                out.extend(inside)
+                if not inside:
+                    continue
+                break
             out.append(p.decode("utf-8", "replace"))
+            break
     return out
+
+
+def _untracked_under(path: bytes, top: bytes, tracked: set[bytes]) -> list[str]:
+    """What a directory holds that HEAD doesn't track, ignored or not (empty directories
+    aside): the files a merge replacing the directory with a file would delete (#343)."""
+    found = []
+    for root, dirs, files in os.walk(path):
+        for name in files + [d for d in dirs if os.path.islink(os.path.join(root, d))]:
+            rel = os.path.relpath(os.path.join(root, name), top)
+            if rel not in tracked:
+                found.append(rel.decode("utf-8", "replace"))
+    return found
 
 
 def _merge_tree(repo: Path, branch: str) -> bytes | None:

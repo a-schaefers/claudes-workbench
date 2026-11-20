@@ -126,11 +126,45 @@ def spawn_runner(task: store.Task) -> int:
     with open(task.dir / "runner.log", "a") as log:
         # -X utf8: the runner reads and writes its files as UTF-8 under any locale (the
         # 2026-11-16 audit); a flag, not PYTHONUTF8, so the agent and its tests keep their own
-        proc = subprocess.Popen([sys.executable, "-X", "utf8", "-m", "workbench.runner", task.name],
+        proc = subprocess.Popen([*runner_scope(), sys.executable, "-X", "utf8", "-m", "workbench.runner",
+                                 task.name],
                                 cwd=PKG_ROOT, env=env, stdin=subprocess.DEVNULL, stdout=log,
                                 stderr=log, start_new_session=True)  # outlives this command
     task.set_status(pid=proc.pid)
     return proc.pid
+
+
+def _loginctl(*argv) -> str:
+    """loginctl's answer, or "" when it has none (absent, failing, slow)."""
+    try:
+        r = subprocess.run(["loginctl", *argv], capture_output=True, text=True, timeout=5)
+    except (OSError, subprocess.SubprocessError):
+        return ""
+    return r.stdout.strip() if r.returncode == 0 else ""
+
+
+def kills_sessions() -> bool:
+    """logind kills every process of a login session at logout (KillUserProcesses=yes). The
+    manager's property: `show-session` with no session (systemd 262 has no `show` verb, and
+    asking it found nothing to warn about anywhere)."""
+    return bool(shutil.which("loginctl")) and \
+        _loginctl("show-session", "-p", "KillUserProcesses", "--value") == "yes"
+
+
+@functools.cache
+def runner_scope() -> tuple[str, ...]:
+    """What starts a runner in a scope of its own under the user's systemd manager, where logind
+    kills a login session's processes at logout: a runner started from an SSH or desktop session
+    died with it, and the night's backlog too (#351, the audit of 1.4). `--scope` execs the
+    command, so the pid is the runner's. Empty anywhere else, or when the manager doesn't answer."""
+    if not kills_sessions() or not shutil.which("systemd-run"):
+        return ()
+    argv = ("systemd-run", "--user", "--scope", "--quiet", "--collect")
+    try:
+        ok = subprocess.run([*argv, "true"], capture_output=True, timeout=10).returncode == 0
+    except (OSError, subprocess.SubprocessError):
+        ok = False
+    return argv if ok else ()
 
 
 def runner_alive(task: store.Task) -> bool:
@@ -1539,7 +1573,10 @@ def cmd_shot(a):
 
 @one_at_a_time
 def cmd_accept(a):
+    a.merge = a.merge or bool(a.merge_as)  # --merge-as says how, so it merges (#352)
     task = need(a.name)
+    # a repo kept to linear history says so once, in commands.json `repos` (#352)
+    a.merge_as = a.merge_as or (a.merge and context.repo_conf(task.spec["repo"]).get("merge")) or None
     reap(task)
     spec, st = task.spec, task.status
     if st.get("phase") in store.CLOSED:
@@ -1597,7 +1634,7 @@ def cmd_accept(a):
             into = gitops.current_branch(repo)
         tip = gitops.git(repo, "rev-parse", "--verify", f"{commit}^{{commit}}").strip()
         close = {"commit": commit, "step": measured, "merge": bool(a.merge), "merge_into": into,
-                 "check_base": check_base}
+                 "check_base": check_base, "merge_as": a.merge_as or "merge"}
         task.set_status(closing=close, tip=tip)  # before anything is removed
         _spec_gaps(task, a.spec_gap)
     if warn := gitops.remove_worktree(repo, task.worktree):  # committed: the rest is cleanup
@@ -1614,7 +1651,7 @@ def cmd_accept(a):
                 if not into:
                     raise gitops.GitError(f"{repo} had a detached HEAD out; merge {spec['branch']} by hand")
                 merged = gitops.merge(repo, a.name, into, spec["base"] if close["check_base"] else None,
-                                      tip=tip)
+                                      tip=tip, how=close.get("merge_as", "merge"))
             except gitops.GitError as e:
                 refused = str(e)
                 print(f"wb: not merged: {e}", file=sys.stderr)
@@ -1622,7 +1659,10 @@ def cmd_accept(a):
             task.set_status(closing={**close, "merged_head": merged})
     if merged and gitops.git(repo, "rev-parse", "--verify", "-q", f"refs/heads/{spec['branch']}",
                              check=False).strip() == tip:
-        gitops.drop_merged_branch(repo, spec["branch"])
+        if close.get("merge_as") == "squash":  # never an ancestor of the squash: -d would keep it
+            gitops.git(repo, "branch", "-D", spec["branch"], check=False)
+        else:
+            gitops.drop_merged_branch(repo, spec["branch"])
     extra = {"commit": commit, "merged": bool(merged)}
     if refused:  # asked and refused: the row says so, and the exit status (#247)
         extra["merge_refused"] = refused[:300]
@@ -2858,22 +2898,19 @@ def logout_stops() -> list[str]:
     without systemd, a container): unknown isn't a warning."""
     if not shutil.which("loginctl"):
         return []
-
-    def ask(*argv):
-        try:
-            r = subprocess.run(["loginctl", *argv], capture_output=True, text=True, timeout=5)
-        except (OSError, subprocess.SubprocessError):
-            return ""
-        return r.stdout.strip() if r.returncode == 0 else ""
     out = []
     user = os.environ.get("USER") or str(os.getuid())
-    if ask("show-user", user, "-p", "Linger", "--value") == "no":
+    lingers = _loginctl("show-user", user, "-p", "Linger", "--value")
+    scoped = runner_scope()
+    if lingers == "no":
         out.append(f"logind stops your user services at logout, the web chat's wb-chat.service "
-                   f"too: loginctl enable-linger {user} keeps them up")
-    if ask("show", "-p", "KillUserProcesses", "--value") == "yes":
+                   f"{'and the runners of tasks running then ' if scoped else ''}too: loginctl "
+                   f"enable-linger {user} keeps them up")
+    if kills_sessions() and not scoped:
         out.append("logind kills every process of a login session at logout (KillUserProcesses=yes),"
-                   " running tasks too: start wb from a session that stays (tmux under systemd-run"
-                   " --user --scope), or set KillUserProcesses=no in /etc/systemd/logind.conf")
+                   " running tasks too, and systemd-run --user can't give them a scope of their own:"
+                   " start wb from a session that stays, or set KillUserProcesses=no in"
+                   " /etc/systemd/logind.conf")
     return out
 
 
@@ -3223,7 +3260,7 @@ def cmd_doctor(a):
     # a warning, not BAD: a desktop that never logs out is fine (#351). The chat's line only
     # with the chat on: nearly every desktop lingers off, and most never turn the chat on
     for why in logout_stops():
-        if chat.is_on() or "wb-chat" not in why:
+        if chat.is_on() or "wb-chat" not in why or "runners" in why:
             print(f"--  {why}")
     found = models.discover()
     line(bool(found), f"{len(found)} local model(s)")
@@ -3640,6 +3677,9 @@ def parser() -> argparse.ArgumentParser:
     s = sub.add_parser("accept", help="commit the work on its branch and close the task")
     s.add_argument("name"); s.add_argument("--message", "-m", required=True)
     s.add_argument("--merge", action="store_true"); s.add_argument("--force", action="store_true")
+    s.add_argument("--merge-as", choices=context.MERGE_AS, help="how --merge lands (implies "
+                   "it): a merge commit (the default, or commands.json repos' merge), fast-forward "
+                   "only, or one squashed commit, for a repo kept to linear history")
     s.add_argument("--include", action="store_true", help="commit it even with more than "
                    f"{gitops.NEW_FILES_MAX} new files or a large new binary (build output?)")
     s.add_argument("--take-claude-md", action="store_true",
