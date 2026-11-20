@@ -7187,6 +7187,84 @@ class ModelSet(Base):
         self.assertIn("runtime: retry", out)
 
 
+class DiskRoom(Base):
+    """#342 (the audit of 1.4): nothing watched the disk, and a full one wedged every task."""
+    @staticmethod
+    def FULL(*_, **__):
+        # a fresh one each time: one shared instance kept its traceback, and with it the frame
+        # of the runner.main() that raised it, holding the runner's lock
+        raise OSError(errno.ENOSPC, "No space left on device")
+
+    def test_start_refuses_a_task_the_disk_has_no_room_for_naming_the_open_tasks(self):
+        self.start("t-open", "ok")
+        wait_phase("t-open", {"review"})
+        err = io.StringIO()
+        with mock.patch.object(store, "free_bytes", return_value=10**9), redirect_stderr(err), \
+                self.assertRaises(SystemExit):
+            self.start("t-big", "ok")
+        self.assertIn("1.0 GB free where the state directory is", err.getvalue())
+        self.assertIn("the open tasks: t-open ", err.getvalue())
+        self.assertFalse(store.Task("t-big").dir.exists())
+        with mock.patch.object(store, "free_bytes", return_value=None):  # unknown: no refusal
+            self.start("t-unknown", "ok", "--queue")
+        wait_phase("t-unknown", {"review"})
+
+    def test_doctor_says_what_the_state_dir_holds_and_what_is_free(self):
+        def doctor(free):
+            buf = io.StringIO()
+            with redirect_stdout(buf), mock.patch.object(store, "free_bytes", return_value=free):
+                try:
+                    cli.main(["doctor"])
+                except SystemExit:
+                    pass
+            return buf.getvalue()
+        self.assertRegex(doctor(50 * 10**9), r"ok  the state dir holds .* GB, with 50.0 GB free\n")
+        self.assertIn("BAD the state dir holds", doctor(10**8))
+
+    def test_a_full_disk_makes_wb_status_say_so_once_not_a_traceback(self):
+        self.start("t-dead", "hang")
+        st = running("t-dead")
+        os.kill(st["pid"], signal.SIGKILL)
+        if sys.platform.startswith("linux"):
+            self.assertTrue(wait_gone(st["agent_pid"]))
+        backdate("t-dead")
+        err = io.StringIO()
+        with mock.patch.object(store, "write_json", side_effect=self.FULL), redirect_stderr(err):
+            run_wb("status")
+            run_wb("status", "t-dead")
+        self.assertEqual(err.getvalue().count("the disk is full"), 1)
+        self.assertEqual(store.Task("t-dead").status["phase"], "running")   # nothing written
+        self.assertIn("[failed] t-dead", run_wb("wait", "t-dead", "--timeout", "5"))  # room again
+        cli._DISK_SAID.clear()
+        # a command whose own write fails: one line, naming the disk
+        err = io.StringIO()
+        with mock.patch.object(cli, "cmd_status", side_effect=self.FULL), redirect_stderr(err), \
+                self.assertRaises(SystemExit):
+            cli.main(["status"])
+        self.assertIn("the disk is full", err.getvalue())
+
+    def test_a_runner_failing_on_a_full_disk_says_so_and_survives_its_own_writes_failing(self):
+        from workbench import runner
+        self.start("t-full", "ok")
+        wait_phase("t-full", {"review"})
+        task = store.Task("t-full")
+        with mock.patch.object(sys, "argv", ["runner", "t-full"]), \
+                mock.patch.object(runner, "drive", side_effect=self.FULL):
+            runner.main()
+        self.assertEqual(task.status["phase"], "failed")
+        self.assertIn("the disk is full", task.status["last"])
+        self.assertIn("wb resume t-full", task.status["last"])
+        task.set_status(phase="review")
+        before, out = task.status, io.StringIO()
+        with redirect_stdout(out), mock.patch.object(sys, "argv", ["runner", "t-full"]), \
+                mock.patch.object(runner, "drive", side_effect=self.FULL), \
+                mock.patch.object(store, "write_json", side_effect=self.FULL), \
+                mock.patch.object(store, "append_jsonl", side_effect=self.FULL):
+            runner.main()                                   # no room for anything: no raise
+        self.assertNotIn("another runner", out.getvalue())  # it ran, and met the disk
+        self.assertEqual(task.status, before)
+
+
 class LogoutStops(Base):
     """What a logout stops: logind's Linger and KillUserProcesses, said by wb chat on and wb doctor."""
     @contextlib.contextmanager

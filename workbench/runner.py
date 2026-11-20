@@ -1832,16 +1832,34 @@ def main():
             task.notify("stuck", f"task {task.name}: {SIGNAL_STOP}. wb resume {task.name} "
                         f"continues it in a fresh session, wb discard {task.name} drops it",
                         round=st.get("round"))
-    except Exception:
+    except Exception as e:
         err = traceback.format_exc()
-        (task.dir / "runner.log").open("a").write(err)
-        task.set_status(phase="failed", last=err.strip().splitlines()[-1][:200])
-        task.notify("failed", f"task {task.name}: the runner crashed\n{err[-1500:]}")
+        full = store.disk_full(e)
+        try:
+            with (task.dir / "runner.log").open("a") as log:
+                log.write(err)
+        except OSError:
+            pass
+        try:
+            task.set_status(phase="failed", last=f"the disk is full ({e.strerror}): free some, "
+                            f"then wb resume {task.name}" if full else err.strip().splitlines()[-1][:200])
+            task.notify("failed", f"task {task.name}: the disk is full ({store.home()}); free "
+                        f"some, then wb resume {task.name}" if full else
+                        f"task {task.name}: the runner crashed\n{err[-1500:]}")
+        except OSError as again:
+            # no room even for this: wb's reap fails the task, naming the disk, once it can
+            # write (#342, the audit of 1.4)
+            if not store.disk_full(again):
+                raise
     finally:
         try:
             _end_agent(task)  # a backstop: drive's own cleanup may not have been reached
         finally:
-            task.set_status(pid=None, stopping=None)
+            try:
+                task.set_status(pid=None, stopping=None)
+            except OSError as e:
+                if not store.disk_full(e):
+                    raise
 
 
 if __name__ == "__main__":

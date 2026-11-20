@@ -28,6 +28,7 @@ Layout of ``$WB_HOME`` (default ``~/.local/state/workbench``)::
 
 Every file and format: ARCHITECTURE.md, *Files and formats*.
 """
+import errno
 import fcntl
 import json
 import os
@@ -68,6 +69,57 @@ def absolute_env() -> None:
 def home() -> Path:
     v = os.environ.get("WB_HOME")
     return Path(os.path.abspath(os.path.expanduser(v))) if v else Path.home() / ".local/state/workbench"
+
+
+# Nothing watched the disk: each task holds a checkout, its --copy paths and the setup's output,
+# and once it filled, every status write raised, the crash handler's own writes too, and wb
+# status, wb wait and the mod's poll ended in a traceback (#342, the audit of 1.4)
+FULL = (errno.ENOSPC, errno.EDQUOT)
+
+
+def disk_full(e: BaseException) -> bool:
+    return isinstance(e, OSError) and e.errno in FULL
+
+
+def free_bytes(path: Path | None = None) -> int | None:
+    """Free space where the state directory lives (or ``path``), for the user; None if unknown."""
+    p = Path(path or home())
+    while not p.exists() and p != p.parent:
+        p = p.parent
+    try:
+        st = os.statvfs(p)
+    except OSError:
+        return None
+    return st.f_bavail * st.f_frsize
+
+
+def dir_size(path: Path, budget: float | None = None) -> tuple[int, bool]:
+    """Bytes under ``path`` (links not followed, a hard-linked file once) and whether the count
+    is whole: with a ``budget`` in seconds it stops there, a lower bound."""
+    total, seen, end = 0, set(), (time.monotonic() + budget) if budget else None
+    stack = [str(path)]
+    while stack:
+        if end and time.monotonic() > end:
+            return total, False
+        try:
+            with os.scandir(stack.pop()) as it:
+                for e in it:
+                    try:
+                        st = e.stat(follow_symlinks=False)
+                    except OSError:
+                        continue
+                    if e.is_dir(follow_symlinks=False):
+                        stack.append(e.path)
+                    elif (st.st_dev, st.st_ino) not in seen:
+                        seen.add((st.st_dev, st.st_ino))
+                        total += st.st_blocks * 512
+        except OSError:
+            continue
+    return total, True
+
+
+def gb(n: int) -> str:
+    return f"{n / 1e9:.1f} GB"
 
 
 def tasks_dir() -> Path:

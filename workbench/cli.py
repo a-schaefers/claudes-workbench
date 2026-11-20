@@ -187,16 +187,28 @@ def runner_alive(task: store.Task) -> bool:
 # queued just before spawn_runner writes the new pid, their slow work done first) it is failed,
 # with one notice.
 REAP_GRACE = 15
+_DISK_SAID: list = []
 RUNNER_DIED = "the runner died (see runner.log)"
 
 
 def reap(task: store.Task) -> bool:
     """Fail a live task whose runner is dead; True when this call did it."""
     agent = task.status.get("agent_pid")
-    st = task.set_status_if(  # one reaper wins: two waiters, one notice
-        lambda st: st.get("phase") in LIVE and not runner_alive(task)
-        and time.time() - (st.get("updated_at") or 0) >= REAP_GRACE,
-        phase="failed", last=RUNNER_DIED, pid=None, agent_pid=None, asking=None)
+    try:
+        st = task.set_status_if(  # one reaper wins: two waiters, one notice
+            lambda st: st.get("phase") in LIVE and not runner_alive(task)
+            and time.time() - (st.get("updated_at") or 0) >= REAP_GRACE,
+            phase="failed", last=RUNNER_DIED, pid=None, agent_pid=None, asking=None)
+    except OSError as e:
+        if not store.disk_full(e):
+            raise
+        # wb status, wb wait and the mod's poll ended in a traceback until space was freed
+        # (#342): said once a command, and reaped on the first call that can write
+        if not _DISK_SAID:
+            _DISK_SAID.append(True)
+            print(f"wb: the disk is full ({store.home()}): a task whose runner died can't be "
+                  "marked failed until there is room", file=sys.stderr)
+        return False
     if st is None:
         return False
     # The agent it left, if the kernel didn't take it with the runner. Off Linux nothing else
@@ -211,8 +223,11 @@ def reap(task: store.Task) -> bool:
     ask_mcp.close_all(task)  # and its questions, which nothing will relay (the 0.90 review)
     task.event({"ts": store.now(), "round": st.get("round"), "kind": "error",
                 "text": "the runner died without a report"})
+    free = store.free_bytes()
+    full = free is not None and free < DISK_SPARE  # a full disk is the likely why (#342)
     task.notify("failed", f"task {task.name}: the runner died without a report (killed, out of "
-                f"memory or a reboot); see {task.dir / 'runner.log'}. wb resume {task.name} "
+                f"memory or a reboot{'; the disk has ' + store.gb(free) + ' free' if full else ''}); "
+                f"see {task.dir / 'runner.log'}. wb resume {task.name} "
                 "continues it in a fresh session", round=st.get("round"))
     return True
 
@@ -523,6 +538,35 @@ def _missing_dirs(repo: Path) -> list[str]:
             and p[:-1] not in CACHE_DIRS and not p[:-1].endswith("cache")]
 
 
+# A task takes its checkout and --copy paths, then the base check's and wb verify's scratch
+# checkouts copy them again (a full copy on ext4, where reflinks don't exist), plus the build
+# (#342, the audit of 1.4)
+DISK_COPIES, DISK_SPARE = 3, 2 * 10**9
+
+
+def _disk_room(repo: Path, base: str, setup: dict) -> None:
+    """Refuse a task the disk has no room for: a full one mid-round failed every status write."""
+    free = store.free_bytes()
+    if free is None:
+        return
+    size = 0
+    for row in gitops.git(repo, "ls-tree", "-r", "-l", base, check=False).splitlines():
+        f = row.split(None, 4)
+        if len(f) >= 4 and f[1] == "blob" and f[3].isdigit():
+            size += int(f[3])
+    for p in setup.get("copy", ()):
+        size += store.dir_size(repo / p, budget=5)[0]
+    need = size * DISK_COPIES + DISK_SPARE
+    if free >= need:
+        return
+    held = sorted(((store.dir_size(t.dir, budget=2)[0], t.name) for t in store.all_tasks()
+                   if t.status.get("phase") not in store.CLOSED), reverse=True)
+    die(f"{store.gb(free)} free where the state directory is ({store.home()}), and a task of this "
+        f"repo wants {store.gb(need)} (its checkout and --copy paths, {store.gb(size)}, three "
+        "times over, and 2 GB): free some, or wb discard an open task"
+        + ("; the open tasks: " + ", ".join(f"{n} {store.gb(b)}" for b, n in held[:8]) if held else ""))
+
+
 def cmd_start(a):
     if not store.NAME_RE.match(a.name):
         die("a task name is lowercase letters, digits and hyphens, at most 48")
@@ -572,6 +616,7 @@ def cmd_start(a):
             "(git config --global user.name/user.email)")
     _need_claude_md(repo, a.base, a)
     setup = _worktree_setup(repo, a)
+    _disk_room(repo, a.base, setup)
     # Two projects, one GPU: a task that can't run beside the GPU's holders used to queue in
     # silence behind them, maybe for hours (the 2026-11-16 audit). Say so before any worktree.
     if not getattr(a, "bench", None):
@@ -3338,6 +3383,14 @@ def cmd_doctor(a):
     except OSError as e:
         why = f"can't make it: {e.strerror or e}"
     line(not why, f"state dir {store.home()}" + (f": {why}" if why else ""))
+    if not why:  # what it holds and what is left: nothing watched the disk (#342)
+        held, whole = store.dir_size(store.home(), budget=3)
+        free = store.free_bytes()
+        if free is not None:
+            line(free >= DISK_SPARE, f"the state dir holds {'' if whole else 'at least '}"
+                 f"{store.gb(held)}, with {store.gb(free)} free"
+                 + ("" if free >= DISK_SPARE else ": a task's writes fail on a full disk; wb "
+                    "discard an open task, or free some"))
     print("--  " + gpu_line())  # informs only: a CPU-only machine isn't broken
     v = lane.abi()
     if v:  # draw a real lane and try a write outside it: the check is the refusal itself
@@ -3398,6 +3451,9 @@ def main(argv=None):
     except RuntimeError as e:  # wb's own failures (git, a config that doesn't parse): a message
         die(str(e))
     except OSError as e:  # a --spec, --message or --file that isn't there: a line, not a traceback
+        if store.disk_full(e):  # (#342)
+            die(f"the disk is full ({e.filename or store.home()}: {e.strerror}): free some, or wb "
+                "discard an open task (wb status lists them)")
         die(f"{e.filename}: {e.strerror}" if e.filename else str(e))  # (the 2026-11-16 audit)
 
 
