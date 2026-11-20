@@ -22,7 +22,7 @@ from pathlib import Path
 from types import SimpleNamespace
 
 from . import (__version__, ask_mcp, audio, bench, chat, context, gitops, hardware, images, lane, lessons, models,
-               optimize, progress, results, router, savings, scan, skills, spend, store, transcript,
+               optimize, progress, results, router, savings, scan, skills, spend, stats, store, transcript,
                tuning, verify)
 from .watch import Watcher, wait_exit
 from . import runner
@@ -2096,6 +2096,17 @@ def cmd_models(a):
 
 
 def cmd_stats(a):
+    """Results by model and size; `wb stats set KEY VALUE` changes what the Stats tab records
+    and shows (stats.py)."""
+    if a.action == "set":
+        if not (a.key and a.value):
+            die("wb stats set recording|live on|off, or wb stats set every 1|2|5")
+        try:
+            stats.set_setting(a.key, a.value)
+        except ValueError as e:
+            die(str(e))
+        print(stats.line())
+        return
     print(results.table())
 
 
@@ -4090,7 +4101,11 @@ def parser() -> argparse.ArgumentParser:
     x.add_argument("--run")
     x.add_argument("--label")
     s.set_defaults(f=cmd_bench)
-    sub.add_parser("stats", help="results by model").set_defaults(f=cmd_stats)
+    s = sub.add_parser("stats", help="results by model; `set` changes the Stats tab's settings")
+    s.add_argument("action", nargs="?", choices=["set"])
+    s.add_argument("key", nargs="?", metavar="KEY", help="recording, live or every")
+    s.add_argument("value", nargs="?", metavar="VALUE", help="on|off, or 1|2|5 (seconds) for every")
+    s.set_defaults(f=cmd_stats)
     s = sub.add_parser("backlog", help="a batch started with --backlog: each task and the batch's saving")
     s.add_argument("name", nargs="?")
     s.add_argument("--json", action="store_true")

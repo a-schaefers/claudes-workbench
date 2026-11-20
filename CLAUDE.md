@@ -118,6 +118,7 @@ dependencies. No packaging: it runs from the clone.
 - `bench.py`: `wb bench`: accepted tasks replayed on any model, graded by their own tests.
 - `verify.py`: `wb verify`, `wb shot`: the base and the candidate run alike, in scratch checkouts.
 - `progress.py`: opt-in progress checks: active work, a hint or a smaller step, what helped.
+- `stats.py`: Stats tab settings.
 - `lessons.py`: what each task taught, gathered into lessons.jsonl by feedback/next/resume/accept/discard.
 - `transcript.py`: `wb watch` (the session export merged with the task's events; `--json` feeds
   the mod's pane). `transcript.export` is also the runner's view of the session.
@@ -190,7 +191,7 @@ Runs on Linux, WSL2 and macOS; the launchers refuse native Windows and Python be
 Plain files under `$WB_HOME` (`~/.local/state/workbench`); the full tree and every format are in
 ARCHITECTURE.md (*Files and formats*):
 ```
-notify{,.old}.jsonl results.jsonl lessons.jsonl notes.md coding.json progress.json tuning.json speed.json gpu*.{lock,json,admit,load}
+notify{,.old}.jsonl results.jsonl lessons.jsonl notes.md coding.json progress.json stats.json tuning.json speed.json gpu*.{lock,json,admit,load}
 scout.json update.json watch.json optimize.json gc.json archive/ imports/ images/ audio/ chat/{messages,receipts,asks,seen}.jsonl chat/{listener,prefs,push,claims,switch,open,port}.json
 bench/{cases/<case>,runs/<run>}/ bench/runs.jsonl bench/driver.json
 rules/<task>/  opencode.json HANDBOOK.md CLAUDE.md bin/git grants.json gitdir.json (no lane)
