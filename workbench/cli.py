@@ -721,7 +721,8 @@ def cmd_next(a):
         _settle_proposals(task, a.take_claude_md)
         try:
             commit = gitops.commit_all(task.worktree, f"{a.message}\n\nWorkbench-Task: {a.name} "
-                                       f"(step {step})\nOpenCode-Session: {st.get('session')}")
+                                       f"(step {step})\nOpenCode-Session: {st.get('session')}",
+                                       a.include)
         except gitops.GitError as e:
             die(str(e))
     _spec_gaps(task, a.spec_gap)  # after the commit: a retry after a failed one counts them once
@@ -1520,7 +1521,7 @@ def cmd_accept(a):
         if not commit:
             head = gitops.git(task.worktree, "rev-parse", "HEAD").strip()
             if gitops.changed(task.worktree) or head == spec["base"]:
-                commit = gitops.commit_all(task.worktree, msg)
+                commit = gitops.commit_all(task.worktree, msg, a.include)
             else:  # nothing new: the branch's commits past the base are the work (the steps
                 # wb next committed, or Claude's own after a takeover: the audit)
                 commit = gitops.git(task.worktree, "rev-parse", "--short", "HEAD").strip()
@@ -3256,6 +3257,8 @@ def parser() -> argparse.ArgumentParser:
     s.add_argument("name"); s.add_argument("--spec", required=True, help="the next step's spec file, or - for stdin")
     s.add_argument("--message", "-m", required=True, help="commit subject for the approved step")
     s.add_argument("--test", help="the next step's acceptance command (default: unchanged)")
+    s.add_argument("--include", action="store_true", help="commit it even with more than "
+                   f"{gitops.NEW_FILES_MAX} new files or a large new binary (build output?)")
     s.add_argument("--fresh", action="store_true", help="a fresh session instead of the same one")
     s.add_argument("--take-claude-md", action="store_true",
                    help="put the agent's proposed CLAUDE.md/AGENTS.md (<name>.proposed) over the "
@@ -3442,6 +3445,8 @@ def parser() -> argparse.ArgumentParser:
     s = sub.add_parser("accept", help="commit the work on its branch and close the task")
     s.add_argument("name"); s.add_argument("--message", "-m", required=True)
     s.add_argument("--merge", action="store_true"); s.add_argument("--force", action="store_true")
+    s.add_argument("--include", action="store_true", help="commit it even with more than "
+                   f"{gitops.NEW_FILES_MAX} new files or a large new binary (build output?)")
     s.add_argument("--take-claude-md", action="store_true",
                    help="put the agent's proposed CLAUDE.md/AGENTS.md (<name>.proposed) over the "
                    "file before committing; without it they are dropped")

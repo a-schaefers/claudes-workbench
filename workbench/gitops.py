@@ -178,6 +178,64 @@ def changed(worktree: Path) -> str:
     return git(worktree, "status", "--porcelain", "--untracked-files=all").rstrip()
 
 
+# A changed-file list goes into every report and check-in Claude reads: whole, a build/ the
+# project doesn't ignore added a line per file, thousands a wake (#251, the audit of 1.2)
+CHANGED_SHOWN = 40  # lines listed as they are; the rest are counted by top-level directory
+BUILD_FILES = 50    # new files in one new top-level directory: likely build output
+NEW_FILES_MAX = 300  # wb accept and wb next commit no more new files than this without --include
+BINARY_MAX = 1 << 20  # nor a new binary file this big
+
+
+def _top(line: str) -> str:
+    path = line[3:].strip('"')
+    return path.split("/", 1)[0] + "/" if "/" in path else "(top level)"
+
+
+def brief(files: str, shown: int = CHANGED_SHOWN) -> list[str]:
+    """``changed``'s lines, the first ``shown`` as they are and the rest counted by top-level
+    directory (`build/ (2,314 more files)`)."""
+    lines = files.splitlines()
+    if len(lines) <= shown:
+        return lines
+    rest = Counter(_top(x) for x in lines[shown:])
+    return lines[:shown] + [f"{d} ({n:,} more file{'s' if n > 1 else ''})"
+                            for d, n in rest.most_common()]
+
+
+def brief_paths(files: str, shown: int = CHANGED_SHOWN) -> str:
+    """``brief`` as one line of paths, for a check-in."""
+    return ", ".join(x[3:] if x[2:3] == " " and x[:2].strip() else x
+                     for x in brief(files, shown)) if files else "none"
+
+
+def build_dirs(worktree: Path, files: str) -> list[tuple[str, int]]:
+    """New top-level directories (none at HEAD) holding BUILD_FILES or more untracked files:
+    likely build output the project doesn't ignore. [(dir/, files)]."""
+    counts = Counter(_top(x) for x in files.splitlines() if x.startswith("??") and "/" in x[3:])
+    return [(d, n) for d, n in counts.most_common() if n >= BUILD_FILES and d != "(top level)"
+            and not git(worktree, "ls-tree", "--name-only", "HEAD", "--", d.rstrip("/"),
+                        check=False).strip()]
+
+
+def _bulk(worktree: Path) -> str | None:
+    """Why the staged commit holds what nobody meant to commit: more than NEW_FILES_MAX new
+    files, or a new binary file of BINARY_MAX or more. None when it doesn't."""
+    added = [p for p in git(worktree, "diff", "--cached", "--name-only", "--no-renames",
+                            "--diff-filter=A", "-z").split("\0") if p]
+    why = []
+    if len(added) > NEW_FILES_MAX:
+        tops = Counter(_top("?? " + p) for p in added).most_common(3)
+        why.append(f"{len(added):,} new files ({', '.join(f'{d} {n:,}' for d, n in tops)})")
+    for row in git(worktree, "diff", "--cached", "--numstat", "--no-renames", "--diff-filter=A",
+                   "-z").split("\0"):
+        if row.startswith("-\t-\t"):  # git's mark for a binary file
+            p = row[4:]
+            size = os.lstat(Path(worktree) / p).st_size if os.path.lexists(Path(worktree) / p) else 0
+            if size >= BINARY_MAX:
+                why.append(f"a {size / (1 << 20):.0f} MB binary file, {p}")
+    return "; ".join(why[:4]) or None
+
+
 MARK_READ_MAX = 1 << 20  # a new file past this counts by its size and time, not its bytes
 
 
@@ -286,16 +344,21 @@ def stack(repo) -> list[str]:
     return [lang for lang, n in langs.most_common(2) if n >= STACK_SHARE * total]
 
 
-def commit_all(worktree: Path, message: str) -> str:
+def commit_all(worktree: Path, message: str, include: bool = False) -> str:
     """Commit everything in the worktree, without git hooks (NO_HOOKS; also for a task started
     before its git dir was recorded) but signed if the user signs. Refuses a nested repository: committed, it was a gitlink to
-    a commit that exists nowhere else."""
+    a commit that exists nowhere else. Refuses, unless ``include``, more than NEW_FILES_MAX new
+    files or a large new binary: `add -A` committed a build/ the project didn't ignore (#251)."""
     if nested := nested_repos(worktree):
         raise GitError(f"{', '.join(nested)}: a git repository of its own, so not committed: "
                        "remove its .git or gitignore it, then try again")
     git(worktree, *NO_HOOKS, "add", "-A")
     if not git(worktree, "diff", "--cached", "--name-only").strip():
         raise GitError("nothing to commit: the agent's worktree has no changes")
+    if not include and (why := _bulk(worktree)):
+        git(worktree, "reset", "-q")  # unstaged again: the files stay in the worktree
+        raise GitError(f"not committed: {why}. Build output? Gitignore or remove it in "
+                       f"{worktree}, or --include to commit it anyway")
     git(worktree, *NO_HOOKS, "commit", "-q", "-m", message)
     return git(worktree, "rev-parse", "--short", "HEAD").strip()
 
