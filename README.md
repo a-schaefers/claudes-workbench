@@ -40,7 +40,7 @@ Claude Code plugin that connects the two inside your normal Claude Code session.
 ```sh
 claude plugin marketplace add a-schaefers/claudes-workbench
 claude plugin install workbench@workbench
-~/.claude/plugins/marketplaces/workbench/bin/wb setup   # puts wb on your PATH and /workbench in your skills
+"${CLAUDE_CONFIG_DIR:-$HOME/.claude}"/plugins/marketplaces/workbench/bin/wb setup   # puts wb on your PATH and /workbench in your skills
 ```
 
 ### In Claude Code, inside your project

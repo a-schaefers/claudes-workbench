@@ -33,6 +33,7 @@ import json
 import os
 import re
 import time
+import uuid
 from contextlib import contextmanager
 from pathlib import Path
 
@@ -87,11 +88,19 @@ def now() -> float:
 
 def write_json(path: Path, data) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
-    tmp = path.with_name(f".{path.name}.{os.getpid()}.tmp")
-    # UTF-8 whatever the locale: under a legacy one an em dash in a spec failed to write and a
-    # file written under UTF-8 failed to read back (the 2026-11-16 audit)
-    tmp.write_text(json.dumps(data, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
-    os.replace(tmp, path)  # readers (woken by inotify on the rename) never see half a file
+    # a name of its own per write, created exclusively: by pid alone, two of the chat server's
+    # threads writing one file shared it, and one's rename found it gone (the 2026-11-19 audit).
+    # Not mkstemp, whose 0600 would replace the file's mode.
+    tmp = path.with_name(f".{path.name}.{os.getpid()}.{uuid.uuid4().hex[:12]}.tmp")
+    try:
+        # UTF-8 whatever the locale: under a legacy one an em dash in a spec failed to write and a
+        # file written under UTF-8 failed to read back (the 2026-11-16 audit)
+        with open(tmp, "x", encoding="utf-8") as fh:
+            fh.write(json.dumps(data, indent=2, ensure_ascii=False) + "\n")
+        os.replace(tmp, path)  # readers (woken by inotify on the rename) never see half a file
+    except BaseException:
+        tmp.unlink(missing_ok=True)
+        raise
 
 
 def read_json(path: Path, default=None):

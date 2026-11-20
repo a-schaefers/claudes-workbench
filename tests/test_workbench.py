@@ -6725,6 +6725,20 @@ class Hardware(unittest.TestCase):
         self.assertEqual([g["name"] for g in gpus], ["NVIDIA GeForce RTX 4090"])
         self.assertEqual(gpus[0]["vram"], 24564 * 2 ** 20)
 
+    def test_wsl_finds_its_nvidia_smi_when_path_lacks_it(self):
+        # the 2026-11-19 audit: under a systemd unit WSL's /usr/lib/wsl/lib isn't on PATH, and the
+        # GPU went unseen
+        line = "GPU-5e1f, NVIDIA GeForce RTX 4090, 24564, 1000, 560.94"
+        smi = Path(tempfile.mkdtemp()) / "nvidia-smi"
+        self.addCleanup(shutil.rmtree, smi.parent)
+        smi.write_text("")
+        hw = self.fake("Linux", files={"/proc/version": "microsoft-standard-WSL2"},
+                       runs={(str(smi),): line})
+        with mock.patch.object(hw, "WSL_SMI", str(smi)), mock.patch.object(hw.shutil, "which", lambda n: None):
+            self.assertEqual([g["name"] for g in hw.gpus(windows=False)], ["NVIDIA GeForce RTX 4090"])
+        with mock.patch.object(hw, "WSL_SMI", str(smi)), mock.patch.object(hw.shutil, "which", lambda n: "/usr/bin/" + n):
+            self.assertEqual(hw.smi(), "nvidia-smi")         # PATH's first
+
     def test_the_gpu_budget_on_wsl_never_starts_powershell(self):
         # every admission and routing paid a PowerShell start of seconds (the 2026-11-16 audit)
         asked = []

@@ -9,7 +9,6 @@ times a second instead and reports what changed, so nothing here is required for
 from __future__ import annotations
 
 import ctypes
-import ctypes.util
 import fnmatch
 import os
 import select
@@ -48,7 +47,10 @@ def _lib():
     global _libc
     if _libc is None:
         try:
-            lib = ctypes.CDLL(ctypes.util.find_library("c") or "libc.so.6", use_errno=True)
+            # the process's own symbols, libc's among them, as lane.py loads them: musl (Alpine)
+            # has no libc.so.6 and find_library may find nothing, so watching fell back to
+            # polling (the 2026-11-19 audit)
+            lib = ctypes.CDLL(None, use_errno=True)
             lib.inotify_init1.argtypes = [ctypes.c_int]
             lib.inotify_add_watch.argtypes = [ctypes.c_int, ctypes.c_char_p, ctypes.c_uint32]
             _libc = lib

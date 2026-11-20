@@ -1,4 +1,6 @@
 """Machines other than the one workbench grew up on: other servers, ports, configs, platforms, speeds."""
+import ctypes
+import ctypes.util
 import io
 import json
 import os
@@ -700,6 +702,50 @@ class Real(unittest.TestCase):
         self.assertEqual(context.claude_home(), Path(self.tmp.name) / "cc")
         self.assertIn("my-own", context.denied_skills())
 
+
+    def test_threads_writing_one_state_file_never_share_a_temp_file(self):
+        # the 2026-11-19 audit: named by pid alone, two of the chat server's threads writing
+        # push-test.json shared one temp file, and one's rename found it gone (a 500)
+        p = Path(self.tmp.name) / "push-test.json"
+        errors = []
+
+        def write(n):
+            try:
+                for i in range(200):
+                    store.write_json(p, {"thread": n, "i": i, "pad": "x" * 2000})
+            except OSError as e:
+                errors.append(e)
+        threads = [threading.Thread(target=write, args=(n,)) for n in range(4)]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join()
+        self.assertEqual(errors, [])
+        self.assertEqual(store.read_json(p)["i"], 199)
+        self.assertEqual([f.name for f in p.parent.iterdir()], ["push-test.json"])  # no temp left
+        mode = p.stat().st_mode & 0o777
+        p.unlink()
+        with mock.patch("json.dumps", side_effect=ValueError("no")), self.assertRaises(ValueError):
+            store.write_json(p, {})
+        self.assertEqual(list(p.parent.iterdir()), [])    # a failed write leaves nothing behind
+        store.write_json(p, {})
+        self.assertEqual(p.stat().st_mode & 0o777, mode)  # the umask's mode, not mkstemp's 0600
+
+    def test_inotify_works_where_libc_isnt_libc_so_6(self):
+        # the 2026-11-19 audit: on musl (Alpine) find_library("c") can find nothing and there is
+        # no libc.so.6, so every wait fell back to polling
+        if not sys.platform.startswith("linux"):
+            self.skipTest("inotify is Linux's")
+        from workbench import watch
+        real = ctypes.CDLL
+
+        def musl(name, *a, **kw):
+            if name and "libc.so" in str(name):
+                raise OSError(f"{name}: cannot open shared object file")
+            return real(name, *a, **kw)
+        with mock.patch.object(watch, "_libc", None), mock.patch("ctypes.CDLL", musl), \
+                mock.patch("ctypes.util.find_library", lambda name: None):
+            self.assertTrue(watch._lib())
 
     def test_state_files_are_utf8_under_a_legacy_locale(self):
         # the 2026-11-16 audit: an em dash in a spec failed to write under a non-UTF-8 locale
