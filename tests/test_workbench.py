@@ -4335,6 +4335,34 @@ class Images(Base):
         self.assertIn("fake: ", run_wb("image", "--list"))
         self.assertIn("ready", run_wb("image", "--list"))
 
+    def test_a_second_run_keeps_the_first_candidate_and_an_engine_that_writes_nothing_fails(self):
+        # #267 (the audit of 1.2): two prompts with the same first six words and seed wrote one
+        # PNG and sidecar, the second over the first; and an engine that exited 0 without writing
+        # anything passed on the old PNG, its sidecar rewritten for the new prompt
+        tmp = Path(self.tmp.name)
+        fake = tmp / "fake_image.py"
+        fake.write_text("import os, sys\n"
+                        "a = sys.argv[1:]\n"
+                        "if not os.environ.get('NOTHING'):\n"
+                        "    open(a[a.index('-o') + 1], 'wb').write(a[a.index('-p') + 1].encode())\n")
+        self.engines({"fake": {"command": f"{sys.executable} {fake} -p {{prompt}} -o {{out}}"}})
+        first, second = "a red fox in the snow at dawn", "a red fox in the snow at dusk"
+        run_wb("image", first, "--n", "1", "--seed", "5", "--out", str(tmp / "img"))
+        run_wb("image", second, "--n", "1", "--seed", "5", "--out", str(tmp / "img"))
+        a, b = tmp / "img" / "a-red-fox-in-the-snow-5.png", tmp / "img" / "a-red-fox-in-the-snow-5-2.png"
+        self.assertEqual((a.read_text(), b.read_text()), (first, second))
+        self.assertEqual(json.loads(a.with_suffix(".json").read_text())["prompt"], first)
+        self.assertEqual(json.loads(b.with_suffix(".json").read_text())["prompt"], second)
+        os.environ["NOTHING"] = "1"
+        err = io.StringIO()
+        with self.assertRaises(SystemExit), redirect_stderr(err):
+            run_wb("image", first, "--n", "1", "--seed", "5", "--out", str(tmp / "img"))
+        self.assertIn("without an image", err.getvalue())
+        self.assertEqual(sorted(p.name for p in (tmp / "img").iterdir() if p.name != "engine.log"),
+                         ["a-red-fox-in-the-snow-5-2.json", "a-red-fox-in-the-snow-5-2.png",
+                          "a-red-fox-in-the-snow-5.json", "a-red-fox-in-the-snow-5.png"])
+        self.assertEqual(json.loads(a.with_suffix(".json").read_text())["prompt"], first)
+
     def test_wb_image_list_as_a_word_lists_the_engines_instead_of_drawing(self):
         # like `wb skill list`: it took the GPU and drew four pictures of "list" (the 2026-11-16 audit)
         tmp = Path(self.tmp.name)
