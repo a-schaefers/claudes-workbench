@@ -1646,8 +1646,8 @@ tasks take turns on the GPU. A server OpenCode has no provider for: `wb model ad
 --url <baseURL>` (`--context N` when it doesn't say its window).
 
 #### The context window
-16K tokens at the least; 32K or more is better. OpenCode's instructions and tools take a good
-part of it, and the window sets how much of a task one agent can take on. `wb doctor` flags a
+16K tokens at the least; 32K or more is recommended (the README says so). OpenCode's own
+prompt, its instructions and tools, takes about 10K of it, and the window sets how much of a task one agent can take on. `wb doctor` flags a
 window that's too small or doesn't match the model's entry. Most servers start small:
 - Ollama: `OLLAMA_CONTEXT_LENGTH` in the service's environment. Its default is small and cuts
   the prompt off without a word.
@@ -3921,8 +3921,10 @@ run there means a new OpenCode broke the interop. The README shows all three as 
 newer push cancels a workflow's run on a branch, never on main (`cancel-in-progress` is off
 there): shields.io shows a cancelled run as failing, and two merges a minute apart turned the
 tests badge red with nothing broken (2026-11-19). The
-exact floors are kept here; the README names only the majors (Python 3.11, OpenCode 2.x) so it
-can't fall behind (2026-11-17, #102): Claude Code 2.1.287, the floor for mods, and the mod's own
+exact floors are kept here; the README names only the ones a user checks (Python 3.11, OpenCode
+2.3, `runner.OPENCODE_TESTED`'s floor, and a 32K window recommended, 16K the least: OpenCode's own
+prompt is about 10K tokens, so a 16K task hands over almost at once; it said "OpenCode 2.x" and
+"16K at least" until #273, the audit of 1.2) so it can't fall behind (2026-11-17, #102): Claude Code 2.1.287, the floor for mods, and the mod's own
 `MIN_CLAUDE_CODE` (the `CLAUDE_CODE_VERSION` it is verified with), below which it toasts once per
 load (`this Claude Code (<v>) is older than <min>…: claude update if they misbehave`, also when
 `$.session.version` itself is missing) and carries on (the 2026-11-19 audit: an older one met a

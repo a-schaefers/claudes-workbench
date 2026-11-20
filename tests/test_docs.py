@@ -90,6 +90,16 @@ class DocsMatchTheCode(unittest.TestCase):
         missing = sorted(n for n in names if f"`{n}`" not in CLAUDE)
         self.assertEqual(missing, [], "add these to CLAUDE.md's *State and config*")
 
+    def test_the_readme_names_the_floors_the_code_holds(self):
+        # #273 (the audit of 1.2): "OpenCode 2.x" while runner.OPENCODE_TESTED starts at 2.3, and
+        # "16K at least" with OpenCode's own prompt about 10K of it
+        from workbench import models, runner
+        readme = (ROOT / "README.md").read_text()
+        low = ".".join(map(str, runner.OPENCODE_TESTED[0]))
+        self.assertIn(f"[OpenCode](https://opencode.ai) {low} or newer", readme)
+        self.assertIn(f"{models.MIN_WINDOW // 1024}K at the least", readme)
+        self.assertIn("32K context window recommended", readme)
+
     def test_claude_md_stays_under_claude_codes_size_warning(self):
         # Claude Code warns past 40,000 characters, and every session that changes the code
         # loads this file (local agents too, when workbench delegates work on itself)
