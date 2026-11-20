@@ -1,3 +1,10 @@
 __pycache__/
 *.pyc
 mod/.claude-plugin/types/
+# Scratch notes in the repo root stay local (an experiment's steps, a draft): only these root
+# docs are the project's. Anchored with /, so nested .md files (docs/, skill/, mod/) are unaffected.
+/*.md
+!/README.md
+!/CLAUDE.md
+!/ARCHITECTURE.md
+!/THESIS.md
