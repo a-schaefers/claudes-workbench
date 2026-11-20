@@ -16,6 +16,7 @@ import re
 import shlex
 import shutil
 import subprocess
+import time
 from pathlib import Path
 
 GB = 1024 ** 3
@@ -204,8 +205,16 @@ def visible(devs: list[dict], env: dict) -> tuple[list[dict], list[str]]:
     return devs, notes
 
 
+_ENERGY: dict = {}  # hwmon energy1_input path → (monotonic seconds, microjoules) at the last reading
+
+
 def gpu_power_w(drm: Path = Path("/sys/class/drm")) -> float | None:
-    """Power draw of the discrete cards, in watts: nvidia-smi's power.draw, or hwmon's power1_average."""
+    """Power draw of the discrete cards, in watts: nvidia-smi's power.draw, else each card's
+    hwmon power1_average, power1_input (amdgpu generations with no average), or the average over
+    the time since the last call from its energy1_input counter (Intel's i915 and xe publish only
+    that): read from power1_average alone, those cards' energy stayed 0 and the savings said it
+    wasn't measured (#271, the audit of 1.2). A counter's first reading, and one that went back
+    (wrapped or reset), gives nothing for that interval."""
     if system() == "macos":
         return None
     total = 0.0
@@ -218,15 +227,28 @@ def gpu_power_w(drm: Path = Path("/sys/class/drm")) -> float | None:
         nvidia = True  # at least one card reported a value
     if nvidia:
         return round(total, 1)
-    for card in sorted(drm.glob("card[0-9]*/device/hwmon/hwmon*/power1_average")):
-        if "-" in card.parent.parent.parent.parent.name:  # a connector (card0-DP-1), not a card
+    found = False
+    for mon in sorted(drm.glob("card[0-9]*/device/hwmon/hwmon*")):
+        if "-" in mon.parent.parent.parent.name:  # a connector (card0-DP-1), not a card
             continue
-        value = _read(card)
-        try:
-            total += int(value) / 1e6
-        except ValueError:
-            continue  # a card reporting nothing, or non-numeric text
-    return round(total, 1) if total else None
+        for name in ("power1_average", "power1_input"):
+            try:
+                total += int(_read(mon / name)) / 1e6
+                found = True
+                break
+            except ValueError:
+                continue  # missing, a card reporting nothing, or non-numeric text
+        else:
+            try:
+                uj = int(_read(mon / "energy1_input"))
+            except ValueError:
+                continue
+            now, key = time.monotonic(), str(mon / "energy1_input")
+            last, _ENERGY[key] = _ENERGY.get(key), (now, uj)
+            found = True
+            if last and uj >= last[1] and now > last[0]:
+                total += (uj - last[1]) / 1e6 / (now - last[0])
+    return round(total, 1) if found and total else None
 
 
 def memory() -> dict:

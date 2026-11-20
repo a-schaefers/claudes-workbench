@@ -7568,6 +7568,27 @@ class Hardware(unittest.TestCase):
             with mock.patch("platform.system", lambda: "Linux"):
                 self.assertEqual(hardware.gpu_power_w(Path(d)), 240.5)
 
+    def test_gpu_power_reads_power1_input_and_integrates_an_energy_counter(self):
+        # #271 (the audit of 1.2): read from power1_average alone, amdgpu generations with only
+        # power1_input and Intel's i915/xe with only energy1_input measured nothing
+        from workbench import hardware
+        with tempfile.TemporaryDirectory() as d:
+            amd = Path(d, "card0", "device", "hwmon", "hwmon3")
+            intel = Path(d, "card1", "device", "hwmon", "hwmon4")
+            for mon in (amd, intel):
+                mon.mkdir(parents=True)
+            (amd / "power1_input").write_text("50000000\n")             # 50 W
+            (intel / "energy1_input").write_text("1000000000\n")        # 1,000 J so far
+            hardware._ENERGY.clear()
+            with mock.patch("platform.system", lambda: "Linux"), \
+                    mock.patch("workbench.hardware._run", lambda *argv: ""), \
+                    mock.patch.object(hardware.time, "monotonic", side_effect=[100.0, 110.0, 120.0]):
+                self.assertEqual(hardware.gpu_power_w(Path(d)), 50.0)   # the counter's first reading
+                (intel / "energy1_input").write_text("1300000000\n")    # 300 J in 10 s
+                self.assertEqual(hardware.gpu_power_w(Path(d)), 80.0)
+                (intel / "energy1_input").write_text("5\n")             # wrapped: nothing for it
+                self.assertEqual(hardware.gpu_power_w(Path(d)), 50.0)
+
     def test_gpu_power_nvidia_adds_every_card_and_skips_n_a(self):
         from workbench import hardware
         with tempfile.TemporaryDirectory() as d:

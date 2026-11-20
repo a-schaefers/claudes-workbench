@@ -2085,8 +2085,13 @@ else listed from sysfs, VRAM unknown); macOS reads `system_profiler SPDisplaysDa
 has VRAM unknown).
 `gpu_power_w()`: the cards' draw right now, in watts (None on macOS, or when nothing reads):
 nvidia-smi's `power.draw` summed over the cards that report it, else each sysfs card's
-`device/hwmon/hwmon*/power1_average` (microwatts; a connector, `card0-DP-1`, is skipped). It is
-the GPU energy each task's savings line shows.
+`device/hwmon/hwmon*/power1_average`, else its `power1_input` (amdgpu generations with no
+average), in microwatts, else the average since the last call from its `energy1_input` counter in
+microjoules (Intel's i915 and xe publish only that; `_ENERGY` keeps each counter's last reading,
+and a first reading or one that went back gives nothing for that interval). A connector,
+`card0-DP-1`, is skipped. Read from `power1_average` alone, those cards' energy stayed 0 and the
+savings said it wasn't measured (#271, the audit of 1.2). It is the GPU energy each task's
+savings line shows.
 `memory()`: `/proc/meminfo` or `vm_stat`/`vm.swapusage`. `cpu()`, `ollama_env()` (`OLLAMA_KEYS`:
 `OLLAMA_MODELS`, `OLLAMA_CONTEXT_LENGTH`, `OLLAMA_NUM_PARALLEL`, `OLLAMA_MAX_LOADED_MODELS`,
 `OLLAMA_HOST`, and `VISIBLE`'s `CUDA_VISIBLE_DEVICES`, `ROCR_VISIBLE_DEVICES`,
