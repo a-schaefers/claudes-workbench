@@ -313,15 +313,15 @@ an empty profile.
   several files without an encoding (`cli.py:965, 1180, 1895, 1910, 2008, 2437`). Under a legacy
   non-UTF-8 locale this can raise. Give every text read and write an explicit UTF-8 encoding, as
   `store.py` already does.
-- **Temp-file names:** `store.write_json` names its temp file by pid only (`store.py:77`). Two
+- **~~Temp-file names:~~** **Fixed (#216).** `store.write_json` names its temp file by pid only (`store.py:77`). Two
   chat-server threads writing the same unlocked file (`push-test.json`) can collide and return a
   500. Use `mkstemp`.
-- **WSL:** fall back to `/usr/lib/wsl/lib/nvidia-smi` when it isn't on PATH, as can happen under
+- **~~WSL:~~** **Fixed (#216).** Fall back to `/usr/lib/wsl/lib/nvidia-smi` when it isn't on PATH, as can happen under
   a systemd unit.
-- **Alpine/musl:** `find_library("c")` can return None, so `watch.py` drops to polling. Use
+- **~~Alpine/musl:~~** **Fixed (#216).** `find_library("c")` can return None, so `watch.py` drops to polling. Use
   `CDLL(None)`.
-- **README:** the setup path hard-codes `~/.claude`, which is wrong for `CLAUDE_CONFIG_DIR` users.
-- **The mod:** it declares no minimum Claude Code version and doesn't guard its calls to the
+- **~~README:~~** **Fixed (#216).** The setup path hard-codes `~/.claude`, which is wrong for `CLAUDE_CONFIG_DIR` users.
+- **~~The mod:~~** **Fixed (#216: `MIN_CLAUDE_CODE`, a toast once).** It declares no minimum Claude Code version and doesn't guard its calls to the
   plugin API. Because installs track main, someone on an older Claude Code gets runtime errors
   rather than a message. `claude plugin validate` warns about the missing version (reported by
   Codex; the missing version is deliberate).

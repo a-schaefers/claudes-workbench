@@ -1998,7 +1998,7 @@ Ollama that answers while OpenCode has no provider at all.
 
 **The machine** (`hardware.py`, read fresh on each call; it is also on the hot path:
 `gpu_budget` runs in routing and in the lease). `system()`: `macos`, `wsl` (`/proc/version`
-contains "microsoft"), `linux`. `gpus()`: `nvidia-smi` (UUID, name, MiB total/used, driver; a name may hold commas) on Linux and
+contains "microsoft"), `linux`. `gpus()`: `nvidia-smi` (`smi()`: from PATH, else WSL's `WSL_SMI`, `/usr/lib/wsl/lib/nvidia-smi`, which a systemd unit's PATH may lack; UUID, name, MiB total/used, driver; a name may hold commas) on Linux and
 WSL (`[N/A]` reads as unknown, except on ARM (`aarch64`/`arm64`: a DGX Spark, a Jetson), where
 the GPU shares the RAM: `unified` with `MemTotal`, the 2026-11-19 audit; a line of fewer than
 five fields is skipped); WSL adds Windows' adapters from `powershell.exe Get-CimInstance Win32_VideoController` (no
@@ -3345,7 +3345,7 @@ lists the hooks, calls and env reads; `claude --debug` shows hook errors.
 `workbench/watch.py`. Anything that waits for a file or a process sleeps in the kernel.
 
 - **`Watcher(*dirs, recursive=False, skip=())`**: inotify through ctypes (`inotify_init1`,
-  `inotify_add_watch`) on directories, for modify, attribute changes, close-write, create, delete and moves; a queue
+  `inotify_add_watch`, from `CDLL(None)`, the process's own symbols, so musl works too) on directories, for modify, attribute changes, close-write, create, delete and moves; a queue
   overflow or a directory that went away reports every watched directory as changed rather than
   losing the news. `recursive` adds new subdirectories as they appear; `skip` leaves out
   directories by pattern, matched against the path below the root (`tasks/*/worktree`).
@@ -3561,7 +3561,7 @@ $WB_HOME (~/.local/state/workbench)
 relative paths: `absolute_env()`, first thing in `cli.main` and the runner, makes them absolute
 against wb's cwd (not resolved: a symlinked home stays as named), so every child inherits the
 same place (a relative `WB_HOME` once had wb write the task under its cwd and the runner, which
-runs from the package's directory, look for it there: the 2026-11-16 audit). `write_json` writes `.<name>.<pid>.tmp` beside the file and renames it
+runs from the package's directory, look for it there: the 2026-11-16 audit). `write_json` writes `.<name>.<pid>.<random>.tmp` beside the file (created exclusively, so two threads never share one: the 2026-11-19 audit) and renames it
 (no fsync); `read_json` returns the default for a missing or broken file. `append_jsonl` appends
 one line under `<file>.lock` (flock; a task's own events and steer files under `locks/<task>.<file>.lock`, `store.task_lock`, out of the lane), first ending a last line a write cut short (a full disk, a
 crash), so only that fragment is lost, not the row after it; `read_jsonl(path, offset)` returns
@@ -3696,7 +3696,7 @@ hidden files), `handovers` (fresh sessions). A `wb bench self` row (`bench.self_
 ```sh
 claude plugin marketplace add a-schaefers/claudes-workbench
 claude plugin install workbench@workbench
-~/.claude/plugins/marketplaces/workbench/bin/wb setup
+"${CLAUDE_CONFIG_DIR:-$HOME/.claude}"/plugins/marketplaces/workbench/bin/wb setup
 ```
 then `/workbench` in Claude Code, inside a project: the first time, the skill walks the first run
 in order (`wb setup`'s checklist, `wb scout` and `wb model add`, `wb optimize`, `wb try`, its
@@ -3763,7 +3763,11 @@ newer push cancels a workflow's run on a branch, never on main (`cancel-in-progr
 there): shields.io shows a cancelled run as failing, and two merges a minute apart turned the
 tests badge red with nothing broken (2026-11-19). The
 exact floors are kept here; the README names only the majors (Python 3.11, OpenCode 2.x) so it
-can't fall behind (2026-11-17, #102): Claude Code 2.1.287, the floor for mods; OpenCode 2.2.7, the oldest release that
+can't fall behind (2026-11-17, #102): Claude Code 2.1.287, the floor for mods, and the mod's own
+`MIN_CLAUDE_CODE` (the `CLAUDE_CODE_VERSION` it is verified with), below which it toasts once per
+load (`this Claude Code (<v>) is older than <min>…: claude update if they misbehave`, also when
+`$.session.version` itself is missing) and carries on (the 2026-11-19 audit: an older one met a
+call it lacks as a bare error); OpenCode 2.2.7, the oldest release that
 passes the real-OpenCode tests (2.2.0 never lists `workbench_ask_reviewer`, found 2026-11-17);
 Python 3.11. Each Linux job's `Landlock`
 step prints the runner's Landlock ABI, or that it has none and the Lane tests skip. `chat.yml`
@@ -4033,7 +4037,8 @@ push: every change is a pull request that merges once `check` is green and it is
 - **The `$` uses in `register.tsx`** → only through functions declared at its top level, or
   `claude plugin validate mod` fails.
 - **The Claude Code version** the mod is verified with → `CLAUDE_CODE_VERSION` in
-  `.github/workflows/check.yml`; the floor it needs → *The tests* (the README names no Claude Code version).
+  `.github/workflows/check.yml` and the mod's `MIN_CLAUDE_CODE` (raise it when the mod starts
+  using a call a newer Claude Code added) and `register.test.tsx`'s `TESTED`; the floor it needs → *The tests* (the README names no Claude Code version).
 - **The OpenCode version** the tests are verified with → `OPENCODE_VERSION` and `OPENCODE_SHA256`
   in `check.yml` and `nightly.yml` together; the floor → *The tests*, and the "checked against"
   lines here and in CLAUDE.md; a newer range verified → `runner.OPENCODE_TESTED`.

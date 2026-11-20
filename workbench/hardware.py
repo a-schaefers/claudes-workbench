@@ -37,6 +37,16 @@ def _run(*argv: str) -> str:
         return ""
 
 
+# Where WSL puts the Windows driver's nvidia-smi: on PATH in a login shell, not always under a
+# systemd unit, where the GPU then went unseen (the 2026-11-19 audit)
+WSL_SMI = "/usr/lib/wsl/lib/nvidia-smi"
+
+
+def smi() -> str:
+    """nvidia-smi from PATH, else WSL's."""
+    return "nvidia-smi" if shutil.which("nvidia-smi") or not os.path.isfile(WSL_SMI) else WSL_SMI
+
+
 def system() -> str:
     """linux, wsl, macos, or what Python calls the platform."""
     name = platform.system()
@@ -101,9 +111,9 @@ def gpus(windows: bool = True) -> list[dict]:
     if where == "macos":
         return _mac_gpus()
     found = []
-    smi = _run("nvidia-smi", "--query-gpu=uuid,name,memory.total,memory.used,driver_version",
-               "--format=csv,noheader,nounits").splitlines()
-    for line in smi:
+    listed = _run(smi(), "--query-gpu=uuid,name,memory.total,memory.used,driver_version",
+                  "--format=csv,noheader,nounits").splitlines()
+    for line in listed:
         parts = [x.strip() for x in line.split(",")]
         if len(parts) < 5:
             continue
@@ -129,7 +139,7 @@ def gpus(windows: bool = True) -> list[dict]:
             continue
         uevent = dict(x.split("=", 1) for x in _read(dev / "uevent").splitlines() if "=" in x)
         slot, driver = uevent.get("PCI_SLOT_NAME"), uevent.get("DRIVER", "")
-        if not slot or slot in seen or (driver == "nvidia" and smi):  # nvidia-smi spoke for those
+        if not slot or slot in seen or (driver == "nvidia" and listed):  # nvidia-smi spoke for those
             continue
         seen.add(slot)
         name = _run("lspci", "-s", slot).partition(": ")[2] or uevent.get("PCI_ID", "unknown")
@@ -191,7 +201,7 @@ def gpu_power_w(drm: Path = Path("/sys/class/drm")) -> float | None:
         return None
     total = 0.0
     nvidia = False
-    for line in _run("nvidia-smi", "--query-gpu=power.draw", "--format=csv,noheader,nounits").splitlines():
+    for line in _run(smi(), "--query-gpu=power.draw", "--format=csv,noheader,nounits").splitlines():
         try:
             total += float(line.strip())
         except ValueError:

@@ -63,6 +63,68 @@ test('/workbench run again brings the pane back; alone, it is all it does', asyn
   expect((await skill('add a high-score screen')).text).toContain('add a high-score screen')
 })
 
+test('a Claude Code older than the one the mod is tested on is told so once, and the mod still runs', async ($, on) => {
+  // the 2026-11-19 audit: installs track main, so an older Claude Code met calls it lacks as bare errors
+  const clock = mock.clock(on, { now: 1_800_000_000_000 })
+  const files: Record<string, string> = {}
+  task(files, 'fix-it', 'review', { repo: '/home/u/a', cwd: '/home/u/a' })
+  notice(files, { ts: ts0, task: 'fix-it', kind: 'review', text: 'REPORT-fix-it' })
+  fakeTasks(on, files)
+  on('session.id', () => ({ value: 'sess-new' }))
+  on('process.run', () => ({ value: { exitCode: 0, stdout: '', stderr: '' } }))
+  const toasts: string[] = []
+  on('ui.toast', (_: any, e: any) => { toasts.push(e.text); return { value: undefined } })
+  const woken: string[] = []
+  on('prompt.submit', (_: any, e: any) => { woken.push(e.text); return { text: e.text } })
+  try {
+    engine.version = { version: '2.1.290', base: '2.1.290' }
+    await $.session.start({ cwd: '/home/u/a', surface: 'terminal', isInteractive: true })
+    await clock.advance(3000)
+    expect(toasts.filter(t => t.includes('is older than'))).toEqual([
+      'workbench: this Claude Code (2.1.290) is older than 2.1.311, which the pane and wake-ups are tested on: `claude update` if they misbehave'])
+    expect(woken.filter(t => t.includes('REPORT-fix-it'))).toHaveLength(1)   // it carries on
+    engine.version = undefined
+    await $.session.start({ cwd: '/home/u/a', surface: 'terminal', isInteractive: true })
+    expect(toasts.filter(t => t.includes('is older than'))).toHaveLength(1)  // once per load
+  } finally {
+    engine.version = TESTED
+  }
+})
+
+test('a Claude Code older than $.session.version itself is told so too', async ($, on) => {
+  const clock = mock.clock(on, { now: 1_800_000_000_000 })
+  fakeTasks(on, {}, [])
+  on('process.run', () => ({ value: { exitCode: 0, stdout: '', stderr: '' } }))
+  const toasts: string[] = []
+  on('ui.toast', (_: any, e: any) => { toasts.push(e.text); return { value: undefined } })
+  try {
+    engine.version = undefined
+    await $.session.start({ cwd: '/home/u/a', surface: 'terminal', isInteractive: true })
+    await clock.advance(3000)
+  } finally {
+    engine.version = TESTED
+  }
+  expect(toasts).toContain('workbench: this Claude Code is older than 2.1.311, which the pane and wake-ups are tested on: `claude update` if they misbehave')
+})
+
+test('the Claude Code the mod is tested on, or a newer one, hears nothing about versions', async ($, on) => {
+  const clock = mock.clock(on, { now: 1_800_000_000_000 })
+  fakeTasks(on, {}, [])
+  on('process.run', () => ({ value: { exitCode: 0, stdout: '', stderr: '' } }))
+  const toasts: string[] = []
+  on('ui.toast', (_: any, e: any) => { toasts.push(e.text); return { value: undefined } })
+  try {
+    for (const base of ['2.1.311', '2.1.400-dev', '2.2.0', '3.0.1']) {
+      engine.version = { version: base, base }
+      await $.session.start({ cwd: '/home/u/a', surface: 'terminal', isInteractive: true })
+    }
+    await clock.advance(3000)
+  } finally {
+    engine.version = TESTED
+  }
+  expect(toasts.join('\n')).not.toContain('older than')
+})
+
 test('a copy updated from /delegate gets its /workbench link from wb setup', async ($, on) => {
   const ran: string[][] = []
   const toasts: string[] = []
@@ -96,7 +158,17 @@ function chatOn(files: Record<string, string>) {
   return files
 }
 
+// The Claude Code fakeTasks plays: the one the mod is tested on, unless a test says otherwise
+// (undefined: one older than $.session.version itself)
+const engine: { version?: { version: string; base: string } } = {}
+const TESTED = { version: '2.1.311', base: '2.1.311' }
+engine.version = TESTED
+
 function fakeTasks(on: any, files: Record<string, string>, dirs = ['fix-it'], scouted = true, ui: string[] = [], ears = true) {
+  on('session.version', () => {
+    if (!engine.version) throw new Error('no implementation for session.version')
+    return { value: engine.version }
+  })
   // the weekly model check was done just now, unless the test is about it
   if (scouted) files['/wb/scout.json'] = JSON.stringify({ done_at: 1_800_000_000 })
   on('env.get', (_: any, e: any) => ({ value: ({ WB_HOME: '/wb', HOME: '/home/u' } as any)[e.name] }))

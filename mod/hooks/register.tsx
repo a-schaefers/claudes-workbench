@@ -579,6 +579,26 @@ const warnOnce = ($: any, key: string, text: string) => {
   $.ui.toast(`workbench: ${text}`)
 }
 
+// The Claude Code the mod is verified with (check.yml's CLAUDE_CODE_VERSION). Installs track
+// main, so an older one met a call it lacks as a bare runtime error (the 2026-11-19 audit): it
+// hears why once instead, and the mod carries on, since most of it may still work there.
+const MIN_CLAUDE_CODE = '2.1.311'
+const older = (a: string, b: string) => {
+  const [x, y] = [a, b].map(v => v.split('.').map(n => parseInt(n, 10) || 0))
+  const i = [0, 1, 2].find(k => x[k] !== y[k])
+  return i !== undefined && x[i] < y[i]
+}
+async function checkVersion($: any) {
+  let at: string | undefined
+  try {
+    const v = await $.session.version()
+    at = (v?.base ?? v?.version ?? '').match(/^\d+\.\d+\.\d+/)?.[0]
+  } catch { /* a Claude Code older than the call itself */ }
+  if (at && !older(at, MIN_CLAUDE_CODE)) return
+  warnOnce($, 'version', `this Claude Code${at ? ` (${at})` : ''} is older than ${MIN_CLAUDE_CODE}, ` +
+    'which the pane and wake-ups are tested on: `claude update` if they misbehave')
+}
+
 // The last line of what a failing command said (a traceback ends with the error itself).
 const brief = (out: string) => out.trim().split('\n').filter(Boolean).at(-1) ?? ''
 
@@ -1361,7 +1381,10 @@ export const register: Register = (on, options) => {
     // other sessions' wakes, the weekly check and a `wb status` before every prompt (the
     // 2026-11-16 audit). It stays quiet until then.
     mem.person = e.isInteractive || e.surface != null
-    if (mem.person) startEars($)
+    if (mem.person) {
+      await checkVersion($)
+      startEars($)
+    }
     return next(e)
   })
 

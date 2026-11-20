@@ -70,6 +70,14 @@ class DocsMatchTheCode(unittest.TestCase):
                     missing.append(f"wb {' '.join(words)} {spellings[-1]}")
         self.assertEqual(missing, [], "add these to ARCHITECTURE.md's *Every `wb` command*")
 
+    def test_the_quickstart_finds_the_marketplace_where_claude_code_keeps_it(self):
+        # the 2026-11-19 audit: ~/.claude hard-coded, wrong for CLAUDE_CONFIG_DIR users
+        for text in ((ROOT / "README.md").read_text(), ARCH):
+            setup = [line for line in text.splitlines() if "marketplaces/workbench/bin/wb setup" in line]
+            self.assertTrue(setup)
+            for line in setup:
+                self.assertIn('"${CLAUDE_CONFIG_DIR:-$HOME/.claude}"/plugins/', line)
+
     def test_every_module_is_in_the_layout(self):
         layout = section(CLAUDE, "## Layout")
         missing = [p.name for p in sorted((ROOT / "workbench").glob("*.py"))
