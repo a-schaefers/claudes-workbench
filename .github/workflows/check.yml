@@ -55,6 +55,10 @@ jobs:
           git config --global user.name "workbench CI"
           git config --global user.email "ci@invalid"
       - run: scripts/install-opencode.sh "$OPENCODE_VERSION" "$OPENCODE_SHA256" >> "$GITHUB_PATH"
+      # The Git LFS test (#382) skips without git-lfs; the runner image has it, else apt does.
+      - name: Git LFS
+        run: |
+          git lfs version || { sudo apt-get update -q && sudo apt-get install -yq git-lfs && git lfs version; }
       - name: Landlock
         run: |
           python3 -c 'from workbench import lane; print("Landlock ABI", lane.abi() or "none here: the Lane tests skip")'

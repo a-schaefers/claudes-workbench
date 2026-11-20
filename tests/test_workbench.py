@@ -109,6 +109,9 @@ if subprocess.run(["git", "config", "user.email"], capture_output=True).returnco
 # a program that runs and exits 0: /bin/true on Linux, /usr/bin/true on macOS (where /bin has none)
 TRUE = shutil.which("true") or "/bin/true"
 
+# git-lfs, for the one test of a repo that uses it (#382); CI's runner image has it
+GIT_LFS = subprocess.run(["git", "lfs", "version"], capture_output=True).returncode == 0
+
 
 def home_outside_the_lane(test):
     """For a test that hides credentials under the home directory: the lane writes the temp roots
@@ -1335,6 +1338,36 @@ class Lifecycle(Base):
             not_merged("accept", "t-det", "-m", "feat: answer", "--merge")
         self.assertIn("detached HEAD", err.getvalue())
         self.assertEqual(self.branch("main"), self.branch("feature"))  # neither merged
+
+    def test_a_colocated_jujutsu_repo_is_told_to_merge_with_jj(self):
+        # #385 (the audit of 1.6): jj keeps git's HEAD detached once it has moved the working
+        # copy, so accept --merge refused "a detached HEAD" and offered a git merge, whose commit
+        # a detached HEAD orphans. Built from what git sees of a colocated repo (jj 0.47.1's: a
+        # .jj/ beside .git, ignoring itself, and HEAD detached at the working copy's parent),
+        # with no jj needed
+        g = lambda *a: subprocess.run(["git", "-C", str(self.repo), *a], check=True,  # noqa
+                                      capture_output=True)
+        (self.repo / ".jj" / "repo").mkdir(parents=True)
+        (self.repo / ".jj" / ".gitignore").write_text("/*\n")
+        g("switch", "-q", "--detach", "main")
+        self.start("t-jj", "ok")
+        st = store.Task("t-jj")
+        self.assertIsNone(st.spec["base_branch"])
+        wait_phase("t-jj", {"review"})
+        err = io.StringIO()
+        with redirect_stderr(err):
+            out = not_merged("accept", "t-jj", "-m", "feat: answer", "--merge")
+        self.assertIn("colocated Jujutsu repo", err.getvalue())
+        self.assertIn(f"merge with: jj -R {self.repo} new @- delegate/t-jj", out)
+        self.assertNotIn("git -C", out)
+        # a branch recorded at start (--base main), with jj's detached HEAD out at accept
+        self.start("t-jj2", "ok", "--base", "main")
+        self.assertEqual(store.Task("t-jj2").spec["base_branch"], "main")
+        wait_phase("t-jj2", {"review"})
+        with redirect_stderr(err):
+            not_merged("accept", "t-jj2", "-m", "feat: answer", "--merge")
+        self.assertIn("merge delegate/t-jj2 with jj: jj -R", err.getvalue())
+        self.assertEqual(g("rev-parse", "HEAD").stdout, g("rev-parse", "main").stdout)
 
     def test_an_ignored_file_in_the_checkout_survives_an_accept_merge(self):
         # #189 (the 2026-11-19 audit): the task un-ignored settings.ini and committed a default,
@@ -3561,6 +3594,20 @@ class RealOpenCode(Base):
         self.assertFalse("CANARY-PERSONAL-AGENTS" in text)  # (not assertIn: a prompt per failure)
         self.assertFalse("CANARY-PERSONAL-CLAUDE" in text)
 
+    def test_the_projects_skills_reach_the_agent_whatever_opencodes_claude_code_switches_say(self):
+        # #384 (the audit of 1.6): OPENCODE_DISABLE_CLAUDE_CODE or _SKILLS in the user's
+        # environment made OpenCode 2.3 skip every .claude directory, and the project's own
+        # skills with it, without a word
+        write_skill(self.repo / ".claude" / "skills" / "proj", "proj", "Use when CANARY-PROJ-SKILL.")
+        subprocess.run(["git", "-C", str(self.repo), "add", ".claude"], check=True)
+        subprocess.run(["git", "-C", str(self.repo), "commit", "-qm", "a skill"], check=True)
+        for n, flag in enumerate(("OPENCODE_DISABLE_CLAUDE_CODE", "OPENCODE_DISABLE_CLAUDE_CODE_SKILLS")):
+            with mock.patch.dict(os.environ, {flag: "1" if n else "true"}):
+                self.run_calls(f"t-ccs{n}", [])
+            reqs = Path(self.tmp.name, f"t-ccs{n}-requests.jsonl").read_text().splitlines()
+            text = json.dumps(max(map(json.loads, reqs), key=lambda r: len(r.get("tools", []))))
+            self.assertTrue("CANARY-PROJ-SKILL" in text, flag)  # (not assertIn: a prompt per failure)
+
 
     def run_calls(self, name, calls, *extra, before=None):
         """Run real opencode in a task's worktree, in its lane, against a fake model that makes
@@ -4606,6 +4653,35 @@ class Lane(Base):
         report = run_wb("report", "t-dev")
         self.assertIn("the lane refused /dev/kvm: wb allow t-dev --path /dev/kvm", report)
         self.assertNotIn("refused /dev/null", report)      # in the lane: not the lane's doing
+
+    def test_a_proxy_with_a_password_stays_out_of_the_agents_environment_and_is_said_with_its_way_through(self):
+        # #380 (the audit of 1.6): https_proxy=http://user:pass@proxy:3128 is a URL with a
+        # password, so the agent's environment leaves it out, and a setup's `npm ci` or the tests
+        # failed with network errors that read as the project's, with nothing said
+        proxy = {"https_proxy": "http://user:pass@proxy.example:3128", "no_proxy": "localhost",
+                 "HTTP_PROXY": "http://proxy.example:3128"}       # no password: kept, unsaid
+        said = ('note: the agent\'s environment leaves out https_proxy (a URL with a password): '
+                'commands.json "env": ["https_proxy"] passes it through')
+        with mock.patch.dict(os.environ, proxy):
+            out = self.start("t-px", "ok", "--auto-fix", "0", "--no-base-check", "--test",
+                             "echo 'curl: (6) Could not resolve host: example.org'; exit 6")
+            self.assertIn(said, out)
+            st = wait_phase("t-px", {"review"})
+            self.assertEqual(st["tests"]["proxy"], ["https_proxy"])
+            self.assertIn(said[len("note: "):] + ", if the tests need the network",
+                          run_wb("report", "t-px"))
+            env = runner.agent_env(store.Task("t-px"))
+            self.assertNotIn("https_proxy", env)                  # still a credential
+            self.assertEqual(env["HTTP_PROXY"], proxy["HTTP_PROXY"])
+            self.start("t-px-setup", "ok", "--setup", "echo 'npm ERR! code ECONNREFUSED'; exit 1")
+            wait_phase("t-px-setup", {"failed"})
+            note = [r for r in store.notices() if r["task"] == "t-px-setup"][-1]
+            self.assertIn(said[len("note: "):] + ", if the setup needed it", note["text"])
+            # named in commands.json, it passes and nothing is said
+            Path(os.environ["WB_COMMANDS"]).write_text(json.dumps({"env": ["https_proxy"]}))
+            self.assertNotIn("leaves out", self.start("t-px-named", "ok"))
+            self.assertEqual(runner.agent_env(store.Task("t-px-named"))["https_proxy"],
+                             proxy["https_proxy"])
 
     def test_a_task_unloading_for_its_tests_gets_the_gpus_device_nodes_and_no_other_does(self):
         # #331, the audit of 1.4: --unload-for-tests freed the GPU, but its nodes stayed out of
@@ -7276,6 +7352,73 @@ class Projects(Base):
         self.assertIn("note: submodules (vendor/lib) are empty", self.start("t-sub2", "ok"))
         wait_phase("t-sub2", {"review"})
 
+    def test_a_submodules_own_submodules_are_filled_too_and_named_when_they_cant_be(self):
+        # #383 (the audit of 1.6): only the top .gitmodules was read, so a submodule's own
+        # submodule stayed an empty directory in the worktree and the base check's checkout
+        tmp = Path(self.tmp.name)
+        commit = ["-c", "user.email=t@t", "-c", "user.name=t", "commit", "-qm"]
+        file_ok = ["-c", "protocol.file.allow=always"]
+        inner, lib = tmp / "inner", tmp / "lib"
+        for d in (inner, lib):
+            subprocess.run(["git", "init", "-q", str(d)], check=True)
+        (inner / "in.c").write_text("int y;\n")
+        subprocess.run(["git", "-C", str(inner), "add", "."], check=True)
+        subprocess.run(["git", "-C", str(inner), *commit, "inner"], check=True)
+        (lib / "lib.c").write_text("int x;\n")
+        subprocess.run(["git", "-C", str(lib), *file_ok, "submodule", "add", "-q", str(inner),
+                        "deps/inner"], check=True, capture_output=True)
+        subprocess.run(["git", "-C", str(lib), "add", "."], check=True)
+        subprocess.run(["git", "-C", str(lib), *commit, "lib"], check=True)
+        g = lambda *a: subprocess.run(["git", "-C", str(self.repo), *a], check=True,  # noqa
+                                      capture_output=True)
+        g(*file_ok, "submodule", "add", "-q", str(lib), "vendor/lib")
+        g(*file_ok, "submodule", "update", "-q", "--init", "--recursive")
+        g("commit", "-qm", "a submodule with its own")
+        out = self.start("t-nest", "ok", "--test",
+                         "test -f vendor/lib/deps/inner/in.c && " + TEST_CMD)
+        self.assertNotIn("submodules", out)
+        st = wait_phase("t-nest", {"review"})
+        self.assertEqual(st["base_check"]["exit"], 2)   # in.c there (test -f: 1): grep, no answer
+        in_c = store.Task("t-nest").worktree / "vendor/lib/deps/inner/in.c"
+        self.assertEqual(in_c.read_text(), "int y;\n")
+        self.assertFalse(in_c.stat().st_mode & 0o222)
+        self.assertFalse(in_c.with_name(".git").exists())
+        # the user's checkout of lib without its submodule: said by its whole path
+        subprocess.run(["git", "-C", str(self.repo / "vendor/lib"), "submodule", "deinit", "-q",
+                        "-f", "deps/inner"], check=True, capture_output=True)
+        self.assertIn("note: submodules (vendor/lib/deps/inner) are empty",
+                      self.start("t-nest2", "ok"))
+        wait_phase("t-nest2", {"review"})
+
+    @unittest.skipUnless(GIT_LFS, "needs git-lfs")
+    def test_git_lfs_files_are_data_in_the_scratch_checkouts_and_count_at_their_size(self):
+        # #382 (the audit of 1.6): a --shared scratch clone has none of the repo's local config,
+        # so after `git lfs install --local` the base check ran on pointer files; and wb start's
+        # disk check counted the pointers' bytes, not the files'. Only the repo's own config runs
+        # LFS here: a global or system install would have hidden the first
+        identity = Path(self.tmp.name) / "gitconfig"
+        identity.write_text("[user]\n\tname = t\n\temail = t@t\n")
+        os.environ.update(GIT_CONFIG_GLOBAL=str(identity), GIT_CONFIG_NOSYSTEM="1")
+        g = lambda *a: subprocess.run(["git", "-C", str(self.repo), *a], check=True,  # noqa
+                                      capture_output=True)
+        g("lfs", "install", "--local")
+        g("lfs", "track", "*.bin")
+        (self.repo / "data.bin").write_bytes(b"DATA" + bytes(10**6))
+        g("add", ".")
+        g("commit", "-qm", "LFS data")
+        self.assertLess(int(g("cat-file", "-s", "HEAD:data.bin").stdout), 200)   # a pointer
+        err = io.StringIO()
+        with mock.patch.object(store, "free_bytes", return_value=cli.DISK_SPARE + 2 * 10**6), \
+                self.assertRaises(SystemExit), redirect_stderr(err):
+            self.start("t-lfs-room", "ok")
+        self.assertIn("free where the state directory is", err.getvalue())
+        out = self.start("t-lfs", "ok", "--test", "grep -q DATA data.bin && " + TEST_CMD)
+        self.assertIn("started t-lfs", out)
+        st = wait_phase("t-lfs", {"review"})
+        self.assertEqual(st["base_check"]["exit"], 2)   # the data there (a pointer: 1)
+        self.assertEqual((store.Task("t-lfs").worktree / "data.bin").stat().st_size, 10**6 + 4)
+        self.assertIs(st["tests"]["ok"], True)
+
     def test_accept_says_whether_claude_md_kept_up(self):
         self.start("t-ok", "ok", "--test", TEST_CMD)
         wait_phase("t-ok", {"review"})
@@ -8405,7 +8548,8 @@ class Hardware(unittest.TestCase):
         glob = lambda self, pattern: iter(cards) if self == drm else iter(())  # noqa: E731
         for target, value in (("platform.system", lambda: system), ("platform.machine", lambda: machine),
                               ("workbench.hardware._run", run), ("workbench.hardware._read", read),
-                              ("workbench.hardware.DRM", drm), ("pathlib.Path.glob", glob)):
+                              ("workbench.hardware.DRM", drm), ("pathlib.Path.glob", glob),
+                              ("workbench.hardware.PROC", Path("/fake/proc"))):  # no ollama runs
             patcher = mock.patch(target, value)
             patcher.start()
             self.addCleanup(patcher.stop)
@@ -8449,16 +8593,78 @@ class Hardware(unittest.TestCase):
     def test_ollamas_quoted_service_environment_and_a_context_that_isnt_a_number(self):
         # the 2026-11-16 audit: systemd quotes a value with a space and the split lost it; "32k"
         # crashed wb scout, which Ollama only warns about
-        hw = self.fake("Linux", runs={("systemctl",): '"OLLAMA_MODELS=/data/my models" OLLAMA_CONTEXT_LENGTH=32k'})
+        hw = self.fake("Linux", runs={("systemctl",): 'LoadState=loaded\nActiveState=active\n'
+                                      'Environment="OLLAMA_MODELS=/data/my models" OLLAMA_CONTEXT_LENGTH=32k'})
         self.assertEqual(hw.ollama_env()["OLLAMA_MODELS"], "/data/my models")
         self.assertEqual(hw.ollama_context(), (None, "32k"))
         self.assertIn("OLLAMA_CONTEXT_LENGTH='32k' isn't a number", "\n".join(hw.report()))
 
-    def test_the_cards_ollama_may_see_come_from_its_service_else_the_callers_environment(self):
-        hw = self.fake("Linux", runs={("systemctl",): "CUDA_VISIBLE_DEVICES=1"})
+    def test_the_cards_ollama_may_see_come_from_its_service_alone_else_the_callers_environment(self):
+        # #379 (the audit of 1.6): wb's own environment filled in what the unit left unset, which
+        # a systemd service never reads
+        unit = "LoadState=loaded\nActiveState=active\nEnvironment=CUDA_VISIBLE_DEVICES=1"
+        hw = self.fake("Linux", runs={("systemctl",): unit})
         with mock.patch.dict(os.environ, {"CUDA_VISIBLE_DEVICES": "0", "ROCR_VISIBLE_DEVICES": "2"}):
-            env = hw.ollama_env()
-        self.assertEqual((env["CUDA_VISIBLE_DEVICES"], env["ROCR_VISIBLE_DEVICES"]), ("1", "2"))
+            env, source = hw.ollama_settings()
+            self.assertEqual((env["CUDA_VISIBLE_DEVICES"], source), ("1", "systemd's ollama unit"))
+            self.assertNotIn("ROCR_VISIBLE_DEVICES", env)
+            hw = self.fake("Linux", runs={("systemctl",): "LoadState=not-found"})
+            env, source = hw.ollama_settings()       # nothing says: wb's own environment, a guess
+            self.assertEqual((env["CUDA_VISIBLE_DEVICES"], env["ROCR_VISIBLE_DEVICES"], source), ("0", "2", ""))
+
+    def test_ollamas_settings_come_from_the_ollama_that_runs_a_process_or_a_container(self):
+        # #379 (the audit of 1.6): an ollama serve started by hand, or one in Docker, had its
+        # OLLAMA_NUM_PARALLEL and OLLAMA_MAX_LOADED_MODELS read from systemd or wb's environment
+        from workbench import models
+        unit = "LoadState=loaded\nActiveState=inactive\nEnvironment=OLLAMA_NUM_PARALLEL=1"
+        docker = {("docker", "ps"): "f00d ghcr.io/x/open-webui:main webui\nbeef ollama/ollama:rocm llm",
+                  ("docker", "inspect"): json.dumps(["OLLAMA_NUM_PARALLEL=3", "OLLAMA_HOST=0.0.0.0:11434",
+                                                     "OLLAMA_MODELS=/root/.ollama", "PATH=/usr/bin"])}
+        hw = self.fake("Linux", runs={("systemctl",): unit, **docker})
+        env, source = hw.ollama_settings()   # a container: its knobs, not its paths or its bind
+        self.assertEqual((env["OLLAMA_NUM_PARALLEL"], env["OLLAMA_HOST"], env["OLLAMA_MODELS"], source),
+                         ("3", "", "", "the docker container llm"))
+        hw = self.fake("Linux", runs={("systemctl",): unit})
+        self.assertEqual(hw.ollama_settings()[1], "systemd's ollama unit, not running")
+        with tempfile.TemporaryDirectory() as d:
+            proc = Path(d)
+
+            def process(pid, argv, environ, ns="mnt:[1]"):
+                Path(proc, pid, "ns").mkdir(parents=True)
+                Path(proc, pid, "comm").write_text("ollama\n")
+                Path(proc, pid, "cmdline").write_bytes(b"\0".join(argv) + b"\0")
+                Path(proc, pid, "environ").write_bytes(b"\0".join(environ) + b"\0")
+                os.symlink(ns, Path(proc, pid, "ns", "mnt"))
+            Path(proc, "self", "ns").mkdir(parents=True)
+            os.symlink("mnt:[1]", Path(proc, "self", "ns", "mnt"))
+            process("90", [b"/usr/bin/ollama", b"runner"], [b"OLLAMA_NUM_PARALLEL=9"])  # not the server
+            process("120", [b"/usr/bin/ollama", b"serve"],
+                    [b"OLLAMA_NUM_PARALLEL=4", b"CUDA_VISIBLE_DEVICES=1", b"OLLAMA_HOST=127.0.0.1:11500", b"HOME=/x"])
+            with mock.patch("workbench.hardware.PROC", proc):
+                env, source = hw.ollama_settings()   # started by hand: ahead of any unit
+                self.assertEqual((env["OLLAMA_NUM_PARALLEL"], env["CUDA_VISIBLE_DEVICES"],
+                                  env["OLLAMA_HOST"], source),
+                                 ("4", "1", "127.0.0.1:11500", "the running ollama's environment (pid 120)"))
+                self.assertNotIn("HOME", env)
+                os.unlink(Path(proc, "120", "ns", "mnt"))
+                os.symlink("mnt:[2]", Path(proc, "120", "ns", "mnt"))  # a container's, seen from here
+                env, source = hw.ollama_settings()
+                self.assertEqual((env["OLLAMA_NUM_PARALLEL"], env["OLLAMA_HOST"]), ("4", ""))
+                self.assertNotIn("CUDA_VISIBLE_DEVICES", env)
+                self.assertIn("in a container: its knobs only", source)
+                if os.geteuid():  # another user's ollama (a system unit's): systemd says instead
+                    Path(proc, "120", "environ").chmod(0)
+                    self.assertEqual(hw.ollama_settings()[1], "systemd's ollama unit, not running")
+        ollama = models.Model(id="o/m", provider="o", name="m", base_url="http://127.0.0.1:11434/v1",
+                              engine="ollama", label="o/m")
+        hw = self.fake("Linux")
+        with mock.patch.object(models, "_fake", lambda: False), \
+                mock.patch.object(models, "discover", lambda: {"o/m": ollama}):
+            self.assertIn("ollama's settings unknown", cli.ollama_line())   # wb doctor, wb scout
+            self.assertIn("gpu_gb sets the GPU budget and each model's vram_gb its size", cli.ollama_line())
+            hw = self.fake("Linux", runs={("systemctl",): unit})
+            self.assertEqual(cli.ollama_line(),
+                             "ollama's settings: from systemd's ollama unit, not running (OLLAMA_NUM_PARALLEL=1)")
 
     @unittest.skipIf(os.geteuid() == 0, "root reads every directory")
     def test_an_ollama_models_dir_it_cant_read_is_passed_over(self):

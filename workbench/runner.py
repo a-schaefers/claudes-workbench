@@ -217,12 +217,25 @@ ENV_KEEP = frozenset({"HF_HOME", "HF_HUB_CACHE", "HF_HUB_OFFLINE", "HF_DATASETS_
                       "GOOGLE_CLOUD_PROJECT", "GOOGLE_CLOUD_REGION"})
 
 
+# OpenCode's switches that skip every .claude directory (OpenCode 2.3 reads either, as "1" or
+# "true"), and the project's own .claude/skills with them, without a word (#384, the audit of
+# 1.6). They stay out of the agent's environment: wb hands the instructions itself, and keeps the
+# user's personal skills from the agent by its own rules (context.denied_skills), which are made
+# for OpenCode's default.
+CLAUDE_CODE_OFF = ("OPENCODE_DISABLE_CLAUDE_CODE", "OPENCODE_DISABLE_CLAUDE_CODE_SKILLS")
+
+
+def env_kept(name: str, value: str, through: set) -> bool:
+    """Whether the agent's environment keeps ``name``: passed through by commands.json `env`,
+    configuration (ENV_KEEP), or no credential by its name (SECRET_ENV) nor its value (USERINFO)."""
+    return name in through or name in ENV_KEEP or not (SECRET_ENV.search(name) or USERINFO.search(value))
+
+
 def agent_env(task: store.Task, run: str = "") -> dict:
     """The agent's environment: its config layer, and git read-only (gitguard.py). ``run``: the
     one run it is for (WB_RUN), which sweep can then end alone."""
     through = set(context.commands_conf().get("env", []))
-    keep = {k: v for k, v in os.environ.items() if k in through or k in ENV_KEEP
-            or not (SECRET_ENV.search(k) or USERINFO.search(v))}
+    keep = {k: v for k, v in os.environ.items() if env_kept(k, v, through) and k not in CLAUDE_CODE_OFF}
     layer = write_config_layer(task)
     env = {**keep, "PWD": str(task.workdir),  # opencode finds the project from $PWD
            "OPENCODE_CONFIG": str(layer), **rules_env(json.loads(layer.read_text())),
@@ -238,6 +251,42 @@ def agent_env(task: store.Task, run: str = "") -> dict:
     env.update(gitguard.install(context.rules_dir(task) / "bin", Path(task.spec["repo"]), PKG_ROOT,
                                 env["PATH"]) or {})
     return env
+
+
+# A proxy that holds a password (https_proxy=http://user:pass@proxy:3128, a corporate network) is
+# a URL with a password like any other, so USERINFO leaves it out of the agent's environment, and
+# the setup's `npm ci` or `pip install` and the tests failed with network errors that read as the
+# project's, with nothing said (#380, the audit of 1.6). It stays out, a credential the user
+# hasn't named: wb start says so, and a setup or a test run that fails on a connection says it
+# again (NET_FAILED), each with the commands.json `env` that passes it through.
+def dropped_proxies(env=None) -> list[str]:
+    """The proxy variables (`https_proxy`, `ALL_PROXY` and the like) the agent's environment
+    leaves out of ``env`` (the runner's own by default)."""
+    env = os.environ if env is None else env
+    through = set(context.commands_conf().get("env", []))
+    return sorted(k for k, v in env.items()
+                  if k.lower().endswith("_proxy") and not env_kept(k, v, through))
+
+
+def proxy_line(names: list[str]) -> str:
+    return (f"the agent's environment leaves out {', '.join(names)} (a URL with a password): "
+            f"commands.json \"env\": [{', '.join(json.dumps(n) for n in names)}] passes it through")
+
+
+# What a command that couldn't reach the network prints: npm's and Node's error codes, curl's,
+# Python's (urllib, requests, pip), cargo's and Go's, and a proxy asking for its password.
+NET_FAILED = re.compile(r"\b(ECONNREFUSED|ECONNRESET|ENOTFOUND|ETIMEDOUT|EAI_AGAIN|ENETUNREACH|"
+                        r"EHOSTUNREACH)\b|Could not resolve (host|proxy)|Temporary failure in name "
+                        r"resolution|Name or service not known|nodename nor servname|Network is "
+                        r"unreachable|No route to host|Connection (refused|timed out|reset)|"
+                        r"Failed to establish a new connection|ProxyError|Max retries exceeded|"
+                        r"\b407\b.{0,40}Proxy|failed to connect to|dial tcp|getaddrinfo", re.I)
+
+
+def proxy_gap(output: str) -> list[str]:
+    """The dropped proxies a failed setup or test run may have needed: its output says it
+    couldn't connect (NET_FAILED) and the agent's environment left one out (dropped_proxies)."""
+    return dropped_proxies() if NET_FAILED.search(output[-200_000:]) else []
 
 
 def claude_files_changed(files: str) -> list[str]:
@@ -921,6 +970,8 @@ def run_tests(task: store.Task, n: int):
     result = {"ok": code == 0, "exit": code, "tail": clip_tail(output, 40), "round": n}
     if code != 0 and (refused := lane_refused(task, output)):
         result["lane"] = refused
+    if code != 0 and (gone := proxy_gap(output)):  # #380
+        result["proxy"] = gone
     task.event({"ts": store.now(), "round": n, "kind": "tests", "ok": result["ok"],
                 "text": f"exit {code}"})
     return result
@@ -1049,9 +1100,10 @@ def _prepare(task: store.Task) -> bool:
     what = f"the setup command failed (exit {code})" if isinstance(code, int) else \
         f"setting up the worktree failed ({code})"
     tail = "\n".join("    " + x for x in clip_tail(output, 8, total=1500).splitlines())
+    proxy = f"\n{proxy_line(gone)}, if the setup needed it" if (gone := proxy_gap(output)) else ""
     task.set_status(phase="failed", last=what)
     task.notify("failed", f"task {task.name}: {what} before any round "
-                f"({task.dir / 'setup.txt'}):\n{tail}\nfix it, then wb discard {task.name} and "
+                f"({task.dir / 'setup.txt'}):\n{tail}{proxy}\nfix it, then wb discard {task.name} and "
                 "start again")
     return False
 
@@ -1236,6 +1288,9 @@ def summary_text(task: store.Task, n: int, rnd: dict, tests) -> str:
         for node in tests.get("lane") or ():
             lines.append(f"the lane refused {node}: wb allow {task.name} --path {node} if the "
                          "tests need it (not the agent's bug)")
+        if tests.get("proxy"):  # #380
+            lines.append(f"{proxy_line(tests['proxy'])}, if the tests need the network (not the "
+                         "agent's bug)")
     if st.get("setup_secs") is not None and not st.get("reviews") and st.get("steps", 1) == 1:
         lines.append(f"setup: {st['setup_secs']:.0f}s, once; the scratch checkouts copy what it made")
     if st.get("base_check") and not st.get("reviews") and st.get("steps", 1) == 1:

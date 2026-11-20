@@ -91,6 +91,7 @@ def _run(task: store.Task, checkout, cmd: str, limit: int, keep=None,
         work = context.tree(Path(scratch), task.spec["repo"], task.spec.get("siblings"), "repo")
         work.parent.mkdir(parents=True, exist_ok=True)
         gitops.git(scratch, "clone", "-q", "--shared", "--no-checkout", task.spec["repo"], str(work))
+        gitops.share_lfs(Path(task.spec["repo"]), work)  # its LFS files as data (#382)
         if sparse := gitops.sparse_of(Path(task.spec["repo"])):  # as the task's worktree is (#263)
             gitops.apply_sparse(work, sparse)
         checkout(work)

@@ -567,11 +567,7 @@ def _disk_room(repo: Path, base: str, setup: dict) -> None:
     free = store.free_bytes()
     if free is None:
         return
-    size = 0
-    for row in gitops.git(repo, "ls-tree", "-r", "-l", base, check=False).splitlines():
-        f = row.split(None, 4)
-        if len(f) >= 4 and f[1] == "blob" and f[3].isdigit():
-            size += int(f[3])
+    size = gitops.checkout_size(repo, base)  # Git LFS files at their own size (#382)
     for p in setup.get("copy", ()):
         size += store.dir_size(repo / p, budget=5)[0]
     need = size * DISK_COPIES + DISK_SPARE
@@ -747,6 +743,8 @@ def cmd_start(a):
                   "<path> copies one in); commands.json \"repos\" for every task")
     if context.lane_on() and (gap := context.home_gap()):
         print(f"note: {gap}")
+    if proxies := runner.dropped_proxies():  # #380 (the audit of 1.6)
+        print(f"note: {runner.proxy_line(proxies)}")
     if context.on_windows(str(repo), context.windows_drives()):  # finding 30 (the 2026-11-19 audit)
         print("note: the repo is on a Windows drive, where git is many times slower and wb checks "
               "the worktree at every step: a clone in WSL's own filesystem (~/...) runs faster")
@@ -1742,7 +1740,7 @@ def cmd_accept(a):
         else:
             try:
                 if not into:
-                    raise gitops.GitError(f"{repo} had a detached HEAD out; merge {spec['branch']} by hand")
+                    raise gitops.GitError(gitops.detached(repo, spec["branch"], had=True))
                 merged = gitops.merge(repo, a.name, into, spec["base"] if close["check_base"] else None,
                                       tip=tip, how=close.get("merge_as", "merge"))
             except gitops.GitError as e:
@@ -1779,6 +1777,7 @@ def cmd_accept(a):
               f"{note}: keep it current (update and commit it if this change alters what it says)")
     print(f"accepted {a.name}: commit {commit} on {spec['branch']}" +
           (f", merged into {close['merge_into']} as {merged}" if merged else
+           f"\nmerge with: {gitops.jj_merge(repo, spec['branch'])}" if gitops.jj_colocated(repo) else
            f"\nmerge with: git -C {shlex.quote(str(repo))} merge --no-ff {spec['branch']}"))
     _say(savings.line(row) or spend.line(row.get("claude")))
     _say(checked)
@@ -2279,6 +2278,8 @@ def cmd_scout(a):
     print("\nhardware")
     print("\n".join(hardware.report()))
     print("  " + gpu_line())
+    if said := ollama_line():
+        print("  " + said)
     print("\nimage engines (wb image)")
     print("\n".join(image_lines()) or f"  none: describe one in {images.config_path()}")
     provs = models.providers()
@@ -3361,6 +3362,23 @@ def gpu_line() -> str:
             "wb model sizes <id> trivial keeps a big one off small tasks")
 
 
+def ollama_line() -> str:
+    """Where the Ollama here had its settings read (wb doctor, wb scout), or that nothing could
+    say: sharing and the GPU budget rest on them (#379, the audit of 1.6). "" without a local
+    Ollama model."""
+    if models._fake() or not any(m.engine == "ollama" and not m.remote for m in models.discover().values()):
+        return ""
+    env, source = hardware.ollama_settings()
+    if source:
+        knobs = ", ".join(f"{k}={env[k]}" for k in hardware.OLLAMA_KNOBS if env.get(k))
+        return f"ollama's settings: from {source}" + (f" ({knobs})" if knobs else " (Ollama's defaults)")
+    return ("ollama's settings unknown: no ollama process here wb may read, no systemd unit, no "
+            "ollama container (Ollama for Windows, another user's, a container docker won't show), so "
+            "OLLAMA_NUM_PARALLEL, OLLAMA_MAX_LOADED_MODELS and the GPU masks are guessed from wb's own "
+            "environment: tasks may share where Ollama swaps, or take turns where they'd fit; "
+            f"{models.overrides_path().name}'s gpu_gb sets the GPU budget and each model's vram_gb its size")
+
+
 def cmd_doctor(a):
     ok = True
 
@@ -3508,6 +3526,13 @@ def cmd_doctor(a):
                  + ("" if free >= DISK_SPARE else ": a task's writes fail on a full disk; wb "
                     "discard an open task, or free some"))
     print("--  " + gpu_line())  # informs only: a CPU-only machine isn't broken
+    if said := ollama_line():
+        print("--  " + said)
+    if unheld := models.unheld_loaded(skip=down):  # a shared Ollama: another user's, a tool's (#378)
+        print(f"--  ollama has {', '.join(unheld)} loaded, which no task here holds: a task that "
+              "needs the room unloads it (after it goes idle). If others use this Ollama, "
+              f"{models.overrides_path().name}'s keep_loaded lists models wb never unloads, and "
+              "gpu_gb (when the GPU budget is unknown) lets a model that fits beside them leave them loaded")
     v = lane.abi()
     if v:  # draw a real lane and try a write outside it: the check is the refusal itself
         import tempfile
