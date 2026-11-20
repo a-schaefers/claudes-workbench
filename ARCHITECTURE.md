@@ -2718,7 +2718,9 @@ custom-node packs do run their own Python).
   `.gitignore` (unstaging a staged one) and run it again (the audit: a first commit took an `.env`
   with an API key).
 - **CLAUDE.md stays true.** It goes into every agent prompt, so `wb accept` prints how many code
-  commits it's behind (`cli.claude_md_status`), and the skill has Claude update it after each
+  commits it's behind (`cli.claude_md_status`, at the accepted commit, the task's `tip`: read
+  at the branch `--merge` had deleted, every merged accept said "the repo has no CLAUDE.md", a
+  new user's first result, #269, the audit of 1.2), and the skill has Claude update it after each
   accepted task that changes what it describes.
 
 ## Claude coding: when Claude writes a task's code

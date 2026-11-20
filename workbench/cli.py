@@ -1618,7 +1618,9 @@ def cmd_accept(a):
     _ack_all(task)
     _closed(task)
     try:  # a reminder: it once turned a finished accept into exit 1 (the 2026-11-16 audit)
-        note = claude_md_status(repo, spec["branch"])  # the task's own commit counts
+        # the task's own commit counts: by its recorded object, as --merge deleted the branch,
+        # and every merged accept then said the repo had no CLAUDE.md (#269, the audit of 1.2)
+        note = claude_md_status(repo, gitops.git(repo, "rev-parse", "--short", tip).strip())
     except (gitops.GitError, OSError, ValueError):
         note = None
     if note:

@@ -192,6 +192,9 @@ class Lifecycle(Base):
         self.assertIn("already delivered", run_wb("wait", "t-ok", "--timeout", "1"))
         out = run_wb("accept", "t-ok", "-m", "feat: answer", "--merge")
         self.assertIn("merged", out)
+        # #269 (the audit of 1.2): read at the deleted branch, every merged accept said this
+        self.assertNotIn("no CLAUDE.md", out)
+        self.assertRegex(out, r"CLAUDE\.md (is current with|last changed \d+ commit\(s\) before) [0-9a-f]{7}")
         self.assertEqual((self.repo / "answer.txt").read_text(), "42\n")
         log = subprocess.run(["git", "-C", str(self.repo), "log", "--format=%B", "-n1",
                               store.Task("t-ok").status["tip"]], capture_output=True, text=True).stdout
