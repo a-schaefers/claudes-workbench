@@ -1059,7 +1059,8 @@ deliberately hostile process (the 2026-11-16 audit's list of what it can't stop 
   cloud keys out of it). Of the home directory's own entries only the dotfiles and
   `HOME_READABLE` (`bin`, `go`, `R`, `perl5`) are readable, and of `ONLY_KEPT` (`/dev`, `/mnt`,
   the Windows drives on WSL2, `/media`, `/run/media`, `/run/user`, `/home`, the other users'
-  homes) nothing; beyond those, the task's repo (its secrets left out even when it holds some: a
+  homes) nothing; beyond those, OpenCode's global directory where `OPENCODE_CONFIG_DIR` moved
+  it (the agent's OpenCode loads it itself: #370, the audit of 1.6), the task's repo (its secrets left out even when it holds some: a
   repo at `~/.config`), its `siblings` (read-only: *Setting the worktree up*) and its git common directory (`repo_dirs`: outside the repo when it is a
   linked worktree, where git failed in the lane before the 0.90 review; read-only), workbench itself (even inside Claude's directory, the marketplace
   install), the lane, and the programs the agent runs (`tool_roots`: each PATH directory, the

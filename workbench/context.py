@@ -846,6 +846,10 @@ def readable(task: store.Task) -> list[str] | None:
                                           *lane_paths(task), *siblings(task))  # the git shim,
             if p}                                                              # the ask server
     keep |= tool_roots(hidden)
+    # OpenCode's global config where OPENCODE_CONFIG_DIR keeps it, outside the dotfiles: the
+    # agent's OpenCode loads it itself (#370, the audit of 1.6)
+    if os.environ.get("OPENCODE_CONFIG_DIR"):
+        keep.add(os.path.realpath(Path(os.environ["OPENCODE_CONFIG_DIR"]).expanduser()))
     # the git directory too, outside the repo when it is a linked worktree: git failed there
     # ("gitfile does not point to a valid repository", the 0.90 review); writable() keeps it out
     keep |= repo_dirs(task)

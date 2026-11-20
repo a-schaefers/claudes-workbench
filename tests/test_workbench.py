@@ -4072,6 +4072,11 @@ class Lane(Base):
         self.assertFalse([p for p in reads
                           if p.startswith(str(home)) and ("/.ssh" in p or "/gh" in p)])
         self.assertNotIn(str(home / "letters.txt"), reads)    # the user's own files: not a dotfile
+        (home / "dotfiles" / "opencode").mkdir(parents=True)      # #370: OpenCode's config moved
+        with mock.patch.dict(os.environ, {"OPENCODE_CONFIG_DIR": str(home / "dotfiles" / "opencode")}):
+            moved = context.readable(task)
+        self.assertIn(str(home / "dotfiles" / "opencode"), moved)
+        self.assertNotIn(str(home / "dotfiles"), moved)
         script = ("import sys\nfor f in sys.argv[1:]:\n    try:\n        open(f).read()\n"
                   "        print('read')\n    except PermissionError:\n        print('refused')\n")
         files = [home / ".ssh" / "id_ed25519", home / ".config" / "gh" / "hosts.yml",
