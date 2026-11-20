@@ -218,13 +218,10 @@ def agent_providers() -> dict:
     return out
 
 
-def write_config(cfg: dict, change: str) -> None:
-    """Write OpenCode's config back; refused for a file with comments, which a rewrite would lose,
-    and while two files are layered, which one merged file would rewrite. A refusal says only
-    ``change`` (what to do by hand): it once printed the whole config, a provider's apiKey
-    included, into Claude's context (the 2026-11-16 audit). A symlinked file (dotfiles, stow) is
-    written through to its target, and its mode is kept: a 0600 file holding keys came back
-    0644, and the link was replaced by a plain file (the 2026-11-16 audit)."""
+def config_target(change: str) -> Path:
+    """The file write_config would write, or RuntimeError saying why it won't (and ``change``, to
+    make by hand). Asked first by a change that does something else before writing: wb optimize
+    made its Ollama variant, then the config refused it (#266, the audit of 1.2)."""
     files = opencode_config_files()
     if len(files) > 1:
         raise RuntimeError(f"OpenCode layers {' and '.join(map(str, files))}; wb won't rewrite "
@@ -241,6 +238,17 @@ def write_config(cfg: dict, change: str) -> None:
         raise RuntimeError(f"{path}" + (f" links to {target}, which" if target != path else "")
                            + " isn't writable (a read-only store, such as Nix's?); make this "
                            f"change in its source by hand: {change}")
+    return target
+
+
+def write_config(cfg: dict, change: str) -> None:
+    """Write OpenCode's config back; refused for a file with comments, which a rewrite would lose,
+    and while two files are layered, which one merged file would rewrite (config_target). A
+    refusal says only ``change`` (what to do by hand): it once printed the whole config, a
+    provider's apiKey included, into Claude's context (the 2026-11-16 audit). A symlinked file
+    (dotfiles, stow) is written through to its target, and its mode is kept: a 0600 file holding
+    keys came back 0644, and the link was replaced by a plain file (the 2026-11-16 audit)."""
+    target = config_target(change)
     mode = stat.S_IMODE(target.stat().st_mode) if target.exists() else 0o600  # it may hold keys
     tmp = target.with_name(f".{target.name}.{os.getpid()}.tmp")
     fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)  # never readable by others

@@ -2288,7 +2288,13 @@ audit; a name already in OpenCode's config or Ollama is refused: retire it first
 `num_ctx` N (`/api/create` `from`: no download, no GPU) and OpenCode's entry copied from the
 model's (its options, such as `reasoningEffort: "none"`, and output cap kept; `limit.context`
 and `limit.input` set to the new window; an alias's `id` dropped, since it would name the old model). The router weighs both by their records; retiring the
-old one is the user's call (`wb model retire`).
+old one is the user's call (`wb model retire`). The config is checked first (`models.config_target`,
+the checks `write_config` makes: one file, no comments, writable), before anything is made: the
+variant was made, then a config with comments refused its entry, and once the config was plain
+JSON the retry refused the variant as taken (#266, the audit of 1.2). A variant made and not yet
+registered is kept in optimize.json `made` (`<provider>/<name>` → the source's id), so a retry
+registers it without making it again; a model of that name nobody recorded there is the user's,
+and refused as before.
 
 ## The skill library
 
@@ -3634,7 +3640,8 @@ $WB_HOME (~/.local/state/workbench)
                                  (bench.jsonl and bench/repos/ are the old suite's: nothing reads them)
   optimize.json  optimize.log    wb optimize: {pid, start, began, done, stopped, hardware (fingerprint: [name, vram] per GPU, then ["remote", root, [[name, size]…]] per remote Ollama),
                                  secs_per_load, models: {<id>: {window, fits, spill, tried: [{window,
-                                 size, vram}], ts}}}; the run's output
+                                 size, vram}], ts}}, made: {<provider>/<name>: <source id>} (a variant
+                                 apply made and hasn't registered yet: #266)}; the run's output
   imports/<slug>/                skills fetched by wb skill import, for Claude to read
   images/<YYYYmmdd-HHMMSS>/      wb image's candidates (unless --out), their .json sidecars, engine.log
   chat/                          messages.jsonl  receipts.jsonl  asks.jsonl  prefs.json  listener.json  claims.json

@@ -978,7 +978,7 @@ class Optimize(unittest.TestCase):
 
     def ollama(self, window, entry=None, loaded=None, extra=None):
         loaded, posts = loaded if loaded is not None else [], []
-        test = self
+        test, tags = self, [{"name": "m"}]
 
         class H(BaseHTTPRequestHandler):
             def reply(self, body):
@@ -987,7 +987,7 @@ class Optimize(unittest.TestCase):
                 self.wfile.write(json.dumps(body).encode())
 
             def do_GET(self):
-                self.reply({"/api/version": {"version": "0.40.0"}, "/api/tags": {"models": [{"name": "m"}]},
+                self.reply({"/api/version": {"version": "0.40.0"}, "/api/tags": {"models": tags},
                             "/api/ps": {"models": loaded}}.get(self.path) or {})
 
             def do_POST(self):
@@ -1000,6 +1000,8 @@ class Optimize(unittest.TestCase):
                     if body.get("keep_alive") != 0:
                         size = test.WEIGHTS + test.PER_TOKEN * body["options"]["num_ctx"]
                         loaded.append({"name": "m", "size": size, "size_vram": min(size, test.CARD)})
+                if self.path == "/api/create":
+                    tags.append({"name": body["model"]})
                 self.reply({"status": "success"} if self.path == "/api/create" else {})
 
             def log_message(self, *a):
@@ -1132,6 +1134,34 @@ class Optimize(unittest.TestCase):
         with self.assertRaisesRegex(RuntimeError, "ollama/m:64k exists already"):
             optimize.apply(m)
 
+    def test_apply_checks_the_config_first_and_a_retry_registers_the_variant_it_made(self):
+        # #266 (the audit of 1.2): the variant was made, then a config with comments refused its
+        # entry, and once the config was plain JSON the retry refused the variant it had made
+        from workbench import optimize
+        posts = self.ollama(32768)
+        m = models.discover()["ollama/m"]
+        optimize._record(m.id, optimize.fit(m, 262144))
+        cfg = Path(os.environ["WB_OPENCODE_CONFIG"])
+        plain = cfg.read_text()
+        cfg.write_text("// the user's notes\n" + plain)
+        with self.assertRaisesRegex(RuntimeError, "has comments"):
+            optimize.apply(m)
+        self.assertNotIn("/api/create", [p for p, _ in posts])           # nothing made
+        cfg.write_text(plain)
+        # a variant made and left unregistered (the process died between the two): finished
+        with mock.patch.object(models, "write_entry", side_effect=RuntimeError("killed")):
+            with self.assertRaisesRegex(RuntimeError, "killed"):
+                optimize.apply(m)
+        self.assertEqual([p for p, _ in posts].count("/api/create"), 1)
+        self.assertIn("registered ollama/m:64k", optimize.apply(m))
+        self.assertEqual([p for p, _ in posts].count("/api/create"), 1)  # not made twice
+        self.assertIn("m:64k", models.read_config()["provider"]["ollama"]["models"])
+        self.assertNotIn("ollama/m:64k", optimize.state().get("made") or {})
+        # a model of that name the user made: never taken over
+        models.write_entry("ollama", "m:64k", None)
+        with self.assertRaisesRegex(RuntimeError, "exists already"):
+            optimize.apply(m)
+
     def test_nothing_to_change_says_nothing_and_a_task_on_the_gpu_keeps_it(self):
         self.ollama(65536)
         m = models.discover()["ollama/m"]
@@ -1169,7 +1199,8 @@ class Optimize(unittest.TestCase):
                 mock.patch.object(models, "_started", return_value="1"):  # not ps on the fake
                 popen.return_value.pid = os.getpid()
                 out = optimize.start(if_due=True)
-            self.assertIn("measuring the GPU for 1 local model(s) (the GPU changed)", out[0])
+            # the model and the variant apply made (the fake lists what /api/create made: #266)
+            self.assertIn("measuring the GPU for 2 local model(s) (the GPU changed)", out[0])
             self.assertIn("a task you start goes first", out[0])
             self.assertNotIn("--all", popen.call_args[0][0])
 

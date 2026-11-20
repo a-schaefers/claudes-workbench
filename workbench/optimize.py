@@ -23,6 +23,7 @@ kept. Nothing it does wakes Claude.
 from __future__ import annotations
 
 import contextlib
+import json
 import math
 import os
 import re
@@ -209,6 +210,14 @@ def _record(model_id: str, row: dict) -> None:
     store.write_json(path(), {**st, "models": {**(st.get("models") or {}), model_id: row}})
 
 
+def _made(key: str, source: str | None) -> None:
+    """optimize.json `made`: a variant apply made at the server and hasn't yet registered, so a
+    retry finishes it rather than refusing it as a model of the user's (#266)."""
+    st = state()
+    made = {k: v for k, v in (st.get("made") or {}).items() if k != key}
+    store.write_json(path(), {**st, "made": {**made, **({key: source} if source else {})}})
+
+
 def advice(model_id: str, row: dict) -> str:
     """One line on what the fit says, or "" when there is nothing to change."""
     w, fits, spill = row.get("window"), row.get("fits"), row.get("spill")
@@ -247,21 +256,28 @@ def apply(m: models.Model) -> str:
         raise RuntimeError(f"no measured window to apply for {m.id}: wb optimize first")
     name = entry_name(m.name, fits)
     provider = m.id.split("/", 1)[0]
-    taken = {x.get("name") for x in (models._get(f"{m.root}/api/tags") or {}).get("models", [])}
-    if f"{provider}/{name}" in models.discover() or models._matches(name, taken):
-        raise RuntimeError(f"{provider}/{name} exists already: wb model retire {provider}/{name} "
-                           "first if it should be replaced")
-    models._post(f"{m.root}/api/create", {"model": name, "from": m.name, "stream": False,
-                                          "parameters": {"num_ctx": fits}}, timeout=300)
     entry = dict(m.config)
     entry.pop("id", None)  # an alias's id names m at the server: the new entry is its own model
     out = (entry.get("limit") or {}).get("output") or fits // 8
     entry["limit"] = {**(entry.get("limit") or {}), "context": fits, "input": fits - out, "output": out}
     if entry.get("name"):
         entry["name"] = f"{entry['name']} ({fits // 1024}K)"
+    # the config first: the variant was made, then a config with comments refused its entry, and
+    # the retry refused the variant it had made (#266, the audit of 1.2)
+    models.config_target(f'under provider {provider}\'s "models", add "{name}": {json.dumps(entry)}')
+    key = f"{provider}/{name}"
+    made = (state().get("made") or {}).get(key) == m.id  # this apply's, left unregistered
+    taken = {x.get("name") for x in (models._get(f"{m.root}/api/tags") or {}).get("models", [])}
+    if key in models.discover() or models._matches(name, taken) and not made:
+        raise RuntimeError(f"{key} exists already: wb model retire {key} first if it should be replaced")
+    if not models._matches(name, taken):
+        models._post(f"{m.root}/api/create", {"model": name, "from": m.name, "stream": False,
+                                              "parameters": {"num_ctx": fits}}, timeout=300)
+        _made(key, m.id)
     models.write_entry(provider, name, entry)
+    _made(key, None)
     # measured already: it is the window that fit, so its arrival doesn't make a run due
-    _record(f"{provider}/{name}", {**row, "window": fits, "spill": 0, "tried": [], "ts": store.now()})
+    _record(key, {**row, "window": fits, "spill": 0, "tried": [], "ts": store.now()})
     return (f"registered {provider}/{name}: {m.id}'s settings at a {fits // 1024}K window, all on "
             f"the GPU here. The router weighs both by their records; wb model retire {m.id} when "
             "you'd rather it never runs")
