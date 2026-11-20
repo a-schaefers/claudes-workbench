@@ -63,7 +63,8 @@ def fake_probe(tmp: Path) -> None:
     """A `probe` first on PATH, as `cargo install probe-code` puts one (PROBE_EXPERIMENT.md)."""
     bin_ = tmp / "probe-bin"
     bin_.mkdir()
-    (bin_ / "probe").write_text("#!/bin/sh\necho probe-code 0.6.0\n")
+    (bin_ / "probe").write_text('#!/bin/sh\nif [ "$1" = --help ]; then printf "Commands:\\n  symbols  List symbols\\n"; '
+                                'else echo probe-code 0.6.0; fi\n')
     (bin_ / "probe").chmod(0o755)
     os.environ["PATH"] = f"{bin_}{os.pathsep}{os.environ['PATH']}"
 
@@ -9373,7 +9374,7 @@ class ProbeExperiment(Base):
     def test_without_probe_installed_the_task_runs_as_main_does(self):
         with mock.patch.object(context, "probe_bin", return_value=None):
             self.start("t-noprobe", "ok")
-            self.assertIn("isn't on PATH", cli.experiment_lines()[0])
+            self.assertIn("no probe with `symbols`", cli.experiment_lines()[0])
         wait_phase("t-noprobe", {"review"})
         task = store.Task("t-noprobe")
         self.assertEqual(task.spec["experiments"], {"probe": False})
@@ -9401,6 +9402,16 @@ class ProbeExperiment(Base):
         self.assertEqual(rows["t-before"]["experiments"], ["probe"])   # the results rows say which
         self.assertNotIn("experiments", rows["t-after"])
         self.assertIn("probe: on", run_wb("experiment", "probe", "on"))
+
+    def test_a_probe_without_symbols_counts_as_not_installed(self):
+        # crates.io's probe-code 0.6.0: `symbols` read as a search word (2026-11-20)
+        bin_ = Path(self.tmp.name) / "old-probe"
+        bin_.mkdir()
+        (bin_ / "probe").write_text("#!/bin/sh\nprintf 'Commands:\\n  search  Search code\\n'\n")
+        (bin_ / "probe").chmod(0o755)
+        os.environ["PATH"] = f"{bin_}{os.pathsep}{os.environ['PATH']}"
+        self.assertIsNone(context.probe_bin())
+        self.assertEqual(context.task_experiments(), {"probe": False})
 
     def test_an_unknown_experiment_is_refused(self):
         with self.assertRaises(SystemExit):
