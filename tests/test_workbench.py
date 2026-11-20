@@ -7744,7 +7744,9 @@ class Hardware(unittest.TestCase):
             hardware._ENERGY.clear()
             with mock.patch("platform.system", lambda: "Linux"), \
                     mock.patch("workbench.hardware._run", lambda *argv: ""), \
-                    mock.patch.object(hardware.time, "monotonic", side_effect=[100.0, 110.0, 120.0]):
+                    mock.patch.object(hardware, "time", mock.Mock(wraps=time, monotonic=mock.Mock(
+                        side_effect=[100.0, 110.0, 120.0]))):  # hardware's clock alone: a thread
+                # an earlier test left reading time.monotonic took a reading (CI, PR #357)
                 self.assertEqual(hardware.gpu_power_w(Path(d)), 50.0)   # the counter's first reading
                 (intel / "energy1_input").write_text("1300000000\n")    # 300 J in 10 s
                 self.assertEqual(hardware.gpu_power_w(Path(d)), 80.0)
