@@ -17,7 +17,7 @@ import subprocess
 import sys
 import time
 from collections import defaultdict
-from contextlib import redirect_stderr, redirect_stdout
+from contextlib import contextmanager, redirect_stderr, redirect_stdout
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -1579,6 +1579,21 @@ def cmd_takeover(a):
           f"wb feedback {a.name} --message <file>")
 
 
+@contextmanager
+def _ends_cleanly():
+    """SIGTERM and SIGHUP end the command as an error would, so its cleanups run: the tests' group
+    killed and swept (run_in_lane's finally), the scratch clone removed. Killed by Claude's Bash at
+    its 2 minutes, wb verify left a clone and a test still running (#372, the audit of 1.6)."""
+    def end(signum, _frame):
+        raise SystemExit(128 + signum)
+    old = {s: signal.signal(s, end) for s in (signal.SIGTERM, signal.SIGHUP)}
+    try:
+        yield
+    finally:
+        for s, h in old.items():
+            signal.signal(s, h)
+
+
 def cmd_verify(a):
     """A regression test on the base and on the candidate, each in a scratch checkout under the
     task's lane (#96): whether the test shows the bug the change fixes."""
@@ -1592,7 +1607,8 @@ def cmd_verify(a):
     if not cmd:
         die("name the regression test's command: --test '<cmd>'")
     try:
-        r = verify.run(task, cmd, a.files, a.timeout, a.expect or "", a.setup)
+        with _ends_cleanly():
+            r = verify.run(task, cmd, a.files, a.timeout, a.expect or "", a.setup)
     except (RuntimeError, gitops.GitError) as e:
         die(str(e))
     print("\n".join(verify.lines(r)))
@@ -1605,7 +1621,8 @@ def cmd_shot(a):
     if task.status.get("phase") in store.CLOSED | store.ACTIVE:
         die(f"{a.name} is {task.status.get('phase')}: capture it at review")
     try:
-        m = verify.shot(task, a.capture, a.files, a.viewport, a.timeout, a.setup)
+        with _ends_cleanly():
+            m = verify.shot(task, a.capture, a.files, a.viewport, a.timeout, a.setup)
     except (RuntimeError, gitops.GitError) as e:
         die(str(e))
     print("\n".join(verify.shot_lines(m)))

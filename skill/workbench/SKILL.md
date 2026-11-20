@@ -327,7 +327,9 @@ coding choice is the user's (`wb coding`), never changed by a check.
     special-cased; expected values not just copied from the output. For a bug fix with its own
     regression test, `wb verify <name> --test '<that test>'` shows whether it fails on the base
     and passes on the change (add `--expect '<the assertion's message>'` when you know what the
-    bug's failure prints); after `wb next` the comparison starts at the previous approved step. Only `proven` is proof (`wb report` repeats it, and `wb accept`
+    bug's failure prints); after `wb next` the comparison starts at the previous approved step.
+    It runs the test twice (and the setup, with `--setup`), up to `--timeout` each: when that can
+    pass a minute, run it, and `wb shot`, with `run_in_background: true` and read its notification. Only `proven` is proof (`wb report` repeats it, and `wb accept`
     says when it proves nothing about what you accept). For a visual change, `wb shot <name>
     --capture '<the project's screenshot command>'` captures the base and the candidate the same
     way: look at both images, and if a capture failed, review the code as usual. `--chat` shows the

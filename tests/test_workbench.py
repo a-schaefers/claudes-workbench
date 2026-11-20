@@ -6370,6 +6370,24 @@ class Verify(Base):
         (self.wt / "calc.py").write_text("def kw(watts):\n    return watts // 1000\n")
         self.assertTrue(verify.last(store.Task("t"))["stale"])     # the candidate moved on since
 
+    def test_a_killed_verify_leaves_no_scratch_clone_and_no_test_running(self):
+        # #372 (the audit of 1.6): Claude's Bash killed wb verify at 2 minutes, and its clone and
+        # the test (in a session of its own) were left behind
+        marker = f"sleep {3000 + os.getpid() % 1000}"
+        proc = subprocess.Popen([str(ROOT / "bin" / "wb"), "verify", "t", "--test", marker],
+                                stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
+        def running():
+            return subprocess.run(["pgrep", "-f", f"^{marker}$"], capture_output=True).returncode == 0
+        end = time.monotonic() + 60
+        while not running() and time.monotonic() < end:
+            time.sleep(0.1)
+        self.assertTrue(running(), "the test never started")
+        self.assertTrue(list(store.home().glob(".verify-*")))
+        proc.terminate()
+        self.assertEqual(proc.wait(30), 128 + signal.SIGTERM)
+        self.assertFalse(running())
+        self.assertEqual(list(store.home().glob(".verify-*")), [])
+
     def test_verify_credits_the_step_that_fixed_the_bug(self):
         # #252 (the audit of 1.2): step two's test passed on step one's commit already.
         from workbench import verify
