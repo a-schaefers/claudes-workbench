@@ -1510,6 +1510,24 @@ class Lifecycle(Base):
                     ignore={b"pkg/init.pyc": b"PERSONAL\n"})
                 self._assert_refused_and_kept(repo, g, b"pkg/init.pyc", b"PERSONAL\n")
 
+    def test_a_merge_as_ff_or_squash_keeps_the_history_linear(self):
+        # #352 (the audit of 1.4): --no-ff made a merge commit a linear-history repo refused
+        git = lambda r, *a: subprocess.run(["git", "-C", str(r), *a], check=True,  # noqa
+                                           capture_output=True, text=True).stdout.strip()
+        repo, g = self._merge_case(base={b"a.txt": b"a\n"}, main={b"c.txt": b"c\n"},
+                                   task={b"b.txt": b"b\n"}, ignore={})
+        tip = git(repo, "rev-parse", gitops.branch_name("t"))
+        with self.assertRaisesRegex(gitops.GitError, "backed out"):  # main moved: no ff
+            gitops.merge(repo, "t", "main", how="ff")
+        head = gitops.merge(repo, "t", "main", how="squash")
+        self.assertEqual(git(repo, "rev-list", "--min-parents=2", "--count", "HEAD"), "0")
+        self.assertEqual((repo / "b.txt").read_bytes(), b"b\n")
+        self.assertEqual(git(repo, "log", "-1", "--format=%s", head), git(repo, "log", "-1",
+                                                                         "--format=%s", tip))
+        git(repo, "reset", "-q", "--hard", f"{tip}~1")  # the base: a fast-forward lands the tip
+        self.assertTrue(tip.startswith(gitops.merge(repo, "t", "main", how="ff")))
+        self.assertEqual(git(repo, "rev-list", "--min-parents=2", "--count", "HEAD"), "0")
+
     def test_accept_merge_completes_the_merge_or_says_it_did_not(self):
         # #190 (the 2026-11-19 audit): with branch.main.mergeOptions=--no-commit, git left the
         # merge pending, HEAD unmoved, and accept said merged

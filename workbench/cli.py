@@ -1539,6 +1539,7 @@ def cmd_shot(a):
 
 @one_at_a_time
 def cmd_accept(a):
+    a.merge = a.merge or bool(a.merge_as)  # --merge-as says how, so it merges (#352)
     task = need(a.name)
     reap(task)
     spec, st = task.spec, task.status
@@ -1597,7 +1598,7 @@ def cmd_accept(a):
             into = gitops.current_branch(repo)
         tip = gitops.git(repo, "rev-parse", "--verify", f"{commit}^{{commit}}").strip()
         close = {"commit": commit, "step": measured, "merge": bool(a.merge), "merge_into": into,
-                 "check_base": check_base}
+                 "check_base": check_base, "merge_as": a.merge_as or "merge"}
         task.set_status(closing=close, tip=tip)  # before anything is removed
         _spec_gaps(task, a.spec_gap)
     if warn := gitops.remove_worktree(repo, task.worktree):  # committed: the rest is cleanup
@@ -1614,7 +1615,7 @@ def cmd_accept(a):
                 if not into:
                     raise gitops.GitError(f"{repo} had a detached HEAD out; merge {spec['branch']} by hand")
                 merged = gitops.merge(repo, a.name, into, spec["base"] if close["check_base"] else None,
-                                      tip=tip)
+                                      tip=tip, how=close.get("merge_as", "merge"))
             except gitops.GitError as e:
                 refused = str(e)
                 print(f"wb: not merged: {e}", file=sys.stderr)
@@ -3640,6 +3641,9 @@ def parser() -> argparse.ArgumentParser:
     s = sub.add_parser("accept", help="commit the work on its branch and close the task")
     s.add_argument("name"); s.add_argument("--message", "-m", required=True)
     s.add_argument("--merge", action="store_true"); s.add_argument("--force", action="store_true")
+    s.add_argument("--merge-as", choices=("merge", "ff", "squash"), help="how --merge lands "
+                   "(implies it): a merge commit (the default), fast-forward only, or one squashed "
+                   "commit, for a repo kept to linear history")
     s.add_argument("--include", action="store_true", help="commit it even with more than "
                    f"{gitops.NEW_FILES_MAX} new files or a large new binary (build output?)")
     s.add_argument("--take-claude-md", action="store_true",

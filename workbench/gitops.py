@@ -568,13 +568,16 @@ def start_branch(repo: Path, base: str) -> str | None:
 
 
 def merge(repo: Path, task: str, into: str | None = None, base: str | None = None,
-          *, tip: str | None = None) -> str:
+          *, tip: str | None = None, how: str = "merge") -> str:
     """Merge the task's branch into ``into`` (the branch it started from: task.json's
     base_branch), which the main checkout must have out, clean and not mid-merge; a conflict, an
     ignored file in the way, or a merge git left unfinished is backed out, leaving the repo as it
     was, and success means the branch is in HEAD. With no branch recorded, the checkout's branch must contain
     ``base``, the task's base commit. Never onto a detached HEAD, where the merge is lost at the
-    next checkout, nor onto another branch than the task's (both happened: the 2026-11-16 audit)."""
+    next checkout, nor onto another branch than the task's (both happened: the 2026-11-16 audit).
+    ``how``: "merge" (a merge commit, the default), "ff" (fast-forward only, refused when the
+    branch has moved) or "squash" (one new commit with the tip's message): a repo kept to linear
+    history refused every --no-ff merge (#352, the audit of 1.4). The same guards hold for each."""
     if git(repo, "status", "--porcelain", "--untracked-files=no").strip():
         raise GitError(f"{repo} has uncommitted changes; merge {branch_name(task)} by hand")
     have = current_branch(repo)
@@ -596,8 +599,20 @@ def merge(repo: Path, task: str, into: str | None = None, base: str | None = Non
                        f"{branch_name(task)} by hand")
     # --commit and --no-squash outrank a branch.<name>.mergeOptions of --no-commit or --squash,
     # which left the merge pending while accept said merged (#190, the 2026-11-19 audit)
+    if how == "squash":  # no MERGE_HEAD to abort: a conflict is backed out with reset --merge
+        before = git(repo, "rev-parse", "HEAD").strip()
+        try:
+            git(repo, "merge", "--squash", "--no-commit", source)
+            git(repo, *NO_HOOKS, "commit", "--no-verify", "-q", "-C", source)
+        except GitError as e:
+            git(repo, "reset", "-q", "--merge", before, check=False)
+            raise GitError(f"squashing {branch_name(task)} failed and was backed out: {e}") from None
+        if git(repo, "rev-parse", "HEAD").strip() == before:  # a no-op squash committed nothing
+            raise GitError(f"squashing {branch_name(task)} left nothing to commit: merge it by hand")
+        return git(repo, "rev-parse", "--short", "HEAD").strip()
+    args = ("--ff-only",) if how == "ff" else ("--no-ff", "--commit", "--no-squash")
     try:
-        git(repo, "merge", "--no-ff", "--no-edit", "--commit", "--no-squash", source)
+        git(repo, "merge", *args, "--no-edit", source)
     except GitError as e:
         if _merging(repo):
             git(repo, "merge", "--abort", check=False)
