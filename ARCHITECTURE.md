@@ -1731,6 +1731,8 @@ model id; a model's entry is merged over its provider's (`{**provider, **model}`
   model's own id, allows that model.
 - `remote: <root>`: on a provider, `wb remote` made it (for the Ollama at that root), so `wb
   remote --remove` may delete it (#197).
+- `keep_loaded` (top level, a list): model ids or Ollama names wb never unloads or stops to make
+  room (*Residency*).
 
 **Status** (`status` → {available, resident, why}). First what the config alone rules out, so the
 fake models meet it too: an entry with `tool_call: false` ("OpenCode's config says it can't call
@@ -1781,11 +1783,18 @@ what they hold.
 **Residency** (`make_resident(m, keep, warn)`, called by the runner under the lease). A model
 `status` says can't run raises `RuntimeError` (its reason and remedy) before anything is freed: a
 `--force` task for an unpulled model once emptied the GPU and then failed its load. Nothing to do
-when `m` is resident and nothing else is. Else `free_gpu(keep={m, *keep})`: every other running
+when `m` is resident and nothing else is, or all of it is in VRAM with room beside the rest.
+Nothing is freed when `m` fits beside every model resident now (`_room_beside`: Ollama only, a
+known budget, no other server resident, `m` all in VRAM if loaded, Ollama's loaded-model limit not
+reached, and the loaded sizes from `/api/ps` plus `need(m)` within `SHARE_AT` of the budget):
+every round once unloaded the user's Open WebUI, autocomplete or embedding model, fits or not
+(the 2026-11-19 audit). Else `free_gpu(keep={m, *keep})`: every other running
 server with a `stop` command is stopped once per server, after waiting up to 10 minutes while its
 `/metrics` says a reply is in progress (a running server with no `stop` is left, with a warning
 that it may hold GPU memory); every model loaded on each discovered Ollama server is unloaded
-(`POST /api/generate {keep_alive: 0}`) except kept ones. Then Ollama loads the model (`POST
+(`POST /api/generate {keep_alive: 0}`) except kept ones, and except models.json's `keep_loaded`
+(`keep_loaded()`: ids or Ollama names; a server whose model is listed is never stopped), which
+`_others_resident` doesn't count either. Then Ollama loads the model (`POST
 /api/generate {prompt: "", keep_alive: "30m"}`, 20 min limit) or the server is started. An HTTP
 error from Ollama raises with what Ollama said ("…answered HTTP 500: model requires more system
 memory…", `_post`), not urllib's bare "HTTP Error 500". A start command that exits non-zero while
@@ -1830,8 +1839,10 @@ Metal's recommendedMaxWorkingSetSize; it was 75% everywhere, too much on 8-32 GB
 VRAM means no sharing. `gpus(windows=False)`: the budget never asks WSL's PowerShell. A model's
 need: `vram_gb`, else Ollama's loaded size (weights and context), else weights × `KV_GUESS` 1.25.
 `can_share(m)`: every running model and `m` are Ollama and local, and their needs sum to at most
-`SHARE_AT` 0.9 of the budget; the same model twice (the same `server` and name) needs Ollama's
-`OLLAMA_NUM_PARALLEL` ≥ 2, and different models may not outnumber `OLLAMA_MAX_LOADED_MODELS`
+`SHARE_AT` 0.9 of the budget; the same model again (the same `server` and name) needs a slot of
+`OLLAMA_NUM_PARALLEL` for each task on it (two already running it need 3: a value of 2 once
+admitted any number, and a third task's requests queued inside Ollama while its silence budget
+ran, the 2026-11-19 audit), and different models may not outnumber `OLLAMA_MAX_LOADED_MODELS`
 (unset or 0: `OLLAMA_MAX_LOADED` 3, Ollama's default per GPU), or Ollama swaps them on every
 request (both read from the ollama service's environment, `hardware.ollama_env`). Admission
 happens under the `gpu.admit` flock: holders are the `gpu.json` entries whose process is alive,
@@ -2177,7 +2188,11 @@ state.json's pid is still alive, started when it did, and runs `-m workbench.opt
 reboot gave to another program got its SIGTERM: #82); with neither, the pid is trusted.
 
 `wb optimize apply <id>…`, after the user says yes: makes the measured window an entry of its own
-beside the model, never in place of it: an Ollama model `<name>-<N>k` from it with
+beside the model, never in place of it: an Ollama model named by `entry_name` (the source's
+whole name, tag and quantization kept, the window as the tag's suffix: `family:32b-q4_K_M` →
+`family:32b-q4_K_M-64k`, `m` → `m:64k`, an earlier suffix replaced; the family alone once named
+`family:7b` and `family:32b` both `family-16k`, the second overwriting the first, the 2026-11-19
+audit; a name already in OpenCode's config or Ollama is refused: retire it first) from it with
 `num_ctx` N (`/api/create` `from`: no download, no GPU) and OpenCode's entry copied from the
 model's (its options, such as `reasoningEffort: "none"`, and output cap kept; `limit.context`
 and `limit.input` set to the new window; an alias's `id` dropped, since it would name the old model). The router weighs both by their records; retiring the
@@ -3422,7 +3437,7 @@ delivered as taken (`_stale_notes`, *Notes*).
 |---|---|---|
 | `wb models` | `--set-default` | Each model's state, slice and speeds (and `bench:`, its cases passed, when replayed); the router's ranking per size. `--set-default` writes the significant-work pick as OpenCode's `model`. |
 | `wb model add <provider/model>` | `--pull`, `--label`, `--context N`, `--url URL`, `--start CMD`, `--stop CMD` | Registers a model in opencode.json, merged into any existing entry; `--url` first writes an OpenAI-compatible provider for any server on this machine (`models.add_server_provider`: a provider already there is never touched; a URL off this machine needs models.json `local: true`), and `--start`/`--stop` write the model's models.json `start`/`stop`; on a first run with no `--url` it writes the `ollama` provider when Ollama answers; refuses a cloud model, an unknown served context (a server other than Ollama needs `--context`), a down Ollama, a down server of unknown engine (see *Managing the set*). |
-| `wb optimize [start\|estimate\|report\|stop\|apply] [<id>…]` | `--bench`, `--if-due` | Asked for, or when due at setup and session start (*Optimize*). `start --if-due`: only when due, else nothing printed. `estimate`: how long a run would hold the GPU. `start`: detached; measures each Ollama model's largest window all on the GPU (refused while a task holds it; a task that wants it stops it); `--bench` then starts `wb bench run` on every model. `report` (the default): a line per model. `stop`. `apply <id>…`: adds the measured window as an entry of its own beside the model (an Ollama `<name>-<N>k` with that `num_ctx`, the entry's settings copied). |
+| `wb optimize [start\|estimate\|report\|stop\|apply] [<id>…]` | `--bench`, `--if-due` | Asked for, or when due at setup and session start (*Optimize*). `start --if-due`: only when due, else nothing printed. `estimate`: how long a run would hold the GPU. `start`: detached; measures each Ollama model's largest window all on the GPU (refused while a task holds it; a task that wants it stops it); `--bench` then starts `wb bench run` on every model. `report` (the default): a line per model. `stop`. `apply <id>…`: adds the measured window as an entry of its own beside the model (an Ollama `<name>:<tag>-<N>k`, `optimize.entry_name`, with that `num_ctx`, the entry's settings copied; refused when that name exists). |
 | `wb remote <host>` | `--port N` (11434), `--context N`, `--remove` | Another machine's Ollama as this one's models: provider `ollama-<host>` marked `local: true`, each tool-capable model it has pulled registered as `wb model add` would, one line each (see *Models*); exit 1 when it doesn't answer (with `OLLAMA_HOST=0.0.0.0` to try). Refuses a provider of that id already there for another baseURL. `--remove` undoes it; not while OpenCode's default model is one of them, nor for a provider wb didn't add. |
 | `wb model retire <id>` | `--delete` | Unregisters it (not OpenCode's default) and drops its models.json overrides; `--delete` removes Ollama's weights (or says `ollama rm <name>` when it can't). |
 | `wb model sizes <id> [trivial] [significant]` | | Limits the sizes it's routed (none: every size). |

@@ -199,7 +199,7 @@ tasks/<task>/  task.json status.json events.jsonl steer.jsonl acked context.md b
                rounds/<n>/{prompt,instructions,summary}.md rounds/<n>/tests.txt ask/<id>.{json,answer} worktree/
 ```
 The skill library is `~/.local/share/workbench/skills` (`$WB_SKILLS`). `~/.config/workbench/`
-holds `models.json` (what OpenCode can't say: `start`/`stop`, `skip`, `sizes`, `vram_gb`, `gpu_gb`,
+holds `models.json` (what OpenCode can't say: `start`/`stop`, `skip`, `sizes`, `vram_gb`, `gpu_gb`, `keep_loaded`,
 `weights_gb`, `label`, `engine`, `local`, `remote`), `commands.json` (standing `allow` patterns, lane
 `paths`, `env` names passed to the agent, each repo's setup: `repos`), `images.json`, `chat.json`, `chat-token`,
 `savings.json` (`kwh_price`).
