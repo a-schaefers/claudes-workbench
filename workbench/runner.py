@@ -126,6 +126,11 @@ def write_config_layer(task: store.Task) -> Path:
         **models.agent_providers(),
         **context.layer(task),
         "share": "disabled",  # a user's `share: "auto"` would publish every agent session
+        # the user's global small_model (titles, summaries) could be a cloud model whose key
+        # auth.json holds, sent the task's text; an update mid-task could move OpenCode past
+        # OPENCODE_TESTED (#353, the audit of 1.4)
+        "small_model": task.spec["model"],
+        "autoupdate": False,
         **({"compaction": {"auto": True, "buffer": buffer}} if buffer else {}),
         "mcp": {"servers": {**users_servers_off(), "workbench": {  # 2.x shape: mcp.servers.<name>
             "type": "local",
@@ -163,12 +168,25 @@ def users_servers_off() -> dict:
 CONFIG_CONTENT_MAX = 120_000
 
 
+# The user's own OPENCODE_CONFIG_CONTENT goes under the rules, not away: replaced, the providers,
+# instructions or permissions kept there were lost to the agent (#347, the audit of 1.4). Its
+# permissions come first, so the rules' (the last match wins) still decide; its MCP servers stay
+# off like the global files' ones (the layer's `mcp`, which this would load after). A key the
+# layer sets too is left to the layer: loaded last, the user's `compaction` would undo the
+# handover's backstop, and their `skills` or `instructions` replace the task's.
 def rules_env(layer: dict) -> dict:
-    content = json.dumps({"permissions": layer["permissions"], "share": "disabled"},
-                         separators=(",", ":"))
+    users = models.users_config_content()
+    theirs = users.get("permissions")
+    users = {k: v for k, v in users.items() if k not in layer and k not in ("mcp", "permissions")}
+    rules = {"permissions": [*(theirs if isinstance(theirs, list) else []),
+                             *layer["permissions"]], "share": "disabled"}
+    content = json.dumps({**users, **rules}, separators=(",", ":"))
     if len(content.encode()) <= CONFIG_CONTENT_MAX:
         return {"OPENCODE_CONFIG_CONTENT": content}
-    return {"OPENCODE_DISABLE_PROJECT_CONFIG": "1"}
+    # too long: the rules stay in the layer, so the user's content may not lift them either
+    rest = json.dumps({**users, "share": "disabled"}, separators=(",", ":"))
+    return {"OPENCODE_DISABLE_PROJECT_CONFIG": "1",
+            "OPENCODE_CONFIG_CONTENT": rest if len(rest.encode()) <= CONFIG_CONTENT_MAX else "{}"}
 
 
 # What OpenCode's own environment adds to the agent's: npx and `npm exec` run only what the
@@ -871,6 +889,26 @@ def clip_tail(output: str, lines: int, width: int = 300, total: int = 4000) -> s
     return s if len(s) <= total else "… (earlier output cut)\n" + s[-total:]
 
 
+DEV_REFUSED = re.compile(r"(/dev/[\w.+-]+(?:/[\w.+-]+)*).*?(?:Permission denied|Operation not permitted)"
+                         r"|(?:Permission denied|Operation not permitted).*?(/dev/[\w.+-]+(?:/[\w.+-]+)*)")
+
+
+def lane_refused(task: store.Task, output: str) -> list[str]:
+    """The device nodes a failed test run was refused, outside the task's lane: /dev/kvm, /dev/fuse
+    and the like read as the project's bug, and the agent spent its auto-fix rounds on them (#331,
+    the audit of 1.4). The report names `wb allow --path` for each."""
+    lane = context.writable(task)
+    if lane is None:
+        return []
+    found = []
+    for m in DEV_REFUSED.finditer(output[-200_000:]):
+        node = (m.group(1) or m.group(2)).rstrip(".")
+        if node not in found and not any(node == w or node.startswith(str(w).rstrip("/") + "/")
+                                         for w in lane):
+            found.append(node)
+    return found[:5]
+
+
 def run_tests(task: store.Task, n: int):
     cmd = task.spec.get("test_cmd")
     if not cmd:
@@ -881,6 +919,8 @@ def run_tests(task: store.Task, n: int):
     task.round_dir(n).joinpath("tests.txt").write_text(
         f"$ {cmd}\nexit: {code}\nshell: {test_shell()}\n\n{output}")
     result = {"ok": code == 0, "exit": code, "tail": clip_tail(output, 40), "round": n}
+    if code != 0 and (refused := lane_refused(task, output)):
+        result["lane"] = refused
     task.event({"ts": store.now(), "round": n, "kind": "tests", "ok": result["ok"],
                 "text": f"exit {code}"})
     return result
@@ -1186,6 +1226,9 @@ def summary_text(task: store.Task, n: int, rnd: dict, tests) -> str:
                      f"exit {tests['exit']})")
         if not tests["ok"]:
             lines.append("```\n" + "\n".join(tests["tail"].splitlines()[-25:]) + "\n```")
+        for node in tests.get("lane") or ():
+            lines.append(f"the lane refused {node}: wb allow {task.name} --path {node} if the "
+                         "tests need it (not the agent's bug)")
     if st.get("setup_secs") is not None and not st.get("reviews") and st.get("steps", 1) == 1:
         lines.append(f"setup: {st['setup_secs']:.0f}s, once; the scratch checkouts copy what it made")
     if st.get("base_check") and not st.get("reviews") and st.get("steps", 1) == 1:

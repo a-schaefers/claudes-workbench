@@ -2,6 +2,7 @@
 import base64
 import contextlib
 import errno
+import glob
 import io
 import json
 import shlex
@@ -2971,6 +2972,9 @@ class ConfigLayer(Base):
         self.assertIs(server["codemode"], False)
         self.assertGreater(server["timeout"]["execution"], 1200 * 1000)
         self.assertEqual(server["environment"]["WB_TASK"], "t-cfg")
+        # #353: the user's small_model could be a cloud one; an update could land mid-task
+        self.assertEqual((layer["small_model"], layer["autoupdate"]),
+                         (store.Task("t-cfg").spec["model"], False))
 
     def test_providers_from_a_config_opencode_wont_load_by_itself_reach_the_agent(self):
         # the 2026-11-19 audit (finding 13): wb read $WB_OPENCODE_CONFIG (or ignored the user's
@@ -3008,6 +3012,50 @@ class ConfigLayer(Base):
         os.environ.pop("OPENCODE_CONFIG")
         layer = json.loads(runner.write_config_layer(store.Task("t-alt")).read_text())
         self.assertNotIn("provider", layer)        # the global files: OpenCode loads them itself
+
+    def test_the_users_own_config_content_reaches_wb_and_the_agent_under_the_rules(self):
+        # #347, the audit of 1.4: rules_env replaced the user's OPENCODE_CONFIG_CONTENT with the
+        # rules alone, and wb never read it, so a provider kept there was lost to both
+        from workbench import models, runner
+        prov = {"strata": OPENCODE_CONFIG["provider"]["strata"]}
+        cfg = json.loads(Path(os.environ["WB_OPENCODE_CONFIG"]).read_text())
+        del cfg["provider"]["strata"]
+        tmp = Path(self.tmp.name)
+        (tmp / "xdg" / "opencode").mkdir(parents=True)
+        (tmp / "xdg" / "opencode" / "opencode.json").write_text(json.dumps(cfg))
+        del os.environ["WB_OPENCODE_CONFIG"]
+        mine = {"action": "edit", "resource": "*", "effect": "allow"}
+        os.environ.update(XDG_CONFIG_HOME=str(tmp / "xdg"), OPENCODE_CONFIG_CONTENT=json.dumps(
+            {"provider": prov, "instructions": ["/x/rules.md"], "permissions": [mine],
+             "share": "auto", "mcp": {"servers": {"usermcp": {"command": ["true"]}}}}))
+        try:
+            self.assertIn("strata/strata", models.discover())
+            env = runner.rules_env({"permissions": [{"action": "shell", "resource": "sudo *",
+                                                     "effect": "deny"}]})
+            got = json.loads(env["OPENCODE_CONFIG_CONTENT"])
+            self.assertEqual(got["provider"], prov)
+            self.assertEqual(got["instructions"], ["/x/rules.md"])
+            self.assertEqual(got["permissions"][0], mine)              # theirs first,
+            self.assertEqual(got["permissions"][-1]["effect"], "deny")  # the rules last
+            self.assertEqual(got["share"], "disabled")
+            self.assertNotIn("mcp", got)
+            os.environ["OPENCODE_CONFIG_CONTENT"] = json.dumps({"compaction": {"auto": False},
+                                                                "theme": "dark"})
+            got = json.loads(runner.rules_env({"permissions": [], "compaction": {"auto": True}})
+                             ["OPENCODE_CONFIG_CONTENT"])
+            self.assertNotIn("compaction", got)     # the layer's stands: the handover's backstop
+            self.assertEqual(got["theme"], "dark")
+            def doctor():
+                buf = io.StringIO()
+                with redirect_stdout(buf), self.assertRaises(SystemExit):
+                    cli.main(["doctor"])
+                return next(ln for ln in buf.getvalue().splitlines() if "CONFIG_CONTENT" in ln)
+            self.assertIn("OPENCODE_CONFIG_CONTENT is set", doctor())
+            self.assertNotIn("strata", doctor())                  # never its keys or values
+            os.environ["OPENCODE_CONFIG_CONTENT"] = "not json"
+            self.assertIn("doesn't parse", doctor())
+        finally:
+            os.environ.pop("OPENCODE_CONFIG_CONTENT")
 
     def test_launcher_answers_initialize(self):
         out = subprocess.run(
@@ -3666,6 +3714,25 @@ class Lane(Base):
                                                          "resource": "*", "effect": "allow"}])
         self.assertEqual(lane.wrap(None, ["opencode", "run"]), ["opencode", "run"])
 
+    def test_a_fresh_profile_gets_opencodes_directories_made_and_in_its_lane(self):
+        # #340, the audit of 1.4: the lane writes only what exists, so a first task in a fresh
+        # home failed opening ~/.local/share/opencode/log before any model request
+        self.start("t-fresh", "ok")
+        wait_phase("t-fresh", {"review"})
+        task = store.Task("t-fresh")
+        fresh = Path(tempfile.mkdtemp(dir=os.path.expanduser("~"), prefix=".wb-fresh-"))
+        self.addCleanup(shutil.rmtree, fresh, True)
+        env = {v: "" for v in ("XDG_DATA_HOME", "XDG_STATE_HOME", "XDG_CACHE_HOME",
+                               "XDG_CONFIG_HOME")}
+        with mock.patch.object(context.Path, "home", lambda: fresh), \
+                mock.patch.dict(os.environ, env):
+            writable = context.writable(task)
+        for d in (".local/share/opencode", ".local/state/opencode", ".cache/opencode",
+                  ".config/opencode"):
+            self.assertTrue((fresh / d).is_dir(), d)
+        for d in (".local/share/opencode", ".local/state/opencode", ".cache"):
+            self.assertIn(str(fresh / d), writable)
+
     def test_a_directory_request_is_answered_by_wb_allow_path(self):
         self.start("t-lp", "hang")
         deadline = time.time() + 20
@@ -4258,6 +4325,47 @@ class Lane(Base):
                                  capture_output=True, text=True, timeout=20)
             got.append(out.stdout.strip() or out.stderr)
         self.assertEqual(got, ["refused", "pty"])
+
+    def test_a_device_node_the_lane_refused_is_named_with_its_wb_allow(self):
+        # #331 (the audit of 1.4): /dev/kvm or /dev/fuse refused read as the project's bug, and the
+        # agent spent its auto-fix rounds on it
+        self.start("t-dev", "ok", "--auto-fix", "0", "--no-base-check", "--test",
+                   "echo 'qemu: could not open /dev/kvm: Permission denied'; "
+                   "echo 'tee: /dev/null: Permission denied'; exit 1")
+        wait_phase("t-dev", {"review"})
+        report = run_wb("report", "t-dev")
+        self.assertIn("the lane refused /dev/kvm: wb allow t-dev --path /dev/kvm", report)
+        self.assertNotIn("refused /dev/null", report)      # in the lane: not the lane's doing
+
+    def test_a_task_unloading_for_its_tests_gets_the_gpus_device_nodes_and_no_other_does(self):
+        # #331, the audit of 1.4: --unload-for-tests freed the GPU, but its nodes stayed out of
+        # the lane, so CUDA, ROCm and Vulkan found no device and the agent chased its own "bug"
+        task = self.bare_task("t-gpu", self.repo)
+        task.worktree.mkdir()
+        with tempfile.TemporaryDirectory() as d:
+            node = Path(d, "renderD128")
+            node.touch()
+            with mock.patch.object(context, "GPU_NODES", (str(Path(d, "renderD*")),)):
+                self.assertNotIn(str(node), context.gpu_nodes(task))
+                (task.dir / "task.json").write_text(json.dumps({**task.spec, "unload_for_tests": True}))
+                self.assertEqual(context.gpu_nodes(task), [str(node)])
+
+    @unittest.skipUnless(lane.abi() and any(glob.glob(p) for p in context.GPU_NODES),
+                         "needs Landlock and a GPU")
+    def test_a_task_unloading_for_its_tests_can_open_the_gpu_in_the_lane(self):
+        task = self.bare_task("t-gpu-lane", self.repo)
+        task.worktree.mkdir()
+        dev = sorted(n for p in context.GPU_NODES for n in glob.glob(p))[0]
+        script = (f"import os\ntry:\n    os.close(os.open({dev!r}, os.O_RDWR)); print('open')\n"
+                  "except OSError as e:\n    print(e.strerror)\n")
+        got = []
+        for unload in (False, True):
+            (task.dir / "task.json").write_text(json.dumps({**task.spec, "unload_for_tests": unload}))
+            out = subprocess.run(lane.wrap(context.writable(task), [sys.executable, "-c", script],
+                                           context.readable(task), context.unix_paths(task)),
+                                 capture_output=True, text=True, timeout=20)
+            got.append(out.stdout.strip() or out.stderr)
+        self.assertEqual(got, ["Permission denied", "open"])
 
     @unittest.skipUnless(lane.abi() >= 6, "needs Landlock ABI 6")
     def test_the_lane_can_reach_neither_the_users_sockets_nor_their_processes(self):
@@ -6677,9 +6785,10 @@ class Projects(Base):
         self.assertIn("never reused", err)
         self.assertNotIn("discard", err)
 
-    def test_start_says_submodules_are_not_checked_out_for_the_agent(self):
-        # the audit: a submodule stayed empty in the worktree and the build failed for no reason
-        # the spec gave; populated, its .git would be a file the agent could repoint (see _pinned)
+    def test_submodules_are_filled_read_only_from_the_checkout_and_never_committed(self):
+        # #350 (the audit of 1.4): a submodule stayed empty in the worktree and in the base
+        # check's checkout, so a C/C++ or vendored build failed on the base and in every round;
+        # given a .git, it would be a file the agent could repoint (see _pinned)
         lib = Path(self.tmp.name) / "lib"
         subprocess.run(["git", "init", "-q", str(lib)], check=True)
         (lib / "lib.c").write_text("int x;\n")
@@ -6690,8 +6799,25 @@ class Projects(Base):
                                       capture_output=True)
         g("-c", "protocol.file.allow=always", "submodule", "add", "-q", str(lib), "vendor/lib")
         g("commit", "-qm", "a submodule")
-        self.assertIn("note: submodules (vendor/lib) are not checked out", self.start("t-sub", "ok"))
-        wait_phase("t-sub", {"review"})
+        out = self.start("t-sub", "ok", "--test", "test -f vendor/lib/lib.c && " + TEST_CMD)
+        self.assertNotIn("submodules", out)
+        st = wait_phase("t-sub", {"review"})
+        self.assertEqual(st["base_check"]["exit"], 2)   # lib.c there (test -f: 1): grep, no answer
+        t = store.Task("t-sub")
+        lib_c = t.worktree / "vendor" / "lib" / "lib.c"
+        self.assertEqual(lib_c.read_text(), "int x;\n")
+        self.assertFalse(lib_c.stat().st_mode & 0o222)     # an edit fails out loud
+        self.assertFalse((t.worktree / "vendor" / "lib" / ".git").exists())
+        self.assertIs(st["tests"]["ok"], True)
+        self.assertNotIn("lib.c", runner.review_diff(t))
+        run_wb("accept", "t-sub", "-m", "feat: answer")
+        tree = g("ls-tree", "-r", "--name-only", "delegate/t-sub").stdout.decode()
+        self.assertNotIn("vendor/lib/lib.c", tree)
+        self.assertIn("answer.txt", tree)
+        # a checkout without the submodule: said, and the worktree's stays empty
+        g("-c", "protocol.file.allow=always", "submodule", "deinit", "-q", "-f", "vendor/lib")
+        self.assertIn("note: submodules (vendor/lib) are empty", self.start("t-sub2", "ok"))
+        wait_phase("t-sub2", {"review"})
 
     def test_accept_says_whether_claude_md_kept_up(self):
         self.start("t-ok", "ok", "--test", TEST_CMD)
@@ -6900,6 +7026,55 @@ class ModelSet(Base):
         self.assertIn("runtime: retry", out)
 
 
+class LogoutStops(Base):
+    """What a logout stops: logind's Linger and KillUserProcesses, said by wb chat on and wb doctor."""
+    def fake_loginctl(self, linger, kill):
+        bin_dir = Path(self.tmp.name) / "fakebin"
+        bin_dir.mkdir(exist_ok=True)
+        exe = bin_dir / "loginctl"
+        exe.write_text(f"#!/bin/sh\ncase \"$1\" in show-user) echo {linger};; show) echo {kill};; esac\n")
+        exe.chmod(0o755)
+        return mock.patch.dict(os.environ, {"PATH": f"{bin_dir}:{os.environ['PATH']}"})
+
+    def test_a_user_without_linger_hears_how_to_keep_the_chat_up_past_logout(self):
+        # #351, the audit of 1.4: wb-chat.service stopped at the last logout and nothing said why
+        from workbench import cli
+        with self.fake_loginctl("no", "no"):
+            said = cli.logout_stops()
+        self.assertEqual(len(said), 1)
+        self.assertIn("loginctl enable-linger", said[0])
+
+    def test_kill_user_processes_is_named_as_killing_running_tasks(self):
+        from workbench import cli
+        with self.fake_loginctl("yes", "yes"):
+            said = cli.logout_stops()
+        self.assertEqual(len(said), 1)
+        self.assertIn("KillUserProcesses=yes", said[0])
+
+    def test_doctor_names_the_chats_linger_only_with_the_chat_on(self):
+        # most desktops linger off, and the chat is off until turned on: no warning for that
+        from workbench import chat
+        def doctor():
+            buf = io.StringIO()
+            with redirect_stdout(buf), self.fake_loginctl("no", "no"):
+                try:
+                    cli.main(["doctor"])
+                except SystemExit:
+                    pass
+            self.assertIn("local model(s)", buf.getvalue())   # it got past the line in question
+            return buf.getvalue()
+        self.assertNotIn("enable-linger", doctor())
+        chat.set_on(True)
+        self.assertIn("enable-linger", doctor())
+
+    def test_nothing_is_said_where_logind_lingers_and_spares_sessions_or_is_absent(self):
+        from workbench import cli
+        with self.fake_loginctl("yes", "no"):
+            self.assertEqual(cli.logout_stops(), [])
+        with mock.patch("shutil.which", return_value=None):
+            self.assertEqual(cli.logout_stops(), [])
+
+
 class WebChat(Base):
     """wb chat: the page's API (token, host check), receipts, Claude's replies."""
     def setUp(self):
@@ -6952,6 +7127,9 @@ class WebChat(Base):
             while not self.chat.running(free) and time.time() < deadline:
                 time.sleep(0.1)
             self.assertTrue(self.chat.running(free))
+            # asked without a port (the pane does), the link names the port the server runs on,
+            # not the default (#349, the audit of 1.4)
+            self.assertIn(f"http://localhost:{free}/#token=", run_wb("chat", "url"))
             self.assertIn("stopped the server it started", run_wb("chat", "off", "--port", str(free)))
             deadline = time.time() + 10                                # this process is its parent here
             while os.waitpid(pid, os.WNOHANG) == (0, 0) and time.time() < deadline:
@@ -7073,6 +7251,13 @@ class WebChat(Base):
             self.assertEqual(s.recv(100), b"")
             self.assertLess(time.time() - t0, 4)
             s.close()
+
+    def test_a_port_recorded_by_a_server_that_is_gone_falls_back_to_the_default(self):
+        # (#349, the audit of 1.4): the record outlives a server killed without a word
+        store.write_json(self.chat.chat_dir() / "port.json", {"port": 51583, "pid": os.getpid()})
+        self.assertEqual(self.chat.port(), 51583)
+        store.write_json(self.chat.chat_dir() / "port.json", {"port": 51583, "pid": 2 ** 22 + 7})
+        self.assertEqual(self.chat.port(), self.chat.PORT)
 
     def test_the_page_needs_the_token_and_a_known_host(self):
         tok = self.chat.token()
@@ -7336,6 +7521,34 @@ class WebChat(Base):
         self.assertNotIn(unread["id"], [m["id"] for m in chat.thread()])           # off the page
         self.assertEqual([m["id"] for m in chat.pending()], [unread["id"]])
         self.assertIn(unread["id"], run_wb("chat", "pending"))
+
+    def test_open_work_outlasts_a_burst_past_the_files_tails(self):
+        # #329 (the audit of 1.4, reproduced): 540 replies of 7,900 characters pushed an unread
+        # message out of the 4 MiB tail, and 120 plan cards an open question, which then could
+        # no longer be answered
+        chat = self.chat
+        unread = chat.send("are you there?", "user", "c-burst")
+        question = chat.ask("AskUserQuestion", "which?", "question",
+                            {"questions": [{"question": "Which?", "options": []}]})
+        for i in range(540):
+            chat.send(f"reply {i} " + "x" * 7900, "claude")
+        for i in range(120):
+            chat.ask("ExitPlanMode", f"plan {i}", "plan", {"plan": "p" * 39_000})
+        self.assertGreater((chat.chat_dir() / "messages.jsonl").stat().st_size, chat.THREAD_BYTES)
+        self.assertGreater((chat.chat_dir() / "asks.jsonl").stat().st_size, chat.THREAD_BYTES)
+        self.assertEqual([m["id"] for m in chat.pending()], [unread["id"]])
+        self.assertEqual(chat.find_ask(question["id"])["answer"], None)
+        self.assertIn(question["id"], [a["id"] for a in chat.asks()])
+        done = chat.answer(question["id"], "allow", "web", answers={"Which?": "this"})
+        self.assertEqual(done["answer"], "allow")
+        self.assertNotIn(question["id"], chat.open_work()["asks"])
+        chat.ack(unread["id"], "s-1")
+        self.assertEqual(chat.pending(), [])
+        # a state directory from before the index: built once from the whole files
+        late = chat.send("still there?", "user", "c-late")
+        (chat.chat_dir() / "open.json").unlink()
+        self.assertEqual([m["id"] for m in chat.pending()], [late["id"]])
+        self.assertEqual(len(chat.open_work()["asks"]), 120)       # the plan cards, still open
 
     def test_wb_chat_wait_blocks_until_the_answer_or_says_open(self):
         chat = self.chat

@@ -572,7 +572,7 @@ def cmd_start(a):
         die(f"--copy {loose[0]}: ignored in {repo}, but not at {a.base}, where the task starts: a "
             "copy would show in the review diff and be committed. Ignore it in a commit the base "
             "holds, or start from a newer --base")
-    subs = gitops.submodules(repo, base)
+    subs = gitops.fill_submodules(repo, base, wt)
     budget = a.ask_budget
     limits = router.budgets(m)  # from the model's measured speed on this machine, else defaults
     store.write_json(task.dir / "task.json", {
@@ -621,8 +621,8 @@ def cmd_start(a):
         print("note: the repo has uncommitted changes; the agent's worktree starts from "
               f"{a.base}, without them")
     if subs:
-        print(f"note: submodules ({', '.join(subs[:5])}) are not checked out in the agent's "
-              "worktree: a build or test that needs them fails there")
+        print(f"note: submodules ({', '.join(subs[:5])}) are empty in the agent's worktree (your "
+              "checkout lacks them at the base's commit): a build or test that needs them fails there")
     if setup:
         does = [*(["links " + ", ".join(n if n.startswith("../") else f"../{n}" for n in setup["siblings"])]
                   if setup.get("siblings") else []),
@@ -2756,6 +2756,8 @@ def cmd_events(a):
 
 def cmd_chat(a):
     """The web chat: the user's side door to Claude while away from the terminal."""
+    if a.port is None:  # named: that port; else the running server's, else the default (#349)
+        a.port = chat.PORT if a.action == "serve" else chat.port()
     if a.action == "serve":
         chat.serve(a.port, a.bind or None, a.host or None, say=lambda m: print(m, flush=True))
     elif a.action == "url":
@@ -2775,6 +2777,8 @@ def cmd_chat(a):
                 tail = (log.read_text(errors="replace").strip().splitlines() or ["(nothing)"])[-1]
                 die(f"web chat on, but its server didn't start: {tail} ({log})")
             print(f"web chat on: started its server (pid {pid}, {log}): {chat.url(a.port)}")
+        for why in logout_stops():  # its unit is a user service: a logout stops it (#351)
+            print(f"--  {why}")
     elif a.action == "off":
         chat.set_on(False)
         if chat.stop_started():
@@ -2844,6 +2848,33 @@ def cmd_chat(a):
             print(f"{time.strftime('%H:%M', time.localtime(r['ts']))} {who}: {r['text']}")
         lst = chat.listener()
         print(f"listening: {lst['cwd']}" if lst else "no session is listening")
+
+
+def logout_stops() -> list[str]:
+    """What a logout would stop, from logind: the user manager (so wb-chat.service) unless the
+    user lingers, and every process in the login session, runners too, under KillUserProcesses=yes.
+    A headless box reached by SSH, or a desktop logged out overnight, lost the chat and the night's
+    backlog without a word (#351, the audit of 1.4). Empty when logind can't say (macOS, WSL
+    without systemd, a container): unknown isn't a warning."""
+    if not shutil.which("loginctl"):
+        return []
+
+    def ask(*argv):
+        try:
+            r = subprocess.run(["loginctl", *argv], capture_output=True, text=True, timeout=5)
+        except (OSError, subprocess.SubprocessError):
+            return ""
+        return r.stdout.strip() if r.returncode == 0 else ""
+    out = []
+    user = os.environ.get("USER") or str(os.getuid())
+    if ask("show-user", user, "-p", "Linger", "--value") == "no":
+        out.append(f"logind stops your user services at logout, the web chat's wb-chat.service "
+                   f"too: loginctl enable-linger {user} keeps them up")
+    if ask("show", "-p", "KillUserProcesses", "--value") == "yes":
+        out.append("logind kills every process of a login session at logout (KillUserProcesses=yes),"
+                   " running tasks too: start wb from a session that stays (tmux under systemd-run"
+                   " --user --scope), or set KillUserProcesses=no in /etc/systemd/logind.conf")
+    return out
 
 
 def path_advice() -> str:
@@ -3168,6 +3199,10 @@ def cmd_doctor(a):
     except RuntimeError as e:  # "<file> doesn't parse (…)"
         line(False, str(e))
         sys.exit(1)  # nothing below can read the models
+    if os.environ.get("OPENCODE_CONFIG_CONTENT"):  # loaded after the files (#347, the audit of 1.4)
+        print("--  OPENCODE_CONFIG_CONTENT is set: OpenCode loads it last, wb and the agents too"
+              + ("" if models.users_config_content() or os.environ.get("WB_OPENCODE_CONFIG")
+                 else "; it doesn't parse as a JSON object, so wb ignores it"))
     # the Python wb runs on, and when the launcher handed over from an older python3 (#259)
     handed = "wb-python" in sys._xoptions
     print(f"ok  python {sys.version.split()[0]} ({sys.executable})"
@@ -3185,6 +3220,11 @@ def cmd_doctor(a):
              (path_advice() if linked else "link bin/wb into a PATH directory (wb setup)")
              + (f"; WB_BIN={wb_bin} covers only the mod's calls" if wb_bin else ""))
     elsewhere("wb", wb_bin or on_path, PKG_ROOT / "bin/wb")
+    # a warning, not BAD: a desktop that never logs out is fine (#351). The chat's line only
+    # with the chat on: nearly every desktop lingers off, and most never turn the chat on
+    for why in logout_stops():
+        if chat.is_on() or "wb-chat" not in why:
+            print(f"--  {why}")
     found = models.discover()
     line(bool(found), f"{len(found)} local model(s)")
     for pid, why in models.skipped_providers():  # once dropped without a word (the 2026-11-16 audit)
@@ -3661,7 +3701,8 @@ def parser() -> argparse.ArgumentParser:
     s.add_argument("--note", help="answer: words to pass on with it")
     s.add_argument("--timeout", type=float, default=30, help="wait: seconds")
     s.add_argument("--json", action="store_true", help="wait: the whole ask, answered or not")
-    s.add_argument("--port", type=int, default=chat.PORT)
+    s.add_argument("--port", type=int, help=f"default: the running server's (chat/port.json), "
+                   f"else {chat.PORT}")
     s.add_argument("--bind", action="append", help="serve: an address to listen on, `tailscale` "
                    "or 0.0.0.0 (default: chat.json's `bind`, else localhost)")
     s.add_argument("--host", action="append", help="serve: another host name to answer to (* any)")

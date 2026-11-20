@@ -127,7 +127,7 @@ dependencies. No packaging: it runs from the clone.
 - `optimize.py`: `wb optimize` (when due, or asked): each Ollama model's largest window all on the GPU.
 - `agent/HANDBOOK.md`: Claude's working habits for the agent. Every agent prompt carries it, so
   keep it short: each token costs prefill time.
-- `skill/workbench/`: the `/workbench` procedure, `SKILL.md` and the `reference/` it reads (`wb setup` links it).
+- `skill/workbench/`: the `/workbench` procedure (`SKILL.md`, `reference/`; `wb setup` links it).
 - `mod/`: the Claude Code plugin (`hooks/register.tsx`, `hooks/apprentice.ts` the pane's
   character, `hooks/register.test.tsx`, `types/index.d.ts`; `.claude-plugin/plugin.json` has no
   version: installs track main's commits). The root's `.claude-plugin/marketplace.json` makes the repo a marketplace.
@@ -189,7 +189,7 @@ Plain files under `$WB_HOME` (`~/.local/state/workbench`); the full tree and eve
 ARCHITECTURE.md (*Files and formats*):
 ```
 notify{,.old}.jsonl results.jsonl lessons.jsonl notes.md coding.json progress.json tuning.json speed.json gpu*.{lock,json,admit,load}
-scout.json update.json watch.json optimize.json gc.json archive/ imports/ images/ chat/{messages,receipts,asks,seen}.jsonl chat/{listener,prefs,push,claims,switch}.json
+scout.json update.json watch.json optimize.json gc.json archive/ imports/ images/ chat/{messages,receipts,asks,seen}.jsonl chat/{listener,prefs,push,claims,switch,open,port}.json
 bench/{cases/<case>,runs/<run>}/ bench/runs.jsonl bench/driver.json
 rules/<task>/  opencode.json HANDBOOK.md CLAUDE.md bin/git grants.json gitdir.json (no lane)
 locks/<task>.{runner,cmd,status,events,steer,grants}.lock   (store.task_lock: no lane reads them)

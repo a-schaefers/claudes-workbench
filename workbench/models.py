@@ -161,14 +161,28 @@ def _layers() -> list[tuple[Path, dict]]:
     return out
 
 
+def users_config_content() -> dict:
+    """The user's own OPENCODE_CONFIG_CONTENT, parsed: OpenCode loads it after every file, so a
+    provider kept there alone was invisible to wb (#347, the audit of 1.4). Unset, unparsed, or
+    beside $WB_OPENCODE_CONFIG (which stands alone): nothing."""
+    raw = os.environ.get("OPENCODE_CONFIG_CONTENT")
+    if not raw or os.environ.get("WB_OPENCODE_CONFIG"):
+        return {}
+    try:
+        cfg = json.loads(_strip_jsonc(raw))
+    except ValueError:
+        return {}
+    return cfg if isinstance(cfg, dict) else {}
+
+
 def read_config() -> dict:
-    """OpenCode's config as OpenCode sees it: its files merged, the later winning. Read one file
-    only, a provider kept in opencode.jsonc beside an opencode.json holding a theme was invisible
-    (the 2026-11-16 audit)."""
+    """OpenCode's config as OpenCode sees it: its files merged, the later winning, then the
+    user's OPENCODE_CONFIG_CONTENT. Read one file only, a provider kept in opencode.jsonc beside
+    an opencode.json holding a theme was invisible (the 2026-11-16 audit)."""
     cfg: dict = {}
     for _, layer in _layers():
         cfg = _merge(cfg, layer)
-    return cfg
+    return _merge(cfg, users_config_content())
 
 
 def _providers_of(layer: dict) -> dict:

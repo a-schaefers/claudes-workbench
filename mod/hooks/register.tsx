@@ -1092,21 +1092,14 @@ async function listen($: any, now: number) {
     mem.listenerBody = body
     await $.fs.write(`${dir}/listener.json`, body)
   }
-  // the tails: both files only grow, and past 4 MiB the whole read failed and the chat went silent
-  const messages = await readTail($, `${dir}/messages.jsonl`, NOTIFY_TAIL)
-  const receipts = await readTail($, `${dir}/receipts.jsonl`, NOTIFY_TAIL)
-  if (!messages || !receipts) {
-    warnOnce($, 'chat', `can't read the web chat's files in ${dir}: wb doctor`)
-    return
-  }
-  const got = new Set(receipts.text.split('\n')
-    .map(l => { try { return JSON.parse(l).id } catch { return undefined } }))
-  for (const line of messages.text.split('\n')) {
-    let m: Row
-    try { m = JSON.parse(line) } catch { continue }
+  for (const m of await unread($, dir)) {
     const id = String(m.id ?? '')
-    if (m.from !== 'user' || !id || got.has(id) || mem.chatSent.has(id)) continue
-    if (now - Number(m.ts ?? 0) * 1000 > CHAT_EXPIRE_MS) continue // stale: the page shows it undelivered
+    if (m.from !== 'user' || !id || mem.chatSent.has(id)) continue
+    if (now - Number(m.ts ?? 0) * 1000 > CHAT_EXPIRE_MS) { // stale: not sprung on a new listener
+      warnOnce($, 'chat-old', `a web chat message older than ${CHAT_EXPIRE_MS / 3600_000} hours ` +
+        "wasn't passed to Claude: wb chat pending lists it") // said, not dropped in silence (#329)
+      continue
+    }
     if ((mem.chatRetry.get(id) ?? 0) > now) continue // its prompt was dropped: again in a minute
     // Claimed under wb's lock: two sessions starting together both took the chat and both
     // submitted it, each guard knowing only its own sends (#84). Refused: another session's.
@@ -1131,6 +1124,31 @@ async function listen($: any, now: number) {
     await update($, chat, c => ({ ...c, webAt: now }))
     $.ui.toast('workbench: a message from the web chat')
   }
+}
+
+// The user's messages without a receipt: wb's index of open work (chat/open.json), whatever the
+// files' size. The tails it replaces lost a message behind 4 MiB of replies (#329, the audit of
+// 1.4); they remain for a wb from before the index.
+async function unread($: any, dir: string): Promise<Row[]> {
+  const work = await readJson($, `${dir}/open.json`)
+  if (work.messages && typeof work.messages === 'object') {
+    return (Object.values(work.messages) as Row[]).sort((a, b) => Number(a.ts ?? 0) - Number(b.ts ?? 0))
+  }
+  // the tails: both files only grow, and past 4 MiB the whole read failed and the chat went silent
+  const messages = await readTail($, `${dir}/messages.jsonl`, NOTIFY_TAIL)
+  const receipts = await readTail($, `${dir}/receipts.jsonl`, NOTIFY_TAIL)
+  if (!messages || !receipts) {
+    warnOnce($, 'chat', `can't read the web chat's files in ${dir}: wb doctor`)
+    return []
+  }
+  const got = new Set(receipts.text.split('\n')
+    .map(l => { try { return JSON.parse(l).id } catch { return undefined } }))
+  return messages.text.split('\n').flatMap(line => {
+    try {
+      const m = JSON.parse(line)
+      return m && !got.has(String(m.id ?? '')) ? [m as Row] : []
+    } catch { return [] }
+  })
 }
 
 // A web message as a prompt of its own; the receipt only once it entered. A dropped one had a

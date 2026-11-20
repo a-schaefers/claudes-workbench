@@ -27,4 +27,6 @@ RestartMaxDelaySec=300
 RestartPreventExitStatus=78
 
 [Install]
+# A user unit stops at the last logout unless the user lingers: loginctl enable-linger $USER
+# (wb chat on and wb doctor say so, #351, the audit of 1.4).
 WantedBy=default.target
