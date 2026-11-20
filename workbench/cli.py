@@ -3086,6 +3086,10 @@ def cmd_doctor(a):
     except RuntimeError as e:  # "<file> doesn't parse (…)"
         line(False, str(e))
         sys.exit(1)  # nothing below can read the models
+    # the Python wb runs on, and when the launcher handed over from an older python3 (#259)
+    handed = "wb-python" in sys._xoptions
+    print(f"ok  python {sys.version.split()[0]} ({sys.executable})"
+          + ("; python3 on PATH is older, so the launcher found this one" if handed else ""))
     good, said = version(["git"])
     line(good, said)
     # Claude's Bash runs `wb` by name whatever WB_BIN says: WB_BIN only moves the mod's own calls
