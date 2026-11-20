@@ -442,8 +442,8 @@ def _local_providers(cfg: dict, extra: dict, dirs: dict | None = None):
             # the key before the probe: an Ollama that wants one on /api/version answered the
             # keyless probe with an error, was cached as a server, and its Ollama management
             # (load, unload, pull, the window check) was skipped (#337, the audit of 1.4)
-            opts = prov.get("options") or prov.get("settings") or {}
-            key = _expand(str(opts.get("apiKey") or ""), base=(dirs or {}).get(pid))
+            raw = str((prov.get("options") or prov.get("settings") or {}).get("apiKey") or "")
+            key = _expand(raw, base=(dirs or {}).get(pid)) if raw else auth_key(pid)  # #336
             if key:
                 _KEYS[url.rstrip("/").removesuffix("/v1")] = key
             yield pid, prov, url, _engine(url, extra.get(pid) or {}, pid), remote
