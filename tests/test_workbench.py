@@ -2845,12 +2845,35 @@ class Watch(Base):
             changed_until("tasks/live/probe")
             (home / "tasks/old/status.json").write_text('{"phase": "accepted", "trial": true}')
             (home / "rules/live/grants.json").write_text("{}")
+            # #373 (the audit of 1.6): a scratch clone with a copied node_modules added a watch
+            # per directory, and each write there woke the mod
+            mods = home / ".verify-abc" / "repo" / "node_modules"
+            for i in range(30):
+                (mods / f"p{i}").mkdir(parents=True)
+                (mods / f"p{i}" / "index.js").write_text("x")
+            (home / "wb-index-x").mkdir()
+            (home / "wb-index-x" / "index").write_text("x")
+            time.sleep(0.3)
+            for i in range(30):
+                (mods / f"p{i}" / "index.js").write_text("y")
             time.sleep(0.3)
             (home / "tasks/live/status.json").write_text('{"phase": "review"}')
             self.assertEqual(changed_until("tasks/live/status.json"), ["tasks/live/status.json"])
         finally:
             p.kill()
             p.wait()
+
+    def test_wb_events_watches_no_scratch_clone(self):
+        # #373: 300 package directories under .verify-abc took the watcher from 2 to 605
+        from workbench.watch import Watcher
+        home = store.home()
+        (home / "tasks").mkdir(parents=True, exist_ok=True)
+        for scratch in (".verify-abc/repo", ".base-x", "wb-merge-y", "wb-index-z"):
+            for i in range(20):
+                (home / scratch / "node_modules" / f"p{i}").mkdir(parents=True)
+        with Watcher(home, recursive=True, skip=cli.EVENT_SKIP) as w:
+            watched = {str(d.relative_to(home)) for d in w.dirs.values()}
+        self.assertEqual(watched, {".", "tasks"})
 
     def test_session_commands_never_need_opencodes_background_service(self):
         # the fake, like OpenCode with another service on the managed port, refuses without

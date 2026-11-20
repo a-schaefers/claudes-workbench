@@ -2808,8 +2808,19 @@ def cmd_init(a):
 # a thousand finished tasks were 4,000 inotify watches per Claude session, or a rescan of them
 # four times a second without inotify (the 2026-11-16 audit).
 EVENT_SKIP = ("tasks/*/worktree", "tasks/*/tree", "tasks/*/rounds", "rules", "imports", "images",
-              "archive")  # clones (tree/: one nested for a sibling further up, #261), outputs
+              "archive",  # clones (tree/: one nested for a sibling further up, #261), outputs
+              # and the scratch clones and indexes (the base check, verify, shot, bench, a
+              # submodule fill, a merge): one with a copied node_modules took a wb events from 2
+              # watched directories to 605, and each write there woke the mod (#373, the audit
+              # of 1.6)
+              *(SCRATCH := (".?*", "wb-index-*", "wb-merge-*")))  # .?*: not "." (the home itself)
 QUIET = (".lock", ".tmp", "runner.log")
+
+
+def _scratch(rel: str) -> bool:
+    """Whether a path under the state directory is in a scratch clone or index (SCRATCH)."""
+    top = rel.split("/")[0]
+    return any(fnmatch.fnmatch(top, pat) for pat in SCRATCH)
 
 
 def cmd_events(a):
@@ -2826,8 +2837,9 @@ def cmd_events(a):
     reaped = time.time()
     with Watcher(home, recursive=True, skip=EVENT_SKIP + closed) as w:
         while os.getppid() == parent:
-            changed = {str(p.relative_to(home)) for p in w.wait(10)
-                       if not p.name.endswith(QUIET) and not p.name.startswith(".")}
+            changed = {rel for p in w.wait(10)
+                       if not p.name.endswith(QUIET) and not p.name.startswith(".")
+                       and not _scratch(rel := str(p.relative_to(home)))}
             if time.time() - reaped > 60:  # a runner that died silently: its failed notice
                 reaped = time.time()       # wakes the mod like any other (reap)
                 for t in store.all_tasks():
