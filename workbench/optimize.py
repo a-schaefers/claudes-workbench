@@ -246,10 +246,31 @@ def entry_name(source: str, window: int) -> str:
     return f"{base}:{tag + '-' if tag else ''}{window // 1024}k"
 
 
+def budget(entry: dict, fits: int) -> tuple[dict, dict]:
+    """The entry's limits and options at a ``fits`` window, its caps recomputed together: the
+    source's output cap kept while it is at most half the window, else cut to a quarter of it,
+    and ``max_tokens`` never past it. A 16K fit of a 128K entry with a 32K output cap and ``max_tokens`` 64K once
+    wrote an input limit of -16384 and kept both caps (#332, the audit of 1.4)."""
+    lim, opts = dict(entry.get("limit") or {}), dict(entry.get("options") or {})
+    out = lim.get("output") or fits // 8
+    if out > fits // 2:
+        out = fits // 4
+    lim.update(context=fits, input=fits - out, output=out)
+    if opts.get("max_tokens"):
+        opts["max_tokens"] = min(opts["max_tokens"], out)
+    # checked before anything is written: a request inside these limits must fit the window
+    if not (0 < out <= lim["input"] and lim["input"] + out <= fits
+            and 0 < (opts.get("max_tokens") or out) <= out):
+        raise RuntimeError(f"no workable budget at a {fits}-token window: limit {lim}, "
+                           f"max_tokens {opts.get('max_tokens')}")
+    return lim, opts
+
+
 def apply(m: models.Model) -> str:
     """Make the measured window an entry of its own beside ``m``: an Ollama model with that
     num_ctx (from ``m``, no download) and OpenCode's entry, copied from ``m``'s (its options,
-    such as thinking off, and output cap kept), with the new window."""
+    such as thinking off, and output cap kept while the window leaves room: ``budget``), with
+    the new window."""
     row = (state().get("models") or {}).get(m.id) or {}
     fits = row.get("fits")
     if not fits or fits == row.get("window"):
@@ -258,8 +279,9 @@ def apply(m: models.Model) -> str:
     provider = m.id.split("/", 1)[0]
     entry = dict(m.config)
     entry.pop("id", None)  # an alias's id names m at the server: the new entry is its own model
-    out = (entry.get("limit") or {}).get("output") or fits // 8
-    entry["limit"] = {**(entry.get("limit") or {}), "context": fits, "input": fits - out, "output": out}
+    entry["limit"], entry["options"] = budget(entry, fits)
+    if not entry["options"]:
+        del entry["options"]
     if entry.get("name"):
         entry["name"] = f"{entry['name']} ({fits // 1024}K)"
     # the config first: the variant was made, then a config with comments refused its entry, and

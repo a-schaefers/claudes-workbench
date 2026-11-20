@@ -2313,8 +2313,12 @@ whole name, tag and quantization kept, the window as the tag's suffix: `family:3
 `family:7b` and `family:32b` both `family-16k`, the second overwriting the first, the 2026-11-19
 audit; a name already in OpenCode's config or Ollama is refused: retire it first) from it with
 `num_ctx` N (`/api/create` `from`: no download, no GPU) and OpenCode's entry copied from the
-model's (its options, such as `reasoningEffort: "none"`, and output cap kept; `limit.context`
-and `limit.input` set to the new window; an alias's `id` dropped, since it would name the old model). The router weighs both by their records; retiring the
+model's (its options, such as `reasoningEffort: "none"`, kept; `limit.context` set to the new
+window, and the caps recomputed together by `budget`: `limit.output` and `options.max_tokens`
+kept while the output cap is at most half the window, else cut to a quarter of it, `limit.input` the window less the
+output cap, and an entry no request could fit refused before anything is made: a 16K fit of a
+128K entry once wrote an input limit of -16384 and kept its 32K and 64K caps, #332, the audit of
+1.4; an alias's `id` dropped, since it would name the old model). The router weighs both by their records; retiring the
 old one is the user's call (`wb model retire`). The config is checked first (`models.config_target`,
 the checks `write_config` makes: one file, no comments, writable), before anything is made: the
 variant was made, then a config with comments refused its entry, and once the config was plain

@@ -1119,6 +1119,25 @@ class Optimize(unittest.TestCase):
         self.assertEqual(entry["options"], {"reasoningEffort": "none"})       # thinking stays off
         self.assertEqual(entry["limit"], {"context": 65536, "input": 65536 - 4096, "output": 4096})
 
+    def test_a_smaller_window_cuts_the_output_cap_and_max_tokens_so_input_stays_positive(self):
+        # #332 (the audit of 1.4): a 16K fit of a 128K entry wrote an input limit of -16384 and
+        # kept its 32K output cap and its 64K max_tokens
+        self.ollama(131072, entry={"limit": {"context": 131072, "output": 32768},
+                                   "options": {"max_tokens": 65536}})
+        m = models.discover()["ollama/m"]
+        from workbench import optimize
+        optimize._record(m.id, {"window": 131072, "fits": 16384, "spill": 40, "tried": []})
+        self.assertIn("registered ollama/m:16k", optimize.apply(m))
+        entry = models.read_config()["provider"]["ollama"]["models"]["m:16k"]
+        self.assertEqual(entry["limit"], {"context": 16384, "input": 16384 - 4096, "output": 4096})
+        self.assertEqual(entry["options"], {"max_tokens": 4096})
+        from workbench import runner
+        self.assertGreater(runner.compaction_buffer(entry), 0)
+        self.assertLess(runner.compaction_buffer(entry), 16384)
+        self.assertEqual(optimize.budget({"limit": {"context": 8192, "output": 1024}}, 8192)[0]["input"], 7168)
+        kept = optimize.budget({"limit": {"output": 32768}, "options": {"max_tokens": 32768}}, 65536)
+        self.assertEqual((kept[0]["output"], kept[1]["max_tokens"]), (32768, 32768))  # half: room left
+
     def test_two_tags_of_one_model_get_names_of_their_own_and_a_taken_name_is_refused(self):
         # the 2026-11-19 audit: family:7b and family:32b both became family-16k, the second
         # overwriting the first in Ollama and in OpenCode's config
