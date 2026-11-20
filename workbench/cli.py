@@ -3085,9 +3085,14 @@ def cmd_update(a):
     if before == after:
         print("already up to date")
     else:
-        n = gitops.git(PKG_ROOT, "rev-list", "--count", f"{before}..{after}").strip()
-        print(f"updated {kind} {before[:7]}..{after[:7]} ({n} commit(s)); /reload-plugins or a "
-              "restart picks up the pane")
+        try:  # Claude Code keeps its marketplace's clone shallow, one commit, and its update
+            # replaces it: the old HEAD is gone, and counting from it failed a good update (a
+            # user's 0.94 to 1.4, 2026-11-20)
+            n = f" ({int(gitops.git(PKG_ROOT, 'rev-list', '--count', f'{before}..{after}'))} commit(s))"
+        except (gitops.GitError, ValueError):
+            n = ""
+        print(f"updated {kind} {before[:7]}..{after[:7]}{n}; /reload-plugins or a restart picks up "
+              "the pane")
 
 
 def gpu_line() -> str:
