@@ -1015,7 +1015,8 @@ def serve(port: int, binds: list[str] | None, hosts: list[str] | None = None, sa
     servers, p = make_servers(port, binds, hosts)
     # the port it runs on, for `wb chat url` and the pane's link: they asked without one and got
     # the default, wrong for a server on the free port the CLI advises (#349, the audit of 1.4)
-    store.write_json(chat_dir() / "port.json", {"port": port, "pid": os.getpid()})
+    store.write_json(chat_dir() / "port.json", {"port": servers[0].server_address[1] if servers
+                                                else port, "pid": os.getpid()})
     for srv in servers[1:]:
         threading.Thread(target=srv.serve_forever, daemon=True).start()
     say(f"web chat on {', '.join(f'{s.server_address[0]}:{port}' for s in servers)}"
