@@ -164,24 +164,32 @@ def gpus(windows: bool = True) -> list[dict]:
 
 
 # What a runtime started with these sees, by driver: CUDA's and ROCm's own settings, which take
-# device numbers (counted in nvidia-smi's or sysfs's order) or UUIDs. HIP's counts within ROCR's.
+# device numbers (counted in nvidia-smi's or sysfs's order) or UUIDs. HIP's counts within ROCR's,
+# in the order ROCR's names them; a Vulkan-backed Ollama's mask counts every card ("*").
 VISIBLE = (("nvidia", "CUDA_VISIBLE_DEVICES"), ("amdgpu", "ROCR_VISIBLE_DEVICES"),
-           ("amdgpu", "HIP_VISIBLE_DEVICES"))
+           ("amdgpu", "HIP_VISIBLE_DEVICES"), ("*", "GGML_VK_VISIBLE_DEVICES"))
+EMPTY_IS_NONE = {"CUDA_VISIBLE_DEVICES"}  # set but empty: CUDA sees no device at all
 
 
 def visible(devs: list[dict], env: dict) -> tuple[list[dict], list[str]]:
-    """The devices of ``devs`` a runtime started with ``env`` can use, and the settings that left
-    some out. Two 8 GiB cards with Ollama limited to one made a 16 GiB budget (the 2026-11-19
-    audit). An empty or unset setting leaves every device; like CUDA, the list stops at the first
-    entry that names no device ("-1": none)."""
+    """The devices of ``devs`` a runtime started with ``env`` can use, in the order it numbers
+    them, and the settings that left some out. Two 8 GiB cards with Ollama limited to one made a
+    16 GiB budget (the 2026-11-19 audit). An unset setting leaves every device; like CUDA, the
+    list stops at the first entry that names no device ("-1": none). Each setting counts within
+    the order the one before left: HIP_VISIBLE_DEVICES=0 under ROCR_VISIBLE_DEVICES=1,0 is
+    ROCR's card 1, where discovery order picked the 4 GB card for the 24 GB one; an empty
+    CUDA_VISIBLE_DEVICES is no device, not every one; and a Vulkan-backed Ollama's own mask was
+    never read (#255, the audit of 1.2)."""
     notes = []
     for driver, key in VISIBLE:
-        raw = (env.get(key) or "").strip()
-        mine = [g for g in devs if (g.get("driver") or "").split(" ")[0] == driver]
-        if not raw or not mine:
+        if key not in env or env[key] is None:
+            continue
+        raw = env[key].strip()
+        mine = [g for g in devs if driver == "*" or (g.get("driver") or "").split(" ")[0] == driver]
+        if not mine or not raw and key not in EMPTY_IS_NONE:
             continue
         picked = []
-        for item in (x.strip() for x in raw.split(",")):
+        for item in (x.strip() for x in raw.split(",")) if raw else ():
             if item.isdigit() and int(item) < len(mine):
                 one = [mine[int(item)]]
             else:  # a UUID, or the unique start of one, as CUDA allows
@@ -189,9 +197,10 @@ def visible(devs: list[dict], env: dict) -> tuple[list[dict], list[str]]:
             if len(one) != 1:
                 break
             picked += [g for g in one if not any(g is p for p in picked)]
-        if len(picked) < len(mine):
-            devs = [g for g in devs if not any(g is m for m in mine) or any(g is p for p in picked)]
-            notes.append(f"{key}={raw}")
+        if [id(g) for g in picked] != [id(g) for g in mine]:
+            devs = [g for g in devs if not any(g is m for m in mine)] + picked
+            if len(picked) < len(mine):
+                notes.append(f"{key}={raw}")
     return devs, notes
 
 
@@ -267,8 +276,11 @@ def ollama_env() -> dict:
             for item in items:
                 k, _, v = item.partition("=")
                 env.setdefault(k, v)
-    for k in OLLAMA_KEYS + tuple(key for _, key in VISIBLE):
+    for k in OLLAMA_KEYS:
         env.setdefault(k, os.environ.get(k, ""))
+    for _, k in VISIBLE:  # unset stays unset: an empty CUDA_VISIBLE_DEVICES is no device (#255)
+        if k in os.environ:
+            env.setdefault(k, os.environ[k])
     return env
 
 
