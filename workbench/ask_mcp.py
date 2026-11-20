@@ -26,6 +26,7 @@ from . import __version__, store
 from .watch import Watcher
 
 PROTOCOL = "2025-06-18"
+LISTED = ".listed"  # in ask/: written when OpenCode lists the tool (a newer OpenCode might not)
 TOOL = {
     "name": "ask_reviewer",
     "description": (
@@ -322,6 +323,10 @@ def handle(msg: dict, task: store.Task):
         result = {}
     elif method == "tools/list":
         result = {"tools": [TOOL]}
+        try:  # OpenCode listed the tool: the runner's round report checks for it (LISTED)
+            (ask_dir(task) / LISTED).touch()
+        except OSError:
+            pass
     elif method == "tools/call":
         params = msg.get("params") or {}
         if params.get("name") != TOOL["name"]:

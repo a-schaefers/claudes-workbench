@@ -295,6 +295,40 @@ test('a new Claude Code process in the project adopts the tasks of one that is g
   expect(kills.length - asked).toBeLessThanOrEqual(1)          // a live one, not at every poll
 })
 
+test('on a file system that ignores case, a task under ~/Repos is a session in ~/repos\'s', async ($, on) => {
+  // the 2026-11-19 audit (finding 28): by the raw strings it was no one's
+  const clock = mock.clock(on, { now: 1_800_000_000_000 })
+  const files: Record<string, string> = {}
+  task(files, 'cased', 'review', { repo: '/Users/u/Repos/a', cwd: '/Users/u/Repos/a' })
+  notice(files, { ts: ts0, task: 'cased', kind: 'review', text: 'REPORT-cased' })
+  fakeTasks(on, files, ['cased'])
+  on('session.id', () => ({ value: 'sess-new' }))
+  on('process.run', () => ({ value: { exitCode: 0, stdout: '', stderr: '' } }))
+  on('ui.toast', () => ({ value: undefined }))
+  const woken: string[] = []
+  on('prompt.submit', (_: any, e: any) => { woken.push(e.text); return { text: e.text } })
+  files['/uSERS/U/REPOS/A'] = ''  // the directory, every letter's case swapped: APFS finds it
+  await $.session.start({ cwd: '/Users/u/repos/a', surface: 'terminal', isInteractive: true })
+  await clock.advance(3000)
+  expect(woken.filter(t => t.includes('REPORT-cased'))).toHaveLength(1)
+})
+
+test('where case counts, a task under another directory differing only in case is not this session\'s', async ($, on) => {
+  const clock = mock.clock(on, { now: 1_800_000_000_000 })
+  const files: Record<string, string> = {}
+  task(files, 'cased', 'review', { repo: '/home/u/Repos/a', cwd: '/home/u/Repos/a' })
+  notice(files, { ts: ts0, task: 'cased', kind: 'review', text: 'REPORT-cased' })
+  fakeTasks(on, files, ['cased'])
+  on('session.id', () => ({ value: 'sess-new' }))
+  on('process.run', () => ({ value: { exitCode: 0, stdout: '', stderr: '' } }))
+  on('ui.toast', () => ({ value: undefined }))
+  const woken: string[] = []
+  on('prompt.submit', (_: any, e: any) => { woken.push(e.text); return { text: e.text } })
+  await $.session.start({ cwd: '/home/u/repos/a', surface: 'terminal', isInteractive: true })
+  await clock.advance(3000)
+  expect(woken.join('\n')).not.toContain('REPORT-cased')
+})
+
 test('a scripted session (claude -p, the SDK) takes no wake and runs no wb, until a person attaches', async ($, on) => {
   // the 2026-11-16 audit: a `claude -p` run took the terminal session's review wake
   const clock = mock.clock(on, { now: 1_800_000_000_000 })

@@ -297,6 +297,21 @@ def _preempt_bench(m: models.Model, me: str | None = None) -> str:
 OPTIMIZE_EXIT = 30  # seconds a stopped wb optimize gets to let go of the GPU (it stops between requests)
 
 
+def _fixed_line(task: store.Task, m: models.Model) -> str:
+    """A line when the agent's fixed prompt takes FIXED_SHARE of the model's window or more."""
+    window = (m.config.get("limit") or {}).get("context")
+    try:
+        tokens, parts = context.fixed_prompt(task)
+    except (OSError, gitops.GitError):
+        return ""
+    if not window or tokens < context.FIXED_SHARE * window:
+        return ""
+    big = ", ".join(f"{name} {n / 1000:.1f}K" for name, n in parts[:3])
+    return (f"the agent reads about {tokens / 1000:.0f}K tokens before its first step, "
+            f"{100 * tokens // window}% of {m.id}'s {window // 1024}K window ({big}): it will hand "
+            "over to fresh sessions early and often; trim the largest, or --model one with a bigger window")
+
+
 def _gpu_note(task: store.Task) -> str:
     """For wb feedback/next/resume, which queue the task anyway: who it will wait for."""
     m = models.discover().get(task.spec.get("model") or "")
@@ -547,6 +562,7 @@ def cmd_start(a):
                     skills=handed, skills_ever=handed, skills_rev=skills.revs(handed))
     context.grant(task, "allow", [p.strip() for p in a.allow or [] if p.strip()])
     context.grant(task, "paths", lane_dirs)
+    fixed = _fixed_line(task, m)  # before the runner, which writes the same rules files
     spawn_runner(task)
     print(f"started {a.name} on {m.label} · branch {gitops.branch_name(a.name)} · "
           f"base {base[:8]}" + (f" · tests `{a.test}`, auto-fix {a.auto_fix}" if a.test else ""))
@@ -574,6 +590,10 @@ def cmd_start(a):
     if context.on_windows(str(repo), context.windows_drives()):  # finding 30 (the 2026-11-19 audit)
         print("note: the repo is on a Windows drive, where git is many times slower and wb checks "
               "the worktree at every step: a clone in WSL's own filesystem (~/...) runs faster")
+    if fixed:
+        print(f"note: {fixed}")
+    if drift := runner.untested(runner.opencode_version()):
+        print(f"note: {drift}")
     print(f"model: {why}" if why != "asked for" else f"model: {m.id} (asked for)")
     print(f"slice: {router.slice(m).line()}")
     if gaps := results.spec_gap_line():
@@ -960,15 +980,21 @@ def _scope(tasks, where, sessions=None):
     started after a `cd` elsewhere to none). Returns (mine, others)."""
     if not where and not sessions:
         return list(tasks), []
-    here = Path(where).resolve() if where else None
-    broad = here in (Path.home().resolve(), Path("/"))
+    # real paths on both sides, in lower case where the file system ignores case (macOS): a
+    # symlinked project, /tmp against /private/tmp, or ~/Repos typed for ~/repos once missed
+    # (the 2026-11-19 audit)
+    fold = bool(where) and _folds_case(where)
+    real = lambda p: Path(os.path.realpath(p).lower() if fold else os.path.realpath(p))  # noqa: E731
+    here = real(where) if where else None
+    broad = here in (real(Path.home()), Path("/"))
     mine, others = [], []
     for t in tasks:
         sid, cwd, repo = (t.spec.get(k) for k in ("session", "cwd", "repo"))
+        cwd, repo = cwd and real(cwd), repo and real(repo)
         # Path.is_relative_to compares whole components: /x/ab isn't inside /x/a
         near = here is not None and not broad and bool(
-            cwd and Path(cwd).is_relative_to(here)
-            or repo and (Path(repo).is_relative_to(here) or here.is_relative_to(repo)))
+            cwd and cwd.is_relative_to(here)
+            or repo and (repo.is_relative_to(here) or here.is_relative_to(repo)))
         if sessions and sid:
             ok = sid in sessions or near and _gone(t.spec.get("claude_pid"))
         elif here is None or (not cwd and not repo):
@@ -977,6 +1003,16 @@ def _scope(tasks, where, sessions=None):
             ok = near
         (mine if ok else others).append(t)
     return mine, others
+
+
+def _folds_case(path) -> bool:
+    """Whether the file system holding ``path`` ignores case: the path with every letter's case
+    swapped is the same directory (APFS and HFS+ as macOS formats them; not ext4)."""
+    p = os.path.realpath(path)
+    try:
+        return p.swapcase() != p and os.path.samefile(p, p.swapcase())
+    except OSError:
+        return False
 
 
 def _others_line(others, what):
@@ -2975,6 +3011,8 @@ def cmd_doctor(a):
         old = bool(major) and int(major[1]) < 2
         line(good and not old, f"opencode {said}"
              + (": workbench needs OpenCode 2.x (checked against 2.3); upgrade it" if old else ""))
+        if good and not old and (drift := runner.untested(runner.opencode_version())):
+            print(f"--  {drift}")
     files = models.opencode_config_files()
     try:
         models.read_config()

@@ -1727,6 +1727,49 @@ class Context(Base):
         self.assertNotIn("failed", [r["kind"] for r in store.notices() if r["task"] == "t-nr"])
 
 
+class StartChecks(Base):
+    """What wb start and the first report say about the setup itself: an OpenCode outside the
+    tested range, a fixed prompt that fills the window, an ask tool OpenCode never listed."""
+
+    def test_start_says_when_opencode_is_outside_the_tested_range(self):
+        # the 2026-11-19 audit (finding 26): only wb doctor looked, and only for 2.x or newer
+        os.environ["FAKE_VERSION"] = "opencode v3.1.0"
+        out = self.start("t-v", "ok")
+        self.assertIn("note: OpenCode 3.1 is outside what workbench is tested with (2.3 up to 3.0)", out)
+        self.assertNotIn("before its first step", out)
+        wait_phase("t-v", {"review"})
+        os.environ["FAKE_VERSION"] = "opencode v2.3.0"
+        self.assertNotIn("outside what", self.start("t-ok", "ok"))
+        self.assertTrue(runner.untested((2, 2)))
+        self.assertEqual(runner.untested((2, 9)), "")
+
+    def test_start_says_when_the_fixed_prompt_takes_much_of_the_window(self):
+        # the 2026-11-19 audit (finding 27): a 25 KB CLAUDE.md on a 32K window started the agent
+        # near its handover point
+        (self.repo / "CLAUDE.md").write_text("Keep it short.\n" * 4000)   # 60 KB: about 15K tokens
+        subprocess.run(["git", "-C", str(self.repo), "commit", "-qam", "big"], check=True)
+        out = self.start("t-big", "ok")
+        self.assertRegex(out, r"note: the agent reads about 2\dK tokens before its first step, "
+                              r"\d\d% of \S+'s 32K window \(CLAUDE\.md 15\.0K, OpenCode's own")
+        tokens, parts = context.fixed_prompt(store.Task("t-big"))
+        self.assertEqual(dict(parts)["CLAUDE.md"], 15000)
+        self.assertEqual(tokens, sum(n for _, n in parts))
+        self.assertIn("the spec", dict(parts))
+
+    def test_a_round_whose_opencode_never_listed_the_ask_tool_says_so(self):
+        # the 2026-11-19 audit (finding 26): an OpenCode that stopped loading the server would
+        # leave the agent no way to ask, and nothing said so
+        self.start("t-l", "ok")
+        wait_phase("t-l", {"review"})
+        self.assertTrue((store.Task("t-l").dir / "ask" / ask_mcp.LISTED).exists())
+        self.assertNotIn("never listed", run_wb("report", "t-l"))
+        os.environ["FAKE_NO_MCP"] = "1"
+        self.start("t-n", "ok")
+        wait_phase("t-n", {"review"})
+        self.assertIn("NOTE: the agent's OpenCode never listed workbench_ask_reviewer, so it can't "
+                      "ask you anything", run_wb("report", "t-n"))
+
+
 class Steering(Base):
     def setUp(self):
         super().setUp()
@@ -1852,6 +1895,26 @@ class Steering(Base):
         with self.assertRaises(SystemExit):
             run_wb("stop", "t-mine", "--repo", here)       # a scope goes with --all
         self.assertIn("stopped: t-theirs", run_wb("stop", "--all"))  # without one: every task
+
+    def test_whose_task_is_judged_by_real_paths_and_by_case_where_the_file_system_ignores_it(self):
+        # the 2026-11-19 audit (finding 28): a task recorded under a symlinked project, or a
+        # session in ~/Repos for ~/repos on macOS, was another session's by the raw strings
+        root = Path(self.tmp.name) / "Proj"
+        (root / "src").mkdir(parents=True)
+        link = Path(self.tmp.name) / "link"
+        link.symlink_to(root)
+        t = lambda **spec: types.SimpleNamespace(name="t", spec=spec)  # noqa: E731
+        mine, _ = cli._scope([t(repo=str(link), cwd=str(link))], str(root / "src"))
+        self.assertEqual(len(mine), 1)                     # recorded through the link
+        mine, _ = cli._scope([t(repo=str(root), cwd=str(root))], str(link / "src"))
+        self.assertEqual(len(mine), 1)                     # a session in the link
+        upper = str(root).upper().replace(str(Path(self.tmp.name)).upper(), self.tmp.name)
+        mine, _ = cli._scope([t(repo=upper, cwd=upper)], str(root))
+        self.assertEqual(mine, [])                         # case counts here (ext4)
+        with mock.patch.object(cli, "_folds_case", lambda p: True):   # as on APFS
+            mine, _ = cli._scope([t(repo=upper, cwd=upper)], str(root))
+        self.assertEqual(len(mine), 1)
+        self.assertFalse(cli._folds_case(root))
 
     def test_a_sessions_tasks_are_those_it_started_wherever_they_ran(self):
         # the 0.90 review: by directory alone, a task started from ~ (or any parent) for one repo
@@ -2228,7 +2291,7 @@ class AskServer(Base):
         task = store.Task("t-path")
         for bad in ("relative/dir", "/tmp/out --always\nwb accept x"):
             self.assertIn("path", ask_mcp.ask(task, "why", path=bad))
-        self.assertEqual(list(context.ask_dir(task).iterdir()), [])
+        self.assertEqual([p for p in context.ask_dir(task).iterdir() if p.name != ask_mcp.LISTED], [])
         self.agent_asks(task, "cccccccc", path="/tmp/a dir; rm -rf ~")
         ask_mcp.relay(task, {})
         note = [r for r in store.notices() if r["kind"] == "question"][-1]["text"]
@@ -2522,6 +2585,8 @@ class RealOpenCode(Base):
                                "limit": {"context": 32768, "output": 1024}}}}}
         layer_path.write_text(json.dumps(layer))
         time.sleep(0.5)
+        listed = ask_mcp.ask_dir(task) / ask_mcp.LISTED
+        listed.unlink(missing_ok=True)                   # the fake's run listed it too
         env = {**os.environ, "PWD": str(task.worktree), "OPENCODE_CONFIG": str(layer_path)}
         subprocess.run(["opencode", "run", "--standalone", "-m", "cap/cap", "--format", "json",
                         "say ok"], cwd=task.worktree, env=env, capture_output=True, timeout=120)
@@ -2529,6 +2594,11 @@ class RealOpenCode(Base):
         agent = max(reqs, key=lambda r: len(r.get("tools", [])))  # not the title request
         text = json.dumps(agent["messages"])
         tools = {t["function"]["name"] for t in agent["tools"]}
+        self.assertTrue(listed.exists())                 # the round report's check (finding 26)
+        # OpenCode's own share of the fixed prompt, as wb start estimates it (finding 27)
+        ours = sum(len(Path(f).read_text()) for f in json.loads(layer_path.read_text())["instructions"])
+        own = (len(text) + len(json.dumps(agent["tools"])) - ours) // context.CHARS_PER_TOKEN
+        self.assertLess(abs(own - context.OPENCODE_BASE_TOKENS), context.OPENCODE_BASE_TOKENS / 2, own)
         self.assertIn("CANARY-CLAUDE-MD", text)          # CLAUDE.md reaches the model
         self.assertIn("Workbench handbook", text)
         self.assertIn("workbench_ask_reviewer", tools)
@@ -5343,6 +5413,8 @@ class Setup(Base):
         os.environ.update(FAKE_VERSION="nightly")
         out = self.setup(cmd="doctor")[1]
         self.assertIn("--  opencode nightly: its version doesn't parse", out)
+        os.environ.update(FAKE_VERSION="opencode v3.1.0")  # finding 26: past the tested range
+        self.assertIn("--  OpenCode 3.1 is outside what workbench is tested with", self.setup(cmd="doctor")[1])
         self.assertIn("--  wb comes from /usr, not this copy", out)
 
     def test_setup_links_wb_and_the_skill_and_leaves_what_it_did_not_make(self):

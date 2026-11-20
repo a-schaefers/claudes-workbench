@@ -274,19 +274,19 @@ and wait a bounded time for the started server before reporting.
 - Where it does restart, `os._exit(75)` ends a chat started without a supervisor (`chat.py:448`).
 - **Fix:** compare address sets, and re-exec in place when there's no supervisor.
 
-**26. OpenCode version drift goes unnoticed.** Claude; source. Only `wb doctor` checks the
+**26. ~~OpenCode version drift goes unnoticed.~~** **Fixed (#212).** Claude; source. Only `wb doctor` checks the
 version, and only that the major version is at least 2 (`cli.py:2767`). The permission rules
 depend on behaviour checked against 2.3, so a 3.x would pass silently. **Fix:** keep a tested
 range, have `wb start` warn outside it, and check after round 1 that `workbench_ask_reviewer` was
 listed.
 
-**27. The fixed prompt isn't checked against the model's context window.** Claude; source.
+**27. ~~The fixed prompt isn't checked against the model's context window.~~** **Fixed (#213).** Claude; source.
 CLAUDE.md, nested instruction files, the HANDBOOK, the system prompt and the tools are never
 estimated at `wb start`. A 25 KB CLAUDE.md on a 32K window starts near the handover point, and
 the agent loops between "reading full" and handovers. **Fix:** estimate at about 4 characters per
 token, and warn or refuse above roughly 40% of the window.
 
-**28. "Whose task is this" compares raw path strings.** Claude; source. The mod's `within`/`near`
+**28. ~~"Whose task is this" compares raw path strings.~~** **Fixed (#214).** Claude; source. The mod's `within`/`near`
 (`register.tsx:518`) and Python's `_scope` (`cli.py:856`, which resolves only `here`) don't
 normalise paths. Symlinked project directories, `/tmp` vs `/private/tmp`, and case-insensitive
 APFS all miss. This only matters for adopting tasks after a crash or restart, and for tasks

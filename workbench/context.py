@@ -892,6 +892,37 @@ def instruction_files(task: store.Task) -> tuple[list[Path], list[str]]:
     return files, nested
 
 
+# What OpenCode 2.3 itself puts before the instructions: its system prompt and the tools left
+# after DENIED_TOOLS, measured with tests/capture_llm.py (the note at DENIED_TOOLS). Text is
+# estimated at CHARS_PER_TOKEN; a fixed prompt past FIXED_SHARE of the window is said at wb start.
+OPENCODE_BASE_TOKENS = 3500
+CHARS_PER_TOKEN = 4
+FIXED_SHARE = 0.4
+
+
+def fixed_prompt(task: store.Task) -> tuple[int, list[tuple[str, int]]]:
+    """About how many tokens the agent reads before its first step (OpenCode's own prompt, the
+    instruction files, AGENTS.md, round 1's prompt), and each part's, largest first. A 25 KB
+    CLAUDE.md on a 32K window started the agent near its handover point, and it looped between
+    reading and handovers (the 2026-11-19 audit)."""
+    files, _ = instruction_files(task)
+    wt, rules = task.worktree, rules_dir(task)
+    named = {rules / "HANDBOOK.md": "the handbook", rules / "CLAUDE.md": "~/.claude/CLAUDE.md"}
+    paths = [*files, *([wt / "AGENTS.md"] if (wt / "AGENTS.md").is_file() else []),
+             task.round_dir(1) / "prompt.md"]
+    parts = [("OpenCode's own prompt and tools", OPENCODE_BASE_TOKENS)]
+    for p in paths:
+        try:
+            n = p.stat().st_size // CHARS_PER_TOKEN
+        except OSError:
+            continue
+        label = named.get(p) or ("the spec" if p.name == "prompt.md" else
+                                 str(p.relative_to(wt)) if p.is_relative_to(wt) else p.name)
+        parts.append((label, n))
+    parts.sort(key=lambda x: -x[1])
+    return sum(n for _, n in parts), parts
+
+
 def denied_skills(extra: list[str] | None = None, project: Path | None = None) -> list[str]:
     """The user's personal skills (~/.claude/skills, the synced Claude-app ones included) are
     theirs, about their other work: an agent sees only the project's own .claude/skills. On

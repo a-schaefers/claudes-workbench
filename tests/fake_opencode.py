@@ -28,7 +28,8 @@ stays alive (a shutdown that hangs).
 `session export` prints one finished step: FAKE_FILL sets the context it read, FAKE_COMPACTED
 adds a completed compaction. `session list` lists nothing. Either fails without `--standalone`,
 as the real one does when another service holds the managed port. `--version` says
-`FAKE_VERSION` (2.3.0).
+`FAKE_VERSION` (2.3.0). A `run` starts the config's workbench MCP server and lists its tools,
+as OpenCode does, unless FAKE_NO_MCP.
 """
 import json
 import os
@@ -107,6 +108,22 @@ if scenario == "crash":
         for f in (os.environ["FAKE_DOWN"], os.environ["FAKE_DOWN"] + ".crashed"):
             open(f, "w").close()
     sys.exit(1)
+if args and args[0] == "run" and not os.environ.get("FAKE_NO_MCP"):
+    # as OpenCode does when a session starts: each local MCP server in the config is started and
+    # its tools listed (the workbench one here; the user's are commands that do nothing)
+    import subprocess
+    try:
+        with open(os.environ["OPENCODE_CONFIG"]) as fh:
+            server = json.load(fh)["mcp"]["servers"]["workbench"]
+    except (KeyError, OSError, ValueError, TypeError):
+        server = None
+    if server and server.get("type") == "local":
+        hello = [{"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {}},
+                 {"jsonrpc": "2.0", "method": "notifications/initialized"},
+                 {"jsonrpc": "2.0", "id": 2, "method": "tools/list"}]
+        subprocess.run(server["command"], input="".join(json.dumps(m) + "\n" for m in hello),
+                       env={**os.environ, **(server.get("environment") or {})},
+                       capture_output=True, text=True, timeout=30)
 if os.environ.get("FAKE_STRAY"):
     for stray in ("42", "[1, 2]", "null", '{"type": "step_finish", "part": {"tokens": 5}}',
                   '{"type": "tool_use", "part": "x"}', '{"type": "text", "part": {"text": 7}}',
