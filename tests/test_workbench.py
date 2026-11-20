@@ -798,10 +798,12 @@ class Lifecycle(Base):
         self.start("t-killed", "hang")
         st = running("t-killed")
         os.kill(st["pid"], signal.SIGKILL)
-        self.assertTrue(wait_gone(st["agent_pid"]))   # the kernel takes the agent with it (lane.py)
+        if sys.platform.startswith("linux"):           # the kernel takes the agent with it (lane.py)
+            self.assertTrue(wait_gone(st["agent_pid"]))
         self.assertEqual(store.Task("t-killed").status["phase"], "running")  # within the grace
         backdate("t-killed")
         out = run_wb("wait", "t-killed", "--timeout", "5")
+        self.assertTrue(wait_gone(st["agent_pid"]))   # elsewhere (no PDEATHSIG) the reap ends it (#236)
         self.assertIn("[failed] t-killed", out)
         self.assertIn("the runner died", out)
         self.assertEqual(store.Task("t-killed").status["last"], cli.RUNNER_DIED)
