@@ -1528,6 +1528,20 @@ class Lifecycle(Base):
         self.assertTrue(tip.startswith(gitops.merge(repo, "t", "main", how="ff")))
         self.assertEqual(git(repo, "rev-list", "--min-parents=2", "--count", "HEAD"), "0")
 
+    def test_accept_merge_as_squash_lands_one_commit_and_drops_the_branch(self):
+        # #352: branch -d keeps a squashed branch (never an ancestor of the squash), and merged
+        # delegate branches once piled up, 8 in one repo (the 2026-11-19 audit)
+        self.start("t-sq", "ok", "--test", TEST_CMD)
+        wait_phase("t-sq", {"review"})
+        out = run_wb("accept", "t-sq", "--merge-as", "squash", "-m", "feat: answer")
+        self.assertIn("merged into", out)
+        git = lambda *a: subprocess.run(["git", "-C", str(self.repo), *a], check=True,  # noqa
+                                        capture_output=True, text=True).stdout.strip()
+        self.assertEqual(git("rev-list", "--min-parents=2", "--count", "HEAD"), "0")
+        self.assertEqual(git("log", "-1", "--format=%s"), "feat: answer")
+        self.assertEqual((self.repo / "answer.txt").read_text().strip(), "42")
+        self.assertEqual(git("branch", "--list", "delegate/t-sq"), "")
+
     def test_accept_merge_completes_the_merge_or_says_it_did_not(self):
         # #190 (the 2026-11-19 audit): with branch.main.mergeOptions=--no-commit, git left the
         # merge pending, HEAD unmoved, and accept said merged

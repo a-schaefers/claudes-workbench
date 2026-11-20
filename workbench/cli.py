@@ -1623,7 +1623,10 @@ def cmd_accept(a):
             task.set_status(closing={**close, "merged_head": merged})
     if merged and gitops.git(repo, "rev-parse", "--verify", "-q", f"refs/heads/{spec['branch']}",
                              check=False).strip() == tip:
-        gitops.drop_merged_branch(repo, spec["branch"])
+        if close.get("merge_as") == "squash":  # never an ancestor of the squash: -d would keep it
+            gitops.git(repo, "branch", "-D", spec["branch"], check=False)
+        else:
+            gitops.drop_merged_branch(repo, spec["branch"])
     extra = {"commit": commit, "merged": bool(merged)}
     if refused:  # asked and refused: the row says so, and the exit status (#247)
         extra["merge_refused"] = refused[:300]
