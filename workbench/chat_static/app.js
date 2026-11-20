@@ -53,7 +53,25 @@
   let state = { messages: token ? load(K.thread, []) : [], asks: [], prefs: {}, push: {}, listener: null }
   let live = false
   let skew = 0                                  // server clock − ours, seconds
-  let outbox = load(K.outbox, [])               // [{cid, text, ts, error?}]
+  // The outbox: one localStorage key per message (OUT + its cid), read afresh whenever it is
+  // used. A single shared array was each tab's own copy saved over the others': two tabs offline,
+  // and only the second tab's message ever reached the server (#199, the 2026-11-19 audit).
+  const OUT = 'wb-chat-out-'
+  const outItems = () => {
+    const out = []
+    try {
+      for (let i = 0; i < localStorage.length; i++) {
+        const k = localStorage.key(i)
+        if (k && k.startsWith(OUT)) { const o = load(k, null); if (o && o.cid) out.push(o) }
+      }
+    } catch {}
+    return out.sort((x, y) => x.ts - y.ts)
+  }
+  const keep = o => { save(OUT + o.cid, o); outbox = outItems() }
+  const drop = cid => { try { localStorage.removeItem(OUT + cid) } catch {} outbox = outbox.filter(o => o.cid !== cid) }
+  for (const o of load(K.outbox, [])) if (o && o.cid) save(OUT + o.cid, o)  // the one array, before #199
+  try { localStorage.removeItem(K.outbox) } catch {}
+  let outbox = outItems()                       // [{cid, text, ts, error?}]
   let seen = new Set(load(K.seen, null) || [])  // Claude's messages already shown in full
   let firstVisit = load(K.seen, null) === null  // the backlog shows whole; what comes after flows
   const nodes = new Map()                       // key → row element
@@ -195,12 +213,12 @@
       if (m.error) {
         meta.append(span('', 'Not sent: ' + m.error + ' · '))
         const b = document.createElement('button'); b.textContent = 'retry'
-        b.onclick = () => { const o = outbox.find(x => x.cid === m.cid); if (o) { delete o.error; save(K.outbox, outbox) } flush(true); render() }
+        b.onclick = () => { const o = outbox.find(x => x.cid === m.cid); if (o) { delete o.error; keep(o) } flush(true); render() }
         const d = document.createElement('button'); d.textContent = 'delete'
-        d.onclick = () => { outbox = outbox.filter(x => x.cid !== m.cid); save(K.outbox, outbox); render() }
+        d.onclick = () => { drop(m.cid); render() }
         const ed = document.createElement('button'); ed.textContent = 'edit'
         ed.onclick = () => {
-          outbox = outbox.filter(x => x.cid !== m.cid); save(K.outbox, outbox)
+          drop(m.cid)
           input.value = m.text; save(K.draft, m.text); grow(); sendBtn.disabled = false
           render(); input.focus()
         }
@@ -467,7 +485,7 @@
     if (state.push.key && !pushSynced) { pushSynced = true; syncPush() }
     reportSeen()
     const onServer = new Set(state.messages.map(m => m.cid).filter(Boolean))
-    if (outbox.some(o => onServer.has(o.cid))) { outbox = outbox.filter(o => !onServer.has(o.cid)); save(K.outbox, outbox) }
+    for (const o of outItems()) if (onServer.has(o.cid)) drop(o.cid)
     render()
   }
   function reloadOnce() {
@@ -547,6 +565,8 @@
   // back on screen (or from the back-forward cache) with a line that's likely dead from the sleep:
   // dial now rather than wait out the watchdog
   const freshen = () => { if (conn && Date.now() - lastRx > STALE_MS) reconnectNow() }
+  // another tab queued, sent or dropped a message: show it, and send it if this tab can
+  addEventListener('storage', e => { if (e.key === null || e.key.startsWith(OUT)) { outbox = outItems(); render(); flush(true) } })
   addEventListener('online', () => { online = true; banner(''); reconnectNow(); flush(true); render() })
   addEventListener('offline', () => { online = false; banner('Offline. Messages will send when the connection is back.', true); render() })
   document.addEventListener('visibilitychange', () => {
@@ -631,17 +651,18 @@
   let flushing = false, flushTimer = 0, flushTries = 0
   async function flush(now) {
     if (now) { clearTimeout(flushTimer); flushTries = 0 }
+    outbox = outItems()  // another tab's too: whichever tab is online sends them all
     if (flushing || !token || !outbox.length) return
     flushing = true
     let again = false
     for (const o of [...outbox]) {
-      if (o.error) continue
+      if (o.error || !load(OUT + o.cid, null)) continue  // refused, or sent by another tab meanwhile
       try {
         const r = await post('/api/send', { text: o.text, cid: o.cid, ...(o.about ? { about: { task: o.about.task, n: o.about.n } } : {}) })
         const j = await r.json().catch(() => ({}))
         if (r.ok) { if (j.state) apply(j.state); continue }
         if (r.status === 401) { keyless('That key was not accepted.'); break }
-        if (r.status >= 400 && r.status < 500) { o.error = j.error || 'refused'; save(K.outbox, outbox); render(); continue }
+        if (r.status >= 400 && r.status < 500) { o.error = j.error || 'refused'; keep(o); render(); continue }
         again = true
       } catch { again = true }
     }
@@ -654,7 +675,7 @@
   function send() {
     const text = input.value.trim()
     if (!text || !token) return
-    outbox.push({ cid: newId(), text, ts: now(), ...(about ? { about } : {}) }); save(K.outbox, outbox)
+    keep({ cid: newId(), text, ts: now(), ...(about ? { about } : {}) })
     setAbout(null)
     input.value = ''; save(K.draft, ''); grow(); sendBtn.disabled = true
     render(); toEnd(true); flush(true)

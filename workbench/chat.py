@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import errno
 import hmac
+import http.client
 import json
 import os
 import secrets
@@ -145,15 +146,49 @@ def send(text: str, frm: str, cid: str | None = None, **extra) -> dict:
     so a retried send never lands twice. ``extra``: a pair of screenshots (``shots``), or what a
     reply is about (``about``)."""
     with _send_lock:
-        if cid:
-            for r in store.read_jsonl(chat_dir() / "messages.jsonl")[0][-500:]:
-                if r.get("cid") == cid:
-                    return r
+        if cid and (r := _by_cid(cid)):
+            return r
         row = {"id": f"{int(time.time() * 1000)}-{secrets.token_hex(3)}", "ts": store.now(),
                "from": frm, "text": text, **({"cid": cid} if cid else {}),
                **{k: v for k, v in extra.items() if v}}
         store.append_jsonl(chat_dir() / "messages.jsonl", row)
         return row
+
+
+CIDS_KEPT = 5000  # client ids remembered: an outbox item older than that many messages is no retry
+_cids: dict = {"key": None, "at": 0, "rows": {}}  # what _by_cid has read of messages.jsonl
+
+
+def _by_cid(cid: str) -> dict | None:
+    """The message a client sent with id ``cid``, or None. Read on from where the last call
+    stopped (the file is only appended to; another file or a shorter one is read afresh), and the
+    newest CIDS_KEPT kept: the last 500 rows were checked, and an outbox item from a tab offline
+    longer than that landed twice (#199, the 2026-11-19 audit)."""
+    p = chat_dir() / "messages.jsonl"
+    try:
+        st = p.stat()
+    except FileNotFoundError:
+        return None
+    key = (str(p), st.st_dev, st.st_ino)
+    if _cids["key"] != key or st.st_size < _cids["at"]:
+        _cids.update(key=key, at=0, rows={})
+    with open(p, "rb") as f:
+        f.seek(_cids["at"])
+        data = f.read()
+    end = data.rfind(b"\n") + 1  # a row still being written waits for its newline
+    rows = _cids["rows"]
+    for line in data[:end].splitlines():
+        try:
+            r = json.loads(line)
+        except ValueError:
+            continue
+        if isinstance(r, dict) and isinstance(r.get("cid"), str):
+            rows.pop(r["cid"], None)
+            rows[r["cid"]] = r
+    while len(rows) > CIDS_KEPT:
+        del rows[next(iter(rows))]
+    _cids["at"] += end
+    return rows.get(cid)
 
 
 CLAIM_STALE = 120  # seconds: a claim its session never followed with a receipt gives way
@@ -434,15 +469,69 @@ def set_on(on: bool) -> None:
         (chat_dir() / "listener.json").unlink(missing_ok=True)
 
 
-def running(port: int) -> bool:
-    """Whether a server answers on the port at an address this machine's plan binds."""
+MARK = "X-Workbench-Chat"  # on every response: how wb chat on knows its own server
+
+
+def who_answers(port: int) -> str | None:
+    """Who answers on the port at an address this machine's plan binds: "workbench" (its
+    responses carry MARK), "other", or None. A bare connect counted any program there as the
+    chat, and `wb chat on` showed a link to it (#200, the 2026-11-19 audit)."""
+    found = None
     for addr in plan()["binds"]:
+        conn = http.client.HTTPConnection("127.0.0.1" if addr in WILDCARD else addr, port, timeout=2)
         try:
-            with socket.create_connection(("127.0.0.1" if addr in WILDCARD else addr, port), timeout=1):
-                return True
-        except OSError:
-            continue
+            conn.request("GET", "/manifest.webmanifest", headers={"Host": "localhost"})
+            if conn.getresponse().getheader(MARK) == "1":
+                return "workbench"
+            found = "other"
+        except (OSError, http.client.HTTPException):
+            found = found or (_connects(addr, port) and "other") or None
+        finally:
+            conn.close()
+    return found
+
+
+def _connects(addr: str, port: int) -> bool:
+    try:
+        with socket.create_connection(("127.0.0.1" if addr in WILDCARD else addr, port), timeout=1):
+            return True
+    except OSError:
+        return False
+
+
+def running(port: int) -> bool:
+    """Whether the web chat's own server answers on the port."""
+    return who_answers(port) == "workbench"
+
+
+START_WAIT = 10  # seconds wb chat on waits for the server it started to answer
+
+
+def wait_up(port: int, pid: int, limit: float = START_WAIT) -> bool:
+    """Whether the server started as ``pid`` answers within ``limit`` seconds: it may exit at once
+    (the port taken, an address not here), and a fixed half second said started either way."""
+    deadline = time.monotonic() + limit
+    while time.monotonic() < deadline:
+        if running(port):
+            return True
+        try:
+            if os.waitpid(pid, os.WNOHANG)[0]:
+                return False  # it exited: serve.log says why
+        except ChildProcessError:  # not this process's child
+            if not _alive(pid):
+                return False
+        time.sleep(0.1)
     return False
+
+
+def _alive(pid: int) -> bool:
+    try:
+        os.kill(pid, 0)
+        return True
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
 
 
 def start(port: int) -> int:
@@ -594,6 +683,7 @@ class Handler(BaseHTTPRequestHandler):
         pass
 
     def _security_headers(self) -> None:
+        self.send_header(MARK, "1")
         self.send_header("Cache-Control", "no-store")
         self.send_header("X-Frame-Options", "DENY")
         self.send_header("X-Content-Type-Options", "nosniff")
@@ -884,19 +974,22 @@ def serve(port: int, binds: list[str] | None, hosts: list[str] | None = None, sa
         say("every interface: anyone who can reach this machine and has the link can use it")
     if p["hosts"] is None:
         say("answering to any host name (hosts: *): the token is the only lock")
-    if p["skipped"]:  # an address not up yet (tailscaled after login): serve what is, and once
-        def replan():  # it comes up, end so the service manager starts the server with it
+    def restart(why: str):  # the same command again, in this process: systemd and launchd see
+        say(why)            # no exit, and a server wb chat on started has no supervisor to rerun it
+        os.execv(sys.executable, [sys.executable, *sys.orig_argv[1:]])
+    if p["skipped"] or "tailscale" in (binds or settings().get("bind") or []):
+        # an address that comes and goes (tailscaled after login, a VPN): once the plan's set
+        # changes, rebind. Only a longer list was noticed, so a tailscale-only chat on loopback
+        # stayed there when the tailnet came up; and it exited 75, which ended a chat with no
+        # service manager (#200, the 2026-11-19 audit)
+        def replan():
             while True:
                 time.sleep(REPLAN_EVERY)
-                if len(plan(binds, hosts)["binds"]) > len(p["binds"]):
-                    say("an address this server skipped is up now: restarting to bind it")
-                    os._exit(75)
+                if set(plan(binds, hosts)["binds"]) != set(p["binds"]):
+                    restart("the addresses to listen on changed: restarting to bind them")
         threading.Thread(target=replan, daemon=True).start()
-
-    def restart():  # the same command again, in this process: systemd and launchd see no exit
-        say("the web chat's code changed: restarting with it")
-        os.execv(sys.executable, [sys.executable, *sys.orig_argv[1:]])
-    threading.Thread(target=watch_code, args=(restart,), daemon=True).start()
+    threading.Thread(target=watch_code, args=(
+        lambda: restart("the web chat's code changed: restarting with it"),), daemon=True).start()
     threading.Thread(target=Pusher(servers[0].RequestHandlerClass.hub).run, daemon=True).start()
     servers[0].serve_forever()
 

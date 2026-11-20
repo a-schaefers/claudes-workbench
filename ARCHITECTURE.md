@@ -2676,7 +2676,13 @@ VPN), `"hosts": ["chat.example.org"]` a name a tunnel or proxy sends.
   A server already running is left up (systemd's: `systemctl --user disable --now wb-chat` stops
   it), its messages waiting for the chat to be on again. `wb chat on` starts `bin/wb chat serve
   --port <port>` detached (`chat.start`: `chat/serve.log`, `chat/serve.pid` `{pid, port}`) when
-  nothing answers on the port at an address the plan binds (`chat.running`); `wb chat off` stops
+  nothing answers on the port at an address the plan binds (`chat.who_answers`: a GET whose
+  response carries `X-Workbench-Chat: 1`, `chat.MARK`, which every response of the server has, is
+  the chat; anything else answering is another program, and `wb chat on` refuses with the port
+  named), then waits up to `START_WAIT` 10 s for it to answer (`chat.wait_up`; one that exits,
+  the port taken, fails at once with serve.log's last line). A bare connect counted any program
+  on the port as the chat, and a fixed half second said started either way (#200, the
+  2026-11-19 audit); `chat.running` is `who_answers == "workbench"`. `wb chat off` stops
   only that process (`chat.stop_started`, by its pid and command line), never one wb didn't start.
 - **One listener.** A session listens while workbench mode is on in it (from `/workbench`, or a
   delegating `wb` command, until a quit command) and the chat is on. With several sessions the first live claim on
@@ -2713,8 +2719,10 @@ VPN), `"hosts": ["chat.example.org"]` a name a tunnel or proxy sends.
 
 **Files** (`$WB_HOME/chat/`):
 - `messages.jsonl`: `{id: "<ms>-<6 hex>", ts, from: "user"|"claude", text, cid?, shots?,
-  about?}`. A post whose `cid` is among the last 500 messages returns that row instead of adding
-  one. `shots` (Claude's, from `wb shot --chat`) is `chat.shots`: `{task, n, step, round,
+  about?}`. A post whose `cid` the thread already holds returns that row instead of adding one
+  (`_by_cid`: the file read on from where the last post stopped, the newest `CIDS_KEPT` 5000 ids
+  kept; only the last 500 rows were checked, and a tab offline longer than that sent its message
+  twice, #199). `shots` (Claude's, from `wb shot --chat`) is `chat.shots`: `{task, n, step, round,
   viewport, base: {rev, image: bool}, candidate: {rev, image: bool}}`. `about` (the user's reply
   to a pair) is `{task, n, step, round}`, taken from the pair's shots.json and not from the page.
 - `receipts.jsonl`: `{id, ts, by, how: "now"|"queued"}`, written by `wb chat ack` (the mod).
@@ -2759,8 +2767,11 @@ the host name resolves to; any other bind as itself; plus `hosts`. `serve` print
 on, binds it skipped, and warnings for a wildcard bind or `hosts: *`; an address it can't listen
 on ends it with one line (`can't listen on <addr>:<port>: the port is taken: another wb chat serve
 … or another program; --port picks another`, or the address isn't on this machine). With a bind skipped (tailscale
-not up yet), it rechecks every `REPLAN_EVERY` 30 s and exits 75 once more binds are available,
-for the service manager (`Restart=always`) to start it again with them. Every `RELOAD_EVERY` 10 s
+not up yet) or a `tailscale` bind (its address comes and goes), it rechecks every
+`REPLAN_EVERY` 30 s and once the set of addresses differs re-execs in place (as for a code
+change, below) to bind them. Only a longer list was noticed, so a tailscale-only chat serving
+loopback stayed there when the tailnet came up, and the restart was an exit 75 that ended a chat
+`wb chat on` had started, with no service manager to start it again (#200). Every `RELOAD_EVERY` 10 s
 it looks at its package's `*.py` (`code_stamp`: names, mtimes, sizes; `watch_code`); once they
 have changed and held still for a look (a pull writes files one by one), it says so and re-execs
 the same command line (`sys.orig_argv`) in the same process, so systemd and launchd see no exit
@@ -2839,8 +2850,12 @@ or token. It never expires (it is the token file). A keyed page over https point
 `/api/state` for at once as well as opening the stream (a refresh showed "no session listening"
 and an empty thread for seconds while the stream waited for a slot, 2026-11-18). The stream is a `fetch` with the
 bearer header (EventSource can't send one), parsed by hand; every state event is a full resync, so
-nothing arrives half-received. A message goes into a local outbox (`wb-chat-outbox`, each with a
-`crypto.randomUUID()` cid) and is sent in order until the server has it; the server ignores a cid
+nothing arrives half-received. A message goes into a local outbox (one localStorage key per
+message, `wb-chat-out-<cid>`, the cid a `crypto.randomUUID()`), read afresh whenever it is used,
+and is sent in order until the server has it; a `storage` event (another tab queued, sent or
+dropped one) redraws and flushes, so whichever tab is online sends every tab's. One shared array
+(`wb-chat-outbox`, moved into the keys on load) was each tab's copy saved over the others':
+two tabs offline, and only the second's message reached the server (#199). the server ignores a cid
 it already holds, so nothing is sent twice; a 4xx other than 401 marks it not sent, with retry,
 edit and delete. Each send gives up after `POST_MS` 15 s and is tried again, so a dead line
 can't hold the outbox. Staying connected: a 40 s watchdog (`DEAD_MS`; pings count) aborts a silent
@@ -3335,7 +3350,7 @@ delivered as taken (`_stale_notes`, *Notes*).
 | Command | Flags | What it does |
 |---|---|---|
 | `wb image "<prompt>"` | `--n` (4), `--size WxH` (1024x1024), `--seed`, `--ref <img>…`, `--out DIR`, `--engine`, `--list`, `--wait` | Candidates from a local image engine (see *Images*). While anything holds the GPU it refuses at once, naming the holders; `--wait` queues behind them. A bare `list` or `ls` as the prompt acts as `--list`. |
-| `wb chat [log\|on\|off\|serve\|url\|reply\|ack\|claim\|pending\|ask\|wait\|answer]` | `on`, `off` (the switch, kept; `on` starts a server when none answers on `--port` and prints the link, `off` stops only one it started), `--port` (1337), `--bind` (replaces chat.json's), `--host` (adds), `--text`, `--message <file\|->` (reply reads stdin without either), `-n` (10); `ack <id> --by --how`, `claim <id> --by` (exit 1: another session's), `ask --tool --kind permission\|plan\|question --text --detail <json>` (prints `<id> open`, or `<id> allow` when the user's setting answered it), `wait <id> --timeout` (30 s; prints allow, deny, expired, or `open` at the timeout; `--json`: the whole ask), `answer <id> allow\|deny\|expired --by --note` (prints the answer that stands) (the mod) | The web chat: the thread, the server, the link with its token, Claude's reply, permission prompts. |
+| `wb chat [log\|on\|off\|serve\|url\|reply\|ack\|claim\|pending\|ask\|wait\|answer]` | `on`, `off` (the switch, kept; `on` starts a server when none answers on `--port`, waits for it, and prints the link; it refuses when another program answers there, `off` stops only one it started), `--port` (1337), `--bind` (replaces chat.json's), `--host` (adds), `--text`, `--message <file\|->` (reply reads stdin without either), `-n` (10); `ack <id> --by --how`, `claim <id> --by` (exit 1: another session's), `ask --tool --kind permission\|plan\|question --text --detail <json>` (prints `<id> open`, or `<id> allow` when the user's setting answered it), `wait <id> --timeout` (30 s; prints allow, deny, expired, or `open` at the timeout; `--json`: the whole ask), `answer <id> allow\|deny\|expired --by --note` (prints the answer that stands) (the mod) | The web chat: the thread, the server, the link with its token, Claude's reply, permission prompts. |
 | `wb try` | `--model <id or fragment>` (the router's pick) | A sample task that proves the setup (#112): copies `workbench/try/project/` (a tiny `stats.py` with its tests and a committed CLAUDE.md) into `~/.local/share/workbench/try/<n>` (beside `$WB_SKILLS`: the state directory is hidden from the lane, and its agent had no git there, #164), sets it up as `wb init` does, and starts `workbench/try/spec.md` (add `median`) as `try-<n>`, `--size trivial --trial --test 'python3 -m unittest'`: never the router's evidence or the lessons. Prints what `wb start` does, the project's path and the hidden check for review, `python3 <pkg>/workbench/try/check.py <worktree>` (the agent never sees it; it fails on the untouched base, passes once `median` meets the spec, and leaves no `__pycache__`). A refused start (the GPU busy without `--queue`, no model) removes the copy again (#161). |
 | `wb init <dir>` | | A project the way Claude keeps one: git on the default branch, an initial commit, AGENTS.md → CLAUDE.md (a CLAUDE.md → AGENTS.md link is swapped; a gitignored CLAUDE.md isn't linked). Refuses the home directory or above, inside another repo, a repo git refuses (git's reason: no `git init` over it), without a git identity (`git var`, as for `wb start`), and a first commit holding likely secrets or installed directories no .gitignore covers. |
 | `wb setup` | `--force` (replaces a link that points elsewhere; never a real file) | Links `~/.local/bin/wb` to this copy's `bin/wb` and Claude Code's `skills/workbench` to its `skill/workbench`, removes an old `skills/delegate` link that now leads nowhere (the skill was `/delegate` until 2026-11-17; the mod runs `wb setup` itself when it finds only that), warns when `~/.local/bin` isn't on PATH (Claude and the mod run `wb` by name); exit 1 when it left something in the way (see *Installing*). Then, when due (*Optimize*), starts the minute or two of measuring the GPU and prints its line as `--`. Ends with a `first run:` checklist (`cli.first_run`, #111), one line each, `ok` or `--` with the fix: OpenCode 2.x (else where to get it), a model server answering (a configured provider, this machine's Ollama, or a server on a default port; else: start yours, or run /workbench and Claude lays out the ones that fit the machine, never steering to one; `wb model add --url`), a local model registered (else: run /workbench, and Claude picks one for the machine), Landlock. It names no model, and changes no exit code. |
