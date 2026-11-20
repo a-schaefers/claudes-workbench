@@ -149,6 +149,28 @@ class _At(store.Task):
         return self._worktree
 
 
+def _prepared(at: store.Task, where: str) -> None:
+    """A scratch checkout set up as the task's worktree was (runner.prepare); RuntimeError
+    naming what it couldn't reproduce."""
+    code, said = runner.prepare(at)
+    if code != 0:
+        what = f"`{at.spec.get('setup')}` exited {code}" if isinstance(code, int) else str(code)
+        raise RuntimeError(f"setting up {where} as the task's worktree was failed ({what}): the "
+                           f"case can't reproduce its dependencies. {runner.clip_tail(said, 4, total=400)}")
+
+
+def _inputs(case: dict, repo: Path) -> None:
+    """The original checkout's copied paths and siblings, beside a replay's checkout, where its
+    wb start --copy and --sibling find them (#250)."""
+    src = Path(case["repo"])
+    for p in case.get("copy") or ():
+        if os.path.lexists(src / p):
+            runner._copy(src / p, repo / p)
+    for name in case.get("siblings") or ():
+        if not os.path.lexists(repo.parent / name):
+            (repo.parent / name).symlink_to(os.path.realpath(src.parent / name))
+
+
 def add(name: str, step: int | None = None, hidden: list[str] | None = None,
         check: str | None = None, case_name: str | None = None) -> list[str]:
     """Make a case of one step of an accepted task; the report's lines. RuntimeError refuses."""
@@ -214,6 +236,11 @@ def add(name: str, step: int | None = None, hidden: list[str] | None = None,
                 "test_cmd": test.group(1), "test_timeout": spec.get("test_timeout") or 900,
                 "check_cmd": check, "hidden": picked, "allow": grants.get("allow") or [],
                 "paths": grants.get("paths") or [], "skills": st.get("skills_ever") or [],
+                # the worktree's setup (#201), so the reference, the base and each replay are the
+                # project as the task had it: a task whose --setup made an ignored stamp had its
+                # own commit rejected, the scratch clone without it (#250, the audit of 1.2)
+                "setup": spec.get("setup") or "", "copy": spec.get("copy") or [],
+                "siblings": spec.get("siblings") or [],
                 "original": {"model": spec.get("model"), "rounds": row.get("rounds"),
                              "reviews": step_row.get("reviews", row.get("reviews")),
                              "minutes": row.get("minutes"), "steps": steps},
@@ -230,6 +257,7 @@ def add(name: str, step: int | None = None, hidden: list[str] | None = None,
                 (work / p).parent.mkdir(parents=True, exist_ok=True)
                 shutil.copyfile(tmp / "hidden" / p, work / p)
             at = _At(name, work)
+            _prepared(at, "the base")
             codes = [runner.run_in_lane(at, c, BASE_CHECK_SECS)[0]
                      for c in (case["test_cmd"], check) if c]
         if all(c == 0 for c in codes):
@@ -244,6 +272,7 @@ def add(name: str, step: int | None = None, hidden: list[str] | None = None,
             gitops.git(scratch, "clone", "-q", "--shared", "--no-checkout", str(repo), str(work))
             gitops.git(work, "checkout", "-q", "--detach", ref)
             at = _At(name, work)
+            _prepared(at, f"step {step}'s own commit")
             for c in (case["test_cmd"], check):
                 code = c and runner.run_in_lane(at, c, case["test_timeout"])[0]
                 if c and code != 0:
@@ -387,6 +416,12 @@ def _start_task(case: dict, model: str, name: str, repo: Path, skills: list[str]
         argv += ["--skill", s]
     for pat in case.get("allow") or []:
         argv += ["--allow", pat]
+    if case.get("setup"):
+        argv += ["--setup", case["setup"]]
+    for p in case.get("copy") or []:
+        argv += ["--copy", p]
+    for s in case.get("siblings") or []:
+        argv += ["--sibling", s]
     for path in case.get("paths") or []:
         argv += ["--allow-path", path]
     a = cli.parser().parse_args(argv)
@@ -407,6 +442,7 @@ def replay(case: dict, model: str, rep: int, run: str, label: str, skills: list[
     log = open(d / "wb.log", "a")
     try:
         checkout(case, d / "repo")
+        _inputs(case, d / "repo")
         with redirect_stdout(log):
             try:
                 _start_task(case, model, name, d / "repo", skills,
@@ -533,6 +569,9 @@ def self_run(case_name: str, turns: int = SELF_TURNS) -> dict:
     began = time.time()
     try:
         checkout(case, d / "repo")
+        code, said = runner.prepare(_At(original.name, d / "repo"))  # as the replays are (#250)
+        if code != 0:
+            return {**row, "outcome": "error", "why": f"the setup failed ({code}): {said.strip()[-200:]}"}
         prompt = SELF_PROMPT.format(spec=(case_dir(case_name) / "spec.md").read_text(),
                                     test=case["test_cmd"])
         # edits and the acceptance command only: nothing else is allowed without someone to ask.

@@ -868,8 +868,10 @@ def grants(task: store.Task) -> dict:
     """What Claude allowed this task beyond the everyday rules: {"allow": [patterns], "paths":
     [dirs]}. Kept with the rules, out of the agent's reach: an agent that edited its own grants
     would widen its next round."""
-    # read without making the directory: a closed task's rules are gone (cli.gc)
-    return store.read_json(store.home() / "rules" / task.name / "grants.json", {}) or {}
+    # read without making the directory: a closed task's rules are gone (cli.gc), its grants
+    # kept in its status (cli._keep_grants: wb bench add replays a case with them, #250)
+    return store.read_json(store.home() / "rules" / task.name / "grants.json", {}) or \
+        task.status.get("grants_kept") or {}
 
 
 def grant(task: store.Task, key: str, new: list[str]) -> list[str]:
