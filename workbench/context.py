@@ -9,6 +9,7 @@ answers headless).
 """
 from __future__ import annotations
 
+import glob
 import hashlib
 import json
 import os
@@ -263,6 +264,22 @@ OPENCODE_HOMES = (".local/share/opencode", ".local/state/opencode")
 # is all a pty-driven test needs (the 0.90 review).
 DEV_NODES = ("/dev/null", "/dev/zero", "/dev/full", "/dev/random", "/dev/urandom", "/dev/tty",
              "/dev/ptmx", "/dev/shm")
+# A GPU's device nodes, for a task started with --unload-for-tests: its tests use the GPU, and
+# without these CUDA said "no CUDA-capable device", ROCm hipErrorNoDevice, Vulkan "no physical
+# device", none of them "permission", so the agent spent its auto-fix rounds on what it read as
+# its own bug (#331, the audit of 1.4). Render nodes only of /dev/dri (not card*, the display's
+# modesetting), ROCm's /dev/kfd, CUDA's nodes, WSL2's /dev/dxg
+GPU_NODES = ("/dev/dri/renderD*", "/dev/kfd", "/dev/nvidia[0-9]*", "/dev/nvidiactl",
+             "/dev/nvidia-uvm", "/dev/nvidia-uvm-tools", "/dev/dxg")
+
+
+def gpu_nodes(task: store.Task) -> list[str]:
+    """The GPU's device nodes that exist, when the task's tests need the GPU (unload_for_tests)."""
+    if not task.spec.get("unload_for_tests"):
+        return []
+    return sorted({n for pat in GPU_NODES for n in glob.glob(pat)})
+
+
 # the system, for the file tools: headers, man pages, installed packages' sources
 READABLE = ("/usr", "/etc", "/opt", "/lib", "/lib64", "/bin", "/sbin", "/proc", "/sys",
             "/nix", "/run/current-system", "/Library", "/System", "/Applications")
@@ -421,7 +438,7 @@ def writable(task: store.Task) -> list[str] | None:
         if os.environ.get(v):
             first = os.environ[v].split(os.pathsep)[0]
             xdg.append(os.path.join(first, VAR_CACHES[v]) if v in VAR_CACHES else first)
-    places = [tempfile.gettempdir(), *TEMP_ROOTS, *DEV_NODES, "/proc",
+    places = [tempfile.gettempdir(), *TEMP_ROOTS, *DEV_NODES, *gpu_nodes(task), "/proc",
               *(home / h for h in TOOL_HOMES + OPENCODE_HOMES), *(x for x in xdg if x),
               *(Path(p).expanduser() for p in extra)]
     whole = {"/", os.path.realpath(home)}  # a GOPATH=~ must not hand over the home directory

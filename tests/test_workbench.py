@@ -2,6 +2,7 @@
 import base64
 import contextlib
 import errno
+import glob
 import io
 import json
 import shlex
@@ -4258,6 +4259,36 @@ class Lane(Base):
                                  capture_output=True, text=True, timeout=20)
             got.append(out.stdout.strip() or out.stderr)
         self.assertEqual(got, ["refused", "pty"])
+
+    def test_a_task_unloading_for_its_tests_gets_the_gpus_device_nodes_and_no_other_does(self):
+        # #331, the audit of 1.4: --unload-for-tests freed the GPU, but its nodes stayed out of
+        # the lane, so CUDA, ROCm and Vulkan found no device and the agent chased its own "bug"
+        task = self.bare_task("t-gpu", self.repo)
+        task.worktree.mkdir()
+        with tempfile.TemporaryDirectory() as d:
+            node = Path(d, "renderD128")
+            node.touch()
+            with mock.patch.object(context, "GPU_NODES", (str(Path(d, "renderD*")),)):
+                self.assertNotIn(str(node), context.gpu_nodes(task))
+                (task.dir / "task.json").write_text(json.dumps({**task.spec, "unload_for_tests": True}))
+                self.assertEqual(context.gpu_nodes(task), [str(node)])
+
+    @unittest.skipUnless(lane.abi() and any(glob.glob(p) for p in context.GPU_NODES),
+                         "needs Landlock and a GPU")
+    def test_a_task_unloading_for_its_tests_can_open_the_gpu_in_the_lane(self):
+        task = self.bare_task("t-gpu-lane", self.repo)
+        task.worktree.mkdir()
+        dev = sorted(n for p in context.GPU_NODES for n in glob.glob(p))[0]
+        script = (f"import os\ntry:\n    os.close(os.open({dev!r}, os.O_RDWR)); print('open')\n"
+                  "except OSError as e:\n    print(e.strerror)\n")
+        got = []
+        for unload in (False, True):
+            (task.dir / "task.json").write_text(json.dumps({**task.spec, "unload_for_tests": unload}))
+            out = subprocess.run(lane.wrap(context.writable(task), [sys.executable, "-c", script],
+                                           context.readable(task), context.unix_paths(task)),
+                                 capture_output=True, text=True, timeout=20)
+            got.append(out.stdout.strip() or out.stderr)
+        self.assertEqual(got, ["Permission denied", "open"])
 
     @unittest.skipUnless(lane.abi() >= 6, "needs Landlock ABI 6")
     def test_the_lane_can_reach_neither_the_users_sockets_nor_their_processes(self):
