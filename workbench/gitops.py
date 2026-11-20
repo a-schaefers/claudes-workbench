@@ -2,6 +2,7 @@
 
 The agent never commits; everything it does stays in the worktree's working tree until `wb accept`.
 """
+import functools
 import hashlib
 import os
 import shutil
@@ -75,7 +76,35 @@ def _pinned(cwd) -> list[str]:
         raise GitError(f"the worktree's .git was rewritten: git was not run there ({dotgit} "
                        f"must say gitdir: {want['gitdir']})")
     return [f"--git-dir={want['gitdir']}", f"--work-tree={os.path.abspath(cwd)}",
-            *NO_HOOKS, "-c", "core.fsmonitor=false"]
+            *NO_HOOKS, "-c", "core.fsmonitor=false",
+            *(("-c", "core.filemode=true") if _modes_hold(os.path.dirname(os.path.abspath(cwd)))
+              else ())]
+
+
+@functools.lru_cache(maxsize=64)
+def _modes_hold(d: str) -> bool:
+    """Whether the file system at ``d`` keeps the execute bit. A task's worktree is on the state
+    directory's, whatever the repo's: with the repo's core.filemode=false (a checkout on a drive
+    that distrusts modes, WSL's /mnt/c), a script the agent made 0755 ran in the task and was
+    committed 100644, so a fresh checkout couldn't run it (#323, the audit of 1.4). Where the
+    modes hold, the task's git reads them: the review diff and the commit say the same."""
+    try:
+        fd, probe = tempfile.mkstemp(prefix=".wb-mode-", dir=d)
+        os.close(fd)
+    except OSError:
+        return False
+    try:
+        os.chmod(probe, 0o755)
+        on = os.stat(probe).st_mode & 0o111
+        os.chmod(probe, 0o644)
+        return on == 0o111 and not os.stat(probe).st_mode & 0o111
+    except OSError:
+        return False
+    finally:
+        try:
+            os.unlink(probe)
+        except OSError:
+            pass
 
 
 def _run(cwd, args, env=None, check=True) -> subprocess.CompletedProcess:

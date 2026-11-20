@@ -2620,7 +2620,11 @@ custom-node packs do run their own Python).
   `.git` file's text in `rules/<task>/gitdir.json`, outside the lane, and every `gitops.git` call
   on a task's worktree, the runner's and wb's, runs with `--git-dir` and `--work-tree` set from it
   (so git reads only the real repo's config), `core.hooksPath=/dev/null` and
-  `core.fsmonitor=false`. A `.git` that isn't a regular file holding the recorded text stops the
+  `core.fsmonitor=false`, and `core.filemode=true` where the task directory's file system keeps
+  the execute bit (`gitops._modes_hold`, a probe file, once a process): with the repo's
+  `core.filemode=false` (a checkout on a drive that distrusts modes, WSL's `/mnt/c`), a script
+  the agent made 0755 ran in the task and was committed 100644 (#323, the audit of 1.4); now the
+  review diff and the commit both carry the mode. A `.git` that isn't a regular file holding the recorded text stops the
   call with a `GitError` ("the worktree's .git was rewritten"): the runner fails the task, `wb
   accept` refuses. A task started before the record runs unpinned.
 - **No git hooks from the worktree.** With a relative `core.hooksPath` (husky's gitignored

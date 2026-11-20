@@ -428,6 +428,23 @@ class Lifecycle(Base):
         self.start("t-loud", "ok", "--size", "significant", "--checkin", "15", "--queue")
         self.assertEqual(store.Task("t-loud").spec["checkin"], 15)
 
+    def test_a_script_made_executable_in_the_task_is_committed_executable(self):
+        # #323 (the audit of 1.4, reproduced): the repo said core.filemode=false (its drive
+        # distrusts modes: WSL's /mnt/c), so run-tool, 0755 in the task's worktree where it ran,
+        # was committed 100644, and a fresh checkout couldn't run it
+        subprocess.run(["git", "-C", str(self.repo), "config", "core.filemode", "false"], check=True)
+        self.start("t-exec", "ok", "--test", TEST_CMD)
+        wait_phase("t-exec", {"review"})
+        t = store.Task("t-exec")
+        tool = t.worktree / "run-tool"
+        tool.write_text("#!/bin/sh\necho ran\n")
+        tool.chmod(0o755)
+        self.assertIn("new file mode 100755", runner.review_diff(t))  # what Claude reviews
+        run_wb("accept", "t-exec", "-m", "feat: run-tool")
+        row = subprocess.run(["git", "-C", str(self.repo), "ls-tree", "delegate/t-exec", "run-tool"],
+                             capture_output=True, text=True).stdout
+        self.assertTrue(row.startswith("100755"), row)                # is what lands
+
     def test_a_proposed_claude_md_is_shown_as_a_diff_and_taken_only_when_claude_says(self):
         # Claude making each CLAUDE.md change itself was a call over its whole context on most
         # tasks (2026-11-18): the agent proposes the file, accept takes it
