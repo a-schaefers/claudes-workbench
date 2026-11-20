@@ -4479,12 +4479,23 @@ class Lane(Base):
                 (task.dir / "task.json").write_text(json.dumps({**task.spec, "unload_for_tests": True}))
                 self.assertEqual(context.gpu_nodes(task), [str(node)])
 
-    @unittest.skipUnless(lane.abi() and any(glob.glob(p) for p in context.GPU_NODES),
-                         "needs Landlock and a GPU")
+    @staticmethod
+    def openable_gpu_node():
+        """A GPU node this user may open outside the lane: on the nightly's WSL runner /dev/dxg
+        exists but its user can't open it at all, and the lane was blamed for that."""
+        for n in sorted(n for p in context.GPU_NODES for n in glob.glob(p)):
+            try:
+                os.close(os.open(n, os.O_RDWR))
+                return n
+            except OSError:
+                continue
+        return None
+
+    @unittest.skipUnless(lane.abi() and openable_gpu_node(), "needs Landlock and a GPU this user may open")
     def test_a_task_unloading_for_its_tests_can_open_the_gpu_in_the_lane(self):
         task = self.bare_task("t-gpu-lane", self.repo)
         task.worktree.mkdir()
-        dev = sorted(n for p in context.GPU_NODES for n in glob.glob(p))[0]
+        dev = self.openable_gpu_node()
         script = (f"import os\ntry:\n    os.close(os.open({dev!r}, os.O_RDWR)); print('open')\n"
                   "except OSError as e:\n    print(e.strerror)\n")
         got = []
