@@ -195,7 +195,7 @@ French locale installed here).
   - Add a per-server budget setting as the escape hatch. Today only the test-only
     `WB_FAKE_GPU_GB` exists.
 
-**17. A model server that is only briefly away fails the task for good.** Both; source.
+**17. ~~A model server that is only briefly away fails the task for good.~~** **Fixed (#205).** Both; source.
 - `make_resident` raises at once when the model isn't available (`models.py:738`), and the
   runner's `_load_failed` ends the task (`runner.py:1150`, `runner.py:1182`).
 - So `wb start --force`, which `wb start` suggests for "its server is just down" (`cli.py:414`),
@@ -233,7 +233,7 @@ But a wrong key passes too, and the router can pick that model over a working on
 (`router.py:168`). **Fix:** keep "reachable" separate from "ready". Retry the list with the key
 the agent will send, and if that's refused, diagnose the key.
 
-**20. Starting a model server can spin on its readiness check.** Codex; source.
+**20. ~~Starting a model server can spin on its readiness check.~~** **Fixed (#205).** Codex; source.
 - When a start command exits 0 at once (systemctl, docker, `cmd &`), `p.wait(timeout=5)` returns
   immediately on every pass. The loop then probes `status()` back to back (`models.py:754`,
   `models.py:775`).

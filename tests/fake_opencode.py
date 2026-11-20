@@ -5,7 +5,8 @@
   fix    first round writes "41" (wrong); a continued session (--session) writes "42"
   loop   run the same failing command over and over (the stuck detector should stop it)
   hang   print one event, then go silent (the silence timeout should stop it)
-  crash  exit 1 with no events
+  crash  exit 1 with no events; with FAKE_DOWN (a file) it takes the model server down with it
+         (creates the file) the first time, and behaves like ok after
   slow   a first run that takes an hour; a continued session behaves like ok
   fill   writes "41", then a step that fills 76% of a 32K window, then works on for an hour;
          a fresh session handed the task behaves like ok
@@ -99,7 +100,12 @@ if scenario == "slow":
     scenario = "ok" if "--session" in args else "hang"
 if scenario == "fill" and "picking this task up in a fresh session" in args[-1]:
     scenario = "ok"
+if scenario == "crash" and os.path.exists(os.environ.get("FAKE_DOWN", "") + ".crashed"):
+    scenario = "ok"  # the server came back: this run works
 if scenario == "crash":
+    if os.environ.get("FAKE_DOWN"):  # an out-of-memory kill or an Ollama restart, mid-round
+        for f in (os.environ["FAKE_DOWN"], os.environ["FAKE_DOWN"] + ".crashed"):
+            open(f, "w").close()
     sys.exit(1)
 if os.environ.get("FAKE_STRAY"):
     for stray in ("42", "[1, 2]", "null", '{"type": "step_finish", "part": {"tokens": 5}}',

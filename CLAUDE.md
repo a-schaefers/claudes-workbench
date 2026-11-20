@@ -156,10 +156,10 @@ Runs on Linux, WSL2 and macOS; the launchers refuse native Windows and Python be
    spawns the runner and returns at once. The runner sets the worktree up (`--setup`, `--copy`,
    `--sibling`), then runs `--test` once on the base, in a scratch clone (the base check).
 2. The runner takes the GPU (`GpuLease`: shared beside other tasks when the models fit, else
-   alone), makes the model resident (again before every round), and runs `opencode run
-   --standalone --auto --format json … -- <prompt>` in
-   the worktree, through `lane.wrap`, with the config layer `rules/<task>/opencode.json`. Events
-   go to `events.jsonl`; `status.json` is the live summary.
+   alone; a server only down is waited for), makes the model resident (again before every
+   round), and runs `opencode run --standalone --auto --format json … -- <prompt>` in the
+   worktree, through `lane.wrap`, with the config layer `rules/<task>/opencode.json`. Events:
+   `events.jsonl`; the live summary: `status.json`.
 3. Guards stop the agent (`stuck`): one call repeated 4 times, 6 tool errors in a row, 40 calls
    without a worktree edit, silence past `--silence-timeout`, a round past `--round-timeout`, more than
    `HANDOVER_MAX` handovers in a round. Past the think budget (`--think-timeout`, from the round's
@@ -293,7 +293,6 @@ PATH, the lane, and (RealOpenCodeRun) the events, the export, `--session` and co
   assistant message's `tokens` (input + cache read/write + output) is the context the next request
   carries (the between-rounds check). The live `step_finish` tokens (input + cache read + cache
   write + output) drive the mid-round check.
-- `--worktree` takes `=name`; the runner makes its own worktrees anyway.
 - `run` reads a message that starts with `-` as a flag (usage, exit 1): the prompt goes after `--`.
 - `run --format json` prints nothing while a tool runs or the model reads its prompt; a shell
   command past 2 minutes goes to the background and the turn ends with a `background_wait` line.

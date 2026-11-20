@@ -234,8 +234,8 @@ CLAUDE.md, the user's decisions, the review checks) marked apart.
   give it a `start`; the router's message names models the size policy holds back as such). A
   `--model` that can't run right now is refused the same way, with "(--force queues it anyway,
   to wait for it)" only when its server is just down (`models.may_come_up`); `--force` queues it
-  regardless, and the runner's load (`make_resident`) fails it before freeing the GPU if it still
-  can't run.
+  regardless. The runner waits for a server that is just down (*Waiting for a server that is
+  down*), and its load (`make_resident`) fails it before freeing the GPU if it still can't run.
 - Two projects, one GPU: when another task holds the GPU (or waits for it, or `wb image` does)
   and the new task's model couldn't run beside it (`models.admits`: the same rule the lease
   uses), it refuses before making anything, exit 4, with one line naming each holder's task,
@@ -277,6 +277,18 @@ CLAUDE.md, the user's decisions, the review checks) marked apart.
   `rules/<task>/grants.json`), and spawns the runner.
 - It prints the model and why, the slice, Claude's spec record, the handed or suggested skills,
   any notes, and `next: wb wait <task>`.
+
+**Waiting for a server that is down.** A task's model whose server is only down
+(`models.may_come_up`: Ollama not answering, a server with no `start` command not running) is
+waited for, not failed (`runner._wait_up`): it looks again after 2 s, then 4, 8, … up to a minute
+apart (`DOWN_PAUSES`), for up to `DOWN_WAIT` (`models.START_TIMEOUT`, 20 min), with status `last`
+"waiting for <id>: <why> (up to N min more; wb stop gives up)" and one `load` event; past that,
+the task fails ("<id> can't run: <why>, for 20 min"). It waits before taking the GPU lease, so
+it holds no GPU from other tasks meanwhile; a load under the lease that fails while the server
+is down (an Ollama restart, an out-of-memory kill between rounds) waits the same way, then loads
+once more (`runner._load`). A configuration error (not pulled, a refused key, a window too small)
+still fails at once. `wb stop` ends the runner, and the wait with it. Failing at once, a task `wb
+start --force` queued "to wait for it" failed on its first check (the 2026-11-19 audit).
 
 **3. The runner takes the GPU** (`models.GpuLease`; *Sharing the GPU* below). Tasks run side by
 side when their models fit the GPU together; otherwise a task waits as `queued` for the GPU to
@@ -502,8 +514,10 @@ once more and `pid` and `stopping` are cleared.
    carries any pending notes), unless this runner has already handed over `HANDOVER_MAX` (5)
    times: then the round is stuck ("handed over to a fresh session 5 times in this round without
    finishing: the step is too big for this model's window…"). Interrupted, or a note pending and the round not stuck →
-   `_steer_round` (the next round carries the notes). Stuck, or
-   opencode exited non-zero with no text → the report without tests (plus "NOTE: not delivered,
+   `_steer_round` (the next round carries the notes). Opencode exited non-zero with no text
+   while the model's server is down (it went away under the round) → a `load` event, the wait
+   for the server (*Waiting for a server that is down*), and the round runs again, once a round.
+   Stuck, or opencode exited non-zero with no text → the report without tests (plus "NOTE: not delivered,
    the round stopped first: …" for Claude's notes still pending, `_undelivered`), phase
    `stuck`/`failed`, a notice, exit. Otherwise `run_tests`; a note that arrived meanwhile, or while
    the report was being written → `_steer_round`. The report
@@ -537,6 +551,7 @@ clears `asking`. A stdout line that is JSON but not an object is skipped, not a 
 
 The prompt goes after `--`: OpenCode 2.3 reads a message that starts with `-` (a spec opening with
 a bullet or front matter) as a flag, prints its usage and exits (the 2026-11-16 audit).
+OpenCode's own `--worktree` (which takes `=name`) isn't used: the runner makes its own worktrees.
 
 Every pass of the round's loop runs the clocks, the guards and the steer check, whatever the
 line was: only the event handling is skipped for a line that isn't an event (`_event`: stray
@@ -1766,7 +1781,10 @@ error from Ollama raises with what Ollama said ("…answered HTTP 500: model req
 memory…", `_post`), not urllib's bare "HTTP Error 500". A start command that exits non-zero while
 nothing answers fails after `START_GRACE` 10 s ("…'s start command exited N and nothing answers;
 run it by hand to see why: <cmd>"), not after 20 min; exit 0 keeps waiting (a start that
-daemonizes); a server that answers as another model fails after the same grace. After an Ollama
+daemonizes); a server that answers as another model fails after the same grace. Its probes are
+paced on a monotonic clock, 5 s apart (1 s once the command failed), whether or not the command
+has exited: a start that daemonized returned `p.wait` at once on every pass, and the loop probed
+back to back (3,095 requests in 0.8 s: the 2026-11-19 audit). After an Ollama
 load, `_placement` reads `/api/ps`: part of the model in RAM is a warning ("<name> is N% on the
 CPU: expect it to be slow …"). Warnings (that one, a server wb can't stop, a stop command that
 failed or ran past 5 min) go to `warn`: the lease's `warn` sets status `last` and appends a `gpu`
@@ -3705,8 +3723,11 @@ main (*Shipping to main*).
   port guess, multi-model servers, loopback and host names, `local: true`, `opencode.jsonc` under
   `XDG_CONFIG_HOME` and layered with `opencode.json`, provider filters and `{env:}` URLs, skipped
   providers, `/v1`, cloud models, API keys, a proxy, a down Ollama on another port,
-  `CLAUDE_CONFIG_DIR`), the polling watcher (`watch._libc = False`), the launchers on an old
-  Python or native Windows, fit, budgets.
+  `CLAUDE_CONFIG_DIR`, aliases, a start command's paced probes), a server briefly away
+  (`ServerAway`: tasks against a fake Ollama that answers 503 while a file exists: waited for at
+  start and between rounds, a lost round run again, a config error still failing at once), the
+  polling watcher (`watch._libc = False`), the launchers on an old Python or native Windows, fit,
+  budgets.
 - `tests/test_sizing.py`: the slice guess and its correction from real steps.
 - `tests/test_workflows.py`: the merge gate, in plain text (no YAML library): every action pinned
   to a commit with its version, every workflow with its own permissions, `check` never
@@ -3759,7 +3780,8 @@ there (what `sweep` must end); `FAKE_STRAY` first prints lines that are JSON but
 (`42`, a list, `null`) and events whose parts have the wrong shape; `FAKE_LINGER` closes its
 output after its last event and stays alive. Scenarios (`FAKE_SCENARIO`): `ok` (writes 42), `fix` (41 in a new session, 42 when
 continued: an auto-fix round passes), `loop` (the repeat guard stops it), `hang`, `crash` (exit 1,
-no events), `slow` (hangs in a new session, ok when continued), `fill` (a 25K-token step at 76%
+no events; with `FAKE_DOWN`, a file, it creates it the first time, taking the model server down
+with it, and runs like `ok` after), `slow` (hangs in a new session, ok when continued), `fill` (a 25K-token step at 76%
 of 32K, then sleeps: the runner hands over mid-round; the handover prompt turns it into `ok`),
 `read` (25K tokens before any change: it carries on), `floor` (a re-read floor too high to hand
 over: `HANDOVER_ROOM`), `refill` (every session changes a file, then fills: `HANDOVER_MAX`),
