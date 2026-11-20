@@ -2824,15 +2824,15 @@ def cmd_update(a):
 
 def gpu_line() -> str:
     """What the GPU budget counts (wb doctor, wb scout): sharing and the router's fit rest on it."""
-    budget, devs = models.budget_devices()
+    budget, _, why = models.budget_devices()
     if budget:
-        names = "; ".join(g["name"] for g in devs) or "the GPU"
-        return (f"GPU budget {budget / 1e9:.0f} GB, from {names}: tasks share the GPU when their "
-                "Ollama models fit in it together")
+        return (f"GPU budget {budget / 1e9:.0f} GB, from {why or 'the GPU'}: tasks share the GPU when "
+                "their Ollama models fit in it together (models.json gpu_gb sets it by hand)")
     gs = [] if models._fake() else hardware.gpus()
     if gs:
         return (f"GPU memory unknown here ({', '.join(sorted({g['driver'] for g in gs}))}): tasks take "
-                "turns on the GPU, and the router can't hold back a model too big for it")
+                "turns on the GPU, and the router can't hold back a model too big for it; "
+                "models.json gpu_gb sets it by hand")
     return ("no GPU memory found: local models run on the CPU, slowly; "
             "wb model sizes <id> trivial keeps a big one off small tasks")
 

@@ -960,37 +960,54 @@ def unified_default(ram: int) -> int:
     return ram * 2 // 3 if ram <= UNIFIED_SMALL else ram * 3 // 4
 
 
-def budget_devices() -> tuple[int | None, list[dict]]:
+def budget_devices() -> tuple[int | None, list[dict], str]:
     """Bytes of GPU memory models can use (None when the machine can't say: then no sharing),
-    and the devices that make it up. One runtime serves a model, so it's the largest group of
-    one driver's GPUs (several NVIDIA cards, which Ollama splits a model across, add up; an
-    iGPU of another vendor beside them doesn't), leaving out devices under 1 GiB (an integrated
-    GPU's carve-out). Summing every GPU counted a laptop's Radeon iGPU into its RTX card's 8 GB
+    the devices that make it up, and where the number comes from (wb doctor and wb scout say it).
+    models.json's `gpu_gb` sets it by hand, for hardware this can't read. One runtime serves a
+    model, so it's the largest group of one driver's GPUs (several NVIDIA cards, which Ollama
+    splits a model across, add up; an iGPU of another vendor beside them doesn't), leaving out
+    devices under 1 GiB (an integrated GPU's carve-out). Summing every GPU counted a laptop's Radeon iGPU into its RTX card's 8 GB
     (the 2026-11-16 audit). Once a device is known discrete (hardware.gpus `discrete`), only
     those count: an AMD APU's carve-out never outranks or adds to a card (the 0.90 review: a
     16 GiB Radeon 780M carve-out beside an 8 GiB RTX became the budget, a 4 GiB one was added to
-    an RX 7600S's 8). With none known, as before. Apple Silicon: iogpu.wired_limit_mb, else
-    macOS's default share."""
+    an RX 7600S's 8). With none known, as before. Only the devices Ollama's environment lets it
+    see count (hardware.visible). Apple Silicon: iogpu.wired_limit_mb, else macOS's default
+    share; another unified GPU (an APU's GTT, a DGX Spark's RAM): what hardware.gpus found."""
+    hand = _overrides().get("gpu_gb")
+    if hand is not None:
+        try:
+            return int(float(hand) * 1e9), [], "models.json gpu_gb"
+        except (TypeError, ValueError):
+            raise RuntimeError(f"{overrides_path()}: gpu_gb is {hand!r}, not a number of GB; "
+                               "fix it by hand") from None
     if _fake():
         gb = os.environ.get("WB_FAKE_GPU_GB")  # tests: a GPU of this size
-        return (int(float(gb) * 1e9), []) if gb else (None, [])
+        return (int(float(gb) * 1e9), [], "WB_FAKE_GPU_GB") if gb else (None, [], "")
     devs = hardware.gpus(windows=False)  # WSL's Windows names carry no VRAM: skip PowerShell
+    notes = []
+    if any((g.get("driver") or "").split(" ")[0] in ("nvidia", "amdgpu") for g in devs):
+        devs, notes = hardware.visible(devs, hardware.ollama_env())
     if any(g.get("discrete") and g.get("vram") for g in devs):
         devs = [g for g in devs if g.get("discrete")]
     groups: dict[str, list] = {}
     for g in devs:
-        if g.get("unified"):
+        if g.get("unified") and not g.get("memory"):  # Apple Silicon
             usable = g.get("wired_limit") or unified_default(g.get("vram") or 0)
+            how = "iogpu.wired_limit_mb" if g.get("wired_limit") else "macOS's default share of the RAM"
+        elif g.get("unified"):
+            usable, how = g.get("vram") or 0, g["memory"]
         else:
-            usable = g.get("vram") or 0
+            usable, how = g.get("vram") or 0, "VRAM"
             if usable < IGPU_UNDER:
                 continue
         if usable:
-            groups.setdefault((g.get("driver") or "?").split()[0], []).append((usable, g))
+            groups.setdefault((g.get("driver") or "?").split()[0], []).append((usable, g, how))
     if not groups:
-        return None, []
-    best = max(groups.values(), key=lambda devs: sum(n for n, _ in devs))
-    return sum(n for n, _ in best), [g for _, g in best]
+        return None, [], ""
+    best = max(groups.values(), key=lambda devs: sum(n for n, _, _ in devs))
+    why = "; ".join(f"{g['name']} ({how})" for _, g, how in best)
+    return (sum(n for n, _, _ in best), [g for _, g, _ in best],
+            why + "".join(f", as {n} leaves it" for n in notes))
 
 
 def gpu_budget() -> int | None:

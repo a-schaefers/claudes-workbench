@@ -33,7 +33,7 @@ the drift this rule exists to stop.
 
 ## Commands
 ```sh
-python3 -m unittest                                   # the whole suite, about four minutes
+python3 -m unittest                                   # the whole suite, about 4 minutes
 python3 -m unittest tests.test_workbench.Context      # one class (or .Context.test_…); -k handover by name
 claude plugin validate mod && claude plugin test mod  # the mod: the $ rule, then mod/hooks/register.test.tsx
 PLAYWRIGHT=…/node_modules/playwright node tests/e2e_chat.mjs   # the web chat in WebKit and Chromium
@@ -199,7 +199,7 @@ tasks/<task>/  task.json status.json events.jsonl steer.jsonl acked context.md b
                rounds/<n>/{prompt,instructions,summary}.md rounds/<n>/tests.txt ask/<id>.{json,answer} worktree/
 ```
 The skill library is `~/.local/share/workbench/skills` (`$WB_SKILLS`). `~/.config/workbench/`
-holds `models.json` (what OpenCode can't say: `start`/`stop`, `skip`, `sizes`, `vram_gb`,
+holds `models.json` (what OpenCode can't say: `start`/`stop`, `skip`, `sizes`, `vram_gb`, `gpu_gb`,
 `weights_gb`, `label`, `engine`, `local`, `remote`), `commands.json` (standing `allow` patterns, lane
 `paths`, `env` names passed to the agent, each repo's setup: `repos`), `images.json`, `chat.json`, `chat-token`,
 `savings.json` (`kwh_price`).

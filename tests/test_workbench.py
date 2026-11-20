@@ -6385,14 +6385,19 @@ class WebChat(Base):
 class Hardware(unittest.TestCase):
     """wb scout's hardware report off Linux: each platform's own sources, faked here."""
 
-    def fake(self, system, runs=None, files=None):
+    def fake(self, system, runs=None, files=None, machine="arm64"):
+        """``files``: path → text, which the sysfs scan finds too (under a fake DRM)."""
         from unittest import mock
         from workbench import hardware
         runs, files = runs or {}, files or {}
         run = lambda *argv: next((out for k, out in runs.items() if argv[:len(k)] == k), "")  # noqa
         read = lambda path: files.get(str(path), "")  # noqa: E731
-        for target, value in (("platform.system", lambda: system), ("platform.machine", lambda: "arm64"),
-                              ("workbench.hardware._run", run), ("workbench.hardware._read", read)):
+        drm = Path("/fake/sys/class/drm")
+        cards = sorted({Path(f).parent for f in files if f.startswith(f"{drm}/")})
+        glob = lambda self, pattern: iter(cards) if self == drm else iter(())  # noqa: E731
+        for target, value in (("platform.system", lambda: system), ("platform.machine", lambda: machine),
+                              ("workbench.hardware._run", run), ("workbench.hardware._read", read),
+                              ("workbench.hardware.DRM", drm), ("pathlib.Path.glob", glob)):
             patcher = mock.patch(target, value)
             patcher.start()
             self.addCleanup(patcher.stop)
@@ -6441,6 +6446,12 @@ class Hardware(unittest.TestCase):
         self.assertEqual(hw.ollama_context(), (None, "32k"))
         self.assertIn("OLLAMA_CONTEXT_LENGTH='32k' isn't a number", "\n".join(hw.report()))
 
+    def test_the_cards_ollama_may_see_come_from_its_service_else_the_callers_environment(self):
+        hw = self.fake("Linux", runs={("systemctl",): "CUDA_VISIBLE_DEVICES=1"})
+        with mock.patch.dict(os.environ, {"CUDA_VISIBLE_DEVICES": "0", "ROCR_VISIBLE_DEVICES": "2"}):
+            env = hw.ollama_env()
+        self.assertEqual((env["CUDA_VISIBLE_DEVICES"], env["ROCR_VISIBLE_DEVICES"]), ("1", "2"))
+
     @unittest.skipIf(os.geteuid() == 0, "root reads every directory")
     def test_an_ollama_models_dir_it_cant_read_is_passed_over(self):
         # the 2026-11-16 audit: Path.is_dir raised under Ubuntu's 0750 /usr/share/ollama before 3.14
@@ -6456,7 +6467,7 @@ class Hardware(unittest.TestCase):
 
     def test_wsl_with_nvidia_is_not_listed_twice(self):
         hw = self.fake("Linux", files={"/proc/version": "microsoft-standard-WSL2"}, runs={
-            ("nvidia-smi",): "NVIDIA GeForce RTX 4090, 24564, 1000, 560.94",
+            ("nvidia-smi",): "GPU-5e1f, NVIDIA GeForce RTX 4090, 24564, 1000, 560.94",
             ("powershell.exe",): "NVIDIA GeForce RTX 4090\n"})
         gpus = hw.gpus()
         self.assertEqual([g["name"] for g in gpus], ["NVIDIA GeForce RTX 4090"])
@@ -6466,11 +6477,47 @@ class Hardware(unittest.TestCase):
         # every admission and routing paid a PowerShell start of seconds (the 2026-11-16 audit)
         asked = []
         hw = self.fake("Linux", files={"/proc/version": "microsoft-standard-WSL2"},
-                       runs={("nvidia-smi",): "NVIDIA GeForce RTX 4090, 24564, 1000, 560.94"})
+                       runs={("nvidia-smi",): "GPU-5e1f, NVIDIA GeForce RTX 4090, 24564, 1000, 560.94"})
         run = hw._run
         with mock.patch.object(hw, "_run", lambda *argv: asked.append(argv[0]) or run(*argv)):
             self.assertEqual([g["name"] for g in hw.gpus(windows=False)], ["NVIDIA GeForce RTX 4090"])
         self.assertNotIn("powershell.exe", asked)
+
+    def test_an_apu_counts_its_gtt_and_a_dgx_spark_its_ram_as_the_gpus_memory(self):
+        # the 2026-11-19 audit: a Strix Halo's 512 MiB carve-out was dropped as an iGPU and a
+        # GB10's memory.total is [N/A], so neither had a budget: no sharing, no fit
+        from workbench import models
+        card = "/fake/sys/class/drm/card1/device"
+        hw = self.fake("Linux", files={
+            f"{card}/uevent": "DRIVER=amdgpu\nPCI_SLOT_NAME=0000:c5:00.0",
+            f"{card}/mem_info_vram_total": str(512 * 2 ** 20),
+            f"{card}/mem_info_gtt_total": str(96 * 2 ** 30), f"{card}/unique_id": "a1b2"},
+            runs={("lspci",): "c5:00.0 Display controller: Radeon 8060S"})
+        apu = hw.gpus()[0]
+        self.assertEqual((apu["vram"], apu["uuid"]), (512 * 2 ** 20 + 96 * 2 ** 30, "GPU-a1b2"))
+        self.assertIn("Radeon 8060S · unified memory: 96.5 GB usable by the GPU "
+                      "(0.5 GB carve-out + 96.0 GB GTT) · amdgpu", "\n".join(hw.report()))
+        with mock.patch.dict(os.environ, {"WB_FAKE_MODELS": "", "WB_MODELS": "/nonexistent"}):
+            self.assertEqual(models.budget_devices()[0], 512 * 2 ** 20 + 96 * 2 ** 30)
+
+        meminfo = {"/proc/meminfo": "MemTotal:       125000000 kB\nMemAvailable:    100000000 kB\n"}
+        spark = ("nvidia-smi",), "GPU-77aa, NVIDIA GB10, [N/A], [N/A], 580.95"
+        hw = self.fake("Linux", files=meminfo, runs=dict([spark]))
+        with mock.patch.dict(os.environ, {"WB_FAKE_MODELS": "", "WB_MODELS": "/nonexistent"}):
+            budget, devs, why = models.budget_devices()
+        self.assertEqual((budget, [g["name"] for g in devs]), (125000000 * 1024, ["NVIDIA GB10"]))
+        self.assertIn("NVIDIA GB10 (the RAM: nvidia-smi gives the GPU no memory of its own)", why)
+        hw = self.fake("Linux", files=meminfo, runs=dict([spark]), machine="x86_64")
+        self.assertIsNone(hw.gpus()[0]["vram"])  # an x86 card's [N/A] stays unknown
+
+    def test_a_discrete_amd_card_doesnt_count_its_gtt(self):
+        card = "/fake/sys/class/drm/card0/device"
+        hw = self.fake("Linux", files={
+            f"{card}/uevent": "DRIVER=amdgpu\nPCI_SLOT_NAME=0000:03:00.0",
+            f"{card}/mem_info_vram_total": str(16 * 2 ** 30), f"{card}/mem_info_vram_vendor": "samsung",
+            f"{card}/mem_info_gtt_total": str(32 * 2 ** 30)})
+        self.assertEqual(hw.gpus()[0]["vram"], 16 * 2 ** 30)
+        self.assertNotIn("unified", hw.gpus()[0])
 
     def test_gpu_power_hwmon_sums_the_cards_and_skips_connectors(self):
         from workbench import hardware
