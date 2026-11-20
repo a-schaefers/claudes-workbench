@@ -1394,6 +1394,11 @@ class GpuLease:
         # First come, first served: a blocking flock hands the lock to any of its waiters, so three
         # queued tasks started in no particular order (#108). Each waits its turn in gpu.json
         # (oldest `since` first, then task name) and only the first tries the lock.
+        # Holding nothing meanwhile: a lease let in sharing whose load then misfit kept its shared
+        # gpu.lock while second in line, so the first's LOCK_EX never succeeded, and every later
+        # task queued behind the two for good (#366, the audit of 1.6)
+        if self.fh:
+            fcntl.flock(self.fh, fcntl.LOCK_UN)
         with Watcher(self.home) as w:
             while True:
                 if self._first():
@@ -1442,7 +1447,7 @@ class GpuLease:
             with store.locked(self.home / f"{self.pool}.admit"):
                 held = self._holders()
                 self._set({**held, self.me: self._entry(waiting=True)})
-        self._take_alone(held)  # flock converts: drops the shared lock, then waits for the others
+        self._take_alone(held)  # it drops the shared lock, then waits its turn (#366)
         with store.locked(self.home / f"{self.pool}.load"):
             return secs + make_resident(self.m, say=self.say, warn=self.warn)
 

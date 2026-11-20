@@ -408,6 +408,70 @@ with models.GpuLease(None, optimize.HOLDER, wait=False):
         self.assertIn(("unload", False), said)      # sent before t-b was let in, which loads again
         self.assertTrue(admitted.exists())
 
+    def test_two_tasks_whose_loads_misfit_both_get_the_gpu_once_the_holder_ends(self):
+        # #366 (the audit of 1.6, reproduced): two leases let in beside a third, each finding at
+        # its load that Ollama couldn't keep both, waited for the GPU to themselves. The second
+        # kept its shared gpu.lock while it waited, so the first's LOCK_EX never succeeded, and
+        # every later task queued behind the two
+        os.environ["WB_FAKE_GPU_GB"] = "80"      # 25 + 11 + 11 GB guessed: all three fit
+        tmp = Path(self.tmp.name)
+        cfg = json.loads(Path(os.environ["WB_OPENCODE_CONFIG"]).read_text())
+        cfg["provider"]["ollama"]["models"]["other:9b"] = {"limit": {"context": 32768}}
+        Path(os.environ["WB_OPENCODE_CONFIG"]).write_text(json.dumps(cfg))
+        Path(os.environ["WB_MODELS"]).write_text(json.dumps(
+            {BIG: {"weights_gb": 20}, SMALL: {"weights_gb": 9}, "ollama/other:9b": {"weights_gb": 9}}))
+        root = str(Path(__file__).resolve().parent.parent)
+        active = textwrap.dedent(f"""
+            import sys, time
+            from pathlib import Path
+            sys.path.insert(0, {root!r})
+            from workbench import models
+            with models.GpuLease(models.resolve({BIG!r}), "t-act", lambda s: None):
+                Path({str(tmp / "act")!r}).write_text("in")
+                time.sleep(3)
+            """)
+        waiter = textwrap.dedent(f"""
+            import sys, time
+            from pathlib import Path
+            sys.path.insert(0, {root!r})
+            from workbench import models
+            models.make_resident = lambda *a, **k: 1.0     # a load that took a second,
+            models._fits_beside = lambda *a: False         # and didn't fit beside the holder
+            _take_alone = models.GpuLease._take_alone
+            def take_alone(self, held):                    # t-w1 queued before t-w2 loads
+                Path({str(tmp)!r}, self.task + "-queued").write_text("")
+                _take_alone(self, held)
+            models.GpuLease._take_alone = take_alone
+            with models.GpuLease(models.resolve(sys.argv[2]), sys.argv[1],
+                                 lambda s: print(s, flush=True)) as lease:
+                print("in", flush=True)
+                Path({str(tmp)!r}, sys.argv[1]).write_text("in")
+                while not all(Path({str(tmp)!r}, n).exists() for n in ("t-w1", "t-w2")):
+                    time.sleep(0.05)                   # both let in before either loads
+                while sys.argv[1] == "t-w2" and not Path({str(tmp)!r}, "t-w1-queued").exists():
+                    time.sleep(0.05)
+                lease.load()
+                print("got", flush=True)
+                time.sleep(0.3)
+            """)
+        procs = [subprocess.Popen([sys.executable, "-c", active])]
+        self.addCleanup(lambda: [p.kill() for p in procs])
+        deadline = time.time() + 10
+        while not (tmp / "act").exists():
+            self.assertLess(time.time(), deadline)
+            time.sleep(0.05)
+        for name, model in (("t-w1", SMALL), ("t-w2", "ollama/other:9b")):  # one model each
+            procs.append(subprocess.Popen([sys.executable, "-c", waiter, name, model], stdout=subprocess.PIPE,
+                                          stderr=subprocess.STDOUT, text=True))
+            self.assertTrue(procs[-1].stdout.readline().startswith("sharing the GPU"))  # let in
+            self.assertEqual(procs[-1].stdout.readline().strip(), "in")
+        outs = [p.communicate(timeout=30)[0] for p in procs[1:]]
+        for out in outs:
+            self.assertIn("could not fit", out)
+            self.assertIn("got", out)
+        self.assertEqual(procs[0].wait(timeout=5), 0)
+
+
 class Budget(unittest.TestCase):
     """The GPU budget: one runtime's GPUs, an iGPU's carve-out left out, Apple's real default."""
 
