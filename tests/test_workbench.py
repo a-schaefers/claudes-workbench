@@ -3470,6 +3470,49 @@ class RealOpenCode(Base):
         self.assertIn("CANARY-HANDED", text)              # a handed skill is listed to the model
         self.assertNotIn("CANARY-KEPT", text)             # and the rest of the library is not
 
+    def test_personal_skills_in_agents_stay_out_and_the_projects_stay_in(self):
+        # #371 (the audit of 1.6, reproduced): OpenCode reads ~/.agents/skills as well as
+        # ~/.claude/skills, and the first reached every agent
+        from workbench import runner
+        home = Path(self.tmp.name) / "home"
+        for where, name in ((home / ".agents" / "skills", "personal-agents"),
+                            (home / ".claude" / "skills", "personal-claude"),
+                            (self.repo / ".agents" / "skills", "project-agents")):
+            write_skill(where / name, name, f"Use when CANARY-{name.upper()}.")
+        subprocess.run(["git", "-C", str(self.repo), "add", ".agents"], check=True)
+        subprocess.run(["git", "-C", str(self.repo), "commit", "-qm", "a skill"], check=True)
+        env = {k: v for k, v in os.environ.items() if not k.startswith("XDG_")}
+        with mock.patch.dict(os.environ, {"HOME": str(home)}, clear=False):
+            for k in [k for k in os.environ if k.startswith("XDG_")]:
+                os.environ.pop(k)
+            self.start("t-skl", "ok")
+            wait_phase("t-skl", {"review"})
+            task = store.Task("t-skl")
+            layer_path = runner.write_config_layer(task)
+        with socket.socket() as sock:
+            sock.bind(("127.0.0.1", 0))
+            port = sock.getsockname()[1]
+        out = Path(self.tmp.name) / "skills-requests.jsonl"
+        server = subprocess.Popen([sys.executable, str(ROOT / "tests" / "capture_llm.py"),
+                                   str(port), str(out)])
+        self.addCleanup(server.kill)
+        layer = json.loads(layer_path.read_text())
+        layer["provider"] = {"cap": {
+            "npm": "@ai-sdk/openai-compatible",
+            "options": {"baseURL": f"http://127.0.0.1:{port}/v1", "apiKey": "x"},
+            "models": {"cap": {"name": "capture", "tool_call": True,
+                               "limit": {"context": 32768, "output": 1024}}}}}
+        layer_path.write_text(json.dumps(layer))
+        time.sleep(0.5)
+        env.update(HOME=str(home), PWD=str(task.worktree), OPENCODE_CONFIG=str(layer_path))
+        subprocess.run(["opencode", "run", "--standalone", "-m", "cap/cap", "--format", "json",
+                        "say ok"], cwd=task.worktree, env=env, capture_output=True, timeout=120)
+        reqs = [json.loads(line) for line in out.read_text().splitlines()]
+        text = json.dumps(max(reqs, key=lambda r: len(r.get("tools", []))))
+        self.assertTrue("CANARY-PROJECT-AGENTS" in text)   # the project's own: kept
+        self.assertFalse("CANARY-PERSONAL-AGENTS" in text)  # (not assertIn: a prompt per failure)
+        self.assertFalse("CANARY-PERSONAL-CLAUDE" in text)
+
 
     def run_calls(self, name, calls, *extra, before=None):
         """Run real opencode in a task's worktree, in its lane, against a fake model that makes

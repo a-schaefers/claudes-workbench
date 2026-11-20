@@ -251,7 +251,7 @@ unset: unknown, so no sharing).
   it. Each `$.state` atom has a shape tag (ARCHITECTURE.md, *Couplings*, lists them): change it
   when its type changes. A slash command may not start a turn itself: it pushes onto `mem.queued`.
 - Skills for the agents: Claude's library (`wb skill`), handed per task, or a project's own
-  `.claude/skills`, committed with it. The user's personal `~/.claude/skills` are denied to agents.
+  `.claude/skills`, committed with it. Personal skills (`~/.claude/skills`, `~/.agents/skills`) are denied to agents.
 
 ## OpenCode quirks this code relies on
 Checked against OpenCode 2.3 with `tests/capture_llm.py` (a recording model server: it shows
@@ -270,10 +270,10 @@ denials, compound shell commands, rule order, git by path, the edit rule, PATH, 
   entry says `"enabled": false` still starts: the layer swaps its command for `false`.
 - It loads AGENTS.md itself but never CLAUDE.md, which reaches it through `instructions`
   (absolute paths).
-- Skills come from `~/.claude/skills` and `.claude/skills`. A `disable-model-invocation` skill is
-  not listed. The config's `skills` list adds more: a path to one skill's directory lists that
-  skill, a parent directory lists every skill in it, a path to the SKILL.md itself lists nothing,
-  so handed skills go in one directory each. Loading one (the `skill` tool, argument `id`) returns
+- Skills come from `skills/` in `~/.claude`, `~/.agents`, `.claude`, `.agents`. A
+  `disable-model-invocation` skill isn't listed. The config's `skills` list adds more: a skill's
+  directory lists it, a parent lists every skill in it, its SKILL.md lists nothing, so handed
+  skills go in one directory each. Loading one (the `skill` tool, argument `id`) returns
   its body, its base directory and its files, readable from the worktree.
 - `permissions: [{action, resource, effect}]`: a `deny` removes a tool or skill from the prompt.
   Patterns are anchored, `*` matches anything (spaces and `/` too), a trailing ` *` is optional,

@@ -1226,11 +1226,13 @@ is. Claude making each change itself was a call over its whole context on most t
 **Git, read-only** (`gitguard.py`; *Git, commits and projects*). `runner.agent_env` writes a `git`
 of its own into `rules/<task>/bin/` and puts it first on `PATH`.
 
-**Skills**: the repo's own `.claude/skills`, plus the library skills Claude handed this task (one
-directory each in the config's `skills` list). The user's personal `~/.claude/skills` (including
-synced Claude app skills, `synced/*/*/SKILL.md`) are denied by name (`denied_skills`): an agent
-once read a personal skill as a "newer task" and went off into the user's files. A name the
-worktree's own `.claude/skills` also has stays allowed (the project's skill wins); `workbench` and
+**Skills**: the repo's own `.claude/skills` and `.agents/skills`, plus the library skills Claude
+handed this task (one directory each in the config's `skills` list). The user's personal
+`~/.claude/skills` (including synced Claude app skills, `synced/*/*/SKILL.md`) and
+`~/.agents/skills` (the cross-tool place OpenCode 2.3 also reads, which reached every agent: #371,
+the audit of 1.6) are denied by name (`denied_skills`): an agent once read a personal skill as a
+"newer task" and went off into the user's files. A name the worktree's own `.claude/skills` or
+`.agents/skills` also has stays allowed (the project's skill wins); `workbench` and
 task.json's `deny_skills` are always denied. `wb skill add` refuses the personal names. Claude's
 own skills and plugins (under `~/.claude`, outside the lane) never reach the agent either: the
 skill has Claude apply the ones that fit a task itself and carry the result into the spec as

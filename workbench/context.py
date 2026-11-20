@@ -1046,11 +1046,15 @@ def denied_skills(extra: list[str] | None = None, project: Path | None = None) -
     2026-11-16 an agent, its context full, summarised a personal publishing skill
     into a made-up "newer task" and went off reading the user's private library."""
     names = {"workbench", *(extra or [])}
-    for home in {claude_home() / "skills", Path.home() / ".claude" / "skills"}:  # OpenCode reads ~/.claude
+    # OpenCode reads ~/.claude/skills and ~/.agents/skills, the cross-tool place other agents read
+    # too: the second reached every agent, prefill on every round (#371, the audit of 1.6)
+    for home in {claude_home() / "skills", Path.home() / ".claude" / "skills",
+                 Path.home() / ".agents" / "skills"}:
         names |= {s.parent.name for s in home.glob("*/SKILL.md")}
         names |= {s.parent.name for s in (home / "synced").glob("*/*/SKILL.md")}
     if project:  # a project's own skill keeps its name (the personal ones are unreadable anyway)
-        names -= {s.parent.name for s in (project / ".claude" / "skills").glob("*/SKILL.md")}
+        for own in (".claude", ".agents"):
+            names -= {s.parent.name for s in (project / own / "skills").glob("*/SKILL.md")}
     return sorted(names | {"workbench", *(extra or [])})
 
 
