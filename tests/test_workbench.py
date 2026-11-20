@@ -6370,6 +6370,18 @@ class Shot(Base):
             run_wb("shot", "t", "--capture", "true", "--viewport", "big")
         self.assertIn("give it as WIDTHxHEIGHT", err.getvalue())
 
+    def test_a_capture_that_writes_nothing_fails_though_an_old_png_is_there(self):
+        # #344 (the audit of 1.4): with a real PNG tracked at .wb-shot.png, `true` passed on both
+        # sides, each "image" the old file
+        for name in (".wb-shot.png", ".wb-shot-0.png"):
+            (self.wt / name).write_bytes(self.PNG + b"old")
+        out = run_wb("shot", "t", "--capture", "true", "--files", ".wb-shot.png")
+        self.assertEqual(out.count("no PNG at $WB_SHOT_OUT"), 2)
+        m = json.loads((store.Task("t").dir / "shots" / "1" / "shots.json").read_text())
+        self.assertEqual((m["base"]["ok"], m["candidate"]["ok"]), (False, False))
+        out = run_wb("shot", "t", "--capture", self.CAPTURE)        # a real capture still lands
+        self.assertNotIn("a capture failed", out)
+
     def test_a_capture_that_writes_its_png_and_exits_nonzero_failed_on_both_sides(self):
         # #268 (the audit of 1.2): exit 7 on both sides printed two normal-looking paths, the
         # exits in shots.json only, and the chat showed both images

@@ -2924,8 +2924,9 @@ one.
 `wb shot <task> --capture CMD [--viewport WxH] [--files PATH…] [--timeout N]` (`verify.shot`,
 #98) runs the project's own capture command (a headless browser script, a test that saves a
 screenshot) once on the base and once on the candidate. Each run uses the same scratch checkouts,
-lane and environment as `wb verify`. The command writes a PNG to `$WB_SHOT_OUT` (`.wb-shot.png`
-in its checkout) at the size in `$WB_SHOT_VIEWPORT` (1280x800 by default). The same command,
+lane and environment as `wb verify`. The command writes a PNG to `$WB_SHOT_OUT` (`.wb-shot-<random>.png`
+in its checkout, a fresh name each run: a PNG already at a fixed `.wb-shot.png` passed a capture
+that wrote nothing, #344) at the size in `$WB_SHOT_VIEWPORT` (1280x800 by default). The same command,
 fixture and viewport on both sides make the two images comparable; `--files` copies the
 candidate's new capture script or fixture onto the base. workbench ships no browser: the capture
 is the project's.

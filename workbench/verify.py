@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import json
 import re
+import secrets
 import shlex
 import shutil
 import tempfile
@@ -198,7 +199,10 @@ def lines(r: dict) -> list[str]:
     return out
 
 
-SHOT = ".wb-shot.png"  # where a capture command writes, in its checkout ($WB_SHOT_OUT)
+# where a capture command writes, in its checkout ($WB_SHOT_OUT): a fresh name each run, absent
+# before it, since a PNG already there (a tracked .wb-shot.png) passed a capture that wrote
+# nothing, `true` reporting both images captured (#344, the audit of 1.4)
+SHOT = ".wb-shot-{}.png"
 
 
 def shot(task: store.Task, cmd: str, files: list[str] | None = None, viewport: str = "1280x800",
@@ -222,12 +226,13 @@ def shot(task: store.Task, cmd: str, files: list[str] | None = None, viewport: s
             "base": {"rev": task.spec["base"]}, "candidate": {"rev": tree}}
     for side, checkout in (("base", base), ("candidate", candidate)):
         dest = out / f"{side}.png"
+        name = SHOT.format(secrets.token_hex(6))
 
-        def keep(work: Path, dest=dest) -> None:
-            p = work / SHOT
+        def keep(work: Path, dest=dest, name=name) -> None:
+            p = work / name
             if p.is_file() and not p.is_symlink() and p.read_bytes()[:8] == b"\x89PNG\r\n\x1a\n":
                 shutil.copyfile(p, dest)
-        env = f"WB_SHOT_OUT=./{SHOT} WB_SHOT_VIEWPORT={viewport} "
+        env = f"WB_SHOT_OUT=./{name} WB_SHOT_VIEWPORT={viewport} "
         code, text = _run(task, checkout, env + f"sh -c {shlex.quote(cmd)}", limit, keep, setup)
         (out / f"{side}.txt").write_text(text, encoding="utf-8")
         # a capture that exits nonzero failed, PNG or not: one that wrote its image and exited 7
