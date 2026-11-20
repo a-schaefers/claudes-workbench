@@ -2956,7 +2956,13 @@ VPN), `"hosts": ["chat.example.org"]` a name a tunnel or proxy sends.
   `answers` only for a question allowed, keyed by its own questions' text, each a non-empty
   string). The first answer row wins (`chat.asks` ignores later ones), so the page's tap and the
   mod's expiry, two processes, can't both stand; `wb chat answer` prints the answer that stands.
-  A row without `kind` reads as a permission.
+  A row without `kind` reads as a permission. The page's list (`chat.asks`, in the snapshot) is
+  the newest 20 plus every open one older than those, and `wb chat pending` every message of the
+  user's without a receipt in the bounded tail, not only the newest 200: an open question
+  vanished behind 20 newer answered ones, and an unread message behind 200 replies (#265, the
+  audit of 1.2). An ask open past `ASK_STALE` (an hour; the mod waits 30 minutes) and a message
+  unread past `PENDING_STALE` (a day) carry `stale: true`; the page shows a stale ask as waiting in
+  the terminal, with no buttons.
 - `prefs.json`: `{away: "ask"|"allow"}` (anything else reads as `ask`), from the gear menu
   (`/api/prefs`), read by `chat.ask` (`allow` answers a new permission at once, by `setting`).
 - `push.json`: `{subs: [{endpoint, ts, ua}]}`, the devices with notifications on (the last 20,

@@ -233,8 +233,22 @@ def thread(limit: int = 200) -> list[dict]:
     return [{**r, "received": receipts.get(r["id"])} if r["from"] == "user" else r for r in rows]
 
 
+# Work still waiting is kept apart from what the page shows: an open question vanished from the
+# page's list behind 20 newer answered ones, and `wb chat pending` lost an unread message behind
+# 200 newer replies (#265, the audit of 1.2). Past these ages one is marked `stale`: the mod waits
+# 30 minutes on an ask, and a message a day old is no longer news.
+ASK_STALE = 3600
+PENDING_STALE = 86400
+
+
 def pending() -> list[dict]:
-    return [r for r in thread() if r["from"] == "user" and not r["received"]]
+    """Every message of the user's without a receipt, in the bounded tail: not only among the
+    newest 200."""
+    rows = store.read_jsonl_tail(chat_dir() / "messages.jsonl", THREAD_BYTES)
+    got = {r["id"] for r in store.read_jsonl_tail(chat_dir() / "receipts.jsonl", THREAD_BYTES)}
+    now = store.now()
+    return [{**r, "received": None, **({"stale": True} if now - r["ts"] > PENDING_STALE else {})}
+            for r in rows if r.get("from") == "user" and r.get("id") not in got]
 
 
 def snapshot() -> dict:
@@ -393,8 +407,9 @@ def ask(tool: str, text: str, kind: str = "permission", detail: dict | None = No
 
 
 def asks(limit: int = 20) -> list[dict]:
-    """The latest asks, each with its answer (None while open), `answered`, `by`, and the answer's
-    `note` and `answers` when it has them."""
+    """The latest asks, and every open one older than those, each with its answer (None while
+    open; `stale` once open past ASK_STALE), `answered`, `by`, and the answer's `note` and
+    `answers` when it has them."""
     seen: dict[str, dict] = {}
     for r in store.read_jsonl_tail(chat_dir() / "asks.jsonl", THREAD_BYTES):  # an answer follows its ask
         a = seen.get(r.get("id"))
@@ -404,7 +419,10 @@ def asks(limit: int = 20) -> list[dict]:
                 a.update({k: r[k] for k in ("note", "answers") if k in r})
         elif "tool" in r and r.get("id"):
             seen[r["id"]] = {"kind": "permission", **r, "answer": None}
-    return list(seen.values())[-limit:]
+    rows, now = list(seen.values()), store.now()
+    out = [a for a in rows[:max(0, len(rows) - limit)] if a["answer"] is None] + rows[-limit:]
+    return [{**a, "stale": True} if a["answer"] is None and now - a["ts"] > ASK_STALE else a
+            for a in out]
 
 
 def find_ask(ask_id: str) -> dict | None:

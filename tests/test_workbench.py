@@ -6985,6 +6985,27 @@ class WebChat(Base):
             self.assertEqual((detail, state), ({"plan": "", "project": "alpha"}, "expired"), args)
         self.assertEqual(self.chat.asks()[-1]["by"], "terminal")              # answered there
 
+    def test_open_questions_and_unread_messages_outlast_the_display_windows(self):
+        # #265 (the audit of 1.2): an open question vanished from the page behind 20 newer answered
+        # ones, and `wb chat pending` lost an unread message behind 200 newer replies
+        chat = self.chat
+        first = chat.ask("AskUserQuestion", "", "question", {"questions": []})
+        for i in range(25):
+            chat.answer(chat.ask("Bash", f"cmd {i}")["id"], "deny", "web")
+        listed = chat.asks()
+        self.assertEqual(len(listed), 21)
+        self.assertEqual((listed[0]["id"], listed[0]["answer"]), (first["id"], None))
+        self.assertIn(first["id"], [a["id"] for a in chat.snapshot()["asks"]])   # on the page
+        self.assertNotIn("stale", listed[0])
+        with mock.patch.object(chat.store, "now", return_value=store.now() + chat.ASK_STALE + 1):
+            self.assertTrue(chat.asks()[0]["stale"])                                # past the wait
+        unread = chat.send("are you there?", "user", "c-1")
+        for i in range(205):
+            chat.send(f"reply {i}", "claude")
+        self.assertNotIn(unread["id"], [m["id"] for m in chat.thread()])           # off the page
+        self.assertEqual([m["id"] for m in chat.pending()], [unread["id"]])
+        self.assertIn(unread["id"], run_wb("chat", "pending"))
+
     def test_wb_chat_wait_blocks_until_the_answer_or_says_open(self):
         chat = self.chat
         a = chat.ask("Write", "/etc/hosts")
