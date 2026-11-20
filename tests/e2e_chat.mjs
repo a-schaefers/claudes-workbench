@@ -424,6 +424,28 @@ async function run(engine, device) {
     }
     await q.close()
   })
+  await check('a retry after a lost reply and 205 newer messages clears its pending bubble', async () => {
+    // #264 (the audit of 1.2): the server logged it once and answered the retry, but the page
+    // cleared an outbox item only from the newest 200 in the snapshot, so it stayed pending
+    let lost = false
+    await page.route('**/api/send', async route => {
+      if (lost) return route.continue()
+      lost = true
+      await route.fetch()                                   // the server takes it,
+      const file = join(home, 'state/chat/messages.jsonl')
+      for (let i = 0; i < 205; i++) {
+        appendFileSync(file, JSON.stringify({ id: `filler-${i}`, ts: Date.now() / 1000, from: 'claude', text: `filler ${i}` }) + '\n')
+      }
+      await route.abort('connectionreset')                  // and its reply is lost
+    })
+    await page.fill('#input', 'retried after a lost reply')
+    await page.click('#send')
+    await until(() => messages().filter(m => m.text === 'retried after a lost reply').length === 1)
+    await until(async () => (await page.locator('.row.user.pending').count()) === 0, 30000)
+    await page.unroute('**/api/send')
+    const n = messages().filter(m => m.text === 'retried after a lost reply').length
+    if (n !== 1) throw new Error(`landed ${n} times`)
+  })
   await check('no script errors', async () => { if (errors.length) throw new Error(errors.join('; ')) })
   await browser.close()
   await stopServer()

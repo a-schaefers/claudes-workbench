@@ -683,7 +683,14 @@
       try {
         const r = await post('/api/send', { text: o.text, cid: o.cid, ...(o.about ? { about: { task: o.about.task, n: o.about.n } } : {}) })
         const j = await r.json().catch(() => ({}))
-        if (r.ok) { if (o === held) sentHeld(); if (j.state) apply(j.state); continue }
+        // landed: the reply names it. The snapshot alone holds the newest 200, so a retry after
+        // a lost reply, 205 messages later, kept its pending bubble for good (#264, the audit of 1.2)
+        if (r.ok) {
+          if (o === held) sentHeld()
+          else if (j.message && j.message.cid === o.cid) drop(o.cid)
+          if (j.state) apply(j.state); else render()
+          continue
+        }
         if (r.status === 401) { keyless('That key was not accepted.'); break }
         if (r.status >= 400 && r.status < 500) {
           if (o === held) { held = null; banner('Not sent: ' + (j.error || 'refused') + '. Your message is still in the box.', true); continue }

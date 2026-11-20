@@ -3066,7 +3066,10 @@ and an empty thread for seconds while the stream waited for a slot, 2026-11-18).
 bearer header (EventSource can't send one), parsed by hand; every state event is a full resync, so
 nothing arrives half-received. A message goes into a local outbox (one localStorage key per
 message, `wb-chat-out-<cid>`, the cid a `crypto.randomUUID()`), read afresh whenever it is used,
-and is sent in order until the server has it; a `storage` event (another tab queued, sent or
+and is sent in order until the server has it: an item is dropped when `/api/send`'s reply names
+its cid (`message.cid`, the row the server logged or already had), or when a snapshot lists it.
+The snapshot alone holds the newest 200, so a retry after a lost reply, 205 messages later, kept
+its pending bubble for good (#264, the audit of 1.2). A `storage` event (another tab queued, sent or
 dropped one) redraws and flushes, so whichever tab is online sends every tab's. One shared array
 (`wb-chat-outbox`, moved into the keys on load) was each tab's copy saved over the others':
 two tabs offline, and only the second's message reached the server (#199). A message the
