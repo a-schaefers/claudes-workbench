@@ -3121,6 +3121,27 @@ class RealOpenCode(Base):
             {"name": "shell", "arguments": {"command": "cd . && sudo -n true", "workdir": wt}}])
         self.assertIn("permission.rejected", answers[0])
 
+    def test_a_command_with_a_variable_before_it_runs_and_the_hard_limits_still_hold(self):
+        # #258 (the audit of 1.2): `FOO=1 ls` was refused while `ls` and `env FOO=1 ls` ran, and
+        # it is how projects spell their tests (`PYTHONPATH=. pytest`, `CI=1 npm test`)
+        wt = str(store.Task("t-assign").worktree)
+        def shell(cmd):
+            return {"name": "shell", "arguments": {"command": cmd, "workdir": wt}}
+        _, answers = self.run_calls("t-assign", [
+            shell("FOO=1 echo assigned-ok"),
+            shell("A=1 B='two words' printf '%s\\n' two-ok"),
+            shell("FOO=1 ./missing-tool"),
+            shell("FOO=1 sudo -n true"),
+            shell("CI=1 pip install requests"),
+            shell("FOO=1 curl --version"),
+        ])
+        self.assertIn("assigned-ok", answers[0])
+        self.assertIn("two-ok", answers[1])
+        self.assertNotIn("rejected", answers[2])               # a project's tool, by its path
+        self.assertIn("permission.rejected", answers[3])       # no root
+        self.assertIn("permission.rejected", answers[4])       # a new package asks first
+        self.assertIn("permission.rejected", answers[5])       # not an allowed command
+
     def test_git_is_read_only_and_claudes_files_are_claudes(self):
         task = store.Task("t-git")
         wt = str(task.worktree)

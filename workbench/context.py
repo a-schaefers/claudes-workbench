@@ -32,6 +32,13 @@ ROOT_FILES = ("CLAUDE.md", ".claude/CLAUDE.md", "CLAUDE.local.md")
 # lists opencode_worktree_remove; the rule then refuses the call.
 DENIED_TOOLS = ("question", "experimental_image_generate", "execute", "subagent", "websearch",
                 "webfetch", "opencode_*", "*worktree*")  # the network, like curl: Claude's to allow
+# A command written `NAME=value cmd`: OpenCode matches each simple command's raw text, so `FOO=1
+# ls` was refused while `ls` and `env FOO=1 ls` ran. It is how CLAUDE.md files and READMEs spell
+# tests (`PYTHONPATH=. pytest`, `CI=1 npm test`), and a small model copying the project's command
+# spent a Claude wake asking, or stopped running the tests (#258, the audit of 1.2). `*` matches
+# spaces too, so the prefix form lets through a line with an `=` before an allowed command's name:
+# no more than `env *` already runs. The hard limits and the ask-first steps get the form as well.
+ASSIGN = "*=*"
 # The shell's hard limits: no root, and no road round the read-only git (gitguard.py, a `git` of
 # its own first on the agent's PATH): not the real git named by its path, not `gh`, which pushes,
 # opens pull requests and runs workflows. OpenCode checks each part of a compound command, so
@@ -45,7 +52,7 @@ _HARD = ("sudo", "doas", "pkexec", "su", "gh")
 # 2026-11-16 audit); not `time *` itself, which would refuse `time pytest -k gh`
 _WRAPPERS = ("env", "env *", "xargs", "xargs *", "nohup", "nohup --", "nice", "nice *", "time",
              "time -p", "time --", "command", "command -p", "command --", "exec", "timeout *",
-             "stdbuf *", "setsid")
+             "stdbuf *", "setsid", ASSIGN)
 
 
 def _denied(commands) -> tuple[str, ...]:
@@ -192,16 +199,18 @@ def shell_rules(task: store.Task) -> list[dict]:
     and the user allowed; the hard limits last, so no allowance lifts them (later rules win)."""
     rules = [{"action": "shell", "resource": "*", "effect": "deny"}]
     rules += [{"action": "shell", "resource": r, "effect": "allow"}
-              for c in ALLOWED_COMMANDS for r in (c, f"{c} *")]
-    rules += [{"action": "shell", "resource": r, "effect": "allow"} for r in ("./*", "../*")]
+              for c in ALLOWED_COMMANDS for r in (c, f"{c} *", f"{ASSIGN} {c} *")]
+    rules += [{"action": "shell", "resource": r, "effect": "allow"}
+              for b in ("./*", "../*", *PROJECT_BINS) for r in (b, f"{ASSIGN} {b}")]
     # and what it built anywhere in its lane, by path: a debug binary in the temp directory was
     # refused (2026-11-16) though `bash` could run it; the lane, not this list, bounds writes
     rules += [{"action": "shell", "resource": f"{d}/*", "effect": "allow"}
               for d in (writable(task) or []) if os.path.isdir(d)
               and not d.startswith(("/dev", "/proc"))]
-    rules += [{"action": "shell", "resource": r, "effect": "allow"} for r in PROJECT_BINS]
-    rules += [{"action": "shell", "resource": r, "effect": "deny"} for r in ASK_FIRST]
-    rules += [{"action": "shell", "resource": r, "effect": "allow"} for r in INSTALL_LISTED]
+    rules += [{"action": "shell", "resource": r, "effect": "deny"}
+              for p in ASK_FIRST for r in (p, f"{ASSIGN} {p}")]
+    rules += [{"action": "shell", "resource": r, "effect": "allow"}
+              for p in INSTALL_LISTED for r in (p, f"{ASSIGN} {p}")]
     rules += [{"action": "shell", "resource": r, "effect": "allow"} for r in allowed_patterns(task)]
     rules += [{"action": "shell", "resource": c, "effect": "deny"} for c in denied_shell()]
     return rules
