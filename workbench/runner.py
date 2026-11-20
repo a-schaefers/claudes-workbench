@@ -1044,12 +1044,20 @@ PROPOSABLE = ("CLAUDE.md", "AGENTS.md")
 
 def proposals(worktree: Path) -> list[tuple[Path, Path]]:
     """(the instruction file, the agent's proposed new version) for each proposal in the
-    worktree; a link is never one (it could point anywhere)."""
+    worktree: a new file, untracked at the step's start (HEAD), never a link (it could point
+    anywhere). A `CLAUDE.md.proposed` the project already tracked was settled too, and accept
+    deleted a draft the agent never touched and the review never showed; and an rglob walked
+    every copied node_modules on each review (#321, the audit of 1.4). Git skips ignored paths."""
+    try:
+        listed = gitops.git(worktree, "ls-files", "--others", "--exclude-standard", "-z", "--",
+                            *(f":(glob)**/{name}.proposed" for name in PROPOSABLE))
+    except gitops.GitError:  # no worktree (gone, or not a repo): nothing to settle
+        return []
     out = []
-    for name in PROPOSABLE:
-        for prop in sorted(worktree.rglob(name + ".proposed")):
-            if not prop.is_symlink() and prop.is_file() and ".git" not in prop.parts:
-                out.append((prop.with_name(name), prop))
+    for rel in sorted(p for p in listed.split("\0") if p):
+        prop = worktree / rel
+        if not prop.is_symlink() and prop.is_file():
+            out.append((prop.with_name(prop.name.removesuffix(".proposed")), prop))
     return out
 
 

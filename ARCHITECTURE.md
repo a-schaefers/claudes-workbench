@@ -1164,7 +1164,11 @@ agent, so code the agent wrote gets no more rights when the runner tests it.
 can't change them; a change made from the
 shell shows in the round report. When a task asks for a change to CLAUDE.md or AGENTS.md, the
 protocol has the agent write the whole new file beside it as `<name>.proposed`
-(`runner.PROPOSABLE`, `runner.proposals`: never a link). The review notice shows each as a diff
+(`runner.PROPOSABLE`, `runner.proposals`: a new file, untracked at the step's start (HEAD),
+listed by `git ls-files --others --exclude-standard`, so ignored directories aren't walked;
+never a link). A `<name>.proposed` the project already tracks is its own file, shown and
+committed like any other: settled as the agent's, accept deleted a team's committed draft that
+the review never showed (#321, the audit of 1.4). The review notice shows each as a diff
 against the file (`proposal_diff`; `review_diff` leaves exactly those proposals out of the main
 diff, by literal path: an ordinary `schema.proposed` is code, shown and committed like any file,
 #79), and `wb accept`/`wb next` settle them before committing (`cli._settle_proposals`):
