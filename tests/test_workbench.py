@@ -3036,6 +3036,12 @@ class ConfigLayer(Base):
             self.assertEqual(got["permissions"][-1]["effect"], "deny")  # the rules last
             self.assertEqual(got["share"], "disabled")
             self.assertNotIn("mcp", got)
+            os.environ["OPENCODE_CONFIG_CONTENT"] = json.dumps({"compaction": {"auto": False},
+                                                                "theme": "dark"})
+            got = json.loads(runner.rules_env({"permissions": [], "compaction": {"auto": True}})
+                             ["OPENCODE_CONFIG_CONTENT"])
+            self.assertNotIn("compaction", got)     # the layer's stands: the handover's backstop
+            self.assertEqual(got["theme"], "dark")
             def doctor():
                 buf = io.StringIO()
                 with redirect_stdout(buf), self.assertRaises(SystemExit):

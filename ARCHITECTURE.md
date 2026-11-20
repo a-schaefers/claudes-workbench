@@ -1159,7 +1159,8 @@ could write one for its next round). `rules_env` passes the layer's permissions 
 (120,000 bytes; one environment string holds 128 KiB) sets `OPENCODE_DISABLE_PROJECT_CONFIG=1`
 instead, which also drops AGENTS.md and the project's skills. The user's own
 `OPENCODE_CONFIG_CONTENT` (`models.users_config_content`) goes under the rules, not away (#347,
-the audit of 1.4): its keys are kept but `mcp` (the user's MCP servers stay off), its
+the audit of 1.4): its keys are kept but `mcp` (the user's MCP servers stay off) and any the
+layer sets itself (loaded last, the user's `compaction` would undo the handover's backstop), its
 `permissions` come before the layer's (the last match wins), and `share` is `disabled`; past
 the limit it goes alone, without its permissions. The layer's `edit` rule also denies
 `OPENCODE_FILES` (`*opencode.json`, `*opencode.jsonc`, `.opencode/*`, `*/.opencode/*`), and the

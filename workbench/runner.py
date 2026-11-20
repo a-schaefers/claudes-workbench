@@ -166,10 +166,13 @@ CONFIG_CONTENT_MAX = 120_000
 # The user's own OPENCODE_CONFIG_CONTENT goes under the rules, not away: replaced, the providers,
 # instructions or permissions kept there were lost to the agent (#347, the audit of 1.4). Its
 # permissions come first, so the rules' (the last match wins) still decide; its MCP servers stay
-# off like the global files' ones (the layer's `mcp`, which this would load after).
+# off like the global files' ones (the layer's `mcp`, which this would load after). A key the
+# layer sets too is left to the layer: loaded last, the user's `compaction` would undo the
+# handover's backstop, and their `skills` or `instructions` replace the task's.
 def rules_env(layer: dict) -> dict:
-    users = {k: v for k, v in models.users_config_content().items() if k != "mcp"}
-    theirs = users.pop("permissions", None)
+    users = models.users_config_content()
+    theirs = users.get("permissions")
+    users = {k: v for k, v in users.items() if k not in layer and k not in ("mcp", "permissions")}
     rules = {"permissions": [*(theirs if isinstance(theirs, list) else []),
                              *layer["permissions"]], "share": "disabled"}
     content = json.dumps({**users, **rules}, separators=(",", ":"))
