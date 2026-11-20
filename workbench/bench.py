@@ -254,7 +254,7 @@ def add(name: str, step: int | None = None, hidden: list[str] | None = None,
         # with the caller's environment the same test saw other files, other variables and no
         # cleanup (#81, the 2026-11-18 audit)
         home().mkdir(parents=True, exist_ok=True)  # not in /tmp, where the git shim allows writes
-        with tempfile.TemporaryDirectory(prefix=".base-", dir=home()) as scratch:
+        with tempfile.TemporaryDirectory(prefix=store.scratch(".base-"), dir=home()) as scratch:
             work = _checkout_at(Path(scratch), case)
             gitops.git(scratch, "clone", "-q", "-b", "main", str(tmp / "base.bundle"), str(work))
             overlay(case, work, tmp)  # as a replay gets them (#346)
@@ -269,7 +269,7 @@ def add(name: str, step: int | None = None, hidden: list[str] | None = None,
         # and pass on the step's own commit, run as a replay's grade is (the lane, read-only
         # git): workbench's suite commits, so clean-fixtures failed every replay (2026-11-17)
         home().mkdir(parents=True, exist_ok=True)  # not in /tmp, where the git shim allows writes
-        with tempfile.TemporaryDirectory(prefix=".check-", dir=home()) as scratch:
+        with tempfile.TemporaryDirectory(prefix=store.scratch(".check-"), dir=home()) as scratch:
             work = _checkout_at(Path(scratch), case)
             gitops.git(scratch, "clone", "-q", "--shared", "--no-checkout", str(repo), str(work))
             if sparse := gitops.sparse_of(Path(repo)):  # as the task's worktree was (#263)

@@ -5158,6 +5158,58 @@ class Cleanup(Base):
         self.assertEqual(gitops.step_commit(task, 1, 1), tip)
         self.assertFalse((store.home() / "rules" / "t-merged").exists())
 
+    def test_a_start_killed_in_worktree_add_frees_its_name_and_gc_its_scratches(self):
+        # #376 (the audit of 1.6): a wb start killed by Claude's Bash limit left tasks/<name>/
+        # without a task.json, its branch and worktree, and the name was refused for good; killed
+        # commands' scratch clones stayed in the state directory, counted against every new task
+        shim = Path(self.tmp.name) / "slow-git"
+        shim.mkdir()
+        real = shutil.which("git")
+        (shim / "git").write_text(f'#!/bin/sh\ncase " $* " in *" worktree add "*) '
+                                  f'{real} "$@"; sleep 300;; esac\nexec {real} "$@"\n')
+        (shim / "git").chmod(0o755)
+        g = lambda *a: subprocess.run(["git", "-C", str(self.repo), *a], capture_output=True,  # noqa
+                                      text=True).stdout
+
+        def killed_start(name):  # killed once its worktree and branch exist: no cleanup at all
+            proc = subprocess.Popen([str(ROOT / "bin" / "wb"), "start", name, "--spec",
+                                     str(self.spec), "--repo", str(self.repo), "--model", "mimo"],
+                                    env={**os.environ, "PATH": f"{shim}:{os.environ['PATH']}"},
+                                    stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                                    start_new_session=True)
+            end = time.monotonic() + 60
+            while f"delegate/{name}" not in g("branch", "--list") and time.monotonic() < end:
+                time.sleep(0.1)
+            os.killpg(proc.pid, signal.SIGKILL)
+            proc.wait()
+            task = store.Task(name)
+            self.assertTrue(task.dir.is_dir() and not task.exists)
+            self.assertIn(name, g("worktree", "list"))
+
+        killed_start("t-half")
+        self.start("t-half", "ok")                      # the same name again: it cleans up first
+        task = store.Task("t-half")
+        self.assertTrue(task.exists)
+        self.assertFalse((task.dir / cli.STARTING).exists())
+        wait_phase("t-half", {"review"})
+
+        killed_start("t-half2")                         # and wb gc cleans up one left alone
+        home = store.home()
+        dead = home / ".verify-999999999-x"             # its maker gone, an hour old: removed
+        mine = home / f".verify-{os.getpid()}-y"        # its maker alive: kept
+        young = home / "wb-merge-999999999-z"           # its maker gone, but just made: kept
+        for d in (dead, mine, young):
+            (d / "repo" / "node_modules").mkdir(parents=True)
+        for d in (dead, mine):
+            os.utime(d, (time.time() - 7200, time.time() - 7200))
+        out = run_wb("gc")
+        self.assertIn("1 scratch dir(s), 1 half-made start(s)", out)
+        self.assertEqual([d.exists() for d in (dead, mine, young)], [False, True, True])
+        self.assertFalse(store.Task("t-half2").dir.exists())
+        self.assertNotIn("delegate/t-half2", g("branch", "--list"))
+        self.assertNotIn("t-half2", g("worktree", "list"))
+        self.assertTrue(store.Task("t-half").exists)    # a real task is no half-made start
+
     def test_wb_gc_deletes_branches_merged_before_and_keeps_the_rest(self):
         self.start("t-old", "ok")
         wait_phase("t-old", {"review"})

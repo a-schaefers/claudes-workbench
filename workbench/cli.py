@@ -652,11 +652,16 @@ def cmd_start(a):
     try:
         task.dir.mkdir(parents=True)
     except FileExistsError:  # a start under way, or one that died before task.json
-        die(f"{task.dir} exists without a task.json: another wb start {a.name} is under way or "
-            "one failed; pick a new name")
+        if (half := _dead_start(task)) is None:
+            die(f"{task.dir} exists without a task.json: another wb start {a.name} is under way; "
+                "pick a new name")
+        _drop_start(task, half)  # killed (Claude's Bash limit): its name was refused for good (#376)
+        task.dir.mkdir(parents=True)
     try:
         wt = context.tree(task.dir, repo, setup.get("siblings"), "worktree")  # #261
         wt.parent.mkdir(parents=True, exist_ok=True)
+        store.write_json(task.dir / STARTING, {"repo": str(repo), "worktree": str(wt),
+                                               "pid": os.getpid(), "at": store.now()})
         base = gitops.create_worktree(repo, a.name, wt, a.base)
     except gitops.GitError as e:
         shutil.rmtree(task.dir, ignore_errors=True)  # create_worktree removed its own leftovers
@@ -705,6 +710,7 @@ def cmd_start(a):
         "silence_timeout": a.silence_timeout or limits["silence"],
         "think_timeout": a.think_timeout if a.think_timeout is not None else limits["think"],
         "created_at": store.now(), "wb_version": __version__})
+    (task.dir / STARTING).unlink(missing_ok=True)  # a task now: wb discard drops it from here on
     prompt = spec_text.rstrip() + PROTOCOL.format(branch=gitops.branch_name(a.name),
                                                   test_line=test_line(a.test), budget=budget)
     task.round_dir(1).mkdir(parents=True)
@@ -1814,6 +1820,53 @@ def _finish_record(task: store.Task) -> bool:
 
 GC_EVERY = 86400  # a close runs gc at most once a day (gc.json): a task closed is a moment's work
 RULES_GRACE = 3600  # a rules directory with no task yet may be a start in progress
+STARTING = "starting.json"  # a start's repo, worktree and pid, until its task.json is written (#376)
+
+
+def _dead_start(task: store.Task) -> dict | None:
+    """A half-made start of ``task`` whose wb start is gone: its starting.json ({} when it died
+    before writing one and RULES_GRACE has passed), or None while it may still be under way."""
+    if task.exists or not task.dir.is_dir():
+        return None
+    info = store.read_json(task.dir / STARTING)
+    if isinstance(info, dict) and isinstance(info.get("pid"), int):
+        return None if models._alive(info["pid"]) else info
+    try:
+        young = time.time() - task.dir.stat().st_mtime < RULES_GRACE
+    except OSError:
+        return None
+    return None if young else {}
+
+
+def _drop_start(task: store.Task, info: dict) -> None:
+    """Undo a half-made start: its worktree and registration, its branch (it holds no work: the
+    agent never ran), its directory and its rules."""
+    repo = Path(info.get("repo") or "/nonexistent")
+    if repo.is_dir():
+        if info.get("worktree"):
+            gitops.remove_worktree(repo, Path(info["worktree"]))
+        gitops.git(repo, "worktree", "prune", check=False)
+        gitops.delete_branch(repo, task.name)
+    gitops._rmtree(task.dir)
+    shutil.rmtree(context.rules_dir(task), ignore_errors=True)
+
+
+def _drop_scratches() -> int:
+    """The scratch directories (store.SCRATCH_PREFIXES) SCRATCH_AGE old whose maker is gone (#376)."""
+    n = 0
+    for d in sorted(store.home().iterdir()) if store.home().is_dir() else []:
+        pre = next((p for p in store.SCRATCH_PREFIXES if d.name.startswith(p)), None)
+        if not pre or not d.is_dir() or d.is_symlink():
+            continue
+        pid = d.name[len(pre):].split("-")[0]
+        try:
+            old = time.time() - d.stat().st_mtime > store.SCRATCH_AGE
+        except OSError:
+            continue
+        if old and not (pid.isdigit() and models._alive(int(pid))):
+            gitops._rmtree(d)
+            n += 1
+    return n
 
 
 def _keep_grants(task: store.Task) -> None:
@@ -1853,6 +1906,13 @@ def gc(days: float = store.ARCHIVE_DAYS, branches: bool = False) -> dict:
             shutil.rmtree(d, ignore_errors=True)
             out["rules"] += 1
     out["runtime"] = context.drop_stale_runtime_dirs(store.all_tasks())
+    out["scratch"] = _drop_scratches()
+    out["starts"] = 0
+    for d in sorted(store.tasks_dir().iterdir()) if store.tasks_dir().is_dir() else []:
+        t = store.Task(d.name)
+        if store.NAME_RE.match(d.name) and (half := _dead_start(t)) is not None:
+            _drop_start(t, half)
+            out["starts"] += 1
     out["branches"] = _merged_branches() if branches else 0
     store.write_json(store.home() / "gc.json", {"at": store.now(), **out})
     return out
@@ -1916,7 +1976,8 @@ def cmd_gc(a):
     out = gc(a.days, branches=True)
     print(f"archived {out['archived']} task(s) closed over {a.days:g} days ago; moved "
           f"{out['notices']} old notice(s) to notify.old.jsonl; removed {out['rules']} rules "
-          f"dir(s), {out['runtime']} runtime dir(s), {out['branches']} merged branch(es)")
+          f"dir(s), {out['runtime']} runtime dir(s), {out['scratch']} scratch dir(s), "
+          f"{out['starts']} half-made start(s), {out['branches']} merged branch(es)")
 
 
 def _landed(task: store.Task) -> str | None:

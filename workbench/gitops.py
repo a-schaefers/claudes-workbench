@@ -247,7 +247,7 @@ def fill_submodules(repo: Path, commit: str, checkout: Path) -> list[str]:
             left.append(path)
             continue
         store.home().mkdir(parents=True, exist_ok=True)  # the scratch index: never in the lane
-        with tempfile.TemporaryDirectory(prefix=".submodule-", dir=store.home()) as scratch:
+        with tempfile.TemporaryDirectory(prefix=store.scratch(".submodule-"), dir=store.home()) as scratch:
             env = {"GIT_INDEX_FILE": os.path.join(scratch, "index")}
             try:
                 dest.mkdir(parents=True, exist_ok=True)
@@ -392,7 +392,7 @@ def with_new_files(worktree: Path, *args, whole: bool = False, limit: int | None
     # files dropped out of the diff Claude reviews (the 2026-11-16 audit)
     from . import store
     store.home().mkdir(parents=True, exist_ok=True)
-    scratch = tempfile.mkdtemp(prefix="wb-index-", dir=store.home())
+    scratch = tempfile.mkdtemp(prefix=store.scratch("wb-index-"), dir=store.home())
     index = os.path.join(scratch, "index")
     env = {"GIT_INDEX_FILE": index}
     try:
@@ -741,7 +741,7 @@ def _trial_merge(repo: Path, branch: str) -> bytes:
     missed a modify/delete conflict whose abort deleted the developer's ignored copy on Git
     2.34.1, Ubuntu 22.04's (#320, the audit of 1.4). A trial that can't run refuses the merge."""
     store.home().mkdir(parents=True, exist_ok=True)
-    scratch = tempfile.mkdtemp(prefix="wb-merge-", dir=store.home())
+    scratch = tempfile.mkdtemp(prefix=store.scratch("wb-merge-"), dir=store.home())
     wt = os.path.join(scratch, "w")
     try:
         _run(repo, (*NO_HOOKS, "worktree", "add", "-q", "--detach", wt, "HEAD"))

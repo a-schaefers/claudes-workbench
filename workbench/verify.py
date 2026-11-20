@@ -86,7 +86,7 @@ def _run(task: store.Task, checkout, cmd: str, limit: int, keep=None,
     takes what the run left before the clone goes. Prepared from the task's worktree, unless
     ``setup`` (--setup) asks for the setup to run there again."""
     store.home().mkdir(parents=True, exist_ok=True)  # not in /tmp, where the git shim allows writes
-    with tempfile.TemporaryDirectory(prefix=".verify-", dir=store.home()) as scratch:
+    with tempfile.TemporaryDirectory(prefix=store.scratch(".verify-"), dir=store.home()) as scratch:
         # nested as the worktree is, so that a sibling two levels up stays in the scratch (#261)
         work = context.tree(Path(scratch), task.spec["repo"], task.spec.get("siblings"), "repo")
         work.parent.mkdir(parents=True, exist_ok=True)

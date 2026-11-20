@@ -346,6 +346,19 @@ class Task:
                      {"ts": now(), "task": self.name, "kind": kind, "text": text, **extra})
 
 
+# The scratch directories workbench makes in its home, each named <prefix><maker's pid>-…: wb gc
+# removes one SCRATCH_AGE old whose maker is gone. Killed commands left full clones there, with
+# their copied dependencies, that _disk_room then counted against every new task (#376, the
+# audit of 1.6).
+SCRATCH_PREFIXES = (".verify-", ".base-", ".check-", ".submodule-", "wb-index-", "wb-merge-")
+SCRATCH_AGE = 3600
+
+
+def scratch(prefix: str) -> str:
+    """``prefix`` (one of SCRATCH_PREFIXES) with this process's pid, for tempfile."""
+    return f"{prefix}{os.getpid()}-"
+
+
 def all_tasks(archived: bool = False):
     """Every task in tasks/: open, and closed less than ARCHIVE_DAYS ago (archive); with
     ``archived``, the archived ones too, for a question about history: a batch's older tasks
