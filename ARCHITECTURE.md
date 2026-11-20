@@ -2646,7 +2646,7 @@ custom-node packs do run their own Python).
   `delete_branch` (`branch -D`) unless `--keep-branch` or the repo is gone. `wb accept` records the
   branch's tip in status `tip` and, after a `--merge`, deletes the branch (`drop_merged_branch`:
   `branch -d`, which keeps one not merged into the checkout's HEAD): merged delegate branches
-  piled up, 8 in one repo (the 2026-11-19 audit). `bench._reference` and `cli._landed` read the
+  piled up, 8 in one repo (the 2026-11-19 audit). `gitops.step_commit` and `cli._landed` read the
   tip once the branch is gone; `wb gc` does the same for branches merged before (`_merged_branches`).
 - **One command per task at a time** (`cli.one_at_a_time`): accept, discard, next, feedback,
   resume, takeover and stop hold the task's `locks/<task>.cmd.lock` (`runner.lock_file`, `store.task_lock`, where no
@@ -2717,8 +2717,8 @@ delegating or with a task open. A shell edit isn't seen: the block says the rule
 `wb verify <task> [--test CMD] [--files PATH…] [--expect TEXT] [--timeout N]` (`workbench/verify.py`, #96) runs
 one regression test twice, at review, each run in its own scratch checkout under the state
 directory and in the task's own lane and environment (`runner.run_in_lane` on a `verify._At`):
-- **The base**: a `--shared` clone checked out at the task's base, with the candidate's test files
-  copied in (`--files`, else the changed files whose path looks like a test, `TEST_PATH`, as
+- **The base**: a `--shared` clone at the task's original base for step one or the previous approved step commit for later steps (#252), with the candidate's test files
+  copied in (`--files`, else the files changed since that commit whose path looks like a test, `TEST_PATH`, as
   they are in the candidate: a deleted one, such as a renamed test's old name, is left out, and
   each path goes to git `:(literal)`; the old name once stopped git on its pathspec before either
   run, #194). That copy is what makes a test separable from the change; with no test file it
@@ -2742,9 +2742,9 @@ not found, a failed build or compile) says the tests never ran. A bare "expected
 Python's `SyntaxError: expected ':'`, and a base that never ran an assertion was called proven
 (#193, the 2026-11-19 audit). `assertion` picks the line the report shows: the first assertion
 line, else a failed test's header. Each run is kept in `tasks/<task>/verify/<n>/`: `base.txt`,
-`candidate.txt` and `result.json` `{cmd, files, tree, ts, base: {exit, assertion}, candidate:
-{exit, assertion}, verdict, dir, expect (when given)}`. `verify.last` reads the newest, with `stale` once the worktree
-has changed since.
+`candidate.txt` and `result.json` `{cmd, files, tree, ts, base: {rev, exit, assertion}, candidate:
+{rev, exit, assertion}, verdict, dir, expect (when given)}`. `verify.last` reads the newest, with `stale` once the worktree
+or the comparison base has changed since. The verdict names the base commit and candidate tree.
 
 The comparison reaches the review (#97): `wb report <task>` (the latest round's) ends with the
 newest check's lines, marked stale when the worktree has changed since. `wb accept` prints
@@ -3671,7 +3671,7 @@ check-ins off), not `wb start`'s.
 | `progress_checks`, `progress_mark`, `progress_open`, `interventions` | progress checks raised; the worktree's mark at the last; a check not yet answered; the steers that answered one, `[{kind, ts, round, step}]` |
 | `skills`, `skills_ever`, `skills_rev`, `skills_told` | the handed set; every skill held; the library rev of each; what this session was told |
 | `asking`, `agent_pid` | the oldest open question's id; the agent's pid while a round runs (cleared by `_end_agent`, or `reap`) |
-| `tip` | the branch's tip at `wb accept` (or `wb gc`, for a branch merged before): `bench._reference` and `_landed` read it once the merged branch is deleted |
+| `tip` | the branch's tip at `wb accept` (or `wb gc`, for a branch merged before): `gitops.step_commit` and `_landed` read it once the merged branch is deleted |
 | `asks` | the runner's count of the task's ask files, `{id: "q" \| "p" \| "x"}` (question, permission request, refused): the budgets |
 | `spec_gaps` | `[{round, text}]` from `--spec-gap` |
 | `updated_at` | every write |
@@ -4033,7 +4033,7 @@ push: every change is a pull request that merges once `check` is green and it is
   and the mod's replay test.
 - **`cli.PROTOCOL`'s acceptance line or fold, or `wb next`'s step opening** → `bench.py` reads
   them back out of old prompts (`TEST_LINE`, `FOLD`, `STEP_HEAD`); the trailers `wb next` and
-  `wb accept` write → `bench._reference`, which finds them from status `tip` once the merged
+  `wb accept` write → `gitops.step_commit`, which finds them from status `tip` once the merged
   branch is gone.
 - **The mod's wake opening** (`` [workbench] Task `<name>` ``, register.tsx) **or Claude Code's
   transcript rows** (`type`, `message.id`, `message.usage`, a Bash `tool_use`'s `command`,

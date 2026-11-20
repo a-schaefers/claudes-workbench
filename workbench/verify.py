@@ -53,13 +53,18 @@ class _At(store.Task):
         return self._worktree
 
 
-def test_files(task: store.Task, tree: str) -> list[str]:
+def _review_base(task: store.Task) -> str | None:
+    step = task.status.get("steps", 1)
+    return task.spec["base"] if step == 1 else gitops.step_commit(task, step - 1, step)
+
+
+def test_files(task: store.Task, tree: str, base_rev: str) -> list[str]:
     """The candidate's changed files that look like tests, as they are in the candidate: what the
     base run borrows. Not the deleted ones: a renamed test listed its old name too, the overlay
     asked the candidate for it, and git stopped on the pathspec before any test ran (#194, the
     2026-11-19 audit). NUL-separated, so a name with a tab or newline survives."""
     raw = gitops.git(task.worktree, "diff", "--name-status", "--no-renames", "-z",
-                     task.spec["base"], tree).split("\0")
+                     base_rev, tree).split("\0")
     pairs = zip(raw[0::2], raw[1::2])
     return [p for st, p in pairs if p and not st.startswith("D") and TEST_PATH.search(p)]
 
@@ -102,12 +107,12 @@ def on_base(task: store.Task, cmd: str, limit: int) -> tuple[int | str, str]:
                 cmd, limit)
 
 
-def _checkouts(task: store.Task, tree: str, files: list[str]):
+def _checkouts(task: store.Task, tree: str, files: list[str], base_rev: str):
     """The base, with the candidate's ``files`` copied in, and the candidate as the worktree is."""
     head = gitops.git(task.worktree, "rev-parse", "HEAD").strip()
 
     def base(work: Path) -> None:
-        gitops.git(work, "checkout", "-q", "--detach", task.spec["base"])
+        gitops.git(work, "checkout", "-q", "--detach", base_rev)
         if files:  # the candidate's, alone; literal, so a `*` in a name is no glob
             gitops.git(work, "checkout", "-q", tree, "--", *(f":(literal){f}" for f in files))
 
@@ -141,11 +146,14 @@ def run(task: store.Task, cmd: str, files: list[str] | None = None, limit: int =
     """Run ``cmd`` on the base (with the candidate's test files) and on the candidate; the
     result, also kept in tasks/<task>/verify/<n>/ with both outputs."""
     tree = gitops.snapshot(task.worktree)
-    files = test_files(task, tree) if files is None else files
+    base_rev = _review_base(task)
+    if not base_rev:
+        raise RuntimeError("cannot find the last approved step's commit for the comparison")
+    files = test_files(task, tree, base_rev) if files is None else files
     if not files:
         raise RuntimeError("no test file among the candidate's changes: name the regression "
                            "test's files with --files (or review it as usual)")
-    base, candidate = _checkouts(task, tree, files)
+    base, candidate = _checkouts(task, tree, files, base_rev)
     b_code, b_out = _run(task, base, cmd, limit, setup=setup)
     c_code, c_out = _run(task, candidate, cmd, limit, setup=setup)
     d = task.dir / "verify"
@@ -155,8 +163,8 @@ def run(task: store.Task, cmd: str, files: list[str] | None = None, limit: int =
     (out / "base.txt").write_text(b_out, encoding="utf-8")
     (out / "candidate.txt").write_text(c_out, encoding="utf-8")
     result = {"cmd": cmd, "files": files, "tree": tree, "ts": store.now(),
-              "base": {"exit": b_code, "assertion": assertion(b_out)},
-              "candidate": {"exit": c_code, "assertion": assertion(c_out)},
+              "base": {"rev": base_rev, "exit": b_code, "assertion": assertion(b_out)},
+              "candidate": {"rev": tree, "exit": c_code, "assertion": assertion(c_out)},
               "verdict": verdict(b_code, b_out, c_code, expect), "dir": str(out),
               **({"expect": expect} if expect else {})}
     store.write_json(out / "result.json", result)
@@ -174,6 +182,8 @@ SAY = {"proven": "proven: it fails on the base and passes on the candidate",
 def lines(r: dict) -> list[str]:
     """The report: the verdict, each run's exit and assertion, where the outputs are."""
     out = [f"regression check `{r['cmd']}` ({', '.join(r['files'])}): {SAY[r['verdict']]}"]
+    if base_rev := r["base"].get("rev"):
+        out.append(f"  comparing base commit {base_rev} to candidate tree {r['tree']}")
     for side in ("base", "candidate"):
         x = r[side]
         out.append(f"  {side}: exit {x['exit']}" + (f": {x['assertion']}" if x["assertion"] else ""))
@@ -194,7 +204,7 @@ def shot(task: store.Task, cmd: str, files: list[str] | None = None, viewport: s
     if not re.fullmatch(r"\d{2,5}x\d{2,5}", viewport):
         raise RuntimeError(f"--viewport {viewport}: give it as WIDTHxHEIGHT, e.g. 390x844")
     tree = gitops.snapshot(task.worktree)
-    base, candidate = _checkouts(task, tree, files or [])
+    base, candidate = _checkouts(task, tree, files or [], task.spec["base"])
     d = task.dir / "shots"
     n = 1 + max((int(p.name) for p in d.glob("*") if p.name.isdigit()), default=0)
     out = d / str(n)
@@ -257,4 +267,8 @@ def last(task: store.Task) -> dict | None:
         r = json.loads((runs[-1] / "result.json").read_text())
     except (OSError, ValueError):
         return None
-    return {**r, "stale": task.worktree.is_dir() and gitops.snapshot(task.worktree) != r.get("tree")}
+    # Old checks always compared against task.json's original base (#252).
+    stale = task.worktree.is_dir() and (
+        r["base"].get("rev", task.spec["base"]) != _review_base(task)
+        or gitops.snapshot(task.worktree) != r.get("tree"))
+    return {**r, "stale": stale}

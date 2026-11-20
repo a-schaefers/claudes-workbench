@@ -345,6 +345,19 @@ def stack(repo) -> list[str]:
     return [lang for lang, n in langs.most_common(2) if n >= STACK_SHARE * total]
 
 
+def step_commit(task: store.Task, step: int, steps: int) -> str | None:
+    """The commit that landed step `step`: `wb next` marks its steps "(step N)", `wb accept` the last."""
+    spec = task.spec
+    want = f"Workbench-Task: {task.name}" + (f" (step {step})" if step < steps else "")
+    tip = task.status.get("tip") or spec["branch"]  # the branch is deleted once merged (cli.gc)
+    log = git(spec["repo"], "log", "--format=%H%x00%B%x01", f"{spec['base']}..{tip}", check=False)
+    for entry in log.split("\x01"):
+        sha, _, body = entry.strip().partition("\x00")
+        if sha and want in body.splitlines():
+            return sha
+    return None
+
+
 def commit_all(worktree: Path, message: str, include: bool = False) -> str:
     """Commit everything in the worktree, without git hooks (NO_HOOKS; also for a task started
     before its git dir was recorded) but signed if the user signs. Refuses a nested repository: committed, it was a gitlink to

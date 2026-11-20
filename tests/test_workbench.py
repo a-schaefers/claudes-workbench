@@ -4437,7 +4437,7 @@ class Cleanup(Base):
         self.assertNotEqual(self.git("rev-parse", "--verify", "-q", "refs/heads/delegate/t-merged").returncode, 0)
         tip = task.status["tip"]
         self.assertEqual(self.git("merge-base", "--is-ancestor", tip, "HEAD").returncode, 0)
-        self.assertEqual(bench._reference(task, 1, 1), tip)
+        self.assertEqual(gitops.step_commit(task, 1, 1), tip)
         self.assertFalse((store.home() / "rules" / "t-merged").exists())
 
     def test_wb_gc_deletes_branches_merged_before_and_keeps_the_rest(self):
@@ -5598,6 +5598,27 @@ class Verify(Base):
         self.assertIn("AssertionError", Path(r["dir"], "base.txt").read_text())   # both outputs kept
         (self.wt / "calc.py").write_text("def kw(watts):\n    return watts // 1000\n")
         self.assertTrue(verify.last(store.Task("t"))["stale"])     # the candidate moved on since
+
+    def test_verify_credits_the_step_that_fixed_the_bug(self):
+        # #252 (the audit of 1.2): step two's test passed on step one's commit already.
+        from workbench import verify
+        task = store.Task("t")
+        run_wb("verify", "t", "--test", "python3 -m unittest tests.test_calc")
+        with mock.patch("sys.stdin", io.StringIO("Document the conversion.")):
+            run_wb("next", "t", "--spec", "-", "-m", "Fix conversion")
+        wait_phase("t", {"review"})
+        self.assertTrue(verify.last(task)["stale"])
+        approved = gitops.git(self.wt, "rev-parse", "HEAD").strip()
+        (self.wt / "tests/test_again.py").write_bytes((self.wt / "tests/test_calc.py").read_bytes())
+        out = run_wb("verify", "t", "--test", "python3 -m unittest tests.test_again")
+        result = verify.last(task)
+        self.assertEqual(result["files"], ["tests/test_again.py"])
+        self.assertEqual(result["verdict"], "base-passes")
+        self.assertEqual(result["base"]["rev"], approved)
+        self.assertEqual(result["candidate"]["rev"], gitops.snapshot(self.wt))
+        self.assertIn(approved, out)
+        self.assertIn(result["candidate"]["rev"], out)
+        self.assertIn("already passes", out)
 
     def test_a_test_that_passes_on_the_base_or_fails_to_set_up_proves_nothing(self):
         (self.wt / "tests" / "test_calc.py").write_text(

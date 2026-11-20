@@ -85,19 +85,6 @@ def _spec_of(prompt: str) -> str:
     return text.split(FOLD, 1)[0].rstrip() + "\n"
 
 
-def _reference(task: store.Task, step: int, steps: int) -> str | None:
-    """The commit that landed step `step`: `wb next` marks its steps "(step N)", `wb accept` the last."""
-    spec = task.spec
-    want = f"Workbench-Task: {task.name}" + (f" (step {step})" if step < steps else "")
-    tip = task.status.get("tip") or spec["branch"]  # the branch is deleted once merged (cli.gc)
-    log = gitops.git(spec["repo"], "log", "--format=%H%x00%B%x01", f"{spec['base']}..{tip}", check=False)
-    for entry in log.split("\x01"):
-        sha, _, body = entry.strip().partition("\x00")
-        if sha and want in body.splitlines():
-            return sha
-    return None
-
-
 def _safe(path: str) -> bool:
     p = Path(path)
     return bool(path) and not p.is_absolute() and ".." not in p.parts
@@ -194,7 +181,7 @@ def add(name: str, step: int | None = None, hidden: list[str] | None = None,
         raise RuntimeError("a case name is lowercase letters, digits and hyphens, at most 48")
     if case_dir(case_name).exists():
         raise RuntimeError(f"case {case_name} exists (wb bench list)")
-    ref = _reference(task, step, steps)
+    ref = gitops.step_commit(task, step, steps)
     if not ref:
         raise RuntimeError(f"no commit of step {step} on {spec.get('branch')} in {repo}: the branch "
                            "was deleted or rewritten")
