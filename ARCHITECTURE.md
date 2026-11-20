@@ -2215,8 +2215,10 @@ own commit was rejected, and its grants, deleted with its rules at the close, we
   can change it per step);
 - the hidden checks: `--hidden` paths, by default the files the step added or changed that look
   like tests (`TESTISH`: under `tests/`, `test/`, `spec/`, `__tests__/`, or `test_*`, `*_test.*`,
-  `*.test.*`, `*.spec.*`), copied from the reference into `hidden/`; and `--check`, a command
-  that must pass too;
+  `*.test.*`, `*.spec.*`), copied from the reference into `hidden/` with their Git mode (a
+  100755 file stays executable: written at 0644, an executable `./test_check.sh` exited 126 on the
+  right answer, #346), and overlaid with it on the base, the reference and every replay alike
+  (`overlay`); and `--check`, a command that must pass too;
 - the task's grants (`allow`, `paths`) and the original's model, rounds, reviews and minutes.
 
 It is refused when the task isn't accepted or is a trial, the repo or the step's commit is gone,
@@ -2226,7 +2228,7 @@ scratch clone of the bundle under `bench/`, in the original task's lane and envi
 reference check below is (`runner.run_in_lane` on `_At`: a plain shell with the caller's
 environment saw other files and variables, and left a hung check's children running, #81), for at
 most `BASE_CHECK_SECS` = 120 s; past that, `base_check` says not checked. It is refused too when the
-checks fail on the step's own commit run as a replay's grade is: a scratch checkout under
+checks fail on the step's own commit run as a replay's grade is: the hidden checks overlaid on a scratch checkout under
 `bench/` (in /tmp the git shim would allow writes), in the original task's lane and environment
 (`runner.run_in_lane` on `_At`, the task with that worktree), up to the case's test timeout. A
 suite that commits or writes outside the lane can never pass there: `clean-fixtures` (workbench's

@@ -5288,6 +5288,26 @@ class Bench(Base):
         self.assertEqual((bench.case_dir("t-steps-s2") / "spec.md").read_text(), "Now add the check.\n")
         self.assertEqual(case["test_cmd"], "sh tests/check.sh")
 
+    def test_an_executable_hidden_check_stays_executable_on_the_reference_and_every_replay(self):
+        # #346 (the audit of 1.4): the overlay wrote ./test_check.sh at 0644, so the right answer
+        # exited 126, and the reference, graded from its commit, never saw it
+        from workbench import bench
+        self.start("t-exec", "ok", "--test", "./tests/check.sh")
+        wait_phase("t-exec", {"review"})
+        wt = store.Task("t-exec").worktree
+        (wt / "tests").mkdir()
+        (wt / "tests" / "check.sh").write_text("#!/bin/sh\ngrep -qx 42 answer.txt\n")
+        (wt / "tests" / "check.sh").chmod(0o755)
+        run_wb("accept", "t-exec", "-m", "feat: the answer")
+        self.assertIn("on the base: fails", "\n".join(bench.add("t-exec")))
+        case = bench.cases()["t-exec"]
+        replay = Path(self.tmp.name) / "replay"
+        (replay / "tests").mkdir(parents=True)
+        (replay / "tests" / "check.sh").write_text("exit 0\n")   # the agent's own, at 0644
+        bench.overlay(case, replay)
+        self.assertTrue(os.access(replay / "tests" / "check.sh", os.X_OK))
+        self.assertIn("grep -qx 42", (replay / "tests" / "check.sh").read_text())
+
     def test_a_replay_is_graded_by_the_hidden_checks_and_leaves_no_trace_in_real_work(self):
         from workbench import bench
         self.accepted("t-src")

@@ -116,10 +116,13 @@ def checkout(case: dict, dest: Path) -> None:
     gitops.git(dest, "config", "user.email", "bench@workbench.invalid")
 
 
-def overlay(case: dict, worktree: Path) -> None:
+def overlay(case: dict, worktree: Path, src: Path | None = None) -> None:
     """The hidden checks over the replay's work. The driver runs outside the lane and the agent
     could have planted links in its worktree, so nothing is written through one: a link on the
-    way (a file or a directory) is replaced."""
+    way (a file or a directory) is replaced. Each keeps its mode in `hidden/`: an executable
+    `./test_check.sh` written at 0644 exited 126 on the right answer (#346, the audit of 1.4).
+    `src` is the case's directory (`add` overlays from its temporary one)."""
+    src = src or case_dir(case["name"])
     for rel in case["hidden"]:
         at = worktree
         for part in Path(rel).parts:
@@ -129,7 +132,9 @@ def overlay(case: dict, worktree: Path) -> None:
             elif at == worktree / rel and at.is_dir():
                 shutil.rmtree(at)
         (worktree / rel).parent.mkdir(parents=True, exist_ok=True)
-        shutil.copyfile(case_dir(case["name"]) / "hidden" / rel, worktree / rel)
+        shutil.copyfile(src / "hidden" / rel, worktree / rel)
+        # the mode too: copyfile over a file the agent wrote keeps that file's (#346)
+        os.chmod(worktree / rel, (src / "hidden" / rel).stat().st_mode & 0o777)
 
 
 class _At(store.Task):
@@ -220,6 +225,9 @@ def add(name: str, step: int | None = None, hidden: list[str] | None = None,
         for p in picked:
             (tmp / "hidden" / p).parent.mkdir(parents=True, exist_ok=True)
             (tmp / "hidden" / p).write_bytes(gitops.git_bytes(repo, "show", f"{ref}:{p}"))
+            # with its Git mode, which overlay copies: 100755 is executable (#346, the audit of 1.4)
+            mode = gitops.git(repo, "ls-tree", ref, "--", p).split(" ", 1)[0]
+            (tmp / "hidden" / p).chmod(0o755 if mode == "100755" else 0o644)
         bundle(repo, base, tmp / "base.bundle")
         (tmp / "spec.md").write_text(_spec_of(prompt), encoding="utf-8")
         (tmp / "reference.patch").write_bytes(gitops.git_bytes(repo, "diff", base, ref))
@@ -249,9 +257,7 @@ def add(name: str, step: int | None = None, hidden: list[str] | None = None,
         with tempfile.TemporaryDirectory(prefix=".base-", dir=home()) as scratch:
             work = _checkout_at(Path(scratch), case)
             gitops.git(scratch, "clone", "-q", "-b", "main", str(tmp / "base.bundle"), str(work))
-            for p in picked:
-                (work / p).parent.mkdir(parents=True, exist_ok=True)
-                shutil.copyfile(tmp / "hidden" / p, work / p)
+            overlay(case, work, tmp)  # as a replay gets them (#346)
             at = _At(name, work)
             _prepared(at, "the base")
             codes = [runner.run_in_lane(at, c, BASE_CHECK_SECS)[0]
@@ -269,6 +275,9 @@ def add(name: str, step: int | None = None, hidden: list[str] | None = None,
             if sparse := gitops.sparse_of(Path(repo)):  # as the task's worktree was (#263)
                 gitops.apply_sparse(work, sparse)
             gitops.git(work, "checkout", "-q", "--detach", ref)
+            # the hidden checks overlaid as on a replay: graded straight from the commit, a check
+            # the overlay broke (its execute bit lost) still let the case in (#346, the audit of 1.4)
+            overlay(case, work, tmp)
             at = _At(name, work)
             _prepared(at, f"step {step}'s own commit")
             for c in (case["test_cmd"], check):
