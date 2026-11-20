@@ -1864,6 +1864,30 @@ class WorktreeSetup(Base):
         out = run_wb("verify", "t-venv", "--test", "sh test_venv.sh", "--files", "test_venv.sh")
         self.assertIn("base: exit 0\n  candidate: exit 0", out)  # both sides ran their own
 
+    def test_a_symlinked_state_directory_still_copies_the_prepared_inputs_but_a_link_inside_refuses(self):
+        # #345 (the audit of 1.4): WB_HOME a link to another volume made every prepared input
+        # "changed", since each parent was compared with its own resolution, the home's link too
+        real = Path(self.tmp.name) / "volume"
+        (real / "task" / "deps").mkdir(parents=True)
+        (real / "task" / "deps" / "stamp").write_text("built\n")
+        (real / "scratch").mkdir()
+        home = Path(self.tmp.name) / "linked-home"
+        home.symlink_to(real)
+        at = types.SimpleNamespace(spec={"repo": str(self.repo)}, worktree=home / "scratch",
+                                   status={"prepared_paths": ["deps/stamp"]})
+        self.assertEqual(runner.prepare(at, home / "task"), (0, ""))
+        self.assertEqual((real / "scratch" / "deps" / "stamp").read_text(), "built\n")
+        elsewhere = Path(self.tmp.name) / "elsewhere"
+        elsewhere.mkdir()
+        (elsewhere / "stamp").write_text("planted\n")
+        shutil.rmtree(real / "task" / "deps")
+        (real / "task" / "deps").symlink_to(elsewhere)     # a link inside the task: still refused
+        shutil.rmtree(real / "scratch" / "deps")
+        code, said = runner.prepare(at, home / "task")
+        self.assertEqual(code, "copy failed")
+        self.assertIn("prepared input deps/stamp changed", said)
+        self.assertFalse((real / "scratch" / "deps" / "stamp").exists())
+
     def test_commands_json_gives_a_repo_its_setup_for_every_task(self):
         self.ignore("deps/")
         Path(os.environ["WB_COMMANDS"]).write_text(json.dumps({"repos": {str(self.repo): {

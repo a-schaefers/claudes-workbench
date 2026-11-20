@@ -780,7 +780,7 @@ is set and it isn't run again, with `prepared_paths` (the worktree's ignored pat
 and the output's tail ("the setup command failed (exit N)", or "setting up the worktree failed
 (copy failed)" for a link or copy). Each scratch checkout (the base check, `wb verify`, `wb shot`:
 `verify._run`) gets the same links beside it and a copy of the task's `prepared_paths` from its
-worktree (`prepare(at, prepared)`, as a reflink where the filesystem has them). A file already present in the scratch checkout takes precedence. A missing prepared input or a changed parent link requires fresh setup. The setup
+worktree (`prepare(at, prepared)`, as a reflink where the filesystem has them). A file already present in the scratch checkout takes precedence. A missing prepared input or a changed parent link requires fresh setup: each input's parent must resolve to the same path under the two worktrees' resolved roots, so a link inside a worktree refuses the copy while a symlinked state directory (`WB_HOME` a link to another volume) doesn't (#345). The setup
 isn't run there: each ran it from nothing, up to `SETUP_SECS`, and a first build compiled three
 to five times a task (#249, the audit of 1.2). `wb verify --setup` and `wb shot --setup` run it in
 each checkout as before; so does a task prepared before the paths were recorded, and one whose

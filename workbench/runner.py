@@ -981,13 +981,19 @@ def prepare(task: store.Task, prepared: Path | None = None) -> tuple[int | str, 
                 at.parent.mkdir(parents=True, exist_ok=True)
                 at.symlink_to(context.sibling_real(repo, name))
         if made is not None:
+            # The two worktrees resolved first: a symlinked state directory (WB_HOME a link to
+            # another volume, which store.absolute_env keeps) is trusted, and only a link inside
+            # a worktree refuses the copy. Comparing each parent with its own resolution refused
+            # every prepared input under a linked home (#345, the audit of 1.4).
+            roots = prepared.resolve(), wt.resolve()
             for p in made:
                 src, dest = prepared / p, wt / p
                 # A later step can track an earlier build path or change its parent to a link.
                 # Keep that checkout's own file and confine copies to the two worktrees (#249).
                 if os.path.lexists(dest):
                     continue
-                if (src.parent.resolve() != src.parent or dest.parent.resolve() != dest.parent
+                if (src.parent.resolve() != (roots[0] / p).parent
+                        or dest.parent.resolve() != (roots[1] / p).parent
                         or not os.path.lexists(src)):
                     return "copy failed", f"prepared input {p} changed; use --setup for a fresh checkout"
                 _copy(src, dest)
