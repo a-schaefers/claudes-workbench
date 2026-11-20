@@ -5640,6 +5640,11 @@ class Backlog(Base):
         self.assertEqual(got["tasks"][0]["branch"], "delegate/t-a")
         self.assertIn("saved", got["totals"])
         self.assertEqual(run_wb("backlog").strip(), "night-1: 2 task(s), 0 open")
+        # #270 (the audit of 1.2): archived after 30 days, a batch's tasks dropped out of it
+        self.assertEqual(store.archive(days=0), ["t-a", "t-b"])
+        self.assertFalse((store.tasks_dir() / "t-a").exists())
+        self.assertEqual(run_wb("backlog", "night-1"), out)
+        self.assertEqual(run_wb("backlog").strip(), "night-1: 2 task(s), 0 open")
 
     def test_names_are_checked_and_an_unknown_backlog_is_refused(self):
         with self.assertRaises(SystemExit), redirect_stderr(io.StringIO()):

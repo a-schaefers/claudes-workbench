@@ -1911,7 +1911,7 @@ def cmd_savings(a):
 def cmd_backlog(a):
     """A batch of tasks started with `--backlog`: each one's phase, rounds, minutes, branch and
     saving, and the batch's saving (the morning summary). Without a name, the batches."""
-    tasks = [t for t in store.all_tasks() if t.spec.get("backlog")]
+    tasks = [t for t in store.all_tasks(archived=True) if t.spec.get("backlog")]  # #270
     if not a.name:
         names = {}
         for t in tasks:

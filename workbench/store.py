@@ -284,12 +284,12 @@ class Task:
                      {"ts": now(), "task": self.name, "kind": kind, "text": text, **extra})
 
 
-def all_tasks():
-    """Every task in tasks/: open, and closed less than ARCHIVE_DAYS ago (archive)."""
-    d = tasks_dir()
-    if not d.exists():
-        return []
-    return sorted((Task(p.name) for p in d.iterdir() if (p / "task.json").exists()),
+def all_tasks(archived: bool = False):
+    """Every task in tasks/: open, and closed less than ARCHIVE_DAYS ago (archive); with
+    ``archived``, the archived ones too, for a question about history: a batch's older tasks
+    dropped out of wb backlog after 30 days, and its totals with them (#270, the audit of 1.2)."""
+    ds = [d for d in (tasks_dir(), *([archive_dir()] if archived else ())) if d.exists()]
+    return sorted((Task(p.name) for d in ds for p in d.iterdir() if (p / "task.json").exists()),
                   key=lambda t: t.spec.get("created_at", 0))
 
 
