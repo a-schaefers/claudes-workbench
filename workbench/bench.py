@@ -89,8 +89,8 @@ def _reference(task: store.Task, step: int, steps: int) -> str | None:
     """The commit that landed step `step`: `wb next` marks its steps "(step N)", `wb accept` the last."""
     spec = task.spec
     want = f"Workbench-Task: {task.name}" + (f" (step {step})" if step < steps else "")
-    log = gitops.git(spec["repo"], "log", "--format=%H%x00%B%x01", f"{spec['base']}..{spec['branch']}",
-                     check=False)
+    tip = task.status.get("tip") or spec["branch"]  # the branch is deleted once merged (cli.gc)
+    log = gitops.git(spec["repo"], "log", "--format=%H%x00%B%x01", f"{spec['base']}..{tip}", check=False)
     for entry in log.split("\x01"):
         sha, _, body = entry.strip().partition("\x00")
         if sha and want in body.splitlines():

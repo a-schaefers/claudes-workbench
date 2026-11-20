@@ -1497,11 +1497,16 @@ def cmd_accept(a):
     context.drop_runtime_dir(task)
     _spec_gaps(task, a.spec_gap)
     merged = None
+    tip = gitops.git(repo, "rev-parse", "--verify", "-q", f"refs/heads/{spec['branch']}", check=False).strip()
+    if tip:  # where wb bench finds the task's commits once the branch is gone
+        task.set_status(tip=tip)
     if a.merge:
         try:
             merged = gitops.merge(repo, a.name, _merge_into(spec, repo), spec["base"])
         except gitops.GitError as e:
             print(f"wb: not merged: {e}", file=sys.stderr)
+        else:
+            gitops.drop_merged_branch(repo, spec["branch"])
     extra = {"commit": commit, "merged": bool(merged)}
     task.set_status(phase="accepted", last=f"accepted as {commit}" +
                     (f", merged {merged}" if merged else ""),
@@ -1509,6 +1514,7 @@ def cmd_accept(a):
     row = results.record(task, "accepted", measured, **extra)
     task.set_status(unrecorded=None)
     _ack_all(task)
+    _closed(task)
     try:  # a reminder: it once turned a finished accept into exit 1 (the 2026-11-16 audit)
         note = claude_md_status(repo, spec["branch"])  # the task's own commit counts
     except (gitops.GitError, OSError, ValueError):
@@ -1554,6 +1560,103 @@ def _finish_record(task: store.Task) -> bool:
     return True
 
 
+GC_EVERY = 86400  # a close runs gc at most once a day (gc.json): a task closed is a moment's work
+RULES_GRACE = 3600  # a rules directory with no task yet may be a start in progress
+
+
+def _closed(task: store.Task) -> None:
+    """A task just closed: its rules go (55 were left over here, the 2026-11-19 audit), and once
+    a day the rest of gc. Never an accept's or discard's failure."""
+    shutil.rmtree(store.home() / "rules" / task.name, ignore_errors=True)
+    if time.time() - ((store.read_json(store.home() / "gc.json", {}) or {}).get("at") or 0) > GC_EVERY:
+        try:
+            gc()
+        except (OSError, gitops.GitError, RuntimeError) as e:
+            print(f"wb: gc: {e}", file=sys.stderr)
+
+
+def gc(days: float = store.ARCHIVE_DAYS, branches: bool = False) -> dict:
+    """What history leaves behind (the 2026-11-19 audit, finding 18): closed tasks archived after
+    ``days`` (store.archive), handled notices older than that moved to notify.old.jsonl, the
+    rules of closed or vanished tasks, stale runtime directories, and with ``branches`` the
+    delegate branches of tasks accepted and merged (wb gc). The counts of each."""
+    out = {"archived": len(store.archive(days)), "notices": _rotate_notices(days)}
+    rules = store.home() / "rules"
+    out["rules"] = 0
+    for d in sorted(rules.iterdir()) if rules.is_dir() else []:
+        t = store.Task(d.name)
+        if t.status.get("phase") in store.CLOSED or (
+                not t.exists and time.time() - d.stat().st_mtime > RULES_GRACE):
+            shutil.rmtree(d, ignore_errors=True)
+            out["rules"] += 1
+    keep = {context._runtime_path(t) for t in store.all_tasks() if t.status.get("phase") not in store.CLOSED}
+    out["runtime"] = context.drop_stale_runtime_dirs(keep)
+    out["branches"] = _merged_branches() if branches else 0
+    store.write_json(store.home() / "gc.json", {"at": store.now(), **out})
+    return out
+
+
+def _rotate_notices(days: float) -> int:
+    """Move notify.jsonl's notices older than ``days`` that are handled (acknowledged, or their
+    task closed or gone) to notify.old.jsonl: each carries up to 32K of report, and every wb wait
+    wake and acknowledgement parsed the whole file, 529 KB for 158 notices (the 2026-11-19
+    audit). Under the file's own lock, so no notice appended meanwhile is lost."""
+    path = store.home() / "notify.jsonl"
+    cutoff = time.time() - days * 86400
+
+    def handled(r) -> bool:
+        if not isinstance(r, dict) or not isinstance(r.get("ts"), (int, float)):
+            return True  # no notice at all (store.notices skips it)
+        if r["ts"] > cutoff:
+            return False
+        if not (isinstance(r.get("task"), str) and store.NAME_RE.match(r["task"])):
+            return True
+        t = store.Task(r["task"])
+        return not t.exists or t.status.get("phase") in store.CLOSED or r["ts"] <= _acked(t)
+
+    with store.locked(path.with_name(path.name + ".lock")):
+        rows = store.read_jsonl(path)[0]
+        line = lambda r: json.dumps(r, ensure_ascii=False).encode() + b"\n"  # noqa: E731
+        old, kept = [], []
+        for r in rows:
+            (old if handled(r) else kept).append(r)
+        if old:
+            with open(path.with_name("notify.old.jsonl"), "ab") as fh:
+                fh.write(b"".join(map(line, old)))
+            tmp = path.with_name(f".{path.name}.{os.getpid()}.tmp")
+            tmp.write_bytes(b"".join(map(line, kept)))
+            os.replace(tmp, path)
+    return len(old)
+
+
+def _merged_branches() -> int:
+    """Delete the delegate branches that wb accept --merge merged before it did so itself,
+    recording each tip first (status `tip`), which wb bench finds the task's commits from. git
+    branch -d keeps any not merged into the checkout's HEAD."""
+    n = 0
+    for name in sorted({r["task"] for r in store.results(trials=True)
+                        if r.get("outcome") == "accepted" and r.get("merged")}):
+        t = store.Task(name)
+        repo, branch = Path(t.spec.get("repo") or "/nonexistent"), t.spec.get("branch")
+        if not (t.exists and branch and repo.is_dir()):
+            continue
+        tip = gitops.git(repo, "rev-parse", "--verify", "-q", f"refs/heads/{branch}", check=False).strip()
+        if not tip:
+            continue
+        if not t.status.get("tip"):
+            t.set_status(tip=tip)
+        n += gitops.drop_merged_branch(repo, branch)
+    return n
+
+
+def cmd_gc(a):
+    """Tidy what history leaves behind (gc); wb accept and discard run it once a day too."""
+    out = gc(a.days, branches=True)
+    print(f"archived {out['archived']} task(s) closed over {a.days:g} days ago; moved "
+          f"{out['notices']} old notice(s) to notify.old.jsonl; removed {out['rules']} rules "
+          f"dir(s), {out['runtime']} runtime dir(s), {out['branches']} merged branch(es)")
+
+
 def _landed(task: store.Task) -> str | None:
     """The commit an earlier wb accept made before its cleanup failed: the worktree is gone or
     broken and the branch's tip carries accept's own trailer (a step's says "(step N)"). A retry
@@ -1563,7 +1666,8 @@ def _landed(task: store.Task) -> str | None:
         return None  # a working worktree: commit from it
     except gitops.GitError:
         pass
-    repo, branch = task.spec["repo"], task.spec["branch"]
+    repo = task.spec["repo"]
+    branch = task.status.get("tip") or task.spec["branch"]  # merged and deleted: its recorded tip
     if f"Workbench-Task: {task.name}" in gitops.git(repo, "log", "-1", "--format=%B", branch,
                                                     check=False).splitlines():
         return gitops.git(repo, "rev-parse", "--short", branch).strip()
@@ -1594,6 +1698,7 @@ def cmd_discard(a):
     row = results.record(task, "discarded", measured, reason=a.reason)
     task.set_status(unrecorded=None)
     _ack_all(task)
+    _closed(task)
     print(f"discarded {a.name}" + ("" if a.keep_branch else f"; branch {spec['branch']} deleted"
                                    if not kept else f"; {repo} is gone, so its branch with it"))
     _say(savings.line(row) or spend.line(row.get("claude")))
@@ -2468,7 +2573,7 @@ def cmd_init(a):
 # config layers and shims) is nothing the mod reads; each closed task is skipped too (cmd_events):
 # a thousand finished tasks were 4,000 inotify watches per Claude session, or a rescan of them
 # four times a second without inotify (the 2026-11-16 audit).
-EVENT_SKIP = ("tasks/*/worktree", "tasks/*/rounds", "rules", "imports", "images")  # clones, outputs
+EVENT_SKIP = ("tasks/*/worktree", "tasks/*/rounds", "rules", "imports", "images", "archive")  # clones, outputs
 QUIET = (".lock", ".tmp", "runner.log")
 
 
@@ -3432,6 +3537,11 @@ def parser() -> argparse.ArgumentParser:
     s.add_argument("--price", type=float, help="set the electricity price per kWh, then report")
     s.set_defaults(f=cmd_savings)
     sub.add_parser("tune", help="the settings tuned from results, per model and window").set_defaults(f=cmd_tune)
+    s = sub.add_parser("gc", help="archive old closed tasks, rotate old notices, remove leftover "
+                                  "rules, runtime dirs and merged branches")
+    s.add_argument("--days", type=float, default=store.ARCHIVE_DAYS,
+                   help=f"how long a closed task or a handled notice stays (default {store.ARCHIVE_DAYS})")
+    s.set_defaults(f=cmd_gc)
     s = sub.add_parser("trial", help="mark closed tasks as trial runs: their results stop counting")
     s.add_argument("names", nargs="+")
     s.set_defaults(f=cmd_trial)

@@ -374,7 +374,7 @@ Then one of:
 
 | Command | What happens |
 |---|---|
-| `wb accept <task> -m "…"` | commits the work on its branch, removes the worktree and the agent's runtime directory, optionally `--merge`s |
+| `wb accept <task> -m "…"` | commits the work on its branch, removes the worktree, the agent's runtime directory and its rules, optionally `--merge`s (then deletes the merged branch) |
 | `wb feedback <task> --message <file>` / `--text "…"` | a numbered list of exact changes becomes the next round's prompt; the runner starts again. The skill allows three review rounds before Claude fixes it itself or discards it |
 | `wb next <task> --spec <file> -m "…"` | commits the approved step on the branch and gives the next step to the same agent, in the same worktree (and session, while it has room) |
 | `wb discard <task> --reason "…"` | stops it, removes the worktree, the agent's runtime directory and the branch (`--keep-branch` keeps it) |
@@ -2584,7 +2584,11 @@ custom-node packs do run their own Python).
   after accept's commit only ignored files are left) and `prune`; when git can't remove it (a
   read-only directory, an embedded repo, the repo moved or deleted) a task's own worktree is
   deleted by hand and `wb` warns: accept and discard once wedged there for good (the audit).
-  `delete_branch` (`branch -D`) unless `--keep-branch` or the repo is gone.
+  `delete_branch` (`branch -D`) unless `--keep-branch` or the repo is gone. `wb accept` records the
+  branch's tip in status `tip` and, after a `--merge`, deletes the branch (`drop_merged_branch`:
+  `branch -d`, which keeps one not merged into the checkout's HEAD): merged delegate branches
+  piled up, 8 in one repo (the 2026-11-19 audit). `bench._reference` and `cli._landed` read the
+  tip once the branch is gone; `wb gc` does the same for branches merged before (`_merged_branches`).
 - **One command per task at a time** (`cli.one_at_a_time`): accept, discard, next, feedback,
   resume, takeover and stop hold the task's `locks/<task>.cmd.lock` (`runner.lock_file`, `store.task_lock`, where no
   lane reads: an agent holding a lock with flock would wedge every command), so a
@@ -2887,7 +2891,7 @@ thread no longer):
 - The API wants `Authorization: Bearer <token>` (the `Bearer ` prefix required, compared in
   constant time); else 401 "bad or
   missing token: open the link from `wb chat url`".
-- `GET /api/state`: `{messages (the last 200, each user row with its receipt as `received`),
+- `GET /api/state`: `{messages (the last 200, each user row with its receipt as `received`; `thread` reads the files' last `THREAD_BYTES` 4 MiB, `store.read_jsonl_tail`, as `asks` does: the whole history was parsed on every poll, 56 ms at 20,000 rows, the 2026-11-19 audit),
   asks (the last 20, each with `answer` (null while open), `answered`, `by`), prefs, push (`{key:
   the VAPID public key, test: the last test push's ts}`), listener, savings (`chat.week_saved`:
   `savings.totals` over the last 7 days with its `score`, as `wb savings --json` without `period`), build, now}`. `build` (`chat.build`, a crc32 of the page's files' names, mtimes and sizes) changes
@@ -3399,8 +3403,8 @@ delivered as taken (`_stale_notes`, *Notes*).
 | `wb verify <task>` | `--test CMD` (the task's `--test`), `--files PATH…`, `--expect TEXT` (the failure the base must print to be proven), `--timeout N` (300) | At review: a regression test on the base (with the candidate's test files) and on the candidate, each in a scratch checkout under the task's lane; the verdict, each run's exit and assertion, and where both outputs are (*Verifying a fix against the base*). Refuses while the agent runs. |
 | `wb stop [<task> \| --all]` | `--repo DIR`, `--session ID` | A live task only. Marks status `stopping`, SIGTERM the runner (15 s, `wait_exit`, then SIGKILL to its session and the agent's), sweeps what the agent left (`runner.sweep`), phase `stuck`, "stopped by the reviewer", and acknowledges the task; the worktree is kept. `--all` (`stop_everything`): every open task, a `stopped` event "bail out: stopped by the user"; without `--repo`/`--session`, the bench's driver first (`bench.stop_driver`), so it starts no replay. `--session ID`, `--repo DIR` (with `--all`): as for takeover, the rest listed as `left running (other sessions'): …`. |
 | `wb resume <task>` | | Reaps a dead runner first. Phase stuck/failed (a task whose runner died is failed), no live runner: a fresh session (round n+1, `runner.RESUME` + what the step's rounds asked), not a review round; Claude's notes the last runner never delivered follow, as a `NOTE_HEAD` note. A note names the GPU's holders when it will wait for them. Acks the task and gathers lessons. |
-| `wb accept <task> -m "…"` | `--merge`, `--force` (any open phase; stops a live runner), `--spec-gap`, `--take-claude-md` (the agent's `<name>.proposed` CLAUDE.md/AGENTS.md over the file; without it they are dropped: *Claude's files*) | Reaps a dead runner first. Phase review; refuses a closed task, unless an earlier accept or discard closed it without writing its results row (status `unrecorded`): then it writes that row, once, from what the earlier run measured, and says so (`_finish_record`, #88). A live task with nothing changed on its first step is refused before its runner is stopped ("no changes to accept yet"); a live task whose commit then fails is left `stuck` ("accept failed: …", for wb accept again, resume, feedback or discard), not live with no runner. Records the step, commits (a worktree with no new changes accepts the branch's commits past the base: earlier steps, or Claude's own after a takeover; a retry after an accept died past its commit takes that commit) (`<m>` + "Delegated to <label> via OpenCode: R round(s), F automatic test-fix, V review round(s)." + `Workbench-Task:` + `OpenCode-Session:`; no AI co-author line), removes the worktree (a failure is a warning: `remove_worktree`) and the agent's runtime directory (`drop_runtime_dir`), `--merge`s (`merge --no-ff --no-edit --commit --no-squash` into `base_branch`, which the main checkout must have out, else a branch holding the base; never a detached HEAD; no changes to tracked files, no merge under way, no untracked or ignored file where the branch adds one (#189); a conflict, or a merge git left unfinished, is backed out (#190); a failure is reported and the accept stands), writes the results row, prints how far CLAUDE.md (or `.claude/CLAUDE.md`) is behind (a failure there never fails the accept) and what the task cost Claude (`claude:`, when known). Gathers lessons. |
-| `wb discard <task>` | `--reason "…"`, `--spec-gap`, `--keep-branch` | Stops the runner, records the step, removes the worktree (never fails on it: a warning), the agent's runtime directory (`drop_runtime_dir`) and (unless `--keep-branch`, or the repo is gone) the branch, writes the results row, prints what the task cost Claude (`claude:`, when known). Gathers lessons. Refuses a closed task, unless its row is unwritten (as for accept). |
+| `wb accept <task> -m "…"` | `--merge`, `--force` (any open phase; stops a live runner), `--spec-gap`, `--take-claude-md` (the agent's `<name>.proposed` CLAUDE.md/AGENTS.md over the file; without it they are dropped: *Claude's files*) | Reaps a dead runner first. Phase review; refuses a closed task, unless an earlier accept or discard closed it without writing its results row (status `unrecorded`): then it writes that row, once, from what the earlier run measured, and says so (`_finish_record`, #88). A live task with nothing changed on its first step is refused before its runner is stopped ("no changes to accept yet"); a live task whose commit then fails is left `stuck` ("accept failed: …", for wb accept again, resume, feedback or discard), not live with no runner. Records the step, commits (a worktree with no new changes accepts the branch's commits past the base: earlier steps, or Claude's own after a takeover; a retry after an accept died past its commit takes that commit) (`<m>` + "Delegated to <label> via OpenCode: R round(s), F automatic test-fix, V review round(s)." + `Workbench-Task:` + `OpenCode-Session:`; no AI co-author line), removes the worktree (a failure is a warning: `remove_worktree`) and the agent's runtime directory (`drop_runtime_dir`), records the branch's tip (status `tip`), `--merge`s (`merge --no-ff --no-edit --commit --no-squash` into `base_branch`, which the main checkout must have out, else a branch holding the base; never a detached HEAD; no changes to tracked files, no merge under way, no untracked or ignored file where the branch adds one (#189); a conflict, or a merge git left unfinished, is backed out (#190); a failure is reported and the accept stands; a merged branch is then deleted, `drop_merged_branch`), writes the results row, removes the task's rules (`_closed`, and `gc` once a day), prints how far CLAUDE.md (or `.claude/CLAUDE.md`) is behind (a failure there never fails the accept) and what the task cost Claude (`claude:`, when known). Gathers lessons. |
+| `wb discard <task>` | `--reason "…"`, `--spec-gap`, `--keep-branch` | Stops the runner, records the step, removes the worktree (never fails on it: a warning), the agent's runtime directory (`drop_runtime_dir`), its rules (`_closed`, which also runs `gc` when the last was over `GC_EVERY` a day ago, as accept does) and (unless `--keep-branch`, or the repo is gone) the branch, writes the results row, prints what the task cost Claude (`claude:`, when known). Gathers lessons. Refuses a closed task, unless its row is unwritten (as for accept). |
 
 ### Watching
 | Command | Flags | What it does |
@@ -3438,6 +3442,7 @@ delivered as taken (`_stale_notes`, *Notes*).
 | `wb backlog [NAME]` | `--json` | A batch started with `wb start --backlog NAME` (the morning summary of a night's run): `backlog NAME: N task(s) · 2 accepted · 1 review`, then a line per task (phase, rounds, minutes: the results row's, or since start while open; the branch when accepted; `savings.line` of its row once closed), then `savings.summary` over the batch's non-trial rows (`the batch: …`). An unknown name: exit 1. Without a name, each batch with its task count and how many are open. `--json`: `{backlog, tasks: [{task, phase, rounds, minutes, branch, saving}], totals}`. |
 | `wb savings` | `--week` (default) \| `--month` \| `--all`, `--json`, `--share` (a summary to paste: the machine, model sizes, no names; *Sharing it*), `--card FILE.svg`, `--price X` | What the delegated tasks saved Claude over the period against the estimate of writing them (`savings.totals`, `summary`; trials left out): tasks, Claude's tokens, the estimate, the saving and its percentage, the GPU energy and, with a price, its cost. `--price` (per kWh, positive, else exit 1) writes savings.json first. `--json`: `{period, tasks, of, claude, self_est, saved, wh, cost, remote, score}`. `--card FILE.svg`: the badge as an image (*The badge*). |
 | `wb stats` / `wb tune` / `wb trial <task…>` | | Results by model and size (judged rows: it says how many spec-gap discards and trials it left out), with a `claude` column (the average input-equivalent tokens a task cost Claude) once a row records one; the tuned settings; mark closed tasks as trials: their results rows, and their open lessons are dropped; an open task is refused (it has no row yet, so it was marked as nothing while its lessons went). |
+| `wb gc` | `--days N` (default `ARCHIVE_DAYS` 30) | Tidies what history leaves behind (`cli.gc`, the 2026-11-19 audit, finding 18): archives tasks closed and untouched for N days (`store.archive`), moves notices older than that which are handled (acknowledged, their task closed or gone) to `notify.old.jsonl` under notify's lock (`_rotate_notices`), removes the rules of closed tasks and of vanished ones (a rules directory with no task waits `RULES_GRACE` an hour: a start in progress), stale runtime directories (`context.drop_stale_runtime_dirs`) and the delegate branches of tasks accepted with `--merge` before accept deleted them itself (`_merged_branches`: tip recorded first, `branch -d`). Prints the counts; writes `gc.json`. `wb accept` and `wb discard` run it without the branches at most once a day (`GC_EVERY`). |
 
 ### Other
 | Command | Flags | What it does |
@@ -3455,6 +3460,9 @@ delivered as taken (`_stale_notes`, *Notes*).
 ```
 $WB_HOME (~/.local/state/workbench)
   notify.jsonl                   notices that need Claude, all tasks (the runner writes them)
+  notify.old.jsonl               notices handled and older than ARCHIVE_DAYS, moved by gc (_rotate_notices)
+  gc.json                        the last gc: {at, archived, notices, rules, runtime, branches}
+  archive/<task>/                a task closed and untouched for ARCHIVE_DAYS (30), moved from tasks/ by gc
   coding.json                    Claude coding, the user's choice: {mode: only|ask|decide, ts}; none: decide
   progress.json                  progress checks, the user's opt-in: {on, after?, ts}; none: off
   results.jsonl                  one row per closed task: what the router, slices, tuning and skill records learn from
@@ -3481,7 +3489,8 @@ $WB_HOME (~/.local/state/workbench)
   rules/<task>/                  outside the lane: opencode.json (the config layer), HANDBOOK.md,
                                  CLAUDE.md (a copy of the user's), bin/git (the shim),
                                  grants.json (what Claude allowed: {"allow", "paths"}),
-                                 gitdir.json (the worktree's real git dir and its .git's text: {"gitdir", "dotgit"})
+                                 gitdir.json (the worktree's real git dir and its .git's text: {"gitdir", "dotgit"});
+                                 removed when the task closes (cli._closed), and by gc for a closed or vanished task
   locks/<task>.runner.lock       held by the task's runner for its life (its pid inside): one runner a task
   locks/<task>.cmd.lock          one wb command on the task at a time
   locks/<task>.<file>.lock       one writer of the task's status, events, steer and grants files
@@ -3518,8 +3527,9 @@ $WB_HOME (~/.local/state/workbench)
 ~/.config/opencode/opencode.json + .jsonc (layered, under $XDG_CONFIG_HOME; then $OPENCODE_CONFIG; $WB_OPENCODE_CONFIG) the models
 /tmp/wb-run-<uid>-<hash>/        the agent's XDG_RUNTIME_DIR (lane on; context.runtime_dir), 0700: kept while
                                  the task is open (stuck or in review too), removed by wb accept and wb discard
-                                 (drop_runtime_dir); taken by another user, a mkdtemp wb-run-* is used instead,
-                                 which nothing removes
+                                 (drop_runtime_dir); taken by another user, a mkdtemp wb-run-* is used instead;
+                                 gc removes any wb-run-* of this user's untouched for STALE_RUNTIME_DAYS (7)
+                                 that isn't an open task's (drop_stale_runtime_dirs)
 ```
 
 **Store primitives** (`workbench/store.py`). `home()` is `$WB_HOME`, else
@@ -3540,7 +3550,12 @@ prompts, and the runner runs under `-X utf8`. `results(trials=False)` leaves out
 are re-read on every access; `set_status(**kw)` is a read-modify-write under `locks/<task>.status.lock` that adds
 `updated_at`; `set_status_if(check, **kw)` writes only while `check(status)` holds under that
 lock (a compare-and-set: `cli.reap`); never write status.json directly. `all_tasks()` lists task directories with a
-task.json, oldest first.
+task.json, oldest first, in `tasks/` only: `archive(days)` moves the tasks closed and untouched for
+`ARCHIVE_DAYS` (30) to `archive/` and drops their locks, since every `wb wait` wake, `wb events`
+minute and `wb start` read every task's two files (101 tasks in three days here, the 2026-11-19
+audit); `task_dir(name)` falls back to `archive/<name>`, so `Task(name)` (wb status, report,
+bench add) still finds one and its name stays taken. `read_jsonl_tail(path, max_bytes)`: the
+whole rows in the file's last bytes (a cut first line skipped).
 
 **task.json** (written by `wb start`; `wb next --test` rewrites `test_cmd`): `name`, `repo`,
 `cwd` (the directory `wb start` ran in), `session` (when set: `CLAUDE_CODE_SESSION_ID`, the
@@ -3586,6 +3601,7 @@ check-ins off), not `wb start`'s.
 | `progress_checks`, `progress_mark`, `progress_open`, `interventions` | progress checks raised; the worktree's mark at the last; a check not yet answered; the steers that answered one, `[{kind, ts, round, step}]` |
 | `skills`, `skills_ever`, `skills_rev`, `skills_told` | the handed set; every skill held; the library rev of each; what this session was told |
 | `asking`, `agent_pid` | the oldest open question's id; the agent's pid while a round runs (cleared by `_end_agent`, or `reap`) |
+| `tip` | the branch's tip at `wb accept` (or `wb gc`, for a branch merged before): `bench._reference` and `_landed` read it once the merged branch is deleted |
 | `asks` | the runner's count of the task's ask files, `{id: "q" \| "p" \| "x"}` (question, permission request, refused): the budgets |
 | `spec_gaps` | `[{round, text}]` from `--spec-gap` |
 | `updated_at` | every write |
@@ -3934,7 +3950,8 @@ push: every change is a pull request that merges once `check` is green and it is
   and the mod's replay test.
 - **`cli.PROTOCOL`'s acceptance line or fold, or `wb next`'s step opening** → `bench.py` reads
   them back out of old prompts (`TEST_LINE`, `FOLD`, `STEP_HEAD`); the trailers `wb next` and
-  `wb accept` write → `bench._reference`.
+  `wb accept` write → `bench._reference`, which finds them from status `tip` once the merged
+  branch is gone.
 - **The mod's wake opening** (`` [workbench] Task `<name>` ``, register.tsx) **or Claude Code's
   transcript rows** (`type`, `message.id`, `message.usage`, a Bash `tool_use`'s `command`,
   `timestamp`, `subagents/`) → `spend.py` (`WAKE`, `calls`) and the ClaudeSpend tests' rows.

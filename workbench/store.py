@@ -11,6 +11,9 @@ Layout of ``$WB_HOME`` (default ``~/.local/state/workbench``)::
                             opencode.json (the config layer), HANDBOOK.md, CLAUDE.md, bin/git,
                             grants.json
     locks/<name>.<kind>.lock  the task's locks (task_lock): runner, cmd, status, events, steer, grants
+    archive/<name>/         a task closed for ARCHIVE_DAYS, moved out of tasks/ (archive); Task
+                            still finds it there, all_tasks no longer reads it
+    notify.old.jsonl        notices handled and older than ARCHIVE_DAYS (cli.gc)
     tasks/<name>/
         task.json           what the task is (static after start, but for `wb next --test`)
         status.json         what it is doing now (rewritten by the runner and wb)
@@ -66,8 +69,16 @@ def tasks_dir() -> Path:
     return home() / "tasks"
 
 
+def archive_dir() -> Path:
+    return home() / "archive"
+
+
 def task_dir(name: str) -> Path:
-    return tasks_dir() / name
+    """tasks/<name>, or archive/<name> for a task archived since it closed (archive)."""
+    d = tasks_dir() / name
+    if not d.exists() and (old := archive_dir() / name).exists():
+        return old
+    return d
 
 
 def now() -> float:
@@ -117,7 +128,7 @@ def task_lock(name: str, kind: str) -> Path:
 def _lock_of(path: Path) -> Path:
     # a task's own JSONL (events, steer) takes its lock outside the lane; the shared files
     # (notify, results, lessons, chat) aren't in any lane and keep theirs beside them
-    if path.parent.parent == tasks_dir():
+    if path.parent.parent in (tasks_dir(), archive_dir()):
         return task_lock(path.parent.name, path.stem)
     return path.with_name(path.name + ".lock")
 
@@ -178,13 +189,33 @@ def read_jsonl(path: Path, offset: int = 0):
     except FileNotFoundError:
         return [], offset
     end = data.rfind(b"\n") + 1  # a line still being written waits for the next read
+    return _rows(data[:end]), offset + end
+
+
+def read_jsonl_tail(path: Path, max_bytes: int) -> list:
+    """The whole rows in the file's last ``max_bytes``: a reader that wants the latest rows
+    parsed the whole history every time (the 2026-11-19 audit: the chat's thread took 56 ms at
+    20,000 messages)."""
+    try:
+        with open(path, "rb") as fh:
+            start = max(0, fh.seek(0, os.SEEK_END) - max_bytes)
+            fh.seek(max(0, start - 1))
+            data = fh.read()
+    except FileNotFoundError:
+        return []
+    if start:  # from the first line that starts inside the window
+        data = data[data.find(b"\n") + 1:] if b"\n" in data else b""
+    return _rows(data[:data.rfind(b"\n") + 1])
+
+
+def _rows(data: bytes) -> list:
     rows = []
-    for line in data[:end].splitlines():
+    for line in data.splitlines():
         try:
             rows.append(json.loads(line))
         except ValueError:  # a torn line; one that isn't UTF-8 too, which crashed every reader (the audit)
             pass
-    return rows, offset + end
+    return rows
 
 
 class Task:
@@ -244,8 +275,33 @@ class Task:
 
 
 def all_tasks():
+    """Every task in tasks/: open, and closed less than ARCHIVE_DAYS ago (archive)."""
     d = tasks_dir()
     if not d.exists():
         return []
     return sorted((Task(p.name) for p in d.iterdir() if (p / "task.json").exists()),
                   key=lambda t: t.spec.get("created_at", 0))
+
+
+ARCHIVE_DAYS = 30
+
+
+def archive(days: float = ARCHIVE_DAYS) -> list[str]:
+    """Move the tasks closed and untouched for ``days`` to archive/, with their locks gone: every
+    wb wait wake, wb events minute and wb start read each task's two files, which after 101 tasks
+    in three days was most of what they did (the 2026-11-19 audit). Task(name) still finds them
+    (task_dir), so wb report, bench add and the results keep working; names stay taken."""
+    cutoff, moved = time.time() - days * 86400, []
+    for t in all_tasks():
+        st = t.status
+        if st.get("phase") not in CLOSED or st.get("unrecorded") or (st.get("updated_at") or 0) > cutoff:
+            continue
+        archive_dir().mkdir(parents=True, exist_ok=True)
+        try:
+            os.rename(t.dir, archive_dir() / t.name)
+        except OSError:
+            continue
+        for lock in (home() / "locks").glob(f"{t.name}.*.lock"):
+            lock.unlink(missing_ok=True)
+        moved.append(t.name)
+    return moved

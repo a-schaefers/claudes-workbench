@@ -340,6 +340,12 @@ def delete_branch(repo: Path, task: str) -> None:
     git(repo, "branch", "-D", branch_name(task), check=False)
 
 
+def drop_merged_branch(repo: Path, branch: str) -> bool:
+    """`git branch -d`: only a branch merged into the checkout's HEAD (or its upstream) goes.
+    Merged delegate branches piled up, 8 in one repo (the 2026-11-19 audit)."""
+    return _run(repo, ("branch", "-d", branch), check=False).returncode == 0
+
+
 def current_branch(repo: Path) -> str:
     """The checked-out branch, "" for a detached HEAD (any git: `branch --show-current` is 2.22+)."""
     return git(repo, "symbolic-ref", "--short", "-q", "HEAD", check=False).strip()

@@ -17,6 +17,7 @@ import shutil
 import stat
 import sys
 import tempfile
+import time
 from pathlib import Path
 
 from . import chat, gitops, hardware, images, models, skills, store
@@ -479,10 +480,13 @@ def ask_dir(task: store.Task) -> Path:
     return d
 
 
+def _runtime_base() -> Path:
+    return Path("/tmp") if os.path.isdir("/tmp") else Path(tempfile.gettempdir())
+
+
 def _runtime_path(task: store.Task) -> Path:
     tag = hashlib.sha256(f"{store.home()}\0{task.name}".encode()).hexdigest()[:12]
-    base = Path("/tmp") if os.path.isdir("/tmp") else Path(tempfile.gettempdir())
-    return base / f"wb-run-{os.getuid()}-{tag}"
+    return _runtime_base() / f"wb-run-{os.getuid()}-{tag}"
 
 
 def runtime_dir(task: store.Task) -> Path:
@@ -509,6 +513,27 @@ def drop_runtime_dir(task: store.Task) -> None:
         return
     if stat.S_ISDIR(st.st_mode) and st.st_uid == os.getuid():
         shutil.rmtree(d, ignore_errors=True)
+
+
+STALE_RUNTIME_DAYS = 7
+
+
+def drop_stale_runtime_dirs(keep: set[Path]) -> int:
+    """Remove this user's runtime directories (``wb-run-*``) untouched for STALE_RUNTIME_DAYS and
+    not in ``keep`` (the open tasks'): a task closed while its runner was killed, a test's home,
+    a fallback mkdtemp left them behind, 13 of them here (the 2026-11-19 audit). Another state
+    directory's live task keeps its own fresh. Returns how many went."""
+    cutoff, n = time.time() - STALE_RUNTIME_DAYS * 86400, 0
+    for d in _runtime_base().glob("wb-run-*"):
+        try:
+            st = os.lstat(d)
+        except OSError:
+            continue
+        if d in keep or not stat.S_ISDIR(st.st_mode) or st.st_uid != os.getuid() or st.st_mtime > cutoff:
+            continue
+        shutil.rmtree(d, ignore_errors=True)
+        n += 1
+    return n
 
 
 # Where credentials and the user's own records live, under the home directory: the agent's
@@ -803,7 +828,8 @@ def grants(task: store.Task) -> dict:
     """What Claude allowed this task beyond the everyday rules: {"allow": [patterns], "paths":
     [dirs]}. Kept with the rules, out of the agent's reach: an agent that edited its own grants
     would widen its next round."""
-    return store.read_json(rules_dir(task) / "grants.json", {}) or {}
+    # read without making the directory: a closed task's rules are gone (cli.gc)
+    return store.read_json(store.home() / "rules" / task.name / "grants.json", {}) or {}
 
 
 def grant(task: store.Task, key: str, new: list[str]) -> list[str]:

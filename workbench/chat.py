@@ -218,10 +218,15 @@ def ack(msg_id: str, by: str, how: str = "now") -> None:
                        {"id": msg_id, "ts": store.now(), "by": by, "how": how})
 
 
+THREAD_BYTES = 4 << 20  # the last 200 messages fit with room to spare (a reply is a few KB)
+
+
 def thread(limit: int = 200) -> list[dict]:
     """The latest messages, each of the user's with its receipt (or None: not read yet)."""
-    rows = store.read_jsonl(chat_dir() / "messages.jsonl")[0][-limit:]
-    receipts = {r["id"]: r for r in store.read_jsonl(chat_dir() / "receipts.jsonl")[0]}
+    # bounded reads: the whole history was parsed on every poll (the 2026-11-19 audit: 56 ms at
+    # 20,000 rows); a receipt comes after its message, so the newest ones cover the thread
+    rows = store.read_jsonl_tail(chat_dir() / "messages.jsonl", THREAD_BYTES)[-limit:]
+    receipts = {r["id"]: r for r in store.read_jsonl_tail(chat_dir() / "receipts.jsonl", THREAD_BYTES)}
     return [{**r, "received": receipts.get(r["id"])} if r["from"] == "user" else r for r in rows]
 
 
@@ -388,7 +393,7 @@ def asks(limit: int = 20) -> list[dict]:
     """The latest asks, each with its answer (None while open), `answered`, `by`, and the answer's
     `note` and `answers` when it has them."""
     seen: dict[str, dict] = {}
-    for r in store.read_jsonl(chat_dir() / "asks.jsonl")[0]:
+    for r in store.read_jsonl_tail(chat_dir() / "asks.jsonl", THREAD_BYTES):  # an answer follows its ask
         a = seen.get(r.get("id"))
         if "answer" in r:
             if a and a["answer"] is None and r["answer"] in ANSWERS:
