@@ -1763,7 +1763,7 @@ model id; a model's entry is merged over its provider's (`{**provider, **model}`
 - `remote: <root>`: on a provider, `wb remote` made it (for the Ollama at that root), so `wb
   remote --remove` may delete it (#197).
 - `keep_loaded` (top level, a list): model ids or Ollama names wb never unloads or stops to make
-  room (*Residency*).
+  room (*Residency*), nor measures (`wb optimize`: each probe unloads its model, #254).
 
 **Status** (`status` → {available, resident, why}). First what the config alone rules out, so the
 fake models meet it too: an entry with `tool_call: false` ("OpenCode's config says it can't call
@@ -2193,7 +2193,9 @@ people (the user, 2026-11-18). Everything else learns passively from real tasks 
 window measured, `wb start` on it prints the advice as a `note:` (ask the user first: applying
 it adds to their OpenCode config).
 
-What it measures, per Ollama model that can run (`candidates`): the largest window that keeps the
+What it measures, per Ollama model that can run (`candidates`; not one in models.json's
+`keep_loaded`, by id, name or an alias of the same model: a background run unloaded the user's
+autocomplete model to measure it, #254, the audit of 1.2): the largest window that keeps the
 model and its context all in VRAM, by Ollama's own placement after a load at each window tried
 (`probe`: `/api/generate` with `options.num_ctx`, then `/api/ps` `size_vram` against `size`, then
 unloaded). `fit` loads the served window first (`limit.context`); when it spills it searches down

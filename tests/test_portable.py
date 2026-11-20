@@ -1035,6 +1035,19 @@ class Optimize(unittest.TestCase):
             self.assertIn(m.id, optimize.state()["models"])
             self.assertEqual(models.holders(pool=models.pool(m)), {})          # and let go
 
+    def test_a_model_the_user_keeps_loaded_is_never_measured_or_unloaded(self):
+        # #254 (the audit of 1.2): each probe unloads and reloads its model, so a background
+        # measurement dropped the user's autocomplete model; keep_loaded guarded only eviction
+        from workbench import optimize
+        for keep in (["ollama/m"], ["m"], ["m:latest"]):                    # by id, name or tag
+            posts = self.ollama(32768, extra={"keep_loaded": keep})
+            with mock.patch.object(optimize.hardware, "gpus", lambda windows=True: [{"name": "Card", "vram": 1}]), \
+                    mock.patch.object(sys, "argv", ["optimize", "--all"]):
+                self.assertEqual(optimize.candidates(), [], keep)
+                with redirect_stdout(io.StringIO()):
+                    optimize.main()
+            self.assertEqual([b for path, b in posts if path == "/api/generate"], [], keep)  # no unload
+
     def test_the_first_run_on_a_fresh_profile_starts(self):
         # #198 (the 2026-11-19 audit): optimize.log was opened before the state directory existed,
         # and wb setup swallowed the error, so the first measurement never ran
