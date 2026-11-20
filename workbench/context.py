@@ -997,10 +997,17 @@ def instruction_files(task: store.Task) -> tuple[list[Path], list[str]]:
             if (base / rel).is_file():
                 load.append(base / rel)
                 break
+    if sub := task.spec.get("subdir"):  # the package's own, as Claude Code loads it there (#375)
+        for rel in ROOT_FILES:
+            for base in (wt / sub, repo / sub):
+                if (base / rel).is_file():
+                    load.append(base / rel)
+                    break
     load += [wt / p for p in _tracked(wt, ".claude/rules/*.md")]
     # OpenCode already loads the worktree's AGENTS.md: skip a CLAUDE.md with the same text (one
     # only in the user's checkout isn't loaded, so it can't stand in for CLAUDE.md)
-    agents = {_digest(wt / "AGENTS.md")} if (wt / "AGENTS.md").is_file() else set()
+    # (and, started in a package, the package's too: checked on OpenCode 2.3, #375)
+    agents = {_digest(a) for a in {wt / "AGENTS.md", wt / (sub or "") / "AGENTS.md"} if a.is_file()}
     seen, files = set(agents), []
     for p in load:
         d = _digest(p)
@@ -1009,7 +1016,7 @@ def instruction_files(task: store.Task) -> tuple[list[Path], list[str]]:
             files.append(p)
     nested = [p for p in _tracked(wt, "*CLAUDE.md", "*AGENTS.md")
               if "/" in p and Path(p).name in ("CLAUDE.md", "AGENTS.md")
-              and not p.startswith(".claude/")]
+              and not p.startswith(".claude/") and Path(p).parent.as_posix() != sub]
     return files, nested
 
 

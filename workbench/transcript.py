@@ -92,7 +92,7 @@ def find_session(task: store.Task) -> str | None:
         return sid
     try:
         r = subprocess.run(opencode_bin() + ["session", "list", "--standalone"], capture_output=True,
-                           text=True, cwd=task.worktree, env={**os.environ, "PWD": str(task.worktree)},
+                           text=True, cwd=task.workdir, env={**os.environ, "PWD": str(task.workdir)},
                            timeout=30)
     except (OSError, subprocess.TimeoutExpired):
         return None

@@ -396,13 +396,25 @@ def _local_claude_md(repo: Path) -> bool:
 PROJECT_MEMORY = ("CLAUDE.md", ".claude/CLAUDE.md")
 
 
-def _claude_md_at(repo: Path, ref: str) -> str | None:
-    """The first of PROJECT_MEMORY committed at ``ref``, or None."""
-    return next((p for p in PROJECT_MEMORY if _has_file(repo, ref, p)), None)
+def _claude_md_at(repo: Path, ref: str, under: str = "") -> str | None:
+    """The first of PROJECT_MEMORY committed at ``ref`` (in directory ``under``), or None."""
+    return next((p for p in PROJECT_MEMORY if _has_file(repo, ref, f"{under}/{p}".lstrip("/"))), None)
 
 
-def _need_claude_md(repo: Path, base: str, a) -> None:
-    if a.no_claude_md:
+def _package(repo: Path, given: Path, base: str) -> str | None:
+    """``given`` below the repo's top, when it has a CLAUDE.md of its own at ``base``: a monorepo's
+    package, where the agent, the setup and the tests then run (task.json `subdir`). From
+    packages/app, wb start refused the repo for a CLAUDE.md at its root, and the agent worked
+    from the root (#375, the audit of 1.6). A plain subdirectory still means the whole repo."""
+    try:
+        sub = given.relative_to(repo).as_posix()
+    except ValueError:
+        return None
+    return sub if sub != "." and _claude_md_at(repo, base, sub) else None
+
+
+def _need_claude_md(repo: Path, base: str, a, sub: str | None = None) -> None:
+    if a.no_claude_md or sub:  # a package's own CLAUDE.md counts
         return
     if not _claude_md_at(repo, base) and _local_claude_md(repo):
         print("note: CLAUDE.md is gitignored: the agent gets your checkout's copy")
@@ -620,7 +632,10 @@ def cmd_start(a):
     if not _identity(repo):
         die("git has no user.name/user.email here: the user's identity signs the commits "
             "(git config --global user.name/user.email)")
-    _need_claude_md(repo, a.base, a)
+    sub = _package(repo, Path(a.repo).resolve(), a.base)
+    _need_claude_md(repo, a.base, a, sub)
+    if sub:
+        print(f"package: {sub} (its own CLAUDE.md): the agent, the setup and the tests run there")
     if not a.no_sign:  # said now, not after the whole task at wb accept (#374)
         _say(gitops.sign_problem(repo, a.base))
     setup = _worktree_setup(repo, a)
@@ -680,6 +695,7 @@ def cmd_start(a):
         **({"no_base_check": True} if a.no_base_check else {}),
         **({"unload_for_tests": True} if getattr(a, "unload_for_tests", False) else {}),
         **({"sign": False} if a.no_sign else {}),
+        **({"subdir": sub} if sub else {}),
         "auto_fix": a.auto_fix, "ask_budget": budget, "ask_timeout": a.ask_timeout,
         # periodic check-ins are opt-in: each wakes Claude, re-reading its whole context, and they
         # were 500K of one task's 1.2M (2026-11-17); the pane shows progress, and the warnings

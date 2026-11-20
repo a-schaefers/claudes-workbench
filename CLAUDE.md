@@ -6,7 +6,7 @@ Claude Code mod wakes Claude when a task needs it. Everything talks through plai
 
 The short name, `workbench`, stays on everything inside: the package, the plugin
 (`workbench@workbench`), the state and config directories, and the clone path `~/repos/workbench`
-ARCHITECTURE.md's *Installing* suggests (nothing depends on it).
+(ARCHITECTURE.md's *Installing*; nothing needs it).
 
 ## Keeping the docs true
 README.md is for people and stays simple: the pitch, a quickstart, then a pointer. ARCHITECTURE.md
@@ -33,7 +33,7 @@ the drift this rule exists to stop.
 
 ## Commands
 ```sh
-python3 -m unittest                                   # the whole suite, about 4 minutes
+python3 -m unittest                                   # the whole suite, about 8 minutes
 python3 -m unittest tests.test_workbench.Context      # one class (or .Context.test_…); -k handover by name
 claude plugin validate mod && claude plugin test mod  # the mod: the $ rule, then mod/hooks/register.test.tsx
 PLAYWRIGHT=…/node_modules/playwright node tests/e2e_chat.mjs   # the web chat in WebKit and Chromium
@@ -109,7 +109,7 @@ dependencies. No packaging: it runs from the clone.
 - `models.py`: discovers local models from OpenCode's config, their status, residency
   (`make_resident`, `free_gpu`), GPU sharing (`GpuLease`, `can_share`), adding and retiring them.
 - `hardware.py`: OS, GPU/VRAM, RAM, CPU, disk, read fresh for `wb scout` and the GPU budget
-  (Linux sysfs and /proc, WSL2, macOS). Unknowns stay unknown; nothing is hard-coded.
+  (Linux sysfs and /proc, WSL2, macOS). Unknowns stay unknown, nothing hard-coded.
 - `skills.py`: Claude's skill library for the agents (its own git repo): checks, add/patch/
   retire/restore, import, suggestions for a spec, the outcome record. `scan.py`: the security scan
   every skill passes (ported from Hermes Agent's skills guard: keep its MIT notice).
@@ -137,7 +137,7 @@ dependencies. No packaging: it runs from the clone.
   `test_portable.py`, `test_sizing.py`, `test_docs.py` (the docs cover the code),
   `test_workflows.py` (the merge gate),
   `fake_opencode.py`, `capture_llm.py`, `e2e_chat.mjs`.
-- `.github/`: CI (`workflows/check.yml`, the required check, on each push and pull request,
+- `.github/`: CI (`workflows/check.yml`, the required check, on each push and PR,
   Python 3.11, OpenCode `OPENCODE_VERSION`; `chat.yml`, the browser test; `nightly.yml`: the
   newest Claude Code, macOS, WSL2; `opencode.yml`: the newest OpenCode), `owner-merge.yml` (approves
   the owner's pull requests only), `rulesets/main.json`, dependabot for the actions' pins.
@@ -150,7 +150,7 @@ Runs on Linux, WSL2 and macOS; the launchers refuse native Windows and Python be
 
 ## How a task runs
 1. `wb start` refuses a repo without a committed CLAUDE.md or `.claude/CLAUDE.md`
-   (`--no-claude-md`), asks the router for a model (unless `--model`), refuses (exit 4) when the
+   (`--no-claude-md`; or a package's: `subdir`), asks the router for a model (unless `--model`), refuses (exit 4) when the
    GPU's holders leave its model no room (`--queue` waits behind them), makes branch
    `delegate/<task>` in a fresh worktree, writes round 1's prompt (the spec plus `PROTOCOL`),
    spawns the runner and returns at once. The runner sets the worktree up (`--setup`, `--copy`,

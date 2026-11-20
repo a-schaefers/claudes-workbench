@@ -307,6 +307,12 @@ class Task:
         # deeper, under tree/, for a sibling more than one level up (task.json `worktree`, #261)
         return self.dir / self.spec.get("worktree", "worktree")
 
+    @property
+    def workdir(self) -> Path:
+        """Where the agent, the setup and the tests run: the package wb start was given in a
+        monorepo (task.json `subdir`, #375), else the worktree's top."""
+        return self.worktree / self.spec.get("subdir", "")
+
     def round_dir(self, n: int) -> Path:
         return self.dir / "rounds" / str(n)
 

@@ -7090,6 +7090,44 @@ class Projects(Base):
                               capture_output=True, text=True, check=True).stdout
         self.assertIn("gpgsig", body)
 
+    def test_a_monorepo_package_with_its_own_claude_md_is_where_the_agent_and_tests_run(self):
+        # #375 (the audit of 1.6, reproduced): from packages/app, whose CLAUDE.md Claude Code reads,
+        # wb start refused the repo for a CLAUDE.md at its root, and the agent worked from the root
+        g = lambda *a: subprocess.run(["git", "-C", str(self.repo), *a], check=True)  # noqa
+        app, lib = self.repo / "packages" / "app", self.repo / "packages" / "lib"
+        for d in (app, lib):
+            d.mkdir(parents=True)
+        (app / "CLAUDE.md").write_text("# app\nThe app package.\n")
+        (app / "app.marker").write_text("")
+        (lib / "lib.txt").write_text("")
+        g("rm", "-q", "CLAUDE.md")
+        g("add", "-A")
+        g("commit", "-qm", "two packages, no root CLAUDE.md")
+        runs = Path(self.tmp.name) / "runs.jsonl"
+        os.environ["FAKE_RUNS"] = str(runs)
+        os.environ["FAKE_SCENARIO"] = "ok"
+        out = run_wb("start", "t-pkg", "--spec", str(self.spec), "--repo", str(app), "--model", "mimo",
+                     "--test", "test -f app.marker && test -f answer.txt")
+        self.assertIn("package: packages/app", out)
+        st = wait_phase("t-pkg", {"review"})
+        task = store.Task("t-pkg")
+        self.assertEqual(task.spec["subdir"], "packages/app")
+        first = json.loads(runs.read_text().splitlines()[0])
+        self.assertEqual((first["cwd"], first["pwd"]), (str(task.workdir), str(task.workdir)))
+        self.assertTrue(st["tests"]["ok"])                     # the tests ran in the package
+        from workbench import context
+        files, nested = context.instruction_files(task)
+        self.assertIn(task.worktree / "packages" / "app" / "CLAUDE.md", files)
+        self.assertNotIn("packages/app/CLAUDE.md", nested)
+        (task.workdir / "AGENTS.md").write_text((app / "CLAUDE.md").read_text())  # OpenCode loads it
+        self.assertNotIn(task.workdir / "CLAUDE.md", context.instruction_files(task)[0])
+        self.assertIn("packages/app/answer.txt", run_wb("diff", "t-pkg"))  # the diff: the whole repo's
+        # a plain subdirectory still means the whole repo
+        g("checkout", "-q", "HEAD~1", "--", "CLAUDE.md")
+        g("commit", "-qm", "root CLAUDE.md again")
+        run_wb("start", "t-lib", "--spec", str(self.spec), "--repo", str(lib), "--model", "mimo")
+        self.assertNotIn("subdir", store.Task("t-lib").spec)
+
     def test_instructions_in_dot_claude_count_and_hints_quote_their_paths(self):
         # the audit: a repo with only .claude/CLAUDE.md (Claude Code reads it, and so does the
         # agent) was refused as having none; a path with a space broke the printed merge command

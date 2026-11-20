@@ -224,7 +224,7 @@ def agent_env(task: store.Task, run: str = "") -> dict:
     keep = {k: v for k, v in os.environ.items() if k in through or k in ENV_KEEP
             or not (SECRET_ENV.search(k) or USERINFO.search(v))}
     layer = write_config_layer(task)
-    env = {**keep, "PWD": str(task.worktree),  # opencode finds the project from $PWD
+    env = {**keep, "PWD": str(task.workdir),  # opencode finds the project from $PWD
            "OPENCODE_CONFIG": str(layer), **rules_env(json.loads(layer.read_text())),
            "WB_TASK": task.name, "WB_HOME": str(store.home()), **CLEAN_ENV,
            **({"WB_RUN": run} if run else {})}
@@ -541,7 +541,7 @@ def run_round(task: store.Task, n: int, keep: bool = False) -> dict:
                     context.readable(task),       # and credentials out of its reach
                     context.unix_paths(task))
     log = open(task.dir / "runner.log", "a")
-    proc = subprocess.Popen(cmd, cwd=task.worktree, env=env, stdin=subprocess.DEVNULL,
+    proc = subprocess.Popen(cmd, cwd=task.workdir, env=env, stdin=subprocess.DEVNULL,
                             stdout=subprocess.PIPE, stderr=log, text=True,
                             start_new_session=True)  # its own group, so a stop takes MCP too
     CURRENT["proc"] = proc
@@ -845,7 +845,7 @@ def run_in_lane(task: store.Task, cmd: str, limit: int) -> tuple[int | str, str]
     argv = lane.wrap(context.writable(task), [test_shell(), "-c", cmd], context.readable(task),
                      context.unix_paths(task))
     run = uuid.uuid4().hex  # its own mark: sweep ends what it left, and nothing else (#324)
-    proc = subprocess.Popen(argv, cwd=task.worktree, stdout=subprocess.PIPE,
+    proc = subprocess.Popen(argv, cwd=task.workdir, stdout=subprocess.PIPE,
                             stderr=subprocess.STDOUT, env=agent_env(task, run),
                             start_new_session=True)  # its own group: a timeout ends all of it
     prev = CURRENT.get("proc")
@@ -1226,7 +1226,7 @@ def summary_text(task: store.Task, n: int, rnd: dict, tests) -> str:
         # an OpenCode that stopped loading the server would leave the agent no way to ask, and
         # nothing said so (the 2026-11-19 audit)
         lines.append("NOTE: the agent's OpenCode never listed workbench_ask_reviewer, so it can't "
-                     f"ask you anything; PWD={task.worktree} OPENCODE_CONFIG="
+                     f"ask you anything; PWD={task.workdir} OPENCODE_CONFIG="
                      f"{context.rules_dir(task) / 'opencode.json'} opencode mcp list --print-logs says why")
     if tests is not None:
         lines.append(f"tests: {'PASS' if tests['ok'] else 'FAIL'} (`{spec['test_cmd']}`, "
