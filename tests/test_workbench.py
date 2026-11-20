@@ -1473,6 +1473,31 @@ class WorktreeSetup(Base):
         self.assertIn("inside the repo", self.refused("t-c3", "--copy", "../x"))
         self.assertIn("no local.cfg", self.refused("t-c4", "--copy", "local.cfg"))
 
+    def test_copy_refuses_a_path_tracked_at_the_base_or_inside_an_ignored_directory(self):
+        # #244 (the audit of 1.2): the checkout ignores generated/, but the tag given as --base
+        # tracks generated/config; the developer's local file went over it into the commit
+        g = lambda *a: subprocess.run(["git", "-C", str(self.repo), *a], check=True,  # noqa
+                                      capture_output=True)
+        (self.repo / "generated").mkdir()
+        (self.repo / "generated" / "config").write_text("TRACKED\n")
+        g("add", "generated/config")
+        g("commit", "-qm", "generated")
+        g("tag", "v0")
+        g("rm", "-q", "--cached", "generated/config")
+        self.ignore("generated/", "vendor/")
+        (self.repo / "generated" / "config").write_text("LOCAL\n")
+        self.assertIn("generated/config under it is tracked",
+                      self.refused("t-c5", "--copy", "generated", "--base", "v0"))
+        (self.repo / "vendor").mkdir()                              # both tracked and ignored files
+        (self.repo / "vendor" / "keep.txt").write_text("kept\n")
+        (self.repo / "vendor" / "lib.txt").write_text("local\n")
+        g("add", "-f", "vendor/keep.txt")
+        g("commit", "-qm", "keep")
+        self.assertIn("--copy vendor:", self.refused("t-c6", "--copy", "vendor"))  # check-ignore: not ignored
+        self.start("t-c7", "ok", "--copy", "generated")             # untracked at HEAD: fine
+        wait_phase("t-c7", {"review"})
+        self.assertEqual((store.Task("t-c7").worktree / "generated" / "config").read_text(), "LOCAL\n")
+
     def test_a_sibling_directory_is_readable_at_the_same_relative_path(self):
         lib = self.repo.parent / "lib"
         lib.mkdir()
