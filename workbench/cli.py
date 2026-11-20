@@ -587,6 +587,8 @@ def cmd_start(a):
             print(f"note: the worktree has only committed files, not the checkout's ignored "
                   f"{', '.join(lack[:4])}: --setup '<install command>' sets a task up (--copy "
                   "<path> copies one in); commands.json \"repos\" for every task")
+    if context.lane_on() and (gap := context.home_gap()):
+        print(f"note: {gap}")
     if context.on_windows(str(repo), context.windows_drives()):  # finding 30 (the 2026-11-19 audit)
         print("note: the repo is on a Windows drive, where git is many times slower and wb checks "
               "the worktree at every step: a clone in WSL's own filesystem (~/...) runs faster")
@@ -3127,6 +3129,8 @@ def cmd_doctor(a):
         for gap in lane.gaps(v):  # what this kernel's Landlock can't confine (the 2026-11-16 audit)
             print(f"--  Landlock ABI {v}: {gap}")
         if gap := context.interop_gap():  # WSL: a Windows program escapes it (the 0.90 review)
+            print(f"--  {gap}")
+        if gap := context.home_gap():
             print(f"--  {gap}")
     else:
         print("--  agents' writes outside their lane and reads of credentials aren't refused here "

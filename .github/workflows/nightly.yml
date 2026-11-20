@@ -1,9 +1,12 @@
 # Runs check.yml's suite once a day on the newest Claude Code. The mod API can change between
 # releases, so a red run here means "a new Claude Code broke the mod", not "main is broken":
 # check.yml is the one pinned to the version the mod was last verified with. The README shows
-# this run's status as a badge. Its `macos` job runs the Python suite on macOS (no /proc, no
-# inotify, no Landlock), which the badge says workbench runs on; it may fail without turning the
-# run red (continue-on-error), so look at it before a release (the 2026-11-16 audit).
+# this run's status as a badge. Its `macos` job runs the Python suite on macOS on Apple silicon
+# (no /proc, no inotify, no Landlock) with OpenCode, and its `wsl` job on WSL2's Debian (dash as
+# /bin/sh, as a user who isn't root: scripts/ci-wsl.sh), both of which the README says workbench
+# runs on. Either one failing turns the run red, and a release waits for a green run on its commit
+# (docs/release-checklist.md; the 2026-11-19 audit: the macOS job could fail unseen and ran
+# without OpenCode, and nothing ran WSL at all).
 #
 # The real-OpenCode tests run against the OpenCode pinned below (OPENCODE_VERSION, installed from
 # its release with the hash pinned here); opencode.yml runs them on the newest OpenCode. The Lane
@@ -61,8 +64,12 @@ jobs:
 
   macos:
     runs-on: macos-latest
-    timeout-minutes: 30
-    continue-on-error: true
+    # 21 minutes without OpenCode (no inotify there: waits poll), past 30 with it (2026-11-20)
+    timeout-minutes: 60
+    env:
+      # check.yml's OpenCode, its Apple silicon asset's hash
+      OPENCODE_VERSION: '2.3.0'
+      OPENCODE_SHA256: '7907df2b12720a840fbb49c5b978b9b82925b6bf75479a5fd216afa8932b6702'
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -74,4 +81,30 @@ jobs:
       - run: |
           git config --global user.name "workbench CI"
           git config --global user.email "ci@invalid"
+      - run: scripts/install-opencode.sh "$OPENCODE_VERSION" "$OPENCODE_SHA256" >> "$GITHUB_PATH"
       - run: python3 -m unittest
+
+  wsl:
+    runs-on: windows-2025
+    timeout-minutes: 45
+    env:
+      # check.yml's OpenCode, its Linux x64 asset's hash
+      OPENCODE_VERSION: '2.3.0'
+      OPENCODE_SHA256: 'fc0f81522aceeabac47693d88389efa2bc517ce74c2c38fd6967819fcc6e4d3b'
+      WSLENV: OPENCODE_VERSION:OPENCODE_SHA256
+    steps:
+      # LF endings and the repo's own text: the clone inside WSL is made from this checkout
+      - run: git config --global core.autocrlf false
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      # Windows' own WSL, not a third-party action: only GitHub's and verified ones may run here
+      # (scripts/github-settings.sh)
+      - name: WSL2 with Debian
+        run: |
+          wsl --version
+          wsl --set-default-version 2
+          wsl --install --distribution Debian --no-launch --web-download
+          wsl --list --verbose
+          wsl -d Debian -u root -- cat /etc/os-release
+      - run: wsl -d Debian -u root -- bash scripts/ci-wsl.sh

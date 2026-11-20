@@ -54,6 +54,44 @@ class RequiredCheck(unittest.TestCase):
         self.assertIn({"context": "check", "integration_id": GITHUB_ACTIONS_APP}, checks)
 
 
+def job(workflow: str, name: str) -> str:
+    """One job's lines, up to the next job."""
+    m = re.search(rf"(?ms)^  {name}:\n(.*?)(?=^  \S|\Z)", text(workflow).split("\njobs:\n", 1)[1])
+    return m.group(1) if m else ""
+
+
+class ReleaseGates(unittest.TestCase):
+    """The 2026-11-19 audit: the macOS job could fail unseen and ran without OpenCode, nothing ran
+    WSL, and no release recorded which of the platforms the README names were run."""
+
+    def test_the_nightly_runs_macos_with_opencode_and_a_failure_shows(self):
+        mac = job("nightly.yml", "macos")
+        self.assertIn("runs-on: macos-latest", mac)
+        self.assertNotIn("continue-on-error", mac)
+        self.assertIn("scripts/install-opencode.sh", mac)
+        pin = lambda t: re.search(r"OPENCODE_VERSION: '([\d.]+)'", t)[1]  # noqa: E731
+        self.assertEqual(pin(mac), pin(text("check.yml")))
+
+    def test_the_nightly_runs_wsl2_debian_as_a_user_who_isnt_root(self):
+        wsl = job("nightly.yml", "wsl")
+        for want in ("runs-on: windows-", "wsl --set-default-version 2", "--distribution Debian",
+                     "bash scripts/ci-wsl.sh"):
+            self.assertIn(want, wsl)
+        self.assertNotIn("continue-on-error", wsl)
+        self.assertEqual(re.search(r"OPENCODE_SHA256: '(\w+)'", wsl)[1],
+                         re.search(r"OPENCODE_SHA256: '(\w+)'", text("check.yml"))[1])  # Linux x64's
+        script = (ROOT / "scripts" / "ci-wsl.sh").read_text()
+        for want in ("sudo -u ci", "install-opencode.sh", "python3 -m unittest"):
+            self.assertIn(want, script)
+
+    def test_the_release_checklist_names_each_platform_and_the_nightly(self):
+        checklist = (ROOT / "docs" / "release-checklist.md").read_text()
+        for want in ("gh workflow run nightly.yml", "`macos`", "`wsl`", "Linux", "Apple silicon",
+                     "WSL2", "/mnt/c", "skip is not a pass", "docs/releases/<version>.md"):
+            self.assertIn(want, checklist)
+        self.assertIn("docs/release-checklist.md", (ROOT / "ARCHITECTURE.md").read_text())
+
+
 class Marketplace(unittest.TestCase):
     def test_the_plugin_has_no_version_so_installs_track_main(self):
         # a version would hold every install on its cached copy until the string changed, which

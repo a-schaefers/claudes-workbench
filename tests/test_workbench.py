@@ -81,6 +81,24 @@ def backdate(name, secs=60) -> None:
     store.write_json(t.dir / "status.json", {**st, "updated_at": st["updated_at"] - secs})
 
 
+# The suite commits in scratch repos, as CI does with a global identity: a clean profile without
+# one (a sandbox's) failed seven tests on "Author identity unknown" (the 2026-11-19 audit). The
+# tests about identity set GIT_CONFIG_GLOBAL themselves.
+if subprocess.run(["git", "config", "user.email"], capture_output=True).returncode:
+    _gitconfig = Path(tempfile.mkdtemp(prefix="wb-test-git-")) / "gitconfig"
+    _gitconfig.write_text("[user]\n\tname = workbench tests\n\temail = tests@invalid\n")
+    os.environ["GIT_CONFIG_GLOBAL"] = str(_gitconfig)
+
+
+def home_outside_the_lane(test):
+    """For a test that hides credentials under the home directory: the lane writes the temp roots
+    whole, so with the home inside one (a sandbox's profile under /tmp) nothing there is hidden,
+    and wb doctor and wb start say so (context.home_gap). Codex's run of 1.0 failed 11 of these
+    (the 2026-11-19 audit)."""
+    return unittest.skipIf(bool(context.home_gap()), "the home directory is inside a temp root, "
+                           "which the lane writes whole (context.home_gap)")(test)
+
+
 class Base(unittest.TestCase):
     def setUp(self):
         # `wb start` leaves its runner running on purpose (it outlives the command)
@@ -91,14 +109,16 @@ class Base(unittest.TestCase):
         # the suite may run in Claude Code's Bash: no task is a session's unless a test says so
         os.environ.pop("CLAUDE_CODE_SESSION_ID", None)
         os.environ.pop("CLAUDE_PID", None)
+        # the state directory before WB_HOME names it: a thread the last test left running (its
+        # chat server) wrote there in between, and mkdir found it made (seen on WSL, 2026-11-20)
+        (tmp / "state").mkdir()
+        # self-review is on by default (tuning.py); the tests that count rounds don't want it
+        (tmp / "state" / "tuning.json").write_text('{"self_review": 0}')
         os.environ.update(WB_HOME=str(tmp / "state"), WB_OPENCODE_BIN=FAKE, WB_FAKE_MODELS="1",
                           WB_OPENCODE_CONFIG=str(tmp / "opencode.json"),
                           WB_MODELS=str(tmp / "wb-models.json"), WB_SKILLS=str(tmp / "skills"),
                           WB_COMMANDS=str(tmp / "commands.json"))
         (tmp / "opencode.json").write_text(json.dumps(OPENCODE_CONFIG))
-        # self-review is on by default (tuning.py); the tests that count rounds don't want it
-        (tmp / "state").mkdir()
-        (tmp / "state" / "tuning.json").write_text('{"self_review": 0}')
         self.repo = tmp / "repo"
         self.repo.mkdir()
         g = lambda *a: subprocess.run(["git", "-C", str(self.repo), *a], check=True,  # noqa
@@ -2678,6 +2698,7 @@ class RealOpenCode(Base):
         self.assertEqual(refused, [False, True, True, True, True], answers)
 
     @unittest.skipUnless(lane.abi(), "needs Landlock")
+    @home_outside_the_lane
     def test_writes_and_file_tools_stay_in_the_lane_until_claude_widens_it(self):
         # outside the temp directory, which is in every lane
         outside = Path(tempfile.mkdtemp(dir=Path.home(), prefix=".wb-lane-test-"))
@@ -2941,7 +2962,7 @@ class GitGuard(unittest.TestCase):
             scratch = os.path.realpath(d) + "/s/.git"
             self.assertFalse(gitguard.protected(scratch, "/elsewhere"))  # a test's scratch repo
             self.assertTrue(gitguard.protected(scratch, scratch))  # the task's own, even here
-        self.assertTrue(gitguard.protected(str(ROOT / ".git"), "/elsewhere"))  # a real project
+        self.assertTrue(gitguard.protected("/srv/project/.git", "/elsewhere"))  # a real project
         self.assertFalse(gitguard.protected(None, "/elsewhere"))  # no repository: init, clone
 
     def test_the_shim_runs_from_a_python_whose_path_has_a_space(self):
@@ -2971,6 +2992,14 @@ class GitGuard(unittest.TestCase):
 class Lane(Base):
     """Where the agent may write: its worktree, the temp directory and build caches; Claude
     adds a directory with `wb allow --path`, the user turns the lane off with `"paths": ["*"]`."""
+    def test_a_home_inside_a_temp_root_is_said_since_the_lane_writes_it_whole(self):
+        # the 2026-11-19 audit: with the profile under /tmp, the agent read its credentials
+        tmp = os.path.realpath(tempfile.gettempdir())
+        with mock.patch.object(context.Path, "home", lambda: Path(tmp) / "sandbox-home"):
+            self.assertIn(f"is inside {tmp}, which every agent's lane writes whole", context.home_gap())
+        with mock.patch.object(context.Path, "home", lambda: Path("/srv/home/u")):
+            self.assertEqual(context.home_gap(), "")
+
     def test_the_lane_holds_the_task_and_its_rules_follow_it(self):
         self.start("t-lane", "ok")
         wait_phase("t-lane", {"review"})
@@ -3046,6 +3075,7 @@ class Lane(Base):
         self.assertIn("PATH", env)
         self.assertEqual(env["PWD"], str(task.worktree))
 
+    @home_outside_the_lane
     def test_credentials_are_unreadable_and_the_rules_out_of_reach(self):
         task = store.Task("t-sec")
         self.start("t-sec", "ok")
@@ -3084,6 +3114,7 @@ class Lane(Base):
         # real homes are under ~/.local/state, outside the lane, which adds the worktree and ask/)
 
     @unittest.skipUnless(lane.abi(), "needs Landlock")
+    @home_outside_the_lane
     def test_workbench_state_and_config_stay_out_of_the_lane_but_the_tasks_own_files(self):
         # the 2026-11-16 audit: the chat token and the chat log were readable from the lane (an
         # agent could post to Claude as the user), notify.jsonl and the task's own task.json and
@@ -3117,6 +3148,7 @@ class Lane(Base):
         self.assertEqual(out.stdout.split(), ["refused"] * 4 + ["wrote"] * 2, out.stderr)
 
     @unittest.skipUnless(lane.abi(), "needs Landlock")
+    @home_outside_the_lane
     def test_a_granted_directory_that_holds_secrets_keeps_them_unreadable_through_the_socket_rule(self):
         # the 0.90 review: the --unix rule gave READ_FILE to the whole grant, so a granted
         # ~/.config handed the agent the gh token and the chat token again
@@ -3233,6 +3265,7 @@ class Lane(Base):
                              capture_output=True, text=True, timeout=20)
         return out.stdout.split() or [out.stderr]
 
+    @home_outside_the_lane
     def test_toolchain_bins_user_site_and_a_repo_under_gopath_stay_out_of_the_lane(self):
         home = self.fake_home()
         for d in (".cargo/bin", ".cargo/registry", "go/bin", "go/pkg", ".pub-cache",
@@ -3275,6 +3308,7 @@ class Lane(Base):
             self.assertFalse([q for q in w if q in (str(c), str(c / "bin"), str(c / "env"))])
         self.assertEqual(os.listdir(home / ".dotnet"), [])
 
+    @home_outside_the_lane
     def test_uvs_tools_and_pythons_and_rustups_toolchains_stay_out_of_the_lane(self):
         # the 0.90 review: ~/.local/share/uv (what `uv tool` programs and every uv venv's python
         # run from) and ~/.rustup/toolchains (what ~/.cargo/bin's proxies exec) were writable, so a
@@ -3297,6 +3331,7 @@ class Lane(Base):
         self.assertTrue((moved / "toolchains").is_dir())
 
     @unittest.skipUnless(lane.abi(), "needs Landlock")
+    @home_outside_the_lane
     def test_secrets_stay_unreadable_inside_tool_homes_and_where_variables_moved_them(self):
         home = self.fake_home()
         files = {".config/opencode/service.json": "pw", ".local/state/opencode/service.json": "pw",
@@ -3320,6 +3355,7 @@ class Lane(Base):
                           ".gem/specs/x", ".npmrc"}, got)
 
     @unittest.skipUnless(lane.abi(), "needs Landlock")
+    @home_outside_the_lane
     def test_the_agent_cannot_read_the_locks_its_runner_and_wb_commands_take(self):
         # runner.lock was in the task's directory, which the lane reads: an agent holding it
         # with flock made every later runner exit at once, and reap fail the task; then
@@ -3379,6 +3415,7 @@ class Lane(Base):
         self.assertEqual((out.returncode, out.stderr.split(":")[0]), (127, "workbench lane"))
 
     @unittest.skipUnless(lane.abi(), "needs Landlock")
+    @home_outside_the_lane
     def test_linuxbrew_under_a_kept_only_root_runs_in_the_lane_but_other_homes_stay_out(self):
         # the 0.90 review: with /home ONLY_KEPT, Linuxbrew's bin/ was readable but not the
         # ../Cellar its links point into, so the tool failed with Permission denied
@@ -3517,6 +3554,7 @@ class Lane(Base):
         if lane.abi() and devices:  # one the user may open, but not from the lane
             self.assertEqual(self.reads_in_lane(task, devices[:1]) + [], ["refused"])
 
+    @home_outside_the_lane
     def test_on_wsl_the_windows_drives_stay_out_of_the_agents_path_and_reads(self):
         # the 0.90 review: on WSL2 the Windows PATH (System32, a Windows-only Node's npm) was on
         # the agent's PATH and in its read lane, and a Windows program runs through interop as a
@@ -3644,7 +3682,8 @@ class Lane(Base):
         binfmt.mkdir()
         (binfmt / "WSLInterop").write_text("enabled\ninterpreter /init\nflags: PF\n")
         with mock.patch.object(context, "BINFMT", str(binfmt)):
-            self.assertIsNone(context.interop_gap())   # not WSL
+            with mock.patch("workbench.hardware.system", return_value="linux"):  # CI's wsl job is WSL
+                self.assertIsNone(context.interop_gap())   # not WSL
             with mock.patch("workbench.hardware.system", return_value="wsl"):
                 self.assertIn("[interop] enabled=false in /etc/wsl.conf", context.interop_gap())
                 (binfmt / "WSLInterop").write_text("disabled\ninterpreter /init\n")
