@@ -7319,6 +7319,44 @@ class Projects(Base):
         self.assertIn("note: submodules (vendor/lib) are empty", self.start("t-sub2", "ok"))
         wait_phase("t-sub2", {"review"})
 
+    def test_a_submodules_own_submodules_are_filled_too_and_named_when_they_cant_be(self):
+        # #383 (the audit of 1.6): only the top .gitmodules was read, so a submodule's own
+        # submodule stayed an empty directory in the worktree and the base check's checkout
+        tmp = Path(self.tmp.name)
+        commit = ["-c", "user.email=t@t", "-c", "user.name=t", "commit", "-qm"]
+        file_ok = ["-c", "protocol.file.allow=always"]
+        inner, lib = tmp / "inner", tmp / "lib"
+        for d in (inner, lib):
+            subprocess.run(["git", "init", "-q", str(d)], check=True)
+        (inner / "in.c").write_text("int y;\n")
+        subprocess.run(["git", "-C", str(inner), "add", "."], check=True)
+        subprocess.run(["git", "-C", str(inner), *commit, "inner"], check=True)
+        (lib / "lib.c").write_text("int x;\n")
+        subprocess.run(["git", "-C", str(lib), *file_ok, "submodule", "add", "-q", str(inner),
+                        "deps/inner"], check=True, capture_output=True)
+        subprocess.run(["git", "-C", str(lib), "add", "."], check=True)
+        subprocess.run(["git", "-C", str(lib), *commit, "lib"], check=True)
+        g = lambda *a: subprocess.run(["git", "-C", str(self.repo), *a], check=True,  # noqa
+                                      capture_output=True)
+        g(*file_ok, "submodule", "add", "-q", str(lib), "vendor/lib")
+        g(*file_ok, "submodule", "update", "-q", "--init", "--recursive")
+        g("commit", "-qm", "a submodule with its own")
+        out = self.start("t-nest", "ok", "--test",
+                         "test -f vendor/lib/deps/inner/in.c && " + TEST_CMD)
+        self.assertNotIn("submodules", out)
+        st = wait_phase("t-nest", {"review"})
+        self.assertEqual(st["base_check"]["exit"], 2)   # in.c there (test -f: 1): grep, no answer
+        in_c = store.Task("t-nest").worktree / "vendor/lib/deps/inner/in.c"
+        self.assertEqual(in_c.read_text(), "int y;\n")
+        self.assertFalse(in_c.stat().st_mode & 0o222)
+        self.assertFalse(in_c.with_name(".git").exists())
+        # the user's checkout of lib without its submodule: said by its whole path
+        subprocess.run(["git", "-C", str(self.repo / "vendor/lib"), "submodule", "deinit", "-q",
+                        "-f", "deps/inner"], check=True, capture_output=True)
+        self.assertIn("note: submodules (vendor/lib/deps/inner) are empty",
+                      self.start("t-nest2", "ok"))
+        wait_phase("t-nest2", {"review"})
+
     def test_accept_says_whether_claude_md_kept_up(self):
         self.start("t-ok", "ok", "--test", TEST_CMD)
         wait_phase("t-ok", {"review"})

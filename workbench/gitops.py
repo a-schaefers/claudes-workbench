@@ -234,7 +234,10 @@ def fill_submodules(repo: Path, commit: str, checkout: Path) -> list[str]:
     (see submodules) and read-only, since the gitlink keeps an edit there out of the diff and the
     commit. The ones it couldn't fill come back (the checkout lacks the submodule or that commit).
     Empty, a C/C++ or vendored project's build failed on the base and in every round (#350, the
-    audit of 1.4). A directory already holding files is left as it is."""
+    audit of 1.4). A directory already holding files is left as it is. A submodule's own
+    submodules are filled the same way, from the user's checkout of each inside it, and the ones
+    it couldn't fill come back by their whole path: only the top `.gitmodules` was read, and a
+    nested one stayed an empty directory (#383, the audit of 1.6)."""
     left = []
     for path in submodules(repo, commit):
         row = git(repo, "ls-tree", commit, "--", path, check=False).split()
@@ -261,6 +264,7 @@ def fill_submodules(repo: Path, commit: str, checkout: Path) -> list[str]:
                 f = os.path.join(root, name)
                 if not os.path.islink(f):
                     os.chmod(f, os.stat(f).st_mode & ~0o222)
+        left += [f"{path}/{p}" for p in fill_submodules(src, sha, dest)]
     return left
 
 
