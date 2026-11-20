@@ -7054,6 +7054,42 @@ class Projects(Base):
         self.assertIn("no user.name/user.email", err)
         self.assertFalse(store.Task("t-anon").dir.exists())
 
+    @unittest.skipUnless(shutil.which("ssh-keygen"), "needs ssh-keygen")
+    def test_a_key_that_needs_unlocking_is_said_at_start_and_accept_says_how(self):
+        # #374 (the audit of 1.6, reproduced): with commit.gpgsign and a passphrase no agent
+        # held, wb accept failed after the whole task, blaming an "incorrect passphrase"
+        key = Path(self.tmp.name) / "signing"
+        subprocess.run(["ssh-keygen", "-q", "-t", "ed25519", "-N", "a passphrase", "-f", str(key)],
+                       check=True)
+        for k, v in (("gpg.format", "ssh"), ("user.signingkey", str(key)), ("commit.gpgsign", "true")):
+            subprocess.run(["git", "-C", str(self.repo), "config", k, v], check=True)
+        os.environ.pop("SSH_AUTH_SOCK", None)
+        out = self.start("t-sign", "ok")
+        self.assertIn("commits here are signed and the key needs unlocking first: ssh-add", out)
+        wait_phase("t-sign", {"review"})
+        t0 = time.monotonic()
+        err = self.refused("accept", "t-sign", "-m", "feat: answer")
+        self.assertLess(time.monotonic() - t0, 30)                 # no waiting on a prompt
+        self.assertIn("not committed: commits here are signed", err)
+        self.assertIn("--no-sign", err)
+        run_wb("accept", "t-sign", "-m", "feat: answer", "--no-sign")
+        branch = store.Task("t-sign").spec["branch"]
+        body = subprocess.run(["git", "-C", str(self.repo), "cat-file", "commit", branch],
+                              capture_output=True, text=True, check=True).stdout
+        self.assertNotIn("gpgsig", body)
+        # a key that signs unattended: no word at start, and the commit is signed
+        bare = Path(self.tmp.name) / "signing-bare"
+        subprocess.run(["ssh-keygen", "-q", "-t", "ed25519", "-N", "", "-f", str(bare)], check=True)
+        subprocess.run(["git", "-C", str(self.repo), "config", "user.signingkey", str(bare)], check=True)
+        out = self.start("t-sign2", "ok")
+        self.assertNotIn("needs unlocking", out)
+        wait_phase("t-sign2", {"review"})
+        run_wb("accept", "t-sign2", "-m", "feat: answer")
+        body = subprocess.run(["git", "-C", str(self.repo), "cat-file", "commit",
+                               store.Task("t-sign2").spec["branch"]],
+                              capture_output=True, text=True, check=True).stdout
+        self.assertIn("gpgsig", body)
+
     def test_instructions_in_dot_claude_count_and_hints_quote_their_paths(self):
         # the audit: a repo with only .claude/CLAUDE.md (Claude Code reads it, and so does the
         # agent) was refused as having none; a path with a space broke the printed merge command

@@ -421,6 +421,12 @@ def _identity(repo: Path) -> bool:
                for v in ("GIT_AUTHOR_IDENT", "GIT_COMMITTER_IDENT"))
 
 
+def _signed(spec: dict, a) -> bool:
+    """Whether accept's or next's commit is signed as the user's git says: not after --no-sign,
+    given at start (task.json `sign`) or now (#374)."""
+    return spec.get("sign", True) and not getattr(a, "no_sign", False)
+
+
 def _lane_fits(repo: Path, test: str | None, *, off: bool = False) -> None:
     """Refuse a task the agent's lane can't hold (the 2026-11-16 audit): a repo that is the home
     directory (the lane would read all of it) or lies where credentials live (it couldn't read
@@ -615,6 +621,8 @@ def cmd_start(a):
         die("git has no user.name/user.email here: the user's identity signs the commits "
             "(git config --global user.name/user.email)")
     _need_claude_md(repo, a.base, a)
+    if not a.no_sign:  # said now, not after the whole task at wb accept (#374)
+        _say(gitops.sign_problem(repo, a.base))
     setup = _worktree_setup(repo, a)
     _disk_room(repo, a.base, setup)
     # Two projects, one GPU: a task that can't run beside the GPU's holders used to queue in
@@ -671,6 +679,7 @@ def cmd_start(a):
         **({"bench": b} if (b := getattr(a, "bench", None)) else {}),
         **({"no_base_check": True} if a.no_base_check else {}),
         **({"unload_for_tests": True} if getattr(a, "unload_for_tests", False) else {}),
+        **({"sign": False} if a.no_sign else {}),
         "auto_fix": a.auto_fix, "ask_budget": budget, "ask_timeout": a.ask_timeout,
         # periodic check-ins are opt-in: each wakes Claude, re-reading its whole context, and they
         # were 500K of one task's 1.2M (2026-11-17); the pane shows progress, and the warnings
@@ -849,7 +858,7 @@ def cmd_next(a):
         try:
             commit = gitops.commit_all(task.worktree, f"{a.message}\n\nWorkbench-Task: {a.name} "
                                        f"(step {step})\nOpenCode-Session: {st.get('session')}",
-                                       a.include)
+                                       a.include, _signed(spec, a))
         except gitops.GitError as e:
             die(str(e))
     _spec_gaps(task, a.spec_gap)  # after the commit: a retry after a failed one counts them once
@@ -1680,7 +1689,7 @@ def cmd_accept(a):
             if not commit:
                 head = gitops.git(task.worktree, "rev-parse", "HEAD").strip()
                 if gitops.changed(task.worktree) or head == spec["base"]:
-                    commit = gitops.commit_all(task.worktree, msg, a.include)
+                    commit = gitops.commit_all(task.worktree, msg, a.include, _signed(spec, a))
                 else:  # nothing new: the branch's commits past the base are the work (the steps
                     # wb next committed, or Claude's own after a takeover: the audit)
                     commit = gitops.git(task.worktree, "rev-parse", "--short", "HEAD").strip()
@@ -3524,6 +3533,8 @@ def parser() -> argparse.ArgumentParser:
                    help="seconds the acceptance command may run (default 900)")
     s.add_argument("--unload-for-tests", action="store_true",
                    help="unload the model before each test run, for tests that need the GPU")
+    s.add_argument("--no-sign", action="store_true",
+                   help="commit this task's work unsigned, whatever commit.gpgsign says")
     s.add_argument("--no-base-check", action="store_true",
                    help="don't run the acceptance command once on the base before the agent starts")
     s.add_argument("--base", default="HEAD")
@@ -3573,6 +3584,8 @@ def parser() -> argparse.ArgumentParser:
     s.add_argument("--test", help="the next step's acceptance command (default: unchanged)")
     s.add_argument("--include", action="store_true", help="commit it even with more than "
                    f"{gitops.NEW_FILES_MAX} new files or a large new binary (build output?)")
+    s.add_argument("--no-sign", action="store_true",
+                   help="commit it unsigned, whatever commit.gpgsign says (a key that needs unlocking)")
     s.add_argument("--fresh", action="store_true", help="a fresh session instead of the same one")
     s.add_argument("--take-claude-md", action="store_true",
                    help="put the agent's proposed CLAUDE.md/AGENTS.md (<name>.proposed) over the "
@@ -3768,6 +3781,8 @@ def parser() -> argparse.ArgumentParser:
                    "only, or one squashed commit, for a repo kept to linear history")
     s.add_argument("--include", action="store_true", help="commit it even with more than "
                    f"{gitops.NEW_FILES_MAX} new files or a large new binary (build output?)")
+    s.add_argument("--no-sign", action="store_true",
+                   help="commit it unsigned, whatever commit.gpgsign says (a key that needs unlocking)")
     s.add_argument("--take-claude-md", action="store_true",
                    help="put the agent's proposed CLAUDE.md/AGENTS.md (<name>.proposed) over the "
                    "file before committing; without it they are dropped")

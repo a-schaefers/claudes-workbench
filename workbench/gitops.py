@@ -2,6 +2,7 @@
 
 The agent never commits; everything it does stays in the worktree's working tree until `wb accept`.
 """
+import contextlib
 import functools
 import hashlib
 import os
@@ -107,9 +108,13 @@ def _modes_hold(d: str) -> bool:
             pass
 
 
-def _run(cwd, args, env=None, check=True) -> subprocess.CompletedProcess:
-    r = subprocess.run(["git", "-C", str(cwd), *PLAIN, *_pinned(cwd), *args], capture_output=True,
-                       env={**os.environ, **env} if env else None)
+def _run(cwd, args, env=None, check=True, timeout=None) -> subprocess.CompletedProcess:
+    try:
+        r = subprocess.run(["git", "-C", str(cwd), *PLAIN, *_pinned(cwd), *args], capture_output=True,
+                           env={**os.environ, **env} if env else None, timeout=timeout,
+                           stdin=subprocess.DEVNULL if timeout else None)
+    except subprocess.TimeoutExpired:
+        raise GitError(f"git {' '.join(args)}: no answer in {timeout}s") from None
     if check and r.returncode:
         err = (r.stderr or r.stdout).decode("utf-8", "replace").strip()
         raise GitError(f"git {' '.join(args)}: {err}")
@@ -489,7 +494,32 @@ def step_commit(task: store.Task, step: int, steps: int) -> str | None:
     return None
 
 
-def commit_all(worktree: Path, message: str, include: bool = False) -> str:
+SIGN_SECS = 10    # the dry signature at wb start: an unlocked key answers at once
+COMMIT_SECS = 90  # a signed commit at accept: a pinentry nobody answers, under Claude's 2 minutes
+UNLOCK = ("commits here are signed and the key needs unlocking first: ssh-add for an SSH key, or "
+          "sign once in a terminal for GPG (echo x | gpg -s >/dev/null); or --no-sign")
+NO_TERMINAL = {"GPG_TTY": "", "DISPLAY": "", "WAYLAND_DISPLAY": "", "SSH_ASKPASS_REQUIRE": "never"}
+
+
+def signs(repo: Path) -> bool:
+    return git(repo, "config", "--bool", "commit.gpgsign", check=False).strip() == "true"
+
+
+def sign_problem(repo: Path, rev: str) -> str | None:
+    """UNLOCK when ``repo``'s commits are signed and signing can't happen unattended (a key with a
+    passphrase no agent holds, a pinentry that needs a terminal), else None. A dry commit-tree -S
+    of ``rev``'s tree, with no terminal or display: wb accept failed at the very end of the task
+    with "incorrect passphrase supplied" (#374, the audit of 1.6). It leaves a loose object."""
+    if not signs(repo):
+        return None
+    r = None
+    with contextlib.suppress(GitError):
+        r = _run(repo, ["commit-tree", "-S", "-m", "workbench: can it sign?", f"{rev}^{{tree}}"],
+                 NO_TERMINAL, check=False, timeout=SIGN_SECS)
+    return None if r is not None and r.returncode == 0 else UNLOCK
+
+
+def commit_all(worktree: Path, message: str, include: bool = False, sign: bool = True) -> str:
     """Commit everything in the worktree, without git hooks (NO_HOOKS; also for a task started
     before its git dir was recorded) but signed if the user signs. Refuses a nested repository: committed, it was a gitlink to
     a commit that exists nowhere else. Refuses, unless ``include``, more than NEW_FILES_MAX new
@@ -503,7 +533,19 @@ def commit_all(worktree: Path, message: str, include: bool = False) -> str:
     git(worktree, *NO_HOOKS, "add", "-A")
     if not git(worktree, "diff", "--cached", "--name-only").strip():
         raise GitError("nothing to commit: the agent's worktree has no changes")
-    git(worktree, *NO_HOOKS, "commit", "-q", "-m", message)
+    if not sign:  # --no-sign, at start or now: the task's commits go unsigned (#374)
+        git(worktree, *NO_HOOKS, "-c", "commit.gpgsign=false", "commit", "-q", "-m", message)
+    elif signs(worktree):  # no terminal, a time limit, and git's error said plainly (#374)
+        try:
+            r = _run(worktree, [*NO_HOOKS, "commit", "-q", "-m", message], NO_TERMINAL,
+                     check=False, timeout=COMMIT_SECS)
+        except GitError as e:  # no answer: a pinentry waiting on an unattended desktop
+            raise GitError(f"not committed: {UNLOCK} ({e})") from None
+        if r.returncode:
+            said = (r.stderr or r.stdout).decode("utf-8", "replace").strip().splitlines()
+            raise GitError(f"not committed: {UNLOCK} (git: {said[0] if said else r.returncode})")
+    else:
+        git(worktree, *NO_HOOKS, "commit", "-q", "-m", message)
     return git(worktree, "rev-parse", "--short", "HEAD").strip()
 
 
