@@ -6830,15 +6830,35 @@ class WebChat(Base):
         self.assertEqual(page[0], 200)
         self.assertEqual(self.call("/icon-192.png")[0], 200)
 
-    def test_a_plan_with_none_given_is_read_from_claude_codes_newest_plan_file(self):
-        plans = Path(self.tmp.name) / "claude" / "plans"
+    def test_a_plan_card_shows_its_own_sessions_plan_and_never_another_projects(self):
+        # #253 (the audit of 1.2): with no plan text the card took the newest file in the plans
+        # directory, so with two projects planning, A's card showed B's plan for revisions
+        home = Path(self.tmp.name) / "claude"
+        plans, projects = home / "plans", home / "projects"
         plans.mkdir(parents=True)
-        (plans / "old.md").write_text("old plan")
-        os.utime(plans / "old.md", (time.time() - 60, time.time() - 60))
-        (plans / "new.md").write_text("# The plan\n1. Do it")
-        with mock.patch.dict(os.environ, {"CLAUDE_CONFIG_DIR": str(plans.parent)}):
-            ask_id = run_wb("chat", "ask", "--tool", "ExitPlanMode", "--kind", "plan").split()[0]
-        self.assertEqual(self.chat.find_ask(ask_id)["detail"], {"plan": "# The plan\n1. Do it"})
+        (plans / "alpha-plan.md").write_text("# A's plan")
+        (plans / "beta-plan.md").write_text("# B's plan")                      # the newest
+        os.utime(plans / "alpha-plan.md", (time.time() - 60, time.time() - 60))
+        (projects / "-a").mkdir(parents=True)
+        (projects / "-a" / "sess-a.jsonl").write_text(json.dumps({"message": {"content": [
+            {"type": "text", "text": f"A plan file exists from plan mode at: {plans}/alpha-plan.md"}]}}) + "\n")
+        (projects / "-a" / "sess-empty.jsonl").write_text("")
+
+        def card(*args):
+            with mock.patch.dict(os.environ, {"CLAUDE_CONFIG_DIR": str(home)}):
+                ask_id, state = run_wb("chat", "ask", "--tool", "ExitPlanMode", "--kind", "plan", *args).split()
+            return self.chat.find_ask(ask_id)["detail"], state
+
+        self.assertEqual(card("--session", "sess-a"), ({"plan": "# A's plan"}, "open"))    # its transcript
+        self.assertEqual(card("--detail", json.dumps({"plan_file": str(plans / "alpha-plan.md")})),
+                         ({"plan": "# A's plan"}, "open"))                                  # the tool's input
+        outside = Path(self.tmp.name) / "secret.md"
+        outside.write_text("not a plan")
+        for args in ((), ("--session", "sess-gone"), ("--session", "sess-empty"),
+                     ("--detail", json.dumps({"plan_file": str(outside)}))):
+            detail, state = card(*args, "--repo", "/home/u/alpha")
+            self.assertEqual((detail, state), ({"plan": "", "project": "alpha"}, "expired"), args)
+        self.assertEqual(self.chat.asks()[-1]["by"], "terminal")              # answered there
 
     def test_wb_chat_wait_blocks_until_the_answer_or_says_open(self):
         chat = self.chat

@@ -198,7 +198,8 @@
       const no = { plan: 'you asked for changes', question: 'you passed' }[a.kind] || 'you said no'
       meta.append(span('', clock(a.ts) + (a.answer === 'allow' ? ` · ${yes} ` + (a.by === 'setting' ? '' : clock(a.answered))
         : a.answer === 'deny' ? ` · ${no} ` + clock(a.answered)
-        : a.answer === 'expired' ? (a.by === 'interrupted' ? ' · settled in the terminal' : ' · no answer in time: it waits in the terminal')
+        : a.answer === 'expired' ? (a.by === 'interrupted' ? ' · settled in the terminal'
+          : a.by === 'terminal' ? ' · answer it in the terminal' : ' · no answer in time: it waits in the terminal')
         : ' · Claude is waiting for your answer')))
       return meta
     }
@@ -294,7 +295,9 @@
     card.append(head)
     if (a.kind === 'plan') {
       const body = document.createElement('div'); body.className = 'plan bubble-text'
-      rich(body, d.plan || '(the plan is in the terminal)')
+      // a plan wb couldn't read is named by its project, never shown as another one (#253)
+      rich(body, d.plan || (d.project ? `Claude in ${d.project} finished a plan, but its text didn't reach the chat: read it and answer in that terminal.`
+        : '(the plan is in the terminal)'))
       card.append(body)
       if (d.plan && (d.plan.length > 900 || d.plan.split('\n').length > 14)) {  // long: folded, with a way to read it all
         body.classList.add('folded')

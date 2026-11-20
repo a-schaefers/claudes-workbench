@@ -20,7 +20,9 @@ import errno
 import hmac
 import http.client
 import json
+import mmap
 import os
+import re
 import secrets
 import select
 import shutil
@@ -434,17 +436,29 @@ def answer(ask_id: str, verdict: str, by: str, note: str | None = None,
     return cur
 
 
-def latest_plan() -> str:
-    """The plan Claude Code just wrote: the newest of its plan files, from the last day (the
-    ExitPlanMode call names none)."""
-    d = Path(os.environ.get("CLAUDE_CONFIG_DIR") or Path.home() / ".claude").expanduser() / "plans"
+def session_plan(session: str | None, plan_file: str | None = None) -> str:
+    """The plan this session wrote: the file ExitPlanMode's input names, else the last plan file
+    its transcript names, else "". The newest file in the plans directory was any project's: with
+    two planning, one session's card showed the other's plan, and the user sent revisions against
+    it (#253, the audit of 1.2)."""
+    from . import context, spend  # context imports this module
+    d = (context.claude_home().expanduser() / "plans").resolve()
+    f = None
+    if plan_file:
+        f = Path(plan_file).expanduser()
+    elif session and (transcript := spend.transcript_paths(session)[0]):
+        pat = re.compile(re.escape(str(d).encode()) + rb"/[A-Za-z0-9._-]+\.md")
+        try:
+            with open(transcript, "rb") as fh, mmap.mmap(fh.fileno(), 0, access=mmap.ACCESS_READ) as mm:
+                f = next((Path(m.group().decode()) for m in reversed(list(pat.finditer(mm)))), None)
+        except (OSError, ValueError):  # gone, or empty (mmap refuses an empty file)
+            f = None
     try:
-        f = max(d.glob("*.md"), key=lambda p: p.stat().st_mtime)
-    except (ValueError, OSError):
+        if f is None or f.resolve().parent != d or f.suffix != ".md" or not f.resolve().is_file():
+            return ""
+        return f.read_text(errors="replace")[:DETAIL_MAX - 100]
+    except OSError:
         return ""
-    if time.time() - f.stat().st_mtime > 86400:
-        return ""
-    return f.read_text(errors="replace")[:DETAIL_MAX - 100]
 
 
 def prefs() -> dict:
