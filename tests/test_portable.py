@@ -155,10 +155,39 @@ class Real(unittest.TestCase):
         self.assertEqual(len(said), 1)
         self.assertIn("one/z is running and wb can't stop it", said[0])
 
-    def test_one_listed_model_answers_to_any_name(self):
-        llama = self.server({"/v1/models": {"data": [{"id": "/models/coder-q4.gguf"}]}})
-        self.config({"l": {"options": {"baseURL": llama + "/v1"}, "models": {"coder": {}}}})
-        self.assertTrue(models.status(models.resolve("coder"))["available"])
+    def test_llama_server_answers_to_any_name_and_a_strict_server_says_the_name_it_serves(self):
+        # #256 (the audit of 1.2): only llama-server answers to any name; vLLM, SGLang and TGI
+        # 404 a wrong one, so the round died at its first request as "opencode exited 1"
+        llama = self.server({"/v1/models": {"data": [{"id": "/models/coder-q4.gguf", "owned_by": "llamacpp"}]}})
+        meta = self.server({"/v1/models": {"data": [{"id": "/models/coder-q4.gguf", "meta": {"n_ctx_train": 1}}]}})
+        vllm = self.server({"/v1/models": {"data": [{"id": "Org/Coder-7B-Instruct", "owned_by": "vllm"}]}})
+        empty = self.server({"/v1/models": {"object": "list", "data": []}})
+        self.config({"l": {"options": {"baseURL": llama + "/v1"}, "models": {"coder": {}}},
+                     "m": {"options": {"baseURL": meta + "/v1"}, "models": {"coder": {}}},
+                     "v": {"options": {"baseURL": vllm + "/v1"}, "models": {"coder-7b": {},
+                                                                           "Org/Coder-7B-Instruct": {}}},
+                     "e": {"options": {"baseURL": empty + "/v1"}, "models": {"x": {}}}})
+        self.assertTrue(models.status(models.resolve("l/coder"))["available"])
+        self.assertTrue(models.status(models.resolve("m/coder"))["available"])
+        st = models.status(models.resolve("v/coder-7b"))
+        self.assertEqual((st["available"], st["why"]), (False, "the server serves Org/Coder-7B-Instruct, "
+                                                                "not coder-7b: set the entry's id to Org/Coder-7B-Instruct"))
+        self.assertTrue(models.status(models.resolve("v/Org/Coder-7B-Instruct"))["available"])
+        st = models.status(models.resolve("e/x"))                              # it read as resident
+        self.assertEqual((st["available"], st["resident"]), (False, False))
+        self.assertIn("lists no model", st["why"])
+
+    def test_a_keyed_ollama_is_probed_with_the_providers_key(self):
+        # #256 (the audit of 1.2): it served the model to the key, but the native /api probes
+        # sent none, so it read as unavailable
+        key = lambda body: lambda h: body if h.get("Authorization") == "Bearer s3cret" else 401  # noqa
+        ollama = self.server({"/api/version": key({"version": "0.40.0"}),
+                              "/api/tags": key({"models": [{"name": "m:latest"}]}),
+                              "/api/ps": key({"models": [{"name": "m:latest"}]})})
+        self.config({"o": {"options": {"baseURL": ollama + "/v1", "apiKey": "s3cret"}, "models": {"m": {}}}},
+                    {"o": {"engine": "ollama"}})
+        self.assertEqual(models.status(models.resolve("o/m")),
+                         {"available": True, "resident": True, "why": "loaded"})
 
     def test_a_port_two_started_models_share_says_which_one_it_serves(self):
         # both read "running", so a task for one ran on the other (the 2026-11-16 audit)
