@@ -16,6 +16,7 @@ import os
 import re
 import shutil
 import stat
+import subprocess
 import sys
 import tempfile
 import time
@@ -222,8 +223,18 @@ def set_experiment(name: str, on: bool) -> None:
 
 
 def probe_bin() -> str | None:
-    """probe on the agent's PATH (the runner's, which the agent's shell inherits), or None."""
-    return shutil.which("probe", path=agent_path(os.environ.get("PATH") or os.defpath))
+    """probe on the agent's PATH (the runner's, which the agent's shell inherits), when it has
+    `symbols`, else None. crates.io's probe-code 0.6.0 hasn't, and says the same version as the
+    release that has: `probe symbols main.c` searched for the word, the agent got no results and
+    wrote a function named `symbols` to match (2026-11-20)."""
+    found = shutil.which("probe", path=agent_path(os.environ.get("PATH") or os.defpath))
+    if not found:
+        return None
+    try:
+        out = subprocess.run([found, "--help"], capture_output=True, text=True, timeout=10).stdout
+    except (OSError, subprocess.TimeoutExpired):
+        return None
+    return found if re.search(r"^\s+symbols\s", out, re.M) else None
 
 
 def task_experiments() -> dict[str, bool]:
