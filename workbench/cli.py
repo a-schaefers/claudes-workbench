@@ -158,13 +158,22 @@ RUNNER_DIED = "the runner died (see runner.log)"
 
 def reap(task: store.Task) -> bool:
     """Fail a live task whose runner is dead; True when this call did it."""
+    agent = task.status.get("agent_pid")
     st = task.set_status_if(  # one reaper wins: two waiters, one notice
         lambda st: st.get("phase") in LIVE and not runner_alive(task)
         and time.time() - (st.get("updated_at") or 0) >= REAP_GRACE,
         phase="failed", last=RUNNER_DIED, pid=None, agent_pid=None, asking=None)
     if st is None:
         return False
-    runner.sweep(task)  # the agent it left, if the kernel didn't take it with the runner
+    # The agent it left, if the kernel didn't take it with the runner. Off Linux nothing else
+    # does (no PDEATHSIG, no /proc for sweep), and it went on editing a task reported failed
+    # (the 2026-11-19 audit): its group, once its command line shows it is still that agent
+    if agent and models.runs(agent, "run", "--standalone"):
+        try:
+            os.killpg(agent, signal.SIGKILL)
+        except (ProcessLookupError, PermissionError):
+            pass
+    runner.sweep(task)
     ask_mcp.close_all(task)  # and its questions, which nothing will relay (the 0.90 review)
     task.event({"ts": store.now(), "round": st.get("round"), "kind": "error",
                 "text": "the runner died without a report"})
@@ -446,11 +455,10 @@ def cmd_start(a):
     try:
         repo = gitops.toplevel(Path(a.repo).resolve())
     except gitops.GitError as e:  # git's own reason when it isn't "not a repo": dubious ownership
-        why = str(e).split(": ", 1)[-1]  # would otherwise send Claude to git init a repo (the audit)
-        if not Path(a.repo).is_dir():
+        if not Path(a.repo).is_dir():  # would otherwise send Claude to git init a repo (the audit)
             die(f"{a.repo} is not a directory")
-        if "not a git repository" not in why:
-            die(f"{a.repo}: {why}")
+        if not isinstance(e, gitops.NotARepo):
+            die(f"{a.repo}: {str(e).split(': ', 1)[-1]}")
         die(f"{a.repo} is not inside a git repository: wb init {shlex.quote(a.repo)} sets the "
             "project up")
     tasks = store.tasks_dir().resolve()
@@ -2389,10 +2397,10 @@ def cmd_init(a):
     d.mkdir(parents=True, exist_ok=True)
     try:
         inside = str(gitops.toplevel(d))
-    except gitops.GitError as e:  # a repo git refuses (dubious ownership) is no place to git init
-        if "not a git repository" not in str(e):
-            die(f"{d}: {str(e).split(': ', 1)[-1]}")
+    except gitops.NotARepo:
         inside = ""
+    except gitops.GitError as e:  # a repo git refuses (dubious ownership) is no place to git init
+        die(f"{d}: {str(e).split(': ', 1)[-1]}")
     if inside and Path(inside) != d:
         die(f"{d} is inside the git repo {inside}; init the project in its own directory")
     if not _identity(d):

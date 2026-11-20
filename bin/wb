@@ -16,6 +16,14 @@ if sys.version_info < (3, 11):
                      "on PATH.\n" % (sys.executable, sys.version.split()[0]))
     sys.exit(78)
 
+# Text files are UTF-8 whatever the locale: under a legacy one (ISO-8859-1, or C with the
+# coercion off) open() without an encoding used that one, and could raise on the task files
+# (the 2026-11-19 audit). The runner, the bench and the chat server start with -X utf8 too.
+if not sys.flags.utf8_mode:
+    import locale
+    if locale.getencoding().lower().replace("-", "").replace("_", "") != "utf8":
+        os.execv(sys.executable, [sys.executable, "-X", "utf8", *sys.argv])
+
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.realpath(__file__))))
 
 from workbench.cli import main  # noqa: E402

@@ -762,6 +762,24 @@ class Lifecycle(Base):
         run_wb("resume", "t-killed")
         wait_phase("t-killed", {"review"})
 
+    def test_a_reap_ends_the_agent_its_runner_left_and_nothing_else(self):
+        # the 2026-11-19 audit: reap cleared agent_pid without killing it, and off Linux (no
+        # PDEATHSIG, no /proc for sweep) the agent went on editing a task reported failed
+        self.start("t-orphan", "ok")
+        wait_phase("t-orphan", {"review"})
+        sleep = [sys.executable, "-c", "import time; time.sleep(60)"]
+        agent = subprocess.Popen(sleep + ["run", "--standalone", "-m", "x"], start_new_session=True)
+        stranger = subprocess.Popen(sleep, start_new_session=True)  # a pid recycled since
+        self.addCleanup(lambda: [p.kill() or p.wait() for p in (agent, stranger)])
+        task = store.Task("t-orphan")
+        for proc in (stranger, agent):
+            task.set_status(phase="running", pid=None, agent_pid=proc.pid)
+            backdate("t-orphan")
+            self.assertTrue(cli.reap(task))
+            self.assertIsNone(task.status["agent_pid"])
+        self.assertEqual(agent.wait(timeout=5), -signal.SIGKILL)
+        self.assertIsNone(stranger.poll())
+
     def test_a_wait_that_meets_a_reap_in_progress_delivers_its_notice_once(self):
         # the reaper writes the phase, sweeps, then the notice: a wait in between said "no
         # notice", and the next one delivered the notice again (the 0.90 review)
@@ -5523,6 +5541,31 @@ class Projects(Base):
         self.assertIn(".claude/CLAUDE.md last changed 1 commit(s) before", out)
         self.assertNotIn("no CLAUDE.md", out)
         self.assertIn(f"git -C {shlex.quote(str(self.repo))} merge", out)
+
+    def test_init_and_start_know_a_directory_outside_any_repo_whatever_gits_language(self):
+        # the 2026-11-19 audit: "not a git repository" was matched in English, so under a French
+        # git wb init refused an empty directory, and the first-run sample with it
+        shim = Path(self.tmp.name) / "fr-bin"
+        shim.mkdir()
+        (shim / "git").write_text(
+            f"#!{sys.executable}\nimport os, subprocess, sys\n"
+            f"r = subprocess.run([{shutil.which('git')!r}, *sys.argv[1:]], stderr=subprocess.PIPE)\n"
+            "err = r.stderr\n"
+            "if os.environ.get('LC_ALL') != 'C':\n"
+            "    err = err.replace(b'not a git repository', 'ni ceci ni aucun de ses parents "
+            "n’est un dépôt git'.encode())\n"
+            "sys.stderr.buffer.write(err)\nsys.exit(r.returncode)\n")
+        (shim / "git").chmod(0o755)
+        os.environ.update(PATH=f"{shim}{os.pathsep}{os.environ['PATH']}",
+                          GIT_CONFIG_GLOBAL=str(Path(self.tmp.name) / "gitconfig"))
+        (Path(self.tmp.name) / "gitconfig").write_text("[user]\n\temail = t@t\n\tname = t\n")
+        outside = Path(self.tmp.name) / "outside"
+        outside.mkdir()
+        self.assertIn("dépôt git", subprocess.run(["git", "-C", str(outside), "status"],
+                                                  capture_output=True, text=True).stderr)
+        err = self.refused("start", "t-fr", "--spec", str(self.spec), "--repo", str(outside))
+        self.assertIn("is not inside a git repository: wb init", err)
+        self.assertIn("git repo on", run_wb("init", str(outside)))
 
     def test_a_repo_git_refuses_is_reported_with_gits_reason(self):
         # the audit: dubious ownership read as "not inside a git repository: wb init", which

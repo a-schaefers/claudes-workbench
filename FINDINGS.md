@@ -170,7 +170,7 @@ time.~~** **Fixed (#202).** Both; source.
 - **Fix:** keep both: the key for routing and selection, the effective upstream id for
   availability, loading and placement.
 
-**15. Localized git blocks `wb init`, and with it the first-run sample.** Codex; source (no
+**15. ~~Localized git blocks `wb init`, and with it the first-run sample.~~** **Fixed (#207).** Codex; source (no
 French locale installed here).
 - `cmd_init` recognizes an empty directory by the English text "not a git repository"
   (`cli.py:2310`), and the sample calls it (`cli.py:2602`). `wb start` has the same check
@@ -252,7 +252,7 @@ third task's requests then queue inside Ollama while its silence budget runs. **
 holders per server and model against the limit, and start a task's clocks only once it's
 admitted.
 
-**23. macOS lacks parts of the Linux safety net.** Both; source.
+**23. ~~macOS lacks parts of the Linux safety net.~~** **Fixed (#208);** the native macOS run is a 1.2 release gate. Both; source.
 - `sweep` needs /proc (`runner.py:231`), and PDEATHSIG is Linux-only (`lane.py:163`). `reap`
   clears `agent_pid` without killing its group (`cli.py:159`). After an abrupt runner death, the
   agent (`runner.py:438`) keeps editing a task reported as failed and keeps the model busy.
@@ -309,7 +309,7 @@ an empty profile.
 
 ## P3: polish
 
-- **Locale:** the `wb` CLI itself, unlike the runner (which uses `-X utf8`), reads and writes
+- **~~Locale:~~** **Fixed (#207: the launchers re-exec with `-X utf8`).** The `wb` CLI itself, unlike the runner (which uses `-X utf8`), reads and writes
   several files without an encoding (`cli.py:965, 1180, 1895, 1910, 2008, 2437`). Under a legacy
   non-UTF-8 locale this can raise. Give every text read and write an explicit UTF-8 encoding, as
   `store.py` already does.

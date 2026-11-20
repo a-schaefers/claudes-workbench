@@ -727,6 +727,26 @@ class Remote(unittest.TestCase):
                 code = e.code or 0
         return code, out.getvalue() + err.getvalue()
 
+    def test_a_macs_own_lan_address_is_this_machine_without_ip(self):
+        # the 2026-11-19 audit: macOS has no `ip`, so a provider at the Mac's own LAN address
+        # counted as remote and its model was left out
+        ifconfig = ("lo0: flags=8049<UP,LOOPBACK> mtu 16384\n\tinet 127.0.0.1 netmask 0xff000000\n"
+                    "\tinet6 fe80::1%lo0 prefixlen 64 scopeid 0x1\n"
+                    "en0: flags=8863<UP,BROADCAST> mtu 1500\n\tinet 192.168.1.23 netmask 0xffffff00 "
+                    "broadcast 192.168.1.255\n\tinet6 fe80::1c2b:3d4e:5f60:7182%en0 prefixlen 64\n")
+
+        def run(argv, **kw):
+            if argv[0] == "ip":
+                raise FileNotFoundError(argv[0])
+            return subprocess.CompletedProcess(argv, 0, ifconfig if argv[0] == "ifconfig" else "", "")
+        models._own_addresses.cache_clear()
+        self.addCleanup(models._own_addresses.cache_clear)
+        with mock.patch.object(models.subprocess, "run", run), \
+                mock.patch.object(models.socket, "getaddrinfo", side_effect=OSError):
+            self.assertTrue(models._this_host("192.168.1.23"))
+            self.assertTrue(models._this_host("fe80::1c2b:3d4e:5f60:7182"))
+            self.assertFalse(models._this_host("192.168.1.24"))
+
     def test_wb_remote_registers_the_tool_models_of_another_machines_ollama_and_remove_undoes_it(self):
         ctx = {"llama.context_length": 131072}
         srv, port = fake_remote_ollama(
@@ -1046,6 +1066,19 @@ class Launchers(unittest.TestCase):
         prevent = [l.split("=", 1)[1].split() for l in unit.splitlines()
                    if l.startswith("RestartPreventExitStatus=")]
         self.assertEqual(prevent, [["78"]])  # never 75: chat.py exits 75 to be restarted
+
+    def test_a_legacy_locale_still_reads_and_writes_utf8(self):
+        # the 2026-11-19 audit: under a non-UTF-8 locale wb's reads and writes without an
+        # encoding used that one, so a note with an accent was a traceback
+        import subprocess
+        with tempfile.TemporaryDirectory() as home:
+            Path(home, "notes.md").write_text("- café: naïve ✓\n", encoding="utf-8")
+            env = {**os.environ, "WB_HOME": home, "LC_ALL": "C", "PYTHONCOERCECLOCALE": "0",
+                   "PYTHONUTF8": "0"}
+            r = subprocess.run([sys.executable, str(self.ROOT / "bin" / "wb"), "notes"], env=env,
+                               capture_output=True, timeout=30)
+            self.assertEqual(r.returncode, 0, r.stderr.decode(errors="replace"))
+            self.assertIn("café: naïve ✓", r.stdout.decode())
 
     def test_a_supported_python_runs_the_package(self):
         r = self.launch("wb", "pass")
