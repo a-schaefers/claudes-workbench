@@ -227,12 +227,20 @@ def shot(task: store.Task, cmd: str, files: list[str] | None = None, viewport: s
         env = f"WB_SHOT_OUT=./{SHOT} WB_SHOT_VIEWPORT={viewport} "
         code, text = _run(task, checkout, env + f"sh -c {shlex.quote(cmd)}", limit, keep, setup)
         (out / f"{side}.txt").write_text(text, encoding="utf-8")
-        meta[side].update(exit=code, image=str(dest) if dest.exists() else None)
-        if not dest.exists():  # said, never hidden: the ordinary code review still stands
+        # a capture that exits nonzero failed, PNG or not: one that wrote its image and exited 7
+        # on both sides printed two normal-looking paths (#268, the audit of 1.2)
+        ok = code == 0 and dest.exists()
+        meta[side].update(exit=code, ok=ok, image=str(dest) if dest.exists() else None)
+        if not ok:  # said, never hidden: the ordinary code review still stands
             meta[side]["error"] = (f"exit {code}" if code != 0 else "no PNG at $WB_SHOT_OUT") + \
                 f": {out / (side + '.txt')}"
     store.write_json(out / "shots.json", meta)
     return {**meta, "dir": str(out)}
+
+
+def shot_ok(side: dict) -> bool:
+    """Whether one side's capture worked: exit 0 and a PNG (a shots.json before #268: a PNG)."""
+    return bool(side.get("ok", side.get("image")))
 
 
 def shot_lines(m: dict) -> list[str]:
@@ -240,9 +248,10 @@ def shot_lines(m: dict) -> list[str]:
            f"(`{m['cmd']}`):"]
     for side in ("base", "candidate"):
         x = m[side]
-        out.append(f"  {side} {x['rev'][:10]}: " + (x["image"] if x.get("image") else
-                                                    f"no image: {x['error']}"))
-    if not (m["base"].get("image") and m["candidate"].get("image")):
+        out.append(f"  {side} {x['rev'][:10]}: " + (
+            f"{x['image']} (exit 0)" if shot_ok(x) else
+            f"failed, {x['error']}" + (f" (the PNG it wrote anyway: {x['image']})" if x.get("image") else "")))
+    if not (shot_ok(m["base"]) and shot_ok(m["candidate"])):
         out.append("  a capture failed: the code review stands on its own")
     return out
 

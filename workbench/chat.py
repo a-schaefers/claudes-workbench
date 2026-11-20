@@ -127,13 +127,15 @@ def shots(task: str, n) -> dict | None:
         return None
     return {"task": task, "n": n, "step": m.get("step"), "round": m.get("round"),
             "viewport": m.get("viewport"),
-            **{s: {"rev": (m.get(s) or {}).get("rev"), "image": bool((m.get(s) or {}).get("image"))}
+            # a capture that failed shows no image, even when it wrote one (#268; verify.shot_ok)
+            **{s: {"rev": (x := m.get(s) or {}).get("rev"), "image": bool(x.get("ok", x.get("image"))),
+                   **({"exit": x["exit"]} if x.get("exit") not in (None, 0) else {})}
                for s in ("base", "candidate")}}
 
 
 def shot_png(task: str, n: int, side: str) -> bytes | None:
     """One side's screenshot, never through a link: it is wb shot's own copy."""
-    if side not in ("base", "candidate") or not shots(task, n):
+    if side not in ("base", "candidate") or not (s := shots(task, n)) or not s[side]["image"]:
         return None
     p = store.Task(task).dir / "shots" / str(n) / f"{side}.png"
     try:
