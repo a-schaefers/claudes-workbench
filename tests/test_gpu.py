@@ -326,6 +326,28 @@ with models.GpuLease(None, optimize.HOLDER, wait=False):
         t.join(30)
         self.assertEqual(len(done[0]), 1)
 
+    def test_wb_audio_refuses_while_a_task_holds_the_gpu_but_a_cpu_engine_runs_beside_it(self):
+        # #395: an engine that says "gpu": false (a small speech model) takes no lease, so it
+        # makes a voice line while a coding task runs; a GPU engine refuses like wb image
+        os.environ["WB_FAKE_GPU_GB"] = "48"
+        tmp = Path(self.tmp.name)
+        engine = tmp / "engine.py"
+        engine.write_text("import sys, wave\nw = wave.open(sys.argv[1], 'wb')\nw.setnchannels(1)\n"
+                          "w.setsampwidth(2)\nw.setframerate(8000)\nw.writeframes(b'\\x00\\x20' * 800)\nw.close()\n")
+        cmd = f"{sys.executable} {engine} {{out}}"
+        (tmp / "audio.json").write_text(json.dumps({"gpu": {"command": cmd},
+                                                    "cpu": {"command": cmd, "gpu": False}}))
+        os.environ["WB_AUDIO"] = str(tmp / "audio.json")
+        self.start("t-big", "hang", "--model", BIG)
+        wait_running("t-big")
+        said = self.refused("audio", "hello", "--n", "1", "--out", str(tmp / "o"))
+        self.assertIn("task t-big", said)
+        self.assertIn("wb audio needs it to itself", said)
+        self.assertIn("1 clip(s)", run_wb("audio", "hello", "--n", "1", "--engine", "cpu",
+                                          "--out", str(tmp / "o")))
+        self.assertEqual([h["task"] for h in models.holders().values()], ["t-big"])
+        run_wb("stop", "t-big")
+
     def test_a_share_ollama_couldnt_keep_falls_back_to_the_gpu_alone(self):
         # need() guesses a model's context before it loads; when it's short, Ollama evicts or
         # splits a model and two tasks reload theirs on every request (the 2026-11-16 audit)

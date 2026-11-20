@@ -20,7 +20,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))  # run as a scri
 
 from unittest import mock
 
-from workbench import context, images, models, router, store, watch
+from workbench import context, images, media, models, router, store, watch
 from tests.test_workbench import Base, TEST_CMD, run_wb, wait_phase
 
 
@@ -473,8 +473,8 @@ class Real(unittest.TestCase):
         self.config({"one": {"options": {"baseURL": srv + "/v1"}, "models": {"z": {}}}})
         self.assertEqual([m.id for m in models.resident()], ["one/z"])
         said, t0 = [], time.time()
-        with mock.patch.object(images.hardware, "gpus", lambda windows=True: []):
-            images._settle(said.append, timeout=30)
+        with mock.patch.object(media.hardware, "gpus", lambda windows=True: []):
+            media.settle(said.append, timeout=30)
         self.assertLess(time.time() - t0, 5)
         self.assertEqual(said, [])
 

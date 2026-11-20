@@ -21,7 +21,7 @@ from contextlib import contextmanager, redirect_stderr, redirect_stdout
 from pathlib import Path
 from types import SimpleNamespace
 
-from . import (__version__, ask_mcp, bench, chat, context, gitops, hardware, images, lane, lessons, models,
+from . import (__version__, ask_mcp, audio, bench, chat, context, gitops, hardware, images, lane, lessons, models,
                optimize, progress, results, router, savings, scan, skills, spend, store, transcript,
                tuning, verify)
 from .watch import Watcher, wait_exit
@@ -2282,6 +2282,8 @@ def cmd_scout(a):
         print("  " + said)
     print("\nimage engines (wb image)")
     print("\n".join(image_lines()) or f"  none: describe one in {images.config_path()}")
+    print("\naudio engines (wb audio)")
+    print("\n".join(audio.lines()) or f"  none: describe one in {audio.config_path()}")
     provs = models.providers()
     registered = models.discover()
     print("\nmodel servers here (work with what the user runs)")
@@ -2625,6 +2627,29 @@ def cmd_image(a):
           "holds its prompt and seed")
 
 
+def cmd_audio(a):
+    """Local audio: Claude writes the brief, reads each candidate's checks (it can't hear them),
+    keeps one or asks the user to listen."""
+    if a.list or not a.text or a.text.strip().lower() in ("list", "ls"):
+        print("\n".join(audio.lines()) or f"no audio engine: describe one in {audio.config_path()}")
+        return
+    lyrics = ""
+    if a.lyrics:
+        try:
+            lyrics = sys.stdin.read() if a.lyrics == "-" else Path(a.lyrics).read_text()
+        except OSError as e:
+            die(f"--lyrics {a.lyrics}: {e.strerror or e}")
+    out = Path(a.out) if a.out else store.home() / "audio" / time.strftime("%Y%m%d-%H%M%S")
+    try:
+        made = audio.generate(a.text, out, kind=a.kind, n=a.n, seconds=a.seconds, voice=a.voice,
+                              lyrics=lyrics.strip(), refs=a.ref or [], seed=a.seed, name=a.engine,
+                              check=not a.no_check, say=lambda m: print(m, flush=True), wait=a.wait)
+    except (KeyError, RuntimeError, OSError, subprocess.TimeoutExpired) as e:
+        die(str(e).strip("'\""))
+    print(f"{len(made)} clip(s) in {out}: you can't hear them, so read each check line and look at "
+          "each spectrogram; for music or a voice's character, ask the user to listen")
+
+
 def cmd_model(a):
     """Add a model to OpenCode's config (pulling it first with --pull), or retire one."""
     if a.action == "sizes":
@@ -2911,7 +2936,7 @@ def cmd_init(a):
 # config layers and shims) is nothing the mod reads; each closed task is skipped too (cmd_events):
 # a thousand finished tasks were 4,000 inotify watches per Claude session, or a rescan of them
 # four times a second without inotify (the 2026-11-16 audit).
-EVENT_SKIP = ("tasks/*/worktree", "tasks/*/tree", "tasks/*/rounds", "rules", "imports", "images",
+EVENT_SKIP = ("tasks/*/worktree", "tasks/*/tree", "tasks/*/rounds", "rules", "imports", "images", "audio",
               "archive",  # clones (tree/: one nested for a sibling further up, #261), outputs
               # and the scratch clones and indexes (the base check, verify, shot, bench, a
               # submodule fill, a merge): one with a copied node_modules took a wb events from 2
@@ -3756,6 +3781,25 @@ def parser() -> argparse.ArgumentParser:
     s.add_argument("--wait", action="store_true", help="wait for the tasks holding the GPU instead "
                    "of refusing (long: run it in the background)")
     s.set_defaults(f=cmd_image)
+    s = sub.add_parser("audio", help="generate speech, sound effects or music with a local audio "
+                       "model, each candidate checked for Claude, who can't hear it")
+    s.add_argument("text", nargs="?", help="the script (speech) or the description (sfx, music)")
+    s.add_argument("--kind", choices=audio.KINDS, help="the first engine of this kind (default: "
+                   "the first engine)")
+    s.add_argument("--n", type=int, default=3, help="candidates (seeds SEED, SEED+1, ...)")
+    s.add_argument("--seconds", type=float, help="the length, for engines that take one")
+    s.add_argument("--voice", help="one of the engine's voices")
+    s.add_argument("--ref", action="append", help="a reference clip (repeatable): a voice the "
+                   "user has the right to, for engines that take them")
+    s.add_argument("--lyrics", metavar="FILE", help="lyrics for a song (- reads stdin)")
+    s.add_argument("--seed", type=int)
+    s.add_argument("--engine", help="an engine from audio.json")
+    s.add_argument("--out", help="directory (default: a new one under $WB_HOME/audio)")
+    s.add_argument("--no-check", action="store_true", help="skip the listener and the spectrograms")
+    s.add_argument("--list", action="store_true", help="the configured engines")
+    s.add_argument("--wait", action="store_true", help="wait for the tasks holding the GPU instead "
+                   "of refusing (long: run it in the background)")
+    s.set_defaults(f=cmd_audio)
     s = sub.add_parser("answer", help="answer the agent's ask_reviewer question")
     s.add_argument("name"); s.add_argument("--id")
     g = s.add_mutually_exclusive_group(required=True)

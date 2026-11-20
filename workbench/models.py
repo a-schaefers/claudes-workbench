@@ -1435,7 +1435,7 @@ class GpuLease:
         with store.locked(self.home / f"{self.pool}.admit"):
             held = {p: h for p, h in self._holders().items() if p != self.me}
             if held and self.m is None and not self.wait:
-                raise RuntimeError(busy(held, "wb image needs it to itself. Run it once they "
+                raise RuntimeError(busy(held, f"{self.task} needs it to itself. Run it once they "
                                         "are in review (answer one that asks first), or with "
                                         "--wait, in the background, to queue behind them"))
             if admits(self.m, held):

@@ -21,7 +21,7 @@ import tempfile
 import time
 from pathlib import Path
 
-from . import chat, gitops, hardware, images, models, skills, store
+from . import audio, chat, gitops, hardware, images, models, skills, store
 
 PKG_ROOT = Path(__file__).resolve().parent.parent
 HANDBOOK = PKG_ROOT / "agent" / "HANDBOOK.md"
@@ -324,7 +324,8 @@ def private_paths() -> set[str]:
     the config (the chat token, commands.json). The 2026-11-16 audit read the chat token from a
     lane, which would let an agent post to Claude as the user."""
     paths = [store.home(), Path.home() / ".config" / "workbench", commands_path(),
-             chat.token_path(), chat.config_path(), models.overrides_path(), images.config_path()]
+             chat.token_path(), chat.config_path(), models.overrides_path(), images.config_path(),
+             audio.config_path()]
     whole = {"/", os.path.realpath(Path.home())}
     return {r for r in map(os.path.realpath, paths) if r not in whole}
 

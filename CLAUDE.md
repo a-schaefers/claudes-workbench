@@ -124,7 +124,8 @@ dependencies. No packaging: it runs from the clone.
 - `watch.py`: waiting without polling: inotify (ctypes) and pidfd, with a stat fallback.
 - `chat.py` + `chat_static/`: the web chat (stdlib HTTP, a token and a Host check); `webpush.py`,
   its notifications.
-- `images.py`: `wb image`, local image engines from `images.json`; holds the GPU.
+- `images.py`, `audio.py`: `wb image`, `wb audio` (`images.json`, `audio.json`; sounds come checked:
+  Claude can't hear); `media.py`: what they share, the GPU too.
 - `optimize.py`: `wb optimize` (when due, or asked): each Ollama model's largest window all on the GPU.
 - `agent/HANDBOOK.md`: Claude's working habits for the agent. Every agent prompt carries it, so
   keep it short: each token costs prefill time.
@@ -190,7 +191,7 @@ Plain files under `$WB_HOME` (`~/.local/state/workbench`); the full tree and eve
 ARCHITECTURE.md (*Files and formats*):
 ```
 notify{,.old}.jsonl results.jsonl lessons.jsonl notes.md coding.json progress.json tuning.json speed.json gpu*.{lock,json,admit,load}
-scout.json update.json watch.json optimize.json gc.json archive/ imports/ images/ chat/{messages,receipts,asks,seen}.jsonl chat/{listener,prefs,push,claims,switch,open,port}.json
+scout.json update.json watch.json optimize.json gc.json archive/ imports/ images/ audio/ chat/{messages,receipts,asks,seen}.jsonl chat/{listener,prefs,push,claims,switch,open,port}.json
 bench/{cases/<case>,runs/<run>}/ bench/runs.jsonl bench/driver.json
 rules/<task>/  opencode.json HANDBOOK.md CLAUDE.md bin/git grants.json gitdir.json (no lane)
 locks/<task>.{runner,cmd,status,events,steer,grants}.lock   (store.task_lock: no lane reads them)
@@ -201,7 +202,7 @@ tasks/<task>/  task.json status.json events.jsonl steer.jsonl acked context.md b
 The skill library is `~/.local/share/workbench/skills` (`$WB_SKILLS`). `~/.config/workbench/`
 holds `models.json` (what OpenCode can't say: `start`/`stop`, `skip`, `sizes`, `vram_gb`, `gpu_gb`, `keep_loaded`,
 `weights_gb`, `label`, `engine`, `local`, `remote`), `commands.json` (standing `allow` patterns, lane
-`paths`, `env` names passed to the agent, each repo's setup: `repos`), `images.json`, `chat.json`, `chat-token`,
+`paths`, `env` names passed to the agent, each repo's setup: `repos`), `images.json`, `audio.json`, `chat.json`, `chat-token`,
 `savings.json` (`kwh_price`).
 
 A model is a candidate when OpenCode loads its provider (`disabled_providers`/`enabled_providers`
@@ -220,7 +221,7 @@ trained length); every entry needs `limit.context` (a server other than Ollama: 
 server works: `wb model add <p>/<m> --url <baseURL>` writes its provider, `--start`/`--stop`
 its models.json commands; never steer a user to one server.
 
-Environment: `WB_HOME`, `WB_MODELS`, `WB_SKILLS`, `WB_IMAGES`, `WB_CHAT_TOKEN`, `WB_CHAT_CONFIG`,
+Environment: `WB_HOME`, `WB_MODELS`, `WB_SKILLS`, `WB_IMAGES`, `WB_AUDIO`, `WB_CHAT_TOKEN`, `WB_CHAT_CONFIG`,
 `WB_COMMANDS`, `WB_SAVINGS` (the paths above); `WB_OPENCODE_CONFIG` (OpenCode's config); `CLAUDE_CONFIG_DIR` (where
 `spend.py` reads Claude Code's transcripts); these may be relative
 or start with `~` (`store.absolute_env` makes them absolute against wb's cwd); `WB_COMPACT_AT` (the
@@ -236,9 +237,9 @@ unset: unknown, so no sharing).
 - State changes go through `Task.set_status` (locked read-modify-write) and `append_jsonl`.
   Never write status.json directly.
 - Never name a model in code or the skill. Models come from OpenCode's config and choices from
-  the router and the weekly model check, so newer models slot in without code changes. (The test
-  fixtures, the real-run instruction above and ARCHITECTURE.md's image setup
-  are the only places that name one.)
+  the router and the weekly model check, so newer models slot in without code changes. (Only the test
+  fixtures, the real-run instruction above and ARCHITECTURE.md's image and audio setup
+  name one.)
 - The launchers and the runner find the package by path. `-I` drops `PYTHONPATH`, so use it only
   where the path is inserted in code (the git shim) or nothing outside the standard library is
   imported (the lane, run as a file); never rely on `PYTHONPATH` under `-I`.
@@ -298,18 +299,16 @@ denials, compound shell commands, rule order, git by path, the edit rule, PATH, 
   command past 2 minutes goes to the background and the turn ends with a `background_wait` line.
 
 ## Troubleshooting
-- `wb doctor`: what an install lacks, each with its fix (every check: ARCHITECTURE.md, *Every
-  `wb` command*).
-- A model "can't run": `wb models` says why (server down, not pulled, no `start` command), and
-  `wb start` adds the next step.
+- `wb doctor`: what an install lacks, each with its fix.
+- A model "can't run": `wb models` says why, and `wb start` adds the next step.
 - A task misbehaves: `wb log <t> -v`, `wb watch <t> -v`, `tasks/<t>/runner.log` (the runner's
   output and OpenCode's stderr, including `workbench lane: the kernel refused the lane`).
 - The agent can't see `ask_reviewer`: `PWD=<worktree> OPENCODE_CONFIG=<state>/rules/<task>/opencode.json
   opencode mcp list --print-logs`.
 - The mod does nothing: `wb` must be on Claude Code's PATH (`WB_BIN` moves only the mod's calls;
-  Claude's Bash still runs `wb` by name; the mod toasts once when it can't run `wb events`); a
+  the mod toasts once when it can't run `wb events`); a
   task started in another live session wakes that session, not this one; `claude --debug`
   shows hook errors.
 - A test fails: the task's `runner.log` is under the test's temp `WB_HOME`;
-  `wait_phase` prints the status when it times out. An interrupted run can leave runners and
+  `wait_phase` prints the status on a timeout. An interrupted run can leave runners and
   fakes behind.

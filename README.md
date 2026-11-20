@@ -23,9 +23,11 @@ Claude Code plugin that connects the two inside your normal Claude Code session.
 - **It's still just Claude Code.** You talk to Claude as usual, your plugins, skills and settings
   keep working, and the agents work on their own branches, so your checkout is untouched until
   you accept.
-- **Beyond code: images and audio.** Optionally, Claude art-directs local image and audio models
-  too, making a project's icons, illustrations, voice and sound, and keeps the takes it likes
-  ([images](ARCHITECTURE.md#images)).
+- **Beyond code: images and audio.** Optionally, Claude directs local image and audio models
+  too, making a project's icons, illustrations, voice lines, sound effects and music. It looks at
+  every image; it can't hear, so each sound comes with a transcript and measurements it can read,
+  and for music you have the last word ([images](ARCHITECTURE.md#images),
+  [audio](ARCHITECTURE.md#audio)).
 
 On bigger coding tasks, once the session is already open, handing the coding off to the local
 model typically costs Claude about half the tokens of writing the code itself
@@ -42,7 +44,8 @@ model typically costs Claude about half the tokens of writing the code itself
   and a 32K context window recommended, 16K at the least). **None yet?** Claude suggests one that fits your hardware and
   asks before installing or downloading anything.
 - (optional) An image or audio model, for pictures and sound. The first time a project needs one,
-  Claude proposes a model that fits your GPU and its licence, and asks before downloading it.
+  Claude proposes a model that fits your machine and your use's licence, and asks before
+  downloading it. Small speech models run on the CPU; music wants a GPU.
 
 ### In your terminal
 

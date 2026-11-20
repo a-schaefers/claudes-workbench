@@ -14,7 +14,7 @@ Contents: [The pieces](#the-pieces) · [Why it's built this way](#why-its-built-
 [What the agent knows](#what-the-agent-knows) · [Talking to a running agent](#talking-to-a-running-agent) ·
 [Context, on both sides](#context-on-both-sides) · [Waking Claude, exactly once](#waking-claude-exactly-once) ·
 [Seeing what the agent does](#seeing-what-the-agent-does) · [Models](#models-found-loaded-chosen) ·
-[Bench](#bench-real-tasks-replayed) · [The skill library](#the-skill-library) · [Images](#images) · [Git, commits and projects](#git-commits-and-projects) ·
+[Bench](#bench-real-tasks-replayed) · [The skill library](#the-skill-library) · [Images](#images) · [Audio](#audio) · [Git, commits and projects](#git-commits-and-projects) ·
 [The web chat](#the-web-chat) · [Stopping everything](#stopping-everything) · [The mod, inside](#the-mod-inside) ·
 [Waiting without polling](#waiting-without-polling) · [Every `wb` command](#every-wb-command) ·
 [Files and formats](#files-and-formats) · [The tests](#the-tests) · [Couplings](#couplings-change-one-change-the-other)
@@ -41,7 +41,7 @@ Contents: [The pieces](#the-pieces) · [Why it's built this way](#why-its-built-
 - **`/workbench`** (`skill/workbench/SKILL.md`, linked to `~/.claude/skills/workbench`) turns
   workbench mode on for the session and is Claude's procedure in it: size the work, write the
   spec, dispatch, drive, review, accept. SKILL.md holds what every session needs; what only some
-  do (model servers and the weekly check, the agents' skill library, images, steering and
+  do (model servers and the weekly check, the agents' skill library, images, audio, steering and
   check-ins, handovers, permissions, the web and the web chat, the checks for a spec Claude
   wrote) is in `reference/*.md` beside it, read when it comes up: every line of SKILL.md rides
   along on each of Claude's calls (it was 46KB; the 2026-11-17 measurement; 34KB to 30KB on
@@ -261,7 +261,8 @@ CLAUDE.md, the user's decisions, the review checks) marked apart.
   to wait for it)" only when its server is just down (`models.may_come_up`); `--force` queues it
   regardless. The runner waits for a server that is just down (*Waiting for a server that is
   down*), and its load (`make_resident`) fails it before freeing the GPU if it still can't run.
-- Two projects, one GPU: when another task holds the GPU (or waits for it, or `wb image` does)
+- Two projects, one GPU: when another task holds the GPU (or waits for it, or `wb image` or a
+  GPU engine of `wb audio` does)
   and the new task's model couldn't run beside it (`models.admits`: the same rule the lease
   uses), it refuses before making anything, exit 4, with one line naming each holder's task,
   repo and model and the two ways out: `--queue` (start anyway and wait behind it) or doing the
@@ -1060,7 +1061,7 @@ deliberately hostile process (the 2026-11-16 audit's list of what it can't stop 
   credentials) and Claude's directory (`secret_paths`); and workbench's own files
   (`private_paths`): `$WB_HOME` (notify.jsonl, the chat log, the rules, other tasks) and its
   config (`~/.config/workbench` and wherever `WB_COMMANDS`, `WB_CHAT_TOKEN`, `WB_CHAT_CONFIG`,
-  `WB_MODELS`, `WB_IMAGES` moved its files): the audit read the chat token from a lane, which
+  `WB_MODELS`, `WB_IMAGES`, `WB_AUDIO` moved its files): the audit read the chat token from a lane, which
   would let an agent post to Claude as the user. Of `$WB_HOME`, the task's own directory and
   `rules/<task>/` stay readable (its prompts and spec; its OpenCode config, instructions and git
   shim). Left readable on purpose: `.npmrc` and
@@ -2052,8 +2053,8 @@ reboot doesn't hold the GPU forever. `admits(m, held)`: no holder is waiting, ev
 model still resolves, and there are no holders or `can_share` passes; then a runner joins with
 `LOCK_SH|LOCK_NB` on `gpu.lock` (so a task alone holds the lock shared). Otherwise it marks
 itself `waiting`, says "waiting for the GPU (held by <task>…)" and waits its turn: first come,
-first served by the entry's `since` (when its task started, `task.json` `created_at`; a `wb image`,
-when it asked), then task name. A waiting lease holds no lock (`_take_alone` drops it first:
+first served by the entry's `since` (when its task started, `task.json` `created_at`; a `wb image`
+or `wb audio`, when it asked), then task name. A waiting lease holds no lock (`_take_alone` drops it first:
 one let in sharing whose load then misfit kept its shared lock while second in line, so the first's
 `LOCK_EX` never succeeded and every later task queued behind the two, #366). Only the first waiting
 entry tries `LOCK_EX|LOCK_NB`; the others wait for gpu.json to change (`watch.Watcher`, at least every `QUEUE_POLL` 1 s). A blocking flock
@@ -2076,7 +2077,7 @@ for that one to finish). If not, it warns "ollama could not fit … waiting for 
 unloads its own model (unless a holder runs the same model: it is theirs too), marks itself
 waiting and takes its turn as above (its shared lock dropped first), then loads alone.
 `gpu.json` is `{"<pid>": {model, task, since, start, waiting?}}`. `wb image` takes `gpu.lock` through
-`GpuLease(None, "wb image", wait=…)`: with `--wait` it queues in `gpu.json` like a task with no
+`GpuLease(None, "wb image", wait=…)` (`wb audio`: `"wb audio"`, and the refusal names which): with `--wait` it queues in `gpu.json` like a task with no
 model, waits for the running tasks to finish, then has the GPU to itself; while it holds or waits
 for the GPU, `wb start` refuses a new task (exit 4, see *Two projects, one GPU*) unless `--queue`,
 and `wb feedback`/`next`/`resume` queue behind it; without `--wait`, any live holder makes it
@@ -2270,7 +2271,7 @@ no local model can run. `wb scout` prints the facts, read fresh: the machine (`h
 Ollama's default context, every registered model (size, quantization, context, slice, real-task
 record), installed models that aren't registered, the watch list (`watch.json`: models set aside
 and what would bring each back; `--watch TEXT`, `--unwatch N`), flagged skills, waiting lessons,
-image engines. Claude researches what's newest from primary sources, recommends keep / add /
+image and audio engines (their licences change too: OmniVoice went non-commercial in 2026-07). Claude researches what's newest from primary sources, recommends keep / add /
 retire in a few lines and changes nothing without the user's yes; `wb scout --done --notes "…"`
 records it (`scout.json` `done_at`, notes). `--due` says whether one is due.
 
@@ -2721,12 +2722,12 @@ Prefer weights in safetensors or GGUF from the model's own publisher or a well-k
 quantizer. Prefer tools that load models without running code that comes with them (ComfyUI's
 custom-node packs do run their own Python).
 
-**How it works** (`workbench/images.py`, `cli.cmd_image`).
+**How it works** (`workbench/images.py`, `cli.cmd_image`; what audio shares is in `workbench/media.py`).
 - `images.json` (`$WB_IMAGES`, default `~/.config/workbench/images.json`) maps an engine name to an
   entry; the first entry is the default, non-object values are ignored. Keys: `command` or `url`,
   `ref_arg`, `model`, `label`, `notes` (shown to Claude: put the licence there), `timeout` (s,
   default 1800).
-- A command engine (`_argv`): `shlex.split(command)`, `~` expanded per token, then `{prompt}`,
+- A command engine (`_argv`, through `media.fill`): `shlex.split(command)`, `~` expanded per token, then `{prompt}`,
   `{out}`, `{width}`, `{height}`, `{seed}` filled in, token by token, in one pass (a prompt that
   says `{seed}` reaches the engine as written; it used to get the seed and the out path), never
   through a shell; `--ref` images are appended as `[ref_arg, path]` pairs (both `command` and `ref_arg` are
@@ -2736,11 +2737,11 @@ custom-node packs do run their own Python).
   model]}` (no auth header), decode `data[0].b64_json`.
 - Ready (`ready`, shown by `wb image --list` and `wb scout`): a command whose first token is on
   PATH or a file; a url whose server answers a GET (any status) within 2 s.
-- `generate`: holds the GPU for the whole batch through `models.GpuLease(None, "wb image",
+- `generate`: holds the GPU for the whole batch through `media.gpu`, that is `models.GpuLease(None, "wb image",
   wait=…)` (any live holder in gpu.json: a RuntimeError naming them, unless `--wait`; then it
   queues in gpu.json behind the running tasks; while it holds or waits, `wb start` refuses a new
   task (exit 4) unless `--queue`, and `wb feedback`/`next`/`resume` queue behind it), calls
-  `models.free_gpu()` with nothing kept, then `_settle` (up to 90 s for what free_gpu can release,
+  `models.free_gpu()` with nothing kept, then `media.settle` (up to 90 s for what free_gpu can release,
   `models.releasable`: local Ollama models and servers with a stop command, to go, and used VRAM
   to stop falling, after an engine started a second after the unload found 1.1 GB of 16 free; a
   server with no stop command or a remote model used to cost every generation the whole 90 s;
@@ -2749,11 +2750,118 @@ custom-node packs do run their own Python).
   `{prompt, seed, width, height, engine, refs, secs, ts}`. Each is made in a fresh temporary
   directory inside the output directory (`.wb-image-*`), refused when the engine wrote nothing
   there, then published with its sidecar under the first of `<slug>-<seed>.png`,
-  `<slug>-<seed>-2.png`, … that has neither (`images._free`): two prompts with the same first six
+  `<slug>-<seed>-2.png`, … that has neither (`media.free`): two prompts with the same first six
   words and seed wrote one PNG, the second over the first, and an engine that exited 0 without
   writing anything passed on the old PNG with its sidecar rewritten (#267, the audit of 1.2). An
   earlier candidate is never replaced. `--out` defaults to
   `$WB_HOME/images/<YYYYmmdd-HHMMSS>/`.
+
+## Audio
+
+Claude can make sounds for a project (a voice line or narration, a sound effect, a music loop)
+with an audio model on the user's machine, the way it makes images (*Images*), with one
+difference: **Claude can't hear.** So `wb audio` gives every candidate checks Claude can read,
+and the skill says which judgements stay the user's:
+- its length against the one asked for, its peak and clipping, its silences (lead, tail, and gaps
+  of a second or more in the middle: a music model cut short, a sound effect that stops), and its
+  loudness (LUFS, with ffmpeg);
+- a spectrogram picture (`.png`, with ffmpeg), which Claude *can* look at: a dead track, a hard
+  cut, noise where a footstep should be;
+- for speech, a **listener**, a speech recognition engine that transcribes each candidate back,
+  scored against the script as a word error rate: a skipped clause or a fumbled word shows.
+
+Taste (a song, a voice's character) is the user's: Claude shortlists on the checks and asks the
+user to listen. The keeper goes into the project, converted with ffmpeg as the project needs, and
+is committed with what its `.json` sidecar says made it, like an image. The coding agents can't
+make audio; one that needs a sound asks Claude. Still to come (milestone 1.90): the measured real
+runs (#396), a player in the web chat so the user can pick by ear (#397), and the weekly model
+check re-checking the audio picks (#398).
+
+**Setting it up is optional.** Claude offers it the first time a project needs a sound and never
+installs anything unasked (the skill's `reference/audio.md`). The recommended runtime is
+[audio.cpp](https://github.com/0xShug0/audio.cpp): Apache-2.0, C++ on ggml with no Python at
+inference, on Vulkan, CUDA, HIP, Metal or the CPU, and one CLI for speech, sound effects, music
+and speech recognition, prebuilt for Linux and macOS. The models are picked by licence first:
+some of the best liked aren't free for commercial use (OmniVoice since 2026-07, Breeze TTS 2,
+YuE2, CrisperWhisper), and some are only below a revenue line (Stable Audio 3). What the plan
+proposes, each checked at setup against its licence text:
+
+| Kind | Model | Licence | Note |
+|---|---|---|---|
+| speech | Kokoro-82M | Apache-2.0 | small, real time on the CPU (`"gpu": false`), fixed voices |
+| speech | Qwen3-TTS 1.7B VoiceDesign (0.6B Base to clone) | Apache-2.0 | a voice from a description |
+| sfx | MOSS-SoundEffect v2 | Apache-2.0 | up to 30 s |
+| music | ACE-Step 1.5 | MIT | lyrics optional; the 2B turbo fits 6 GB with offload |
+| listen | Parakeet TDT 0.6B v3, or Qwen3-ASR 0.6B | CC-BY-4.0, Apache-2.0 | only checks transcripts |
+
+```sh
+git clone https://github.com/0xShug0/audio.cpp ~/.local/opt/audio.cpp && cd ~/.local/opt/audio.cpp
+cmake -S . -B build -DENGINE_ENABLE_VULKAN=ON && cmake --build build -j --target audiocpp_cli
+ln -s "$PWD/build/bin/audiocpp_cli" ~/.local/bin/audiocpp_cli  # weights: audio-cpp/audio.cpp-gguf
+```
+
+Then describe the engines in `~/.config/workbench/audio.json` (`$WB_AUDIO`). The flags below are
+audio.cpp's; check them against the installed version (some families take `--seed`, others
+`--request-option seed=`):
+
+```json
+{
+  "kokoro": {"kind": "speech", "gpu": false, "voices": ["af_heart", "am_puck"],
+             "command": "audiocpp_cli --task tts --family kokoro_tts --model ~/models/audio/kokoro --backend cpu --text {text} --voice-id {voice} --seed {seed} --out {out}",
+             "notes": "licence: Apache-2.0; English best; no cloning"},
+  "moss-sfx": {"kind": "sfx",
+               "command": "audiocpp_cli --task gen --family moss_soundeffect --model ~/models/audio/moss-soundeffect-v2-q8_0.gguf --backend vulkan --text {text} --request-option duration_sec={seconds} --request-option seed={seed} --out {out}",
+               "notes": "licence: Apache-2.0; 0.1-30 s"},
+  "parakeet": {"kind": "listen", "gpu": false,
+               "command": "audiocpp_cli --task asr --family parakeet_tdt --model ~/models/audio/parakeet-tdt-0.6b-v3 --backend cpu --audio {in}",
+               "notes": "licence: CC-BY-4.0"},
+  "server": {"kind": "speech", "url": "http://127.0.0.1:8080/v1/audio/speech", "model": "qwen3-tts",
+             "unload": "http://127.0.0.1:8080/v1/tasks/unload_all_models"}
+}
+```
+
+- A **command** engine fills `{text}`, `{out}`, `{seed}`, `{seconds}`, `{voice}` and `{lyrics}`
+  the way `wb image` fills its placeholders: one argument each, never through a shell. An option
+  the engine has no placeholder for is refused, not dropped. `ref_arg` adds `--ref` clips; clone
+  only a voice the user has the right to.
+- A **url** engine is any OpenAI `/v1/audio/speech` server (audio.cpp's `audiocpp_server`,
+  Kokoro-FastAPI, Speaches). It makes speech only, since sound effects and music have no common
+  API. `unload` is POSTed after each batch so the server lets its GPU memory go (audio.cpp's
+  `/v1/tasks/unload_all_models`), which a url image engine can't do.
+- A **listen** engine prints its transcript on stdout (`{in}` is the clip; JSON with `text` is
+  read too), or is an OpenAI `/v1/audio/transcriptions` server. The first one in the file checks
+  every speech batch.
+- `"gpu": false` marks an engine that runs on the CPU. It takes no GPU lease and frees nothing,
+  so it can run beside a coding task. Any other engine has the GPU to itself, exactly as
+  `wb image` does.
+
+**How it works** (`workbench/audio.py`, `cli.cmd_audio`; shared with images: `workbench/media.py`).
+- `audio.json` keys: `command` or `url`, `kind` (`speech`, `sfx`, `music`, `listen`; default
+  `speech`), `gpu`, `voices`, `seconds`, `unload`, `ref_arg`, `model`, `label`, `notes`,
+  `timeout` (s, default 1800; a listener's 600). `engine(name, kind)` returns the named engine
+  (refused when it's of another kind), else the first of `--kind`, else the first that isn't a
+  listener.
+- `generate` refuses, before anything runs, a voice not in `voices` and a `--voice`, `--lyrics`,
+  `--seconds` or `--ref` the engine has no slot for. It runs under `media.gpu("wb audio", …)`
+  (the lease, `free_gpu`, `settle`) unless both the engine and the listener say `"gpu": false`.
+  Each clip is made in a temporary directory (`.wb-audio-*`), checked there (`inspect`), then
+  published with its sidecar and spectrogram under the first free `<slug>-<seed>.wav`
+  (`media.free`, #267). A url engine POSTs `{model, input, voice, seed, response_format: "wav"}`
+  and saves the body. The `unload` URL is POSTed when the batch ends, whether it failed or not.
+- `inspect`: with ffmpeg, it makes a 16 kHz mono PCM copy first (the `wave` module reads only
+  integer PCM, and listeners want 16 kHz), measures loudness with `ebur128` and draws the picture
+  with `showspectrumpic`. Without ffmpeg it uses the `wave` module alone and says "loudness: no
+  ffmpeg". `levels` reads 50 ms blocks: silence is below `SILENT_DB` (-50 dBFS), a gap is
+  `GAP_SECS` (1 s) or more between sounds, and a sample at 0.999 of full scale or more counts as
+  clipped. `wer` is the word edit distance over the script's word count (lower case, apostrophes
+  kept, so the skill says to write numbers as words). A listener that fails is reported on the
+  line, not raised.
+- The line reads `3.4 s (asked 3) · peak -1.2 dBFS · -16 LUFS · lead 0.1 s, tail 0.3 s · gaps … ·
+  heard "…" WER 0%`, then the spectrogram's path. Under 80% of the asked length it adds "cut
+  short".
+- The sidecar: `{text, kind, seed, seconds, voice, lyrics, refs, engine, secs, ts, duration,
+  peak_db, clipped, lead, tail, gaps, silent?, lufs?, transcript?, wer?, listener?,
+  listen_error?, unreadable?}`. `--out` defaults to `$WB_HOME/audio/<YYYYmmdd-HHMMSS>/`.
 
 ## Git, commits and projects
 
@@ -3497,7 +3605,7 @@ and two timers. A `claude -p` run or an SDK session (neither) stays quiet, no po
 took the terminal session's wakes and the weekly check (the 2026-11-16 audit).
 
 **Ears and timers.** `ears` spawns `wb events` (cli.cmd_events: `{"hello": pid}` first, then
-`{"changed": [...]}` per batch; it skips tasks' `worktree/` and `rounds/`, closed tasks, `rules/`, `imports/`, `images/`,
+`{"changed": [...]}` per batch; it skips tasks' `worktree/` and `rounds/`, closed tasks, `rules/`, `imports/`, `images/`, `audio/`,
 `runner.log`, `*.lock`, `*.tmp` and dotfiles, and exits when its parent changes); every line runs `poll()`; when the child ends
 it is respawned after 2 s. Until a child has said hello in this load (`mem.earsOk`: wb runs),
 a failure toasts once (`can't run \`wb events\` (<why>)…: put wb on Claude Code's PATH or set
@@ -3735,7 +3843,7 @@ Every waiter and its bounded wake (a timeout to re-check what the kernel can't s
 
 | Caller | Waits on | Re-checks every |
 |---|---|---|
-| `wb events` | `$WB_HOME`, recursive, skipping `tasks/*/worktree`, `tasks/*/tree`, `tasks/*/rounds`, `rules`, `imports`, `images`, `archive`, the scratch clones and indexes (`SCRATCH`: `.?*`, `wb-index-*`, `wb-merge-*`, neither watched nor reported: one with a copied node_modules took it from 2 watches to 605, each write waking the mod, #373) and the tasks already closed when it starts (`EVENT_SKIP`) | 10 s (exits when its parent changes); every minute it reaps dead runners |
+| `wb events` | `$WB_HOME`, recursive, skipping `tasks/*/worktree`, `tasks/*/tree`, `tasks/*/rounds`, `rules`, `imports`, `images`, `audio`, `archive`, the scratch clones and indexes (`SCRATCH`: `.?*`, `wb-index-*`, `wb-merge-*`, neither watched nor reported: one with a copied node_modules took it from 2 watches to 605, each write waking the mod, #373) and the tasks already closed when it starts (`EVENT_SKIP`) | 10 s (exits when its parent changes); every minute it reaps dead runners |
 | `wb wait` | the state directory and the named task's directory | 60 s (a dead runner: `reap`) |
 | `wb log -f` | the task directory | 30 s |
 | `wb watch` | the task directory | 1.5 s on a terminal, 30 s otherwise |
@@ -3808,7 +3916,7 @@ delivered as taken (`_stale_notes`, *Notes*).
 | `wb log <task>` | `-n N` (0 all), `-f`, `-v` | The agent's events: tool calls (`HH:MM:SS rN tool brief  ✗ error`), text, questions, answers, stops, auto-fixes, rounds, tests, errors. `-f` follows until the task needs Claude or is closed, looking at the phase before each wait (on a finished task it returns at once: it waited 30 s, #90) and printing the events that came with it. |
 | `wb report <task>` | `--round N` | The round's summary.md. |
 | `wb diff <task> [paths…]` | `--stat`, `--all` | The worktree against the task's base, or after `wb next` against the last committed step (`--all`: the whole branch); new files included. |
-| `wb events` | | `{"hello": pid}`, then `{"changed": [paths]}` whenever `$WB_HOME` changes (not tasks' worktrees and rounds, closed tasks, `rules/`, `imports/`, `images/`, `runner.log`, `*.lock`, `*.tmp`, dotfiles); reaps dead runners once a minute; exits when its parent does. The mod's ears. |
+| `wb events` | | `{"hello": pid}`, then `{"changed": [paths]}` whenever `$WB_HOME` changes (not tasks' worktrees and rounds, closed tasks, `rules/`, `imports/`, `images/`, `audio/`, `runner.log`, `*.lock`, `*.tmp`, dotfiles); reaps dead runners once a minute; exits when its parent does. The mod's ears. |
 
 ### Models, skills, lessons, notes
 | Command | Flags | What it does |
@@ -3841,6 +3949,7 @@ delivered as taken (`_stale_notes`, *Notes*).
 | Command | Flags | What it does |
 |---|---|---|
 | `wb image "<prompt>"` | `--n` (4), `--size WxH` (1024x1024), `--seed`, `--ref <img>…`, `--out DIR`, `--engine`, `--list`, `--wait` | Candidates from a local image engine (see *Images*). While anything holds the GPU it refuses at once, naming the holders; `--wait` queues behind them. A bare `list` or `ls` as the prompt acts as `--list`. |
+| `wb audio "<text>"` | `--kind speech\|sfx\|music` (default: the first engine), `--n` (3), `--seconds S` (engines with `{seconds}`; default the entry's `seconds`, else 5 for sfx, 30 for music, 10 otherwise), `--voice NAME` (default: the entry's first of `voices`), `--ref <clip>…`, `--lyrics FILE\|-`, `--seed`, `--engine`, `--out DIR`, `--no-check` (no listener, no spectrograms), `--list`, `--wait` | Clips from a local audio engine, each with one line of checks (see *Audio*). A GPU engine refuses while anything holds the GPU (`--wait` queues); a `"gpu": false` engine runs beside tasks. A bare `list` or `ls` acts as `--list`. An option the engine has no placeholder for is refused, naming it. |
 | `wb chat [log\|on\|off\|serve\|url\|reply\|ack\|claim\|pending\|ask\|wait\|answer]` | `on`, `off` (the switch, kept; `on` starts a server when none answers on `--port`, waits for it, and prints the link; it refuses when another program answers there, `off` stops only one it started), `--port` (the running server's, from `chat/port.json`, else 1337: #349), `--bind` (replaces chat.json's), `--host` (adds), `--text`, `--message <file\|->` (reply reads stdin without either), `-n` (10); `ack <id> --by --how`, `claim <id> --by` (exit 1: another session's), `ask --tool --kind permission\|plan\|question --text --detail <json> --session --repo` (a plan's session and directory; prints `<id> open`, `<id> allow` when the user's setting answered it, or `<id> expired` for a plan it can't read), `wait <id> --timeout` (30 s; prints allow, deny, expired, or `open` at the timeout; `--json`: the whole ask), `answer <id> allow\|deny\|expired --by --note` (prints the answer that stands) (the mod) | The web chat: the thread, the server, the link with its token, Claude's reply, permission prompts. |
 | `wb try` | `--model <id or fragment>` (the router's pick) | A sample task that proves the setup (#112): copies `workbench/try/project/` (a tiny `stats.py` with its tests and a committed CLAUDE.md) into `~/.local/share/workbench/try/<n>` (beside `$WB_SKILLS`: the state directory is hidden from the lane, and its agent had no git there, #164), sets it up as `wb init` does, and starts `workbench/try/spec.md` (add `median`) as `try-<n>`, `--size trivial --trial --test 'python3 -m unittest'`: never the router's evidence or the lessons. Prints what `wb start` does, the project's path and the hidden check for review, `python3 <pkg>/workbench/try/check.py <worktree>` (the agent never sees it; it fails on the untouched base, passes once `median` meets the spec, and leaves no `__pycache__`). A refused start (the GPU busy without `--queue`, no model) removes the copy again (#161). |
 | `wb init <dir>` | | A project the way Claude keeps one: git on the default branch, an initial commit, AGENTS.md → CLAUDE.md (a CLAUDE.md → AGENTS.md link is swapped; a gitignored CLAUDE.md isn't linked). Refuses the home directory or above, inside another repo, a repo git refuses (git's reason: no `git init` over it; "not a repo" is told apart in any language, `gitops.NotARepo`), without a git identity (`git var`, as for `wb start`), and a first commit holding likely secrets or installed directories no .gitignore covers. |
@@ -3878,6 +3987,7 @@ $WB_HOME (~/.local/state/workbench)
                                  apply made and hasn't registered yet: #266)}; the run's output
   imports/<slug>/                skills fetched by wb skill import, for Claude to read
   images/<YYYYmmdd-HHMMSS>/      wb image's candidates (unless --out), their .json sidecars, engine.log
+  audio/<YYYYmmdd-HHMMSS>/       wb audio's clips (unless --out): .wav, .json sidecar, .png spectrogram, engine.log
   chat/                          messages.jsonl  receipts.jsonl  asks.jsonl  prefs.json  listener.json  claims.json
                                  switch.json ({on}: wb chat on|off)  serve.pid ({pid, port})  serve.log (the server wb chat on started)
                                  port.json ({port, pid}: the port wb chat serve runs on, read back without --port)
@@ -3913,6 +4023,7 @@ $WB_HOME (~/.local/state/workbench)
 ~/.config/workbench/
   models.json ($WB_MODELS)       what OpenCode can't say about each model or provider
   images.json ($WB_IMAGES)       image engines
+  audio.json ($WB_AUDIO)         audio engines (speech, sfx, music, and a listener)
   commands.json ($WB_COMMANDS)   the user's standing allowances: {"allow": [patterns], "paths": [dirs], "env": [names]}
                                  (each a list of strings, or the file is refused: context.commands_conf), and
                                  "repos": {"<repo path>": {"setup": cmd, "copy": [paths], "siblings": [paths],
@@ -3934,7 +4045,7 @@ $WB_HOME (~/.local/state/workbench)
 
 **Store primitives** (`workbench/store.py`). `home()` is `$WB_HOME`, else
 `~/.local/state/workbench`. The path variables (`PATH_VARS`: `WB_HOME`, `WB_MODELS`, `WB_SKILLS`,
-`WB_IMAGES`, `WB_COMMANDS`, `WB_CHAT_TOKEN`, `WB_CHAT_CONFIG`, `WB_OPENCODE_CONFIG`, `WB_SAVINGS`,
+`WB_IMAGES`, `WB_AUDIO`, `WB_COMMANDS`, `WB_CHAT_TOKEN`, `WB_CHAT_CONFIG`, `WB_OPENCODE_CONFIG`, `WB_SAVINGS`,
 and the user's `OPENCODE_CONFIG` and `CLAUDE_CONFIG_DIR`, #328) accept `~` and
 relative paths: `absolute_env()`, first thing in `cli.main` and the runner, makes them absolute
 against wb's cwd (not resolved: a symlinked home stays as named), so every child inherits the
@@ -4181,11 +4292,11 @@ main (*Shipping to main*).
 **Files.**
 - `tests/test_workbench.py`: end to end, one class per feature (Lifecycle, Context, Steering,
   WorktreeSetup, Watch, AskServer, ConfigLayer, AgentContext, SkillLibrary, RealOpenCode, GitGuard, Lane,
-  Permission, Images, Discovery, Routing, Tuning, Notes, Setup, Update, Projects, ModelSet,
+  Permission, Images, Audio, Discovery, Routing, Tuning, Notes, Setup, Update, Projects, ModelSet,
   WebChat, Hardware, Detector, SkillLearning, RealOpenCodeSkillFiles, RealOpenCodeRun, Drift).
 - `tests/test_gpu.py`: sharing the GPU (side by side, taking turns, unknown VRAM, an exclusive
   holder, `wb start` refused or `--queue`d behind a holder, `wb image` refused or `--wait`ing,
-  stale holders, a share Ollama couldn't keep), `can_share` (with `OLLAMA_MAX_LOADED_MODELS`) and
+  `wb audio` refused while a CPU engine runs beside a task, stale holders, a share Ollama couldn't keep), `can_share` (with `OLLAMA_MAX_LOADED_MODELS`) and
   the budget (driver groups, an iGPU's carve-out, Apple's default).
 - `tests/test_portable.py`: discovery against real HTTP servers on port 0 (the Ollama probe, the
   port guess, multi-model servers, loopback and host names, `local: true`, `opencode.jsonc` under
@@ -4374,6 +4485,10 @@ nested `.md` files (`docs/`, `skill/`, `mod/`, `agent/`) are unaffected. A new r
   (`skill/workbench/SKILL.md`) if Claude uses it there; README only for the quickstart. CLAUDE.md's
   *Keeping the docs true* is the procedure; `tests/test_docs.py` checks what it can (every command
   and flag here, every module and environment variable in CLAUDE.md, CLAUDE.md's size).
+- **`wb image` and `wb audio` share `media.py`** (the engine file, `fill`, `settle`, `gpu`,
+  `free`, `publish`): a change there changes both (`tests.Images`, `tests.Audio`). A new kind of
+  generated media → its config path in `store.PATH_VARS` and `context.private_paths`, its output
+  directory in `cli.EVENT_SKIP` (and the mod's ears), its engines in `wb scout`.
 - **A file in a task's directory** → `context.TASK_FILES`, the names a `--sibling` can't take
   (its link sits beside the worktree).
 - **Where a task's worktree is** (`Task.worktree`, `tree/…/worktree` for a sibling further up,
