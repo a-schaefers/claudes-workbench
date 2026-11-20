@@ -1041,7 +1041,8 @@ class Optimize(unittest.TestCase):
         from workbench import optimize
         self.ollama(32768)
         os.environ["WB_HOME"] = str(Path(os.environ["WB_HOME"]) / "fresh")
-        with mock.patch.object(optimize.subprocess, "Popen") as popen:
+        with mock.patch.object(optimize.subprocess, "Popen") as popen, \
+                mock.patch.object(models, "_started", return_value="1"):  # not ps on the fake
             popen.return_value.pid = os.getpid()
             self.assertIn("wb optimize: measuring 1 model(s)", optimize.start()[0])
         self.assertTrue((store.home() / "optimize.log").exists())
@@ -1112,7 +1113,8 @@ class Optimize(unittest.TestCase):
             store.write_json(optimize.path(), {**optimize.state(), "done": 1, "stopped": None,
                                                "hardware": optimize.fingerprint()})
             self.assertEqual(optimize.due(), "")
-            with mock.patch.object(optimize.subprocess, "Popen") as popen:
+            with mock.patch.object(optimize.subprocess, "Popen") as popen, \
+                mock.patch.object(models, "_started", return_value="1"):  # not ps on the fake
                 self.assertEqual(optimize.start(if_due=True), [])            # nothing to do: quiet
                 popen.assert_not_called()
             optimize.apply(m)                                    # its own entry: measured already
@@ -1121,7 +1123,8 @@ class Optimize(unittest.TestCase):
             self.assertEqual(optimize.due(), "the GPU changed")
             with mock.patch.object(models, "holders", lambda *a: {"1": {"task": "t"}}):
                 self.assertEqual(optimize.start(if_due=True), [])            # busy: next session
-            with mock.patch.object(optimize.subprocess, "Popen") as popen:
+            with mock.patch.object(optimize.subprocess, "Popen") as popen, \
+                mock.patch.object(models, "_started", return_value="1"):  # not ps on the fake
                 popen.return_value.pid = os.getpid()
                 out = optimize.start(if_due=True)
             self.assertIn("measuring the GPU for 1 local model(s) (the GPU changed)", out[0])

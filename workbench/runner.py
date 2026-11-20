@@ -9,6 +9,7 @@ loops, errors repeatedly, goes silent or runs too long. After a clean round the 
 command runs in the worktree, in the agent's lane; a failure goes back to the agent on its own while auto-fix rounds remain, so
 Claude is only woken for work that passes, or for a task that has run out of road.
 """
+import ctypes
 import json
 import os
 import queue
@@ -263,12 +264,13 @@ def sweep(task: store.Task) -> int:
     """Kill every process of ours the agent started for this task and left running: a server
     backgrounded with `&`, a `setsid`'d child, the agent itself after its runner died. They are
     found by the environment the runner gave them (WB_TASK and WB_HOME, agent_env), since
-    OpenCode's shell starts each command in a group of its own. Linux only (/proc); elsewhere
-    the process group kills are all there is. The 2026-11-16 audit: a leftover writer kept
-    editing the worktree after Claude read the diff, and a crashed runner left its agent working."""
+    OpenCode's shell starts each command in a group of its own. /proc's environ, else KERN_PROCARGS2
+    (macOS, where they once outlived the round: #236). The 2026-11-16 audit: a leftover writer
+    kept editing the worktree after Claude read the diff, and a crashed runner left its agent
+    working."""
     proc = Path("/proc")
     if not proc.joinpath("self").exists():
-        return 0
+        return _sweep_macos(task) if sys.platform == "darwin" else 0
     want = {f"WB_TASK={task.name}".encode(), f"WB_HOME={store.home()}".encode()}
     me, uid, n = os.getpid(), os.getuid(), 0
     for d in proc.iterdir():
@@ -282,6 +284,48 @@ def sweep(task: store.Task) -> int:
         except OSError:
             continue
     return n
+
+
+def _mac_environ(procargs: bytes) -> set[bytes]:
+    """Darwin KERN_PROCARGS2 returns argc, the padded executable path, argv, then environ."""
+    argc = int.from_bytes(procargs[:4], sys.byteorder, signed=True)
+    _, _, strings = procargs[4:].partition(b"\0")
+    fields = strings.lstrip(b"\0").split(b"\0")
+    if not 0 < argc < len(fields):
+        return set()
+    env = set()
+    for field in fields[argc:-1]:  # only complete entries, up to the environment terminator
+        if not field:
+            break
+        env.add(field)
+    return env
+
+
+def _sweep_macos(task: store.Task) -> int:
+    """ps -E flattens argv and environ together. Only kernel environment entries identify a task."""
+    try:
+        pids = subprocess.run(["ps", "-U", str(os.getuid()), "-o", "pid="], capture_output=True,
+                              check=True, timeout=10).stdout.split()
+        buf = ctypes.create_string_buffer(os.sysconf("SC_ARG_MAX"))
+        sysctl = ctypes.CDLL(None).sysctl
+    except (OSError, ValueError, subprocess.SubprocessError):
+        return 0
+    want = {os.fsencode(f"WB_TASK={task.name}"), os.fsencode(f"WB_HOME={store.home()}")}
+    killed = 0
+    for word in pids:
+        if not word.isdigit() or (pid := int(word)) == os.getpid() or pid <= 1:
+            continue
+        mib = (ctypes.c_int * 3)(1, 49, pid)  # CTL_KERN, KERN_PROCARGS2
+        size = ctypes.c_size_t(len(buf))
+        if sysctl(mib, 3, buf, ctypes.byref(size), None, 0) != 0:
+            continue
+        if want <= _mac_environ(buf[:size.value]):
+            try:
+                os.kill(pid, signal.SIGKILL)
+                killed += 1
+            except OSError:  # exited since ps
+                pass
+    return killed
 
 
 def _end_agent(task: store.Task) -> None:

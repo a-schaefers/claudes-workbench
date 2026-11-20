@@ -200,9 +200,8 @@ their slow work, `wb next`'s session export and the GPU note, comes before it: a
 reaped as dead while it read the session)
 becomes `failed`, `last` "the runner died (see runner.log)", with an `error` event and one
 `failed` notice ("wb resume continues it"); the agent's group (`agent_pid`, read before it is
-cleared) is killed when `models.runs` shows it still runs `run --standalone` (off Linux nothing
-else ends it: no PDEATHSIG, no /proc for sweep; it went on editing a task reported failed, the
-2026-11-19 audit), and `runner.sweep` kills what its agent left. The
+cleared) is killed when `models.runs` shows it still runs `run --standalone` (off Linux the kernel leaves it running when its parent dies, as the
+2026-11-19 audit observed), and `runner.sweep` kills what its agent left. The
 check-and-set is `Task.set_status_if`, under the task's status lock (`locks/<task>.status.lock`), so of two reapers one notifies. `wb status`, `wait`,
 `feedback`, `resume`, `next`, `steer` and `accept` call it, and `wb events` once a minute, so the
 mod wakes Claude. On Linux the agent dies with its runner anyway: `lane.py` sets
@@ -592,8 +591,9 @@ in `main`'s `finally`): the agent if it still runs (`_stop`), a SIGKILL to its p
 `cmd &` left in it), then `sweep(task)`: every process of the user's whose environment carries
 the task's `WB_TASK` and `WB_HOME` (`agent_env` sets both; the runner's own environment drops
 `WB_TASK`, `spawn_runner`), since OpenCode's shell starts each command in a group of its own and
-`setsid` leaves any group. `agent_pid` is cleared. `sweep` reads `/proc/<pid>/environ`, so it is
-Linux only; elsewhere the group kill is all there is. The tests get the same after each run, and
+`setsid` leaves any group. `agent_pid` is cleared. `sweep` reads `/proc/<pid>/environ`, else
+on macOS `_sweep_macos` lists the user's PIDs with `ps` and reads the environment entries from
+Darwin's `KERN_PROCARGS2` after skipping the argument vector. The tests get the same after each run, and
 `wb stop`, `takeover`, `accept`, `discard` and `reap` sweep too. Seen in the audit: a writer left
 running could change the worktree after Claude had read the diff, and a crashed runner's agent
 went on working beside the next task.
@@ -1869,8 +1869,8 @@ ran, the 2026-11-19 audit), and different models may not outnumber `OLLAMA_MAX_L
 (unset or 0: `OLLAMA_MAX_LOADED` 3, Ollama's default per GPU), or Ollama swaps them on every
 request (both read from the ollama service's environment, `hardware.ollama_env`). Admission
 happens under the `gpu.admit` flock: holders are the `gpu.json` entries whose process is alive,
-checked by identity (`_alive`: a pid of another user's is dead, and on Linux the process's start
-time, `/proc/<pid>/stat` field 22, must match the entry's `start`), so a pid recycled after a
+checked by identity (`_alive`: a pid of another user's is dead, and when available the process's start
+time from `/proc/<pid>/stat` field 22 or `ps -o lstart=` must match the entry's `start`), so a pid recycled after a
 reboot doesn't hold the GPU forever. `admits(m, held)`: no holder is waiting, every holder's
 model still resolves, and there are no holders or `can_share` passes; then a runner joins with
 `LOCK_SH|LOCK_NB` on `gpu.lock` (so a task alone holds the lock shared). Otherwise it marks
@@ -2783,7 +2783,9 @@ terminal, the one the workbench mod runs, reachable over your own network.
 
 `wb chat serve` (`workbench/chat.py`; kept up by `systemd/wb-chat.service`, a user unit running
 `%h/.local/bin/wb chat serve` with `Restart=always` and no start limit) serves a small page on
-port 1337 for reaching the Claude session in workbench mode while the user is away. The unit
+port 1337 for reaching the Claude session in workbench mode while the user is away (one
+`chat._Server` per bound address, which binds without the host-name lookup HTTPServer makes:
+on macOS it stalled the start past `wb chat on`'s wait, #236). The unit
 retries with a delay growing from 10 s to 5 min (`RestartSteps`, systemd 254+; every 10 s on
 older ones), since retrying is what brings the chat up when a bound address arrives late (a user
 manager has no network-online.target) or the port is briefly held: a start limit gave up for good
@@ -3709,8 +3711,8 @@ hidden files), `handovers` (fresh sessions). A `wb bench self` row (`bench.self_
   how: "skill:<name>"|"dropped", why}` (*Lessons*).
 - `speed.json`: `{"<model id>": {"write": [tok/s…], "read": [tok/s…]}}`, the last 60 of each.
 - `gpu.json`: `{"<pid>": {model, task, since, start, waiting?}}` (`since`: its place in the queue,
-  the task's `created_at`; `start`: the holder's start time on Linux, `/proc/<pid>/stat` field 22,
-  so a recycled pid isn't taken for it; null elsewhere).
+  the task's `created_at`; `start`: the holder's start time, `/proc/<pid>/stat` field 22, else
+  `ps -o lstart=` (macOS: #236), so a recycled pid isn't taken for it; null when neither says).
 - `scout.json`: `{done_at, notes, offered_at}` (`offered_at` from the mod); `watch.json`: `[{ts, text}]`.
 - `update.json`: `{checked_at, behind, kind}` (`kind`: `marketplace` or `clone`); `checked_at`
   is written before the fetch, so a failed, timed-out or killed check waits a week too.
@@ -3787,7 +3789,8 @@ Windows runner (Windows' own `wsl --install`, then `scripts/ci-wsl.sh`: dash as 
 user who isn't root, a clone in WSL's own file system, OpenCode; no third-party action, which
 the repo's settings refuse). Either failing turns the run red, and a release waits for a
 green nightly on its commit (`docs/release-checklist.md`; the 2026-11-19 audit: the macOS job
-could fail unseen and ran without OpenCode, and nothing ran WSL). Neither is a required check:
+could fail unseen and ran without OpenCode, and nothing ran WSL). The credential-read enforcement test requires Landlock, and the Snap launcher test requires Linux.
+The killed-runner test checks immediate kernel cleanup on Linux and cleanup after reaping on both platforms. Neither is a required check:
 each pull request would wait on a macOS and a Windows runner. Both Linux jobs install the OpenCode the real-OpenCode tests were last verified with (`OPENCODE_VERSION`,
 from its GitHub release through `scripts/install-opencode.sh`, checked against the tarball's hash
 pinned beside it as `OPENCODE_SHA256`: 2.x isn't on npm), so those tests run there instead of
