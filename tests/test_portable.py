@@ -1220,10 +1220,11 @@ class Launchers(unittest.TestCase):
     Ubuntu 22.04's 3.10, native Windows (the 2026-11-16 audit)."""
     ROOT = Path(__file__).resolve().parent.parent
 
-    def launch(self, name, setup):
+    def launch(self, name, setup, path=""):
         import subprocess
         code = f"import runpy, sys; {setup}; sys.argv = [{name!r}, '--version']; runpy.run_path({str(self.ROOT / 'bin' / name)!r})"
-        return subprocess.run([sys.executable, "-c", code], capture_output=True, text=True, timeout=30)
+        return subprocess.run([sys.executable, "-c", code], capture_output=True, text=True, timeout=30,
+                              env={**os.environ, "PATH": path})
 
     def test_an_old_python_is_told_the_version_it_needs_before_any_import(self):
         for name in ("wb", "wb-ask-mcp"):
@@ -1231,6 +1232,25 @@ class Launchers(unittest.TestCase):
             self.assertEqual(r.returncode, 78, r.stderr)  # EX_CONFIG: the chat unit stops on it
             self.assertIn(f"{name}: needs Python 3.11 or newer", r.stderr)
             self.assertNotIn("Traceback", r.stderr)
+
+    def test_an_old_python3_hands_over_to_the_newest_python3_n_on_path_once(self):
+        # #259 (the audit of 1.2): Ubuntu 22.04's python3 is 3.10, RHEL 9's 3.9, and wb refused
+        # though the user had installed python3.12 beside it
+        with tempfile.TemporaryDirectory() as d:
+            old, new = Path(d, "a"), Path(d, "b")
+            for where, minor in ((old, 11), (new, 12), (new, 9)):
+                where.mkdir(exist_ok=True)
+                exe = where / f"python3.{minor}"
+                exe.write_text(f"#!/bin/sh\necho python3.{minor} \"$@\"\n")
+                exe.chmod(0o755)
+            for name in ("wb", "wb-ask-mcp"):
+                r = self.launch(name, "sys.version_info = (3, 10, 12)", f"{old}:{new}")
+                self.assertEqual(r.returncode, 0, r.stderr)
+                self.assertEqual(r.stdout.split(), ["python3.12", "-X", "wb-python",
+                                                    str(self.ROOT / "bin" / name), "--version"])
+                r = self.launch(name, "sys.version_info = (3, 10, 12); sys._xoptions = {'wb-python': True}",
+                                f"{old}:{new}")
+                self.assertEqual(r.returncode, 78, r.stderr)                # handed over once only
 
     def test_native_windows_is_told_to_use_wsl2(self):
         r = self.launch("wb", "sys.platform = 'win32'")

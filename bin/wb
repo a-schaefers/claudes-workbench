@@ -3,6 +3,8 @@
 import os
 import sys
 
+NAME = "wb"
+
 # Before the package is imported, so an unsupported interpreter gets a sentence, not a traceback
 # from deep inside it (the 2026-11-16 audit: 3.10's re rejects scan.py, 3.9 cli.py's annotations;
 # native Windows has no fcntl). Keep these lines parseable by old Pythons. Exit 78 (EX_CONFIG):
@@ -12,8 +14,22 @@ if sys.platform == "win32":
                      "signals); run Claude Code and wb inside WSL2\n")
     sys.exit(78)
 if sys.version_info < (3, 11):
-    sys.stderr.write("wb: needs Python 3.11 or newer; %s is %s. Put a newer python3 first "
-                     "on PATH.\n" % (sys.executable, sys.version.split()[0]))
+    # Ubuntu 22.04's python3 is 3.10 and RHEL 9's 3.9; their users install python3.11 or newer
+    # beside it, and wb refused anyway, the mod's `wb events` too (#259, the audit of 1.2). The
+    # newest python3.N on PATH runs it instead, once (-X wb-python: never again from there).
+    newer = None
+    if "wb-python" not in getattr(sys, "_xoptions", {}):
+        for d in os.environ.get("PATH", "").split(os.pathsep):
+            for minor in range(40, 10, -1):
+                exe = os.path.join(d or ".", "python3.%d" % minor)
+                if os.path.isfile(exe) and os.access(exe, os.X_OK):
+                    if newer is None or minor > newer[0]:
+                        newer = (minor, exe)
+                    break
+    if newer:
+        os.execv(newer[1], [newer[1], "-X", "wb-python", os.path.realpath(__file__)] + sys.argv[1:])
+    sys.stderr.write("%s: needs Python 3.11 or newer; %s is %s, and no python3.11 or newer is "
+                     "on PATH. Install one.\n" % (NAME, sys.executable, sys.version.split()[0]))
     sys.exit(78)
 
 # Text files are UTF-8 whatever the locale: under a legacy one (ISO-8859-1, or C with the

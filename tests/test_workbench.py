@@ -5866,7 +5866,8 @@ class Setup(Base):
                      "WB_BIN=/x/wb covers only the mod's calls",
                      f"ok  state dir {home / '.local/state/workbench'}\n",
                      f"BAD /workbench isn't in {home / '.claude/skills'}: wb setup links it",
-                     "--  the Claude Code mod (the pane, the wake-ups) isn't among"):
+                     "--  the Claude Code mod (the pane, the wake-ups) isn't among",
+                     "ok  python 3."):                                     # which one runs wb (#259)
             self.assertIn(want, out)
         if lane.abi():
             self.assertIn("ok  agents write only in their lane", out)
