@@ -1186,6 +1186,18 @@ test('a permission prompt while the user is away goes to the web chat, and their
   said = { answer: 'deny', note: 'split step 2' }
   const back = (await ask('ExitPlanMode', {})).decision
   expect([back.behavior, back.message.includes('split step 2'), back.message.includes('Revise the plan')]).toEqual(['deny', true, true])
+  // #253 (the audit of 1.2): the card is this session's plan, by its file, never the newest of any
+  // project's; one wb can't read is answered in the terminal, so the dialog comes up there
+  said = { answer: 'allow' }
+  await ask('ExitPlanMode', { planFilePath: '/home/u/.claude/plans/a-b-c.md' })
+  const plan = runs.filter(a => a[2] === 'ask').at(-1)!
+  expect(plan[plan.indexOf('--detail') + 1]).toBe('{"plan_file":"/home/u/.claude/plans/a-b-c.md"}')
+  expect(plan.slice(-2)).toEqual(['--repo', '/home/u/project'])     // whose plan it is
+  posted = 'ask-3-ef expired'
+  const waited = runs.filter(a => a[2] === 'wait').length
+  expect((await ask('ExitPlanMode', {})).decision).toBeUndefined()
+  expect(runs.filter(a => a[2] === 'wait').length).toBe(waited)    // nothing to wait for on the page
+  posted = 'ask-1-ab open'
 
   // a question: the options they picked become the tool's answers
   const questions = [{ question: 'Which DB?', header: 'DB', options: [{ label: 'SQLite', description: '' }, { label: 'Postgres', description: '' }], multiSelect: false }]

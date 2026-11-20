@@ -2893,10 +2893,14 @@ VPN), `"hosts": ["chat.example.org"]` a name a tunnel or proxy sends.
 - `asks.jsonl`: the dialogs. An ask row `{id: "ask-<ms>-<8 hex>", ts, tool (200 characters),
   text (2000), kind: "permission"|"plan"|"question", detail?}` from `wb chat ask` (`detail`, at
   most 40,000 characters of JSON: a question's `{questions}`, the tool's own; a plan's `{plan}`,
-  from the tool's input, else `chat.latest_plan`: the newest `*.md` under
-  `$CLAUDE_CONFIG_DIR/plans` from the last day, since ExitPlanMode's input carries none), then
+  from the tool's input, else `chat.session_plan`: the file `{plan_file}` names, else the last
+  plan file the `--session`'s transcript names, read only when it is a `*.md` directly in
+  `$CLAUDE_CONFIG_DIR/plans`; one it can't find is `{plan: "", project: <--repo's name>}`,
+  answered `expired` by `terminal` at once, and the page sends the user to that project's
+  terminal. It read the newest file in that directory, any project's: with two planning, one
+  card showed the other's plan, #253, the audit of 1.2), then
   answer rows `{id, ts, answer: "allow"|"deny"|"expired", by:
-  "web"|"setting"|"timeout"|"interrupted"|"cli", note?, answers?}` (`note` up to 2000 characters;
+  "web"|"setting"|"timeout"|"interrupted"|"terminal"|"cli", note?, answers?}` (`note` up to 2000 characters;
   `answers` only for a question allowed, keyed by its own questions' text, each a non-empty
   string). The first answer row wins (`chat.asks` ignores later ones), so the page's tap and the
   mod's expiry, two processes, can't both stand; `wb chat answer` prints the answer that stands.
@@ -3327,8 +3331,11 @@ settles it): unless a settings hook already decided, or the session isn't delega
 backlog task open (`awayNow`), `askOnChat` runs `wb
 chat ask --tool <t> --kind <KIND[tool], else permission> --text <a permission's: the input's
 command, file_path, url, path or pattern, else its JSON, cut at 1500>` (`--detail` with a
-question's `{questions}` or a plan's `{plan}` when the input has one). It prints `<id> <state>`:
-`allow` (the user's setting) answers `{behavior: 'allow'}` at once; else the id goes in
+question's `{questions}`; a plan's `{plan}` when the input has its text, else `{plan_file}` from
+its `planFilePath`, and for a plan `--session <id> --repo <the session's directory>`, so wb reads
+this session's own plan, #253). It prints `<id> <state>`:
+`allow` (the user's setting) answers `{behavior: 'allow'}` at once; `expired` (a plan wb couldn't
+read) leaves the dialog to the terminal at once; else the id goes in
 `mem.asksOpen`, a toast says what waits in the web chat, and `waitOnChat` runs `wb chat wait <id>
 --timeout 20 --json` (ASK_CHUNK_S) again and again, so an interrupt (`next.signal`) is seen
 within 20 s, until ASK_WAIT_MS (30 min). An answer `allow` is `{behavior: 'allow'}`, for a
@@ -3513,7 +3520,7 @@ delivered as taken (`_stale_notes`, *Notes*).
 | Command | Flags | What it does |
 |---|---|---|
 | `wb image "<prompt>"` | `--n` (4), `--size WxH` (1024x1024), `--seed`, `--ref <img>…`, `--out DIR`, `--engine`, `--list`, `--wait` | Candidates from a local image engine (see *Images*). While anything holds the GPU it refuses at once, naming the holders; `--wait` queues behind them. A bare `list` or `ls` as the prompt acts as `--list`. |
-| `wb chat [log\|on\|off\|serve\|url\|reply\|ack\|claim\|pending\|ask\|wait\|answer]` | `on`, `off` (the switch, kept; `on` starts a server when none answers on `--port`, waits for it, and prints the link; it refuses when another program answers there, `off` stops only one it started), `--port` (1337), `--bind` (replaces chat.json's), `--host` (adds), `--text`, `--message <file\|->` (reply reads stdin without either), `-n` (10); `ack <id> --by --how`, `claim <id> --by` (exit 1: another session's), `ask --tool --kind permission\|plan\|question --text --detail <json>` (prints `<id> open`, or `<id> allow` when the user's setting answered it), `wait <id> --timeout` (30 s; prints allow, deny, expired, or `open` at the timeout; `--json`: the whole ask), `answer <id> allow\|deny\|expired --by --note` (prints the answer that stands) (the mod) | The web chat: the thread, the server, the link with its token, Claude's reply, permission prompts. |
+| `wb chat [log\|on\|off\|serve\|url\|reply\|ack\|claim\|pending\|ask\|wait\|answer]` | `on`, `off` (the switch, kept; `on` starts a server when none answers on `--port`, waits for it, and prints the link; it refuses when another program answers there, `off` stops only one it started), `--port` (1337), `--bind` (replaces chat.json's), `--host` (adds), `--text`, `--message <file\|->` (reply reads stdin without either), `-n` (10); `ack <id> --by --how`, `claim <id> --by` (exit 1: another session's), `ask --tool --kind permission\|plan\|question --text --detail <json> --session --repo` (a plan's session and directory; prints `<id> open`, `<id> allow` when the user's setting answered it, or `<id> expired` for a plan it can't read), `wait <id> --timeout` (30 s; prints allow, deny, expired, or `open` at the timeout; `--json`: the whole ask), `answer <id> allow\|deny\|expired --by --note` (prints the answer that stands) (the mod) | The web chat: the thread, the server, the link with its token, Claude's reply, permission prompts. |
 | `wb try` | `--model <id or fragment>` (the router's pick) | A sample task that proves the setup (#112): copies `workbench/try/project/` (a tiny `stats.py` with its tests and a committed CLAUDE.md) into `~/.local/share/workbench/try/<n>` (beside `$WB_SKILLS`: the state directory is hidden from the lane, and its agent had no git there, #164), sets it up as `wb init` does, and starts `workbench/try/spec.md` (add `median`) as `try-<n>`, `--size trivial --trial --test 'python3 -m unittest'`: never the router's evidence or the lessons. Prints what `wb start` does, the project's path and the hidden check for review, `python3 <pkg>/workbench/try/check.py <worktree>` (the agent never sees it; it fails on the untouched base, passes once `median` meets the spec, and leaves no `__pycache__`). A refused start (the GPU busy without `--queue`, no model) removes the copy again (#161). |
 | `wb init <dir>` | | A project the way Claude keeps one: git on the default branch, an initial commit, AGENTS.md → CLAUDE.md (a CLAUDE.md → AGENTS.md link is swapped; a gitignored CLAUDE.md isn't linked). Refuses the home directory or above, inside another repo, a repo git refuses (git's reason: no `git init` over it; "not a repo" is told apart in any language, `gitops.NotARepo`), without a git identity (`git var`, as for `wb start`), and a first commit holding likely secrets or installed directories no .gitignore covers. |
 | `wb setup` | `--force` (replaces a link that points elsewhere; never a real file) | Links `~/.local/bin/wb` to this copy's `bin/wb` and Claude Code's `skills/workbench` to its `skill/workbench`, removes an old `skills/delegate` link that now leads nowhere (the skill was `/delegate` until 2026-11-17; the mod runs `wb setup` itself when it finds only that), warns when `~/.local/bin` isn't on PATH (Claude and the mod run `wb` by name); exit 1 when it left something in the way (see *Installing*). Then, when due (*Optimize*), starts the minute or two of measuring the GPU and prints its line as `--`. Ends with a `first run:` checklist (`cli.first_run`, #111), one line each, `ok` or `--` with the fix: OpenCode 2.x (else where to get it), a model server answering (a configured provider, this machine's Ollama, or a server on a default port; else: start yours, or run /workbench and Claude lays out the ones that fit the machine, never steering to one; `wb model add --url`), a local model registered (else: run /workbench, and Claude picks one for the machine), Landlock. It names no model, and changes no exit code. |

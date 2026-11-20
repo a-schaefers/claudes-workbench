@@ -2752,12 +2752,17 @@ def cmd_chat(a):
             detail = json.loads(a.detail) if a.detail else None
         except ValueError:
             die("--detail is JSON")
-        if a.kind == "plan" and not (detail or {}).get("plan"):
-            detail = {"plan": chat.latest_plan()}  # ExitPlanMode's input holds no plan
+        unknown = False
+        if a.kind == "plan" and not (detail or {}).get("plan"):  # the input may hold only its file
+            detail = {"plan": chat.session_plan(a.session, (detail or {}).get("plan_file"))}
+            if unknown := not detail["plan"]:  # not another project's newest plan (#253)
+                detail["project"] = Path(a.repo).name if a.repo else ""
         if not (a.text or a.kind != "permission"):
             die("wb chat ask --kind permission needs --text")
         try:
             row = chat.ask(a.tool, a.text or "", a.kind, detail)
+            if unknown:  # nothing to answer on the page: the dialog comes up in its terminal
+                row = chat.answer(row["id"], "expired", "terminal")
         except ValueError as e:
             die(f"wb chat ask: {e}")
         print(row["id"], row["answer"] or "open")
@@ -3560,7 +3565,10 @@ def parser() -> argparse.ArgumentParser:
     s.add_argument("verdict", nargs="?", help="answer: allow, deny or expired")
     s.add_argument("--tool", help="ask: the tool asking")
     s.add_argument("--kind", default="permission", help="ask: permission, plan or question")
-    s.add_argument("--detail", help="ask: JSON, a question's {questions} or a plan's {plan}")
+    s.add_argument("--detail", help="ask: JSON, a question's {questions} or a plan's {plan} "
+                   "or {plan_file}")
+    s.add_argument("--session", help="ask: the Claude Code session asking (its plan file)")
+    s.add_argument("--repo", help="ask: the session's directory (named when its plan is unknown)")
     s.add_argument("--note", help="answer: words to pass on with it")
     s.add_argument("--timeout", type=float, default=30, help="wait: seconds")
     s.add_argument("--json", action="store_true", help="wait: the whole ask, answered or not")

@@ -980,11 +980,20 @@ async function askOnChat($: any, tool: string, input: unknown, signal?: AbortSig
   // what the call is for, as Claude described it (Bash's description): the card leads with it
   if (kind === 'permission' && typeof i.description === 'string' && i.description.trim())
     args.push('--detail', JSON.stringify({ purpose: i.description.trim().slice(0, 300) }))
-  if (kind === 'plan' && typeof i.plan === 'string') args.push('--detail', JSON.stringify({ plan: i.plan }))
+  // a plan: its text, else its file, and whose it is; wb read the newest in the plans directory,
+  // any project's, so a card could show another session's plan (#253, the audit of 1.2)
+  if (kind === 'plan') {
+    if (typeof i.plan === 'string' && i.plan) args.push('--detail', JSON.stringify({ plan: i.plan }))
+    else if (typeof i.planFilePath === 'string') args.push('--detail', JSON.stringify({ plan_file: i.planFilePath }))
+    const session = await $.session.id().catch(() => '')
+    if (session) args.push('--session', session)
+    if (mem.cwd) args.push('--repo', mem.cwd)
+  }
   const posted = await runWb($, args, 15_000)
   const [id, state] = (posted.out.split('\n').pop() || '').split(' ')
   if (!posted.ok || !id?.startsWith('ask-')) return undefined
   if (state === 'allow') return { behavior: 'allow' as const }  // their setting: go ahead while away
+  if (state === 'expired') return undefined  // a plan wb can't show: the dialog, in the terminal
   mem.asksOpen.add(id)
   try {
     return await waitOnChat($, id, kind, i, signal)
