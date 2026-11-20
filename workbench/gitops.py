@@ -526,16 +526,9 @@ def _overwritten(repo: Path, branch: str) -> list[str]:
     branch's added paths missed a modify/delete conflict, whose abort deleted the personal copy, a
     directory rename that moved an added file onto one, and a non-UTF-8 name read with U+FFFD
     (#241, the audit of 1.2). Raw bytes throughout."""
-    r = _run(repo, ("merge-tree", "--write-tree", "-z", "HEAD", branch), check=False)
-    if r.returncode in (0, 1):  # 1: it conflicts, and the tree holds what the merge would leave
-        tree = r.stdout.split(b"\0", 1)[0].strip()
-        written = _run(repo, ("diff", "--name-only", "--no-renames", "-z", "HEAD", tree)).stdout
-    else:  # git before 2.38: the paths the branch adds, as before
-        base = _run(repo, ("merge-base", "HEAD", branch), check=False).stdout.strip()
-        if not base:
-            return []
-        written = _run(repo, ("diff", "--name-only", "--no-renames", "--diff-filter=A", "-z",
-                              base, branch)).stdout
+    written = _merge_tree(repo, branch)
+    if written is None:  # git before 2.38
+        written = _trial_merge(repo, branch)
     tracked = set(_run(repo, ("ls-tree", "-r", "--name-only", "-z", "HEAD")).stdout.split(b"\0"))
     top = os.fsencode(repo)
     out = []
@@ -546,6 +539,41 @@ def _overwritten(repo: Path, branch: str) -> list[str]:
                for i in range(1, len(parts) + 1)):
             out.append(p.decode("utf-8", "replace"))
     return out
+
+
+def _merge_tree(repo: Path, branch: str) -> bytes | None:
+    """The paths the merge would leave different from HEAD, from the merge done in memory
+    (`merge-tree --write-tree`, git 2.38+); None on an older git."""
+    r = _run(repo, ("merge-tree", "--write-tree", "-z", "HEAD", branch), check=False)
+    if r.returncode not in (0, 1):  # 1: it conflicts, and the tree holds what the merge would leave
+        return None
+    tree = r.stdout.split(b"\0", 1)[0].strip()
+    return _run(repo, ("diff", "--name-only", "--no-renames", "-z", "HEAD", tree)).stdout
+
+
+def _trial_merge(repo: Path, branch: str) -> bytes:
+    """The paths the merge would write, from the same merge done in a scratch worktree of HEAD:
+    git before 2.38 has no merge-tree --write-tree, and the paths the branch adds, its fallback,
+    missed a modify/delete conflict whose abort deleted the developer's ignored copy on Git
+    2.34.1, Ubuntu 22.04's (#320, the audit of 1.4). A trial that can't run refuses the merge."""
+    store.home().mkdir(parents=True, exist_ok=True)
+    scratch = tempfile.mkdtemp(prefix="wb-merge-", dir=store.home())
+    wt = os.path.join(scratch, "w")
+    try:
+        _run(repo, (*NO_HOOKS, "worktree", "add", "-q", "--detach", wt, "HEAD"))
+        _run(wt, (*NO_HOOKS, "-c", "rerere.enabled=false", "merge", "--no-commit", "--no-ff",
+                  "--no-edit", branch), check=False)  # a conflict still says what it touched
+        changed = _run(wt, ("diff", "--name-only", "--no-renames", "-z", "HEAD")).stdout
+        unmerged = [row.split(b"\t", 1)[1] for row in
+                    _run(wt, ("ls-files", "-u", "-z")).stdout.split(b"\0") if b"\t" in row]
+        return b"\0".join([*changed.split(b"\0"), *unmerged])
+    except GitError as e:
+        raise GitError(f"couldn't check what merging {branch} would write ({e}); merge it by "
+                       "hand") from None
+    finally:
+        _run(repo, ("worktree", "remove", "--force", wt), check=False)
+        shutil.rmtree(scratch, ignore_errors=True)
+        _run(repo, ("worktree", "prune"), check=False)
 
 
 def contains(repo: Path, ref: str, commit: str) -> bool:
