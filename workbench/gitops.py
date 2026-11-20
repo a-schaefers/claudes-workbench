@@ -403,26 +403,33 @@ def merge(repo: Path, task: str, into: str | None = None, base: str | None = Non
 
 
 def _overwritten(repo: Path, branch: str) -> list[str]:
-    """The files the branch adds that are already in the checkout untracked: git's merge silently
-    replaces an ignored one, so a task that un-ignored and committed settings.ini overwrote the
-    user's own copy (#189, the 2026-11-19 audit). Its --no-overwrite-ignore doesn't stop it (git
-    2.56's ort merge ignores it), so the paths are checked first, and a parent that is a file
-    counts too."""
-    base = git(repo, "merge-base", "HEAD", branch, check=False).strip()
-    if not base:
-        return []
-    added = [p for p in git(repo, "diff", "--name-only", "--no-renames", "--diff-filter=A", "-z",
-                            base, branch).split("\0") if p]
-    tracked = set(git(repo, "ls-tree", "-r", "--name-only", "-z", "HEAD").split("\0"))
+    """The files the merge would write that are already in the checkout untracked: git's merge
+    silently replaces an ignored one, so a task that un-ignored and committed settings.ini
+    overwrote the user's own copy (#189, the 2026-11-19 audit). Its --no-overwrite-ignore doesn't
+    stop it (git 2.56's ort merge ignores it), so the paths are checked first, and a parent that
+    is a file counts too. The paths come from the merge itself, done in memory (merge-tree): the
+    branch's added paths missed a modify/delete conflict, whose abort deleted the personal copy, a
+    directory rename that moved an added file onto one, and a non-UTF-8 name read with U+FFFD
+    (#241, the audit of 1.2). Raw bytes throughout."""
+    r = _run(repo, ("merge-tree", "--write-tree", "-z", "HEAD", branch), check=False)
+    if r.returncode in (0, 1):  # 1: it conflicts, and the tree holds what the merge would leave
+        tree = r.stdout.split(b"\0", 1)[0].strip()
+        written = _run(repo, ("diff", "--name-only", "--no-renames", "-z", "HEAD", tree)).stdout
+    else:  # git before 2.38: the paths the branch adds, as before
+        base = _run(repo, ("merge-base", "HEAD", branch), check=False).stdout.strip()
+        if not base:
+            return []
+        written = _run(repo, ("diff", "--name-only", "--no-renames", "--diff-filter=A", "-z",
+                              base, branch)).stdout
+    tracked = set(_run(repo, ("ls-tree", "-r", "--name-only", "-z", "HEAD")).stdout.split(b"\0"))
+    top = os.fsencode(repo)
     out = []
-    for p in added:
-        if p in tracked:
-            continue
-        parts = p.split("/")
-        if any(os.path.lexists(os.path.join(repo, *parts[:i])) and (
-                i == len(parts) or not os.path.isdir(os.path.join(repo, *parts[:i])))
+    for p in (p for p in written.split(b"\0") if p and p not in tracked):
+        parts = p.split(b"/")
+        if any(os.path.lexists(os.path.join(top, *parts[:i])) and (
+                i == len(parts) or not os.path.isdir(os.path.join(top, *parts[:i])))
                for i in range(1, len(parts) + 1)):
-            out.append(p)
+            out.append(p.decode("utf-8", "replace"))
     return out
 
 

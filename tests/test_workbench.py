@@ -1,6 +1,7 @@
 """End-to-end tests: real git, real runner processes, a fake opencode. Run: python3 -m unittest"""
 import base64
 import contextlib
+import errno
 import io
 import json
 import shlex
@@ -1016,6 +1017,92 @@ class Lifecycle(Base):
         self.assertIn("merge with: git", out)
         self.assertFalse(subprocess.run(["git", "-C", str(self.repo), "rev-parse", "-q", "--verify",
                                          "MERGE_HEAD"], capture_output=True).returncode == 0)
+
+    def _merge_case(self, base, main, task, ignore, config=()):
+        """A repo whose task branch and main each made their commits from one base; the
+        ignored files are written last, as the developer's own. Returns (repo, git)."""
+        repo = Path(self.tmp.name) / f"m{len(os.listdir(self.tmp.name))}"
+        repo.mkdir()
+        g = lambda *a: subprocess.run(["git", "-C", str(repo), *a], check=True,  # noqa
+                                      capture_output=True).stdout
+        g("init", "-q", "-b", "main")
+        for k, v in config:
+            g("config", k, v)
+        def commit(files, msg):
+            for name, data in files.items():
+                f = repo / os.fsdecode(name)
+                if data is None:
+                    g("rm", "-q", "--cached", "--", os.fsdecode(name))
+                    continue
+                f.parent.mkdir(parents=True, exist_ok=True)
+                f.write_bytes(data)
+                g("add", "--", os.fsdecode(name))
+            g("commit", "-qm", msg)
+        commit(base, "base")
+        g("switch", "-qc", "delegate/t")
+        commit(task, "task")
+        g("switch", "-q", "main")
+        commit(main, "main")
+        for name, data in ignore.items():
+            (repo / os.fsdecode(name)).parent.mkdir(parents=True, exist_ok=True)
+            (repo / os.fsdecode(name)).write_bytes(data)
+        return repo, g
+
+    def _assert_refused_and_kept(self, repo, g, path, data):
+        before = g("rev-parse", "main")
+        with self.assertRaises(gitops.GitError) as e:
+            gitops.merge(repo, "t", "main")
+        self.assertIn("would overwrite", str(e.exception))
+        self.assertEqual((repo / os.fsdecode(path)).read_bytes(), data)  # byte for byte
+        self.assertEqual(g("rev-parse", "main"), before)
+        self.assertNotEqual(subprocess.run(["git", "-C", str(repo), "rev-parse", "-q", "--verify",
+                                            "MERGE_HEAD"], capture_output=True).returncode, 0)
+        g("rev-parse", "--verify", "delegate/t")                         # the work is kept
+
+    def test_a_modify_delete_conflict_leaves_the_ignored_personal_copy(self):
+        # #241 (the audit of 1.2, reproduced): main stopped tracking settings.ini and the
+        # developer kept an ignored copy; the task edited the tracked one. The merge conflicted,
+        # its abort deleted the copy, and wb said "backed out"
+        repo, g = self._merge_case(
+            base={b"settings.ini": b"DEFAULT\n"},
+            main={b"settings.ini": None, b".gitignore": b"settings.ini\n"},
+            task={b"settings.ini": b"DEFAULT\nmore\n"},
+            ignore={b"settings.ini": b"PERSONAL\n"})
+        self._assert_refused_and_kept(repo, g, b"settings.ini", b"PERSONAL\n")
+
+    def test_a_directory_rename_does_not_move_an_added_file_onto_an_ignored_one(self):
+        # #241: main renamed conf/ to etc/, where the developer keeps an ignored local.cfg; the
+        # task added conf/local.cfg, which merge.directoryRenames moves to etc/local.cfg
+        repo, g = self._merge_case(
+            base={b"conf/a.cfg": b"a\n", b"conf/b.cfg": b"b\n"},
+            main={b"conf/a.cfg": None, b"conf/b.cfg": None, b"etc/a.cfg": b"a\n",
+                  b"etc/b.cfg": b"b\n", b".gitignore": b"etc/local.cfg\n"},
+            task={b"conf/local.cfg": b"TASK\n"},
+            ignore={b"etc/local.cfg": b"PERSONAL\n"},
+            config=[("merge.directoryRenames", "true")])
+        (repo / "conf").exists() and shutil.rmtree(repo / "conf")
+        self._assert_refused_and_kept(repo, g, b"etc/local.cfg", b"PERSONAL\n")
+
+    def test_a_file_name_that_is_not_utf8_is_checked_as_its_bytes(self):
+        # #241: the path list was decoded with U+FFFD, so a Latin-1 name missed the check
+        name = b"r\xe9glages.ini"
+        try:
+            repo, g = self._merge_case(
+                base={b"README": b"x\n"}, main={b".gitignore": name + b"\n"},
+                task={name: b"TASK\n"}, ignore={name: b"PERSONAL\n"})
+        except (OSError, subprocess.CalledProcessError) as e:  # APFS takes UTF-8 names only
+            if getattr(e, "errno", errno.EILSEQ) != errno.EILSEQ:
+                raise
+            self.skipTest("this file system refuses names that aren't UTF-8")
+        self._assert_refused_and_kept(repo, g, name, b"PERSONAL\n")
+
+    def test_a_clean_merge_beside_ignored_files_still_merges(self):
+        repo, g = self._merge_case(
+            base={b"a.txt": b"a\n"}, main={b".gitignore": b"local.ini\n"},
+            task={b"b.txt": b"b\n"}, ignore={b"local.ini": b"PERSONAL\n"})
+        gitops.merge(repo, "t", "main")
+        self.assertEqual((repo / "b.txt").read_bytes(), b"b\n")
+        self.assertEqual((repo / "local.ini").read_bytes(), b"PERSONAL\n")
 
     def test_accept_merge_completes_the_merge_or_says_it_did_not(self):
         # #190 (the 2026-11-19 audit): with branch.main.mergeOptions=--no-commit, git left the
