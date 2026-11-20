@@ -357,6 +357,34 @@ async function run(engine, device) {
     }
     await c.close()
   })
+  await check("storage full: a message stays in the box until the server has it, then lands once", async () => {
+    // #245 (the audit of 1.2): at quota, Send cleared the box, no pending bubble showed, and
+    // nothing reached the server
+    const q = await ctx.newPage()
+    q.on('pageerror', e => errors.push(String(e)))
+    await q.goto(base)
+    await until(async () => await q.locator('#input').isEditable())
+    await q.evaluate(() => { Storage.prototype.setItem = () => { throw new DOMException('full', 'QuotaExceededError') } })
+    await q.fill('#input', 'sent with storage full')
+    await q.click('#send')
+    await until(() => messages().filter(m => m.text === 'sent with storage full').length === 1)
+    await until(async () => (await q.inputValue('#input')) === '')
+    await stopServer()
+    await q.fill('#input', 'full and the server down')
+    await q.click('#send')
+    await sleep(1500)
+    if ((await q.inputValue('#input')) !== 'full and the server down') throw new Error('the box was cleared before the server had it')
+    if (!(await q.textContent('#net')).includes('storage is full')) throw new Error('no word on the full storage: ' + await q.textContent('#net'))
+    startServer()
+    await until(() => messages().filter(m => m.text === 'full and the server down').length === 1, 30000)
+    await until(async () => (await q.inputValue('#input')) === '', 20000)
+    await sleep(1500)
+    for (const text of ['sent with storage full', 'full and the server down']) {
+      const n = messages().filter(m => m.text === text).length
+      if (n !== 1) throw new Error(`${text}: landed ${n} times`)
+    }
+    await q.close()
+  })
   await check('no script errors', async () => { if (errors.length) throw new Error(errors.join('; ')) })
   await browser.close()
   await stopServer()
