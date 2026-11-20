@@ -1648,9 +1648,19 @@ GC_EVERY = 86400  # a close runs gc at most once a day (gc.json): a task closed 
 RULES_GRACE = 3600  # a rules directory with no task yet may be a start in progress
 
 
+def _keep_grants(task: store.Task) -> None:
+    """The task's grants into its status (`grants_kept`) before its rules go: wb bench add,
+    later, replays a case with them, and found them empty once the close had deleted the rules
+    (#250, the audit of 1.2)."""
+    kept = store.read_json(store.home() / "rules" / task.name / "grants.json", {}) or {}
+    if kept and task.exists and not task.status.get("grants_kept"):
+        task.set_status(grants_kept=kept)
+
+
 def _closed(task: store.Task) -> None:
     """A task just closed: its rules go (55 were left over here, the 2026-11-19 audit), and once
     a day the rest of gc. Never an accept's or discard's failure."""
+    _keep_grants(task)
     shutil.rmtree(store.home() / "rules" / task.name, ignore_errors=True)
     if time.time() - ((store.read_json(store.home() / "gc.json", {}) or {}).get("at") or 0) > GC_EVERY:
         try:
@@ -1671,6 +1681,7 @@ def gc(days: float = store.ARCHIVE_DAYS, branches: bool = False) -> dict:
         t = store.Task(d.name)
         if t.status.get("phase") in store.CLOSED or (
                 not t.exists and time.time() - d.stat().st_mtime > RULES_GRACE):
+            _keep_grants(t)
             shutil.rmtree(d, ignore_errors=True)
             out["rules"] += 1
     out["runtime"] = context.drop_stale_runtime_dirs(store.all_tasks())
