@@ -1627,8 +1627,7 @@ def gc(days: float = store.ARCHIVE_DAYS, branches: bool = False) -> dict:
                 not t.exists and time.time() - d.stat().st_mtime > RULES_GRACE):
             shutil.rmtree(d, ignore_errors=True)
             out["rules"] += 1
-    keep = {context._runtime_path(t) for t in store.all_tasks() if t.status.get("phase") not in store.CLOSED}
-    out["runtime"] = context.drop_stale_runtime_dirs(keep)
+    out["runtime"] = context.drop_stale_runtime_dirs(store.all_tasks())
     out["branches"] = _merged_branches() if branches else 0
     store.write_json(store.home() / "gc.json", {"at": store.now(), **out})
     return out

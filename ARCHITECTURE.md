@@ -3560,8 +3560,10 @@ $WB_HOME (~/.local/state/workbench)
 /tmp/wb-run-<uid>-<hash>/        the agent's XDG_RUNTIME_DIR (lane on; context.runtime_dir), 0700: kept while
                                  the task is open (stuck or in review too), removed by wb accept and wb discard
                                  (drop_runtime_dir); taken by another user, a mkdtemp wb-run-* is used instead;
-                                 gc removes any wb-run-* of this user's untouched for STALE_RUNTIME_DAYS (7)
-                                 that isn't an open task's (drop_stale_runtime_dirs)
+                                 each holds .wb-owner {home, task} (RUNTIME_OWNER); gc removes one of this
+                                 user's untouched for STALE_RUNTIME_DAYS (7) only when it names this profile
+                                 and a task closed or gone (unmarked: a closed task's, by its name), never
+                                 another profile's or a wb-run-* wb didn't make (drop_stale_runtime_dirs, #243)
 ```
 
 **Store primitives** (`workbench/store.py`). `home()` is `$WB_HOME`, else

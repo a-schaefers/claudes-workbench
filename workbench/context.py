@@ -512,7 +512,9 @@ def runtime_dir(task: store.Task) -> Path:
         pass
     st = os.lstat(d)
     if not stat.S_ISDIR(st.st_mode) or st.st_uid != os.getuid():  # someone else's: not this one
-        return Path(tempfile.mkdtemp(prefix="wb-run-"))
+        d = Path(tempfile.mkdtemp(prefix="wb-run-"))
+    if not (d / RUNTIME_OWNER).exists():
+        store.write_json(d / RUNTIME_OWNER, {"home": str(store.home()), "task": task.name})
     return d
 
 
@@ -528,20 +530,46 @@ def drop_runtime_dir(task: store.Task) -> None:
 
 
 STALE_RUNTIME_DAYS = 7
+RUNTIME_OWNER = ".wb-owner"  # {home, task}: whose runtime directory this is
 
 
-def drop_stale_runtime_dirs(keep: set[Path]) -> int:
-    """Remove this user's runtime directories (``wb-run-*``) untouched for STALE_RUNTIME_DAYS and
-    not in ``keep`` (the open tasks'): a task closed while its runner was killed, a test's home,
-    a fallback mkdtemp left them behind, 13 of them here (the 2026-11-19 audit). Another state
-    directory's live task keeps its own fresh. Returns how many went."""
+def _owner(d: Path) -> dict | None:
+    """A runtime directory's owner mark, or None. The directory is in the agent's lane: a FIFO
+    there would hang the read, so only a regular file counts."""
+    try:
+        if not stat.S_ISREG(os.lstat(d / RUNTIME_OWNER).st_mode):
+            return None
+        owner = store.read_json(d / RUNTIME_OWNER, None)
+    except OSError:
+        return None
+    return owner if isinstance(owner, dict) else None
+
+
+def drop_stale_runtime_dirs(tasks) -> int:
+    """Remove this profile's runtime directories (``wb-run-*``) untouched for STALE_RUNTIME_DAYS
+    whose task (of ``tasks``, this profile's) is closed or gone: a task closed while its runner
+    was killed, a fallback mkdtemp left them behind, 13 of them here (the 2026-11-19 audit). Each
+    names its owner (RUNTIME_OWNER): any wb-run-* not this profile's open tasks' went, a second
+    profile's task nine days in review lost its own, and so did a wb-run-user-notes wb never made
+    (#243, the audit of 1.2). One made before the mark goes only as a closed task's of this
+    profile, by its name. Returns how many went."""
+    tasks = list(tasks)
+    live = {t.name for t in tasks if t.status.get("phase") not in store.CLOSED}
+    closed = {_runtime_path(t) for t in tasks if t.name not in live}
+    home = str(store.home())
     cutoff, n = time.time() - STALE_RUNTIME_DAYS * 86400, 0
     for d in _runtime_base().glob("wb-run-*"):
         try:
             st = os.lstat(d)
         except OSError:
             continue
-        if d in keep or not stat.S_ISDIR(st.st_mode) or st.st_uid != os.getuid() or st.st_mtime > cutoff:
+        if not stat.S_ISDIR(st.st_mode) or st.st_uid != os.getuid() or st.st_mtime > cutoff:
+            continue
+        owner = _owner(d)
+        if owner is None:
+            if d not in closed:
+                continue
+        elif owner.get("home") != home or owner.get("task") in live:
             continue
         shutil.rmtree(d, ignore_errors=True)
         n += 1
