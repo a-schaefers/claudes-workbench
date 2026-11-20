@@ -613,7 +613,12 @@ in `main`'s `finally`): the agent if it still runs (`_stop`), a SIGKILL to its p
 `cmd &` left in it), then `sweep(task)`: every process of the user's whose environment carries
 the task's `WB_TASK` and `WB_HOME` (`agent_env` sets both; the runner's own environment drops
 `WB_TASK`, `spawn_runner`), since OpenCode's shell starts each command in a group of its own and
-`setsid` leaves any group. `agent_pid` is cleared. `sweep` reads `/proc/<pid>/environ`, else
+`setsid` leaves any group; of those, only the ones carrying the round's own `WB_RUN` (a fresh id
+each round, and each test, setup or verify run: `agent_env(task, run)`), so a `wb verify`
+finishing beside a round that `wb feedback` had just started no longer killed its agent, nor
+two verifies each other's checks (#324, the audit of 1.4). A whole-task sweep (`sweep(task)`,
+no run) is for `wb stop`, takeover, accept, discard, `reap` and a runner that crashed before its
+round's id was known. `agent_pid` is cleared. `sweep` reads `/proc/<pid>/environ`, else
 on macOS `_sweep_macos` lists the user's PIDs with `ps` and reads the environment entries from
 Darwin's `KERN_PROCARGS2` after skipping the argument vector. The tests get the same after each run, and
 `wb stop`, `takeover`, `accept`, `discard` and `reap` sweep too. Seen in the audit: a writer left
@@ -1126,7 +1131,7 @@ prefixes; `SSH_AUTH_SOCK`, `SSH_AGENT_PID`, `GPG_AGENT_INFO`, `DBUS_SESSION_BUS_
 (`HF_HOME`, `HF_HUB_CACHE`, `HF_HUB_OFFLINE`, `HF_DATASETS_OFFLINE`, `HF_ENDPOINT`,
 `HF_HUB_DISABLE_TELEMETRY`, `TRANSFORMERS_OFFLINE`, `TOKENIZERS_PARALLELISM`, `AWS_REGION`,
 `AWS_DEFAULT_REGION`, `GOOGLE_CLOUD_PROJECT`, `GOOGLE_CLOUD_REGION`); plus `PWD` (the worktree),
-`OPENCODE_CONFIG`, `OPENCODE_CONFIG_CONTENT` (the rules again, below), `WB_TASK`, `WB_HOME`, its
+`OPENCODE_CONFIG`, `OPENCODE_CONFIG_CONTENT` (the rules again, below), `WB_TASK`, `WB_HOME`, `WB_RUN` (the run's id, for `sweep`), its
 own `XDG_RUNTIME_DIR` (`context.runtime_dir`, with the lane on), `PYTHONDONTWRITEBYTECODE=1` (no
 `__pycache__` in the diff) and the shim's `PATH` (on WSL with the lane on, without the Windows
 drives' directories, and without `WSL_INTEROP`: `context.agent_path`). A provider that needs a key from the

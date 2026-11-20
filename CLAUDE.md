@@ -127,7 +127,7 @@ dependencies. No packaging: it runs from the clone.
 - `optimize.py`: `wb optimize` (when due, or asked): each Ollama model's largest window all on the GPU.
 - `agent/HANDBOOK.md`: Claude's working habits for the agent. Every agent prompt carries it, so
   keep it short: each token costs prefill time.
-- `skill/workbench/`: the `/workbench` procedure, `SKILL.md` and the `reference/` it reads when needed (`wb setup` links it).
+- `skill/workbench/`: the `/workbench` procedure, `SKILL.md` and the `reference/` it reads (`wb setup` links it).
 - `mod/`: the Claude Code plugin (`hooks/register.tsx`, `hooks/apprentice.ts` the pane's
   character, `hooks/register.test.tsx`, `types/index.d.ts`; `.claude-plugin/plugin.json` has no
   version: installs track main's commits). The root's `.claude-plugin/marketplace.json` makes the repo a marketplace.
@@ -223,7 +223,7 @@ Environment: `WB_HOME`, `WB_MODELS`, `WB_SKILLS`, `WB_IMAGES`, `WB_CHAT_TOKEN`, 
 `WB_COMMANDS`, `WB_SAVINGS` (the paths above); `WB_OPENCODE_CONFIG` (OpenCode's config); `CLAUDE_CONFIG_DIR` (where
 `spend.py` reads Claude Code's transcripts); these may be relative
 or start with `~` (`store.absolute_env` makes them absolute against wb's cwd); `WB_COMPACT_AT` (the
-mod's early compaction, a percentage, 0 off); `WB_BIN` (the `wb` the mod runs); `WB_TASK` (set
+mod's early compaction, a percentage, 0 off); `WB_BIN` (the `wb` the mod runs); `WB_TASK`, `WB_RUN` (set
 for the ask server and the agent); `WB_SHOT_OUT`, `WB_SHOT_VIEWPORT` (`wb shot`); `CLAUDE_CODE_SESSION_ID` (Claude Code's: `wb start` records it,
 which session's task it is) and `CLAUDE_PID` (its process: once gone, the directory rule adopts the task). Tests only: `WB_OPENCODE_BIN` (a command line, split with
 `shlex`: the fake), `WB_FAKE_MODELS` (no model servers), `WB_FAKE_GPU_GB` (the fake GPU's size;

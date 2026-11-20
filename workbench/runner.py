@@ -23,6 +23,7 @@ import sys
 import threading
 import time
 import traceback
+import uuid
 from collections import deque
 from pathlib import Path
 
@@ -198,15 +199,17 @@ ENV_KEEP = frozenset({"HF_HOME", "HF_HUB_CACHE", "HF_HUB_OFFLINE", "HF_DATASETS_
                       "GOOGLE_CLOUD_PROJECT", "GOOGLE_CLOUD_REGION"})
 
 
-def agent_env(task: store.Task) -> dict:
-    """The agent's environment: its config layer, and git read-only (gitguard.py)."""
+def agent_env(task: store.Task, run: str = "") -> dict:
+    """The agent's environment: its config layer, and git read-only (gitguard.py). ``run``: the
+    one run it is for (WB_RUN), which sweep can then end alone."""
     through = set(context.commands_conf().get("env", []))
     keep = {k: v for k, v in os.environ.items() if k in through or k in ENV_KEEP
             or not (SECRET_ENV.search(k) or USERINFO.search(v))}
     layer = write_config_layer(task)
     env = {**keep, "PWD": str(task.worktree),  # opencode finds the project from $PWD
            "OPENCODE_CONFIG": str(layer), **rules_env(json.loads(layer.read_text())),
-           "WB_TASK": task.name, "WB_HOME": str(store.home()), **CLEAN_ENV}
+           "WB_TASK": task.name, "WB_HOME": str(store.home()), **CLEAN_ENV,
+           **({"WB_RUN": run} if run else {})}
     env["PATH"] = env.get("PATH") or os.defpath
     if context.writable(task) is not None:  # its own: the user's holds their bus and agents
         env["XDG_RUNTIME_DIR"] = str(context.runtime_dir(task))
@@ -260,18 +263,21 @@ def _kill_group(pgid: int) -> None:
         pass
 
 
-def sweep(task: store.Task) -> int:
+def sweep(task: store.Task, run: str = "") -> int:
     """Kill every process of ours the agent started for this task and left running: a server
     backgrounded with `&`, a `setsid`'d child, the agent itself after its runner died. They are
     found by the environment the runner gave them (WB_TASK and WB_HOME, agent_env), since
     OpenCode's shell starts each command in a group of its own. /proc's environ, else KERN_PROCARGS2
     (macOS, where they once outlived the round: #236). The 2026-11-16 audit: a leftover writer
     kept editing the worktree after Claude read the diff, and a crashed runner left its agent
-    working."""
+    working. With ``run``, only what that run started (WB_RUN, agent_env): a wb verify's cleanup
+    killed the agent wb feedback had just started on the same task, and two verifies each
+    other's checks (#324, the audit of 1.4)."""
     proc = Path("/proc")
     if not proc.joinpath("self").exists():
-        return _sweep_macos(task) if sys.platform == "darwin" else 0
-    want = {f"WB_TASK={task.name}".encode(), f"WB_HOME={store.home()}".encode()}
+        return _sweep_macos(task, run) if sys.platform == "darwin" else 0
+    want = {f"WB_TASK={task.name}".encode(), f"WB_HOME={store.home()}".encode(),
+            *([f"WB_RUN={run}".encode()] if run else [])}
     me, uid, n = os.getpid(), os.getuid(), 0
     for d in proc.iterdir():
         if not d.name.isdigit() or int(d.name) == me:
@@ -301,7 +307,7 @@ def _mac_environ(procargs: bytes) -> set[bytes]:
     return env
 
 
-def _sweep_macos(task: store.Task) -> int:
+def _sweep_macos(task: store.Task, run: str = "") -> int:
     """ps -E flattens argv and environ together. Only kernel environment entries identify a task."""
     try:
         pids = subprocess.run(["ps", "-U", str(os.getuid()), "-o", "pid="], capture_output=True,
@@ -310,7 +316,8 @@ def _sweep_macos(task: store.Task) -> int:
         sysctl = ctypes.CDLL(None).sysctl
     except (OSError, ValueError, subprocess.SubprocessError):
         return 0
-    want = {os.fsencode(f"WB_TASK={task.name}"), os.fsencode(f"WB_HOME={store.home()}")}
+    want = {os.fsencode(f"WB_TASK={task.name}"), os.fsencode(f"WB_HOME={store.home()}"),
+            *([os.fsencode(f"WB_RUN={run}")] if run else [])}
     killed = 0
     for word in pids:
         if not word.isdigit() or (pid := int(word)) == os.getpid() or pid <= 1:
@@ -337,7 +344,7 @@ def _end_agent(task: store.Task) -> None:
         if proc.poll() is None:
             _stop(proc)
         _kill_group(proc.pid)
-    sweep(task)
+    sweep(task, CURRENT.pop("run", ""))  # the round's own; none known (a crash before it): all
     try:
         if task.status.get("agent_pid"):
             task.set_status(agent_pid=None)
@@ -510,7 +517,8 @@ def run_round(task: store.Task, n: int, keep: bool = False) -> dict:
     # After `--`: OpenCode reads a message that starts with '-' (a spec opening with a bullet or
     # front matter) as a flag, prints its usage and exits (the 2026-11-16 audit).
     cmd += ["--", note + prompt]
-    env = {**agent_env(task), **OPENCODE_ENV}
+    CURRENT["run"] = run = uuid.uuid4().hex
+    env = {**agent_env(task, run), **OPENCODE_ENV}
     cmd = lane.wrap(context.writable(task), cmd,   # writes stay in the agent's lane (lane.py),
                     context.readable(task),       # and credentials out of its reach
                     context.unix_paths(task))
@@ -818,8 +826,9 @@ def run_in_lane(task: store.Task, cmd: str, limit: int) -> tuple[int | str, str]
     # or fail as they did when the agent ran them
     argv = lane.wrap(context.writable(task), [test_shell(), "-c", cmd], context.readable(task),
                      context.unix_paths(task))
+    run = uuid.uuid4().hex  # its own mark: sweep ends what it left, and nothing else (#324)
     proc = subprocess.Popen(argv, cwd=task.worktree, stdout=subprocess.PIPE,
-                            stderr=subprocess.STDOUT, env=agent_env(task),
+                            stderr=subprocess.STDOUT, env=agent_env(task, run),
                             start_new_session=True)  # its own group: a timeout ends all of it
     prev = CURRENT.get("proc")
     CURRENT["proc"] = proc  # a stop (SIGTERM, _on_term) takes the tests down too
@@ -838,7 +847,7 @@ def run_in_lane(task: store.Task, cmd: str, limit: int) -> tuple[int | str, str]
     finally:
         _kill_group(proc.pid)  # a timeout's remains, or what it left running in its group
         proc.wait()
-        sweep(task)            # and what left the group
+        sweep(task, run)       # and what left the group
         if prev is None:
             CURRENT.pop("proc", None)
         else:

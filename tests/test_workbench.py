@@ -353,6 +353,26 @@ class Lifecycle(Base):
                 child.kill()
                 survivor.kill()
 
+    def test_a_test_run_ends_what_it_started_and_no_other_run_of_the_task(self):
+        # #324 (the audit of 1.4, reproduced): a wb verify's cleanup killed every process of the
+        # task, the agent wb feedback had just started among them (opencode exited -9)
+        self.start("t-runs", "ok", "--no-base-check")
+        wait_phase("t-runs", {"review"})
+        task = store.Task("t-runs")
+        sleeper = [sys.executable, "-c", "import time; time.sleep(60)"]
+        agent = subprocess.Popen(sleeper, env=runner.agent_env(task, "another-run"),
+                                 start_new_session=True)
+        pidfile = Path(self.tmp.name) / "left.pid"
+        try:
+            code, _ = runner.run_in_lane(task, f"setsid sleep 60 & echo $! > {pidfile}", 30)
+            self.assertEqual(code, 0)
+            self.assertTrue(wait_gone(int(pidfile.read_text())))  # what the run left: ended
+            self.assertIsNone(agent.poll())                         # the other run: untouched
+            self.assertEqual(runner.sweep(task), 1)                 # a whole-task sweep ends it
+            self.assertEqual(agent.wait(timeout=5), -signal.SIGKILL)
+        finally:
+            agent.kill()
+
     def test_what_the_agent_leaves_running_ends_with_its_round(self):
         # A writer left running could change the worktree after Claude read the diff (the
         # 2026-11-16 audit); a stray non-event line on its stdout is no crash either.
