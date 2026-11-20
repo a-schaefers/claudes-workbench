@@ -432,10 +432,9 @@ def checkin_text(task: store.Task, n: int, out: dict, since: float) -> str:
     if out["texts"]:
         lines.append("its latest words: " + out["texts"][-1].strip().replace("\n", " ")[:400])
     files = gitops.changed(task.worktree)
-    lines.append("files changed so far: "
-                 + (", ".join(f[3:] for f in files.splitlines()) if files else "none"))
+    lines.append("files changed so far: " + gitops.brief_paths(files))
     if extra := outside_spec(task, files):
-        lines.append("NOTE: the spec doesn't name " + ", ".join(extra)
+        lines.append("NOTE: the spec doesn't name " + ", ".join(gitops.brief(extra))
                      + ": check it is still on its task")
     return "\n".join(lines)
 
@@ -1104,7 +1103,7 @@ def review_diff(task: store.Task) -> str:
             return (f"\n\nthe diff (all of it; wb diff {task.name} again only after a change):"
                     f"\n{full}" + prop)
         return (f"\n\nthe diff is {len(full)} characters, too big to include: "
-                f"its stat:\n{gitops.diff(task.worktree, base, stat=True)}" + prop)
+                f"its stat:\n{gitops.diff(task.worktree, base, stat=True, stat_count=gitops.CHANGED_SHOWN)}" + prop)
     except (gitops.GitError, OSError):
         return ""
 
@@ -1162,12 +1161,14 @@ def summary_text(task: store.Task, n: int, rnd: dict, tests) -> str:
     final = (rnd["texts"][-1] if rnd["texts"] else "(the agent wrote no final message)").strip()
     lines += ["", "agent's summary:", final[:2500], ""]
     files = gitops.changed(task.worktree)
-    lines += ["files changed:", files or "(none)"]
+    lines += ["files changed:", "\n".join(gitops.brief(files.splitlines(), status=True)) or "(none)"]
+    for d, k in gitops.build_dirs(task.worktree, files)[:gitops.CHANGED_SHOWN]:
+        lines.append(f"NOTE: {d} holds {k:,} new files the project doesn't ignore: build output?")
     if extra := outside_spec(task, files):
-        lines.append("NOTE: the spec doesn't name " + ", ".join(extra)
+        lines.append("NOTE: the spec doesn't name " + ", ".join(gitops.brief(extra))
                      + ": needed for the task, or drift?")
     if mine := claude_files_changed(files):
-        lines.append(f"NOTE: the agent changed your files ({', '.join(mine)}): instructions and "
+        lines.append(f"NOTE: the agent changed your files ({', '.join(gitops.brief(mine))}): instructions and "
                      ".claude/ are yours to write; keep, rewrite or revert them")
     if nested := gitops.nested_repos(task.worktree):
         lines.append(gitops.nested_line(nested))
@@ -1634,7 +1635,7 @@ def _full_round(task: store.Task, n: int, rnd: dict, handed: int = 1) -> None:
         files = gitops.changed(task.worktree)
         task.notify("checkin", f"task {task.name}: {text} (handover {handed} this round; "
                     f"stopped as stuck past {HANDOVER_MAX}); files changed so far: "
-                    + (", ".join(f[3:] for f in files.splitlines()) if files else "none"), round=n)
+                    + gitops.brief_paths(files), round=n)
     last = "\n\n".join(t.strip() for t in rnd["texts"][-2:] if t.strip())[-1200:]
     task.round_dir(n + 1).mkdir(parents=True, exist_ok=True)
     asks = round_asks(task, n)

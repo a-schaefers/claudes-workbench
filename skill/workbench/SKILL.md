@@ -385,6 +385,10 @@ git repository of its own` is a nested repo the diff leaves out and `wb accept` 
 `.git` removed, or gitignore it. Override per round: `wb feedback --fresh` when the agent is
 confused or working from stale reads; `--keep-context` when it needs what it read and the window
 still has room (how handovers work: `reference/driving.md`).
+Check a directory flagged as possible build output before you accept a step. Remove or gitignore
+generated files. When the bulk additions or large binaries belong in the commit, pass
+`--include` to `wb next` or `wb accept` after reviewing them.
+
 Follow-up work in the same area goes to the same agent: `wb next <name> --spec <file> -m "<subject
 for the approved step>" [--test …]` commits the approved step on the branch and sends the next
 step to the same worktree and session (`--fresh` for a new one). `wb diff` then shows the current
