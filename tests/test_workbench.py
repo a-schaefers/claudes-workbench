@@ -60,7 +60,7 @@ def not_merged(*argv) -> str:
 
 
 def fake_probe(tmp: Path) -> None:
-    """A `probe` first on PATH, as `cargo install probe-code` puts one (PROBE_EXPERIMENT.md)."""
+    """A `probe` first on PATH, as its release binary installs one (PROBE_EXPERIMENT.md)."""
     bin_ = tmp / "probe-bin"
     bin_.mkdir()
     (bin_ / "probe").write_text('#!/bin/sh\nif [ "$1" = --help ]; then printf "Commands:\\n  symbols  List symbols\\n"; '
