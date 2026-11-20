@@ -447,20 +447,33 @@ def _worktree_setup(repo: Path, a) -> dict:
             copy.append(p)
     guard = context.repo_dirs(SimpleNamespace(spec={"repo": str(repo)}))
     for name in [*conf.get("siblings", []), *(a.sibling or [])]:
-        name = name.strip().rstrip("/")
-        if not name or "/" in name or name in (".", ".."):
-            die(f"--sibling {name}: a directory's name, beside the repo (../<name>)")
-        if name in context.TASK_FILES:
-            die(f"--sibling {name}: the name of one of the task's own files; link it by hand")
-        real = os.path.realpath(repo.parent / name)
+        ups, rest = context.sibling_parts(name.strip().rstrip("/"))
+        parts = rest.split("/")
+        if not rest or any(c in ("", ".", "..") for c in parts) or ups > len(repo.parents):
+            die(f"--sibling {name}: a directory beside the repo (<name> or ../<name>) or further up "
+                "(../../<path>), by the path the project's own files use")
+        name = rest if ups == 1 else "../" * ups + rest  # kept as `lib` when one up, as before
+        real = context.sibling_real(repo, name)
         if not os.path.isdir(real):
-            die(f"--sibling {name}: no directory {repo.parent / name} beside the repo")
+            die(f"--sibling {name}: no directory {repo.parents[ups - 1] / rest}")
         if why := context.lane_refusal(real):
             die(f"--sibling {why}")
         if any(g == real or g.startswith(real.rstrip(os.sep) + os.sep) for g in guard):
             die(f"--sibling {name}: it holds the repo itself")
         if name not in sibs:
             sibs.append(name)
+    # each link is made where the worktree reaches it, under the task's directory: one inside
+    # another would be made through the first link, in the real directory (#261)
+    wt = context.tree(Path("/t"), repo, sibs, "worktree")
+    for n in sibs:
+        at = context.sibling_link(wt, n)
+        if wt.parent == Path("/t") and at.relative_to("/t").parts[0] in context.TASK_FILES:
+            die(f"--sibling {n}: the name of one of the task's own files; link it by hand")
+        for other in [*(m for m in sibs if m != n), None]:
+            there = context.sibling_link(wt, other) if other else wt
+            if at == there or there.is_relative_to(at) or at.is_relative_to(there):
+                die(f"--sibling {n}: " + (f"it overlaps --sibling {other}: name one of them"
+                                          if other else "its link would be the task's worktree"))
     return {k: v for k, v in (("setup", setup), ("copy", copy), ("siblings", sibs)) if v}
 
 
@@ -553,7 +566,9 @@ def cmd_start(a):
         die(f"{task.dir} exists without a task.json: another wb start {a.name} is under way or "
             "one failed; pick a new name")
     try:
-        base = gitops.create_worktree(repo, a.name, task.worktree, a.base)
+        wt = context.tree(task.dir, repo, setup.get("siblings"), "worktree")  # #261
+        wt.parent.mkdir(parents=True, exist_ok=True)
+        base = gitops.create_worktree(repo, a.name, wt, a.base)
     except gitops.GitError as e:
         shutil.rmtree(task.dir, ignore_errors=True)  # create_worktree removed its own leftovers
         die(str(e))
@@ -571,6 +586,7 @@ def cmd_start(a):
         "opencode_model": m.id, "route": why, "size": a.size, "stack": stack,
         **({"trial": True} if a.trial else {}), "test_cmd": a.test, "test_timeout": a.test_timeout,
         **setup,  # setup, copy, siblings: runner.prepare, before the base check (#201)
+        **({"worktree": str(wt.relative_to(task.dir))} if wt != task.dir / "worktree" else {}),
         **({"backlog": a.backlog} if a.backlog else {}),  # a batch left to run: wb backlog
         # a replay of the bench driver's (bench.replay): no notices, no results row, not listed
         **({"bench": b} if (b := getattr(a, "bench", None)) else {}),
@@ -608,7 +624,7 @@ def cmd_start(a):
         print(f"note: submodules ({', '.join(subs[:5])}) are not checked out in the agent's "
               "worktree: a build or test that needs them fails there")
     if setup:
-        does = [*(["links " + ", ".join(f"../{n}" for n in setup["siblings"])]
+        does = [*(["links " + ", ".join(n if n.startswith("../") else f"../{n}" for n in setup["siblings"])]
                   if setup.get("siblings") else []),
                 *([f"copies {', '.join(setup['copy'])}"] if setup.get("copy") else []),
                 *([f"runs `{setup['setup']}`"] if setup.get("setup") else [])]
@@ -2692,7 +2708,8 @@ def cmd_init(a):
 # config layers and shims) is nothing the mod reads; each closed task is skipped too (cmd_events):
 # a thousand finished tasks were 4,000 inotify watches per Claude session, or a rescan of them
 # four times a second without inotify (the 2026-11-16 audit).
-EVENT_SKIP = ("tasks/*/worktree", "tasks/*/rounds", "rules", "imports", "images", "archive")  # clones, outputs
+EVENT_SKIP = ("tasks/*/worktree", "tasks/*/tree", "tasks/*/rounds", "rules", "imports", "images",
+              "archive")  # clones (tree/: one nested for a sibling further up, #261), outputs
 QUIET = (".lock", ".tmp", "runner.log")
 
 
@@ -3328,9 +3345,9 @@ def parser() -> argparse.ArgumentParser:
     s.add_argument("--copy", action="append", metavar="PATH",
                    help="copy this ignored path from your checkout into the worktree (repeatable; "
                    "never a secret)")
-    s.add_argument("--sibling", action="append", metavar="NAME",
-                   help="let the agent read the directory ../NAME beside the repo, at the same "
-                   "relative path (repeatable)")
+    s.add_argument("--sibling", action="append", metavar="PATH",
+                   help="let the agent read a directory around the repo at the same relative "
+                   "path: NAME or ../NAME beside it, ../../shared/lib further up (repeatable)")
     s.set_defaults(f=cmd_start)
 
     s = sub.add_parser("feedback", help="send review feedback for another round")

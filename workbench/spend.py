@@ -115,7 +115,7 @@ def _theirs(path: str, tasks: set[str], handed: set[str]) -> bool:
     """Whether an edit is the tasks' work: in one's worktree (a takeover), or a file handed to
     `wb` (a spec, feedback, an answer)."""
     return any(path == s or path.endswith("/" + s.removeprefix("./")) for s in handed) or any(
-        path.startswith(str(store.task_dir(t) / "worktree") + "/") for t in tasks)
+        path.startswith(str(store.Task(t).worktree) + "/") for t in tasks)
 
 
 def _usage(row: dict) -> dict:

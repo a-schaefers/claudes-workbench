@@ -248,7 +248,8 @@ class Task:
 
     @property
     def worktree(self) -> Path:
-        return self.dir / "worktree"
+        # deeper, under tree/, for a sibling more than one level up (task.json `worktree`, #261)
+        return self.dir / self.spec.get("worktree", "worktree")
 
     def round_dir(self, n: int) -> Path:
         return self.dir / "rounds" / str(n)

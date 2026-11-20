@@ -921,9 +921,10 @@ def prepare(task: store.Task, prepared: Path | None = None) -> tuple[int | str, 
     repo = Path(spec["repo"])
     made = task.status.get("prepared_paths") if prepared else None
     try:
-        for name in spec.get("siblings") or ():
-            if not (wt.parent / name).is_symlink():
-                (wt.parent / name).symlink_to(os.path.realpath(repo.parent / name))
+        for name in spec.get("siblings") or ():  # where the repo's own paths reach them (#261)
+            if not (at := context.sibling_link(wt, name)).is_symlink():
+                at.parent.mkdir(parents=True, exist_ok=True)
+                at.symlink_to(context.sibling_real(repo, name))
         if made is not None:
             for p in made:
                 src, dest = prepared / p, wt / p

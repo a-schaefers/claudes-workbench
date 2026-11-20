@@ -1830,10 +1830,48 @@ class WorktreeSetup(Base):
         self.assertNotIn(real, context.writable(t))
         self.assertIn(f"{t.worktree.parent / 'lib'}/*",
                       [r["resource"] for r in context.external_rules(t) if r["effect"] == "allow"])
-        self.assertIn("beside the repo", self.refused("t-s1", "--sibling", "nope"))
-        self.assertIn("a directory's name", self.refused("t-s2", "--sibling", "../lib"))
+        self.assertIn("no directory", self.refused("t-s1", "--sibling", "nope"))
+        self.assertIn("by the path", self.refused("t-s2", "--sibling", "../lib/../lib"))
         (self.repo.parent / "rounds").mkdir()
         self.assertIn("task's own", self.refused("t-s3", "--sibling", "rounds"))
+
+    def test_a_sibling_two_levels_up_resolves_by_the_projects_own_path(self):
+        # #261 (the audit of 1.2): only `../<name>` was linked, so Cargo's `../../shared/lib`, a
+        # workspace two levels up and Go's `replace ../../x` broke with nothing to configure
+        deep = Path(self.tmp.name) / "mono" / "apps" / "repo"
+        deep.parent.mkdir(parents=True)
+        shutil.move(self.repo, deep)
+        self.repo = deep
+        (lib := deep.parents[1] / "shared" / "lib").mkdir(parents=True)
+        (lib / "VERSION").write_text("7\n")
+        (tools := deep.parent / "tools").mkdir()
+        (tools / "T").write_text("t\n")
+        cmd = ("grep -qx 7 ../../shared/lib/VERSION && grep -qx t ../tools/T "
+               "|| { echo NO-SIBLING; exit 3; }")
+        self.start("t-deep", "ok", "--test", cmd, "--sibling", "../../shared/lib/",
+                   "--sibling", "../tools", "--auto-fix", "0", "--no-self-review")
+        st = wait_phase("t-deep", {"review"})
+        t = store.Task("t-deep")
+        self.assertEqual(t.worktree, t.dir / "tree" / "apps" / "worktree")
+        self.assertEqual(t.spec["siblings"], ["../../shared/lib", "tools"])
+        self.assertIs(st["base_check"]["ok"], True)          # the scratch checkout nests too,
+        self.assertFalse((store.home() / "shared").exists())  # its links inside it
+        self.assertIs(st["tests"]["ok"], True)
+        self.assertEqual(context.siblings(t), [os.path.realpath(lib), os.path.realpath(tools)])
+        allowed = [r["resource"] for r in context.external_rules(t) if r["effect"] == "allow"]
+        self.assertIn(f"{t.dir / 'tree' / 'shared' / 'lib'}/*", allowed)
+        self.assertIsNotNone(gitops._record(t.worktree))      # git still pinned to its own dir
+        run_wb("accept", "t-deep", "-m", "deep")
+        self.assertIn("answer.txt", subprocess.run(
+            ["git", "-C", str(deep), "show", "--name-only", "--format=", gitops.branch_name("t-deep")],
+            capture_output=True, text=True, check=True).stdout)
+        (deep.parents[1] / "shared" / "x").mkdir()
+        (deep.parent / "worktree").mkdir()
+        self.assertIn("overlaps", self.refused("t-d1", "--sibling", "../../shared",
+                                               "--sibling", "../../shared/lib"))
+        self.assertIn("by the path", self.refused("t-d2", "--sibling", "../../shared/../x"))
+        self.assertIn("the task's worktree", self.refused("t-d3", "--sibling", "../worktree",
+                                                          "--sibling", "../../shared/x"))
 
     def test_start_says_which_ignored_directories_the_worktree_will_lack(self):
         self.ignore("node_modules/", "__pycache__/")
@@ -4767,6 +4805,34 @@ class Bench(Base):
             bench._start_task(case, "m", "bench-x", Path(self.tmp.name), [], {})
         self.assertEqual(argv[argv.index("--setup") + 1], "mkdir -p deps && touch deps/stamp")
         self.assertEqual(argv[argv.index("--allow") + 1], "make check*")
+
+    def test_a_case_with_a_sibling_two_levels_up_checks_and_replays_inside_its_own_directory(self):
+        # #261 (the audit of 1.2): the case's checkouts nest as the task's worktree did, so the
+        # link to ../../shared/lib is made in the scratch, not in the bench's own directory
+        from workbench import bench
+        deep = Path(self.tmp.name) / "mono" / "apps" / "repo"
+        deep.parent.mkdir(parents=True)
+        shutil.move(self.repo, deep)
+        self.repo = deep
+        (lib := deep.parents[1] / "shared" / "lib").mkdir(parents=True)
+        (lib / "VERSION").write_text("7\n")
+        test = "grep -qx 7 ../../shared/lib/VERSION && sh tests/check.sh"
+        self.start("t-up", "ok", "--test", test, "--sibling", "../../shared/lib")
+        wait_phase("t-up", {"review"})
+        wt = store.Task("t-up").worktree
+        (wt / "tests").mkdir()
+        (wt / "tests" / "check.sh").write_text("grep -qx 42 answer.txt\n")
+        run_wb("accept", "t-up", "-m", "feat: the answer")
+        self.assertIn("on the base: fails", run_wb("bench", "add", "t-up", "--hidden", "tests/check.sh"))
+        self.assertFalse((bench.home() / "shared").exists())
+        self.assertFalse((bench.home().parent / "shared").exists())
+        case = bench.cases()["t-up"]
+        d = Path(self.tmp.name) / "replay"
+        work = bench._checkout_at(d, case)
+        bench.checkout(case, work)
+        bench._inputs(case, work)
+        self.assertEqual(work, d / "tree" / "apps" / "repo")
+        self.assertEqual((work / ".." / ".." / "shared" / "lib" / "VERSION").read_text(), "7\n")
 
     def fake_claude(self, answer: str, events: bool = False) -> Path:
         """A `claude` on PATH that writes answer.txt and prints claude -p's JSON result (with

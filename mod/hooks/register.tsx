@@ -416,7 +416,8 @@ async function codingMode($: any): Promise<string> {
 // with the user's yes recorded for that task and not yet handed back (`wb coding allow`).
 async function codingRefusal($: any, path: string): Promise<string> {
   const task = path.startsWith(`${mem.root}/tasks/`)
-    ? /^([^/]+)\/worktree\//.exec(path.slice(mem.root.length + 7))?.[1] : undefined
+    // tasks/<t>/worktree, or tasks/<t>/tree/…/worktree for a sibling further up (#261)
+    ? /^([^/]+)\/(?:tree\/(?:[^/]+\/)+)?worktree\//.exec(path.slice(mem.root.length + 7))?.[1] : undefined
   if (!task) return ''
   const mode = await codingMode($)
   if (mode === 'decide') return ''

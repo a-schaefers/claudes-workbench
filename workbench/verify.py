@@ -17,7 +17,7 @@ import shutil
 import tempfile
 from pathlib import Path
 
-from . import gitops, runner, store
+from . import context, gitops, runner, store
 
 LIMIT = 300  # seconds for each run; past it, that run is inconclusive
 
@@ -86,7 +86,9 @@ def _run(task: store.Task, checkout, cmd: str, limit: int, keep=None,
     ``setup`` (--setup) asks for the setup to run there again."""
     store.home().mkdir(parents=True, exist_ok=True)  # not in /tmp, where the git shim allows writes
     with tempfile.TemporaryDirectory(prefix=".verify-", dir=store.home()) as scratch:
-        work = Path(scratch) / "repo"
+        # nested as the worktree is, so that a sibling two levels up stays in the scratch (#261)
+        work = context.tree(Path(scratch), task.spec["repo"], task.spec.get("siblings"), "repo")
+        work.parent.mkdir(parents=True, exist_ok=True)
         gitops.git(scratch, "clone", "-q", "--shared", "--no-checkout", task.spec["repo"], str(work))
         if sparse := gitops.sparse_of(Path(task.spec["repo"])):  # as the task's worktree is (#263)
             gitops.apply_sparse(work, sparse)
