@@ -224,6 +224,17 @@ class Real(unittest.TestCase):
         self.assertEqual((st["available"], st["resident"]), (False, False))
         self.assertIn("lists no model", st["why"])
 
+    def test_a_strict_server_takes_its_exact_id_not_one_ending_in_the_same_name(self):
+        # #339 (the audit of 1.4): a vLLM serving studio/coder read as serving personal/coder,
+        # a basename match meant for llama-server's file paths
+        vllm = self.server({"/v1/models": {"data": [{"id": "studio/coder", "owned_by": "vllm"}]}})
+        self.config({"v": {"options": {"baseURL": vllm + "/v1"},
+                           "models": {"personal/coder": {}, "studio/coder": {}}}})
+        st = models.status(models.resolve("v/personal/coder"))
+        self.assertEqual((st["available"], st["why"]), (False, "the server serves studio/coder, "
+                                                                "not personal/coder: set the entry's id to studio/coder"))
+        self.assertTrue(models.status(models.resolve("v/studio/coder"))["available"])
+
     def test_a_keyed_ollama_is_probed_with_the_providers_key(self):
         # #256 (the audit of 1.2): it served the model to the key, but the native /api probes
         # sent none, so it read as unavailable

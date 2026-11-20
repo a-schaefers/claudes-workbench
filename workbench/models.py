@@ -705,9 +705,12 @@ def status(m: Model, down=frozenset()) -> dict:
         # request as "opencode exited 1", and a vLLM name is a long HF path, easy to miss (#256,
         # the audit of 1.2). llama-server says it is one (owned_by llamacpp, a `meta` field).
         llamacpp = any(x.get("owned_by") == "llamacpp" or "meta" in x for x in rows)
-        if sid and not _serves(sid, m.name) and not llamacpp and not (m.start and _contended(m)):
+        # the file's basename is llama-server's spelling only: a strict server takes its exact
+        # id, so studio/coder read as serving personal/coder (#339, the audit of 1.4)
+        same = sid == m.name or (llamacpp and _serves(sid, m.name))
+        if sid and not same and not llamacpp and not (m.start and _contended(m)):
             return _no(f"the server serves {sid}, not {m.name}: set the entry's id to {sid}")
-        if sid and m.start and _contended(m) and not _serves(sid, m.name):
+        if sid and m.start and _contended(m) and not same:
             # the task would run on the other model, recorded under this one (the 2026-11-16 audit)
             owners = _owners(m, sid)
             if [o.id for o in owners] == [m.id]:

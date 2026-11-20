@@ -1843,8 +1843,10 @@ one listing none (`data: []`) is unavailable, "the server answers but lists no m
 running and resident, #256); a llama-server listing one (a row `owned_by: llamacpp` or with a
 `meta` field) answers to any name; any other server listing one is strict, as vLLM, SGLang and TGI
 are (a wrong `model` is a 404, and the round died at its first request as "opencode exited 1":
-#256, the audit of 1.2), so an id that isn't this model's (`_serves`) is unavailable, "the server
-serves <id>, not <name>: set the entry's id to <id>"; except on a port that several models share,
+#256, the audit of 1.2), so an id that isn't exactly this model's name is unavailable, "the server
+serves <id>, not <name>: set the entry's id to <id>" (the file's basename, `_serves`, is matched
+only on a llama-server: a strict server listing `studio/coder` read as serving `personal/coder`,
+#339, the audit of 1.4); except on a port that several models share,
 each with its own `start` (`_contended`: one llama-server per model), where the listed id says which model it is
 (`_owners`): the model whose name is the id or its file's basename without `.gguf` (`_serves`), or
 whose start command names that file (`-m <path>`). The model it is reads running; another model on
