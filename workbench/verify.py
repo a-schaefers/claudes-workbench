@@ -74,18 +74,21 @@ def assertion(text: str) -> str:
     return ""
 
 
-def _run(task: store.Task, checkout, cmd: str, limit: int, keep=None) -> tuple[int | str, str]:
+def _run(task: store.Task, checkout, cmd: str, limit: int, keep=None,
+         setup: bool = False) -> tuple[int | str, str]:
     """``cmd`` in a scratch clone that ``checkout`` sets up, under the task's lane; ``keep(work)``
-    takes what the run left before the clone goes."""
+    takes what the run left before the clone goes. Prepared from the task's worktree, unless
+    ``setup`` (--setup) asks for the setup to run there again."""
     store.home().mkdir(parents=True, exist_ok=True)  # not in /tmp, where the git shim allows writes
     with tempfile.TemporaryDirectory(prefix=".verify-", dir=store.home()) as scratch:
         work = Path(scratch) / "repo"
         gitops.git(scratch, "clone", "-q", "--shared", "--no-checkout", task.spec["repo"], str(work))
         checkout(work)
         at = _At(task.name, work)
-        code, setup = runner.prepare(at)  # its setup, copies and siblings, as the worktree (#201)
+        # its setup, copies and siblings, as the worktree (#201): copied from it (#249)
+        code, said = runner.prepare(at, None if setup else task.worktree)
         if code != 0:
-            return "setup failed", f"[setting up the scratch checkout failed: {code}]\n{setup}"
+            return "setup failed", f"[setting up the scratch checkout failed: {code}]\n{said}"
         out = runner.run_in_lane(at, cmd, limit)
         if keep:
             keep(work)
@@ -134,7 +137,7 @@ def verdict(base: int | str, base_out: str, cand: int | str, expect: str = "") -
 
 
 def run(task: store.Task, cmd: str, files: list[str] | None = None, limit: int = LIMIT,
-        expect: str = "") -> dict:
+        expect: str = "", setup: bool = False) -> dict:
     """Run ``cmd`` on the base (with the candidate's test files) and on the candidate; the
     result, also kept in tasks/<task>/verify/<n>/ with both outputs."""
     tree = gitops.snapshot(task.worktree)
@@ -143,8 +146,8 @@ def run(task: store.Task, cmd: str, files: list[str] | None = None, limit: int =
         raise RuntimeError("no test file among the candidate's changes: name the regression "
                            "test's files with --files (or review it as usual)")
     base, candidate = _checkouts(task, tree, files)
-    b_code, b_out = _run(task, base, cmd, limit)
-    c_code, c_out = _run(task, candidate, cmd, limit)
+    b_code, b_out = _run(task, base, cmd, limit, setup=setup)
+    c_code, c_out = _run(task, candidate, cmd, limit, setup=setup)
     d = task.dir / "verify"
     n = 1 + max((int(p.name) for p in d.glob("*") if p.name.isdigit()), default=0)
     out = d / str(n)
@@ -182,7 +185,7 @@ SHOT = ".wb-shot.png"  # where a capture command writes, in its checkout ($WB_SH
 
 
 def shot(task: store.Task, cmd: str, files: list[str] | None = None, viewport: str = "1280x800",
-         limit: int = LIMIT) -> dict:
+         limit: int = LIMIT, setup: bool = False) -> dict:
     """Run one capture command on the base and on the candidate (#98), each in a scratch
     checkout under the task's lane: the same command, fixture and viewport, so the two images
     show the same interaction. The command is the project's own (a headless browser script, a
@@ -208,7 +211,7 @@ def shot(task: store.Task, cmd: str, files: list[str] | None = None, viewport: s
             if p.is_file() and not p.is_symlink() and p.read_bytes()[:8] == b"\x89PNG\r\n\x1a\n":
                 shutil.copyfile(p, dest)
         env = f"WB_SHOT_OUT=./{SHOT} WB_SHOT_VIEWPORT={viewport} "
-        code, text = _run(task, checkout, env + f"sh -c {shlex.quote(cmd)}", limit, keep)
+        code, text = _run(task, checkout, env + f"sh -c {shlex.quote(cmd)}", limit, keep, setup)
         (out / f"{side}.txt").write_text(text, encoding="utf-8")
         meta[side].update(exit=code, image=str(dest) if dest.exists() else None)
         if not dest.exists():  # said, never hidden: the ordinary code review still stands
