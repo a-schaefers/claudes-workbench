@@ -2227,7 +2227,7 @@ environment of the Ollama that runs here and where it was read, `""` when nothin
 `ollama_env()` is its environment alone): `OLLAMA_KEYS` (`OLLAMA_MODELS`,
 `OLLAMA_CONTEXT_LENGTH`, `OLLAMA_NUM_PARALLEL`, `OLLAMA_MAX_LOADED_MODELS`, `OLLAMA_HOST`, `""`
 when unset) and `SET_ONLY`, `VISIBLE`'s `CUDA_VISIBLE_DEVICES`, `ROCR_VISIBLE_DEVICES`,
-`HIP_VISIBLE_DEVICES`, `GGML_VK_VISIBLE_DEVICES` (only when set). The first source that answers
+`HIP_VISIBLE_DEVICES`, `GGML_VK_VISIBLE_DEVICES`, and `CUDA_DEVICE_ORDER` (only when set). The first source that answers
 is the whole answer: an `ollama serve` whose `/proc/<pid>/environ` this user may read (one
 started by hand in another terminal, a user unit's; under `PROC`), lowest pid first; a systemd
 `ollama` unit that is running (`systemctl show -p LoadState -p ActiveState -p Environment`, the
@@ -2247,7 +2247,15 @@ audit of 1.6). A system unit's process runs as another user and can't be read: i
 with spaces and quotes trimmed, as Ollama reads it, and the raw value: `report` says when it isn't
 a number instead of crashing), `ollama_models_dir()` (`os.path.isdir`: a directory it can't read
 is passed over), `visible(devs, env)` (the devices a runtime with that environment sees: by
-number, counted per driver in nvidia-smi's or sysfs's order, or by UUID or its unique start; it
+number, counted per driver in sysfs's order or CUDA's, or by UUID or its unique start. CUDA's
+order is nvidia-smi's (PCI) under `CUDA_DEVICE_ORDER=PCI_BUS_ID`; by default CUDA counts fastest
+first, by a heuristic NVIDIA doesn't spell out, so when the NVIDIA cards differ (name or memory)
+a number is read in that order as near as can be told, compute capability (`gpus`' `compute_cap`,
+from a second `nvidia-smi --query-gpu=uuid,compute_cap`, asked only then, since a driver without
+the field fails the whole query) then memory, and its note says it is a guess (`GUESSED`: set
+`CUDA_DEVICE_ORDER=PCI_BUS_ID` or name the card by UUID). Read in PCI order, a 3090 beside a 1060
+in a lower slot budgeted the 1060 for `CUDA_VISIBLE_DEVICES=0`, the 3090 to Ollama (#381, the
+audit of 1.6); no such rig was at hand, so the guess at CUDA's heuristic is unmeasured. It
 stops at the first entry naming no device, as CUDA does, so `-1` is none; unset is all, and so is
 empty except `CUDA_VISIBLE_DEVICES` (`EMPTY_IS_NONE`: to CUDA an empty list is no device); each
 mask counts within the order the one before left, so HIP's numbers index ROCR's list as ROCR

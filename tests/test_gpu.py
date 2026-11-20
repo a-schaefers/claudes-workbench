@@ -531,6 +531,38 @@ class Budget(unittest.TestCase):
         self.assertEqual(self.budget([dict(rx), rx], {"ROCR_VISIBLE_DEVICES": "1"}), (8 * 2 ** 30, [rx]))
         self.assertEqual(self.budget([a, b], {"ROCR_VISIBLE_DEVICES": "0"})[0], 16 * 2 ** 30)
 
+    def test_a_cuda_number_counts_fastest_first_unless_ollama_orders_cards_by_pci_bus(self):
+        # #381 (the audit of 1.6): nvidia-smi lists cards in PCI order and CUDA numbers them
+        # fastest first by default, so with a 1060 in the lower slot beside a 3090,
+        # CUDA_VISIBLE_DEVICES=0 was the 1060 to wb and the 3090 to Ollama
+        old = {"name": "GTX 1060", "driver": "nvidia 560.94", "vram": 6 * 2 ** 30, "discrete": True,
+               "uuid": "GPU-aaaa", "compute_cap": (6, 1)}
+        new = {"name": "RTX 3090", "driver": "nvidia 560.94", "vram": 24 * 2 ** 30, "discrete": True,
+               "uuid": "GPU-bbbb", "compute_cap": (8, 6)}
+        budget, devs, why = self.budget([old, new], {"CUDA_VISIBLE_DEVICES": "0"}, why=True)
+        self.assertEqual((budget, devs), (24 * 2 ** 30, [new]))
+        self.assertIn("as CUDA_VISIBLE_DEVICES=0 (counted fastest first, CUDA's default order: a guess; "
+                      "CUDA_DEVICE_ORDER=PCI_BUS_ID or the card's UUID makes it sure) leaves it", why)
+        self.assertEqual(self.budget([old, new], {"CUDA_VISIBLE_DEVICES": "1"}), (6 * 2 ** 30, [old]))
+        budget, devs, why = self.budget([old, new], {"CUDA_VISIBLE_DEVICES": "0",
+                                                     "CUDA_DEVICE_ORDER": "PCI_BUS_ID"}, why=True)
+        self.assertEqual((budget, devs, why), (6 * 2 ** 30, [old], "GTX 1060 (VRAM), as CUDA_VISIBLE_DEVICES=0 leaves it"))
+        _, devs, why = self.budget([old, new], {"CUDA_VISIBLE_DEVICES": "GPU-aaaa"}, why=True)
+        self.assertEqual((devs, "guess" in why), ([old], False))                # a UUID is sure
+        unknown = [{k: v for k, v in g.items() if k != "compute_cap"} for g in (old, new)]
+        self.assertEqual(self.budget(unknown, {"CUDA_VISIBLE_DEVICES": "0"})[0], 24 * 2 ** 30)  # memory
+        smi = {("nvidia-smi", "--query-gpu=uuid,compute_cap"): "GPU-aaaa, 6.1\nGPU-bbbb, 8.6",
+               ("nvidia-smi",): "GPU-aaaa, GTX 1060, 6144, 0, 560.94\nGPU-bbbb, RTX 3090, 24576, 0, 560.94"}
+        with mock.patch.object(hardware, "_run", lambda *a: next((v for k, v in smi.items() if a[:len(k)] == k), "")), \
+                mock.patch.object(hardware, "system", lambda: "linux"), \
+                mock.patch.object(hardware, "DRM", Path("/nonexistent")):
+            self.assertEqual([g.get("compute_cap") for g in hardware.gpus()], [(6, 1), (8, 6)])
+        with mock.patch.object(hardware, "_run", lambda *a: "LoadState=loaded\nActiveState=active\n"
+                               "Environment=CUDA_DEVICE_ORDER=PCI_BUS_ID" if a[0] == "systemctl" else ""), \
+                mock.patch.object(hardware, "PROC", Path("/nonexistent")), \
+                mock.patch.object(hardware, "system", lambda: "linux"):
+            self.assertEqual(hardware.ollama_env()["CUDA_DEVICE_ORDER"], "PCI_BUS_ID")   # Ollama's own
+
     def test_masks_keep_unset_apart_from_empty_and_count_in_the_order_before_them(self):
         # #255 (the audit of 1.2): an empty CUDA_VISIBLE_DEVICES (no device, to CUDA) counted
         # every card; HIP's index was read in discovery order, not within ROCR's, so it picked

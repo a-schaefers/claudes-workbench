@@ -128,6 +128,15 @@ def gpus(windows: bool = True) -> list[dict]:
             g.update(vram=memory()["ram"], unified=True, discrete=False,
                      memory="the RAM: nvidia-smi gives the GPU no memory of its own")
         found.append(g)
+    if len({(g["name"], g["vram"]) for g in found}) > 1:
+        # cards that differ: CUDA numbers them fastest first by default, which visible() guesses
+        # from this (a query of its own: a driver that lacks the field fails the whole query)
+        caps = dict(tuple(x.strip() for x in line.split(",")) for line in _run(
+            smi(), "--query-gpu=uuid,compute_cap", "--format=csv,noheader").splitlines()
+            if line.count(",") == 1)
+        for g in found:
+            if re.fullmatch(r"\d+\.\d+", cap := caps.get(g["uuid"], "")):
+                g["compute_cap"] = tuple(int(x) for x in cap.split("."))
     if where == "wsl":
         if not windows:
             return found
@@ -165,11 +174,17 @@ def gpus(windows: bool = True) -> list[dict]:
 
 
 # What a runtime started with these sees, by driver: CUDA's and ROCm's own settings, which take
-# device numbers (counted in nvidia-smi's or sysfs's order) or UUIDs. HIP's counts within ROCR's,
+# device numbers (counted in sysfs's order, or CUDA's: GUESSED) or UUIDs. HIP's counts within ROCR's,
 # in the order ROCR's names them; a Vulkan-backed Ollama's mask counts every card ("*").
 VISIBLE = (("nvidia", "CUDA_VISIBLE_DEVICES"), ("amdgpu", "ROCR_VISIBLE_DEVICES"),
            ("amdgpu", "HIP_VISIBLE_DEVICES"), ("*", "GGML_VK_VISIBLE_DEVICES"))
 EMPTY_IS_NONE = {"CUDA_VISIBLE_DEVICES"}  # set but empty: CUDA sees no device at all
+# How CUDA numbers its devices: nvidia-smi lists them in PCI order, CUDA by default fastest first
+# (CUDA_DEVICE_ORDER=FASTEST_FIRST, a heuristic NVIDIA doesn't spell out), so on a 3090 beside a
+# 1060 in a lower slot CUDA_VISIBLE_DEVICES=0 was the 1060 to wb and the 3090 to Ollama (#381,
+# the audit of 1.6). PCI_BUS_ID makes the orders agree; a UUID needs no order at all.
+GUESSED = (" (counted fastest first, CUDA's default order: a guess; CUDA_DEVICE_ORDER=PCI_BUS_ID "
+           "or the card's UUID makes it sure)")
 
 
 def visible(devs: list[dict], env: dict) -> tuple[list[dict], list[str]]:
@@ -180,7 +195,9 @@ def visible(devs: list[dict], env: dict) -> tuple[list[dict], list[str]]:
     the order the one before left: HIP_VISIBLE_DEVICES=0 under ROCR_VISIBLE_DEVICES=1,0 is
     ROCR's card 1, where discovery order picked the 4 GB card for the 24 GB one; an empty
     CUDA_VISIBLE_DEVICES is no device, not every one; and a Vulkan-backed Ollama's own mask was
-    never read (#255, the audit of 1.2)."""
+    never read (#255, the audit of 1.2). CUDA's numbers follow ``env``'s CUDA_DEVICE_ORDER:
+    PCI_BUS_ID is nvidia-smi's order; else, when the cards differ, fastest first as near as
+    can be told (compute capability, then memory), and the note says it is a guess (#381)."""
     notes = []
     for driver, key in VISIBLE:
         if key not in env or env[key] is None:
@@ -189,10 +206,17 @@ def visible(devs: list[dict], env: dict) -> tuple[list[dict], list[str]]:
         mine = [g for g in devs if driver == "*" or (g.get("driver") or "").split(" ")[0] == driver]
         if not mine or not raw and key not in EMPTY_IS_NONE:
             continue
+        order, guessed = mine, False
+        if key == "CUDA_VISIBLE_DEVICES" and (env.get("CUDA_DEVICE_ORDER") or "").strip().upper() \
+                != "PCI_BUS_ID" and len({(g.get("name"), g.get("vram")) for g in mine}) > 1:
+            # fastest first, as near as can be told: compute capability, then memory (stable,
+            # so PCI order among equals)
+            order = sorted(mine, key=lambda g: (g.get("compute_cap") or (0,), g.get("vram") or 0), reverse=True)
         picked = []
         for item in (x.strip() for x in raw.split(",")) if raw else ():
             if item.isdigit() and int(item) < len(mine):
-                one = [mine[int(item)]]
+                one = [order[int(item)]]
+                guessed |= order is not mine
             else:  # a UUID, or the unique start of one, as CUDA allows
                 one = [g for g in mine if item and (g.get("uuid") or "").lower().startswith(item.lower())]
             if len(one) != 1:
@@ -201,7 +225,7 @@ def visible(devs: list[dict], env: dict) -> tuple[list[dict], list[str]]:
         if [id(g) for g in picked] != [id(g) for g in mine]:
             devs = [g for g in devs if not any(g is m for m in mine)] + picked
             if len(picked) < len(mine):
-                notes.append(f"{key}={raw}")
+                notes.append(f"{key}={raw}" + (GUESSED if guessed else ""))
     return devs, notes
 
 
@@ -282,7 +306,8 @@ OLLAMA_KEYS = ("OLLAMA_MODELS", "OLLAMA_CONTEXT_LENGTH", "OLLAMA_NUM_PARALLEL",
 # The server's own knobs, which mean the same read from a container: its OLLAMA_MODELS is a path
 # inside it, its OLLAMA_HOST the container's bind, and its device masks count its own devices
 OLLAMA_KNOBS = ("OLLAMA_CONTEXT_LENGTH", "OLLAMA_NUM_PARALLEL", "OLLAMA_MAX_LOADED_MODELS")
-SET_ONLY = tuple(k for _, k in VISIBLE)  # unset stays unset: an empty CUDA_VISIBLE_DEVICES is no device (#255)
+# unset stays unset: an empty CUDA_VISIBLE_DEVICES is no device (#255); CUDA_DEVICE_ORDER (#381)
+SET_ONLY = (*(k for _, k in VISIBLE), "CUDA_DEVICE_ORDER")
 PROC = Path("/proc")
 
 
