@@ -3044,8 +3044,12 @@ count at one, so a server that took the call and never answered showed "Reconnec
 2026-11-18); jittered backoff, 0.5 s to 30 s, a banner after three failures; aborting a stream
 also cancels its body's reader, since WebKit can keep the socket (and the server's slot) open
 otherwise; offline, it still tries every 30 s or so, since a phone doesn't always fire `online`;
-back on screen or from the back-forward cache with nothing heard for `STALE_MS` 20 s, it dials at
-once rather than waiting out the watchdog; a page hidden for a minute drops its stream. When a
+back on screen after more than `AWAY_MS` (3 s) off it, or from the back-forward cache with nothing
+heard for `STALE_MS` 20 s, it dials at once rather than waiting out the watchdog: a phone asleep
+a few seconds after the last ping came back to a line heard from under 20 s before, kept it, and
+showed a new message 10 to 40 s after its push (the owner, 2026-11-20); and when the worker
+shows a push it posts `{kind: "push"}` to each open page, which dials again (a push is only for
+news no page showed, so that page's line is likely dead); a page hidden for a minute drops its stream. When a
 state's `build` differs from the one the page loaded with, the page reloads (`reloadOnce`, at
 most once a minute, else it carries on with the new build; the draft and the outbox are in
 localStorage). The phone keyboard (as merecatholicity.com's DM composer handles it, 2026-11-19):

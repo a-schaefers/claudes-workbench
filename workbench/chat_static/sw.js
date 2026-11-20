@@ -43,6 +43,8 @@ self.addEventListener('push', e => {
     await self.registration.showNotification(n.title, {
       body: n.body, icon: '/icon-192.png', badge: '/icon-192.png', tag: 'wb-chat', renotify: true, data: { url: '/' },
     })
+    // news the open page hasn't shown (a push is only for what no page saw): its line may be dead
+    for (const c of await self.clients.matchAll({ type: 'window', includeUncontrolled: true })) c.postMessage({ kind: 'push' })
   })())
 })
 
