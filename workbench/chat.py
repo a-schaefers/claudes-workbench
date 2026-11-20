@@ -25,6 +25,7 @@ import secrets
 import select
 import shutil
 import socket
+import socketserver
 import subprocess
 import sys
 import threading
@@ -940,7 +941,15 @@ def plan(binds: list[str] | None = None, hosts: list[str] | None = None) -> dict
             "names": names, "skipped": skipped}
 
 
-class _Server6(ThreadingHTTPServer):
+class _Server(ThreadingHTTPServer):
+    def server_bind(self):
+        # HTTPServer's own also looks the address's host name up (socket.getfqdn), which nothing
+        # here reads: on macOS that lookup stalled the start past wb chat on's wait (#236)
+        socketserver.TCPServer.server_bind(self)
+        self.server_name, self.server_port = self.server_address[:2]
+
+
+class _Server6(_Server):
     address_family = socket.AF_INET6
 
 
@@ -954,7 +963,7 @@ def make_servers(port: int, binds: list[str] | None = None,
     servers = []
     for addr in p["binds"]:
         try:
-            srv = (_Server6 if ":" in addr else ThreadingHTTPServer)((addr, port), handler)
+            srv = (_Server6 if ":" in addr else _Server)((addr, port), handler)
         except OSError as e:  # one line, not a traceback (the 2026-11-16 audit)
             for s in servers:
                 s.server_close()

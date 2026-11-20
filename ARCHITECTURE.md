@@ -586,8 +586,9 @@ in `main`'s `finally`): the agent if it still runs (`_stop`), a SIGKILL to its p
 `cmd &` left in it), then `sweep(task)`: every process of the user's whose environment carries
 the task's `WB_TASK` and `WB_HOME` (`agent_env` sets both; the runner's own environment drops
 `WB_TASK`, `spawn_runner`), since OpenCode's shell starts each command in a group of its own and
-`setsid` leaves any group. `agent_pid` is cleared. `sweep` reads `/proc/<pid>/environ`, so it is
-Linux only; elsewhere the group kill is all there is. The tests get the same after each run, and
+`setsid` leaves any group. `agent_pid` is cleared. `sweep` reads `/proc/<pid>/environ`, else
+(macOS) `ps -axwwE`, which prints each of the user's processes' environment after its command line
+(`_sweep_ps`, matching the two variables as whole words; #236: there what the agent left ran on). The tests get the same after each run, and
 `wb stop`, `takeover`, `accept`, `discard` and `reap` sweep too. Seen in the audit: a writer left
 running could change the worktree after Claude had read the diff, and a crashed runner's agent
 went on working beside the next task.
@@ -2769,7 +2770,9 @@ terminal, the one the workbench mod runs, reachable over your own network.
 
 `wb chat serve` (`workbench/chat.py`; kept up by `systemd/wb-chat.service`, a user unit running
 `%h/.local/bin/wb chat serve` with `Restart=always` and no start limit) serves a small page on
-port 1337 for reaching the Claude session in workbench mode while the user is away. The unit
+port 1337 for reaching the Claude session in workbench mode while the user is away (one
+`chat._Server` per bound address, which binds without the host-name lookup HTTPServer makes:
+on macOS it stalled the start past `wb chat on`'s wait, #236). The unit
 retries with a delay growing from 10 s to 5 min (`RestartSteps`, systemd 254+; every 10 s on
 older ones), since retrying is what brings the chat up when a bound address arrives late (a user
 manager has no network-online.target) or the port is briefly held: a start limit gave up for good
@@ -3687,8 +3690,8 @@ hidden files), `handovers` (fresh sessions). A `wb bench self` row (`bench.self_
   how: "skill:<name>"|"dropped", why}` (*Lessons*).
 - `speed.json`: `{"<model id>": {"write": [tok/s…], "read": [tok/s…]}}`, the last 60 of each.
 - `gpu.json`: `{"<pid>": {model, task, since, start, waiting?}}` (`since`: its place in the queue,
-  the task's `created_at`; `start`: the holder's start time on Linux, `/proc/<pid>/stat` field 22,
-  so a recycled pid isn't taken for it; null elsewhere).
+  the task's `created_at`; `start`: the holder's start time, `/proc/<pid>/stat` field 22, else
+  `ps -o lstart=` (macOS: #236), so a recycled pid isn't taken for it; null when neither says).
 - `scout.json`: `{done_at, notes, offered_at}` (`offered_at` from the mod); `watch.json`: `[{ts, text}]`.
 - `update.json`: `{checked_at, behind, kind}` (`kind`: `marketplace` or `clone`); `checked_at`
   is written before the fetch, so a failed, timed-out or killed check waits a week too.

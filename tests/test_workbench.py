@@ -2047,12 +2047,13 @@ class Steering(Base):
         mine, _ = cli._scope([t(repo=str(root), cwd=str(root))], str(link / "src"))
         self.assertEqual(len(mine), 1)                     # a session in the link
         upper = str(root).upper().replace(str(Path(self.tmp.name)).upper(), self.tmp.name)
+        folds = cli._folds_case(root)                      # macOS's APFS: yes; ext4: no
+        self.assertEqual(folds, (Path(upper).exists()))
         mine, _ = cli._scope([t(repo=upper, cwd=upper)], str(root))
-        self.assertEqual(mine, [])                         # case counts here (ext4)
+        self.assertEqual(len(mine), 1 if folds else 0)    # case counts only where the FS keeps it
         with mock.patch.object(cli, "_folds_case", lambda p: True):   # as on APFS
             mine, _ = cli._scope([t(repo=upper, cwd=upper)], str(root))
         self.assertEqual(len(mine), 1)
-        self.assertFalse(cli._folds_case(root))
 
     def test_a_sessions_tasks_are_those_it_started_wherever_they_ran(self):
         # the 0.90 review: by directory alone, a task started from ~ (or any parent) for one repo
@@ -6172,6 +6173,16 @@ class WebChat(Base):
         self.srv.server_close()
         self.srv.RequestHandlerClass.hub.close()  # or it outlives the test (#134)
         super().tearDown()
+
+    def test_the_server_binds_without_looking_its_host_name_up(self):
+        # #236: HTTPServer's bind asks socket.getfqdn, which stalled on macOS past wb chat on's wait
+        with mock.patch("socket.getfqdn", side_effect=AssertionError("looked up")):
+            servers, _ = self.chat.make_servers(0)
+        try:
+            self.assertEqual(servers[0].server_name, "127.0.0.1")
+        finally:
+            for srv in servers:
+                srv.server_close()
 
     def test_the_web_chat_is_off_until_turned_on_and_stays_as_left(self):
         # The user, 2026-11-19: off by default, a switch in the pane, remembered across /workbench runs.
