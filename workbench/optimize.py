@@ -56,9 +56,14 @@ def state() -> dict:
 
 def candidates() -> list[models.Model]:
     """The Ollama models that can be measured: this machine's and those on another machine's
-    Ollama (wb remote), where the same /api/ps placement says what fits its card (#115)."""
+    Ollama (wb remote), where the same /api/ps placement says what fits its card (#115). Not one
+    the user keeps loaded (models.json `keep_loaded`, by id, by name, or an alias of the same
+    model): each probe unloads and reloads its model, and a background measurement dropped the
+    user's autocomplete model, which #215 protected only from eviction (#254, the audit of 1.2)."""
+    held = models.keep_loaded()
     return [m for m in models.discover().values()
-            if m.engine == "ollama" and models.status(m)["available"]]
+            if m.engine == "ollama" and m.id not in held and not models._kept_name(m.name, held)
+            and models.status(m)["available"]]
 
 
 def served(m: models.Model) -> int:
