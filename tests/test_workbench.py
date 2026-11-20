@@ -43,6 +43,20 @@ def run_wb(*argv) -> str:
     return buf.getvalue()
 
 
+def not_merged(*argv) -> str:
+    """run_wb for an accept --merge whose merge is refused: exit 5 (cli.NOT_MERGED, #247)."""
+    buf = io.StringIO()
+    with redirect_stdout(buf):
+        try:
+            cli.main(list(argv))
+        except SystemExit as e:
+            if e.code != cli.NOT_MERGED:
+                raise
+        else:
+            raise AssertionError("the accept exited 0, not 5")
+    return buf.getvalue()
+
+
 def wait_phase(name, phases, timeout=30):
     deadline = time.time() + timeout
     while time.time() < deadline:
@@ -949,6 +963,82 @@ class Lifecycle(Base):
         self.assertIn("accepted t-retry", run_wb("accept", "t-retry", "-m", "feat: answer"))
         self.assertEqual(self.branch("delegate/t-retry"), tip)  # the same commit, not a new one
 
+    def test_an_accept_merge_interrupted_after_any_step_of_its_close_ends_once_and_right(self):
+        # #246 (the audit of 1.2): killed after the merge and the branch's deletion, a retry
+        # recorded merged=false and named a branch wb had deleted; git had the tip in main
+        def then_killed(real):
+            def f(*args, **kw):
+                real(*args, **kw)
+                raise KeyboardInterrupt
+            return f
+        points = ((gitops, "remove_worktree"), (context, "drop_runtime_dir"), (gitops, "merge"),
+                  (gitops, "drop_merged_branch"), (cli.results, "record"))
+        for i, (mod, name) in enumerate(points):
+            t = f"t-int{i}"
+            self.start(t, "ok")
+            wait_phase(t, {"review"})
+            (store.Task(t).worktree / f"{t}.txt").write_text("its own\n")  # main has the answer by now
+            with mock.patch.object(mod, name, then_killed(getattr(mod, name))), \
+                    self.assertRaises(KeyboardInterrupt), redirect_stderr(io.StringIO()):
+                run_wb("accept", t, "-m", f"feat: {t}", "--merge")
+            if name == "merge":  # and the branch went too: only its commit's ancestry is left
+                subprocess.run(["git", "-C", str(self.repo), "branch", "-qd", f"delegate/{t}"], check=True)
+            run_wb("accept", t, "-m", f"feat: {t}", "--merge")      # exits 0: merged
+            st = store.Task(t).status
+            self.assertEqual(st["phase"], "accepted", name)
+            self.assertIsNone(st.get("closing"), name)
+            rows = [r for r in store.results(trials=True) if r["task"] == t]
+            self.assertEqual(len(rows), 1, name)
+            self.assertIs(rows[0]["merged"], True, name)
+            self.assertNotIn("merge_refused", rows[0], name)
+            self.assertTrue(gitops.contains(self.repo, "refs/heads/main", st["tip"]), name)
+            log = subprocess.run(["git", "-C", str(self.repo), "log", "--format=%s", "main"],
+                                 capture_output=True, text=True).stdout.splitlines()
+            self.assertEqual(log.count(f"feat: {t}"), 1, name)   # one commit, merged once
+
+    def test_a_last_step_with_no_new_edits_accepts_after_an_interrupt_took_its_worktree(self):
+        # #246: the worktree was removed, the retry found no accept trailer on step 1's commit,
+        # and exited 1 with the task in review for good
+        self.start("t-st", "ok", "--test", TEST_CMD)
+        wait_phase("t-st", {"review"})
+        with mock.patch("sys.stdin", io.StringIO("Now check it again.\n")):
+            run_wb("next", "t-st", "--spec", "-", "-m", "feat: step one")
+        wait_phase("t-st", {"review"})
+        wt = store.Task("t-st").worktree
+        subprocess.run(["git", "-C", str(wt), "checkout", "-q", "--", "."], check=True)
+        subprocess.run(["git", "-C", str(wt), "clean", "-qfd"], check=True)  # no new edits
+        step1 = self.branch("delegate/t-st")
+        real = gitops.remove_worktree
+        def removed_then_killed(*args, **kw):
+            real(*args, **kw)
+            raise KeyboardInterrupt
+        with mock.patch.object(gitops, "remove_worktree", removed_then_killed), \
+                self.assertRaises(KeyboardInterrupt):
+            run_wb("accept", "t-st", "-m", "feat: both steps")
+        self.assertFalse(wt.exists())
+        self.assertIn("accepted t-st", run_wb("accept", "t-st", "-m", "feat: both steps"))
+        self.assertEqual(store.Task("t-st").status["phase"], "accepted")
+        self.assertEqual(self.branch("delegate/t-st"), step1)
+        self.assertEqual(len([r for r in store.results(trials=True) if r["task"] == "t-st"]), 1)
+
+    def test_a_refused_merge_exits_5_with_the_accept_kept_and_the_row_saying_so(self):
+        # #247 (the audit of 1.2): a dirty checkout printed "not merged", closed the task as
+        # accepted and exited 0, so a script went on as if main had the change
+        self.start("t-nm", "ok")
+        wait_phase("t-nm", {"review"})
+        (self.repo / "README.md").write_text("an edit of the developer's\n")
+        before = self.branch("main")
+        with self.assertRaises(SystemExit) as e, redirect_stderr(io.StringIO()) as err:
+            run_wb("accept", "t-nm", "-m", "feat: answer", "--merge")
+        self.assertEqual(e.exception.code, cli.NOT_MERGED)
+        self.assertIn("not merged", err.getvalue())
+        self.assertEqual(self.branch("main"), before)
+        self.assertTrue(self.branch("delegate/t-nm"))              # the work is kept
+        self.assertEqual(store.Task("t-nm").status["phase"], "accepted")
+        row = [r for r in store.results(trials=True) if r["task"] == "t-nm"][0]
+        self.assertIs(row["merged"], False)
+        self.assertIn("uncommitted changes", row["merge_refused"])
+
     def test_a_task_whose_repo_moved_can_still_be_discarded(self):
         self.start("t-moved", "ok")
         wait_phase("t-moved", {"review"})
@@ -983,11 +1073,11 @@ class Lifecycle(Base):
         g("switch", "-q", "main")
         err = io.StringIO()
         with redirect_stderr(err):
-            run_wb("accept", "t-feat", "-m", "feat: answer", "--merge")
+            not_merged("accept", "t-feat", "-m", "feat: answer", "--merge")
         self.assertIn("not feature", err.getvalue())
         g("switch", "-q", "--detach", "feature")
         with redirect_stderr(err):
-            run_wb("accept", "t-det", "-m", "feat: answer", "--merge")
+            not_merged("accept", "t-det", "-m", "feat: answer", "--merge")
         self.assertIn("detached HEAD", err.getvalue())
         self.assertEqual(self.branch("main"), self.branch("feature"))  # neither merged
 
@@ -1008,7 +1098,7 @@ class Lifecycle(Base):
         (wt / "settings.ini").write_text("DEFAULT\n")
         err = io.StringIO()
         with redirect_stderr(err):
-            out = run_wb("accept", "t-ign", "-m", "feat: default settings", "--merge")
+            out = not_merged("accept", "t-ign", "-m", "feat: default settings", "--merge")
         self.assertIn("not merged", err.getvalue())
         self.assertIn("settings.ini", err.getvalue())             # git names the file in the way
         self.assertEqual((self.repo / "settings.ini").read_text(), "PERSONAL\n")
@@ -1128,7 +1218,7 @@ class Lifecycle(Base):
         theirs = g("rev-parse", "theirs").stdout.strip()
         err = io.StringIO()
         with redirect_stderr(err):
-            run_wb("accept", "t-mid", "-m", "feat: b", "--merge")
+            not_merged("accept", "t-mid", "-m", "feat: b", "--merge")
         self.assertIn("middle of a merge", err.getvalue())
         self.assertEqual(g("rev-parse", "MERGE_HEAD").stdout.strip(), theirs)
 
@@ -1152,7 +1242,7 @@ class Lifecycle(Base):
         g("commit", "-q", "--allow-empty", "-m", "another history")
         err = io.StringIO()
         with redirect_stderr(err):
-            run_wb("accept", "t-off", "-m", "feat: c", "--merge")
+            not_merged("accept", "t-off", "-m", "feat: c", "--merge")
         self.assertIn("doesn't hold the task's base", err.getvalue())
         # a record from before base_branch: a tag still merges, a local branch is still held to
         spec = {"base_ref": "v1"}

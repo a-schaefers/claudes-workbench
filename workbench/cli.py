@@ -1503,52 +1503,75 @@ def cmd_accept(a):
     # the task running with no runner (the 2026-11-16 audit): check before stopping anything,
     # and a stopped task whose commit fails is stuck, for wb resume, feedback or discard.
     was_live = st.get("phase") in LIVE
-    if (was_live and st.get("steps", 1) == 1 and task.worktree.is_dir()
+    # an earlier accept that got past its commit: its record, not the branch's name, says what
+    # is left. A retry recorded merged=false for a merge git had made and named a branch it had
+    # deleted, and a last step with no new edits stayed in review once its worktree was gone
+    # (#246, the audit of 1.2)
+    close = st.get("closing")
+    if (not close and was_live and st.get("steps", 1) == 1 and task.worktree.is_dir()
             and not gitops.changed(task.worktree)):
         die(f"{a.name} has no changes to accept yet: wait for it, or wb stop {a.name} first")
     _stop_runner(task)  # under --force it may still be running, and would set its phase back
-    checked = verify.note(task)  # before the commit: what Claude accepts it on (#97)
-    _settle_proposals(task, a.take_claude_md)
+    checked = None if close else verify.note(task)  # before the commit: what Claude accepts it on (#97)
+    if not close:
+        _settle_proposals(task, a.take_claude_md)
     repo = Path(spec["repo"])
     rounds, autofix = st.get("round", 1), st.get("auto_fixes_total", 0) + st.get("auto_fixes", 0)
     msg = (f"{a.message}\n\nDelegated to {spec['model_label']} via OpenCode: {rounds} round(s), "
            f"{autofix} automatic test-fix, {st.get('reviews', 0)} review round(s)."
            f"\n\nWorkbench-Task: {a.name}\nOpenCode-Session: {st.get('session')}")
-    measured = results.step(task, landed=True)
-    try:
-        commit = _landed(task)
-        if not commit:
-            head = gitops.git(task.worktree, "rev-parse", "HEAD").strip()
-            if gitops.changed(task.worktree) or head == spec["base"]:
-                commit = gitops.commit_all(task.worktree, msg)
-            else:  # nothing new: the branch's commits past the base are the work (the steps
-                # wb next committed, or Claude's own after a takeover: the audit)
-                commit = gitops.git(task.worktree, "rev-parse", "--short", "HEAD").strip()
-    except gitops.GitError as e:  # nothing removed: the uncommitted work is still in the worktree
-        if was_live:
-            task.set_status(phase="stuck", last=f"accept failed: {e}"[:200], pid=None)
-            die(f"{e}\n{a.name} is stopped: fix the cause and wb accept again, or wb resume, "
-                "wb feedback or wb discard it")
-        die(str(e))
+    if close:
+        commit, measured = close["commit"], close.get("step")
+    else:
+        measured = results.step(task, landed=True)
+        try:
+            commit = _landed(task)
+            if not commit:
+                head = gitops.git(task.worktree, "rev-parse", "HEAD").strip()
+                if gitops.changed(task.worktree) or head == spec["base"]:
+                    commit = gitops.commit_all(task.worktree, msg)
+                else:  # nothing new: the branch's commits past the base are the work (the steps
+                    # wb next committed, or Claude's own after a takeover: the audit)
+                    commit = gitops.git(task.worktree, "rev-parse", "--short", "HEAD").strip()
+        except gitops.GitError as e:  # nothing removed: the uncommitted work is still in the worktree
+            if was_live:
+                task.set_status(phase="stuck", last=f"accept failed: {e}"[:200], pid=None)
+                die(f"{e}\n{a.name} is stopped: fix the cause and wb accept again, or wb resume, "
+                    "wb feedback or wb discard it")
+            die(str(e))
+        close = {"commit": commit, "step": measured, "merge": bool(a.merge),
+                 "merge_into": _merge_into(spec, repo) if a.merge else None}
+        task.set_status(closing=close)  # before anything is removed
+        _spec_gaps(task, a.spec_gap)
     if warn := gitops.remove_worktree(repo, task.worktree):  # committed: the rest is cleanup
         print(f"wb: {warn}", file=sys.stderr)
     context.drop_runtime_dir(task)
-    _spec_gaps(task, a.spec_gap)
-    merged = None
-    tip = gitops.git(repo, "rev-parse", "--verify", "-q", f"refs/heads/{spec['branch']}", check=False).strip()
+    tip = gitops.git(repo, "rev-parse", "--verify", "-q", f"refs/heads/{spec['branch']}^{{commit}}",
+                     check=False).strip() or task.status.get("tip") or gitops.git(
+                         repo, "rev-parse", "--verify", "-q", f"{commit}^{{commit}}", check=False).strip()
     if tip:  # where wb bench finds the task's commits once the branch is gone
         task.set_status(tip=tip)
-    if a.merge:
-        try:
-            merged = gitops.merge(repo, a.name, _merge_into(spec, repo), spec["base"])
-        except gitops.GitError as e:
-            print(f"wb: not merged: {e}", file=sys.stderr)
+    merged, refused = close.get("merged_head"), None
+    if close.get("merge") and not merged:
+        into = close.get("merge_into") or gitops.current_branch(repo)
+        if into and into != "HEAD" and gitops.contains(repo, f"refs/heads/{into}", tip or commit):
+            merged = gitops.git(repo, "rev-parse", "--short", f"refs/heads/{into}").strip()  # made already
         else:
-            gitops.drop_merged_branch(repo, spec["branch"])
+            try:
+                merged = gitops.merge(repo, a.name, close.get("merge_into"), spec["base"])
+            except gitops.GitError as e:
+                refused = str(e)
+                print(f"wb: not merged: {e}", file=sys.stderr)
+        if merged:
+            task.set_status(closing={**close, "merged_head": merged})
+    if merged:
+        gitops.drop_merged_branch(repo, spec["branch"])
     extra = {"commit": commit, "merged": bool(merged)}
+    if refused:  # asked and refused: the row says so, and the exit status (#247)
+        extra["merge_refused"] = refused[:300]
     task.set_status(phase="accepted", last=f"accepted as {commit}" +
-                    (f", merged {merged}" if merged else ""),
-                    unrecorded={"outcome": "accepted", "step": measured, "extra": extra})
+                    (f", merged {merged}" if merged else ", not merged" if refused else ""),
+                    unrecorded={"outcome": "accepted", "step": measured, "extra": extra}, closing=None)
     row = results.record(task, "accepted", measured, **extra)
     task.set_status(unrecorded=None)
     _ack_all(task)
@@ -1568,6 +1591,11 @@ def cmd_accept(a):
     _say(savings.line(row) or spend.line(row.get("claude")))
     _say(checked)
     _say(lessons.nudge(task, "accepted"))
+    if refused:  # accepted, not merged: a script or Claude reading 0 went on as if main had it
+        sys.exit(NOT_MERGED)  # (#247, the audit of 1.2)
+
+
+NOT_MERGED = 5  # wb accept --merge's exit status when the accept stands and the merge was refused
 
 
 def _merge_into(spec: dict, repo: Path) -> str | None:

@@ -433,6 +433,12 @@ def _overwritten(repo: Path, branch: str) -> list[str]:
     return out
 
 
+def contains(repo: Path, ref: str, commit: str) -> bool:
+    """Whether ``ref`` holds ``commit`` (its ancestry): a merge already made, whatever the branch
+    is called now."""
+    return _run(repo, ("merge-base", "--is-ancestor", commit, ref), check=False).returncode == 0
+
+
 def _merging(repo: Path) -> bool:
     """Whether a merge is under way in ``repo`` (MERGE_HEAD is there)."""
     return _run(repo, ("rev-parse", "-q", "--verify", "MERGE_HEAD"), check=False).returncode == 0
