@@ -45,6 +45,7 @@ import urllib.error
 import urllib.parse
 import urllib.request
 from dataclasses import dataclass, field
+from datetime import datetime
 from pathlib import Path
 from urllib.parse import urlparse
 
@@ -1078,15 +1079,93 @@ def free_gpu(keep=(), say=print, warn=None) -> None:
             warn(f"{other.id}'s stop command failed (exit {r.returncode}): "
                  f"{(r.stderr or r.stdout).strip()[-200:]}")
     kept_ollama = [o for o in kept if o.engine == "ollama"]
-    for key, root in _roots(o for o in local if o.engine == "ollama").items():
-        for name in _ollama_loaded(root):  # every model Ollama has loaded, ours or another tool's
-            if any(o.server == key and _matches(o.name, {name}) for o in kept_ollama) or _kept_name(name, held):
-                continue
+    doomed = {root: [name for name in _ollama_loaded(root)  # every model Ollama has loaded,
+                     if not any(o.server == key and _matches(o.name, {name}) for o in kept_ollama)
+                     and not _kept_name(name, held)]  # ours or another tool's
+              for key, root in _roots(o for o in local if o.engine == "ollama").items()}
+    _wait_unused(doomed, warn)
+    for root, names in doomed.items():
+        for name in names:
             say(f"unloading {name} from ollama")
             try:
                 _post(f"{root}/api/generate", {"model": name, "keep_alive": 0}, timeout=120)
             except Exception:
                 pass
+
+
+# A model free_gpu would unload may be answering someone this account's lease doesn't know:
+# another account's tasks on a shared system Ollama (gpu.lock is per account), Open WebUI, an
+# editor. Ollama moves a model's /api/ps expires_at each time a request finishes (now plus its
+# keep-alive) and stops its clock while one runs, so a stamp that moves, or one already past,
+# is a model in use. Each account's runner once unloaded the other's model before every round,
+# and both paid a reload on every request (#378, the audit of 1.6).
+INFLIGHT_WATCH = 10   # seconds free_gpu watches /api/ps for a request on what it would unload
+INFLIGHT_WAIT = 600   # at most this long waiting for one in use, as for a server's reply
+
+
+def _stamps(doomed: dict) -> dict:
+    """(root, name) → /api/ps expires_at, for the models in ``doomed`` (root → names)."""
+    return {(root, x["name"]): x["expires_at"] for root, names in doomed.items() if names
+            for x in (_get(f"{root}/api/ps") or {}).get("models", [])
+            if x.get("name") in names and x.get("expires_at")}
+
+
+def _past(stamp: str) -> bool:
+    """Whether an /api/ps expires_at has gone by (a request running past the keep-alive)."""
+    try:  # Ollama writes nanoseconds; fromisoformat before 3.12 reads at most six digits
+        when = datetime.fromisoformat(re.sub(r"(\.\d{6})\d+", r"\1", stamp.replace("Z", "+00:00")))
+    except (ValueError, TypeError):
+        return False
+    return when.tzinfo is not None and when.timestamp() < time.time() - 2
+
+
+def _in_use(doomed: dict, watch: float | None = None) -> set:
+    """The (root, name) pairs of ``doomed`` with a request on them, watched for ``watch`` seconds
+    (INFLIGHT_WATCH): expires_at moved, or is past. A server whose /api/ps gives no expires_at
+    has nothing to watch: none."""
+    first = _stamps(doomed)
+    busy = {k for k, v in first.items() if _past(v)}
+    deadline = time.monotonic() + (INFLIGHT_WATCH if watch is None else watch)
+    while first and len(busy) < len(first) and time.monotonic() < deadline:
+        time.sleep(min(1.0, max(deadline - time.monotonic(), 0)))
+        busy |= {k for k, v in _stamps(doomed).items() if k in first and v != first[k]}
+    return busy
+
+
+def _wait_unused(doomed: dict, warn) -> None:
+    """Wait, up to INFLIGHT_WAIT, while a model free_gpu would unload is answering requests that
+    aren't this account's tasks' (they are kept): unloading it between someone's requests made
+    them reload it on the next (#378). It is unloaded after, used or not: the GPU is the task's."""
+    busy = _in_use(doomed)
+    if not busy:
+        return
+    names = ", ".join(sorted({n for _, n in busy}))
+    warn(f"{names} on ollama is answering requests that aren't this account's tasks (another "
+         f"user's wb, Open WebUI, an editor): waiting up to {INFLIGHT_WAIT // 60} min for it to go "
+         "idle before unloading it (models.json keep_loaded leaves a model loaded)")
+    deadline = time.monotonic() + INFLIGHT_WAIT
+    while busy and time.monotonic() < deadline:
+        busy = _in_use({root: [n for r, n in busy if r == root] for root in doomed},
+                       min(INFLIGHT_WATCH, max(deadline - time.monotonic(), 0)))
+    if busy:
+        names = ", ".join(sorted({n for _, n in busy}))
+        warn(f"{names} on ollama was still in use after {INFLIGHT_WAIT // 60} min: unloading it")
+
+
+def unheld_loaded(skip=()) -> list[str]:
+    """The models this machine's Ollama servers have loaded that no running task of this account
+    holds (gpu.json) and keep_loaded doesn't list: another user's, another tool's, or idle ones
+    of wb's. wb doctor says how to keep them on a shared Ollama (#378). ``skip``: roots that
+    don't answer."""
+    if _fake():
+        return []
+    held, found = keep_loaded(), discover()
+    local = [o for o in found.values() if not o.remote and o.engine == "ollama"]
+    tasks = [o for o in (found.get(h.get("model") or "") for h in holders().values()) if o]
+    return [name for key, root in _roots(local).items() if root not in skip
+            for name in _ollama_loaded(root)
+            if not any(o.server == key and _matches(o.name, {name}) for o in tasks)
+            and not _kept_name(name, held)]
 
 
 def _others_resident(m: Model, keep=()) -> bool:

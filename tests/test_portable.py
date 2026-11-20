@@ -345,6 +345,44 @@ class Real(unittest.TestCase):
         models.make_resident(x(), say=lambda m: None)
         self.assertEqual([p["model"] for p in posts], ["chat", "x"])
 
+    def test_a_model_answering_someone_else_is_left_until_it_goes_idle_then_unloaded(self):
+        # #378 (the audit of 1.6): on a system Ollama two accounts share, each one's runner
+        # unloaded the other's model before every round, mid-use, and both reloaded on every request
+        at = lambda s: time.strftime("%Y-%m-%dT%H:%M:%S", time.gmtime(time.time() + s)) + ".123456789Z"  # noqa
+        theirs = {"name": "theirs", "size": 10, "size_vram": 10, "expires_at": at(300)}
+        idle = {"name": "idle", "size": 10, "size_vram": 10, "expires_at": at(200)}
+        found, posts = self.own([theirs, idle], ["x"])
+        self.assertEqual(models.unheld_loaded(), ["theirs", "idle"])   # what wb doctor names
+        Path(os.environ["WB_MODELS"]).write_text(json.dumps({"keep_loaded": ["idle"]}))
+        self.assertEqual(models.unheld_loaded(), ["theirs"])
+        Path(os.environ["WB_MODELS"]).write_text("{}")
+        done = threading.Event()
+
+        def requests_finishing():  # another user's agent: a request ends every half second
+            for i in range(5):
+                time.sleep(0.5)
+                theirs["expires_at"] = at(300 + i)
+            done.set()
+        threading.Thread(target=requests_finishing, daemon=True).start()
+        warned = []
+        with mock.patch.object(models, "INFLIGHT_WATCH", 1.5), mock.patch.object(models, "INFLIGHT_WAIT", 60):
+            models.free_gpu(keep={"a/x"}, say=lambda m: None, warn=warned.append)
+            self.assertTrue(done.is_set())                    # it waited out their requests
+            self.assertEqual(len(warned), 1)
+            self.assertIn("theirs on ollama is answering requests that aren't this account's tasks", warned[0])
+            self.assertEqual(sorted(p["model"] for p in posts), ["idle", "theirs"])  # then unloaded
+            warned.clear()
+            _, posts = self.own([idle], [])                    # idle: watched, unloaded, no word
+            models.free_gpu(keep={"a/x"}, say=lambda m: None, warn=warned.append)
+            self.assertEqual((warned, [p["model"] for p in posts]), ([], ["idle"]))
+        stuck = {"name": "long", "size": 10, "size_vram": 10, "expires_at": at(-60)}  # a request
+        found, posts = self.own([stuck], [])     # running past the keep-alive: its clock stopped
+        with mock.patch.object(models, "INFLIGHT_WATCH", 0.5), mock.patch.object(models, "INFLIGHT_WAIT", 1):
+            models.free_gpu(say=lambda m: None, warn=warned.append)
+        self.assertIn("long on ollama was still in use after", warned[-1])
+        self.assertEqual([p["model"] for p in posts], ["long"])   # the GPU is the task's after all
+        self.assertFalse(models._in_use({"r": []}))            # nothing to watch: no wait at all
+
     def test_a_server_the_user_keeps_loaded_is_never_stopped(self):
         srv = self.server({"/v1/models": {"data": [{"id": "m"}]}})
         stopped = Path(self.tmp.name) / "stopped"

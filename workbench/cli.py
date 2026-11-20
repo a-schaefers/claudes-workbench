@@ -3507,6 +3507,11 @@ def cmd_doctor(a):
                  + ("" if free >= DISK_SPARE else ": a task's writes fail on a full disk; wb "
                     "discard an open task, or free some"))
     print("--  " + gpu_line())  # informs only: a CPU-only machine isn't broken
+    if unheld := models.unheld_loaded(skip=down):  # a shared Ollama: another user's, a tool's (#378)
+        print(f"--  ollama has {', '.join(unheld)} loaded, which no task here holds: a task that "
+              "needs the room unloads it (after it goes idle). If others use this Ollama, "
+              f"{models.overrides_path().name}'s keep_loaded lists models wb never unloads, and "
+              "gpu_gb (when the GPU budget is unknown) lets a model that fits beside them leave them loaded")
     v = lane.abi()
     if v:  # draw a real lane and try a write outside it: the check is the refusal itself
         import tempfile
