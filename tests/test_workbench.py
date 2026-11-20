@@ -1359,6 +1359,9 @@ class Lifecycle(Base):
                 f = repo / os.fsdecode(name)
                 if data is None:
                     g("rm", "-q", "--cached", "--", os.fsdecode(name))
+                    f.unlink(missing_ok=True)  # pkg's file gone, so pkg/ can be made (#343)
+                    if f.parent != repo and not any(f.parent.iterdir()):
+                        f.parent.rmdir()       # and pkg/ gone, so pkg can be (#343)
                     continue
                 f.parent.mkdir(parents=True, exist_ok=True)
                 f.write_bytes(data)
@@ -1459,6 +1462,34 @@ class Lifecycle(Base):
         gitops.merge(repo, "t", "main")
         self.assertEqual((repo / "b.txt").read_bytes(), b"b\n")
         self.assertEqual((repo / "local.ini").read_bytes(), b"PERSONAL\n")
+
+    def test_a_file_turned_into_a_directory_and_back_merges_beside_ignored_files(self):
+        # #343 (the audit of 1.4, reproduced on Git 2.56): the task replaced the tracked file pkg
+        # with pkg/init.py, and accept --merge called pkg an untracked obstruction; a plain git
+        # merge of the kept branch succeeded. Both directions, beside real ignored files
+        for old_git in (False, True):
+            with (mock.patch.object(gitops, "_merge_tree", return_value=None) if old_git
+                  else contextlib.nullcontext()):
+                repo, g = self._merge_case(
+                    base={b"pkg": b"one\n"}, main={b".gitignore": b"*.pyc\nlocal.ini\n"},
+                    task={b"pkg": None, b"pkg/init.py": b"two\n"},
+                    ignore={b"local.ini": b"PERSONAL\n", b"x.pyc": b"c"})
+                gitops.merge(repo, "t", "main")
+                self.assertEqual((repo / "pkg" / "init.py").read_bytes(), b"two\n")
+                self.assertEqual((repo / "local.ini").read_bytes(), b"PERSONAL\n")
+                repo, g = self._merge_case(
+                    base={b"pkg/init.py": b"one\n"}, main={b".gitignore": b"local.ini\n"},
+                    task={b"pkg/init.py": None, b"pkg": b"two\n"},
+                    ignore={b"local.ini": b"PERSONAL\n"})
+                gitops.merge(repo, "t", "main")
+                self.assertEqual((repo / "pkg").read_bytes(), b"two\n")
+                self.assertEqual((repo / "local.ini").read_bytes(), b"PERSONAL\n")
+                # an ignored file inside the directory the merge turns into a file is in the way
+                repo, g = self._merge_case(
+                    base={b"pkg/init.py": b"one\n"}, main={b".gitignore": b"*.pyc\n"},
+                    task={b"pkg/init.py": None, b"pkg": b"two\n"},
+                    ignore={b"pkg/init.pyc": b"PERSONAL\n"})
+                self._assert_refused_and_kept(repo, g, b"pkg/init.pyc", b"PERSONAL\n")
 
     def test_accept_merge_completes_the_merge_or_says_it_did_not(self):
         # #190 (the 2026-11-19 audit): with branch.main.mergeOptions=--no-commit, git left the

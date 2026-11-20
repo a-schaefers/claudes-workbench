@@ -600,11 +600,38 @@ def _overwritten(repo: Path, branch: str) -> list[str]:
     out = []
     for p in (p for p in written.split(b"\0") if p and p not in tracked):
         parts = p.split(b"/")
-        if any(os.path.lexists(os.path.join(top, *parts[:i])) and (
-                i == len(parts) or not os.path.isdir(os.path.join(top, *parts[:i])))
-               for i in range(1, len(parts) + 1)):
+        for i in range(1, len(parts) + 1):
+            here = os.path.join(top, *parts[:i])
+            if b"/".join(parts[:i]) in tracked or not os.path.lexists(here):
+                # a tracked file where the merge puts a directory is the merge's to replace: a
+                # clean file-to-directory refactor (pkg to pkg/init.py) was refused (#343, the
+                # audit of 1.4)
+                continue
+            if i < len(parts) and os.path.isdir(here):
+                continue
+            if i == len(parts) and os.path.isdir(here) and not os.path.islink(here):
+                # a tracked directory the merge turns into a file is in the way only through
+                # what it holds untracked (#343)
+                inside = _untracked_under(here, top, tracked)
+                out.extend(inside)
+                if not inside:
+                    continue
+                break
             out.append(p.decode("utf-8", "replace"))
+            break
     return out
+
+
+def _untracked_under(path: bytes, top: bytes, tracked: set[bytes]) -> list[str]:
+    """What a directory holds that HEAD doesn't track, ignored or not (empty directories
+    aside): the files a merge replacing the directory with a file would delete (#343)."""
+    found = []
+    for root, dirs, files in os.walk(path):
+        for name in files + [d for d in dirs if os.path.islink(os.path.join(root, d))]:
+            rel = os.path.relpath(os.path.join(root, name), top)
+            if rel not in tracked:
+                found.append(rel.decode("utf-8", "replace"))
+    return found
 
 
 def _merge_tree(repo: Path, branch: str) -> bytes | None:

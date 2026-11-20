@@ -2768,7 +2768,10 @@ custom-node packs do run their own Python).
   into the `main` checked out since, and one on a detached HEAD left its merge commit orphaned,
   the 2026-11-16 audit. It refuses when a file the merge would write is already in the checkout
   untracked, ignored or not, or has an untracked file where its directory goes
-  (`gitops._overwritten`, naming each): git's merge silently replaced an ignored `settings.ini`
+  (`gitops._overwritten`, naming each). A tracked file the merge turns into a directory
+  (`pkg` to `pkg/init.py`) is the merge's to replace, and a directory it turns into a file is in
+  the way only through what it holds untracked, ignored files included: a clean file-to-directory
+  refactor was refused (#343, the audit of 1.4). Git's merge silently replaced an ignored `settings.ini`
   the task had un-ignored and committed, and its `--no-overwrite-ignore` doesn't stop the ort
   merge (#189). The paths come from the merge itself, done first in memory (`git merge-tree
   --write-tree`, git 2.38+; an older git does the same merge with `--no-commit` in a scratch
