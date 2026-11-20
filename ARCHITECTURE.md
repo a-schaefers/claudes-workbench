@@ -4328,7 +4328,7 @@ push: every change is a pull request that merges once `check` is green and it is
 
 A new `.md` file in the repository's root is never committed by accident: `.gitignore` ignores
 `/*.md` but README.md, CLAUDE.md, ARCHITECTURE.md and THESIS.md, so a scratch note (an
-experiment's steps, a draft) stays local. Already-tracked root files (FINDINGS.md) stay tracked, and
+experiment's steps, a draft) stays local. A root file already tracked (an audit's FINDINGS.md, until its fixes ship) stays tracked, and
 nested `.md` files (`docs/`, `skill/`, `mod/`, `agent/`) are unaffected. A new root doc needs its own `!/` line.
 
 - **The ruleset** (`.github/rulesets/main.json`, on the default branch): no deletion, no force
