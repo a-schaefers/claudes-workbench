@@ -70,7 +70,10 @@ def record(task: store.Task, outcome: str, last_step: dict | None = None, **extr
                         "added": sum(s.get("lines", 0) for s in steps),
                         "removed": sum(s.get("removed", 0) for s in steps)}}
               if outcome == "accepted" else {}),
-           **({"trial": True} if spec.get("trial") else {}), **extra}
+           **({"trial": True} if spec.get("trial") else {}),
+           # on only: a task with every experiment off ran as main does
+           **({"experiments": on} if (on := sorted(k for k, v in (spec.get("experiments") or {}).items()
+                                                    if v)) else {}), **extra}
     store.append_jsonl(store.home() / "results.jsonl", row)
     return row
 

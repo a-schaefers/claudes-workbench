@@ -187,6 +187,56 @@ def commands_conf() -> dict:
     return conf
 
 
+# Experiments: a change to what the agent may do, measured before it is supported
+# (PROBE_EXPERIMENT.md). Each is on by default while it is measured; `wb experiment <name> on|off`
+# sets it (experiments.json), and `wb start` records its value per task (task.json `experiments`),
+# so a flip changes only the tasks started after it. Off, the agent's rules are main's exactly.
+EXPERIMENTS = {
+    "probe": "the agent's shell may run probe, and its handbook says how: a file's outline and "
+             "one function, instead of the whole file",
+}
+# what an experiment adds to the agent's copy of the handbook, after its own text
+EXPERIMENT_NOTES = {
+    "probe": "\n## Reading code\nRead a whole file only when you need most of it. `probe symbols "
+             "<file>` lists its functions with line numbers; `probe extract <file>#<name>` prints "
+             "one; after an edit, re-read only the function you changed.\n",
+}
+
+
+def experiments_path() -> Path:
+    return store.home() / "experiments.json"
+
+
+def experiments() -> dict[str, bool]:
+    """Each experiment's setting: on unless experiments.json says "off"."""
+    saved = store.read_json(experiments_path(), {}) or {}
+    saved = saved if isinstance(saved, dict) else {}
+    return {name: saved.get(name) != "off" for name in EXPERIMENTS}
+
+
+def set_experiment(name: str, on: bool) -> None:
+    with store.locked(experiments_path().with_suffix(".lock")):
+        saved = store.read_json(experiments_path(), {}) or {}
+        saved = saved if isinstance(saved, dict) else {}
+        store.write_json(experiments_path(), {**saved, name: "on" if on else "off"})
+
+
+def probe_bin() -> str | None:
+    """probe on the agent's PATH (the runner's, which the agent's shell inherits), or None."""
+    return shutil.which("probe", path=agent_path(os.environ.get("PATH") or os.defpath))
+
+
+def task_experiments() -> dict[str, bool]:
+    """What `wb start` records: each experiment on only when set on and able to work (probe
+    installed), so a task's record says what its agent really had."""
+    found = {"probe": probe_bin() is not None}
+    return {name: on and found.get(name, True) for name, on in experiments().items()}
+
+
+def experiment(task: store.Task, name: str) -> bool:
+    return bool((task.spec.get("experiments") or {}).get(name))
+
+
 # How wb accept --merge lands: a merge commit, fast-forward only, or one squashed commit (#352)
 MERGE_AS = ("merge", "ff", "squash")
 
@@ -208,6 +258,9 @@ def shell_rules(task: store.Task) -> list[dict]:
     rules = [{"action": "shell", "resource": "*", "effect": "deny"}]
     rules += [{"action": "shell", "resource": r, "effect": "allow"}
               for c in ALLOWED_COMMANDS for r in (c, f"{c} *", f"{ASSIGN} {c} *")]
+    if experiment(task, "probe"):  # read-only: an outline, one function, a search
+        rules += [{"action": "shell", "resource": r, "effect": "allow"}
+                  for r in ("probe", "probe *", f"{ASSIGN} probe *")]
     rules += [{"action": "shell", "resource": r, "effect": "allow"}
               for b in ("./*", "../*", *PROJECT_BINS) for r in (b, f"{ASSIGN} {b}")]
     # and what it built anywhere in its lane, by path: a debug binary in the temp directory was
@@ -985,7 +1038,8 @@ def instruction_files(task: store.Task) -> tuple[list[Path], list[str]]:
     # the agent's own copy: OpenCode shows each instruction file's path, and a path into the
     # workbench repo once led a freshly started agent to go looking there for plans
     handbook = rules_dir(task) / "HANDBOOK.md"
-    handbook.write_text(HANDBOOK.read_text())
+    handbook.write_text(HANDBOOK.read_text() + "".join(
+        note for name, note in EXPERIMENT_NOTES.items() if experiment(task, name)))
     load: list[Path] = [handbook]
     user = claude_home() / "CLAUDE.md"
     if user.is_file():  # a copy too: the agent can't read Claude's directory (SECRETS)

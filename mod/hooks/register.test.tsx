@@ -1540,6 +1540,7 @@ test('the settings rows open to Buttons, pick through wb, and say the sentence o
     runs.push(e.argv)
     if (e.argv[1] === 'chat' && e.argv[2] === 'on') files['/wb/chat/switch.json'] = JSON.stringify({ on: true })
     if (e.argv[1] === 'coding') files['/wb/coding.json'] = JSON.stringify({ mode: e.argv[2] })  // what wb writes
+    if (e.argv[1] === 'experiment') files['/wb/experiments.json'] = JSON.stringify({ [e.argv[2]]: e.argv[3] })
     if (e.argv[1] === 'chat' && e.argv[2] === 'url')
       return { value: { exitCode: 0, stdout: 'http://localhost:1337/#token=abc\n', stderr: '' } }
     return { value: { exitCode: 0, stdout: '', stderr: '' } }
@@ -1553,6 +1554,7 @@ test('the settings rows open to Buttons, pick through wb, and say the sentence o
     await ui.press({ key: 'tab-settings' })
     expect((await ui.find({ key: 'coding' }))?.props.label).toBe('▸ Claude coding: Let Claude decide (default)')  // no saved choice
     expect((await ui.find({ key: 'chat' }))?.props.label).toBe('▸ Web chat: Off (default)')                      // off by default
+    expect((await ui.find({ key: 'probe' }))?.props.label).toBe('▸ Agent code navigation (experiment): On (default)')  // on while measured
     expect(await ui.find({ key: 'coding:ask' })).toBeUndefined()                                       // one row each at rest
     expect(await ui.find({ type: 'Text', text: /web chat / })).toBeUndefined()                         // and no link
     await ui.press({ key: 'tab-tasks' })
@@ -1575,6 +1577,10 @@ test('the settings rows open to Buttons, pick through wb, and say the sentence o
   await ui.press({ key: 'chat:on' })
   expect(runs.some(r => r.join(' ') === 'wb chat on')).toBe(true)
   expect((await ui.find({ key: 'chat' }))?.props.label).toBe('▸ Web chat: On')
+  await ui.press({ key: 'probe' })
+  await ui.press({ key: 'probe:off' })
+  expect(runs.at(-1)).toEqual(['wb', 'experiment', 'probe', 'off'])
+  expect((await ui.find({ key: 'probe' }))?.props.label).toBe('▸ Agent code navigation (experiment): Off')
   const texts = (await ui.findAll({ type: 'Text' })).map(t => t.text)
   expect(texts.at(-1)).toBe('http://localhost:1337/#token=abc')                                   // the link, at once
   await ui.press({ key: 'tab-tasks' })
