@@ -23,6 +23,9 @@ Claude Code plugin that connects the two inside your normal Claude Code session.
 - **It's still just Claude Code.** You talk to Claude as usual, your plugins, skills and settings
   keep working, and the agents work on their own branches, so your checkout is untouched until
   you accept.
+- **Beyond code: images and audio.** Optionally, Claude art-directs local image and audio models
+  too, making a project's icons, illustrations, voice and sound, and keeps the takes it likes
+  ([images](ARCHITECTURE.md#images)).
 
 On bigger coding tasks, once the session is already open, handing the coding off to the local
 model typically costs Claude about half the tokens of writing the code itself
@@ -38,6 +41,8 @@ model typically costs Claude about half the tokens of writing the code itself
 - A local model. **Already run a server** that speaks the OpenAI API? Claude uses it (tool calls
   and a 32K context window recommended, 16K at the least). **None yet?** Claude suggests one that fits your hardware and
   asks before installing or downloading anything.
+- (optional) An image or audio model, for pictures and sound. The first time a project needs one,
+  Claude proposes a model that fits your GPU and its licence, and asks before downloading it.
 
 ### In your terminal
 
