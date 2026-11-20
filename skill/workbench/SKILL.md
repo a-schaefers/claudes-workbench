@@ -257,7 +257,7 @@ wb start <kebab-name> --spec <file|-> --repo <repo> --size significant|trivial \
 ```
 The worktree holds only committed files. When the acceptance command needs what the user
 installed (node_modules, a .venv, a build), add `--setup '<install command>'` (a .venv always: a copy still runs the original) (or `--copy <ignored
-path>`; `--sibling <name>` for a `../<name>` the project uses): `wb start` names the ignored
+path>`; `--sibling <path>` for a `../<name>` or `../../<path>` the project uses, by that same path): `wb start` names the ignored
 directories it lacks, and a failing setup fails the task before any round. Tests that use the
 GPU themselves (CUDA, PyTorch, a game engine): add `--unload-for-tests`, or they run beside the
 model and fail out of memory.

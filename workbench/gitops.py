@@ -47,8 +47,9 @@ def _record(worktree) -> Path | None:
     outside the agent's lane. None for any other directory."""
     p = Path(os.path.abspath(worktree))  # not resolved: a worktree swapped for a link still pins
     tasks = Path(os.path.abspath(store.tasks_dir()))
-    if p.name == "worktree" and p.parent.parent == tasks:
-        return tasks.parent / "rules" / p.parent.name / "gitdir.json"
+    rel = p.relative_to(tasks).parts if p.is_relative_to(tasks) else ()
+    if p.name == "worktree" and (len(rel) == 2 or len(rel) > 3 and rel[1] == "tree"):  # #261
+        return tasks.parent / "rules" / rel[0] / "gitdir.json"
     return None
 
 

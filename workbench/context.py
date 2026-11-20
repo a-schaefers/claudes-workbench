@@ -343,16 +343,46 @@ def repo_dirs(task: store.Task) -> set[str]:
 # worktree) may not take one of these names. A new file in the task directory goes here too.
 TASK_FILES = ("acked", "ask", "base-tests.txt", "context.md", "events.jsonl", "rounds",
               "runner.log", "setup.txt", "shots", "status.json", "steer.jsonl", "task.json",
-              "verify", "worktree")
+              "tree", "verify", "worktree")
+
+
+def sibling_parts(s: str) -> tuple[int, str]:
+    """A sibling as (levels above the repo, the path below there): `lib` is `../lib`, one up;
+    `../../shared/lib` is two up (#261, the audit of 1.2)."""
+    parts, ups = s.split("/"), 0
+    while parts and parts[0] == "..":
+        parts, ups = parts[1:], ups + 1
+    return max(ups, 1), "/".join(parts)
+
+
+def sibling_link(worktree: Path, s: str) -> Path:
+    """Where a sibling's link goes, so that the worktree reaches it by the repo's own path."""
+    ups, rest = sibling_parts(s)
+    return Path(worktree).parents[ups - 1] / rest
+
+
+def sibling_real(repo, s: str) -> str:
+    ups, rest = sibling_parts(s)
+    return os.path.realpath(Path(repo).parents[ups - 1] / rest)
+
+
+def tree(base: Path, repo, sibs, leaf: str) -> Path:
+    """Where a checkout of `repo` goes under `base`, so that every sibling's link lands inside
+    `base`: `base/leaf` while none is more than one level up, else `base/tree/<the names of the
+    repo's own parents>/leaf`. Only `../<name>` resolved: Cargo's `path = "../../shared/lib"`, a
+    workspace two levels up, Go's `replace ../../x` broke with nothing to configure (#261)."""
+    ups = max((sibling_parts(s)[0] for s in sibs or ()), default=1)
+    if ups <= 1:
+        return Path(base) / leaf
+    return Path(base).joinpath("tree", *[p.name for p in Path(repo).parents[:ups - 1]][::-1], leaf)
 
 
 def siblings(task: store.Task) -> list[str]:
-    """The real paths of the directories beside the repo the task reads at `../<name>` (#201:
+    """The real paths of the directories around the repo the task reads by a relative path (#201:
     Cargo's `path = "../lib"`, Go's `replace ../lib`, npm's `file:../lib` broke in a worktree
     under the state directory). Read-only: the agent's lane reads them, never writes them."""
     repo = task.spec.get("repo")
-    return [os.path.realpath(Path(repo).parent / n) for n in task.spec.get("siblings") or ()
-            if repo]
+    return [sibling_real(repo, n) for n in task.spec.get("siblings") or () if repo]
 
 
 def _hidden() -> set[str]:
@@ -841,7 +871,7 @@ def external_rules(task: store.Task) -> list[dict]:
     have = skills.available()
     # and the rounds' prompts, read-only, where a prompt too long for one argument waits
     places = [*lane, *READABLE, task.dir / "rounds", *siblings(task),
-              *(task.worktree.parent / n for n in task.spec.get("siblings") or ()),
+              *(sibling_link(task.worktree, n) for n in task.spec.get("siblings") or ()),
               *(have[n]["path"] for n in task.status.get("skills") or [] if n in have)]
     rules = [{"action": "external_directory", "resource": "*", "effect": "deny"}]
     rules += [{"action": "external_directory", "resource": f"{p.rstrip('/')}/*", "effect": "allow"}

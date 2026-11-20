@@ -1493,6 +1493,9 @@ test('Claude coding: its own edit in a task\'s worktree waits for the user\'s ye
   expect((await edit()).deny).toContain('report the blocker to the user')   // handed back: spent
   const w = await $.tool.call({ tool: 'Write', file_path: '/wb/tasks/fix-it/worktree/new.py', content: '' } as any) as any
   expect(w.deny).toContain('"Only when I say"')
+  // a worktree nested for a sibling two levels up (#261, the audit of 1.2) is the task's too
+  expect((await edit('/wb/tasks/fix-it/tree/apps/worktree/power.py')).deny).toContain('"Only when I say"')
+  expect((await edit('/wb/tasks/fix-it/tree/shared/lib/power.py')).deny).toBeUndefined()   // a sibling's link
 })
 
 test('the settings rows open to Buttons, pick through wb, and say the sentence of the option the ring is on', async ($, on) => {

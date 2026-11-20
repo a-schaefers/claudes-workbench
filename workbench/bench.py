@@ -100,6 +100,14 @@ def bundle(repo: Path, commit: str, dest: Path) -> None:
         gitops.git(clone, "bundle", "create", str(dest.resolve()), "main")
 
 
+def _checkout_at(d: Path, case: dict) -> Path:
+    """Where a case's checkout goes in `d`: nested as a task's worktree is when a sibling is two
+    or more levels up, so that its link lands in `d` (#261, the audit of 1.2)."""
+    work = context.tree(d, case["repo"], case.get("siblings"), "repo")
+    work.parent.mkdir(parents=True, exist_ok=True)
+    return work
+
+
 def checkout(case: dict, dest: Path) -> None:
     """The case's base, checked out at `dest`, with an identity of its own (nothing commits)."""
     gitops.git(dest.parent, "clone", "-q", "-b", "main", str(case_dir(case["name"]) / "base.bundle"),
@@ -153,9 +161,10 @@ def _inputs(case: dict, repo: Path) -> None:
     for p in case.get("copy") or ():
         if os.path.lexists(src / p):
             runner._copy(src / p, repo / p)
-    for name in case.get("siblings") or ():
-        if not os.path.lexists(repo.parent / name):
-            (repo.parent / name).symlink_to(os.path.realpath(src.parent / name))
+    for name in case.get("siblings") or ():  # at any level the case reaches (#261)
+        if not os.path.lexists(at := context.sibling_link(repo, name)):
+            at.parent.mkdir(parents=True, exist_ok=True)
+            at.symlink_to(context.sibling_real(src, name))
 
 
 def add(name: str, step: int | None = None, hidden: list[str] | None = None,
@@ -238,7 +247,7 @@ def add(name: str, step: int | None = None, hidden: list[str] | None = None,
         # cleanup (#81, the 2026-11-18 audit)
         home().mkdir(parents=True, exist_ok=True)  # not in /tmp, where the git shim allows writes
         with tempfile.TemporaryDirectory(prefix=".base-", dir=home()) as scratch:
-            work = Path(scratch) / "repo"
+            work = _checkout_at(Path(scratch), case)
             gitops.git(scratch, "clone", "-q", "-b", "main", str(tmp / "base.bundle"), str(work))
             for p in picked:
                 (work / p).parent.mkdir(parents=True, exist_ok=True)
@@ -255,7 +264,7 @@ def add(name: str, step: int | None = None, hidden: list[str] | None = None,
         # git): workbench's suite commits, so clean-fixtures failed every replay (2026-11-17)
         home().mkdir(parents=True, exist_ok=True)  # not in /tmp, where the git shim allows writes
         with tempfile.TemporaryDirectory(prefix=".check-", dir=home()) as scratch:
-            work = Path(scratch) / "repo"
+            work = _checkout_at(Path(scratch), case)
             gitops.git(scratch, "clone", "-q", "--shared", "--no-checkout", str(repo), str(work))
             if sparse := gitops.sparse_of(Path(repo)):  # as the task's worktree was (#263)
                 gitops.apply_sparse(work, sparse)
@@ -429,12 +438,13 @@ def replay(case: dict, model: str, rep: int, run: str, label: str, skills: list[
            "model": model, "task": name, "wb_commit": wb_commit(), "skills": skills}
     began = time.time()
     log = open(d / "wb.log", "a")
+    work = _checkout_at(d, case)
     try:
-        checkout(case, d / "repo")
-        _inputs(case, d / "repo")
+        checkout(case, work)
+        _inputs(case, work)
         with redirect_stdout(log):
             try:
-                _start_task(case, model, name, d / "repo", skills,
+                _start_task(case, model, name, work, skills,
                             {"case": case["name"], "run": run, "label": label})
             except SystemExit:
                 pass
@@ -476,7 +486,7 @@ def replay(case: dict, model: str, rep: int, run: str, label: str, skills: list[
                                                     keep_branch=False))
                 except SystemExit:
                     pass
-        shutil.rmtree(d / "repo", ignore_errors=True)
+        shutil.rmtree(d / "tree" if work.parent != d else work, ignore_errors=True)
 
 
 def _wait(task: store.Task) -> tuple[dict, int]:
@@ -556,9 +566,10 @@ def self_run(case_name: str, turns: int = SELF_TURNS) -> dict:
     row = {"ts": store.now(), "run": run, "label": "claude", "rep": 1, "case": case_name,
            "model": "claude", "arm": "claude", "task": name, "wb_commit": wb_commit()}
     began = time.time()
+    work = _checkout_at(d, case)
     try:
-        checkout(case, d / "repo")
-        code, said = runner.prepare(_At(original.name, d / "repo"))  # as the replays are (#250)
+        checkout(case, work)
+        code, said = runner.prepare(_At(original.name, work))  # as the replays are (#250)
         if code != 0:
             return {**row, "outcome": "error", "why": f"the setup failed ({code}): {said.strip()[-200:]}"}
         prompt = SELF_PROMPT.format(spec=(case_dir(case_name) / "spec.md").read_text(),
@@ -569,7 +580,7 @@ def self_run(case_name: str, turns: int = SELF_TURNS) -> dict:
         argv = [claude, "-p", "--output-format", "json", "--max-turns", str(turns),
                 "--permission-mode", "acceptEdits", "--allowedTools", *allow, "--", prompt]
         try:
-            p = subprocess.run(argv, cwd=d / "repo", capture_output=True, text=True,
+            p = subprocess.run(argv, cwd=work, capture_output=True, text=True,
                                timeout=int(case.get("test_timeout") or 900) * 4)
         except subprocess.TimeoutExpired:
             return {**row, "outcome": "error", "why": "claude -p timed out"}
@@ -583,12 +594,12 @@ def self_run(case_name: str, turns: int = SELF_TURNS) -> dict:
         usage = _self_usage(result, calls)
         row.update(claude=usage, minutes=round((time.time() - began) / 60, 1),
                    turns=usage["turns"], claude_model=next(iter(result.get("modelUsage") or {}), None))
-        (d / "diff.patch").write_text(gitops.diff(d / "repo", "HEAD"))
-        overlay(case, d / "repo")
+        (d / "diff.patch").write_text(gitops.diff(work, "HEAD"))
+        overlay(case, work)
         out, ok = [], True
         for cmd in (case["test_cmd"], case.get("check_cmd")):
             if cmd:
-                code, text = runner.run_in_lane(_At(original.name, d / "repo"), cmd,
+                code, text = runner.run_in_lane(_At(original.name, work), cmd,
                                                 int(case.get("test_timeout") or 900))
                 out.append(f"$ {cmd}\nexit: {code}\n\n{text}")
                 ok = ok and code == 0
@@ -596,7 +607,7 @@ def self_run(case_name: str, turns: int = SELF_TURNS) -> dict:
         return {**row, "outcome": "passed" if ok else "failed",
                 **({} if ok else {"why": "the hidden checks failed (grade.txt)"})}
     finally:
-        shutil.rmtree(d / "repo", ignore_errors=True)
+        shutil.rmtree(d / "tree" if work.parent != d else work, ignore_errors=True)
 
 
 def self_lines(rs: list[dict]) -> list[str]:
