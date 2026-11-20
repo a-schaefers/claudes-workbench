@@ -208,12 +208,12 @@ A model is a candidate when OpenCode loads its provider (`disabled_providers`/`e
 followed) and the provider's `baseURL` (`{env:}`/`{file:}` resolved) is on this machine (loopback,
 `localhost`, this host's name) or models.json marks the provider `local: true`. Not an Ollama
 cloud model (`:cloud`, `-cloud`, a tags row with `remote_host`) unless models.json marks that
-model's id `local: true`, nor an entry with `tool_call: false`. OpenCode's config is
-`$XDG_CONFIG_HOME/opencode/opencode.json` and `.jsonc`, then `$OPENCODE_CONFIG`, layered in that
-order and merged by `models.read_config`; the layer adds what agents won't load (`agent_providers`).
-Written only when one file holds it and it has no comments (through a symlink, keeping its mode;
-a refusal never prints the config). Probes to this
-machine skip any HTTP proxy. Ollama entries need `options.max_tokens` (Ollama ignores
+model's id `local: true`, nor an entry with `tool_call: false`. OpenCode's config: `opencode.json`
+and `.jsonc` in `/etc/opencode`, then `$OPENCODE_CONFIG_DIR` (else `$XDG_CONFIG_HOME/opencode`),
+then `$OPENCODE_CONFIG`, merged by `models.read_config`; the layer adds what agents won't load
+(`agent_providers`). Written only when one file holds it and it has no comments (through a
+symlink, keeping its mode; a refusal prints no config). Probes to this machine skip any
+HTTP proxy. Ollama entries need `options.max_tokens` (Ollama ignores
 OpenCode's `max_completion_tokens`) and a `limit.context` matching what Ollama serves (never the
 trained length); every entry needs `limit.context` (a server other than Ollama: `wb model add
 --context N`); `wb model add` writes both and `wb doctor` checks them. Any OpenAI-compatible
@@ -311,5 +311,5 @@ denials, compound shell commands, rule order, git by path, the edit rule, PATH, 
   task started in another live session wakes that session, not this one; `claude --debug`
   shows hook errors.
 - A test fails: the task's `runner.log` is under the test's temp `WB_HOME`;
-  `wait_phase` prints the status when it times out. An interrupted run can leave detached runners
-  and fakes sleeping.
+  `wait_phase` prints the status when it times out. An interrupted run can leave runners and
+  fakes behind.

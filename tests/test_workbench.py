@@ -3187,6 +3187,32 @@ class ConfigLayer(Base):
         layer = json.loads(runner.write_config_layer(store.Task("t-alt")).read_text())
         self.assertNotIn("provider", layer)        # the global files: OpenCode loads them itself
 
+    def test_opencodes_config_is_read_from_its_config_dir_and_the_system_file_first(self):
+        # #370 (the audit of 1.6, reproduced): OPENCODE_CONFIG_DIR held the user's providers and
+        # wb said "no local models"; an admin's /etc/opencode was never read either
+        from workbench import models
+        tmp = Path(self.tmp.name)
+        mine, system = tmp / "dotfiles" / "opencode", tmp / "etc-opencode"
+        mine.mkdir(parents=True)
+        system.mkdir()
+        (system / "opencode.json").write_text(json.dumps({"provider": {
+            "strata": OPENCODE_CONFIG["provider"]["strata"]}, "model": "strata/strata"}))
+        (mine / "opencode.json").write_text(json.dumps({"provider": {
+            "ollama": OPENCODE_CONFIG["provider"]["ollama"]}, "model": "ollama/qwen3.8-27b"}))
+        del os.environ["WB_OPENCODE_CONFIG"]
+        os.environ["OPENCODE_CONFIG_DIR"] = str(mine)
+        with mock.patch.object(models, "_system_dir", return_value=system):
+            self.assertEqual(models.opencode_config_files(),
+                             [system / "opencode.json", mine / "opencode.json"])
+            found = models.discover()
+            self.assertIn("strata/strata", found)                          # the admin's
+            self.assertIn("ollama/qwen3.8-27b", found)                     # the user's
+            self.assertEqual(models.read_config()["model"], "ollama/qwen3.8-27b")  # the user's wins
+            self.assertEqual(models.config_target("x"), mine / "opencode.json")   # never the system's
+            (mine / "opencode.json").unlink()
+            self.assertEqual(models.config_target("x"), mine / "opencode.json")
+            self.assertFalse(models.agent_providers())    # OpenCode loads both itself
+
     def test_the_users_own_config_content_reaches_wb_and_the_agent_under_the_rules(self):
         # #347, the audit of 1.4: rules_env replaced the user's OPENCODE_CONFIG_CONTENT with the
         # rules alone, and wb never read it, so a provider kept there was lost to both
@@ -3469,6 +3495,28 @@ class RealOpenCode(Base):
         self.assertNotIn("<id>workbench</id>", text)
         self.assertIn("CANARY-HANDED", text)              # a handed skill is listed to the model
         self.assertNotIn("CANARY-KEPT", text)             # and the rest of the library is not
+
+    def test_wb_reads_the_config_files_opencode_reads_under_opencode_config_dir(self):
+        # #370 (the audit of 1.6): OpenCode 2.3 takes its global directory from
+        # OPENCODE_CONFIG_DIR, and wb read ~/.config/opencode
+        from workbench import models
+        mine = Path(self.tmp.name) / "dotfiles"
+        mine.mkdir()
+        (mine / "opencode.json").write_text(json.dumps({"provider": {
+            "ollama": OPENCODE_CONFIG["provider"]["ollama"]}}))
+        (mine / "opencode.jsonc").write_text("{// a comment\n}")
+        del os.environ["WB_OPENCODE_CONFIG"]
+        os.environ.pop("OPENCODE_CONFIG", None)
+        os.environ["OPENCODE_CONFIG_DIR"] = str(mine)
+        empty = Path(tempfile.mkdtemp())    # no project config there or above (OpenCode looks up)
+        self.addCleanup(shutil.rmtree, empty, True)
+        out = subprocess.run(["opencode", "debug", "config", "--standalone"], cwd=empty,
+                             env={**os.environ, "PWD": str(empty)}, capture_output=True, text=True,
+                             timeout=60).stdout
+        theirs = [Path(x["path"]) for x in json.loads(out[out.index("["):])
+                  if x.get("type") == "document"]
+        self.assertEqual(models.opencode_config_files(), theirs)
+        self.assertIn("ollama/qwen3.8-27b", models.discover())
 
     def test_personal_skills_in_agents_stay_out_and_the_projects_stay_in(self):
         # #371 (the audit of 1.6, reproduced): OpenCode reads ~/.agents/skills as well as

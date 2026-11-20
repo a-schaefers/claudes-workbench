@@ -1750,8 +1750,14 @@ A key kept with `opencode auth login` (OpenCode's `auth.json`) works too, when t
 
 ### Found, loaded, chosen
 **OpenCode's config.** `models.opencode_config_files()`: `$WB_OPENCODE_CONFIG` alone, else
-whichever of `$XDG_CONFIG_HOME/opencode/` (default `~/.config/opencode/`) `opencode.json` and
-`opencode.jsonc` exist, in that order, then the user's own `$OPENCODE_CONFIG` (`_users_config`;
+whichever exist of the system directory's `opencode.json` and `opencode.jsonc` (`_system_dir`:
+`/etc/opencode`, on macOS `/Library/Application Support/opencode`; an admin's or a managed
+install's, layered first, never written: `config_target` passes it by), then the global
+directory's (`_config_dir`: `$OPENCODE_CONFIG_DIR` as OpenCode 2.3 takes it, else
+`$XDG_CONFIG_HOME/opencode/`, default `~/.config/opencode/`; a user keeping it in a dotfiles
+directory had "no local models", and `wb model add` wrote a file OpenCode ignored: #370, the
+audit of 1.6; the real-OpenCode test compares the list with `opencode debug config`), in that
+order, then the user's own `$OPENCODE_CONFIG` (`_users_config`;
 never a path under the state directory, which is a task's layer): OpenCode 2.3 layers them, the
 later winning, and `read_config` merges them the same way (dicts recursively), each parsed
 through `_strip_jsonc` (comments and trailing commas removed), then the user's
