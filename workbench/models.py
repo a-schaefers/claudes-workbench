@@ -1270,14 +1270,22 @@ class GpuLease:
         ``unload``: the model too, unless another holder runs it. `rejoin` before the next round."""
         if self.aside or not self.fh:
             return
+        # The unload is decided and sent while this task still holds the lease, under the lock
+        # every admission takes: decided after letting go, from the holders seen before, it
+        # unloaded the model the next task had just been admitted with and loaded (#327, the
+        # audit of 1.4). Nobody is admitted meanwhile, and a task let in after it loads again.
         with store.locked(self.home / f"{self.pool}.admit"):
             held = self._holders()
             held.pop(self.me, None)
+            if unload:
+                self._unload_unshared(held)
             self._set(held)
             fcntl.flock(self.fh, fcntl.LOCK_UN)
             self.aside = True
+
+    def _unload_unshared(self, held: dict) -> None:
         held_ids = keep_loaded()  # the user's own (#215), and only Ollama unloads on request
-        if unload and self.m and self.m.engine == "ollama" and not self.m.remote and not _fake() \
+        if self.m and self.m.engine == "ollama" and not self.m.remote and not _fake() \
                 and self.m.id not in held_ids and not _kept_name(self.m.name, held_ids):
             found = discover()
             if _key(self.m) not in {_key(o) for o in (found.get(h.get("model")) for h in held.values()) if o}:

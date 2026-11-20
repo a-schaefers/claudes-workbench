@@ -523,7 +523,10 @@ once more and `pid` and `stopping` are cleared.
    project's own GPU tests ran beside the resident model, their out-of-memory failures sent back
    to the agent as its bug (#257, the audit of 1.2). `wb start --unload-for-tests` (task.json
    `unload_for_tests`) also unloads an Ollama model there, unless another holder runs it or
-   models.json keeps it loaded. Before the next round `_rejoin` (phase `queued`, "waiting for the
+   models.json keeps it loaded, decided and sent before the lease is let go, under the
+   `gpu.admit` lock every admission takes: decided after, from the holders seen before, it
+   unloaded the model the next task had just been let in with and loaded (#327, the audit of
+   1.4). Before the next round `_rejoin` (phase `queued`, "waiting for the
    GPU") takes it back: beside the holders when it fits, else alone, in first-come order by the
    task's start, so it keeps its place ahead of later tasks; a round that ends in review leaves
    without rejoining. `lease.load()` (the seconds go to
