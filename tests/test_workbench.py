@@ -6898,6 +6898,94 @@ class Shot(Base):
         self.assertNotIn("no image", out)
 
 
+class Stats(Base):
+    """What the Stats tab reads (#404): the settings behind it, and what a task records for it,
+    on by default and off with one setting."""
+    def events(self, name, kind):
+        return [e for e in store.read_jsonl(store.Task(name).dir / "events.jsonl")[0]
+                if e.get("kind") == kind]
+
+    def test_the_settings_default_on_and_change_through_wb_stats_set(self):
+        from workbench import stats
+        self.assertEqual(stats.settings(), {"recording": True, "live": True, "every": 2})
+        self.assertIn("recording off", run_wb("stats", "set", "recording", "off"))
+        self.assertIn("every 5 s", run_wb("stats", "set", "every", "5"))
+        self.assertEqual(stats.settings(), {"recording": False, "live": True, "every": 5})
+        for bad in (("recording", "maybe"), ("every", "3"), ("colour", "on")):
+            with self.assertRaises(SystemExit), redirect_stderr(io.StringIO()):
+                run_wb("stats", "set", *bad)
+        for text in ('{"recording": "no", "every": 7}', '[1]', 'not json'):  # hand-edited: ignored
+            stats.path().write_text(text)
+            self.assertEqual(stats.settings(), stats.DEFAULTS)
+
+    def test_a_round_stopped_by_a_guard_says_which_and_the_row_keeps_it(self):
+        self.start("t-loop", "loop")
+        wait_phase("t-loop", {"stuck"})
+        end = self.events("t-loop", "round_end")
+        self.assertEqual((end[-1]["how"], end[-1]["guard"]), ("stuck", "repeat"))
+        self.assertGreaterEqual(end[-1]["secs"], 0)
+        self.assertEqual(store.Task("t-loop").status["guards"], {"repeat": 1})
+        run_wb("discard", "t-loop")
+        row = store.results()[-1]
+        self.assertEqual(row["guards"], {"repeat": 1})
+        self.assertEqual(row["started_at"], store.Task("t-loop").spec["created_at"])
+        self.assertIn("load_secs", row)
+
+    def test_a_clean_round_ends_done_and_an_older_reader_sees_only_new_keys(self):
+        self.start("t", "ok", "--test", TEST_CMD)
+        wait_phase("t", {"review"})
+        self.assertEqual([e["how"] for e in self.events("t", "round_end")], ["done"])
+        # the event is the Stats tab's alone: the transcript and wb log show nothing for it
+        self.assertNotIn("round_end", run_wb("log", "t"))
+        run_wb("accept", "t", "-m", "feat: answer")
+        row = store.results()[-1]
+        self.assertNotIn("guards", row)  # never measured: left out, not zero
+        self.assertEqual(row["outcome"], "accepted")
+
+    def test_with_recording_off_nothing_new_is_written(self):
+        run_wb("stats", "set", "recording", "off")
+        self.start("t-loop", "loop")
+        wait_phase("t-loop", {"stuck"})
+        self.assertEqual(self.events("t-loop", "round_end"), [])
+        run_wb("discard", "t-loop")
+        row = store.results()[-1]
+        for key in ("started_at", "load_secs", "guards", "speed", "gpu_w", "asks", "nudges"):
+            self.assertNotIn(key, row)
+        self.assertIn("rounds", row)  # what the router and the savings read is kept
+
+    def test_the_row_keeps_the_tasks_medians_watts_and_asks_by_kind(self):
+        from workbench import results
+        self.start("t", "ok")
+        wait_phase("t", {"review"})
+        task = store.Task("t")
+        task.set_status(speeds={"write": [30, 40, 50], "read": [900], "ttft": [1.0, 3.0], "x": []},
+                        gpu_w_sum=900.0, gpu_w_n=3, gpu_w_peak=410.0, nudges=1,
+                        asks={"a": "q", "b": "q", "c": "p", "d": "x"})
+        got = results.for_stats(task)
+        self.assertEqual(got["speed"], {"write": 40, "read": 900, "ttft": 2.0})
+        self.assertEqual(got["gpu_w"], {"mean": 300.0, "peak": 410.0})
+        self.assertEqual(got["asks"], {"questions": 2, "permissions": 1, "refused": 1})
+        self.assertEqual(got["nudges"], 1)
+
+    def test_a_requests_time_to_first_token_is_sampled_with_its_speeds(self):
+        from workbench import router
+        msgs = [{"type": "assistant", "time": {"created": 1000, "firstToken": 3500, "completed": 8500},
+                 "tokens": {"input": 5000, "output": 400, "reasoning": 100}},
+                {"type": "assistant", "time": {"created": 9000, "firstToken": 9100},
+                 "tokens": {"input": 10, "output": 5}},  # cut short and tiny: only its first token
+                {"type": "user", "time": {"created": 1, "firstToken": 2}}]
+        self.assertEqual(router.speed_samples(msgs),
+                         {"write": [100.0], "read": [2000], "ttft": [2.5, 0.1]})
+
+    def test_the_power_sampler_keeps_its_mean_and_peak(self):
+        from workbench import hardware, runner
+        with mock.patch.object(hardware, "gpu_power_w", side_effect=[100.0, None, 300.0]):
+            p = runner._Power()
+            for _ in range(3):
+                p._sample()
+        self.assertEqual((p.w_sum, p.n, p.peak), (400.0, 2, 300.0))
+
+
 class Progress(Base):
     """Opt-in progress checks (#95): active work, evidence, a hint or a smaller step, and what
     helped, learned; the coding choice untouched."""

@@ -77,6 +77,7 @@ class StuckDetector:
         self.recent = deque(maxlen=repeat)
         self.errors = 0
         self.since_edit = 0
+        self.guard = None
 
     def feed(self, row: dict):
         if row.get("kind") != "tool":
@@ -85,11 +86,15 @@ class StuckDetector:
         self.errors = 0 if row["ok"] else self.errors + 1
         changed = row["tool"] in EDIT_TOOLS and row["ok"] and self._ours(row.get("path"))
         self.since_edit = 0 if changed else self.since_edit + 1
+        # .guard names the one that fired, for the Stats tab's "what stops agents" (#404)
         if len(self.recent) == self.repeat and len(set(self.recent)) == 1:
+            self.guard = "repeat"
             return f"the same call {self.repeat} times in a row: {row['tool']} {row['brief']}"
         if self.errors >= self.error_streak:
+            self.guard = "errors"
             return f"{self.errors} failing tool calls in a row (last: {row.get('error', '')[:120]})"
         if self.since_edit >= self.no_edit:
+            self.guard = "no_edit"
             return f"{self.since_edit} tool calls without changing a file in the task"
         return None
 

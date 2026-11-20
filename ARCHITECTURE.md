@@ -1402,6 +1402,27 @@ default, nothing below runs and the timing is the check-ins'.
   `progress.helped(model)` counts, per kind, the tasks it was tried on and those accepted without
   a takeover; the next check cites them ("on this model before: a hint helped 3 of 4").
 
+**Stats recording** (`workbench/stats.py`, #404) keeps what only the pane's Stats tab reads, so
+its history has begun before anything draws it. The user's rule (2026-11-20): a measurement that
+costs nothing is on by default, and every one can be turned off. It is on unless stats.json says
+`recording: false` (`wb stats set recording off`), and costs a few bytes a task: no process, no
+model call, nothing that wakes Claude. With it on:
+- each round's end is an event, `round_end {secs, how, guard?}`: `how` is `done`, `stuck`,
+  `handover` (the window filled, a fresh session goes on), `interrupted` or `failed`
+  (`runner._round_end`). No reader shows the kind, so the transcript, the pane and `wb log`
+  are unchanged;
+- the guard that stopped a round is named (`repeat`, `errors`, `no_edit` from the stuck
+  detector's `guard`; `round`, `silence`, `think` (after a nudge) and `handovers` from the
+  runner) and counted in status `guards`;
+- `measure_speed` keeps the task's own speed samples beside speed.json's, with each request's
+  time to first token (`router.speed_samples`), in status `speeds`;
+- the results row gets `results.for_stats`: `started_at`, `load_secs`, `setup_secs`, `nudges`,
+  `asks` by kind, `guards`, the median `speed` and `gpu_w` `{mean, peak}`, each only when
+  measured. `_Power` keeps its readings' sum, count and peak for it (status `gpu_w_*`), on or
+  off: it reads them anyway.
+Off, none of these are written. What the router, tuning, savings and progress read is not
+part of the setting. `live` and `every` are the Stats tab's live view (`wb top`).
+
 **Taking over.** `wb takeover <task>` stops the agent and sets `review` ("Claude took over"):
 Claude finishes in the worktree, leaving it uncommitted (accept commits it with the provenance
 trailers), and accepts, or hands back with `wb feedback`. A commit Claude made there by hand is
@@ -3942,7 +3963,7 @@ delivered as taken (`_stale_notes`, *Notes*).
 | `wb bench run` | `--model ID…` (every model that can run and takes the case's size), `--case NAME…` (every case), `--skill NAME…`, `--label TEXT`, `--repeat N` (1) | Writes the run's plan and detaches its driver, then returns: one replay at a time, after any real task, preempted by one; refuses while another run runs. Skips what an earlier run with the same label already replayed. |
 | `wb backlog [NAME]` | `--json` | A batch started with `wb start --backlog NAME` (the morning summary of a night's run), archived tasks included (#270): `backlog NAME: N task(s) · 2 accepted · 1 review`, then a line per task (phase, rounds, minutes: the results row's, or since start while open; the branch when accepted; `savings.line` of its row once closed), then `savings.summary` over the batch's non-trial rows (`the batch: …`). An unknown name: exit 1. Without a name, each batch with its task count and how many are open. `--json`: `{backlog, tasks: [{task, phase, rounds, minutes, branch, saving}], totals}`. |
 | `wb savings` | `--week` (default) \| `--month` \| `--all`, `--json`, `--share` (a summary to paste: the machine, model sizes, no names; *Sharing it*), `--card FILE.svg`, `--price X` | What the delegated tasks saved Claude over the period against the estimate of writing them (`savings.totals`, `summary`; trials left out): tasks, Claude's tokens, the estimate, the saving and its percentage, the GPU energy and, with a price, its cost. `--price` (per kWh, positive, else exit 1) writes savings.json first. `--json`: `{period, tasks, of, claude, self_est, saved, wh, cost, remote, score}`. `--card FILE.svg`: the badge as an image (*The badge*). |
-| `wb stats` / `wb tune` / `wb trial <task…>` | | Results by model and size (judged rows: it says how many spec-gap discards and trials it left out), with a `claude` column (the average input-equivalent tokens a task cost Claude) once a row records one; the tuned settings; mark closed tasks as trials: their results rows, and their open lessons are dropped; an open task is refused (it has no row yet, so it was marked as nothing while its lessons went). |
+| `wb stats [set KEY VALUE]` / `wb tune` / `wb trial <task…>` | `set recording\|live on\|off`, `set every 1\|2\|5` | `wb stats set` changes the Stats tab's settings (stats.json, *Stats recording*) and prints them. Results by model and size (judged rows: it says how many spec-gap discards and trials it left out), with a `claude` column (the average input-equivalent tokens a task cost Claude) once a row records one; the tuned settings; mark closed tasks as trials: their results rows, and their open lessons are dropped; an open task is refused (it has no row yet, so it was marked as nothing while its lessons went). |
 | `wb gc` | `--days N` (default `ARCHIVE_DAYS` 30) | Tidies what history leaves behind (`cli.gc`, the 2026-11-19 audit, finding 18): archives tasks closed and untouched for N days (`store.archive`), moves notices older than that which are handled (acknowledged, their task closed or gone) to `notify.old.jsonl` under notify's lock (`_rotate_notices`), removes the rules of closed tasks and of vanished ones (a rules directory with no task waits `RULES_GRACE` an hour: a start in progress), stale runtime directories (`context.drop_stale_runtime_dirs`), the scratch directories in the state directory (`store.SCRATCH_PREFIXES`: `.verify-`, `.base-`, `.check-`, `.submodule-`, `wb-index-`, `wb-merge-`, each named with its maker's pid by `store.scratch`) `SCRATCH_AGE` (an hour) old whose maker is gone (`_drop_scratches`), half-made starts (`_dead_start`, `_drop_start`: a task directory with no task.json whose `starting.json` pid is gone, or with none past `RULES_GRACE`; its worktree, registration, branch and rules go too; killed commands left full clones that `_disk_room` counted, and a killed start's name was refused for good: #376, the audit of 1.6) and the delegate branches of tasks accepted with `--merge` before accept deleted them itself (`_merged_branches`: tip recorded first, `branch -d`). Prints the counts; writes `gc.json`. `wb accept` and `wb discard` run it without the branches at most once a day (`GC_EVERY`). |
 
 ### Other
@@ -3968,6 +3989,7 @@ $WB_HOME (~/.local/state/workbench)
   coding.json                    Claude coding, the user's choice: {mode: only|ask|decide, ts}; none: decide
   progress.json                  progress checks, the user's opt-in: {on, after?, ts}; none: off
   results.jsonl                  one row per closed task: what the router, slices, tuning and skill records learn from
+  stats.json                     the Stats tab's settings ({recording, live, every, ts}; none: all defaults: *Stats recording*)
   lessons.jsonl                  what each task taught, open until written into a skill or closed
   notes.md  notes.lock           wb notes: how the user wants delegation run
   tuning.json                    optional: pin a tuned setting ({"fresh_at": 0.6})
@@ -4109,6 +4131,9 @@ check-ins off), not `wb start`'s.
 | `tools`, `tok_in`, `tok_out` | task-wide tool calls and tokens (input without cache reads) |
 | `live_used` | `{session, used}`: the context the round's last `step_finish` carried (input + cache + output), what the between-rounds check uses when the session export fails (#262) |
 | `gpu_wh` | the GPU energy its rounds used so far, in Wh (the runner's `_Power`; absent for a remote model or no reading) |
+| `gpu_w_sum`, `gpu_w_n`, `gpu_w_peak` | the same sampler's readings in watts: their sum, count and peak, for the row's `gpu_w` (*Stats recording*) |
+| `speeds` | `{write, read, ttft}`: this task's own samples (`router.speed_samples`), the newest `TASK_SPEED_KEEP` 200 of each, with stats recording on |
+| `guards` | `{<guard>: n}`: the guards that stopped its rounds, with stats recording on (*Stats recording*) |
 | `remote_gpu` | true when its model runs on another machine (set in `drive`): the results row carries it, and the savings say the energy wasn't measured |
 | `unrecorded` | set with an accept's or discard's closing phase, cleared once its results row is written: `{outcome, step, extra}`, what a retried accept or discard writes the row from |
 | `closing` | set by `wb accept` once its commit is made, before anything is removed, cleared with the phase: `{commit, step, merge, merge_into, check_base, merged_head?}`. The same status write saves the full object ID as `tip`. A retry uses that object and the original destination even if the delegate ref moved. A recovered refusal still exits 5. An interrupted accept recorded merged=false for a merge git had made, and stranded a last step with no new edits once its worktree was gone (#246, the audit of 1.2) |
@@ -4134,7 +4159,8 @@ description, 90 characters; a skill's id), `text {text}` (2000 characters), `ste
 cache}`, `error {text}`. From the runner: `round`, `stopped {text}`, `steer {now, by:
 "workbench"}` (a nudge), `interrupted`, `tests {ok, text}`, `skills`, `fresh {overflow,
 compacted}`,
-`autofix`, `self_review`, `reading_full`, `full`, `load` (the model reloaded before a round), `export` (the session export failed: judged by `live_used`), `stopped {by:
+`autofix`, `self_review`, `reading_full`, `full`, `load` (the model reloaded before a round),
+`round_end {secs, how, guard?}` (with stats recording on: *Stats recording*), `export` (the session export failed: judged by `live_used`), `stopped {by:
 "signal"}` (a SIGTERM not from wb), `gpu {text}` (a warning from loading the model: a server wb
 can't stop, a model partly on the CPU, a share Ollama couldn't keep), and relaying the agent's
 questions `ask {id}`, `answer {id}`. From `wb`:
@@ -4150,7 +4176,10 @@ review included), `tok_in`, `tok_out`, `skills_offered`, `skills_loaded`, `skill
 output}`, *What a task cost Claude*), `gpu_wh` (status's, when measured), `remote_gpu` (true
 when its model ran on another machine, whose energy nothing here measures), `active_minutes`
 (status `active_s`), `interventions` (status's, when a progress check was answered), `diff` (accepted only:
-`{files, added, removed}` summed over the steps; *What a task saved*), `backlog` (task.json's), `trial` (when set); `commit` and `merged` on accept (and `merge_refused`, git's reason, when `--merge` was refused), `reason` on
+`{files, added, removed}` summed over the steps; *What a task saved*), `backlog` (task.json's), `trial` (when set);
+with stats recording on (`results.for_stats`, each only when measured), `started_at`, `load_secs`, `setup_secs`,
+`nudges`, `asks` (`{questions, permissions, refused}`), `guards`, `speed` (`{write, read, ttft}`, the
+medians of status `speeds`) and `gpu_w` (`{mean, peak}`); `commit` and `merged` on accept (and `merge_refused`, git's reason, when `--merge` was refused), `reason` on
 discard. A step (`results.step`): `files`,
 `lines` (added, against HEAD, new files included), `removed`, `window`, `landed`, `compacted` (its last
 session, or one a handover replaced: a `fresh` event's `compacted`), `handovers` (fresh sessions
@@ -4179,6 +4208,9 @@ hidden files), `handovers` (fresh sessions). A `wb bench self` row (`bench.self_
 - `lessons.jsonl`: `{ts, task, repo, skills, id, kind, round, text}`; a close is `{close: id, ts,
   how: "skill:<name>"|"dropped", why}` (*Lessons*).
 - `speed.json`: `{"<model id>": {"write": [tok/s…], "read": [tok/s…]}}`, the last 60 of each.
+- `stats.json`: `{recording, live, every, ts}` (`stats.py`, `wb stats set`): `recording` and `live`
+  booleans, `every` 1, 2 or 5 seconds; a missing or mistyped key is its default (`stats.DEFAULTS`:
+  on, on, 2).
 - `gpu.json`: `{"<pid>": {model, task, since, start, waiting?}}` (`since`: its place in the queue,
   the task's `created_at`; `start`: the holder's start time, `/proc/<pid>/stat` field 22, else
   `ps -o lstart=` (macOS: #236), so a recycled pid isn't taken for it; null when neither says).

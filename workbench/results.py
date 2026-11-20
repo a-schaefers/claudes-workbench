@@ -1,7 +1,8 @@
 """results.jsonl: one row per closed task, so the models can be compared on real work."""
 from collections import defaultdict
+from statistics import median
 
-from . import gitops, skills, spend, store
+from . import gitops, skills, spend, stats, store
 
 
 def step(task: store.Task, landed: bool, since: str = "HEAD") -> dict:
@@ -70,9 +71,38 @@ def record(task: store.Task, outcome: str, last_step: dict | None = None, **extr
                         "added": sum(s.get("lines", 0) for s in steps),
                         "removed": sum(s.get("removed", 0) for s in steps)}}
               if outcome == "accepted" else {}),
-           **({"trial": True} if spec.get("trial") else {}), **extra}
+           **({"trial": True} if spec.get("trial") else {}), **for_stats(task), **extra}
     store.append_jsonl(store.home() / "results.jsonl", row)
     return row
+
+
+def for_stats(task: store.Task) -> dict:
+    """What only the Stats tab reads (#404), with stats recording on: when the task began, its
+    load and setup time, the runner's nudges, the questions it asked, the guards that stopped
+    its rounds, its own median speeds and time to first token, and the GPU's mean and peak watts
+    while it ran. A value never measured is left out, not written as zero."""
+    if not stats.recording():
+        return {}
+    spec, st = task.spec, task.status
+    speeds = {k: round(median(v), 2) for k, v in (st.get("speeds") or {}).items() if v}
+    keep = {"started_at": spec.get("created_at"), "load_secs": st.get("load_secs"),
+            "setup_secs": st.get("setup_secs"), "nudges": st.get("nudges"),
+            "asks": _asks(st.get("asks") or {}) or None, "guards": st.get("guards"),
+            "speed": speeds or None,
+            "gpu_w": {"mean": round(st["gpu_w_sum"] / st["gpu_w_n"], 1),
+                      "peak": round(st.get("gpu_w_peak") or 0, 1)} if st.get("gpu_w_n") else None}
+    return {k: v for k, v in keep.items() if v is not None}
+
+
+def _asks(asks: dict) -> dict:
+    """The ask_reviewer calls by kind (status `asks`: "q" a question, "p" a command or path
+    request, "x" one refused), the kinds with none left out."""
+    names = {"q": "questions", "p": "permissions", "x": "refused"}
+    out = {}
+    for kind in asks.values():
+        if kind in names:
+            out[names[kind]] = out.get(names[kind], 0) + 1
+    return out
 
 
 SPEC_GAP_WINDOW = 10
