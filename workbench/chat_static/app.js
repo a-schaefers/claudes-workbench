@@ -24,7 +24,7 @@
     sendBtn = $('send'), jump = $('jump'), presence = $('presence'), presenceText = $('presence-text')
 
   const load = (k, d) => { try { const v = localStorage.getItem(k); return v == null ? d : JSON.parse(v) } catch { return d } }
-  const save = (k, v) => { try { localStorage.setItem(k, JSON.stringify(v)) } catch {} }
+  const save = (k, v) => { try { localStorage.setItem(k, JSON.stringify(v)); return true } catch { return false } }
 
   // ---- the key ----
   let token = ''
@@ -72,6 +72,10 @@
   for (const o of load(K.outbox, [])) if (o && o.cid) save(OUT + o.cid, o)  // the one array, before #199
   try { localStorage.removeItem(K.outbox) } catch {}
   let outbox = outItems()                       // [{cid, text, ts, error?}]
+  // A message the browser wouldn't store (its storage full, or denied): it stays in the composer
+  // until the server has it. Send cleared the composer, the outbox read back empty, and the
+  // message was gone, with no pending bubble (#245, the audit of 1.2)
+  let held = null
   let seen = new Set(load(K.seen, null) || [])  // Claude's messages already shown in full
   let firstVisit = load(K.seen, null) === null  // the backlog shows whole; what comes after flows
   const nodes = new Map()                       // key → row element
@@ -470,7 +474,9 @@
   // ---- the connection ----
   let online = navigator.onLine, conn = null, failures = 0, retryTimer = 0, lastRx = 0, hiddenTimer = 0
   let build = ''  // the page's files when this page loaded (the server's `build`)
+  const HELD = "This browser's storage is full, so your message stays in the box until it's sent: keep this page open."
   function banner(text, bad) {
+    if (held) { text = text ? text + ' ' + HELD : HELD; bad = true }  // said for as long as it waits
     if (!text) { net.hidden = true; return }
     net.textContent = text; net.className = 'net' + (bad ? ' bad' : ''); net.hidden = false
   }
@@ -652,33 +658,47 @@
   async function flush(now) {
     if (now) { clearTimeout(flushTimer); flushTries = 0 }
     outbox = outItems()  // another tab's too: whichever tab is online sends them all
-    if (flushing || !token || !outbox.length) return
+    if (flushing || !token || !(outbox.length || held)) return
     flushing = true
     let again = false
-    for (const o of [...outbox]) {
-      if (o.error || !load(OUT + o.cid, null)) continue  // refused, or sent by another tab meanwhile
+    for (const o of [...outbox, ...(held ? [held] : [])]) {
+      if (o !== held && (o.error || !load(OUT + o.cid, null))) continue  // refused, or sent by another tab meanwhile
       try {
         const r = await post('/api/send', { text: o.text, cid: o.cid, ...(o.about ? { about: { task: o.about.task, n: o.about.n } } : {}) })
         const j = await r.json().catch(() => ({}))
-        if (r.ok) { if (j.state) apply(j.state); continue }
+        if (r.ok) { if (o === held) sentHeld(); if (j.state) apply(j.state); continue }
         if (r.status === 401) { keyless('That key was not accepted.'); break }
-        if (r.status >= 400 && r.status < 500) { o.error = j.error || 'refused'; keep(o); render(); continue }
+        if (r.status >= 400 && r.status < 500) {
+          if (o === held) { held = null; banner('Not sent: ' + (j.error || 'refused') + '. Your message is still in the box.', true); continue }
+          o.error = j.error || 'refused'; keep(o); render(); continue
+        }
         again = true
       } catch { again = true }
     }
     flushing = false
-    if (again && outbox.some(o => !o.error)) {
+    if (again && (held || outbox.some(o => !o.error))) {
       flushTimer = setTimeout(flush, BACKOFF[Math.min(flushTries++, BACKOFF.length - 1)])
     }
   }
   const newId = () => (crypto.randomUUID ? crypto.randomUUID() : Date.now().toString(36) + Math.random().toString(36).slice(2))
   function send() {
     const text = input.value.trim()
-    if (!text || !token) return
-    keep({ cid: newId(), text, ts: now(), ...(about ? { about } : {}) })
+    if (!text || !token || held) return
+    const o = { cid: newId(), text, ts: now(), ...(about ? { about } : {}) }
+    if (!save(OUT + o.cid, o)) {  // not stored, so not cleared: sent from here, kept till it lands
+      held = o; sendBtn.disabled = true
+      banner('Sending…')
+      flush(true)
+      return
+    }
+    outbox = outItems()
     setAbout(null)
     input.value = ''; save(K.draft, ''); grow(); sendBtn.disabled = true
     render(); toEnd(true); flush(true)
+  }
+  function sentHeld() {
+    if (input.value.trim() === held.text) { input.value = ''; save(K.draft, ''); grow(); sendBtn.disabled = true }
+    held = null; setAbout(null); banner('')
   }
 
   // ---- composer ----
