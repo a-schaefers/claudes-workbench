@@ -572,6 +572,19 @@ def cmd_start(a):
     except gitops.GitError as e:
         shutil.rmtree(task.dir, ignore_errors=True)  # create_worktree removed its own leftovers
         die(str(e))
+    # Ignored in the checkout isn't ignored where the task starts: at a tag older than the ignore
+    # rule, a copied local-input.dat was a new file in the worktree, and wb accept committed it
+    # (#322, the audit of 1.4). The task's worktree has the base's own .gitignore files.
+    # (a directory as `dir/`: nothing is there yet to tell a `dir/` rule it is one)
+    if loose := [p for p in setup.get("copy", ())
+                 if not gitops.ignored(wt, p + "/" * (repo / p).is_dir())]:
+        gitops.remove_worktree(repo, wt)
+        gitops.delete_branch(repo, a.name)
+        shutil.rmtree(task.dir, ignore_errors=True)
+        shutil.rmtree(context.rules_dir(task), ignore_errors=True)
+        die(f"--copy {loose[0]}: ignored in {repo}, but not at {a.base}, where the task starts: a "
+            "copy would show in the review diff and be committed. Ignore it in a commit the base "
+            "holds, or start from a newer --base")
     subs = gitops.submodules(repo, base)
     budget = a.ask_budget
     limits = router.budgets(m)  # from the model's measured speed on this machine, else defaults

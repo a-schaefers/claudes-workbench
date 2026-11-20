@@ -1850,6 +1850,25 @@ class WorktreeSetup(Base):
         wait_phase("t-c7", {"review"})
         self.assertEqual((store.Task("t-c7").worktree / "generated" / "config").read_text(), "LOCAL\n")
 
+    def test_copy_refuses_a_path_the_base_does_not_ignore(self):
+        # #322 (the audit of 1.4, reproduced): the ignore rule came after the tag the task
+        # started from, so the copied local-input.dat was a new file there, and accept committed it
+        g = lambda *a: subprocess.run(["git", "-C", str(self.repo), *a], check=True,  # noqa
+                                      capture_output=True)
+        g("tag", "v0")
+        self.ignore("local-input.dat")
+        (self.repo / "local-input.dat").write_text("LOCAL\n")
+        err = self.refused("t-c8", "--copy", "local-input.dat", "--base", "v0")
+        self.assertIn("not at v0", err)
+        self.assertFalse(subprocess.run(["git", "-C", str(self.repo), "branch", "--list",
+                                         "delegate/t-c8"], capture_output=True, text=True).stdout.strip())
+        self.assertEqual(subprocess.run(["git", "-C", str(self.repo), "worktree", "list",
+                                         "--porcelain"], capture_output=True).stdout.count(b"worktree "), 1)
+        self.assertFalse((store.home() / "rules" / "t-c8").exists())
+        self.start("t-c9", "ok", "--copy", "local-input.dat")           # at HEAD it's ignored: fine
+        wait_phase("t-c9", {"review"})
+        self.assertNotIn("local-input.dat", gitops.changed(store.Task("t-c9").worktree))
+
     def test_copy_refuses_a_virtualenv_and_says_to_recreate_it_with_setup(self):
         # #260 (the audit of 1.2): a copied .venv's activate and shebangs named the checkout, so
         # the task's tests ran the developer's environment and its writes left the lane
