@@ -4323,6 +4323,17 @@ class Lane(Base):
             got.append(out.stdout.strip() or out.stderr)
         self.assertEqual(got, ["refused", "pty"])
 
+    def test_a_device_node_the_lane_refused_is_named_with_its_wb_allow(self):
+        # #331 (the audit of 1.4): /dev/kvm or /dev/fuse refused read as the project's bug, and the
+        # agent spent its auto-fix rounds on it
+        self.start("t-dev", "ok", "--auto-fix", "0", "--no-base-check", "--test",
+                   "echo 'qemu: could not open /dev/kvm: Permission denied'; "
+                   "echo 'tee: /dev/null: Permission denied'; exit 1")
+        wait_phase("t-dev", {"review"})
+        report = run_wb("report", "t-dev")
+        self.assertIn("the lane refused /dev/kvm: wb allow t-dev --path /dev/kvm", report)
+        self.assertNotIn("refused /dev/null", report)      # in the lane: not the lane's doing
+
     def test_a_task_unloading_for_its_tests_gets_the_gpus_device_nodes_and_no_other_does(self):
         # #331, the audit of 1.4: --unload-for-tests freed the GPU, but its nodes stayed out of
         # the lane, so CUDA, ROCm and Vulkan found no device and the agent chased its own "bug"

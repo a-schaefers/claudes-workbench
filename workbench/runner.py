@@ -884,6 +884,26 @@ def clip_tail(output: str, lines: int, width: int = 300, total: int = 4000) -> s
     return s if len(s) <= total else "… (earlier output cut)\n" + s[-total:]
 
 
+DEV_REFUSED = re.compile(r"(/dev/[\w.+-]+(?:/[\w.+-]+)*).*?(?:Permission denied|Operation not permitted)"
+                         r"|(?:Permission denied|Operation not permitted).*?(/dev/[\w.+-]+(?:/[\w.+-]+)*)")
+
+
+def lane_refused(task: store.Task, output: str) -> list[str]:
+    """The device nodes a failed test run was refused, outside the task's lane: /dev/kvm, /dev/fuse
+    and the like read as the project's bug, and the agent spent its auto-fix rounds on them (#331,
+    the audit of 1.4). The report names `wb allow --path` for each."""
+    lane = context.writable(task)
+    if lane is None:
+        return []
+    found = []
+    for m in DEV_REFUSED.finditer(output[-200_000:]):
+        node = (m.group(1) or m.group(2)).rstrip(".")
+        if node not in found and not any(node == w or node.startswith(str(w).rstrip("/") + "/")
+                                         for w in lane):
+            found.append(node)
+    return found[:5]
+
+
 def run_tests(task: store.Task, n: int):
     cmd = task.spec.get("test_cmd")
     if not cmd:
@@ -894,6 +914,8 @@ def run_tests(task: store.Task, n: int):
     task.round_dir(n).joinpath("tests.txt").write_text(
         f"$ {cmd}\nexit: {code}\nshell: {test_shell()}\n\n{output}")
     result = {"ok": code == 0, "exit": code, "tail": clip_tail(output, 40), "round": n}
+    if code != 0 and (refused := lane_refused(task, output)):
+        result["lane"] = refused
     task.event({"ts": store.now(), "round": n, "kind": "tests", "ok": result["ok"],
                 "text": f"exit {code}"})
     return result
@@ -1199,6 +1221,9 @@ def summary_text(task: store.Task, n: int, rnd: dict, tests) -> str:
                      f"exit {tests['exit']})")
         if not tests["ok"]:
             lines.append("```\n" + "\n".join(tests["tail"].splitlines()[-25:]) + "\n```")
+        for node in tests.get("lane") or ():
+            lines.append(f"the lane refused {node}: wb allow {task.name} --path {node} if the "
+                         "tests need it (not the agent's bug)")
     if st.get("setup_secs") is not None and not st.get("reviews") and st.get("steps", 1) == 1:
         lines.append(f"setup: {st['setup_secs']:.0f}s, once; the scratch checkouts copy what it made")
     if st.get("base_check") and not st.get("reviews") and st.get("steps", 1) == 1:

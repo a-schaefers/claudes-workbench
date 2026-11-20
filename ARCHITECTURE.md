@@ -964,7 +964,10 @@ deliberately hostile process (the 2026-11-16 audit's list of what it can't stop 
   say), with `--unload-for-tests` the GPU's nodes that exist (`GPU_NODES` through `gpu_nodes`:
   `/dev/dri/renderD*`, `/dev/kfd`, `/dev/nvidia[0-9]*`, `/dev/nvidiactl`, `/dev/nvidia-uvm`,
   `/dev/nvidia-uvm-tools`, `/dev/dxg`; without them CUDA, ROCm and Vulkan found no device and
-  said nothing of permission, #331, the audit of 1.4), `/proc`, the build caches and
+  said nothing of permission, #331, the audit of 1.4; any other node a failed test run names
+  with "Permission denied" or "Operation not permitted" outside the lane, `/dev/kvm` say, goes in
+  status `tests.lane` and the report names `wb allow <task> --path <node>` for it:
+  `runner.lane_refused`), `/proc`, the build caches and
   toolchain homes under `$HOME` (`TOOL_HOMES`: `.cache`, `.cargo`, `.rustup`, `go/pkg`, `.npm`,
   `.bun/install/cache`, `.yarn`, `.pnpm-store`, `.local/share/pnpm/store`,
   `.gradle`, `.m2`, `.nuget`, `.dotnet`, `.gem`, `.julia`, `.cabal`, `.stack`, `.ghcup`,
@@ -3847,7 +3850,7 @@ check-ins off), not `wb start`'s.
 | `auto_fixes`, `auto_fixes_total` | auto-fix rounds since the last review or step; earlier ones |
 | `self_reviewed` | `[steps, reviews]` when the self-review round last ran (`tuned.self_review` on: once per review round) |
 | `reviewed` | `{step, tree}`: the working tree the last review notice showed, a tree object (`gitops.snapshot`); the next review notice of the same step shows the diff since it |
-| `tests` | `{ok, exit, tail, round}` of the last test run (`exit`: a code, `timeout` or `output limit`) |
+| `tests` | `{ok, exit, tail, round, lane?}` of the last test run (`exit`: a code, `timeout` or `output limit`; `lane`: the device nodes it was refused outside the lane, #331) |
 | `base_check` | `{ok, exit, tail, limit}` of the acceptance command run once on the base, in the lane (`runner.base_check`; `exit` is `"timeout"` past `limit`, `"setup failed"` when its scratch checkout couldn't be set up); the runner, before round 1, only with `--test` and without `--no-base-check` |
 | `prepared` | true once the worktree is set up (`runner._prepare`: `setup`, `copy`, `siblings`), so a later run of the runner doesn't again |
 | `prepared_paths`, `setup_secs` | set with `prepared`: the worktree's ignored paths the preparation left, which each scratch checkout copies instead of running the setup (#249), unless one is a virtualenv (#325); how long it took, in the first report |
