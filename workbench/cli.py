@@ -567,11 +567,7 @@ def _disk_room(repo: Path, base: str, setup: dict) -> None:
     free = store.free_bytes()
     if free is None:
         return
-    size = 0
-    for row in gitops.git(repo, "ls-tree", "-r", "-l", base, check=False).splitlines():
-        f = row.split(None, 4)
-        if len(f) >= 4 and f[1] == "blob" and f[3].isdigit():
-            size += int(f[3])
+    size = gitops.checkout_size(repo, base)  # Git LFS files at their own size (#382)
     for p in setup.get("copy", ()):
         size += store.dir_size(repo / p, budget=5)[0]
     need = size * DISK_COPIES + DISK_SPARE

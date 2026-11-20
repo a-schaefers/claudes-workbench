@@ -108,11 +108,11 @@ def _modes_hold(d: str) -> bool:
             pass
 
 
-def _run(cwd, args, env=None, check=True, timeout=None) -> subprocess.CompletedProcess:
+def _run(cwd, args, env=None, check=True, timeout=None, input=None) -> subprocess.CompletedProcess:
     try:
         r = subprocess.run(["git", "-C", str(cwd), *PLAIN, *_pinned(cwd), *args], capture_output=True,
-                           env={**os.environ, **env} if env else None, timeout=timeout,
-                           stdin=subprocess.DEVNULL if timeout else None)
+                           env={**os.environ, **env} if env else None, timeout=timeout, input=input,
+                           stdin=subprocess.DEVNULL if timeout and input is None else None)
     except subprocess.TimeoutExpired:
         raise GitError(f"git {' '.join(args)}: no answer in {timeout}s") from None
     if check and r.returncode:
@@ -216,6 +216,64 @@ def apply_sparse(dest: Path, sparse: tuple[str, bool]) -> None:
     info = Path(dest) / git(dest, "rev-parse", "--git-path", "info/sparse-checkout").strip()
     info.parent.mkdir(parents=True, exist_ok=True)
     info.write_text(patterns)
+
+
+# A Git LFS pointer file: its first line, and the spec's bounds (the smallest has no extensions)
+LFS_POINTER = b"version https://git-lfs.github.com/spec/v1\n"
+LFS_POINTER_MIN, LFS_POINTER_MAX = 126, 1024
+
+
+def lfs_filter(repo: Path) -> list[tuple[str, str]]:
+    """The repo's `filter.lfs.*` settings (any scope): none when its checkouts don't run Git LFS."""
+    out = git(repo, "config", "--get-regexp", r"^filter\.lfs\.", check=False)
+    return [(k, v) for k, _, v in (line.partition(" ") for line in out.splitlines()) if k]
+
+
+def checkout_size(repo: Path, commit: str) -> int:
+    """The bytes a checkout of ``commit`` writes: each blob's size, and where the repo runs Git
+    LFS, for a pointer the size of the file it stands for. Counted as pointers, a repo of
+    LFS-tracked data read as a few kilobytes, and wb start's disk check passed it (#382, the
+    audit of 1.6)."""
+    size, pointers = 0, []
+    for row in git(repo, "ls-tree", "-r", "-l", "-z", commit, check=False).split("\0"):
+        f = row.partition("\t")[0].split()
+        if len(f) == 4 and f[1] == "blob" and f[3].isdigit():
+            size += int(f[3])
+            if LFS_POINTER_MIN <= int(f[3]) <= LFS_POINTER_MAX:
+                pointers.append(f[2])
+    if not pointers or not lfs_filter(repo):
+        return size
+    out = _run(repo, ("cat-file", "--batch"), check=False,
+               input="".join(f"{sha}\n" for sha in pointers).encode()).stdout
+    at = 0
+    while (nl := out.find(b"\n", at)) >= 0:
+        head = out[at:nl].split()
+        if len(head) < 3 or not head[2].isdigit():  # "<sha> missing"
+            at = nl + 1
+            continue
+        n = int(head[2])
+        body, at = out[nl + 1:nl + 1 + n], nl + 2 + n
+        if body.startswith(LFS_POINTER):
+            for line in body.splitlines():
+                if line.startswith(b"size ") and line[5:].isdigit():
+                    size += int(line[5:]) - n
+    return size
+
+
+def share_lfs(repo: Path, clone: Path) -> None:
+    """A scratch clone of ``repo`` (the base check's, wb verify's) smudges Git LFS files as the
+    repo does, from the repo's own LFS objects. A clone has none of the repo's local config: after
+    `git lfs install --local` it checked out pointer files where the tests expected the data, and
+    with a global install each clone fetched its own copy of every object (#382, the audit of
+    1.6). git-lfs only reads that directory here: the objects are there already."""
+    pairs = lfs_filter(repo)
+    if not pairs:
+        return
+    for key, value in pairs:
+        git(clone, "config", key, value)
+    common = Path(repo) / git(repo, "rev-parse", "--git-common-dir").strip()
+    storage = git(repo, "config", "lfs.storage", check=False).strip()
+    git(clone, "config", "lfs.storage", str((common / (storage or "lfs")).resolve()))
 
 
 def submodules(repo: Path, commit: str) -> list[str]:

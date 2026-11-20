@@ -109,6 +109,9 @@ if subprocess.run(["git", "config", "user.email"], capture_output=True).returnco
 # a program that runs and exits 0: /bin/true on Linux, /usr/bin/true on macOS (where /bin has none)
 TRUE = shutil.which("true") or "/bin/true"
 
+# git-lfs, for the one test of a repo that uses it (#382); CI's runner image has it
+GIT_LFS = subprocess.run(["git", "lfs", "version"], capture_output=True).returncode == 0
+
 
 def home_outside_the_lane(test):
     """For a test that hides credentials under the home directory: the lane writes the temp roots
@@ -7356,6 +7359,35 @@ class Projects(Base):
         self.assertIn("note: submodules (vendor/lib/deps/inner) are empty",
                       self.start("t-nest2", "ok"))
         wait_phase("t-nest2", {"review"})
+
+    @unittest.skipUnless(GIT_LFS, "needs git-lfs")
+    def test_git_lfs_files_are_data_in_the_scratch_checkouts_and_count_at_their_size(self):
+        # #382 (the audit of 1.6): a --shared scratch clone has none of the repo's local config,
+        # so after `git lfs install --local` the base check ran on pointer files; and wb start's
+        # disk check counted the pointers' bytes, not the files'. Only the repo's own config runs
+        # LFS here: a global or system install would have hidden the first
+        identity = Path(self.tmp.name) / "gitconfig"
+        identity.write_text("[user]\n\tname = t\n\temail = t@t\n")
+        os.environ.update(GIT_CONFIG_GLOBAL=str(identity), GIT_CONFIG_NOSYSTEM="1")
+        g = lambda *a: subprocess.run(["git", "-C", str(self.repo), *a], check=True,  # noqa
+                                      capture_output=True)
+        g("lfs", "install", "--local")
+        g("lfs", "track", "*.bin")
+        (self.repo / "data.bin").write_bytes(b"DATA" + bytes(10**6))
+        g("add", ".")
+        g("commit", "-qm", "LFS data")
+        self.assertLess(int(g("cat-file", "-s", "HEAD:data.bin").stdout), 200)   # a pointer
+        err = io.StringIO()
+        with mock.patch.object(store, "free_bytes", return_value=cli.DISK_SPARE + 2 * 10**6), \
+                self.assertRaises(SystemExit), redirect_stderr(err):
+            self.start("t-lfs-room", "ok")
+        self.assertIn("free where the state directory is", err.getvalue())
+        out = self.start("t-lfs", "ok", "--test", "grep -q DATA data.bin && " + TEST_CMD)
+        self.assertIn("started t-lfs", out)
+        st = wait_phase("t-lfs", {"review"})
+        self.assertEqual(st["base_check"]["exit"], 2)   # the data there (a pointer: 1)
+        self.assertEqual((store.Task("t-lfs").worktree / "data.bin").stat().st_size, 10**6 + 4)
+        self.assertIs(st["tests"]["ok"], True)
 
     def test_accept_says_whether_claude_md_kept_up(self):
         self.start("t-ok", "ok", "--test", TEST_CMD)

@@ -214,7 +214,8 @@ mod wakes Claude. On Linux the agent dies with its runner anyway: `lane.py` sets
 **A full disk** (#342, the audit of 1.4) failed every status write: the runner's crash handler
 failed on its own, the task stayed live, and `reap`'s write raised, so `wb status`, `wb wait` and
 the mod's poll ended in a traceback until space was freed. Now `wb start` refuses a task the disk
-has no room for (`cli._disk_room`: under the base's tracked size plus its `--copy` paths, times
+has no room for (`cli._disk_room`: under the base's tracked size (`gitops.checkout_size`: a Git
+LFS pointer at the size of the file it stands for, #382) plus its `--copy` paths, times
 `DISK_COPIES` (3: the worktree, the base check's and `wb verify`'s scratch checkouts, full copies
 on ext4) plus `DISK_SPARE` (2 GB), free where the state directory is; it names the open tasks and
 their sizes; unknown free space refuses nothing). The runner's crash handler on ENOSPC or EDQUOT
@@ -2753,6 +2754,18 @@ custom-node packs do run their own Python).
   commit-msg or post-commit hook runs, the user's own included; signing is kept (git-lfs's post-checkout hook fails
   without git-lfs on PATH, and wb start died on it). Checks belong in `--test`, which runs in the
   lane.
+- **Git LFS** (#382, the audit of 1.6). The task's worktree shares the repo's config and LFS
+  objects, so its checkout smudges as the user's does. A `--shared` scratch clone (the base
+  check's, `wb verify`'s: `verify._run`) has none of the repo's local config: after `git lfs
+  install --local` it checked out pointer files where the tests expected the data, and with a
+  global install each clone fetched its own copy of every object. `gitops.share_lfs` gives the
+  clone the repo's `filter.lfs.*` settings (`gitops.lfs_filter`) and points its `lfs.storage` at
+  the repo's own LFS directory (the repo's `lfs.storage`, else `<common git dir>/lfs`), which
+  git-lfs only reads there. `wb start`'s disk check counts each pointer (a blob of
+  `LFS_POINTER_MIN` to `LFS_POINTER_MAX` bytes starting `LFS_POINTER`, read in one `cat-file
+  --batch`) at the `size` it records, when the repo has `filter.lfs.*` settings
+  (`gitops.checkout_size`). The suite's test runs under `git lfs install --local` alone (no
+  global or system config) and skips without git-lfs; CI's `Git LFS` step installs it.
 - **The split of roles.** The agent writes code and reads git freely (`status`, `diff`, `log`,
   `show`, `blame`). Everything that leaves its working tree is Claude's: commits, branches,
   merges, pushes, pull requests, CI/CD, deploys and infrastructure (`gh`, `wrangler` and the like),
@@ -2938,7 +2951,8 @@ delegating or with a task open. A shell edit isn't seen: the block says the rule
 `wb verify <task> [--test CMD] [--files PATH…] [--expect TEXT] [--timeout N]` (`workbench/verify.py`, #96) runs
 one regression test twice, at review, each run in its own scratch checkout under the state
 directory and in the task's own lane and environment (`runner.run_in_lane` on a `verify._At`):
-- **The base**: a `--shared` clone at the task's original base for step one or the previous approved step commit for later steps (#252), with the candidate's test files
+- **The base**: a `--shared` clone (its Git LFS files smudged from the repo's own objects:
+  `gitops.share_lfs`, #382) at the task's original base for step one or the previous approved step commit for later steps (#252), with the candidate's test files
   copied in (`--files`, else the files changed since that commit whose path looks like a test, `TEST_PATH`, as
   they are in the candidate: a deleted one, such as a renamed test's old name, is left out, and
   each path goes to git `:(literal)`; the old name once stopped git on its pathspec before either
@@ -4110,7 +4124,9 @@ load (`this Claude Code (<v>) is older than <min>…: claude update if they misb
 call it lacks as a bare error); OpenCode 2.2.7, the oldest release that
 passes the real-OpenCode tests (2.2.0 never lists `workbench_ask_reviewer`, found 2026-11-17);
 Python 3.11. Each Linux job's `Landlock`
-step prints the runner's Landlock ABI, or that it has none and the Lane tests skip. The tests that hide credentials under the home directory also skip, saying why, when the home lies in a temp root (`home_outside_the_lane`: the lane writes those whole), and a profile without a git identity gets a scratch one for the run (the 2026-11-19 audit: Codex's clean profile under `/tmp` failed 11 isolation tests and seven on "Author identity unknown"). `chat.yml`
+step prints the runner's Landlock ABI, or that it has none and the Lane tests skip. `check.yml`'s
+`Git LFS` step installs git-lfs when the runner image lacks it (the LFS test skips without it,
+#382). The tests that hide credentials under the home directory also skip, saying why, when the home lies in a temp root (`home_outside_the_lane`: the lane writes those whole), and a profile without a git identity gets a scratch one for the run (the 2026-11-19 audit: Codex's clean profile under `/tmp` failed 11 isolation tests and seven on "Author identity unknown"). `chat.yml`
 runs the browser test (WebKit and Chromium, through the Playwright pinned there as
 `PLAYWRIGHT_VERSION`) on each pull request and push to main that changes `chat.py`, `webpush.py`,
 `chat_static/`, the test or itself; it is not a required check (#91). Not run in CI: a real run
