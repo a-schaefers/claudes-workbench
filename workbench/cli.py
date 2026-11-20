@@ -2833,6 +2833,20 @@ def cmd_chat(a):
         print(f"listening: {lst['cwd']}" if lst else "no session is listening")
 
 
+def path_advice() -> str:
+    """How to put ~/.local/bin on PATH for the user's own shell, then restart Claude Code. "Add
+    it" was all wb setup said, and on macOS, or in a Claude Code started from the Dock or an IDE,
+    PATH comes from places users don't know (#274, the audit of 1.2)."""
+    shell = Path(os.environ.get("SHELL") or "sh").name
+    if shell == "fish":
+        how = "run: fish_add_path ~/.local/bin"
+    else:
+        rc = {"zsh": "~/.zshrc", "bash": "~/.bash_profile" if sys.platform == "darwin" else "~/.bashrc"}
+        how = (f"run: echo 'export PATH=\"$HOME/.local/bin:$PATH\"' >> {rc.get(shell, '~/.profile')}")
+    return (f"For {shell}, {how}; then quit Claude Code and start it again from a new terminal "
+            "(the desktop app or an IDE too: each reads PATH only when it starts)")
+
+
 def cmd_setup(a):
     """Link `wb` onto PATH and /workbench into Claude Code's skills, from wherever this copy lives:
     the marketplace's clone (~/.claude/plugins/marketplaces/workbench) for users, a git clone for
@@ -2860,8 +2874,8 @@ def cmd_setup(a):
         print(f"ok  {old} removed: /delegate is now /workbench")
     bindir = str(Path.home() / ".local/bin")
     if bindir not in os.environ.get("PATH", "").split(os.pathsep):
-        print(f"--  {bindir} isn't on PATH: add it; Claude and the mod run wb by name (WB_BIN moves "
-              "only the mod's calls)")
+        print(f"--  {bindir} isn't on PATH: Claude and the mod run wb by name (WB_BIN moves only "
+              f"the mod's calls). {path_advice()}")
     try:  # a minute or two, said up front; a task started meanwhile goes first
         for line in optimize.start(if_due=True):
             print(f"--  {line}")
@@ -3139,9 +3153,10 @@ def cmd_doctor(a):
     if on_path:
         line(True, f"wb on PATH: {on_path}" + (f" (the mod runs WB_BIN={wb_bin})" if wb_bin else ""))
     else:
-        line(False, "wb isn't on PATH: Claude runs it by name in Bash, and the mod too; link bin/wb "
-             "into a PATH directory (wb setup)" + (f"; WB_BIN={wb_bin} covers only the mod's calls"
-                                                    if wb_bin else ""))
+        linked = (Path.home() / ".local/bin/wb").exists()  # wb setup's link, not on PATH (#274)
+        line(False, "wb isn't on PATH: Claude runs it by name in Bash, and the mod too; " +
+             (path_advice() if linked else "link bin/wb into a PATH directory (wb setup)")
+             + (f"; WB_BIN={wb_bin} covers only the mod's calls" if wb_bin else ""))
     elsewhere("wb", wb_bin or on_path, PKG_ROOT / "bin/wb")
     found = models.discover()
     line(bool(found), f"{len(found)} local model(s)")
