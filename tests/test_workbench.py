@@ -7184,6 +7184,25 @@ class ModelSet(Base):
         self.assertIn("retired ollama/coder", run_wb("model", "retire", "ollama/coder"))
         self.assertIn("qwen3.8-27b", self.config()["provider"]["ollama"]["models"])
 
+    def test_retire_with_delete_keeps_weights_another_spelling_of_the_server_uses(self):
+        # #368 (the audit of 1.6, reproduced): `ollama` at localhost and `ollama-long` at
+        # 127.0.0.1, one Ollama; retiring ollama/x --delete deleted the default ollama-long/x's
+        # weights, since the sharing check compared the URLs as strings
+        cfg = self.config()
+        url = cfg["provider"]["ollama"]["options"]["baseURL"]
+        other = url.replace("localhost", "127.0.0.1") if "localhost" in url else url.replace("127.0.0.1", "localhost")
+        self.assertNotEqual(other, url)
+        cfg["provider"]["ollama-long"] = {**cfg["provider"]["ollama"], "options": {"baseURL": other},
+                                          "models": {"qwen3.8-27b": {"limit": {"context": 65536}}}}
+        cfg["model"] = "ollama-long/qwen3.8-27b"
+        Path(os.environ["WB_OPENCODE_CONFIG"]).write_text(json.dumps(cfg))
+        err = io.StringIO()
+        with mock.patch.object(cli.models, "ollama_delete") as rm, \
+                self.assertRaises(SystemExit), redirect_stderr(err):
+            run_wb("model", "retire", "ollama/qwen3.8-27b", "--delete")
+        rm.assert_not_called()
+        self.assertIn("ollama-long/qwen3.8-27b also use", err.getvalue())
+
     def test_size_policy(self):
         run_wb("model", "sizes", "mimo", "trivial")
         from workbench import router

@@ -2654,8 +2654,9 @@ def cmd_model(a):
             w = str((e or {}).get("id") or n)
             return w if ":" in w else w + ":latest"  # Ollama's own name for an untagged model
         mine = weights(name, prov["models"][name])
+        here = models.server_key(prov["url"])  # localhost and 127.0.0.1 are one Ollama (#368)
         sharing = [f"{pid}/{n}" for pid, p in provs.items() if p["engine"] == "ollama"
-                   and p["root"] == prov["root"] for n, e in p["models"].items()
+                   and models.server_key(p["url"]) == here for n, e in p["models"].items()
                    if (pid, n) != (provider, name) and weights(n, e) == mine]
         if sharing:
             die(f"--delete would delete the weights {', '.join(sharing)} also use ({mine}): "

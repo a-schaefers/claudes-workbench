@@ -85,15 +85,21 @@ class Model:
 
     @property
     def server(self) -> tuple:
-        """The server behind the baseURL, one key however its host is spelled: localhost,
-        127.0.0.1 and this machine's own name or address are one server. Compared as strings,
-        two spellings of one Ollama made free_gpu unload the models it was told to keep (the
-        2026-11-16 audit). No DNS lookup: this runs on every admission."""
-        u = urlparse(self.base_url)
-        here = not self.remote and _this_host(u.hostname)
-        return ("this host" if here else (u.hostname or "").lower(),
-                u.port or (443 if u.scheme == "https" else 80),
-                u.path.rstrip("/").removesuffix("/v1"))
+        """The server behind the baseURL, one key however its host is spelled (server_key)."""
+        return server_key(self.base_url, self.remote)
+
+
+def server_key(url: str, remote: bool = False) -> tuple:
+    """One key per server however its host is spelled: localhost, 127.0.0.1 and this machine's
+    own name or address are one server. Compared as strings, two spellings of one Ollama made
+    free_gpu unload the models it was told to keep (the 2026-11-16 audit), and wb model retire
+    --delete delete the default's weights (#368, the audit of 1.6). No DNS lookup: this runs on
+    every admission."""
+    u = urlparse(url)
+    here = not remote and _this_host(u.hostname)
+    return ("this host" if here else (u.hostname or "").lower(),
+            u.port or (443 if u.scheme == "https" else 80),
+            u.path.rstrip("/").removesuffix("/v1"))
 
 
 def _config_dir() -> Path:
