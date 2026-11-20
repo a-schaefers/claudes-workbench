@@ -425,6 +425,16 @@ def _worktree_setup(repo: Path, a) -> dict:
         if not gitops.ignored(repo, p):
             die(f"--copy {raw}: not ignored in {repo}, so a copy would show in the review diff; "
                 "a tracked file is in the worktree already")
+        # ignored in the checkout isn't untracked where the task starts: a tag given as --base
+        # tracked generated/config, the developer's local copy went over it, and it reached the
+        # accepted commit; nor is an ignored directory empty of tracked files (#244, the audit of 1.2)
+        base = gitops.base_commit(repo, a.base) or "HEAD"
+        held = [x for x in gitops.git(repo, "ls-tree", "-r", "--name-only", "-z", base, "--", p).split("\0")
+                + gitops.git(repo, "ls-files", "-z", "--", p).split("\0") if x]
+        if held:
+            die(f"--copy {raw}: {held[0]} under it is tracked (at {a.base} or in the checkout's "
+                "index), and the copy would replace it in the task's worktree and its commit; "
+                "copy only the ignored files inside")
         if p not in copy:
             copy.append(p)
     guard = context.repo_dirs(SimpleNamespace(spec={"repo": str(repo)}))
