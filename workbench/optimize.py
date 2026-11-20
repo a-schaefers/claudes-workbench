@@ -220,6 +220,18 @@ def advice(model_id: str, row: dict) -> str:
     return ""
 
 
+def entry_name(source: str, window: int) -> str:
+    """The new model's name: the source's whole name, tag and quantization kept, with the window
+    as the tag's suffix (an earlier one's replaced). The family alone once named both
+    family:7b and family:32b family-16k, and the second overwrote the first in Ollama and in
+    OpenCode's config (the 2026-11-19 audit)."""
+    base, _, tag = source.partition(":")
+    if tag in ("", "latest"):
+        base, tag = re.sub(r"-[0-9]+k$", "", base), ""  # an entry this made before 1.2: family-16k
+    tag = re.sub(r"(^|-)[0-9]+k$", "", tag)
+    return f"{base}:{tag + '-' if tag else ''}{window // 1024}k"
+
+
 def apply(m: models.Model) -> str:
     """Make the measured window an entry of its own beside ``m``: an Ollama model with that
     num_ctx (from ``m``, no download) and OpenCode's entry, copied from ``m``'s (its options,
@@ -228,7 +240,12 @@ def apply(m: models.Model) -> str:
     fits = row.get("fits")
     if not fits or fits == row.get("window"):
         raise RuntimeError(f"no measured window to apply for {m.id}: wb optimize first")
-    name = f"{re.sub(r'-[0-9]+k$', '', m.name.split(':')[0])}-{fits // 1024}k"
+    name = entry_name(m.name, fits)
+    provider = m.id.split("/", 1)[0]
+    taken = {x.get("name") for x in (models._get(f"{m.root}/api/tags") or {}).get("models", [])}
+    if f"{provider}/{name}" in models.discover() or models._matches(name, taken):
+        raise RuntimeError(f"{provider}/{name} exists already: wb model retire {provider}/{name} "
+                           "first if it should be replaced")
     models._post(f"{m.root}/api/create", {"model": name, "from": m.name, "stream": False,
                                           "parameters": {"num_ctx": fits}}, timeout=300)
     entry = dict(m.config)
@@ -237,7 +254,6 @@ def apply(m: models.Model) -> str:
     entry["limit"] = {**(entry.get("limit") or {}), "context": fits, "input": fits - out, "output": out}
     if entry.get("name"):
         entry["name"] = f"{entry['name']} ({fits // 1024}K)"
-    provider = m.id.split("/", 1)[0]
     models.write_entry(provider, name, entry)
     # measured already: it is the window that fit, so its arrival doesn't make a run due
     _record(f"{provider}/{name}", {**row, "window": fits, "spill": 0, "tried": [], "ts": store.now()})

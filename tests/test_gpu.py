@@ -458,6 +458,17 @@ class CanShare(Base):
         os.environ["OLLAMA_NUM_PARALLEL"] = "1"
         self.assertFalse(models.can_share(a, [a], int(99e9)))     # the same model would take turns
 
+    def test_the_same_model_shares_only_as_many_times_as_ollama_has_slots(self):
+        # the 2026-11-19 audit: OLLAMA_NUM_PARALLEL=2 admitted any number, and a third task's
+        # requests queued inside Ollama while its silence budget ran
+        a, b = self.model("ollama/a", gb=1), self.model("ollama/b", gb=1)
+        os.environ["OLLAMA_NUM_PARALLEL"] = "2"
+        self.assertTrue(models.can_share(a, [a], int(99e9)))
+        self.assertFalse(models.can_share(a, [a, a], int(99e9)))
+        self.assertTrue(models.can_share(a, [a, b], int(99e9)))   # b's slots are b's own
+        os.environ["OLLAMA_NUM_PARALLEL"] = "3"
+        self.assertTrue(models.can_share(a, [a, a], int(99e9)))
+
     def test_more_models_than_ollama_keeps_loaded_never_share(self):
         # OLLAMA_MAX_LOADED_MODELS=1 made two tasks' models swap on every request (the 2026-11-16 audit)
         a, b, c = self.model("ollama/a"), self.model("ollama/b"), self.model("ollama/c")

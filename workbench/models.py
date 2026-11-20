@@ -828,10 +828,10 @@ def make_resident(m: Model, say=print, keep=(), warn=None) -> float:
         # first and failed after (the 2026-11-16 audit): fail before freeing anything
         raise RuntimeError(f"{m.id} can't run: {st['why']}"
                            + (f": {fix}" if (fix := remedy(m, st)) else ""))
-    if st["resident"] and (m.remote or not _others_resident(m, keep)):
+    if st["resident"] and (m.remote or not _others_resident(m, keep) or _room_beside(m)):
         return 0.0
     t0 = time.time()
-    if not m.remote:
+    if not m.remote and not _room_beside(m):
         free_gpu(keep={m.id, *keep}, say=say, warn=warn)
     if m.engine == "ollama":
         say(f"loading {m.name} into ollama")
@@ -890,14 +890,29 @@ def _unload(m: Model) -> None:
         pass
 
 
+def keep_loaded() -> set[str]:
+    """models.json's top-level `keep_loaded`: model ids or Ollama names that wb never unloads or
+    stops (an embedding model a project's tests need, the user's autocomplete or Open WebUI
+    model): every round once unloaded every one of them (the 2026-11-19 audit)."""
+    v = _overrides().get("keep_loaded") or []
+    return {str(x) for x in v} if isinstance(v, list) else set()
+
+
+def _kept_name(name: str, held: set[str]) -> bool:
+    return any(_matches(name, {k.split("/", 1)[-1]}) or _matches(k.split("/", 1)[-1], {name})
+               for k in held)
+
+
 def free_gpu(keep=(), say=print, warn=None) -> None:
     """Stop every model server and unload every Ollama model holding the GPU, except the models
-    in ``keep`` (ids): the task's own, and those of tasks running beside it."""
+    in ``keep`` (ids): the task's own, and those of tasks running beside it; and those the user
+    keeps loaded (keep_loaded)."""
     warn = warn or say
     if _fake():
         return
+    held = keep_loaded()
     local = [o for o in discover().values() if not o.remote]  # another host's GPU isn't ours to free
-    kept = [o for o in local if o.id in keep]
+    kept = [o for o in local if o.id in keep or o.id in held]
     # a server swaps its own models; one serving another model on the kept one's port is stopped
     done = {o.server for o in kept if o.engine == "server"
             and (not _contended(o) or status(o)["resident"])}
@@ -924,7 +939,7 @@ def free_gpu(keep=(), say=print, warn=None) -> None:
     kept_ollama = [o for o in kept if o.engine == "ollama"]
     for key, root in _roots(o for o in local if o.engine == "ollama").items():
         for name in _ollama_loaded(root):  # every model Ollama has loaded, ours or another tool's
-            if any(o.server == key and _matches(o.name, {name}) for o in kept_ollama):
+            if any(o.server == key and _matches(o.name, {name}) for o in kept_ollama) or _kept_name(name, held):
                 continue
             say(f"unloading {name} from ollama")
             try:
@@ -934,14 +949,47 @@ def free_gpu(keep=(), say=print, warn=None) -> None:
 
 
 def _others_resident(m: Model, keep=()) -> bool:
+    """Whether anything free_gpu would let go of holds the GPU beside ``m``."""
+    held = keep_loaded()
     local = [o for o in discover().values() if not o.remote]
-    ours = [m, *(o for o in local if o.id in keep)]
+    ours = [m, *(o for o in local if o.id in keep or o.id in held)]
     if any(o.engine == "server" and o.stop and o.server not in {x.server for x in ours}
            and status(o)["resident"] for o in local):
         return True
     return any(not any(o.engine == "ollama" and o.server == key and _matches(o.name, {n}) for o in ours)
+               and not _kept_name(n, held)
                for key, root in _roots(o for o in local if o.engine == "ollama").items()
                for n in _ollama_loaded(root))
+
+
+def _room_beside(m: Model) -> bool:
+    """Whether ``m`` fits on the GPU beside every model resident there now, so nothing need be
+    unloaded: every round once emptied the GPU of the user's other models even when all of them
+    fit (the 2026-11-19 audit). Only for Ollama, under a known budget (gpu_budget), with no other
+    server resident (whose memory nothing here measures), ``m`` all in VRAM if it is loaded, and
+    Ollama's own limit on loaded models (OLLAMA_MAX_LOADED_MODELS) not reached."""
+    budget = gpu_budget()
+    if m.engine != "ollama" or not budget:
+        return False
+    local = [o for o in discover().values() if not o.remote]
+    if any(o.engine == "server" and status(o)["resident"] for o in local):
+        return False
+    used, here, mine = 0, [], False
+    for key, root in _roots(o for o in local if o.engine == "ollama").items():
+        for x in (_get(f"{root}/api/ps") or {}).get("models", []):
+            if key == m.server and _matches(m.name, {x.get("name")}):
+                if not x.get("size") or x.get("size_vram") != x["size"]:
+                    return False  # partly on the CPU: room has to be made
+                mine = True
+                continue
+            used += x.get("size") or 0
+            if key == m.server:
+                here.append(x)
+    most = hardware.ollama_env().get("OLLAMA_MAX_LOADED_MODELS") or ""
+    if not mine and len(here) + 1 > (int(most) if most.isdigit() and int(most) else OLLAMA_MAX_LOADED):
+        return False
+    n = need(m)
+    return bool(n) and used + n <= SHARE_AT * budget
 
 
 # ---- sharing the GPU: several tasks' models at once, when they fit ----
@@ -1053,9 +1101,11 @@ def can_share(m: Model, running: list[Model], budget: int | None) -> bool:
             any(o.engine != "ollama" or o.remote for o in running):
         return False
     env = hardware.ollama_env()
-    if any(_key(o) == _key(m) for o in running):
+    if same := sum(_key(o) == _key(m) for o in running):
+        # one slot each: a value of 2 once admitted any number, and a third task's requests
+        # queued inside Ollama while its silence budget ran (the 2026-11-19 audit)
         par = env.get("OLLAMA_NUM_PARALLEL") or ""
-        return par.isdigit() and int(par) >= 2
+        return par.isdigit() and same + 1 <= int(par)
     distinct = {_key(o): o for o in running}
     most = env.get("OLLAMA_MAX_LOADED_MODELS") or ""  # 0 or unset: Ollama's default
     if len(distinct) + 1 > (int(most) if most.isdigit() and int(most) else OLLAMA_MAX_LOADED):

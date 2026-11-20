@@ -102,6 +102,9 @@ class Real(unittest.TestCase):
         models._ENGINES.clear()
         models._FACTS.clear()
         self.servers = []
+        no_gpu = mock.patch.object(models.hardware, "gpus", lambda windows=True: [])  # this machine's
+        no_gpu.start()  # would decide what fits; a test that wants a budget sets models.json gpu_gb
+        self.addCleanup(no_gpu.stop)
 
     def tearDown(self):
         for s in self.servers:
@@ -216,6 +219,54 @@ class Real(unittest.TestCase):
                             engine="ollama", label="b/x", extra={"weights_gb": 1})
         with mock.patch.object(models.hardware, "ollama_env", lambda: {"OLLAMA_NUM_PARALLEL": "1"}):
             self.assertFalse(models.can_share(twin, [found["a/x"]], int(99e9)))  # the same model
+
+    def test_a_model_that_fits_beside_the_loaded_ones_unloads_nothing_and_kept_ones_stay(self):
+        # the 2026-11-19 audit: every round unloaded every other Ollama model, the user's Open
+        # WebUI or autocomplete model and an embedding model the project's tests use, fits or not
+        gb = 10 ** 9
+        loaded = [{"name": "emb", "size": gb, "size_vram": gb}, {"name": "chat", "size": 2 * gb, "size_vram": 2 * gb}]
+        found, posts = self.own(loaded, ["x", "chat", "emb"])
+        over = lambda **kw: Path(os.environ["WB_MODELS"]).write_text(  # noqa: E731
+            json.dumps({"a/x": {"vram_gb": 4}, **kw}))  # read at discovery: rediscovered below
+        x = lambda: models.discover()["a/x"]  # noqa: E731
+        over(gpu_gb=20)                       # 3 + 4 of 18 usable: room for x beside both
+        with mock.patch.object(models.hardware, "ollama_env", lambda: {"OLLAMA_MAX_LOADED_MODELS": "2"}):
+            self.assertFalse(models._room_beside(x()))   # but Ollama keeps two: it would swap
+        models.make_resident(x(), say=lambda m: None)
+        self.assertEqual(posts, [{"model": "x", "prompt": "", "keep_alive": "30m"}])
+        models._unload(x())
+        posts.clear()
+        over(gpu_gb=6, keep_loaded=["emb"])   # 3 + 4 of 5.4: chat goes, emb is kept
+        models.make_resident(x(), say=lambda m: None)
+        self.assertEqual([(p["model"], p.get("keep_alive")) for p in posts], [("chat", 0), ("x", "30m")])
+        posts.clear()
+        over(gpu_gb=1, keep_loaded=["ollama/emb"])  # no room, but only a kept model beside x
+        self.assertEqual(models.make_resident(x(), say=lambda m: None), 0.0)
+        models.free_gpu(keep={"a/x"}, say=lambda m: None)
+        self.assertEqual(posts, [])
+        next(r for r in loaded if r["name"] == "x")["size_vram"] = 5  # x partly on the CPU
+        over(gpu_gb=20)
+        models.make_resident(x(), say=lambda m: None)
+        self.assertEqual([p["model"] for p in posts], ["emb", "x"])  # room is made, x reloaded
+        posts.clear()
+        over()                                # no budget known: the GPU is freed, as before
+        loaded.append({"name": "chat", "size": gb, "size_vram": gb})
+        models._unload(x())
+        posts.clear()
+        models.make_resident(x(), say=lambda m: None)
+        self.assertEqual([p["model"] for p in posts], ["chat", "x"])
+
+    def test_a_server_the_user_keeps_loaded_is_never_stopped(self):
+        srv = self.server({"/v1/models": {"data": [{"id": "m"}]}})
+        stopped = Path(self.tmp.name) / "stopped"
+        self.config({"s": {"options": {"baseURL": srv + "/v1"}, "models": {"m": {}}}},
+                    {"s": {"stop": f"touch {stopped}"}, "keep_loaded": ["s/m"]})
+        models.free_gpu(say=lambda m: None)
+        self.assertFalse(stopped.exists())
+        self.config({"s": {"options": {"baseURL": srv + "/v1"}, "models": {"m": {}}}},
+                    {"s": {"stop": f"touch {stopped}"}})
+        models.free_gpu(say=lambda m: None)
+        self.assertTrue(stopped.exists())
 
     def test_an_alias_is_checked_loaded_and_placed_by_the_id_its_server_knows(self):
         # the 2026-11-19 audit (finding 14): an entry keyed `friendly` with "id": "cap" was "the
@@ -946,12 +997,27 @@ class Optimize(unittest.TestCase):
         self.assertEqual((row["window"], row["fits"], row["spill"]), (32768, 65536, 0))
         self.assertIn("more than the 32K it serves", optimize.advice(m.id, row))
         out = optimize.apply(m)
-        self.assertIn("registered ollama/m-64k", out)
-        self.assertIn(("/api/create", {"model": "m-64k", "from": "m", "stream": False,
+        self.assertIn("registered ollama/m:64k", out)
+        self.assertIn(("/api/create", {"model": "m:64k", "from": "m", "stream": False,
                                        "parameters": {"num_ctx": 65536}}), posts)
-        entry = models.read_config()["provider"]["ollama"]["models"]["m-64k"]
+        entry = models.read_config()["provider"]["ollama"]["models"]["m:64k"]
         self.assertEqual(entry["options"], {"reasoningEffort": "none"})       # thinking stays off
         self.assertEqual(entry["limit"], {"context": 65536, "input": 65536 - 4096, "output": 4096})
+
+    def test_two_tags_of_one_model_get_names_of_their_own_and_a_taken_name_is_refused(self):
+        # the 2026-11-19 audit: family:7b and family:32b both became family-16k, the second
+        # overwriting the first in Ollama and in OpenCode's config
+        from workbench import optimize
+        self.assertEqual([optimize.entry_name(n, 16384) for n in
+                          ("family:7b", "family:32b", "family:32b-q4_K_M", "family:32b-24k", "family-24k", "m")],
+                         ["family:7b-16k", "family:32b-16k", "family:32b-q4_K_M-16k", "family:32b-16k",
+                          "family:16k", "m:16k"])
+        self.ollama(32768)
+        m = models.discover()["ollama/m"]
+        optimize._record(m.id, optimize.fit(m, 262144))
+        optimize.apply(m)
+        with self.assertRaisesRegex(RuntimeError, "ollama/m:64k exists already"):
+            optimize.apply(m)
 
     def test_nothing_to_change_says_nothing_and_a_task_on_the_gpu_keeps_it(self):
         self.ollama(65536)

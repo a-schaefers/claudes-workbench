@@ -240,13 +240,13 @@ the agent will send, and if that's refused, diagnose the key.
 - Codex counted 3,095 requests in 0.8 s, and a slow model load could run that for minutes.
 - **Fix:** pace the probes on a monotonic deadline, whether or not the launcher has exited.
 
-**21. Optimizing two tags of one model writes the same name.** Codex; source. `apply` names the
+**21. ~~Optimizing two tags of one model writes the same name.~~** **Fixed (#211).** Codex; source. `apply` names the
 new entry `<family>-<N>k` with the tag removed (`optimize.py:230`). `family:7b` and `family:32b`
 both become `family-16k`, in Ollama and in OpenCode's config (`optimize.py:239`). Earlier tasks
 and the router's history then point at a name whose meaning changed. **Fix:** derive the name
 from the whole source (tag and quantization), and refuse when an incompatible one exists.
 
-**22. `OLLAMA_NUM_PARALLEL` is treated as on or off.** Codex; source. For the same model,
+**22. ~~`OLLAMA_NUM_PARALLEL` is treated as on or off.~~** **Fixed (#210).** Codex; source. For the same model,
 `can_share` admits any number of tasks once the value is 2 or more (`models.py:946`/`968`). A
 third task's requests then queue inside Ollama while its silence budget runs. **Fix:** count
 holders per server and model against the limit, and start a task's clocks only once it's
@@ -292,7 +292,7 @@ normalise paths. Symlinked project directories, `/tmp` vs `/private/tmp`, and ca
 APFS all miss. This only matters for adopting tasks after a crash or restart, and for tasks
 started by hand. **Fix:** compare real paths, case-folded on macOS.
 
-**29. Every other Ollama model is unloaded before every round.** Claude; source. `free_gpu`
+**29. ~~Every other Ollama model is unloaded before every round.~~** **Fixed (#215).** Claude; source. `free_gpu`
 (`models.py:800`) runs before each round, even when everything would fit. That includes the
 user's Open WebUI or IDE autocomplete model, and an embedding model the project's tests need.
 **Fix:** evict only when what's needed plus what's resident exceeds the budget, and add a "keep
