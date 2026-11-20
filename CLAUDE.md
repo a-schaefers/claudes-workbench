@@ -153,8 +153,8 @@ Runs on Linux, WSL2 and macOS; the launchers refuse native Windows and Python be
    (`--no-claude-md`), asks the router for a model (unless `--model`), refuses (exit 4) when the
    GPU's holders leave its model no room (`--queue` waits behind them), makes branch
    `delegate/<task>` in a fresh worktree, writes round 1's prompt (the spec plus `PROTOCOL`),
-   spawns the runner and returns at once. The runner runs `--test` once on the untouched base
-   first, in a scratch clone (the base check; the first report says what).
+   spawns the runner and returns at once. The runner sets the worktree up (`--setup`, `--copy`,
+   `--sibling`), then runs `--test` once on the base, in a scratch clone (the base check).
 2. The runner takes the GPU (`GpuLease`: shared beside other tasks when the models fit, else
    alone), makes the model resident (again before every round), and runs `opencode run
    --standalone --auto --format json … -- <prompt>` in
@@ -194,14 +194,14 @@ scout.json update.json watch.json optimize.json imports/ images/ chat/{messages,
 bench/{cases/<case>,runs/<run>}/ bench/runs.jsonl bench/driver.json
 rules/<task>/  opencode.json HANDBOOK.md CLAUDE.md bin/git grants.json gitdir.json (no lane)
 locks/<task>.{runner,cmd,status,events,steer,grants}.lock   (store.task_lock: no lane reads them)
-tasks/<task>/  task.json status.json events.jsonl steer.jsonl acked context.md base-tests.txt runner.log
+tasks/<task>/  task.json status.json events.jsonl steer.jsonl acked context.md base-tests.txt setup.txt runner.log
                (the lane: worktree/, ask/)
                rounds/<n>/{prompt,instructions,summary}.md rounds/<n>/tests.txt ask/<id>.{json,answer} worktree/
 ```
 The skill library is `~/.local/share/workbench/skills` (`$WB_SKILLS`). `~/.config/workbench/`
 holds `models.json` (what OpenCode can't say: `start`/`stop`, `skip`, `sizes`, `vram_gb`,
 `weights_gb`, `label`, `engine`, `local`, `remote`), `commands.json` (standing `allow` patterns, lane
-`paths`, and `env` names passed to the agent), `images.json`, `chat.json`, `chat-token`,
+`paths`, `env` names passed to the agent, each repo's setup: `repos`), `images.json`, `chat.json`, `chat-token`,
 `savings.json` (`kwh_price`).
 
 A model is a candidate when OpenCode loads its provider (`disabled_providers`/`enabled_providers`

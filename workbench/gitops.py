@@ -406,3 +406,8 @@ def _overwritten(repo: Path, branch: str) -> list[str]:
 def _merging(repo: Path) -> bool:
     """Whether a merge is under way in ``repo`` (MERGE_HEAD is there)."""
     return _run(repo, ("rev-parse", "-q", "--verify", "MERGE_HEAD"), check=False).returncode == 0
+
+
+def ignored(repo: Path, path: str) -> bool:
+    """Whether `path` is ignored in the checkout (.gitignore, info/exclude, the global excludes)."""
+    return _run(repo, ("check-ignore", "-q", "--", path), check=False).returncode == 0

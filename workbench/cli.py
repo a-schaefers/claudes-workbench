@@ -373,6 +373,67 @@ def _lane_fits(repo: Path, test: str | None, *, off: bool = False) -> None:
             'off for this task), or commands.json "paths": ["*"] for every task')
 
 
+# Ignored directories a worktree lacks that are only caches, not worth a note at wb start
+CACHE_DIRS = ("__pycache__", ".pytest_cache", ".mypy_cache", ".ruff_cache", ".tox", ".nox",
+              ".cache", ".idea", ".vscode")
+
+
+def _worktree_setup(repo: Path, a) -> dict:
+    """The task's `setup`, `copy` and `siblings`: commands.json's `repos` entry for the repo,
+    with --setup in its place and --copy/--sibling added, each checked (#201, the 2026-11-19
+    audit). A copied path must be ignored in the checkout (else it shows in the review diff) and
+    no secret (SECRET_FILES): the user's settings stay theirs. A sibling is a directory beside
+    the repo the lane may read."""
+    conf = context.repo_conf(repo)
+    setup = a.setup if a.setup is not None else conf.get("setup") or ""
+    copy, sibs = [], []
+    for raw in [*conf.get("copy", []), *(a.copy or [])]:
+        p = os.path.normpath(raw.strip()).rstrip("/")
+        if os.path.isabs(p) or p == ".." or p.startswith("../") or p in (".", ""):
+            die(f"--copy {raw}: a path inside the repo, ignored there (e.g. node_modules)")
+        parts = p.split("/")
+        if any(x not in NOT_SECRET and any(fnmatch.fnmatch(x, pat) for pat in SECRET_FILES)
+               for x in parts):
+            die(f"--copy {raw}: looks like a secret or a user's setting "
+                f"({', '.join(SECRET_FILES[:4])}…), which stays out of the agent's worktree")
+        if not os.path.lexists(repo / p):
+            die(f"--copy {raw}: no {p} in {repo}")
+        if not gitops.ignored(repo, p):
+            die(f"--copy {raw}: not ignored in {repo}, so a copy would show in the review diff; "
+                "a tracked file is in the worktree already")
+        if p not in copy:
+            copy.append(p)
+    guard = context.repo_dirs(SimpleNamespace(spec={"repo": str(repo)}))
+    for name in [*conf.get("siblings", []), *(a.sibling or [])]:
+        name = name.strip().rstrip("/")
+        if not name or "/" in name or name in (".", ".."):
+            die(f"--sibling {name}: a directory's name, beside the repo (../<name>)")
+        if name in context.TASK_FILES:
+            die(f"--sibling {name}: the name of one of the task's own files; link it by hand")
+        real = os.path.realpath(repo.parent / name)
+        if not os.path.isdir(real):
+            die(f"--sibling {name}: no directory {repo.parent / name} beside the repo")
+        if why := context.lane_refusal(real):
+            die(f"--sibling {why}")
+        if any(g == real or g.startswith(real.rstrip(os.sep) + os.sep) for g in guard):
+            die(f"--sibling {name}: it holds the repo itself")
+        if name not in sibs:
+            sibs.append(name)
+    return {k: v for k, v in (("setup", setup), ("copy", copy), ("siblings", sibs)) if v}
+
+
+def _missing_dirs(repo: Path) -> list[str]:
+    """The checkout's ignored top-level directories (but caches), which a task's worktree won't
+    have: what a --setup would install (node_modules/, .venv/, target/)."""
+    try:
+        out = gitops.git(repo, "ls-files", "--others", "--ignored", "--exclude-standard",
+                         "--directory", "-z")
+    except gitops.GitError:
+        return []
+    return [p for p in out.split("\0") if p.endswith("/") and p.count("/") == 1
+            and p[:-1] not in CACHE_DIRS and not p[:-1].endswith("cache")]
+
+
 def cmd_start(a):
     if not store.NAME_RE.match(a.name):
         die("a task name is lowercase letters, digits and hyphens, at most 48")
@@ -422,6 +483,7 @@ def cmd_start(a):
         die("git has no user.name/user.email here: the user's identity signs the commits "
             "(git config --global user.name/user.email)")
     _need_claude_md(repo, a.base, a)
+    setup = _worktree_setup(repo, a)
     # Two projects, one GPU: a task that can't run beside the GPU's holders used to queue in
     # silence behind them, maybe for hours (the 2026-11-16 audit). Say so before any worktree.
     if not getattr(a, "bench", None):
@@ -454,6 +516,7 @@ def cmd_start(a):
         "branch": gitops.branch_name(a.name), "model": m.id, "model_label": m.label,
         "opencode_model": m.id, "route": why, "size": a.size, "stack": stack,
         **({"trial": True} if a.trial else {}), "test_cmd": a.test, "test_timeout": a.test_timeout,
+        **setup,  # setup, copy, siblings: runner.prepare, before the base check (#201)
         **({"backlog": a.backlog} if a.backlog else {}),  # a batch left to run: wb backlog
         # a replay of the bench driver's (bench.replay): no notices, no results row, not listed
         **({"bench": b} if (b := getattr(a, "bench", None)) else {}),
@@ -488,6 +551,21 @@ def cmd_start(a):
     if subs:
         print(f"note: submodules ({', '.join(subs[:5])}) are not checked out in the agent's "
               "worktree: a build or test that needs them fails there")
+    if setup:
+        does = [*(["links " + ", ".join(f"../{n}" for n in setup["siblings"])]
+                  if setup.get("siblings") else []),
+                *([f"copies {', '.join(setup['copy'])}"] if setup.get("copy") else []),
+                *([f"runs `{setup['setup']}`"] if setup.get("setup") else [])]
+        print(f"setup: the runner sets the worktree up first ({'; '.join(does)}); a failure stops "
+              "the task before any round")
+    elif "repos" not in context.commands_conf() or not context.repo_conf(repo):
+        if lack := _missing_dirs(repo):
+            print(f"note: the worktree has only committed files, not the checkout's ignored "
+                  f"{', '.join(lack[:4])}: --setup '<install command>' sets a task up (--copy "
+                  "<path> copies one in); commands.json \"repos\" for every task")
+    if context.on_windows(str(repo), context.windows_drives()):  # finding 30 (the 2026-11-19 audit)
+        print("note: the repo is on a Windows drive, where git is many times slower and wb checks "
+              "the worktree at every step: a clone in WSL's own filesystem (~/...) runs faster")
     print(f"model: {why}" if why != "asked for" else f"model: {m.id} (asked for)")
     print(f"slice: {router.slice(m).line()}")
     if gaps := results.spec_gap_line():
@@ -2999,6 +3077,16 @@ def parser() -> argparse.ArgumentParser:
                    help="let the agent read and write this directory outside its lane")
     s.add_argument("--skill", action="append", metavar="NAME",
                    help="hand the agent this library skill (repeatable; wb skill list)")
+    s.add_argument("--setup", metavar="CMD",
+                   help="run this in the agent's lane to set the worktree up before the base check "
+                   "(e.g. 'npm ci'); a failure stops the task before any round (default: "
+                   "commands.json \"repos\")")
+    s.add_argument("--copy", action="append", metavar="PATH",
+                   help="copy this ignored path from your checkout into the worktree (repeatable; "
+                   "never a secret)")
+    s.add_argument("--sibling", action="append", metavar="NAME",
+                   help="let the agent read the directory ../NAME beside the repo, at the same "
+                   "relative path (repeatable)")
     s.set_defaults(f=cmd_start)
 
     s = sub.add_parser("feedback", help="send review feedback for another round")
