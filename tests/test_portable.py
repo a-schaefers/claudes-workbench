@@ -902,6 +902,30 @@ class Remote(unittest.TestCase):
                            "models": {"coder:7b": {}}}}, {pid: {"local": True}})
         self.assertEqual(self.wb("remote", "127.0.0.1", "--remove")[0], 0)
 
+    def test_wb_remote_remove_keeps_a_provider_the_user_repointed_after_wb_remote_made_it(self):
+        # #242 (the audit of 1.2): the `remote` mark outlived the provider wb remote made; the
+        # user repointed it at another server with a model of their own, and --remove deleted
+        # the replacement, its model and their settings
+        srv, port = fake_remote_ollama([{"name": "coder:7b"}],
+                                       {"coder:7b": {"capabilities": ["tools"], "model_info": {}}})
+        self.servers.append(srv)
+        pid = models.remote_pid("127.0.0.1")
+        self.config({}, {})
+        self.assertEqual(self.wb("remote", "127.0.0.1", "--port", str(port), "--context", "32768")[0], 0)
+        cfg_path, models_path = Path(os.environ["WB_OPENCODE_CONFIG"]), Path(os.environ["WB_MODELS"])
+        cfg = json.loads(cfg_path.read_text())
+        cfg["provider"][pid] = {"name": "Ollama on 127.0.0.1", "options": {"baseURL": "http://127.0.0.1:9/v1"},
+                                "models": {"mine": {"limit": {"context": 8192}}}}
+        cfg_path.write_text(json.dumps(cfg, indent=2))
+        over = json.loads(models_path.read_text())
+        over[f"{pid}/mine"] = {"sizes": ["small"]}
+        models_path.write_text(json.dumps(over, indent=2))
+        before = (cfg_path.read_bytes(), models_path.read_bytes())
+        code, out = self.wb("remote", "127.0.0.1", "--remove")
+        self.assertEqual(code, 1, out)
+        self.assertIn("isn't one wb remote added", out)
+        self.assertEqual((cfg_path.read_bytes(), models_path.read_bytes()), before)  # byte for byte
+
     def test_wb_remote_says_how_to_open_an_ollama_that_doesnt_answer_and_why_a_model_was_left_out(self):
         code, out = self.wb("remote", "127.0.0.1", "--port", str(free_port()))
         self.assertEqual(code, 1)
