@@ -1554,7 +1554,7 @@ test('the settings rows open to Buttons, pick through wb, and say the sentence o
     await ui.press({ key: 'tab-settings' })
     expect((await ui.find({ key: 'coding' }))?.props.label).toBe('▸ Claude coding: Let Claude decide (default)')  // no saved choice
     expect((await ui.find({ key: 'chat' }))?.props.label).toBe('▸ Web chat: Off (default)')                      // off by default
-    expect((await ui.find({ key: 'probe' }))?.props.label).toBe('▸ Agent code navigation (experiment): On (default)')  // on while measured
+    expect((await ui.find({ key: 'probe' }))?.props.label).toBe('▸ Agent code navigation (experimental, may go away): Off (default)')  // opt-in
     expect(await ui.find({ key: 'coding:ask' })).toBeUndefined()                                       // one row each at rest
     expect(await ui.find({ type: 'Text', text: /web chat / })).toBeUndefined()                         // and no link
     await ui.press({ key: 'tab-tasks' })
@@ -1578,9 +1578,9 @@ test('the settings rows open to Buttons, pick through wb, and say the sentence o
   expect(runs.some(r => r.join(' ') === 'wb chat on')).toBe(true)
   expect((await ui.find({ key: 'chat' }))?.props.label).toBe('▸ Web chat: On')
   await ui.press({ key: 'probe' })
-  await ui.press({ key: 'probe:off' })
-  expect(runs.at(-1)).toEqual(['wb', 'experiment', 'probe', 'off'])
-  expect((await ui.find({ key: 'probe' }))?.props.label).toBe('▸ Agent code navigation (experiment): Off')
+  await ui.press({ key: 'probe:on' })
+  expect(runs.at(-1)).toEqual(['wb', 'experiment', 'probe', 'on'])
+  expect((await ui.find({ key: 'probe' }))?.props.label).toBe('▸ Agent code navigation (experimental, may go away): On')
   const texts = (await ui.findAll({ type: 'Text' })).map(t => t.text)
   expect(texts.at(-1)).toBe('http://localhost:1337/#token=abc')                                   // the link, at once
   await ui.press({ key: 'tab-tasks' })

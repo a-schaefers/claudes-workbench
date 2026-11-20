@@ -188,8 +188,8 @@ def commands_conf() -> dict:
     return conf
 
 
-# Experiments: a change to what the agent may do, measured before it is supported
-# (PROBE_EXPERIMENT.md). Each is on by default while it is measured; `wb experiment <name> on|off`
+# Experiments: a change to what the agent may do, not yet measured enough to be supported
+# (ARCHITECTURE.md, *Experiments*). Each is off unless the user turns it on: `wb experiment <name> on|off`
 # sets it (experiments.json), and `wb start` records its value per task (task.json `experiments`),
 # so a flip changes only the tasks started after it. Off, the agent's rules are main's exactly.
 EXPERIMENTS = {
@@ -209,10 +209,10 @@ def experiments_path() -> Path:
 
 
 def experiments() -> dict[str, bool]:
-    """Each experiment's setting: on unless experiments.json says "off"."""
+    """Each experiment's setting: off unless experiments.json says "on"."""
     saved = store.read_json(experiments_path(), {}) or {}
     saved = saved if isinstance(saved, dict) else {}
-    return {name: saved.get(name) != "off" for name in EXPERIMENTS}
+    return {name: saved.get(name) == "on" for name in EXPERIMENTS}
 
 
 def set_experiment(name: str, on: bool) -> None:

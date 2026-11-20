@@ -1621,9 +1621,9 @@ nothing until a surface attaches.
   `Only when I say`, `Ask me first`, `Let Claude decide (default)` (`CODING_STOPS`); a pick runs `wb coding
   <mode>`, and each draw reads `coding.json` again. **Web chat** (`CHAT_STOPS`, both saying what it
   is: `A localhost web server to interact with Claude.`): `Off (default)` and `On`; a pick runs `wb chat on|off` and reads the switch and the link back at once.
-  **Agent code navigation (experiment)** (`PROBE_STOPS`, key `probe`, options `probe:off|on`,
-  *Experiments*): `Off` and `On (default)`; a pick runs `wb experiment probe off|on`, and each
-  draw reads `experiments.json` again (`probeMode`; no file or no `probe` key: on).
+  **Agent code navigation (experimental, may go away)** (`PROBE_STOPS`, key `probe`, options `probe:off|on`,
+  *Experiments*): `Off (default)` and `On`; a pick runs `wb experiment probe off|on`, and each
+  draw reads `experiments.json` again (`probeMode`; no file or no `probe` key: off).
 - **The status line** reads like `⚒ wb · add-scores running r2 · fix-typo asks · 1 awaiting
   review`, or `⚒ wb · workbench mode` with nothing open. Outside workbench mode it counts only
   the session's own tasks (`mine`), and shows nothing without one: another session's running task
@@ -3103,10 +3103,9 @@ delegating or with a task open. A shell edit isn't seen: the block says the rule
 
 ## Experiments
 
-An experiment is a change to what the agent may do, measured before it is supported: it lives on
-its branch (a draft pull request, never shipped by `scripts/ship.sh`) until the bench says it
-pays. `context.EXPERIMENTS` names each with its purpose; each is on by default while it is
-measured. `wb experiment <name> on|off` (or the pane's Settings row) sets it in
+An experiment is a change to what the agent may do that isn't measured enough to be supported:
+it ships off, marked experimental, for the user to turn on, and the bench (`--label`) or the
+results rows' `experiments` say whether it earns a place; one that doesn't is removed. `context.EXPERIMENTS` names each with its purpose. `wb experiment <name> on|off` (or the pane's Settings row) sets it in
 `$WB_HOME/experiments.json`, and `wb start` records what the task's agent has in task.json
 `experiments` (`context.task_experiments`: on only when set on and able to work), so a flip
 changes only the tasks started after it, a replay's task records which arm it ran in, and a
@@ -3992,7 +3991,7 @@ $WB_HOME (~/.local/state/workbench)
   gc.json                        the last gc: {at, archived, notices, rules, runtime, branches}
   archive/<task>/                a task closed and untouched for ARCHIVE_DAYS (30), moved from tasks/ by gc
   coding.json                    Claude coding, the user's choice: {mode: only|ask|decide, ts}; none: decide
-  experiments.json  .lock        wb experiment: {<name>: "on"|"off"}; a missing name is on (*Experiments*)
+  experiments.json  .lock        wb experiment: {<name>: "on"|"off"}; a missing name is off (*Experiments*)
   progress.json                  progress checks, the user's opt-in: {on, after?, ts}; none: off
   results.jsonl                  one row per closed task: what the router, slices, tuning and skill records learn from
   lessons.jsonl                  what each task taught, open until written into a skill or closed

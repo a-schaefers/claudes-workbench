@@ -60,7 +60,7 @@ def not_merged(*argv) -> str:
 
 
 def fake_probe(tmp: Path) -> None:
-    """A `probe` first on PATH, as its release binary installs one (PROBE_EXPERIMENT.md)."""
+    """A `probe` first on PATH, as its release binary installs one (*Experiments*)."""
     bin_ = tmp / "probe-bin"
     bin_.mkdir()
     (bin_ / "probe").write_text('#!/bin/sh\nif [ "$1" = --help ]; then printf "Commands:\\n  symbols  List symbols\\n"; '
@@ -3689,8 +3689,9 @@ class RealOpenCode(Base):
         self.assertEqual(refused, [False, True, True, True, True], answers)
 
     def test_the_probe_experiment_lets_the_agent_run_probe_and_only_while_on(self):
-        # PROBE_EXPERIMENT.md: the rule and the PATH reach the agent's shell, in its lane
+        # *Experiments*: the rule and the PATH reach the agent's shell, in its lane
         fake_probe(Path(self.tmp.name))
+        run_wb("experiment", "probe", "on")
         def shell(name):
             return [{"name": "shell", "arguments": {"command": "probe symbols README.md",
                                                     "workdir": str(store.Task(name).worktree)}}]
@@ -9350,11 +9351,12 @@ class Drift(unittest.TestCase):
 
 
 class ProbeExperiment(Base):
-    """The probe experiment (PROBE_EXPERIMENT.md): on by default while measured, recorded per task,
+    """The probe experiment (ARCHITECTURE.md, *Experiments*): off by default, recorded per task,
     and nothing at all where it is off or probe isn't installed."""
 
     def fake_probe(self):
         fake_probe(Path(self.tmp.name))
+        context.set_experiment("probe", True)
 
     def probe_rules(self, task):
         return [r["resource"] for r in context.shell_rules(task) if "probe" in r["resource"].split()]
@@ -9371,7 +9373,19 @@ class ProbeExperiment(Base):
         self.assertTrue(handbook.endswith(context.EXPERIMENT_NOTES["probe"]))
         self.assertIn("probe: on, found (probe-code 0.6.0)", cli.experiment_lines())
 
+    def test_it_is_off_until_turned_on_even_with_probe_installed(self):
+        fake_probe(Path(self.tmp.name))
+        self.assertEqual(context.experiments(), {"probe": False})
+        self.assertIn("probe: off (wb experiment probe on)", cli.experiment_lines())
+        self.start("t-default", "ok")
+        wait_phase("t-default", {"review"})
+        task = store.Task("t-default")
+        self.assertEqual(task.spec["experiments"], {"probe": False})
+        self.assertEqual(self.probe_rules(task), [])
+        self.assertEqual((context.rules_dir(task) / "HANDBOOK.md").read_text(), context.HANDBOOK.read_text())
+
     def test_without_probe_installed_the_task_runs_as_main_does(self):
+        context.set_experiment("probe", True)
         with mock.patch.object(context, "probe_bin", return_value=None):
             self.start("t-noprobe", "ok")
             self.assertIn("no probe with `symbols`", cli.experiment_lines()[0])
@@ -9410,6 +9424,7 @@ class ProbeExperiment(Base):
         (bin_ / "probe").write_text("#!/bin/sh\nprintf 'Commands:\\n  search  Search code\\n'\n")
         (bin_ / "probe").chmod(0o755)
         os.environ["PATH"] = f"{bin_}{os.pathsep}{os.environ['PATH']}"
+        context.set_experiment("probe", True)
         self.assertIsNone(context.probe_bin())
         self.assertEqual(context.task_experiments(), {"probe": False})
 
