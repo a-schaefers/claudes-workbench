@@ -3667,6 +3667,25 @@ class Lane(Base):
                                                          "resource": "*", "effect": "allow"}])
         self.assertEqual(lane.wrap(None, ["opencode", "run"]), ["opencode", "run"])
 
+    def test_a_fresh_profile_gets_opencodes_directories_made_and_in_its_lane(self):
+        # #340, the audit of 1.4: the lane writes only what exists, so a first task in a fresh
+        # home failed opening ~/.local/share/opencode/log before any model request
+        self.start("t-fresh", "ok")
+        wait_phase("t-fresh", {"review"})
+        task = store.Task("t-fresh")
+        fresh = Path(tempfile.mkdtemp(dir=os.path.expanduser("~"), prefix=".wb-fresh-"))
+        self.addCleanup(shutil.rmtree, fresh, True)
+        env = {v: "" for v in ("XDG_DATA_HOME", "XDG_STATE_HOME", "XDG_CACHE_HOME",
+                               "XDG_CONFIG_HOME")}
+        with mock.patch.object(context.Path, "home", lambda: fresh), \
+                mock.patch.dict(os.environ, env):
+            writable = context.writable(task)
+        for d in (".local/share/opencode", ".local/state/opencode", ".cache/opencode",
+                  ".config/opencode"):
+            self.assertTrue((fresh / d).is_dir(), d)
+        for d in (".local/share/opencode", ".local/state/opencode", ".cache"):
+            self.assertIn(str(fresh / d), writable)
+
     def test_a_directory_request_is_answered_by_wb_allow_path(self):
         self.start("t-lp", "hang")
         deadline = time.time() + 20

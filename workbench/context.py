@@ -438,6 +438,18 @@ def writable(task: store.Task) -> list[str] | None:
         if os.environ.get(v):
             first = os.environ[v].split(os.pathsep)[0]
             xdg.append(os.path.join(first, VAR_CACHES[v]) if v in VAR_CACHES else first)
+    # OpenCode's own directories, made first: the lane writes only what exists, so a first task
+    # in a fresh profile failed opening OpenCode's log before any model request (#340, the audit
+    # of 1.4). One that can't be made is named in runner.log, the place a failed round points to.
+    made = [Path(os.environ.get(v) or home / d) / "opencode"
+            for v, d in (("XDG_DATA_HOME", ".local/share"), ("XDG_STATE_HOME", ".local/state"),
+                         ("XDG_CACHE_HOME", ".cache"), ("XDG_CONFIG_HOME", ".config"))]
+    for d in made:
+        try:
+            d.mkdir(parents=True, exist_ok=True)
+        except OSError as e:
+            print(f"workbench: can't make OpenCode's directory {d} ({e.strerror}): "
+                  f"its first run fails without it", file=sys.stderr)
     places = [tempfile.gettempdir(), *TEMP_ROOTS, *DEV_NODES, *gpu_nodes(task), "/proc",
               *(home / h for h in TOOL_HOMES + OPENCODE_HOMES), *(x for x in xdg if x),
               *(Path(p).expanduser() for p in extra)]

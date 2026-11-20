@@ -977,7 +977,10 @@ deliberately hostile process (the 2026-11-16 audit's list of what it can't stop 
   caches, `VAR_CACHES`: `pkg`, `install/cache`), OpenCode's own data (`.local/share/opencode`,
   `.local/state/opencode`, and `opencode` under `$XDG_DATA_HOME` and `$XDG_STATE_HOME` when set),
   `$XDG_CACHE_HOME`, and the extra paths (`commands.json` `paths`, the task's grants `paths`), each with its real path
-  too, keeping only those that exist. Left out, where a planted file runs later outside the
+  too, keeping only those that exist. OpenCode's data, state, cache and config directories
+  (`opencode` under each XDG directory, or its default under the home) are made first, so a
+  first task in a fresh profile can open OpenCode's log (#340); one that can't be made is named
+  in `runner.log`. Left out, where a planted file runs later outside the
   lane: what's on the user's PATH or sourced by their shell, and the toolchains those run.
   `~/.local/lib` (user site-packages, whose `.pth` files every python runs) is out; `go`, `.bun`,
   `.deno` and pnpm's home give only their caches; `.local/share/uv` is out (`uv tool` programs and
