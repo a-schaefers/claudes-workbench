@@ -1347,6 +1347,36 @@ class Lifecycle(Base):
             self.skipTest("this file system refuses names that aren't UTF-8")
         self._assert_refused_and_kept(repo, g, name, b"PERSONAL\n")
 
+    def test_on_a_git_before_2_38_the_merge_is_tried_in_a_scratch_worktree_first(self):
+        # #320 (the audit of 1.4, reproduced on Git 2.34.1): without merge-tree --write-tree the
+        # check read only the paths the branch adds, missed the modify/delete conflict, and the
+        # abort deleted the personal copy. The cases above, with that git's answer
+        cases = [
+            (dict(base={b"settings.ini": b"DEFAULT\n"},
+                  main={b"settings.ini": None, b".gitignore": b"settings.ini\n"},
+                  task={b"settings.ini": b"DEFAULT\nmore\n"},
+                  ignore={b"settings.ini": b"PERSONAL\n"}), b"settings.ini"),
+            (dict(base={b"conf/a.cfg": b"a\n", b"conf/b.cfg": b"b\n"},
+                  main={b"conf/a.cfg": None, b"conf/b.cfg": None, b"etc/a.cfg": b"a\n",
+                        b"etc/b.cfg": b"b\n", b".gitignore": b"etc/local.cfg\n"},
+                  task={b"conf/local.cfg": b"TASK\n"},
+                  ignore={b"etc/local.cfg": b"PERSONAL\n"},
+                  config=[("merge.directoryRenames", "true")]), b"etc/local.cfg"),
+        ]
+        with mock.patch.object(gitops, "_merge_tree", return_value=None):
+            for case, path in cases:
+                repo, g = self._merge_case(**case)
+                (repo / "conf").exists() and shutil.rmtree(repo / "conf")
+                self._assert_refused_and_kept(repo, g, path, b"PERSONAL\n")
+                self.assertEqual(g("worktree", "list", "--porcelain").count(b"worktree "), 1,
+                                 "the scratch worktree is gone")
+            repo, g = self._merge_case(
+                base={b"a.txt": b"a\n"}, main={b".gitignore": b"local.ini\n"},
+                task={b"b.txt": b"b\n"}, ignore={b"local.ini": b"PERSONAL\n"})
+            gitops.merge(repo, "t", "main")  # nothing in the way: it still merges
+            self.assertEqual((repo / "b.txt").read_bytes(), b"b\n")
+            self.assertEqual((repo / "local.ini").read_bytes(), b"PERSONAL\n")
+
     def test_a_clean_merge_beside_ignored_files_still_merges(self):
         repo, g = self._merge_case(
             base={b"a.txt": b"a\n"}, main={b".gitignore": b"local.ini\n"},
