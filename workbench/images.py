@@ -30,6 +30,7 @@ import re
 import shlex
 import shutil
 import subprocess
+import tempfile
 import time
 import urllib.error
 import urllib.request
@@ -165,17 +166,36 @@ def generate(prompt: str, out_dir: Path, n: int = 4, size: tuple[int, int] = (10
         _settle(say)
         for i in range(n):
             s = seed + i
-            out = out_dir / f"{_slug(prompt)}-{s}.png"
-            values = {"prompt": prompt, "out": out, "width": size[0], "height": size[1], "seed": s}
-            t0 = time.time()
-            if e.get("command"):
-                _command(e, values, refs, out_dir / "engine.log")
-            else:
-                _server(e, values)
-            secs = round(time.time() - t0, 1)
-            store.write_json(out.with_suffix(".json"), {
-                "prompt": prompt, "seed": s, "width": size[0], "height": size[1],
-                "engine": name, "refs": [str(r) for r in refs], "secs": secs, "ts": store.now()})
+            # into a path of its own, then published under a name nothing has: two prompts with
+            # the same first six words and seed wrote one PNG, the second over the first, and an
+            # engine that wrote nothing passed on the old PNG, its sidecar rewritten (#267)
+            with tempfile.TemporaryDirectory(prefix=".wb-image-", dir=out_dir) as tmp:
+                fresh = Path(tmp) / f"{_slug(prompt)}-{s}.png"
+                values = {"prompt": prompt, "out": fresh, "width": size[0], "height": size[1], "seed": s}
+                t0 = time.time()
+                if e.get("command"):
+                    _command(e, values, refs, out_dir / "engine.log")
+                else:
+                    _server(e, values)
+                secs = round(time.time() - t0, 1)
+                if fresh.is_symlink() or not fresh.is_file() or not fresh.stat().st_size:
+                    raise RuntimeError(f"image engine {name} wrote no image")
+                out = _free(out_dir, f"{_slug(prompt)}-{s}")
+                store.write_json(fresh.with_suffix(".json"), {
+                    "prompt": prompt, "seed": s, "width": size[0], "height": size[1],
+                    "engine": name, "refs": [str(r) for r in refs], "secs": secs, "ts": store.now()})
+                os.replace(fresh.with_suffix(".json"), out.with_suffix(".json"))
+                os.replace(fresh, out)
             say(f"{out}  ({secs} s)")
             made.append(out)
     return made
+
+
+def _free(out_dir: Path, stem: str) -> Path:
+    """`<stem>.png`, or `<stem>-2.png` and on, whichever has neither the image nor its sidecar:
+    an earlier candidate is never replaced (#267)."""
+    for k in range(1, 10_000):
+        p = out_dir / f"{stem}{'' if k == 1 else f'-{k}'}.png"
+        if not (os.path.lexists(p) or os.path.lexists(p.with_suffix(".json"))):
+            return p
+    raise RuntimeError(f"{out_dir} holds 9,999 images named {stem}: pick another directory")
