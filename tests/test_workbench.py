@@ -7073,6 +7073,9 @@ class WebChat(Base):
             while not self.chat.running(free) and time.time() < deadline:
                 time.sleep(0.1)
             self.assertTrue(self.chat.running(free))
+            # asked without a port (the pane does), the link names the port the server runs on,
+            # not the default (#349, the audit of 1.4)
+            self.assertIn(f"http://localhost:{free}/#token=", run_wb("chat", "url"))
             self.assertIn("stopped the server it started", run_wb("chat", "off", "--port", str(free)))
             deadline = time.time() + 10                                # this process is its parent here
             while os.waitpid(pid, os.WNOHANG) == (0, 0) and time.time() < deadline:
@@ -7194,6 +7197,13 @@ class WebChat(Base):
             self.assertEqual(s.recv(100), b"")
             self.assertLess(time.time() - t0, 4)
             s.close()
+
+    def test_a_port_recorded_by_a_server_that_is_gone_falls_back_to_the_default(self):
+        # (#349, the audit of 1.4): the record outlives a server killed without a word
+        store.write_json(self.chat.chat_dir() / "port.json", {"port": 51583, "pid": os.getpid()})
+        self.assertEqual(self.chat.port(), 51583)
+        store.write_json(self.chat.chat_dir() / "port.json", {"port": 51583, "pid": 2 ** 22 + 7})
+        self.assertEqual(self.chat.port(), self.chat.PORT)
 
     def test_the_page_needs_the_token_and_a_known_host(self):
         tok = self.chat.token()

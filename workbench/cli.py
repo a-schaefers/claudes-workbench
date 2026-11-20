@@ -2756,6 +2756,8 @@ def cmd_events(a):
 
 def cmd_chat(a):
     """The web chat: the user's side door to Claude while away from the terminal."""
+    if a.port is None:  # named: that port; else the running server's, else the default (#349)
+        a.port = chat.PORT if a.action == "serve" else chat.port()
     if a.action == "serve":
         chat.serve(a.port, a.bind or None, a.host or None, say=lambda m: print(m, flush=True))
     elif a.action == "url":
@@ -3696,7 +3698,8 @@ def parser() -> argparse.ArgumentParser:
     s.add_argument("--note", help="answer: words to pass on with it")
     s.add_argument("--timeout", type=float, default=30, help="wait: seconds")
     s.add_argument("--json", action="store_true", help="wait: the whole ask, answered or not")
-    s.add_argument("--port", type=int, default=chat.PORT)
+    s.add_argument("--port", type=int, help=f"default: the running server's (chat/port.json), "
+                   f"else {chat.PORT}")
     s.add_argument("--bind", action="append", help="serve: an address to listen on, `tailscale` "
                    "or 0.0.0.0 (default: chat.json's `bind`, else localhost)")
     s.add_argument("--host", action="append", help="serve: another host name to answer to (* any)")

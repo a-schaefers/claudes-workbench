@@ -1013,6 +1013,9 @@ def make_servers(port: int, binds: list[str] | None = None,
 
 def serve(port: int, binds: list[str] | None, hosts: list[str] | None = None, say=print) -> None:
     servers, p = make_servers(port, binds, hosts)
+    # the port it runs on, for `wb chat url` and the pane's link: they asked without one and got
+    # the default, wrong for a server on the free port the CLI advises (#349, the audit of 1.4)
+    store.write_json(chat_dir() / "port.json", {"port": port, "pid": os.getpid()})
     for srv in servers[1:]:
         threading.Thread(target=srv.serve_forever, daemon=True).start()
     say(f"web chat on {', '.join(f'{s.server_address[0]}:{port}' for s in servers)}"
@@ -1061,6 +1064,15 @@ def watch_code(restart, every: float = RELOAD_EVERY) -> None:
         if now != first and now == prev:
             return restart()
         prev = now
+
+
+def port() -> int:
+    """The port the running server recorded (chat/port.json), else PORT: so a command or the
+    pane that names no port finds a server started on another (#349, the audit of 1.4)."""
+    st = store.read_json(chat_dir() / "port.json", None) or {}
+    if isinstance(st.get("port"), int) and st.get("pid") and _alive(st["pid"]):
+        return st["port"]
+    return PORT
 
 
 def url(port: int) -> str:
