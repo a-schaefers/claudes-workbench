@@ -133,8 +133,15 @@ def create_worktree(repo: Path, task: str, dest: Path, base: str = "HEAD") -> st
         raise GitError(f"no commit {base} in {repo}")
     if git(repo, "branch", "--list", branch_name(task)).strip():
         raise GitError(f"branch {branch_name(task)} already exists in {repo}")
+    # a sparse checkout's patterns: newer git copies them into a worktree it adds (2.56 does),
+    # an older one checked out the whole tree; set before the checkout either way (#263)
+    sparse = sparse_of(repo)
     try:
-        git(repo, *NO_HOOKS, "worktree", "add", "-q", "-b", branch_name(task), str(dest), commit)
+        git(repo, *NO_HOOKS, "worktree", "add", "-q", *(["--no-checkout"] if sparse else []),
+            "-b", branch_name(task), str(dest), commit)
+        if sparse:
+            apply_sparse(Path(dest), sparse)
+            git(dest, *NO_HOOKS, "read-tree", "-mu", "HEAD")
     except GitError:
         git(repo, *NO_HOOKS, "worktree", "remove", "--force", str(dest), check=False)
         git(repo, "worktree", "prune", check=False)
@@ -145,6 +152,35 @@ def create_worktree(repo: Path, task: str, dest: Path, base: str = "HEAD") -> st
         store.write_json(rec, {"gitdir": git(dest, "rev-parse", "--absolute-git-dir").strip(),
                                "dotgit": (Path(dest) / ".git").read_text()})
     return commit
+
+
+def sparse_of(repo: Path) -> tuple[str, bool] | None:
+    """The checkout's sparse patterns and whether they are cone mode, None when it isn't sparse.
+    A worktree added plainly held the whole tree, a monorepo's every package, and the base check's
+    clone of it too (#263, the audit of 1.2)."""
+    if git(repo, "config", "--bool", "core.sparseCheckout", check=False).strip() != "true":
+        return None
+    try:
+        path = Path(repo) / git(repo, "rev-parse", "--git-path", "info/sparse-checkout").strip()
+        patterns = path.read_text()
+    except (GitError, OSError):
+        return None
+    cone = git(repo, "config", "--bool", "core.sparseCheckoutCone", check=False).strip() == "true"
+    return (patterns, cone) if patterns.strip() else None
+
+
+def apply_sparse(dest: Path, sparse: tuple[str, bool]) -> None:
+    """``sparse_of``'s patterns for the checkout at ``dest``, before anything is checked out: a
+    linked worktree's own (config --worktree where the repo keeps per-worktree config, else the
+    shared config's setting holds), or a clone's."""
+    patterns, cone = sparse
+    linked = git(dest, "config", "--bool", "extensions.worktreeConfig", check=False).strip() == "true"
+    scope = ["--worktree"] if linked else []
+    git(dest, "config", *scope, "core.sparseCheckout", "true")
+    git(dest, "config", *scope, "core.sparseCheckoutCone", "true" if cone else "false")
+    info = Path(dest) / git(dest, "rev-parse", "--git-path", "info/sparse-checkout").strip()
+    info.parent.mkdir(parents=True, exist_ok=True)
+    info.write_text(patterns)
 
 
 def submodules(repo: Path, commit: str) -> list[str]:

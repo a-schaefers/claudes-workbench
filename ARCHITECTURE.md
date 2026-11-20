@@ -2681,7 +2681,13 @@ custom-node packs do run their own Python).
   `base_ref` the same way).
 - **The worktree** (`gitops.create_worktree`): `worktree add -b delegate/<task> <task
   dir>/worktree <base sha>` (the base peeled to its commit, so an annotated tag's object id is
-  never the base), refused when the branch exists. A failed add (a required smudge filter) removes
+  never the base), refused when the branch exists. A sparse checkout (`core.sparseCheckout`,
+  `gitops.sparse_of`) gets a sparse worktree: added with `--no-checkout`, its patterns and cone
+  mode set (`apply_sparse`: `config --worktree` where the repo keeps per-worktree config), then
+  `read-tree -mu HEAD`; newer git copies them itself, an older one checked out the whole tree. The
+  scratch clones (the base check, `wb verify`, `wb shot`, `wb bench add`'s checks) are made sparse
+  the same way before their checkout: the base check's clone held the whole monorepo (#263, the
+  audit of 1.2). A failed add (a required smudge filter) removes
   the worktree and the branch it made, and `wb start` the task directory, so the name stays free
   (one once left all three behind for good, the 2026-11-16 audit). `remove_worktree` (always `--force`:
   after accept's commit only ignored files are left) and `prune`; when git can't remove it (a

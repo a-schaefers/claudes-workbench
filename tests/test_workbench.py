@@ -1734,6 +1734,28 @@ class WorktreeSetup(Base):
         self.assertIn("NO-NETWORK", note["text"])
         self.assertIn("NO-NETWORK", (t.dir / "setup.txt").read_text())
 
+    def test_a_sparse_checkout_gets_a_sparse_worktree_and_a_sparse_base_check(self):
+        # #263 (the audit of 1.2): the worktree held the whole monorepo, and the base check's
+        # clone of it too
+        g = lambda *a: subprocess.run(["git", "-C", str(self.repo), *a], check=True,  # noqa
+                                      capture_output=True)
+        for d in ("app", "huge"):
+            (self.repo / d).mkdir()
+            (self.repo / d / "f.txt").write_text(d)
+        g("add", "app", "huge")
+        g("commit", "-qm", "two packages")
+        g("sparse-checkout", "set", "app")
+        self.assertFalse((self.repo / "huge").exists())
+        self.start("t-sparse", "ok", "--test", "test -e app/f.txt && test ! -e huge", "--auto-fix", "0",
+                   "--no-self-review")
+        st = wait_phase("t-sparse", {"review", "failed"})
+        wt = store.Task("t-sparse").worktree
+        self.assertTrue((wt / "app" / "f.txt").exists())
+        self.assertFalse((wt / "huge").exists())
+        self.assertIs(st["base_check"]["ok"], True)                       # its clone is sparse too
+        self.assertEqual(st["phase"], "review")
+        self.assertNotIn("huge", gitops.changed(wt))                       # not a deletion
+
     def test_copy_brings_an_ignored_path_from_the_checkout_and_refuses_secrets_and_tracked_files(self):
         self.ignore("vendor/", ".env", "local.cfg")
         (self.repo / "vendor").mkdir()

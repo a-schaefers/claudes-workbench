@@ -88,6 +88,8 @@ def _run(task: store.Task, checkout, cmd: str, limit: int, keep=None,
     with tempfile.TemporaryDirectory(prefix=".verify-", dir=store.home()) as scratch:
         work = Path(scratch) / "repo"
         gitops.git(scratch, "clone", "-q", "--shared", "--no-checkout", task.spec["repo"], str(work))
+        if sparse := gitops.sparse_of(Path(task.spec["repo"])):  # as the task's worktree is (#263)
+            gitops.apply_sparse(work, sparse)
         checkout(work)
         at = _At(task.name, work)
         # its setup, copies and siblings, as the worktree (#201): copied from it (#249)
