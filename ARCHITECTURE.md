@@ -1160,7 +1160,8 @@ deliberately hostile process (the 2026-11-16 audit's list of what it can't stop 
   `"paths": ["*"]` in `commands.json` does for every task.
 
 **Its environment** (`runner.agent_env`) is that of the `wb` command that last started its runner
-(`start`, `feedback`, `next`, `resume`) less credentials and the runner's `PYTHONPATH`
+(`start`, `feedback`, `next`, `resume`) less OpenCode's switches that drop the project's skills
+(`CLAUDE_CODE_OFF`, *Skills* below), credentials and the runner's `PYTHONPATH`
 (`SECRET_ENV`: names containing `TOKEN`, `SECRET`, `PASSW`, `CREDENTIAL`, `API_KEY`, `ACCESS_KEY`,
 `PRIVATE_KEY`, `WEBHOOK`; ending `_PASS`, `_PASSPHRASE`, `_PWD`, `_DSN`, `_JWT`, `_PAT`, `_KEY`, or
 holding `PASS_`; `PASS`, `PASSPHRASE`, `KEY`, `BW_SESSION`, `OP_SESSION_*`, `KRB5CCNAME`; the
@@ -1250,7 +1251,11 @@ handed this task (one directory each in the config's `skills` list). The user's 
 the audit of 1.6) are denied by name (`denied_skills`): an agent once read a personal skill as a
 "newer task" and went off into the user's files. A name the worktree's own `.claude/skills` or
 `.agents/skills` also has stays allowed (the project's skill wins); `workbench` and
-task.json's `deny_skills` are always denied. `wb skill add` refuses the personal names. Claude's
+task.json's `deny_skills` are always denied. `wb skill add` refuses the personal names.
+`OPENCODE_DISABLE_CLAUDE_CODE` or `OPENCODE_DISABLE_CLAUDE_CODE_SKILLS` (`1` or `true`) makes
+OpenCode 2.3 skip every `.claude` directory, the project's own skills with them, without a word
+(#384, the audit of 1.6), so the agent's environment leaves both out (`runner.CLAUDE_CODE_OFF`):
+the rules above are made for OpenCode's default. Claude's
 own skills and plugins (under `~/.claude`, outside the lane) never reach the agent either: the
 skill has Claude apply the ones that fit a task itself and carry the result into the spec as
 decisions and concrete rules, review against them, and turn a correction that recurs into a

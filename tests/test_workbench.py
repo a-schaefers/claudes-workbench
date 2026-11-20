@@ -3561,6 +3561,20 @@ class RealOpenCode(Base):
         self.assertFalse("CANARY-PERSONAL-AGENTS" in text)  # (not assertIn: a prompt per failure)
         self.assertFalse("CANARY-PERSONAL-CLAUDE" in text)
 
+    def test_the_projects_skills_reach_the_agent_whatever_opencodes_claude_code_switches_say(self):
+        # #384 (the audit of 1.6): OPENCODE_DISABLE_CLAUDE_CODE or _SKILLS in the user's
+        # environment made OpenCode 2.3 skip every .claude directory, and the project's own
+        # skills with it, without a word
+        write_skill(self.repo / ".claude" / "skills" / "proj", "proj", "Use when CANARY-PROJ-SKILL.")
+        subprocess.run(["git", "-C", str(self.repo), "add", ".claude"], check=True)
+        subprocess.run(["git", "-C", str(self.repo), "commit", "-qm", "a skill"], check=True)
+        for n, flag in enumerate(("OPENCODE_DISABLE_CLAUDE_CODE", "OPENCODE_DISABLE_CLAUDE_CODE_SKILLS")):
+            with mock.patch.dict(os.environ, {flag: "1" if n else "true"}):
+                self.run_calls(f"t-ccs{n}", [])
+            reqs = Path(self.tmp.name, f"t-ccs{n}-requests.jsonl").read_text().splitlines()
+            text = json.dumps(max(map(json.loads, reqs), key=lambda r: len(r.get("tools", []))))
+            self.assertTrue("CANARY-PROJ-SKILL" in text, flag)  # (not assertIn: a prompt per failure)
+
 
     def run_calls(self, name, calls, *extra, before=None):
         """Run real opencode in a task's worktree, in its lane, against a fake model that makes

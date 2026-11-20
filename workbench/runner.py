@@ -217,6 +217,14 @@ ENV_KEEP = frozenset({"HF_HOME", "HF_HUB_CACHE", "HF_HUB_OFFLINE", "HF_DATASETS_
                       "GOOGLE_CLOUD_PROJECT", "GOOGLE_CLOUD_REGION"})
 
 
+# OpenCode's switches that skip every .claude directory (OpenCode 2.3 reads either, as "1" or
+# "true"), and the project's own .claude/skills with them, without a word (#384, the audit of
+# 1.6). They stay out of the agent's environment: wb hands the instructions itself, and keeps the
+# user's personal skills from the agent by its own rules (context.denied_skills), which are made
+# for OpenCode's default.
+CLAUDE_CODE_OFF = ("OPENCODE_DISABLE_CLAUDE_CODE", "OPENCODE_DISABLE_CLAUDE_CODE_SKILLS")
+
+
 def env_kept(name: str, value: str, through: set) -> bool:
     """Whether the agent's environment keeps ``name``: passed through by commands.json `env`,
     configuration (ENV_KEEP), or no credential by its name (SECRET_ENV) nor its value (USERINFO)."""
@@ -227,7 +235,7 @@ def agent_env(task: store.Task, run: str = "") -> dict:
     """The agent's environment: its config layer, and git read-only (gitguard.py). ``run``: the
     one run it is for (WB_RUN), which sweep can then end alone."""
     through = set(context.commands_conf().get("env", []))
-    keep = {k: v for k, v in os.environ.items() if env_kept(k, v, through)}
+    keep = {k: v for k, v in os.environ.items() if env_kept(k, v, through) and k not in CLAUDE_CODE_OFF}
     layer = write_config_layer(task)
     env = {**keep, "PWD": str(task.workdir),  # opencode finds the project from $PWD
            "OPENCODE_CONFIG": str(layer), **rules_env(json.loads(layer.read_text())),
