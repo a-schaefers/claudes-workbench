@@ -1710,6 +1710,8 @@ and aren't counted as local unless marked the same way.
 Put it in the provider's `options.apiKey` in OpenCode's config. If it reads `{env:NAME}`, add
 `NAME` to `env` in `~/.config/workbench/commands.json`: the agents get none of the environment's
 secrets by default. A key the server refuses makes its models unavailable (`wb models` says so).
+A key kept with `opencode auth login` (OpenCode's `auth.json`) works too, when the config has no
+`options.apiKey`.
 
 ### Found, loaded, chosen
 **OpenCode's config.** `models.opencode_config_files()`: `$WB_OPENCODE_CONFIG` alone, else
@@ -1799,7 +1801,10 @@ agent will see it (`_expand`: a `{env:}` name the agent's environment drops is e
 bearer token on every probe to its server's root (`_KEYS`, filled by `discover`, added in
 `_open`): `/models`, and Ollama's own `/api/version`, `/api/tags`, `/api/ps`, loads and unloads,
 which sent none, so an Ollama behind a key read as unavailable (#256, the audit of 1.2); it is
-never printed or stored. A key whose `{env:NAME}`
+never printed or stored. With no `options.apiKey`, the provider's key from OpenCode's own
+`$XDG_DATA_HOME/opencode/auth.json` (`opencode auth login`, a `{"type": "api", "key"}` row:
+`auth_key`) is the one sent, as OpenCode's docs keep a custom provider's key there and the lane
+leaves the file readable for the agent's OpenCode (#336, the audit of 1.4). A key whose `{env:NAME}`
 is set for wb but dropped for the agent is a provider problem, so the model is unavailable: "its
 apiKey reads {env:NAME}, which agents don't get: add NAME to commands.json env" (probed with wb's
 own key it read running, and every request of the agent's was refused: the 0.90 review).

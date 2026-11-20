@@ -610,6 +610,27 @@ class Real(unittest.TestCase):
         self.assertFalse((Path(self.tmp.name) / "started").exists())   # no second copy started
         self.assertNotIn("sekret", repr(found["k/a"]))
 
+    def test_a_key_kept_by_opencode_auth_login_is_sent_when_the_config_has_no_api_key(self):
+        # #336, the audit of 1.4: OpenCode's docs keep a custom provider's key in auth.json, with
+        # no options.apiKey; the probes sent none and a model OpenCode would run read "it wants
+        # an API key"
+        keyed = self.server({"/v1/models": lambda h: {"data": [{"id": "a"}]}
+                             if h.get("Authorization") == "Bearer authkey" else 401})
+        data = Path(self.tmp.name) / "xdgdata"
+        (data / "opencode").mkdir(parents=True)
+        (data / "opencode" / "auth.json").write_text(json.dumps(
+            {"ak": {"type": "api", "key": "authkey"}, "wrong": {"type": "api", "key": "authkey"}}))
+        self.config({"ak": {"options": {"baseURL": keyed + "/v1"}, "models": {"a": {}}},
+                     "wrong": {"options": {"baseURL": keyed + "/v1", "apiKey": "nope"},
+                               "models": {"a": {}}}})
+        with mock.patch.dict(os.environ, {"XDG_DATA_HOME": str(data)}):
+            found = models.discover()
+            self.assertEqual(models.status(found["ak/a"])["why"], "running")
+            self.assertEqual(models.providers()["ak"]["key"], "authkey")
+            # a key in the config is still the one probed
+            self.assertIn("refuses its API key", models.status(found["wrong/a"])["why"])
+        self.assertNotIn("authkey", repr(found["ak/a"]))
+
     def test_a_start_command_that_exits_at_once_paces_its_readiness_probes(self):
         # the 2026-11-19 audit (finding 20): a start that daemonizes (systemctl, docker, cmd &)
         # exits 0 at once, p.wait returned at once on every pass, and the loop probed back to

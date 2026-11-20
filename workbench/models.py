@@ -488,6 +488,19 @@ def cloud_allowed(model_id: str) -> bool:
     return (_overrides().get(model_id) or {}).get("local") is True
 
 
+def auth_key(pid: str) -> str:
+    """The key `opencode auth login` keeps for a provider, in OpenCode's auth.json: OpenCode's
+    docs set a custom provider's key there, with no options.apiKey, and the probes sent none, so
+    a model OpenCode would run read "it wants an API key" (#336, the audit of 1.4). The lane keeps
+    auth.json readable, so the agent's OpenCode sends the same key. Never printed."""
+    base = os.environ.get("XDG_DATA_HOME") or str(Path.home() / ".local/share")
+    try:
+        row = json.loads((Path(base) / "opencode" / "auth.json").read_text()).get(pid)
+    except (OSError, ValueError, AttributeError):
+        return ""
+    return str(row.get("key") or "") if isinstance(row, dict) and row.get("type") == "api" else ""
+
+
 def discover() -> dict[str, Model]:
     """Every local model OpenCode knows, by OpenCode id, in config order."""
     extra, dirs = _overrides(), _provider_dirs()
@@ -498,7 +511,7 @@ def discover() -> dict[str, Model]:
         # the key the agent's OpenCode will send: probed with wb's own, a key the agent never got
         # read as running and every request of the task was refused (the 0.90 review)
         raw_key = str(opts.get("apiKey") or "")
-        key = _expand(raw_key, base=dirs.get(pid))
+        key = _expand(raw_key, base=dirs.get(pid)) or (auth_key(pid) if not raw_key else "")
         hidden = [n.strip() for k, n in _TEMPLATE.findall(raw_key)
                   if k == "env" and n.strip() in os.environ and not _agent_sees(n.strip())]
         if hidden and not problem:
@@ -1522,12 +1535,14 @@ def ollama_cap(entry: dict) -> int:
 
 def providers() -> dict[str, dict]:
     """OpenCode's local providers: id → {"root", "url", "engine", "engine_known", "start",
-    "problem", "key" (its apiKey, resolved: never printed), "models"} (the config's model entries)."""
+    "problem", "key" (its apiKey, resolved, else auth.json's: never printed), "models"} (the config's model entries)."""
     extra, dirs = _overrides(), _provider_dirs()
+    def key(pid, prov):
+        raw = str((prov.get("options") or prov.get("settings") or {}).get("apiKey") or "")
+        return _expand(raw, base=dirs.get(pid)) if raw else auth_key(pid)   # #336, the audit of 1.4
     return {pid: {"root": url.rstrip("/").removesuffix("/v1"), "url": url,
                   "models": prov.get("models") or {}, "engine": engine,
-                  "key": _expand(str((prov.get("options") or prov.get("settings") or {}).get("apiKey") or ""),
-                                 base=dirs.get(pid)),
+                  "key": key(pid, prov),
                   "engine_known": engine_known(url, extra.get(pid) or {}),
                   "start": (extra.get(pid) or {}).get("start"),
                   "problem": url_problem(url, engine, prov.get("npm"))}
