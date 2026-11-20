@@ -480,5 +480,49 @@ class CanShare(Base):
             self.assertFalse(models.can_share(c, [a, b], int(99e9)))
 
 
+
+class ServedWindow(unittest.TestCase):
+    """#248 (the audit of 1.2): only doctor, scout and wb model add compared limit.context with
+    what the server serves. After an Ollama restart without OLLAMA_CONTEXT_LENGTH, every prompt
+    was trimmed silently and OpenCode, thinking there was room, never compacted."""
+
+    def model(self, engine="ollama", said=65536):
+        return models.Model(id="p/coder", provider="p", name="coder", base_url="http://127.0.0.1:9/v1",
+                            engine=engine, label="coder", config={"limit": {"context": said}})
+
+    def setUp(self):
+        fake = mock.patch.dict(os.environ, {"WB_FAKE_MODELS": ""})
+        fake.start()
+        self.addCleanup(fake.stop)
+
+    def ps(self, ctx):
+        return mock.patch.object(models, "_get", lambda url, **kw: {
+            "models": [{"name": "coder:latest", "context_length": ctx}]} if url.endswith("/api/ps") else None)
+
+    def test_a_short_ollama_window_is_named_with_its_fix(self):
+        with self.ps(8192):
+            why = models.short_window(self.model())
+        self.assertIn("serves p/coder a 8K window, but OpenCode is told 64K", why)
+        self.assertIn("OLLAMA_CONTEXT_LENGTH", why)
+        with self.ps(65536):
+            self.assertIsNone(models.short_window(self.model()))
+        with self.ps(None):                                            # an Ollama that doesn't say
+            self.assertIsNone(models.short_window(self.model()))
+
+    def test_another_server_is_read_through_its_facts(self):
+        with mock.patch.object(models, "server_facts", return_value={"context": 32768}):
+            why = models.short_window(self.model("server"))
+        self.assertIn("start the server with a bigger window, or wb model add p/coder --context 32768", why)
+
+    def test_the_runner_fails_the_load_before_any_round(self):
+        from workbench import runner
+        lease = mock.Mock(load=mock.Mock(return_value=3.0))
+        with self.ps(8192), self.assertRaises(RuntimeError) as e:
+            runner._load(None, lease, self.model())
+        self.assertIn("cut the prompt off", str(e.exception))
+        with self.ps(65536):
+            self.assertEqual(runner._load(None, lease, self.model()), 3.0)
+
+
 if __name__ == "__main__":
     unittest.main()

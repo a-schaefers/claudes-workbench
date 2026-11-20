@@ -307,6 +307,12 @@ model Ollama holds (the user's or another tool's) except those of tasks running 
 other model servers that have a stop command, and loads or starts the one it needs. The lease is
 held for every round and every test run until the runner exits, and the model is made resident
 again before every round after the first (one look at the server when it is still loaded).
+After each load the runner reads the window the server now serves (`models.served_window`:
+Ollama's `/api/ps` `context_length`, else `server_facts`) and, when it is less than
+`limit.context`, fails the task before the round with the fix (`short_window`, raised in
+`runner._load`): only doctor, scout and `wb model add` compared them, and an Ollama restarted
+without its `OLLAMA_CONTEXT_LENGTH` trimmed every prompt silently while OpenCode, thinking there
+was room, never compacted (#248, the audit of 1.2). A server that doesn't say isn't refused.
 
 **4. The agent works a round.** The runner runs `opencode run --standalone -m <model> --auto
 --format json --title "wb: <task>" [--session <id>] -- <prompt>` in the worktree, inside the lane,
