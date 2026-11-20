@@ -449,6 +449,28 @@ class Lifecycle(Base):
             self.assertNotIn("CLAUDE.md.proposed", files)
             self.assertEqual("CLAUDE.md" in files, kept)
 
+    def test_a_proposal_the_project_already_tracks_is_left_alone(self):
+        # #321 (the audit of 1.4, reproduced): a CLAUDE.md.proposed committed before the task
+        # was settled as the agent's, and accept deleted it, though wb diff never showed it
+        draft = self.repo / "docs" / "CLAUDE.md.proposed"
+        draft.parent.mkdir(exist_ok=True)
+        draft.write_text("the team's draft\n")
+        for args in (("add", "docs/CLAUDE.md.proposed"), ("commit", "-qm", "a draft")):
+            subprocess.run(["git", "-C", str(self.repo), *args], check=True, capture_output=True)
+        self.start("t-draft", "ok", "--test", TEST_CMD)
+        wait_phase("t-draft", {"review"})
+        t = store.Task("t-draft")
+        (t.worktree / "AGENTS.md.proposed").write_text("# the agent's\n")  # a new one is its own
+        self.assertEqual([p.name for _, p in runner.proposals(t.worktree)], ["AGENTS.md.proposed"])
+        self.assertNotIn("docs/CLAUDE.md", runner.review_diff(t))
+        out = run_wb("accept", "t-draft", "-m", "feat: answer")
+        self.assertIn("dropped the agent's proposed AGENTS.md", out)
+        self.assertNotIn("docs/CLAUDE.md", out)
+        tree = subprocess.run(["git", "-C", str(self.repo), "ls-tree", "-r", "--name-only",
+                               "delegate/t-draft"], capture_output=True, text=True).stdout.split()
+        self.assertIn("docs/CLAUDE.md.proposed", tree)   # still there, as committed
+        self.assertNotIn("AGENTS.md.proposed", tree)
+
     def test_the_review_notice_shows_every_file_accept_would_commit(self):
         # #79 (the 2026-11-18 audit): every *.proposed was left out of the notice, so an ordinary
         # schema.proposed, the only change, read as "no changes" and was committed all the same
