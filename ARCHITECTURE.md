@@ -647,7 +647,11 @@ A prompt (with its skills note) over `PROMPT_ARG_MAX` (100K bytes) is sent as a 
   that never started still hands the next round the task); `keep` → continue; the last round handed over (`context: full`) → fresh; OpenCode compacted the
   session (`session export` lists a completed compaction) → fresh; the session's last assistant
   message carried `fresh_at` or more of the window (input + cache read + cache write + output) →
-  fresh. This check doesn't look at whether files changed.
+  fresh. This check doesn't look at whether files changed. When the export fails (a 30 s
+  timeout, a busy store: `transcript.export(sid, strict=True)` is None), the round's last
+  `step_finish` count stands in (status `live_used`, when it is this session's), compactions are
+  taken as none, and an `export` event says so: an empty export once read as an empty session, so
+  a full or compacted one carried on (#262, the audit of 1.2).
 
 **A fresh session's prompt** (`_start_fresh`, `handoff_prompt`). The raw prompt is kept as
 `rounds/<n>/instructions.md`, and `prompt.md` becomes: "You are picking this task up in a fresh
@@ -3707,6 +3711,7 @@ check-ins off), not `wb start`'s.
 | `prepared_paths`, `setup_secs` | set with `prepared`: the worktree's ignored paths the preparation left, which each scratch checkout copies instead of running the setup (#249); how long it took, in the first report |
 | `stopping` | wb is stopping the runner (`cli._stop_runner`); cleared by `spawn_runner` and the runner's exit |
 | `tools`, `tok_in`, `tok_out` | task-wide tool calls and tokens (input without cache reads) |
+| `live_used` | `{session, used}`: the context the round's last `step_finish` carried (input + cache + output), what the between-rounds check uses when the session export fails (#262) |
 | `gpu_wh` | the GPU energy its rounds used so far, in Wh (the runner's `_Power`; absent for a remote model or no reading) |
 | `remote_gpu` | true when its model runs on another machine (set in `drive`): the results row carries it, and the savings say the energy wasn't measured |
 | `unrecorded` | set with an accept's or discard's closing phase, cleared once its results row is written: `{outcome, step, extra}`, what a retried accept or discard writes the row from |
@@ -3733,7 +3738,7 @@ description, 90 characters; a skill's id), `text {text}` (2000 characters), `ste
 cache}`, `error {text}`. From the runner: `round`, `stopped {text}`, `steer {now, by:
 "workbench"}` (a nudge), `interrupted`, `tests {ok, text}`, `skills`, `fresh {overflow,
 compacted}`,
-`autofix`, `self_review`, `reading_full`, `full`, `load` (the model reloaded before a round), `stopped {by:
+`autofix`, `self_review`, `reading_full`, `full`, `load` (the model reloaded before a round), `export` (the session export failed: judged by `live_used`), `stopped {by:
 "signal"}` (a SIGTERM not from wb), `gpu {text}` (a warning from loading the model: a server wb
 can't stop, a model partly on the CPU, a share Ollama couldn't keep), and relaying the agent's
 questions `ask {id}`, `answer {id}`. From `wb`:

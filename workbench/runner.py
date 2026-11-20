@@ -593,9 +593,10 @@ def run_round(task: store.Task, n: int, keep: bool = False) -> dict:
             elif row["kind"] == "step":
                 out["tok_in"] += row["in"]
                 out["tok_out"] += row["out"]
-                task.set_status(tok_in=task.status.get("tok_in", 0) + row["in"],
-                                tok_out=task.status.get("tok_out", 0) + row["out"])
                 used = row["in"] + row.get("cache", 0) + row["out"]
+                st = task.status
+                task.set_status(tok_in=st.get("tok_in", 0) + row["in"], tok_out=st.get("tok_out", 0) + row["out"],
+                                live_used={"session": st.get("session"), "used": used})  # #262
                 # Full: a fresh session takes over (drive), never OpenCode's own summary. Only
                 # once this session has changed a file: one that filled up reading would hand
                 # the same reading to the next, which fills up too (seen 2026-11-16: twenty
@@ -1197,7 +1198,17 @@ def context_state(task: store.Task) -> dict:
     if not sid:
         return {}
     from .transcript import export  # transcript imports this module
-    msgs = export(sid).get("messages", [])
+    got = export(sid, strict=True)
+    if got is None:
+        # a timeout or a busy store read as an empty session: no usage, no compaction, so a full
+        # or compacted one carried on, likeliest with several tasks sharing the store (#262, the
+        # audit of 1.2). The round's own last step says how full it was.
+        live = task.status.get("live_used") or {}
+        task.event({"ts": store.now(), "round": task.status.get("round", 1), "kind": "export",
+                    "text": "opencode session export failed: judged by the round's last step"})
+        return {"used": live.get("used") if live.get("session") == sid else None,
+                "window": task.status.get("window"), "compactions": 0}
+    msgs = got.get("messages", [])
     last = next((m for m in reversed(msgs) if m.get("type") == "assistant" and m.get("tokens")), None)
     used = None
     if last:  # what the next request carries: everything the last one read, plus its reply
