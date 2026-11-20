@@ -554,6 +554,7 @@ def cmd_start(a):
         # a replay of the bench driver's (bench.replay): no notices, no results row, not listed
         **({"bench": b} if (b := getattr(a, "bench", None)) else {}),
         **({"no_base_check": True} if a.no_base_check else {}),
+        **({"unload_for_tests": True} if getattr(a, "unload_for_tests", False) else {}),
         "auto_fix": a.auto_fix, "ask_budget": budget, "ask_timeout": a.ask_timeout,
         # periodic check-ins are opt-in: each wakes Claude, re-reading its whole context, and they
         # were 500K of one task's 1.2M (2026-11-17); the pane shows progress, and the warnings
@@ -3276,6 +3277,8 @@ def parser() -> argparse.ArgumentParser:
                    "model's measured speed gives; 0 turns it off)")
     s.add_argument("--test-timeout", type=int, default=900, metavar="SECS",
                    help="seconds the acceptance command may run (default 900)")
+    s.add_argument("--unload-for-tests", action="store_true",
+                   help="unload the model before each test run, for tests that need the GPU")
     s.add_argument("--no-base-check", action="store_true",
                    help="don't run the acceptance command once on the base before the agent starts")
     s.add_argument("--base", default="HEAD")

@@ -1425,11 +1425,21 @@ def _load(task: store.Task, lease, m: models.Model) -> float:
     except (KeyError, RuntimeError, OSError):
         if not _down(m):
             raise
+        lease.step_aside()  # a server that is down holds no GPU from other tasks (#257)
         _wait_up(task, m)
+        _rejoin(task, lease)
         secs = lease.load()
     if why := models.short_window(m):
         raise RuntimeError(why)
     return secs
+
+
+def _rejoin(task: store.Task, lease) -> None:
+    """Back on the GPU before a round, after the tests or a server's wait let it go (#257):
+    queued, in its first-come place, when the GPU is someone else's meanwhile."""
+    if lease.aside:
+        task.set_status(phase="queued", last="waiting for the GPU")
+        lease.rejoin()
 
 
 def drive(task: store.Task) -> None:
@@ -1474,6 +1484,7 @@ def drive(task: store.Task) -> None:
                 # auto-fix round's think budget paid for loading it (the 2026-11-16 audit).
                 # Resident already, this is one look at the server.
                 try:
+                    _rejoin(task, lease)
                     if (again := _load(task, lease, m)) > 0:
                         task.set_status(load_secs=round(task.status.get("load_secs", 0) + again, 1))
                         task.event({"ts": store.now(), "round": task.status["round"], "kind": "load",
@@ -1517,6 +1528,7 @@ def drive(task: store.Task) -> None:
                 task.event({"ts": store.now(), "round": n, "kind": "load",
                             "text": f"opencode exited {rnd['exit']} with the model's server down: "
                                     "the round runs again once it is back"})
+                lease.step_aside()  # #257: nothing of ours is on the GPU while it is down
                 try:
                     _wait_up(task, m)
                 except RuntimeError as e:
@@ -1529,6 +1541,8 @@ def drive(task: store.Task) -> None:
                 task.set_status(phase=phase, last=rnd["stuck"] or f"opencode exited {rnd['exit']}")
                 task.notify(phase, text, round=n)
                 return
+            # the tests need no model: the GPU is the queue's, or theirs (--unload-for-tests), #257
+            lease.step_aside(unload=bool(task.spec.get("unload_for_tests")))
             tests = run_tests(task, n)
             if pending_steer(task):  # a note that came in while the tests ran
                 _steer_round(task, n, False)

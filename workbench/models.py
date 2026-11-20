@@ -1196,6 +1196,7 @@ class GpuLease:
         self.home = store.home()
         self.pool = pool(m or on)  # ``on``: whose server a lease with no model takes (wb optimize)
         self.fh = None
+        self.aside = False  # stepped out of gpu.json for the tests or a server's wait (#257)
         self.me = str(os.getpid())
         # its place in the queue: when the task started, so one sent back for another round
         # (feedback, next, resume) goes ahead of tasks started after it; an image, from now
@@ -1226,29 +1227,61 @@ class GpuLease:
         self.home.mkdir(parents=True, exist_ok=True)
         self.fh = open(self.home / f"{self.pool}.lock", "a+")
         try:
-            with store.locked(self.home / f"{self.pool}.admit"):
-                held = self._holders()
-                if held and self.m is None and not self.wait:
-                    raise RuntimeError(busy(held, "wb image needs it to itself. Run it once they "
-                                            "are in review (answer one that asks first), or with "
-                                            "--wait, in the background, to queue behind them"))
-                if admits(self.m, held):
-                    try:
-                        fcntl.flock(self.fh, fcntl.LOCK_SH | fcntl.LOCK_NB)
-                    except BlockingIOError:
-                        pass  # something has the GPU to itself: wait below
-                    else:
-                        self._set({**held, self.me: self._entry()})
-                        if held:
-                            self.say("sharing the GPU with " + ", ".join(
-                                sorted({h["model"] for h in held.values() if h.get("model")})))
-                        return self
-                self._set({**held, self.me: self._entry(waiting=True)})
-            self._take_alone(held)
+            self._admit()
             return self
         except BaseException:
             self._leave()  # a stop while queued used to leave a waiting entry behind (the
             raise          # 2026-11-16 audit), which made every later task wait alone
+
+    def _admit(self) -> None:
+        with store.locked(self.home / f"{self.pool}.admit"):
+            held = {p: h for p, h in self._holders().items() if p != self.me}
+            if held and self.m is None and not self.wait:
+                raise RuntimeError(busy(held, "wb image needs it to itself. Run it once they "
+                                        "are in review (answer one that asks first), or with "
+                                        "--wait, in the background, to queue behind them"))
+            if admits(self.m, held):
+                try:
+                    fcntl.flock(self.fh, fcntl.LOCK_SH | fcntl.LOCK_NB)
+                except BlockingIOError:
+                    pass  # something has the GPU to itself: wait below
+                else:
+                    self._set({**held, self.me: self._entry()})
+                    if held:
+                        self.say("sharing the GPU with " + ", ".join(
+                            sorted({h["model"] for h in held.values() if h.get("model")})))
+                    return
+            self._set({**held, self.me: self._entry(waiting=True)})
+        self._take_alone(held)
+
+    def step_aside(self, unload: bool = False) -> None:
+        """Let the GPU go while the task needs none of it: its tests (up to --test-timeout, every
+        round) and a wait for its server (up to 20 minutes) ran under the lease, so queued tasks
+        waited through them, and a project's own GPU tests ran beside the resident model, their
+        out-of-memory failures sent back to the agent as its bug (#257, the audit of 1.2).
+        ``unload``: the model too, unless another holder runs it. `rejoin` before the next round."""
+        if self.aside or not self.fh:
+            return
+        with store.locked(self.home / f"{self.pool}.admit"):
+            held = self._holders()
+            held.pop(self.me, None)
+            self._set(held)
+            fcntl.flock(self.fh, fcntl.LOCK_UN)
+            self.aside = True
+        held_ids = keep_loaded()  # the user's own (#215), and only Ollama unloads on request
+        if unload and self.m and self.m.engine == "ollama" and not self.m.remote and not _fake() \
+                and self.m.id not in held_ids and not _kept_name(self.m.name, held_ids):
+            found = discover()
+            if _key(self.m) not in {_key(o) for o in (found.get(h.get("model")) for h in held.values()) if o}:
+                _unload(self.m)
+
+    def rejoin(self) -> None:
+        """Back on the GPU after `step_aside`: beside the holders when the model fits, else
+        alone, in first-come order by the task's start (``since``), so it keeps its place ahead
+        of tasks started after it."""
+        if self.aside:
+            self.aside = False
+            self._admit()
 
     def _take_alone(self, held: dict) -> None:
         """Wait for the GPU to itself (marked waiting in gpu.json, so nobody joins the holders
