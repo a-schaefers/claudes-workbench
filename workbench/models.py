@@ -1522,10 +1522,13 @@ def remove_remote(host: str) -> tuple[str, list[str]]:
     prov = (cfg.get(key) or {}).get(pid)
     if prov is None:
         raise RuntimeError(f"no provider {pid} in {opencode_config_path()}: nothing to remove")
-    # only the provider wb remote made: models.json's `remote` mark, or (made before the mark)
-    # its name and host as add_remote writes them. A hand-written provider of that id was deleted
-    # with its models and their settings (#197, the 2026-11-19 audit)
-    if not ((_overrides().get(pid) or {}).get("remote") or (
+    # only the provider wb remote made: models.json's `remote` mark, while the provider still
+    # points where the mark says, or (made before the mark) its name and host as add_remote writes
+    # them. A hand-written provider of that id was deleted with its models and their settings
+    # (#197, the 2026-11-19 audit), and so was one the user repointed at another server after
+    # wb remote made it, its mark left behind (#242, the audit of 1.2)
+    mark = (_overrides().get(pid) or {}).get("remote")
+    if not (f"{mark}/v1" == _provider_url(prov).rstrip("/") if mark else (
             prov.get("name") == f"Ollama on {host}"
             and (urlparse(_provider_url(prov)).hostname or "") == host.lower())):
         raise RuntimeError(f"{pid} in {opencode_config_path()} isn't one wb remote added (it "
