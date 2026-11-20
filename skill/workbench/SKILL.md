@@ -256,7 +256,7 @@ wb start <kebab-name> --spec <file|-> --repo <repo> --size significant|trivial \
    --test "<acceptance command>" [--skill <name>] [--model …] [--auto-fix 2]
 ```
 The worktree holds only committed files. When the acceptance command needs what the user
-installed (node_modules, a .venv, a build), add `--setup '<install command>'` (or `--copy <ignored
+installed (node_modules, a .venv, a build), add `--setup '<install command>'` (a .venv always: a copy still runs the original) (or `--copy <ignored
 path>`; `--sibling <name>` for a `../<name>` the project uses): `wb start` names the ignored
 directories it lacks, and a failing setup fails the task before any round.
 Once the tests pass, the agent checks its own change against your review checks in one more
