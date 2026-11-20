@@ -648,6 +648,54 @@ class Lifecycle(Base):
         self.assertEqual((st["phase"], st["round"]), ("review", 2))
         self.assertEqual(len(calls), 2)
 
+    def test_the_gpu_is_let_go_while_the_tests_run_and_while_the_server_is_down(self):
+        # #257 (the audit of 1.2): all of drive ran under the lease, so queued tasks waited
+        # through every test run and a 20-minute wait for a dead server, and a project's GPU
+        # tests ran beside the resident model
+        import fcntl
+        with mock.patch.object(cli, "spawn_runner"):
+            self.start("t-aside", "fix", "--test", TEST_CMD, "--no-base-check", "--unload-for-tests")
+        lock = store.home() / "gpu.lock"
+
+        def free() -> bool:  # another task could take the GPU to itself now
+            with open(lock, "a+") as fh:
+                try:
+                    fcntl.flock(fh, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                except BlockingIOError:
+                    return False
+                fcntl.flock(fh, fcntl.LOCK_UN)
+                return True
+
+        seen, unloads, loads, real = [], [], [], runner.run_tests
+        with mock.patch.object(runner, "run_tests",
+                               side_effect=lambda t, n: seen.append((free(), runner.models.holders())) or real(t, n)), \
+                mock.patch.object(runner.models, "make_resident",
+                                  side_effect=lambda *a, **k: loads.append(str(os.getpid()) in runner.models.holders()) or 0.0), \
+                mock.patch.object(runner.models, "_fake", return_value=False), \
+                mock.patch.object(runner, "_down", return_value=False), \
+                mock.patch.object(runner.models, "_unload", side_effect=lambda m: unloads.append(m.id)):
+            # _fake off and no _down mock probed the model's real server: up here, absent in CI,
+            # where drive waited out DOWN_WAIT and the job's 20 minutes (2026-11-20)
+            runner.drive(store.Task("t-aside"))
+        st = store.Task("t-aside").status
+        self.assertEqual((st["phase"], st["round"]), ("review", 2))           # an auto-fix round between
+        self.assertEqual(seen, [(True, {}), (True, {})])                     # each test run: free
+        self.assertEqual(len(unloads), 2)                                    # --unload-for-tests
+        self.assertEqual(loads, [True, True])                                # back on it for round 2
+        self.assertEqual(runner.models.holders(), {})
+        self.assertTrue(store.Task("t-aside").spec["unload_for_tests"])
+
+        m = runner.models.resolve(store.Task("t-aside").spec["model"])
+        waits = []
+        with runner.models.GpuLease(m, "t-aside", lambda msg: None) as lease, \
+                mock.patch.object(lease, "load", side_effect=[RuntimeError("down"), 0.0]), \
+                mock.patch.object(runner, "_down", return_value=True), \
+                mock.patch.object(runner, "_wait_up", side_effect=lambda t, m: waits.append((free(), runner.models.holders()))):
+            self.assertEqual(runner._load(store.Task("t-aside"), lease, m), 0.0)
+            self.assertEqual(waits, [(True, {})])                              # a server's wait: free
+            self.assertIn(str(os.getpid()), runner.models.holders())          # back before the load
+            self.assertFalse(free())
+
     def test_acting_on_a_task_acknowledges_its_notifications(self):
         # A review notice nobody waited for must not resurface after the task is discarded.
         self.start("t-ack", "ok")
