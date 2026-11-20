@@ -2827,11 +2827,15 @@ is the project's.
 
 Each pair is kept in `tasks/<task>/shots/<n>/`: `base.png`, `candidate.png`, each run's output
 (`base.txt`, `candidate.txt`), and `shots.json` `{task, step, round, cmd, viewport, files, ts,
-base: {rev, exit, image, error?}, candidate: {rev, exit, image, error?}}`, where the candidate's
-`rev` is the worktree snapshot's tree. A run that exits non-zero or leaves no PNG (checked by its
-signature, never through a link) gets an `error` naming its output file. The report says the
-capture failed and that the code review stands on its own: a missing image never blocks or passes
-a review.
+base: {rev, exit, ok, image, error?}, candidate: {rev, exit, ok, image, error?}}`, where the
+candidate's `rev` is the worktree snapshot's tree. A side is `ok` only when its run exits 0 and
+leaves a PNG (checked by its signature, never through a link; `verify.shot_ok`, which reads a
+shots.json from before `ok` by its image); one that isn't gets an `error` naming its exit and its
+output file, even with a PNG, which is kept and named as "the PNG it wrote anyway". A capture
+that wrote its image and exited 7 on both sides printed two normal-looking paths, the exits in
+shots.json only (#268, the audit of 1.2). The report gives each side's exit, says a capture
+failed and that the code review stands on its own: a failed capture never blocks or passes a
+review.
 
 `--chat` posts the pair to the web chat (#99): a message from Claude carrying `shots`
 (`chat.shots`, *Files* under *The web chat*). The page draws the two images labelled Base and
@@ -2943,7 +2947,8 @@ VPN), `"hosts": ["chat.example.org"]` a name a tunnel or proxy sends.
   (`_by_cid`: the file read on from where the last post stopped, the newest `CIDS_KEPT` 5000 ids
   kept; only the last 500 rows were checked, and a tab offline longer than that sent its message
   twice, #199). `shots` (Claude's, from `wb shot --chat`) is `chat.shots`: `{task, n, step, round,
-  viewport, base: {rev, image: bool}, candidate: {rev, image: bool}}`. `about` (the user's reply
+  viewport, base: {rev, image: bool, exit?}, candidate: {rev, image: bool, exit?}}` (`image` false
+  for a failed capture, `exit` when it wasn't 0: #268). `about` (the user's reply
   to a pair) is `{task, n, step, round}`, taken from the pair's shots.json and not from the page.
 - `receipts.jsonl`: `{id, ts, by, how: "now"|"queued"}`, written by `wb chat ack` (the mod).
   `queued`: a mid-turn delivery didn't go through, so it was submitted as a prompt.
@@ -3031,7 +3036,8 @@ thread no longer):
   when the page does: a page that loaded other files reloads itself.
 - `GET /api/shot?task=&n=&side=base|candidate`: one side of a `wb shot` pair as `image/png`,
   behind the token (401). It is read only when the task name passes `store.NAME_RE`, `n` is a
-  number with a shots.json, and the side is one of the two; it never follows a link
+  number with a shots.json, and the side is one of the two and its capture worked (#268: a
+  failed one shows "No image: the capture failed (exit N)", whatever it wrote); it never follows a link
   (`O_NOFOLLOW`) and serves at most `SHOT_MAX` (16 MB). Anything else gets 404 "no such
   screenshot". The page can't put the token in an `<img src>`, so it fetches each image with the
   token and shows a blob URL.

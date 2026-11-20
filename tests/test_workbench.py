@@ -5929,7 +5929,7 @@ class Shot(Base):
     def test_a_failed_capture_is_said_and_the_review_stands_without_it(self):
         out = run_wb("shot", "t", "--capture", "test -f units.py && " + self.CAPTURE)
         self.assertIn("base ", out)
-        self.assertIn("no image: exit 1", out)                     # the base has no units.py
+        self.assertIn("failed, exit 1", out)                       # the base has no units.py
         self.assertIn("a capture failed: the code review stands on its own", out)
         out = run_wb("shot", "t", "--capture", "echo not a png > \"$WB_SHOT_OUT\"")
         self.assertIn("no PNG at $WB_SHOT_OUT", out)
@@ -5937,6 +5937,27 @@ class Shot(Base):
         with self.assertRaises(SystemExit), redirect_stderr(err):
             run_wb("shot", "t", "--capture", "true", "--viewport", "big")
         self.assertIn("give it as WIDTHxHEIGHT", err.getvalue())
+
+    def test_a_capture_that_writes_its_png_and_exits_nonzero_failed_on_both_sides(self):
+        # #268 (the audit of 1.2): exit 7 on both sides printed two normal-looking paths, the
+        # exits in shots.json only, and the chat showed both images
+        out = run_wb("shot", "t", "--capture", self.CAPTURE + "; exit 7", "--chat")
+        lines = out.splitlines()
+        for side in ("base", "candidate"):
+            line = next(x for x in lines if x.startswith(f"  {side} "))
+            self.assertIn("failed, exit 7", line)
+            self.assertIn("the PNG it wrote anyway", line)
+        self.assertIn("a capture failed: the code review stands on its own", out)
+        m = json.loads((store.Task("t").dir / "shots" / "1" / "shots.json").read_text())
+        self.assertEqual((m["base"]["ok"], m["candidate"]["ok"]), (False, False))
+        from workbench import chat
+        sent = chat.thread()[-1]["shots"]
+        self.assertEqual([sent[s]["image"] for s in ("base", "candidate")], [False, False])
+        self.assertEqual(sent["base"]["exit"], 7)
+        self.assertIsNone(chat.shot_png("t", 1, "base"))           # not served either
+        out = run_wb("shot", "t", "--capture", self.CAPTURE)
+        self.assertIn("(exit 0)", out)
+        self.assertNotIn("a capture failed", out)
 
     def test_the_pair_goes_to_the_web_chat_with_what_each_image_is_of(self):
         out = run_wb("shot", "t", "--capture", self.CAPTURE, "--chat")

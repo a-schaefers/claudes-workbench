@@ -392,7 +392,8 @@
   // ---- wb shot's pairs (#99): images behind the token, so fetched with it, shown as blobs ----
   const shotOf = s => `${s.task} · step ${s.step} · round ${s.round}`
   function shotImage(s, side, fig) {
-    if (!s[side].image) { fig.prepend(span('missing', 'No image: the capture failed. The code review stands on its own.')); return }
+    // a capture that exited nonzero failed, whatever it wrote (#268)
+    if (!s[side].image) { fig.prepend(span('missing', `No image: the capture failed${s[side].exit != null ? ` (exit ${s[side].exit})` : ''}. The code review stands on its own.`)); return }
     const img = document.createElement('img')
     img.alt = `${side === 'base' ? 'Base' : 'Candidate'} of ${shotOf(s)}`
     fig.prepend(img)
