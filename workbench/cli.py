@@ -3220,8 +3220,11 @@ def cmd_doctor(a):
              (path_advice() if linked else "link bin/wb into a PATH directory (wb setup)")
              + (f"; WB_BIN={wb_bin} covers only the mod's calls" if wb_bin else ""))
     elsewhere("wb", wb_bin or on_path, PKG_ROOT / "bin/wb")
-    for why in logout_stops():  # a warning, not BAD: a desktop that never logs out is fine (#351)
-        print(f"--  {why}")
+    # a warning, not BAD: a desktop that never logs out is fine (#351). The chat's line only
+    # with the chat on: nearly every desktop lingers off, and most never turn the chat on
+    for why in logout_stops():
+        if chat.is_on() or "wb-chat" not in why:
+            print(f"--  {why}")
     found = models.discover()
     line(bool(found), f"{len(found)} local model(s)")
     for pid, why in models.skipped_providers():  # once dropped without a word (the 2026-11-16 audit)

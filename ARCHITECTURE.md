@@ -2971,7 +2971,8 @@ systemctl --user enable --now wb-chat`. An upgrade needs no restart: the server 
 new code (below); `systemctl --user daemon-reload` picks up a changed unit file.
 A user unit stops with the user's last session unless the user lingers (a headless box
 reached by SSH, a desktop logged out overnight): `loginctl enable-linger $USER` keeps it up.
-`wb chat on` and `wb doctor` say so when logind reports `Linger=no`, and `wb doctor` warns when
+`wb chat on` says so when logind reports `Linger=no`, and `wb doctor` too while the chat is on
+(most desktops linger off, and the chat is off until turned on); `wb doctor` also warns when
 logind's `KillUserProcesses=yes` would kill the session's runners at logout (`cli.logout_stops`;
 quiet where `loginctl` is absent; #351, the audit of 1.4). The runners still start in the
 caller's session: moving them into their own `systemd-run --user --scope` is not done yet.

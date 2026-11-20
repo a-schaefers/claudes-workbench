@@ -7019,6 +7019,22 @@ class LogoutStops(Base):
         self.assertEqual(len(said), 1)
         self.assertIn("KillUserProcesses=yes", said[0])
 
+    def test_doctor_names_the_chats_linger_only_with_the_chat_on(self):
+        # most desktops linger off, and the chat is off until turned on: no warning for that
+        from workbench import chat
+        def doctor():
+            buf = io.StringIO()
+            with redirect_stdout(buf), self.fake_loginctl("no", "no"):
+                try:
+                    cli.main(["doctor"])
+                except SystemExit:
+                    pass
+            self.assertIn("local model(s)", buf.getvalue())   # it got past the line in question
+            return buf.getvalue()
+        self.assertNotIn("enable-linger", doctor())
+        chat.set_on(True)
+        self.assertIn("enable-linger", doctor())
+
     def test_nothing_is_said_where_logind_lingers_and_spares_sessions_or_is_absent(self):
         from workbench import cli
         with self.fake_loginctl("yes", "no"):
