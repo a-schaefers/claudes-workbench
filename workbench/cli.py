@@ -2562,6 +2562,19 @@ def cmd_model(a):
         die(f"{a.id} is OpenCode's default model; wb models --set-default picks another first")
     if name not in prov["models"]:
         die(f"{a.id} is not registered")
+    if a.delete and prov["engine"] == "ollama":
+        # Two aliases of one Ollama model share its weights: retiring one with --delete left the
+        # default "not pulled", since only the entry names were compared (#333, the audit of 1.4)
+        def weights(n, e):
+            w = str((e or {}).get("id") or n)
+            return w if ":" in w else w + ":latest"  # Ollama's own name for an untagged model
+        mine = weights(name, prov["models"][name])
+        sharing = [f"{pid}/{n}" for pid, p in provs.items() if p["engine"] == "ollama"
+                   and p["root"] == prov["root"] for n, e in p["models"].items()
+                   if (pid, n) != (provider, name) and weights(n, e) == mine]
+        if sharing:
+            die(f"--delete would delete the weights {', '.join(sharing)} also use ({mine}): "
+                f"wb model retire {a.id} without --delete keeps them")
     try:
         models.write_entry(provider, name, None)
     except RuntimeError as e:

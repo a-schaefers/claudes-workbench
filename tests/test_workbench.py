@@ -6834,6 +6834,23 @@ class ModelSet(Base):
         with self.assertRaises(SystemExit):
             run_wb("model", "retire", "ollama/qwen3.8-27b")
 
+    def test_retire_with_delete_keeps_weights_another_alias_still_uses(self):
+        # #333, the audit of 1.4: two aliases of one Ollama model, one the default; retiring the
+        # other with --delete deleted the shared weights and the default read "not pulled"
+        cfg = self.config(); cfg["model"] = "ollama/qwen3.8-27b"
+        cfg["provider"]["ollama"]["models"]["coder"] = {"id": "qwen3.8-27b:latest",
+                                                        "limit": {"context": 32768}}
+        Path(os.environ["WB_OPENCODE_CONFIG"]).write_text(json.dumps(cfg))
+        err = io.StringIO()
+        with mock.patch.object(cli.models, "ollama_delete") as rm, \
+                self.assertRaises(SystemExit), redirect_stderr(err):
+            run_wb("model", "retire", "ollama/coder", "--delete")
+        rm.assert_not_called()
+        self.assertIn("ollama/qwen3.8-27b also use", err.getvalue())
+        self.assertIn("coder", self.config()["provider"]["ollama"]["models"])  # nothing changed
+        self.assertIn("retired ollama/coder", run_wb("model", "retire", "ollama/coder"))
+        self.assertIn("qwen3.8-27b", self.config()["provider"]["ollama"]["models"])
+
     def test_size_policy(self):
         run_wb("model", "sizes", "mimo", "trivial")
         from workbench import router
