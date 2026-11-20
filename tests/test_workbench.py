@@ -152,7 +152,7 @@ class Lifecycle(Base):
         self.assertIn("merged", out)
         self.assertEqual((self.repo / "answer.txt").read_text(), "42\n")
         log = subprocess.run(["git", "-C", str(self.repo), "log", "--format=%B", "-n1",
-                              "delegate/t-ok"], capture_output=True, text=True).stdout
+                              store.Task("t-ok").status["tip"]], capture_output=True, text=True).stdout
         self.assertIn("Workbench-Task: t-ok", log)
         self.assertIn("OpenCode-Session: ses_", log)
         self.assertNotIn("Co-Authored-By", log)   # the user's commit; no AI credit line
@@ -1008,8 +1008,8 @@ class Lifecycle(Base):
         wait_phase("t-nc", {"review"})
         wait_phase("t-mid", {"review"})
         self.assertIn("merged into main", run_wb("accept", "t-nc", "-m", "feat: a", "--merge"))
-        self.assertEqual(g("merge-base", "--is-ancestor", "delegate/t-nc", "main", check=False)
-                         .returncode, 0)                            # really in main
+        self.assertEqual(g("merge-base", "--is-ancestor", store.Task("t-nc").status["tip"], "main",
+                           check=False).returncode, 0)              # really in main (its branch deleted)
         self.assertNotEqual(g("rev-parse", "-q", "--verify", "MERGE_HEAD", check=False).returncode, 0)
         # a merge of the user's own under way (nothing staged, so the checkout looks clean): wb
         # refuses, and its --abort never throws the user's merge away
@@ -3963,6 +3963,143 @@ class Routing(Base):
         cfg = json.loads(Path(os.environ["WB_OPENCODE_CONFIG"]).read_text())
         self.assertEqual(cfg["model"], "strata/strata")
         self.assertIn("provider", cfg)                # the rest of the config is kept
+
+
+class Cleanup(Base):
+    """What history leaves behind (the 2026-11-19 audit, finding 18): merged branches, rules,
+    runtime directories, old closed tasks and old notices, and the chat read from its end."""
+
+    def git(self, *a):
+        return subprocess.run(["git", "-C", str(self.repo), *a], capture_output=True, text=True)
+
+    def test_a_merged_branch_goes_and_bench_still_finds_its_commit(self):
+        # 8 merged delegate branches were left in one repo, and 55 rules directories here
+        from workbench import bench
+        for name in ("t-merged", "t-kept"):
+            self.start(name, "ok", "--test", TEST_CMD)
+            wait_phase(name, {"review"})
+        run_wb("accept", "t-kept", "-m", "feat: kept")  # unmerged: the branch stays for the user
+        self.assertEqual(self.git("rev-parse", "--verify", "-q", "refs/heads/delegate/t-kept").returncode, 0)
+        task = store.Task("t-merged")
+        self.assertTrue(context.rules_dir(task).is_dir())
+        run_wb("accept", "t-merged", "-m", "feat: answer", "--merge")
+        self.assertNotEqual(self.git("rev-parse", "--verify", "-q", "refs/heads/delegate/t-merged").returncode, 0)
+        tip = task.status["tip"]
+        self.assertEqual(self.git("merge-base", "--is-ancestor", tip, "HEAD").returncode, 0)
+        self.assertEqual(bench._reference(task, 1, 1), tip)
+        self.assertFalse((store.home() / "rules" / "t-merged").exists())
+
+    def test_wb_gc_deletes_branches_merged_before_and_keeps_the_rest(self):
+        self.start("t-old", "ok")
+        wait_phase("t-old", {"review"})
+        run_wb("accept", "t-old", "-m", "feat: answer", "--merge")
+        task = store.Task("t-old")
+        tip = task.status["tip"]
+        self.git("branch", "delegate/t-old", tip)  # as an accept before this one left it
+        task.set_status(tip=None)
+        self.git("branch", "delegate/t-mine", tip)  # not a task's: never touched
+        self.assertIn("1 merged branch(es)", run_wb("gc"))
+        self.assertNotEqual(self.git("rev-parse", "--verify", "-q", "refs/heads/delegate/t-old").returncode, 0)
+        self.assertEqual(task.status["tip"], tip)
+        self.assertEqual(self.git("rev-parse", "--verify", "-q", "refs/heads/delegate/t-mine").returncode, 0)
+
+    def test_old_closed_tasks_are_archived_and_still_found(self):
+        # every wb wait wake, wb events minute and wb start read all 101 tasks' files
+        for name in ("t-done", "t-open"):
+            self.start(name, "ok")
+            wait_phase(name, {"review"})
+        run_wb("discard", "t-done")
+        done = store.Task("t-done")
+        store.write_json(done.dir / "status.json", {**done.status, "updated_at": time.time() - 31 * 86400})
+        out = cli.gc()
+        self.assertEqual(out["archived"], 1)
+        self.assertTrue((store.archive_dir() / "t-done" / "task.json").exists())
+        self.assertFalse((store.tasks_dir() / "t-done").exists())
+        self.assertEqual([t.name for t in store.all_tasks()], ["t-open"])
+        self.assertTrue(store.Task("t-done").exists)
+        self.assertEqual(store.Task("t-done").status["phase"], "discarded")
+        self.assertIn("discarded", run_wb("status", "t-done"))
+        self.assertFalse(list((store.home() / "locks").glob("t-done.*.lock")))
+        with self.assertRaises(SystemExit), redirect_stderr(io.StringIO()):
+            self.start("t-done", "ok")  # names stay taken
+        self.assertEqual(cli.gc()["archived"], 0)
+
+    def test_handled_old_notices_move_to_the_old_file_and_news_stays(self):
+        # notify.jsonl was 529 KB for 158 notices, parsed on every wait wake and ack
+        for name in ("t-acked", "t-news"):
+            self.start(name, "ok")
+            wait_phase(name, {"review"})
+        old = time.time() - 31 * 86400
+        path = store.home() / "notify.jsonl"
+        rows = [{"ts": old, "task": "t-acked", "kind": "review", "text": "R1"},
+                {"ts": old + 1, "task": "t-news", "kind": "review", "text": "R2"},
+                {"ts": old + 2, "task": "t-gone", "kind": "review", "text": "R3"},
+                {"ts": time.time() - 60, "task": "t-gone", "kind": "review", "text": "R4"}]  # handled, but recent
+        path.write_text("".join(json.dumps(r) + "\n" for r in rows) + "not json\n")
+        cli._write_ack(store.Task("t-acked"), old)
+        self.assertEqual(cli.gc()["notices"], 2)  # t-acked's and t-gone's; the garbage line is dropped
+        self.assertEqual([r["text"] for r in store.notices()], ["R2", "R4"])
+        moved = store.read_jsonl(store.home() / "notify.old.jsonl")[0]
+        self.assertEqual([r["text"] for r in moved], ["R1", "R3"])
+        self.assertNotIn(b"not json", path.read_bytes())
+        self.assertIn("[review] t-news", run_wb("wait", "t-news", "--timeout", "1"))
+
+    def test_rules_of_closed_or_vanished_tasks_and_stale_runtime_dirs_go(self):
+        self.start("t-live", "ok")
+        wait_phase("t-live", {"review"})
+        ghost = store.home() / "rules" / "t-ghost"
+        ghost.mkdir(parents=True)
+        os.utime(ghost, (time.time() - 7200,) * 2)
+        starting = store.home() / "rules" / "t-starting"  # a start in progress: no task.json yet
+        starting.mkdir()
+        base = context._runtime_base()
+        stale, fresh = (Path(tempfile.mkdtemp(prefix="wb-run-", dir=base)) for _ in range(2))
+        self.addCleanup(lambda: [shutil.rmtree(d, ignore_errors=True) for d in (stale, fresh)])
+        os.utime(stale, (time.time() - 8 * 86400,) * 2)
+        live = context.runtime_dir(store.Task("t-live"))
+        os.utime(live, (time.time() - 8 * 86400,) * 2)  # an open task's, however old
+        out = cli.gc()
+        self.assertEqual(out["rules"], 1)
+        self.assertFalse(ghost.exists())
+        self.assertTrue(starting.exists())
+        self.assertTrue(context.rules_dir(store.Task("t-live")).exists())
+        self.assertGreaterEqual(out["runtime"], 1)
+        self.assertFalse(stale.exists())
+        self.assertTrue(fresh.exists())
+        self.assertTrue(live.exists())
+
+    def test_a_close_runs_gc_at_most_once_a_day(self):
+        self.start("t-a", "ok")
+        wait_phase("t-a", {"review"})
+        run_wb("discard", "t-a")
+        at = store.read_json(store.home() / "gc.json", {})["at"]
+        self.start("t-b", "ok")
+        wait_phase("t-b", {"review"})
+        run_wb("discard", "t-b")
+        self.assertEqual(store.read_json(store.home() / "gc.json", {})["at"], at)
+        self.assertFalse((store.home() / "rules" / "t-b").exists())  # its own rules go at once
+
+    def test_the_chat_thread_reads_the_end_of_a_long_history(self):
+        # the chat's thread parsed all of messages.jsonl on every poll: 56 ms at 20,000 rows
+        from workbench import chat
+        with tempfile.TemporaryDirectory() as d:
+            p = Path(d, "m.jsonl")
+            self.assertEqual(store.read_jsonl_tail(p, 100), [])
+            p.write_text("".join(json.dumps({"n": i}) + "\n" for i in range(1000)) + '{"n": "torn')
+            last = len(json.dumps({"n": 999}) + "\n") + len('{"n": "torn')
+            self.assertEqual(store.read_jsonl_tail(p, last + 3), [{"n": 999}])   # 998 cut: skipped
+            self.assertEqual(store.read_jsonl_tail(p, 10 ** 6)[0], {"n": 0})      # the whole file
+            exact = len(json.dumps({"n": 998}) + "\n") + last
+            self.assertEqual(store.read_jsonl_tail(p, exact), [{"n": 998}, {"n": 999}])  # on a line's start
+            p.write_text("12345\n678\n")  # a cut line can still parse: "45" is JSON
+            self.assertEqual(store.read_jsonl_tail(p, 6), [678])
+        for i in range(300):
+            chat.send(f"message {i}", "claude")
+        with mock.patch.object(chat, "THREAD_BYTES", 4000):
+            rows = chat.thread()
+        self.assertTrue(0 < len(rows) < 200)
+        self.assertEqual(rows[-1]["text"], "message 299")
+        self.assertEqual([r["text"] for r in chat.thread()][0], "message 100")
 
 
 class Bench(Base):

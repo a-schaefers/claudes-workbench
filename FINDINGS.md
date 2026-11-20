@@ -206,7 +206,7 @@ French locale installed here).
 - **Fix:** a bounded, cancellable wait with backoff for "server down", then reload and retry once.
   Keep failing at once on configuration errors.
 
-**18. Nothing is cleaned up, and the cost grows with history.** Both; source, with measurements
+**18. ~~Nothing is cleaned up, and the cost grows with history.~~** **Fixed (#209).** Both; source, with measurements
 from the state directory here.
 - After 101 tasks in about three days:
   - `notify.jsonl` is 529 KB for 158 notices, because each carries a diff of up to 32K.
