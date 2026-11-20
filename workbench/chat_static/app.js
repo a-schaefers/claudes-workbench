@@ -199,7 +199,7 @@
       const no = { plan: 'you asked for changes', question: 'you passed' }[a.kind] || 'you said no'
       meta.append(span('', clock(a.ts) + (a.answer === 'allow' ? ` · ${yes} ` + (a.by === 'setting' ? '' : clock(a.answered))
         : a.answer === 'deny' ? ` · ${no} ` + clock(a.answered)
-        : a.answer === 'expired' ? (a.by === 'interrupted' ? ' · settled in the terminal'
+        : a.answer === 'expired' || a.stale ? (a.by === 'interrupted' ? ' · settled in the terminal'
           : a.by === 'terminal' ? ' · answer it in the terminal' : ' · no answer in time: it waits in the terminal')
         : ' · Claude is waiting for your answer')))
       return meta
@@ -285,7 +285,7 @@
     const row = document.createElement('div')
     const card = document.createElement('div'); card.className = 'card'
     const head = document.createElement('div'); head.className = 'asks'
-    const open = !a.answer, d = a.detail || {}
+    const open = !a.answer && !a.stale, d = a.detail || {}  // stale: open past the mod's wait (#265)
     // the decision first, when Claude said what the call is for; the exact command under it (#103)
     const purpose = typeof d.purpose === 'string' ? d.purpose.trim().replace(/\.$/, '') : ''
     head.textContent = a.kind === 'plan' ? (open ? "Claude's plan is ready" : "Claude's plan")
