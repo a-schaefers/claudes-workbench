@@ -4,6 +4,7 @@
 import { spawn, execFileSync } from 'node:child_process'
 import { mkdtempSync, mkdirSync, writeFileSync, appendFileSync, copyFileSync, readFileSync, existsSync, rmSync, statSync, utimesSync } from 'node:fs'
 import { createRequire } from 'node:module'
+import { createServer, connect as dial } from 'node:net'
 import { tmpdir } from 'node:os'
 import { join, dirname } from 'node:path'
 import { fileURLToPath } from 'node:url'
@@ -257,6 +258,44 @@ async function run(engine, device) {
     await until(async () => await page.locator('#net').isHidden(), 20000)
     if (!(await page.evaluate(() => window.sameLoad))) throw new Error('the page reloaded')
     if (messages().filter(m => m.text === 'sent while it hung').length !== 1) throw new Error('landed twice')
+  })
+  await check('back on screen after the line died in its sleep: a new message shows at once, and on a push', async () => {
+    // the owner, 2026-11-20: the push came at once, the open app showed the message 10 to 30 s
+    // later. A proxy whose old connections go silent, as a phone's do after a sleep, new ones fine
+    const socks = new Set()
+    const proxy = createServer(c => {
+      const up = dial(PORT, '127.0.0.1'), s = { c, up, dead: false }
+      socks.add(s)
+      c.on('data', d => { if (!s.dead) up.write(d) })
+      up.on('data', d => { if (!s.dead) c.write(d) })
+      for (const x of [c, up]) x.on('error', () => {}).on('close', () => { c.destroy(); up.destroy(); socks.delete(s) })
+    })
+    await new Promise(r => proxy.listen(PORT + 7, '127.0.0.1', r))
+    const p = await ctx.newPage()
+    p.on('pageerror', e => errors.push(String(e)))
+    const hide = h => p.evaluate(h => {
+      Object.defineProperty(document, 'hidden', { value: h, configurable: true })
+      document.dispatchEvent(new Event('visibilitychange'))
+    }, h)
+    try {
+      await p.goto(`http://localhost:${PORT + 7}/#token=${token}`)
+      await until(async () => (await p.textContent('#presence-text')).includes('listening'))
+      for (const [n, wake] of [[1, () => hide(false)],
+                               [2, () => p.evaluate(() => navigator.serviceWorker.dispatchEvent(
+                                 new MessageEvent('message', { data: { kind: 'push' } })))]]) {
+        for (const s of socks) s.dead = true                 // the sleep: the line goes silent
+        if (n === 1) await hide(true)
+        await sleep(n === 1 ? 4000 : 1000)
+        wb('chat', 'reply', '--text', `While you slept ${n}.`)
+        await sleep(500)
+        await wake()
+        await until(async () => (await p.locator('.row.claude .bubble').last().textContent()).includes(`While you slept ${n}.`), 5000)
+      }
+    } finally {
+      await p.close()
+      for (const s of socks) { s.c.destroy(); s.up.destroy() }
+      proxy.close()
+    }
   })
   await check('an updated page reloads itself, keyed, with the thread', async () => {
     await page.evaluate(() => { window.sameLoad = true })

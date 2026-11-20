@@ -16,6 +16,7 @@
   const CONNECT_MS = 12000       // a connection that never answers: dial again
   const HIDDEN_GRACE_MS = 60000  // a hidden page keeps its stream this long, then lets go
   const STALE_MS = 20000         // back on screen with nothing heard this long: the line is likely dead
+  const AWAY_MS = 3000           // off screen this long: a phone may have let the line die, so dial again
   const POST_MS = 15000          // a send that hasn't answered by now is tried again
   const FLOW_MS = 40
 
@@ -573,7 +574,15 @@
   setInterval(() => { if (conn && Date.now() - lastRx > DEAD_MS) conn.abort() }, 5000)
   // back on screen (or from the back-forward cache) with a line that's likely dead from the sleep:
   // dial now rather than wait out the watchdog
-  const freshen = () => { if (conn && Date.now() - lastRx > STALE_MS) reconnectNow() }
+  // A phone asleep a few seconds after the last ping came back to a line heard from under
+  // STALE_MS ago, kept it, and showed nothing until the watchdog gave up on it, 10 to 40 s while
+  // the push had already arrived (the owner, 2026-11-20): off screen past AWAY_MS, dial again
+  let hiddenAt = 0
+  const freshen = () => {
+    const away = hiddenAt && Date.now() - hiddenAt > AWAY_MS
+    hiddenAt = 0
+    if (conn && (away || Date.now() - lastRx > STALE_MS)) reconnectNow()
+  }
   // another tab queued, sent or dropped a message: show it, and send it if this tab can
   addEventListener('storage', e => { if (e.key === null || e.key.startsWith(OUT)) { outbox = outItems(); render(); flush(true) } })
   addEventListener('online', () => { online = true; banner(''); reconnectNow(); flush(true); render() })
@@ -581,6 +590,7 @@
   document.addEventListener('visibilitychange', () => {
     if (document.hidden) {
       finishAll()
+      hiddenAt = Date.now()
       hiddenTimer = setTimeout(() => { if (document.hidden && conn) { conn.abort(); conn = null } }, HIDDEN_GRACE_MS)
     } else {
       clearTimeout(hiddenTimer)
@@ -591,6 +601,10 @@
   })
 
   const letGo = () => { finishAll(); if (conn) { conn.abort(); conn = null } }
+  // the worker's push: news this page hasn't shown, so its line is likely dead
+  if ('serviceWorker' in navigator) navigator.serviceWorker.addEventListener('message', e => {
+    if (e.data && e.data.kind === 'push' && !document.hidden && token) reconnectNow()
+  })
   const comeBack = () => {
     if (document.hidden || !token) return
     if (!conn) { failures = 0; connect() } else freshen()
