@@ -126,11 +126,45 @@ def spawn_runner(task: store.Task) -> int:
     with open(task.dir / "runner.log", "a") as log:
         # -X utf8: the runner reads and writes its files as UTF-8 under any locale (the
         # 2026-11-16 audit); a flag, not PYTHONUTF8, so the agent and its tests keep their own
-        proc = subprocess.Popen([sys.executable, "-X", "utf8", "-m", "workbench.runner", task.name],
+        proc = subprocess.Popen([*runner_scope(), sys.executable, "-X", "utf8", "-m", "workbench.runner",
+                                 task.name],
                                 cwd=PKG_ROOT, env=env, stdin=subprocess.DEVNULL, stdout=log,
                                 stderr=log, start_new_session=True)  # outlives this command
     task.set_status(pid=proc.pid)
     return proc.pid
+
+
+def _loginctl(*argv) -> str:
+    """loginctl's answer, or "" when it has none (absent, failing, slow)."""
+    try:
+        r = subprocess.run(["loginctl", *argv], capture_output=True, text=True, timeout=5)
+    except (OSError, subprocess.SubprocessError):
+        return ""
+    return r.stdout.strip() if r.returncode == 0 else ""
+
+
+def kills_sessions() -> bool:
+    """logind kills every process of a login session at logout (KillUserProcesses=yes). The
+    manager's property: `show-session` with no session (systemd 262 has no `show` verb, and
+    asking it found nothing to warn about anywhere)."""
+    return bool(shutil.which("loginctl")) and \
+        _loginctl("show-session", "-p", "KillUserProcesses", "--value") == "yes"
+
+
+@functools.cache
+def runner_scope() -> tuple[str, ...]:
+    """What starts a runner in a scope of its own under the user's systemd manager, where logind
+    kills a login session's processes at logout: a runner started from an SSH or desktop session
+    died with it, and the night's backlog too (#351, the audit of 1.4). `--scope` execs the
+    command, so the pid is the runner's. Empty anywhere else, or when the manager doesn't answer."""
+    if not kills_sessions() or not shutil.which("systemd-run"):
+        return ()
+    argv = ("systemd-run", "--user", "--scope", "--quiet", "--collect")
+    try:
+        ok = subprocess.run([*argv, "true"], capture_output=True, timeout=10).returncode == 0
+    except (OSError, subprocess.SubprocessError):
+        ok = False
+    return argv if ok else ()
 
 
 def runner_alive(task: store.Task) -> bool:
@@ -2864,22 +2898,19 @@ def logout_stops() -> list[str]:
     without systemd, a container): unknown isn't a warning."""
     if not shutil.which("loginctl"):
         return []
-
-    def ask(*argv):
-        try:
-            r = subprocess.run(["loginctl", *argv], capture_output=True, text=True, timeout=5)
-        except (OSError, subprocess.SubprocessError):
-            return ""
-        return r.stdout.strip() if r.returncode == 0 else ""
     out = []
     user = os.environ.get("USER") or str(os.getuid())
-    if ask("show-user", user, "-p", "Linger", "--value") == "no":
+    lingers = _loginctl("show-user", user, "-p", "Linger", "--value")
+    scoped = runner_scope()
+    if lingers == "no":
         out.append(f"logind stops your user services at logout, the web chat's wb-chat.service "
-                   f"too: loginctl enable-linger {user} keeps them up")
-    if ask("show", "-p", "KillUserProcesses", "--value") == "yes":
+                   f"{'and the runners of tasks running then ' if scoped else ''}too: loginctl "
+                   f"enable-linger {user} keeps them up")
+    if kills_sessions() and not scoped:
         out.append("logind kills every process of a login session at logout (KillUserProcesses=yes),"
-                   " running tasks too: start wb from a session that stays (tmux under systemd-run"
-                   " --user --scope), or set KillUserProcesses=no in /etc/systemd/logind.conf")
+                   " running tasks too, and systemd-run --user can't give them a scope of their own:"
+                   " start wb from a session that stays, or set KillUserProcesses=no in"
+                   " /etc/systemd/logind.conf")
     return out
 
 
@@ -3229,7 +3260,7 @@ def cmd_doctor(a):
     # a warning, not BAD: a desktop that never logs out is fine (#351). The chat's line only
     # with the chat on: nearly every desktop lingers off, and most never turn the chat on
     for why in logout_stops():
-        if chat.is_on() or "wb-chat" not in why:
+        if chat.is_on() or "wb-chat" not in why or "runners" in why:
             print(f"--  {why}")
     found = models.discover()
     line(bool(found), f"{len(found)} local model(s)")

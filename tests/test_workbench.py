@@ -7177,13 +7177,28 @@ class ModelSet(Base):
 
 class LogoutStops(Base):
     """What a logout stops: logind's Linger and KillUserProcesses, said by wb chat on and wb doctor."""
-    def fake_loginctl(self, linger, kill):
+    @contextlib.contextmanager
+    def fake_loginctl(self, linger, kill, scope=None):
+        """loginctl answering Linger and KillUserProcesses; with ``scope`` ("ok" or "fails"), a
+        systemd-run that logs its argv and execs the command, or refuses."""
+        from workbench import cli
         bin_dir = Path(self.tmp.name) / "fakebin"
         bin_dir.mkdir(exist_ok=True)
         exe = bin_dir / "loginctl"
-        exe.write_text(f"#!/bin/sh\ncase \"$1\" in show-user) echo {linger};; show) echo {kill};; esac\n")
+        exe.write_text(f"#!/bin/sh\ncase \"$1\" in show-user) echo {linger};; show-session) echo {kill};;"
+                       " *) exit 1;; esac\n")
         exe.chmod(0o755)
-        return mock.patch.dict(os.environ, {"PATH": f"{bin_dir}:{os.environ['PATH']}"})
+        run = bin_dir / "systemd-run"
+        log = Path(self.tmp.name) / "systemd-run.log"
+        run.write_text("#!/bin/sh\n" + (f'echo "$*" >> {log}\nshift 4\nexec "$@"\n' if scope == "ok"
+                                         else "exit 1\n"))
+        run.chmod(0o755)
+        cli.runner_scope.cache_clear()
+        try:
+            with mock.patch.dict(os.environ, {"PATH": f"{bin_dir}:{os.environ['PATH']}"}):
+                yield log
+        finally:
+            cli.runner_scope.cache_clear()
 
     def test_a_user_without_linger_hears_how_to_keep_the_chat_up_past_logout(self):
         # #351, the audit of 1.4: wb-chat.service stopped at the last logout and nothing said why
@@ -7193,12 +7208,26 @@ class LogoutStops(Base):
         self.assertEqual(len(said), 1)
         self.assertIn("loginctl enable-linger", said[0])
 
-    def test_kill_user_processes_is_named_as_killing_running_tasks(self):
+    def test_kill_user_processes_is_named_as_killing_running_tasks_without_a_scope_for_them(self):
         from workbench import cli
-        with self.fake_loginctl("yes", "yes"):
+        with self.fake_loginctl("yes", "yes", scope="fails"):
             said = cli.logout_stops()
         self.assertEqual(len(said), 1)
         self.assertIn("KillUserProcesses=yes", said[0])
+
+    def test_where_logind_kills_sessions_the_runner_starts_in_a_scope_of_its_own(self):
+        # #351 (the audit of 1.4): a runner started from an SSH or desktop session died at logout
+        from workbench import cli
+        with self.fake_loginctl("yes", "yes", scope="ok") as log:
+            self.assertEqual(cli.logout_stops(), [])        # nothing the user need do
+            self.start("t-scope", "ok")
+            wait_phase("t-scope", {"review"})
+        self.assertIn("--user --scope --quiet --collect", log.read_text())
+        self.assertIn("workbench.runner t-scope", log.read_text())
+        with self.fake_loginctl("no", "yes", scope="ok"):
+            said = cli.logout_stops()
+        self.assertEqual(len(said), 1)                      # the manager stops too: linger
+        self.assertIn("runners", said[0])
 
     def test_doctor_names_the_chats_linger_only_with_the_chat_on(self):
         # most desktops linger off, and the chat is off until turned on: no warning for that

@@ -95,7 +95,7 @@ installed module:
 | Process | Started by | How it finds `workbench` |
 |---|---|---|
 | `wb` | the user, Claude, the mod | `bin/wb` puts its real path's repo root on `sys.path` (so the `~/.local/bin/wb` symlink works) |
-| the runner | `cli.spawn_runner` | `python -X utf8 -m workbench.runner <task>`, cwd and `PYTHONPATH` = the repo root, own session, output to `runner.log` |
+| the runner | `cli.spawn_runner` | `python -X utf8 -m workbench.runner <task>`, cwd and `PYTHONPATH` = the repo root, own session (and its own systemd scope where logind kills sessions at logout: `cli.runner_scope`, #351), output to `runner.log` |
 | the ask server | OpenCode, from the config layer's `mcp.servers.workbench` | `[sys.executable, <root>/bin/wb-ask-mcp]`, like `bin/wb` |
 | the git shim | the agent's shell (`<rules>/bin/git`) | a `/bin/sh` wrapper that execs `<python> -I -c` (quoted: a shebang splits at a space) with an explicit `sys.path.insert` |
 | the lane | the runner, before OpenCode | `python -I lane.py …`, a standard-library-only script |
@@ -2986,10 +2986,14 @@ new code (below); `systemctl --user daemon-reload` picks up a changed unit file.
 A user unit stops with the user's last session unless the user lingers (a headless box
 reached by SSH, a desktop logged out overnight): `loginctl enable-linger $USER` keeps it up.
 `wb chat on` says so when logind reports `Linger=no`, and `wb doctor` too while the chat is on
-(most desktops linger off, and the chat is off until turned on); `wb doctor` also warns when
-logind's `KillUserProcesses=yes` would kill the session's runners at logout (`cli.logout_stops`;
-quiet where `loginctl` is absent; #351, the audit of 1.4). The runners still start in the
-caller's session: moving them into their own `systemd-run --user --scope` is not done yet.
+(most desktops linger off, and the chat is off until turned on). Where logind's
+`KillUserProcesses=yes` would kill the session's runners at logout (`cli.kills_sessions`, the
+manager's property through `loginctl show-session`: systemd 262 has no `show` verb), each runner
+starts in a scope of its own under the user's manager (`cli.runner_scope`: `systemd-run --user
+--scope --quiet --collect`, which execs it, so the pid is the runner's; probed once per `wb`
+call), and the linger line names the runners too, with or without the chat; `wb doctor` warns
+only when that scope can't be had (`cli.logout_stops`; quiet where `loginctl` is absent; #351,
+the audit of 1.4).
 The unit runs systemd's `python3`; a Python from pyenv, uv or conda goes in with `systemctl --user
 edit wb-chat` (the unit's comment says how). On macOS, a launchd agent running `~/.local/bin/wb
 chat serve` does the same. `wb chat url` prints the link, `http://localhost:1337/#token=…` (the
