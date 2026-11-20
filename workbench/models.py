@@ -873,6 +873,16 @@ def make_resident(m: Model, say=print, keep=(), warn=None) -> float:
         # first and failed after (the 2026-11-16 audit): fail before freeing anything
         raise RuntimeError(f"{m.id} can't run: {st['why']}"
                            + (f": {fix}" if (fix := remedy(m, st)) else ""))
+    if m.engine == "server" and (key := lmstudio_unloaded(m)):
+        # LM Studio's just-in-time loading lists every downloaded model as served, so nothing
+        # was loaded, and OpenCode's first request loaded it with LM Studio's default window
+        # (often 4K): the prompt was refused and round 1 failed as "opencode exited 1" (#335,
+        # the audit of 1.4). Load it here with the window OpenCode is told.
+        t0 = time.time()
+        if not m.remote and not _room_beside(m):
+            free_gpu(keep={m.id, *keep}, say=say, warn=warn)
+        _lmstudio_load(m, key, say)
+        return time.time() - t0
     if st["resident"] and (m.remote or not _others_resident(m, keep) or _room_beside(m)):
         return 0.0
     t0 = time.time()
@@ -914,6 +924,38 @@ def make_resident(m: Model, say=print, keep=(), warn=None) -> float:
                     pass
             time.sleep(max(due - time.monotonic(), 0))
     return time.time() - t0
+
+
+def lmstudio_unloaded(m: Model) -> str | None:
+    """The LM Studio key of ``m`` when LM Studio lists it but has no instance of it loaded (it
+    would load on the first request, with its default window: #335); else None."""
+    if _fake():
+        return None
+    lms = _ask(f"{m.root}/api/v1/models", m.api_key)
+    rows = lms.get("models") if isinstance(lms, dict) else None
+    for x in rows if isinstance(rows, list) else []:
+        if not isinstance(x, dict):
+            continue
+        loaded = [i for i in x.get("loaded_instances") or [] if isinstance(i, dict)]
+        if any(i.get("id") == m.name for i in loaded):
+            return None
+        if _serves(str(x.get("key") or ""), m.name):
+            return None if loaded else str(x["key"])
+    return None
+
+
+def _lmstudio_load(m: Model, key: str, say) -> None:
+    """Load ``key`` into LM Studio with OpenCode's window (limit.context); a refusal names the
+    command that does it by hand."""
+    ctx = (m.config.get("limit") or {}).get("context")
+    body = {"model": key, **({"context_length": ctx} if isinstance(ctx, int) and ctx > 0 else {})}
+    say(f"loading {key} into LM Studio" + (f" with a {ctx // 1024}K window" if "context_length" in body else ""))
+    try:
+        _post(f"{m.root}/api/v1/models/load", body, timeout=START_TIMEOUT)
+    except Exception as e:
+        raise RuntimeError(f"{m.id} isn't loaded in LM Studio and loading it failed ({e}): run "
+                           f"lms load {key}" + (f" --context-length {ctx}" if "context_length" in body else ""))
+    _FACTS.pop((m.root, m.name), None)  # the window it now serves, for short_window
 
 
 def _placement(m: Model, warn) -> None:

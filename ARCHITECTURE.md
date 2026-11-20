@@ -1672,7 +1672,8 @@ window that's too small or doesn't match the model's entry. Most servers start s
 - llama.cpp: `-c` on `llama-server`. With `--parallel N` set, each slot gets an Nth of it (unless
   `--kv-unified`), and one agent uses one slot.
 - LM Studio: the context length when the model is loaded (`lms load <model> --context-length
-  32768`). Load it before registering it, so LM Studio can say what it gave it.
+  32768`). Load it before registering it, so LM Studio can say what it gave it. A task loads an
+  unloaded one itself with the entry's `limit.context` (*Residency*).
 - vLLM: `--max-model-len`.
 
 Bigger is better while it fits on the GPU. A window too big for the card pushes part of the model
@@ -1887,7 +1888,12 @@ what they hold.
 `status` says can't run raises `RuntimeError` (its reason and remedy) before anything is freed: a
 `--force` task for an unpulled model once emptied the GPU and then failed its load. Nothing to do
 when `m` is resident and nothing else is, or all of it is in VRAM with room beside the rest.
-Nothing is freed when `m` fits beside every model resident now (`_room_beside`: Ollama only, a
+An LM Studio model listed but with no loaded instance (`lmstudio_unloaded`: just-in-time loading
+lists every downloaded model, so `status` says running) is loaded first, after `free_gpu` as
+below, with `POST /api/v1/models/load` and `context_length` set to its `limit.context`; a refused
+load raises, naming `lms load <key> --context-length N`. Left to OpenCode's first request, LM
+Studio loaded it with its default window (often 4K), refused the prompt, and round 1 failed
+(#335, the audit of 1.4). Nothing is freed when `m` fits beside every model resident now (`_room_beside`: Ollama only, a
 known budget, no other server resident, `m` all in VRAM if loaded, Ollama's loaded-model limit not
 reached, and the loaded sizes from `/api/ps` plus `need(m)` within `SHARE_AT` of the budget):
 every round once unloaded the user's Open WebUI, autocomplete or embedding model, fits or not
