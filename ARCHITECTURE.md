@@ -741,7 +741,11 @@ check that needed them failed on the base and in every round for that, not for t
   write lane doesn't.
 - each of `copy` (`--copy`) from the user's checkout as it is now (`_copy`: `cp -a
   --reflink=auto`, macOS's `cp -cRp`, else a plain copy, replacing what is there, which is
-  why `wb start` refuses a path with anything under it tracked at the base: #244).
+  why `wb start` refuses a path with anything under it tracked at the base: #244). Nor a Python
+  virtualenv (a `pyvenv.cfg` in the path or one level inside, `cli._venv_in`): its `activate`
+  and its scripts' shebangs name the checkout, so a copied `.venv` ran the developer's
+  environment and its writes left the lane (#260, the audit of 1.2); the refusal says to
+  recreate it with `--setup` (`python3 -m venv .venv && .venv/bin/pip install -r …`, `uv sync`).
 - `setup` (`--setup`), in the lane and the agent's shell, as the tests run (`run_in_lane`), for
   at most `SETUP_SECS` (1800 s).
 

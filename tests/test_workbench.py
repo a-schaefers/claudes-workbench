@@ -1773,6 +1773,20 @@ class WorktreeSetup(Base):
         wait_phase("t-c7", {"review"})
         self.assertEqual((store.Task("t-c7").worktree / "generated" / "config").read_text(), "LOCAL\n")
 
+    def test_copy_refuses_a_virtualenv_and_says_to_recreate_it_with_setup(self):
+        # #260 (the audit of 1.2): a copied .venv's activate and shebangs named the checkout, so
+        # the task's tests ran the developer's environment and its writes left the lane
+        self.ignore(".venv/", "envs/")
+        (self.repo / ".venv" / "bin").mkdir(parents=True)
+        (self.repo / ".venv" / "pyvenv.cfg").write_text("home = /usr/bin\n")
+        (self.repo / "envs" / "py").mkdir(parents=True)
+        (self.repo / "envs" / "py" / "pyvenv.cfg").write_text("home = /usr/bin\n")
+        said = self.refused("t-v1", "--copy", ".venv")
+        self.assertIn(".venv is a Python virtualenv", said)
+        self.assertIn("--setup 'python3 -m venv .venv && .venv/bin/pip install", said)
+        self.assertIn("envs/py is a Python virtualenv", self.refused("t-v2", "--copy", "envs"))
+        self.assertFalse(store.Task("t-v1").exists)
+
     def test_a_sibling_directory_is_readable_at_the_same_relative_path(self):
         lib = self.repo.parent / "lib"
         lib.mkdir()
