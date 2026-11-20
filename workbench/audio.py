@@ -1,0 +1,407 @@
+"""Local audio generation (speech, sound effects, music), directed by Claude, who can't hear it.
+
+Claude writes the brief, `wb audio` has a local audio model make a few candidates, and checks each
+one in the ways Claude can read: its length against the one asked for, its peak and clipping, its
+silences (a lead, a tail, a gap in the middle: a music model cut short), its loudness and a
+spectrogram picture (with ffmpeg), and for speech a listener (a speech recognition engine) that
+transcribes it back, scored against the script as a word error rate. Taste stays the user's: for
+music and a voice's character Claude shortlists and asks the user to listen.
+
+Engines are described in ~/.config/workbench/audio.json (`$WB_AUDIO`), name -> entry, shaped like
+images.json: {"command": "<argv template>"} or {"url": "<an OpenAI /v1/audio/speech server>"},
+plus "kind" (speech, sfx, music, or listen: the checker; default speech), "gpu" (false: it runs on
+the CPU, without the GPU lease, so beside a task), "voices", "seconds" (the default length),
+"unload" (a URL POSTed after a batch, so a server lets its GPU memory go), "ref_arg", "model",
+"label", "notes" (the licence: shown to Claude), "timeout" (s). Placeholders: {text} {out} {seed}
+{seconds} {voice} {lyrics}, and {in} for a listener, which prints its transcript on stdout. No
+model is named here: the user installs one and describes it.
+"""
+from __future__ import annotations
+
+import array
+import contextlib
+import json
+import math
+import os
+import re
+import shutil
+import subprocess
+import sys
+import tempfile
+import time
+import urllib.request
+import uuid
+import wave
+from pathlib import Path
+
+from . import media, models, store
+
+KINDS = ("speech", "sfx", "music")
+PLACEHOLDERS = ("text", "out", "seed", "seconds", "voice", "lyrics")
+DEFAULT_SECONDS = {"sfx": 5, "music": 30}
+SILENT_DB = -50     # a 50 ms block quieter than this (dBFS) is silence
+GAP_SECS = 1.0      # a silence this long between sounds is reported as a gap
+
+
+def config_path() -> Path:
+    return Path(os.environ.get("WB_AUDIO") or Path.home() / ".config/workbench/audio.json")
+
+
+def kind_of(e: dict) -> str:
+    return e.get("kind") or "speech"
+
+
+def engines() -> dict[str, dict]:
+    return media.load(config_path())
+
+
+def engine(name: str | None, kind: str | None) -> tuple[str, dict]:
+    """The named engine, or the first of ``kind``, or the first that makes audio."""
+    have = engines()
+    makers = {k: e for k, e in have.items() if kind_of(e) != "listen"}
+    if not makers:
+        raise KeyError(f"no audio engine: describe one in {config_path()}")
+    if name is not None:
+        if name not in makers:
+            raise KeyError(f"no audio engine {name!r} (have: {', '.join(makers)})")
+        if kind and kind_of(makers[name]) != kind:
+            raise KeyError(f"audio engine {name} makes {kind_of(makers[name])}, not {kind}")
+        return name, makers[name]
+    for k, e in makers.items():
+        if kind is None or kind_of(e) == kind:
+            return k, e
+    raise KeyError(f"no {kind} engine in {config_path()} (have: "
+                   + ", ".join(f"{k} ({kind_of(e)})" for k, e in makers.items()) + ")")
+
+
+def listener() -> tuple[str, dict] | None:
+    return next(((k, e) for k, e in engines().items() if kind_of(e) == "listen"), None)
+
+
+def _takes(e: dict, slot: str) -> bool:
+    return f"{{{slot}}}" in (e.get("command") or "")
+
+
+# --- making a candidate -------------------------------------------------------------------------
+
+def _command(e: dict, values: dict, refs: list[Path], log: Path) -> None:
+    argv = media.fill(e["command"], {k: values[k] for k in PLACEHOLDERS})
+    for r in refs:
+        argv += [e["ref_arg"], str(r)]
+    with open(log, "a") as f:
+        r = subprocess.run(argv, stdin=subprocess.DEVNULL, stdout=f, stderr=subprocess.STDOUT,
+                           timeout=int(e.get("timeout", 1800)))
+    if r.returncode or not Path(values["out"]).is_file():
+        tail = "\n".join(log.read_text().strip().splitlines()[-8:])
+        raise RuntimeError(f"the engine exited {r.returncode} without audio:\n{tail}")
+
+
+def _server(e: dict, values: dict) -> None:
+    """An OpenAI /v1/audio/speech server (audio.cpp's, Kokoro-FastAPI, Speaches…): WAV back."""
+    body = {"input": values["text"], "response_format": "wav", "seed": values["seed"]}
+    for k, v in (("model", e.get("model")), ("voice", values["voice"] or None)):
+        if v:
+            body[k] = v
+    req = urllib.request.Request(e["url"], json.dumps(body).encode(),
+                                 {"Content-Type": "application/json"})
+    with models._open(req, timeout=int(e.get("timeout", 1800))) as r:
+        Path(values["out"]).write_bytes(r.read())
+
+
+def _unload(e: dict, say) -> None:
+    """A server engine keeps its model in GPU memory while it runs; one with an unload URL
+    (audio.cpp's /v1/tasks/unload_all_models) is asked to let it go after the batch."""
+    if not e.get("unload"):
+        return
+    try:
+        req = urllib.request.Request(e["unload"], b"{}", {"Content-Type": "application/json"})
+        models._open(req, timeout=30).close()
+    except OSError as err:
+        say(f"couldn't unload the audio server ({e['unload']}: {err}); it may still hold GPU memory")
+
+
+def generate(text: str, out_dir: Path, kind: str | None = None, n: int = 3,
+             seconds: float | None = None, voice: str | None = None, lyrics: str = "",
+             refs: list[Path] = (), seed: int | None = None, name: str | None = None,
+             check: bool = True, say=print, wait: bool = False) -> list[Path]:
+    """Make n candidates (seeds seed, seed+1, …), each a .wav with a .json sidecar holding how it
+    was made and what the checks found (and a .png spectrogram when ffmpeg is here); returns
+    their paths. A GPU engine (the default) takes the GPU as `wb image` does; ``gpu: false`` runs
+    without it."""
+    name, e = engine(name, kind)
+    kind = kind_of(e)
+    if why := media.ready(e):
+        raise RuntimeError(f"audio engine {name}: {why}")
+    refs = [Path(r).resolve() for r in refs]
+    if refs and not (e.get("command") and e.get("ref_arg")):
+        raise RuntimeError(f"audio engine {name} takes no reference clips (no ref_arg)")
+    for r in refs:
+        if not r.is_file():
+            raise RuntimeError(f"no reference clip {r}")
+    if voice and e.get("command") and not _takes(e, "voice"):
+        raise RuntimeError(f"audio engine {name} takes no voice (no {{voice}} in its command)")
+    if voice and e.get("voices") and voice not in e["voices"]:
+        raise RuntimeError(f"audio engine {name} has no voice {voice!r} (voices: {', '.join(e['voices'])})")
+    if lyrics and not _takes(e, "lyrics"):
+        raise RuntimeError(f"audio engine {name} takes no lyrics (no {{lyrics}} in its command)")
+    if seconds is not None and not _takes(e, "seconds"):
+        raise RuntimeError(f"audio engine {name} takes no length (no {{seconds}} in its command)")
+    if seconds is None and _takes(e, "seconds"):
+        seconds = e.get("seconds") or DEFAULT_SECONDS.get(kind, 10)
+    voice = voice or (e["voices"][0] if e.get("voices") else "")
+    ear = listener() if check and kind == "speech" else None
+    if ear and (why := media.ready(ear[1])):
+        say(f"listener {ear[0]}: {why}; no transcripts")
+        ear = None
+    out_dir.mkdir(parents=True, exist_ok=True)
+    seed = int(time.time()) % 1_000_000 if seed is None else seed
+    on_gpu = e.get("gpu", True) is not False or bool(ear and ear[1].get("gpu", True) is not False)
+    made = []
+    hold = media.gpu("wb audio", say, wait) if on_gpu else contextlib.nullcontext()
+    with hold:
+        try:
+            for i in range(n):
+                s = seed + i
+                stem = f"{media.slug(text, kind)}-{s}"
+                # made in a directory of its own, then published under a name nothing has (#267)
+                with tempfile.TemporaryDirectory(prefix=".wb-audio-", dir=out_dir) as tmp:
+                    fresh = Path(tmp) / f"{stem}.wav"
+                    values = {"text": text, "out": fresh, "seed": s, "seconds": seconds or "",
+                              "voice": voice, "lyrics": lyrics}
+                    t0 = time.time()
+                    if e.get("command"):
+                        _command(e, values, refs, out_dir / "engine.log")
+                    else:
+                        _server(e, values)
+                    secs = round(time.time() - t0, 1)
+                    if fresh.is_symlink() or not fresh.is_file() or not fresh.stat().st_size:
+                        raise RuntimeError(f"audio engine {name} wrote no audio")
+                    found = inspect(fresh, kind, text if kind == "speech" else "", seconds,
+                                    ear, draw=check, log=out_dir / "engine.log")
+                    out = media.free(out_dir, stem, ".wav", (".png",))
+                    store.write_json(fresh.with_suffix(".json"), {
+                        "text": text, "kind": kind, "seed": s, "seconds": seconds, "voice": voice,
+                        "lyrics": lyrics, "refs": [str(r) for r in refs], "engine": name,
+                        "secs": secs, "ts": store.now(), **found})
+                    media.publish(fresh, out, (".png",))
+                say(f"{out}  ({secs} s)\n  {summary(found, seconds)}"
+                    + (f"\n  spectrogram: {out.with_suffix('.png')}" if out.with_suffix(".png").is_file() else ""))
+                made.append(out)
+        finally:
+            _unload(e, say)
+    return made
+
+
+# --- the checks ---------------------------------------------------------------------------------
+
+def _pcm(path: Path) -> tuple[list[float], int] | None:
+    """The samples (mono, -1..1) and rate of a PCM WAV, or None when the wave module can't read
+    it (float or 24-bit WAV: ffmpeg converts those first)."""
+    try:
+        with wave.open(str(path)) as w:
+            ch, width, rate, frames = w.getnchannels(), w.getsampwidth(), w.getframerate(), w.getnframes()
+            raw = w.readframes(frames)
+    except (wave.Error, EOFError, OSError):
+        return None
+    codes = {1: "B", 2: "h", 4: "i"}
+    if width not in codes or not ch or not rate:
+        return None
+    a = array.array(codes[width])
+    a.frombytes(raw[:len(raw) - len(raw) % width])
+    if sys.byteorder == "big" and width > 1:
+        a.byteswap()
+    full = float(2 ** (8 * width - 1))
+    if width == 1:
+        a = array.array("h", (x - 128 for x in a))
+        full = 128.0
+    mono = a if ch == 1 else [max(a[i:i + ch], key=abs) for i in range(0, len(a) - ch + 1, ch)]
+    return [x / full for x in mono], rate
+
+
+def _db(x: float) -> float:
+    return round(20 * math.log10(x), 1) if x > 0 else -120.0
+
+
+def levels(samples: list[float], rate: int) -> dict:
+    """Duration, peak, clipping and silences, from 50 ms blocks."""
+    out = {"duration": round(len(samples) / rate, 2) if rate else 0.0}
+    if not samples:
+        return {**out, "peak_db": -120.0, "clipped": 0.0, "lead": 0.0, "tail": 0.0, "gaps": []}
+    peak = max(map(abs, samples))
+    clipped = sum(1 for x in samples if abs(x) >= 0.999) / len(samples)
+    block = max(1, rate // 20)
+    loud = []
+    for i in range(0, len(samples), block):
+        part = samples[i:i + block]
+        rms = math.sqrt(sum(x * x for x in part) / len(part))
+        loud.append(_db(rms) > SILENT_DB)
+    step = block / rate
+    if not any(loud):
+        return {**out, "peak_db": _db(peak), "clipped": round(clipped, 4), "lead": out["duration"],
+                "tail": 0.0, "gaps": [], "silent": True}
+    first = loud.index(True)
+    last = len(loud) - 1 - loud[::-1].index(True)
+    gaps, run = [], 0
+    for j in range(first, last + 1):
+        if loud[j]:
+            if run * step >= GAP_SECS:
+                gaps.append([round((j - run) * step, 1), round(run * step, 1)])  # [at, length]
+            run = 0
+        else:
+            run += 1
+    return {**out, "peak_db": _db(peak), "clipped": round(clipped, 4),
+            "lead": round(first * step, 2), "tail": round((len(loud) - 1 - last) * step, 2),
+            "gaps": gaps}
+
+
+def _ffmpeg(*args: str, timeout: int = 300) -> subprocess.CompletedProcess | None:
+    exe = shutil.which("ffmpeg")
+    if not exe:
+        return None
+    try:
+        return subprocess.run([exe, "-hide_banner", "-nostdin", *args], capture_output=True,
+                              text=True, timeout=timeout)
+    except (OSError, subprocess.TimeoutExpired):
+        return None
+
+
+def loudness(path: Path) -> float | None:
+    """Integrated loudness (LUFS, EBU R128) from ffmpeg's ebur128, None without ffmpeg."""
+    r = _ffmpeg("-i", str(path), "-filter_complex", "ebur128", "-f", "null", "-")
+    found = re.findall(r"\bI:\s*(-?[\d.]+|-inf) LUFS", r.stderr) if r else []
+    if not found:
+        return None
+    return None if found[-1] == "-inf" else float(found[-1])
+
+
+def spectrogram(path: Path, png: Path) -> bool:
+    r = _ffmpeg("-v", "error", "-i", str(path), "-lavfi", "showspectrumpic=s=800x300:legend=1",
+                "-y", str(png))
+    return bool(r and r.returncode == 0 and png.is_file())
+
+
+def words(text: str) -> list[str]:
+    return re.findall(r"[\w']+", text.lower().replace("’", "'"))
+
+
+def wer(script: str, heard: str) -> float:
+    """Word error rate: word-level edit distance over the script's length."""
+    ref, hyp = words(script), words(heard)
+    if not ref:
+        return 0.0 if not hyp else 1.0
+    prev = list(range(len(hyp) + 1))
+    for i, r in enumerate(ref, 1):
+        cur = [i]
+        for j, h in enumerate(hyp, 1):
+            cur.append(min(prev[j] + 1, cur[j - 1] + 1, prev[j - 1] + (r != h)))
+        prev = cur
+    return round(prev[-1] / len(ref), 3)
+
+
+def _multipart(fields: dict, file: Path) -> tuple[bytes, str]:
+    b = uuid.uuid4().hex
+    parts = [f'--{b}\r\nContent-Disposition: form-data; name="{k}"\r\n\r\n{v}\r\n'.encode()
+             for k, v in fields.items() if v]
+    parts.append(f'--{b}\r\nContent-Disposition: form-data; name="file"; filename="{file.name}"\r\n'
+                 "Content-Type: audio/wav\r\n\r\n".encode() + file.read_bytes() + b"\r\n")
+    return b"".join(parts) + f"--{b}--\r\n".encode(), f"multipart/form-data; boundary={b}"
+
+
+def transcribe(ear: tuple[str, dict], clip: Path, log: Path) -> str:
+    """The listener's transcript: a command's stdout ({in} the clip; JSON with "text" is read
+    too), or an OpenAI /v1/audio/transcriptions server's "text"."""
+    name, e = ear
+    if e.get("command"):
+        argv = media.fill(e["command"], {"in": clip})
+        r = subprocess.run(argv, stdin=subprocess.DEVNULL, capture_output=True, text=True,
+                           timeout=int(e.get("timeout", 600)))
+        with open(log, "a") as f:
+            f.write(r.stderr)
+        if r.returncode:
+            raise RuntimeError(f"listener {name} exited {r.returncode}: "
+                               + " ".join(r.stderr.strip().splitlines()[-2:]))
+        out = r.stdout.strip()
+    else:
+        body, ctype = _multipart({"model": e.get("model")}, clip)
+        req = urllib.request.Request(e["url"], body, {"Content-Type": ctype})
+        with models._open(req, timeout=int(e.get("timeout", 600))) as resp:
+            out = resp.read().decode(errors="replace").strip()
+    try:
+        data = json.loads(out)
+        if isinstance(data, dict) and isinstance(data.get("text"), str):
+            return data["text"].strip()
+    except ValueError:
+        pass
+    return out
+
+
+def inspect(path: Path, kind: str, script: str = "", seconds: float | None = None,
+            ear: tuple[str, dict] | None = None, draw: bool = True,
+            log: Path | None = None) -> dict:
+    """What Claude can read of a clip it can't hear. ffmpeg, when here, makes a 16 kHz mono copy
+    first (the wave module reads only integer PCM, and listeners want 16 kHz), measures loudness
+    and draws the spectrogram beside the clip (.png)."""
+    found: dict = {}
+    with tempfile.TemporaryDirectory(prefix=".wb-listen-") as tmp:
+        plain = Path(tmp) / "plain.wav"
+        r = _ffmpeg("-v", "error", "-i", str(path), "-ac", "1", "-ar", "16000", "-c:a", "pcm_s16le",
+                    "-y", str(plain))
+        clip = plain if r and r.returncode == 0 and plain.is_file() else path
+        pcm = _pcm(clip)
+        if pcm is None:
+            found["unreadable"] = "not a PCM WAV the wave module reads" + ("" if r else "; no ffmpeg to convert it")
+        else:
+            found.update(levels(*pcm))
+        if r is not None:
+            found["lufs"] = loudness(path)
+            if draw:
+                spectrogram(path, path.with_suffix(".png"))
+        if ear and script:
+            try:
+                heard = transcribe(ear, clip, log or Path(tmp) / "listen.log")
+                found.update(transcript=heard, wer=wer(script, heard), listener=ear[0])
+            except (OSError, RuntimeError, subprocess.TimeoutExpired) as err:
+                found["listen_error"] = str(err)
+    return found
+
+
+def summary(found: dict, seconds: float | None) -> str:
+    """One line of checks, for Claude."""
+    if "unreadable" in found:
+        bits = [f"unreadable: {found['unreadable']}"]
+    else:
+        d = found["duration"]
+        bits = [f"{d:.1f} s" + (f" (asked {seconds:g}{', cut short' if d < 0.8 * float(seconds) else ''})"
+                                 if seconds else "")]
+        if found.get("silent"):
+            bits.append("SILENT")
+        bits.append(f"peak {found['peak_db']:g} dBFS"
+                    + (f", clipped {found['clipped']:.1%}" if found["clipped"] >= 0.001 else ""))
+        if found.get("lufs") is not None:
+            bits.append(f"{found['lufs']:g} LUFS")
+        elif "lufs" not in found:
+            bits.append("loudness: no ffmpeg")
+        bits.append(f"lead {found['lead']:g} s, tail {found['tail']:g} s")
+        if found["gaps"]:
+            bits.append("gaps " + ", ".join(f"{g[1]:g} s at {g[0]:g} s" for g in found["gaps"]))
+    if "transcript" in found:
+        bits.append(f"heard \"{found['transcript']}\" WER {found['wer']:.0%}")
+    elif "listen_error" in found:
+        bits.append(f"listener failed: {found['listen_error']}")
+    return " · ".join(bits)
+
+
+def lines() -> list[str]:
+    """Each engine for `wb audio --list` and `wb scout`: its kind, whether it's ready, its notes."""
+    out = []
+    for name, e in engines().items():
+        why = media.ready(e)
+        out.append(f"  {name} ({kind_of(e)}{', CPU' if e.get('gpu') is False else ''}): "
+                   f"{e.get('label') or e.get('command', e.get('url', ''))[:60]}"
+                   f" · {'ready' if not why else why}"
+                   + (" · a server: it holds its GPU memory while it runs"
+                      + ("" if e.get("unload") else " (no unload URL)")
+                      if e.get("url") and not e.get("command") else "")
+                   + (f"\n    voices: {', '.join(e['voices'])}" if e.get("voices") else "")
+                   + (f"\n    {e['notes']}" if e.get("notes") else ""))
+    return out

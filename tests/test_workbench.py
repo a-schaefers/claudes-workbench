@@ -1,4 +1,5 @@
 """End-to-end tests: real git, real runner processes, a fake opencode. Run: python3 -m unittest"""
+import ast
 import base64
 import contextlib
 import errno
@@ -25,7 +26,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
 
-from workbench import runner, ask_mcp, cli, context, events, gitops, hardware, lane, store, transcript  # noqa: E402
+from workbench import runner, ask_mcp, audio, cli, context, events, gitops, hardware, lane, store, transcript  # noqa: E402
 
 FAKE = shlex.join([sys.executable, str(ROOT / "tests" / "fake_opencode.py")])  # a path may hold spaces
 TEST_CMD = "grep -qx 42 answer.txt"
@@ -5014,6 +5015,185 @@ class Images(Base):
                 run_wb("image", "x", "--ref", str(tmp / "o" / "a-lighthouse-9.png"))
         self.engines({})
         self.assertIn("no image engine", run_wb("image", "--list"))
+
+
+
+TONE = """import math, struct, sys, wave
+a = sys.argv[1:]
+out = a[a.index('--out') + 1]
+secs = float(a[a.index('--seconds') + 1]) if '--seconds' in a else 1.5
+open(sys.argv[0] + '.calls', 'a').write(repr(a) + '\\n')
+rate = 8000
+with wave.open(out, 'wb') as w:
+    w.setnchannels(1); w.setsampwidth(2); w.setframerate(rate)
+    w.writeframes(b''.join(struct.pack('<h', 0 if i / rate < 0.2 or 0.6 < i / rate < 1.8 else
+                                       int(9000 * math.sin(i / 3))) for i in range(int(rate * secs))))
+"""
+
+
+class Audio(Base):
+    """wb audio: Claude can't hear, so each candidate comes with checks it can read (#395)."""
+    def engines(self, entries):
+        path = Path(self.tmp.name) / "audio.json"
+        path.write_text(json.dumps(entries))
+        os.environ["WB_AUDIO"] = str(path)
+
+    def tone(self):
+        fake = Path(self.tmp.name) / "tone.py"
+        fake.write_text(TONE)
+        return fake
+
+    def ear(self, heard):
+        fake = Path(self.tmp.name) / "ear.py"
+        fake.write_text(f"import sys\nopen(sys.argv[0] + '.got', 'w').write(sys.argv[1])\nprint({heard!r})\n")
+        return fake
+
+    def test_speech_candidates_carry_the_listeners_transcript_and_word_error_rate(self):
+        tmp, tone, ear = Path(self.tmp.name), self.tone(), self.ear('{"text": "the gate is closed"}')
+        self.engines({"tts": {"command": f"{sys.executable} {tone} --text {{text}} --voice {{voice}} "
+                                         "--seed {seed} --out {out}", "gpu": False,
+                              "voices": ["anna", "bo"], "notes": "licence: test"},
+                      "ear": {"kind": "listen", "gpu": False, "command": f"{sys.executable} {ear} {{in}}"}})
+        script = "The gate is open; $HOME & `rm -rf` ~ {seed}"
+        out = run_wb("audio", script, "--n", "2", "--seed", "5", "--out", str(tmp / "o"))
+        self.assertIn("2 clip(s)", out)
+        made = sorted((tmp / "o").glob("*.wav"))
+        self.assertEqual([p.name for p in made], ["the-gate-is-open-home-rm-5.wav",
+                                                  "the-gate-is-open-home-rm-6.wav"])
+        side = json.loads(made[0].with_suffix(".json").read_text())
+        self.assertEqual((side["text"], side["kind"], side["seed"], side["voice"], side["engine"]),
+                         (script, "speech", 5, "anna", "tts"))   # the first voice by default
+        self.assertEqual((side["duration"], side["transcript"]), (1.5, "the gate is closed"))
+        self.assertAlmostEqual(side["lead"], 0.2, delta=0.06)  # ffmpeg's resampling rings a little
+        self.assertEqual(side["wer"], audio.wer(script, "the gate is closed"))
+        self.assertGreater(side["wer"], 0)
+        self.assertIn('heard "the gate is closed" WER', out)
+        calls = [ast.literal_eval(l) for l in Path(str(tone) + ".calls").read_text().splitlines()]
+        self.assertEqual(calls[0][:2], ["--text", script])  # one argument, never through a shell
+        self.assertEqual(calls[1][calls[1].index("--seed") + 1], "6")
+        self.assertTrue(Path(str(ear) + ".got").read_text().endswith(".wav"))
+        listed = run_wb("audio", "--list")
+        self.assertIn("tts (speech, CPU)", listed)
+        self.assertIn("ear (listen, CPU)", listed)
+        self.assertIn("voices: anna, bo", listed)
+        self.assertIn("ear (listen", run_wb("audio", "ls"))
+        err = io.StringIO()
+        with self.assertRaises(SystemExit), redirect_stderr(err):
+            run_wb("audio", "hi", "--voice", "zoe", "--out", str(tmp / "o"))
+        self.assertIn("has no voice 'zoe' (voices: anna, bo)", err.getvalue())
+
+    def test_the_checks_find_a_gap_a_short_clip_a_silent_one_and_clipping(self):
+        tmp, tone = Path(self.tmp.name), self.tone()
+        self.engines({"fx": {"kind": "sfx", "gpu": False,
+                             "command": f"{sys.executable} {tone} --seconds {{seconds}} --out {{out}}"}})
+        out = run_wb("audio", "a door slam", "--seconds", "3", "--n", "1", "--seed", "1",
+                     "--no-check", "--out", str(tmp / "o"))
+        self.assertIn("3.0 s (asked 3)", out)
+        self.assertRegex(out, r"gaps 1\.[12] s at 0\.[67] s")  # ffmpeg's resampling rings a little
+        self.assertFalse(list((tmp / "o").glob("*.png")))   # --no-check: no spectrogram
+        real_which = shutil.which
+        with mock.patch.object(audio.shutil, "which",
+                               lambda x, *a, **k: None if x == "ffmpeg" else real_which(x, *a, **k)):
+            out = run_wb("audio", "a door slam", "--seconds", "3", "--n", "1", "--seed", "1",
+                         "--out", str(tmp / "plain"))   # without ffmpeg: the wave module alone
+        self.assertIn("loudness: no ffmpeg", out)
+        self.assertRegex(out, r"gaps 1\.[12] s at 0\.[67] s")
+        self.assertFalse(list((tmp / "plain").glob("*.png")))
+        rate = 1000
+        cut = audio.levels([0.5] * 500, rate)
+        self.assertIn("cut short", audio.summary(cut, 3))
+        quiet = audio.levels([0.0] * 2000, rate)
+        self.assertTrue(quiet["silent"])
+        self.assertIn("SILENT", audio.summary(quiet, None))
+        loud = audio.levels([1.0, -1.0] * 1000, rate)
+        self.assertEqual((loud["peak_db"], loud["clipped"]), (0.0, 1.0))
+        self.assertIn("clipped 100.0%", audio.summary(loud, None))
+        self.assertEqual(audio.wer("It's three o'clock", "its three oclock"), round(2 / 3, 3))
+        self.assertEqual(audio.wer("open the gate", "Open the gate."), 0.0)
+
+    def test_an_engine_refuses_what_it_has_no_slot_for_and_the_wrong_kind(self):
+        tmp, tone = Path(self.tmp.name), self.tone()
+        self.engines({"tts": {"command": f"{sys.executable} {tone} --out {{out}}", "gpu": False,
+                              "voices": ["anna"]}})
+        lyrics = tmp / "lyrics.txt"
+        lyrics.write_text("la la")
+        for argv, said in ((["--voice", "anna"], "takes no voice"),
+                           (["--lyrics", str(lyrics)], "takes no lyrics"),
+                           (["--seconds", "3"], "takes no length"),
+                           (["--kind", "music"], "no music engine"),
+                           (["--engine", "nope"], "no audio engine 'nope'"),
+                           (["--ref", str(lyrics)], "takes no reference clips")):
+            err = io.StringIO()
+            with self.assertRaises(SystemExit), redirect_stderr(err):
+                run_wb("audio", "hello", "--out", str(tmp / "o"), *argv)
+            self.assertIn(said, err.getvalue(), argv)
+        self.assertFalse(list((tmp / "o").glob("*.wav")) if (tmp / "o").exists() else [])
+        self.engines({})
+        self.assertIn("no audio engine", run_wb("audio", "--list"))
+
+    def test_a_second_run_keeps_the_first_clip_and_an_engine_that_writes_nothing_fails(self):
+        tmp = Path(self.tmp.name)
+        fake = tmp / "fake.py"
+        fake.write_text("import os, shutil, sys\n"
+                        f"if not os.environ.get('NOTHING'): shutil.copy({str(tmp / 'src.wav')!r}, sys.argv[1])\n")
+        import wave as _wave
+        with _wave.open(str(tmp / "src.wav"), "wb") as w:
+            w.setnchannels(1); w.setsampwidth(2); w.setframerate(8000); w.writeframes(b"\x10\x00" * 800)
+        self.engines({"e": {"command": f"{sys.executable} {fake} {{out}}", "gpu": False}})
+        for _ in range(2):
+            run_wb("audio", "a beep", "--n", "1", "--seed", "3", "--out", str(tmp / "o"))
+        self.assertTrue((tmp / "o" / "a-beep-3.wav").is_file() and (tmp / "o" / "a-beep-3-2.wav").is_file())
+        os.environ["NOTHING"] = "1"
+        err = io.StringIO()
+        with self.assertRaises(SystemExit), redirect_stderr(err):
+            run_wb("audio", "a beep", "--n", "1", "--seed", "3", "--out", str(tmp / "o"))
+        self.assertIn("without audio", err.getvalue())
+        self.assertEqual(len(list((tmp / "o").glob("*.wav"))), 2)
+
+    def test_a_server_engine_a_server_listener_and_the_unload_after_the_batch(self):
+        import threading
+        import wave as _wave
+        from http.server import BaseHTTPRequestHandler, HTTPServer
+        buf = io.BytesIO()
+        with _wave.open(buf, "wb") as w:
+            w.setnchannels(1); w.setsampwidth(2); w.setframerate(8000); w.writeframes(b"\x00\x30" * 8000)
+        got = []
+
+        class H(BaseHTTPRequestHandler):
+            def log_message(self, *a):
+                pass
+
+            def do_GET(self):
+                self.send_response(404); self.end_headers()
+
+            def do_POST(self):
+                body = self.rfile.read(int(self.headers["Content-Length"]))
+                got.append((self.path, self.headers["Content-Type"], body))
+                reply = (buf.getvalue() if self.path.endswith("/speech") else
+                         b'{"text": "hello there"}' if self.path.endswith("/transcriptions") else b"{}")
+                self.send_response(200); self.end_headers(); self.wfile.write(reply)
+
+        srv = HTTPServer(("127.0.0.1", 0), H)
+        threading.Thread(target=srv.serve_forever, daemon=True).start()
+        self.addCleanup(srv.shutdown)
+        root = f"http://127.0.0.1:{srv.server_port}"
+        self.engines({"srv": {"url": root + "/v1/audio/speech", "model": "kokoro", "gpu": False,
+                              "unload": root + "/v1/tasks/unload_all_models"},
+                      "ear": {"kind": "listen", "url": root + "/v1/audio/transcriptions",
+                              "model": "asr", "gpu": False}})
+        tmp = Path(self.tmp.name)
+        out = run_wb("audio", "Hello there.", "--n", "1", "--seed", "9", "--voice", "af",
+                     "--out", str(tmp / "o"))
+        self.assertIn('heard "hello there" WER 0%', out)
+        paths = [g[0] for g in got]
+        self.assertEqual(paths, ["/v1/audio/speech", "/v1/audio/transcriptions",
+                                 "/v1/tasks/unload_all_models"])
+        speech = json.loads(got[0][2])
+        self.assertEqual((speech["input"], speech["model"], speech["voice"], speech["seed"],
+                          speech["response_format"]), ("Hello there.", "kokoro", "af", 9, "wav"))
+        self.assertTrue(got[1][1].startswith("multipart/form-data"))
+        self.assertIn(b'name="model"\r\n\r\nasr', got[1][2])
+        self.assertIn("a server", run_wb("audio", "--list"))
 
 
 class Discovery(Base):

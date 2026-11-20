@@ -250,7 +250,8 @@ in ~30 minutes as three, every hidden check passing.)
 **Skills for the agents** are yours to write, hand out (`wb start … --skill <name>`, 0–2 that fit
 the task) and keep honest. `reference/skills.md` has how: read it before you write, patch, import
 or retire one, or triage lessons. **Images** (a sprite, an icon): a local engine draws them, you
-art-direct (`wb image --list`); read `reference/images.md` first.
+art-direct (`wb image --list`); read `reference/images.md` first. **Audio** (a voice line, a sound,
+music): the same with `wb audio --list`, but you can't hear: read `reference/audio.md` first.
 
 ## 3. Dispatch
 ```
