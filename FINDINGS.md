@@ -152,8 +152,8 @@ clearly been through several audits, and most edges probed there were already ha
   - A configurable worktree root, for example beside the repo.
   - A diagnosis of missing setup before any model round.
 
-**13. A provider defined outside the default config passes discovery, then vanishes at run
-time.** Both; source.
+**13. ~~A provider defined outside the default config passes discovery, then vanishes at run
+time.~~** **Fixed (#202).** Both; source.
 - wb reads `$WB_OPENCODE_CONFIG` (`models.py:114`), but the agent's OpenCode gets
   `OPENCODE_CONFIG` pointed at the per-task layer, which has no `provider` block (`runner.py:85`,
   `runner.py:176`).
@@ -162,7 +162,7 @@ time.** Both; source.
 - **Fix:** discovery, preflight and execution must use the same providers. Merge them into the
   layer, or refuse at `wb start`.
 
-**14. wb rejects a model alias that OpenCode runs.** Codex; source.
+**14. ~~wb rejects a model alias that OpenCode runs.~~** **Fixed (#203).** Codex; source.
 - An OpenCode entry can be keyed `friendly` with `"id": "cap"`, the name the server knows. wb uses
   the key as the server-side name everywhere (`models.py:391`, `models.py:404`).
 - `status` then says "the server lists N models, not friendly" (`models.py:575`), while OpenCode
@@ -227,7 +227,7 @@ from the state directory here.
 
 ## P2: needed for 9+
 
-**19. A rejected API key counts as runnable.** Codex; source. A server answering 401/403 is
+**19. ~~A rejected API key counts as runnable.~~** **Fixed (#204).** Codex; source. A server answering 401/403 is
 marked available and resident (`models.py:560`), on purpose: a key-protected server is running.
 But a wrong key passes too, and the router can pick that model over a working one
 (`router.py:168`). **Fix:** keep "reachable" separate from "ready". Retry the list with the key

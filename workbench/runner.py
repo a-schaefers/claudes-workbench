@@ -84,7 +84,8 @@ def fresh_ceiling(cfg: dict) -> float | None:
 
 
 def write_config_layer(task: store.Task) -> Path:
-    """The per-task OpenCode config: the agent's context and the ask_reviewer server."""
+    """The per-task OpenCode config: the providers OpenCode wouldn't load by itself
+    (models.agent_providers), the agent's context and the ask_reviewer server."""
     path = context.rules_dir(task) / "opencode.json"
     wait_ms = int(task.spec.get("ask_timeout", 1200) + 60) * 1000
     try:
@@ -93,6 +94,7 @@ def write_config_layer(task: store.Task) -> Path:
         buffer = None
     store.write_json(path, {
         "$schema": "https://opencode.ai/config.json",
+        **models.agent_providers(),
         **context.layer(task),
         "share": "disabled",  # a user's `share: "auto"` would publish every agent session
         **({"compaction": {"auto": True, "buffer": buffer}} if buffer else {}),
@@ -105,6 +107,7 @@ def write_config_layer(task: store.Task) -> Path:
             "timeout": {"startup": 15000, "execution": wait_ms},
         }}},
     })
+    os.chmod(path, 0o600)  # a provider copied in may carry its apiKey
     return path
 
 
