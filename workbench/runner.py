@@ -126,6 +126,11 @@ def write_config_layer(task: store.Task) -> Path:
         **models.agent_providers(),
         **context.layer(task),
         "share": "disabled",  # a user's `share: "auto"` would publish every agent session
+        # the user's global small_model (titles, summaries) could be a cloud model whose key
+        # auth.json holds, sent the task's text; an update mid-task could move OpenCode past
+        # OPENCODE_TESTED (#353, the audit of 1.4)
+        "small_model": task.spec["model"],
+        "autoupdate": False,
         **({"compaction": {"auto": True, "buffer": buffer}} if buffer else {}),
         "mcp": {"servers": {**users_servers_off(), "workbench": {  # 2.x shape: mcp.servers.<name>
             "type": "local",

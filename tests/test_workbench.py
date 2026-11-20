@@ -2972,6 +2972,9 @@ class ConfigLayer(Base):
         self.assertIs(server["codemode"], False)
         self.assertGreater(server["timeout"]["execution"], 1200 * 1000)
         self.assertEqual(server["environment"]["WB_TASK"], "t-cfg")
+        # #353: the user's small_model could be a cloud one; an update could land mid-task
+        self.assertEqual((layer["small_model"], layer["autoupdate"]),
+                         (store.Task("t-cfg").spec["model"], False))
 
     def test_providers_from_a_config_opencode_wont_load_by_itself_reach_the_agent(self):
         # the 2026-11-19 audit (finding 13): wb read $WB_OPENCODE_CONFIG (or ignored the user's

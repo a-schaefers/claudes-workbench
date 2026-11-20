@@ -1177,7 +1177,11 @@ can't run (`runner.users_servers_off`: `{"type": "local", "command": ["false"], 
 false}`; OpenCode 2.3 starts a server whose own entry says `"enabled": false` all the same), and
 its permissions start with `MCP_RULES`: deny `*_*` (every MCP tool, named `<server>_<tool>`, a
 project's too), allow `workbench_*`, allow `doom_loop` (what `--auto` gave it). The layer also
-sets `"share": "disabled"`, against a user's `share: "auto"`.
+sets `"share": "disabled"`, against a user's `share: "auto"`, `small_model` to the task's own
+model (a user's could be a cloud one, sent the task's text for titles and summaries) and
+`"autoupdate": false` (an update mid-task could move OpenCode past `OPENCODE_TESTED`), both
+accepted by OpenCode 2.3 in the real-OpenCode tests (#353, the audit of 1.4). The user's plugins
+still load: theirs to choose, and not the agent's to change.
 
 **What the agent writes is not trusted.** Of the task directory, the lane writes only the
 worktree and `ask/`; the grants, the rules and the config live in `rules/<task>/`, and the ask
