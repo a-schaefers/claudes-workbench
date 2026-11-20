@@ -3093,14 +3093,23 @@ def cmd_update(a):
 def gpu_line() -> str:
     """What the GPU budget counts (wb doctor, wb scout): sharing and the router's fit rest on it."""
     budget, _, why = models.budget_devices()
+    gs = [] if models._fake() or why == "models.json gpu_gb" else hardware.gpus()
+    # a GPU that publishes no memory size (Intel's i915 and xe) is left out of the budget: with
+    # none, tasks never share and the user's other Ollama models are unloaded every round; the
+    # fix was gpu_gb, and nothing said how to set it (#272, the audit of 1.2)
+    unknown = sorted({g["name"] for g in gs if g.get("vram") is None and not g.get("unified")})
+    hand = (f'set its memory in {models.overrides_path()}: {{"gpu_gb": <the card\'s GB>}}'
+            if unknown else "models.json gpu_gb sets it by hand")
     if budget:
         return (f"GPU budget {budget / 1e9:.0f} GB, from {why or 'the GPU'}: tasks share the GPU when "
-                "their Ollama models fit in it together (models.json gpu_gb sets it by hand)")
-    gs = [] if models._fake() else hardware.gpus()
+                "their Ollama models fit in it together" +
+                (f"; {', '.join(unknown)} publishes no memory size: if models run on it, {hand}"
+                 if unknown else " (models.json gpu_gb sets it by hand)"))
     if gs:
         return (f"GPU memory unknown here ({', '.join(sorted({g['driver'] for g in gs}))}): tasks take "
                 "turns on the GPU, and the router can't hold back a model too big for it; "
-                "models.json gpu_gb sets it by hand")
+                + (f"if {', '.join(unknown)} has memory of its own (an Intel Arc), {hand}" if unknown
+                   else hand))
     return ("no GPU memory found: local models run on the CPU, slowly; "
             "wb model sizes <id> trivial keeps a big one off small tasks")
 
