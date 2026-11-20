@@ -263,12 +263,13 @@ def sweep(task: store.Task) -> int:
     """Kill every process of ours the agent started for this task and left running: a server
     backgrounded with `&`, a `setsid`'d child, the agent itself after its runner died. They are
     found by the environment the runner gave them (WB_TASK and WB_HOME, agent_env), since
-    OpenCode's shell starts each command in a group of its own. Linux only (/proc); elsewhere
-    the process group kills are all there is. The 2026-11-16 audit: a leftover writer kept
-    editing the worktree after Claude read the diff, and a crashed runner left its agent working."""
+    OpenCode's shell starts each command in a group of its own. /proc's environ, else `ps -E`
+    (macOS, where they once outlived the round: #236). The 2026-11-16 audit: a leftover writer
+    kept editing the worktree after Claude read the diff, and a crashed runner left its agent
+    working."""
     proc = Path("/proc")
     if not proc.joinpath("self").exists():
-        return 0
+        return _sweep_ps(task)
     want = {f"WB_TASK={task.name}".encode(), f"WB_HOME={store.home()}".encode()}
     me, uid, n = os.getpid(), os.getuid(), 0
     for d in proc.iterdir():
@@ -281,6 +282,30 @@ def sweep(task: store.Task) -> int:
             n += 1
         except OSError:
             continue
+    return n
+
+
+def _sweep_ps(task: store.Task) -> int:
+    """sweep without /proc: BSD ps's -E puts each of our processes' environment after its command
+    line, so the two variables are matched as whole words there."""
+    try:
+        r = subprocess.run(["ps", "-axwwE", "-o", "pid=,uid=,command="], capture_output=True,
+                           text=True, errors="replace", timeout=10)
+    except (OSError, subprocess.TimeoutExpired):
+        return 0
+    want = (f" WB_TASK={task.name} ", f" WB_HOME={store.home()} ")
+    me, uid, n = os.getpid(), os.getuid(), 0
+    for line in r.stdout.splitlines() if r.returncode == 0 else []:
+        pid, _, rest = line.strip().partition(" ")
+        owner, _, command = rest.strip().partition(" ")
+        if not (pid.isdigit() and owner.isdigit()) or int(pid) == me or int(owner) != uid:
+            continue
+        if all(w in f" {command} " for w in want):
+            try:
+                os.kill(int(pid), signal.SIGKILL)
+                n += 1
+            except OSError:
+                continue
     return n
 
 

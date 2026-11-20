@@ -91,6 +91,10 @@ if subprocess.run(["git", "config", "user.email"], capture_output=True).returnco
     os.environ["GIT_CONFIG_GLOBAL"] = str(_gitconfig)
 
 
+# a program that runs and exits 0: /bin/true on Linux, /usr/bin/true on macOS (where /bin has none)
+TRUE = shutil.which("true") or "/bin/true"
+
+
 def home_outside_the_lane(test):
     """For a test that hides credentials under the home directory: the lane writes the temp roots
     whole, so with the home inside one (a sandbox's profile under /tmp) nothing there is hidden,
@@ -105,6 +109,9 @@ class Base(unittest.TestCase):
         # `wb start` leaves its runner running on purpose (it outlives the command)
         warnings.simplefilter("ignore", ResourceWarning)
         self.tmp = tempfile.TemporaryDirectory()
+        # its real path: macOS's temp directory is under /var, a link to /private/var, and wb
+        # records repos and directories by their real paths (git's toplevel, getcwd)
+        self.tmp.name = os.path.realpath(self.tmp.name)
         tmp = Path(self.tmp.name)
         self.env_before = dict(os.environ)
         # the suite may run in Claude Code's Bash: no task is a session's unless a test says so
@@ -302,6 +309,25 @@ class Lifecycle(Base):
         wait_phase("t-server", {"review"}, timeout=40)
         self.assertLess(time.time() - began, 30)
         self.assertTrue(wait_gone(int(pidfile.read_text())))
+
+    def test_without_proc_the_sweep_finds_the_tasks_processes_by_their_environment_in_ps(self):
+        # #236: on macOS (no /proc) what the agent left running outlived its round
+        task = store.Task("t-a")
+        home, uid, me = store.home(), os.getuid(), os.getpid()
+        out = "\n".join([
+            f"  101 {uid} sleep 300 PATH=/bin WB_TASK=t-a WB_HOME={home} TERM=x",   # the task's
+            f"  102 {uid} node srv.js WB_HOME={home} WB_TASK=t-a",                  # the task's too
+            f"  103 {uid} sleep 300 WB_TASK=t-ab WB_HOME={home}",                   # another task's
+            f"  104 {uid + 1} sleep 300 WB_TASK=t-a WB_HOME={home}",                # another user's
+            f"  105 {uid} sleep 300 WB_TASK=t-a WB_HOME={home}/other",              # another wb's
+            f"  {me} {uid} python3 runner WB_TASK=t-a WB_HOME={home}",              # the runner
+            "garbage"])
+        killed = []
+        with mock.patch.object(runner.subprocess, "run",
+                               return_value=subprocess.CompletedProcess([], 0, out, "")), \
+                mock.patch.object(runner.os, "kill", lambda pid, sig: killed.append(pid)):
+            self.assertEqual(runner._sweep_ps(task), 2)
+        self.assertEqual(killed, [101, 102])
 
     def test_what_the_agent_leaves_running_ends_with_its_round(self):
         # A writer left running could change the worktree after Claude read the diff (the
@@ -1261,8 +1287,13 @@ class Lifecycle(Base):
         before = gitops.mark(wt)
         (wt / "l.c").write_bytes(b"caf\xe7\n")   # one non-UTF-8 byte for another is still an edit
         self.assertNotEqual(gitops.mark(wt), before)
-        (wt / os.fsdecode(b"f\xe9.c")).write_bytes(b"x")       # and a new file with such a name
-        self.assertIn("�", run_wb("diff", "t-l1"))
+        try:
+            (wt / os.fsdecode(b"f\xe9.c")).write_bytes(b"x")   # and a new file with such a name
+        except OSError as e:  # APFS takes UTF-8 names only (EILSEQ): no such file can exist there
+            if e.errno != errno.EILSEQ:
+                raise
+        else:
+            self.assertIn("�", run_wb("diff", "t-l1"))
         run_wb("feedback", "t-l1", "--text", "1. Keep it.")
         self.assertEqual(wait_phase("t-l1", {"review", "failed"})["phase"], "review")
 
@@ -3163,6 +3194,7 @@ class Lane(Base):
         self.assertEqual(env["PWD"], str(task.worktree))
 
     @home_outside_the_lane
+    @unittest.skipUnless(lane.abi(), "needs Landlock: the kernel refuses the reads")
     def test_credentials_are_unreadable_and_the_rules_out_of_reach(self):
         task = store.Task("t-sec")
         self.start("t-sec", "ok")
@@ -3482,8 +3514,8 @@ class Lane(Base):
         home = self.fake_home()
         for d in ("miniconda3/bin", "apps/t2/bin", ".local/bin", "bin"):
             (home / d).mkdir(parents=True)
-        shutil.copy("/bin/true", home / "miniconda3" / "bin" / "tool")
-        shutil.copy("/bin/true", home / "apps" / "t2" / "bin" / "t2")
+        shutil.copy(TRUE, home / "miniconda3" / "bin" / "tool")
+        shutil.copy(TRUE, home / "apps" / "t2" / "bin" / "t2")
         os.symlink(home / "apps" / "t2" / "bin" / "t2", home / ".local" / "bin" / "t2")
         os.environ["PATH"] = os.pathsep.join([str(home / "miniconda3" / "bin"),
                                               str(home / ".local" / "bin"), str(home / "bin"),
@@ -3513,7 +3545,7 @@ class Lane(Base):
         cellar = brew / "Cellar" / "tool" / "1.0" / "bin"
         for d in (cellar, brew / "bin", brew / "lib", root / "bob" / "bin"):
             d.mkdir(parents=True)
-        shutil.copy("/bin/true", cellar / "tool")
+        shutil.copy(TRUE, cellar / "tool")
         os.symlink("../Cellar/tool/1.0/bin/tool", brew / "bin" / "tool")
         (root / "bob" / "letters.txt").write_text("private")
         os.environ["PATH"] = os.pathsep.join([str(brew / "bin"), str(root / "bob" / "bin"),
@@ -3606,6 +3638,7 @@ class Lane(Base):
                 run_wb("start", "t-home", "--spec", str(self.spec), "--repo", str(repo))
             self.assertIn(said, err.getvalue())
 
+    @unittest.skipUnless(sys.platform.startswith("linux"), "snaps are Linux's")
     def test_a_snap_acceptance_command_is_refused_at_start(self):
         with mock.patch("shutil.which", return_value="/snap/bin/go"):
             err = io.StringIO()
@@ -3655,8 +3688,8 @@ class Lane(Base):
         tools, local = home / "tools" / "bin", home / ".local" / "bin"
         for d in (system32, node, tools, local):
             d.mkdir(parents=True)
-        shutil.copy("/bin/true", system32 / "cmd.exe")
-        shutil.copy("/bin/true", node / "npm")
+        shutil.copy(TRUE, system32 / "cmd.exe")
+        shutil.copy(TRUE, node / "npm")
         os.symlink(node / "npm", local / "npm")        # a link into the drive
         mounts = home / "mounts"
         mounts.write_text("none /mnt/wsl tmpfs rw 0 0\n"
@@ -5005,16 +5038,19 @@ class Savings(Base):
         t = {"now": 100.0}
         fake_time = lambda: (t.__setitem__("now", t["now"] + 0.1) or t["now"])
         readings = [300.0, None, 300.0, None, 300.0, None, 300.0]
-        with mock.patch.object(hardware, "gpu_power_w", side_effect=list(readings)), \
+        with mock.patch.object(hardware, "gpu_power_w", side_effect=list(readings)) as power, \
              mock.patch.object(runner, "POWER_EVERY", 0.1), \
              mock.patch.object(runner.time, "time", side_effect=fake_time):
             p = runner._Power()
             p.start()
-            time.sleep(0.3)  # the thread takes one reading per 0.1 s of fake time
+            # five readings, however slow the machine: a fixed 0.3 s gave a macOS runner one (#236)
+            deadline = time.monotonic() + 20
+            while power.call_count < 5 and time.monotonic() < deadline:
+                time.sleep(0.02)
             p.stop()
             p.join(timeout=2)
-        # the thread ran 2 to 4 intervals; each 300 W reading covers the next 0.1 s of
-        # fake time, so p.wh is 300 W times 2 to 4 tenths of a second
+        # r0 and r2 (300 W) each cover the next 0.1 s of fake time, r4 too if the thread got to
+        # the next reading before it stopped: 300 W times 2 to 3 tenths of a second
         self.assertGreaterEqual(p.wh, 300.0 * 0.2 / 3600 - 1e-12)
         self.assertLess(p.wh, 300.0 * 0.4 / 3600 + 1e-12)
 

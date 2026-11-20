@@ -1327,11 +1327,19 @@ def pool(m: Model | None) -> str:
 
 
 def _started(pid: int) -> str | None:
-    """When the process started (/proc/<pid>/stat's 22nd field); None without /proc."""
+    """When the process started: /proc/<pid>/stat's 22nd field, else ps's `lstart` (macOS, where a
+    stale gpu.json holder under a recycled pid of ours was trusted, and kept tasks from sharing:
+    #236); None when neither says."""
     try:
         return Path(f"/proc/{pid}/stat").read_text().rpartition(")")[2].split()[19]
     except (OSError, IndexError):
+        pass
+    try:
+        r = subprocess.run(["ps", "-o", "lstart=", "-p", str(pid)], capture_output=True, text=True,
+                           timeout=5, env={**os.environ, "LC_ALL": "C"})
+    except (OSError, subprocess.TimeoutExpired):
         return None
+    return (" ".join(r.stdout.split()) or None) if r.returncode == 0 else None
 
 
 PROC = Path("/proc")
@@ -1360,8 +1368,8 @@ def runs(pid: int, *words: str) -> bool:
 
 def _alive(pid: int, start: str | None = None) -> bool:
     """Whether the holder is still running: its pid is this user's (a recycled pid of another
-    user's is not), and on Linux it started when the holder did (a recycled pid of ours didn't).
-    Without /proc, or for an entry without `start`, the pid alone decides."""
+    user's is not), and it started when the holder did (a recycled pid of ours didn't: /proc, else
+    ps). For an entry without `start`, or where neither says, the pid alone decides."""
     try:
         os.kill(pid, 0)
     except (ProcessLookupError, PermissionError):

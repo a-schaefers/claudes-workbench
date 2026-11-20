@@ -215,6 +215,20 @@ with models.GpuLease(None, optimize.HOLDER, wait=False):
         self.assertEqual(store.Task("t-big").status["phase"], "running")
         run_wb("stop", "t-big")
 
+    def test_without_proc_a_holders_start_comes_from_ps(self):
+        # #236: on macOS (no /proc) a recycled pid of ours was trusted as the holder
+        real = Path.read_text
+        noproc = lambda self, *a, **kw: (_ for _ in ()).throw(OSError("no /proc")) \
+            if str(self).startswith("/proc/") else real(self, *a, **kw)  # noqa: E731
+        sleeper = subprocess.Popen(["sleep", "60"])
+        self.addCleanup(sleeper.kill)
+        with mock.patch.object(Path, "read_text", noproc):
+            start = models._started(sleeper.pid)
+            self.assertRegex(start or "", r"\d\d:\d\d:\d\d")   # ps's lstart
+            self.assertEqual(models._started(sleeper.pid), start)
+            self.assertTrue(models._alive(sleeper.pid, start))
+            self.assertFalse(models._alive(sleeper.pid, "1"))  # recycled: started at another time
+
     def test_a_long_load_never_holds_the_admission_lock(self):
         # a finishing task waited on gpu.admit for another task's load, so its runner looked
         # alive after its review notice and wb feedback refused it (the 2026-11-16 audit)
