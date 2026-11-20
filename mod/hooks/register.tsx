@@ -512,10 +512,13 @@ const mem = {
   posed: '' as Pose | '', // its pose as last drawn in a Raster: the timer animates it while set
   shown: '' as Pose | '', // the frame on screen now
   skill: '', // the /workbench skill's SKILL.md, for the workbench-mode block
+  fold: false, // the session's directory is on a file system that ignores case (macOS): `within`
 }
 
-// Whether path b is path a or inside it, by whole components: /x/ab is not inside /x/a.
-const parts = (p: string) => p.split('/').filter(c => c && c !== '.')
+// Whether path b is path a or inside it, by whole components: /x/ab is not inside /x/a. In lower
+// case where the file system ignores it (`mem.fold`, macOS): ~/Repos typed for ~/repos once
+// missed (the 2026-11-19 audit). wb records task paths real (getcwd, git's toplevel).
+const parts = (p: string) => (mem.fold ? p.toLowerCase() : p).split('/').filter(c => c && c !== '.')
 const within = (a: string, b: string) => {
   const [pa, pb] = [parts(a), parts(b)]
   return pa.length <= pb.length && pa.every((c, i) => c === pb[i])
@@ -1348,6 +1351,9 @@ export const register: Register = (on, options) => {
     })
     const real = async (p: string) => (await $.fs.stat(p, { resolve: true }).catch(() => undefined))?.realPath ?? p
     mem.cwd = await real(e.cwd)
+    // the file system ignores case when the directory is there with every letter's case swapped
+    const swapped = [...mem.cwd].map(c => c === c.toLowerCase() ? c.toUpperCase() : c.toLowerCase()).join('')
+    mem.fold = swapped !== mem.cwd && !!(await $.fs.stat(swapped).catch(() => undefined))
     mem.home = home ? await real(home) : ''
     mem.ids = new Set(await read($, sessions))
     await noteSession($)

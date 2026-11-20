@@ -53,6 +53,33 @@ def opencode_bin() -> list[str]:
     return shlex.split(fake) if fake else ["opencode"]
 
 
+# The OpenCode versions the rules were checked against (the real-OpenCode tests, CLAUDE.md's
+# quirks): from 2.3 up to, not including, 3.0. Outside it the permission rules, the config layer's
+# shape and the events may not hold, and only wb doctor's "2.x or newer" noticed (the 2026-11-19
+# audit). Move it when the real-OpenCode tests pass on a newer one.
+OPENCODE_TESTED = ((2, 3), (3, 0))
+
+
+def opencode_version() -> tuple[int, int] | None:
+    """OpenCode's major and minor version, or None when it doesn't run or say."""
+    try:
+        r = subprocess.run([*opencode_bin(), "--version"], capture_output=True, text=True, timeout=30)
+    except (OSError, subprocess.TimeoutExpired):
+        return None
+    v = re.search(r"(\d+)\.(\d+)", r.stdout) if r.returncode == 0 else None
+    return (int(v[1]), int(v[2])) if v else None
+
+
+def untested(version: tuple[int, int] | None) -> str:
+    """A line when ``version`` is outside OPENCODE_TESTED, else ""."""
+    lo, hi = OPENCODE_TESTED
+    if version is None or lo <= version < hi:
+        return ""
+    return (f"OpenCode {version[0]}.{version[1]} is outside what workbench is tested with "
+            f"({lo[0]}.{lo[1]} up to {hi[0]}.{hi[1]}): the agent's rules and lane may not hold as "
+            "documented; watch its first rounds")
+
+
 # OpenCode compacts a session once its context passes the model's input limit less
 # `compaction.buffer`, and its compaction is the model's own summary, which a small model can get
 # wrong: seen 2026-11-16, a summary that recounted CLAUDE.md instead of the task, and the agent
@@ -1038,6 +1065,12 @@ def summary_text(task: store.Task, n: int, rnd: dict, tests) -> str:
         lines.append(f"STOPPED: {rnd['stuck']}")
     elif rnd["exit"] not in (0, None):
         lines.append(f"opencode exited {rnd['exit']} (see {task.dir / 'runner.log'})")
+    if rnd["exit"] == 0 and not (ask_mcp.ask_dir(task) / ask_mcp.LISTED).exists():
+        # an OpenCode that stopped loading the server would leave the agent no way to ask, and
+        # nothing said so (the 2026-11-19 audit)
+        lines.append("NOTE: the agent's OpenCode never listed workbench_ask_reviewer, so it can't "
+                     f"ask you anything; PWD={task.worktree} OPENCODE_CONFIG="
+                     f"{context.rules_dir(task) / 'opencode.json'} opencode mcp list --print-logs says why")
     if tests is not None:
         lines.append(f"tests: {'PASS' if tests['ok'] else 'FAIL'} (`{spec['test_cmd']}`, "
                      f"exit {tests['exit']})")
