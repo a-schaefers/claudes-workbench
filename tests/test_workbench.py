@@ -8548,7 +8548,8 @@ class Hardware(unittest.TestCase):
         glob = lambda self, pattern: iter(cards) if self == drm else iter(())  # noqa: E731
         for target, value in (("platform.system", lambda: system), ("platform.machine", lambda: machine),
                               ("workbench.hardware._run", run), ("workbench.hardware._read", read),
-                              ("workbench.hardware.DRM", drm), ("pathlib.Path.glob", glob)):
+                              ("workbench.hardware.DRM", drm), ("pathlib.Path.glob", glob),
+                              ("workbench.hardware.PROC", Path("/fake/proc"))):  # no ollama runs
             patcher = mock.patch(target, value)
             patcher.start()
             self.addCleanup(patcher.stop)
@@ -8592,16 +8593,78 @@ class Hardware(unittest.TestCase):
     def test_ollamas_quoted_service_environment_and_a_context_that_isnt_a_number(self):
         # the 2026-11-16 audit: systemd quotes a value with a space and the split lost it; "32k"
         # crashed wb scout, which Ollama only warns about
-        hw = self.fake("Linux", runs={("systemctl",): '"OLLAMA_MODELS=/data/my models" OLLAMA_CONTEXT_LENGTH=32k'})
+        hw = self.fake("Linux", runs={("systemctl",): 'LoadState=loaded\nActiveState=active\n'
+                                      'Environment="OLLAMA_MODELS=/data/my models" OLLAMA_CONTEXT_LENGTH=32k'})
         self.assertEqual(hw.ollama_env()["OLLAMA_MODELS"], "/data/my models")
         self.assertEqual(hw.ollama_context(), (None, "32k"))
         self.assertIn("OLLAMA_CONTEXT_LENGTH='32k' isn't a number", "\n".join(hw.report()))
 
-    def test_the_cards_ollama_may_see_come_from_its_service_else_the_callers_environment(self):
-        hw = self.fake("Linux", runs={("systemctl",): "CUDA_VISIBLE_DEVICES=1"})
+    def test_the_cards_ollama_may_see_come_from_its_service_alone_else_the_callers_environment(self):
+        # #379 (the audit of 1.6): wb's own environment filled in what the unit left unset, which
+        # a systemd service never reads
+        unit = "LoadState=loaded\nActiveState=active\nEnvironment=CUDA_VISIBLE_DEVICES=1"
+        hw = self.fake("Linux", runs={("systemctl",): unit})
         with mock.patch.dict(os.environ, {"CUDA_VISIBLE_DEVICES": "0", "ROCR_VISIBLE_DEVICES": "2"}):
-            env = hw.ollama_env()
-        self.assertEqual((env["CUDA_VISIBLE_DEVICES"], env["ROCR_VISIBLE_DEVICES"]), ("1", "2"))
+            env, source = hw.ollama_settings()
+            self.assertEqual((env["CUDA_VISIBLE_DEVICES"], source), ("1", "systemd's ollama unit"))
+            self.assertNotIn("ROCR_VISIBLE_DEVICES", env)
+            hw = self.fake("Linux", runs={("systemctl",): "LoadState=not-found"})
+            env, source = hw.ollama_settings()       # nothing says: wb's own environment, a guess
+            self.assertEqual((env["CUDA_VISIBLE_DEVICES"], env["ROCR_VISIBLE_DEVICES"], source), ("0", "2", ""))
+
+    def test_ollamas_settings_come_from_the_ollama_that_runs_a_process_or_a_container(self):
+        # #379 (the audit of 1.6): an ollama serve started by hand, or one in Docker, had its
+        # OLLAMA_NUM_PARALLEL and OLLAMA_MAX_LOADED_MODELS read from systemd or wb's environment
+        from workbench import models
+        unit = "LoadState=loaded\nActiveState=inactive\nEnvironment=OLLAMA_NUM_PARALLEL=1"
+        docker = {("docker", "ps"): "f00d ghcr.io/x/open-webui:main webui\nbeef ollama/ollama:rocm llm",
+                  ("docker", "inspect"): json.dumps(["OLLAMA_NUM_PARALLEL=3", "OLLAMA_HOST=0.0.0.0:11434",
+                                                     "OLLAMA_MODELS=/root/.ollama", "PATH=/usr/bin"])}
+        hw = self.fake("Linux", runs={("systemctl",): unit, **docker})
+        env, source = hw.ollama_settings()   # a container: its knobs, not its paths or its bind
+        self.assertEqual((env["OLLAMA_NUM_PARALLEL"], env["OLLAMA_HOST"], env["OLLAMA_MODELS"], source),
+                         ("3", "", "", "the docker container llm"))
+        hw = self.fake("Linux", runs={("systemctl",): unit})
+        self.assertEqual(hw.ollama_settings()[1], "systemd's ollama unit, not running")
+        with tempfile.TemporaryDirectory() as d:
+            proc = Path(d)
+
+            def process(pid, argv, environ, ns="mnt:[1]"):
+                Path(proc, pid, "ns").mkdir(parents=True)
+                Path(proc, pid, "comm").write_text("ollama\n")
+                Path(proc, pid, "cmdline").write_bytes(b"\0".join(argv) + b"\0")
+                Path(proc, pid, "environ").write_bytes(b"\0".join(environ) + b"\0")
+                os.symlink(ns, Path(proc, pid, "ns", "mnt"))
+            Path(proc, "self", "ns").mkdir(parents=True)
+            os.symlink("mnt:[1]", Path(proc, "self", "ns", "mnt"))
+            process("90", [b"/usr/bin/ollama", b"runner"], [b"OLLAMA_NUM_PARALLEL=9"])  # not the server
+            process("120", [b"/usr/bin/ollama", b"serve"],
+                    [b"OLLAMA_NUM_PARALLEL=4", b"CUDA_VISIBLE_DEVICES=1", b"OLLAMA_HOST=127.0.0.1:11500", b"HOME=/x"])
+            with mock.patch("workbench.hardware.PROC", proc):
+                env, source = hw.ollama_settings()   # started by hand: ahead of any unit
+                self.assertEqual((env["OLLAMA_NUM_PARALLEL"], env["CUDA_VISIBLE_DEVICES"],
+                                  env["OLLAMA_HOST"], source),
+                                 ("4", "1", "127.0.0.1:11500", "the running ollama's environment (pid 120)"))
+                self.assertNotIn("HOME", env)
+                os.unlink(Path(proc, "120", "ns", "mnt"))
+                os.symlink("mnt:[2]", Path(proc, "120", "ns", "mnt"))  # a container's, seen from here
+                env, source = hw.ollama_settings()
+                self.assertEqual((env["OLLAMA_NUM_PARALLEL"], env["OLLAMA_HOST"]), ("4", ""))
+                self.assertNotIn("CUDA_VISIBLE_DEVICES", env)
+                self.assertIn("in a container: its knobs only", source)
+                if os.geteuid():  # another user's ollama (a system unit's): systemd says instead
+                    Path(proc, "120", "environ").chmod(0)
+                    self.assertEqual(hw.ollama_settings()[1], "systemd's ollama unit, not running")
+        ollama = models.Model(id="o/m", provider="o", name="m", base_url="http://127.0.0.1:11434/v1",
+                              engine="ollama", label="o/m")
+        hw = self.fake("Linux")
+        with mock.patch.object(models, "_fake", lambda: False), \
+                mock.patch.object(models, "discover", lambda: {"o/m": ollama}):
+            self.assertIn("ollama's settings unknown", cli.ollama_line())   # wb doctor, wb scout
+            self.assertIn("gpu_gb sets the GPU budget and each model's vram_gb its size", cli.ollama_line())
+            hw = self.fake("Linux", runs={("systemctl",): unit})
+            self.assertEqual(cli.ollama_line(),
+                             "ollama's settings: from systemd's ollama unit, not running (OLLAMA_NUM_PARALLEL=1)")
 
     @unittest.skipIf(os.geteuid() == 0, "root reads every directory")
     def test_an_ollama_models_dir_it_cant_read_is_passed_over(self):

@@ -279,31 +279,108 @@ def cpu() -> dict:
 
 OLLAMA_KEYS = ("OLLAMA_MODELS", "OLLAMA_CONTEXT_LENGTH", "OLLAMA_NUM_PARALLEL",
                "OLLAMA_MAX_LOADED_MODELS", "OLLAMA_HOST")
+# The server's own knobs, which mean the same read from a container: its OLLAMA_MODELS is a path
+# inside it, its OLLAMA_HOST the container's bind, and its device masks count its own devices
+OLLAMA_KNOBS = ("OLLAMA_CONTEXT_LENGTH", "OLLAMA_NUM_PARALLEL", "OLLAMA_MAX_LOADED_MODELS")
+SET_ONLY = tuple(k for _, k in VISIBLE)  # unset stays unset: an empty CUDA_VISIBLE_DEVICES is no device (#255)
+PROC = Path("/proc")
+
+
+def _environ(raw: bytes, keys) -> dict:
+    """``keys`` from a NUL-separated environment block (/proc/<pid>/environ, docker's list)."""
+    pairs = (x.decode(errors="replace").partition("=") for x in raw.split(b"\0") if b"=" in x)
+    return {k: v for k, _, v in pairs if k in keys}
+
+
+def _ollama_process() -> tuple[dict, str] | None:
+    """The environment of an `ollama serve` running here that this user may read
+    (/proc/<pid>/environ: one started by hand in another terminal, a user unit's, anyone's as
+    root), and what it is. One in another mount namespace (a container) gives its knobs only.
+    A system unit's process (user ollama) can't be read: systemd says its environment."""
+    try:
+        pids = sorted(int(d.name) for d in PROC.iterdir() if d.name.isdigit())
+    except OSError:
+        return None
+    for pid in pids:
+        d = PROC / str(pid)
+        try:
+            if (d / "comm").read_text().strip() != "ollama" \
+                    or (d / "cmdline").read_bytes().split(b"\0")[1:2] != [b"serve"]:
+                continue
+            raw = (d / "environ").read_bytes()
+        except (OSError, UnicodeDecodeError):
+            continue  # gone, or another user's
+        try:
+            boxed = os.readlink(d / "ns" / "mnt") != os.readlink(PROC / "self" / "ns" / "mnt")
+        except OSError:
+            boxed = False
+        if boxed:
+            return _environ(raw, OLLAMA_KNOBS), f"the ollama process {pid} (in a container: its knobs only)"
+        return _environ(raw, OLLAMA_KEYS + SET_ONLY), f"the running ollama's environment (pid {pid})"
+    return None
+
+
+def _ollama_container() -> tuple[dict, str] | None:
+    """A running container of an ollama image (`ollama/ollama`, any tag or registry), asked of
+    docker or podman when it answers: its Config.Env, the knobs only."""
+    for tool in ("docker", "podman"):
+        for line in _run(tool, "ps", "--format", "{{.ID}} {{.Image}} {{.Names}}").splitlines():
+            cid, image, name = (line.split() + ["", "", ""])[:3]
+            if image.split("@")[0].rsplit("/", 1)[-1].split(":")[0] != "ollama":
+                continue
+            try:
+                items = json.loads(_run(tool, "inspect", "--format", "{{json .Config.Env}}", cid) or "[]")
+            except ValueError:
+                items = []
+            raw = b"\0".join(str(x).encode() for x in items if isinstance(x, str))
+            return _environ(raw, OLLAMA_KNOBS), f"the {tool} container {name or cid}"
+    return None
+
+
+def ollama_settings() -> tuple[dict, str]:
+    """The environment of the Ollama that runs here (where it keeps models, its default context,
+    its sharing knobs, where it listens, the devices it may use), and where it was read; "" when
+    nothing could say, and wb's own environment is the guess. In order: a running `ollama serve`
+    this user may read; a running systemd unit (the system's, else the user's), its Environment
+    split as a shell would (systemd quotes an entry holding a space: split on spaces it was lost,
+    the 2026-11-16 audit); an ollama container; on macOS what the app reads (launchctl setenv);
+    a unit that isn't running, which Ollama reads when it starts. Read from systemd, launchctl or
+    wb's own environment alone, a server in Docker, one started by hand, or Ollama for Windows
+    from WSL had OLLAMA_NUM_PARALLEL and OLLAMA_MAX_LOADED_MODELS read as unset, so sharing was
+    refused that fit or allowed where Ollama swaps (#379, the audit of 1.6). One source is the
+    whole answer: wb's environment no longer fills in what a unit leaves unset."""
+    found, idle = _ollama_process(), None
+    if not found and system() != "macos":
+        for scope in ((), ("--user",)):
+            raw = _run("systemctl", *scope, "show", "ollama", "-p", "LoadState", "-p", "ActiveState",
+                       "-p", "Environment")
+            props = dict(line.partition("=")[::2] for line in raw.splitlines())
+            if props.get("LoadState") != "loaded":
+                continue
+            try:
+                items = shlex.split(props.get("Environment", ""))
+            except ValueError:  # an unbalanced quote
+                items = props.get("Environment", "").split()
+            unit = (_environ("\0".join(items).encode(), OLLAMA_KEYS + SET_ONLY),
+                    "systemd's ollama unit" + (" (--user)" if scope else ""))
+            if props.get("ActiveState") in ("active", "activating", "reloading"):
+                found = unit
+                break
+            idle = idle or (unit[0], unit[1] + ", not running")
+    found = found or _ollama_container()
+    if not found and system() == "macos":
+        env = {k: v for k in OLLAMA_KEYS if (v := _run("launchctl", "getenv", k))}
+        found = (env, "launchctl (what the Ollama app reads)") if env else None
+    env, source = found or idle or ({k: os.environ[k] for k in OLLAMA_KEYS + SET_ONLY
+                                     if k in os.environ}, "")
+    for k in OLLAMA_KEYS:
+        env.setdefault(k, "")
+    return env, source
 
 
 def ollama_env() -> dict:
-    """The Ollama service's environment (where it keeps models, its default context, where it
-    listens): systemd's unit (the system's, else the user's), or on macOS what the app reads
-    (launchctl setenv). An Ollama started by hand reads the caller's environment instead."""
-    env = {}
-    if system() == "macos":
-        env = {k: v for k in OLLAMA_KEYS if (v := _run("launchctl", "getenv", k))}
-    else:
-        for scope in ((), ("--user",)):
-            raw = _run("systemctl", *scope, "show", "ollama", "-p", "Environment", "--value")
-            try:  # systemd quotes an entry holding a space: "OLLAMA_MODELS=/data/my models"
-                items = shlex.split(raw)  # (split on spaces, it was lost: the 2026-11-16 audit)
-            except ValueError:  # an unbalanced quote
-                items = raw.split()
-            for item in items:
-                k, _, v = item.partition("=")
-                env.setdefault(k, v)
-    for k in OLLAMA_KEYS:
-        env.setdefault(k, os.environ.get(k, ""))
-    for _, k in VISIBLE:  # unset stays unset: an empty CUDA_VISIBLE_DEVICES is no device (#255)
-        if k in os.environ:
-            env.setdefault(k, os.environ[k])
-    return env
+    """The running Ollama's environment (ollama_settings)."""
+    return ollama_settings()[0]
 
 
 def ollama_context() -> tuple[int | None, str]:

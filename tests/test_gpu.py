@@ -545,6 +545,7 @@ class Budget(unittest.TestCase):
         self.assertEqual(self.budget([small, big], {"GGML_VK_VISIBLE_DEVICES": "1"}), (24 * 2 ** 30, [big]))
         with mock.patch.dict(os.environ, {}, clear=True), \
                 mock.patch.object(hardware, "_run", lambda *a: ""), \
+                mock.patch.object(hardware, "PROC", Path("/nonexistent")), \
                 mock.patch.object(hardware, "system", lambda: "linux"):
             self.assertNotIn("CUDA_VISIBLE_DEVICES", hardware.ollama_env())   # unset stays unset
 
@@ -593,19 +594,21 @@ class CanShare(Base):
         self.assertFalse(models.can_share(b, [], int(99e9)))      # nothing to share with
         self.assertFalse(models.can_share(self.model("srv/x", "server"), [a], int(99e9)))
         self.assertFalse(models.can_share(b, [self.model("ollama/u", gb=0)], int(99e9)))  # unknown size
-        os.environ["OLLAMA_NUM_PARALLEL"] = "1"
-        self.assertFalse(models.can_share(a, [a], int(99e9)))     # the same model would take turns
+        with mock.patch.object(models.hardware, "ollama_env", lambda: {"OLLAMA_NUM_PARALLEL": "1"}):
+            self.assertFalse(models.can_share(a, [a], int(99e9)))     # the same model would take turns
 
     def test_the_same_model_shares_only_as_many_times_as_ollama_has_slots(self):
         # the 2026-11-19 audit: OLLAMA_NUM_PARALLEL=2 admitted any number, and a third task's
         # requests queued inside Ollama while its silence budget ran
+        # (the setting is the running Ollama's, not wb's environment: #379, the audit of 1.6)
         a, b = self.model("ollama/a", gb=1), self.model("ollama/b", gb=1)
-        os.environ["OLLAMA_NUM_PARALLEL"] = "2"
-        self.assertTrue(models.can_share(a, [a], int(99e9)))
-        self.assertFalse(models.can_share(a, [a, a], int(99e9)))
-        self.assertTrue(models.can_share(a, [a, b], int(99e9)))   # b's slots are b's own
-        os.environ["OLLAMA_NUM_PARALLEL"] = "3"
-        self.assertTrue(models.can_share(a, [a, a], int(99e9)))
+        par = lambda n: mock.patch.object(models.hardware, "ollama_env", lambda: {"OLLAMA_NUM_PARALLEL": n})  # noqa
+        with par("2"):
+            self.assertTrue(models.can_share(a, [a], int(99e9)))
+            self.assertFalse(models.can_share(a, [a, a], int(99e9)))
+            self.assertTrue(models.can_share(a, [a, b], int(99e9)))   # b's slots are b's own
+        with par("3"):
+            self.assertTrue(models.can_share(a, [a, a], int(99e9)))
 
     def test_more_models_than_ollama_keeps_loaded_never_share(self):
         # OLLAMA_MAX_LOADED_MODELS=1 made two tasks' models swap on every request (the 2026-11-16 audit)

@@ -2278,6 +2278,8 @@ def cmd_scout(a):
     print("\nhardware")
     print("\n".join(hardware.report()))
     print("  " + gpu_line())
+    if said := ollama_line():
+        print("  " + said)
     print("\nimage engines (wb image)")
     print("\n".join(image_lines()) or f"  none: describe one in {images.config_path()}")
     provs = models.providers()
@@ -3360,6 +3362,23 @@ def gpu_line() -> str:
             "wb model sizes <id> trivial keeps a big one off small tasks")
 
 
+def ollama_line() -> str:
+    """Where the Ollama here had its settings read (wb doctor, wb scout), or that nothing could
+    say: sharing and the GPU budget rest on them (#379, the audit of 1.6). "" without a local
+    Ollama model."""
+    if models._fake() or not any(m.engine == "ollama" and not m.remote for m in models.discover().values()):
+        return ""
+    env, source = hardware.ollama_settings()
+    if source:
+        knobs = ", ".join(f"{k}={env[k]}" for k in hardware.OLLAMA_KNOBS if env.get(k))
+        return f"ollama's settings: from {source}" + (f" ({knobs})" if knobs else " (Ollama's defaults)")
+    return ("ollama's settings unknown: no ollama process here wb may read, no systemd unit, no "
+            "ollama container (Ollama for Windows, another user's, a container docker won't show), so "
+            "OLLAMA_NUM_PARALLEL, OLLAMA_MAX_LOADED_MODELS and the GPU masks are guessed from wb's own "
+            "environment: tasks may share where Ollama swaps, or take turns where they'd fit; "
+            f"{models.overrides_path().name}'s gpu_gb sets the GPU budget and each model's vram_gb its size")
+
+
 def cmd_doctor(a):
     ok = True
 
@@ -3507,6 +3526,8 @@ def cmd_doctor(a):
                  + ("" if free >= DISK_SPARE else ": a task's writes fail on a full disk; wb "
                     "discard an open task, or free some"))
     print("--  " + gpu_line())  # informs only: a CPU-only machine isn't broken
+    if said := ollama_line():
+        print("--  " + said)
     if unheld := models.unheld_loaded(skip=down):  # a shared Ollama: another user's, a tool's (#378)
         print(f"--  ollama has {', '.join(unheld)} loaded, which no task here holds: a task that "
               "needs the room unloads it (after it goes idle). If others use this Ollama, "
