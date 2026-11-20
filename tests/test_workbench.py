@@ -6271,6 +6271,26 @@ class Update(Base):
         self.assertEqual(self.calls.read_text().splitlines(),
                          ["plugin marketplace update workbench", "plugin update workbench@workbench"])
 
+    def test_a_shallow_marketplace_copy_replaced_by_claude_code_reports_its_update(self):
+        # a user's 0.94 to 1.4 (2026-11-20): Claude Code's clone is one commit deep and its
+        # update replaces it, so counting from the old HEAD died after the update had landed
+        git = lambda d, *a: subprocess.run(["git", "-C", str(d), *a], check=True, capture_output=True,
+                                           text=True).stdout.strip()
+        clone = ["git", "clone", "-q", "--depth", "1", f"file://{self.origin}", str(self.copy)]
+        shutil.rmtree(self.copy)
+        subprocess.run(clone, check=True, capture_output=True)
+        old = git(self.copy, "rev-parse", "HEAD")
+        (self.origin / "more.txt").write_text("y")
+        git(self.origin, "add", "more.txt"); git(self.origin, "commit", "-qm", "more")
+        (Path(self.tmp.name) / "fakebin" / "claude").write_text(   # its update: a new clone
+            f'#!/bin/sh\necho "$@" >> {self.calls}\ncase "$*" in "plugin marketplace update"*)\n'
+            f'  rm -rf {shlex.quote(str(self.copy))} && {shlex.join(clone)};; esac\n')
+        out = self.update()
+        self.assertIn(f"updated marketplace {old[:7]}..", out)
+        self.assertNotIn("rev-list", out)
+        self.assertTrue((self.copy / "more.txt").exists())
+        self.assertEqual(store.read_json(store.home() / "update.json")["behind"], 0)
+
     def test_a_clone_pulls_unless_it_has_changes_or_tasks_are_running(self):
         os.environ["CLAUDE_CONFIG_DIR"] = str(Path(self.tmp.name) / "elsewhere")   # not Claude Code's clone
         (self.copy / "README.md").write_text("mine")
