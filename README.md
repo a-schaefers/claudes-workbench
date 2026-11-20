@@ -24,6 +24,10 @@ Claude Code plugin that connects the two inside your normal Claude Code session.
   keep working, and the agents work on their own branches, so your checkout is untouched until
   you accept.
 
+On bigger coding tasks, once the session is already open, handing the coding off to the local
+model typically costs Claude about half the tokens of writing the code itself
+([measured](ARCHITECTURE.md#what-a-handoff-costs-claude-measured)).
+
 ## Quickstart
 
 ### What you need
