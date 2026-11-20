@@ -363,7 +363,7 @@ const CHAT_STOPS: [string, string, string][] = [
 // experiments.json), on by default while it is measured. A task keeps what it started with.
 const PROBE_STOPS: [string, string, string][] = [
   ['off', 'Off', 'The agent reads whole files, as without the experiment.'],
-  ['on', 'On (default)', "The agent may read a file's outline and one function, with probe (cargo install probe-code)."],
+  ['on', 'On (default)', "The agent may read a file's outline and one function, with probe (its release binary)."],
 ]
 
 async function probeMode($: any): Promise<string> {
