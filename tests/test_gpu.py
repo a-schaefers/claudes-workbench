@@ -4,6 +4,7 @@ import json
 import os
 import subprocess
 import sys
+import tempfile
 import threading
 import time
 import unittest
@@ -362,10 +363,12 @@ with models.GpuLease(None, optimize.HOLDER, wait=False):
 class Budget(unittest.TestCase):
     """The GPU budget: one runtime's GPUs, an iGPU's carve-out left out, Apple's real default."""
 
-    def budget(self, gpus):
-        with mock.patch.dict(os.environ, {"WB_FAKE_MODELS": ""}), \
-                mock.patch.object(models.hardware, "gpus", lambda windows=True: gpus):
-            return models.budget_devices()
+    def budget(self, gpus, env=None, why=False):
+        with mock.patch.dict(os.environ, {"WB_FAKE_MODELS": "", "WB_MODELS": "/nonexistent"}), \
+                mock.patch.object(models.hardware, "gpus", lambda windows=True: gpus), \
+                mock.patch.object(models.hardware, "ollama_env", lambda: env or {}):
+            budget, devs, said = models.budget_devices()
+            return (budget, devs, said) if why else (budget, devs)
 
     def test_an_igpu_of_another_vendor_isnt_added_to_the_cards_vram(self):
         # an RTX 4060 laptop's Radeon 780M carve-out made 8 GB look like 12 (the 2026-11-16 audit)
@@ -399,15 +402,44 @@ class Budget(unittest.TestCase):
         self.assertEqual(self.budget([mac(64)])[0], 64 * 2 ** 30 * 3 // 4)
         self.assertEqual(self.budget([mac(16, 14 * 2 ** 30)])[0], 14 * 2 ** 30)  # wired_limit_mb wins
 
+    def test_only_the_cards_ollama_may_see_count(self):
+        # the 2026-11-19 audit: two 8 GiB cards with Ollama limited to one made a 16 GiB budget
+        card = lambda uuid: {"name": "RTX 4060", "driver": "nvidia 560.94", "vram": 8 * 2 ** 30,  # noqa
+                             "discrete": True, "uuid": uuid}
+        a, b = card("GPU-8932f937-d72c"), card("GPU-1d2e3f40-aa11")
+        self.assertEqual(self.budget([a, b])[0], 16 * 2 ** 30)
+        budget, devs, why = self.budget([a, b], {"CUDA_VISIBLE_DEVICES": "0"}, why=True)
+        self.assertEqual((budget, devs), (8 * 2 ** 30, [a]))
+        self.assertEqual(why, "RTX 4060 (VRAM), as CUDA_VISIBLE_DEVICES=0 leaves it")
+        self.assertEqual(self.budget([a, b], {"CUDA_VISIBLE_DEVICES": "GPU-1d2e"}), (8 * 2 ** 30, [b]))
+        self.assertEqual(self.budget([a, b], {"CUDA_VISIBLE_DEVICES": "1,0"})[0], 16 * 2 ** 30)
+        self.assertEqual(self.budget([a, b], {"CUDA_VISIBLE_DEVICES": "-1"}), (None, []))
+        self.assertEqual(self.budget([a, b], {"CUDA_VISIBLE_DEVICES": "1,7,0"}), (8 * 2 ** 30, [b]))
+        rx = {"name": "RX 7600", "driver": "amdgpu", "vram": 8 * 2 ** 30, "discrete": True}
+        self.assertEqual(self.budget([dict(rx), rx], {"ROCR_VISIBLE_DEVICES": "1"}), (8 * 2 ** 30, [rx]))
+        self.assertEqual(self.budget([a, b], {"ROCR_VISIBLE_DEVICES": "0"})[0], 16 * 2 ** 30)
+
+    def test_models_json_gpu_gb_sets_the_budget_by_hand(self):
+        with tempfile.TemporaryDirectory() as d:
+            path = Path(d, "models.json")
+            path.write_text(json.dumps({"gpu_gb": 20}))
+            with mock.patch.dict(os.environ, {"WB_MODELS": str(path)}), \
+                    mock.patch.object(models.hardware, "gpus", lambda windows=True: []):
+                self.assertEqual(models.budget_devices(), (20 * 10 ** 9, [], "models.json gpu_gb"))
+                self.assertIn("GPU budget 20 GB, from models.json gpu_gb", cli.gpu_line())
+                path.write_text(json.dumps({"gpu_gb": "lots"}))
+                with self.assertRaisesRegex(RuntimeError, "gpu_gb is 'lots', not a number of GB"):
+                    models.gpu_budget()
+
     def test_doctor_and_scout_say_what_the_budget_counts(self):
-        rtx = {"name": "RTX 4060", "driver": "nvidia 560.94", "vram": 8 * 2 ** 30}
-        with mock.patch.object(models, "budget_devices", lambda: (8 * 2 ** 30, [rtx])):
-            self.assertIn("GPU budget 9 GB, from RTX 4060", cli.gpu_line())
-        with mock.patch.object(models, "budget_devices", lambda: (None, [])), \
+        with mock.patch.object(models, "budget_devices", lambda: (8 * 2 ** 30, [], "RTX 4060 (VRAM)")):
+            self.assertIn("GPU budget 9 GB, from RTX 4060 (VRAM)", cli.gpu_line())
+        with mock.patch.object(models, "budget_devices", lambda: (None, [], "")), \
                 mock.patch.dict(os.environ, {"WB_FAKE_MODELS": ""}), \
                 mock.patch.object(cli.hardware, "gpus", lambda windows=True: [
                     {"name": "Arc", "driver": "xe", "vram": None}]):
             self.assertIn("GPU memory unknown here (xe): tasks take turns", cli.gpu_line())
+            self.assertIn("models.json gpu_gb sets it by hand", cli.gpu_line())
 
 
 class CanShare(Base):

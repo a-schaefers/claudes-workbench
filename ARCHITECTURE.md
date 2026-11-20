@@ -1714,6 +1714,8 @@ model id; a model's entry is merged over its provider's (`{**provider, **model}`
 - `skip`: leave the model (or every model of the provider) out;
 - `sizes`: the task sizes it may take (`wb model sizes`; empty means both);
 - `vram_gb`: the GPU memory it takes (decimal GB), for sharing and for `fits`;
+- `gpu_gb` (top level, not under an id): this machine's GPU budget by hand, in decimal GB
+  (*Sharing the GPU*);
 - `weights_gb`: its size, which always overrides the server's figure (for one that can't report it);
 - `label`: the display name (also in `wb accept`'s commit message);
 - `engine` (`ollama`/`server`): per provider only;
@@ -1797,8 +1799,10 @@ and it serves another model, which is then stopped first. `releasable(m)`: what 
 let go of (a local Ollama model, a local server with `stop`).
 
 **Sharing the GPU** (`GpuLease`, `admits`, `can_share`, `budget_devices`, `gpu_budget`, `need`).
-The budget (`budget_devices`, which also returns the devices it counts, for `wb doctor` and `wb
-scout`) comes from one runtime's GPUs: the GPUs are grouped by driver (`nvidia`, `amdgpu`,
+The budget (`budget_devices`, which also returns the devices it counts and where the number
+comes from, for `wb doctor` and `wb scout`'s `cli.gpu_line`) is models.json's top-level `gpu_gb`
+when set (decimal GB, the escape hatch for hardware this can't read; not a number: an error, as a
+malformed file), else it comes from one runtime's GPUs: the GPUs are grouped by driver (`nvidia`, `amdgpu`,
 `metal`…) and the largest group's sum is taken, so several NVIDIA cards (which Ollama splits a
 model across) add up but another vendor's GPU beside them doesn't; a discrete device under
 `IGPU_UNDER` 1 GiB (an integrated GPU's carve-out, Ollama's own cutoff) is left out. Summing
@@ -1809,7 +1813,10 @@ reports an APU's carve-out of system RAM as VRAM too, so `hardware.gpus` marks a
 known discrete, only those count, so a carve-out never outranks or adds to a card (the 0.90
 review: a 16 GiB Radeon 780M carve-out beside an 8 GiB RTX became the budget, and a 4 GiB one was
 added to an RX 7600S's 8). With none known discrete (an APU alone, a card that names no vendor)
-the groups decide as above. Apple Silicon: `iogpu.wired_limit_mb` when set, else macOS's default
+the groups decide as above. Only the devices Ollama may see count (`hardware.visible` over
+`ollama_env()`): two 8 GiB cards with Ollama limited to one by `CUDA_VISIBLE_DEVICES` made a
+16 GiB budget (the 2026-11-19 audit). A unified GPU off macOS counts what `hardware.gpus` found
+(an APU's carve-out plus GTT, a DGX Spark's RAM). Apple Silicon: `iogpu.wired_limit_mb` when set, else macOS's default
 (`unified_default`: two thirds of the RAM up to `UNIFIED_SMALL` 36 GiB, three quarters above,
 Metal's recommendedMaxWorkingSetSize; it was 75% everywhere, too much on 8-32 GB Macs). Unknown
 VRAM means no sharing. `gpus(windows=False)`: the budget never asks WSL's PowerShell. A model's
@@ -1964,11 +1971,17 @@ Ollama that answers while OpenCode has no provider at all.
 
 **The machine** (`hardware.py`, read fresh on each call; it is also on the hot path:
 `gpu_budget` runs in routing and in the lease). `system()`: `macos`, `wsl` (`/proc/version`
-contains "microsoft"), `linux`. `gpus()`: `nvidia-smi` (name, MiB total/used, driver) on Linux and
-WSL (`[N/A]` reads as unknown; a line that isn't four fields is skipped); WSL adds Windows' adapters from `powershell.exe Get-CimInstance Win32_VideoController` (no
+contains "microsoft"), `linux`. `gpus()`: `nvidia-smi` (UUID, name, MiB total/used, driver; a name may hold commas) on Linux and
+WSL (`[N/A]` reads as unknown, except on ARM (`aarch64`/`arm64`: a DGX Spark, a Jetson), where
+the GPU shares the RAM: `unified` with `MemTotal`, the 2026-11-19 audit; a line of fewer than
+five fields is skipped); WSL adds Windows' adapters from `powershell.exe Get-CimInstance Win32_VideoController` (no
 VRAM: AdapterRAM caps at 4 GB), but only for the report (`wb scout`, `wb doctor`'s GPU line):
-`gpus(windows=False)`, which the budget and `wb image`'s settle use, reads nvidia-smi alone; Linux scans `/sys/class/drm/card*/device` (amdgpu's
-`mem_info_vram_total`/`_used`; names from `lspci`; NVIDIA left to nvidia-smi when it answered,
+`gpus(windows=False)`, which the budget and `wb image`'s settle use, reads nvidia-smi alone; Linux scans `DRM`'s (`/sys/class/drm`) `card*/device` (amdgpu's
+`mem_info_vram_total`/`_used`; an amdgpu device not known discrete with a `mem_info_gtt_total`
+is an APU: `unified`, its VRAM the carve-out plus the GTT, since that is where a Strix Halo with a
+512 MiB carve-out keeps its models (the 2026-11-19 audit); `unique_id` as `uuid` `GPU-<id>`;
+a unified device off macOS carries `memory`, what it counts, which `report` and the budget say;
+names from `lspci`; NVIDIA left to nvidia-smi when it answered,
 else listed from sysfs, VRAM unknown); macOS reads `system_profiler SPDisplaysDataType -json`
 (Apple Silicon: unified memory, `wired_limit`; an adapter with only shared memory, an Intel iGPU,
 has VRAM unknown).
@@ -1978,11 +1991,15 @@ nvidia-smi's `power.draw` summed over the cards that report it, else each sysfs 
 the GPU energy each task's savings line shows.
 `memory()`: `/proc/meminfo` or `vm_stat`/`vm.swapusage`. `cpu()`, `ollama_env()` (`OLLAMA_KEYS`:
 `OLLAMA_MODELS`, `OLLAMA_CONTEXT_LENGTH`, `OLLAMA_NUM_PARALLEL`, `OLLAMA_MAX_LOADED_MODELS`,
-`OLLAMA_HOST`: systemctl's `Environment`, split as a shell would, since systemd quotes a value
+`OLLAMA_HOST`, and `VISIBLE`'s `CUDA_VISIBLE_DEVICES`, `ROCR_VISIBLE_DEVICES`,
+`HIP_VISIBLE_DEVICES`: systemctl's `Environment`, split as a shell would, since systemd quotes a value
 with a space; or launchctl; then the process env), `ollama_context()` (`OLLAMA_CONTEXT_LENGTH`
 with spaces and quotes trimmed, as Ollama reads it, and the raw value: `report` says when it isn't
 a number instead of crashing), `ollama_models_dir()` (`os.path.isdir`: a directory it can't read
-is passed over), `report()` (the lines `wb scout`
+is passed over), `visible(devs, env)` (the devices a runtime with that environment sees: by
+number, counted per driver in nvidia-smi's or sysfs's order, or by UUID or its unique start; it
+stops at the first entry naming no device, as CUDA does, so `-1` is none; unset or empty is all;
+HIP's numbers count within ROCR's choice), `report()` (the lines `wb scout`
 prints). Unknowns stay unknown; nothing about the machine is hard-coded.
 
 **The weekly model check.** Models change fast. Once a week, in a quiet moment, the mod submits

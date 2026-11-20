@@ -19,6 +19,7 @@ import subprocess
 from pathlib import Path
 
 GB = 1024 ** 3
+DRM = Path("/sys/class/drm")
 
 
 def _read(path: Path) -> str:
@@ -100,16 +101,22 @@ def gpus(windows: bool = True) -> list[dict]:
     if where == "macos":
         return _mac_gpus()
     found = []
-    smi = _run("nvidia-smi", "--query-gpu=name,memory.total,memory.used,driver_version",
+    smi = _run("nvidia-smi", "--query-gpu=uuid,name,memory.total,memory.used,driver_version",
                "--format=csv,noheader,nounits").splitlines()
     for line in smi:
         parts = [x.strip() for x in line.split(",")]
-        if len(parts) != 4:
+        if len(parts) < 5:
             continue
-        name, total, used, driver = parts
+        uuid, name, (total, used, driver) = parts[0], ", ".join(parts[1:-3]), parts[-3:]
         mib = lambda v: int(v) * 2 ** 20 if v.isdigit() else None  # noqa: E731 ("[N/A]" on some cards)
-        found.append({"name": name, "driver": f"nvidia {driver}", "vram": mib(total),
-                      "vram_used": mib(used), "discrete": True})
+        g = {"name": name, "driver": f"nvidia {driver}", "vram": mib(total),
+             "vram_used": mib(used), "discrete": True, "uuid": uuid}
+        if g["vram"] is None and platform.machine().lower() in ("aarch64", "arm64"):
+            # DGX Spark, Jetson: the GPU shares the RAM and nvidia-smi gives it no size ([N/A]),
+            # so there was no budget at all (the 2026-11-19 audit). An x86 card's [N/A] stays unknown
+            g.update(vram=memory()["ram"], unified=True, discrete=False,
+                     memory="the RAM: nvidia-smi gives the GPU no memory of its own")
+        found.append(g)
     if where == "wsl":
         if not windows:
             return found
@@ -117,7 +124,7 @@ def gpus(windows: bool = True) -> list[dict]:
         return found + [g for g in _windows_gpus()
                         if not any(n in g["name"] or g["name"] in n for n in nvidia)]
     seen = set()
-    for dev in sorted(Path("/sys/class/drm").glob("card[0-9]*/device")):
+    for dev in sorted(DRM.glob("card[0-9]*/device")):
         if "-" in dev.parent.name:  # a connector (card0-DP-1), not a card
             continue
         uevent = dict(x.split("=", 1) for x in _read(dev / "uevent").splitlines() if "=" in x)
@@ -130,10 +137,52 @@ def gpus(windows: bool = True) -> list[dict]:
         # amdgpu reports an APU's carve-out of system RAM as VRAM too; only a card's own memory
         # has a vendor (mem_info_vram_vendor: samsung, hynix…), so that marks a discrete one.
         # Without it the device stays unknown, not integrated (models.budget_devices)
-        found.append({"name": name, "driver": driver, "vram": int(total) if total else None,
-                      "vram_used": int(used) if used else None,
-                      **({"discrete": True} if _read(dev / "mem_info_vram_vendor") else {})})
+        g = {"name": name, "driver": driver, "vram": int(total) if total else None,
+             "vram_used": int(used) if used else None,
+             **({"discrete": True} if _read(dev / "mem_info_vram_vendor") else {})}
+        gtt = _int(_read(dev / "mem_info_gtt_total"))
+        if driver == "amdgpu" and not g.get("discrete") and gtt:
+            # an APU's GPU also maps system RAM up to its GTT size, which is where a Strix Halo
+            # with a 512 MiB carve-out keeps its models: counting the carve-out alone dropped it
+            # as an iGPU, so no budget (the 2026-11-19 audit)
+            g.update(vram=(g["vram"] or 0) + gtt, unified=True,
+                     memory=f"{size(g['vram'])} carve-out + {size(gtt)} GTT")
+        if uid := _read(dev / "unique_id"):
+            g["uuid"] = f"GPU-{uid}"  # how ROCR_VISIBLE_DEVICES names it
+        found.append(g)
     return found
+
+
+# What a runtime started with these sees, by driver: CUDA's and ROCm's own settings, which take
+# device numbers (counted in nvidia-smi's or sysfs's order) or UUIDs. HIP's counts within ROCR's.
+VISIBLE = (("nvidia", "CUDA_VISIBLE_DEVICES"), ("amdgpu", "ROCR_VISIBLE_DEVICES"),
+           ("amdgpu", "HIP_VISIBLE_DEVICES"))
+
+
+def visible(devs: list[dict], env: dict) -> tuple[list[dict], list[str]]:
+    """The devices of ``devs`` a runtime started with ``env`` can use, and the settings that left
+    some out. Two 8 GiB cards with Ollama limited to one made a 16 GiB budget (the 2026-11-19
+    audit). An empty or unset setting leaves every device; like CUDA, the list stops at the first
+    entry that names no device ("-1": none)."""
+    notes = []
+    for driver, key in VISIBLE:
+        raw = (env.get(key) or "").strip()
+        mine = [g for g in devs if (g.get("driver") or "").split(" ")[0] == driver]
+        if not raw or not mine:
+            continue
+        picked = []
+        for item in (x.strip() for x in raw.split(",")):
+            if item.isdigit() and int(item) < len(mine):
+                one = [mine[int(item)]]
+            else:  # a UUID, or the unique start of one, as CUDA allows
+                one = [g for g in mine if item and (g.get("uuid") or "").lower().startswith(item.lower())]
+            if len(one) != 1:
+                break
+            picked += [g for g in one if not any(g is p for p in picked)]
+        if len(picked) < len(mine):
+            devs = [g for g in devs if not any(g is m for m in mine) or any(g is p for p in picked)]
+            notes.append(f"{key}={raw}")
+    return devs, notes
 
 
 def gpu_power_w(drm: Path = Path("/sys/class/drm")) -> float | None:
@@ -208,7 +257,7 @@ def ollama_env() -> dict:
             for item in items:
                 k, _, v = item.partition("=")
                 env.setdefault(k, v)
-    for k in OLLAMA_KEYS:
+    for k in OLLAMA_KEYS + tuple(key for _, key in VISIBLE):
         env.setdefault(k, os.environ.get(k, ""))
     return env
 
@@ -253,7 +302,9 @@ def report() -> list[str]:
              + (f" · {SYSTEM_NOTE[where]}" if where in SYSTEM_NOTE else "")]
     gpu_lines = []
     for g in gpus():
-        if g.get("unified"):
+        if g.get("memory"):  # a unified GPU off macOS: what it may use, and where that comes from
+            vram = f" · unified memory: {size(g['vram'])} usable by the GPU ({g['memory']})"
+        elif g.get("unified"):
             limit = (f", the GPU may wire {size(g['wired_limit'])} (iogpu.wired_limit_mb)"
                      if g.get("wired_limit") else ", of which macOS lets the GPU use only part by default")
             vram = f" · unified memory: {size(g['vram'])} shared with the CPU{limit}"

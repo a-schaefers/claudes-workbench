@@ -178,7 +178,7 @@ French locale installed here).
 - **Fix:** run machine-read git calls with `LC_ALL=C`, or classify by exit code
   (`rev-parse --is-inside-work-tree`), keeping git's own message for the user.
 
-**16. The GPU budget can be wrong for the hardware local-model users favor.** Both; source.
+**16. ~~The GPU budget can be wrong for the hardware local-model users favor.~~** **Fixed (#206).** Both; source.
 - **Unified-memory Linux.** `hardware.gpus`/`models.budget_devices` (`hardware.py:94`,
   `models.py:876`) handle unified memory only on Apple Silicon.
   - AMD Strix Halo: amdgpu reports only the BIOS carve-out as VRAM, and `mem_info_gtt_total` is
