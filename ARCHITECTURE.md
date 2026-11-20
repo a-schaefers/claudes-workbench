@@ -2042,14 +2042,18 @@ the GPU energy each task's savings line shows.
 `memory()`: `/proc/meminfo` or `vm_stat`/`vm.swapusage`. `cpu()`, `ollama_env()` (`OLLAMA_KEYS`:
 `OLLAMA_MODELS`, `OLLAMA_CONTEXT_LENGTH`, `OLLAMA_NUM_PARALLEL`, `OLLAMA_MAX_LOADED_MODELS`,
 `OLLAMA_HOST`, and `VISIBLE`'s `CUDA_VISIBLE_DEVICES`, `ROCR_VISIBLE_DEVICES`,
-`HIP_VISIBLE_DEVICES`: systemctl's `Environment`, split as a shell would, since systemd quotes a value
+`HIP_VISIBLE_DEVICES`, `GGML_VK_VISIBLE_DEVICES` (those four only when set): systemctl's `Environment`, split as a shell would, since systemd quotes a value
 with a space; or launchctl; then the process env), `ollama_context()` (`OLLAMA_CONTEXT_LENGTH`
 with spaces and quotes trimmed, as Ollama reads it, and the raw value: `report` says when it isn't
 a number instead of crashing), `ollama_models_dir()` (`os.path.isdir`: a directory it can't read
 is passed over), `visible(devs, env)` (the devices a runtime with that environment sees: by
 number, counted per driver in nvidia-smi's or sysfs's order, or by UUID or its unique start; it
-stops at the first entry naming no device, as CUDA does, so `-1` is none; unset or empty is all;
-HIP's numbers count within ROCR's choice), `report()` (the lines `wb scout`
+stops at the first entry naming no device, as CUDA does, so `-1` is none; unset is all, and so is
+empty except `CUDA_VISIBLE_DEVICES` (`EMPTY_IS_NONE`: to CUDA an empty list is no device); each
+mask counts within the order the one before left, so HIP's numbers index ROCR's list as ROCR
+ordered it; a Vulkan-backed Ollama's `GGML_VK_VISIBLE_DEVICES` counts every card. Empty counted
+every card, HIP picked by discovery order (the 4 GB card for the 24 GB one), and the Vulkan mask
+was never read: #255, the audit of 1.2), `report()` (the lines `wb scout`
 prints). Unknowns stay unknown; nothing about the machine is hard-coded.
 
 **The weekly model check.** Models change fast. Once a week, in a quiet moment, the mod submits

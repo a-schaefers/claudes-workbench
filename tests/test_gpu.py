@@ -14,7 +14,7 @@ from unittest import mock
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))  # run as a script too
 
-from workbench import cli, images, models, store, transcript
+from workbench import cli, hardware, images, models, store, transcript
 from tests.test_workbench import Base, TEST_CMD, run_wb, wait_phase
 
 BIG, SMALL = "ollama/qwen3.8-27b", "ollama/mimo-v2.6:9b-q8_0"
@@ -432,6 +432,23 @@ class Budget(unittest.TestCase):
         rx = {"name": "RX 7600", "driver": "amdgpu", "vram": 8 * 2 ** 30, "discrete": True}
         self.assertEqual(self.budget([dict(rx), rx], {"ROCR_VISIBLE_DEVICES": "1"}), (8 * 2 ** 30, [rx]))
         self.assertEqual(self.budget([a, b], {"ROCR_VISIBLE_DEVICES": "0"})[0], 16 * 2 ** 30)
+
+    def test_masks_keep_unset_apart_from_empty_and_count_in_the_order_before_them(self):
+        # #255 (the audit of 1.2): an empty CUDA_VISIBLE_DEVICES (no device, to CUDA) counted
+        # every card; HIP's index was read in discovery order, not within ROCR's, so it picked
+        # the 4 GB card for the 24 GB one; and a Vulkan Ollama's mask wasn't read
+        nv = {"name": "RTX 4060", "driver": "nvidia 560.94", "vram": 8 * 2 ** 30, "discrete": True}
+        self.assertEqual(self.budget([nv], {"CUDA_VISIBLE_DEVICES": ""}), (None, []))
+        self.assertEqual(self.budget([nv], {})[0], 8 * 2 ** 30)
+        small = {"name": "RX 6400", "driver": "amdgpu", "vram": 4 * 2 ** 30, "discrete": True}
+        big = {"name": "RX 7900", "driver": "amdgpu", "vram": 24 * 2 ** 30, "discrete": True}
+        self.assertEqual(self.budget([small, big], {"ROCR_VISIBLE_DEVICES": "1,0",
+                                                    "HIP_VISIBLE_DEVICES": "0"}), (24 * 2 ** 30, [big]))
+        self.assertEqual(self.budget([small, big], {"GGML_VK_VISIBLE_DEVICES": "1"}), (24 * 2 ** 30, [big]))
+        with mock.patch.dict(os.environ, {}, clear=True), \
+                mock.patch.object(hardware, "_run", lambda *a: ""), \
+                mock.patch.object(hardware, "system", lambda: "linux"):
+            self.assertNotIn("CUDA_VISIBLE_DEVICES", hardware.ollama_env())   # unset stays unset
 
     def test_models_json_gpu_gb_sets_the_budget_by_hand(self):
         with tempfile.TemporaryDirectory() as d:
