@@ -422,6 +422,25 @@ class Lifecycle(Base):
         self.assertIn("big.txt", big)
         self.assertNotIn("+x", big)
 
+    def test_a_big_diff_is_never_held_whole_just_to_show_its_stat(self):
+        # a 19 MB generated file's patch was captured and decoded whole (a 55 MiB peak) for a
+        # 182-character notice (#348, the audit of 1.4)
+        import tracemalloc
+        from workbench import runner
+        self.start("t-huge", "ok", "--test", TEST_CMD)
+        wait_phase("t-huge", {"review"})
+        task = store.Task("t-huge")
+        (task.worktree / "huge.txt").write_text("generated line\n" * 400_000)   # 6 MB
+        tracemalloc.start()
+        try:
+            text = runner.review_diff(task)
+            peak = tracemalloc.get_traced_memory()[1]
+        finally:
+            tracemalloc.stop()
+        self.assertIn("too big to include", text)
+        self.assertIn("huge.txt", text)
+        self.assertLess(peak, 2 * 1024 * 1024)
+
     def test_after_feedback_the_review_notice_carries_only_what_changed_since(self):
         # the wake after a feedback round carried the whole 14K-character diff again, which
         # Claude already had from the first (2026-11-18)

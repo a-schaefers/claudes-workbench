@@ -554,7 +554,9 @@ once more and `pid` and `stopping` are cleared.
    goes to `rounds/<n>/summary.md`. Failing tests with auto-fix left → an auto-fix round (round
    n+1's prompt is the failure). Otherwise phase `review`, a `review` notice (the report, then
    `review_diff`: the whole diff under review when it is at most `REVIEW_DIFF_MAX` = 32,000
-   characters (~8K tokens), else its stat; each call Claude makes to fetch it re-reads its session,
+   characters (~8K tokens), else its stat (the diff read as it streams, `gitops.diff(limit=)`,
+   git stopped past the limit: a 19 MB generated file's patch was held whole, a 55 MiB peak, for a
+   182-character notice, #348); each call Claude makes to fetch it re-reads its session,
    2026-11-17, and at 12,000 both significant tasks of 2026-11-18 (13K and 15K) cost that call;
    after a review of the same step, only the diff since that review notice (`gitops.snapshot`,
    a tree object recorded as status `reviewed`), with a proposed instruction file shown again only

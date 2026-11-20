@@ -1168,25 +1168,26 @@ def review_diff(task: store.Task) -> str:
     try:
         task.set_status(reviewed={"step": steps, "tree": gitops.snapshot(task.worktree)})
         if since:
-            full = gitops.diff(task.worktree, since, paths=code)
+            # bounded: a big diff is never read whole only to show its stat (#348, the audit of 1.4)
+            full = gitops.diff(task.worktree, since, paths=code, limit=REVIEW_DIFF_MAX)
             same = not props or not gitops.diff(task.worktree, since,
                                                  paths=tuple(f":(literal){p}" for p in props))
             prop = ("\n\nthe agent's proposed instruction files: unchanged since your last review"
                     if same and proposals(task.worktree) else proposal_diff(task))
-            if not full:
+            if full == "":
                 return "\n\nthe diff since your last review: (no changes)" + prop
-            if len(full) <= REVIEW_DIFF_MAX:
+            if full is not None:
                 return (f"\n\nthe diff since your last review (wb diff {task.name} for all of "
                         f"it):\n{full}" + prop)
             base = since
-        full = gitops.diff(task.worktree, base, paths=code)
+        full = gitops.diff(task.worktree, base, paths=code, limit=REVIEW_DIFF_MAX)
         prop = proposal_diff(task)
-        if not full:
+        if full == "":
             return "\n\nthe diff: (no changes)" + prop
-        if len(full) <= REVIEW_DIFF_MAX:
+        if full is not None:
             return (f"\n\nthe diff (all of it; wb diff {task.name} again only after a change):"
                     f"\n{full}" + prop)
-        return (f"\n\nthe diff is {len(full)} characters, too big to include: "
+        return (f"\n\nthe diff is over {REVIEW_DIFF_MAX} characters, too big to include: "
                 f"its stat:\n{gitops.diff(task.worktree, base, stat=True, stat_count=gitops.CHANGED_SHOWN)}" + prop)
     except (gitops.GitError, OSError):
         return ""

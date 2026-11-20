@@ -374,13 +374,14 @@ def mark(worktree: Path) -> str:
     return h.hexdigest()
 
 
-def with_new_files(worktree: Path, *args, whole: bool = False) -> str:
+def with_new_files(worktree: Path, *args, whole: bool = False, limit: int | None = None) -> str | None:
     """`git <args>` with new files counted as changes (intent-to-add), in a scratch index: the
     worktree's own index, and anything a concurrent git command holds, are left alone. The
     scratch index starts as a copy of the worktree's, so sparse-checkout's skip-worktree entries
     aren't read as deletions (read-tree listed a monorepo's every file outside the cone as
     deleted: the 2026-11-16 audit). Nested repositories are left out (nested_repos). ``whole``
-    adds new files' contents too, not just their intent (for write-tree: snapshot)."""
+    adds new files' contents too, not just their intent (for write-tree: snapshot). ``limit``:
+    at most that many characters of output, else None (_bounded)."""
     # in a private directory of the state dir, not the temp dir: /tmp is in the agent's lane, and
     # an agent process still running could rewrite the index between `add -N` and the diff, so
     # files dropped out of the diff Claude reviews (the 2026-11-16 audit)
@@ -398,9 +399,32 @@ def with_new_files(worktree: Path, *args, whole: bool = False) -> str:
         skip = [f":(exclude){p}" for p in nested_repos(worktree)]
         git(worktree, "add", "-A", *([] if whole else ["-N"]), *(["--", ".", *skip] if skip else []),
             env=env)
-        return git(worktree, *args, env=env)
+        return _bounded(worktree, args, env, limit) if limit else git(worktree, *args, env=env)
     finally:
         shutil.rmtree(scratch, ignore_errors=True)
+
+
+def _bounded(cwd, args, env, limit: int) -> str | None:
+    """git's output as text when it is at most ``limit`` characters, else None, read as it
+    streams and git stopped past the limit: a 19 MB generated file's patch was captured and
+    decoded whole (a 55 MiB peak) only for the review notice to show its stat (#348, the audit
+    of 1.4). A character is at most 4 bytes, so past 4 * limit bytes it can't fit."""
+    with tempfile.TemporaryFile() as err:
+        p = subprocess.Popen(["git", "-C", str(cwd), *PLAIN, *_pinned(cwd), *args],
+                             stdout=subprocess.PIPE, stderr=err, env={**os.environ, **env})
+        out = p.stdout.read(4 * limit + 1)
+        over = len(out) > 4 * limit
+        if over:
+            p.kill()
+        p.stdout.close()
+        p.wait()
+        if over:
+            return None
+        if p.returncode:
+            err.seek(0)
+            raise GitError(f"git {' '.join(args)}: {err.read().decode('utf-8', 'replace').strip()}")
+    text = out.decode("utf-8", "replace")
+    return text if len(text) <= limit else None
 
 
 def snapshot(worktree: Path) -> str:
@@ -409,10 +433,14 @@ def snapshot(worktree: Path) -> str:
     return with_new_files(worktree, "write-tree", whole=True).strip()
 
 
-def diff(worktree: Path, base: str, stat=False, paths=(), numstat=False, stat_count=None) -> str:
+def diff(worktree: Path, base: str, stat=False, paths=(), numstat=False, stat_count=None,
+         limit: int | None = None) -> str | None:
+    """The diff since ``base``, new files included. ``limit``: None when it is longer than that
+    many characters, never held whole in memory (#348, the audit of 1.4)."""
     args = (["diff", "--no-ext-diff", "--no-color", base] + (["--stat"] if stat else []) + (["--numstat"] if numstat else [])
             + ([f"--stat-count={stat_count}"] if stat_count else []) + (["--", *paths] if paths else []))
-    return with_new_files(worktree, *args).rstrip()
+    out = with_new_files(worktree, *args, limit=limit)
+    return None if out is None else out.rstrip()
 
 
 def footprint(worktree: Path, base: str) -> dict:
