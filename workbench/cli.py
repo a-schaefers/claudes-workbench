@@ -2775,6 +2775,8 @@ def cmd_chat(a):
                 tail = (log.read_text(errors="replace").strip().splitlines() or ["(nothing)"])[-1]
                 die(f"web chat on, but its server didn't start: {tail} ({log})")
             print(f"web chat on: started its server (pid {pid}, {log}): {chat.url(a.port)}")
+        for why in logout_stops():  # its unit is a user service: a logout stops it (#351)
+            print(f"--  {why}")
     elif a.action == "off":
         chat.set_on(False)
         if chat.stop_started():
@@ -2844,6 +2846,33 @@ def cmd_chat(a):
             print(f"{time.strftime('%H:%M', time.localtime(r['ts']))} {who}: {r['text']}")
         lst = chat.listener()
         print(f"listening: {lst['cwd']}" if lst else "no session is listening")
+
+
+def logout_stops() -> list[str]:
+    """What a logout would stop, from logind: the user manager (so wb-chat.service) unless the
+    user lingers, and every process in the login session, runners too, under KillUserProcesses=yes.
+    A headless box reached by SSH, or a desktop logged out overnight, lost the chat and the night's
+    backlog without a word (#351, the audit of 1.4). Empty when logind can't say (macOS, WSL
+    without systemd, a container): unknown isn't a warning."""
+    if not shutil.which("loginctl"):
+        return []
+
+    def ask(*argv):
+        try:
+            r = subprocess.run(["loginctl", *argv], capture_output=True, text=True, timeout=5)
+        except (OSError, subprocess.SubprocessError):
+            return ""
+        return r.stdout.strip() if r.returncode == 0 else ""
+    out = []
+    user = os.environ.get("USER") or str(os.getuid())
+    if ask("show-user", user, "-p", "Linger", "--value") == "no":
+        out.append(f"logind stops your user services at logout, the web chat's wb-chat.service "
+                   f"too: loginctl enable-linger {user} keeps them up")
+    if ask("show", "-p", "KillUserProcesses", "--value") == "yes":
+        out.append("logind kills every process of a login session at logout (KillUserProcesses=yes),"
+                   " running tasks too: start wb from a session that stays (tmux under systemd-run"
+                   " --user --scope), or set KillUserProcesses=no in /etc/systemd/logind.conf")
+    return out
 
 
 def path_advice() -> str:
@@ -3189,6 +3218,8 @@ def cmd_doctor(a):
              (path_advice() if linked else "link bin/wb into a PATH directory (wb setup)")
              + (f"; WB_BIN={wb_bin} covers only the mod's calls" if wb_bin else ""))
     elsewhere("wb", wb_bin or on_path, PKG_ROOT / "bin/wb")
+    for why in logout_stops():  # a warning, not BAD: a desktop that never logs out is fine (#351)
+        print(f"--  {why}")
     found = models.discover()
     line(bool(found), f"{len(found)} local model(s)")
     for pid, why in models.skipped_providers():  # once dropped without a word (the 2026-11-16 audit)

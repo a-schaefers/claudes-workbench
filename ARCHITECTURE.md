@@ -2968,6 +2968,12 @@ unit from the copy `wb` runs from (`~/.claude/plugins/marketplaces/workbench` fo
 install, else the clone): `systemctl --user link <that copy>/systemd/wb-chat.service &&
 systemctl --user enable --now wb-chat`. An upgrade needs no restart: the server restarts itself with
 new code (below); `systemctl --user daemon-reload` picks up a changed unit file.
+A user unit stops with the user's last session unless the user lingers (a headless box
+reached by SSH, a desktop logged out overnight): `loginctl enable-linger $USER` keeps it up.
+`wb chat on` and `wb doctor` say so when logind reports `Linger=no`, and `wb doctor` warns when
+logind's `KillUserProcesses=yes` would kill the session's runners at logout (`cli.logout_stops`;
+quiet where `loginctl` is absent; #351, the audit of 1.4). The runners still start in the
+caller's session: moving them into their own `systemd-run --user --scope` is not done yet.
 The unit runs systemd's `python3`; a Python from pyenv, uv or conda goes in with `systemctl --user
 edit wb-chat` (the unit's comment says how). On macOS, a launchd agent running `~/.local/bin/wb
 chat serve` does the same. `wb chat url` prints the link, `http://localhost:1337/#token=…`; from a phone, reach the PC the way you normally do and change the host in the link. It

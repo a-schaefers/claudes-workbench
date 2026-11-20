@@ -6988,6 +6988,39 @@ class ModelSet(Base):
         self.assertIn("runtime: retry", out)
 
 
+class LogoutStops(Base):
+    """What a logout stops: logind's Linger and KillUserProcesses, said by wb chat on and wb doctor."""
+    def fake_loginctl(self, linger, kill):
+        bin_dir = Path(self.tmp.name) / "fakebin"
+        bin_dir.mkdir(exist_ok=True)
+        exe = bin_dir / "loginctl"
+        exe.write_text(f"#!/bin/sh\ncase \"$1\" in show-user) echo {linger};; show) echo {kill};; esac\n")
+        exe.chmod(0o755)
+        return mock.patch.dict(os.environ, {"PATH": f"{bin_dir}:{os.environ['PATH']}"})
+
+    def test_a_user_without_linger_hears_how_to_keep_the_chat_up_past_logout(self):
+        # #351, the audit of 1.4: wb-chat.service stopped at the last logout and nothing said why
+        from workbench import cli
+        with self.fake_loginctl("no", "no"):
+            said = cli.logout_stops()
+        self.assertEqual(len(said), 1)
+        self.assertIn("loginctl enable-linger", said[0])
+
+    def test_kill_user_processes_is_named_as_killing_running_tasks(self):
+        from workbench import cli
+        with self.fake_loginctl("yes", "yes"):
+            said = cli.logout_stops()
+        self.assertEqual(len(said), 1)
+        self.assertIn("KillUserProcesses=yes", said[0])
+
+    def test_nothing_is_said_where_logind_lingers_and_spares_sessions_or_is_absent(self):
+        from workbench import cli
+        with self.fake_loginctl("yes", "no"):
+            self.assertEqual(cli.logout_stops(), [])
+        with mock.patch("shutil.which", return_value=None):
+            self.assertEqual(cli.logout_stops(), [])
+
+
 class WebChat(Base):
     """wb chat: the page's API (token, host check), receipts, Claude's replies."""
     def setUp(self):
