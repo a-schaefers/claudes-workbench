@@ -2831,13 +2831,14 @@ Neither run touches the user's checkout or the worktree under review. The verdic
 doesn't show the bug), `candidate-fails`, or `inconclusive`: a run timed out, overran its
 output or couldn't be set up, or the base failed without an assertion. A missing module or a command not found says
 nothing about the bug, so it can never count as proof. Proof is positive evidence only: with
-`--expect TEXT`, that text in the base's output; else an assertion line (`ASSERTION`:
-`AssertionError`, pytest's `E assert`, a line opening `Expected`, an "expected … but/got/
-received/to be" phrase, jest's `expect(`, a Go `panic:`); else a failed test's header, unless a
-setup error (`SETUP`: a syntax, import or module error, pytest's collection errors, a fixture
-not found, a failed build or compile) says the tests never ran. A bare "expected" once matched
-Python's `SyntaxError: expected ':'`, and a base that never ran an assertion was called proven
-(#193, the 2026-11-19 audit). `assertion` picks the line the report shows: the first assertion
+`--expect TEXT`, that text in the base's output; else, unless a setup error (`SETUP`: a syntax,
+import or module error, pytest's collection errors, a fixture not found, a failed build or
+compile) says the tests never ran, an assertion line (`ASSERTION`: `AssertionError`, pytest's
+`E assert`, a line opening `Expected`, an "expected … but/got/received/to be" phrase, jest's
+`expect(`, a Go `panic:`) or a failed test's header. A bare "expected" once matched Python's
+`SyntaxError: expected ':'`, and a base that never ran an assertion was called proven (#193,
+the 2026-11-19 audit); and the setup error is checked first, since a SyntaxError's traceback
+quoting `assert 2 = 2` was proof too (#326, the audit of 1.4). `assertion` picks the line the report shows: the first assertion
 line, else a failed test's header. Each run is kept in `tasks/<task>/verify/<n>/`: `base.txt`,
 `candidate.txt` and `result.json` `{cmd, files, tree, ts, base: {rev, exit, assertion}, candidate:
 {rev, exit, assertion}, verdict, dir, expect (when given)}`. `verify.last` reads the newest, with `stale` once the worktree

@@ -5965,6 +5965,9 @@ class Verify(Base):
         self.assertEqual(verify.verdict(1, "--- FAIL: TestKw (0.00s)\n    kw_test.go:9: expected 250, got 250000", 0),
                          "proven")                                          # the positive control
         self.assertEqual(verify.verdict(1, "E       assert 250000 == 250", 0), "proven")
+        # #326 (the audit of 1.4, reproduced): the traceback quoted the line that didn't parse
+        self.assertEqual(verify.verdict(1, '  File "calc.py", line 3\n    assert 2 = 2\n           ^\n'
+                                           "SyntaxError: cannot assign to literal", 0), "inconclusive")
         out = run_wb("verify", "t", "--test", "python3 -m unittest tests.test_calc",
                      "--expect", "250000 != 250")
         self.assertIn("proven", out)
