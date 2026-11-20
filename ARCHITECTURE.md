@@ -764,7 +764,7 @@ check that needed them failed on the base and in every round for that, not for t
   ignored in the task's own worktree too, checked once it is made (a directory as `dir/`): at a
   tag older than the ignore rule, the copy was a new file there and accept committed it (#322,
   the audit of 1.4; the worktree, branch and task directory are removed again). Nor a Python
-  virtualenv (a `pyvenv.cfg` in the path or one level inside, `cli._venv_in`): its `activate`
+  virtualenv (a `pyvenv.cfg` in the path or one level inside, `runner.venv_in`): its `activate`
   and its scripts' shebangs name the checkout, so a copied `.venv` ran the developer's
   environment and its writes left the lane (#260, the audit of 1.2); the refusal says to
   recreate it with `--setup` (`python3 -m venv .venv && .venv/bin/pip install -r …`, `uv sync`).
@@ -780,7 +780,10 @@ and the output's tail ("the setup command failed (exit N)", or "setting up the w
 worktree (`prepare(at, prepared)`, as a reflink where the filesystem has them). A file already present in the scratch checkout takes precedence. A missing prepared input or a changed parent link requires fresh setup. The setup
 isn't run there: each ran it from nothing, up to `SETUP_SECS`, and a first build compiled three
 to five times a task (#249, the audit of 1.2). `wb verify --setup` and `wb shot --setup` run it in
-each checkout as before; so does a task prepared before the paths were recorded. Failing there,
+each checkout as before; so does a task prepared before the paths were recorded, and one whose
+`prepared_paths` hold a virtualenv (`venv_in`): its `activate` and scripts name the worktree it
+was made in, so the copy ran the task's interpreter and code, and the base check and `wb verify`
+failed where the task passed (#325, the audit of 1.4). Failing there,
 the run's exit is `"setup failed"`.
 
 **The base check** (`_base_check`, `base_check`, before round 1 and the GPU): the acceptance
@@ -3787,7 +3790,7 @@ check-ins off), not `wb start`'s.
 | `tests` | `{ok, exit, tail, round}` of the last test run (`exit`: a code, `timeout` or `output limit`) |
 | `base_check` | `{ok, exit, tail, limit}` of the acceptance command run once on the base, in the lane (`runner.base_check`; `exit` is `"timeout"` past `limit`, `"setup failed"` when its scratch checkout couldn't be set up); the runner, before round 1, only with `--test` and without `--no-base-check` |
 | `prepared` | true once the worktree is set up (`runner._prepare`: `setup`, `copy`, `siblings`), so a later run of the runner doesn't again |
-| `prepared_paths`, `setup_secs` | set with `prepared`: the worktree's ignored paths the preparation left, which each scratch checkout copies instead of running the setup (#249); how long it took, in the first report |
+| `prepared_paths`, `setup_secs` | set with `prepared`: the worktree's ignored paths the preparation left, which each scratch checkout copies instead of running the setup (#249), unless one is a virtualenv (#325); how long it took, in the first report |
 | `stopping` | wb is stopping the runner (`cli._stop_runner`); cleared by `spawn_runner` and the runner's exit |
 | `tools`, `tok_in`, `tok_out` | task-wide tool calls and tokens (input without cache reads) |
 | `live_used` | `{session, used}`: the context the round's last `step_finish` carried (input + cache + output), what the between-rounds check uses when the session export fails (#262) |

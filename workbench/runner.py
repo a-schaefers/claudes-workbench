@@ -929,6 +929,12 @@ def prepare(task: store.Task, prepared: Path | None = None) -> tuple[int | str, 
     spec, wt = task.spec, task.worktree
     repo = Path(spec["repo"])
     made = task.status.get("prepared_paths") if prepared else None
+    # A virtualenv names the checkout it was made in (pyvenv.cfg's home is fine, its activate
+    # and its scripts' shebangs aren't): copied, the base check and wb verify ran the task's
+    # worktree's interpreter and code, and failed where the task passed (#325, the audit of
+    # 1.4). Such a checkout is prepared afresh, the setup run in it.
+    if made and any(venv_in(prepared / p) for p in made):
+        made = None
     try:
         for name in spec.get("siblings") or ():  # where the repo's own paths reach them (#261)
             if not (at := context.sibling_link(wt, name)).is_symlink():
@@ -953,6 +959,19 @@ def prepare(task: store.Task, prepared: Path | None = None) -> tuple[int | str, 
     if not (cmd := spec.get("setup")):
         return 0, ""
     return run_in_lane(task, cmd, SETUP_SECS)
+
+
+def venv_in(path: Path) -> Path | None:
+    """The virtualenv at ``path`` or one level inside it (its pyvenv.cfg), else None."""
+    if not path.is_dir() or path.is_symlink():
+        return None
+    if (path / "pyvenv.cfg").is_file():
+        return path
+    try:
+        return next((d for d in sorted(path.iterdir()) if d.is_dir() and not d.is_symlink()
+                     and (d / "pyvenv.cfg").is_file()), None)
+    except OSError:
+        return None
 
 
 def _ignored_paths(wt: Path) -> list[str]:

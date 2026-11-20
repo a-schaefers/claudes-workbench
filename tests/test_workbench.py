@@ -1801,6 +1801,22 @@ class WorktreeSetup(Base):
         run_wb("verify", "t-once", "--test", "sh test_answer.sh", "--files", "test_answer.sh", "--setup")
         self.assertEqual(count.read_text().count("run"), 3)     # asked: in each checkout
 
+    def test_a_virtualenv_the_setup_made_is_made_again_in_each_scratch_checkout(self):
+        # #325 (the audit of 1.4, reproduced): copied from the task's worktree, a .venv's scripts
+        # ran the worktree's interpreter and code, so the base check and wb verify failed there
+        self.ignore(".venv/")
+        here = 'test "$(cat .venv/made-in)" = "$PWD"'          # what a shebang would name
+        self.start("t-venv", "ok", "--test", f"{here} && grep -qx 42 answer.txt", "--setup",
+                   "mkdir -p .venv && touch .venv/pyvenv.cfg && echo \"$PWD\" > .venv/made-in",
+                   "--auto-fix", "0", "--no-self-review")
+        st = wait_phase("t-venv", {"review"})
+        t = store.Task("t-venv")
+        self.assertIs(st["tests"]["ok"], True)
+        self.assertEqual(st["base_check"]["exit"], 2)          # grep: no answer.txt; the venv's own
+        (t.worktree / "test_venv.sh").write_text(here + "\n")
+        out = run_wb("verify", "t-venv", "--test", "sh test_venv.sh", "--files", "test_venv.sh")
+        self.assertIn("base: exit 0\n  candidate: exit 0", out)  # both sides ran their own
+
     def test_commands_json_gives_a_repo_its_setup_for_every_task(self):
         self.ignore("deps/")
         Path(os.environ["WB_COMMANDS"]).write_text(json.dumps({"repos": {str(self.repo): {
