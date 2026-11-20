@@ -1474,7 +1474,7 @@ def cmd_verify(a):
     if not cmd:
         die("name the regression test's command: --test '<cmd>'")
     try:
-        r = verify.run(task, cmd, a.files, a.timeout, a.expect or "")
+        r = verify.run(task, cmd, a.files, a.timeout, a.expect or "", a.setup)
     except (RuntimeError, gitops.GitError) as e:
         die(str(e))
     print("\n".join(verify.lines(r)))
@@ -1487,7 +1487,7 @@ def cmd_shot(a):
     if task.status.get("phase") in store.CLOSED | store.ACTIVE:
         die(f"{a.name} is {task.status.get('phase')}: capture it at review")
     try:
-        m = verify.shot(task, a.capture, a.files, a.viewport, a.timeout)
+        m = verify.shot(task, a.capture, a.files, a.viewport, a.timeout, a.setup)
     except (RuntimeError, gitops.GitError) as e:
         die(str(e))
     print("\n".join(verify.shot_lines(m)))
@@ -3444,6 +3444,8 @@ def parser() -> argparse.ArgumentParser:
     s.add_argument("--expect", metavar="TEXT", help="the failure the base must print to be "
                    "proven (an assertion's message); without it, any assertion line")
     s.add_argument("--timeout", type=int, default=verify.LIMIT, help="seconds for each run (300)")
+    s.add_argument("--setup", action="store_true", help="run the task's setup in each scratch "
+                   "checkout (default: copy what it made in the task's worktree)")
     s.set_defaults(f=cmd_verify)
     s = sub.add_parser("shot", help="capture the same interaction on the base and the candidate "
                        "(the project's own capture command), for a visual task's review")
@@ -3454,6 +3456,8 @@ def parser() -> argparse.ArgumentParser:
     s.add_argument("--files", nargs="+", metavar="PATH", help="the candidate's files the capture "
                    "needs on the base too (a new fixture or script)")
     s.add_argument("--timeout", type=int, default=verify.LIMIT, help="seconds for each capture (300)")
+    s.add_argument("--setup", action="store_true", help="run the task's setup in each scratch "
+                   "checkout (default: copy what it made in the task's worktree)")
     s.add_argument("--chat", action="store_true", help="post the pair to the web chat, where a "
                    "reply is tied to this task and step")
     s.set_defaults(f=cmd_shot)

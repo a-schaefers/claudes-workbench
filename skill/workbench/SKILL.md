@@ -372,6 +372,9 @@ When the fix is for something your spec missed, add `--spec-gap "…"` (checklis
 (`wb status <name>` prints its path) and accept, or `wb discard <name> --reason …`.
 If a "trivial" task fails twice, it wasn't trivial: discard and restart it with `--size significant`.
 
+The base check, `wb verify`, and `wb shot` reuse the ignored files from the prepared worktree.
+Pass `--setup` to verify or shot when the comparison needs dependencies rebuilt for each revision.
+
 ## Context, on both sides
 **The agent's.** Rounds of a task continue one OpenCode session, so the agent keeps what it read;
 past its handover point the runner hands the task to a fresh session by itself, and reports show
