@@ -85,15 +85,21 @@ class Model:
 
     @property
     def server(self) -> tuple:
-        """The server behind the baseURL, one key however its host is spelled: localhost,
-        127.0.0.1 and this machine's own name or address are one server. Compared as strings,
-        two spellings of one Ollama made free_gpu unload the models it was told to keep (the
-        2026-11-16 audit). No DNS lookup: this runs on every admission."""
-        u = urlparse(self.base_url)
-        here = not self.remote and _this_host(u.hostname)
-        return ("this host" if here else (u.hostname or "").lower(),
-                u.port or (443 if u.scheme == "https" else 80),
-                u.path.rstrip("/").removesuffix("/v1"))
+        """The server behind the baseURL, one key however its host is spelled (server_key)."""
+        return server_key(self.base_url, self.remote)
+
+
+def server_key(url: str, remote: bool = False) -> tuple:
+    """One key per server however its host is spelled: localhost, 127.0.0.1 and this machine's
+    own name or address are one server. Compared as strings, two spellings of one Ollama made
+    free_gpu unload the models it was told to keep (the 2026-11-16 audit), and wb model retire
+    --delete delete the default's weights (#368, the audit of 1.6). No DNS lookup: this runs on
+    every admission."""
+    u = urlparse(url)
+    here = not remote and _this_host(u.hostname)
+    return ("this host" if here else (u.hostname or "").lower(),
+            u.port or (443 if u.scheme == "https" else 80),
+            u.path.rstrip("/").removesuffix("/v1"))
 
 
 def _config_dir() -> Path:
@@ -1394,6 +1400,11 @@ class GpuLease:
         # First come, first served: a blocking flock hands the lock to any of its waiters, so three
         # queued tasks started in no particular order (#108). Each waits its turn in gpu.json
         # (oldest `since` first, then task name) and only the first tries the lock.
+        # Holding nothing meanwhile: a lease let in sharing whose load then misfit kept its shared
+        # gpu.lock while second in line, so the first's LOCK_EX never succeeded, and every later
+        # task queued behind the two for good (#366, the audit of 1.6)
+        if self.fh:
+            fcntl.flock(self.fh, fcntl.LOCK_UN)
         with Watcher(self.home) as w:
             while True:
                 if self._first():
@@ -1442,7 +1453,7 @@ class GpuLease:
             with store.locked(self.home / f"{self.pool}.admit"):
                 held = self._holders()
                 self._set({**held, self.me: self._entry(waiting=True)})
-        self._take_alone(held)  # flock converts: drops the shared lock, then waits for the others
+        self._take_alone(held)  # it drops the shared lock, then waits its turn (#366)
         with store.locked(self.home / f"{self.pool}.load"):
             return secs + make_resident(self.m, say=self.say, warn=self.warn)
 

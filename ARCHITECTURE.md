@@ -2008,8 +2008,10 @@ model still resolves, and there are no holders or `can_share` passes; then a run
 `LOCK_SH|LOCK_NB` on `gpu.lock` (so a task alone holds the lock shared). Otherwise it marks
 itself `waiting`, says "waiting for the GPU (held by <task>…)" and waits its turn: first come,
 first served by the entry's `since` (when its task started, `task.json` `created_at`; a `wb image`,
-when it asked), then task name. Only the first waiting entry tries `LOCK_EX|LOCK_NB`; the others
-wait for gpu.json to change (`watch.Watcher`, at least every `QUEUE_POLL` 1 s). A blocking flock
+when it asked), then task name. A waiting lease holds no lock (`_take_alone` drops it first:
+one let in sharing whose load then misfit kept its shared lock while second in line, so the first's
+`LOCK_EX` never succeeded and every later task queued behind the two, #366). Only the first waiting
+entry tries `LOCK_EX|LOCK_NB`; the others wait for gpu.json to change (`watch.Watcher`, at least every `QUEUE_POLL` 1 s). A blocking flock
 promised no order among its waiters, and since a task sent back (`wb feedback`, `next`, `resume`)
 keeps its start, its round goes ahead of tasks started after it instead of waiting out a night's
 backlog while its review waits on it (#108). Once it holds the lock exclusively nobody joins it, and gpu.json is rewritten
@@ -2027,7 +2029,7 @@ already gone before the load was unloaded idle by Ollama's keep-alive (its task 
 or waiting on a question), not evicted (the 0.90 review: the other task unloaded itself and waited
 for that one to finish). If not, it warns "ollama could not fit … waiting for the GPU to itself",
 unloads its own model (unless a holder runs the same model: it is theirs too), marks itself
-waiting and takes its turn as above (flock converts: the shared lock goes first), then loads alone.
+waiting and takes its turn as above (its shared lock dropped first), then loads alone.
 `gpu.json` is `{"<pid>": {model, task, since, start, waiting?}}`. `wb image` takes `gpu.lock` through
 `GpuLease(None, "wb image", wait=…)`: with `--wait` it queues in `gpu.json` like a task with no
 model, waits for the running tasks to finish, then has the GPU to itself; while it holds or waits
@@ -2131,7 +2133,9 @@ and sharing the GPU.
 (an Ollama that can't delete them is reported with `ollama rm <name>` after the entry is gone, a
 404 as "had no weights", and `--delete` refused, naming them, while another entry on the same
 Ollama still resolves to those weights: an alias's `id`, untagged read as `:latest`; #333, the
-audit of 1.4); its results stay. `wb model sizes <id> trivial|significant|…` sets `sizes`. `wb doctor` asks each
+audit of 1.4. The same Ollama however its host is spelled, `localhost`, `127.0.0.1` or this
+machine's name: `models.server_key`, which `Model.server` uses too; compared as strings, a retire
+deleted the default's weights under another provider, #368, the audit of 1.6); its results stay. `wb model sizes <id> trivial|significant|…` sets `sizes`. `wb doctor` asks each
 Ollama provider once whether it answers (`ollama_answers`; a sleeping LAN box once cost 35 s a
 model and ran doctor past Claude's 2-minute Bash limit): one that doesn't gets one `--` line, its
 models read "ollama is not answering" without another probe, and their served-context checks are
@@ -2788,7 +2792,10 @@ custom-node packs do run their own Python).
   (`gitops._overwritten`, naming each). A tracked file the merge turns into a directory
   (`pkg` to `pkg/init.py`) is the merge's to replace, and a directory it turns into a file is in
   the way only through what it holds untracked, ignored files included: a clean file-to-directory
-  refactor was refused (#343, the audit of 1.4). Git's merge silently replaced an ignored `settings.ini`
+  refactor was refused (#343, the audit of 1.4). An untracked link where the merge writes beneath
+  it is in the way whatever it points at (named itself): `os.path.isdir` followed it, and git
+  replaced a user's ignored link to a dataset with a plain directory (#367, the audit of 1.6).
+  Git's merge silently replaced an ignored `settings.ini`
   the task had un-ignored and committed, and its `--no-overwrite-ignore` doesn't stop the ort
   merge (#189). The paths come from the merge itself, done first in memory (`git merge-tree
   --write-tree`, git 2.38+; an older git does the same merge with `--no-commit` in a scratch

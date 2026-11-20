@@ -650,6 +650,12 @@ def _overwritten(repo: Path, branch: str) -> list[str]:
                 # clean file-to-directory refactor (pkg to pkg/init.py) was refused (#343, the
                 # audit of 1.4)
                 continue
+            if i < len(parts) and os.path.islink(here):
+                # an untracked link the merge writes under: git won't write through it and
+                # replaced the user's ignored link to a dataset with a plain directory (#367, the
+                # audit of 1.6). os.path.isdir follows links, so it read as a directory
+                out.append(b"/".join(parts[:i]).decode("utf-8", "replace"))
+                break
             if i < len(parts) and os.path.isdir(here):
                 continue
             if i == len(parts) and os.path.isdir(here) and not os.path.islink(here):
