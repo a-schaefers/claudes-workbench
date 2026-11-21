@@ -9748,6 +9748,55 @@ class Images(Base):
         self.assertIn("image engine fake wrote no image (it starts '<html><body>502", err.getvalue())
         self.assertEqual([p.name for p in (tmp / "html").iterdir() if p.name != "engine.log"], [])
 
+    def test_an_image_or_audio_server_that_cuts_its_reply_off_ends_in_one_line_naming_it(self):
+        # #925: IncompleteRead is an HTTPException, not an OSError: a server killed mid-body gave
+        # Claude a traceback from wb image / wb audio instead of one line
+        import threading
+        from http.server import BaseHTTPRequestHandler, HTTPServer
+        from workbench import images, media
+
+        class H(BaseHTTPRequestHandler):
+            def log_message(self, *a):
+                pass
+
+            def cut(self):
+                self.send_response(200)
+                self.send_header("Content-Length", "100000"); self.end_headers()
+                self.wfile.write(b'{"data": [{"b64_json": "iVBOR')       # and the connection closes
+                self.close_connection = True
+
+            def do_GET(self):
+                self.cut()
+
+            def do_POST(self):
+                self.rfile.read(int(self.headers["Content-Length"]))
+                if self.path == "/by-url/v1/images/generations":       # its image by url, then cut
+                    body = json.dumps({"data": [{"url": f"http://127.0.0.1:{srv.server_port}/img.png"}]})
+                    self.send_response(200); self.end_headers(); self.wfile.write(body.encode())
+                    return
+                self.cut()
+
+        srv = HTTPServer(("127.0.0.1", 0), H)
+        threading.Thread(target=srv.serve_forever, daemon=True).start()
+        self.addCleanup(srv.server_close)
+        self.addCleanup(srv.shutdown)
+        root, tmp = f"http://127.0.0.1:{srv.server_port}", Path(self.tmp.name)
+        with self.assertRaisesRegex(RuntimeError, rf"^{root}/x: the reply was cut off \(IncompleteRead"):
+            media.post({}, root + "/x", b"{}", "application/json", 5)
+        with self.assertRaisesRegex(RuntimeError, rf"^{root}/view: the reply was cut off"):
+            images._get({}, root + "/view", 5)
+        self.engines({"cut": {"url": root + "/v1/images/generations", "gpu": False}})
+        err = io.StringIO()
+        with self.assertRaises(SystemExit), redirect_stderr(err):
+            run_wb("image", "a fox", "--n", "1", "--out", str(tmp / "o"))
+        self.assertIn("the reply was cut off", err.getvalue())
+        self.assertNotIn("Traceback", err.getvalue())
+        self.engines({"cut": {"url": root + "/by-url/v1/images/generations", "gpu": False}})
+        err = io.StringIO()
+        with self.assertRaises(SystemExit), redirect_stderr(err):
+            run_wb("image", "a fox", "--n", "1", "--out", str(tmp / "o"))
+        self.assertIn(f"{root}/img.png: the reply was cut off", err.getvalue())
+
     def test_a_url_image_engines_unload_url_is_posted_with_its_body_after_the_batch_even_a_failed_one(self):
         # #749 (the 2026-11-21 audit, finding 96): images.json's `unload` was checked but never
         # called, so an image server kept 6-12 GB beside the next task's coding model

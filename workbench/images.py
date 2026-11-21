@@ -195,6 +195,8 @@ def _get(e: dict, url: str, timeout: float) -> bytes:
             return r.read()
     except urllib.error.HTTPError as err:
         raise RuntimeError(f"{url} answered HTTP {err.code}") from None
+    except http.client.HTTPException as err:  # cut off mid-body (#925)
+        raise media.cut_off(url, err) from None
 
 
 def _comfyui(e: dict, values: dict) -> None:
@@ -296,6 +298,8 @@ def _server(e: dict, values: dict) -> None:
         except urllib.error.HTTPError as err:
             raise RuntimeError(f"{e['url']} ignored response_format b64_json and its image url "
                                f"answered HTTP {err.code}") from None
+        except http.client.HTTPException as err:  # cut off mid-body (#925)
+            raise media.cut_off(url, err) from None
     else:
         raise RuntimeError(f"{e['url']} sent no image: {media._gist(raw)}")
 

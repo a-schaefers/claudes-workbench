@@ -4603,7 +4603,10 @@ custom-node packs do run their own Python).
   `data[0].b64_json`, or fetch `data[0].url` for a server that ignores `response_format` (the key
   goes only to the engine's own server). An error status is a RuntimeError with the status and the
   first 300 characters of the body, and a 401 or 403 without a key says it wants one; a reply of
-  another shape quotes it ("sent no image: …"). A 200 with a url gave "wb: b64_json", `{"data":
+  another shape quotes it ("sent no image: …"), and a reply cut off mid-body or not HTTP
+  (`http.client.HTTPException`, not an OSError: a server killed while sending) is `<url>: the
+  reply was cut off (…)` (`media.cut_off`, in `media.post`, `images._get` and the url fetch; it was
+  a traceback, #925). A 200 with a url gave "wb: b64_json", `{"data":
   []}` or a page that isn't JSON a traceback, a 400 only "Bad Request" (#597). An `a1111` engine
   (`images.api`, `_a1111`) POSTs `{prompt, width, height, seed, batch_size: 1, n_iter: 1, steps?}`
   and decodes `images[0]` (a `data:` prefix dropped); a Forge url got an OpenAI body and "sent no
@@ -4787,7 +4790,8 @@ it. ACE-Step's takes peaked at -0.2 dBFS, near clipping, before any `loudnorm`: 
   POSTed too, each URL once (only the maker's was, so a GPU listener kept its weights after the
   lease was let go: #594). `key` is sent as a Bearer
   token, as for images, to the speech, transcription and unload URLs alike; an error status
-  says what the server said (`media.post`, #597).
+  says what the server said (`media.post`, #597), and a reply cut off mid-body says so in one
+  line (`media.cut_off`, #925).
 - A **listen** engine prints its transcript on stdout (`{in}` is the clip; JSON with `text`, and
   audio.cpp's `text_output=` line among its `key=value` lines, are read too), or is an OpenAI
   `/v1/audio/transcriptions` server. The first one in the file checks
