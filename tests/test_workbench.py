@@ -3402,6 +3402,35 @@ class Watch(Base):
             watched = {str(d.relative_to(home)) for d in w.dirs.values()}
         self.assertEqual(watched, {".", "tasks"})
 
+    def test_wb_events_watches_no_bench_clone_no_link_out_and_survives_an_unreadable_directory(self):
+        # #439: 1,209 of 1,211 watches were under bench/, a mode-000 directory there made wb
+        # events exit 1 at every respawn, and a --sibling link took it into the sibling's tree
+        from workbench import watch
+        home = store.home()
+        for d in ("bench/.base-1-x", "bench/.check-1-y", "bench/runs/r1/case/repo"):
+            for i in range(20):
+                (home / d / "node_modules" / f"p{i}").mkdir(parents=True)
+        (home / "bench/cases/c").mkdir(parents=True)
+        lib = Path(self.tmp.name) / "biglib"
+        for i in range(20):
+            (lib / f"src{i}").mkdir(parents=True)
+        (home / "tasks/t").mkdir(parents=True)
+        (home / "tasks/t/biglib").symlink_to(lib)
+        locked = home / "tasks/t/locked"
+        (locked / "inside").mkdir(parents=True)
+        locked.chmod(0)
+        want = {".", "tasks", "tasks/t", "bench", "bench/cases", "bench/cases/c"}
+        try:
+            for libc in (None, False):                      # inotify, then polling (macOS)
+                with mock.patch.object(watch, "_libc", libc), \
+                        watch.Watcher(home, recursive=True, skip=cli.EVENT_SKIP) as w:
+                    seen = {str(d.relative_to(home)) for d in [*w.dirs.values(), *w.polled]}
+                self.assertEqual(seen - {"tasks/t/locked", "tasks/t/locked/inside"}, want)
+                if os.geteuid() != 0:  # root reads a mode-000 directory all the same
+                    self.assertNotIn("tasks/t/locked/inside", seen)
+        finally:
+            locked.chmod(0o755)
+
     def test_session_commands_never_need_opencodes_background_service(self):
         # the fake, like OpenCode with another service on the managed port, refuses without
         # --standalone (the 2026-11-16 audit)
@@ -6396,6 +6425,16 @@ class Cleanup(Base):
         self.assertIsNone(cli._dead_start(task))              # its maker runs: under way
         store.write_json(task.dir / cli.STARTING, {**info, "start": "1"})
         self.assertEqual(cli._dead_start(task)["pid"], me)    # another process under its pid
+
+    def test_wb_gc_removes_a_killed_bench_adds_clones(self):
+        # #439: _drop_scratches looked at the state directory's top level only
+        bench_dir = store.home() / "bench"
+        dead, young = bench_dir / ".base-999999999-x", bench_dir / ".check-999999999-y"
+        for d in (dead, young):
+            (d / "repo").mkdir(parents=True)
+        os.utime(dead, (time.time() - 7200, time.time() - 7200))
+        self.assertEqual(cli._drop_scratches(), 1)
+        self.assertEqual([dead.exists(), young.exists()], [False, True])
 
     def test_a_merged_branch_goes_and_bench_still_finds_its_commit(self):
         # 8 merged delegate branches were left in one repo, and 55 rules directories here

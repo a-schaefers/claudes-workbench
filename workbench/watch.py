@@ -9,6 +9,7 @@ times a second instead and reports what changed, so nothing here is required for
 from __future__ import annotations
 
 import ctypes
+import errno
 import fnmatch
 import os
 import select
@@ -96,12 +97,20 @@ class Watcher:
         wd = _lib().inotify_add_watch(self.fd, os.fsencode(d), MASK) if self.native else -1
         if wd >= 0:
             self.dirs[wd] = d
+        elif self.native and ctypes.get_errno() in (errno.EACCES, errno.ENOENT, errno.ENOTDIR):
+            return  # unreadable or gone: nothing to look at either (only the watch limit polls)
         elif d not in self.polled:
             self.polled[d] = _scan(d)
         if self.recursive:
-            for sub in d.iterdir():
-                if sub.is_dir() and not self._skipped(sub) and sub not in self.dirs.values() \
-                        and sub not in self.polled:
+            # a directory that can't be read (mode 000, removed mid-scan) is left out: it killed
+            # wb events at every respawn (#439). A link is never followed: a task's --sibling
+            # link took the watches into the sibling's whole tree (#439, Codex's 17)
+            try:
+                subs = [sub for sub in d.iterdir() if sub.is_dir() and not sub.is_symlink()]
+            except OSError:
+                return
+            for sub in subs:
+                if not self._skipped(sub) and sub not in self.dirs.values() and sub not in self.polled:
                     self.add(sub)
 
     def _poll(self) -> list[Path]:
