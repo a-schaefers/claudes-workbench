@@ -975,8 +975,38 @@ def weights(m: Model) -> int:
         if row and not _cloud_row(row):
             return int(row.get("size") or 0)
     if m.engine != "ollama" and not _fake():
-        return server_facts(m.root, m.name, m.api_key)["weights"] or 0
+        return server_facts(m.root, m.name, m.api_key)["weights"] or start_file(m)
     return 0
+
+
+def start_file(m: Model) -> int:
+    """Bytes of the weights file models.json's `start` command serves (`-m`/`--model <file>`,
+    as llama-server takes it), when it is a file here; else 0. vLLM's /v1/models has no size,
+    and llama-swap or a router-mode llama-server none for a model not loaded: every weight was 0,
+    so the router took the config's order and called it the largest model (#704)."""
+    try:
+        argv = shlex.split(m.start or "")
+    except ValueError:
+        return 0
+    for i, arg in enumerate(argv):
+        path = argv[i + 1] if arg in ("-m", "--model") and i + 1 < len(argv) else \
+            arg.partition("=")[2] if arg.startswith("--model=") else ""
+        if path and os.path.isfile(full := os.path.expanduser(path)):
+            return os.path.getsize(full)
+    return 0
+
+
+# A parameter count in a model's name (70b, 8x7B, 1.5B), not an active one (a3b) or part of a
+# word; a lone count as bytes at one a parameter (an 8-bit quantization's), a guess (#704)
+PARAMS = re.compile(r"(?<![A-Za-z0-9.])(?:(\d+)x)?(\d+(?:\.\d+)?)[bB](?![A-Za-z0-9])")
+
+
+def guessed_weights(m: Model) -> int:
+    """Bytes of weights guessed from the parameter count in ``m``'s name (models.PARAMS), for
+    ordering models whose server says no size; 0 when the name gives none. Never a fit: only
+    weights() is measured."""
+    counts = [float(n) * (int(e) if e else 1) for e, n in PARAMS.findall(f"{m.name} {m.label}")]
+    return int(max(counts) * 1e9) if counts else 0
 
 
 # What a server other than Ollama says about a model: only Ollama's API was read, so on any other

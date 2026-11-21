@@ -920,8 +920,7 @@ layer sets `compaction: {auto: true, buffer}` with `buffer = max(usable + reply 
 STEP_GROWTH` (usable: OpenCode 2.3's own figure, `runner.usable_input`: the smaller of
 `limit.input` and the window, else the window, since OpenCode compacts at usable − buffer; reply:
 `options.max_tokens`, else `limit.output`; `STEP_GROWTH` 4096), so OpenCode compacts only past the
-handover point, leaving room for one reply at the output cap and one step's 
-growth
+handover point, leaving room for one reply at the output cap and one step's growth
 (`compaction_buffer`). Taking an unset `limit.input` as context − output (OpenCode 1.x) wrote a 4K
 buffer for a hand-written `{context 32K, output 16K}`: OpenCode compacted at 87.5% while the
 handovers were planned against 37.5% (#675). OpenCode shrinks each request's `maxTokens` to fit, so
@@ -2808,7 +2807,12 @@ answering (doctor) and doesn't ask them again. `remedy(m, state)` is the next st
 (none when the reason says it already), and `may_come_up(state)` whether the model may run by the
 time a queued task gets the GPU (Ollama not answering, a server not running). `weights()`:
 `weights_gb`, else Ollama's size (0 for a cloud model), else what another server says
-(`server_facts`), else 0; the router weighs only a model that can run (and `fits` only that one),
+(`server_facts`), else the file a models.json `start` command serves (`start_file`: `-m`/`--model
+<file>`, llama-server's), else 0. vLLM, SGLang, KoboldCpp and MLX say no size, nor llama-swap or a
+router-mode llama-server for a model not loaded: every weight 0, the router took the config's
+order as "the largest model" (#704). For ordering only, `guessed_weights` reads a parameter count
+in the name or label (`PARAMS`: `70b`, `8x7B` as 56, not an active `a3b`) at a byte a parameter;
+`fits` never uses it. The router weighs only a model that can run (and `fits` only that one),
 so a down server isn't asked again per model.
 
 **What other servers say** (`server_facts(root, name, key)` → `{context, weights, tools}`, each
@@ -3033,7 +3037,8 @@ fades; `tries` and `wins`, shown in `Score.line`, stay plain counts (#648, the a
 The available models within `QUALITY_MARGIN` 0.15 of the best are ordered by the guess
 (`_guess`): those that fit the GPU before those that would spill (`fits`: Ollama says it's all in
 VRAM, or `vram_gb`/weights within 90% of the budget; unknown is neither), then the largest by
-weight bytes for `significant` work, the smallest for `trivial` (a model of unknown size ranks last), then
+weight bytes for `significant` work, the smallest for `trivial` (a size the server doesn't say is
+guessed from the name, `Score.guessed`; a model of unknown size still ranks last), then
 the one already resident. Then what Claude spends (`_cheaper`): once the guess's pick and another
 model in the band each have `COST_MIN` 3 tasks of the size with a results `claude` (spend.py), the
 one whose mean costs Claude `COST_MARGIN` 15% less goes first ("costs Claude least on <size>
@@ -3051,7 +3056,10 @@ discard on a model's first task, Claude's own wrong test, put it 0.17 below a mo
 record and it never ran again (#648). Without a name (`wb models --set-default`) nothing
 explores. `choose` returns the pick and a reason ("the largest … that fits the GPU",
 "the best record on significant C work", "exploring: its record on <size> work is N task(s), too
-few to leave it out (one task in 10)", … "(vs …)"). `wb models` prints the ranking per size,
+few to leave it out (one task in 10)", … "(vs …)"); "(its size guessed from its name)" after a
+guessed pick, "(<ids>: size unknown, models.json weights_gb sets it)" when others are unknown, and
+"sizes unknown: config order; …" when the pick's own is, not "the largest" (#704). `wb models` adds
+a `size:` line for a model whose size the server doesn't say, and `wb doctor` a `--` line. `wb models` prints the ranking per size,
 marking each unproven model ("out of the band on N task(s): one task in 10 explores it");
 `--set-default` makes the pick OpenCode's default. A new model has no record, so Claude gives it
 its first tasks by hand (`--model`).
@@ -5647,7 +5655,7 @@ delivered as taken (`_stale_notes`, *Notes*).
 ### Models, skills, lessons, notes
 | Command | Flags | What it does |
 |---|---|---|
-| `wb models` | `--set-default` | Each model's state, slice and speeds (and `bench:`, its cases passed, when replayed); the router's ranking per size, each model the record left out on fewer than `router.EXPLORE_TRIES` tasks marked (*Exploring*, #648). `--set-default` writes the significant-work pick as OpenCode's `model` (`models.set_default`: in the user's file, refused while `OPENCODE_CONFIG_CONTENT` sets one, which would win: #421). |
+| `wb models` | `--set-default` | Each model's state, slice and speeds (and `bench:`, its cases passed, when replayed; `size:` when the server says none, guessed from its name or unknown, with `weights_gb` named: #704); the router's ranking per size, each model the record left out on fewer than `router.EXPLORE_TRIES` tasks marked (*Exploring*, #648). `--set-default` writes the significant-work pick as OpenCode's `model` (`models.set_default`: in the user's file, refused while `OPENCODE_CONFIG_CONTENT` sets one, which would win: #421). |
 | `wb model add <provider/model>` | `--pull`, `--label`, `--context N`, `--url URL`, `--start CMD`, `--stop CMD` | Registers a model in opencode.json, merged into any existing entry; `--url` first writes an OpenAI-compatible provider for any server on this machine (`models.add_server_provider`: a provider already there is never touched, and one for another baseURL refuses the add; a URL off this machine needs models.json `local: true`), and `--start`/`--stop` write the model's models.json `start`/`stop`; on a first run with no `--url` it writes the `ollama` provider when Ollama answers; refuses a cloud model, an unknown served context (a server other than Ollama needs `--context`), a down Ollama, a down server of unknown engine (see *Managing the set*). |
 | `wb optimize [start\|estimate\|report\|stop\|apply] [<id>…]` | `--bench`, `--if-due` | Asked for, or when due at setup and session start (*Optimize*). `start --if-due`: only when due, else nothing printed. `estimate`: how long a run would hold the GPU. `start`: detached; measures each Ollama model's largest window all on the GPU (refused while a task holds it; a task that wants it stops it); `--bench` then starts `wb bench run` on every model. `report` (the default): a line per model. `stop`. `apply <id>…`: adds the measured window as an entry of its own beside the model (an Ollama `<name>:<tag>-<N>k`, `optimize.entry_name`, with that `num_ctx`, the entry's settings copied; refused when that name exists). |
 | `wb remote <host>` | `--port N` (11434), `--context N`, `--remove` | Another machine's Ollama as this one's models: provider `ollama-<host>` marked `local: true`, each tool-capable model it has pulled registered as `wb model add` would, one line each (see *Models*); exit 1 when it doesn't answer (with `OLLAMA_HOST=0.0.0.0` to try). Refuses a provider of that id already there for another baseURL. `--remove` undoes it; not while OpenCode's default model is one of them, nor for a provider wb didn't add or that now points elsewhere. |

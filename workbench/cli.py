@@ -2631,6 +2631,10 @@ def cmd_models(a):
             print(f"{'':36}speed: {sp} on this machine")
         if b := bench.model_line(m.id):
             print(f"{'':36}bench: {b} (wb bench report)")
+        if st["available"] and not models.weights(m):  # the router can't rank it by size (#704)
+            guess = models.guessed_weights(m)
+            print(f"{'':36}size: " + (f"~{guess / 1e9:.0f} GB guessed from its name" if guess else "unknown")
+                  + " (the server says none; models.json weights_gb sets it)")
     for size in router.SIZES:
         print(f"\n{size}:")
         ranked = router.rank(size)
@@ -4301,6 +4305,12 @@ def cmd_doctor(a):
                 elif said and served and served > said:
                     print(f"--  {pid}/{name}: the server serves {served // 1024}K, the entry says "
                           f"{said // 1024}K; wb model add {pid}/{name} --context {served} lets its tasks grow")
+                if (sized := found.get(f"{pid}/{name}")) and states[sized.id]["available"] \
+                        and not models.weights(sized):
+                    # vLLM, SGLang, llama-swap say no size: routing went by config order (#704)
+                    print(f"--  {pid}/{name}: its size is unknown (the server says none), so routing "
+                          "ranks it by the size in its name, else the config's order: models.json "
+                          "weights_gb sets it")
                 continue
             capped = "max_tokens" in (e.get("options") or {})
             line(capped, f"{pid}/{name} caps its output on Ollama (options.max_tokens; Ollama ignores "

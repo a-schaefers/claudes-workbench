@@ -1141,6 +1141,50 @@ class Real(unittest.TestCase):
             cli.main(["doctor"])
         self.assertIn("BAD v/coder says a 128K context but the server serves 32K", out.getvalue())
 
+    def test_models_a_server_gives_no_size_are_ranked_by_their_names_or_start_file_and_say_so(self):
+        # #704: vLLM's /v1/models has no size, so every weight was 0: small-3b listed first took
+        # significant work as "the largest model", and trivial work as "the smallest"
+        from workbench import cli
+        vllm = self.server({"/v1/models": {"data": [{"id": "small-3b", "owned_by": "vllm"},
+                                                    {"id": "big-70b", "owned_by": "vllm"},
+                                                    {"id": "coder", "owned_by": "vllm"}]}})
+        entry = {"limit": {"context": 32768}}
+        self.config({"v": {"options": {"baseURL": vllm + "/v1"},
+                           "models": {"small-3b": entry, "big-70b": entry}}}, {"v": {"engine": "server"}})
+        top, why = router.choose("significant")
+        self.assertEqual(top.model.id, "v/big-70b")
+        self.assertIn("the largest model allowed significant work (its size guessed from its name)", why)
+        self.assertEqual(router.choose("trivial")[0].model.id, "v/small-3b")
+        self.assertEqual(models.guessed_weights(models.Model(
+            id="o/m", provider="o", name="mixtral-8x7b-instruct", base_url="", engine="server", label="o/m")), 56 * 10 ** 9)
+        self.assertEqual(models.guessed_weights(models.Model(
+            id="o/m", provider="o", name="qwen3-30b-a3b", base_url="", engine="server", label="o/m")), 30 * 10 ** 9)
+        # no size anywhere: said, not called the largest
+        self.config({"v": {"options": {"baseURL": vllm + "/v1"}, "models": {"coder": entry, "small-3b": entry}}},
+                    {"v": {"engine": "server"}})
+        top, why = router.choose("significant")
+        self.assertIn("v/coder: size unknown, models.json weights_gb sets it", why)
+        self.assertEqual(top.model.id, "v/small-3b")
+        self.config({"v": {"options": {"baseURL": vllm + "/v1"}, "models": {"coder": entry}},
+                     "w": {"options": {"baseURL": vllm + "/v1"}, "models": {"coder": entry}}},
+                    {"v": {"engine": "server"}, "w": {"engine": "server"}})
+        self.assertIn("sizes unknown: config order; models.json weights_gb sets a model's size",
+                      router.choose("significant")[1])
+        out = io.StringIO()
+        with redirect_stdout(out):
+            cli.main(["models"])
+        self.assertIn("size: unknown (the server says none; models.json weights_gb sets it)", out.getvalue())
+        out = io.StringIO()
+        with contextlib.suppress(SystemExit), redirect_stdout(out):
+            cli.main(["doctor"])
+        self.assertIn("--  v/coder: its size is unknown (the server says none)", out.getvalue())
+        # a llama-server start command's -m file is the size, measured
+        gguf = Path(self.tmp.name, "coder.gguf")
+        gguf.write_bytes(b"\0" * 4096)
+        self.config({"v": {"options": {"baseURL": vllm + "/v1"}, "models": {"coder": entry}}},
+                    {"v": {"engine": "server"}, "v/coder": {"start": f"llama-server -m {gguf} --port 1"}})
+        self.assertEqual(models.weights(models.discover()["v/coder"]), 4096)
+
     def test_doctor_scout_and_add_ask_ollama_by_an_aliased_entrys_id(self):
         # #588 (the audit of 1.90): `ollama/coder` with id qwen3-coder:30b; doctor asked Ollama
         # about `coder`, fell back to OLLAMA_CONTEXT_LENGTH and said BAD, its advice (wb model add

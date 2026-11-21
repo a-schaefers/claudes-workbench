@@ -84,6 +84,7 @@ class Score:
     explored: bool = False         # put first to explore it (choose's task_name)
     # the record weighed by recency (HALF_LIFE_DAYS); None: as counted
     w: tuple | None = None         # (tries, wins, like_tries, like_wins)
+    guessed: bool = False          # weights guessed from its name: the server says no size (#704)
 
     @property
     def quality(self) -> float:
@@ -130,6 +131,8 @@ def score(m: models.Model, size: str, state: dict | None = None, stack=()) -> Sc
     # cost seconds per model on a sleeping LAN box (the 2026-11-16 audit)
     s = Score(model=m, state=state, stack=tuple(stack),
               weights=models.weights(m) if state["available"] or m.extra.get("weights_gb") else 0)
+    if not s.weights and state["available"] and (guess := models.guessed_weights(m)):
+        s.weights, s.guessed = guess, True  # ordered by its name's size, not the config's (#704)
     s.tries = len(real)
     s.wins = sum(tuning.agent_landed(r) for r in real)  # a takeover's accept is Claude's (#647)
     like = [r for r in real if set(row_stack(r)) & set(stack)] if stack else []
@@ -268,6 +271,7 @@ def choose(size: str, stack=(), task_name: str | None = None) -> tuple[Score | N
         return None, "no local models: " + models.why_none()
     usable = [s for s in ranked if s.state["available"]]
     sizes = [s.weights for s in usable if s.fits is not False or top.fits is False]
+    unknown = [s.model.id for s in usable if not s.weights]
     if len(usable) == 1:
         pick = f"the only model allowed {size} work"
     elif top.explored:
@@ -275,6 +279,9 @@ def choose(size: str, stack=(), task_name: str | None = None) -> tuple[Score | N
                 f"out (one task in {EXPLORE_ONE_IN})")
     elif top.cheaper:
         pick = f"costs Claude least on {size} work"
+    elif size in ("significant", "trivial") and not top.weights:
+        # every weight 0 made it "the largest" and "the smallest" at once, by config order (#704)
+        pick = "sizes unknown: config order; models.json weights_gb sets a model's size"
     elif size == "significant" and top.weights == max(sizes):
         pick = "the largest model allowed significant work" + (
             " that fits the GPU" if top.fits and any(s.fits is False for s in usable) else "")
@@ -283,6 +290,10 @@ def choose(size: str, stack=(), task_name: str | None = None) -> tuple[Score | N
     else:
         kind = f"{size} {'/'.join(stack)}" if top.like_tries else size
         pick = f"the best record on {kind} work"
+    if top.guessed and pick.startswith(("the largest", "the smallest")):
+        pick += " (its size guessed from its name)"
+    if unknown and top.weights and size in ("significant", "trivial"):
+        pick += f" ({', '.join(unknown[:3])}: size unknown, models.json weights_gb sets it)"
     others = "; ".join(f"{s.model.id} {s.line()}" for s in usable[1:4])
     return top, f"{top.model.id}: {pick}; {top.line()}" + (f" (vs {others})" if others else "")
 
