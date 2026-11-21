@@ -644,6 +644,9 @@ once more and `pid` and `stopping` are cleared.
    `_steer_round` (the next round carries the notes). Opencode exited non-zero with no text
    while the model's server is down (it went away under the round) → a `load` event, the wait
    for the server (*Waiting for a server that is down*), and the round runs again, once a round.
+   A server wb starts itself (models.json `start`) that is no longer running (`runner._stopped`:
+   an out-of-memory kill, a CUDA assert) isn't waited for: the loop's load starts it again, and
+   the round runs again, once a round; a start that fails fails the task as a load failure (#579).
    Stuck, or opencode exited non-zero (`died`: whatever it printed, since a child that said "I
    will inspect the files" and exited 7 went on to an already-green test and to review as "tests
    passed", #427; not the runner's own stop of a shutdown that hung, `lingered`) → the report

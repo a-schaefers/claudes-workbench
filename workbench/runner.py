@@ -2021,6 +2021,20 @@ def _down(m: models.Model) -> bool:
         return False
 
 
+def _stopped(m: models.Model) -> bool:
+    """Whether the model's server is one wb starts itself (models.json `start`) and it is not
+    running now: one that died under a round (an out-of-memory kill, a CUDA or GGML assert) is
+    started again by the loop's load. Only Ollama's and servers wb can't start were revived, and
+    the same crash under llama-server failed the task (#579, the audit of 1.90)."""
+    if not m.start:
+        return False
+    try:
+        st = models.status(m)
+    except Exception:  # the config can't be read: nothing to start
+        return False
+    return bool(st["available"]) and not st["resident"]
+
+
 def _wait_up(task: store.Task, m: models.Model) -> None:
     """Wait, backing off, until the model's server is no longer only down; RuntimeError past
     DOWN_WAIT. Whatever it is then, the caller's load says."""
@@ -2165,19 +2179,22 @@ def drive(task: store.Task) -> None:
                 _steer_round(task, n, rnd["interrupted"])
                 continue
             if not rnd["stuck"] and rnd["exit"] not in (0, None) and not rnd["texts"] \
-                    and revived != n and _down(m):
+                    and revived != n and ((down := _down(m)) or _stopped(m)):
                 # OpenCode died without a word while the model's server is down (restarted, or
                 # killed out of memory): the round never reached the model. Once it is back, the
                 # loop's load reloads it and the round runs again, once (the 2026-11-19 audit).
+                # A server wb starts itself isn't waited for: the loop's load starts it (#579).
                 revived = n
                 task.event({"ts": store.now(), "round": n, "kind": "load",
                             "text": f"opencode exited {rnd['exit']} with the model's server down: "
-                                    "the round runs again once it is back"})
+                                    + ("the round runs again once it is back" if down else
+                                       "wb starts it again and the round runs again")})
                 lease.step_aside()  # #257: nothing of ours is on the GPU while it is down
-                try:
-                    _wait_up(task, m)
-                except RuntimeError as e:
-                    return _load_failed(task, e)
+                if down:
+                    try:
+                        _wait_up(task, m)
+                    except RuntimeError as e:
+                        return _load_failed(task, e)
                 continue
             if rnd["stuck"] or died(rnd):
                 text = summary_text(task, n, rnd, None) + _undelivered(task)

@@ -1579,6 +1579,46 @@ class ServerAway(Base):
         self.assertFalse(self.waits("t-gone"))
 
 
+class ServerRestarted(Base):
+    """A model server wb starts itself (models.json `start`) that dies under a round: #579, the
+    audit of 1.90. Only Ollama's and servers wb can't start were revived; an out-of-memory kill of
+    a llama-server failed the task as "opencode exited 1"."""
+    def setUp(self):
+        super().setUp()
+        os.environ.pop("WB_FAKE_MODELS")
+        self.down = Path(self.tmp.name) / "down"
+        self.starts = Path(self.tmp.name) / "starts"
+        srv, url = serve({"/v1/models": lambda h: 503 if self.down.exists() else {"data": [{"id": "m"}]}})
+        self.addCleanup(srv.server_close)
+        self.addCleanup(srv.shutdown)
+        Path(os.environ["WB_OPENCODE_CONFIG"]).write_text(json.dumps({"provider": {"s": {
+            "options": {"baseURL": f"{url}/v1"}, "models": {"m": {"limit": {"context": 32768}}}}}}))
+        Path(os.environ["WB_MODELS"]).write_text(json.dumps({"s": {"engine": "server"}, "s/m": {
+            "start": f"echo >> {self.starts}; rm -f {self.down}"}}))
+
+    def test_a_server_wb_starts_that_dies_under_a_round_is_started_again_and_the_round_rerun(self):
+        os.environ["FAKE_DOWN"] = str(self.down)                      # the round takes it down
+        self.start("t-oom", "crash", "--test", TEST_CMD, "--model", "s/m")
+        st = wait_phase("t-oom", {"review", "stuck", "failed"}, timeout=90)
+        self.assertEqual(st["phase"], "review", st.get("last"))
+        self.assertTrue(st["tests"]["ok"])                              # the round, run again
+        self.assertEqual(st["round"], 1)
+        self.assertEqual(self.starts.read_text().count("\n"), 1)        # started once, by wb
+        rows, _ = store.read_jsonl(store.Task("t-oom").dir / "events.jsonl")
+        self.assertIn("opencode exited 1 with the model's server down: wb starts it again and the "
+                      "round runs again", [r["text"] for r in rows if r.get("kind") == "load"])
+
+    def test_a_second_crash_in_the_same_round_still_fails_the_task(self):
+        os.environ["FAKE_DOWN"] = str(self.down)
+        # the start brings the server back but the crash marker goes too: it crashes again
+        Path(os.environ["WB_MODELS"]).write_text(json.dumps({"s": {"engine": "server"}, "s/m": {
+            "start": f"echo >> {self.starts}; rm -f {self.down} {self.down}.crashed"}}))
+        self.start("t-oom2", "crash", "--test", TEST_CMD, "--model", "s/m")
+        st = wait_phase("t-oom2", {"review", "stuck", "failed"}, timeout=90)
+        self.assertEqual((st["phase"], st["last"]), ("failed", "opencode exited 1"))
+        self.assertEqual(self.starts.read_text().count("\n"), 1)        # revived once a round
+
+
 class Fit(Base):
     """The router on a known GPU: a model that spills into RAM loses the size guess."""
     def setUp(self):
