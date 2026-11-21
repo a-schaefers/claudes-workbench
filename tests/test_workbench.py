@@ -6207,6 +6207,45 @@ class AskServer(Base):
         from workbench import lessons
         self.assertFalse(any("first?" in r["text"] for r in lessons.gather(task, "accepted")))
 
+    def test_two_answers_at_once_deliver_one_and_an_answer_racing_the_close_is_refused(self):
+        # #938 (the outside review of 1.90.24): is_open, then write_answer, with nothing making
+        # them one step: two answers both said "answered", the second replacing the first, and
+        # one landing as the runner closed the question overwrote NO_ANSWER and was counted
+        self.start("t-race", "ok", "--ask-budget", "3")
+        wait_phase("t-race", {"review"})
+        task, opened = store.Task("t-race"), {}
+        task.set_status(phase="running")
+        self.agent_asks(task, "aaaaaaaa", question="first?")
+        ask_mcp.relay(task, opened)
+        real, results = ask_mcp.write_answer, []
+        def slow(*a):  # noqa: E306  the window between the check and the write, held open
+            time.sleep(0.3)
+            real(*a)
+        with mock.patch.object(ask_mcp, "write_answer", slow):
+            racers = [threading.Thread(target=lambda t=t: results.append(
+                (t, ask_mcp.answer_once(task, "aaaaaaaa", t)))) for t in ("one", "two")]
+            for r in racers:
+                r.start()
+            for r in racers:
+                r.join()
+        self.assertEqual(sorted(ok for _, ok in results), [False, True])
+        winner = next(t for t, ok in results if ok)
+        self.assertEqual((context.ask_dir(task) / "aaaaaaaa.answer").read_text().strip(), winner)
+        self.agent_asks(task, "bbbbbbbb", question="second?")
+        ask_mcp.relay(task, opened)
+        before = task.status.get("answered")
+        once = [dict(opened)]  # the runner's close lands once, between wb answer's check and its write
+        closing = lambda text: once and ask_mcp.close(task, once.pop()) or ""  # noqa: E731
+        err = io.StringIO()
+        with mock.patch.object(ask_mcp, "too_long", closing), redirect_stderr(err), \
+                self.assertRaises(SystemExit) as cm:
+            run_wb("answer", "t-race", "--id", "bbbbbbbb", "--text", "late")
+        self.assertNotEqual(cm.exception.code, 0)
+        self.assertIn("already answered (or closed with NO_ANSWER)", err.getvalue())
+        self.assertEqual((context.ask_dir(task) / "bbbbbbbb.answer").read_text().strip(),
+                         ask_mcp.NO_ANSWER)
+        self.assertEqual(task.status.get("answered"), before)
+
     def test_a_suspend_while_the_agent_waits_on_its_question_does_not_expire_it(self):
         # #453: both waits ran on the wall clock, so a laptop woken past the ask timeout found
         # the question answered "No answer arrived in time" and closed, while the round paused
@@ -17119,7 +17158,6 @@ class ConfigWrites(Base):
             self.assertTrue(t.is_alive())
         t.join(10)
         self.assertEqual(context.commands_conf()["allow"], ["a *", "b *"])
-
 
 class DiskRoom(Base):
     """#342 (the audit of 1.4): nothing watched the disk, and a full one wedged every task."""

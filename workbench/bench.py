@@ -776,8 +776,7 @@ def _wait(task: store.Task) -> tuple[dict, int]:
             if phase in cli.LIVE:
                 cli.reap(task)
             if phase == "asking" and (qid := st.get("asking")) and ask_mcp.is_open(task, qid):
-                ask_mcp.write_answer(task, qid, REFUSED)
-                refused += 1
+                refused += ask_mcp.answer_once(task, qid, REFUSED)  # not if closed meanwhile (#938)
             elif phase in ("review", "stuck", "failed") and not cli.runner_alive(task):
                 return st, refused
             watcher.wait(30.0)

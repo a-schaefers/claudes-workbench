@@ -1476,7 +1476,10 @@ def cmd_answer(a):
     if why := ask_mcp.too_long(text):  # the server would never read it (#605)
         die(f"{why} ({task.worktree})")
     handled = store.now()  # the question; a newer notice, raised after the answer, stays news
-    ask_mcp.write_answer(task, qid, text)  # whole, and never through a link in the lane
+    # whole, never through a link in the lane, and only while still open: another answer or the
+    # runner's NO_ANSWER may have landed since the check above (#938)
+    if not ask_mcp.answer_once(task, qid, text):
+        die(f"{qid} was already answered (or closed with NO_ANSWER)")
     if (task.status.get("asks") or {}).get(qid) == "q":  # what the Stats tab may call answered:
         # here, outside the lane (an answer file the agent could write itself), never a NO_ANSWER (#562)
         task.set_status(answered=sorted({*(task.status.get("answered") or []), qid}))
@@ -2227,7 +2230,8 @@ def cmd_allow(a):
     handled = None
     if qid and ask_mcp.is_open(task, qid):
         handled = store.now()  # the request is answered: handled, as wb answer does
-        ask_mcp.write_answer(task, qid, text)  # whole, and never through a link in the lane
+        if not ask_mcp.answer_once(task, qid, text):  # answered or closed meanwhile (#938)
+            handled = None
     if (phase := task.status.get("phase")) in LIVE and runner_alive(task):
         store.append_jsonl(task.dir / "steer.jsonl", {"ts": store.now(), "text": text, "now": True})
         print(f"allowed {said} on {a.name}" + (" (always)" if a.always else "") + ": "
