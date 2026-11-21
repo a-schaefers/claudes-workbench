@@ -234,8 +234,14 @@ unknown), the rest unknown and said: a 30 GB monorepo's whole tree was counted f
 and a blobless clone fetched every blob, one at a time, to be sized, #436) plus its `--copy` paths
 (a file at its own size: `store.dir_size` counted one as nothing, #436), times
 `DISK_COPIES` (3: the worktree, the base check's and `wb verify`'s scratch checkouts, full copies
-on ext4) plus `DISK_SPARE` (2 GB), free where the state directory is; it names the open tasks and
-their sizes; unknown free space refuses nothing). The runner's crash handler on ENOSPC or EDQUOT
+on ext4) plus `DISK_SPARE` (2 GB), free where the state directory is, less what the open tasks'
+runners haven't checked out yet (`runner.pending_checkouts`: each one's task.json
+`checkout_bytes`, the size this check measured, until its status has `checked_out`; a failed one's
+never counts): since the runner makes the checkout, a batch of starts each saw the disk as the
+first did and four 8 GB checkouts ran at once on 40 GB (#676). It names the open tasks and
+their sizes; unknown free space refuses nothing). The runner checks again before its checkout:
+less free than `checkout_bytes` plus `runner.CHECKOUT_SPARE` (2 GB, `DISK_SPARE` is it) fails the
+task before any round ("… free where the state directory is, and its checkout needs …"). The runner's crash handler on ENOSPC or EDQUOT
 (`store.disk_full`) sets `failed` with "the disk is full … wb resume", and with no room even for
 that, exits without raising. `reap` that can't write says so once per command on stderr and
 leaves the task for the first call that can; its notice names the free space when it is under
@@ -5751,7 +5757,7 @@ router's reason), `size`, `stack`, `trial` (when set), `backlog` (`--backlog`), 
 monorepo package, *Instructions*) (each when set), `setup`, `setup_timeout` (with a setup, when
 set: its limit in seconds, `--setup-timeout` or the repo's commands.json one), `copy`, `siblings` (when set: the
 flags with commands.json `repos`, *Setting the worktree up*; `lib` one level up, `../../a/b` further),
-`worktree` (when nested: the worktree's path in the task's directory, `tree/…/worktree`, #261), `checkout` (`"runner"`: the runner makes the worktree, `runner.checkout`; missing on a task from before #529, whose worktree `wb start` made), `auto_fix`, `self_review` (true/false from the flags; null: learned), `ask_budget`,
+`worktree` (when nested: the worktree's path in the task's directory, `tree/…/worktree`, #261), `checkout` (`"runner"`: the runner makes the worktree, `runner.checkout`; missing on a task from before #529, whose worktree `wb start` made), `checkout_bytes` (the checkout and `--copy` size `wb start`'s disk check measured: counted as taken until the runner has made it, and checked again before it does, #676; missing when the free space was unknown), `auto_fix`, `self_review` (true/false from the flags; null: learned), `ask_budget`,
 `ask_timeout`, `checkin`, `round_timeout`, `silence_timeout`, `think_timeout`, `test_timeout`,
 `created_at`, `wb_version`, `experiments` (`{probe: true|false}`: what this task's agent has,
 `context.task_experiments`; missing on a task from before them: all off). Read but written by no command: `stuck` (the guards' thresholds),

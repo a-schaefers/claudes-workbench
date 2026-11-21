@@ -1527,6 +1527,19 @@ def checked_out(task: store.Task) -> bool:
     return task.spec.get("checkout") != "runner" or bool(task.status.get("checked_out"))
 
 
+def pending_checkouts() -> int:
+    """The bytes the open tasks' checkouts will still write: task.json `checkout_bytes` of each
+    one whose runner hasn't made its worktree yet (a failed one never will). wb start counts them
+    as taken (#676)."""
+    return sum(int(t.spec.get("checkout_bytes") or 0) for t in store.all_tasks()
+               if t.status.get("phase") not in store.CLOSED | {"failed"}
+               and not checked_out(t))
+
+
+# What a checkout leaves free at the least, and wb start's spare beside a task (cli.DISK_SPARE)
+CHECKOUT_SPARE = 2 * 10**9
+
+
 def _checkout_failed(task: store.Task, what: str, fix: str) -> bool:
     task.set_status(phase="failed", last=what[:200])
     task.notify("failed", f"task {task.name}: {what}, before any round. {fix}")
@@ -1544,6 +1557,13 @@ def checkout(task: store.Task) -> bool:
     spec, wt = task.spec, task.worktree
     repo = Path(spec["repo"])
     task.set_status(last="checking out the base")
+    # the disk may have filled since wb start measured it: a checkout cut short by a full disk
+    # failed the status writes that would have said so (#342, #676)
+    free, size = store.free_bytes(), int(spec.get("checkout_bytes") or 0)
+    if free is not None and size and free < size + CHECKOUT_SPARE:
+        return _checkout_failed(
+            task, f"{store.gb(free)} free where the state directory is, and its checkout needs "
+            f"{store.gb(size)} and 2 GB spare", f"Free some, then wb discard {task.name} and start again")
     began = time.monotonic()
     branch = gitops.branch_name(task.name)
     try:

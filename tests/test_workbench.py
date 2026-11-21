@@ -13038,6 +13038,39 @@ class DiskRoom(Base):
             self.start("t-partial", "ok")
         self.assertIn("7 of its files aren't fetched yet (a partial clone)", err.getvalue())
 
+    def test_start_counts_the_checkouts_of_tasks_just_started_as_taken(self):
+        # #676 (Claude's audit of main): since the runner makes the checkout (#529), each start of
+        # a batch saw 40 GB free and passed, and four 8 GB checkouts then ran at once
+        def task(name, **status):
+            t = store.Task(name)
+            t.dir.mkdir(parents=True)
+            store.write_json(t.dir / "task.json", {"name": name, "checkout": "runner",
+                                                   "checkout_bytes": 8 * 10**9, "created_at": store.now()})
+            t.set_status(phase="starting", **status)
+        task("t-a")
+        task("t-made", checked_out=True)                     # on the disk already: free counts it
+        task("t-dead")
+        store.Task("t-dead").set_status(phase="failed")      # never will be
+        self.assertEqual(runner.pending_checkouts(), 8 * 10**9)
+        size = mock.patch.object(gitops, "checkout_size", return_value=(8 * 10**9, 0))
+        with size, mock.patch.object(store, "free_bytes", return_value=40 * 10**9):
+            self.assertEqual(cli._disk_room(self.repo, "HEAD", {}), 8 * 10**9)  # 32 GB left: room
+            task("t-b")
+            err = io.StringIO()
+            with redirect_stderr(err), self.assertRaises(SystemExit):
+                cli._disk_room(self.repo, "HEAD", {})
+        self.assertIn("16.0 GB more is promised to the checkouts of tasks just started", err.getvalue())
+
+    def test_the_runner_refuses_a_checkout_the_disk_has_no_longer_room_for(self):
+        # #676: the disk filled between wb start's check and the runner's checkout
+        with mock.patch.object(gitops, "checkout_size", return_value=(10**15, 0)), \
+                mock.patch.object(store, "free_bytes", return_value=10**16):
+            self.start("t-huge", "ok")
+        self.assertEqual(store.Task("t-huge").spec["checkout_bytes"], 10**15)
+        st = wait_phase("t-huge", {"failed"})
+        self.assertIn("free where the state directory is, and its checkout needs", st["last"])
+        self.assertFalse(store.Task("t-huge").worktree.exists())
+
     def test_a_single_file_given_to_copy_counts_at_its_size(self):
         # #436 (Codex's 21): dir_size scanned a file as a directory, counted nothing and called
         # the count whole, so one large --copy input passed the disk check

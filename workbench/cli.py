@@ -715,7 +715,7 @@ def _missing_dirs(repo: Path) -> list[str]:
 # A task takes its checkout and --copy paths, then the base check's and wb verify's scratch
 # checkouts copy them again (a full copy on ext4, where reflinks don't exist), plus the build
 # (#342, the audit of 1.4)
-DISK_COPIES, DISK_SPARE = 3, 2 * 10**9
+DISK_COPIES, DISK_SPARE = 3, runner.CHECKOUT_SPARE
 
 
 def history_held(budget: float = 2) -> str:
@@ -732,11 +732,15 @@ def history_held(budget: float = 2) -> str:
     return "; ".join(parts)
 
 
-def _disk_room(repo: Path, base: str, setup: dict) -> None:
-    """Refuse a task the disk has no room for: a full one mid-round failed every status write."""
+def _disk_room(repo: Path, base: str, setup: dict) -> int | None:
+    """Refuse a task the disk has no room for: a full one mid-round failed every status write.
+    The checkouts the open tasks' runners haven't made yet count as taken: since the runner makes
+    the checkout (#529), a batch of starts each saw the disk as the first did, and four 8 GB
+    checkouts ran at once on 40 GB (#676). Returns the size it measured (task.json
+    `checkout_bytes`), or None when the free space is unknown."""
     free = store.free_bytes()
     if free is None:
-        return
+        return None
     # Git LFS files at their own size (#382), the sparse cone only, a partial clone's local blobs
     size, unknown = gitops.checkout_size(repo, base)  # (#436)
     for p in setup.get("copy", ()):
@@ -744,10 +748,14 @@ def _disk_room(repo: Path, base: str, setup: dict) -> None:
     need = size * DISK_COPIES + DISK_SPARE
     gap = (f"; {unknown} of its files aren't fetched yet (a partial clone), so their size isn't "
            "counted" if unknown else "")
+    pending = runner.pending_checkouts()
+    if pending:
+        gap += f"; {store.gb(pending)} more is promised to the checkouts of tasks just started"
+        free = max(free - pending, 0)
     if free >= need:
         if unknown:
             print(f"note: the disk check counted {store.gb(size)} of the checkout{gap}")
-        return
+        return size
     held = sorted(((store.dir_size(t.dir, budget=2)[0], t.name) for t in store.all_tasks()
                    if t.status.get("phase") not in store.CLOSED), reverse=True)
     die(f"{store.gb(free)} free where the state directory is ({store.home()}), and a task of this "
@@ -814,7 +822,7 @@ def cmd_start(a):
     if not a.no_sign:  # said now, not after the whole task at wb accept (#374)
         _say(gitops.sign_problem(repo, a.base))
     setup = _worktree_setup(repo, a)
-    _disk_room(repo, a.base, setup)
+    checkout_bytes = _disk_room(repo, a.base, setup)
     # Two projects, one GPU: a task that can't run beside the GPU's holders used to queue in
     # silence behind them, maybe for hours (the 2026-11-16 audit). Say so before any worktree.
     if not getattr(a, "bench", None):
@@ -862,6 +870,8 @@ def cmd_start(a):
         **setup,  # setup, copy, siblings: runner.prepare, before the base check (#201)
         **({"worktree": str(wt.relative_to(task.dir))} if wt != task.dir / "worktree" else {}),
         "checkout": "runner",  # the runner makes the worktree, before its setup (#529)
+        # the next start counts it as taken until the runner has made it (#676)
+        **({"checkout_bytes": checkout_bytes} if checkout_bytes else {}),
         **({"backlog": a.backlog} if a.backlog else {}),  # a batch left to run: wb backlog
         # a replay of the bench driver's (bench.replay): no notices, no results row, not listed
         **({"bench": b} if (b := getattr(a, "bench", None)) else {}),
