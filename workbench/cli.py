@@ -1713,6 +1713,25 @@ def stop_everything(tasks=None) -> list[str]:
     return stopped
 
 
+def _park_waiting(a) -> str:
+    """`wb stop --all --park-waiting` (the mod's /workbench-quit): the scope's tasks waiting on
+    Claude (review, stuck, failed, no runner) parked as they stand, their news acknowledged, so
+    the status line, the pick-up block and the jobs' gate leave them until the user asks. Only the
+    running ones were parked, and a review left at the quit stayed "awaiting review" and was handed
+    to every new conversation, against the quit (#698)."""
+    waiting, _ = _scope([t for t in store.all_tasks() if t.status.get("phase") in store.PARKS
+                         and not store.parked(t.status) and not runner_alive(t)], *_caller(a))
+    parked = []
+    for t in waiting:
+        with store.locked(runner.lock_file(t.name, "cmd")):
+            if t.status.get("phase") not in store.PARKS or runner_alive(t):
+                continue  # picked up meanwhile
+            t.set_status(parked=store.now())
+            _ack_all(t, upto=store.now())  # its news too, still true: the mod would wake for it
+            parked.append(t.name)
+    return f"parked as they stand (waiting on Claude): {', '.join(parked)}" if parked else ""
+
+
 @one_at_a_time
 def cmd_stop(a):
     if a.all:
@@ -1722,9 +1741,11 @@ def cmd_stop(a):
         stopped = ([f"wb bench (pid {driver})"] if driver else []) + stop_everything(mine)
         print("stopped: " + ("; ".join(stopped) if stopped else "nothing was running"))
         _say(_others_line(others, "left running"))
+        if a.park_waiting:
+            _say(_park_waiting(a))
         return
-    if a.repo or a.session:
-        die("--repo and --session go with --all")
+    if a.repo or a.session or a.park_waiting:
+        die("--repo, --session and --park-waiting go with --all")
     if not a.name:
         die("name a task, or --all")
     task = need(a.name)
@@ -2129,7 +2150,8 @@ def cmd_takeover(a):
     _stop_runner(task)
     task.event({"ts": store.now(), "round": task.status.get("round"), "kind": "takeover",
                 "text": "Claude took over"})
-    task.set_status(phase="review", last="Claude took over", pid=None, taken_over=True)
+    task.set_status(phase="review", last="Claude took over", pid=None, taken_over=True,
+                    parked=None)  # Claude's now (#698)
     _ack_all(task)
     print(f"took over {a.name}: the agent is stopped. Edit in {task.worktree} and leave it "
           f"uncommitted, then wb accept {a.name} -m \"…\" (it commits), or hand it back with "
@@ -4977,6 +4999,8 @@ def parser() -> argparse.ArgumentParser:
     s.add_argument("--session", action="append", metavar="ID",
                    help="with --all: only those of Claude Code session ID (repeatable)")
     s.add_argument("--all-sessions", action="store_true", help=ALL_SESSIONS)
+    s.add_argument("--park-waiting", action="store_true", help="with --all: also park the tasks "
+                   "waiting on Claude (review, stuck, failed) as they stand (/workbench-quit)")
     s.set_defaults(f=cmd_stop)
     s = sub.add_parser("resume", help="continue a stopped task in a fresh session (not a review round)")
     s.add_argument("name", nargs="?")

@@ -55,8 +55,14 @@ def parked(st: dict) -> bool:
     """A task `wb stop --all` (the mod's /workbench-quit) stopped and nothing has picked up since:
     the status line, the session's open-tasks block and `wb status` leave it out, `wb status
     --all` lists it. It stayed "awaiting review" and each new conversation was told to pick it up,
-    against the quit (#541). spawn_runner clears the mark; any other phase isn't parked."""
-    return st.get("phase") == "stuck" and bool(st.get("parked"))
+    against the quit (#541). A task waiting on Claude when the quit came (review, stuck, failed:
+    `--park-waiting`) is parked as it stands: only the running ones were, and a review stayed in
+    the status line and every new conversation's pick-up block (#698). spawn_runner and a takeover
+    clear the mark; any other phase isn't parked."""
+    return st.get("phase") in PARKS and bool(st.get("parked"))
+
+
+PARKS = ("review", "stuck", "failed")  # the phases a parked mark counts in (parked)
 
 
 # The environment variables that name a path. A relative one, or one with a `~` no shell expanded

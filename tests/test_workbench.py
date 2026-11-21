@@ -4268,6 +4268,22 @@ class Steering(Base):
         wait_phase("t-park", {"review"})
         self.assertRegex(run_wb("status"), r"t-park +review ")
 
+    def test_the_quit_parks_a_task_waiting_for_review_as_it_stands(self):
+        # #698: only running tasks were parked, so a review left at /workbench-quit stayed
+        # "awaiting review" and every new conversation was told to pick it up
+        self.start("t-rev", "ok", "--test", TEST_CMD)
+        wait_phase("t-rev", {"review"})
+        out = run_wb("stop", "--all", "--park-waiting", "--repo", os.getcwd())
+        self.assertIn("parked as they stand (waiting on Claude): t-rev", out)
+        st = store.Task("t-rev").status
+        self.assertEqual(st["phase"], "review")                # its state unchanged
+        self.assertTrue(store.parked(st))
+        self.assertTrue(run_wb("status").startswith("no open tasks"))
+        self.assertGreaterEqual(cli._acked(store.Task("t-rev")),  # its review notice: handled
+                                max(r["ts"] for r in store.notices() if r["task"] == "t-rev"))
+        run_wb("takeover", "t-rev")                            # picked up: Claude's again
+        self.assertFalse(store.parked(store.Task("t-rev").status))
+
     def test_wb_doctor_names_the_tasks_left_waiting_on_claude_for_days(self):
         # #541: a task left stuck, failed or in review for weeks was named nowhere
         self.start("t-idle", "ok")

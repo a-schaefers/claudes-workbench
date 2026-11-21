@@ -27,7 +27,8 @@ export type WbTask = {
   claude_start: string
   /** task.json's backlog ('' for none): while one of this session's is open, the user stays away */
   backlog: string
-  /** stuck and status `parked`: stopped by /workbench-quit (`wb stop --all`), waiting on no one (#541) */
+  /** review, stuck or failed and status `parked`: stopped or left by /workbench-quit (`wb stop --all
+   * --park-waiting`), waiting on no one (#541, #698) */
   parked: boolean
   /** the user's unspent allowance for Claude to edit it (`wb coding allow`), as the pane says it;
    * '' for none */

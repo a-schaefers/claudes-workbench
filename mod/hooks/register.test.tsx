@@ -330,7 +330,7 @@ test('a task wb start ran in this session is its own wherever it ran, also after
   await clock.advance(31_000)                                  // the safety poll reads it
   expect(woken.filter(t => t.includes('REPORT-again'))).toHaveLength(1)
   await $.command.run({ command: 'workbench-quit', args: '' })
-  expect(runs.at(-1)).toEqual(['wb', 'stop', '--all', '--repo', '/home/u', '--session', 'sess-1', '--session', 'sess-2'])
+  expect(runs.at(-1)).toEqual(['wb', 'stop', '--all', '--park-waiting', '--repo', '/home/u', '--session', 'sess-1', '--session', 'sess-2'])
 })
 
 test('a new Claude Code process in the project adopts the tasks of one that is gone', async ($, on) => {
@@ -518,6 +518,24 @@ test('in a monorepo a session in one package is not woken for another package\'s
   expect(woken.filter(t => t.includes('REPORT-ours'))).toHaveLength(1)
   expect(woken.join('\n')).not.toContain('REPORT-pkg')
   expect(woken.join('\n')).not.toContain('REPORT-here')
+})
+
+test('a review the quit parked is out of the status line and wakes no one (#698)', async ($, on) => {
+  // #698: the quit parked only running tasks: a review stayed "1 awaiting review" for good
+  const clock = mock.clock(on, { now: 1_800_000_000_000 })
+  const files: Record<string, string> = {}
+  const ui: string[] = []
+  task(files, 'left', 'review', { repo: '/home/u/a', cwd: '/home/u/a' }, ts0 - 3600)
+  files['/wb/tasks/left/status.json'] = JSON.stringify({ phase: 'review', round: 1, updated_at: ts0 - 3600, parked: ts0 - 60 })
+  fakeTasks(on, files, ['left'], true, ui)
+  on('process.run', () => ({ value: { exitCode: 0, stdout: '', stderr: '' } }))
+  on('ui.toast', () => ({ value: undefined }))
+  const woken: string[] = []
+  on('prompt.submit', (_: any, e: any) => { woken.push(e.text); return { text: e.text } })
+  await $.session.start({ cwd: '/home/u/a', surface: 'terminal', isInteractive: true })
+  await clock.advance(120_000)
+  expect(ui.filter(l => l.startsWith('status ⚒'))).toEqual([])
+  expect(woken).toEqual([])                                     // rewake leaves it too
 })
 
 test('a notice another session took under wb\'s lock wakes no one here (#687)', async ($, on) => {
@@ -1100,7 +1118,7 @@ test('/workbench-quit stops everything; /workbench-quit-and-hand-back-claude han
   await $.session.start({ cwd: '/', surface: 'terminal', isInteractive: true })
 
   const quit = await $.command.run({ command: 'workbench-quit', args: '' })
-  expect(runs.at(-1)).toEqual(['wb', 'stop', '--all', '--repo', '/'])  // this session's tasks
+  expect(runs.at(-1)).toEqual(['wb', 'stop', '--all', '--park-waiting', '--repo', '/'])  // this session's tasks
   expect(quit.text).toContain('stopped: fix-it')
   expect(JSON.stringify(quit.context)).toContain("Don't finish, restart")  // Claude is told
   expect(submitted.length).toBe(0)                                         // without a turn

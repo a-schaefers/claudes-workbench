@@ -1558,7 +1558,7 @@ async function scan($: any, root: string, now: number): Promise<WbTask[]> {
       session: String(sp.session ?? ''),
       claude_pid: Number(sp.claude_pid ?? 0), claude_start: String(sp.claude_start ?? ''),
       backlog: String(sp.backlog ?? ''),
-      parked: phase === 'stuck' && !!st.parked,
+      parked: ['review', 'stuck', 'failed'].includes(phase) && !!st.parked, // as store.parked (#698)
       allowed: allowedLine((await readJson($, `${base}/coding.json`)).allowed),
     })
   }
@@ -2614,7 +2614,9 @@ export const register: Register = (on, options) => {
   // This session's tasks only (`--repo`): another session keeps its own running.
   on('command.run', { command: QUIT }, async $ => {
     await workbenchMode($, false)
-    const { ok, out } = await runWb($, ['stop', '--all', ...(await scope($))])
+    // waiting tasks too, as they stand: a review left at the quit stayed "awaiting review" and in
+    // every new conversation's pick-up block (#698)
+    const { ok, out } = await runWb($, ['stop', '--all', '--park-waiting', ...(await scope($))])
     $.ui.toast(ok ? 'workbench: this session\'s delegated agents are stopped'
       : `workbench: wb stop --all failed: ${brief(out)}`)
     return { text: ok ? `Delegation stopped. ${out}` : `Delegation not stopped: ${out}`, context: [QUIT_NOTE(out, ok)] }
