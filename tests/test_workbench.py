@@ -16033,6 +16033,36 @@ class WebChat(Base):
             with contextlib.suppress(ProcessLookupError):
                 os.kill(pid, signal.SIGKILL)
 
+    def test_without_inotify_the_hub_wakes_the_streams_only_for_a_change_or_the_listener_ending(self):
+        # #841: the polling branch bumped every second, so each open stream rebuilt its snapshot
+        # (a `ps` fork each on macOS) once a second with nothing new
+        from workbench import watch
+        saved = watch._libc
+        watch._libc = False                                 # macOS: no inotify
+        self.addCleanup(setattr, watch, "_libc", saved)
+        d = self.chat.chat_dir()
+        d.mkdir(parents=True, exist_ok=True)
+        proc = subprocess.Popen(["sleep", "30"])
+        self.addCleanup(proc.kill)
+        store.write_json(d / "listener.json", {"session": "s", "pid": proc.pid})
+        hub = self.chat.Hub()
+        self.addCleanup(hub.close)
+        time.sleep(1.5)                                     # its first look
+        v = hub.version
+        time.sleep(3.5)
+        self.assertEqual(hub.version, v)                    # nothing changed: no wake
+        (d / "messages.jsonl").write_text('{"id": "m1"}\n')
+        time.sleep(2)
+        self.assertGreater(hub.version, v)                  # a change: woken
+        v = hub.version
+        proc.kill()
+        proc.wait()
+        time.sleep(2)
+        self.assertGreater(hub.version, v)                  # the listener ended: woken
+        v = hub.version
+        time.sleep(2.5)
+        self.assertEqual(hub.version, v)                    # and once, not every second after
+
     def test_a_closed_hub_makes_nothing_in_the_next_home(self):
         # #134 (CI, 2026-11-19): a test's hub outlived it and made the next test's state/ in its
         # setUp's way. It keeps its own directory, and close() ends it.

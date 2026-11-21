@@ -5598,8 +5598,11 @@ thread no longer):
   `TCP_USER_TIMEOUT` `UNACKED_MS` 45 s, so a write the peer never acknowledges fails within a
   minute rather than the kernel's quarter of an hour. One `Hub` thread watches
   `chat/` (inotify, or `wait()` when it fell back to polling) and a pidfd on the listener and
-  wakes every stream. Without inotify it wakes them every second (how a dead listener is noticed
-  there); a wake with nothing new writes nothing, so the 15 s ping holds on every platform. A
+  wakes every stream. Without inotify it looks every second but wakes them only for a change, the
+  listener's process no longer answering `kill 0` (once per pid: how a dead listener is noticed
+  there, no `ps`), or `IDLE_BUMP_S` (60 s) with neither, as the native path's timeout: waking every
+  second, each open stream rebuilt its whole snapshot, a `ps` fork each on macOS, with nothing new
+  (#841); a wake with nothing new writes nothing, so the 15 s ping holds on every platform. A
   failure in the hub's watching (`_watch`) is printed and the watching starts again a second
   later: a dead hub would have left every page without news. It keeps the `chat/` it started with
   (`Hub.dir`) and stops at `close()`: a test's hub, resolving `WB_HOME` again on each restart,
@@ -6226,7 +6229,7 @@ Every waiter and its bounded wake (a timeout to re-check what the kernel can't s
 | `wb watch` | the task directory | 1.5 s on a terminal while the task is live, 30 s otherwise; the session exported again only on a change or every 30 s while live (#555) |
 | the runner's steer bell | the task directory (`steer.jsonl`) and `ask/` | 5 s, while OpenCode runs |
 | `ask_reviewer` | `ask/` | 30 s (`STEP_SECS`), until the ask timeout |
-| the chat `Hub` | `chat/` and the listener's pidfd | 60 s |
+| the chat `Hub` | `chat/` and the listener's pidfd (without inotify: `kill 0` each second) | 60 s |
 | `wb stop` / `takeover` | `wait_exit(pid, 15)` | |
 | `wb top` | `select` on its nvidia-smi stream and, on a terminal, the keys | each tick (`--every`), when it also checks its parent |
 
