@@ -1426,9 +1426,19 @@ async function claim($: any, name: string, sp: Row): Promise<Row> {
   const r = await runWb($, ['adopt', name, '--pid', String(mem.claudePid), ...ids.flatMap(i => ['--session', i])], 15_000)
   const now = await readJson($, `${mem.root}/tasks/${name}/task.json`)
   if (!r.ok && now.claude_pid === sp.claude_pid) mem.deadPids.delete(pidKey(sp)) // wb couldn't say: not ours to claim
-  // a task adopted into this session was being delegated: the mode comes back with it (#689)
-  if (r.ok) await workbenchMode($, true)
+  // a task adopted into this session was being delegated: the mode comes back with it (#689).
+  // Not one the user's quit parked, nor one handed back to Claude (taken over): adopting those
+  // turned the mode back on against /workbench-quit or the hand-back (#834).
+  if (r.ok && delegatedWork(await readJson($, `${mem.root}/tasks/${name}/status.json`))) await workbenchMode($, true)
   return now.name ? now : sp
+}
+
+// Whether a task (its status.json) is still delegated work: running, or waiting on Claude and
+// neither parked by a quit (store.parked, #698) nor taken over by Claude (#834)
+const delegatedWork = (st: Row) => {
+  const phase = String(st.phase ?? 'queued')
+  if (ACTIVE.has(phase)) return true
+  return NEEDS.has(phase) && !(['review', 'stuck', 'failed'].includes(phase) && st.parked) && !st.taken_over
 }
 
 // This session's id joins the ids this process has had: at the start and at each poll, so a

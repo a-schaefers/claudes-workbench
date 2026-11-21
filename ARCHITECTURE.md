@@ -50,7 +50,8 @@ Contents: [The pieces](#the-pieces) · [Why it's built this way](#why-its-built-
   the mod keeps the mode (and reminds Claude of it after a compaction or `/clear`) until a quit
   command. Only the user starts it; Claude never delegates on its own (the mod also counts a
   delegating `wb` command as the mode, keeps the mode by session id in its `$.store` so a
-  session resumed in a new process comes back in it, and turns it on when it adopts a task: #689).
+  session resumed in a new process comes back in it, and turns it on when it adopts a task still
+  delegated: #689; not one a quit parked or Claude took over, #834).
 - **`wb`** (`bin/wb` → `workbench/cli.py`) is the CLI Claude drives. Every command does one thing
   and prints a short, plain report, because Claude reads it and Claude's tokens are the scarce
   resource.
@@ -5878,7 +5879,9 @@ session's, `mine`), `mem.ids` (the `sessions` atom plus `$.session.id()`), turns
 mode turns on, and for a /clear's new id while it is on, drops this process's ids when it turns off, and
 entries past MODES_KEEP_MS, 30 days: #689, `claude --continue` came back with the mode off, so the chat
 didn't listen and a compaction dropped it, until Claude happened to run a delegating command; a
-`wb adopt` that succeeds turns it on too), registers its `workbench-*` commands (*Commands*
+`wb adopt` that succeeds turns it on too, for a task still delegated (`delegatedWork`: running, or
+waiting on Claude and neither parked nor `taken_over`): adopting the reviews /workbench-quit parked
+or the hand-back took over turned the mode back on against them, #834), registers its `workbench-*` commands (*Commands*
 below), runs `wb setup` once with a toast when the `/workbench` skill link is missing
 but the old `skills/delegate` link is there (a copy updated across the 2026-11-17 rename), and, when a person can be at the session (`isInteractive`, or a surface), starts the ears
 and two timers. A `claude -p` run or an SDK session (neither) stays quiet, no poll, no wake, no

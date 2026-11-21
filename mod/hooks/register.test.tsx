@@ -520,6 +520,48 @@ test('a session that adopts a task whose process is gone turns workbench mode on
   await clock.advance(3000)
 })
 
+// #834: /workbench-quit parked the review (or the hand-back took it over), the session ended, and
+// the next one in the project adopted it and turned the mode back on against the quit
+async function adoptsLeftOver($: any, on: any, extra: Record<string, unknown>) {
+  const clock = mock.clock(on, { now: 1_800_000_000_000 })
+  const files: Record<string, string> = {}
+  const ui: string[] = []
+  task(files, 'orphan', 'review', { repo: '/home/u/a', cwd: '/home/u/a', session: 'sess-old', claude_pid: 4242 })
+  files['/wb/tasks/orphan/status.json'] = JSON.stringify({ phase: 'review', round: 1, updated_at: ts0, ...extra })
+  fakeTasks(on, files, ['orphan'], true, ui, false)
+  on('process.spawn', async function* () {
+    yield { stream: 'stdout', text: '{"hello": 4343, "parent": 9000, "parent_start": "77"}\n' }
+    await new Promise(() => {})
+    return { code: 0, signal: null }
+  })
+  on('session.id', () => ({ value: 'sess-new' }))
+  on('process.run', (_: any, e: any) => {
+    const [cmd, ...args] = e.argv
+    if (cmd === 'kill') return { value: { exitCode: args[1] === '4242' ? 1 : 0, stdout: '', stderr: '' } }
+    if (args[0] === 'adopt') {
+      const path = '/wb/tasks/orphan/task.json'
+      files[path] = JSON.stringify({ ...JSON.parse(files[path]), session: 'sess-new', claude_pid: 9000, claude_start: '77' })
+    }
+    return { value: { exitCode: 0, stdout: '', stderr: '' } }
+  })
+  on('ui.toast', () => ({ value: undefined }))
+  on('prompt.submit', (_: any, e: any) => ({ text: e.text }))
+  await $.session.start({ cwd: '/home/u/a', surface: 'terminal', isInteractive: true })
+  await clock.advance(3000)
+  expect(JSON.parse(files['/wb/tasks/orphan/task.json']).session).toBe('sess-new') // still adopted
+  await clock.advance(3000)
+  expect(ui).not.toContain('open workbench')
+  expect(ui.some(l => l.includes('workbench mode'))).toBe(false)
+}
+
+test('adopting a task the user\'s quit parked leaves workbench mode off (#834)', async ($, on) => {
+  await adoptsLeftOver($, on, { parked: true })
+})
+
+test('adopting a task handed back to Claude leaves workbench mode off (#834)', async ($, on) => {
+  await adoptsLeftOver($, on, { taken_over: true })
+})
+
 test('in workbench mode the status line counts only this session\'s tasks as awaiting review (#693)', async ($, on) => {
   // #693: another session's review counted in this one's "N awaiting review"
   const clock = mock.clock(on, { now: 1_800_000_000_000 })
