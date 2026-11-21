@@ -45,6 +45,7 @@ import stat
 import struct
 import subprocess
 import sys
+import threading
 import time
 import urllib.error
 import urllib.parse
@@ -125,8 +126,8 @@ def server_key(url: str, remote: bool = False) -> tuple:
     """One key per server however its host is spelled: localhost, 127.0.0.1 and this machine's
     own name or address are one server. Compared as strings, two spellings of one Ollama made
     free_gpu unload the models it was told to keep (the 2026-11-16 audit), and wb model retire
-    --delete delete the default's weights (#368, the audit of 1.6). No DNS lookup: this runs on
-    every admission."""
+    --delete delete the default's weights (#368, the audit of 1.6). This runs on every
+    admission: a host name is looked up once per process (_named_here)."""
     u = urlparse(url)
     here = not remote and _this_host(u.hostname)
     return ("this host" if here else (u.hostname or "").lower(),
@@ -424,7 +425,36 @@ def _this_host(host: str | None) -> bool:
         return ip.is_loopback or str(ip) in _own_addresses()
     except ValueError:
         me = socket.gethostname().lower()
-        return host.lower() in (me, me.split(".")[0], f"{me.split('.')[0]}.local")
+        name = host.lower().rstrip(".")
+        return name in (me, me.split(".")[0], f"{me.split('.')[0]}.local") or _named_here(name)
+
+
+RESOLVE_WAIT = 1.0  # seconds a baseURL's host name gets to resolve; slower counts as another host
+
+
+@functools.lru_cache(maxsize=64)
+def _named_here(name: str) -> bool:
+    """Whether the host name ``name`` is this machine by another name: its FQDN (or that's short
+    form), or a name (LAN DNS, a tailnet's) that resolves to a loopback or own address. A config
+    naming the box as box.lan or box.tail1234.ts.net was another host: a GPU pool of its own, no
+    sharing, residency or fit check, and the local lease never saw it (#807). Once per process
+    (server_key runs on every admission), within RESOLVE_WAIT; a failure is not this machine."""
+    out: list = []
+
+    def look():
+        try:
+            fq = socket.getfqdn().lower()
+            if name in (fq, fq.split(".")[0]):
+                out.append(True)
+                return
+            ips = {a[4][0].split("%")[0] for a in socket.getaddrinfo(name, None)}
+            out.append(any(ipaddress.ip_address(ip).is_loopback or ip in _own_addresses() for ip in ips))
+        except (OSError, ValueError, UnicodeError):
+            out.append(False)
+    t = threading.Thread(target=look, daemon=True)
+    t.start()
+    t.join(RESOLVE_WAIT)
+    return bool(out and out[0])
 
 
 _ENGINES: dict[str, str] = {}  # root -> engine, once its server has answered

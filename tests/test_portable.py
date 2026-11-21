@@ -1686,6 +1686,34 @@ class Remote(unittest.TestCase):
             self.assertTrue(models._this_host("fe80::1c2b:3d4e:5f60:7182"))
             self.assertFalse(models._this_host("192.168.1.24"))
 
+    def test_this_machine_named_by_its_lan_or_tailnet_name_is_this_host(self):
+        # #807: a baseURL at box.lan (dotfiles shared with a laptop) was another host: its own
+        # GPU pool, no sharing or fit check, and the local lease never saw its tasks
+        me = socket.gethostname().split(".")[0].lower()
+        names = {f"{me}.lan": "192.168.1.23", f"{me}.tail1234.ts.net": "100.64.0.7",
+                 "gpubox.lan": "192.168.1.40", "loop.example": "127.0.1.1"}
+
+        def resolve(name, *a, **kw):
+            if name not in names:
+                raise socket.gaierror(name)
+            return [(socket.AF_INET, socket.SOCK_STREAM, 6, "", (names[name], 0))]
+        for f in (models._own_addresses, models._named_here):
+            f.cache_clear()
+            self.addCleanup(f.cache_clear)
+        with mock.patch.object(models.socket, "getaddrinfo", resolve), \
+                mock.patch.object(models.socket, "getfqdn", lambda *a: "desk.corp.example"), \
+                mock.patch.object(models, "_own_addresses", lambda: frozenset({"192.168.1.23", "100.64.0.7"})):
+            for host in (f"{me}.lan", f"{me}.tail1234.ts.net", "loop.example", "desk.corp.example", "desk"):
+                self.assertTrue(models._this_host(host), host)
+            self.assertFalse(models._this_host("gpubox.lan"))     # a box of its own
+            self.assertFalse(models._this_host("nowhere.lan"))    # unresolved: not this machine
+            url = f"http://{me}.lan:11434/v1"
+            self.assertEqual(models.server_key(url), models.server_key("http://127.0.0.1:11434/v1"))
+            ((pid, _, _, why, remote),) = models._scan({"provider": {"o": {"options": {"baseURL": url}}}}, {})
+            self.assertEqual((why, remote), ("", False))
+            m = models.Model(id="o/m", provider="o", name="m", base_url=url, engine="ollama", label="o/m")
+            self.assertEqual(models.pool(m), "gpu")
+
     def test_wb_remote_registers_the_tool_models_of_another_machines_ollama_and_remove_undoes_it(self):
         ctx = {"llama.context_length": 131072}
         srv, port = fake_remote_ollama(

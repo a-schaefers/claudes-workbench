@@ -2846,7 +2846,11 @@ audit). `models.agent_providers()` copies those files' `provider`, `enabled_prov
 `localhost`, `0.0.0.0`, `host.docker.internal`, any loopback IP, the host name, its first label,
 or `<label>.local`, or any of the machine's own addresses (`_own_addresses`: the host name's
 `getaddrinfo` and `ip -o addr`, else `ifconfig -a` where there is no `ip` (macOS: the Mac's own
-LAN address counted as remote, the 2026-11-19 audit), so a LAN or Tailscale IP counts) (`_this_host`). A
+LAN address counted as remote, the 2026-11-19 audit), so a LAN or Tailscale IP counts), or a
+name that is this machine's by another spelling (`_named_here`: its FQDN or that's first label,
+or a name resolving to a loopback or own address, within `RESOLVE_WAIT` 1 s, once per process;
+`box.lan` or a tailnet name was another host, its own GPU pool with no sharing, residency or fit
+check, #807) (`_this_host`). A
 provider elsewhere counts when models.json gives it `"local": true`; it is then `remote`: it
 takes no lease on this machine's GPU, but one on its server's (tasks there take turns: *Sharing the GPU*),
 unless its server is on this GPU after all (`same_gpu`: WSL2's Windows host), when it takes this
