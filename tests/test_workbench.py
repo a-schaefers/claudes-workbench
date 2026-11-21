@@ -3178,6 +3178,7 @@ class AutoFix(Base):
         task.set_status(base_check={**base, "cmd": "make check"})
         self.assertIsNone(runner.hang(task, 4))
 
+    @unittest.skipUnless(lane_device(), "needs Landlock and a device node this user may open")
     def test_tests_the_lane_refused_a_device_are_not_sent_back_as_the_agents_bug(self):
         # #496: /dev/kvm refused was named in the report (#331), yet rounds 2 and 3 ran on it
         dev = lane_device()
@@ -3592,6 +3593,7 @@ class WorktreeSetup(Base):
         self.assertIn("NO-NETWORK", note["text"])
         self.assertIn("NO-NETWORK", (t.dir / "setup.txt").read_text())
 
+    @unittest.skipUnless(lane.abi(), "needs Landlock: without it nothing is the lane's (#773)")
     def test_a_setup_the_lane_refused_says_the_grant_that_reaches_it(self):
         # #824 (the second 2026-11-21 audit): a first `npm ci` refused ~/.npm, and the failed
         # notice named no grant, only the setup's output
@@ -9119,7 +9121,8 @@ class Lane(Base):
         # path under a writable place, so a Postgres socket in /tmp read as a broken database
         task = self.bare_task("t-826", self.repo)
         task.worktree.mkdir()
-        d = Path(tempfile.mkdtemp(dir="/tmp", prefix="wb-826-"))
+        # its real path: macOS's /tmp is a link to /private/tmp, and a grant names the real one
+        d = Path(os.path.realpath(tempfile.mkdtemp(dir="/tmp", prefix="wb-826-")))
         self.addCleanup(shutil.rmtree, d, True)
         sock = str(d / ".s.PGSQL.5432")
         srv = socket.socket(socket.AF_UNIX)
@@ -9159,6 +9162,8 @@ class Lane(Base):
         # #832 (the second 2026-11-21 audit): with an rbenv Ruby, `bundle install` writes the
         # Ruby's gem home; Bundler's and RubyGems' refusals say no "permission denied", so the
         # report named nothing, and a grant of the one directory named failed at the next
+        abi = mock.patch.object(lane, "abi", lambda: 6)   # a lane to refuse: #773 asks for one
+        abi.start(); self.addCleanup(abi.stop)            # (macOS has none, #950)
         home = self.fake_home()
         gems = home / ".rbenv" / "versions" / "3.3.0" / "lib" / "ruby" / "gems" / "3.3.0"
         for d in ("cache", "gems", "specifications"):
