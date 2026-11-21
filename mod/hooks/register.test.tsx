@@ -766,6 +766,36 @@ test('a notify.jsonl past what one read takes is read from its end, and still wa
   expect(woken.filter(t => t.includes('REPORT'))).toHaveLength(1)
 })
 
+test('a task in review whose events have not changed is not read again on every poll', async ($, on) => {
+  // #739 (the 2026-11-21 audit): each poll (every 1.5 s while a task ran) spawned `tail` for every
+  // open task's events.jsonl past 64 KB, unchanged since the task went to review
+  const clock = mock.clock(on, { now: 1_800_000_000_000 })
+  const files: Record<string, string> = {}
+  task(files, 'waits', 'review')
+  task(files, 'runs', 'running')
+  const row = (brief: string) => JSON.stringify({ kind: 'tool', tool: 'read', brief, ok: true }) + '\n'
+  files['/wb/tasks/waits/events.jsonl'] = row('x'.repeat(200)).repeat(400) + row('last.py')
+  files['/wb/tasks/runs/events.jsonl'] = row('a.py')
+  fakeTasks(on, files, ['waits', 'runs'])
+  const tails: string[] = []
+  on('process.run', (_: any, e: any) => {
+    if (e.argv[0] === 'tail') {
+      tails.push(e.argv[3])
+      return { value: { exitCode: 0, stdout: files[e.argv[3]].slice(-Number(e.argv[2])), stderr: '' } }
+    }
+    return { value: { exitCode: 0, stdout: '', stderr: '' } }
+  })
+  on('ui.toast', () => ({ value: undefined }))
+  on('prompt.submit', (_: any, e: any) => ({ text: e.text }))
+  await $.session.start({ cwd: '/', surface: 'terminal', isInteractive: true })
+  await clock.advance(15_000)                                     // ten polls and more
+  const waits = () => tails.filter(p => p === '/wb/tasks/waits/events.jsonl').length
+  expect(waits()).toBe(1)
+  files['/wb/tasks/waits/events.jsonl'] += row('new.py')         // it changed: read once more
+  await clock.advance(3000)
+  expect(waits()).toBe(2)
+})
+
 test('outside workbench mode another session\'s running task opens no pane and fills no status line', async ($, on) => {
   // 2026-11-17: a session opened in another project showed the pane and the task's status line for
   // a task this session never started, and /workbench-quit couldn't clear it

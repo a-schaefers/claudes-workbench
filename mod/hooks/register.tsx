@@ -1298,6 +1298,7 @@ const mem = {
   eventsStart: '', // its start, as its hello says: with the pid, listener.json's proof of life (#532)
   earsOk: false, // `wb events` has said hello in this load: wb runs
   gone: new Set<string>(), // task directories closed past KEEP_CLOSED_MS: final, never read again
+  recent: new Map<string, { key: string; recent: string[] }>(), // each task's last events, by events.jsonl's size@mtime (recentEvents)
   again: false, // something changed while a poll ran: run another after it
   hasActive: false, // a task is running: the clock redraws
   lastPoll: 0,
@@ -1431,6 +1432,25 @@ async function readTail($: any, path: string, max: number): Promise<{ text: stri
 const NOTIFY_TAIL = 1 << 20 // far more than OLDEST_WAKE_MS's hour of notices
 const EVENTS_TAIL = 64 << 10 // the pane shows a task's last four events
 
+// A task's last four events, read again only when events.jsonl's size or mtime changed: every
+// poll (each 1.5 s while one task runs) read each open task's file, past EVENTS_TAIL by spawning
+// `tail`, for tasks in review whose files hadn't changed in hours: 10-30 spawns a second in every
+// session with the mod (#739, the 2026-11-21 audit).
+async function recentEvents($: any, name: string, path: string): Promise<string[]> {
+  let key = ''
+  try {
+    const st = await $.fs.stat(path)
+    key = `${st.size}@${st.mtimeMs}`
+  } catch {}
+  const had = mem.recent.get(name)
+  if (key && had?.key === key) return had.recent
+  const got = await readTail($, path, EVENTS_TAIL)
+  const recent = parseLines(got?.text ?? '').map(eventLine).filter(Boolean).slice(-4) as string[]
+  if (got?.key) mem.recent.set(name, { key: got.key, recent })
+  else mem.recent.delete(name)
+  return recent
+}
+
 // Every task directory, as the pane draws it. Closed tasks drop out after half an hour, and are
 // then never read again in this load (a closed phase is final): every poll read both files of
 // every task ever created (the 2026-11-16 audit).
@@ -1456,8 +1476,7 @@ async function scan($: any, root: string, now: number): Promise<WbTask[]> {
     let recent: string[] = []
     if (ACTIVE.has(phase) || NEEDS.has(phase)) {
       await noteClaude($, sp, now)
-      const text = (await readTail($, `${base}/events.jsonl`, EVENTS_TAIL))?.text ?? ''
-      recent = parseLines(text).map(eventLine).filter(Boolean).slice(-4) as string[]
+      recent = await recentEvents($, ent.name, `${base}/events.jsonl`)
     }
     list.push({
       name: sp.name, phase, round: Number(st.round ?? 1), model: String(sp.model ?? ''),
@@ -1473,6 +1492,7 @@ async function scan($: any, root: string, now: number): Promise<WbTask[]> {
     })
   }
   for (const name of mem.gone) if (!names.has(name)) mem.gone.delete(name) // removed by hand
+  for (const name of mem.recent.keys()) if (!names.has(name) || mem.gone.has(name)) mem.recent.delete(name)
 
   return list.sort((a, b) => a.createdAt - b.createdAt)
 }

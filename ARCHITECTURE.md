@@ -5165,7 +5165,10 @@ last part through `tail -c`, from a whole line, since `$.fs.read` rejects a file
 **poll()** (re-entrant calls set `again` and run once more after): `scan` reads every
 `tasks/*/status.json`, then `task.json` for the tasks shown (closed tasks drop out 30 min after
 their last update, and an accepted or discarded one is then never read again in that load; open
-ones get their last 4 event lines as `recent`), sorted by creation; sets the status line; opens
+ones get their last 4 event lines as `recent`, `recentEvents`: kept in `mem.recent` by
+events.jsonl's size@mtime and read again only when that changes, since every poll spawned `tail`
+for each open task's file past 64 KiB, unchanged since review: #739, the 2026-11-21 audit),
+sorted by creation; sets the status line; opens
 the pane once per load when one of the session's own tasks (any task, in workbench mode) is
 queued/running/testing or workbench mode is on (an open the
 user didn't ask for is placed only on a wide terminal; a pane the user closed stays closed for that
