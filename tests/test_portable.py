@@ -330,7 +330,8 @@ class Real(unittest.TestCase):
         models.make_resident(x(), say=lambda m: None)
         self.assertEqual([(p["model"], p.get("keep_alive")) for p in posts], [("chat", 0), ("x", "30m")])
         posts.clear()
-        over(gpu_gb=1, keep_loaded=["ollama/emb"])  # no room, but only a kept model beside x
+        over(gpu_gb=1, keep_loaded=["b/emb"])  # no room, but only a kept model beside x (by id:
+        # the provider must be one the config has, or it's a namespaced Ollama name, #461)
         self.assertEqual(models.make_resident(x(), say=lambda m: None), 0.0)
         models.free_gpu(keep={"a/x"}, say=lambda m: None)
         self.assertEqual(posts, [])
@@ -345,6 +346,24 @@ class Real(unittest.TestCase):
         posts.clear()
         models.make_resident(x(), say=lambda m: None)
         self.assertEqual([p["model"] for p in posts], ["chat", "x"])
+
+    def test_keep_loaded_keeps_namespaced_ollama_names_and_only_them(self):
+        # #461 (the audit of 1.8, reproduced): cut at the first `/`, a kept hf.co/... name never
+        # matched itself, mannix/llama3:8b kept llama3:8b, and acme/coder missed acme/coder:latest
+        hf = "hf.co/nomic-ai/nomic-embed-text-v1.5-GGUF:Q4_K_M"
+        loaded = [{"name": n, "size": 10, "size_vram": 10}
+                  for n in (hf, "llama3:8b", "mannix/llama3:8b", "acme/coder:latest", "big:1b")]
+        found, posts = self.own(loaded, ["x"])
+        cfg = json.loads(Path(os.environ["WB_OPENCODE_CONFIG"]).read_text())
+        cfg["provider"]["a"]["models"]["emb"] = {"id": "big:1b"}       # an alias, by its id
+        Path(os.environ["WB_OPENCODE_CONFIG"]).write_text(json.dumps(cfg))
+        Path(os.environ["WB_MODELS"]).write_text(json.dumps(
+            {"keep_loaded": [hf, "mannix/llama3:8b", "acme/coder", "a/emb"]}))
+        self.assertTrue(models._kept_name(hf, models.keep_loaded()))
+        self.assertFalse(models._kept_name("llama3:8b", models.keep_loaded()))
+        with mock.patch.object(models, "INFLIGHT_WATCH", 0):
+            models.free_gpu(say=lambda m: None)
+        self.assertEqual([p["model"] for p in posts], ["llama3:8b"])   # only the one not kept
 
     def test_a_model_answering_someone_else_is_left_until_it_goes_idle_then_unloaded(self):
         # #378 (the audit of 1.6): on a system Ollama two accounts share, each one's runner

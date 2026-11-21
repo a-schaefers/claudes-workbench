@@ -2614,7 +2614,11 @@ model id; a model's entry is merged over its provider's (`{**provider, **model}`
 - `remote: <root>`: on a provider, `wb remote` made it (for the Ollama at that root), so `wb
   remote --remove` may delete it (#197).
 - `keep_loaded` (top level, a list): model ids or Ollama names wb never unloads or stops to make
-  room (*Residency*), nor measures (`wb optimize`: each probe unloads its model, #254).
+  room (*Residency*), nor measures (`wb optimize`: each probe unloads its model, #254). An entry
+  is an id only when it starts with a provider id the config has (`<provider>/<key>`: its entry's
+  `id`, an alias, or its key); else it is an Ollama name, whole (`hf.co/<org>/<repo>:Q4_K_M`,
+  `user/model:tag`), untagged read as `:latest` (`models._kept_name`; cut at its first `/`, a
+  namespaced name never matched itself and `mannix/llama3:8b` kept `llama3:8b`, #461).
 - `variant_of: <id>`: `wb optimize apply` made this model from that one (with a copy of its other
   keys here): the two share one record in the router (`router.lineage`), and the router puts the
   variant first (#584).

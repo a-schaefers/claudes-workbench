@@ -1186,8 +1186,21 @@ def keep_loaded() -> set[str]:
 
 
 def _kept_name(name: str, held: set[str]) -> bool:
-    return any(_matches(name, {k.split("/", 1)[-1]}) or _matches(k.split("/", 1)[-1], {name})
-               for k in held)
+    """Whether the Ollama name ``name`` is one keep_loaded lists: as an Ollama name, whole
+    (`hf.co/<org>/<repo>:Q4_K_M`, `user/model:tag`), or as an OpenCode id, `<provider>/<key>`,
+    whose entry's id (an alias) or key is the name. Untagged is `:latest` either way. Cut at its
+    first `/` whatever it was, a namespaced name never matched itself, and `mannix/llama3:8b` kept
+    `llama3:8b`, another model (#461, the audit of 1.8)."""
+    provs = _providers_of(read_config())
+    bare = lambda n: n if ":" in n.rsplit("/", 1)[-1] else n + ":latest"  # noqa: E731
+    want = set()
+    for k in held:
+        want.add(bare(k))
+        pid, _, key = k.partition("/")
+        if key and pid in provs:
+            spec = ((provs[pid] or {}).get("models") or {}).get(key) or {}
+            want.add(bare(str(spec.get("id") or key) if isinstance(spec, dict) else key))
+    return bare(name) in want
 
 
 def free_gpu(keep=(), say=print, warn=None) -> None:
