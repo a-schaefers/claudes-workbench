@@ -347,6 +347,37 @@ class Real(unittest.TestCase):
         models.make_resident(x(), say=lambda m: None)
         self.assertEqual([p["model"] for p in posts], ["chat", "x"])
 
+    def test_a_llama_server_or_vllm_answering_a_request_is_not_idle(self):
+        # #465 (the audit of 1.8): only a JSON /metrics `live.state` was read; llama-server and
+        # vLLM serve Prometheus text, read as idle, so free_gpu stopped one mid-reply
+        pages = {}
+        class H(BaseHTTPRequestHandler):
+            def do_GET(self):
+                body = pages.get(self.path)
+                self.send_response(200 if body is not None else 404)
+                self.end_headers()
+                self.wfile.write((body if isinstance(body, str) else json.dumps(body or {})).encode())
+            def log_message(self, *a):
+                pass
+        srv = ThreadingHTTPServer(("127.0.0.1", 0), H)
+        threading.Thread(target=srv.serve_forever, daemon=True).start()
+        self.servers.append(srv)
+        m = models.Model(id="s/m", provider="s", name="m", engine="server", label="s/m",
+                         base_url=f"http://127.0.0.1:{srv.server_address[1]}/v1")
+        prom = lambda name, n: (f"# HELP {name} running\n# TYPE {name} gauge\n"  # noqa: E731
+                                f'{name}{{model_name="m"}} {n}\n')
+        cases = [({"/slots": [{"id": 0, "is_processing": False}, {"id": 1, "is_processing": True}]}, False),
+                 ({"/slots": [{"id": 0, "is_processing": False}]}, True),
+                 ({"/metrics": prom("llamacpp:requests_processing", "1")}, False),
+                 ({"/metrics": prom("vllm:num_requests_running", "2.0")}, False),
+                 ({"/metrics": prom("vllm:num_requests_running", "0.0")}, True),
+                 ({"/metrics": {"live": {"state": "generating"}}}, False),
+                 ({}, True)]                                   # says nothing: idle, as before
+        for page, idle in cases:
+            pages.clear()
+            pages.update(page)
+            self.assertEqual(models._server_idle(m), idle, page)
+
     def test_keep_loaded_keeps_namespaced_ollama_names_and_only_them(self):
         # #461 (the audit of 1.8, reproduced): cut at the first `/`, a kept hf.co/... name never
         # matched itself, mannix/llama3:8b kept llama3:8b, and acme/coder missed acme/coder:latest

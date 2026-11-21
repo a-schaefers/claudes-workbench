@@ -2695,8 +2695,11 @@ known budget, no other server resident, `m` all in VRAM if loaded, Ollama's load
 reached, and the loaded sizes from `/api/ps` plus `need(m)` within `SHARE_AT` of the budget):
 every round once unloaded the user's Open WebUI, autocomplete or embedding model, fits or not
 (the 2026-11-19 audit). Else `free_gpu(keep={m, *keep})`: every other running
-server with a `stop` command is stopped once per server, after waiting up to 10 minutes while its
-`/metrics` says a reply is in progress (a running server with no `stop` is left, with a warning
+server with a `stop` command is stopped once per server, after waiting up to 10 minutes while it
+answers someone (`_server_idle`: llama-server's `/slots` `is_processing`, else `/metrics` as a JSON
+`live.state` or Prometheus text with a `BUSY_GAUGES` gauge above 0, `llamacpp:requests_processing`
+or `vllm:num_requests_running`; read as JSON only, both stopped mid-reply, #465, the audit of 1.8;
+a server that says none of these is idle) (a running server with no `stop` is left, with a warning
 that it may hold GPU memory); every model loaded on each discovered Ollama server is unloaded
 (`POST /api/generate {keep_alive: 0}`) except kept ones, and except models.json's `keep_loaded`
 (`keep_loaded()`: ids or Ollama names; a server whose model is listed is never stopped), which

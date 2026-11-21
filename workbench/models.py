@@ -1050,9 +1050,41 @@ def freed(m: Model, keep=()) -> bool:
         for o in discover().values()))
 
 
+# Prometheus gauges of requests being answered: llama-server's (--metrics), vLLM's
+BUSY_GAUGES = ("llamacpp:requests_processing", "vllm:num_requests_running")
+
+
 def _server_idle(m: Model) -> bool:
-    live = (_get(f"{m.root}/metrics", timeout=2) or {}).get("live") or {}
-    return live.get("state", "idle") == "idle"  # servers without metrics count as idle
+    """Whether a server answers nobody now, so free_gpu may stop it. llama-server's /slots
+    (`is_processing`), else /metrics: a JSON `live.state`, or Prometheus text with a BUSY_GAUGES
+    gauge above 0. Only the JSON was read, and llama-server and vLLM serve Prometheus text, read
+    as idle: a server was stopped mid-reply to an editor or Open WebUI (#465, the audit of 1.8).
+    A server that says none of these counts as idle."""
+    slots = _ask(f"{m.root}/slots", m.api_key)
+    if isinstance(slots, list):
+        return not any(isinstance(x, dict) and x.get("is_processing") for x in slots)
+    req = urllib.request.Request(f"{m.root}/metrics",
+                                 headers={"Authorization": f"Bearer {m.api_key}"} if m.api_key else {})
+    try:
+        with _open(req, timeout=2) as r:
+            text = r.read(1 << 20).decode(errors="replace")
+    except Exception:
+        return True
+    try:
+        body = json.loads(text)
+    except ValueError:
+        body = None
+    if isinstance(body, dict):
+        live = body.get("live") if isinstance(body.get("live"), dict) else {}
+        return live.get("state", "idle") == "idle"
+    for line in text.splitlines():
+        if line.split("{", 1)[0].split(" ", 1)[0] in BUSY_GAUGES:
+            try:
+                if float(line.rsplit(None, 1)[-1]) > 0:
+                    return False
+            except ValueError:
+                pass
+    return True
 
 
 def _ollama_loaded(root: str) -> list[str]:
