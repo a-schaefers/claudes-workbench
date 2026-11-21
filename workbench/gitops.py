@@ -75,6 +75,10 @@ def _pinned(cwd) -> list[str]:
                 and dotgit.read_bytes() == want["dotgit"].encode())
     except OSError:
         same = False
+    if not Path(want["gitdir"]).is_dir():  # its repo moved: `.git` still says so, or repaired (#498)
+        task = rec.parent.name
+        raise GitError(f"the repo moved or was deleted (its git dir {want['gitdir']} is gone): "
+                       f"wb relocate {task} --repo <its new path>")
     if not same:
         raise GitError(f"the worktree's .git was rewritten: git was not run there ({dotgit} "
                        f"must say gitdir: {want['gitdir']})")
@@ -175,6 +179,79 @@ def toplevel(path) -> Path:
         if again.returncode and b"not a git repository" in again.stderr:
             raise NotARepo(str(e)) from None
         raise
+
+
+def common_dir(path) -> Path | None:
+    """The repository's own git dir, which all its worktrees share, as a real path; None when
+    ``path`` is in none (or gone)."""
+    if not Path(path).is_dir():
+        return None
+    out = git(path, "rev-parse", "--git-common-dir", check=False).strip()
+    return Path(os.path.realpath(Path(path) / out)) if out else None
+
+
+def repo_of(spec: dict) -> Path:
+    """Where a task's repo-level git runs (its tip, its branch, wb verify's clones): task.json
+    `repo` while it is a checkout of the task's repository; once that checkout is gone (a linked
+    worktree removed: one per feature, the bare-repo layout, Claude Code's --worktree sessions)
+    the repository's main worktree, from its git dir (task.json `git_common`), or that git dir
+    itself when it is bare. A removed `repo` wedged wb accept on every retry, and discard said
+    the branch had gone with it (#498, the audit of 1.90). `repo` itself when the git dir is
+    gone too: the repo moved (wb relocate)."""
+    repo = Path(spec.get("repo") or "/nonexistent")
+    common = spec.get("git_common") or _common_recorded(spec.get("name"))
+    if not common or not Path(common).is_dir() or common_dir(repo) == Path(common):
+        return repo
+    for line in git(common, "worktree", "list", "--porcelain", check=False).splitlines():
+        if line.startswith("worktree "):  # the first is the main one (a bare repo: its git dir)
+            return main if (main := Path(line[9:])).is_dir() else Path(common)
+    return Path(common)
+
+
+def _common_recorded(task: str | None) -> str | None:
+    """A task's git dir from gitdir.json, for a task.json from before `git_common`."""
+    rec = Path(store.tasks_dir()).parent / "rules" / task / "gitdir.json" if task else None
+    want = store.read_json(rec) if rec else None
+    try:
+        gitdir = Path(want["gitdir"])
+        return os.path.realpath(gitdir / (gitdir / "commondir").read_text().strip())
+    except (TypeError, KeyError, OSError):
+        return None
+
+
+def relocate(repo: Path, worktree: Path) -> None:
+    """Point a task's worktree at ``repo``, the place its repository moved to, and record that
+    (gitdir.json): its git dir is the one ``repo`` keeps for it (the one whose link back is this
+    worktree); then `git worktree repair`, and its `.git` written as repair would have when
+    the repair couldn't (a git too old to infer it). A `.git` naming another git dir that exists
+    (one the agent made) is refused first, as _pinned refuses it: a newer git's repair would
+    quietly take it back."""
+    common, dotgit = common_dir(repo), Path(worktree) / ".git"
+    admin = None
+    for d in (common / "worktrees").iterdir() if common and (common / "worktrees").is_dir() else ():
+        with contextlib.suppress(OSError):
+            if os.path.realpath((d / "gitdir").read_text().strip()) == os.path.realpath(dotgit):
+                admin = d
+    if admin is None:
+        raise GitError(f"{worktree} isn't one of {repo}'s worktrees")
+
+    def said() -> Path | None:
+        try:
+            if stat.S_ISREG(os.lstat(dotgit).st_mode):
+                return Path(dotgit.read_text().removeprefix("gitdir:").strip())
+        except OSError:
+            pass
+        return None
+    if (was := said()) is not None and was.is_dir() and os.path.realpath(was) != os.path.realpath(admin):
+        raise GitError(f"{dotgit} names a git dir of its own ({was}): it isn't one of {repo}'s "
+                       "worktrees")
+    git(repo, *NO_HOOKS, "worktree", "repair", str(worktree), check=False)
+    if (now := said()) is None or os.path.realpath(now) != os.path.realpath(admin):
+        if dotgit.is_symlink() or dotgit.is_dir():
+            raise GitError(f"{dotgit} isn't a file: it isn't one of {repo}'s worktrees")
+        dotgit.write_text(f"gitdir: {admin}\n")
+    if rec := _record(worktree):
+        store.write_json(rec, {"gitdir": str(admin), "dotgit": dotgit.read_text()})
 
 
 def branch_name(task: str) -> str:
@@ -821,7 +898,7 @@ def step_commit(task: store.Task, step: int, steps: int) -> str | None:
     spec = task.spec
     want = f"Workbench-Task: {task.name}" + (f" (step {step})" if step < steps else "")
     tip = task.status.get("tip") or spec["branch"]  # the branch is deleted once merged (cli.gc)
-    log = git(spec["repo"], "log", "--format=%H%x00%B%x01", f"{spec['base']}..{tip}", check=False)
+    log = git(repo_of(spec), "log", "--format=%H%x00%B%x01", f"{spec['base']}..{tip}", check=False)
     for entry in log.split("\x01"):
         sha, _, body = entry.strip().partition("\x00")
         if sha and want in body.splitlines():

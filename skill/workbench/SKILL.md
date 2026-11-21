@@ -414,6 +414,8 @@ still has room (how handovers work: `reference/driving.md`).
 Check a directory flagged as possible build output before you accept a step. Remove or gitignore
 generated files. When the bulk additions or large binaries belong in the commit, pass
 `--include` to `wb next` or `wb accept` after reviewing them.
+When a command says the repo `moved or was deleted`, ask the user where it is now, then
+`wb relocate <name> --repo <dir>`; a removed linked worktree needs nothing (its main one is used).
 
 Follow-up work in the same area goes to the same agent: `wb next <name> --spec <file> -m "<subject
 for the approved step>" [--test …]` commits the approved step on the branch and sends the next

@@ -1540,7 +1540,9 @@ class Lifecycle(Base):
         self.start("t-moved", "ok")
         wait_phase("t-moved", {"review"})
         self.repo.rename(self.repo.with_name("elsewhere"))
-        self.assertIn("is gone", run_wb("discard", "t-moved"))
+        # #498: not "gone, so its branch with it": the branch is wherever the repo went
+        self.assertIn("moved or was deleted: branch delegate/t-moved wasn't deleted",
+                      run_wb("discard", "t-moved"))
         self.assertEqual(store.Task("t-moved").status["phase"], "discarded")
         self.assertFalse(store.Task("t-moved").worktree.exists())
 
@@ -2609,6 +2611,89 @@ class AutoFix(Base):
         self.assertEqual(line, "note: the acceptance command ran past 120s on the base; not "
                                "checked. If it runs that long, a round's run may pass "
                                "--test-timeout (900s) too: raise it for a slow suite")
+
+
+class RepoMoved(Base):
+    """A task outlives the checkout it started from being removed, moved or renamed (#498, the
+    audit of 1.90): accept died on every retry, `git worktree repair` was refused, and discard
+    said the branch was gone while git still had it."""
+
+    def git(self, cwd, *a):
+        return subprocess.run(["git", "-C", str(cwd), *a], capture_output=True, text=True)
+
+    def fails(self, *argv) -> str:
+        err = io.StringIO()
+        with self.assertRaises(SystemExit), redirect_stderr(err):
+            run_wb(*argv)
+        return err.getvalue()
+
+    def test_a_task_from_a_removed_linked_worktree_still_accepts_and_discards(self):
+        w1 = Path(self.tmp.name) / "w1"
+        self.assertEqual(self.git(self.repo, "worktree", "add", "-q", "-b", "feat", str(w1)).returncode, 0)
+        os.environ["FAKE_SCENARIO"] = "ok"
+        for name in ("t-l1", "t-l2"):
+            run_wb("start", name, "--spec", str(self.spec), "--repo", str(w1), "--model", "mimo")
+            wait_phase(name, {"review"})
+        # commands.json's entry for the repo holds for its linked worktrees too
+        Path(os.environ["WB_COMMANDS"]).write_text(json.dumps({"repos": {str(self.repo): {
+            "merge": "ff"}}}))
+        self.assertEqual(context.repo_conf(w1), {"merge": "ff"})
+        self.assertEqual(self.git(self.repo, "worktree", "remove", str(w1)).returncode, 0)
+        out = run_wb("accept", "t-l1", "-m", "feat: answer")
+        self.assertIn("accepted t-l1", out)
+        log = self.git(self.repo, "log", "-1", "--format=%B", "delegate/t-l1").stdout
+        self.assertIn("Workbench-Task: t-l1", log)
+        out = run_wb("discard", "t-l2")
+        self.assertNotIn("is gone", out)
+        self.assertIn("branch delegate/t-l2 deleted", out)
+        self.assertEqual(self.git(self.repo, "rev-parse", "-q", "--verify", "delegate/t-l2").stdout, "")
+
+    def test_a_moved_repo_is_relocated_and_its_task_accepts(self):
+        for name in ("t-m1", "t-m2"):
+            self.start(name, "ok")
+            wait_phase(name, {"review"})
+        old, new = self.repo, Path(self.tmp.name) / "moved"
+        old.rename(new)
+        err = self.fails("accept", "t-m1", "-m", "feat: answer")
+        self.assertIn(f"{old} moved or was deleted", err)
+        self.assertIn(f"wb relocate t-m1 --repo <its new path>", err)
+        self.assertEqual(store.Task("t-m1").status["phase"], "review")  # nothing was stopped
+        # discarded meanwhile: the branch is said to be where it is, not gone
+        out = run_wb("discard", "t-m2")
+        self.assertNotIn("its branch with it", out)
+        self.assertIn(f"{old} moved or was deleted: branch delegate/t-m2 wasn't deleted", out)
+        # the user repairs the worktree themselves; the .git it rewrote is taken from the repo
+        self.assertEqual(self.git(new, "worktree", "repair").returncode, 0)
+        self.assertIn("the repo moved", self.fails("diff", "t-m1"))
+        other = Path(self.tmp.name) / "other"
+        other.mkdir()
+        self.git(other, "init", "-q")
+        self.git(other, "-c", "user.email=t@t", "-c", "user.name=t", "commit", "-q", "--allow-empty", "-m", "x")
+        self.assertIn("not t-m1's repository", self.fails("relocate", "t-m1", "--repo", str(other)))
+        self.assertIn(f"relocated t-m1: {new} (was {old})", run_wb("relocate", "t-m1", "--repo", str(new)))
+        self.assertEqual(store.Task("t-m1").spec["repo"], str(new))
+        self.assertIn("+42", run_wb("diff", "t-m1"))
+        self.assertIn("accepted t-m1", run_wb("accept", "t-m1", "-m", "feat: answer"))
+        self.assertIn("Workbench-Task: t-m1",
+                      self.git(new, "log", "-1", "--format=%B", "delegate/t-m1").stdout)
+
+    def test_relocate_repairs_a_worktree_nobody_repaired_and_refuses_a_foreign_git_dir(self):
+        self.start("t-r", "ok")
+        wait_phase("t-r", {"review"})
+        old, new = self.repo, Path(self.tmp.name) / "renamed"
+        old.rename(new)
+        wt = store.Task("t-r").worktree
+        self.assertIn("relocated t-r", run_wb("relocate", "t-r", "--repo", str(new)))
+        self.assertIn("+42", run_wb("diff", "t-r"))
+        # its .git says so too, for plain git there (the agent's shim, the user's own)
+        self.assertEqual((wt / ".git").read_text(), f"gitdir: {new / '.git' / 'worktrees' / 'worktree'}\n")
+        self.assertEqual(self.git(wt, "status", "--short").returncode, 0)
+        # a .git the agent pointed at a git dir of its own is still refused, relocated or not
+        fake = Path(self.tmp.name) / "fake.git"
+        shutil.copytree(new / ".git", fake)
+        (wt / ".git").write_text(f"gitdir: {fake}\n")
+        self.assertIn("rewritten", self.fails("diff", "t-r"))
+        self.assertIn("isn't one of", self.fails("relocate", "t-r", "--repo", str(new)))
 
 
 class WorktreeSetup(Base):

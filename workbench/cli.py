@@ -781,6 +781,8 @@ def cmd_start(a):
     limits = router.budgets(m)  # from the model's measured speed on this machine, else defaults
     store.write_json(task.dir / "task.json", {
         "name": a.name, "repo": str(repo), "cwd": os.getcwd(), "base": base, "base_ref": a.base,
+        # the repository's own git dir: where its branch is once `repo` is removed (#498)
+        **({"git_common": str(common)} if (common := gitops.common_dir(repo)) else {}),
         # the Claude Code session whose Bash ran this (_scope, the mod's `mine`); none by hand.
         # And its process: once that is gone, the directory rule may hand the task to a new one
         **({"session": sid} if (sid := os.environ.get("CLAUDE_CODE_SESSION_ID")) else {}),
@@ -1416,15 +1418,15 @@ def cmd_diff(a):
     task = need(a.name)
     # the accepted commit, not the branch: --merge deletes the branch (#477, the audit of 1.8)
     tip = (task.status.get("tip") or "")[:12] or task.spec["branch"]
+    repo = shlex.quote(str(gitops.repo_of(task.spec)))
     if not task.worktree.is_dir():
         die(f"{a.name} is {task.status.get('phase')} and its worktree is gone: "
-            f"git -C {shlex.quote(task.spec['repo'])} diff {task.spec['base'][:12]} {tip}")
+            f"git -C {repo} diff {task.spec['base'][:12]} {tip}")
     base = "HEAD" if task.status.get("steps", 1) > 1 and not a.all else task.spec["base"]
     try:
         print(gitops.diff(task.worktree, base, stat=a.stat, paths=a.paths) or "(no changes)")
     except gitops.GitError as e:
-        die(f"{e}\nthe branch's commits: git -C {shlex.quote(task.spec['repo'])} diff "
-            f"{task.spec['base'][:12]} {tip}")
+        die(f"{e}\nthe branch's commits: git -C {repo} diff {task.spec['base'][:12]} {tip}")
 
 
 def _stop_runner(task):
@@ -1853,7 +1855,7 @@ def cmd_accept(a):
     a.merge = a.merge or bool(a.merge_as)  # --merge-as says how, so it merges (#352)
     task = need(a.name)
     # a repo kept to linear history says so once, in commands.json `repos` (#352)
-    a.merge_as = a.merge_as or (a.merge and context.repo_conf(task.spec["repo"]).get("merge")) or None
+    a.merge_as = a.merge_as or (a.merge and context.repo_conf(gitops.repo_of(task.spec)).get("merge")) or None
     reap(task)
     spec, st = task.spec, task.status
     if st.get("phase") in store.CLOSED:
@@ -1865,6 +1867,7 @@ def cmd_accept(a):
         die(f"{a.name} is already {st.get('phase')}")
     if st.get("phase") != "review" and not a.force:
         die(f"{a.name} is {st.get('phase')}, not waiting for review (--force accepts anyway)")
+    repo = _repo(task)  # moved: said before anything is stopped or changed (#498)
     # A doomed accept once stopped the runner first, then died on "nothing to commit", leaving
     # the task running with no runner (the 2026-11-16 audit): check before stopping anything,
     # and a stopped task whose commit fails is stuck, for wb resume, feedback or discard.
@@ -1879,7 +1882,6 @@ def cmd_accept(a):
         die(f"{a.name} has no changes to accept yet: wait for it, or wb stop {a.name} first")
     _stop_runner(task)  # under --force it may still be running, and would set its phase back
     checked = None if close else verify.note(task)  # before the commit: what Claude accepts it on (#97)
-    repo = Path(spec["repo"])
     rounds, autofix = st.get("round", 1), st.get("auto_fixes_total", 0) + st.get("auto_fixes", 0)
     msg = (f"{a.message}\n\nDelegated to {spec['model_label']} via OpenCode: {rounds} round(s), "
            f"{autofix} automatic test-fix, {st.get('reviews', 0)} review round(s)."
@@ -1901,6 +1903,8 @@ def cmd_accept(a):
             # the branch must hold it before the worktree goes: on a detached HEAD the commit was
             # left in no branch at all (#417, the audit of 1.8)
             gitops.put_on_branch(repo, spec["branch"], commit, task.worktree)
+            # inside: the commit is made, and a retry finds it (#498: outside, it died every time)
+            tip = gitops.git(repo, "rev-parse", "--verify", f"{commit}^{{commit}}").strip()
         except gitops.GitError as e:  # nothing removed: the uncommitted work is still in the worktree
             if was_live:
                 task.set_status(phase="stuck", last=f"accept failed: {e}"[:200], pid=None)
@@ -1910,7 +1914,6 @@ def cmd_accept(a):
         into = _merge_into(spec, repo) if a.merge else None
         if a.merge and into in (None, "HEAD"):
             into = gitops.current_branch(repo)
-        tip = gitops.git(repo, "rev-parse", "--verify", f"{commit}^{{commit}}").strip()
         close = {"commit": commit, "step": measured, "merge": bool(a.merge), "merge_into": into,
                  "merge_as": a.merge_as or "merge", "sign": _signed(spec, a)}
         task.set_status(closing=close, tip=tip)  # before anything is removed
@@ -2178,7 +2181,7 @@ def _merged_branches() -> int:
     for name in sorted({r["task"] for r in store.results(trials=True)
                         if r.get("outcome") == "accepted" and r.get("merged")}):
         t = store.Task(name)
-        repo, branch = Path(t.spec.get("repo") or "/nonexistent"), t.spec.get("branch")
+        repo, branch = gitops.repo_of(t.spec), t.spec.get("branch")
         if not (t.exists and branch and repo.is_dir()):
             continue
         tip = gitops.git(repo, "rev-parse", "--verify", "-q", f"refs/heads/{branch}", check=False).strip()
@@ -2211,12 +2214,51 @@ def _landed(task: store.Task) -> str | None:
         return None  # a working worktree: commit from it
     except gitops.GitError:
         pass
-    repo = task.spec["repo"]
+    repo = gitops.repo_of(task.spec)
     branch = task.status.get("tip") or task.spec["branch"]  # merged and deleted: its recorded tip
     if f"Workbench-Task: {task.name}" in gitops.git(repo, "log", "-1", "--format=%B", branch,
                                                     check=False).splitlines():
         return gitops.git(repo, "rev-parse", "--short", branch).strip()
     return None
+
+
+def _repo(task: store.Task) -> Path:
+    """gitops.repo_of, or a stop when the repo is nowhere: it moved (#498)."""
+    repo = gitops.repo_of(task.spec)
+    if not repo.is_dir():
+        die(f"{task.spec['repo']} moved or was deleted: wb relocate {task.name} --repo <its new "
+            "path>, then try again")
+    return repo
+
+
+@one_at_a_time
+def cmd_relocate(a):
+    """Tell a task where its repository is now: moved or renamed (`mv proj proj2`), or the
+    checkout it started from removed. Repairs its worktree's link (gitops.relocate) and rewrites
+    task.json `repo`, `git_common` and a `cwd` that was inside it. Without it the task could only
+    be discarded: every git call on its worktree failed, and `git worktree repair` was refused
+    by the pinning (#498, the audit of 1.90)."""
+    task = need(a.name)
+    spec = task.spec
+    try:
+        repo = gitops.toplevel(Path(a.repo).resolve())
+    except gitops.GitError:
+        die(f"{a.repo} is not inside a git repository")
+    if not gitops.base_commit(repo, spec["base"]):
+        die(f"{repo} is not {a.name}'s repository: it has no commit {spec['base'][:12]}, the "
+            "task's base")
+    if task.worktree.is_dir():
+        try:
+            gitops.relocate(repo, task.worktree)
+        except (gitops.GitError, OSError) as e:
+            die(str(e))
+    old = Path(spec["repo"])
+    cwd = Path(spec.get("cwd") or old)
+    if cwd == old or cwd.is_relative_to(old):
+        spec["cwd"] = str(repo / cwd.relative_to(old))
+    spec.update(repo=str(repo), git_common=str(gitops.common_dir(repo)))
+    store.write_json(task.dir / "task.json", spec)
+    print(f"relocated {a.name}: {repo} (was {old})")
 
 
 @one_at_a_time
@@ -2229,7 +2271,7 @@ def cmd_discard(a):
         die(f"{a.name} is already {task.status.get('phase')}")
     _stop_runner(task)
     _spec_gaps(task, a.spec_gap)
-    repo = Path(spec["repo"])
+    repo = gitops.repo_of(spec)  # a removed linked worktree: the repository's main one (#498)
     measured = results.step(task, landed=False)
     if warn := gitops.remove_worktree(repo, task.worktree):  # never stops a discard (the audit)
         print(f"wb: {warn}", file=sys.stderr)
@@ -2237,8 +2279,9 @@ def cmd_discard(a):
     branch, said = spec["branch"], ""
     if a.keep_branch:
         pass
-    elif not repo.is_dir():
-        said = f"; {repo} is gone, so its branch with it"
+    elif not repo.is_dir():  # moved: its branch is still in it, wherever it is now (#498)
+        said = (f"; {spec['repo']} moved or was deleted: branch {branch} wasn't deleted (git "
+                f"branch -D {branch} where it is now)")
     elif not runner.checked_out(task):
         # a checkout cut short (#529): the branch is this task's only where its runner recorded
         # making it, and only while it still points there; an earlier task's, or one moved
@@ -4298,6 +4341,10 @@ def parser() -> argparse.ArgumentParser:
     s.add_argument("--drop-steps", action="store_true",
                    help="delete the branch even when it holds steps wb next committed")
     s.set_defaults(f=cmd_discard)
+    s = sub.add_parser("relocate", help="where a task's repo is now: moved, renamed, or the "
+                                        "checkout it started from removed")
+    s.add_argument("name"); s.add_argument("--repo", required=True)
+    s.set_defaults(f=cmd_relocate)
     s = sub.add_parser("models", help="the local models, and which the router picks per task size")
     s.add_argument("--set-default", action="store_true",
                    help="make the router's pick for significant tasks OpenCode's default model")
