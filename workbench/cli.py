@@ -2608,7 +2608,7 @@ def cmd_discard(a):
             gitops.delete_branch(repo, a.name, at=tip)
             said = f"; branch {branch} deleted (was {tip[:8]})"
     # --drop-steps deleted the approved steps with the branch: no longer kept work (#722)
-    dropped = {"steps_dropped": True} if a.drop_steps else {}
+    dropped = {"steps_dropped": True} if getattr(a, "drop_steps", False) else {}  # bench's own call lacks it
     task.set_status(phase="discarded", last=a.reason or "discarded", pid=None,
                     unrecorded={"outcome": "discarded", "step": measured,
                                 "extra": {"reason": a.reason, **dropped}})
