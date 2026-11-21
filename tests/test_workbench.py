@@ -3487,7 +3487,9 @@ class Context(Base):
                       transcript._user_message(p, False)[0])      # so read the head directly
 
     def test_a_session_filling_mid_round_hands_over_at_once(self):
-        """The runner, not OpenCode's own summary, decides what a filling session keeps."""
+        """The runner, not OpenCode's own summary, decides what a filling session keeps. The
+        fake's full step is 58% of the window without its reasoning tokens: counted as OpenCode
+        counts them, it is 76% (#644)."""
         self.start("t-c4", "fill", "--test", TEST_CMD)
         st = wait_phase("t-c4", {"review", "stuck", "failed"}, timeout=60)
         self.assertEqual(st["phase"], "review")
@@ -9983,14 +9985,36 @@ class Tuning(Base):
 
     def test_values_past_the_ceiling_are_never_tried(self):
         from workbench import runner, tuning
-        cfg = {"limit": {"context": 32768, "input": 28672, "output": 4096}, "options": {"max_tokens": 8192}}
+        cfg = {"limit": {"context": 65536, "input": 57344, "output": 8192}, "options": {"max_tokens": 16384}}
+        self.assertEqual(runner.compaction_point(cfg), 0.6875)  # where OpenCode would compact
         top = runner.fresh_ceiling(cfg)
-        self.assertEqual(top, 0.625)                         # where OpenCode would compact
+        self.assertEqual(top, 0.625)                         # a step's growth before it
         self.assertEqual(tuning.allowed("fresh_at", top), [0.4, 0.5, 0.6])
         self.assertEqual(tuning.default("fresh_at", 0.55), 0.5)
         self.result(0.6, n=3)
         picks = {tuning.choose("fresh_at", self.M, self.W, f"t{i}", top) for i in range(300)}
         self.assertEqual(picks, {(0.6, False), (0.5, True)})  # never 0.7 above the pick
+
+    def test_the_handover_point_leaves_a_steps_growth_before_opencodes_compaction(self):
+        # #644 (the audit of main): at 32K, wb model add's entry put OpenCode's compaction at
+        # 20480 tokens and the handover point at 19661: a step ending at 19000 then a 3K read,
+        # and OpenCode compacted the session before the runner saw a step past the point
+        from workbench import runner, tuning
+        for ctx in (16384, 32768, 65536, 131072):           # the entries wb model add writes
+            out = ctx // 8
+            cfg = {"limit": {"context": ctx, "input": ctx - out, "output": out},
+                   "options": {"max_tokens": 2 * out}}
+            at = runner.compaction_point(cfg) * ctx
+            for v in tuning.allowed("fresh_at", runner.fresh_ceiling(cfg)):
+                self.assertGreaterEqual(at - v * ctx, runner.STEP_GROWTH - 1e-6, (ctx, v))
+        cfg = {"limit": {"context": 32768, "input": 28672, "output": 4096}, "options": {"max_tokens": 8192}}
+        fresh_at = tuning.default("fresh_at", runner.fresh_ceiling(cfg))
+        step, read = 0.98 * fresh_at * 32768, 3000           # just under the point, then a read
+        self.assertLess(step, fresh_at * 32768)
+        self.assertLess(step + read, runner.compaction_point(cfg) * 32768)
+        # the reasoning a step spent is context OpenCode's compaction counts: so does the runner
+        self.assertEqual(events.normalize({"type": "step_finish", "part": {"tokens": {
+            "input": 100, "output": 20, "reasoning": 300, "cache": {"read": 5}}}}, 1)["reasoning"], 300)
 
     def test_a_ceiling_under_every_value_hands_over_before_the_compaction_and_says_so(self):
         # #595 (the audit of 1.90, reproduced): a 16K output cap on a 32K window put the ceiling
@@ -9998,11 +10022,16 @@ class Tuning(Base):
         from workbench import optimize, runner, tuning
         cfg = {"limit": {"context": 32768, "output": 16384}}
         top = runner.fresh_ceiling(cfg)
-        self.assertEqual(top, 0.375)
-        self.assertEqual(tuning.allowed("fresh_at", top), [0.325])
-        self.assertEqual(tuning.choose("fresh_at", self.M, self.W, "t", top), (0.325, False))
-        self.assertLess(tuning.choose("fresh_at", self.M, self.W, "t", top)[0], top)
-        self.assertIn("puts OpenCode's compaction at 38% of the window", runner.handover_warning(cfg))
+        self.assertEqual(runner.compaction_point(cfg), 0.375)
+        self.assertEqual(top, 0.25)                          # a step's growth before it (#644)
+        cfg = {"limit": {"context": 32768, "output": 12288}}
+        top = runner.fresh_ceiling(cfg)
+        self.assertEqual(tuning.allowed("fresh_at", top), [0.375])
+        self.assertEqual(tuning.choose("fresh_at", self.M, self.W, "t", top), (0.375, False))
+        self.assertLess(tuning.choose("fresh_at", self.M, self.W, "t", top)[0], runner.compaction_point(cfg))
+        self.assertIn("puts OpenCode's compaction at 50% of the window", runner.handover_warning(cfg))
+        self.assertIn("handovers come at 38%", runner.handover_warning(cfg))
+        cfg = {"limit": {"context": 32768, "output": 16384}}
         tiny = {"limit": {"context": 16384, "output": 8192}, "options": {"max_tokens": 16384}}
         self.assertLessEqual(runner.fresh_ceiling(tiny), 0)
         self.assertEqual(tuning.allowed("fresh_at", runner.fresh_ceiling(tiny)), [0.4])

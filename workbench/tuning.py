@@ -16,11 +16,11 @@ scores 0. Neither a trial run (store.results) nor a discard Claude put down to i
 (judged) is evidence, and a value is judged only by the tasks it ran, so a task routed to
 explore doesn't blur the pick's record.
 
-A knob can have a ceiling per model (the runner's: fresh_at must come before OpenCode's
-compaction, which sits one reply and one step's growth short of the window), and values past it
-are never tried. A default past it falls to the highest value under it; with every value past
-it, the ceiling less CEILING_MARGIN is the only one (an output cap that is a large share of the
-window: #595).
+A knob can have a ceiling per model (the runner's: fresh_at must come one step's growth, or
+CEILING_MARGIN of the window, before OpenCode's compaction, which sits one reply and one step's
+growth short of the window: #644), and values past it are never tried. A default past it falls
+to the highest value under it; with every value past it, the ceiling itself is the only one (an
+output cap that is a large share of the window: #595).
 
 $WB_HOME/tuning.json pins a knob for everyone on this install: {"fresh_at": 0.6}.
 """
@@ -37,8 +37,9 @@ PRIOR = 2  # tasks' worth of the pooled record each value starts with
 EXPLORE = 0.2
 COMPACT_PENALTY = 0.25
 SPEED_WEIGHT = 0.15
-# Below a ceiling under every candidate: the smallest value once stood, past OpenCode's
-# compaction, so every long step compacted instead of handing over (#595, the audit of 1.90)
+# The least room between the handover point and OpenCode's compaction, as a share of the window
+# (runner.fresh_ceiling: one step's growth, if more). With none, one tool result past the
+# handover point compacted the session before the runner could hand it over (#595, #644)
 CEILING_MARGIN = 0.05
 
 
@@ -102,13 +103,13 @@ def reward(row: dict, usual_minutes: float | None = None) -> float:
 
 
 def allowed(name: str, ceiling=None) -> list:
-    """The knob's values at or under ``ceiling``; none is, the ceiling less CEILING_MARGIN (or
-    the smallest value, when that isn't positive: nothing fits, and runner.handover_warning says)."""
+    """The knob's values at or under ``ceiling``; none is, the ceiling itself (or the smallest
+    value, when that isn't positive: nothing fits, and runner.handover_warning says)."""
     vals = sorted(KNOBS[name].values)
     under = [v for v in vals if ceiling is None or v <= ceiling + 1e-9]
     if under:
         return under
-    return [round(ceiling - CEILING_MARGIN, 3)] if ceiling - CEILING_MARGIN > 0 else vals[:1]
+    return [round(ceiling, 3)] if ceiling > 0 else vals[:1]
 
 
 def default(name: str, ceiling=None):

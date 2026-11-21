@@ -290,8 +290,8 @@ compaction, the header wait.
   worktree, the model is still told the first one. So context carries over only within a task's
   own worktree (rounds, `wb next`), never to a new task.
 - `session export` lists compactions as messages `{type: "compaction", status, summary}`; an
-  assistant message's `tokens` (input + cache read/write + output) is the context the next request
-  carries (the between-rounds check). The live `step_finish` tokens (the same sum) drive the
+  assistant message's `tokens` (input + cache read/write + output + reasoning) is the context the
+  next request carries (the between-rounds check). Live `step_finish` tokens (the same) drive the
   mid-round check.
 - `run` reads a message that starts with `-` as a flag (usage, exit 1): the prompt goes after `--`.
 - `run --format json` prints nothing while a tool runs or the model reads its prompt; a shell

@@ -144,7 +144,8 @@ run it as a backlog. Each task still gets the same review it would by day.
 ## The agent's context and handovers
 Rounds of a task continue one OpenCode session, so the agent keeps what it read.
 When that session passes its handover point (60% of the window until `wb tune` learns better
-for that model; less on windows under ~32K, and a model served under 16K can't take tasks), the runner hands the task to a fresh session
+for that model; less where the output cap leaves less room before OpenCode's compaction, 50% on
+the 32K entry `wb model add` writes, and a model served under 16K can't take tasks), the runner hands the task to a fresh session
 at once, mid-round if need be: the task, the work so far (the diff), the agent's last words and
 the new instructions. The fourth handover in a round is a check-in, and past the fifth the round is
 stopped as stuck (the step is too big for the window: split it). OpenCode's own compaction (the model summarising itself, which can lose the

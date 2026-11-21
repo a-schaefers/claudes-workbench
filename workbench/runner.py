@@ -130,8 +130,8 @@ def compaction_buffer(cfg: dict) -> int | None:
     return max(usable + reply - window, 0) + STEP_GROWTH
 
 
-def fresh_ceiling(cfg: dict) -> float | None:
-    """The latest a fresh session can take over: where OpenCode's compaction sits (tuning.py)."""
+def compaction_point(cfg: dict) -> float | None:
+    """Where OpenCode's compaction sits, as a share of the window."""
     lim, buf = cfg.get("limit") or {}, compaction_buffer(cfg)
     window = lim.get("context")
     if not window or buf is None:
@@ -139,12 +139,24 @@ def fresh_ceiling(cfg: dict) -> float | None:
     return (usable_input(lim) - buf) / window
 
 
+def fresh_ceiling(cfg: dict) -> float | None:
+    """The latest a fresh session can take over (tuning.py): one step's growth (STEP_GROWTH, or
+    tuning.CEILING_MARGIN of the window if more) before OpenCode's compaction. The runner checks
+    at each step's end and OpenCode before the next request, with that step's tool results in:
+    a ceiling at the compaction point itself left 819 tokens at 32K (0 at 16K), so one 3K file
+    read compacted the session before the runner handed it over (#644, the audit of main)."""
+    top, window = compaction_point(cfg), (cfg.get("limit") or {}).get("context")
+    if top is None:
+        return None
+    return round(top - max(STEP_GROWTH / window, tuning.CEILING_MARGIN), 6)
+
+
 def handover_warning(cfg: dict) -> str:
-    """What to say of an entry whose output cap puts OpenCode's compaction before the earliest
-    handover point (fresh_ceiling under every fresh_at value), or "". Nothing said so, and every
-    long step compacted, the small-model summary the handover exists to avoid (#595, the audit of
-    1.90). Under HANDOVER_ROOM no successor has room, so no handover fits at all."""
-    top = fresh_ceiling(cfg)
+    """What to say of an entry whose output cap puts OpenCode's compaction too close to the
+    earliest handover point (fresh_ceiling under every fresh_at value), or "". Nothing said so,
+    and every long step compacted, the small-model summary the handover exists to avoid (#595,
+    the audit of 1.90). At HANDOVER_ROOM or under, no successor has room, so no handover fits."""
+    top, at = fresh_ceiling(cfg), compaction_point(cfg)
     lo = min(tuning.KNOBS["fresh_at"].values)
     if top is None or top >= lo:
         return ""
@@ -152,9 +164,9 @@ def handover_warning(cfg: dict) -> str:
     caps = ", ".join(f"{k} {v}" for k, v in (("limit.output", lim.get("output")),
                                              ("options.max_tokens", opts.get("max_tokens"))) if v)
     return (f"its output cap ({caps} of a {lim['context'] // 1024}K window) puts OpenCode's "
-            f"compaction at {max(top, 0):.0%} of the window, before the earliest handover point "
-            f"({lo:.0%}): " + ("no handover fits, so long steps compact" if top < HANDOVER_ROOM else
-                               f"handovers come at {top - tuning.CEILING_MARGIN:.0%}, with little room")
+            f"compaction at {max(at, 0):.0%} of the window, under a step's growth past the earliest "
+            f"handover point ({lo:.0%}): " + ("no handover fits, so long steps compact" if top <= HANDOVER_ROOM else
+                               f"handovers come at {top:.0%}, with little room")
             + "; lower limit.output and options.max_tokens")
 
 
@@ -926,7 +938,7 @@ def run_round(task: store.Task, n: int, keep: bool = False) -> dict:
             elif row["kind"] == "step":
                 out["tok_in"] += row["in"]
                 out["tok_out"] += row["out"]
-                used = row["in"] + row.get("cache", 0) + row["out"]
+                used = row["in"] + row.get("cache", 0) + row["out"] + row.get("reasoning", 0)  # #644
                 st = task.status
                 task.set_status(tok_in=st.get("tok_in", 0) + row["in"], tok_out=st.get("tok_out", 0) + row["out"],
                                 live_used={"session": st.get("session"), "used": used})  # #262
@@ -2014,7 +2026,8 @@ def context_state(task: store.Task) -> dict:
         if not isinstance(tk, dict):
             return 0
         cache = tk.get("cache") if isinstance(tk.get("cache"), dict) else {}
-        return sum(n for n in (tk.get("input"), cache.get("read"), cache.get("write"), tk.get("output"))
+        return sum(n for n in (tk.get("input"), cache.get("read"), cache.get("write"), tk.get("output"),
+                               tk.get("reasoning"))  # as OpenCode's compaction counts it (#644)
                    if isinstance(n, (int, float)))
     # the last one that counted anything: an aborted step recorded with every count 0 (an
     # interrupt) read as an empty session and skipped the between-rounds check (#481)

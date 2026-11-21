@@ -8,8 +8,8 @@
   crash  exit 1 with no events; with FAKE_DOWN (a file) it takes the model server down with it
          (creates the file) the first time, and behaves like ok after
   slow   a first run that takes an hour; a continued session behaves like ok
-  fill   writes "41", then a step that fills 76% of a 32K window, then works on for an hour;
-         a fresh session handed the task behaves like ok
+  fill   writes "41", then a step that fills 76% of a 32K window (6K of it reasoning), then
+         works on for an hour; a fresh session handed the task behaves like ok
   read   reads, a step that fills 76% before any change, then writes "42" like ok
   floor  reads 48% of its window before its first change, then fills to 76%, then writes "42"
   refill every session changes a file, then fills 76% and works on for an hour
@@ -245,8 +245,9 @@ elif scenario == "fill":
     emit("step_finish", reason="tool-calls", tokens={"input": 2000, "output": 100,
                                                       "cache": {"read": 900}})  # began work at 3000
     emit("text", text="Wrote 41 so far; next I fix it to the real answer.")
-    emit("step_finish", reason="tool-calls", tokens={"input": 2000, "output": 900,
-                                                      "cache": {"read": 22100}})  # 25000: 76%
+    # 25000: 76%, but 58% without its reasoning, which OpenCode's compaction counts (#644)
+    emit("step_finish", reason="tool-calls", tokens={"input": 2000, "output": 900, "reasoning": 6000,
+                                                      "cache": {"read": 16100}})
     time.sleep(3600)
 if os.environ.get("FAKE_EXIT") and args and args[0] == "run":
     sys.exit(int(os.environ["FAKE_EXIT"]))

@@ -778,7 +778,7 @@ until the silence timeout stopped the round as "no first output" (#440); a
 steer bell (`_steer_bell`, a `Watcher` on the task directory and `ask/`) queues a wake when
 `steer.jsonl` or an ask file changes; each tick relays the agent's questions (`ask_mcp.relay`). The loop wakes on a line or every 5 s. Per line: `events.normalize` (dropping the rest),
 the session id from the first `sessionID`, the tool tally and `status.last`, every text kept, and
-for each `step` the context in use (input + cache read + cache write + output) against the handover point.
+for each `step` the context in use (input + cache read + cache write + output + reasoning, which OpenCode counts too) against the handover point.
 Then, every pass, in this order: asking (phase `asking`) or not, and time spent asking is
 neither the round's nor silence; the round's wall clock; silence; the think nudge; a guard stop (`stopped` event; before a no-edit stop it checks
 `gitops.mark`, so an edit made through the shell, `sed -i` or `cat >`, resets that guard); a handover; a check-in; a
@@ -879,7 +879,7 @@ A prompt (with its skills note) over `PROMPT_ARG_MAX` (100K bytes) is sent as a 
   that never started still hands the next round the task); `keep` → continue; the last round handed over (`context: full`) → fresh; OpenCode compacted the
   session (`session export` lists a completed compaction) → fresh; the session's last assistant
   message that counted any tokens (`context_state`: one whose counts are all 0, an aborted step,
-  is passed over, #481) carried `fresh_at` or more of the window (input + cache read + cache write + output) →
+  is passed over, #481) carried `fresh_at` or more of the window (input + cache read + cache write + output + reasoning) →
   fresh. This check doesn't look at whether files changed. When the export fails (a 30 s
   timeout, a busy store: `transcript.export(sid, strict=True)` is None), the round's last
   `step_finish` count stands in (status `live_used`, when it is this session's), compactions are
@@ -920,20 +920,28 @@ layer sets `compaction: {auto: true, buffer}` with `buffer = max(usable + reply 
 STEP_GROWTH` (usable: OpenCode 2.3's own figure, `runner.usable_input`: the smaller of
 `limit.input` and the window, else the window, since OpenCode compacts at usable − buffer; reply:
 `options.max_tokens`, else `limit.output`; `STEP_GROWTH` 4096), so OpenCode compacts only past the
-handover point, leaving room for one reply at the output cap and one step's growth
+handover point, leaving room for one reply at the output cap and one step's 
+growth
 (`compaction_buffer`). Taking an unset `limit.input` as context − output (OpenCode 1.x) wrote a 4K
 buffer for a hand-written `{context 32K, output 16K}`: OpenCode compacted at 87.5% while the
 handovers were planned against 37.5% (#675). OpenCode shrinks each request's `maxTokens` to fit, so
-a request never overflows; the buffer is what keeps a full reply possible. `fresh_ceiling`
-is the same point as a share of the window: 62.5% on a 32K window with a 4K output limit and an
-8K cap; the tuner never tries a handover point past it. A model without `limit.context` gets no
+a request never overflows; the buffer is what keeps a full reply possible.
+
+`compaction_point` is that point as a share of the window: 62.5% on a 32K window with a 4K output
+limit and an 8K cap. `fresh_ceiling` sits one step's growth before it (`STEP_GROWTH`, or
+`tuning.CEILING_MARGIN` of the window when that is more): 50% there; the tuner never tries a
+handover point past it. The runner checks at each step's end, OpenCode before the next request
+with that step's tool results in, so a ceiling at the compaction point itself (819 tokens of room
+at 32K) let one 3K read compact the session first (#644). Both count a step's reasoning tokens
+(the step row's `reasoning`, the export's `tokens.reasoning`), as OpenCode's check does. A model without `limit.context` gets no
 mid-round handover, no compaction setting and no ceiling. Below `models.MIN_WINDOW` (16K) a
 window can't hold a task (OpenCode's prompt and tools, PROTOCOL and the handbook take ~5K tokens,
 and compaction would come before the earliest handover point, at 4K before the first request), so
 `models.status` says the model can't run ("a 8K window; tasks need 16K+ …"): the router skips it,
 `wb start --model` refuses it (exit 3), `wb model add` refuses to register it and `wb doctor`
-marks it. At 16K, the entry `wb model add` writes puts the ceiling at 50%; a hand-written entry
-whose ceiling falls below every candidate gets the lowest (`tuning.allowed`).
+marks it. At 16K, the entry `wb model add` writes puts the compaction at 50% and the ceiling at
+25%, so no handover fits there and `runner.handover_warning` says so; an entry whose ceiling falls
+below every candidate gets the ceiling itself (`tuning.allowed`).
 
 **Notes, nudges and interrupts.** `steer.jsonl` holds every note (`{ts, text, now}`), written by
 `wb steer`, by `wb allow` (to restart a running agent with its new rule) and by the runner's own
@@ -1990,7 +1998,7 @@ Local models work in a small context window, and so, in its own way, does Claude
 **The agent's.** Rounds continue one OpenCode session. The runner reads the context every step
 reports and hands a full session to a fresh one with exactly what it needs (*The runner, inside*:
 the handover point, the two checks, the handoff prompt). OpenCode's compaction is set as a backstop
-just past the handover point. Reports show the fill (`agent context: 19.4K of 32K (60%)`) so
+at least a step's growth past the handover point (#644). Reports show the fill (`agent context: 19.4K of 32K (60%)`) so
 Claude sees it coming. `wb feedback --fresh` (or `wb next --fresh`) forces a fresh session (a
 confused agent); `--keep-context` asks to keep it at the next round's start. A session stays
 bound to the directory it was made in (continued or forked from another worktree, the model is
@@ -2042,14 +2050,16 @@ counted the wait for Claude's review as the agent being slow, #543). Discarded s
 `--spec-gap` is its own miss and counts for nothing, here or in the router's and the skills'
 records (`judged`). Each value's mean is smoothed toward the others' (`PRIOR`, two tasks' worth),
 so one lucky task moves nothing, and the pick walks one step at a time toward whatever scores
-best. Values past the model's compaction point (`runner.fresh_ceiling`) are never tried (a
+best. Values past the model's ceiling (`runner.fresh_ceiling`: one step's growth, at least
+`tuning.CEILING_MARGIN` 0.05 of the window, before OpenCode's compaction, #644) are never tried (a
 window under `models.MIN_WINDOW`, 16K, which would leave none, is refused instead). An output cap
-that is a large share of the window can put the ceiling under every value: then the ceiling less
-`tuning.CEILING_MARGIN` (0.05) is the only one, and the smallest value when that isn't positive
-(the smallest stood before, past the compaction, so every long step compacted: a 16K cap on 32K
-is a 0.375 ceiling, #595, the audit of 1.90); `runner.handover_warning` says so, a `note:` in `wb
-start` and a `--` line in `wb doctor` ("its output cap … puts OpenCode's compaction at N% of the
-window, before the earliest handover point"; under `HANDOVER_ROOM`, "no handover fits"), and
+that is a large share of the window can put the ceiling under every value: then the ceiling
+itself is the only one, and the smallest value when that isn't positive (the smallest stood
+before, past the compaction, so every long step compacted: a 16K cap on 32K compacts at 0.375,
+#595, the audit of 1.90); `runner.handover_warning` says so, a `note:` in `wb start` and a `--`
+line in `wb doctor` ("its output cap … puts OpenCode's compaction at N% of the window, under a
+step's growth past the earliest handover point"; at `HANDOVER_ROOM` or under, "no handover
+fits"), and
 `optimize.budget` cuts such a cap to a quarter of the window. Trial
 runs aren't evidence. `wb tune` shows each model's record and pick; `$WB_HOME/tuning.json` pins a
 value (`{"fresh_at": 0.6}`, used as given, ceiling or not). A new knob: add it to `KNOBS`, read it
@@ -5822,7 +5832,7 @@ check-ins off), not `wb start`'s.
 | `failed_before` | `setup` or `load`: the runner failed the task on its setup or its model's load before the agent ran (`_prepare`, `_load_failed`); the results row copies it (#581) |
 | `stopping` | wb is stopping the runner (`cli._stop_runner`); cleared by `spawn_runner` and the runner's exit |
 | `tools`, `tok_in`, `tok_out` | task-wide tool calls and tokens (input without cache reads) |
-| `live_used` | `{session, used}`: the context the round's last `step_finish` carried (input + cache + output), what the between-rounds check uses when the session export fails (#262) |
+| `live_used` | `{session, used}`: the context the round's last `step_finish` carried (input + cache + output + reasoning, #644), what the between-rounds check uses when the session export fails (#262) |
 | `gpu_wh` | the GPU energy its rounds used so far, in Wh (the runner's `_Power`; absent for a remote model or no reading) |
 | `gpu_w_sum`, `gpu_w_n`, `gpu_w_peak` | the same sampler's readings in watts: their sum, count and peak, for the row's `gpu_w` (*Stats recording*) |
 | `speeds` | `{write, read, ttft}`: this task's own samples (`router.speed_samples`), the newest `TASK_SPEED_KEEP` 200 of each, with stats recording on |
@@ -5851,7 +5861,7 @@ check-ins off), not `wb start`'s.
 **events.jsonl** rows are `{ts, round, kind, …}`. From OpenCode, normalized (`events.normalize`):
 `tool {tool, brief, ok, error?}` (`brief`: the input's command, path, pattern, url, query or
 description, 90 characters; a skill's id), `text {text}` (2000 characters), `step {in, out,
-cache}`, `error {text}`, `retry {text, attempt}` (OpenCode resending a request, #491). From the runner: `round`, `stopped {text}`, `steer {now, by:
+cache, reasoning?}` (reasoning tokens apart from `out`, when any, #644), `error {text}`, `retry {text, attempt}` (OpenCode resending a request, #491). From the runner: `round`, `stopped {text}`, `steer {now, by:
 "workbench"}` (a nudge), `interrupted`, `tests {ok, text}`, `skills`, `fresh {overflow,
 compacted}`,
 `autofix`, `self_review`, `reading_full`, `full`, `load` (the model reloaded before a round),

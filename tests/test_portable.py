@@ -1633,8 +1633,11 @@ class Optimize(unittest.TestCase):
         self.assertGreater(runner.compaction_buffer(entry), 0)
         self.assertLess(runner.compaction_buffer(entry), 16384)
         self.assertEqual(optimize.budget({"limit": {"context": 8192, "output": 1024}}, 8192)[0]["input"], 7168)
-        kept = optimize.budget({"limit": {"output": 32768}, "options": {"max_tokens": 32768}}, 65536)
-        self.assertEqual((kept[0]["output"], kept[1]["max_tokens"]), (32768, 32768))  # half: room left
+        kept = optimize.budget({"limit": {"output": 20480}, "options": {"max_tokens": 20480}}, 65536)
+        self.assertEqual((kept[0]["output"], kept[1]["max_tokens"]), (20480, 20480))  # room left
+        # half the window leaves under a step's growth past the earliest handover point (#644)
+        cut = optimize.budget({"limit": {"output": 32768}, "options": {"max_tokens": 32768}}, 65536)
+        self.assertEqual((cut[0]["output"], cut[1]["max_tokens"]), (16384, 16384))
 
     def test_two_tags_of_one_model_get_names_of_their_own_and_a_taken_name_is_refused(self):
         # the 2026-11-19 audit: family:7b and family:32b both became family-16k, the second

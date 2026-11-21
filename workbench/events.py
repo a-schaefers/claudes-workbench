@@ -60,9 +60,12 @@ def normalize(raw: dict, round_no: int):
         tok = _obj(part.get("tokens"))
         cache = _obj(tok.get("cache"))
         n = lambda v: v if isinstance(v, (int, float)) else 0  # noqa: E731
+        # reasoning apart from output, as OpenCode counts it: its compaction check adds it in,
+        # so the runner's handover check must too (#644)
         return {"ts": ts, "round": round_no, "kind": "step",
                 "in": n(tok.get("input")), "out": n(tok.get("output")),
-                "cache": n(cache.get("read")) + n(cache.get("write"))}
+                "cache": n(cache.get("read")) + n(cache.get("write")),
+                **({"reasoning": n(tok.get("reasoning"))} if n(tok.get("reasoning")) else {})}
     if kind == "error":
         return {"ts": ts, "round": round_no, "kind": "error", "text": _message(raw.get("error"))}
     if kind == "retry":  # a request OpenCode gave up on and sends again: not the model's output
