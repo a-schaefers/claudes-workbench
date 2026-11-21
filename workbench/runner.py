@@ -2442,9 +2442,6 @@ def _steer_round(task: store.Task, n: int, interrupted: bool) -> None:
     task.set_status(round=n + 1, steer_taken=task.status.get("steer_taken", 0) + len(notes))
 
 
-# A SIGTERM that didn't come from wb (a shutdown, a logout, a kill): wb marks its own stops
-# (status `stopping`, cli._stop_runner); any other leaves the task stuck, with a notice, so it
-# doesn't sit in a live phase that nothing will ever end (the 2026-11-16 audit).
 # What a task's children load from the clone afresh each round, beside this runner's code loaded
 # at its start: the lane (run as a file), the git shim (written by this runner, importing
 # gitguard) and the ask server (ask_mcp, store, watch). A `git pull` or Claude Code's plugin
@@ -2478,6 +2475,9 @@ def _updated(task: store.Task) -> bool:
     return True
 
 
+# A SIGTERM that didn't come from wb (a shutdown, a logout, a kill): wb marks its own stops
+# (status `stopping`, cli._stop_runner); any other leaves the task stuck, with a notice, so it
+# doesn't sit in a live phase that nothing will ever end (the 2026-11-16 audit).
 SIGNAL_STOP = "the runner was stopped by a signal (a shutdown, a logout or a kill), not by Claude"
 
 
