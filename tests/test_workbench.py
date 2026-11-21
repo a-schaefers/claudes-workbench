@@ -12962,6 +12962,72 @@ class Top(Base):
         first = json.loads(out.read_text().splitlines()[0])
         self.assertEqual(sorted(first), ["every", "gpus", "queue", "rack", "running", "ts"])
 
+    def test_ctrl_z_gives_the_terminal_back_and_fg_takes_it_again_so_one_q_quits(self):
+        # #607: stopped with the alternate screen up and the cursor hidden, and after `fg` the
+        # terminal was canonical again, so `q` needed Enter
+        import pty
+        import select
+        import termios
+        pidfile = Path(self.tmp.name, "top.pid")
+        # a shell's part: wb top in a process group of its own, the terminal's foreground, under a
+        # parent in the same session (a stop signal to an orphaned group is discarded)
+        shell = ("import os, signal, sys\n"
+                 "pid = os.fork()\n"
+                 "if pid == 0:\n"
+                 "    os.setpgid(0, 0)\n"
+                 "    signal.signal(signal.SIGTTOU, signal.SIG_IGN)\n"  # a shell's own step
+                 "    os.tcsetpgrp(0, os.getpid())\n"
+                 "    signal.signal(signal.SIGTTOU, signal.SIG_DFL)\n"
+                 "    os.execv(sys.argv[1], [sys.argv[1], 'top', '--every', '0.2'])\n"
+                 "open(sys.argv[2], 'w').write(str(pid))\n"
+                 "while not os.WIFEXITED(os.waitpid(pid, os.WUNTRACED)[1]):\n"
+                 "    pass\n")
+        child, fd = pty.fork()
+        if child == 0:
+            os.environ["PATH"] = "/usr/bin:/bin"  # no nvidia-smi: nothing to wait on
+            os.execv(sys.executable, [sys.executable, "-c", shell, str(ROOT / "bin" / "wb"), str(pidfile)])
+        def reap_all():
+            for pid in (int(pidfile.read_text()) if pidfile.exists() else 0, child):
+                if pid:
+                    with contextlib.suppress(OSError):
+                        os.kill(pid, signal.SIGKILL)
+            with contextlib.suppress(OSError):
+                os.waitpid(child, 0)
+            os.close(fd)
+        self.addCleanup(reap_all)
+        got = bytearray()
+
+        def read_until(needle: bytes, secs: float = 15) -> bool:
+            deadline = time.time() + secs
+            while needle not in got and time.time() < deadline:
+                if select.select([fd], [], [], 0.1)[0]:
+                    try:
+                        got.extend(os.read(fd, 65536))
+                    except OSError:
+                        break
+            return needle in got
+
+        self.assertTrue(read_until(b"RUNNING"), bytes(got)[-2000:])
+        top_pid = int(pidfile.read_text())
+        self.assertFalse(termios.tcgetattr(fd)[3] & termios.ICANON)       # cbreak while it runs
+        del got[:]
+        os.kill(top_pid, signal.SIGTSTP)
+        self.assertTrue(read_until(b"\033[?1049l"))
+        self.assertIn(b"\033[?25h", got)
+        deadline = time.time() + 10
+        while Path(f"/proc/{top_pid}/stat").read_text().split(")")[1].split()[0] != "T" \
+                and time.time() < deadline:
+            time.sleep(0.05)
+        self.assertEqual(Path(f"/proc/{top_pid}/stat").read_text().split(")")[1].split()[0], "T")
+        self.assertTrue(termios.tcgetattr(fd)[3] & termios.ICANON)        # the shell's mode back
+        del got[:]
+        os.kill(top_pid, signal.SIGCONT)
+        self.assertTrue(read_until(b"RUNNING"))                           # redrawn on its own
+        self.assertIn(b"\033[?1049h", got)
+        self.assertFalse(termios.tcgetattr(fd)[3] & termios.ICANON)
+        os.write(fd, b"q")                                                # one key, no Enter
+        self.assertTrue(wait_gone(top_pid, 10))
+
     def test_sigterm_ends_it_quietly(self):
         p = subprocess.Popen([str(ROOT / "bin" / "wb"), "top", "--json", "--every", "0.2"],
                              stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)

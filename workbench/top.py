@@ -709,18 +709,61 @@ def main(every: float | None = None, as_json: bool = False, out=None, drm: Path 
     top = Top(every, drm=drm, background=as_json or tty)
     keys = None
     saved = None
+    wake = None  # a pipe SIGCONT writes to: back from Ctrl-Z, the view redraws at once
+
+    def enter():  # cbreak for `q`, the alternate screen, the cursor hidden
+        if saved is not None:
+            import tty as tty_mod
+            try:
+                tty_mod.setcbreak(keys)
+            except OSError:
+                pass
+        out.write("\033[?1049h\033[?25l")
+        out.flush()
+
+    def leave():  # the cursor, the main screen and the terminal's own mode back
+        try:
+            out.write("\033[?25h\033[?1049l")
+            out.flush()
+        except (BrokenPipeError, OSError):
+            pass
+        if saved is not None:
+            import termios
+            try:
+                termios.tcsetattr(keys, termios.TCSADRAIN, saved)
+            except OSError:
+                pass
+
+    # Ctrl-Z: put the terminal back before stopping, and take it again on SIGCONT. It stopped with
+    # the shell's prompt drawn over the frozen view, no cursor, and after `fg` `q` needed Enter (#607)
+    def suspend(_signum, _frame):
+        leave()
+        signal.signal(signal.SIGTSTP, signal.SIG_DFL)
+        os.kill(os.getpid(), signal.SIGTSTP)  # stops here until SIGCONT (an orphaned group: not)
+        signal.signal(signal.SIGTSTP, suspend)
+        resume(None, None)
+
+    def resume(_signum, _frame):
+        enter()
+        try:
+            os.write(wake[1], b"!")
+        except (OSError, TypeError):
+            pass
     try:
         if tty:
             try:
                 import termios
-                import tty as tty_mod
                 if sys.stdin.isatty():
-                    saved = termios.tcgetattr(sys.stdin.fileno())
-                    tty_mod.setcbreak(sys.stdin.fileno())
                     keys = sys.stdin.fileno()
+                    saved = termios.tcgetattr(keys)
             except (ImportError, OSError):
-                keys = None
-            out.write("\033[?1049h\033[?25l")  # the alternate screen, the cursor hidden
+                keys = saved = None
+            wake = os.pipe()
+            os.set_blocking(wake[0], False)
+            os.set_blocking(wake[1], False)
+            old.update({s: signal.signal(s, h) for s, h in
+                        ((signal.SIGTSTP, suspend), (signal.SIGCONT, resume))})
+            enter()
         while True:
             started = time.monotonic()
             snap = top.tick()
@@ -740,13 +783,19 @@ def main(every: float | None = None, as_json: bool = False, out=None, drm: Path 
             while (left := started + every - time.monotonic()) > 0:
                 # a stream that ended reads as ready forever: no longer waited on (its rows go stale)
                 smi = top.smi.fileno() if top.smi and top.smi.proc.poll() is None else None
-                fds = [f for f in (smi, keys) if f is not None]
+                fds = [f for f in (smi, keys, wake and wake[0]) if f is not None]
                 if not fds:
                     time.sleep(left)
                     break
                 ready = select.select(fds, [], [], left)[0]
                 if smi is not None and smi in ready:
                     top.smi.drain()
+                if wake and wake[0] in ready:  # back from a stop: redraw now
+                    try:
+                        os.read(wake[0], 64)
+                    except BlockingIOError:
+                        pass
+                    break
                 if keys is not None and keys in ready:
                     if "q" in os.read(keys, 64).decode(errors="replace").lower():
                         return
@@ -758,14 +807,9 @@ def main(every: float | None = None, as_json: bool = False, out=None, drm: Path 
         sys.stdout = open(os.devnull, "w")
     finally:
         top.close()
-        if tty:
-            try:
-                out.write("\033[?25h\033[?1049l")
-                out.flush()
-            except (BrokenPipeError, OSError):
-                pass
-        if saved is not None:
-            import termios
-            termios.tcsetattr(sys.stdin.fileno(), termios.TCSADRAIN, saved)
         for s, h in old.items():
             signal.signal(s, h)
+        if tty:
+            leave()
+        for fd in wake or ():
+            os.close(fd)

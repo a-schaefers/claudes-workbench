@@ -2266,7 +2266,10 @@ each tick: bars in eighths (`▏▎▍▌▋▊▉█`) for VRAM and busy, model
 short name (`top.short`, the pane's `cardName` alike: lspci's last bracket when the name ends with
 one, else what follows the last bracket, the vendor tag's, so a Phoenix1 or a "Device 1586" newer
 than hwdata isn't shown as "AMD/ATI", #576; `(rev …)` dropped), sizes in decimal GB, colour only there; stdin in cbreak mode for `q`, restored on
-exit. Not on a terminal: one plain pass, then exit (as `wb watch --once`).
+exit. Ctrl-Z (SIGTSTP) puts the cursor, the main screen and the saved termios back before it
+stops, and SIGCONT takes them again (cbreak, the alternate screen) and redraws at once (a wake
+pipe in the `select`): it stopped with the shell's prompt over the frozen view and no cursor,
+and after `fg` `q` needed Enter (#607). Not on a terminal: one plain pass, then exit (as `wb watch --once`).
 
 ## Models: found, loaded, chosen
 
