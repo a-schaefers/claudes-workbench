@@ -589,6 +589,7 @@ async function run(engine, device) {
     const now = Date.now() / 1000
     for (let i = 0; i < 60; i++) appendFileSync(join(home, 'state/chat/messages.jsonl'), JSON.stringify({ id: `fill-${i}`,
       ts: now + i / 100, from: 'claude', text: `filler reply ${i}\n\n` + 'a line of words to make it tall\n'.repeat(4) }) + '\n')
+    await page.reload()  // rows written behind the server's back: a load shows them (and keeps them)
     await until(async () => (await page.locator('.row.claude .bubble').last().textContent()).includes('filler reply 59'))
     const gets = []
     const count = r => { if (r.url().includes('/api/file/')) gets.push(r.url()) }
@@ -598,7 +599,7 @@ async function run(engine, device) {
       await until(async () => (await page.locator('.row.claude .bubble').last().textContent()).includes('filler reply 59'))
       await sleep(1500)
       if (gets.length) throw new Error(`fetched ${gets.length} photo(s) far above the view`)
-      await page.$eval('main', m => { m.scrollTop = 0 })
+      await page.$eval('.row.user .files', f => f.scrollIntoView())
       await until(() => gets.length === 1)
       await until(() => page.$eval('.row.user .files .pic img', i => i.complete && i.naturalWidth > 0))
     } finally { page.off('request', count) }
@@ -620,21 +621,20 @@ async function run(engine, device) {
     await p.addInitScript(() => {
       window.live = new Set()
       const make = URL.createObjectURL, drop = URL.revokeObjectURL
-      URL.createObjectURL = b => { const u = make(b); window.live.add(u); return u }
+      URL.createObjectURL = b => { const u = make(b); if (b instanceof File) window.live.add(u); return u }  // a picked file's, not the thread's
       URL.revokeObjectURL = u => { window.live.delete(u); drop(u) }
     })
     try {
       await p.goto(base)
       await until(async () => (await p.textContent('#presence-text')).length > 0)
       const png = readFileSync(join(ROOT, 'workbench/chat_static/icon-192.png'))
-      const thread = await p.evaluate(() => window.live.size)  // the thread's own thumbnails
       for (let i = 0; i < 4; i++) {
         await p.setInputFiles('#pick', { name: `p${i}.png`, mimeType: 'image/png', buffer: Buffer.concat([png, Buffer.from([i])]) })
         await until(() => p.$eval('#tray .face', img => img.complete && img.naturalWidth > 0))
         await p.click('#tray .att .x')
         await until(async () => await p.locator('#tray').isHidden())
       }
-      await until(async () => (await p.evaluate(() => window.live.size)) <= thread)
+      await until(async () => (await p.evaluate(() => window.live.size)) === 0)
     } finally { await p.close() }
   })
   await check('a disk that refuses for good shows its reason on the chip, and a server failure stops after three tries', async () => {
