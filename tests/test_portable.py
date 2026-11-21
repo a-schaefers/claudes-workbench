@@ -1430,6 +1430,27 @@ class Launchers(unittest.TestCase):
                                 f"{old}:{new}")
                 self.assertEqual(r.returncode, 78, r.stderr)                # handed over once only
 
+    def test_a_python3_n_that_cannot_run_is_passed_over_for_one_that_can(self):
+        # #526: on Ubuntu 22.04 with pyenv, ~/.pyenv/shims/python3.12 (a version pyenv has only
+        # for another project) exited 127, and the apt python3.11 behind it was never tried
+        with tempfile.TemporaryDirectory() as d:
+            shims, apt, broken = Path(d, "shims"), Path(d, "apt"), Path(d, "partial")
+            fakes = {shims / "python3.12": 'echo "pyenv: python3.12: command not found" >&2; exit 127\n',
+                     broken / "python3.13": '[ "$1" = -c ] && exit 1\necho python3.13 "$@"\n',  # no ctypes
+                     apt / "python3.11": 'echo python3.11 "$@"\n'}
+            for exe, body in fakes.items():
+                exe.parent.mkdir(exist_ok=True)
+                exe.write_text("#!/bin/sh\n" + body)
+                exe.chmod(0o755)
+            for name in ("wb", "wb-ask-mcp"):
+                r = self.launch(name, "sys.version_info = (3, 10, 12)", f"{shims}:{broken}:{apt}")
+                self.assertEqual(r.returncode, 0, r.stderr)
+                self.assertEqual(r.stdout.split(), ["python3.11", "-X", "wb-python",
+                                                    str(self.ROOT / "bin" / name), "--version"])
+                r = self.launch(name, "sys.version_info = (3, 10, 12)", f"{shims}:{broken}")
+                self.assertEqual(r.returncode, 78, r.stderr)              # none runs: say which
+                self.assertIn(f"tried {broken / 'python3.13'}, {shims / 'python3.12'}", r.stderr)
+
     def test_native_windows_is_told_to_use_wsl2(self):
         r = self.launch("wb", "sys.platform = 'win32'")
         self.assertEqual(r.returncode, 78, r.stderr)

@@ -77,11 +77,15 @@ crashed piece loses nothing, and every piece can be inspected with `cat`.
 workbench is Python's standard library only (3.11+), plus the TypeScript mod. There is no
 packaging: it runs from its clone. `bin/wb` and `bin/wb-ask-mcp` check the interpreter before they
 import the package. On Python older than 3.11 they first exec the newest `python3.N` (N 11 or
-more) on PATH with `-X wb-python`, which stops a second hand-over: Ubuntu 22.04's `python3` is
+more) on PATH that runs, with `-X wb-python`, which stops a second hand-over: Ubuntu 22.04's `python3` is
 3.10 and RHEL 9's 3.9, their users install `python3.11` or newer beside it, and wb refused anyway,
-the mod's `wb events` too (#259, the audit of 1.2). With none, they exit 78 (EX_CONFIG) with one
-line (`wb: needs Python 3.11 or newer; <python> is <version>, and no python3.11 or newer is on
-PATH. Install one.`); so they do on native
+the mod's `wb events` too (#259, the audit of 1.2). Each candidate, newest first (PATH order
+among equals), is probed first with `-c "import sys, ctypes; sys.exit(sys.version_info < (3,
+11))"`: a pyenv or asdf shim for a version it lacks exits 127, a partial build may lack the
+ctypes the lane imports, and the working 3.11 behind such a shim was never tried (#526). With
+none, they exit 78 (EX_CONFIG) with one line (`wb: needs Python 3.11 or newer; <python> is
+<version>, and no python3.11 or newer is on PATH. Install one.`, or, when some were found and
+none ran, `… and none of the python3.N on PATH runs with ctypes (tried <each>). Install one.`); so they do on native
 Windows (`wb: native Windows is not supported …; run Claude Code and wb inside WSL2`), not with a
 traceback from deep inside it (the 2026-11-16 audit). The chat's unit stops on 78 instead of
 retrying a broken install (*The web chat*). Under a locale whose encoding isn't UTF-8 (ISO-8859-1,
