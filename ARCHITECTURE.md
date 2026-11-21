@@ -764,7 +764,8 @@ steer --now` and held the GPU lease (#195, the 2026-11-19 audit).
 The guards' clocks (`_Clock`) run on `time.monotonic()`, which a suspend doesn't advance and NTP
 never steps (on the wall clock a laptop shut for 20 minutes woke to a round stopped for silence:
 the 2026-11-16 audit); a loop pass longer than `FROZEN_SECS` (60 s, against its 5 s wait) means
-the process was frozen, and that time counts as neither the round's nor silence. Check-ins stay
+the process was frozen, and that time counts as neither the round's nor silence. A question's
+wait (`ask_mcp.Waited`, its own `FROZEN_SECS`: keep the two alike) leaves a suspend out the same way. Check-ins stay
 on the wall clock, which the files' timestamps use. Silence and the think budget:
 - The think budget starts at the round's first output line: OpenCode prints nothing while the
   model reads its prompt, which on the CPU or a model spilled into RAM takes many minutes, and a
@@ -1682,7 +1683,11 @@ courtesy: the runner's count is the one that holds) it returns the refusal. Othe
 `ask/<id>.json` (`{id, ts, round, question, context, command?, path?}`) and blocks (a `Watcher`
 on `ask/`) until `ask/<id>.answer` appears or the ask timeout passes (`--ask-timeout`, 20
 minutes), returning the answer or "No answer arrived in time. Make the most reasonable
-assumption…". A call that raises (a full disk, an unwritable `ask/`) returns `isError: true` and
+assumption…". Both that wait and the runner's (below) count on `ask_mcp.Waited`: the monotonic
+clock, less any step longer than `ask_mcp.FROZEN_SECS` (60 s, as the round's `_Clock`; the server
+looks at least every `STEP_SECS`, 30 s), so a suspend doesn't expire the question; on the wall
+clock a laptop woken past the ask timeout found it answered and closed (#453).
+A call that raises (a full disk, an unwritable `ask/`) returns `isError: true` and
 `ask_reviewer failed: <why>; carry on without an answer and say so in your summary.`; any other
 request that raises gets a `-32603` error with the request's own id (`null` only for a line that
 isn't a request). OpenCode's MCP client dropped a reply with id `null`, so the call waited out
@@ -5159,7 +5164,7 @@ Every waiter and its bounded wake (a timeout to re-check what the kernel can't s
 | `wb log -f` | the task directory | 30 s |
 | `wb watch` | the task directory | 1.5 s on a terminal while the task is live, 30 s otherwise; the session exported again only on a change or every 30 s while live (#555) |
 | the runner's steer bell | the task directory (`steer.jsonl`) and `ask/` | 5 s, while OpenCode runs |
-| `ask_reviewer` | `ask/` | 60 s, until the ask timeout |
+| `ask_reviewer` | `ask/` | 30 s (`STEP_SECS`), until the ask timeout |
 | the chat `Hub` | `chat/` and the listener's pidfd | 60 s |
 | `wb stop` / `takeover` | `wait_exit(pid, 15)` | |
 | `wb top` | `select` on its nvidia-smi stream and, on a terminal, the keys | each tick (`--every`), when it also checks its parent |

@@ -4390,7 +4390,7 @@ class AskServer(Base):
         task.set_status(phase="running")
         self.agent_asks(task, "aaaaaaaa", question="first?")
         ask_mcp.relay(task, opened)
-        opened["aaaaaaaa"] -= 1201                          # past the ask timeout
+        ask_mcp._WAITS[(str(task.dir), "aaaaaaaa")].secs = 1201   # past the ask timeout
         ask_mcp.relay(task, opened)
         self.assertEqual((task.status["phase"], opened), ("running", {}))
         self.assertEqual((context.ask_dir(task) / "aaaaaaaa.answer").read_text().strip(),
@@ -4405,6 +4405,45 @@ class AskServer(Base):
         self.assertFalse(ask_mcp.is_open(task, "bbbbbbbb"))
         from workbench import lessons
         self.assertFalse(any("first?" in r["text"] for r in lessons.gather(task, "accepted")))
+
+    def test_a_suspend_while_the_agent_waits_on_its_question_does_not_expire_it(self):
+        # #453: both waits ran on the wall clock, so a laptop woken past the ask timeout found
+        # the question answered "No answer arrived in time" and closed, while the round paused
+        self.start("t-susp", "ok")
+        wait_phase("t-susp", {"review"})
+        task, clock = store.Task("t-susp"), [time.time()]
+        fake = types.SimpleNamespace(time=lambda: clock[0], monotonic=lambda: clock[0])
+        waits = []
+
+        class Watch:  # the server's waits: a suspend first, then Claude's answer
+            def __init__(self, d):
+                self.d = d
+
+            def wait(self, secs):
+                waits.append(secs)
+                if len(waits) == 1:
+                    clock[0] += 5000
+                else:
+                    qid = next(context.ask_dir(task).glob("*.json")).stem
+                    ask_mcp.write_answer(task, qid, "Use 42.")
+
+            def close(self):
+                pass
+        with mock.patch.object(ask_mcp, "time", fake), mock.patch.object(ask_mcp, "Watcher", Watch):
+            self.assertEqual(ask_mcp.ask(task, "41 or 42?"), "Use 42.")
+            self.assertLessEqual(max(waits), ask_mcp.STEP_SECS)
+            task.set_status(phase="running")
+            opened = {}
+            self.agent_asks(task, "cccccccc", question="again?")
+            ask_mcp.relay(task, opened)                     # the runner's side
+            clock[0] += 5000                                # suspended
+            ask_mcp.relay(task, opened)
+            self.assertEqual(list(opened), ["cccccccc"])
+            self.assertEqual(task.status["asking"], "cccccccc")
+            for _ in range(41):                             # 1230 s awake, in steps
+                clock[0] += 30
+                ask_mcp.relay(task, opened)
+            self.assertEqual(opened, {})                    # then it does time out
 
     def test_a_stop_closes_the_question_the_agent_waits_on(self):
         # wb stop (or a signal) unwound past run_round's close: the question stayed open, status
