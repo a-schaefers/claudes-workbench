@@ -8605,6 +8605,38 @@ class Routing(Base):
         self.assertIn("wb model sizes", why)
         self.assertIsNotNone(router.choose("trivial")[0])
 
+    def test_one_unlucky_task_does_not_leave_a_model_out_for_good(self):
+        # #648 (the audit of main): the guess sent the first significant task to the largest
+        # model, Claude discarded it for its own wrong test, and at 1/3 against an unknown 0.5
+        # it never ran again; a week misconfigured held a model down forever too
+        from workbench import router
+        run_wb("model", "sizes", "mimo", "trivial")              # two models in the running
+        self.result("strata/strata", "significant", "discarded")
+        self.result("ollama/qwen3.8-27b", "significant", "accepted", n=4)
+        names = [f"t{i}" for i in range(200)]
+        picks = [router.choose("significant", (), n)[0].model.id for n in names]
+        tried = [n for n, p in zip(names, picks) if p == "strata/strata"]
+        self.assertTrue(10 <= len(tried) <= 30, len(tried))   # about one in EXPLORE_ONE_IN
+        self.assertEqual(picks[:50], [router.choose("significant", (), n)[0].model.id
+                                      for n in names[:50]])  # the same pick for the same name
+        why = router.choose("significant", (), tried[0])[1]
+        self.assertIn("exploring: its record on significant work is 1 task(s)", why)
+        self.assertEqual(router.choose("significant")[0].model.id, "ollama/qwen3.8-27b")  # no name: no exploring
+        self.assertIn("out of the band on 1 task(s)", run_wb("models"))
+        self.result("strata/strata", "significant", "discarded", n=2)   # 3 tries: the record stands
+        self.assertEqual({router.choose("significant", (), n)[0].model.id for n in tried},
+                         {"ollama/qwen3.8-27b"})
+        # an old record fades: the same three discards two years ago weigh next to nothing
+        rows = store.read_jsonl(store.home() / "results.jsonl")[0]
+        old = time.time() - 730 * 86400
+        store.home().joinpath("results.jsonl").write_text("".join(
+            json.dumps({**r, "ts": old} if r["model"] == "strata/strata" else r) + "\n" for r in rows))
+        sc = {s.model.id: s for s in router.rank("significant")}
+        self.assertEqual(sc["strata/strata"].tries, 3)                 # still counted, and shown
+        self.assertGreater(sc["strata/strata"].quality, 0.49)
+        self.result("strata/strata", "significant", "accepted", n=3)   # fixed, and doing well now
+        self.assertEqual(router.choose("significant")[0].model.id, "strata/strata")  # back in the band
+
     def test_a_poor_record_outweighs_size(self):
         from workbench import router
         self.result("strata/strata", "significant", "discarded", n=4)

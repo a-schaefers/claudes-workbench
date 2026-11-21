@@ -140,7 +140,8 @@ if you can, and start nothing until the plan is approved; then write the first s
   The runner runs it once on the base, in the agent's lane, before round 1; what it saw comes in
   the first report. A test that writes outside the lane or races under load fails there whatever
   the agent does, and the agent spends its rounds on failures it didn't cause (seen: `whoami` and
-  /tmp probes): `wb discard` and start again with a better one. A command that already passes on
+  /tmp probes): `wb discard --spec-gap "the test"` (it isn't the model's miss: without it the
+  router holds it against the model) and start again with a better one. A command that already passes on
   the base is normal when the agent writes the step's tests (the report says so; don't restart):
   then those tests are the check, so the spec names what they must cover, and at review you see
   they fail without the change. Otherwise the command should fail only for what the step changes,
@@ -165,7 +166,9 @@ whatever CLAUDE.md says is next.
 the largest model allowed significant work, the smallest allowed trivial work, unless a model's
 record of accepted tasks at that size is clearly worse, or another with as good a record has
 been measured to cost you less a task (once each has three with your spend recorded). It prints why; the runner then loads that
-model, unloading whatever is there. `wb models` shows the ranking per size. Pass
+model, unloading whatever is there. Old results weigh less, and one task in ten goes to a model
+the record left out on fewer than three tasks ("exploring: …"): review it as any other. `wb
+models` shows the ranking per size. Pass
 `--model <id or fragment>` only if the user names one, or when the record argues against the guess.
 Which sizes a model takes is set with `wb model sizes <id> trivial|significant`: set it when you
 add a model you judge fit only for small work, and otherwise change it only when the user asks.

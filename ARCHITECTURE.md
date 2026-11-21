@@ -3007,6 +3007,9 @@ and no step `took_over`; a task Claude finished after `wb takeover` is a try, no
 counted as the agent's, so the model most often taken over looked best, #647); on the repo's stack (`gitops.stack`: up to two languages, each at
 least 20% of the tracked source files; a row's stack is the one recorded, else read from its repo)
 quality = (like_accepted + `LIKE_PRIOR`·overall) / (like_tried + `LIKE_PRIOR`), `LIKE_PRIOR` = 2.
+Each count in quality is weighed by recency (`_weight`: half for each `HALF_LIFE_DAYS` 60 of a
+row's age, 1 without a `ts`; `Score.w`), so a record from a week a model was misconfigured
+fades; `tries` and `wins`, shown in `Score.line`, stay plain counts (#648, the audit of main).
 The available models within `QUALITY_MARGIN` 0.15 of the best are ordered by the guess
 (`_guess`): those that fit the GPU before those that would spill (`fits`: Ollama says it's all in
 VRAM, or `vram_gb`/weights within 90% of the budget; unknown is neither), then the largest by
@@ -3020,8 +3023,16 @@ review and fixes than a larger one whose first change was right. With no spend r
 stands, so a new install routes as before. `Score.line` adds `~NK Claude tokens a task` once
 it is evidence. The rest follow by quality, unavailable models last. `allowed()`:
 models.json `sizes`; when it leaves no model, `choose` says "no local model takes <size> tasks
-(…: limited by wb model sizes; …, or pass --model)", not that there are none. `choose` returns the pick and a reason ("the largest … that fits the GPU",
-"the best record on significant C work", … "(vs …)"). `wb models` prints the ranking per size;
+(…: limited by wb model sizes; …, or pass --model)", not that there are none. **Exploring** (`choose(size, stack, task_name)`, from `wb start`): one task in
+`EXPLORE_ONE_IN` 10 (`explores`: a hash of the task's name, so the same name picks the same)
+goes to the usable model outside the band with the fewest tasks of the size, while it has fewer
+than `EXPLORE_TRIES` 3 (`unproven`; one that would spill only when the pick would too): one
+discard on a model's first task, Claude's own wrong test, put it 0.17 below a model with no
+record and it never ran again (#648). Without a name (`wb models --set-default`) nothing
+explores. `choose` returns the pick and a reason ("the largest … that fits the GPU",
+"the best record on significant C work", "exploring: its record on <size> work is N task(s), too
+few to leave it out (one task in 10)", … "(vs …)"). `wb models` prints the ranking per size,
+marking each unproven model ("out of the band on N task(s): one task in 10 explores it");
 `--set-default` makes the pick OpenCode's default. A new model has no record, so Claude gives it
 its first tasks by hand (`--model`).
 
@@ -5604,7 +5615,7 @@ delivered as taken (`_stale_notes`, *Notes*).
 ### Models, skills, lessons, notes
 | Command | Flags | What it does |
 |---|---|---|
-| `wb models` | `--set-default` | Each model's state, slice and speeds (and `bench:`, its cases passed, when replayed); the router's ranking per size. `--set-default` writes the significant-work pick as OpenCode's `model` (`models.set_default`: in the user's file, refused while `OPENCODE_CONFIG_CONTENT` sets one, which would win: #421). |
+| `wb models` | `--set-default` | Each model's state, slice and speeds (and `bench:`, its cases passed, when replayed); the router's ranking per size, each model the record left out on fewer than `router.EXPLORE_TRIES` tasks marked (*Exploring*, #648). `--set-default` writes the significant-work pick as OpenCode's `model` (`models.set_default`: in the user's file, refused while `OPENCODE_CONFIG_CONTENT` sets one, which would win: #421). |
 | `wb model add <provider/model>` | `--pull`, `--label`, `--context N`, `--url URL`, `--start CMD`, `--stop CMD` | Registers a model in opencode.json, merged into any existing entry; `--url` first writes an OpenAI-compatible provider for any server on this machine (`models.add_server_provider`: a provider already there is never touched, and one for another baseURL refuses the add; a URL off this machine needs models.json `local: true`), and `--start`/`--stop` write the model's models.json `start`/`stop`; on a first run with no `--url` it writes the `ollama` provider when Ollama answers; refuses a cloud model, an unknown served context (a server other than Ollama needs `--context`), a down Ollama, a down server of unknown engine (see *Managing the set*). |
 | `wb optimize [start\|estimate\|report\|stop\|apply] [<id>…]` | `--bench`, `--if-due` | Asked for, or when due at setup and session start (*Optimize*). `start --if-due`: only when due, else nothing printed. `estimate`: how long a run would hold the GPU. `start`: detached; measures each Ollama model's largest window all on the GPU (refused while a task holds it; a task that wants it stops it); `--bench` then starts `wb bench run` on every model. `report` (the default): a line per model. `stop`. `apply <id>…`: adds the measured window as an entry of its own beside the model (an Ollama `<name>:<tag>-<N>k`, `optimize.entry_name`, with that `num_ctx`, the entry's settings copied; refused when that name exists). |
 | `wb remote <host>` | `--port N` (11434), `--context N`, `--remove` | Another machine's Ollama as this one's models: provider `ollama-<host>` marked `local: true`, each tool-capable model it has pulled registered as `wb model add` would, one line each (see *Models*); exit 1 when it doesn't answer (with `OLLAMA_HOST=0.0.0.0` to try). Refuses a provider of that id already there for another baseURL. `--remove` undoes it; not while OpenCode's default model is one of them, nor for a provider wb didn't add or that now points elsewhere. |

@@ -426,16 +426,17 @@ def ago(ts) -> str:
     return f"{s}s" if s < 90 else f"{s // 60}m" if s < 5400 else f"{s // 3600}h"
 
 
-def pick_model(size: str, wanted: str | None, stack=()) -> tuple[models.Model, dict, str]:
+def pick_model(size: str, wanted: str | None, stack=(), name: str | None = None) -> tuple[models.Model, dict, str]:
     """The task's model: the one asked for, else the router's choice on the evidence (the
-    record on this kind of work first: router.score)."""
+    record on this kind of work first: router.score; ``name``: the task's, which decides
+    whether it explores, router.explores)."""
     if wanted:
         try:
             m = models.resolve(wanted)
         except KeyError as e:
             die(str(e).strip('"'))
         return m, models.status(m), "asked for"
-    top, why = router.choose(size, stack)
+    top, why = router.choose(size, stack, name)
     if top is None:
         die(why, 3)
     return top.model, top.state, why
@@ -801,7 +802,7 @@ def cmd_start(a):
         die(f"{exe} isn't on PATH: install OpenCode (https://opencode.ai), or put it on the PATH "
             "Claude Code runs wb with; wb doctor checks the setup")
     stack = gitops.stack(repo)
-    m, state, why = pick_model(a.size, a.model, stack)
+    m, state, why = pick_model(a.size, a.model, stack, a.name)
     if not state["available"] and not a.force:
         fix = models.remedy(m, state)
         die(f"{m.id} can't run: {state['why']}" + (f": {fix}" if fix else "")
@@ -2632,9 +2633,13 @@ def cmd_models(a):
             print(f"{'':36}bench: {b} (wb bench report)")
     for size in router.SIZES:
         print(f"\n{size}:")
-        for i, sc in enumerate(router.rank(size)):
+        ranked = router.rank(size)
+        few = {sc.model.id for sc in router.unproven(ranked)}
+        for i, sc in enumerate(ranked):
             mark = "→" if i == 0 and sc.state["available"] else " "
-            print(f" {mark} {sc.model.id:34} {sc.line()}")
+            print(f" {mark} {sc.model.id:34} {sc.line()}" + (
+                f" · out of the band on {sc.tries} task(s): one task in {router.EXPLORE_ONE_IN} "
+                "explores it" if sc.model.id in few else ""))
         for m in found.values():
             if not router.allowed(m, size):
                 print(f"   {m.id:34} not for {size} tasks (wb model sizes)")

@@ -5,7 +5,9 @@ Quality is the acceptance rate with a uniform prior, (accepted + 1) / (tries + 2
 task doesn't crown a model. Work of the same kind counts most: a task in a repo of the same stack
 (its main languages, gitops.stack) is judged first by that model's record on that stack, with its
 overall record as the prior worth LIKE_PRIOR tasks, so a model strong in one language and weak in
-another is routed by the one at hand once there is evidence, and by its whole record until then. Among the models within QUALITY_MARGIN of the best, the guess
+another is routed by the one at hand once there is evidence, and by its whole record until then. Each row weighs half as much every HALF_LIFE_DAYS, so a stale record
+recovers, and one task in EXPLORE_ONE_IN goes to a model the record left out on fewer than
+EXPLORE_TRIES tasks, so one unlucky task doesn't dethrone one (#648). Among the models within QUALITY_MARGIN of the best, the guess
 decides: for significant work the largest model (more parameters, better judgment), for trivial
 work the smallest (faster), and at equal size the one already on the GPU. Claude's tokens are
 what workbench saves, so once two of those models each have COST_MIN tasks of the size with what
@@ -33,7 +35,9 @@ round's session says how fast the model reads and writes on this machine (record
 from __future__ import annotations
 
 import functools
+import hashlib
 import statistics
+import time
 import types
 from dataclasses import dataclass
 from pathlib import Path
@@ -44,6 +48,15 @@ QUALITY_MARGIN = 0.15
 COST_MIN = 3        # tasks of a size with Claude's spend recorded before it can move the pick
 COST_MARGIN = 0.15  # how much less a task must cost Claude to beat the guess
 LIKE_PRIOR = 2  # how many tasks of the same stack the overall record weighs as
+# The record forgets and explores (#648, the audit of main). One discard on a model's first task
+# (Claude's own wrong test) put it 0.17 below a model with no record, out of the band for good,
+# and a week misconfigured held a model down forever. So a row weighs half as much each
+# HALF_LIFE_DAYS, and one task in EXPLORE_ONE_IN (by its name, as tuning.EXPLORE does) goes to
+# the usable model outside the band with the fewest tasks of the size, while it has fewer than
+# EXPLORE_TRIES.
+HALF_LIFE_DAYS = 60
+EXPLORE_ONE_IN = 10
+EXPLORE_TRIES = 3
 SIZES = ("trivial", "significant")
 # Measured 2026-11-16 on a 32K window: 2-3 files and ~150 new lines landed in one session; eight
 # files took an hour of compactions and drift. A bigger window is guessed to hold proportionally
@@ -68,11 +81,15 @@ class Score:
     claude: float | None = None    # mean input-equivalent tokens a task cost Claude (spend.py)
     claude_n: int = 0              # the tasks it is the mean of
     cheaper: bool = False          # put ahead of the guess for costing Claude less (_cheaper)
+    explored: bool = False         # put first to explore it (choose's task_name)
+    # the record weighed by recency (HALF_LIFE_DAYS); None: as counted
+    w: tuple | None = None         # (tries, wins, like_tries, like_wins)
 
     @property
     def quality(self) -> float:
-        overall = (self.wins + 1) / (self.tries + 2)
-        return (self.like_wins + LIKE_PRIOR * overall) / (self.like_tries + LIKE_PRIOR)
+        tries, wins, like_tries, like_wins = self.w or (self.tries, self.wins, self.like_tries, self.like_wins)
+        overall = (wins + 1) / (tries + 2)
+        return (like_wins + LIKE_PRIOR * overall) / (like_tries + LIKE_PRIOR)
 
     def line(self) -> str:
         if not self.tries:
@@ -115,10 +132,13 @@ def score(m: models.Model, size: str, state: dict | None = None, stack=()) -> Sc
               weights=models.weights(m) if state["available"] or m.extra.get("weights_gb") else 0)
     s.tries = len(real)
     s.wins = sum(tuning.agent_landed(r) for r in real)  # a takeover's accept is Claude's (#647)
+    like = [r for r in real if set(row_stack(r)) & set(stack)] if stack else []
     if stack:
-        like = [r for r in real if set(row_stack(r)) & set(stack)]
         s.like_tries = len(like)
         s.like_wins = sum(tuning.agent_landed(r) for r in like)
+    now = time.time()
+    s.w = (sum(_weight(r, now) for r in real), sum(_weight(r, now) for r in real if tuning.agent_landed(r)),
+           sum(_weight(r, now) for r in like), sum(_weight(r, now) for r in like if tuning.agent_landed(r)))
     # the agent's active work, median: wall minutes held the queue, Claude's review and a night
     # before an accept (480 min for a 12-minute task), and a mean let one such row set every
     # ETA and progress check at many times the real length (#543). Rows without it are skipped.
@@ -128,6 +148,35 @@ def score(m: models.Model, size: str, state: dict | None = None, stack=()) -> Sc
     spent = [spend.weighted(r["claude"]) for r in real if isinstance(r.get("claude"), dict)]
     s.claude, s.claude_n = (statistics.fmean(spent) if spent else None), len(spent)
     return s
+
+
+def _weight(r: dict, now: float) -> float:
+    """A row's weight in the record: half for each HALF_LIFE_DAYS of age; 1 without a time."""
+    ts = r.get("ts")
+    if not isinstance(ts, (int, float)) or isinstance(ts, bool):
+        return 1.0
+    return 0.5 ** (max(now - ts, 0) / 86400 / HALF_LIFE_DAYS)
+
+
+def explores(task_name: str | None) -> bool:
+    """Whether this task is one the router sends to explore (one in EXPLORE_ONE_IN, by name)."""
+    if not task_name:
+        return False
+    return int(hashlib.sha1(f"route\0{task_name}".encode()).hexdigest(), 16) % EXPLORE_ONE_IN == 0
+
+
+def unproven(scores: list[Score]) -> list[Score]:
+    """The usable models outside the band with fewer than EXPLORE_TRIES tasks of the size, fewest
+    first: those the record left out before it could say much. One that would spill out of the
+    GPU only when the pick would too."""
+    band = [s for s in scores if s.state["available"]][:1]
+    if not band:
+        return []
+    best = max(s.quality for s in scores if s.state["available"])
+    head = band[0]
+    out = [s for s in scores if s.state["available"] and s.quality < best - QUALITY_MARGIN
+           and s.tries < EXPLORE_TRIES and (s.fits is not False or head.fits is False)]
+    return sorted(out, key=lambda s: (s.tries, -s.quality))
 
 
 def _cheaper(close: list[Score]) -> list[Score]:
@@ -200,9 +249,13 @@ def rank(size: str, stack=()) -> list[Score]:
     return close + rest + blocked
 
 
-def choose(size: str, stack=()) -> tuple[Score | None, str]:
-    """The model for a task of this size (in a repo of this stack) and one line on why."""
+def choose(size: str, stack=(), task_name: str | None = None) -> tuple[Score | None, str]:
+    """The model for a task of this size (in a repo of this stack) and one line on why. With
+    ``task_name``, one task in EXPLORE_ONE_IN explores a model outside the band (unproven)."""
     ranked = rank(size, stack)
+    if explores(task_name) and (new := unproven(ranked)):
+        new[0].explored = True
+        ranked = [new[0]] + [s for s in ranked if s is not new[0]]
     top = ranked[0] if ranked and ranked[0].state["available"] else None
     if top is None:
         if ranked:
@@ -217,6 +270,9 @@ def choose(size: str, stack=()) -> tuple[Score | None, str]:
     sizes = [s.weights for s in usable if s.fits is not False or top.fits is False]
     if len(usable) == 1:
         pick = f"the only model allowed {size} work"
+    elif top.explored:
+        pick = (f"exploring: its record on {size} work is {top.tries} task(s), too few to leave it "
+                f"out (one task in {EXPLORE_ONE_IN})")
     elif top.cheaper:
         pick = f"costs Claude least on {size} work"
     elif size == "significant" and top.weights == max(sizes):
