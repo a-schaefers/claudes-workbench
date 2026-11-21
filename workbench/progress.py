@@ -27,7 +27,11 @@ def settings() -> dict:
 
 
 def set_enabled(on: bool, after: float | None = None) -> None:
-    store.write_json(path(), {"on": on, **({"after": after} if after else {}), "ts": store.now()})
+    """On or off, with the user's fixed threshold: None keeps the one stored, 0 clears it. The
+    pane's Progress checks row runs a bare `wb progress on|off`, and each rewrote the file without
+    `after`: a `--after 30` went at the next pick, and checks came at the typical length (#578)."""
+    kept = settings().get("after") if after is None else after
+    store.write_json(path(), {"on": on, **({"after": kept} if kept else {}), "ts": store.now()})
 
 
 def threshold(spec: dict) -> float | None:

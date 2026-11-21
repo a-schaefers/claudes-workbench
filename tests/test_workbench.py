@@ -35,7 +35,7 @@ from datetime import date
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
 
-from workbench import runner, ask_mcp, audio, cli, context, events, gitops, hardware, lane, store, transcript  # noqa: E402
+from workbench import runner, ask_mcp, audio, cli, context, events, gitops, hardware, lane, progress, store, transcript  # noqa: E402
 
 FAKE = shlex.join([sys.executable, str(ROOT / "tests" / "fake_opencode.py")])  # a path may hold spaces
 TEST_CMD = "grep -qx 42 answer.txt"
@@ -10742,6 +10742,17 @@ class Progress(Base):
         self.assertGreater(store.Task("t").status["active_s"], 0)
         run_wb("accept", "t", "-m", "x")
         self.assertIn("active_minutes", store.results()[-1])
+
+    def test_a_bare_wb_progress_on_or_off_keeps_the_after_threshold_and_after_0_clears_it(self):
+        # #578: the pane's row runs a bare `wb progress on`, which dropped a `--after 30`
+        run_wb("progress", "on", "--after", "30")
+        self.assertIn("on: a task past 30 min", run_wb("progress", "on"))
+        self.assertEqual(progress.threshold({}), 30.0)
+        run_wb("progress", "off")
+        self.assertIsNone(progress.threshold({}))
+        self.assertIn("on: a task past 30 min", run_wb("progress", "on"))   # off and on again
+        self.assertIn("past its typical length", run_wb("progress", "on", "--after", "0"))
+        self.assertNotIn("after", progress.settings())
 
     def test_a_check_recommends_and_a_steer_that_answers_it_is_learned_from(self):
         run_wb("coding", "only")

@@ -1675,7 +1675,7 @@ def cmd_progress(a):
             die("progress checks are off: wb progress on --after MIN")
         a.state = "on"
     if a.state:
-        progress.set_enabled(a.state == "on", a.after if a.state == "on" else None)
+        progress.set_enabled(a.state == "on", a.after)  # --after kept unless given (0 clears it, #578)
     s = progress.settings()
     print("progress checks: " + (f"on: a task past {s['after']:g} min of active work" if s.get("after")
                                   else "on: a task past its typical length of active work")
@@ -4384,7 +4384,8 @@ def parser() -> argparse.ArgumentParser:
                        "typical length of active work gets a check and a recommendation")
     s.add_argument("state", nargs="?", choices=["on", "off"])
     s.add_argument("--after", type=float, metavar="MIN", help="check after this many minutes of "
-                   "active work (default: the task's typical length on its model)")
+                   "active work (default: the task's typical length on its model); kept until "
+                   "given again, 0 clears it")
     s.set_defaults(f=cmd_progress)
     s = sub.add_parser("note", help="Claude's captain's-log line in the task's transcript")
     s.add_argument("name"); s.add_argument("--text", required=True); s.set_defaults(f=cmd_note)
