@@ -778,6 +778,18 @@ class CanShare(Base):
         with mock.patch.object(models.hardware, "ollama_env", lambda: {"OLLAMA_MAX_LOADED_MODELS": "2"}):
             self.assertFalse(models.can_share(c, [a, b], int(99e9)))
 
+    def test_ollamas_default_model_limit_is_three_per_gpu(self):
+        # #466 (the audit of 1.8; Ollama's server/sched.go: defaultModelsPerGPU * len(gpus)):
+        # counted as 3 in all, a fourth task on a two-card box was refused sharing
+        a, b, c, d = (self.model(f"ollama/{x}", gb=1) for x in "abcd")
+        card = {"name": "RTX 3090", "driver": "nvidia 560.94", "vram": 24 * 2 ** 30, "discrete": True}
+        for cards, ok in (([card], False), ([card, dict(card)], True)):
+            with mock.patch.dict(os.environ, {"WB_FAKE_MODELS": "", "WB_MODELS": "/nonexistent"}), \
+                    mock.patch.object(models.hardware, "gpus", lambda windows=True: cards), \
+                    mock.patch.object(models.hardware, "ollama_env", lambda: {}):
+                self.assertEqual(models.max_loaded(), 3 * len(cards))
+                self.assertEqual(models.can_share(d, [a, b, c], int(99e9)), ok, len(cards))
+
 
 
 class ServedWindow(unittest.TestCase):

@@ -1409,8 +1409,7 @@ def _room_beside(m: Model) -> bool:
             used += x.get("size") or 0
             if key == m.server:
                 here.append(x)
-    most = hardware.ollama_env_at(m.root).get("OLLAMA_MAX_LOADED_MODELS") or ""
-    if not mine and len(here) + 1 > (int(most) if most.isdigit() and int(most) else OLLAMA_MAX_LOADED):
+    if not mine and len(here) + 1 > max_loaded(m.root):
         return False
     n = need(m)
     return bool(n) and used + n <= SHARE_AT * budget
@@ -1434,6 +1433,17 @@ UNIFIED_SMALL = 36 * 2 ** 30
 SYSTEM_FLOOR = 2 * 2 ** 30
 OLLAMA_MAX_LOADED = 3  # Ollama's own default (3 per GPU) when OLLAMA_MAX_LOADED_MODELS is unset
 QUEUE_POLL = 1.0  # a queued task looks again this often; gpu.json changing wakes it sooner
+
+
+def max_loaded(root: str | None = None) -> int:
+    """How many models the Ollama at ``root`` keeps loaded at once: OLLAMA_MAX_LOADED_MODELS, else
+    (0 or unset) Ollama's default of OLLAMA_MAX_LOADED per GPU it may use (server/sched.go:
+    defaultModelsPerGPU * len(gpus)), one when none is counted. Read as 3 in all, a fourth task on
+    a 2-4 GPU box was refused sharing and the others' models unloaded (#466, the audit of 1.8)."""
+    most = (hardware.ollama_env_at(root).get("OLLAMA_MAX_LOADED_MODELS") or "").strip()
+    if most.isdigit() and int(most):
+        return int(most)
+    return OLLAMA_MAX_LOADED * max(len(budget_devices(root)[1]), 1)
 
 
 def unified_default(ram: int) -> int:
@@ -1558,10 +1568,8 @@ def can_share(m: Model, running: list[Model], budget: int | None) -> bool:
         par = env.get("OLLAMA_NUM_PARALLEL") or ""
         return par.isdigit() and same + 1 <= int(par)
     distinct = {_key(o): o for o in running}
-    most = env.get("OLLAMA_MAX_LOADED_MODELS") or ""  # 0 or unset: Ollama's default
     # its limit is its own server's: models another Ollama holds aren't counted against it
-    if sum(k[0] == m.server for k in distinct) + 1 > (int(most) if most.isdigit() and int(most)
-                                                      else OLLAMA_MAX_LOADED):
+    if sum(k[0] == m.server for k in distinct) + 1 > max_loaded(m.root):
         return False
     sizes = [need(o) for o in distinct.values()] + [need(m)]
     return all(sizes) and sum(sizes) <= SHARE_AT * budget

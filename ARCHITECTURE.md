@@ -2783,8 +2783,10 @@ need: `vram_gb`, else Ollama's loaded size (weights and context), else weights Ã
 `OLLAMA_NUM_PARALLEL` for each task on it (two already running it need 3: a value of 2 once
 admitted any number, and a third task's requests queued inside Ollama while its silence budget
 ran, the 2026-11-19 audit), and different models may not outnumber `OLLAMA_MAX_LOADED_MODELS`
-(unset or 0: `OLLAMA_MAX_LOADED` 3, Ollama's default per GPU), or Ollama swaps them on every
-request (both read from the running Ollama's environment, `hardware.ollama_env`, which `wb
+on their server (`max_loaded`; unset or 0: `OLLAMA_MAX_LOADED` 3 per GPU the budget counts,
+Ollama's `defaultModelsPerGPU * len(gpus)`; counted as 3 in all, a fourth task on a two-card box
+was refused, #466, the audit of 1.8), or Ollama swaps them on every
+request (both read from the running Ollama's environment, `hardware.ollama_env_at`, which `wb
 doctor` and `wb scout` say the source of, or that it is unknown). Admission
 happens under the `gpu.admit` flock: holders are the `gpu.json` entries whose process is alive,
 checked by identity (`_alive`: a pid of another user's is dead, and when available the process's start
