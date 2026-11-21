@@ -4,6 +4,7 @@ import base64
 import contextlib
 import errno
 import glob
+import fnmatch
 import io
 import json
 import shlex
@@ -9677,6 +9678,23 @@ class Top(Base):
              "total": 16 * 2 ** 30, "busy": 97, "watts": 212.0},
             {"index": 1, "name": "card1", "driver": "i915"}])  # absent, not zero
 
+    def test_an_older_amd_card_shows_its_vram_and_only_an_apu_adds_its_gtt(self):
+        # #435's comment: wb top had its own copy of the vendor-only rule, so an 8 GiB GCN card
+        # with 24 GiB GTT showed as 32.0 GB unified
+        drm = Path(self.tmp.name, "drm")
+        for card, slot, label in (("card0", "0000:03:00.0", "vddgfx"), ("card1", "0000:c5:00.0", "vddnb")):
+            dev = drm / card / "device"
+            (dev / "hwmon" / "hwmon2").mkdir(parents=True)
+            (dev / "uevent").write_text(f"DRIVER=amdgpu\nPCI_SLOT_NAME={slot}\n")
+            (dev / "hwmon" / "hwmon2" / "in1_label" if label == "vddnb" else dev / "hwmon" / "hwmon2" / "in0_label").write_text(label)
+            for k, v in (("vram_total", 8 * 2 ** 30), ("vram_used", 2 ** 30), ("gtt_total", 24 * 2 ** 30),
+                         ("gtt_used", 300 * 2 ** 20)):
+                (dev / f"mem_info_{k}").write_text(str(v))
+        card, apu = self.top(drm).gpus()
+        self.assertEqual((card["used"], card["total"], card.get("unified")), (2 ** 30, 8 * 2 ** 30, None))
+        self.assertEqual((apu["used"], apu["total"], apu.get("unified")),
+                         (2 ** 30 + 300 * 2 ** 20, 32 * 2 ** 30, True))
+
     def test_with_no_gpu_it_shows_the_ram(self):
         drm = Path(self.tmp.name, "empty")
         drm.mkdir()
@@ -9806,8 +9824,16 @@ class Hardware(unittest.TestCase):
         run = lambda *argv: next((out for k, out in runs.items() if argv[:len(k)] == k), "")  # noqa
         read = lambda path: files.get(str(path), "")  # noqa: E731
         drm = Path("/fake/sys/class/drm")
-        cards = sorted({Path(f).parent for f in files if f.startswith(f"{drm}/")})
-        glob = lambda self, pattern: iter(cards) if self == drm else iter(())  # noqa: E731
+        # every directory and file the fake files make, so a glob below the DRM (a card's hwmon)
+        # finds what a real one would
+        made = {p for f in files for p in (Path(f), *Path(f).parents)}
+
+        def glob(self, pattern):
+            if self != drm and drm not in self.parents:
+                return iter(())
+            return iter(sorted(p for p in made if self in p.parents
+                               and fnmatch.fnmatchcase(str(p.relative_to(self)), pattern)
+                               and str(p.relative_to(self)).count("/") == pattern.count("/")))
         for target, value in (("platform.system", lambda: system), ("platform.machine", lambda: machine),
                               ("workbench.hardware._run", run), ("workbench.hardware._read", read),
                               ("workbench.hardware.DRM", drm), ("pathlib.Path.glob", glob),
@@ -9981,7 +10007,8 @@ class Hardware(unittest.TestCase):
         hw = self.fake("Linux", files={
             f"{card}/uevent": "DRIVER=amdgpu\nPCI_SLOT_NAME=0000:c5:00.0",
             f"{card}/mem_info_vram_total": str(512 * 2 ** 20),
-            f"{card}/mem_info_gtt_total": str(96 * 2 ** 30), f"{card}/unique_id": "a1b2"},
+            f"{card}/mem_info_gtt_total": str(96 * 2 ** 30), f"{card}/unique_id": "a1b2",
+            f"{card}/hwmon/hwmon5/in1_label": "vddnb"},   # an APU's northbridge voltage (#435)
             runs={("lspci",): "c5:00.0 Display controller: Radeon 8060S"})
         apu = hw.gpus()[0]
         self.assertEqual((apu["vram"], apu["uuid"]), (512 * 2 ** 20 + 96 * 2 ** 30, "GPU-a1b2"))
@@ -9999,6 +10026,19 @@ class Hardware(unittest.TestCase):
         self.assertIn("NVIDIA GB10 (the RAM: nvidia-smi gives the GPU no memory of its own)", why)
         hw = self.fake("Linux", files=meminfo, runs=dict([spark]), machine="x86_64")
         self.assertIsNone(hw.gpus()[0]["vram"])  # an x86 card's [N/A] stays unknown
+
+    def test_an_older_amd_card_that_names_no_memory_vendor_is_not_taken_for_an_apu(self):
+        # #435: GCN cards (RX 470-590, Fury, R9 390) have no mem_info_vram_vendor, so an 8 GiB
+        # RX 580 with 24 GiB GTT was made a unified 34.4 GB budget. Only an APU's hwmon has vddnb
+        card = "/fake/sys/class/drm/card0/device"
+        gcn = {f"{card}/uevent": "DRIVER=amdgpu\nPCI_SLOT_NAME=0000:03:00.0",
+               f"{card}/mem_info_vram_total": str(8 * 2 ** 30), f"{card}/mem_info_gtt_total": str(24 * 2 ** 30),
+               f"{card}/hwmon/hwmon2/in0_label": "vddgfx", f"{card}/hwmon/hwmon2/power1_average": "90000000"}
+        (g,) = self.fake("Linux", files=gcn, machine="x86_64").gpus()
+        self.assertEqual((g["vram"], g.get("unified"), g.get("discrete")), (8 * 2 ** 30, None, True))
+        bare = {k: v for k, v in gcn.items() if "/hwmon/" not in k}   # no hwmon at all: unknown
+        (g,) = self.fake("Linux", files=bare, machine="x86_64").gpus()
+        self.assertEqual((g["vram"], g.get("unified"), g.get("discrete")), (8 * 2 ** 30, None, None))
 
     def test_a_discrete_amd_card_doesnt_count_its_gtt(self):
         card = "/fake/sys/class/drm/card0/device"

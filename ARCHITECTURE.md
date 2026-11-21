@@ -1895,8 +1895,8 @@ a load or an `opencode session export`.
 
 Each tick reads, cheapest first:
 - **GPUs**: sysfs per card (`hardware.drm_cards`, connectors skipped, one entry per PCI slot):
-  `gpu_busy_percent`, `mem_info_vram_used`/`_total` (an amdgpu APU without a VRAM vendor adds
-  its GTT, `unified`), the card's hwmon watts (`hardware.card_watts`, the readers `gpu_power_w`
+  `gpu_busy_percent`, `mem_info_vram_used`/`_total` (an amdgpu APU, by `hardware.apu`, the rule
+  `gpus` uses, adds its GTT, `unified`), the card's hwmon watts (`hardware.card_watts`, the readers `gpu_power_w`
   uses); the card's name from lspci once at start (`card_name`), never per tick. NVIDIA: one
   `nvidia-smi --query-gpu=index,memory.used,memory.total,utilization.gpu,power.draw
   --format=csv,noheader,nounits -lms <ms>` for the life of the command (`SmiStream`, found by
@@ -2278,11 +2278,13 @@ model across) add up but another vendor's GPU beside them doesn't; a discrete de
 `IGPU_UNDER` 1 GiB (an integrated GPU's carve-out, Ollama's own cutoff) is left out. Summing
 every GPU counted a laptop's Radeon iGPU into its RTX card's 8 GB (the 2026-11-16 audit). amdgpu
 reports an APU's carve-out of system RAM as VRAM too, so `hardware.gpus` marks a device
-`discrete` only on evidence: nvidia-smi's, and an amdgpu card that names its memory's vendor
-(`mem_info_vram_vendor`, which an APU's system memory never has); once any device with VRAM is
+`discrete` only on evidence: nvidia-smi's, an amdgpu card that names its memory's vendor
+(`mem_info_vram_vendor`, which an APU's system memory never has), and an amdgpu device whose
+hwmon isn't an APU's (`hardware.apu` False: GCN cards, RX 470-590, Fury, R9 390, name no vendor,
+#435); once any device with VRAM is
 known discrete, only those count, so a carve-out never outranks or adds to a card (the 0.90
 review: a 16 GiB Radeon 780M carve-out beside an 8 GiB RTX became the budget, and a 4 GiB one was
-added to an RX 7600S's 8). With none known discrete (an APU alone, a card that names no vendor)
+added to an RX 7600S's 8). With none known discrete (an APU alone, a card amdgpu gives no hwmon)
 the groups decide as above. Only the devices Ollama may see count (`hardware.visible` over
 `ollama_env()`): two 8 GiB cards with Ollama limited to one by `CUDA_VISIBLE_DEVICES` made a
 16 GiB budget (the 2026-11-19 audit). A unified GPU off macOS counts what `hardware.gpus` found
@@ -2460,9 +2462,14 @@ the GPU shares the RAM: `unified` with `MemTotal`, the 2026-11-19 audit; a line 
 five fields is skipped); WSL adds Windows' adapters from `powershell.exe Get-CimInstance Win32_VideoController` (no
 VRAM: AdapterRAM caps at 4 GB), but only for the report (`wb scout`, `wb doctor`'s GPU line):
 `gpus(windows=False)`, which the budget and `wb image`'s settle use, reads nvidia-smi alone; Linux scans `DRM`'s (`/sys/class/drm`) `card*/device` (amdgpu's
-`mem_info_vram_total`/`_used`; an amdgpu device not known discrete with a `mem_info_gtt_total`
-is an APU: `unified`, its VRAM the carve-out plus the GTT, since that is where a Strix Halo with a
-512 MiB carve-out keeps its models (the 2026-11-19 audit); `unique_id` as `uuid` `GPU-<id>`;
+`mem_info_vram_total`/`_used`; an amdgpu device `apu` says is an APU, with a `mem_info_gtt_total`:
+`unified`, its VRAM the carve-out plus the GTT, since that is where a Strix Halo with a
+512 MiB carve-out keeps its models (the 2026-11-19 audit). `apu(dev)` is True when the card's
+hwmon has `in1_label` `vddnb`, the northbridge voltage amdgpu shows only on APUs, False when it
+has a hwmon without it, None without a hwmon (unknown: plain VRAM, not `discrete`). Taken from a
+missing `mem_info_vram_vendor`, which the GCN cards' memory controllers never set, an 8 GiB
+RX 580 with 24 GiB GTT was a 34.4 GB unified budget in `gpus` and in `wb top` alike (#435); KFD's
+topology can't say, since a GPU node never carries the CPU's cores; `unique_id` as `uuid` `GPU-<id>`;
 a unified device off macOS carries `memory`, what it counts, which `report` and the budget say;
 names from `lspci`; NVIDIA left to nvidia-smi when it answered,
 else listed from sysfs, VRAM unknown); macOS reads `system_profiler SPDisplaysDataType -json`

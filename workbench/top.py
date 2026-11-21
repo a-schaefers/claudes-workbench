@@ -209,7 +209,7 @@ class Top:
             g = {"index": len(out) if self.smi else n, "name": self.names.get(c["slot"], c["card"]),
                  "driver": c["driver"]}
             used, total = hardware.vram(dev)
-            if c["driver"] == "amdgpu" and not hardware.discrete(dev):
+            if c["driver"] == "amdgpu" and hardware.apu(dev):
                 gused, gtotal = hardware.gtt(dev)  # an APU: the carve-out and the GTT together
                 if gtotal:
                     used = (used or 0) + (gused or 0) if used is not None or gused is not None else None

@@ -154,14 +154,16 @@ def gpus(windows: bool = True) -> list[dict]:
         seen.add(slot)
         name = _run("lspci", "-s", slot).partition(": ")[2] or uevent.get("PCI_ID", "unknown")
         total, used = _read(dev / "mem_info_vram_total"), _read(dev / "mem_info_vram_used")
-        # amdgpu reports an APU's carve-out of system RAM as VRAM too; only a card's own memory
-        # has a vendor (mem_info_vram_vendor: samsung, hynix…), so that marks a discrete one.
-        # Without it the device stays unknown, not integrated (models.budget_devices)
+        # amdgpu reports an APU's carve-out of system RAM as VRAM too, so a device is discrete
+        # only on evidence: a vendor for its memory (mem_info_vram_vendor: samsung, hynix…), or
+        # an amdgpu hwmon that isn't an APU's (apu). Without either it stays unknown, not
+        # integrated (models.budget_devices)
+        kind = apu(dev) if driver == "amdgpu" else None
         g = {"name": name, "driver": driver, "vram": int(total) if total else None,
              "vram_used": int(used) if used else None,
-             **({"discrete": True} if _read(dev / "mem_info_vram_vendor") else {})}
+             **({"discrete": True} if _read(dev / "mem_info_vram_vendor") or kind is False else {})}
         gtt = _int(_read(dev / "mem_info_gtt_total"))
-        if driver == "amdgpu" and not g.get("discrete") and gtt:
+        if kind and gtt:
             # an APU's GPU also maps system RAM up to its GTT size, which is where a Strix Halo
             # with a 512 MiB carve-out keeps its models: counting the carve-out alone dropped it
             # as an iGPU, so no budget (the 2026-11-19 audit)
@@ -330,9 +332,18 @@ def gtt(dev: Path) -> tuple[int | None, int | None]:
     return _num(_read(dev / "mem_info_gtt_used")), _num(_read(dev / "mem_info_gtt_total"))
 
 
-def discrete(dev: Path) -> bool:
-    """Memory of its own: only a card's VRAM has a vendor (gpus' rule)."""
-    return bool(_read(dev / "mem_info_vram_vendor"))
+def apu(dev: Path) -> bool | None:
+    """Whether the amdgpu device at ``dev`` is an APU (its GPU on the CPU's die, its memory the
+    system RAM): True on the kernel's word, False when it says otherwise, None when it can't say.
+    The word is hwmon's vddnb (in1_label), the northbridge voltage amdgpu shows only on APUs
+    (amdgpu_pm.c: "only APUs ... have vddnb"); an amdgpu hwmon without it is a card's. Taken
+    from the lack of mem_info_vram_vendor, which the GCN cards' memory controllers never set,
+    an 8 GiB RX 580 with 24 GiB of GTT was a 34.4 GB unified budget, in gpus and in wb top
+    alike (#435). KFD's topology can't say: a GPU node never carries the CPU's cores."""
+    mons = list(dev.glob("hwmon/hwmon*"))
+    if any(_read(m / "in1_label") == "vddnb" for m in mons):
+        return True
+    return False if mons else None
 
 
 def card_watts(dev: Path) -> float | None:
