@@ -261,7 +261,10 @@ directory, with patterns the checkout's own index entries without skip-worktree;
 clone, `gitops.partial_clone` (a promisor remote), only the blobs it holds, asked through
 `cat-file --batch-check` with `GIT_NO_LAZY_FETCH=1` (git 2.44+; an older git's all count as
 unknown), the rest unknown and said: a 30 GB monorepo's whole tree was counted for a 1 GB cone,
-and a blobless clone fetched every blob, one at a time, to be sized, #436) plus its `--copy` paths
+and a blobless clone fetched every blob, one at a time, to be sized, #436; and each submodule
+`fill_submodules` can fill, its whole tree at the recorded commit and its own submodules,
+`_submodules_size`: a gitlink is no blob, so a 6 GB submodule counted nothing and the base check's
+fill hit ENOSPC, #886) plus its `--copy` paths
 (a file at its own size: `store.dir_size` counted one as nothing, #436), times
 `DISK_COPIES` (3: the worktree, the base check's and `wb verify`'s scratch checkouts, full copies
 on ext4; the setup's build output, not made yet, is checked before each scratch copy instead:

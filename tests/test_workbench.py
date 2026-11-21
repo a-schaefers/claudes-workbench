@@ -16487,6 +16487,33 @@ class DiskRoom(Base):
             self.start("t-partial", "ok")
         self.assertIn("7 of its files aren't fetched yet (a partial clone)", err.getvalue())
 
+    def test_the_disk_check_counts_the_submodules_the_checkouts_fill(self):
+        # #886 (the third 2026-11-21 audit): a gitlink is no blob, so a 6 GB engine/ submodule
+        # counted 0 bytes, wb start passed on 8 GB free, and the base check's fill hit ENOSPC
+        tmp = Path(self.tmp.name)
+        file_ok = ["-c", "protocol.file.allow=always"]
+        g = lambda d, *a: subprocess.run(["git", "-C", str(d), *a], check=True,  # noqa
+                                         capture_output=True, text=True).stdout
+        inner, lib = tmp / "inner", tmp / "lib"
+        for d, blob in ((inner, "in.bin"), (lib, "lib.bin")):
+            subprocess.run(["git", "init", "-q", str(d)], check=True)
+            (d / blob).write_bytes(os.urandom(300_000))
+            if d == lib:
+                g(lib, *file_ok, "submodule", "add", "-q", str(inner), "deps/inner")
+            g(d, "add", ".")
+            g(d, "-c", "user.email=t@t", "-c", "user.name=t", "commit", "-qm", d.name)
+        before, _ = gitops.checkout_size(self.repo, "HEAD")
+        g(self.repo, *file_ok, "submodule", "add", "-q", str(lib), "vendor/lib")
+        g(self.repo, *file_ok, "submodule", "update", "-q", "--init", "--recursive")
+        g(self.repo, "commit", "-qm", "a submodule with its own")
+        size, unknown = gitops.checkout_size(self.repo, "HEAD")
+        self.assertEqual(unknown, 0)
+        self.assertGreater(size - before, 600_000)               # lib's and its inner one's
+        self.assertLess(size - before, 620_000)
+        # one the checkouts can't fill (the user's checkout lacks it) writes nothing
+        g(self.repo / "vendor" / "lib", "submodule", "deinit", "-q", "-f", "deps/inner")
+        self.assertLess(gitops.checkout_size(self.repo, "HEAD")[0] - before, 320_000)
+
     def test_start_counts_the_checkouts_of_tasks_just_started_as_taken(self):
         # #676 (Claude's audit of main): since the runner makes the checkout (#529), each start of
         # a batch saw 40 GB free and passed, and four 8 GB checkouts then ran at once

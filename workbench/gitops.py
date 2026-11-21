@@ -513,8 +513,34 @@ def checkout_size(repo: Path, commit: str) -> tuple[int, int]:
     start's disk check passed it (#382, the audit of 1.6). Only what the sparse cone checks out
     counts, and in a partial clone only the blobs it holds, asked with lazy fetching off (git
     2.44+; an older one's are all unknown): the whole tree of a 30 GB monorepo was counted for a
-    1 GB cone, and a blobless clone fetched every blob, one at a time, to size it (#436)."""
-    keeps = _sparse_keeps(repo)
+    1 GB cone, and a blobless clone fetched every blob, one at a time, to size it (#436). The
+    submodules fill_submodules fills count too, whole and nested: a gitlink is no blob, so a
+    6 GB engine/ submodule counted nothing, the check passed on 8 GB free, and the base check's
+    scratch fill hit ENOSPC (#886, the third 2026-11-21 audit)."""
+    size, unknown = _tree_size(repo, commit, sparse=True)
+    sub_size, sub_unknown = _submodules_size(repo, commit)
+    return size + sub_size, unknown + sub_unknown
+
+
+def _submodules_size(repo: Path, commit: str) -> tuple[int, int]:
+    """checkout_size of each submodule of ``commit`` that _fill can fill (the user's checkout of
+    it holds the commit recorded), at that commit, its whole tree (checkout-index writes it all)
+    and its own submodules."""
+    size = unknown = 0
+    for path in submodules(repo, commit):
+        row = git(repo, "ls-tree", commit, "--", path, check=False).split()
+        sha = row[2] if len(row) >= 3 and row[1] == "commit" else ""
+        src = Path(repo) / path
+        if not sha or not (src / ".git").exists() or \
+                _run(src, ("cat-file", "-e", f"{sha}^{{commit}}"), check=False).returncode:
+            continue
+        for s, u in (_tree_size(src, sha, sparse=False), _submodules_size(src, sha)):
+            size, unknown = size + s, unknown + u
+    return size, unknown
+
+
+def _tree_size(repo: Path, commit: str, sparse: bool) -> tuple[int, int]:
+    keeps = _sparse_keeps(repo) if sparse else None
     lazy = partial_clone(repo)
     no_fetch = {"GIT_NO_LAZY_FETCH": "1"}
     size, unknown, pointers, blobs = 0, 0, [], []
