@@ -5658,6 +5658,36 @@ class Permission(Base):
         self.assertEqual(self.verdict(rules, "curl -s x | xargs grep -l gh"), "allow")
         self.assertEqual(self.verdict(rules, "timeout 5 sudo x"), "deny")  # still the hard limit
 
+    def test_the_acceptance_command_claude_chose_is_the_agents_to_run(self):
+        # #514, the audit of 1.90: the protocol said "The acceptance command is `flutter test`.
+        # Run it", and the agent's shell refused it, so it asked Claude or finished untested
+        self.start("t-acc", "ok", "--test", f"earthly +test || CI=1 {TEST_CMD}")
+        wait_phase("t-acc", {"review"})
+        task = store.Task("t-acc")
+        rules = context.shell_rules(task)
+        for cmd in ("earthly +test", "earthly +lint", "CI=1 earthly +test"):
+            self.assertEqual(self.verdict(rules, cmd), "allow", cmd)
+        self.assertEqual(self.verdict(rules, "ponyc --check"), "deny")
+        with mock.patch("sys.stdin", io.StringIO("And again.\n")):
+            run_wb("next", "t-acc", "--spec", "-", "-m", "feat: step one",
+                   "--test", f"ponyc --check || {TEST_CMD}")
+        wait_phase("t-acc", {"review"})
+        rules = context.shell_rules(task)
+        self.assertEqual(self.verdict(rules, "ponyc --check"), "allow")
+        self.assertEqual(self.verdict(rules, "earthly +test"), "allow")   # grants add up
+        # the toolchains the lane prepares for, a project's scripts, a pinned interpreter
+        for cmd in ("flutter test", "dart analyze", "bazel test //...", "just test",
+                    "vendor/bin/phpunit", "scripts/test.sh", "python3.12 -m pytest -q",
+                    "pipenv install", "pio test", "xcodebuild test -scheme App"):
+            self.assertEqual(self.verdict(rules, cmd), "allow", cmd)
+        for cmd in ("python3.12 -m pip install requests", "flutter pub add http", "pdm add x",
+                    "conda install numpy", "pipenv install requests"):
+            self.assertEqual(self.verdict(rules, cmd), "deny", cmd)          # still asks first
+        self.start("t-acc-gh", "ok", "--test", f"gh run list || {TEST_CMD}")
+        wait_phase("t-acc-gh", {"review"})
+        self.assertEqual(self.verdict(context.shell_rules(store.Task("t-acc-gh")), "gh run list"),
+                         "deny")                                        # never the hard limits
+
     def test_a_commands_json_that_is_malformed_is_refused_not_ignored(self):
         # a string `allow` was spread letter by letter, its `*` allowing every command; a file
         # that didn't parse dropped every allowance silently (the 2026-11-16 audit)

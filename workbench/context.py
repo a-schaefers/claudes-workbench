@@ -125,10 +125,18 @@ ALLOWED_COMMANDS = (
     "swift", "swiftc", "kotlin", "kotlinc", "scala", "sbt", "ghc", "cabal", "stack", "elixir",
     "mix", "erl", "perl", "R", "Rscript", "julia",
     "bash", "sh", "zsh", "dash", "xvfb-run", "Xvfb", "sqlite3", "git",
+    # the toolchains the lane makes room for (.pub-cache, hatch, virtualenvs, .platformio,
+    # .conan2) and wb doctor checks, and the common runners and linters: `flutter test` was
+    # refused though Claude chose it as the acceptance command (#514, the audit of 1.90).
+    # `python3.*`, `pip3.*`: a pinned interpreter (`python3.12 -m pytest`)
+    "python3.*", "pip3.*", "pypy3", "pdm", "pipenv", "hatch", "nox", "pixi", "conda", "mamba",
+    "micromamba", "pre-commit", "pyright", "flutter", "dart", "bazel", "bazelisk", "just", "task",
+    "pio", "platformio", "conan", "xcodebuild", "xcrun", "rubocop", "golangci-lint", "shellcheck",
 )
 # A project's own tools and builds, by their usual relative paths (`./x` is allowed already).
 PROJECT_BINS = (".venv/bin/*", "venv/bin/*", "node_modules/.bin/*", "build/*", "target/debug/*",
-                "target/release/*", "bin/*", "out/*", "dist/*", "zig-out/bin/*")
+                "target/release/*", "bin/*", "out/*", "dist/*", "zig-out/bin/*", "vendor/bin/*",
+                "scripts/*", "tools/*")
 # Inside the allowed tools, the steps that change what the project depends on: a new package is
 # Claude's decision (the handbook: no new dependencies), so these ask first even though the tool
 # is allowed. Installing what the project already lists (`npm install`, `npm ci`) needs no ask.
@@ -139,6 +147,11 @@ ASK_FIRST = (
     "bun install *", "bun i *", "cargo add *", "cargo install *", "go install *", "go get *",
     "gem install *", "bundle add *", "composer require *", "deno add *", "deno install *",
     "dotnet add * package *",
+    "pip3.* install *", "python3.* -m pip install *", "pypy3 -m pip install *", "pdm add *",
+    "pipenv install *", "pixi add *", "pixi global install *", "conda install *",
+    "mamba install *", "micromamba install *", "flutter pub add *", "dart pub add *",
+    "dart pub global activate *", "flutter pub global activate *", "pio pkg install *",
+    "platformio pkg install *", "conan install *--requires*",
     # fetch a package and run it
     "npx -y *", "npx --yes *", "npm exec *", "pnpm dlx *", "yarn dlx *", "bunx *", "uvx *",
     # their other spellings (the 2026-11-16 audit); a plain `npx <pkg>` runs only what the
@@ -154,6 +167,9 @@ INSTALL_LISTED = (
     "pip3 install -e .", "python -m pip install -r *", "python3 -m pip install -r *",
     "python -m pip install -e .", "python3 -m pip install -e .", "uv pip install -r *",
     "uv pip install -e .",
+    "pip3.* install -r *", "pip3.* install -e .", "python3.* -m pip install -r *",
+    "python3.* -m pip install -e .", "pipenv install", "pipenv install --dev", "pipenv sync",
+    "pio pkg install", "platformio pkg install",
 )
 # The pip forms above are allowed only when they install into the worktree's own venv, or no
 # environment is active and Landlock bounds pip (python_installs); else they ask first. These,
@@ -167,6 +183,49 @@ def allowed_patterns(task: store.Task) -> list[str]:
     """What this task's agent may run beyond ALLOWED_COMMANDS: the user's standing allowances
     (commands.json `allow`; "*" turns the list off) and what Claude granted this task."""
     return [*commands_conf().get("allow", []), *(grants(task).get("allow") or [])]
+
+
+def _simple_commands(line: str) -> list[str]:
+    """The simple commands of a shell line as OpenCode checks them, each its raw text: split at
+    `&&`, `||`, `;`, `|`, `&` and newlines outside quotes, a subshell's parentheses dropped."""
+    parts, cur, quote, i = [], "", None, 0
+    while i < len(line):
+        ch = line[i]
+        if quote:
+            quote = None if ch == quote else quote
+            cur += ch
+        elif ch in "'\"":
+            quote, cur = ch, cur + ch
+        elif ch == "\\" and i + 1 < len(line):
+            cur, i = cur + line[i:i + 2], i + 1
+        elif ch in ";|&\n":
+            parts.append(cur)
+            cur = ""
+        else:
+            cur += ch
+        i += 1
+    parts.append(cur)
+    return [p.strip().strip("()").strip() for p in parts if p.strip().strip("()").strip()]
+
+
+def test_allowances(test: str | None) -> list[str]:
+    """What `wb start --test` and `wb next --test` grant the task: the acceptance command's own
+    simple commands, as written and as `<their command> *`. The protocol tells the agent to run
+    it; refused (`flutter test`, `just test`, `scripts/test.sh`), it spent an ask and a Claude
+    wake on a command Claude chose, or finished untested (#514, the audit of 1.90). The hard
+    limits come later in the rules, so a grant here never lifts them."""
+    import shlex
+    out = []
+    for cmd in _simple_commands(test or ""):
+        out.append(cmd)
+        try:
+            words = shlex.split(cmd)
+        except ValueError:
+            continue
+        words = [w for w in words if not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*=.*", w)]
+        if words and "*" not in words[0]:
+            out += [f"{words[0]} *", f"{ASSIGN} {words[0]} *"]
+    return list(dict.fromkeys(out))
 
 
 def commands_path() -> Path:
@@ -307,7 +366,7 @@ def shell_rules(task: store.Task) -> list[dict]:
     and the user allowed; the hard limits last, so no allowance lifts them (later rules win)."""
     rules = [{"action": "shell", "resource": "*", "effect": "deny"}]
     rules += [{"action": "shell", "resource": r, "effect": "allow"}
-              for c in ALLOWED_COMMANDS for r in (c, f"{c} *", f"{ASSIGN} {c} *")]
+              for c in ALLOWED_COMMANDS for r in (f"{c} *", f"{ASSIGN} {c} *")]  # `c *` is `c` too
     if experiment(task, "probe"):  # read-only: an outline, one function, a search
         rules += [{"action": "shell", "resource": r, "effect": "allow"}
                   for r in ("probe", "probe *", f"{ASSIGN} probe *")]
