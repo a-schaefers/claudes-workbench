@@ -1414,16 +1414,17 @@ def cmd_report(a):
 def cmd_diff(a):
     """The work under review: the whole task, or after `wb next` the current step (--all: all)."""
     task = need(a.name)
+    # the accepted commit, not the branch: --merge deletes the branch (#477, the audit of 1.8)
+    tip = (task.status.get("tip") or "")[:12] or task.spec["branch"]
     if not task.worktree.is_dir():
         die(f"{a.name} is {task.status.get('phase')} and its worktree is gone: "
-            f"git -C {shlex.quote(task.spec['repo'])} diff {task.spec['base'][:12]} "
-            f"{task.spec['branch']}")
+            f"git -C {shlex.quote(task.spec['repo'])} diff {task.spec['base'][:12]} {tip}")
     base = "HEAD" if task.status.get("steps", 1) > 1 and not a.all else task.spec["base"]
     try:
         print(gitops.diff(task.worktree, base, stat=a.stat, paths=a.paths) or "(no changes)")
     except gitops.GitError as e:
         die(f"{e}\nthe branch's commits: git -C {shlex.quote(task.spec['repo'])} diff "
-            f"{task.spec['base'][:12]} {task.spec['branch']}")
+            f"{task.spec['base'][:12]} {tip}")
 
 
 def _stop_runner(task):

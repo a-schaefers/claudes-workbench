@@ -1351,6 +1351,23 @@ class Lifecycle(Base):
                               capture_output=True, text=True).stdout
         self.assertIn("blob.bin", tree)
 
+    def test_diff_of_a_merged_task_hints_a_command_that_still_works(self):
+        # #477 (the audit of 1.8): the hint named delegate/<task>, which the merge had deleted,
+        # and git said "unknown revision"
+        self.start("t-dm", "ok")
+        wait_phase("t-dm", {"review"})
+        run_wb("accept", "t-dm", "-m", "feat: answer", "--merge")
+        tip = store.Task("t-dm").status["tip"]
+        err = io.StringIO()
+        with self.assertRaises(SystemExit), redirect_stderr(err):
+            run_wb("diff", "t-dm")
+        hint = err.getvalue().strip().split(": ", 2)[-1]
+        self.assertIn(tip[:12], hint)
+        self.assertNotIn("delegate/", hint)
+        out = subprocess.run(shlex.split(hint), capture_output=True, text=True)
+        self.assertEqual(out.returncode, 0, out.stderr)
+        self.assertIn("+42", out.stdout)
+
     def test_build_output_never_reaches_the_object_store_before_an_accept_takes_it(self):
         # #431 (the audit of 1.8): the review snapshot's `add -A` wrote every new file into the
         # user's object store each round, and a refused accept of 400 x 100 KB build/ files
