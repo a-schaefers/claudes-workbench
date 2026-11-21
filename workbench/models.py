@@ -1967,14 +1967,37 @@ def can_share(m: Model, running: list[Model], budget: int | None) -> bool:
         par = env.get("OLLAMA_NUM_PARALLEL") or ""
         return par.isdigit() and same + 1 <= int(par)
     distinct = {_key(o): o for o in running}
+    kept = _kept_beside(m, running)
     # its limit is its own server's: models another Ollama holds aren't counted against it
-    if sum(k[0] == m.server for k in distinct) + 1 > max_loaded(m.root):
+    if sum(k[0] == m.server for k in distinct) + sum(k == m.server for k, _ in kept) + 1 \
+            > max_loaded(m.root):
         return False
     # only what may sit on m's cards takes its budget: summed with another card's models, two
     # tasks on one Ollama per GPU were refused sharing that fit (#460)
     seen: dict = {}
     sizes = [need(o) for o in distinct.values() if not apart(m.root, o.root, seen)] + [need(m)]
-    return all(sizes) and sum(sizes) <= SHARE_AT * budget
+    return all(sizes) and sum(sizes) + sum(n for _, n in kept) <= SHARE_AT * budget
+
+
+def _kept_beside(m: Model, running: list[Model]) -> list[tuple]:
+    """The keep_loaded models resident on ``m``'s cards that no running task runs: (server, bytes)
+    each. free_gpu never unloads them, so they take room a shared load needs: left out,
+    can_share admitted a task whose load made Ollama evict the user's protected model (or the
+    other task's) without a word (#803). Asked only when keep_loaded lists something."""
+    held = keep_loaded()
+    if not held:
+        return []
+    out, seen = [], {}
+    local = [o for o in discover().values() if o.engine == "ollama" and not o.remote]
+    for key, root in _roots([m, *local]).items():
+        if apart(m.root, root, seen):
+            continue  # another card's models take none of m's room (#460)
+        for x in (_get(f"{root}/api/ps", timeout=1.0) or {}).get("models") or []:
+            name = x.get("name") or ""
+            if _kept_name(name, held) and not any(o.server == key and _matches(o.name, {name})
+                                                  for o in (m, *running)):
+                out.append((key, int(x.get("size") or 0)))
+    return out
 
 
 def admits(m: Model | None, held: dict, cards: frozenset | None = None) -> bool:
@@ -2014,14 +2037,16 @@ def holders(home: Path | None = None, pool: str = "gpu") -> dict:
             if p.isdigit() and _alive(int(p), h.get("start"), h.get("uid"))}
 
 
-def _fits_beside(m: Model, keep: set, before=None) -> bool:
+def _fits_beside(m: Model, keep: set, before=None, kept=()) -> bool:
     """After a shared load: Ollama kept every other holder's model and has all of ``m`` in VRAM.
     need() guesses a model's context before it loads; when the guess is short, Ollama evicts a
     model or splits one onto the CPU, and two tasks then reload their models on every request
     (the 2026-11-16 audit). Unknown (Ollama didn't answer) counts as fitting. ``before``: the
     names /api/ps listed before the load. A kept model missing from it was unloaded idle (its task
     in a long test run or waiting on a question past the keep-alive), not evicted: counted as one,
-    the other task unloaded itself and waited for that task to finish (the 0.90 review)."""
+    the other task unloaded itself and waited for that task to finish (the 0.90 review).
+    ``kept``: the keep_loaded names /api/ps listed before the load, each still loaded after it:
+    an eviction of the user's protected model passed unseen (#803)."""
     if _fake() or m.engine != "ollama":
         return True
     body = _get(f"{m.root}/api/ps")
@@ -2034,7 +2059,7 @@ def _fits_beside(m: Model, keep: set, before=None) -> bool:
               and (before is None or _matches(o.name, before))]
     whole = any(_matches(m.name, {x.get("name")}) and x.get("size") and x.get("size_vram") == x["size"]
                 for x in ps)
-    return whole and all(_matches(o.name, names) for o in others)
+    return whole and all(_matches(o.name, names) for o in others) and all(n in names for n in kept)
 
 
 class GpuLease:
@@ -2222,11 +2247,14 @@ class GpuLease:
                         if p != self.me and not h.get("waiting") and h.get("model")}
             before = set(_ollama_loaded(self.m.root)) if keep and self.m.engine == "ollama" \
                 and not _fake() else None
+            held_ids = keep_loaded() if before else set()
+            kept = {n for n in before or () if n and _kept_name(n, held_ids)
+                    and not _matches(self.m.name, {n})}
             secs = make_resident(self.m, say=self.say, keep=keep, warn=self.warn)
             # a load that loaded nothing evicted nothing (the 0.90 review)
-            if not keep or not secs or _fits_beside(self.m, keep, before):
+            if not keep or not secs or _fits_beside(self.m, keep, before, kept):
                 return secs
-            self.warn(f"ollama could not fit {self.m.id} beside {', '.join(sorted(keep))}; "
+            self.warn(f"ollama could not fit {self.m.id} beside {', '.join(sorted(keep | kept))}; "
                       "waiting for the GPU to itself")
             found = discover()
             if _key(self.m) not in {_key(o) for o in (found.get(k) for k in keep) if o}:

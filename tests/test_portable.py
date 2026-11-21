@@ -564,6 +564,54 @@ class Real(unittest.TestCase):
         with mock.patch.object(models.hardware, "ollama_env", lambda: {"OLLAMA_NUM_PARALLEL": "1"}):
             self.assertFalse(models.can_share(twin, [found["a/x"]], int(99e9)))  # the same model
 
+    def test_a_shared_task_counts_the_kept_models_already_loaded_and_sees_one_evicted(self):
+        # #803: keep_loaded's embedding (1 GB) and autocomplete (5 GB) models loaded, x (10 GB)
+        # running: y (10 GB) was let in to share, and loading it made Ollama evict a kept model
+        gb = 10 ** 9
+        loaded = [{"name": "emb", "size": gb, "size_vram": gb},
+                  {"name": "auto", "size": 5 * gb, "size_vram": 5 * gb}]
+        self.own(loaded, ["x", "y", "emb", "auto"])
+        kept = lambda *ids: Path(os.environ["WB_MODELS"]).write_text(json.dumps(  # noqa: E731
+            {"a/x": {"vram_gb": 10}, "b/y": {"vram_gb": 10}, "keep_loaded": list(ids)}))
+        env = lambda n: mock.patch.object(models.hardware, "ollama_env",  # noqa: E731
+                                          lambda: {"OLLAMA_MAX_LOADED_MODELS": n})
+        kept()
+        x, y = models.discover()["a/x"], models.discover()["b/y"]
+        with env("9"):
+            self.assertTrue(models.can_share(y, [x], int(24e9)))     # 20 of 21.6: nothing kept
+            kept("emb", "auto")
+            self.assertFalse(models.can_share(y, [x], int(24e9)))    # 26 of 21.6
+            self.assertTrue(models.can_share(y, [x], int(30e9)))     # 26 of 27
+            kept("emb", "auto", "a/x")                                # x is the task's: counted once
+            self.assertTrue(models.can_share(y, [x], int(30e9)))
+        with env("3"):
+            kept("emb", "auto")
+            self.assertFalse(models.can_share(y, [x], int(99e9)))    # x, emb, auto and y: 4 of 3
+            kept("emb")
+            self.assertTrue(models.can_share(y, [x], int(99e9)))
+        loaded[:] = [{"name": n, "size": 10, "size_vram": 10} for n in ("x", "y", "auto")]
+        self.assertFalse(models._fits_beside(y, {"a/x"}, {"x", "emb", "auto"}, {"emb", "auto"}))  # emb went
+        self.assertTrue(models._fits_beside(y, {"a/x"}, {"x", "auto"}, {"auto"}))
+        # and the lease sees it: the load evicts emb, so y waits for the GPU alone
+        os.environ["WB_GPU_DIR"] = str(Path(self.tmp.name) / "lease")
+        runner_x = subprocess.Popen(["sleep", "60"])  # x's task's runner, holding a/x
+        self.addCleanup(runner_x.kill)
+        store.write_json(models.lease_dir() / "gpu.json", {str(runner_x.pid): {"model": "a/x", "task": "t-x"}})
+        loaded[:] = [{"name": n, "size": 10, "size_vram": 10} for n in ("x", "emb")]
+        def evicting(m, say=print, keep=(), warn=None):
+            loaded[:] = [r for r in loaded if r["name"] != "emb"] + [{"name": m.name, "size": 10, "size_vram": 10}]
+            return 1.0
+        Path(os.environ["WB_MODELS"]).write_text(json.dumps(
+            {"a/x": {"vram_gb": 10}, "b/y": {"vram_gb": 10}, "keep_loaded": ["emb"], "gpu_gb": 99}))
+        said, alone = [], []
+        with env("9"), mock.patch.object(models, "make_resident", evicting), \
+                mock.patch.object(models.GpuLease, "_take_alone", lambda self, held: alone.append(1)):
+            with models.GpuLease(models.discover()["b/y"], "t-y", said.append) as lease:
+                self.assertEqual(alone, [])                          # let in to share
+                lease.load()
+        self.assertEqual(alone, [1])
+        self.assertIn("ollama could not fit b/y beside a/x, emb", said[-1])
+
     def test_a_model_that_fits_beside_the_loaded_ones_unloads_nothing_and_kept_ones_stay(self):
         # the 2026-11-19 audit: every round unloaded every other Ollama model, the user's Open
         # WebUI or autocomplete model and an embedding model the project's tests use, fits or not

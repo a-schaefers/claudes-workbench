@@ -3201,7 +3201,11 @@ ran, the 2026-11-19 audit), and different models may not outnumber `OLLAMA_MAX_L
 on their server (`max_loaded`; unset or 0: `OLLAMA_MAX_LOADED` 3 per GPU the budget counts,
 Ollama's `defaultModelsPerGPU * len(gpus)`; counted as 3 in all, a fourth task on a two-card box
 was refused, #466, the audit of 1.8), or Ollama swaps them on every
-request (both read from the running Ollama's environment, `hardware.ollama_env_at`, which `wb
+request. The keep_loaded models resident on `m`'s cards that no running task runs
+(`_kept_beside`, from each such server's `/api/ps`, asked only when models.json lists any) count
+in both the sum and, on `m`'s server, the loaded-model limit: free_gpu never unloads them, and
+left out, a share was let in whose load made Ollama evict the user's protected model or the other
+task's (#803). (The settings are read from the running Ollama's environment, `hardware.ollama_env_at`, which `wb
 doctor` and `wb scout` say the source of, or that it is unknown). Admission
 happens under the `gpu.admit` flock: holders are the `gpu.json` entries whose process is alive,
 checked by identity (`_alive`: a pid of another user's is dead, unless the entry is that user's in a
@@ -3227,7 +3231,8 @@ or a finishing task's exit never waits for another task's load (a runner held th
 after its review notice, and `wb feedback` refused it). After a shared load (other holders' models
 kept) that loaded something (a load that took 0 s evicted nothing) `_fits_beside` reads
 `/api/ps`: every kept model that was loaded before the load (`/api/ps` read under `gpu.load` just
-before it) must still be loaded and all of `m` in VRAM, since need()'s guess can be short and
+before it) must still be loaded, as must every keep_loaded model listed then (`kept`: its
+eviction passed unseen, #803), and all of `m` in VRAM, since need()'s guess can be short and
 Ollama then evicts or splits a model, and two tasks reload theirs on every request. A kept model
 already gone before the load was unloaded idle by Ollama's keep-alive (its task in a long test run
 or waiting on a question), not evicted (the 0.90 review: the other task unloaded itself and waited

@@ -422,7 +422,7 @@ with models.GpuLease(None, optimize.HOLDER, wait=False):
         calls, said = [], []
         loads = lambda m, say=print, keep=(), warn=None: calls.append(set(keep)) or 1.0  # noqa: E731
         with mock.patch.object(models, "make_resident", loads), \
-                mock.patch.object(models, "_fits_beside", lambda m, keep, before=None: False), \
+                mock.patch.object(models, "_fits_beside", lambda m, keep, before=None, kept=(): False), \
                 mock.patch.object(models, "_unload", lambda m: said.append(f"unload {m.id}")):
             with models.GpuLease(models.resolve(SMALL), "t-small", said.append) as lease:
                 self.assertEqual(lease.load(), 2.0)
