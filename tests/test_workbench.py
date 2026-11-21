@@ -6441,6 +6441,62 @@ class Cleanup(Base):
         self.assertNotIn("t-half2", g("worktree", "list"))
         self.assertTrue(store.Task("t-half").exists)    # a real task is no half-made start
 
+    def test_gc_deletes_only_the_branch_a_killed_start_made_and_only_where_it_made_it(self):
+        # #416 (the audit of 1.8, reproduced): an unmerged delegate/<task> holding a commit of its
+        # own, left by an earlier task; a wb start under that name killed before its worktree was
+        # made, and wb gc deleted the branch, the commit then reachable from no ref
+        real = shutil.which("git")
+
+        def killed_start(name, where):  # killed while git sleeps in `where`
+            shim = Path(self.tmp.name) / f"slow-git-{name}"
+            shim.mkdir()
+            after = "worktree add" in where  # the branch is made, then it sleeps
+            (shim / "git").write_text(f'#!/bin/sh\ncase " $* " in *" {where} "*) '
+                                      + (f'{real} "$@"; sleep 300;;' if after else 'sleep 300;;')
+                                      + f' esac\nexec {real} "$@"\n')
+            (shim / "git").chmod(0o755)
+            proc = subprocess.Popen([str(ROOT / "bin" / "wb"), "start", name, "--spec",
+                                     str(self.spec), "--repo", str(self.repo), "--model", "mimo"],
+                                    env={**os.environ, "PATH": f"{shim}:{os.environ['PATH']}"},
+                                    stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                                    start_new_session=True)
+            starting = store.Task(name).dir / cli.STARTING
+            end = time.monotonic() + 60
+            while time.monotonic() < end and not (
+                    starting.exists() and (not after or name in self.git("worktree", "list").stdout)):
+                time.sleep(0.1)
+            time.sleep(0.5)  # into the sleep
+            os.killpg(proc.pid, signal.SIGKILL)
+            proc.wait()
+            self.assertTrue(starting.exists())
+
+        def tip(name):
+            return self.git("rev-parse", "--verify", "-q", f"refs/heads/delegate/{name}").stdout.strip()
+
+        # before the branch: an earlier task's delegate/t-partial, with a commit nothing else has
+        self.git("checkout", "-q", "-b", "delegate/t-partial")
+        (self.repo / "work.txt").write_text("unmerged work\n")
+        self.git("add", "work.txt")
+        self.git("commit", "-qm", "unmerged work")
+        held = tip("t-partial")
+        self.git("checkout", "-q", "main")
+        killed_start("t-partial", "branch --list")       # create_worktree's check: none made yet
+        # after it: the branch this start made, then moved on by someone else
+        killed_start("t-moved", "worktree add")
+        base = tip("t-moved")
+        moved = self.git("commit-tree", "-p", base, "-m", "moved on", f"{base}^{{tree}}").stdout.strip()
+        self.git("update-ref", "refs/heads/delegate/t-moved", moved, base)
+        self.assertIn("2 half-made start(s)", run_wb("gc"))
+        self.assertEqual(tip("t-partial"), held)          # not this start's: kept
+        self.assertEqual(tip("t-moved"), moved)           # this start's, but moved: kept
+        self.assertNotIn("t-moved", self.git("worktree", "list").stdout)  # its worktree went
+        self.assertFalse(store.Task("t-partial").dir.exists())
+        # and one the start made and nothing moved goes (as #376's test sees, from the record)
+        killed_start("t-made", "worktree add")
+        self.assertTrue(tip("t-made"))
+        self.assertIn("1 half-made start(s)", run_wb("gc"))
+        self.assertEqual(tip("t-made"), "")
+
     def test_wb_gc_deletes_branches_merged_before_and_keeps_the_rest(self):
         self.start("t-old", "ok")
         wait_phase("t-old", {"review"})

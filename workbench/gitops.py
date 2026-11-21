@@ -181,7 +181,7 @@ def create_worktree(repo: Path, task: str, dest: Path, base: str = "HEAD") -> st
     except GitError:
         git(repo, *NO_HOOKS, "worktree", "remove", "--force", str(dest), check=False)
         git(repo, "worktree", "prune", check=False)
-        delete_branch(repo, task)  # this call made it: the --list above found none
+        delete_branch(repo, task, at=commit)  # this call made it: the --list above found none
         raise
     if rec := _record(dest):  # before any agent has run there: see _pinned
         rec.parent.mkdir(parents=True, exist_ok=True)
@@ -669,8 +669,13 @@ def remove_worktree(repo: Path, worktree: Path) -> str:
     return warn
 
 
-def delete_branch(repo: Path, task: str) -> None:
-    git(repo, "branch", "-D", branch_name(task), check=False)
+def delete_branch(repo: Path, task: str, at: str | None = None) -> None:
+    """Delete the task's branch; with ``at``, only while it still points at that commit (one
+    update-ref, compare and delete), so a branch someone else made or moved stays (#416)."""
+    if at:
+        git(repo, "update-ref", "-d", f"refs/heads/{branch_name(task)}", at, check=False)
+    else:
+        git(repo, "branch", "-D", branch_name(task), check=False)
 
 
 def drop_merged_branch(repo: Path, branch: str) -> bool:

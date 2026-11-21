@@ -657,9 +657,16 @@ def cmd_start(a):
     try:
         wt = context.tree(task.dir, repo, setup.get("siblings"), "worktree")  # #261
         wt.parent.mkdir(parents=True, exist_ok=True)
-        store.write_json(task.dir / STARTING, {"repo": str(repo), "worktree": str(wt),
-                                               "pid": os.getpid(), "at": store.now()})
-        base = gitops.create_worktree(repo, a.name, wt, a.base)
+        # the branch this start makes, and at which commit, only when there is none yet: gc
+        # deleted a delegate/<task> an earlier task had left, unmerged, after a start killed
+        # before its worktree (#416, the audit of 1.8)
+        commit = gitops.base_commit(repo, a.base)
+        mine = not gitops.git(repo, "rev-parse", "--verify", "-q",
+                              f"refs/heads/{gitops.branch_name(a.name)}", check=False).strip()
+        store.write_json(task.dir / STARTING, {
+            "repo": str(repo), "worktree": str(wt), "pid": os.getpid(), "at": store.now(),
+            **({"branch": gitops.branch_name(a.name), "branch_at": commit} if mine else {})})
+        base = gitops.create_worktree(repo, a.name, wt, commit or a.base)
     except gitops.GitError as e:
         shutil.rmtree(task.dir, ignore_errors=True)  # create_worktree removed its own leftovers
         die(str(e))
@@ -1941,7 +1948,9 @@ def _dead_start(task: store.Task) -> dict | None:
 
 def _drop_start(task: store.Task, info: dict) -> None:
     """Undo a half-made start: its worktree and registration, its branch (it holds no work: the
-    agent never ran), its directory and its rules."""
+    agent never ran), its directory and its rules. The branch only when starting.json says this
+    start made it, and only while it still points at the commit it was made at: an earlier
+    task's branch, or one moved since, stays (#416)."""
     repo = Path(info.get("repo") or "/nonexistent")
     if repo.is_dir():
         if info.get("worktree"):
@@ -1951,7 +1960,8 @@ def _drop_start(task: store.Task, info: dict) -> None:
             gitops.git(repo, "worktree", "unlock", info["worktree"], check=False)
             gitops.remove_worktree(repo, Path(info["worktree"]))
         gitops.git(repo, "worktree", "prune", check=False)
-        gitops.delete_branch(repo, task.name)
+        if info.get("branch") == gitops.branch_name(task.name) and info.get("branch_at"):
+            gitops.delete_branch(repo, task.name, at=info["branch_at"])
     gitops._rmtree(task.dir)
     shutil.rmtree(context.rules_dir(task), ignore_errors=True)
 
