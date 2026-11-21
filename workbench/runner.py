@@ -2833,7 +2833,8 @@ def _updated(task: store.Task) -> bool:
         return False
     msg = f"{UPDATED}: wb resume {task.name} continues it on the new code"
     task.set_status(phase="stuck", last=msg)
-    task.notify("stuck", f"task {task.name}: {msg}", round=task.status.get("round"))
+    # not the step's: an update mid-step shrank the model's slice (#660)
+    task.notify("stuck", f"task {task.name}: {msg}", round=task.status.get("round"), cause="updated")
     return True
 
 

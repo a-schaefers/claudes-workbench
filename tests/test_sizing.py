@@ -219,6 +219,24 @@ class Measured(Base):
                            ("task t: stuck: one call repeated 4 times", False)):
             self.assertIs(results._not_the_step({"kind": "stuck", "text": text}), skip)
 
+    def test_workbench_updated_under_a_step_isnt_held_against_its_size(self):
+        # #660: runner._updated's stuck notice had no cause, so an update mid-step recorded the
+        # step stuck and capped the model's slice below it, with no expiry
+        from unittest import mock
+        from workbench import results, runner
+        self.start("t-upd", "ok", "--test", TEST_CMD, "--no-self-review")
+        wait_phase("t-upd", {"review"})
+        task = store.Task("t-upd")
+        with mock.patch.dict(runner.CURRENT, code="the code before the update"):
+            self.assertTrue(runner._updated(task))
+        note = [r for r in store.notices() if r["task"] == "t-upd"][-1]
+        self.assertEqual((note["kind"], note["cause"]), ("stuck", "updated"))
+        self.assertFalse(results.step(task, True)["stuck"])
+        old = {"kind": "stuck", "round": 1, "text": f"task t: {runner.UPDATED}: wb resume t …"}
+        self.assertTrue(results._not_the_step(old))                # one written before the cause
+        for cause, skip in (("guard", False), ("agent", False), ("a stop added later", True)):
+            self.assertIs(results._not_the_step({"kind": "stuck", "cause": cause}), skip)
+
 
 if __name__ == "__main__":
     unittest.main()

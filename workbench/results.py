@@ -38,18 +38,22 @@ def step(task: store.Task, landed: bool, since: str = "HEAD") -> dict:
             "stuck": stuck, "took_over": any(e.get("kind") == "takeover" for e in evs)}
 
 
-# Notices that end a round for reasons outside the step: a shutdown's, a logout's or a kill's
-# SIGTERM (runner.SIGNAL_STOP), and a runner that died (cli.reap: killed, out of memory, a reboot).
-# Counted as stuck, a laptop shut down mid-step shrank the model's slice for good (#582, the audit
-# of 1.90). And a model server that died again after the round's one revive (runner, `server`:
-# #657). Notices from before `cause` was written are known by their text.
-NOT_THE_STEP = ("signal", "died", "server")
-_NOT_THE_STEP_TEXT = ("the runner was stopped by a signal", "the runner died without a report")
+# The causes of a stuck or failed notice that are the step's own: a guard stopped the agent, or
+# OpenCode exited non-zero. Any other ends a round for reasons outside the step: a shutdown's,
+# a logout's or a kill's SIGTERM (`signal`, runner.SIGNAL_STOP), a runner that died (`died`,
+# cli.reap: killed, out of memory, a reboot), a model server gone again after the round's one
+# revive (`server`, #657), workbench updated under the task (`updated`, runner._updated). Counted
+# as stuck, a laptop shut down mid-step shrank the model's slice for good (#582, the audit of
+# 1.90), and so did an update mid-step until it had a cause (#660): an allowlist, so the next
+# stop from outside the step can't slip in. Notices from before `cause` are known by their text.
+THE_STEP = ("guard", "agent")
+_NOT_THE_STEP_TEXT = ("the runner was stopped by a signal", "the runner died without a report",
+                      "workbench was updated under this task")  # runner.UPDATED
 
 
 def _not_the_step(notice: dict) -> bool:
     if "cause" in notice:
-        return notice["cause"] in NOT_THE_STEP
+        return notice["cause"] not in THE_STEP
     return any(t in str(notice.get("text") or "") for t in _NOT_THE_STEP_TEXT)
 
 
