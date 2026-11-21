@@ -1424,9 +1424,9 @@ def free_port() -> int:
         return sk.getsockname()[1]
 
 
-def fake_remote_ollama(tags: list[dict], shows: dict[str, dict]):
-    """An Ollama on another machine (a free port here): /api/tags lists ``tags``, POST /api/show
-    answers ``shows[name]``."""
+def fake_remote_ollama(tags: list[dict], shows: dict[str, dict], host: str = "127.0.0.1"):
+    """An Ollama on another machine (a free port here, on ``host``: "::1" listens on IPv6):
+    /api/tags lists ``tags``, POST /api/show answers ``shows[name]``."""
     class H(BaseHTTPRequestHandler):
         def reply(self, body):
             self.send_response(200 if body is not None else 404)
@@ -1443,7 +1443,9 @@ def fake_remote_ollama(tags: list[dict], shows: dict[str, dict]):
 
         def log_message(self, *a):
             pass
-    srv = ThreadingHTTPServer(("127.0.0.1", 0), H)
+    server = type("V6", (ThreadingHTTPServer,), {"address_family": socket.AF_INET6}) if ":" in host \
+        else ThreadingHTTPServer
+    srv = server((host, 0), H)
     threading.Thread(target=srv.serve_forever, daemon=True).start()
     return srv, srv.server_address[1]
 
@@ -1520,6 +1522,29 @@ class Remote(unittest.TestCase):
         self.assertNotIn(pid, json.loads(Path(os.environ["WB_OPENCODE_CONFIG"]).read_text())["provider"])
         self.assertEqual(json.loads(Path(os.environ["WB_MODELS"]).read_text()),
                          {"keep/me": {"sizes": ["trivial"]}})            # only its own entries go
+
+    def test_wb_remote_brackets_a_bare_ipv6_address_and_either_spelling_is_one_provider(self):
+        # #707: `wb remote ::1` wrote http://::1:PORT/v1, which the probe reached and discovery
+        # couldn't parse: no models, and retrying as [::1] hit a provider conflict
+        ctx = {"llama.context_length": 131072}
+        try:
+            srv, port = fake_remote_ollama([{"name": "coder:7b"}],
+                                           {"coder:7b": {"capabilities": ["tools"], "model_info": ctx}}, host="::1")
+        except OSError:
+            self.skipTest("no IPv6 loopback here")
+        self.servers.append(srv)
+        self.config({}, {})
+        code, out = self.wb("remote", "::1", "--port", str(port), "--context", "32768")
+        self.assertEqual(code, 0, out)
+        pid = models.remote_pid("::1")
+        prov = json.loads(Path(os.environ["WB_OPENCODE_CONFIG"]).read_text())["provider"][pid]
+        self.assertEqual(prov["options"]["baseURL"], f"http://[::1]:{port}/v1")
+        self.assertIn(f"{pid}/coder:7b", models.discover())
+        code, out = self.wb("remote", "[::1]", "--port", str(port), "--context", "32768")
+        self.assertEqual(code, 0, out)                                   # the same provider, reused
+        self.assertEqual(self.wb("remote", "[::1]", "--remove")[0], 0)
+        with self.assertRaises(RuntimeError):
+            models.remote_root("bad host", 11434)
 
     def test_wb_remote_never_takes_over_or_deletes_a_provider_it_didnt_add(self):
         # #197 (the 2026-11-19 audit): the provider id comes from the host alone, so a provider of

@@ -2314,14 +2314,43 @@ def add_server_provider(pid: str, base: str) -> bool:
 
 def remote_pid(host: str) -> str:
     """The provider id wb remote gives another machine's Ollama: ollama-<host>, in id characters."""
-    return "ollama-" + (re.sub(r"[^a-z0-9]+", "-", host.lower()).strip("-") or "host")
+    return "ollama-" + (re.sub(r"[^a-z0-9]+", "-", remote_host(host)).strip("-") or "host")
+
+
+def remote_host(host: str) -> str:
+    """A wb remote host as one spelling: lower case, an IPv6 literal without its brackets."""
+    host = host.strip().lower()
+    return host[1:-1] if host.startswith("[") and host.endswith("]") else host
+
+
+def remote_root(host: str, port: int) -> str:
+    """http://<host>:<port> for a wb remote host, an IPv6 literal bracketed (its zone as %25):
+    `http://::1:11434/v1` was written as given, which the probe reached and provider discovery
+    couldn't parse, so the models were never found (#707). Raises RuntimeError for a host no URL
+    can carry."""
+    host = remote_host(host)
+    try:
+        literal = ipaddress.ip_address(host.split("%", 1)[0]).version == 6
+    except ValueError:
+        literal = False
+    root = f"http://[{host.replace('%', '%25')}]:{port}" if literal else f"http://{host}:{port}"
+    try:  # read back as discovery reads a provider's baseURL
+        ok = bool(re.fullmatch(r"[\w.:%-]+", host)) and remote_host(urlparse(f"{root}/v1").hostname or "").split("%", 1)[0] == host.split("%", 1)[0] \
+            and urlparse(root).port == port
+    except ValueError:
+        ok = False
+    if not ok:
+        raise RuntimeError(f"{host!r} with port {port} makes no URL wb can use: give a host name, "
+                           "an IPv4 address or an IPv6 one")
+    return root
 
 
 def add_remote(host: str, port: int = OLLAMA_PORT) -> tuple[str, str, list[str]]:
     """Give OpenCode a provider for the Ollama on another machine (a gaming PC on the LAN or
     tailnet), marked local in models.json: (its provider id, its root, the tool-capable models it
     has pulled, cloud models left out). Raises RuntimeError when it doesn't answer (#114)."""
-    root = f"http://{host}:{port}"
+    root = remote_root(host, port)
+    host = remote_host(host)
     if not ollama_answers(root):
         raise RuntimeError(f"no Ollama answers at {root}: on {host}, have Ollama listen on the "
                            "network (OLLAMA_HOST=0.0.0.0, then restart it), and check the port")
@@ -2356,7 +2385,7 @@ def add_remote(host: str, port: int = OLLAMA_PORT) -> tuple[str, str, list[str]]
 def remove_remote(host: str) -> tuple[str, list[str]]:
     """Undo add_remote: its models out of OpenCode's config with their models.json entries, the
     provider and its local mark gone. (provider id, the models removed)."""
-    pid = remote_pid(host)
+    host, pid = remote_host(host), remote_pid(host)
     cfg = read_config()
     key = "provider" if pid in (cfg.get("provider") or {}) else "providers"
     prov = (cfg.get(key) or {}).get(pid)
