@@ -963,7 +963,7 @@ counted it, #677).
 
 **OpenCode's own compaction** is a small model's summary of its session, which drops details and
 can lose the task itself (seen: an agent that built CLAUDE.md's "next step" after one). The config
-layer sets `compaction: {auto: true, buffer}` with `buffer = max(usable + reply − window, 0) +
+layer sets `compaction: {auto: true, buffer, background: false}` with `buffer = max(usable + reply − window, 0) +
 STEP_GROWTH` (usable: OpenCode 2.3's own figure, `runner.usable_input`: the smaller of
 `limit.input` and the window, else the window, since OpenCode compacts at usable − buffer; reply:
 `options.max_tokens`, else `limit.output`; `STEP_GROWTH` 4096), so OpenCode compacts only past the
@@ -980,7 +980,15 @@ handover point past it. The runner checks at each step's end, OpenCode before th
 with that step's tool results in, so a ceiling at the compaction point itself (819 tokens of room
 at 32K) let one 3K read compact the session first (#644). Both count a step's reasoning tokens
 (the step row's `reasoning`, the export's `tokens.reasoning`), as OpenCode's check does. A model without `limit.context` gets no
-mid-round handover, no compaction setting and no ceiling. Below `models.MIN_WINDOW` (16K) a
+mid-round handover, no `auto`/`buffer` and no ceiling. Every layer sets `compaction.background:
+false` (`RESTATED` repeats it after a project's config): OpenCode 2.3.2 writes the summary ahead
+by default (`SessionCompaction.precompute`, before each step once the context passes threshold −
+min(60000, (threshold − first request)/2), about 43% of the 32K `wb model add` entry), a
+full-context request on the agent's own server, below the handover point: a one-slot server
+queued the agent's step behind it, its prefix evicted the agent's KV cache, the wait read as
+thinking, and the handover threw the summary away (#661; `RealOpenCodeRun` checks no summary
+request comes at 55%). 2.3.0, CI's pin, has no such key (it precomputes only behind an
+experimental flag, off) and ignores it. Below `models.MIN_WINDOW` (16K) a
 window can't hold a task (OpenCode's prompt and tools, PROTOCOL and the handbook take ~5K tokens,
 and compaction would come before the earliest handover point, at 4K before the first request), so
 `models.status` says the model can't run ("a 8K window; tasks need 16K+ …"): the router skips it,

@@ -217,7 +217,11 @@ def write_config_layer(task: store.Task) -> Path:
         # OPENCODE_TESTED (#353, the audit of 1.4)
         "small_model": task.spec["model"],
         "autoupdate": False,
-        **({"compaction": {"auto": True, "buffer": buffer}} if buffer else {}),
+        # background: OpenCode 2.3.2's summary written ahead (on by default; 2.3.0 ignores the
+        # key) is a full-context request on the agent's own server, below the handover point,
+        # queued ahead of the agent's next step on a one-slot server and evicting its cache,
+        # then thrown away at the handover (#661)
+        "compaction": {"background": False, **({"auto": True, "buffer": buffer} if buffer else {})},
         "mcp": {"servers": {**users_servers_off(), "workbench": {  # 2.x shape: mcp.servers.<name>
             "type": "local",
             "command": [sys.executable, str(PKG_ROOT / "bin" / "wb-ask-mcp")],

@@ -5252,6 +5252,8 @@ class ConfigLayer(Base):
         self.assertIs(got["autoupdate"], False)
         self.assertTrue(got["compaction"]["auto"])
         self.assertEqual(got["compaction"], layer["compaction"])
+        # #661: no summary written ahead on the agent's server, then thrown away at the handover
+        self.assertIs(got["compaction"]["background"], False)
         self.assertEqual(got["provider"]["ollama"]["models"], {"mimo-v2.6:9b-q8_0": {
             "limit": {"context": 32768, "output": 2048}, "options": {"max_tokens": 2048}}})
         # the layer's provider timeouts (#491) stay beside the pins, and nothing else of the entry
@@ -6245,6 +6247,26 @@ class RealOpenCodeRun(Base):
         self.assertEqual(runner.context_state(task)["compactions"], 1)
         self.assertEqual(runner.fresh_reason(task), runner.COMPACTED)
         self.assertIn("OpenCode compacted", run_wb("watch", "t-run", "--once", "--no-color"))
+
+    def test_no_compaction_summary_is_written_ahead_of_the_handover_point(self):
+        # #661 (checked on OpenCode 2.3.2): its background compaction forked a full-context
+        # summary request at about 43% of a 32K window, below the 60% handover, on the agent's own
+        # server: a one-slot server queued the agent behind it, and the handover threw it away
+        task, st = self.answered([WRITE_42])
+        self.server.kill()
+        self.server.wait()
+        self.serve([], read=18_000)                                # 55%: past 2.3.2's precompute
+        env = {**runner.agent_env(task), "PWD": str(task.worktree)}
+        before = len(self.requests.read_text().splitlines())
+        for text in ("Go on.", "Go on again."):
+            subprocess.run(lane.wrap(context.writable(task), [
+                "opencode", "run", "--standalone", "-m", "cap/cap", "--format", "json",
+                "--session", st["session"], text]), cwd=task.worktree, env=env,
+                capture_output=True, timeout=180)
+        later = self.requests.read_text().splitlines()[before:]
+        self.assertTrue(later)
+        self.assertFalse([r for r in later if "<template>" in r and "## Objective" in r])
+        self.assertEqual(runner.context_state(task)["compactions"], 0)
 
     def test_a_projects_opencode_json_keeps_neither_compaction_nor_the_window_nor_titles(self):
         # #519 (checked on OpenCode 2.3.2): a repo's committed opencode.json loads after the layer

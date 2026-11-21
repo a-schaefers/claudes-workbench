@@ -172,7 +172,7 @@ Runs on Linux, WSL2 and macOS; the launchers refuse native Windows and Python be
    times without waking Claude (`--test-timeout`, 900 s). A session that reaches the handover point (`fresh_at`, tuned per
    model) after changing a file, with room left for a successor, is stopped mid-round and a fresh
    session gets the task, the diff and its last words; between rounds, a session over the point
-   or compacted is replaced. OpenCode's own compaction is set just past it, as a backstop.
+   or compacted is replaced. OpenCode's compaction is a backstop just past it, never ahead.
 5. The runner writes the round report and a `review`/`stuck`/`failed` notice and exits; nothing
    the agent or the tests started outlives a round (`runner.sweep`). A runner that died without a
    word is failed by `cli.reap` (status, wait, events, top and the acting commands).
