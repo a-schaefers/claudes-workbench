@@ -19,7 +19,7 @@ import subprocess
 import time
 from pathlib import Path
 
-GB = 1024 ** 3
+GIB = 1024 ** 3  # what system_profiler means by "GB"
 DRM = Path("/sys/class/drm")
 
 
@@ -80,7 +80,7 @@ def _mac_gpus() -> list[dict]:
         shared = not g.get("spdisplays_vram") and not unified  # an Intel iGPU's slice of RAM
         found.append({"name": name, "driver": "metal", "unified": unified,
                       "vram": (_int(_sysctl("hw.memsize")) if unified else None if shared else
-                               int(m.group(1)) * (GB if m.group(2) == "GB" else 2 ** 20) if m else None),
+                               int(m.group(1)) * (GIB if m.group(2) == "GB" else 2 ** 20) if m else None),
                       "vram_used": None,
                       "wired_limit": _int(_sysctl("iogpu.wired_limit_mb")) * 2 ** 20
                       if unified and _int(_sysctl("iogpu.wired_limit_mb")) else None})
@@ -502,7 +502,10 @@ def disk_free(path: Path | None) -> int | None:
 
 
 def size(n: int | None) -> str:
-    return f"{n / GB:.1f} GB" if n else "?"
+    """Bytes in decimal GB, the unit models.json's gpu_gb and vram_gb take (and Ollama prints):
+    binary GiB labelled GB sat beside a decimal budget, and a hand-set gpu_gb came out 7% small
+    (#523)."""
+    return f"{n / 1e9:.1f} GB" if n else "?"
 
 
 SYSTEM_NOTE = {

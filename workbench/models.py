@@ -2005,7 +2005,7 @@ def ollama_pull(root: str, name: str, say=print) -> None:
                 pct = int(100 * done / total)
                 if pct >= shown + 5 or pct == 100:
                     shown = pct
-                    say(f"{status}: {pct}% of {total / 1024 ** 3:.1f} GB")
+                    say(f"{status}: {pct}% of {total / 1e9:.1f} GB")  # decimal, as Ollama says it
             elif status != last:
                 say(status)
             last = status

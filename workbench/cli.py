@@ -3435,7 +3435,8 @@ def gpu_line() -> str:
     # none, tasks never share and the user's other Ollama models are unloaded every round; the
     # fix was gpu_gb, and nothing said how to set it (#272, the audit of 1.2)
     unknown = sorted({g["name"] for g in gs if g.get("vram") is None and not g.get("unified")})
-    hand = (f'set its memory in {models.overrides_path()}: {{"gpu_gb": <the card\'s GB>}}'
+    hand = (f'set its memory in {models.overrides_path()}: {{"gpu_gb": <the card\'s memory in '
+            'decimal GB: 12.9 for a 12 GiB card>}'
             if unknown else "models.json gpu_gb sets it by hand")
     if budget:
         return (f"GPU budget {budget / 1e9:.0f} GB, from {why or 'the GPU'}: tasks share the GPU when "

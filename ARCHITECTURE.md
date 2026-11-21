@@ -1937,7 +1937,7 @@ never 0):
 
 On a terminal (without `--json`) the same view fills the alternate screen and is redrawn in place
 each tick: bars in eighths (`▏▎▍▌▋▊▉█`) for VRAM and busy, models by their `label`, the card's
-short name (lspci's last bracket), colour only there; stdin in cbreak mode for `q`, restored on
+short name (lspci's last bracket), sizes in decimal GB, colour only there; stdin in cbreak mode for `q`, restored on
 exit. Not on a terminal: one plain pass, then exit (as `wb watch --once`).
 
 ## Models: found, loaded, chosen
@@ -2468,6 +2468,11 @@ names from `lspci`; NVIDIA left to nvidia-smi when it answered,
 else listed from sysfs, VRAM unknown); macOS reads `system_profiler SPDisplaysDataType -json`
 (Apple Silicon: unified memory, `wired_limit`; an adapter with only shared memory, an Intel iGPU,
 has VRAM unknown).
+Every size `wb` prints is in decimal GB (`size`, `wb top`'s `_gb`, the progress of a pull `wb model add` starts), the
+unit `gpu_gb` and `vram_gb` take and Ollama prints: scout showed a 16 GiB card as "16.0 GB VRAM"
+beside "GPU budget 17 GB", and a 12 GiB card's owner who wrote `{"gpu_gb": 12}` got 7% less than
+the card has (#523), so `gpu_line`'s hint says "the card's memory in decimal GB: 12.9 for a 12
+GiB card". The pane's live view labels its sizes GiB, which they are.
 `gpu_power_w()`: the cards' draw right now, in watts (None on macOS, or when nothing reads):
 nvidia-smi's `power.draw` summed over the cards that report it, else each sysfs card's
 `device/hwmon/hwmon*/power1_average`, else its `power1_input` (amdgpu generations with no

@@ -615,6 +615,19 @@ class Budget(unittest.TestCase):
                 with self.assertRaisesRegex(RuntimeError, "gpu_gb is 'lots', not a number of GB"):
                     models.gpu_budget()
 
+    def test_every_gb_wb_prints_is_the_decimal_gb_gpu_gb_takes_and_the_hint_names_it(self):
+        # #523: scout printed a 16 GiB card as "16.0 GB VRAM" (binary) beside "GPU budget 17 GB"
+        # (decimal), and a 12 GiB Arc's owner wrote {"gpu_gb": 12}, 7% short of the card
+        from workbench import top
+        self.assertEqual(hardware.size(16 * 2 ** 30), "17.2 GB")
+        self.assertEqual(top._gb(16 * 2 ** 30), "17.2")
+        with mock.patch.object(models, "budget_devices", lambda: (None, [], "")), \
+                mock.patch.dict(os.environ, {"WB_FAKE_MODELS": ""}), \
+                mock.patch.object(cli.hardware, "gpus", lambda windows=True: [
+                    {"name": "Intel Arc B580", "driver": "xe", "vram": None}]):
+            self.assertIn('{"gpu_gb": <the card\'s memory in decimal GB: 12.9 for a 12 GiB card>}',
+                          cli.gpu_line())
+
     def test_doctor_and_scout_say_what_the_budget_counts(self):
         with mock.patch.object(models, "budget_devices", lambda: (8 * 2 ** 30, [], "RTX 4060 (VRAM)")):
             self.assertIn("GPU budget 9 GB, from RTX 4060 (VRAM)", cli.gpu_line())

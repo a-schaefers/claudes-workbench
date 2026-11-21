@@ -9831,15 +9831,15 @@ class Hardware(unittest.TestCase):
                 {"_name": "Apple M2 Pro", "sppci_model": "Apple M2 Pro", "sppci_cores": "19"}]})})
         out = "\n".join(hw.report())
         self.assertIn("OS    macos (arm64)", out)
-        self.assertIn("Apple M2 Pro (19-core GPU) · unified memory: 32.0 GB shared with the CPU", out)
+        self.assertIn("Apple M2 Pro (19-core GPU) · unified memory: 34.4 GB shared with the CPU", out)
         self.assertNotIn("none found", out)
-        self.assertIn("RAM   32.0 GB (2.0 GB free) · swap 2.0 GB (1.5 GB free)", out)
+        self.assertIn("RAM   34.4 GB (2.1 GB free) · swap 2.1 GB (1.6 GB free)", out)
         self.assertIn("CPU   Apple M2 Pro", out)
 
     def test_an_intel_mac_reports_its_graphics_cards_vram(self):
         hw = self.fake("Darwin", runs={("system_profiler",): json.dumps({"SPDisplaysDataType": [
             {"sppci_model": "AMD Radeon Pro 5500M", "spdisplays_vram": "8 GB"}]})})
-        self.assertIn("AMD Radeon Pro 5500M · 8.0 GB VRAM · metal", "\n".join(hw.report()))
+        self.assertIn("AMD Radeon Pro 5500M · 8.6 GB VRAM · metal", "\n".join(hw.report()))
 
     def test_wsl_names_windows_gpus_and_says_what_it_cannot_see(self):
         hw = self.fake("Linux", files={
@@ -9850,7 +9850,7 @@ class Hardware(unittest.TestCase):
         self.assertIn("OS    wsl", out)
         self.assertIn("only NVIDIA GPUs are usable from inside WSL", out)
         self.assertIn("AMD Radeon RX 7900 XTX · VRAM unknown · windows (seen from WSL)", out)
-        self.assertIn("RAM   15.3 GB", out)
+        self.assertIn("RAM   16.4 GB", out)  # decimal GB (#523)
 
     def test_ollamas_quoted_service_environment_and_a_context_that_isnt_a_number(self):
         # the 2026-11-16 audit: systemd quotes a value with a space and the split lost it; "32k"
@@ -9985,8 +9985,8 @@ class Hardware(unittest.TestCase):
             runs={("lspci",): "c5:00.0 Display controller: Radeon 8060S"})
         apu = hw.gpus()[0]
         self.assertEqual((apu["vram"], apu["uuid"]), (512 * 2 ** 20 + 96 * 2 ** 30, "GPU-a1b2"))
-        self.assertIn("Radeon 8060S · unified memory: 96.5 GB usable by the GPU "
-                      "(0.5 GB carve-out + 96.0 GB GTT) · amdgpu", "\n".join(hw.report()))
+        self.assertIn("Radeon 8060S · unified memory: 103.6 GB usable by the GPU "
+                      "(0.5 GB carve-out + 103.1 GB GTT) · amdgpu", "\n".join(hw.report()))
         with mock.patch.dict(os.environ, {"WB_FAKE_MODELS": "", "WB_MODELS": "/nonexistent"}):
             self.assertEqual(models.budget_devices()[0], 512 * 2 ** 20 + 96 * 2 ** 30)
 

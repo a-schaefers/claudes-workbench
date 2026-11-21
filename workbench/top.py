@@ -433,7 +433,7 @@ def bar(frac: float, width: int = 16) -> str:
 
 
 def _gb(n) -> str:
-    return f"{n / 2 ** 30:.1f}"
+    return f"{n / 1e9:.1f}"  # decimal GB, as everything else wb prints (#523)
 
 
 def _secs(s: float) -> str:
