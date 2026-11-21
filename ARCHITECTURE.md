@@ -4833,7 +4833,11 @@ themselves are re-read from `$WB_HOME`; the mod writes `tasks/<n>/acked`, scout.
 `offered_at` and `chat/listener.json`.
 
 **session.start.** Sets `mem.root` (`WB_HOME` or `~/.local/state/workbench`), `mem.wb` (`WB_BIN`
-or `wb`), `mem.skill` (`$CLAUDE_CONFIG_DIR` or `~/.claude`, then `skills/workbench/SKILL.md`),
+or `wb`), `mem.skill` (`$CLAUDE_CONFIG_DIR` or `~/.claude`, then `skills/workbench/SKILL.md`);
+`WB_HOME`, `CLAUDE_CONFIG_DIR` and `WB_SAVINGS` (`mem.savingsFile`) read as wb reads them (`absolutePath`, `store.absolute_env`'s
+rule: `~` expanded, relative to the session's directory, where the mod's `wb` calls run, `.`,
+`..` and extra slashes dropped: settings.json's `env` passes them literally, and a `~` left the
+pane empty and a trailing slash the Claude-coding guard off, #454),
 the chat key (`<start ms>-<6 base36>`, kept across reloads), `mem.cwd` and `mem.home` (the
 session's directory and the home directory, resolved: which tasks without a `session` are this
 session's, `mine`), `mem.ids` (the `sessions` atom plus `$.session.id()`), registers its `workbench-*` commands (*Commands*
@@ -5332,7 +5336,8 @@ $WB_HOME (~/.local/state/workbench)
 `WB_IMAGES`, `WB_AUDIO`, `WB_COMMANDS`, `WB_CHAT_TOKEN`, `WB_CHAT_CONFIG`, `WB_OPENCODE_CONFIG`, `WB_SAVINGS`,
 and the user's `OPENCODE_CONFIG` and `CLAUDE_CONFIG_DIR`, #328) accept `~` and
 relative paths: `absolute_env()`, first thing in `cli.main` and the runner, makes them absolute
-against wb's cwd (not resolved: a symlinked home stays as named), so every child inherits the
+against wb's cwd (not resolved: a symlinked home stays as named; the mod's `absolutePath` does the
+same for `WB_HOME`, `CLAUDE_CONFIG_DIR` and `WB_SAVINGS`, #454), so every child inherits the
 same place (a relative `WB_HOME` once had wb write the task under its cwd and the runner, which
 runs from the package's directory, look for it there: the 2026-11-16 audit; a relative
 `OPENCODE_CONFIG` had `wb start` pick a model the runner then called unknown: #328, the audit of
@@ -5841,6 +5846,8 @@ nested `.md` files (`docs/`, `skill/`, `mod/`, `agent/`) are unaffected. A new r
   `free`, `publish`): a change there changes both (`tests.Images`, `tests.Audio`). A new kind of
   generated media → its config path in `store.PATH_VARS` and `context.private_paths`, its output
   directory in `cli.EVENT_SKIP` (and the mod's ears), its engines in `wb scout`.
+- **How wb reads a path variable** (`store.absolute_env`, `home()`) → the mod's `absolutePath`,
+  which reads `WB_HOME` and `CLAUDE_CONFIG_DIR` the same way (#454).
 - **A process wb leaves running** (a runner, the bench driver, `wb optimize`, the chat `wb chat
   on` starts) → started through `cli.detach` (its own scope where logind kills sessions: #531),
   with `awake=` when it runs unattended (*Kept awake*, #516), and named in `cli.logout_stops`' lines.

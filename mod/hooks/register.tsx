@@ -1976,6 +1976,22 @@ function taskParts(list: WbTask[], on: boolean) {
   ] }
 }
 
+// A path variable as wb reads it (store.absolute_env: os.path.abspath(os.path.expanduser(v))):
+// `~` expanded, relative to the directory wb runs in (the session's, where $.process.run starts
+// it), `.`, `..` and repeated or trailing slashes gone. settings.json's `env` passes WB_HOME
+// literally, and the mod took `~/state/wb` as given: the pane stayed empty and no wake came; a
+// trailing slash made `…/workbench//tasks/`, and the Claude-coding guard never matched (#454).
+export function absolutePath(v: string, home: string, cwd: string): string {
+  let p = v === '~' ? home : v.startsWith('~/') ? `${home}${v.slice(1)}` : v
+  if (!p.startsWith('/')) p = `${cwd}/${p}`
+  const out: string[] = []
+  for (const part of p.split('/')) {
+    if (part === '..') out.pop()
+    else if (part && part !== '.') out.push(part)
+  }
+  return `/${out.join('/')}`
+}
+
 // The task /workbench was given, as the skill's text has it after expansion ("**First task:**
 // `<arguments>`."): empty when the user typed /workbench alone.
 const firstTask = (text: string) => /\*\*First task:\*\* `([\s\S]*?)`\. Empty\?/.exec(text)?.[1].trim() ?? ''
@@ -1986,11 +2002,15 @@ export const register: Register = (on, options) => {
   on('session.start', async ($, e, next) => {
     const home = await $.env.get('HOME')
     const wbHome = await $.env.get('WB_HOME')
-    mem.root = wbHome || `${home}/.local/state/workbench`
+    const real = async (p: string) => (await $.fs.stat(p, { resolve: true }).catch(() => undefined))?.realPath ?? p
+    mem.cwd = await real(e.cwd)
+    const abs = (v: string) => absolutePath(v, home ?? '', mem.cwd) // as wb reads it (#454)
+    mem.root = wbHome ? abs(wbHome) : `${home}/.local/state/workbench`
     mem.wb = (await $.env.get('WB_BIN')) || 'wb'
-    mem.skill = `${(await $.env.get('CLAUDE_CONFIG_DIR')) || `${home}/.claude`}/skills/workbench/SKILL.md`
-    const priced = (await $.env.get('WB_SAVINGS')) || `${home}/.config/workbench/savings.json`
-    mem.savingsFile = priced.startsWith('~/') ? `${home}${priced.slice(1)}` : priced
+    const config = await $.env.get('CLAUDE_CONFIG_DIR')
+    mem.skill = `${config ? abs(config) : `${home}/.claude`}/skills/workbench/SKILL.md`
+    const priced = await $.env.get('WB_SAVINGS')
+    mem.savingsFile = priced ? abs(priced) : `${home}/.config/workbench/savings.json`
     mem.startedAt = await $.clock.now()
     // 2026-11-17: /delegate became /workbench. A copy updated across it still has only the old
     // skill link, which now leads nowhere: wb setup makes the new one and drops the old.
@@ -2021,8 +2041,6 @@ export const register: Register = (on, options) => {
       name: HAND_BACK,
       description: 'Stop this session\'s agents and hand their tasks back to Claude to finish',
     })
-    const real = async (p: string) => (await $.fs.stat(p, { resolve: true }).catch(() => undefined))?.realPath ?? p
-    mem.cwd = await real(e.cwd)
     // the file system ignores case when the directory is there with every letter's case swapped
     const swapped = [...mem.cwd].map(c => c === c.toLowerCase() ? c.toUpperCase() : c.toLowerCase()).join('')
     mem.fold = swapped !== mem.cwd && !!(await $.fs.stat(swapped).catch(() => undefined))

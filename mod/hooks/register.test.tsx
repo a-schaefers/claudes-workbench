@@ -1,5 +1,5 @@
 import { expect, mock, test } from 'claude-code/testing'
-import { attachedLines, awayNow, cardName, delegates, liveLines, parsePrice, priceOf, savedLine, spark, statsLines, wrapWords } from './register.js'
+import { absolutePath, attachedLines, awayNow, cardName, delegates, liveLines, parsePrice, priceOf, savedLine, spark, statsLines, wrapWords } from './register.js'
 
 const PANE = {
   plugin: 'workbench',
@@ -160,7 +160,8 @@ function chatOn(files: Record<string, string>) {
 
 // The Claude Code fakeTasks plays: the one the mod is tested on, unless a test says otherwise
 // (undefined: one older than $.session.version itself)
-const engine: { version?: { version: string; base: string } } = {}
+// and its environment past WB_HOME=/wb and HOME=/home/u, unless a test says otherwise
+const engine: { version?: { version: string; base: string }; env?: Record<string, string> } = {}
 const TESTED = { version: '2.1.311', base: '2.1.311' }
 engine.version = TESTED
 
@@ -171,7 +172,7 @@ function fakeTasks(on: any, files: Record<string, string>, dirs = ['fix-it'], sc
   })
   // the weekly model check was done just now, unless the test is about it
   if (scouted) files['/wb/scout.json'] = JSON.stringify({ done_at: 1_800_000_000 })
-  on('env.get', (_: any, e: any) => ({ value: ({ WB_HOME: '/wb', HOME: '/home/u' } as any)[e.name] }))
+  on('env.get', (_: any, e: any) => ({ value: ({ WB_HOME: '/wb', HOME: '/home/u', ...engine.env } as any)[e.name] }))
   const reads: string[] = []
   on('fs.read', (_: any, e: any) => {
     reads.push(e.path)
@@ -1679,6 +1680,33 @@ test('Claude coding: its own edit in a task\'s worktree waits for the user\'s ye
   // a worktree nested for a sibling two levels up (#261, the audit of 1.2) is the task's too
   expect((await edit('/wb/tasks/fix-it/tree/apps/worktree/power.py')).deny).toContain('"Only when I say"')
   expect((await edit('/wb/tasks/fix-it/tree/shared/lib/power.py')).deny).toBeUndefined()   // a sibling's link
+})
+
+test('a WB_HOME given with ~, relative or with a trailing slash is read where wb reads it (#454)', async ($, on) => {
+  // settings.json's env passes WB_HOME literally: the mod took `~/state/wb/` as given
+  expect(absolutePath('~/state/wb/', '/home/u', '/home/u/a')).toBe('/home/u/state/wb')
+  expect(absolutePath('~', '/home/u', '/x')).toBe('/home/u')
+  expect(absolutePath('state//wb/./', '/home/u', '/home/u/a')).toBe('/home/u/a/state/wb')
+  expect(absolutePath('../wb', '/home/u', '/home/u/a')).toBe('/home/u/wb')
+  expect(absolutePath('/wb/', '/home/u', '/')).toBe('/wb')
+  expect(absolutePath('~u/wb', '/home/u', '/x')).toBe('/x/~u/wb')        // as expanduser leaves another user's
+  const clock = mock.clock(on, { now: 1_800_000_000_000 })
+  const files: Record<string, string> = {
+    '/home/u/wb/coding.json': JSON.stringify({ mode: 'only' }),
+  }
+  fakeTasks(on, files)
+  on('process.run', () => ({ value: { exitCode: 0, stdout: '', stderr: '' } }))
+  on('tool.call', () => ({ result: {}, text: '' }))
+  try {
+    engine.env = { WB_HOME: '~/wb/' }
+    await $.session.start({ cwd: '/home/u/a', surface: 'terminal', isInteractive: true })
+    await clock.advance(1000)
+    const r = await $.tool.call({ tool: 'Write', file_path: '/home/u/wb/tasks/fix-it/worktree/x.py', content: '' } as any) as any
+    expect(r.deny).toContain('"Only when I say"')                  // the Claude-coding guard applies
+    await clock.advance(1000)                                      // the poll the call started ends here
+  } finally {
+    engine.env = undefined
+  }
 })
 
 test('the probe row says whether it works, and turned on without probe it asks Claude to offer the setup', async ($, on) => {
