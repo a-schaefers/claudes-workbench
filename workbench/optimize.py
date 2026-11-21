@@ -254,11 +254,27 @@ def _made(key: str, source: str | None) -> None:
     store.write_json(path(), {**st, "made": {**made, **({key: source} if source else {})}})
 
 
+def applied(model_id: str, row: dict) -> str:
+    """The registered variant `wb optimize apply` made of ``model_id`` at the window ``row``
+    measured, or "": the row's `applied`, else the name apply would give it. A run that measured
+    the source again (a changed GPU, --all, a stopped run) wrote its row without `applied`, and
+    the advice came back, naming a command that answered "exists already" (#584)."""
+    have = models.discover()
+    if row.get("applied") in have:
+        return row["applied"]
+    fits = row.get("fits")
+    if not fits or fits == row.get("window") or "/" not in model_id:
+        return ""
+    provider, name = model_id.split("/", 1)
+    key = f"{provider}/{entry_name(name, fits)}"
+    return key if key != model_id and key in have else ""
+
+
 def advice(model_id: str, row: dict) -> str:
     """One line on what the fit says, or "" when there is nothing to change (or apply has made
     its variant, still registered: every wb start repeated the advice, and the command it named
     answered "exists already", #584)."""
-    if row.get("applied") and row["applied"] in models.discover():
+    if applied(model_id, row):
         return ""
     w, fits, spill = row.get("window"), row.get("fits"), row.get("spill")
     k = lambda n: f"{n // 1024}K"  # noqa
@@ -423,6 +439,10 @@ def report() -> list[str]:
     if not rows and not out and not st.get("skipped"):
         return ["not run yet: wb optimize estimate, then wb optimize"]
     for mid, row in rows.items():
+        if made := applied(mid, row):  # not "fits all on the GPU": it spills, its variant doesn't
+            out.append(f"{mid}: {row['fits'] // 1024}K fits all on the GPU here; {made}, applied, "
+                       "is that window")
+            continue
         out.append(advice(mid, row) or f"{mid}: its {row['window'] // 1024}K window fits all on "
                    "the GPU here, and no bigger one does")
     for mid, row in (st.get("skipped") or {}).items():

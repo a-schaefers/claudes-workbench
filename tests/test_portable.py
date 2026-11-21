@@ -1317,6 +1317,25 @@ class Optimize(unittest.TestCase):
         self.assertEqual((sv.tries, sv.wins, sm.tries), (1, 1, 1))   # one record, both ways
         self.assertEqual(router.lineage(m), {"ollama/m", "ollama/m:48k"})
 
+    def test_a_source_measured_again_after_its_apply_gets_no_advice_to_apply_it_again(self):
+        # the review of #584: a run that measured the source again (a changed GPU, --all, a
+        # stopped run) wrote its row without `applied`, the advice came back, and the command it
+        # named answered "exists already"; the report said the spilling window fit
+        from workbench import optimize
+        self.ollama(65536)
+        m = models.discover()["ollama/m"]
+        row = {"window": 65536, "fits": 49152, "spill": 12, "tried": []}
+        optimize._record(m.id, row)
+        optimize.apply(m)
+        optimize._record(m.id, {**row, "ts": store.now()})          # as fit() writes it, again
+        self.assertEqual(optimize.advice(m.id, optimize.state()["models"][m.id]), "")
+        said = "\n".join(optimize.report())
+        self.assertIn("ollama/m: 48K fits all on the GPU here; ollama/m:48k, applied, is that window", said)
+        self.assertNotIn("ollama/m: its 64K window fits all on the GPU", said)
+        # a different window measured (a new card): that one is advised
+        self.assertIn("wb optimize apply ollama/m makes a 32K entry",
+                      optimize.advice(m.id, {**row, "fits": 32768}))
+
     def test_a_smaller_window_cuts_the_output_cap_and_max_tokens_so_input_stays_positive(self):
         # #332 (the audit of 1.4): a 16K fit of a 128K entry wrote an input limit of -16384 and
         # kept its 32K output cap and its 64K max_tokens

@@ -3167,7 +3167,10 @@ output cap, and an entry no request could fit refused before anything is made: a
 source's models.json keys (`sizes`, `label`, `weights_gb`…) and `variant_of` the source's id; the
 router scores both on one record (`router.lineage`: the source, its variants) and, when both can
 run, puts the variant before its source, which stays for `--model`. The source's optimize row gets
-`applied` (the variant's id), so `advice` stays quiet while the variant is registered. Before,
+`applied` (the variant's id), so `advice` stays quiet while the variant is registered; a run
+that measures the source again writes its row without it, so `optimize.applied` also knows the
+variant by the name apply gives the measured window (it came back after a changed GPU or
+`--all`, the review of #584), and the report says the variant is that window. Before,
 the variant started with no record, ranked below the spilling source's one accepted task, every
 start picked the source and repeated the advice, whose command then said "exists already", and a
 source kept to trivial work got a variant that took significant work (#584). Retiring the
