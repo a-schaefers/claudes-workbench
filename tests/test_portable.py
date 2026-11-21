@@ -2000,6 +2000,42 @@ class Remote(unittest.TestCase):
             m = models.Model(id="o/m", provider="o", name="m", base_url=url, engine="ollama", label="o/m")
             self.assertEqual(models.pool(m), "gpu")
 
+    def test_a_host_lookup_that_failed_is_asked_again_and_a_new_address_is_seen(self):
+        # #900: a lookup that timed out or failed (a tailnet reconnecting after a wake, slow DNS)
+        # was cached as "another host" for the life of the process, and so were the machine's
+        # addresses: a runner or the chat server took this machine's server for another's for
+        # hours, beside processes that knew better
+        me = socket.gethostname().split(".")[0].lower()
+        name, looked = f"{me}.tail1234.ts.net", []
+        up = []                                            # the tailnet: down, then up
+
+        def resolve(host, *a, **kw):
+            looked.append(host)
+            if not up:
+                raise socket.gaierror(socket.EAI_AGAIN, "Temporary failure in name resolution")
+            return [(socket.AF_INET, socket.SOCK_STREAM, 6, "", ("100.64.0.7", 0))]
+        ip_out = ["1: lo    inet 127.0.0.1/8 scope host lo\n"]
+
+        def run(argv, **kw):
+            return subprocess.CompletedProcess(argv, 0, ip_out[0] if argv[0] == "ip" else "", "")
+        for f in (models._own_addresses, models._named_here):
+            f.cache_clear()
+            self.addCleanup(f.cache_clear)
+        with mock.patch.object(models.socket, "getaddrinfo", resolve), \
+                mock.patch.object(models.socket, "getfqdn", lambda *a: "desk.corp.example"), \
+                mock.patch.object(models.subprocess, "run", run):
+            self.assertFalse(models._this_host(name))
+            self.assertFalse(models._this_host(name))
+            self.assertEqual(looked.count(name), 1)         # within DOWN_SECS: not asked again
+            up.append(1)
+            ip_out[0] += "3: tailscale0    inet 100.64.0.7/32 scope global tailscale0\n"
+            with mock.patch.object(models, "DOWN_SECS", 0), mock.patch.object(models, "ADDR_SECS", 0):
+                self.assertTrue(models._this_host(name))    # asked again, and the tailnet IP is ours
+                self.assertTrue(models._this_host("100.64.0.7"))
+            n = len(looked)
+            self.assertTrue(models._this_host(name))        # a definite answer: kept
+            self.assertEqual(len(looked), n)
+
     def test_wb_remote_registers_the_tool_models_of_another_machines_ollama_and_remove_undoes_it(self):
         ctx = {"llama.context_length": 131072}
         srv, port = fake_remote_ollama(

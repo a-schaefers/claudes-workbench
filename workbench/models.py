@@ -32,7 +32,6 @@ from __future__ import annotations
 
 import contextlib
 import fcntl
-import functools
 import ipaddress
 import json
 import os
@@ -127,7 +126,7 @@ def server_key(url: str, remote: bool = False) -> tuple:
     own name or address are one server. Compared as strings, two spellings of one Ollama made
     free_gpu unload the models it was told to keep (the 2026-11-16 audit), and wb model retire
     --delete delete the default's weights (#368, the audit of 1.6). This runs on every
-    admission: a host name is looked up once per process (_named_here)."""
+    admission: a host name is looked up once per process, or a minute when it failed (_named_here)."""
     u = urlparse(url)
     here = not remote and _this_host(u.hostname)
     return ("this host" if here else (u.hostname or "").lower(),
@@ -392,9 +391,17 @@ def _overrides() -> dict:
     return data if isinstance(data, dict) else {}
 
 
-@functools.lru_cache(maxsize=1)
+# _own_addresses' last reading: (time.monotonic(), addresses). Kept for the process, a tailnet
+# IP that came up after a runner, the chat server or wb top started never counted (#900)
+_ADDRS: list = []
+ADDR_SECS = 60
+
+
 def _own_addresses() -> frozenset:
-    """This machine's own IP addresses (LAN, Tailscale, ...): a provider at one of them is local."""
+    """This machine's own IP addresses (LAN, Tailscale, ...): a provider at one of them is local.
+    Read again after ADDR_SECS."""
+    if _ADDRS and time.monotonic() - _ADDRS[0][0] < ADDR_SECS:
+        return _ADDRS[0][1]
     found = set()
     try:
         found |= {a[4][0] for a in socket.getaddrinfo(socket.gethostname(), None)}
@@ -413,7 +420,11 @@ def _own_addresses() -> frozenset:
                   for line in out.splitlines() for i, w in enumerate(line.split())
                   if i and line.split()[i - 1] in ("inet", "inet6")}
         break
-    return frozenset(found)
+    _ADDRS[:] = [(time.monotonic(), frozenset(found))]
+    return _ADDRS[0][1]
+
+
+_own_addresses.cache_clear = _ADDRS.clear  # as the lru_cache it was, for the tests
 
 
 def _this_host(host: str | None) -> bool:
@@ -434,29 +445,48 @@ def _this_host(host: str | None) -> bool:
 RESOLVE_WAIT = 1.0  # seconds a baseURL's host name gets to resolve; slower counts as another host
 
 
-@functools.lru_cache(maxsize=64)
+# _named_here's lookups by name: (time.monotonic(), True for this machine's FQDN, the addresses
+# it resolved to, or None for a lookup that failed or ran past RESOLVE_WAIT)
+_NAMES: dict[str, tuple] = {}
+
+
 def _named_here(name: str) -> bool:
     """Whether the host name ``name`` is this machine by another name: its FQDN (or that's short
     form), or a name (LAN DNS, a tailnet's) that resolves to a loopback or own address. A config
     naming the box as box.lan or box.tail1234.ts.net was another host: a GPU pool of its own, no
-    sharing, residency or fit check, and the local lease never saw it (#807). Once per process
-    (server_key runs on every admission), within RESOLVE_WAIT; a failure is not this machine."""
-    out: list = []
+    sharing, residency or fit check, and the local lease never saw it (#807). Looked up once per
+    process (server_key runs on every admission), within RESOLVE_WAIT; a failure or a timeout is
+    not this machine for now, and looked up again after DOWN_SECS: kept for good, a slow DNS or a
+    tailnet reconnecting after a wake made a runner or the chat server take this machine's server
+    for another host's for hours, beside processes that knew better (#900). The addresses a name
+    resolved to are checked against _own_addresses each time, which are read again too."""
+    hit = _NAMES.get(name)
+    if hit is None or (hit[1] is None and time.monotonic() - hit[0] >= DOWN_SECS):
+        out: list = []
 
-    def look():
-        try:
-            fq = socket.getfqdn().lower()
-            if name in (fq, fq.split(".")[0]):
-                out.append(True)
-                return
-            ips = {a[4][0].split("%")[0] for a in socket.getaddrinfo(name, None)}
-            out.append(any(ipaddress.ip_address(ip).is_loopback or ip in _own_addresses() for ip in ips))
-        except (OSError, ValueError, UnicodeError):
-            out.append(False)
-    t = threading.Thread(target=look, daemon=True)
-    t.start()
-    t.join(RESOLVE_WAIT)
-    return bool(out and out[0])
+        def look():
+            try:
+                fq = socket.getfqdn().lower()
+                if name in (fq, fq.split(".")[0]):
+                    out.append(True)
+                    return
+                out.append(frozenset(a[4][0].split("%")[0] for a in socket.getaddrinfo(name, None)))
+            except (OSError, ValueError, UnicodeError):
+                out.append(None)
+        t = threading.Thread(target=look, daemon=True)
+        t.start()
+        t.join(RESOLVE_WAIT)
+        hit = _NAMES[name] = (time.monotonic(), out[0] if out else None)
+    found = hit[1]
+    if found is None or found is True:
+        return bool(found)
+    try:
+        return any(ipaddress.ip_address(ip).is_loopback or ip in _own_addresses() for ip in found)
+    except ValueError:
+        return False
+
+
+_named_here.cache_clear = _NAMES.clear  # as the lru_cache it was, for the tests
 
 
 _ENGINES: dict[str, str] = {}  # root -> engine, once its server has answered
