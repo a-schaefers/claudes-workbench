@@ -4959,6 +4959,22 @@ class Steering(Base):
             run_wb("status")
         self.assertEqual(store.Task("t-m1").status["phase"], "failed")
 
+    def test_the_bail_out_stops_this_machines_agents_while_another_machine_runs_a_bench(self):
+        # the review of #876: wb bench stop's refusal of another machine's driver came out of
+        # a plain wb stop --all too, which died with it before stopping any task here
+        from workbench import bench
+        self.start("t-far1", "slow")
+        self.wait_session("t-far1")
+        bench.home().mkdir(parents=True, exist_ok=True)
+        store.write_json(bench.home() / "driver.json", {"pid": 999999999, "run": "r-far",
+                                                        "machine": "another-machine", "host": "lab-2"})
+        (bench.home() / "driver.lock").touch()              # beating there
+        out = run_wb("stop", "--all")
+        self.assertIn("stopped: t-far1", out)
+        self.assertIn("left running: bench run r-far runs on lab-2", out)
+        self.assertEqual(store.Task("t-far1").status["phase"], "stuck")
+        self.assertFalse(cli.runner_alive(store.Task("t-far1")))
+
     def test_another_machines_runner_that_stopped_beating_is_reaped_and_stoppable_here(self):
         # #872 (Claude's audit of 1.90.24): a runner killed with its machine (a recreated
         # container with a new host name, a reimaged machine) kept its task running for good:

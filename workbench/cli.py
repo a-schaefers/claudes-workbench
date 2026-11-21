@@ -2002,11 +2002,17 @@ def _park_waiting(a) -> str:
 def cmd_stop(a):
     if a.all:
         # everything, without --repo/--session: the bench's driver too, first, so it starts nothing
-        driver = None if a.repo or a.session else bench.stop_driver()
+        driver, far = None, ""
+        if not (a.repo or a.session):
+            try:
+                driver = bench.stop_driver()
+            except RuntimeError as e:  # another machine's run: that one's to stop there, and the
+                far = str(e)           # bail-out died before stopping any task here (#876 review)
         mine, others = _scope(_open_tasks(), *_caller(a))
         stopped = ([f"wb bench (pid {driver})"] if driver else []) + stop_everything(mine)
         print("stopped: " + ("; ".join(stopped) if stopped else "nothing was running"))
         _say(_others_line(others, "left running"))
+        _say(far and f"left running: {far}")
         if a.park_waiting:
             _say(_park_waiting(a))
         return
