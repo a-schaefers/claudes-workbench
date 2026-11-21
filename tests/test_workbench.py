@@ -16192,6 +16192,39 @@ class Projects(Base):
         self.assertEqual(self.git(d, "rev-parse", "HEAD"), before)
         self.assertEqual((d / "CLAUDE.md").read_text(), "# rules\nmore\n")
 
+    def test_init_commits_no_link_while_a_merge_or_cherry_pick_waits_for_the_user(self):
+        # the review of #931: during `git merge --no-commit`, the link's commit took MERGE_HEAD as
+        # its second parent with only HEAD's tree plus AGENTS.md, so the merge's changes were lost
+        # and MERGE_HEAD consumed (a later `git merge other` said "Already up to date")
+        self.identity()
+        for case in ("merge", "cherry-pick"):
+            with self.subTest(case):
+                d = Path(self.tmp.name) / f"init-{case}"
+                d.mkdir()
+                self.git(d, "init", "-q", "-b", "main")
+                (d / "CLAUDE.md").write_text("# rules\n")
+                self.git(d, "add", "CLAUDE.md"); self.git(d, "commit", "-qm", "docs")
+                self.git(d, "checkout", "-qb", "other")
+                (d / "theirs.txt").write_text("theirs\n")
+                self.git(d, "add", "theirs.txt"); self.git(d, "commit", "-qm", "theirs")
+                self.git(d, "checkout", "-q", "main")
+                if case == "merge":
+                    self.git(d, "merge", "-q", "--no-ff", "--no-commit", "other")
+                else:  # a conflict: the cherry-pick stops with CHERRY_PICK_HEAD
+                    (d / "theirs.txt").write_text("ours\n")
+                    self.git(d, "add", "theirs.txt"); self.git(d, "commit", "-qm", "ours")
+                    self.git(d, "cherry-pick", "other")
+                before = self.git(d, "rev-parse", "HEAD")
+                out = run_wb("init", str(d))
+                self.assertIn(f"not committed: a {case} is under way here, so commit AGENTS.md "
+                              "yourself once it is done", out)
+                self.assertEqual(self.git(d, "rev-parse", "HEAD"), before)
+                head = "MERGE_HEAD" if case == "merge" else "CHERRY_PICK_HEAD"
+                self.assertEqual(self.git(d, "rev-parse", "-q", "--verify", head), self.git(d, "rev-parse", "other"))
+                if case == "merge":
+                    self.assertEqual(self.git(d, "show", ":theirs.txt"), "theirs")  # the staged result kept
+                self.assertEqual(os.readlink(d / "AGENTS.md"), "CLAUDE.md")
+
     def identity(self):
         cfg = Path(self.tmp.name) / "gitconfig"
         cfg.write_text("[user]\n\temail = t@t\n\tname = t\n")

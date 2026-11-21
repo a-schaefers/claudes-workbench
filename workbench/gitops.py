@@ -2062,6 +2062,21 @@ def _merging(repo: Path) -> bool:
     return _run(repo, ("rev-parse", "-q", "--verify", "MERGE_HEAD"), check=False).returncode == 0
 
 
+# What git leaves in the git dir while an operation waits for the user's commit, and its name
+UNDER_WAY = (("MERGE_HEAD", "a merge"), ("CHERRY_PICK_HEAD", "a cherry-pick"),
+             ("REVERT_HEAD", "a revert"), ("rebase-merge", "a rebase"), ("rebase-apply", "a rebase"),
+             ("sequencer", "a cherry-pick or revert"))
+
+
+def under_way(repo: Path) -> str | None:
+    """The git operation waiting in ``repo`` for the user to finish it (UNDER_WAY), or None. A
+    commit made then is theirs to shape: during a merge, wb init's link commit took MERGE_HEAD as
+    its second parent with only HEAD's tree, so the merge's changes were lost and MERGE_HEAD
+    consumed (the review of #931)."""
+    paths = git(repo, "rev-parse", *(a for p, _ in UNDER_WAY for a in ("--git-path", p))).splitlines()
+    return next((what for (_, what), p in zip(UNDER_WAY, paths) if (Path(repo) / p).exists()), None)
+
+
 def ignored(repo: Path, path: str) -> bool:
     """Whether `path` is ignored in the checkout (.gitignore, info/exclude, the global excludes)."""
     return _run(repo, ("check-ignore", "-q", "--", path), check=False).returncode == 0

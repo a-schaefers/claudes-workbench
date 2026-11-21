@@ -4351,6 +4351,9 @@ def _commit_link(d: Path, head: dict, index: dict, moved: bool) -> str:
         changed = {p: e for p, e in new.items() if head.get(p) != e}
         if not changed:
             return "already committed"
+        if what := gitops.under_way(d):  # its commit is the user's (the review of #931)
+            return (f"not committed: {what} is under way here, so commit "
+                    + " and ".join(sorted(changed)) + " yourself once it is done")
         if (moved and "CLAUDE.md" not in new) or any(index.get(p) != head.get(p) for p in changed) \
                 or not {**head, **changed}.get("CLAUDE.md", ("",))[0].startswith("100"):
             return ("not committed: CLAUDE.md or AGENTS.md has changes of yours (staged, or not "
