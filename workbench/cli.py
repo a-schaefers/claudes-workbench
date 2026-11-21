@@ -23,7 +23,7 @@ from types import SimpleNamespace
 
 from . import (__version__, ask_mcp, audio, bench, chat, context, gitops, hardware, images, lane, lessons, models,
                optimize, progress, results, router, savings, scan, skills, spend, stats, store, transcript,
-               tuning, verify)
+               tuning, verify, webpush)
 from .watch import Watcher, wait_exit
 from . import runner
 from .runner import PKG_ROOT
@@ -3857,6 +3857,10 @@ def cmd_doctor(a):
         line(True, said)
     else:
         print(f"--  {said}")
+    if webpush.subscriptions() and not webpush.has_cas():  # every push failed, unsaid (#539)
+        line(False, "web chat notifications: this Python has no CA certificates, so no push reaches "
+             "its service: on macOS run Install Certificates.command (in your Python's Applications "
+             "folder); elsewhere install ca-certificates, or set SSL_CERT_FILE")
     found = models.discover()
     line(bool(found), f"{len(found)} local model(s)")
     for pid, why in models.skipped_providers():  # once dropped without a word (the 2026-11-16 audit)

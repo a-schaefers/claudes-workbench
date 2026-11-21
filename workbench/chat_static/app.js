@@ -963,7 +963,13 @@
         b.disabled = true
         try {
           const j = await (await post('/api/push', { test: true })).json()
-          pushNote = j.ok ? 'Sent: it should arrive in a few seconds.' : "The push service didn't take it: turn notifications off and on again."
+          // why it failed, from the computer's side: it all read as the service's refusal (#539)
+          const why = (j.reasons || []).length ? ` (${j.reasons[0]})` : ''
+          pushNote = j.ok ? 'Sent: it should arrive in a few seconds.'
+            : j.hint === 'cert' ? "The computer can't check the push service's certificate" + why + ': its Python has no CA certificates. On a Mac, run Install Certificates.command from your Python\'s folder in Applications; elsewhere install ca-certificates, or set SSL_CERT_FILE. Then restart the chat server.'
+            : j.hint === 'clock' ? 'The push service refused it' + why + ": check the computer's clock is right, then turn notifications off and on again."
+            : j.hint === 'unreached' ? "The computer couldn't reach the push service" + why + ': check its network, or a proxy in the way.'
+            : "The push service didn't take it" + why + ': turn notifications off and on again.'
         } catch { pushNote = 'Not sent: try again.' }
         drawSettings()
       }

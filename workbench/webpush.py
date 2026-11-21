@@ -13,6 +13,7 @@ import hashlib
 import json
 import os
 import secrets
+import ssl
 import time
 import urllib.error
 import urllib.request
@@ -36,6 +37,8 @@ SUBJECT = "https://github.com/a-schaefers/claudes-workbench"  # VAPID's contact:
 TTL = 86400               # a phone off for a day still gets the news when it's back
 SEND_TIMEOUT = 10
 MAX_SUBS = 20             # a phone, a tablet, a laptop or two: more is someone else's loop
+CERT = -1                 # a send's status: this machine couldn't check the service's certificate
+MAC_CAS = "/etc/ssl/cert.pem"  # macOS's own bundle, for a python.org Python with an empty store
 
 
 def _add(p, q):
@@ -133,18 +136,54 @@ def vapid(d: int, endpoint: str, now: float | None = None) -> str:
     return f"vapid t={jwt}.{b64u(sign(d, jwt.encode()))}, k={public_key(d)}"
 
 
-def send(d: int, endpoint: str, urgency: str = "high") -> int:
-    """One push with no payload; the push service's status (0: not reached)."""
+_ctx: list = []
+
+
+def tls() -> ssl.SSLContext:
+    """The context pushes go out with: the default one, and macOS's bundle when its store is
+    empty (python.org's Python before Install Certificates.command), as Apple's Python has it."""
+    if not _ctx:
+        ctx = ssl.create_default_context()
+        if not has_cas(ctx) and os.path.isfile(MAC_CAS):
+            try:
+                ctx.load_verify_locations(MAC_CAS)
+            except (OSError, ssl.SSLError):
+                pass
+        _ctx.append(ctx)
+    return _ctx[0]
+
+
+def has_cas(ctx: ssl.SSLContext | None = None) -> bool:
+    """Whether this Python can check a push service's certificate: CA certificates loaded, or a
+    CA directory with files in it (OpenSSL reads one only as it needs them, so they don't count yet)."""
+    ctx = ctx or tls()
+    if ctx.cert_store_stats().get("x509_ca"):
+        return True
+    capath = ssl.get_default_verify_paths().capath
+    try:
+        return bool(capath) and any(os.scandir(capath))
+    except OSError:
+        return False
+
+
+def send(d: int, endpoint: str, urgency: str = "high") -> tuple[int, str]:
+    """One push with no payload: the push service's status (0: not reached; CERT: its certificate
+    couldn't be checked here, for good) and why it failed ("" when taken). The reason was dropped,
+    so an empty CA store read as the push service's refusal on the page and left serve.log empty
+    (#539, the 2026-11-20 audit)."""
     req = urllib.request.Request(endpoint, data=b"", method="POST", headers={
         "TTL": str(TTL), "Urgency": urgency, "Authorization": vapid(d, endpoint),
         "Content-Length": "0"})
     try:
-        with urllib.request.urlopen(req, timeout=SEND_TIMEOUT) as r:
-            return r.status
+        with urllib.request.urlopen(req, timeout=SEND_TIMEOUT, context=tls()) as r:
+            return r.status, ""
     except urllib.error.HTTPError as e:
-        return e.code
-    except (urllib.error.URLError, OSError):
-        return 0
+        return e.code, f"HTTP {e.code} {e.reason}".strip()
+    except (urllib.error.URLError, OSError) as e:
+        why = e.reason if isinstance(e, urllib.error.URLError) else e
+        if isinstance(why, ssl.SSLCertVerificationError):
+            return CERT, f"certificate not verified: {why.verify_message or why}"
+        return 0, str(why) or type(why).__name__
 
 
 # ---- subscriptions: chat/push.json {"subs": [{endpoint, ts, ua}]} ----
@@ -172,13 +211,12 @@ def unsubscribe(endpoint: str) -> None:
 
 def push_all(d: int, endpoints: list[str] | None = None) -> dict:
     """Push every subscription (or these of them); one the service says is gone (404, 410) is
-    dropped. Each endpoint's status (0: not reached)."""
+    dropped. Each endpoint's (status, reason), as `send`."""
     out = {}
     for s in subscriptions():
         if endpoints is not None and s["endpoint"] not in endpoints:
             continue
-        status = send(d, s["endpoint"])
-        out[s["endpoint"]] = status
-        if status in (404, 410):
+        out[s["endpoint"]] = got = send(d, s["endpoint"])
+        if got[0] in (404, 410):
             unsubscribe(s["endpoint"])
     return out

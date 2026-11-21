@@ -555,8 +555,26 @@ def _pushed() -> dict[str, set]:
 
 
 def _transient(status: int) -> bool:
-    """A push that may go through if tried again: not reached, rate-limited, the service's fault."""
+    """A push that may go through if tried again: not reached, rate-limited, the service's fault.
+    A certificate this machine can't check (webpush.CERT) is for good: retried every 30 s for 15
+    minutes, it was then dropped without a word (#539)."""
     return status == 0 or status == 429 or status >= 500
+
+
+def _result(got) -> tuple[int, str]:
+    """A send's (status, reason) from push_all, or a bare status (a test's sender)."""
+    return (got, "") if isinstance(got, int) else (int(got[0]), str(got[1] or ""))
+
+
+def push_hint(results: dict) -> str:
+    """What the page tells the user when a test push failed: `cert` (this machine can't check the
+    service's certificate), `clock` (a 403: VAPID's expiry, read against a skewed clock),
+    `unreached`, `refused`, or "" when one went through."""
+    got = [_result(v)[0] for v in results.values()]
+    if not got or any(200 <= c < 300 for c in got):
+        return ""
+    return ("cert" if webpush.CERT in got else "clock" if 403 in got
+            else "unreached" if all(_transient(c) for c in got) else "refused")
 
 
 def mark_seen(ids, by: str, endpoint: str | None = None) -> None:
@@ -590,6 +608,7 @@ class Pusher:
         self.hub = hub
         self.send = send or (lambda eps: webpush.push_all(webpush.private_key(token_path()), eps))
         self.retry_at: dict[str, float] = {}  # endpoint: when a failed one may be tried again
+        self.said: set[str] = set()  # failure reasons already in serve.log
 
     def tick(self, now: float | None = None) -> list[str]:
         """The ids pushed now, to at least one device."""
@@ -609,16 +628,28 @@ class Pusher:
         got = self.send(owed) or {}
         took = False
         for e in owed:
-            if _transient(got.get(e, 0)):
+            status, why = _result(got.get(e, 0))
+            if not 200 <= status < 300:
+                self._say(e, status, why)
+            if _transient(status):
                 self.retry_at[e] = now + PUSH_RETRY
                 continue
             self.retry_at.pop(e, None)  # delivered, or refused for good (gone: unsubscribed)
-            took = True
-            for i in due:
+            ok = 200 <= status < 300
+            took |= ok
+            for i in due:  # a refusal isn't tried again, and isn't written down as delivered (#539)
                 if e not in pushed.get(i, ()):
-                    store.append_jsonl(chat_dir() / "seen.jsonl",
-                                       {"id": i, "ts": store.now(), "by": "push", "endpoint": e})
+                    store.append_jsonl(chat_dir() / "seen.jsonl", {"id": i, "ts": store.now(), "endpoint": e,
+                                       **({"by": "push"} if ok else {"by": "refused", "status": status})})
         return due if took else []
+
+    def _say(self, endpoint: str, status: int, why: str) -> None:
+        """Each distinct failure once in serve.log: they were dropped, and the log stayed empty (#539)."""
+        why = why or f"status {status}"
+        if why not in self.said:
+            self.said.add(why)
+            print(f"web chat: a push to {urlsplit(endpoint).hostname} failed: {why}",
+                  file=sys.stderr, flush=True)
 
     def run(self) -> None:
         seen = -1
@@ -1315,7 +1346,10 @@ class Handler(BaseHTTPRequestHandler):
             if body.get("test") is True:
                 store.write_json(chat_dir() / "push-test.json", {"ts": store.now()})
                 sent = webpush.push_all(webpush.private_key(token_path()))
-                return self._json(200, {"sent": len(sent), "ok": sum(1 for s in sent.values() if 200 <= s < 300)})
+                got = [_result(v) for v in sent.values()]
+                return self._json(200, {"sent": len(sent), "ok": sum(1 for c, _ in got if 200 <= c < 300),
+                                        "hint": push_hint(sent),
+                                        "reasons": sorted({w for c, w in got if w and not 200 <= c < 300})})
             endpoint, on = body.get("endpoint"), body.get("on")
             if not webpush.accepted(endpoint) or not isinstance(on, bool):
                 return self._json(400, {"error": "push is {endpoint: a push service's https URL, on: true|false}"})

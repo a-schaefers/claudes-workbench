@@ -11343,7 +11343,7 @@ class WebChat(Base):
         self.addCleanup(svc.server_close)
         self.addCleanup(svc.shutdown)
         d = wp.private_key(self.chat.token_path())
-        self.assertEqual(wp.send(d, f"http://127.0.0.1:{svc.server_address[1]}/sub/1"), 201)
+        self.assertEqual(wp.send(d, f"http://127.0.0.1:{svc.server_address[1]}/sub/1"), (201, ""))
         headers, body = got[0]
         self.assertEqual(body, b"")
         self.assertEqual(headers["TTL"], str(wp.TTL))
@@ -11388,8 +11388,8 @@ class WebChat(Base):
         self.assertEqual(self.call("/api/push", {"endpoint": good, "on": False}, token=tok)[0], 200)
         self.assertEqual(wp.subscriptions(), [])
         wp.subscribe(good)
-        with mock.patch.object(wp, "send", return_value=410):           # the service says it's gone
-            self.assertEqual(wp.push_all(1), {good: 410})
+        with mock.patch.object(wp, "send", return_value=(410, "HTTP 410 Gone")):  # the service says it's gone
+            self.assertEqual(wp.push_all(1), {good: (410, "HTTP 410 Gone")})
         self.assertEqual(wp.subscriptions(), [])
         # #86: each device on its own; one its service failed for now is tried again, alone
         flaky = "https://web.push.apple.com/QF"
@@ -11415,6 +11415,74 @@ class WebChat(Base):
         page = self.call("/sw.js")
         self.assertEqual(page[0], 200)
         self.assertEqual(self.call("/icon-192.png")[0], 200)
+
+    def test_a_push_that_fails_says_why_in_the_log_and_on_the_page_and_a_refusal_is_not_delivered(self):
+        # #539 (the 2026-11-20 audit, reproduced with an empty SSL_CERT_FILE): send returned 0 with
+        # the reason dropped, the page blamed the push service, serve.log stayed empty, the push was
+        # retried for 15 minutes, and a 403 was written down as delivered
+        chat, tok = self.chat, self.chat.token()
+        from workbench import webpush as wp
+        import http.server
+        import ssl
+        import threading
+        tmp = Path(self.tmp.name)
+        subprocess.run(["openssl", "req", "-x509", "-newkey", "ec", "-pkeyopt", "ec_paramgen_curve:P-256",
+                        "-nodes", "-keyout", tmp / "k.pem", "-out", tmp / "c.pem", "-days", "1",
+                        "-subj", "/CN=localhost"], check=True, capture_output=True)
+
+        class Svc(http.server.BaseHTTPRequestHandler):
+            def do_POST(self):
+                self.send_response(201)
+                self.end_headers()
+
+            def log_message(self, *a):
+                pass
+        svc = http.server.HTTPServer(("127.0.0.1", 0), Svc)
+        tls = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+        tls.load_cert_chain(tmp / "c.pem", tmp / "k.pem")
+        svc.socket = tls.wrap_socket(svc.socket, server_side=True)
+        threading.Thread(target=svc.serve_forever, daemon=True).start()
+        self.addCleanup(svc.server_close)
+        self.addCleanup(svc.shutdown)
+        status, why = wp.send(wp.private_key(chat.token_path()), f"https://localhost:{svc.server_address[1]}/sub")
+        self.assertEqual(status, wp.CERT)                                    # a certificate it can't check
+        self.assertIn("certificate", why)
+        self.assertFalse(chat._transient(wp.CERT))                         # for good, not tried for 15 minutes
+
+        phone, desk = "https://web.push.apple.com/phone", "https://fcm.googleapis.com/fcm/send/desk"
+        wp.subscribe(phone)
+        wp.subscribe(desk)
+        answers = {phone: (wp.CERT, why), desk: (403, "HTTP 403 Forbidden")}
+        hub = chat.Hub()
+        self.addCleanup(hub.close)
+        pusher = chat.Pusher(hub, send=lambda eps: {e: answers[e] for e in eps})
+        news = chat.send("Done", "claude")
+        err = io.StringIO()
+        with redirect_stderr(err):
+            self.assertEqual(pusher.tick(news["ts"] + chat.PUSH_DELAY + 1), [])  # nothing went
+            again = chat.send("Again", "claude")
+            pusher.tick(again["ts"] + chat.PUSH_DELAY + 1)
+        log = err.getvalue().splitlines()
+        self.assertEqual(len(log), 2, log)                                   # each reason once
+        self.assertIn("web.push.apple.com failed: certificate not verified", log[0])
+        self.assertIn("fcm.googleapis.com failed: HTTP 403 Forbidden", log[1])
+        self.assertEqual(pusher.retry_at, {})
+        rows = [r for r in store.read_jsonl(chat.chat_dir() / "seen.jsonl")[0] if r["id"] == news["id"]]
+        self.assertEqual(sorted((r["by"], r["status"]) for r in rows), [("refused", wp.CERT), ("refused", 403)])
+
+        for got, hint in (({phone: (wp.CERT, why)}, "cert"), ({phone: (403, "HTTP 403 Forbidden")}, "clock"),
+                          ({phone: (0, "timed out")}, "unreached"), ({phone: (400, "HTTP 400")}, "refused"),
+                          ({phone: (201, ""), desk: (403, "x")}, "")):
+            with mock.patch.object(wp, "push_all", return_value=got):
+                j = self.call("/api/push", {"test": True}, token=tok)[1]
+            self.assertEqual(j["hint"], hint, got)
+        self.assertEqual(j["reasons"], ["x"])
+        with mock.patch.object(wp, "has_cas", return_value=False):          # wb doctor says it, with a fix
+            buf = io.StringIO()
+            with redirect_stdout(buf), contextlib.suppress(SystemExit):
+                cli.main(["doctor"])
+        self.assertIn("BAD web chat notifications: this Python has no CA certificates", buf.getvalue())
+        self.assertTrue(wp.has_cas())                                        # this machine's has them
 
     def test_a_page_only_on_screen_silences_its_own_devices_push_and_not_the_phones(self):
         # #537 (the 2026-11-20 audit): a desktop tab left open behind the terminal reported what
