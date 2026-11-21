@@ -8640,6 +8640,34 @@ class Lane(Base):
                     self.assertEqual(out.returncode, 126, out.stderr)
                     self.assertIn("Permission denied", out.stderr)
 
+    @home_outside_the_lane
+    def test_on_wsl_a_drive_mounted_outside_mnt_stays_out_of_the_agents_reads(self):
+        # #914 (the third 2026-11-21 audit): with wsl.conf's `[automount] root = /`, the drives
+        # sat at /c and /d, which readable() kept whole: the agent could exec
+        # /c/Windows/System32/cmd.exe by its path, a Windows process outside the lane. Here the
+        # drive is in a readable place (a dotfile of the home), as / is for a drive at /c.
+        home = self.fake_home()
+        drive = home / ".c"
+        system32 = drive / "Windows" / "System32"
+        system32.mkdir(parents=True)
+        shutil.copy(TRUE, system32 / "cmd.exe")
+        (home / ".vim").mkdir()
+        mounts = home / "mounts"
+        mounts.write_text(f"C:\\134 {drive} 9p rw,noatime,aname=drvfs;path=C:\\;uid=1000 0 0\n")
+        task = self.bare_task("t-914", self.repo)
+        on_drive = lambda ps: [p for p in ps if p == str(drive) or p.startswith(f"{drive}/")  # noqa: E731
+                               or str(drive).startswith(p + "/")]
+        self.assertTrue(on_drive(context.readable(task)))     # off WSL: a dotfile like any
+        with mock.patch("workbench.hardware.system", return_value="wsl"), \
+                mock.patch.object(context, "MOUNTS", str(mounts)):
+            r = context.readable(task)
+            self.assertEqual(on_drive(r), [])
+            self.assertIn(str(home / ".vim"), r)               # the rest of its parent stays
+            if lane.abi():  # out of the read lane, the exec itself is refused
+                out = subprocess.run(lane.wrap(context.writable(task), [str(system32 / "cmd.exe")], r),
+                                     capture_output=True, text=True, timeout=20)
+                self.assertEqual(out.returncode, 126, out.stderr)
+
     @unittest.skipUnless(lane.abi() and os.path.isdir("/dev/pts"), "needs Landlock")
     def test_a_pty_needs_dev_pts_granted_and_then_needs_nothing_more(self):
         # the 0.90 review: /dev/ptmx alone opens no pty ("out of pty devices"); the skill and

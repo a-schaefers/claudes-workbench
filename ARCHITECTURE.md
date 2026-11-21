@@ -1755,7 +1755,10 @@ deliberately hostile process (the 2026-11-16 audit's list of what it can't stop 
   Git for Windows, a Windows-only Node, whose `npm` the allowed `npm` resolved to) on the agent's
   PATH and in its read lane. With the lane on, their directories are dropped from the agent's
   `PATH` (`context.agent_path`, in `runner.agent_env`, which also drops `WSL_INTEROP`) and from
-  `tool_roots`, so `/mnt/<drive>` stays unreadable beyond the repo and grants; a Windows program
+  `tool_roots`, and `readable` treats each drive as an `ONLY_KEPT` root wherever it is mounted
+  (wsl.conf's `[automount] root = /` puts them at `/c`, `/d`, which `/` had read whole, so the
+  agent could run `/c/Windows/System32/cmd.exe` by its path: #914, the third 2026-11-21 audit),
+  so a drive stays unreadable beyond the repo and grants; a Windows program
   there can't be run even by full path, since `execve` opens it for reading and the read lane
   refuses that (the Lane test runs a program outside the read lane and gets `Permission denied`).
   A Windows program inside the lane (one the agent writes, or in a repo on a Windows drive) still

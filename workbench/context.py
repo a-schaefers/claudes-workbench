@@ -1130,8 +1130,9 @@ ONLY_KEPT = ("/dev", "/mnt", "/media", "/run/media", "/run/user", "/home")
 # runs through interop as a Windows process, as the user, outside Landlock and no-new-privileges.
 # The read lane let the agent start one: python3 running cmd.exe, or the allowed `npm` resolving to
 # a Windows-only Node (the 0.90 review). So on WSL they are left out of the agent's PATH
-# (agent_path) and of tool_roots: out of the read lane, the exec itself is refused, since execve
-# opens the program for reading. A Windows program inside the lane still runs (`wb doctor` says
+# (agent_path), of tool_roots and, wherever they are mounted, of the reads (readable keeps only
+# what is kept beneath them, as for ONLY_KEPT, #914): out of the read lane, the exec itself is
+# refused, since execve opens the program for reading. A Windows program inside the lane still runs (`wb doctor` says
 # so, interop_gap): only turning interop off closes that.
 MOUNTS = "/proc/self/mounts"
 DRIVE_LETTER = re.compile(r"/mnt/[a-zA-Z](/|$)")
@@ -1543,6 +1544,9 @@ def readable(task: store.Task) -> list[str] | None:
     own = (PKG_ROOT, task.dir, rules_dir(task))
     inner = {r for r in map(os.path.realpath, own) if any(_under(r, h) or r == h for h in hidden)}
     only_kept = {os.path.realpath(p) for p in ONLY_KEPT}
+    # and WSL's drives wherever they are mounted: at /c (wsl.conf's `[automount] root = /`) a
+    # drive was read whole, so the agent could exec cmd.exe by its path, outside the lane (#914)
+    only_kept |= set(windows_drives() or [])
     under = _under
     out: list[str] = []
 
