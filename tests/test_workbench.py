@@ -7967,6 +7967,51 @@ class Images(Base):
         self.assertIn("image engine fake wrote no image (it starts '<html><body>502", err.getvalue())
         self.assertEqual([p.name for p in (tmp / "html").iterdir() if p.name != "engine.log"], [])
 
+    def test_a_url_image_engines_unload_url_is_posted_with_its_body_after_the_batch_even_a_failed_one(self):
+        # #749 (the 2026-11-21 audit, finding 96): images.json's `unload` was checked but never
+        # called, so an image server kept 6-12 GB beside the next task's coding model
+        import base64, threading
+        from http.server import BaseHTTPRequestHandler, HTTPServer
+        from workbench import media
+        got, fail = [], [False]
+
+        class H(BaseHTTPRequestHandler):
+            def log_message(self, *a):
+                pass
+
+            def do_GET(self):
+                self.send_response(404); self.end_headers()
+
+            def do_POST(self):
+                got.append((self.path, json.loads(self.rfile.read(int(self.headers["Content-Length"])))))
+                if self.path == "/v1/images/generations" and fail[0]:
+                    self.send_response(500); self.end_headers(); return
+                body = json.dumps({"data": [{"b64_json": base64.b64encode(IMAGE_PNG).decode()}]})
+                self.send_response(200); self.end_headers(); self.wfile.write(body.encode())
+
+        srv = HTTPServer(("127.0.0.1", 0), H)
+        threading.Thread(target=srv.serve_forever, daemon=True).start()
+        self.addCleanup(srv.shutdown)
+        root, tmp = f"http://127.0.0.1:{srv.server_port}", Path(self.tmp.name)
+        entry = {"url": root + "/v1/images/generations", "unload": root + "/free",
+                 "unload_body": {"unload_models": True, "free_memory": True}}
+        self.engines({"comfy": entry})
+        held = []
+        with mock.patch.object(media, "gpu", lambda *a, **k: held.append(a) or nullcontext()):
+            run_wb("image", "a fox", "--n", "2", "--out", str(tmp / "o"))
+            self.assertEqual([p for p, _ in got], ["/v1/images/generations"] * 2 + ["/free"])
+            self.assertEqual(got[-1][1], {"unload_models": True, "free_memory": True})
+            got.clear(); fail[0] = True
+            with self.assertRaises(SystemExit), redirect_stderr(io.StringIO()):
+                run_wb("image", "a fox", "--n", "2", "--out", str(tmp / "o"))
+            self.assertEqual(got[-1], ("/free", {"unload_models": True, "free_memory": True}))
+        self.assertEqual(len(held), 2)                        # on this GPU: inside the lease
+        self.assertNotIn("(no unload URL)", run_wb("image", "--list"))
+        self.engines({"srv": {"url": entry["url"]}})
+        self.assertIn("a server: it holds its GPU memory while it runs (no unload URL)", run_wb("image", "--list"))
+        self.engines({"bad": {**entry, "unload_body": "free"}})
+        self.assertIn("not usable: unload_body must be a JSON object", run_wb("image", "--list"))
+
     def test_wb_image_list_as_a_word_lists_the_engines_instead_of_drawing(self):
         # like `wb skill list`: it took the GPU and drew four pictures of "list" (the 2026-11-16 audit)
         tmp = Path(self.tmp.name)

@@ -3287,8 +3287,9 @@ def image_lines() -> list[str]:
         out.append(f"  {name}{'' if media.on_gpu(e) else ' (off the GPU)'}: "
                    f"{str(e.get('label') or e.get('command') or e.get('url') or '')[:60]}"
                    f" · {'ready' if not why else why}"
-                   + (" · a server: it holds its GPU memory while it runs" if e.get("url")
-                      and not e.get("command") and media.on_gpu(e) else "")
+                   + (" · a server: it holds its GPU memory while it runs"
+                      + ("" if e.get("unload") else " (no unload URL)")  # #749, as audio's
+                      if e.get("url") and not e.get("command") and media.on_gpu(e) else "")
                    + (f"\n    {e['notes']}" if e.get("notes") else ""))
     return out
 

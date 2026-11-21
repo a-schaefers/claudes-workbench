@@ -86,6 +86,8 @@ def problem(e: dict, kinds: tuple[str, ...] = ()) -> str:
         return "voices must be a list of names"
     if "gpu" in e and not isinstance(e["gpu"], bool):
         return "gpu must be true or false"
+    if "unload_body" in e and not isinstance(e["unload_body"], dict):
+        return "unload_body must be a JSON object"
     if kinds and "kind" in e and e["kind"] not in kinds:
         return f"kind must be one of {', '.join(kinds)}"
     return ""
@@ -141,6 +143,33 @@ def post(e: dict, url: str, data: bytes, ctype: str, timeout: float,
         raise RuntimeError(f"{url} answered HTTP {err.code}" + (f": {said}" if said else "")
                            + (" (it wants an API key: `key` in the engine's entry)"
                               if err.code in (401, 403) and not e.get("key") else "")) from None
+
+
+def unload(used: list[dict], say, what: str, base: Path | None = None) -> None:
+    """A server engine keeps its model in GPU memory while it runs; each the batch used with an
+    `unload` URL is asked to let it go after the batch (`unload_body`, a JSON object, else {}:
+    ComfyUI's /free wants {"unload_models": true, "free_memory": true}, LocalAI's
+    /backend/shutdown {"model": …}), each URL once. Audio's listener too (#594); images had none,
+    so an image server kept 6-12 GB beside the next task's model (#749)."""
+    done = set()
+    for e in used:
+        if not e.get("unload") or e["unload"] in done:
+            continue
+        done.add(e["unload"])
+        try:
+            post(e, e["unload"], json.dumps(e.get("unload_body") or {}).encode(), "application/json",
+                 30, base)
+        except (OSError, RuntimeError, ValueError, http.client.HTTPException) as err:
+            say(f"couldn't unload the {what} server ({e['unload']}: {err}); it may still hold GPU memory")
+
+
+@contextlib.contextmanager
+def unloading(used: list[dict], say, what: str, base: Path | None = None):
+    """`unload` when the block ends, however it ends."""
+    try:
+        yield
+    finally:
+        unload(used, say, what, base)
 
 
 def ready(e: dict, kinds: tuple[str, ...] = (), base: Path | None = None) -> str:

@@ -13,7 +13,8 @@ An engine is whatever runs an image model on this machine, described in
   {"url": "http://127.0.0.1:…/v1/images/generations", "model": "…"}
                                    any server with the OpenAI images API (SGLang, vLLM-Omni,
                                    LocalAI…); the response's b64_json is saved (or
-                                   its url fetched); "key": its API key ({env:}, {file:})
+                                   its url fetched); "key": its API key ({env:}, {file:});
+                                   "unload": a URL that frees its GPU memory, "unload_body"
 plus optional "label", "notes" (licence, what it is good at: shown to Claude), "timeout" (s),
 "gpu" (false: not this machine's GPU; a url on another host is off it unless true).
 The first entry is the default. No model is named here: the user installs one and describes it.
@@ -22,7 +23,8 @@ What an engine writes must start like a PNG, JPEG or WebP; a JPEG or WebP keeps 
 A generation on the GPU holds the GPU lock and first unloads the coding models, as a task does;
 while a task holds the GPU it refuses at once, unless asked to wait. A command engine exits when it's done, so
 its memory is free again; a url engine is a server the user runs, which keeps its model in GPU
-memory for as long as it is up: workbench can't stop it.
+memory for as long as it is up, unless its "unload" URL (POSTed "unload_body", else {}, after
+each batch) makes it let go.
 """
 from __future__ import annotations
 
@@ -157,7 +159,8 @@ def generate(prompt: str, out_dir: Path, n: int = 4, size: tuple[int, int] = (10
     made = []
     # the GPU to itself, queued with the tasks; an engine off this GPU runs beside them (#587)
     hold = media.gpu("wb image", say, wait, media.serving(e)) if media.on_gpu(e) else contextlib.nullcontext()
-    with hold:
+    # the unload inside the lease, failed or not: the next task loads beside nothing (#749)
+    with hold, media.unloading([e], say, "image", config_path().parent):
         for i in range(n):
             s = seed + i
             # into a path of its own, then published under a name nothing has: two prompts with

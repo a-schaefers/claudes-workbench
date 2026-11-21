@@ -116,19 +116,8 @@ def _server(e: dict, values: dict) -> None:
 
 
 def _unload(used: list[dict], say) -> None:
-    """A server engine keeps its model in GPU memory while it runs; each the batch used with an
-    unload URL (audio.cpp's /v1/tasks/unload_all_models) is asked to let it go after the batch,
-    the listener too (only the maker was, so a GPU listener kept its VRAM after the lease was
-    let go: #594), each URL once."""
-    done = set()
-    for e in used:
-        if not e.get("unload") or e["unload"] in done:
-            continue
-        done.add(e["unload"])
-        try:
-            media.post(e, e["unload"], b"{}", "application/json", 30, config_path().parent)
-        except (OSError, RuntimeError) as err:
-            say(f"couldn't unload the audio server ({e['unload']}: {err}); it may still hold GPU memory")
+    """The engine's and the listener's `unload` URLs, after the batch (`media.unload`, #594)."""
+    media.unload(used, say, "audio", config_path().parent)
 
 
 def generate(text: str, out_dir: Path, kind: str | None = None, n: int = 3,

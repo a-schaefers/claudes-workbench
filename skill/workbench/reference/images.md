@@ -25,7 +25,8 @@ url on another host) runs beside tasks. Any other generation needs the GPU to it
 `wb image` refuses and names it; `--wait` (Bash `run_in_background: true`) queues behind it.
 While it runs (or waits), `wb start` refuses a new task (exit 4) unless `--queue`, which waits
 behind it; feedback, next and resume queue behind it. A url engine is a server that keeps its GPU
-memory while it runs: ask the user to stop it before big coding tasks.
+memory while it runs, unless its entry has an `unload` URL (`(no unload URL)` in the listing says
+it hasn't): then ask the user to stop it before big coding tasks.
 
 **No ready engine? Offer to set one up; never set it up unasked.** This is an optional step, as
 ARCHITECTURE.md's Images section (in the workbench code, two directories above `readlink -f "$(command -v wb)"`) says. Read `wb scout` for the OS and GPU, then propose in one

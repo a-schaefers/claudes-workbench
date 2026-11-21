@@ -4032,9 +4032,12 @@ A generation on this GPU takes the GPU lock and unloads the coding models first,
 a task holds the GPU, `wb image` refuses at once and names it; `--wait` queues behind it instead
 (run that in the background: it can take as long as the task). A command engine exits when it's
 done, so its memory is free for the next task. A url engine is a server you run: it keeps its
-model in GPU memory for as long as it is up, and workbench can't stop it, so a coding model loaded
-beside it may spill into RAM. Start it to make images and stop it afterwards (or give it a GPU of
-its own). `wb scout` and `wb image --list` show each engine, whether it's ready, and which are
+model in GPU memory for as long as it is up, so a coding model loaded beside it may spill into
+RAM. Give it an `unload` URL, POSTed after each batch, and `unload_body` when it wants one
+(ComfyUI: `"unload": "http://127.0.0.1:8188/free"`, `"unload_body": {"unload_models": true,
+"free_memory": true}`; A1111/Forge: `/sdapi/v1/unload-checkpoint`; LocalAI: `/backend/shutdown`
+with `{"model": …}`); without one, start it to make images and stop it afterwards (or give it a
+GPU of its own). The listing marks such a server `(no unload URL)`. `wb scout` and `wb image --list` show each engine, whether it's ready, and which are
 servers.
 Prefer weights in safetensors or GGUF from the model's own publisher or a well-known
 quantizer. Prefer tools that load models without running code that comes with them (ComfyUI's
@@ -4044,7 +4047,9 @@ custom-node packs do run their own Python).
 - `images.json` (`$WB_IMAGES`, default `~/.config/workbench/images.json`) maps an engine name to an
   entry; the first entry is the default, non-object values are ignored. Keys: `command` or `url`,
   `ref_arg`, `model`, `label`, `notes` (shown to Claude: put the licence there), `timeout` (s,
-  default 1800), `key` (a url engine's API key, `media.auth`: `models._expand`, no agent filter),
+  default 1800), `unload` and `unload_body` (a JSON object, else `{}`: `media.unload` POSTs it to
+  `unload` when the batch ends, inside the lease, failed or not, `media.unloading`; it was checked
+  but never called, and an image server kept 6-12 GB beside the next task's model, #749), `key` (a url engine's API key, `media.auth`: `models._expand`, no agent filter),
   `gpu` (`media.on_gpu`: false is off this GPU; unset, a url on another host is off
   it and anything else on; #587: a remote or CPU engine took the exclusive lease, unloaded the
   coding models and refused while any task ran).
@@ -4204,7 +4209,7 @@ it. ACE-Step's takes peaked at -0.2 dBFS, near clipping, before any `loudnorm`: 
 - A **url** engine is any OpenAI `/v1/audio/speech` server (audio.cpp's `audiocpp_server`,
   Kokoro-FastAPI, Speaches). It makes speech only, since sound effects and music have no common
   API. `unload` is POSTed after each batch so the server lets its GPU memory go (audio.cpp's
-  `/v1/tasks/unload_all_models`), which a url image engine can't do. A listener's `unload` is
+  `/v1/tasks/unload_all_models`), as a url image engine's is (`unload_body` too). A listener's `unload` is
   POSTed too, each URL once (only the maker's was, so a GPU listener kept its weights after the
   lease was let go: #594). `key` is sent as a Bearer
   token, as for images, to the speech, transcription and unload URLs alike; an error status
@@ -4221,7 +4226,7 @@ it. ACE-Step's takes peaked at -0.2 dBFS, near clipping, before any `loudnorm`: 
 
 **How it works** (`workbench/audio.py`, `cli.cmd_audio`; shared with images: `workbench/media.py`).
 - `audio.json` keys: `command` or `url`, `kind` (`speech`, `sfx`, `music`, `listen`; default
-  `speech`), `gpu`, `voices`, `seconds`, `unload`, `key`, `ref_arg`, `model`, `label`, `notes`,
+  `speech`), `gpu`, `voices`, `seconds`, `unload`, `unload_body`, `key`, `ref_arg`, `model`, `label`, `notes`,
   `timeout` (s, default 1800; a listener's 600); `audio.ready` refuses a `kind` it doesn't know
   (it skipped the listener and took 10 s, #596). `engine(name, kind)` returns the named engine
   (refused when it's of another kind), else the first of `--kind`, else the first that isn't a
@@ -4233,7 +4238,7 @@ it. ACE-Step's takes peaked at -0.2 dBFS, near clipping, before any `loudnorm`: 
   published with its sidecar and spectrogram under the first free `<slug>-<seed>.wav`
   (`media.free`, #267). A url engine POSTs `{model, input, voice, seed, response_format: "wav"}`
   and saves the body. The `unload` URLs of the engine and the listener it used are POSTed
-  (`_unload`, each distinct URL once) when the batch ends, inside the lease, whether it failed or
+  (`_unload`, that is `media.unload`, each distinct URL once) when the batch ends, inside the lease, whether it failed or
   not.
 - `inspect`: with ffmpeg, it makes a 16-bit PCM copy first at the clip's own rate and channels
   (the `wave` module reads only integer PCM; `_plain_tag` marks the copy plain PCM, since for
