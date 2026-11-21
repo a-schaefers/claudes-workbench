@@ -2286,12 +2286,12 @@ async function deliver($: any, now: number) {
         // a web message does; refused, it is held like the rest, which deliver once the turn ends.
         if (row.kind === 'question') {
           if (!(await take($, name, row.ts))) { acked = row.ts; continue } // another session's wake took it
-          await $.fs.write(ackPath, String(row.ts)) // acknowledge before sending: never twice
+          await raiseAck($, ackPath, row.ts) // acknowledge before sending: never twice
           if (await intoTurn($, text)) {
             acked = row.ts
             continue
           }
-          await $.fs.write(ackPath, String(acked))
+          await release($, name, acked, row.ts) // only over this session's own mark (#786)
           mem.heldAsks.add(key)
         }
         held = true
@@ -2299,7 +2299,7 @@ async function deliver($: any, now: number) {
       }
       const prev = acked
       if (current && !(await take($, name, row.ts))) { acked = row.ts; continue } // taken by another
-      await $.fs.write(ackPath, String(row.ts)) // acknowledge before waking: never wake twice
+      await raiseAck($, ackPath, row.ts) // acknowledge before waking: never wake twice
       acked = row.ts
       if (!current) {
         // held through the turn and timed out unseen: said, not acknowledged in silence (#542)
@@ -2329,6 +2329,26 @@ async function take($: any, name: string, ts: number): Promise<boolean> {
   }
 }
 
+// The plain write after a take, for a wb that couldn't run: only ever up. Written unchecked, it
+// lowered a mark another session or `wb wait` had claimed since `wb ack` wrote this one, and that
+// later notice was delivered twice (#786).
+async function raiseAck($: any, ackPath: string, ts: number) {
+  if ((Number(await $.fs.read(ackPath).catch(() => '0')) || 0) < ts) await $.fs.write(ackPath, String(ts))
+}
+
+// A wake taken but not delivered goes back to `prev`, only while the mark is still this session's
+// `ts`: a compare-and-set under wb's lock (`wb ack <task> <prev> --if <ts>`); the plain write put
+// the old mark back over a notice claimed since, delivered twice then (#786). A wb that can't
+// run leaves the check-then-write, as before.
+async function release($: any, name: string, prev: number, ts: number) {
+  try {
+    const r = await $.process.run([mem.wb, 'ack', name, String(prev), '--if', String(ts)], { timeoutMs: 15_000 })
+    if (r.exitCode === 0 || r.exitCode === 3) return
+  } catch {}
+  const ackPath = `${mem.root}/tasks/${name}/acked`
+  if (Number(await $.fs.read(ackPath).catch(() => '0')) === ts) await $.fs.write(ackPath, String(prev))
+}
+
 // Into the running turn, as a message typed mid-turn would be (`listen` does the same for the web
 // chat): whether the engine took it.
 async function intoTurn($: any, text: string): Promise<boolean> {
@@ -2351,8 +2371,7 @@ async function wake($: any, name: string, text: string, prev: number, ts: number
   const r = await $.prompt.submit({ text: await awayToo($, text) }).catch((err: unknown) => ({ drop: String(err) }))
   if (!r?.drop) return
   mem.dropped.set(name, await $.clock.now())
-  const ackPath = `${mem.root}/tasks/${name}/acked`
-  if (Number(await $.fs.read(ackPath).catch(() => '0')) === ts) await $.fs.write(ackPath, String(prev))
+  await release($, name, prev, ts)
   warnOnce($, `drop:${name}`, `the wake for ${name} was dropped (${r.drop}); trying again in a minute`)
 }
 

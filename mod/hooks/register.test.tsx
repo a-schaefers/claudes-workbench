@@ -288,6 +288,21 @@ function task(files: Record<string, string>, name: string, phase: string, extra:
 const notice = (files: Record<string, string>, row: Record<string, any>) => {
   files['/wb/notify.jsonl'] = (files['/wb/notify.jsonl'] ?? '') + JSON.stringify(row) + '\n'
 }
+// `wb ack` as wb runs it, on the test's files: a claim (exit 3 when the mark is there already) or,
+// with --if, a rollback only while the mark is still that value (#786); `then` runs after a claim,
+// standing in for another session claiming next. Every other command: exit 0.
+function wbAck(files: Record<string, string>, then?: (name: string, ts: number) => void) {
+  return (_: any, e: any) => {
+    if (e.argv[1] !== 'ack') return { value: { exitCode: 0, stdout: '', stderr: '' } }
+    const [name, ts] = [e.argv[2], Number(e.argv[3])], path = `/wb/tasks/${e.argv[2]}/acked`
+    const now = Number(files[path] ?? 0)
+    const i = e.argv.indexOf('--if')
+    const ok = i > 0 ? now === Number(e.argv[i + 1]) : now < ts
+    if (ok) files[path] = String(ts)
+    if (ok && i < 0) then?.(name, ts)
+    return { value: { exitCode: ok ? 0 : 3, stdout: '', stderr: '' } }
+  }
+}
 const endTurn = (turnId: string) => ({ answer: '', durationMs: 1, isAborted: false, turnId, reason: 'answer' } as const)
 
 test('a session wakes for its own project\'s tasks only: another project\'s are left for their session', async ($, on) => {
@@ -743,7 +758,7 @@ test('a wake the engine drops is not acknowledged, and comes again a minute late
   task(files, 'fix-it', 'review')
   notice(files, { ts: ts0, task: 'fix-it', kind: 'review', text: 'REPORT' })
   fakeTasks(on, files)
-  on('process.run', () => ({ value: { exitCode: 0, stdout: '', stderr: '' } }))
+  on('process.run', wbAck(files))
   const toasts: string[] = []
   on('ui.toast', (_: any, e: any) => { toasts.push(e.text); return { value: undefined } })
   const tried: string[] = []
@@ -761,6 +776,48 @@ test('a wake the engine drops is not acknowledged, and comes again a minute late
   expect(tried[1]).toContain('Task `fix-it` is ready for review')
   await clock.advance(120_000)
   expect(tried).toHaveLength(2)                                 // once it went through
+})
+
+test('a mark another session claimed after this one\'s take is never written back lower (#786)', async ($, on) => {
+  // #786: after `wb ack` took R1, a later claim of R2 landed, and the mod's plain write of R1
+  // lowered the mark under it: its own next poll took R2 again, delivered by both
+  const clock = mock.clock(on, { now: 1_800_000_000_000 })
+  const files: Record<string, string> = {}
+  task(files, 'fix-it', 'review')
+  notice(files, { ts: ts0, task: 'fix-it', kind: 'review', text: 'REPORT' })
+  fakeTasks(on, files)
+  on('process.run', wbAck(files, name => { files[`/wb/tasks/${name}/acked`] = String(ts0 + 5) }))
+  on('ui.toast', () => ({ value: undefined }))
+  on('prompt.submit', (_: any, e: any) => ({ text: e.text }))
+  await $.session.start({ cwd: '/', surface: 'terminal', isInteractive: true })
+  await clock.advance(3000)
+  expect(files['/wb/tasks/fix-it/acked']).toBe(String(ts0 + 5))
+})
+
+test('a question the running turn refused goes back only while the mark is still this session\'s (#786)', async ($, on) => {
+  // #786: the refused send wrote the old mark back unconditionally, over a notice another
+  // session or wb wait had claimed meanwhile, which was then delivered a second time
+  const clock = mock.clock(on, { now: 1_800_000_000_000 })
+  const files: Record<string, string> = {}
+  task(files, 'fix-it', 'asking')
+  files['/wb/tasks/fix-it/ask/q1.json'] = JSON.stringify({ id: 'q1' })
+  notice(files, { ts: ts0, task: 'fix-it', kind: 'question', id: 'q1', text: 'Q: which config?' })
+  fakeTasks(on, files)
+  const runs: string[][] = []
+  const ack = wbAck(files)
+  on('process.run', (h: any, e: any) => { runs.push(e.argv.slice(1)); return ack(h, e) })
+  on('ui.toast', () => ({ value: undefined }))
+  on('session.id', () => ({ value: 'sess-1' }))
+  on('session.send', () => {                                      // refused, and meanwhile a later
+    files['/wb/tasks/fix-it/acked'] = String(ts0 + 7)            // notice was claimed elsewhere
+    return { isDelivered: false, reason: 'busy' }
+  })
+  on('prompt.submit', (_: any, e: any) => ({ text: e.text }))
+  await $.session.start({ cwd: '/', surface: 'terminal', isInteractive: true })
+  await $.turn.start({ text: 'a long review', turnId: 't1' })
+  await clock.advance(3000)
+  expect(runs).toContainEqual(['ack', 'fix-it', '0', '--if', String(ts0)])
+  expect(files['/wb/tasks/fix-it/acked']).toBe(String(ts0 + 7))  // not lowered under the claim
 })
 
 test('a notice already delivered (before a reload, or by wb wait) is not rewoken as lost', async ($, on) => {
@@ -936,7 +993,7 @@ test('a question held for a turn that could not take it, which then timed out, i
   files['/wb/tasks/fix-it/ask/q1.json'] = JSON.stringify({ id: 'q1' })
   notice(files, { ts: ts0, task: 'fix-it', kind: 'question', id: 'q1', text: 'Q: which config?' })
   fakeTasks(on, files)
-  on('process.run', () => ({ value: { exitCode: 0, stdout: '', stderr: '' } }))
+  on('process.run', wbAck(files))
   on('ui.toast', () => ({ value: undefined }))
   on('session.id', () => ({ value: 'sess-1' }))
   on('session.send', () => ({ isDelivered: false, reason: 'busy' }))  // refused: held for the turn

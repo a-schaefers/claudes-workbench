@@ -1334,20 +1334,36 @@ def _ack_all(task, upto: float | None = None):
     wb wait, the 2026-11-16 audit), and what its runner raises after it isn't; but the mark still
     stops short of another question still open (answer and allow write their answer first, so
     theirs isn't): answering the first of two acknowledged the second's notice before anything
-    delivered it, and the agent waited out the ask timeout (the 0.90 review)."""
-    acked = _acked(task)
-    phase = task.status.get("phase")
-    if upto is None:
-        news = "question" if phase == "asking" else "checkin" if phase in LIVE else phase
-        pending = [r["ts"] for r in store.notices()
-                   if r["task"] == task.name and r["kind"] == news and r["ts"] > acked]
-        upto = min(pending) - 0.001 if pending else store.now()
-    elif phase == "asking":  # not in review: a question from an older round is closed by then
-        still = [r["ts"] for r in store.notices()
-                 if r["task"] == task.name and r["kind"] == "question" and r["ts"] > acked
-                 and ask_mcp.is_open(task, str(r.get("id") or ""))]
-        upto = min([upto, *(ts - 0.001 for ts in still)])
-    _write_ack(task, max(acked, upto))
+    delivered it, and the agent waited out the ask timeout (the 0.90 review). Read and written
+    under the ack lock claim_ack takes, and never lowered: unlocked, a claim made between the
+    read and the write (the mod's `wb ack` of a question) was written over with a lower mark,
+    and the same notice was delivered again (#786)."""
+    with store.locked(store.task_lock(task.name, "ack")):
+        acked = _acked(task)
+        phase = task.status.get("phase")
+        if upto is None:
+            news = "question" if phase == "asking" else "checkin" if phase in LIVE else phase
+            pending = [r["ts"] for r in store.notices()
+                       if r["task"] == task.name and r["kind"] == news and r["ts"] > acked]
+            upto = min(pending) - 0.001 if pending else store.now()
+        elif phase == "asking":  # not in review: a question from an older round is closed by then
+            still = [r["ts"] for r in store.notices()
+                     if r["task"] == task.name and r["kind"] == "question" and r["ts"] > acked
+                     and ask_mcp.is_open(task, str(r.get("id") or ""))]
+            upto = min([upto, *(ts - 0.001 for ts in still)])
+        _write_ack(task, max(acked, upto))  # acked as read under the lock: never lower
+
+
+def release_ack(task, back: float, mine: float) -> bool:
+    """The mod's rollback of a wake the engine dropped or refused (`wb ack <task> <back> --if
+    <mine>`): the mark goes back to ``back`` only while it is still ``mine``, the value that
+    session set, under the ack lock. Its unconditional write put the old mark back over a notice
+    another session or wb wait had claimed since, which was then delivered twice (#786)."""
+    with store.locked(store.task_lock(task.name, "ack")):
+        if _acked(task) != mine:
+            return False
+        _write_ack(task, back)
+        return True
 
 
 def claim_ack(task, ts: float) -> bool:
@@ -1366,6 +1382,11 @@ def cmd_ack(a):
     """The mod's acknowledgement before a wake (claim_ack): exit 3 when another session or a
     wb wait took this notice first."""
     task = need(a.name)
+    if a.if_ts is not None:  # a rollback: only over this session's own mark (#786)
+        if not release_ack(task, a.ts, a.if_ts):
+            die(f"{a.name}: acknowledged since", 3)
+        print(f"released {a.name}")
+        return
     if not claim_ack(task, a.ts):
         die(f"{a.name}: already acknowledged", 3)
     print(f"acknowledged {a.name}")
@@ -5200,6 +5221,8 @@ def parser() -> argparse.ArgumentParser:
     s = sub.add_parser("ack", help="the mod's: take a task's notice before waking Claude "
                        "(exit 3 when taken already)")
     s.add_argument("name"); s.add_argument("ts", type=float)
+    s.add_argument("--if", dest="if_ts", type=float, metavar="TS",
+                   help="move the mark back to ts, only while it is still TS (a dropped wake's rollback)")
     s.set_defaults(f=cmd_ack)
     s = sub.add_parser("top", help="a live view of the GPUs, the running tasks, the models and the "
                        "GPU's queue (q quits)")

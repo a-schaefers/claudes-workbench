@@ -2325,7 +2325,13 @@ ended, every nearby session and the resumed one owned it for good, and both woke
 review). The wake itself is a compare-and-set too: before a wake the mod runs `wb ack <task>
 <ts>`, which moves `acked` under the task's `ack` lock only if it is below `ts` (`cli.claim_ack`,
 shared with `wb wait`), and exit 3, taken already, wakes no one; a `wb` that can't run leaves the
-mod's own write to decide. Two live sessions
+mod's own write to decide, which only ever raises the mark (`raiseAck`: written plainly after a
+take, it lowered a mark claimed since, #786). A wake taken but not delivered (the engine dropped
+the prompt, or the running turn refused a question) goes back through `wb ack <task> <prev> --if
+<ts>` (`cli.release_ack`, the mod's `release`): under the same lock, only while the mark is still
+the `ts` this session set, exit 3 otherwise; the unconditional write put the old mark back over a
+notice claimed meanwhile, delivered twice then (#786). A `wb` that can't run leaves the
+check-then-write. Two live sessions
 in one repo keep their own; a task with a `session` but no `claude_pid` stays its session's. One
 without a `session` (started by hand, or before 0.90) goes by directory: its `repo` is the session's directory or inside it, or the session's
 directory is inside the task's own spot (its package, `repo`/`subdir`; else its `cwd` when that is
@@ -6041,7 +6047,10 @@ kind its phase stands for exists (`question` while `asking`, `checkin` while que
 testing, else the phase name), the mark stops
 just before the oldest such notice, so news Claude hasn't seen stays deliverable; otherwise it
 moves to now; it never moves back (after a `wb note` seven seconds after a failure swallowed the
-failure notice for an hour). It's called by feedback, next, answer, allow, note, resume,
+failure notice for an hour). It reads and writes under the task's `ack` lock, the one
+`claim_ack` takes, and writes only a higher mark: unlocked, a `wb ack` of a question landing
+between its read and its write was written over with a lower mark, and the question was
+delivered twice (#786). It's called by feedback, next, answer, allow, note, resume,
 takeover, accept, discard and stop (one task or `--all`); not by steer, `skill hand|take`, diff,
 report or log. `_ack_all(task, upto=t)` moves the mark to `t` instead, the moment the command
 acted: answer, allow when it answers a request, feedback, next and resume, which handle the news
@@ -6088,7 +6097,7 @@ delivered as taken (`_stale_notes`, *Notes*).
 | `wb diff <task> [paths…]` | `--stat`, `--all` | The worktree against the task's base, or after `wb next` against the last committed step (`--all`: the whole branch); new files included. Once the worktree is gone (accepted, discarded), the git command for the branch's commits: from the base to status `tip`, the accepted commit, since `--merge` deletes the branch (#477); the branch for a task never accepted. |
 | `wb top` | `--json` (one object per tick, until its parent exits), `--every S` (0.2 to 3600 s, else exit 1; default stats.json `every`, else 2) | A live view of the machine (*Seeing what the agent does*, `wb top`): each GPU's memory, busy % and watts, the running tasks, every model (the rack) and the GPU lease's queue; on a terminal redrawn in place, `q` or Ctrl-C quits; elsewhere one plain pass. Never a model call, a load or a session export. |
 | `wb adopt <task>` | `--session ID…` (required: the claimer's ids, the current first), `--pid PID` (default `CLAUDE_PID`, else wb's parent) | The mod's (#687): under the task's command lock, a task whose recorded Claude Code process is gone becomes the claimer's (task.json `session`, kept when it is one of the ids, `claude_pid`, `claude_start`); exit 1 while that process lives, for a task with no `session` (it goes by directory) or a pid that runs nothing. |
-| `wb ack <task> <ts>` | | The mod's, before a wake (#687): moves the task's `acked` to `ts` under its `ack` lock unless it is there already (`cli.claim_ack`, which `wb wait` uses too); exit 3 when another session or a wait took the notice first. |
+| `wb ack <task> <ts>` | `--if TS` (the mod's rollback of a wake not delivered: the mark back to `ts` only while it is still `TS`, `cli.release_ack`, exit 3 otherwise, `released <task>`: #786) | The mod's, before a wake (#687): moves the task's `acked` to `ts` under its `ack` lock unless it is there already (`cli.claim_ack`, which `wb wait` uses too); exit 3 when another session or a wait took the notice first. |
 | `wb events` | | `{"hello": pid, "start": …, "parent": pid, "parent_start": …}` (the parent: the Claude Code process the mod claims tasks for, #687), then `{"changed": [paths]}` whenever `$WB_HOME` changes (not tasks' worktrees and rounds, closed tasks, `rules/`, `imports/`, `images/`, `audio/`, the bench's clones and runs, what a link leads to, `runner.log`, `*.lock`, `*.tmp`, dotfiles); reaps dead runners once a minute; exits when its parent does. The mod's ears. |
 
 ### Models, skills, lessons, notes
@@ -6191,7 +6200,7 @@ $WB_HOME (~/.local/state/workbench)
   locks/<task>.runner.lock       held by the task's runner for its life (its pid inside): one runner a task
   locks/<task>.cmd.lock          one wb command on the task at a time
   locks/<task>.<file>.lock       one writer of the task's status, events, steer and grants files
-  locks/<task>.ack.lock          one taker of the task's notice (`wb ack`, `wb wait`: cli.claim_ack, #687)
+  locks/<task>.ack.lock          one taker of the task's notice (`wb ack`, `wb wait`: cli.claim_ack, #687; _ack_all and release_ack, #786)
                                  (store.task_lock: every lock a task's writers take is here, where no
                                  lane reads; in the task's directory an agent held runner.lock, then
                                  status.lock, with flock, and every later runner exited at once, then

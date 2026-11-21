@@ -4691,6 +4691,36 @@ class Steering(Base):
         self.assertEqual(e.exception.code, 3)
         self.assertEqual(cli._acked(t), 100.5)
 
+    def test_acting_on_a_task_never_lowers_a_mark_claimed_meanwhile_and_a_rollback_is_only_ones_own(self):
+        # #786: _ack_all read `acked`, parsed notify.jsonl, then wrote: the mod's `wb ack` of a
+        # question in between was written over with a lower mark, and the question was delivered
+        # again; and the mod's rollback of a dropped wake wrote its old mark back over a later claim
+        import threading
+        t = store.Task("t-race")
+        store.write_json(t.dir / "task.json", {"name": "t-race", "created_at": store.now()})
+        t.set_status(phase="asking", round=1)
+        q = store.now()
+        t.notify("question", "which way?", round=1, ts=q, id="a1")
+        claimed, real = [], store.notices
+        th = threading.Thread(target=lambda: claimed.append(cli.claim_ack(t, q)))
+        def notices():                                  # the mod claims Q while _ack_all reads
+            th.start(); th.join(0.3)
+            claimed.append("read")
+            return real()
+        with mock.patch.object(store, "notices", notices):
+            cli._ack_all(t)
+        th.join(5)
+        self.assertEqual(claimed, ["read", True])        # the claim waited for the lock, then took Q
+        self.assertEqual(cli._acked(t), q)               # and the mark stayed at Q
+        self.assertFalse(cli.claim_ack(t, q))            # so nobody delivers Q again
+        # a rollback goes back only over the value its session set
+        with self.assertRaises(SystemExit) as e, redirect_stderr(io.StringIO()):
+            run_wb("ack", "t-race", "1.0", "--if", str(q - 5))
+        self.assertEqual(e.exception.code, 3)
+        self.assertEqual(cli._acked(t), q)
+        self.assertIn("released t-race", run_wb("ack", "t-race", "1.0", "--if", repr(q)))
+        self.assertEqual(cli._acked(t), 1.0)
+
     def test_plain_wb_status_from_claude_code_lists_the_calling_sessions_tasks(self):
         # #693: the skill and the compaction note send Claude to `wb status`, which listed every
         # session's open tasks as one, so one session could accept or discard another's
