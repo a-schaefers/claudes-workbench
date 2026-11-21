@@ -942,6 +942,9 @@ def cmd_start(a):
     if why := gitops.branch_clash(repo, a.name):  # a branch `delegate` too (#792)
         shutil.rmtree(task.dir, ignore_errors=True)
         die(why)
+    if base and (why := gitops.case_clash(repo, base, task.dir, a.base)):
+        shutil.rmtree(task.dir, ignore_errors=True)
+        die(why)  # #797: the checkout would have two paths in one file
     store.write_json(task.dir / STARTING, {"repo": str(repo), "worktree": str(wt),
                                            "pid": os.getpid(), "at": store.now(),
                                            "start": models._started(os.getpid())})

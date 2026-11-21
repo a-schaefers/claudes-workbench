@@ -674,6 +674,37 @@ class Lifecycle(Base):
         gitops._modes_hold.cache_clear()
         self.assertIsNone(gitops._modes_hold(str(Path(self.tmp.name) / "nowhere")))
 
+    def test_a_base_with_paths_differing_only_by_case_is_refused_on_a_case_folding_state_dir(self):
+        # #797 (the second 2026-11-21 audit, reproduced on a casefold tmpfs): one file was
+        # written for docs/API.md and docs/api.md, the review showed the other as the agent's
+        # change, and an edit to one was committed to the other
+        g = lambda *a: subprocess.run(["git", "-C", str(self.repo), *a], check=True,  # noqa
+                                      capture_output=True)
+        (self.repo / "docs").mkdir()
+        (self.repo / "docs" / "API.md").write_text("upper\n")
+        (self.repo / "docs" / "api.md").write_text("lower\n")
+        g("add", "docs")
+        g("commit", "-qm", "twins")
+        with mock.patch.object(gitops, "_case_folds", return_value=True):
+            err = io.StringIO()
+            with redirect_stderr(err), self.assertRaises(SystemExit):
+                self.start("t-twins", "ok")
+            self.assertIn("HEAD tracks paths that differ only by case (docs/API.md and docs/api.md)",
+                          err.getvalue())
+            self.assertIn("case-sensitive volume", err.getvalue())
+            self.assertFalse(store.Task("t-twins").dir.exists())
+            wt = Path(self.tmp.name) / "wt"
+            with self.assertRaisesRegex(gitops.GitError, "differ only by case"):
+                gitops.create_worktree(self.repo, "t-twins", wt)
+            self.assertFalse(wt.exists())
+            self.assertEqual(g("branch", "--list", "delegate/t-twins").stdout, b"")
+        with mock.patch.object(gitops, "_case_folds", return_value=False):   # a case-sensitive one
+            self.assertEqual(gitops.case_clash(self.repo, "HEAD", self.repo), "")
+        g("rm", "-q", "docs/api.md")
+        g("commit", "-qm", "one")
+        with mock.patch.object(gitops, "_case_folds", return_value=True):
+            self.assertEqual(gitops.case_clash(self.repo, "HEAD", self.repo), "")
+
     def test_the_agents_own_git_sees_the_worktrees_file_system_as_wbs_git_does(self):
         # #796 (the second 2026-11-21 audit): core.filemode and core.ignorecase were pinned for
         # wb's calls only, so on a file system unlike the repo's the agent's `git status` listed

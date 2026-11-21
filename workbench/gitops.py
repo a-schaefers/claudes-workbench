@@ -329,6 +329,30 @@ def branch_clash(repo: Path, task: str) -> str:
     return ""
 
 
+def case_clash(repo: Path, commit: str, where: Path, name: str = "") -> str:
+    """Why ``commit`` can't be checked out faithfully under ``where``, or "": its tree holds paths
+    that differ only by case (docs/API.md and docs/api.md, Makefile and makefile) and the file
+    system there folds case (macOS's default APFS, exFAT, a casefold mount). Only one file is
+    written for each pair, so the review showed the other as changed by the agent before it
+    did anything, and an edit to one was committed to the other: the branch accepted wasn't the
+    diff reviewed (#797, the second 2026-11-21 audit). ``name``: the base as the user gave it."""
+    if not _case_folds(os.path.abspath(where)):
+        return ""
+    groups: dict[str, list[str]] = {}
+    for p in _run(repo, ("ls-tree", "-r", "-z", "--name-only", commit)).stdout.split(b"\0"):
+        if p:
+            groups.setdefault(_folded(p), []).append(os.fsdecode(p))
+    twins = [g for g in groups.values() if len(g) > 1]
+    if not twins:
+        return ""
+    shown = "; ".join(" and ".join(g) for g in twins[:3]) + \
+        (f"; {len(twins) - 3} more" if len(twins) > 3 else "")
+    return (f"{name or commit[:12]} tracks paths that differ only by case ({shown}), and the state "
+            f"directory's file system folds case: checked out there, one of each would overwrite "
+            "the other, and accept would commit an edit to the wrong one. Put WB_HOME on a "
+            "case-sensitive volume")
+
+
 def base_commit(repo: Path, base: str) -> str | None:
     """The commit ``base`` names (an annotated tag peeled), or None when it names none: a typo
     once read as a missing CLAUDE.md (the 2026-11-16 audit)."""
@@ -343,7 +367,7 @@ def create_worktree(repo: Path, task: str, dest: Path, base: str = "HEAD") -> st
     commit = base_commit(repo, base)
     if not commit:
         raise GitError(f"no commit {base} in {repo}")
-    if why := branch_clash(repo, task):
+    if why := branch_clash(repo, task) or case_clash(repo, commit, Path(dest).parent, base):
         raise GitError(why)
     # a sparse checkout's patterns: newer git copies them into a worktree it adds (2.56 does),
     # an older one checked out the whole tree; set before the checkout either way (#263)
