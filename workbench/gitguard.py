@@ -25,6 +25,10 @@ READ = {
     "grep", "help", "log", "ls-files", "ls-remote", "ls-tree", "merge-base", "name-rev",
     "range-diff", "rev-list", "rev-parse", "shortlog", "show", "show-branch", "show-ref", "status",
     "var", "verify-commit", "verify-tag", "version", "whatchanged",
+    # (#443, the audit of 1.8) pure readers too: an archive goes to stdout or a file, trailers to
+    # stdout (or, --in-place, a worktree file the agent may edit anyway)
+    "archive", "check-mailmap", "get-tar-commit-id", "interpret-trailers",
+    "verify-pack", "show-index",
 }
 # global options that take the next argument as their value
 VALUED = {"-C", "-c", "--git-dir", "--work-tree", "--namespace", "--super-prefix", "--attr-source"}
@@ -33,8 +37,13 @@ BRANCH_WRITES = {"-d", "-D", "--delete", "-m", "-M", "--move", "-c", "-C", "--co
                  "-t", "--track", "--no-track"}
 BRANCH_LISTS = {"-l", "--list", "--show-current", "--contains", "--no-contains", "--merged",
                 "--no-merged", "--points-at"}
+# `tag` lists with any of these, a pattern or a commit after them: version scripts in Makefiles,
+# setup.py and build.rs run `git tag --points-at HEAD`, refused until #443 (the audit of 1.8)
+TAG_LISTS = {"-l", "--list", "--points-at", "--contains", "--no-contains", "--merged",
+             "--no-merged"}
 TAG_WRITES = {"-a", "-s", "-u", "-d", "-f", "-m", "-F", "--annotate", "--sign", "--delete",
               "--force", "--message", "--file"}
+APPLY_REPORTS = {"--check", "--stat", "--numstat", "--summary"}
 CONFIG_READS = {"--get", "--get-all", "--get-regexp", "--get-urlmatch", "--list", "-l", "get",
                 "list"}
 # init's and clone's options that take the next argument as their value
@@ -71,7 +80,7 @@ def reads(sub: str | None, rest: list[str]) -> bool:
     if sub == "branch":
         return not flags & BRANCH_WRITES and (not plain or bool(flags & BRANCH_LISTS))
     if sub == "tag":
-        return not flags & TAG_WRITES and (not plain or bool(flags & {"-l", "--list"}))
+        return not flags & TAG_WRITES and (not plain or bool(flags & TAG_LISTS))
     if sub == "config":
         words = flags | set(plain[:1])
         return not words & CONFIG_WRITES and (bool(words & CONFIG_READS) or len(plain) == 1)
@@ -86,6 +95,12 @@ def reads(sub: str | None, rest: list[str]) -> bool:
         return first is None or first in ("show", "exists") or first.startswith("-")
     if sub in ("notes", "submodule"):
         return first in (None, "list", "show", "status")
+    if sub == "apply":  # only reports on the patch, applying nothing
+        return bool(flags & APPLY_REPORTS) and "--apply" not in flags
+    if sub == "hash-object":  # prints the id; -w writes the object
+        return "-w" not in flags
+    if sub == "fsck":  # --lost-found writes into the git dir
+        return "--lost-found" not in flags
     if sub == "symbolic-ref":
         return len(plain) == 1 and not flags & {"-d", "--delete", "-m"}
     return False

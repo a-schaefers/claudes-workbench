@@ -4533,6 +4533,25 @@ class GitGuard(unittest.TestCase):
             _, sub, rest = gitguard.split(line.split())
             self.assertFalse(gitguard.reads(sub, rest), line)
 
+    def test_version_scripts_and_pure_readers_get_through_the_shim(self):
+        # #443, the audit of 1.8: `git tag --points-at HEAD` (Makefiles, setup.py, build.rs) was
+        # refused as a write, so the tests failed every round and the agent couldn't fix it
+        from workbench import gitguard
+        reads = ["tag --points-at HEAD", "tag --contains v1.2", "tag --no-contains x",
+                 "tag --merged main", "tag --no-merged main", "tag -l v*", "archive HEAD",
+                 "archive -o x.tar HEAD", "apply --check p.diff", "apply --stat p.diff",
+                 "apply --numstat p.diff", "hash-object src/a.c", "check-mailmap A <a@b>",
+                 "interpret-trailers msg.txt", "fsck", "fsck --full"]
+        writes = ["tag v1", "tag -a v1 --contains HEAD", "apply p.diff", "apply --index p.diff",
+                  "apply --check --apply p.diff", "hash-object -w src/a.c",
+                  "fsck --lost-found"]
+        for line in reads:
+            _, sub, rest = gitguard.split(line.split())
+            self.assertTrue(gitguard.reads(sub, rest), line)
+        for line in writes:
+            _, sub, rest = gitguard.split(line.split())
+            self.assertFalse(gitguard.reads(sub, rest), line)
+
     def test_protected_repositories(self):
         from workbench import gitguard
         with tempfile.TemporaryDirectory() as d:

@@ -3239,9 +3239,13 @@ it. ACE-Step's takes peaked at -0.2 dBFS, near clipping, before any `loudnorm`.
   repo's common dir>, argv)`) and puts its directory first on the agent's `PATH`,
   so it's the git called from the shell, a script or `make`. `split` skips git's global options
   (and the values of `-C`, `-c`, `--git-dir`, `--work-tree`, `--namespace`, `--super-prefix`,
-  `--attr-source`) to find the subcommand; `reads` decides: no subcommand or one of `READ` (35:
-  `status`, `diff`, `log`, `show`, `blame`, `grep`, `rev-parse`, `ls-files`, …) reads; `branch` and
-  `tag` read only when listing; `config` only with a read option or one name; `stash` only `list`
+  `--attr-source`) to find the subcommand; `reads` decides: no subcommand or one of `READ` (41:
+  `status`, `diff`, `log`, `show`, `blame`, `grep`, `rev-parse`, `ls-files`, `archive`,
+  `check-mailmap`, `interpret-trailers`, …) reads; `branch` and `tag` read only when listing (for
+  `tag`, `TAG_LISTS`: `-l`, `--points-at`, `--contains`, `--merged` and their `--no-` forms, which
+  version scripts in Makefiles, `setup.py` and `build.rs` run: #443); `apply` only with
+  `--check`, `--stat`, `--numstat` or `--summary` and no `--apply`; `hash-object` without `-w`;
+  `fsck` without `--lost-found`; `config` only with a read option or one name; `stash` only `list`
   and `show`; `worktree` only `list`; `remote` without arguments, `get-url`, `show` (with or without `-v`); `reflog`,
   `notes`, `submodule` and `symbolic-ref` in their read forms; anything else (aliases and `lfs`
   included) is a write. A read is exec'd with `GIT_OPTIONAL_LOCKS=0`, so the agent's `git status`
