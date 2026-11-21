@@ -1865,7 +1865,15 @@ class Optimize(unittest.TestCase):
     """wb optimize against an Ollama whose placement depends on the window: 10 GB of weights and
     32 KB a token of context, on a card that holds 12 GB (so up to 64K fits whole)."""
     WEIGHTS, PER_TOKEN, CARD = 10_000_000_000, 32_000, 12_100_000_000
-    setUp, tearDown, config = Real.setUp, Real.tearDown, Real.config  # not Real's tests again
+    tearDown, config = Real.tearDown, Real.config  # not Real's tests again
+
+    def setUp(self):
+        Real.setUp(self)
+        from workbench import optimize
+        self.no_gpu_here = optimize.no_gpu_here
+        card = mock.patch.object(optimize, "no_gpu_here", lambda m, seen=None: False)  # the card's
+        card.start()  # there, though hardware.gpus lists none (Real's); #809's test says otherwise
+        self.addCleanup(card.stop)
 
     def ollama(self, window, entry=None, loaded=None, extra=None, served=None):
         loaded, posts = loaded if loaded is not None else [], []
@@ -1958,6 +1966,35 @@ class Optimize(unittest.TestCase):
             self.assertTrue([p for p in posts if p[0] == "/api/generate"])
             self.assertIn(m.id, optimize.state()["models"])
             self.assertEqual(models.holders(pool=models.pool(m)), {})          # and let go
+
+    def test_a_machine_with_no_gpu_measures_nothing_and_a_model_on_the_cpu_gets_no_advice(self):
+        # #809: on a CPU-only box wb optimize ran by itself, loaded each model into RAM twice, and
+        # wb start and wb doctor said each "doesn't fit the GPU whole even at 16K"
+        from workbench import optimize
+        self.ollama(32768)
+        real = mock.patch.object(optimize, "no_gpu_here", self.no_gpu_here)  # as it is
+        real.start()
+        self.addCleanup(real.stop)
+        with mock.patch.object(models.hardware, "gpus", lambda windows=True: []):  # Real's: none
+            self.assertTrue(optimize.no_gpu_here(models.discover()["ollama/m"]))
+            self.assertEqual(optimize.candidates(), [])
+            self.assertEqual(optimize.due(), "")                       # nothing starts by itself
+            Path(os.environ["WB_MODELS"]).write_text(json.dumps({"gpu_gb": 12}))  # said by hand
+            self.assertEqual([m.id for m in optimize.candidates()], ["ollama/m"])
+        with mock.patch.object(models.hardware, "system", lambda: "macos"), \
+                mock.patch.object(models.hardware, "gpus", lambda windows=True: [
+                    {"name": "AMD Radeon Pro 5500M", "driver": "metal", "vram": 4 * 2 ** 30}]):
+            Path(os.environ["WB_MODELS"]).write_text("{}")
+            self.assertTrue(optimize.no_gpu_here(models.discover()["ollama/m"]))  # an Intel Mac's
+        self.CARD = 0                                                  # Ollama puts it all in RAM
+        row = optimize.fit(models.discover()["ollama/m"], 262144)
+        self.assertEqual((row["fits"], row.get("cpu")), (None, True))
+        self.assertEqual(optimize.advice("ollama/m", row), "")
+        self.assertEqual(optimize.advice("ollama/m", {k: v for k, v in row.items() if k != "cpu"}), "")  # an old row
+        self.CARD = 5_000_000_000                                      # partly on a GPU: advised
+        row = optimize.fit(models.discover()["ollama/m"], 262144)
+        self.assertNotIn("cpu", row)
+        self.assertIn("doesn't fit the GPU whole even at 16K", optimize.advice("ollama/m", row))
 
     def test_a_model_the_user_keeps_loaded_is_never_measured_or_unloaded(self):
         # #254 (the audit of 1.2): each probe unloads and reloads its model, so a background

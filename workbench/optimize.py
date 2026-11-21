@@ -62,11 +62,28 @@ def candidates() -> list[models.Model]:
     Ollama (wb remote), where the same /api/ps placement says what fits its card (#115). Not one
     the user keeps loaded (models.json `keep_loaded`, by id, by name, or an alias of the same
     model): each probe unloads and reloads its model, and a background measurement dropped the
-    user's autocomplete model, which #215 protected only from eviction (#254, the audit of 1.2)."""
+    user's autocomplete model, which #215 protected only from eviction (#254, the audit of 1.2).
+    Nor this machine's when it has no GPU Ollama can use (no_gpu_here)."""
     held = models.keep_loaded()
+    bare: dict = {}
     return [m for m in models.discover().values()
             if m.engine == "ollama" and m.id not in held and not models._kept_name(m.name, held)
-            and models.status(m)["available"]]
+            and (m.remote or not no_gpu_here(m, bare)) and models.status(m)["available"]]
+
+
+def no_gpu_here(m: models.Model, seen: dict | None = None) -> bool:
+    """Whether this machine has no GPU the Ollama serving ``m`` could use: no GPU budget (gpu_gb
+    unset) and no GPU listed (on macOS, no Apple Silicon one: an Intel Mac's Ollama runs on the
+    CPU). Measured anyway, a CPU-only box loaded each model into RAM twice at every new model,
+    and wb start and wb doctor then said it "doesn't fit the GPU whole even at 16K" (#809).
+    ``seen``: root -> the answer, for one pass."""
+    seen = {} if seen is None else seen
+    if m.root not in seen:
+        devs = hardware.gpus(windows=False)
+        if hardware.system() == "macos":
+            devs = [g for g in devs if g.get("unified")]
+        seen[m.root] = not devs and models.gpu_budget(m.root) is None
+    return seen[m.root]
 
 
 def served(m: models.Model) -> int:
@@ -260,9 +277,12 @@ def fit(m: models.Model, trained: int | None, check=lambda: None) -> dict:
         good, bad = (mid, bad) if whole(mid) else (good, mid)
     at = next((r for r in tried if r["window"] == now), None)
     short = [r["served"] for r in tried if r.get("served") and r["served"] < r["window"]]
+    # nothing of it on a GPU at any window: Ollama runs it on the CPU here, and there is no GPU
+    # fit to advise on (#809)
+    cpu = good is None and bool(tried) and not any(r["vram"] for r in tried)
     return {"window": now, "fits": good, "spill": round(100 * (1 - at["vram"] / at["size"]))
             if at and at["size"] else None, "clamped": max(short) if short else None,
-            "tried": tried, "ts": store.now()}
+            **({"cpu": True} if cpu else {}), "tried": tried, "ts": store.now()}
 
 
 def _record(model_id: str, row: dict) -> None:
@@ -300,7 +320,10 @@ def advice(model_id: str, row: dict) -> str:
     """One line on what the fit says, or "" when there is nothing to change (or apply has made
     its variant, still registered: every wb start repeated the advice, and the command it named
     answered "exists already", #584)."""
-    if applied(model_id, row):
+    tried = row.get("tried") if isinstance(row.get("tried"), list) else []
+    on_cpu = row.get("cpu") or (row.get("fits") is None and tried  # a row from before `cpu`
+                                and not any(isinstance(r, dict) and r.get("vram") for r in tried))
+    if applied(model_id, row) or on_cpu:  # on the CPU here: no GPU to fit (#809)
         return ""
     w, fits, spill = row.get("window"), row.get("fits"), row.get("spill")
     k = lambda n: f"{n // 1024}K"  # noqa

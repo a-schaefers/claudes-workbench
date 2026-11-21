@@ -3799,7 +3799,10 @@ it adds to their OpenCode config).
 
 What it measures, per Ollama model that can run (`candidates`; not one in models.json's
 `keep_loaded`, by id, name or an alias of the same model: a background run unloaded the user's
-autocomplete model to measure it, #254, the audit of 1.2): the largest window that keeps the
+autocomplete model to measure it, #254, the audit of 1.2; nor this machine's when it has no GPU
+Ollama could use, `no_gpu_here`: no GPU budget, `gpu_gb` unset, and no GPU listed, on macOS no
+Apple Silicon one: a CPU-only box ran it by itself, loading each model into RAM twice, #809; a
+remote model stays): the largest window that keeps the
 model and its context all in VRAM, by Ollama's own placement after a load at each window tried
 (`probe`: `/api/generate` with `options.num_ctx`, then `/api/ps` `size_vram` against `size`, then
 unloaded). A load counts as whole only when `/api/ps` `context_length` (`served`) is at least the
@@ -3813,7 +3816,10 @@ window that put a tenth of a 27B model in system RAM wrote at ~17-21 tok/s where
 all on the GPU, wrote at ~37, while the bigger window spared Claude review rounds (no
 compactions). Where the line falls depends on the card, the model and the server, so it is
 measured, and Claude and the user choose with both facts (`advice`): a spilling window and the
-largest whole one, or a whole window with room for more.
+largest whole one, or a whole window with room for more. A fit with nothing in VRAM at any window
+tried records `cpu: true` (Ollama runs it on the CPU here), and `advice` says nothing of it: "doesn't
+fit the GPU whole even at 16K" was printed on every `wb start` and `wb doctor` of a machine with
+no GPU (#809).
 
 `wb optimize estimate` says how long (`estimate`: loads × the last run's measured seconds a load
 (`secs_per_load`), else the median of the model's measured single loads (`models.single_loads`,
@@ -6235,7 +6241,7 @@ $WB_HOME (~/.local/state/workbench)
   bench/runs.jsonl  driver.json  one row per replay; the driver's {pid, run, start}
                                  (bench.jsonl and bench/repos/ are the old suite's: nothing reads them)
   optimize.json  optimize.log    wb optimize: {pid, start, began, done, stopped, hardware (fingerprint: [name, vram] per GPU, then ["remote", root, [[name, size]…]] per remote Ollama),
-                                 secs_per_load, models: {<id>: {window, fits, spill, clamped, applied?, digest? (its weights', #709), tried:
+                                 secs_per_load, models: {<id>: {window, fits, spill, clamped, cpu? (nothing in VRAM: #809), applied?, digest? (its weights', #709), tried:
                                  [{window, size, vram, served}], ts}}, skipped: {<id>: {outcome (busy|failed|unreachable), why,
                                  ts, retry_after}} (#583), made: {<provider>/<name>: <source id>} (a variant
                                  apply made and hasn't registered yet: #266)}; the run's output
