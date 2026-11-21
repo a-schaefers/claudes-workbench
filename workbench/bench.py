@@ -16,7 +16,6 @@ round; these are the tasks this machine's models were actually given.
 import json
 import os
 import re
-import shlex
 import shutil
 import signal
 import subprocess
@@ -63,6 +62,42 @@ def cases() -> dict[str, dict]:
     return found
 
 
+def remove(names: list[str]) -> list[str]:
+    """`wb bench rm`: the cases gone, with their bundles; their rows in runs.jsonl stay, the
+    history. Nothing ever removed one, and a case keeps its base and hidden checks for good
+    (#740, the 2026-11-21 audit). Refused while a run goes: its plan names them."""
+    have = cases()
+    if unknown := [n for n in names if n not in have]:
+        raise RuntimeError(f"no case {', '.join(unknown)} (wb bench list)")
+    if driver():
+        raise RuntimeError("a bench run is going: wb bench stop first")
+    for n in names:
+        shutil.rmtree(case_dir(n))
+    return names
+
+
+RUNS_KEPT = 20  # the runs whose replays keep their logs, diffs and grades; older runs keep plan.json
+
+
+def prune_runs(keep: int = RUNS_KEPT) -> int:
+    """Each replay's directory (wb.log, diff.patch, grade.txt: up to 640 KB of test output) of the
+    runs older than the newest ``keep``, never the one going; plan.json and runs.jsonl's rows
+    stay, which the report and the Stats tab read. They were kept for good (#740). How many went."""
+    runs = home() / "runs"
+    going = driver().get("run")
+    old = sorted((d for d in runs.iterdir() if d.is_dir()), key=lambda d: d.stat().st_mtime,
+                 reverse=True)[keep:] if runs.is_dir() else []
+    gone = 0
+    for d in old:
+        if d.name == going:
+            continue
+        for replay in d.iterdir():
+            if replay.is_dir() and not replay.is_symlink():
+                shutil.rmtree(replay, ignore_errors=True)
+                gone += 1
+    return gone
+
+
 # --- making a case ------------------------------------------------------------------------------
 
 def _step_prompt(task: store.Task, step: int) -> str | None:
@@ -92,22 +127,22 @@ def _safe(path: str) -> bool:
 
 
 def bundle(repo: Path, commit: str, dest: Path) -> None:
-    """A bundle of `commit`'s history alone, as branch main: made in a scratch clone, so the
-    user's repo gets no ref, and the commits after it (the answer) aren't in it. Refused from a
-    shallow clone whose cut-off history `commit` reaches: its bundle can't be cloned ("remote did
-    not send all necessary objects", #478, the audit of 1.8)."""
-    shallow = Path(repo) / gitops.git(repo, "rev-parse", "--git-path", "shallow").strip()
-    try:
-        cut = shallow.read_text().split()
-    except OSError:  # not shallow
-        cut = []
-    if any(gitops.contains(repo, commit, c) for c in cut):
-        raise RuntimeError(f"{repo} is a shallow clone: a case needs the base's whole history "
-                           f"(git -C {shlex.quote(str(repo))} fetch --unshallow, then add it again)")
+    """A bundle of `commit`'s tree alone, as branch main's one commit (its message, no parent):
+    made in a scratch clone, so the user's repo gets no ref, and nothing after it (the answer) is
+    in it. The whole history it once packed was the repo's every reachable object, about 800 MB a
+    case on a big repo, for good (#740, the 2026-11-21 audit); and a shallow clone, whose cut-off
+    history couldn't be bundled (#478), has the tree."""
     with tempfile.TemporaryDirectory(prefix="wb-bench-") as tmp:
         clone = Path(tmp) / "c"
         gitops.git(tmp, "clone", "-q", "--no-checkout", "--shared", str(repo), str(clone))
-        gitops.git(clone, "update-ref", "refs/heads/main", commit)
+        when = gitops.git(clone, "log", "-1", "--format=%aI", commit).strip()
+        who = {"GIT_AUTHOR_NAME": "workbench bench", "GIT_AUTHOR_EMAIL": "bench@workbench.invalid",
+               "GIT_AUTHOR_DATE": when, "GIT_COMMITTER_DATE": when}
+        who |= {"GIT_COMMITTER_NAME": who["GIT_AUTHOR_NAME"], "GIT_COMMITTER_EMAIL": who["GIT_AUTHOR_EMAIL"]}
+        message = gitops.git(clone, "log", "-1", "--format=%B", commit).strip() or "the base"
+        root = gitops.git(clone, "commit-tree", "--no-gpg-sign", "-m", message, f"{commit}^{{tree}}",
+                          env=who).strip()
+        gitops.git(clone, "update-ref", "refs/heads/main", root)
         gitops.git(clone, "bundle", "create", str(dest.resolve()), "main")
 
 
@@ -495,6 +530,7 @@ def start(model_ids: list[str], case_names: list[str], skills: list[str], label:
         return None, [f"all {len(pairs) * repeat} replay(s) already done"
                       + (f" under label {label}" if label else " (no --label)")
                       + ": --label <name> runs them again"]
+    prune_runs()  # #740
     run = stamp = time.strftime("%m%d-%H%M%S")
     for n in range(2, 100):  # two runs in one second: the second's mkdir failed (#511's test)
         if not (home() / "runs" / run).exists():

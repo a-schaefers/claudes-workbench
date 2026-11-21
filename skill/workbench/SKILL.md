@@ -470,7 +470,8 @@ goes in that repo's CLAUDE.md instead. Drop a note that has stopped holding (`wb
   a skill handed with `--skill`) on the same work. It is evidence for your `--model` and the
   weekly check, never a reason to skip review: the router doesn't read it. `wb bench self <case>
   --yes` has you write a case yourself, to set the handoff's cost against yours; it spends your
-  tokens, so run it only when the user says yes.
+  tokens, so run it only when the user says yes. `wb bench rm <case>` drops one that no longer
+  tells models apart (its results stay).
 
 ## Report to the user
 Short and honest: what was built, on which model, rounds (automatic and review), test result,

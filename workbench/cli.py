@@ -718,6 +718,20 @@ def _missing_dirs(repo: Path) -> list[str]:
 DISK_COPIES, DISK_SPARE = 3, 2 * 10**9
 
 
+def history_held(budget: float = 2) -> str:
+    """What the state directory's history holds that wb can prune, for the disk advice: the
+    archive and wb bench's cases and runs, each with what frees it; '' when they hold little.
+    The advice named only open tasks, never the space history took for good (#740)."""
+    parts = []
+    for path, what, fix in ((store.archive_dir(), "the archive", "wb gc trims its old logs"),
+                            (bench.home() / "cases", "wb bench's cases", "wb bench rm <case>"),
+                            (bench.home() / "runs", "wb bench's runs", "a new run trims old ones")):
+        size, whole = store.dir_size(path, budget=budget)
+        if size >= 100_000_000:
+            parts.append(f"{what} {'' if whole else 'at least '}{store.gb(size)} ({fix})")
+    return "; ".join(parts)
+
+
 def _disk_room(repo: Path, base: str, setup: dict) -> None:
     """Refuse a task the disk has no room for: a full one mid-round failed every status write."""
     free = store.free_bytes()
@@ -739,7 +753,8 @@ def _disk_room(repo: Path, base: str, setup: dict) -> None:
     die(f"{store.gb(free)} free where the state directory is ({store.home()}), and a task of this "
         f"repo wants {store.gb(need)} (its checkout and --copy paths, {store.gb(size)}, three "
         f"times over, and 2 GB{gap}): free some, or wb discard an open task"
-        + ("; the open tasks: " + ", ".join(f"{n} {store.gb(b)}" for b, n in held[:8]) if held else ""))
+        + ("; the open tasks: " + ", ".join(f"{n} {store.gb(b)}" for b, n in held[:8]) if held else "")
+        + (f"; history: {kept}" if (kept := history_held()) else ""))
 
 
 def cmd_start(a):
@@ -2317,9 +2332,70 @@ def gc(days: float = store.ARCHIVE_DAYS, branches: bool = False) -> dict:
             _drop_start(t, half)
             out["starts"] += 1
     out["uploads"] = chat.drop_old_uploads(days)  # the web chat's attachments, once delivered (#623)
+    out["slimmed"] = store.slim_archive()  # the old archive's logs and test outputs (#740)
+    out["old_notices"] = _cap_old_notices()
+    out["leftovers"] = _drop_leftovers(days)
     out["branches"] = _merged_branches() if branches else 0
     store.write_json(store.home() / "gc.json", {"at": store.now(), **out})
     return out
+
+
+NOTIFY_OLD_MAX = 8 << 20  # notify.old.jsonl past this keeps its newest half: no code reads it
+
+
+def _cap_old_notices() -> int:
+    """notify.old.jsonl cut to its newest half once past NOTIFY_OLD_MAX: each review notice there
+    carries up to 32,000 characters of diff, and it only grew (#740, the 2026-11-21 audit). The
+    bytes dropped."""
+    path = store.home() / "notify.old.jsonl"
+    with store.locked(store.home() / "notify.jsonl.lock"):  # as _rotate_notices appends to it
+        try:
+            size = path.stat().st_size
+            if size <= NOTIFY_OLD_MAX:
+                return 0
+            with open(path, "rb") as fh:
+                fh.seek(size - NOTIFY_OLD_MAX // 2)
+                tail = fh.read()
+        except OSError:
+            return 0
+        tail = tail[tail.find(b"\n") + 1:]  # from a whole line
+        store.replace_bytes(path, tail)
+        return size - len(tail)
+
+
+def _drop_leftovers(days: float) -> int:
+    """What other commands leave in the state directory and nothing removed (#740): a skill
+    import's copy (imports/, read once by Claude before its own version is added) older than
+    ``days``, and claude-sessions/<pid> of a Claude Code process gone ``days`` ago that no open
+    task records. How many went."""
+    cutoff, gone = time.time() - days * 86400, 0
+    imports = store.home() / "imports"
+    for d in sorted(imports.iterdir()) if imports.is_dir() else ():
+        try:
+            if d.lstat().st_mtime < cutoff:
+                shutil.rmtree(d) if d.is_dir() and not d.is_symlink() else d.unlink()
+                gone += 1
+        except OSError:
+            continue
+    sessions = store.home() / "claude-sessions"
+    held = {str(t.spec.get("claude_pid")) for t in store.all_tasks()
+            if t.status.get("phase") not in store.CLOSED}
+    for f in sorted(sessions.iterdir()) if sessions.is_dir() else ():
+        try:
+            if not f.name.isdigit() or f.name in held or f.stat().st_mtime >= cutoff:
+                continue
+            try:
+                os.kill(int(f.name), 0)
+                continue  # alive, or a process by that number: kept
+            except ProcessLookupError:
+                pass
+            except OSError:  # alive and someone else's
+                continue
+            f.unlink()
+            gone += 1
+        except OSError:
+            continue
+    return gone
 
 
 def _rotate_notices(days: float) -> int:
@@ -2381,7 +2457,9 @@ def cmd_gc(a):
           f"{out['notices']} old notice(s) to notify.old.jsonl; removed {out['rules']} rules "
           f"dir(s), {out['runtime']} runtime dir(s), {out['scratch']} scratch dir(s), "
           f"{out['starts']} half-made start(s), {out['uploads']} web chat upload(s), "
-          f"{out['branches']} merged branch(es)")
+          f"{out['branches']} merged branch(es), {out['leftovers']} old import(s) and session "
+          f"record(s); freed {store.gb(out['slimmed'] + out['old_notices'])} of old logs and "
+          "test outputs")
     if left := bench.sweep():  # not in gc(): a discard runs that, and this discards (#511)
         print(f"closed {len(left)} bench replay(s) whose driver died, with their clones: "
               + ", ".join(left[:5]))
@@ -2664,6 +2742,8 @@ def cmd_bench(a):
             print("\n".join(bench.add(a.task, a.step, a.hidden, a.check, a.name)))
     elif a.bench_cmd == "list":
         print("\n".join(bench.list_lines()))
+    elif a.bench_cmd == "rm":
+        print(f"removed case(s) {', '.join(bench.remove(a.case))}; their results stay in the report")
     elif a.bench_cmd == "run":
         if a.repeat < 1:
             die("--repeat is at least 1")
@@ -4209,7 +4289,8 @@ def cmd_doctor(a):
             line(free >= DISK_SPARE, f"the state dir holds {'' if whole else 'at least '}"
                  f"{store.gb(held)}, with {store.gb(free)} free"
                  + ("" if free >= DISK_SPARE else ": a task's writes fail on a full disk; wb "
-                    "discard an open task, or free some"))
+                    "discard an open task, or free some")
+                 + (f"; history: {kept}" if (kept := history_held()) else ""))
     if idle := idle_line():
         print("--  " + idle)
     print("--  " + gpu_line())  # informs only: a CPU-only machine isn't broken
@@ -4294,8 +4375,9 @@ def main(argv=None):
         die(str(e))
     except OSError as e:  # a --spec, --message or --file that isn't there: a line, not a traceback
         if store.disk_full(e):  # (#342)
+            kept = history_held(budget=1)
             die(f"the disk is full ({e.filename or store.home()}: {e.strerror}): free some, or wb "
-                "discard an open task (wb status lists them)")
+                "discard an open task (wb status lists them)" + (f"; history: {kept}" if kept else ""))
         die(f"{e.filename}: {e.strerror}" if e.filename else str(e))  # (the 2026-11-16 audit)
 
 
@@ -4759,6 +4841,8 @@ def parser() -> argparse.ArgumentParser:
     x.add_argument("--check", help="a command run after the acceptance command, to pass too")
     x.add_argument("--name", help="the case's name (default: the task's)")
     bs.add_parser("list", help="the cases")
+    x = bs.add_parser("rm", help="remove cases, with their bundles (their results stay)")
+    x.add_argument("case", nargs="+")
     x = bs.add_parser("run", help="replay the cases in the background, one at a time")
     x.add_argument("--model", nargs="+", help="default: every model that can run and takes the case's size")
     x.add_argument("--case", nargs="+", help="default: every case")

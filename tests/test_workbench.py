@@ -8564,6 +8564,49 @@ class Cleanup(Base):
             self.assertIs(got.get(name), True, (name, replaced))
         self.assertEqual(store.read_jsonl(store.home() / "results.jsonl")[0][-1].get("trial"), True)
 
+    def test_gc_trims_what_history_kept_for_good(self):
+        # #740 (the 2026-11-21 audit): the archive kept every log and test output, notify.old.jsonl
+        # and imports/ and claude-sessions/ only grew, and the disk advice never named them
+        home = store.home()
+        old = home / "archive" / "t-old"
+        (old / "rounds" / "1").mkdir(parents=True)
+        long_ago = time.time() - (store.SLIM_DAYS + 1) * 86400
+        (old / "status.json").write_text(json.dumps({"phase": "accepted", "updated_at": long_ago}))
+        (old / "task.json").write_text("{}")
+        for f in ("runner.log", "base-tests.txt", "rounds/1/tests.txt"):
+            (old / f).write_text("x" * 1000)
+        (old / "rounds" / "1" / "prompt.md").write_text("the spec")  # bench add reads it
+        (old / "events.jsonl").write_text("")
+        recent = home / "archive" / "t-recent"
+        recent.mkdir()
+        (recent / "status.json").write_text(json.dumps({"phase": "accepted", "updated_at": time.time()}))
+        (recent / "runner.log").write_text("kept")
+        (home / "notify.old.jsonl").write_bytes(b'{"ts": 1}\n' * (cli.NOTIFY_OLD_MAX // 10 + 10))
+        (home / "imports" / "a-skill").mkdir(parents=True)
+        dead = subprocess.Popen(["true"])
+        dead.wait()
+        (home / "claude-sessions").mkdir()
+        (home / "claude-sessions" / str(dead.pid)).write_text("1 sid\n")
+        (home / "claude-sessions" / str(os.getpid())).write_text("1 sid\n")    # alive: kept
+        for p in (home / "imports" / "a-skill", *(home / "claude-sessions").iterdir()):
+            os.utime(p, (long_ago, long_ago))
+        out = cli.gc(30)
+        self.assertEqual(sorted(p.name for p in old.rglob("*") if p.is_file()),
+                         ["events.jsonl", "prompt.md", "status.json", "task.json"])
+        self.assertTrue((recent / "runner.log").exists())
+        self.assertEqual(out["slimmed"], 3000)
+        self.assertLessEqual((home / "notify.old.jsonl").stat().st_size, cli.NOTIFY_OLD_MAX // 2)
+        self.assertTrue((home / "notify.old.jsonl").read_bytes().startswith(b'{"ts": 1}\n'))
+        self.assertFalse((home / "imports" / "a-skill").exists())
+        self.assertEqual([p.name for p in (home / "claude-sessions").iterdir()], [str(os.getpid())])
+        self.assertEqual(out["leftovers"], 2)
+        # the disk advice names what history holds and what frees it
+        with mock.patch.object(store, "dir_size", lambda p, budget=None: (5 * 10 ** 9, True)):
+            said = cli.history_held()
+        self.assertIn("the archive 5.0 GB (wb gc trims its old logs)", said)
+        self.assertIn("wb bench's cases 5.0 GB (wb bench rm <case>)", said)
+        self.assertEqual(cli.history_held(), "")
+
     def test_a_task_json_emptied_by_a_power_loss_fails_the_task_saying_so(self):
         # #475: read as {}, task.spec["model"] raised a bare KeyError, and the runner died
         # without a word inside its own failure report
@@ -9008,8 +9051,13 @@ class Bench(Base):
         clone = Path(self.tmp.name) / "c"
         bench.checkout(case, clone)
         self.assertFalse((clone / "answer.txt").exists())
-        # the answer is not in the bundle: only the base's history, one branch
-        self.assertEqual(gitops.git(clone, "rev-list", "--all").split(), [case["base"]])
+        # the answer is not in the bundle: the base's tree alone, one commit, one branch (#740:
+        # its whole history was every reachable object of the repo, for each case)
+        (only,) = gitops.git(clone, "rev-list", "--all").split()
+        self.assertEqual(gitops.git(clone, "rev-parse", f"{only}^{{tree}}"),
+                         gitops.git(self.repo, "rev-parse", f"{case['base']}^{{tree}}"))
+        self.assertEqual(gitops.git(clone, "log", "-1", "--format=%s").strip(),
+                         gitops.git(self.repo, "log", "-1", "--format=%s", case["base"]).strip())
         with self.assertRaises(SystemExit):
             run_wb("bench", "add", "t-src")                               # once
         self.assertIn("t-src", run_wb("bench", "list"))
@@ -9050,9 +9098,31 @@ class Bench(Base):
         self.assertEqual(bench.cases()["t-sq-s1"]["reference"], step1)
         self.assertEqual(bench.cases()["t-sq-s2"]["base"], step1)
 
-    def test_a_case_from_a_shallow_clone_is_refused_rather_than_made_unclonable(self):
+    def test_bench_rm_removes_a_case_and_old_runs_keep_only_their_plans(self):
+        # #740 (the 2026-11-21 audit): no command removed a case, and every replay's logs, diff
+        # and grade stayed under bench/runs/ for good
+        from workbench import bench
+        self.accepted("t-gone")
+        run_wb("bench", "add", "t-gone")
+        self.assertIn("removed case(s) t-gone", run_wb("bench", "rm", "t-gone"))
+        self.assertNotIn("t-gone", bench.cases())
+        with self.assertRaises(SystemExit):
+            run_wb("bench", "rm", "t-gone")
+        runs = bench.home() / "runs"
+        for i in range(bench.RUNS_KEPT + 2):
+            (runs / f"r{i:02d}" / "bench-x").mkdir(parents=True)
+            (runs / f"r{i:02d}" / "bench-x" / "grade.txt").write_text("out")
+            (runs / f"r{i:02d}" / "plan.json").write_text("{}")
+            os.utime(runs / f"r{i:02d}", (1e9 + i, 1e9 + i))
+        self.assertEqual(bench.prune_runs(), 2)
+        self.assertFalse((runs / "r00" / "bench-x").exists())
+        self.assertTrue((runs / "r00" / "plan.json").exists())             # the report reads it
+        self.assertTrue((runs / "r02" / "bench-x" / "grade.txt").exists())
+
+    def test_a_case_from_a_shallow_clone_bundles_its_base_and_clones(self):
         # #478 (the audit of 1.8, reproduced): the bundle of a shallow clone's history verified,
-        # and cloning it failed "remote did not send all necessary objects"
+        # and cloning it failed "remote did not send all necessary objects"; refused since, until
+        # the bundle held the base's tree alone, which a shallow clone has (#740)
         from workbench import bench
         g = lambda *a: gitops.git(self.repo, *a)  # noqa: E731
         for i in range(2):
@@ -9060,14 +9130,11 @@ class Bench(Base):
             g("add", "f.txt")
             g("commit", "-qm", f"c{i}")
         shallow = Path(self.tmp.name) / "shallow"
-        gitops.git(self.tmp.name, "clone", "-q", "--depth", "2", f"file://{self.repo}", str(shallow))
+        gitops.git(self.tmp.name, "clone", "-q", "--depth", "1", f"file://{self.repo}", str(shallow))
         dest = Path(self.tmp.name) / "base.bundle"
-        with self.assertRaisesRegex(RuntimeError, "is a shallow clone: .*fetch --unshallow"):
-            bench.bundle(shallow, "HEAD", dest)
-        self.assertFalse(dest.exists())
-        gitops.git(shallow, "fetch", "-q", "--unshallow")
-        bench.bundle(shallow, "HEAD", dest)                   # whole again: it bundles and clones
+        bench.bundle(shallow, "HEAD", dest)
         gitops.git(self.tmp.name, "clone", "-q", "-b", "main", str(dest), str(shallow) + "-c")
+        self.assertEqual((Path(str(shallow) + "-c") / "f.txt").read_text(), "1\n")
 
     def test_a_case_hides_the_golden_file_its_test_reads_beside_the_test(self):
         # #500 (the audit of 1.90): bench's own test pattern left Go's testdata/ out of the hidden

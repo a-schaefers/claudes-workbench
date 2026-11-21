@@ -629,6 +629,34 @@ def all_tasks(archived: bool = False):
 ARCHIVE_DAYS = 30
 
 
+SLIM_DAYS = 90  # an archived task keeps its bulky outputs this long after it closed
+# what a closed task's directory holds that nothing reads once it is old: the runner's log
+# (appended every round), each round's and check's test output (up to 320 KB each). Its
+# task.json, status.json, prompts, summaries, events and asks stay: names stay taken, wb bench
+# add reads an accepted task's prompts, and the lessons and transcripts its events (#740).
+SLIM_GLOBS = ("runner.log", "base-tests.txt", "setup.txt", "rounds/*/tests.txt",
+              "verify/*/base.txt", "verify/*/candidate.txt", "shots/*/*.txt")
+
+
+def slim_archive(days: float = SLIM_DAYS) -> int:
+    """Drop SLIM_GLOBS from the archived tasks closed over ``days`` ago: archive/ kept every
+    one of them for good (#740, the 2026-11-21 audit). The bytes freed."""
+    cutoff, freed = time.time() - days * 86400, 0
+    for d in sorted(archive_dir().iterdir()) if archive_dir().is_dir() else ():
+        st = read_json(d / "status.json", {})
+        if not isinstance(st, dict) or st.get("phase") not in CLOSED or (st.get("updated_at") or 0) > cutoff:
+            continue
+        for pattern in SLIM_GLOBS:
+            for f in d.glob(pattern):
+                try:
+                    if f.is_file() and not f.is_symlink():
+                        freed += f.stat().st_size
+                        f.unlink()
+                except OSError:
+                    continue
+    return freed
+
+
 def archive(days: float = ARCHIVE_DAYS) -> list[str]:
     """Move the tasks closed and untouched for ``days`` to archive/, with their locks gone: every
     wb wait wake, wb events minute and wb start read each task's two files, which after 101 tasks
