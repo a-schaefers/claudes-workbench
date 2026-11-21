@@ -195,10 +195,15 @@ def _case_folds(d: str) -> bool | None:
             pass
 
 
-def _run(cwd, args, env=None, check=True, timeout=None, input=None) -> subprocess.CompletedProcess:
+def _run(cwd, args, env=None, check=True, timeout=None, input=None,
+         detach=False) -> subprocess.CompletedProcess:
+    """``detach``: git in a session of its own, with no controlling terminal, for the calls that
+    may sign (with NO_TERMINAL): ssh-keygen opens /dev/tty when it can, and on WSL2, where wb has
+    one, it prompted there for a passphrase nobody would type, so wb accept waited COMMIT_SECS
+    and wb start SIGN_SECS before refusing (#933). Detached, it fails at once."""
     try:
         r = subprocess.run(["git", "-C", str(cwd), *PLAIN, *_pinned(cwd), *args], capture_output=True,
-                           env=_env(env), timeout=timeout, input=input,
+                           env=_env(env), timeout=timeout, input=input, start_new_session=detach,
                            stdin=subprocess.DEVNULL if timeout and input is None else None)
     except subprocess.TimeoutExpired:
         raise GitError(f"git {' '.join(args)}: no answer in {timeout}s") from None
@@ -1416,7 +1421,7 @@ def sign_problem(repo: Path, rev: str) -> str | None:
     r = None
     with contextlib.suppress(GitError):
         r = _run(repo, ["commit-tree", "-S", "-m", "workbench: can it sign?", f"{rev}^{{tree}}"],
-                 NO_TERMINAL, check=False, timeout=SIGN_SECS)
+                 NO_TERMINAL, check=False, timeout=SIGN_SECS, detach=True)
     return None if r is not None and r.returncode == 0 else UNLOCK
 
 
@@ -1442,7 +1447,7 @@ def commit_all(worktree: Path, message: str, include: bool = False, sign: bool =
     elif signs(worktree):  # no terminal, a time limit, and git's error said plainly (#374)
         try:
             r = _run(worktree, [*NO_HOOKS, "commit", "-q", "-m", message], NO_TERMINAL,
-                     check=False, timeout=COMMIT_SECS)
+                     check=False, timeout=COMMIT_SECS, detach=True)
         except GitError as e:  # no answer: a pinentry waiting on an unattended desktop
             raise GitError(f"not committed: {_unlock(worktree)} ({e})") from None
         if r.returncode:
@@ -1751,7 +1756,7 @@ def merge(repo: Path, task: str, into: str | None = None, base: str | None = Non
     secs = COMMIT_SECS if signed and how != "ff" else None
 
     def committing(args):  # the step that makes a commit, so may sign
-        r = _run(repo, [*unsigned, *args], NO_TERMINAL, check=False, timeout=secs)
+        r = _run(repo, [*unsigned, *args], NO_TERMINAL, check=False, timeout=secs, detach=signed)
         if r.returncode:
             said = (r.stderr or r.stdout).decode("utf-8", "replace").strip()
             raise GitError(f"git {' '.join(args)}: {said}")

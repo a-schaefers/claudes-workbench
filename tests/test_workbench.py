@@ -16156,6 +16156,45 @@ class Projects(Base):
                               capture_output=True, text=True, check=True).stdout
         self.assertIn("gpgsig", body)
 
+    @unittest.skipUnless(shutil.which("ssh-keygen") and hasattr(os, "login_tty"), "needs ssh-keygen, a pty")
+    def test_a_locked_key_is_refused_at_once_even_when_wb_has_a_controlling_terminal(self):
+        # #933 (an outside review of v1.90.24; every WSL2 nightly): with a terminal of its own,
+        # ssh-keygen prompted on /dev/tty for a passphrase nobody typed, so the dry signature
+        # took SIGN_SECS and the signed commit COMMIT_SECS before either refused
+        key = Path(self.tmp.name) / "locked"
+        subprocess.run(["ssh-keygen", "-q", "-t", "ed25519", "-N", "a passphrase", "-f", str(key)],
+                       check=True)
+        repo = Path(self.tmp.name) / "signed-repo"
+        g = lambda *a: subprocess.run(["git", "-C", str(repo), *a], check=True)  # noqa: E731
+        subprocess.run(["git", "init", "-q", str(repo)], check=True)
+        g("-c", "user.email=t@t", "-c", "user.name=t", "commit", "-q", "--allow-empty", "-m", "base")
+        for k, v in (("user.email", "t@t"), ("user.name", "t"), ("gpg.format", "ssh"),
+                     ("user.signingkey", str(key)), ("commit.gpgsign", "true")):
+            g("config", k, v)
+        (repo / "new.txt").write_text("new\n")
+        out = Path(self.tmp.name) / "tty-result.json"
+        code = ("import json, sys, time; sys.path.insert(0, sys.argv[1]); from workbench import gitops\n"
+                "repo, t0 = gitops.Path(sys.argv[2]), time.monotonic()\n"
+                "said = gitops.sign_problem(repo, 'HEAD'); t1 = time.monotonic()\n"
+                "try:\n    gitops.commit_all(repo, 'feat: new'); err = None\n"
+                "except gitops.GitError as e:\n    err = str(e)\n"
+                "open(sys.argv[3], 'w').write(json.dumps({'said': said, 'sign': t1 - t0,"
+                " 'commit': time.monotonic() - t1, 'err': err}))\n")
+        master, slave = os.openpty()
+        env = {k: v for k, v in os.environ.items() if k != "SSH_AUTH_SOCK"}
+        try:   # the child's controlling terminal is the pty, as wb's is on WSL2
+            p = subprocess.Popen([sys.executable, "-c", code, str(ROOT), str(repo), str(out)],
+                                 env=env, pass_fds=(slave,), preexec_fn=lambda: os.login_tty(slave))
+            os.close(slave)
+            self.assertEqual(p.wait(timeout=200), 0)
+        finally:
+            os.close(master)
+        got = json.loads(out.read_text())
+        self.assertEqual(got["said"], gitops.UNLOCK)
+        self.assertLess(got["sign"], gitops.SIGN_SECS / 2)
+        self.assertIn("not committed: commits here are signed", got["err"])
+        self.assertLess(got["commit"], 30)
+
     def test_a_signer_that_asks_for_a_touch_gets_no_dry_signature_and_is_told_apart_from_ssh_add(self):
         # #528 (the audit of v1.90): the dry signature made a security key blink on every wb
         # start, and on a timeout advised ssh-add, which can't make a touch-required key sign

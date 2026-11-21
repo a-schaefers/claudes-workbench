@@ -4265,7 +4265,10 @@ identity, or `workbench <workbench@localhost>` when none is set (`_commit`), uns
 hooks (`commit.gpgsign=false`, `core.hooksPath` = the null device, `--no-verify`): the library is
 workbench's own record, and the user's signing prompt or a global hook failed `wb skill add` from
 Claude's Bash (the 2026-11-16 audit); commits in the user's projects (`gitops.commit_all`) stay signed
-as the user's git says. Signed, with no terminal or display (`NO_TERMINAL`) and `COMMIT_SECS` (90),
+as the user's git says. Signed, with no terminal or display (`NO_TERMINAL`), in a session of its
+own with no controlling terminal (`gitops._run(detach=True)`: with one, as on WSL2, ssh-keygen
+prompted on `/dev/tty` for a passphrase nobody typed, and accept waited all of `COMMIT_SECS`, start
+`SIGN_SECS`, before refusing, #933) and `COMMIT_SECS` (90),
 a refusal says how to unlock the key (`UNLOCK`: `ssh-add`, or one GPG signature in a terminal) or
 `--no-sign`; `wb start` tries a dry `commit-tree -S` of the base's tree first (`sign_problem`,
 `SIGN_SECS` 10) and prints the same line, since accept failed only at the end of the task with
@@ -4280,7 +4283,7 @@ the key blink on every start and on a timeout advised `ssh-add`, which can't mak
 signer (`_unlock`, `unlock_how`) rather than `ssh-add`. `wb start --no-sign` (task.json `sign:
 false`) or `wb accept`/`wb next --no-sign` commits unsigned. The merge or squash commit `wb
 accept --merge` makes in the user's checkout gets the same (`gitops.merge`, `sign`; the closing
-record's `sign` keeps a retry's merge as unsigned as the first run's): no terminal, `COMMIT_SECS`,
+record's `sign` keeps a retry's merge as unsigned as the first run's): no terminal (detached when signed, #933), `COMMIT_SECS`,
 unsigned after `--no-sign`, and a refusal that says how to unlock the key (`UNLOCK_HOW`) and merge
 by hand; it signed after `--no-sign` and failed, and a pinentry nobody answered hung the accept
 until Claude's Bash killed it, leaving `MERGE_HEAD` and the staged merge in the user's checkout
