@@ -3019,6 +3019,7 @@ def cmd_model(a):
     if a.action == "add":
         if prov["problem"]:
             die(f"provider {provider}: {prov['problem']}")
+        _say(prov.get("engine_note"))  # an Ollama emulator, driven as a server (#580)
         own = models._overrides().get(a.id) or {}
         if not prov["engine_known"] and not prov["start"] and not own.get("start"):
             # a guess would write an Ollama entry without its output cap, or the reverse
@@ -3903,6 +3904,8 @@ def cmd_doctor(a):
     for pid, prov in provs.items():
         if prov["problem"]:
             line(False, f"provider {pid}: {prov['problem']}")
+        if prov.get("engine_note"):  # an Ollama emulator, or a server on Ollama's port (#580)
+            print(f"--  provider {pid}: {prov['engine_note']}")
         ollama = prov["engine"] == "ollama"
         for name, e in prov["models"].items():
             said = (e.get("limit") or {}).get("context")

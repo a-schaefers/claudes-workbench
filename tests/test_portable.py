@@ -102,6 +102,7 @@ class Real(unittest.TestCase):
         os.environ.update(WB_HOME=str(tmp / "state"), WB_OPENCODE_CONFIG=str(tmp / "opencode.json"),
                           WB_MODELS=str(tmp / "models.json"), WB_COMMANDS=str(tmp / "commands.json"))
         models._ENGINES.clear()
+        models._EMULATORS.clear()
         models._DOWN.clear()
         models._KEYS.clear()
         models._FACTS.clear()
@@ -745,6 +746,60 @@ class Real(unittest.TestCase):
         self.assertEqual(models.weights(models.resolve("lms/qwen/coder-30b")), 18_000_000_000)
         entry = json.loads(Path(os.environ["WB_OPENCODE_CONFIG"]).read_text())["provider"]["lms"]["models"]
         self.assertFalse(entry["tiny/chat"]["tool_call"])  # LM Studio says it wasn't trained for tools
+
+    def kobold(self, extra: bool = True) -> str:
+        """A server answering as KoboldCpp does (checked against its source for #580): Ollama's
+        /api/version, /api/tags and /api/ps with one hard-coded 0.39 GB row of family koboldcpp,
+        /api/show with only completion, and, ``extra``, its own /api/extra/version."""
+        row = {"name": "koboldcpp/coder", "model": "koboldcpp/coder", "size": 394998579,
+               "size_vram": 394998579, "details": {"family": "koboldcpp"}}
+        return self.server({"/api/version": {"version": "0.7.0"}, "/api/tags": {"models": [row]},
+                            "/api/ps": {"models": [row]},
+                            **({"/api/extra/version": {"result": "KoboldCpp", "version": "1.80"}}
+                               if extra else {}),
+                            "/v1/models": {"data": [{"id": "koboldcpp/coder", "owned_by": "koboldcpp"}]}})
+
+    def test_koboldcpps_ollama_emulation_is_driven_as_a_server_and_add_keeps_its_tool_calls(self):
+        # #580, the audit of 1.90: any /api/version with a version read as Ollama, so wb model add
+        # wrote tool_call: false from its /api/show, and the router, unloads and optimize drove
+        # it as Ollama with a fake 0.39 GB size
+        from workbench import cli
+        for extra in (True, False):        # its own endpoint, or only its tags row's family
+            models._ENGINES.clear()
+            models._EMULATORS.clear()
+            url = self.kobold(extra)
+            self.config({"kc": {"options": {"baseURL": url + "/v1"}, "models": {}}})
+            self.assertEqual(models.providers()["kc"]["engine"], "server")
+            self.assertFalse(models.ollama_answers(url))
+            self.assertIn("is KoboldCpp's emulation of it: wb drives it as an OpenAI-compatible "
+                          "server", models.providers()["kc"]["engine_note"])
+            out = io.StringIO()
+            with redirect_stdout(out):
+                cli.main(["model", "add", "kc/koboldcpp/coder", "--context", "32768"])
+            self.assertIn("KoboldCpp's emulation", out.getvalue())
+            self.assertNotIn("NO tool calls", out.getvalue())
+            entry = json.loads(Path(os.environ["WB_OPENCODE_CONFIG"]).read_text())["provider"]["kc"]["models"]
+            self.assertNotEqual(entry["koboldcpp/coder"].get("tool_call"), False)
+            self.assertNotIn("max_tokens", entry["koboldcpp/coder"].get("options") or {})
+            m = models.resolve("kc/koboldcpp/coder")
+            self.assertEqual((m.engine, models.status(m)["why"]), ("server", "running"))
+        # the models.json override still wins, and then nothing is said
+        self.config({"kc": {"options": {"baseURL": url + "/v1"}, "models": {}}}, {"kc": {"engine": "ollama"}})
+        self.assertEqual((models.providers()["kc"]["engine"], models.providers()["kc"]["engine_note"]),
+                         ("ollama", ""))
+
+    def test_a_real_ollama_is_not_taken_for_an_emulator_and_a_server_on_its_port_is_named(self):
+        posts = []
+        srv, port = fake_ollama([], ["m"], posts)
+        self.servers.append(srv)
+        other = self.server({"/v1/models": {"data": [{"id": "m"}]}})
+        self.config({"o": {"options": {"baseURL": f"http://127.0.0.1:{port}/v1"}, "models": {}},
+                     "ollama-box": {"options": {"baseURL": other + "/v1"}, "models": {}}})
+        provs = models.providers()
+        self.assertEqual((provs["o"]["engine"], provs["o"]["engine_note"]), ("ollama", ""))
+        self.assertEqual(provs["ollama-box"]["engine"], "server")
+        self.assertIn("ollama-box is named for Ollama, but", provs["ollama-box"]["engine_note"])
+        self.assertIn('set "engine" for ollama-box', provs["ollama-box"]["engine_note"])
 
     def test_llama_server_says_its_size_and_the_window_of_one_slot_and_is_ranked_by_size(self):
         big = self.server({"/v1/models": {"data": [{"id": "/m/big.gguf", "owned_by": "llamacpp",

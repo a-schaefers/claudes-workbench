@@ -13,8 +13,8 @@ keyed by OpenCode model id or by provider id:
                    "weights_gb": 55},
      "ollama/some-model": {"skip": true}}
 
-A provider is driven as Ollama when its server answers Ollama's /api/version, whatever its port;
-anything else is a server (`"engine": "ollama"|"server"` on the provider overrides the probe). A
+A provider is driven as Ollama when its server answers Ollama's /api/version, whatever its port,
+and isn't an emulation of it (KoboldCpp: `emulator`); anything else is a server (`"engine": "ollama"|"server"` on the provider overrides the probe). A
 server that lists several models (LM Studio, llama-swap, vLLM) swaps them itself: its models
 are one server, stopped or started as one.
 
@@ -444,13 +444,62 @@ def _engine(url: str, over: dict, pid: str = "") -> str:
     try:
         with _open(f"{root}/api/version", timeout=1.5) as r:
             body = json.loads(r.read() or b"{}")
-        _ENGINES[root] = "ollama" if isinstance(body, dict) and "version" in body else "server"
+        _ENGINES[root] = "ollama" if isinstance(body, dict) and "version" in body \
+            and not emulator(root) else "server"
     except urllib.error.HTTPError:  # it answered, without Ollama's API
         _ENGINES[root] = "server"
     except Exception:  # down, or not speaking JSON: the port is the best guess
         _DOWN[root] = time.monotonic()
         return guess
     return _ENGINES[root]
+
+
+# Servers that answer Ollama's /api/version but only emulate its API, by root: their name, or ""
+# for a real Ollama. KoboldCpp's emulation answers /api/version, /api/tags and /api/ps with a
+# hard-coded row (0.39 GB, family "koboldcpp"), /api/show with capabilities ["completion"], and
+# /api/generate with a generation: driven as Ollama, wb model add wrote it `tool_call: false`
+# though it serves OpenAI tool calls, the router read it as the smallest model, and unloads
+# freed nothing (#580, the audit of 1.90). Driven as an OpenAI-compatible server instead.
+_EMULATORS: dict[str, str] = {}
+
+
+def emulator(root: str) -> str:
+    """The name of the Ollama emulator answering at ``root`` (KoboldCpp), or "" for anything
+    else: its own /api/extra/version answers, or a tags row says its family is koboldcpp."""
+    root = root.rstrip("/").removesuffix("/v1")
+    if root in _EMULATORS:
+        return _EMULATORS[root]
+    extra = _get(f"{root}/api/extra/version", timeout=1.5)
+    tags = None if isinstance(extra, dict) and extra else _get(f"{root}/api/tags", timeout=1.5)
+    rows = (tags or {}).get("models") if isinstance(tags, dict) else None
+    if isinstance(extra, dict) and extra:
+        name = str(extra.get("result") or "KoboldCpp")
+    elif any(isinstance(x, dict) and str((x.get("details") or {}).get("family", "")).lower()
+             == "koboldcpp" for x in rows or []):
+        name = "KoboldCpp"
+    else:
+        name = ""
+    _EMULATORS[root] = name
+    return name
+
+
+def engine_note(pid: str, url: str, over: dict) -> str:
+    """What Claude should hear when the probed engine isn't what the provider's port or name
+    suggests (#580): an Ollama emulator driven as a server, or a server on Ollama's port or named
+    for it. "" when they agree, the engine was set in models.json, or nothing answered."""
+    root = url.rstrip("/").removesuffix("/v1")
+    if over.get("engine") in ("ollama", "server") or root not in _ENGINES:
+        return ""
+    fix = (f"if that is wrong, set \"engine\" for {pid} in {overrides_path()} (\"ollama\" or "
+           "\"server\")")
+    if name := _EMULATORS.get(root):
+        return (f"{root} answers Ollama's API, but it is {name}'s emulation of it: wb drives it as "
+                f"an OpenAI-compatible server; {fix}")
+    guess = "ollama" if urlparse(url).port == OLLAMA_PORT or "ollama" in pid.lower() else "server"
+    if guess == "ollama" and _ENGINES[root] == "server":
+        why = "is on Ollama's port" if urlparse(url).port == OLLAMA_PORT else "is named for Ollama"
+        return f"{pid} {why}, but {root} doesn't answer as Ollama: wb drives it as a server; {fix}"
+    return ""
 
 
 def engine_known(url: str, over: dict) -> bool:
@@ -639,6 +688,9 @@ def _get(url: str, timeout: float = 2.5):
     try:
         with _open(url, timeout=timeout) as r:
             return json.loads(r.read() or b"{}")
+    except urllib.error.HTTPError as e:  # a 404 (emulator's probe on a real Ollama) left open
+        e.close()
+        return None
     except Exception:
         return None
 
@@ -1803,6 +1855,7 @@ def providers() -> dict[str, dict]:
                   "models": prov.get("models") or {}, "engine": engine,
                   "key": key(pid, prov),
                   "engine_known": engine_known(url, extra.get(pid) or {}),
+                  "engine_note": engine_note(pid, url, extra.get(pid) or {}),
                   "start": (extra.get(pid) or {}).get("start"),
                   "problem": url_problem(url, engine, prov.get("npm"))}
             for pid, prov, url, engine, _ in _local_providers(read_config(), extra, dirs)}
@@ -1824,7 +1877,7 @@ def ollama_answers(root: str) -> bool:
     if _fake():
         return False
     body = _get(f"{root}/api/version", timeout=1.5)
-    return isinstance(body, dict) and "version" in body
+    return isinstance(body, dict) and "version" in body and not emulator(root)
 
 
 def _add_provider(cfg: dict, pid: str, name: str, base: str) -> None:

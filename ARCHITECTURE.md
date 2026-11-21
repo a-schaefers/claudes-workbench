@@ -2444,7 +2444,16 @@ models.json `engine`, else a cached probe of `GET <root>/api/version` (a JSON `v
 probe sends the provider's `apiKey` (`_KEYS` is filled before it), so an Ollama that wants a key
 isn't classed a server; a probe that gets no answer is remembered for `DOWN_SECS` (60 s, `_DOWN`), so a
 server that is down costs one 1.5 s timeout a minute, not one per `discover()`, and a runner or the
-chat server, which live for hours, learn the engine once it is back (#337).
+chat server, which live for hours, learn the engine once it is back (#337). A server that
+answers `/api/version` but only emulates Ollama is a `server` (`models.emulator`, cached per root
+in `_EMULATORS`; `ollama_answers` says no to it too): KoboldCpp, whose own `/api/extra/version`
+answers, or whose `/api/tags` row has `details.family` `koboldcpp`. Driven as Ollama, its
+`/api/show` (capabilities `completion` only) made `wb model add` write `tool_call: false`, its
+hard-coded 0.39 GB row ranked it smallest and fitting beside anything, and unloads started a
+generation (#580). When the probe and the port or name disagree (an emulator, or a provider on
+Ollama's port or named for it that doesn't answer as Ollama), `providers()`'s `engine_note`
+says so and names the models.json `engine` override; `wb doctor` (`--  provider <pid>: …`) and `wb
+model add` print it.
 `resolve()` takes an exact id, an exact model or provider name (the entry's key or its server
 name), or a unique case-insensitive substring.
 
