@@ -608,6 +608,25 @@ class Lifecycle(Base):
         task.set_status(steps=2)                       # a new step is reviewed whole
         self.assertNotIn("since your last review", runner.review_diff(task))
 
+    def test_a_review_after_gc_pruned_the_last_snapshot_carries_the_whole_diff_and_says_why(self):
+        # #795 (the second 2026-11-21 audit): nothing reaches the snapshot a review notice
+        # recorded, git gc pruned it, and the next notice's diff against it failed: the notice
+        # left out the whole diff without a word
+        from workbench import runner
+        self.start("t-gc", "ok", "--test", TEST_CMD)
+        wait_phase("t-gc", {"review"})
+        task = store.Task("t-gc")
+        runner.review_diff(task)
+        tree = task.status["reviewed"]["tree"]
+        (task.worktree / "fixed.txt").write_text("the fix\n")
+        subprocess.run(["git", "-C", str(self.repo), "prune", "--expire=now"], check=True)
+        self.assertFalse(gitops.has_tree(task.worktree, tree))
+        again = runner.review_diff(task)
+        self.assertIn("the last review's snapshot is gone (git gc pruned it)", again)
+        self.assertIn("the diff (all of it", again)
+        self.assertIn("+the fix", again)
+        self.assertIn("+42", again)
+
     def test_periodic_check_ins_are_off_unless_asked_for(self):
         # each wakes Claude over its whole context: 500K of one task's 1.2M (2026-11-17)
         self.start("t-quiet", "ok", "--size", "significant")

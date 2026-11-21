@@ -1965,6 +1965,7 @@ def review_diff(task: store.Task) -> str:
     base = "HEAD" if steps > 1 else task.spec["base"]
     last = task.status.get("reviewed") or {}
     since = last.get("tree") if last.get("step") == steps else None
+    gone = ""
     # Only the proposals accept settles (proposals()) are left out of the code's diff: every
     # `*.proposed` was, so an ordinary schema.proposed read as "no changes" and was committed
     # all the same (#79, the 2026-11-18 audit).
@@ -1974,6 +1975,11 @@ def review_diff(task: store.Task) -> str:
         tree, left = gitops.snapshot_left(task.worktree)  # bulky new files left out (#431)
         task.set_status(reviewed={"step": steps, "tree": tree})
         left = gitops.left_line(left)
+        if since and not gitops.has_tree(task.worktree, since):
+            # nothing reaches the last snapshot, and git gc pruned it: the diff against it failed,
+            # and the notice dropped the whole diff without a word (#795, the second 2026-11-21
+            # audit). The whole diff again, said why.
+            since, gone = None, "\n\nthe last review's snapshot is gone (git gc pruned it): all of it again"
         if since:
             # bounded: a big diff is never read whole only to show its stat (#348, the audit of 1.4)
             full = gitops.diff(task.worktree, since, paths=code, limit=REVIEW_DIFF_MAX)
@@ -1990,11 +1996,11 @@ def review_diff(task: store.Task) -> str:
         full = gitops.diff(task.worktree, base, paths=code, limit=REVIEW_DIFF_MAX)
         prop = proposal_diff(task) + left
         if full == "":
-            return "\n\nthe diff: (no changes)" + prop
+            return gone + "\n\nthe diff: (no changes)" + prop
         if full is not None:
-            return (f"\n\nthe diff (all of it; wb diff {task.name} again only after a change):"
+            return (f"{gone}\n\nthe diff (all of it; wb diff {task.name} again only after a change):"
                     f"\n{full}" + prop)
-        return (f"\n\nthe diff is over {REVIEW_DIFF_MAX} characters, too big to include: "
+        return (f"{gone}\n\nthe diff is over {REVIEW_DIFF_MAX} characters, too big to include: "
                 f"its stat:\n{gitops.diff(task.worktree, base, stat=True, stat_count=gitops.CHANGED_SHOWN)}" + prop)
     except (gitops.GitError, OSError):
         return ""

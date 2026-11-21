@@ -933,6 +933,12 @@ def snapshot(worktree: Path, landing: bool = False) -> str:
     return snapshot_left(worktree, landing)[0]
 
 
+def has_tree(cwd: Path, rev: str) -> bool:
+    """Whether ``rev`` still names a tree here. A review snapshot (snapshot_left) is reachable from
+    nothing, so git gc prunes it once gc.pruneExpire passes (#795)."""
+    return not _run(cwd, ("cat-file", "-e", f"{rev}^{{tree}}"), check=False).returncode
+
+
 def snapshot_left(worktree: Path, landing: bool = False) -> tuple[str, list[str]]:
     """snapshot's tree, and what it left out ("build/ (400 new files)", "data.bin (3 MB)"; []
     when nothing): a new file of BINARY_MAX or more, the top-level directories with the most new

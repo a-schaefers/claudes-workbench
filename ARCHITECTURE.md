@@ -805,7 +805,9 @@ while any runner is live; a manual pull is the case this catches.
    after a review of the same step, only the diff since that review notice (`gitops.snapshot`,
    a tree object recorded as status `reviewed`), with a proposed instruction file shown again only
    when it changed: the wake after a feedback round carried the whole 14K-character diff again,
-   2026-11-18; the snapshot leaves bulky new files out, named in the notice ("left out of the
+   2026-11-18 (that tree reachable from nothing, git gc prunes it in time: then the whole diff
+   again, saying "the last review's snapshot is gone (git gc pruned it)", `gitops.has_tree`;
+   the diff against it failed and the notice dropped every diff without a word, #795); the snapshot leaves bulky new files out, named in the notice ("left out of the
    review snapshot, too big to store each round: …"; the next review's diff shows them again):
    `gitops.snapshot_left`, chosen from `ls-files --others` and their sizes before anything is
    hashed, so a file of `BINARY_MAX` or more, while more than `NEW_FILES_MAX` new files remain
@@ -6377,7 +6379,7 @@ check-ins off), not `wb start`'s.
 | `reviews` | review rounds in this step (`wb feedback` +1, `wb next` resets) |
 | `auto_fixes`, `auto_fixes_total` | auto-fix rounds since the last review or step; earlier ones |
 | `self_reviewed` | `[steps, reviews]` when the self-review round last ran (`tuned.self_review` on: once per review round) |
-| `reviewed` | `{step, tree}`: the working tree the last review notice showed, a tree object (`gitops.snapshot`, bulky new files left out); the next review notice of the same step shows the diff since it |
+| `reviewed` | `{step, tree}`: the working tree the last review notice showed, a tree object (`gitops.snapshot`, bulky new files left out); the next review notice of the same step shows the diff since it (the whole diff once git gc pruned it, #795) |
 | `tests` | `{ok, exit, tail, round, lane?, proxy?, hang?}` of the last test run (`exit`: a code, `timeout` or `output limit`; `lane`: the device nodes it was refused outside the lane, #331; `proxy`: the proxy variables the agent's environment left out, when the run failed on a connection, #380; `hang`: `{base, limit}`, a timeout of a command the base check ran in a quarter of the limit or less, #779) |
 | `base_check` | `{ok, exit, tail, limit, secs, cmd}` of the acceptance command run once on the base, in the lane (`runner.base_check`; `exit` is `"timeout"` past `limit`, `"setup failed"` when its scratch checkout couldn't be set up); the runner, before round 1, only with `--test` and without `--no-base-check` |
 | `infra` | why the machine, not the agent, failed the task: `setup` (`runner._prepare`), `model` (`_load_failed`: it couldn't load, or its server stayed down past `DOWN_WAIT`, or died again after a round's revive: #657), `crash`, `disk full` (the runner's crash handler), `runner died` (`cli.reap`); cleared at each runner's start. A replay with it is an `error` row, not `failed` (*Bench*, #508) |
