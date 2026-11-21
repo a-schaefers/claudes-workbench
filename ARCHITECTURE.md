@@ -3786,7 +3786,8 @@ retries with a delay growing from 10 s to 5 min (`RestartSteps`, systemd 254+; e
 older ones), since retrying is what brings the chat up when a bound address arrives late (a user
 manager has no network-online.target) or the port is briefly held: a start limit gave up for good
 there (the 0.90 review). It stops only on exit 78 (`RestartPreventExitStatus`), which bin/wb's
-Python-version and Windows guards use; never 75, the replan exit below.
+Python-version and Windows guards use, and `wb chat serve` on a chat.json it can't follow (#534);
+never 75, the replan exit below.
 
 **Keeping it up, and reaching it** (moved here from the README, 2026-11-17). On Linux, link the
 unit from the copy `wb` runs from (`~/.claude/plugins/marketplaces/workbench` for a marketplace
@@ -3805,9 +3806,16 @@ call), and the linger line names the runners too, with or without the chat; `wb 
 only when that scope can't be had (`cli.logout_stops`; quiet where `loginctl` is absent; #351,
 the audit of 1.4).
 The unit runs systemd's `python3`; a Python from pyenv, uv or conda goes in with `systemctl --user
-edit wb-chat` (the unit's comment says how). On macOS, a launchd agent running `~/.local/bin/wb
-chat serve` does the same. `wb chat url` prints the link, `http://localhost:1337/#token=…` (the
-port the running server recorded in `chat/port.json`, else 1337; `--port` names one: `wb chat url`,
+edit wb-chat` (the unit's comment says how). On macOS, `launchd/workbench.chat.plist` does the
+same (a user agent, `RunAtLoad` and `KeepAlive`, running `exec "$HOME/.local/bin/wb" chat serve`
+through `/bin/sh`, since launchd expands no `~`, with Homebrew's `python3` first on `PATH`, Apple's
+`/usr/bin/python3` being 3.9): copy it to `~/Library/LaunchAgents/` and `launchctl bootstrap
+gui/$(id -u) ~/Library/LaunchAgents/workbench.chat.plist` (its comment says how to remove it; it
+retries even a broken install's exit 78, which launchd can't exempt; not checked on a Mac yet,
+#449). WSL2 with systemd on (`[boot] systemd=true` in `/etc/wsl.conf`) uses the unit; without
+it, and on any machine with neither, the revive below brings a chat `wb chat on` started back. `wb chat url` prints the link, `http://localhost:1337/#token=…` (the
+port the running server recorded in `chat/port.json`, else the one `chat/serve.pid` says `wb chat
+on` last started one on, else 1337; `--port` names one: `wb chat url`,
 `on` and `off` without it, and the pane's link, find a server on another port, #349); from a phone, reach the PC the way you normally do and change the host in the link. It
 serves only localhost until chat.json says otherwise (*Settings* below): `{"bind": ["localhost",
 "tailscale"]}` adds the Tailscale address, `{"bind": ["0.0.0.0"]}` every interface (the LAN, a
@@ -3829,14 +3837,30 @@ VPN), `"hosts": ["chat.example.org"]` a name a tunnel or proxy sends.
   A server already running is left up (systemd's: `systemctl --user disable --now wb-chat` stops
   it), its messages waiting for the chat to be on again. `wb chat on` starts `bin/wb chat serve
   --port <port>` detached (`chat.start`: `chat/serve.log`, `chat/serve.pid` `{pid, port}`) when
-  nothing answers on the port at an address the plan binds (`chat.who_answers`: a GET whose
-  response carries `X-Workbench-Chat: 1`, `chat.MARK`, which every response of the server has, is
-  the chat; anything else answering is another program, and `wb chat on` refuses with the port
-  named), then waits up to `START_WAIT` 10 s for it to answer (`chat.wait_up`; one that exits,
+  nothing answers on the port at an address the plan binds (a wildcard probed at its family's
+  loopback, `chat._probe`: `::` at `::1`, since an IPv6-only socket, bindv6only=1, never answered
+  the 127.0.0.1 it was probed at and a healthy chat looked down, #450) (`chat.who_answers`: a GET whose
+  response carries `X-Workbench-Chat: <identity>`, `chat.MARK`, which every response of the server
+  has, is this account's chat when the value is `chat.identity(token)`, an HMAC-SHA256 of a fixed
+  string keyed by the token (32 hex characters, nothing of the token given away); anything else
+  answering, another account's chat or a server still on a replaced token included, is "other",
+  and `wb chat on` refuses with the port named, while `wb chat off` names no systemd unit. A bare
+  `1` said only "a wb chat", so on a shared machine one account's `wb chat on` showed a link to
+  another's server that its token got 401 on, #554), then waits up to `START_WAIT` 10 s for it to answer (`chat.wait_up`; one that exits,
   the port taken, fails at once with serve.log's last line). A bare connect counted any program
   on the port as the chat, and a fixed half second said started either way (#200, the
   2026-11-19 audit); `chat.running` is `who_answers == "workbench"`. `wb chat off` stops
   only that process (`chat.stop_started`, by its pid and command line), never one wb didn't start.
+- **Coming back.** Nothing brought a server `wb chat on` started back after a reboot or a crash:
+  the switch stayed on, the pane showed the link, and the phone said "Can't reach the computer"
+  for good (#449). `wb chat url` now starts it again first (`chat.revive`, silently: the mod reads
+  the output whole as the link) when the switch is on, `chat/serve.pid` names a server that is
+  gone (its pid not a live `wb chat serve`), nothing answers on that port, and `wb-chat.service`
+  isn't enabled (`systemctl --user is-enabled`: systemd's to restart). The mod runs `wb chat url`
+  as a session starts and every 10 minutes while the chat is on, so it comes back within that
+  once any Claude session with the mod runs. `wb doctor` says when the switch is on and nothing,
+  or something else, answers (`cli.chat_gap`). A server `chat.start` makes has no supervisor of
+  its own: only that revive, the unit or the launchd agent starts it again.
 - **One listener.** A session listens while workbench mode is on in it (from `/workbench`, or a
   delegating `wb` command, until a quit command) and the chat is on. With several sessions the first live claim on
   `chat/listener.json` listens; it is known by its `wb events` process's pid.
@@ -3935,14 +3959,27 @@ with a message), read once when the server starts, so a new token needs a restar
 on, which replace localhost (`localhost`, an address, `tailscale`: the tailnet IPv4 from
 `tailscale status --json`, the CLI found on PATH or, on macOS, in the app bundle
 (`TAILSCALE_APP`); skipped as `tailscale (not running)`, or `tailscale (CLI not found: …)` when
-neither has it; `0.0.0.0` or `::`: every interface). `hosts`: extra host names to answer to (`*`: any). `--bind` replaces chat.json's
+neither has it; `0.0.0.0` or `::`: every interface). `hosts`: extra host names to answer to (`*`: any).
+Each is a list of strings; a string is a one-item list (iterated, `"0.0.0.0"` became the binds `0`
+and `.`), and anything else stops `serve` with `chat.ConfigError` naming chat.json, exit 78, so the
+unit doesn't retry it (#534). A wildcard covers its family's other binds: with `0.0.0.0` the plan
+drops the specific IPv4 ones, with `::` the specific IPv6 ones (their names stay answered), and
+`::` beside any IPv4 bind gets `IPV6_V6ONLY` (`plan()["v6only"]`, `_Server.v6only`). On Linux each
+further socket on the port failed `EADDRINUSE`, so `["localhost", "0.0.0.0"]`, `["0.0.0.0", "::"]`
+or `["127.0.0.1", "::"]` never started (#534). `--bind` replaces chat.json's
 binds, `--host` adds to its hosts, `--port` changes the port. Answered host names (`chat.plan`,
 worked out once at startup): `localhost`, `127.0.0.1`, `::1` always; for `tailscale` its DNS name,
 first label and host name; for a wildcard the host's name, its first label, its FQDN and whatever
-the host name resolves to; any other bind as itself; plus `hosts`. `serve` prints what it listens
+the host name resolves to; any other bind as itself; plus `hosts`. On any bind it also answers to
+this machine's full MagicDNS name while Tailscale is up (`chat.tailnet_name`, from `tailscale status
+--json`, asked at most every `REPLAN_EVERY` 30 s and only for a Host not already answered):
+`tailscale serve --bg 1337` passes that name through as the Host, and the default localhost chat
+answered the page itself 403 `unknown host` (#448). Only the full name (`box.tailnet.ts.net`, the one
+serve's certificate has), which no other site's DNS can answer for. `serve` prints what it listens
 on, binds it skipped, and warnings for a wildcard bind or `hosts: *`; an address it can't listen
 on ends it with one line (`can't listen on <addr>:<port>: the port is taken: another wb chat serve
-… or another program; --port picks another`, or the address isn't on this machine). With a bind skipped (tailscale
+… or another program; --port picks another`; for an address after the first, `by another address in
+the bind list (chat.json's bind, or --bind) or another program`; or the address isn't on this machine). With a bind skipped (tailscale
 not up yet) or a `tailscale` bind (its address comes and goes), it rechecks every
 `REPLAN_EVERY` 30 s and once the set of addresses differs re-execs in place (as for a code
 change, below) to bind them. Only a longer list was noticed, so a tailscale-only chat serving
@@ -3953,13 +3990,20 @@ have changed and held still for a look (a pull writes files one by one), it says
 the same command line (`sys.orig_argv`) in the same process, so systemd and launchd see no exit
 and a hand-started server keeps running: one left up across an update served the new page from
 the old code for a day and a half (2026-11-18). `wb chat url` prints
-`http://localhost:<port>/#token=…` (the fragment never leaves the browser).
+`http://localhost:<port>/#token=…` (the fragment never leaves the browser); when chat.json's `bind`
+has neither loopback nor a wildcard, the plan's first address instead of localhost, which reached
+nothing there (#534).
 
 **The HTTP API** (`Handler`, HTTP/1.0, no keep-alive, no CORS; a connection that stalls for
 `TIMEOUT` 30 s, before its request is in or on a blocked write, is closed, so an idle one holds a
 thread no longer):
 - Every request: the `Host` header (port and brackets stripped, lowercased) must be an answered
-  name, else 403 `{"error": "unknown host"}`: this stops other web pages and DNS rebinding.
+  name or the address the connection came in on (`Handler._local`, the socket's own address,
+  `::ffff:` and a `%zone` dropped), else 403 `{"error": "unknown host <host>: add it to chat.json's
+  hosts"}`: this stops other web pages and DNS rebinding, which needs a name, never an address.
+  With `0.0.0.0` the names come from the host name, which Debian, Ubuntu and WSL resolve to
+  127.0.1.1, and they miss an address gained after the start (a late Wi-Fi, a VPN), so a phone on
+  the LAN or tailnet IP got that 403 (#533).
   Responses carry `Cache-Control: no-store`, `X-Frame-Options: DENY`, `nosniff`, `no-referrer` and
   a CSP (`default-src 'self'`, inline styles only, images also from `blob:` (the screenshots),
   media only from `blob:` (the audio takes, #397), no framing, no forms).
@@ -4566,7 +4610,7 @@ the audio ones cover); `--done` records it; `--due` exits 0 when one is due (7 d
 |---|---|---|
 | `wb image "<prompt>"` | `--n` (4), `--size WxH` (1024x1024), `--seed`, `--ref <img>…`, `--out DIR`, `--engine`, `--list`, `--wait` | Candidates from a local image engine (see *Images*). While anything holds the GPU it refuses at once, naming the holders; `--wait` queues behind them. A bare `list` or `ls` as the prompt acts as `--list`. |
 | `wb audio "<text>"` | `--kind speech\|sfx\|music` (default: the first engine), `--n` (3), `--seconds S` (engines with `{seconds}`; default the entry's `seconds`, else 5 for sfx, 30 for music, 10 otherwise), `--voice NAME` (default: the entry's first of `voices`), `--ref <clip>…`, `--lyrics FILE\|-`, `--seed`, `--engine`, `--out DIR`, `--no-check` (no listener, no spectrograms), `--list`, `--wait` | Clips from a local audio engine, each with one line of checks (see *Audio*). A GPU engine refuses while anything holds the GPU (`--wait` queues); a `"gpu": false` engine runs beside tasks. A bare `list` or `ls` acts as `--list`. An option the engine has no placeholder for is refused, naming it. |
-| `wb chat [log\|on\|off\|serve\|url\|reply\|listen\|ack\|claim\|pending\|ask\|wait\|answer]` | `listen <clip>… [--text]` (Claude's shortlist of `wb audio` takes for the user to play and pick, up to 8: *Listening by ear*, #397), `on`, `off` (the switch, kept; `on` starts a server when none answers on `--port`, waits for it, and prints the link; it refuses when another program answers there, `off` stops only one it started), `--port` (the running server's, from `chat/port.json`, else 1337: #349), `--bind` (replaces chat.json's), `--host` (adds), `--text`, `--message <file\|->` (reply reads stdin without either), `-n` (10); `ack <id> --by --how`, `claim <id> --by` (exit 1: another session's), `ask --tool --kind permission\|plan\|question --text --detail <json> --session --repo` (a plan's session and directory; prints `<id> open`, `<id> allow` when the user's setting answered it, or `<id> expired` for a plan it can't read), `wait <id> --timeout` (30 s; prints allow, deny, expired, or `open` at the timeout; `--json`: the whole ask), `answer <id> allow\|deny\|expired --by --note` (prints the answer that stands) (the mod) | The web chat: the thread, the server, the link with its token, Claude's reply, permission prompts. |
+| `wb chat [log\|on\|off\|serve\|url\|reply\|listen\|ack\|claim\|pending\|ask\|wait\|answer]` | `listen <clip>… [--text]` (Claude's shortlist of `wb audio` takes for the user to play and pick, up to 8: *Listening by ear*, #397), `on`, `off` (the switch, kept; `on` starts a server when none answers on `--port`, waits for it, and prints the link; it refuses when another program or another account's chat answers there, `off` stops only one it started; `url` first starts again one `on` started that is gone, #449), `--port` (the running server's, from `chat/port.json`, else the one `chat/serve.pid` names, else 1337: #349), `--bind` (replaces chat.json's), `--host` (adds), `--text`, `--message <file\|->` (reply reads stdin without either), `-n` (10); `ack <id> --by --how`, `claim <id> --by` (exit 1: another session's), `ask --tool --kind permission\|plan\|question --text --detail <json> --session --repo` (a plan's session and directory; prints `<id> open`, `<id> allow` when the user's setting answered it, or `<id> expired` for a plan it can't read), `wait <id> --timeout` (30 s; prints allow, deny, expired, or `open` at the timeout; `--json`: the whole ask), `answer <id> allow\|deny\|expired --by --note` (prints the answer that stands) (the mod) | The web chat: the thread, the server, the link with its token, Claude's reply, permission prompts. |
 | `wb try` | `--model <id or fragment>` (the router's pick) | A sample task that proves the setup (#112): copies `workbench/try/project/` (a tiny `stats.py` with its tests and a committed CLAUDE.md) into `~/.local/share/workbench/try/<n>` (beside `$WB_SKILLS`: the state directory is hidden from the lane, and its agent had no git there, #164), sets it up as `wb init` does, and starts `workbench/try/spec.md` (add `median`) as `try-<n>`, `--size trivial --trial --test 'python3 -m unittest'`: never the router's evidence or the lessons. Prints what `wb start` does, the project's path and the hidden check for review, `python3 <pkg>/workbench/try/check.py <worktree>` (the agent never sees it; it fails on the untouched base, passes once `median` meets the spec, and leaves no `__pycache__`). A refused start (the GPU busy without `--queue`, no model) removes the copy again (#161). |
 | `wb init <dir>` | | A project the way Claude keeps one: git on the default branch, an initial commit, AGENTS.md → CLAUDE.md (a CLAUDE.md → AGENTS.md link is swapped; a gitignored CLAUDE.md isn't linked). Refuses the home directory or above, inside another repo, a repo git refuses (git's reason: no `git init` over it; "not a repo" is told apart in any language, `gitops.NotARepo`), without a git identity (`git var`, as for `wb start`), and a first commit holding likely secrets or installed directories no .gitignore covers. |
 | `wb setup` | `--force` (replaces a link that points elsewhere; never a real file) | Links `~/.local/bin/wb` to this copy's `bin/wb` and Claude Code's `skills/workbench` to its `skill/workbench`, removes an old `skills/delegate` link that now leads nowhere (the skill was `/delegate` until 2026-11-17; the mod runs `wb setup` itself when it finds only that), warns when `~/.local/bin` isn't on PATH (Claude and the mod run `wb` by name) with the line for the user's `$SHELL` (`cli.path_advice`: zsh's `~/.zshrc`, bash's `~/.bashrc`, on macOS `~/.bash_profile`, fish's `fish_add_path`, else `~/.profile`) and to start Claude Code again from a new terminal (the desktop app or an IDE too); "add it" was all it said (#274, the audit of 1.2), and `wb doctor`'s "wb isn't on PATH" gives the same line when that link is there; exit 1 when it left something in the way (see *Installing*). Then, when due (*Optimize*), starts the minute or two of measuring the GPU and prints its line as `--`. Ends with a `first run:` checklist (`cli.first_run`, #111), one line each, `ok` or `--` with the fix: OpenCode 2.x (else where to get it), a model server answering (a configured provider, this machine's Ollama, or a server on a default port; else: start yours, or run /workbench and Claude lays out the ones that fit the machine, never steering to one; `wb model add --url`), a local model registered (else: run /workbench, and Claude picks one for the machine), Landlock. It names no model, and changes no exit code. |
@@ -4608,7 +4652,7 @@ $WB_HOME (~/.local/state/workbench)
   images/<YYYYmmdd-HHMMSS>/      wb image's candidates (unless --out), their .json sidecars, engine.log
   audio/<YYYYmmdd-HHMMSS>/       wb audio's clips (unless --out): .wav, .json sidecar, .png spectrogram, engine.log
   chat/                          messages.jsonl  receipts.jsonl  asks.jsonl  prefs.json  listener.json  claims.json
-                                 switch.json ({on}: wb chat on|off)  serve.pid ({pid, port})  serve.log (the server wb chat on started)
+                                 switch.json ({on}: wb chat on|off)  serve.pid ({pid, port}; wb chat url revives from it)  serve.log (the server wb chat on started)
                                  port.json ({port, pid}: the port wb chat serve runs on, read back without --port)
                                  audio/<batch>/ (wb chat listen's copies, <n>.<ext>, and audio.json; the newest 20)
   rules/<task>/                  outside the lane: opencode.json (the config layer), HANDBOOK.md,

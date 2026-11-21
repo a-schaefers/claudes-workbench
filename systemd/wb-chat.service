@@ -23,7 +23,8 @@ RestartSteps=6
 RestartMaxDelaySec=300
 # bin/wb's guards (a python3 older than 3.11 on systemd's PATH, native Windows) exit 78
 # (EX_CONFIG): a broken install, which no retry fixes, so the unit stops at once (the 2026-11-16
-# audit). `systemctl --user restart wb-chat` once it's fixed.
+# audit); so does a chat.json whose bind or hosts isn't a list (#534). `systemctl --user restart
+# wb-chat` once it's fixed.
 RestartPreventExitStatus=78
 
 [Install]

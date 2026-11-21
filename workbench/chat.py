@@ -85,9 +85,23 @@ def config_path() -> Path:
     return Path(os.environ.get("WB_CHAT_CONFIG") or Path.home() / ".config" / "workbench" / "chat.json")
 
 
+class ConfigError(RuntimeError):
+    """chat.json says something the server can't follow: no retry fixes it (`wb chat serve` exits 78)."""
+
+
 def settings() -> dict:
-    """The user's choices for the server: {"bind": [...], "hosts": [...]}; {} for the defaults."""
-    return store.read_json(config_path(), {}) or {}
+    """The user's choices for the server: {"bind": [...], "hosts": [...]}; {} for the defaults. A
+    string is a one-item list: iterated as a list, "0.0.0.0" became the binds '0' and '.' (#534)."""
+    conf = store.read_json(config_path(), {}) or {}
+    if not isinstance(conf, dict):
+        raise ConfigError(f"{config_path()} isn't a JSON object: {{\"bind\": [...], \"hosts\": [...]}}")
+    for key in ("bind", "hosts"):
+        val = conf.get(key)
+        if isinstance(val, str):
+            conf[key] = [val]
+        elif val is not None and not (isinstance(val, list) and all(isinstance(v, str) for v in val)):
+            raise ConfigError(f"{config_path()}: {key} is a list of strings, not {json.dumps(val)[:60]}")
+    return conf
 
 
 def token() -> str:
@@ -120,7 +134,23 @@ def tailscale() -> dict:
     ips = [ip for ip in me.get("TailscaleIPs") or [] if "." in ip]
     dns = (me.get("DNSName") or "").rstrip(".")
     names = {n for n in (dns, dns.split(".")[0], me.get("HostName", "")) if n}
-    return {"ip": ips[0] if ips else None, "names": names}
+    return {"ip": ips[0] if ips else None, "names": names, "dns": dns.lower()}
+
+
+_tailnet = {"at": float("-inf"), "name": ""}
+_tailnet_lock = threading.Lock()
+
+
+def tailnet_name() -> str:
+    """This machine's MagicDNS name (box.tailnet.ts.net), "" when Tailscale isn't up; asked at
+    most every REPLAN_EVERY seconds, so a request under an unknown name costs no subprocess.
+    `tailscale serve --bg 1337`, the https the gear advises, passes that name through as the Host,
+    and a chat bound to localhost answered every request 403 "unknown host" (#448). Only the full
+    name: it is the one serve's certificate has, and no other site's DNS can answer for it."""
+    with _tailnet_lock:
+        if time.monotonic() - _tailnet["at"] >= REPLAN_EVERY:
+            _tailnet.update(at=time.monotonic(), name=tailscale().get("dns") or "")
+        return _tailnet["name"]
 
 
 # ---- the thread ----
@@ -676,16 +706,26 @@ def set_on(on: bool) -> None:
 MARK = "X-Workbench-Chat"  # on every response: how wb chat on knows its own server
 
 
+def identity(secret: str) -> str:
+    """MARK's value: an HMAC of a fixed string keyed by the server's token, so it names whose chat
+    this is and gives away nothing of the token. A bare "1" said only "a wb chat": on a shared
+    machine another account's `wb chat on` took the first's server for its own and showed a link
+    its token got 401 on (#554)."""
+    return hmac.new(secret.encode(), b"workbench web chat", "sha256").hexdigest()[:32]
+
+
 def who_answers(port: int) -> str | None:
-    """Who answers on the port at an address this machine's plan binds: "workbench" (its
-    responses carry MARK), "other", or None. A bare connect counted any program there as the
-    chat, and `wb chat on` showed a link to it (#200, the 2026-11-19 audit)."""
-    found = None
+    """Who answers on the port at an address this machine's plan binds: "workbench" (this
+    account's chat: its responses carry MARK keyed by this token), "other" (another program,
+    another account's chat, or one holding a token since replaced), or None. A bare connect
+    counted any program there as the chat, and `wb chat on` showed a link to it (#200, the
+    2026-11-19 audit)."""
+    found, mine = None, identity(token())
     for addr in plan()["binds"]:
-        conn = http.client.HTTPConnection("127.0.0.1" if addr in WILDCARD else addr, port, timeout=2)
+        conn = http.client.HTTPConnection(_probe(addr), port, timeout=2)
         try:
             conn.request("GET", "/manifest.webmanifest", headers={"Host": "localhost"})
-            if conn.getresponse().getheader(MARK) == "1":
+            if hmac.compare_digest(conn.getresponse().getheader(MARK) or "", mine):
                 return "workbench"
             found = "other"
         except (OSError, http.client.HTTPException):
@@ -695,9 +735,16 @@ def who_answers(port: int) -> str | None:
     return found
 
 
+def _probe(addr: str) -> str:
+    """Where to reach a bound address from here: a wildcard by its family's loopback. `::` was
+    probed at 127.0.0.1, which an IPv6-only socket (bindv6only=1) never answers, so a healthy
+    chat looked down and `wb chat on` started a second that failed on the port (#450)."""
+    return {"0.0.0.0": "127.0.0.1", "::": "::1"}.get(addr, addr)
+
+
 def _connects(addr: str, port: int) -> bool:
     try:
-        with socket.create_connection(("127.0.0.1" if addr in WILDCARD else addr, port), timeout=1):
+        with socket.create_connection((_probe(addr), port), timeout=1):
             return True
     except OSError:
         return False
@@ -748,6 +795,37 @@ def start(port: int) -> int:
                                 stdout=log, stderr=log, start_new_session=True)  # outlives wb
     store.write_json(chat_dir() / "serve.pid", {"pid": proc.pid, "port": port})
     return proc.pid
+
+
+def _unit_keeps_it() -> bool:
+    """Whether wb-chat.service is enabled, so systemd brings the chat back itself."""
+    if not shutil.which("systemctl"):
+        return False
+    try:
+        return subprocess.run(["systemctl", "--user", "is-enabled", "--quiet", "wb-chat"],
+                              capture_output=True, timeout=5).returncode == 0
+    except (OSError, subprocess.TimeoutExpired):
+        return False
+
+
+def revive() -> int | None:
+    """Start again the server `wb chat on` started (chat/serve.pid), when the switch is still on and
+    it is gone and nothing answers on its port; the port it started on, else None. Nothing brought
+    it back after a reboot or a crash, while the switch said on and the pane showed the link, so
+    the phone said "Can't reach the computer" for good (#449). `wb chat url` calls it, which the
+    mod runs at a session's start and every ten minutes while the chat is on. Never for a chat wb
+    didn't start, nor where wb-chat.service is enabled (systemd's to restart)."""
+    from . import models  # as in stop_started
+    rec = store.read_json(chat_dir() / "serve.pid", None) or {}
+    pid, port = rec.get("pid"), rec.get("port")
+    if not is_on() or not isinstance(port, int) or not pid:
+        return None
+    if _alive(pid) and models.runs(int(pid), "chat", "serve"):  # up, or still starting
+        return None
+    if who_answers(port) is not None or _unit_keeps_it():
+        return None
+    start(port)
+    return port
 
 
 def stop_started() -> bool:
@@ -887,7 +965,7 @@ class Handler(BaseHTTPRequestHandler):
         pass
 
     def _security_headers(self) -> None:
-        self.send_header(MARK, "1")
+        self.send_header(MARK, identity(self.secret))
         self.send_header("Cache-Control", "no-store")
         self.send_header("X-Frame-Options", "DENY")
         self.send_header("X-Content-Type-Options", "nosniff")
@@ -914,10 +992,23 @@ class Handler(BaseHTTPRequestHandler):
             host = host[1:host.find("]")] if "]" in host else host
         elif host.count(":") == 1:
             host = host.rsplit(":", 1)[0]
-        if self.hosts is not None and host not in self.hosts:
-            self._json(403, {"error": "unknown host"})
+        if (self.hosts is not None and host not in self.hosts and not (host and host.split("%")[0] == self._local())
+                and not (host and host == tailnet_name())):
+            self._json(403, {"error": f"unknown host {host[:100]}: add it to chat.json's hosts"})
             return False
         return True
+
+    def _local(self) -> str:
+        """The address this connection came in on: on a wildcard bind, the LAN or tailnet IP a
+        phone typed. The names were worked out once at startup from the host name, which resolves
+        to 127.0.1.1 on Debian, Ubuntu and WSL, and missed an address gained later (a late Wi-Fi,
+        a VPN), so those IPs got 403 (#533). An address can't be rebound: DNS rebinding needs a
+        name, and the socket's own address is one this server bound."""
+        try:
+            addr = self.connection.getsockname()[0]
+        except (OSError, AttributeError, IndexError):
+            return ""
+        return addr.lower().removeprefix("::ffff:").split("%")[0]
 
     def _authed(self) -> bool:
         auth = self.headers.get("Authorization") or ""
@@ -1152,12 +1243,25 @@ def plan(binds: list[str] | None = None, hosts: list[str] | None = None) -> dict
             allowed.add(b)
         if b not in out:
             out.append(b)
+    # A wildcard covers the specific addresses of its family, and on Linux (bindv6only=0) `::`
+    # takes IPv4 too: each further socket on the port failed EADDRINUSE, so ["localhost",
+    # "0.0.0.0"] or ["0.0.0.0", "::"] never started, blamed on "another wb chat serve" (#534).
+    # Their names stay answered; `::` beside any IPv4 bind is made IPv6-only (IPV6_V6ONLY).
+    if "0.0.0.0" in out:
+        out = [b for b in out if b == "0.0.0.0" or ":" in b]
+    if "::" in out:
+        out = [b for b in out if b == "::" or ":" not in b]
     return {"binds": out or ["127.0.0.1"], "hosts": None if "*" in extra else allowed | set(extra),
-            "names": names, "skipped": skipped}
+            "names": names, "skipped": skipped,
+            "v6only": "::" in out and any(":" not in b for b in out)}
 
 
 class _Server(ThreadingHTTPServer):
+    v6only = False  # set for `::` beside an IPv4 bind, so the two can share the port (#534)
+
     def server_bind(self):
+        if self.v6only:
+            self.socket.setsockopt(socket.IPPROTO_IPV6, socket.IPV6_V6ONLY, 1)
         # HTTPServer's own also looks the address's host name up (socket.getfqdn), which nothing
         # here reads: on macOS that lookup stalled the start past wb chat on's wait (#236)
         socketserver.TCPServer.server_bind(self)
@@ -1178,12 +1282,16 @@ def make_servers(port: int, binds: list[str] | None = None,
     servers = []
     for addr in p["binds"]:
         try:
-            srv = (_Server6 if ":" in addr else _Server)((addr, port), handler)
+            kind = (type("_Server6Only", (_Server6,), {"v6only": True}) if addr == "::" and p["v6only"]
+                    else _Server6 if ":" in addr else _Server)
+            srv = kind((addr, port), handler)
         except OSError as e:  # one line, not a traceback (the 2026-11-16 audit)
             for s in servers:
                 s.server_close()
-            why = ("the port is taken: another wb chat serve (systemctl --user status wb-chat) or "
-                   "another program; --port picks another" if e.errno == errno.EADDRINUSE else
+            why = (("the port is taken: by another address in the bind list (chat.json's bind, or "
+                    "--bind) or another program" if servers else
+                    "the port is taken: another wb chat serve (systemctl --user status wb-chat) or "
+                    "another program") + "; --port picks another" if e.errno == errno.EADDRINUSE else
                    "that address isn't on this machine (chat.json's bind, or --bind)"
                    if e.errno == errno.EADDRNOTAVAIL else e.strerror or str(e))
             raise RuntimeError(f"can't listen on {addr}:{port}: {why}") from None
@@ -1218,7 +1326,11 @@ def serve(port: int, binds: list[str] | None, hosts: list[str] | None = None, sa
         def replan():
             while True:
                 time.sleep(REPLAN_EVERY)
-                if set(plan(binds, hosts)["binds"]) != set(p["binds"]):
+                try:
+                    now = set(plan(binds, hosts)["binds"])
+                except ConfigError:  # chat.json broken while it runs: keep serving what it bound
+                    continue
+                if now != set(p["binds"]):
                     restart("the addresses to listen on changed: restarting to bind them")
         threading.Thread(target=replan, daemon=True).start()
     threading.Thread(target=watch_code, args=(
@@ -1249,15 +1361,25 @@ def watch_code(restart, every: float = RELOAD_EVERY) -> None:
 
 
 def port() -> int:
-    """The port the running server recorded (chat/port.json), else PORT: so a command or the
-    pane that names no port finds a server started on another (#349, the audit of 1.4)."""
+    """The port the running server recorded (chat/port.json), else the one `wb chat on` last
+    started a server on (chat/serve.pid: gone after a reboot or a crash, it comes back there,
+    #449), else PORT: so a command or the pane that names no port finds a server started on
+    another (#349, the audit of 1.4)."""
     st = store.read_json(chat_dir() / "port.json", None) or {}
     if isinstance(st.get("port"), int) and st.get("pid") and _alive(st["pid"]):
         return st["port"]
-    return PORT
+    started = (store.read_json(chat_dir() / "serve.pid", None) or {}).get("port")
+    return started if isinstance(started, int) else PORT
 
 
 def url(port: int) -> str:
     """The one link to open: localhost, the token in the fragment. Reaching it from another
-    device (Tailscale, a tunnel) is the user's own setup: they change the host in the link."""
-    return f"http://localhost:{port}/#token={token()}"
+    device (Tailscale, a tunnel) is the user's own setup: they change the host in the link. A bind
+    list without loopback or a wildcard gets its first address instead: localhost reached nothing
+    there (#534)."""
+    host = "localhost"
+    binds = settings().get("bind") or []
+    if binds and not any(b in ("localhost", "127.0.0.1", "::1", *WILDCARD) for b in binds):
+        first = plan()["binds"][0]
+        host = f"[{first}]" if ":" in first else first
+    return f"http://{host}:{port}/#token={token()}"
