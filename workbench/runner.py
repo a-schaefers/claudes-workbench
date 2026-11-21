@@ -1207,7 +1207,7 @@ def base_check(task: store.Task) -> dict | None:
         return None
     limit = min(BASE_CHECK_SECS, int(task.spec.get("test_timeout") or 900))
     from . import verify  # verify imports this module
-    code, output = verify.on_base(task, cmd, limit)
+    code, output = verify.on_base(task, cmd, limit, say=lambda msg: task.set_status(last=msg))
     task.dir.joinpath("base-tests.txt").write_text(
         f"$ {cmd}\nexit: {code}\nshell: {test_shell()}\n\n{output}")
     return {"ok": code == 0, "exit": code, "tail": clip_tail(output, 8, total=1500), "limit": limit}

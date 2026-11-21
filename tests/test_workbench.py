@@ -6874,6 +6874,43 @@ class Verify(Base):
         said = Path(verify_dir := store.Task("t-copied").dir / "verify" / "1", "base.txt").read_text()
         self.assertIn(f"build is a build tree configured for {self.repo}", said, verify_dir)
 
+    def test_with_unload_for_tests_the_checks_have_the_gpu_alone(self):
+        # #502 (the audit of 1.90): the base check, wb verify and wb shot ran the project's GPU
+        # tests beside other tasks' resident models, taking no lease and freeing nothing, and an
+        # out-of-memory failure read as the base's or the change's
+        with mock.patch.object(cli, "spawn_runner"):
+            self.start("t-gpu", "ok", "--queue", "--unload-for-tests", "--test", TEST_CMD)
+        seen, freed, real = [], [], runner.run_in_lane
+
+        def look(task, cmd, limit):
+            seen.append((cmd, runner.models.holders()))
+            return real(task, cmd, limit)
+        with mock.patch.object(runner, "run_in_lane", side_effect=look), \
+                mock.patch.object(runner.models, "free_gpu",
+                                  side_effect=lambda *a, **k: freed.append(1)):
+            runner.drive(store.Task("t-gpu"))
+            wt = store.Task("t-gpu").worktree
+            (wt / "tests").mkdir()
+            (wt / "tests" / "test_x.py").write_text("")
+            run_wb("verify", "t-gpu", "--test", TEST_CMD)
+            run_wb("shot", "t-gpu", "--capture", "true")
+        me = str(os.getpid())
+        checks = [h for cmd, h in seen if TEST_CMD in cmd and "-c" not in cmd]
+        base_check, round_tests, base, cand = checks[:4]
+        for held in (base_check, base, cand):                       # alone, as no model's task
+            self.assertEqual([(p, h["model"], h["task"]) for p, h in held.items()],
+                             [(me, None, "t-gpu")])
+        self.assertEqual(round_tests, {})                            # the round's: stepped aside
+        shots = [h for cmd, h in seen if "WB_SHOT_OUT" in cmd]
+        self.assertEqual([list(h) for h in shots], [[me], [me]])
+        self.assertEqual(len(freed), 3)                              # once each: check, verify, shot
+        self.assertEqual(runner.models.holders(), {})
+        # without the flag, as before: no lease
+        seen.clear()
+        with mock.patch.object(runner, "run_in_lane", side_effect=look):
+            run_wb("verify", "t", "--test", "python3 -m unittest tests.test_calc")
+        self.assertEqual([h for _, h in seen], [{}, {}])
+
     def test_the_scratch_checkouts_read_the_bytes_the_task_reads(self):
         # #426 (the audit of 1.8, reproduced): with the repo's own core.autocrlf the task read
         # CRLF, and the base check's and verify's clones read LF, failing on an untouched file

@@ -266,7 +266,7 @@ agent's environment leaves out a proxy (it holds a password): a setup or tests t
 network fail there; ask the user before naming it in commands.json `env`. Tests that use the
 GPU themselves (CUDA, PyTorch, a game engine): add `--unload-for-tests`, or they run beside the
 model and fail out of memory (it also opens the GPU's device nodes to the lane; without it they
-see no device).
+see no device). With it, the base check, `wb verify` and `wb shot` wait for the GPU alone too.
 Once the tests pass, the agent checks its own change against your review checks in one more
 round, at local cost only, before you are woken (learned per model; `--no-self-review` skips it).
 It returns at once; a detached runner does the work. **Don't poll.** With the workbench mod loaded

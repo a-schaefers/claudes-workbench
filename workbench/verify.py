@@ -10,6 +10,7 @@ command not found or a timeout says nothing about the bug, so the comparison is 
 """
 from __future__ import annotations
 
+import contextlib
 import json
 import re
 import secrets
@@ -18,7 +19,7 @@ import shutil
 import tempfile
 from pathlib import Path, PurePosixPath
 
-from . import context, gitops, runner, store
+from . import context, gitops, models, runner, store
 
 LIMIT = 300  # seconds for each run; past it, that run is inconclusive
 
@@ -134,6 +135,33 @@ def checkout_settings(repo: Path, clone: Path) -> None:
         pass
 
 
+def _say(msg: str) -> None:
+    print(msg, flush=True)
+
+
+@contextlib.contextmanager
+def gpu(task: store.Task, say=_say):
+    """The GPU to the checks alone, for a task started with --unload-for-tests whose model is
+    local: queued with the tasks in first-come order, then the other models unloaded (models.json's
+    keep_loaded kept) and their memory let go (media.gpu), as the round's own tests have it. The
+    base check, wb verify and wb shot ran the project's GPU tests beside other tasks' resident
+    models, and an out-of-memory failure read as the base's or the change's (#502, the audit of
+    1.90). Otherwise nothing: tests that need no GPU don't wait for it."""
+    if not task.spec.get("unload_for_tests"):
+        yield
+        return
+    try:
+        local = not models.resolve(task.spec["model"]).remote
+    except KeyError:
+        local = True  # retired since: the GPU may still be busy, so take it
+    if not local:
+        yield
+        return
+    from . import media  # media imports models and hardware; only these checks need it
+    with media.gpu(task.name, say, wait=True):
+        yield
+
+
 def _run(task: store.Task, checkout, cmd, limit: int, keep=None,
          setup: bool = False) -> tuple[int | str, str]:
     """``cmd`` in a scratch clone that ``checkout`` sets up, under the task's lane; ``keep(work)``
@@ -164,11 +192,13 @@ def _run(task: store.Task, checkout, cmd, limit: int, keep=None,
         return out
 
 
-def on_base(task: store.Task, cmd: str, limit: int) -> tuple[int | str, str]:
+def on_base(task: store.Task, cmd: str, limit: int, say=_say) -> tuple[int | str, str]:
     """``cmd`` on the task's base commit alone, in a scratch checkout under its lane (the runner's
-    base check): nothing it writes reaches the task's worktree."""
-    return _run(task, lambda work: gitops.git(work, "checkout", "-q", "--detach", task.spec["base"]),
-                cmd, limit)
+    base check): nothing it writes reaches the task's worktree. With the GPU alone when the
+    task's tests need it (``gpu``)."""
+    with gpu(task, say):
+        return _run(task, lambda work: gitops.git(work, "checkout", "-q", "--detach", task.spec["base"]),
+                    cmd, limit)
 
 
 def _checkouts(task: store.Task, tree: str, files: list[str], base_rev: str):
@@ -223,8 +253,9 @@ def run(task: store.Task, cmd: str, files: list[str] | None = None, limit: int =
     # the candidate's new files the base doesn't get: a test that reads one fails there for that
     uncopied = [p for st, p in _changes(task, tree, base_rev) if st.startswith("A") and p not in files]
     base, candidate = _checkouts(task, tree, files, base_rev)
-    b_code, b_out = _run(task, base, cmd, limit, setup=setup)
-    c_code, c_out = _run(task, candidate, cmd, limit, setup=setup)
+    with gpu(task):  # both runs under one hold: nothing loads in between
+        b_code, b_out = _run(task, base, cmd, limit, setup=setup)
+        c_code, c_out = _run(task, candidate, cmd, limit, setup=setup)
     d = task.dir / "verify"
     n = 1 + max((int(p.name) for p in d.glob("*") if p.name.isdigit()), default=0)
     out = d / str(n)
@@ -296,7 +327,16 @@ def shot(task: store.Task, cmd: str, files: list[str] | None = None, viewport: s
     meta = {"task": task.name, "step": st.get("steps", 1), "round": st.get("round", 1),
             "cmd": cmd, "viewport": viewport, "files": files or [], "ts": store.now(),
             "base": {"rev": base_rev}, "candidate": {"rev": tree}}
-    for side, checkout in (("base", base), ("candidate", candidate)):
+    with gpu(task):
+        _capture(task, cmd, viewport, limit, setup, out, meta, (("base", base), ("candidate", candidate)))
+    store.write_json(out / "shots.json", meta)
+    return {**meta, "dir": str(out)}
+
+
+def _capture(task: store.Task, cmd: str, viewport: str, limit: int, setup: bool, out: Path,
+             meta: dict, sides) -> None:
+    """Each side's capture, its image and output in ``out``, what it gave in ``meta``."""
+    for side, checkout in sides:
         dest = out / f"{side}.png"
         name = SHOT.format(secrets.token_hex(6))
 
@@ -318,8 +358,6 @@ def shot(task: store.Task, cmd: str, files: list[str] | None = None, viewport: s
         if not ok:  # said, never hidden: the ordinary code review still stands
             meta[side]["error"] = (f"exit {code}" if code != 0 else "no PNG at $WB_SHOT_OUT") + \
                 f": {out / (side + '.txt')}"
-    store.write_json(out / "shots.json", meta)
-    return {**meta, "dir": str(out)}
 
 
 def shot_ok(side: dict) -> bool:
