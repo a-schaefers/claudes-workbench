@@ -4090,7 +4090,9 @@ custom-node packs do run their own Python).
   to stop falling, after an engine started a second after the unload found 1.1 GB of 16 free; a
   server with no stop command, a remote model or a kept one used to cost every generation the
   whole 90 s (#467); skipped under `WB_FAKE_MODELS`). Seeds are seed … seed+n−1 (default seed `time() % 1_000_000`). Files are
-  `<slug>-<seed>.png` (the slug is the prompt's first six words), each with a `.json` sidecar
+  `<slug>-<seed>.png` (the slug is the prompt's first six words) in the output directory, made
+  absolute first (on 3.11 `mkdtemp` kept a relative `--out` relative, so an engine that changed
+  directory wrote its `{out}` elsewhere; `wb audio` too, #751), each with a `.json` sidecar
   `{prompt, seed, width, height, engine, refs, secs, ts, format}`. Each is made in a fresh temporary
   directory inside the output directory (`.wb-image-*`), refused when the engine wrote nothing
   there or what it wrote doesn't start like an image (`images.kind`: PNG, JPEG or WebP magic

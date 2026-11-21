@@ -153,6 +153,9 @@ def generate(text: str, out_dir: Path, kind: str | None = None, n: int = 3,
     if ear and (why := ready(ear[1])):
         say(f"listener {ear[0]}: {why}; no transcripts")
         ear = None
+    # absolute on every Python: 3.11's mkdtemp kept a relative dir relative, so an engine that
+    # changed directory wrote its {out} elsewhere and the run failed (3.12+ passed) (#751)
+    out_dir = Path(out_dir).resolve()
     out_dir.mkdir(parents=True, exist_ok=True)
     seed = int(time.time()) % 1_000_000 if seed is None else seed
     on_gpu = media.on_gpu(e) or bool(ear and media.on_gpu(ear[1]))

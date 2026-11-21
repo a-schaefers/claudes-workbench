@@ -8012,6 +8012,24 @@ class Images(Base):
         self.engines({"bad": {**entry, "unload_body": "free"}})
         self.assertIn("not usable: unload_body must be a JSON object", run_wb("image", "--list"))
 
+    def test_a_relative_out_reaches_the_engine_and_the_report_as_an_absolute_path(self):
+        # #751 (the 2026-11-21 audit, finding 98): on 3.11 mkdtemp kept `--out assets` relative,
+        # so an engine that changed directory wrote its {out} elsewhere and the run failed
+        tmp = Path(self.tmp.name)
+        (tmp / "elsewhere").mkdir()
+        fake = tmp / "cd_engine.py"
+        fake.write_text("import os, sys\nopen(sys.argv[0] + '.got', 'w').write(sys.argv[1])\n"
+                        f"os.chdir({str(tmp / 'elsewhere')!r})\n"
+                        "open(sys.argv[1], 'wb').write(b'\\x89PNG\\r\\n\\x1a\\n')\n")
+        self.engines({"cd": {"command": f"{sys.executable} {fake} {{out}}", "gpu": False}})
+        here = os.getcwd()
+        os.chdir(tmp)
+        self.addCleanup(os.chdir, here)
+        out = run_wb("image", "a fox", "--n", "1", "--seed", "1", "--out", "assets")
+        self.assertTrue(Path(Path(str(fake) + ".got").read_text()).is_absolute())
+        self.assertTrue(out.startswith(f"{tmp.resolve() / 'assets' / 'a-fox-1.png'}  ("), out)
+        self.assertEqual(list((tmp / "elsewhere").iterdir()), [])
+
     def test_wb_image_list_as_a_word_lists_the_engines_instead_of_drawing(self):
         # like `wb skill list`: it took the GPU and drew four pictures of "list" (the 2026-11-16 audit)
         tmp = Path(self.tmp.name)
@@ -8302,6 +8320,18 @@ class Audio(Base):
             run_wb("audio", "a bell", "--n", "1", "--no-check", "--out", str(tmp / "o9"))
         self.assertIn("the engine exited 2 without audio", err.getvalue())
         self.assertIn("broke", err.getvalue())
+
+    def test_a_relative_out_gives_the_engine_and_the_listener_absolute_paths(self):
+        # #751: as wb image; without ffmpeg the listener's {in} was relative too
+        tmp, tone, ear = Path(self.tmp.name), self.tone(), self.ear('{"text": "hello"}')
+        self.engines({"tts": {"command": f"{sys.executable} {tone} --text {{text}} --out {{out}}", "gpu": False},
+                      "ear": {"kind": "listen", "gpu": False, "command": f"{sys.executable} {ear} {{in}}"}})
+        here = os.getcwd()
+        os.chdir(tmp)
+        self.addCleanup(os.chdir, here)
+        out = run_wb("audio", "hello", "--n", "1", "--seed", "1", "--out", "sounds")
+        self.assertTrue(out.startswith(f"{tmp.resolve() / 'sounds' / 'hello-1.wav'}  ("), out)
+        self.assertTrue(Path(Path(str(ear) + ".got").read_text()).is_absolute())
 
     def test_audio_cpps_key_value_transcript_is_read_for_its_text(self):
         # the first real run (#396): audio.cpp's CLI prints task=, word_timestamps=[…] and

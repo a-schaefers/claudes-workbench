@@ -154,6 +154,9 @@ def generate(prompt: str, out_dir: Path, n: int = 4, size: tuple[int, int] = (10
     for r in refs:
         if not r.is_file():
             raise RuntimeError(f"no reference image {r}")
+    # absolute on every Python: 3.11's mkdtemp kept a relative dir relative, so an engine that
+    # changed directory wrote its {out} elsewhere and the run failed (3.12+ passed) (#751)
+    out_dir = Path(out_dir).resolve()
     out_dir.mkdir(parents=True, exist_ok=True)
     seed = int(time.time()) % 1_000_000 if seed is None else seed
     made = []
