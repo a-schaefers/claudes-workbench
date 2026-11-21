@@ -2599,7 +2599,8 @@ OpenCode request resets Ollama's keep-alive to `OLLAMA_KEEP_ALIVE` (5 minutes by
 model can be unloaded during a long test run. A server that lists several models swaps them itself:
 `free_gpu` treats a server as one, kept when a kept model is on it, unless the port is contended
 and it serves another model, which is then stopped first. `releasable(m)`: what `free_gpu` can
-let go of (a local Ollama model, a local server with `stop`).
+let go of (a local Ollama model, a local server with `stop`); `freed(m, keep)`: what
+`free_gpu(keep)` does let go of, so neither `keep`, nor `keep_loaded`, nor a server a kept model is on.
 
 **Sharing the GPU** (`GpuLease`, `admits`, `can_share`, `budget_devices`, `gpu_budget`, `need`).
 The budget (`budget_devices`, which also returns the devices it counts and where the number
@@ -3421,11 +3422,12 @@ custom-node packs do run their own Python).
   wait=…)` (any live holder in gpu.json: a RuntimeError naming them, unless `--wait`; then it
   queues in gpu.json behind the running tasks; while it holds or waits, `wb start` refuses a new
   task (exit 4) unless `--queue`, and `wb feedback`/`next`/`resume` queue behind it), calls
-  `models.free_gpu()` with nothing kept, then `media.settle` (up to 90 s for what free_gpu can release,
-  `models.releasable`: local Ollama models and servers with a stop command, to go, and used VRAM
+  `models.free_gpu()` with nothing kept, then `media.settle` (up to 90 s for what free_gpu lets
+  go of, `models.freed`: local Ollama models and servers with a stop command, less what it keeps
+  (`keep_loaded`), to go, and used VRAM
   to stop falling, after an engine started a second after the unload found 1.1 GB of 16 free; a
-  server with no stop command or a remote model used to cost every generation the whole 90 s;
-  skipped under `WB_FAKE_MODELS`). Seeds are seed … seed+n−1 (default seed `time() % 1_000_000`). Files are
+  server with no stop command, a remote model or a kept one used to cost every generation the
+  whole 90 s (#467); skipped under `WB_FAKE_MODELS`). Seeds are seed … seed+n−1 (default seed `time() % 1_000_000`). Files are
   `<slug>-<seed>.png` (the slug is the prompt's first six words), each with a `.json` sidecar
   `{prompt, seed, width, height, engine, refs, secs, ts}`. Each is made in a fresh temporary
   directory inside the output directory (`.wb-image-*`), refused when the engine wrote nothing

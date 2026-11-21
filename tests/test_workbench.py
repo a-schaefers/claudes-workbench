@@ -6804,6 +6804,38 @@ class Images(Base):
         self.engines({})
         self.assertIn("no image engine", run_wb("image", "--list"))
 
+    def test_a_model_kept_loaded_doesnt_hold_the_settle_for_its_whole_timeout(self):
+        # #467 (the audit of 1.8): settle waited for every releasable resident model, the one
+        # keep_loaded leaves loaded too, so each wb image waited its full 90 s and then said the
+        # memory was still being released
+        from workbench import media, models
+        Path(os.environ["WB_MODELS"]).write_text(json.dumps({"keep_loaded": ["ollama/embed"]}))
+        kept = models.Model(id="ollama/embed", provider="ollama", name="embed", label="e",
+                            base_url="http://127.0.0.1:11434/v1", engine="ollama")
+        other = models.Model(id="ollama/coder", provider="ollama", name="coder", label="c",
+                             base_url="http://127.0.0.1:11434/v1", engine="ollama")
+        clock = [0.0]
+        fake_time = types.SimpleNamespace(time=lambda: clock[0],
+                                          sleep=lambda s: clock.__setitem__(0, clock[0] + s))
+        said = []
+        with mock.patch.object(models, "_fake", lambda: False), \
+                mock.patch.object(models, "resident", lambda: [kept]), \
+                mock.patch.object(media.hardware, "gpus", lambda **k: []), \
+                mock.patch.object(media, "time", fake_time):
+            media.settle(said.append)
+            self.assertLess(clock[0], 5)
+            self.assertEqual(said, [])
+            self.assertFalse(models.freed(other, keep=["ollama/coder"]))  # a task's own, kept
+            self.assertTrue(models.freed(other))
+        with mock.patch.object(models, "_fake", lambda: False), \
+                mock.patch.object(models, "resident", lambda: [other]), \
+                mock.patch.object(media.hardware, "gpus", lambda **k: []), \
+                mock.patch.object(media, "time", fake_time):
+            clock[0] = 0.0
+            media.settle(said.append)       # one free_gpu unloads is still waited for
+            self.assertGreaterEqual(clock[0], 90)
+            self.assertIn("still being released", said[0])
+
 
 
 TONE = """import math, struct, sys, wave

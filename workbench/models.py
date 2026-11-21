@@ -970,6 +970,21 @@ def releasable(m: Model) -> bool:
     return not m.remote and (m.engine == "ollama" or bool(m.stop))
 
 
+def freed(m: Model, keep=()) -> bool:
+    """Whether free_gpu(keep) lets go of the model: releasable, and not one it keeps (``keep``,
+    keep_loaded, or a model on a kept one's server). media.settle waits only for these: a kept
+    model is still resident when the unloads are done, so every `wb image` waited its whole 90 s
+    and then said the memory was still being released (#467)."""
+    if not releasable(m):
+        return False
+    held = {*keep, *keep_loaded()}
+    if m.id in held or (m.engine == "ollama" and _kept_name(m.name, held)):
+        return False
+    return not (m.engine == "server" and any(
+        o.engine == "server" and o.server == m.server and o.id in held and not o.remote
+        for o in discover().values()))
+
+
 def _server_idle(m: Model) -> bool:
     live = (_get(f"{m.root}/metrics", timeout=2) or {}).get("live") or {}
     return live.get("state", "idle") == "idle"  # servers without metrics count as idle

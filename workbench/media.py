@@ -62,15 +62,16 @@ def slug(text: str, fallback: str) -> str:
     return "-".join(re.findall(r"[a-z0-9]+", text.lower())[:6]) or fallback
 
 
-def settle(say, timeout: float = 90) -> None:
+def settle(say, timeout: float = 90, keep=()) -> None:
     """Wait until the unloaded models have let go of the VRAM. free_gpu's unload returns before
     the memory does: seen 2026-11-16, an engine starting a second later found 1.1 GB free of 16.
-    Only what free_gpu can release is waited for: a server it can't stop, or another host's
-    model, used to cost every generation the whole timeout (the 2026-11-16 audit)."""
+    Only what free_gpu(keep) lets go of is waited for (models.freed): a server it can't stop, or
+    another host's model, used to cost every generation the whole timeout (the 2026-11-16 audit),
+    and so did a model it keeps loaded (#467)."""
     if models._fake():
         return
     deadline = time.time() + timeout
-    while any(models.releasable(m) for m in models.resident()) and time.time() < deadline:
+    while any(models.freed(m, keep) for m in models.resident()) and time.time() < deadline:
         time.sleep(1)
     last = None
     while time.time() < deadline:  # then until the GPU's used VRAM stops falling
