@@ -9442,6 +9442,24 @@ class Stats(Base):
             landed = time.mktime((*yesterday, 12, 0, 0, 0, 0, -1))
             self.assertEqual(stats._streak([{"ts": landed, "outcome": "accepted"}], now)["current"], 1)
 
+    def test_a_task_landed_with_no_review_is_first_try_whatever_rounds_the_runner_added(self):
+        # #550: self-review (on by default), a handover or a steer each add a round Claude never
+        # saw, and "largest landed first try" stayed empty for every default --test task
+        from workbench import stats
+        (store.home() / "tuning.json").write_text("{}")  # the default: self-review on
+        self.start("t-a", "ok", "--test", TEST_CMD)
+        wait_phase("t-a", {"review"})
+        run_wb("accept", "t-a", "-m", "feat: answer")
+        row = store.results()[-1]
+        self.assertGreater(row["rounds"], 1)  # its self-review round
+        self.assertEqual(stats.feed()["bests"]["largest_first_try"]["task"], "t-a")
+        self.rows({"task": "t-b", "ts": time.time(), "outcome": "accepted", "rounds": 2, "reviews": 0,
+                   "steps": [{"handovers": 1}], "diff": {"files": 3, "added": 400, "removed": 0}},
+                  {"task": "t-c", "ts": time.time(), "outcome": "accepted", "rounds": 2, "reviews": 1,
+                   "diff": {"files": 3, "added": 900, "removed": 0}})  # Claude sent it back: not first try
+        self.assertEqual(stats.feed()["bests"]["largest_first_try"], {
+            "task": "t-b", "ts": store.results()[-2]["ts"], "lines": 400})
+
     def test_a_models_write_speed_trend_compares_its_newest_third_with_its_oldest(self):
         from workbench import stats
         self.rows(*({"ts": 1000.0 + i, "outcome": "accepted", "speed": {"write": w}}

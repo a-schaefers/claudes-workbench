@@ -116,9 +116,13 @@ def _streak(rows: list[dict], now: float) -> dict | None:
 
 
 def _bests(rows: list[dict]) -> dict:
+    """The most lines landed first try, and the fastest landing. First try is skills.py's: landed
+    with no review round the agent caused. Not the runner's round counter: self-review, a handover
+    and a steer each add a round Claude never saw, so a default `--test` task never qualified
+    (#550)."""
+    from . import tuning
     out = {}
-    first_try = [r for r in rows if _landed(r) and r.get("rounds") == 1 and not r.get("reviews")
-                 and r.get("diff")]
+    first_try = [r for r in rows if _landed(r) and not tuning.agent_reviews(r) and r.get("diff")]
     if first_try:
         big = max(first_try, key=lambda r: r["diff"].get("added", 0) + r["diff"].get("removed", 0))
         out["largest_first_try"] = {"task": big.get("task"), "ts": big.get("ts"),

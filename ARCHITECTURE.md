@@ -1748,7 +1748,9 @@ Keys: `periods` (`week`, `month`, `all`, `savings.PERIODS`: tasks, landed, `acce
 `active_minutes`, and `savings` (`savings.totals`) with its `score` once a task can be compared),
 `streak` (`{current, best, days}`: local days in a row with a task landed; the current run ends
 today or yesterday, else 0, and `wb stats` then names only the best: a run that ended is never
-mentioned), `bests` (`largest_first_try`: the most lines landed in one round with no review;
+mentioned), `bests` (`largest_first_try`: the most lines landed with no review round the agent caused,
+`tuning.agent_reviews`, as skills.py counts first try, whatever rounds the runner added
+(self-review, a handover, a steer: the round counter kept every default `--test` task out, #550);
 `fastest`), `milestones` (`[{kind: landed|saved, n, day}]`: 1, 10, 25… tasks landed; 100K, 1M…
 Claude tokens saved by the estimate), `absorbed` (what never reached Claude: `auto_fixes`,
 `auto_fixed_tasks` (their tests then passed), `questions` answered, `handovers_landed`),
