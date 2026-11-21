@@ -22593,6 +22593,87 @@ class ProbeWhereItHelps(Base):
         self.assertIsNone(self.off(repo, "Change a.py, using top.py.", "pkg"))      # named: counted
         self.assertIsNone(self.off(repo, "Change a.py."))                           # the whole repo
 
+    def objects(self, repo: Path) -> int:
+        """The objects ``repo`` holds, loose and packed."""
+        out = subprocess.run(["git", "-C", str(repo), "count-objects", "-v"], check=True,
+                             capture_output=True, text=True).stdout
+        rows = dict(line.split(": ") for line in out.splitlines())
+        return int(rows["count"]) + int(rows["in-pack"])
+
+    def test_a_blobless_clone_fetches_nothing_to_count_its_files(self):
+        # review, #857, 2026-11-21: ls-tree -l and cat-file fetched every blob of a blobless
+        # clone, one at a time, at wb start (as checkout_size once did, #436)
+        src = self.repo_with({f"m{i}.py": self.code(200) for i in range(30)} |
+                             {"big.py": self.code(self.LONG)}, "src")
+        subprocess.run(["git", "-C", str(src), "config", "uploadpack.allowFilter", "true"], check=True)
+        clone = Path(self.tmp.name) / "blobless"
+        subprocess.run(["git", "clone", "-q", "--no-checkout", "--filter=blob:none", f"file://{src}",
+                        str(clone)], check=True, capture_output=True)
+        self.assertTrue(gitops.partial_clone(clone))
+        held = self.objects(clone)
+        self.assertEqual(self.off(clone), context.PROBE_OFF_SHORT)         # it holds no blob to count
+        self.assertEqual(self.objects(clone), held)                         # and fetched none
+        with mock.patch.object(gitops, "version", return_value=(2, 43, 0)):  # no GIT_NO_LAZY_FETCH
+            self.assertEqual(self.off(clone), context.PROBE_OFF_PARTIAL)
+        self.assertEqual(self.objects(clone), held)
+        subprocess.run(["git", "-C", str(clone), "reset", "-q", "--hard"], check=True,
+                       capture_output=True)                                 # the blobs it now holds
+        held = self.objects(clone)
+        self.assertIsNone(self.off(clone))
+        self.assertEqual(self.objects(clone), held)
+
+    def test_a_long_file_outside_the_sparse_cone_leaves_it_off(self):
+        # review, #857, 2026-11-21: the task's worktree takes the user's sparse patterns
+        # (gitops.apply_sparse), so a long file outside the cone is one its agent never sees
+        repo = self.repo_with({"a/big.py": self.code(self.LONG), "b/small.py": "x = 1\n", "CLAUDE.md": "# r\n"})
+        self.assertIsNone(self.off(repo))
+        subprocess.run(["git", "-C", str(repo), "sparse-checkout", "set", "--cone", "b"], check=True,
+                       capture_output=True)
+        self.assertEqual(self.off(repo), context.PROBE_OFF_SHORT)
+        self.assertEqual(self.off(repo, "Change a/big.py."), context.PROBE_OFF_SHORT)
+        subprocess.run(["git", "-C", str(repo), "sparse-checkout", "set", "--cone", "a"], check=True,
+                       capture_output=True)
+        self.assertIsNone(self.off(repo))
+
+    def test_languages_are_read_from_the_language_option_only_in_either_of_claps_forms(self):
+        # review, #857, 2026-11-21: in clap's long form the search ran past --language and read
+        # --format's [possible values: …] as the languages
+        fmt = "\n  -o, --format <FORMAT>\n          Output\n\n          [possible values: terminal, markdown, json]\n"
+        long_form = ("  -l, --language <LANGUAGE>\n          Programming language\n\n"
+                     "          Possible values:\n          - rust:   Rust\n          - python: Python\n"
+                     "          - c++\n" + fmt)
+        self.assertEqual(context.probe_language_names(long_form), ["rust", "python", "c++"])
+        self.assertEqual(context.probe_language_names(SEARCH_HELP + fmt)[:3], ["rust", "rs", "javascript"])
+        self.assertIsNone(context.probe_language_names("  -l, --language <LANGUAGE>\n          Any\n" + fmt))
+        long_code(self.repo)
+        for help_text in (long_form.replace("- rust:   Rust\n          - python: Python\n", ""),  # no row
+                          "  -l, --language <LANGUAGE>\n          Any\n" + fmt):
+            context.probe_languages_path().unlink(missing_ok=True)
+            self.recording_probe(help_text, f"probe-code 9.{len(help_text)}")
+            self.assertIsNone(context.probe_languages(context.probe_bin()))
+            self.assertEqual(self.off(self.repo, "Change lib.py."), context.PROBE_OFF_HELP)
+            self.assertFalse(context.probe_languages_path().exists())
+        self.recording_probe(long_form, "probe-code 9.0")
+        self.assertEqual(context.probe_languages(context.probe_bin()), frozenset({".rs", ".py"}))
+
+    def test_minified_bundles_dont_use_up_the_count_before_a_long_file(self):
+        # review, #857, 2026-11-21: largest first, a 70 MiB one-line big.min.js was counted whole
+        # and the long a.py beside it never reached
+        repo = self.repo_with({f"dist/b{i}.min.js": b"var a=1;" * (3 << 17) for i in range(3)} |
+                              {"a.py": self.code(self.LONG)})
+        fed = []
+        real = context._Lines.update
+        with mock.patch.object(context, "PROBE_SCAN_BYTES", 4 << 20), \
+                mock.patch.object(context._Lines, "update", lambda s, c: (fed.append(len(c)), real(s, c))):
+            self.assertIsNone(self.off(repo))
+        self.assertLess(sum(fed), 1 << 20)                  # each bundle: its first chunk or two
+        # and where the count runs out among real code, the reason says it gave up
+        dense = self.repo_with({f"m{k}.py": self.code(context.PROBE_FILE_LINES - 2, f"def f{k}_{{i}}():\n    pass\n")
+                                for k in range(6)}, "dense")              # six blobs, not one
+        with mock.patch.object(context, "PROBE_SCAN_BYTES", 64 << 10):
+            self.assertEqual(self.off(dense), context.PROBE_OFF_GAVE_UP)
+        self.assertEqual(self.off(dense), context.PROBE_OFF_SHORT)
+
     def test_wb_image_and_wb_audio_never_start_an_agent_so_probe_cant_reach_them(self):
         # #857: they call the local engines directly, never OpenCode or a runner, so nothing of
         # the experiment (its note, protocol line, rules, cap) is in what they run

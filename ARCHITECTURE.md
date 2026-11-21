@@ -5588,21 +5588,36 @@ the prompt, the handbook, the shell rules, the config layer (no `tool_output` ca
 environment (no `PROBE_MAX_TOKENS`) and round 1 (no outline) are byte for byte a probe-off task's,
 `tuned` has no `probe_aggressive` and the results row no `experiments` or `probe_*`, so adaptable
 never counts it as evidence for any level. `wb status <task>` says why: `probe: off for this task
-(no file over 1500 lines in a language probe reads)` (`context.PROBE_OFF_SHORT`), or `(probe's
+(no file over 1500 lines in a language probe reads)` (`context.PROBE_OFF_SHORT`), `(… among the
+largest it counted)` (`PROBE_OFF_GAVE_UP`: `PROBE_SCAN_BYTES` ran out first), `(a partial clone,
+whose files git before 2.44 can't count without fetching each)` (`PROBE_OFF_PARTIAL`), or `(probe's
 languages couldn't be read from `+"`probe search --help`"+`)` (`PROBE_OFF_HELP`).
 - **Which files count.** The blobs of the base commit (`git ls-tree -r -l` at `base`, `--full-tree`),
   in a package task (`subdir`) only the package's, where the agent works, plus any file the spec
   names anywhere in the repo (`context.long_files` with `kinds`, tried in the package first). Only
   extensions of probe's languages; a blob of no more than `PROBE_FILE_LINES` bytes can't be long and
-  isn't read. The rest are counted largest first through one `git cat-file --batch`
+  isn't read. The rest are counted largest first through `git cat-file --batch`
   (`gitops.feed_blobs`), a chunk at a time (`context._Lines`), stopping at the first line past the
-  limit, so no file is read whole; identical files are one blob, counted once; at most
-  `PROBE_SCAN_BYTES` (64 MiB) in all, past which the task is off (a repo whose biggest code files
-  are all minified or generated). A submodule's files don't count: its gitlink is no blob, and
-  its checkout in the worktree is filled read-only (`gitops.fill_submodules`), another project's
-  code the task can't change. Symbolic links don't count either.
+  limit, so no file is read whole; identical files are one blob, counted once. A blob whose first
+  `PROBE_SPARSE_AFTER` (64 KiB) or more average over `PROBE_SPARSE_BYTES` (2 MiB) per
+  `PROBE_FILE_LINES` lines is generated (minified, a bundle): the rest of it is skipped
+  (`gitops.SKIP_BLOB`: that git is stopped and a new one asked for the blobs after it), so a
+  70 MiB one-line `big.min.js` costs a chunk, not the budget, and the long `a.py` beside it is
+  still reached (it wasn't, in review). At most `PROBE_SCAN_BYTES` (64 MiB) are counted in all,
+  past which the task is off with `PROBE_OFF_GAVE_UP`. Only what the checkout's sparse cone or
+  patterns keep counts (`gitops.sparse_keeps`, named files too): the task's worktree takes the
+  same patterns (`gitops.apply_sparse`), so a long file outside them is one its agent never sees.
+  In a partial clone (`gitops.partial_clone`) both git calls run with `GIT_NO_LAZY_FETCH=1`, as
+  `gitops.checkout_size` does (#436): a blob it lacks is `BAD` to `ls-tree -l` and `missing` to
+  `cat-file`, and isn't counted; unset, a blobless clone fetched every blob one at a time at
+  `wb start`. A git before 2.44 ignores that variable, so there only the named files count
+  (`PROBE_OFF_PARTIAL` when none is long). A submodule's files don't count: its gitlink is no
+  blob, and its checkout in the worktree is filled read-only (`gitops.fill_submodules`), another
+  project's code the task can't change. Symbolic links don't count either.
 - **Which languages.** The installed probe's own `probe search --help`, `--language`'s `[possible
-  values: …]` (`context.probe_language_names`), each mapped to the extensions `probe symbols`
+  values: …]` or, in clap's long form, its `Possible values:` and one `- <name>: …` line each,
+  read from its option line to the next option's only (searched further, the long form read
+  `--format`'s values as the languages: `context.probe_language_names`), each mapped to the extensions `probe symbols`
   parses by one table, `context.PROBE_LANGUAGES`, whose comment says how it was made: each value of
   probe-code 0.6.0's list tried on a one-function file (a file it has no parser for comes back as
   `"kind": "text"` lines, so `.mjs`, `.cjs`, `.mts`, `.cts`, `.pyi`, `.c++`, `.cu` are out). Two
@@ -5611,7 +5626,8 @@ languages couldn't be read from `+"`probe search --help`"+`)` (`PROBE_OFF_HELP`)
   with no row counts for nothing, so a newer probe's new language needs only its row. Read once per
   probe (its real path) and version (`probe --version`) and kept in `probe-languages.json`
   (`context.probe_languages`); a probe that prints no version is asked each time. Help that can't
-  be read or lists no values: off, with that reason, never on, and nothing is cached.
+  be read, lists no values, or lists only values with no row in the table (another option's, or a
+  probe that renamed them all): off, with that reason, never on, and nothing is cached.
 - **The outline** runs only on the named files in those languages (`runner.outline_section`
   passes `kinds`), and task.json `probe_files` lists only those, so a spec naming a long CSV is no
   long-file task for the knob either.
@@ -6958,7 +6974,7 @@ delivered as taken (`_stale_notes`, *Notes*).
 | `wb wait [<task>]` | `--timeout S` (0: none), unnamed: `--repo DIR`, `--session ID…`, `--all-sessions` (as `wb status`'s scope, `_caller`: from Claude Code's Bash, the calling session's tasks only, #696) | Reaps dead runners, then blocks (inotify) until a notice past a task's `acked` arrives, prints `[<kind>] <task>\n<text>` and acks it (under the task's ack lock, `cli.claim_ack`: of two waits, or a wait and the mod, one takes it, #696; a bare wait skips another session's tasks, whose mod then never woke for a notice it took) (skipping notices no longer true, rows that aren't whole and removed tasks'). Named: a closed task exits 2; a task already waiting whose notice was taken elsewhere prints it again "(already delivered once)"; one stopped or taken over by hand prints `[<phase>] <task> (no notice: <last>)`. Bare, with no open task: exits 2. |
 | `wb status [<task>]` | `--all`, `--repo DIR`, `--session ID`, `--all-sessions` (from Claude Code's Bash, without `--repo`/`--session`, the scope is the calling session's: `cli._caller`, every id its process had, `claude-sessions/<CLAUDE_PID>`, and its directory, #693; this flag, or a terminal, takes every session's) | Reaps dead runners. One line per open task: name, phase, round, model, age, idle, last action; `?` after queued/running/testing whose runner died within `REAP_GRACE`. Named: also `worktree: <path>` while it exists, and with an experiment on, what its agent has used of it so far (`cli.use_line`: `probe (adaptable → moderate): 3 call(s); whole reads of files over 300 lines: 1`, #857; probe with its level, `cli._level_said`: `probe (aggressive)` for a fixed level, adaptable's pick with `, a try` when the knob explored and `, no long file named` when the spec named none, so no try could come); and each experiment set but off for the task,
 with why, task.json `experiments_off`: `probe: off for this task (no file over 1500 lines in a
-language probe reads)` (*Experiments*, *Only where probe can help*). A task `wb stop --all` parked (`store.parked`: still stuck, `parked` set) shows as phase `parked`, and without `--all` or a name is left out of the table for one line, `parked by wb stop --all (/workbench-quit): …; leave them unless the user asks`, after it ("no open tasks" first when it was all there was, so the mod's context block stays out; #541). `--session ID`, `--repo DIR` (the mod's context block): only that session's tasks (as for `wb stop`), then `open elsewhere (other sessions'): …`, by name. |
+language probe reads)`, or one of the other reasons there (*Experiments*, *Only where probe can help*). A task `wb stop --all` parked (`store.parked`: still stuck, `parked` set) shows as phase `parked`, and without `--all` or a name is left out of the table for one line, `parked by wb stop --all (/workbench-quit): …; leave them unless the user asks`, after it ("no open tasks" first when it was all there was, so the mod's context block stays out; #541). `--session ID`, `--repo DIR` (the mod's context block): only that session's tasks (as for `wb stop`), then `open elsewhere (other sessions'): …`, by name. |
 | `wb watch [<task>]` | `-v`, `--once`, `--no-color`, `--json` (hidden: one pass of JSON lines, the mod's pane), `--last N` (hidden, with `--json`: the newest N transcript lines) | The live transcript (`transcript.follow`); default task: the most recently updated open one, else the most recently updated task, never a `wb bench` replay (#555). |
 | `wb log <task>` | `-n N` (0 all), `-f`, `-v` | The agent's events: tool calls (`HH:MM:SS rN tool brief  ✗ error`), text, and one line for each kind `wb watch` shows (`transcript.EVENT_KINDS`, one set for both: questions, answers, stops, auto-fixes, rounds, tests, errors, retries, the runner's gpu, handover, compaction, load, steer and interrupt rows among them; it once printed nine kinds, #861). `-n` counts the lines printed, the rows that never print (one `step` per model request) left out first: they once used up the count (#861). `-f` follows until the task needs Claude or is closed, looking at the phase before each wait (on a finished task it returns at once: it waited 30 s, #90) and printing the events that came with it; each pass reaps a task whose runner died (`cli.reap`), so the follow ends on its error instead of following it for ever, and each line is flushed, so a pipe or a file gets it as it comes (#545). |
 | `wb report <task>` | `--round N` | The round's summary.md. |
@@ -7245,8 +7261,8 @@ and with probe on `probe_setting` (the setting it came from: `adaptable`, `moder
 `probe_files` (`{path: lines}`: each file the spec names in a language probe reads with more than
 `PROBE_FILE_LINES` lines, at the base, `context.long_files`; `{}` for none) and `probe_explored` (true when adaptable's level is
 the knob's exploration); `experiments_off` (`{probe: "<why>"}`: set but off for this task, when
-its repo has no file in a language probe reads over `PROBE_FILE_LINES` or probe's languages
-couldn't be read, `context.probe_off`; `wb status <task>` shows it; missing when nothing was turned
+its repo has no file in a language probe reads over `PROBE_FILE_LINES` (in its sparse cone, among
+what a partial clone holds), the count gave up or probe's languages couldn't be read, `context.probe_off`; `wb status <task>` shows it; missing when nothing was turned
 off). Read but written by no command: `stuck` (the guards' thresholds),
 `deny_skills`. A missing key takes the runner's own default (auto-fix 0, think and
 check-ins off), not `wb start`'s.
@@ -7758,7 +7774,10 @@ nested `.md` files (`docs/`, `skill/`, `mod/`, `agent/`) are unaffected. A new r
   (results, bench, `cli._level_said`), and `probe_start` with the `probe_aggressive` knob.
   **probe's languages** (`context.PROBE_LANGUAGES`, `probe_language_names`) → `probe_off` (wb
   start's `experiments_off`), `long_files`' `kinds`, `runner.outline_section`, the tests'
-  `SEARCH_HELP` (probe-code 0.6.0's list) and *Only where probe can help*.
+  `SEARCH_HELP` (probe-code 0.6.0's list) and *Only where probe can help*. What a checkout holds
+  (`gitops.sparse_keeps`, a partial clone's `GIT_NO_LAZY_FETCH`) → both `gitops.checkout_size` and
+  `context.probe_off`: a git call over a repo's blobs that skips either fetches or counts what the
+  task's worktree won't have (#436; #857's review).
   `context.PROBE_RECOMMENDED` → `experiment_lines`' `; adaptable is recommended`, which `probeSaid` reads.
   What every level adds (`runner.output_cap` in the layer and `RESTATED`, `runner.add_outline` with
   `OUTLINE_HEAD`/`OUTLINE_MORE` in *The runner, inside*'s prompt texts) → the off test's byte-for-byte

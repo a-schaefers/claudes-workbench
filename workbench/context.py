@@ -550,9 +550,17 @@ PROBE_LANGUAGES = {
 # wb status's words for a task where probe was set but is off (task.json `experiments_off`)
 PROBE_OFF_SHORT = f"no file over {PROBE_FILE_LINES} lines in a language probe reads"
 PROBE_OFF_HELP = "probe's languages couldn't be read from `probe search --help`"
-# the most of a repo's blobs probe_off counts, largest first, before it gives up: a repo whose
-# biggest code files are all long-lined (minified, generated) would be read whole otherwise
+PROBE_OFF_GAVE_UP = (f"no file over {PROBE_FILE_LINES} lines in a language probe reads among "
+                     "the largest it counted")
+PROBE_OFF_PARTIAL = "a partial clone, whose files git before 2.44 can't count without fetching each"
+# the most of a repo's blobs probe_off counts, largest first, before it gives up (PROBE_OFF_GAVE_UP)
 PROBE_SCAN_BYTES = 64 << 20
+# A blob sparser than this many bytes per PROBE_FILE_LINES lines is generated (minified, a
+# bundle), not code anyone reads by function: probe_off skips the rest of it once its first
+# PROBE_SPARSE_AFTER bytes are that sparse. Counted whole, a 70 MiB one-line big.min.js used up
+# PROBE_SCAN_BYTES and the 2,000-line a.py beside it was never reached: off (review, #857, 2026-11-21)
+PROBE_SPARSE_BYTES = 2 << 20
+PROBE_SPARSE_AFTER = 1 << 16
 
 
 def probe_languages_path() -> Path:
@@ -560,10 +568,28 @@ def probe_languages_path() -> Path:
 
 
 def probe_language_names(help_text: str) -> list[str] | None:
-    """--language's possible values in `probe search --help`, or None when it lists none."""
-    m = re.search(r"--language\b.*?\[possible values:([^\]]*)\]", help_text, re.S)
-    names = [n.strip() for n in m.group(1).split(",") if n.strip()] if m else []
-    return names or None
+    """--language's possible values in `probe search --help`, or None when it lists none: from
+    its option line to the next option's, in clap's short form (`[possible values: rust, …]`) or
+    its long one (`Possible values:` and a `- rust: …` line each). Searched past its block, a
+    --language in the long form read --format's values (terminal, markdown, …) as the languages
+    (review, #857, 2026-11-21)."""
+    lines = help_text.splitlines()
+    at = next((i for i, line in enumerate(lines) if re.match(r"\s*(?:-\w,\s*)?--language\b", line)), None)
+    if at is None:
+        return None
+    block = [lines[at]]
+    for line in lines[at + 1:]:
+        if re.match(r"\s*-{1,2}[A-Za-z]", line):  # the next option ("- rust: …" has a space)
+            break
+        block.append(line)
+    text = "\n".join(block)
+    if m := re.search(r"\[possible values:([^\]]*)\]", text):
+        names = [n.strip() for n in m.group(1).split(",")]
+    elif "Possible values:" in text:
+        names = re.findall(r"^\s*- ([\w+#.-]+)", text.partition("Possible values:")[2], re.M)
+    else:
+        names = []
+    return [n for n in names if n] or None
 
 
 def probe_languages(exe: str) -> frozenset[str] | None:
@@ -584,7 +610,9 @@ def probe_languages(exe: str) -> frozenset[str] | None:
     names = saved.get("languages") if all(saved.get(k) == v for k, v in key.items()) else None
     if not isinstance(names, list) or not all(isinstance(n, str) for n in names):
         names = probe_language_names(run("search", "--help") or "")
-        if names is None:
+        # values none of which PROBE_LANGUAGES knows are another option's, or a probe renamed:
+        # not its languages, and not cached (review, #857, 2026-11-21)
+        if names is None or not any(n in PROBE_LANGUAGES for n in names):
             return None
         if version:  # a probe that names no version is asked each time
             try:
@@ -600,22 +628,33 @@ def probe_off(spec: str, repo: Path, sub: str | None, rev: str | None) -> tuple[
     probe reads (probe_languages) over PROBE_FILE_LINES: one the spec names anywhere in the repo,
     or any in the task's package ``sub`` (the whole repo without one), where the agent works.
     Counted from git's objects, largest first, lines a chunk at a time and only until one is past
-    the limit, never a file read whole (_Lines), at most PROBE_SCAN_BYTES. A submodule's files
-    don't count: its gitlink is no blob here, and its checkout in the worktree is read-only
-    (gitops.fill_submodules), another project's code the task can't change. Nor symbolic links.
-    (the owner, 2026-11-21, #857)"""
+    the limit, never a file read whole (_Lines), a sparse blob (PROBE_SPARSE_BYTES) no further
+    than its first chunks, at most PROBE_SCAN_BYTES in all. A submodule's files don't count: its
+    gitlink is no blob here, and its checkout in the worktree is read-only
+    (gitops.fill_submodules), another project's code the task can't change. Nor symbolic links,
+    nor a file outside a sparse checkout's cone, which the task's worktree doesn't have either
+    (gitops.apply_sparse). A partial clone's blobs are counted only where it holds them: asked
+    with lazy fetching off (git 2.44+), as gitops.checkout_size asks (#436); an older git's would
+    each be fetched, so only the named files count there (PROBE_OFF_PARTIAL). (the owner,
+    2026-11-21, #857; the review's sparse, partial and minified cases, the same day)"""
     exe = probe_bin()
     kinds = probe_languages(exe) if exe else None
     if kinds is None:
         return PROBE_OFF_HELP, {}
-    named = long_files(spec, repo, sub, rev, kinds)
+    keeps = gitops.sparse_keeps(repo) if rev else None
+    named = {rel: n for rel, n in long_files(spec, repo, sub, rev, kinds).items()
+             if not keeps or keeps(rel)}
     if named:
         return None, named
     if not rev or not kinds:
         return PROBE_OFF_SHORT, {}
+    lazy = gitops.partial_clone(repo)
+    if lazy and (gitops.version() or (0,)) < (2, 44):
+        return PROBE_OFF_PARTIAL, {}
+    no_fetch = {"GIT_NO_LAZY_FETCH": "1"} if lazy else None  # a blob it lacks: size BAD, missing
     try:
         tree = gitops.git_bytes(repo, "ls-tree", "-r", "-l", "-z", "--full-tree", rev,
-                                *(["--", sub] if sub else []))
+                                *(["--", sub] if sub else []), env=no_fetch)
     except gitops.GitError:
         return PROBE_OFF_SHORT, {}
     found = []
@@ -624,33 +663,42 @@ def probe_off(spec: str, repo: Path, sub: str | None, rev: str | None) -> tuple[
         meta = meta.split()
         if len(meta) != 4 or meta[1] != b"blob" or meta[0] == b"120000" or not meta[3].isdigit():
             continue
+        name = os.fsdecode(path)
         # a file of more than N lines has more than N bytes: the rest can't be long
-        if int(meta[3]) > PROBE_FILE_LINES and os.path.splitext(os.fsdecode(path))[1] in kinds:
+        if int(meta[3]) > PROBE_FILE_LINES and os.path.splitext(name)[1] in kinds and \
+                (not keeps or keeps(name)):
             found.append((int(meta[3]), meta[2].decode()))
     found.sort(reverse=True)
     now: dict[str, _Lines] = {}  # the blob being fed: one at a time, each once
-    read = [0, False]
+    read = {"bytes": 0, "blob": 0, "long": False, "spent": False}
 
-    def feed(oid: str, chunk: bytes) -> bool:
+    def feed(oid: str, chunk: bytes):
         if oid not in now:
             now.clear()
             now[oid] = _Lines()
-        now[oid].update(chunk)
-        read[0] += len(chunk)
-        read[1] = now[oid].count() > PROBE_FILE_LINES
-        return read[1] or read[0] >= PROBE_SCAN_BYTES
+            read["blob"] = 0
+        lines = now[oid]
+        lines.update(chunk)
+        read["bytes"] += len(chunk)
+        read["blob"] += len(chunk)
+        if lines.count() > PROBE_FILE_LINES:
+            read["long"] = True
+            return True
+        if read["bytes"] >= PROBE_SCAN_BYTES:
+            read["spent"] = True
+            return True
+        if read["blob"] >= PROBE_SPARSE_AFTER and \
+                read["blob"] > (lines.count() + 1) * PROBE_SPARSE_BYTES // PROBE_FILE_LINES:
+            return gitops.SKIP_BLOB  # generated: the next blob
+        return False
 
-    picked, seen, total = [], set(), 0
-    for size, oid in found:  # the blobs within the budget, so git is asked only for those; two
-        if total >= PROBE_SCAN_BYTES:  # files alike are one blob, counted once
-            break
-        if oid not in seen:
-            seen.add(oid)
-            picked.append(oid)
-            total += size
-    if picked:
-        gitops.feed_blobs(repo, picked, feed)
-    return (None, {}) if read[1] else (PROBE_OFF_SHORT, {})
+    seen: set[str] = set()  # two files alike are one blob, counted once
+    oids = [oid for _, oid in found if not (oid in seen or seen.add(oid))]
+    if oids:
+        gitops.feed_blobs(repo, oids, feed, env=no_fetch)
+    if read["long"]:
+        return None, {}
+    return (PROBE_OFF_GAVE_UP if read["spent"] else PROBE_OFF_SHORT), {}
 
 
 def probe_start(level: str, model: str, window, task_name: str, long: bool) -> tuple[str, bool]:
