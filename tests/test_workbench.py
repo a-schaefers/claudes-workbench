@@ -10750,6 +10750,35 @@ class Setup(Base):
         self.assertTrue((skills / "workbench/SKILL.md").exists())
 
 
+class UpdatedUnderATask(Base):
+    """A clone pulled (or a plugin updated) while a task runs: its runner, on the old code, ends
+    the task cleanly before the next round instead of feeding the round new children (#603)."""
+
+    def test_a_runner_whose_lane_shim_or_ask_code_changed_stops_before_the_next_round(self):
+        pkg = Path(self.tmp.name) / "pkg"   # a copy to update: the runner runs from it
+        ignore = shutil.ignore_patterns("__pycache__")
+        for d in ("workbench", "bin", "agent", "tests"):   # the fake too: the lane reads the copy
+            shutil.copytree(runner.PKG_ROOT / d, pkg / d, ignore=ignore)
+        os.environ["WB_OPENCODE_BIN"] = shlex.join([sys.executable, str(pkg / "tests/fake_opencode.py")])
+        with mock.patch.object(cli, "PKG_ROOT", pkg):
+            os.environ["FAKE_SLEEP"] = "2"
+            self.start("t", "fix", "--test", TEST_CMD, "--no-base-check")   # round 2 would follow
+            running("t")
+            with (pkg / "workbench/lane.py").open("a") as f:
+                f.write("\n# a pull landed\n")
+            st = wait_phase("t", {"stuck"})
+        self.assertIn("workbench was updated under this task: wb resume t", st["last"])
+        self.assertEqual(st["round"], 2)                          # its prompt written, never run
+        self.assertFalse(store.Task("t").round_dir(2).joinpath("summary.md").exists())
+        notes = [r for r in store.read_jsonl(store.home() / "notify.jsonl")[0] if r.get("task") == "t"]
+        self.assertIn("workbench was updated under this task", notes[-1]["text"])
+
+    def test_an_unchanged_copy_runs_every_round(self):
+        self.start("t", "fix", "--test", TEST_CMD, "--no-base-check")
+        st = wait_phase("t", {"review"})
+        self.assertTrue(st["tests"]["ok"])
+
+
 class Update(Base):
     """wb update: the weekly check the mod runs, and /workbench-update (2026-11-16). A real origin
     and clone stand in for this copy; a fake `claude` records the plugin steps."""

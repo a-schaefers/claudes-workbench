@@ -11,6 +11,7 @@ Claude is only woken for work that passes, or for a task that has run out of roa
 """
 import contextlib
 import ctypes
+import hashlib
 import json
 import os
 import queue
@@ -2217,6 +2218,8 @@ def drive(task: store.Task) -> None:
         first = True
         revived = None  # the round run again after its server went away under it
         while True:
+            if _updated(task):  # before the round: its lane, shim and ask server would be new
+                return
             if not first:
                 # Again before every round: each request resets Ollama's keep-alive to its own
                 # default (5 minutes), so after a longer test run the model was unloaded and the
@@ -2433,6 +2436,39 @@ def _steer_round(task: store.Task, n: int, interrupted: bool) -> None:
 # A SIGTERM that didn't come from wb (a shutdown, a logout, a kill): wb marks its own stops
 # (status `stopping`, cli._stop_runner); any other leaves the task stuck, with a notice, so it
 # doesn't sit in a live phase that nothing will ever end (the 2026-11-16 audit).
+# What a task's children load from the clone afresh each round, beside this runner's code loaded
+# at its start: the lane (run as a file), the git shim (written by this runner, importing
+# gitguard) and the ask server (ask_mcp, store, watch). A `git pull` or Claude Code's plugin
+# update mid-task gave them new code under the old runner, and a changed interface between them
+# ended the task stuck or failed with the cause only in runner.log (#603, the audit of v1.90).
+# So the runner prints them at its start and, before each round, ends cleanly when they changed.
+CHILD_CODE = ("bin/wb-ask-mcp", "workbench/__init__.py", "workbench/ask_mcp.py",
+              "workbench/gitguard.py", "workbench/lane.py", "workbench/store.py", "workbench/watch.py")
+UPDATED = "workbench was updated under this task"
+
+
+def code_print() -> str:
+    h = hashlib.sha256()
+    for rel in CHILD_CODE:
+        try:
+            h.update((PKG_ROOT / rel).read_bytes())
+        except OSError:
+            h.update(b"-")
+        h.update(b"\0")
+    return h.hexdigest()
+
+
+def _updated(task: store.Task) -> bool:
+    """Whether the children's code changed since this runner started (CURRENT["code"]); if so,
+    the task is left stuck for wb resume, which starts a runner on the new code."""
+    if not (was := CURRENT.get("code")) or code_print() == was:
+        return False
+    msg = f"{UPDATED}: wb resume {task.name} continues it on the new code"
+    task.set_status(phase="stuck", last=msg)
+    task.notify("stuck", f"task {task.name}: {msg}", round=task.status.get("round"))
+    return True
+
+
 SIGNAL_STOP = "the runner was stopped by a signal (a shutdown, a logout or a kill), not by Claude"
 
 
@@ -2472,6 +2508,8 @@ def main():
         print(f"another runner drives {task.name}; this one exits", flush=True)
         return
     signal.signal(signal.SIGTERM, _on_term)
+    CURRENT["code"] = code_print()  # what the children load; compared before each round (#603)
+    from . import router, transcript, verify  # noqa: F401 (now, not mid-task from an updated clone)
     try:
         drive(task)
     except Stopped:

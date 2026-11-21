@@ -191,7 +191,7 @@ stuck, failed, asking (`asking` is in both); `CLOSED` = accepted, discarded. Who
 | `testing` | the runner while the acceptance command runs |
 | `asking` | the runner while a question of the round is open (`ask_mcp.relay`) |
 | `review` | the runner (tests pass; tests fail with auto-fix spent; no `--test`); `wb takeover` |
-| `stuck` | the runner (a guard stop; a SIGTERM that wasn't wb's: `runner.SIGNAL_STOP`); `wb stop`; `wb accept` when a live task's commit fails ("accept failed: …", the work kept in the worktree) |
+| `stuck` | the runner (a guard stop; a SIGTERM that wasn't wb's: `runner.SIGNAL_STOP`; workbench updated under it: `runner.UPDATED`, #603); `wb stop`; `wb accept` when a live task's commit fails ("accept failed: …", the work kept in the worktree) |
 | `failed` | the runner (opencode exited non-zero, whatever it printed: `runner.died`; the setup failed; the model couldn't load; a crash or a full disk); `cli.reap` (the runner died without a report). All but the first set status `infra`: the machine's doing, which `wb bench` doesn't grade (#508) |
 | `accepted` / `discarded` | `wb accept` / `wb discard` |
 
@@ -590,6 +590,19 @@ runner was stopped by a signal … not by Claude") and raises a `stuck` notice, 
 resumable rather than live forever (past the first step, with `steps_line`). Any other exception writes the traceback to `runner.log`, sets
 `failed` and raises a `failed` notice with the traceback's tail. On the way out `_end_agent` runs
 once more and `pid` and `stopping` are cleared.
+
+**An update under a running task** (#603, the audit of v1.90). The runner's code is loaded once,
+at its start, but each round's children load theirs from the clone afresh: the lane (`lane.py`,
+run as a file), the git shim (written by the runner, importing `gitguard`) and the ask server
+(`bin/wb-ask-mcp`: `ask_mcp`, `store`, `watch`). A `git pull`, or Claude Code's plugin update,
+mid-task paired old and new, and a changed interface between them (lane flags, `gitguard.main`'s
+parameters, the ask file format) ended the task stuck or failed with the cause only in
+`runner.log`. So `main` records `code_print()` (a sha256 of `runner.CHILD_CODE`, those files) in
+`CURRENT["code"]` and imports `router`, `transcript` and `verify` up front (they were imported
+lazily, mid-task, from whatever the clone then held); before each round `_updated` compares, and
+on a change sets `stuck` ("workbench was updated under this task: wb resume <task> continues it
+on the new code") with a `stuck` notice, before anything of the round runs. `wb update` refuses
+while any runner is live; a manual pull is the case this catches.
 
 **`drive(task)`**, the loop:
 1. Phase `queued`, `pid`; resolve the model (unknown: `failed`). With a `setup`, `copy` or
@@ -4698,7 +4711,7 @@ mode back on, pane and all).
 `mod/types/index.d.ts` (the atom types), `mod/.claude-plugin/icon.png` (the `work` pose).
 The repo root's `.claude-plugin/marketplace.json` makes the repo a folder marketplace (`workbench`,
 plugin source `./mod`), so the plugin id is `workbench@workbench` and it is read from the clone:
-`git pull` plus a restart or `/reload-plugins` upgrades it. `mod/tsconfig.json` extends
+`wb update` (or, with no task running, `git pull`) plus a restart or `/reload-plugins` upgrades it. `mod/tsconfig.json` extends
 `./.claude-plugin/types/tsconfig.json`, which Claude Code generates (gitignored, absent in a fresh
 clone).
 
@@ -5438,8 +5451,9 @@ so the plugin, `wb` and the skill all read the working tree (the README's instal
 2026-11-16):
 ```sh
 git clone https://github.com/a-schaefers/claudes-workbench ~/repos/workbench
-# to upgrade later: git -C ~/repos/workbench pull, then restart Claude Code (or /reload-plugins);
-# the links and the plugin read from the clone, and your state and skills stay as they are
+# to upgrade later: wb update (it pulls with --ff-only and refuses while tasks run), or stop
+# running tasks first (wb stop --all), git -C ~/repos/workbench pull, then restart Claude Code (or
+# /reload-plugins); the links and the plugin read from the clone, and your state and skills stay
 cd ~/repos/workbench
 mkdir -p ~/.local/bin ~/.claude/skills   # ~/.local/bin must be on your PATH
 ln -s "$PWD/bin/wb" ~/.local/bin/wb
@@ -5709,6 +5723,8 @@ nested `.md` files (`docs/`, `skill/`, `mod/`, `agent/`) are unaffected. A new r
 
 ## Couplings: change one, change the other
 
+- **A file a round's children load** (the lane, the git shim, the ask server, and what they
+  import) → `runner.CHILD_CODE`, so an update under a running task is caught (*The runner, inside*).
 - **An experiment** (`context.EXPERIMENTS`) → its effects (`shell_rules`, `EXPERIMENT_NOTES`),
   `task_experiments` (when it can work), `cli.experiment_lines`, the pane's Settings row
   (`PROBE_STOPS`, `probeMode`, `probeStatus` and `probeSaid`, which read `experiment_lines`' wording,
