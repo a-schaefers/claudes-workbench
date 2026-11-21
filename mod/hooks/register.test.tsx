@@ -2128,6 +2128,28 @@ test('a session that enters workbench mode after its first message gets the note
   expect(asked).toEqual([])
 })
 
+test('after a reload the mod still tells the conversation of a rule change, such as wakes turned off (#697)', { options: { wake: 'off' } }, async ($, on) => {
+  // #697: what the conversation was told lived in `mem`, which a reload (here the wake option
+  // turned off) emptied, and prompt.context doesn't fire again: WAKE_OFF_NOTE was never said
+  const clock = mock.clock(on, { now: 1_800_000_000_000 })
+  const files: Record<string, string> = {}
+  task(files, 'fix-it', 'running', { repo: '/home/u/a', cwd: '/home/u/a' })
+  fakeTasks(on, files)
+  let reloaded = false
+  on('state.get', (_: any, e: any, next: any) => e.key === 'said' && e.plugin === 'workbench' && !reloaded   // the earlier load's
+    ? (reloaded = true, { value: { value: { shape: 'said-1', value: { notes: '', wakeOff: false, coding: 'decide' } }, version: 0 } }) : next(e))
+  on('ui.toast', () => ({ value: undefined }))
+  on('process.run', () => ({ value: { exitCode: 0, stdout: '', stderr: '' } }))
+  const rows: string[] = []
+  on('session.append', (_: any, e: any, next: any) => { rows.push(e.message.content[0].text); return next(e) })
+  on('prompt.submit', (_: any, e: any) => ({ text: e.text }))
+  await $.session.start({ cwd: '/home/u/a', surface: 'terminal', isInteractive: true })
+  await clock.advance(3000)
+  expect(rows.filter(r => r.includes('Wakes are off'))).toHaveLength(1)
+  await clock.advance(31_000)
+  expect(rows.filter(r => r.includes('Wakes are off'))).toHaveLength(1)   // once
+})
+
 test('a wb start that turns workbench mode on mid-session brings the notes as a row, or a turn when the row is refused (#540)', async ($, on) => {
   const clock = mock.clock(on, { now: 1_800_000_000_000 })
   const files: Record<string, string> = { '/wb/notes.md': '- merge only when asked' }

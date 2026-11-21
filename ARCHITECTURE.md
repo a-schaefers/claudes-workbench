@@ -5500,7 +5500,7 @@ const bound to one; imports from the module's own files also pass). The helpers 
 "gating hook without .catch" notes) is the check. Env reads must be string literals: `HOME`,
 `WB_HOME`, `WB_BIN`, `CLAUDE_CONFIG_DIR`, `WB_COMPACT_AT`.
 
-**State.** Eight `$.state` atoms survive a module reload within a session; each has a shape tag,
+**State.** Nine `$.state` atoms survive a module reload within a session; each has a shape tag,
 and an atom read under an old tag is absent, so change the tag when its type changes:
 `tasks` (`tasks-8`, WbTask[]: name, phase, round, model, label, tests, last, createdAt,
 updatedAt, tokens, recent, repo, cwd, subdir, session, claude_pid, claude_start, backlog, parked, allowed), `live` (`live-1`, {task, lines: {s, t}[]}: the transcript lines),
@@ -5510,9 +5510,12 @@ minimized}: the pane's tab, the open settings row, the option under the ring, th
 has had, `mem.ids` while loaded), `savings` (`savings-1`, string: the pane's saving line, '' for
 none), `stats` (`stats-1`, {key, feed}: the Stats tab's `wb stats --json` and the stamp of the files
 it was read from), `top` (`top-1`, {snap, busy}: `wb top --json`'s newest tick and each GPU's busy
-% since the Stats tab opened). Everything else is `mem`, a plain object reset by a reload (busy, queued turns,
+% since the Stats tab opened), `said` (`said-1`, WbSaid | null, {notes, wakeOff, coding}: what the conversation was told of the
+rules that depend on the state, #540; kept across a reload, #697: in `mem` a reload emptied it, prompt.context doesn't fire
+again in that conversation, and `sayRules` waited for it for good, so wakes turned off mid-session were never said; a
+conversation's first context block sets it again). Everything else is `mem`, a plain object reset by a reload (busy, queued turns,
 this session's open set, the session's resolved `cwd` and `home`, `person`, follow, sawTurn, scoutAsked,
-toasts sent, dropped wakes, the closed tasks no longer read, the events pid, what the conversation was told of the rules (`said`, #540), …). The task facts
+toasts sent, dropped wakes, the closed tasks no longer read, the events pid, `mem.said`, the `said` atom's copy, …). The task facts
 themselves are re-read from `$WB_HOME`; the mod writes `tasks/<n>/acked`, scout.json's
 `offered_at` and `chat/listener.json`.
 
@@ -6687,7 +6690,7 @@ nested `.md` files (`docs/`, `skill/`, `mod/`, `agent/`) are unaffected. A new r
 - **`wb watch --json`** (a style, the order, the activity wording) → the mod's `LINE_STYLE`, its
   pose regex, the `live-1` tag; `--last` and `JSON_LINE_CHARS` with the mod's `KEEP_LINES` and
   `LINE_CHARS`.
-- **A `$.state` atom's type** in the mod → its tag (`tasks-7`, `live-1`, `chat-3`, `sessions-1`, `savings-1`, `pane-1`, `stats-1`, `top-1`).
+- **A `$.state` atom's type** in the mod → its tag (`tasks-8`, `live-1`, `chat-4`, `sessions-1`, `savings-1`, `pane-1`, `stats-1`, `top-1`, `said-1`).
 - **The Claude coding choices** (`cli.CODING`: modes, labels, sentences) → the mod's
   `CODING_STOPS` (the Settings row) and `CODING_RULES` (the context block), and the skill's *Claude
   coding* bullet.

@@ -72,7 +72,7 @@ const SCOUT_NOTE =
 import { atom, read, update } from 'claude-code'
 import type { Register } from 'claude-code'
 
-import type { WbChat, WbLine, WbLive, WbPane, WbStats, WbTask, WbTop } from '../types'
+import type { WbChat, WbLine, WbLive, WbPane, WbSaid, WbStats, WbTask, WbTop } from '../types'
 import { cells, COLUMNS, FACE, MOUTH, ROWS } from './apprentice'
 import type { Pose } from './apprentice'
 
@@ -1226,7 +1226,17 @@ const CODING_DECIDE = 'Claude coding is now "Let Claude decide" (the user\'s cho
 // first message (again after a compaction or /clear), and a block the engine doesn't route can't
 // be added later: a session that entered workbench mode afterwards got no notes and no wake-off
 // note, and a coding change from the pane reached only the file-tool gates.
-type Said = { notes: string; wakeOff: boolean; coding: string }
+type Said = WbSaid
+// Kept across a reload within the session (#697): in `mem` alone a reload (a plugin option
+// changed, /workbench-update, /reload-plugins) emptied it, and since prompt.context doesn't fire
+// again in that conversation, sayRules waited for it for good: turning wakes off mid-session
+// never said WAKE_OFF_NOTE, and Claude ended its turn waiting for a wake that would not come.
+// A conversation's first context block (a /clear's, a compaction's) sets it again.
+const saidState = atom({ plugin: 'workbench', key: 'said' } as const, null as WbSaid | null, { shape: 'said-1' })
+async function setSaid($: any, said: Said) {
+  mem.said = said
+  await update($, saidState, () => said).catch(() => {}) // mem has it for this load either way
+}
 
 async function wanted($: any, delegating: boolean, notesToo = true): Promise<Said> {
   const notes = delegating && notesToo ? (await $.fs.read(`${mem.root}/notes.md`).catch(() => '')).trim() : ''
@@ -1245,7 +1255,7 @@ async function unsaid($: any, delegating: boolean): Promise<string[]> {
   if (want.wakeOff && !was.wakeOff) out.push(WAKE_OFF_NOTE)
   const any = delegating || mem.open.size > 0 // out of the mode with nothing open: nothing changes
   if (any && want.coding !== was.coding) out.push(want.coding === 'decide' ? CODING_DECIDE : CODING_RULES[want.coding])
-  mem.said = { notes: was.notes || want.notes, wakeOff: was.wakeOff || want.wakeOff, coding: any ? want.coding : was.coding }
+  await setSaid($, { notes: was.notes || want.notes, wakeOff: was.wakeOff || want.wakeOff, coding: any ? want.coding : was.coding })
   return out
 }
 
@@ -2515,6 +2525,7 @@ export const register: Register = (on, options) => {
     mem.fold = swapped !== mem.cwd && !!(await $.fs.stat(swapped).catch(() => undefined))
     mem.home = home ? await real(home) : ''
     mem.ids = new Set(await read($, sessions))
+    mem.said = mem.said ?? await read($, saidState) // a reload: what this conversation was told stands (#697)
     await noteSession($)
     if (!(await read($, chat)).delegating && await modeKept($)) await workbenchMode($, true) // a resume (#689)
     // A `claude -p` run or an SDK session has no person at it until a surface attaches: it took
@@ -2661,7 +2672,7 @@ export const register: Register = (on, options) => {
     // /workbench as the first message said them in its text already (#540)
     const had = mem.skillTurn ? mem.said : null
     mem.skillTurn = false
-    mem.said = want
+    await setSaid($, want)
     if (want.coding !== 'decide' && had?.coding !== want.coding) blocks.push({ name: 'claude-coding', text: CODING_RULES[want.coding] })
     if (want.notes && !had?.notes) blocks.push({ name: 'user-notes', text: NOTES_NOTE(want.notes) })
     if (isAway) blocks.push({ name: 'web-chat', text: AWAY_NOTE })

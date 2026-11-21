@@ -59,6 +59,10 @@ export type WbStats = { key: string; feed: Record<string, any> | null }
  * each GPU's busy % since the tab was shown, for its sparkline (memory only: never on disk). */
 export type WbTop = { snap: Record<string, any> | null; busy: Record<string, number[]> }
 
+/** What this conversation was told of the rules that depend on the state (#540): the user's
+ * notes, that wakes are off, the Claude-coding rule; null before its first context block. */
+export type WbSaid = { notes: string; wakeOff: boolean; coding: string }
+
 declare module 'claude-code' {
   interface PluginState {
     workbench: {
@@ -71,6 +75,8 @@ declare module 'claude-code' {
       stats: Shaped<WbStats>
       /** the Stats tab's live view (WbTop, #408) */
       top: Shaped<WbTop>
+      /** what the conversation was told of the rules (WbSaid, #540): kept across a reload (#697) */
+      said: Shaped<WbSaid | null>
     }
   }
 }
