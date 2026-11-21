@@ -129,6 +129,8 @@ run it as a backlog. Each task still gets the same review it would by day.
   than guessing.
 - The user stays away while a backlog task of this session's is open, so permission prompts
   keep going to the web chat (*The web chat*).
+- Each task keeps the machine from idle-sleeping while it runs (macOS, Linux). On WSL2 nothing
+  can: when `wb start` says so, tell the user to set Windows' sleep to Never for the night.
 - When the batch is done, run `wb backlog <name>` and post it with `wb chat reply`: each task's
   outcome and branch, and the batch's saving. That is the morning summary.
 

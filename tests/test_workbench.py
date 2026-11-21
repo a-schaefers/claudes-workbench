@@ -10336,7 +10336,9 @@ class LogoutStops(Base):
                 started.append(argv)
                 self.assertTrue(kw.get("start_new_session"))
                 return types.SimpleNamespace(pid=os.getpid())
+            awake = []  # and #516: the runs a night is left to keep the machine awake
             with mock.patch("subprocess.Popen", popen), \
+                    mock.patch.object(cli, "keep_awake", lambda pid, why: awake.append(why)), \
                     mock.patch.object(models, "_started", return_value="1"):
                 chat.start(51583)
                 with mock.patch.object(optimize, "candidates", return_value=[object()]), \
@@ -10349,6 +10351,9 @@ class LogoutStops(Base):
                         mock.patch.object(models, "resolve", return_value=types.SimpleNamespace(id="m")):
                     bench.start(["m"], [], [], "", 1)
         self.assertEqual(len(started), 3)
+        self.assertEqual(awake[0], "wb optimize")
+        self.assertTrue(awake[1].startswith("wb bench run "))
+        self.assertEqual(len(awake), 2)                     # the chat waits for nothing overnight
         for argv, what in zip(started, (("chat", "serve"), ("-m", "workbench.optimize"),
                                         ("-m", "workbench.bench"))):
             self.assertEqual(tuple(argv[:5]), scope, argv)
@@ -10379,6 +10384,87 @@ class LogoutStops(Base):
             self.assertEqual(cli.logout_stops(), [])
         with mock.patch("shutil.which", return_value=None):
             self.assertEqual(cli.logout_stops(), [])
+
+
+class KeepAwake(Base):
+    """What keeps the machine awake while a run lives (#516): systemd-inhibit, caffeinate, or on
+    WSL2 nothing, said once."""
+    def fake(self, name, body):
+        bin_dir = Path(self.tmp.name) / "awakebin"
+        bin_dir.mkdir(exist_ok=True)
+        (bin_dir / name).write_text("#!/bin/sh\n" + body)
+        (bin_dir / name).chmod(0o755)
+        return mock.patch.dict(os.environ, {"PATH": f"{bin_dir}:{os.environ['PATH']}"})
+
+    def test_a_runner_holds_a_sleep_lock_until_it_ends(self):
+        # #516: an overnight backlog froze with the machine when it idle-slept, and the
+        # monotonic guards counted none of the gap
+        log, pidf = Path(self.tmp.name) / "inhibit.log", Path(self.tmp.name) / "waiter.pid"
+        # logs its options, then execs the command after them, as systemd-inhibit runs it
+        body = (f'echo "$1 $2 $3 $4" >> {log}\necho $$ > {pidf}\n'
+                'while [ "${1#--}" != "$1" ]; do shift; done\nexec "$@"\n')
+        with self.fake("systemd-inhibit", body), \
+                mock.patch.object(cli, "awake_how", return_value="systemd-inhibit"):
+            self.start("t-awake", "slow")
+            end = time.monotonic() + 10
+            while not pidf.exists() and time.monotonic() < end:
+                time.sleep(0.05)
+        self.assertEqual(log.read_text().splitlines()[0],
+                         "--what=idle:sleep --who=workbench --why=task t-awake --mode=block")
+        waiter = int(pidf.read_text())
+        self.assertFalse(wait_gone(waiter, 1))                # held while the runner runs
+        run_wb("stop", "t-awake")
+        self.assertTrue(wait_gone(waiter, 10))                # and let go when it ends
+
+    def test_where_logind_refuses_a_sleep_lock_an_idle_lock_is_held(self):
+        # polkit grants a sleep lock to a local active session only: over SSH, idle alone
+        log = Path(self.tmp.name) / "inhibit.log"
+        body = (f'echo "$1" >> {log}\n[ "$1" = --what=idle:sleep ] && exit 1\n'
+                'while [ "${1#--}" != "$1" ]; do shift; done\nexec "$@"\n')
+        sleeper = subprocess.Popen(["sleep", "1"])
+        self.addCleanup(sleeper.wait)
+        with self.fake("systemd-inhibit", body), \
+                mock.patch.object(cli, "awake_how", return_value="systemd-inhibit"):
+            self.assertTrue(cli.keep_awake(sleeper.pid, "task x"))
+        end = time.monotonic() + 10
+        while len(log.read_text().split() if log.exists() else []) < 2 and time.monotonic() < end:
+            time.sleep(0.05)
+        self.assertEqual(log.read_text().split(), ["--what=idle:sleep", "--what=idle"])
+
+    def test_on_macos_caffeinate_waits_on_the_run(self):
+        log = Path(self.tmp.name) / "caffeinate.log"
+        with self.fake("caffeinate", f'echo "$@" > {log}\n'), \
+                mock.patch.object(hardware, "system", return_value="macos"):
+            self.assertEqual(cli.awake_how(), "caffeinate")
+            self.assertTrue(cli.keep_awake(4242, "task x"))
+        end = time.monotonic() + 10
+        while not log.exists() and time.monotonic() < end:
+            time.sleep(0.05)
+        self.assertEqual(log.read_text().split(), ["-i", "-w", "4242"])
+
+    def test_wsl_holds_nothing_and_says_so_once_per_backlog_and_in_doctor(self):
+        # Windows sleeps whatever Linux inside it holds
+        with mock.patch.object(hardware, "system", return_value="wsl"):
+            self.assertEqual(cli.awake_how(), "")
+            self.assertFalse(cli.keep_awake(os.getpid(), "task x"))
+            first = self.start("t-night1", "ok", "--backlog", "night", "--queue")
+            second = self.start("t-night2", "ok", "--backlog", "night", "--queue")
+            alone = self.start("t-day", "ok", "--queue")
+            self.assertIn(cli.WSL_SLEEPS, first)
+            self.assertNotIn(cli.WSL_SLEEPS, second)          # once for the batch
+            self.assertNotIn(cli.WSL_SLEEPS, alone)           # by day, nobody walked away
+            self.assertEqual(cli.awake_line(), (False, cli.WSL_SLEEPS))
+        for t in ("t-night1", "t-night2", "t-day"):
+            wait_phase(t, {"review"})
+
+    def test_with_no_tool_nothing_is_held_and_nothing_fails(self):
+        with mock.patch("shutil.which", return_value=None), \
+                mock.patch.object(hardware, "system", return_value="linux"):
+            self.assertEqual(cli.awake_how(), "")
+            self.assertFalse(cli.keep_awake(os.getpid(), "task x"))
+            ok, said = cli.awake_line()
+        self.assertFalse(ok)
+        self.assertIn("no systemd-inhibit", said)
 
 
 class WebChat(Base):

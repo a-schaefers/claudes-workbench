@@ -127,7 +127,7 @@ def spawn_runner(task: store.Task) -> int:
         # -X utf8: the runner reads and writes its files as UTF-8 under any locale (the
         # 2026-11-16 audit); a flag, not PYTHONUTF8, so the agent and its tests keep their own
         proc = detach([sys.executable, "-X", "utf8", "-m", "workbench.runner", task.name],
-                      cwd=PKG_ROOT, env=env, stdout=log, stderr=log)
+                      awake=f"task {task.name}", cwd=PKG_ROOT, env=env, stdout=log, stderr=log)
     task.set_status(pid=proc.pid)
     return proc.pid
 
@@ -166,13 +166,100 @@ def runner_scope() -> tuple[str, ...]:
     return argv if ok else ()
 
 
-def detach(argv: list[str], **kw) -> subprocess.Popen:
+def detach(argv: list[str], awake: str = "", **kw) -> subprocess.Popen:
     """Start what outlives this command: a runner, the bench driver, wb optimize, the chat `wb
     chat on` starts. Its own session, stdin from /dev/null, and its own scope where logind kills
     a session's processes at logout (runner_scope): the runners alone had one, so the others
-    still died there (#531)."""
-    return subprocess.Popen([*runner_scope(), *argv], stdin=subprocess.DEVNULL,
+    still died there (#531). With ``awake`` (why, for the inhibitor's list), the machine is kept
+    from idle-sleeping while it runs (keep_awake)."""
+    proc = subprocess.Popen([*runner_scope(), *argv], stdin=subprocess.DEVNULL,
                             start_new_session=True, **kw)
+    if awake:
+        keep_awake(proc.pid, awake)
+    return proc
+
+
+# Waits for a pid to exit (argv[1]): a pidfd where Linux has one, else kill -0 every 15 s.
+AWAIT_PID = """import os, select, sys, time
+pid = int(sys.argv[1])
+try:
+    fd = os.pidfd_open(pid)
+except (AttributeError, OSError):
+    fd = None
+if fd is not None:
+    select.select([fd], [], [])
+else:
+    while True:
+        try:
+            os.kill(pid, 0)
+        except OSError:
+            break
+        time.sleep(15)
+"""
+
+
+def awake_how() -> str:
+    """What keeps this machine awake while a run lives: "caffeinate" (macOS), "systemd-inhibit"
+    (Linux booted with systemd), or "" where nothing can: WSL2 (Windows sleeps whatever Linux
+    holds), or neither tool."""
+    kind = hardware.system()
+    if kind == "macos":
+        return "caffeinate" if shutil.which("caffeinate") else ""
+    if kind == "linux" and shutil.which("systemd-inhibit") and Path("/run/systemd/system").is_dir():
+        return "systemd-inhibit"
+    return ""
+
+
+def keep_awake(pid: int, why: str) -> bool:
+    """Hold an idle-sleep inhibitor for as long as ``pid`` lives: an overnight backlog, wb
+    optimize or wb bench froze with the machine when it idle-slept, runner, lease and model server
+    alike, and the monotonic guards counted none of the gap (#516). macOS: `caffeinate -i -w
+    <pid>`. Linux: `systemd-inhibit --what=idle:sleep --mode=block` around a wait for the pid;
+    logind lets a local active session block sleep, and where it refuses (polkit: an SSH session,
+    a scope outside any session) an idle lock alone. Started in this session, not a scope, for
+    that reason. Where nothing can (WSL2, no tool) or the start fails: nothing, and False."""
+    how = awake_how()
+    if how == "caffeinate":
+        argv = ["caffeinate", "-i", "-w", str(pid)]
+    elif how == "systemd-inhibit":
+        def lock(what: str) -> str:
+            return shlex.join(["systemd-inhibit", f"--what={what}", "--who=workbench", f"--why={why}",
+                               "--mode=block", sys.executable, "-c", AWAIT_PID, str(pid)])
+        argv = ["sh", "-c", f"{lock('idle:sleep')} 2>/dev/null || exec {lock('idle')}"]
+    else:
+        return False
+    try:
+        subprocess.Popen(argv, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
+                         stderr=subprocess.DEVNULL, start_new_session=True)
+    except OSError:
+        return False
+    return True
+
+
+def awake_line() -> tuple[bool, str]:
+    """For wb doctor: whether runs keep the machine awake here, and how (or why not)."""
+    how = awake_how()
+    if how == "caffeinate":
+        return True, "runs keep the Mac awake (caffeinate -i)"
+    if how == "systemd-inhibit":
+        try:
+            ok = subprocess.run(["systemd-inhibit", "--what=idle:sleep", "--who=workbench",
+                                 "--why=wb doctor", "--mode=block", "true"], capture_output=True,
+                                timeout=10).returncode == 0
+        except (OSError, subprocess.SubprocessError):
+            ok = False
+        return ok, ("runs keep the machine from idle-sleeping (systemd-inhibit)" if ok else
+                      "runs hold an idle lock only (systemd-inhibit): logind refuses a sleep lock "
+                      "from this session (polkit grants one to a local active session)")
+    if hardware.system() == "wsl":
+        return False, WSL_SLEEPS
+    return False, ("nothing here keeps the machine from idle-sleeping during a run (no "
+                   "systemd-inhibit): a machine that sleeps pauses its tasks until it wakes")
+
+
+WSL_SLEEPS = ("WSL2 can't keep Windows awake: when the laptop sleeps, its tasks pause until it "
+              "wakes; for a night's run set Windows' sleep to Never while plugged in (Settings, "
+              "System, Power)")
 
 
 def runner_alive(task: store.Task) -> bool:
@@ -762,6 +849,9 @@ def cmd_start(a):
         print(f"note: {runner.proxy_line(proxies)}")
     if venvs := context.venv_line(task, bool(setup and setup.get("setup"))):  # #490
         print(f"note: {venvs}")
+    if a.backlog and hardware.system() == "wsl" and not any(  # once per backlog (#516)
+            t.spec.get("backlog") == a.backlog for t in store.all_tasks() if t.name != a.name):
+        print(f"note: {WSL_SLEEPS}")
     if context.on_windows(str(repo), context.windows_drives()):  # finding 30 (the 2026-11-19 audit)
         print("note: the repo is on a Windows drive, where git is many times slower and wb checks "
               "the worktree at every step: a clone in WSL's own filesystem (~/...) runs faster")
@@ -3701,6 +3791,11 @@ def cmd_doctor(a):
             print(f"--  {why}")
     if gap := chat_gap():
         print(f"--  {gap}")
+    ok, said = awake_line()  # #516: a warning, not BAD: a server or a desktop that never sleeps is fine
+    if ok:
+        line(True, said)
+    else:
+        print(f"--  {said}")
     found = models.discover()
     line(bool(found), f"{len(found)} local model(s)")
     for pid, why in models.skipped_providers():  # once dropped without a word (the 2026-11-16 audit)

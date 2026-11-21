@@ -484,7 +484,7 @@ def start(model_ids: list[str], case_names: list[str], skills: list[str], label:
     from . import cli  # cli imports this module
     with open(d / "driver.log", "a") as log:  # its own scope, to outlive a logout (#531)
         proc = cli.detach([sys.executable, "-X", "utf8", "-m", "workbench.bench", run], cwd=d,
-                          env=env, stdout=log, stderr=log)
+                          awake=f"wb bench run {run}", env=env, stdout=log, stderr=log)  # #516
     store.write_json(home() / "driver.json", {"pid": proc.pid, "run": run,
                                               "start": models._started(proc.pid)})
     return run, [f"bench run {run}: {len(pairs)} replay(s) × {repeat}"

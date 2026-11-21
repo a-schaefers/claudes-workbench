@@ -341,7 +341,7 @@ def start(bench: bool = False, if_due: bool = False) -> list[str]:
         from . import cli  # cli imports this module
         # its own scope, to outlive a logout: SIGTERM there recorded "stopped" (#531)
         proc = cli.detach([sys.executable, "-X", "utf8", "-m", "workbench.optimize", *argv],
-                          env=env, stdout=log, stderr=log)
+                          awake="wb optimize", env=env, stdout=log, stderr=log)  # awake: #516
     store.write_json(path(), {**st, "pid": proc.pid, "start": models._started(proc.pid),
                               "began": store.now(), "done": None, "stopped": None})
     mins = max(1, round(estimate(ms) / 60))

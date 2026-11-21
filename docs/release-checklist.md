@@ -50,7 +50,9 @@ On at least one of them:
 - [ ] Python 3.11.
 - [ ] git in another language (`LANGUAGE=fr`).
 - [ ] A repo path with spaces.
-- [ ] A laptop's sleep and wake during a round.
+- [ ] A laptop's sleep and wake during a round; and left idle with a task running, it stays
+      awake (macOS, Linux: `systemd-inhibit --list` names workbench), or on WSL2 `wb start
+      --backlog` says it can't.
 
 ## Models and long runs
 
