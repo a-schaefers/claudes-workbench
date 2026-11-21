@@ -2981,9 +2981,10 @@ def _merged_branches() -> int:
     """Delete the delegate branches of accepted tasks that have landed: merged by wb accept
     --merge before it deleted them itself, or by hand after a plain accept (the skill's default,
     whose `git merge` line left delegate/<task> for good). Each tip is recorded first (status
-    `tip`), which wb bench finds the task's commits from; then `branch -d` (merged into the
-    checkout's HEAD or its upstream), else a compare-and-delete when the task's base branch holds
-    the tip. A branch gone, or deleted here, is recorded (status `branch_gone`) and never looked
+    `tip`), which wb bench finds the task's commits from; a branch moved past that tip since is
+    the user's and stays (#930); then `branch -d` (merged into the checkout's HEAD or its
+    upstream), else a compare-and-delete when the task's base branch holds the tip, never while a
+    worktree has the branch out (#930: its HEAD was left naming no ref). A branch gone, or deleted here, is recorded (status `branch_gone`) and never looked
     at again: every merged task ever recorded cost a git call on every run, 2,828 of them in
     1.8 s on tmpfs, minutes on /mnt/c (#686). Each repo's delegate refs are listed once. A branch
     squash-merged (a PR) holds commits its target lacks, so it stays."""
@@ -3003,8 +3004,11 @@ def _merged_branches() -> int:
             if not (tip := refs.get(f"refs/heads/{branch}")):
                 t.set_status(branch_gone=True)
                 continue
-            if not t.status.get("tip"):
+            if not (accepted := t.status.get("tip")):  # accepted before accept recorded it
+                accepted = tip
                 t.set_status(tip=tip)
+            if tip != accepted:  # moved since accept (more work on it): the user's now, it stays
+                continue  # (#930: the tip compared was the one read here, so it went if merged)
             if gitops.drop_landed_branch(repo, branch, tip, t.spec.get("base_branch")):
                 n += 1
                 t.set_status(branch_gone=True)
@@ -3142,6 +3146,14 @@ def cmd_relocate(a):
     print(f"relocated {a.name}: {repo} (was {old})")
 
 
+def _held(repo: Path, branch: str) -> str:
+    """Why discard kept ``branch``: a worktree has it out, which update-ref would have left
+    naming no ref (#930); else it moved under the compare-and-delete."""
+    if at := gitops.checked_out_in(repo, branch):
+        return f"; branch {branch} kept: it is checked out in {at}"
+    return f"; branch {branch} kept: it moved while being deleted"
+
+
 @one_at_a_time
 def cmd_discard(a):
     task = need(a.name)
@@ -3173,8 +3185,8 @@ def cmd_discard(a):
         tip = gitops.git(repo, "rev-parse", "--verify", "-q", f"refs/heads/{branch}",
                          check=False).strip()
         if tip and made and tip == made:
-            gitops.delete_branch(repo, a.name, at=made)
-            said = f"; branch {branch} deleted"
+            said = f"; branch {branch} deleted" if gitops.delete_branch(repo, a.name, at=made) \
+                else _held(repo, branch)
         elif tip:
             said = (f"; branch {branch} kept: this task's checkout "
                     + ("made it, but it has moved since" if made else "didn't make it"))
@@ -3189,9 +3201,10 @@ def cmd_discard(a):
             said = (f"; branch {branch} kept: its {past} commit(s) past the base are approved "
                     f"steps. {git_c} merge {branch} lands them; {git_c} branch -D {branch} "
                     "drops them (wb discard --drop-steps deletes it at once)")
-        else:
-            gitops.delete_branch(repo, a.name, at=tip)
+        elif gitops.delete_branch(repo, a.name, at=tip):
             said = f"; branch {branch} deleted (was {tip[:8]})"
+        else:
+            said = _held(repo, branch)
     # --drop-steps deleted the approved steps with the branch: no longer kept work (#722)
     dropped = {"steps_dropped": True} if getattr(a, "drop_steps", False) else {}  # bench's own call lacks it
     task.set_status(phase="discarded", last=a.reason or "discarded", pid=None,

@@ -1558,13 +1558,34 @@ def _unlock_cut_short(repo: Path, worktree: Path) -> None:
             return
 
 
-def delete_branch(repo: Path, task: str, at: str | None = None) -> None:
+def checked_out_in(repo: Path, branch: str) -> str | None:
+    """The worktree that has ``branch`` checked out (the main one or a linked one), or None.
+    `git branch -d/-D` refuse such a branch, but `update-ref -d` skips that check: wb gc deleted a
+    landed delegate branch the user had out in a second worktree, whose HEAD then named no ref,
+    `git status` showed every file staged and the next commit there had no parent (#930). A
+    registration whose directory is gone (`prunable`) holds nothing: no checkout breaks."""
+    held = entry = None
+    for line in git(repo, "worktree", "list", "--porcelain", check=False).splitlines() + [""]:
+        if line.startswith("worktree "):
+            entry, held = line[9:], None
+        elif line == f"branch refs/heads/{branch}":
+            held = entry
+        elif line.startswith("prunable"):
+            held = entry = None
+        elif not line and held:
+            return held
+    return None
+
+
+def delete_branch(repo: Path, task: str, at: str | None = None) -> bool:
     """Delete the task's branch; with ``at``, only while it still points at that commit (one
-    update-ref, compare and delete), so a branch someone else made or moved stays (#416)."""
+    update-ref, compare and delete), so a branch someone else made or moved stays (#416), and
+    never while a worktree has it checked out (#930). True when it went."""
     if at:
-        git(repo, "update-ref", "-d", f"refs/heads/{branch_name(task)}", at, check=False)
-    else:
-        git(repo, "branch", "-D", branch_name(task), check=False)
+        branch = branch_name(task)
+        return checked_out_in(repo, branch) is None and _run(
+            repo, ("update-ref", "-d", f"refs/heads/{branch}", at), check=False).returncode == 0
+    return _run(repo, ("branch", "-D", branch_name(task)), check=False).returncode == 0
 
 
 def drop_merged_branch(repo: Path, branch: str) -> bool:
@@ -1576,11 +1597,14 @@ def drop_merged_branch(repo: Path, branch: str) -> bool:
 def drop_landed_branch(repo: Path, branch: str, tip: str, into: str | None) -> bool:
     """Delete ``branch`` once it has landed: merged into the checkout's HEAD (drop_merged_branch),
     else held by ``into`` (the task's base branch, not checked out), deleted only while it still
-    points at ``tip`` (update-ref's compare-and-delete). wb gc (#686)."""
-    if drop_merged_branch(repo, branch):
+    points at ``tip`` (update-ref's compare-and-delete), and never while a worktree has it checked
+    out: update-ref doesn't look, and that checkout's HEAD was left naming no ref (#930). wb gc
+    (#686)."""
+    if drop_merged_branch(repo, branch):  # git's own check refuses a checked-out branch
         return True
-    return bool(into) and contains(repo, f"refs/heads/{into}", tip) and _run(
-        repo, ("update-ref", "-d", f"refs/heads/{branch}", tip), check=False).returncode == 0
+    return bool(into) and contains(repo, f"refs/heads/{into}", tip) and \
+        checked_out_in(repo, branch) is None and _run(
+            repo, ("update-ref", "-d", f"refs/heads/{branch}", tip), check=False).returncode == 0
 
 
 def current_branch(repo: Path) -> str:

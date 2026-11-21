@@ -11965,6 +11965,47 @@ class Cleanup(Base):
             self.assertIn("0 merged branch(es)", run_wb("gc"))
         self.assertEqual({c.args[0]["name"] for c in seen.call_args_list}, {"t-later"})
 
+    def test_wb_gc_keeps_a_landed_branch_another_worktree_has_out_and_one_moved_since_accept(self):
+        # #930 (an outside review of v1.90.24): branch -d refused a branch checked out in a second
+        # worktree, then update-ref -d deleted it anyway, leaving that checkout's HEAD naming no
+        # ref (every file staged, the next commit parentless); and the tip compared was the one
+        # read at gc, so a branch with more work on it since accept went once that was merged too
+        merge = lambda b: self.git("-c", "user.email=t@t", "-c", "user.name=t", "merge", "-q",  # noqa: E731
+                                   "--no-ff", "--no-edit", b)
+        for name in ("t-out", "t-moved"):
+            self.start(name, "ok")
+            wait_phase(name, {"review"})
+            run_wb("accept", name, "-m", "feat: answer")
+        for name in ("t-out", "t-moved"):
+            self.assertEqual(merge(f"delegate/{name}").returncode, 0)
+        wt = Path(self.tmp.name) / "second"
+        self.assertEqual(self.git("worktree", "add", "-q", str(wt), "delegate/t-out").returncode, 0)
+        more = Path(self.tmp.name) / "more"
+        self.assertEqual(self.git("worktree", "add", "-q", str(more), "delegate/t-moved").returncode, 0)
+        (more / "later.txt").write_text("more\n")
+        for args in (("add", "later.txt"), ("-c", "user.email=t@t", "-c", "user.name=t", "commit",
+                                             "-q", "-m", "more")):
+            self.assertEqual(subprocess.run(["git", "-C", str(more), *args]).returncode, 0)
+        self.assertEqual(self.git("worktree", "remove", str(more)).returncode, 0)
+        self.assertEqual(merge("delegate/t-moved").returncode, 0)   # landed too, past accept's tip
+        self.assertIn("0 merged branch(es)", run_wb("gc"))
+        head = subprocess.run(["git", "-C", str(wt), "rev-parse", "--verify", "HEAD"],
+                              capture_output=True, text=True)
+        self.assertEqual(head.returncode, 0, head.stderr)
+        status = subprocess.run(["git", "-C", str(wt), "status", "--porcelain"],
+                                capture_output=True, text=True)
+        self.assertEqual(status.stdout, "")
+        for name in ("t-out", "t-moved"):
+            self.assertFalse(store.Task(name).status.get("branch_gone"), name)   # asked again
+            self.assertEqual(self.git("rev-parse", "--verify", "-q", f"refs/heads/delegate/{name}").returncode, 0)
+        tip = store.Task("t-out").status["tip"]   # discard's compare-and-delete looks too
+        self.assertFalse(gitops.delete_branch(self.repo, "t-out", at=tip))
+        self.assertEqual(gitops.checked_out_in(self.repo, "delegate/t-out"), str(wt))
+        self.assertEqual(self.git("worktree", "remove", str(wt)).returncode, 0)
+        self.assertIn("1 merged branch(es)", run_wb("gc"))
+        self.assertNotEqual(self.git("rev-parse", "--verify", "-q", "refs/heads/delegate/t-out").returncode, 0)
+        self.assertEqual(self.git("rev-parse", "--verify", "-q", "refs/heads/delegate/t-moved").returncode, 0)
+
     def test_old_closed_tasks_are_archived_and_still_found(self):
         # every wb wait wake, wb events minute and wb start read all 101 tasks' files
         for name in ("t-done", "t-open"):
