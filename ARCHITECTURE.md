@@ -656,16 +656,29 @@ once more and `pid` and `stopping` are cleared.
    after a review of the same step, only the diff since that review notice (`gitops.snapshot`,
    a tree object recorded as status `reviewed`), with a proposed instruction file shown again only
    when it changed: the wake after a feedback round carried the whole 14K-character diff again,
-   2026-11-18;
+   2026-11-18; the snapshot leaves bulky new files out, named in the notice ("left out of the
+   review snapshot, too big to store each round: …"; the next review's diff shows them again):
+   `gitops.snapshot_left`, chosen from `ls-files --others` and their sizes before anything is
+   hashed, so a file of `BINARY_MAX` or more, while more than `NEW_FILES_MAX` new files remain
+   the top-level directories holding the most, then the biggest files while the rest pass
+   `SNAPSHOT_MAX` (32 MiB); the tree then gets the tracked files' changes (`add -u`) and the new
+   files kept by name, where `add -A` had written every new file into the user's object store
+   each round, a refused accept of 400 × 100 KB `build/` files taking `.git/objects` from 28K to
+   41M (#431);
    then the agent's proposed instruction files as diffs, *Claude's files*), exit.
 
 Round reports and check-ins list the first 40 changed paths (`gitops.CHANGED_SHOWN`).
 They count remaining files by top-level directory, showing up to 40 directory totals.
 The stat in a review notice also shows at most 40 paths, followed by Git's total.
 A report flags a new top-level directory with at least 50 untracked files (`BUILD_FILES`).
-Before committing, `wb accept` and `wb next` check the proposed tree for more than 300 new
-files (`NEW_FILES_MAX`) or a new binary of at least 1 MiB (`BINARY_MAX`). A refusal preserves
-the working files and staging area. Use `--include` to approve those files after review.
+Before committing, `wb accept` and `wb next` check the worktree for more than 300 new
+files (`NEW_FILES_MAX`) or a new binary of at least 1 MiB (`BINARY_MAX`). The check
+(`gitops._bulk`) reads `ls-files --others` (and new files already staged) and their sizes, a big
+file's `diff` and `filter` attributes and, if they don't say, its first 8000 bytes for a NUL, as
+git's own test; a filtered file (Git LFS) is stored as its filter makes it, so passes. Nothing is
+hashed until it passes: run on a snapshot, every file it refused was already in the object store
+(#431). A refusal preserves the working files and staging area. Use `--include` to approve those
+files after review.
 
 **`run_round(task, n)`.** Writes the config layer and the agent's environment (*What the agent
 knows*), prepends the skills note (`skills_note`) to the prompt argument (not to `prompt.md`),
@@ -3834,7 +3847,9 @@ directory and in the task's own lane and environment (`runner.run_in_lane` on a 
   run, #194). That copy is what makes a test separable from the change; with no test file it
   refuses.
 - **The candidate**: the same clone at the worktree's HEAD, then `read-tree -u` of a snapshot of
-  the worktree (`gitops.snapshot`), new files included.
+  the worktree (`gitops.snapshot`), new files included, but not the bulky ones the snapshot
+  leaves out (*The runner, inside*, #431): `result.json` `left_out` and the report's "not in the
+  candidate (too big to snapshot)" line name them.
 
 Each is set up from the task's worktree (`runner.prepare`: its siblings, and the ignored paths
 its preparation made, copied; `--setup` runs the setup command there instead) before the test runs.
@@ -3857,7 +3872,7 @@ quoting `assert 2 = 2` was proof too (#326, the audit of 1.4). `assertion` picks
 line, else a failed test's header. Each run is kept in `tasks/<task>/verify/<n>/`: `base.txt`,
 `candidate.txt` and `result.json` `{cmd, files, tree, ts, base: {rev, exit, assertion}, candidate:
 {rev, exit, assertion}, verdict, dir, expect (when given), uncopied (the candidate's added files
-not copied to the base, when any), missing (those the base's output said it couldn't find)}`. `verify.last` reads the newest, with `stale` once the worktree
+not copied to the base, when any), missing (those the base's output said it couldn't find), left_out (when any)}`. `verify.last` reads the newest, with `stale` once the worktree
 or the comparison base has changed since. The verdict names the base commit and candidate tree.
 
 The comparison reaches the review (#97): `wb report <task>` (the latest round's) ends with the
@@ -4949,7 +4964,7 @@ check-ins off), not `wb start`'s.
 | `reviews` | review rounds in this step (`wb feedback` +1, `wb next` resets) |
 | `auto_fixes`, `auto_fixes_total` | auto-fix rounds since the last review or step; earlier ones |
 | `self_reviewed` | `[steps, reviews]` when the self-review round last ran (`tuned.self_review` on: once per review round) |
-| `reviewed` | `{step, tree}`: the working tree the last review notice showed, a tree object (`gitops.snapshot`); the next review notice of the same step shows the diff since it |
+| `reviewed` | `{step, tree}`: the working tree the last review notice showed, a tree object (`gitops.snapshot`, bulky new files left out); the next review notice of the same step shows the diff since it |
 | `tests` | `{ok, exit, tail, round, lane?, proxy?}` of the last test run (`exit`: a code, `timeout` or `output limit`; `lane`: the device nodes it was refused outside the lane, #331; `proxy`: the proxy variables the agent's environment left out, when the run failed on a connection, #380) |
 | `base_check` | `{ok, exit, tail, limit}` of the acceptance command run once on the base, in the lane (`runner.base_check`; `exit` is `"timeout"` past `limit`, `"setup failed"` when its scratch checkout couldn't be set up); the runner, before round 1, only with `--test` and without `--no-base-check` |
 | `infra` | why the machine, not the agent, failed the task: `setup` (`runner._prepare`), `model` (`_load_failed`: it couldn't load, or its server stayed down past `DOWN_WAIT`), `crash`, `disk full` (the runner's crash handler), `runner died` (`cli.reap`); cleared at each runner's start. A replay with it is an `error` row, not `failed` (*Bench*, #508) |

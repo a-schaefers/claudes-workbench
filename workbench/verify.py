@@ -251,7 +251,7 @@ def run(task: store.Task, cmd: str, files: list[str] | None = None, limit: int =
         expect: str = "", setup: bool = False) -> dict:
     """Run ``cmd`` on the base (with the candidate's test files) and on the candidate; the
     result, also kept in tasks/<task>/verify/<n>/ with both outputs."""
-    tree = gitops.snapshot(task.worktree)
+    tree, left = gitops.snapshot_left(task.worktree)  # bulky new files left out (#431)
     base_rev = _review_base(task)
     if not base_rev:
         raise RuntimeError("cannot find the last approved step's commit for the comparison")
@@ -276,7 +276,8 @@ def run(task: store.Task, cmd: str, files: list[str] | None = None, limit: int =
               "candidate": {"rev": tree, "exit": c_code, "assertion": assertion(c_out)},
               "verdict": verdict(b_code, b_out, c_code, expect, uncopied), "dir": str(out),
               **({"expect": expect} if expect else {}),
-              **({"uncopied": uncopied[:50]} if uncopied else {})}
+              **({"uncopied": uncopied[:50]} if uncopied else {}),
+              **({"left_out": left} if left else {})}
     if b_code != 0 and (gone := missing(b_out, uncopied)):
         result["missing"] = gone
     store.write_json(out / "result.json", result)
@@ -302,6 +303,8 @@ def lines(r: dict) -> list[str]:
     if r.get("missing"):
         out.append(f"  the base lacked what the candidate adds: {', '.join(r['missing'])} "
                    "(--files copies what the test reads onto the base)")
+    if r.get("left_out"):
+        out.append(f"  not in the candidate (too big to snapshot): {', '.join(r['left_out'])}")
     out.append(f"  outputs: {r['dir']}/{{base,candidate}}.txt")
     return out
 

@@ -561,22 +561,65 @@ def build_dirs(worktree: Path, files: str) -> list[tuple[str, int]]:
             if n >= BUILD_FILES and os.fsencode(d[:-1]) not in tracked]
 
 
-def _bulk(worktree: Path, tree: str) -> str | None:
-    """Check the prospective tree, including binary paths that cannot be decoded as UTF-8."""
-    rows = git_bytes(worktree, "diff", "--numstat", "--no-renames", "--diff-filter=A",
-                     "-z", "HEAD", tree).split(b"\0")
-    added = [r.split(b"\t", 2) for r in rows if r]
+SNAPSHOT_MAX = 1 << 25  # a review snapshot stores at most this many bytes of new files
+
+
+def _new_files(worktree: Path) -> list[tuple[bytes, int]]:
+    """The new files (untracked, not ignored) and their sizes, from `ls-files --others` and
+    lstat alone: nothing is read or hashed. A symlink or anything but a regular file counts 0;
+    nested repositories (nested_repos) are left out."""
+    top, out = os.fsencode(os.path.abspath(worktree)), []
+    for f in git_bytes(worktree, "ls-files", "--others", "--exclude-standard", "-z").split(b"\0"):
+        if f and not f.endswith(b"/"):
+            try:
+                st = os.lstat(os.path.join(top, f))
+            except OSError:  # gone mid-scan
+                continue
+            out.append((f, st.st_size if stat.S_ISREG(st.st_mode) else 0))
+    return out
+
+
+def _binary(worktree: Path, path: bytes) -> bool | None:
+    """Whether git would store ``path`` as a binary file, None when a filter (Git LFS) decides
+    what is stored: the `diff` attribute, else a NUL in its first 8000 bytes, as git's own test."""
+    out = _run(worktree, ["check-attr", "-z", "filter", "diff", "--", os.fsdecode(path)],
+               check=False).stdout.split(b"\0")
+    attrs = {out[i + 1]: out[i + 2] for i in range(0, len(out) - 2, 3)}
+    if attrs.get(b"filter", b"unspecified") not in (b"unspecified", b"unset"):
+        return None
+    if attrs.get(b"diff") in (b"set", b"unset"):
+        return attrs[b"diff"] == b"unset"
+    try:
+        fd = os.open(os.path.join(os.fsencode(os.path.abspath(worktree)), path),
+                     os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+        with os.fdopen(fd, "rb") as f:
+            return b"\0" in f.read(8000)
+    except OSError:
+        return False
+
+
+def _bulk(worktree: Path) -> str | None:
+    """Why the worktree's new files shouldn't be committed without --include, or None: more than
+    NEW_FILES_MAX of them, a new binary of BINARY_MAX or more. Counted from the file system
+    before anything is hashed: checked on a snapshot, every file the check then refused was
+    already in the user's object store (#431, the audit of 1.8). Paths are bytes: a name that
+    isn't UTF-8 is checked too."""
+    added = _new_files(worktree)
+    top = os.fsencode(os.path.abspath(worktree))
+    for f in git_bytes(worktree, "diff", "--cached", "--name-only", "--no-renames",
+                       "--diff-filter=A", "-z", "HEAD").split(b"\0"):  # staged, not at HEAD
+        with contextlib.suppress(OSError):
+            if f and stat.S_ISREG((st := os.lstat(os.path.join(top, f))).st_mode):
+                added.append((f, st.st_size))
     why = []
     if len(added) > NEW_FILES_MAX:
-        tops = Counter(_top(p.decode("utf-8", "replace")) for _, _, p in added).most_common(3)
+        tops = Counter(_top(os.fsdecode(p)) for p, _ in added).most_common(3)
         why.append(f"{len(added):,} new files ({', '.join(f'{d} {n:,}' for d, n in tops)})")
-    for insertions, _, path in added:
-        if insertions == b"-":
-            size = int(git_bytes(worktree, "cat-file", "-s", os.fsencode(tree) + b":" + path))
-            if size >= BINARY_MAX:
-                why.append(f"a {size / (1 << 20):.0f} MB binary file, {path.decode('utf-8', 'replace')}")
-                if len(why) == 4:
-                    break
+    for path, size in added:
+        if size >= BINARY_MAX and _binary(worktree, path):
+            why.append(f"a {size / (1 << 20):.0f} MB binary file, {path.decode('utf-8', 'replace')}")
+            if len(why) == 4:
+                break
     return "; ".join(why) or None
 
 
@@ -614,14 +657,16 @@ def mark(worktree: Path) -> str:
     return h.hexdigest()
 
 
-def with_new_files(worktree: Path, *args, whole: bool = False, limit: int | None = None) -> str | None:
+def with_new_files(worktree: Path, *args, whole: bool = False, limit: int | None = None,
+                   new: list[bytes] | None = None) -> str | None:
     """`git <args>` with new files counted as changes (intent-to-add), in a scratch index: the
     worktree's own index, and anything a concurrent git command holds, are left alone. The
     scratch index starts as a copy of the worktree's, so sparse-checkout's skip-worktree entries
     aren't read as deletions (read-tree listed a monorepo's every file outside the cone as
     deleted: the 2026-11-16 audit). Nested repositories are left out (nested_repos). ``whole``
     adds new files' contents too, not just their intent (for write-tree: snapshot). ``limit``:
-    at most that many characters of output, else None (_bounded)."""
+    at most that many characters of output, else None (_bounded). ``new``: only these new files
+    are added, beside the tracked files' changes (snapshot_left)."""
     # in a private directory of the state dir, not the temp dir: /tmp is in the agent's lane, and
     # an agent process still running could rewrite the index between `add -N` and the diff, so
     # files dropped out of the diff Claude reviews (the 2026-11-16 audit)
@@ -636,8 +681,15 @@ def with_new_files(worktree: Path, *args, whole: bool = False, limit: int | None
             shutil.copyfile(Path(worktree) / real, index)  # a relative path is the worktree's
         except (GitError, OSError):
             git(worktree, "read-tree", "HEAD", env=env)
-        skip = [f":(exclude){p}" for p in nested_repos(worktree)]
-        add_all(worktree, *([] if whole else ["-N"]), *(["--", ".", *skip] if skip else []), env=env)
+        if new is not None:
+            _run(worktree, ["add", "-u"], env)
+            if new:
+                add_all(worktree, *([] if whole else ["-N"]), "--",
+                        *(":(literal)" + os.fsdecode(p) for p in new), env=env)
+        else:
+            skip = [f":(exclude){p}" for p in nested_repos(worktree)]
+            add_all(worktree, *([] if whole else ["-N"]), *(["--", ".", *skip] if skip else []),
+                    env=env)
         return _bounded(worktree, args, env, limit) if limit else git(worktree, *args, env=env)
     finally:
         shutil.rmtree(scratch, ignore_errors=True)
@@ -683,8 +735,42 @@ def _bounded(cwd, args, env, limit: int) -> str | None:
 
 def snapshot(worktree: Path) -> str:
     """The working tree as it is now, new files included, as a tree object: a base to diff
-    against later. The worktree's own index is left alone."""
-    return with_new_files(worktree, "write-tree", whole=True).strip()
+    against later. The worktree's own index is left alone. Bulky new files are left out
+    (snapshot_left)."""
+    return snapshot_left(worktree)[0]
+
+
+def snapshot_left(worktree: Path) -> tuple[str, list[str]]:
+    """snapshot's tree, and what it left out ("build/ (400 new files)", "data.bin (3 MB)"; []
+    when nothing): a new file of BINARY_MAX or more, the top-level directories with the most new
+    files while there are more than NEW_FILES_MAX, then the biggest new files while the rest
+    pass SNAPSHOT_MAX bytes. Chosen by count and size alone, before anything is hashed: `add -A`
+    wrote every new file into the user's object store, each round it changed, kept until git's
+    prune window passed (a refused accept of 400 x 100 KB build/ files took .git/objects from
+    28K to 41M: #431, the audit of 1.8)."""
+    files = _new_files(worktree)
+    big = [(p, n) for p, n in files if n >= BINARY_MAX]
+    rest = [(p, n) for p, n in files if n < BINARY_MAX]
+    dirs, count = [], Counter(_top(os.fsdecode(p)) for p, _ in rest)
+    for d, n in count.most_common():
+        if len(rest) <= NEW_FILES_MAX:
+            break
+        dirs.append(f"{d} ({n:,} new file{'s' if n != 1 else ''})")
+        rest = [(p, m) for p, m in rest if _top(os.fsdecode(p)) != d]
+    rest.sort(key=lambda r: r[1])
+    while rest and sum(n for _, n in rest) > SNAPSHOT_MAX:
+        big.append(rest.pop())
+    if len(rest) == len(files):
+        return with_new_files(worktree, "write-tree", whole=True).strip(), []
+    tree = with_new_files(worktree, "write-tree", whole=True, new=[p for p, _ in rest]).strip()
+    return tree, dirs + brief([f"{os.fsdecode(p)} ({n / (1 << 20):.0f} MB)" if n >= 1 << 20
+                               else f"{os.fsdecode(p)} ({n >> 10:,} KB)" for p, n in sorted(big)])
+
+
+def left_line(left: list[str]) -> str:
+    """The review notice's line on what snapshot_left left out."""
+    return (f"\n\nleft out of the review snapshot, too big to store each round: {', '.join(left)}"
+            "; the next review's diff shows them again" if left else "")
 
 
 def diff(worktree: Path, base: str, stat=False, paths=(), numstat=False, stat_count=None,
@@ -844,7 +930,7 @@ def commit_all(worktree: Path, message: str, include: bool = False, sign: bool =
                        "remove its .git or gitignore it, then try again")
     if edits := submodule_edits(worktree):  # they would vanish with the worktree (#419)
         raise GitError("not committed: " + "; ".join(edits))
-    if not include and (why := _bulk(worktree, snapshot(worktree))):
+    if not include and (why := _bulk(worktree)):
         raise GitError(f"not committed: {why}. Build output? Gitignore or remove it in "
                        f"{worktree}, or --include to commit it anyway")
     add_all(worktree, pre=NO_HOOKS)

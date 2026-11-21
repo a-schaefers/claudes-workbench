@@ -1351,6 +1351,52 @@ class Lifecycle(Base):
                               capture_output=True, text=True).stdout
         self.assertIn("blob.bin", tree)
 
+    def test_build_output_never_reaches_the_object_store_before_an_accept_takes_it(self):
+        # #431 (the audit of 1.8): the review snapshot's `add -A` wrote every new file into the
+        # user's object store each round, and a refused accept of 400 x 100 KB build/ files
+        # grew .git/objects from 28K to 41M before the bulk check refused them
+        self.start("t-objs", "ok")
+        wait_phase("t-objs", {"review"})
+        t = store.Task("t-objs")
+        (t.worktree / "build").mkdir()
+        for i in range(gitops.NEW_FILES_MAX + 20):
+            (t.worktree / "build" / f"o{i}.o").write_text(f"object {i}\n")
+        (t.worktree / "big.dat").write_bytes(os.urandom(gitops.BINARY_MAX))
+        (t.worktree / "small.txt").write_text("kept in the snapshot\n")
+
+        def stored(rel):
+            sha = subprocess.run(["git", "-C", str(self.repo), "hash-object", str(t.worktree / rel)],
+                                 capture_output=True, text=True, check=True).stdout.strip()
+            return subprocess.run(["git", "-C", str(self.repo), "cat-file", "-e", sha],
+                                  capture_output=True).returncode == 0
+        t.set_status(reviewed=None)
+        notice = runner.review_diff(t)
+        self.assertIn("left out of the review snapshot", notice)
+        self.assertIn("build/ (320 new files)", notice)
+        self.assertIn("big.dat (1 MB)", notice)
+        err = io.StringIO()
+        with self.assertRaises(SystemExit), redirect_stderr(err):
+            run_wb("accept", "t-objs", "-m", "feat: answer")
+        self.assertIn("not committed: 323 new files (build/ 320", err.getvalue())
+        self.assertIn("a 1 MB binary file, big.dat", err.getvalue())
+        for rel in ("build/o0.o", f"build/o{gitops.NEW_FILES_MAX + 19}.o", "big.dat"):
+            self.assertFalse(stored(rel), rel)
+        self.assertTrue(stored("small.txt"))  # the rest of the snapshot is whole
+        tree = t.status["reviewed"]["tree"]
+        names = gitops.git(t.worktree, "ls-tree", "-r", "--name-only", tree).split()
+        self.assertIn("small.txt", names)
+        self.assertNotIn("big.dat", names)
+        from workbench import verify  # wb verify's candidate is the snapshot: it says what's missing
+        said = verify.lines({"cmd": "t", "files": ["t"], "tree": tree, "verdict": "proven",
+                             "dir": "d", "left_out": ["big.dat (1 MB)"],
+                             **{k: {"rev": "r", "exit": 0, "assertion": ""} for k in ("base", "candidate")}})
+        self.assertIn("  not in the candidate (too big to snapshot): big.dat (1 MB)", said)
+        # gone, nothing is left out and the snapshot is the whole working tree again
+        shutil.rmtree(t.worktree / "build")
+        (t.worktree / "big.dat").unlink()
+        self.assertEqual(gitops.snapshot_left(t.worktree)[1], [])
+        self.assertNotIn("left out", runner.review_diff(t))
+
     def test_an_accept_that_died_after_its_commit_finishes_on_a_retry(self):
         self.start("t-retry", "ok")
         wait_phase("t-retry", {"review"})

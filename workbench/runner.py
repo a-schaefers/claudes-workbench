@@ -1538,14 +1538,16 @@ def review_diff(task: store.Task) -> str:
     props = [str(p.relative_to(task.worktree)) for _, p in proposals(task.worktree)]
     code = (".", *(f":(exclude,literal){p}" for p in props))
     try:
-        task.set_status(reviewed={"step": steps, "tree": gitops.snapshot(task.worktree)})
+        tree, left = gitops.snapshot_left(task.worktree)  # bulky new files left out (#431)
+        task.set_status(reviewed={"step": steps, "tree": tree})
+        left = gitops.left_line(left)
         if since:
             # bounded: a big diff is never read whole only to show its stat (#348, the audit of 1.4)
             full = gitops.diff(task.worktree, since, paths=code, limit=REVIEW_DIFF_MAX)
             same = not props or not gitops.diff(task.worktree, since,
                                                  paths=tuple(f":(literal){p}" for p in props))
             prop = ("\n\nthe agent's proposed instruction files: unchanged since your last review"
-                    if same and proposals(task.worktree) else proposal_diff(task))
+                    if same and proposals(task.worktree) else proposal_diff(task)) + left
             if full == "":
                 return "\n\nthe diff since your last review: (no changes)" + prop
             if full is not None:
@@ -1553,7 +1555,7 @@ def review_diff(task: store.Task) -> str:
                         f"it):\n{full}" + prop)
             base = since
         full = gitops.diff(task.worktree, base, paths=code, limit=REVIEW_DIFF_MAX)
-        prop = proposal_diff(task)
+        prop = proposal_diff(task) + left
         if full == "":
             return "\n\nthe diff: (no changes)" + prop
         if full is not None:
