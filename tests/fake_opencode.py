@@ -18,6 +18,8 @@
   refill every session changes a file, then fills 76% and works on for an hour
   bgwait a command OpenCode moved to the background: `background_wait`, quiet for FAKE_BGWAIT
          seconds (6), then writes "42" like ok
+  devserver  writes "42", starts `npm run dev` in the background, ends its turn (reason stop),
+         then `background_wait` on that job for an hour (a server never ends: #658)
   toolhang  one tool call, then silent (a command that prints nothing for long)
   retry  no answer from the model's server: a `retry` line every FAKE_RETRY_EVERY seconds (1),
          OpenCode cutting the request at its provider timeout and sending it again (#491)
@@ -209,6 +211,16 @@ elif scenario == "bgwait":
     tool("write", {"filePath": os.path.abspath("answer.txt"), "content": "42"})
     emit("text", text="Wrote answer.txt = 42.")
     finish()
+elif scenario == "devserver":
+    with open("answer.txt", "w") as fh:
+        fh.write("42\n")
+    tool("write", {"filePath": os.path.abspath("answer.txt"), "content": "42"})
+    tool("shell", {"command": "npm run dev", "background": True})
+    emit("text", text="Wrote answer.txt = 42; the dev server is up.")
+    finish()
+    print(json.dumps({"type": "background_wait", "timestamp": t(), "sessionID": session,
+                      "jobs": [{"id": "job1", "kind": "shell", "title": "npm run dev"}]}), flush=True)
+    time.sleep(3600)
 elif scenario == "refill":  # every session changes something early, then fills up
     with open("notes.txt", "a") as fh:
         fh.write(f"{session}\n")

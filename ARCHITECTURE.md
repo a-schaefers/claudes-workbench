@@ -863,6 +863,14 @@ on the wall clock, which the files' timestamps use. Silence and the think budget
   the turn waits on it, printing nothing until it ends) pauses the think budget, and silence runs
   to the longer of `--silence-timeout` and `--test-timeout`, until the next event; the round's
   limit still holds. A long test suite was nudged and killed every 7 minutes, then rerun.
+  But when the agent's turn is over (the last `step_finish` had reason `stop`) and nothing new
+  comes for `BG_GRACE` (120 s, or `--silence-timeout` when shorter), the round is done: a dev
+  server or watcher the agent left running never ends, so the round sat out the long wait and
+  the finished work was reported stuck with no tests run (#658). The runner stops OpenCode (the
+  job goes with it, `_end_agent`), records `left_bg` (the jobs' titles from the event's
+  `jobs[]`; not a crash for `died`), writes a `left_bg {text}` event, and goes on to the tests;
+  the report says `the agent left `<job>` running in the background when its turn ended;
+  stopped`.
 
 **Nothing a round starts outlives it** (`_end_agent`, after every round however it ended, and
 in `main`'s `finally`): the agent if it still runs (`_stop`), a SIGKILL to its process group (a
@@ -6059,7 +6067,7 @@ description, 90 characters; a skill's id), `text {text}` (2000 characters), `ste
 cache, reasoning?}` (reasoning tokens apart from `out`, when any, #644), `error {text}`, `retry {text, attempt}` (OpenCode resending a request, #491). From the runner: `round`, `stopped {text}`, `steer {now, by:
 "workbench"}` (a nudge), `interrupted`, `tests {ok, text}`, `skills`, `fresh {overflow,
 compacted}`,
-`autofix`, `self_review`, `reading_full`, `full`, `load` (the model reloaded before a round),
+`autofix`, `self_review`, `reading_full`, `full`, `load` (the model reloaded before a round), `left_bg {text}` (the round ended with a job still in the background, #658),
 `round_end {secs, how, guard?}` (with stats recording on: *Stats recording*), `export` (the session export failed: judged by `live_used`), `stopped {by:
 "signal"}` (a SIGTERM not from wb), `gpu {text}` (a warning from loading the model: a server wb
 can't stop, a model partly on the CPU, a share Ollama couldn't keep), and relaying the agent's
@@ -6313,7 +6321,7 @@ output after its last event and stays alive; `FAKE_EXIT` exits with that code af
 (a crash after words or an edit). Scenarios (`FAKE_SCENARIO`): `ok` (writes 42), `fix` (41 in a new session, 42 when
 continued: an auto-fix round passes), `loop` (the repeat guard stops it), `hang`, `crash` (exit 1,
 no events; with `FAKE_DOWN`, a file, it creates it the first time, taking the model server down
-with it, and runs like `ok` after), `slow` (hangs in a new session, ok when continued), `fill` (a 25K-token step at 76%
+with it, and runs like `ok` after), `devserver` (writes 42, a `shell` call with `background: true`, a `stop` step, then `background_wait` on `npm run dev` for an hour: #658), `slow` (hangs in a new session, ok when continued), `fill` (a 25K-token step at 76%
 of 32K, then sleeps: the runner hands over mid-round; the handover prompt turns it into `ok`),
 `read` (25K tokens before any change: it carries on), `floor` (a re-read floor too high to hand
 over: `HANDOVER_ROOM`), `refill` (every session changes a file, then fills: `HANDOVER_MAX`),

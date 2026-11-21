@@ -526,6 +526,13 @@ def _reader(stream, q):
 
 
 EXIT_GRACE = 30  # seconds OpenCode has to exit once its output closes; past that, it's stopped
+# A job left in the background after the agent's turn ended (step_finish reason `stop`): OpenCode
+# waits on it before it exits, and a dev server never ends, so the round sat out the long wait
+# below and the finished work was reported stuck, its tests never run (#658). Past this much
+# quiet (or the round's silence limit, when shorter) the round is done: the job is stopped with
+# the agent, and the tests run. A job the turn itself waits on (reason `tool-calls`) keeps the
+# long wait.
+BG_GRACE = 120
 
 
 def _stop(proc: subprocess.Popen):
@@ -868,6 +875,8 @@ def run_round(task: store.Task, n: int, keep: bool = False) -> dict:
     # was nudged and killed every 7 minutes, and rerun (the 2026-11-16 audit). While it waits
     # (`background_wait`), no nudge, and silence runs to the test timeout; the round's limit holds.
     wait_hush = max(silence, float(spec.get("test_timeout") or 900))
+    turn_over = False  # the last step finished with reason `stop`: the agent's turn ended (#658)
+    bg_jobs: list[str] = []  # what OpenCode waits on once the turn is over
     nudged = False
     renudge = renudged(st, n)
     edit_mark = gitops.mark(task.worktree)  # shell edits (sed -i, cat >) count as edits too
@@ -924,6 +933,12 @@ def run_round(task: store.Task, n: int, keep: bool = False) -> dict:
         for raw in got:
             if raw.get("type") == "background_wait":
                 waiting_bg = True
+                bg_jobs = [str(j.get("title") or j.get("id") or "a job")
+                           for j in raw.get("jobs") or () if isinstance(j, dict)]
+            elif raw.get("type") == "step_finish":
+                turn_over = (raw.get("part") or {}).get("reason") == "stop"
+            elif raw.get("type") not in ("retry", None):
+                turn_over = False
             if raw.get("sessionID") and not task.status.get("session"):
                 task.set_status(session=raw["sessionID"])
             row = normalize(raw, n)
@@ -988,6 +1003,15 @@ def run_round(task: store.Task, n: int, keep: bool = False) -> dict:
             if why:
                 out["stuck"], out["guard"] = why, detector.guard
         quiet = clock.quiet(mono)
+        if waiting_bg and turn_over and not out["stuck"] and not asking \
+                and quiet > min(BG_GRACE, silence):
+            # the agent finished and left a job running (a dev server): the round is done (#658)
+            out["left_bg"] = bg_jobs or ["a background job"]
+            task.event({"ts": store.now(), "round": n, "kind": "left_bg",  # not a guard's stop
+                        "text": "the agent's turn ended with " + ", ".join(out["left_bg"])
+                                + " still running in the background: stopped"})
+            _stop(proc)
+            break
         hush = wait_hush if waiting_bg else silence
         if not out["stuck"] and clock.ran(mono) > wall:
             out["stuck"], out["guard"] = f"the round ran past its {int(wall // 60)}-minute limit", "round"
@@ -1954,6 +1978,9 @@ def summary_text(task: store.Task, n: int, rnd: dict, tests) -> str:
         lines.append("reading: " + full[-1]["text"])
     if rnd["stuck"]:
         lines.append(f"STOPPED: {rnd['stuck']}")
+    elif rnd.get("left_bg"):  # #658: what the agent left running, stopped with it
+        lines.append("the agent left " + ", ".join(f"`{j}`" for j in rnd["left_bg"])
+                     + " running in the background when its turn ended; stopped")
     elif rnd["exit"] not in (0, None):
         lines.append(f"opencode exited {rnd['exit']}"
                      + (": the round didn't finish; what it changed so far stays in the worktree"
@@ -2317,7 +2344,7 @@ def died(rnd: dict) -> bool:
     kill, a provider error), not the runner's stop of a shutdown that hung (#83). Such a round
     failed whatever it printed: one that said "I will inspect the files" and exited 7 went on to
     the tests, and to review as "tests passed" (#427, the audit of 1.8)."""
-    return rnd.get("exit") not in (0, None) and not rnd.get("lingered")
+    return rnd.get("exit") not in (0, None) and not rnd.get("lingered") and not rnd.get("left_bg")
 
 
 def _round_end(task: store.Task, n: int, rnd: dict, began: float) -> None:

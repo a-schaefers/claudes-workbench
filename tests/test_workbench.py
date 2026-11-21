@@ -836,6 +836,16 @@ class Lifecycle(Base):
         st = wait_phase("t-bgwait", {"review", "stuck"}, timeout=40)
         self.assertEqual((st["phase"], st.get("nudges", 0), st["round"]), ("review", 0, 1))
 
+    def test_a_job_left_running_after_the_turn_ends_is_stopped_and_the_tests_run(self):
+        # #658: a dev server the agent backgrounded never ends, so `opencode run` waited on it
+        # until the long silence limit, and the finished work was reported stuck, untested
+        self.start("t-dev", "devserver", "--test", TEST_CMD, "--silence-timeout", "4")
+        st = wait_phase("t-dev", {"review", "stuck", "failed"}, timeout=60)
+        self.assertEqual(st["phase"], "review", st.get("last"))
+        self.assertTrue(st["tests"]["ok"])
+        self.assertIn("the agent left `npm run dev` running in the background when its turn "
+                      "ended; stopped", run_wb("report", "t-dev"))
+
     def test_a_round_that_stalls_again_after_a_nudge_is_stopped_whatever_it_did_first(self):
         # A tool call before the stall let the nudged round be nudged again, round after round
         # with no end (the 2026-11-16 audit).
