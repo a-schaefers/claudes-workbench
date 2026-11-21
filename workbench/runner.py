@@ -1044,24 +1044,44 @@ def clip_tail(output: str, lines: int, width: int = 300, total: int = 4000) -> s
     return s if len(s) <= total else "… (earlier output cut)\n" + s[-total:]
 
 
-DEV_REFUSED = re.compile(r"(/dev/[\w.+-]+(?:/[\w.+-]+)*).*?(?:Permission denied|Operation not permitted)"
-                         r"|(?:Permission denied|Operation not permitted).*?(/dev/[\w.+-]+(?:/[\w.+-]+)*)")
+# A refusal in a test's output: the phrase, and the absolute paths on its line. Not a URL's path
+# (`https://h/x`), nor one inside a word.
+REFUSAL = re.compile(r"permission denied|operation not permitted", re.I)
+ABS_PATH = re.compile(r"(?<![\w:/.~-])/[\w.+@~-]+(?:/[\w.+@~-]+)*")
 
 
 def lane_refused(task: store.Task, output: str) -> list[str]:
-    """The device nodes a failed test run was refused, outside the task's lane: /dev/kvm, /dev/fuse
-    and the like read as the project's bug, and the agent spent its auto-fix rounds on them (#331,
-    the audit of 1.4). The report names `wb allow --path` for each."""
+    """The paths outside the task's lane a failed test run was refused, each one a grant could
+    reach (`lane_grant`): /dev/kvm and /dev/fuse (#331, the audit of 1.4), and since #437 (the
+    audit of 1.8) any path, an Android keystore, a Flutter lockfile, a NuGet cache, which read as
+    the project's bug, and the agent spent its auto-fix rounds on them. The report names
+    `wb allow --path` for each."""
     lane = context.writable(task)
     if lane is None:
         return []
+    guard = context.repo_dirs(task)  # the user's checkout: no lane may write it
     found = []
-    for m in DEV_REFUSED.finditer(output[-200_000:]):
-        node = (m.group(1) or m.group(2)).rstrip(".")
-        if node not in found and not any(node == w or node.startswith(str(w).rstrip("/") + "/")
-                                         for w in lane):
-            found.append(node)
+    for line in output[-200_000:].splitlines():
+        if not REFUSAL.search(line):
+            continue
+        for m in ABS_PATH.finditer(line):
+            path = m.group(0).rstrip(".")
+            grant = lane_grant(path)
+            if path not in found and grant and not any(
+                    path == w or path.startswith(str(w).rstrip("/") + "/") for w in lane) \
+                    and not any(grant == g or context._under(grant, g) for g in guard):
+                found.append(path)
     return found[:5]
+
+
+def lane_grant(path: str) -> str | None:
+    """The `wb allow --path` that reaches a refused path: itself when it exists (a directory, a
+    device node, a socket) or is a device node, else the nearest directory that does; None when no grant can (`/`,
+    the home directory, a secret: context.lane_refusal)."""
+    real = os.path.realpath(path)
+    while not os.path.exists(real) and not real.startswith("/dev/"):  # a node: itself, or /dev
+        real = os.path.dirname(real)
+    return None if context.lane_refusal(real) else real
 
 
 def run_tests(task: store.Task, n: int):
@@ -1482,7 +1502,8 @@ def summary_text(task: store.Task, n: int, rnd: dict, tests) -> str:
         if not tests["ok"]:
             lines.append("```\n" + "\n".join(tests["tail"].splitlines()[-25:]) + "\n```")
         for node in tests.get("lane") or ():
-            lines.append(f"the lane refused {node}: wb allow {task.name} --path {node} if the "
+            grant = lane_grant(node) or node
+            lines.append(f"the lane refused {node}: wb allow {task.name} --path {grant} if the "
                          "tests need it (not the agent's bug)")
         if tests.get("proxy"):  # #380
             lines.append(f"{proxy_line(tests['proxy'])}, if the tests need the network (not the "

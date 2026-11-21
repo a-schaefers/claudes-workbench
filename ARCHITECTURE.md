@@ -1079,16 +1079,26 @@ deliberately hostile process (the 2026-11-16 audit's list of what it can't stop 
   said nothing of permission, #331, the audit of 1.4; any other node a failed test run names
   with "Permission denied" or "Operation not permitted" outside the lane, `/dev/kvm` say, goes in
   status `tests.lane` and the report names `wb allow <task> --path <node>` for it:
-  `runner.lane_refused`), `/proc`, the build caches and
+  `runner.lane_refused`; since #437, the audit of 1.8, any absolute path on a refusal's line,
+  matched in any case, that lies outside the lane and that a grant can reach (`lane_grant`: the
+  path when it exists or is under `/dev`, else its nearest existing directory; never `/`, the
+  home directory, a secret, or the task's repo), so a refused keystore, lockfile or cache is
+  named too, not a URL's path), `/proc`, the build caches and
   toolchain homes under `$HOME` (`TOOL_HOMES`: `.cache`, `.cargo`, `.rustup`, `go/pkg`, `.npm`,
   `.bun/install/cache`, `.yarn`, `.pnpm-store`, `.local/share/pnpm/store`,
   `.gradle`, `.m2`, `.nuget`, `.dotnet`, `.gem`, `.julia`, `.cabal`, `.stack`, `.ghcup`,
   `.platformio`, `.conan2`, `.hex`, `.mix`, `.sbt`, `.ivy2`, `.pub-cache`, `.konan`,
-  `.local/share/hatch`, `.local/share/virtualenvs`) and wherever the environment moved them
+  `.local/share/hatch`, `.local/share/virtualenvs`, and since #437 `.local/share/NuGet`, NuGet's
+  http and plugins caches, `.local/state/cabal`, Cabal 3.10's store without `~/.cabal`, and
+  `.android`, the debug keystore, split around `adbkey`), Flutter's `bin/cache` for
+  `$FLUTTER_ROOT` and each `flutter` on PATH (`flutter_caches`: every flutter command opens
+  `bin/cache/lockfile` for writing; kept whole, like `.dotnet`, though the Dart SDK the user's
+  flutter runs lives there) and wherever the environment moved them
   (`TOOL_HOME_VARS`, each that is set: `CARGO_HOME`, `RUSTUP_HOME`, `GOPATH`'s first entry,
   `GOMODCACHE`, `GOCACHE`, `npm_config_cache`, `PIP_CACHE_DIR`, `UV_CACHE_DIR`,
   `GRADLE_USER_HOME`, `BUN_INSTALL`, `DENO_DIR`, `MIX_HOME`, `HEX_HOME`, `PUB_CACHE`,
-  `KONAN_DATA_DIR`, `HATCH_DATA_DIR`, `WORKON_HOME`; of `GOPATH` and `BUN_INSTALL` only their
+  `KONAN_DATA_DIR`, `HATCH_DATA_DIR`, `WORKON_HOME`, `CARGO_TARGET_DIR`, `NPM_CONFIG_CACHE`,
+  `NUGET_PACKAGES`, each only when absolute; of `GOPATH` and `BUN_INSTALL` only their
   caches, `VAR_CACHES`: `pkg`, `install/cache`), OpenCode's own data (`.local/share/opencode`,
   `.local/state/opencode`, and `opencode` under `$XDG_DATA_HOME` and `$XDG_STATE_HOME` when set),
   `$XDG_CACHE_HOME`, and the extra paths (`commands.json` `paths`, the task's grants `paths`), each with its real path
@@ -1139,7 +1149,8 @@ deliberately hostile process (the 2026-11-16 audit's list of what it can't stop 
 - *Reads.* Everything is readable except where credentials and the user's own records live:
   `context.SECRETS` under `$HOME` (`.ssh`, `.gnupg`, `.password-store`, `.netrc`,
   `.git-credentials`, `.config/git/credentials`, `.gcm`, `.config/gh`, keyrings, `.aws`, `.azure`,
-  `.config/gcloud`, `.kube`, `.docker`, `.pypirc`, `.pgpass`, `.my.cnf`, `.vault-token`, cargo and
+  `.config/gcloud`, `.kube`, `.docker`, `.android/adbkey` (adb's key to the user's devices),
+  `.pypirc`, `.pgpass`, `.my.cnf`, `.vault-token`, cargo and
   gem credentials, OpenCode's service password (`.config/opencode/service.json`,
   `.local/state/opencode/service.json`: its background service runs outside the lane), password
   managers, cloud CLIs, browser and mail profiles (Flatpak's `.var/app` too), shell history,
@@ -1172,7 +1183,11 @@ deliberately hostile process (the 2026-11-16 audit's list of what it can't stop 
   into (only those are listed, each directory once: an lstat per entry, and the 0.90 review found
   every PATH directory under an `ONLY_KEPT` root listed on each lane drawn, WSL2's System32
   among them), and the Python running workbench; never `/`, the home directory or a parent of a
-  secret), not the user's documents or other projects. On WSL (`hardware.system()`), never the
+  secret), the SDKs a build finds by variable rather than PATH (`sdk_roots`: `SDK_VARS`,
+  `ANDROID_HOME`, `ANDROID_SDK_ROOT`, `JAVA_HOME`, `FLUTTER_ROOT`, `DOTNET_ROOT`, and
+  `SDK_DEFAULTS`, Android Studio's `~/Android/Sdk` and macOS's `~/Library/Android/sdk`: with only
+  `platform-tools` on PATH, Gradle couldn't open `platforms/*/android.jar` and every Android build
+  failed, #437, the audit of 1.8), not the user's documents or other projects. On WSL (`hardware.system()`), never the
   Windows drives either (`windows_drives`: the DrvFs mounts in `/proc/self/mounts`, and any
   `/mnt/<letter>`): a Windows program runs through interop as a Windows process, as the user,
   outside Landlock and no-new-privileges, and the 0.90 review found the Windows PATH (System32,
@@ -1236,11 +1251,11 @@ deliberately hostile process (the 2026-11-16 audit's list of what it can't stop 
   `/System`, `/Applications`), the installs the lane already lets the agent read (`read_only`:
   `tool_roots`, the programs it runs, such as a conda, pyenv or mise env's site-packages, and the
   toolchains split out of the write lane, `NOT_WRITABLE` and `$RUSTUP_HOME/toolchains`, rustup's
-  std sources; never one that holds a lane entry or lies in one), the task's `rounds/` (a prompt
+  std sources; and `sdk_roots`; never one inside a lane entry), the task's `rounds/` (a prompt
   too long for one argument is read from there) and the handed skills' directories; with the
   lane off, allow `*` (said outright: the layer's rule for other MCP servers' tools, `*_*`, would
   match it). The `read_only` places also get an `edit` deny (`read_only_rules`): read, never
-  edited. Before #521 (the audit of 1.90) `read` on an env's `pandas/core/frame.py` was refused,
+  edited, but a lane entry inside one (a Flutter SDK's `bin/cache`) gets its `edit` allow back. Before #521 (the audit of 1.90) `read` on an env's `pandas/core/frame.py` was refused,
   each refusal counting toward the six-errors guard, and the only remedy, `wb allow --path`, made
   the install writable, though the user's own shell runs it outside the lane later. This is all
   that applies without Landlock.

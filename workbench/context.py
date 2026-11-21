@@ -405,13 +405,21 @@ TOOL_HOMES = (".cache", ".cargo", ".rustup", "go/pkg", ".npm", ".bun/install/cac
               ".pnpm-store", ".local/share/pnpm/store", ".gradle", ".m2",
               ".nuget", ".dotnet", ".gem", ".julia", ".cabal", ".stack", ".ghcup", ".platformio",
               ".conan2", ".hex", ".mix", ".sbt", ".ivy2", ".pub-cache", ".konan",
-              ".local/share/hatch", ".local/share/virtualenvs")
+              ".local/share/hatch", ".local/share/virtualenvs",
+              # NuGet's http and plugins caches, Cabal 3.10's store without ~/.cabal, and
+              # Android's debug keystore, its adbkey hidden (SECRETS): each build failed (#437)
+              ".local/share/NuGet", ".local/state/cabal", ".android")
 # where the user moved them: a toolchain follows its variable, not the default path; GOPATH and
 # BUN_INSTALL name a whole home (GOPATH may hold every project), so only their caches
 TOOL_HOME_VARS = ("CARGO_HOME", "RUSTUP_HOME", "GOPATH", "GOMODCACHE", "GOCACHE", "npm_config_cache",
                   "PIP_CACHE_DIR", "UV_CACHE_DIR", "GRADLE_USER_HOME", "BUN_INSTALL", "DENO_DIR",
                   "MIX_HOME", "HEX_HOME", "PUB_CACHE", "KONAN_DATA_DIR", "HATCH_DATA_DIR",
-                  "WORKON_HOME")
+                  "WORKON_HOME", "CARGO_TARGET_DIR", "NPM_CONFIG_CACHE", "NUGET_PACKAGES")
+# The SDKs a build reads by variable, not from PATH: with only Android's platform-tools on PATH,
+# Gradle couldn't open ~/Android/Sdk/platforms' android.jar, and every build and test failed
+# (#437, the audit of 1.8). Their targets are readable, and so are the SDKs' default places.
+SDK_VARS = ("ANDROID_HOME", "ANDROID_SDK_ROOT", "JAVA_HOME", "FLUTTER_ROOT", "DOTNET_ROOT")
+SDK_DEFAULTS = ("Android/Sdk", "Library/Android/sdk")
 VAR_CACHES = {"GOPATH": "pkg", "BUN_INSTALL": "install/cache"}
 # inside a toolchain home in the lane, what stays out of it: the programs on the user's PATH and
 # what their shell sources, and the toolchains rustup's proxies run (relative to the home, or to
@@ -608,7 +616,8 @@ def writable(task: store.Task) -> list[str] | None:
     for v in TOOL_HOME_VARS:
         if os.environ.get(v):
             first = os.environ[v].split(os.pathsep)[0]
-            xdg.append(os.path.join(first, VAR_CACHES[v]) if v in VAR_CACHES else first)
+            if os.path.isabs(first):  # a relative CARGO_TARGET_DIR is the build's own, in the repo
+                xdg.append(os.path.join(first, VAR_CACHES[v]) if v in VAR_CACHES else first)
     # OpenCode's own directories, made first: the lane writes only what exists, so a first task
     # in a fresh profile failed opening OpenCode's log before any model request (#340, the audit
     # of 1.4). One that can't be made is named in runner.log, the place a failed round points to.
@@ -623,6 +632,7 @@ def writable(task: store.Task) -> list[str] | None:
                   f"its first run fails without it", file=sys.stderr)
     places = [tempfile.gettempdir(), *TEMP_ROOTS, *DEV_NODES, *gpu_nodes(task), "/proc",
               *(home / h for h in TOOL_HOMES + OPENCODE_HOMES), *(x for x in xdg if x),
+              *flutter_caches(),
               *(Path(p).expanduser() for p in extra)]
     whole = {"/", os.path.realpath(home)}  # a GOPATH=~ must not hand over the home directory
     temps = {os.path.realpath(t) for t in (tempfile.gettempdir(), *TEMP_ROOTS)}
@@ -667,6 +677,29 @@ def writable(task: store.Task) -> list[str] | None:
         else:  # split around the repo like a secret: a grant of ~/work beside the repo ~/work/api
             kept += _split(str(p), out_of | guard)  # was dropped whole (the 0.90 review)
     return [p for p in _both(kept) if os.path.exists(p) and os.path.realpath(p) not in whole]
+
+
+def flutter_caches() -> list[str]:
+    """Flutter's `bin/cache`, for $FLUTTER_ROOT and each `flutter` on PATH: every flutter command
+    opens bin/cache/lockfile for writing, so in the lane each one exited (#437, the audit of 1.8).
+    Kept whole, like .dotnet: the Dart SDK the user's flutter runs later lives there."""
+    roots = [os.environ.get("FLUTTER_ROOT")]
+    for d in (os.environ.get("PATH") or "").split(os.pathsep):
+        f = os.path.join(d, "flutter")
+        if os.path.isabs(d) and os.path.isfile(f):
+            roots.append(os.path.dirname(os.path.dirname(os.path.realpath(f))))
+    caches = (os.path.join(r, "bin", "cache") for r in roots if r and os.path.isabs(r))
+    return list(dict.fromkeys(c for c in caches if os.path.isdir(c)))
+
+
+def sdk_roots(hidden: set[str]) -> set[str]:
+    """The SDKs' homes (SDK_VARS, SDK_DEFAULTS) that exist, real paths: never `/`, the home
+    directory or a place holding or inside a secret."""
+    home = os.path.realpath(Path.home())
+    paths = [os.environ.get(v) for v in SDK_VARS] + [str(Path(home) / d) for d in SDK_DEFAULTS]
+    real = {os.path.realpath(p) for p in paths if p and os.path.isabs(p) and os.path.isdir(p)}
+    return {r for r in real if r not in ("/", home)
+            and not any(h == r or _under(h, r) or _under(r, h) for h in hidden)}
 
 
 # the toolchains `wb doctor` checks for snaps
@@ -839,7 +872,7 @@ SECRETS = (".ssh", ".gnupg", ".password-store", ".netrc", ".git-credentials", ".
            ".config/Bitwarden CLI", ".config/doctl", ".config/sops", ".config/age", ".fly",
            ".kaggle", ".oci", ".gemini", ".config/containers/auth.json",
            ".local/share/fish/fish_history", ".var/app", ".config/vivaldi",
-           ".config/microsoft-edge", ".config/opera")
+           ".config/microsoft-edge", ".config/opera", ".android/adbkey")
 # where the user moved them (a file, a directory, or a path list)
 SECRET_VARS = ("GNUPGHOME", "PASSWORD_STORE_DIR", "GH_CONFIG_DIR", "DOCKER_CONFIG", "KUBECONFIG",
                "AWS_SHARED_CREDENTIALS_FILE", "AWS_CONFIG_FILE", "CLOUDSDK_CONFIG",
@@ -1160,7 +1193,7 @@ def readable(task: store.Task) -> list[str] | None:
     keep = {os.path.realpath(p) for p in (task.spec.get("repo"), PKG_ROOT, *lane,  # PKG_ROOT:
                                           *lane_paths(task), *siblings(task))  # the git shim,
             if p}                                                              # the ask server
-    keep |= tool_roots(hidden)
+    keep |= tool_roots(hidden) | sdk_roots(hidden)
     # OpenCode's global config where OPENCODE_CONFIG_DIR keeps it, outside the dotfiles: the
     # agent's OpenCode loads it itself (#370, the audit of 1.6)
     if os.environ.get("OPENCODE_CONFIG_DIR"):
@@ -1223,18 +1256,21 @@ def read_only(task: store.Task, lane: list[str]) -> list[str]:
     split out of the write lane (NOT_WRITABLE, $RUSTUP_HOME/toolchains: rustup's std sources).
     `read` on pandas' frame.py got "Permission denied: external_directory", counting toward the
     six-errors guard, and the only remedy, `wb allow --path`, made the install writable (#521,
-    the audit of 1.90). Never one that holds a lane entry or lies in one: the lane's own rules
-    say what is done there."""
+    the audit of 1.90). Also the SDKs (sdk_roots). Never one inside a lane entry, whose own
+    rules say what is done there."""
     hidden = secret_paths() | private_paths()
     home = Path.home()
     split = [home / h for h in NOT_WRITABLE]
     split += [Path(v) / d for v, d in ((os.environ.get("RUSTUP_HOME"), "toolchains"),
                                        (os.environ.get("CARGO_HOME"), "bin")) if v]
-    places = tool_roots(hidden) | {os.path.realpath(p) for p in split if os.path.isdir(p)
-                                   and not any(_under(os.path.realpath(p), h) for h in hidden)}
+    places = tool_roots(hidden) | sdk_roots(hidden) | {
+        os.path.realpath(p) for p in split
+        if os.path.isdir(p) and not any(_under(os.path.realpath(p), h) for h in hidden)}
     real_lane = {os.path.realpath(p) for p in lane}
+    # one holding a lane entry stays (a Flutter SDK, its bin/cache in the lane: read_only_rules
+    # lets the entry be edited again); one in a lane entry is the lane's
     return sorted(p for p in places if p not in real_lane and not any(
-        _under(p, q) or _under(q, p) for q in real_lane))
+        p == q or _under(p, q) for q in real_lane))
 
 
 def read_only_rules(task: store.Task) -> list[dict]:
@@ -1243,8 +1279,11 @@ def read_only_rules(task: store.Task) -> list[dict]:
     lane = writable(task)
     if lane is None:
         return []
+    places = read_only(task, lane)
+    inner = [q for q in lane if any(_under(os.path.realpath(q), p) for p in places)]
     return [{"action": "edit", "resource": f"{p.rstrip('/')}/*", "effect": "deny"}
-            for p in _both(read_only(task, lane))]
+            for p in _both(places)] + \
+        [{"action": "edit", "resource": f"{q.rstrip('/')}/*", "effect": "allow"} for q in _both(inner)]
 
 
 def external_rules(task: store.Task) -> list[dict]:

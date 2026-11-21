@@ -5297,6 +5297,62 @@ class Lane(Base):
             got.append(out.stdout.strip() or out.stderr)
         self.assertEqual(got, ["refused", "pty"])
 
+    @unittest.skipUnless(lane.abi(), "needs Landlock")
+    @home_outside_the_lane
+    def test_android_flutter_dotnet_and_cabal_find_their_sdks_and_caches_in_the_lane(self):
+        # #437, the audit of 1.8: Gradle couldn't read ~/Android/Sdk/platforms, every flutter
+        # command opened bin/cache/lockfile for writing and exited, NuGet's and Cabal 3.10's
+        # caches and ~/.android weren't writable, and NPM_CONFIG_CACHE wasn't followed
+        task = self.bare_task("t-sdk", self.repo)
+        task.worktree.mkdir()
+        home = Path(tempfile.mkdtemp(dir=os.path.expanduser("~"), prefix=".wb-sdk-"))
+        self.addCleanup(shutil.rmtree, home, True)
+        files = ["Android/Sdk/platforms/android-34/android.jar", "Android/Sdk/platform-tools/adb",
+                 "jdk/lib/modules", "sdk/flutter/bin/flutter", "sdk/flutter/bin/cache/lockfile",
+                 ".android/debug.keystore", ".android/adbkey", ".local/share/NuGet/v3-cache/x",
+                 ".local/state/cabal/store/x", "npmc/x"]
+        for f in files:
+            (home / f).parent.mkdir(parents=True, exist_ok=True)
+            (home / f).write_text("x")
+        (home / "sdk/flutter/bin/flutter").chmod(0o755)
+        env = {"PATH": os.pathsep.join([str(home / "sdk/flutter/bin"),
+                                        str(home / "Android/Sdk/platform-tools"), os.environ["PATH"]]),
+               "JAVA_HOME": str(home / "jdk"), "NPM_CONFIG_CACHE": str(home / "npmc"),
+               **{v: "" for v in ("XDG_DATA_HOME", "XDG_STATE_HOME", "XDG_CACHE_HOME",
+                                  "XDG_CONFIG_HOME", "FLUTTER_ROOT", "ANDROID_HOME")}}
+        with mock.patch.object(context.Path, "home", lambda: home), mock.patch.dict(os.environ, env):
+            w, r = context.writable(task), context.readable(task)
+        script = ("import json, sys\nout = {}\nfor mode, p in json.loads(sys.argv[1]):\n"
+                  "    try:\n        open(p, mode).close(); out[p] = 'ok'\n"
+                  "    except OSError as e:\n        out[p] = e.strerror\nprint(json.dumps(out))\n")
+        ops = [("r", "Android/Sdk/platforms/android-34/android.jar"), ("r", "jdk/lib/modules"),
+               ("w", "sdk/flutter/bin/cache/lockfile"), ("w", ".android/debug.keystore"),
+               ("w", ".local/share/NuGet/v3-cache/x"), ("w", ".local/state/cabal/store/x"),
+               ("w", "npmc/x"), ("r", ".android/adbkey"), ("w", "sdk/flutter/bin/flutter")]
+        out = subprocess.run(lane.wrap(w, [sys.executable, "-c", script,
+                                           json.dumps([(m, str(home / p)) for m, p in ops])], r),
+                             capture_output=True, text=True, timeout=20)
+        got = {k[len(str(home)) + 1:]: v for k, v in json.loads(out.stdout or "{}").items()}
+        self.assertEqual(got, {**{p: "ok" for _, p in ops[:7]},
+                               ".android/adbkey": "Permission denied",       # a credential
+                               "sdk/flutter/bin/flutter": "Permission denied"}, out.stderr)
+
+    def test_any_path_the_lane_refused_is_named_with_the_grant_that_reaches_it(self):
+        # #437, the audit of 1.8: only /dev paths were named, so a refused keystore or cache read
+        # as the agent's bug
+        outside = Path(tempfile.mkdtemp(dir=os.path.expanduser("~"), prefix=".wb-refused-"))
+        self.addCleanup(shutil.rmtree, outside, True)
+        self.start("t-refused", "ok", "--auto-fix", "0", "--no-base-check", "--test",
+                   f"echo 'java.io.FileNotFoundException: {outside}/keys/debug.keystore "
+                   "(Permission denied)'; echo 'fetch https://example.org/x: permission denied'; "
+                   f"echo 'PermissionError: [Errno 13] Permission denied: \"{outside}\"'; exit 1")
+        st = wait_phase("t-refused", {"review"})
+        self.assertEqual(st["tests"]["lane"], [f"{outside}/keys/debug.keystore", str(outside)])
+        report = run_wb("report", "t-refused")
+        self.assertIn(f"the lane refused {outside}/keys/debug.keystore: wb allow t-refused --path "
+                      f"{outside} if the tests need it", report)
+        self.assertNotIn("example.org", "".join(st["tests"]["lane"]))   # a URL's path isn't one
+
     def test_a_device_node_the_lane_refused_is_named_with_its_wb_allow(self):
         # #331 (the audit of 1.4): /dev/kvm or /dev/fuse refused read as the project's bug, and the
         # agent spent its auto-fix rounds on it
