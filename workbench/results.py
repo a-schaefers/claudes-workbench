@@ -89,6 +89,7 @@ def record(task: store.Task, outcome: str, last_step: dict | None = None, **extr
            "steps": steps,
            **({"landed_steps": landed} if landed else {}),
            "window": st.get("window"),
+           **({"weights_id": spec["weights_id"]} if spec.get("weights_id") else {}),  # #726
            "tuned": st.get("tuned") or {}, "explored": st.get("explored") or [],  # tuning.py
            "tuned_max": st.get("tuned_max") or {},
            **({"peak_share": st["peak_share"]} if "peak_share" in st else {}),  # tuning (#721)

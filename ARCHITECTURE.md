@@ -3095,7 +3095,12 @@ keeps, for this model and size (and the models sharing its record, `lineage`: a 
 apply` variant and its source, #584). `judged` drops a discard marked `--spec-gap` and a task whose
 agent never ran (row `ran` false: its setup or its model's load failed, `failed_before`; a row
 from before `ran` was recorded: not accepted and `tok_out` 0): three discards of a lockfile
-problem scored a model 0/3, and the router passed it by for good (#581). Quality is the acceptance rate with a uniform prior, overall =
+problem scored a model 0/3, and the router passed it by for good (#581). A row recorded on other weights than the model
+has now is left out here, from the slice and from the tuning (`router.same_weights`, `weights_now`): each task
+records `weights_id` (`models.identity`: Ollama's digest for the tag, else the bytes a server reports, asked
+once per `FACTS_TTL`; a model whose server is down, or a row from before, still counts), since an id is an alias
+and weights swapped under it (another GGUF behind llama-swap, a re-pulled moving tag) kept the old model's
+record, slice and knobs (#726). Quality is the acceptance rate with a uniform prior, overall =
 (accepted + 1) / (tried + 2), where 
 accepted is the agent's kept share (`tuning.credit`): 1 when `tuning.agent_landed` (accepted
 and no step `took_over`); a task Claude finished after `wb takeover` counts only the steps the agent
@@ -5761,7 +5766,8 @@ delivered as taken (`_stale_notes`, *Notes*).
 ### Models, skills, lessons, notes
 | Command | Flags | What it does |
 |---|---|---|
-| `wb models` | `--set-default` | Each model's state, slice and speeds (and `bench:`, its cases passed, when replayed; `size:` when the server says none, guessed from its name or unknown, with `weights_gb` named: #704); the router's ranking per size, each model the record left out on fewer than `router.EXPLORE_TRIES` tasks marked (*Exploring*, #648). `--set-default` writes the significant-work pick as OpenCode's `model` (`models.set_default`: in the user's file, refused while `OPENCODE_CONFIG_CONTENT` sets one, which would win: #421). |
+| `wb models` | `--set-default` | Each model's state, slice and speeds (and `bench:`, its cases passed, when replayed; 
+`size:` when the server says none, guessed from its name or unknown, with `weights_gb` named: #704); `weights changed since its record: starting fresh` while every recorded task of it ran on other weights, `router.weights_changed`, #726); the router's ranking per size, each model the record left out on fewer than `router.EXPLORE_TRIES` tasks marked (*Exploring*, #648). `--set-default` writes the significant-work pick as OpenCode's `model` (`models.set_default`: in the user's file, refused while `OPENCODE_CONFIG_CONTENT` sets one, which would win: #421). |
 | `wb model add <provider/model>` | `--pull`, `--label`, `--context N`, `--url URL`, `--start CMD`, `--stop CMD` | Registers a model in opencode.json, merged into any existing entry; `--url` first writes an OpenAI-compatible provider for any server on this machine (`models.add_server_provider`: a provider already there is never touched, and one for another baseURL refuses the add; a URL off this machine needs models.json `local: true`), and `--start`/`--stop` write the model's models.json `start`/`stop`; on a first run with no `--url` it writes the `ollama` provider when Ollama answers; refuses a cloud model, an unknown served context (a server other than Ollama needs `--context`), a down Ollama, a down server of unknown engine (see *Managing the set*). |
 | `wb optimize [start\|estimate\|report\|stop\|apply] [<id>…]` | `--bench`, `--if-due` | Asked for, or when due at setup and session start (*Optimize*). `start --if-due`: only when due, else nothing printed. `estimate`: how long a run would hold the GPU. `start`: detached; measures each Ollama model's largest window all on the GPU (refused while a task holds it; a task that wants it stops it); `--bench` then starts `wb bench run` on every model. `report` (the default): a line per model. `stop`. `apply <id>…`: adds the measured window as an entry of its own beside the model (an Ollama `<name>:<tag>-<N>k`, `optimize.entry_name`, with that `num_ctx`, the entry's settings copied; refused when that name exists). |
 | `wb remote <host>` | `--port N` (11434), `--context N`, `--remove` | Another machine's Ollama as this one's models: provider `ollama-<host>` marked `local: true`, each tool-capable model it has pulled registered as `wb model add` would, one line each (see *Models*); exit 1 when it doesn't answer (with `OLLAMA_HOST=0.0.0.0` to try). Refuses a provider of that id already there for another baseURL, and a host no URL can carry; an IPv6 address is bracketed either way (#707). `--remove` undoes it; not while OpenCode's default model or `small_model` is one of them (#708), nor for a provider wb didn't add or that now points elsewhere. |
@@ -5978,7 +5984,7 @@ Claude Code session whose Bash ran `wb start`; with `cwd` and `repo`, which sess
 session's Claude Code process; once it is gone the directory rule adopts the task), `claude_start`
 (with it: when that process started, `models._started`, so a recycled pid isn't it: #532), `base` (the full sha), `base_ref`, `base_branch` (the branch
 `--merge` lands on: the one checked out for `HEAD`, or `--base` when it names a local branch; null
-on a detached HEAD, a tag or a commit), `branch`, `model`, `model_label`, `opencode_model`, `route` (the
+on a detached HEAD, a tag or a commit), `branch`, `model`, `model_label`, `opencode_model`, `weights_id` (`models.identity`, when the server says: #726), `route` (the
 router's reason), `size`, `stack`, `trial` (when set), `backlog` (`--backlog`), `bench` (a replay's `{case, run, label}`:
 *Bench*), `test_cmd`, `no_base_check`, `unload_for_tests`, `sign` (false: `--no-sign`), `subdir` (a
 monorepo package, *Instructions*) (each when set), `setup`, `setup_timeout` (with a setup, when
@@ -6063,7 +6069,7 @@ questions `ask {id}`, `answer {id}`. From `wb`:
 review included), `tok_in`, `tok_out`, `ran` (whether the agent ever got a request to its model, `results.ran`: a
 session began or a token was written), `failed_before` (`setup` or `load`, when it never ran:
 status's), `skills_offered`, `skills_loaded`, `skills_rev`, `experiments` (the
-names on for the task, when any), `steps` (one `results.step` per step), `window`, `tuned`, `explored`, `tuned_max`, `peak_share` (status's, when recorded: `tuning.acted`), `spec_gaps`, `claude`
+names on for the task, when any), `steps` (one `results.step` per step), `window`, `weights_id` (task.json's, when known: #726), `tuned`, `explored`, `tuned_max`, `peak_share` (status's, when recorded: `tuning.acted`), `spec_gaps`, `claude`
 (when known: `spend.usage`, `{turns, calls, input, cache_write_5m, cache_write_1h, cache_read,
 output}`, *What a task cost Claude*), `gpu_wh` (status's, when measured), `remote_gpu` (true
 when its model ran on another machine, whose energy nothing here measures), `active_minutes`

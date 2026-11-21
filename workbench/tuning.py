@@ -179,11 +179,19 @@ def acted(name: str, row: dict, ceiling=None) -> bool:
         or peak >= min(allowed(name, ceiling)) - 1e-9
 
 
+def _rows(model: str, window) -> list[dict]:
+    """The rows for this model and window recorded on the weights it has now (router.same_weights:
+    knobs learned on another model under the same id don't carry over, #726)."""
+    from . import router  # router imports this module
+    return router.same_weights([r for r in store.results() if _key(r) == (model, window)],
+                               router.weights_now({model}))
+
+
 def record(name: str, model: str, window, ceiling=None) -> dict:
     """Each allowed value's evidence for this model and window: {value: [rewards]}, each task's
     speed set against the usual minutes a step of its own size took (pooled over sizes, a
     trivial task beat a significant one's median every time, #721)."""
-    rows = [r for r in store.results() if _key(r) == (model, window) and judged(r)
+    rows = [r for r in _rows(model, window) if judged(r)
             and (r.get("tuned") or {}).get(name) is not None and acted(name, r, ceiling)]
     usual = {}
     for size in {r.get("size") for r in rows}:

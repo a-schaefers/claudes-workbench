@@ -1849,6 +1849,25 @@ class Optimize(unittest.TestCase):
         self.assertEqual((sv.tries, sv.wins, sm.tries), (1, 1, 1))   # one record, both ways
         self.assertEqual(router.lineage(m), {"ollama/m", "ollama/m:48k"})
 
+    def test_a_models_weights_are_known_by_ollamas_digest_and_asked_once_a_while(self):
+        # #726: what tells a model swapped under the same id from the one its record is about
+        self.ollama(32768)
+        m = models.discover()["ollama/m"]
+        models._IDS.clear()
+        asked = []
+        tags = {"models": [{"name": "m", "digest": "0123456789abcdef0123456789"}]}
+        with mock.patch.object(models, "_get", lambda url, timeout=2.5: asked.append(url) or tags):
+            self.assertEqual(models.identity(m), "ollama:0123456789abcdef")
+            self.assertEqual(models.identity(m), "ollama:0123456789abcdef")
+            self.assertEqual(len(asked), 1)                                 # within FACTS_TTL
+            models._IDS.clear()
+            tags["models"][0]["digest"] = "fedcba9876543210fedcba"           # re-pulled
+            self.assertEqual(models.identity(m), "ollama:fedcba9876543210")
+            models._IDS.clear()
+            tags["models"] = []                                             # not pulled: unknown
+            self.assertIsNone(models.identity(m))
+        models._IDS.clear()
+
     def test_a_variant_of_a_variant_keeps_the_first_sources_record_and_leads_alone(self):
         # #723 (reproduced): apply on a variant wrote variant_of the variant, lineage followed one
         # level, so the source's tasks left the record, and with both the source and the first

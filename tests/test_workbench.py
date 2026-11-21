@@ -8805,6 +8805,35 @@ class Routing(Base):
         self.assertAlmostEqual(skills.usage()["s"]["with"]["accepted"], 0.8)
         self.assertIn("0.8 accepted", skills.record_line(skills.usage()["s"]))
 
+    def test_a_model_whose_weights_changed_under_its_id_starts_a_fresh_record(self):
+        # #726: rows held only the id, so weights swapped behind an alias (another GGUF under
+        # llama-swap, a re-pulled tag) kept the old model's record, slice and knobs
+        from workbench import models, router, tuning
+        mid = "strata/strata"
+        steps = [{"files": 9, "lines": 900, "landed": True, "window": None}] * 3
+        self.result(mid, "significant", "accepted", n=4, weights_id="bytes:1", steps=steps,
+                    window=None, tuned={"fresh_at": 0.7})
+        self.result(mid, "significant", "discarded", n=1)                 # before weights_id: counts
+        now = {"weights": "bytes:1"}
+        with mock.patch.object(models, "identity", lambda m: now["weights"] if m and m.id == mid else None):
+            m = models.discover()[mid]
+            self.assertEqual(router.score(m, "significant").tries, 5)
+            self.assertEqual(router.slice(m).files, 9)
+            self.assertEqual(len(tuning.record("fresh_at", mid, None)[0.7]), 4)
+            self.assertNotIn("weights changed", run_wb("models"))
+            now["weights"] = "bytes:2"                                      # another model, same id
+            models._IDS.clear()
+            self.assertEqual(router.score(m, "significant").tries, 1)
+            self.assertEqual(router.slice(m).files, 3)                      # the guess again
+            self.assertEqual(tuning.record("fresh_at", mid, None)[0.7], [])
+            self.assertIn("weights changed since its record: starting fresh", run_wb("models"))
+        with mock.patch.object(models, "identity", lambda m: "ollama:abc"):
+            self.start("t-w", "ok")                                         # recorded at the start
+        self.assertEqual(store.Task("t-w").spec["weights_id"], "ollama:abc")
+        wait_phase("t-w", {"review"})
+        run_wb("accept", "t-w", "-m", "x")
+        self.assertEqual(store.results()[-1]["weights_id"], "ollama:abc")
+
     def test_results_are_parsed_once_per_change_however_many_models_and_sizes_ask(self):
         # #727: the router, the slice and wb tune re-read results.jsonl per model, size and knob;
         # at 20,000 rows wb models took 2.9 s and wb tune 7.8 s

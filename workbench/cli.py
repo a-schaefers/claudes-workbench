@@ -865,6 +865,8 @@ def cmd_start(a):
         **({"claude_pid": int(pid), "claude_start": models._started(int(pid))}
            if (pid := os.environ.get("CLAUDE_PID", "")).isdigit() else {}),
         "base_branch": gitops.start_branch(repo, a.base),  # where wb accept --merge lands
+        # the weights behind the id: a record on other weights under it isn't this model's (#726)
+        **({"weights_id": w} if (w := models.identity(m)) else {}),
         "branch": gitops.branch_name(a.name), "model": m.id, "model_label": m.label,
         "opencode_model": m.id, "route": why, "size": a.size, "stack": stack,
         **({"trial": True} if a.trial else {}), "test_cmd": a.test, "test_timeout": a.test_timeout,
@@ -2634,6 +2636,8 @@ def cmd_models(a):
         print(f"{m.id:34} {('on GPU' if st['resident'] else 'ready' if st['available'] else 'no'):6}"
               f"  {m.label}" + ("" if st["available"] else f"  ({st['why']})"))
         print(f"{'':36}slice: {router.slice(m).line()}")
+        if router.weights_changed(m):  # #726
+            print(f"{'':36}weights changed since its record: starting fresh")
         if sp := router.speed_line(m.id):
             print(f"{'':36}speed: {sp} on this machine")
         if b := bench.model_line(m.id):

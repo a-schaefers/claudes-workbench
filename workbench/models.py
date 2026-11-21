@@ -1014,6 +1014,29 @@ def guessed_weights(m: Model) -> int:
     return int(max(counts) * 1e9) if counts else 0
 
 
+_IDS: dict = {}  # (root, name) -> (monotonic time, identity): asked once per FACTS_TTL
+
+
+def identity(m: Model | None) -> str | None:
+    """Which weights are behind the id now: Ollama's digest for the tag (`ollama:<digest>`), else
+    the bytes a server reports (`bytes:<n>`); None when nothing says. Recorded in each task and
+    its results row: an id is an alias, and weights swapped under it (another GGUF behind
+    llama-swap, a re-pulled moving tag) kept the old model's record, slice and knobs (#726)."""
+    if m is None or m.cloud or _fake():
+        return None
+    key = (m.root, m.name)
+    if (hit := _IDS.get(key)) and time.monotonic() - hit[0] < FACTS_TTL:
+        return hit[1]
+    if m.engine == "ollama":
+        row = _tag_row(m.name, _get(f"{m.root}/api/tags") or {})
+        got = f"ollama:{row['digest'][:16]}" if row and isinstance(row.get("digest"), str) and row["digest"] else None
+    else:
+        n = server_facts(m.root, m.name, m.api_key)["weights"]
+        got = f"bytes:{n}" if n else None
+    _IDS[key] = (time.monotonic(), got)  # a server down is asked again only after the TTL
+    return got
+
+
 # What a server other than Ollama says about a model: only Ollama's API was read, so on any other
 # server the router ranked models without their sizes, checked no fit, and every window had to
 # be typed in (2026-11-17). Each server answers its own call; the fields as each project's docs

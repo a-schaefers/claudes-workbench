@@ -159,11 +159,33 @@ def replaced(ids) -> set[str]:
     return out
 
 
+def weights_now(ids) -> dict:
+    """{id: models.identity} for the discovered ones of ``ids``."""
+    found = models.discover()
+    return {i: models.identity(found[i]) for i in ids if i in found}
+
+
+def same_weights(rows: list[dict], now: dict) -> list[dict]:
+    """The rows recorded on the weights each model has now (`now`: weights_now): a row from
+    before `weights_id` was recorded, or a model whose weights can't be told, counts (#726)."""
+    return [r for r in rows if not (w := r.get("weights_id")) or now.get(r.get("model")) in (None, w)]
+
+
+def weights_changed(m: models.Model) -> bool:
+    """Whether every recorded task of the model ran on other weights than it has now: its record
+    starts fresh (`wb models` says so)."""
+    now = weights_now({m.id}).get(m.id)
+    seen = {r.get("weights_id") for r in store.results() if r.get("model") == m.id} - {None}
+    return bool(now and seen and now not in seen)
+
+
 def score(m: models.Model, size: str, state: dict | None = None, stack=()) -> Score:
     state = state or models.status(m)
     ids = lineage(m)
     real = [r for r in store.results() if r.get("model") in ids and r.get("size") == size
             and tuning.judged(r)]
+    # the weights each model has now: a server just found down isn't asked again (the audit)
+    real = same_weights(real, weights_now(ids) if state["available"] else {})
     # a model that can't run isn't weighed: its server was just found down, and asking it again
     # cost seconds per model on a sleeping LAN box (the 2026-11-16 audit)
     s = Score(model=m, state=state, stack=tuple(stack),
@@ -364,8 +386,10 @@ def slice(m: models.Model) -> Slice:
     scale = min(window / BASE_WINDOW, GUESS_MAX) if window else 1
     files, lines = max(1, round(BASE_FILES * scale)), max(50, round(BASE_LINES * scale / 10) * 10)
     basis = f"{window // 1024}K window" if window else "window unknown"
-    steps = [s for r in store.results() if r.get("model") == m.id and tuning.judged(r)
-             for s in r.get("steps") or [] if s.get("files") and (not window or s.get("window") in (None, window))]
+    rows = same_weights([r for r in store.results() if r.get("model") == m.id and tuning.judged(r)],
+                        weights_now({m.id}))  # another model's steps under the same id (#726)
+    steps = [s for r in rows for s in r.get("steps") or []
+             if s.get("files") and (not window or s.get("window") in (None, window))]
     every = len(steps)
     steps = steps[-SLICE_RECENT:]  # the latest say how it does now
     went = [_went(s) for s in steps]
