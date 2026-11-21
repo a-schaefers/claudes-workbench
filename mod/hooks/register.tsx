@@ -2445,8 +2445,12 @@ async function rewake($: any, now: number, list: WbTask[]) {
     const ackPath = `${mem.root}/tasks/${t.name}/acked`
     const acked = Number(await $.fs.read(ackPath).catch(() => '0')) || 0
     // Claude had the news if it acked the task's latest notice: the runner's last status write
-    // (its pid cleared) lands just after that notice, so updated_at alone would wake it twice
-    const noticed = mem.noticed.get(t.name)
+    // (its pid cleared) lands just after that notice, so updated_at alone would wake it twice.
+    // The task's own `noticed` mark too (Task.notify): after a reload mem.noticed holds only
+    // notify.jsonl's last 1 MiB, and a review whose notice had left it woke Claude again (#844)
+    const marked = Number(await $.fs.read(`${mem.root}/tasks/${t.name}/noticed`).catch(() => '')) || 0
+    const seen = mem.noticed.get(t.name)
+    const noticed = seen !== undefined || marked ? Math.max(seen ?? 0, marked) : undefined
     if (noticed !== undefined ? acked >= noticed : acked * 1000 >= t.updatedAt) continue
     await $.fs.write(ackPath, String(now / 1000))
     const kind = t.phase === 'asking' ? 'question' : t.phase

@@ -937,6 +937,28 @@ test('a notice already delivered (before a reload, or by wb wait) is not rewoken
   expect(woken).toEqual([])
 })
 
+test('a review whose notice left notify.jsonl\'s tail is not rewoken after a reload: its own noticed mark says it was had (#844)', async ($, on) => {
+  // #844: mem.noticed came only from the last 1 MiB of notify.jsonl, so a review acknowledged at
+  // its notice's ts, its runner's last status write after that, woke Claude a second time
+  const clock = mock.clock(on, { now: 1_800_000_000_000 })
+  const files: Record<string, string> = {}
+  task(files, 'fix-it', 'review', {}, ts0 + 0.05)               // the runner's last write lands after its notice
+  files['/wb/notify.jsonl'] = JSON.stringify({ ts: ts0 + 1, task: 'other', kind: 'checkin', text: 'later news' }) + '\n'
+  files['/wb/tasks/fix-it/acked'] = String(ts0)                 // its notice woke Claude
+  files['/wb/tasks/fix-it/noticed'] = String(ts0)               // Task.notify's mark of it
+  fakeTasks(on, files, ['fix-it'])
+  on('process.run', () => ({ value: { exitCode: 0, stdout: '', stderr: '' } }))
+  on('ui.toast', () => ({ value: undefined }))
+  const woken: string[] = []
+  on('prompt.submit', (_: any, e: any) => { woken.push(e.text); return { text: e.text } })
+  await $.session.start({ cwd: '/', surface: 'terminal', isInteractive: true })
+  await clock.advance(120_000)
+  expect(woken).toEqual([])
+  files['/wb/tasks/fix-it/noticed'] = String(ts0 + 30)          // a newer notice it never acknowledged
+  await clock.advance(120_000)
+  expect(woken.filter(w => w.includes('no notice reached Claude'))).toHaveLength(1)
+})
+
 test('one notice for the tasks a restart interrupted wakes once, ending with the resume, not the failure\'s next step', async ($, on) => {
   // #544: the batch's wake ended with "Look at wb log …; feedback or discard" after its own
   // wb resume --all line, and the tasks it named but carried no notice of their own were rewoken

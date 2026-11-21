@@ -2336,7 +2336,10 @@ and `wb update --stop`'s `stuck`, one per owner with `tasks` and `cause` `update
 file is out of its lane (the 2026-11-16 audit: it could forge any task's wake, or wipe them
 all). Readers take its rows through `store.notices()`, which keeps only whole ones (a dict with a
 `NAME_RE` task, a kind, a numeric ts): one row without a task once made every acknowledging
-command raise. Each task's `acked` file holds the time up to which Claude has had its news.
+command raise. Each task's `acked` file holds the time up to which Claude has had its news, and
+its `noticed` file the ts of its newest notice (`Task.notify`, for each task a batch names too:
+the mod's idle net knew it from notify.jsonl's last 1 MiB only, and after a reload woke Claude a
+second time for a review whose notice had left that tail, #844).
 A notice's `ts` is the clock's, but later than every notice before it and than its task's
 `acked` mark, under the file's lock (`append_jsonl(…, after=)`, `store.newest_ts`): a clock
 corrected backwards (a dual boot with a local-time RTC) put a notice raised after a mark at or
@@ -2380,7 +2383,8 @@ of 1.8).
   (answering the first of two acknowledged the second before anything delivered it).
 - **The safety net** (`rewake`). A task that has waited on Claude (review, asking, stuck, failed)
   for a minute after its last status change with its newest notice not acknowledged (any notice in
-  notify.jsonl counts, however old, so one delivered before a reload isn't "lost") wakes Claude
+  notify.jsonl's tail counts, however old, so one delivered before a reload isn't "lost", and the
+  task's `noticed` mark for one past the tail: #844) wakes Claude
   anyway, once, with `wb report <n>` and the next commands.
 - **Without the mod.** `wb wait [task]` blocks until there's news past a task's `acked`, prints
   `[kind] task` and the text, and acks it. It skips what the mod would (`_stale`: a review, stuck
@@ -5966,8 +5970,9 @@ Claude (review/asking/stuck/failed) whose status changed between 60 s (`REWAKE_M
 (`REWAKE_MAX_MS`) ago, whose news Claude hasn't had and whose wake wasn't dropped in the last
 minute gets `acked = now` and a prompt saying no
 notice reached Claude, with `wb report <n>` and NEXT. Had the news: `acked` is at or past the
-newest notice (the runner's last status write, clearing its pid, lands just after
-its notice, so `updated_at` alone woke Claude twice), else `acked` is past `updated_at`. `cli._ack_all` stops the mark short of news still
+newest notice, the later of `mem.noticed` and the task's `noticed` file (the runner's last status write, clearing its pid, lands just after
+its notice, so `updated_at` alone woke Claude twice; a notice pushed out of the tail by 1 MiB of
+later ones did the same after a reload, #844), else, with neither, `acked` is past `updated_at`. `cli._ack_all` stops the mark short of news still
 true. Wake prompts are submitted as the plugin, not `asUser`. The state directory is global and
 the mod runs in every session with the plugin, so each acts only on its own tasks (the
 2026-11-16 audit: two projects at once, each session was woken for the other's); among the
@@ -6427,7 +6432,7 @@ $WB_HOME (~/.local/state/workbench)
                                  file in the user's dotfiles; #495)
   tasks/<task>/                  readable from the lane; only worktree/ and ask/ writable
     task.json  status.json
-    events.jsonl  steer.jsonl  acked  context.md  runner.log
+    events.jsonl  steer.jsonl  acked  noticed (its newest notice's ts, #844)  context.md  runner.log
     claude-sessions              "<ts> <session id>" lines: each Claude Code session a wb call naming the task ran in (spend.sessions, #719)
     coding.json                  what the user allowed Claude to edit: {allowed: [{edit, said, ts, used, when?, started?, did?}]} (*Claude coding*)
     verify/<n>/                  wb verify's runs: base.txt  candidate.txt  result.json

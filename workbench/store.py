@@ -505,9 +505,9 @@ def _lock_of(path: Path) -> Path:
     return path.with_name(path.name + ".lock")
 
 
-def append_jsonl(path: Path, row: dict, after: float | None = None) -> None:
-    """Append ``row``. ``after`` (a time): its `ts` is made later than it and than every row's
-    already there, under the same lock (the notices: Task.notify)."""
+def append_jsonl(path: Path, row: dict, after: float | None = None) -> dict:
+    """Append ``row``, and return it as written. ``after`` (a time): its `ts` is made later than
+    it and than every row's already there, under the same lock (the notices: Task.notify)."""
     with locked(_lock_of(path)):
         if after is not None:
             row = {**row, "ts": max(row["ts"], round(max(after, newest_ts(path)) + 0.001, 3))}
@@ -524,6 +524,7 @@ def append_jsonl(path: Path, row: dict, after: float | None = None) -> None:
                 if fh.read(1) != b"\n":
                     line = b"\n" + line
             fh.write(line)
+    return row
 
 
 _results_seen: dict = {}  # path -> (inode, size, mtime_ns), rows: results() parses a file once
@@ -697,9 +698,22 @@ class Task:
             acked = float((self.dir / "acked").read_text() or 0)
         except (OSError, ValueError):
             acked = 0.0
-        append_jsonl(home() / "notify.jsonl",
-                     {"ts": now(), "task": self.name, "kind": kind, "text": text, **extra},
-                     after=acked if math.isfinite(acked) else 0.0)
+        row = append_jsonl(home() / "notify.jsonl",
+                           {"ts": now(), "task": self.name, "kind": kind, "text": text, **extra},
+                           after=acked if math.isfinite(acked) else 0.0)
+        # each named task's newest notice, in its own directory: the mod's idle net read it from
+        # notify.jsonl's last 1 MiB only, and after a reload woke Claude again for a review whose
+        # notice it had acknowledged, pushed out of that tail by later ones (#844)
+        for name in dict.fromkeys([self.name, *(extra.get("tasks") or [])]):
+            if not isinstance(name, str) or "/" in name or name.startswith("."):
+                continue  # a batch names tasks wb named: nothing outside tasks/
+            d = self.dir if name == self.name else home() / "tasks" / name
+            try:
+                was = float((d / "noticed").read_text() or 0)
+            except (OSError, ValueError):
+                was = 0.0
+            if d.is_dir() and not was >= row["ts"]:
+                replace_bytes(d / "noticed", str(row["ts"]).encode())
 
 
 # The scratch directories workbench makes in its home, each named <prefix><maker's pid>-…: wb gc

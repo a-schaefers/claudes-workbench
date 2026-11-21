@@ -5265,6 +5265,25 @@ class Watch(Base):
         task.notify("stuck", "again")  # and after the notice before it, whatever the clock says
         self.assertGreater(store.notices()[-1]["ts"], row["ts"])
 
+    def test_each_notice_marks_its_tasks_noticed_for_the_mods_idle_net(self):
+        # #844: after a reload the mod knew a task's newest notice only from notify.jsonl's last
+        # 1 MiB, and woke Claude again for a review whose notice had left it
+        tasks = []
+        for name in ("t-a", "t-b"):
+            t = store.Task(name)
+            store.write_json(t.dir / "task.json", {"name": name, "created_at": store.now()})
+            tasks.append(t)
+        a, b = tasks
+        a.notify("review", "ready")
+        first = store.notices()[-1]["ts"]
+        self.assertEqual(float((a.dir / "noticed").read_text()), first)
+        self.assertFalse((b.dir / "noticed").exists())
+        a.notify("stuck", "2 tasks were stopped", tasks=["t-a", "t-b", "../../x"])  # a batch: each named
+        batch = store.notices()[-1]["ts"]
+        self.assertGreater(batch, first)
+        self.assertEqual([float((t.dir / "noticed").read_text()) for t in tasks], [batch, batch])
+        self.assertFalse((store.home().parent / "x" / "noticed").exists())
+
     def test_a_malformed_notice_breaks_neither_wait_nor_the_commands_that_acknowledge(self):
         # one row without a task made every acknowledging command raise KeyError, and a task
         # named ../../x put wb wait's ack outside the state directory (the 2026-11-16 audit)
