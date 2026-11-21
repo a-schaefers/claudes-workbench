@@ -2808,3 +2808,24 @@ test("a web message's attachments reach Claude as one path each, with size and t
     { id: 'b', name: 'n.txt', size: 300, type: 'text/plain', path: '/s/chat/uploads/b/n.txt' }, { id: 'c' }]))
     .toBe('\n[attached: /s/chat/uploads/a/p.jpg (2.1 MB, image/jpeg)]\n[attached: /s/chat/uploads/b/n.txt (300 B, text/plain)]')
 })
+
+test('the stats tab folds a model with its window variants, newest first, and sums up the older ones', () => {
+  // #638: every model that ever ran a task, forever, each wb optimize window on its own line
+  const said = (f: any) => statsLines({ tasks: 40, ...f }).map(l => `${l.label}: ${l.text}`)
+  const lines = said({
+    models: { 'ollama/q': { tasks: 1, accepted_pct: 0 }, 'strata/strata': { tasks: 1, accepted_pct: 0 } },
+    model_lines: {
+      lines: [{ model: 'ollama/q', windows: [32768, 40960, 65536], tasks: 37, accepted_pct: 94 },
+        { model: 'ollama/small', windows: [32768], tasks: 2, accepted_pct: 50 }],
+      older: { models: 2, tasks: 4 },
+    },
+  })
+  expect(lines).toContain('ollama/q (32K, 40K, 64K): 37 tasks · 94% landed')
+  expect(lines).toContain('ollama/small: 2 tasks · 50% landed')
+  expect(lines).toContain('Older models: 2 older models: 4 tasks (wb stats --all)')
+  expect(lines.join('\n')).not.toMatch(/strata/)
+  expect(lines.indexOf('ollama/q (32K, 40K, 64K): 37 tasks · 94% landed'))
+    .toBeLessThan(lines.indexOf('ollama/small: 2 tasks · 50% landed'))
+  expect(said({ models: { 'ollama/old': { tasks: 3, accepted_pct: 67 } } }))  // an older wb's feed
+    .toContain('ollama/old: 3 tasks · 67% landed')
+})

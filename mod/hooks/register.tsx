@@ -1085,15 +1085,24 @@ export function statsLines(f: Record<string, any> | null, why = ''): { label: st
   const q = f.questions // a question wakes Claude: its own line, "answered" only for wb answer's (#562)
   if (q?.asked) out.push({ label: 'Questions', text: `${q.asked} asked mid-task` +
     (q.answered ? ` · ${q.answered} answered` : '') })
-  for (const [model, m] of Object.entries(f.models ?? {}) as [string, any][]) {
+  // the models OpenCode has now, a wb optimize variant folded under its source, the most recently
+  // used first, the rest on one line (`model_lines`, #638); an older wb's feed: every model
+  const shown: [string, any][] = f.model_lines
+    ? (f.model_lines.lines ?? []).map((m: any) => [String(m.model), m])
+    : Object.entries(f.models ?? {})
+  for (const [model, m] of shown) {
     const trend = spark((m.write_trend ?? []).map((p: number[]) => p[1]))
     const speed = m.speed?.write ? ` · writes ~${Math.round(m.speed.write)} tok/s` : ''
     const change = typeof m.write_change_pct === 'number' && m.write_change_pct
       ? ` (${m.write_change_pct > 0 ? '+' : ''}${m.write_change_pct}%)` : ''
-    out.push({ label: model, text: `${m.tasks} task${m.tasks === 1 ? '' : 's'} · ${m.accepted_pct}% landed` +
+    const windows = (m.windows ?? []).length > 1 ? ` (${m.windows.map((w: number) => `${Math.round(w / 1024)}K`).join(', ')})` : ''
+    out.push({ label: model + windows, text: `${m.tasks} task${m.tasks === 1 ? '' : 's'} · ${m.accepted_pct}% landed` +
       (m.rounds != null ? ` · ${m.rounds} rounds` : '') + (m.minutes != null ? ` · ${m.minutes} min` : '') +
       speed + (trend ? ` ${trend}` : '') + change + (m.claude ? ` · Claude ~${kilo(m.claude)}/task` : '') })
   }
+  const older = f.model_lines?.older
+  if (older?.models) out.push({ label: 'Older models', text: `${older.models} older model${older.models === 1 ? '' : 's'}: ` +
+    `${older.tasks} task${older.tasks === 1 ? '' : 's'} (wb stats --all)` })
   const sized = Object.entries(f.sizes ?? {}) as [string, any][]
   if (sized.length) out.push({ label: 'By size', text: sized.map(([k, v]) => `${k} ${v.tasks} (${v.accepted_pct}%)`).join(' · ') })
   if (f.days?.length) {

@@ -2669,8 +2669,14 @@ def cmd_stats(a):
     if a.json:  # the Stats tab's history (#405)
         print(json.dumps(stats.feed()))
         return
-    head = stats.summary(stats.feed(only=stats.SUMMARY))  # the headline: none of the rest (#565)
-    print("\n".join(head + [""] if head else []) + results.table())
+    f = stats.feed(only=(*stats.SUMMARY, "model_lines"))  # the headline: none of the rest (#565)
+    head, shown = stats.summary(f), f.get("model_lines") or {}
+    # the models OpenCode has now, as the Stats tab shows them; --all every one that ran (#638)
+    only = None if a.all or not shown else {v for x in shown.get("lines", []) for v in x["variants"]}
+    old = shown.get("older") if only is not None else None
+    print("\n".join(head + [""] if head else []) + results.table(only)
+          + (f"\n{old['models']} older model(s), retired or idle {stats.OLD_DAYS}+ days: "
+             f"{old['tasks']} task(s) (wb stats --all)" if old else ""))
 
 
 def cmd_savings(a):
@@ -4912,6 +4918,8 @@ def parser() -> argparse.ArgumentParser:
     s.add_argument("key", nargs="?", metavar="KEY", help="recording, live or every")
     s.add_argument("value", nargs="?", metavar="VALUE", help="on|off, or 1|2|5 (seconds) for every")
     s.add_argument("--json", action="store_true", help="everything learned, as one object (the Stats tab's feed)")
+    s.add_argument("--all", action="store_true",
+                   help="every model that ran a task, retired and idle ones too")
     s.set_defaults(f=cmd_stats)
     s = sub.add_parser("backlog", help="a batch started with --backlog: each task and the batch's saving")
     s.add_argument("name", nargs="?")

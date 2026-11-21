@@ -11674,6 +11674,38 @@ class Stats(Base):
             stats.path().write_text(text)
             self.assertEqual(stats.settings(), stats.DEFAULTS)
 
+    def test_the_tab_lists_the_models_there_now_variants_folded_newest_first(self):
+        # #638 (the owner, 2026-11-21): after 49 tasks the tab listed five models, two of them
+        # wb optimize variants of a third and one long gone, in no order
+        from workbench import stats
+        cfg = json.loads(Path(os.environ["WB_OPENCODE_CONFIG"]).read_text())
+        for k in ("qwen3.8-27b-40k", "qwen3.8-27b-64k"):
+            cfg["provider"]["ollama"]["models"][k] = {"name": k}
+        Path(os.environ["WB_OPENCODE_CONFIG"]).write_text(json.dumps(cfg))
+        Path(os.environ["WB_MODELS"]).write_text(json.dumps({
+            f"ollama/qwen3.8-27b-{w}k": {"variant_of": "ollama/qwen3.8-27b"} for w in (40, 64)}))
+        now = time.time()
+        for model, window, age in (("ollama/mimo-v2.6:9b-q8_0", 32768, 5), ("ollama/qwen3.8-27b", 32768, 9),
+                                   ("ollama/qwen3.8-27b-40k", 40960, 3), ("ollama/qwen3.8-27b-64k", 65536, 1),
+                                   ("gone/model", 32768, 2), ("strata/strata", None, 200)):
+            store.append_jsonl(store.home() / "results.jsonl", {
+                "model": model, "size": "trivial", "outcome": "accepted", "ran": True,
+                "window": window, "ts": now - age * 86400})
+        f = stats.feed(now)
+        lines = f["model_lines"]["lines"]
+        self.assertEqual([x["model"] for x in lines], ["ollama/qwen3.8-27b", "ollama/mimo-v2.6:9b-q8_0"])
+        self.assertEqual((lines[0]["tasks"], lines[0]["windows"]), (3, [32768, 40960, 65536]))
+        self.assertEqual(f["model_lines"]["older"], {"models": 2, "tasks": 2})  # gone, and idle 90+ days
+        self.assertEqual(len(f["models"]), 6)                     # the feed's split stays whole
+        out = run_wb("stats")
+        self.assertIn("ollama/qwen3.8-27b-40k", out)              # wb stats keeps the variants
+        self.assertNotIn("gone/model", out)
+        self.assertIn("2 older model(s), retired or idle 90+ days: 2 task(s) (wb stats --all)", out)
+        out = run_wb("stats", "--all")
+        self.assertIn("gone/model", out)
+        self.assertIn("strata/strata", out)
+        self.assertNotIn("older model", out)
+
     def test_two_settings_changed_at_once_both_stay(self):
         # #564: each wrote back the snapshot it read, so one change was lost while both said it took.
         # Each process waits after its read until the other has read too (or a second passes: under

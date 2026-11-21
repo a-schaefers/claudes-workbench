@@ -154,10 +154,11 @@ def spec_gap_line() -> str | None:
             f"gap; last: {hit[-1]['spec_gaps'][-1][:160]} (the checklist: /workbench, Before wb start)")
 
 
-def table() -> str:
+def table(only: set | None = None) -> str:
+    """`wb stats`' table; ``only``: these models' rows alone (the ones the Stats tab shows)."""
     from .tuning import judged  # tuning reads results' rows
     every = store.results()
-    rows = [r for r in every if judged(r)]
+    rows = [r for r in every if judged(r) and (only is None or r.get("model") in only)]
     gaps = len(every) - len(rows)
     trials = len(store.results(trials=True)) - len(every)
     left_out = (f"\n({trials} trial run{'s' if trials > 1 else ''} left out)" if trials else "") + \

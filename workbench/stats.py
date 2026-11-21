@@ -178,34 +178,74 @@ def _questions(rows: list[dict]) -> dict:
 
 
 def _models(rows: list[dict]) -> dict:
-    from . import router, spend
     by = defaultdict(list)
     for r in rows:
         if r.get("model"):
             by[r["model"]].append(r)
-    out = {}
-    for model, rs in by.items():
-        n, landed = len(rs), sum(map(_landed, rs))
-        claude = [spend.weighted(r["claude"]) for r in rs if isinstance(r.get("claude"), dict)]
-        m = {"tasks": n, "landed": landed, "accepted_pct": round(100 * landed / n),
-             "rounds": _mean([r.get("rounds") for r in rs]),
-             "auto_fixes": _mean([r.get("auto_fixes") for r in rs]),
-             "reviews": _mean([r.get("reviews") for r in rs]),
-             "minutes": _mean([r.get("minutes") for r in rs]),
-             "local_tokens": round(sum((r.get("tok_in") or 0) + (r.get("tok_out") or 0) for r in rs) / n),
-             **({"claude": round(sum(claude) / len(claude))} if claude else {}),
-             **({"speed": sp} if (sp := router.speed(model)) else {})}
-        trend = [[r["ts"], r["speed"]["write"]] for r in sorted(rs, key=lambda r: r.get("ts") or 0)
-                 if r.get("ts") and isinstance(r.get("speed"), dict) and r["speed"].get("write")]
-        if trend:
-            m["write_trend"] = trend[-30:]
-        if len(trend) >= TREND_MIN:  # the newest third against the oldest third, medians
-            k = len(trend) // 3
-            old, new = median(v for _, v in trend[:k]), median(v for _, v in trend[-k:])
-            if old:
-                m["write_change_pct"] = round(100 * (new - old) / old)
-        out[model] = {k: v for k, v in m.items() if v is not None}
-    return out
+    return {model: _model_stats(model, rs) for model, rs in by.items()}
+
+
+# The tab's model lines (#638, the owner, 2026-11-21): every model that ever ran a task, forever,
+# each `wb optimize` window its own line, in no order; after 49 tasks the tab listed five, two of
+# them variants of a third and one long gone. Shown: the models OpenCode has now, a variant folded
+# under its source, the most recently used first; the rest on one line. `models` keeps them all.
+OLD_DAYS = 90
+
+
+def _model_lines(rows: list[dict], now: float) -> dict | None:
+    """{"lines": [{model, variants, windows, last, …_model_stats}], "older": {models, tasks}}."""
+    from . import models
+    try:
+        found = models.discover()
+    except Exception:  # the feed never fails over a config it can't read
+        found = {}
+    over = models._overrides()  # a retired variant still folds under its source
+    base = lambda mid: ((over.get(mid) or {}) if isinstance(over.get(mid), dict) else {}).get("variant_of") or mid  # noqa: E731
+    sources = {base(m) for m in found} | set(found)
+    groups = defaultdict(list)
+    for r in rows:
+        if r.get("model"):
+            groups[base(r["model"])].append(r)
+    lines, older = [], {"models": 0, "tasks": 0}
+    for b, rs in groups.items():
+        last = max((r.get("ts") or 0 for r in rs), default=0)
+        if b not in sources or (last and now - last > OLD_DAYS * 86400):
+            older["models"] += 1
+            older["tasks"] += len(rs)
+            continue
+        newest = max(rs, key=lambda r: r.get("ts") or 0)["model"]
+        lines.append({"model": b, "variants": sorted({r["model"] for r in rs}),
+                      "windows": sorted({r["window"] for r in rs if isinstance(r.get("window"), int)}),
+                      "last": last, **_model_stats(newest, rs)})
+    lines.sort(key=lambda x: -x["last"])
+    if not lines and not older["models"]:
+        return None
+    return {"lines": lines, **({"older": older} if older["models"] else {})}
+
+
+def _model_stats(model: str, rs: list[dict]) -> dict:
+    """One model's record over ``rs``; its speeds (router.speed) are ``model``'s."""
+    from . import router, spend
+    n, landed = len(rs), sum(map(_landed, rs))
+    claude = [spend.weighted(r["claude"]) for r in rs if isinstance(r.get("claude"), dict)]
+    m = {"tasks": n, "landed": landed, "accepted_pct": round(100 * landed / n),
+         "rounds": _mean([r.get("rounds") for r in rs]),
+         "auto_fixes": _mean([r.get("auto_fixes") for r in rs]),
+         "reviews": _mean([r.get("reviews") for r in rs]),
+         "minutes": _mean([r.get("minutes") for r in rs]),
+         "local_tokens": round(sum((r.get("tok_in") or 0) + (r.get("tok_out") or 0) for r in rs) / n),
+         **({"claude": round(sum(claude) / len(claude))} if claude else {}),
+         **({"speed": sp} if (sp := router.speed(model)) else {})}
+    trend = [[r["ts"], r["speed"]["write"]] for r in sorted(rs, key=lambda r: r.get("ts") or 0)
+             if r.get("ts") and isinstance(r.get("speed"), dict) and r["speed"].get("write")]
+    if trend:
+        m["write_trend"] = trend[-30:]
+    if len(trend) >= TREND_MIN:  # the newest third against the oldest third, medians
+        k = len(trend) // 3
+        old, new = median(v for _, v in trend[:k]), median(v for _, v in trend[-k:])
+        if old:
+            m["write_change_pct"] = round(100 * (new - old) / old)
+    return {k: v for k, v in m.items() if v is not None}
 
 
 def _by(rows: list[dict], key) -> dict:
@@ -340,6 +380,7 @@ def feed(now: float | None = None, only: tuple | None = None) -> dict:
         "absorbed": lambda: _absorbed(rows),
         "questions": lambda: _questions(rows),
         "models": lambda: _models(rows),
+        "model_lines": lambda: _model_lines(rows, now),
         "sizes": lambda: _by(rows, lambda r: [r["size"]] if r.get("size") else []),
         "stacks": lambda: _by(rows, lambda r: r.get("stack") or []),
         "days": lambda: _days(rows, now) if rows else None,
