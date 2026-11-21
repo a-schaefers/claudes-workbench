@@ -4752,9 +4752,13 @@ reports the same version as the release that has, and `probe symbols main.c` the
 the word (the agent got no results and wrote a function named `symbols`, 2026-11-20). Off, it isn't
 checked at all: `wb start` ran `probe --help` with it off, and a `probe` printing a non-UTF-8 byte
 failed the start after its branch and worktree were made (#518); its output is read with
-`errors="replace"`. On, the task's shell rules allow `probe` (`shell_rules`, after `ALLOWED_COMMANDS`),
-and its copy of the handbook ends with `EXPERIMENT_NOTES["probe"]` (`instruction_files`;
-`agent/HANDBOOK.md` itself is unchanged). It is read-only: no index, no daemon, no network.
+`errors="replace"`. On, the task's shell rules allow probe's read-only subcommands, `context.PROBE_READS`
+(`symbols`, `extract`, `search`, `grep`, `query`; `shell_rules`, after `ALLOWED_COMMANDS`), and
+refuse `--lsp` on any of them; its copy of the handbook ends with `EXPERIMENT_NOTES["probe"]`
+(`instruction_files`; `agent/HANDBOOK.md` itself is unchanged). So it stays read-only: no index,
+no daemon, no network. The rule was `probe *` until 2026-11-21, when testing the experiment found
+that it let the agent run `probe lsp` (a daemon and language servers), `--lsp` on a read (the
+same), `probe config set|reset` (probe's config) and `probe benchmark`.
 
 ## Verifying a fix against the base
 
