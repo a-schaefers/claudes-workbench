@@ -2087,16 +2087,20 @@ def cmd_accept(a):
             try:
                 if not into:
                     raise gitops.GitError(gitops.detached(repo, spec["branch"], had=True))
-                # where the target stood before: a squash interrupted before merged_head was
-                # saved is found from it on the retry (#432, the audit of 1.8)
-                close = {**close, "merge_from": gitops.git(
-                    repo, "rev-parse", "--verify", "-q", f"refs/heads/{into}", check=False).strip()}
-                task.set_status(closing=close)
-                # every target is held to the base, a named branch too: reset or rebased since
-                # the start, the merge brought back what was withdrawn from it (#418)
-                # signed as the task's commit was, and a kill backs the checkout out: SIGTERM
-                # left MERGE_HEAD and the staged merge in the user's checkout (#420)
-                with _ends_cleanly():
+                # one merge into the checkout at a time, another task's or profile's too: one
+                # backed out over another's landed merge rewound it (#639)
+                with _ends_cleanly(), gitops.merge_lock(
+                        repo, say=lambda m: print(f"wb: {m}", file=sys.stderr)):
+                    # where the target stood before: a squash interrupted before merged_head was
+                    # saved is found from it on the retry (#432, the audit of 1.8)
+                    close = {**close, "merge_from": gitops.git(
+                        repo, "rev-parse", "--verify", "-q", f"refs/heads/{into}",
+                        check=False).strip()}
+                    task.set_status(closing=close)
+                    # every target is held to the base, a named branch too: reset or rebased
+                    # since the start, the merge brought back what was withdrawn from it (#418)
+                    # signed as the task's commit was, and a kill backs the checkout out: SIGTERM
+                    # left MERGE_HEAD and the staged merge in the user's checkout (#420)
                     merged = gitops.merge(repo, a.name, into, spec["base"], tip=tip,
                                           how=close.get("merge_as", "merge"),
                                           sign=close.get("sign", True) and _signed(spec, a))

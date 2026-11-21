@@ -4198,7 +4198,17 @@ it. ACE-Step's takes peaked at -0.2 dBFS, near clipping, before any `loudnorm`: 
   conflict, a signature with no answer in `COMMIT_SECS` or a SIGTERM or SIGHUP mid-merge
   (`cli._ends_cleanly` raises it) is backed out, `merge --abort` and then `reset --merge` to the
   commit before (`gitops._back_out`: a kill left `MERGE_HEAD` and the staged merge, #420), and
-  reported as not merged); otherwise it prints the
+  reported as not merged. The back-out undoes only its own merge: another merge's `MERGE_HEAD` is
+  left, and a HEAD moved past the commit before by anything but this merge's own commit
+  (`gitops._made_by`: the tip for a fast-forward, else a child of that commit whose second parent
+  is the tip, or whose message is the tip's for a squash) is reset to, not from. Merges into one
+  checkout take turns (`gitops.merge_lock`: a flock on `workbench-merge.lock` in its own git dir,
+  shared by every profile and account merging there, held from `merge_from` through the merge;
+  `wb: waiting for another merge into <repo>` once; past `MERGE_WAIT`, `COMMIT_SECS` + 15 s, the
+  merge is refused, never made, since an agent can read the git dir and so hold the lock). The
+  command lock is per task, so two tasks' accepts once interleaved: B read HEAD, A merged, B
+  conflicted and reset to the HEAD it had read, rewinding A's merge while A's row said merged
+  and its branch was gone (#639, Codex's audit of 1.90.6)); otherwise it prints the
   merge command (`merge with:`, `gitops.merge_by_hand`): in the repo's mode, the `--merge-as`
   given or commands.json's `merge`, and with `--no-gpg-sign` after `--no-sign` (it said `merge
   --no-ff` whatever the repo kept to, #471, the audit of 1.8). A colocated Jujutsu repo (`gitops.jj_colocated`: `.jj/` beside `.git`) has git's

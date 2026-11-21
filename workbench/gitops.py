@@ -3,6 +3,7 @@
 The agent never commits; everything it does stays in the worktree's working tree until `wb accept`.
 """
 import contextlib
+import fcntl
 import functools
 import hashlib
 import os
@@ -11,6 +12,7 @@ import shutil
 import stat
 import subprocess
 import tempfile
+import time
 import unicodedata
 from collections import Counter
 from pathlib import Path
@@ -1171,6 +1173,42 @@ def start_branch(repo: Path, base: str) -> str | None:
                         check=False).returncode == 0 else None
 
 
+MERGE_LOCK = "workbench-merge.lock"  # in the destination checkout's git dir (merge_lock)
+MERGE_WAIT = COMMIT_SECS + 15  # waiting on another merge into it: one signed commit's time
+
+
+@contextlib.contextmanager
+def merge_lock(repo: Path, say=None):
+    """One wb merge at a time into a checkout: a flock on MERGE_LOCK in its own git dir (a linked
+    worktree's, so two worktrees of one repo don't wait on each other), which every profile and
+    account merging there shares. Two accepts into one checkout once interleaved: B read HEAD,
+    A merged, B conflicted and its rollback reset to the HEAD it had read, rewinding A's merge
+    while A's record said merged and its branch was gone (#639, Codex's audit of 1.90.6). The
+    file is opened read-only (flock needs no write: another account made it). An agent can read
+    the git dir and so could hold the lock: past MERGE_WAIT the merge is refused, never made."""
+    gd = git(repo, "rev-parse", "--absolute-git-dir").strip()
+    try:
+        fd = os.open(os.path.join(gd, MERGE_LOCK), os.O_RDONLY | os.O_CREAT, 0o664)
+    except OSError as e:
+        raise GitError(f"can't lock {gd} for the merge ({e.strerror})") from None
+    try:
+        deadline, said = time.monotonic() + MERGE_WAIT, False
+        while True:
+            try:
+                fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                break
+            except BlockingIOError:
+                if time.monotonic() >= deadline:
+                    raise GitError(f"another merge into {repo} held it for {MERGE_WAIT}s") from None
+                if say and not said:
+                    say(f"waiting for another merge into {repo}")
+                    said = True
+                time.sleep(0.2)
+        yield
+    finally:
+        os.close(fd)  # releases the lock
+
+
 def merge(repo: Path, task: str, into: str | None = None, base: str | None = None,
           *, tip: str | None = None, how: str = "merge", sign: bool = True) -> str:
     """Merge the task's branch into ``into`` (the branch it started from: task.json's
@@ -1262,7 +1300,7 @@ def merge(repo: Path, task: str, into: str | None = None, base: str | None = Non
             committing([*NO_HOOKS, "merge", "--no-ff", "--commit", "--no-squash", "--no-verify",
                         "--no-log", "-m", merge_message(repo, task, source), source])
     except BaseException as e:  # a conflict, a timeout, a SIGTERM: the checkout as it was (#420)
-        _back_out(repo, before)
+        _back_out(repo, before, source, how)
         if isinstance(e, GitError):
             raise failed("squashing" if how == "squash" else "merging", e) from None
         raise
@@ -1273,7 +1311,7 @@ def merge(repo: Path, task: str, into: str | None = None, base: str | None = Non
     if _merging(repo) or _run(repo, ("merge-base", "--is-ancestor", source, "HEAD"),
                               check=False).returncode:
         # HEAD or the index changed with no MERGE_HEAD (a squash staged) is backed out too (#430)
-        _back_out(repo, before)
+        _back_out(repo, before, source, how)
         raise GitError(f"git didn't complete the merge of {branch_name(task)} (a merge setting "
                        "of yours?); it was backed out: merge it by hand")
     return git(repo, "rev-parse", "--short", "HEAD").strip()
@@ -1348,15 +1386,40 @@ def squashed(repo: Path, into: str, before: str | None, tip: str) -> str | None:
     return None
 
 
-def _back_out(repo: Path, before: str) -> None:
-    """Undo wb's own merge in the user's checkout, which was clean at ``before``: a conflict, a
-    signature that timed out, a kill mid-merge. `reset --merge` drops MERGE_HEAD and the staged
-    merge (a squash leaves no MERGE_HEAD), and a commit made just before an interruption."""
+def _back_out(repo: Path, before: str, source: str | None = None, how: str = "merge") -> None:
+    """Undo wb's own merge of ``source`` in the user's checkout, which was clean at ``before``: a
+    conflict, a signature that timed out, a kill mid-merge. `reset --merge` drops MERGE_HEAD and
+    the staged merge (a squash leaves no MERGE_HEAD), and a commit made just before an
+    interruption. Only what this merge did: a MERGE_HEAD of another merge is left, and a HEAD
+    that moved past ``before`` by anything but this merge's own commit is reset to, not from.
+    The rollback reset to the HEAD it had read, rewinding another accept's merge that landed in
+    between (#639, Codex's audit of 1.90.6)."""
+    tip = git(repo, "rev-parse", "-q", "--verify", f"{source}^{{commit}}",
+              check=False).strip() if source else ""
     if _merging(repo):
+        theirs = git(repo, "rev-parse", "-q", "--verify", "MERGE_HEAD", check=False).strip()
+        if tip and theirs != tip:
+            return  # someone else's merge under way: not ours to abort
         git(repo, "merge", "--abort", check=False)
-    if (git(repo, "rev-parse", "HEAD", check=False).strip() != before
-            or git(repo, "status", "--porcelain", "--untracked-files=no", check=False).strip()):
-        git(repo, "reset", "-q", "--merge", before, check=False)
+    head = git(repo, "rev-parse", "HEAD", check=False).strip()
+    to = before if head == before or not tip or _made_by(repo, head, before, tip, how) else head
+    if head != to or git(repo, "status", "--porcelain", "--untracked-files=no", check=False).strip():
+        git(repo, "reset", "-q", "--merge", to, check=False)
+
+
+def _made_by(repo: Path, head: str, before: str, tip: str, how: str) -> bool:
+    """Whether ``head`` is the commit merging ``tip`` onto ``before`` made: the tip itself
+    (a fast-forward), else a child of ``before`` whose second parent is the tip (a merge) or
+    whose message is the tip's (a squash, commit -C)."""
+    if how == "ff":
+        return head == tip
+    parents = git(repo, "rev-list", "--parents", "-n", "1", head, check=False).split()[1:]
+    if parents[:1] != [before]:
+        return False
+    if how == "squash":
+        msg = lambda c: git(repo, "log", "-1", "--format=%B", c, check=False).strip()  # noqa
+        return len(parents) == 1 and msg(head) == msg(tip)
+    return parents[1:2] == [tip]
 
 
 def _overwritten(repo: Path, branch: str) -> list[str]:

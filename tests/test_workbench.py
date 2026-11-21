@@ -2288,6 +2288,68 @@ class Lifecycle(Base):
         # another commit from the same parent isn't taken for it
         self.assertIsNone(gitops.squashed(self.repo, "main", g("rev-parse", "main~1"), "main~1"))
 
+    def test_a_merge_backed_out_never_rewinds_another_merge_that_landed_meanwhile(self):
+        # #639 (Codex's audit of 1.90.6, reproduced by pausing B just before git's merge): B read
+        # HEAD, A's merge landed, B conflicted and its rollback reset to the HEAD it had read: A's
+        # change was gone from main while A's record said merged and its branch was deleted
+        for how in ("merge", "squash", "ff"):
+            repo, g = self._merge_case(base={b"a.txt": b"base\n"}, main={b"c.txt": b"c\n"},
+                                       task={b"a.txt": b"B\n"}, ignore={b"mine.txt": b"MINE\n"})
+            g("checkout", "-q", "-b", "other", "main")
+            (repo / "a.txt").write_bytes(b"A\n")
+            g("commit", "-qam", "A's merge")
+            g("checkout", "-q", "main")
+            landed = g("rev-parse", "other").strip()
+            real = gitops.signs
+
+            def a_lands_now(r):  # after B read HEAD, before its merge
+                g("merge", "-q", "--ff-only", "other")
+                return real(r)
+            with mock.patch.object(gitops, "signs", a_lands_now), \
+                    self.assertRaisesRegex(gitops.GitError, "backed out"):
+                gitops.merge(repo, "t", "main", how=how)
+            self.assertEqual(g("rev-parse", "main").strip(), landed, how)   # A's merge stands
+            self.assertEqual((repo / "a.txt").read_bytes(), b"A\n", how)
+            self.assertEqual((repo / "mine.txt").read_bytes(), b"MINE\n", how)
+            self.assertEqual(g("status", "--porcelain", "--untracked-files=no"), b"", how)
+            self.assertNotEqual(subprocess.run(["git", "-C", str(repo), "rev-parse", "-q", "--verify",
+                                                "MERGE_HEAD"], capture_output=True).returncode, 0, how)
+        for how in ("merge", "squash"):  # an interrupted merge's own commit is still undone (#420)
+            repo, g = self._merge_case(base={b"a.txt": b"a\n"}, main={b"c.txt": b"c\n"},
+                                       task={b"b.txt": b"b\n"}, ignore={})
+            before = g("rev-parse", "main").decode().strip()
+            gitops.merge(repo, "t", "main", how=how)
+            gitops._back_out(repo, before, "delegate/t", how)
+            self.assertEqual(g("rev-parse", "main").decode().strip(), before, how)
+
+    def test_two_accept_merges_into_one_checkout_take_turns(self):
+        # #639: the command lock is per task, so two tasks' accepts merged into one checkout at
+        # once; the merge lock in its git dir (shared by every profile) makes the second wait,
+        # and one held past MERGE_WAIT refuses the merge rather than making it
+        import fcntl
+        self.start("t-l1", "ok")
+        wait_phase("t-l1", {"review"})
+        fd = os.open(self.repo / ".git" / gitops.MERGE_LOCK, os.O_RDONLY | os.O_CREAT)
+        fcntl.flock(fd, fcntl.LOCK_EX)  # another accept's merge, under way
+        done = threading.Timer(1.5, os.close, (fd,))  # it finishes
+        try:
+            with mock.patch.object(gitops, "MERGE_WAIT", 1), \
+                    self.assertRaisesRegex(gitops.GitError, "another merge into .* held it for 1s"):
+                with gitops.merge_lock(self.repo):
+                    pass
+            done.start()
+            err = io.StringIO()
+            with redirect_stderr(err):
+                out = run_wb("accept", "t-l1", "-m", "feat: answer", "--merge")
+        finally:
+            if done.ident:  # started: it closes the lock
+                done.join()
+            else:
+                os.close(fd)
+        self.assertIn("waiting for another merge into", err.getvalue())
+        self.assertIn("merged into main", out)
+        self.assertEqual((self.repo / "answer.txt").read_text().strip(), "42")
+
     def test_the_merge_by_hand_line_follows_the_repos_merge_mode_and_signing(self):
         # #471 (the audit of 1.8): "merge with: … merge --no-ff" whatever commands.json's `merge`
         # said, and a signed merge commit after --no-sign
