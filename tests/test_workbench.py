@@ -708,10 +708,12 @@ class Lifecycle(Base):
         # change, and an edit to one was committed to the other
         g = lambda *a: subprocess.run(["git", "-C", str(self.repo), *a], check=True,  # noqa
                                       capture_output=True)
-        (self.repo / "docs").mkdir()
-        (self.repo / "docs" / "API.md").write_text("upper\n")
-        (self.repo / "docs" / "api.md").write_text("lower\n")
-        g("add", "docs")
+        for path, data in (("docs/API.md", b"upper\n"), ("docs/api.md", b"lower\n")):
+            # into the index alone: on a disk that folds case (macOS's APFS, #950) the second
+            # write was the first file again, and HEAD tracked one of the two
+            sha = subprocess.run(["git", "-C", str(self.repo), "hash-object", "-w", "--stdin"],
+                                 input=data, check=True, capture_output=True).stdout.decode().strip()
+            g("update-index", "--add", "--cacheinfo", f"100644,{sha},{path}")
         g("commit", "-qm", "twins")
         with mock.patch.object(gitops, "_case_folds", return_value=True):
             err = io.StringIO()
@@ -2295,12 +2297,15 @@ class Lifecycle(Base):
             parent, name = os.path.split(path)
             return real(path) or os.path.isdir(parent) and any(
                 n.casefold() == name.casefold() for n in os.listdir(parent))
-        os.link(repo / "Readme.md", repo / "README.md")
+        made = not os.path.lexists(repo / "README.md")  # on macOS's APFS it is already (#950)
+        if made:
+            os.link(repo / "Readme.md", repo / "README.md")
         for old_git in (False, True):
             with mock.patch.object(gitops, "_merge_tree", return_value=None) if old_git \
                     else nullcontext():
                 self.assertEqual(gitops._overwritten(repo, "delegate/t"), [])
-        (repo / "README.md").unlink()
+        if made:
+            (repo / "README.md").unlink()
         gitops.merge(repo, "t", "main")
         self.assertEqual((repo / "README.md").read_bytes(), b"r\n")
         repo, g = self._merge_case(  # a case-sensitive git: in the way, as before
@@ -2310,6 +2315,9 @@ class Lifecycle(Base):
         with mock.patch("os.path.lexists", lexists):
             self.assertEqual(gitops._overwritten(repo, "delegate/t"), ["README.md"])
 
+    @unittest.skipIf(gitops._case_folds(tempfile.gettempdir()),
+                     "the temp directory's file system folds case (macOS's APFS): CONFIG and "
+                     "config can't both exist there")
     def test_a_stale_ignorecase_on_a_case_sensitive_file_system_keeps_the_ignored_twin(self):
         # #640 (Codex's audit of 1.90.6): a copied repo carried core.ignorecase=true onto a
         # case-sensitive file system; the checkout tracked CONFIG and kept its own ignored config,
