@@ -2118,6 +2118,43 @@ test('a web message the turn didn\'t answer in the chat gets one follow-up, then
   expect([followUps().length, posted().length]).toEqual([1, 1])  // answered there: no follow-up, no note
 })
 
+test('a /loop firing, another plugin\'s prompt or a channel message leaves the user away and the follow-up owed; the user\'s Enter ends it (#835)', async ($, on) => {
+  // #835: any prompt that wasn't isMeta counted as the user back at the terminal, so a /loop
+  // firing ended away for every session and cancelled the #767 follow-up
+  const clock = mock.clock(on, { now: 1_800_000_000_000 })
+  const files: Record<string, string> = {}
+  fakeTasks(on, files, [])
+  chatOn(files)
+  on('ui.toast', () => ({ value: undefined }))
+  on('session.id', () => ({ value: 'sess-1' }))
+  on('process.run', () => ({ value: { exitCode: 0, stdout: '', stderr: '' } }))
+  const asked: string[] = []
+  on('prompt.submit', (_: any, e: any) => { asked.push(e.text); return { text: e.text } })
+  on('tool.call', () => ({ result: { stdout: '' }, text: '' }))  // the engine's Bash
+  const followUps = () => asked.filter(a => a.includes("hasn't heard back"))
+  const awayAt = () => JSON.parse(files['/wb/chat/away.json'] ?? '{"at": 0}').at
+  await $.session.start({ cwd: '/home/u/project', surface: 'terminal', isInteractive: true })
+  const turn = async (id: string, command?: string) => {
+    await $.turn.start({ text: '', turnId: id })
+    if (command) await $.tool.call({ tool: 'Bash', command })
+    await $.turn.complete(endTurn(id))
+    await clock.advance(3000)
+  }
+  await turn('t0', 'wb start t --spec s.md')                     // workbench mode: the chat listens
+  files['/wb/chat/messages.jsonl'] = JSON.stringify({ id: 'm1', ts: 1_800_000_000, from: 'user', text: 'Status' }) + '\n'
+  await clock.advance(31_000)
+  expect(asked.filter(a => a.startsWith('[web chat] Status'))).toHaveLength(1)
+  expect(awayAt()).toBeGreaterThan(0)
+  for (const origin of [{ kind: 'scheduled-trigger' }, { kind: 'plugin', name: 'other' }, { kind: 'channel', server: 'slack' },
+    { kind: 'peer' }, { kind: 'task-notification' }])
+    await $.prompt.submit({ text: 'check on the tasks', origin } as any)
+  expect(awayAt()).toBeGreaterThan(0)                            // still away
+  await turn('t1')                                               // answered in the terminal only
+  expect(followUps()).toHaveLength(1)                            // the follow-up still comes
+  await $.prompt.submit({ text: 'back now', origin: { kind: 'composer' } } as any)
+  expect(awayAt()).toBe(0)                                       // the user's own Enter: back
+})
+
 test('only wb run as a command counts as delegating, read as bash reads it, not wb written in a string, a heredoc or a comment (#409, #560)', () => {
   // 2026-11-20: a Python patch whose string held "split it (wb next)" turned workbench mode on
   for (const run of ['wb start t --spec s.md', 'cd ~ && wb start step-2 --spec s.md --repo .', 'wb next t',

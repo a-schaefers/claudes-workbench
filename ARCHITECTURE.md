@@ -6085,7 +6085,11 @@ as the next turn; the page said "Queued for Claude" for good, 2026-11-21), `chat
 `{at: now, by: <key>}`, a toast. Away is the user's (#688: `away()` reads that file, so every
 session in workbench mode relays its dialogs and ends its wakes with AWAY_NOTE, not only the
 listener; kept in the listener's own state, another session's overnight backlog left its dialogs in
-the empty terminal, #110 again); a prompt typed in any session writes `{at: 0}` (`back`).
+the empty terminal, #110 again); a prompt typed in any session writes `{at: 0}` (`back`). Typed
+is the engine's `origin.kind` (`byUser`): `composer`, `bridge`, `sdk`, `auto-continuation`, or an
+`unclassified` or unstamped one not `isMeta`; a /loop or scheduled firing, another plugin's
+prompt, an MCP channel's or a peer session's message ended away for every session and cancelled
+the follow-up below (#835).
 Each message passed to Claude is owed a reply in the chat (`mem.chatOwed`, `owedAtTurnEnd`, #767:
 for two release cycles the owner's "Status" from the phone was answered in the terminal only, and
 the phone heard nothing): a `wb chat reply`/`listen` or `wb shot … --chat` in Bash, a row `from:

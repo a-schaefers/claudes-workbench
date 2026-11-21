@@ -175,6 +175,17 @@ export function quietForJobs(list: WbTask[], now: number, isMine: (t: WbTask) =>
 // session relays its dialogs and says AWAY_NOTE. Kept in the listener's own state, only it did:
 // another session's overnight backlog left its permission dialogs in the empty terminal (#110 again).
 const awayFile = () => `${mem.root}/chat/away.json`
+// Whether a prompt is the user's own (at the terminal, or through Remote Control), by the
+// engine's stamp: a /loop or scheduled firing, another plugin's prompt or an MCP channel's
+// message ended away for every session and cancelled the #767 follow-up (#835). An unstamped
+// prompt goes by isMeta, as before the stamp; an `unclassified` one by isMeta too (the engine
+// stamps some queued typed prompts so).
+const USER_ORIGINS = new Set(['composer', 'bridge', 'sdk', 'auto-continuation'])
+const byUser = (e: { isMeta?: boolean; origin?: { kind?: string } }) => {
+  const kind = e.origin?.kind
+  if (!kind || kind === 'unclassified') return !e.isMeta
+  return USER_ORIGINS.has(kind)
+}
 async function webAt($: any): Promise<number> {
   return Number((await readJson($, awayFile())).at ?? 0) * 1000 || 0
 }
@@ -2687,7 +2698,7 @@ export const register: Register = (on, options) => {
 
   // Typed in the terminal: the user is back, so answers go here again
   on('prompt.submit', async ($, e, next) => {
-    if (!e.isMeta && !e.text.startsWith(WEB) && !e.text.startsWith('[workbench]')) {
+    if (byUser(e) && !e.text.startsWith(WEB) && !e.text.startsWith('[workbench]')) {
       await back($)
       mem.chatOwed.clear() // back at the terminal: an answer there reaches them (#767)
     }
