@@ -166,14 +166,29 @@ def assertion(text: str) -> str:
 CHECKOUT_KEYS = r"^core\.(eol|autocrlf|safecrlf|symlinks|filemode|ignorecase|checkroundtripencoding)$"
 
 
+def local_filters(repo: Path) -> list[tuple[str, str]]:
+    """``repo``'s local `filter.<driver>.*` settings but Git LFS's (share_lfs has those), in
+    order. A key with no value (`required` alone) is git's true."""
+    out = gitops.git(repo, "config", "-z", "--local", "--includes", "--get-regexp", r"^filter\.",
+                     check=False)
+    pairs = [(k, v if nl else "true") for k, nl, v in (rec.partition("\n") for rec in out.split("\0"))]
+    return [(k, v) for k, v in pairs if k and not k.lower().startswith("filter.lfs.")]
+
+
 def checkout_settings(repo: Path, clone: Path) -> None:
-    """``repo``'s local checkout settings (CHECKOUT_KEYS, its info/attributes) in ``clone``,
-    before anything is checked out there."""
+    """``repo``'s local checkout settings (CHECKOUT_KEYS, its filters, its info/attributes) in
+    ``clone``, before anything is checked out there. Its own clean/smudge filters too (git-crypt,
+    transcrypt, a hand-written one): without them a filtered file checked out as the stored blob,
+    the task's worktree (which shares the repo's config) had it smudged, and the base check
+    failed on an unchanged file, which read as evidence for the step (#932). The main checkout
+    runs these same commands: nothing new runs."""
     out = gitops.git(repo, "config", "--local", "--includes", "--get-regexp", CHECKOUT_KEYS,
                      check=False)
     for key, _, value in (line.partition(" ") for line in out.splitlines()):
         if key:
             gitops.git(clone, "config", key, value)
+    for key, value in local_filters(repo):
+        gitops.git(clone, "config", "--add", key, value)
     try:
         attrs = Path(repo) / gitops.git(repo, "rev-parse", "--git-path", "info/attributes").strip()
         if attrs.is_file():
@@ -182,6 +197,63 @@ def checkout_settings(repo: Path, clone: Path) -> None:
             shutil.copyfile(attrs, dest)
     except (gitops.GitError, OSError):
         pass
+
+
+FILTER_SAMPLE = 50  # filtered files compared with the task's worktree, at most
+
+
+def filter_gap(worktree: Path, clone: Path) -> str | None:
+    """Why ``clone``'s checkout of its filtered files isn't the task's worktree's, else None:
+    the first of them (FILTER_SAMPLE at most) with the same blob in both and other bytes, the
+    worktree's unedited. A filter that keeps state in the git dir (git-crypt's keys in
+    .git/git-crypt) can't work from the copied config, and a scratch run on the stored bytes is
+    no evidence either way (#932). No local filter: one git call."""
+    drivers = {k.split(".")[1] for k, _ in local_filters(clone)
+               if k.lower().endswith((".smudge", ".process"))}
+    if not drivers or not Path(worktree).is_dir():
+        return None
+    files = gitops.git_bytes(clone, "ls-files", "-z")
+    said = gitops._run(clone, ("check-attr", "-z", "--stdin", "filter"), input=files,
+                       check=False).stdout.split(b"\0")
+    filtered = {os.fsdecode(said[i]): os.fsdecode(said[i + 2]) for i in range(0, len(said) - 2, 3)
+                if os.fsdecode(said[i + 2]) in drivers}
+    paths = sorted(filtered)[:FILTER_SAMPLE]
+    if not paths:
+        return None
+
+    def blobs(at):
+        out = gitops.git_bytes(at, "ls-files", "-s", "-z", "--", *(f":(literal){p}" for p in paths))
+        return {os.fsdecode(rec.split(b"\t", 1)[1]): rec.split()[1]
+                for rec in out.split(b"\0") if b"\t" in rec}
+
+    mine, theirs = blobs(clone), blobs(worktree)
+    differ = []
+    for p in paths:
+        if mine.get(p) and mine.get(p) == theirs.get(p):
+            try:
+                if (Path(clone) / p).read_bytes() != (Path(worktree) / p).read_bytes():
+                    differ.append(p)
+            except OSError:
+                pass
+    if differ:  # an edit in the worktree isn't the filter's doing
+        edited = gitops.git_bytes(worktree, "diff", "--name-only", "-z", "--",
+                                  *(f":(literal){p}" for p in differ)).split(b"\0")
+        differ = [p for p in differ if os.fsencode(p) not in edited]
+    if not differ:
+        return None
+    p = differ[0]
+    return (f"{p} checks out differently in the scratch checkout than in the task's worktree "
+            f"(filter.{filtered[p]}, the repo's own: state it keeps in the git dir, such as "
+            "git-crypt's keys, isn't there), so this run wasn't on the task's bytes")
+
+
+def _filter_failed(repo: Path, e: gitops.GitError) -> str | None:
+    """The checkout's failure, named, when a filter of ``repo``'s made it (a `required` one that
+    can't work in the scratch clone: #932), else None."""
+    names = {k.split(".")[1] for k, _ in local_filters(repo)}
+    hit = next((n for n in sorted(names) if f"filter {n} failed" in str(e)), None)  # git's words
+    return (f"checking out the scratch clone failed in filter.{hit}, the repo's own (state it "
+            f"keeps in the git dir, such as git-crypt's keys, isn't there): {str(e)[-300:]}") if hit else None
 
 
 def _say(msg: str) -> None:
@@ -229,7 +301,14 @@ def _run(task: store.Task, checkout, cmd, limit: int, keep=None,
         gitops.share_lfs(repo, work)  # its LFS files as data (#382)
         if sparse := gitops.sparse_of(repo):  # as the task's worktree is (#263)
             gitops.apply_sparse(work, sparse)
-        checkout(work)
+        try:
+            checkout(work)
+        except gitops.GitError as e:
+            if why := _filter_failed(repo, e):
+                return "filtered", f"[{why}]"
+            raise
+        if why := filter_gap(task.worktree, work):  # not the task's bytes: no evidence (#932)
+            return "filtered", f"[{why}]"
         # its submodules as the task's worktree has them (#350)
         gitops.fill_submodules(repo, gitops.git(work, "rev-parse", "HEAD").strip(), work)
         at = _At(task.name, work)
@@ -353,6 +432,10 @@ def run(task: store.Task, cmd: str, files: list[str] | None = None, limit: int =
               **({"uncopied": uncopied[:50]} if uncopied else {}),
               **({"removed": removed[:50]} if removed else {}),
               **({"left_out": left} if left else {})}
+    for code, text in ((b_code, b_out), (c_code, c_out)):  # a checkout unlike the task's (#932)
+        if code == "filtered":
+            result["filtered"] = text.strip().strip("[]")
+            break
     if b_code != 0 and (gone := missing(b_out, uncopied)):
         result["missing"] = gone
     # --files naming code (a Rust file with its inline tests): the base got the candidate's code
@@ -382,6 +465,8 @@ def lines(r: dict) -> list[str]:
     for side in ("base", "candidate"):
         x = r[side]
         out.append(f"  {side}: exit {x['exit']}" + (f": {x['assertion']}" if x["assertion"] else ""))
+    if r.get("filtered"):
+        out.append(f"  {r['filtered']}")
     if r.get("missing"):
         out.append(f"  the base lacked what the candidate adds: {', '.join(r['missing'])} "
                    "(--files copies what the test reads onto the base)")

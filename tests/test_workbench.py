@@ -14610,6 +14610,53 @@ class Verify(Base):
         r = verify.last(store.Task("t-crlf"))
         self.assertEqual((r["base"]["exit"], r["candidate"]["exit"]), (0, 0))  # and verify's
 
+    def test_the_scratch_checkouts_run_the_repos_own_filters_and_say_when_they_cant(self):
+        # #932 (an outside review of v1.90.24, reproduced): a clone has none of the repo's local
+        # config, so a file under a local clean/smudge filter (git-crypt, transcrypt) checked out
+        # as the stored blob there, and the base check failed on an unchanged file
+        from workbench import verify
+        g = lambda *a: subprocess.run(["git", "-C", str(self.repo), *a], check=True)  # noqa
+        g("config", "filter.swap.clean", "sed s/EXPANDED/STORED/")
+        g("config", "filter.swap.smudge", "sed s/STORED/EXPANDED/")
+        (self.repo / ".gitattributes").write_text("fixture.txt filter=swap\n")
+        (self.repo / "fixture.txt").write_text("EXPANDED\n")
+        g("add", "-A")
+        g("commit", "-qm", "a filtered fixture")
+        self.assertEqual(gitops.git(self.repo, "cat-file", "-p", "HEAD:fixture.txt"), "STORED\n")
+        check = "grep -q EXPANDED fixture.txt"
+        self.start("t-swap", "ok", "--queue", "--test", check)
+        st = wait_phase("t-swap", {"review"})
+        wt = store.Task("t-swap").worktree
+        self.assertEqual((wt / "fixture.txt").read_text(), "EXPANDED\n")   # the task's bytes
+        self.assertTrue(st["base_check"]["ok"], st["base_check"])           # the base check's
+        (wt / "tests").mkdir()
+        (wt / "tests" / "test_x.py").write_text("")
+        run_wb("verify", "t-swap", "--test", check)
+        r = verify.last(store.Task("t-swap"))
+        self.assertEqual((r["base"]["exit"], r["candidate"]["exit"]), (0, 0))  # and verify's
+        clone = Path(self.tmp.name) / "bench-like"                          # and bench's
+        gitops.scratch_clone(self.repo, clone)
+        verify.checkout_settings(self.repo, clone)
+        gitops.git(clone, "checkout", "-q", "--detach", "HEAD")
+        self.assertEqual((clone / "fixture.txt").read_text(), "EXPANDED\n")
+        # a filter whose state the clone lacks (git-crypt's keys): said, not "fails on the base"
+        g("config", "filter.swap.smudge",
+          "sh -c 'case $(pwd -P) in *.verify-*) cat ;; *) sed s/STORED/EXPANDED/ ;; esac'")
+        self.start("t-swap2", "ok", "--queue", "--test", check)
+        st = wait_phase("t-swap2", {"review"})
+        self.assertEqual(st["base_check"]["exit"], "filtered", st["base_check"])
+        line = runner.base_check_line(st["base_check"], store.Task("t-swap2"))
+        self.assertIn("the base wasn't checked: fixture.txt checks out differently", line)
+        self.assertIn("filter.swap", line)
+        self.assertNotIn("fails", line)
+        # a required one that fails there: the checkout's failure, named
+        g("config", "filter.swap.required", "true")
+        g("config", "filter.swap.smudge",
+          "sh -c 'case $(pwd -P) in *.verify-*) exit 1 ;; *) sed s/STORED/EXPANDED/ ;; esac'")
+        code, out = verify.on_base(store.Task("t-swap2"), check, 60)
+        self.assertEqual(code, "filtered")
+        self.assertIn("failed in filter.swap", out)
+
     def test_a_renamed_test_is_checked_under_its_new_name(self):
         # #194 (the 2026-11-19 audit): the old name was listed too, the overlay asked the
         # candidate for it, and git stopped on the pathspec before either run

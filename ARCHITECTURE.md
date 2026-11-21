@@ -1264,7 +1264,11 @@ audit); a task prepared before the marks were recorded copies as before. A scrat
 configured for another checkout's tracked sources, the user's or the worktree's, with nothing to
 make it afresh, is refused (`_foreign_builds`: "copy failed", "<path> is a build tree configured
 for <dir>…", naming `--setup`); a dependency's build whose source is ignored is the same in every
-checkout and passes. Failing there, the run's exit is `"setup failed"`.
+checkout and passes. Failing there, the run's exit is `"setup failed"`. A checkout that isn't
+the task's bytes, a file under one of the repo's own filters checked out otherwise than in the
+worktree (`verify.filter_gap`) or a `required` filter's failure (`_filter_failed`), makes the
+run's exit `"filtered"`, naming the file and `filter.<driver>`: no run on other bytes is evidence
+(#932; *Checkout settings*).
 
 **The base check** (`_base_check`, `base_check`, before round 1 and the GPU): the acceptance
 command once on the untouched base, the same way but in a scratch checkout of the base
@@ -1281,7 +1285,8 @@ writes the step's tests: only those can fail it, so Claude checks the diff adds 
 without the change), a warning when `--test-timeout` cut it short (every round's tests will time
 out too), a note when it ran past 120 s (not checked; with a larger `--test-timeout`, that a round's run
 may pass it too, #496), a note when setting the scratch checkout
-up failed (not checked), else its exit and tail, for Claude to check it fails only for what the
+up failed (not checked), one when its checkout isn't the task's bytes (exit `"filtered"`: not
+checked, naming the filter, #932), else its exit and tail, for Claude to check it fails only for what the
 step changes. The warning also raises a `checkin` at once, so Claude
 can discard before round 1 lands. A passing base once did too, telling Claude to discard and start
 again: that cost a whole restart in one task of two (the 2026-11-17 measurement), so it is a note.
@@ -4987,7 +4992,16 @@ it. ACE-Step's takes peaked at -0.2 dBFS, near clipping, before any `loudnorm`: 
   reading a file byte for byte failed there alone. `verify.checkout_settings` gives each clone,
   before its checkout, the repo's local `core.eol`, `core.autocrlf`, `core.safecrlf`,
   `core.symlinks`, `core.filemode`, `core.ignorecase` and `core.checkRoundtripEncoding`
-  (`CHECKOUT_KEYS`) and its `info/attributes`. bench's clones too: `bench add`'s base and
+  (`CHECKOUT_KEYS`), its own `filter.<driver>.*` but LFS's, which `share_lfs` gives
+  (`verify.local_filters`: git-crypt, transcrypt, a hand-written clean/smudge; without them a
+  filtered file checked out as the stored blob and the base check failed on an unchanged file,
+  which read as evidence for the step, #932; the main checkout runs the same commands) and its
+  `info/attributes`. A filter that keeps state in the git dir (git-crypt's keys) still can't work
+  there: after the checkout, up to `FILTER_SAMPLE` (50) filtered files with the same blob as the
+  task's worktree and unedited there are compared byte for byte (`verify.filter_gap`), and a
+  difference, or a checkout a `required` filter failed, makes the run `"filtered"`: the base
+  check's note says the base wasn't checked, `wb verify` is `inconclusive` with the reason
+  (result.json `filtered`), `wb shot`'s side `exit filtered`. bench's clones too: `bench add`'s base and
   reference checks and each replay's checkout (`bench._clone_base`, from the case's repo while it
   lasts); without them the reference check read LF where the task read CRLF and refused the case,
   and replays were graded on other bytes (#736, the 2026-11-21 audit).
@@ -6934,7 +6948,7 @@ check-ins off), not `wb start`'s.
 | `self_reviewed` | `[steps, reviews]` when the self-review round last ran (`tuned.self_review` on: once per review round) |
 | `reviewed` | `{step, tree}`: the working tree the last review notice showed, a tree object (`gitops.snapshot`, bulky new files left out); the next review notice of the same step shows the diff since it (the whole diff once git gc pruned it, #795) |
 | `tests` | `{ok, exit, tail, round, lane?, proxy?, hang?}` of the last test run (`exit`: a code, `timeout` or `output limit`; `lane`: the device nodes it was refused outside the lane, #331; `proxy`: the proxy variables the agent's environment left out, when the run failed on a connection, #380; `hang`: `{base, limit}`, a timeout of a command the base check ran in a quarter of the limit or less, #779) |
-| `base_check` | `{ok, exit, tail, limit, secs, cmd}` of the acceptance command run once on the base, in the lane (`runner.base_check`; `exit` is `"timeout"` past `limit`, `"setup failed"` when its scratch checkout couldn't be set up); the runner, before round 1, only with `--test` and without `--no-base-check` |
+| `base_check` | `{ok, exit, tail, limit, secs, cmd}` of the acceptance command run once on the base, in the lane (`runner.base_check`; `exit` is `"timeout"` past `limit`, `"setup failed"` when its scratch checkout couldn't be set up, `"filtered"` when it isn't the task's bytes, #932); the runner, before round 1, only with `--test` and without `--no-base-check` |
 | `infra` | why the machine, not the agent, failed the task: `setup` (`runner._prepare`), `model` (`_load_failed`: it couldn't load, or its server stayed down past `DOWN_WAIT`, or died again after a round's revive: #657), `crash`, `disk full` (the runner's crash handler), `runner died` (`cli.reap`); cleared at each runner's start. A replay with it is an `error` row, not `failed` (*Bench*, #508) |
 | `prepared` | true once the worktree is set up (`runner._prepare`: `setup`, `copy`, `siblings`), so a later run of the runner doesn't again |
 | `checked_out`, `checkout_secs` | `runner.checkout`: the worktree is made (task.json `checkout: "runner"`, #529); how long the checkout took |

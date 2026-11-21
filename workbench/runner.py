@@ -2108,6 +2108,8 @@ def base_check_line(r: dict, task: store.Task) -> str:
         tail = "\n".join("    " + line for line in r["tail"].splitlines())
         return (f"note: setting up the base's scratch checkout failed, so the base wasn't checked "
                 f"({task.dir / 'base-tests.txt'}):\n{tail}")
+    if r["exit"] == "filtered":  # its checkout isn't the task's bytes: a failure there says nothing (#932)
+        return f"note: the base wasn't checked: {r['tail'].strip().strip('[]')}"
     if r["exit"] == "timeout":
         limit = r.get("limit", BASE_CHECK_SECS)
         if limit < BASE_CHECK_SECS:  # --test-timeout set it: every round's tests stop there too
