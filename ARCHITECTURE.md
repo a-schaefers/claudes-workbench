@@ -3766,8 +3766,9 @@ names, each one's memory from its driver's registry key, `HardwareInformation.qw
 the display class `{4d36e968-e325-11ce-bfc1-08002be10318}`, since `AdapterRAM` caps at 4 GB),
 kept `WINDOWS_FOR` (an hour) in `wsl-gpus.json` (`store.machine_dir()`), as a PowerShell start takes seconds.
 
-`powershell.exe` from PATH, else Windows' own under WSL's automount root (`hardware.powershell`:
-`[automount] root` in `/etc/wsl.conf`, `/mnt/` by default, then `WINDOWS_POWERSHELL`), since
+`powershell.exe` from PATH, else Windows' own under WSL's automount root (`hardware.powershell`,
+through `hardware.windows_program`: `[automount] root` in `/etc/wsl.conf`, `/mnt/` by default, then
+`WINDOWS_POWERSHELL`), since
 `[interop] appendWindowsPath=false` takes it off PATH. A read that lists nothing (no PowerShell,
 one past `_run`'s 10 s after a boot; Windows always lists an adapter) is no reading: the last good
 one stays, its `tried` stamp waits `WINDOWS_RETRY` (60 s) before PowerShell is asked again.
@@ -5785,8 +5786,11 @@ this machine's full MagicDNS name while Tailscale is up (`chat.tailnet_name`, fr
 --json`, asked at most every `REPLAN_EVERY` 30 s and only for a Host not already answered):
 `tailscale serve --bg 1337` passes that name through as the Host, and the default localhost chat
 answered the page itself 403 `unknown host` (#448). Under WSL with no Linux CLI it asks Windows'
-`tailscale.exe` on PATH (`tailscale(windows=True)`: Tailscale's own WSL2 setup, whose serve
-reaches WSL through Windows' localhost forwarding; `which` never tries `.exe`, #920); the
+`tailscale.exe` (`tailscale(windows=True)`: Tailscale's own WSL2 setup, whose serve
+reaches WSL through Windows' localhost forwarding; `which` never tries `.exe`, #920), from PATH,
+else `TAILSCALE_WINDOWS` under WSL's automount root (`hardware.windows_program`, as for
+PowerShell): `wb-chat.service` runs with the user manager's PATH, and `appendWindowsPath=false`
+leaves Windows' off too; the
 `tailscale` bind doesn't, as Windows' tailnet IP isn't on WSL's interfaces in NAT networking. Only the full name (`box.tailnet.ts.net`, the one
 serve's certificate has), which no other site's DNS can answer for. `serve` prints what it listens
 on, binds it skipped, and warnings for a wildcard bind or `hosts: *`; an address it can't listen

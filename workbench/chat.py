@@ -65,6 +65,8 @@ PUSH_WINDOW = 900       # only news this recent is pushed, never a backlog
 PUSH_RETRY = 30         # seconds before a device whose push failed for now is tried again
 # macOS's App Store and standalone Tailscale apps keep the CLI in the bundle, off PATH
 TAILSCALE_APP = "/Applications/Tailscale.app/Contents/MacOS/Tailscale"
+# Tailscale for Windows' CLI under WSL's automount root, for a chat whose PATH lacks Windows' (#920)
+TAILSCALE_WINDOWS = "c/Program Files/Tailscale/tailscale.exe"
 STATIC = Path(__file__).parent / "chat_static"
 TYPES = {".html": "text/html; charset=utf-8", ".js": "text/javascript; charset=utf-8",
          ".css": "text/css; charset=utf-8", ".svg": "image/svg+xml",
@@ -125,13 +127,16 @@ def tailscale(windows: bool = False) -> dict:
     when there is no CLI to ask (said apart from "not running": the 2026-11-16 audit).
     ``windows``: under WSL with no Linux CLI, Windows' tailscale.exe (Tailscale's own setup for
     WSL2), for the name `tailscale serve` passes in through Windows' localhost forwarding: `which`
-    never tries .exe, so the chat answered it 403 "unknown host" (#920). Not for the address: in
-    WSL's NAT networking, Windows' tailnet IP isn't on WSL's interfaces."""
+    never tries .exe, so the chat answered it 403 "unknown host" (#920). From PATH, else its
+    install under the automount root: wb-chat.service runs with the user manager's PATH, which
+    has none of Windows', as has appendWindowsPath=false (the review of #920). Not for the
+    address: in WSL's NAT networking, Windows' tailnet IP isn't on WSL's interfaces."""
     cli = shutil.which("tailscale") or (TAILSCALE_APP if sys.platform == "darwin"
                                         and os.path.isfile(TAILSCALE_APP) else None)
     if not cli and windows:
         from . import hardware
-        cli = shutil.which("tailscale.exe") if hardware.system() == "wsl" else None
+        cli = (hardware.windows_program("tailscale.exe", TAILSCALE_WINDOWS)
+               if hardware.system() == "wsl" else None)
     if not cli:
         return {"missing": True}
     try:

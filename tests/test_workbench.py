@@ -17896,6 +17896,30 @@ class WebChat(Base):
                 mock.patch.object(hardware, "system", return_value="linux"):   # not WSL
             self.assertEqual(chat.tailnet_name(), "")
 
+    def test_on_wsl_a_chat_without_windows_path_finds_tailscale_exe_under_the_automount_root(self):
+        # the review of #920: wb-chat.service runs with the user manager's PATH, and
+        # appendWindowsPath=false leaves Windows' off too, so `which("tailscale.exe")` found
+        # nothing and the chat behind `tailscale serve` still answered 403 "unknown host"
+        chat, tok = self.chat, self.chat.token()
+        me = {"Self": {"TailscaleIPs": ["100.64.0.9"], "DNSName": "box.tail1234.ts.net.",
+                       "HostName": "box"}}
+        ran = mock.Mock(return_value=types.SimpleNamespace(stdout=json.dumps(me)))
+        from workbench import hardware
+        with tempfile.TemporaryDirectory() as root:
+            exe = Path(root, chat.TAILSCALE_WINDOWS)
+            exe.parent.mkdir(parents=True)
+            exe.write_text("")
+            with mock.patch.object(chat, "_tailnet", {"at": float("-inf"), "name": ""}), \
+                    mock.patch.object(chat.shutil, "which", lambda n: None), \
+                    mock.patch.object(hardware.shutil, "which", lambda n: None), \
+                    mock.patch.object(hardware, "_read", lambda path: f"[automount]\nroot = {root}\n"
+                                      if path == hardware.WSL_CONF else ""), \
+                    mock.patch.object(chat.sys, "platform", "linux"), \
+                    mock.patch.object(hardware, "system", return_value="wsl"), \
+                    mock.patch.object(chat.subprocess, "run", ran):
+                self.assertEqual(self.call("/api/state", token=tok, host="box.tail1234.ts.net")[0], 200)
+                self.assertEqual(ran.call_args[0][0][0], str(exe))
+
     def test_a_wildcard_chat_answers_to_the_address_it_was_reached_on_where_the_host_name_says_127_0_1_1(self):
         # #533 (the 2026-11-20 audit): with bind 0.0.0.0 the names came from the host name, which
         # Debian's /etc/hosts maps to 127.0.1.1, so a phone on the LAN IP got a bare 403
