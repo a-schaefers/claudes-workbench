@@ -2637,8 +2637,10 @@ nothing until a surface attaches.
 
 - **The pane** (opened by `/workbench`, or once per load when a task runs, and closed by a quit command;
   `/workbench` run again brings it back) has three tabs, **Tasks**, **Stats** and **Settings** (Buttons on its
-  last line, keys `1`, `2` and `3`: Stats in the middle, looked at more often than Settings; last, since the pane follows its end and a row at the top scrolled
-  away under a long transcript). Closed by the user (its mark, Esc), it is minimized, as
+  second-to-last line, keys `1`, `2` and `3`: Stats in the middle, looked at more often than Settings; at the foot, since the pane follows its end and a row at the top scrolled
+  away under a long transcript). Under them on every tab, always, is a modeline as in Emacs or Vim:
+  `[•_•] Claude's Workbench` (the apprentice's `FACE.rest`, `MODELINE`) on a bar in the theme's
+  `claude` color with `inverseText`, so it reads on a dark or a light terminal (the user, 2026-11-21). Closed by the user (its mark, Esc), it is minimized, as
   backseat-driver's is (2026-11-19): a strip above the prompt stands in for it while workbench mode
   is on or the session has tasks, `▸ Workbench`, `Tasks`, `Stats`, `Settings` (each a way back, to that tab)
   and the status line's summary; a press there or `/workbench` brings it back; a quit command
