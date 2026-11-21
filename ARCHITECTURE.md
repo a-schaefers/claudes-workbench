@@ -5887,7 +5887,10 @@ the whole lines and the offset after the last one, skipping bad lines (bad JSON,
 aren't UTF-8). `scrub(data)` makes every lone surrogate in data's strings U+FFFD and `loads(text)`
 is `json.loads` then `scrub`, for JSON from outside workbench (#438). All of them read and write UTF-8 whatever the locale (the 2026-11-16 audit: under a
 legacy one an em dash in a spec failed to write), as do `wb start|next|feedback`'s specs and
-prompts, and the runner runs under `-X utf8`. `results(trials=False)` leaves out trial rows;
+prompts, and the runner runs under `-X utf8`. `results(trials=False)` leaves out trial rows,
+and parses the file again only when its inode, size or mtime changed, so the router, the slice
+and `wb tune`, asking per model, size and knob, read it once per command (#727: 9 and 25 full
+reads of a 20,000-row history, 2.9 s and 7.8 s; the rows are shared, so callers don't change them);
 `mark_trials` rewrites results.jsonl under its lock. `Task(name)`: `spec` (task.json) and `status`
 are re-read on every access; `set_status(**kw)` is a read-modify-write under `locks/<task>.status.lock` that adds
 `updated_at`; `set_status_if(check, **kw)` writes only while `check(status)` holds under that

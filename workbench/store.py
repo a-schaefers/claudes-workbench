@@ -427,11 +427,29 @@ def append_jsonl(path: Path, row: dict, after: float | None = None) -> None:
             fh.write(line)
 
 
+_results_seen: dict = {}  # path -> (inode, size, mtime_ns), rows: results() parses a file once
+
+
 def results(trials: bool = False) -> list[dict]:
     """results.jsonl's rows: the evidence the router and the skill records learn from, which a
-    trial run (a check of workbench itself on a scratch repo) is not, unless asked for."""
-    rows = read_jsonl(home() / "results.jsonl")[0]
-    return rows if trials else [r for r in rows if not r.get("trial")]
+    trial run (a check of workbench itself on a scratch repo) is not, unless asked for.
+    The file is parsed again only when it changed (its inode, size or mtime): the router, the
+    slice and `wb tune` asked for it per model, size and knob, and at 20,000 rows `wb models`
+    read it 9 times (2.9 s) and `wb tune` 25 (7.8 s) (#727). Callers don't change the rows."""
+    path = home() / "results.jsonl"
+    try:
+        st = path.stat()
+        stamp = (st.st_ino, st.st_size, st.st_mtime_ns)
+    except FileNotFoundError:
+        stamp = None
+    seen = _results_seen.get(path)
+    if seen is not None and seen[0] == stamp:
+        rows = seen[1]
+    else:
+        rows = read_jsonl(path)[0] if stamp else []
+        _results_seen.clear()  # one file at a time: a test's WB_HOME, then the next one's
+        _results_seen[path] = (stamp, rows)
+    return list(rows) if trials else [r for r in rows if not r.get("trial")]
 
 
 def notices() -> list[dict]:

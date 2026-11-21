@@ -8784,6 +8784,23 @@ class Routing(Base):
         self.assertIn("t-open still open", err.getvalue())
         self.assertNotIn("aaaaaa", lessons._all()[1])
 
+    def test_results_are_parsed_once_per_change_however_many_models_and_sizes_ask(self):
+        # #727: the router, the slice and wb tune re-read results.jsonl per model, size and knob;
+        # at 20,000 rows wb models took 2.9 s and wb tune 7.8 s
+        from workbench import models, router
+        self.result("strata/strata", "significant", "accepted", n=3)
+        real, reads = store.read_jsonl, []
+        with mock.patch.object(store, "read_jsonl",
+                               lambda p, *a: reads.append(Path(p).name) or real(p, *a)):
+            for size in router.SIZES:
+                router.rank(size)
+            for m in models.discover().values():
+                router.slice(m)
+            self.assertEqual(reads.count("results.jsonl"), 1)
+            self.result("strata/strata", "significant", "discarded")      # appended: read again
+            self.assertIn("3/4 real tasks accepted", router.choose("significant")[1])
+            self.assertEqual(reads.count("results.jsonl"), 2)
+
     def test_set_default_writes_the_pick_to_opencode(self):
         out = run_wb("models", "--set-default")
         self.assertIn("→ strata/strata", out)
@@ -11892,7 +11909,7 @@ class Stats(Base):
         with mock.patch.object(store, "read_jsonl", counted):
             reads.clear()
             head = stats.feed(now, only=stats.SUMMARY)
-        self.assertEqual(len(reads), 1)
+        self.assertEqual(len(reads), 0)  # unchanged since: not parsed again (#727)
         self.assertNotIn("helps", head)
         self.assertNotIn("models", head)
         self.assertEqual(stats.summary(head), stats.summary(f))
