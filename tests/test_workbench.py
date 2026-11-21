@@ -2910,6 +2910,40 @@ class Context(Base):
         wait_phase("t-nr", {"review"})
         self.assertNotIn("failed", [r["kind"] for r in store.notices() if r["task"] == "t-nr"])
 
+    def test_a_step_with_no_changes_advances_and_a_failed_commit_keeps_the_proposals(self):
+        # #507 (Claude's audit of 1.90): a step that changed nothing died on "nothing to commit"
+        # and stayed put; and wb next dropped the agent's CLAUDE.md.proposed before a commit
+        # that then failed, so a retry with --take-claude-md had nothing to take
+        self.start("t-ne", "ok")
+        wait_phase("t-ne", {"review"})
+        step = Path(self.tmp.name) / "step.md"
+        step.write_text("Check the answer again.\n")
+        run_wb("next", "t-ne", "--spec", str(step), "-m", "feat: step one")
+        wait_phase("t-ne", {"review"})                     # step 2 rewrote the same answer
+        out = run_wb("next", "t-ne", "--spec", str(step), "-m", "feat: step two")
+        self.assertIn("step 2 of t-ne had no changes; step 3 sent", out)
+        st = wait_phase("t-ne", {"review"})
+        self.assertEqual(st["steps"], 3)
+        self.assertTrue(self.runs()[2]["prompt"].startswith(
+            "Step 2 of this task is done and committed (no changes to commit). The next step:"))
+        log = lambda: subprocess.run(["git", "-C", str(self.repo), "log", "--format=%s",  # noqa
+                                      "delegate/t-ne"], capture_output=True, text=True).stdout
+        self.assertNotIn("feat: step two", log())
+        t = store.Task("t-ne")
+        prop = t.worktree / "CLAUDE.md.proposed"
+        prop.write_text("# repo\nA test project. Answers go in answer.txt.\n")
+        subprocess.run(["git", "init", "-q", str(t.worktree / "nest")], check=True)  # refused
+        with self.assertRaises(SystemExit):
+            run_wb("next", "t-ne", "--spec", str(step), "-m", "feat: step three")
+        self.assertTrue(prop.is_file())                    # still there to take
+        self.assertEqual((t.worktree / "CLAUDE.md").read_text(), "# repo\nA test project.\n")
+        shutil.rmtree(t.worktree / "nest")
+        out = run_wb("next", "t-ne", "--spec", str(step), "-m", "feat: step three",
+                     "--take-claude-md")
+        self.assertIn("took the agent's proposed CLAUDE.md", out)
+        self.assertIn("step 3 of t-ne committed", out)
+        self.assertIn("feat: step three", log())
+
 
 class StartChecks(Base):
     """What wb start and the first report say about the setup itself: an OpenCode outside the
