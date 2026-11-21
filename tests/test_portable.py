@@ -1393,6 +1393,7 @@ class Real(unittest.TestCase):
         self.config({"box": {"options": {"baseURL": f"http://127.0.0.1:{port}/v1"},
                              "models": {"x": {}, "y": {}}}}, {"box": {"local": True}})
         with mock.patch.object(models, "_this_host", lambda h: False), \
+                mock.patch.object(models, "INFLIGHT_WATCH", 0.3), \
                 mock.patch.object(models, "BOX_QUIET", 30), mock.patch.object(models, "BOX_POLL", 0.1):
             found = models.discover()
             models.make_resident(found["box/x"], say=lambda *_: None, warn=lambda *_: None)
@@ -1404,6 +1405,42 @@ class Real(unittest.TestCase):
             self.assertLess(time.monotonic() - began, 5)                # no BOX_QUIET wait
             loaded[:] = [{"name": "theirs", "size": 10, "size_vram": 10, "expires_at": at(300)}]
             self.assertEqual(models.box_others(found["box/y"]), ["theirs"])   # still another's
+
+    def test_a_model_this_machine_once_loaded_on_its_box_is_waited_for_while_another_client_uses_it(self):
+        # #893: boxes.json marked a model this machine loaded on Monday as its own for a week, so
+        # on Wednesday, with another client mid-round on it, the load evicted it without waiting
+        # or a word. A request on it now is another client's: this machine runs one task there
+        at = lambda s: time.strftime("%Y-%m-%dT%H:%M:%S", time.gmtime(time.time() + s)) + ".1Z"  # noqa
+        x = {"name": "x", "size": 10, "size_vram": 10, "expires_at": at(300)}
+        loaded, posts = [], []
+        srv, port = fake_ollama(loaded, ["x", "y"], posts)
+        self.servers.append(srv)
+        self.config({"box": {"options": {"baseURL": f"http://127.0.0.1:{port}/v1"},
+                             "models": {"x": {}, "y": {}}}}, {"box": {"local": True}})
+        warned, requests = [], []
+
+        def request():  # the other client's request on x finishes
+            requests.append(time.monotonic())
+            x["expires_at"] = at(300 + len(requests))
+        with mock.patch.object(models, "_this_host", lambda h: False), \
+                mock.patch.object(models, "INFLIGHT_WATCH", 1), \
+                mock.patch.object(models, "BOX_QUIET", 1.5), mock.patch.object(models, "BOX_POLL", 0.1):
+            found = models.discover()
+            models.make_resident(found["box/x"], say=lambda *_: None, warn=lambda *_: None)
+            root = found["box/x"].root
+            self.assertIn("x", models.box_mine(root))
+            loaded[:] = [x]
+            self.assertEqual(models.box_others(found["box/y"]), [])                 # as before
+            self.assertEqual(models.box_others(found["box/y"], own=True), ["x"])
+            threading.Timer(0.4, request).start()
+            posts[:] = []
+            models.make_resident(found["box/y"], say=lambda *_: None, warn=warned.append)
+            loaded_at = time.monotonic()
+        self.assertEqual(len(requests), 1)
+        self.assertGreaterEqual(loaded_at - requests[-1], 1.5)       # waited BOX_QUIET for it
+        self.assertIn("x on 127.0.0.1 is answering another client's requests", warned[0])
+        self.assertNotIn("x", models.box_mine(root))                   # no longer taken as ours
+        self.assertEqual([p["model"] for p in posts], ["y"])
 
     def test_a_remote_task_hears_when_another_client_unloaded_its_model_between_rounds(self):
         # #812: the other client's load evicted this task's model, and nothing told this task why

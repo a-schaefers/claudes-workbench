@@ -1285,10 +1285,11 @@ def make_resident(m: Model, say=print, keep=(), warn=None) -> float:
     t0 = time.time()
     if not away and not _room_beside(m):
         free_gpu(keep={m.id, *keep}, say=say, warn=warn, of=m)
-    others = box_others(m, keep) if away else []
+    # this machine's own marks too: another client may be mid-round on one of them (#893)
+    others = box_others(m, keep, own=True) if away else []
     host = urlparse(m.root).hostname
     if others:  # another client's model on the box: not evicted in the middle of its round
-        box_quiet(m, others, say, warn)
+        others = box_quiet(m, others, say, warn, mine=box_mine(m.root))
     if m.engine == "ollama":
         if respread:
             # Ollama never re-places a loaded runner: a generate with the same options reuses
@@ -1697,16 +1698,26 @@ BOX_WAIT = 2400  # at most this long waiting for it: a round's default limit (ro
 BOX_POLL = 2.0   # seconds between two looks at the box's /api/ps meanwhile
 
 
-def box_quiet(m: Model, others: list[str], say, warn) -> None:
+def box_quiet(m: Model, others: list[str], say, warn, mine=()) -> list[str]:
     """Wait, up to BOX_WAIT, until each of ``others`` (box_others: what the box has loaded for
     another client) has had no request for BOX_QUIET seconds in a row, or has gone, before ``m``
     is loaded over it (#812). Watched from now: /api/ps says when a model expires, not when it was
     last used. A request finishing moves its expires_at, and one past is a request still running
-    (_past, as _in_use reads them). A server that gives no expires_at has nothing to watch."""
+    (_past, as _in_use reads them). A server that gives no expires_at has nothing to watch.
+    One of ``mine`` (box_mine: this machine loaded it there) is only watched for INFLIGHT_WATCH:
+    this machine runs one task at a time on a box (its pool), so a request on it now is another
+    client's, and its mark is dropped (_forget_mine). Before, a mark kept a week hid a model
+    another client was mid-round on, and the load evicted it unwarned (#893). Returns the models
+    taken as another client's (``others`` less this machine's idle ones)."""
     host, root = urlparse(m.root).hostname, m.root
+    own = [n for n in others if any(_matches(x, {n}) for x in mine)]
+    used = {n for _, n in _in_use({root: own})} if own else set()
+    if used:
+        _forget_mine(root, used)
+    others = [n for n in others if n not in own or n in used]
     last = _stamps({root: others})
     if not last:
-        return
+        return others
     names = ", ".join(sorted({n for _, n in last}))
     say(f"{names} on {host} is another client's: loading {m.name} once it has gone "
         f"{BOX_QUIET} s without a request")
@@ -1714,7 +1725,9 @@ def box_quiet(m: Model, others: list[str], say, warn) -> None:
     busy = False
     while True:
         now = _stamps({root: others})
-        moved = sorted({k[1] for k, v in now.items() if _past(v) or last.get(k) not in (None, v)})
+        moved = sorted({k[1] for k, v in now.items() if _past(v) or last.get(k) not in (None, v)}
+                       | used)
+        used = set()  # seen answering in the watch above: counted once, from now
         if moved:
             quiet = time.monotonic()
             if not busy:
@@ -1724,22 +1737,24 @@ def box_quiet(m: Model, others: list[str], say, warn) -> None:
             busy = True
         last = now
         if not now or time.monotonic() - quiet >= BOX_QUIET:
-            return
+            return others
         if time.monotonic() - began >= BOX_WAIT:
             warn(f"{names} on {host} was still in use after {BOX_WAIT // 60} min: loading "
                  f"{m.name} anyway, and the two may swap on every request ({BOX_SHARED})")
-            return
+            return others
         time.sleep(min(BOX_POLL, max(BOX_QUIET - (time.monotonic() - quiet), 0) + 0.01,
                        max(BOX_WAIT - (time.monotonic() - began), 0) + 0.01))
 
 
-def box_others(m: Model, keep=()) -> list[str]:
+def box_others(m: Model, keep=(), own: bool = False) -> list[str]:
     """The models a wb remote box (``m``'s Ollama on another machine) has loaded that this
     client's task isn't using: ``m`` and the models ``keep`` names aside, and keep_loaded's.
-    Another client's, or the box's own. [] when it doesn't answer, and for a local model."""
+    Another client's, or the box's own. [] when it doesn't answer, and for a local model.
+    ``own``: the ones this machine loaded there too (box_mine), which another client may be
+    using since (#893): box_quiet tells which."""
     if m.engine != "ollama" or not m.remote or same_gpu(m) or _fake():
         return []
-    held, found, mine = keep_loaded(), discover(), box_mine(m.root)
+    held, found, mine = keep_loaded(), discover(), set() if own else box_mine(m.root)
     ours = [m, *(o for o in (found.get(k) for k in keep) if o)]
     return [n for n in _ollama_loaded(m.root) if n and not _kept_name(n, held)
             and not any(o.server == m.server and _matches(o.name, {n}) for o in ours)
@@ -1764,6 +1779,18 @@ def box_mine(root: str) -> set[str]:
     now = time.time()
     return {n for n, t in (row if isinstance(row, dict) else {}).items()
             if isinstance(t, (int, float)) and now - t < BOX_MINE_S}
+
+
+def _forget_mine(root: str, names) -> None:
+    """Drop box_mine's mark on ``names`` at ``root``: another client was seen using them (#893)."""
+    with store.locked(_boxes_path().with_suffix(".lock")):
+        saved = store.read_json(_boxes_path(), {}) or {}
+        row = saved.get(root) if isinstance(saved, dict) else None
+        if not isinstance(row, dict):
+            return
+        left = {n: t for n, t in row.items() if not any(_matches(n, {x}) for x in names)}
+        if left != row:
+            store.write_json(_boxes_path(), {**saved, root: left})
 
 
 def _note_mine(m: Model) -> None:
@@ -2447,7 +2474,9 @@ class GpuLease:
         if self.m.remote:
             # gone from a wb remote box since this task's last round, with another client's model
             # there: the other client's load evicted it, and nothing said so to this task (#812)
-            if self.loaded and (others := box_others(self.m)) and not status(self.m)["resident"]:
+            # own=True: this task is this machine's one on the box, so what replaced its model
+            # was another client's, even one this machine once loaded itself (#893)
+            if self.loaded and (others := box_others(self.m, own=True)) and not status(self.m)["resident"]:
                 self.warn(f"{self.m.name} was unloaded from {urlparse(self.m.root).hostname} since "
                           f"the last round, which has {', '.join(others)} loaded for another "
                           f"client: {BOX_SHARED}")

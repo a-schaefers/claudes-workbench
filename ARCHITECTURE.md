@@ -2957,7 +2957,10 @@ a running one lets pass). So the clients coordinate through that (`models.box_ot
 `box_quiet`, `BOX_SHARED`, #812): before loading its model on the box, a client waits while a
 model loaded there that its task doesn't run (keep_loaded's aside, and any this machine loaded
 there itself in the last week: `box_mine`, `$WB_HOME/boxes.json` `{root: {name: ts}}`, written by
-each load, so one user with one box never waits on their own last task's model) has had a request in the last
+each load, so one user with one box never waits on their own last task's model; such a model is
+still watched for `INFLIGHT_WATCH`, since this machine runs one task at a time on the box and a
+request on it now is another client's: then its mark is dropped, `_forget_mine`, and it is waited
+for like another's, #893) has had a request in the last
 `BOX_QUIET` (150 s, watched from then on: `/api/ps` says when a model expires, not when it was
 last used), up to `BOX_WAIT` (40 min, a round's default limit); within a round the agent's
 requests are seldom further apart, since OpenCode sends a shell command past 2 minutes to the
@@ -2969,7 +2972,8 @@ stop: a round that begins while the other's model is quiet (its tool running pas
 a wait cut off by `BOX_WAIT`, or a client of an older wb, Open WebUI or anything else that loads
 without looking, still swap their models on each request. A model the load evicted anyway is
 named in a `gpu` event, and so is the task's own model found gone from the box at its next round
-while another client's is loaded there (`GpuLease.load`); `wb start` notes the models the box has
+while another client's is loaded there (`GpuLease.load`, counting the models this machine once
+loaded there too: `box_others(own=True)`, #893); `wb start` notes the models the box has
 loaded for someone else, and that the runner waits for them. Run such tasks at different times,
 or on models that fit the box together. Their energy isn't measured, and the savings lines say so. A second machine adds a
 model beside this one's; it doesn't make one model faster. Another server there (llama.cpp, LM
@@ -6537,7 +6541,7 @@ $WB_HOME (~/.local/state/workbench)
   gpu-<host>-<port>.{lock,json,admit,load}   the same for a remote server's models (models.pool)
   scout.json  watch.json         the weekly model check: when it was done and offered; the watch list
   update.json                    wb update: when origin was last asked, how far behind this copy was
-  boxes.json                     what this machine loaded on each wb remote box ({root: {name: ts}}, models.box_mine): its own models there aren't another client's (#812)
+  boxes.json                     what this machine loaded on each wb remote box ({root: {name: ts}}, models.box_mine): its own models there aren't another client's (#812) unless seen in use (#893)
   wsl-gpus.json                  WSL only: Windows' display adapters ({ts, gpus: [{name, vram}], tried?}), re-read hourly (hardware.WINDOWS_FOR); a failed read keeps the last good one and stamps tried (retried after WINDOWS_RETRY)
   bench/cases/<case>/            case.json  spec.md  base.bundle  hidden/<path>…  reference.patch
   bench/runs/<run>/              plan.json  driver.log  <task>/{wb.log,diff.patch,grade.txt} (repo/ while it runs)
