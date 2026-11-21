@@ -6285,6 +6285,30 @@ class Lane(Base):
                                        "-m", "x").stderr)
         self.assertIn("read-only", git("init", "-q", str(home / "notes" / "x")).stderr)
 
+    def test_the_agents_scratch_commits_and_tags_are_never_signed(self):
+        # #666 (the 2026-11-21 audit): with commit.gpgsign in ~/.gitconfig, every test that
+        # committed in a /tmp repo failed in the lane ('gpg failed to sign the data')
+        self.start("t-unsigned", "ok")
+        wait_phase("t-unsigned", {"review"})
+        task = store.Task("t-unsigned")
+        conf = Path(self.tmp.name) / "gitconfig"
+        conf.write_text("[user]\n\tname = t\n\temail = t@t\n[commit]\n\tgpgsign = true\n"
+                        "[tag]\n\tgpgsign = true\n[gpg]\n\tprogram = false\n")
+        with mock.patch.dict(os.environ, {"GIT_CONFIG_GLOBAL": str(conf), "GIT_CONFIG_COUNT": "1",
+                                          "GIT_CONFIG_KEY_0": "core.abbrev",
+                                          "GIT_CONFIG_VALUE_0": "9"}):
+            env = runner.agent_env(task)
+        fixture = Path(tempfile.mkdtemp())
+        self.addCleanup(shutil.rmtree, fixture, True)
+        git = lambda *a: subprocess.run(["git", "-C", str(fixture), *a], env=env,
+                                        capture_output=True, text=True)
+        self.assertEqual(git("init", "-q").returncode, 0)
+        out = git("commit", "-q", "--allow-empty", "-m", "fixture")
+        self.assertEqual(out.returncode, 0, out.stderr)
+        out = git("tag", "-a", "v1", "-m", "v1")
+        self.assertEqual(out.returncode, 0, out.stderr)
+        self.assertEqual(len(git("rev-parse", "--short", "HEAD").stdout.strip()), 9)  # kept
+
     def test_a_fresh_cargo_home_gets_its_caches_made_so_the_split_grants_them(self):
         # the 0.90 review: ~/.cargo split around bin/ and env granted only what existed, so a
         # fresh rustup install couldn't make registry/ and a git dependency couldn't make git/

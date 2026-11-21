@@ -1503,7 +1503,11 @@ prefixes; `SSH_AUTH_SOCK`, `SSH_AGENT_PID`, `GPG_AGENT_INFO`, `DBUS_SESSION_BUS_
 `AWS_DEFAULT_REGION`, `GOOGLE_CLOUD_PROJECT`, `GOOGLE_CLOUD_REGION`); plus `PWD` (the worktree),
 `OPENCODE_CONFIG`, `OPENCODE_CONFIG_CONTENT` (the rules again, below), `WB_TASK`, `WB_HOME`, `WB_RUN` (the run's id, for `sweep`), its
 own `XDG_RUNTIME_DIR` (`context.runtime_dir`, with the lane on), `PYTHONDONTWRITEBYTECODE=1` (no
-`__pycache__` in the diff) and the shim's `PATH` (on WSL with the lane on, without the Windows
+`__pycache__` in the diff), signing off for its git (`NO_SIGNING`: `commit.gpgsign=false` and
+`tag.gpgsign=false` as `GIT_CONFIG_COUNT`/`GIT_CONFIG_KEY_<n>`/`GIT_CONFIG_VALUE_<n>`, after any the
+user set, `git_config_env`: with `commit.gpgsign` in `~/.gitconfig`, every test that committed in
+a scratch repo failed in the lane, the keys and agents out of reach, and the base check blamed
+the project, #666; the agent commits to no repo of the user's anyway) and the shim's `PATH` (on WSL with the lane on, without the Windows
 drives' directories, and without `WSL_INTEROP`: `context.agent_path`). A provider that needs a key from the
 environment, or tests that need `DATABASE_URL` and the like, name it in `commands.json` `"env":
 [names]`, which passes it through. A proxy that holds a password (`https_proxy=http://user:pass@proxy:3128`)

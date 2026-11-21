@@ -335,6 +335,26 @@ def env_kept(name: str, value: str, through: set) -> bool:
     return name in through or name in ENV_KEEP or not (SECRET_ENV.search(name) or USERINFO.search(value))
 
 
+# Signing off for the agent's git: a user with commit.gpgsign or tag.gpgsign in ~/.gitconfig had
+# every test that commits in a scratch repo fail in the lane (the keys hidden, SSH_AUTH_SOCK and
+# the agent's sockets out of reach: 'gpg failed to sign the data'), the base check blamed on the
+# project (#666). The agent can't commit to the task's repo anyway; only scratch repos see this.
+NO_SIGNING = (("commit.gpgsign", "false"), ("tag.gpgsign", "false"))
+
+
+def git_config_env(env: dict, pairs=NO_SIGNING) -> dict:
+    """``pairs`` as git's GIT_CONFIG_COUNT/KEY_n/VALUE_n (git 2.31), after any already in ``env``."""
+    try:
+        n = max(int(env.get("GIT_CONFIG_COUNT") or 0), 0)
+    except ValueError:  # git refuses a bogus count itself; start over rather than add to it
+        n = 0
+    out = {}
+    for i, (k, v) in enumerate(pairs, n):
+        out[f"GIT_CONFIG_KEY_{i}"], out[f"GIT_CONFIG_VALUE_{i}"] = k, v
+    out["GIT_CONFIG_COUNT"] = str(n + len(pairs))
+    return out
+
+
 def agent_env(task: store.Task, run: str = "") -> dict:
     """The agent's environment: its config layer, and git read-only (gitguard.py). ``run``: the
     one run it is for (WB_RUN), which sweep can then end alone."""
@@ -345,6 +365,7 @@ def agent_env(task: store.Task, run: str = "") -> dict:
            "OPENCODE_CONFIG": str(layer), **rules_env(json.loads(layer.read_text())),
            "WB_TASK": task.name, "WB_HOME": str(store.home()), **CLEAN_ENV,
            **({"WB_RUN": run} if run else {})}
+    env.update(git_config_env(env))
     env["PATH"] = env.get("PATH") or os.defpath
     places = context.writable(task)
     if places is not None:  # its own: the user's holds their bus and agents
