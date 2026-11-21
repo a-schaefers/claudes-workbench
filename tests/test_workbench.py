@@ -1834,6 +1834,30 @@ class Lifecycle(Base):
         self.assertIn("wb accept t-half2 finishes it", refused("feedback", "t-half2", "--text", "x"))
         self.assertIn("accepted t-half2", run_wb("accept", "t-half2", "-m", "feat: answer", "--merge"))
 
+    def test_an_accept_cut_short_while_removing_the_worktree_is_finished_by_the_retry(self):
+        # the review of #878: killed partway through the worktree's removal, the retry found the
+        # files gone as changes (or its .git gone, a GitError) and refused, while discard and the
+        # rest pointed back at wb accept: no way out but rm -rf by hand
+        for name, keep_git in (("t-cut1", True), ("t-cut2", False)):
+            self.start(name, "ok", "--test", TEST_CMD)
+            wait_phase(name, {"review"})
+            task = store.Task(name)
+            tracked = [p for p in task.worktree.iterdir() if p.is_file() and p.name != ".git"]
+            self.assertTrue(tracked, name)
+
+            def cut(repo, worktree, keep_git=keep_git, tracked=tracked):
+                if not keep_git:
+                    (Path(worktree) / ".git").unlink()
+                tracked[0].unlink()          # a committed file gone, the rest still there
+                raise KeyboardInterrupt
+            with mock.patch.object(gitops, "remove_worktree", side_effect=cut), \
+                    self.assertRaises(KeyboardInterrupt):
+                run_wb("accept", name, "-m", "feat: answer")
+            self.assertEqual((task.worktree / ".git").exists(), keep_git, name)
+            self.assertIn(f"accepted {name}", run_wb("accept", name, "-m", "feat: answer"), name)
+            self.assertEqual(store.Task(name).status["phase"], "accepted", name)
+            self.assertFalse(task.worktree.exists(), name)
+
     def test_an_accept_retried_after_its_commit_landed_still_measures_the_step(self):
         # #879 (Claude's audit of 1.90.24): killed (or out of disk) between its commit and the
         # `closing` write, the retry measured since HEAD, its own commit: 0 files and 0 lines

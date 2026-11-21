@@ -2546,9 +2546,7 @@ def cmd_accept(a):
            f"\n\nWorkbench-Task: {a.name}\nOpenCode-Session: {st.get('session')}")
     if close:
         commit, measured = close["commit"], close.get("step")
-        if task.worktree.is_dir() and (gitops.changed(task.worktree) or gitops.git(
-                task.worktree, "rev-parse", "HEAD", check=False).strip() != gitops.git(
-                    repo, "rev-parse", "--verify", "-q", f"{commit}^{{commit}}", check=False).strip()):
+        if _gained_work(task, repo, commit):
             # the forced worktree removal below would delete what changed, and the merge leave
             # it out (#878)
             die(f"{a.name}'s worktree changed after an earlier wb accept committed {commit}: "
@@ -2681,6 +2679,23 @@ def cmd_accept(a):
     _say(lessons.nudge(task, "accepted"))
     if refused:  # accepted, not merged: a script or Claude reading 0 went on as if main had it
         sys.exit(NOT_MERGED)  # (#247, the audit of 1.2)
+
+
+def _gained_work(task: store.Task, repo: Path, commit: str) -> bool:
+    """Whether a retried accept's worktree holds work its commit doesn't: an intact worktree with
+    a change other than a deleted file, or moved off the commit. One the earlier try's removal
+    left half-deleted is not: its files gone read as deletions, its `.git` gone as a GitError,
+    and every retry refused it while discard, feedback and the rest pointed back at wb accept
+    (the review of #878). Nothing a deletion drops is lost: the commit has it."""
+    if not task.worktree.is_dir():
+        return False
+    try:
+        left = [ln for ln in gitops.changed(task.worktree).splitlines() if ln[:2].strip() != "D"]
+        head = gitops.git(task.worktree, "rev-parse", "HEAD", check=False).strip()
+    except gitops.GitError:  # its .git removed (or not what it said): being removed
+        return False
+    return bool(left) or head != gitops.git(
+        repo, "rev-parse", "--verify", "-q", f"{commit}^{{commit}}", check=False).strip()
 
 
 NOT_MERGED = 5  # wb accept --merge's exit status when the accept stands and the merge was refused
