@@ -916,6 +916,10 @@ class SharedLease(Base):
             self.assertFalse(models._alive(os.getpid(), start, me))    # ours can't be refused
             self.assertFalse(models._alive(os.getpid(), start))        # an entry from before: as before
             self.assertFalse(models._alive(os.getpid(), None, other))
+            # #806: /proc mounted hidepid hides its start time; EPERM still proves it is there
+            with mock.patch.object(models, "_started", lambda pid: None):
+                self.assertTrue(models._alive(os.getpid(), start, other))
+                self.assertFalse(models._alive(os.getpid(), start, me))
 
     def test_lease_files_another_account_made_can_still_be_locked(self):
         shared = Path(self.tmp.name) / "shared-gpu"

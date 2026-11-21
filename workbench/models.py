@@ -2396,7 +2396,10 @@ def _alive(pid: int, start: str | None = None, uid: int | None = None) -> bool:
     except PermissionError:
         if uid is None or uid == os.getuid() or not start:
             return False
-        return _started(pid) == start
+        # EPERM proves the pid exists. Under /proc mounted hidepid its start time can't be read
+        # (None): taken as gone, B shared the GPU with A's live runner and unloaded its model (#806)
+        now = _started(pid)
+        return now is None or now == start
     except ProcessLookupError:
         return False
     except (OverflowError, ValueError):

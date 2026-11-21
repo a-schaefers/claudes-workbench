@@ -3108,8 +3108,10 @@ directory's write). In a shared lease every file is the group's to read (`LEASE_
 `store.write_json(…, mode=)`): under one account's umask 077 they were 0600, and every other
 account's `holders()`, `wb start`, `wb optimize` and `GpuLease` failed with PermissionError (#802).
 `wb doctor` names any the group still can't read (`unshared_lease_files`), with the chmod. Each entry carries `uid` and `user`: a holder of another uid can't be
-signalled, so `_alive` takes it as alive when its start time matches (an entry of this uid, or
-one without `uid` or `start`, refused a signal is still dead). Another account's model id is
+signalled, so `_alive` takes it as alive when its start time matches, or can't be read (/proc
+mounted hidepid: the refusal proves the pid exists, and taken as gone, the other account shared
+the GPU beside its live runner and unloaded its model, #806); an entry of this uid, or
+one without `uid` or `start`, refused a signal is still dead. Another account's model id is
 usually not in this account's config, so `admits` doesn't share beside it: they take turns, and
 nobody unloads a model under a round. A refusal names it as theirs (`busy`: "<user>'s task <t>"),
 `wb top`'s queue adds the user. The directory is private to every lane (`private_paths`: an
