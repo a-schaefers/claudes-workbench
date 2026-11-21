@@ -9056,6 +9056,27 @@ class Cleanup(Base):
         self.assertEqual(task.status["tip"], tip)
         self.assertEqual(self.git("rev-parse", "--verify", "-q", "refs/heads/delegate/t-mine").returncode, 0)
 
+    def test_wb_gc_deletes_a_branch_merged_by_hand_and_never_looks_at_it_again(self):
+        # #686 (Claude's audit of main): only tasks accepted with --merge were considered, so a
+        # plain accept merged by hand (the skill's default) left delegate/<task> for good; and
+        # every merged task ever recorded cost a git call on every run, 2,828 in one state dir
+        for name in ("t-hand", "t-later"):
+            self.start(name, "ok")
+            wait_phase(name, {"review"})
+            run_wb("accept", name, "-m", "feat: answer")
+        merged = self.git("-c", "user.email=t@t", "-c", "user.name=t", "merge", "-q", "--no-ff",
+                          "--no-edit", "delegate/t-hand")
+        self.assertEqual(merged.returncode, 0, merged.stderr)
+        self.assertIn("1 merged branch(es)", run_wb("gc"))
+        self.assertNotEqual(self.git("rev-parse", "--verify", "-q", "refs/heads/delegate/t-hand").returncode, 0)
+        self.assertEqual(self.git("rev-parse", "--verify", "-q", "refs/heads/delegate/t-later").returncode, 0)
+        self.assertIs(store.Task("t-hand").status["branch_gone"], True)
+        self.assertTrue(store.Task("t-hand").status["tip"])
+        self.assertFalse(store.Task("t-later").status.get("branch_gone"))   # not merged: kept, asked again
+        with mock.patch.object(gitops, "repo_of", wraps=gitops.repo_of) as seen:
+            self.assertIn("0 merged branch(es)", run_wb("gc"))
+        self.assertEqual([c.args[0]["name"] for c in seen.call_args_list], ["t-later"])
+
     def test_old_closed_tasks_are_archived_and_still_found(self):
         # every wb wait wake, wb events minute and wb start read all 101 tasks' files
         for name in ("t-done", "t-open"):

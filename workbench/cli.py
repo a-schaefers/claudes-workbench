@@ -2441,22 +2441,36 @@ def _rotate_notices(days: float) -> int:
 
 
 def _merged_branches() -> int:
-    """Delete the delegate branches that wb accept --merge merged before it did so itself,
-    recording each tip first (status `tip`), which wb bench finds the task's commits from. git
-    branch -d keeps any not merged into the checkout's HEAD."""
-    n = 0
-    for name in sorted({r["task"] for r in store.results(trials=True)
-                        if r.get("outcome") == "accepted" and r.get("merged")}):
+    """Delete the delegate branches of accepted tasks that have landed: merged by wb accept
+    --merge before it deleted them itself, or by hand after a plain accept (the skill's default,
+    whose `git merge` line left delegate/<task> for good). Each tip is recorded first (status
+    `tip`), which wb bench finds the task's commits from; then `branch -d` (merged into the
+    checkout's HEAD or its upstream), else a compare-and-delete when the task's base branch holds
+    the tip. A branch gone, or deleted here, is recorded (status `branch_gone`) and never looked
+    at again: every merged task ever recorded cost a git call on every run, 2,828 of them in
+    1.8 s on tmpfs, minutes on /mnt/c (#686). Each repo's delegate refs are listed once. A branch
+    squash-merged (a PR) holds commits its target lacks, so it stays."""
+    by_repo: dict[Path, list] = {}
+    for name in sorted({r["task"] for r in store.results(trials=True) if r.get("outcome") == "accepted"}):
         t = store.Task(name)
-        repo, branch = gitops.repo_of(t.spec), t.spec.get("branch")
-        if not (t.exists and branch and repo.is_dir()):
+        if not t.exists or t.status.get("branch_gone") or not (branch := t.spec.get("branch")):
             continue
-        tip = gitops.git(repo, "rev-parse", "--verify", "-q", f"refs/heads/{branch}", check=False).strip()
-        if not tip:
-            continue
-        if not t.status.get("tip"):
-            t.set_status(tip=tip)
-        n += gitops.drop_merged_branch(repo, branch)
+        if (repo := gitops.repo_of(t.spec)).is_dir():
+            by_repo.setdefault(repo, []).append((t, branch))
+    n = 0
+    for repo, tasks in by_repo.items():
+        refs = dict(line.split(" ", 1)[::-1] for line in gitops.git(
+            repo, "for-each-ref", "--format=%(objectname) %(refname)", "refs/heads/delegate/",
+            check=False).splitlines() if " " in line)
+        for t, branch in tasks:
+            if not (tip := refs.get(f"refs/heads/{branch}")):
+                t.set_status(branch_gone=True)
+                continue
+            if not t.status.get("tip"):
+                t.set_status(tip=tip)
+            if gitops.drop_landed_branch(repo, branch, tip, t.spec.get("base_branch")):
+                n += 1
+                t.set_status(branch_gone=True)
     return n
 
 

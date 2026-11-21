@@ -1206,6 +1206,16 @@ def drop_merged_branch(repo: Path, branch: str) -> bool:
     return _run(repo, ("branch", "-d", branch), check=False).returncode == 0
 
 
+def drop_landed_branch(repo: Path, branch: str, tip: str, into: str | None) -> bool:
+    """Delete ``branch`` once it has landed: merged into the checkout's HEAD (drop_merged_branch),
+    else held by ``into`` (the task's base branch, not checked out), deleted only while it still
+    points at ``tip`` (update-ref's compare-and-delete). wb gc (#686)."""
+    if drop_merged_branch(repo, branch):
+        return True
+    return bool(into) and contains(repo, f"refs/heads/{into}", tip) and _run(
+        repo, ("update-ref", "-d", f"refs/heads/{branch}", tip), check=False).returncode == 0
+
+
 def current_branch(repo: Path) -> str:
     """The checked-out branch, "" for a detached HEAD (any git: `branch --show-current` is 2.22+)."""
     return git(repo, "symbolic-ref", "--short", "-q", "HEAD", check=False).strip()
