@@ -66,6 +66,20 @@ def die(msg: str, code: int = 1):
     sys.exit(code)
 
 
+def read_text(src: str, what: str) -> str:
+    """A spec or message: the file `src`, or stdin for "-", as strict UTF-8. A Latin-1 or CP1252
+    file raised a traceback, and piped from a C-locale shell (stdin's surrogateescape) passed every
+    check and died writing prompt.md, leaving a task with no status that only discard cleared
+    (#873, Claude's audit of 1.90.24)."""
+    if src == "-" and not hasattr(sys.stdin, "buffer"):  # already text (a StringIO)
+        return sys.stdin.read()
+    data = sys.stdin.buffer.read() if src == "-" else Path(src).read_bytes()
+    try:
+        return data.decode("utf-8")
+    except UnicodeDecodeError as e:
+        die(f"{'stdin' if src == '-' else src}: {what} isn't UTF-8 (byte {e.start}): save it as UTF-8")
+
+
 def need(name: str) -> store.Task:
     """The task a command names, by its name exactly. 'foo/', './foo' (or 'Foo' on macOS) opened
     tasks/foo too, but the runner's command line says 'foo': its live runner read as dead, so
@@ -927,7 +941,7 @@ def cmd_start(a):
         die(f"{repo} is task {owner.name}'s worktree, not a project: start from its repo "
             f"(--repo {owner.spec.get('repo', '<the project>')})")
     _lane_fits(repo, a.test, off="*" in (a.allow_path or []))
-    spec_text = Path(a.spec).read_text(encoding="utf-8") if a.spec != "-" else sys.stdin.read()
+    spec_text = read_text(a.spec, "the spec")
     if not spec_text.strip():
         die("the spec is empty")
     handed = _skill_names(a.skill)
@@ -1003,6 +1017,12 @@ def cmd_start(a):
                                            "start": models._started(os.getpid())})
     subs = gitops.fill_submodules(repo, base, wt, dry=True)
     budget = a.ask_budget
+    # round 1's prompt before task.json: a write that fails leaves a dead start for gc, not a
+    # task with no status (#873)
+    prompt = spec_text.rstrip() + PROTOCOL.format(branch=gitops.branch_name(a.name),
+                                                  test_line=test_line(a.test), budget=budget)
+    task.round_dir(1).mkdir(parents=True)
+    task.round_dir(1).joinpath("prompt.md").write_text(prompt, encoding="utf-8")
     limits = router.budgets(m)  # from the model's measured speed on this machine, else defaults
     store.write_json(task.dir / "task.json", {
         "name": a.name, "repo": str(repo), "cwd": os.getcwd(), "base": base, "base_ref": a.base,
@@ -1045,10 +1065,6 @@ def cmd_start(a):
                            if v] + (["think"] if a.think_timeout is not None else []),
         "created_at": store.now(), "wb_version": __version__})
     (task.dir / STARTING).unlink(missing_ok=True)  # a task now: wb discard drops it from here on
-    prompt = spec_text.rstrip() + PROTOCOL.format(branch=gitops.branch_name(a.name),
-                                                  test_line=test_line(a.test), budget=budget)
-    task.round_dir(1).mkdir(parents=True)
-    task.round_dir(1).joinpath("prompt.md").write_text(prompt, encoding="utf-8")
     task.set_status(phase="queued", round=1, reviews=0, auto_fixes=0, tools=0,
                     tok_in=0, tok_out=0, session=None, last="starting",
                     opencode=f"{have[0]}.{have[1]}" if have else None,  # runner.opencode_moved
@@ -1168,7 +1184,7 @@ def cmd_feedback(a):
     _need_worktree(task)
     _opencode_again(task)
     text = a.text if a.text is not None else \
-        sys.stdin.read() if a.message == "-" else Path(a.message).read_text(encoding="utf-8")
+        read_text(a.message, "the feedback")
     if not text.strip():  # before anything is written: an empty one cost a round (the audit)
         die("the feedback is empty")
     _spec_gaps(task, a.spec_gap)
@@ -1268,7 +1284,7 @@ def cmd_next(a):
     _opencode_again(task)
     step = st.get("steps", 1)
     try:  # read before anything is committed: a bad path must leave the step as it was
-        nxt = sys.stdin.read() if a.spec == "-" else Path(a.spec).read_text(encoding="utf-8")
+        nxt = read_text(a.spec, "the next step's spec")
     except OSError as e:
         die(f"can't read the next step's spec: {e}")
     if not nxt.strip():
@@ -5009,6 +5025,8 @@ def main(argv=None):
     try:
         a.f(a)
     except RuntimeError as e:  # wb's own failures (git, a config that doesn't parse): a message
+        die(str(e))
+    except UnicodeError as e:  # text no encoding takes: a line, not a traceback (#873)
         die(str(e))
     except OSError as e:  # a --spec, --message or --file that isn't there: a line, not a traceback
         if store.disk_full(e):  # (#342)

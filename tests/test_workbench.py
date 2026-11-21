@@ -4487,6 +4487,32 @@ class StartChecks(Base):
     """What wb start and the first report say about the setup itself: an OpenCode outside the
     tested range, a fixed prompt that fills the window, an ask tool OpenCode never listed."""
 
+    def test_a_spec_or_message_that_isnt_utf8_is_refused_in_a_line_before_anything_is_written(self):
+        # #873 (Claude's audit of 1.90.24): a Latin-1 spec file ended in a traceback, and piped
+        # from a C-locale shell it passed every check, then died writing prompt.md, leaving a
+        # task with task.json and no status that only discard cleared
+        latin = Path(self.tmp.name) / "latin.md"
+        latin.write_bytes("Write caf\xe9 to answer.txt.\n".encode("latin-1"))
+        stdin = types.SimpleNamespace(buffer=io.BytesIO(latin.read_bytes()))
+        for name, src, patch in (("t-l1", str(latin), nullcontext()),
+                                 ("t-l2", "-", mock.patch("sys.stdin", stdin))):
+            err = io.StringIO()
+            with patch, redirect_stderr(err), self.assertRaises(SystemExit):
+                run_wb("start", name, "--spec", src, "--repo", str(self.repo), "--model", "mimo")
+            self.assertIn("the spec isn't UTF-8 (byte 9)", err.getvalue())
+            self.assertFalse((store.tasks_dir() / name).exists())
+        self.start("t-l3", "ok")
+        wait_phase("t-l3", {"review"})
+        for argv in (("feedback", "t-l3", "--message", str(latin)),
+                     ("next", "t-l3", "--spec", str(latin), "-m", "feat: one")):
+            err = io.StringIO()
+            with redirect_stderr(err), self.assertRaises(SystemExit) as e:
+                run_wb(*argv)
+            self.assertEqual(e.exception.code, 1)
+            self.assertIn(f"{latin}: the", err.getvalue())
+            self.assertIn("isn't UTF-8", err.getvalue())
+        self.assertEqual(store.Task("t-l3").status["phase"], "review")
+
     def test_a_task_named_in_another_spelling_is_refused_and_its_live_runner_left_alone(self):
         # #782: 'foo/' opened tasks/foo, but the runner's command line says 'foo', so its live
         # runner read as dead: reap failed the task under a notice no reader takes, and discard
