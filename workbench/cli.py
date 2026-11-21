@@ -948,11 +948,32 @@ def _disk_room(repo: Path, base: str, setup: dict) -> int | None:
         + (f"; history: {kept}" if (kept := history_held()) else ""))
 
 
+# A batch is started in one sitting: a backlog whose tasks are all closed, the newest started
+# this long ago, is an earlier night's
+BACKLOG_GAP = 6 * 3600
+
+
+def _backlog_done(name: str) -> str | None:
+    """Why `--backlog name` is refused: an earlier batch had the name. Reused, the morning's
+    `wb backlog` listed both nights' tasks and added their savings, and on WSL2 the second
+    night's first task found the first's and never said nothing keeps Windows awake (#880,
+    Claude's audit of 1.90.24)."""
+    ts = [t for t in store.all_tasks(archived=True) if t.spec.get("backlog") == name]
+    if not ts or any(t.status.get("phase") not in store.CLOSED for t in ts) or time.time() - max(
+            t.spec.get("created_at") or 0 for t in ts) < BACKLOG_GAP:
+        return None
+    fresh = f"{name[:37].rstrip('-')}-{time.strftime('%Y-%m-%d')}"
+    return (f"backlog {name!r} was an earlier batch ({len(ts)} task(s), all closed): give this "
+            f"one a fresh name, as --backlog {fresh}")
+
+
 def cmd_start(a):
     if not store.NAME_RE.match(a.name):
         die("a task name is lowercase letters, digits and hyphens, at most 48")
     if a.backlog is not None and not store.NAME_RE.match(a.backlog):
         die("a backlog name is lowercase letters, digits and hyphens, at most 48")
+    if a.backlog and (why := _backlog_done(a.backlog)):
+        die(why)
     task = store.Task(a.name)
     if task.exists:  # discarding never frees a name, so the refusal doesn't suggest it (the audit)
         die(f"task {a.name!r} exists ({task.status.get('phase')}): task names are never reused, "

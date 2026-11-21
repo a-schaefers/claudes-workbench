@@ -13223,6 +13223,25 @@ class Backlog(Base):
             run_wb("backlog", "nope")
         self.assertEqual(run_wb("backlog").strip(), "no backlogs (wb start --backlog NAME starts one)")
 
+    def test_an_earlier_nights_backlog_name_is_refused_with_a_fresh_dated_one(self):
+        # #880 (Claude's audit of 1.90.24): a reused name merged both nights' tasks into the
+        # morning summary and its saving, and on WSL2 skipped the second night's sleep warning
+        old = store.Task("t-n1")
+        store.write_json(old.dir / "task.json", {"name": "t-n1", "backlog": "overnight",
+                                                 "created_at": time.time() - cli.BACKLOG_GAP - 60})
+        old.set_status(phase="accepted")
+        err = io.StringIO()
+        with self.assertRaises(SystemExit), redirect_stderr(err):
+            self.start("t-n2", "ok", "--backlog", "overnight")
+        self.assertIn(f"--backlog overnight-{time.strftime('%Y-%m-%d')}", err.getvalue())
+        self.assertFalse(store.Task("t-n2").exists)
+        self.start("t-n3", "ok", "--backlog", f"overnight-{time.strftime('%Y-%m-%d')}")
+        # a batch still being started: its first task closed already, the name is still its own
+        wait_phase("t-n3", {"review"})
+        run_wb("accept", "t-n3", "-m", "feat: one")
+        self.start("t-n4", "ok", "--backlog", f"overnight-{time.strftime('%Y-%m-%d')}")
+        self.assertTrue(store.Task("t-n4").exists)
+
 class Notes(Base):
     def test_notes_about_the_user_are_kept_short_and_numbered(self):
         self.assertIn("no notes yet", run_wb("notes"))
