@@ -15796,6 +15796,42 @@ class Projects(Base):
         self.assertEqual((self.repo / "CLAUDE.md").read_text(), "# rules\n")
         self.assertTrue((self.repo / "AGENTS.md").is_symlink())
 
+    def test_init_commits_only_the_link_and_leaves_claude_md_s_staged_and_unstaged_edits_alone(self):
+        # #931 (the outside review of 1.90.24): `add -A -- CLAUDE.md AGENTS.md` and a path-limited
+        # commit put CLAUDE.md's working copy into "chore: AGENTS.md links to CLAUDE.md" and
+        # dropped its staged version, the index left clean
+        self.identity()
+        for case, staged, working in (("staged", b"v2\n", b"v2\n"), ("unstaged", b"v1\n", b"v3\n"),
+                                      ("partly", b"v2\n", b"v3\n")):
+            with self.subTest(case):
+                d = Path(self.tmp.name) / f"init-{case}"
+                d.mkdir()
+                self.git(d, "init", "-q")
+                (d / "CLAUDE.md").write_bytes(b"v1\n")
+                self.git(d, "add", "CLAUDE.md"); self.git(d, "commit", "-qm", "docs")
+                (d / "CLAUDE.md").write_bytes(staged)
+                self.git(d, "add", "CLAUDE.md")
+                (d / "CLAUDE.md").write_bytes(working)
+                before = self.git(d, "rev-parse", "HEAD")
+                self.assertIn("committed", run_wb("init", str(d)))
+                self.assertEqual(self.git(d, "show", "HEAD:CLAUDE.md"), "v1")
+                self.assertEqual(self.git(d, "show", ":CLAUDE.md"), staged.decode().strip())
+                self.assertEqual((d / "CLAUDE.md").read_bytes(), working)
+                self.assertEqual(self.git(d, "diff", "--name-status", before, "HEAD"), "A\tAGENTS.md")
+                self.assertEqual(self.git(d, "ls-tree", "HEAD", "AGENTS.md").split()[0], "120000")
+                self.assertEqual(self.git(d, "status", "--porcelain", "--", "AGENTS.md"), "")
+        d = Path(self.tmp.name) / "init-agents-staged"   # its own staged change: nothing committed
+        d.mkdir()
+        self.git(d, "init", "-q")
+        (d / "AGENTS.md").write_text("# rules\n")
+        self.git(d, "add", "AGENTS.md"); self.git(d, "commit", "-qm", "agents")
+        (d / "AGENTS.md").write_text("# rules\nmore\n")
+        self.git(d, "add", "AGENTS.md")
+        before = self.git(d, "rev-parse", "HEAD")
+        self.assertIn("not committed", run_wb("init", str(d)))
+        self.assertEqual(self.git(d, "rev-parse", "HEAD"), before)
+        self.assertEqual((d / "CLAUDE.md").read_text(), "# rules\nmore\n")
+
     def identity(self):
         cfg = Path(self.tmp.name) / "gitconfig"
         cfg.write_text("[user]\n\temail = t@t\n\tname = t\n")
@@ -15816,6 +15852,10 @@ class Projects(Base):
         self.assertFalse((self.repo / "CLAUDE.md").is_symlink())
         self.assertEqual((self.repo / "CLAUDE.md").read_text(), "# rules\nuncommitted\n")
         self.assertEqual(os.readlink(self.repo / "AGENTS.md"), "CLAUDE.md")
+        # the swap is committed, the edit stays the user's to commit (#931)
+        self.assertEqual(self.git(self.repo, "show", "HEAD:CLAUDE.md"), "# rules")
+        self.assertEqual(self.git(self.repo, "show", "HEAD:AGENTS.md"), "CLAUDE.md")
+        self.assertEqual(self.git(self.repo, "status", "--porcelain"), "M CLAUDE.md")
         d = Path(self.tmp.name) / "fresh"
         d.mkdir()
         (d / "AGENTS.md").write_text("# fresh\n")

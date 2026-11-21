@@ -4242,6 +4242,11 @@ def cmd_init(a):
         did.append("git repo on " + (gitops.git(d, "symbolic-ref", "--short", "HEAD",
                                                 check=False).strip() or "its default branch"))
     has_commits = bool(gitops.git(d, "rev-parse", "--verify", "-q", "HEAD", check=False).strip())
+    # HEAD's and the index's CLAUDE.md and AGENTS.md before anything changes: the commit below
+    # holds only what wb init made, built from these (#931)
+    head, index = (_md_entries(d, "ls-tree", "HEAD"), _md_entries(d, "ls-files", "-s")) \
+        if has_commits else ({}, {})
+    moved = False  # AGENTS.md's file became CLAUDE.md
     if not has_commits:  # before anything is changed: a run after the fix starts clean
         secrets, vendored = _unfit_for_commit(d)
         if secrets or vendored:
@@ -4259,9 +4264,11 @@ def cmd_init(a):
         agents.rename(claude)
         agents.symlink_to("CLAUDE.md")
         did.append("AGENTS.md moved to CLAUDE.md, which it now links to")
+        moved = True
     if agents.is_file() and not agents.is_symlink() and not claude.exists():
         agents.rename(claude)  # the project's instructions live in CLAUDE.md, AGENTS.md points at it
         did.append("AGENTS.md moved to CLAUDE.md")
+        moved = True
     if claude.is_file() and agents.is_file() and not agents.is_symlink():
         if not os.path.samefile(claude, agents) and agents.read_bytes() == claude.read_bytes():
             agents.unlink()
@@ -4278,13 +4285,8 @@ def cmd_init(a):
         gitops.git(d, "commit", "-q", "--allow-empty", "-m", "Initial commit")
         did.append(f"initial commit of the {n} file(s) here (git show --stat to check)" if n
                    else "initial commit")
-    else:
-        touched = [p for p in ("CLAUDE.md", "AGENTS.md")
-                   if gitops.git(d, "status", "--porcelain", "--", p).strip()]
-        if touched and any("AGENTS.md" in x or "moved" in x for x in did):
-            gitops.git(d, "add", "-A", "--", *touched)
-            gitops.git(d, "commit", "-q", "-m", "chore: AGENTS.md links to CLAUDE.md", "--", *touched)
-            did.append("committed")
+    elif any("AGENTS.md" in x for x in did):
+        did.append(_commit_link(d, head, index, moved))
     status = claude_md_status(d)
     print(f"{d}: " + (", ".join(did) if did else "already set up") + f"; {status}"
           + (" (AGENTS.md not linked)" if local else "")
@@ -4292,6 +4294,52 @@ def cmd_init(a):
           + ("\nnext: write CLAUDE.md (what the project is, how to build and test it, its "
              "conventions), commit it, then wb init again to link AGENTS.md"
              if status == "no CLAUDE.md" else ""))
+
+
+def _md_entries(d: Path, *ls) -> dict:
+    """{path: (mode, blob)} for CLAUDE.md and AGENTS.md from ``git ls-tree HEAD`` or ``git
+    ls-files -s`` (the index): the two lines differ only in what sits between mode and hash."""
+    out = {}
+    for line in gitops.git(d, *ls, "-z", "--", "CLAUDE.md", "AGENTS.md").split("\0"):
+        if "\t" in line:
+            meta, path = line.split("\t", 1)
+            f = meta.split()
+            out[path] = (f[0], f[1] if ls[0] == "ls-files" else f[2])
+    return out
+
+
+def _commit_link(d: Path, head: dict, index: dict, moved: bool) -> str:
+    """Commit what wb init made in a repo with commits, and nothing of the user's: the AGENTS.md
+    link and, when AGENTS.md's file moved to CLAUDE.md, the committed text under its new name.
+    `git add -A -- CLAUDE.md AGENTS.md` and a path-limited commit took CLAUDE.md's working copy
+    into "chore: AGENTS.md links to CLAUDE.md" and dropped whatever of it was staged (#931, the
+    outside review of 1.90.24), so the commit is built in a scratch index from HEAD and the
+    user's index and working tree keep their bytes. A path whose index already differed from
+    HEAD (a staged change of theirs), or a link whose CLAUDE.md isn't committed, is left to them."""
+    import tempfile
+    with tempfile.TemporaryDirectory(prefix="wb-init-") as tmp:
+        (link := Path(tmp, "link")).write_text("CLAUDE.md")
+        new = {"AGENTS.md": ("120000", gitops.git(d, "hash-object", "-w", "--no-filters",
+                                                  str(link)).strip())}
+        if moved and head.get("AGENTS.md", ("",))[0].startswith("100"):
+            new["CLAUDE.md"] = head["AGENTS.md"]  # its committed text: unstaged edits stay unstaged
+        changed = {p: e for p, e in new.items() if head.get(p) != e}
+        if not changed:
+            return "already committed"
+        if (moved and "CLAUDE.md" not in new) or any(index.get(p) != head.get(p) for p in changed) \
+                or not {**head, **changed}.get("CLAUDE.md", ("",))[0].startswith("100"):
+            return ("not committed: CLAUDE.md or AGENTS.md has changes of yours (staged, or not "
+                    "committed yet), so commit them yourself")
+        env = {"GIT_INDEX_FILE": str(Path(tmp, "index"))}
+        gitops.git(d, "read-tree", "HEAD", env=env)
+        for p, (mode, blob) in changed.items():
+            gitops.git(d, "update-index", "--add", "--cacheinfo", f"{mode},{blob},{p}", env=env)
+        # no hooks: one with a scratch GIT_INDEX_FILE (lint-staged's stash) could rewrite the tree
+        gitops.git(d, *gitops.NO_HOOKS, "commit", "-q", "-m", "chore: AGENTS.md links to CLAUDE.md",
+                   env=env)
+    for p, (mode, blob) in changed.items():  # their index matched HEAD here: now the new HEAD
+        gitops.git(d, "update-index", "--add", "--cacheinfo", f"{mode},{blob},{p}")
+    return "committed"
 
 
 # What `wb events` reports: the state, not the work (worktrees) or the noise. rules/ (the agents'
