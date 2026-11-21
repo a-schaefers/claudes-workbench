@@ -4207,6 +4207,14 @@ def cmd_doctor(a):
               "needs the room unloads it (after it goes idle). If others use this Ollama, "
               f"{models.overrides_path().name}'s keep_loaded lists models wb never unloads, and "
               "gpu_gb (when the GPU budget is unknown) lets a model that fits beside them leave them loaded")
+        if not models.lease_shared():
+            print("--  if another account on this machine runs wb on this Ollama, one GPU lease for "
+                  f"all of them: sudo install -d -m 2775 -g <their group> {models.SHARED_GPU} (#393)")
+    if models.lease_shared():
+        print(f"--  the GPU lease is shared at {models.lease_dir()}: every account using it takes turns")
+    elif models.SHARED_GPU.is_dir() and not os.environ.get("WB_GPU_DIR"):
+        line(False, f"{models.SHARED_GPU} is the machine's shared GPU lease, and this account can't "
+             "write it: add it to the directory's group, then log in again")
     v = lane.abi()
     if v:  # draw a real lane and try a write outside it: the check is the refusal itself
         import tempfile

@@ -163,7 +163,9 @@ class Base(unittest.TestCase):
         os.environ.update(WB_HOME=str(tmp / "state"), WB_OPENCODE_BIN=FAKE, WB_FAKE_MODELS="1",
                           WB_OPENCODE_CONFIG=str(tmp / "opencode.json"),
                           WB_MODELS=str(tmp / "wb-models.json"), WB_SKILLS=str(tmp / "skills"),
-                          WB_COMMANDS=str(tmp / "commands.json"))
+                          WB_COMMANDS=str(tmp / "commands.json"),
+                          # the GPU lease in the test's own state, never a machine's shared one (#393)
+                          WB_GPU_DIR=str(tmp / "state"))
         (tmp / "opencode.json").write_text(json.dumps(OPENCODE_CONFIG))
         self.repo = tmp / "repo"
         self.repo.mkdir()

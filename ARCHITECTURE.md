@@ -2727,17 +2727,32 @@ that it may hold GPU memory); every model loaded on each discovered Ollama serve
 for `INFLIGHT_WATCH` 10 s (`_in_use`): Ollama moves a model's `expires_at` each time a request
 finishes and stops its clock while one runs, so a stamp that moves, or one already past
 (`_past`), is a model answering someone this account's lease doesn't know (another account's
-tasks on a shared system Ollama, since `gpu.lock` is per account; Open WebUI; an editor). Then it
+tasks on a shared system Ollama whose machine has no shared lease, below; Open WebUI; an editor). Then it
 warns ("<names> on ollama is answering requests that aren't this account's tasks …: waiting up to
 10 min for it to go idle before unloading it") and waits, up to `INFLIGHT_WAIT` 10 min, for a
 quiet watch, looking at most once an `INFLIGHT_POLL` second (a stamp already past is busy at
 once, and the wait asked `/api/ps` back to back: 1,137 requests in 0.25 s, #459, the audit of
 1.8), then unloads it either way. Each account's runner once unloaded the other's model
 before every round, mid-use, and both reloaded on every request (#378, the audit of 1.6). A
-server whose `/api/ps` gives no `expires_at` has nothing to watch. A machine-wide lease (one
-`gpu.lock` for every account, opt-in) would be the whole answer and isn't built; meanwhile `wb
-doctor` names the models loaded that no task of this account holds (`unheld_loaded`: not in
-`gpu.json`, not `keep_loaded`) with how `keep_loaded` and `gpu_gb` serve a shared Ollama.
+server whose `/api/ps` gives no `expires_at` has nothing to watch. The whole answer is one lease
+for every account (#393): the lease's files live in `models.lease_dir()`, which is `$WB_GPU_DIR`,
+else `SHARED_GPU` (`/var/lib/workbench/gpu`) when it is a directory this account may write, else
+`$WB_HOME` as before. An admin opts a machine in once (`sudo install -d -m 2775 -g <group>
+/var/lib/workbench/gpu`, the accounts in that group): every account's tasks then take turns or
+share there like one account's. Lock files are opened read-only (`_lease_lock`, `_lease_fd`:
+another account made them 0644, and flock needs no write); `gpu.json` is replaced by rename (the
+directory's write). Each entry carries `uid` and `user`: a holder of another uid can't be
+signalled, so `_alive` takes it as alive when its start time matches (an entry of this uid, or
+one without `uid` or `start`, refused a signal is still dead). Another account's model id is
+usually not in this account's config, so `admits` doesn't share beside it: they take turns, and
+nobody unloads a model under a round. A refusal names it as theirs (`busy`: "<user>'s task <t>"),
+`wb top`'s queue adds the user. The directory is private to every lane (`private_paths`: an
+agent's flock on `gpu.lock` would hold every account's GPU). Without it, `wb doctor` names the
+models loaded that no task of this account holds (`unheld_loaded`: not in `gpu.json`, not
+`keep_loaded`) with how `keep_loaded` and `gpu_gb` serve a shared Ollama, and how to make the
+directory; with it, a `--` line names it; one that exists and this account can't write is BAD.
+Still missed: one long request from outside wb that neither finishes during the watch nor runs
+past its keep-alive (Ollama has no queue API).
 Then Ollama loads the model (`POST
 /api/generate {prompt: "", keep_alive: "30m"}`, 20 min limit) or the server is started. An HTTP
 error from Ollama raises with what Ollama said ("…answered HTTP 500: model requires more system
@@ -2810,7 +2825,8 @@ was refused, #466, the audit of 1.8), or Ollama swaps them on every
 request (both read from the running Ollama's environment, `hardware.ollama_env_at`, which `wb
 doctor` and `wb scout` say the source of, or that it is unknown). Admission
 happens under the `gpu.admit` flock: holders are the `gpu.json` entries whose process is alive,
-checked by identity (`_alive`: a pid of another user's is dead, and when available the process's start
+checked by identity (`_alive`: a pid of another user's is dead, unless the entry is that user's in a
+shared lease (#393, above), and when available the process's start
 time from `/proc/<pid>/stat` field 22 or `ps -o lstart=` must match the entry's `start`), so a pid recycled after a
 reboot doesn't hold the GPU forever. `admits(m, held)`: no holder is waiting, every holder's
 model still resolves, and there are no holders or `can_share` passes; then a runner joins with
@@ -2839,7 +2855,7 @@ or waiting on a question), not evicted (the 0.90 review: the other task unloaded
 for that one to finish). If not, it warns "ollama could not fit … waiting for the GPU to itself",
 unloads its own model (unless a holder runs the same model: it is theirs too), marks itself
 waiting and takes its turn as above (its shared lock dropped first), then loads alone.
-`gpu.json` is `{"<pid>": {model, task, since, start, waiting?, waiting_since?, tests?}}` (`tests`: a task's
+`gpu.json` is `{"<pid>": {model, task, since, start, uid, user, waiting?, waiting_since?, tests?}}` (`tests`: a task's
 `--unload-for-tests` tests hold the GPU, `model` null). `wb image` takes `gpu.lock` through
 `GpuLease(None, "wb image", wait=…)` (`wb audio`: `"wb audio"`, and the refusal names which): with `--wait` it queues in `gpu.json` like a task with no
 model, waits for the running tasks to finish, then has the GPU to itself; while it holds or waits
@@ -5407,7 +5423,9 @@ $WB_HOME (~/.local/state/workbench)
   tuning.json                    optional: pin a tuned setting ({"fresh_at": 0.6})
   speed.json  speed.lock         each model's measured write and read speeds
   gpu.lock  gpu.json  gpu.admit  the GPU lease: the lock, who holds or waits for it, the admission lock,
-  gpu.load                       and the lock that takes model loads one at a time
+  gpu.load                       and the lock that takes model loads one at a time (all in
+                                 models.lease_dir(): $WB_GPU_DIR or /var/lib/workbench/gpu
+                                 when shared by the machine's accounts, #393)
   gpu-<host>-<port>.{lock,json,admit,load}   the same for a remote server's models (models.pool)
   scout.json  watch.json         the weekly model check: when it was done and offered; the watch list
   update.json                    wb update: when origin was last asked, how far behind this copy was
@@ -5497,7 +5515,7 @@ $WB_HOME (~/.local/state/workbench)
 
 **Store primitives** (`workbench/store.py`). `home()` is `$WB_HOME`, else
 `~/.local/state/workbench`. The path variables (`PATH_VARS`: `WB_HOME`, `WB_MODELS`, `WB_SKILLS`,
-`WB_IMAGES`, `WB_AUDIO`, `WB_COMMANDS`, `WB_CHAT_TOKEN`, `WB_CHAT_CONFIG`, `WB_OPENCODE_CONFIG`, `WB_SAVINGS`,
+`WB_IMAGES`, `WB_AUDIO`, `WB_COMMANDS`, `WB_CHAT_TOKEN`, `WB_CHAT_CONFIG`, `WB_OPENCODE_CONFIG`, `WB_SAVINGS`, `WB_GPU_DIR` (the GPU lease's directory, `models.lease_dir`),
 and the user's `OPENCODE_CONFIG` and `CLAUDE_CONFIG_DIR`, #328) accept `~` and
 relative paths: `absolute_env()`, first thing in `cli.main` and the runner, makes them absolute
 against wb's cwd (not resolved: a symlinked home stays as named; the mod's `absolutePath` does the
@@ -5674,7 +5692,7 @@ hidden files), `handovers` (fresh sessions). A `wb bench self` row (`bench.self_
   booleans, `every` 1, 2 or 5 seconds; a missing or mistyped key is its default (`stats.DEFAULTS`:
   on, on, 2). `set_setting` changes one key under `stats.lock`, the others kept: two picks at once
   each wrote back what it had read, and one was lost (#564).
-- `gpu.json`: `{"<pid>": {model, task, since, start, waiting?, waiting_since?, tests?}}` (`tests`: true while a
+- `gpu.json`: `{"<pid>": {model, task, since, start, uid, user, waiting?, waiting_since?, tests?}}` (`uid`, `user`: whose, for a lease shared by accounts, #393) (`tests`: true while a
   task's `--unload-for-tests` tests hold the GPU, `model` null then; `since`: its
   place in the queue, the task's `created_at`; `waiting_since`: on a waiting entry, when this
   lease began to wait, kept across its rewrites until it is admitted, for `wb top`'s `waited_s`

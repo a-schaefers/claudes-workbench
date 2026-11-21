@@ -413,7 +413,7 @@ class Top:
 
     def pools(self) -> dict[str, dict]:
         """Every lease pool's live entries: gpu, and each remote server's gpu-<host>."""
-        home = store.home()
+        home = models.lease_dir()  # shared with other accounts when the machine opts in (#393)
         names = sorted({p.stem for p in home.glob("gpu*.json")} | {"gpu"})
         return {n: models.holders(home, n) for n in names}
 
@@ -430,6 +430,8 @@ class Top:
                 q["waited_s"] = round(max(0.0, now - began), 1)
             if pool != "gpu":
                 q["pool"] = pool
+            if h.get("uid") is not None and h["uid"] != os.getuid():  # another account's (#393)
+                q["task"] = f"{h.get('task')} ({h.get('user') or h['uid']})"
             out.append(q)
         return out
 
