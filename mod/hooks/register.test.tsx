@@ -3784,3 +3784,68 @@ test('the stats tab folds a model with its window variants, newest first, and su
   expect(said({ models: { 'ollama/old': { tasks: 3, accepted_pct: 67 } } }))  // an older wb's feed
     .toContain('ollama/old: 3 tasks · 67% landed')
 })
+
+// The owner, 2026-11-21: "some people experiment a lot and have a ton of models on their boxes
+// ... they'd have to scroll a lot down to find the menu and get back to Tasks or Settings again.
+// I just really don't want this to be the first impression users face."
+const MANY = (n: number) => Array.from({ length: n }, (_, i) => `ollama/m${i}`)
+const tabFeed = (ids: string[], more?: any) => ({
+  ts: 1, until: 2, settings: {}, tasks: 400,
+  periods: { week: { tasks: 12, landed: 10, accepted_pct: 83 }, all: { tasks: 400, landed: 330, accepted_pct: 83 } },
+  streak: { current: 3, best: 9 }, absorbed: { auto_fixes: 4, auto_fixed_tasks: 2 }, questions: { asked: 2 },
+  models: Object.fromEntries(ids.map(m => [m, { tasks: 13, accepted_pct: 80 }])),
+  model_lines: { lines: ids.slice(0, 3).map((m, i) => ({ model: m, variants: [m], windows: [32768], last: 100 - i, tasks: 13, accepted_pct: 80 })),
+    ...(more ? { more } : {}) },
+  sizes: { trivial: { tasks: 300, accepted_pct: 90 }, small: { tasks: 100, accepted_pct: 60 } },
+  days: [{ day: '2026-11-20', tasks: 3, landed: 2 }, { day: '2026-11-21', tasks: 5, landed: 4 }],
+  bests: { fastest: { minutes: 2, task: 'quick' } }, milestones: [{ kind: 'landed', n: 300, day: '2026-11-19' }],
+  guards: { repeat: 3 },
+  helps: Object.fromEntries(ids.map(m => [m, { hint: [2, 3] }])),
+  bench: Object.fromEntries(ids.map(m => [m, { run: 'r1', day: '2026-11-20', passed: 7, of: 10 }])),
+  optimized: Object.fromEntries(ids.map(m => [m, { window: 32768, fits: true }])),
+})
+const tabTop = (ids: string[]) => ({ busy: {}, snap: { ts: 0, every: 2, queue: [],
+  gpus: [{ index: 0, name: 'GPU', used: 2 ** 33, total: 2 ** 34 }],
+  running: [{ task: 'fix-it', label: ids[0], phase: 'working', round: 1 }],
+  rack: ids.map((m, i) => ({ model: m, label: m, state: i === 0 ? 'resident' : ["idle", "can't run", 'remote'][i % 3],
+    ...(i === 0 ? { tasks: ['fix-it'] } : {}) })) } }) as any
+const text = (rows: any[][]) => rows.map(r => r.map(p => p.text).join(''))
+
+test('the stats tab stays under 25 rows with 30 models, the rest folded and counted (2026-11-21)', () => {
+  const ids = MANY(30)
+  const now = text(liveLines(tabTop(ids)))
+  const history = statsLines(tabFeed(ids, { models: 27, tasks: 351 })).map(l => `${l.label}: ${l.text}`)
+  expect(now.length + history.length).toBeLessThanOrEqual(25)
+  expect(now).toContain("+29 more models idle, can't run or remote (wb top)")
+  expect(now.some(r => r.includes('ollama/m0 resident') && r.includes('← fix-it'))).toBe(true)
+  expect(now.some(r => r.startsWith('○ ollama/m1 '))).toBe(false)
+  expect(history).toContain('More models: 27 more models: 351 tasks (wb stats --all)')
+  expect(history.filter(l => /^ollama\/m\d+/.test(l))).toHaveLength(3)
+  expect(history.find(l => l.startsWith('Optimized:'))).toBe('Optimized: ' +
+    ['m0', 'm1', 'm2'].map(m => `ollama/${m} 32K all on the GPU`).join(' · ') + ' · 27 more')
+  expect(history.find(l => l.startsWith('Bench:'))).toMatch(/ollama\/m2 7\/10 \(2026-11-20\) · 27 more$/)
+  expect(history.filter(l => l.startsWith('What helps'))).toEqual(['m0', 'm1', 'm2'].map((m, i) =>
+    `What helps (ollama/${m}): a hint helped 2 of 3${i === 2 ? ' · 27 more models' : ''}`))
+  // none of the shown models has an entry: the others counted, What helps left out
+  const others = statsLines({ ...tabFeed(ids, { models: 27, tasks: 351 }), helps: { 'ollama/m9': { hint: [1, 2] } },
+    bench: { 'ollama/m9': { run: 'r1', day: '2026-11-20', passed: 1, of: 2 } }, optimized: { 'ollama/m9': { window: 32768 } } })
+    .map(l => `${l.label}: ${l.text}`)
+  expect(others).toContain('Bench: 1 model (wb bench report)')
+  expect(others).toContain('Optimized: 1 model (wb optimize report)')
+  expect(others.some(l => l.startsWith('What helps'))).toBe(false)
+  // the recent and the older ones on one row, a part that is 0 left out
+  const both = statsLines({ tasks: 40, model_lines: { lines: [], more: { models: 2, tasks: 36 }, older: { models: 3, tasks: 4 } } })
+  expect(both).toContainEqual({ label: 'More models', text: '2 more · 3 older models: 40 tasks (wb stats --all)' })
+})
+
+test('a machine with two models draws the stats tab as before the fold (2026-11-21)', () => {
+  const ids = MANY(2)
+  const now = text(liveLines({ ...tabTop(ids), snap: { ...tabTop(ids).snap, running: [],
+    rack: ids.map(m => ({ model: m, label: m, state: 'idle' })) } }))
+  expect(now).toEqual(['GPU 0 GPU ██████░░░░░░ 8.0/16.0 GiB ', 'Nothing running.', '○ ollama/m0 idle', '○ ollama/m1 idle'])
+  const history = statsLines(tabFeed(ids)).map(l => `${l.label}: ${l.text}`)
+  expect(history.some(l => /more|older|wb (bench|optimize) report|wb top/.test(l))).toBe(false)
+  expect(history).toContain('Optimized: ollama/m0 32K all on the GPU · ollama/m1 32K all on the GPU')
+  expect(history).toContain('Bench: ollama/m0 7/10 (2026-11-20) · ollama/m1 7/10 (2026-11-20)')
+  expect(history.filter(l => l.startsWith('What helps'))).toHaveLength(2)
+})
