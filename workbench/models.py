@@ -1223,6 +1223,24 @@ def _ollama_loaded(root: str) -> list[str]:
     return [x.get("name") for x in (_get(f"{root}/api/ps") or {}).get("models", [])]
 
 
+def keep_warm(m: Model) -> bool:
+    """Renew this machine's Ollama's keep-alive for ``m`` (30 minutes, as make_resident loads it)
+    while it is loaded; whether it was. Every request OpenCode sends sets Ollama's default 5
+    minutes again, so a round waiting on a background test run or on Claude's answer lost the
+    model, and its next request loaded it cold, past free_gpu, and read the whole session again
+    (#864). Never loads it: one already gone is left to the next round's make_resident. Not on
+    another machine's GPU, where other clients share the box (box_others)."""
+    if _fake() or m.engine != "ollama" or (m.remote and not same_gpu(m)):
+        return False
+    if not _matches(m.name, set(_ollama_loaded(m.root))):
+        return False
+    try:
+        _post(f"{m.root}/api/generate", {"model": m.name, "prompt": "", "keep_alive": "30m"}, timeout=30)
+    except Exception:  # a server that went away: the round's own guards say so
+        return False
+    return True
+
+
 def single_loads(st: dict) -> list[float]:
     """A task's loads one by one (status `loads`: each load that happened, #577), the samples of a
     model's typical load (wb top, wb optimize); a task from before `loads` gives its `load_secs`."""

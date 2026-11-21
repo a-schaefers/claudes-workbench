@@ -871,6 +871,18 @@ def renudged(st: dict, n: int) -> bool:
     return st.get("nudged_round") == n - 1 and bool(st.get("session"))
 
 
+# How often a round waiting on a background job or on Claude's answer renews the model's
+# keep-alive: under Ollama's default 5 minutes, which each of OpenCode's requests sets again (#864)
+KEEP_WARM_S = 180
+
+
+def _keep_warm(model_id) -> None:
+    try:
+        models.keep_warm(models.resolve(model_id))
+    except Exception:  # an unknown model or a config that can't be read: nothing to renew
+        pass
+
+
 def run_round(task: store.Task, n: int, keep: bool = False) -> dict:
     """One `opencode run`. keep: Claude asked for this session to carry on (wb feedback
     --keep-context), so the round never hands over mid-way."""
@@ -956,6 +968,7 @@ def run_round(task: store.Task, n: int, keep: bool = False) -> dict:
     # session between two steps, and the agent worked on from its summary (#774).
     last_step: tuple = (None, 0)
     opened: dict = {}  # the questions open this round (ask_mcp.relay)
+    warmed = time.monotonic()  # the model's keep-alive, renewed while the round waits (#864)
     while True:
         try:  # woken by the agent's output or a steer note; the timeout runs the clocks below
             line = q.get(timeout=5)
@@ -1130,6 +1143,9 @@ def run_round(task: store.Task, n: int, keep: bool = False) -> dict:
         if out["full"]:
             _stop(proc)
             break
+        if (waiting_bg or asking) and mono - warmed >= KEEP_WARM_S:
+            warmed = mono  # off the loop: a server slow to answer holds no clock or steer up
+            threading.Thread(target=_keep_warm, args=(task.spec.get("model"),), daemon=True).start()
         every = float(spec.get("checkin") or 0) * 60
         since = max(started, float(task.status.get("checkin_at") or 0))
         active = step_prior + clock.ran(mono)

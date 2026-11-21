@@ -3305,7 +3305,12 @@ failed or ran past 5 min) go to `warn`: the lease's `warn` sets status `last` an
 event, which the transcript shows as `■ GPU: …`, so it outlives the next status line. The seconds
 it took go to `status.load_secs`. The runner calls it before every round, not once: each
 OpenCode request resets Ollama's keep-alive to `OLLAMA_KEEP_ALIVE` (5 minutes by default), so a
-model can be unloaded during a long test run. A server that lists several models swaps them itself:
+model can be unloaded during a long test run. Inside a round too: while it waits on a background
+job (`background_wait`) or on Claude's answer (`asking`), the runner renews it every
+`runner.KEEP_WARM_S` (180 s), off the round's loop (`models.keep_warm`: the same empty generate,
+`keep_alive: "30m"`, only while `/api/ps` lists the model, never loading one already gone, since
+that load would skip `free_gpu`; not for a model on another machine's GPU). A long suite the agent
+ran unloaded it mid-round, and its next request loaded it cold and read the whole session again (#864). A server that lists several models swaps them itself:
 `free_gpu` treats a server as one, kept when a kept model is on it, unless the port is contended
 and it serves another model, which is then stopped first. LM Studio (a server whose
 `/api/v1/models` answers) is the exception: it evicts only what it loaded just in time, never what

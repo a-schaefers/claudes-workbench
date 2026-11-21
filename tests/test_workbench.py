@@ -958,6 +958,22 @@ class Lifecycle(Base):
         st = wait_phase("t-bgwait", {"review", "stuck"}, timeout=40)
         self.assertEqual((st["phase"], st.get("nudges", 0), st["round"]), ("review", 0, 1))
 
+    def test_a_round_waiting_on_a_background_job_keeps_its_model_loaded(self):
+        # #864 (the third 2026-11-21 audit): a test run past Ollama's 5-minute keep-alive (each
+        # of OpenCode's requests sets it again) unloaded the model mid-round, and the next request
+        # loaded it cold, past free_gpu, and read the whole session again
+        os.environ["FAKE_BGWAIT"] = "7"
+        with mock.patch.object(cli, "spawn_runner"):
+            self.start("t-warm", "bgwait", "--no-base-check")
+        warmed = []
+        with mock.patch.object(runner, "KEEP_WARM_S", 0), \
+                mock.patch.object(runner.models, "make_resident", return_value=0.0), \
+                mock.patch.object(runner.models, "keep_warm", side_effect=lambda m: warmed.append(m.id)):
+            runner.drive(store.Task("t-warm"))
+        self.assertEqual(store.Task("t-warm").status["phase"], "review")
+        self.assertTrue(warmed)
+        self.assertEqual(set(warmed), {store.Task("t-warm").spec["model"]})
+
     def test_a_job_left_running_after_the_turn_ends_is_stopped_and_the_tests_run(self):
         # #658: a dev server the agent backgrounded never ends, so `opencode run` waited on it
         # until the long silence limit, and the finished work was reported stuck, untested
