@@ -171,6 +171,16 @@ const WEB_NOTE =
   '(The user wrote this in the web chat; the workbench mod delivered it into your running turn. ' +
   'Answer as /workbench\'s "The web chat" says: `wb chat reply --text "…"`.)'
 
+// A web message's attachments (#623), one line each after the user's words, so Claude can Read
+// each file wb chat saved on this machine (an image is seen, a PDF or text read)
+export function attachedLines(files: unknown): string {
+  if (!Array.isArray(files)) return ''
+  const size = (n: number) => n < 1024 ? `${n} B` : n < 1024 * 1024 ? `${Math.round(n / 1024)} KB`
+    : `${(n / 1024 / 1024).toFixed(1)} MB`
+  return files.flatMap(f => f && typeof f === 'object' && typeof f.path === 'string'
+    ? [`\n[attached: ${f.path} (${size(Number(f.size) || 0)}, ${String(f.type || 'unknown type')})]`] : []).join('')
+}
+
 const ACTIVE = new Set(['queued', 'running', 'testing', 'asking'])
 const NEEDS = new Set(['review', 'stuck', 'failed', 'asking'])
 const COLOR: Record<string, string> = {
@@ -1713,7 +1723,7 @@ async function listen($: any, now: number) {
     const about = !a ? ''
       : a.audio ? `(keeps take ${Number(a.n)} of the shortlist: ${String(a.path ?? a.name ?? '')}) `
       : `(about ${String(a.task)}, step ${Number(a.step)}, screenshots ${Number(a.n)}) `
-    const text = `${WEB} ${about}${String(m.text ?? '')}`
+    const text = `${WEB} ${about}${String(m.text ?? '')}${attachedLines(m.files)}`
     // Mid-turn, into the running turn, as a message typed mid-turn would be; else, or if that is
     // refused, as a prompt of its own (which waits for the turn to end).
     if (mem.busy) {

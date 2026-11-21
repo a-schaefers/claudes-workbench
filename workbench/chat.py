@@ -17,6 +17,7 @@ it prints is always localhost; reaching it from a phone is the user's own setup.
 from __future__ import annotations
 
 import errno
+import hashlib
 import hmac
 import http.client
 import json
@@ -36,7 +37,7 @@ import time
 import zlib
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
-from urllib.parse import parse_qs, urlsplit
+from urllib.parse import parse_qs, quote, unquote, urlsplit
 
 from . import savings, store, webpush
 from .watch import Watcher
@@ -482,7 +483,8 @@ def snapshot() -> dict:
     return {"messages": thread(), "asks": asks(), "listener": listener(), "prefs": prefs(),
             "push": {"key": push_key(), "test": (store.read_json(chat_dir() / "push-test.json", None)
                                                  or {}).get("ts")},
-            "savings": week_saved(), "build": build(), "expire": MESSAGE_EXPIRE, "now": store.now()}
+            "savings": week_saved(), "uploads": upload_limits(), "build": build(), "expire": MESSAGE_EXPIRE,
+            "now": store.now()}
 
 
 def week_saved() -> dict:
@@ -1125,6 +1127,268 @@ class Hub:
                 os.close(pidfd)
 
 
+# ---- attachments: images and files the user sends with a message (#623) ----
+# The owner, from the phone (2026-11-20): attach a photo or a file, simple, and never uploaded twice
+# by a refresh. Each file gets its id on the page when it is picked, and `PUT /api/upload/<id>`
+# stores it under chat/uploads/<id>/ once: the same id again stores nothing and answers with the
+# first upload. The body is read to its Content-Length into a part file and becomes the file only
+# whole, so an upload cut short leaves nothing. A message names its files by id (`send`'s
+# `files`); Claude gets each saved path and Reads it. Standard library only: a raw body, the name
+# and type in headers, no multipart parser (`cgi` is gone in 3.13).
+MB = 1 << 20
+UPLOAD_MB = 25            # chat.json `upload_mb`: one file at most this
+UPLOAD_MESSAGE_MB = 50    # chat.json `upload_message_mb`: a message's files together at most this
+UPLOAD_FILES = 10         # files one message may carry
+UPLOAD_NAME = 120         # characters of a saved file's name
+UPLOAD_ID = re.compile(r"[A-Za-z0-9-]{8,64}")  # crypto.randomUUID(), or the page's fallback
+UPLOAD_TYPE = re.compile(r"[a-z0-9][a-z0-9.+-]*/[a-z0-9][a-z0-9.+-]*")
+SHOWN = {"image/png", "image/jpeg", "image/gif", "image/webp", "image/avif"}  # served as images
+_upload_lock = threading.Lock()  # one finishing step at a time in this process (the lock file: any)
+
+
+class UploadError(Exception):
+    """An upload or an attachment refused: the HTTP status and the words the page shows on the chip."""
+
+    def __init__(self, code: int, why: str):
+        super().__init__(why)
+        self.code, self.why = code, why
+
+
+def _mb(n: float) -> str:
+    """A size as the page says it: 300 B, 12 KB, 2.1 MB, 25 MB."""
+    return (f"{n:.0f} B" if n < 1024 else f"{n / 1024:.0f} KB" if n < MB
+            else f"{n / MB:.1f} MB" if n < 10 * MB else f"{n / MB:.0f} MB")
+
+
+def upload_limits() -> dict:
+    """{file, message, files}: bytes per file and per message (chat.json `upload_mb`,
+    `upload_message_mb`, read on each call so a change needs no restart), files per message. Read
+    raw, not through settings(): a bad `bind` there raises ConfigError, and this is on every
+    snapshot, so chat.json broken while the server runs would fail each request (#534 keeps serving)."""
+    conf = store.read_json(config_path(), {})
+    conf = conf if isinstance(conf, dict) else {}
+
+    def mb(key: str, default: float) -> int:
+        v = conf.get(key)
+        ok = isinstance(v, (int, float)) and not isinstance(v, bool) and v > 0
+        return int((v if ok else default) * MB)
+    return {"file": mb("upload_mb", UPLOAD_MB), "message": mb("upload_message_mb", UPLOAD_MESSAGE_MB),
+            "files": UPLOAD_FILES}
+
+
+def upload_name(name: str) -> str:
+    """The name a file is saved under. One that is a path (a `/` or `\\`), or `.`/`..`, is refused:
+    no browser sends one. Otherwise unprintable characters become `_`, leading dots go (the
+    directory's own files start with one), and a long name keeps its extension."""
+    if not name or any(c in name for c in "/\\\0") or name.strip() in (".", ".."):
+        raise UploadError(400, "that file name can't be saved")
+    clean = "".join(c if c.isprintable() else "_" for c in name).strip().lstrip(". ")
+    if len(clean) > UPLOAD_NAME:
+        stem, ext = os.path.splitext(clean)
+        ext = ext[:16]
+        clean = stem[:UPLOAD_NAME - len(ext)] + ext
+    return clean or "file"
+
+
+def _dir_fd(parent: int | None, name: str, make: bool) -> int:
+    """A directory's fd, opened without following a link (O_NOFOLLOW on each step), made 0700 if
+    asked; UploadError 409 when something else is in its place."""
+    if make:
+        try:
+            os.mkdir(name, 0o700, dir_fd=parent)
+        except FileExistsError:
+            pass
+    try:
+        return os.open(name, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=parent)
+    except FileNotFoundError:
+        raise
+    except OSError:  # ELOOP (a link), ENOTDIR (a file)
+        raise UploadError(409, "something else is where the upload goes") from None
+
+
+def _upload_dir(uid: str, make: bool = False) -> int:
+    chat = os.open(chat_dir(), os.O_RDONLY | os.O_DIRECTORY)  # the state directory: the user's own
+    try:
+        up = _dir_fd(chat, "uploads", make)
+    finally:
+        os.close(chat)
+    try:
+        return _dir_fd(up, uid, make)
+    finally:
+        os.close(up)
+
+
+def _read_meta(d: int) -> dict | None:
+    try:
+        fd = os.open(".meta.json", os.O_RDONLY | os.O_NOFOLLOW, dir_fd=d)
+    except OSError:
+        return None
+    try:
+        with os.fdopen(fd, "rb") as f:
+            m = json.loads(f.read(64 * 1024))
+    except ValueError:
+        return None
+    return m if isinstance(m, dict) and isinstance(m.get("path"), str) else None
+
+
+def upload_meta(uid: str) -> dict | None:
+    """A stored upload: {id, name, size, type, sha256, ts, path}; None when there is none."""
+    if not (isinstance(uid, str) and UPLOAD_ID.fullmatch(uid)):
+        return None
+    try:
+        d = _upload_dir(uid)
+    except (OSError, UploadError):
+        return None
+    try:
+        return _read_meta(d)
+    finally:
+        os.close(d)
+
+
+def _drain(body, n: int) -> None:
+    while n > 0 and (chunk := body.read(min(1 << 16, n))):
+        n -= len(chunk)
+
+
+def save_upload(uid: str, name: str, ctype: str, length: int, body) -> tuple[dict, bool]:
+    """Store ``length`` bytes from ``body`` as upload ``uid``: (its meta, whether this call stored
+    it). An id already stored stores nothing and returns the first upload's meta, whatever this
+    one's name or bytes. Refused (UploadError) before a byte is read: a bad id or name, a body over
+    the file limit, a link or a file where its directory is. A body cut short is discarded."""
+    if not (isinstance(uid, str) and UPLOAD_ID.fullmatch(uid)):
+        raise UploadError(400, "bad upload id")
+    name = upload_name(name)
+    limit = upload_limits()["file"]
+    if length > limit:
+        raise UploadError(413, f"too big: {_mb(length)}, the limit is {_mb(limit)}")
+    ctype = (ctype or "").split(";")[0].strip().lower()
+    ctype = ctype if len(ctype) <= 100 and UPLOAD_TYPE.fullmatch(ctype) else "application/octet-stream"
+    if done := upload_meta(uid):  # a retry, or another tab: nothing to store
+        _drain(body, length)
+        return done, False
+    d = _upload_dir(uid, make=True)
+    part = f".part-{secrets.token_hex(6)}"
+    try:
+        fd = os.open(part, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600, dir_fd=d)
+        try:
+            h, got = hashlib.sha256(), 0
+            with os.fdopen(fd, "wb") as f:
+                while got < length and (chunk := body.read(min(1 << 16, length - got))):
+                    f.write(chunk)
+                    h.update(chunk)
+                    got += len(chunk)
+                if got < length:
+                    raise UploadError(400, "the upload was cut short: it is tried again")
+                f.flush()
+                os.fsync(f.fileno())
+            with _upload_lock, store.locked(chat_dir() / "uploads.lock"):
+                if done := _read_meta(d):  # a twin upload of this id finished first
+                    return done, False
+                try:
+                    st = os.lstat(name, dir_fd=d)
+                except FileNotFoundError:
+                    st = None
+                if st and not stat.S_ISREG(st.st_mode):  # a link (or more) in the way
+                    raise UploadError(409, "something else is where the file goes")
+                # a regular file there is this id's own, from an upload stopped before its meta;
+                # rename replaces whatever is at the name and never follows a link
+                os.rename(part, name, src_dir_fd=d, dst_dir_fd=d)
+                meta = {"id": uid, "name": name, "size": got, "type": ctype, "sha256": h.hexdigest(),
+                        "ts": store.now(), "path": str(chat_dir() / "uploads" / uid / name)}
+                tmp = f".meta-{secrets.token_hex(6)}"
+                mfd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600, dir_fd=d)
+                with os.fdopen(mfd, "w", encoding="utf-8") as f:
+                    f.write(json.dumps(meta, ensure_ascii=False))
+                os.rename(tmp, ".meta.json", src_dir_fd=d, dst_dir_fd=d)
+                return meta, True
+        finally:
+            try:
+                os.unlink(part, dir_fd=d)
+            except FileNotFoundError:
+                pass
+    finally:
+        os.close(d)
+
+
+ATTACHED = ("id", "name", "size", "type", "path")  # what a message keeps of each of its files
+
+
+def attachments(ids) -> list[dict]:
+    """A message's `files`: each id's stored upload, in order, one per content (sha256: the same
+    photo picked twice is one file). UploadError for an id with no upload or too much in all."""
+    lim = upload_limits()
+    if not (isinstance(ids, list) and len(ids) <= lim["files"] and all(isinstance(i, str) for i in ids)):
+        raise UploadError(400, f"files is a list of up to {lim['files']} upload ids")
+    out, sums = [], set()
+    for i in dict.fromkeys(ids):
+        m = upload_meta(i)
+        if not m:
+            raise UploadError(400, f"no upload {i[:64]}: it must be uploaded before the message")
+        if m.get("sha256") in sums:
+            continue
+        sums.add(m.get("sha256"))
+        out.append({k: m.get(k) for k in ATTACHED})
+    if (total := sum(int(f["size"] or 0) for f in out)) > lim["message"]:
+        raise UploadError(413, f"too much for one message: {_mb(total)}, the limit is {_mb(lim['message'])}")
+    return out
+
+
+def upload_file(uid: str):
+    """(an open binary file, its meta) for serving an upload, never through a link; None if none."""
+    m = upload_meta(uid)
+    if not m:
+        return None
+    try:
+        d = _upload_dir(uid)
+    except (OSError, UploadError):
+        return None
+    try:
+        fd = os.open(m["name"], os.O_RDONLY | os.O_NOFOLLOW, dir_fd=d)
+    except OSError:
+        return None
+    finally:
+        os.close(d)
+    return os.fdopen(fd, "rb"), m
+
+
+def drop_old_uploads(days: float) -> int:
+    """`wb gc`: remove the uploads older than ``days`` whose message has its receipt, or that no
+    message waiting for one names (a draft never sent). The count removed."""
+    root = chat_dir() / "uploads"
+    if not root.is_dir() or root.is_symlink():
+        return 0
+    waiting = {f.get("id") for m in open_work()["messages"].values()
+               for f in (m.get("files") or []) if isinstance(f, dict)}
+    cutoff, n = store.now() - days * 86400, 0
+    for d in sorted(root.iterdir()):
+        if d.name in waiting or not UPLOAD_ID.fullmatch(d.name):
+            continue
+        try:
+            st = d.lstat()
+        except OSError:
+            continue
+        ts = (_read_meta_path(d) or {}).get("ts") or st.st_mtime
+        if not isinstance(ts, (int, float)) or ts > cutoff:
+            continue
+        if stat.S_ISDIR(st.st_mode):
+            shutil.rmtree(d, ignore_errors=True)  # never follows a link inside
+        else:
+            d.unlink(missing_ok=True)
+        n += 1
+    return n
+
+
+def _read_meta_path(d: Path) -> dict | None:
+    try:
+        fd = os.open(d, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+    except (OSError, UploadError):
+        return None
+    try:
+        return _read_meta(fd)
+    finally:
+        os.close(fd)
+
+
 # ---- the server ----
 
 class Handler(BaseHTTPRequestHandler):
@@ -1223,6 +1487,10 @@ class Handler(BaseHTTPRequestHandler):
                 else:
                     self._send(200, *got)
             return
+        if path.startswith(("/api/upload/", "/api/file/")):  # an attachment (#623)
+            if self._authed():
+                self._get_upload(path)
+            return
         if path == "/api/state":
             if self._authed():
                 self._json(200, snapshot())
@@ -1298,6 +1566,81 @@ class Handler(BaseHTTPRequestHandler):
                 hub.open.remove(self)
             self.streams.release()
 
+    def _get_upload(self, path: str) -> None:
+        """GET /api/upload/<id>: whether it is stored ({upload}, else 404), so a page asks before it
+        sends a byte again; GET /api/file/<id>: the file, an image as itself, anything else as a
+        download."""
+        kind, _, uid = path[len("/api/"):].partition("/")
+        if kind == "upload":
+            m = upload_meta(uid)
+            return self._json(200, {"upload": {k: m.get(k) for k in ATTACHED}}) if m \
+                else self._json(404, {"error": "no such upload"})
+        got = upload_file(uid)
+        if got is None:
+            return self._json(404, {"error": "no such file"})
+        f, m = got
+        with f:
+            size = os.fstat(f.fileno()).st_size
+            self.send_response(200)
+            shown = m.get("type") in SHOWN
+            self.send_header("Content-Type", m["type"] if shown else "application/octet-stream")
+            self.send_header("Content-Length", str(size))
+            if not shown:
+                self.send_header("Content-Disposition", f"attachment; filename*=UTF-8''{quote(m['name'])}")
+            self._security_headers()
+            self.end_headers()
+            shutil.copyfileobj(f, self.wfile, 1 << 16)
+
+    def do_PUT(self):
+        """PUT /api/upload/<id>: the file's bytes as the body, its name (URI-encoded) in
+        X-File-Name, its type in Content-Type. 200 {upload, new}; the same id again stores nothing
+        and answers with the first. Refusals say why, for the page's chip (#623)."""
+        if not self._allowed():
+            return
+        if not self.path.startswith("/api/upload/"):
+            return self._json(404, {"error": "not found"})
+        if not self._authed():
+            return
+        try:
+            n = int(self.headers.get("Content-Length") or -1)
+        except ValueError:
+            n = -1
+        if n < 0:
+            return self._json(411, {"error": "an upload needs its Content-Length"})
+        try:
+            meta, new = save_upload(self.path[len("/api/upload/"):], unquote(self.headers.get("X-File-Name") or ""),
+                                    self.headers.get("Content-Type") or "", n, self.rfile)
+        except UploadError as e:
+            return self._refuse(e.code, e.why)
+        except (TimeoutError, ConnectionError):  # the line dropped mid-body: nothing was kept
+            self.close_connection = True
+            return
+        except OSError as e:  # the disk refused
+            return self._refuse(507 if e.errno == errno.ENOSPC else 500, f"not saved: {e.strerror or e}")
+        self._json(200, {"upload": {k: meta.get(k) for k in ATTACHED}, "new": new})
+
+    def _refuse(self, code: int, why: str) -> None:
+        try:
+            self._json(code, {"error": why})
+        except OSError:  # the page went away meanwhile
+            self.close_connection = True
+            return
+        self._linger()
+
+    def _linger(self) -> None:
+        """After answering a body it didn't read: stop sending, then take what is still coming for a
+        moment, so the refusal reaches the page rather than a reset that would lose it."""
+        self.close_connection = True
+        try:
+            self.wfile.flush()
+            self.connection.shutdown(socket.SHUT_WR)
+            self.connection.settimeout(2)
+            deadline = time.monotonic() + 2
+            while time.monotonic() < deadline and self.connection.recv(1 << 16):
+                pass
+        except OSError:
+            pass
+
     def do_POST(self):
         if not self._allowed():
             return
@@ -1361,7 +1704,13 @@ class Handler(BaseHTTPRequestHandler):
                 return self._json(400, {"error": "prefs are {away: ask|allow}"})
             set_prefs(**body)
             return self._json(200, {"state": snapshot()})
-        if not text or len(text) > MAX_TEXT:
+        files = body.get("files")
+        if files is not None:  # attachments, by the ids they were uploaded with (#623)
+            try:
+                files = attachments(files)
+            except UploadError as e:
+                return self._json(e.code, {"error": e.why})
+        if (not text and not files) or len(text) > MAX_TEXT:
             return self._json(400, {"error": f"a message is 1 to {MAX_TEXT} characters"})
         if cid is not None and not (isinstance(cid, str) and 0 < len(cid) <= 64):
             return self._json(400, {"error": "bad cid"})
@@ -1377,7 +1726,7 @@ class Handler(BaseHTTPRequestHandler):
             if not pair:
                 return self._json(400, {"error": "no such screenshots"})
             about = {k: pair[k] for k in ("task", "n", "step", "round")}
-        msg = send(text, "user", cid, about=about)
+        msg = send(text, "user", cid, about=about, files=files)
         self._json(200, {"message": msg, "listener": listener(), "state": snapshot()})
 
 

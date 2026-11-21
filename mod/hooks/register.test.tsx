@@ -1,5 +1,5 @@
 import { expect, mock, test } from 'claude-code/testing'
-import { awayNow, cardName, delegates, liveLines, parsePrice, priceOf, savedLine, spark, statsLines, wrapWords } from './register.js'
+import { attachedLines, awayNow, cardName, delegates, liveLines, parsePrice, priceOf, savedLine, spark, statsLines, wrapWords } from './register.js'
 
 const PANE = {
   plugin: 'workbench',
@@ -2348,4 +2348,11 @@ test('the strip above the prompt stays the engine\'s until the user closes the p
   expect(await band.find({ key: 'restore' })).toBeUndefined()
   expect((await band.find({ type: 'Text' }))?.text).toBe('engine')
   await band.unmount()
+})
+
+test("a web message's attachments reach Claude as one path each, with size and type (#623)", () => {
+  expect(attachedLines(undefined)).toBe('')
+  expect(attachedLines([{ id: 'a', name: 'p.jpg', size: 2_202_009, type: 'image/jpeg', path: '/s/chat/uploads/a/p.jpg' },
+    { id: 'b', name: 'n.txt', size: 300, type: 'text/plain', path: '/s/chat/uploads/b/n.txt' }, { id: 'c' }]))
+    .toBe('\n[attached: /s/chat/uploads/a/p.jpg (2.1 MB, image/jpeg)]\n[attached: /s/chat/uploads/b/n.txt (300 B, text/plain)]')
 })

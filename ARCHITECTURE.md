@@ -4291,13 +4291,39 @@ VPN), `"hosts": ["chat.example.org"]` a name a tunnel or proxy sends.
 - **The path of a message.** The page posts it; the server appends it to `chat/messages.jsonl`.
   The listening session's mod submits it to Claude as `[web chat] <the user's words>`, nothing
   more (a reply to screenshots adds `(about <task>, step <s>, screenshots <n>)`; a take kept from
-  Claude's audio shortlist, `(keeps take <n> of the shortlist: <path>)`, #397), so the terminal
-  shows what the user wrote; how to answer is in the `/workbench` skill. It
+  Claude's audio shortlist, `(keeps take <n> of the shortlist: <path>)`, #397; and each attached
+  file a line `[attached: <path> (<size>, <type>)]`, `attachedLines`, so Claude can Read it, #623),
+  so the terminal shows what the user wrote; how to answer is in the `/workbench` skill. It
   goes into the running turn if Claude is mid-turn (`session.send`, with one line saying it's from
   the user), else as the next prompt. The mod also writes a receipt (`wb chat ack`) that the page
   shows at once (Claude has it now, or will read it after its current step). Claude answers with
   `wb chat reply`, which the page shows. The page says whether a session is listening and whether
   Claude is working.
+- **Attachments, each uploaded once** (#623; the owner, 2026-11-20, from the phone: simple, and
+  never a file uploaded twice by a refresh). The attach button beside the box (or a paste, or a
+  drop) puts each file in the tray above the box as a chip: a thumbnail for an image, else its
+  kind (`PDF`), its name and size, and ✕. Each file gets its upload id on the page when it is
+  picked (`crypto.randomUUID()`, else the page's fallback) and is uploaded at once by that id
+  (`PUT /api/upload/<id>`), before Send. The server stores an id once (`chat.save_upload`): the
+  same id again stores nothing and answers with the first upload, so a retry, a reload or a second
+  tab can't make a second copy; the page also asks `GET /api/upload/<id>` before it sends a byte,
+  so a file the computer has is never sent again. The body is read to its `Content-Length` into a
+  `.part-<hex>` file in the upload's directory and becomes the file only whole (a body cut short,
+  or a server stopped mid-body, leaves nothing the message can name). A message names its files by
+  id (`/api/send` `files`); one naming an id with no upload is refused (400), and the server keeps
+  one file per content (sha256) in a message, so the same photo picked twice is one file. The
+  message row carries each file's `{id, name, size, type, path}`, and the mod gives Claude each
+  path. Limits (chat.json, read on each request): `upload_mb` per file (25), `upload_message_mb`
+  for a message's files together (50), `UPLOAD_FILES` 10 a message; the page refuses a file past
+  them on its chip with the reason, and the server refuses it again (413) before reading the body,
+  answering then reading on a moment (`_linger`) so the refusal reaches the page rather than a
+  reset. Saved under `chat/uploads/<id>/<name>`, the directory 0700 and the file 0600, through
+  directory fds opened `O_NOFOLLOW` and created `O_EXCL`, so nothing is written through a link: a
+  link where the id's directory or the file goes is refused (409). A name that is a path (`/`,
+  `\`, `.`, `..`) is refused; other names lose unprintable characters and leading dots and are cut
+  to `UPLOAD_NAME` 120 characters, keeping the extension. `wb gc` removes uploads older than its
+  `--days` whose message has a receipt, or that no message waiting for one names (a draft never
+  sent: `chat.drop_old_uploads`).
 - **The switch.** `chat/switch.json` `{on}`, written by `wb chat on|off` (the pane's row runs
   them); absent is off. Off, no session listens or sends the chat a dialog, the pane shows no link,
   the away state ends, and `wb chat off` removes `listener.json`, so the page says nobody listens.
@@ -4362,8 +4388,9 @@ VPN), `"hosts": ["chat.example.org"]` a name a tunnel or proxy sends.
   under *The mod*.
 
 **Files** (`$WB_HOME/chat/`):
-- `messages.jsonl`: `{id: "<ms>-<6 hex>", ts, from: "user"|"claude", text, cid?, shots?,
-  audio?, about?}`. A post whose `cid` the thread already holds returns that row instead of adding one
+- `messages.jsonl`: `{id: "<ms>-<6 hex>", ts, from: "user"|"claude", text (empty when a user's
+  message is files alone), cid?, shots?, audio?, about?, files?}`. `files` (the user's attachments) is
+  `[{id, name, size, type, path}]`, from each upload's meta. A post whose `cid` the thread already holds returns that row instead of adding one
   (`_by_cid`: the file read on from where the last post stopped, the newest `CIDS_KEPT` 5000 ids
   kept; only the last 500 rows were checked, and a tab offline longer than that sent its message
   twice, #199). A user's message so found that `open.json` lacks and that has no receipt is put
@@ -4431,8 +4458,11 @@ VPN), `"hosts": ["chat.example.org"]` a name a tunnel or proxy sends.
   A message of the user's unread past `MESSAGE_EXPIRE` (6 h, the one threshold: the snapshot's
   `expire`) carries `expired: true` in `chat.thread` and `wb chat pending`; `wb chat claim` refuses
   it, so no session springs it on Claude, and the page says "Not passed to Claude (over 6 h old)"
-  with *send again* (a new message, its own cid). The mod skipped it on a clock of its own and
+  with *send again* (a new message, its own cid, naming the same uploads: not a byte sent again). The mod skipped it on a clock of its own and
   the page said "Delivered" for good (#536).
+- `uploads/<id>/`: one attachment (0700): `<name>` (0600) and `.meta.json` `{id, name, size, type,
+  sha256, ts, path}`, written last, so it marks the upload whole; `.part-<hex>` while a body comes
+  (removed whatever happens). `uploads.lock`: one upload finishing at a time.
 - `prefs.json`: `{away: "ask"|"allow"}` (anything else reads as `ask`), from the gear menu
   (`/api/prefs`), read by `chat.ask` (`allow` answers a new permission at once, by `setting`).
 - `push.json`: `{subs: [{endpoint, ts, ua}]}`, the devices with notifications on (the last 20,
@@ -4445,7 +4475,11 @@ VPN), `"hosts": ["chat.example.org"]` a name a tunnel or proxy sends.
 **Settings.** The token: `$WB_CHAT_TOKEN`, else `~/.config/workbench/chat-token` (created on first
 use with `O_EXCL`, mode 600, `token_urlsafe(32)`; kept at 600; one under 16 characters is refused
 with a message), read once when the server starts, so a new token needs a restart. The settings:
-`$WB_CHAT_CONFIG`, else `~/.config/workbench/chat.json`, with two keys. `bind`: addresses to listen
+`$WB_CHAT_CONFIG`, else `~/.config/workbench/chat.json`, with four keys. `upload_mb` and
+`upload_message_mb`: the attachment limits, per file (25) and per message (50), in MiB, read on
+each request (*Attachments* above) straight from the file (`chat.upload_limits`, not `settings`:
+every snapshot reads them, so a `bind` broken while the server runs must not fail each request).
+`bind`: addresses to listen
 on, which replace localhost (`localhost`, an address, `tailscale`: the tailnet IPv4 from
 `tailscale status --json`, the CLI found on PATH or, on macOS, in the app bundle
 (`TAILSCALE_APP`); skipped as `tailscale (not running)`, or `tailscale (CLI not found: …)` when
@@ -4507,7 +4541,7 @@ thread no longer):
 - `GET /api/state`: `{messages (the last 200, each user row with its receipt as `received`; `thread` reads the files' last `THREAD_BYTES` 4 MiB, `store.read_jsonl_tail`, as `asks` does: the whole history was parsed on every poll, 56 ms at 20,000 rows, the 2026-11-19 audit),
   asks (the last 20, each with `answer` (null while open), `answered`, `by`), prefs, push (`{key:
   the VAPID public key, test: the last test push's ts}`), listener, savings (`chat.week_saved`:
-  `savings.totals` over the last 7 days with its `score`, as `wb savings --json` without `period`), build, expire (`MESSAGE_EXPIRE` in seconds: past it a
+  `savings.totals` over the last 7 days with its `score`, as `wb savings --json` without `period`), uploads (`chat.upload_limits`: `{file, message, files}`, the byte limits and files a message), build, expire (`MESSAGE_EXPIRE` in seconds: past it a
   user's unread row carries `expired`, #536), now}`. `build` (`chat.build`, a crc32 of the page's files' names, mtimes and sizes) changes
   when the page does: a page that loaded other files reloads itself.
 - `GET /api/shot?task=&n=&side=base|candidate`: one side of a `wb shot` pair as `image/png`,
@@ -4539,9 +4573,21 @@ thread no longer):
   (`Hub.dir`) and stops at `close()`: a test's hub, resolving `WB_HOME` again on each restart,
   made the next test's state directory in its setUp's way (#134).
 - `POST /api/send`: JSON only (415), at most 32 KB (413), a `Content-Length` that isn't a number
-  0 or more (400), `{text: 1–8000 characters, cid?: 1–64 characters, about?: {task, n} | {audio, n}}` (400;
-  an `about` naming no pair, 400 "no such screenshots"; no such take, an `n` that isn't a whole
-  number among them, 400 "no such take"), → 200 `{message, listener, state}`.
+  0 or more (400), `{text: 1–8000 characters, cid?: 1–64 characters, about?: {task, n} | {audio, n},
+  files?: up to 10 upload ids}` (400; an `about` naming no pair, 400 "no such screenshots"; no such
+  take, an `n` that isn't a whole number among them, 400 "no such take"; text may be empty with
+  files; an id with no upload, 400 "no upload <id>: …"; the files over `upload_message_mb`
+  together, 413), → 200 `{message, listener, state}`.
+- `PUT /api/upload/<id>` (`<id>` 8–64 of `[A-Za-z0-9-]`, else 400): the file's bytes as a raw body
+  (no multipart parser: `cgi` is gone in 3.13), its name URI-encoded in `X-File-Name`, its type in
+  `Content-Type` (kept when it looks like one, else `application/octet-stream`). No
+  `Content-Length`, 411; over `upload_mb`, 413 "too big: <size>, the limit is <limit>" before
+  reading; a name that is a path, 400; a link in the way, 409; a body cut short, nothing kept. →
+  200 `{upload: {id, name, size, type, path}, new}`; an id already stored → the same, `new: false`.
+- `GET /api/upload/<id>`: 200 `{upload}` when stored, else 404 (the page asks before it uploads).
+  `GET /api/file/<id>`: the file, never through a link; an image (`SHOWN`: png, jpeg, gif, webp,
+  avif) as itself, anything else as `application/octet-stream` with `Content-Disposition:
+  attachment`, so nothing uploaded renders as a page.
 - `POST /api/answer`: the same checks, `{id: 1–64 characters, answer: "allow"|"deny", note?: up
   to 2000 characters, answers?: up to 4}` (400; `expired` is the mod's alone; answers that don't
   fit the question, or answers on anything but a question, or a question allowed without them,
@@ -4634,6 +4680,20 @@ the first render is done; the backlog a first visit loads, a message that arrive
 is hidden (it counts as unread in the title) and reduced motion show whole, and each shown message
 is remembered (`wb-chat-seen`, the last 500) so a reload doesn't replay it. Light and dark follow `prefers-color-scheme` (tokens on
 `:root`, `color-scheme` meta, a theme colour per scheme); reduced motion turns animations off.
+Attachments (#623): the tray's chips (`drawTray`; wrapped, not scrolled sideways, so a refused
+chip says why on screen) are the draft's files, kept in localStorage (`wb-chat-files`: `[{id,
+name, size, type, mod, state: up|retry|done|refused, why?}]`) with their bytes in IndexedDB
+(`wb-chat`, store `files`) until the message carrying them lands, so a reload shows the same
+chips and never sends a stored file again. `pump` uploads the draft's files one at a time (XHR,
+for the progress bar; one with no progress for `STALL_MS` 30 s is dropped and tried again with
+the same id), a network failure backing off, a refusal shown on its chip. The same file picked
+twice (name, size, modified time) is one chip. Send takes the text and the chips not refused into
+the outbox item (`files`: `[{id, name, size, type}]`); `flush` makes sure each is uploaded before
+it posts `/api/send` with their ids, and a refused one marks the message not sent, naming the file
+(edit puts its files back in the tray). In the thread a message shows its images as thumbnails
+(a tap shows one whole, `view`; a tap or Escape closes it) and other files as name and size (a
+tap saves it), each fetched once with the token as a blob (`fileURL`), or from this page's own
+bytes; one `wb gc` removed says "no longer on the computer".
 Away from localhost over plain HTTP the page isn't a secure context, so the browser's UUID and
 clipboard are missing (the page falls back), and it can't install or notify: the gear says so,
 and that `tailscale serve --bg 1337` gives it an https address on the tailnet.
@@ -4913,7 +4973,8 @@ its `ts` within 15 s) makes this one stand by; otherwise it writes `chat/listene
 `{session, cwd, pid, start, busy}` when that changes, and
 delivers each user message without a receipt, once `wb chat claim <id> --by <key>` gives it the
 message (refused: another session's, looked at again a minute later; two sessions starting
-together both took the chat and both submitted it, #84): idle → `prompt.submit('[web chat] <words>', asUser)`,
+together both took the chat and both submitted it, #84): idle → `prompt.submit('[web chat] <words>', asUser)`
+(each attached file a line after the words, `attachedLines`: `[attached: <path> (<size>, <type>)]`),
 receipt `how=now`; busy → `session.send` into the running turn with WEB_NOTE, else a queued
 prompt (`how=queued`); `wb chat ack <id> --by <key> --how …` once it entered (a dropped prompt
 gets no receipt and is tried again a minute later), `webAt = now`, a toast. Dialogs
@@ -5127,7 +5188,7 @@ the audio ones cover); `--done` records it; `--due` exits 0 when one is due (7 d
 | `wb backlog [NAME]` | `--json` | A batch started with `wb start --backlog NAME` (the morning summary of a night's run), archived tasks included (#270): `backlog NAME: N task(s) · 2 accepted · 1 review`, then a line per task (phase, rounds, minutes: the results row's, or since start while open; the branch when accepted; `savings.line` of its row once closed), then `savings.summary` over the batch's non-trial rows (`the batch: …`). An unknown name: exit 1. Without a name, each batch with its task count and how many are open. `--json`: `{backlog, tasks: [{task, phase, rounds, minutes, branch, saving}], totals}`; without a name, `[{backlog, tasks, open}]` (it printed the text, #602). |
 | `wb savings` | `--week` (default) \| `--month` \| `--all`, `--json`, `--share` (a summary to paste: the machine, model sizes, no names; *Sharing it*), `--card FILE.svg`, `--price X\|off` | What the delegated tasks saved Claude over the period against the estimate of writing them (`savings.totals`, `summary`; trials left out): tasks, Claude's tokens, the estimate, the saving and its percentage, the GPU energy and, with a price, its cost. `--price` (per kWh, positive and finite, else exit 1) writes savings.json first; `--price off` removes `kwh_price`, its other keys kept (`savings.set_price(None)`, #609). The cost reads `GPU 600 Wh, cost 0.15`: no currency sign. `--json`: `{period, tasks, of, claude, self_est, saved, wh, cost, remote, score, price}` (`price`: the kWh price set, or null; the pane's Settings row shows it). `--card FILE.svg`: the badge as an image (*The badge*). |
 | `wb stats [set KEY VALUE]` / `wb tune` / `wb trial <task…>` | `set recording\|live on\|off`, `set every 1\|2\|5`, `--json` (the feed, *The Stats feed*) | `wb stats set` changes the Stats tab's settings (stats.json, *Stats recording*) and prints them. `wb stats` starts with the feed's headline (`stats.summary` over `feed(only=stats.SUMMARY)`: the week and all time, the streak, what the agents absorbed, their questions, the guards that fired), then the results by model and size (judged rows: it says how many spec-gap discards and trials it left out), with a `claude` column (the average input-equivalent tokens a task cost Claude) once a row records one; the tuned settings; mark closed tasks as trials: their results rows, and their open lessons are dropped; an open task is refused (it has no row yet, so it was marked as nothing while its lessons went). |
-| `wb gc` | `--days N` (default `ARCHIVE_DAYS` 30) | Tidies what history leaves behind (`cli.gc`, the 2026-11-19 audit, finding 18): archives tasks closed and untouched for N days (`store.archive`), moves notices older than that which are handled (acknowledged, their task closed or gone) to `notify.old.jsonl` under notify's lock (`_rotate_notices`), removes the rules of closed tasks and of vanished ones (a rules directory with no task waits `RULES_GRACE` an hour: a start in progress), stale runtime directories (`context.drop_stale_runtime_dirs`), the scratch directories (`store.SCRATCH_PREFIXES`: `.verify-`, `.base-`, `.check-`, `.submodule-`, `wb-index-`, `wb-merge-`, `.wb-image-`, `.wb-audio-`, each named `<prefix><maker's pid>.<start tag>-` by `store.scratch`, the tag `models.start_tag`, a crc32 of its start; and `wb bench add`'s half-made case `.<case>.<pid>.tmp`) in the state directory, `bench/`, `bench/cases/` and each default output directory of `wb image` and `wb audio` (`_scratch_homes`: only the top level was swept, and a bench add or a generation killed at Claude's Bash limit left its clone or temp directory for good, #589) `SCRATCH_AGE` (an hour) old whose maker is gone (`bench/`: a killed `wb bench add`'s clones, #439) (`_drop_scratches`, `_maker_alive`: a pid live again under a process with another start is gone, #532; an untagged name goes by the pid), half-made starts (`_dead_start`, `_drop_start`: a task directory with no task.json whose `starting.json` pid is gone or now another process's (its `start`, #532), or with none past `RULES_GRACE`; its worktree (unlocked first: killed mid-checkout, git leaves it locked "initializing", which remove and prune skip), registration and rules go too, and the branch only when `starting.json` says this start made it and only while it still points at `branch_at` (`delete_branch(at=)`: one `update-ref -d` compare-and-delete; an earlier task's unmerged `delegate/<task>` was deleted after a start killed before its worktree, #416); killed commands left full clones that `_disk_room` counted, and a killed start's name was refused for good: #376, the audit of 1.6) and the delegate branches of tasks accepted with `--merge` before accept deleted them itself (`_merged_branches`: tip recorded first, `branch -d`). Prints the counts; writes `gc.json`. Then (not in `cli.gc`, which a discard runs) `bench.sweep`: the bench replays a driver killed without warning left (*Bench*, #511), with a line naming them. `wb accept` and `wb discard` run it without the branches at most once a day (`GC_EVERY`). |
+| `wb gc` | `--days N` (default `ARCHIVE_DAYS` 30) | Tidies what history leaves behind (`cli.gc`, the 2026-11-19 audit, finding 18): archives tasks closed and untouched for N days (`store.archive`), moves notices older than that which are handled (acknowledged, their task closed or gone) to `notify.old.jsonl` under notify's lock (`_rotate_notices`), removes the rules of closed tasks and of vanished ones (a rules directory with no task waits `RULES_GRACE` an hour: a start in progress), stale runtime directories (`context.drop_stale_runtime_dirs`), the scratch directories (`store.SCRATCH_PREFIXES`: `.verify-`, `.base-`, `.check-`, `.submodule-`, `wb-index-`, `wb-merge-`, `.wb-image-`, `.wb-audio-`, each named `<prefix><maker's pid>.<start tag>-` by `store.scratch`, the tag `models.start_tag`, a crc32 of its start; and `wb bench add`'s half-made case `.<case>.<pid>.tmp`) in the state directory, `bench/`, `bench/cases/` and each default output directory of `wb image` and `wb audio` (`_scratch_homes`: only the top level was swept, and a bench add or a generation killed at Claude's Bash limit left its clone or temp directory for good, #589) `SCRATCH_AGE` (an hour) old whose maker is gone (`bench/`: a killed `wb bench add`'s clones, #439) (`_drop_scratches`, `_maker_alive`: a pid live again under a process with another start is gone, #532; an untagged name goes by the pid), half-made starts (`_dead_start`, `_drop_start`: a task directory with no task.json whose `starting.json` pid is gone or now another process's (its `start`, #532), or with none past `RULES_GRACE`; its worktree (unlocked first: killed mid-checkout, git leaves it locked "initializing", which remove and prune skip), registration and rules go too, and the branch only when `starting.json` says this start made it and only while it still points at `branch_at` (`delete_branch(at=)`: one `update-ref -d` compare-and-delete; an earlier task's unmerged `delegate/<task>` was deleted after a start killed before its worktree, #416); killed commands left full clones that `_disk_room` counted, and a killed start's name was refused for good: #376, the audit of 1.6), the web chat's uploads older than N days whose message has its receipt, or that no unread message names (`chat.drop_old_uploads`, #623), and the delegate branches of tasks accepted with `--merge` before accept deleted them itself (`_merged_branches`: tip recorded first, `branch -d`). Prints the counts; writes `gc.json`. Then (not in `cli.gc`, which a discard runs) `bench.sweep`: the bench replays a driver killed without warning left (*Bench*, #511), with a line naming them. `wb accept` and `wb discard` run it without the branches at most once a day (`GC_EVERY`). |
 
 ### Other
 | Command | Flags | What it does |
@@ -5147,7 +5208,7 @@ the audio ones cover); `--done` records it; `--due` exits 0 when one is due (7 d
 $WB_HOME (~/.local/state/workbench)
   notify.jsonl                   notices that need Claude, all tasks (the runner writes them)
   notify.old.jsonl               notices handled and older than ARCHIVE_DAYS, moved by gc (_rotate_notices)
-  gc.json                        the last gc: {at, archived, notices, rules, runtime, branches}
+  gc.json                        the last gc: {at, archived, notices, rules, runtime, scratch, starts, uploads, branches}
   archive/<task>/                a task closed and untouched for ARCHIVE_DAYS (30), moved from tasks/ by gc
   coding.json                    Claude coding, the user's choice: {mode: only|ask|decide, ts}; none: decide
   experiments.json  .lock        wb experiment: {<name>: "on"|"off"}; a missing name is off (*Experiments*)
@@ -5180,6 +5241,7 @@ $WB_HOME (~/.local/state/workbench)
                                  switch.json ({on}: wb chat on|off)  serve.pid ({pid, port, start}; wb chat url revives from it)  serve.log (the server wb chat on started)
                                  port.json ({port, pid, start}: the port wb chat serve runs on, read back without --port)
                                  audio/<batch>/ (wb chat listen's copies, <n>.<ext>, and audio.json; the newest 20)
+                                 uploads/<id>/ (an attachment: <name> 0600 and .meta.json; *The web chat*)  uploads.lock
   rules/<task>/                  outside the lane: opencode.json (the config layer), HANDBOOK.md,
                                  CLAUDE.md (a copy of the user's), imports/<n>/<name> (an import
                                  from outside the repo: context.import_files), bin/git (the shim),
@@ -5231,7 +5293,7 @@ $WB_HOME (~/.local/state/workbench)
                                  real path, else by git dir: its linked worktrees too; --setup and --setup-timeout replace its setup and its limit, a
                                  positive whole number, --copy and --sibling add) and how wb
                                  accept --merge lands there (context.MERGE_AS; --merge-as overrides, #352)
-  chat.json ($WB_CHAT_CONFIG)    the web chat's {"bind": [...], "hosts": [...]}
+  chat.json ($WB_CHAT_CONFIG)    the web chat's {"bind": [...], "hosts": [...], "upload_mb": 25, "upload_message_mb": 50}
   chat-token ($WB_CHAT_TOKEN)    the web chat's token, mode 600
   savings.json ($WB_SAVINGS)     {"kwh_price": N}, the electricity price the energy is costed at (wb savings --price;
                                  --price off removes it; other keys kept)
@@ -5538,7 +5600,7 @@ main (*Shipping to main*).
 - `tests/test_workbench.py`: end to end, one class per feature (Lifecycle, Context, Steering,
   WorktreeSetup, Watch, AskServer, ConfigLayer, AgentContext, SkillLibrary, RealOpenCode, GitGuard, Lane,
   Permission, Images, Audio, Discovery, Routing, Tuning, Notes, Setup, Update, Projects, ModelSet,
-  WebChat, Hardware, Detector, SkillLearning, RealOpenCodeSkillFiles, RealOpenCodeRun, Drift).
+  WebChat, ChatUploads, Hardware, Detector, SkillLearning, RealOpenCodeSkillFiles, RealOpenCodeRun, Drift).
 - `tests/test_gpu.py`: sharing the GPU (side by side, taking turns, unknown VRAM, an exclusive
   holder, `wb start` refused or `--queue`d behind a holder, `wb image` refused or `--wait`ing,
   `wb audio` refused while a CPU engine runs beside a task, stale holders, a share Ollama couldn't keep), `can_share` (with `OLLAMA_MAX_LOADED_MODELS`) and
@@ -5671,9 +5733,12 @@ take, the composer's draft untouched: #397), the phone keyboard (a swipe down or
 the thread puts it away, a tap on the composer or a button doesn't: touches made by hand, Chromium
 only, since no headless browser raises a keyboard; once it is down the composer is back at the
 foot), a message over 6 h unread (not passed to Claude, never "Delivered", *send again* lands a
-new one), no script errors; and once, in node (`swSays`: `sw.js` in a `vm` against a given state,
-since no browser here shows a push), a push's text: Claude's newer reply over an older or stale
-prompt, a newer open prompt over the reply (#538).
+new one), an attachment (a photo picked, the page reloaded before sending: the chip is back and it
+was uploaded once; sent, one message with one path reaches `wb chat pending`, its thumbnail opens
+whole) and one refused on its chip (over chat.json's `upload_mb`, then dropped with ✕; the test's
+own `WB_CHAT_CONFIG`), no script errors; and once, in node (`swSays`: `sw.js` in a `vm` against a
+given state, since no browser here shows a push), a push's text: Claude's newer reply over an older
+or stale prompt, a newer open prompt over the reply (#538).
 
 **Conventions for a new test.** Names read as sentences (`test_a_note_does_not_swallow_a_failure_claude_has_not_seen`);
 one class per feature with a one-line docstring; end to end through `self.start`/`wait_phase`/

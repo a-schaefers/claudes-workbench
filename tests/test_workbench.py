@@ -6,6 +6,7 @@ import errno
 import re
 import glob
 import fnmatch
+import http.client
 import io
 import json
 import queue
@@ -15,6 +16,7 @@ import os
 import shutil
 import signal
 import socket
+import stat
 import subprocess
 import sys
 import tempfile
@@ -23,6 +25,7 @@ import types
 import threading
 import time
 import unittest
+import urllib.parse
 from unittest import mock
 import warnings
 from contextlib import nullcontext, redirect_stderr, redirect_stdout
@@ -13496,6 +13499,168 @@ while True:
         print("1, [N/A], [N/A], [N/A], [N/A]", flush=True)
     time.sleep(ms / 1000)
 """
+
+
+class ChatUploads(Base):
+    """The web chat's attachments (#623): each file uploaded once, by the id the page gave it."""
+    def setUp(self):
+        super().setUp()
+        os.environ["WB_CHAT_TOKEN"] = str(Path(self.tmp.name) / "chat-token")
+        os.environ["WB_CHAT_CONFIG"] = str(Path(self.tmp.name) / "chat.json")  # not the user's
+        from workbench import chat
+        self.chat = chat
+        servers, _ = chat.make_servers(0, ["127.0.0.1"])
+        self.srv = servers[0]
+        self.port = self.srv.server_address[1]
+        self.tok = chat.token()
+        import threading
+        threading.Thread(target=self.srv.serve_forever, daemon=True).start()
+
+    def tearDown(self):
+        self.srv.shutdown()
+        self.srv.server_close()
+        self.srv.RequestHandlerClass.hub.close()
+        super().tearDown()
+
+    def put(self, uid, body: bytes, name="photo.jpg", ctype="image/jpeg", length=None, token=True):
+        """A raw PUT: ``body`` sent whole, or cut short when ``length`` says more is coming."""
+        with socket.create_connection(("127.0.0.1", self.port), timeout=10) as sk:
+            head = (f"PUT /api/upload/{uid} HTTP/1.1\r\nHost: localhost:{self.port}\r\n"
+                    f"Content-Type: {ctype}\r\nX-File-Name: {urllib.parse.quote(name)}\r\n"
+                    f"Content-Length: {len(body) if length is None else length}\r\n"
+                    + (f"Authorization: Bearer {self.tok}\r\n" if token else "") + "\r\n")
+            sk.sendall(head.encode() + body)
+            if length is not None:
+                sk.shutdown(socket.SHUT_WR)  # the line drops mid-body
+            data = b""
+            while chunk := sk.recv(65536):
+                data += chunk
+        status = int(data.split(b" ", 2)[1]) if data else 0
+        return status, (json.loads(data.split(b"\r\n\r\n", 1)[1] or b"{}") if data else {})
+
+    def send(self, body):
+        c = http.client.HTTPConnection("127.0.0.1", self.port, timeout=5)
+        c.request("POST", "/api/send", json.dumps(body), {"Host": f"localhost:{self.port}",
+                  "Authorization": f"Bearer {self.tok}", "Content-Type": "application/json"})
+        r = c.getresponse()
+        out = r.status, json.loads(r.read())
+        c.close()
+        return out
+
+    def uploads(self) -> Path:
+        return self.chat.chat_dir() / "uploads"
+
+    def test_one_id_uploaded_twice_stores_one_file_and_answers_with_the_first(self):
+        # the owner (2026-11-20): never a file uploaded twice by a refresh. A retry with the id the
+        # page gave the file, or a second tab's, is the first upload again
+        uid = "3f2a9c1e-0b7d-4e55-9a1f-1234567890ab"
+        code, first = self.put(uid, b"\xff\xd8 the photo")
+        self.assertEqual((code, first["new"]), (200, True))
+        code, again = self.put(uid, b"\xff\xd8 other bytes", name="other.jpg")
+        self.assertEqual((code, again["new"]), (200, False))
+        self.assertEqual(again["upload"], first["upload"])
+        saved = Path(first["upload"]["path"])
+        self.assertEqual((saved.parent, saved.name), (self.uploads() / uid, "photo.jpg"))
+        self.assertEqual(saved.read_bytes(), b"\xff\xd8 the photo")
+        self.assertEqual(sorted(p.name for p in saved.parent.iterdir()), [".meta.json", "photo.jpg"])
+        self.assertEqual(stat.S_IMODE(saved.stat().st_mode), 0o600)
+        self.assertEqual(stat.S_IMODE(saved.parent.stat().st_mode), 0o700)
+        self.assertEqual(self.put(uid, b"x", token=False)[0], 401)          # the token, as on every route
+
+    def test_a_message_names_its_files_by_id_one_per_content_and_an_unknown_id_is_refused(self):
+        a, b, c = "aaaaaaaa-1", "bbbbbbbb-2", "cccccccc-3"
+        self.put(a, b"same photo")
+        self.put(b, b"same photo", name="copy.jpg")                          # picked twice
+        self.put(c, b"%PDF-1.7", name="notes.pdf", ctype="application/pdf")
+        self.assertEqual(self.send({"text": "look", "cid": "m1", "files": [a, "dddddddd-4"]}),
+                         (400, {"error": "no upload dddddddd-4: it must be uploaded before the message"}))
+        self.assertEqual(self.chat.thread(), [])                             # nothing logged
+        code, r = self.send({"text": "", "cid": "m2", "files": [a, b, c]})   # files alone are a message
+        self.assertEqual(code, 200)
+        self.assertEqual([f["id"] for f in r["message"]["files"]], [a, c])
+        self.assertEqual(r["message"]["files"][1]["path"], str(self.uploads() / c / "notes.pdf"))
+        self.assertEqual(self.send({"text": "", "cid": "m2", "files": [a, b, c]})[1]["message"]["id"],
+                         r["message"]["id"])                                 # the cid's dedupe holds
+        self.assertEqual(len(self.chat.thread()), 1)
+        self.assertEqual(self.chat.pending()[0]["files"], r["message"]["files"])  # what the mod reads
+        log = run_wb("chat", "log")
+        self.assertIn(f"[attached: {self.uploads() / c / 'notes.pdf'}]", log)
+
+    def test_a_chat_json_broken_while_serving_still_gives_the_page_its_state_and_limits(self):
+        # #534 keeps the server up when chat.json breaks while it runs; the upload limits are read
+        # on every snapshot, so through settings() a bad `bind` would fail every request
+        Path(os.environ["WB_CHAT_CONFIG"]).write_text(json.dumps({"bind": 5, "upload_mb": 2}))
+        snap = self.chat.snapshot()
+        self.assertEqual(snap["uploads"]["file"], 2 * self.chat.MB)
+        Path(os.environ["WB_CHAT_CONFIG"]).write_text("[]")
+        self.assertEqual(self.chat.snapshot()["uploads"]["file"], self.chat.UPLOAD_MB * self.chat.MB)
+
+    def test_an_oversize_body_is_refused_before_it_is_stored(self):
+        Path(os.environ["WB_CHAT_CONFIG"]).write_text(json.dumps({"upload_mb": 1, "upload_message_mb": 1.5}))
+        code, r = self.put("eeeeeeee-5", b"x" * 1000, length=3 << 20)        # says 3 MB, sends 1000 bytes
+        self.assertEqual((code, r["error"]), (413, "too big: 3.0 MB, the limit is 1.0 MB"))
+        self.assertFalse((self.uploads() / "eeeeeeee-5").exists())
+        code, r = self.put("ffffffff-6", b"y" * 1000, length=900 << 10)      # cut short under the limit
+        self.assertEqual(code, 400)
+        self.assertEqual(list((self.uploads() / "ffffffff-6").iterdir()), [])  # no part left
+        self.assertIsNone(self.chat.upload_meta("ffffffff-6"))
+        for i in "12":
+            self.assertEqual(self.put(f"gggggggg-{i}", bytes([ord(i)]) * (900 << 10))[0], 200)
+        code, r = self.send({"text": "two", "files": ["gggggggg-1", "gggggggg-2"]})  # the message's limit
+        self.assertEqual((code, r["error"]), (413, "too much for one message: 1.8 MB, the limit is 1.5 MB"))
+        self.assertEqual(self.chat.snapshot()["uploads"], {"file": 1 << 20, "message": 3 << 19, "files": 10})
+
+    def test_a_path_for_a_name_or_a_link_in_the_way_is_refused(self):
+        for bad in ("../../token", "a/b.jpg", "..", "x\\..\\y"):
+            self.assertEqual(self.put("hhhhhhhh-7", b"x", name=bad)[0], 400, bad)
+        self.assertFalse((self.uploads() / "hhhhhhhh-7").exists())
+        self.assertEqual(self.put("hhhhhhhh-8", b"x", name="\x01.bashrc")[1]["upload"]["name"], "_.bashrc")
+        outside = Path(self.tmp.name) / "outside"
+        outside.mkdir()
+        self.uploads().mkdir(exist_ok=True)
+        (self.uploads() / "iiiiiiii-9").symlink_to(outside)                  # the id's directory a link
+        self.assertEqual(self.put("iiiiiiii-9", b"x")[0], 409)
+        (self.uploads() / "jjjjjjjj-0").mkdir()
+        target = outside / "victim"
+        target.write_text("kept")
+        (self.uploads() / "jjjjjjjj-0" / "photo.jpg").symlink_to(target)    # the file's name a link
+        self.assertEqual(self.put("jjjjjjjj-0", b"evil")[0], 409)
+        self.assertEqual(target.read_text(), "kept")
+        self.assertEqual(sorted(p.name for p in outside.iterdir()), ["victim"])
+        self.assertEqual(self.send({"text": "x", "files": ["iiiiiiii-9"]})[0], 400)
+        self.assertEqual(self.put("short", b"x")[0], 400)                        # not an id
+
+    def test_a_file_is_served_behind_the_token_an_image_as_itself_else_a_download(self):
+        self.put("kkkkkkkk-1", b"\x89PNG img", name="shot.png", ctype="image/png")
+        self.put("kkkkkkkk-2", b"<script>", name="page.html", ctype="text/html")
+        def get(path, token=True):
+            c = http.client.HTTPConnection("127.0.0.1", self.port, timeout=5)
+            c.request("GET", path, headers={"Host": "localhost", **({"Authorization": f"Bearer {self.tok}"} if token else {})})
+            r = c.getresponse()
+            out = r.status, r.getheader("Content-Type"), r.getheader("Content-Disposition"), r.read()
+            c.close()
+            return out
+        self.assertEqual(get("/api/file/kkkkkkkk-1", token=False)[0], 401)
+        self.assertEqual(get("/api/file/kkkkkkkk-1"), (200, "image/png", None, b"\x89PNG img"))
+        code, ctype, disp, body = get("/api/file/kkkkkkkk-2")             # never rendered as a page
+        self.assertEqual((code, ctype, disp), (200, "application/octet-stream", "attachment; filename*=UTF-8''page.html"))
+        self.assertEqual(get("/api/upload/kkkkkkkk-1")[0], 200)
+        self.assertEqual(get("/api/upload/kkkkkkkk-9")[0], 404)
+        self.assertEqual(get("/api/file/..%2Ftoken")[0], 404)
+
+    def test_gc_drops_old_uploads_once_their_message_is_read_and_drafts_never_sent(self):
+        for uid in ("llllllll-1", "llllllll-2", "llllllll-3", "llllllll-4"):
+            self.put(uid, uid.encode())
+        read = self.send({"text": "read", "files": ["llllllll-1"]})[1]["message"]
+        self.send({"text": "unread", "files": ["llllllll-2"]})
+        self.chat.ack(read["id"], "s1")
+        old = store.now() - 40 * 86400
+        for uid in ("llllllll-1", "llllllll-2", "llllllll-3"):              # 4 stays new
+            d = self.uploads() / uid
+            m = json.loads((d / ".meta.json").read_text())
+            (d / ".meta.json").write_text(json.dumps({**m, "ts": old}))
+        self.assertIn("2 web chat upload(s)", run_wb("gc"))
+        self.assertEqual(sorted(p.name for p in self.uploads().iterdir()), ["llllllll-2", "llllllll-4"])
 
 
 class Top(Base):

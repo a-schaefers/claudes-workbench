@@ -2173,7 +2173,8 @@ def gc(days: float = store.ARCHIVE_DAYS, branches: bool = False) -> dict:
     """What history leaves behind (the 2026-11-19 audit, finding 18): closed tasks archived after
     ``days`` (store.archive), handled notices older than that moved to notify.old.jsonl, the
     rules of closed or vanished tasks, stale runtime directories, and with ``branches`` the
-    delegate branches of tasks accepted and merged (wb gc). The counts of each."""
+    delegate branches of tasks accepted and merged (wb gc), and the web chat's uploads past
+    ``days`` once their message is read. The counts of each."""
     out = {"archived": len(store.archive(days)), "notices": _rotate_notices(days)}
     rules = store.home() / "rules"
     out["rules"] = 0
@@ -2192,6 +2193,7 @@ def gc(days: float = store.ARCHIVE_DAYS, branches: bool = False) -> dict:
         if store.NAME_RE.match(d.name) and (half := _dead_start(t)) is not None:
             _drop_start(t, half)
             out["starts"] += 1
+    out["uploads"] = chat.drop_old_uploads(days)  # the web chat's attachments, once delivered (#623)
     out["branches"] = _merged_branches() if branches else 0
     store.write_json(store.home() / "gc.json", {"at": store.now(), **out})
     return out
@@ -2256,7 +2258,8 @@ def cmd_gc(a):
     print(f"archived {out['archived']} task(s) closed over {a.days:g} days ago; moved "
           f"{out['notices']} old notice(s) to notify.old.jsonl; removed {out['rules']} rules "
           f"dir(s), {out['runtime']} runtime dir(s), {out['scratch']} scratch dir(s), "
-          f"{out['starts']} half-made start(s), {out['branches']} merged branch(es)")
+          f"{out['starts']} half-made start(s), {out['uploads']} web chat upload(s), "
+          f"{out['branches']} merged branch(es)")
     if left := bench.sweep():  # not in gc(): a discard runs that, and this discards (#511)
         print(f"closed {len(left)} bench replay(s) whose driver died, with their clones: "
               + ", ".join(left[:5]))
@@ -3516,7 +3519,8 @@ def cmd_chat(a):
     else:  # log
         for r in chat.thread()[-a.n:]:
             who = "you" if r["from"] == "user" else "Claude"
-            print(f"{time.strftime('%H:%M', time.localtime(r['ts']))} {who}: {r['text']}")
+            files = "".join(f" [attached: {f.get('path')}]" for f in r.get("files") or [] if isinstance(f, dict))
+            print(f"{time.strftime('%H:%M', time.localtime(r['ts']))} {who}: {r['text']}{files}")
         lst = chat.listener()
         print(f"listening: {lst['cwd']}" if lst else "no session is listening")
 
