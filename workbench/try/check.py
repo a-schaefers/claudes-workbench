@@ -1,4 +1,4 @@
-"""wb try's hidden check: python3 check.py <worktree>. Claude runs it at review; the agent never
+"""wb try's hidden check: <wb's python> check.py <worktree>. Claude runs it at review; the agent never
 sees it. Exit 0 when stats.median does what the spec says."""
 import sys
 from pathlib import Path
@@ -7,7 +7,7 @@ sys.path.insert(0, str(Path(sys.argv[1]).resolve()))
 sys.dont_write_bytecode = True  # leaves no __pycache__ in the worktree under review
 try:
     from stats import median
-except ImportError as e:
+except Exception as e:  # noqa: BLE001 not only ImportError: a syntax the Python can't read (#530)
     sys.exit(f"hidden check: FAIL (no stats.median: {e})")
 
 failed = []

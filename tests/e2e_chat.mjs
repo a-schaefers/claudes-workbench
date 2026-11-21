@@ -5,6 +5,7 @@ import { spawn, execFileSync } from 'node:child_process'
 import { mkdtempSync, mkdirSync, writeFileSync, appendFileSync, copyFileSync, readFileSync, existsSync, rmSync, statSync, utimesSync } from 'node:fs'
 import { createRequire } from 'node:module'
 import { createServer, connect as dial } from 'node:net'
+import { runInNewContext } from 'node:vm'
 import { tmpdir } from 'node:os'
 import { join, dirname } from 'node:path'
 import { fileURLToPath } from 'node:url'
@@ -241,8 +242,22 @@ async function run(engine, device) {
     await until(async () => await page.locator('#settings').isHidden())
   })
   await check('what the page showed on screen is reported, so it is not pushed', async () => {
+    await page.locator('.thread').click({ position: { x: 5, y: 5 } })  // in use: touched just now
     const shown = JSON.parse(readFileSync(join(home, 'state/chat/messages.jsonl'), 'utf8').trim().split('\n').filter(l => l.includes('"claude"')).at(-1)).id
     await until(() => existsSync(join(home, 'state/chat/seen.jsonl')) && readFileSync(join(home, 'state/chat/seen.jsonl'), 'utf8').includes(shown))
+  })
+  await check("a page on screen but not in use doesn't stop the push, and reports it once it is used", async () => {
+    // #537 (the 2026-11-20 audit): a desktop tab left visible silenced every device's pushes
+    const seen = () => existsSync(join(home, 'state/chat/seen.jsonl')) ? readFileSync(join(home, 'state/chat/seen.jsonl'), 'utf8') : ''
+    await page.evaluate(() => { document._hasFocus = document.hasFocus; document.hasFocus = () => false })
+    wb('chat', 'reply', '--text', 'Nobody is at this tab.')
+    await until(async () => (await page.locator('.row.claude .bubble').last().textContent()).includes('Nobody is at this tab.'))
+    const id = messages().filter(m => m.text === 'Nobody is at this tab.').at(-1).id
+    await sleep(1500)
+    if (seen().includes(id)) throw new Error('an unfocused page reported it')
+    await page.evaluate(() => { document.hasFocus = document._hasFocus })
+    await page.locator('.thread').click({ position: { x: 5, y: 5 } })
+    await until(() => seen().includes(id))
   })
   await check('a server that takes calls and never answers: the page heals itself once it is back, no reload', async () => {
     // the 2026-11-18 report: "Reconnecting" until a hard refresh
@@ -485,10 +500,41 @@ async function run(engine, device) {
     const n = messages().filter(m => m.text === 'retried after a lost reply').length
     if (n !== 1) throw new Error(`landed ${n} times`)
   })
+  await check('a message over 6 h unread says it was not passed to Claude, never Delivered, and sends again', async () => {
+    // #536 (the 2026-11-20 audit): the mod skipped it, and the page said "Delivered" for good
+    listen(false)
+    appendFileSync(join(home, 'state/chat/messages.jsonl'), JSON.stringify({ id: 'old-1', ts: Date.now() / 1000 - 7 * 3600,
+      from: 'user', text: 'run the backlog overnight' }) + '\n')
+    const row = page.locator('.row.user', { hasText: 'run the backlog overnight' })
+    await until(async () => (await row.locator('.meta').textContent()).includes('Not passed to Claude (over 6 h old)'))
+    if ((await row.locator('.meta').textContent()).includes('Delivered')) throw new Error('says Delivered')
+    await row.locator('.meta button', { hasText: 'send again' }).click()
+    await until(() => messages().filter(m => m.text === 'run the backlog overnight').length === 2)
+    const again = messages().filter(m => m.text === 'run the backlog overnight').at(-1)
+    if (Date.now() / 1000 - again.ts > 60) throw new Error('not sent as a new message')
+    await until(async () => (await page.locator('.row.user', { hasText: 'run the backlog overnight' }).last().locator('.meta').textContent()).includes('Delivered'))
+  })
   await check('no script errors', async () => { if (errors.length) throw new Error(errors.join('; ')) })
   await browser.close()
   await stopServer()
 }
+
+// The worker's notification text, run in node against a given state (no browser shows a push)
+async function swSays(state) {
+  const ctx = { self: { addEventListener() {} }, caches: { open: async () => ({ match: async () => null }) },
+    fetch: async () => ({ ok: true, json: async () => state }), Date, Math, String }
+  runInNewContext(readFileSync(join(ROOT, 'workbench/chat_static/sw.js'), 'utf8'), ctx)
+  return ctx.what()
+}
+await check("a push shows Claude's newer reply over an older or stale prompt, and an open newer prompt over it", async () => {
+  // #538 (the 2026-11-20 audit): a dead session's card beat every later reply in every push
+  const ask = { id: 'ask-1', ts: 100, tool: 'Bash', text: 'rm -rf build', kind: 'permission', answer: null }
+  const reply = { id: 'r1', ts: 200, from: 'claude', text: 'Tests pass, ready for review' }
+  const said = async s => (await swSays({ now: 300, push: {}, ...s })).body
+  if (await said({ asks: [ask], messages: [reply] }) !== 'Tests pass, ready for review') throw new Error('the older prompt won')
+  if (await said({ asks: [{ ...ask, ts: 250, stale: true }], messages: [reply] }) !== 'Tests pass, ready for review') throw new Error('a stale prompt won')
+  if (await said({ asks: [{ ...ask, ts: 250 }], messages: [reply] }) !== 'rm -rf build') throw new Error('the newer prompt lost')
+})
 
 try {
   await run('webkit', 'iPhone 13')

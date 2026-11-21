@@ -430,6 +430,33 @@ with models.GpuLease(None, optimize.HOLDER, wait=False):
         self.assertIn(("unload", False), said)      # sent before t-b was let in, which loads again
         self.assertTrue(admitted.exists())
 
+    def test_tests_that_use_the_gpu_hold_it_from_a_queued_task_until_they_end(self):
+        # #428 (the audit of 1.8, reproduced): with --unload-for-tests the lease table was empty
+        # while the tests ran, so a rival with --queue was let in and ran a whole model round
+        # beside them: on real hardware both allocate VRAM at once, out of memory in one
+        os.environ["WB_FAKE_GPU_GB"] = "48"          # the two models fit together: not why it waits
+        flag = Path(self.tmp.name) / "tests-end"
+        self.start("t-gpu", "ok", "--model", SMALL, "--no-base-check", "--unload-for-tests",
+                   "--test", f"while [ ! -e {flag} ]; do sleep 0.1; done; grep -qx 42 answer.txt")
+        deadline = time.time() + 30
+        while store.Task("t-gpu").status.get("phase") != "testing" and time.time() < deadline:
+            time.sleep(0.1)
+        held = list(models.holders().values())
+        self.assertEqual([(h["task"], h["model"], h.get("tests")) for h in held], [("t-gpu", None, True)])
+        argv = ("start", "t-rival", "--spec", str(self.spec), "--repo", str(self.repo),
+                "--model", BIG, "--test", TEST_CMD)
+        os.environ["FAKE_SCENARIO"] = "ok"
+        said = self.refused(*argv)
+        self.assertTrue(said.startswith("exit 4: "), said)
+        self.assertIn("task t-gpu", said)
+        run_wb(*argv, "--queue")
+        time.sleep(2)
+        st = store.Task("t-rival").status
+        self.assertEqual((st["phase"], st["last"]), ("queued", "waiting for the GPU (held by t-gpu)"))
+        flag.write_text("")
+        self.assertEqual(wait_phase("t-gpu", {"review", "stuck", "failed"})["phase"], "review")
+        self.assertEqual(wait_phase("t-rival", {"review", "stuck", "failed"})["phase"], "review")
+
     def test_two_tasks_whose_loads_misfit_both_get_the_gpu_once_the_holder_ends(self):
         # #366 (the audit of 1.6, reproduced): two leases let in beside a third, each finding at
         # its load that Ollama couldn't keep both, waited for the GPU to themselves. The second

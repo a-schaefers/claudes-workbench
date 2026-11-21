@@ -293,6 +293,10 @@ def send(text: str, frm: str, cid: str | None = None, **extra) -> dict:
     reply is about (``about``)."""
     with _send_lock:
         if cid and (r := _by_cid(cid)):
+            if r.get("from") == "user" and r.get("id") not in open_work()["messages"]:
+                # a send cut off between the append and the index (a restart mid-request): the
+                # retry found the id and said sent, and the listener never had it (#446)
+                _open_update(lambda w: _reopen(w, r))
             return r
         row = {"id": f"{int(time.time() * 1000)}-{secrets.token_hex(3)}", "ts": store.now(),
                "from": frm, "text": text, **({"cid": cid} if cid else {}),
@@ -382,13 +386,33 @@ def _open_rebuild() -> dict:
     msgs = {r["id"]: r for r in store.read_jsonl(chat_dir() / "messages.jsonl")[0]
             if r.get("from") == "user" and r.get("id") and r["id"] not in got}
     open_asks: dict = {}
+    answered: dict = {}
     for r in store.read_jsonl(chat_dir() / "asks.jsonl")[0]:
         if "answer" in r:
-            if r.get("answer") in ANSWERS:
-                open_asks.pop(r.get("id"), None)
+            if r.get("answer") in ANSWERS and (a := open_asks.pop(r.get("id"), None)):
+                _settle(answered, a, r)
         elif "tool" in r and r.get("id"):
             open_asks[r["id"]] = {"kind": "permission", **r}
-    return {"messages": msgs, "asks": open_asks}
+    return {"messages": msgs, "asks": open_asks, "answered": answered}
+
+
+def _received(msg_id: str) -> bool:
+    """Whether the message has a receipt: read whole, but only when a retried send finds its
+    message missing from the index (rare), so the rows are parsed only where the id appears."""
+    try:
+        data = (chat_dir() / "receipts.jsonl").read_bytes()
+    except FileNotFoundError:
+        return False
+    key = msg_id.encode()
+    return any(r.get("id") == msg_id for line in data.splitlines() if key in line
+               for r in store._rows(line) if isinstance(r, dict))
+
+
+def _reopen(work: dict, row: dict) -> None:
+    """Under open.lock: index a message the index lacks, unless Claude already has it (an ack
+    writes its receipt before it takes the lock, so a receipt not seen here is popped after)."""
+    if row["id"] not in work["messages"] and not _received(row["id"]):
+        work["messages"][row["id"]] = row
 
 
 def _open_update(change) -> dict:
@@ -397,6 +421,7 @@ def _open_update(change) -> dict:
         if not (isinstance(cur, dict) and isinstance(cur.get("messages"), dict)
                 and isinstance(cur.get("asks"), dict)):
             cur = _open_rebuild()
+        cur.setdefault("answered", {})  # an older wb's index has none
         change(cur)
         store.write_json(_open_path(), cur)
         return cur
@@ -414,35 +439,50 @@ THREAD_BYTES = 4 << 20  # the last 200 messages fit with room to spare (a reply 
 
 
 def thread(limit: int = 200) -> list[dict]:
-    """The latest messages, each of the user's with its receipt (or None: not read yet)."""
+    """The latest messages, each of the user's with its receipt (or None: not read yet), and
+    `expired` once unread past MESSAGE_EXPIRE: no session will be given it (#536)."""
     # bounded reads: the whole history was parsed on every poll (the 2026-11-19 audit: 56 ms at
     # 20,000 rows); a receipt comes after its message, so the newest ones cover the thread
     rows = store.read_jsonl_tail(chat_dir() / "messages.jsonl", THREAD_BYTES)[-limit:]
     receipts = {r["id"]: r for r in store.read_jsonl_tail(chat_dir() / "receipts.jsonl", THREAD_BYTES)}
-    return [{**r, "received": receipts.get(r["id"])} if r["from"] == "user" else r for r in rows]
+    now = store.now()
+    return [{**r, "received": receipts.get(r["id"]),
+             **({"expired": True} if r["id"] not in receipts and _expired(r, now) else {})}
+            if r["from"] == "user" else r for r in rows]
 
 
 # Work still waiting is kept apart from what the page shows: an open question vanished from the
 # page's list behind 20 newer answered ones, and `wb chat pending` lost an unread message behind
-# 200 newer replies (#265, the audit of 1.2). Past these ages one is marked `stale`: the mod waits
-# 30 minutes on an ask, and a message a day old is no longer news.
+# 200 newer replies (#265, the audit of 1.2). An ask open past ASK_STALE is marked `stale` (the
+# mod waits 30 minutes on one). A message of the user's unread past MESSAGE_EXPIRE is `expired`:
+# `wb chat claim` refuses it, so no session springs it on Claude, and the page says so and offers
+# to send it again. The mod skipped it on its own clock, and the page said "Delivered" for good (#536).
 ASK_STALE = 3600
-PENDING_STALE = 86400
+MESSAGE_EXPIRE = 6 * 3600
+
+
+def _expired(row: dict, now: float) -> bool:
+    return now - row.get("ts", 0) > MESSAGE_EXPIRE
+
+
+def expired(msg_id: str) -> bool:
+    """Whether the user's unread message ``msg_id`` is too old to pass to Claude."""
+    row = open_work()["messages"].get(msg_id)
+    return bool(row) and _expired(row, store.now())
 
 
 def pending() -> list[dict]:
     """Every message of the user's without a receipt, however far back (open_work, #329)."""
     now = store.now()
     rows = sorted(open_work()["messages"].values(), key=lambda r: (r.get("ts", 0), r.get("id", "")))
-    return [{**r, "received": None, **({"stale": True} if now - r.get("ts", 0) > PENDING_STALE else {})}
-            for r in rows]
+    return [{**r, "received": None, **({"expired": True} if _expired(r, now) else {})} for r in rows]
 
 
 def snapshot() -> dict:
     return {"messages": thread(), "asks": asks(), "listener": listener(), "prefs": prefs(),
             "push": {"key": push_key(), "test": (store.read_json(chat_dir() / "push-test.json", None)
                                                  or {}).get("ts")},
-            "savings": week_saved(), "build": build(), "now": store.now()}
+            "savings": week_saved(), "build": build(), "expire": MESSAGE_EXPIRE, "now": store.now()}
 
 
 def week_saved() -> dict:
@@ -468,30 +508,84 @@ def push_key() -> str:
     return _keys[path]
 
 
+_seen_read: dict = {"key": None, "at": 0, "all": set(), "per": {}}  # what's been read of seen.jsonl
+_seen_lock = threading.Lock()  # the pusher and the page's requests read it from their own threads
+
+
+def _seen_update(p: Path, c: dict) -> dict:
+    """seen.jsonl read on from where the last call stopped (it is only appended to; another file
+    or a shorter one is read afresh), under _seen_lock: every push tick reread the whole file,
+    94 ms at 60,000 rows with nobody subscribed (#456)."""
+    try:
+        st = p.stat()
+    except FileNotFoundError:
+        c.update(key=None, at=0, all=set(), per={})
+        return c
+    key = (str(p), st.st_dev, st.st_ino)
+    if c["key"] != key or st.st_size < c["at"]:
+        c.update(key=key, at=0, all=set(), per={})
+    if st.st_size > c["at"]:
+        with open(p, "rb") as f:
+            f.seek(c["at"])
+            data = f.read()
+        end = data.rfind(b"\n") + 1  # a row still being written waits for its newline
+        for r in store._rows(data[:end]):
+            if not isinstance(r, dict):
+                continue
+            if r.get("endpoint"):
+                c["per"].setdefault(r.get("id"), set()).add(r["endpoint"])
+            else:
+                c["all"].add(r.get("id"))
+        c["at"] += end
+    return c
+
+
+# _seen and _pushed hand out the cache itself, not a copy (copying 60,000 ids a tick is what #456
+# removed): callers only look things up in it, which is safe while another thread adds.
 def _seen() -> set:
     """Ids no push is owed for: shown on a page (or pushed before pushes were counted per device)."""
-    return {r.get("id") for r in store.read_jsonl(chat_dir() / "seen.jsonl")[0] if not r.get("endpoint")}
+    with _seen_lock:
+        return _seen_update(chat_dir() / "seen.jsonl", _seen_read)["all"]
 
 
 def _pushed() -> dict[str, set]:
-    """Each id's devices (endpoints) that took its push."""
-    out: dict[str, set] = {}
-    for r in store.read_jsonl(chat_dir() / "seen.jsonl")[0]:
-        if r.get("endpoint"):
-            out.setdefault(r.get("id"), set()).add(r["endpoint"])
-    return out
+    """Each id's devices (endpoints) that took its push, or whose page showed it (#537)."""
+    with _seen_lock:
+        return _seen_update(chat_dir() / "seen.jsonl", _seen_read)["per"]
 
 
 def _transient(status: int) -> bool:
-    """A push that may go through if tried again: not reached, rate-limited, the service's fault."""
+    """A push that may go through if tried again: not reached, rate-limited, the service's fault.
+    A certificate this machine can't check (webpush.CERT) is for good: retried every 30 s for 15
+    minutes, it was then dropped without a word (#539)."""
     return status == 0 or status == 429 or status >= 500
 
 
-def mark_seen(ids, by: str) -> None:
-    done = _seen()
+def _result(got) -> tuple[int, str]:
+    """A send's (status, reason) from push_all, or a bare status (a test's sender)."""
+    return (got, "") if isinstance(got, int) else (int(got[0]), str(got[1] or ""))
+
+
+def push_hint(results: dict) -> str:
+    """What the page tells the user when a test push failed: `cert` (this machine can't check the
+    service's certificate), `clock` (a 403: VAPID's expiry, read against a skewed clock),
+    `unreached`, `refused`, or "" when one went through."""
+    got = [_result(v)[0] for v in results.values()]
+    if not got or any(200 <= c < 300 for c in got):
+        return ""
+    return ("cert" if webpush.CERT in got else "clock" if 403 in got
+            else "unreached" if all(_transient(c) for c in got) else "refused")
+
+
+def mark_seen(ids, by: str, endpoint: str | None = None) -> None:
+    """No push owed for these ids: to any device, or, with ``endpoint``, to that one only (a page
+    on screen but not in use speaks for its own device: a desktop tab left open silenced the
+    phone, #537)."""
+    done, mine = _seen(), _pushed()
     for i in dict.fromkeys(ids):
-        if i not in done:
-            store.append_jsonl(chat_dir() / "seen.jsonl", {"id": i, "ts": store.now(), "by": by})
+        if i not in done and not (endpoint and endpoint in mine.get(i, ())):
+            store.append_jsonl(chat_dir() / "seen.jsonl", {"id": i, "ts": store.now(), "by": by,
+                                                          **({"endpoint": endpoint} if endpoint else {})})
 
 
 def news(now: float | None = None) -> list[str]:
@@ -514,13 +608,16 @@ class Pusher:
         self.hub = hub
         self.send = send or (lambda eps: webpush.push_all(webpush.private_key(token_path()), eps))
         self.retry_at: dict[str, float] = {}  # endpoint: when a failed one may be tried again
+        self.said: set[str] = set()  # failure reasons already in serve.log
 
     def tick(self, now: float | None = None) -> list[str]:
         """The ids pushed now, to at least one device."""
         now = now or store.now()
-        due = news(now)
         subs = [x["endpoint"] for x in webpush.subscriptions()]
-        if not due or not subs:
+        if not subs:  # before the news: nobody to tell, nothing to read (#456)
+            return []
+        due = news(now)
+        if not due:
             return []
         pushed = _pushed()
         due = [i for i in due if any(e not in pushed.get(i, ()) for e in subs)]  # owed to a device
@@ -531,16 +628,28 @@ class Pusher:
         got = self.send(owed) or {}
         took = False
         for e in owed:
-            if _transient(got.get(e, 0)):
+            status, why = _result(got.get(e, 0))
+            if not 200 <= status < 300:
+                self._say(e, status, why)
+            if _transient(status):
                 self.retry_at[e] = now + PUSH_RETRY
                 continue
             self.retry_at.pop(e, None)  # delivered, or refused for good (gone: unsubscribed)
-            took = True
-            for i in due:
+            ok = 200 <= status < 300
+            took |= ok
+            for i in due:  # a refusal isn't tried again, and isn't written down as delivered (#539)
                 if e not in pushed.get(i, ()):
-                    store.append_jsonl(chat_dir() / "seen.jsonl",
-                                       {"id": i, "ts": store.now(), "by": "push", "endpoint": e})
+                    store.append_jsonl(chat_dir() / "seen.jsonl", {"id": i, "ts": store.now(), "endpoint": e,
+                                       **({"by": "push"} if ok else {"by": "refused", "status": status})})
         return due if took else []
+
+    def _say(self, endpoint: str, status: int, why: str) -> None:
+        """Each distinct failure once in serve.log: they were dropped, and the log stayed empty (#539)."""
+        why = why or f"status {status}"
+        if why not in self.said:
+            self.said.add(why)
+            print(f"web chat: a push to {urlsplit(endpoint).hostname} failed: {why}",
+                  file=sys.stderr, flush=True)
 
     def run(self) -> None:
         seen = -1
@@ -571,27 +680,63 @@ def build() -> str:
 ANSWERS = ("allow", "deny", "expired")
 KINDS = ("permission", "plan", "question")
 ASK_TEXT = 2000
-DETAIL_MAX = 40_000   # a plan or four questions with previews
+DETAIL_MAX = 40_000   # bytes of JSON as stored (UTF-8): a plan or four questions with previews
+CUT_NOTE = " (cut: the rest is in the terminal)"
 NOTE_MAX = 2000
 AWAY = ("ask", "allow")  # prefs.json `away`: ask the user here, or let Claude go ahead
 
 
-def ask(tool: str, text: str, kind: str = "permission", detail: dict | None = None) -> dict:
+def ask(tool: str, text: str, kind: str = "permission", detail: dict | None = None,
+        pid: int | None = None) -> dict:
     """A new ask. A permission while the user's setting says `allow` is answered at once, by
-    `setting`, and stays in the thread so they see what ran."""
+    `setting`, and stays in the thread so they see what ran. ``pid``: the asking session's `wb
+    events` process, which lives exactly as long as the session; once it is gone the ask expires."""
     if kind not in KINDS:
         raise ValueError(kind)
     row = {"id": f"ask-{int(time.time() * 1000)}-{secrets.token_hex(4)}", "ts": store.now(),
            "tool": tool[:200], "text": text[:ASK_TEXT], "kind": kind}
     if detail is not None:
-        if len(json.dumps(detail)) > DETAIL_MAX:
-            raise ValueError("detail too long")
-        row["detail"] = detail
+        row["detail"] = fit_detail(detail)
+    if pid:
+        row["pid"] = int(pid)
     store.append_jsonl(chat_dir() / "asks.jsonl", row)
     _open_update(lambda w: w["asks"].__setitem__(row["id"], row))
     if kind == "permission" and prefs()["away"] == "allow":
         return answer(row["id"], "allow", "setting")
     return {**row, "answer": None}
+
+
+def _stored(d) -> int:
+    return len(json.dumps(d, ensure_ascii=False).encode())
+
+
+def fit_detail(detail: dict) -> dict:
+    """``detail`` within DETAIL_MAX as stored: a plan, else the questions' previews, else their
+    options' descriptions, cut (each to one length, the longest first) and marked CUT_NOTE.
+    Measured as json.dumps' ASCII escapes, a 7,700-character Japanese plan was six bytes a
+    character and refused, and the dialog sat in the terminal with the phone told nothing (#535).
+    ValueError when even the questions themselves don't fit."""
+    if _stored(detail) <= DETAIL_MAX:
+        return detail
+    d = json.loads(json.dumps(detail))
+    opts = [o for q in d.get("questions") or [] if isinstance(q, dict)
+            for o in q.get("options") or [] if isinstance(o, dict)]
+    for spots in ([(d, "plan")], [(o, "preview") for o in opts], [(o, "description") for o in opts]):
+        spots = [(h, k, h[k]) for h, k in spots if isinstance(h.get(k), str) and h[k]]
+        if not spots:
+            continue
+        def cap(n):
+            for h, k, text in spots:
+                h[k] = text if len(text) <= n else text[:n].rstrip() + CUT_NOTE
+        lo, hi = 0, max(len(t) for _, _, t in spots)
+        while lo < hi:  # the longest length every text may keep
+            mid = (lo + hi + 1) // 2
+            cap(mid)
+            lo, hi = (mid, hi) if _stored(d) <= DETAIL_MAX else (lo, mid - 1)
+        cap(lo)
+        if _stored(d) <= DETAIL_MAX:
+            return d
+    raise ValueError("detail too long")
 
 
 def asks(limit: int = 20) -> list[dict]:
@@ -612,16 +757,49 @@ def asks(limit: int = 20) -> list[dict]:
                    key=lambda a: (a.get("ts", 0), a.get("id", "")))
     rows, now = list(seen.values()), store.now()
     out = older + [a for a in rows[:max(0, len(rows) - limit)] if a["answer"] is None] + rows[-limit:]
+    for a in out:
+        if a["answer"] is None and a.get("pid") and not _alive(a["pid"]):
+            _orphaned(a)
     return [{**a, "stale": True} if a["answer"] is None and now - a["ts"] > ASK_STALE else a
             for a in out]
 
 
+def _orphaned(a: dict) -> None:
+    """Expire an open ask whose session is gone (its pid), by `interrupted`, in place. A Bash card
+    left by a crashed or closed session stayed open for good: answerable for an hour though nobody
+    waited, then "it waits in the terminal", and every later push showed it (#538)."""
+    row = {"id": a["id"], "ts": store.now(), "answer": "expired", "by": "interrupted"}
+    store.append_jsonl(chat_dir() / "asks.jsonl", row)
+    _answered({k: v for k, v in a.items() if k not in ("answer", "stale")}, row)
+    a.update(answer="expired", answered=row["ts"], by="interrupted")
+
+
 def find_ask(ask_id: str) -> dict | None:
-    return next((a for a in reversed(asks(10_000)) if a["id"] == ask_id), None)
+    """The ask as it stands, answered or not. One answered after its row left the asks' tail is
+    in open.json's `answered`: answering took it out of the open index, and its waiter then got
+    "no such ask" for an answer just given (#447)."""
+    return (next((a for a in reversed(asks(10_000)) if a["id"] == ask_id), None)
+            or (open_work().get("answered") or {}).get(ask_id))
 
 
-def _answered(ask_id: str) -> None:
-    _open_update(lambda w: w["asks"].pop(ask_id, None))
+ANSWER_KEPT = 86400  # seconds an answer stays in open.json for its waiter (the mod waits 30 minutes)
+
+
+def _settle(answered: dict, ask_row: dict, ans: dict) -> None:
+    """Keep the ask with its answer (the first one stands), and drop those kept past ANSWER_KEPT."""
+    answered.setdefault(ask_row["id"], {"kind": "permission", **ask_row, "answer": ans["answer"],
+                                        "answered": ans["ts"], "by": ans.get("by"),
+                                        **{k: ans[k] for k in ("note", "answers") if k in ans}})
+    cut = store.now() - ANSWER_KEPT
+    for k in [k for k, a in answered.items() if a.get("answered", 0) < cut]:
+        del answered[k]
+
+
+def _answered(ask_row: dict, ans: dict) -> None:
+    def change(w):
+        w["asks"].pop(ask_row["id"], None)
+        _settle(w["answered"], ask_row, ans)
+    _open_update(change)
 
 
 def answer(ask_id: str, verdict: str, by: str, note: str | None = None,
@@ -645,7 +823,7 @@ def answer(ask_id: str, verdict: str, by: str, note: str | None = None,
         elif cur["kind"] == "question" and verdict == "allow":
             raise ValueError("answers")  # a question is answered with its answers
         store.append_jsonl(chat_dir() / "asks.jsonl", row)
-        _answered(ask_id)
+        _answered({k: v for k, v in cur.items() if k not in ("answer", "stale")}, row)
         cur = find_ask(ask_id) or {**cur, "answer": verdict, "answered": row["ts"], "by": by}
     return cur
 
@@ -670,7 +848,7 @@ def session_plan(session: str | None, plan_file: str | None = None) -> str:
     try:
         if f is None or f.resolve().parent != d or f.suffix != ".md" or not f.resolve().is_file():
             return ""
-        return f.read_text(errors="replace")[:DETAIL_MAX - 100]
+        return f.read_text(errors="replace")[:DETAIL_MAX + 1]  # ask cuts it, marked (#535)
     except OSError:
         return ""
 
@@ -775,25 +953,15 @@ def wait_up(port: int, pid: int, limit: float = START_WAIT) -> bool:
     return False
 
 
-def _alive(pid: int) -> bool:
-    try:
-        os.kill(pid, 0)
-        return True
-    except ProcessLookupError:
-        return False
-    except PermissionError:
-        return True
-
-
 def start(port: int) -> int:
     """`wb chat serve` detached, its output in chat/serve.log, its pid in chat/serve.pid: for a
     machine without the systemd unit, so turning the chat on is enough to reach it."""
+    from . import cli  # only here: the server never starts one
     root = Path(__file__).resolve().parent.parent
-    with open(chat_dir() / "serve.log", "a") as log:
-        proc = subprocess.Popen([sys.executable, "-X", "utf8", str(root / "bin" / "wb"), "chat", "serve",
-                                 "--port", str(port)], cwd=root, stdin=subprocess.DEVNULL,
-                                stdout=log, stderr=log, start_new_session=True)  # outlives wb
-    store.write_json(chat_dir() / "serve.pid", {"pid": proc.pid, "port": port})
+    with open(chat_dir() / "serve.log", "a") as log:  # outlives wb, and a logout (#531)
+        proc = cli.detach([sys.executable, "-X", "utf8", str(root / "bin" / "wb"), "chat", "serve",
+                           "--port", str(port)], cwd=root, stdout=log, stderr=log)
+    store.write_json(chat_dir() / "serve.pid", {"pid": proc.pid, "port": port, "start": _started(proc.pid)})
     return proc.pid
 
 
@@ -831,9 +999,9 @@ def revive() -> int | None:
 def stop_started() -> bool:
     """Stop the server `start` made, if it still runs; never one wb didn't start (systemd's)."""
     from . import models  # only here: chat is imported by the server, which needs none of it
-    pid = (store.read_json(chat_dir() / "serve.pid", None) or {}).get("pid")
+    pid = (st := store.read_json(chat_dir() / "serve.pid", None) or {}).get("pid")
     (chat_dir() / "serve.pid").unlink(missing_ok=True)
-    if not pid or not _alive(pid) or not models.runs(int(pid), "chat", "serve"):
+    if not pid or not _alive(pid, st.get("start")) or not models.runs(int(pid), "chat", "serve"):
         return False
     try:
         os.kill(int(pid), 15)
@@ -862,14 +1030,20 @@ def wait_answer(ask_id: str, timeout: float) -> str | None:
         w.close()
 
 
-def _alive(pid) -> bool:
+def _started(pid: int) -> str | None:
+    from . import models
+    return models._started(pid)
+
+
+def _alive(pid, start=None) -> bool:
+    """models._alive: a pid of another user's (EPERM) is gone, and one that started at another
+    time than recorded was recycled. This said both were alive: a root daemon under listener.json's
+    old pid read as a session listening (#532)."""
+    from . import models  # only here: chat is imported by the server, which needs little of it
     try:
-        os.kill(int(pid), 0)
-        return True
-    except (ProcessLookupError, ValueError, TypeError):
+        return models._alive(int(pid), start if isinstance(start, str) else None)
+    except (ValueError, TypeError):
         return False
-    except PermissionError:
-        return True
 
 
 def listener() -> dict | None:
@@ -879,7 +1053,7 @@ def listener() -> dict | None:
     if not st:
         return None
     if st.get("pid"):
-        return st if _alive(st["pid"]) else None
+        return st if _alive(st["pid"], st.get("start")) else None
     return st if store.now() - st.get("ts", 0) <= LISTENING_FOR else None
 
 
@@ -1160,18 +1334,22 @@ class Handler(BaseHTTPRequestHandler):
             if cur is None:
                 return self._json(404, {"error": "no such prompt"})
             return self._json(200, {"ask": cur, "state": snapshot()})
-        if self.path == "/api/seen":  # what the page showed while visible: no push for it
-            ids = body.get("ids")
+        if self.path == "/api/seen":  # what the page showed: no push for it (endpoint: to it alone)
+            ids, endpoint = body.get("ids"), body.get("endpoint")
             if not (isinstance(ids, list) and len(ids) <= 200
-                    and all(isinstance(x, str) and 0 < len(x) <= 64 for x in ids)):
-                return self._json(400, {"error": "seen is {ids: [up to 200 ids]}"})
-            mark_seen(ids, "page")
+                    and all(isinstance(x, str) and 0 < len(x) <= 64 for x in ids)) \
+                    or not (endpoint is None or webpush.accepted(endpoint)):
+                return self._json(400, {"error": "seen is {ids: [up to 200 ids], endpoint?: this device's push URL}"})
+            mark_seen(ids, "page", endpoint)
             return self._json(200, {})
         if self.path == "/api/push":  # this device's notifications: on, off, or a test
             if body.get("test") is True:
                 store.write_json(chat_dir() / "push-test.json", {"ts": store.now()})
                 sent = webpush.push_all(webpush.private_key(token_path()))
-                return self._json(200, {"sent": len(sent), "ok": sum(1 for s in sent.values() if 200 <= s < 300)})
+                got = [_result(v) for v in sent.values()]
+                return self._json(200, {"sent": len(sent), "ok": sum(1 for c, _ in got if 200 <= c < 300),
+                                        "hint": push_hint(sent),
+                                        "reasons": sorted({w for c, w in got if w and not 200 <= c < 300})})
             endpoint, on = body.get("endpoint"), body.get("on")
             if not webpush.accepted(endpoint) or not isinstance(on, bool):
                 return self._json(400, {"error": "push is {endpoint: a push service's https URL, on: true|false}"})
@@ -1305,7 +1483,8 @@ def serve(port: int, binds: list[str] | None, hosts: list[str] | None = None, sa
     # the port it runs on, for `wb chat url` and the pane's link: they asked without one and got
     # the default, wrong for a server on the free port the CLI advises (#349, the audit of 1.4)
     store.write_json(chat_dir() / "port.json", {"port": servers[0].server_address[1] if servers
-                                                else port, "pid": os.getpid()})
+                                                else port, "pid": os.getpid(),
+                                                "start": _started(os.getpid())})
     for srv in servers[1:]:
         threading.Thread(target=srv.serve_forever, daemon=True).start()
     say(f"web chat on {', '.join(f'{s.server_address[0]}:{port}' for s in servers)}"
@@ -1366,7 +1545,7 @@ def port() -> int:
     #449), else PORT: so a command or the pane that names no port finds a server started on
     another (#349, the audit of 1.4)."""
     st = store.read_json(chat_dir() / "port.json", None) or {}
-    if isinstance(st.get("port"), int) and st.get("pid") and _alive(st["pid"]):
+    if isinstance(st.get("port"), int) and st.get("pid") and _alive(st["pid"], st.get("start")):
         return st["port"]
     started = (store.read_json(chat_dir() / "serve.pid", None) or {}).get("port")
     return started if isinstance(started, int) else PORT

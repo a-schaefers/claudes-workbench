@@ -12,30 +12,34 @@ An engine is whatever runs an image model on this machine, described in
                                    repeated before each --ref image
   {"url": "http://127.0.0.1:…/v1/images/generations", "model": "…"}
                                    any server with the OpenAI images API (SGLang, vLLM-Omni,
-                                   LocalAI…); the response's b64_json is saved
-plus optional "label", "notes" (licence, what it is good at: shown to Claude), "timeout" (s).
+                                   LocalAI…); the response's b64_json is saved (or
+                                   its url fetched); "key": its API key ({env:}, {file:})
+plus optional "label", "notes" (licence, what it is good at: shown to Claude), "timeout" (s),
+"gpu" (false: not this machine's GPU; a url on another host is off it unless true).
 The first entry is the default. No model is named here: the user installs one and describes it.
 
-A generation holds the GPU lock and first unloads the coding models, as a task does; while a task
-holds the GPU it refuses at once, unless asked to wait. A command engine exits when it's done, so
+A generation on the GPU holds the GPU lock and first unloads the coding models, as a task does;
+while a task holds the GPU it refuses at once, unless asked to wait. A command engine exits when it's done, so
 its memory is free again; a url engine is a server the user runs, which keeps its model in GPU
 memory for as long as it is up: workbench can't stop it.
 """
 from __future__ import annotations
 
 import base64
+import contextlib
 import json
 import os
+import re
 import subprocess
 import tempfile
 import time
+import urllib.error
 import urllib.request
 from pathlib import Path
 
 from . import media, models, store
 
 PLACEHOLDERS = ("prompt", "out", "width", "height", "seed")
-ready = media.ready
 _settle = media.settle
 
 
@@ -45,6 +49,10 @@ def config_path() -> Path:
 
 def engines() -> dict[str, dict]:
     return media.load(config_path())
+
+
+def ready(e: dict) -> str:
+    return media.ready(e, base=config_path().parent)
 
 
 def engine(name: str | None) -> tuple[str, dict]:
@@ -67,23 +75,46 @@ def _argv(e: dict, values: dict, refs: list[Path]) -> list[str]:
 
 def _command(e: dict, values: dict, refs: list[Path], log: Path) -> None:
     with open(log, "a") as f:
-        r = subprocess.run(_argv(e, values, refs), stdin=subprocess.DEVNULL, stdout=f,
-                           stderr=subprocess.STDOUT, timeout=int(e.get("timeout", 1800)))
+        r = media.run_group(_argv(e, values, refs), float(e.get("timeout", 1800)),
+                            stdin=subprocess.DEVNULL, stdout=f, stderr=subprocess.STDOUT)
     if r.returncode or not Path(values["out"]).is_file():
         tail = "\n".join(log.read_text().strip().splitlines()[-8:])
         raise RuntimeError(f"the engine exited {r.returncode} without an image:\n{tail}")
 
 
 def _server(e: dict, values: dict) -> None:
+    """An OpenAI images server; its b64_json saved, or the url it gave fetched. A reply of another
+    shape is a RuntimeError quoting it: `{"data": [{"url": …}]}` gave "wb: b64_json", and `{"data":
+    []}` or a page that isn't JSON a traceback (#597)."""
     body = {"prompt": values["prompt"], "n": 1, "size": f"{values['width']}x{values['height']}",
             "response_format": "b64_json", "seed": values["seed"]}
     if e.get("model"):
         body["model"] = e["model"]
-    req = urllib.request.Request(e["url"], json.dumps(body).encode(),
-                                 {"Content-Type": "application/json"})
-    with models._open(req, timeout=int(e.get("timeout", 1800))) as r:
-        data = json.loads(r.read())
-    Path(values["out"]).write_bytes(base64.b64decode(data["data"][0]["b64_json"]))
+    timeout = float(e.get("timeout", 1800))
+    raw, _ = media.post(e, e["url"], json.dumps(body).encode(), "application/json", timeout,
+                        config_path().parent)
+    try:
+        item = json.loads(raw)["data"][0]
+        b64, url = item.get("b64_json"), item.get("url")
+    except (ValueError, KeyError, IndexError, TypeError, AttributeError):
+        raise RuntimeError(f"{e['url']} sent no image: {media._gist(raw) or '(an empty reply)'}") from None
+    if isinstance(b64, str) and b64:
+        try:
+            Path(values["out"]).write_bytes(base64.b64decode(b64))
+        except ValueError:
+            raise RuntimeError(f"{e['url']} sent a b64_json that isn't base64") from None
+    elif isinstance(url, str) and url.startswith(("http://", "https://")):
+        # it ignored response_format: fetched, the key sent only to the engine's own server
+        own = url.startswith(re.sub(r"/v1/.*$", "", e["url"]) + "/")
+        req = urllib.request.Request(url, headers=media.auth(e, config_path().parent) if own else {})
+        try:
+            with models._open(req, timeout=timeout) as r:
+                Path(values["out"]).write_bytes(r.read())
+        except urllib.error.HTTPError as err:
+            raise RuntimeError(f"{e['url']} ignored response_format b64_json and its image url "
+                               f"answered HTTP {err.code}") from None
+    else:
+        raise RuntimeError(f"{e['url']} sent no image: {media._gist(raw)}")
 
 
 def generate(prompt: str, out_dir: Path, n: int = 4, size: tuple[int, int] = (1024, 1024),
@@ -105,13 +136,15 @@ def generate(prompt: str, out_dir: Path, n: int = 4, size: tuple[int, int] = (10
     out_dir.mkdir(parents=True, exist_ok=True)
     seed = int(time.time()) % 1_000_000 if seed is None else seed
     made = []
-    with media.gpu("wb image", say, wait):  # the GPU to itself, queued with the tasks
+    # the GPU to itself, queued with the tasks; an engine off this GPU runs beside them (#587)
+    hold = media.gpu("wb image", say, wait, media.serving(e)) if media.on_gpu(e) else contextlib.nullcontext()
+    with hold:
         for i in range(n):
             s = seed + i
             # into a path of its own, then published under a name nothing has: two prompts with
             # the same first six words and seed wrote one PNG, the second over the first, and an
             # engine that wrote nothing passed on the old PNG, its sidecar rewritten (#267)
-            with tempfile.TemporaryDirectory(prefix=".wb-image-", dir=out_dir) as tmp:
+            with tempfile.TemporaryDirectory(prefix=store.scratch(".wb-image-"), dir=out_dir) as tmp:
                 fresh = Path(tmp) / f"{media.slug(prompt, 'image')}-{s}.png"
                 values = {"prompt": prompt, "out": fresh, "width": size[0], "height": size[1], "seed": s}
                 t0 = time.time()
@@ -122,10 +155,10 @@ def generate(prompt: str, out_dir: Path, n: int = 4, size: tuple[int, int] = (10
                 secs = round(time.time() - t0, 1)
                 if fresh.is_symlink() or not fresh.is_file() or not fresh.stat().st_size:
                     raise RuntimeError(f"image engine {name} wrote no image")
-                out = media.free(out_dir, f"{media.slug(prompt, 'image')}-{s}", ".png")
                 store.write_json(fresh.with_suffix(".json"), {
                     "prompt": prompt, "seed": s, "width": size[0], "height": size[1],
                     "engine": name, "refs": [str(r) for r in refs], "secs": secs, "ts": store.now()})
+                out = media.free(out_dir, f"{media.slug(prompt, 'image')}-{s}", ".png")
                 media.publish(fresh, out)
             say(f"{out}  ({secs} s)")
             made.append(out)

@@ -5,7 +5,8 @@ part that has to load a model to know.
 
 It runs on its own only where the user expects a short wait and is told: at setup (`wb setup`)
 and when a Claude Code session opens (the mod), each time only when it is due (`due`: never
-measured, the GPU changed, or a model came since), never while a task holds the GPU; each run
+measured, the GPU changed, or a model came since, not one skipped before its retry time),
+never while a task holds the GPU; each run
 takes a minute or two (the user, 2026-11-18). Anything heavier (`--bench`) waits for the user to
 ask, through Claude.
 
@@ -29,7 +30,7 @@ import os
 import re
 import signal
 import statistics
-import subprocess
+import subprocess  # noqa: F401 (cli.detach starts the run; tests patch it here)
 import sys
 import time
 from pathlib import Path
@@ -72,9 +73,10 @@ def served(m: models.Model) -> int:
 
 
 def load_secs(m: models.Model) -> float:
-    """How long a load of this model takes here: the median its tasks measured, else a guess."""
-    secs = [t.status["load_secs"] for t in store.all_tasks()
-            if t.spec.get("model") == m.id and t.status.get("load_secs")]
+    """How long a load of this model takes here: the median of the loads its tasks measured, one
+    by one (a task's total held its reloads, #577), else a guess."""
+    secs = [v for t in store.all_tasks() if t.spec.get("model") == m.id
+            for v in models.single_loads(t.status)]
     return statistics.median(secs) if secs else LOAD_GUESS
 
 
@@ -137,6 +139,30 @@ def busy(m: models.Model) -> list[str]:
     return [x.get("name") for x in ps.get("models") or [] if not models._matches(m.name, {x.get("name")})]
 
 
+# A model a run tried and couldn't measure (optimize.json `skipped`: its remote server busy, its
+# load refused, its server unreachable) waits this long before it makes a run due again. Without
+# a record, it was "new" at every Claude Code session, and each session's run emptied the local
+# GPU first, then skipped it again (#583, the audit of 1.90). A changed GPU or remote model list
+# still makes a run due at once.
+RETRY_SECS = {"busy": 6 * 3600, "unreachable": 24 * 3600, "failed": 7 * 86400}
+
+
+def _waiting(st: dict, now: float | None = None) -> set[str]:
+    """The ids whose last try was skipped and whose retry time hasn't come."""
+    now = store.now() if now is None else now
+    return {mid for mid, r in (st.get("skipped") or {}).items()
+            if isinstance(r, dict) and (r.get("retry_after") or 0) > now}
+
+
+def _skip(model_id: str, outcome: str, why: str) -> None:
+    """Record that ``model_id`` wasn't measured, and when to try it again (RETRY_SECS)."""
+    print(f"{model_id}: not measured, {why}", flush=True)
+    st = state()
+    row = {"outcome": outcome, "why": why, "ts": store.now(),
+           "retry_after": store.now() + RETRY_SECS[outcome]}
+    store.write_json(path(), {**st, "skipped": {**(st.get("skipped") or {}), model_id: row}})
+
+
 def due(ms: list[models.Model] | None = None) -> str:
     """Why a run is due, or "": never run, the GPU changed, a model came since, or the last run
     was stopped before it finished."""
@@ -152,7 +178,8 @@ def due(ms: list[models.Model] | None = None) -> str:
         return why
     if st.get("stopped"):
         return "the last run was stopped before it finished"
-    new = [m.id for m in ms if m.id not in (st.get("models") or {})]
+    waiting = _waiting(st)
+    new = [m.id for m in ms if m.id not in (st.get("models") or {}) and m.id not in waiting]
     return f"new model{'s' if len(new) > 1 else ''}: {', '.join(new)}" if new else ""
 
 
@@ -214,7 +241,9 @@ def fit(m: models.Model, trained: int | None, check=lambda: None) -> dict:
 
 def _record(model_id: str, row: dict) -> None:
     st = state()
-    store.write_json(path(), {**st, "models": {**(st.get("models") or {}), model_id: row}})
+    skipped = {k: v for k, v in (st.get("skipped") or {}).items() if k != model_id}
+    store.write_json(path(), {**st, "models": {**(st.get("models") or {}), model_id: row},
+                              "skipped": skipped})
 
 
 def _made(key: str, source: str | None) -> None:
@@ -225,8 +254,28 @@ def _made(key: str, source: str | None) -> None:
     store.write_json(path(), {**st, "made": {**made, **({key: source} if source else {})}})
 
 
+def applied(model_id: str, row: dict) -> str:
+    """The registered variant `wb optimize apply` made of ``model_id`` at the window ``row``
+    measured, or "": the row's `applied`, else the name apply would give it. A run that measured
+    the source again (a changed GPU, --all, a stopped run) wrote its row without `applied`, and
+    the advice came back, naming a command that answered "exists already" (#584)."""
+    have = models.discover()
+    if row.get("applied") in have:
+        return row["applied"]
+    fits = row.get("fits")
+    if not fits or fits == row.get("window") or "/" not in model_id:
+        return ""
+    provider, name = model_id.split("/", 1)
+    key = f"{provider}/{entry_name(name, fits)}"
+    return key if key != model_id and key in have else ""
+
+
 def advice(model_id: str, row: dict) -> str:
-    """One line on what the fit says, or "" when there is nothing to change."""
+    """One line on what the fit says, or "" when there is nothing to change (or apply has made
+    its variant, still registered: every wb start repeated the advice, and the command it named
+    answered "exists already", #584)."""
+    if applied(model_id, row):
+        return ""
     w, fits, spill = row.get("window"), row.get("fits"), row.get("spill")
     k = lambda n: f"{n // 1024}K"  # noqa
     if fits is None:
@@ -285,7 +334,7 @@ def apply(m: models.Model) -> str:
     row = (state().get("models") or {}).get(m.id) or {}
     fits = row.get("fits")
     if not fits or fits == row.get("window"):
-        raise RuntimeError(f"no measured window to apply for {m.id}: wb optimize first")
+        raise RuntimeError(f"no measured window to apply for {m.id}: wb optimize start first")
     name = entry_name(m.name, fits)
     provider = m.id.split("/", 1)[0]
     entry = dict(m.config)
@@ -308,11 +357,19 @@ def apply(m: models.Model) -> str:
                                               "parameters": {"num_ctx": fits}}, timeout=300)
         _made(key, m.id)
     models.write_entry(provider, name, entry)
+    # the source's models.json policy (its sizes, label, weights...) and a shared record: with a
+    # record of its own the variant ranked below the source's one accepted task, so every start
+    # picked the spilling source, and a source limited to trivial work got a variant that took
+    # significant work (#584). router.lineage reads variant_of; router.rank prefers the variant.
+    for k, v in {**(models._overrides().get(m.id) or {}), "variant_of": m.id}.items():
+        models.set_override(key, k, v)
     _made(key, None)
     # measured already: it is the window that fit, so its arrival doesn't make a run due
     _record(key, {**row, "window": fits, "spill": 0, "tried": [], "ts": store.now()})
+    _record(m.id, {**row, "applied": key})  # advice() stays quiet about the source
     return (f"registered {provider}/{name}: {m.id}'s settings at a {fits // 1024}K window, all on "
-            f"the GPU here. The router weighs both by their records; wb model retire {m.id} when "
+            f"the GPU here, with its models.json settings. It shares {m.id}'s record, and the router "
+            f"now picks it before {m.id}, which stays for --model; wb model retire {m.id} when "
             "you'd rather it never runs")
 
 
@@ -330,7 +387,7 @@ def start(bench: bool = False, if_due: bool = False) -> list[str]:
     if not ms:
         raise RuntimeError("no Ollama model here to measure (wb models)")
     if models.holders():
-        raise RuntimeError("a task holds the GPU: run wb optimize once it is done (real work first)")
+        raise RuntimeError("a task holds the GPU: run wb optimize start once it is done (real work first)")
     from . import context  # its bench replays' agents get the user's PYTHONPATH (#512)
     env = context.detached_env()
     for k in ("WB_TASK", "CLAUDE_CODE_SESSION_ID", "CLAUDE_PID"):
@@ -338,9 +395,10 @@ def start(bench: bool = False, if_due: bool = False) -> list[str]:
     store.home().mkdir(parents=True, exist_ok=True)  # a fresh profile's first wb setup (#198)
     with open(store.home() / "optimize.log", "a") as log:
         argv = ["--bench"] * bench + ["--all"] * (not why)  # asked for: every model again
-        proc = subprocess.Popen([sys.executable, "-X", "utf8", "-m", "workbench.optimize", *argv],
-                                env=env, stdin=subprocess.DEVNULL, stdout=log, stderr=log,
-                                start_new_session=True)
+        from . import cli  # cli imports this module
+        # its own scope, to outlive a logout: SIGTERM there recorded "stopped" (#531)
+        proc = cli.detach([sys.executable, "-X", "utf8", "-m", "workbench.optimize", *argv],
+                          awake="wb optimize", env=env, stdout=log, stderr=log)  # awake: #516
     store.write_json(path(), {**st, "pid": proc.pid, "start": models._started(proc.pid),
                               "began": store.now(), "done": None, "stopped": None})
     mins = max(1, round(estimate(ms) / 60))
@@ -378,11 +436,19 @@ def report() -> list[str]:
     elif st.get("stopped"):
         out.append(f"stopped: {st['stopped']}")
     rows = st.get("models") or {}
-    if not rows and not out:
-        return ["not run yet: wb optimize estimate, then wb optimize"]
+    if not rows and not out and not st.get("skipped"):
+        return ["not run yet: wb optimize estimate, then wb optimize start (Ollama models only)"]
     for mid, row in rows.items():
+        if made := applied(mid, row):  # not "fits all on the GPU": it spills, its variant doesn't
+            out.append(f"{mid}: {row['fits'] // 1024}K fits all on the GPU here; {made}, applied, "
+                       "is that window")
+            continue
         out.append(advice(mid, row) or f"{mid}: its {row['window'] // 1024}K window fits all on "
                    "the GPU here, and no bigger one does")
+    for mid, row in (st.get("skipped") or {}).items():
+        when = time.strftime("%Y-%m-%d %H:%M", time.localtime(row.get("retry_after") or 0))
+        out.append(f"{mid}: not measured ({row.get('why')}); tried again after {when}, or by "
+                   "wb optimize")
     return out
 
 
@@ -398,10 +464,11 @@ def main() -> None:
         st = state()
         every = "--all" in sys.argv or st.get("stopped") or st.get("hardware") is None or \
             changed(st["hardware"])
+        waiting = set() if every else _waiting(st)
         with models.GpuLease(None, HOLDER, say=print, wait=False):
-            models.free_gpu()
+            freed = False
             for m in candidates():
-                if not every and m.id in (st.get("models") or {}):
+                if not every and (m.id in (st.get("models") or {}) or m.id in waiting):
                     continue  # due for a new model only: the others' fits still hold
                 with contextlib.ExitStack() as turn:
                     if m.remote:  # its server's own lease too: a task there may be using this very
@@ -409,18 +476,32 @@ def main() -> None:
                             turn.enter_context(models.GpuLease(None, HOLDER, say=print, wait=False,
                                                                on=m))
                         except RuntimeError:
-                            print(f"{m.id}: not measured, a task is using {m.root}", flush=True)
+                            _skip(m.id, "busy", f"a task is using {m.root}")
                             continue
                     if others := busy(m):
-                        print(f"{m.id}: not measured, {m.root} has {', '.join(others)} loaded",
-                              flush=True)
+                        _skip(m.id, "busy", f"{m.root} has {', '.join(others)} loaded")
                         continue
+                    if not m.remote and not freed:
+                        # this machine's GPU emptied only for a local probe: a run due for a
+                        # remote model alone unloaded the user's local models for nothing (#583)
+                        models.free_gpu()
+                        freed = True
                     try:
                         trained = models.ollama_show(m.root, m.name).get("context_length")
                     except Exception:
                         trained = None
                     print(f"{m.id}: measuring", flush=True)
-                    row = fit(m, trained)
+                    # one model's failure is that model's: an HTTP 500 at its load (too big for
+                    # the card) or a dropped connection stopped the run, and the next run
+                    # measured everything again (#583); a stop (Stopped) still ends the run
+                    try:
+                        row = fit(m, trained)
+                    except RuntimeError as e:
+                        _skip(m.id, "failed", f"its load failed: {e}")
+                        continue
+                    except OSError as e:
+                        _skip(m.id, "unreachable", f"its server didn't answer: {getattr(e, 'reason', e)}")
+                        continue
                     n += len(row["tried"])
                     _record(m.id, row)
     except (Stopped, RuntimeError) as e:

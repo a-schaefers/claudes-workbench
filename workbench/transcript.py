@@ -79,7 +79,7 @@ def export(session: str, strict: bool = False) -> dict | None:
         if r.returncode:
             _complain("export", r)
         if r.returncode == 0 and r.stdout.strip():
-            return json.loads(r.stdout)
+            return store.loads(r.stdout)  # its strings written out again (#438)
     except (OSError, subprocess.TimeoutExpired, ValueError):  # a busy or broken store: nothing known
         pass
     return None if strict else {}
@@ -457,8 +457,9 @@ def clock_line(task: store.Task, now: float | None = None, data: dict | None = N
         parts.append(f"model load {_secs(st['load_secs'] * 1000)}")
     if st.get("phase") in ("queued", "running", "testing", "asking"):
         typical = router.expected_minutes(sp.get("model", ""), sp.get("size", "significant"))
-        if typical:
-            left = typical * 60 - took
+        if typical:  # against active work, as typical is (#543)
+            from .runner import active_so_far
+            left = typical * 60 - active_so_far(task, now)
             parts.append(f"~{_secs(left * 1000)} left (typically {typical:.0f}m)" if left > 0
                          else f"{_secs(-left * 1000)} past its typical {typical:.0f}m")
         else:
@@ -496,13 +497,24 @@ def header(task: store.Task, paint: Painter, data: dict | None = None) -> str:
 JSON_LINE_CHARS = 2000  # the pane cuts each line to this anyway (the mod's LINE_CHARS)
 
 
+LIVE_PHASES = ("queued", "running", "testing", "asking")
+EXPORT_EVERY = 30   # seconds: a live task's session is exported at least this often, changed or not
+REAP_EVERY = 60     # seconds between `reap` calls while the task looks live
+
+
 def follow(task: store.Task, verbose: bool = False, once: bool = False, color: bool | None = None,
-           out=None, poll: float = 1.5, as_json: bool = False, last: int = 0) -> None:
+           out=None, poll: float = 1.5, as_json: bool = False, last: int = 0, reap=None) -> None:
     """Print the transcript, then (unless once) keep printing what's new until the task closes.
     as_json writes one {"s": style, "t": text} per line, for the Claude Code pane to style, each
     cut to JSON_LINE_CHARS, and with `last` only the newest `last` transcript lines (the meta,
     activity, clock and phase lines always): the engine keeps only the first 4 MiB of the mod's
-    read, so a long task's newest lines were the ones lost (the 2026-11-16 audit)."""
+    read, so a long task's newest lines were the ones lost (the 2026-11-16 audit).
+
+    The session is exported again only when the task's directory or its status' `session` or
+    `updated_at` changed (or EXPORT_EVERY passed while live); the clock is redrawn from the last
+    export, and once the task isn't live the terminal's tick slows to 30 s: a watch left open
+    over a review ran `opencode session export` every 1.5 s, half a CPU second each (#555).
+    ``reap`` (cli.reap) is called every REAP_EVERY seconds while the task looks live."""
     out = out or sys.stdout
     paint = Painter(out.isatty() if color is None else color)
     held = collections.deque(maxlen=last) if as_json and last else None
@@ -530,20 +542,30 @@ def follow(task: store.Task, verbose: bool = False, once: bool = False, color: b
     watcher = Watcher(task.dir)
     last_phase = None
     worktree = str(task.worktree)
+    dirty, stamp, data, exported, reaped = True, None, {}, 0.0, time.monotonic()
     while True:
-        sid = find_session(task)
-        # the first pass reuses the export just made: every `wb watch --json` (the pane's, every
-        # few seconds) ran two OpenCode exports where one does (the 2026-11-16 audit)
-        data = first if first is not None and sid == first_sid else export(sid) if sid else {}
-        first = None
+        st = task.status
+        if reap and st.get("phase") in LIVE_PHASES and time.monotonic() - reaped >= REAP_EVERY:
+            reaped = time.monotonic()
+            reap(task)
+            st = task.status
+        now_stamp = (st.get("session"), st.get("updated_at"))
+        live = st.get("phase") in LIVE_PHASES
+        if dirty or now_stamp != stamp or live and time.monotonic() - exported >= EXPORT_EVERY:
+            stamp, exported = now_stamp, time.monotonic()
+            sid = find_session(task)
+            # the first pass reuses the export just made: every `wb watch --json` (the pane's, every
+            # few seconds) ran two OpenCode exports where one does (the 2026-11-16 audit)
+            data = first if first is not None and sid == first_sid else export(sid) if sid else {}
+            first = None
+            for old in st.get("sessions") or []:  # earlier sessions, before a fresh start
+                if old not in done:
+                    got = export(old)
+                    if got:  # else a busy store: try again next time
+                        done[old] = session_entries(got, worktree, verbose)
         entries = task_entries(task) + session_entries(data, worktree, verbose)
-        for old in task.status.get("sessions") or []:  # earlier sessions, before a fresh start
-            if old not in done:
-                got = export(old)
-                if not got:
-                    continue  # a busy store: try again next time
-                done[old] = session_entries(got, worktree, verbose)
-            entries += done[old]
+        for old in st.get("sessions") or []:
+            entries += done.get(old, [])
         for e in sorted((e for e in entries if e.key not in seen), key=lambda e: e.ts):
             seen.add(e.key)
             if e.key.endswith(":end") and e.key[:-4] + ":start" in seen:
@@ -572,5 +594,6 @@ def follow(task: store.Task, verbose: bool = False, once: bool = False, color: b
         last_phase = phase
         if once or phase in store.CLOSED:
             return
-        # the task's files change as it works: wake on that; on a terminal, also tick the clock
-        watcher.wait(poll if out.isatty() else 30)
+        # the task's files change as it works: wake on that; on a terminal, also tick the clock,
+        # every `poll` while the task is live, else every 30 s (#555)
+        dirty = bool(watcher.wait(poll if out.isatty() and phase in LIVE_PHASES else 30))

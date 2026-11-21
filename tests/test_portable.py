@@ -102,6 +102,7 @@ class Real(unittest.TestCase):
         os.environ.update(WB_HOME=str(tmp / "state"), WB_OPENCODE_CONFIG=str(tmp / "opencode.json"),
                           WB_MODELS=str(tmp / "models.json"), WB_COMMANDS=str(tmp / "commands.json"))
         models._ENGINES.clear()
+        models._EMULATORS.clear()
         models._DOWN.clear()
         models._KEYS.clear()
         models._FACTS.clear()
@@ -746,6 +747,60 @@ class Real(unittest.TestCase):
         entry = json.loads(Path(os.environ["WB_OPENCODE_CONFIG"]).read_text())["provider"]["lms"]["models"]
         self.assertFalse(entry["tiny/chat"]["tool_call"])  # LM Studio says it wasn't trained for tools
 
+    def kobold(self, extra: bool = True) -> str:
+        """A server answering as KoboldCpp does (checked against its source for #580): Ollama's
+        /api/version, /api/tags and /api/ps with one hard-coded 0.39 GB row of family koboldcpp,
+        /api/show with only completion, and, ``extra``, its own /api/extra/version."""
+        row = {"name": "koboldcpp/coder", "model": "koboldcpp/coder", "size": 394998579,
+               "size_vram": 394998579, "details": {"family": "koboldcpp"}}
+        return self.server({"/api/version": {"version": "0.7.0"}, "/api/tags": {"models": [row]},
+                            "/api/ps": {"models": [row]},
+                            **({"/api/extra/version": {"result": "KoboldCpp", "version": "1.80"}}
+                               if extra else {}),
+                            "/v1/models": {"data": [{"id": "koboldcpp/coder", "owned_by": "koboldcpp"}]}})
+
+    def test_koboldcpps_ollama_emulation_is_driven_as_a_server_and_add_keeps_its_tool_calls(self):
+        # #580, the audit of 1.90: any /api/version with a version read as Ollama, so wb model add
+        # wrote tool_call: false from its /api/show, and the router, unloads and optimize drove
+        # it as Ollama with a fake 0.39 GB size
+        from workbench import cli
+        for extra in (True, False):        # its own endpoint, or only its tags row's family
+            models._ENGINES.clear()
+            models._EMULATORS.clear()
+            url = self.kobold(extra)
+            self.config({"kc": {"options": {"baseURL": url + "/v1"}, "models": {}}})
+            self.assertEqual(models.providers()["kc"]["engine"], "server")
+            self.assertFalse(models.ollama_answers(url))
+            self.assertIn("is KoboldCpp's emulation of it: wb drives it as an OpenAI-compatible "
+                          "server", models.providers()["kc"]["engine_note"])
+            out = io.StringIO()
+            with redirect_stdout(out):
+                cli.main(["model", "add", "kc/koboldcpp/coder", "--context", "32768"])
+            self.assertIn("KoboldCpp's emulation", out.getvalue())
+            self.assertNotIn("NO tool calls", out.getvalue())
+            entry = json.loads(Path(os.environ["WB_OPENCODE_CONFIG"]).read_text())["provider"]["kc"]["models"]
+            self.assertNotEqual(entry["koboldcpp/coder"].get("tool_call"), False)
+            self.assertNotIn("max_tokens", entry["koboldcpp/coder"].get("options") or {})
+            m = models.resolve("kc/koboldcpp/coder")
+            self.assertEqual((m.engine, models.status(m)["why"]), ("server", "running"))
+        # the models.json override still wins, and then nothing is said
+        self.config({"kc": {"options": {"baseURL": url + "/v1"}, "models": {}}}, {"kc": {"engine": "ollama"}})
+        self.assertEqual((models.providers()["kc"]["engine"], models.providers()["kc"]["engine_note"]),
+                         ("ollama", ""))
+
+    def test_a_real_ollama_is_not_taken_for_an_emulator_and_a_server_on_its_port_is_named(self):
+        posts = []
+        srv, port = fake_ollama([], ["m"], posts)
+        self.servers.append(srv)
+        other = self.server({"/v1/models": {"data": [{"id": "m"}]}})
+        self.config({"o": {"options": {"baseURL": f"http://127.0.0.1:{port}/v1"}, "models": {}},
+                     "ollama-box": {"options": {"baseURL": other + "/v1"}, "models": {}}})
+        provs = models.providers()
+        self.assertEqual((provs["o"]["engine"], provs["o"]["engine_note"]), ("ollama", ""))
+        self.assertEqual(provs["ollama-box"]["engine"], "server")
+        self.assertIn("ollama-box is named for Ollama, but", provs["ollama-box"]["engine_note"])
+        self.assertIn('set "engine" for ollama-box', provs["ollama-box"]["engine_note"])
+
     def test_llama_server_says_its_size_and_the_window_of_one_slot_and_is_ranked_by_size(self):
         big = self.server({"/v1/models": {"data": [{"id": "/m/big.gguf", "owned_by": "llamacpp",
                                                       "meta": {"size": 20_000_000_000, "n_ctx_train": 131072}}]},
@@ -1197,6 +1252,21 @@ class Optimize(unittest.TestCase):
                     optimize.main()
             self.assertEqual([b for path, b in posts if path == "/api/generate"], [], keep)  # no unload
 
+    def test_every_hint_to_measure_names_wb_optimize_start_which_is_what_measures(self):
+        # #600 (the audit of v1.90): bare `wb optimize` only reports, and its never-run line named
+        # the bare command again, so the first run's step 3 measured nothing
+        from workbench import optimize
+        self.ollama(32768)
+        self.assertEqual(optimize.report(), ["not run yet: wb optimize estimate, then wb optimize "
+                                             "start (Ollama models only)"])
+        with self.assertRaisesRegex(RuntimeError, "wb optimize start first"):
+            optimize.apply(models.discover()["ollama/m"])
+        with mock.patch.object(models, "holders", return_value={"1": {"task": "t"}}), \
+                self.assertRaisesRegex(RuntimeError, "run wb optimize start once"):
+            optimize.start()
+        skill = (Path(__file__).parent.parent / "skill/workbench/SKILL.md").read_text()
+        self.assertIn("`wb optimize start`", skill.split("**First run**")[1].split("4. `wb try`")[0])
+
     def test_the_first_run_on_a_fresh_profile_starts(self):
         # #198 (the 2026-11-19 audit): optimize.log was opened before the state directory existed,
         # and wb setup swallowed the error, so the first measurement never ran
@@ -1236,6 +1306,50 @@ class Optimize(unittest.TestCase):
         entry = models.read_config()["provider"]["ollama"]["models"]["m:64k"]
         self.assertEqual(entry["options"], {"reasoningEffort": "none"})       # thinking stays off
         self.assertEqual(entry["limit"], {"context": 65536, "input": 65536 - 4096, "output": 4096})
+
+    def test_an_applied_variant_shares_its_sources_record_and_policy_and_the_advice_stops(self):
+        # #584, the audit of 1.90: the variant started with no record and ranked below the
+        # spilling source's one accepted task, it dropped the source's models.json sizes, and
+        # every wb start repeated the advice whose command then said "exists already"
+        from workbench import optimize
+        self.ollama(65536, extra={"ollama/m": {"sizes": ["trivial"], "label": "M"}})
+        store.append_jsonl(store.home() / "results.jsonl", {"task": "t1", "model": "ollama/m",
+                                                            "size": "trivial", "outcome": "accepted",
+                                                            "ran": True})
+        m = models.discover()["ollama/m"]
+        row = {"window": 65536, "fits": 49152, "spill": 12, "tried": []}
+        optimize._record(m.id, row)
+        self.assertIn("wb optimize apply ollama/m", optimize.advice(m.id, row))
+        said = optimize.apply(m)
+        self.assertIn("It shares ollama/m's record, and the router now picks it before ollama/m", said)
+        v = models.discover()["ollama/m:48k"]
+        self.assertEqual((v.extra["sizes"], v.extra["label"], v.extra["variant_of"]),
+                         (["trivial"], "M", "ollama/m"))
+        self.assertFalse(router.allowed(v, "significant"))          # the source's policy holds
+        self.assertEqual(optimize.advice(m.id, optimize.state()["models"][m.id]), "")
+        self.assertEqual([s.model.id for s in router.rank("trivial")][:2], ["ollama/m:48k", "ollama/m"])
+        sv, sm = router.score(v, "trivial"), router.score(m, "trivial")
+        self.assertEqual((sv.tries, sv.wins, sm.tries), (1, 1, 1))   # one record, both ways
+        self.assertEqual(router.lineage(m), {"ollama/m", "ollama/m:48k"})
+
+    def test_a_source_measured_again_after_its_apply_gets_no_advice_to_apply_it_again(self):
+        # the review of #584: a run that measured the source again (a changed GPU, --all, a
+        # stopped run) wrote its row without `applied`, the advice came back, and the command it
+        # named answered "exists already"; the report said the spilling window fit
+        from workbench import optimize
+        self.ollama(65536)
+        m = models.discover()["ollama/m"]
+        row = {"window": 65536, "fits": 49152, "spill": 12, "tried": []}
+        optimize._record(m.id, row)
+        optimize.apply(m)
+        optimize._record(m.id, {**row, "ts": store.now()})          # as fit() writes it, again
+        self.assertEqual(optimize.advice(m.id, optimize.state()["models"][m.id]), "")
+        said = "\n".join(optimize.report())
+        self.assertIn("ollama/m: 48K fits all on the GPU here; ollama/m:48k, applied, is that window", said)
+        self.assertNotIn("ollama/m: its 64K window fits all on the GPU", said)
+        # a different window measured (a new card): that one is advised
+        self.assertIn("wb optimize apply ollama/m makes a 32K entry",
+                      optimize.advice(m.id, {**row, "fits": 32768}))
 
     def test_a_smaller_window_cuts_the_output_cap_and_max_tokens_so_input_stays_positive(self):
         # #332 (the audit of 1.4): a 16K fit of a 128K entry wrote an input limit of -16384 and
@@ -1351,6 +1465,65 @@ class Optimize(unittest.TestCase):
             self.assertIn("a task you start goes first", out[0])
             self.assertNotIn("--all", popen.call_args[0][0])
 
+    def test_a_model_it_could_not_measure_is_remembered_and_not_due_again_each_session(self):
+        # #583, the audit of 1.90: a model skipped (its remote server busy) left no row and was
+        # "new" at every session, whose run emptied this machine's GPU first; one whose load
+        # failed (HTTP 500) stopped the run, so the next measured everything again
+        from workbench import optimize
+        gpu = lambda windows=True: [{"name": "Card", "vram": 1}]  # noqa: E731
+        loaded = [{"name": "theirs", "size": 5, "size_vram": 5}]           # the other machine's own
+        self.ollama(32768, loaded=loaded, extra={"ollama": {"local": True}})
+        with mock.patch.object(models, "_this_host", lambda h: False), \
+                mock.patch.object(optimize.hardware, "gpus", gpu), \
+                mock.patch.object(models, "free_gpu") as free, \
+                mock.patch.object(sys, "argv", ["optimize"]):
+            m, = optimize.candidates()
+            self.assertTrue(m.remote)
+            with redirect_stdout(io.StringIO()) as out:
+                optimize.main()
+            self.assertIn(f"{m.id}: not measured, {m.root} has theirs loaded", out.getvalue())
+            free.assert_not_called()                  # only a remote model was due: nothing here
+            st = optimize.state()
+            self.assertEqual(st["skipped"][m.id]["outcome"], "busy")
+            self.assertGreater(st["skipped"][m.id]["retry_after"], store.now() + 3600)
+            self.assertIsNone(st["stopped"])
+            self.assertEqual(optimize.due(), "")                     # not due at the next session
+            self.assertIn("not measured", "\n".join(optimize.report()))
+            store.write_json(optimize.path(), {**st, "skipped": {m.id: {**st["skipped"][m.id],
+                                                                        "retry_after": 1}}})
+            self.assertEqual(optimize.due(), f"new model: {m.id}")   # its time came: tried again
+            loaded.clear()
+            with redirect_stdout(io.StringIO()):
+                optimize.main()
+            self.assertIn(m.id, optimize.state()["models"])
+            free.assert_not_called()               # measured remotely: this machine's GPU untouched
+
+    def test_one_models_failed_load_is_recorded_and_the_run_carries_on(self):
+        import urllib.error
+        from workbench import optimize
+        self.ollama(32768)
+        gpu = lambda windows=True: [{"name": "Card", "vram": 1}]  # noqa: E731
+        for err, outcome in ((RuntimeError("http://x answered HTTP 500: out of memory"), "failed"),
+                             (urllib.error.URLError(TimeoutError("timed out")), "unreachable")):
+            with self.subTest(outcome), mock.patch.object(optimize.hardware, "gpus", gpu), \
+                    mock.patch.object(models, "free_gpu") as free, \
+                    mock.patch.object(optimize, "fit", side_effect=err), \
+                    mock.patch.object(sys, "argv", ["optimize"]):
+                optimize.path().unlink(missing_ok=True)
+                with redirect_stdout(io.StringIO()) as out:
+                    optimize.main()                          # no traceback: the run finishes
+                self.assertIn("ollama/m: not measured", out.getvalue())
+                free.assert_called_once()                    # a local model: freed for its probe
+                st = optimize.state()
+                self.assertEqual((st["skipped"]["ollama/m"]["outcome"], st["stopped"]), (outcome, None))
+                self.assertTrue(st["done"])
+                self.assertEqual(optimize.due(), "")
+        with mock.patch.object(optimize.hardware, "gpus", gpu), mock.patch.object(models, "free_gpu"), \
+                mock.patch.object(sys, "argv", ["optimize", "--all"]), redirect_stdout(io.StringIO()):
+            optimize.main()                                  # asked for: measured, the record cleared
+        self.assertIn("ollama/m", optimize.state()["models"])
+        self.assertEqual(optimize.state()["skipped"], {})
+
     def test_real_work_stops_it_and_what_it_measured_stays(self):
         self.ollama(32768)
         m = models.discover()["ollama/m"]
@@ -1430,6 +1603,27 @@ class Launchers(unittest.TestCase):
                                 f"{old}:{new}")
                 self.assertEqual(r.returncode, 78, r.stderr)                # handed over once only
 
+    def test_a_python3_n_that_cannot_run_is_passed_over_for_one_that_can(self):
+        # #526: on Ubuntu 22.04 with pyenv, ~/.pyenv/shims/python3.12 (a version pyenv has only
+        # for another project) exited 127, and the apt python3.11 behind it was never tried
+        with tempfile.TemporaryDirectory() as d:
+            shims, apt, broken = Path(d, "shims"), Path(d, "apt"), Path(d, "partial")
+            fakes = {shims / "python3.12": 'echo "pyenv: python3.12: command not found" >&2; exit 127\n',
+                     broken / "python3.13": '[ "$1" = -c ] && exit 1\necho python3.13 "$@"\n',  # no ctypes
+                     apt / "python3.11": 'echo python3.11 "$@"\n'}
+            for exe, body in fakes.items():
+                exe.parent.mkdir(exist_ok=True)
+                exe.write_text("#!/bin/sh\n" + body)
+                exe.chmod(0o755)
+            for name in ("wb", "wb-ask-mcp"):
+                r = self.launch(name, "sys.version_info = (3, 10, 12)", f"{shims}:{broken}:{apt}")
+                self.assertEqual(r.returncode, 0, r.stderr)
+                self.assertEqual(r.stdout.split(), ["python3.11", "-X", "wb-python",
+                                                    str(self.ROOT / "bin" / name), "--version"])
+                r = self.launch(name, "sys.version_info = (3, 10, 12)", f"{shims}:{broken}")
+                self.assertEqual(r.returncode, 78, r.stderr)              # none runs: say which
+                self.assertIn(f"tried {broken / 'python3.13'}, {shims / 'python3.12'}", r.stderr)
+
     def test_native_windows_is_told_to_use_wsl2(self):
         r = self.launch("wb", "sys.platform = 'win32'")
         self.assertEqual(r.returncode, 78, r.stderr)
@@ -1444,7 +1638,18 @@ class Launchers(unittest.TestCase):
         self.assertIn("Restart=always", unit)
         prevent = [l.split("=", 1)[1].split() for l in unit.splitlines()
                    if l.startswith("RestartPreventExitStatus=")]
-        self.assertEqual(prevent, [["78"]])  # never 75: chat.py exits 75 to be restarted
+        self.assertEqual(prevent, [["78"]])
+
+    def test_no_note_says_the_chat_exits_75_since_it_re_execs_in_place(self):
+        # #480 (the audit of v1.8): the unit and ARCHITECTURE.md still said chat.py exits 75 to be
+        # restarted, after #200 made it re-exec in place
+        import re
+        chat = (self.ROOT / "workbench" / "chat.py").read_text()
+        self.assertIn("os.execv(sys.executable, [sys.executable, *sys.orig_argv[1:]])", chat)
+        self.assertNotRegex(chat, r"(sys\.)?exit\(75\)")
+        for f in ("systemd/wb-chat.service", "ARCHITECTURE.md"):
+            text = (self.ROOT / f).read_text()
+            self.assertIsNone(re.search(r"exits 75|never 75|the replan exit", text), f)
 
     def test_a_legacy_locale_still_reads_and_writes_utf8(self):
         # the 2026-11-19 audit: under a non-UTF-8 locale wb's reads and writes without an
@@ -1556,6 +1761,62 @@ class ServerAway(Base):
         self.assertIn("m is not pulled", st["last"])
         self.assertLess(time.monotonic() - began, 20)
         self.assertFalse(self.waits("t-gone"))
+
+    def test_a_model_that_never_loaded_says_resume_and_its_discard_is_not_held_against_it(self):
+        # #581, the audit of 1.90: a task whose model never loaded, discarded, counted as the
+        # model's rejected work
+        from workbench import tuning
+        self.tags.clear()                                             # not pulled: fails at once
+        self.start("t-noload", "ok", "--test", TEST_CMD, "--model", "o/m", "--force")
+        wait_phase("t-noload", {"failed"}, timeout=30)
+        note = [r for r in store.notices() if r["task"] == "t-noload"][-1]
+        self.assertIn("the agent never ran: once the model can, wb resume t-noload starts it",
+                      note["text"])
+        run_wb("discard", "t-noload")
+        row = [r for r in store.results() if r["task"] == "t-noload"][-1]
+        self.assertEqual((row["ran"], row["failed_before"]), (False, "load"))
+        self.assertFalse(tuning.judged(row))
+        self.assertEqual(router.score(models.resolve("o/m"), row["size"]).tries, 0)
+
+
+class ServerRestarted(Base):
+    """A model server wb starts itself (models.json `start`) that dies under a round: #579, the
+    audit of 1.90. Only Ollama's and servers wb can't start were revived; an out-of-memory kill of
+    a llama-server failed the task as "opencode exited 1"."""
+    def setUp(self):
+        super().setUp()
+        os.environ.pop("WB_FAKE_MODELS")
+        self.down = Path(self.tmp.name) / "down"
+        self.starts = Path(self.tmp.name) / "starts"
+        srv, url = serve({"/v1/models": lambda h: 503 if self.down.exists() else {"data": [{"id": "m"}]}})
+        self.addCleanup(srv.server_close)
+        self.addCleanup(srv.shutdown)
+        Path(os.environ["WB_OPENCODE_CONFIG"]).write_text(json.dumps({"provider": {"s": {
+            "options": {"baseURL": f"{url}/v1"}, "models": {"m": {"limit": {"context": 32768}}}}}}))
+        Path(os.environ["WB_MODELS"]).write_text(json.dumps({"s": {"engine": "server"}, "s/m": {
+            "start": f"echo >> {self.starts}; rm -f {self.down}"}}))
+
+    def test_a_server_wb_starts_that_dies_under_a_round_is_started_again_and_the_round_rerun(self):
+        os.environ["FAKE_DOWN"] = str(self.down)                      # the round takes it down
+        self.start("t-oom", "crash", "--test", TEST_CMD, "--model", "s/m")
+        st = wait_phase("t-oom", {"review", "stuck", "failed"}, timeout=90)
+        self.assertEqual(st["phase"], "review", st.get("last"))
+        self.assertTrue(st["tests"]["ok"])                              # the round, run again
+        self.assertEqual(st["round"], 1)
+        self.assertEqual(self.starts.read_text().count("\n"), 1)        # started once, by wb
+        rows, _ = store.read_jsonl(store.Task("t-oom").dir / "events.jsonl")
+        self.assertIn("opencode exited 1 with the model's server down: wb starts it again and the "
+                      "round runs again", [r["text"] for r in rows if r.get("kind") == "load"])
+
+    def test_a_second_crash_in_the_same_round_still_fails_the_task(self):
+        os.environ["FAKE_DOWN"] = str(self.down)
+        # the start brings the server back but the crash marker goes too: it crashes again
+        Path(os.environ["WB_MODELS"]).write_text(json.dumps({"s": {"engine": "server"}, "s/m": {
+            "start": f"echo >> {self.starts}; rm -f {self.down} {self.down}.crashed"}}))
+        self.start("t-oom2", "crash", "--test", TEST_CMD, "--model", "s/m")
+        st = wait_phase("t-oom2", {"review", "stuck", "failed"}, timeout=90)
+        self.assertEqual((st["phase"], st["last"]), ("failed", "opencode exited 1"))
+        self.assertEqual(self.starts.read_text().count("\n"), 1)        # revived once a round
 
 
 class Fit(Base):

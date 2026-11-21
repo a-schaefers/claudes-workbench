@@ -271,6 +271,11 @@ def commands_conf() -> dict:
         if not ok:
             raise RuntimeError(f'{path}: "repos" → {repo!r}: "setup" is a command, "copy" and '
                                '"siblings" lists of strings')
+        if "setup_timeout" in v and not (isinstance(v["setup_timeout"], int)
+                                         and not isinstance(v["setup_timeout"], bool)
+                                         and v["setup_timeout"] > 0):
+            raise RuntimeError(f'{path}: "repos" → {repo!r}: "setup_timeout" is a whole number '
+                               'of seconds, e.g. 3600')
         if v.get("merge", "merge") not in MERGE_AS:
             raise RuntimeError(f'{path}: "repos" → {repo!r}: "merge" is one of {", ".join(MERGE_AS)}')
     return conf
@@ -351,12 +356,17 @@ MERGE_AS = ("merge", "ff", "squash")
 
 
 def repo_conf(repo: str | Path) -> dict:
-    """commands.json's `repos` entry for this repo (matched by real path), or {}: its `setup`
-    command, the ignored paths to `copy` into a task's worktree, its `siblings` (#201), how
-    `--merge` lands there (`merge`, #352)."""
-    real = os.path.realpath(repo)
-    for k, v in (commands_conf().get("repos") or {}).items():
+    """commands.json's `repos` entry for this repo (matched by real path, else by git dir), or
+    {}: its `setup` command and its limit (`setup_timeout`, #520), the ignored paths to `copy`
+    into a task's worktree, its `siblings` (#201), how `--merge` lands there (`merge`, #352)."""
+    real, repos = os.path.realpath(repo), commands_conf().get("repos") or {}
+    for k, v in repos.items():
         if os.path.realpath(Path(k).expanduser()) == real:
+            return v
+    # else by git dir: a linked worktree of a configured repo is that repo (#498)
+    common = gitops.common_dir(repo) if repos else None
+    for k, v in repos.items() if common else ():
+        if gitops.common_dir(Path(k).expanduser()) == common:
             return v
     return {}
 

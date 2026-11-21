@@ -10,7 +10,8 @@ asset at review), and make it once the GPU is free.
    lighting, the size the project needs, and what to avoid. Name the use ("a 64x64 icon on
    a flat background") so the framing fits.
 2. `wb image "<prompt>" --n 4 --size WxH [--seed S] [--ref img]` makes candidates (seeds S, S+1,
-   ...) and prints their paths. **Read every one**: look at it yourself, never pick by filename.
+   ...) and prints their paths. Run it with Bash `run_in_background: true` and read its
+   notification: a batch can outrun Bash's 2 minutes. **Read every one**: look at it yourself, never pick by filename.
 3. Keep one, or rewrite the prompt for what was wrong and go again. A seed you liked comes back
    with `--seed` and a changed prompt. Stop after three rounds and show the user the best.
 4. Copy the keeper into the project (resized or cropped as needed), commit it, and say which
@@ -19,7 +20,8 @@ asset at review), and make it once the GPU is free.
    asset directory. For a sprite on a black background drawn additively, black is see-through
    and no alpha channel is needed.
 Mind the engine's `notes` in `wb image --list`: an image model's licence can restrict where and
-how its output may be used. A generation needs the GPU to itself: while a task holds it,
+how its output may be used. An engine listed `(off the GPU)` (`"gpu": false` in images.json, or a
+url on another host) runs beside tasks. Any other generation needs the GPU to itself: while a task holds it,
 `wb image` refuses and names it; `--wait` (Bash `run_in_background: true`) queues behind it.
 While it runs (or waits), `wb start` refuses a new task (exit 4) unless `--queue`, which waits
 behind it; feedback, next and resume queue behind it. A url engine is a server that keeps its GPU

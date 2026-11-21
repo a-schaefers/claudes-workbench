@@ -4,6 +4,7 @@ a measurement that costs nothing is on by default, and every one can be turned o
 everything workbench has learned, for the tab's history (`wb stats --json`, #405)."""
 import time
 from collections import Counter, defaultdict
+from datetime import date, timedelta
 from statistics import median
 
 from . import store
@@ -39,21 +40,23 @@ def recording() -> bool:
 
 
 def set_setting(key: str, value: str) -> dict:
-    """`wb stats set KEY VALUE`. Raises ValueError with the allowed values."""
-    data = store.read_json(path(), {})
-    data = data if isinstance(data, dict) else {}
+    """`wb stats set KEY VALUE`. Raises ValueError with the allowed values. Under stats.lock: two
+    settings picked at once (two sessions' rows, the pane and a shell) each wrote back the snapshot
+    it read, and one was lost while both said it took (#564)."""
     if key in SWITCHES:
         if value not in ("on", "off"):
             raise ValueError(f"{key} is on or off")
-        data[key] = value == "on"
+        change = {key: value == "on"}
     elif key == "every":
         if value not in {str(s) for s in EVERY}:
             raise ValueError(f"every is one of {', '.join(map(str, EVERY))} (seconds)")
-        data["every"] = int(value)
+        change = {"every": int(value)}
     else:
         raise ValueError(f"no setting {key!r}: recording, live or every")
-    data["ts"] = store.now()
-    store.write_json(path(), data)
+    with store.locked(path().with_suffix(".lock")):
+        data = store.read_json(path(), {})
+        data = data if isinstance(data, dict) else {}
+        store.write_json(path(), {**data, **change, "ts": store.now()})
     return settings()
 
 
@@ -66,7 +69,6 @@ def line() -> str:
 # The feed (#405): everything workbench has learned, as one object for the Stats tab (`wb stats
 # --json`). Built from what already computes it; a section with no data is left out, never a
 # zero, and the savings are the estimate savings.py labels as one.
-DAY = 86400
 MILESTONES_LANDED = (1, 10, 25, 50, 100, 250, 500, 1000)
 MILESTONES_SAVED = (100_000, 1_000_000, 10_000_000, 100_000_000)  # Claude tokens, estimated
 TREND_MIN = 6  # speed samples (tasks) before a model's trend is given
@@ -74,6 +76,14 @@ TREND_MIN = 6  # speed samples (tasks) before a model's trend is given
 
 def _day(ts: float | None) -> str | None:
     return time.strftime("%Y-%m-%d", time.localtime(ts)) if ts else None  # a row too old to say
+
+
+def _midnight(now: float) -> float:
+    """The next local midnight after ``now``: the feed holds until then (its streak, its 7 and 30
+    days and its periods are counted from today), so the pane reads it again once it passes, files
+    unchanged or not (#575)."""
+    t = time.localtime(now)
+    return time.mktime((t.tm_year, t.tm_mon, t.tm_mday + 1, 0, 0, 0, 0, 0, -1))
 
 
 def _landed(r: dict) -> bool:
@@ -92,24 +102,30 @@ def _streak(rows: list[dict], now: float) -> dict | None:
     if not days:
         return None
     best = run = 1
+    gap = lambda a, b: (date.fromisoformat(b) - date.fromisoformat(a)).days  # noqa: E731
     for a, b in zip(days, days[1:]):
-        gap = round((time.mktime(time.strptime(b, "%Y-%m-%d"))
-                     - time.mktime(time.strptime(a, "%Y-%m-%d"))) / DAY)
-        run = run + 1 if gap == 1 else 1
+        run = run + 1 if gap(a, b) == 1 else 1
         best = max(best, run)
     current = 0
-    if days[-1] in (_day(now), _day(now - DAY)):
+    today = date.fromtimestamp(now)  # dates, not now - 86400: a 23- or 25-hour day skipped one (#563)
+    if days[-1] in (today.isoformat(), (today - timedelta(days=1)).isoformat()):
         current, i = 1, len(days) - 1
-        while i > 0 and round((time.mktime(time.strptime(days[i], "%Y-%m-%d"))
-                               - time.mktime(time.strptime(days[i - 1], "%Y-%m-%d"))) / DAY) == 1:
+        while i > 0 and gap(days[i - 1], days[i]) == 1:
             current, i = current + 1, i - 1
     return {"current": current, "best": best, "days": len(days)}
 
 
 def _bests(rows: list[dict]) -> dict:
+    """The most lines landed first try, and the fastest landing. First try is skills.py's: landed
+    with no review round the agent caused. Not the runner's round counter: self-review, a handover
+    and a steer each add a round Claude never saw, so a default `--test` task never qualified
+    (#550)."""
+    from . import tuning
     out = {}
-    first_try = [r for r in rows if _landed(r) and r.get("rounds") == 1 and not r.get("reviews")
-                 and r.get("diff")]
+    # the agent's own landings: a task Claude finished after wb takeover is Claude's work (#566),
+    # as progress.helped leaves it out
+    rows = [r for r in rows if not any(s.get("took_over") for s in r.get("steps") or [])]
+    first_try = [r for r in rows if _landed(r) and not tuning.agent_reviews(r) and r.get("diff")]
     if first_try:
         big = max(first_try, key=lambda r: r["diff"].get("added", 0) + r["diff"].get("removed", 0))
         out["largest_first_try"] = {"task": big.get("task"), "ts": big.get("ts"),
@@ -122,7 +138,9 @@ def _bests(rows: list[dict]) -> dict:
 
 
 def _milestones(rows: list[dict]) -> list[dict]:
-    """Each milestone reached, with its day: tasks landed, and Claude tokens saved (estimate)."""
+    """Each milestone reached, with its day: tasks landed, and Claude tokens saved (estimate),
+    the saving over the same rows as savings.totals, spec-gap discards and all: over the judged
+    rows alone it reached 100K that the all-time saving never did (#569)."""
     from . import savings
     out, landed, saved = [], 0, 0
     marks_l, marks_s = list(MILESTONES_LANDED), list(MILESTONES_SAVED)
@@ -139,14 +157,23 @@ def _milestones(rows: list[dict]) -> list[dict]:
 
 
 def _absorbed(rows: list[dict]) -> dict:
-    """Work that never reached Claude: auto-fix rounds (and the tasks whose tests then passed),
-    the agents' questions answered, and handovers in tasks that went on to land."""
+    """Work that never reached Claude: auto-fix rounds (attempts, whatever came of them) and the
+    tasks whose tests then passed, and handovers in tasks that went on to land. A question isn't
+    here: its notice wakes Claude (#562)."""
     fixed = [r for r in rows if (r.get("auto_fixes") or 0) > 0]
     out = {"auto_fixes": sum(r["auto_fixes"] for r in fixed),
            "auto_fixed_tasks": sum(1 for r in fixed if r.get("tests_ok")),
-           "questions": sum((r.get("asks") or {}).get("questions", 0) for r in rows),
            "handovers_landed": sum(1 for r in rows if _landed(r)
                                    and any((s.get("handovers") or 0) > 0 for s in r.get("steps") or []))}
+    return {k: v for k, v in out.items() if v}
+
+
+def _questions(rows: list[dict]) -> dict:
+    """The agents' ask_reviewer questions: asked, and answered by `wb answer` (a row before
+    `answered` was recorded counts as asked only: never more answered than known, #562)."""
+    asks = [r.get("asks") or {} for r in rows]
+    out = {"asked": sum(a.get("questions", 0) for a in asks),
+           "answered": sum(a.get("answered", 0) for a in asks)}
     return {k: v for k, v in out.items() if v}
 
 
@@ -191,7 +218,8 @@ def _by(rows: list[dict], key) -> dict:
 
 
 def _days(rows: list[dict], now: float, n: int = 30) -> list[dict]:
-    want = [_day(now - i * DAY) for i in range(n - 1, -1, -1)]
+    today = date.fromtimestamp(now)  # local dates: now - i * 86400 skipped or repeated a day at DST (#563)
+    want = [(today - timedelta(days=i)).isoformat() for i in range(n - 1, -1, -1)]
     tasks, landed = defaultdict(int), defaultdict(int)
     for r in rows:
         if r.get("ts"):
@@ -202,18 +230,45 @@ def _days(rows: list[dict], now: float, n: int = 30) -> list[dict]:
 
 
 def _bench() -> dict:
-    """Each model's newest bench run: the cases passed of those graded."""
+    """Each model's newest finished bench run, the cases passed of those graded, and a newer run
+    still going or cut short as `partial` beside it ({run, day, passed, of, planned, running}),
+    never in its place: the newest run's first graded case read "1/1" as the model's result,
+    for good if the run was stopped (#570). A run is finished for a model once each of its
+    planned replays (plan.json's pairs on it, times repeat) has settled: graded, or didn't start
+    (an error, which drive doesn't retry). A run with no plan is taken as finished."""
     from . import bench
-    newest: dict[str, tuple] = {}
-    rows = [r for r in bench.rows() if r.get("model") and r.get("arm") != "claude"]
-    for r in rows:
-        if r["model"] not in newest or r.get("ts", 0) > newest[r["model"]][1]:
-            newest[r["model"]] = (r.get("run"), r.get("ts", 0))
-    out = {}
-    for model, (run, ts) in newest.items():
-        rs = [r for r in rows if r["model"] == model and r.get("run") == run]
-        out[model] = {"run": run, "day": _day(ts), "passed": sum(r.get("outcome") == "passed" for r in rs),
-                      "of": len(rs)}
+    every = [r for r in store.read_jsonl(bench.runs_file())[0]
+             if isinstance(r, dict) and r.get("model") and r.get("arm") != "claude"]
+    graded = defaultdict(list)
+    settled = defaultdict(set)
+    for r in every:
+        key = (r["model"], r.get("run"))
+        if r.get("outcome") in ("passed", "failed"):
+            graded[key].append(r)
+        if r.get("outcome") in ("passed", "failed", "error"):
+            settled[key].add((r.get("case"), r.get("rep", 1)))
+    plans: dict = {}
+    running = (bench.driver() or {}).get("run")
+
+    def planned(model, run) -> int | None:
+        if run not in plans:
+            plans[run] = bench.plan(run) if isinstance(run, str) and run else {}
+        p = plans[run]
+        if not p.get("pairs"):
+            return None
+        return sum(1 for _, m in p["pairs"] if m == model) * int(p.get("repeat") or 1)
+
+    out: dict = {}
+    for (model, run), rs in sorted(graded.items(), key=lambda kv: max(r.get("ts", 0) for r in kv[1])):
+        ts = max(r.get("ts", 0) for r in rs)
+        line = {"run": run, "day": _day(ts), "passed": sum(r["outcome"] == "passed" for r in rs), "of": len(rs)}
+        n = planned(model, run)
+        m = out.setdefault(model, {})
+        if n is None or len(settled[(model, run)]) >= n:
+            m.pop("partial", None)  # a newer run finished: the older partial is history
+            m.update(line)
+        else:
+            m["partial"] = {**line, "planned": n, "running": run == running}
     return out
 
 
@@ -224,51 +279,79 @@ def _optimized() -> dict:
             for m, v in (models or {}).items() if isinstance(v, dict) and v.get("window")}
 
 
-def _helps(rows: list[dict], progress) -> dict:
-    """progress.helped for each model a progress check's answer was tried on."""
-    out = {}
-    for m in {r.get("model") for r in rows if r.get("interventions")}:
-        h = progress.helped(m) if m else {}
-        if any(n for _, n in h.values()):
-            out[m] = h
-    return out
+def _helps(rows: list[dict]) -> dict:
+    """progress.helped for each model a progress check's answer was tried on, over the feed's
+    rows (one pass: a read per model was most of the feed's time on a long history, #565)."""
+    from . import progress
+    return {m: h for m, h in progress.helped_by_model(rows).items()
+            if m and any(n for _, n in h.values())}
 
 
-def feed(now: float | None = None) -> dict:
-    """`wb stats --json`: the Stats tab's history (#405)."""
-    from . import progress, savings, tuning
+def _energy(rows: list[dict], price: float | None) -> dict | None:
+    """A period's GPU energy: every row that measured it (`gpu_wh`; another machine's GPU,
+    `remote_gpu`, measured nothing here), compared by savings or not. savings.totals sums only
+    the rows it can compare, so a period's tasks run outside a session lost their watt-hours
+    (#568). The cost with a price set."""
+    whs = [r["gpu_wh"] for r in rows if isinstance(r.get("gpu_wh"), (int, float))
+           and not isinstance(r["gpu_wh"], bool) and not r.get("remote_gpu")]
+    if not whs:
+        return None
+    wh = round(sum(whs), 1)
+    return {"wh": wh, **({"cost": round(wh / 1000 * price, 2)} if price is not None else {})}
+
+
+SUMMARY = ("periods", "streak", "absorbed", "questions", "guards")  # what `wb stats` shows of the feed
+
+
+def feed(now: float | None = None, only: tuple | None = None) -> dict:
+    """`wb stats --json`: the Stats tab's history (#405). results.jsonl is read once and that
+    snapshot passed down: each period's savings and each model's helps read it again, 16 reads
+    of a 4,800-row history per feed (#565). ``only``: these sections alone (`wb stats`)."""
+    from . import savings, tuning
     now = store.now() if now is None else now
-    rows = [r for r in store.results() if tuning.judged(r)]  # trials and spec-gap discards out
-    out: dict = {"ts": now, "settings": settings(), "tasks": len(rows)}
+    every = store.results()
+    rows = [r for r in every if tuning.judged(r)]  # trials and spec-gap discards out
+    out: dict = {"ts": now, "until": _midnight(now), "settings": settings(), "tasks": len(rows)}
+    price = savings.price()
     periods = {}
     for name, span in savings.PERIODS.items():
         since = now - span if span else 0
         rs = [r for r in rows if (r.get("ts") or 0) >= since]
-        t = savings.totals(store.results(), since=since)
-        if rs or t["tasks"]:
+        t = savings.totals(every, since=since)
+        # in the saving (Claude's tokens were spent) but not the task count: said beside it (#569)
+        gaps = sum(1 for r in every if (r.get("ts") or 0) >= since and not tuning.judged(r))
+        energy = _energy([r for r in every if (r.get("ts") or 0) >= since], price)
+        if rs or t["tasks"] or gaps or energy:
             landed = sum(map(_landed, rs))
             periods[name] = {"tasks": len(rs), "landed": landed,
                              **({"accepted_pct": round(100 * landed / len(rs))} if rs else {}),
+                             **({"spec_gaps": gaps} if gaps else {}),
+                             **({"energy": energy} if energy else {}),
                              # nothing to compare: no savings, rather than a row of zeros
                              **({"savings": t, "score": savings.score(t)} if t["tasks"] else {}),
                              **({"active_minutes": am} if (am := round(sum(r.get("active_minutes") or 0
                                                                            for r in rs), 1)) else {})}
     sections = {
-        "periods": periods,
-        "streak": _streak(rows, now),
-        "bests": _bests(rows),
-        "milestones": _milestones(rows),
-        "absorbed": _absorbed(rows),
-        "models": _models(rows),
-        "sizes": _by(rows, lambda r: [r["size"]] if r.get("size") else []),
-        "stacks": _by(rows, lambda r: r.get("stack") or []),
-        "days": _days(rows, now) if rows else None,
-        "guards": dict(sum((Counter(r.get("guards") or {}) for r in rows), Counter())),
-        "helps": _helps(rows, progress),
-        "bench": _bench(),
-        "optimized": _optimized(),
+        "periods": lambda: periods,
+        "streak": lambda: _streak(rows, now),
+        "bests": lambda: _bests(rows),
+        # every row: a spec-gap discard still cost Claude, as in each period's saving (#569)
+        "milestones": lambda: _milestones(every),
+        "absorbed": lambda: _absorbed(rows),
+        "questions": lambda: _questions(rows),
+        "models": lambda: _models(rows),
+        "sizes": lambda: _by(rows, lambda r: [r["size"]] if r.get("size") else []),
+        "stacks": lambda: _by(rows, lambda r: r.get("stack") or []),
+        "days": lambda: _days(rows, now) if rows else None,
+        "guards": lambda: dict(sum((Counter(r.get("guards") or {}) for r in rows), Counter())),
+        "helps": lambda: _helps(rows),
+        "bench": _bench,
+        "optimized": _optimized,
     }
-    out.update({k: v for k, v in sections.items() if v})
+    for k, make in sections.items():
+        if only is None or k in only:
+            if v := make():
+                out[k] = v
     return out
 
 
@@ -283,6 +366,7 @@ def summary(f: dict) -> list[str]:
         said = (f"saved ~{saved / 1000:.0f}K" if saved >= 0 else f"cost ~{-saved / 1000:.0f}K more")
         lines.append(f"{'this week' if name == 'week' else 'all time'}: {p['tasks']} task(s), "
                      f"{p['landed']} landed" + (f" ({p['accepted_pct']}%)" if "accepted_pct" in p else "")
+                     + (f", and {p['spec_gaps']} discard(s) put down to the spec" if p.get("spec_gaps") else "")
                      + (f" · {said} Claude tokens (estimate) · score {s['score']}/100" if s else ""))
     if st := f.get("streak"):  # a run that ended isn't mentioned: only the best (the plan's rule)
         lines.append(f"streak: {st['current']} day(s) in a row with a task landed · best {st['best']}"
@@ -291,11 +375,12 @@ def summary(f: dict) -> list[str]:
         parts = []
         if ab.get("auto_fixes"):
             parts.append(f"{ab['auto_fixes']} auto-fix round(s), {ab.get('auto_fixed_tasks', 0)} task(s) then green")
-        if ab.get("questions"):
-            parts.append(f"{ab['questions']} question(s) answered mid-task")
         if ab.get("handovers_landed"):
             parts.append(f"{ab['handovers_landed']} landed after a handover")
         lines.append("without waking Claude: " + " · ".join(parts))
+    if q := f.get("questions"):
+        lines.append(f"questions: {q.get('asked', 0)} asked mid-task"
+                     + (f", {q['answered']} answered" if q.get("answered") else ""))
     if g := f.get("guards"):
         lines.append("what stopped agents: " + " · ".join(f"{k} {v}" for k, v in
                                                         sorted(g.items(), key=lambda kv: -kv[1])))

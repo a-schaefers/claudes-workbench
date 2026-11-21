@@ -77,7 +77,7 @@ class Score:
     def line(self) -> str:
         if not self.tries:
             return "no real tasks yet"
-        t = f", ~{self.minutes:.1f} min" if self.minutes is not None else ""
+        t = f", ~{self.minutes:.1f} min of active work" if self.minutes is not None else ""
         like = f", {self.like_wins}/{self.like_tries} on {'/'.join(self.stack)}" if self.like_tries else ""
         c = f", ~{self.claude / 1000:.0f}K Claude tokens a task" if self.claude_n >= COST_MIN else ""
         return f"{self.wins}/{self.tries} real tasks accepted{like}{t}{c}"
@@ -95,9 +95,19 @@ def row_stack(r: dict) -> tuple:
     return _repo_stack(r["repo"]) if r.get("repo") else ()
 
 
+def lineage(m: models.Model) -> set[str]:
+    """The ids that share ``m``'s record: a `wb optimize apply` variant (models.json
+    `variant_of`), its source, and the source's other variants. One model at two windows is one
+    model's record (#584)."""
+    over = models._overrides()
+    root = m.extra.get("variant_of") or m.id
+    return {m.id, root} | {k for k, v in over.items() if isinstance(v, dict) and v.get("variant_of") == root}
+
+
 def score(m: models.Model, size: str, state: dict | None = None, stack=()) -> Score:
     state = state or models.status(m)
-    real = [r for r in store.results() if r.get("model") == m.id and r.get("size") == size
+    ids = lineage(m)
+    real = [r for r in store.results() if r.get("model") in ids and r.get("size") == size
             and tuning.judged(r)]
     # a model that can't run isn't weighed: its server was just found down, and asking it again
     # cost seconds per model on a sleeping LAN box (the 2026-11-16 audit)
@@ -109,8 +119,12 @@ def score(m: models.Model, size: str, state: dict | None = None, stack=()) -> Sc
         like = [r for r in real if set(row_stack(r)) & set(stack)]
         s.like_tries = len(like)
         s.like_wins = sum(r.get("outcome") == "accepted" for r in like)
-    times = [r["minutes"] for r in real if r.get("minutes") is not None]
-    s.minutes = sum(times) / len(times) if times else None
+    # the agent's active work, median: wall minutes held the queue, Claude's review and a night
+    # before an accept (480 min for a 12-minute task), and a mean let one such row set every
+    # ETA and progress check at many times the real length (#543). Rows without it are skipped.
+    times = [r["active_minutes"] for r in real if isinstance(r.get("active_minutes"), (int, float))
+             and not isinstance(r["active_minutes"], bool)]
+    s.minutes = statistics.median(times) if times else None
     spent = [spend.weighted(r["claude"]) for r in real if isinstance(r.get("claude"), dict)]
     s.claude, s.claude_n = (statistics.fmean(spent) if spent else None), len(spent)
     return s
@@ -133,7 +147,8 @@ def _cheaper(close: list[Score]) -> list[Score]:
 
 
 def expected_minutes(model_id: str, size: str) -> float | None:
-    """How long a task of this size usually takes on this model, from real tasks."""
+    """How long a task of this size usually takes on this model, from real tasks: the median of
+    their active minutes (the agent's own working time), so compare it with a task's active time."""
     m = models.discover().get(model_id)
     if not m:
         return None
@@ -174,7 +189,12 @@ def rank(size: str, stack=()) -> list[Score]:
         s.fits = fits(s.model, budget) if s.state["available"] else None
     usable = [s for s in scores if s.state["available"]]
     best = max((s.quality for s in usable), default=0)
-    close = _cheaper(sorted((s for s in usable if s.quality >= best - QUALITY_MARGIN), key=_guess(size)))
+    # a source whose optimize variant can run goes after it: the variant is the window measured
+    # to fit, with the same record (#584)
+    replaced = {s.model.extra.get("variant_of") for s in usable} - {None}
+    guess = _guess(size)
+    close = _cheaper(sorted((s for s in usable if s.quality >= best - QUALITY_MARGIN),
+                            key=lambda s: (s.model.id in replaced, *guess(s))))
     rest = sorted((s for s in usable if s not in close), key=lambda s: -s.quality)
     blocked = [s for s in scores if not s.state["available"]]
     return close + rest + blocked

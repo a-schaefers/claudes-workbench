@@ -154,12 +154,22 @@ def _read(path, limit: int = FILE_MAX) -> str | None:
 def read_question(task: store.Task, qid: str) -> dict | None:
     """ask/<qid>.json as the agent wrote it, its fields as strings, or None."""
     try:
-        q = json.loads(_read(ask_dir(task) / f"{qid}.json") or "")
+        q = store.loads(_read(ask_dir(task) / f"{qid}.json") or "")  # the runner writes it on (#525)
     except ValueError:
         return None
     if not isinstance(q, dict):
         return None
     return {**q, **{k: str(q.get(k) or "") for k in ("question", "context", "command", "path")}}
+
+
+def too_long(text: str) -> str:
+    """Why an answer can't be written, or "": past FILE_MAX the server reads none of it, so the
+    agent waited out its ask timeout for NO_ANSWER while wb said "answered" (#605)."""
+    size = len((text.strip() + "\n").encode())
+    if size <= FILE_MAX:
+        return ""
+    return (f"the answer is {size // 1024} KiB, over the {FILE_MAX // 1024} KiB the agent can be "
+            "sent: put the material in a file in the task's worktree and answer with its path")
 
 
 def write_answer(task: store.Task, qid: str, text: str) -> None:
@@ -169,6 +179,8 @@ def write_answer(task: store.Task, qid: str, text: str) -> None:
     answer's, which replaces a link instead of following it."""
     if not QID.match(qid):
         raise RuntimeError(f"no question {qid}")
+    if why := too_long(text):
+        raise RuntimeError(why)
     d = os.open(ask_dir(task), os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC)
     try:
         tmp = f".{qid}.{secrets.token_hex(6)}.tmp"
@@ -333,8 +345,16 @@ def handle(msg: dict, task: store.Task):
             return {"jsonrpc": "2.0", "id": mid,
                     "error": {"code": -32602, "message": f"unknown tool {params.get('name')}"}}
         args = params.get("arguments") or {}
-        text = ask(task, str(args.get("question", "")).strip(), str(args.get("context", "")),
-                   str(args.get("command", "")).strip(), str(args.get("path", "")).strip())
+        if not isinstance(args, dict):
+            args = {}
+        try:
+            text = ask(task, str(args.get("question", "")).strip(), str(args.get("context", "")),
+                       str(args.get("command", "")).strip(), str(args.get("path", "")).strip())
+        except Exception as exc:  # a full disk, an unwritable ask/: the agent hears it and goes on
+            why = " ".join(str(exc).split())[:200] or type(exc).__name__
+            return {"jsonrpc": "2.0", "id": mid, "result": {"isError": True, "content": [
+                {"type": "text", "text": f"ask_reviewer failed: {why}; carry on without an "
+                                         "answer and say so in your summary."}]}}
         result = {"content": [{"type": "text", "text": text}], "isError": False}
     else:
         return {"jsonrpc": "2.0", "id": mid,
@@ -347,10 +367,16 @@ def main():
     out = threading.Lock()
 
     def serve(line: str) -> None:
+        mid = None  # null only for a line that isn't a request at all, as JSON-RPC says
         try:
-            reply = handle(json.loads(line), task)
+            # scrubbed: half an emoji (a lone surrogate) in the question failed its write (#525)
+            msg = store.loads(line)
+            mid = msg.get("id") if isinstance(msg, dict) else None
+            reply = handle(msg, task)
         except Exception as exc:  # never let one bad message take the agent's tool away
-            reply = {"jsonrpc": "2.0", "id": None, "error": {"code": -32603, "message": str(exc)}}
+            # with the request's own id: OpenCode's MCP client dropped a reply with id null, and
+            # the call waited until the silence guard stopped the round (#525)
+            reply = {"jsonrpc": "2.0", "id": mid, "error": {"code": -32603, "message": str(exc)}}
         if reply is not None:
             with out:
                 sys.stdout.write(json.dumps(reply) + "\n")

@@ -9,6 +9,7 @@ times a second instead and reports what changed, so nothing here is required for
 from __future__ import annotations
 
 import ctypes
+import errno
 import fnmatch
 import os
 import select
@@ -90,19 +91,30 @@ class Watcher:
                     return True
         return False
 
-    def add(self, d: Path) -> None:
+    def add(self, d: Path, again: bool = False) -> None:
+        """Watch ``d`` (and, recursive, what it holds). ``again`` walks the directories already
+        watched too, for what was made in them while the news was lost."""
         if not d.is_dir() or self._skipped(d):
             return
         wd = _lib().inotify_add_watch(self.fd, os.fsencode(d), MASK) if self.native else -1
         if wd >= 0:
             self.dirs[wd] = d
+        elif self.native and ctypes.get_errno() in (errno.EACCES, errno.ENOENT, errno.ENOTDIR):
+            return  # unreadable or gone: nothing to look at either (only the watch limit polls)
         elif d not in self.polled:
             self.polled[d] = _scan(d)
         if self.recursive:
-            for sub in d.iterdir():
-                if sub.is_dir() and not self._skipped(sub) and sub not in self.dirs.values() \
-                        and sub not in self.polled:
-                    self.add(sub)
+            # a directory that can't be read (mode 000, removed mid-scan) is left out: it killed
+            # wb events at every respawn (#439). A link is never followed: a task's --sibling
+            # link took the watches into the sibling's whole tree (#439, Codex's 17)
+            try:
+                subs = [sub for sub in d.iterdir() if sub.is_dir() and not sub.is_symlink()]
+            except OSError:  # gone or unreadable since: its IN_IGNORED says so
+                return
+            for sub in subs:
+                if not self._skipped(sub) and (
+                        again or sub not in self.dirs.values() and sub not in self.polled):
+                    self.add(sub, again)
 
     def _poll(self) -> list[Path]:
         """What changed in the polled directories since they were last looked at."""
@@ -136,6 +148,12 @@ class Watcher:
                 name = buf[i + _EVENT.size:i + _EVENT.size + size].rstrip(b"\0")
                 i += _EVENT.size + size
                 if mask & IN_Q_OVERFLOW:  # events were lost: every directory may have changed
+                    # and, recursive, the directories made meanwhile are found by walking: a task
+                    # made in the burst was never watched, seen only by the mod's 30 s safety
+                    # poll (#472, the audit of 1.8)
+                    if self.recursive:
+                        for root in self.roots:
+                            self.add(root, again=True)
                     changed += list(self.dirs.values())
                     continue
                 if mask & IN_IGNORED:  # the directory went away (deleted, moved, unmounted)

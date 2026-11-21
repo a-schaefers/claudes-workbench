@@ -123,12 +123,15 @@ run it as a backlog. Each task still gets the same review it would by day.
   Bundle trivial items into one task. When the user names GitHub issues, read each one (`gh issue
   view`) and spec from it.
 - Start each with `wb start … --queue --backlog <name>`. They take the GPU in the order you
-  started them, and a task you send back goes ahead of the rest.
+  started them, and a task you send back goes ahead of the rest. Their setups and base checks
+  run one at a time, in the same order.
 - Review each wake as usual: accept, feedback, or discard. Accept without `--merge`: nothing
   reaches the user's branches unattended. Leave a hard call for the morning (`wb note`) rather
   than guessing.
 - The user stays away while a backlog task of this session's is open, so permission prompts
   keep going to the web chat (*The web chat*).
+- Each task keeps the machine from idle-sleeping while it runs (macOS, Linux). On WSL2 nothing
+  can: when `wb start` says so, tell the user to set Windows' sleep to Never for the night.
 - When the batch is done, run `wb backlog <name>` and post it with `wb chat reply`: each task's
   outcome and branch, and the batch's saving. That is the morning summary.
 
@@ -137,8 +140,8 @@ Rounds of a task continue one OpenCode session, so the agent keeps what it read.
 When that session passes its handover point (60% of the window until `wb tune` learns better
 for that model; less on windows under ~32K, and a model served under 16K can't take tasks), the runner hands the task to a fresh session
 at once, mid-round if need be: the task, the work so far (the diff), the agent's last words and
-the new instructions. A round that hands over 5 times is stopped as stuck (the step is too big for
-the window: split it), and from the second handover each one is a check-in. OpenCode's own compaction (the model summarising itself, which can lose the
+the new instructions. The fourth handover in a round is a check-in, and past the fifth the round is
+stopped as stuck (the step is too big for the window: split it). OpenCode's own compaction (the model summarising itself, which can lose the
 task) is only a backstop past that. Reports show `agent context: …` so you see it coming. A
 check-in or report that says `NOTE: the spec doesn't name …` lists files outside the spec: drift
 until you've looked, so read them and steer (`--now`) if the agent left its task. `NOTE: <dir>: a

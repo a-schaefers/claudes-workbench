@@ -21,7 +21,7 @@ def step(task: store.Task, landed: bool, since: str = "HEAD") -> dict:
         size = {}
     evs = [e for e in store.read_jsonl(task.dir / "events.jsonl")[0] if (e.get("round") or 0) >= first]
     stuck = any(r.get("task") == task.name and r.get("kind") in ("stuck", "failed")
-                and (r.get("round") or 0) >= first
+                and (r.get("round") or 0) >= first and not _not_the_step(r)
                 for r in store.notices())
     from .runner import context_state  # the runner imports what this module does
     try:
@@ -36,6 +36,28 @@ def step(task: store.Task, landed: bool, since: str = "HEAD") -> dict:
             "read_full": any(e.get("kind") == "reading_full" for e in evs),  # before any change
             "reviews": reviews, "spec_rounds": min(len(gaps), reviews),
             "stuck": stuck, "took_over": any(e.get("kind") == "takeover" for e in evs)}
+
+
+# Notices that end a round for reasons outside the step: a shutdown's, a logout's or a kill's
+# SIGTERM (runner.SIGNAL_STOP), and a runner that died (cli.reap: killed, out of memory, a reboot).
+# Counted as stuck, a laptop shut down mid-step shrank the model's slice for good (#582, the audit
+# of 1.90). Notices from before `cause` was written are known by their text.
+NOT_THE_STEP = ("signal", "died")
+_NOT_THE_STEP_TEXT = ("the runner was stopped by a signal", "the runner died without a report")
+
+
+def _not_the_step(notice: dict) -> bool:
+    if "cause" in notice:
+        return notice["cause"] in NOT_THE_STEP
+    return any(t in str(notice.get("text") or "") for t in _NOT_THE_STEP_TEXT)
+
+
+def ran(task: store.Task) -> bool:
+    """Whether the task's agent ever got a request to its model: a session began (OpenCode's first
+    event names it) or a token was written. A task that failed on its setup or its model's load
+    never did, and discarded, it counted against the model as rejected work (#581)."""
+    st = task.status
+    return bool(st.get("session") or st.get("sessions") or st.get("tok_out"))
 
 
 def record(task: store.Task, outcome: str, last_step: dict | None = None, **extra) -> dict:
@@ -54,6 +76,8 @@ def record(task: store.Task, outcome: str, last_step: dict | None = None, **extr
            "tests_ok": (st.get("tests") or {}).get("ok"),
            "minutes": round((store.now() - spec.get("created_at", store.now())) / 60, 1),
            "tok_in": st.get("tok_in", 0), "tok_out": st.get("tok_out", 0),
+           "ran": (went := ran(task)),
+           **({"failed_before": st["failed_before"]} if not went and st.get("failed_before") else {}),
            "skills_offered": st.get("skills_ever") or [], "skills_loaded": skills.loaded(task),
            "skills_rev": st.get("skills_rev") or {},  # the version handed: judges each edit
            "steps": steps,
@@ -90,21 +114,24 @@ def for_stats(task: store.Task) -> dict:
     speeds = {k: round(median(v), 2) for k, v in (st.get("speeds") or {}).items() if v}
     keep = {"started_at": spec.get("created_at"), "load_secs": st.get("load_secs"),
             "setup_secs": st.get("setup_secs"), "nudges": st.get("nudges"),
-            "asks": _asks(st.get("asks") or {}) or None, "guards": st.get("guards"),
+            "asks": _asks(st.get("asks") or {}, st.get("answered") or []) or None, "guards": st.get("guards"),
             "speed": speeds or None,
             "gpu_w": {"mean": round(st["gpu_w_sum"] / st["gpu_w_n"], 1),
                       "peak": round(st.get("gpu_w_peak") or 0, 1)} if st.get("gpu_w_n") else None}
     return {k: v for k, v in keep.items() if v is not None}
 
 
-def _asks(asks: dict) -> dict:
+def _asks(asks: dict, answered: list | None = None) -> dict:
     """The ask_reviewer calls by kind (status `asks`: "q" a question, "p" a command or path
-    request, "x" one refused), the kinds with none left out."""
+    request, "x" one refused), and the questions `wb answer` answered (status `answered`; one
+    timed out or outliving its round got NO_ANSWER, which isn't one, #562); none left out."""
     names = {"q": "questions", "p": "permissions", "x": "refused"}
     out = {}
     for kind in asks.values():
         if kind in names:
             out[names[kind]] = out.get(names[kind], 0) + 1
+    if n := sum(1 for q in set(answered or []) if asks.get(q) == "q"):
+        out["answered"] = n
     return out
 
 

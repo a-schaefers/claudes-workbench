@@ -85,9 +85,10 @@ def price() -> float | None:
     return p
 
 
-def set_price(kwh_price: float) -> None:
+def set_price(kwh_price: float | None) -> None:
     """Set "kwh_price" in the file price() reads (creating its directory), its other keys kept:
-    under its lock and through a link, keeping its mode (#495)."""
+    under its lock and through a link, keeping its mode (#495). None removes it: a price once
+    set could only be cleared by editing the file (#609)."""
     def read():
         try:
             data = json.loads(_path().read_text())
@@ -95,7 +96,10 @@ def set_price(kwh_price: float) -> None:
             return {}
         return data if isinstance(data, dict) else {}
     with store.edit_config(_path(), read) as data:
-        data["kwh_price"] = kwh_price
+        if kwh_price is None:
+            data.pop("kwh_price", None)
+        else:
+            data["kwh_price"] = kwh_price
 
 
 def totals(rows: list[dict], since: float = 0) -> dict:
@@ -238,7 +242,8 @@ def summary(t: dict, period: str) -> str:
     saved = (f"saved ~{k(t['saved'])}" if t["saved"] >= 0 else f"cost ~{k(-t['saved'])} more")
     pct = f" ({100 * t['saved'] / t['self_est']:.0f}%)" if t["self_est"] > 0 else ""
     gpu = f" · GPU {energy(t['wh'])}" if t["wh"] else ""
-    cost = f" (${t['cost']:.2f})" if gpu and t["cost"] is not None else ""
+    # no currency sign: the price is the user's, in whatever they pay in (a `$` was hard-coded, #609)
+    cost = f", cost {t['cost']:.2f}" if gpu and t["cost"] is not None else ""
     away = (f" · {t['remote']} on another machine's GPU, not measured" if t.get("remote") else "")
     s = score(t)
     return (f"{when}: {t['tasks']} task(s) · claude {k(t['claude'])} · writing it yourself "

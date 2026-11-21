@@ -8,6 +8,8 @@ def median(xs: list[float]) -> float:
 - The middle value of `xs` once sorted; for an even count, the mean of the two middle values.
 - An empty list raises `ValueError("median of no values")`, as `mean` does.
 - `xs` itself is left unchanged (sort a copy).
+- Keep the module's `from __future__ import annotations`: with it, `list[float]` runs on Python
+  3.7 and 3.8 too.
 
 Add tests for it to `tests/test_stats.py` beside the ones for `mean`: an odd count, an even count,
 an unsorted list, and an empty one.

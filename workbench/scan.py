@@ -181,9 +181,16 @@ def scan(path: Path) -> list[dict]:
                 out.append(finding("symlink_escape", "critical", rel, 0, f"-> {target}",
                                    "a symlink out of the skill"))
                 continue
+            # a link to nothing, or to the directory it is in or one above, is refused: the copy
+            # follows links, failed on the first and recursed into self/self/... on the second,
+            # leaving a half-copied skill in the library (#604, Claude's audit of 1.90)
             if not target.exists():
-                out.append(finding("symlink_dangling", "high", rel, 0, f"-> {target}",
-                                   "a symlink to nothing"))
+                out.append(finding("symlink_dangling", "critical", rel, 0, f"-> {target}",
+                                   "a symlink to nothing: the copy can't follow it"))
+                continue
+            if target.is_dir() and p.parent.resolve().is_relative_to(target):
+                out.append(finding("symlink_loop", "critical", rel, 0, f"-> {target}",
+                                   "a symlink to a directory holding it: the copy never ends"))
                 continue
             if target.is_dir():
                 continue  # its files are scanned under their own names

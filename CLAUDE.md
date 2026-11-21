@@ -175,7 +175,7 @@ Runs on Linux, WSL2 and macOS; the launchers refuse native Windows and Python be
    or compacted is replaced. OpenCode's own compaction is set just past it, as a backstop.
 5. The runner writes the round report and a `review`/`stuck`/`failed` notice and exits; nothing
    the agent or the tests started outlives a round (`runner.sweep`). A runner that died without a
-   word is failed by `cli.reap` (status, wait, events and the acting commands call it).
+   word is failed by `cli.reap` (status, wait, events, top and the acting commands).
    `ask_reviewer` writes a question at any time and blocks until `wb answer` or `wb allow`; the
    runner checks it and raises the `question` (nothing the agent writes is trusted outside it).
 6. The mod (or `wb wait`) delivers each notice once, while still true, in the session the task

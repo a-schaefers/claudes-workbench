@@ -1,5 +1,5 @@
 import { expect, mock, test } from 'claude-code/testing'
-import { awayNow, cardName, delegates, liveLines, priceOf, savedLine, spark, statsLines, wrapWords } from './register.js'
+import { awayNow, cardName, delegates, liveLines, parsePrice, priceOf, savedLine, spark, statsLines, wrapWords } from './register.js'
 
 const PANE = {
   plugin: 'workbench',
@@ -365,6 +365,41 @@ test('a new Claude Code process in the project adopts the tasks of one that is g
   await clock.advance(6000)
   expect(kills.filter(p => p === '4242')).toHaveLength(1)      // gone is final: asked once
   expect(kills.length - asked).toBeLessThanOrEqual(1)          // a live one, not at every poll
+})
+
+test('a task whose Claude Code process\'s pid now belongs to another process is adopted all the same', async ($, on) => {
+  // #532: the crashed session's pid was live again under another program, and `kill -0` alone
+  // said the old session still ran: the new `claude` in the project never adopted its tasks
+  const clock = mock.clock(on, { now: 1_800_000_000_000 })
+  const files: Record<string, string> = {}
+  task(files, 'recycled', 'review', { repo: '/home/u/a', cwd: '/home/u/a', session: 'sess-old',
+    claude_pid: 4242, claude_start: '1000' })
+  task(files, 'same', 'review', { repo: '/home/u/a', cwd: '/home/u/a', session: 'sess-other',
+    claude_pid: 4343, claude_start: '2000' })
+  task(files, 'macos', 'review', { repo: '/home/u/a', cwd: '/home/u/a', session: 'sess-mac',
+    claude_pid: 4444, claude_start: 'Thu Nov 20 09:00:00 2026' })
+  const names = ['recycled', 'same', 'macos']
+  for (const name of names) notice(files, { ts: ts0, task: name, kind: 'review', text: `REPORT-${name}` })
+  fakeTasks(on, files, names)
+  // a stat line whose 22nd field is the start: the comm may hold spaces and parentheses
+  const stat = (start: string) => `9 (we (ird) x) S 1 ${'0 '.repeat(17)}${start} 0 0`
+  files['/proc/4242/stat'] = stat('5000')                     // started after the task's process
+  files['/proc/4343/stat'] = stat('2000')                     // the very process
+  on('session.id', () => ({ value: 'sess-new' }))
+  on('process.run', (_: any, e: any) => {
+    if (e.argv.includes('lstart=')) {                          // no /proc for 4444: ps says
+      return { value: { exitCode: 0, stdout: ' Fri Nov 21  10:00:00 2026\n', stderr: '' } }
+    }
+    return { value: { exitCode: 0, stdout: '', stderr: '' } }  // kill -0: every pid is live
+  })
+  on('ui.toast', () => ({ value: undefined }))
+  const woken: string[] = []
+  on('prompt.submit', (_: any, e: any) => { woken.push(e.text); return { text: e.text } })
+  await $.session.start({ cwd: '/home/u/a', surface: 'terminal', isInteractive: true })
+  await clock.advance(3000)
+  expect(woken.filter(t => t.includes('REPORT-recycled'))).toHaveLength(1)  // the pid lives, not its process
+  expect(woken.filter(t => t.includes('REPORT-macos'))).toHaveLength(1)     // ps's start differs too
+  expect(woken.join('\n')).not.toContain('REPORT-same')                    // the same process: still its own
 })
 
 test('on a file system that ignores case, a task under ~/Repos is a session in ~/repos\'s', async ($, on) => {
@@ -1122,14 +1157,21 @@ test('the web chat reaches Claude only in /workbench mode, with a receipt, and o
   await clock.advance(2000)
   expect(asked.length).toBe(1)
 
+  // #532: its pid is live, but under a process that started after the claim: nobody listens there
+  files['/proc/777/stat'] = `777 (sleep) S 1 ${'0 '.repeat(17)}5000 0 0`
+  files['/wb/chat/listener.json'] = JSON.stringify({ session: 'other', cwd: '/x', pid: 777, start: '1000' })
+  await clock.advance(31_000)
+  expect(asked.at(-1)).toBe('[web chat] hi')                     // this session took the chat
+
   // /workbench-quit ends workbench mode, and with it the listening
   await $.command.run({ command: 'workbench-quit', args: '' })
   await clock.advance(20_000)
-  expect(asked.length).toBe(1)
+  expect(asked.length).toBe(2)
 })
 
-test('a web message wb holds open is delivered past the files tails, and an old one is named', async ($, on) => {
-  // #329: an unread message behind 4 MiB of replies fell out of the tail the mod read
+test('a web message wb holds open is delivered past the files tails, and one wb calls expired is named once', async ($, on) => {
+  // #329: an unread message behind 4 MiB of replies fell out of the tail the mod read. #536: the
+  // expiry is wb's (wb chat claim refuses it), the one the page shows, not the mod's own clock
   const clock = mock.clock(on, { now: 1_800_000_000_000 })
   const files: Record<string, string> = {}
   fakeTasks(on, files, [])
@@ -1138,7 +1180,15 @@ test('a web message wb holds open is delivered past the files tails, and an old 
   on('ui.toast', (_: any, e: any) => { toasts.push(String(e.text ?? e.message ?? JSON.stringify(e))); return { value: undefined } })
   on('session.cwd', () => ({ value: '/home/u/project' }))
   on('skill.prompt', (_: any, e: any) => ({ text: e.text }))
-  on('process.run', () => ({ value: { exitCode: 0, stdout: 'no open tasks', stderr: '' } }))
+  const claims: string[] = []
+  on('process.run', (_: any, e: any) => {
+    if (e.argv[1] === 'chat' && e.argv[2] === 'claim') {
+      claims.push(e.argv[3])
+      if (e.argv[3] === 'm0') return { value: { exitCode: 1, stdout: '', stderr:
+        'wb: m0 expired: over 6 hours unread, so not passed to Claude; the page offers to send it again\n' } }
+    }
+    return { value: { exitCode: 0, stdout: 'no open tasks', stderr: '' } }
+  })
   const asked: string[] = []
   on('prompt.submit', (_: any, e: any) => {
     asked.push(e.text)
@@ -1152,9 +1202,10 @@ test('a web message wb holds open is delivered past the files tails, and an old 
   await $.skill.prompt({ skill: 'workbench', text: 'x', frontmatter: {}, source: 'userSettings' })
   await clock.advance(3000)
   expect(asked).toEqual(['[web chat] are you there?'])              // only in wb's index: delivered
-  expect(toasts.filter(t => t.includes('wb chat pending')).length).toBe(1)  // the old one, named once
+  const named = () => toasts.filter(t => t.includes('a web chat message expired: over 6 hours unread')).length
+  expect(named()).toBe(1)                                           // the old one, named once
   await clock.advance(3000)
-  expect(toasts.filter(t => t.includes('wb chat pending')).length).toBe(1)
+  expect([named(), claims.filter(c => c === 'm0').length, asked.length]).toEqual([1, 1, 1])  // and not asked again
 })
 
 test('a web message another session claimed first is not submitted here', async ($, on) => {
@@ -1218,8 +1269,9 @@ test('a permission prompt while the user is away goes to the web chat, and their
   files['/wb/chat/messages.jsonl'] = JSON.stringify({ id: 'm1', ts: 1_800_000_003, from: 'user', text: 'hi' }) + '\n'
   await clock.advance(3000)                                     // a web message: the user is away
   expect((await ask('Bash', { command: 'git push origin main', description: 'Push the fix' })).decision).toEqual({ behavior: 'allow' })
-  expect(runs.find(a => a[2] === 'ask')).toEqual(['wb', 'chat', 'ask', '--tool', 'Bash', '--kind', 'permission', '--text',
-    'git push origin main', '--detail', '{"purpose":"Push the fix"}'])  // the card leads with it (#103)
+  expect(runs.find(a => a[2] === 'ask')).toEqual(['wb', 'chat', 'ask', '--tool=Bash', '--kind=permission',
+    '--text=git push origin main', '--pid=4242', '--detail={"purpose":"Push the fix"}'])  // the card leads with it (#103);
+  // the pid is this session's `wb events`: once it's gone wb expires the ask (#538)
   expect(runs.find(a => a[2] === 'wait')?.slice(0, 4)).toEqual(['wb', 'chat', 'wait', 'ask-1-ab'])
   expect(toasts.some(t => t.includes('waiting for you in the web chat'))).toBe(true)
 
@@ -1228,12 +1280,12 @@ test('a permission prompt while the user is away goes to the web chat, and their
   expect(no.behavior).toBe('deny')
   expect(no.message).toContain('wb chat reply')                  // Claude asks the user what instead
   expect(no.message).toContain('not on main')                    // with their words
-  expect(runs.filter(a => a[2] === 'ask').at(-1)?.at(-1)).toBe('/etc/hosts')
+  expect(runs.filter(a => a[2] === 'ask').at(-1)).toContain('--text=/etc/hosts')
 
   // a finished plan: approved, or sent back with a note
   said = { answer: 'allow' }
   expect((await ask('ExitPlanMode', {})).decision).toEqual({ behavior: 'allow' })
-  expect(runs.filter(a => a[2] === 'ask').at(-1)?.slice(3, 7)).toEqual(['--tool', 'ExitPlanMode', '--kind', 'plan'])
+  expect(runs.filter(a => a[2] === 'ask').at(-1)?.slice(3, 5)).toEqual(['--tool=ExitPlanMode', '--kind=plan'])
   said = { answer: 'deny', note: 'split step 2' }
   const back = (await ask('ExitPlanMode', {})).decision
   expect([back.behavior, back.message.includes('split step 2'), back.message.includes('Revise the plan')]).toEqual(['deny', true, true])
@@ -1242,7 +1294,7 @@ test('a permission prompt while the user is away goes to the web chat, and their
   said = { answer: 'allow' }
   await ask('ExitPlanMode', { planFilePath: '/home/u/.claude/plans/a-b-c.md' })
   const plan = runs.filter(a => a[2] === 'ask').at(-1)!
-  expect(plan[plan.indexOf('--detail') + 1]).toBe('{"plan_file":"/home/u/.claude/plans/a-b-c.md"}')
+  expect(plan.find(a => a.startsWith('--detail='))).toBe('--detail={"plan_file":"/home/u/.claude/plans/a-b-c.md"}')
   expect(plan.slice(-2)).toEqual(['--repo', '/home/u/project'])     // whose plan it is
   posted = 'ask-3-ef expired'
   const waited = runs.filter(a => a[2] === 'wait').length
@@ -1255,7 +1307,7 @@ test('a permission prompt while the user is away goes to the web chat, and their
   said = { answer: 'allow', answers: { 'Which DB?': 'SQLite' } }
   const picked = (await ask('AskUserQuestion', { questions })).decision
   expect(picked).toEqual({ behavior: 'allow', updatedInput: { questions, answers: { 'Which DB?': 'SQLite' } } })
-  expect(JSON.parse(runs.filter(a => a[2] === 'ask').at(-1)!.at(-1)!)).toEqual({ questions })
+  expect(JSON.parse(runs.filter(a => a[2] === 'ask').at(-1)!.at(-1)!.slice('--detail='.length))).toEqual({ questions })
 
   // their setting says go ahead while away: allowed at once, no wait, no toast
   posted = 'ask-2-cd allow'
@@ -1273,6 +1325,53 @@ test('a permission prompt while the user is away goes to the web chat, and their
   said = { answer: 'allow' }
   expect((await ask('Bash', { command: 'git push' })).decision).toBeUndefined()
   expect(runs.slice(n).some(a => a[2] === 'ask')).toBe(false)
+})
+
+test('a dialog wb chat ask refuses is announced on the phone, and a long plan or preview is cut to fit', async ($, on) => {
+  // #535 (the 2026-11-20 audit): a long or CJK plan was refused, and the dialog sat in the
+  // terminal with nothing posted and nothing said
+  const clock = mock.clock(on, { now: 1_800_000_000_000 })
+  const files: Record<string, string> = {}
+  fakeTasks(on, files, [])
+  chatOn(files)
+  const toasts: string[] = []
+  on('ui.toast', (_: any, e: any) => { toasts.push(e.text); return { value: undefined } })
+  on('session.cwd', () => ({ value: '/home/u/project' }))
+  on('skill.prompt', (_: any, e: any) => ({ text: e.text }))
+  on('prompt.submit', (_: any, e: any) => ({ text: e.text }))
+  let refuse = true
+  const runs: string[][] = []
+  on('process.run', (_: any, e: any) => {
+    runs.push(e.argv)
+    const [, cmd, act] = e.argv
+    if (cmd === 'chat' && act === 'ask') return { value: refuse
+      ? { exitCode: 1, stdout: '', stderr: 'wb: wb chat ask: detail too long\n' }
+      : { exitCode: 0, stdout: 'ask-1-ab open\n', stderr: '' } }
+    if (cmd === 'chat' && act === 'wait') return { value: { exitCode: 0, stdout: JSON.stringify({ answer: 'deny' }), stderr: '' } }
+    return { value: { exitCode: 0, stdout: 'no open tasks', stderr: '' } }
+  })
+  on('classic.PermissionRequest', () => ({}))
+  const ask = (tool_name: string, tool_input: unknown) =>
+    $.classic.PermissionRequest({ tool_name, tool_input } as any) as Promise<any>
+  await $.session.start({ cwd: '/home/u/project', surface: 'terminal', isInteractive: true })
+  await $.skill.prompt({ skill: 'workbench', text: 'x', frontmatter: {}, source: 'userSettings' })
+  files['/wb/chat/messages.jsonl'] = JSON.stringify({ id: 'm1', ts: 1_800_000_003, from: 'user', text: 'hi' }) + '\n'
+  await clock.advance(3000)                                     // a web message: the user is away
+  const plan = '計画'.repeat(30_000)
+  expect((await ask('ExitPlanMode', { plan })).decision).toBeUndefined()  // refused: the dialog, here
+  const sent = runs.filter(a => a[2] === 'ask').at(-1)!
+  expect(JSON.parse(sent.find(a => a.startsWith('--detail='))!.slice(9)).plan).toBe(plan.slice(0, 40_001))
+  expect(runs.find(a => a[2] === 'reply')).toEqual(['wb', 'chat', 'reply',
+    "--text=Claude is waiting on a plan in the terminal: it couldn't be shown here."])
+  expect(toasts.some(t => t.includes("a plan couldn't go to the web chat (wb: wb chat ask: detail too long)"))).toBe(true)
+  refuse = false
+  const long = { label: 'A', description: '', preview: 'p'.repeat(5000) }
+  await ask('AskUserQuestion', { questions: [{ question: 'Which?', options: [long, { label: 'B' }] }] })
+  const q = JSON.parse(runs.filter(a => a[2] === 'ask').at(-1)!.at(-1)!.slice(9))
+  expect(q.questions[0].options[0].preview).toBe('p'.repeat(2000) + ' (cut: the rest is in the terminal)')
+  expect(q.questions[0].options[1]).toEqual({ label: 'B' })
+  await ask('Bash', { command: '--version' })                   // a value that starts with `-`
+  expect(runs.filter(a => a[2] === 'ask').at(-1)).toContain('--text=--version')
 })
 
 test('running wb counts as workbench mode, and a web message reaches a running turn', async ($, on) => {
@@ -1529,6 +1628,7 @@ test('the saving reads in thousands or millions, says when it cost more, and is 
   const t = (o: object) => JSON.stringify({ tasks: 1, claude: 50000, self_est: 80000, saved: 30000, wh: 0, ...o })
   expect(savedLine(t({}))).toBe('this week: saved ~30K Claude tokens (38%, estimate)')
   expect(savedLine(t({ wh: 1500 }))).toBe('this week: saved ~30K Claude tokens (38%, estimate) · 1.5 kWh')
+  expect(savedLine(t({ wh: 1500, cost: 0.45 }))).toBe('this week: saved ~30K Claude tokens (38%, estimate) · 1.5 kWh, cost 0.45')
   expect(savedLine(t({ saved: -4000 }))).toBe('this week: cost ~4K more Claude tokens (estimate)')
   expect(savedLine(t({ tasks: 0 }))).toBe('')
   expect(savedLine('usage: wb …')).toBe('')
@@ -1708,11 +1808,13 @@ test('the settings rows open to Buttons, pick through wb, and say the sentence o
 const FEED = {
   ts: 1_800_000_000, tasks: 9, settings: { recording: true, live: true, every: 2 },
   periods: {
-    week: { tasks: 4, landed: 3, accepted_pct: 75, savings: { saved: 1_230_000, wh: 900, cost: null }, score: { score: 62 } },
+    week: { tasks: 4, landed: 3, accepted_pct: 75, savings: { saved: 1_230_000, wh: 600, cost: null }, score: { score: 62 },
+      energy: { wh: 900 } },
     all: { tasks: 9, landed: 8, accepted_pct: 89 },
   },
   streak: { current: 0, best: 3, days: 5 },
-  absorbed: { auto_fixes: 7, auto_fixed_tasks: 3, questions: 2 },
+  absorbed: { auto_fixes: 7, auto_fixed_tasks: 3 },
+  questions: { asked: 2, answered: 1 },
   models: { 'ollama/m': { tasks: 9, accepted_pct: 89, rounds: 1.4, minutes: 14, speed: { write: 38 },
     write_trend: [[1, 30], [2, 40]], write_change_pct: 12 } },
   days: [{ day: '2026-11-19', tasks: 0 }, { day: '2026-11-20', tasks: 2 }],
@@ -1758,6 +1860,91 @@ test('the Stats tab draws the history, read from wb stats only while it is shown
   await ui.unmount()
 })
 
+test('the Stats tab reads the history again once its day has ended, with nothing on disk changed', async ($, on) => {
+  // #575: an ended streak, last week's "This week" and a 30-day chart ending days ago stayed until
+  // a task closed: the feed says when its day ends (until), and a load reads it once anyway
+  const clock = mock.clock(on, { now: 1_800_000_000_000 })
+  const files: Record<string, string> = { '/wb/results.jsonl': '{}\n' }
+  const pane = fakeTasks(on, files, [])
+  const reads: string[][] = []
+  on('process.run', (_: any, e: any) => {
+    if (e.argv[1] === 'stats' && e.argv[2] === '--json') {
+      reads.push(e.argv)
+      return { value: { exitCode: 0, stdout: JSON.stringify({ ...FEED, until: clock.now() / 1000 + 60 }), stderr: '' } }
+    }
+    return { value: { exitCode: 0, stdout: '', stderr: '' } }
+  })
+  await $.session.start({ cwd: '/', surface: 'terminal', isInteractive: true })
+  pane.show(true)
+  const ui = await $.ui.mount({ ...PANE, surface: 'terminal', props: { ...PANE.props, bodyColumns: 200 } })
+  await ui.press({ key: 'tab-stats' })
+  await clock.advance(10)
+  expect(reads.length).toBe(1)
+  await clock.advance(31_000)
+  expect(reads.length).toBe(1)                                           // the same day: not read again
+  await clock.advance(62_000)
+  expect(reads.length).toBe(2)                                           // past midnight: read again
+  await ui.press({ key: 'tab-tasks' })
+  await ui.unmount()
+})
+
+test('a load reads the history once even when the feed an earlier load kept still matches the files', async ($, on) => {
+  // #575: the stats atom, key included, survives /reload-plugins, so a reload never re-read it
+  const clock = mock.clock(on, { now: 1_800_000_000_000 })
+  const files: Record<string, string> = { '/wb/results.jsonl': '{}\n' }
+  const pane = fakeTasks(on, files, [])
+  const kept = { key: `${files['/wb/results.jsonl'].length}@0 - - - - -`, feed: { ...FEED, until: 1_900_000_000 } }
+  on('state.get', (_: any, e: any, next: any) => e.key === 'stats' && e.plugin === 'workbench'
+    ? { value: { value: { shape: 'stats-1', value: kept }, version: 1 } } : next(e))
+  const reads: string[][] = []
+  on('process.run', (_: any, e: any) => {
+    if (e.argv[1] === 'stats' && e.argv[2] === '--json') reads.push(e.argv)
+    return { value: { exitCode: 0, stdout: e.argv[1] === 'stats' ? JSON.stringify(FEED) : '', stderr: '' } }
+  })
+  await $.session.start({ cwd: '/', surface: 'terminal', isInteractive: true })
+  pane.show(true)
+  const ui = await $.ui.mount({ ...PANE, surface: 'terminal', props: { ...PANE.props, bodyColumns: 200 } })
+  await ui.press({ key: 'tab-stats' })
+  await clock.advance(10)
+  expect(reads.length).toBe(1)
+  await ui.press({ key: 'tab-tasks' })
+  await ui.unmount()
+})
+
+test('the Stats tab reads the history again after wb optimize, a bench run, a price, and on its press', async ($, on) => {
+  // #549: the key stamped results.jsonl and stats.json alone, so the tab kept a feed without the
+  // optimized windows, the bench result or the new price until a task closed, pressed or not
+  const clock = mock.clock(on, { now: 1_800_000_000_000 })
+  const files: Record<string, string> = { '/wb/results.jsonl': '{}\n' }
+  const pane = fakeTasks(on, files, [])
+  const reads: string[][] = []
+  on('process.run', (_: any, e: any) => {
+    if (e.argv[1] === 'stats' && e.argv[2] === '--json') reads.push(e.argv)
+    return { value: { exitCode: 0, stdout: e.argv[1] === 'stats' ? JSON.stringify({ ...FEED, until: 1_900_000_000 }) : '', stderr: '' } }
+  })
+  await $.session.start({ cwd: '/', surface: 'terminal', isInteractive: true })
+  pane.show(true)
+  const ui = await $.ui.mount({ ...PANE, surface: 'terminal', props: { ...PANE.props, bodyColumns: 200 } })
+  await ui.press({ key: 'tab-stats' })
+  await clock.advance(10)
+  expect(reads.length).toBe(1)
+  await clock.advance(31_000)
+  expect(reads.length).toBe(1)                                           // nothing changed
+  const steps: [string, string][] = [['/wb/optimize.json', '{"models": {}}'], ['/wb/bench/runs.jsonl', '{}\n'],
+    ['/home/u/.config/workbench/savings.json', '{"kwh_price": 0.3}']]
+  for (const [i, [path, text]] of steps.entries()) {
+    files[path] = text
+    await clock.advance(31_000)
+    expect(reads.length).toBe(2 + i)
+  }
+  await ui.press({ key: 'tab-tasks' })
+  await ui.press({ key: 'tab-stats' })                                   // pressed: read, files unchanged
+  await clock.advance(10)
+  expect(reads.length).toBe(5)
+  await ui.press({ key: 'tab-tasks' })
+  await ui.unmount()
+})
+
 test('the Stats tab\'s settings pick through wb, progress checks stay off by default, and the price is typed', async ($, on) => {
   const clock = mock.clock(on, { now: 1_800_000_000_000 })
   const files: Record<string, string> = {}
@@ -1768,7 +1955,8 @@ test('the Stats tab\'s settings pick through wb, progress checks stay off by def
     if (e.argv[1] === 'stats' && e.argv[2] === 'set')
       files['/wb/stats.json'] = JSON.stringify({ [e.argv[3]]: e.argv[3] === 'every' ? Number(e.argv[4]) : e.argv[4] === 'on' })
     if (e.argv[1] === 'savings' && e.argv[2] === '--price')
-      return { value: { exitCode: 0, stdout: JSON.stringify({ tasks: 0, price: Number(e.argv[3]) }), stderr: '' } }
+      return { value: { exitCode: 0, stdout: JSON.stringify(e.argv[3] === 'off' ? { tasks: 0, price: null } :
+        { tasks: 1, claude: 50000, self_est: 80000, saved: 30000, wh: 1500, cost: 0.45, price: Number(e.argv[3]) }), stderr: '' } }
     return { value: { exitCode: 0, stdout: '', stderr: '' } }
   })
   await $.session.start({ cwd: '/', surface: 'terminal', isInteractive: true })
@@ -1794,6 +1982,16 @@ test('the Stats tab\'s settings pick through wb, progress checks stay off by def
   await ui.input({ key: 'price', text: '$0.30' })
   expect(runs.some(r => r.join(' ') === 'wb savings --price 0.3 --json')).toBe(true)
   expect((await ui.find({ key: 'price' }))?.props.value).toBe('0.3')
+  runs.length = 0
+  await ui.input({ key: 'price', text: '0,30' })                         // #609: a decimal comma
+  expect(runs.some(r => r.join(' ') === 'wb savings --price 0.3 --json')).toBe(true)
+  await ui.press({ key: 'tab-tasks' })                                  // the footer shows the cost
+  expect((await ui.findAll({ type: 'Text' })).some(t => String(t.text).includes('1.5 kWh, cost 0.45'))).toBe(true)
+  await ui.press({ key: 'tab-settings' })
+  runs.length = 0
+  await ui.input({ key: 'price', text: '' })                             // an empty submit clears it
+  expect(runs.some(r => r.join(' ') === 'wb savings --price off --json')).toBe(true)
+  expect((await ui.find({ key: 'price' }))?.props.value).toBe('')
   await ui.press({ key: 'tab-tasks' })
   await ui.unmount()
 })
@@ -1807,7 +2005,8 @@ const TICK = {
   queue: [{ task: 'later', model: 'ollama/n', waited_s: 30 }],
 }
 
-test('the live view runs wb top only while the Stats tab is on screen with Live view on, and ends it when left', async ($, on) => {
+test('the live view runs wb top only while the Stats tab is on screen with Live view on, and ends it when left', { timeoutMs: 20_000 }, async ($, on) => {
+  // the kit's 5 s default timed it out on a loaded machine (#546)
   // #408: hidden, minimized, another tab or Live view off: no child at all
   const clock = mock.clock(on, { now: 1_800_000_000_000 })
   const files: Record<string, string> = { '/wb/results.jsonl': '' }
@@ -1857,6 +2056,169 @@ test('the live view runs wb top only while the Stats tab is on screen with Live 
   await ui.unmount()
 })
 
+test('a failing wb stats or wb top is tried again after a while, not at every poll, and says why', async ($, on) => {
+  // #553: a failed full-history read ran again at every 1.5 s poll while a task ran, and the tab
+  // said "Reading…" forever; a wb top that ended at once was restarted every 30 s, its stderr dropped
+  const clock = mock.clock(on, { now: 1_800_000_000_000 })
+  const files: Record<string, string> = { '/wb/results.jsonl': '{}\n' }
+  task(files, 'fix-it', 'running')                                        // polls every 1.5 s
+  const pane = fakeTasks(on, files, ['fix-it'], true, [], false)
+  let stats = 0, tops = 0
+  on('process.run', (_: any, e: any) => {
+    if (e.argv[1] === 'stats' && e.argv[2] === '--json') {
+      stats += 1
+      return { value: { exitCode: 1, stdout: '', stderr: 'Traceback (most recent call last):\nValueError: a bad row\n' } }
+    }
+    return { value: { exitCode: 0, stdout: '', stderr: '' } }
+  })
+  on('process.spawn', async function* (_: any, e: any) {
+    if (e.argv[1] !== 'top') {                                           // wb events, as fakeTasks's
+      yield { stream: 'stdout', text: '{"hello": 4242}\n' }
+      await new Promise(() => {})
+    }
+    tops += 1
+    yield { stream: 'stderr', text: "wb: invalid choice: 'top'\n" }        // an older wb on PATH
+    return { value: { code: 2, signal: null } }
+  })
+  await $.session.start({ cwd: '/', surface: 'terminal', isInteractive: true })
+  pane.show(true)
+  const ui = await $.ui.mount({ ...PANE, surface: 'terminal', props: { ...PANE.props, bodyColumns: 200 } })
+  await ui.press({ key: 'tab-stats' })
+  await clock.advance(29_000)
+  expect(stats).toBe(1)                                                   // not twenty
+  let texts = (await ui.findAll({ type: 'Text' })).map(t => t.text)
+  expect(texts).toContain('History unavailable: ValueError: a bad row (wb stats --json)')
+  expect(tops).toBe(1)
+  expect(texts.some(t => t.includes("can't be read"))).toBe(false)        // once may be a blip
+  await clock.advance(2_000)
+  expect(tops).toBe(2)
+  texts = (await ui.findAll({ type: 'Text' })).map(t => t.text)
+  expect(texts).toContain("This machine can't be read: wb: invalid choice: 'top' (wb top --json)")
+  await clock.advance(30_000)                                             // 61 s in
+  expect(tops).toBe(2)                                                    // its wait doubled
+  expect(stats).toBe(2)                                                   // 60 s after the first
+  await clock.advance(117_000)
+  expect(stats).toBe(2)                                                   // and then 120 s
+  await clock.advance(3_000)
+  expect(stats).toBe(3)
+  await ui.press({ key: 'tab-tasks' })
+  await ui.unmount()
+})
+
+test('the history keeps its last feed when a read fails, and says it is not updated', () => {
+  expect(statsLines(null, 'timed out')).toEqual([{ label: '', text: 'History unavailable: timed out (wb stats --json)' }])
+  expect(statsLines({ tasks: 1, periods: { week: { tasks: 1, landed: 1 } } }, 'timed out'))
+    .toEqual([{ label: '', text: 'Not updated: timed out (wb stats --json)' }, { label: 'This week', text: '1 task · 1 landed' }])
+})
+
+test('a poll and tab presses at once start one wb top, and leaving ends every one started (#546)', { timeoutMs: 20_000 }, async ($, on) => {
+  // two syncTops at once both saw no child across the clock's await and both spawned; only the
+  // second was ended by a close, the first ran on beside the next one, and both fed the sparkline
+  const clock = mock.clock(on, { now: 1_800_000_000_000 })
+  const files: Record<string, string> = { '/wb/results.jsonl': '' }
+  const pane = fakeTasks(on, files, [], true, [], false)
+  let starts = 0, ends = 0, most = 0
+  on('process.spawn', async function* (_: any, e: any) {
+    if (e.argv[1] !== 'top') {
+      yield { stream: 'stdout', text: '{"hello": 4242}\n' }
+      await new Promise(() => {})
+    }
+    starts += 1
+    most = Math.max(most, starts - ends)
+    const stall = starts === 2                                           // the second is slow to print
+    try {
+      for (;;) {
+        yield { stream: 'stdout', text: JSON.stringify(TICK) + '\n' }
+        await new Promise(r => setTimeout(r, stall ? 60 : 5))
+      }
+    } finally {
+      ends += 1
+    }
+  })
+  on('process.run', (_: any, e: any) => ({ value: { exitCode: 0, stdout: e.argv[1] === 'stats' ? JSON.stringify({ tasks: 0 }) : '', stderr: '' } }))
+  await $.session.start({ cwd: '/', surface: 'terminal', isInteractive: true })
+  pane.show(true)
+  await clock.advance(31_000)
+  const ui = await $.ui.mount({ ...PANE, surface: 'terminal', props: { ...PANE.props, bodyColumns: 200 } })
+  await Promise.all([ui.press({ key: 'tab-stats' }), ui.press({ key: 'tab-stats' }), clock.advance(31_000)])
+  await new Promise(r => setTimeout(r, 40))
+  expect(starts).toBe(1)
+  for (let i = 0; i < 3; i++) {                                          // away and back at once, over and over
+    await Promise.all([ui.press({ key: 'tab-tasks' }), ui.press({ key: 'tab-stats' })])
+    await Promise.all([ui.press({ key: 'tab-stats' }), clock.advance(31_000)])
+    await new Promise(r => setTimeout(r, 150))
+    expect(starts - ends).toBeLessThanOrEqual(1)                         // never one left running beside it
+  }
+  await ui.press({ key: 'tab-tasks' })
+  await new Promise(r => setTimeout(r, 150))
+  expect(starts - ends).toBe(0)                                          // each one started is ended
+  expect(most).toBeLessThanOrEqual(2)                                    // one ending as the next starts, no more
+  await ui.unmount()
+})
+
+test('a live view the engine put away starts again as soon as the pane is back, without its old tick (#552)', { timeoutMs: 20_000 }, async ($, on) => {
+  // its own loop's break was booked as a crash: no wb top for 30 s, and the last tick drawn as Now
+  const clock = mock.clock(on, { now: 1_800_000_000_000 })
+  const files: Record<string, string> = { '/wb/results.jsonl': '' }
+  const pane = fakeTasks(on, files, [], true, [], false)
+  let starts = 0, ends = 0
+  on('process.spawn', async function* (_: any, e: any) {
+    if (e.argv[1] !== 'top') {
+      yield { stream: 'stdout', text: '{"hello": 4242}\n' }
+      await new Promise(() => {})
+    }
+    starts += 1
+    const first = starts === 1
+    try {
+      if (!first) await new Promise(r => setTimeout(r, 100))           // later ones are slow to their first line
+      for (;;) {
+        yield { stream: 'stdout', text: JSON.stringify(first ? TICK : { ...TICK, running: [] }) + '\n' }
+        await new Promise(r => setTimeout(r, 5))
+      }
+    } finally {
+      ends += 1
+    }
+  })
+  on('skill.prompt', (_: any, e: any) => ({ text: e.text }))
+  on('process.run', (_: any, e: any) => ({ value: { exitCode: 0, stdout: e.argv[1] === 'stats' ? JSON.stringify({ tasks: 0 }) : '', stderr: '' } }))
+  await $.session.start({ cwd: '/', surface: 'terminal', isInteractive: true })
+  await $.skill.prompt({ skill: 'workbench', text: 'x', frontmatter: {}, source: 'userSettings' })  // workbench mode on
+  await clock.advance(31_000)
+  let ui = await $.ui.mount({ ...PANE, surface: 'terminal', props: { ...PANE.props, bodyColumns: 200 } })
+  await ui.press({ key: 'tab-stats' })
+  await new Promise(r => setTimeout(r, 30))
+  expect(starts).toBe(1)
+  const said = async () => (await ui.findAll({ type: 'Text' })).map(t => t.text)
+  expect((await said()).some(t => t.includes('fix-it Model M · running'))).toBe(true)
+  pane.show(false)                                                       // the engine puts it away
+  await new Promise(r => setTimeout(r, 30))
+  expect(ends).toBe(1)                                                   // ended within a tick
+  expect((await said()).some(t => t.includes('fix-it'))).toBe(false)      // and its tick forgotten
+  await ui.unmount()
+  await clock.advance(5_000)
+  pane.show(true)                                                        // and draws it again 5 s on
+  ui = await $.ui.mount({ ...PANE, surface: 'terminal', props: { ...PANE.props, bodyColumns: 200 } })
+  await clock.settle()
+  expect(starts).toBe(2)                                                 // at once, not 30 s later
+  expect((await said()).some(t => t.includes('fix-it'))).toBe(false)      // the old tick isn't Now
+  expect((await said())).toContain('Reading this machine…')
+  pane.show(false)
+  await new Promise(r => setTimeout(r, 150))
+  expect(ends).toBe(2)
+  await ui.unmount()
+  // /workbench again while in workbench mode (no poll of its own) brings the pane back, and the
+  // live view with it
+  await $.skill.prompt({ skill: 'workbench', text: 'x', frontmatter: {}, source: 'userSettings' })
+  await clock.settle()
+  expect(starts).toBe(3)
+  await new Promise(r => setTimeout(r, 30))
+  ui = await $.ui.mount({ ...PANE, surface: 'terminal', props: { ...PANE.props, bodyColumns: 200 } })
+  await ui.press({ key: 'tab-tasks' })
+  await new Promise(r => setTimeout(r, 150))
+  expect(ends).toBe(3)
+  await ui.unmount()
+})
+
 test('a card wb top knows but has no reading for says so, not nothing (#547)', () => {
   const text = (gpus: any[]) => liveLines({ snap: { ts: 0, every: 2, gpus, running: [], rack: [], queue: [] }, busy: {} } as any)
     .map(r => r.map(p => p.text).join(''))
@@ -1882,13 +2244,66 @@ test('a card is named by its product, never the vendor tag, as wb top names it (
 test('the history says nothing it has no data for, and a new install how to begin', () => {
   expect(statsLines(null)).toEqual([{ label: '', text: 'Reading the history…' }])
   expect(statsLines({ tasks: 0 })[0].text).toMatch(/^No finished tasks yet/)
+  // #549: optimized and benched before the first judged task, the tab said only the placeholder
+  const early = statsLines({ ts: 1, until: 2, settings: {}, tasks: 0,
+    optimized: { 'ollama/x': { window: 32768, fits: true } }, bench: { 'ollama/x': { run: 'r1', day: '2026-11-20', passed: 3, of: 4 } } })
+  expect(early).toEqual([{ label: 'Bench', text: 'ollama/x 3/4 (2026-11-20)' },
+    { label: 'Optimized', text: 'ollama/x 32K all on the GPU' }])
+  // #609: the energy's cost labelled as the footer and `wb savings` label it, no bare "(0.27)"
+  expect(statsLines({ tasks: 1, periods: { week: { tasks: 1, landed: 1, energy: { wh: 900, cost: 0.27 } } } })[0].text)
+    .toContain('900 Wh, cost 0.27')
   const lines = statsLines({ tasks: 1, periods: { week: { tasks: 1, landed: 1, accepted_pct: 100 } } })
   expect(lines).toEqual([{ label: 'This week', text: '1 task · 1 landed (100%)' }])   // no savings, no zeros
   expect(spark([0, 0])).toBe('')
   expect(spark([1, 4, 8])).toBe('▂▅█')
   expect(priceOf('{"price": 0.3}')).toBe(0.3)
+  // #609: a decimal comma and a currency sign or code before or after; empty clears; no hex
+  for (const typed of ['0,30', '€0.30', '0.30 EUR', '$0.3', ' 0.3 ', '0.30€', 'kr 0,3', '.3'])
+    expect(parsePrice(typed)).toBe(0.3)
+  expect(parsePrice('')).toBe('off')
+  for (const typed of ['0x10', '1e3', 'cheap', '0', '-0.3', '1,000.50', '0.3.1'])
+    expect(parsePrice(typed)).toBe(null)
   expect(priceOf('{"price": null}')).toBe(null)
   expect(priceOf('not json')).toBe(null)
+})
+
+test('the history claims no more fixed or answered than the feed confirms', () => {
+  // #562: two failed auto-fix rounds read "fixed by the agent", a timed-out question "answered"
+  const said = (f: any) => statsLines({ tasks: 1, ...f }).map(l => `${l.label}: ${l.text}`)
+  const lines = said({ absorbed: { auto_fixes: 2 }, questions: { asked: 1 } })
+  expect(lines).toContain('Without waking Claude: 2 test failures sent back to the agent')
+  expect(lines).toContain('Questions: 1 asked mid-task')
+  expect(lines.join('\n')).not.toMatch(/fixed|answered/)
+  expect(said({ absorbed: { auto_fixes: 3, auto_fixed_tasks: 1 }, questions: { asked: 3, answered: 1 } }))
+    .toEqual(['Without waking Claude: 3 test failures sent back to the agent (1 task then green)',
+      'Questions: 3 asked mid-task · 1 answered'])
+})
+
+test('a period says the spec-gap discards its saving counts beside its task count', () => {
+  // #569: "cost ~115K more Claude tokens · 0 tasks · 0 landed" for a period of one such discard
+  const lines = statsLines({ tasks: 0, periods: { week: { tasks: 0, landed: 0, spec_gaps: 1,
+    savings: { saved: -115_000, tasks: 1 } } } })
+  expect(lines[0]).toEqual({ label: 'This week',
+    text: 'cost ~115K more Claude tokens (estimate) · 0 tasks · 0 landed · and 1 discard put down to the spec' })
+})
+
+test('a period\'s energy is every task\'s, compared by the saving or not', () => {
+  // #568: three tasks used 287 Wh and the tab said 12, the one task the saving could compare
+  const week = (p: any) => statsLines({ tasks: 3, periods: { week: { tasks: 3, landed: 3, accepted_pct: 100, ...p } } })[0].text
+  expect(week({ savings: { saved: 5000, wh: 12, cost: 0 }, energy: { wh: 287, cost: 0.09 } }))
+    .toBe('saved ~5K Claude tokens (estimate) · 3 tasks · 3 landed (100%) · 287 Wh, cost 0.09')
+  expect(week({ energy: { wh: 1500 } })).toBe('3 tasks · 3 landed (100%) · 1.5 kWh')  // nothing compared
+})
+
+test('a bench run still going or cut short shows beside the last finished one, never in its place', () => {
+  // #570: the newest run's first graded case read "M 1/1" as the model's result
+  const bench = (b: any) => statsLines({ tasks: 1, bench: { M: b } }).find(l => l.label === 'Bench')?.text
+  expect(bench({ run: 'r1', day: '2026-11-18', passed: 8, of: 10,
+    partial: { run: 'r2', day: '2026-11-20', passed: 1, of: 1, planned: 10, running: true } }))
+    .toBe('M 8/10 (2026-11-18), newer run 1 of 10 so far, 1 passed')
+  expect(bench({ partial: { run: 'r2', day: '2026-11-20', passed: 0, of: 2, planned: 10, running: false } }))
+    .toBe('M newer run 2 of 10 before it stopped, 0 passed')
+  expect(bench({ run: 'r1', day: '2026-11-18', passed: 8, of: 10 })).toBe('M 8/10 (2026-11-18)')
 })
 
 test('a one-task exception shows beside its task and is under way from Claude\'s first edit', async ($, on) => {

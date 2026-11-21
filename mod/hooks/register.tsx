@@ -87,7 +87,7 @@ const OLDEST_WAKE_MS = 60 * 60 * 1000 // never wake for a notification older tha
 
 // Change the tag when WbTask's fields change: a reload declines what the earlier shape stored.
 const tasks = atom({ plugin: 'workbench', key: 'tasks' } as const, [] as WbTask[], {
-  shape: 'tasks-5',
+  shape: 'tasks-6',
 })
 
 // Every Claude Code session id this process has had (`$.session.id()`): /clear and a resume go on
@@ -136,7 +136,9 @@ const STRIP_HINT = 'minimized · restore: click, or Ctrl+X Tab then Enter'
 // Stats between them (#406): looked at more often than Settings
 const TABS: [string, string, string][] = [['tasks', 'Tasks', '1'], ['stats', 'Stats', '2'], ['settings', 'Settings', '3']]
 // The Stats tab's history (`wb stats --json`), read while the tab is shown: when it is first
-// shown in a load, and again when results.jsonl or stats.json changes. No timer.
+// shown in a load (`mem.statsLoaded`: the atom outlives a reload), on each press of the tab, again
+// when a file it is made from changes (refreshStats), and once the feed's `until` (the next local
+// midnight) has passed. No timer.
 const statsFeed = atom({ plugin: 'workbench', key: 'stats' } as const, { key: '', feed: null } as WbStats,
   { shape: 'stats-1' })
 // The Stats tab's live view (#408): one `wb top --json` child, only while the tab is on screen
@@ -144,9 +146,12 @@ const statsFeed = atom({ plugin: 'workbench', key: 'stats' } as const, { key: ''
 const topNow = atom({ plugin: 'workbench', key: 'top' } as const, { snap: null, busy: {} } as WbTop,
   { shape: 'top-1' })
 const BUSY_KEEP = 60 // busy % samples kept per GPU for the sparkline: two minutes at 2 s
-const TOP_RETRY_MS = 30_000 // a `wb top` that ended by itself (wb missing, failing) is tried again this long after
+const TOP_RETRY_MS = 30_000 // a `wb top` that ended by itself (wb missing, failing) is tried again this long after, doubling
+// A `wb stats --json` that failed or timed out is tried again after STATS_RETRY_MS, doubling to
+// RETRY_MAX_MS; each poll ran it again, a full-history read a core kept busy on a slow host (#553)
+const STATS_RETRY_MS = 60_000
+const RETRY_MAX_MS = 10 * 60_000
 const SETTINGS_HINT = 'Click a row to see its options, then click one; or Tab to it and press Enter. A change applies at once.'
-const CHAT_EXPIRE_MS = 6 * 3600_000 // a web message older than this isn't submitted to a new listener
 const CHAT_STALE_MS = 15_000 // as wb's LISTENING_FOR: a listener silent this long has gone
 const AWAY_MS = 6 * 3600 * 1000 // the user counts as away this long after a web message
 // ...or for as long as this session has a backlog task open: a night's batch outlasts six hours,
@@ -531,27 +536,45 @@ async function progressOn($: any): Promise<boolean> {
 }
 
 // The Stats tab's history: `wb stats --json`, only while the tab is shown, and only when what it
-// is made from changed since the last read (results.jsonl: a task closed; stats.json: a setting).
-// `force` after a settings pick. A stat is all a poll costs while the tab is shown; nothing at all
-// while it isn't.
+// is made from changed since the last read (results.jsonl: a task closed; stats.json: a setting;
+// optimize.json, bench/runs.jsonl, speed.json and the price's savings.json, which the feed reads
+// too and a stale tab kept for good, #549), the day it was counted from has ended (its `until`:
+// an ended streak and last week's numbers stayed for days, #575), or not yet in this load.
+// `force` on the tab's press and after a settings pick. A stat a file is all a poll costs while
+// the tab is shown; nothing at all while it isn't.
 async function refreshStats($: any, force = false) {
   if (mem.statsReading || (await read($, pane)).tab !== 'stats') return
   const shown = ((await $.ui.panes().catch(() => [])) as Row[]).find(p => p.id === PANE)
   if (!shown?.isShown) return
   const stamp = async (f: string) => {
-    try { const s = await $.fs.stat(`${mem.root}/${f}`); return `${s.size}@${s.mtimeMs}` } catch { return '-' }
+    try { const s = await $.fs.stat(f.startsWith('/') ? f : `${mem.root}/${f}`); return `${s.size}@${s.mtimeMs}` } catch { return '-' }
   }
-  const key = `${await stamp('results.jsonl')} ${await stamp('stats.json')}`
+  const key = (await Promise.all(['results.jsonl', 'stats.json', 'optimize.json', 'bench/runs.jsonl',
+    'speed.json', mem.savingsFile || '-'].map(stamp))).join(' ')
   const had = await read($, statsFeed)
-  if (!force && had.feed && key === had.key) return
+  const now = await $.clock.now()
+  const dayOver = typeof had.feed?.until === 'number' && now / 1000 >= had.feed.until
+  if (!force && had.feed && key === had.key && mem.statsLoaded && !dayOver) return
+  if (!force && now < mem.statsRetryAt) return // it failed: not at every poll (#553)
   mem.statsReading = true
+  // wb missing, failing or slow: the last feed stays, the reason is said, and the next try waits
+  const failed = (why: string) => {
+    mem.statsBackoff = Math.min(mem.statsBackoff ? mem.statsBackoff * 2 : STATS_RETRY_MS, RETRY_MAX_MS)
+    mem.statsRetryAt = now + mem.statsBackoff
+    mem.statsWhy = why
+    $.ui.invalidate('ui.render')
+  }
   try {
     const r = await $.process.run([mem.wb, 'stats', '--json'], { timeoutMs: 30_000 })
-    if (r.exitCode !== 0) return
+    if (r.exitCode !== 0) return failed(brief(r.stderr || r.stdout) || `exit ${r.exitCode}`)
     const feed = JSON.parse(r.stdout)
-    if (feed && typeof feed === 'object') await update($, statsFeed, () => ({ key, feed }))
-  } catch {
-    // wb missing or slow: the last feed stays; tried again at the next poll
+    if (!feed || typeof feed !== 'object') return failed('not a feed')
+    mem.statsWhy = ''
+    mem.statsBackoff = mem.statsRetryAt = 0
+    await update($, statsFeed, () => ({ key, feed }))
+    mem.statsLoaded = true
+  } catch (err) {
+    failed(brief(String(err)))
   } finally {
     mem.statsReading = false
   }
@@ -568,26 +591,45 @@ async function topWanted($: any): Promise<boolean> {
 
 // Starts or ends the live view's child to match topWanted: at each poll, on a tab's press, a
 // minimize and a Live view pick, and on each line it prints (so leaving the tab ends it within a
-// tick, whatever else happens)
+// tick, whatever else happens). Every await comes first and the check and the spawn after them,
+// with none between: a poll and a tab press at once both saw no child across the clock's await,
+// both started one, and only the second was ever ended by a close (#546)
 async function syncTop($: any) {
+  const gen = mem.topGen
+  const now = await $.clock.now()
   const want = await topWanted($)
-  if (want && !mem.top && (await $.clock.now()) >= mem.topRetryAt) void runTop($)
-  else if (!want && mem.top) stopTop()
+  if (gen !== mem.topGen) return // started or stopped meanwhile: that call's view is newer
+  if (want && !mem.top && now >= mem.topRetryAt) runTop($)
+  else if (!want && (mem.top || mem.topKids.size)) stopTop($)
 }
 
-function stopTop() {
-  const child = mem.top
+// Ends every child started, and forgets the last tick: shown again, the tab said a finished task
+// was still "running · round 2" under Now until the next child's first line (#552)
+function stopTop($: any) {
   mem.top = null
-  try { void child?.return?.(undefined)?.catch?.(() => {}) } catch { /* already ended */ }
+  mem.topGen += 1
+  for (const child of mem.topKids)
+    try { void child?.return?.(undefined)?.catch?.(() => {}) } catch { /* already ended */ }
+  mem.topKids.clear()
+  void update($, topNow, () => ({ snap: null, busy: {} })).catch(() => {})
 }
 
-async function runTop($: any) {
+// Starts the child and claims it at once (mem.top, mem.topKids), before any await; pumpTop reads it
+function runTop($: any) {
+  mem.topGen += 1
   const child = $.process.spawn({ argv: [mem.wb, 'top', '--json'] })
   mem.top = child
+  mem.topKids.add(child)
+  void pumpTop($, child)
+}
+
+async function pumpTop($: any, child: any) {
   await update($, topNow, () => ({ snap: null, busy: {} })) // the sparkline starts as the tab opens
-  let buf = ''
+  let buf = '', err = '', ticked = false, putAway = false
   try {
     for await (const { stream, text } of child) {
+      if (!mem.topKids.has(child)) break // stopped meanwhile: its lines aren't the view's
+      if (stream === 'stderr') err = (err + text).slice(-2000) // why it ended, should it (#553)
       if (stream !== 'stdout') continue
       buf += text
       let cut
@@ -597,6 +639,9 @@ async function runTop($: any) {
         let snap: Row
         try { snap = JSON.parse(line) } catch { continue }
         if (!snap || typeof snap !== 'object') continue
+        ticked = true
+        mem.topFails = mem.topBackoff = 0
+        mem.topWhy = ''
         await update($, topNow, prev => {
           const busy: Record<string, number[]> = {}
           for (const g of (snap.gpus ?? []) as Row[])
@@ -604,14 +649,26 @@ async function runTop($: any) {
           return { snap, busy }
         })
       }
-      if (!(await topWanted($))) break // off screen now: leaving the loop ends the child
+      if (!mem.topKids.has(child)) break
+      if (!(await topWanted($))) { putAway = true; break } // off screen now: leaving the loop ends the child
     }
-  } catch {
-    // it could not start, or its stream closed: tried again after a while
+  } catch (e) {
+    err ||= String(e) // it could not start, or its stream closed: tried again after a while
   }
-  if (mem.top === child) { // it ended by itself, not by stopTop: not again at once
+  const mine = mem.topKids.delete(child)
+  if (mine && mem.top === child) { // it ended by itself, not by stopTop
     mem.top = null
-    mem.topRetryAt = (await $.clock.now()) + TOP_RETRY_MS
+    // put away by the engine is no failure: booked as one, a pane shown again 5 s later got no
+    // child for 30 s, its last tick drawn as Now meanwhile (#552). Only an exit, a stream error or
+    // a child that printed nothing waits, doubling, and says why (#553)
+    if (putAway) await update($, topNow, () => ({ snap: null, busy: {} }))
+    else {
+      if (!ticked) mem.topFails += 1
+      mem.topWhy = brief(err) || 'it ended'
+      mem.topBackoff = Math.min(mem.topBackoff ? mem.topBackoff * 2 : TOP_RETRY_MS, RETRY_MAX_MS)
+      mem.topRetryAt = (await $.clock.now()) + mem.topBackoff
+      $.ui.invalidate('ui.render')
+    }
   }
 }
 
@@ -642,9 +699,10 @@ const RACK_COLOR: Record<string, string> = { resident: 'success', cpu: 'success'
 // The live view as lines of coloured parts: each GPU (memory and busy as bars, watts, busy's
 // sparkline), what runs now, the rack (every model: where it is, its speeds, its load time, the
 // task on it) and the queue. Nothing is said for what a platform can't tell.
-export function liveLines(t: WbTop): { color?: string; dim?: boolean; bold?: boolean; text: string }[][] {
+export function liveLines(t: WbTop, why = ''): { color?: string; dim?: boolean; bold?: boolean; text: string }[][] {
   const s = t.snap
-  if (!s) return [[{ dim: true, text: 'Reading this machine…' }]]
+  // `why`: what `wb top` said as it ended, once it has failed twice: "Reading…" was all ever said (#553)
+  if (!s) return [[{ dim: true, text: why ? `This machine can't be read: ${why} (wb top --json)` : 'Reading this machine…' }]]
   const out: { color?: string; dim?: boolean; bold?: boolean; text: string }[][] = []
   for (const g of (s.gpus ?? []) as Row[]) {
     const row: { color?: string; dim?: boolean; bold?: boolean; text: string }[] = [
@@ -736,9 +794,14 @@ const GUARD_WORDS: Record<string, string> = {
 // The Stats tab's history as lines (a label in bold, then the text): what the feed holds, each
 // section left out when it has nothing, estimates said as such. A run of days that ended isn't
 // mentioned, only the best (the plan's rule: show what went right, never nag).
-export function statsLines(f: Record<string, any> | null): { label: string; text: string }[] {
-  if (!f) return [{ label: '', text: 'Reading the history…' }]
-  if (!f.tasks) return [{ label: '', text: 'No finished tasks yet: delegate one with /workbench, and how it went shows here.' }]
+export function statsLines(f: Record<string, any> | null, why = ''): { label: string; text: string }[] {
+  // `why`: the last `wb stats --json` failed, said (#553): with no feed yet "Reading…" never ended
+  if (!f) return [{ label: '', text: why ? `History unavailable: ${why} (wb stats --json)` : 'Reading the history…' }]
+  if (why) return [{ label: '', text: `Not updated: ${why} (wb stats --json)` }, ...statsLines(f)]
+  // only when the feed has no section at all: with no judged task, a period of spec-gap
+  // discards (#569), the optimized windows and the bench results still have something to say (#549)
+  if (!f.tasks && !Object.keys(f).some(k => !['ts', 'until', 'settings', 'tasks'].includes(k)))
+    return [{ label: '', text: 'No finished tasks yet: delegate one with /workbench, and how it went shows here.' }]
   const out: { label: string; text: string }[] = []
   const period = (name: string, label: string) => {
     const p = f.periods?.[name]
@@ -750,8 +813,11 @@ export function statsLines(f: Record<string, any> | null): { label: string; text
       p.savings ? (saved >= 0 ? `saved ~${kilo(saved)} Claude tokens (estimate)` : `cost ~${kilo(-saved)} more Claude tokens (estimate)`) : '',
       `${p.tasks} task${p.tasks === 1 ? '' : 's'}`,
       `${p.landed} landed${p.accepted_pct !== undefined ? ` (${p.accepted_pct}%)` : ''}`,
-      p.savings?.wh ? `${p.savings.wh >= 1000 ? `${(p.savings.wh / 1000).toFixed(1)} kWh` : `${Math.round(p.savings.wh)} Wh`}` +
-        (p.savings.cost != null ? ` (${p.savings.cost.toFixed(2)})` : '') : '',
+      // left out of the count, not the saving: Claude's tokens were spent on them (#569)
+      p.spec_gaps ? `and ${p.spec_gaps} discard${p.spec_gaps === 1 ? '' : 's'} put down to the spec` : '',
+      // the period's own energy, every task's: the saving's counts only the tasks it compares (#568)
+      p.energy?.wh ? `${p.energy.wh >= 1000 ? `${(p.energy.wh / 1000).toFixed(1)} kWh` : `${Math.round(p.energy.wh)} Wh`}` +
+        (p.energy.cost != null ? `, cost ${p.energy.cost.toFixed(2)}` : '') : '',
     ]
     out.push({ label, text: parts.filter(Boolean).join(' · ') })
   }
@@ -763,13 +829,16 @@ export function statsLines(f: Record<string, any> | null): { label: string; text
   const ab = f.absorbed
   if (ab) {
     const parts = [
-      ab.auto_fixes ? `${ab.auto_fixes} test failure${ab.auto_fixes === 1 ? '' : 's'} sent back and fixed by the agent` +
+      // attempts, whatever came of them; "green" only for the tasks whose tests then passed (#562)
+      ab.auto_fixes ? `${ab.auto_fixes} test failure${ab.auto_fixes === 1 ? '' : 's'} sent back to the agent` +
         (ab.auto_fixed_tasks ? ` (${ab.auto_fixed_tasks} task${ab.auto_fixed_tasks === 1 ? '' : 's'} then green)` : '') : '',
-      ab.questions ? `${ab.questions} question${ab.questions === 1 ? '' : 's'} answered mid-task` : '',
       ab.handovers_landed ? `${ab.handovers_landed} landed after a handover to a fresh session` : '',
     ].filter(Boolean)
     if (parts.length) out.push({ label: 'Without waking Claude', text: parts.join(' · ') })
   }
+  const q = f.questions // a question wakes Claude: its own line, "answered" only for wb answer's (#562)
+  if (q?.asked) out.push({ label: 'Questions', text: `${q.asked} asked mid-task` +
+    (q.answered ? ` · ${q.answered} answered` : '') })
   for (const [model, m] of Object.entries(f.models ?? {}) as [string, any][]) {
     const trend = spark((m.write_trend ?? []).map((p: number[]) => p[1]))
     const speed = m.speed?.write ? ` · writes ~${Math.round(m.speed.write)} tok/s` : ''
@@ -802,7 +871,12 @@ export function statsLines(f: Record<string, any> | null): { label: string; text
     if (said.length) out.push({ label: `What helps (${model})`, text: said.join(' · ') })
   }
   const bench = Object.entries(f.bench ?? {}) as [string, any][]
-  if (bench.length) out.push({ label: 'Bench', text: bench.map(([m, b]) => `${m} ${b.passed}/${b.of} (${b.day})`).join(' · ') })
+  // the newest finished run, and a newer one beside it, never in its place (#570)
+  const sofar = (p: any) => `${p.of} of ${p.planned} ${p.running ? 'so far' : 'before it stopped'}` +
+    (p.of ? `, ${p.passed} passed` : '')
+  if (bench.length) out.push({ label: 'Bench', text: bench.map(([m, b]) => `${m} ` +
+    [b.run !== undefined ? `${b.passed}/${b.of} (${b.day})` : '', b.partial ? `newer run ${sofar(b.partial)}` : '']
+      .filter(Boolean).join(', ')).join(' · ') })
   const opt = Object.entries(f.optimized ?? {}) as [string, any][]
   if (opt.length) out.push({ label: 'Optimized', text: opt.map(([m, o]) => `${m} ${Math.round(o.window / 1024)}K` +
     (o.spill ? ` (${o.spill}% on the CPU)` : ' all on the GPU')).join(' · ') })
@@ -885,14 +959,23 @@ const mem = {
   liveKey: '', // the followed task and its updated_at when last read
   liveAt: 0, // when its transcript was last read
   statsReading: false, // a `wb stats --json` under way (refreshStats)
+  statsLoaded: false, // the history was read in this load: the atom's feed may be an older load's
+  statsWhy: '', // why the last `wb stats --json` failed ('' when it didn't): said on the tab (#553)
+  statsRetryAt: 0, // not again before then, unless the tab is pressed
+  statsBackoff: 0, // the wait after the last failure, doubling
+  topWhy: '', // why the last `wb top` ended by itself: its stderr's last line
+  topFails: 0, // `wb top` runs in a row that ended with no tick: said under Now from the second
+  topBackoff: 0, // the wait before the next try, doubling
   top: null as any, // the `wb top --json` child while the live view runs (syncTop)
+  topKids: new Set<any>(), // every child started and not yet ended: stopTop ends them all (#546)
+  topGen: 0, // bumped by each start and stop: a syncTop whose awaits saw it change starts nothing
   topRetryAt: 0, // not before then, after one ended by itself
   price: null as number | null, // the electricity price wb says is set (`wb savings --json`)
   cwd: '', // the session's directory, resolved: which old tasks are this session's (mine)
   home: '', // the home directory, resolved: a session there claims no task by directory
   ids: new Set<string>(), // the `sessions` atom: which tasks are this session's (mine)
-  deadPids: new Set<number>(), // Claude Code processes tasks recorded that are gone: final (mine)
-  pidAt: new Map<number, number>(), // when a live one was last checked (noteClaude)
+  deadPids: new Set<string>(), // Claude Code processes tasks recorded that are gone (pid@start): final (mine)
+  pidAt: new Map<string, number>(), // when a live one was last checked (noteClaude)
   person: false, // someone can be at this session (not a bare `claude -p` or SDK run)
   started: false, // the ears and timers run
   busy: false, // Claude's main loop is mid-turn: a wake would queue and arrive stale
@@ -914,9 +997,11 @@ const mem = {
   warned: new Set<string>(), // one-time toasts already shown (a file unreadable, wb failing)
   chatSent: new Set<string>(), // web messages submitted by this load, awaiting their receipt
   chatRetry: new Map<string, number>(), // a web message whose prompt was dropped: tried again from then
+  chatExpired: new Set<string>(), // web messages wb said are too old to pass on (#536): not asked again
   chatUrlAt: 0, // when the web chat's link was last looked up
   savingsAt: 0, // when the week's saving was last read
   eventsPid: 0, // the `wb events` child: its lines wake poll(); the chat counts it as this session
+  eventsStart: '', // its start, as its hello says: with the pid, listener.json's proof of life (#532)
   earsOk: false, // `wb events` has said hello in this load: wb runs
   gone: new Set<string>(), // task directories closed past KEEP_CLOSED_MS: final, never read again
   again: false, // something changed while a poll ran: run another after it
@@ -927,6 +1012,7 @@ const mem = {
   posed: '' as Pose | '', // its pose as last drawn in a Raster: the timer animates it while set
   shown: '' as Pose | '', // the frame on screen now
   skill: '', // the /workbench skill's SKILL.md, for the workbench-mode block
+  savingsFile: '', // savings.json, where wb keeps the kWh price ($WB_SAVINGS): the Stats key stamps it
   fold: false, // the session's directory is on a file system that ignores case (macOS): `within`
 }
 
@@ -955,27 +1041,30 @@ const near = (t: { repo?: string; cwd?: string }) => {
   return (!!t.cwd && within(mem.cwd, t.cwd)) ||
     (!!t.repo && (within(mem.cwd, t.repo) || within(t.repo, mem.cwd)))
 }
-const mine = (t: { session?: string; repo?: string; cwd?: string; claude_pid?: number }) => {
+const mine = (t: { session?: string; repo?: string; cwd?: string; claude_pid?: number; claude_start?: string }) => {
   if (t.session && mem.ids.size) {
-    return mem.ids.has(t.session) || (mem.deadPids.has(Number(t.claude_pid ?? 0)) && near(t))
+    return mem.ids.has(t.session) || (mem.deadPids.has(pidKey(t)) && near(t))
   }
   if (!mem.cwd || (!t.cwd && !t.repo)) return true
   return near(t)
 }
 
 // Whether another session's task's Claude Code process is gone (mem.deadPids, for `mine`): `kill
-// -0`, a live one at most every PID_CHECK_MS. A gone one stays gone; one wb can't ask about
-// (kill failed to run) stays unknown, so its task stays the other session's.
+// -0` and its start (task.json `claude_start`: a recycled pid is another process, #532), a live
+// one at most every PID_CHECK_MS. A gone one stays gone; one wb can't ask about (kill failed to
+// run) stays unknown, so its task stays the other session's. Keyed by pid and start.
 const PID_CHECK_MS = 30_000
-async function noteClaude($: any, t: { session?: string; claude_pid?: number }, now: number): Promise<void> {
+const pidKey = (t: { claude_pid?: number; claude_start?: string }) =>
+  `${Number(t.claude_pid ?? 0)}@${t.claude_start ?? ''}`
+async function noteClaude($: any, t: { session?: string; claude_pid?: number; claude_start?: string },
+  now: number): Promise<void> {
   const pid = Number(t.claude_pid ?? 0)
-  if (!pid || !t.session || mem.ids.has(t.session) || mem.deadPids.has(pid)) return
-  if (now - (mem.pidAt.get(pid) ?? -Infinity) < PID_CHECK_MS) return
-  mem.pidAt.set(pid, now)
-  try {
-    const r = await $.process.run(['kill', '-0', String(pid)], { timeoutMs: 5000 })
-    if (r.exitCode !== 0) mem.deadPids.add(pid)
-  } catch {}
+  const key = pidKey(t)
+  if (!pid || !t.session || mem.ids.has(t.session) || mem.deadPids.has(key)) return
+  if (now - (mem.pidAt.get(key) ?? -Infinity) < PID_CHECK_MS) return
+  mem.pidAt.set(key, now)
+  const live = await alive($, pid, t.claude_start)
+  if (live === false) mem.deadPids.add(key)
 }
 
 // This session's id joins the ids this process has had: at the start and at each poll, so a
@@ -1083,7 +1172,7 @@ async function scan($: any, root: string, now: number): Promise<WbTask[]> {
       last: String(st.last ?? ''), createdAt: Number(sp.created_at ?? 0) * 1000, updatedAt,
       tokens: Number(st.tok_in ?? 0) + Number(st.tok_out ?? 0), recent,
       repo: String(sp.repo ?? ''), cwd: String(sp.cwd ?? ''), session: String(sp.session ?? ''),
-      claude_pid: Number(sp.claude_pid ?? 0),
+      claude_pid: Number(sp.claude_pid ?? 0), claude_start: String(sp.claude_start ?? ''),
       backlog: String(sp.backlog ?? ''),
       allowed: allowedLine((await readJson($, `${base}/coding.json`)).allowed),
     })
@@ -1251,6 +1340,7 @@ async function ears($: any) {
           try { ev = JSON.parse(line) } catch { continue }
           if (ev.hello) {
             mem.eventsPid = Number(ev.hello)
+            mem.eventsStart = typeof ev.start === 'string' ? ev.start : '' // listener.json's start (#532)
             mem.earsOk = hello = true
             wait = 2000
           }
@@ -1261,6 +1351,7 @@ async function ears($: any) {
       why = brief(String(err)) // the child could not start or its stream closed: start another below
     }
     mem.eventsPid = 0
+    mem.eventsStart = ''
     if (!mem.earsOk) {
       warnOnce($, 'ears', `can't run \`${mem.wb} events\` (${why}): the pane runs on the task ` +
         `files alone. Put wb on Claude Code's PATH or set WB_BIN; wb doctor`)
@@ -1278,8 +1369,9 @@ async function ears($: any) {
 // it buried the question Claude had just asked the person (the 2026-11-16 audit).
 const SCOUT_QUIET_MS = 60_000
 
-// `wb savings --json` as the pane's footer: "this week: saved ~1.2M Claude tokens (46%, estimate) · 0.9 kWh";
-// '' until a task can be compared, or when the output isn't wb's.
+// `wb savings --json` as the pane's footer: "this week: saved ~1.2M Claude tokens (46%, estimate) · 0.9 kWh",
+// with ", cost 0.27" once a price is set (as the Stats tab and `wb savings` label it: no currency
+// sign, the price is the user's); '' until a task can be compared, or when the output isn't wb's.
 export function savedLine(out: string): string {
   let t: any
   try { t = JSON.parse(out) } catch { return '' }
@@ -1287,7 +1379,8 @@ export function savedLine(out: string): string {
   const n = (x: number) => (Math.abs(x) >= 1e6 ? `${(x / 1e6).toFixed(1)}M` : `${Math.round(x / 1e3)}K`)
   const pct = t.self_est > 0 ? ` (${Math.round((100 * t.saved) / t.self_est)}%, estimate)` : ' (estimate)'
   const what = t.saved >= 0 ? `saved ~${n(t.saved)} Claude tokens${pct}` : `cost ~${n(-t.saved)} more Claude tokens (estimate)`
-  const gpu = t.wh ? ` · ${t.wh >= 1000 ? `${(t.wh / 1000).toFixed(1)} kWh` : `${Math.round(t.wh)} Wh`}` : ''
+  const cost = typeof t.cost === 'number' ? `, cost ${t.cost.toFixed(2)}` : ''
+  const gpu = t.wh ? ` · ${t.wh >= 1000 ? `${(t.wh / 1000).toFixed(1)} kWh` : `${Math.round(t.wh)} Wh`}${cost}` : ''
   return `this week: ${what}${gpu}`
 }
 
@@ -1301,12 +1394,24 @@ export function priceOf(out: string): number | null {
   }
 }
 
+// What the price row was typed, as `wb savings --price` takes it: "0,30", "€0.30", "0.30 EUR" and
+// "$0.3" are 0.3 (one comma or point, a currency sign or code before or after); empty is 'off'
+// (it clears the price); anything else, "0x10" or "1e3" among them, is null. Number() took
+// "0x10" as 16, and "0,30" and "€0.30" as nothing, with no hint why (#609).
+export function parsePrice(text: string): number | 'off' | null {
+  const s = text.trim()
+  if (!s) return 'off'
+  const m = /^(?:[^\d\s.,+-]{1,3}\s*)?(\d+(?:[.,]\d+)?|[.,]\d+)(?:\s*[^\d\s.,+-]{1,3})?$/u.exec(s)
+  const v = m ? Number(m[1].replace(',', '.')) : NaN
+  return v > 0 ? v : null
+}
+
 // The Settings tab's price row: wb checks and keeps it (`wb savings --price`), and its answer
-// is the week's saving again, now with the energy's cost
+// is the week's saving again, now with the energy's cost (the footer's `, cost …`)
 async function setPrice($: any, text: string) {
-  const v = Number(text.trim().replace(/^\$/, ''))
-  if (!(v > 0)) {
-    $.ui.toast('workbench: the electricity price is a positive number, per kWh')
+  const v = parsePrice(text)
+  if (v === null) {
+    $.ui.toast('workbench: the electricity price per kWh is a number, like 0.30 or 0,30 (empty clears it)')
     return
   }
   const { ok, out } = await runWb($, ['savings', '--price', String(v), '--json'])
@@ -1418,27 +1523,51 @@ function askText(input: unknown): string {
   return text.length > 1500 ? text.slice(0, 1500) + '…' : text
 }
 
+// What a dialog sends wb, within an argument's size: a plan's first DETAIL_CHARS (one past wb's
+// budget, so wb cuts it and says so) and each option's preview to PREVIEW_CHARS. wb measures the
+// rest and cuts it to its own budget; a long plan was refused whole, and the dialog sat in the
+// terminal with the phone told nothing (#535)
+const DETAIL_CHARS = 40_001
+const PREVIEW_CHARS = 2000
+const CUT_NOTE = ' (cut: the rest is in the terminal)'
+export function askQuestions(questions: unknown): unknown {
+  if (!Array.isArray(questions)) return questions
+  return questions.map(q => !q || typeof q !== 'object' || !Array.isArray((q as any).options) ? q : {
+    ...q, options: (q as any).options.map((o: any) => o && typeof o.preview === 'string' && o.preview.length > PREVIEW_CHARS
+      ? { ...o, preview: o.preview.slice(0, PREVIEW_CHARS) + CUT_NOTE } : o),
+  })
+}
+
 // The PermissionRequest answer from the user's answer in the chat, else undefined (the dialog)
 async function askOnChat($: any, tool: string, input: unknown, signal?: AbortSignal) {
   const kind = KIND[tool] ?? 'permission'
   const i = (input && typeof input === 'object' ? input : {}) as Record<string, unknown>
-  const args = ['chat', 'ask', '--tool', tool, '--kind', kind, '--text', kind === 'permission' ? askText(input) : '']
-  if (kind === 'question') args.push('--detail', JSON.stringify({ questions: i.questions }))
+  // `--opt=value`: a value starting with `-` was read as a flag (#535)
+  const args = ['chat', 'ask', `--tool=${tool}`, `--kind=${kind}`, `--text=${kind === 'permission' ? askText(input) : ''}`]
+  // this session's `wb events` process: once it's gone wb expires the ask, so a card left by a
+  // crashed or closed session doesn't stay open for good, and pushes don't show it (#538)
+  if (mem.eventsPid) args.push(`--pid=${mem.eventsPid}`)
+  if (kind === 'question') args.push(`--detail=${JSON.stringify({ questions: askQuestions(i.questions) })}`)
   // what the call is for, as Claude described it (Bash's description): the card leads with it
   if (kind === 'permission' && typeof i.description === 'string' && i.description.trim())
-    args.push('--detail', JSON.stringify({ purpose: i.description.trim().slice(0, 300) }))
+    args.push(`--detail=${JSON.stringify({ purpose: i.description.trim().slice(0, 300) })}`)
   // a plan: its text, else its file, and whose it is; wb read the newest in the plans directory,
   // any project's, so a card could show another session's plan (#253, the audit of 1.2)
   if (kind === 'plan') {
-    if (typeof i.plan === 'string' && i.plan) args.push('--detail', JSON.stringify({ plan: i.plan }))
-    else if (typeof i.planFilePath === 'string') args.push('--detail', JSON.stringify({ plan_file: i.planFilePath }))
+    if (typeof i.plan === 'string' && i.plan) args.push(`--detail=${JSON.stringify({ plan: i.plan.slice(0, DETAIL_CHARS) })}`)
+    else if (typeof i.planFilePath === 'string') args.push(`--detail=${JSON.stringify({ plan_file: i.planFilePath })}`)
     const session = await $.session.id().catch(() => '')
     if (session) args.push('--session', session)
     if (mem.cwd) args.push('--repo', mem.cwd)
   }
   const posted = await runWb($, args, 15_000)
   const [id, state] = (posted.out.split('\n').pop() || '').split(' ')
-  if (!posted.ok || !id?.startsWith('ask-')) return undefined
+  if (!posted.ok || !id?.startsWith('ask-')) { // the away user is told where it waits, not left guessing (#535)
+    const what = kind === 'plan' ? 'a plan' : kind === 'question' ? 'a question' : 'a permission'
+    await runWb($, ['chat', 'reply', `--text=Claude is waiting on ${what} in the terminal: it couldn't be shown here.`], 15_000)
+    $.ui.toast(`workbench: ${what} couldn't go to the web chat (${brief(posted.out)}): answer it here`)
+    return undefined
+  }
   if (state === 'allow') return { behavior: 'allow' as const }  // their setting: go ahead while away
   if (state === 'expired') return undefined  // a plan wb can't show: the dialog, in the terminal
   mem.asksOpen.add(id)
@@ -1494,13 +1623,34 @@ async function sendQueued($: any, text: string) {
   warnOnce($, `queued:${text.slice(0, 40)}`, `a turn for Claude was dropped (${r.drop}); trying again in a minute`)
 }
 
-// Whether a process lives: `kill -0`, since macOS has no /proc.
-async function alive($: any, pid: number): Promise<boolean> {
+// When a process started, as wb's models._started says it: /proc/<pid>/stat's 22nd field, else
+// `ps -o lstart=` (macOS has no /proc); '' when neither says.
+async function startOf($: any, pid: number): Promise<string> {
   try {
-    return (await $.process.run(['kill', '-0', String(pid)], { timeoutMs: 5000 })).exitCode === 0
+    const stat = String(await $.fs.read(`/proc/${pid}/stat`))
+    const field = stat.slice(stat.lastIndexOf(')') + 1).trim().split(/\s+/)[19]
+    if (field) return field
+  } catch {}
+  try {
+    const r = await $.process.run(['env', 'LC_ALL=C', 'ps', '-o', 'lstart=', '-p', String(pid)], { timeoutMs: 5000 })
+    if (r.exitCode === 0) return r.stdout.trim().split(/\s+/).join(' ')
+  } catch {}
+  return ''
+}
+
+// Whether a process lives (`kill -0`) and, given the start recorded beside its pid, is still the
+// one that wrote it: a recycled pid is another process (#532), as wb's models._alive judges. Only
+// two starts of one kind compare (both /proc's tick count, or both ps's date). null: unknown
+// (kill failed to run).
+async function alive($: any, pid: number, start?: string): Promise<boolean | null> {
+  try {
+    if ((await $.process.run(['kill', '-0', String(pid)], { timeoutMs: 5000 })).exitCode !== 0) return false
   } catch {
-    return false
+    return null
   }
+  if (!start) return true
+  const now = await startOf($, pid)
+  return !now || /^\d+$/.test(now) !== /^\d+$/.test(start) || now === start
 }
 
 // The web chat's switch, as the user left it (chat/switch.json, written by `wb chat on|off`): turned
@@ -1530,27 +1680,29 @@ async function listen($: any, now: number) {
   if (!mem.eventsPid) return // the chat knows a listener by its live `wb events` process
   const claim = await readJson($, `${dir}/listener.json`)
   const theirs = claim.session && claim.session !== st.key
-  if (theirs && (claim.pid ? await alive($, Number(claim.pid))
+  if (theirs && (claim.pid ? !!(await alive($, Number(claim.pid), claim.start ? String(claim.start) : ''))
     : now - Number(claim.ts ?? 0) * 1000 < CHAT_STALE_MS)) return // another session listens
   if (!(await $.fs.exists(dir))) await runWb($, ['chat', 'log']) // wb makes the directory
-  const body = JSON.stringify({ session: st.key, cwd: mem.cwd, pid: mem.eventsPid, busy: mem.busy })
+  const body = JSON.stringify({ session: st.key, cwd: mem.cwd, pid: mem.eventsPid,
+    ...(mem.eventsStart ? { start: mem.eventsStart } : {}), busy: mem.busy })
   if (body !== mem.listenerBody || theirs || claim.session !== st.key) { // only on change: a write is an event
     mem.listenerBody = body
     await $.fs.write(`${dir}/listener.json`, body)
   }
   for (const m of await unread($, dir)) {
     const id = String(m.id ?? '')
-    if (m.from !== 'user' || !id || mem.chatSent.has(id)) continue
-    if (now - Number(m.ts ?? 0) * 1000 > CHAT_EXPIRE_MS) { // stale: not sprung on a new listener
-      warnOnce($, 'chat-old', `a web chat message older than ${CHAT_EXPIRE_MS / 3600_000} hours ` +
-        "wasn't passed to Claude: wb chat pending lists it") // said, not dropped in silence (#329)
-      continue
-    }
+    if (m.from !== 'user' || !id || mem.chatSent.has(id) || mem.chatExpired.has(id)) continue
     if ((mem.chatRetry.get(id) ?? 0) > now) continue // its prompt was dropped: again in a minute
     // Claimed under wb's lock: two sessions starting together both took the chat and both
-    // submitted it, each guard knowing only its own sends (#84). Refused: another session's.
-    if (!(await runWb($, ['chat', 'claim', id, '--by', st.key])).ok) {
-      mem.chatRetry.set(id, now + REWAKE_MS)
+    // submitted it, each guard knowing only its own sends (#84). Refused: another session's, or
+    // too old to spring on Claude, by wb's one threshold, which the page shows too (#536): the mod
+    // skipped it on its own clock, and the phone said "Delivered" for a message Claude never got.
+    const claimed = await runWb($, ['chat', 'claim', id, '--by', st.key])
+    if (!claimed.ok) {
+      if (/ expired: /.test(claimed.out)) {
+        mem.chatExpired.add(id)
+        warnOnce($, 'chat-old', `${brief(claimed.out).replace(/^wb: \S+ /, 'a web chat message ')}`) // said, not dropped in silence (#329)
+      } else mem.chatRetry.set(id, now + REWAKE_MS)
       continue
     }
     mem.chatSent.add(id)
@@ -1773,7 +1925,17 @@ async function showPane($: any) {
   mem.paneOpened = true
   const opening = $.ui.open({ id: PANE, title: 'Workbench' })
   if ((await read($, pane)).minimized) await update($, pane, p => ({ ...p, minimized: false }))
+  void paneBack($, opening)
   return opening
+}
+
+// Once an open lands, the Stats tab's history and live view catch up: /workbench again and a
+// bring-back from the strip waited for the next poll, up to 30 s with no task (#552), and a
+// syncTop before the open resolved could still see the pane hidden
+async function paneBack($: any, opening: Promise<unknown>) {
+  await Promise.resolve(opening).catch(() => {})
+  void refreshStats($)
+  void syncTop($)
 }
 
 // Brings the pane back from the strip, on the tab asked for. Opened first, while the press is still
@@ -1783,7 +1945,7 @@ async function restorePane($: any, tab: string) {
   const opening = $.ui.open({ id: PANE, title: 'Workbench' })
   mem.paneOpened = true
   await update($, pane, p => ({ ...p, tab: tab || p.tab, minimized: false }))
-  void syncTop($)
+  void paneBack($, opening)
   $.ui.invalidate('ui.render')
   return opening
 }
@@ -1817,6 +1979,8 @@ export const register: Register = (on, options) => {
     mem.root = wbHome || `${home}/.local/state/workbench`
     mem.wb = (await $.env.get('WB_BIN')) || 'wb'
     mem.skill = `${(await $.env.get('CLAUDE_CONFIG_DIR')) || `${home}/.claude`}/skills/workbench/SKILL.md`
+    const priced = (await $.env.get('WB_SAVINGS')) || `${home}/.config/workbench/savings.json`
+    mem.savingsFile = priced.startsWith('~/') ? `${home}${priced.slice(1)}` : priced
     mem.startedAt = await $.clock.now()
     // 2026-11-17: /delegate became /workbench. A copy updated across it still has only the old
     // skill link, which now leads nowhere: wb setup makes the new one and drops the old.
@@ -2046,7 +2210,7 @@ export const register: Register = (on, options) => {
   on('ui.close', async ($, e, next) => {
     if (e.id === PANE && e.origin?.kind === 'person') {
       await update($, pane, p => ({ ...p, minimized: true }))
-      stopTop() // put away: the live view ends with it
+      stopTop($) // put away: the live view ends with it
       $.ui.invalidate('ui.render')
     }
     return next(e)
@@ -2105,7 +2269,7 @@ export const register: Register = (on, options) => {
       <Box flexDirection="row" columnGap={2} marginTop={1}>
         {TABS.map(([tab, label, hotkey]) => (
           <Button key={`tab-${tab}`} label={label} hotkey={hotkey} plain dimColor={view.tab !== tab}
-            onPress={() => { void update($, pane, p => ({ ...p, tab, open: '', focus: '' })).then(() => { void refreshStats($); void syncTop($) }) }} />
+            onPress={() => { void update($, pane, p => ({ ...p, tab, open: '', focus: '' })).then(() => { void refreshStats($, true); void syncTop($) }) }} />
         ))}
       </Box>
     )
@@ -2143,9 +2307,12 @@ export const register: Register = (on, options) => {
     // the Stats tab: the live view (#408, `wb top --json` while shown, with Live view on), then
     // the history (#406, `wb stats --json`)
     if (view.tab === 'stats') {
+      // drawn with no child: the engine shows the pane again (nothing else says so), so the live
+      // view starts now, not at the next poll, 30 s off with no task (#552)
+      if (!mem.top && !mem.topKids.size) void syncTop($)
       const { feed } = await read($, statsFeed)
       const cols = Math.max(30, Number(((e.props ?? {}) as Row).bodyColumns ?? e.viewport?.columns ?? 60))
-      const now = (await statsSettings($)).live ? liveLines(await read($, topNow)) : []
+      const now = (await statsSettings($)).live ? liveLines(await read($, topNow), mem.topFails >= 2 ? mem.topWhy : '') : []
       return (
         <Box flexDirection="column">
           {now.length ? (
@@ -2156,7 +2323,7 @@ export const register: Register = (on, options) => {
               ))}
             </Box>
           ) : null}
-          {statsLines(feed).map(({ label, text }) => (
+          {statsLines(feed, mem.statsWhy).map(({ label, text }) => (
             <Box flexDirection="column" marginBottom={label ? 0 : 1}>
               {label
                 ? wrapWords(`${label}: ${text}`, cols).map((l, i) => i === 0 && l.startsWith(label)

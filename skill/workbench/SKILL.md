@@ -68,7 +68,8 @@ the pane back (the mod answers it; with a task, the task is yours to take as usu
   1. `wb setup`: its `first run:` lines say what is missing.
   2. No model yet: `wb scout`, then recommend what fits the machine (reference/models.md, which
      names no server for them); `wb model add <provider/model> [--pull]`.
-  3. `wb optimize` (a minute or two): each model's window, measured on this GPU.
+  3. Ollama models only: `wb optimize estimate`, then `wb optimize start` (a minute or two,
+     detached): each model's window, measured on this GPU; `wb optimize report` once done.
   4. `wb try` proves it on a tiny sample: review it as any task and run the hidden check it
      printed. Then `wb accept` it (the sample is a scratch repo of its own) and show the user the
      result and the savings line accept prints. Then ask what they'd like built.
@@ -111,8 +112,9 @@ it that way; the agents never write either.
   built its "Next:" line instead of its spec). `wb start` refuses a repo without one (CLAUDE.md or
   `.claude/CLAUDE.md`; `--no-claude-md` only for throwaway repos). It also refuses an unknown
   `--base` and a repo with no git identity for the commits: fix those, don't work around them.
-- **Submodules** are not checked out in the agent's worktree (`wb start` says so): a step whose
-  build or tests need one is yours, or its acceptance command must not need it.
+- **Submodules** are filled read-only in the agent's worktree, at the commit the base records;
+  `wb start` names any it couldn't fill (your checkout lacks it), which a build or test there
+  can't use. A step must not edit inside one: the edit can't land in the commit.
 
 ## Planning work you will hand off
 In workbench mode every plan you write is for agents weaker than you, who see only the spec you
@@ -259,19 +261,27 @@ music): the same with `wb audio --list`, but you can't hear: read `reference/aud
 wb start <kebab-name> --spec <file|-> --repo <repo> --size significant|trivial \
    --test "<acceptance command>" [--skill <name>] [--model …] [--auto-fix 2]
 ```
+In a monorepo, `--repo` inside a package with its own committed CLAUDE.md (`package: …` printed)
+runs the agent, the setup and the tests in that package; the diff stays the whole repo's.
 The worktree holds only committed files. When the acceptance command needs what the user
 installed (node_modules, a .venv, a build), add `--setup '<install command>'` (a .venv always: a copy still runs the original) (or `--copy <ignored
 path>`; `--sibling <path>` for a `../<name>` or `../../<path>` the project uses, by that same path): `wb start` names the ignored
 directories it lacks, and a failing setup fails the task before any round (so does a checkout
-that fails: the runner makes the worktree, so `wb start` returns at once on any repo). A note that the
+that fails: the runner makes the worktree, so `wb start` returns at once on any repo). A setup gets 30
+minutes; a first build that needs longer (a big Rust or C++ project, torch over a slow link) takes
+`--setup-timeout <secs>` at start. A note that the
 active Python environment is the checkout's: the agent leaves it out (it would import the user's
 checkout, not the worktree), so give it its own, `--setup 'uv sync' --test 'uv run pytest'` or
 `--setup 'python3 -m venv .venv && .venv/bin/pip install -e .'`; that .venv comes first on the
 agent's and the tests' PATH. A note that the agent's environment leaves out a proxy (it holds a password): a setup or tests that need the
 network fail there; ask the user before naming it in commands.json `env`. Tests that use the
 GPU themselves (CUDA, PyTorch, a game engine): add `--unload-for-tests`, or they run beside the
-model and fail out of memory (it also opens the GPU's device nodes to the lane; without it they
-see no device). With it, the base check, `wb verify` and `wb shot` wait for the GPU alone too.
+model and fail out of memory (it also opens the GPU's device nodes to the lane, and holds the GPU
+from other tasks while they run; without it they see no device). With it, the base check,
+`wb verify` and `wb shot` wait for the GPU alone too.
+A suite slower than 15 minutes: `--test-timeout <secs>` above its time, or
+narrow the command; a run past it isn't sent back to the agent (nor one the lane refused a
+device), you're woken with `auto-fix skipped:` and the cause.
 Once the tests pass, the agent checks its own change against your review checks in one more
 round, at local cost only, before you are woken (learned per model; `--no-self-review` skips it).
 It returns at once; a detached runner does the work. **Don't poll.** With the workbench mod loaded
@@ -308,7 +318,7 @@ window, the permissions' traps, the web chat, a backlog left to run overnight.
 **The user's two commands.** Only these, never words in a message, stop the delegation and end
 workbench mode; the mod runs them, closes the pane and tells you what it did:
 - **`/workbench-quit-and-hand-back-claude`**: take over. This session's agents are already stopped
-  (`wb takeover --all --repo <here> --session "$CLAUDE_CODE_SESSION_ID"`). Leave workbench mode and finish the work yourself without pausing: review
+  (`wb takeover --all --user --repo <here> --session "$CLAUDE_CODE_SESSION_ID"`). Leave workbench mode and finish the work yourself without pausing: review
   what each agent left, complete it in its worktree to your standard, run the acceptance command,
   `wb accept`, then carry on with the rest of the request directly, without delegating.
 - **`/workbench-quit`**: stop. This session's delegated agents are already stopped (`wb stop
@@ -374,7 +384,8 @@ coding choice is the user's (`wb coding`), never changed by a check.
   blocked until you do.
 - **stuck / failed** — `wb log <name> -n 30` if the report isn't enough; then feedback that unblocks
   it, or discard. Past step 1, discard drops only this step: the steps `wb next` committed stay on
-  the branch, and the report says how to accept them instead.
+  the branch, and the report says how to accept them instead. A failed round's edits so far stay in the worktree (`wb resume` carries on). A setup or load failure before the agent ran: fix it, then `wb resume <name>`.
+
 - **Lessons**: when the `lessons:` line says one was seen in more than one task, or you just
   corrected something the next agent will get wrong too, triage it now (`reference/skills.md`).
   A one-task detail needs no call.
@@ -407,6 +418,8 @@ still has room (how handovers work: `reference/driving.md`).
 Check a directory flagged as possible build output before you accept a step. Remove or gitignore
 generated files. When the bulk additions or large binaries belong in the commit, pass
 `--include` to `wb next` or `wb accept` after reviewing them.
+When a command says the repo `moved or was deleted`, ask the user where it is now, then
+`wb relocate <name> --repo <dir>`; a removed linked worktree needs nothing (its main one is used).
 
 Follow-up work in the same area goes to the same agent: `wb next <name> --spec <file> -m "<subject
 for the approved step>" [--test …]` commits the approved step on the branch and sends the next
@@ -445,7 +458,8 @@ goes in that repo's CLAUDE.md instead. Drop a note that has stopped holding (`wb
   call, and whose tests fail on its base and pass in the agent's lane (one that commits or writes
   outside it never can: add refuses it), is a case: `wb bench add <name>` (`--step N` for a
   `wb next` step; `--hidden <paths>` or `--check "<cmd>"` when the tests it changed aren't the
-  ones that tell). `wb bench run [--model <id>…] [--label <variant>]` replays the cases in the
+  ones that tell; with `run_in_background: true`, as `wb bench self`: their setup and tests can
+  outrun Bash's 2 minutes). `wb bench run [--model <id>…] [--label <variant>]` replays the cases in the
   background, one at a time, after any real task and stopped by one; it wakes no one and costs
   you nothing. `wb bench report` compares models (or a `--label`, such as a workbench branch or
   a skill handed with `--skill`) on the same work. It is evidence for your `--model` and the

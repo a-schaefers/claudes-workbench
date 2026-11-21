@@ -11,6 +11,7 @@ import shutil
 import stat
 import subprocess
 import tempfile
+import unicodedata
 from collections import Counter
 from pathlib import Path
 from typing import Callable
@@ -44,6 +45,7 @@ PLAIN = ("-c", "color.ui=never", "-c", "color.diff=never", "-c", "color.status=n
 # wb accept ran them as the user outside the lane (the 2026-11-16 audit). The checks belong in
 # --test, which runs in the lane. Signing is kept: only the hooks go.
 NO_HOOKS = ("-c", "core.hooksPath=/dev/null")
+NO_SMUDGE = {"GIT_LFS_SKIP_SMUDGE": "1"}  # LFS files stay pointers: a trial reads paths only (#469)
 
 
 def _record(worktree) -> Path | None:
@@ -75,6 +77,10 @@ def _pinned(cwd) -> list[str]:
                 and dotgit.read_bytes() == want["dotgit"].encode())
     except OSError:
         same = False
+    if not Path(want["gitdir"]).is_dir():  # its repo moved: `.git` still says so, or repaired (#498)
+        task = rec.parent.name
+        raise GitError(f"the repo moved or was deleted (its git dir {want['gitdir']} is gone): "
+                       f"wb relocate {task} --repo <its new path>")
     if not same:
         raise GitError(f"the worktree's .git was rewritten: git was not run there ({dotgit} "
                        f"must say gitdir: {want['gitdir']})")
@@ -175,6 +181,79 @@ def toplevel(path) -> Path:
         if again.returncode and b"not a git repository" in again.stderr:
             raise NotARepo(str(e)) from None
         raise
+
+
+def common_dir(path) -> Path | None:
+    """The repository's own git dir, which all its worktrees share, as a real path; None when
+    ``path`` is in none (or gone)."""
+    if not Path(path).is_dir():
+        return None
+    out = git(path, "rev-parse", "--git-common-dir", check=False).strip()
+    return Path(os.path.realpath(Path(path) / out)) if out else None
+
+
+def repo_of(spec: dict) -> Path:
+    """Where a task's repo-level git runs (its tip, its branch, wb verify's clones): task.json
+    `repo` while it is a checkout of the task's repository; once that checkout is gone (a linked
+    worktree removed: one per feature, the bare-repo layout, Claude Code's --worktree sessions)
+    the repository's main worktree, from its git dir (task.json `git_common`), or that git dir
+    itself when it is bare. A removed `repo` wedged wb accept on every retry, and discard said
+    the branch had gone with it (#498, the audit of 1.90). `repo` itself when the git dir is
+    gone too: the repo moved (wb relocate)."""
+    repo = Path(spec.get("repo") or "/nonexistent")
+    common = spec.get("git_common") or _common_recorded(spec.get("name"))
+    if not common or not Path(common).is_dir() or common_dir(repo) == Path(common):
+        return repo
+    for line in git(common, "worktree", "list", "--porcelain", check=False).splitlines():
+        if line.startswith("worktree "):  # the first is the main one (a bare repo: its git dir)
+            return main if (main := Path(line[9:])).is_dir() else Path(common)
+    return Path(common)
+
+
+def _common_recorded(task: str | None) -> str | None:
+    """A task's git dir from gitdir.json, for a task.json from before `git_common`."""
+    rec = Path(store.tasks_dir()).parent / "rules" / task / "gitdir.json" if task else None
+    want = store.read_json(rec) if rec else None
+    try:
+        gitdir = Path(want["gitdir"])
+        return os.path.realpath(gitdir / (gitdir / "commondir").read_text().strip())
+    except (TypeError, KeyError, OSError):
+        return None
+
+
+def relocate(repo: Path, worktree: Path) -> None:
+    """Point a task's worktree at ``repo``, the place its repository moved to, and record that
+    (gitdir.json): its git dir is the one ``repo`` keeps for it (the one whose link back is this
+    worktree); then `git worktree repair`, and its `.git` written as repair would have when
+    the repair couldn't (a git too old to infer it). A `.git` naming another git dir that exists
+    (one the agent made) is refused first, as _pinned refuses it: a newer git's repair would
+    quietly take it back."""
+    common, dotgit = common_dir(repo), Path(worktree) / ".git"
+    admin = None
+    for d in (common / "worktrees").iterdir() if common and (common / "worktrees").is_dir() else ():
+        with contextlib.suppress(OSError):
+            if os.path.realpath((d / "gitdir").read_text().strip()) == os.path.realpath(dotgit):
+                admin = d
+    if admin is None:
+        raise GitError(f"{worktree} isn't one of {repo}'s worktrees")
+
+    def said() -> Path | None:
+        try:
+            if stat.S_ISREG(os.lstat(dotgit).st_mode):
+                return Path(dotgit.read_text().removeprefix("gitdir:").strip())
+        except OSError:
+            pass
+        return None
+    if (was := said()) is not None and was.is_dir() and os.path.realpath(was) != os.path.realpath(admin):
+        raise GitError(f"{dotgit} names a git dir of its own ({was}): it isn't one of {repo}'s "
+                       "worktrees")
+    git(repo, *NO_HOOKS, "worktree", "repair", str(worktree), check=False)
+    if (now := said()) is None or os.path.realpath(now) != os.path.realpath(admin):
+        if dotgit.is_symlink() or dotgit.is_dir():
+            raise GitError(f"{dotgit} isn't a file: it isn't one of {repo}'s worktrees")
+        dotgit.write_text(f"gitdir: {admin}\n")
+    if rec := _record(worktree):
+        store.write_json(rec, {"gitdir": str(admin), "dotgit": dotgit.read_text()})
 
 
 def branch_name(task: str) -> str:
@@ -380,9 +459,10 @@ def share_lfs(repo: Path, clone: Path) -> None:
 
 
 def submodules(repo: Path, commit: str) -> list[str]:
-    """The submodule paths ``commit`` lists. They stay empty in a task's worktree: each one's
-    `.git` would be a file the agent could point at a git dir of its own, whose config git then
-    obeys outside the lane (see _pinned), so wb start says so instead (the 2026-11-16 audit)."""
+    """The submodule paths ``commit`` lists. In a task's worktree each is filled read-only by
+    fill_submodules, never checked out: a `.git` there would be a file the agent could point at a
+    git dir of its own, whose config git then obeys outside the lane (see _pinned; the 2026-11-16
+    audit). wb start names only the ones it couldn't fill."""
     out = git(repo, "config", "--blob", f"{commit}:.gitmodules", "--get-regexp",
               r"^submodule\..*\.path$", check=False)
     return [line.split(" ", 1)[1] for line in out.splitlines() if " " in line]
@@ -561,22 +641,65 @@ def build_dirs(worktree: Path, files: str) -> list[tuple[str, int]]:
             if n >= BUILD_FILES and os.fsencode(d[:-1]) not in tracked]
 
 
-def _bulk(worktree: Path, tree: str) -> str | None:
-    """Check the prospective tree, including binary paths that cannot be decoded as UTF-8."""
-    rows = git_bytes(worktree, "diff", "--numstat", "--no-renames", "--diff-filter=A",
-                     "-z", "HEAD", tree).split(b"\0")
-    added = [r.split(b"\t", 2) for r in rows if r]
+SNAPSHOT_MAX = 1 << 25  # a review snapshot stores at most this many bytes of new files
+
+
+def _new_files(worktree: Path) -> list[tuple[bytes, int]]:
+    """The new files (untracked, not ignored) and their sizes, from `ls-files --others` and
+    lstat alone: nothing is read or hashed. A symlink or anything but a regular file counts 0;
+    nested repositories (nested_repos) are left out."""
+    top, out = os.fsencode(os.path.abspath(worktree)), []
+    for f in git_bytes(worktree, "ls-files", "--others", "--exclude-standard", "-z").split(b"\0"):
+        if f and not f.endswith(b"/"):
+            try:
+                st = os.lstat(os.path.join(top, f))
+            except OSError:  # gone mid-scan
+                continue
+            out.append((f, st.st_size if stat.S_ISREG(st.st_mode) else 0))
+    return out
+
+
+def _binary(worktree: Path, path: bytes) -> bool | None:
+    """Whether git would store ``path`` as a binary file, None when a filter (Git LFS) decides
+    what is stored: the `diff` attribute, else a NUL in its first 8000 bytes, as git's own test."""
+    out = _run(worktree, ["check-attr", "-z", "filter", "diff", "--", os.fsdecode(path)],
+               check=False).stdout.split(b"\0")
+    attrs = {out[i + 1]: out[i + 2] for i in range(0, len(out) - 2, 3)}
+    if attrs.get(b"filter", b"unspecified") not in (b"unspecified", b"unset"):
+        return None
+    if attrs.get(b"diff") in (b"set", b"unset"):
+        return attrs[b"diff"] == b"unset"
+    try:
+        fd = os.open(os.path.join(os.fsencode(os.path.abspath(worktree)), path),
+                     os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+        with os.fdopen(fd, "rb") as f:
+            return b"\0" in f.read(8000)
+    except OSError:
+        return False
+
+
+def _bulk(worktree: Path) -> str | None:
+    """Why the worktree's new files shouldn't be committed without --include, or None: more than
+    NEW_FILES_MAX of them, a new binary of BINARY_MAX or more. Counted from the file system
+    before anything is hashed: checked on a snapshot, every file the check then refused was
+    already in the user's object store (#431, the audit of 1.8). Paths are bytes: a name that
+    isn't UTF-8 is checked too."""
+    added = _new_files(worktree)
+    top = os.fsencode(os.path.abspath(worktree))
+    for f in git_bytes(worktree, "diff", "--cached", "--name-only", "--no-renames",
+                       "--diff-filter=A", "-z", "HEAD").split(b"\0"):  # staged, not at HEAD
+        with contextlib.suppress(OSError):
+            if f and stat.S_ISREG((st := os.lstat(os.path.join(top, f))).st_mode):
+                added.append((f, st.st_size))
     why = []
     if len(added) > NEW_FILES_MAX:
-        tops = Counter(_top(p.decode("utf-8", "replace")) for _, _, p in added).most_common(3)
+        tops = Counter(_top(os.fsdecode(p)) for p, _ in added).most_common(3)
         why.append(f"{len(added):,} new files ({', '.join(f'{d} {n:,}' for d, n in tops)})")
-    for insertions, _, path in added:
-        if insertions == b"-":
-            size = int(git_bytes(worktree, "cat-file", "-s", os.fsencode(tree) + b":" + path))
-            if size >= BINARY_MAX:
-                why.append(f"a {size / (1 << 20):.0f} MB binary file, {path.decode('utf-8', 'replace')}")
-                if len(why) == 4:
-                    break
+    for path, size in added:
+        if size >= BINARY_MAX and _binary(worktree, path):
+            why.append(f"a {size / (1 << 20):.0f} MB binary file, {path.decode('utf-8', 'replace')}")
+            if len(why) == 4:
+                break
     return "; ".join(why) or None
 
 
@@ -614,14 +737,16 @@ def mark(worktree: Path) -> str:
     return h.hexdigest()
 
 
-def with_new_files(worktree: Path, *args, whole: bool = False, limit: int | None = None) -> str | None:
+def with_new_files(worktree: Path, *args, whole: bool = False, limit: int | None = None,
+                   new: list[bytes] | None = None) -> str | None:
     """`git <args>` with new files counted as changes (intent-to-add), in a scratch index: the
     worktree's own index, and anything a concurrent git command holds, are left alone. The
     scratch index starts as a copy of the worktree's, so sparse-checkout's skip-worktree entries
     aren't read as deletions (read-tree listed a monorepo's every file outside the cone as
     deleted: the 2026-11-16 audit). Nested repositories are left out (nested_repos). ``whole``
     adds new files' contents too, not just their intent (for write-tree: snapshot). ``limit``:
-    at most that many characters of output, else None (_bounded)."""
+    at most that many characters of output, else None (_bounded). ``new``: only these new files
+    are added, beside the tracked files' changes (snapshot_left)."""
     # in a private directory of the state dir, not the temp dir: /tmp is in the agent's lane, and
     # an agent process still running could rewrite the index between `add -N` and the diff, so
     # files dropped out of the diff Claude reviews (the 2026-11-16 audit)
@@ -636,8 +761,15 @@ def with_new_files(worktree: Path, *args, whole: bool = False, limit: int | None
             shutil.copyfile(Path(worktree) / real, index)  # a relative path is the worktree's
         except (GitError, OSError):
             git(worktree, "read-tree", "HEAD", env=env)
-        skip = [f":(exclude){p}" for p in nested_repos(worktree)]
-        add_all(worktree, *([] if whole else ["-N"]), *(["--", ".", *skip] if skip else []), env=env)
+        if new is not None:
+            _run(worktree, ["add", "-u"], env)
+            if new:
+                add_all(worktree, *([] if whole else ["-N"]), "--",
+                        *(":(literal)" + os.fsdecode(p) for p in new), env=env)
+        else:
+            skip = [f":(exclude){p}" for p in nested_repos(worktree)]
+            add_all(worktree, *([] if whole else ["-N"]), *(["--", ".", *skip] if skip else []),
+                    env=env)
         return _bounded(worktree, args, env, limit) if limit else git(worktree, *args, env=env)
     finally:
         shutil.rmtree(scratch, ignore_errors=True)
@@ -683,8 +815,42 @@ def _bounded(cwd, args, env, limit: int) -> str | None:
 
 def snapshot(worktree: Path) -> str:
     """The working tree as it is now, new files included, as a tree object: a base to diff
-    against later. The worktree's own index is left alone."""
-    return with_new_files(worktree, "write-tree", whole=True).strip()
+    against later. The worktree's own index is left alone. Bulky new files are left out
+    (snapshot_left)."""
+    return snapshot_left(worktree)[0]
+
+
+def snapshot_left(worktree: Path) -> tuple[str, list[str]]:
+    """snapshot's tree, and what it left out ("build/ (400 new files)", "data.bin (3 MB)"; []
+    when nothing): a new file of BINARY_MAX or more, the top-level directories with the most new
+    files while there are more than NEW_FILES_MAX, then the biggest new files while the rest
+    pass SNAPSHOT_MAX bytes. Chosen by count and size alone, before anything is hashed: `add -A`
+    wrote every new file into the user's object store, each round it changed, kept until git's
+    prune window passed (a refused accept of 400 x 100 KB build/ files took .git/objects from
+    28K to 41M: #431, the audit of 1.8)."""
+    files = _new_files(worktree)
+    big = [(p, n) for p, n in files if n >= BINARY_MAX]
+    rest = [(p, n) for p, n in files if n < BINARY_MAX]
+    dirs, count = [], Counter(_top(os.fsdecode(p)) for p, _ in rest)
+    for d, n in count.most_common():
+        if len(rest) <= NEW_FILES_MAX:
+            break
+        dirs.append(f"{d} ({n:,} new file{'s' if n != 1 else ''})")
+        rest = [(p, m) for p, m in rest if _top(os.fsdecode(p)) != d]
+    rest.sort(key=lambda r: r[1])
+    while rest and sum(n for _, n in rest) > SNAPSHOT_MAX:
+        big.append(rest.pop())
+    if len(rest) == len(files):
+        return with_new_files(worktree, "write-tree", whole=True).strip(), []
+    tree = with_new_files(worktree, "write-tree", whole=True, new=[p for p, _ in rest]).strip()
+    return tree, dirs + brief([f"{os.fsdecode(p)} ({n / (1 << 20):.0f} MB)" if n >= 1 << 20
+                               else f"{os.fsdecode(p)} ({n >> 10:,} KB)" for p, n in sorted(big)])
+
+
+def left_line(left: list[str]) -> str:
+    """The review notice's line on what snapshot_left left out."""
+    return (f"\n\nleft out of the review snapshot, too big to store each round: {', '.join(left)}"
+            "; the next review's diff shows them again" if left else "")
 
 
 def diff(worktree: Path, base: str, stat=False, paths=(), numstat=False, stat_count=None,
@@ -735,7 +901,7 @@ def step_commit(task: store.Task, step: int, steps: int) -> str | None:
     spec = task.spec
     want = f"Workbench-Task: {task.name}" + (f" (step {step})" if step < steps else "")
     tip = task.status.get("tip") or spec["branch"]  # the branch is deleted once merged (cli.gc)
-    log = git(spec["repo"], "log", "--format=%H%x00%B%x01", f"{spec['base']}..{tip}", check=False)
+    log = git(repo_of(spec), "log", "--format=%H%x00%B%x01", f"{spec['base']}..{tip}", check=False)
     for entry in log.split("\x01"):
         sha, _, body = entry.strip().partition("\x00")
         if sha and want in body.splitlines():
@@ -844,7 +1010,7 @@ def commit_all(worktree: Path, message: str, include: bool = False, sign: bool =
                        "remove its .git or gitignore it, then try again")
     if edits := submodule_edits(worktree):  # they would vanish with the worktree (#419)
         raise GitError("not committed: " + "; ".join(edits))
-    if not include and (why := _bulk(worktree, snapshot(worktree))):
+    if not include and (why := _bulk(worktree)):
         raise GitError(f"not committed: {why}. Build output? Gitignore or remove it in "
                        f"{worktree}, or --include to commit it anyway")
     add_all(worktree, pre=NO_HOOKS)
@@ -1201,18 +1367,23 @@ def _overwritten(repo: Path, branch: str) -> list[str]:
     is a file counts too. The paths come from the merge itself, done in memory (merge-tree): the
     branch's added paths missed a modify/delete conflict, whose abort deleted the personal copy, a
     directory rename that moved an added file onto one, and a non-UTF-8 name read with U+FFFD
-    (#241, the audit of 1.2). Raw bytes throughout."""
+    (#241, the audit of 1.2). Raw bytes throughout. Under core.ignorecase (macOS, Windows) a
+    path matching a tracked one but for case is that tracked file: a case-only rename (Readme.md
+    to README.md) was refused as "would overwrite README.md" on APFS (#470, the audit of 1.8)."""
     written = _merge_tree(repo, branch)
     if written is None:  # git before 2.38
         written = _trial_merge(repo, branch)
     tracked = set(_run(repo, ("ls-tree", "-r", "--name-only", "-z", "HEAD")).stdout.split(b"\0"))
+    ignorecase = git(repo, "config", "--bool", "core.ignorecase", check=False).strip() == "true"
+    folded = {_folded(t) for t in tracked} if ignorecase else set()
     top = os.fsencode(repo)
     out = []
     for p in (p for p in written.split(b"\0") if p and p not in tracked):
         parts = p.split(b"/")
         for i in range(1, len(parts) + 1):
             here = os.path.join(top, *parts[:i])
-            if b"/".join(parts[:i]) in tracked or not os.path.lexists(here):
+            if (b"/".join(parts[:i]) in tracked or not os.path.lexists(here)
+                    or folded and _folded(b"/".join(parts[:i])) in folded):
                 # a tracked file where the merge puts a directory is the merge's to replace: a
                 # clean file-to-directory refactor (pkg to pkg/init.py) was refused (#343, the
                 # audit of 1.4)
@@ -1236,6 +1407,12 @@ def _overwritten(repo: Path, branch: str) -> list[str]:
             out.append(p.decode("utf-8", "replace"))
             break
     return out
+
+
+def _folded(path: bytes) -> str:
+    """A path as a case-insensitive file system compares it (APFS folds case and Unicode
+    normalization alike): for core.ignorecase (#470)."""
+    return unicodedata.normalize("NFC", os.fsdecode(path)).casefold()
 
 
 def _untracked_under(path: bytes, top: bytes, tracked: set[bytes]) -> list[str]:
@@ -1264,15 +1441,21 @@ def _trial_merge(repo: Path, branch: str) -> bytes:
     """The paths the merge would write, from the same merge done in a scratch worktree of HEAD:
     git before 2.38 has no merge-tree --write-tree, and the paths the branch adds, its fallback,
     missed a modify/delete conflict whose abort deleted the developer's ignored copy on Git
-    2.34.1, Ubuntu 22.04's (#320, the audit of 1.4). A trial that can't run refuses the merge."""
+    2.34.1, Ubuntu 22.04's (#320, the audit of 1.4). A trial that can't run refuses the merge.
+    The worktree is made without a checkout and its index read from HEAD, so the merge writes
+    only the files it changes, and LFS's smudge is skipped: a full checkout of HEAD took
+    gigabytes and minutes on a big repo, ignoring its sparse patterns, and failed when LFS
+    objects weren't local (#469, the audit of 1.8). A file missing from the worktree is no local
+    change to git's merge, and the paths are read from the index (diff --cached)."""
     store.home().mkdir(parents=True, exist_ok=True)
     scratch = tempfile.mkdtemp(prefix=store.scratch("wb-merge-"), dir=store.home())
     wt = os.path.join(scratch, "w")
     try:
-        _run(repo, (*NO_HOOKS, "worktree", "add", "-q", "--detach", wt, "HEAD"))
+        _run(repo, (*NO_HOOKS, "worktree", "add", "-q", "--no-checkout", "--detach", wt, "HEAD"))
+        _run(wt, ("read-tree", "HEAD"))
         _run(wt, (*NO_HOOKS, "-c", "rerere.enabled=false", "merge", "--no-commit", "--no-ff",
-                  "--no-edit", branch), check=False)  # a conflict still says what it touched
-        changed = _run(wt, ("diff", "--name-only", "--no-renames", "-z", "HEAD")).stdout
+                  "--no-edit", branch), NO_SMUDGE, check=False)  # a conflict says what it touched
+        changed = _run(wt, ("diff", "--cached", "--name-only", "--no-renames", "-z", "HEAD")).stdout
         unmerged = [row.split(b"\t", 1)[1] for row in
                     _run(wt, ("ls-files", "-u", "-z")).stdout.split(b"\0") if b"\t" in row]
         return b"\0".join([*changed.split(b"\0"), *unmerged])

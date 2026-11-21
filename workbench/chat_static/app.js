@@ -235,7 +235,13 @@
     // one short line, one time: the receipt's once Claude has it (#103)
     if (m.received) meta.append(span('tick', '✓✓'), span('', (m.received.how === 'queued'
       ? 'Queued for Claude · ' : 'Read by Claude · ') + clock(m.received.ts)))
-    else meta.append(span('tick', '✓'), span('', (state.listener ? 'Delivered · ' : 'Waiting for a Claude session · ')
+    else if (m.expired) {  // unread too long: no session is given it, so never "Delivered" (#536)
+      const h = Math.round((state.expire || 21600) / 3600)
+      meta.append(span('', `Not passed to Claude (over ${h} h old) · ` + clock(m.ts) + ' · '))
+      const b = document.createElement('button'); b.textContent = 'send again'
+      b.onclick = () => { b.disabled = true; resend(m.text) }
+      meta.append(b)
+    } else meta.append(span('tick', '✓'), span('', (state.listener ? 'Delivered · ' : 'Waiting for a Claude session · ')
       + clock(m.ts)))
     return meta
   }
@@ -520,7 +526,7 @@
     if (s.build) build = s.build
     live = true
     save(K.thread, (s.messages || []).slice(-50))
-    state = { messages: s.messages || [], asks: s.asks || [], prefs: s.prefs || {}, push: s.push || {}, listener: s.listener || null, savings: s.savings || null }
+    state = { messages: s.messages || [], asks: s.asks || [], prefs: s.prefs || {}, push: s.push || {}, listener: s.listener || null, savings: s.savings || null, expire: s.expire || 0 }
     if (!sheet.hidden) drawSettings()
     if (state.push.key && !pushSynced) { pushSynced = true; syncPush() }
     reportSeen()
@@ -758,6 +764,14 @@
     outbox = outItems()
     render(); toEnd(true); flush(true)
   }
+  // an expired message, sent again as a new one through the outbox (its own cid)
+  function resend(text) {
+    if (!token) return
+    const o = { cid: newId(), text, ts: now() }
+    if (!save(OUT + o.cid, o)) { banner('Not sent: this browser keeps no outbox here. Copy it into the box.', true); return }
+    outbox = outItems()
+    render(); toEnd(true); flush(true)
+  }
   function sentHeld() {
     if (input.value.trim() === held.text) { input.value = ''; save(K.draft, ''); grow(); sendBtn.disabled = true }
     if (!(held.about && held.about.audio)) setAbout(null)  // a kept take never set the box's
@@ -859,7 +873,7 @@
   const ios = /iphone|ipad|ipod/i.test(navigator.userAgent) || (navigator.platform === 'MacIntel' && navigator.maxTouchPoints > 1)
   const iosSafari = ios && !/CriOS|FxiOS|EdgiOS|OPiOS/.test(navigator.userAgent)
   const canPush = window.isSecureContext && 'serviceWorker' in navigator && 'PushManager' in window && 'Notification' in window
-  let installEvt = null, swReg = null, pushOn = false, pushBusy = false, pushNote = '', pushSynced = false
+  let installEvt = null, swReg = null, pushOn = false, pushEndpoint = '', pushBusy = false, pushNote = '', pushSynced = false
   addEventListener('beforeinstallprompt', e => { e.preventDefault(); installEvt = e; if (!sheet.hidden) drawSettings() })
   addEventListener('appinstalled', () => { installEvt = null; if (!sheet.hidden) drawSettings() })
   if (window.isSecureContext && 'serviceWorker' in navigator) {
@@ -887,6 +901,7 @@
           ? await swReg.pushManager.subscribe({ userVisibleOnly: true, applicationServerKey: unb64u(key) }) : null
       }
       pushOn = !!sub && Notification.permission === 'granted'
+      pushEndpoint = pushOn ? sub.endpoint : ''
       if (sub) await post('/api/push', { endpoint: sub.endpoint, on: true })
     } catch {}
     if (!sheet.hidden) drawSettings()
@@ -900,11 +915,11 @@
         if (!sub) sub = await swReg.pushManager.subscribe({ userVisibleOnly: true, applicationServerKey: unb64u(state.push.key) })
         const r = await post('/api/push', { endpoint: sub.endpoint, on: true })
         if (!r.ok) throw new Error((await r.json().catch(() => ({}))).error || 'The computer refused it.')
-        pushOn = true
+        pushOn = true; pushEndpoint = sub.endpoint
       } else {
         const sub = await swReg.pushManager.getSubscription()
         if (sub) { await post('/api/push', { endpoint: sub.endpoint, on: false }).catch(() => {}); await sub.unsubscribe() }
-        pushOn = false
+        pushOn = false; pushEndpoint = ''
       }
     } catch (e) { pushNote = String((e && e.message) || e) }
     pushBusy = false; drawSettings()
@@ -940,7 +955,7 @@
     sw.checked = pushOn; sw.disabled = pushBusy || !swReg || !(state.push && state.push.key)
     sw.onchange = () => setPush(sw.checked)
     row.append(t, sw); box.append(row)
-    para(box, pushBusy ? 'Working…' : pushNote || (pushOn ? 'On: this device hears from Claude even with the page closed, unless the page already showed it.'
+    para(box, pushBusy ? 'Working…' : pushNote || (pushOn ? 'On: this device hears from Claude even with the page closed, unless this page showed it on screen, or you were using the chat on another device then.'
       : 'Off. Nothing you and Claude write passes through the push service: the phone fetches it from your computer.'), 'small')
     if (pushOn && !pushBusy) {
       const b = document.createElement('button'); b.type = 'button'; b.className = 'plain'; b.textContent = 'Send a test'
@@ -948,24 +963,41 @@
         b.disabled = true
         try {
           const j = await (await post('/api/push', { test: true })).json()
-          pushNote = j.ok ? 'Sent: it should arrive in a few seconds.' : "The push service didn't take it: turn notifications off and on again."
+          // why it failed, from the computer's side: it all read as the service's refusal (#539)
+          const why = (j.reasons || []).length ? ` (${j.reasons[0]})` : ''
+          pushNote = j.ok ? 'Sent: it should arrive in a few seconds.'
+            : j.hint === 'cert' ? "The computer can't check the push service's certificate" + why + ': its Python has no CA certificates. On a Mac, run Install Certificates.command from your Python\'s folder in Applications; elsewhere install ca-certificates, or set SSL_CERT_FILE. Then restart the chat server.'
+            : j.hint === 'clock' ? 'The push service refused it' + why + ": check the computer's clock is right, then turn notifications off and on again."
+            : j.hint === 'unreached' ? "The computer couldn't reach the push service" + why + ': check its network, or a proxy in the way.'
+            : "The push service didn't take it" + why + ': turn notifications off and on again.'
         } catch { pushNote = 'Not sent: try again.' }
         drawSettings()
       }
       box.append(b)
     }
   }
-  // What the page showed while on screen: the computer pushes only what no page has
-  const reported = new Set()
+  // What the page showed while on screen, so the computer pushes only what nobody saw. Merely
+  // visible counted for every device: a desktop tab left open behind the terminal silenced the
+  // phone's pushes for good (#537). Now a page in use (focused, touched or typed in within
+  // USING_MS) speaks for every device; one only on screen, for its own subscription alone.
+  const USING_MS = 120_000
+  let lastInput = 0
+  const reported = new Set()  // `<all|own>:<id>`
   function reportSeen() {
     if (document.hidden || !token) return
+    const using = document.hasFocus() && Date.now() - lastInput < USING_MS
+    if (!using && !pushEndpoint) return
+    const how = using ? 'all' : 'own'
     const ids = [...state.messages.filter(m => m.from === 'claude').slice(-20).map(m => m.id),
-      ...state.asks.filter(a => !a.answer).map(a => a.id)].filter(i => !reported.has(i))
+      ...state.asks.filter(a => !a.answer).map(a => a.id)].filter(i => !reported.has('all:' + i) && !reported.has(how + ':' + i))
     if (!ids.length) return
-    ids.forEach(i => reported.add(i))
-    post('/api/seen', { ids }).catch(() => ids.forEach(i => reported.delete(i)))
+    ids.forEach(i => reported.add(how + ':' + i))
+    post('/api/seen', { ids, ...(using ? {} : { endpoint: pushEndpoint }) }).catch(() => ids.forEach(i => reported.delete(how + ':' + i)))
   }
   document.addEventListener('visibilitychange', reportSeen)
+  addEventListener('focus', reportSeen)
+  for (const ev of ['pointerdown', 'keydown', 'wheel', 'touchstart'])
+    addEventListener(ev, () => { lastInput = Date.now(); reportSeen() }, { capture: true, passive: true })
 
   async function firstState() {  // at once, without waiting for a stream slot to free up
     try {

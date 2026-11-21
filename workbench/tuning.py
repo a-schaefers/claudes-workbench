@@ -68,8 +68,15 @@ def _key(row: dict) -> tuple:
 
 def judged(row: dict) -> bool:
     """Whether a closed task says anything about the model, a knob or a skill: not a discard
-    Claude put down to its own spec (--spec-gap), which would score the agent for Claude's miss."""
-    return not (row.get("outcome") == "discarded" and row.get("spec_gaps"))
+    Claude put down to its own spec (--spec-gap), which would score the agent for Claude's miss;
+    nor a task whose agent never ran (`ran` false: its setup or its model's load failed), which
+    scored the model 0/3 for a lockfile problem or a sleeping server and locked it out of routing
+    (#581). A row from before `ran` was recorded: not accepted, and no token written."""
+    if row.get("outcome") == "discarded" and row.get("spec_gaps"):
+        return False
+    if "ran" in row:
+        return bool(row["ran"])
+    return row.get("outcome") == "accepted" or row.get("tok_out") != 0
 
 
 def agent_reviews(row: dict) -> int:
@@ -83,8 +90,8 @@ def reward(row: dict, usual_minutes: float | None = None) -> float:
     r = 1 / (1 + agent_reviews(row))
     if any(s.get("compacted") for s in row.get("steps") or []):
         r -= COMPACT_PENALTY
-    mins = row.get("minutes")
-    if usual_minutes and mins and mins > 0:
+    mins = row.get("active_minutes")  # the agent's time, not the wait for Claude's review (#543)
+    if usual_minutes and isinstance(mins, (int, float)) and mins > 0:
         r -= SPEED_WEIGHT * max(-1.0, min(1.0, math.log2(mins / usual_minutes)))
     return r
 
@@ -103,7 +110,8 @@ def record(name: str, model: str, window, ceiling=None) -> dict:
     """Each allowed value's evidence for this model and window: {value: [rewards]}."""
     rows = [r for r in store.results() if _key(r) == (model, window) and judged(r)
             and (r.get("tuned") or {}).get(name) is not None]
-    mins = [r["minutes"] for r in rows if r.get("minutes")]
+    mins = [r["active_minutes"] for r in rows if isinstance(r.get("active_minutes"), (int, float))
+            and r["active_minutes"] > 0]
     usual = statistics.median(mins) if mins else None
     out: dict = {v: [] for v in allowed(name, ceiling)}
     for r in rows:

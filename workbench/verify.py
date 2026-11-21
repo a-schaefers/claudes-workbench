@@ -172,21 +172,23 @@ def _run(task: store.Task, checkout, cmd, limit: int, keep=None,
     store.home().mkdir(parents=True, exist_ok=True)  # not in /tmp, where the git shim allows writes
     with tempfile.TemporaryDirectory(prefix=store.scratch(".verify-"), dir=store.home()) as scratch:
         # nested as the worktree is, so that a sibling two levels up stays in the scratch (#261)
+        repo = gitops.repo_of(task.spec)  # a removed linked worktree: the main one (#498)
         work = context.tree(Path(scratch), task.spec["repo"], task.spec.get("siblings"), "repo")
         work.parent.mkdir(parents=True, exist_ok=True)
-        gitops.git(scratch, "clone", "-q", "--shared", "--no-checkout", task.spec["repo"], str(work))
-        checkout_settings(Path(task.spec["repo"]), work)  # its line endings, as the task's (#426)
-        gitops.share_lfs(Path(task.spec["repo"]), work)  # its LFS files as data (#382)
-        if sparse := gitops.sparse_of(Path(task.spec["repo"])):  # as the task's worktree is (#263)
+        gitops.git(scratch, "clone", "-q", "--shared", "--no-checkout", str(repo), str(work))
+        checkout_settings(repo, work)  # its line endings, as the task's (#426)
+        gitops.share_lfs(repo, work)  # its LFS files as data (#382)
+        if sparse := gitops.sparse_of(repo):  # as the task's worktree is (#263)
             gitops.apply_sparse(work, sparse)
         checkout(work)
         # its submodules as the task's worktree has them (#350)
-        gitops.fill_submodules(Path(task.spec["repo"]), gitops.git(work, "rev-parse", "HEAD").strip(), work)
+        gitops.fill_submodules(repo, gitops.git(work, "rev-parse", "HEAD").strip(), work)
         at = _At(task.name, work)
         # its setup, copies and siblings, as the worktree (#201): copied from it (#249)
         code, said = runner.prepare(at, None if setup else task.worktree)
         if code != 0:
-            return "setup failed", f"[setting up the scratch checkout failed: {code}]\n{said}"
+            why = runner.setup_timed_out(task.spec) if code == "timeout" else code
+            return "setup failed", f"[setting up the scratch checkout failed: {why}]\n{said}"
         out = runner.run_in_lane(at, cmd(work) if callable(cmd) else cmd, limit)
         if keep:
             keep(work)
@@ -250,7 +252,7 @@ def run(task: store.Task, cmd: str, files: list[str] | None = None, limit: int =
         expect: str = "", setup: bool = False) -> dict:
     """Run ``cmd`` on the base (with the candidate's test files) and on the candidate; the
     result, also kept in tasks/<task>/verify/<n>/ with both outputs."""
-    tree = gitops.snapshot(task.worktree)
+    tree, left = gitops.snapshot_left(task.worktree)  # bulky new files left out (#431)
     base_rev = _review_base(task)
     if not base_rev:
         raise RuntimeError("cannot find the last approved step's commit for the comparison")
@@ -275,7 +277,8 @@ def run(task: store.Task, cmd: str, files: list[str] | None = None, limit: int =
               "candidate": {"rev": tree, "exit": c_code, "assertion": assertion(c_out)},
               "verdict": verdict(b_code, b_out, c_code, expect, uncopied), "dir": str(out),
               **({"expect": expect} if expect else {}),
-              **({"uncopied": uncopied[:50]} if uncopied else {})}
+              **({"uncopied": uncopied[:50]} if uncopied else {}),
+              **({"left_out": left} if left else {})}
     if b_code != 0 and (gone := missing(b_out, uncopied)):
         result["missing"] = gone
     store.write_json(out / "result.json", result)
@@ -301,6 +304,8 @@ def lines(r: dict) -> list[str]:
     if r.get("missing"):
         out.append(f"  the base lacked what the candidate adds: {', '.join(r['missing'])} "
                    "(--files copies what the test reads onto the base)")
+    if r.get("left_out"):
+        out.append(f"  not in the candidate (too big to snapshot): {', '.join(r['left_out'])}")
     out.append(f"  outputs: {r['dir']}/{{base,candidate}}.txt")
     return out
 
@@ -353,10 +358,14 @@ def _capture(task: store.Task, cmd: str, viewport: str, limit: int, setup: bool,
             if p.is_file() and not p.is_symlink() and p.read_bytes()[:8] == b"\x89PNG\r\n\x1a\n":
                 shutil.copyfile(p, dest)
         # absolute: the command runs in the task's package (task.json `subdir`), where a relative
-        # path landed while the image was looked for at the checkout's top (#433, the audit of 1.8)
+        # path landed while the image was looked for at the checkout's top (#433, the audit of 1.8).
+        # Exported, then the command itself, in the agent's shell as --test and wb verify run it
+        # (runner.test_shell): a nested `sh -c` was dash on Debian and Ubuntu, and `source
+        # .venv/bin/activate && …` failed on both sides (#517). Every part of a compound command
+        # sees the variables.
         def line(work: Path, name=name) -> str:
-            return (f"WB_SHOT_OUT={shlex.quote(str(work / name))} WB_SHOT_VIEWPORT={viewport} "
-                    f"sh -c {shlex.quote(cmd)}")
+            return (f"export WB_SHOT_OUT={shlex.quote(str(work / name))} "
+                    f"WB_SHOT_VIEWPORT={shlex.quote(viewport)}\n{cmd}")
         code, text = _run(task, checkout, line, limit, keep, setup)
         (out / f"{side}.txt").write_text(text, encoding="utf-8")
         # a capture that exits nonzero failed, PNG or not: one that wrote its image and exited 7

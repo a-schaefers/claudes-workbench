@@ -13,8 +13,8 @@ keyed by OpenCode model id or by provider id:
                    "weights_gb": 55},
      "ollama/some-model": {"skip": true}}
 
-A provider is driven as Ollama when its server answers Ollama's /api/version, whatever its port;
-anything else is a server (`"engine": "ollama"|"server"` on the provider overrides the probe). A
+A provider is driven as Ollama when its server answers Ollama's /api/version, whatever its port,
+and isn't an emulation of it (KoboldCpp: `emulator`); anything else is a server (`"engine": "ollama"|"server"` on the provider overrides the probe). A
 server that lists several models (LM Studio, llama-swap, vLLM) swaps them itself: its models
 are one server, stopped or started as one.
 
@@ -43,6 +43,7 @@ import time
 import urllib.error
 import urllib.parse
 import urllib.request
+import zlib
 from contextlib import contextmanager
 from dataclasses import dataclass, field
 from datetime import datetime
@@ -443,13 +444,62 @@ def _engine(url: str, over: dict, pid: str = "") -> str:
     try:
         with _open(f"{root}/api/version", timeout=1.5) as r:
             body = json.loads(r.read() or b"{}")
-        _ENGINES[root] = "ollama" if isinstance(body, dict) and "version" in body else "server"
+        _ENGINES[root] = "ollama" if isinstance(body, dict) and "version" in body \
+            and not emulator(root) else "server"
     except urllib.error.HTTPError:  # it answered, without Ollama's API
         _ENGINES[root] = "server"
     except Exception:  # down, or not speaking JSON: the port is the best guess
         _DOWN[root] = time.monotonic()
         return guess
     return _ENGINES[root]
+
+
+# Servers that answer Ollama's /api/version but only emulate its API, by root: their name, or ""
+# for a real Ollama. KoboldCpp's emulation answers /api/version, /api/tags and /api/ps with a
+# hard-coded row (0.39 GB, family "koboldcpp"), /api/show with capabilities ["completion"], and
+# /api/generate with a generation: driven as Ollama, wb model add wrote it `tool_call: false`
+# though it serves OpenAI tool calls, the router read it as the smallest model, and unloads
+# freed nothing (#580, the audit of 1.90). Driven as an OpenAI-compatible server instead.
+_EMULATORS: dict[str, str] = {}
+
+
+def emulator(root: str) -> str:
+    """The name of the Ollama emulator answering at ``root`` (KoboldCpp), or "" for anything
+    else: its own /api/extra/version answers, or a tags row says its family is koboldcpp."""
+    root = root.rstrip("/").removesuffix("/v1")
+    if root in _EMULATORS:
+        return _EMULATORS[root]
+    extra = _get(f"{root}/api/extra/version", timeout=1.5)
+    tags = None if isinstance(extra, dict) and extra else _get(f"{root}/api/tags", timeout=1.5)
+    rows = (tags or {}).get("models") if isinstance(tags, dict) else None
+    if isinstance(extra, dict) and extra:
+        name = str(extra.get("result") or "KoboldCpp")
+    elif any(isinstance(x, dict) and str((x.get("details") or {}).get("family", "")).lower()
+             == "koboldcpp" for x in rows or []):
+        name = "KoboldCpp"
+    else:
+        name = ""
+    _EMULATORS[root] = name
+    return name
+
+
+def engine_note(pid: str, url: str, over: dict) -> str:
+    """What Claude should hear when the probed engine isn't what the provider's port or name
+    suggests (#580): an Ollama emulator driven as a server, or a server on Ollama's port or named
+    for it. "" when they agree, the engine was set in models.json, or nothing answered."""
+    root = url.rstrip("/").removesuffix("/v1")
+    if over.get("engine") in ("ollama", "server") or root not in _ENGINES:
+        return ""
+    fix = (f"if that is wrong, set \"engine\" for {pid} in {overrides_path()} (\"ollama\" or "
+           "\"server\")")
+    if name := _EMULATORS.get(root):
+        return (f"{root} answers Ollama's API, but it is {name}'s emulation of it: wb drives it as "
+                f"an OpenAI-compatible server; {fix}")
+    guess = "ollama" if urlparse(url).port == OLLAMA_PORT or "ollama" in pid.lower() else "server"
+    if guess == "ollama" and _ENGINES[root] == "server":
+        why = "is on Ollama's port" if urlparse(url).port == OLLAMA_PORT else "is named for Ollama"
+        return f"{pid} {why}, but {root} doesn't answer as Ollama: wb drives it as a server; {fix}"
+    return ""
 
 
 def engine_known(url: str, over: dict) -> bool:
@@ -638,6 +688,9 @@ def _get(url: str, timeout: float = 2.5):
     try:
         with _open(url, timeout=timeout) as r:
             return json.loads(r.read() or b"{}")
+    except urllib.error.HTTPError as e:  # a 404 (emulator's probe on a real Ollama) left open
+        e.close()
+        return None
     except Exception:
         return None
 
@@ -746,10 +799,34 @@ def small_window_why(ctx: int) -> str:
             "OLLAMA_CONTEXT_LENGTH or the server's context, then wb model add … --context N)")
 
 
-def status(m: Model, down=frozenset()) -> dict:
+def _catalog(m: Model, catalog: dict | None):
+    """A server's GET {base_url}/models: the body (a dict, else None) or the HTTPError's code.
+    ``catalog``: one probe's answers by (base_url, api_key), shared by every entry on that server,
+    so its aliases ask it once: wb top sent 8 requests for 8 aliases each probe, one after
+    another, 2 s each on a server that stalled (#561)."""
+    key = (m.base_url.rstrip('/'), m.api_key or "")
+    if catalog is not None and key in catalog:
+        return catalog[key]
+    auth = {"Authorization": f"Bearer {m.api_key}"} if m.api_key else {}
+    try:
+        with _open(urllib.request.Request(f"{key[0]}/models", headers=auth), timeout=2) as r:
+            got = json.loads(r.read() or b"{}")
+        got = got if isinstance(got, dict) else None  # an int would read as an HTTP code
+    except urllib.error.HTTPError as e:
+        e.close()
+        got = e.code
+    except Exception:
+        got = None
+    if catalog is not None:
+        catalog[key] = got
+    return got
+
+
+def status(m: Model, down=frozenset(), catalog: dict | None = None) -> dict:
     """``{available, resident, why}``: can the runner get this model onto the GPU, is it there.
     What the config alone rules out comes first, so the fake models meet it too. ``down``: Ollama
-    roots the caller already found not answering, not asked again."""
+    roots the caller already found not answering, not asked again. ``catalog``: a dict the caller
+    keeps for one pass, so each server other than Ollama is asked for its /models once (_catalog)."""
     if small := window_too_small(m.config):
         return _no(small_window_why(small))
     if m.config.get("tool_call") is False:  # the router used to hand it tasks (the 2026-11-16 audit)
@@ -771,26 +848,20 @@ def status(m: Model, down=frozenset()) -> dict:
             return _no(CLOUD_WHY.format(id=m.id))
         resident = _matches(m.name, _ollama_names(m, "ps"))
         return {"available": True, "resident": resident, "why": "loaded" if resident else "pulled"}
-    auth = {"Authorization": f"Bearer {m.api_key}"} if m.api_key else {}
-    try:
-        with _open(urllib.request.Request(f"{m.base_url.rstrip('/')}/models", headers=auth), timeout=2) as r:
-            body = json.loads(r.read() or b"{}")
-    except urllib.error.HTTPError as e:
-        e.close()
+    body = _catalog(m, catalog)
+    if isinstance(body, int):  # an HTTP error's code
+        code, body = body, None
         # a server behind a key answered, with the key the agent will send: refused, every
         # request of the task would be. Not "running": a wrong key passed, and the router could
         # pick that model over a working one (the 2026-11-19 audit). Not "not running" either,
         # which started a second copy and waited 20 minutes for it (the 2026-11-16 audit).
-        if e.code in (401, 403):
+        if code in (401, 403):
             # where else a key may be kept: opencode auth login's auth.json (#336, the audit of 1.4)
-            return _no(f"the server refuses its API key (HTTP {e.code}): set the provider's "
+            return _no(f"the server refuses its API key (HTTP {code}): set the provider's "
                        f"options.apiKey, or `opencode auth login` for {m.provider}, to the key it "
                        "wants" if m.api_key else
-                       f"the server answers, but it wants an API key (HTTP {e.code}): set the "
+                       f"the server answers, but it wants an API key (HTTP {code}): set the "
                        f"provider's options.apiKey, or `opencode auth login` for {m.provider}")
-        body = None
-    except Exception:
-        body = None
     if isinstance(body, dict):
         # one listed model: llama-server answers to any name; several: it routes by name
         rows = [x for x in (body.get("data") or []) if isinstance(x, dict)]
@@ -951,6 +1022,21 @@ def releasable(m: Model) -> bool:
     return not m.remote and (m.engine == "ollama" or bool(m.stop))
 
 
+def freed(m: Model, keep=()) -> bool:
+    """Whether free_gpu(keep) lets go of the model: releasable, and not one it keeps (``keep``,
+    keep_loaded, or a model on a kept one's server). media.settle waits only for these: a kept
+    model is still resident when the unloads are done, so every `wb image` waited its whole 90 s
+    and then said the memory was still being released (#467)."""
+    if not releasable(m):
+        return False
+    held = {*keep, *keep_loaded()}
+    if m.id in held or (m.engine == "ollama" and _kept_name(m.name, held)):
+        return False
+    return not (m.engine == "server" and any(
+        o.engine == "server" and o.server == m.server and o.id in held and not o.remote
+        for o in discover().values()))
+
+
 def _server_idle(m: Model) -> bool:
     live = (_get(f"{m.root}/metrics", timeout=2) or {}).get("live") or {}
     return live.get("state", "idle") == "idle"  # servers without metrics count as idle
@@ -958,6 +1044,15 @@ def _server_idle(m: Model) -> bool:
 
 def _ollama_loaded(root: str) -> list[str]:
     return [x.get("name") for x in (_get(f"{root}/api/ps") or {}).get("models", [])]
+
+
+def single_loads(st: dict) -> list[float]:
+    """A task's loads one by one (status `loads`: each load that happened, #577), the samples of a
+    model's typical load (wb top, wb optimize); a task from before `loads` gives its `load_secs`."""
+    num = lambda v: isinstance(v, (int, float)) and not isinstance(v, bool) and v > 0  # noqa: E731
+    if isinstance(st.get("loads"), list):
+        return [v for v in st["loads"] if num(v)]
+    return [st["load_secs"]] if num(st.get("load_secs")) else []
 
 
 def make_resident(m: Model, say=print, keep=(), warn=None) -> float:
@@ -1418,7 +1513,7 @@ def admits(m: Model | None, held: dict) -> bool:
 
 def holders(home: Path | None = None, pool: str = "gpu") -> dict:
     """gpu.json's live entries (a remote server's: ``pool`` gpu-<host>): pid → {model, task,
-    start, waiting?}."""
+    start, waiting?, tests? (tests that use the GPU hold it: GpuLease.step_aside)}."""
     held = store.read_json((home or store.home()) / f"{pool}.json", {}) or {}
     return {p: h for p, h in held.items() if p.isdigit() and _alive(int(p), h.get("start"))}
 
@@ -1468,6 +1563,9 @@ class GpuLease:
         # (feedback, next, resume) goes ahead of tasks started after it; an image, from now
         t = store.Task(task) if task else None
         self.since = (t.spec.get("created_at") if t and t.exists else None) or store.now()
+        # when this wait began, for how long it has waited: `since` is the task's age, so a task
+        # sent back three hours after it started read "waiting 3h00m" ten seconds in (#573)
+        self.waiting_since: float | None = None
 
     def _holders(self) -> dict:
         return holders(self.home, self.pool)
@@ -1477,8 +1575,13 @@ class GpuLease:
 
     def _entry(self, waiting: bool = False) -> dict:
         # the start time tells this runner from a later process given its pid (after a reboot)
+        if not waiting:
+            self.waiting_since = None
+        elif self.waiting_since is None:
+            self.waiting_since = store.now()
         return {"model": self.m.id if self.m else None, "task": self.task, "since": self.since,
-                "start": _started(os.getpid()), **({"waiting": True} if waiting else {})}
+                "start": _started(os.getpid()),
+                **({"waiting": True, "waiting_since": self.waiting_since} if waiting else {})}
 
     def warn(self, msg: str) -> None:
         """What Claude should see later, not only in status.last (overwritten within moments):
@@ -1525,7 +1628,12 @@ class GpuLease:
         round) and a wait for its server (up to 20 minutes) ran under the lease, so queued tasks
         waited through them, and a project's own GPU tests ran beside the resident model, their
         out-of-memory failures sent back to the agent as its bug (#257, the audit of 1.2).
-        ``unload``: the model too, unless another holder runs it. `rejoin` before the next round."""
+        ``unload`` (tests that use the GPU, --unload-for-tests): the model too, unless another
+        holder runs it, and the lease stays held for the tests, an entry with no model (`tests`)
+        that nobody joins, so wb start refuses and a queued task waits: let go, a queued task was
+        admitted and ran a model round beside them, both allocating VRAM at once (#428, the audit
+        of 1.8). On a remote model's server the tests use none of its GPU: let go there.
+        `rejoin` before the next round."""
         if self.aside or not self.fh:
             return
         # The unload is decided and sent while this task still holds the lease, under the lock
@@ -1537,8 +1645,11 @@ class GpuLease:
             held.pop(self.me, None)
             if unload:
                 self._unload_unshared(held)
-            self._set(held)
-            fcntl.flock(self.fh, fcntl.LOCK_UN)
+            if unload and not (self.m and self.m.remote):
+                self._set({**held, self.me: {**self._entry(), "model": None, "tests": True}})
+            else:
+                self._set(held)
+                fcntl.flock(self.fh, fcntl.LOCK_UN)
             self.aside = True
 
     def _unload_unshared(self, held: dict) -> None:
@@ -1700,6 +1811,13 @@ def runs(pid: int, *words: str) -> bool:
     return any(toks[i:i + n] == list(words) for i in range(len(toks) - n + 1))
 
 
+def start_tag(pid: int) -> str:
+    """`_started` short enough for a file name (its crc32, in hex), '' when unknown: a scratch
+    directory's name carries its maker's, so wb gc knows a recycled pid isn't the maker (#532)."""
+    s = _started(pid)
+    return format(zlib.crc32(s.encode()), "08x") if s else ""
+
+
 def _alive(pid: int, start: str | None = None) -> bool:
     """Whether the holder is still running: its pid is this user's (a recycled pid of another
     user's is not), and it started when the holder did (a recycled pid of ours didn't: /proc, else
@@ -1737,6 +1855,7 @@ def providers() -> dict[str, dict]:
                   "models": prov.get("models") or {}, "engine": engine,
                   "key": key(pid, prov),
                   "engine_known": engine_known(url, extra.get(pid) or {}),
+                  "engine_note": engine_note(pid, url, extra.get(pid) or {}),
                   "start": (extra.get(pid) or {}).get("start"),
                   "problem": url_problem(url, engine, prov.get("npm"))}
             for pid, prov, url, engine, _ in _local_providers(read_config(), extra, dirs)}
@@ -1758,7 +1877,7 @@ def ollama_answers(root: str) -> bool:
     if _fake():
         return False
     body = _get(f"{root}/api/version", timeout=1.5)
-    return isinstance(body, dict) and "version" in body
+    return isinstance(body, dict) and "version" in body and not emulator(root)
 
 
 def _add_provider(cfg: dict, pid: str, name: str, base: str) -> None:

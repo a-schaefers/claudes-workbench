@@ -17,7 +17,8 @@ StartLimitIntervalSec=0
 ExecStart=%h/.local/bin/wb chat serve
 Restart=always
 # The delay grows from 10 s to 5 min (systemd 254+; older systemd ignores these two lines and
-# retries every 10 s). Not exit 75: chat.py exits 75 to be restarted when tailscale comes up.
+# retries every 10 s). The chat never exits to be restarted: it re-execs itself in place to bind
+# new addresses or load new code, so systemd sees no exit (#200).
 RestartSec=10
 RestartSteps=6
 RestartMaxDelaySec=300

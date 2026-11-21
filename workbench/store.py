@@ -30,8 +30,10 @@ Every file and format: ARCHITECTURE.md, *Files and formats*.
 """
 import errno
 import fcntl
+import functools
 import hashlib
 import json
+import math
 import os
 import re
 import stat
@@ -151,6 +153,30 @@ def now() -> float:
     return round(time.time(), 3)
 
 
+def scrub(data):
+    """``data`` with every lone surrogate in its strings (and keys) made U+FFFD. JSON may escape
+    half an emoji (``"\\ud83d"``) and json.loads keeps it, but no UTF-8 file can hold it: one in
+    a model's tool arguments made the runner's next status write raise UnicodeEncodeError and
+    failed the task (#438). Paired halves stay the character they are."""
+    if isinstance(data, str):
+        try:
+            data.encode("utf-8")  # the common case, at C speed
+            return data
+        except UnicodeEncodeError:
+            return data.encode("utf-16", "surrogatepass").decode("utf-16", "replace")
+    if isinstance(data, dict):
+        return {scrub(k): scrub(v) for k, v in data.items()}
+    if isinstance(data, list):
+        return [scrub(v) for v in data]
+    return data
+
+
+def loads(text):
+    """json.loads for text from outside workbench (OpenCode's output, the agent's files), its
+    strings scrubbed so they can be written back out."""
+    return scrub(json.loads(text))
+
+
 def write_json(path: Path, data) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     # a name of its own per write, created exclusively: by pid alone, two of the chat server's
@@ -162,10 +188,41 @@ def write_json(path: Path, data) -> None:
         # file written under UTF-8 failed to read back (the 2026-11-16 audit)
         with open(tmp, "x", encoding="utf-8") as fh:
             fh.write(json.dumps(data, indent=2, ensure_ascii=False) + "\n")
+            _synced(fh)
         os.replace(tmp, path)  # readers (woken by inotify on the rename) never see half a file
     except BaseException:
         tmp.unlink(missing_ok=True)
         raise
+
+
+def _synced(fh) -> None:
+    """The file's data on the disk before a rename puts it in place: renamed unsynced, a power
+    loss on XFS (RHEL's default) or ext4 without auto_da_alloc can leave task.json or
+    status.json empty, read as {} (#475, the audit of 1.8)."""
+    fh.flush()
+    os.fsync(fh.fileno())
+
+
+class Damaged(KeyError, RuntimeError):
+    """A key missing from a task's task.json: a KeyError to the code that reads it, a message to
+    wb's caller (main prints a RuntimeError's)."""
+
+    def __str__(self) -> str:
+        return str(self.args[0])
+
+
+class Record(dict):
+    """task.json's contents: a key it lacks says the file is damaged, not a bare KeyError
+    (#475)."""
+
+    def __init__(self, data=None, task: str = ""):
+        super().__init__(data if isinstance(data, dict) else {})
+        self.task = task
+
+    def __missing__(self, key):
+        raise Damaged(f"task {self.task}'s task.json is damaged (it has no {key!r}: a write a "
+                      f"crash or power loss cut short?); its work is in "
+                      f"{task_dir(self.task) / 'worktree'}")
 
 
 def writable_target(path: Path, change: str = "") -> Path:
@@ -196,6 +253,7 @@ def write_through(path: Path, data, change: str = "") -> None:
     try:
         with os.fdopen(fd, "w", encoding="utf-8") as fh:
             fh.write(json.dumps(data, indent=2, ensure_ascii=False) + "\n")
+            _synced(fh)
         os.chmod(tmp, mode)
         os.replace(tmp, target)
     except BaseException:
@@ -262,9 +320,13 @@ def _lock_of(path: Path) -> Path:
     return path.with_name(path.name + ".lock")
 
 
-def append_jsonl(path: Path, row: dict) -> None:
-    line = json.dumps(row, ensure_ascii=False).encode() + b"\n"
+def append_jsonl(path: Path, row: dict, after: float | None = None) -> None:
+    """Append ``row``. ``after`` (a time): its `ts` is made later than it and than every row's
+    already there, under the same lock (the notices: Task.notify)."""
     with locked(_lock_of(path)):
+        if after is not None:
+            row = {**row, "ts": max(row["ts"], round(max(after, newest_ts(path)) + 0.001, 3))}
+        line = json.dumps(row, ensure_ascii=False).encode() + b"\n"
         with open(path, "ab+") as fh:
             # A write cut short (a full disk, a crash) leaves a line with no end, and the next row
             # appended to it was lost with it (the 2026-11-16 audit): end the fragment first, so
@@ -292,6 +354,14 @@ def notices() -> list[dict]:
             if isinstance(r, dict) and isinstance(r.get("task"), str) and NAME_RE.match(r["task"])
             and isinstance(r.get("kind"), str) and isinstance(r.get("ts"), (int, float))
             and isinstance(r.get("text", ""), str)]
+
+
+def newest_ts(path: Path) -> float:
+    """The latest `ts` among a JSONL file's rows (its tail first: notices carry reports), 0 for
+    none."""
+    rows = read_jsonl_tail(path, 256 * 1024) or read_jsonl(path)[0]
+    return max((r["ts"] for r in rows if isinstance(r, dict)
+                and isinstance(r.get("ts"), (int, float))), default=0.0)
 
 
 def mark_trials(names: set[str]) -> list[str]:
@@ -369,7 +439,7 @@ class Task:
 
     @property
     def spec(self) -> dict:
-        return read_json(self.dir / "task.json", {})
+        return Record(read_json(self.dir / "task.json", {}), self.name)
 
     @property
     def status(self) -> dict:
@@ -416,21 +486,39 @@ class Task:
     def notify(self, kind: str, text: str, **extra) -> None:
         if self.spec.get("bench"):  # a replay of wb bench's: no one is to be woken
             return
+        # stamped after every notice before it and after the task's acknowledgement, whatever
+        # the clock did since: corrected backwards (a dual boot with a local-time RTC), a notice
+        # raised after a mark came out at or before it, and wb wait, the mod's wake and its idle
+        # net all skipped it as handled (#473, the audit of 1.8)
+        try:
+            acked = float((self.dir / "acked").read_text() or 0)
+        except (OSError, ValueError):
+            acked = 0.0
         append_jsonl(home() / "notify.jsonl",
-                     {"ts": now(), "task": self.name, "kind": kind, "text": text, **extra})
+                     {"ts": now(), "task": self.name, "kind": kind, "text": text, **extra},
+                     after=acked if math.isfinite(acked) else 0.0)
 
 
 # The scratch directories workbench makes in its home, each named <prefix><maker's pid>-…: wb gc
 # removes one SCRATCH_AGE old whose maker is gone. Killed commands left full clones there, with
 # their copied dependencies, that _disk_room then counted against every new task (#376, the
 # audit of 1.6).
-SCRATCH_PREFIXES = (".verify-", ".base-", ".check-", ".submodule-", "wb-index-", "wb-merge-")
+SCRATCH_PREFIXES = (".verify-", ".base-", ".check-", ".submodule-", "wb-index-", "wb-merge-",
+                    ".wb-image-", ".wb-audio-")  # the last two in wb image's and audio's output (#589)
 SCRATCH_AGE = 3600
 
 
 def scratch(prefix: str) -> str:
-    """``prefix`` (one of SCRATCH_PREFIXES) with this process's pid, for tempfile."""
-    return f"{prefix}{os.getpid()}-"
+    """``prefix`` (one of SCRATCH_PREFIXES) with this process's pid and its start (`.<tag>`,
+    models.start_tag: a pid recycled since isn't the maker, #532), for tempfile."""
+    pid = os.getpid()
+    return f"{prefix}{pid}{'.' + tag if (tag := _start_tag(pid)) else ''}-"
+
+
+@functools.cache  # by pid: a forked child is another process
+def _start_tag(pid: int) -> str:
+    from . import models  # only here: models imports store
+    return models.start_tag(pid)
 
 
 def all_tasks(archived: bool = False):

@@ -20,6 +20,8 @@ export type WbTask = {
   session: string
   /** the Claude Code process it ran in (0 when unknown): once gone, the directory rule adopts it */
   claude_pid: number
+  /** when that process started (task.json `claude_start`, '' when unknown): a recycled pid isn't it */
+  claude_start: string
   /** task.json's backlog ('' for none): while one of this session's is open, the user stays away */
   backlog: string
   /** the user's unspent allowance for Claude to edit it (`wb coding allow`), as the pane says it;
@@ -43,7 +45,8 @@ export type WbChat = { key: string; delegating: boolean; webAt: number; url: str
 export type WbPane = { tab: string; open: string; focus: string; minimized: boolean }
 
 /** The Stats tab's history: `wb stats --json` as last read (null before the first read), and the
- * key of the files it was read from (results.jsonl and stats.json: size and mtime). */
+ * key of the files it was read from (results.jsonl, stats.json, optimize.json, bench/runs.jsonl,
+ * speed.json and savings.json: size and mtime). */
 export type WbStats = { key: string; feed: Record<string, any> | null }
 
 /** The Stats tab's live view (#408): `wb top --json`'s newest tick (null before the first), and

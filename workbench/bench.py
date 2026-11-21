@@ -16,6 +16,7 @@ round; these are the tasks this machine's models were actually given.
 import json
 import os
 import re
+import shlex
 import shutil
 import signal
 import subprocess
@@ -26,7 +27,7 @@ from contextlib import redirect_stdout
 from pathlib import Path
 from types import SimpleNamespace
 
-from . import ask_mcp, context, gitops, models, router, runner, spend, store
+from . import ask_mcp, context, gitops, media, models, router, runner, spend, store, verify
 from .runner import PKG_ROOT
 from .watch import Watcher
 
@@ -38,7 +39,6 @@ REFUSED = ("No reviewer is available in this run, so nothing outside the everyda
 FOLD = "\n---\nHow to work"
 TEST_LINE = re.compile(r"^- The acceptance command is `(.+)`\. Run it", re.M)
 STEP_HEAD = re.compile(r"\AStep (\d+) of this task is done and committed \([^)]*\)\. The next step:\n\n")
-TESTISH = re.compile(r"(^|/)(tests?|spec|__tests__)/|(^|/)test_[^/]+$|_test\.[^/.]+$|\.(test|spec)\.[^/]+$")
 BASE_CHECK_SECS = 120  # the hidden checks on the base, at add time; past this, not checked
 
 
@@ -93,7 +93,17 @@ def _safe(path: str) -> bool:
 
 def bundle(repo: Path, commit: str, dest: Path) -> None:
     """A bundle of `commit`'s history alone, as branch main: made in a scratch clone, so the
-    user's repo gets no ref, and the commits after it (the answer) aren't in it."""
+    user's repo gets no ref, and the commits after it (the answer) aren't in it. Refused from a
+    shallow clone whose cut-off history `commit` reaches: its bundle can't be cloned ("remote did
+    not send all necessary objects", #478, the audit of 1.8)."""
+    shallow = Path(repo) / gitops.git(repo, "rev-parse", "--git-path", "shallow").strip()
+    try:
+        cut = shallow.read_text().split()
+    except OSError:  # not shallow
+        cut = []
+    if any(gitops.contains(repo, commit, c) for c in cut):
+        raise RuntimeError(f"{repo} is a shallow clone: a case needs the base's whole history "
+                           f"(git -C {shlex.quote(str(repo))} fetch --unshallow, then add it again)")
     with tempfile.TemporaryDirectory(prefix="wb-bench-") as tmp:
         clone = Path(tmp) / "c"
         gitops.git(tmp, "clone", "-q", "--no-checkout", "--shared", str(repo), str(clone))
@@ -276,7 +286,10 @@ def add(name: str, step: int | None = None, hidden: list[str] | None = None,
         raise RuntimeError(f"step {step} had no acceptance command: nothing to grade a replay by")
     changed = gitops.git(repo, "diff", "--name-only", "--no-renames", "--diff-filter=AM", base, ref
                          ).splitlines()
-    picked = hidden if hidden is not None else [p for p in changed if TESTISH.search(p)]
+    # the tests and the data they read (Go's testdata/, fixtures/, golden files, Jest snapshots),
+    # verify's one pattern: a golden file left out of hidden/ failed the base for lack of it and
+    # passed a replay only when the agent wrote it (#500, the audit of 1.90)
+    picked = hidden if hidden is not None else [p for p in changed if verify.looks_like_test(p)]
     for p in picked:
         if not _safe(p):
             raise RuntimeError(f"{p}: a hidden check is a path inside the repo")
@@ -286,7 +299,7 @@ def add(name: str, step: int | None = None, hidden: list[str] | None = None,
         raise RuntimeError(f"step {step} changed no test files ({len(changed)} files): name the "
                            "hidden checks with --hidden <path>…, or --check <command>")
     d = case_dir(case_name)
-    tmp = d.with_name(f".{case_name}.tmp")
+    tmp = d.with_name(f".{case_name}.{os.getpid()}.tmp")  # the pid: wb gc sweeps a killed one's
     shutil.rmtree(tmp, ignore_errors=True)
     tmp.mkdir(parents=True)
     try:
@@ -481,10 +494,10 @@ def start(model_ids: list[str], case_names: list[str], skills: list[str], label:
     env.pop("WB_TASK", None)
     env.pop("CLAUDE_CODE_SESSION_ID", None)  # its tasks are no session's
     env.pop("CLAUDE_PID", None)
-    with open(d / "driver.log", "a") as log:
-        proc = subprocess.Popen([sys.executable, "-X", "utf8", "-m", "workbench.bench", run], cwd=d,
-                                env=env, stdin=subprocess.DEVNULL, stdout=log, stderr=log,
-                                start_new_session=True)
+    from . import cli  # cli imports this module
+    with open(d / "driver.log", "a") as log:  # its own scope, to outlive a logout (#531)
+        proc = cli.detach([sys.executable, "-X", "utf8", "-m", "workbench.bench", run], cwd=d,
+                          awake=f"wb bench run {run}", env=env, stdout=log, stderr=log)  # #516
     store.write_json(home() / "driver.json", {"pid": proc.pid, "run": run,
                                               "start": models._started(proc.pid)})
     return run, [f"bench run {run}: {len(pairs)} replay(s) × {repeat}"
@@ -735,8 +748,9 @@ def self_run(case_name: str, turns: int = SELF_TURNS) -> dict:
         argv = [claude, "-p", "--output-format", "json", "--max-turns", str(turns),
                 "--permission-mode", "acceptEdits", "--allowedTools", *allow, "--", prompt]
         try:
-            p = subprocess.run(argv, cwd=work / (subdir(case) or ""), capture_output=True, text=True,
-                               timeout=int(case.get("test_timeout") or 900) * 4)
+            # its own group, killed with wb (#589): a Bash-limit kill left claude -p running
+            p = media.run_group(argv, int(case.get("test_timeout") or 900) * 4, cwd=work / (subdir(case) or ""),
+                                stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
         except subprocess.TimeoutExpired:
             return {**row, "outcome": "error", "why": "claude -p timed out"}
         (d / "claude.json").write_text(p.stdout)
@@ -761,6 +775,10 @@ def self_run(case_name: str, turns: int = SELF_TURNS) -> dict:
         (d / "grade.txt").write_text("\n\n".join(out))
         return {**row, "outcome": "passed" if ok else "failed",
                 **({} if ok else {"why": "the hidden checks failed (grade.txt)"})}
+    except SystemExit:  # ended (Claude's Bash limit): a row says so, not nothing (#589)
+        store.append_jsonl(runs_file(), {**row, "outcome": "error",
+                                         "why": "stopped before it finished (a signal)"})
+        raise
     finally:
         shutil.rmtree(d / "tree" if work.parent != d else work, ignore_errors=True)
 

@@ -18,6 +18,7 @@ import signal
 import statistics
 import subprocess
 import sys
+import threading
 import time
 from pathlib import Path
 
@@ -168,8 +169,10 @@ class Top:
     """The state between ticks: the GPUs found at start, the stream, the cached files and the
     servers' last answers."""
 
-    def __init__(self, every: float, drm: Path = hardware.DRM):
+    def __init__(self, every: float, drm: Path = hardware.DRM, background: bool = False):
         self.every = every
+        self.background = background  # the servers asked off the tick (the live loop's)
+        self.prober: threading.Thread | None = None
         self.drm = drm
         self.files = _Files()
         self.where = hardware.system()
@@ -205,6 +208,7 @@ class Top:
             self.static = [{"name": g["name"], **({"total": g["vram"]} if g.get("vram") else {})}
                            for g in hardware._windows_gpus()]
         self.probed = 0.0
+        self.reaped = 0.0
         self.loads_at = 0.0
         self.load: dict[str, float] = {}
         self.rack: list[dict] = []
@@ -310,8 +314,37 @@ class Top:
             if isinstance(spec, dict):
                 yield d, spec, self.files.json(d / "status.json", {}) or {}
 
+    def reap(self) -> None:
+        """Fail every live task whose runner died without a word (cli.reap, as `wb events` does),
+        every PROBE_EVERY seconds: a runner OOM-killed mid-round stayed `running`, its round clock
+        counting, for as long as wb top was the only thing looking (#571). reap waits out
+        REAP_GRACE and checks the pid's process itself."""
+        if self.reaped and time.monotonic() - self.reaped < PROBE_EVERY:
+            return
+        self.reaped = time.monotonic()
+        from . import cli  # wb top runs from cli: loaded already
+        for d, _spec, st in list(self._tasks()):
+            if st.get("phase") in LIVE:
+                try:
+                    cli.reap(store.Task(d.name))
+                except OSError:
+                    pass  # a task removed mid-tick; a full disk reaps on a later pass
+
+    def _owners(self, found: dict) -> dict[str, int]:
+        """How many tasks are in phase running on each local server root."""
+        n: dict[str, int] = {}
+        for _, spec, st in self._tasks():
+            m = found.get(spec.get("model") or "")
+            if st.get("phase") == "running" and m and not m.remote:
+                n[m.root] = n.get(m.root, 0) + 1
+        return n
+
     def running(self, found: dict, now: float) -> list[dict]:
         out = []
+        # a server's live rate is a task's only when it is the one task running on that server: a
+        # queued, testing or asking task, or one of two running there, claimed whatever the server
+        # was writing, someone else's request too (#548). Unclaimed, it goes on the rack (rack_now)
+        owners = self._owners(found)
         for d, spec, st in self._tasks():
             if st.get("phase") not in LIVE:
                 continue
@@ -325,7 +358,8 @@ class Top:
                 r["round_s"] = round(now - st["round_started_at"], 1)
             if m and m.remote:
                 r["remote"] = True
-            live = self.live.get(m.root) if m and not m.remote else None
+            live = self.live.get(m.root) if m and not m.remote and st["phase"] == "running" \
+                and owners.get(m.root) == 1 else None
             if live and live.get("state") not in (None, "idle"):
                 r["server"] = live
                 if isinstance(live.get("tok_s"), (int, float)):
@@ -364,12 +398,13 @@ class Top:
         return round(last["out"] / gap, 1)
 
     def _loads(self) -> dict[str, float]:
-        """Each model's typical load here: the median of its tasks' load_secs (none measured: absent)."""
+        """Each model's typical load here: the median of its tasks' loads, one by one (a task's
+        load_secs is their total, reloads and all, #577; none measured: absent)."""
         if time.monotonic() - self.loads_at >= LOAD_EVERY or not self.loads_at:
             secs: dict[str, list] = {}
             for _, spec, st in self._tasks():
-                if st.get("load_secs") and spec.get("model"):
-                    secs.setdefault(spec["model"], []).append(st["load_secs"])
+                if spec.get("model") and (one := models.single_loads(st)):
+                    secs.setdefault(spec["model"], []).extend(one)
             self.load = {k: round(_median(v), 1) for k, v in secs.items()}
             self.loads_at = time.monotonic()
         return self.load
@@ -386,10 +421,13 @@ class Top:
         rows = [(h.get("since") or 0, pool, h) for pool, held in pools.items()
                 for h in held.values() if h.get("waiting")]
         out = []
-        for since, pool, h in sorted(rows, key=lambda x: x[0]):
+        for since, pool, h in sorted(rows, key=lambda x: x[0]):  # in line by the task's start
             q = {"task": h.get("task"), "model": h.get("model")}
             if since:
-                q["since"], q["waited_s"] = since, round(now - since, 1)
+                q["since"] = since
+            # the wait's own length, not the task's age (#573); an entry from before has none
+            if isinstance(began := h.get("waiting_since"), (int, float)):
+                q["waited_s"] = round(max(0.0, now - began), 1)
             if pool != "gpu":
                 q["pool"] = pool
             out.append(q)
@@ -412,19 +450,35 @@ class Top:
         # the live object of each running task's server (Ollama has no /metrics)
         roots = {found[r["model"]].root for r in running if r["model"] in found
                  and not found[r["model"]].remote and found[r["model"]].engine != "ollama"}
-        self.live = {}
+        live = {}  # built whole, then swapped in: the tick may read it meanwhile (_probe_bg)
         for root in () if fake else roots:
             body = models._get(f"{root}/metrics", timeout=1.0)
             if isinstance(body, dict) and isinstance(body.get("live"), dict):
-                self.live[root] = body["live"]
-        self.rack = [self._state(m, tags, ps) for m in found.values()]
+                live[root] = body["live"]
+        self.live = live
+        catalog: dict = {}  # each other server's /v1/models, asked once for all its entries (#561)
+        self.rack = [self._state(m, tags, ps, catalog) for m in found.values()]
 
-    def _state(self, m: models.Model, tags: dict, ps: dict) -> dict:
+    def _probe_bg(self, found: dict, running: list[dict]) -> None:
+        """The probe on a thread of its own: a server that accepts and then stalls held the tick,
+        so `q`, the nvidia-smi stream and the pane's lines waited for its timeouts (#561). The
+        tick shows the newest answers; one probe runs at a time. The first is waited for, up to
+        one interval (PROBE_EVERY at most), so the first view has the rack."""
+        if self.prober and self.prober.is_alive():
+            return
+        self.probed = time.monotonic()
+        first = self.prober is None
+        self.prober = threading.Thread(target=self.probe, args=(found, running), daemon=True)
+        self.prober.start()
+        if first:
+            self.prober.join(min(max(self.every, 1.0), PROBE_EVERY))  # --every may be an hour
+
+    def _state(self, m: models.Model, tags: dict, ps: dict, catalog: dict | None = None) -> dict:
         r = {"model": m.id, "label": m.label}
         if m.remote:
             r.update(state="remote", why="another machine: no telemetry")
         elif m.engine != "ollama" or models._fake():
-            st = models.status(m)
+            st = models.status(m, catalog=catalog)
             r["state"] = ("resident" if st["resident"] else "idle") if st["available"] else "can't run"
             if not st["available"]:
                 r["why"] = st["why"]
@@ -465,9 +519,22 @@ class Top:
             if h.get("model") and h.get("task"):
                 held.setdefault(h["model"], []).append(h["task"])
         loads = self._loads()
+        # a busy server whose rate no task row claimed (two running there, or a request from outside
+        # workbench) shows it once, on its first model's row, the resident one first (#548)
+        owners = self._owners(self.found or {})
+        unclaimed = {root: live for root, live in self.live.items()
+                     if live.get("state") not in (None, "idle") and owners.get(root) != 1}
+        rows = sorted(self.rack, key=lambda r: r.get("state") != "resident")
+        shown: dict[str, str] = {}
+        for r in rows:
+            m = (self.found or {}).get(r["model"])
+            if m and m.root in unclaimed and m.root not in shown:
+                shown[m.root] = r["model"]
         out = []
         for r in self.rack:
             r = dict(r)
+            if (m := (self.found or {}).get(r["model"])) and shown.get(m.root) == r["model"]:
+                r["server"] = unclaimed[m.root]
             sp = router.speed(r["model"])
             if sp.get("write"):
                 r["write_tok_s"] = round(sp["write"], 1)
@@ -482,13 +549,17 @@ class Top:
 
     def tick(self) -> dict:
         now = time.time()
+        self.reap()
         gpus = self.gpus()  # first: the rack's states read gpu_memory
         if self._probe_due() or self.found is None:
             self.found = models.discover()  # the config, re-read with the servers' answers
         found = self.found
         running = self.running(found, now)
         if self._probe_due():
-            self.probe(found, running)
+            if self.background:
+                self._probe_bg(found, running)
+            else:
+                self.probe(found, running)
             running = self.running(found, now)  # with the servers' live objects
         pools = self.pools()
         return {"ts": round(now, 1), "every": self.every, "gpus": gpus, "running": running,
@@ -529,8 +600,32 @@ def short(name: str) -> str:
     return name.rpartition("]")[2].strip() or name
 
 
-def lines(snap: dict) -> list[list[tuple[str, str]]]:
-    """The view as lines of (style, text) segments: the text is safe to print (plain)."""
+FOLD = ("idle", "can't run", "remote")  # rack rows folded first on a short terminal
+
+
+def lines(snap: dict, rows: int | None = None) -> list[list[tuple[str, str]]]:
+    """The view as lines of (style, text) segments: the text is safe to print (plain). ``rows``:
+    the terminal's height. Taller, the rack's idle, can't-run and remote models fold into one
+    line, and if it still doesn't fit the middle is cut with a "… N more lines" line, the QUEUE
+    kept: cut at the bottom, the queue went first, with nothing said (#608)."""
+    out = _lines(snap)
+    if rows is None or len(out) <= rows:
+        return out
+    folded = [r for r in snap["rack"] if r["state"] in FOLD and not r.get("tasks")]
+    if folded:
+        kept = [r for r in snap["rack"] if r not in folded]
+        out = _lines({**snap, "rack": kept}, fold=len(folded))
+    if len(out) <= rows:
+        return out
+    q = max(i for i, segs in enumerate(out) if segs == [("head", "QUEUE")]) - 1  # its blank line
+    head, tail = out[:q], out[q:]  # the header, the GPUs, RUNNING and RACK; then the QUEUE
+    room = rows - len(tail) - 1
+    if room < 1:  # not even the queue fits: the top of it, and how much is hidden
+        return out[:rows - 1] + [[("dim", f"  … {len(out) - rows + 1} more lines")]]
+    return head[:room] + [[("dim", f"  … {len(head) - room} more lines")]] + tail
+
+
+def _lines(snap: dict, fold: int = 0) -> list[list[tuple[str, str]]]:
     p = lambda v: plain(str(v))  # noqa: E731
     out = [[("head", f"wb top · {time.strftime('%H:%M:%S', time.localtime(snap['ts']))} · every "
              f"{snap['every']:g}s"), ("dim", "   q quits")], []]
@@ -586,6 +681,8 @@ def lines(snap: dict) -> list[list[tuple[str, str]]]:
                  f"reads ~{r['read_tok_s']}" if r.get("read_tok_s") else "",
                  f"loads ~{_secs(r['load_s'])}" if r.get("load_s") else ""]
         row.append(("dim", " · ".join(f for f in facts if f)))
+        if isinstance((r.get("server") or {}).get("tok_s"), (int, float)):
+            row.append(("", f"  server {r['server']['tok_s']:.0f} tok/s live"))
         if r.get("tasks"):
             row.append(("", "  ← " + ", ".join(p(t) for t in r["tasks"])))
         if r.get("why") and state != "remote":
@@ -593,7 +690,9 @@ def lines(snap: dict) -> list[list[tuple[str, str]]]:
         elif state == "remote":
             row.append(("dim", "  another machine: no telemetry"))
         out.append(row)
-    if not snap["rack"]:
+    if fold:
+        out.append([("dim", f"  +{fold} idle, can't run or remote (a taller terminal shows them)")])
+    elif not snap["rack"]:
         out.append([("dim", "  no models found")])
     out += [[], [("head", "QUEUE")]]
     for q in snap["queue"]:
@@ -604,10 +703,11 @@ def lines(snap: dict) -> list[list[tuple[str, str]]]:
     return out
 
 
-def render(snap: dict, width: int, color: bool) -> str:
-    """The lines cut to ``width`` columns, coloured on a terminal."""
+def render(snap: dict, width: int, color: bool, height: int | None = None) -> str:
+    """The lines cut to ``width`` columns (and fitted to ``height`` rows: `lines`), coloured on a
+    terminal."""
     rows = []
-    for segs in lines(snap):
+    for segs in lines(snap, height):
         left, parts = width, []
         for style, text in segs:
             if left <= 0:
@@ -632,21 +732,65 @@ def main(every: float | None = None, as_json: bool = False, out=None, drm: Path 
     def end(_signum, _frame):
         raise SystemExit(0)
     old = {s: signal.signal(s, end) for s in (signal.SIGTERM, signal.SIGHUP)}
-    top = Top(every, drm=drm)
+    # the loop asks the servers on a thread; the one pass (not a terminal, no --json) waits for them
+    top = Top(every, drm=drm, background=as_json or tty)
     keys = None
     saved = None
+    wake = None  # a pipe SIGCONT writes to: back from Ctrl-Z, the view redraws at once
+
+    def enter():  # cbreak for `q`, the alternate screen, the cursor hidden
+        if saved is not None:
+            import tty as tty_mod
+            try:
+                tty_mod.setcbreak(keys)
+            except OSError:
+                pass
+        out.write("\033[?1049h\033[?25l")
+        out.flush()
+
+    def leave():  # the cursor, the main screen and the terminal's own mode back
+        try:
+            out.write("\033[?25h\033[?1049l")
+            out.flush()
+        except (BrokenPipeError, OSError):
+            pass
+        if saved is not None:
+            import termios
+            try:
+                termios.tcsetattr(keys, termios.TCSADRAIN, saved)
+            except OSError:
+                pass
+
+    # Ctrl-Z: put the terminal back before stopping, and take it again on SIGCONT. It stopped with
+    # the shell's prompt drawn over the frozen view, no cursor, and after `fg` `q` needed Enter (#607)
+    def suspend(_signum, _frame):
+        leave()
+        signal.signal(signal.SIGTSTP, signal.SIG_DFL)
+        os.kill(os.getpid(), signal.SIGTSTP)  # stops here until SIGCONT (an orphaned group: not)
+        signal.signal(signal.SIGTSTP, suspend)
+        resume(None, None)
+
+    def resume(_signum, _frame):
+        enter()
+        try:
+            os.write(wake[1], b"!")
+        except (OSError, TypeError):
+            pass
     try:
         if tty:
             try:
                 import termios
-                import tty as tty_mod
                 if sys.stdin.isatty():
-                    saved = termios.tcgetattr(sys.stdin.fileno())
-                    tty_mod.setcbreak(sys.stdin.fileno())
                     keys = sys.stdin.fileno()
+                    saved = termios.tcgetattr(keys)
             except (ImportError, OSError):
-                keys = None
-            out.write("\033[?1049h\033[?25l")  # the alternate screen, the cursor hidden
+                keys = saved = None
+            wake = os.pipe()
+            os.set_blocking(wake[0], False)
+            os.set_blocking(wake[1], False)
+            old.update({s: signal.signal(s, h) for s, h in
+                        ((signal.SIGTSTP, suspend), (signal.SIGCONT, resume))})
+            enter()
         while True:
             started = time.monotonic()
             snap = top.tick()
@@ -655,7 +799,7 @@ def main(every: float | None = None, as_json: bool = False, out=None, drm: Path 
                 out.flush()
             elif tty:
                 size = shutil.get_terminal_size()
-                text = render(snap, size.columns, color=True).split("\n")[:size.lines]
+                text = render(snap, size.columns, color=True, height=size.lines).split("\n")[:size.lines]
                 out.write("\033[H" + "".join(f"{line}\033[K\n" for line in text[:-1])
                           + (text[-1] + "\033[K" if text else "") + "\033[J")
                 out.flush()
@@ -666,13 +810,19 @@ def main(every: float | None = None, as_json: bool = False, out=None, drm: Path 
             while (left := started + every - time.monotonic()) > 0:
                 # a stream that ended reads as ready forever: no longer waited on (its rows go stale)
                 smi = top.smi.fileno() if top.smi and top.smi.proc.poll() is None else None
-                fds = [f for f in (smi, keys) if f is not None]
+                fds = [f for f in (smi, keys, wake and wake[0]) if f is not None]
                 if not fds:
                     time.sleep(left)
                     break
                 ready = select.select(fds, [], [], left)[0]
                 if smi is not None and smi in ready:
                     top.smi.drain()
+                if wake and wake[0] in ready:  # back from a stop: redraw now
+                    try:
+                        os.read(wake[0], 64)
+                    except BlockingIOError:
+                        pass
+                    break
                 if keys is not None and keys in ready:
                     if "q" in os.read(keys, 64).decode(errors="replace").lower():
                         return
@@ -684,14 +834,9 @@ def main(every: float | None = None, as_json: bool = False, out=None, drm: Path 
         sys.stdout = open(os.devnull, "w")
     finally:
         top.close()
-        if tty:
-            try:
-                out.write("\033[?25h\033[?1049l")
-                out.flush()
-            except (BrokenPipeError, OSError):
-                pass
-        if saved is not None:
-            import termios
-            termios.tcsetattr(sys.stdin.fileno(), termios.TCSADRAIN, saved)
         for s, h in old.items():
             signal.signal(s, h)
+        if tty:
+            leave()
+        for fd in wake or ():
+            os.close(fd)
