@@ -3023,6 +3023,22 @@ class Budgets(Base):
         router.record_speed(m.id, self.session(60, 2800))      # faster: never below the default
         self.assertEqual(router.budgets(m), {"think": 420, "silence": 900, "round": 2400})
 
+    def test_machines_sharing_a_network_state_dir_each_budget_from_their_own_speeds(self):
+        # #901: speed.json was one file for every machine on a network home, so a fast desktop's
+        # samples outvoted a slow laptop's in the median and the laptop's rounds got the defaults
+        m = models.resolve("mimo")
+        router.record_speed(m.id, self.session(15, 150))         # measured before #901: shared
+        with mock.patch.object(store, "network_fs", return_value="nfs"):
+            with mock.patch.object(store, "machine", return_value="desktop"):
+                self.assertEqual(router.speed(m.id), {"write": 15.0, "read": 150})  # until its own
+                router.record_speed(m.id, self.session(60, 2800, n=20))
+                self.assertEqual(router.budgets(m)["think"], 420)
+            with mock.patch.object(store, "machine", return_value="laptop"):
+                router.record_speed(m.id, self.session(15, 150))
+                self.assertEqual(router.speed(m.id), {"write": 15.0, "read": 150})
+                self.assertEqual(router.budgets(m)["think"], int(13500 / 15 + 32768 / 150))
+        self.assertTrue((store.home() / "machines" / "laptop" / "speed.json").exists())
+
     def test_a_slow_machine_gets_time(self):
         m = models.resolve("mimo")
         router.record_speed(m.id, self.session(15, 150))

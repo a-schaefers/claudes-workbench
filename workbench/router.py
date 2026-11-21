@@ -480,7 +480,9 @@ SPEED_KEEP = 60  # samples kept per model and measure
 
 
 def _speed_path():
-    return store.home() / "speed.json"
+    # this machine's (store.machine_dir): shared on a network home, a fast desktop's samples
+    # outvoted a laptop's in the median, and the laptop's rounds ran on the desktop's limits (#901)
+    return store.machine_dir() / "speed.json"
 
 
 def record_speed(model_id: str, messages: list[dict]) -> dict:
@@ -536,11 +538,16 @@ def speed_samples(messages: list[dict]) -> dict:
 def speed(model_id: str) -> dict:
     """{"write", "read"}: the model's median tokens per second on this machine, where measured;
     unmeasured under this id, under the nearest id it had before (earlier, #818)."""
-    data = store.read_json(_speed_path(), {}) or {}
-    row = data.get(model_id) or {}
-    if not row and data:
-        m = models.discover().get(model_id)
-        row = next((data[i] for i in (earlier(m) if m else []) if data.get(i)), {})
+    def row_in(path: Path) -> dict:
+        data = store.read_json(path, {}) or {}
+        row = data.get(model_id) or {}
+        if not row and data:
+            m = models.discover().get(model_id)
+            row = next((data[i] for i in (earlier(m) if m else []) if data.get(i)), {})
+        return row
+    row = row_in(_speed_path())
+    if not row and (shared := store.home() / "speed.json") != _speed_path():
+        row = row_in(shared)  # every machine's, from before #901: until this one has measured it
     return {k: statistics.median(row[k]) for k in ("write", "read") if row.get(k)}
 
 

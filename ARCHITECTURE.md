@@ -238,7 +238,7 @@ recorded before the beat (no `beat`) is trusted, as before. `wb doctor` says whe
 `$WB_HOME/machines/<store.machine()>/` (`store.machine_dir`, else `$WB_HOME`): the GPU lease
 (#849), optimize.json and optimize.log, boxes.json and wsl-gpus.json (#894: shared, each machine's
 `wb optimize` found the other's GPU in the fingerprint and emptied its own to measure again, and
-another machine's loads on a wb remote box counted as this one's). A new file of one machine's
+another machine's loads on a wb remote box counted as this one's), and speed.json (#901). A new file of one machine's
 goes there too. The agent's group (`agent_pid`, read before it is
 cleared) is killed when `models.runs` shows it still runs `run --standalone` (off Linux the kernel leaves it running when its parent dies, as the
 2026-11-19 audit observed), and `runner.sweep` kills what its agent left. The
@@ -3588,8 +3588,10 @@ reads the session export (`measure_speed`) and `record_speed` keeps, per model, 
 ((output + reasoning) / (completed − first token), samples of ≥ 100 tokens over > 1 s) and read
 speed (input / (first token − created), ≥ 1000 tokens over > 0.5 s, also from a request cut
 short before it completed), the last `SPEED_KEEP` 60 of
-each, in `speed.json` (`{"<id>": {"write": [...], "read": [...]}}`, under `speed.lock`); `speed()`
-takes the medians. At `wb start`, `budgets(m)` sets think = `THINK_TOKENS` 13,500 / write + window
+each, in `speed.json` (`{"<id>": {"write": [...], "read": [...]}}`, under `speed.lock`; this
+machine's, in `store.machine_dir()`: on a network home a fast machine's samples outvoted a slow
+one's, whose rounds then ran on the fast one's limits, #901); `speed()` takes the medians, from
+`$WB_HOME/speed.json` (every machine's, from before) until this machine has measured the model. At `wb start`, `budgets(m)` sets think = `THINK_TOKENS` 13,500 / write + window
 / read (either term alone when only one speed is measured: a read bound may be all there is,
 #491), clamped to [420, `THINK_MAX` 1800] s, and scales silence (900) and round (2400) by
 think / 420. No measured speed: the defaults. They are written into task.json at start, and
@@ -6544,7 +6546,7 @@ $WB_HOME (~/.local/state/workbench)
                                  when shared by the machine's accounts, #393; machines/<machine>/
                                  when the state dir is on a network file system, #849)
   machines/<machine>/            on a network file system, one machine's own (store.machine_dir, #849, #894): its
-                                 GPU lease, optimize.json and .log, boxes.json, wsl-gpus.json (each listed here)
+                                 GPU lease, optimize.json and .log, boxes.json, wsl-gpus.json, speed.json (#901)
   gpu-<host>-<port>.{lock,json,admit,load}   the same for a remote server's models (models.pool)
   scout.json  watch.json         the weekly model check: when it was done and offered; the watch list
   update.json                    wb update: when origin was last asked, how far behind this copy was
