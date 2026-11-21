@@ -2869,7 +2869,9 @@ and sharing the GPU.
 Ollama still resolves to those weights: an alias's `id`, untagged read as `:latest`; #333, the
 audit of 1.4. The same Ollama however its host is spelled, `localhost`, `127.0.0.1` or this
 machine's name: `models.server_key`, which `Model.server` uses too; compared as strings, a retire
-deleted the default's weights under another provider, #368, the audit of 1.6); its results stay. `wb model sizes <id> trivial|significant|…` sets `sizes`. `wb doctor` asks each
+deleted the default's weights under another provider, #368, the audit of 1.6; and any provider
+the config has, one in `disabled_providers` too: `models.configured_providers`, #458, the audit of
+1.8); its results stay. `wb model sizes <id> trivial|significant|…` sets `sizes`. `wb doctor` asks each
 Ollama provider once whether it answers (`ollama_answers`; a sleeping LAN box once cost 35 s a
 model and ran doctor past Claude's 2-minute Bash limit): one that doesn't gets one `--` line, its
 models read "ollama is not answering" without another probe, and their served-context checks are

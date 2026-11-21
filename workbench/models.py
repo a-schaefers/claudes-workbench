@@ -583,9 +583,15 @@ def _local_providers(cfg: dict, extra: dict, dirs: dict | None = None):
             yield pid, prov, url, _engine(url, extra.get(pid) or {}, pid), remote
 
 
+def configured_providers() -> list[tuple]:
+    """(provider id, its config, its baseURL, why discovery skips it or "", remote) for every
+    provider with a baseURL, disabled or not: what another entry may still need (#458)."""
+    return list(_scan(read_config(), _overrides()))
+
+
 def skipped_providers() -> list[tuple[str, str]]:
     """(provider id, why) for each provider with a baseURL that discovery leaves out."""
-    return [(pid, why) for pid, _, _, why, _ in _scan(read_config(), _overrides()) if why]
+    return [(pid, why) for pid, _, _, why, _ in configured_providers() if why]
 
 
 def why_none() -> str:

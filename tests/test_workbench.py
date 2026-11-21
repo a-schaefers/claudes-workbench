@@ -11795,6 +11795,23 @@ class ModelSet(Base):
         rm.assert_not_called()
         self.assertIn("ollama-long/qwen3.8-27b also use", err.getvalue())
 
+    def test_retire_with_delete_keeps_weights_a_disabled_providers_entry_still_uses(self):
+        # #458 (the audit of 1.8, reproduced): `spare` in disabled_providers on the same Ollama
+        # with the same weights; retire --delete sent the delete, and re-enabling spare meant
+        # pulling them again
+        cfg = self.config()
+        cfg["provider"]["spare"] = {**cfg["provider"]["ollama"],
+                                    "models": {"qwen3.8-27b": {"limit": {"context": 65536}}}}
+        cfg["disabled_providers"] = ["spare"]
+        Path(os.environ["WB_OPENCODE_CONFIG"]).write_text(json.dumps(cfg))
+        err = io.StringIO()
+        with mock.patch.object(cli.models, "ollama_delete") as rm, \
+                self.assertRaises(SystemExit), redirect_stderr(err):
+            run_wb("model", "retire", "ollama/qwen3.8-27b", "--delete")
+        rm.assert_not_called()
+        self.assertIn("spare/qwen3.8-27b also use", err.getvalue())
+        self.assertIn("qwen3.8-27b", self.config()["provider"]["ollama"]["models"])
+
     def test_size_policy(self):
         run_wb("model", "sizes", "mimo", "trivial")
         from workbench import router

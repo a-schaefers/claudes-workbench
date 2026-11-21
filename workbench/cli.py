@@ -3196,8 +3196,10 @@ def cmd_model(a):
             return w if ":" in w else w + ":latest"  # Ollama's own name for an untagged model
         mine = weights(name, prov["models"][name])
         here = models.server_key(prov["url"])  # localhost and 127.0.0.1 are one Ollama (#368)
-        sharing = [f"{pid}/{n}" for pid, p in provs.items() if p["engine"] == "ollama"
-                   and models.server_key(p["url"]) == here for n, e in p["models"].items()
+        # every provider the config has, disabled ones too: one left out of disabled_providers
+        # again would have to pull the weights again (#458, the audit of 1.8)
+        sharing = [f"{pid}/{n}" for pid, p, url, _, _ in models.configured_providers()
+                   if models.server_key(url) == here for n, e in (p.get("models") or {}).items()
                    if (pid, n) != (provider, name) and weights(n, e) == mine]
         if sharing:
             die(f"--delete would delete the weights {', '.join(sharing)} also use ({mine}): "
