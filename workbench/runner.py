@@ -1389,6 +1389,8 @@ def run_tests(task: store.Task, n: int):
     task.round_dir(n).joinpath("tests.txt").write_text(
         f"$ {cmd}\nexit: {code}\nshell: {test_shell()}\n\n{output}")
     result = {"ok": code == 0, "exit": code, "tail": clip_tail(output, 40), "round": n}
+    if code == "timeout" and (stalled := hang(task, limit)):  # #779
+        result["hang"] = stalled
     if code != 0 and (refused := lane_refused(task, output)):
         result["lane"] = refused
     if code != 0 and (gone := proxy_gap(output)):  # #380
@@ -1836,11 +1838,43 @@ def base_check(task: store.Task) -> dict | None:
         return None
     limit = min(BASE_CHECK_SECS, int(task.spec.get("test_timeout") or 900))
     from . import verify  # verify imports this module
+    timed: list[float] = []  # its scratch checkout and run, not the waits for the GPU or a turn (#779)
     code, output = verify.on_base(task, cmd, limit, say=lambda msg: task.set_status(last=msg),
-                                  turn=lambda: prep_turn(task))  # one at a time, as setups (#590)
+                                  turn=lambda: _timed(prep_turn(task), timed))  # one at a time, as setups (#590)
     task.dir.joinpath("base-tests.txt").write_text(
         f"$ {cmd}\nexit: {code}\nshell: {test_shell()}\n\n{output}")
-    return {"ok": code == 0, "exit": code, "tail": clip_tail(output, 8, total=1500), "limit": limit}
+    return {"ok": code == 0, "exit": code, "tail": clip_tail(output, 8, total=1500), "limit": limit,
+            **({"secs": round(timed[0], 1), "cmd": cmd} if timed else {})}
+
+
+@contextlib.contextmanager
+def _timed(inner, into: list):
+    """``inner`` (a context manager), with the seconds spent inside it appended to ``into``."""
+    with inner:
+        began = time.monotonic()
+        try:
+            yield
+        finally:
+            into.append(time.monotonic() - began)
+
+
+# A base check that passed in under this share of --test-timeout says the whole suite is fast: a
+# round's run past the limit is the change's hang (an infinite loop, a blocking read, a server
+# never shut down), and goes back to the agent. Skipped as "the suite may be slow", each one cost
+# a 15-minute run and a wake that auto-fix could have handled (#779).
+HANG_SHARE = 0.25
+
+
+def hang(task: store.Task, limit: int) -> dict | None:
+    """{"base", "limit"} when a round's run past ``limit`` is the change's hang: the base check
+    ran this same command to exit 0 in under HANG_SHARE of it. None when it timed out or failed
+    there, or was never checked: then the suite may well be slow."""
+    base = task.status.get("base_check") or {}
+    secs = base.get("secs")
+    if base.get("ok") and secs is not None and base.get("cmd") == task.spec.get("test_cmd") \
+            and secs <= HANG_SHARE * limit:
+        return {"base": secs, "limit": limit}
+    return None
 
 
 def base_check_line(r: dict, task: store.Task) -> str:
@@ -2326,6 +2360,10 @@ def auto_fix_prompt(tests: dict, cmd: str) -> str:
            "failures." if tests.get("proxy") else "")
     vouch = "" if tests.get("proxy") or tests.get("lane") else \
         " The compiler, libraries and system work; the bug is in this change."
+    if h := tests.get("hang"):  # #779: the whole suite finished in seconds on the base
+        net += (f" They now run past {h['limit']}s, where they finished in {h['base']:g}s on the "
+                "base: look for a loop that never ends, a read that blocks (input(), a socket), "
+                "or a process or server the tests start that never exits.")
     return (f"The acceptance tests fail.{net} Command: `{cmd}` (exit {tests['exit']}). Output:\n\n"
             f"```\n{tests['tail']}\n```\n\nFix the code so the tests pass. When a failing check is "
             "one you wrote for this task, first work its expected value out by hand from the task: "
@@ -2343,7 +2381,7 @@ def not_the_code(task: store.Task, tests) -> str:
     (a dropped proxy may be either: its auto-fix prompt says so, auto_fix_prompt)."""
     if not tests or tests["ok"]:
         return ""
-    if tests["exit"] == "timeout":
+    if tests["exit"] == "timeout" and not tests.get("hang"):  # a hang is the change's (#779)
         return (f"the acceptance command ran past --test-timeout "
                 f"({int(task.spec.get('test_timeout') or 900)}s): its failure says nothing about "
                 "the change; run it in the worktree yourself, or narrow it (wb next --test); "

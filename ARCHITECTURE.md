@@ -426,7 +426,13 @@ agent whose change compared the wrong way round spent 40 minutes sure gcc was br
 2026-11-18), and Claude isn't woken. Not a failure that says nothing about the change
 (`not_the_code`, #496, the audit of 1.90): a run past `--test-timeout` (the agent edited code that
 may well have been right, nothing ever naming the limit) or one the lane refused a device
-(`lane_refused`, #331: rounds 2 and 3 ran on the same refusal) is no auto-fix round; the round
+(`lane_refused`, #331: rounds 2 and 3 ran on the same refusal) is no auto-fix round. Not a run
+past the limit whose command passed the base check in `HANG_SHARE` (a quarter) of it or less
+(`hang`; tests `hang {base, limit}`): that is the change's hang, an infinite loop, a blocking
+read, a server never shut down, and goes back to the agent, its prompt saying, after its opening
+sentence, that the tests now run past the limit where they finished in so many seconds on the
+base, and what to look for (#779: each one cost a full-length run and a wake). A base check that
+timed out, failed, ran another command or never ran keeps the skip; the round
 goes to review, status `last` the cause ("the acceptance command ran past --test-timeout (900s):
 Claude reviews next", "the lane refused /dev/kvm: …") and the report led by `auto-fix skipped:
 <cause>` with what to do (run it in the worktree, narrow it, a larger `--test-timeout`; `wb allow
@@ -1140,7 +1146,8 @@ command once on the untouched base, the same way but in a scratch checkout of th
 there (a build stamp, a fixture, an updated snapshot) stayed for the agent, could make a later
 test pass, and showed in the review diff (#192, the 2026-11-19 audit). The output goes to
 `base-tests.txt` (as tests.txt, with its shell), the result to status `base_check` `{ok,
-exit, tail (clip_tail: 8 lines, 1500 characters), limit}`, and `base_check_line` words it for the
+exit, tail (clip_tail: 8 lines, 1500 characters), limit, secs, cmd}` (`secs`: its scratch
+checkout and run, not the waits for the GPU or its turn; `cmd`: the command it ran, #779), and `base_check_line` words it for the
 report (*The round report*, below): a note when it already passes (the usual case when the agent
 writes the step's tests: only those can fail it, so Claude checks the diff adds tests that fail
 without the change), a warning when `--test-timeout` cut it short (every round's tests will time
@@ -6307,8 +6314,8 @@ check-ins off), not `wb start`'s.
 | `auto_fixes`, `auto_fixes_total` | auto-fix rounds since the last review or step; earlier ones |
 | `self_reviewed` | `[steps, reviews]` when the self-review round last ran (`tuned.self_review` on: once per review round) |
 | `reviewed` | `{step, tree}`: the working tree the last review notice showed, a tree object (`gitops.snapshot`, bulky new files left out); the next review notice of the same step shows the diff since it |
-| `tests` | `{ok, exit, tail, round, lane?, proxy?}` of the last test run (`exit`: a code, `timeout` or `output limit`; `lane`: the device nodes it was refused outside the lane, #331; `proxy`: the proxy variables the agent's environment left out, when the run failed on a connection, #380) |
-| `base_check` | `{ok, exit, tail, limit}` of the acceptance command run once on the base, in the lane (`runner.base_check`; `exit` is `"timeout"` past `limit`, `"setup failed"` when its scratch checkout couldn't be set up); the runner, before round 1, only with `--test` and without `--no-base-check` |
+| `tests` | `{ok, exit, tail, round, lane?, proxy?, hang?}` of the last test run (`exit`: a code, `timeout` or `output limit`; `lane`: the device nodes it was refused outside the lane, #331; `proxy`: the proxy variables the agent's environment left out, when the run failed on a connection, #380; `hang`: `{base, limit}`, a timeout of a command the base check ran in a quarter of the limit or less, #779) |
+| `base_check` | `{ok, exit, tail, limit, secs, cmd}` of the acceptance command run once on the base, in the lane (`runner.base_check`; `exit` is `"timeout"` past `limit`, `"setup failed"` when its scratch checkout couldn't be set up); the runner, before round 1, only with `--test` and without `--no-base-check` |
 | `infra` | why the machine, not the agent, failed the task: `setup` (`runner._prepare`), `model` (`_load_failed`: it couldn't load, or its server stayed down past `DOWN_WAIT`, or died again after a round's revive: #657), `crash`, `disk full` (the runner's crash handler), `runner died` (`cli.reap`); cleared at each runner's start. A replay with it is an `error` row, not `failed` (*Bench*, #508) |
 | `prepared` | true once the worktree is set up (`runner._prepare`: `setup`, `copy`, `siblings`), so a later run of the runner doesn't again |
 | `checked_out`, `checkout_secs` | `runner.checkout`: the worktree is made (task.json `checkout: "runner"`, #529); how long the checkout took |
