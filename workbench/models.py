@@ -28,11 +28,13 @@ is not the one it runs on, so it frees nothing here, and nothing here unloads or
 """
 from __future__ import annotations
 
+import contextlib
 import fcntl
 import functools
 import ipaddress
 import json
 import os
+import pwd
 import re
 import shlex
 import shutil
@@ -1464,6 +1466,45 @@ UNIFIED_SMALL = 36 * 2 ** 30
 SYSTEM_FLOOR = 2 * 2 ** 30
 OLLAMA_MAX_LOADED = 3  # Ollama's own default (3 per GPU) when OLLAMA_MAX_LOADED_MODELS is unset
 QUEUE_POLL = 1.0  # a queued task looks again this often; gpu.json changing wakes it sooner
+# One lease for every account on a shared machine (#393): gpu.lock and gpu.json were per account
+# ($WB_HOME), so two accounts' tasks on one system Ollama never saw each other's holds, and each
+# unloaded the other's model mid-round. An admin opts the machine in by making this directory,
+# writable by the accounts that share the GPU (a group, setgid); WB_GPU_DIR names another.
+SHARED_GPU = Path("/var/lib/workbench/gpu")
+
+
+def lease_dir() -> Path:
+    """Where the GPU lease's files live (gpu.lock, gpu.json, gpu.admit, gpu.load, and a remote
+    server's gpu-<host>.*): WB_GPU_DIR, else SHARED_GPU when this account may write it, else the
+    state directory, as before."""
+    v = os.environ.get("WB_GPU_DIR")
+    if v:
+        return Path(os.path.abspath(os.path.expanduser(v)))
+    if SHARED_GPU.is_dir() and os.access(SHARED_GPU, os.W_OK | os.X_OK):
+        return SHARED_GPU
+    return store.home()
+
+
+def lease_shared() -> bool:
+    """Whether the lease is shared with other accounts (not this account's state directory)."""
+    return os.path.realpath(lease_dir()) != os.path.realpath(store.home())
+
+
+@contextlib.contextmanager
+def _lease_lock(path: Path):
+    """store.locked for a lease file, opened read-only (flock needs no write): in a shared lease
+    another account made the file, 0644 under its umask, so opening it to append was refused."""
+    fd = _lease_fd(path)
+    try:
+        fcntl.flock(fd, fcntl.LOCK_EX)
+        yield
+    finally:
+        os.close(fd)  # releases the lock
+
+
+def _lease_fd(path: Path) -> int:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    return os.open(path, os.O_RDONLY | os.O_CREAT, 0o664)
 
 
 def max_loaded(root: str | None = None) -> int:
@@ -1650,9 +1691,11 @@ def admits(m: Model | None, held: dict) -> bool:
 
 def holders(home: Path | None = None, pool: str = "gpu") -> dict:
     """gpu.json's live entries (a remote server's: ``pool`` gpu-<host>): pid → {model, task,
-    start, waiting?, tests? (tests that use the GPU hold it: GpuLease.step_aside)}."""
-    held = store.read_json((home or store.home()) / f"{pool}.json", {}) or {}
-    return {p: h for p, h in held.items() if p.isdigit() and _alive(int(p), h.get("start"))}
+    start, uid, user, waiting?, tests? (tests that use the GPU hold it: GpuLease.step_aside)}.
+    ``home``: the lease's directory (lease_dir)."""
+    held = store.read_json((home or lease_dir()) / f"{pool}.json", {}) or {}
+    return {p: h for p, h in held.items()
+            if p.isdigit() and _alive(int(p), h.get("start"), h.get("uid"))}
 
 
 def _fits_beside(m: Model, keep: set, before=None) -> bool:
@@ -1691,7 +1734,7 @@ class GpuLease:
     def __init__(self, m: Model | None, task: str, say=print, wait: bool = True,
                  on: Model | None = None):
         self.m, self.task, self.say, self.wait = m, task, say, wait
-        self.home = store.home()
+        self.home = lease_dir()
         self.pool = pool(m or on)  # ``on``: whose server a lease with no model takes (wb optimize)
         self.fh = None
         self.aside = False  # stepped out of gpu.json for the tests or a server's wait (#257)
@@ -1717,7 +1760,7 @@ class GpuLease:
         elif self.waiting_since is None:
             self.waiting_since = store.now()
         return {"model": self.m.id if self.m else None, "task": self.task, "since": self.since,
-                "start": _started(os.getpid()),
+                "start": _started(os.getpid()), "uid": os.getuid(), "user": _user(),
                 **({"waiting": True, "waiting_since": self.waiting_since} if waiting else {})}
 
     def warn(self, msg: str) -> None:
@@ -1730,8 +1773,7 @@ class GpuLease:
                         "text": msg})
 
     def __enter__(self):
-        self.home.mkdir(parents=True, exist_ok=True)
-        self.fh = open(self.home / f"{self.pool}.lock", "a+")
+        self.fh = os.fdopen(_lease_fd(self.home / f"{self.pool}.lock"), "r")
         try:
             self._admit()
             return self
@@ -1740,7 +1782,7 @@ class GpuLease:
             raise          # 2026-11-16 audit), which made every later task wait alone
 
     def _admit(self) -> None:
-        with store.locked(self.home / f"{self.pool}.admit"):
+        with _lease_lock(self.home / f"{self.pool}.admit"):
             held = {p: h for p, h in self._holders().items() if p != self.me}
             if held and self.m is None and not self.wait:
                 raise RuntimeError(busy(held, f"{self.task} needs it to itself. Run it once they "
@@ -1777,7 +1819,7 @@ class GpuLease:
         # every admission takes: decided after letting go, from the holders seen before, it
         # unloaded the model the next task had just been admitted with and loaded (#327, the
         # audit of 1.4). Nobody is admitted meanwhile, and a task let in after it loads again.
-        with store.locked(self.home / f"{self.pool}.admit"):
+        with _lease_lock(self.home / f"{self.pool}.admit"):
             held = self._holders()
             held.pop(self.me, None)
             if unload:
@@ -1828,7 +1870,7 @@ class GpuLease:
                     except BlockingIOError:
                         pass  # the holders are still running (or still letting go)
                 w.wait(QUEUE_POLL)
-        with store.locked(self.home / f"{self.pool}.admit"):
+        with _lease_lock(self.home / f"{self.pool}.admit"):
             # nobody else can hold gpu.lock now: any other non-waiting entry is stale
             self._set({**{p: h for p, h in self._holders().items() if h.get("waiting")},
                        self.me: self._entry()})
@@ -1847,8 +1889,8 @@ class GpuLease:
         2026-11-16 audit). Lock order: gpu.load, then gpu.admit."""
         if self.m.remote:
             return make_resident(self.m, say=self.say, warn=self.warn)
-        with store.locked(self.home / f"{self.pool}.load"):
-            with store.locked(self.home / f"{self.pool}.admit"):
+        with _lease_lock(self.home / f"{self.pool}.load"):
+            with _lease_lock(self.home / f"{self.pool}.admit"):
                 held = self._holders()
                 keep = {h["model"] for p, h in held.items()
                         if p != self.me and not h.get("waiting") and h.get("model")}
@@ -1864,18 +1906,18 @@ class GpuLease:
             if _key(self.m) not in {_key(o) for o in (found.get(k) for k in keep) if o}:
                 _unload(self.m)  # or the holders' next requests swap it in and out; a model a
                 # holder runs too is theirs as well, and stops being asked for once we wait
-            with store.locked(self.home / f"{self.pool}.admit"):
+            with _lease_lock(self.home / f"{self.pool}.admit"):
                 held = self._holders()
                 self._set({**held, self.me: self._entry(waiting=True)})
         self._take_alone(held)  # it drops the shared lock, then waits its turn (#366)
-        with store.locked(self.home / f"{self.pool}.load"):
+        with _lease_lock(self.home / f"{self.pool}.load"):
             return secs + make_resident(self.m, say=self.say, warn=self.warn)
 
     def _leave(self) -> None:
         if not self.fh:
             return
         try:
-            with store.locked(self.home / f"{self.pool}.admit"):
+            with _lease_lock(self.home / f"{self.pool}.admit"):
                 held = self._holders()
                 held.pop(self.me, None)
                 self._set(held)
@@ -1890,6 +1932,8 @@ class GpuLease:
 def busy(held: dict, why: str) -> str:
     """Who holds the GPU, for a refusal: each holder's task, its repo and model, and its phase."""
     def one(h):
+        if h.get("uid") is not None and h["uid"] != os.getuid():  # a shared lease (#393)
+            return f"{h.get('user') or 'another account'}'s task {h.get('task') or '?'} ({h.get('model') or 'no model'})"
         task = store.Task(h.get("task") or "")
         if not h.get("task") or not task.exists:
             return h.get("task") or "something"
@@ -1897,6 +1941,13 @@ def busy(held: dict, why: str) -> str:
         return (f"task {task.name} (repo {spec.get('repo')}, {h.get('model') or spec.get('model')}"
                 + (f", {phase}" if phase else "") + (", waiting for it" if h.get("waiting") else "") + ")")
     return f"the GPU is in use by {', '.join(one(h) for h in held.values())}: {why}"
+
+
+def _user() -> str:
+    try:
+        return pwd.getpwuid(os.getuid()).pw_name
+    except (KeyError, OSError):
+        return str(os.getuid())
 
 
 def pool(m: Model | None) -> str:
@@ -1955,13 +2006,19 @@ def start_tag(pid: int) -> str:
     return format(zlib.crc32(s.encode()), "08x") if s else ""
 
 
-def _alive(pid: int, start: str | None = None) -> bool:
+def _alive(pid: int, start: str | None = None, uid: int | None = None) -> bool:
     """Whether the holder is still running: its pid is this user's (a recycled pid of another
     user's is not), and it started when the holder did (a recycled pid of ours didn't: /proc, else
-    ps). For an entry without `start`, or where neither says, the pid alone decides."""
+    ps). For an entry without `start`, or where neither says, the pid alone decides. ``uid``:
+    another account's holder in a shared lease (#393), alive only when its start time says so,
+    since its pid can't be signalled (read as gone, each account took the GPU from the other)."""
     try:
         os.kill(pid, 0)
-    except (ProcessLookupError, PermissionError):
+    except PermissionError:
+        if uid is None or uid == os.getuid() or not start:
+            return False
+        return _started(pid) == start
+    except ProcessLookupError:
         return False
     except (OverflowError, ValueError):
         return False

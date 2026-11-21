@@ -508,7 +508,7 @@ def private_paths() -> set[str]:
     lane, which would let an agent post to Claude as the user."""
     paths = [store.home(), Path.home() / ".config" / "workbench", commands_path(),
              chat.token_path(), chat.config_path(), models.overrides_path(), images.config_path(),
-             audio.config_path()]
+             audio.config_path(), models.lease_dir()]  # a shared GPU lease too: flock on it wedges every account's (#393)
     whole = {"/", os.path.realpath(Path.home())}
     return {r for r in map(os.path.realpath, paths) if r not in whole}
 

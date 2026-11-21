@@ -760,6 +760,87 @@ class Budget(unittest.TestCase):
                           cli.gpu_line())
 
 
+class SharedLease(Base):
+    """#393: gpu.lock and gpu.json were per account ($WB_HOME), so two accounts' tasks on one
+    system Ollama never saw each other's holds and unloaded each other's models mid-round."""
+
+    def setUp(self):
+        super().setUp()
+        os.environ["FAKE_RUNS"] = str(Path(self.tmp.name) / "runs.jsonl")
+        Path(os.environ["WB_MODELS"]).write_text(json.dumps(
+            {BIG: {"weights_gb": 20}, SMALL: {"weights_gb": 9}}))
+
+    def other_account(self) -> Path:
+        """A second state directory, as another account on this machine has."""
+        other = Path(self.tmp.name) / "other-state"
+        other.mkdir()
+        (other / "tuning.json").write_text('{"self_review": 0}')
+        return other
+
+    def test_two_state_directories_on_one_lease_take_turns_on_the_gpu(self):
+        os.environ["WB_GPU_DIR"] = str(Path(self.tmp.name) / "shared-gpu")
+        os.environ["WB_FAKE_GPU_GB"] = "24"           # 36 GB wanted: too much at once
+        self.start("t-big", "hang", "--model", BIG)
+        wait_running("t-big")
+        mine = os.environ["WB_HOME"]
+        os.environ["WB_HOME"] = str(self.other_account())
+        out = self.start("t-small", "ok", "--model", SMALL, "--test", TEST_CMD, "--queue")
+        self.assertIn("t-big", out)                   # the other account's hold is seen
+        time.sleep(1.5)
+        self.assertEqual(store.Task("t-small").status["phase"], "queued")
+        os.environ["WB_HOME"] = mine
+        run_wb("stop", "t-big")
+        os.environ["WB_HOME"] = str(Path(self.tmp.name) / "other-state")
+        wait_phase("t-small", {"review"})            # its turn came when the other's let go
+        self.assertFalse((Path(mine) / "gpu.json").exists())  # nothing in either state directory
+        os.environ["WB_HOME"] = mine
+
+    def test_the_lease_is_the_machines_shared_directory_when_this_account_may_write_it(self):
+        shared = Path(self.tmp.name) / "var-lib-workbench-gpu"
+        del os.environ["WB_GPU_DIR"]
+        with mock.patch.object(models, "SHARED_GPU", shared):
+            self.assertEqual(models.lease_dir(), store.home())   # no such directory: per account
+            self.assertFalse(models.lease_shared())
+            shared.mkdir()
+            self.assertEqual(models.lease_dir(), shared)
+            self.assertTrue(models.lease_shared())
+            if os.getuid() != 0:                                  # root may write anything
+                shared.chmod(0o555)
+                try:
+                    self.assertEqual(models.lease_dir(), store.home())
+                finally:
+                    shared.chmod(0o755)
+        os.environ["WB_GPU_DIR"] = str(Path(self.tmp.name) / "elsewhere")
+        self.assertEqual(models.lease_dir(), Path(self.tmp.name) / "elsewhere")
+
+    def test_another_accounts_live_holder_is_alive_though_its_pid_cant_be_signalled(self):
+        start = models._started(os.getpid())
+        me, other = os.getuid(), os.getuid() + 1
+        with mock.patch.object(models.os, "kill", side_effect=PermissionError):
+            self.assertTrue(models._alive(os.getpid(), start, other))
+            self.assertFalse(models._alive(os.getpid(), "1", other))   # a recycled pid: another start
+            self.assertFalse(models._alive(os.getpid(), start, me))    # ours can't be refused
+            self.assertFalse(models._alive(os.getpid(), start))        # an entry from before: as before
+            self.assertFalse(models._alive(os.getpid(), None, other))
+
+    def test_lease_files_another_account_made_can_still_be_locked(self):
+        shared = Path(self.tmp.name) / "shared-gpu"
+        shared.mkdir()
+        os.environ["WB_GPU_DIR"] = str(shared)
+        for name in ("gpu.lock", "gpu.admit", "gpu.load"):
+            (shared / name).touch()
+            (shared / name).chmod(0o444)              # another account's, under its umask
+        with models.GpuLease(None, "an-image", say=lambda *_: None):
+            held = models.holders()
+            self.assertEqual([h["task"] for h in held.values()], ["an-image"])
+            self.assertEqual(next(iter(held.values()))["uid"], os.getuid())
+        self.assertEqual(models.holders(), {})
+
+    def test_a_refusal_names_another_accounts_task_as_theirs(self):
+        held = {"1": {"task": "fix-it", "model": BIG, "uid": os.getuid() + 1, "user": "sam"}}
+        self.assertIn(f"sam's task fix-it ({BIG})", models.busy(held, "wait"))
+
+
 class CanShare(Base):
     def model(self, mid, engine="ollama", gb=10):
         return models.Model(id=mid, provider=mid.split("/")[0], name=mid.split("/")[1],

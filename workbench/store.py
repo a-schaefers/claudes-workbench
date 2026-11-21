@@ -7,6 +7,7 @@ Layout of ``$WB_HOME`` (default ``~/.local/state/workbench``)::
                             a trial run's (`wb start --trial`, `wb trial`) is kept but not evidence
     gpu.lock                held by every running task: shared beside others, exclusive alone
     gpu.json                who holds it (pid → model, task); gpu.admit serializes admissions
+                            (both in models.lease_dir(): elsewhere when the machine's accounts share it)
     rules/<name>/           the agent's rules, kept outside its lane (context.rules_dir):
                             opencode.json (the config layer), HANDBOOK.md, CLAUDE.md, bin/git,
                             grants.json
@@ -69,7 +70,7 @@ def parked(st: dict) -> bool:
 # and CLAUDE_CONFIG_DIR, which the runner reads for the lane and spend.py for the transcripts.
 PATH_VARS = ("WB_HOME", "WB_MODELS", "WB_SKILLS", "WB_IMAGES", "WB_AUDIO", "WB_COMMANDS", "WB_CHAT_TOKEN",
              "WB_CHAT_CONFIG", "WB_OPENCODE_CONFIG", "WB_SAVINGS", "OPENCODE_CONFIG",
-             "CLAUDE_CONFIG_DIR")
+             "CLAUDE_CONFIG_DIR", "WB_GPU_DIR")
 
 
 def absolute_env() -> None:

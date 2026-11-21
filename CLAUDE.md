@@ -222,7 +222,7 @@ server works: `wb model add <p>/<m> --url <baseURL>` writes its provider, `--sta
 its models.json commands; never steer a user to one server.
 
 Environment: `WB_HOME`, `WB_MODELS`, `WB_SKILLS`, `WB_IMAGES`, `WB_AUDIO`, `WB_CHAT_TOKEN`, `WB_CHAT_CONFIG`,
-`WB_COMMANDS`, `WB_SAVINGS` (the paths above); `WB_OPENCODE_CONFIG` (OpenCode's config); `CLAUDE_CONFIG_DIR` (where
+`WB_COMMANDS`, `WB_SAVINGS` (the paths above); `WB_GPU_DIR` (the GPU lease); `WB_OPENCODE_CONFIG` (OpenCode's config); `CLAUDE_CONFIG_DIR` (where
 `spend.py` reads Claude Code's transcripts); these may be relative
 or start with `~` (`store.absolute_env`); `WB_COMPACT_AT` (the
 mod's early compaction, a percentage, 0 off); `WB_BIN` (the `wb` the mod runs); `WB_TASK`, `WB_RUN` (set
