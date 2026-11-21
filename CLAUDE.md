@@ -108,8 +108,8 @@ dependencies. No packaging: it runs from the clone.
   A new knob goes in `KNOBS`; read it with `tuning.value`.
 - `models.py`: discovers local models from OpenCode's config, their status, residency
   (`make_resident`, `free_gpu`), GPU sharing (`GpuLease`, `can_share`), adding and retiring them.
-- `hardware.py`: OS, GPU/VRAM, RAM, CPU, disk, read fresh for `wb scout` and the GPU budget
-  (Linux sysfs and /proc, WSL2, macOS). Unknowns stay unknown, nothing hard-coded.
+- `hardware.py`: OS, GPU/VRAM, RAM, CPU, disk, read fresh for `wb scout` and the GPU budget.
+  Unknowns stay unknown, nothing hard-coded.
 - `skills.py`: Claude's skill library for the agents (its own git repo): checks, add/patch/
   retire/restore, import, suggestions for a spec, the outcome record. `scan.py`: the security scan
   every skill passes (ported from Hermes Agent's skills guard: keep its MIT notice).
@@ -193,7 +193,7 @@ Plain files under `$WB_HOME` (`~/.local/state/workbench`); the tree and formats:
 notify{,.old}.jsonl results.jsonl lessons.jsonl notes.md coding.json progress.json stats.json tuning.json speed.json gpu*.{lock,json,admit,load}
 scout.json update.json watch.json optimize.json gc.json wsl-gpus.json archive/ imports/ images/ audio/ chat/{messages,receipts,asks,seen}.jsonl chat/{listener,prefs,push,claims,switch,open,port}.json
 bench/{cases/<case>,runs/<run>}/ bench/runs.jsonl bench/driver.json
-rules/<task>/  opencode.json HANDBOOK.md CLAUDE.md bin/git grants.json gitdir.json submodules.json (no lane)
+rules/<task>/  opencode.json HANDBOOK.md CLAUDE.md imports/ bin/git grants.json gitdir.json submodules.json (no lane)
 locks/<task>.{runner,cmd,status,events,steer,grants}.lock   (store.task_lock: no lane reads them)
 tasks/<task>/  task.json status.json events.jsonl steer.jsonl acked context.md base-tests.txt setup.txt runner.log
                (the lane: worktree/, ask/)

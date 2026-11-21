@@ -4231,6 +4231,69 @@ class RealOpenCode(Base):
         self.assertIn("CANARY-HANDED", text)              # a handed skill is listed to the model
         self.assertNotIn("CANARY-KEPT", text)             # and the rest of the library is not
 
+    @home_outside_the_lane
+    def test_claude_md_imports_reach_the_model_in_the_lane_and_secrets_stay_out(self):
+        # #513 (the audit of 1.90): OpenCode reads an instruction file as a raw string, so
+        # `See @docs/testing.md` reached the agent as that line, and an import into ~/.claude
+        # was unreadable in the lane
+        from workbench import runner
+        claude = Path(tempfile.mkdtemp(dir=Path.home(), prefix=".wb-imports-test-"))
+        self.addCleanup(shutil.rmtree, claude, True)
+        os.environ["CLAUDE_CONFIG_DIR"] = str(claude)              # hidden from the lane (SECRETS)
+        (claude / "rules").mkdir()
+        (claude / "CLAUDE.md").write_text("Mine: @rules/python.md\n")
+        (claude / "rules" / "python.md").write_text("CANARY-USER-IMPORT\n")
+        (claude / "notes.md").write_text("CANARY-CLAUDE-NOTES\n")
+        (claude / ".credentials.json").write_text("CANARY-CREDENTIAL\n")
+        outside = Path(self.tmp.name) / "elsewhere.md"
+        outside.write_text("CANARY-OUTSIDE\n")
+        (self.repo / "docs").mkdir()
+        for name, text in (("testing", "CANARY-IMPORTED, then @deeper.md"), ("deeper", "CANARY-DEEPER"),
+                           ("span", "CANARY-SPAN"), ("fenced", "CANARY-FENCED")):
+            (self.repo / "docs" / f"{name}.md").write_text(text + "\n")
+        (self.repo / "CLAUDE.md").write_text(
+            "See @docs/testing.md and @docs/missing.md, not `see @docs/span.md first`.\n"
+            "```\n@docs/fenced.md\n```\n<!-- @docs/span.md -->\n"
+            f"@{claude}/notes.md @{claude}/.credentials.json @{outside}\n")
+        subprocess.run(["git", "-C", str(self.repo), "add", "."], check=True)
+        subprocess.run(["git", "-C", str(self.repo), "commit", "-qm", "imports"], check=True)
+        self.start("t-imp", "ok")
+        wait_phase("t-imp", {"review"})
+        task = store.Task("t-imp")
+        files, _ = context.instruction_files(task)
+        rules = context.rules_dir(task)
+        self.assertEqual([p for p in files if p.name in ("testing.md", "deeper.md")],
+                         [task.worktree / "docs" / "testing.md", task.worktree / "docs" / "deeper.md"])
+        self.assertTrue(all(p.is_relative_to(rules) for p in files if p.name in ("python.md", "notes.md")))
+        self.assertIn("docs/testing.md", dict(context.fixed_prompt(task)[1]))  # counted at wb start
+        with socket.socket() as sock:
+            sock.bind(("127.0.0.1", 0))
+            port = sock.getsockname()[1]
+        out = Path(self.tmp.name) / "imports-requests.jsonl"
+        server = subprocess.Popen([sys.executable, str(ROOT / "tests" / "capture_llm.py"),
+                                   str(port), str(out)])
+        self.addCleanup(server.kill)
+        env = runner.agent_env(task)
+        layer_path = Path(env["OPENCODE_CONFIG"])
+        layer = json.loads(layer_path.read_text())
+        layer["provider"] = {"cap": {
+            "npm": "@ai-sdk/openai-compatible",
+            "options": {"baseURL": f"http://127.0.0.1:{port}/v1", "apiKey": "x"},
+            "models": {"cap": {"name": "capture", "tool_call": True,
+                               "limit": {"context": 32768, "output": 1024}}}}}
+        layer_path.write_text(json.dumps(layer))
+        time.sleep(0.5)
+        cmd = lane.wrap(context.writable(task), ["opencode", "run", "--standalone", "-m", "cap/cap",
+                                                 "--format", "json", "say ok"],
+                        context.readable(task), context.unix_paths(task))
+        subprocess.run(cmd, cwd=task.worktree, env=env, capture_output=True, timeout=180)
+        reqs = [json.loads(line) for line in out.read_text().splitlines()]
+        text = json.dumps(max(reqs, key=lambda r: len(r.get("tools", [])))["messages"])
+        for seen in ("CANARY-IMPORTED", "CANARY-DEEPER", "CANARY-USER-IMPORT", "CANARY-CLAUDE-NOTES"):
+            self.assertIn(seen, text)
+        for unseen in ("CANARY-SPAN", "CANARY-FENCED", "CANARY-CREDENTIAL", "CANARY-OUTSIDE"):
+            self.assertNotIn(unseen, text)
+
     def test_wb_reads_the_config_files_opencode_reads_under_opencode_config_dir(self):
         # #370 (the audit of 1.6): OpenCode 2.3 takes its global directory from
         # OPENCODE_CONFIG_DIR, and wb read ~/.config/opencode
