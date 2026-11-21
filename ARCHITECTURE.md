@@ -2973,7 +2973,9 @@ in use when `gpus` read it (`MemTotal` less `MemAvailable`, its `ram_free`), les
 machine's Ollama has loaded (`/api/ps`, one ask, 1 s), never under `SYSTEM_FLOOR` 2 GiB; the
 budget's why says "less N GB the system uses". All of `MemTotal` passed a 6.5 GB model as fitting
 an 8 GB Orin Nano whose desktop held 2 GB (#524); another server's loaded model counts as the
-system's, which only stops sharing. `gpu_gb` still overrides it. Apple Silicon: `iogpu.wired_limit_mb` when set, else macOS's default
+system's, which only stops sharing. `gpu_gb` still overrides it. Apple Silicon: the raised wired limit when set (`hardware.wired_limit`, read once: `iogpu.wired_limit_mb`
+from macOS 14, else Ventura's `debug.iogpu.wired_limit` in bytes, its key kept as `wired_key`
+and named by `report` and the budget's why; read from Sonoma's alone, macOS 13's was ignored, #714), else macOS's default
 (`unified_default`: two thirds of the RAM up to `UNIFIED_SMALL` 36 GiB, three quarters above,
 Metal's recommendedMaxWorkingSetSize; it was 75% everywhere, too much on 8-32 GB Macs). On macOS
 only an Apple GPU (`unified`) counts: an Intel Mac's Radeon or Intel adapter is no budget, as

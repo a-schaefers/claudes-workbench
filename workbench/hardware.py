@@ -93,7 +93,7 @@ def _mac_gpus() -> list[dict]:
         items = json.loads(_run("system_profiler", "SPDisplaysDataType", "-json") or "{}")
     except ValueError:
         items = {}
-    found = []
+    found, wired = [], None
     for g in items.get("SPDisplaysDataType", []):
         name = g.get("sppci_model") or g.get("_name") or "unknown"
         if g.get("sppci_cores"):
@@ -102,13 +102,27 @@ def _mac_gpus() -> list[dict]:
         m = re.match(r"(\d+)\s*(MB|GB)", vram)
         unified = name.startswith("Apple")
         shared = not g.get("spdisplays_vram") and not unified  # an Intel iGPU's slice of RAM
+        if unified and wired is None:
+            wired = wired_limit()
         found.append({"name": name, "driver": "metal", "unified": unified,
                       "vram": (_int(_sysctl("hw.memsize")) if unified else None if shared else
                                int(m.group(1)) * (GIB if m.group(2) == "GB" else 2 ** 20) if m else None),
                       "vram_used": None,
-                      "wired_limit": _int(_sysctl("iogpu.wired_limit_mb")) * 2 ** 20
-                      if unified and _int(_sysctl("iogpu.wired_limit_mb")) else None})
+                      "wired_limit": wired[0] if unified and wired[0] else None,
+                      **({"wired_key": wired[1]} if unified and wired[0] else {})})
     return found
+
+
+def wired_limit() -> tuple[int | None, str]:
+    """The GPU's raised wired limit on Apple Silicon in bytes, and the sysctl that set it:
+    iogpu.wired_limit_mb (macOS 14 on, in MiB), else Ventura's debug.iogpu.wired_limit (bytes);
+    (None, "") when neither is set (0, or missing). Read from Sonoma's key alone, a limit raised on
+    macOS 13 was ignored and the budget fell back to macOS's default share (#714)."""
+    if mb := _int(_sysctl("iogpu.wired_limit_mb")):
+        return mb * 2 ** 20, "iogpu.wired_limit_mb"
+    if raw := _int(_sysctl("debug.iogpu.wired_limit")):
+        return raw, "debug.iogpu.wired_limit"
+    return None, ""
 
 
 # Windows' display adapters, each with the memory its driver's registry key states
@@ -781,7 +795,7 @@ def report() -> list[str]:
         if g.get("memory"):  # a unified GPU off macOS: what it may use, and where that comes from
             vram = f" · unified memory: {size(g['vram'])} usable by the GPU ({g['memory']})"
         elif g.get("unified"):
-            limit = (f", the GPU may wire {size(g['wired_limit'])} (iogpu.wired_limit_mb)"
+            limit = (f", the GPU may wire {size(g['wired_limit'])} ({g.get('wired_key') or 'iogpu.wired_limit_mb'})"
                      if g.get("wired_limit") else ", of which macOS lets the GPU use only part by default")
             vram = f" · unified memory: {size(g['vram'])} shared with the CPU{limit}"
         else:

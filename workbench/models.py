@@ -1752,7 +1752,8 @@ def budget_devices(root: str | None = None) -> tuple[int | None, list[dict], str
     for g in devs:
         if g.get("unified") and not g.get("memory"):  # Apple Silicon
             usable = g.get("wired_limit") or unified_default(g.get("vram") or 0)
-            how = "iogpu.wired_limit_mb" if g.get("wired_limit") else "macOS's default share of the RAM"
+            how = (g.get("wired_key") or "iogpu.wired_limit_mb") if g.get("wired_limit") \
+                else "macOS's default share of the RAM"
         elif g.get("unified") and (g.get("driver") or "").startswith("nvidia"):
             keep = system_reserve(g, root)
             usable = max(0, (g.get("vram") or 0) - keep)

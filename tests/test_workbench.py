@@ -15896,6 +15896,27 @@ class Hardware(unittest.TestCase):
         self.assertIn("RAM   34.4 GB (2.1 GB free) · swap 2.1 GB (1.6 GB free)", out)
         self.assertIn("CPU   Apple M2 Pro", out)
 
+    def test_a_wired_limit_raised_on_ventura_is_read_from_its_own_sysctl_and_named(self):
+        # #714: macOS 13 has debug.iogpu.wired_limit (bytes), not Sonoma's iogpu.wired_limit_mb:
+        # a 64 GB Mac set to 56 GB was budgeted 48 GB, and scout named a sysctl it hasn't got
+        from workbench import models
+        asked = []
+        runs = {("sysctl", "-n", "hw.memsize"): str(64 * 2 ** 30),
+                ("sysctl", "-n", "debug.iogpu.wired_limit"): str(56 * 2 ** 30),
+                ("system_profiler",): json.dumps({"SPDisplaysDataType": [
+                    {"sppci_model": "Apple M1 Max", "sppci_cores": "32"}]})}
+        hw = self.fake("Darwin", runs=runs)
+        run = hw._run
+        with mock.patch.object(hw, "_run", lambda *argv: asked.append(argv) or run(*argv)):
+            (g,) = hw.gpus()
+        self.assertEqual((g["wired_limit"], g["wired_key"]), (56 * 2 ** 30, "debug.iogpu.wired_limit"))
+        self.assertEqual(asked.count(("sysctl", "-n", "iogpu.wired_limit_mb")), 1)   # read once
+        self.assertIn("the GPU may wire 60.1 GB (debug.iogpu.wired_limit)", "\n".join(hw.report()))
+        with mock.patch.dict(os.environ, {"WB_FAKE_MODELS": "", "WB_MODELS": "/nonexistent"}):
+            budget, _, why = models.budget_devices()
+        self.assertEqual(budget, 56 * 2 ** 30)
+        self.assertIn("debug.iogpu.wired_limit", why)
+
     def test_an_intel_mac_reports_its_graphics_cards_vram_but_budgets_none_of_it(self):
         # #711: a MacBook Pro's 4 GB Radeon became the budget, though Ollama's Intel Mac build
         # runs on the CPU in RAM: every model over 3.9 GB was "too big" beside 32 GB of RAM
