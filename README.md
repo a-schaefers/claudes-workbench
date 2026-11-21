@@ -24,8 +24,9 @@ Claude Code plugin that connects the two inside your normal Claude Code session.
   keep working, and the agents work on their own branches, so your checkout is untouched until
   you accept.
 - **Beyond code: images and audio.** Optionally, Claude directs local image and audio models
-  for a project's icons, illustrations, voice lines, sound effects and music, and checks each one
-  ([images](ARCHITECTURE.md#images), [audio](ARCHITECTURE.md#audio)).
+  for a project's icons, illustrations, voice lines, sound effects and music, and checks each one;
+  a voice or music you pick by ear, on your phone too ([images](ARCHITECTURE.md#images),
+  [audio](ARCHITECTURE.md#audio)).
 - **See how it's going.** The pane's Stats tab shows this machine live (the GPU, the running
   task, every model) and your history: tasks landed, Claude tokens saved, energy, streaks.
 - **Experimental: lighter code reading.** With [probe](https://github.com/probelabs/probe)

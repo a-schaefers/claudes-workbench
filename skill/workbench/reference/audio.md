@@ -32,6 +32,11 @@ Never say a sound "sounds" good. Say what the checks show, and let the user's ea
    didn't ask for, and ones whose spectrogram is wrong for the brief (all one band, a hard cut,
    a tail that never decays on a loop). Tell the user which you'd keep and why, and ask them to
    listen (give the paths). Stop after three rounds and show the best.
+   **Asking them to listen:** with the web chat on (`wb chat url` answers), send the shortlist
+   there: `wb chat listen <clip.wav>… --text "<which you'd keep and why>"` (up to 8 takes). They
+   play each on their phone beside its check line and tap the keeper, which comes back as
+   `[web chat] (keeps take <n> of the shortlist: <path>) Keep take <n>: …`: use that file. In
+   the terminal, give the paths instead.
 5. Convert it to what the project uses with ffmpeg (format, trim, `loudnorm` to the project's
    level, a loop point). A sound effect's hit often comes a second or more in, so trim the lead
    it reports (`silenceremove`) for anything that must play on cue. Then commit it and say

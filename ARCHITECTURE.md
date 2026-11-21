@@ -2533,7 +2533,10 @@ no local model can run. `wb scout` prints the facts, read fresh: the machine (`h
 Ollama's default context, every registered model (size, quantization, context, slice, real-task
 record), installed models that aren't registered, the watch list (`watch.json`: models set aside
 and what would bring each back; `--watch TEXT`, `--unwatch N`), flagged skills, waiting lessons,
-image and audio engines (their licences change too: OmniVoice went non-commercial in 2026-07). Claude researches what's newest from primary sources, recommends keep / add /
+image and audio engines (their licences change too: OmniVoice went non-commercial in 2026-07;
+each engine with no `notes` says "licence: not noted", and `audio.coverage` adds a line of what
+the audio engines cover: each kind's engines, the kinds with none, and speech with no listener,
+#398). Claude researches what's newest from primary sources, recommends keep / add /
 retire in a few lines and changes nothing without the user's yes; `wb scout --done --notes "…"`
 records it (`scout.json` `done_at`, notes). `--due` says whether one is due.
 
@@ -3041,9 +3044,10 @@ and the skill says which judgements stay the user's:
 Taste (a song, a voice's character) is the user's: Claude shortlists on the checks and asks the
 user to listen. The keeper goes into the project, converted with ffmpeg as the project needs, and
 is committed with what its `.json` sidecar says made it, like an image. The coding agents can't
-make audio; one that needs a sound asks Claude. Still to come (milestone 1.90.1): a player in the web
-chat so the user can pick by ear (#397), and the weekly model check re-checking the audio picks
-(#398).
+make audio; one that needs a sound asks Claude. The weekly model check re-checks the audio picks
+and their licences like the coding models (#398). With the web chat on, Claude sends its
+shortlist there (`wb chat listen <clip>…`), and the user plays each take on the phone and taps
+the keeper, which reaches Claude as a chat message (#397, *The web chat*, *Listening by ear*).
 
 **Setting it up is optional.** Claude offers it the first time a project needs a sound and never
 installs anything unasked (the skill's `reference/audio.md`). The recommended runtime is
@@ -3161,6 +3165,22 @@ it. ACE-Step's takes peaked at -0.2 dBFS, near clipping, before any `loudnorm`.
 - The line reads `3.4 s (asked 3) · peak -1.2 dBFS · -16 LUFS · lead 0.1 s, tail 0.3 s · gaps … ·
   heard "…" WER 30% (twenty twenty six → 2026)`, then the spectrogram's path. Under 80% of the asked length it adds "cut
   short".
+- `lines()` (`wb audio --list`, `wb scout`) shows each engine's kind, whether it's ready, its
+  voices and its `notes`, or "licence: not noted" when it has none; `coverage()` is scout's line
+  of what the engines cover (#398: the weekly check re-checks audio picks and their licences).
+- **Listening by ear** (#397, `chat.listen`, `wb chat listen <clip>… [--text "…"]`): up to
+  `LISTEN_MAX` (8) takes Claude has shortlisted, each a `.wav` (or `.mp3`, `.ogg`, `.opus`,
+  `.flac`, `.m4a`: `AUDIO_TYPES`, what a browser plays) of at most `AUDIO_MAX` (64 MiB), is
+  copied into `chat/audio/<batch>/` as `<n>.<ext>` with `audio.json` (each take's name, path,
+  media type, and its check line, `audio.summary` of the `.json` sidecar beside it; engine,
+  seed and voice from the sidecar too), and sent as a message from Claude carrying `audio`
+  (`chat.audio_batch`: `{batch, clips: [{n, name, line}]}`). The page plays wb's own copy, so a
+  clip changed or moved since still plays as it was sent. A link, a missing clip, a file the page
+  can't play, too many or too big are refused before anything is copied or sent; a copy that
+  fails mid-way removes the batch. Only the newest `LISTEN_KEPT` (20) batches are kept: an older
+  take's player says "This take is no longer kept." The keeper comes back as the user's message
+  `Keep take <n>: <name>` with `about: {audio, n, name, path}`, the name and path taken from the
+  batch, not the page.
 - The sidecar: `{text, kind, seed, seconds, voice, lyrics, refs, engine, secs, ts, duration,
   peak_db, clipped, lead, tail, gaps, silent?, lufs?, transcript?, wer?, differences?, listener?,
   listen_error?, unreadable?}`. `--out` defaults to `$WB_HOME/audio/<YYYYmmdd-HHMMSS>/`.
@@ -3555,6 +3575,14 @@ stays with the task and step the images were of, even after another task becomes
 pairs arrive. The mod gives it to Claude as `[web chat] (about <task>, step <s>, screenshots <n>)
 <their words>`, and Claude turns it into `wb feedback <task>`.
 
+**Audio takes** (#397) come to the page the same way (`wb chat listen`, *Audio*, *Listening by
+ear*): under Claude's words, one card per take with "Take <n> · <name>", an `<audio>` player on
+a blob fetched with the token from `/api/audio`, its check line, and "Keep this one", which sends
+`Keep take <n>: <name>` at once with `about: {audio, n}` (through the outbox, leaving the composer
+as it was). The server fills in the take's name and path from the batch; the user's message shows
+"Kept take <n> · <name>", and the mod gives it to Claude as `[web chat] (keeps take <n> of the
+shortlist: <path>) Keep take <n>: <name>`.
+
 ## The web chat
 
 **For people** (moved here from the README, #102): the web chat is off until you turn it on, in
@@ -3607,7 +3635,8 @@ VPN), `"hosts": ["chat.example.org"]` a name a tunnel or proxy sends.
 
 - **The path of a message.** The page posts it; the server appends it to `chat/messages.jsonl`.
   The listening session's mod submits it to Claude as `[web chat] <the user's words>`, nothing
-  more (a reply to screenshots adds `(about <task>, step <s>, screenshots <n>)`), so the terminal
+  more (a reply to screenshots adds `(about <task>, step <s>, screenshots <n>)`; a take kept from
+  Claude's audio shortlist, `(keeps take <n> of the shortlist: <path>)`, #397), so the terminal
   shows what the user wrote; how to answer is in the `/workbench` skill. It
   goes into the running turn if Claude is mid-turn (`session.send`, with one line saying it's from
   the user), else as the next prompt. The mod also writes a receipt (`wb chat ack`) that the page
@@ -3663,13 +3692,19 @@ VPN), `"hosts": ["chat.example.org"]` a name a tunnel or proxy sends.
 
 **Files** (`$WB_HOME/chat/`):
 - `messages.jsonl`: `{id: "<ms>-<6 hex>", ts, from: "user"|"claude", text, cid?, shots?,
-  about?}`. A post whose `cid` the thread already holds returns that row instead of adding one
+  audio?, about?}`. A post whose `cid` the thread already holds returns that row instead of adding one
   (`_by_cid`: the file read on from where the last post stopped, the newest `CIDS_KEPT` 5000 ids
   kept; only the last 500 rows were checked, and a tab offline longer than that sent its message
   twice, #199). `shots` (Claude's, from `wb shot --chat`) is `chat.shots`: `{task, n, step, round,
   viewport, base: {rev, image: bool, exit?}, candidate: {rev, image: bool, exit?}}` (`image` false
   for a failed capture, `exit` when it wasn't 0: #268). `about` (the user's reply
   to a pair) is `{task, n, step, round}`, taken from the pair's shots.json and not from the page.
+  `audio` (Claude's, from `wb chat listen`, #397) is `chat.audio_batch`: `{batch: "<ms>-<6 hex>",
+  clips: [{n, name, line}]}`; the user's pick has `about: {audio: <batch>, n, name, path}`, the
+  name and path from the batch's audio.json.
+- `audio/<batch>/`: `wb chat listen`'s copies, `<n>.<ext>`, and `audio.json` `{batch, ts, clips:
+  [{n, name, path (the original), file, type (its media type), line (the check line), engine?,
+  seed?, voice?}]}`; the newest `LISTEN_KEPT` (20) batches are kept. `wb events` skips it.
 - `receipts.jsonl`: `{id, ts, by, how: "now"|"queued"}`, written by `wb chat ack` (the mod).
   `queued`: a mid-turn delivery didn't go through, so it was submitted as a prompt.
 - `open.json`: `{messages: {<id>: row}, asks: {<id>: row}}`, the user's messages without a
@@ -3746,8 +3781,8 @@ thread no longer):
 - Every request: the `Host` header (port and brackets stripped, lowercased) must be an answered
   name, else 403 `{"error": "unknown host"}`: this stops other web pages and DNS rebinding.
   Responses carry `Cache-Control: no-store`, `X-Frame-Options: DENY`, `nosniff`, `no-referrer` and
-  a CSP (`default-src 'self'`, inline styles only, images also from `blob:` (the screenshots), no
-  framing, no forms).
+  a CSP (`default-src 'self'`, inline styles only, images also from `blob:` (the screenshots),
+  media only from `blob:` (the audio takes, #397), no framing, no forms).
 - `GET /`, `/index.html`, `/<name>` with a known suffix (html, js, css, svg, png, webmanifest)
   from `chat_static/`; anything else 404. `/manifest.webmanifest?k=<the token>` (compared in
   constant time) gives `start_url: "/?token=<it>"`, so the app installed from it opens keyed;
@@ -3767,6 +3802,12 @@ thread no longer):
   (`O_NOFOLLOW`) and serves at most `SHOT_MAX` (16 MB). Anything else gets 404 "no such
   screenshot". The page can't put the token in an `<img src>`, so it fetches each image with the
   token and shows a blob URL.
+- `GET /api/audio?batch=&n=`: one take of a `wb chat listen` shortlist (#397), behind the token
+  (401), with the media type it was sent with. It is read only when the batch matches `<ms>-<6
+  hex>` (`BATCH_RE`) and is a directory (not a link) with an audio.json, and `n` is one of its
+  takes; it never follows a link (`O_NOFOLLOW`, a regular file only) and serves at most
+  `AUDIO_MAX` (64 MiB). Anything else gets 404 "no such take". The page fetches each take with the
+  token and plays a blob URL, as it shows the screenshots.
 - `GET /api/stream`: server-sent events (with the security headers): `event: state` with the
   snapshot at once and whenever it changes, `: ping` after 15 s idle. At most `MAX_STREAMS` 16
   open: past it the oldest stream gives way (its handler's `evicted`, then a wake) and the new one
@@ -3783,8 +3824,9 @@ thread no longer):
   (`Hub.dir`) and stops at `close()`: a test's hub, resolving `WB_HOME` again on each restart,
   made the next test's state directory in its setUp's way (#134).
 - `POST /api/send`: JSON only (415), at most 32 KB (413), a `Content-Length` that isn't a number
-  0 or more (400), `{text: 1–8000 characters, cid?: 1–64 characters, about?: {task, n}}` (400;
-  an `about` naming no pair, 400 "no such screenshots"), → 200 `{message, listener, state}`.
+  0 or more (400), `{text: 1–8000 characters, cid?: 1–64 characters, about?: {task, n} | {audio, n}}` (400;
+  an `about` naming no pair, 400 "no such screenshots"; no such take, an `n` that isn't a whole
+  number among them, 400 "no such take"), → 200 `{message, listener, state}`.
 - `POST /api/answer`: the same checks, `{id: 1–64 characters, answer: "allow"|"deny", note?: up
   to 2000 characters, answers?: up to 4}` (400; `expired` is the mod's alone; answers that don't
   fit the question, or answers on anything but a question, or a question allowed without them,
@@ -4170,7 +4212,8 @@ a minute after a main-loop turn (`SCOUT_QUIET_MS`: raised the moment a turn ende
 Claude's question to the user), no task open, once per
 load: when scout.json's `done_at` is 7+ days old and `offered_at` 1+ day old, it writes
 `offered_at` and submits SCOUT_NOTE (`wb scout`, research, recommend keep/add/retire, change
-nothing without a yes, `wb scout --done --notes`).
+nothing without a yes; the audio and image engines too, each model's licence checked against
+its text today and its `notes` kept true, #398; then `wb scout --done --notes`).
 
 **The weekly update check**: after the first main-loop turn of a load once wb runs, once, beside
 the poll rather than in it (a stalled fetch held every wake), `wb update --check
@@ -4232,7 +4275,7 @@ Every waiter and its bounded wake (a timeout to re-check what the kernel can't s
 
 | Caller | Waits on | Re-checks every |
 |---|---|---|
-| `wb events` | `$WB_HOME`, recursive, skipping `tasks/*/worktree`, `tasks/*/tree`, `tasks/*/rounds`, `rules`, `imports`, `images`, `audio`, `archive`, the scratch clones and indexes (`SCRATCH`: `.?*`, `wb-index-*`, `wb-merge-*`, neither watched nor reported: one with a copied node_modules took it from 2 watches to 605, each write waking the mod, #373) and the tasks already closed when it starts (`EVENT_SKIP`) | 10 s (exits when its parent changes); every minute it reaps dead runners |
+| `wb events` | `$WB_HOME`, recursive, skipping `tasks/*/worktree`, `tasks/*/tree`, `tasks/*/rounds`, `rules`, `imports`, `images`, `audio`, `archive`, `chat/audio` (the takes `wb chat listen` copied, #397), the scratch clones and indexes (`SCRATCH`: `.?*`, `wb-index-*`, `wb-merge-*`, neither watched nor reported: one with a copied node_modules took it from 2 watches to 605, each write waking the mod, #373) and the tasks already closed when it starts (`EVENT_SKIP`) | 10 s (exits when its parent changes); every minute it reaps dead runners |
 | `wb wait` | the state directory and the named task's directory | 60 s (a dead runner: `reap`) |
 | `wb log -f` | the task directory | 30 s |
 | `wb watch` | the task directory | 1.5 s on a terminal, 30 s otherwise |
@@ -4319,7 +4362,8 @@ delivered as taken (`_stale_notes`, *Notes*).
 | `wb remote <host>` | `--port N` (11434), `--context N`, `--remove` | Another machine's Ollama as this one's models: provider `ollama-<host>` marked `local: true`, each tool-capable model it has pulled registered as `wb model add` would, one line each (see *Models*); exit 1 when it doesn't answer (with `OLLAMA_HOST=0.0.0.0` to try). Refuses a provider of that id already there for another baseURL. `--remove` undoes it; not while OpenCode's default model is one of them, nor for a provider wb didn't add or that now points elsewhere. |
 | `wb model retire <id>` | `--delete` | Unregisters it (not OpenCode's default) and drops its models.json overrides; `--delete` removes Ollama's weights (or says `ollama rm <name>` when it can't). |
 | `wb model sizes <id> [trivial] [significant]` | | Limits the sizes it's routed (none: every size). |
-| `wb scout` | `--done [--notes "…"]`, `--due`, `--watch "…"`, `--unwatch N` | The weekly check's facts (with the GPU budget and the devices it counts, `cli.gpu_line`; where Ollama's settings were read, `cli.ollama_line`; the model servers here, `cli.server_lines`: the server commands on PATH and each usual port whose `/v1/models` answers, flagged when OpenCode has no provider for it); `--done` records it; `--due` exits 0 when one is due (7 days); the watch list; each model's bench cases passed, when replayed. |
+| `wb scout` | `--done [--notes "…"]`, `--due`, `--watch "…"`, `--unwatch N` | The weekly check's facts (with the GPU budget and the devices it counts, `cli.gpu_line`; where Ollama's settings were read, `cli.ollama_line`; the model servers here, `cli.server_lines`: the server commands on PATH and each usual port whose `/v1/models` answers, flagged when OpenCode has no provider for it); the image and audio engines (`audio.coverage`: what
+the audio ones cover); `--done` records it; `--due` exits 0 when one is due (7 days); the watch list; each model's bench cases passed, when replayed. |
 | `wb skill list \| show <n> \| scan <n\|path>` | | The library, a skill with its history, the scan alone. |
 | `wb skill add <n> --from <src> -m "…"` | `--source "<origin>, <license>"`, `--lesson ID…` | Check, scan, copy, commit. |
 | `wb skill patch <n> --old … --new … -m "…"` | `--old-file`, `--new-file`, `--lesson` | An exact, unique replacement, then as add. |
@@ -4342,7 +4386,7 @@ delivered as taken (`_stale_notes`, *Notes*).
 |---|---|---|
 | `wb image "<prompt>"` | `--n` (4), `--size WxH` (1024x1024), `--seed`, `--ref <img>…`, `--out DIR`, `--engine`, `--list`, `--wait` | Candidates from a local image engine (see *Images*). While anything holds the GPU it refuses at once, naming the holders; `--wait` queues behind them. A bare `list` or `ls` as the prompt acts as `--list`. |
 | `wb audio "<text>"` | `--kind speech\|sfx\|music` (default: the first engine), `--n` (3), `--seconds S` (engines with `{seconds}`; default the entry's `seconds`, else 5 for sfx, 30 for music, 10 otherwise), `--voice NAME` (default: the entry's first of `voices`), `--ref <clip>…`, `--lyrics FILE\|-`, `--seed`, `--engine`, `--out DIR`, `--no-check` (no listener, no spectrograms), `--list`, `--wait` | Clips from a local audio engine, each with one line of checks (see *Audio*). A GPU engine refuses while anything holds the GPU (`--wait` queues); a `"gpu": false` engine runs beside tasks. A bare `list` or `ls` acts as `--list`. An option the engine has no placeholder for is refused, naming it. |
-| `wb chat [log\|on\|off\|serve\|url\|reply\|ack\|claim\|pending\|ask\|wait\|answer]` | `on`, `off` (the switch, kept; `on` starts a server when none answers on `--port`, waits for it, and prints the link; it refuses when another program answers there, `off` stops only one it started), `--port` (the running server's, from `chat/port.json`, else 1337: #349), `--bind` (replaces chat.json's), `--host` (adds), `--text`, `--message <file\|->` (reply reads stdin without either), `-n` (10); `ack <id> --by --how`, `claim <id> --by` (exit 1: another session's), `ask --tool --kind permission\|plan\|question --text --detail <json> --session --repo` (a plan's session and directory; prints `<id> open`, `<id> allow` when the user's setting answered it, or `<id> expired` for a plan it can't read), `wait <id> --timeout` (30 s; prints allow, deny, expired, or `open` at the timeout; `--json`: the whole ask), `answer <id> allow\|deny\|expired --by --note` (prints the answer that stands) (the mod) | The web chat: the thread, the server, the link with its token, Claude's reply, permission prompts. |
+| `wb chat [log\|on\|off\|serve\|url\|reply\|listen\|ack\|claim\|pending\|ask\|wait\|answer]` | `listen <clip>… [--text]` (Claude's shortlist of `wb audio` takes for the user to play and pick, up to 8: *Listening by ear*, #397), `on`, `off` (the switch, kept; `on` starts a server when none answers on `--port`, waits for it, and prints the link; it refuses when another program answers there, `off` stops only one it started), `--port` (the running server's, from `chat/port.json`, else 1337: #349), `--bind` (replaces chat.json's), `--host` (adds), `--text`, `--message <file\|->` (reply reads stdin without either), `-n` (10); `ack <id> --by --how`, `claim <id> --by` (exit 1: another session's), `ask --tool --kind permission\|plan\|question --text --detail <json> --session --repo` (a plan's session and directory; prints `<id> open`, `<id> allow` when the user's setting answered it, or `<id> expired` for a plan it can't read), `wait <id> --timeout` (30 s; prints allow, deny, expired, or `open` at the timeout; `--json`: the whole ask), `answer <id> allow\|deny\|expired --by --note` (prints the answer that stands) (the mod) | The web chat: the thread, the server, the link with its token, Claude's reply, permission prompts. |
 | `wb try` | `--model <id or fragment>` (the router's pick) | A sample task that proves the setup (#112): copies `workbench/try/project/` (a tiny `stats.py` with its tests and a committed CLAUDE.md) into `~/.local/share/workbench/try/<n>` (beside `$WB_SKILLS`: the state directory is hidden from the lane, and its agent had no git there, #164), sets it up as `wb init` does, and starts `workbench/try/spec.md` (add `median`) as `try-<n>`, `--size trivial --trial --test 'python3 -m unittest'`: never the router's evidence or the lessons. Prints what `wb start` does, the project's path and the hidden check for review, `python3 <pkg>/workbench/try/check.py <worktree>` (the agent never sees it; it fails on the untouched base, passes once `median` meets the spec, and leaves no `__pycache__`). A refused start (the GPU busy without `--queue`, no model) removes the copy again (#161). |
 | `wb init <dir>` | | A project the way Claude keeps one: git on the default branch, an initial commit, AGENTS.md → CLAUDE.md (a CLAUDE.md → AGENTS.md link is swapped; a gitignored CLAUDE.md isn't linked). Refuses the home directory or above, inside another repo, a repo git refuses (git's reason: no `git init` over it; "not a repo" is told apart in any language, `gitops.NotARepo`), without a git identity (`git var`, as for `wb start`), and a first commit holding likely secrets or installed directories no .gitignore covers. |
 | `wb setup` | `--force` (replaces a link that points elsewhere; never a real file) | Links `~/.local/bin/wb` to this copy's `bin/wb` and Claude Code's `skills/workbench` to its `skill/workbench`, removes an old `skills/delegate` link that now leads nowhere (the skill was `/delegate` until 2026-11-17; the mod runs `wb setup` itself when it finds only that), warns when `~/.local/bin` isn't on PATH (Claude and the mod run `wb` by name) with the line for the user's `$SHELL` (`cli.path_advice`: zsh's `~/.zshrc`, bash's `~/.bashrc`, on macOS `~/.bash_profile`, fish's `fish_add_path`, else `~/.profile`) and to start Claude Code again from a new terminal (the desktop app or an IDE too); "add it" was all it said (#274, the audit of 1.2), and `wb doctor`'s "wb isn't on PATH" gives the same line when that link is there; exit 1 when it left something in the way (see *Installing*). Then, when due (*Optimize*), starts the minute or two of measuring the GPU and prints its line as `--`. Ends with a `first run:` checklist (`cli.first_run`, #111), one line each, `ok` or `--` with the fix: OpenCode 2.x (else where to get it), a model server answering (a configured provider, this machine's Ollama, or a server on a default port; else: start yours, or run /workbench and Claude lays out the ones that fit the machine, never steering to one; `wb model add --url`), a local model registered (else: run /workbench, and Claude picks one for the machine), Landlock. It names no model, and changes no exit code. |
@@ -4385,6 +4429,7 @@ $WB_HOME (~/.local/state/workbench)
   chat/                          messages.jsonl  receipts.jsonl  asks.jsonl  prefs.json  listener.json  claims.json
                                  switch.json ({on}: wb chat on|off)  serve.pid ({pid, port})  serve.log (the server wb chat on started)
                                  port.json ({port, pid}: the port wb chat serve runs on, read back without --port)
+                                 audio/<batch>/ (wb chat listen's copies, <n>.<ext>, and audio.json; the newest 20)
   rules/<task>/                  outside the lane: opencode.json (the config layer), HANDBOOK.md,
                                  CLAUDE.md (a copy of the user's), bin/git (the shim),
                                  grants.json (what Claude allowed: {"allow", "paths"}),
@@ -4833,7 +4878,9 @@ the app (its worker runs and holds the
 key; the gear sends the install to https; notifications offered, or on iPhone sent to the installed app), what a page
 showed reported to `/api/seen`, a server frozen (SIGSTOP) past the 40 s watchdog and then
 let go (the page heals with no reload; a message sent meanwhile lands once), a changed page file
-(the page reloads itself, keyed, with the thread), the phone keyboard (a swipe down or a tap on
+(the page reloads itself, keyed, with the thread), wb shot's pair, `wb chat listen`'s shortlist
+(each take plays from its blob with its length and check line, and Keep sends the pick with its
+take, the composer's draft untouched: #397), the phone keyboard (a swipe down or a tap on
 the thread puts it away, a tap on the composer or a button doesn't: touches made by hand, Chromium
 only, since no headless browser raises a keyboard; once it is down the composer is back at the
 foot), no script errors.
@@ -4984,6 +5031,7 @@ nested `.md` files (`docs/`, `skill/`, `mod/`, `agent/`) are unaffected. A new r
   `drive` if it has one.
 - **`chat.py` or `chat_static/`** → the browser test (`chat.yml` runs it on the pull request too).
 - **`/api/state`'s asks or messages** → `sw.js`, which builds the notification from them.
+- **A message's `about`** (a pair's `{task, n, step, round}`, a kept take's `{audio, n, name, path}`) → the mod's prefix for it in `listen` (register.tsx), the page's `aboutTag` and `aboutBody`, and `/api/send`'s check, which fills it in from the pair or the batch (#99, #397).
 - **`wb chat ask|wait|answer`'s output** (`<id> <state>` on the last line, `wait --json`'s ask) → `askOnChat` and `waitOnChat` in register.tsx, which parse it.
 - **AskUserQuestion's or ExitPlanMode's input shape** → `askOnChat` (`--detail`) and `makeAsk` in app.js.
 - **The `$` uses in `register.tsx`** → only through functions declared at its top level, or

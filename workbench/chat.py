@@ -28,6 +28,7 @@ import select
 import shutil
 import socket
 import socketserver
+import stat
 import subprocess
 import sys
 import threading
@@ -46,6 +47,13 @@ LISTENING_FOR = 15      # seconds: a listener.json older than this means nobody 
 MAX_TEXT = 8000
 MAX_BODY = 32 * 1024
 SHOT_MAX = 16 << 20  # a screenshot served whole up to this
+AUDIO_MAX = 64 << 20    # a take copied for the page up to this (5 minutes of 48 kHz stereo WAV)
+LISTEN_MAX = 8          # takes in one shortlist
+LISTEN_KEPT = 20        # shortlists kept (chat/audio/<batch>/): an older one's player says it's gone
+# what a browser's <audio> plays, by the clip's suffix
+AUDIO_TYPES = {".wav": "audio/wav", ".mp3": "audio/mpeg", ".ogg": "audio/ogg", ".opus": "audio/ogg",
+               ".flac": "audio/flac", ".m4a": "audio/mp4"}
+BATCH_RE = re.compile(r"^[0-9]{13}-[0-9a-f]{6}$")
 MAX_STREAMS = 16        # open /api/stream connections (each holds a thread)
 PING_EVERY = 15         # seconds between keep-alive comments on a stream
 TIMEOUT = 30            # seconds a connection may stall (more than PING_EVERY: streams write by then)
@@ -144,6 +152,109 @@ def shot_png(task: str, n: int, side: str) -> bytes | None:
         return None
     with os.fdopen(fd, "rb") as f:
         return f.read(SHOT_MAX + 1)[:SHOT_MAX]
+
+
+def _plain(path: Path, most: int) -> bytes:
+    """A file's bytes, never through a link (O_NOFOLLOW) and only a regular file, up to ``most``:
+    OSError otherwise, ValueError past ``most``."""
+    fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+    with os.fdopen(fd, "rb") as f:
+        if not stat.S_ISREG(os.fstat(fd).st_mode):
+            raise OSError(errno.EINVAL, "not a regular file")
+        data = f.read(most + 1)
+    if len(data) > most:
+        raise ValueError(f"over {most >> 20} MiB")
+    return data
+
+
+def _batch_dir(batch) -> Path | None:
+    if not (isinstance(batch, str) and BATCH_RE.match(batch)):
+        return None
+    d = chat_dir() / "audio" / batch
+    return d if d.is_dir() and not d.is_symlink() else None
+
+
+def _manifest(batch) -> dict | None:
+    """chat/audio/<batch>/audio.json: {batch, ts, clips: [{n, name, path, file, type, line,
+    engine?, seed?, voice?}]}; None when there is no such shortlist."""
+    d = _batch_dir(batch)
+    m = store.read_json(d / "audio.json", None) if d else None
+    return m if isinstance(m, dict) and isinstance(m.get("clips"), list) else None
+
+
+def audio_batch(batch) -> dict | None:
+    """What the page shows of a shortlist: {batch, clips: [{n, name, line}]}."""
+    m = _manifest(batch)
+    return m and {"batch": m["batch"],
+                  "clips": [{k: c.get(k) for k in ("n", "name", "line")} for c in m["clips"]]}
+
+
+def audio_take(batch, n) -> tuple[bytes, str] | None:
+    """One take of a shortlist and its media type, never through a link: it is wb's own copy."""
+    m = _manifest(batch)
+    c = next((c for c in m["clips"] if c.get("n") == n), None) if m and isinstance(n, int) else None
+    if not c or c.get("type") not in AUDIO_TYPES.values():
+        return None
+    try:
+        return _plain(chat_dir() / "audio" / m["batch"] / c["file"], AUDIO_MAX), c["type"]
+    except (OSError, ValueError, KeyError, TypeError):
+        return None
+
+
+def listen(clips: list, text: str = "") -> dict:
+    """Claude's shortlist of `wb audio` takes for the user's ears (#397): Claude can't hear, so a
+    voice's character and a song's feel are the user's to pick. Each clip is copied into
+    chat/audio/<batch>/ (so the page plays wb's own copy, whatever happens to the original) with
+    its check line from the `.json` sidecar beside it, and sent as a message the page shows with
+    a player and a Keep button. A link, a missing clip or one the page can't play is refused,
+    and nothing is sent. Returns the message."""
+    from . import audio
+    if not 1 <= len(clips) <= LISTEN_MAX:
+        raise ValueError(f"a shortlist is 1 to at most {LISTEN_MAX} takes")
+    taken = []
+    for c in map(Path, clips):
+        c = c if c.is_absolute() else Path.cwd() / c
+        kind = AUDIO_TYPES.get(c.suffix.lower())
+        if not kind:
+            raise ValueError(f"{c}: not a clip the page can play ({', '.join(AUDIO_TYPES)})")
+        if c.is_symlink():
+            raise ValueError(f"{c} is a link: name the clip itself")
+        try:
+            data = _plain(c, AUDIO_MAX)
+        except FileNotFoundError:
+            raise ValueError(f"no such clip {c}") from None
+        except (OSError, ValueError) as e:
+            raise ValueError(f"{c}: {e.strerror if isinstance(e, OSError) else e}") from None
+        try:
+            side = json.loads(_plain(c.with_suffix(".json"), 1 << 20))
+        except (OSError, ValueError):
+            side = {}
+        side = side if isinstance(side, dict) else {}
+        try:
+            line = audio.summary(side, side.get("seconds")) if {"duration", "unreadable"} & set(side) else ""
+        except (KeyError, TypeError, ValueError):
+            line = ""
+        taken.append((c, kind, data, line, {k: side[k] for k in ("engine", "seed", "voice") if side.get(k) not in (None, "")}))
+    root = chat_dir() / "audio"
+    root.mkdir(exist_ok=True)
+    batch = f"{int(time.time() * 1000)}-{secrets.token_hex(3)}"
+    d = root / batch
+    d.mkdir()
+    rows = []
+    try:
+        for n, (c, kind, data, line, made) in enumerate(taken, 1):
+            (d / f"{n}{c.suffix.lower()}").write_bytes(data)
+            rows.append({"n": n, "name": c.name, "path": str(c), "file": f"{n}{c.suffix.lower()}",
+                         "type": kind, "line": line, **made})
+        store.write_json(d / "audio.json", {"batch": batch, "ts": store.now(), "clips": rows})
+    except OSError:
+        shutil.rmtree(d, ignore_errors=True)
+        raise
+    for old in sorted(p.name for p in root.iterdir() if BATCH_RE.match(p.name))[:-LISTEN_KEPT]:
+        shutil.rmtree(root / old, ignore_errors=True)
+    n = len(rows)
+    return send(text or f"{n} take(s) to listen to. I can't hear them: tap Keep on the one you want.",
+                "claude", audio=audio_batch(batch))
 
 
 def send(text: str, frm: str, cid: str | None = None, **extra) -> dict:
@@ -783,6 +894,7 @@ class Handler(BaseHTTPRequestHandler):
         self.send_header("Referrer-Policy", "no-referrer")
         self.send_header("Content-Security-Policy",
                          "default-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' blob:; "
+                         "media-src blob:; "
                          "frame-ancestors 'none'; base-uri 'none'; form-action 'none'")
 
     def _send(self, code: int, body: bytes, ctype: str) -> None:
@@ -835,6 +947,16 @@ class Handler(BaseHTTPRequestHandler):
                     self._json(404, {"error": "no such screenshot"})
                 else:
                     self._send(200, body, "image/png")
+            return
+        if path == "/api/audio":  # one take of Claude's shortlist (#397), behind the token too
+            if self._authed():
+                q = parse_qs(urlsplit(self.path).query)
+                n = (q.get("n") or [""])[0]
+                got = audio_take((q.get("batch") or [""])[0], int(n) if n.isdigit() else 0)
+                if got is None:
+                    self._json(404, {"error": "no such take"})
+                else:
+                    self._send(200, *got)
             return
         if path == "/api/state":
             if self._authed():
@@ -975,7 +1097,13 @@ class Handler(BaseHTTPRequestHandler):
         if cid is not None and not (isinstance(cid, str) and 0 < len(cid) <= 64):
             return self._json(400, {"error": "bad cid"})
         about = body.get("about")
-        if about is not None:  # a reply to a pair of screenshots: its task and step, from the pair
+        if isinstance(about, dict) and "audio" in about:  # the take the user keeps, from its batch
+            m, n = _manifest(about.get("audio")), about.get("n")
+            take = next((c for c in m["clips"] if c.get("n") == n), None) if m and type(n) is int else None
+            if not take:
+                return self._json(400, {"error": "no such take"})
+            about = {"audio": m["batch"], "n": n, "name": take.get("name"), "path": take.get("path")}
+        elif about is not None:  # a reply to a pair of screenshots: its task and step, from the pair
             pair = shots(about.get("task"), about.get("n")) if isinstance(about, dict) else None
             if not pair:
                 return self._json(400, {"error": "no such screenshots"})

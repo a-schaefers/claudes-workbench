@@ -424,5 +424,21 @@ def lines() -> list[str]:
                       + ("" if e.get("unload") else " (no unload URL)")
                       if e.get("url") and not e.get("command") else "")
                    + (f"\n    voices: {', '.join(e['voices'])}" if e.get("voices") else "")
-                   + (f"\n    {e['notes']}" if e.get("notes") else ""))
+                   + (f"\n    {e['notes']}" if e.get("notes") else
+                      "\n    licence: not noted (check it, then put it in notes)"))
     return out
+
+
+def coverage() -> str | None:
+    """What the engines cover, for the weekly model check (#398): each kind's engines, the kinds
+    with none, and speech without a listener (its takes go unchecked)."""
+    have = engines()
+    if not have:
+        return None
+    by = {k: [n for n, e in have.items() if kind_of(e) == k] for k in (*KINDS, "listen")}
+    line = "  covers " + "; ".join(f"{k}: {', '.join(v)}" for k, v in by.items() if v)
+    if none := [k for k in KINDS if not by[k]]:
+        line += f"; none for {', '.join(none)}"
+    if by["speech"] and not by["listen"]:
+        line += " · no listener: speech takes go unchecked"
+    return line

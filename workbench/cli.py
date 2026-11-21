@@ -2399,6 +2399,8 @@ def cmd_scout(a):
     print("\n".join(image_lines()) or f"  none: describe one in {images.config_path()}")
     print("\naudio engines (wb audio)")
     print("\n".join(audio.lines()) or f"  none: describe one in {audio.config_path()}")
+    if said := audio.coverage():
+        print(said)
     provs = models.providers()
     registered = models.discover()
     print("\nmodel servers here (work with what the user runs)")
@@ -3052,7 +3054,7 @@ def cmd_init(a):
 # a thousand finished tasks were 4,000 inotify watches per Claude session, or a rescan of them
 # four times a second without inotify (the 2026-11-16 audit).
 EVENT_SKIP = ("tasks/*/worktree", "tasks/*/tree", "tasks/*/rounds", "rules", "imports", "images", "audio",
-              "archive",  # clones (tree/: one nested for a sibling further up, #261), outputs
+              "archive", "chat/audio",  # chat/audio: the takes copied for the page (#397)  # clones (tree/: one nested for a sibling further up, #261), outputs
               # and the scratch clones and indexes (the base check, verify, shot, bench, a
               # submodule fill, a merge): one with a copied node_modules took a wb events from 2
               # watched directories to 605, and each write there woke the mod (#373, the audit
@@ -3106,6 +3108,8 @@ def cmd_top(a):
 
 def cmd_chat(a):
     """The web chat: the user's side door to Claude while away from the terminal."""
+    if a.more and a.action != "listen":
+        die(f"wb chat {a.action}: too many arguments")
     if a.port is None:  # named: that port; else the running server's, else the default (#349)
         a.port = chat.PORT if a.action == "serve" else chat.port()
     if a.action == "serve":
@@ -3145,6 +3149,14 @@ def cmd_chat(a):
             die("the reply is empty")
         chat.send(text, "claude")
         print("sent to the web chat")
+    elif a.action == "listen":  # the takes the user picks from by ear (#397)
+        clips = [c for c in (a.id, a.verdict, *a.more) if c]
+        try:
+            m = chat.listen(clips, (a.text or "").strip())
+        except (ValueError, OSError) as e:
+            die(f"wb chat listen: {e}")
+        print(f"sent {len(m['audio']['clips'])} take(s) to the web chat: the user's pick comes back "
+              "as a chat message")
     elif a.action == "ack":
         chat.ack(a.id, a.by or "claude", a.how)
     elif a.action == "claim":  # the mod, before it submits a message: exit 1 if another has it
@@ -4108,13 +4120,17 @@ def parser() -> argparse.ArgumentParser:
                    help="seconds between ticks (default: stats.json every, else 2)")
     s.set_defaults(f=cmd_top)
     s = sub.add_parser("chat", help="the web chat: turn it on or off (on starts a server; kept as "
-                       "left), serve it, its link, reply to the user there, "
+                       "left), serve it, its link, reply to the user there, takes for the user "
+                       "to pick by ear (listen), "
                        "the thread (log), receipts (ack, claim), what waits (pending), permission "
                        "prompts for the away user (ask, wait, answer: the mod's)")
-    s.add_argument("action", choices=["serve", "url", "on", "off", "reply", "log", "ack", "claim",
-                                      "pending", "ask", "wait", "answer"], nargs="?", default="log")
-    s.add_argument("id", nargs="?", help="ack, claim: the message id; wait, answer: the prompt's id")
+    s.add_argument("action", choices=["serve", "url", "on", "off", "reply", "listen", "log", "ack",
+                                      "claim", "pending", "ask", "wait", "answer"], nargs="?",
+                   default="log")
+    s.add_argument("id", nargs="?", help="ack, claim: the message id; wait, answer: the prompt's "
+                   "id; listen: the clips (wb audio's takes, up to 8)")
     s.add_argument("verdict", nargs="?", help="answer: allow, deny or expired")
+    s.add_argument("more", nargs="*", help=argparse.SUPPRESS)  # listen's further clips
     s.add_argument("--tool", help="ask: the tool asking")
     s.add_argument("--kind", default="permission", help="ask: permission, plan or question")
     s.add_argument("--detail", help="ask: JSON, a question's {questions} or a plan's {plan} "
@@ -4129,7 +4145,7 @@ def parser() -> argparse.ArgumentParser:
     s.add_argument("--bind", action="append", help="serve: an address to listen on, `tailscale` "
                    "or 0.0.0.0 (default: chat.json's `bind`, else localhost)")
     s.add_argument("--host", action="append", help="serve: another host name to answer to (* any)")
-    s.add_argument("--text", help="reply, ask: the text"); s.add_argument("--message", help="reply: file, or -")
+    s.add_argument("--text", help="reply, ask, listen: the text"); s.add_argument("--message", help="reply: file, or -")
     s.add_argument("--by", help=argparse.SUPPRESS); s.add_argument("-n", type=int, default=10)
     s.add_argument("--how", choices=["now", "queued"], default="now", help=argparse.SUPPRESS)
     s.set_defaults(f=cmd_chat)

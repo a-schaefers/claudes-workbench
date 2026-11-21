@@ -51,4 +51,14 @@ download it the server's own way (`lms get`, a GGUF from Hugging Face) and `wb m
 should take, `wb model retire <id> [--delete]`. Installed but unregistered models may belong to other tools: ask before touching
 them. When you set a model aside, `wb scout --watch "…"` records what would bring it back:
 the change to look for, and the test it must pass. A model you add: offer an overnight
-`wb bench run --model <id>` before its first real task. Finish with `wb scout --done --notes "…"`. Nothing worth changing: one line, and done.
+`wb bench run --model <id>` before its first real task.
+
+**The audio and image engines** are in the check too, when `wb scout` lists any (speech, sound
+effects, music, the listener; images). For each, check its model's licence today against the
+licence text, not its tag or the `notes` written at setup: audio licences change (one model went
+non-commercial mid-2026), and some are free only below a revenue line or need a credit. Then look
+for a newer local model of that kind that fits this machine better (the runtime's releases too),
+and recommend keep / add / retire the same way, with the download size and what runs on the
+CPU. A kind the project uses with no engine, or speech with no listener (its takes go unchecked),
+is worth a line. Ask before downloading or removing anything; keep each engine's `notes` (its
+licence) true in audio.json or images.json. Finish with `wb scout --done --notes "…"`. Nothing worth changing: one line, and done.

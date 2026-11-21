@@ -5910,6 +5910,31 @@ class Audio(Base):
         self.assertIn("a server", run_wb("audio", "--list"))
 
 
+    def test_scout_lists_the_audio_engines_what_they_cover_and_a_licence_never_noted(self):
+        # #398: the weekly model check re-checks the audio picks and their licences (one went
+        # non-commercial mid-2026), so scout says what each engine is, what has none, and which
+        # engine's licence was never written down
+        tone = self.tone()
+        self.engines({"tts": {"command": f"{sys.executable} {tone} --out {{out}}", "gpu": False,
+                              "notes": "licence: Apache-2.0"},
+                      "fx": {"kind": "sfx", "command": f"{sys.executable} {tone} --out {{out}}"}})
+        out = run_wb("scout")
+        section = out[out.index("audio engines (wb audio)"):]
+        self.assertIn("tts (speech, CPU)", section)
+        self.assertIn("licence: Apache-2.0", section)
+        self.assertIn("fx (sfx)", section)
+        self.assertIn("licence: not noted (check it, then put it in notes)", section)
+        self.assertIn("covers speech: tts; sfx: fx; none for music", section)
+        self.assertIn("no listener: speech takes go unchecked", section)
+        self.engines({"tts": {"command": f"{sys.executable} {tone} --out {{out}}", "notes": "x"},
+                      "ear": {"kind": "listen", "command": f"{sys.executable} {tone} {{in}}", "notes": "y"}})
+        section = run_wb("scout")
+        self.assertIn("covers speech: tts; listen: ear; none for sfx, music", section)
+        self.assertNotIn("no listener", section)
+        self.assertNotIn("not noted", section)
+        self.engines({})
+        self.assertIn("none: describe one in", run_wb("scout"))
+
 class Discovery(Base):
     def test_local_providers_only_with_overrides(self):
         from workbench import models
@@ -9253,6 +9278,76 @@ class WebChat(Base):
         self.assertEqual(code, 200)
         self.assertEqual(r["message"]["about"], {"task": "t", "n": 1, "step": 2, "round": 3})  # the pair's
         self.assertEqual(self.call("/api/send", {"text": "x", "about": {"task": "t", "n": 7}}, tok)[0], 400)
+
+    def test_wb_audio_takes_play_behind_the_token_and_a_pick_reaches_claude_with_its_take(self):
+        # #397: Claude can't hear, so the user picks a voice or a song by ear on the phone. The
+        # takes are wb's own copies, served behind the token like /api/shot, never through a link
+        import wave as _wave
+        tmp = Path(self.tmp.name)
+        (tmp / "o").mkdir()
+        takes = []
+        for i, level in ((1, b"\x00\x10"), (2, b"\x00\x30")):
+            p = tmp / "o" / f"a-door-slam-{i}.wav"
+            with _wave.open(str(p), "wb") as w:
+                w.setnchannels(1); w.setsampwidth(2); w.setframerate(8000); w.writeframes(level * 8000)
+            store.write_json(p.with_suffix(".json"), {"text": "a door slam", "kind": "sfx", "seed": i,
+                                                      "engine": "fx", "seconds": 1, **audio.levels([0.5] * 800, 800)})
+            takes.append(p)
+        tok = self.chat.token()
+        out = run_wb("chat", "listen", *map(str, takes), "--text", "Take 1 has the cleaner tail.")
+        self.assertIn("sent 2 take(s) to the web chat", out)
+        msg = self.chat.thread()[-1]
+        self.assertEqual((msg["from"], msg["text"]), ("claude", "Take 1 has the cleaner tail."))
+        batch = msg["audio"]["batch"]
+        self.assertEqual([(c["n"], c["name"]) for c in msg["audio"]["clips"]],
+                         [(1, "a-door-slam-1.wav"), (2, "a-door-slam-2.wav")])
+        self.assertIn("1.0 s (asked 1) · peak", msg["audio"]["clips"][0]["line"])  # its checks, from the sidecar
+        q = f"/api/audio?batch={batch}&n=2"
+        self.assertEqual(self.call(q)[0], 401)                                 # the token, as ever
+        self.assertEqual(self.call(q, token=tok), (200, takes[1].read_bytes()))
+        takes[1].write_bytes(b"changed since")                                 # wb's own copy
+        self.assertEqual(self.call(q, token=tok)[1][:4], b"RIFF")
+        for bad in (f"batch={batch}&n=3", f"batch={batch}&n=0", f"batch={batch}&n=x",
+                    f"batch=../{batch}&n=1", "batch=1&n=1", f"batch={batch}&n=audio.json"):
+            self.assertEqual(self.call("/api/audio?" + bad, token=tok)[0], 404, bad)
+        copy = self.chat.chat_dir() / "audio" / batch / "1.wav"
+        copy.unlink()
+        copy.symlink_to(Path(os.environ["WB_CHAT_TOKEN"]))                     # never through a link
+        self.assertEqual(self.call(f"/api/audio?batch={batch}&n=1", token=tok)[0], 404)
+        import http.client
+        c = http.client.HTTPConnection("127.0.0.1", self.port, timeout=5)
+        c.request("GET", "/", headers={"Host": "localhost"})
+        r = c.getresponse()
+        r.read()
+        c.close()
+        self.assertIn("media-src blob:", r.getheader("Content-Security-Policy"))  # the player's blobs
+        # the user's pick: Claude hears which take, and where it is, from the batch, not the page
+        code, r = self.call("/api/send", {"text": "Keep take 2: a-door-slam-2.wav", "cid": "k1",
+                                          "about": {"audio": batch, "n": 2, "path": "/etc/passwd"}}, tok)
+        self.assertEqual(code, 200)
+        self.assertEqual(r["message"]["about"], {"audio": batch, "n": 2, "name": "a-door-slam-2.wav",
+                                                 "path": str(takes[1])})
+        for bad in ({"audio": batch, "n": 3}, {"audio": "nope", "n": 1}, {"audio": batch, "n": "2"}):
+            self.assertEqual(self.call("/api/send", {"text": "x", "about": bad}, tok)[0], 400, bad)
+        # what it refuses: a link, a file the page can't play, too many; nothing is sent
+        (tmp / "link.wav").symlink_to(takes[0])
+        (tmp / "notes.txt").write_text("x")
+        for argv, said in (([str(tmp / "link.wav")], "is a link"), ([str(tmp / "notes.txt")], "not a clip"),
+                           ([str(takes[0])] * (self.chat.LISTEN_MAX + 1), "at most"),
+                           ([str(tmp / "gone.wav")], "no such clip")):
+            err = io.StringIO()
+            with self.assertRaises(SystemExit), redirect_stderr(err):
+                run_wb("chat", "listen", *argv)
+            self.assertIn(said, err.getvalue(), argv)
+        self.assertEqual(self.chat.thread()[-1]["id"], r["message"]["id"])
+        self.assertEqual(len(list((self.chat.chat_dir() / "audio").iterdir())), 1)  # nothing left behind
+        # only the newest LISTEN_KEPT batches are kept: an old one says it's gone
+        with mock.patch.object(self.chat, "LISTEN_KEPT", 1):
+            run_wb("chat", "listen", str(takes[0]))
+        self.assertIn("1 take(s)", self.chat.thread()[-1]["text"])               # the default words
+        self.assertEqual(self.call(f"/api/audio?batch={batch}&n=2", token=tok)[0], 404)
+        self.assertEqual(self.call(f"/api/audio?batch={self.chat.thread()[-1]['audio']['batch']}&n=1",
+                                   token=tok)[0], 200)
 
     def test_it_serves_localhost_unless_the_user_chose_more(self):
         chat, conf = self.chat, Path(os.environ["WB_CHAT_CONFIG"])
