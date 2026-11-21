@@ -421,7 +421,10 @@ class Real(unittest.TestCase):
         os.symlink("mnt:[1]", proc / "self" / "ns" / "mnt")
         cards = [{"name": "RTX 3090", "driver": "nvidia 560.94", "vram": 24 * 2 ** 30,
                   "discrete": True, "uuid": f"GPU-{i}{i}"} for i in (0, 1)]
+        # a Linux box's: on macOS ps stands in for /proc (#804) and only unified GPUs count
+        # (#711), so the nightly's macOS runner read neither server's cards (#950)
         for patch in (mock.patch.object(models.hardware, "PROC", proc),
+                      mock.patch.object(models.hardware, "system", lambda: "linux"),
                       mock.patch.object(models.hardware, "_run", lambda *a, **k: ""),
                       mock.patch.object(models.hardware, "gpus", lambda windows=True: cards)):
             patch.start()

@@ -663,6 +663,14 @@ with models.GpuLease(None, optimize.HOLDER, wait=False):
 class Budget(unittest.TestCase):
     """The GPU budget: one runtime's GPUs, an iGPU's carve-out left out, Apple's real default."""
 
+    def setUp(self):
+        # the cards and the fake /proc these tests give are a Linux box's: on the nightly's macOS
+        # runner budget_devices kept only unified GPUs (#711) and ps stood in for /proc (#804),
+        # so every NVIDIA or AMD case read no budget at all (#950). Apple's case says macOS.
+        linux = mock.patch.object(hardware, "system", lambda: "linux")
+        linux.start()
+        self.addCleanup(linux.stop)
+
     def budget(self, gpus, env=None, why=False):
         with mock.patch.dict(os.environ, {"WB_FAKE_MODELS": "", "WB_MODELS": "/nonexistent"}), \
                 mock.patch.object(models.hardware, "gpus", lambda windows=True: gpus), \
@@ -751,6 +759,9 @@ class Budget(unittest.TestCase):
         # 75% of a 16 GB Mac let a model's context spill to the CPU (the 2026-11-16 audit)
         mac = lambda ram, wired=None: {"name": "Apple M3", "driver": "metal", "unified": True,  # noqa
                                        "vram": ram * 2 ** 30, "wired_limit": wired}
+        macos = mock.patch.object(hardware, "system", lambda: "macos")
+        macos.start()
+        self.addCleanup(macos.stop)
         self.assertEqual(self.budget([mac(16)])[0], 16 * 2 ** 30 * 2 // 3)
         self.assertEqual(self.budget([mac(36)])[0], 36 * 2 ** 30 * 2 // 3)
         self.assertEqual(self.budget([mac(64)])[0], 64 * 2 ** 30 * 3 // 4)
@@ -1087,6 +1098,10 @@ class CanShare(Base):
     def test_ollamas_default_model_limit_is_three_per_gpu(self):
         # #466 (the audit of 1.8; Ollama's server/sched.go: defaultModelsPerGPU * len(gpus)):
         # counted as 3 in all, a fourth task on a two-card box was refused sharing
+        # NVIDIA cards are a Linux box's: on macOS budget_devices keeps only unified GPUs (#711, #950)
+        linux = mock.patch.object(hardware, "system", lambda: "linux")
+        linux.start()
+        self.addCleanup(linux.stop)
         a, b, c, d = (self.model(f"ollama/{x}", gb=1) for x in "abcd")
         card = {"name": "RTX 3090", "driver": "nvidia 560.94", "vram": 24 * 2 ** 30, "discrete": True}
         for cards, ok in (([card], False), ([card, dict(card)], True)):
@@ -1099,6 +1114,10 @@ class CanShare(Base):
     def test_the_model_limit_is_three_per_gpu_when_gpu_gb_sets_the_budget_too(self):
         # #811: gpu_gb (a hand-set headroom) left budget_devices no devices, so a two-card box
         # was allowed 3 models in all, and a fourth task was refused sharing that fit
+        # NVIDIA cards are a Linux box's: on macOS budget_devices keeps only unified GPUs (#711, #950)
+        linux = mock.patch.object(hardware, "system", lambda: "linux")
+        linux.start()
+        self.addCleanup(linux.stop)
         a, b, c, d = (self.model(f"ollama/{x}", gb=1) for x in "abcd")
         card = {"name": "RTX 3090", "driver": "nvidia 560.94", "vram": 24 * 2 ** 30, "discrete": True}
         hand = Path(self.tmp.name) / "models.json"
