@@ -388,6 +388,33 @@ class Lifecycle(Base):
         finally:
             agent.kill()
 
+    def test_a_verify_started_at_review_outlives_the_next_rounds_runner(self):
+        # #504 (the audit of 1.90): the runner's backstop on exit swept every process of the task,
+        # and SIGKILLed the candidate's check of a wb verify run in the background beside a
+        # feedback round, which then read as candidate-fails
+        self.start("t-bgverify", "ok", "--no-base-check")
+        wait_phase("t-bgverify", {"review"})
+        task = store.Task("t-bgverify")
+        sleeper = [sys.executable, "-c", "import time; time.sleep(60)"]
+        check = subprocess.Popen(sleeper, env=runner.agent_env(task, "a-verify-run"),
+                                 start_new_session=True)  # as run_in_lane starts one
+        try:
+            run_wb("feedback", "t-bgverify", "--text", "1. Again.")
+            st = wait_phase("t-bgverify", {"review"})              # its runner has exited
+            self.assertEqual(st["round"], 2)
+            self.assertIsNone(check.poll())                       # the verify's run: untouched
+            # a crashed runner's backstop ends only the runs it issued
+            runner.ISSUED.clear()
+            runner._end_agent(task)
+            self.assertIsNone(check.poll())
+            runner.ISSUED.add("a-verify-run")
+            runner._end_agent(task)
+            self.assertEqual(check.wait(timeout=5), -signal.SIGKILL)
+        finally:
+            check.kill()
+            check.wait()
+            runner.ISSUED.clear()
+
     def test_what_the_agent_leaves_running_ends_with_its_round(self):
         # A writer left running could change the worktree after Claude read the diff (the
         # 2026-11-16 audit); a stray non-event line on its stdout is no crash either.

@@ -34,6 +34,15 @@ from .watch import Watcher
 
 PKG_ROOT = Path(__file__).resolve().parent.parent
 CURRENT: dict = {}  # the agent process of the round in flight, for the SIGTERM handler
+# The run ids this process gave out (WB_RUN: a round's agent, each test, setup or check run) and
+# not yet swept: all its exit's backstop may end (#504).
+ISSUED: set[str] = set()
+
+
+def _issue() -> str:
+    run = uuid.uuid4().hex
+    ISSUED.add(run)
+    return run
 # Keep build droppings out of the worktree, so the review diff is only the agent's work.
 CLEAN_ENV = {"PYTHONDONTWRITEBYTECODE": "1"}
 
@@ -330,7 +339,7 @@ def _kill_group(pgid: int) -> None:
         pass
 
 
-def sweep(task: store.Task, run: str = "") -> int:
+def sweep(task: store.Task, run: str = "", runs=()) -> int:
     """Kill every process of ours the agent started for this task and left running: a server
     backgrounded with `&`, a `setsid`'d child, the agent itself after its runner died. They are
     found by the environment the runner gave them (WB_TASK and WB_HOME, agent_env), since
@@ -339,18 +348,23 @@ def sweep(task: store.Task, run: str = "") -> int:
     kept editing the worktree after Claude read the diff, and a crashed runner left its agent
     working. With ``run``, only what that run started (WB_RUN, agent_env): a wb verify's cleanup
     killed the agent wb feedback had just started on the same task, and two verifies each
-    other's checks (#324, the audit of 1.4)."""
+    other's checks (#324, the audit of 1.4). With ``runs``, only what one of them started: a
+    runner's backstop on exit ends the runs it issued, not a wb verify's (#504)."""
     proc = Path("/proc")
     if not proc.joinpath("self").exists():
-        return _sweep_macos(task, run) if sys.platform == "darwin" else 0
+        return _sweep_macos(task, run, runs) if sys.platform == "darwin" else 0
     want = {f"WB_TASK={task.name}".encode(), f"WB_HOME={store.home()}".encode(),
             *([f"WB_RUN={run}".encode()] if run else [])}
+    anyof = {f"WB_RUN={r}".encode() for r in runs}
     me, uid, n = os.getpid(), os.getuid(), 0
     for d in proc.iterdir():
         if not d.name.isdigit() or int(d.name) == me:
             continue
         try:
-            if d.stat().st_uid != uid or not want <= set(d.joinpath("environ").read_bytes().split(b"\0")):
+            if d.stat().st_uid != uid:
+                continue
+            env = set(d.joinpath("environ").read_bytes().split(b"\0"))
+            if not want <= env or (anyof and not anyof & env):
                 continue
             os.kill(int(d.name), signal.SIGKILL)
             n += 1
@@ -374,7 +388,7 @@ def _mac_environ(procargs: bytes) -> set[bytes]:
     return env
 
 
-def _sweep_macos(task: store.Task, run: str = "") -> int:
+def _sweep_macos(task: store.Task, run: str = "", runs=()) -> int:
     """ps -E flattens argv and environ together. Only kernel environment entries identify a task."""
     try:
         pids = subprocess.run(["ps", "-U", str(os.getuid()), "-o", "pid="], capture_output=True,
@@ -385,6 +399,7 @@ def _sweep_macos(task: store.Task, run: str = "") -> int:
         return 0
     want = {os.fsencode(f"WB_TASK={task.name}"), os.fsencode(f"WB_HOME={store.home()}"),
             *([os.fsencode(f"WB_RUN={run}")] if run else [])}
+    anyof = {os.fsencode(f"WB_RUN={r}") for r in runs}
     killed = 0
     for word in pids:
         if not word.isdigit() or (pid := int(word)) == os.getpid() or pid <= 1:
@@ -393,7 +408,8 @@ def _sweep_macos(task: store.Task, run: str = "") -> int:
         size = ctypes.c_size_t(len(buf))
         if sysctl(mib, 3, buf, ctypes.byref(size), None, 0) != 0:
             continue
-        if want <= _mac_environ(buf[:size.value]):
+        env = _mac_environ(buf[:size.value])
+        if want <= env and (not anyof or anyof & env):
             try:
                 os.kill(pid, signal.SIGKILL)
                 killed += 1
@@ -411,7 +427,14 @@ def _end_agent(task: store.Task) -> None:
         if proc.poll() is None:
             _stop(proc)
         _kill_group(proc.pid)
-    sweep(task, CURRENT.pop("run", ""))  # the round's own; none known (a crash before it): all
+    # The round's own; none known (main's backstop, a crash before it): every run this runner
+    # issued and hasn't swept. Not the whole task's: that killed a wb verify run in the
+    # background beside a feedback round, and its candidate read as failing (#504, the audit of
+    # 1.90). wb stop, takeover, accept, discard and reap still sweep the whole task.
+    run = CURRENT.pop("run", "")
+    if runs := ({run} if run else set(ISSUED)):
+        sweep(task, runs=runs)
+        ISSUED.difference_update(runs)
     try:
         if task.status.get("agent_pid"):
             task.set_status(agent_pid=None)
@@ -584,7 +607,7 @@ def run_round(task: store.Task, n: int, keep: bool = False) -> dict:
     # After `--`: OpenCode reads a message that starts with '-' (a spec opening with a bullet or
     # front matter) as a flag, prints its usage and exits (the 2026-11-16 audit).
     cmd += ["--", note + prompt]
-    CURRENT["run"] = run = uuid.uuid4().hex
+    CURRENT["run"] = run = _issue()
     env = {**agent_env(task, run), **OPENCODE_ENV}
     cmd = lane.wrap(context.writable(task), cmd,   # writes stay in the agent's lane (lane.py),
                     context.readable(task),       # and credentials out of its reach
@@ -906,7 +929,7 @@ def run_in_lane(task: store.Task, cmd: str, limit: int) -> tuple[int | str, str]
     # or fail as they did when the agent ran them
     argv = lane.wrap(context.writable(task), [test_shell(), "-c", cmd], context.readable(task),
                      context.unix_paths(task))
-    run = uuid.uuid4().hex  # its own mark: sweep ends what it left, and nothing else (#324)
+    run = _issue()  # its own mark: sweep ends what it left, and nothing else (#324)
     proc = subprocess.Popen(argv, cwd=task.workdir, stdout=subprocess.PIPE,
                             stderr=subprocess.STDOUT, env=agent_env(task, run),
                             start_new_session=True)  # its own group: a timeout ends all of it
@@ -928,6 +951,7 @@ def run_in_lane(task: store.Task, cmd: str, limit: int) -> tuple[int | str, str]
         _kill_group(proc.pid)  # a timeout's remains, or what it left running in its group
         proc.wait()
         sweep(task, run)       # and what left the group
+        ISSUED.discard(run)
         if prev is None:
             CURRENT.pop("proc", None)
         else:

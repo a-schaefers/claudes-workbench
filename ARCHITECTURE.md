@@ -642,9 +642,12 @@ the task's `WB_TASK` and `WB_HOME` (`agent_env` sets both; the runner's own envi
 `setsid` leaves any group; of those, only the ones carrying the round's own `WB_RUN` (a fresh id
 each round, and each test, setup or verify run: `agent_env(task, run)`), so a `wb verify`
 finishing beside a round that `wb feedback` had just started no longer killed its agent, nor
-two verifies each other's checks (#324, the audit of 1.4). A whole-task sweep (`sweep(task)`,
-no run) is for `wb stop`, takeover, accept, discard, `reap` and a runner that crashed before its
-round's id was known. `agent_pid` is cleared. `sweep` reads `/proc/<pid>/environ`, else
+two verifies each other's checks (#324, the audit of 1.4). With no round's id known (`main`'s
+backstop, a crash before it), `_end_agent` sweeps the runs this runner issued and hasn't swept
+(`ISSUED`, `_issue`; `sweep(task, runs=…)`), not the whole task: the backstop runs on every exit,
+and it killed a `wb verify` or `wb shot` run in the background beside a feedback round, whose
+candidate then read as failing (#504, the audit of 1.90). A whole-task sweep (`sweep(task)`, no
+run) is for `wb stop`, takeover, accept, discard and `reap`. `agent_pid` is cleared. `sweep` reads `/proc/<pid>/environ`, else
 on macOS `_sweep_macos` lists the user's PIDs with `ps` and reads the environment entries from
 Darwin's `KERN_PROCARGS2` after skipping the argument vector. The tests get the same after each run, and
 `wb stop`, `takeover`, `accept`, `discard` and `reap` sweep too. Seen in the audit: a writer left
