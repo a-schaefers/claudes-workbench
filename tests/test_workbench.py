@@ -10758,12 +10758,42 @@ class Audio(Base):
                 mock.patch.object(audio, "_align", lambda *a: (calls.append(1), real(*a))[1]):
             found = audio.inspect(clip, "speech", script, ear=("ear", {}), draw=False)
         self.assertEqual((found["wer"], found["differences"], len(calls)), (rate, diffs, 1))
-        with mock.patch.object(audio, "transcribe", lambda *a: heard), \
+        other = "".join(chr(0x3041 + rnd.randrange(80)) for _ in range(700))   # read as another text
+        with mock.patch.object(audio, "transcribe", lambda *a: other), \
                 mock.patch.object(audio, "ALIGN_CELLS", 100_000):     # past the cap: said, not tried
             found = audio.inspect(clip, "speech", script, ear=("ear", {}), draw=False)
         self.assertNotIn("wer", found)
         self.assertIn("too long to score: 700 script units against 700 heard", found["listen_error"])
         self.assertIn("listener failed: too long to score", audio.summary(found, None))
+
+    def test_a_long_take_that_follows_its_script_is_scored_however_long_with_a_miss_at_each_end(self):
+        # the review of #947: the cap of 16M pairs between the common ends refused 4,100
+        # characters with a miss at each end ("too long to score"), which had scored before: a
+        # listener's first or last word often differs, so trimming the ends saved nothing
+        import random, tracemalloc
+        rnd = random.Random(9470)
+        for size in (4100, 20000):
+            script = "".join(chr(0x4E00 + rnd.randrange(3000)) for _ in range(size))
+            heard = list(script)
+            misses = [0, size // 3, size // 2, size - 1]
+            for p in misses:
+                heard[p] = "中" if script[p] != "中" else "国"
+            tracemalloc.start()
+            try:
+                rate, diffs = audio.score(script, "".join(heard))
+                peak = tracemalloc.get_traced_memory()[1]
+            finally:
+                tracemalloc.stop()
+            self.assertEqual(rate, round(4 / size, 3))
+            self.assertEqual(diffs, [f"{script[p]} → {heard[p]}" for p in misses])
+            self.assertLess(peak, 32 * 2**20)            # a band of the matrix: 20,000 took ~11 MiB
+        for _ in range(300):  # the band, however narrow it starts, gives the whole matrix's alignment
+            a = [rnd.choice("abc") for _ in range(rnd.randrange(60))]
+            b = list(a)
+            for _ in range(rnd.randrange(30)):
+                p = rnd.randrange(len(b) + 1)
+                b[p:p + rnd.randrange(2)] = [rnd.choice("abc")] * rnd.randrange(2)
+            self.assertEqual(audio._align(a, b, band=1), audio._align(a, b, band=200), (a, b))
 
     def test_speech_written_without_spaces_is_scored_by_character(self):
         # #598: '東京タワーに行きましょう。' heard with に→へ scored WER 100%, one character of a

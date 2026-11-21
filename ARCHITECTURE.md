@@ -4922,10 +4922,16 @@ it. ACE-Step's takes peaked at -0.2 dBFS, near clipping, before any `loudnorm`: 
   `GAP_SECS` (1 s) or more between sounds, and a sample at 0.999 of full scale or more counts as
   clipped. `_spans` aligns the script's words with the heard ones (`_align`: the fewest word
   edits, Levenshtein with a backtrace, lower case: the common start and end matched without a
-  matrix, then two rows of costs and a byte a cell for the way back; past `ALIGN_CELLS`, 16M
-  pairs between those ends, a ValueError "too long to score: …" reported as the listener's
-  failure. A full matrix of Python ints took 327 MiB and 3.5 s for a 3,000-character Japanese
-  script, several GiB past 10,000, #947) and keeps each stretch of edits as a span,
+  matrix, then two rows of costs and a byte a cell for the way back, over a band of diagonals:
+  `ALIGN_BAND`, 32 edits either side, doubled (up to the whole matrix) until the alignment found
+  costs no more edits than the band reaches: one that cheap never leaves the band, so it is the
+  full matrix's, ties and all; past `ALIGN_CELLS`, 64M cells (script units times the band), a
+  ValueError "too long to score: …" reported as the listener's failure. A full matrix of Python
+  ints took 327 MiB and 3.5 s for a 3,000-character Japanese script, several GiB past 10,000,
+  #947; a cap of 16M pairs between the common ends then refused 4,100 characters with a miss at
+  each end, which had scored before. A take that follows its script costs a sliver: 20,000
+  characters, 0.5 s and 11 MiB; one read as another text, the whole matrix, 14 s at 5,600) and
+  keeps each stretch of edits as a span,
   except those that differ only in spacing or apostrophes ("boatswain's", "Boat Swain's"); `wer`
   is the substitutions, deletions and insertions over the script's words, not capped at 100%,
   `differences` the first four spans as `script → heard`, both from one alignment (`score`,

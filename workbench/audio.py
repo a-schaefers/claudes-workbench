@@ -380,19 +380,29 @@ def by_characters(script: str) -> bool:
     return sum(bool(UNSPACED.match(u)) for u in units) * 2 > len(units) if units else False
 
 
-# The most cells (script units x heard units, past their common start and end) one alignment
-# fills: a byte each, and a few seconds of Python. The full matrix of Python ints, built twice,
-# took 327 MiB and 3.5 s for a 3,000-character Japanese script, and several GiB past 10,000 (#947).
-ALIGN_CELLS = 16_000_000
+# The most cells one alignment fills: a byte each for the way back, so 64 MB. Cells are the
+# script's units times the band of diagonals tried (below), the whole of the heard ones at most.
+# The full matrix of Python ints, built twice, took 327 MiB and 3.5 s for a 3,000-character
+# Japanese script, several GiB past 10,000 (#947); its first cap, 16M pairs between the common
+# ends, refused 4,100 characters with a miss at each end, which had scored before (the review of
+# #947): a listener's first or last word often differs, so trimming the ends saved nothing.
+ALIGN_CELLS = 64_000_000
+# The first band tried: this many edits either side of the diagonal, doubled until it holds the
+# alignment. A take that follows its script costs a sliver of the matrix, however long.
+ALIGN_BAND = 32
 
 
-def _align(ref: list[str], hyp: list[str]) -> list[tuple[list[str], list[str], int]]:
+def _align(ref: list[str], hyp: list[str], band: int = ALIGN_BAND) -> list[tuple[list[str], list[str], int]]:
     """The fewest edits (substitutions, deletions, insertions) from ``ref`` to ``hyp``, as runs
     of (script words, heard words, edits): 0 edits for a matched word, else a whole stretch of
     edits. difflib's longest-block matching paired an insert with a delete among repeated
     words: one wrong word in "go go go go" scored 100% (#593). The common start and end match
-    without a matrix; between them two rows of costs and a byte per cell for the way back
-    (#947). Past ``ALIGN_CELLS`` it raises ValueError rather than take the machine's memory."""
+    without a matrix; between them, two rows of costs and a byte per cell for the way back
+    (#947), over the diagonals within ``k`` of the main one. An alignment of at most ``k`` edits
+    never leaves them, so one that costs at most ``k`` there is the fewest, and the cells on
+    every cheapest path hold their full-matrix costs: the way back takes the same turns, ties
+    included. Otherwise ``k`` doubles, up to the whole matrix. Past ``ALIGN_CELLS`` it raises
+    ValueError rather than take the machine's memory."""
     n, m = len(ref), len(hyp)
     end = 0  # the end first: the way back matched a common end word for word anyway
     while end < min(n, m) and ref[n - 1 - end] == hyp[m - 1 - end]:
@@ -403,25 +413,42 @@ def _align(ref: list[str], hyp: list[str]) -> list[tuple[list[str], list[str], i
     same = lambda ws: [([w], [w], 0) for w in ws]  # noqa: E731
     r, h = ref[start:n - end], hyp[start:m - end]
     n, m = len(r), len(h)
-    if n * m > ALIGN_CELLS:
-        raise ValueError(f"too long to score: {n} script units against {m} heard between their "
-                         f"common start and end (at most {ALIGN_CELLS:,} pairs)")
-    back = bytearray(n * m)  # 0 a match or substitution, 1 a deletion, 2 an insertion
-    prev = list(range(m + 1))
-    for i in range(1, n + 1):
-        word, cur, row = r[i - 1], [i] + [0] * m, (i - 1) * m - 1
-        for j in range(1, m + 1):
-            diag, up, left = prev[j - 1] + (word != h[j - 1]), prev[j] + 1, cur[j - 1] + 1
-            if diag <= up and diag <= left:  # the way back's order: a match or substitution first
-                cur[j] = diag
-            elif up <= left:
-                cur[j], back[row + j] = up, 1
-            else:
-                cur[j], back[row + j] = left, 2
-        prev = cur
+    k = max(band, abs(n - m), 1)
+    while True:
+        if 2 * (2 * k + 1) >= n + m + 1:  # over half of them: the whole matrix at once
+            k = max(n, m)
+        lo, hi = max(-k, -n), min(k, m)  # the diagonals j - i kept
+        width = hi - lo + 1
+        if n * width > ALIGN_CELLS:
+            raise ValueError(f"too long to score: {n} script units against {m} heard between their "
+                             f"common start and end, too far apart to align in {ALIGN_CELLS:,} cells")
+        far = n + m + 1  # a cell outside the band: dearer than any alignment
+        back = bytearray(n * width)  # 0 a match or substitution, 1 a deletion, 2 an insertion
+        prev = [j if 0 <= j <= m else far for j in range(lo, hi + 1)]  # row 0, by diagonal
+        for i in range(1, n + 1):
+            word, cur, row = r[i - 1], [far] * width, (i - 1) * width
+            first, last = max(0, -i - lo), min(width - 1, m - i - lo)  # 0 <= j <= m
+            for t in range(first, last + 1):
+                j = i + lo + t
+                if j == 0:
+                    cur[t] = i
+                    continue
+                diag = prev[t] + (word != h[j - 1])
+                up = prev[t + 1] + 1 if t + 1 < width else far
+                left = cur[t - 1] + 1 if t else far
+                if diag <= up and diag <= left:  # the way back's order: a match or substitution first
+                    cur[t] = diag
+                elif up <= left:
+                    cur[t], back[row + t] = up, 1
+                else:
+                    cur[t], back[row + t] = left, 2
+            prev = cur
+        if prev[m - n - lo] <= k or (lo, hi) == (-n, m):
+            break
+        k *= 2
     steps, i, j = [], n, m
     while i or j:  # back from the end: a match or substitution first, then a deletion
-        way = back[(i - 1) * m + j - 1] if i and j else (1 if i else 2)
+        way = back[(i - 1) * width + j - i - lo] if i and j else (1 if i else 2)
         if way == 0:
             steps.append((r[i - 1] == h[j - 1], [r[i - 1]], [h[j - 1]]))
             i, j = i - 1, j - 1
