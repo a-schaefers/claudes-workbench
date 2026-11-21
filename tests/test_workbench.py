@@ -313,6 +313,19 @@ class Lifecycle(Base):
         task.set_status(phase="queued", last="checking the acceptance command on the base")
         self.assertEqual(transcript.activity(task, {}), "Checking the acceptance command on the base…")
 
+    def test_the_pane_says_the_setup_runs_not_that_the_task_waits_for_the_gpu(self):
+        # #869 (the third 2026-11-21 audit): a half-hour npm ci or cargo build read "Waiting for
+        # the GPU…" in wb watch and the pane, the task not yet at the lease
+        self.start("t-setnow", "ok")
+        wait_phase("t-setnow", {"review"})
+        task = store.Task("t-setnow")
+        task.set_status(phase="queued", last="setting up the worktree: npm ci")
+        self.assertEqual(transcript.activity(task, {}), "Setting up the worktree: npm ci…")
+        task.set_status(phase="queued", last="reloading m: it was partly on the CPU")
+        self.assertEqual(transcript.activity(task, {}), "Reloading m: it was partly on the CPU…")
+        task.set_status(phase="queued", last="")
+        self.assertEqual(transcript.activity(task, {}), "Waiting for the GPU…")
+
     def test_an_acceptance_command_that_already_passes_is_a_note_in_the_report_not_a_wake(self):
         # the usual case when the agent writes the tests: the check-in that said to discard and
         # start again cost a whole restart in one task of two (the 2026-11-17 measurement)

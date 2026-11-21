@@ -2693,8 +2693,9 @@ Drawn in Claude Code's own grammar, results under `  ⎿  `:
 transcript (on a terminal, one row rewritten in place): what's happening now (`activity`) and a
 clock line:
 - *Now:* queued: `Waiting for the GPU…`, or `status.last` itself while it checks the
-  acceptance command on the base, waits for a named holder, loads, starts, stops, unloads or
-  shares a model (`Waiting for the GPU (held by t)…`,
+  acceptance command on the base, waits for a named holder, sets the worktree up (`Setting up the
+  worktree: npm ci…`: it read "Waiting for the GPU…" through a half-hour setup, #869), loads,
+  reloads, starts, stops, unloads or shares a model (`Waiting for the GPU (held by t)…`,
   `Loading …`); testing:
   ``Running the acceptance tests… `cmd` ``; asking: `Waiting for Claude's answer…`; running: from
   the model server's `GET <root>/metrics` when it returns a `live` object (`{state, phase,

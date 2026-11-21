@@ -418,8 +418,10 @@ def activity(task: store.Task, data: dict, now: float | None = None) -> str | No
     phase = st.get("phase")
     last = st.get("last") or ""
     if phase == "queued":  # the runner says what it waits on, or what it loads
+        # the base check said "Waiting for the GPU" (the 0.90 review), and so did a setup
+        # running for half an hour, and a reload of a model partly on the CPU (#869)
         if last.startswith(("loading", "starting", "stopping", "unloading", "sharing", "waiting",
-                            "checking")):  # the base check said "Waiting for the GPU" (the 0.90 review)
+                            "checking", "setting", "reloading")):
             return f"{last[:1].upper()}{last[1:]}…"
         return "Waiting for the GPU…"
     if phase == "testing":
