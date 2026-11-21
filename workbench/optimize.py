@@ -31,7 +31,6 @@ import os
 import re
 import signal
 import statistics
-import subprocess  # noqa: F401 (cli.detach starts the run; tests patch it here)
 import sys
 import time
 from pathlib import Path

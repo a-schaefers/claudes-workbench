@@ -708,10 +708,12 @@ class Lifecycle(Base):
         # change, and an edit to one was committed to the other
         g = lambda *a: subprocess.run(["git", "-C", str(self.repo), *a], check=True,  # noqa
                                       capture_output=True)
-        (self.repo / "docs").mkdir()
-        (self.repo / "docs" / "API.md").write_text("upper\n")
-        (self.repo / "docs" / "api.md").write_text("lower\n")
-        g("add", "docs")
+        for path, data in (("docs/API.md", b"upper\n"), ("docs/api.md", b"lower\n")):
+            # into the index alone: on a disk that folds case (macOS's APFS, #950) the second
+            # write was the first file again, and HEAD tracked one of the two
+            sha = subprocess.run(["git", "-C", str(self.repo), "hash-object", "-w", "--stdin"],
+                                 input=data, check=True, capture_output=True).stdout.decode().strip()
+            g("update-index", "--add", "--cacheinfo", f"100644,{sha},{path}")
         g("commit", "-qm", "twins")
         with mock.patch.object(gitops, "_case_folds", return_value=True):
             err = io.StringIO()
@@ -2295,12 +2297,15 @@ class Lifecycle(Base):
             parent, name = os.path.split(path)
             return real(path) or os.path.isdir(parent) and any(
                 n.casefold() == name.casefold() for n in os.listdir(parent))
-        os.link(repo / "Readme.md", repo / "README.md")
+        made = not os.path.lexists(repo / "README.md")  # on macOS's APFS it is already (#950)
+        if made:
+            os.link(repo / "Readme.md", repo / "README.md")
         for old_git in (False, True):
             with mock.patch.object(gitops, "_merge_tree", return_value=None) if old_git \
                     else nullcontext():
                 self.assertEqual(gitops._overwritten(repo, "delegate/t"), [])
-        (repo / "README.md").unlink()
+        if made:
+            (repo / "README.md").unlink()
         gitops.merge(repo, "t", "main")
         self.assertEqual((repo / "README.md").read_bytes(), b"r\n")
         repo, g = self._merge_case(  # a case-sensitive git: in the way, as before
@@ -2310,6 +2315,9 @@ class Lifecycle(Base):
         with mock.patch("os.path.lexists", lexists):
             self.assertEqual(gitops._overwritten(repo, "delegate/t"), ["README.md"])
 
+    @unittest.skipIf(gitops._case_folds(tempfile.gettempdir()),
+                     "the temp directory's file system folds case (macOS's APFS): CONFIG and "
+                     "config can't both exist there")
     def test_a_stale_ignorecase_on_a_case_sensitive_file_system_keeps_the_ignored_twin(self):
         # #640 (Codex's audit of 1.90.6): a copied repo carried core.ignorecase=true onto a
         # case-sensitive file system; the checkout tracked CONFIG and kept its own ignored config,
@@ -3178,6 +3186,7 @@ class AutoFix(Base):
         task.set_status(base_check={**base, "cmd": "make check"})
         self.assertIsNone(runner.hang(task, 4))
 
+    @unittest.skipUnless(lane_device(), "needs Landlock and a device node this user may open")
     def test_tests_the_lane_refused_a_device_are_not_sent_back_as_the_agents_bug(self):
         # #496: /dev/kvm refused was named in the report (#331), yet rounds 2 and 3 ran on it
         dev = lane_device()
@@ -3592,6 +3601,7 @@ class WorktreeSetup(Base):
         self.assertIn("NO-NETWORK", note["text"])
         self.assertIn("NO-NETWORK", (t.dir / "setup.txt").read_text())
 
+    @unittest.skipUnless(lane.abi(), "needs Landlock: without it nothing is the lane's (#773)")
     def test_a_setup_the_lane_refused_says_the_grant_that_reaches_it(self):
         # #824 (the second 2026-11-21 audit): a first `npm ci` refused ~/.npm, and the failed
         # notice named no grant, only the setup's output
@@ -5778,8 +5788,8 @@ class Watch(Base):
         for scratch in (".verify-abc/repo", ".base-x", "wb-merge-y", "wb-index-z"):
             for i in range(20):
                 (home / scratch / "node_modules" / f"p{i}").mkdir(parents=True)
-        with Watcher(home, recursive=True, skip=cli.EVENT_SKIP) as w:
-            watched = {str(d.relative_to(home)) for d in w.dirs.values()}
+        with Watcher(home, recursive=True, skip=cli.EVENT_SKIP) as w:  # polled without inotify (macOS)
+            watched = {str(d.relative_to(home)) for d in [*w.dirs.values(), *w.polled]}
         self.assertEqual(watched, {".", "tasks"})
 
     def test_wb_events_watches_no_bench_clone_case_or_upload_no_link_out_and_survives_an_unreadable_directory(self):
@@ -9119,7 +9129,8 @@ class Lane(Base):
         # path under a writable place, so a Postgres socket in /tmp read as a broken database
         task = self.bare_task("t-826", self.repo)
         task.worktree.mkdir()
-        d = Path(tempfile.mkdtemp(dir="/tmp", prefix="wb-826-"))
+        # its real path: macOS's /tmp is a link to /private/tmp, and a grant names the real one
+        d = Path(os.path.realpath(tempfile.mkdtemp(dir="/tmp", prefix="wb-826-")))
         self.addCleanup(shutil.rmtree, d, True)
         sock = str(d / ".s.PGSQL.5432")
         srv = socket.socket(socket.AF_UNIX)
@@ -9159,6 +9170,8 @@ class Lane(Base):
         # #832 (the second 2026-11-21 audit): with an rbenv Ruby, `bundle install` writes the
         # Ruby's gem home; Bundler's and RubyGems' refusals say no "permission denied", so the
         # report named nothing, and a grant of the one directory named failed at the next
+        abi = mock.patch.object(lane, "abi", lambda: 6)   # a lane to refuse: #773 asks for one
+        abi.start(); self.addCleanup(abi.stop)            # (macOS has none, #950)
         home = self.fake_home()
         gems = home / ".rbenv" / "versions" / "3.3.0" / "lib" / "ruby" / "gems" / "3.3.0"
         for d in ("cache", "gems", "specifications"):
@@ -9425,6 +9438,10 @@ class CheckoutVenv(Base):
         rules = context.shell_rules(task)
         self.assertEqual(Permission.verdict(rules, "pip install -e ."),
                          "allow" if lane.abi() else "deny")
+        # pipenv makes its own venv in the worktree: no lane needed for that (#950)
+        self.assertEqual(Permission.verdict(rules, "pipenv install"), "allow")
+        with mock.patch.object(lane, "abi", return_value=0):
+            self.assertEqual(Permission.verdict(context.shell_rules(task), "pipenv install"), "allow")
 
     def test_a_venv_in_a_per_project_home_or_on_path_alone_is_the_checkouts_too(self):
         task = store.Task("t-homes")
@@ -9485,7 +9502,8 @@ class CheckoutVenv(Base):
         self.assertIn(str(tools / "bin"), env["PATH"].split(os.pathsep))
         rules = context.shell_rules(task)
         for cmd in ("pip install -e .", "python3 -m pip install -r requirements.txt",
-                    "poetry install", "pip uninstall -y mypkg", "uv pip sync requirements.txt"):
+                    "poetry install", "pip uninstall -y mypkg", "uv pip sync requirements.txt",
+                    "pipenv install"):  # pipenv's goes into the active venv too
             self.assertEqual(Permission.verdict(rules, cmd), "deny", cmd)
         self.assertEqual(Permission.verdict(rules, "npm ci"), "allow")
         lane_ = context.writable(task)                            # granted, but not the venv
@@ -14322,8 +14340,12 @@ class Try(Base):
         self.assertFalse((cli.try_dir() / "3").exists())          # (#161)
 
     def test_wb_try_refused_by_wb_init_leaves_no_sample_behind(self):
-        # #530: with no git identity wb init refused, and try/1, try/2… were left at each retry
-        os.environ.update(GIT_CONFIG_GLOBAL=os.devnull, GIT_CONFIG_NOSYSTEM="1")
+        # #530: with no git identity wb init refused, and try/1, try/2… were left at each retry.
+        # useConfigOnly: git makes no identity up from the user and host names, as it does on a
+        # Mac (user@host.local), where a host name without a domain makes none (#950)
+        noid = Path(self.tmp.name) / "no-identity.gitconfig"
+        noid.write_text("[user]\n\tuseConfigOnly = true\n")
+        os.environ.update(GIT_CONFIG_GLOBAL=str(noid), GIT_CONFIG_NOSYSTEM="1")
         for k in ("GIT_AUTHOR_NAME", "GIT_AUTHOR_EMAIL", "GIT_COMMITTER_NAME", "GIT_COMMITTER_EMAIL",
                   "EMAIL"):
             os.environ.pop(k, None)
@@ -17770,7 +17792,9 @@ class DiskRoom(Base):
         # #852: on APFS statvfs leaves out purgeable space (local snapshots, iCloud's optimized
         # files), so a Mac with 1.5 GB by statvfs and 30 GB in Finder refused every start
         small = types.SimpleNamespace(f_bavail=1500, f_frsize=10**6)            # 1.5 GB
-        with mock.patch.object(store.os, "statvfs", return_value=small):
+        # no Windows drive behind it, as on a Mac: on WSL the faked statvfs was C:'s too (#950)
+        with mock.patch.object(store.os, "statvfs", return_value=small), \
+                mock.patch.object(store, "host_drive", return_value=None):
             with mock.patch.object(store, "_important_free", return_value=30 * 10**9):
                 self.assertEqual(store.free_bytes(), 30 * 10**9)
                 self.assertIsNotNone(cli._disk_room(self.repo, "HEAD", {}))     # room: no refusal
@@ -18046,7 +18070,10 @@ class LogoutStops(Base):
                 self.assertTrue(kw.get("start_new_session"))
                 return types.SimpleNamespace(pid=os.getpid())
             awake = []  # and #516: the runs a night is left to keep the machine awake
+            # the state directory is local: off Linux, store.network_fs asks `mount` (a Popen) where
+            # Linux reads /proc/self/mounts, and the fake took it for a detach (#950, macOS)
             with mock.patch("subprocess.Popen", popen), \
+                    mock.patch.object(store, "network_fs", return_value=None), \
                     mock.patch.object(cli, "keep_awake", lambda pid, why: awake.append(why)), \
                     mock.patch.object(models, "_started", return_value="1"):
                 chat.start(51583)
@@ -18193,7 +18220,7 @@ class KeepAwake(Base):
         time.sleep(0.3)
         self.assertNotIn("released", log.read_text())         # held while the run lives
         sleeper.kill()
-        end = time.monotonic() + 30                           # the waiter polls a pidfd, else 15 s
+        end = time.monotonic() + 30                           # a pidfd or a kqueue, else 15 s
         while "released" not in log.read_text() and time.monotonic() < end:
             time.sleep(0.05)
         self.assertIn("released", log.read_text())           # and let go when it ends
@@ -20064,6 +20091,12 @@ class Top(Base):
                           FAKE_SMI_LOG=str(bindir / "log"), FAKE_SMI_PID=str(bindir / "pid"))
         return bindir
 
+    @staticmethod
+    def x86():
+        """An x86 machine's card: on ARM (an Apple Silicon CI runner, a DGX Spark) nvidia-smi's
+        [N/A] memory is the RAM's (#572), so the fake old card read as unified there (#950)."""
+        return mock.patch("platform.machine", lambda: "x86_64")
+
     def top(self, drm, smi=None):
         from workbench import top
         run = hardware._run if smi else lambda *argv: ""  # no lspci: the PCI id instead
@@ -20154,6 +20187,7 @@ class Top(Base):
         self.assertLessEqual(g["used"], g["total"])
 
     def test_nvidia_comes_from_one_long_lived_nvidia_smi_and_n_a_is_left_out(self):
+        self.enterContext(self.x86())
         bindir = self.fake_smi()
         t = self.top(Path(self.tmp.name, "nodrm"), smi=str(bindir / "nvidia-smi"))
         try:
@@ -20180,6 +20214,7 @@ class Top(Base):
         # #547: before nvidia-smi's first line (the one pass Claude's Bash gets, the pane's first
         # tick) and after its stream exited, wb top said "RAM (no GPU)" on an NVIDIA machine
         from workbench import top
+        self.enterContext(self.x86())
         bindir = self.fake_smi()
         smi, nodrm = str(bindir / "nvidia-smi"), Path(self.tmp.name, "nodrm")
         os.environ["FAKE_SMI_MODE"] = "slow"
@@ -20565,10 +20600,13 @@ class Top(Base):
                              str(ROOT / "bin" / "wb"), str(out)], capture_output=True, text=True, timeout=30)
         pid = int(sh.stdout.strip())
         self.assertTrue(wait_gone(pid, 10), "wb top outlived its parent")
-        deadline = time.time() + 5
-        while not (bindir / "pid").exists() and time.time() < deadline:
-            time.sleep(0.05)
-        self.assertTrue(wait_gone(int((bindir / "pid").read_text()), 10), "nvidia-smi outlived wb top")
+        if hardware.system() == "macos":  # a Mac has no NVIDIA card: wb top never runs nvidia-smi
+            self.assertFalse((bindir / "log").exists())
+        else:
+            deadline = time.time() + 5
+            while not (bindir / "pid").exists() and time.time() < deadline:
+                time.sleep(0.05)
+            self.assertTrue(wait_gone(int((bindir / "pid").read_text()), 10), "nvidia-smi outlived wb top")
         first = json.loads(out.read_text().splitlines()[0])
         self.assertEqual(sorted(first), ["every", "gpus", "queue", "rack", "running", "ts"])
 
@@ -20588,13 +20626,15 @@ class Top(Base):
                  "    signal.signal(signal.SIGTTOU, signal.SIG_IGN)\n"  # a shell's own step
                  "    os.tcsetpgrp(0, os.getpid())\n"
                  "    signal.signal(signal.SIGTTOU, signal.SIG_DFL)\n"
-                 "    os.execv(sys.argv[1], [sys.argv[1], 'top', '--every', '0.2'])\n"
+                 "    os.execv(sys.executable, [sys.executable, sys.argv[1], 'top', '--every', '0.2'])\n"
                  "open(sys.argv[2], 'w').write(str(pid))\n"
                  "while not os.WIFEXITED(os.waitpid(pid, os.WUNTRACED)[1]):\n"
                  "    pass\n")
         child, fd = pty.fork()
         if child == 0:
-            os.environ["PATH"] = "/usr/bin:/bin"  # no nvidia-smi: nothing to wait on
+            # no nvidia-smi: nothing to wait on. wb runs on this Python, not PATH's python3, which
+            # on a Mac is Xcode's 3.9 (#950)
+            os.environ["PATH"] = "/usr/bin:/bin"
             os.execv(sys.executable, [sys.executable, "-c", shell, str(ROOT / "bin" / "wb"), str(pidfile)])
         def reap_all():
             for pid in (int(pidfile.read_text()) if pidfile.exists() else 0, child):
@@ -20624,11 +20664,13 @@ class Top(Base):
         os.kill(top_pid, signal.SIGTSTP)
         self.assertTrue(read_until(b"\033[?1049l"))
         self.assertIn(b"\033[?25h", got)
+        def state():  # ps, not /proc/<pid>/stat: a Mac has no /proc (#950)
+            return subprocess.run(["ps", "-o", "stat=", "-p", str(top_pid)], capture_output=True,
+                                  text=True).stdout.strip()[:1]
         deadline = time.time() + 10
-        while Path(f"/proc/{top_pid}/stat").read_text().split(")")[1].split()[0] != "T" \
-                and time.time() < deadline:
+        while state() != "T" and time.time() < deadline:
             time.sleep(0.05)
-        self.assertEqual(Path(f"/proc/{top_pid}/stat").read_text().split(")")[1].split()[0], "T")
+        self.assertEqual(state(), "T")
         self.assertTrue(termios.tcgetattr(fd)[3] & termios.ICANON)        # the shell's mode back
         del got[:]
         os.kill(top_pid, signal.SIGCONT)

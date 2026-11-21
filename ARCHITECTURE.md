@@ -719,8 +719,9 @@ of its own that ends when the run does:
 
 - **macOS**: `caffeinate -i -w <pid>` (idle sleep; a closed lid on battery still sleeps).
 - **Linux booted with systemd**: `systemd-inhibit --what=idle:sleep --who=workbench --why='task
-  <name>' --mode=block` around a wait for the pid (`AWAIT_PID`: a pidfd, else `kill -0` every
-  15 s); `systemd-inhibit --list` shows it. logind's polkit grants a sleep lock to a local active
+  <name>' --mode=block` around a wait for the pid (`AWAIT_PID`: a pidfd, else a kqueue's
+  `NOTE_EXIT`, both at the exit itself, else `kill -0` every 15 s, which a pid not yet reaped still
+  answers); `systemd-inhibit --list` shows it. logind's polkit grants a sleep lock to a local active
   session only, so where it refuses (SSH, a scope outside any session) an idle lock is held
   instead (`--what=idle`: it holds logind's `IdleAction`, not a desktop's suspend). It starts in
   the caller's session, not `runner_scope`'s scope, for that grant: under
@@ -1552,7 +1553,10 @@ wins; no match means ask, which `--auto` allows. The rules, in order:
    forms only where pip installs into the worktree's own venv, or with no Python environment
    active (the user's checkout's are left out: *Its environment*, below) while Landlock bounds
    what pip writes (`context.python_installs`); otherwise they ask first, since pip would write
-   the user's own conda env or tools venv, or their Python with no lane. While a venv of the
+   the user's own conda env or tools venv, or their Python with no lane. The pipenv ones wherever
+   no venv of the user's is active (the worktree's own may be), lane or none: pipenv installs into the active venv, else
+   makes its own in the worktree (`PIPENV_VENV_IN_PROJECT`), never the user's Python (#950: taken
+   for a pip form, `pipenv install` asked first on every Mac). While a venv of the
    user's stays active in the agent's shell (one that isn't the checkout's), `ENV_INSTALLS`
    (`poetry install *`, `poetry sync *`, `poetry remove *`, `uv sync --active *`, `uv pip sync
    *`, the `pip uninstall` forms), which change the active venv, ask first too (#490, the audit
