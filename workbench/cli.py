@@ -3427,6 +3427,17 @@ def cmd_update(a):
               "the pane")
 
 
+def _card_example(names: list[str]) -> str:
+    """A card with memory of its own of the vendor ``names`` name, for gpu_line's hint: it said
+    "an Intel Arc" of a Radeon seen from WSL (#522)."""
+    text = " ".join(names).lower()
+    for words, example in ((("radeon", "amd"), "a Radeon card"), (("intel", "arc"), "an Intel Arc"),
+                           (("nvidia", "geforce", "rtx", "quadro"), "a GeForce card")):
+        if any(w in text for w in words):
+            return f" ({example})"
+    return ""
+
+
 def gpu_line() -> str:
     """What the GPU budget counts (wb doctor, wb scout): sharing and the router's fit rest on it."""
     budget, _, why = models.budget_devices()
@@ -3446,8 +3457,8 @@ def gpu_line() -> str:
     if gs:
         return (f"GPU memory unknown here ({', '.join(sorted({g['driver'] for g in gs}))}): tasks take "
                 "turns on the GPU, and the router can't hold back a model too big for it; "
-                + (f"if {', '.join(unknown)} has memory of its own (an Intel Arc), {hand}" if unknown
-                   else hand))
+                + (f"if {', '.join(unknown)} has memory of its own{_card_example(unknown)}, {hand}"
+                   if unknown else hand))
     return ("no GPU memory found: local models run on the CPU, slowly; "
             "wb model sizes <id> trivial keeps a big one off small tasks")
 

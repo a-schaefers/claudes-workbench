@@ -662,6 +662,13 @@ class Budget(unittest.TestCase):
             self.assertIn("GPU memory unknown here (xe): tasks take turns", cli.gpu_line())
             # #272 (the audit of 1.2): nothing said how; the line names the file and the key
             self.assertIn(f'set its memory in {models.overrides_path()}: {{"gpu_gb": ', cli.gpu_line())
+        # #522: the example fits the card it names: a Radeon seen from WSL is no Intel Arc
+        with mock.patch.object(models, "budget_devices", lambda: (None, [], "")), \
+                mock.patch.dict(os.environ, {"WB_FAKE_MODELS": ""}), \
+                mock.patch.object(cli.hardware, "gpus", lambda windows=True: [
+                    {"name": "AMD Radeon RX 7800 XT", "driver": "windows (seen from WSL)", "vram": None}]):
+            self.assertIn("if AMD Radeon RX 7800 XT has memory of its own (a Radeon card)", cli.gpu_line())
+            self.assertNotIn("Intel Arc", cli.gpu_line())
         # and a card that publishes no size beside one that does: the budget leaves it out
         with mock.patch.object(models, "budget_devices", lambda: (2 * 2 ** 30, [], "Radeon 780M (VRAM)")), \
                 mock.patch.dict(os.environ, {"WB_FAKE_MODELS": ""}), \

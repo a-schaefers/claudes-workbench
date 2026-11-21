@@ -9841,6 +9841,11 @@ class Hardware(unittest.TestCase):
             patcher = mock.patch(target, value)
             patcher.start()
             self.addCleanup(patcher.stop)
+        home = tempfile.mkdtemp()  # what hardware caches (WSL's Windows adapters), never the real one's
+        self.addCleanup(shutil.rmtree, home, True)
+        patcher = mock.patch.dict(os.environ, {"WB_HOME": home})
+        patcher.start()
+        self.addCleanup(patcher.stop)
         return hardware
 
     def test_apple_silicon_reports_unified_memory_not_no_gpu(self):
@@ -9867,16 +9872,31 @@ class Hardware(unittest.TestCase):
             {"sppci_model": "AMD Radeon Pro 5500M", "spdisplays_vram": "8 GB"}]})})
         self.assertIn("AMD Radeon Pro 5500M · 8.6 GB VRAM · metal", "\n".join(hw.report()))
 
-    def test_wsl_names_windows_gpus_and_says_what_it_cannot_see(self):
+    def test_wsl_reads_each_windows_gpus_memory_and_budgets_it_when_linux_sees_none(self):
+        # #522: a 16 GB RX 7800 XT under Ollama for Windows was "VRAM unknown", scout said only
+        # NVIDIA is usable, and with no budget tasks took turns and unloaded every model
+        from workbench import models
+        asked = []
         hw = self.fake("Linux", files={
             "/proc/version": "Linux version 5.15.153.1-microsoft-standard-WSL2",
             "/proc/meminfo": "MemTotal:       16000000 kB\nMemAvailable:    8000000 kB\n"},
-            runs={("powershell.exe",): "AMD Radeon RX 7900 XTX\r\n"})
-        out = "\n".join(hw.report())
-        self.assertIn("OS    wsl", out)
-        self.assertIn("only NVIDIA GPUs are usable from inside WSL", out)
-        self.assertIn("AMD Radeon RX 7900 XTX · VRAM unknown · windows (seen from WSL)", out)
-        self.assertIn("RAM   16.4 GB", out)  # decimal GB (#523)
+            runs={("powershell.exe",): "AMD Radeon RX 7800 XT\t17163091968\r\n"
+                                       "Intel(R) UHD Graphics 770\t134217728\r\nParsec Virtual Display Adapter\t\r\n"})
+        run = hw._run
+        with mock.patch.object(hw, "_run", lambda *argv: asked.append(argv) or run(*argv)):
+            out = "\n".join(hw.report())
+            self.assertIn("OS    wsl", out)
+            self.assertNotIn("only NVIDIA", out)
+            self.assertIn("models served from Windows (Ollama for Windows) can use any vendor's GPU", out)
+            self.assertIn("AMD Radeon RX 7800 XT · 17.2 GB VRAM · windows (seen from WSL)", out)
+            self.assertIn("Parsec Virtual Display Adapter · VRAM unknown", out)
+            self.assertIn("RAM   16.4 GB", out)  # decimal GB (#523)
+            with mock.patch.dict(os.environ, {"WB_FAKE_MODELS": "", "WB_MODELS": "/nonexistent"}):
+                budget, devs, why = models.budget_devices()
+        self.assertEqual((budget, why), (17163091968, "AMD Radeon RX 7800 XT (VRAM)"))
+        ps = [a for a in asked if a[0] == "powershell.exe"]
+        self.assertEqual(len(ps), 1)                    # cached: the budget asked no PowerShell
+        self.assertIn("-EncodedCommand", ps[0])          # no quoting through WSL's interop
 
     def test_ollamas_quoted_service_environment_and_a_context_that_isnt_a_number(self):
         # the 2026-11-16 audit: systemd quotes a value with a space and the split lost it; "32k"

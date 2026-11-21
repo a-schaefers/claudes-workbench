@@ -184,7 +184,8 @@ class Top:
                             **({"unified": True} if g.get("unified") else {})}
                            for g in hardware._mac_gpus()]
         elif self.where == "wsl" and not self.smi and not self.cards:
-            self.static = [{"name": g["name"]} for g in hardware._windows_gpus()]
+            self.static = [{"name": g["name"], **({"total": g["vram"]} if g.get("vram") else {})}
+                           for g in hardware._windows_gpus()]
         self.probed = 0.0
         self.loads_at = 0.0
         self.load: dict[str, float] = {}

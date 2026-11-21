@@ -1,14 +1,16 @@
-"""What this machine has to run models on, found fresh each time: nothing about it is written down.
+"""What this machine has to run models on, found fresh each time: nothing about it is written
+down, but WSL's reading of Windows' adapters, which takes a PowerShell start (an hour's cache).
 
 `wb scout` reports it next to the installed models, so Claude can judge each week which models
 are the best fit for this hardware right now (the /workbench skill's weekly model check).
 
-Linux reads sysfs and /proc; WSL2 adds what Windows says about its GPUs (only NVIDIA's are
-visible inside WSL); macOS asks sysctl and system_profiler, and on Apple Silicon the GPU's memory
-is the unified RAM. Anything a platform can't tell comes back as unknown, never as a guess.
+Linux reads sysfs and /proc; WSL2 adds what Windows says about its GPUs (a model served from
+Windows runs on any of them; Linux inside WSL sees few); macOS asks sysctl and system_profiler,
+and on Apple Silicon the GPU's memory is the unified RAM. Anything a platform can't tell comes back as unknown, never as a guess.
 """
 from __future__ import annotations
 
+import base64
 import json
 import os
 import platform
@@ -18,6 +20,8 @@ import shutil
 import subprocess
 import time
 from pathlib import Path
+
+from . import store
 
 GIB = 1024 ** 3  # what system_profiler means by "GB"
 DRM = Path("/sys/class/drm")
@@ -87,13 +91,44 @@ def _mac_gpus() -> list[dict]:
     return found
 
 
+# Windows' display adapters, each with the memory its driver's registry key states
+# (HardwareInformation.qwMemorySize, 64 bits: Win32_VideoController's AdapterRAM caps at 4 GB),
+# one name and size a line, tab between. Sent as -EncodedCommand: no quoting through WSL's interop
+WINDOWS_SCRIPT = (
+    "$r = @(Get-ItemProperty 'HKLM:\\SYSTEM\\CurrentControlSet\\Control\\Class\\"
+    "{4d36e968-e325-11ce-bfc1-08002be10318}\\0*' -ErrorAction SilentlyContinue); "
+    "Get-CimInstance Win32_VideoController | ForEach-Object { $n = $_.Name; "
+    "$m = ($r | Where-Object { $_.DriverDesc -eq $n } | Select-Object -First 1).'HardwareInformation.qwMemorySize'; "
+    "$n + [char]9 + $m }")
+WINDOWS_CACHE = "wsl-gpus.json"  # under $WB_HOME: {ts, gpus: [{name, vram}]}
+WINDOWS_FOR = 3600  # seconds a reading serves: PowerShell takes seconds to start
+
+
 def _windows_gpus() -> list[dict]:
-    """From inside WSL2: the Windows host's adapters by name (WSL hides all but NVIDIA's from
-    Linux). Windows' AdapterRAM is capped at 4 GB, so VRAM stays unknown rather than wrong."""
-    out = _run("powershell.exe", "-NoProfile", "-Command",
-               "Get-CimInstance Win32_VideoController | Select-Object -ExpandProperty Name")
-    return [{"name": n.strip(), "driver": "windows (seen from WSL)", "vram": None, "vram_used": None}
-            for n in out.splitlines() if n.strip()]
+    """From inside WSL2: the Windows host's adapters, with their memory from the registry. A
+    model served from Windows (Ollama for Windows) runs on any of them, and WSL shows Linux only
+    NVIDIA's (and AMD's or Intel's to ROCm or Level Zero), so a 16 GB Radeon was "VRAM unknown"
+    and had no budget (#522). Read at most once per WINDOWS_FOR, in WINDOWS_CACHE: the budget
+    asks it on every admission when Linux sees no GPU."""
+    path = store.home() / WINDOWS_CACHE
+    hit = store.read_json(path, None)
+    if isinstance(hit, dict) and isinstance(hit.get("gpus"), list) \
+            and 0 <= time.time() - (hit.get("ts") or 0) < WINDOWS_FOR:
+        rows = hit["gpus"]
+    else:
+        out = _run("powershell.exe", "-NoProfile", "-NonInteractive", "-EncodedCommand",
+                   base64.b64encode(WINDOWS_SCRIPT.encode("utf-16-le")).decode())
+        rows = []
+        for line in out.splitlines():
+            name, _, mem = (x.strip() for x in line.partition("\t"))
+            if name:
+                rows.append({"name": name, "vram": int(mem) if mem.isdigit() and int(mem) else None})
+        try:
+            store.write_json(path, {"ts": time.time(), "gpus": rows})
+        except OSError:
+            pass  # unwritable state: asked again next time
+    return [{"name": r["name"], "driver": "windows (seen from WSL)", "vram": r.get("vram"), "vram_used": None}
+            for r in rows if isinstance(r, dict) and isinstance(r.get("name"), str)]
 
 
 def _int(text: str) -> int:
@@ -106,8 +141,10 @@ def _int(text: str) -> int:
 def gpus(windows: bool = True) -> list[dict]:
     """Every display adapter: name, driver, VRAM total and in use (bytes) where the driver says,
     and `discrete` when it is known to be a card with memory of its own (not an APU's carve-out).
-    ``windows`` False leaves out what WSL names from Windows (no VRAM, and a PowerShell start of
-    seconds): the GPU budget and wb image's settle asked it on every call (the 2026-11-16 audit)."""
+    On WSL, Windows' adapters too (_windows_gpus); ``windows`` False leaves them out whenever
+    Linux sees a GPU of its own (a PowerShell start takes seconds: the GPU budget and wb image's
+    settle asked it on every call, the 2026-11-16 audit), and takes them from the cache when it
+    sees none (#522)."""
     where = system()
     if where == "macos":
         return _mac_gpus()
@@ -140,7 +177,7 @@ def gpus(windows: bool = True) -> list[dict]:
             if re.fullmatch(r"\d+\.\d+", cap := caps.get(g["uuid"], "")):
                 g["compute_cap"] = tuple(int(x) for x in cap.split("."))
     if where == "wsl":
-        if not windows:
+        if not windows and found:
             return found
         nvidia = {g["name"] for g in found}
         return found + [g for g in _windows_gpus()
@@ -522,8 +559,10 @@ def size(n: int | None) -> str:
 
 
 SYSTEM_NOTE = {
-    "wsl": "WSL2: RAM is the VM's share (.wslconfig sets it); only NVIDIA GPUs are usable from "
-           "inside WSL, others are named from Windows without their VRAM",
+    "wsl": "WSL2: RAM is the VM's share (.wslconfig sets it); models served from Windows (Ollama "
+           "for Windows) can use any vendor's GPU, and inside WSL NVIDIA (CUDA), recent AMD (ROCm "
+           "for WSL) and Intel (Level Zero) work; Windows' adapters are read from Windows, their "
+           "memory from its registry",
     "macos": "macOS: Apple Silicon models run on the GPU through Metal, in the unified memory",
 }
 

@@ -1340,7 +1340,10 @@ def budget_devices() -> tuple[int | None, list[dict], str]:
             if usable < IGPU_UNDER:
                 continue
         if usable:
-            groups.setdefault((g.get("driver") or "?").split()[0], []).append((usable, g, how))
+            # an adapter named from Windows (WSL) is a group of its own: the registry can't tell
+            # a laptop's Radeon iGPU from its Radeon card, so the largest counts alone (#522)
+            key = (g.get("driver") or "?").split()[0]
+            groups.setdefault(f"{key}:{g['name']}" if key == "windows" else key, []).append((usable, g, how))
     if not groups:
         return None, [], ""
     best = max(groups.values(), key=lambda devs: sum(n for n, _, _ in devs))

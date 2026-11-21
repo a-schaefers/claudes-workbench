@@ -1902,7 +1902,7 @@ Each tick reads, cheapest first:
   --format=csv,noheader,nounits -lms <ms>` for the life of the command (`SmiStream`, found by
   `hardware.smi_path`: PATH, else WSL's), read line by line as it prints; a row older than three
   intervals drops out. macOS: the GPUs from system_profiler once (no VRAM used, no busy %); WSL
-  without NVIDIA: Windows' adapter names once; no GPU at all: the RAM, from /proc/meminfo.
+  without NVIDIA: Windows' adapters once (names, and memory as `total` where the registry says); no GPU at all: the RAM, from /proc/meminfo.
 - **Tasks**: every task's task.json and status.json, re-read only when one changes (`_Files`, by
   mtime and size), and a running task's newest `step` events (the last 64 KiB of events.jsonl).
 - **The lease**: gpu.json and each remote pool's `gpu-<host>.json` through `models.holders` (dead
@@ -2270,7 +2270,8 @@ comes from, for `wb doctor` and `wb scout`'s `cli.gpu_line`) is models.json's to
 when set (decimal GB, the escape hatch for hardware this can't read; not a number: an error, as a
 malformed file; `gpu_line` names the file and the key whenever a GPU publishes no memory size,
 Intel's i915 and xe, whose sysfs has none: alone, as the fix for "GPU memory unknown here", and
-beside a budget from another device, as the card that budget leaves out. Nothing pointed there,
+beside a budget from another device, as the card that budget leaves out; its example card is of
+the vendor it names, `_card_example`: it said "an Intel Arc" of a Radeon seen from WSL, #522. Nothing pointed there,
 so tasks never shared and the user's other Ollama models were unloaded every round: #272, the
 audit of 1.2), else it comes from one runtime's GPUs: the GPUs are grouped by driver (`nvidia`, `amdgpu`,
 `metal`…) and the largest group's sum is taken, so several NVIDIA cards (which Ollama splits a
@@ -2297,7 +2298,9 @@ an 8 GB Orin Nano whose desktop held 2 GB (#524); another server's loaded model 
 system's, which only stops sharing. `gpu_gb` still overrides it. Apple Silicon: `iogpu.wired_limit_mb` when set, else macOS's default
 (`unified_default`: two thirds of the RAM up to `UNIFIED_SMALL` 36 GiB, three quarters above,
 Metal's recommendedMaxWorkingSetSize; it was 75% everywhere, too much on 8-32 GB Macs). Unknown
-VRAM means no sharing. `gpus(windows=False)`: the budget never asks WSL's PowerShell. A model's
+VRAM means no sharing. `gpus(windows=False)`: the budget asks WSL's PowerShell only when Linux sees no GPU, and then
+at most hourly (`wsl-gpus.json`); each adapter named from Windows is a group of its own, since
+the registry can't tell a laptop's Radeon iGPU from its Radeon card: the largest counts (#522). A model's
 need: `vram_gb`, else Ollama's loaded size (weights and context), else weights × `KV_GUESS` 1.25.
 `can_share(m)`: every running model and `m` are Ollama and local, and their needs sum to at most
 `SHARE_AT` 0.9 of the budget; the same model again (the same `server` and name) needs a slot of
@@ -2466,9 +2469,16 @@ contains "microsoft"), `linux`. `gpus()`: `nvidia-smi` (`smi()`: from PATH, else
 WSL (`[N/A]` reads as unknown, except on ARM (`aarch64`/`arm64`: a DGX Spark, a Jetson), where
 the GPU shares the RAM: `unified` with `MemTotal`, and `ram_free` (`MemAvailable`) for the
 budget's reserve, the 2026-11-19 audit and #524; a line of fewer than
-five fields is skipped); WSL adds Windows' adapters from `powershell.exe Get-CimInstance Win32_VideoController` (no
-VRAM: AdapterRAM caps at 4 GB), but only for the report (`wb scout`, `wb doctor`'s GPU line):
-`gpus(windows=False)`, which the budget and `wb image`'s settle use, reads nvidia-smi alone; Linux scans `DRM`'s (`/sys/class/drm`) `card*/device` (amdgpu's
+five fields is skipped); WSL adds Windows' adapters (`_windows_gpus`: one `powershell.exe
+-EncodedCommand` of `WINDOWS_SCRIPT`, no quoting through the interop: `Win32_VideoController`'s
+names, each one's memory from its driver's registry key, `HardwareInformation.qwMemorySize` under
+the display class `{4d36e968-e325-11ce-bfc1-08002be10318}`, since `AdapterRAM` caps at 4 GB),
+kept `WINDOWS_FOR` (an hour) in `$WB_HOME/wsl-gpus.json`, as a PowerShell start takes seconds.
+A model served from Windows (Ollama for Windows) runs on any vendor's GPU, and inside WSL NVIDIA,
+recent AMD (ROCm for WSL) and Intel (Level Zero) work: a 16 GB RX 7800 XT was "VRAM unknown", the
+note said only NVIDIA is usable, and with no budget tasks took turns (#522). `gpus(windows=False)`,
+which the budget and `wb image`'s settle use, leaves Windows' adapters out whenever Linux sees a
+GPU (nvidia-smi), and takes them from the cache when it sees none; Linux scans `DRM`'s (`/sys/class/drm`) `card*/device` (amdgpu's
 `mem_info_vram_total`/`_used`; an amdgpu device `apu` says is an APU, with a `mem_info_gtt_total`:
 `unified`, its VRAM the carve-out plus the GTT, since that is where a Strix Halo with a
 512 MiB carve-out keeps its models (the 2026-11-19 audit). `apu(dev)` is True when the card's
@@ -4362,6 +4372,7 @@ $WB_HOME (~/.local/state/workbench)
   gpu-<host>-<port>.{lock,json,admit,load}   the same for a remote server's models (models.pool)
   scout.json  watch.json         the weekly model check: when it was done and offered; the watch list
   update.json                    wb update: when origin was last asked, how far behind this copy was
+  wsl-gpus.json                  WSL only: Windows' display adapters ({ts, gpus: [{name, vram}]}), re-read hourly (hardware.WINDOWS_FOR)
   bench/cases/<case>/            case.json  spec.md  base.bundle  hidden/<path>…  reference.patch
   bench/runs/<run>/              plan.json  driver.log  <task>/{wb.log,diff.patch,grade.txt} (repo/ while it runs)
   bench/runs.jsonl  driver.json  one row per replay; the driver's {pid, run}
