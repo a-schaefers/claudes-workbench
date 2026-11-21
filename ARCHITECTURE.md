@@ -2079,15 +2079,22 @@ round (*4. Tests*), which costs time and pays when it spares Claude a review rou
 sets for one task (`--self-review`/`--no-self-review`) wins over the record and a pin (`tune`'s
 `fixed`), and that task is evidence for the value it ran. `tune(task, ceilings)` picks each knob once per task (`status.tuned`, with
 `status.explored` and `status.tuned_max`): usually the best value so far, while one task in five
-(`EXPLORE`) tries the value next to it. When a task closes, its value scores the result (`reward`):
-1 for accepted (`agent_landed`: a takeover's accept is Claude's and scores 0, #647), divided by one plus the review rounds the agent caused (every step's), less
+(`EXPLORE`) tries the value next to it. When a task closes, its value scores the result (`reward`),
+per step so a chain is set against single tasks fairly: 1 for accepted (`agent_landed`: a takeover's accept is Claude's and scores 0, #647), divided by one plus the
+review rounds the agent caused a step (every step's, over the steps), less
 `COMPACT_PENALTY` 0.25 if OpenCode still had to compact, and up to ± `SPEED_WEIGHT` 0.15 for being
-faster or slower than that model's usual task, both in active minutes (the median; the wall clock
-counted the wait for Claude's review as the agent being slow, #543). Discarded scores 0; a discard Claude marks
+faster or slower a step than that model's usual step of the same size, both in active minutes (the
+median; the wall clock counted the wait for Claude's review as the agent being slow, #543; pooled
+over sizes, every trivial task beat the median, #721). Discarded scores 0; a discard Claude marks
 `--spec-gap` is its own miss and counts for nothing, here or in the router's and the skills'
-records (`judged`). Each value's mean is smoothed toward the others' (`PRIOR`, two tasks' worth),
-so one lucky task moves nothing, and the pick walks one step at a time toward whatever scores
-best. Values past the model's ceiling (`runner.fresh_ceiling`: one step's growth, at least
+records (`judged`). A knob that acts only on a filling session (`Knob.fills`: `fresh_at`) counts
+a task only when one of its sessions reached the smallest allowed value (`tuning.acted`, from the
+row's `peak_share`; a row from before it was recorded counts): most tasks never fill 40% of the
+window, and one fast trivial task at 0.5 flipped the pick, one discard flipped it back (#721).
+Each value's mean is smoothed toward the others' (`PRIOR`, two tasks' worth), and a value other
+than the default can be the pick only once `TRY_MIN` (3) tasks ran at it (an untried value sits at
+the pooled mean, so any one task above it won), so one lucky task moves nothing, and the pick
+walks one step at a time toward whatever scores best. Values past the model's ceiling (`runner.fresh_ceiling`: one step's growth, at least
 `tuning.CEILING_MARGIN` 0.05 of the window, before OpenCode's compaction, #644) are never tried (a
 window under `models.MIN_WINDOW`, 16K, which would leave none, is refused instead). An output cap
 that is a large share of the window can put the ceiling under every value: then the ceiling
@@ -5993,6 +6000,7 @@ check-ins off), not `wb start`'s.
 | `full_pct`, `handovers` | the fill at the last mid-round handover; how many |
 | `window`, `load_secs`, `loads` | the model's context window; the load time, summed over every runner of the task (`wb feedback`, `next`, `resume`) and the reloads before later rounds (`runner._loaded`); each load that happened, alone (`[secs…]`: the typical load's samples, #577) |
 | `tuned`, `explored`, `tuned_max` | the knob values this task runs at (`tuning.tune`) |
+| `peak_share` | the fullest any of its sessions got, a share of the window (`runner.peak`: each `step_finish`, and each session export's last message), so the row says whether `fresh_at` could act (#721) |
 | `steer_taken`, `nudges`, `nudged_round`, `checkin_at` | notes delivered; nudges sent; the round that ended in one; the last check-in |
 | `active_s` | the agent's active work so far, in seconds: rounds less answers and a frozen machine (*Progress checks*) |
 | `progress_checks`, `progress_mark`, `progress_open`, `interventions` | progress checks raised; the worktree's mark at the last; a check not yet answered; the steers that answered one, `[{kind, ts, round, step}]` |
@@ -6025,7 +6033,7 @@ questions `ask {id}`, `answer {id}`. From `wb`:
 review included), `tok_in`, `tok_out`, `ran` (whether the agent ever got a request to its model, `results.ran`: a
 session began or a token was written), `failed_before` (`setup` or `load`, when it never ran:
 status's), `skills_offered`, `skills_loaded`, `skills_rev`, `experiments` (the
-names on for the task, when any), `steps` (one `results.step` per step), `window`, `tuned`, `explored`, `tuned_max`, `spec_gaps`, `claude`
+names on for the task, when any), `steps` (one `results.step` per step), `window`, `tuned`, `explored`, `tuned_max`, `peak_share` (status's, when recorded: `tuning.acted`), `spec_gaps`, `claude`
 (when known: `spend.usage`, `{turns, calls, input, cache_write_5m, cache_write_1h, cache_read,
 output}`, *What a task cost Claude*), `gpu_wh` (status's, when measured), `remote_gpu` (true
 when its model ran on another machine, whose energy nothing here measures), `active_minutes`

@@ -87,6 +87,7 @@ def record(task: store.Task, outcome: str, last_step: dict | None = None, **extr
            "window": st.get("window"),
            "tuned": st.get("tuned") or {}, "explored": st.get("explored") or [],  # tuning.py
            "tuned_max": st.get("tuned_max") or {},
+           **({"peak_share": st["peak_share"]} if "peak_share" in st else {}),  # tuning (#721)
            "spec_gaps": [g["text"] for g in st.get("spec_gaps") or []],
            **({"backlog": spec["backlog"]} if spec.get("backlog") else {}),  # wb backlog
            **({"claude": u} if u else {}),

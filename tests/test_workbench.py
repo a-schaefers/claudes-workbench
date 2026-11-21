@@ -10079,16 +10079,43 @@ class Tuning(Base):
     def test_a_better_record_moves_the_pick_and_one_lucky_task_does_not(self):
         from workbench import tuning
         self.result(0.6, reviews=1, n=4)                     # 0.5 each
-        self.result(0.7, n=1)                                # one clean task
-        self.assertEqual(tuning.best("fresh_at", self.M, self.W), 0.7)  # smoothed: 0.67 > 0.5...
+        self.result(0.7, n=1)                                # one clean task moves nothing (#721)
+        self.assertEqual(tuning.best("fresh_at", self.M, self.W), 0.6)
+        self.result(0.7, n=2)                                # three do (TRY_MIN)
+        self.assertEqual(tuning.best("fresh_at", self.M, self.W), 0.7)
         self.result(0.7, outcome="discarded", n=2, spec_gaps=["the spec's reading didn't fit"])
         self.assertEqual(tuning.best("fresh_at", self.M, self.W), 0.7)  # Claude's misses aren't its
-        self.result(0.7, outcome="discarded", n=2)           # ...but not once it fails twice
+        self.result(0.7, outcome="discarded", n=3)           # ...but not once it fails as often
         self.assertEqual(tuning.best("fresh_at", self.M, self.W), 0.6)
         self.result(0.7, n=6)
         self.assertEqual(tuning.best("fresh_at", self.M, self.W), 0.7)
         self.assertEqual(tuning.best("fresh_at", "ollama/other", self.W), 0.6)  # per model
         self.assertEqual(tuning.best("fresh_at", self.M, 65536), 0.6)           # and window
+
+    def test_a_task_that_never_filled_a_session_is_no_evidence_of_the_handover_point(self):
+        # #721 (reproduced): ten tasks at 0.6 scored alike; one 8-minute trivial task at 0.5,
+        # its session 15% full so fresh_at never acted, scored 1.15 against a median pooled over
+        # every size, and best() switched to 0.5; one discard switched it back
+        from workbench import tuning
+        for i in range(10):
+            self.result(0.6, outcome="discarded" if i < 2 else "accepted", reviews=int(i in (2, 3)),
+                        minutes=20.5, size="significant", peak_share=0.7)
+        self.result(0.5, minutes=8, size="trivial", peak_share=0.15)
+        self.assertEqual(tuning.record("fresh_at", self.M, self.W)[0.5], [])
+        self.assertEqual(tuning.best("fresh_at", self.M, self.W), 0.6)
+        self.result(0.5, minutes=8, size="trivial", peak_share=0.45, n=2)  # it acted: evidence,
+        self.assertEqual(len(tuning.record("fresh_at", self.M, self.W)[0.5]), 2)
+        self.assertEqual(tuning.best("fresh_at", self.M, self.W), 0.6)     # but two aren't TRY_MIN
+        # the speed term is set against the usual step of the same size, not every size's
+        self.assertAlmostEqual(tuning.record("fresh_at", self.M, self.W)[0.5][0], 1.0)
+
+    def test_a_chain_of_steps_is_scored_per_step(self):
+        # #721: a 5-step chain with one review a step scored 1/6, and its time was set against
+        # single tasks' whole minutes
+        from workbench import tuning
+        chain = {"outcome": "accepted", "reviews": 5, "active_minutes": 50, "steps": [{}] * 5}
+        self.assertEqual(tuning.reward(chain, 10), 0.5)
+        self.assertEqual(tuning.reward({**chain, "reviews": 0}, 10), 1.0)
 
     def test_compaction_and_time_cost_reward(self):
         from workbench import tuning

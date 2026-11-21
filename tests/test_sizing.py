@@ -144,6 +144,7 @@ class Measured(Base):
         run_wb("accept", "t-m2", "-m", "feat: answer")
         (step,) = self.row()["steps"]
         self.assertEqual((step["handovers"], step["reviews"], step["compacted"]), (1, 1, False))
+        self.assertGreaterEqual(self.row()["peak_share"], 0.7)  # fresh_at could act on it (#721)
         self.assertIn("1 of 1 measured steps went well",
                       router.slice(models.resolve("ollama/mimo-v2.6:9b-q8_0")).line())
 

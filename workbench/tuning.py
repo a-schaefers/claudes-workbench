@@ -4,15 +4,17 @@ each knob that works best for each model at the context window it is served.
 A knob has a few candidate values and a default (a reasoned guess, the pick until evidence
 says otherwise). At a task's start, choose() takes the value with the best record for that model
 and window, each value's mean reward smoothed toward the record of all values (PRIOR tasks'
-worth), so one lucky task doesn't win; ties go to the default. One task in EXPLORE tries a
+worth), among the default and the values tried TRY_MIN times, so one lucky task doesn't win; ties
+go to the default. A knob that acts only on a filling session (fresh_at) learns only from the
+tasks whose sessions reached its smallest value. One task in EXPLORE tries a
 neighbouring value instead, the one tried less, so evidence keeps growing beside the pick and
 the pick walks toward a better value one step at a time, never jumping across the range.
 
 A task's reward is how well it went for what it cost: accepted (and not taken over: Claude's
-work isn't the agent's), discounted by the review rounds
-the agent caused (Claude's time is the expensive part; a round Claude marked as the spec's gap
-isn't the agent's), less COMPACT_PENALTY when OpenCode still had to compact a session, plus or
-minus up to SPEED_WEIGHT for taking less or more time than that model's usual task. Discarded
+work isn't the agent's), discounted by the review rounds the agent caused a step (Claude's time
+is the expensive part; a round Claude marked as the spec's gap isn't the agent's), less
+COMPACT_PENALTY when OpenCode still had to compact a session, plus or minus up to SPEED_WEIGHT
+for taking less or more time a step than that model's usual step of the same size. Discarded
 scores 0. Neither a trial run (store.results) nor a discard Claude put down to its own spec
 (judged) is evidence, and a value is judged only by the tasks it ran, so a task routed to
 explore doesn't blur the pick's record.
@@ -35,6 +37,7 @@ from dataclasses import dataclass
 from . import store
 
 PRIOR = 2  # tasks' worth of the pooled record each value starts with
+TRY_MIN = 3  # tasks a value other than the default needs before it can be the pick (#721)
 EXPLORE = 0.2
 COMPACT_PENALTY = 0.25
 SPEED_WEIGHT = 0.15
@@ -49,13 +52,16 @@ class Knob:
     values: tuple
     default: float
     help: str
+    fills: bool = False  # acts only on a session that fills: a task whose sessions never reached
+    # the smallest value (results' `peak_share`) is no evidence of it (#721)
 
 
 KNOBS = {
     # The share of the window at which a filling session hands over to a fresh one (runner).
     # Earlier: more handovers, each re-reading files. Later: work in a crowded context, closer to
     # OpenCode's compaction. Which costs more depends on the model.
-    "fresh_at": Knob((0.4, 0.5, 0.6, 0.7, 0.8), 0.6, "share of the window at which a fresh session takes over"),
+    "fresh_at": Knob((0.4, 0.5, 0.6, 0.7, 0.8), 0.6, "share of the window at which a fresh session takes over",
+                     fills=True),
     # Whether the agent reviews its own change in one more round once the tests pass, before
     # Claude is woken (runner.SELF_REVIEW). It costs local time; a bug it catches saves Claude a
     # feedback round, a whole extra wake (2026-11-18: a trivial handoff came in under Claude
@@ -104,14 +110,28 @@ def agent_reviews(row: dict) -> int:
     return max(0, (row.get("reviews") or 0) - (row.get("spec_rounds") or 0))
 
 
+def _steps(row: dict) -> int:
+    return max(1, len(row.get("steps") or []))
+
+
+def _step_minutes(row: dict) -> float | None:
+    """The agent's active minutes per step (#543: not the wait for Claude's review)."""
+    mins = row.get("active_minutes")
+    if isinstance(mins, (int, float)) and not isinstance(mins, bool) and mins > 0:
+        return mins / _steps(row)
+    return None
+
+
 def reward(row: dict, usual_minutes: float | None = None) -> float:
+    """Per step, so a chain is set against single tasks fairly: a 5-step chain with one review a
+    step scored 1/6 (#721). ``usual_minutes``: the model's usual minutes a step for the size."""
     if not agent_landed(row):  # a discard, or Claude's work after a takeover (#647)
         return 0.0
-    r = 1 / (1 + agent_reviews(row))
+    r = 1 / (1 + agent_reviews(row) / _steps(row))
     if any(s.get("compacted") for s in row.get("steps") or []):
         r -= COMPACT_PENALTY
-    mins = row.get("active_minutes")  # the agent's time, not the wait for Claude's review (#543)
-    if usual_minutes and isinstance(mins, (int, float)) and mins > 0:
+    mins = _step_minutes(row)
+    if usual_minutes and mins:
         r -= SPEED_WEIGHT * max(-1.0, min(1.0, math.log2(mins / usual_minutes)))
     return r
 
@@ -131,17 +151,30 @@ def default(name: str, ceiling=None):
     return d if d in ok else max(ok)
 
 
+def acted(name: str, row: dict, ceiling=None) -> bool:
+    """Whether the knob could have acted on the task: a `fills` knob, only when one of its
+    sessions reached the smallest value (a row from before `peak_share` was recorded counts).
+    Most tasks are small and never fill 40% of the window: one fast trivial task at 0.5 flipped
+    the pick, one discard flipped it back (#721)."""
+    peak = row.get("peak_share")
+    return not KNOBS[name].fills or not isinstance(peak, (int, float)) \
+        or peak >= min(allowed(name, ceiling)) - 1e-9
+
+
 def record(name: str, model: str, window, ceiling=None) -> dict:
-    """Each allowed value's evidence for this model and window: {value: [rewards]}."""
+    """Each allowed value's evidence for this model and window: {value: [rewards]}, each task's
+    speed set against the usual minutes a step of its own size took (pooled over sizes, a
+    trivial task beat a significant one's median every time, #721)."""
     rows = [r for r in store.results() if _key(r) == (model, window) and judged(r)
-            and (r.get("tuned") or {}).get(name) is not None]
-    mins = [r["active_minutes"] for r in rows if isinstance(r.get("active_minutes"), (int, float))
-            and r["active_minutes"] > 0]
-    usual = statistics.median(mins) if mins else None
+            and (r.get("tuned") or {}).get(name) is not None and acted(name, r, ceiling)]
+    usual = {}
+    for size in {r.get("size") for r in rows}:
+        mins = [m for r in rows if r.get("size") == size and (m := _step_minutes(r))]
+        usual[size] = statistics.median(mins) if mins else None
     out: dict = {v: [] for v in allowed(name, ceiling)}
     for r in rows:
         if r["tuned"][name] in out:
-            out[r["tuned"][name]].append(reward(r, usual))
+            out[r["tuned"][name]].append(reward(r, usual.get(r.get("size"))))
     return out
 
 
@@ -154,8 +187,12 @@ def scores(name: str, model: str, window, ceiling=None) -> dict:
 
 
 def best(name: str, model: str, window, ceiling=None) -> float:
+    """The best-scoring value among the default and those tried TRY_MIN times: an untried value
+    sits at the pooled mean, so any one task above it won the pick (#721)."""
     d, sc = default(name, ceiling), scores(name, model, window, ceiling)
-    return max(sc, key=lambda v: (round(sc[v], 9), v == d, -abs(v - d)))
+    rec = record(name, model, window, ceiling)
+    ok = [v for v in sc if v == d or len(rec[v]) >= TRY_MIN]
+    return max(ok, key=lambda v: (round(sc[v], 9), v == d, -abs(v - d)))
 
 
 def choose(name: str, model: str, window, task_name: str, ceiling=None) -> tuple[float, bool]:

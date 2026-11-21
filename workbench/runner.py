@@ -941,7 +941,8 @@ def run_round(task: store.Task, n: int, keep: bool = False) -> dict:
                 used = row["in"] + row.get("cache", 0) + row["out"] + row.get("reasoning", 0)  # #644
                 st = task.status
                 task.set_status(tok_in=st.get("tok_in", 0) + row["in"], tok_out=st.get("tok_out", 0) + row["out"],
-                                live_used={"session": st.get("session"), "used": used})  # #262
+                                live_used={"session": st.get("session"), "used": used},  # #262
+                                **peak(st, used))
                 # Full: a fresh session takes over (drive), never OpenCode's own summary. Only
                 # once this session has changed a file: one that filled up reading would hand
                 # the same reading to the next, which fills up too (seen 2026-11-16: twenty
@@ -2019,6 +2020,15 @@ HANDOFF_DIFF_SHARE = 0.09
 HANDOFF_DIFF_MAX = 60_000  # characters, whatever the window: the prompt is one argv string (see run_round)
 
 
+def peak(st: dict, used) -> dict:
+    """status `peak_share`, the fullest any of the task's sessions got (a share of the window),
+    raised to ``used`` when that is more: whether fresh_at could act on the task (#721)."""
+    window = st.get("window")
+    if not (window and isinstance(used, (int, float)) and used / window > (st.get("peak_share") or 0)):
+        return {}
+    return {"peak_share": round(used / window, 3)}
+
+
 def context_state(task: store.Task) -> dict:
     """How full the task's current session is: {"used", "window", "compactions"}."""
     sid = task.status.get("session")
@@ -2047,6 +2057,8 @@ def context_state(task: store.Task) -> dict:
     # interrupt) read as an empty session and skipped the between-rounds check (#481)
     last = next((m for m in reversed(msgs) if m.get("type") == "assistant" and carried(m.get("tokens"))), None)
     used = carried(last["tokens"]) if last else None
+    if more := peak(task.status, used):
+        task.set_status(**more)
     return {"used": used, "window": task.status.get("window"),
             "compactions": sum(m.get("type") == "compaction" and m.get("status") == "completed"
                                for m in msgs)}
