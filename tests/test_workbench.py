@@ -4337,7 +4337,8 @@ class RealOpenCode(Base):
         self.assertIn("assigned-ok", answers[0])
         self.assertIn("two-ok", answers[1])
         self.assertNotIn("rejected", answers[2])               # a project's tool, by its path
-        self.assertIn("permission.rejected", answers[3])       # no root
+        if sys.platform.startswith("linux"):  # no root: the kernel's, as a variable's value can't
+            self.assertIn("no new privileges", answers[3])  # be bounded in a pattern (#442)
         self.assertIn("permission.rejected", answers[4])       # a new package asks first
         self.assertIn("permission.rejected", answers[5])       # not an allowed command
 
@@ -5604,13 +5605,14 @@ class Permission(Base):
 
     @staticmethod
     def verdict(rules, command):
-        """OpenCode's matcher as CLAUDE.md describes it: anchored, `*` matches anything, a
-        trailing ` *` optional, the last matching rule wins."""
+        """OpenCode's matcher as CLAUDE.md describes it: anchored, `*` matches anything, `?` one
+        character, a trailing ` *` optional, the last matching rule wins."""
         import re as _re
         found = None
         for r in rules:
             pat = r["resource"]
-            rx = _re.escape(pat[:-2] if pat.endswith(" *") else pat).replace(r"\*", ".*")
+            rx = _re.escape(pat[:-2] if pat.endswith(" *") else pat).replace(r"\*", ".*") \
+                .replace(r"\?", ".")
             rx += "( .*)?" if pat.endswith(" *") else ""
             if _re.fullmatch(rx, command, _re.S):
                 found = r["effect"]
@@ -5633,6 +5635,28 @@ class Permission(Base):
                     "uv run --with requests python x.py", "uv tool run ruff"):
             self.assertEqual(self.verdict(rules, cmd), "deny", cmd)
         self.assertEqual(runner.OPENCODE_ENV["npm_config_yes"], "false")  # a plain `npx <pkg>`
+
+    def test_a_hard_word_after_a_wrappers_arguments_is_refused_but_inside_a_command_is_not(self):
+        # #442, the audit of 1.8: `xargs *`, `env *`, `timeout *` and `*=*` before ` gh` matched
+        # `xargs grep -l gh` and `pytest --tb=short -k gh`, last, so nothing could lift them
+        task = store.Task("t-wrap")
+        task.dir.mkdir(parents=True)
+        (task.dir / "task.json").write_text(json.dumps({"name": "t-wrap", "repo": str(self.repo)}))
+        rules = context.shell_rules(task)
+        for cmd in ("xargs grep -l gh", "pytest --tb=short -k gh", "timeout 300 pytest -k gh",
+                    "env CI=1 rg gh src", "nice -n 5 make su", "xargs -0 rg gh",
+                    "timeout 60 grep -rw sudo docs", "CI=1 npm test -- -t gh"):
+            self.assertEqual(self.verdict(rules, cmd), "allow", cmd)
+        for cmd in ("sudo x", "gh pr create", "env gh pr list", "env -i sudo x", "xargs gh",
+                    "xargs -0 sudo rm", "xargs -n 1 gh", "xargs -I {} sudo cp {} /", "xargs -r0 su",
+                    "timeout 5 sudo -n true", "timeout 30 gh run list", "timeout 5m su",
+                    "nice -n 10 sudo x", "nice -5 doas x", "stdbuf -oL -eL gh api x",
+                    "time -p sudo x", "command -p gh pr create", "nohup -- pkexec x", "setsid su"):
+            self.assertEqual(self.verdict(rules, cmd), "deny", cmd)
+        Path(os.environ["WB_COMMANDS"]).write_text(json.dumps({"allow": ["*"]}))
+        rules = context.shell_rules(task)
+        self.assertEqual(self.verdict(rules, "curl -s x | xargs grep -l gh"), "allow")
+        self.assertEqual(self.verdict(rules, "timeout 5 sudo x"), "deny")  # still the hard limit
 
     def test_a_commands_json_that_is_malformed_is_refused_not_ignored(self):
         # a string `allow` was spread letter by letter, its `*` allowing every command; a file

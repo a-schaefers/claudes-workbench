@@ -967,8 +967,8 @@ image generation.
 
 **Commands, an allowlist** (`context.shell_rules`). OpenCode's `shell` permission rules are
 checked against each simple command of a line (pipes, `&&`, loops, `$(…)`), its raw text as the
-resource. OpenCode anchors each pattern, lets `*` match anything (spaces and `/` too), treats a
-trailing ` *` as optional (`npm install *` also matches `npm install`), and the last matching rule
+resource. OpenCode anchors each pattern, lets `*` match anything (spaces and `/` too) and `?` any
+one character (a space too), treats a trailing ` *` as optional (`npm install *` also matches `npm install`), and the last matching rule
 wins; no match means ask, which `--auto` allows. The rules, in order:
 1. deny `*`;
 2. allow `c`, `c *` and `*=* c *` (`ASSIGN`: a variable set before it, `PYTHONPATH=. pytest`)
@@ -979,8 +979,8 @@ wins; no match means ask, which `--auto` allows. The rules, in order:
    so `FOO=1 ls` was refused while `ls` and `env FOO=1 ls` ran, and a small model copying the
    project's own `CI=1 npm test` spent a Claude wake asking or stopped running the tests (#258, the
    audit of 1.2). `*` matches spaces, so the prefix form also passes a line with an `=` anywhere
-   before an allowed command's name: no more than `env *` already runs. Steps 4 to 6 and 8 get the
-   prefix form too;
+   before an allowed command's name: no more than `env *` already runs. Steps 4 to 6 get the
+   prefix form too (step 8 no longer does: #442);
 3. allow `./*`, `../*`, and `<dir>/*` for every directory of the lane but those under `/dev` and `/proc` (a program the agent built
    runs by its path anywhere it can write: a debug binary in the temp directory was refused
    though `bash` could run it);
@@ -1016,11 +1016,23 @@ wins; no match means ask, which `--auto` allows. The rules, in order:
 8. deny the hard limits (`context.denied_shell()`): `DENIED_SHELL`, built from `_HARD` (`sudo`,
    `doas`, `pkexec`, `su`, `gh`), and the real git by its path (each `git` on the runner's PATH
    but the shim, its real path, and `GIT_PATHS`: `/usr/bin/git`, `/bin/git`,
-   `/usr/local/bin/git`, `/opt/homebrew/bin/git`), each bare and with ` *`, and each again behind
-   the `_WRAPPERS` (`env`, `env *`, `xargs`, `xargs *`, `nohup`, `nohup --`, `nice`, `nice *`,
-   `time`, `time -p`, `time --`, `command`, `command -p`, `command --`, `exec`, `timeout *`,
-   `stdbuf *`, `setsid`, `*=*`), so `env gh …`, `time -p sudo …`, `timeout 5 sudo …` and
-   `FOO=1 sudo …` are refused.
+   `/usr/local/bin/git`, `/opt/homebrew/bin/git`), each as `c *` (which matches a bare `c` too:
+   one rule each, as the rules travel in one environment string, `runner.CONFIG_CONTENT_MAX`), and
+   each again behind the `_WRAPPERS`, a wrapper's own option shapes: `env`, `env -i`, `env --`;
+   `xargs` bare, `-0`, `-r`, `-0r`, `-r0`, `--null`, `--no-run-if-empty`, `-??`, `-???`, `-? ?`,
+   `-I {}`, `-I{}`; `nohup`, `nohup --`; `nice` bare, `-?`, `-??`, `-???`, `-n ?`, `-n ??`,
+   `-n ???`; `time`, `time -p`, `time --`; `command`, `command -p`, `command --`; `exec`;
+   `timeout ?`, `timeout ??`, `timeout ???`; `stdbuf -??` once to three times; `setsid`. So
+   `env gh …`, `time -p sudo …`, `timeout 5 sudo …`, `nice -n 10 sudo …`, `xargs -n 1 gh …` are
+   refused. Never a `*` before the hard word: `*` matches spaces, so the earlier `env *`,
+   `xargs *`, `nice *`, `timeout *`, `stdbuf *` and `*=*` forms refused `env CI=1 rg gh src`,
+   `xargs grep -l gh`, `timeout 300 pytest -k gh` and `pytest --tb=short -k gh`, and being last,
+   no `wb allow` nor `"allow": ["*"]` could lift them (#442, the audit of 1.8). Each shape starts
+   with the wrapper's word or a `-` and spans at most three characters with `?` (a count, a
+   duration, a niceness, a buffering mode), so it can't reach over a command's name; a longer
+   value (`timeout 3600 sudo`, `timeout -s KILL 5 sudo`) and a variable set before the command
+   (`FOO=1 sudo`, `env CI=1 gh`), whose value no pattern can bound, pass the patterns like
+   `bash -c` does, and the kernel stands behind them (below).
    Not `*/git`, which also refused `go test ./internal/git` whatever Claude allowed, and not
    `time *`, which would refuse `time pytest -k gh` (the 2026-11-16 audit).
 

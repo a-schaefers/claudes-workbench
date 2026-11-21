@@ -40,27 +40,39 @@ DENIED_TOOLS = ("question", "experimental_image_generate", "execute", "subagent"
 # tests (`PYTHONPATH=. pytest`, `CI=1 npm test`), and a small model copying the project's command
 # spent a Claude wake asking, or stopped running the tests (#258, the audit of 1.2). `*` matches
 # spaces too, so the prefix form lets through a line with an `=` before an allowed command's name:
-# no more than `env *` already runs. The hard limits and the ask-first steps get the form as well.
+# no more than `env *` already runs. The ask-first steps get the form as well; the hard limits
+# don't (#442).
 ASSIGN = "*=*"
 # The shell's hard limits: no root, and no road round the read-only git (gitguard.py, a `git` of
 # its own first on the agent's PATH): not the real git named by its path, not `gh`, which pushes,
 # opens pull requests and runs workflows. OpenCode checks each part of a compound command, so
 # `cd x && sudo ...` is refused too. Everything else is the agent's, guided by the handbook.
 # The plain wrappers are covered too (`env gh`, `timeout 5 sudo …`). A command built some other
-# way (`bash -c`, an interpreter) still gets past these patterns; behind them, the kernel refuses
-# sudo (no_new_privs, lane.py, on any Linux) and, with Landlock, gh finds no login (its config and
-# tokens are out of reach). On macOS only these patterns stand.
+# way (`bash -c`, an interpreter, `FOO=1 sudo`, `env CI=1 gh`) still gets past these patterns;
+# behind them, the kernel refuses sudo (no_new_privs, lane.py, on any Linux) and, with Landlock,
+# gh finds no login (its config and tokens are out of reach). On macOS only these patterns stand.
 _HARD = ("sudo", "doas", "pkexec", "su", "gh")
-# a wrapper's option forms too: `time -p sudo x` matched only the allow rule `time *` (the
-# 2026-11-16 audit); not `time *` itself, which would refuse `time pytest -k gh`
-_WRAPPERS = ("env", "env *", "xargs", "xargs *", "nohup", "nohup --", "nice", "nice *", "time",
-             "time -p", "time --", "command", "command -p", "command --", "exec", "timeout *",
-             "stdbuf *", "setsid", ASSIGN)
+# A wrapper's own option shapes, before the hard word: `time -p sudo x` matched only the allow
+# rule `time *` (the 2026-11-16 audit). Never a `*` before the hard word: `*` matches spaces too,
+# so `xargs *`, `env *`, `timeout *` and `*=*` refused `xargs grep -l gh`, `env CI=1 rg gh src`,
+# `timeout 300 pytest -k gh` and `pytest --tb=short -k gh`, and as the hard limits come last,
+# nothing Claude or the user allowed could lift them (#442, the audit of 1.8). `?` matches one
+# character (a space too), so each shape starts with the wrapper's literal word or `-` and spans
+# at most three: a count, a duration, a niceness, a buffering mode. A value it can't bound (a
+# variable's) is left to the kernel, as above.
+_WRAPPERS = ("env", "env -i", "env --", "xargs", "xargs -0", "xargs -r", "xargs -0r", "xargs -r0",
+             "xargs --null", "xargs --no-run-if-empty", "xargs -??", "xargs -???", "xargs -? ?",
+             "xargs -I {}", "xargs -I{}", "nohup", "nohup --", "nice", "nice -?", "nice -??",
+             "nice -???", "nice -n ?", "nice -n ??", "nice -n ???", "time", "time -p", "time --",
+             "command", "command -p", "command --", "exec", "timeout ?", "timeout ??",
+             "timeout ???", "stdbuf -??", "stdbuf -?? -??", "stdbuf -?? -?? -??", "setsid")
 
 
 def _denied(commands) -> tuple[str, ...]:
-    return tuple(p for c in commands for p in (c, f"{c} *")) + \
-        tuple(f"{w} {p}" for w in _WRAPPERS for c in commands for p in (c, f"{c} *"))
+    # `sudo *` matches a bare `sudo` too (OpenCode makes a trailing " *" optional): one rule each,
+    # as the rules travel in one environment string (runner.CONFIG_CONTENT_MAX)
+    return tuple(f"{c} *" for c in commands) + \
+        tuple(f"{w} {c} *" for w in _WRAPPERS for c in commands)
 
 
 DENIED_SHELL = _denied(_HARD)
