@@ -5233,11 +5233,16 @@ thread no longer):
   that isn't stale, a plan's without its `detail`], messages: [Claude's last message, from the
   messages' last `LATEST_BYTES` 1 MiB], push: {test}}`, the snapshot's shape for `sw.js`.
 - `GET /api/state`: `{messages (the last 200, each user row with its receipt as `received`; `thread` reads the files' last `THREAD_BYTES` 4 MiB, `store.read_jsonl_tail`, as `asks` does: the whole history was parsed on every poll, 56 ms at 20,000 rows, the 2026-11-19 audit),
-  asks (the last 20, each with `answer` (null while open), `answered`, `by`), prefs, push (`{key:
+  asks (the last 20, each with `answer` (null while open), `answered`, `by`; a settled one lean,
+  `chat.page_ask`: a plan past `PLAN_PREVIEW` 1,200 characters cut to them with `detail.cut`, a
+  question's `detail.questions` only their `question` text, all the page shows of one answered;
+  thirty answered plans were most of a 922 KB state, #755), prefs, push (`{key:
   the VAPID public key, test: the last test push's ts}`), listener, savings (`chat.week_saved`:
   `savings.totals` over the last 7 days with its `score`, as `wb savings --json` without `period`), uploads (`chat.upload_limits`: `{file, message, files}`, the byte limits and files a message), build, expire (`MESSAGE_EXPIRE` in seconds: past it a
   user's unread row carries `expired`, #536), now}`. `build` (`chat.build`, a crc32 of the page's files' names, mtimes and sizes) changes
   when the page does: a page that loaded other files reloads itself.
+- `GET /api/ask/<id>`: `{ask}`, the ask whole (`chat.find_ask`), else 404 "no such prompt": the
+  page fetches a cut plan's text when the user unfolds it (#755).
 - `GET /api/shot?task=&n=&side=base|candidate`: one side of a `wb shot` pair as `image/png`,
   behind the token (401). It is read only when the task name passes `store.NAME_RE`, `n` is a
   number with a shots.json, and the side is one of the two and its capture worked (#268: a
@@ -5252,7 +5257,13 @@ thread no longer):
   `AUDIO_MAX` (64 MiB). Anything else gets 404 "no such take". The page fetches each take with the
   token and plays a blob URL, as it shows the screenshots.
 - `GET /api/stream`: server-sent events (with the security headers): `event: state` with the
-  snapshot at once and whenever it changes, `: ping` after 15 s idle. At most `MAX_STREAMS` 16
+  snapshot at once, then `event: patch` whenever it changes (`chat.patch`, against what this
+  stream sent: `messages` and `asks` as `{put: the rows new or changed, drop: the ids gone}`, only
+  when they changed, and every other field whole, about a kilobyte, with `now`), `: ping` after
+  15 s idle. The whole state went out on every receipt and busy flip, five times an exchange,
+  4.6 MB per open device with a long thread and plan mode (#755). The small fields go whole so a
+  page that took an older state from a POST's reply can't keep it (a busy flipped back would never
+  be sent again). At most `MAX_STREAMS` 16
   open: past it the oldest stream gives way (its handler's `evicted`, then a wake) and the new one
   waits up to 5 s for its slot (503 after), since a stream a phone dropped without a word (asleep,
   a new network) lingers while the live page can't get in; with the cap full of those, the page
@@ -5311,8 +5322,14 @@ or token. It never expires (it is the token file). A keyed page over https point
 50 messages, `wb-chat-thread`) and "connecting…" until the first live state, which it asks
 `/api/state` for at once as well as opening the stream (a refresh showed "no session listening"
 and an empty thread for seconds while the stream waited for a slot, 2026-11-18). The stream is a `fetch` with the
-bearer header (EventSource can't send one), parsed by hand; every state event is a full resync, so
-nothing arrives half-received. A message goes into a local outbox (one localStorage key per
+bearer header (EventSource can't send one), parsed by hand; each connection starts with a whole
+state, a resync, so nothing arrives half-received, and a `patch` is merged by id (`merge`: a row
+put replaces its own or is added at the end, a dropped one goes). The page keeps the server's
+`now` of the newest state it took (`stamp`), and skips a POST's reply (`/api/send`, `/api/answer`,
+`/api/prefs`) or the first `/api/state` older than that: the patches build on what the stream sent,
+so a row an older reply lacked would never come again (#755). The thread is saved for a reload
+only when a state or patch carries messages. A settled plan that came cut shows "Show the whole
+plan", which fetches `/api/ask/<id>` and unfolds it ("Not loaded: try again" on a failure). A message goes into a local outbox (one localStorage key per
 message, `wb-chat-out-<cid>`, the cid a `crypto.randomUUID()`), read afresh whenever it is used,
 and is sent in order until the server has it: an item is dropped when `/api/send`'s reply names
 its cid (`message.cid`, the row the server logged or already had), or when a snapshot lists it.
@@ -6537,7 +6554,7 @@ real run with a real model (CLAUDE.md, *Checks before committing*).
 Pixel 7: the token leaves the address bar, a send lands once with its tick, the receipt, "working"
 then the reply, a message sent during an outage lands exactly once, the stream recovers, a
 reload doubles nothing, a permission prompt's card (Allow at least 44 px tall, a tap answers it,
-the buttons go) and one left to expire, a long plan folded and sent back with a note, a question
+the buttons go) and one left to expire, a long plan folded and sent back with a note, a settled plan cut and fetched whole on unfolding (#755), a question
 answered (Answer disabled until a pick), the gear's sheet (what this lane is; Let Claude go
 ahead saved, the next prompt allowed at once and listed), a reload whose state is slow to come (the last thread, "connecting…"; Chromium only, as
 Playwright's WebKit routes no requests once a service worker is registered), the install only

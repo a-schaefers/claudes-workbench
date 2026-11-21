@@ -515,8 +515,28 @@ def pending() -> list[dict]:
     return [{**r, "received": None} for r in rows]
 
 
+# The page's state is sent over and over, so a settled ask travels without its bulk: an answered
+# (or stale) plan as its first PLAN_PREVIEW characters with `cut`, the rest fetched from GET
+# /api/ask/<id> when the user unfolds it; a settled question as its questions' text, all the page
+# shows of it. Thirty answered plans were most of a 922 KB state (#755).
+PLAN_PREVIEW = 1200
+
+
+def page_ask(a: dict) -> dict:
+    """``a`` as the page's state carries it: an open one whole, a settled one lean."""
+    d = a.get("detail")
+    if not isinstance(d, dict) or (a.get("answer") is None and not a.get("stale")):
+        return a
+    lean = dict(d)
+    if isinstance(d.get("plan"), str) and len(d["plan"]) > PLAN_PREVIEW:
+        lean.update(plan=d["plan"][:PLAN_PREVIEW], cut=True)
+    if isinstance(d.get("questions"), list):
+        lean["questions"] = [{"question": q.get("question")} for q in d["questions"] if isinstance(q, dict)]
+    return {**a, "detail": lean}
+
+
 def snapshot() -> dict:
-    return {"messages": thread(), "asks": asks(), "listener": listener(), "prefs": prefs(),
+    return {"messages": thread(), "asks": [page_ask(a) for a in asks()], "listener": listener(), "prefs": prefs(),
             "push": {"key": push_key(), "test": (store.read_json(chat_dir() / "push-test.json", None)
                                                  or {}).get("ts")},
             "savings": week_saved(), "uploads": upload_limits(), "build": build(), "expire": MESSAGE_EXPIRE,
@@ -541,6 +561,34 @@ def latest() -> dict:
             "push": {"test": (store.read_json(chat_dir() / "push-test.json", None) or {}).get("ts")}}
 
 
+LISTS = ("messages", "asks")  # what a patch sends row by row; the rest, small, it sends whole
+
+
+def patch(sent: dict, snap: dict) -> dict | None:
+    """What a stream sends after its first state (#755): the rows of `messages` and `asks` new or
+    changed since the state ``sent`` records (updated in place) as `{put, drop}` (the ids gone),
+    and every other field whole (a kilobyte: the listener's busy, the prefs, the push key...), or
+    None when nothing but `now` changed. The whole state went out on every receipt and every busy
+    flip, five times an exchange: 4.6 MB per open device with a long thread and plan mode. The
+    small fields go whole so a page that took an older state from a POST's reply can't keep it:
+    a busy flipped back would never be sent again."""
+    out = {}
+    for key in LISTS:
+        rows = {r.get("id"): json.dumps(r, sort_keys=True) for r in snap.get(key) or []}
+        old = sent.get(key) or {}
+        put = [r for r in snap.get(key) or [] if old.get(r.get("id")) != rows[r.get("id")]]
+        drop = [i for i in old if i not in rows]
+        if put or drop:
+            out[key] = {"put": put, "drop": drop}
+        sent[key] = rows
+    small = {k: v for k, v in snap.items() if k not in LISTS and k != "now"}
+    body = json.dumps(small, sort_keys=True)
+    if not out and body == sent.get("small"):
+        return None
+    sent["small"] = body
+    return {**small, **out, "now": snap.get("now")}
+
+
 def week_saved() -> dict:
     """The gear sheet's Savings: `wb savings` for the last 7 days (savings.totals)."""
     t = savings.totals(store.results(), since=store.now() - savings.PERIODS["week"])
@@ -549,7 +597,7 @@ def week_saved() -> dict:
 
 # ---- notifications: web push with no payload (webpush.py) ----
 # The page reports what it showed while visible (/api/seen); news no page showed within
-# PUSH_DELAY gets one push to every subscribed device, whose service worker then fetches the state
+# PUSH_DELAY gets one push to every subscribed device, whose service worker then fetches `/api/latest`
 # and shows the newest open ask, else Claude's latest message. seen.jsonl: {id, ts, by: page|push,
 # endpoint (push: the device that took it)}.
 
@@ -1589,6 +1637,15 @@ class Handler(BaseHTTPRequestHandler):
             if self._authed():
                 self._json(200, snapshot())
             return
+        if path.startswith("/api/ask/"):  # a settled plan's whole text, when it is unfolded (#755)
+            if self._authed():
+                ask_id = path[len("/api/ask/"):]
+                got = find_ask(ask_id) if 0 < len(ask_id) <= 64 else None
+                if got is None:
+                    self._json(404, {"error": "no such prompt"})
+                else:
+                    self._json(200, {"ask": got})
+            return
         if path == "/api/latest":  # the service worker's, at a push (#755)
             if self._authed():
                 self._json(200, latest())
@@ -1604,8 +1661,9 @@ class Handler(BaseHTTPRequestHandler):
         self._send(200, f.read_bytes(), TYPES[f.suffix])
 
     def _stream(self):
-        """Server-sent events: the whole state on connect and on every change, a ping between.
-        The client takes each state as the truth, so a reconnect is a resync."""
+        """Server-sent events: the whole state on connect (`state`), then only what changed
+        (`patch`, chat.patch: #755), a ping between. A reconnect starts with the whole state
+        again, so it is a resync."""
         hub = self.hub
         if not self.streams.acquire(blocking=False):
             # Full: the oldest stream gives way, since a stream the phone dropped without a word
@@ -1632,7 +1690,7 @@ class Handler(BaseHTTPRequestHandler):
             self._security_headers()
             self.send_header("X-Accel-Buffering", "no")
             self.end_headers()
-            seen, last_body, sent = -1, None, time.monotonic()
+            seen, had, sent = -1, None, time.monotonic()
             while True:
                 with hub.cond:
                     woke = hub.cond.wait_for(lambda: hub.version != seen,
@@ -1642,10 +1700,15 @@ class Handler(BaseHTTPRequestHandler):
                     return
                 if woke:
                     snap = snapshot()
-                    body = json.dumps({k: v for k, v in snap.items() if k != "now"})
-                    if body != last_body:
-                        last_body = body
-                        self.wfile.write(f"event: state\ndata: {json.dumps(snap)}\n\n".encode())
+                    if had is None:  # the first: the whole state, recorded for the patches
+                        had = {}
+                        patch(had, snap)
+                        event = f"event: state\ndata: {json.dumps(snap)}\n\n"
+                    else:
+                        delta = patch(had, snap)
+                        event = delta and f"event: patch\ndata: {json.dumps(delta)}\n\n"
+                    if event:
+                        self.wfile.write(event.encode())
                         self.wfile.flush()
                         sent = time.monotonic()
                         continue

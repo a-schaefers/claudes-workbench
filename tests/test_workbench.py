@@ -15695,7 +15695,6 @@ class WebChat(Base):
         self.assertNotIn("detail", got["asks"][0])                           # not its plan's text
         self.assertEqual([m["text"] for m in got["messages"]], ["Tests pass, ready for review"])
         self.assertLess(len(json.dumps(got)), 2000)
-        self.assertGreater(len(json.dumps(chat.snapshot())), 400_000)
         code, body = self.call("/api/latest", token=chat.token())
         self.assertEqual((code, [a["id"] for a in body["asks"]]), (200, [plan["id"]]))
         self.assertEqual(self.call("/api/latest")[0], 401)
@@ -15799,7 +15798,7 @@ class WebChat(Base):
                 time.sleep(0.05)
         self.assertTrue(execs)                                           # re-exec'd, not exit 75
 
-    def test_the_stream_sends_the_whole_state_then_each_change(self):
+    def test_the_stream_sends_the_whole_state_then_what_changed(self):
         import http.client
         tok = self.chat.token()
         self.call("/api/send", {"text": "first"}, token=tok)
@@ -15822,9 +15821,78 @@ class WebChat(Base):
         self.assertEqual([m["text"] for m in json.loads(first[1][6:])["messages"]], ["first"])
         run_wb("chat", "reply", "--text", "On it.")
         second = event()
-        self.assertEqual([m["text"] for m in json.loads(second[1][6:])["messages"]], ["first", "On it."])
+        self.assertEqual(second[0], "event: patch")                      # only the new row (#755)
+        self.assertEqual([m["text"] for m in json.loads(second[1][6:])["messages"]["put"]], ["On it."])
         c.close()
         self.assertEqual(self.call("/api/stream")[0], 401)
+
+    def test_after_its_first_state_the_stream_sends_only_what_changed(self):
+        # #755 (the 2026-11-21 audit, finding 102): every receipt and busy flip sent the whole
+        # state, the thread and 20 asks with their plans: 922 KB each, five times an exchange
+        import http.client
+        chat, tok = self.chat, self.chat.token()
+        for i in range(10):
+            done = chat.ask("ExitPlanMode", "", "plan", {"plan": f"plan {i}\n" + "step\n" * 4000})
+            chat.answer(done["id"], "deny", "web")
+        for i in range(60):
+            chat.send("x" * 1500, "user" if i % 2 else "claude")
+        mine = chat.send("and the tests?", "user")
+        c = http.client.HTTPConnection("127.0.0.1", self.port, timeout=10)
+        c.request("GET", "/api/stream", headers={"Host": "localhost", "Authorization": f"Bearer {tok}"})
+        r = c.getresponse()
+
+        def event():
+            lines = []
+            while True:
+                line = r.fp.readline().decode().rstrip("\n")
+                if line.startswith(":"):
+                    continue
+                if not line:
+                    if lines:
+                        return lines[0][7:], json.loads(lines[1][6:]), len(lines[1])
+                    continue
+                lines.append(line)
+        kind, first, _ = event()
+        self.assertEqual((kind, len(first["messages"])), ("state", 61))       # the whole state first
+        plans = [a for a in first["asks"] if a["kind"] == "plan"]
+        self.assertTrue(all(a["detail"]["cut"] and len(a["detail"]["plan"]) == chat.PLAN_PREVIEW for a in plans))
+        code, whole = self.call(f"/api/ask/{plans[0]['id']}", token=tok)    # unfolded: fetched
+        self.assertEqual((code, len(whole["ask"]["detail"]["plan"])), (200, len("plan 0\n" + "step\n" * 4000)))
+        self.assertEqual(self.call("/api/ask/ask-nope", token=tok)[0], 404)
+        self.assertEqual(self.call(f"/api/ask/{plans[0]['id']}")[0], 401)
+        chat.ack(mine["id"], "s1")                                            # a receipt
+        kind, got, size = event()
+        self.assertEqual(kind, "patch")
+        self.assertEqual([m["id"] for m in got["messages"]["put"]], [mine["id"]])
+        self.assertEqual((got["messages"]["drop"], "asks" in got), ([], False))
+        self.assertLess(size, 3000)
+        store.write_json(chat.chat_dir() / "listener.json",
+                         {"session": "s1", "cwd": "/home/u/p", "ts": store.now(), "busy": True})
+        kind, got, size = event()                                             # a busy flip
+        self.assertEqual((kind, got["listener"]["busy"], "messages" in got), ("patch", True, False))
+        self.assertIn("prefs", got)                                           # the small fields whole
+        self.assertLess(size, 3000)
+        open_ = chat.ask("Bash", "make test")
+        kind, got, _ = event()
+        self.assertEqual([a["id"] for a in got["asks"]["put"]], [open_["id"]])
+        c.close()
+
+    def test_a_patch_names_each_row_that_changed_or_left_and_nothing_when_nothing_did(self):
+        # #755: the page merges these by id, so a row the window lost must be named
+        chat, had = self.chat, {}
+        snap = {"messages": [{"id": "a", "text": "1"}, {"id": "b", "text": "2"}], "asks": [],
+                "listener": None, "now": 1}
+        chat.patch(had, snap)
+        self.assertIsNone(chat.patch(had, {**snap, "now": 2}))              # only the clock moved
+        got = chat.patch(had, {**snap, "messages": [{"id": "b", "text": "2!"}, {"id": "c", "text": "3"}], "now": 3})
+        self.assertEqual(got["messages"], {"put": [{"id": "b", "text": "2!"}, {"id": "c", "text": "3"}], "drop": ["a"]})
+        self.assertEqual((got["now"], got["listener"], "asks" in got), (3, None, False))
+        self.assertEqual(chat.patch(had, {**snap, "messages": got["messages"]["put"], "listener": {"busy": True}})
+                         ["listener"], {"busy": True})
+        self.assertNotIn("detail", chat.page_ask({"id": "x", "answer": None}))
+        q = {"id": "q", "answer": "allow", "detail": {"questions": [{"question": "Which?", "options": [{"label": "A", "preview": "p" * 9000}]}]}}
+        self.assertEqual(chat.page_ask(q)["detail"], {"questions": [{"question": "Which?"}]})
+        self.assertEqual(chat.page_ask({**q, "answer": None})["detail"], q["detail"])  # open: whole
 
     def test_without_inotify_the_stream_stays_quiet_between_changes(self):
         # the fallback hub wakes every second; each wake was a ping (the 2026-11-16 audit)
