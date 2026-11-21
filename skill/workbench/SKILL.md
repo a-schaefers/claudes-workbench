@@ -263,7 +263,9 @@ The worktree holds only committed files. When the acceptance command needs what 
 installed (node_modules, a .venv, a build), add `--setup '<install command>'` (a .venv always: a copy still runs the original) (or `--copy <ignored
 path>`; `--sibling <path>` for a `../<name>` or `../../<path>` the project uses, by that same path): `wb start` names the ignored
 directories it lacks, and a failing setup fails the task before any round (so does a checkout
-that fails: the runner makes the worktree, so `wb start` returns at once on any repo). A note that the
+that fails: the runner makes the worktree, so `wb start` returns at once on any repo). A setup gets 30
+minutes; a first build that needs longer (a big Rust or C++ project, torch over a slow link) takes
+`--setup-timeout <secs>` at start. A note that the
 active Python environment is the checkout's: the agent leaves it out (it would import the user's
 checkout, not the worktree), so give it its own, `--setup 'uv sync' --test 'uv run pytest'` or
 `--setup 'python3 -m venv .venv && .venv/bin/pip install -e .'`; that .venv comes first on the

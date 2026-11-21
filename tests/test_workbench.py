@@ -2561,6 +2561,48 @@ class WorktreeSetup(Base):
         self.assertIn("NO-NETWORK", note["text"])
         self.assertIn("NO-NETWORK", (t.dir / "setup.txt").read_text())
 
+    def test_a_setup_past_its_timeout_fails_the_task_naming_the_limit_and_how_to_raise_it(self):
+        # #520: a fixed 1800 s with no override failed a big first build before round 1, and
+        # starting again hit the same limit
+        self.start("t-slow", "ok", "--test", TEST_CMD, "--setup", "sleep 60",
+                   "--setup-timeout", "1")
+        st = wait_phase("t-slow", {"failed", "review"}, timeout=40)
+        self.assertEqual(st["phase"], "failed", st)
+        self.assertEqual(store.Task("t-slow").spec["setup_timeout"], 1)
+        note = [r for r in store.notices() if r["task"] == "t-slow"][-1]
+        self.assertIn("setting up the worktree failed (timed out after 1s; wb start "
+                      "--setup-timeout SECS", note["text"])
+
+    def test_commands_json_gives_a_repo_its_setup_limit_and_the_flag_outranks_it(self):
+        Path(os.environ["WB_COMMANDS"]).write_text(json.dumps({"repos": {str(self.repo): {
+            "setup": "sleep 60", "setup_timeout": 1}}}))
+        self.start("t-conf-slow", "ok", "--test", TEST_CMD)
+        st = wait_phase("t-conf-slow", {"failed", "review"}, timeout=40)
+        self.assertEqual(st["phase"], "failed", st)
+        self.assertEqual(store.Task("t-conf-slow").spec["setup_timeout"], 1)
+        self.start("t-conf-long", "ok", "--test", TEST_CMD, "--setup", "true",
+                   "--setup-timeout", "7200")
+        self.assertEqual(store.Task("t-conf-long").spec["setup_timeout"], 7200)
+        Path(os.environ["WB_COMMANDS"]).write_text(json.dumps({"repos": {str(self.repo): {
+            "setup": "true", "setup_timeout": "1h"}}}))
+        self.assertIn('"setup_timeout" is a whole number of seconds', self.refused("t-conf-bad"))
+        Path(os.environ["WB_COMMANDS"]).write_text("{}")
+        self.assertIn("--setup-timeout is seconds", self.refused(
+            "t-flag-bad", "--setup", "true", "--setup-timeout", "0"))
+
+    def test_each_scratch_checkout_runs_the_setup_under_the_tasks_limit(self):
+        # #520: wb verify --setup, the base check and wb shot rerun the setup, under the same cap
+        once = Path(self.tmp.name) / "set-up-once"
+        self.start("t-scratch", "ok", "--test", TEST_CMD, "--auto-fix", "0", "--no-self-review",
+                   "--setup", f"test -f {once} && sleep 60; touch {once}", "--setup-timeout", "5")
+        wait_phase("t-scratch", {"review"})
+        (store.Task("t-scratch").worktree / "test_answer.sh").write_text("grep -qx 42 answer.txt\n")
+        out = run_wb("verify", "t-scratch", "--test", "sh test_answer.sh", "--files",
+                     "test_answer.sh", "--setup")
+        self.assertIn("base: exit setup failed", out)
+        said = (store.Task("t-scratch").dir / "verify" / "1" / "base.txt").read_text()
+        self.assertIn("setting up the scratch checkout failed: timed out after 5s", said)
+
     def test_a_sparse_checkout_gets_a_sparse_worktree_and_a_sparse_base_check(self):
         # #263 (the audit of 1.2): the worktree held the whole monorepo, and the base check's
         # clone of it too
