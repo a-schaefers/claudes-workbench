@@ -9115,6 +9115,38 @@ class Bench(Base):
         self.assertEqual(argv[argv.index("--setup") + 1], "mkdir -p deps && touch deps/stamp")
         self.assertEqual(argv[argv.index("--allow") + 1], "make check*")
 
+    def test_a_replay_keeps_the_tasks_setup_limit_and_its_gpu_for_tests(self):
+        # #735 (the 2026-11-21 audit): each replay's wb start got --setup without
+        # --setup-timeout, so a long build stopped at 1800 s on every run, and lost
+        # --unload-for-tests, its GPU tests beside the resident model
+        from workbench import bench
+        self.start("t-long", "ok", "--test", "sh tests/check.sh", "--setup", "true",
+                   "--setup-timeout", "5400", "--unload-for-tests")
+        wait_phase("t-long", {"review"})
+        wt = store.Task("t-long").worktree
+        (wt / "tests").mkdir()
+        (wt / "tests" / "check.sh").write_text("grep -qx 42 answer.txt\n")
+        run_wb("accept", "t-long", "-m", "feat: the answer")
+        run_wb("bench", "add", "t-long")
+        case = bench.cases()["t-long"]
+        self.assertEqual((case["setup_timeout"], case["unload_for_tests"]), (5400, True))
+
+        def argv_of(case):
+            argv = []
+            with mock.patch.object(cli, "parser") as parser:
+                parser.return_value.parse_args.side_effect = lambda a: argv.extend(a) or mock.Mock()
+                bench._start_task(case, "m", "bench-x", Path(self.tmp.name), [], {})
+            return argv
+        argv = argv_of(case)
+        self.assertEqual(argv[argv.index("--setup-timeout") + 1], "5400")
+        self.assertIn("--unload-for-tests", argv)
+        # a case made before they were kept: read from its task, while it lasts
+        old = {k: v for k, v in case.items() if k not in ("setup_timeout", "unload_for_tests")}
+        argv = argv_of(old)
+        self.assertEqual(argv[argv.index("--setup-timeout") + 1], "5400")
+        self.assertIn("--unload-for-tests", argv)
+        self.assertNotIn("--unload-for-tests", argv_of({**case, "unload_for_tests": False}))
+
     def test_a_case_with_a_sibling_two_levels_up_checks_and_replays_inside_its_own_directory(self):
         # #261 (the audit of 1.2): the case's checkouts nest as the task's worktree did, so the
         # link to ../../shared/lib is made in the scratch, not in the bench's own directory

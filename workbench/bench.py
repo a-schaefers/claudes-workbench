@@ -326,6 +326,11 @@ def add(name: str, step: int | None = None, hidden: list[str] | None = None,
                 # own commit rejected, the scratch clone without it (#250, the audit of 1.2)
                 "setup": spec.get("setup") or "", "copy": spec.get("copy") or [],
                 "siblings": spec.get("siblings") or [],
+                # its setup's limit and its tests' GPU: a replay without them stopped a 90-minute
+                # build at 1800 s, failed as an error and was retried by every run, never graded
+                # (#735, the 2026-11-21 audit)
+                "setup_timeout": spec.get("setup_timeout"),
+                "unload_for_tests": bool(spec.get("unload_for_tests")),
                 # the package the task ran in (#375), where each replay runs, sets up and is
                 # graded: from the root, an answer written there passed a package's check (#425)
                 "subdir": spec.get("subdir") or "",
@@ -557,6 +562,15 @@ def subdir(case: dict) -> str | None:
     return (task.spec.get("subdir") or "") if case.get("task") and task.exists else None
 
 
+def _kept(case: dict, key: str):
+    """A task setting the case keeps; one made before it was kept (#735) reads it from its task,
+    while the task lasts, as ``subdir`` does."""
+    if key in case:
+        return case[key]
+    task = store.Task(case.get("task") or "")
+    return task.spec.get(key) if case.get("task") and task.exists else None
+
+
 def _start_task(case: dict, model: str, name: str, repo: Path, skills: list[str], meta: dict) -> None:
     from . import cli  # cli imports this module
     # from the package, so wb start finds it as the task's start did (cli._package, #425)
@@ -571,6 +585,10 @@ def _start_task(case: dict, model: str, name: str, repo: Path, skills: list[str]
         argv += ["--allow", pat]
     if case.get("setup"):
         argv += ["--setup", case["setup"]]
+        if isinstance(secs := _kept(case, "setup_timeout"), int) and secs > 0:  # #735
+            argv += ["--setup-timeout", str(secs)]
+    if _kept(case, "unload_for_tests"):
+        argv += ["--unload-for-tests"]
     for p in case.get("copy") or []:
         argv += ["--copy", p]
     for s in case.get("siblings") or []:

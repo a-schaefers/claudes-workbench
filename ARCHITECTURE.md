@@ -3188,9 +3188,14 @@ tasks every model passed in one round in a minute, so it told them apart by noth
 `wb models`, `wb scout` and `wb bench report` print it, and the router doesn't read it.
 
 **A case** (`wb bench add <task> [--step N]`, by default a `wb next` task's last step) comes from
-a closed, accepted task, not a trial. It keeps the task's setup, copies, siblings, grants and
-package (task.json `subdir`, kept as case.json `subdir`), and
-its base check, its reference check, each replay (`wb start --setup/--copy/--sibling/--allow`,
+a closed, accepted task, not a trial. It keeps the task's setup, its setup's limit, copies,
+siblings, grants, package (task.json `subdir`, kept as case.json `subdir`) and
+`unload_for_tests`, and
+its base check, its reference check, each replay (`wb start --setup/--setup-timeout/--copy/
+--sibling/--allow/--unload-for-tests`: without the limit a replay's long build stopped at 1800 s,
+failed as an `error` and was retried by every run, never graded, and without the flag its GPU
+tests ran beside the resident model, #735; a case made before they were kept reads them from its
+task, `bench._kept`),
 the copies and siblings put beside the replay's checkout first, `bench._inputs`) and `wb bench
 self` run with them; a setup that fails there refuses the case, saying it can't reproduce the
 task's dependencies. A replay starts from the package (`--repo <checkout>/<subdir>`), so it
@@ -5817,7 +5822,8 @@ steps whose cost was split, #558).
 **bench/cases/<case>/case.json** (`bench.add`): `name`, `task`, `step`, `repo`, `base`,
 `reference`, `size`, `stack`, `test_cmd`, `test_timeout`, `check_cmd`, `hidden` (paths, their
 files in `hidden/`), `allow`, `paths` (the task's grants, from status `grants_kept` once its
-rules are gone), `setup`, `copy`, `siblings` (its worktree's setup: #250), `subdir` (the package it ran in, '' for the repo's
+rules are gone), `setup`, `copy`, `siblings` (its worktree's setup: #250), `setup_timeout`
+(task.json's, or null), `unload_for_tests` (#735), `subdir` (the package it ran in, '' for the repo's
 top: #425), `skills` (the original's), `original` (`model`, `rounds`,
 `reviews`, `minutes`, `steps`), `base_check` (`fails` or `not checked (timed out)`),
 `created_at`. **bench/runs.jsonl** (`bench.replay`): `ts`, `run`, `label`, `rep`, `case`,
