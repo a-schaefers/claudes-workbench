@@ -9,6 +9,7 @@ loops, errors repeatedly, goes silent or runs too long. After a clean round the 
 command runs in the worktree, in the agent's lane; a failure goes back to the agent on its own while auto-fix rounds remain, so
 Claude is only woken for work that passes, or for a task that has run out of road.
 """
+import contextlib
 import ctypes
 import json
 import os
@@ -1408,12 +1409,85 @@ def checkout(task: store.Task) -> bool:
     return True
 
 
+# How many tasks may run their setup or base check at once on this machine. Both run before the
+# GPU lease, so a batch of N queued tasks ran N installs and N test suites together, beside the
+# running agent: a small machine swapped, base checks timed out "not checked", and a test server
+# on a fixed port failed EADDRINUSE in all but one clone, a base failure the base doesn't have
+# (#590, the audit of 1.90). Taken in queue order (task.json created_at), in locks/, which no
+# lane reads: prepare-<n>.lock the slots, prepare.json the queue.
+PREP_SLOTS = 1
+
+
+def _prep_queue() -> Path:
+    return store.home() / "locks" / "prepare.json"
+
+
+@contextlib.contextmanager
+def prep_turn(task: store.Task):
+    """Hold one of PREP_SLOTS, waiting behind the tasks queued before this one (status `last`
+    names the one it waits for). A holder that died lets go: the kernel drops its flock, and
+    its queue entry is passed over once its pid is gone."""
+    import fcntl
+    path = _prep_queue()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    me = str(os.getpid())
+    mine = {"task": task.name, "since": task.spec.get("created_at") or store.now(),
+            "start": models._started(os.getpid()), "holding": False}
+
+    def update(holding=None, leave=False) -> list:
+        with store.locked(path.with_name(path.name + ".lock")):
+            rows = {pid: r for pid, r in (store.read_json(path, {}) or {}).items()
+                    if pid != me and isinstance(r, dict) and pid.isdigit()
+                    and models._alive(int(pid), r.get("start"))}
+            if not leave:
+                rows[me] = {**mine, "holding": bool(holding)}
+            store.write_json(path, rows)
+            return sorted(((r.get("since") or 0, int(pid), r) for pid, r in rows.items()),
+                          key=lambda x: x[:2])
+
+    fh, said = None, None
+    try:
+        while fh is None:
+            queue = update()
+            waiting = [(pid, r) for _, pid, r in queue if not r.get("holding")]
+            if waiting and waiting[0][0] == os.getpid():
+                for i in range(PREP_SLOTS):
+                    f = open(path.with_name(f"prepare-{i}.lock"), "a+")
+                    try:
+                        fcntl.flock(f, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                    except BlockingIOError:
+                        f.close()
+                        continue
+                    fh = f
+                    break
+            if fh is None:
+                ahead = next((r["task"] for _, pid, r in queue if r.get("holding")), None) or \
+                    next((r["task"] for pid, r in waiting if pid != os.getpid()), None)
+                if ahead and ahead != said:
+                    task.set_status(phase="queued", last=f"waiting for {ahead}'s setup or base check "
+                                    "(one at a time on this machine)")
+                    said = ahead
+                time.sleep(1)
+        update(holding=True)
+        yield
+    finally:
+        if fh:
+            fh.close()  # the flock goes with it
+        update(leave=True)
+
+
 def _prepare(task: store.Task) -> bool:
     """Once, before the base check and the GPU: prepare() the worktree, its output in
     setup.txt. Failing, the task fails before any round, saying what the setup printed."""
     spec = task.spec
     if task.status.get("prepared") or not any(spec.get(k) for k in ("setup", "copy", "siblings")):
         return True
+    with prep_turn(task):  # one task's setup at a time on this machine (#590)
+        return _prepare_now(task)
+
+
+def _prepare_now(task: store.Task) -> bool:
+    spec = task.spec
     task.set_status(last="setting up the worktree"
                     + (f": {spec['setup']}" if spec.get("setup") else ""))
     began = time.monotonic()
@@ -2121,7 +2195,8 @@ def drive(task: store.Task) -> None:
         except RuntimeError as e:
             return _load_failed(task, e)
     if needs_base_check(task):
-        _base_check(task)  # on the untouched base, before the agent and the GPU
+        with prep_turn(task):  # one at a time on this machine, as the setups are (#590)
+            _base_check(task)  # on the untouched base, before the agent and the GPU
     # beside the running tasks' models when all fit the GPU, else alone once they finish
     with models.GpuLease(m, task.name, say) as lease:
         try:

@@ -2902,6 +2902,34 @@ class WorktreeSetup(Base):
         said = (store.Task("t-scratch").dir / "verify" / "1" / "base.txt").read_text()
         self.assertIn("setting up the scratch checkout failed: timed out after 5s", said)
 
+    def test_queued_tasks_run_their_setups_and_base_checks_one_at_a_time_in_queue_order(self):
+        # #590, the audit of 1.90: every queued runner ran its setup and base check at once,
+        # before the GPU lease: N installs and N test suites together, and a test server on a
+        # fixed port failed in all but one clone
+        log = Path(self.tmp.name) / "turns.log"
+        step = lambda who, what: f"echo {what}-{who} >> {log}"  # noqa: E731
+        for who in ("a", "b", "c"):
+            self.start(f"t-q{who}", "ok", "--no-self-review", "--queue", "--setup",
+                       f"{step(who, 'setup')}; sleep 1; {step(who, 'setup-done')}",
+                       "--test", f"{step(who, 'check')}; sleep 0.5; {step(who, 'check-done')}; "
+                                 f"test -f answer.txt")
+        for who in ("a", "b", "c"):
+            wait_phase(f"t-q{who}", {"review"}, timeout=60)
+        # each line's first time is the setup or the base check: the round's tests, later,
+        # run when they run
+        lines = list(dict.fromkeys(log.read_text().split()))
+        # each one's setup and its base check whole before another's begins, and a, b, c in order
+        opened = []
+        for x in lines[:12]:
+            what, who = x.rsplit("-", 1)
+            if what.endswith("-done"):
+                self.assertEqual(opened.pop(), (what.removesuffix("-done"), who), lines)
+            else:
+                self.assertEqual(opened, [], lines)          # nothing else running meanwhile
+                opened.append((what, who))
+        self.assertEqual([x.rsplit("-", 1)[1] for x in lines[:12:4]], ["a", "b", "c"])
+        self.assertEqual(json.loads((store.home() / "locks" / "prepare.json").read_text()), {})
+
     def test_a_task_whose_setup_failed_is_resumed_and_discarded_never_counts_against_its_model(self):
         # #581, the audit of 1.90: three discards of a lockfile problem scored the model 0/3 and
         # the router passed it by, though its agent never ran a request

@@ -123,7 +123,8 @@ run it as a backlog. Each task still gets the same review it would by day.
   Bundle trivial items into one task. When the user names GitHub issues, read each one (`gh issue
   view`) and spec from it.
 - Start each with `wb start … --queue --backlog <name>`. They take the GPU in the order you
-  started them, and a task you send back goes ahead of the rest.
+  started them, and a task you send back goes ahead of the rest. Their setups and base checks
+  run one at a time, in the same order.
 - Review each wake as usual: accept, feedback, or discard. Accept without `--merge`: nothing
   reaches the user's branches unattended. Leave a hard call for the morning (`wb note`) rather
   than guessing.
