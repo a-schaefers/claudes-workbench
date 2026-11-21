@@ -528,8 +528,47 @@ def _ollama_container() -> tuple[dict, str] | None:
             except ValueError:
                 items = []
             raw = b"\0".join(str(x).encode() for x in items if isinstance(x, str))
-            return _environ(raw, OLLAMA_KNOBS), f"the {tool} container {name or cid}"
+            try:
+                host = json.loads(_run(tool, "inspect", "--format", "{{json .HostConfig}}", cid) or "{}")
+            except ValueError:
+                host = {}
+            return ({**_environ(raw, OLLAMA_KNOBS), **container_mask(host)},
+                    f"the {tool} container {name or cid}")
     return None
+
+
+def container_mask(host) -> dict:
+    """The devices a container's HostConfig gives it, as the masks visible() reads, in this
+    host's numbering: `--gpus device=0` or compose `device_ids` (DeviceRequests' DeviceIDs, or a
+    Count of the first N; NVIDIA's toolkit numbers them as nvidia-smi does, PCI order), and an AMD
+    card passed as `--device /dev/dri/renderD129` (Devices). The container's own masks number
+    its own devices, so only these say which of this host's cards it has; unread, an Ollama
+    limited to one card was budgeted every card (#463, the audit of 1.8). {} when it has all."""
+    if not isinstance(host, dict):
+        return {}
+    out = {}
+    for req in host.get("DeviceRequests") or []:
+        if not isinstance(req, dict):
+            continue
+        caps = {c for group in req.get("Capabilities") or [] for c in group or []}
+        if req.get("Driver") not in ("", None, "nvidia") or (caps and "gpu" not in caps):
+            continue
+        ids = [str(x) for x in req.get("DeviceIDs") or [] if str(x).strip()]
+        count = req.get("Count") or 0
+        if not ids and isinstance(count, int) and count > 0:
+            ids = [str(i) for i in range(count)]
+        if ids:
+            out.update(CUDA_VISIBLE_DEVICES=",".join(ids), CUDA_DEVICE_ORDER="PCI_BUS_ID")
+    renders = [str(d.get("PathOnHost") or "") for d in host.get("Devices") or [] if isinstance(d, dict)]
+    renders = [p.rsplit("/", 1)[-1] for p in renders if re.fullmatch(r"/dev/dri/renderD\d+", p)]
+    if renders:
+        slot = lambda dev: dict(x.split("=", 1) for x in _read(dev / "uevent").splitlines()  # noqa: E731
+                                if "=" in x).get("PCI_SLOT_NAME")
+        amd = [c["slot"] for c in drm_cards(DRM) if c["driver"] == "amdgpu"]  # gpus()'s order
+        picked = [str(amd.index(s)) for r in renders if (s := slot(DRM / r / "device")) in amd]
+        if picked:
+            out["ROCR_VISIBLE_DEVICES"] = ",".join(dict.fromkeys(picked))
+    return out
 
 
 def ollama_settings() -> tuple[dict, str]:

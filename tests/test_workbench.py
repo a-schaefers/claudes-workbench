@@ -14685,6 +14685,36 @@ class Hardware(unittest.TestCase):
             env, source = hw.ollama_settings()       # nothing says: wb's own environment, a guess
             self.assertEqual((env["CUDA_VISIBLE_DEVICES"], env["ROCR_VISIBLE_DEVICES"], source), ("0", "2", ""))
 
+    def test_an_ollama_container_given_some_gpus_is_budgeted_only_those(self):
+        # #463 (the audit of 1.8): --gpus device=1, compose device_ids or --device
+        # /dev/dri/renderD129 weren't read, so the container's Ollama was budgeted every card
+        from workbench import models
+        drm = "/fake/sys/class/drm"
+        files = {}
+        for i, slot in enumerate(("0000:03:00.0", "0000:0a:00.0")):
+            for d in (f"card{i}", f"renderD{128 + i}"):
+                files[f"{drm}/{d}/device/uevent"] = f"DRIVER=amdgpu\nPCI_SLOT_NAME={slot}"
+            files[f"{drm}/card{i}/device/mem_info_vram_total"] = str(24 * 2 ** 30)
+            files[f"{drm}/card{i}/device/mem_info_vram_vendor"] = "samsung"
+        docker = lambda host: {  # noqa: E731
+            ("docker", "ps"): "beef ollama/ollama:rocm llm",
+            ("docker", "inspect", "--format", "{{json .Config.Env}}"): json.dumps(["OLLAMA_NUM_PARALLEL=2"]),
+            ("docker", "inspect", "--format", "{{json .HostConfig}}"): json.dumps(host)}
+        hw = self.fake("Linux", files=files, runs=docker(
+            {"Devices": [{"PathOnHost": "/dev/kfd"}, {"PathOnHost": "/dev/dri/renderD129"}]}))
+        self.assertEqual(hw.ollama_env()["ROCR_VISIBLE_DEVICES"], "1")
+        self.assertEqual(hw.ollama_env()["OLLAMA_NUM_PARALLEL"], "2")
+        with mock.patch.dict(os.environ, {"WB_FAKE_MODELS": "", "WB_MODELS": "/nonexistent"}):
+            budget, devs, why = models.budget_devices()
+        self.assertEqual(budget, 24 * 2 ** 30)
+        self.assertIn("as ROCR_VISIBLE_DEVICES=1 leaves it", why)
+        gpus = {"Capabilities": [["gpu"]], "Driver": ""}
+        self.assertEqual(hw.container_mask({"DeviceRequests": [{**gpus, "DeviceIDs": ["1"], "Count": 0}]}),
+                         {"CUDA_VISIBLE_DEVICES": "1", "CUDA_DEVICE_ORDER": "PCI_BUS_ID"})
+        self.assertEqual(hw.container_mask({"DeviceRequests": [{**gpus, "Count": 2}]})["CUDA_VISIBLE_DEVICES"], "0,1")
+        self.assertEqual(hw.container_mask({"DeviceRequests": [{**gpus, "Count": -1}]}), {})  # --gpus all
+        self.assertEqual(hw.container_mask(["not", "a", "host config"]), {})
+
     def test_ollamas_settings_come_from_the_ollama_that_runs_a_process_or_a_container(self):
         # #379 (the audit of 1.6): an ollama serve started by hand, or one in Docker, had its
         # OLLAMA_NUM_PARALLEL and OLLAMA_MAX_LOADED_MODELS read from systemd or wb's environment

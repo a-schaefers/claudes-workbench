@@ -2999,7 +2999,11 @@ started by hand in another terminal, a user unit's; under `PROC`), lowest pid fi
 `ollama` unit that is running (`systemctl show -p LoadState -p ActiveState -p Environment`, the
 system's then `--user`'s; `Environment` split as a shell would, since systemd quotes a value with
 a space; an `EnvironmentFile` isn't in it); a running container of an `ollama` image that
-`docker ps` or `podman ps` lists (its `Config.Env`, from `inspect`); on macOS launchctl (what the
+`docker ps` or `podman ps` lists (its `Config.Env`, from `inspect`, and the devices its
+`HostConfig` gives it, `container_mask`: `DeviceRequests`' `DeviceIDs`, or a `Count` of the first
+N, as `CUDA_VISIBLE_DEVICES` with `CUDA_DEVICE_ORDER=PCI_BUS_ID`, and `Devices`' `/dev/dri/renderD…`
+as `ROCR_VISIBLE_DEVICES`, this host's numbering; unread, `--gpus device=0` was budgeted every
+card, #463, the audit of 1.8); on macOS launchctl (what the
 app reads); a unit that isn't running. A process in another mount namespace than wb's, and a
 container, give only `OLLAMA_KNOBS` (`OLLAMA_CONTEXT_LENGTH`, `OLLAMA_NUM_PARALLEL`,
 `OLLAMA_MAX_LOADED_MODELS`): their paths, bind address and device numbers are the container's.
