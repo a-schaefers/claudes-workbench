@@ -331,7 +331,8 @@ def start(bench: bool = False, if_due: bool = False) -> list[str]:
         raise RuntimeError("no Ollama model here to measure (wb models)")
     if models.holders():
         raise RuntimeError("a task holds the GPU: run wb optimize once it is done (real work first)")
-    env = {**os.environ, "PYTHONPATH": str(PKG_ROOT), "WB_HOME": str(store.home())}
+    from . import context  # its bench replays' agents get the user's PYTHONPATH (#512)
+    env = context.detached_env()
     for k in ("WB_TASK", "CLAUDE_CODE_SESSION_ID", "CLAUDE_PID"):
         env.pop(k, None)
     store.home().mkdir(parents=True, exist_ok=True)  # a fresh profile's first wb setup (#198)

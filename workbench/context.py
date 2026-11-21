@@ -1073,7 +1073,45 @@ def python_env(task: store.Task, env: dict) -> list[str]:
         env["VIRTUAL_ENV"] = str(own)
         env.pop("VIRTUAL_ENV_PROMPT", None)
     env["PATH"] = os.pathsep.join(path)
+    python_path(task, env, gone)
     return inside
+
+
+# The user's PYTHONPATH (ROS's setup.bash, a src layout exported from a shell profile, Blender,
+# Spack) never reached the agent, the setup or the tests: spawn_runner replaced it with the
+# package root, the agent's environment dropped that, and naming PYTHONPATH in commands.json `env`
+# passed workbench's own path, which lacks the project's modules and put `python3 -m workbench.cli`
+# in the agent's reach (#512, the audit of 1.90). The detached processes (the runner, the bench
+# driver, wb optimize) keep the caller's in USER_PYTHONPATH; agent_env gives it back (python_path).
+USER_PYTHONPATH = "WB_USER_PYTHONPATH"
+
+
+def detached_env() -> dict:
+    """The environment for a detached workbench process: `PYTHONPATH` the package root, and the
+    caller's own kept in USER_PYTHONPATH (already kept, when wb runs inside one: a bench replay)."""
+    env = {**os.environ, "PYTHONPATH": str(PKG_ROOT), "WB_HOME": str(store.home())}
+    env[USER_PYTHONPATH] = os.environ.get(USER_PYTHONPATH, os.environ.get("PYTHONPATH", ""))
+    return env
+
+
+def python_path(task: store.Task, env: dict, gone=lambda p: False) -> None:
+    """``env``'s PYTHONPATH, in place: the user's (USER_PYTHONPATH, never the runner's own), less
+    workbench's package and the dropped environments' directories (``gone``), with each directory
+    inside the repo as the worktree's, as on PATH; unset when nothing is left."""
+    repo = os.path.realpath(task.spec["repo"])
+    own = os.path.realpath(PKG_ROOT)
+    out = []
+    for d in env.pop(USER_PYTHONPATH, "").split(os.pathsep):
+        real = os.path.realpath(d) if os.path.isabs(d) else ""
+        if real and (real == own or _under(real, own) or gone(real)):
+            continue
+        if real and _in_repo(real, repo):
+            d = os.path.normpath(os.path.join(task.worktree, os.path.relpath(real, repo)))
+        if d:
+            out.append(d)
+    env.pop("PYTHONPATH", None)
+    if out:
+        env["PYTHONPATH"] = os.pathsep.join(out)
 
 
 def python_installs(task: store.Task) -> tuple[bool, bool]:

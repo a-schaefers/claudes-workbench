@@ -240,8 +240,9 @@ OPENCODE_ENV = {"npm_config_yes": "false"}
 
 
 # What the agent's environment leaves out of the runner's: credentials (API keys and tokens Claude
-# Code or the user's shell carry, the SSH agent that would sign a push) and the runner's own
-# PYTHONPATH, which would put `python3 -m workbench.cli` in the agent's reach. A provider that
+# Code or the user's shell carry, the SSH agent that would sign a push). The runner's own
+# PYTHONPATH, which would put `python3 -m workbench.cli` in the agent's reach, gives way to the
+# user's (context.python_path, #512), whatever `env` names. A provider that
 # needs a key from the environment names it in commands.json `env`, which passes it through.
 # The 2026-11-16 audit added the second line's names (SMTP_PASS, MYSQL_PWD, SENTRY_DSN, BW_SESSION
 # an unlocked Bitwarden vault, OP_SESSION_<acct> 1Password's) and the value rule (USERINFO: a URL
@@ -251,7 +252,7 @@ SECRET_ENV = re.compile(r"TOKEN|SECRET|PASSW|CREDENTIAL|API_?KEY|ACCESS_KEY|PRIV
                         r"(^|_)PASS_|WEBHOOK|^BW_SESSION$|^OP_SESSION_|^KRB5CCNAME$|"
                         r"^(ANTHROPIC|CLAUDE|GH|GITHUB|GITLAB|AWS|AZURE|GOOGLE|OPENAI|HF)_|"
                         r"^(SSH_AUTH_SOCK|SSH_AGENT_PID|GPG_AGENT_INFO|DBUS_SESSION_BUS_ADDRESS|"
-                        r"DBUS_SYSTEM_BUS_ADDRESS|PYTHONPATH)$", re.I)
+                        r"DBUS_SYSTEM_BUS_ADDRESS)$", re.I)
 USERINFO = re.compile(r"\w+://[^/@\s:]*:[^/@\s]+@")
 # Configuration, not credentials, under the prefixes above: a test that reads Hugging Face models
 # offline from HF_HOME, or a region, behaves in the lane as it does for the user (the audit).

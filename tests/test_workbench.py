@@ -5830,6 +5830,33 @@ class CheckoutVenv(Base):
             f"MAPPING = {{'mypkg': {str(self.repo) + '-other/src'!r}}}\n")  # another repo
         self.assertNotIn(str(finder), context.checkout_envs(task))
 
+    def test_the_users_pythonpath_reaches_the_setup_and_tests_with_the_repo_as_the_worktree(self):
+        # #512 (the audit of 1.90): ROS's setup.bash exports PYTHONPATH; the runner replaced it
+        # with workbench's own, the agent's environment dropped that, and naming PYTHONPATH in
+        # commands.json `env` passed workbench's package path instead of the user's
+        deps = Path(self.tmp.name) / "opt" / "ros"
+        deps.mkdir(parents=True)
+        (deps / "rclpy.py").write_text("OK = True\n")
+        os.environ["PYTHONPATH"] = os.pathsep.join([str(deps), str(self.repo / "src"),
+                                                    str(context.PKG_ROOT)])
+        Path(os.environ["WB_COMMANDS"]).write_text(json.dumps({"env": ["PYTHONPATH"]}))
+        check = ("python3 -c \"import importlib.util as u, rclpy, mypkg, sys; print(mypkg.__file__); "
+                 "sys.exit(mypkg.VALUE != 'base' or u.find_spec('workbench') is not None)\"")
+        self.start("t-pypath", "ok", "--setup", "python3 -c 'import rclpy'", "--test", check,
+                   "--auto-fix", "0", "--no-base-check")
+        st = wait_phase("t-pypath", {"review"})
+        task = store.Task("t-pypath")
+        said = task.round_dir(1).joinpath("tests.txt").read_text()
+        self.assertTrue(st["tests"]["ok"], said)                  # rclpy, and the worktree's mypkg
+        self.assertIn(str(task.worktree / "src" / "mypkg"), said)
+        with mock.patch.dict(os.environ, context.detached_env()):   # as spawn_runner leaves it
+            env = runner.agent_env(task)
+        self.assertEqual(env["PYTHONPATH"], os.pathsep.join([str(deps), str(task.worktree / "src")]))
+        self.assertNotIn(context.USER_PYTHONPATH, env)
+        os.environ.pop("PYTHONPATH")                              # none: none for the agent either
+        with mock.patch.dict(os.environ, context.detached_env()):
+            self.assertNotIn("PYTHONPATH", runner.agent_env(task))
+
     def test_a_venv_that_isnt_the_checkouts_stays_but_the_agent_may_not_install_into_it(self):
         envs = Path(self.tmp.name) / "envs"
         Path(os.environ["WB_COMMANDS"]).write_text(json.dumps({"paths": [str(envs)]}))
