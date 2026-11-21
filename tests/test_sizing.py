@@ -169,6 +169,30 @@ class Measured(Base):
         self.assertIn("0 of 1 measured steps went well, 1 badly",  # the empty second step has no size
                       router.slice(models.resolve("ollama/mimo-v2.6:9b-q8_0")).line())
 
+    def test_a_compacted_step_leaves_the_clean_step_after_it_measured_clean(self):
+        # 2026-11-21, the audit of #958: the fresh session wb next's step 2 began in replaced step
+        # 1's compacted one, at step 2's first round, and step 2 was measured compacted for it
+        os.environ["FAKE_COMPACTED"] = "1"
+        self.start("t-m5", "ok", "--test", TEST_CMD)
+        wait_phase("t-m5", {"review"})
+        nxt = Path(self.tmp.name) / "next.md"
+        nxt.write_text("Write two more files.\n")
+        self.assertIn("to a fresh session", run_wb("next", "t-m5", "-m", "step one", "--spec", str(nxt)))
+        wait_phase("t-m5", {"review"})
+        del os.environ["FAKE_COMPACTED"]                     # step 2's own session never compacted
+        task = store.Task("t-m5")
+        self.assertTrue(any(e.get("kind") == "fresh" and e.get("compacted")
+                            and e.get("round") == task.status["step_round"]
+                            for e in store.read_jsonl(task.dir / "events.jsonl")[0]))
+        for f in ("a.txt", "b.txt"):
+            (task.worktree / f).write_text("line\n" * 40)
+        run_wb("accept", "t-m5", "-m", "both")
+        first, second = self.row()["steps"]
+        self.assertTrue(first["compacted"])                  # counted once, on its own step
+        self.assertEqual((second["files"], second["compacted"], second["handovers"]), (2, False, 0))
+        self.assertIn("1 of 2 measured steps went well, 1 badly",
+                      router.slice(models.resolve("ollama/mimo-v2.6:9b-q8_0")).line())
+
     def test_asking_for_a_fresh_session_is_not_an_overflow(self):
         self.start("t-m3", "ok", "--test", TEST_CMD)
         wait_phase("t-m3", {"review"})
