@@ -1386,18 +1386,23 @@ def lane_refused(task: store.Task, output: str) -> list[str]:
     without it) there is none, and a path the runner, outside the lane, may not use either is the
     user's own permissions (#773, the second 2026-11-21 audit: a test's Permission denied on
     /usr/share skipped auto-fix and woke Claude with a grant that couldn't help)."""
-    writable = context.writable(task)
-    if writable is None or not lane.abi():
+    places = context.writable(task)
+    if places is None or not lane.abi():
         return []
     guard = context.repo_dirs(task)  # the user's checkout: no lane may write it
+    # From ABI 9 a socket made outside the lane is refused even inside a writable place: the
+    # user's Postgres or MySQL socket in /tmp read as a broken database, no grant named (#826)
+    sockets = context.unix_paths(task) if lane.abi() >= 9 else None
     found = []
     for line in output[-200_000:].splitlines():
         if not REFUSAL.search(line):
             continue
         for path in refused_paths(line):
             grant = lane_grant(path)
-            if path not in found and grant and not any(
-                    path == w or path.startswith(str(w).rstrip("/") + "/") for w in writable) \
+            if path not in found and grant and (not any(
+                    path == w or path.startswith(str(w).rstrip("/") + "/") for w in places)
+                    or sockets is not None and is_socket(path) and not any(
+                        path == u or context._under(path, u) for u in sockets)) \
                     and not any(grant == g or context._under(grant, g) for g in guard) \
                     and runner_may(path):
                 found.append(path)
@@ -1413,6 +1418,14 @@ def runner_may(path: str) -> bool:
     while not os.path.exists(real):
         real = os.path.dirname(real)
     return os.access(real, os.W_OK | os.X_OK)
+
+
+def is_socket(path: str) -> bool:
+    """Whether ``path`` is a UNIX socket (followed: a link to one is one)."""
+    try:
+        return stat.S_ISSOCK(os.stat(path).st_mode)
+    except OSError:
+        return False
 
 
 def lane_grant(path: str) -> str | None:

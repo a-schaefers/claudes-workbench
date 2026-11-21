@@ -8028,6 +8028,47 @@ class Lane(Base):
         self.assertIn(f"connected {socks[1]}", out)
         self.assertIn("config: Permission denied", out)                 # the logins stay hidden
 
+    def test_a_socket_in_tmp_made_outside_the_lane_is_named_with_its_grant_from_abi_9(self):
+        # #826 (the second 2026-11-21 audit), the #441 fix's gap: /tmp is writable, but from ABI 9
+        # a socket made outside the lane is refused there too, and lane_refused dropped every
+        # path under a writable place, so a Postgres socket in /tmp read as a broken database
+        task = self.bare_task("t-826", self.repo)
+        task.worktree.mkdir()
+        d = Path(tempfile.mkdtemp(dir="/tmp", prefix="wb-826-"))
+        self.addCleanup(shutil.rmtree, d, True)
+        sock = str(d / ".s.PGSQL.5432")
+        srv = socket.socket(socket.AF_UNIX)
+        srv.bind(sock)
+        srv.listen()
+        self.addCleanup(srv.close)
+        (d / "plain.txt").write_text("")
+        out = (f"psql: error: connection to server on socket \"{sock}\" failed: Permission denied\n"
+               f"tee: {d}/plain.txt: Permission denied\n")      # a file in the lane: not this
+        with mock.patch.object(lane, "abi", return_value=9):
+            self.assertEqual(runner.lane_refused(task, out), [sock])
+            self.assertEqual(runner.lane_grant(sock), sock)
+            Path(os.environ["WB_COMMANDS"]).write_text(json.dumps({"paths": [sock]}))
+            self.assertIn(sock, context.unix_paths(task))
+            self.assertEqual(runner.lane_refused(task, out), [])            # granted now
+        Path(os.environ["WB_COMMANDS"]).write_text("{}")
+        with mock.patch.object(lane, "abi", return_value=6):            # no socket rule: in the lane
+            self.assertEqual(runner.lane_refused(task, out), [])
+        if (lane.abi() or 0) < 9:
+            return
+        script = ("import socket, sys\ns = socket.socket(socket.AF_UNIX)\ntry:\n"
+                  "    s.connect(sys.argv[1]); print('connected')\n"
+                  "except OSError as e:\n    print(f'connect {sys.argv[1]}: {e.strerror}')\n")
+
+        def run():
+            return subprocess.run(lane.wrap(context.writable(task), [sys.executable, "-c", script, sock],
+                                            context.readable(task), context.unix_paths(task)),
+                                  capture_output=True, text=True, timeout=20).stdout
+        got = run()
+        self.assertIn("Permission denied", got)
+        self.assertEqual(runner.lane_refused(task, got), [sock])
+        Path(os.environ["WB_COMMANDS"]).write_text(json.dumps({"paths": [sock]}))
+        self.assertIn("connected", run())
+
     @unittest.skipUnless(lane_device(), "needs Landlock and a device node this user may open")
     def test_a_device_node_the_lane_refused_is_named_with_its_wb_allow(self):
         # #331 (the audit of 1.4): /dev/kvm or /dev/fuse refused read as the project's bug, and the
