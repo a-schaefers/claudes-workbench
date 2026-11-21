@@ -897,8 +897,9 @@ def cmd_start(a):
     task.set_status(phase="queued", round=1, reviews=0, auto_fixes=0, tools=0,
                     tok_in=0, tok_out=0, session=None, last="starting",
                     skills=handed, skills_ever=handed, skills_rev=skills.revs(handed))
-    context.grant(task, "allow", [p.strip() for p in a.allow or [] if p.strip()]
-                  + context.test_allowances(a.test))
+    exact, tools = context.test_allowances(a.test)
+    context.grant(task, "allow", [p.strip() for p in a.allow or [] if p.strip()] + exact)
+    context.grant(task, "test_tools", tools)
     context.grant(task, "paths", lane_dirs)
     fixed = _fixed_line(task, m)  # before the runner, which writes the same rules files
     spawn_runner(task)
@@ -1124,8 +1125,9 @@ def cmd_next(a):
     _spec_gaps(task, a.spec_gap)  # after the commit: a retry after a failed one counts them once
     dropped = _stale_notes(task)
     if a.allow or a.test:
-        context.grant(task, "allow", [p.strip() for p in a.allow or [] if p.strip()]
-                      + context.test_allowances(a.test))
+        exact, tools = context.test_allowances(a.test)
+        context.grant(task, "allow", [p.strip() for p in a.allow or [] if p.strip()] + exact)
+        context.grant(task, "test_tools", tools)
     if a.test is not None:  # the one change to task.json after start
         store.write_json(task.dir / "task.json", {**spec, "test_cmd": a.test})
     test = a.test if a.test is not None else spec.get("test_cmd")

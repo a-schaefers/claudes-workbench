@@ -229,24 +229,27 @@ def _simple_commands(line: str) -> list[str]:
     return [p.strip().strip("()").strip() for p in parts if p.strip().strip("()").strip()]
 
 
-def test_allowances(test: str | None) -> list[str]:
-    """What `wb start --test` and `wb next --test` grant the task: the acceptance command's own
-    simple commands, as written and as `<their command> *`. The protocol tells the agent to run
-    it; refused (`flutter test`, `just test`, `scripts/test.sh`), it spent an ask and a Claude
-    wake on a command Claude chose, or finished untested (#514, the audit of 1.90). The hard
-    limits come later in the rules, so a grant here never lifts them."""
+def test_allowances(test: str | None) -> tuple[list[str], list[str]]:
+    """What `wb start --test` and `wb next --test` grant the task, as (allow, test_tools): the
+    acceptance command's own simple commands, as written and with more arguments (`npm test *`),
+    and their tools (`npm *`). The protocol tells the agent to run it; refused (`flutter test`,
+    `just test`, `scripts/test.sh`), it spent an ask and a Claude wake on a command Claude chose,
+    or finished untested (#514, the audit of 1.90). The tools go in a tier of their own, before
+    ASK_FIRST (shell_rules): granted with the commands, after it, `--test 'npm test'` allowed
+    `npm install left-pad`, `--test 'uv run pytest'` `uv add requests` (#646, the audit of main).
+    The hard limits come later in the rules, so no grant here lifts them."""
     import shlex
-    out = []
+    exact, tools = [], []
     for cmd in _simple_commands(test or ""):
-        out.append(cmd)
+        exact += [cmd, f"{cmd} *"]
         try:
             words = shlex.split(cmd)
         except ValueError:
             continue
         words = [w for w in words if not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*=.*", w)]
         if words and "*" not in words[0]:
-            out += [f"{words[0]} *", f"{ASSIGN} {words[0]} *"]
-    return list(dict.fromkeys(out))
+            tools += [f"{words[0]} *", f"{ASSIGN} {words[0]} *"]
+    return list(dict.fromkeys(exact)), list(dict.fromkeys(tools))
 
 
 def commands_path() -> Path:
@@ -408,6 +411,9 @@ def shell_rules(task: store.Task) -> list[dict]:
     rules += [{"action": "shell", "resource": f"{d}/*", "effect": "allow"}
               for d in (writable(task) or []) if os.path.isdir(d)
               and not d.startswith(("/dev", "/proc"))]
+    # the acceptance command's tools (test_allowances): before the asks, which still win (#646)
+    rules += [{"action": "shell", "resource": r, "effect": "allow"}
+              for r in grants(task).get("test_tools") or []]
     pip, theirs = python_installs(task)  # into the worktree's venv, not the user's (#490)
     rules += [{"action": "shell", "resource": r, "effect": "deny"}
               for p in (*ASK_FIRST, *(ENV_INSTALLS if theirs else ())) for r in (p, f"{ASSIGN} {p}")]
@@ -1474,7 +1480,7 @@ def rules_dir(task: store.Task) -> Path:
 
 def grants(task: store.Task) -> dict:
     """What Claude allowed this task beyond the everyday rules: {"allow": [patterns], "paths":
-    [dirs]}. Kept with the rules, out of the agent's reach: an agent that edited its own grants
+    [dirs], "test_tools": [patterns, ASK_FIRST still asked]}. Kept with the rules, out of the agent's reach: an agent that edited its own grants
     would widen its next round."""
     # read without making the directory: a closed task's rules are gone (cli.gc), its grants
     # kept in its status (cli._keep_grants: wb bench add replays a case with them, #250)

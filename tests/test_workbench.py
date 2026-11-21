@@ -7632,6 +7632,38 @@ class Permission(Base):
         self.assertEqual(self.verdict(context.shell_rules(store.Task("t-acc-gh")), "gh run list"),
                          "deny")                                        # never the hard limits
 
+    def test_a_test_commands_tool_still_asks_before_it_adds_a_dependency(self):
+        # #646 (the audit of main): --test 'npm test' granted `npm *` after the ASK_FIRST denies,
+        # and the last matching rule wins, so `npm install left-pad` was allowed; so were `uv add`
+        # under `uv run pytest`, `cargo add` under `cargo test`, `npx -y` under `npx vitest run`
+        cases = {"npm test": ("npm install left-pad", "npm run lint"),
+                 "pnpm test": ("pnpm add lodash", "pnpm run build"),
+                 "uv run pytest": ("uv add requests", "uv run ruff check"),
+                 "cargo test": ("cargo add serde", "cargo clippy"),
+                 "go test ./...": ("go get github.com/x/y", "go vet ./..."),
+                 "python -m pytest": ("python -m pip install requests", "python -m mypy src"),
+                 "npx vitest run": ("npx -y cowsay", "npx vitest run src/a.test.ts")}
+        for n, (test, (adds, uses)) in enumerate(cases.items()):
+            task = store.Task(f"t-tool{n}")
+            task.dir.mkdir(parents=True)
+            exact, tools = context.test_allowances(test)
+            context.grant(task, "allow", exact)
+            context.grant(task, "test_tools", tools)
+            rules = context.shell_rules(task)
+            self.assertEqual(self.verdict(rules, test), "allow", test)
+            self.assertEqual(self.verdict(rules, f"CI=1 {test}"), "allow", test)
+            self.assertEqual(self.verdict(rules, uses), "allow", (test, uses))  # the tool's other work
+            self.assertEqual(self.verdict(rules, adds), "deny", (test, adds))   # still asks first
+        # a test command that is itself an ASK_FIRST shape stays the agent's to run, as written
+        task = store.Task("t-tool-x")
+        task.dir.mkdir(parents=True)
+        exact, tools = context.test_allowances("npx -y vitest run")
+        context.grant(task, "allow", exact)
+        context.grant(task, "test_tools", tools)
+        rules = context.shell_rules(task)
+        self.assertEqual(self.verdict(rules, "npx -y vitest run"), "allow")
+        self.assertEqual(self.verdict(rules, "npx -y cowsay"), "deny")
+
     def test_a_commands_json_that_is_malformed_is_refused_not_ignored(self):
         # a string `allow` was spread letter by letter, its `*` allowing every command; a file
         # that didn't parse dropped every allowance silently (the 2026-11-16 audit)
