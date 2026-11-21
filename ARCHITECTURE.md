@@ -1221,7 +1221,12 @@ wins; no match means ask, which `--auto` allows. The rules, in order:
    `pnpm install`, `pnpm i`, `bun install`, `bun i`, `yarn`, `yarn install`, `pip install -r *`,
    `pip install -e .` (and `pip3`, `pip3.*`, `python -m pip`, `python3 -m pip`,
    `python3.* -m pip`, `uv pip` forms), `pipenv install`, `pipenv install --dev`, `pipenv sync`,
-   `pio pkg install`, `platformio pkg install`. The pip
+   `pio pkg install`, `platformio pkg install`; the npm, pnpm and bun ones with one of
+   `INSTALL_FLAGS` (`--frozen-lockfile`, `--immutable`, `--prefer-offline`, `--offline`,
+   `--legacy-peer-deps`, `--no-audit`, `--ignore-scripts`, `--prod`, `--production`), and the
+   pip ones as `-e .[*]`, `-e ".[*]"`, `-e '.[*]'`, the project's own extras (#671: refused, an
+   agent copying the project's `pnpm install --frozen-lockfile` spent a question; two flags still
+   ask, and `*` would also pass a second requirement with extras after it). The pip
    forms only where pip installs into the worktree's own venv, or with no Python environment
    active (the user's checkout's are left out: *Its environment*, below) while Landlock bounds
    what pip writes (`context.python_installs`); otherwise they ask first, since pip would write

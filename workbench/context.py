@@ -171,6 +171,19 @@ INSTALL_LISTED = (
     "python3.* -m pip install -e .", "pipenv install", "pipenv install --dev", "pipenv sync",
     "pio pkg install", "platformio pkg install",
 )
+# and with the flags projects spell those installs with, one flag each, and pip's extras of the
+# project itself: `pnpm install --frozen-lockfile` and `pip install -e ".[dev]"` were refused,
+# so an agent copying the project's own command spent a question and a Claude wake (#671).
+# `[*]` ends in `]`, which no package name does (a second requirement with extras after it
+# would match: a guardrail, not a sandbox).
+INSTALL_FLAGS = ("--frozen-lockfile", "--immutable", "--prefer-offline", "--offline",
+                 "--legacy-peer-deps", "--no-audit", "--ignore-scripts", "--prod", "--production")
+INSTALL_LISTED += tuple(f"{c} {f}" for c in ("npm install", "npm i", "pnpm install", "pnpm i",
+                                             "bun install", "bun i") for f in INSTALL_FLAGS)
+INSTALL_LISTED += tuple(f"{c} -e {e}" for c in (
+    "pip install", "pip3 install", "python -m pip install", "python3 -m pip install",
+    "uv pip install", "pip3.* install", "python3.* -m pip install")
+    for e in (".[*]", '".[*]"', "'.[*]'"))
 # The pip forms above are allowed only when they install into the worktree's own venv, or no
 # environment is active and Landlock bounds pip (python_installs); else they ask first. These,
 # which change the active venv, ask first while it is the user's (#490)

@@ -7194,6 +7194,26 @@ class Permission(Base):
                 found = r["effect"]
         return found
 
+    def test_installing_what_the_project_lists_with_its_usual_flags_needs_no_question(self):
+        # #671 (the 2026-11-21 audit): `pnpm install --frozen-lockfile` and `pip install -e
+        # ".[dev]"` were refused, though the bare forms were the agent's
+        task = store.Task("t-flags")
+        task.dir.mkdir(parents=True)
+        (task.dir / "task.json").write_text(json.dumps({"name": "t-flags", "repo": str(self.repo)}))
+        rules = context.shell_rules(task)
+        for cmd in ("pnpm install --frozen-lockfile", "npm install --legacy-peer-deps",
+                    "bun install --frozen-lockfile", "npm i --no-audit", "pnpm i --offline",
+                    "npm install --production", "bun install --immutable"):
+            self.assertEqual(self.verdict(rules, cmd), "allow", cmd)
+        for cmd in ("pnpm install --frozen-lockfile lodash", "npm install --legacy-peer-deps x",
+                    "npm install left-pad", "bun install --prod zod"):
+            self.assertEqual(self.verdict(rules, cmd), "deny", cmd)       # a new package asks
+        pip = self.verdict(rules, "pip install -e .")    # allowed where pip's install is bounded
+        for cmd in ('pip install -e ".[dev]"', "pip install -e .[dev,test]",
+                    "python3 -m pip install -e '.[all]'", 'uv pip install -e ".[dev]"'):
+            self.assertEqual(self.verdict(rules, cmd), pip, cmd)
+        self.assertEqual(self.verdict(rules, "pip install -e .[dev] requests"), "deny")
+
     def test_git_by_path_is_refused_but_a_directory_named_git_is_not(self):
         # `*/git` refused `go test ./internal/git` whatever Claude allowed, and `time -p sudo`
         # matched only the allow rule `time *` (the 2026-11-16 audit)
