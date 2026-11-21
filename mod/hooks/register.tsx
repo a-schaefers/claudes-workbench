@@ -146,7 +146,6 @@ const topNow = atom({ plugin: 'workbench', key: 'top' } as const, { snap: null, 
 const BUSY_KEEP = 60 // busy % samples kept per GPU for the sparkline: two minutes at 2 s
 const TOP_RETRY_MS = 30_000 // a `wb top` that ended by itself (wb missing, failing) is tried again this long after
 const SETTINGS_HINT = 'Click a row to see its options, then click one; or Tab to it and press Enter. A change applies at once.'
-const CHAT_EXPIRE_MS = 6 * 3600_000 // a web message older than this isn't submitted to a new listener
 const CHAT_STALE_MS = 15_000 // as wb's LISTENING_FOR: a listener silent this long has gone
 const AWAY_MS = 6 * 3600 * 1000 // the user counts as away this long after a web message
 // ...or for as long as this session has a backlog task open: a night's batch outlasts six hours,
@@ -914,6 +913,7 @@ const mem = {
   warned: new Set<string>(), // one-time toasts already shown (a file unreadable, wb failing)
   chatSent: new Set<string>(), // web messages submitted by this load, awaiting their receipt
   chatRetry: new Map<string, number>(), // a web message whose prompt was dropped: tried again from then
+  chatExpired: new Set<string>(), // web messages wb said are too old to pass on (#536): not asked again
   chatUrlAt: 0, // when the web chat's link was last looked up
   savingsAt: 0, // when the week's saving was last read
   eventsPid: 0, // the `wb events` child: its lines wake poll(); the chat counts it as this session
@@ -1589,17 +1589,18 @@ async function listen($: any, now: number) {
   }
   for (const m of await unread($, dir)) {
     const id = String(m.id ?? '')
-    if (m.from !== 'user' || !id || mem.chatSent.has(id)) continue
-    if (now - Number(m.ts ?? 0) * 1000 > CHAT_EXPIRE_MS) { // stale: not sprung on a new listener
-      warnOnce($, 'chat-old', `a web chat message older than ${CHAT_EXPIRE_MS / 3600_000} hours ` +
-        "wasn't passed to Claude: wb chat pending lists it") // said, not dropped in silence (#329)
-      continue
-    }
+    if (m.from !== 'user' || !id || mem.chatSent.has(id) || mem.chatExpired.has(id)) continue
     if ((mem.chatRetry.get(id) ?? 0) > now) continue // its prompt was dropped: again in a minute
     // Claimed under wb's lock: two sessions starting together both took the chat and both
-    // submitted it, each guard knowing only its own sends (#84). Refused: another session's.
-    if (!(await runWb($, ['chat', 'claim', id, '--by', st.key])).ok) {
-      mem.chatRetry.set(id, now + REWAKE_MS)
+    // submitted it, each guard knowing only its own sends (#84). Refused: another session's, or
+    // too old to spring on Claude, by wb's one threshold, which the page shows too (#536): the mod
+    // skipped it on its own clock, and the phone said "Delivered" for a message Claude never got.
+    const claimed = await runWb($, ['chat', 'claim', id, '--by', st.key])
+    if (!claimed.ok) {
+      if (/ expired: /.test(claimed.out)) {
+        mem.chatExpired.add(id)
+        warnOnce($, 'chat-old', `${brief(claimed.out).replace(/^wb: \S+ /, 'a web chat message ')}`) // said, not dropped in silence (#329)
+      } else mem.chatRetry.set(id, now + REWAKE_MS)
       continue
     }
     mem.chatSent.add(id)

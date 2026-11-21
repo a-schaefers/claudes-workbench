@@ -485,6 +485,20 @@ async function run(engine, device) {
     const n = messages().filter(m => m.text === 'retried after a lost reply').length
     if (n !== 1) throw new Error(`landed ${n} times`)
   })
+  await check('a message over 6 h unread says it was not passed to Claude, never Delivered, and sends again', async () => {
+    // #536 (the 2026-11-20 audit): the mod skipped it, and the page said "Delivered" for good
+    listen(false)
+    appendFileSync(join(home, 'state/chat/messages.jsonl'), JSON.stringify({ id: 'old-1', ts: Date.now() / 1000 - 7 * 3600,
+      from: 'user', text: 'run the backlog overnight' }) + '\n')
+    const row = page.locator('.row.user', { hasText: 'run the backlog overnight' })
+    await until(async () => (await row.locator('.meta').textContent()).includes('Not passed to Claude (over 6 h old)'))
+    if ((await row.locator('.meta').textContent()).includes('Delivered')) throw new Error('says Delivered')
+    await row.locator('.meta button', { hasText: 'send again' }).click()
+    await until(() => messages().filter(m => m.text === 'run the backlog overnight').length === 2)
+    const again = messages().filter(m => m.text === 'run the backlog overnight').at(-1)
+    if (Date.now() / 1000 - again.ts > 60) throw new Error('not sent as a new message')
+    await until(async () => (await page.locator('.row.user', { hasText: 'run the backlog overnight' }).last().locator('.meta').textContent()).includes('Delivered'))
+  })
   await check('no script errors', async () => { if (errors.length) throw new Error(errors.join('; ')) })
   await browser.close()
   await stopServer()

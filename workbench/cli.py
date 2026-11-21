@@ -3364,6 +3364,9 @@ def cmd_chat(a):
     elif a.action == "ack":
         chat.ack(a.id, a.by or "claude", a.how)
     elif a.action == "claim":  # the mod, before it submits a message: exit 1 if another has it
+        if a.id and chat.expired(a.id):  # one threshold, wb's: the page shows it unsent (#536)
+            die(f"{a.id} expired: over {chat.MESSAGE_EXPIRE // 3600} hours unread, so not passed to "
+                "Claude; the page offers to send it again")
         if not a.id or not chat.claim(a.id, a.by or "claude"):
             die(f"{a.id} is another session's to submit")
     elif a.action == "pending":

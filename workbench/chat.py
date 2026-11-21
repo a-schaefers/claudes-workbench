@@ -439,35 +439,50 @@ THREAD_BYTES = 4 << 20  # the last 200 messages fit with room to spare (a reply 
 
 
 def thread(limit: int = 200) -> list[dict]:
-    """The latest messages, each of the user's with its receipt (or None: not read yet)."""
+    """The latest messages, each of the user's with its receipt (or None: not read yet), and
+    `expired` once unread past MESSAGE_EXPIRE: no session will be given it (#536)."""
     # bounded reads: the whole history was parsed on every poll (the 2026-11-19 audit: 56 ms at
     # 20,000 rows); a receipt comes after its message, so the newest ones cover the thread
     rows = store.read_jsonl_tail(chat_dir() / "messages.jsonl", THREAD_BYTES)[-limit:]
     receipts = {r["id"]: r for r in store.read_jsonl_tail(chat_dir() / "receipts.jsonl", THREAD_BYTES)}
-    return [{**r, "received": receipts.get(r["id"])} if r["from"] == "user" else r for r in rows]
+    now = store.now()
+    return [{**r, "received": receipts.get(r["id"]),
+             **({"expired": True} if r["id"] not in receipts and _expired(r, now) else {})}
+            if r["from"] == "user" else r for r in rows]
 
 
 # Work still waiting is kept apart from what the page shows: an open question vanished from the
 # page's list behind 20 newer answered ones, and `wb chat pending` lost an unread message behind
-# 200 newer replies (#265, the audit of 1.2). Past these ages one is marked `stale`: the mod waits
-# 30 minutes on an ask, and a message a day old is no longer news.
+# 200 newer replies (#265, the audit of 1.2). An ask open past ASK_STALE is marked `stale` (the
+# mod waits 30 minutes on one). A message of the user's unread past MESSAGE_EXPIRE is `expired`:
+# `wb chat claim` refuses it, so no session springs it on Claude, and the page says so and offers
+# to send it again. The mod skipped it on its own clock, and the page said "Delivered" for good (#536).
 ASK_STALE = 3600
-PENDING_STALE = 86400
+MESSAGE_EXPIRE = 6 * 3600
+
+
+def _expired(row: dict, now: float) -> bool:
+    return now - row.get("ts", 0) > MESSAGE_EXPIRE
+
+
+def expired(msg_id: str) -> bool:
+    """Whether the user's unread message ``msg_id`` is too old to pass to Claude."""
+    row = open_work()["messages"].get(msg_id)
+    return bool(row) and _expired(row, store.now())
 
 
 def pending() -> list[dict]:
     """Every message of the user's without a receipt, however far back (open_work, #329)."""
     now = store.now()
     rows = sorted(open_work()["messages"].values(), key=lambda r: (r.get("ts", 0), r.get("id", "")))
-    return [{**r, "received": None, **({"stale": True} if now - r.get("ts", 0) > PENDING_STALE else {})}
-            for r in rows]
+    return [{**r, "received": None, **({"expired": True} if _expired(r, now) else {})} for r in rows]
 
 
 def snapshot() -> dict:
     return {"messages": thread(), "asks": asks(), "listener": listener(), "prefs": prefs(),
             "push": {"key": push_key(), "test": (store.read_json(chat_dir() / "push-test.json", None)
                                                  or {}).get("ts")},
-            "savings": week_saved(), "build": build(), "now": store.now()}
+            "savings": week_saved(), "build": build(), "expire": MESSAGE_EXPIRE, "now": store.now()}
 
 
 def week_saved() -> dict:

@@ -235,7 +235,13 @@
     // one short line, one time: the receipt's once Claude has it (#103)
     if (m.received) meta.append(span('tick', '✓✓'), span('', (m.received.how === 'queued'
       ? 'Queued for Claude · ' : 'Read by Claude · ') + clock(m.received.ts)))
-    else meta.append(span('tick', '✓'), span('', (state.listener ? 'Delivered · ' : 'Waiting for a Claude session · ')
+    else if (m.expired) {  // unread too long: no session is given it, so never "Delivered" (#536)
+      const h = Math.round((state.expire || 21600) / 3600)
+      meta.append(span('', `Not passed to Claude (over ${h} h old) · ` + clock(m.ts) + ' · '))
+      const b = document.createElement('button'); b.textContent = 'send again'
+      b.onclick = () => { b.disabled = true; resend(m.text) }
+      meta.append(b)
+    } else meta.append(span('tick', '✓'), span('', (state.listener ? 'Delivered · ' : 'Waiting for a Claude session · ')
       + clock(m.ts)))
     return meta
   }
@@ -520,7 +526,7 @@
     if (s.build) build = s.build
     live = true
     save(K.thread, (s.messages || []).slice(-50))
-    state = { messages: s.messages || [], asks: s.asks || [], prefs: s.prefs || {}, push: s.push || {}, listener: s.listener || null, savings: s.savings || null }
+    state = { messages: s.messages || [], asks: s.asks || [], prefs: s.prefs || {}, push: s.push || {}, listener: s.listener || null, savings: s.savings || null, expire: s.expire || 0 }
     if (!sheet.hidden) drawSettings()
     if (state.push.key && !pushSynced) { pushSynced = true; syncPush() }
     reportSeen()
@@ -755,6 +761,14 @@
     if (!token || held) return
     const o = { cid: newId(), text: `Keep take ${a.n}: ${a.name}`, ts: now(), about: a }
     if (!save(OUT + o.cid, o)) { held = o; banner('Sending…'); flush(true); return }
+    outbox = outItems()
+    render(); toEnd(true); flush(true)
+  }
+  // an expired message, sent again as a new one through the outbox (its own cid)
+  function resend(text) {
+    if (!token) return
+    const o = { cid: newId(), text, ts: now() }
+    if (!save(OUT + o.cid, o)) { banner('Not sent: this browser keeps no outbox here. Copy it into the box.', true); return }
     outbox = outItems()
     render(); toEnd(true); flush(true)
   }

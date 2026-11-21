@@ -4119,7 +4119,9 @@ VPN), `"hosts": ["chat.example.org"]` a name a tunnel or proxy sends.
   wait`) then got "no such permission prompt" for the answer just given (#447).
 - `claims.json`: `{<message id>: {by, ts}}` (a day's), under `claims.lock`: `wb chat claim` gives
   a message to the first session that asks and to it again, or to another once the claim is
-  `CLAIM_STALE` (120 s) old (its session gone); exit 1 otherwise.
+  `CLAIM_STALE` (120 s) old (its session gone); exit 1 otherwise, and exit 1 with `<id> expired:
+  over 6 hours unread, so not passed to Claude; the page offers to send it again` for an expired
+  message (below).
 - `listener.json`: `{session, cwd, pid, start, busy}`, written by the mod when it changes (`start`:
   its `wb events` process's, from the hello). A listener counts while its pid is this user's and
   started at `start` (`chat._alive`, which is `models._alive`: a root daemon under a recycled pid
@@ -4148,9 +4150,13 @@ VPN), `"hosts": ["chat.example.org"]` a name a tunnel or proxy sends.
   answered ones, and an unread message behind 200 replies (#265, the audit of 1.2). Both read
   `open.json` for what is still open, not the files' tails: an unread message behind 540 long
   replies, and an open question behind 120 plan cards, fell out of the 4 MiB tails, and the
-  question could no longer be answered (#329, the audit of 1.4). An ask open past `ASK_STALE` (an hour; the mod waits 30 minutes) and a message
-  unread past `PENDING_STALE` (a day) carry `stale: true`; the page shows a stale ask as waiting in
-  the terminal, with no buttons.
+  question could no longer be answered (#329, the audit of 1.4). An ask open past `ASK_STALE` (an hour; the mod waits 30 minutes)
+  carries `stale: true`; the page shows a stale ask as waiting in the terminal, with no buttons.
+  A message of the user's unread past `MESSAGE_EXPIRE` (6 h, the one threshold: the snapshot's
+  `expire`) carries `expired: true` in `chat.thread` and `wb chat pending`; `wb chat claim` refuses
+  it, so no session springs it on Claude, and the page says "Not passed to Claude (over 6 h old)"
+  with *send again* (a new message, its own cid). The mod skipped it on a clock of its own and
+  the page said "Delivered" for good (#536).
 - `prefs.json`: `{away: "ask"|"allow"}` (anything else reads as `ask`), from the gear menu
   (`/api/prefs`), read by `chat.ask` (`allow` answers a new permission at once, by `setting`).
 - `push.json`: `{subs: [{endpoint, ts, ua}]}`, the devices with notifications on (the last 20,
@@ -4225,7 +4231,8 @@ thread no longer):
 - `GET /api/state`: `{messages (the last 200, each user row with its receipt as `received`; `thread` reads the files' last `THREAD_BYTES` 4 MiB, `store.read_jsonl_tail`, as `asks` does: the whole history was parsed on every poll, 56 ms at 20,000 rows, the 2026-11-19 audit),
   asks (the last 20, each with `answer` (null while open), `answered`, `by`), prefs, push (`{key:
   the VAPID public key, test: the last test push's ts}`), listener, savings (`chat.week_saved`:
-  `savings.totals` over the last 7 days with its `score`, as `wb savings --json` without `period`), build, now}`. `build` (`chat.build`, a crc32 of the page's files' names, mtimes and sizes) changes
+  `savings.totals` over the last 7 days with its `score`, as `wb savings --json` without `period`), build, expire (`MESSAGE_EXPIRE` in seconds: past it a
+  user's unread row carries `expired`, #536), now}`. `build` (`chat.build`, a crc32 of the page's files' names, mtimes and sizes) changes
   when the page does: a page that loaded other files reloads itself.
 - `GET /api/shot?task=&n=&side=base|candidate`: one side of a `wb shot` pair as `image/png`,
   behind the token (401). It is read only when the task name passes `store.NAME_RE`, `n` is a
@@ -4326,7 +4333,8 @@ in screen coordinates, since iOS pans the page with the finger and `clientY` bar
 tap on nothing that takes one puts the keyboard away. Rendering is DOM only (inline code, bold, links, fenced code,
 lists); a receipt is one short line with one time (#103: it wrapped, and showed the time twice):
 "✓ Delivered · <sent>", "✓ Waiting for a Claude session · <sent>", "✓✓ Read by Claude · <read>",
-"✓✓ Queued for Claude · <read>" (mid-turn, read after the current step); the meta line is
+"✓✓ Queued for Claude · <read>" (mid-turn, read after the current step), "Not passed to Claude
+(over 6 h old) · <sent> · send again" (`expired`, #536); the meta line is
 `--dim` (4.9:1 on the background; it was `--faint`, 2.4:1), its buttons (copy, retry, edit,
 delete) padded to a thumb's target. The user's bubbles are dark text on coral (5.1:1; white was
 3.1:1). "Claude is on it" shows while the listener is
@@ -4640,8 +4648,9 @@ An interrupt (Esc) drops a waiting hook outright, so its own expiry never runs (
 2026-11-18): `turn.complete` expires every id left in `mem.asksOpen`, by `interrupted`. A hook
 that fails is skipped, which also leaves the dialog.
 The messages come from `open.json` (the tails of messages.jsonl and receipts.jsonl only for a
-`wb` from before it: #329). A web message over 6 h old (`CHAT_EXPIRE_MS`) isn't submitted; a
-toast says so once, and that `wb chat pending` lists it. Quitting stops delivery and, when
+`wb` from before it: #329). A web message wb calls expired (`wb chat claim` refuses it: unread past
+`chat.MESSAGE_EXPIRE`, 6 h) isn't submitted or asked about again this load (`mem.chatExpired`);
+a toast says so once, and that the page offers to send it again (#536). Quitting stops delivery and, when
 this session holds listener.json, writes it empty, so the page and other sessions see nobody
 listening at once.
 
@@ -5346,7 +5355,8 @@ let go (the page heals with no reload; a message sent meanwhile lands once), a c
 take, the composer's draft untouched: #397), the phone keyboard (a swipe down or a tap on
 the thread puts it away, a tap on the composer or a button doesn't: touches made by hand, Chromium
 only, since no headless browser raises a keyboard; once it is down the composer is back at the
-foot), no script errors.
+foot), a message over 6 h unread (not passed to Claude, never "Delivered", *send again* lands a
+new one), no script errors.
 
 **Conventions for a new test.** Names read as sentences (`test_a_note_does_not_swallow_a_failure_claude_has_not_seen`);
 one class per feature with a one-line docstring; end to end through `self.start`/`wait_phase`/

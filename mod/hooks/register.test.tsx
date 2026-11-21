@@ -1169,8 +1169,9 @@ test('the web chat reaches Claude only in /workbench mode, with a receipt, and o
   expect(asked.length).toBe(2)
 })
 
-test('a web message wb holds open is delivered past the files tails, and an old one is named', async ($, on) => {
-  // #329: an unread message behind 4 MiB of replies fell out of the tail the mod read
+test('a web message wb holds open is delivered past the files tails, and one wb calls expired is named once', async ($, on) => {
+  // #329: an unread message behind 4 MiB of replies fell out of the tail the mod read. #536: the
+  // expiry is wb's (wb chat claim refuses it), the one the page shows, not the mod's own clock
   const clock = mock.clock(on, { now: 1_800_000_000_000 })
   const files: Record<string, string> = {}
   fakeTasks(on, files, [])
@@ -1179,7 +1180,15 @@ test('a web message wb holds open is delivered past the files tails, and an old 
   on('ui.toast', (_: any, e: any) => { toasts.push(String(e.text ?? e.message ?? JSON.stringify(e))); return { value: undefined } })
   on('session.cwd', () => ({ value: '/home/u/project' }))
   on('skill.prompt', (_: any, e: any) => ({ text: e.text }))
-  on('process.run', () => ({ value: { exitCode: 0, stdout: 'no open tasks', stderr: '' } }))
+  const claims: string[] = []
+  on('process.run', (_: any, e: any) => {
+    if (e.argv[1] === 'chat' && e.argv[2] === 'claim') {
+      claims.push(e.argv[3])
+      if (e.argv[3] === 'm0') return { value: { exitCode: 1, stdout: '', stderr:
+        'wb: m0 expired: over 6 hours unread, so not passed to Claude; the page offers to send it again\n' } }
+    }
+    return { value: { exitCode: 0, stdout: 'no open tasks', stderr: '' } }
+  })
   const asked: string[] = []
   on('prompt.submit', (_: any, e: any) => {
     asked.push(e.text)
@@ -1193,9 +1202,10 @@ test('a web message wb holds open is delivered past the files tails, and an old 
   await $.skill.prompt({ skill: 'workbench', text: 'x', frontmatter: {}, source: 'userSettings' })
   await clock.advance(3000)
   expect(asked).toEqual(['[web chat] are you there?'])              // only in wb's index: delivered
-  expect(toasts.filter(t => t.includes('wb chat pending')).length).toBe(1)  // the old one, named once
+  const named = () => toasts.filter(t => t.includes('a web chat message expired: over 6 hours unread')).length
+  expect(named()).toBe(1)                                           // the old one, named once
   await clock.advance(3000)
-  expect(toasts.filter(t => t.includes('wb chat pending')).length).toBe(1)
+  expect([named(), claims.filter(c => c === 'm0').length, asked.length]).toEqual([1, 1, 1])  // and not asked again
 })
 
 test('a web message another session claimed first is not submitted here', async ($, on) => {

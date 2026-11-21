@@ -11501,6 +11501,31 @@ class WebChat(Base):
         self.assertEqual([m["id"] for m in chat.pending()], [unread["id"]])
         self.assertIn(unread["id"], run_wb("chat", "pending"))
 
+    def test_a_message_over_six_hours_unread_is_marked_expired_and_never_claimed(self):
+        # #536 (the 2026-11-20 audit): sent at 23:00 with no session, it was skipped by the mod's
+        # own clock when one listened at 08:00, and the page said "Delivered" from then on
+        chat = self.chat
+        night = store.now() - 7 * 3600
+        with mock.patch.object(chat.store, "now", return_value=night):
+            old = chat.send("run the backlog and tell me", "user", "c-night")
+        with mock.patch.object(chat.store, "now", return_value=night + chat.MESSAGE_EXPIRE - 60):
+            self.assertNotIn("expired", chat.thread()[-1])                   # not yet
+            self.assertFalse(chat.expired(old["id"]))
+        fresh = chat.send("and this one?", "user", "c-day")
+        store.write_json(chat.chat_dir() / "listener.json", {"session": "s", "pid": os.getpid()})
+        got = {m["id"]: m for m in chat.snapshot()["messages"]}
+        self.assertTrue(got[old["id"]]["expired"])                           # the page's mark
+        self.assertNotIn("expired", got[fresh["id"]])
+        self.assertEqual(chat.snapshot()["expire"], chat.MESSAGE_EXPIRE)     # the page's hours
+        self.assertEqual([m.get("expired") for m in chat.pending()], [True, None])
+        err = io.StringIO()
+        with redirect_stderr(err), self.assertRaises(SystemExit):            # the mod is refused it
+            run_wb("chat", "claim", old["id"], "--by", "s")
+        self.assertIn(f"{old['id']} expired: over 6 hours unread", err.getvalue())
+        run_wb("chat", "claim", fresh["id"], "--by", "s")                    # a fresh one is claimed
+        chat.ack(old["id"], "s")                                             # read after all: a receipt wins
+        self.assertNotIn("expired", {m["id"]: m for m in chat.thread()}[old["id"]])
+
     def test_open_work_outlasts_a_burst_past_the_files_tails(self):
         # #329 (the audit of 1.4, reproduced): 540 replies of 7,900 characters pushed an unread
         # message out of the 4 MiB tail, and 120 plan cards an open question, which then could
