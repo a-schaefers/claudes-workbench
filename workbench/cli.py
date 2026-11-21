@@ -1741,6 +1741,9 @@ def cmd_accept(a):
                 else:  # nothing new: the branch's commits past the base are the work (the steps
                     # wb next committed, or Claude's own after a takeover: the audit)
                     commit = gitops.git(task.worktree, "rev-parse", "--short", "HEAD").strip()
+            # the branch must hold it before the worktree goes: on a detached HEAD the commit was
+            # left in no branch at all (#417, the audit of 1.8)
+            gitops.put_on_branch(repo, spec["branch"], commit, task.worktree)
         except gitops.GitError as e:  # nothing removed: the uncommitted work is still in the worktree
             if was_live:
                 task.set_status(phase="stuck", last=f"accept failed: {e}"[:200], pid=None)
@@ -1748,12 +1751,11 @@ def cmd_accept(a):
                     "wb feedback or wb discard it")
             die(str(e))
         into = _merge_into(spec, repo) if a.merge else None
-        check_base = a.merge and into in (None, "HEAD")
-        if check_base:
+        if a.merge and into in (None, "HEAD"):
             into = gitops.current_branch(repo)
         tip = gitops.git(repo, "rev-parse", "--verify", f"{commit}^{{commit}}").strip()
         close = {"commit": commit, "step": measured, "merge": bool(a.merge), "merge_into": into,
-                 "check_base": check_base, "merge_as": a.merge_as or "merge"}
+                 "merge_as": a.merge_as or "merge", "sign": _signed(spec, a)}
         task.set_status(closing=close, tip=tip)  # before anything is removed
         _spec_gaps(task, a.spec_gap)
     if warn := gitops.remove_worktree(repo, task.worktree):  # committed: the rest is cleanup
@@ -1769,8 +1771,14 @@ def cmd_accept(a):
             try:
                 if not into:
                     raise gitops.GitError(gitops.detached(repo, spec["branch"], had=True))
-                merged = gitops.merge(repo, a.name, into, spec["base"] if close["check_base"] else None,
-                                      tip=tip, how=close.get("merge_as", "merge"))
+                # every target is held to the base, a named branch too: reset or rebased since
+                # the start, the merge brought back what was withdrawn from it (#418)
+                # signed as the task's commit was, and a kill backs the checkout out: SIGTERM
+                # left MERGE_HEAD and the staged merge in the user's checkout (#420)
+                with _ends_cleanly():
+                    merged = gitops.merge(repo, a.name, into, spec["base"], tip=tip,
+                                          how=close.get("merge_as", "merge"),
+                                          sign=close.get("sign", True) and _signed(spec, a))
             except gitops.GitError as e:
                 refused = str(e)
                 print(f"wb: not merged: {e}", file=sys.stderr)

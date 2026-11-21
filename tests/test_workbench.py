@@ -1328,6 +1328,50 @@ class Lifecycle(Base):
                               capture_output=True, text=True).stdout.strip()
         self.assertIn(f"commit {head}", run_wb("accept", "t-hand", "-m", "feat: answer"))
 
+    def test_accept_puts_its_commit_on_the_task_branch_whatever_the_worktree_has_out(self):
+        # #417 (the audit of 1.8, reproduced): with the worktree's HEAD detached, accept committed
+        # there, said "on delegate/<task>", removed the worktree, and no branch held the commit
+        for name, switch in (("t-det", ("--detach",)), ("t-other", ("-c", "other"))):
+            self.start(name, "ok")
+            wait_phase(name, {"review"})
+            wt = store.Task(name).worktree
+            subprocess.run(["git", "-C", str(wt), "switch", "-q", *switch], check=True)
+            out = run_wb("accept", name, "-m", "feat: answer")
+            tip = store.Task(name).status["tip"]
+            self.assertEqual(self.branch(f"delegate/{name}"), tip, name)
+            self.assertIn(f"on delegate/{name}", out)
+            self.assertEqual(subprocess.run(
+                ["git", "-C", str(self.repo), "show", f"delegate/{name}:answer.txt"],
+                capture_output=True, text=True, check=True).stdout.strip(), "42", name)
+            self.assertFalse(wt.exists(), name)
+
+    def test_accept_keeps_the_worktree_when_the_task_branch_has_commits_its_commit_lacks(self):
+        # #417: the branch moved on without the worktree's HEAD (a step committed, then a
+        # checkout of the commit before it): moving the branch would drop that step
+        self.start("t-div", "ok")
+        wait_phase("t-div", {"review"})
+        wt = store.Task("t-div").worktree
+        g = lambda *a: subprocess.run(["git", "-C", str(wt), *a], check=True,  # noqa
+                                      capture_output=True, text=True).stdout.strip()
+        g("commit", "-q", "--allow-empty", "-m", "a step")
+        step = g("rev-parse", "HEAD")
+        g("switch", "-q", "--detach", "HEAD~1")
+        with self.assertRaises(SystemExit), redirect_stderr(io.StringIO()) as err:
+            run_wb("accept", "t-div", "-m", "feat: answer")
+        self.assertIn("a step", err.getvalue())                    # what the branch has
+        self.assertIn(f"rebase delegate/t-div", err.getvalue())    # and the way out
+        self.assertTrue(wt.is_dir())                               # nothing removed
+        self.assertEqual(self.branch("delegate/t-div"), step)
+        st = store.Task("t-div").status
+        self.assertEqual(st["phase"], "review")
+        self.assertIsNone(st.get("closing"))
+        g("rebase", "-q", "delegate/t-div")                        # as it says, then again
+        run_wb("accept", "t-div", "-m", "feat: answer")
+        tip = store.Task("t-div").status["tip"]
+        self.assertEqual(self.branch("delegate/t-div"), tip)
+        self.assertTrue(gitops.contains(self.repo, tip, step))
+        self.assertFalse(wt.exists())
+
     def test_merge_lands_only_on_the_branch_the_task_started_from(self):
         # the audit: a task started on `feature` merged into the main checkout's `main`, and one
         # on a detached HEAD left its merge commit orphaned
@@ -1349,6 +1393,45 @@ class Lifecycle(Base):
             not_merged("accept", "t-det", "-m", "feat: answer", "--merge")
         self.assertIn("detached HEAD", err.getvalue())
         self.assertEqual(self.branch("main"), self.branch("feature"))  # neither merged
+
+    def test_a_merge_into_a_branch_that_lost_the_base_is_refused_with_what_would_come_back(self):
+        # #418 (the audit of 1.8, reproduced): main reset back past the task's base, then accept
+        # --merge into main (its base_branch) brought the withdrawn commit back; only a merge into
+        # the checkout's branch with no base_branch recorded was held to the base
+        g = lambda *a: subprocess.run(["git", "-C", str(self.repo), *a], check=True,  # noqa
+                                      capture_output=True, text=True).stdout.strip()
+        def withdrawn_then(name, rewrite):
+            (self.repo / "withdrawn.txt").write_text("taken back\n")
+            g("add", "withdrawn.txt")
+            g("commit", "-qm", f"withdrawn for {name}")
+            self.start(name, "ok")
+            wait_phase(name, {"review"})
+            self.assertEqual(store.Task(name).spec["base_branch"], "main")
+            rewrite()
+            before = g("rev-parse", "main")
+            with redirect_stderr(io.StringIO()) as err:
+                not_merged("accept", name, "-m", "feat: answer", "--merge")
+            self.assertIn("doesn't hold the task's base", err.getvalue(), name)
+            self.assertIn(f"withdrawn for {name}", err.getvalue(), name)  # what would come back
+            self.assertIn("rebase --onto main", err.getvalue(), name)     # and the choices
+            self.assertIn("by hand", err.getvalue(), name)
+            self.assertEqual(g("rev-parse", "main"), before, name)
+            self.assertFalse((self.repo / "withdrawn.txt").exists(), name)
+            self.assertTrue(self.branch(f"delegate/{name}"), name)        # the work is kept
+        withdrawn_then("t-rewound", lambda: g("reset", "-q", "--hard", "HEAD~1"))
+        def rebased():  # the withdrawn commit rewritten: a force-pushed main, pulled down
+            g("reset", "-q", "--hard", "HEAD~1")
+            (self.repo / "other.txt").write_text("rebased in\n")
+            g("add", "other.txt")
+            g("commit", "-qm", "the rebased history")
+        withdrawn_then("t-rebased", rebased)
+        self.start("t-forward", "ok")  # main moving forward still merges
+        wait_phase("t-forward", {"review"})
+        (self.repo / "later.txt").write_text("later\n")
+        g("add", "later.txt")
+        g("commit", "-qm", "later work on main")
+        self.assertIn("merged into main", run_wb("accept", "t-forward", "-m", "feat: answer", "--merge"))
+        self.assertEqual((self.repo / "answer.txt").read_text().strip(), "42")
 
     def test_a_colocated_jujutsu_repo_is_told_to_merge_with_jj(self):
         # #385 (the audit of 1.6): jj keeps git's HEAD detached once it has moved the working
@@ -1593,6 +1676,85 @@ class Lifecycle(Base):
         git(repo, "reset", "-q", "--hard", f"{tip}~1")  # the base: a fast-forward lands the tip
         self.assertTrue(tip.startswith(gitops.merge(repo, "t", "main", how="ff")))
         self.assertEqual(git(repo, "rev-list", "--min-parents=2", "--count", "HEAD"), "0")
+
+    def _signer(self, hang_on_merge: bool = False) -> Path:
+        """A gpg.program that signs unattended with a made-up signature (git checks only the
+        status line), or, `hang_on_merge`, waits on nobody for a commit with two parents: a
+        pinentry no one answers."""
+        prog = Path(self.tmp.name) / f"signer{len(os.listdir(self.tmp.name))}"
+        prog.write_text("#!/bin/sh\npayload=$(cat)\n" + (
+            "if [ \"$(printf '%s\\n' \"$payload\" | grep -c '^parent ')\" -ge 2 ]; then exec sleep 30; fi\n"
+            if hang_on_merge else "") +
+            "printf '\\n[GNUPG:] SIG_CREATED D 22 8 00 0 FAKE\\n' >&2\n"
+            "printf -- '-----BEGIN PGP SIGNATURE-----\\n\\nmade up\\n-----END PGP SIGNATURE-----\\n'\n")
+        prog.chmod(0o755)
+        return prog
+
+    def test_a_signed_merge_no_one_answers_is_backed_out_in_time_and_no_sign_merges_unsigned(self):
+        # #420 (the audit of 1.8, reproduced): the merge and the squash's commit in the user's
+        # checkout ran with a terminal and no time limit, and signed after --no-sign
+        slow = Path(self.tmp.name) / "slowgpg"
+        slow.write_text("#!/bin/sh\nexec sleep 30\n")  # git is killed; this one lapses
+        slow.chmod(0o755)
+        for how in ("merge", "squash"):
+            repo, g = self._merge_case(base={b"a.txt": b"a\n"}, main={b"c.txt": b"c\n"},
+                                       task={b"b.txt": b"b\n"}, ignore={})
+            g("config", "commit.gpgsign", "true")
+            g("config", "gpg.program", str(slow))
+            before = g("rev-parse", "main")
+            t0 = time.monotonic()
+            with mock.patch.object(gitops, "COMMIT_SECS", 2), \
+                    self.assertRaisesRegex(gitops.GitError, "backed out") as e:
+                gitops.merge(repo, "t", "main", how=how)
+            self.assertLess(time.monotonic() - t0, 20, how)
+            self.assertIn("needs unlocking", str(e.exception), how)
+            self.assertEqual(g("rev-parse", "main"), before, how)
+            self.assertEqual(g("status", "--porcelain"), b"", how)  # nothing staged, no b.txt
+            self.assertNotEqual(subprocess.run(["git", "-C", str(repo), "rev-parse", "-q", "--verify",
+                                                "MERGE_HEAD"]).returncode, 0, how)
+            head = gitops.merge(repo, "t", "main", how=how, sign=False)
+            self.assertNotIn(b"gpgsig", g("cat-file", "commit", head), how)
+
+    @unittest.skipUnless(shutil.which("timeout"), "needs timeout")
+    def test_an_accept_merge_killed_mid_merge_leaves_the_checkout_as_it_was(self):
+        # #420: under `timeout 4 wb accept --merge`, a signing key waiting on a pinentry left
+        # MERGE_HEAD and the staged merge in the user's checkout, and the retry refused it
+        g = lambda *a: subprocess.run(["git", "-C", str(self.repo), *a], check=True,  # noqa
+                                      capture_output=True, text=True).stdout
+        g("config", "commit.gpgsign", "true")
+        g("config", "gpg.program", str(self._signer(hang_on_merge=True)))
+        out = self.start("t-kill", "ok")
+        self.assertNotIn("needs unlocking", out)                       # the signer works
+        wait_phase("t-kill", {"review"})
+        before = g("rev-parse", "main")
+        r = subprocess.run(["timeout", "5", sys.executable, str(ROOT / "bin" / "wb"), "accept",
+                            "t-kill", "-m", "feat: answer", "--merge"], capture_output=True, text=True)
+        self.assertEqual(r.returncode, 124, r.stderr)                  # killed in the merge
+        self.assertEqual(g("rev-parse", "main"), before)
+        self.assertEqual(g("status", "--porcelain", "--untracked-files=no"), "")
+        self.assertFalse((self.repo / "answer.txt").exists())
+        self.assertNotEqual(subprocess.run(["git", "-C", str(self.repo), "rev-parse", "-q",
+                                            "--verify", "MERGE_HEAD"]).returncode, 0)
+        self.assertIn("gpgsig", g("cat-file", "commit", store.Task("t-kill").status["tip"]))
+        self.assertIn("merged into main", run_wb("accept", "t-kill", "-m", "feat: answer",
+                                                 "--merge", "--no-sign"))  # the retry lands it
+        self.assertNotIn("gpgsig", g("cat-file", "commit", "main"))
+        self.assertEqual((self.repo / "answer.txt").read_text().strip(), "42")
+
+    def test_accept_merge_no_sign_merges_unsigned_when_the_key_cannot_sign(self):
+        # #420 (Codex's 20 too): --no-sign let the task's commit through, then the merge signed,
+        # failed ("gpg failed to sign the data") and exited 5: the task couldn't land
+        g = lambda *a: subprocess.run(["git", "-C", str(self.repo), *a], check=True,  # noqa
+                                      capture_output=True, text=True).stdout
+        g("config", "commit.gpgsign", "true")
+        g("config", "gpg.program", "false")
+        for name, how in (("t-ns", ()), ("t-nsq", ("--merge-as", "squash"))):
+            self.start(name, "ok", "--no-sign")
+            wait_phase(name, {"review"})
+            self.assertIn("merged into main", run_wb("accept", name, "-m", f"feat: {name}",
+                                                     "--merge", *how))
+            self.assertNotIn("gpgsig", g("cat-file", "commit", "main"), name)
+            g("reset", "-q", "--hard", "HEAD~1")  # the next one from the same base
 
     def test_accept_merge_as_squash_lands_one_commit_and_drops_the_branch(self):
         # #352: branch -d keeps a squashed branch (never an ancestor of the squash), and merged

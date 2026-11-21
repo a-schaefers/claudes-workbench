@@ -559,8 +559,8 @@ def step_commit(task: store.Task, step: int, steps: int) -> str | None:
 
 SIGN_SECS = 10    # the dry signature at wb start: an unlocked key answers at once
 COMMIT_SECS = 90  # a signed commit at accept: a pinentry nobody answers, under Claude's 2 minutes
-UNLOCK = ("commits here are signed and the key needs unlocking first: ssh-add for an SSH key, or "
-          "sign once in a terminal for GPG (echo x | gpg -s >/dev/null); or --no-sign")
+UNLOCK_HOW = "ssh-add for an SSH key, or sign once in a terminal for GPG (echo x | gpg -s >/dev/null)"
+UNLOCK = f"commits here are signed and the key needs unlocking first: {UNLOCK_HOW}; or --no-sign"
 NO_TERMINAL = {"GPG_TTY": "", "DISPLAY": "", "WAYLAND_DISPLAY": "", "SSH_ASKPASS_REQUIRE": "never"}
 
 
@@ -610,6 +610,27 @@ def commit_all(worktree: Path, message: str, include: bool = False, sign: bool =
     else:
         git(worktree, *NO_HOOKS, "commit", "-q", "-m", message)
     return git(worktree, "rev-parse", "--short", "HEAD").strip()
+
+
+def put_on_branch(repo: Path, branch: str, commit: str, worktree: Path) -> None:
+    """Make ``branch`` the accepted ``commit`` before its worktree goes: already there, moved
+    forward when it is an ancestor (a worktree on a detached HEAD or another branch), made when
+    gone. Refuses a branch holding commits ``commit`` lacks, naming them and the way out: accept
+    committed on a detached HEAD, said the branch had it and removed the only checkout that did
+    (#417, the audit of 1.8)."""
+    ref, sha = f"refs/heads/{branch}", git(repo, "rev-parse", "--verify", f"{commit}^{{commit}}").strip()
+    have = git(repo, "rev-parse", "--verify", "-q", ref, check=False).strip()
+    if have == sha:
+        return
+    if have and not contains(repo, sha, have):
+        lost = git(repo, "log", "--format=%h %s", f"{sha}..{have}").splitlines()
+        raise GitError(
+            f"{branch} has {len(lost)} commit(s) the accepted {commit} lacks ("
+            f"{'; '.join(lost[:5])}{'; …' if len(lost) > 5 else ''}), so the worktree {worktree} "
+            f"is kept: bring them together there (git -C {shlex.quote(str(worktree))} rebase "
+            f"{branch}), or drop them (git -C {shlex.quote(str(repo))} branch -f {branch} "
+            f"{commit}), then accept again")
+    git(repo, "update-ref", "-m", "workbench: accept", ref, sha, have)  # unmoved since it was read
 
 
 def _rmtree(path: Path) -> None:
@@ -693,7 +714,7 @@ def start_branch(repo: Path, base: str) -> str | None:
 
 
 def merge(repo: Path, task: str, into: str | None = None, base: str | None = None,
-          *, tip: str | None = None, how: str = "merge") -> str:
+          *, tip: str | None = None, how: str = "merge", sign: bool = True) -> str:
     """Merge the task's branch into ``into`` (the branch it started from: task.json's
     base_branch), which the main checkout must have out, clean and not mid-merge; a conflict, an
     ignored file in the way, or a merge git left unfinished is backed out, leaving the repo as it
@@ -702,7 +723,12 @@ def merge(repo: Path, task: str, into: str | None = None, base: str | None = Non
     next checkout, nor onto another branch than the task's (both happened: the 2026-11-16 audit).
     ``how``: "merge" (a merge commit, the default), "ff" (fast-forward only, refused when the
     branch has moved) or "squash" (one new commit with the tip's message): a repo kept to linear
-    history refused every --no-ff merge (#352, the audit of 1.4). The same guards hold for each."""
+    history refused every --no-ff merge (#352, the audit of 1.4). The same guards hold for each.
+    The commit it makes is signed as commit_all's is: with no terminal and COMMIT_SECS when the
+    user signs, unsigned when ``sign`` is False (--no-sign); a timeout, a failure or an
+    interruption (a SIGTERM, raised by the caller) backs the checkout out to where it was: a
+    pinentry nobody answered hung accept until it was killed, leaving MERGE_HEAD and the staged
+    merge in the user's checkout, and --no-sign's merge still signed (#420, the audit of 1.8)."""
     if git(repo, "status", "--porcelain", "--untracked-files=no").strip():
         raise GitError(f"{repo} has uncommitted changes; merge {branch_name(task)} by hand")
     have = current_branch(repo)
@@ -712,8 +738,16 @@ def merge(repo: Path, task: str, into: str | None = None, base: str | None = Non
         raise GitError(f"{repo} has {have} out, not {into}; merge {branch_name(task)} by hand")
     if (tip or not into or into == "HEAD") and base and _run(
             repo, ("merge-base", "--is-ancestor", base, "HEAD"), check=False).returncode:
-        raise GitError(f"{repo} has {have} out, which doesn't hold the task's base; "
-                       f"merge {branch_name(task)} by hand")
+        # a branch reset or rebased since the task started: the merge would bring back what was
+        # withdrawn from it, so the commits are named and the choice is Claude's (#418)
+        back = git(repo, "log", "--format=%h %s", f"HEAD..{base}").splitlines()
+        b = branch_name(task)
+        raise GitError(
+            f"{repo} has {have} out, which doesn't hold the task's base {base[:12]} (reset or "
+            f"rebased since?): merging would bring back {len(back)} commit(s) it lacks ("
+            f"{'; '.join(back[:5])}{'; …' if len(back) > 5 else ''}). Rebase the task's commits "
+            f"onto it (git -C {shlex.quote(str(repo))} rebase --onto {have} {base[:12]} {b}, "
+            f"then git switch {have} && git merge {b}), or merge {b} by hand to bring them back")
     if _merging(repo):  # an --abort below would throw away the user's own merge
         raise GitError(f"{repo} is in the middle of a merge; finish it, then merge "
                        f"{branch_name(task)} by hand")
@@ -722,26 +756,43 @@ def merge(repo: Path, task: str, into: str | None = None, base: str | None = Non
         raise GitError(f"the merge would overwrite {', '.join(in_the_way)} in {repo}, untracked "
                        f"there (yours, maybe ignored): move it aside, then merge "
                        f"{branch_name(task)} by hand")
+    before = git(repo, "rev-parse", "HEAD").strip()
+    signed = sign and signs(repo)
+    unsigned = () if sign else ("-c", "commit.gpgsign=false")
+    # a fast-forward makes no commit, and an unsigned merge of a large checkout takes its time
+    secs = COMMIT_SECS if signed and how != "ff" else None
+
+    def committing(args):  # the step that makes a commit, so may sign
+        r = _run(repo, [*unsigned, *args], NO_TERMINAL, check=False, timeout=secs)
+        if r.returncode:
+            said = (r.stderr or r.stdout).decode("utf-8", "replace").strip()
+            raise GitError(f"git {' '.join(args)}: {said}")
+
+    def failed(what, e):
+        why = str(e)
+        if signed and any(w in why for w in ("no answer in", "failed to sign", "failed to write commit")):
+            why = (f"the commit is signed and the key needs unlocking first ({UNLOCK_HOW}); then "
+                   f"merge it by hand ({why.splitlines()[0]})")
+        return GitError(f"{what} {branch_name(task)} failed and was backed out: {why}")
+
     # --commit and --no-squash outrank a branch.<name>.mergeOptions of --no-commit or --squash,
     # which left the merge pending while accept said merged (#190, the 2026-11-19 audit)
-    if how == "squash":  # no MERGE_HEAD to abort: a conflict is backed out with reset --merge
-        before = git(repo, "rev-parse", "HEAD").strip()
-        try:
+    try:
+        if how == "squash":  # no MERGE_HEAD to abort: backed out with reset --merge
             git(repo, "merge", "--squash", "--no-commit", source)
-            git(repo, *NO_HOOKS, "commit", "--no-verify", "-q", "-C", source)
-        except GitError as e:
-            git(repo, "reset", "-q", "--merge", before, check=False)
-            raise GitError(f"squashing {branch_name(task)} failed and was backed out: {e}") from None
+            committing([*NO_HOOKS, "commit", "--no-verify", "-q", "-C", source])
+        else:
+            committing(["merge", *(("--ff-only",) if how == "ff" else
+                                   ("--no-ff", "--commit", "--no-squash")), "--no-edit", source])
+    except BaseException as e:  # a conflict, a timeout, a SIGTERM: the checkout as it was (#420)
+        _back_out(repo, before)
+        if isinstance(e, GitError):
+            raise failed("squashing" if how == "squash" else "merging", e) from None
+        raise
+    if how == "squash":
         if git(repo, "rev-parse", "HEAD").strip() == before:  # a no-op squash committed nothing
             raise GitError(f"squashing {branch_name(task)} left nothing to commit: merge it by hand")
         return git(repo, "rev-parse", "--short", "HEAD").strip()
-    args = ("--ff-only",) if how == "ff" else ("--no-ff", "--commit", "--no-squash")
-    try:
-        git(repo, "merge", *args, "--no-edit", source)
-    except GitError as e:
-        if _merging(repo):
-            git(repo, "merge", "--abort", check=False)
-        raise GitError(f"merging {branch_name(task)} failed and was backed out: {e}") from None
     if _merging(repo) or _run(repo, ("merge-base", "--is-ancestor", source, "HEAD"),
                               check=False).returncode:
         if _merging(repo):
@@ -749,6 +800,17 @@ def merge(repo: Path, task: str, into: str | None = None, base: str | None = Non
         raise GitError(f"git didn't complete the merge of {branch_name(task)} (a merge setting "
                        "of yours?); it was backed out: merge it by hand")
     return git(repo, "rev-parse", "--short", "HEAD").strip()
+
+
+def _back_out(repo: Path, before: str) -> None:
+    """Undo wb's own merge in the user's checkout, which was clean at ``before``: a conflict, a
+    signature that timed out, a kill mid-merge. `reset --merge` drops MERGE_HEAD and the staged
+    merge (a squash leaves no MERGE_HEAD), and a commit made just before an interruption."""
+    if _merging(repo):
+        git(repo, "merge", "--abort", check=False)
+    if (git(repo, "rev-parse", "HEAD", check=False).strip() != before
+            or git(repo, "status", "--porcelain", "--untracked-files=no", check=False).strip()):
+        git(repo, "reset", "-q", "--merge", before, check=False)
 
 
 def _overwritten(repo: Path, branch: str) -> list[str]:
