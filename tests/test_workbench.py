@@ -8307,6 +8307,13 @@ class Audio(Base):
                          ["gate and → (nothing)"])
         self.assertEqual(audio.wer("open the gate and walk", "open the walk"), 0.4)
 
+    def test_canonically_equal_text_scores_no_error_and_a_different_accent_still_counts(self):
+        # #747 (Codex's audit of 1.90.6, finding 20): `café` precomposed against `cafe` plus a
+        # combining acute scored a WER of 1.0, though both render the same
+        self.assertEqual(audio.wer("un caf\u00e9 noir", "un cafe\u0301 noir"), 0.0)
+        self.assertEqual(audio.wer("Ångström", "A\u030angstro\u0308m"), 0.0)
+        self.assertEqual(audio.wer("un café noir", "un cafè noir"), 0.333)  # another accent: a miss
+
     def test_peak_clipping_and_silence_are_measured_on_the_clips_own_channels_and_rate(self):
         # #586: measured on ffmpeg's 16 kHz mono copy, a 48 kHz stereo take clipped on its left
         # channel read peak -6 dBFS and 0% clipped, one with its right channel inverted read

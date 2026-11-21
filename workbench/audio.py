@@ -356,9 +356,10 @@ UNSPACED = re.compile("[\u0e00-\u0eff\u1000-\u109f\u1780-\u17ff\u3040-\u30ff\u31
 def words(text: str) -> list[str]:
     """The units a listener is scored on: lower-case words (letters, digits, apostrophes, and
     their combining marks: `\\w` split Hindi and Thai at each vowel sign), and each character of a
-    script written without spaces."""
+    script written without spaces. NFC first: `café` with a combining accent scored a WER of 1.0
+    against the same word precomposed (#747)."""
     out, cur, after_unit = [], "", False
-    for c in text.lower().replace("’", "'"):
+    for c in unicodedata.normalize("NFC", text.lower()).replace("’", "'"):
         if unicodedata.category(c).startswith("M"):  # a vowel sign or tone mark: its base's
             if cur:
                 cur += c
