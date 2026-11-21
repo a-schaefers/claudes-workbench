@@ -14018,6 +14018,32 @@ class Projects(Base):
             run_wb(*argv)
         return err.getvalue()
 
+    def test_a_start_from_a_git_hook_or_a_vcsh_shell_works_on_the_repo_it_names(self):
+        # #798 (the second 2026-11-21 audit): wb, the runner and the agent inherited the caller's
+        # GIT_INDEX_FILE (a commit hook's) and GIT_DIR (a vcsh shell's): the runner's worktree
+        # add failed, or the review diff and the accept commit used the user's own index
+        other = Path(self.tmp.name) / "dotfiles"
+        subprocess.run(["git", "init", "-q", str(other)], check=True)
+        g = lambda *a: subprocess.run(["git", "-C", str(self.repo), *a], check=True,  # noqa
+                                      capture_output=True, text=True,
+                                      env={k: v for k, v in os.environ.items()
+                                           if k not in gitops.REPO_ENV})
+        index = g("ls-files", "--stage").stdout
+        with mock.patch.dict(os.environ, {"GIT_INDEX_FILE": str(other / "no-index")}):
+            self.assertIn("README.md", gitops.git(self.repo, "ls-tree", "--name-only", "HEAD"))
+            self.assertEqual(gitops.git(self.repo, "ls-files", "--stage"), index)
+        os.environ.update(GIT_INDEX_FILE=str(self.repo / ".git" / "index"),
+                          GIT_DIR=str(other / ".git"), GIT_WORK_TREE=str(other))
+        self.start("t-hook", "ok", "--test", TEST_CMD)
+        for name in gitops.REPO_ENV:
+            self.assertNotIn(name, os.environ)                    # the runner's and the agent's
+        st = wait_phase("t-hook", {"review"})
+        self.assertIs(st["tests"]["ok"], True)
+        self.assertIn("+42", run_wb("diff", "t-hook"))
+        run_wb("accept", "t-hook", "-m", "feat: answer")
+        self.assertIn("answer.txt", g("ls-tree", "--name-only", "delegate/t-hook").stdout)
+        self.assertEqual(g("ls-files", "--stage").stdout, index)  # the user's index untouched
+
     def test_a_branch_named_delegate_or_under_the_tasks_branch_is_refused_at_start_by_name(self):
         # #792 (the second 2026-11-21 audit): `branch --list delegate/<task>` missed both, and
         # the runner's `worktree add` failed every task in the repo after it had spawned

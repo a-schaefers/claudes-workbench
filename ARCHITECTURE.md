@@ -1728,7 +1728,12 @@ lane: #674, checked with mise 2026.11.11; `wb start` notes a config the user has
 user set, `git_config_env`: with `commit.gpgsign` in `~/.gitconfig`, every test that committed in
 a scratch repo failed in the lane, the keys and agents out of reach, and the base check blamed
 the project, #666; the agent commits to no repo of the user's anyway) and the shim's `PATH` (on WSL with the lane on, without the Windows
-drives' directories, and without `WSL_INTEROP`: `context.agent_path`). A provider that needs a key from the
+drives' directories, and without `WSL_INTEROP`: `context.agent_path`). The caller's repository variables never reach it,
+nor wb or the runner (`gitops.REPO_ENV`: `GIT_DIR`, `GIT_WORK_TREE`, `GIT_INDEX_FILE` and the like, dropped by
+`gitops.drop_repo_env` at `cli.main` and `runner.main`, and left out of each of wb's git calls, `gitops._env`,
+wb's own scratch `GIT_INDEX_FILE` layered on per call: started from a commit hook, the runner's `worktree add`
+failed on its `GIT_INDEX_FILE`, or the review diff and accept used the user's own index; from a vcsh shell,
+`GIT_DIR` sent the calls to another repo, #798). A provider that needs a key from the
 environment, or tests that need `DATABASE_URL` and the like, name it in `commands.json` `"env":
 [names]`, which passes it through. A proxy that holds a password (`https_proxy=http://user:pass@proxy:3128`)
 is a URL with a password too, and stays out unless named (#380, the audit of 1.6: the setup's `npm ci`

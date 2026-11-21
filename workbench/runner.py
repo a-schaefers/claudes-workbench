@@ -3080,6 +3080,7 @@ def _one_runner(task: store.Task):
 
 def main():
     store.absolute_env()
+    gitops.drop_repo_env()  # the caller's repository variables, for the agent too (#798)
     task = store.Task(sys.argv[1])
     lock = _one_runner(task)  # noqa: F841 (held until the process exits)
     if lock is None:

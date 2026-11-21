@@ -47,6 +47,30 @@ PLAIN = ("-c", "color.ui=never", "-c", "color.diff=never", "-c", "color.status=n
 # wb accept ran them as the user outside the lane (the 2026-11-16 audit). The checks belong in
 # --test, which runs in the lane. Signing is kept: only the hooks go.
 NO_HOOKS = ("-c", "core.hooksPath=/dev/null")
+# The variables that tell git which repository, index or work tree to use. Inherited from a git
+# hook (git exports GIT_INDEX_FILE, and GIT_DIR in a linked worktree) or a vcsh or bare-dotfiles
+# shell (GIT_DIR, GIT_WORK_TREE), they sent wb's calls to the caller's repository or index: the
+# runner's `worktree add` failed ("index file open failed: Not a directory"), or the review diff
+# and the accept commit were built from the user's own index (#798, the second 2026-11-21
+# audit). wb, its runner and the agent never inherit them (drop_repo_env); wb's own deliberate
+# GIT_INDEX_FILE (a scratch index) is layered on per call.
+REPO_ENV = ("GIT_DIR", "GIT_WORK_TREE", "GIT_INDEX_FILE", "GIT_COMMON_DIR", "GIT_OBJECT_DIRECTORY",
+            "GIT_ALTERNATE_OBJECT_DIRECTORIES", "GIT_NAMESPACE", "GIT_PREFIX")
+
+
+def drop_repo_env(env=None) -> None:
+    """REPO_ENV out of ``env`` (the process's own by default), in place: at wb's and the runner's
+    start, so no child (the runner, the agent, its tests) inherits the caller's."""
+    env = os.environ if env is None else env
+    for name in REPO_ENV:
+        env.pop(name, None)
+
+
+def _env(extra=None) -> dict:
+    """The environment for one of wb's git calls: the process's, less REPO_ENV, plus ``extra``."""
+    return {**{k: v for k, v in os.environ.items() if k not in REPO_ENV}, **(extra or {})}
+
+
 NO_SMUDGE = {"GIT_LFS_SKIP_SMUDGE": "1"}  # LFS files stay pointers: a trial reads paths only (#469)
 
 
@@ -171,7 +195,7 @@ def _case_folds(d: str) -> bool | None:
 def _run(cwd, args, env=None, check=True, timeout=None, input=None) -> subprocess.CompletedProcess:
     try:
         r = subprocess.run(["git", "-C", str(cwd), *PLAIN, *_pinned(cwd), *args], capture_output=True,
-                           env={**os.environ, **env} if env else None, timeout=timeout, input=input,
+                           env=_env(env), timeout=timeout, input=input,
                            stdin=subprocess.DEVNULL if timeout and input is None else None)
     except subprocess.TimeoutExpired:
         raise GitError(f"git {' '.join(args)}: no answer in {timeout}s") from None
@@ -200,7 +224,7 @@ def git_hash(cwd, h, *args) -> None:
     beside the resident model (#678)."""
     with tempfile.TemporaryFile() as err:  # not a pipe: a full one would stall git mid-diff
         p = subprocess.Popen(["git", "-C", str(cwd), *PLAIN, *_pinned(cwd), *args],
-                             stdout=subprocess.PIPE, stderr=err, stdin=subprocess.DEVNULL)
+                             stdout=subprocess.PIPE, stderr=err, stdin=subprocess.DEVNULL, env=_env())
         with p.stdout:
             while chunk := p.stdout.read(1 << 16):
                 h.update(chunk)
@@ -954,7 +978,7 @@ def _bounded(cwd, args, env, limit: int) -> str | None:
     of 1.4). A character is at most 4 bytes, so past 4 * limit bytes it can't fit."""
     with tempfile.TemporaryFile() as err:
         p = subprocess.Popen(["git", "-C", str(cwd), *PLAIN, *_pinned(cwd), *args],
-                             stdout=subprocess.PIPE, stderr=err, env={**os.environ, **env})
+                             stdout=subprocess.PIPE, stderr=err, env=_env(env))
         out = p.stdout.read(4 * limit + 1)
         over = len(out) > 4 * limit
         if over:

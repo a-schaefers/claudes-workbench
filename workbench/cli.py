@@ -4809,6 +4809,7 @@ def cmd_doctor(a):
 
 def main(argv=None):
     store.absolute_env()  # before anything reads a path from the environment or a child inherits it
+    gitops.drop_repo_env()  # a git hook's GIT_INDEX_FILE, a vcsh shell's GIT_DIR: never ours (#798)
     a = parser().parse_args(argv)
     try:
         store.note_claude_session()  # which sessions a /clear gave this process (spend.usage)
