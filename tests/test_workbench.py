@@ -9223,10 +9223,10 @@ class ClaudeSpend(Base):
         super().setUp()
         os.environ["CLAUDE_CONFIG_DIR"] = str(Path(self.tmp.name) / "claude")  # never the user's
 
-    def transcript(self, rows: list[dict], torn: bool = False) -> Path:
+    def transcript(self, rows: list[dict], torn: bool = False, sid: str = SID) -> Path:
         d = Path(os.environ["CLAUDE_CONFIG_DIR"]) / "projects" / "-some-project"
         d.mkdir(parents=True, exist_ok=True)
-        path = d / f"{self.SID}.jsonl"
+        path = d / f"{sid}.jsonl"
         path.write_text("".join(json.dumps(r) + "\n" for r in rows)
                         + ('{"type": "assistant", "mess' if torn else ""))
         return path
@@ -9268,6 +9268,27 @@ class ClaudeSpend(Base):
         self.assertEqual(spend.usage(t2)["calls"], 0.5)
         self.assertEqual(spend.usage(self.task("never-named"))["output"], 0)
         self.assertEqual(spend.usage(store.Task("theirs")), None)   # its session has no transcript
+
+    def test_the_turns_after_a_clear_are_charged_to_the_task_too(self):
+        # #451: /clear continues the process under a new session id and transcript, and only the
+        # one wb start recorded was read: the review after it went uncounted
+        from workbench import spend
+        t1 = store.Task("t1")
+        store.write_json(t1.dir / "task.json", {"name": "t1", "session": self.SID,
+                                                "claude_pid": 4242, "created_at": store.now()})
+        self.transcript([_turn("add the thing", "2026-11-17T10:00:00Z"),
+                         *_call("m1", "2026-11-17T10:00:01Z", 10, "wb start t1 --spec s.md")])
+        self.transcript([_turn("[workbench] Task `t1` is ready for review.", "2026-11-17T11:00:00Z"),
+                         *_call("m2", "2026-11-17T11:00:01Z", 20, "wb diff t1"),
+                         *_call("m3", "2026-11-17T11:00:02Z", 30, "wb accept t1 -m x")], sid="sess-after")
+        with mock.patch.dict(os.environ, {"CLAUDE_PID": "4242", "CLAUDE_CODE_SESSION_ID": "sess-after"}):
+            run_wb("status")                                 # any wb call in the cleared session
+            run_wb("status")                                 # once per id
+        with mock.patch.dict(os.environ, {"CLAUDE_PID": "999", "CLAUDE_CODE_SESSION_ID": "sess-x"}):
+            run_wb("status")                                 # another process's
+        self.assertEqual(spend.sessions(t1), [self.SID, "sess-after"])
+        u = spend.usage(t1)
+        self.assertEqual((u["output"], u["turns"]), (10 + 20 + 30, 2))
 
     def test_a_turn_of_other_work_ending_in_wb_start_charges_only_the_spec_before_it(self):
         from workbench import spend

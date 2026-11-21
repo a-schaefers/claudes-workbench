@@ -196,9 +196,19 @@ def calls(main: Path, subagents: list[Path], names: set[str]) -> list[dict]:
     return out
 
 
+def sessions(task: store.Task) -> list[str]:
+    """The Claude Code sessions the task's Claude worked in: the one `wb start` recorded, then
+    each one its process had since (a /clear starts another: store.note_claude_session, #451)."""
+    sid = task.spec.get("session")
+    if not sid:
+        return []
+    later = store.claude_sessions(task.spec.get("claude_pid"), task.spec.get("created_at") or 0)
+    return [sid] + [s for s in later if s != sid]
+
+
 def usage(task: store.Task) -> dict | None:
-    """The task's share of its session: {turns, calls, input, cache_write_5m,
-    cache_write_1h, cache_read, output}; None without a session or its transcript.
+    """The task's share of its sessions: {turns, calls, input, cache_write_5m,
+    cache_write_1h, cache_read, output}; None without a session or any of its transcripts.
     ``calls`` is the task's share of each charged call, each counting 1/len(names)."""
     return usage_by_step(task)[0]
 
@@ -215,14 +225,17 @@ def usage_by_step(task: store.Task) -> tuple[dict | None, list[dict] | None]:
     was made (the `next_step` events mark where each began), except that a `wb next` call and
     the calls charged with it as its spec (`ahead`) are the step it hands over. So a step's cost
     is its spec, its reviews and its feedback; step 1's also has the planning before `wb start`,
-    the last step's the accept."""
-    sid = task.spec.get("session")
-    main, subs = transcript_paths(sid) if sid else (None, [])
-    if main is None:
+    the last step's the accept. Every session the task's Claude worked in counts (`sessions`: a
+    /clear starts another, #451), a turn per session."""
+    sids = sessions(task)
+    found = [(s, *transcript_paths(s)) for s in sids]
+    found = [(s, main, subs) for s, main, subs in found if main is not None]
+    if not found:
         return None, None
-    names = {t.name for t in store.all_tasks() if t.spec.get("session") == sid} | {task.name}
+    names = {t.name for t in store.all_tasks() if t.spec.get("session") in sids} | {task.name}
     try:
-        charged = [c for c in calls(main, subs, names) if task.name in c["names"]]
+        charged = [{**c, "turn": (s, c["turn"])} for s, main, subs in found
+                   for c in calls(main, subs, names) if task.name in c["names"]]
     except OSError:  # unreadable: a measurement never stops an accept
         return None, None
     bounds = _step_bounds(task)

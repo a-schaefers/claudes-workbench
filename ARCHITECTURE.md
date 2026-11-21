@@ -460,7 +460,12 @@ it (its row is kept but left out by `store.results()`, and its lessons aren't ga
 scarce resource, so each row also records what the task cost the Claude Code session that ran it
 (task.json `session`), read from that session's transcript at accept or discard:
 `${CLAUDE_CONFIG_DIR:-~/.claude}/projects/*/<session>.jsonl`, plus its subagents' files under
-`<session>/subagents/`. Usage is per API call (an assistant message: one row per content block,
+`<session>/subagents/`, and those of each later session its process had (`spend.sessions`): a
+/clear continues the process under a new id and transcript, whose review turns once went
+uncounted (#451). Every `wb` call records its session under its process
+(`store.note_claude_session`: `claude-sessions/<CLAUDE_PID>`, a `<ts> <id>` line once per id);
+the ones task.json's `claude_pid` recorded from its `created_at` on are read too, each turn
+counted per session. Usage is per API call (an assistant message: one row per content block,
 the same `usage` on each, so counted once by `message.id`), and a call is charged to tasks of that
 session only:
 - a call whose Bash runs `wb … <task>` (each `wb` in the command, split with `shlex`) is that
@@ -5310,6 +5315,7 @@ the audio ones cover); `--done` records it; `--due` exits 0 when one is due (7 d
 $WB_HOME (~/.local/state/workbench)
   notify.jsonl                   notices that need Claude, all tasks (the runner writes them)
   notify.old.jsonl               notices handled and older than ARCHIVE_DAYS, moved by gc (_rotate_notices)
+  claude-sessions/<pid>          "<ts> <session id>" lines: each session a Claude Code process ran wb in (spend.sessions)
   gc.json                        the last gc: {at, archived, notices, rules, runtime, scratch, starts, uploads, branches}
   archive/<task>/                a task closed and untouched for ARCHIVE_DAYS (30), moved from tasks/ by gc
   coding.json                    Claude coding, the user's choice: {mode: only|ask|decide, ts}; none: decide

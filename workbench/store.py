@@ -177,6 +177,41 @@ def loads(text):
     return scrub(json.loads(text))
 
 
+def note_claude_session() -> None:
+    """Record the Claude Code session a `wb` call runs in under its process
+    (claude-sessions/<CLAUDE_PID>: "<ts> <session id>" lines), once per id. /clear starts a new
+    session id and transcript in the same process, and spend.usage read only the one `wb start`
+    recorded: the review turns after a /clear went uncounted (#451)."""
+    sid, pid = os.environ.get("CLAUDE_CODE_SESSION_ID", ""), os.environ.get("CLAUDE_PID", "")
+    if not sid or not pid.isdigit() or not re.fullmatch(r"[\w-]{1,128}", sid):
+        return
+    path = home() / "claude-sessions" / pid
+    try:
+        if sid in path.read_text().split()[1::2]:
+            return
+    except FileNotFoundError:
+        pass
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("a") as f:
+        f.write(f"{now()} {sid}\n")
+
+
+def claude_sessions(pid, since: float = 0) -> list[str]:
+    """The session ids Claude Code process `pid` ran `wb` in from `since` on, first seen first."""
+    try:
+        words = (home() / "claude-sessions" / str(int(pid))).read_text().split()
+    except (OSError, TypeError, ValueError):
+        return []
+    out = []
+    for ts, sid in zip(words[::2], words[1::2]):
+        try:
+            if float(ts) >= since and sid not in out:
+                out.append(sid)
+        except ValueError:
+            continue
+    return out
+
+
 _BOOT: list = []
 
 

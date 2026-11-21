@@ -4208,6 +4208,10 @@ def main(argv=None):
     store.absolute_env()  # before anything reads a path from the environment or a child inherits it
     a = parser().parse_args(argv)
     try:
+        store.note_claude_session()  # which sessions a /clear gave this process (spend.usage)
+    except OSError:
+        pass  # a measurement's record never stops a command
+    try:
         a.f(a)
     except RuntimeError as e:  # wb's own failures (git, a config that doesn't parse): a message
         die(str(e))
