@@ -9544,6 +9544,17 @@ class Savings(Base):
         self.assertIsNone(savings.price())
         self.assertEqual(json.loads(Path(os.environ["WB_SAVINGS"]).read_text()), {"currency": "x"})
 
+    def test_the_documented_savings_line_shows_the_cost_as_wb_savings_prints_it(self):
+        # Review of #609: ARCHITECTURE.md's example still read `GPU 1.2 kWh ($0.36)` after the
+        # `$` was dropped from summary
+        from workbench import savings
+        line = savings.summary({"tasks": 3, "claude": 160000, "self_est": 390000, "saved": 230000,
+                                "wh": 1200, "cost": 0.36}, "week")
+        tail = line.split(" · GPU ", 1)[1].split(" · ")[0]
+        doc = (Path(__file__).parent.parent / "ARCHITECTURE.md").read_text()
+        example = re.search(r"`the last 7 days: 3 task\(s\)[^`]*`", " ".join(doc.split())).group(0)
+        self.assertIn(f"GPU {tail}`", example)
+
     def test_wb_savings_with_nothing_to_compare_says_why(self):
         self.assertIn("no task to compare yet", run_wb("savings"))
 

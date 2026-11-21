@@ -526,7 +526,7 @@ nothing, and holds no name, path, host or account; the user decides where it goe
 `claude`, no `diff` needed) gives `self_est` 0 and `saved` −claude, and reads `claude: 21K ·
 discarded, nothing saved · GPU 12 Wh`; `totals` counts it too. `wb savings` prints `summary`
 over a period (the last 7 days by default; `PERIODS`): `the last 7 days: 3 task(s) · claude 160K ·
-writing it yourself ~390K (estimate) · saved ~230K (59%) · GPU 1.2 kWh ($0.36)`. The percentage
+writing it yourself ~390K (estimate) · saved ~230K (59%) · GPU 1.2 kWh, cost 0.36`. The percentage
 is the saving's share of the estimate, the number the savings badge scores (#101).
 
 The inputs come from the task. The energy: while OpenCode runs a round, the runner's `_Power`
