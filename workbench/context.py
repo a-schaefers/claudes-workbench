@@ -195,9 +195,23 @@ INSTALL_LISTED = (
 # `[*]` ends in `]`, which no package name does (a second requirement with extras after it
 # would match: a guardrail, not a sandbox).
 INSTALL_FLAGS = ("--frozen-lockfile", "--immutable", "--prefer-offline", "--offline",
-                 "--legacy-peer-deps", "--no-audit", "--ignore-scripts", "--prod", "--production")
+                 "--legacy-peer-deps", "--no-audit", "--ignore-scripts", "--prod", "--production",
+                 "--no-fund")
+# and the common CI lines with two, as written, by the managers that spell them:
+# `pnpm install --frozen-lockfile --prefer-offline` and `npm i --no-audit --no-fund` asked first
+# (#916, the third 2026-11-21 audit). A short list, not every pair: with each rule's `*=*` copy
+# those were ~80 KB, past CONFIG_CONTENT_MAX, whose fallback drops AGENTS.md and the project's
+# skills. No flag with `=*`: the `*` would let a package name through.
+INSTALL_FLAG_PAIRS = {
+    ("npm install", "npm i"): ("--no-audit --no-fund", "--no-fund --no-audit",
+                               "--prefer-offline --no-audit", "--no-audit --prefer-offline"),
+    ("pnpm install", "bun install"): ("--frozen-lockfile --prefer-offline",
+                                      "--prefer-offline --frozen-lockfile",
+                                      "--frozen-lockfile --ignore-scripts",
+                                      "--frozen-lockfile --production")}
 INSTALL_LISTED += tuple(f"{c} {f}" for c in ("npm install", "npm i", "pnpm install", "pnpm i",
                                              "bun install", "bun i") for f in INSTALL_FLAGS)
+INSTALL_LISTED += tuple(f"{c} {f}" for cs, fs in INSTALL_FLAG_PAIRS.items() for c in cs for f in fs)
 INSTALL_LISTED += tuple(f"{c} -e {e}" for c in (
     "pip install", "pip3 install", "python -m pip install", "python3 -m pip install",
     "uv pip install", "pip3.* install", "python3.* -m pip install")

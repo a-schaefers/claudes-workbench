@@ -9393,8 +9393,17 @@ class Permission(Base):
                     "bun install --frozen-lockfile", "npm i --no-audit", "pnpm i --offline",
                     "npm install --production", "bun install --immutable"):
             self.assertEqual(self.verdict(rules, cmd), "allow", cmd)
+        # #916 (the third 2026-11-21 audit): the common CI lines with two flags, and npm's
+        # --no-fund, still asked first
+        for cmd in ("pnpm install --frozen-lockfile --prefer-offline", "npm i --no-audit --no-fund",
+                    "npm install --no-audit --prefer-offline", "npm install --no-fund",
+                    "bun install --frozen-lockfile --production",
+                    "CI=1 pnpm install --frozen-lockfile --ignore-scripts"):
+            self.assertEqual(self.verdict(rules, cmd), "allow", cmd)
         for cmd in ("pnpm install --frozen-lockfile lodash", "npm install --legacy-peer-deps x",
-                    "npm install left-pad", "bun install --prod zod"):
+                    "npm install left-pad", "bun install --prod zod",
+                    "npm i --no-audit --no-fund left-pad",
+                    "pnpm install --frozen-lockfile --prefer-offline lodash"):
             self.assertEqual(self.verdict(rules, cmd), "deny", cmd)       # a new package asks
         pip = self.verdict(rules, "pip install -e .")    # allowed where pip's install is bounded
         for cmd in ('pip install -e ".[dev]"', "pip install -e .[dev,test]",

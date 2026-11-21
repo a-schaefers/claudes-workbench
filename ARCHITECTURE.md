@@ -1516,10 +1516,18 @@ wins; no match means ask, which `--auto` allows. The rules, in order:
    `pio pkg install`, `platformio pkg install`, `nimble install -d`, `nimble install
    --depsOnly`; the npm, pnpm and bun ones with one of
    `INSTALL_FLAGS` (`--frozen-lockfile`, `--immutable`, `--prefer-offline`, `--offline`,
-   `--legacy-peer-deps`, `--no-audit`, `--ignore-scripts`, `--prod`, `--production`), and the
+   `--legacy-peer-deps`, `--no-audit`, `--ignore-scripts`, `--prod`, `--production`,
+   `--no-fund`), or with one of `INSTALL_FLAG_PAIRS`, the common CI lines with two, by the
+   managers that spell them (`npm install`, `npm i`: `--no-audit --no-fund`, `--prefer-offline
+   --no-audit` and each reversed; `pnpm install`, `bun install`: `--frozen-lockfile` with
+   `--prefer-offline` either side, `--ignore-scripts` or `--production`; #916, the third
+   2026-11-21 audit: `pnpm install --frozen-lockfile --prefer-offline` and `npm install
+   --no-fund` asked; a short list, as every ordered pair with its `*=*` copy would take the rules
+   past `CONFIG_CONTENT_MAX`, whose fallback drops AGENTS.md and the project's skills, and no flag
+   with `=*`, whose `*` would pass a package name), and the
    pip ones as `-e .[*]`, `-e ".[*]"`, `-e '.[*]'`, the project's own extras (#671: refused, an
-   agent copying the project's `pnpm install --frozen-lockfile` spent a question; two flags still
-   ask, and `*` would also pass a second requirement with extras after it). The pip
+   agent copying the project's `pnpm install --frozen-lockfile` spent a question; other flag
+   combinations still ask, and `*` would also pass a second requirement with extras after it). The pip
    forms only where pip installs into the worktree's own venv, or with no Python environment
    active (the user's checkout's are left out: *Its environment*, below) while Landlock bounds
    what pip writes (`context.python_installs`); otherwise they ask first, since pip would write
