@@ -6840,6 +6840,31 @@ class Verify(Base):
             self.assertTrue(verify.looks_like_test(p), p)
         self.assertFalse(verify.looks_like_test("src/parse.go"))
 
+    def test_the_scratch_checkouts_read_the_bytes_the_task_reads(self):
+        # #426 (the audit of 1.8, reproduced): with the repo's own core.autocrlf the task read
+        # CRLF, and the base check's and verify's clones read LF, failing on an untouched file
+        g = lambda *a: subprocess.run(["git", "-C", str(self.repo), *a], check=True)  # noqa
+        (self.repo / "data.txt").write_bytes(b"a\nb\n")
+        (self.repo / "more.dat").write_bytes(b"x\ny\n")
+        g("add", "-A")
+        g("commit", "-qm", "data")
+        g("config", "core.autocrlf", "true")
+        (self.repo / ".git" / "info" / "attributes").write_text("*.dat -text\n")  # kept as is
+        check = ("python3 -c \"import sys; ok = open('data.txt', 'rb').read() == b'a\\r\\nb\\r\\n' "
+                 "and open('more.dat', 'rb').read() == b'x\\ny\\n'; sys.exit(0 if ok else 3)\"")
+        self.start("t-crlf", "ok", "--queue", "--test", check)
+        st = wait_phase("t-crlf", {"review"})
+        wt = store.Task("t-crlf").worktree
+        self.assertEqual((wt / "data.txt").read_bytes(), b"a\r\nb\r\n")    # the task's bytes
+        self.assertEqual((wt / "more.dat").read_bytes(), b"x\ny\n")
+        self.assertTrue(st["base_check"]["ok"], st["base_check"])          # the base check's
+        (wt / "tests").mkdir()
+        (wt / "tests" / "test_x.py").write_text("")
+        run_wb("verify", "t-crlf", "--test", check)
+        from workbench import verify
+        r = verify.last(store.Task("t-crlf"))
+        self.assertEqual((r["base"]["exit"], r["candidate"]["exit"]), (0, 0))  # and verify's
+
     def test_a_renamed_test_is_checked_under_its_new_name(self):
         # #194 (the 2026-11-19 audit): the old name was listed too, the overlay asked the
         # candidate for it, and git stopped on the pathspec before either run

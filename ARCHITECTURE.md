@@ -3084,6 +3084,13 @@ it. ACE-Step's takes peaked at -0.2 dBFS, near clipping, before any `loudnorm`.
   --batch`) at the `size` it records, when the repo has `filter.lfs.*` settings
   (`gitops.checkout_size`). The suite's test runs under `git lfs install --local` alone (no
   global or system config) and skips without git-lfs; CI's `Git LFS` step installs it.
+- **Checkout settings** (#426, the audit of 1.8). For the same reason a scratch clone checked out
+  other bytes than the task's worktree: with the repo's own `core.autocrlf` (a Windows-born
+  project, a WSL workspace) the task read CRLF and the base check and `wb verify` LF, and a test
+  reading a file byte for byte failed there alone. `verify.checkout_settings` gives each clone,
+  before its checkout, the repo's local `core.eol`, `core.autocrlf`, `core.safecrlf`,
+  `core.symlinks`, `core.filemode`, `core.ignorecase` and `core.checkRoundtripEncoding`
+  (`CHECKOUT_KEYS`) and its `info/attributes`.
 - **The split of roles.** The agent writes code and reads git freely (`status`, `diff`, `log`,
   `show`, `blame`). Everything that leaves its working tree is Claude's: commits, branches,
   merges, pushes, pull requests, CI/CD, deploys and infrastructure (`gh`, `wrangler` and the like),

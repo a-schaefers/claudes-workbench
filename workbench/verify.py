@@ -109,6 +109,31 @@ def assertion(text: str) -> str:
     return ""
 
 
+# The repo's own settings for how its files are checked out: a clone has none of its local config,
+# so a repo with core.autocrlf (a Windows-born project, a WSL workspace) gave the task CRLF files
+# and the base check and wb verify LF ones, and a test reading bytes failed there alone (#426, the
+# audit of 1.8). .git/info/attributes too.
+CHECKOUT_KEYS = r"^core\.(eol|autocrlf|safecrlf|symlinks|filemode|ignorecase|checkroundtripencoding)$"
+
+
+def checkout_settings(repo: Path, clone: Path) -> None:
+    """``repo``'s local checkout settings (CHECKOUT_KEYS, its info/attributes) in ``clone``,
+    before anything is checked out there."""
+    out = gitops.git(repo, "config", "--local", "--includes", "--get-regexp", CHECKOUT_KEYS,
+                     check=False)
+    for key, _, value in (line.partition(" ") for line in out.splitlines()):
+        if key:
+            gitops.git(clone, "config", key, value)
+    try:
+        attrs = Path(repo) / gitops.git(repo, "rev-parse", "--git-path", "info/attributes").strip()
+        if attrs.is_file():
+            dest = Path(clone) / gitops.git(clone, "rev-parse", "--git-path", "info/attributes").strip()
+            dest.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copyfile(attrs, dest)
+    except (gitops.GitError, OSError):
+        pass
+
+
 def _run(task: store.Task, checkout, cmd, limit: int, keep=None,
          setup: bool = False) -> tuple[int | str, str]:
     """``cmd`` in a scratch clone that ``checkout`` sets up, under the task's lane; ``keep(work)``
@@ -121,6 +146,7 @@ def _run(task: store.Task, checkout, cmd, limit: int, keep=None,
         work = context.tree(Path(scratch), task.spec["repo"], task.spec.get("siblings"), "repo")
         work.parent.mkdir(parents=True, exist_ok=True)
         gitops.git(scratch, "clone", "-q", "--shared", "--no-checkout", task.spec["repo"], str(work))
+        checkout_settings(Path(task.spec["repo"]), work)  # its line endings, as the task's (#426)
         gitops.share_lfs(Path(task.spec["repo"]), work)  # its LFS files as data (#382)
         if sparse := gitops.sparse_of(Path(task.spec["repo"])):  # as the task's worktree is (#263)
             gitops.apply_sparse(work, sparse)
