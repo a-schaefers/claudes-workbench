@@ -67,3 +67,4 @@ On at least one of them:
 - [ ] More tasks than fit, queued (`--queue`), each run in turn.
 - [ ] A model load interrupted (`wb stop` while it loads), and the next task runs.
 - [ ] The web chat in two tabs, with reconnects and a long history.
+- [ ] The web chat behind a real `tailscale serve --bg 1337`, on its https address, with the default chat.json (#448).

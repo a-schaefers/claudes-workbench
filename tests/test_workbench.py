@@ -9890,6 +9890,22 @@ class WebChat(Base):
         self.assertEqual(c.getresponse().status, 401)                # no "Bearer ": no entry
         c.close()
 
+    def test_a_chat_on_localhost_answers_behind_tailscale_serve_under_the_machines_tailnet_name(self):
+        # #448 (the 2026-11-20 audit): `tailscale serve --bg 1337`, the https the gear advises, passes
+        # the tailnet name through as the Host, and the default localhost chat answered it 403
+        chat, tok = self.chat, self.chat.token()
+        me = {"ip": "100.64.0.9", "names": {"box", "box.tail1234.ts.net"}, "dns": "box.tail1234.ts.net"}
+        with mock.patch.object(chat, "_tailnet", {"at": float("-inf"), "name": ""}), \
+                mock.patch.object(chat, "tailscale", return_value=me) as asked:
+            self.assertEqual(self.call("/api/state", token=tok, host="box.tail1234.ts.net")[0], 200)
+            self.assertEqual(self.call("/", host="BOX.tail1234.ts.net")[0], 200)
+            self.assertEqual(self.call("/api/state", token=tok, host="evil.example")[0], 403)
+            self.assertEqual(self.call("/api/state", token=tok, host="box")[0], 403)  # the full name only
+            self.assertEqual(asked.call_count, 1)                 # looked up once, not per request
+        with mock.patch.object(chat, "_tailnet", {"at": float("-inf"), "name": ""}), \
+                mock.patch.object(chat, "tailscale", return_value={}):       # Tailscale down
+            self.assertEqual(self.call("/api/state", token=tok, host="box.tail1234.ts.net")[0], 403)
+
     def test_an_empty_token_file_lets_nobody_in(self):
         Path(os.environ["WB_CHAT_TOKEN"]).write_text("\n")
         with self.assertRaises(RuntimeError):

@@ -120,7 +120,23 @@ def tailscale() -> dict:
     ips = [ip for ip in me.get("TailscaleIPs") or [] if "." in ip]
     dns = (me.get("DNSName") or "").rstrip(".")
     names = {n for n in (dns, dns.split(".")[0], me.get("HostName", "")) if n}
-    return {"ip": ips[0] if ips else None, "names": names}
+    return {"ip": ips[0] if ips else None, "names": names, "dns": dns.lower()}
+
+
+_tailnet = {"at": float("-inf"), "name": ""}
+_tailnet_lock = threading.Lock()
+
+
+def tailnet_name() -> str:
+    """This machine's MagicDNS name (box.tailnet.ts.net), "" when Tailscale isn't up; asked at
+    most every REPLAN_EVERY seconds, so a request under an unknown name costs no subprocess.
+    `tailscale serve --bg 1337`, the https the gear advises, passes that name through as the Host,
+    and a chat bound to localhost answered every request 403 "unknown host" (#448). Only the full
+    name: it is the one serve's certificate has, and no other site's DNS can answer for it."""
+    with _tailnet_lock:
+        if time.monotonic() - _tailnet["at"] >= REPLAN_EVERY:
+            _tailnet.update(at=time.monotonic(), name=tailscale().get("dns") or "")
+        return _tailnet["name"]
 
 
 # ---- the thread ----
@@ -914,7 +930,7 @@ class Handler(BaseHTTPRequestHandler):
             host = host[1:host.find("]")] if "]" in host else host
         elif host.count(":") == 1:
             host = host.rsplit(":", 1)[0]
-        if self.hosts is not None and host not in self.hosts:
+        if self.hosts is not None and host not in self.hosts and not (host and host == tailnet_name()):
             self._json(403, {"error": "unknown host"})
             return False
         return True

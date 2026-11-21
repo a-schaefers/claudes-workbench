@@ -3904,7 +3904,12 @@ neither has it; `0.0.0.0` or `::`: every interface). `hosts`: extra host names t
 binds, `--host` adds to its hosts, `--port` changes the port. Answered host names (`chat.plan`,
 worked out once at startup): `localhost`, `127.0.0.1`, `::1` always; for `tailscale` its DNS name,
 first label and host name; for a wildcard the host's name, its first label, its FQDN and whatever
-the host name resolves to; any other bind as itself; plus `hosts`. `serve` prints what it listens
+the host name resolves to; any other bind as itself; plus `hosts`. On any bind it also answers to
+this machine's full MagicDNS name while Tailscale is up (`chat.tailnet_name`, from `tailscale status
+--json`, asked at most every `REPLAN_EVERY` 30 s and only for a Host not already answered):
+`tailscale serve --bg 1337` passes that name through as the Host, and the default localhost chat
+answered the page itself 403 `unknown host` (#448). Only the full name (`box.tailnet.ts.net`, the one
+serve's certificate has), which no other site's DNS can answer for. `serve` prints what it listens
 on, binds it skipped, and warnings for a wildcard bind or `hosts: *`; an address it can't listen
 on ends it with one line (`can't listen on <addr>:<port>: the port is taken: another wb chat serve
 … or another program; --port picks another`, or the address isn't on this machine). With a bind skipped (tailscale
