@@ -3458,7 +3458,10 @@ custom-node packs do run their own Python).
   `<slug>-<seed>-2.png`, … that has neither (`media.free`): two prompts with the same first six
   words and seed wrote one PNG, the second over the first, and an engine that exited 0 without
   writing anything passed on the old PNG with its sidecar rewritten (#267, the audit of 1.2). An
-  earlier candidate is never replaced. `--out` defaults to
+  earlier candidate is never replaced. The name is claimed by creating its sidecar empty
+  (`O_EXCL`; taken, the next `-k`) before the moves, so two runs at once never share one: two CPU
+  `wb audio` runs (no lease) with one text and seed both reported one WAV, and one take was lost
+  (#591). `--out` defaults to
   `$WB_HOME/images/<YYYYmmdd-HHMMSS>/`.
 
 ## Audio

@@ -183,11 +183,11 @@ def generate(text: str, out_dir: Path, kind: str | None = None, n: int = 3,
                         raise RuntimeError(f"audio engine {name} wrote no audio")
                     found = inspect(fresh, kind, text if kind == "speech" else "", seconds,
                                     ear, draw=check, log=out_dir / "engine.log")
-                    out = media.free(out_dir, stem, ".wav", (".png",))
                     store.write_json(fresh.with_suffix(".json"), {
                         "text": text, "kind": kind, "seed": s, "seconds": seconds, "voice": voice,
                         "lyrics": lyrics, "refs": [str(r) for r in refs], "engine": name,
                         "secs": secs, "ts": store.now(), **found})
+                    out = media.free(out_dir, stem, ".wav", (".png",))
                     media.publish(fresh, out, (".png",))
                 say(f"{out}  ({secs} s)\n  {summary(found, seconds)}"
                     + (f"\n  spectrogram: {out.with_suffix('.png')}" if out.with_suffix(".png").is_file() else ""))

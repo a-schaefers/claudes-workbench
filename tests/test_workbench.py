@@ -7175,6 +7175,51 @@ class Audio(Base):
         self.assertIn("without audio", err.getvalue())
         self.assertEqual(len(list((tmp / "o").glob("*.wav"))), 2)
 
+    def test_two_runs_at_once_never_publish_under_one_name(self):
+        # #591 (Codex's audit of 1.8 → 1.90): two CPU runs (no lease) with one text's first six
+        # words and one seed both chose a-b-c-d-e-f-7.wav, both reported it, and one take was lost
+        from workbench import media
+        tmp = Path(self.tmp.name)
+        fake = tmp / "fake.py"   # a clip as long as its text: 0.1 s a character
+        fake.write_text("import sys, wave\nw = wave.open(sys.argv[2], 'wb')\nw.setnchannels(1)\n"
+                        "w.setsampwidth(2)\nw.setframerate(8000)\n"
+                        "w.writeframes(b'\\x00\\x20' * 800 * len(sys.argv[1]))\nw.close()\n")
+        self.engines({"e": {"command": f"{sys.executable} {fake} {{text}} {{out}}", "gpu": False}})
+        meet, met = threading.Barrier(2, timeout=20), set()
+        real = os.path.lexists
+
+        def lexists(p):  # both runs have looked at every file of the name before either takes it
+            found = real(p)
+            if str(p).endswith("a-b-c-d-e-f-7.png") and threading.get_ident() not in met:
+                met.add(threading.get_ident())
+                meet.wait()
+            return found
+
+        got, errors = [], []
+
+        def take(text):
+            try:
+                got.extend(audio.generate(text, tmp / "o", n=1, seed=7, check=False, say=lambda m: None))
+            except Exception as e:  # noqa: BLE001
+                errors.append(e)
+
+        with mock.patch.object(media.os.path, "lexists", lexists):
+            runs = [threading.Thread(target=take, args=(t,))
+                    for t in ("a b c d e f take one", "a b c d e f take three")]
+            for t in runs:
+                t.start()
+            for t in runs:
+                t.join(60)
+        self.assertEqual(errors, [])
+        self.assertEqual(len(set(got)), 2)
+        self.assertEqual(sorted(p.name for p in (tmp / "o").glob("*.wav")),
+                         ["a-b-c-d-e-f-7-2.wav", "a-b-c-d-e-f-7.wav"])
+        for clip in got:
+            side = json.loads(clip.with_suffix(".json").read_text())
+            import wave as _wave
+            with _wave.open(str(clip)) as w:
+                self.assertEqual(w.getnframes(), 800 * len(side["text"]))   # its own take
+
     def test_a_server_engine_a_server_listener_and_the_unload_after_the_batch(self):
         import threading
         import wave as _wave

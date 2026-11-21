@@ -155,10 +155,10 @@ def generate(prompt: str, out_dir: Path, n: int = 4, size: tuple[int, int] = (10
                 secs = round(time.time() - t0, 1)
                 if fresh.is_symlink() or not fresh.is_file() or not fresh.stat().st_size:
                     raise RuntimeError(f"image engine {name} wrote no image")
-                out = media.free(out_dir, f"{media.slug(prompt, 'image')}-{s}", ".png")
                 store.write_json(fresh.with_suffix(".json"), {
                     "prompt": prompt, "seed": s, "width": size[0], "height": size[1],
                     "engine": name, "refs": [str(r) for r in refs], "secs": secs, "ts": store.now()})
+                out = media.free(out_dir, f"{media.slug(prompt, 'image')}-{s}", ".png")
                 media.publish(fresh, out)
             say(f"{out}  ({secs} s)")
             made.append(out)

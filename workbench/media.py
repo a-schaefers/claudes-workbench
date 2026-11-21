@@ -195,18 +195,25 @@ def gpu(who: str, say, wait: bool, keep=()):
 
 def free(out_dir: Path, stem: str, suffix: str, extra: tuple[str, ...] = ()) -> Path:
     """`<stem><suffix>`, or `<stem>-2<suffix>` and on, whichever has neither the file nor its
-    .json sidecar (nor any ``extra`` file beside it): an earlier candidate is never replaced (#267)."""
+    .json sidecar (nor any ``extra`` file beside it), claimed by creating its sidecar empty
+    (O_EXCL): an earlier candidate is never replaced (#267), and two runs at once (CPU engines
+    take no lease) never pick one name, which left one take and two runs reporting it (#591)."""
     for k in range(1, 10_000):
         p = out_dir / f"{stem}{'' if k == 1 else f'-{k}'}{suffix}"
-        if not any(os.path.lexists(p.with_suffix(s)) for s in (suffix, ".json", *extra)):
-            return p
+        if any(os.path.lexists(p.with_suffix(s)) for s in (suffix, ".json", *extra)):
+            continue
+        try:
+            os.close(os.open(p.with_suffix(".json"), os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o644))
+        except FileExistsError:
+            continue
+        return p
     raise RuntimeError(f"{out_dir} holds 9,999 files named {stem}: pick another directory")
 
 
 def publish(fresh: Path, out: Path, extra: tuple[str, ...] = ()) -> None:
     """Move a candidate made in its own temporary directory, its sidecar (and any ``extra``
-    suffixes beside it, such as a spectrogram) to ``out``'s name: the sidecar first, so a file
-    is never seen without its record."""
+    suffixes beside it, such as a spectrogram) to ``out``'s name, which `free` claimed: the
+    sidecar first, so a file is never seen without its record."""
     os.replace(fresh.with_suffix(".json"), out.with_suffix(".json"))
     for suf in extra:
         if fresh.with_suffix(suf).is_file():
