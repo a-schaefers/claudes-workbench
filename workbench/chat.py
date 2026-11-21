@@ -930,10 +930,23 @@ class Handler(BaseHTTPRequestHandler):
             host = host[1:host.find("]")] if "]" in host else host
         elif host.count(":") == 1:
             host = host.rsplit(":", 1)[0]
-        if self.hosts is not None and host not in self.hosts and not (host and host == tailnet_name()):
-            self._json(403, {"error": "unknown host"})
+        if (self.hosts is not None and host not in self.hosts and not (host and host.split("%")[0] == self._local())
+                and not (host and host == tailnet_name())):
+            self._json(403, {"error": f"unknown host {host[:100]}: add it to chat.json's hosts"})
             return False
         return True
+
+    def _local(self) -> str:
+        """The address this connection came in on: on a wildcard bind, the LAN or tailnet IP a
+        phone typed. The names were worked out once at startup from the host name, which resolves
+        to 127.0.1.1 on Debian, Ubuntu and WSL, and missed an address gained later (a late Wi-Fi,
+        a VPN), so those IPs got 403 (#533). An address can't be rebound: DNS rebinding needs a
+        name, and the socket's own address is one this server bound."""
+        try:
+            addr = self.connection.getsockname()[0]
+        except (OSError, AttributeError, IndexError):
+            return ""
+        return addr.lower().removeprefix("::ffff:").split("%")[0]
 
     def _authed(self) -> bool:
         auth = self.headers.get("Authorization") or ""

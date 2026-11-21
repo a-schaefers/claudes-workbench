@@ -9906,6 +9906,41 @@ class WebChat(Base):
                 mock.patch.object(chat, "tailscale", return_value={}):       # Tailscale down
             self.assertEqual(self.call("/api/state", token=tok, host="box.tail1234.ts.net")[0], 403)
 
+    def test_a_wildcard_chat_answers_to_the_address_it_was_reached_on_where_the_host_name_says_127_0_1_1(self):
+        # #533 (the 2026-11-20 audit): with bind 0.0.0.0 the names came from the host name, which
+        # Debian's /etc/hosts maps to 127.0.1.1, so a phone on the LAN IP got a bare 403
+        import http.client
+        real = socket.getaddrinfo
+        debian = lambda host, *a, **k: ([(socket.AF_INET, socket.SOCK_STREAM, 6, "", ("127.0.1.1", 0))]
+                                        if host == socket.gethostname() else real(host, *a, **k))
+        with mock.patch("socket.getaddrinfo", side_effect=debian):
+            servers, p = self.chat.make_servers(0, ["0.0.0.0"])
+        srv = servers[0]
+        threading.Thread(target=srv.serve_forever, daemon=True).start()
+        self.addCleanup(srv.RequestHandlerClass.hub.close)
+        self.addCleanup(srv.server_close)
+        self.addCleanup(srv.shutdown)
+        self.assertNotIn("127.0.0.2", p["hosts"])                 # not among the names worked out
+        tok, port = self.chat.token(), srv.server_address[1]
+
+        def get(at, host):
+            c = http.client.HTTPConnection(at, port, timeout=5)
+            try:
+                c.request("GET", "/api/state", headers={"Host": f"{host}:{port}", "Authorization": f"Bearer {tok}"})
+                r = c.getresponse()
+                return r.status, json.loads(r.read())
+            finally:
+                c.close()
+        try:
+            got = get("127.0.0.2", "127.0.0.2")                   # the LAN IP, as the phone typed it
+        except OSError:
+            self.skipTest("no 127.0.0.2 here (macOS configures only 127.0.0.1)")
+        self.assertEqual(got[0], 200)
+        code, body = get("127.0.0.2", "127.0.0.3")                # an address, but not this socket's
+        self.assertEqual(code, 403)
+        self.assertIn("add it to chat.json's hosts", body["error"])  # says what to do
+        self.assertEqual(get("127.0.0.2", "evil.example")[0], 403)
+
     def test_an_empty_token_file_lets_nobody_in(self):
         Path(os.environ["WB_CHAT_TOKEN"]).write_text("\n")
         with self.assertRaises(RuntimeError):

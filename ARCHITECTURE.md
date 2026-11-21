@@ -3929,7 +3929,12 @@ the old code for a day and a half (2026-11-18). `wb chat url` prints
 `TIMEOUT` 30 s, before its request is in or on a blocked write, is closed, so an idle one holds a
 thread no longer):
 - Every request: the `Host` header (port and brackets stripped, lowercased) must be an answered
-  name, else 403 `{"error": "unknown host"}`: this stops other web pages and DNS rebinding.
+  name or the address the connection came in on (`Handler._local`, the socket's own address,
+  `::ffff:` and a `%zone` dropped), else 403 `{"error": "unknown host <host>: add it to chat.json's
+  hosts"}`: this stops other web pages and DNS rebinding, which needs a name, never an address.
+  With `0.0.0.0` the names come from the host name, which Debian, Ubuntu and WSL resolve to
+  127.0.1.1, and they miss an address gained after the start (a late Wi-Fi, a VPN), so a phone on
+  the LAN or tailnet IP got that 403 (#533).
   Responses carry `Cache-Control: no-store`, `X-Frame-Options: DENY`, `nosniff`, `no-referrer` and
   a CSP (`default-src 'self'`, inline styles only, images also from `blob:` (the screenshots),
   media only from `blob:` (the audio takes, #397), no framing, no forms).
