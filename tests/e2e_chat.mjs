@@ -242,8 +242,22 @@ async function run(engine, device) {
     await until(async () => await page.locator('#settings').isHidden())
   })
   await check('what the page showed on screen is reported, so it is not pushed', async () => {
+    await page.locator('.thread').click({ position: { x: 5, y: 5 } })  // in use: touched just now
     const shown = JSON.parse(readFileSync(join(home, 'state/chat/messages.jsonl'), 'utf8').trim().split('\n').filter(l => l.includes('"claude"')).at(-1)).id
     await until(() => existsSync(join(home, 'state/chat/seen.jsonl')) && readFileSync(join(home, 'state/chat/seen.jsonl'), 'utf8').includes(shown))
+  })
+  await check("a page on screen but not in use doesn't stop the push, and reports it once it is used", async () => {
+    // #537 (the 2026-11-20 audit): a desktop tab left visible silenced every device's pushes
+    const seen = () => existsSync(join(home, 'state/chat/seen.jsonl')) ? readFileSync(join(home, 'state/chat/seen.jsonl'), 'utf8') : ''
+    await page.evaluate(() => { document._hasFocus = document.hasFocus; document.hasFocus = () => false })
+    wb('chat', 'reply', '--text', 'Nobody is at this tab.')
+    await until(async () => (await page.locator('.row.claude .bubble').last().textContent()).includes('Nobody is at this tab.'))
+    const id = messages().filter(m => m.text === 'Nobody is at this tab.').at(-1).id
+    await sleep(1500)
+    if (seen().includes(id)) throw new Error('an unfocused page reported it')
+    await page.evaluate(() => { document.hasFocus = document._hasFocus })
+    await page.locator('.thread').click({ position: { x: 5, y: 5 } })
+    await until(() => seen().includes(id))
   })
   await check('a server that takes calls and never answers: the page heals itself once it is back, no reload', async () => {
     // the 2026-11-18 report: "Reconnecting" until a hard refresh

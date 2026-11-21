@@ -527,11 +527,15 @@ def _transient(status: int) -> bool:
     return status == 0 or status == 429 or status >= 500
 
 
-def mark_seen(ids, by: str) -> None:
-    done = _seen()
+def mark_seen(ids, by: str, endpoint: str | None = None) -> None:
+    """No push owed for these ids: to any device, or, with ``endpoint``, to that one only (a page
+    on screen but not in use speaks for its own device: a desktop tab left open silenced the
+    phone, #537)."""
+    done, mine = _seen(), _pushed()
     for i in dict.fromkeys(ids):
-        if i not in done:
-            store.append_jsonl(chat_dir() / "seen.jsonl", {"id": i, "ts": store.now(), "by": by})
+        if i not in done and not (endpoint and endpoint in mine.get(i, ())):
+            store.append_jsonl(chat_dir() / "seen.jsonl", {"id": i, "ts": store.now(), "by": by,
+                                                          **({"endpoint": endpoint} if endpoint else {})})
 
 
 def news(now: float | None = None) -> list[str]:
@@ -1265,12 +1269,13 @@ class Handler(BaseHTTPRequestHandler):
             if cur is None:
                 return self._json(404, {"error": "no such prompt"})
             return self._json(200, {"ask": cur, "state": snapshot()})
-        if self.path == "/api/seen":  # what the page showed while visible: no push for it
-            ids = body.get("ids")
+        if self.path == "/api/seen":  # what the page showed: no push for it (endpoint: to it alone)
+            ids, endpoint = body.get("ids"), body.get("endpoint")
             if not (isinstance(ids, list) and len(ids) <= 200
-                    and all(isinstance(x, str) and 0 < len(x) <= 64 for x in ids)):
-                return self._json(400, {"error": "seen is {ids: [up to 200 ids]}"})
-            mark_seen(ids, "page")
+                    and all(isinstance(x, str) and 0 < len(x) <= 64 for x in ids)) \
+                    or not (endpoint is None or webpush.accepted(endpoint)):
+                return self._json(400, {"error": "seen is {ids: [up to 200 ids], endpoint?: this device's push URL}"})
+            mark_seen(ids, "page", endpoint)
             return self._json(200, {})
         if self.path == "/api/push":  # this device's notifications: on, off, or a test
             if body.get("test") is True:

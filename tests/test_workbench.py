@@ -11416,6 +11416,31 @@ class WebChat(Base):
         self.assertEqual(page[0], 200)
         self.assertEqual(self.call("/icon-192.png")[0], 200)
 
+    def test_a_page_only_on_screen_silences_its_own_devices_push_and_not_the_phones(self):
+        # #537 (the 2026-11-20 audit): a desktop tab left open behind the terminal reported what
+        # it showed for every device, so the phone was never notified
+        chat, tok = self.chat, self.chat.token()
+        from workbench import webpush as wp
+        desk, phone = "https://fcm.googleapis.com/fcm/send/desk", "https://web.push.apple.com/phone"
+        wp.subscribe(desk)
+        wp.subscribe(phone)
+        calls = []
+        hub = chat.Hub()
+        self.addCleanup(hub.close)
+        pusher = chat.Pusher(hub, send=lambda eps: calls.append(eps) or {e: 201 for e in eps})
+        news = chat.send("Done: ready for review", "claude")
+        self.assertEqual(self.call("/api/seen", {"ids": [news["id"]], "endpoint": desk}, token=tok)[0], 200)
+        self.assertEqual(self.call("/api/seen", {"ids": [news["id"]], "endpoint": desk}, token=tok)[0], 200)  # once
+        self.assertEqual(self.call("/api/seen", {"ids": [news["id"]], "endpoint": "https://evil.io/x"},
+                                   token=tok)[0], 400)
+        self.assertEqual(pusher.tick(news["ts"] + chat.PUSH_DELAY + 1), [news["id"]])
+        self.assertEqual(calls, [[phone]])                                  # the phone still hears of it
+        rows = store.read_jsonl(chat.chat_dir() / "seen.jsonl")[0]
+        self.assertEqual([(r["by"], r["endpoint"]) for r in rows], [("page", desk), ("push", phone)])
+        used = chat.send("And the docs too", "claude")                       # a page in use speaks for all
+        self.assertEqual(self.call("/api/seen", {"ids": [used["id"]]}, token=tok)[0], 200)
+        self.assertEqual(pusher.tick(used["ts"] + chat.PUSH_DELAY + 1), [])
+
     def test_a_plan_card_shows_its_own_sessions_plan_and_never_another_projects(self):
         # #253 (the audit of 1.2): with no plan text the card took the newest file in the plans
         # directory, so with two projects planning, A's card showed B's plan for revisions

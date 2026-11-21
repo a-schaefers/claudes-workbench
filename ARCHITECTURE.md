@@ -4166,8 +4166,8 @@ VPN), `"hosts": ["chat.example.org"]` a name a tunnel or proxy sends.
   (`/api/prefs`), read by `chat.ask` (`allow` answers a new permission at once, by `setting`).
 - `push.json`: `{subs: [{endpoint, ts, ua}]}`, the devices with notifications on (the last 20,
   `MAX_SUBS`), locked by `push.lock`; `seen.jsonl`: `{id, ts, by: "page"|"push", endpoint?}`: what a
-  page showed on screen (each id once), or a push one device took (`endpoint`, each id once per
-  device; a push row without one, from before, counts for every device); `push-test.json`: `{ts}`, the
+  page showed on screen (each id once; with `endpoint`, for that device only, #537), or a push one
+  device took (`endpoint`, each id once per device; a push row without one, from before, counts for every device); `push-test.json`: `{ts}`, the
   last test push. The VAPID key is beside the token (`<token file>-push`, mode 600, made on first
   use).
 
@@ -4278,7 +4278,8 @@ thread no longer):
   stands (an earlier one, when the prompt was already answered).
 - `POST /api/prefs`: the same checks, `{away: "ask"|"allow"}` and nothing else (400) → 200
   `{state}`.
-- `POST /api/seen`: `{ids: up to 200 ids}` (400 otherwise) → 200; the ids go in seen.jsonl.
+- `POST /api/seen`: `{ids: up to 200 ids, endpoint?: a push service's URL}` (400 otherwise) → 200;
+  the ids go in seen.jsonl, with `endpoint` (no push owed to that device alone) when it is given.
 - `POST /api/push`: `{endpoint, on: true|false}` subscribes or drops a device (400 unless the
   endpoint is `https` on port 443 at a push service, `webpush.PUSH_HOSTS`, so the token alone
   can't make this machine post where it likes); `{test: true}` pushes every device now → 200
@@ -4389,8 +4390,12 @@ Claude write passes through Apple's, Google's or Mozilla's service: the worker f
 each write: WebKit drops a put over an entry a reloaded page wrote) and shows the newest open
 dialog that isn't `stale`, unless Claude's latest message is newer, else that message (or
 "Notifications work" for a test; a dead session's card beat every later reply, #538), tagged `wb-chat`; a
-tap focuses the chat or opens it. Which news is pushed: a visible page posts what it showed to
-`/api/seen`; the server's `Pusher` thread (woken by each change, and every `PUSH_DELAY`/2) sends
+tap focuses the chat or opens it. Which news is pushed: a page posts what it showed to
+`/api/seen`: for every device while it is in use (visible, focused, and a pointer, key, wheel or
+touch within `USING_MS` 2 min; it reports again on focus and on each input), else, when this
+device has notifications on, with its own `endpoint`, so only its push is spared; a page merely
+visible and unsubscribed reports nothing. Any visible tab counted for every device, so a desktop
+tab left open behind the terminal meant the phone was never notified (#537); the server's `Pusher` thread (woken by each change, and every `PUSH_DELAY`/2) sends
 one push to each device still owed Claude's messages and open dialogs that no page showed within
 `PUSH_DELAY` 10 s and that are under `PUSH_WINDOW` 15 min old (never a backlog), and marks them
 `push` for each device that took it. A device its service failed for now (not reached, 429, 5xx:
@@ -5355,7 +5360,8 @@ Playwright's WebKit routes no requests once a service worker is registered), the
 over https (no manifest link over localhost; a keyed one on an https origin routed to the server),
 the app (its worker runs and holds the
 key; the gear sends the install to https; notifications offered, or on iPhone sent to the installed app), what a page
-showed reported to `/api/seen`, a server frozen (SIGSTOP) past the 40 s watchdog and then
+showed while in use reported to `/api/seen`, and not while only on screen (`hasFocus` false,
+#537), a server frozen (SIGSTOP) past the 40 s watchdog and then
 let go (the page heals with no reload; a message sent meanwhile lands once), a changed page file
 (the page reloads itself, keyed, with the thread), wb shot's pair, `wb chat listen`'s shortlist
 (each take plays from its blob with its length and check line, and Keep sends the pick with its

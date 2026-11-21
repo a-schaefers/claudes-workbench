@@ -873,7 +873,7 @@
   const ios = /iphone|ipad|ipod/i.test(navigator.userAgent) || (navigator.platform === 'MacIntel' && navigator.maxTouchPoints > 1)
   const iosSafari = ios && !/CriOS|FxiOS|EdgiOS|OPiOS/.test(navigator.userAgent)
   const canPush = window.isSecureContext && 'serviceWorker' in navigator && 'PushManager' in window && 'Notification' in window
-  let installEvt = null, swReg = null, pushOn = false, pushBusy = false, pushNote = '', pushSynced = false
+  let installEvt = null, swReg = null, pushOn = false, pushEndpoint = '', pushBusy = false, pushNote = '', pushSynced = false
   addEventListener('beforeinstallprompt', e => { e.preventDefault(); installEvt = e; if (!sheet.hidden) drawSettings() })
   addEventListener('appinstalled', () => { installEvt = null; if (!sheet.hidden) drawSettings() })
   if (window.isSecureContext && 'serviceWorker' in navigator) {
@@ -901,6 +901,7 @@
           ? await swReg.pushManager.subscribe({ userVisibleOnly: true, applicationServerKey: unb64u(key) }) : null
       }
       pushOn = !!sub && Notification.permission === 'granted'
+      pushEndpoint = pushOn ? sub.endpoint : ''
       if (sub) await post('/api/push', { endpoint: sub.endpoint, on: true })
     } catch {}
     if (!sheet.hidden) drawSettings()
@@ -914,11 +915,11 @@
         if (!sub) sub = await swReg.pushManager.subscribe({ userVisibleOnly: true, applicationServerKey: unb64u(state.push.key) })
         const r = await post('/api/push', { endpoint: sub.endpoint, on: true })
         if (!r.ok) throw new Error((await r.json().catch(() => ({}))).error || 'The computer refused it.')
-        pushOn = true
+        pushOn = true; pushEndpoint = sub.endpoint
       } else {
         const sub = await swReg.pushManager.getSubscription()
         if (sub) { await post('/api/push', { endpoint: sub.endpoint, on: false }).catch(() => {}); await sub.unsubscribe() }
-        pushOn = false
+        pushOn = false; pushEndpoint = ''
       }
     } catch (e) { pushNote = String((e && e.message) || e) }
     pushBusy = false; drawSettings()
@@ -954,7 +955,7 @@
     sw.checked = pushOn; sw.disabled = pushBusy || !swReg || !(state.push && state.push.key)
     sw.onchange = () => setPush(sw.checked)
     row.append(t, sw); box.append(row)
-    para(box, pushBusy ? 'Working…' : pushNote || (pushOn ? 'On: this device hears from Claude even with the page closed, unless the page already showed it.'
+    para(box, pushBusy ? 'Working…' : pushNote || (pushOn ? 'On: this device hears from Claude even with the page closed, unless this page showed it on screen, or you were using the chat on another device then.'
       : 'Off. Nothing you and Claude write passes through the push service: the phone fetches it from your computer.'), 'small')
     if (pushOn && !pushBusy) {
       const b = document.createElement('button'); b.type = 'button'; b.className = 'plain'; b.textContent = 'Send a test'
@@ -969,17 +970,28 @@
       box.append(b)
     }
   }
-  // What the page showed while on screen: the computer pushes only what no page has
-  const reported = new Set()
+  // What the page showed while on screen, so the computer pushes only what nobody saw. Merely
+  // visible counted for every device: a desktop tab left open behind the terminal silenced the
+  // phone's pushes for good (#537). Now a page in use (focused, touched or typed in within
+  // USING_MS) speaks for every device; one only on screen, for its own subscription alone.
+  const USING_MS = 120_000
+  let lastInput = 0
+  const reported = new Set()  // `<all|own>:<id>`
   function reportSeen() {
     if (document.hidden || !token) return
+    const using = document.hasFocus() && Date.now() - lastInput < USING_MS
+    if (!using && !pushEndpoint) return
+    const how = using ? 'all' : 'own'
     const ids = [...state.messages.filter(m => m.from === 'claude').slice(-20).map(m => m.id),
-      ...state.asks.filter(a => !a.answer).map(a => a.id)].filter(i => !reported.has(i))
+      ...state.asks.filter(a => !a.answer).map(a => a.id)].filter(i => !reported.has('all:' + i) && !reported.has(how + ':' + i))
     if (!ids.length) return
-    ids.forEach(i => reported.add(i))
-    post('/api/seen', { ids }).catch(() => ids.forEach(i => reported.delete(i)))
+    ids.forEach(i => reported.add(how + ':' + i))
+    post('/api/seen', { ids, ...(using ? {} : { endpoint: pushEndpoint }) }).catch(() => ids.forEach(i => reported.delete(how + ':' + i)))
   }
   document.addEventListener('visibilitychange', reportSeen)
+  addEventListener('focus', reportSeen)
+  for (const ev of ['pointerdown', 'keydown', 'wheel', 'touchstart'])
+    addEventListener(ev, () => { lastInput = Date.now(); reportSeen() }, { capture: true, passive: true })
 
   async function firstState() {  // at once, without waiting for a stream slot to free up
     try {
