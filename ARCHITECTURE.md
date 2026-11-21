@@ -4073,7 +4073,11 @@ it. ACE-Step's takes peaked at -0.2 dBFS, near clipping, before any `loudnorm`: 
   the execute bit (`gitops._modes_hold`, a probe file, once a process): with the repo's
   `core.filemode=false` (a checkout on a drive that distrusts modes, WSL's `/mnt/c`), a script
   the agent made 0755 ran in the task and was committed 100644 (#323, the audit of 1.4); now the
-  review diff and the commit both carry the mode. Likewise `core.ignorecase` says whether that
+  review diff and the commit both carry the mode. Where it doesn't (exFAT, NTFS, CIFS, drvfs
+  without metadata: every file reads 0755 or 0777), `core.filemode=false`: with the repo's
+  `true`, every file showed as changed to 100755, `mark()` saw a change before the agent did
+  anything, and accept committed the flip (#683); a probe that fails pins neither, and `wb doctor`
+  notes a state dir that keeps no modes. Likewise `core.ignorecase` says whether that
   file system folds case (`gitops._case_folds`: a probe file, then its name in capitals; unpinned
   when it can't tell): with the repo's `core.ignorecase=true` (Git for Windows on `/mnt/c`, a repo
   from macOS) on a case-sensitive one, a case-only rename showed as a deletion alone and a new

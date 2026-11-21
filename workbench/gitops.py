@@ -88,30 +88,33 @@ def _pinned(cwd) -> list[str]:
                        f"must say gitdir: {want['gitdir']})")
     return [f"--git-dir={want['gitdir']}", f"--work-tree={os.path.abspath(cwd)}",
             *NO_HOOKS, "-c", "core.fsmonitor=false",
-            *(("-c", "core.filemode=true") if _modes_hold(os.path.dirname(os.path.abspath(cwd)))
-              else ()),
+            *(("-c", f"core.filemode={'true' if modes else 'false'}")
+              if (modes := _modes_hold(os.path.dirname(os.path.abspath(cwd)))) is not None else ()),
             *(("-c", f"core.ignorecase={'true' if folds else 'false'}")
               if (folds := _case_folds(os.path.dirname(os.path.abspath(cwd)))) is not None else ())]
 
 
 @functools.lru_cache(maxsize=64)
-def _modes_hold(d: str) -> bool:
-    """Whether the file system at ``d`` keeps the execute bit. A task's worktree is on the state
-    directory's, whatever the repo's: with the repo's core.filemode=false (a checkout on a drive
-    that distrusts modes, WSL's /mnt/c), a script the agent made 0755 ran in the task and was
-    committed 100644, so a fresh checkout couldn't run it (#323, the audit of 1.4). Where the
-    modes hold, the task's git reads them: the review diff and the commit say the same."""
+def _modes_hold(d: str) -> bool | None:
+    """Whether the file system at ``d`` keeps the execute bit (None: couldn't tell). A task's
+    worktree is on the state directory's, whatever the repo's: with the repo's
+    core.filemode=false (a checkout on a drive that distrusts modes, WSL's /mnt/c), a script the
+    agent made 0755 ran in the task and was committed 100644, so a fresh checkout couldn't run it
+    (#323, the audit of 1.4). Where the modes hold, the task's git reads them: the review diff and
+    the commit say the same. Where they don't (exFAT, NTFS, CIFS, drvfs without metadata: every
+    file reads 0755 or 0777), it ignores them: with the repo's core.filemode=true every file of
+    the tree showed as changed to 100755, and accept committed the flip (#683)."""
     try:
         fd, probe = tempfile.mkstemp(prefix=".wb-mode-", dir=d)
         os.close(fd)
     except OSError:
-        return False
+        return None
     try:
         os.chmod(probe, 0o755)
         on = os.stat(probe).st_mode & 0o111
         os.chmod(probe, 0o644)
         return on == 0o111 and not os.stat(probe).st_mode & 0o111
-    except OSError:
+    except OSError:  # a chmod refused: the modes don't hold there (a mount that forbids it)
         return False
     finally:
         try:

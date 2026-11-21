@@ -592,6 +592,29 @@ class Lifecycle(Base):
                              capture_output=True, text=True).stdout
         self.assertTrue(row.startswith("100755"), row)                # is what lands
 
+    def test_a_state_dir_that_keeps_no_modes_never_shows_every_file_as_made_executable(self):
+        # #683 (Claude's audit of main): on exFAT, NTFS, CIFS or drvfs without metadata every file
+        # reads 0755; the task's git kept the repo's core.filemode=true, so the whole tree showed
+        # as changed to 100755 and accept committed the flip
+        self.start("t-nomodes", "ok", "--test", TEST_CMD)
+        wait_phase("t-nomodes", {"review"})
+        t = store.Task("t-nomodes")
+        for f in ("README.md", "CLAUDE.md"):
+            (t.worktree / f).chmod(0o755)                  # as such a file system reads them
+        with mock.patch.object(gitops, "_modes_hold", return_value=False):
+            self.assertIn("core.filemode=false", gitops._pinned(t.worktree))
+            self.assertEqual(gitops.changed(t.worktree).split(), ["??", "answer.txt"])
+            self.assertNotIn("old mode", runner.review_diff(t))
+            buf = io.StringIO()
+            with redirect_stdout(buf), contextlib.suppress(SystemExit):
+                cli.main(["doctor"])
+            self.assertIn("keeps no file modes", buf.getvalue())
+        with mock.patch.object(gitops, "_modes_hold", return_value=None):   # couldn't tell
+            self.assertNotIn("core.filemode=false", gitops._pinned(t.worktree))
+            self.assertNotIn("core.filemode=true", gitops._pinned(t.worktree))
+        gitops._modes_hold.cache_clear()
+        self.assertIsNone(gitops._modes_hold(str(Path(self.tmp.name) / "nowhere")))
+
     @unittest.skipIf(gitops._case_folds(tempfile.gettempdir()) is not False,
                      "the temp directory folds case: no mismatch to make")
     def test_a_case_only_rename_and_a_case_twin_land_where_the_repo_says_ignorecase(self):

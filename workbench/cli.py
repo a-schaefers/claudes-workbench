@@ -4310,6 +4310,9 @@ def cmd_doctor(a):
                  + ("" if free >= DISK_SPARE else ": a task's writes fail on a full disk; wb "
                     "discard an open task, or free some")
                  + (f"; history: {kept}" if (kept := history_held()) else ""))
+        if gitops._modes_hold(str(store.home())) is False:  # exFAT, NTFS, CIFS, drvfs (#683)
+            print("--  the state dir's file system keeps no file modes: a task's git ignores them, "
+                  "so a script the agent makes executable lands as the repo had it")
     if idle := idle_line():
         print("--  " + idle)
     print("--  " + gpu_line())  # informs only: a CPU-only machine isn't broken
