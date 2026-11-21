@@ -1384,8 +1384,11 @@ def _tracked(worktree: Path, *patterns: str) -> list[str]:
 
 
 def instruction_files(task: store.Task) -> tuple[list[Path], list[str]]:
-    """(files OpenCode should load, nested CLAUDE.md paths the agent reads when it works there)."""
-    wt, repo = task.worktree, Path(task.spec["repo"])
+    """(files OpenCode should load, nested CLAUDE.md paths the agent reads when it works there).
+    Before the runner has checked the worktree out (wb start's fixed_prompt, #529), the user's
+    checkout stands in for it."""
+    repo = Path(task.spec["repo"])
+    wt = task.worktree if task.worktree.is_dir() else repo
     # the agent's own copy: OpenCode shows each instruction file's path, and a path into the
     # workbench repo once led a freshly started agent to go looking there for plans
     handbook = rules_dir(task) / "HANDBOOK.md"
@@ -1440,7 +1443,9 @@ def fixed_prompt(task: store.Task) -> tuple[int, list[tuple[str, int]]]:
     CLAUDE.md on a 32K window started the agent near its handover point, and it looped between
     reading and handovers (the 2026-11-19 audit)."""
     files, _ = instruction_files(task)
-    wt, rules = task.worktree, rules_dir(task)
+    rules = rules_dir(task)
+    # at wb start the runner has yet to check the worktree out (#529): the checkout stands in
+    wt = task.worktree if task.worktree.is_dir() else Path(task.spec["repo"])
     named = {rules / "HANDBOOK.md": "the handbook", rules / "CLAUDE.md": "~/.claude/CLAUDE.md"}
     paths = [*files, *([wt / "AGENTS.md"] if (wt / "AGENTS.md").is_file() else []),
              task.round_dir(1) / "prompt.md"]

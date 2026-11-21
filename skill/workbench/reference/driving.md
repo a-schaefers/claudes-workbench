@@ -99,7 +99,8 @@ You are the driver, not a spectator. When something tells you the agent is headi
   traps (links, toolchains, `/dev/pts`): `reference/driving.md`.
 - `wb stop <name>`: just stop it. `wb resume <name>` continues it in a fresh session (not a
   review round), e.g. after fixing workbench under it. A task failed with "the runner died" (a
-  reboot, a kill) or stuck with "stopped by a signal" resumes the same way.
+  reboot, a kill) or stuck with "stopped by a signal" resumes the same way, unless it never got
+  its worktree: then `wb discard` it and start it again under a new name.
 - A check-in saying the session "reached N% of its window before it changed a file" (or "had
   read N% before its first change": a fresh session would have little room after re-reading it):
   the step needs more reading than the window holds. Let it carry on; next time name fewer files to read,

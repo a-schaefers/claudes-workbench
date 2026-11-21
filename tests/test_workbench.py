@@ -2306,17 +2306,21 @@ class Lifecycle(Base):
         g("config", "filter.wb.clean", "cat")
         g("config", "filter.wb.smudge", "false")    # a required filter that fails: the add fails
         g("config", "filter.wb.required", "true")
-        err = io.StringIO()
-        with self.assertRaises(SystemExit), redirect_stderr(err):
-            self.start("t-smudge", "ok")
-        self.assertIn("smudge filter wb failed", err.getvalue())   # a message, no traceback
-        self.assertFalse(store.Task("t-smudge").dir.exists())
+        # the runner's checkout since #529: a failed notice before any round, no traceback
+        self.start("t-smudge", "ok", "--queue")
+        st = wait_phase("t-smudge", {"failed"})
+        self.assertIsNone(st.get("session"))
+        note = [r for r in store.notices() if r["task"] == "t-smudge"][-1]["text"]
+        self.assertIn("making the worktree failed", note)
+        self.assertIn("smudge filter wb failed", note)
+        self.assertNotIn("Traceback", note)
         self.assertEqual(self.branch("delegate/t-smudge"), "")
         self.assertNotIn("t-smudge", subprocess.run(["git", "-C", str(self.repo), "worktree", "list"],
                                                     capture_output=True, text=True).stdout)
+        run_wb("discard", "t-smudge")
         g("config", "--remove-section", "filter.wb")
-        self.assertIn("started t-smudge", self.start("t-smudge", "ok"))   # the name is still free
-        wait_phase("t-smudge", {"review"})
+        self.assertIn("started t-smudge2", self.start("t-smudge2", "ok"))
+        wait_phase("t-smudge2", {"review"})
 
     def test_a_sparse_checkout_diff_counts_only_what_changed(self):
         # the audit: the review diff's scratch index came from read-tree, with no skip-worktree
@@ -2625,8 +2629,14 @@ class WorktreeSetup(Base):
         g("tag", "v0")
         self.ignore("local-input.dat")
         (self.repo / "local-input.dat").write_text("LOCAL\n")
-        err = self.refused("t-c8", "--copy", "local-input.dat", "--base", "v0")
-        self.assertIn("not at v0", err)
+        # checked where the runner checks the worktree out (#529): a failed notice, no round
+        self.start("t-c8", "ok", "--copy", "local-input.dat", "--base", "v0")
+        st = wait_phase("t-c8", {"failed"})
+        self.assertIsNone(st.get("session"))                        # the agent never ran
+        note = [r for r in store.notices() if r["task"] == "t-c8"][-1]
+        self.assertIn("--copy local-input.dat: ignored in", note["text"])
+        self.assertIn("not at v0", note["text"])
+        run_wb("discard", "t-c8")
         self.assertFalse(subprocess.run(["git", "-C", str(self.repo), "branch", "--list",
                                          "delegate/t-c8"], capture_output=True, text=True).stdout.strip())
         self.assertEqual(subprocess.run(["git", "-C", str(self.repo), "worktree", "list",
@@ -6477,37 +6487,26 @@ class Cleanup(Base):
         self.assertEqual(gitops.step_commit(task, 1, 1), tip)
         self.assertFalse((store.home() / "rules" / "t-merged").exists())
 
-    def test_a_start_killed_in_worktree_add_frees_its_name_and_gc_its_scratches(self):
+    def test_a_half_made_start_frees_its_name_and_gc_clears_it_and_its_scratches(self):
         # #376 (the audit of 1.6): a wb start killed by Claude's Bash limit left tasks/<name>/
         # without a task.json, its branch and worktree, and the name was refused for good; killed
         # commands' scratch clones stayed in the state directory, counted against every new task
-        shim = Path(self.tmp.name) / "slow-git"
-        shim.mkdir()
-        real = shutil.which("git")
-        (shim / "git").write_text(f'#!/bin/sh\ncase " $* " in *" worktree add "*) '
-                                  f'{real} "$@"; sleep 300;; esac\nexec {real} "$@"\n')
-        (shim / "git").chmod(0o755)
         g = lambda *a: subprocess.run(["git", "-C", str(self.repo), *a], capture_output=True,  # noqa
                                       text=True).stdout
 
-        def killed_start(name):  # killed once its worktree and branch exist: no cleanup at all
-            proc = subprocess.Popen([str(ROOT / "bin" / "wb"), "start", name, "--spec",
-                                     str(self.spec), "--repo", str(self.repo), "--model", "mimo"],
-                                    env={**os.environ, "PATH": f"{shim}:{os.environ['PATH']}"},
-                                    stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
-                                    start_new_session=True)
-            end = time.monotonic() + 60
-            while f"delegate/{name}" not in g("branch", "--list") and time.monotonic() < end:
-                time.sleep(0.1)
-            os.killpg(proc.pid, signal.SIGKILL)
-            proc.wait()
+        def killed_start(name):  # as a start killed in worktree add left it, before #529
             task = store.Task(name)
+            task.dir.mkdir(parents=True)
+            wt = task.dir / "worktree"
+            g("worktree", "add", "-q", "-b", f"delegate/{name}", str(wt))
+            # killed mid-checkout, as a slow CI runner caught it: git's "initializing" lock stays
+            g("worktree", "lock", "--reason", "initializing", str(wt))
+            # a start from before #529 made the branch itself, and recorded so (#416)
+            store.write_json(task.dir / cli.STARTING, {
+                "repo": str(self.repo), "worktree": str(wt), "pid": 999999999, "at": store.now(),
+                "branch": f"delegate/{name}", "branch_at": g("rev-parse", "HEAD").strip()})
             self.assertTrue(task.dir.is_dir() and not task.exists)
             self.assertIn(name, g("worktree", "list"))
-            # killed mid-checkout, as a slow CI runner caught it: git's "initializing" lock stays
-            wt = store.read_json(task.dir / cli.STARTING)["worktree"]
-            subprocess.run(["git", "-C", str(self.repo), "worktree", "lock", "--reason",
-                            "initializing", wt], capture_output=True)
 
         killed_start("t-half")
         self.start("t-half", "ok")                      # the same name again: it cleans up first
@@ -6536,58 +6535,115 @@ class Cleanup(Base):
     def test_gc_deletes_only_the_branch_a_killed_start_made_and_only_where_it_made_it(self):
         # #416 (the audit of 1.8, reproduced): an unmerged delegate/<task> holding a commit of its
         # own, left by an earlier task; a wb start under that name killed before its worktree was
-        # made, and wb gc deleted the branch, the commit then reachable from no ref
+        # made, and wb gc deleted the branch, the commit then reachable from no ref. Since #529
+        # the runner makes the branch, so its checkout is the one cut short, wb discard (or a
+        # rerun) the cleanup; gc still honours a record left by a start from before
         real = shutil.which("git")
 
-        def killed_start(name, where):  # killed while git sleeps in `where`
+        def cut_short(name, where):  # the runner killed while git sleeps in `where`
             shim = Path(self.tmp.name) / f"slow-git-{name}"
             shim.mkdir()
             after = "worktree add" in where  # the branch is made, then it sleeps
             (shim / "git").write_text(f'#!/bin/sh\ncase " $* " in *" {where} "*) '
-                                      + (f'{real} "$@"; sleep 300;;' if after else 'sleep 300;;')
+                                      + (f'{real} "$@"; exec sleep 300;;' if after else 'exec sleep 300;;')
                                       + f' esac\nexec {real} "$@"\n')
             (shim / "git").chmod(0o755)
-            proc = subprocess.Popen([str(ROOT / "bin" / "wb"), "start", name, "--spec",
-                                     str(self.spec), "--repo", str(self.repo), "--model", "mimo"],
-                                    env={**os.environ, "PATH": f"{shim}:{os.environ['PATH']}"},
-                                    stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
-                                    start_new_session=True)
-            starting = store.Task(name).dir / cli.STARTING
+            with mock.patch.dict(os.environ, PATH=f"{shim}:{os.environ['PATH']}"):
+                self.start(name, "ok", "--queue")
+            task = store.Task(name)
             end = time.monotonic() + 60
             while time.monotonic() < end and not (
-                    starting.exists() and (not after or name in self.git("worktree", "list").stdout)):
+                    task.status.get("last") == "checking out the base"
+                    and (not after or name in self.git("worktree", "list").stdout)):
                 time.sleep(0.1)
             time.sleep(0.5)  # into the sleep
-            os.killpg(proc.pid, signal.SIGKILL)
-            proc.wait()
-            self.assertTrue(starting.exists())
+            os.killpg(os.getpgid(task.status["pid"]), signal.SIGKILL)
+            end = time.monotonic() + 10
+            while cli.runner_alive(task) and time.monotonic() < end:
+                time.sleep(0.1)
+            self.assertFalse(runner.checked_out(task))
+            return task
 
         def tip(name):
             return self.git("rev-parse", "--verify", "-q", f"refs/heads/delegate/{name}").stdout.strip()
 
-        # before the branch: an earlier task's delegate/t-partial, with a commit nothing else has
-        self.git("checkout", "-q", "-b", "delegate/t-partial")
-        (self.repo / "work.txt").write_text("unmerged work\n")
-        self.git("add", "work.txt")
-        self.git("commit", "-qm", "unmerged work")
-        held = tip("t-partial")
-        self.git("checkout", "-q", "main")
-        killed_start("t-partial", "branch --list")       # create_worktree's check: none made yet
-        # after it: the branch this start made, then moved on by someone else
-        killed_start("t-moved", "worktree add")
+        def unmerged(name):  # an earlier task's delegate/<name>, with a commit nothing else has
+            self.git("checkout", "-q", "-b", f"delegate/{name}")
+            (self.repo / "work.txt").write_text(f"unmerged work of {name}\n")
+            self.git("add", "work.txt")
+            self.git("commit", "-qm", "unmerged work")
+            self.git("checkout", "-q", "main")
+            return tip(name)
+
+        # an earlier task's branch: wb start refuses the name and leaves the branch alone
+        held = unmerged("t-partial")
+        err = io.StringIO()
+        with redirect_stderr(err), self.assertRaises(SystemExit):
+            self.start("t-partial", "ok", "--queue")
+        self.assertIn("branch delegate/t-partial already exists", err.getvalue())
+        self.assertEqual(tip("t-partial"), held)
+        # before the branch: killed at the runner's own check, and one made meanwhile is kept
+        cut_short("t-before", "rev-parse --verify -q refs/heads/delegate/t-before")
+        self.assertIsNone(store.Task("t-before").status.get("branch_made"))
+        held = unmerged("t-before")
+        self.assertIn("didn't make it", run_wb("discard", "t-before"))
+        self.assertEqual(tip("t-before"), held)               # not this task's: kept
+        # after it: the branch this checkout made, then moved on by someone else
+        task = cut_short("t-moved", "worktree add")
         base = tip("t-moved")
+        self.assertEqual(task.status["branch_made"], base)
         moved = self.git("commit-tree", "-p", base, "-m", "moved on", f"{base}^{{tree}}").stdout.strip()
         self.git("update-ref", "refs/heads/delegate/t-moved", moved, base)
-        self.assertIn("2 half-made start(s)", run_wb("gc"))
-        self.assertEqual(tip("t-partial"), held)          # not this start's: kept
-        self.assertEqual(tip("t-moved"), moved)           # this start's, but moved: kept
+        self.assertIn("moved since", run_wb("discard", "t-moved"))
+        self.assertEqual(tip("t-moved"), moved)               # this task's, but moved: kept
         self.assertNotIn("t-moved", self.git("worktree", "list").stdout)  # its worktree went
-        self.assertFalse(store.Task("t-partial").dir.exists())
-        # and one the start made and nothing moved goes (as #376's test sees, from the record)
-        killed_start("t-made", "worktree add")
+        # and one it made and nothing moved goes
+        cut_short("t-made", "worktree add")
         self.assertTrue(tip("t-made"))
-        self.assertIn("1 half-made start(s)", run_wb("gc"))
+        run_wb("discard", "t-made")
         self.assertEqual(tip("t-made"), "")
+        # a start from before #529, killed with no record of making the branch: gc keeps it
+        held = unmerged("t-old")
+        half = store.Task("t-old")
+        half.dir.mkdir(parents=True)
+        store.write_json(half.dir / cli.STARTING, {"repo": str(self.repo), "worktree":
+                                                   str(half.dir / "worktree"), "pid": 999999999,
+                                                   "at": store.now()})
+        self.assertIn("1 half-made start(s)", run_wb("gc"))
+        self.assertEqual(tip("t-old"), held)
+        self.assertFalse(half.dir.exists())
+
+    def test_wb_start_returns_before_the_checkout_and_discard_undoes_one_cut_short(self):
+        # #529 (the audit of v1.90): wb start made the whole checkout in the foreground, so a big
+        # repo, one on /mnt/c or with Git LFS data passed Claude's two-minute Bash limit, and the
+        # next start was killed the same way. The runner checks out now; this git takes 300 s
+        shim = Path(self.tmp.name) / "slow-git"
+        shim.mkdir()
+        real = shutil.which("git")
+        (shim / "git").write_text(f'#!/bin/sh\ncase " $* " in *" worktree add "*) '
+                                  f'{real} "$@"; exec sleep 300;; esac\nexec {real} "$@"\n')
+        (shim / "git").chmod(0o755)
+        g = lambda *a: subprocess.run(["git", "-C", str(self.repo), *a], capture_output=True,  # noqa
+                                      text=True).stdout
+        t0 = time.monotonic()
+        with mock.patch.dict(os.environ, PATH=f"{shim}:{os.environ['PATH']}"):
+            out = self.start("t-slow", "ok")
+        self.assertLess(time.monotonic() - t0, 60)
+        self.assertIn("started t-slow", out)
+        task = store.Task("t-slow")
+        self.assertEqual(task.spec["checkout"], "runner")
+        end = time.monotonic() + 60
+        while "delegate/t-slow" not in g("branch", "--list") and time.monotonic() < end:
+            time.sleep(0.1)
+        self.assertEqual(task.status["last"], "checking out the base")
+        self.assertFalse(task.status.get("checked_out"))
+        # wb discard stops the runner mid-checkout: git's "initializing" lock, which remove and
+        # prune skip, goes with the worktree and the branch
+        g("worktree", "lock", "--reason", "initializing", str(task.worktree))
+        run_wb("discard", "t-slow")
+        self.assertNotIn("delegate/t-slow", g("branch", "--list"))
+        self.assertNotIn("t-slow", g("worktree", "list"))
+        self.assertFalse(task.worktree.exists())
 
     def test_wb_gc_deletes_branches_merged_before_and_keeps_the_rest(self):
         self.start("t-old", "ok")

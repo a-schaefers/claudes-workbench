@@ -153,9 +153,9 @@ Runs on Linux, WSL2 and macOS; the launchers refuse native Windows and Python be
 ## How a task runs
 1. `wb start` refuses a repo without a committed CLAUDE.md or `.claude/CLAUDE.md`
    (`--no-claude-md`; or a package's: `subdir`), asks the router for a model (unless `--model`), refuses (exit 4) when the
-   GPU's holders leave its model no room (`--queue` waits behind them), makes branch
-   `delegate/<task>` in a fresh worktree, writes round 1's prompt (the spec plus `PROTOCOL`),
-   spawns the runner and returns at once. The runner sets the worktree up (`--setup`, `--copy`,
+   GPU's holders leave its model no room (`--queue` waits behind them), writes round 1's
+   prompt (the spec plus `PROTOCOL`), spawns the runner and returns at once. The runner makes
+   branch `delegate/<task>` in a fresh worktree, sets it up (`--setup`, `--copy`,
    `--sibling`), then runs `--test` once on the base, in a scratch clone (the base check).
 2. The runner takes the GPU (`GpuLease`: shared beside other tasks when the models fit, else
    alone; a server only down is waited for), makes the model resident (again before every

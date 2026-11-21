@@ -385,7 +385,7 @@ def submodules(repo: Path, commit: str) -> list[str]:
 SUBMODULES = "submodules.json"  # rules/<task>/: the submodules filled in its worktree (#419)
 
 
-def fill_submodules(repo: Path, commit: str, checkout: Path) -> list[str]:
+def fill_submodules(repo: Path, commit: str, checkout: Path, dry: bool = False) -> list[str]:
     """Each submodule of ``commit`` filled in ``checkout`` (a task's worktree or a scratch one)
     with its files at the commit ``commit`` records, from the user's own checkout of it: written
     by git itself (a scratch index, `checkout-index`), with no `.git` for the agent to repoint
@@ -396,7 +396,11 @@ def fill_submodules(repo: Path, commit: str, checkout: Path) -> list[str]:
     submodules are filled the same way, from the user's checkout of each inside it, and the ones
     it couldn't fill come back by their whole path: only the top `.gitmodules` was read, and a
     nested one stayed an empty directory (#383, the audit of 1.6). In a task's worktree each one
-    filled is recorded (SUBMODULES, beside gitdir.json, with its index: submodule_edits)."""
+    filled is recorded (SUBMODULES, beside gitdir.json, with its index: submodule_edits).
+    ``dry``: only the ones it couldn't fill, nothing written or recorded (wb start says them
+    before the runner's checkout, #529)."""
+    if dry:
+        return _fill(repo, commit, checkout, None, [], "", dry=True)
     rec, filled = _record(checkout), []
     left = _fill(repo, commit, checkout, rec.parent if rec else None, filled, "")
     if rec is not None and filled:
@@ -404,17 +408,21 @@ def fill_submodules(repo: Path, commit: str, checkout: Path) -> list[str]:
     return left
 
 
-def _fill(repo: Path, commit: str, checkout: Path, keep: Path | None, filled: list, at: str) -> list[str]:
+def _fill(repo: Path, commit: str, checkout: Path, keep: Path | None, filled: list, at: str,
+          dry: bool = False) -> list[str]:
     left = []
     for path in submodules(repo, commit):
         row = git(repo, "ls-tree", commit, "--", path, check=False).split()
         sha = row[2] if len(row) >= 3 and row[1] == "commit" else ""
         src, dest = Path(repo) / path, Path(checkout) / path
-        if dest.is_dir() and any(dest.iterdir()):
+        if not dry and dest.is_dir() and any(dest.iterdir()):
             continue
         if not sha or not (src / ".git").exists() or \
                 _run(src, ("cat-file", "-e", f"{sha}^{{commit}}"), check=False).returncode:
             left.append(path)
+            continue
+        if dry:
+            left += [f"{path}/{p}" for p in _fill(src, sha, dest, None, filled, "", dry=True)]
             continue
         store.home().mkdir(parents=True, exist_ok=True)  # the scratch index: never in the lane
         with tempfile.TemporaryDirectory(prefix=store.scratch(".submodule-"), dir=store.home()) as scratch:
@@ -894,6 +902,8 @@ def remove_worktree(repo: Path, worktree: Path) -> str:
     embedded repo, a repo moved or deleted), a task's own worktree is deleted by hand: accept and
     discard once wedged there for good (the 2026-11-16 audit)."""
     worktree, warn = Path(worktree), ""
+    if Path(repo).is_dir():
+        _unlock_cut_short(repo, worktree)
     if worktree.exists() or worktree.is_symlink():
         try:
             if not Path(repo).is_dir():
@@ -908,6 +918,24 @@ def remove_worktree(repo: Path, worktree: Path) -> str:
     if Path(repo).is_dir():
         git(repo, "worktree", "prune", check=False)
     return warn
+
+
+def _unlock_cut_short(repo: Path, worktree: Path) -> None:
+    """`git worktree add` locks its worktree "initializing" until the checkout is done: killed in
+    between (a runner's checkout stopped by wb discard, a reboot), the lock stayed, remove --force
+    and prune both skipped it, and the branch checked out there couldn't be deleted (#376, #529).
+    Only that lock goes, and only for a task's own worktree: one the user locked stays locked."""
+    if _record(worktree) is None:
+        return
+    at = {os.path.abspath(worktree), os.path.realpath(worktree)}
+    entry = None
+    for line in git(repo, "worktree", "list", "--porcelain", check=False).splitlines():
+        if line.startswith("worktree "):
+            entry = line[9:]
+        elif entry and line == "locked initializing" and \
+                {os.path.abspath(entry), os.path.realpath(entry)} & at:
+            git(repo, "worktree", "unlock", entry, check=False)
+            return
 
 
 def delete_branch(repo: Path, task: str, at: str | None = None) -> None:
