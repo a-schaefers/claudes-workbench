@@ -13,7 +13,10 @@ from pathlib import Path
 
 from . import context, store
 
-WAKE = re.compile(r"\[workbench\] Task `([a-z0-9][a-z0-9-]{0,47})`")  # the mod's wake opening
+# The mod's wake opening, at a prompt's start only, after the line Claude Code puts before a
+# plugin's message: matched anywhere, a summary quoting one charged later calls to it (#557)
+WAKE = re.compile(r"\s*(?:The [\w .-]{1,60} plugin sent a message:\s*)?"
+                  r"\[workbench\] Task `([a-z0-9][a-z0-9-]{0,47})`")
 KINDS = ("input", "cache_write_5m", "cache_write_1h", "cache_read", "output")
 # Input-equivalent weights: the API's multipliers on the base input price (claude-api skill,
 # pricing, cached 2026-10-06): output 5x on every current model, a cache write 1.25x (5 minutes)
@@ -41,8 +44,11 @@ def _ts(row: dict) -> float | None:
 
 
 def _prompt(row: dict) -> str | None:
-    """A user row's text when it starts a turn; None for a tool result (within one)."""
-    if row.get("type") != "user":
+    """A user row's text when it starts a turn; None for a tool result (within one), and for
+    the rows Claude Code adds inside a turn (isMeta: an image a Read showed, a skill's body) or
+    after a compaction (isCompactSummary): taken for new turns, they once ended the task's
+    charge mid-review (#557)."""
+    if row.get("type") != "user" or row.get("isMeta") or row.get("isCompactSummary"):
         return None
     content = (row.get("message") or {}).get("content")
     if isinstance(content, str):
@@ -146,7 +152,7 @@ def calls(main: Path, subagents: list[Path], names: set[str]) -> list[dict]:
     events, by_id = [], {}  # an assistant message is a row per content block, each with its usage
     for row in store.read_jsonl(main)[0]:
         if (text := _prompt(row)) is not None:
-            events.append(set(WAKE.findall(text)) & names)
+            events.append({m.group(1)} & names if (m := WAKE.match(text)) else set())
         elif row.get("type") == "assistant":
             does = _named(row, names)
             mid = (row.get("message") or {}).get("id") or f"row {len(events)}"

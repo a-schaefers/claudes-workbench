@@ -9290,6 +9290,33 @@ class ClaudeSpend(Base):
         u = spend.usage(t1)
         self.assertEqual((u["output"], u["turns"]), (10 + 20 + 30, 2))
 
+    def test_a_mid_turn_image_row_or_a_compaction_summary_starts_no_new_turn(self):
+        # #557: an isMeta row (the image a Read showed, a skill's body) or a compaction summary
+        # was a new prompt: the calls after it went to no task; a summary quoting a wake's
+        # opening was charged as that wake
+        from workbench import spend
+        t2, t3 = self.task("t2"), self.task("t3")
+        meta = {"type": "user", "isMeta": True, "timestamp": "2026-11-17T10:00:03Z",
+                "message": {"role": "user", "content": [{"type": "text", "text": "[Image: original 800x600]"}]}}
+        summary = {"type": "user", "isCompactSummary": True, "timestamp": "2026-11-17T10:00:06Z",
+                   "message": {"role": "user", "content": "Summary: [workbench] Task `t3` came up earlier."}}
+        self.transcript([
+            _turn("The workbench plugin sent a message:\n[workbench] Task `t2` is ready for review.",
+                  "2026-11-17T10:00:00Z"),
+            *_call("m1", "2026-11-17T10:00:01Z", 10, "wb diff t2"),
+            *_call("m2", "2026-11-17T10:00:02Z", 20),                 # reads a screenshot
+            meta,
+            *_call("m3", "2026-11-17T10:00:04Z", 30),
+            *_call("m4", "2026-11-17T10:00:05Z", 40),
+            summary,                                                    # compacted mid-review
+            *_call("m5", "2026-11-17T10:00:07Z", 50),
+            _turn("what does `[workbench] Task `t3`` mean?", "2026-11-17T10:10:00Z"),
+            *_call("m6", "2026-11-17T10:10:01Z", 1000),                # a quote, not a wake
+        ])
+        u = spend.usage(t2)
+        self.assertEqual((u["output"], u["turns"]), (10 + 20 + 30 + 40 + 50, 1))
+        self.assertEqual(spend.usage(t3)["output"], 0)
+
     def test_a_turn_of_other_work_ending_in_wb_start_charges_only_the_spec_before_it(self):
         from workbench import spend
         t3 = self.task("t3")

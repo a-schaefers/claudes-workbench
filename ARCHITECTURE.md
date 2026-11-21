@@ -477,8 +477,12 @@ session only:
   spec before `wb start`), back to the last call that ran any `wb` or edited a file other than
   one the naming call hands over or one in the task's worktree: a long turn of other work that ended
   in `wb start` once put all of it on the task (82K output, 2026-11-17); a turn a wake opened
-  (`` [workbench] Task `<name>` ``, the mod's opening, `WAKE`) is that task's from its start; a
-  turn that names none is no task's (planning, other work);
+  (`` [workbench] Task `<name>` ``, the mod's opening, `WAKE`, matched only at the prompt's start,
+  after Claude Code's "The workbench plugin sent a message:" line) is that task's from its start;
+  a turn that names none is no task's (planning, other work). A turn starts at a user row that is
+  no tool result, not `isMeta` (an image a Read showed, a skill's body) and not
+  `isCompactSummary`: those, taken for new turns, ended a review's charge mid-turn, and a summary
+  quoting a wake was charged as one (#557);
 - a call naming several tasks is split evenly; a subagent's call is charged as the session's
   call before it.
 
@@ -5956,8 +5960,9 @@ nested `.md` files (`docs/`, `skill/`, `mod/`, `agent/`) are unaffected. A new r
   `wb accept` write → `gitops.step_commit`, which finds them from status `tip` once the merged
   branch is gone.
 - **The mod's wake opening** (`` [workbench] Task `<name>` ``, register.tsx) **or Claude Code's
-  transcript rows** (`type`, `message.id`, `message.usage`, a Bash `tool_use`'s `command`,
-  `timestamp`, `subagents/`) → `spend.py` (`WAKE`, `calls`) and the ClaudeSpend tests' rows.
+  transcript rows** (`type`, `isMeta`, `isCompactSummary`, `message.id`, `message.usage`, a Bash
+  `tool_use`'s `command`, `timestamp`, `subagents/`, the line before a plugin's message) →
+  `spend.py` (`WAKE`, `_prompt`, `calls`) and the ClaudeSpend tests' rows.
 - **`wb next`'s `next_step` event** (its `ts`, written after the step's commit) **or the
   results row's `steps` count** → `spend.usage_by_step` (where each step's cost begins),
   `results.record` (which writes it per step) and `bench.handoff_cost` (which reads it, #558).
