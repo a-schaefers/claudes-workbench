@@ -3284,8 +3284,10 @@ high, case-insensitive and multiline:
   `>`, `>>`, `sed -i` or `tee`; high: a line telling the agent to edit one).
 
 File rules: what is scanned is what `skills.add` copies, which follows links. A symlink resolving
-outside the skill, or into its `.git`, and binary extensions are critical; a link to nothing is
-high; a link inside the skill is scanned as its target's bytes under the link's own name and
+outside the skill, or into its `.git`, and binary extensions are critical; so are a link to
+nothing (`symlink_dangling`) and a link to a directory holding it, the skill's own or one above
+(`symlink_loop`): the copy, following links, failed on the first and recursed into
+`self/self/…` on the second (#604, Claude's audit of 1.90); a link inside the skill is scanned as its target's bytes under the link's own name and
 suffix (a link to a directory: its files are scanned under their own names), and a lone SKILL.md
 given as a link as its target's text. Archives, NUL bytes and invalid UTF-8 are high. Media
 files (.png .pdf .ttf …) are skipped only when they look binary (a NUL in the first 8 KB, or not
@@ -3304,8 +3306,12 @@ not forced.
 **The flows.**
 - `wb skill add <name> --from <file|dir> -m "<what review taught>" [--source …] [--lesson ID…]`
   (`skills.add`): check, then scan (critical findings become problems, the rest warnings), then
-  copy: a directory source replaces the skill's directory (rmtree + copytree, `.git` ignored); a
-  file source replaces only SKILL.md. `git add -A -- <name>`, commit only if something changed
+  copy (`skills._put`): a directory source replaces the skill's directory, copied first into a
+  scratch `.adding-<name>-…` in the library (`.git` ignored) and renamed into place, a file source
+  only SKILL.md, written beside it and renamed over it, so a copy that fails leaves the old
+  version as it was: copied straight in, a link it couldn't follow left the skill half there,
+  live but uncommitted (#604). A failed copy or git call prints one `not added: …` line (`not
+  patched`, `not retired`, `not restored`: `cli._skill_failure`). `git add -A -- <name>`, commit only if something changed
   (an identical re-add prints "updated" and commits nothing). Refuses the names in
   `context.denied_skills()` (`workbench` and the user's personal skills), because skill denies
   are by name, and `retired` (the library's own directory, refused by `check`); refuses a source

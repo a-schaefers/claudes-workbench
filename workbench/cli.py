@@ -2766,8 +2766,8 @@ def cmd_skill(a):
             die(f"{a.name} is the name of one of the user's own skills; pick another")
         try:
             verb, warns = skills.add(Path(a.source), a.name, a.message, a.origin or "")
-        except ValueError as e:
-            die(f"not added: {e}")
+        except (ValueError, OSError, RuntimeError) as e:  # a copy or git failure too (#604)
+            die(f"not added: {_skill_failure(e)}")
         print(f"{verb} {a.name}" + "".join(f"\nwarning: {w}" for w in warns + _one_project(a.lesson, a.name))
               + _closed_by(a.lesson, a.name))
         return
@@ -2780,8 +2780,8 @@ def cmd_skill(a):
             warns = skills.patch(a.name, old, new, a.message)
         except KeyError:
             die(f"no skill {a.name} in the library")
-        except ValueError as e:
-            die(f"not patched: {e}")
+        except (ValueError, OSError, RuntimeError) as e:
+            die(f"not patched: {_skill_failure(e)}")
         print(f"patched {a.name} ({skills.rev(a.name)}); tasks from now on are judged on this version"
               + "".join(f"\nwarning: {w}" for w in warns) + _closed_by(a.lesson, a.name))
         return
@@ -2800,6 +2800,8 @@ def cmd_skill(a):
             skills.retire(a.name, a.message)
         except KeyError:
             die(f"no skill {a.name} in the library")
+        except (OSError, RuntimeError) as e:
+            die(f"not retired: {_skill_failure(e)}")
         print(f"retired {a.name} (wb skill restore {a.name} brings it back)")
         return
     if a.action == "restore":
@@ -2809,6 +2811,8 @@ def cmd_skill(a):
             die(f"no retired skill {a.name}")
         except ValueError as e:
             die(str(e))
+        except (OSError, RuntimeError) as e:
+            die(f"not restored: {_skill_failure(e)}")
         print(f"restored {a.name}")
         return
     # hand / take: change what one task's agent holds, from its next run on
@@ -2827,6 +2831,18 @@ def cmd_skill(a):
     when = "from its next run" + (" (`wb steer --now` starts that run now)" if runner_alive(task)
                                   else "")
     print(f"{task.name} holds: {', '.join(held) or 'no skills'}; the agent is told {when}")
+
+
+def _skill_failure(e: Exception) -> str:
+    """One line for a skill command's failure: shutil.Error carries a list of (src, dst, why), one
+    per file it couldn't copy (#604)."""
+    if isinstance(e, shutil.Error) and e.args and isinstance(e.args[0], list) and e.args[0]:
+        rows = e.args[0]
+        first = rows[0]
+        said = (f"{first[0]}: {first[2]}" if isinstance(first, tuple) and len(first) == 3
+                else str(first))
+        return f"couldn't copy {said}" + (f" (and {len(rows) - 1} more)" if len(rows) > 1 else "")
+    return str(e).splitlines()[0] if str(e) else type(e).__name__
 
 
 def cmd_skill_import(a):

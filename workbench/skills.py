@@ -201,14 +201,7 @@ def add(src: Path, name: str, message: str, source: str = "") -> tuple[str, list
         raise ValueError("; ".join(problems))
     verb = "updated" if dest.exists() else "added"
     _git("status")  # makes the repository on first use
-    if src.is_dir():
-        if dest.resolve() != src.resolve():
-            shutil.rmtree(dest, ignore_errors=True)
-            shutil.copytree(src, dest, ignore=shutil.ignore_patterns(".git"))
-    else:
-        dest.mkdir(parents=True, exist_ok=True)
-        if (dest / "SKILL.md").resolve() != src.resolve():
-            shutil.copyfile(src, dest / "SKILL.md")
+    _put(src, dest)
     md = dest / "SKILL.md"
     if (raw := md.read_bytes()).startswith(codecs.BOM_UTF8):  # the library's copy without it (#479)
         md.write_bytes(raw[len(codecs.BOM_UTF8):])
@@ -216,6 +209,38 @@ def add(src: Path, name: str, message: str, source: str = "") -> tuple[str, list
     if _git("status", "--porcelain", "--", name).strip():
         _commit(f"{name}: {message}" + (f"\n\nSource: {source}" if source else ""))
     return verb, warnings
+
+
+def _put(src: Path, dest: Path) -> None:
+    """The skill's files at ``dest``, all or none: a directory is copied into a scratch directory
+    in the library (`.adding-<name>-…`: on dest's file system, and no `*/SKILL.md` a skill is
+    listed by) and renamed into place, a SKILL.md written beside its old one and renamed over
+    it. Copied straight into the library, a link the copy couldn't follow left the skill half
+    there, live but uncommitted, and an update's committed copy replaced by the partial one (#604,
+    Claude's audit of 1.90). A failure raises OSError (shutil.Error), the old copy as it was."""
+    lib = library()
+    if not src.is_dir():
+        dest.mkdir(parents=True, exist_ok=True)
+        tmp = dest / f".SKILL.md.{os.getpid()}.tmp"
+        try:
+            shutil.copyfile(src, tmp)
+            os.replace(tmp, dest / "SKILL.md")
+        finally:
+            tmp.unlink(missing_ok=True)
+        return
+    staged = Path(tempfile.mkdtemp(prefix=f".adding-{dest.name}-", dir=lib))
+    try:
+        shutil.copytree(src, staged / "new", ignore=shutil.ignore_patterns(".git"))
+        if dest.exists():
+            os.rename(dest, staged / "old")
+        try:
+            os.rename(staged / "new", dest)
+        except OSError:
+            if (staged / "old").exists():
+                os.rename(staged / "old", dest)
+            raise
+    finally:
+        shutil.rmtree(staged, ignore_errors=True)
 
 
 def patch(name: str, old: str, new: str, message: str) -> list[str]:

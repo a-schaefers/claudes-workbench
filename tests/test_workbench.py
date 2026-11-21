@@ -4803,6 +4803,45 @@ class SkillLibrary(Base):
         self.assertFalse((skills.library() / "bom-skill" / "SKILL.md").read_bytes()
                          .startswith(b"\xef\xbb\xbf"))  # what OpenCode reads opens with `---`
 
+    def test_a_skill_with_a_dangling_or_looping_link_is_refused_and_the_old_copy_stays(self):
+        # #604 (Claude's audit of 1.90, reproduced): notes.md -> missing.md was only a high
+        # finding and `self -> .` none, so the copy began, failed partway, and left the skill
+        # live but uncommitted; retire then raised "source directory is empty"
+        from workbench import skills
+        run_wb("skill", "add", "demo", "--from", str(self.draft("demo")), "-m", "first")
+        before = (skills.library() / "demo" / "SKILL.md").read_text()
+        for link, to in (("notes.md", "missing.md"), ("self", "."), ("up", "..")):
+            d = self.draft("demo", body="Changed.\n")
+            for old in ("notes.md", "self", "up"):
+                (d / old).unlink(missing_ok=True)
+            (d / link).symlink_to(to)
+            err = io.StringIO()
+            with self.assertRaises(SystemExit), redirect_stderr(err):
+                run_wb("skill", "add", "demo", "--from", str(d), "-m", "broken")
+            self.assertIn("not added: scan: ", err.getvalue())
+            self.assertEqual((skills.library() / "demo" / "SKILL.md").read_text(), before, link)
+            self.assertEqual(skills._git("status", "--porcelain"), "")
+        # a copy that fails all the same (a file it can't read) leaves the old copy too
+        d = self.draft("demo", body="Changed.\n")
+        for old in ("notes.md", "self", "up"):
+            (d / old).unlink(missing_ok=True)
+        (d / "z.md").write_text("more\n")
+        real = shutil.copytree
+
+        def copy(a, b, **k):  # SKILL.md copied, then z.md refused: half a skill
+            if Path(a).name == "z.md":
+                raise PermissionError(13, "Permission denied", a)
+            return shutil.copy2(a, b, **k)
+        err = io.StringIO()
+        with (mock.patch("shutil.copytree", lambda a, b, **k: real(a, b, copy_function=copy, **k)),
+              self.assertRaises(SystemExit), redirect_stderr(err)):
+            run_wb("skill", "add", "demo", "--from", str(d), "-m", "unreadable")
+        self.assertRegex(err.getvalue(), r"not added: couldn't copy .*z.md: .*Permission denied")
+        self.assertEqual((skills.library() / "demo" / "SKILL.md").read_text(), before)
+        self.assertEqual(skills._git("status", "--porcelain"), "")
+        self.assertEqual(list(skills.available()), ["demo"])
+        run_wb("skill", "retire", "demo", "-m", "done")      # and it retires as it was
+
     def test_the_librarys_commits_ignore_the_users_signing_and_hooks(self):
         # a signing prompt or a global hook failed `wb skill add` from Claude's Bash (the 2026-11-16 audit)
         hooks = Path(self.tmp.name) / "hooks"
