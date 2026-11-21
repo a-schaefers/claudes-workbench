@@ -2287,8 +2287,14 @@ review: a 16 GiB Radeon 780M carve-out beside an 8 GiB RTX became the budget, an
 added to an RX 7600S's 8). With none known discrete (an APU alone, a card amdgpu gives no hwmon)
 the groups decide as above. Only the devices Ollama may see count (`hardware.visible` over
 `ollama_env()`): two 8 GiB cards with Ollama limited to one by `CUDA_VISIBLE_DEVICES` made a
-16 GiB budget (the 2026-11-19 audit). A unified GPU off macOS counts what `hardware.gpus` found
-(an APU's carve-out plus GTT, a DGX Spark's RAM). Apple Silicon: `iogpu.wired_limit_mb` when set, else macOS's default
+16 GiB budget (the 2026-11-19 audit). An APU counts what `hardware.gpus` found (its carve-out plus GTT, a
+limit the kernel already sets below the RAM). An NVIDIA GPU that shares the RAM (a DGX Spark, a
+Jetson: nvidia-smi gives it no memory) counts the RAM less `system_reserve`: what the system had
+in use when `gpus` read it (`MemTotal` less `MemAvailable`, its `ram_free`), less what this
+machine's Ollama has loaded (`/api/ps`, one ask, 1 s), never under `SYSTEM_FLOOR` 2 GiB; the
+budget's why says "less N GB the system uses". All of `MemTotal` passed a 6.5 GB model as fitting
+an 8 GB Orin Nano whose desktop held 2 GB (#524); another server's loaded model counts as the
+system's, which only stops sharing. `gpu_gb` still overrides it. Apple Silicon: `iogpu.wired_limit_mb` when set, else macOS's default
 (`unified_default`: two thirds of the RAM up to `UNIFIED_SMALL` 36 GiB, three quarters above,
 Metal's recommendedMaxWorkingSetSize; it was 75% everywhere, too much on 8-32 GB Macs). Unknown
 VRAM means no sharing. `gpus(windows=False)`: the budget never asks WSL's PowerShell. A model's
@@ -2458,7 +2464,8 @@ Ollama that answers while OpenCode has no provider at all.
 `gpu_budget` runs in routing and in the lease). `system()`: `macos`, `wsl` (`/proc/version`
 contains "microsoft"), `linux`. `gpus()`: `nvidia-smi` (`smi()`: from PATH, else WSL's `WSL_SMI`, `/usr/lib/wsl/lib/nvidia-smi`, which a systemd unit's PATH may lack; UUID, name, MiB total/used, driver; a name may hold commas) on Linux and
 WSL (`[N/A]` reads as unknown, except on ARM (`aarch64`/`arm64`: a DGX Spark, a Jetson), where
-the GPU shares the RAM: `unified` with `MemTotal`, the 2026-11-19 audit; a line of fewer than
+the GPU shares the RAM: `unified` with `MemTotal`, and `ram_free` (`MemAvailable`) for the
+budget's reserve, the 2026-11-19 audit and #524; a line of fewer than
 five fields is skipped); WSL adds Windows' adapters from `powershell.exe Get-CimInstance Win32_VideoController` (no
 VRAM: AdapterRAM caps at 4 GB), but only for the report (`wb scout`, `wb doctor`'s GPU line):
 `gpus(windows=False)`, which the budget and `wb image`'s settle use, reads nvidia-smi alone; Linux scans `DRM`'s (`/sys/class/drm`) `card*/device` (amdgpu's

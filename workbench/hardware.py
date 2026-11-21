@@ -125,7 +125,9 @@ def gpus(windows: bool = True) -> list[dict]:
         if g["vram"] is None and platform.machine().lower() in ("aarch64", "arm64"):
             # DGX Spark, Jetson: the GPU shares the RAM and nvidia-smi gives it no size ([N/A]),
             # so there was no budget at all (the 2026-11-19 audit). An x86 card's [N/A] stays unknown
-            g.update(vram=memory()["ram"], unified=True, discrete=False,
+            # (ram_free: what the system left, from which the budget takes its reserve, #524)
+            ram = memory()
+            g.update(vram=ram["ram"], ram_free=ram["ram_free"], unified=True, discrete=False,
                      memory="the RAM: nvidia-smi gives the GPU no memory of its own")
         found.append(g)
     if len({(g["name"], g["vram"]) for g in found}) > 1:

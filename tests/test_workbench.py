@@ -10020,10 +10020,13 @@ class Hardware(unittest.TestCase):
         meminfo = {"/proc/meminfo": "MemTotal:       125000000 kB\nMemAvailable:    100000000 kB\n"}
         spark = ("nvidia-smi",), "GPU-77aa, NVIDIA GB10, [N/A], [N/A], 580.95"
         hw = self.fake("Linux", files=meminfo, runs=dict([spark]))
-        with mock.patch.dict(os.environ, {"WB_FAKE_MODELS": "", "WB_MODELS": "/nonexistent"}):
+        with mock.patch.dict(os.environ, {"WB_FAKE_MODELS": "", "WB_MODELS": "/nonexistent"}), \
+                mock.patch.object(models, "_get", lambda *a, **k: None):   # no Ollama answers
             budget, devs, why = models.budget_devices()
-        self.assertEqual((budget, [g["name"] for g in devs]), (125000000 * 1024, ["NVIDIA GB10"]))
-        self.assertIn("NVIDIA GB10 (the RAM: nvidia-smi gives the GPU no memory of its own)", why)
+        # the RAM less what the system used when read (#524)
+        self.assertEqual((budget, [g["name"] for g in devs]), (100000000 * 1024, ["NVIDIA GB10"]))
+        self.assertIn("NVIDIA GB10 (the RAM: nvidia-smi gives the GPU no memory of its own, less 25.6 GB "
+                      "the system uses)", why)
         hw = self.fake("Linux", files=meminfo, runs=dict([spark]), machine="x86_64")
         self.assertIsNone(hw.gpus()[0]["vram"])  # an x86 card's [N/A] stays unknown
 
