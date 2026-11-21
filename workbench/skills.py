@@ -145,8 +145,18 @@ def check(skill_md: Path, name: str) -> tuple[list[str], list[str]]:
     # what a directory skill ships beside its SKILL.md
     root = skill_md.parent
     for ref in sorted(set(SUPPORT.findall(s["body"]))):
-        if not (root / ref).exists():
+        if (root / ref).exists():
+            continue
+        # scripts/, templates/ and assets/ are ordinary project directories too: "put the page in
+        # templates/polls/detail.html, run scripts/test.sh" was refused with no way in but
+        # rewording (#738, the 2026-11-21 audit). Refused only where it must be the skill's own:
+        # references/ (a skill's word), or a directory of that name the skill has.
+        top = ref.split("/", 1)[0]
+        if top == "references" or skill_md.name == "SKILL.md" and (root / top).is_dir():
             problems.append(f"names {ref}, which the skill doesn't have: the agent would go looking")
+        else:
+            warnings.append(f"names {ref}, which the skill doesn't have: if it is the skill's own "
+                            "file, add it; if it is a path in the project, ignore this")
     if skill_md.name == "SKILL.md" and root.is_dir():
         extra = [p for p in root.rglob("*") if p.is_file() and p != skill_md
                  and ".git" not in p.relative_to(root).parts]

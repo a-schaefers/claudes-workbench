@@ -3495,15 +3495,19 @@ quotes are stripped. Fields used: `name`, `description`, `license`.
 **Checked on the way in** (`check` → problems that refuse, warnings Claude reads):
 - Refused: no file; a name not matching `^[a-z0-9]+(-[a-z0-9]+)*$`; a front-matter name that
   differs; no description, or one over 300 characters (it's all an agent sees before loading);
-  the whole file over 8000 UTF-8 bytes; a body path `references/…`, `scripts/…`, `templates/…` or
-  `assets/…` that doesn't exist beside the source file. A leading UTF-8 BOM (a Windows
+  the whole file over 8000 UTF-8 bytes; a body path `references/…` that doesn't exist beside the
+  source file, or one under `scripts/`, `templates/` or `assets/` when the skill has that
+  directory but not the file. A leading UTF-8 BOM (a Windows
   editor's) is read past (`parse`, `utf-8-sig`) and left out of the library's copy: before the
   `---` it hid the front matter, refused as "front matter name is ''" (#479, the audit of 1.8).
 - Warned: a body over 120 lines; a home path (`/home/`, `/Users/`, `/root/`, `/var/home/`) or `~/` anywhere (agents go looking for those paths); a
   description without when/for/before/after/if; for a SKILL.md in a directory, clutter
   (README.md, CHANGELOG.md, .env, .gitignore, LICENSE.txt) or more than 10 other files; a body that
   reads like an incident log (3+ of `#NN`, `PR NN`, `issue NN`, `20YY-MM-DD`): a skill states the
-  rule.
+  rule; a body path under `scripts/`, `templates/` or `assets/` the skill has no directory for
+  ("if it is the skill's own file, add it; if it is a path in the project, ignore this"): those
+  are ordinary project directories, and "run scripts/test.sh" was refused with no way in but
+  rewording (#738, the 2026-11-21 audit).
 
 **Scanned on the way in** (`scan.py`, adapted from Hermes Agent's `tools/skills_guard.py` at
 081e8d9, MIT notice kept in its docstring; it keeps the critical and high rules, drops trust tiers

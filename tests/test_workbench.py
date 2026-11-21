@@ -15866,6 +15866,22 @@ class SkillLearning(Base):
             "On 2026-11-02 issue #4411 broke it, PR #4412 fixed it.\n"))), "-m", "x")
         self.assertIn("incident log", out)
 
+    def test_a_skill_naming_a_project_path_under_scripts_or_templates_is_warned_not_refused(self):
+        # #738 (the 2026-11-21 audit, reproduced): check() read both paths as the skill's own
+        # supporting files, and the add was refused with no override
+        d = self.draft("polls", body="Put the page in templates/polls/detail.html and run "
+                                     "scripts/test.sh before finishing.\n")
+        out = run_wb("skill", "add", "polls", "--from", str(d), "-m", "the polls app's habits")
+        self.assertIn("added polls", out)
+        self.assertIn("names scripts/test.sh, which the skill doesn't have: if it is the skill's "
+                      "own file, add it; if it is a path in the project, ignore this", out)
+        self.assertIn("templates/polls/detail.html", out)
+        # a skill with its own scripts/ that lacks the one it names: still refused
+        (d / "scripts").mkdir()
+        (d / "scripts" / "lint.sh").write_text("true\n")
+        self.assertIn("names scripts/test.sh, which the skill doesn't have: the agent would go looking",
+                      self.refused("skill", "add", "polls", "--from", str(d), "-m", "no"))
+
     def test_a_patch_fixes_the_passage_that_misled_and_is_judged_on_its_own(self):
         from workbench import skills
         run_wb("skill", "add", "alpha", "--from", str(self.draft(
