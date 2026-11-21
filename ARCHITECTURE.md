@@ -4244,8 +4244,8 @@ retries with a delay growing from 10 s to 5 min (`RestartSteps`, systemd 254+; e
 older ones), since retrying is what brings the chat up when a bound address arrives late (a user
 manager has no network-online.target) or the port is briefly held: a start limit gave up for good
 there (the 0.90 review). It stops only on exit 78 (`RestartPreventExitStatus`), which bin/wb's
-Python-version and Windows guards use, and `wb chat serve` on a chat.json it can't follow (#534);
-never 75, the replan exit below.
+Python-version and Windows guards use, and `wb chat serve` on a chat.json it can't follow (#534). Rebinding and a code reload re-exec in place (below), with
+no exit for the unit to see; the exit 75 they once used is gone (#200).
 
 **Keeping it up, and reaching it** (moved here from the README, 2026-11-17). On Linux, link the
 unit from the copy `wb` runs from (`~/.claude/plugins/marketplaces/workbench` for a marketplace

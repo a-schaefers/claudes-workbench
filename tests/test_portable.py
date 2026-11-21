@@ -1638,7 +1638,18 @@ class Launchers(unittest.TestCase):
         self.assertIn("Restart=always", unit)
         prevent = [l.split("=", 1)[1].split() for l in unit.splitlines()
                    if l.startswith("RestartPreventExitStatus=")]
-        self.assertEqual(prevent, [["78"]])  # never 75: chat.py exits 75 to be restarted
+        self.assertEqual(prevent, [["78"]])
+
+    def test_no_note_says_the_chat_exits_75_since_it_re_execs_in_place(self):
+        # #480 (the audit of v1.8): the unit and ARCHITECTURE.md still said chat.py exits 75 to be
+        # restarted, after #200 made it re-exec in place
+        import re
+        chat = (self.ROOT / "workbench" / "chat.py").read_text()
+        self.assertIn("os.execv(sys.executable, [sys.executable, *sys.orig_argv[1:]])", chat)
+        self.assertNotRegex(chat, r"(sys\.)?exit\(75\)")
+        for f in ("systemd/wb-chat.service", "ARCHITECTURE.md"):
+            text = (self.ROOT / f).read_text()
+            self.assertIsNone(re.search(r"exits 75|never 75|the replan exit", text), f)
 
     def test_a_legacy_locale_still_reads_and_writes_utf8(self):
         # the 2026-11-19 audit: under a non-UTF-8 locale wb's reads and writes without an
