@@ -481,10 +481,10 @@ def start(model_ids: list[str], case_names: list[str], skills: list[str], label:
     env.pop("WB_TASK", None)
     env.pop("CLAUDE_CODE_SESSION_ID", None)  # its tasks are no session's
     env.pop("CLAUDE_PID", None)
-    with open(d / "driver.log", "a") as log:
-        proc = subprocess.Popen([sys.executable, "-X", "utf8", "-m", "workbench.bench", run], cwd=d,
-                                env=env, stdin=subprocess.DEVNULL, stdout=log, stderr=log,
-                                start_new_session=True)
+    from . import cli  # cli imports this module
+    with open(d / "driver.log", "a") as log:  # its own scope, to outlive a logout (#531)
+        proc = cli.detach([sys.executable, "-X", "utf8", "-m", "workbench.bench", run], cwd=d,
+                          env=env, stdout=log, stderr=log)
     store.write_json(home() / "driver.json", {"pid": proc.pid, "run": run,
                                               "start": models._started(proc.pid)})
     return run, [f"bench run {run}: {len(pairs)} replay(s) × {repeat}"

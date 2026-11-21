@@ -29,7 +29,7 @@ import os
 import re
 import signal
 import statistics
-import subprocess
+import subprocess  # noqa: F401 (cli.detach starts the run; tests patch it here)
 import sys
 import time
 from pathlib import Path
@@ -338,9 +338,10 @@ def start(bench: bool = False, if_due: bool = False) -> list[str]:
     store.home().mkdir(parents=True, exist_ok=True)  # a fresh profile's first wb setup (#198)
     with open(store.home() / "optimize.log", "a") as log:
         argv = ["--bench"] * bench + ["--all"] * (not why)  # asked for: every model again
-        proc = subprocess.Popen([sys.executable, "-X", "utf8", "-m", "workbench.optimize", *argv],
-                                env=env, stdin=subprocess.DEVNULL, stdout=log, stderr=log,
-                                start_new_session=True)
+        from . import cli  # cli imports this module
+        # its own scope, to outlive a logout: SIGTERM there recorded "stopped" (#531)
+        proc = cli.detach([sys.executable, "-X", "utf8", "-m", "workbench.optimize", *argv],
+                          env=env, stdout=log, stderr=log)
     store.write_json(path(), {**st, "pid": proc.pid, "start": models._started(proc.pid),
                               "began": store.now(), "done": None, "stopped": None})
     mins = max(1, round(estimate(ms) / 60))
