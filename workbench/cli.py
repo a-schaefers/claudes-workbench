@@ -501,15 +501,20 @@ def _claude_md_at(repo: Path, ref: str, under: str = "") -> str | None:
 
 
 def _package(repo: Path, given: Path, base: str) -> str | None:
-    """``given`` below the repo's top, when it has a CLAUDE.md of its own at ``base``: a monorepo's
-    package, where the agent, the setup and the tests then run (task.json `subdir`). From
-    packages/app, wb start refused the repo for a CLAUDE.md at its root, and the agent worked
-    from the root (#375, the audit of 1.6). A plain subdirectory still means the whole repo."""
+    """The nearest directory from ``given`` up to (not including) the repo's top with a CLAUDE.md
+    of its own at ``base``: a monorepo's package, where the agent, the setup and the tests then
+    run (task.json `subdir`). From packages/app, wb start refused the repo for a CLAUDE.md at its
+    root, and the agent worked from the root (#375, the audit of 1.6); from packages/app/src it
+    still did, since only ``given`` itself was looked at (#606, the audit of v1.90). Claude Code
+    loads the nearest CLAUDE.md above it too. A plain subdirectory still means the whole repo."""
     try:
-        sub = given.relative_to(repo).as_posix()
+        parts = given.relative_to(repo).parts
     except ValueError:
         return None
-    return sub if sub != "." and _claude_md_at(repo, base, sub) else None
+    for n in range(len(parts), 0, -1):
+        if _claude_md_at(repo, base, sub := "/".join(parts[:n])):
+            return sub
+    return None
 
 
 def _need_claude_md(repo: Path, base: str, a, sub: str | None = None) -> None:
@@ -520,8 +525,8 @@ def _need_claude_md(repo: Path, base: str, a, sub: str | None = None) -> None:
     elif not _claude_md_at(repo, base):
         die(f"{repo} has no CLAUDE.md (or .claude/CLAUDE.md) at {base}: the agent would start "
             "blind. Write it (what the project is, how to build and test it, its conventions), "
-            f"commit it, and run wb init {shlex.quote(str(repo))} to link AGENTS.md; "
-            "--no-claude-md skips this check")
+            f"commit it, and run wb init {shlex.quote(str(repo))} to link AGENTS.md (a monorepo "
+            "package with its own: --repo <the package's directory>); --no-claude-md skips this check")
 
 
 def _identity(repo: Path) -> bool:

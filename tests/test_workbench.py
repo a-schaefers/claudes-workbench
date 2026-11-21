@@ -11198,6 +11198,30 @@ class Projects(Base):
         run_wb("start", "t-lib", "--spec", str(self.spec), "--repo", str(lib), "--model", "mimo")
         self.assertNotIn("subdir", store.Task("t-lib").spec)
 
+    def test_from_a_folder_inside_a_package_the_nearest_package_claude_md_above_is_used(self):
+        # #606 (the audit of v1.90): only --repo itself was looked at, so from packages/app/src
+        # wb start refused the repo, or with a root CLAUDE.md ran the task at the root
+        g = lambda *a: subprocess.run(["git", "-C", str(self.repo), *a], check=True)  # noqa
+        app = self.repo / "packages" / "app"
+        (app / "src" / "deep").mkdir(parents=True)
+        (app / "CLAUDE.md").write_text("# app\nThe app package.\n")
+        (app / "src" / "deep" / "x.ts").write_text("")
+        g("add", "-A")
+        g("commit", "-qm", "a package below a root CLAUDE.md")
+        os.environ["FAKE_SCENARIO"] = "ok"
+        out = run_wb("start", "t-src", "--spec", str(self.spec), "--repo", str(app / "src" / "deep"),
+                     "--model", "mimo")
+        self.assertIn("package: packages/app", out)                  # not the root's
+        self.assertEqual(store.Task("t-src").spec["subdir"], "packages/app")
+        wait_phase("t-src", {"review"})
+        g("rm", "-q", "CLAUDE.md", "packages/app/CLAUDE.md")
+        g("commit", "-qm", "no CLAUDE.md anywhere")
+        err = io.StringIO()
+        with self.assertRaises(SystemExit), redirect_stderr(err):
+            run_wb("start", "t-none", "--spec", str(self.spec), "--repo", str(app / "src"),
+                   "--model", "mimo")
+        self.assertIn("a monorepo package with its own: --repo <the package's directory>", err.getvalue())
+
     def test_instructions_in_dot_claude_count_and_hints_quote_their_paths(self):
         # the audit: a repo with only .claude/CLAUDE.md (Claude Code reads it, and so does the
         # agent) was refused as having none; a path with a space broke the printed merge command

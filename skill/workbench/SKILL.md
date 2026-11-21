@@ -261,6 +261,8 @@ music): the same with `wb audio --list`, but you can't hear: read `reference/aud
 wb start <kebab-name> --spec <file|-> --repo <repo> --size significant|trivial \
    --test "<acceptance command>" [--skill <name>] [--model …] [--auto-fix 2]
 ```
+In a monorepo, `--repo` inside a package with its own committed CLAUDE.md (`package: …` printed)
+runs the agent, the setup and the tests in that package; the diff stays the whole repo's.
 The worktree holds only committed files. When the acceptance command needs what the user
 installed (node_modules, a .venv, a build), add `--setup '<install command>'` (a .venv always: a copy still runs the original) (or `--copy <ignored
 path>`; `--sibling <path>` for a `../<name>` or `../../<path>` the project uses, by that same path): `wb start` names the ignored
