@@ -1438,7 +1438,12 @@ handed this task (one directory each in the config's `skills` list). The user's 
 the audit of 1.6) are denied by name (`denied_skills`): an agent once read a personal skill as a
 "newer task" and went off into the user's files. A name the worktree's own `.claude/skills` or
 `.agents/skills` also has stays allowed (the project's skill wins); `workbench` and
-task.json's `deny_skills` are always denied. `wb skill add` refuses the personal names.
+task.json's `deny_skills` are always denied. `wb skill add` refuses the personal names. A
+library skill handed to the task keeps its name though a personal skill has it too (one synced by
+the app after the library's): denied by name, every load of it failed while the agent was told to
+load it, and `wb skill list` then advised rewriting a good skill (#515, the audit of v1.90).
+OpenCode 2.3 loads the handed one, by its library path, in and out of the lane (the
+RealOpenCode test), and `wb skill list` says when a personal skill shares a library skill's name.
 `OPENCODE_DISABLE_CLAUDE_CODE` or `OPENCODE_DISABLE_CLAUDE_CODE_SKILLS` (`1` or `true`) makes
 OpenCode 2.3 skip every `.claude` directory, the project's own skills with them, without a word
 (#384, the audit of 1.6), so the agent's environment leaves both out (`runner.CLAUDE_CODE_OFF`):
@@ -3059,7 +3064,8 @@ didn't load it; "since its last edit" (rows whose `skills_rev[name]` is the curr
 loaded in. `advice`, first match wins: never offered; offered 3+ times and never loaded (its
 description is wrong); 2+ tasks since its last edit and none accepted; 3+ loads under 50%
 accepted (patch it with what review taught); 3+ loads and 3+ without, no better than without; not
-offered in 60 days. `wb skill list` shows each skill's record and advice; `wb scout` lists the
+offered in 60 days. `wb skill list` shows each skill's record and advice (and that a personal skill
+shares its name, #515); `wb scout` lists the
 flagged ones.
 
 **Suggested for a spec** (`skills.suggest`, used by `wb start` when no `--skill` is given). Words

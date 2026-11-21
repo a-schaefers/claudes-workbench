@@ -2551,10 +2551,14 @@ def cmd_skill(a):
             print(f"the skill library is empty ({skills.library()}); "
                   "wb skill add <name> --from <file> -m \"why\" starts it")
             return
+        personal = set(context.denied_skills()) - {"workbench"}
         for name, info in have.items():
             note = skills.advice(use.get(name), now)
             print(f"{name}: {info['description']}\n  {skills.record_line(use.get(name))}"
-                  + (f" · {note}" if note else ""))
+                  + (f" · {note}" if note else "")
+                  # handed, the library's loads (#515); unhanded, the agent sees neither
+                  + (" · one of the user's own skills has this name too: a task it is handed "
+                     "to gets this one" if name in personal else ""))
         return
     if a.action == "show":
         have = skills.available()

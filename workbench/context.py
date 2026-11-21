@@ -1503,14 +1503,20 @@ def layer(task: store.Task) -> dict:
     rules += read_only_rules(task)
     rules += [{"action": "edit", "resource": f, "effect": "deny"}
               for f in CLAUDE_FILES + OPENCODE_FILES]
-    rules += [{"action": "skill", "resource": n, "effect": "deny"}
-              for n in denied_skills(task.spec.get("deny_skills"), task.worktree)]
-    # the skill library is Claude's to write, with or without the kernel's lane
-    rules += [{"action": "edit", "resource": f"{p.rstrip('/')}/*", "effect": "deny"}
-              for p in _both([skills.library()])]
     # the skills Claude handed this task, one directory each: OpenCode lists exactly those, and
     # the rest of the library stays out of the prompt (a retired one is simply left out)
     have = skills.available()
-    handed = [str(have[n]["path"]) for n in task.status.get("skills") or [] if n in have]
+    mine = [n for n in task.status.get("skills") or [] if n in have]
+    handed = [str(have[n]["path"]) for n in mine]
+    # A handed skill keeps its name though a personal skill has it too (a library `pdf`, then the
+    # app synced the user's own): denied by name, its every load failed while the agent was told
+    # to load it, and wb skill list advised rewriting a good skill (#515). OpenCode takes the
+    # handed one by its library path, listed after the personal ones (checked on OpenCode 2.3)
+    rules += [{"action": "skill", "resource": n, "effect": "deny"}
+              for n in denied_skills(task.spec.get("deny_skills"), task.worktree)
+              if n not in mine or n == "workbench" or n in (task.spec.get("deny_skills") or ())]
+    # the skill library is Claude's to write, with or without the kernel's lane
+    rules += [{"action": "edit", "resource": f"{p.rstrip('/')}/*", "effect": "deny"}
+              for p in _both([skills.library()])]
     return {"instructions": [str(p) for p in files + ([note] if note else [])],
             "permissions": rules, "skills": handed}

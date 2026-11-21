@@ -4083,6 +4083,26 @@ class SkillLibrary(Base):
                                         capture_output=True).stdout.strip(), "refs/heads/master")
         self.assertIn("BAD git version 2.25.1: workbench needs git 2.34 or newer", buf.getvalue())
 
+    def test_a_library_skill_a_personal_one_later_shadows_is_still_handed_and_listed_as_such(self):
+        # #515 (the audit of v1.90): the app synced a personal `pdf` after the library had one,
+        # and the handed skill was denied by name to every agent it went to
+        home = Path(self.tmp.name) / "home"
+        home.mkdir()
+        with mock.patch.dict(os.environ, {"HOME": str(home)}):
+            run_wb("skill", "add", "pdf", "--from", str(self.draft("pdf", "Use when reading PDFs.")),
+                   "-m", "first")
+            write_skill(home / ".claude" / "skills" / "synced" / "org" / "pdf", "pdf", "Use when PDF.")
+            write_skill(home / ".claude" / "skills" / "mine", "mine", "Use when mine.")
+            self.start("t-pdf", "ok", "--skill", "pdf")
+            wait_phase("t-pdf", {"review"})
+            layer = context.layer(store.Task("t-pdf"))
+            listed = run_wb("skill", "list")
+        denied = {r["resource"] for r in layer["permissions"] if r["action"] == "skill"}
+        self.assertNotIn("pdf", denied)
+        self.assertTrue({"mine", "workbench"} <= denied)
+        self.assertEqual(layer["skills"], [str(Path(os.environ["WB_SKILLS"]) / "pdf")])
+        self.assertIn("one of the user's own skills has this name too", listed)
+
     def test_the_users_own_skill_names_are_off_limits(self):
         home = Path(self.tmp.name) / "home"
         write_skill(home / ".claude" / "skills" / "publishing-arm", "publishing-arm", "Use when publishing.")
@@ -4291,10 +4311,11 @@ class RealOpenCode(Base):
             self.assertTrue("CANARY-PROJ-SKILL" in text, flag)  # (not assertIn: a prompt per failure)
 
 
-    def run_calls(self, name, calls, *extra, before=None):
-        """Run real opencode in a task's worktree, in its lane, against a fake model that makes
-        these tool calls; returns the tool results it got back, in order. `before(task)` runs
-        once the task is set up, before OpenCode starts."""
+    def run_calls(self, name, calls, *extra, before=None, in_lane=True):
+        """Run real opencode in a task's worktree, in its lane (unless not ``in_lane``: a machine
+        without Landlock), against a fake model that makes these tool calls; returns the tool
+        results it got back, in order. `before(task)` runs once the task is set up, before
+        OpenCode starts."""
         self.start(name, "ok", *extra)
         wait_phase(name, {"review"})
         task = store.Task(name)
@@ -4317,14 +4338,39 @@ class RealOpenCode(Base):
                                "limit": {"context": 32768, "output": 1024}}}}}
         layer_path.write_text(json.dumps(layer))
         time.sleep(0.5)
-        cmd = lane.wrap(context.writable(task), ["opencode", "run", "--standalone", "-m",
-                                                 "cap/cap", "--auto", "--format", "json", "go"])
+        cmd = ["opencode", "run", "--standalone", "-m", "cap/cap", "--auto", "--format", "json", "go"]
+        if in_lane:
+            cmd = lane.wrap(context.writable(task), cmd)
         subprocess.run(cmd, cwd=task.worktree, env=env, capture_output=True, timeout=180)
         reqs = [json.loads(line) for line in out.read_text().splitlines()]
         last = max(reqs, key=lambda r: len(r.get("messages", [])))
         answers = [json.dumps(m["content"]) for m in last["messages"] if m.get("role") == "tool"]
         self.assertEqual(len(answers), len(calls), "not every fake call came back")
         return task, answers
+
+    def test_a_handed_skill_named_like_a_personal_one_loads_the_librarys_in_and_out_of_the_lane(self):
+        # #515 (the audit of v1.90, reproduced): the app synced a personal `pdf` after the
+        # library had one; denied by name, every load of the handed skill failed, unexplained
+        home = Path(self.tmp.name) / "home"
+        write_skill(home / ".claude" / "skills" / "pdf", "pdf",
+                    "Use when CANARY-PERSONAL-PDF.", "CANARY-PERSONAL-BODY\n")
+        write_skill(home / ".claude" / "skills" / "mine", "mine", "Use when CANARY-MINE.")
+        lib = Path(os.environ["WB_SKILLS"])
+        write_skill(lib / "pdf", "pdf", "Use when CANARY-LIBRARY-PDF.", "CANARY-LIBRARY-BODY\n")
+        with mock.patch.dict(os.environ, {"HOME": str(home)}):
+            for lane_on in (True, False):
+                task, answers = self.run_calls(f"t-pdf-{int(lane_on)}", [
+                    {"name": "skill", "arguments": {"id": "pdf"}},
+                    {"name": "skill", "arguments": {"id": "mine"}}], "--skill", "pdf",
+                    in_lane=lane_on)
+                rules = json.loads((context.rules_dir(task) / "opencode.json").read_text())
+                denied = {r["resource"] for r in rules["permissions"]
+                          if r["action"] == "skill" and r["effect"] == "deny"}
+                self.assertIn("mine", denied)                   # a personal one: still denied
+                self.assertNotIn("pdf", denied)                 # the handed one: not
+                self.assertIn("CANARY-LIBRARY-BODY", answers[0], lane_on)
+                self.assertNotIn("CANARY-PERSONAL", answers[0], lane_on)
+                self.assertNotIn("CANARY-MINE", answers[1], lane_on)
 
     def test_everyday_tools_run_and_the_rest_waits_for_claude(self):
         wt = str(store.Task("t-cmds").worktree)
