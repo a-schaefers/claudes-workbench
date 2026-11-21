@@ -8330,6 +8330,25 @@ class Shot(Base):
         self.assertEqual((m["step"], m["base"]["rev"]), (2, approved))
         self.assertIn(b"watts / 1000", Path(m["base"]["image"]).read_bytes())  # step 1's code
 
+    def test_the_capture_runs_in_the_agents_shell_not_sh(self):
+        # #517: a nested `sh -c` ran it in dash on Debian and Ubuntu, so `source … && …` failed
+        # on both sides though the same command passed as --test. Here sh is a stand-in for
+        # dash, refusing `source`; the agent's shell is bash.
+        bin_dir = Path(self.tmp.name) / "dashbin"
+        bin_dir.mkdir()
+        (bin_dir / "sh").write_text('#!/bin/bash\ncase "$*" in *source*) echo "sh: 1: source: not '
+                                    'found" >&2; exit 127;; esac\nexec /bin/bash "$@"\n')
+        (bin_dir / "sh").chmod(0o755)
+        bash = shutil.which("bash")
+        if not bash:
+            self.skipTest("no bash")
+        os.environ.update(PATH=f"{bin_dir}:{os.environ['PATH']}", SHELL=bash)
+        out = run_wb("shot", "t", "--capture", "source /dev/null && " + self.CAPTURE)
+        self.assertNotIn("a capture failed", out)
+        m = json.loads((store.Task("t").dir / "shots" / "1" / "shots.json").read_text())
+        self.assertEqual((m["base"]["ok"], m["candidate"]["ok"]), (True, True))
+        self.assertTrue(Path(m["base"]["image"]).read_bytes().startswith(self.PNG + b"1280x800"))
+
     def test_a_package_scoped_task_keeps_both_screenshots(self):
         # #433 (the audit of 1.8, reproduced): run from packages/web, both captures wrote their
         # PNG to the relative $WB_SHOT_OUT, inside the package, and wb shot looked at the top

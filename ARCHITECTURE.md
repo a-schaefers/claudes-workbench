@@ -3720,7 +3720,10 @@ change as step two's, and a capture needing what step one added failed on the ba
 `.wb-shot.png` passed a capture that wrote nothing, #344; absolute because the command runs in the
 task's package, `subdir`, where a relative `./.wb-shot-….png` landed while the image was looked
 for at the top, and both sides of a package-scoped task lost their screenshot, #433) at the size in
-`$WB_SHOT_VIEWPORT` (1280x800 by default). The same command,
+`$WB_SHOT_VIEWPORT` (1280x800 by default). Both are exported ahead of the command itself, which
+runs in the agent's shell (`runner.test_shell`) as `--test` and `wb verify` run theirs: a nested
+`sh -c` was dash on Debian and Ubuntu, and a `source .venv/bin/activate && …` capture failed on
+both sides while the same command passed as `--test` (#517). The same command,
 fixture and viewport on both sides make the two images comparable; `--files` copies the
 candidate's new capture script or fixture onto the base. workbench ships no browser: the capture
 is the project's.
