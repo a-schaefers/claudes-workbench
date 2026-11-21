@@ -1807,7 +1807,8 @@ test('the settings rows open to Buttons, pick through wb, and say the sentence o
 const FEED = {
   ts: 1_800_000_000, tasks: 9, settings: { recording: true, live: true, every: 2 },
   periods: {
-    week: { tasks: 4, landed: 3, accepted_pct: 75, savings: { saved: 1_230_000, wh: 900, cost: null }, score: { score: 62 } },
+    week: { tasks: 4, landed: 3, accepted_pct: 75, savings: { saved: 1_230_000, wh: 600, cost: null }, score: { score: 62 },
+      energy: { wh: 900 } },
     all: { tasks: 9, landed: 8, accepted_pct: 89 },
   },
   streak: { current: 0, best: 3, days: 5 },
@@ -2060,6 +2061,14 @@ test('a period says the spec-gap discards its saving counts beside its task coun
     savings: { saved: -115_000, tasks: 1 } } } })
   expect(lines[0]).toEqual({ label: 'This week',
     text: 'cost ~115K more Claude tokens (estimate) · 0 tasks · 0 landed · and 1 discard put down to the spec' })
+})
+
+test('a period\'s energy is every task\'s, compared by the saving or not', () => {
+  // #568: three tasks used 287 Wh and the tab said 12, the one task the saving could compare
+  const week = (p: any) => statsLines({ tasks: 3, periods: { week: { tasks: 3, landed: 3, accepted_pct: 100, ...p } } })[0].text
+  expect(week({ savings: { saved: 5000, wh: 12, cost: 0 }, energy: { wh: 287, cost: 0.09 } }))
+    .toBe('saved ~5K Claude tokens (estimate) · 3 tasks · 3 landed (100%) · 287 Wh (0.09)')
+  expect(week({ energy: { wh: 1500 } })).toBe('3 tasks · 3 landed (100%) · 1.5 kWh')  // nothing compared
 })
 
 test('a one-task exception shows beside its task and is under way from Claude\'s first edit', async ($, on) => {

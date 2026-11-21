@@ -9518,6 +9518,28 @@ class Stats(Base):
         self.assertNotIn("spec_gaps", f["periods"]["week"])
         self.assertTrue(stats.summary(f)[1].startswith("all time: 1 task(s), 1 landed (100%), and 1 discard(s) put down to the spec"))
 
+    def test_a_periods_energy_counts_every_task_that_measured_it(self):
+        # #568: of three tasks (180, 95 and 12 Wh) only the one with a Claude session could be
+        # compared, and the period's energy was its 12 Wh
+        from workbench import stats
+        now = time.time()
+        claude = {"input": 4_000, "output": 0, "calls": 2}
+        self.rows({"ts": now - 3600, "outcome": "accepted", "gpu_wh": 180, "diff": {"added": 10}},
+                  {"ts": now - 3600, "outcome": "accepted", "gpu_wh": 95, "diff": {"added": 10}},
+                  {"ts": now - 3600, "outcome": "accepted", "gpu_wh": 12, "diff": {"added": 10}, "claude": claude},
+                  {"ts": now - 3600, "outcome": "accepted", "gpu_wh": 50, "remote_gpu": True},  # not ours
+                  {"ts": now - 20 * 86400, "outcome": "discarded", "gpu_wh": 40})          # none to compare
+        f = stats.feed(now)
+        self.assertEqual(f["periods"]["week"]["energy"], {"wh": 287})
+        self.assertEqual(f["periods"]["week"]["savings"]["wh"], 12)  # wb savings' compared-only, kept
+        self.assertEqual(f["periods"]["month"]["energy"], {"wh": 327})
+        (Path(self.tmp.name) / "savings.json").write_text('{"kwh_price": 0.3}')
+        with mock.patch.dict(os.environ, WB_SAVINGS=str(Path(self.tmp.name) / "savings.json")):
+            self.assertEqual(stats.feed(now)["periods"]["week"]["energy"], {"wh": 287, "cost": 0.09})
+        (store.home() / "results.jsonl").write_text("")
+        self.rows({"ts": now - 3600, "outcome": "accepted", "gpu_wh": 30})               # no session at all
+        self.assertEqual(stats.feed(now)["periods"]["week"]["energy"], {"wh": 30})
+
     def test_a_models_write_speed_trend_compares_its_newest_third_with_its_oldest(self):
         from workbench import stats
         self.rows(*({"ts": 1000.0 + i, "outcome": "accepted", "speed": {"write": w}}

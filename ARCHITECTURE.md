@@ -1748,7 +1748,10 @@ from today, so the pane reads the feed again once it passes.
 Keys: `periods` (`week`, `month`, `all`, `savings.PERIODS`: tasks, landed, `accepted_pct`,
 `active_minutes`, and `savings` (`savings.totals`, over every row: a spec-gap discard cost Claude
 too) with its `score` once a task can be compared, and `spec_gaps`, the spec-gap discards its
-saving counts and its task count doesn't, said beside it, #569),
+saving counts and its task count doesn't, said beside it, #569; and `energy`, `{wh, cost?}`: the
+GPU watt-hours of every row in it that measured them, `gpu_wh`, compared by the saving or not,
+another machine's GPU left out, with the cost once a price is set: the saving's `wh` counts only
+the rows it compares, and the tab drew that as the period's, 12 Wh of 287, #568),
 `streak` (`{current, best, days}`: local days in a row with a task landed; the current run ends
 today or yesterday, else 0, and `wb stats` then names only the best: a run that ended is never
 mentioned), `bests` (`largest_first_try`: the most lines landed with no review round the agent caused,
@@ -2031,8 +2034,8 @@ nothing until a surface attaches.
   `TOP_RETRY_MS` 30 s. Live view off: no child, no **Now**. The newest tick is the `top` atom
   (`top-1`). Below it is the history (#406): `wb stats --json` (*The Stats feed*) drawn as one line a
   section by `statsLines`, `Label: text` with the label bold: this week and all time (the score,
-  the saving or the cost (estimate), tasks, landed, the spec-gap discards in the saving, energy
-  and, with a price, its cost), the
+  the saving or the cost (estimate), tasks, landed, the spec-gap discards in the saving, the
+  period's `energy` and, with a price, its cost), the
   streak (only the best once a run ended), what the agents absorbed without waking Claude (the
   auto-fix rounds as attempts, "then green" only for the tasks whose tests passed), the
   questions (asked, and answered only as `wb answer` did), one

@@ -758,8 +758,9 @@ export function statsLines(f: Record<string, any> | null): { label: string; text
       `${p.landed} landed${p.accepted_pct !== undefined ? ` (${p.accepted_pct}%)` : ''}`,
       // left out of the count, not the saving: Claude's tokens were spent on them (#569)
       p.spec_gaps ? `and ${p.spec_gaps} discard${p.spec_gaps === 1 ? '' : 's'} put down to the spec` : '',
-      p.savings?.wh ? `${p.savings.wh >= 1000 ? `${(p.savings.wh / 1000).toFixed(1)} kWh` : `${Math.round(p.savings.wh)} Wh`}` +
-        (p.savings.cost != null ? ` (${p.savings.cost.toFixed(2)})` : '') : '',
+      // the period's own energy, every task's: the saving's counts only the tasks it compares (#568)
+      p.energy?.wh ? `${p.energy.wh >= 1000 ? `${(p.energy.wh / 1000).toFixed(1)} kWh` : `${Math.round(p.energy.wh)} Wh`}` +
+        (p.energy.cost != null ? ` (${p.energy.cost.toFixed(2)})` : '') : '',
     ]
     out.push({ label, text: parts.filter(Boolean).join(' · ') })
   }

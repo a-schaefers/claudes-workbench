@@ -260,6 +260,19 @@ def _helps(rows: list[dict]) -> dict:
             if m and any(n for _, n in h.values())}
 
 
+def _energy(rows: list[dict], price: float | None) -> dict | None:
+    """A period's GPU energy: every row that measured it (`gpu_wh`; another machine's GPU,
+    `remote_gpu`, measured nothing here), compared by savings or not. savings.totals sums only
+    the rows it can compare, so a period's tasks run outside a session lost their watt-hours
+    (#568). The cost with a price set."""
+    whs = [r["gpu_wh"] for r in rows if isinstance(r.get("gpu_wh"), (int, float))
+           and not isinstance(r["gpu_wh"], bool) and not r.get("remote_gpu")]
+    if not whs:
+        return None
+    wh = round(sum(whs), 1)
+    return {"wh": wh, **({"cost": round(wh / 1000 * price, 2)} if price is not None else {})}
+
+
 SUMMARY = ("periods", "streak", "absorbed", "questions", "guards")  # what `wb stats` shows of the feed
 
 
@@ -272,6 +285,7 @@ def feed(now: float | None = None, only: tuple | None = None) -> dict:
     every = store.results()
     rows = [r for r in every if tuning.judged(r)]  # trials and spec-gap discards out
     out: dict = {"ts": now, "until": _midnight(now), "settings": settings(), "tasks": len(rows)}
+    price = savings.price()
     periods = {}
     for name, span in savings.PERIODS.items():
         since = now - span if span else 0
@@ -279,11 +293,13 @@ def feed(now: float | None = None, only: tuple | None = None) -> dict:
         t = savings.totals(every, since=since)
         # in the saving (Claude's tokens were spent) but not the task count: said beside it (#569)
         gaps = sum(1 for r in every if (r.get("ts") or 0) >= since and not tuning.judged(r))
-        if rs or t["tasks"] or gaps:
+        energy = _energy([r for r in every if (r.get("ts") or 0) >= since], price)
+        if rs or t["tasks"] or gaps or energy:
             landed = sum(map(_landed, rs))
             periods[name] = {"tasks": len(rs), "landed": landed,
                              **({"accepted_pct": round(100 * landed / len(rs))} if rs else {}),
                              **({"spec_gaps": gaps} if gaps else {}),
+                             **({"energy": energy} if energy else {}),
                              # nothing to compare: no savings, rather than a row of zeros
                              **({"savings": t, "score": savings.score(t)} if t["tasks"] else {}),
                              **({"active_minutes": am} if (am := round(sum(r.get("active_minutes") or 0
