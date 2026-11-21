@@ -3019,13 +3019,15 @@ def _released_refs() -> int:
     """Delete each accepted task's refs/workbench/accepted/<task>, the ref wb accept kept in the
     user's repo before #799 (or when it couldn't write the task's steps bundle): kept for good, each
     task's steps showed in `git log --all`, mirrors copied them and git's gc never pruned them (the
-    second 2026-11-21 audit). wb bench add reads the steps from gitops.STEPS_BUNDLE now, so one
-    that still has a step to make a case of is moved into that bundle first; one whose tip landed
-    in the task's base branch (which keeps every step alive), or each of whose steps has its case
-    (the only thing it was kept for, #649), just goes. And a bundle whose every step has its case
-    goes too. A ref gone, or deleted here, is recorded (status `accepted_ref_gone`) and never
-    looked at again, and each repo's refs are listed once, with one `for-each-ref --merged` per
-    base branch: not a call per task on every run (#686)."""
+    second 2026-11-21 audit). wb bench add reads the steps from gitops.STEPS_BUNDLE now, so the ref
+    is moved into that bundle first; one whose tip landed in the task's base branch (which keeps
+    every step alive) just goes, and so does one whose bundle can't be made once each step has its
+    case (#649). The bundle stays as long as the task: removed once every step had its case, a
+    case removed with wb bench rm (#740) could never be made again after a squash accept, once
+    git's gc pruned the steps (#940, the v1.90.24 review); it holds base..tip alone. A ref gone,
+    or deleted here, is recorded (status `accepted_ref_gone`) and never looked at again, and each
+    repo's refs are listed once, with one `for-each-ref --merged` per base branch: not a call per
+    task on every run (#686)."""
     cased: dict[str, set] = {}
     for c in bench.cases().values():
         cased.setdefault(c.get("task"), set()).add(c.get("step"))
@@ -3036,8 +3038,6 @@ def _released_refs() -> int:
         if not t.exists:
             continue
         done[name] = set(range(1, int(t.status.get("steps") or 1) + 1)) <= cased.get(name, set())
-        if done[name]:
-            (t.dir / gitops.STEPS_BUNDLE).unlink(missing_ok=True)
         if not t.status.get("accepted_ref_gone") and (repo := gitops.repo_of(t.spec)).is_dir():
             by_repo.setdefault(repo, []).append(t)
     n = 0
@@ -3057,9 +3057,11 @@ def _released_refs() -> int:
             if not (tip := refs.get(ref)):  # one from before #649, or deleted by hand
                 t.set_status(accepted_ref_gone=True)
                 continue
-            if (done[t.name] or ref in landed.get(t.spec.get("base_branch"), ()) or
-                    gitops.bundle_steps(repo, t.spec["base"], tip, t.dir / gitops.STEPS_BUNDLE)) \
-                    and gitops.drop_accepted(repo, t.name, tip):
+            # into the bundle even when each step has its case: a case removed could be made
+            # again only from it (#940); dropped outright then only when it can't be made
+            if (ref in landed.get(t.spec.get("base_branch"), ()) or
+                    gitops.bundle_steps(repo, t.spec["base"], tip, t.dir / gitops.STEPS_BUNDLE)
+                    or done[t.name]) and gitops.drop_accepted(repo, t.name, tip):
                 t.set_status(accepted_ref_gone=True)
                 n += 1
     return n

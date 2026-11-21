@@ -12290,8 +12290,37 @@ class Bench(Base):
         self.assertEqual(g("for-each-ref"), g("for-each-ref", "refs/heads/"))   # unbundled: no ref
         self.assertNotIn(tip[:7], g("log", "--all", "--format=%h"))
         self.assertFalse((self.repo / ".git" / "FETCH_HEAD").exists())
-        run_wb("gc")                                     # every step has its case: the bundle goes
-        self.assertFalse((task.dir / gitops.STEPS_BUNDLE).exists())
+        run_wb("gc")                     # every step has its case: the bundle still stays (#940)
+        self.assertTrue((task.dir / gitops.STEPS_BUNDLE).is_file())
+
+    def remade(self, first: int):
+        """Both steps of a squash-accepted task cased, wb gc, then each case removed (step
+        ``first``'s first), git's gc run, and the case made again."""
+        from workbench import bench
+        task = self.squashed("t-re")
+        run_wb("bench", "add", "t-re", "--step", "1")
+        run_wb("bench", "add", "t-re", "--step", "2")
+        run_wb("gc")
+        self.assertTrue((task.dir / gitops.STEPS_BUNDLE).is_file())
+        for step in (first, 3 - first):
+            case = f"t-re-s{step}"
+            ref = bench.cases()[case]["reference"]
+            run_wb("bench", "rm", case)
+            self.prune()
+            self.assertNotEqual(gitops.git(self.repo, "cat-file", "-t", ref, check=False).strip(),
+                                "commit", case)
+            run_wb("bench", "add", "t-re", "--step", str(step))
+            self.assertEqual(bench.cases()[case]["reference"], ref, case)
+
+    def test_a_squash_accepted_tasks_case_removed_after_wb_gc_can_be_made_again(self):
+        # #940 (the v1.90.24 review): wb gc deleted steps.bundle once every step had its case, so
+        # after a squash accept and git's gc a case removed with wb bench rm (to remake it with a
+        # case format's new fields) could never be made again: "no commit of step N"
+        self.remade(first=1)
+
+    def test_a_squash_accepted_tasks_last_case_removed_first_can_be_made_again(self):
+        # #940: the same, the last step's case removed first
+        self.remade(first=2)
 
     def test_the_steps_bundle_is_made_with_the_users_safe_bare_repository_explicit(self):
         # #887 (the third 2026-11-21 audit, reproduced): git found the bare scratch clone from
