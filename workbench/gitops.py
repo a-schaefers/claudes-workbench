@@ -80,7 +80,9 @@ def _pinned(cwd) -> list[str]:
     return [f"--git-dir={want['gitdir']}", f"--work-tree={os.path.abspath(cwd)}",
             *NO_HOOKS, "-c", "core.fsmonitor=false",
             *(("-c", "core.filemode=true") if _modes_hold(os.path.dirname(os.path.abspath(cwd)))
-              else ())]
+              else ()),
+            *(("-c", f"core.ignorecase={'true' if folds else 'false'}")
+              if (folds := _case_folds(os.path.dirname(os.path.abspath(cwd)))) is not None else ())]
 
 
 @functools.lru_cache(maxsize=64)
@@ -102,6 +104,31 @@ def _modes_hold(d: str) -> bool:
         return on == 0o111 and not os.stat(probe).st_mode & 0o111
     except OSError:
         return False
+    finally:
+        try:
+            os.unlink(probe)
+        except OSError:
+            pass
+
+
+@functools.lru_cache(maxsize=64)
+def _case_folds(d: str) -> bool | None:
+    """Whether the file system at ``d`` folds case (None: couldn't tell). A task's worktree is on
+    the state directory's, whatever the repo's: with the repo's core.ignorecase=true (a checkout
+    Git for Windows made on /mnt/c, a repo from macOS) on a case-sensitive one, git saw a
+    case-only rename as a deletion alone and a new OTHER.PY beside other.py as nothing, and wb
+    accept committed the deletion and removed the worktree, the new names lost (#492, the audit
+    of 1.90; #323 did the same for core.filemode). The task's git says what this one does."""
+    try:
+        fd, probe = tempfile.mkstemp(prefix=".wb-case-", dir=d)
+        os.close(fd)
+    except OSError:
+        return None
+    try:
+        twin = os.path.join(d, os.path.basename(probe).upper())
+        return os.path.exists(twin) and os.path.samefile(probe, twin)
+    except OSError:
+        return None
     finally:
         try:
             os.unlink(probe)

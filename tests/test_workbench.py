@@ -551,6 +551,36 @@ class Lifecycle(Base):
                              capture_output=True, text=True).stdout
         self.assertTrue(row.startswith("100755"), row)                # is what lands
 
+    @unittest.skipIf(gitops._case_folds(tempfile.gettempdir()) is not False,
+                     "the temp directory folds case: no mismatch to make")
+    def test_a_case_only_rename_and_a_case_twin_land_where_the_repo_says_ignorecase(self):
+        # #492 (the audit of 1.90, reproduced): the repo said core.ignorecase=true (made by Git
+        # for Windows on /mnt/c, or on macOS) and the task's worktree is on a case-sensitive
+        # state directory: the rename showed as a deletion alone, OTHER.PY beside other.py as
+        # nothing, and accept committed the deletion and removed the worktree with the new names
+        g = lambda *a: subprocess.run(["git", "-C", str(self.repo), *a], check=True,  # noqa
+                                      capture_output=True)
+        (self.repo / "other.py").write_text("other\n")
+        g("add", "other.py")
+        g("commit", "-qm", "other")
+        g("config", "core.ignorecase", "true")
+        self.start("t-case", "ok", "--test", TEST_CMD)
+        wait_phase("t-case", {"review"})
+        t = store.Task("t-case")
+        (t.worktree / "README.md").rename(t.worktree / "Readme.md")
+        (t.worktree / "OTHER.PY").write_text("shouted\n")
+        files, shown = gitops.changed(t.worktree), runner.review_diff(t)
+        for name in ("Readme.md", "OTHER.PY"):
+            self.assertIn(name, files)
+            self.assertIn(name, shown)                                # what Claude reviews
+        run_wb("accept", "t-case", "-m", "feat: case")
+        tree = subprocess.run(["git", "-C", str(self.repo), "ls-tree", "--name-only", "delegate/t-case"],
+                              capture_output=True, text=True).stdout.split()
+        self.assertIn("Readme.md", tree)                              # is what lands
+        self.assertIn("OTHER.PY", tree)
+        self.assertIn("other.py", tree)
+        self.assertNotIn("README.md", tree)
+
     def test_a_proposed_claude_md_is_shown_as_a_diff_and_taken_only_when_claude_says(self):
         # Claude making each CLAUDE.md change itself was a call over its whole context on most
         # tasks (2026-11-18): the agent proposes the file, accept takes it

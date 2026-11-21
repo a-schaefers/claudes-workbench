@@ -3354,7 +3354,12 @@ it. ACE-Step's takes peaked at -0.2 dBFS, near clipping, before any `loudnorm`.
   the execute bit (`gitops._modes_hold`, a probe file, once a process): with the repo's
   `core.filemode=false` (a checkout on a drive that distrusts modes, WSL's `/mnt/c`), a script
   the agent made 0755 ran in the task and was committed 100644 (#323, the audit of 1.4); now the
-  review diff and the commit both carry the mode. A `.git` that isn't a regular file holding the recorded text stops the
+  review diff and the commit both carry the mode. Likewise `core.ignorecase` says whether that
+  file system folds case (`gitops._case_folds`: a probe file, then its name in capitals; unpinned
+  when it can't tell): with the repo's `core.ignorecase=true` (Git for Windows on `/mnt/c`, a repo
+  from macOS) on a case-sensitive one, a case-only rename showed as a deletion alone and a new
+  `OTHER.PY` beside `other.py` as nothing, and accept committed the deletion and removed the
+  worktree with the new names (#492, the audit of 1.90). A `.git` that isn't a regular file holding the recorded text stops the
   call with a `GitError` ("the worktree's .git was rewritten"): the runner fails the task, `wb
   accept` refuses. A task started before the record runs unpinned.
 - **No git hooks from the worktree.** With a relative `core.hooksPath` (husky's gitignored
