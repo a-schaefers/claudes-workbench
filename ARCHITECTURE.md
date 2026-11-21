@@ -3795,7 +3795,9 @@ VPN), `"hosts": ["chat.example.org"]` a name a tunnel or proxy sends.
   A server already running is left up (systemd's: `systemctl --user disable --now wb-chat` stops
   it), its messages waiting for the chat to be on again. `wb chat on` starts `bin/wb chat serve
   --port <port>` detached (`chat.start`: `chat/serve.log`, `chat/serve.pid` `{pid, port}`) when
-  nothing answers on the port at an address the plan binds (`chat.who_answers`: a GET whose
+  nothing answers on the port at an address the plan binds (a wildcard probed at its family's
+  loopback, `chat._probe`: `::` at `::1`, since an IPv6-only socket, bindv6only=1, never answered
+  the 127.0.0.1 it was probed at and a healthy chat looked down, #450) (`chat.who_answers`: a GET whose
   response carries `X-Workbench-Chat: 1`, `chat.MARK`, which every response of the server has, is
   the chat; anything else answering is another program, and `wb chat on` refuses with the port
   named), then waits up to `START_WAIT` 10 s for it to answer (`chat.wait_up`; one that exits,

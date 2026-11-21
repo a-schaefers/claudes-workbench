@@ -10429,6 +10429,25 @@ class WebChat(Base):
             free = sk.getsockname()[1]
         self.assertFalse(self.chat.wait_up(free, dead.pid, limit=5))
 
+    def test_an_ipv6_only_chat_is_seen_running_by_wbs_own_check(self):
+        # #450 (the 2026-11-20 audit): `::` was probed at 127.0.0.1, which an IPv6-only socket
+        # (bindv6only=1) never answers, so wb chat on took a healthy chat for none
+        try:
+            with socket.socket(socket.AF_INET6) as sk:
+                sk.bind(("::1", 0))
+        except OSError:
+            self.skipTest("no IPv6 here")
+        Path(os.environ["WB_CHAT_CONFIG"]).write_text(json.dumps({"bind": ["::"]}))
+        handler = self.srv.RequestHandlerClass
+        only6 = type("Only6", (self.chat._Server6,), {"v6only": True})(("::", 0), handler)  # bindv6only=1
+        threading.Thread(target=only6.serve_forever, daemon=True).start()
+        self.addCleanup(only6.server_close)
+        self.addCleanup(only6.shutdown)
+        port = only6.server_address[1]
+        self.assertFalse(self.chat._connects("0.0.0.0", port))           # nothing on IPv4
+        self.assertEqual(self.chat.who_answers(port), "workbench")
+        self.assertTrue(self.chat.running(port))
+
     def test_a_chat_on_an_address_that_comes_and_goes_rebinds_in_place_when_it_changes(self):
         # #200 (the 2026-11-19 audit): with bind ["tailscale"] the plan was loopback while the
         # tailnet was down and its address once up, but only a longer list restarted, and the

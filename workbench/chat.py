@@ -712,7 +712,7 @@ def who_answers(port: int) -> str | None:
     chat, and `wb chat on` showed a link to it (#200, the 2026-11-19 audit)."""
     found = None
     for addr in plan()["binds"]:
-        conn = http.client.HTTPConnection("127.0.0.1" if addr in WILDCARD else addr, port, timeout=2)
+        conn = http.client.HTTPConnection(_probe(addr), port, timeout=2)
         try:
             conn.request("GET", "/manifest.webmanifest", headers={"Host": "localhost"})
             if conn.getresponse().getheader(MARK) == "1":
@@ -725,9 +725,16 @@ def who_answers(port: int) -> str | None:
     return found
 
 
+def _probe(addr: str) -> str:
+    """Where to reach a bound address from here: a wildcard by its family's loopback. `::` was
+    probed at 127.0.0.1, which an IPv6-only socket (bindv6only=1) never answers, so a healthy
+    chat looked down and `wb chat on` started a second that failed on the port (#450)."""
+    return {"0.0.0.0": "127.0.0.1", "::": "::1"}.get(addr, addr)
+
+
 def _connects(addr: str, port: int) -> bool:
     try:
-        with socket.create_connection(("127.0.0.1" if addr in WILDCARD else addr, port), timeout=1):
+        with socket.create_connection((_probe(addr), port), timeout=1):
             return True
     except OSError:
         return False
