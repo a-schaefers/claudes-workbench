@@ -1683,7 +1683,7 @@ def instruction_files(task: store.Task) -> tuple[list[Path], list[str]]:
     user = claude_home() / "CLAUDE.md"
     if user.is_file():  # a copy too: the agent can't read Claude's directory (SECRETS)
         mine = rules_dir(task) / "CLAUDE.md"
-        mine.write_text(user.read_text())
+        mine.write_bytes(user.read_bytes())  # as it is: a CP1252 byte failed every start (#784)
         roots.append((mine, user, True))
     roots += [(copy, src, True) for copy, src in user_rules(task)]
     load: list[Path] = []

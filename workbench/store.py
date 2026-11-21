@@ -294,7 +294,7 @@ def write_json(path: Path, data) -> None:
     try:
         # UTF-8 whatever the locale: under a legacy one an em dash in a spec failed to write and a
         # file written under UTF-8 failed to read back (the 2026-11-16 audit)
-        with open(tmp, "x", encoding="utf-8") as fh:
+        with open(tmp, "x", encoding="utf-8", errors="backslashreplace") as fh:  # as append_jsonl
             fh.write(json.dumps(data, indent=2, ensure_ascii=False) + "\n")
             _synced(fh)
         os.replace(tmp, path)  # readers (woken by inotify on the rename) never see half a file
@@ -452,7 +452,9 @@ def append_jsonl(path: Path, row: dict, after: float | None = None) -> None:
     with locked(_lock_of(path)):
         if after is not None:
             row = {**row, "ts": max(row["ts"], round(max(after, newest_ts(path)) + 0.001, 3))}
-        line = json.dumps(row, ensure_ascii=False).encode() + b"\n"
+        # a lone surrogate (a path's byte that isn't UTF-8) as its JSON escape, which reads back
+        # the same: strict, it raised past every caller's guard and failed the task (#784)
+        line = json.dumps(row, ensure_ascii=False).encode("utf-8", "backslashreplace") + b"\n"
         with open(path, "ab+") as fh:
             # A write cut short (a full disk, a crash) leaves a line with no end, and the next row
             # appended to it was lost with it (the 2026-11-16 audit): end the fragment first, so

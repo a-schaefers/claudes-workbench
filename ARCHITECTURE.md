@@ -6268,7 +6268,12 @@ one line under `<file>.lock` (flock; a task's own events and steer files under `
 crash), so only that fragment is lost, not the row after it; `read_jsonl(path, offset)` returns
 the whole lines and the offset after the last one, skipping bad lines (bad JSON, or bytes that
 aren't UTF-8). `scrub(data)` makes every lone surrogate in data's strings U+FFFD and `loads(text)`
-is `json.loads` then `scrub`, for JSON from outside workbench (#438). All of them read and write UTF-8 whatever the locale (the 2026-11-16 audit: under a
+is `json.loads` then `scrub`, for JSON from outside workbench (#438). `append_jsonl` and
+`write_json` write a lone surrogate still in their data as its JSON escape (`backslashreplace`,
+which reads back the same): strict, one in a notice raised past every caller's guard (#784); the
+paths git gives as bytes are shown with `gitops.shown` (a byte that isn't UTF-8 as `\xe9`:
+`snapshot_left`'s left-out list, `submodule_edits`), and `~/.claude/CLAUDE.md` is copied for the
+agent as bytes (a CP1252 byte failed every `wb start` and round, #784). All of them read and write UTF-8 whatever the locale (the 2026-11-16 audit: under a
 legacy one an em dash in a spec failed to write), as do `wb start|next|feedback`'s specs and
 prompts, and the runner runs under `-X utf8`. `results(trials=False)` leaves out trial rows,
 and parses the file again only when its inode, size or mtime changed, so the router, the slice

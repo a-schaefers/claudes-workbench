@@ -603,7 +603,7 @@ def submodule_edits(worktree: Path) -> list[str]:
                            f"{sub['src']} is gone or unreadable (moved? wb relocate {rec.parent.name} "
                            "--repo <its new path>)")
                 continue
-        files = [os.fsdecode(f) for f in (changed + new).split(b"\0") if f]
+        files = [shown(f) for f in (changed + new).split(b"\0") if f]
         if files:
             out.append(_edit_line(sub, files))
     return out
@@ -643,6 +643,15 @@ CHANGED_SHOWN = 40  # lines listed as they are; the rest are counted by top-leve
 BUILD_FILES = 50    # new files in one new top-level directory: likely build output
 NEW_FILES_MAX = 300  # wb accept and wb next commit no more new files than this without --include
 BINARY_MAX = 1 << 20  # nor a new binary file this big
+
+
+def shown(path) -> str:
+    """A path git gave as bytes, for a line a person reads: a byte that isn't UTF-8 as `\\xe9`.
+    os.fsdecode kept it as a lone surrogate, which no UTF-8 write takes: a Latin-1 fixture's name
+    in the left-out list crashed the runner's review notice, every wb resume again, and wb
+    verify's result (#784)."""
+    raw = path if isinstance(path, bytes) else os.fsencode(path)
+    return raw.decode("utf-8", "backslashreplace")
 
 
 def _top(path: str) -> str:
@@ -922,20 +931,20 @@ def snapshot_left(worktree: Path, landing: bool = False) -> tuple[str, list[str]
         big = [(p, n) for p, n in files if n >= BINARY_MAX]
     skip = set(big)
     rest = [r for r in files if r not in skip]
-    dirs, count = [], Counter(_top(os.fsdecode(p)) for p, _ in rest)
+    dirs, count = [], Counter(_top(shown(p)) for p, _ in rest)
     for d, n in count.most_common():
         if len(rest) <= NEW_FILES_MAX:
             break
         dirs.append(f"{d} ({n:,} new file{'s' if n != 1 else ''})")
-        rest = [(p, m) for p, m in rest if _top(os.fsdecode(p)) != d]
+        rest = [(p, m) for p, m in rest if _top(shown(p)) != d]
     rest.sort(key=lambda r: r[1])
     while not landing and rest and sum(n for _, n in rest) > SNAPSHOT_MAX:
         big.append(rest.pop())
     if len(rest) == len(files):
         return with_new_files(worktree, "write-tree", whole=True).strip(), []
     tree = with_new_files(worktree, "write-tree", whole=True, new=[p for p, _ in rest]).strip()
-    return tree, dirs + brief([f"{os.fsdecode(p)} ({n / (1 << 20):.0f} MB)" if n >= 1 << 20
-                               else f"{os.fsdecode(p)} ({n >> 10:,} KB)" for p, n in sorted(big)])
+    return tree, dirs + brief([f"{shown(p)} ({n / (1 << 20):.0f} MB)" if n >= 1 << 20
+                               else f"{shown(p)} ({n >> 10:,} KB)" for p, n in sorted(big)])
 
 
 def left_line(left: list[str]) -> str:

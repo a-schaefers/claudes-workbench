@@ -479,6 +479,37 @@ class Lifecycle(Base):
         self.assertIn("caf�.txt", events)
         self.assertIn("half �", events)
 
+    @unittest.skipIf(sys.platform == "darwin", "macOS file names are UTF-8 by force")
+    def test_a_big_new_file_whose_name_isnt_utf8_reaches_review_and_wb_verify(self):
+        # #784 (the second 2026-11-21 audit): snapshot_left kept a Latin-1 byte as a lone
+        # surrogate, and the review notice's write raised UnicodeEncodeError past review_diff's
+        # guard: the task failed, and every wb resume failed again at the same review
+        make = ("python3 -c \"open(b'donn\\xe9es.bin', 'wb').write(b'\\0' * (1 << 20))\"; "
+                f"{TEST_CMD}")
+        self.start("t-784", "ok", "--no-base-check", "--test", make)
+        st = wait_phase("t-784", {"review", "stuck", "failed"})
+        self.assertEqual(st["phase"], "review", st.get("last"))
+        notice = [r for r in store.notices() if r["task"] == "t-784"][-1]["text"]
+        self.assertIn("donn\\xe9es.bin (1 MB)", notice)
+        self.assertEqual(gitops.shown(b"caf\xe9/x"), "caf\\xe9/x")
+        # wb verify's result too, and the store writes a stray surrogate as its JSON escape
+        store.append_jsonl(Path(self.tmp.name) / "x.jsonl", {"name": "donn\udce9es"})
+        self.assertEqual(store.read_jsonl(Path(self.tmp.name) / "x.jsonl")[0], [{"name": "donn\udce9es"}])
+        store.write_json(Path(self.tmp.name) / "x.json", {"left_out": ["donn\udce9es"]})
+        self.assertEqual(store.read_json(Path(self.tmp.name) / "x.json"), {"left_out": ["donn\udce9es"]})
+
+    def test_a_claude_md_of_claudes_that_isnt_utf8_starts_the_task_all_the_same(self):
+        # #784: ~/.claude/CLAUDE.md edited from Windows (a CP1252 apostrophe, 0x92) failed every
+        # wb start with a traceback after the task was written, and every round's config layer
+        claude = Path(tempfile.mkdtemp(dir=self.tmp.name, prefix="claude-"))
+        os.environ["CLAUDE_CONFIG_DIR"] = str(claude)
+        (claude / "CLAUDE.md").write_bytes(b"Don\x92t guess.\n")
+        self.start("t-784b", "ok")
+        st = wait_phase("t-784b", {"review", "stuck", "failed"})
+        self.assertEqual(st["phase"], "review", st.get("last"))
+        self.assertEqual((context.rules_dir(store.Task("t-784b")) / "CLAUDE.md").read_bytes(),
+                         b"Don\x92t guess.\n")
+
     def test_a_line_that_isnt_utf8_on_opencodes_output_loses_nothing(self):
         # #440: one Latin-1 byte killed the reader thread; the finished agent went unseen until
         # the silence timeout stopped the round as "no first output"
