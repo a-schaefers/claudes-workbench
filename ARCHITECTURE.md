@@ -5184,9 +5184,13 @@ is the project's.
 
 Each pair is kept in `tasks/<task>/shots/<n>/`: `base.png`, `candidate.png`, each run's output
 (`base.txt`, `candidate.txt`), and `shots.json` `{task, step, round, cmd, viewport, files, ts,
-base: {rev, exit, ok, image, error?, pruned?}, candidate: {…the same}}` (`pruned`: its PNG
+base: {rev, exit, ok, image, error?, pruned?}, candidate: {…the same}, left_out?}` (`pruned`: its PNG
 dropped with its archived task, `store.slim_archive`, #821), where the
-candidate's `rev` is the worktree snapshot's tree. A side is `ok` only when its run exits 0 and
+candidate's `rev` is the worktree snapshot's tree. That snapshot is what accept lands, as `wb verify`
+takes it (`gitops.snapshot_left`): a new binary of 1 MiB or more, or a directory past
+NEW_FILES_MAX, isn't in it, and `left_out` names them; the report and the `--chat` message add
+`not in the candidate (accept lands them only with --include): <paths>; its picture may not show
+them` (`verify.LEFT_OUT`; a new 2 MB photo showed as a broken image with nothing said, #836). A side is `ok` only when its run exits 0 and
 leaves a PNG (checked by its signature, never through a link; `verify.shot_ok`, which reads a
 shots.json from before `ok` by its image); one that isn't gets an `error` naming its exit and its
 output file, even with a PNG, which is kept and named as "the PNG it wrote anyway". A capture

@@ -13354,6 +13354,24 @@ class Shot(Base):
         self.assertEqual(m["shots"]["base"]["rev"], store.Task("t").spec["base"])
         self.assertIn("Reply here to send feedback on it.", m["text"])
 
+    def test_a_new_binary_left_out_of_the_candidate_is_said_in_the_report_and_the_chat(self):
+        # #836: a new 2 MB photo wasn't in the candidate's checkout, so its picture showed a
+        # broken image, and neither the report, shots.json nor the chat's message said why
+        (self.wt / "hero.jpg").write_bytes(b"\xff\xd8\xff\x00" * (1 << 19))  # 2 MiB, binary
+        out = run_wb("shot", "t", "--capture", self.CAPTURE, "--chat")
+        self.assertIn("not in the candidate (accept lands them only with --include): hero.jpg", out)
+        self.assertIn("its picture may not show them", out)
+        m = json.loads((store.Task("t").dir / "shots" / "1" / "shots.json").read_text())
+        self.assertEqual(len(m["left_out"]), 1)
+        self.assertIn("hero.jpg", m["left_out"][0])
+        from workbench import chat
+        self.assertIn("not in the candidate", chat.thread()[-1]["text"])
+        (self.wt / "hero.jpg").unlink()
+        out = run_wb("shot", "t", "--capture", self.CAPTURE)          # nothing left out: nothing said
+        self.assertNotIn("not in the candidate", out)
+        m = json.loads((store.Task("t").dir / "shots" / "2" / "shots.json").read_text())
+        self.assertNotIn("left_out", m)
+
     def test_a_new_capture_script_reaches_the_base_through_files(self):
         (self.wt / "shoot.sh").write_text(self.CAPTURE + "\n")
         out = run_wb("shot", "t", "--capture", "sh shoot.sh", "--files", "shoot.sh")

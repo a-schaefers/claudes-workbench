@@ -410,7 +410,10 @@ def shot(task: store.Task, cmd: str, files: list[str] | None = None, viewport: s
     $WB_SHOT_VIEWPORT. Kept in tasks/<task>/shots/<n>/ with what each image is of."""
     if not re.fullmatch(r"\d{2,5}x\d{2,5}", viewport):
         raise RuntimeError(f"--viewport {viewport}: give it as WIDTHxHEIGHT, e.g. 390x844")
-    tree = gitops.snapshot(task.worktree, landing=True)  # what accept would land, as verify (#642)
+    # what accept would land, as verify (#642); what it refuses without --include (a new binary
+    # of 1 MiB or more, a directory past NEW_FILES_MAX) is said: a new photo missing from the
+    # candidate showed as a broken image, with nothing said (#836)
+    tree, left = gitops.snapshot_left(task.worktree, landing=True)
     # after wb next, the last approved step, as wb verify compares: the original base showed the
     # earlier steps' change as this one's (#501, the audit of 1.90)
     base_rev = _review_base(task)
@@ -426,6 +429,8 @@ def shot(task: store.Task, cmd: str, files: list[str] | None = None, viewport: s
     meta = {"task": task.name, "step": st.get("steps", 1), "round": st.get("round", 1),
             "cmd": cmd, "viewport": viewport, "files": files or [], "ts": store.now(),
             "base": {"rev": base_rev}, "candidate": {"rev": tree}}
+    if left:
+        meta["left_out"] = left
     with gpu(task):
         _capture(task, cmd, viewport, limit, setup, out, meta, (("base", base), ("candidate", candidate)))
     store.write_json(out / "shots.json", meta)
@@ -478,7 +483,15 @@ def shot_lines(m: dict) -> list[str]:
             f"failed, {x['error']}" + (f" (the PNG it wrote anyway: {x['image']})" if x.get("image") else "")))
     if not (shot_ok(m["base"]) and shot_ok(m["candidate"])):
         out.append("  a capture failed: the code review stands on its own")
+    if m.get("left_out"):
+        out.append(f"  {LEFT_OUT.format(', '.join(m['left_out']))}")
     return out
+
+
+# a shot's candidate without what accept lands only with --include (#836): in the report and the
+# chat's message, where the user judges the picture
+LEFT_OUT = ("not in the candidate (accept lands them only with --include): {}; "
+            "its picture may not show them")
 
 
 def note(task: store.Task) -> str:

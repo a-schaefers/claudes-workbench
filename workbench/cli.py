@@ -2303,7 +2303,8 @@ def cmd_shot(a):
     print("\n".join(verify.shot_lines(m)))
     if a.chat:  # to the web chat, for a review from the phone (#99)
         n = int(Path(m["dir"]).name)
-        chat.send(" ".join(verify.shot_lines(m)[:1]) + " Reply here to send feedback on it.",
+        left = f" {verify.LEFT_OUT.format(', '.join(m['left_out']))}." if m.get("left_out") else ""  # #836
+        chat.send(" ".join(verify.shot_lines(m)[:1]) + left + " Reply here to send feedback on it.",
                   "claude", shots=chat.shots(task.name, n))
         print("sent to the web chat")
 
