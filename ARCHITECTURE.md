@@ -1833,7 +1833,11 @@ writes `NO_ANSWER` as its answer, so nothing takes it for open (Claude was woken
 waited on); lessons skip that answer. However the round ended (a `wb stop`, a signal, a crash),
 `_end_agent` closes every question in status `asks` still open (`ask_mcp.close_all`) and clears
 `asking` (and an `asking` phase), as `cli.reap` does for a runner that died: a stop once unwound
-past the round's close, and `wb answer` said "answered" to nobody (the 0.90 review). The prompt `wb next` writes names the
+past the round's close, and `wb answer` said "answered" to nobody (the 0.90 review). It closes
+the ask files never relayed too (written in the tick before the round ended, or by an agent that
+outlived its runner off Linux), recorded in `asks` as refused (`x`, no budget): left, the next
+round's first relay raised one as live, woke Claude and held the phase `asking`, pausing every
+guard, for a question nobody waited on (#680). The prompt `wb next` writes names the
 questions left (`ask_mcp.used`), not the whole budget. A `tools/call` runs on its own thread
 (replies written under a lock), so `ping` and the rest are answered while a question waits. The
 silence guard doesn't count the wait. `wb answer <task> --text|--file` answers, and refuses a

@@ -245,8 +245,16 @@ def close_all(task: store.Task) -> None:
     """Close every question the task has relayed (status `asks`) that is still open: called once
     its round's agent is gone, however the round ended, since no server outlives its round. A
     stop or a signal unwound past run_round's close, and `wb answer` said "answered" to nobody;
-    after a resume `wb allow` could answer the dead request (the 0.90 review)."""
-    close(task, dict.fromkeys(task.status.get("asks") or {}))
+    after a resume `wb allow` could answer the dead request (the 0.90 review). And every ask file
+    the runner never relayed (written in the tick before the round ended, or after a runner died
+    while its agent lived on, off Linux): answered and counted as refused ("x"), or the next
+    round's first relay raised it as live, woke Claude for it and held the phase `asking`,
+    pausing every guard, for a question nobody waited on (#680)."""
+    asks = task.status.get("asks") or {}
+    stray = [n[:-5] for n in _names(task) if n[:-5] not in asks]
+    close(task, dict.fromkeys([*asks, *stray]))
+    if stray:
+        task.set_status(asks={**(task.status.get("asks") or {}), **dict.fromkeys(stray, "x")})
 
 
 def used(task: store.Task) -> int:

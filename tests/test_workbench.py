@@ -4546,6 +4546,23 @@ class AskServer(Base):
         store.write_json(context.ask_dir(task) / f"{qid}.json",
                          {"id": qid, "ts": store.now(), "question": "?", **q})
 
+    def test_a_question_never_relayed_before_its_round_ended_is_closed_not_raised_next_round(self):
+        # #680 (Claude's audit of main): off Linux an agent outlived its killed runner and asked;
+        # close_all closed only the relayed ids, so after wb resume the next round raised the
+        # stale file as live, woke Claude and held the phase asking, pausing every guard
+        self.start("t-stray", "ok")
+        wait_phase("t-stray", {"review"})
+        task, opened = store.Task("t-stray"), {}
+        self.agent_asks(task, "cccccccc", question="still there?")
+        ask_mcp.close_all(task)                              # the round ended, or reap
+        self.assertEqual(ask_mcp._read(context.ask_dir(task) / "cccccccc.answer").strip(), ask_mcp.NO_ANSWER)
+        self.assertEqual(task.status["asks"], {"cccccccc": "x"})
+        task.set_status(phase="running")
+        ask_mcp.relay(task, opened)                          # the next round's first tick
+        self.assertEqual((task.status["phase"], task.status.get("asking"), opened), ("running", None, {}))
+        self.assertNotIn("question", [r["kind"] for r in store.read_jsonl(store.home() / "notify.jsonl")[0]])
+        self.assertEqual(ask_mcp.used(task), 0)              # and it cost no budget
+
     def test_two_questions_at_once_keep_the_task_asking_until_both_are_answered(self):
         # the first answer set the phase running while the other still waited, and the silence
         # guard stopped the round (the 2026-11-16 audit)
