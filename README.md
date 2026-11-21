@@ -24,30 +24,17 @@ Claude Code plugin that connects the two inside your normal Claude Code session.
   keep working, and the agents work on their own branches, so your checkout is untouched until
   you accept.
 - **Beyond code: images and audio.** Optionally, Claude directs local image and audio models
-  too, making a project's icons, illustrations, voice lines, sound effects and music. It looks at
-  every image; it can't hear, so each sound comes with a transcript and measurements it can read,
-  and for music you have the last word ([images](ARCHITECTURE.md#images),
-  [audio](ARCHITECTURE.md#audio)).
-- **See how it's going: the Stats tab.** The Workbench pane's Stats tab shows this machine live:
-  each GPU's memory, load and watts, the running task's speed, and every model, loaded or not.
-  Below that is your history: tasks landed, Claude tokens saved (an estimate), energy and its
-  cost, streaks and bests, what the agents fixed without waking Claude, each model's speed over
-  time, and what tends to stop them. It all stays on your machine and costs nothing while the tab
-  isn't on screen.
-- **Experimental: lighter code reading.** Turn on *Agent code navigation* in the pane's Settings
-  and agents read a file's outline and just the function they need, instead of the whole file,
-  which saves their context on big files. It needs [probe's release
-  binary](https://github.com/probelabs/probe/releases) on your PATH, which you install yourself
-  (crates.io's `probe-code` lacks the command it uses); without it the setting changes nothing,
-  and the pane says so. It's off by default and may go away
+  for a project's icons, illustrations, voice lines, sound effects and music, and checks each one
+  ([images](ARCHITECTURE.md#images), [audio](ARCHITECTURE.md#audio)).
+- **See how it's going.** The pane's Stats tab shows this machine live (the GPU, the running
+  task, every model) and your history: tasks landed, Claude tokens saved, energy, streaks.
+- **Experimental: lighter code reading.** With [probe](https://github.com/probelabs/probe)
+  installed, agents read a file's outline and one function instead of the whole file. Turn on
+  *Agent code navigation* in the pane's Settings, and Claude can set probe up for you
   ([experiments](ARCHITECTURE.md#experiments)).
-- **Optional: Claude on your phone.** Off by default. Turn on *Web chat* in the pane's Settings
-  and a small web app, served on localhost, becomes another lane to the same Claude session in
-  your terminal: message Claude, answer its questions and permission prompts. Reach it over your
-  own network, such as Tailscale (`tailscale serve` gives it an https address), and it installs
-  on your phone as an app that notifies you when Claude answers or needs you. It does less than
-  the Claude app with Remote Control (`claude rc`); it's a simple alternative that talks to the
-  workbench plugin in your session directly ([the web chat](ARCHITECTURE.md#the-web-chat)).
+- **Optional: Claude on your phone.** Turn on *Web chat* in Settings to message Claude and answer
+  its prompts from your phone, over your own network such as Tailscale
+  ([the web chat](ARCHITECTURE.md#the-web-chat)).
 
 On bigger coding tasks, once the session is already open, handing the coding off to the local
 model typically costs Claude about half the tokens of writing the code itself

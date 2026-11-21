@@ -1542,11 +1542,13 @@ def experiment_lines() -> list[str]:
         if not on[name]:
             out.append(f"{name}: off (wb experiment {name} on)")
         elif name == "probe" and not (path := context.probe_bin()):
-            out.append(f"{name}: on, but no probe with `symbols` is on PATH, so it changes "
-                       "nothing yet (its release binary: github.com/probelabs/probe/releases; crates.io's 0.6.0 lacks symbols)")
+            out.append(f"{name}: on, but not set up: no probe with `symbols` is on PATH, so it "
+                       f"changes nothing yet (probe, a code-search tool: {context.PROBE_HOME}; "
+                       f"its release binary from {context.PROBE_RELEASES}, not crates.io's "
+                       "probe-code 0.6.0)")
         else:
             found = _tool_version([path])[1] if name == "probe" else ""
-            out.append(f"{name}: on" + (f", found ({found})" if found else ""))
+            out.append(f"{name}: on" + (f" and working ({found})" if found else ""))
     return out
 
 
