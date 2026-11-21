@@ -288,7 +288,9 @@ def _measure(path: Path) -> dict | None:
                     a.byteswap()
                 if width == 1:  # unsigned, 128 the zero
                     a = array.array("h", (x - 128 for x in a))
-                mags = (array.array(a.typecode, map(abs, a)) if ch == 1 else
+                # a list, not an array of the samples' type: abs(-32768) doesn't fit a signed
+                # short, so a mono take touching full scale ended `wb audio` in an OverflowError
+                mags = (list(map(abs, a)) if ch == 1 else
                         list(map(max, *(map(abs, a[c::ch]) for c in range(ch)))))
                 meter.add(mags)
     except (wave.Error, EOFError, OSError):

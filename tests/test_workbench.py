@@ -7097,6 +7097,26 @@ class Audio(Base):
                 found = audio.inspect(quiet, "sfx", draw=False)
                 self.assertTrue(found["silent"])
 
+    def test_a_take_at_negative_full_scale_is_measured_as_clipped_not_a_traceback(self):
+        # review of #599: the streamed magnitudes went into an array of the samples' own type, and
+        # abs(-32768) doesn't fit a signed short, so a mono clip touching full scale (any clipped
+        # take, and every float take reaching -1.0 once ffmpeg made it 16-bit) raised OverflowError
+        import array as _array, wave as _wave
+        tmp = Path(self.tmp.name)
+        for width, low, code in ((2, -32768, "h"), (4, -2 ** 31, "i")):
+            for chans in (1, 2):
+                p = tmp / f"low-{width}-{chans}.wav"
+                with _wave.open(str(p), "wb") as w:
+                    w.setnchannels(chans); w.setsampwidth(width); w.setframerate(16000)
+                    w.writeframes(_array.array(code, [0, low, low // 2, low] * 4000 * chans).tobytes())
+                with self.subTest(width=width, chans=chans):
+                    found = audio._measure(p)
+                    self.assertEqual(found["peak_db"], 0.0)
+                    self.assertGreater(found["clipped"], 0.4)
+        if shutil.which("ffmpeg"):
+            found = audio.inspect(tmp / "low-2-1.wav", "sfx", draw=False)
+            self.assertEqual(found["peak_db"], 0.0)
+
     def test_the_word_error_rate_counts_the_fewest_edits_among_repeated_words(self):
         # #593 (Codex's audit of 1.8 → 1.90): difflib paired an insert with a delete, so one wrong
         # word in "go go go go" scored 100% with the wrong differences, and the 100% cap made an
