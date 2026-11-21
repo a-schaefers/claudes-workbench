@@ -12931,6 +12931,30 @@ class Top(Base):
             self.assertLess(time.monotonic() - began, 0.5)
         self.assertTrue(t.prober.is_alive())
 
+    def test_on_a_short_terminal_the_rack_folds_and_the_queue_stays_with_what_was_hidden_said(self):
+        # #608: at 80x24 the bottom was cut, so the QUEUE (last) went first, nothing said
+        from workbench import top
+        snap = {"ts": time.time(), "every": 2,
+                "gpus": [{"index": 0, "name": "GPU", "used": 2e9, "total": 8e9}],
+                "running": [{"task": f"t{i}", "label": "M", "phase": "running", "last": "edit x"}
+                            for i in range(3)],
+                "rack": [{"model": "a", "label": "A", "state": "resident", "tasks": ["t0"]}]
+                + [{"model": f"m{i}", "label": f"M{i}", "state": "idle"} for i in range(11)],
+                "queue": [{"task": "waiter", "model": "a", "waited_s": 40.0}]}
+        text = top.render(snap, 80, color=False, height=24).split("\n")
+        self.assertLessEqual(len(text), 24)
+        self.assertIn("QUEUE", text)
+        self.assertTrue(any("waiter" in x for x in text))
+        self.assertTrue(any("+11 idle, can't run or remote" in x for x in text))
+        self.assertTrue(any(x.strip().startswith("A ") for x in text))       # the one in use stays
+        many = {**snap, "running": snap["running"] * 6}                         # still too tall
+        text = top.render(many, 80, color=False, height=24).split("\n")
+        self.assertLessEqual(len(text), 24)
+        self.assertTrue(any("waiter" in x for x in text))
+        self.assertTrue(any(x.strip().startswith("… ") and x.endswith(" more lines") for x in text))
+        self.assertEqual(top.render(snap, 80, color=False), top.render(snap, 80, color=False, height=None))
+        self.assertIn("M10", top.render(snap, 80, color=False, height=100))   # room: nothing folds
+
     def test_the_default_tick_is_stats_json_every_else_two_seconds(self):
         from workbench import top
         self.assertEqual(top.default_every(), 2)

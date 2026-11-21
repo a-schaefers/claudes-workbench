@@ -2269,7 +2269,11 @@ than hwdata isn't shown as "AMD/ATI", #576; `(rev …)` dropped), sizes in decim
 exit. Ctrl-Z (SIGTSTP) puts the cursor, the main screen and the saved termios back before it
 stops, and SIGCONT takes them again (cbreak, the alternate screen) and redraws at once (a wake
 pipe in the `select`): it stopped with the shell's prompt over the frozen view and no cursor,
-and after `fg` `q` needed Enter (#607). Not on a terminal: one plain pass, then exit (as `wb watch --once`).
+and after `fg` `q` needed Enter (#607). Taller than the terminal, the view folds the rack's
+idle, `can't run` and `remote` models no task holds into one `+N idle, can't run or remote`
+line (`top.FOLD`), and if it still doesn't fit cuts the middle (the GPUs, RUNNING, RACK) with
+a `… N more lines` line, the QUEUE kept (`top.lines(snap, rows)`): it cut the bottom, so the
+queue went first, with nothing said (#608). Not on a terminal: one plain pass, then exit (as `wb watch --once`).
 
 ## Models: found, loaded, chosen
 

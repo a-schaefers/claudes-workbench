@@ -600,8 +600,32 @@ def short(name: str) -> str:
     return name.rpartition("]")[2].strip() or name
 
 
-def lines(snap: dict) -> list[list[tuple[str, str]]]:
-    """The view as lines of (style, text) segments: the text is safe to print (plain)."""
+FOLD = ("idle", "can't run", "remote")  # rack rows folded first on a short terminal
+
+
+def lines(snap: dict, rows: int | None = None) -> list[list[tuple[str, str]]]:
+    """The view as lines of (style, text) segments: the text is safe to print (plain). ``rows``:
+    the terminal's height. Taller, the rack's idle, can't-run and remote models fold into one
+    line, and if it still doesn't fit the middle is cut with a "… N more lines" line, the QUEUE
+    kept: cut at the bottom, the queue went first, with nothing said (#608)."""
+    out = _lines(snap)
+    if rows is None or len(out) <= rows:
+        return out
+    folded = [r for r in snap["rack"] if r["state"] in FOLD and not r.get("tasks")]
+    if folded:
+        kept = [r for r in snap["rack"] if r not in folded]
+        out = _lines({**snap, "rack": kept}, fold=len(folded))
+    if len(out) <= rows:
+        return out
+    q = max(i for i, segs in enumerate(out) if segs == [("head", "QUEUE")]) - 1  # its blank line
+    head, tail = out[:q], out[q:]  # the header, the GPUs, RUNNING and RACK; then the QUEUE
+    room = rows - len(tail) - 1
+    if room < 1:  # not even the queue fits: the top of it, and how much is hidden
+        return out[:rows - 1] + [[("dim", f"  … {len(out) - rows + 1} more lines")]]
+    return head[:room] + [[("dim", f"  … {len(head) - room} more lines")]] + tail
+
+
+def _lines(snap: dict, fold: int = 0) -> list[list[tuple[str, str]]]:
     p = lambda v: plain(str(v))  # noqa: E731
     out = [[("head", f"wb top · {time.strftime('%H:%M:%S', time.localtime(snap['ts']))} · every "
              f"{snap['every']:g}s"), ("dim", "   q quits")], []]
@@ -666,7 +690,9 @@ def lines(snap: dict) -> list[list[tuple[str, str]]]:
         elif state == "remote":
             row.append(("dim", "  another machine: no telemetry"))
         out.append(row)
-    if not snap["rack"]:
+    if fold:
+        out.append([("dim", f"  +{fold} idle, can't run or remote (a taller terminal shows them)")])
+    elif not snap["rack"]:
         out.append([("dim", "  no models found")])
     out += [[], [("head", "QUEUE")]]
     for q in snap["queue"]:
@@ -677,10 +703,11 @@ def lines(snap: dict) -> list[list[tuple[str, str]]]:
     return out
 
 
-def render(snap: dict, width: int, color: bool) -> str:
-    """The lines cut to ``width`` columns, coloured on a terminal."""
+def render(snap: dict, width: int, color: bool, height: int | None = None) -> str:
+    """The lines cut to ``width`` columns (and fitted to ``height`` rows: `lines`), coloured on a
+    terminal."""
     rows = []
-    for segs in lines(snap):
+    for segs in lines(snap, height):
         left, parts = width, []
         for style, text in segs:
             if left <= 0:
@@ -772,7 +799,7 @@ def main(every: float | None = None, as_json: bool = False, out=None, drm: Path 
                 out.flush()
             elif tty:
                 size = shutil.get_terminal_size()
-                text = render(snap, size.columns, color=True).split("\n")[:size.lines]
+                text = render(snap, size.columns, color=True, height=size.lines).split("\n")[:size.lines]
                 out.write("\033[H" + "".join(f"{line}\033[K\n" for line in text[:-1])
                           + (text[-1] + "\033[K" if text else "") + "\033[J")
                 out.flush()
