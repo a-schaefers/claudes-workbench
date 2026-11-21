@@ -123,7 +123,7 @@ def spawn_runner(task: store.Task) -> int:
     _coding_used(task)  # work handed (back) to the agent: Claude's allowance, if any, is spent
     env = context.detached_env()  # the user's PYTHONPATH kept for the agent (#512)
     env.pop("WB_TASK", None)  # the agent's mark (runner.sweep kills what carries it), not the runner's
-    task.set_status(stopping=None)  # a stop wb made earlier says nothing about this runner
+    task.set_status(stopping=None, parked=None)  # a stop wb made earlier says nothing about this runner
     with open(task.dir / "runner.log", "a") as log:
         # -X utf8: the runner reads and writes its files as UTF-8 under any locale (the
         # 2026-11-16 audit); a flag, not PYTHONUTF8, so the agent and its tests keep their own
@@ -1391,8 +1391,14 @@ def cmd_status(a):
                                            if a.all or (t.status.get("phase") not in store.CLOSED
                                                         and not t.spec.get("bench"))]
     tasks, others = (tasks, []) if a.name else _scope(tasks, a.repo, a.session)
+    parked = [] if a.name or a.all else [t for t in tasks if store.parked(t.status)]
+    tasks = [t for t in tasks if t not in parked]
+    others = [t for t in others if a.all or not store.parked(t.status)]
+    parked_line = (f"parked by wb stop --all (/workbench-quit): {', '.join(t.name for t in parked)}; "
+                   "leave them unless the user asks (wb status --all lists them)") if parked else None
     if not tasks:
         print("no open tasks" + ("" if a.all else " (wb status --all shows closed ones)"))
+        _say(parked_line)
         _say(_others_line(others, "open elsewhere"))
         return
     print(f"{'task':22} {'phase':9} {'rnd':>3} {'model':16} {'age':>5} {'idle':>5}  last")
@@ -1400,7 +1406,7 @@ def cmd_status(a):
         if t.status.get("phase") in LIVE:
             reap(t)
         st, sp = t.status, t.spec
-        phase = st.get("phase", "?")
+        phase = "parked" if store.parked(st) else st.get("phase", "?")
         if phase in store.ACTIVE and not runner_alive(t) and phase != "asking":
             phase += "?"  # the runner died seconds ago (reap waits REAP_GRACE)
         short = sp.get("model", "").split("/")[-1][:16]
@@ -1409,6 +1415,7 @@ def cmd_status(a):
               f"{(st.get('last') or '')[:70]}")
     if a.name and tasks[0].worktree.is_dir():
         print(f"worktree: {tasks[0].worktree}")
+    _say(parked_line)
     _say(_others_line(others, "open elsewhere"))
 
 
@@ -1523,7 +1530,8 @@ def stop_everything(tasks=None) -> list[str]:
             _stop_runner(t)
             t.event({"ts": store.now(), "round": t.status.get("round"), "kind": "stopped",
                      "by": "user", "text": "bail out: stopped by the user"})
-            t.set_status(phase="stuck", last="bail out: stopped", pid=None)
+            t.set_status(phase="stuck", last="bail out: stopped", pid=None,
+                         parked=store.now())  # out of the status line and new sessions (#541)
             _ack_all(t)
             stopped.append(f"{t.name} (worktree kept: {t.worktree})")
     return stopped
@@ -3973,6 +3981,24 @@ def ollama_line() -> str:
             f"{models.overrides_path().name}'s gpu_gb sets the GPU budget and each model's vram_gb its size")
 
 
+# A task waiting on Claude this long was left (a quit, a reboot, a project put down): nothing
+# else ever named it, and one such gated the weekly check for good (#541). wb doctor does.
+IDLE_DAYS = 3
+
+
+def idle_line() -> str | None:
+    """The tasks waiting on Claude (review, stuck, failed, asking) untouched for IDLE_DAYS+."""
+    cutoff = time.time() - IDLE_DAYS * 86400
+    old = [t for t in store.all_tasks() if t.status.get("phase") in store.NEEDS_CLAUDE
+           and not t.spec.get("bench") and (t.status.get("updated_at") or 0) < cutoff]
+    if not old:
+        return None
+    said = ", ".join(f"{t.name} ({t.status['phase']} {int((time.time() - (t.status.get('updated_at') or 0)) // 86400)}d"
+                     + (", parked" if store.parked(t.status) else "") + ")" for t in old)
+    return (f"waiting on Claude for {IDLE_DAYS}+ days: {said}: wb resume <name> continues a stuck "
+            "or failed one, wb report <name> shows where one stands, wb discard <name> drops one")
+
+
 def cmd_doctor(a):
     ok = True
 
@@ -4135,6 +4161,8 @@ def cmd_doctor(a):
                  f"{store.gb(held)}, with {store.gb(free)} free"
                  + ("" if free >= DISK_SPARE else ": a task's writes fail on a full disk; wb "
                     "discard an open task, or free some"))
+    if idle := idle_line():
+        print("--  " + idle)
     print("--  " + gpu_line())  # informs only: a CPU-only machine isn't broken
     if said := ollama_line():
         print("--  " + said)

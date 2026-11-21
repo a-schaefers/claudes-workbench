@@ -50,6 +50,14 @@ NEEDS_CLAUDE = {"review", "stuck", "failed", "asking"}
 CLOSED = {"accepted", "discarded"}
 
 
+def parked(st: dict) -> bool:
+    """A task `wb stop --all` (the mod's /workbench-quit) stopped and nothing has picked up since:
+    the status line, the session's open-tasks block and `wb status` leave it out, `wb status
+    --all` lists it. It stayed "awaiting review" and each new conversation was told to pick it up,
+    against the quit (#541). spawn_runner clears the mark; any other phase isn't parked."""
+    return st.get("phase") == "stuck" and bool(st.get("parked"))
+
+
 # The environment variables that name a path. A relative one, or one with a `~` no shell expanded
 # (a systemd unit, settings.json's env), meant one place to wb and another to the runner, which
 # runs from the package's directory: the task was written under the cwd and looked for under the

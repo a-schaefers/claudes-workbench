@@ -787,6 +787,26 @@ test('outside workbench mode another session\'s running task opens no pane and f
   expect(ui.filter(u => u.startsWith('status ')).at(-1)).toBe('status ⚒ wb · ours running r1')
 })
 
+test('a task /workbench-quit parked is not counted as awaiting review, nor rewoken', async ($, on) => {
+  // #541: a task the quit stopped stayed "1 awaiting review" in the status line for weeks
+  const clock = mock.clock(on, { now: 1_800_000_000_000 })
+  const files: Record<string, string> = {}
+  task(files, 'quit', 'stuck', { repo: '/home/u/a', cwd: '/home/u/a' })
+  files['/wb/tasks/quit/status.json'] = JSON.stringify({ phase: 'stuck', round: 1, updated_at: ts0 - 300, parked: ts0 - 300 })
+  task(files, 'done', 'review', { repo: '/home/u/a', cwd: '/home/u/a' })
+  files['/wb/tasks/done/acked'] = String(ts0)
+  const ui: string[] = []
+  fakeTasks(on, files, ['quit', 'done'], true, ui)
+  on('process.run', () => ({ value: { exitCode: 0, stdout: '', stderr: '' } }))
+  on('ui.toast', () => ({ value: undefined }))
+  const woken: string[] = []
+  on('prompt.submit', (_: any, e: any) => { woken.push(e.text); return { text: e.text } })
+  await $.session.start({ cwd: '/home/u/a', surface: 'terminal', isInteractive: true })
+  await clock.advance(120_000)
+  expect(ui.filter(u => u.startsWith('status ')).at(-1)).toBe('status ⚒ wb · 1 awaiting review')
+  expect(woken.join('\n')).not.toContain('quit')                // no "no notice reached Claude" for it
+})
+
 test('the pane follows the running task: its whole history, then what it is doing now', async ($, on) => {
   const clock = mock.clock(on, { now: 1_800_000_000_000 })
   const ts = 1_800_000_000
@@ -1928,6 +1948,8 @@ test('a leftover task waiting on Claude stops neither the weekly check nor the o
   expect(quietForJobs([t('review', hour)], now, theirs)).toBe(true)    // another session's
   expect(quietForJobs([t('stuck', 13 * hour)], now, ours)).toBe(true)  // left for a session long gone
   expect(quietForJobs([t('accepted', 0)], now, ours)).toBe(true)
+  // #541: one /workbench-quit parked waits on no one, this session's or not
+  expect(quietForJobs([{ ...t('stuck', hour), parked: true }], now, ours)).toBe(true)
 })
 
 test('Claude coding: its own edit in a task\'s worktree waits for the user\'s yes, unless Claude decides', async ($, on) => {

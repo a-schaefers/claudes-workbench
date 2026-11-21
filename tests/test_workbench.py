@@ -3891,6 +3891,45 @@ class Steering(Base):
         self.assertIn("resumed t-s1", out)
         self.assertIn("resumed t-s2", out)
 
+    def test_a_task_the_quit_stopped_is_parked_out_of_wb_status_until_it_is_picked_up(self):
+        # #541: /workbench-quit left t1 stuck, "awaiting review" in the status line and offered to
+        # every new conversation in the repo, against the quit
+        self.start("t-park", "hang")
+        running("t-park")
+        run_wb("stop", "--all")
+        st = store.Task("t-park").status
+        self.assertTrue(store.parked(st))
+        out = run_wb("status")
+        self.assertTrue(out.startswith("no open tasks"))      # the mod's open-tasks block: none
+        self.assertIn("parked by wb stop --all (/workbench-quit): t-park", out)
+        self.assertRegex(run_wb("status", "--all"), r"t-park +parked ")
+        self.assertRegex(run_wb("status", "t-park"), r"t-park +parked ")
+        os.environ["FAKE_SCENARIO"] = "ok"
+        run_wb("resume", "t-park")                            # picked up: open again
+        self.assertIsNone(store.Task("t-park").status.get("parked"))
+        wait_phase("t-park", {"review"})
+        self.assertRegex(run_wb("status"), r"t-park +review ")
+
+    def test_wb_doctor_names_the_tasks_left_waiting_on_claude_for_days(self):
+        # #541: a task left stuck, failed or in review for weeks was named nowhere
+        self.start("t-idle", "ok")
+        wait_phase("t-idle", {"review"})
+        self.start("t-fresh", "ok")
+        wait_phase("t-fresh", {"review"})
+        backdate("t-idle", 4 * 86400)
+
+        def doctor():
+            buf = io.StringIO()
+            with redirect_stdout(buf), self.assertRaises(SystemExit):
+                cli.main(["doctor"])
+            return buf.getvalue()
+        out = doctor()
+        self.assertIn(f"--  waiting on Claude for {cli.IDLE_DAYS}+ days: t-idle (review 4d): "
+                      "wb resume <name>", out)
+        self.assertNotIn("t-fresh", out)
+        run_wb("discard", "t-idle")
+        self.assertNotIn("waiting on Claude for", doctor())
+
     def test_get_it_done_takes_over_every_open_task(self):
         self.start("t-g1", "slow")
         self.wait_session("t-g1")

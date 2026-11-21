@@ -458,7 +458,7 @@ goes in that repo's CLAUDE.md instead. Drop a note that has stopped holding (`wb
   run again.
 - `wb discard <name> --reason "…"` drops it (a branch holding steps `wb next` committed is kept;
   `--drop-steps` deletes it too). `wb status` lists open tasks (e.g. after a context
-  reset); `wb stats` compares the models on finished work.
+  reset; tasks a /workbench-quit parked only by name: leave them unless the user asks); `wb stats` compares the models on finished work.
 - **Keep the good ones as bench cases.** An accepted step whose spec pinned the names its tests
   call, and whose tests fail on its base and pass in the agent's lane (one that commits or writes
   outside it never can: add refuses it), is a case: `wb bench add <name>` (`--step N` for a

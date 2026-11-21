@@ -87,7 +87,7 @@ const OLDEST_WAKE_MS = 60 * 60 * 1000 // never wake for a notification older tha
 
 // Change the tag when WbTask's fields change: a reload declines what the earlier shape stored.
 const tasks = atom({ plugin: 'workbench', key: 'tasks' } as const, [] as WbTask[], {
-  shape: 'tasks-6',
+  shape: 'tasks-7',
 })
 
 // Every Claude Code session id this process has had (`$.session.id()`): /clear and a resume go on
@@ -159,16 +159,16 @@ const AWAY_MS = 6 * 3600 * 1000 // the user counts as away this long after a web
 export function awayNow(webAt: number, now: number, list: WbTask[], isMine: (t: WbTask) => boolean): boolean {
   if (!webAt) return false
   if (now - webAt < AWAY_MS) return true
-  return list.some(t => t.backlog && isMine(t) && (ACTIVE.has(t.phase) || NEEDS.has(t.phase)))
+  return list.some(t => t.backlog && isMine(t) && (ACTIVE.has(t.phase) || waitsOnClaude(t)))
 }
 // Whether the weekly model check and the automatic optimize may run: no task anywhere active (the
 // GPU's, and a check's question beside a running task's), and none of this session's waiting on
 // Claude lately. Any task open at any age once gated both, so one stuck, failed or unreviewed
 // task left after a quit stopped them for good (#541); one idle past REWAKE_MAX_MS waits for a
-// session long gone, as rewake judges it.
+// session long gone, as rewake judges it; a parked one waits for no one.
 export function quietForJobs(list: WbTask[], now: number, isMine: (t: WbTask) => boolean): boolean {
   return !list.some(t => ACTIVE.has(t.phase) ||
-    (NEEDS.has(t.phase) && isMine(t) && now - t.updatedAt <= REWAKE_MAX_MS))
+    (waitsOnClaude(t) && isMine(t) && now - t.updatedAt <= REWAKE_MAX_MS))
 }
 async function away($: any, st: WbChat): Promise<boolean> {
   return awayNow(st.webAt, await $.clock.now(), await read($, tasks), mine)
@@ -202,6 +202,10 @@ export function attachedLines(files: unknown): string {
 
 const ACTIVE = new Set(['queued', 'running', 'testing', 'asking'])
 const NEEDS = new Set(['review', 'stuck', 'failed', 'asking'])
+// Waiting on Claude, unless parked: stopped by /workbench-quit (`wb stop --all`, status `parked`),
+// which the status line, rewake, the boundary and the jobs' gate don't count. It stayed "awaiting
+// review" and kept the weekly check off for good (#541); the pane and `wb status --all` still show it.
+const waitsOnClaude = (t: WbTask) => NEEDS.has(t.phase) && !t.parked
 const COLOR: Record<string, string> = {
   queued: 'subtle', running: 'claude', testing: 'suggestion', asking: 'warning',
   review: 'success', stuck: 'error', failed: 'error', accepted: 'inactive', discarded: 'inactive',
@@ -1424,6 +1428,7 @@ async function scan($: any, root: string, now: number): Promise<WbTask[]> {
       repo: String(sp.repo ?? ''), cwd: String(sp.cwd ?? ''), session: String(sp.session ?? ''),
       claude_pid: Number(sp.claude_pid ?? 0), claude_start: String(sp.claude_start ?? ''),
       backlog: String(sp.backlog ?? ''),
+      parked: phase === 'stuck' && !!st.parked,
       allowed: allowedLine((await readJson($, `${base}/coding.json`)).allowed),
     })
   }
@@ -1714,7 +1719,7 @@ async function poll($: any) {
     if (!on) mem.boundary = false
     mem.open = open
     await sayRules($, on)
-    if (mem.boundary && !mem.busy && !list.some(t => NEEDS.has(t.phase) && mine(t))) {
+    if (mem.boundary && !mem.busy && !list.some(t => waitsOnClaude(t) && mine(t))) {
       mem.boundary = false
       await compactAtBoundary($)
     }
@@ -2148,7 +2153,7 @@ const REWAKE_MAX_MS = 12 * 3600_000 // older than this, it waited for a session 
 async function rewake($: any, now: number, list: WbTask[]) {
   if (mem.busy || !mem.wake) return
   for (const t of list) {
-    if (!NEEDS.has(t.phase) || !mine(t) || now - t.updatedAt < REWAKE_MS || now - t.updatedAt > REWAKE_MAX_MS) continue
+    if (!waitsOnClaude(t) || !mine(t) || now - t.updatedAt < REWAKE_MS || now - t.updatedAt > REWAKE_MAX_MS) continue
     if (now - (mem.dropped.get(t.name) ?? 0) < REWAKE_MS) continue // dropped: once a minute
     const ackPath = `${mem.root}/tasks/${t.name}/acked`
     const acked = Number(await $.fs.read(ackPath).catch(() => '0')) || 0
@@ -2246,7 +2251,7 @@ function taskParts(list: WbTask[], on: boolean) {
   const shown = on ? list : list.filter(t => mine(t))
   const live = shown.filter(t => ACTIVE.has(t.phase) && t.phase !== 'asking')
   const asking = shown.filter(t => t.phase === 'asking')
-  const waiting = shown.filter(t => NEEDS.has(t.phase) && t.phase !== 'asking')
+  const waiting = shown.filter(t => waitsOnClaude(t) && t.phase !== 'asking')
   return { live, parts: [
     ...live.map(t => `${t.name} ${t.phase} r${t.round}`),
     ...asking.map(t => `${t.name} asks`),
