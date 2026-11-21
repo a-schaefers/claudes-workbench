@@ -25,6 +25,7 @@ from unittest import mock
 import warnings
 from contextlib import nullcontext, redirect_stderr, redirect_stdout
 from pathlib import Path
+from datetime import date
 
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
@@ -9420,6 +9421,26 @@ class Stats(Base):
         until = stats.feed(now)["until"]
         self.assertEqual(time.localtime(until)[:6], (2026, 11, 21, 0, 0, 0))
         self.assertGreater(until, now)
+
+    def test_a_daylight_saving_day_neither_skips_nor_repeats_a_date_nor_breaks_the_streak(self):
+        # #563: now - i * 86400 across a 23- or 25-hour day landed two days back or on the same one
+        from workbench import stats
+        before = os.environ.get("TZ")
+        def restore():
+            os.environ.pop("TZ", None) if before is None else os.environ.update(TZ=before)
+            time.tzset()
+        self.addCleanup(restore)
+        os.environ["TZ"] = "America/Denver"
+        time.tzset()
+        for now, yesterday in ((time.mktime((2026, 3, 9, 0, 15, 0, 0, 0, -1)), (2026, 3, 8)),    # after a 23-hour day
+                               (time.mktime((2026, 11, 1, 23, 30, 0, 0, 0, -1)), (2026, 10, 31))):  # a 25-hour day
+            days = [d["day"] for d in stats._days([], now)]
+            self.assertEqual(len(days), 30)
+            self.assertEqual(days[-1], date.fromtimestamp(now).isoformat())
+            self.assertEqual({(date.fromisoformat(b) - date.fromisoformat(a)).days
+                              for a, b in zip(days, days[1:])}, {1})  # consecutive, each once
+            landed = time.mktime((*yesterday, 12, 0, 0, 0, 0, -1))
+            self.assertEqual(stats._streak([{"ts": landed, "outcome": "accepted"}], now)["current"], 1)
 
     def test_a_models_write_speed_trend_compares_its_newest_third_with_its_oldest(self):
         from workbench import stats

@@ -1756,7 +1756,8 @@ Claude tokens saved by the estimate), `absorbed` (what never reached Claude: `au
 (`router.speed`), `write_trend` (`[[ts, tok/s]…]`, the newest 30 rows' own `speed.write`) and,
 from `TREND_MIN` 6 rows, `write_change_pct`: the newest third's median against the oldest
 third's), `sizes`, `stacks` (`{tasks, accepted_pct}`), `days` (the last 30 local days: `{day,
-tasks, landed}`), `guards` (summed), `helps` (`progress.helped`, per model tried), `bench` (each
+tasks, landed}`; the streak's and the days' arithmetic is on local dates, never `now - 86400`, which
+skipped or repeated a date across a daylight-saving change, #563), `guards` (summed), `helps` (`progress.helped`, per model tried), `bench` (each
 model's newest run: `{run, day, passed, of}`) and `optimized` (optimize.json's `{window, fits,
 spill, ts}` per model). It reads results.jsonl once and passes that snapshot down (each period's
 savings and each model's helps read it again: 16 reads of a 4,800-row history, 3 s at 20,000 rows,

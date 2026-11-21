@@ -4,6 +4,7 @@ a measurement that costs nothing is on by default, and every one can be turned o
 everything workbench has learned, for the tab's history (`wb stats --json`, #405)."""
 import time
 from collections import Counter, defaultdict
+from datetime import date, timedelta
 from statistics import median
 
 from . import store
@@ -68,7 +69,6 @@ def line() -> str:
 # The feed (#405): everything workbench has learned, as one object for the Stats tab (`wb stats
 # --json`). Built from what already computes it; a section with no data is left out, never a
 # zero, and the savings are the estimate savings.py labels as one.
-DAY = 86400
 MILESTONES_LANDED = (1, 10, 25, 50, 100, 250, 500, 1000)
 MILESTONES_SAVED = (100_000, 1_000_000, 10_000_000, 100_000_000)  # Claude tokens, estimated
 TREND_MIN = 6  # speed samples (tasks) before a model's trend is given
@@ -102,16 +102,15 @@ def _streak(rows: list[dict], now: float) -> dict | None:
     if not days:
         return None
     best = run = 1
+    gap = lambda a, b: (date.fromisoformat(b) - date.fromisoformat(a)).days  # noqa: E731
     for a, b in zip(days, days[1:]):
-        gap = round((time.mktime(time.strptime(b, "%Y-%m-%d"))
-                     - time.mktime(time.strptime(a, "%Y-%m-%d"))) / DAY)
-        run = run + 1 if gap == 1 else 1
+        run = run + 1 if gap(a, b) == 1 else 1
         best = max(best, run)
     current = 0
-    if days[-1] in (_day(now), _day(now - DAY)):
+    today = date.fromtimestamp(now)  # dates, not now - 86400: a 23- or 25-hour day skipped one (#563)
+    if days[-1] in (today.isoformat(), (today - timedelta(days=1)).isoformat()):
         current, i = 1, len(days) - 1
-        while i > 0 and round((time.mktime(time.strptime(days[i], "%Y-%m-%d"))
-                               - time.mktime(time.strptime(days[i - 1], "%Y-%m-%d"))) / DAY) == 1:
+        while i > 0 and gap(days[i - 1], days[i]) == 1:
             current, i = current + 1, i - 1
     return {"current": current, "best": best, "days": len(days)}
 
@@ -201,7 +200,8 @@ def _by(rows: list[dict], key) -> dict:
 
 
 def _days(rows: list[dict], now: float, n: int = 30) -> list[dict]:
-    want = [_day(now - i * DAY) for i in range(n - 1, -1, -1)]
+    today = date.fromtimestamp(now)  # local dates: now - i * 86400 skipped or repeated a day at DST (#563)
+    want = [(today - timedelta(days=i)).isoformat() for i in range(n - 1, -1, -1)]
     tasks, landed = defaultdict(int), defaultdict(int)
     for r in rows:
         if r.get("ts"):
