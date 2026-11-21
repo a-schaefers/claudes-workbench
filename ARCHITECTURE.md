@@ -2693,7 +2693,13 @@ models.json `engine`, else a cached probe of `GET <root>/api/version` (a JSON `v
 probe sends the provider's `apiKey` (`_KEYS` is filled before it), so an Ollama that wants a key
 isn't classed a server; a probe that gets no answer is remembered for `DOWN_SECS` (60 s, `_DOWN`), so a
 server that is down costs one 1.5 s timeout a minute, not one per `discover()`, and a runner or the
-chat server, which live for hours, learn the engine once it is back (#337). A server that
+chat server, which live for hours, learn the engine once it is back (#337). That covers only
+the engine probe: `status` asked an Ollama's `/api/tags` per model, so `router.rank` and `wb
+models` paid a 2.5 s timeout per model on a `wb remote` box asleep (`wb models` 31 s, each `wb
+start` 10 s, #705). A pass now keeps a `down` set and a `catalog` dict: `status(m, down,
+catalog)` adds a root it finds not answering to a `down` that is a set, and `rank`/`choose`
+(their `down=`, `catalog=`) and `cmd_models` share one through all their calls, as `wb doctor`
+and `wb top` pass theirs. A server that
 answers `/api/version` but only emulates Ollama is a `server` (`models.emulator`, cached per root
 in `_EMULATORS`; `ollama_answers` says no to it too): KoboldCpp, whose own `/api/extra/version`
 answers, or whose `/api/tags` row has `details.family` `koboldcpp`. Driven as Ollama, its

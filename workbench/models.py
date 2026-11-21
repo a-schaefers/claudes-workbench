@@ -859,8 +859,11 @@ def _catalog(m: Model, catalog: dict | None):
 def status(m: Model, down=frozenset(), catalog: dict | None = None) -> dict:
     """``{available, resident, why}``: can the runner get this model onto the GPU, is it there.
     What the config alone rules out comes first, so the fake models meet it too. ``down``: Ollama
-    roots the caller already found not answering, not asked again. ``catalog``: a dict the caller
-    keeps for one pass, so each server other than Ollama is asked for its /models once (_catalog)."""
+    roots the caller already found not answering, not asked again; a set the caller keeps for one
+    pass learns each one found so, as ``catalog`` does: a wb remote box asleep cost each status
+    call its 2.5 s timeout, per model, and wb models took 31 s (#705). ``catalog``: a dict the
+    caller keeps for one pass, so each server other than Ollama is asked for its /models once
+    (_catalog)."""
     if small := window_too_small(m.config):
         return _no(small_window_why(small))
     if m.config.get("tool_call") is False:  # the router used to hand it tasks (the 2026-11-16 audit)
@@ -874,6 +877,8 @@ def status(m: Model, down=frozenset(), catalog: dict | None = None) -> dict:
     if m.engine == "ollama":
         tags = None if m.root in down else _get(f"{m.root}/api/tags")
         if tags is None:
+            if isinstance(down, set):
+                down.add(m.root)
             return _no("ollama is not answering")
         row = _tag_row(m.name, tags)
         if row is None:

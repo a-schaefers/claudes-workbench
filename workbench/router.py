@@ -232,10 +232,15 @@ def fits(m: models.Model, budget: int | None) -> bool | None:
     return n <= models.SHARE_AT * budget if n and budget else None
 
 
-def rank(size: str, stack=()) -> list[Score]:
+def rank(size: str, stack=(), down: set | None = None, catalog: dict | None = None) -> list[Score]:
     """Every discovered model's case for a task of this size (in a repo of this stack), best
-    first (the user's policy leaves some out: allowed)."""
-    scores = [score(m, size, stack=stack) for m in models.discover().values() if allowed(m, size)]
+    first (the user's policy leaves some out: allowed). ``down`` and ``catalog``: what this pass
+    has learnt of the servers (models.status), the caller's to share across calls: each model's
+    status asked its server afresh, so a wb remote box asleep cost 2.5 s a model (#705)."""
+    down = set() if down is None else down
+    catalog = {} if catalog is None else catalog
+    scores = [score(m, size, state=models.status(m, down, catalog), stack=stack)
+              for m in models.discover().values() if allowed(m, size)]
     budget = models.gpu_budget() if scores else None
     for s in scores:
         s.fits = fits(s.model, budget) if s.state["available"] else None
@@ -252,10 +257,12 @@ def rank(size: str, stack=()) -> list[Score]:
     return close + rest + blocked
 
 
-def choose(size: str, stack=(), task_name: str | None = None) -> tuple[Score | None, str]:
+def choose(size: str, stack=(), task_name: str | None = None, down: set | None = None,
+           catalog: dict | None = None) -> tuple[Score | None, str]:
     """The model for a task of this size (in a repo of this stack) and one line on why. With
-    ``task_name``, one task in EXPLORE_ONE_IN explores a model outside the band (unproven)."""
-    ranked = rank(size, stack)
+    ``task_name``, one task in EXPLORE_ONE_IN explores a model outside the band (unproven);
+    ``down``, ``catalog``: rank's."""
+    ranked = rank(size, stack, down, catalog)
     if explores(task_name) and (new := unproven(ranked)):
         new[0].explored = True
         ranked = [new[0]] + [s for s in ranked if s is not new[0]]

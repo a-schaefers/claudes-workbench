@@ -193,6 +193,35 @@ class Real(unittest.TestCase):
             models.discover()
         self.assertEqual(len(probes), 2)
 
+    def test_a_sleeping_remote_ollama_is_asked_once_per_pass_by_wb_models_and_routing(self):
+        # #705: each model's status asked the box again into a 2.5 s timeout: wb models took 31 s
+        # and each wb start 10 s for a remote of 4 models, though the task ran on a local one
+        from workbench import cli
+        dead = socket.socket()
+        dead.bind(("127.0.0.1", 0))
+        port = dead.getsockname()[1]
+        dead.close()  # nothing listens there now
+        here = self.server({"/v1/models": {"data": [{"id": "local"}]}})
+        self.config({"box": {"options": {"baseURL": f"http://127.0.0.1:{port}/v1"},
+                             "models": {n: {} for n in ("a", "b", "c", "d")}},
+                     "s": {"options": {"baseURL": here + "/v1"}, "models": {"local": {}}}},
+                    {"box": {"engine": "ollama"}, "s": {"engine": "server"}})
+        asked = []
+        real = models._open
+
+        def counting(target, timeout):
+            url = target.full_url if hasattr(target, "full_url") else target
+            if f":{port}/" in url:
+                asked.append(url)
+            return real(target, timeout)
+        with mock.patch.object(models, "_open", counting):
+            self.assertEqual(router.choose("significant")[0].model.id, "s/local")
+            self.assertEqual(len(asked), 1)
+            asked.clear()
+            with redirect_stdout(io.StringIO()):
+                cli.main(["models"])
+        self.assertEqual(len(asked), 1)
+
     def test_an_ollama_behind_a_key_is_probed_with_it_and_known_as_ollama(self):
         class H(BaseHTTPRequestHandler):
             def do_GET(self):

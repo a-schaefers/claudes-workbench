@@ -2622,8 +2622,11 @@ def cmd_models(a):
     found = models.discover()
     if not found:
         die(f"no local models: {models.why_none()}")
+    # one pass's answers for every status and ranking below: a server asleep is asked once,
+    # not per model and again per size (31 s for a wb remote box of 4 models, #705)
+    down, catalog = set(), {}
     for m in found.values():
-        st = models.status(m)
+        st = models.status(m, down, catalog)
         print(f"{m.id:34} {('on GPU' if st['resident'] else 'ready' if st['available'] else 'no'):6}"
               f"  {m.label}" + ("" if st["available"] else f"  ({st['why']})"))
         print(f"{'':36}slice: {router.slice(m).line()}")
@@ -2637,7 +2640,7 @@ def cmd_models(a):
                   + " (the server says none; models.json weights_gb sets it)")
     for size in router.SIZES:
         print(f"\n{size}:")
-        ranked = router.rank(size)
+        ranked = router.rank(size, down=down, catalog=catalog)
         few = {sc.model.id for sc in router.unproven(ranked)}
         for i, sc in enumerate(ranked):
             mark = "→" if i == 0 and sc.state["available"] else " "
@@ -2648,7 +2651,7 @@ def cmd_models(a):
             if not router.allowed(m, size):
                 print(f"   {m.id:34} not for {size} tasks (wb model sizes)")
     if a.set_default:
-        top, why = router.choose("significant")
+        top, why = router.choose("significant", down=down, catalog=catalog)
         if top is None:
             die(why)
         try:
