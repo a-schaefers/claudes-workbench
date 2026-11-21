@@ -5799,13 +5799,17 @@ class Watch(Base):
             cli._stop_for_update([a, b])
         noticed = float((b.dir / "noticed").read_text())
         self.assertGreater(noticed, time.time() + 3000)
+        self.assertEqual(store.notices()[-1]["task"], "t-u1")   # the batch's first: in the order given
         self.assertGreaterEqual(cli._acked(b), noticed)
         at = time.time()
         c, d = tasks("t-s1", "t-s2")
         for t in (c, d):
             t.set_status(phase="stuck", last=runner.SIGNAL_STOP, signalled=at)
         runner._signal_notice(c, at)  # no runner of theirs left to wait for
-        self.assertGreaterEqual(cli._acked(d), float((d.dir / "noticed").read_text()))
+        row = store.notices()[-1]
+        self.assertEqual(sorted(row["tasks"]), ["t-s1", "t-s2"])
+        other = d if row["task"] == "t-s1" else c                # raised on the first started
+        self.assertGreaterEqual(cli._acked(other), float((other.dir / "noticed").read_text()))
 
     def test_a_malformed_notice_breaks_neither_wait_nor_the_commands_that_acknowledge(self):
         # one row without a task made every acknowledging command raise KeyError, and a task
