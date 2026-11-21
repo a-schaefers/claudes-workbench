@@ -3626,7 +3626,10 @@ def cmd_doctor(a):
     print(f"ok  python {sys.version.split()[0]} ({sys.executable})"
           + ("; python3 on PATH is older, so the launcher found this one" if handed else ""))
     good, said = version(["git"])
-    line(good, said)
+    have = gitops.version() if good else None
+    old = bool(have) and have < gitops.GIT_FLOOR  # #527: init -b and the rest, unchecked
+    line(good and not old, said + (f": workbench needs git {'.'.join(map(str, gitops.GIT_FLOOR))} "
+                                   "or newer; upgrade it" if old else ""))
     # Claude's Bash runs `wb` by name whatever WB_BIN says: WB_BIN only moves the mod's own calls
     # (the 2026-11-16 audit: doctor said ok beside "the mod can't run it")
     on_path, wb_bin = shutil.which("wb"), os.environ.get("WB_BIN")

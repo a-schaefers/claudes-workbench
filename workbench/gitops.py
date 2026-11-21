@@ -258,6 +258,12 @@ def lfs_filter(repo: Path) -> list[tuple[str, str]]:
     return [(k, v) for k, _, v in (line.partition(" ") for line in out.splitlines()) if k]
 
 
+# The oldest git workbench supports: Ubuntu 22.04's 2.34, where the fallbacks for what came later
+# (merge-tree --write-tree, 2.38; GIT_NO_LAZY_FETCH, 2.44) are checked. wb doctor flags an older
+# one (#527).
+GIT_FLOOR = (2, 34)
+
+
 @functools.lru_cache(maxsize=1)
 def version() -> tuple[int, ...] | None:
     """The git on PATH as numbers ((2, 44, 0)), None when it can't say."""

@@ -4051,6 +4051,38 @@ class SkillLibrary(Base):
         self.assertIn("added svg-charts", run_wb("skill", "add", "svg-charts", "--from",
                                                  str(self.draft("svg-charts")), "-m", "signed nowhere"))
 
+    def test_the_library_is_made_on_a_git_without_init_b_and_doctor_names_a_git_below_the_floor(self):
+        # #527 (the audit of v1.90): git before 2.28 refused `init -b`, the library was never
+        # made and `wb skill add` ended in a traceback; wb doctor accepted any git
+        shim = Path(self.tmp.name) / "old-git"
+        shim.mkdir()
+        real = shutil.which("git")
+        (shim / "git").write_text(
+            '#!/bin/sh\nfor a in "$@"; do [ "$a" = -b ] && [ "$prev" = -q ] && [ "$init" ] && '
+            '{ echo "error: unknown switch b" >&2; exit 129; }; [ "$a" = init ] && init=1; '
+            'prev=$a; done\n'
+            f'[ "$1" = --version ] && {{ echo "git version 2.25.1"; exit 0; }}\nexec {real} "$@"\n')
+        (shim / "git").chmod(0o755)
+        lib = Path(os.environ["WB_SKILLS"])
+        with mock.patch.dict(os.environ, PATH=f"{shim}:{os.environ['PATH']}"):
+            self.assertNotEqual(subprocess.run(["git", "init", "-q", "-b", "x", str(lib) + "-x"],
+                                               capture_output=True).returncode, 0)  # the shim bites
+            self.assertIn("added svg-charts", run_wb("skill", "add", "svg-charts", "--from",
+                                                     str(self.draft("svg-charts")), "-m", "old git"))
+            gitops.version.cache_clear()
+            try:
+                buf = io.StringIO()
+                with redirect_stdout(buf):
+                    try:
+                        cli.main(["doctor"])
+                    except SystemExit:
+                        pass
+            finally:
+                gitops.version.cache_clear()
+        self.assertEqual(subprocess.run(["git", "-C", str(lib), "symbolic-ref", "HEAD"], text=True,
+                                        capture_output=True).stdout.strip(), "refs/heads/master")
+        self.assertIn("BAD git version 2.25.1: workbench needs git 2.34 or newer", buf.getvalue())
+
     def test_the_users_own_skill_names_are_off_limits(self):
         home = Path(self.tmp.name) / "home"
         write_skill(home / ".claude" / "skills" / "publishing-arm", "publishing-arm", "Use when publishing.")
