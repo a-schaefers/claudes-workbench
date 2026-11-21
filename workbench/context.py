@@ -383,20 +383,42 @@ def experiment(task: store.Task, name: str) -> bool:
 MERGE_AS = ("merge", "ff", "squash")
 
 
-def repo_conf(repo: str | Path) -> dict:
-    """commands.json's `repos` entry for this repo (matched by real path, else by git dir), or
-    {}: its `setup` command and its limit (`setup_timeout`, #520), the ignored paths to `copy`
-    into a task's worktree, its `siblings` (#201), how `--merge` lands there (`merge`, #352)."""
-    real, repos = os.path.realpath(repo), commands_conf().get("repos") or {}
-    for k, v in repos.items():
-        if os.path.realpath(Path(k).expanduser()) == real:
-            return v
-    # else by git dir: a linked worktree of a configured repo is that repo (#498)
-    common = gitops.common_dir(repo) if repos else None
+def repo_conf(repo: str | Path, sub: str | None = None) -> dict:
+    """commands.json's `repos` entry for the task's spot, the repo or its package ``sub``
+    (task.json `subdir`), or {}: its `setup` command and its limit (`setup_timeout`, #520), the
+    ignored paths to `copy` into a task's worktree, its `siblings` (#201), how `--merge` lands
+    there (`merge`, #352). The key nearest the spot wins: the spot itself, else the nearest
+    directory above it inside the repo, matched by real path, else the same by git dir, as the
+    path inside its worktree: a linked worktree of a configured repo is that repo (#498). Any
+    key once matched by git dir, so in a monorepo the first package's entry (its setup, its
+    copies, its merge) applied to every task of the repo, the root's and the other packages' (#778)."""
+    repos = commands_conf().get("repos") or {}
+    if not repos:
+        return {}
+    top = os.path.realpath(repo)
+    spot = os.path.realpath(Path(repo) / sub) if sub else top
+
+    def within(p: str, d: str) -> bool:
+        return d == "." or p == d or p.startswith(d.rstrip(os.sep) + os.sep)
+
+    best = max(((len(kr), v) for k, v in repos.items()
+                if within(kr := os.path.realpath(Path(k).expanduser()), top) and within(spot, kr)),
+               default=None, key=lambda x: x[0])
+    if best:
+        return best[1]
+    common, rel_spot, found = gitops.common_dir(repo), os.path.relpath(spot, top), None
     for k, v in repos.items() if common else ():
-        if gitops.common_dir(Path(k).expanduser()) == common:
-            return v
-    return {}
+        kp = Path(k).expanduser()
+        if gitops.common_dir(kp) != common:
+            continue
+        try:
+            rel = os.path.relpath(os.path.realpath(kp), os.path.realpath(gitops.toplevel(kp)))
+        except gitops.GitError:
+            continue
+        rank = 0 if rel == "." else len(rel) + 1
+        if within(rel_spot, rel) and (found is None or rank > found[0]):
+            found = (rank, v)
+    return found[1] if found else {}
 
 
 def shell_rules(task: store.Task) -> list[dict]:

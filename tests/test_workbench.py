@@ -13929,6 +13929,37 @@ class Projects(Base):
         run_wb("start", "t-lib", "--spec", str(self.spec), "--repo", str(lib), "--model", "mimo")
         self.assertNotIn("subdir", store.Task("t-lib").spec)
 
+    def test_each_monorepo_package_gets_its_own_commands_json_entry_not_the_first_in_the_file(self):
+        # #778: no key equalled the repo's root, so the git-dir fallback took the first entry, a
+        # package's: the api task ran web's `pnpm install` and accept squashed by web's `merge`
+        g = lambda *a: subprocess.run(["git", "-C", str(self.repo), *a], check=True)  # noqa
+        web, api = self.repo / "packages" / "web", self.repo / "services" / "api"
+        for d in (web, api):
+            d.mkdir(parents=True)
+            (d / "CLAUDE.md").write_text(f"# {d.name}\n")
+        g("add", "-A")
+        g("commit", "-qm", "two packages")
+        Path(os.environ["WB_COMMANDS"]).write_text(json.dumps({"repos": {
+            str(web): {"setup": "true web", "merge": "squash"}, str(api): {"setup": "true api"}}}))
+        self.assertEqual(context.repo_conf(self.repo, "services/api"), {"setup": "true api"})
+        self.assertEqual(context.repo_conf(self.repo, "packages/web")["setup"], "true web")
+        self.assertEqual(context.repo_conf(self.repo), {})                  # the root: neither
+        self.assertEqual(context.repo_conf(self.repo, "services/other"), {})
+        os.environ["FAKE_SCENARIO"] = "ok"
+        run_wb("start", "t-api", "--spec", str(self.spec), "--repo", str(api), "--model", "mimo")
+        self.assertEqual(store.Task("t-api").spec.get("setup"), "true api")
+        # a linked worktree of the repo: the same package's entry, by the path inside it
+        wt = Path(self.tmp.name) / "linked"
+        g("worktree", "add", "-q", "-b", "feat", str(wt))
+        self.assertEqual(context.repo_conf(wt, "services/api"), {"setup": "true api"})
+        self.assertEqual(context.repo_conf(wt), {})
+        # the root's entry holds for every package without one of its own
+        Path(os.environ["WB_COMMANDS"]).write_text(json.dumps({"repos": {
+            str(self.repo): {"merge": "ff"}, str(web): {"merge": "squash"}}}))
+        self.assertEqual(context.repo_conf(self.repo, "services/api"), {"merge": "ff"})
+        self.assertEqual(context.repo_conf(wt, "packages/web"), {"merge": "squash"})
+        self.assertEqual(context.repo_conf(wt, "services/api"), {"merge": "ff"})
+
     def test_from_a_folder_inside_a_package_the_nearest_package_claude_md_above_is_used(self):
         # #606 (the audit of v1.90): only --repo itself was looked at, so from packages/app/src
         # wb start refused the repo, or with a root CLAUDE.md ran the task at the root

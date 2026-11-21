@@ -4762,7 +4762,7 @@ it. ACE-Step's takes peaked at -0.2 dBFS, near clipping, before any `loudnorm`: 
   task.json `repo`, `git_common` and a `cwd` inside the old place, and each `src` in
   `rules/<task>/submodules.json` under the old place (left there, `submodule_edits` failed on
   every filled submodule and skipped it, and an edit inside one vanished at accept, #682). commands.json `repos` entries
-  match a linked worktree of the repo by git dir (`context.repo_conf`).
+  match a linked worktree of the repo by git dir and the path inside it (`context.repo_conf`).
   `wb discard` records the branch's tip in status `tip`, then deletes the branch (`delete_branch`
   at that tip, printed as `(was <sha>)`) unless `--keep-branch`, the repo moved ("moved or was
   deleted: branch … wasn't deleted"), or the branch
@@ -6215,8 +6215,14 @@ $WB_HOME (~/.local/state/workbench)
   commands.json ($WB_COMMANDS)   the user's standing allowances: {"allow": [patterns], "paths": [dirs], "env": [names]}
                                  (each a list of strings, or the file is refused: context.commands_conf), and
                                  "repos": {"<repo path>": {"setup": cmd, "setup_timeout": secs, "copy": [paths], "siblings": [paths],
-                                 "merge": "merge|ff|squash"}}, each repo's worktree setup (context.repo_conf, by
-                                 real path, else by git dir: its linked worktrees too; --setup and --setup-timeout replace its setup and its limit, a
+                                 "merge": "merge|ff|squash"}}, each repo's worktree setup (context.repo_conf, for the
+                                 task's spot, the repo or its package (task.json subdir): a key may name a monorepo
+                                 package, and the key nearest the spot wins, the spot itself, else the nearest
+                                 directory above it in the repo, so the root's entry holds for a package without its
+                                 own and a package's never for the root or another package (#778: any key matched
+                                 by git dir, the file's first package entry for every task); by real path, else by
+                                 git dir and the path inside the worktree: its linked worktrees too; wb accept reads it
+                                 the same way; --setup and --setup-timeout replace its setup and its limit, a
                                  positive whole number, --copy and --sibling add) and how wb
                                  accept --merge lands there (context.MERGE_AS; --merge-as overrides, #352)
   chat.json ($WB_CHAT_CONFIG)    the web chat's {"bind": [...], "hosts": [...], "upload_mb": 25, "upload_message_mb": 50}

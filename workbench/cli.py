@@ -667,13 +667,13 @@ CACHE_DIRS = ("__pycache__", ".pytest_cache", ".mypy_cache", ".ruff_cache", ".to
               ".cache", ".idea", ".vscode")
 
 
-def _worktree_setup(repo: Path, a) -> dict:
+def _worktree_setup(repo: Path, a, sub: str | None = None) -> dict:
     """The task's `setup`, `copy` and `siblings`: commands.json's `repos` entry for the repo,
     with --setup in its place and --copy/--sibling added, each checked (#201, the 2026-11-19
     audit). A copied path must be ignored in the checkout (else it shows in the review diff) and
     no secret (SECRET_FILES): the user's settings stay theirs. A sibling is a directory beside
     the repo the lane may read."""
-    conf = context.repo_conf(repo)
+    conf = context.repo_conf(repo, sub)  # the package's entry, not the repo's first (#778)
     setup = a.setup if a.setup is not None else conf.get("setup") or ""
     copy, sibs = [], []
     for raw in [*conf.get("copy", []), *(a.copy or [])]:
@@ -873,7 +873,7 @@ def cmd_start(a):
         print(f"package: {sub} (its own CLAUDE.md): the agent, the setup and the tests run there")
     if not a.no_sign:  # said now, not after the whole task at wb accept (#374)
         _say(gitops.sign_problem(repo, a.base))
-    setup = _worktree_setup(repo, a)
+    setup = _worktree_setup(repo, a, sub)
     checkout_bytes = _disk_room(repo, a.base, setup)
     # Two projects, one GPU: a task that can't run beside the GPU's holders used to queue in
     # silence behind them, maybe for hours (the 2026-11-16 audit). Say so before any worktree.
@@ -975,7 +975,7 @@ def cmd_start(a):
                 *([f"runs `{setup['setup']}`"] if setup.get("setup") else [])]
         print(f"setup: the runner sets the worktree up first ({'; '.join(does)}); a failure stops "
               "the task before any round")
-    elif "repos" not in context.commands_conf() or not context.repo_conf(repo):
+    elif "repos" not in context.commands_conf() or not context.repo_conf(repo, sub):
         if lack := _missing_dirs(repo):
             print(f"note: the worktree has only committed files, not the checkout's ignored "
                   f"{', '.join(lack[:4])}: --setup '<install command>' sets a task up (--copy "
@@ -2223,7 +2223,8 @@ def cmd_accept(a):
     a.merge = a.merge or bool(a.merge_as)  # --merge-as says how, so it merges (#352)
     task = need(a.name)
     # a repo kept to linear history says so once, in commands.json `repos` (#352)
-    a.merge_as = a.merge_as or (a.merge and context.repo_conf(gitops.repo_of(task.spec)).get("merge")) or None
+    a.merge_as = a.merge_as or (a.merge and context.repo_conf(
+        gitops.repo_of(task.spec), task.spec.get("subdir")).get("merge")) or None  # its package's (#778)
     reap(task)
     spec, st = task.spec, task.status
     if st.get("phase") in store.CLOSED:
@@ -2357,7 +2358,7 @@ def cmd_accept(a):
            f"\nmerge with: {gitops.jj_merge(repo, spec['branch'])}" if gitops.jj_colocated(repo) else
            f"\nmerge with: " + gitops.merge_by_hand(
                repo, spec["branch"], close.get("merge_as") if close.get("merge") else
-               context.repo_conf(spec["repo"]).get("merge") or "merge",
+               context.repo_conf(spec["repo"], spec.get("subdir")).get("merge") or "merge",
                close.get("sign", True) and _signed(spec, a))))
     _say(savings.line(row) or spend.line(row.get("claude")))
     _say(checked)
