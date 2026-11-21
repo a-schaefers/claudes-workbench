@@ -392,7 +392,11 @@ def apply(m: models.Model) -> str:
     # record of its own the variant ranked below the source's one accepted task, so every start
     # picked the spilling source, and a source limited to trivial work got a variant that took
     # significant work (#584). router.lineage reads variant_of; router.rank prefers the variant.
-    for k, v in {**(models._overrides().get(m.id) or {}), "variant_of": m.id}.items():
+    # a variant of a variant keeps the first source, and names the one it replaces: written as
+    # the one it came from, the first source's record split off and the router went back to it (#723)
+    own = models._overrides().get(m.id) or {}
+    for k, v in {**own, "variant_of": own.get("variant_of") or m.id,
+                 **({"replaces": m.id} if own.get("variant_of") else {})}.items():
         models.set_override(key, k, v)
     _made(key, None)
     # measured already: it is the window that fit, so its arrival doesn't make a run due

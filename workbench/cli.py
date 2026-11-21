@@ -3479,7 +3479,8 @@ def cmd_model(a):
     except RuntimeError as e:
         die(str(e))
     for key in list(models._overrides().get(a.id) or {}):  # its sizes, labels, start/stop
-        models.set_override(a.id, key, None)
+        if key not in ("variant_of", "replaces"):  # its rows stay in its source's record (#723)
+            models.set_override(a.id, key, None)
     done = f"retired {a.id}: removed from OpenCode's config (its measurements stay in the history)"
     if a.delete:
         if prov["engine"] != "ollama":

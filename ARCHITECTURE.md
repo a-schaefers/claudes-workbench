@@ -2803,7 +2803,9 @@ model id; a model's entry is merged over its provider's (`{**provider, **model}`
   namespaced name never matched itself and `mannix/llama3:8b` kept `llama3:8b`, #461).
 - `variant_of: <id>`: `wb optimize apply` made this model from that one (with a copy of its other
   keys here): the two share one record in the router (`router.lineage`), and the router puts the
-  variant first (#584).
+  variant first (#584). A variant of a variant keeps the first source here and names the variant
+  it was made from in `replaces: <id>` (#723). `wb model retire` keeps both keys, so a retired
+  variant's tasks stay in its source's record.
 
 **Status** (`status` → {available, resident, why}). First what the config alone rules out, so the
 fake models meet it too: an entry with `tool_call: false` ("OpenCode's config says it can't call
@@ -3624,9 +3626,16 @@ compaction (`runner.handover_warning`, #595), else cut to a quarter of it, `limi
 output cap, and an entry no request could fit refused before anything is made: a 16K fit of a
 128K entry once wrote an input limit of -16384 and kept its 32K and 64K caps, #332, the audit of
 1.4; an alias's `id` dropped, since it would name the old model). The variant gets a copy of the
-source's models.json keys (`sizes`, `label`, `weights_gb`…) and `variant_of` the source's id; the
-router scores both on one record (`router.lineage`: the source, its variants) and, when both can
-run, puts the variant before its source, which stays for `--model`. The source's optimize row gets
+source's models.json keys (`sizes`, `label`, `weights_gb`…) and `variant_of` the source's id (an
+apply on a variant: the first source's, with `replaces` the variant's); the
+router scores them on one record (`router.lineage`: `variant_of` followed to the first source,
+then every model whose chain reaches it) and, when both can
+run, puts the variant before the models it stands in for (`router.replaced`: its `variant_of` and
+`replaces` chains, however far back), which stay for `--model`. An apply on a variant once wrote
+`variant_of` the variant and lineage followed one level, so the first source's tasks left the
+record, both the source and the first variant counted as replaced, and the router went back to
+the spilling source (#723); `wb model retire` dropped a variant's `variant_of` with its other
+keys, and its tasks with it. The source's optimize row gets
 `applied` (the variant's id), so `advice` stays quiet while the variant is registered; a run
 that measures the source again writes its row without it, so `optimize.applied` also knows the
 variant by the name apply gives the measured window (it came back after a changed GPU or
@@ -5742,7 +5751,7 @@ delivered as taken (`_stale_notes`, *Notes*).
 | `wb model add <provider/model>` | `--pull`, `--label`, `--context N`, `--url URL`, `--start CMD`, `--stop CMD` | Registers a model in opencode.json, merged into any existing entry; `--url` first writes an OpenAI-compatible provider for any server on this machine (`models.add_server_provider`: a provider already there is never touched, and one for another baseURL refuses the add; a URL off this machine needs models.json `local: true`), and `--start`/`--stop` write the model's models.json `start`/`stop`; on a first run with no `--url` it writes the `ollama` provider when Ollama answers; refuses a cloud model, an unknown served context (a server other than Ollama needs `--context`), a down Ollama, a down server of unknown engine (see *Managing the set*). |
 | `wb optimize [start\|estimate\|report\|stop\|apply] [<id>…]` | `--bench`, `--if-due` | Asked for, or when due at setup and session start (*Optimize*). `start --if-due`: only when due, else nothing printed. `estimate`: how long a run would hold the GPU. `start`: detached; measures each Ollama model's largest window all on the GPU (refused while a task holds it; a task that wants it stops it); `--bench` then starts `wb bench run` on every model. `report` (the default): a line per model. `stop`. `apply <id>…`: adds the measured window as an entry of its own beside the model (an Ollama `<name>:<tag>-<N>k`, `optimize.entry_name`, with that `num_ctx`, the entry's settings copied; refused when that name exists). |
 | `wb remote <host>` | `--port N` (11434), `--context N`, `--remove` | Another machine's Ollama as this one's models: provider `ollama-<host>` marked `local: true`, each tool-capable model it has pulled registered as `wb model add` would, one line each (see *Models*); exit 1 when it doesn't answer (with `OLLAMA_HOST=0.0.0.0` to try). Refuses a provider of that id already there for another baseURL, and a host no URL can carry; an IPv6 address is bracketed either way (#707). `--remove` undoes it; not while OpenCode's default model or `small_model` is one of them (#708), nor for a provider wb didn't add or that now points elsewhere. |
-| `wb model retire <id>` | `--delete` | Unregisters it (not OpenCode's default `model` nor its `small_model`, each refusal naming the field: #708) and drops its models.json overrides; `--delete` removes Ollama's weights (or says `ollama rm <name>` when it can't). |
+| `wb model retire <id>` | `--delete` | Unregisters it (not OpenCode's default `model` nor its `small_model`, each refusal naming the field: #708) and drops its models.json overrides but `variant_of` and `replaces` (its tasks stay in its source's record, #723); `--delete` removes Ollama's weights (or says `ollama rm <name>` when it can't). |
 | `wb model sizes <id> [trivial] [significant]` | | Limits the sizes it's routed (none: every size). A flag or size for another action is refused, not ignored (#602): `--url`, `--start`, `--stop`, `--label`, `--context` and `--pull` go with `add`, `--delete` with `retire`, sizes with `sizes`. |
 | `wb scout` | `--done [--notes "…"]` (`--notes` without `--done` refused, #602), `--due`, `--watch "…"`, `--unwatch N` (1-based; 0 refused) | The weekly check's facts (with the GPU budget and the devices it counts, `cli.gpu_line`; where Ollama's settings were read, `cli.ollama_line`; the model servers here, `cli.server_lines`: the server commands on PATH and each usual port whose `/v1/models` answers, flagged when OpenCode has no provider for it, compared by `models.server_key`, so `::1`, `localhost` or this host's name is one server, #588); the image and audio engines (`audio.coverage`: what the audio ones cover); `--done` records it; `--due` exits 0 when one is due (7 days); the watch list; each model's bench cases passed, when replayed. |
 | `wb skill list \| show <n> \| scan <n\|path>` | | The library, a skill with its history, the scan alone. |

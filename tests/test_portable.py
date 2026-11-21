@@ -1849,6 +1849,42 @@ class Optimize(unittest.TestCase):
         self.assertEqual((sv.tries, sv.wins, sm.tries), (1, 1, 1))   # one record, both ways
         self.assertEqual(router.lineage(m), {"ollama/m", "ollama/m:48k"})
 
+    def test_a_variant_of_a_variant_keeps_the_first_sources_record_and_leads_alone(self):
+        # #723 (reproduced): apply on a variant wrote variant_of the variant, lineage followed one
+        # level, so the source's tasks left the record, and with both the source and the first
+        # variant `replaced` the router went back to the spilling source; retiring a variant
+        # dropped its rows from the record
+        import io
+        from contextlib import redirect_stdout
+        from workbench import cli, optimize
+        self.ollama(65536)
+        for i in range(3):
+            store.append_jsonl(store.home() / "results.jsonl", {"task": f"t{i}", "model": "ollama/m",
+                                                                "size": "trivial", "outcome": "accepted", "ran": True})
+        m = models.discover()["ollama/m"]
+        optimize._record(m.id, {"window": 65536, "fits": 49152, "spill": 12, "tried": []})
+        optimize.apply(m)
+        v1 = models.discover()["ollama/m:48k"]
+        store.append_jsonl(store.home() / "results.jsonl", {"task": "t3", "model": v1.id,
+                                                            "size": "trivial", "outcome": "accepted", "ran": True})
+        optimize._record(v1.id, {"window": 49152, "fits": 32768, "spill": 9, "tried": []})  # a new card
+        optimize.apply(v1)
+        v2 = models.discover()["ollama/m:32k"]
+        self.assertEqual((v2.extra["variant_of"], v2.extra["replaces"]), ("ollama/m", "ollama/m:48k"))
+        self.assertEqual(router.lineage(v2), {"ollama/m", "ollama/m:48k", "ollama/m:32k"})
+        self.assertEqual(router.score(v2, "trivial").tries, 4)
+        self.assertEqual([s.model.id for s in router.rank("trivial")][0], "ollama/m:32k")
+        self.assertEqual(router.replaced([v2.id]), {"ollama/m", "ollama/m:48k"})
+        # an older apply's chain (variant_of the variant itself) is followed to the source too
+        models.set_override(v2.id, "variant_of", v1.id)
+        models.set_override(v2.id, "replaces", None)
+        self.assertEqual(router.lineage(models.discover()[v2.id]), {"ollama/m", "ollama/m:48k", "ollama/m:32k"})
+        self.assertEqual(router.replaced([v2.id]), {"ollama/m", "ollama/m:48k"})
+        with redirect_stdout(io.StringIO()):
+            cli.main(["model", "retire", v1.id])
+        self.assertNotIn(v1.id, models.discover())
+        self.assertEqual(router.score(models.discover()["ollama/m"], "trivial").tries, 4)  # its row stays
+
     def test_a_source_measured_again_after_its_apply_gets_no_advice_to_apply_it_again(self):
         # the review of #584: a run that measured the source again (a changed GPU, --all, a
         # stopped run) wrote its row without `applied`, the advice came back, and the command it
