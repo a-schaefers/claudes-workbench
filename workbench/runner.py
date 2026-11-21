@@ -53,7 +53,11 @@ class Stopped(BaseException):  # not an Exception: no `except Exception` on the 
     pass
 
 
+SIGNALLED: list = []  # when the SIGTERM came: a shutdown's runners are batched by it (#544)
+
+
 def _on_term(signum, frame):
+    SIGNALLED.append(time.time())
     signal.signal(signal.SIGTERM, signal.SIG_IGN)  # one stop is enough: a second (systemd sends
     proc = CURRENT.get("proc")                      # more) must not cut the cleanup short
     if proc and proc.poll() is None:
@@ -2492,6 +2496,49 @@ def _updated(task: store.Task) -> bool:
 # (status `stopping`, cli._stop_runner); any other leaves the task stuck, with a notice, so it
 # doesn't sit in a live phase that nothing will ever end (the 2026-11-16 audit).
 SIGNAL_STOP = "the runner was stopped by a signal (a shutdown, a logout or a kill), not by Claude"
+# A shutdown or logout signals every runner at once: each raised a stuck notice of its own, and
+# the mod woke Claude once a task (#544). A runner stopped by a signal waits, up to this long
+# after its own signal, while another task of its session still runs, so the others stop too
+# (past _stop's 10 s wait on an agent); then one notice names every task of the session the
+# signal stopped then (within the same span), raised on the first started, the rest acknowledged.
+SIGNAL_SETTLE = 12
+
+
+def _signal_notice(task: store.Task, at: float) -> None:
+    owner = store.owner(task)
+    ours = lambda: [t for t in store.all_tasks() if store.owner(t) == owner]  # noqa: E731
+    deadline = at + SIGNAL_SETTLE
+    while time.time() < deadline and any(
+            t.name != task.name and t.status.get("phase") in store.ACTIVE
+            and not t.status.get("stopping") and t.status.get("pid")
+            and models.runs(t.status["pid"], "workbench.runner", t.name) for t in ours()):
+        time.sleep(0.25)
+    with store.locked(store.home() / "locks" / "signal-stop.lock"):  # one writer per batch
+        named = {n for r in store.notices() if r["kind"] == "stuck" and r["ts"] >= at - SIGNAL_SETTLE
+                 for n in (r.get("tasks") if isinstance(r.get("tasks"), list) else ())}
+        if task.name in named:
+            return  # another runner's notice named this one
+        batch = [t for t in ours() if t.name not in named and t.status.get("phase") == "stuck"
+                 and t.status.get("last") == SIGNAL_STOP
+                 and abs((t.status.get("signalled") or 0) - at) <= SIGNAL_SETTLE]
+        if task.name not in (t.name for t in batch):
+            batch.append(task)  # resumed meanwhile, or no owner known: its own notice still
+        names, where = [t.name for t in batch], owner[1]
+        ts = store.now()
+        # the steps `wb next` committed, which a discard keeps (#494), for each task they are in
+        kept = [line for t in batch if (line := steps_line(t))]
+        batch[0].notify("stuck", (
+            f"task {task.name}: {SIGNAL_STOP}. wb resume {task.name} continues it in a fresh "
+            f"session, wb discard {task.name} drops it" if len(batch) == 1 else
+            f"{len(batch)} tasks' runners were stopped by a signal (a shutdown, a logout or a "
+            f"kill), not by Claude: {', '.join(names)}. wb resume --all"
+            + (f" --repo {shlex.quote(where)}" if where else "")
+            + " continues them in the order they were started")
+            + "".join(f"\n{k}" for k in kept),
+            round=batch[0].status.get("round"), ts=ts, tasks=names,
+            cause="signal")  # not the step's size (#582)
+        for t in batch[1:]:
+            store.write_ack(t, ts)  # had with the first's notice: neither wb wait nor the mod wakes for it
 
 
 def lock_file(name: str, kind: str):
@@ -2542,12 +2589,9 @@ def main():
         else:
             task.event({"ts": store.now(), "round": st.get("round"), "kind": "stopped",
                         "by": "signal", "text": SIGNAL_STOP})
-            task.set_status(phase="stuck", last=SIGNAL_STOP)
-            kept = steps_line(task)
-            task.notify("stuck", f"task {task.name}: {SIGNAL_STOP}. wb resume {task.name} "
-                        f"continues it in a fresh session, wb discard {task.name} drops it"
-                        + (f"\n{kept}" if kept else ""),
-                        round=st.get("round"), cause="signal")  # not the step's size (#582)
+            at = SIGNALLED[0] if SIGNALLED else time.time()
+            task.set_status(phase="stuck", last=SIGNAL_STOP, signalled=at)
+            _signal_notice(task, at)
     except Exception as e:
         err = traceback.format_exc()
         full = store.disk_full(e)

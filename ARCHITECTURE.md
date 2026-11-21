@@ -615,8 +615,16 @@ so no `except Exception` on the way swallows a stop). wb's own stops mark status
 (`cli._stop_runner`): that stop logs a `stopped` event (`by: reviewer`, "stopped by the
 reviewer"), and the command sets the phase. A SIGTERM without the mark (a shutdown, a logout, a
 `kill`) while the phase is live logs `stopped` `by: signal`, sets `stuck` with `SIGNAL_STOP` ("the
-runner was stopped by a signal … not by Claude") and raises a `stuck` notice, so the task is
-resumable rather than live forever (past the first step, with `steps_line`). Any other exception writes the traceback to `runner.log`, sets
+runner was stopped by a signal … not by Claude", status `signalled`: when the signal came) and
+raises a `stuck` notice, so the task is resumable rather than live forever (past the first step, with `steps_line`). A shutdown or a
+logout signals every runner at once, and each raised a notice of its own, one wake a task (#544):
+`_signal_notice` waits, up to `SIGNAL_SETTLE` (12 s, past `_stop`'s 10 s wait on an agent) after
+its signal, while another task of its session (`store.owner`: task.json `session` and `cwd`, else
+`repo`) still runs a live runner; then, under `locks/signal-stop.lock`, one notice names every
+task of the session the signal stopped within that span (`tasks`), raised on the first started
+with `wb resume --all --repo <dir>` (and each one's `steps_line`; `cause` `signal`), the others
+acknowledged with it (`store.write_ack`); a runner a notice already named raises none. One
+stopped alone keeps its own notice, with `wb resume <n>`. Any other exception writes the traceback to `runner.log`, sets
 `failed` and raises a `failed` notice with the traceback's tail. On the way out `_end_agent` runs
 once more and `pid` and `stopping` are cleared.
 
@@ -1968,11 +1976,12 @@ The runner appends notices to `$WB_HOME/notify.jsonl` (`Task.notify`: `{ts,
 task, kind, text, round?, id?, cause?, tasks?}`; `cause` on a `stuck` or `failed` notice with a round:
 `guard` (a guard stopped it), `agent` (OpenCode exited non-zero with no text), `signal` (a
 SIGTERM from outside wb, `SIGNAL_STOP`) or `died` (`reap`, a restart's batch notice too); `tasks`:
-a restart's batch, below). Kinds: `review` (the round report and `review_diff`), `stuck`, `failed` (the round report as text;
+a restart's or a shutdown's batch, below and in *The runner, inside*). Kinds: `review` (the round report and `review_diff`), `stuck`, `failed` (the round report as text;
 a load failure or crash without a round), `question` (with the question's `id`), `checkin`
 (periodic, a nudge, the mid-round handover before the last a round allows, a
 base check whose `--test-timeout` cut it short). `wb` itself writes only
-one: `reap`'s `failed` for a runner that died without a report (or one for a restart's batch). The agent never writes one: the
+one: `reap`'s `failed` for a runner that died without a report (or one for a restart's batch;
+the runner raises a shutdown's). The agent never writes one: the
 file is out of its lane (the 2026-11-16 audit: it could forge any task's wake, or wipe them
 all). Readers take its rows through `store.notices()`, which keeps only whole ones (a dict with a
 `NAME_RE` task, a kind, a numeric ts): one row without a task once made every acknowledging
@@ -2001,7 +2010,10 @@ of 1.8).
   the mod writes `acked` first, shows a toast, and submits
   a prompt: `[workbench] Task <n> <headline>.`, the notice's text, and the next commands to run
   (`NEXT[kind]` in `register.tsx`; a question names its `wb answer <n> --id <id>`, a PERMISSION
-  question the `wb allow` that answers it). A prompt the engine drops (a settings hook's block, a
+  question the `wb allow` that answers it). A batch's notice (a `tasks` list: a restart's or a
+  shutdown's) wakes as `[workbench] Tasks <a>, <b> were interrupted.` (one: `Task <n> was
+  interrupted.`) and ends with `BATCH_NEXT`, the resume, not the failure's `wb log`, feedback or
+  discard (#544). A prompt the engine drops (a settings hook's block, a
   Stop, a host limit) puts `acked` back (unless something acted on the task since), toasts, and
   the safety net tries again a minute later.
 - **Acting acknowledges.** `feedback`, `next`, `answer`, `allow`, `note`, `resume`, `takeover`,
@@ -4955,7 +4967,8 @@ run: a question's `wb answer <n> --id <id>`, and a PERMISSION request is answere
 allow` it names). A submit the engine drops (`{drop}`) puts `acked` back if it still holds the
 value written, records `mem.dropped`, and toasts once. With the `wake` setting off it is only
 toasted: `acked` isn't written, so `wb wait` still gets it. `deliver` remembers each task's
-newest notice ts in notify.jsonl's tail, however old (`mem.noticed`). `rewake`: when idle, with
+newest notice ts in notify.jsonl's tail, however old (`mem.noticed`), a batch's for each task it
+names (`tasks`: acknowledged with it, they have no notice of their own, and rewake woke for them). `rewake`: when idle, with
 wake on, a task of this session's waiting on
 Claude (review/asking/stuck/failed) whose status changed between 60 s (`REWAKE_MS`) and 12 h
 (`REWAKE_MAX_MS`) ago, whose news Claude hasn't had and whose wake wasn't dropped in the last
@@ -5371,6 +5384,7 @@ $WB_HOME (~/.local/state/workbench)
                                  the runner and wb stop froze at their next status write: the 0.90 review)
   locks/prepare.json, prepare-<n>.lock  the setups' and base checks' queue ({pid: {task, since, start,
                                  holding}}) and their turns, PREP_SLOTS of them (runner.prep_turn, #590)
+  locks/signal-stop.lock         one runner at a time writing a shutdown's one notice (runner._signal_notice, #544)
   locks/config-<key>.lock        one read-modify-write at a time of a user's config file (store.config_lock:
                                  <key> from the path a write lands in; beside the file it would be a stray
                                  file in the user's dotfiles; #495)
@@ -5490,6 +5504,7 @@ check-ins off), not `wb start`'s.
 | Key | Meaning; set by |
 |---|---|
 | `phase`, `last`, `pid` | the phase; the last action in words; the runner's pid (cleared when it exits) |
+| `signalled` | when a SIGTERM that wasn't wb's stopped the runner (`SIGNAL_STOP`): a shutdown's tasks are batched by it (`runner._signal_notice`, #544) |
 | `boot` | the boot the runner started in (`store.boot_id`: Linux's and WSL2's `/proc/sys/kernel/random/boot_id`, macOS's `kern.boottime`); `reap` reads another as a restart (#544) |
 | `round`, `round_started_at` | the runner round (every kind counts); when it started |
 | `steps`, `step_round`, `step_sizes` | `wb next`: the step number, the round it began, the closed steps' `results.step` |

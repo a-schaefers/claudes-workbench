@@ -346,6 +346,16 @@ const NEXT: Record<string, (n: string, id?: string) => string> = {
     `(progress, time, anything off), and log the same with \`wb note ${n} --text "…"\`. ` +
     `If it is heading the wrong way, \`wb steer ${n}\` (\`--now\` to interrupt). Keep it short.`,
 }
+// One notice for the tasks a restart or a shutdown interrupted (its `tasks`: cli._restart_notice,
+// runner._signal_notice). Nothing went wrong in them, yet the wake ended with the failure's
+// `wb log`, feedback or discard after the notice's own `wb resume --all` line (#544).
+const BATCH_NEXT = (names: string[]) => names.length > 1
+  ? 'Nothing went wrong in the tasks themselves: the `wb resume --all` line above continues ' +
+    'them all, in the order they were started (`wb resume <name>` one, `wb discard <name>` drops one).'
+  : `Nothing went wrong in the task itself: \`wb resume ${names[0]}\` continues it in a fresh ` +
+    `session, \`wb discard ${names[0]}\` drops it.`
+const batchOf = (row: Row): string[] | null =>
+  Array.isArray(row.tasks) && row.tasks.length ? row.tasks.map(String) : null
 const RUNNING = new Set(['queued', 'running', 'testing'])
 
 // A question delivered into a running turn (#542): the engine frames it as another session's
@@ -2026,7 +2036,8 @@ async function deliver($: any, now: number) {
   for (const row of parseLines(file.text)) {
     // Every notice counts for rewake, however old: a notice delivered before a reload (or by
     // another session) is news Claude had, not a lost one (the 2026-11-16 audit).
-    mem.noticed.set(row.task, Math.max(mem.noticed.get(row.task) ?? 0, row.ts))
+    // a batch's notice is news for each task it names (acked with it), or rewake woke for the rest
+    for (const n of [row.task, ...(batchOf(row) ?? [])]) mem.noticed.set(n, Math.max(mem.noticed.get(n) ?? 0, row.ts))
     if (row.ts * 1000 < Math.max(mem.startedAt, now) - OLDEST_WAKE_MS) continue
     due.set(row.task, [...(due.get(row.task) ?? []).filter(r => r.kind === 'question'), row])
   }
@@ -2052,15 +2063,20 @@ async function deliver($: any, now: number) {
           // dropped (timed out, its round ended or stopped) woke Claude for nobody (the 0.90 review)
           ? status.phase === 'asking' && await asking($, name, String(row.id))
           : status.phase === (row.kind === 'question' ? 'asking' : row.kind)
-      const headline = HEADLINE[row.kind] ?? row.kind
+      const batch = batchOf(row)
+      const headline = batch ? (batch.length > 1 ? `and ${batch.length - 1} more were interrupted`
+        : 'was interrupted') : HEADLINE[row.kind] ?? row.kind
       const key = `${name}:${row.ts}`
       if (current && !mem.toasted.has(key)) {
         mem.toasted.add(key)
         $.ui.toast(`workbench: ${name} ${headline}`)
       }
       if (!own || !mem.wake) continue // the toast only: the notice stays for its session or wb wait
-      const next = (NEXT[row.kind] ?? NEXT.failed)(name, row.id ? String(row.id) : undefined)
-      const text = `[workbench] Task \`${name}\` ${headline}.\n\n${row.text}\n\n${next}`
+      // a batch's wake ends with its resume, not the failure's next step (#544)
+      const next = batch ? BATCH_NEXT(batch) : (NEXT[row.kind] ?? NEXT.failed)(name, row.id ? String(row.id) : undefined)
+      const who = batch && batch.length > 1 ? `Tasks ${batch.map(n => `\`${n}\``).join(', ')} were interrupted`
+        : `Task \`${name}\` ${headline}`
+      const text = `[workbench] ${who}.\n\n${row.text}\n\n${next}`
       if (mem.busy && current) {
         // A question can't wait for the turn to end: its agent is blocked, and after the ask
         // timeout it guesses (a 20-minute review turn, #542). It goes into the running turn, as

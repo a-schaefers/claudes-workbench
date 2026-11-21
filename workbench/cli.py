@@ -344,8 +344,7 @@ def reap(task: store.Task, quiet: bool = False) -> bool:
     return True
 
 
-def _owner(t: store.Task) -> tuple:
-    return t.spec.get("session"), t.spec.get("cwd") or t.spec.get("repo")
+_owner = store.owner
 
 
 def _restart_notice(task: store.Task) -> None:
@@ -1176,14 +1175,7 @@ def _ack_file(task):
     return task.dir / "acked"
 
 
-def _write_ack(task, ts: float) -> None:
-    """The mark replaced whole: the mod and wb wait read it on every poll, and a read between a
-    truncate and the write (or a write that failed after it) saw 0, every old notice news again
-    (the 2026-11-16 audit)."""
-    f = _ack_file(task)
-    tmp = f.with_name(f".acked.{os.getpid()}.tmp")
-    tmp.write_text(str(ts))
-    os.replace(tmp, f)
+_write_ack = store.write_ack  # the runner writes one too (a shutdown's batch, #544)
 
 
 def _acked(task):

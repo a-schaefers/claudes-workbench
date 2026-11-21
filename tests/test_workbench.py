@@ -3865,6 +3865,32 @@ class Steering(Base):
         self.assertEqual(wait_phase("t-r2", {"review"}, timeout=40)["round"], 1)
         self.assertIn("nothing to resume", run_wb("resume", "--all"))
 
+    def test_a_shutdown_that_signals_every_runner_raises_one_notice_for_its_tasks(self):
+        # #544: a clean shutdown's SIGTERM left one stuck notice per task, written by each runner
+        # as it stopped, and the mod woke Claude once a task
+        self.start("t-s1", "hang")
+        running("t-s1")
+        self.start("t-s2", "hang", "--queue")               # behind t-s1 on the GPU
+        deadline = time.time() + 15
+        while not store.Task("t-s2").status.get("boot"):    # in drive: its SIGTERM handler is set
+            self.assertLess(time.time(), deadline, "t-s2's runner never started")
+            time.sleep(0.1)
+        before = len(store.read_jsonl(store.home() / "notify.jsonl")[0])
+        for name in ("t-s2", "t-s1"):                       # the shutdown signals them all
+            os.kill(store.Task(name).status["pid"], signal.SIGTERM)
+        for name in ("t-s1", "t-s2"):
+            self.assertEqual(wait_phase(name, {"stuck"}, timeout=40)["last"], runner.SIGNAL_STOP)
+        rows = store.read_jsonl(store.home() / "notify.jsonl")[0][before:]
+        self.assertEqual([(r["task"], r["kind"]) for r in rows], [("t-s1", "stuck")])
+        self.assertIn("2 tasks' runners were stopped by a signal", rows[0]["text"])
+        self.assertIn(f"wb resume --all --repo {shlex.quote(os.getcwd())}", rows[0]["text"])
+        self.assertEqual(rows[0]["tasks"], ["t-s1", "t-s2"])
+        self.assertGreaterEqual(cli._acked(store.Task("t-s2")), rows[0]["ts"])  # had with t-s1's
+        os.environ["FAKE_SCENARIO"] = "ok"
+        out = run_wb("resume", "--all", "--repo", os.getcwd())
+        self.assertIn("resumed t-s1", out)
+        self.assertIn("resumed t-s2", out)
+
     def test_get_it_done_takes_over_every_open_task(self):
         self.start("t-g1", "slow")
         self.wait_session("t-g1")

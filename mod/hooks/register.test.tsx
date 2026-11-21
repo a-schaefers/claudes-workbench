@@ -514,6 +514,50 @@ test('a notice already delivered (before a reload, or by wb wait) is not rewoken
   expect(woken).toEqual([])
 })
 
+test('one notice for the tasks a restart interrupted wakes once, ending with the resume, not the failure\'s next step', async ($, on) => {
+  // #544: the batch's wake ended with "Look at wb log …; feedback or discard" after its own
+  // wb resume --all line, and the tasks it named but carried no notice of their own were rewoken
+  const clock = mock.clock(on, { now: 1_800_000_000_000 })
+  const files: Record<string, string> = {}
+  task(files, 'a', 'failed', {}, ts0 + 0.05)
+  task(files, 'b', 'failed', {}, ts0 + 0.05)                   // its last write lands after the notice
+  notice(files, { ts: ts0, task: 'a', kind: 'failed', tasks: ['a', 'b'],
+    text: '2 tasks were interrupted by a restart: a, b. wb resume --all --repo /r continues them' })
+  files['/wb/tasks/b/acked'] = String(ts0)                    // acknowledged with a's notice
+  fakeTasks(on, files, ['a', 'b'])
+  on('process.run', () => ({ value: { exitCode: 0, stdout: '', stderr: '' } }))
+  const toasts: string[] = []
+  on('ui.toast', (_: any, e: any) => { toasts.push(e.text); return { value: undefined } })
+  const woken: string[] = []
+  on('prompt.submit', (_: any, e: any) => { woken.push(e.text); return { text: e.text } })
+  await $.session.start({ cwd: '/', surface: 'terminal', isInteractive: true })
+  await clock.advance(120_000)
+  expect(woken).toHaveLength(1)
+  expect(woken[0]).toContain('[workbench] Tasks `a`, `b` were interrupted.')
+  expect(woken[0]).toContain('the `wb resume --all` line above continues them all')
+  expect(woken[0]).not.toContain('wb log')
+  expect(woken[0]).not.toContain('wb feedback')
+  expect(toasts).toContain('workbench: a and 1 more were interrupted')
+})
+
+test('a shutdown\'s notice for one task says to resume it', async ($, on) => {
+  const clock = mock.clock(on, { now: 1_800_000_000_000 })
+  const files: Record<string, string> = {}
+  task(files, 'a', 'stuck')
+  notice(files, { ts: ts0, task: 'a', kind: 'stuck', tasks: ['a'], text: 'task a: the runner was stopped by a signal' })
+  fakeTasks(on, files, ['a'])
+  on('process.run', () => ({ value: { exitCode: 0, stdout: '', stderr: '' } }))
+  on('ui.toast', () => ({ value: undefined }))
+  const woken: string[] = []
+  on('prompt.submit', (_: any, e: any) => { woken.push(e.text); return { text: e.text } })
+  await $.session.start({ cwd: '/', surface: 'terminal', isInteractive: true })
+  await clock.advance(3000)
+  expect(woken).toHaveLength(1)
+  expect(woken[0]).toContain('[workbench] Task `a` was interrupted.')
+  expect(woken[0]).toContain('`wb resume a` continues it in a fresh session')
+  expect(woken[0]).not.toContain('Steer it')
+})
+
 test('two wakes due in one turn both arrive, the second after the first one\'s turn', async ($, on) => {
   // the 2026-11-16 audit: the second report never came, only a rewake a minute later
   const clock = mock.clock(on, { now: 1_800_000_000_000 })

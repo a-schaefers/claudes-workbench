@@ -579,6 +579,22 @@ def _start_tag(pid: int) -> str:
     return models.start_tag(pid)
 
 
+def owner(t: "Task") -> tuple:
+    """Whose task it is, as one restart or shutdown's batch is judged (#544): the Claude Code
+    session `wb start` ran in and the directory it ran in (else the repo)."""
+    return t.spec.get("session"), t.spec.get("cwd") or t.spec.get("repo")
+
+
+def write_ack(task: "Task", ts: float) -> None:
+    """Task's `acked` mark, replaced whole: the mod and wb wait read it on every poll, and a read
+    between a truncate and the write (or a write that failed after it) saw 0, every old notice
+    news again (the 2026-11-16 audit)."""
+    f = task.dir / "acked"
+    tmp = f.with_name(f".acked.{os.getpid()}.tmp")
+    tmp.write_text(str(ts))
+    os.replace(tmp, f)
+
+
 def all_tasks(archived: bool = False):
     """Every task in tasks/: open, and closed less than ARCHIVE_DAYS ago (archive); with
     ``archived``, the archived ones too, for a question about history: a batch's older tasks
