@@ -1478,6 +1478,9 @@ class GpuLease:
         # (feedback, next, resume) goes ahead of tasks started after it; an image, from now
         t = store.Task(task) if task else None
         self.since = (t.spec.get("created_at") if t and t.exists else None) or store.now()
+        # when this wait began, for how long it has waited: `since` is the task's age, so a task
+        # sent back three hours after it started read "waiting 3h00m" ten seconds in (#573)
+        self.waiting_since: float | None = None
 
     def _holders(self) -> dict:
         return holders(self.home, self.pool)
@@ -1487,8 +1490,13 @@ class GpuLease:
 
     def _entry(self, waiting: bool = False) -> dict:
         # the start time tells this runner from a later process given its pid (after a reboot)
+        if not waiting:
+            self.waiting_since = None
+        elif self.waiting_since is None:
+            self.waiting_since = store.now()
         return {"model": self.m.id if self.m else None, "task": self.task, "since": self.since,
-                "start": _started(os.getpid()), **({"waiting": True} if waiting else {})}
+                "start": _started(os.getpid()),
+                **({"waiting": True, "waiting_since": self.waiting_since} if waiting else {})}
 
     def warn(self, msg: str) -> None:
         """What Claude should see later, not only in status.last (overwritten within moments):

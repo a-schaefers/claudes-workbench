@@ -12725,6 +12725,29 @@ class Top(Base):
         self.assertEqual((store.Task("killed").status["phase"], store.Task("killed").status["last"]),
                          ("failed", cli.RUNNER_DIED))
 
+    def test_the_queue_says_how_long_a_task_has_waited_not_how_old_it_is_and_keeps_its_place(self):
+        # #573: a task sent back three hours after it started read "waiting 3h00m" ten seconds in
+        from workbench import models, top
+        now = time.time()
+        d = store.tasks_dir() / "old"
+        d.mkdir(parents=True)
+        store.write_json(d / "task.json", {"model": "ollama/m", "created_at": now - 3 * 3600})
+        lease = models.GpuLease(None, "old")
+        first = lease._entry(waiting=True)
+        self.assertEqual(first["since"], now - 3 * 3600)
+        self.assertAlmostEqual(first["waiting_since"], now, delta=5)
+        self.assertEqual(lease._entry(waiting=True)["waiting_since"], first["waiting_since"])
+        self.assertNotIn("waiting_since", lease._entry())  # admitted: the next wait starts afresh
+        later = subprocess.Popen(["sleep", "30"])
+        self.addCleanup(later.wait)
+        self.addCleanup(later.kill)
+        held = {str(os.getpid()): {**first, "waiting_since": now - 10},
+                str(later.pid): {"model": "ollama/m", "task": "later", "since": now - 600,
+                                 "waiting": True, "waiting_since": now - 300,
+                                 "start": models._started(later.pid)}}
+        q = self.top(Path(self.tmp.name)).queue({"gpu": held}, now)
+        self.assertEqual([(x["task"], x["waited_s"]) for x in q], [("old", 10.0), ("later", 300.0)])
+
     def test_the_default_tick_is_stats_json_every_else_two_seconds(self):
         from workbench import top
         self.assertEqual(top.default_every(), 2)

@@ -2226,8 +2226,10 @@ never 0):
   GPU row says a memory size: all in RAM, `cpu_bytes`, the normal state of a CPU-only machine,
   shown as `split 0.0 GB GPU` in the warning colour before #551), `idle`, `can't run` (with
   status's `why`), `remote` (another machine: no telemetry); `tasks` the lease holders on it.
-- `queue`: the lease's waiters, oldest first: `[{task, model, since, waited_s, pool?}]` (`pool`
-  for a remote server's).
+- `queue`: the lease's waiters, in line by `since` (the task's start): `[{task, model, since,
+  waited_s, pool?}]`; `waited_s` is how long this wait has lasted (gpu.json `waiting_since`), not
+  the task's age, which a task sent back for another round showed as hours ten seconds in (#573);
+  `pool` for a remote server's.
 
 On a terminal (without `--json`) the same view fills the alternate screen and is redrawn in place
 each tick: bars in eighths (`▏▎▍▌▋▊▉█`) for VRAM and busy, models by their `label`, the card's
@@ -2636,7 +2638,7 @@ or waiting on a question), not evicted (the 0.90 review: the other task unloaded
 for that one to finish). If not, it warns "ollama could not fit … waiting for the GPU to itself",
 unloads its own model (unless a holder runs the same model: it is theirs too), marks itself
 waiting and takes its turn as above (its shared lock dropped first), then loads alone.
-`gpu.json` is `{"<pid>": {model, task, since, start, waiting?, tests?}}` (`tests`: a task's
+`gpu.json` is `{"<pid>": {model, task, since, start, waiting?, waiting_since?, tests?}}` (`tests`: a task's
 `--unload-for-tests` tests hold the GPU, `model` null). `wb image` takes `gpu.lock` through
 `GpuLease(None, "wb image", wait=…)` (`wb audio`: `"wb audio"`, and the refusal names which): with `--wait` it queues in `gpu.json` like a task with no
 model, waits for the running tasks to finish, then has the GPU to itself; while it holds or waits
@@ -5187,9 +5189,11 @@ hidden files), `handovers` (fresh sessions). A `wb bench self` row (`bench.self_
   booleans, `every` 1, 2 or 5 seconds; a missing or mistyped key is its default (`stats.DEFAULTS`:
   on, on, 2). `set_setting` changes one key under `stats.lock`, the others kept: two picks at once
   each wrote back what it had read, and one was lost (#564).
-- `gpu.json`: `{"<pid>": {model, task, since, start, waiting?, tests?}}` (`tests`: true while a
-  task's `--unload-for-tests` tests hold the GPU, `model` null then; `since`: its place in the queue,
-  the task's `created_at`; `start`: the holder's start time, `/proc/<pid>/stat` field 22, else
+- `gpu.json`: `{"<pid>": {model, task, since, start, waiting?, waiting_since?, tests?}}` (`tests`: true while a
+  task's `--unload-for-tests` tests hold the GPU, `model` null then; `since`: its
+  place in the queue, the task's `created_at`; `waiting_since`: on a waiting entry, when this
+  lease began to wait, kept across its rewrites until it is admitted, for `wb top`'s `waited_s`
+  (#573); `start`: the holder's start time, `/proc/<pid>/stat` field 22, else
   `ps -o lstart=` (macOS: #236), so a recycled pid isn't taken for it; null when neither says).
 - `scout.json`: `{done_at, notes, offered_at}` (`offered_at` from the mod); `watch.json`: `[{ts, text}]`.
 - `update.json`: `{checked_at, behind, kind}` (`kind`: `marketplace` or `clone`); `checked_at`
@@ -5553,7 +5557,7 @@ nested `.md` files (`docs/`, `skill/`, `mod/`, `agent/`) are unaffected. A new r
   that imitate them, and *Running your own server* where it says what each server needs set.
 - **The status keys and event fields `wb top` reads** (`live_used`, `window`, `round`,
   `round_started_at`, `load_secs`, `last`; a `step` row's `ts`, `round`, `out`; gpu.json's
-  `waiting`, `since`) → `top.py` and the Top tests; its `--json` shape → *wb top* here.
+  `waiting`, `since`, `waiting_since`) → `top.py` and the Top tests; its `--json` shape → *wb top* here.
 - **A git call on a task's worktree** → through `gitops.git` (pinned to the recorded git dir, no
   hooks), never `git -C <worktree>` by hand; parsed output → a porcelain or `-z` form.
 - **Permissions or the config layer** (`context.py`, `write_config_layer`) → the real-OpenCode

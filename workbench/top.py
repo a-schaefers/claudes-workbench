@@ -404,10 +404,13 @@ class Top:
         rows = [(h.get("since") or 0, pool, h) for pool, held in pools.items()
                 for h in held.values() if h.get("waiting")]
         out = []
-        for since, pool, h in sorted(rows, key=lambda x: x[0]):
+        for since, pool, h in sorted(rows, key=lambda x: x[0]):  # in line by the task's start
             q = {"task": h.get("task"), "model": h.get("model")}
             if since:
-                q["since"], q["waited_s"] = since, round(now - since, 1)
+                q["since"] = since
+            # the wait's own length, not the task's age (#573); an entry from before has none
+            if isinstance(began := h.get("waiting_since"), (int, float)):
+                q["waited_s"] = round(max(0.0, now - began), 1)
             if pool != "gpu":
                 q["pool"] = pool
             out.append(q)
