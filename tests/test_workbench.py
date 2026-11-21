@@ -7117,6 +7117,28 @@ class Audio(Base):
             found = audio.inspect(tmp / "low-2-1.wav", "sfx", draw=False)
             self.assertEqual(found["peak_db"], 0.0)
 
+    @unittest.skipUnless(shutil.which("ffmpeg"), "needs ffmpeg")
+    def test_a_take_of_more_than_two_channels_is_measured_through_ffmpeg_on_any_python(self):
+        # review of #586: ffmpeg's copy kept the clip's channels, and for more than two it writes
+        # WAVE_FORMAT_EXTENSIBLE, which the wave module reads only from Python 3.12, so a 5.1 take
+        # read "unreadable" on 3.11 (CI's); the old mono copy had been measured
+        import array as _array, math, wave as _wave
+        tmp = Path(self.tmp.name)
+        src = tmp / "six.wav"
+        a = _array.array("h")
+        for i in range(16000):
+            a.extend([int(16000 * math.sin(i / 7))] + [0] * 5)
+        with _wave.open(str(src), "wb") as w:
+            w.setnchannels(6); w.setsampwidth(2); w.setframerate(16000); w.writeframes(a.tobytes())
+        copied = []
+        real = audio._measure
+        with mock.patch.object(audio, "_measure", lambda p: (copied.append(Path(p).read_bytes()[:64]), real(p))[1]):
+            found = audio.inspect(src, "sfx", draw=False)
+        self.assertNotIn("unreadable", found)
+        self.assertAlmostEqual(found["peak_db"], -6.2, delta=0.2)
+        i = copied[0].find(b"fmt ")
+        self.assertEqual(copied[0][i + 8:i + 10], b"\x01\x00")  # plain PCM, read by 3.11 too
+
     def test_the_word_error_rate_counts_the_fewest_edits_among_repeated_words(self):
         # #593 (Codex's audit of 1.8 → 1.90): difflib paired an insert with a delete, so one wrong
         # word in "go go go go" scored 100% with the wrong differences, and the 100% cap made an

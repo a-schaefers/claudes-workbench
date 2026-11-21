@@ -3599,7 +3599,9 @@ it. ACE-Step's takes peaked at -0.2 dBFS, near clipping, before any `loudnorm`: 
   (`_unload`, each distinct URL once) when the batch ends, inside the lease, whether it failed or
   not.
 - `inspect`: with ffmpeg, it makes a 16-bit PCM copy first at the clip's own rate and channels
-  (the `wave` module reads only integer PCM), measures loudness with `ebur128` and draws the
+  (the `wave` module reads only integer PCM; `_plain_tag` marks the copy plain PCM, since for
+  more than two channels ffmpeg writes WAVE_FORMAT_EXTENSIBLE, which `wave` reads only from Python
+  3.12), measures loudness with `ebur128` and draws the
   picture with `showspectrumpic`; the listener alone gets a 16 kHz mono copy. Without ffmpeg it
   uses the `wave` module alone and says "loudness: no ffmpeg". A file ffmpeg can't decode, or,
   without ffmpeg, one the `wave` module can't read that doesn't start like audio (`MAGIC`: RIFF,

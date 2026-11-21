@@ -269,6 +269,22 @@ class _Meter:
                 "tail": round((len(loud) - 1 - last) * step, 2), "gaps": gaps}
 
 
+def _plain_tag(path: Path) -> None:
+    """Mark ffmpeg's 16-bit copy plain PCM. For more than two channels ffmpeg writes
+    WAVE_FORMAT_EXTENSIBLE (its samples plain PCM all the same), which the wave module reads only
+    from Python 3.12: once the copy kept the clip's channels (#586), a 5.1 take read "unreadable"
+    on 3.11, where the old mono copy had been measured."""
+    try:
+        with open(path, "r+b") as f:
+            head = f.read(64)
+            i = head.find(b"fmt ", 12)
+            if head[:4] == b"RIFF" and head[8:12] == b"WAVE" and i >= 0 and head[i + 8:i + 10] == b"\xfe\xff":
+                f.seek(i + 8)
+                f.write(b"\x01\x00")
+    except OSError:
+        pass
+
+
 def _measure(path: Path) -> dict | None:
     """`levels` of a PCM WAV at its own rate, each frame's loudest channel, read a block at a
     time; None when the wave module can't read it (float or 24-bit WAV: ffmpeg converts those
@@ -488,6 +504,8 @@ def inspect(path: Path, kind: str, script: str = "", seconds: float | None = Non
     with tempfile.TemporaryDirectory(prefix=".wb-listen-") as tmp:
         whole = Path(tmp) / "pcm.wav"
         r = _ffmpeg("-v", "error", "-i", str(path), "-c:a", "pcm_s16le", "-y", str(whole))
+        if r and r.returncode == 0 and whole.is_file():
+            _plain_tag(whole)
         measured = _measure(whole if r and r.returncode == 0 and whole.is_file() else path)
         if measured is None:
             # ffmpeg couldn't decode it, or, with no ffmpeg, it doesn't even start like audio: an
