@@ -290,10 +290,14 @@ def notice(task: store.Task, qid: str, q: dict) -> str:
         body = (f"PERMISSION to run: `{q['command']}`\nWhy: {question}\nAllow it with `wb allow "
                 f"{task.name} \"<pattern>\"` (--always to keep it), or answer with another way.")
     elif q["path"]:
+        from . import context  # the runner's side: the ask server never builds a notice
         path = shlex.quote(q["path"])
-        body = (f"PERMISSION to use the directory {path} (outside its lane)\nWhy: {question}\n"
-                f"Allow it with `wb allow {task.name} --path {path}` (--always to keep it), or "
-                "answer with another way.")
+        body = f"PERMISSION to use the directory {path} (outside its lane)\nWhy: {question}\n"
+        if why := context.kept_out(q["path"]):  # no grant reaches it: don't suggest one (#912)
+            body += f"No grant reaches it: {why}, or answer with another way."
+        else:
+            body += (f"Allow it with `wb allow {task.name} --path {path}` (--always to keep it), "
+                     "or answer with another way.")
     else:
         body = f"Q: {question}"
     if q["context"].strip():

@@ -2144,8 +2144,8 @@ def _lane_dir(raw: str, guard: set[str] = frozenset()) -> str:
     real = os.path.realpath(given)
     if real != given:
         die(f"{raw} is a link to {real}: allow {real} itself if that is what the task needs")
-    if why := context.lane_refusal(real):
-        die(why)
+    if why := context.lane_refusal(real) or context.kept_out(real):
+        die(why)  # kept_out: writable() would split the grant away, the retry refused (#912)
     if any(real == g or context._under(real, g) for g in guard):
         die(f"{raw}: inside the task's own repo or its git directory, which no lane may write (wb's "
             "git runs there, and a hook planted in it would run outside the lane); take what the "

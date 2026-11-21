@@ -23,7 +23,8 @@ check-in, when an agent asks for a command or a directory, a spec needs web rese
   user's checkout or another project: there, take the file yourself or say no. `wb allow --path`
   refuses a path through a link (it names the target: allow that only if it is what the task
   needs; the agent can plant links in its lane), a place inside credentials or workbench's own
-  state and config, and one in the task's own repo (the user's checkout: take that file yourself).
+  state and config, one in the task's own repo (the user's checkout: take that file yourself),
+  and one the lane always keeps out (`~/.cargo/bin`, rustup's toolchains, the user's active venv).
   A toolchain the build wants installed (a Python uv must download, a
   `rust-toolchain.toml` toolchain, `uv tool install`, `cargo install`, the gems a `bundle
   install` adds to an rbenv, rvm, asdf or mise Ruby) is refused there: install it yourself (the

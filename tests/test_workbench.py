@@ -8784,6 +8784,34 @@ class Lane(Base):
         self.assertLessEqual(set(grants), set(context.writable(task)))
 
     @home_outside_the_lane
+    def test_a_grant_the_lane_always_splits_away_is_refused_not_reported_as_allowed(self):
+        # #912 (the third 2026-11-21 audit): `wb allow --path ~/.cargo/bin`, or a path in the
+        # user's active venv, was saved and the agent told to run it again, but writable() split
+        # it away, so the retry was refused the same way and a permission request was spent
+        home = self.fake_home()
+        (home / ".cargo" / "bin").mkdir(parents=True)
+        venv = home / "envs" / "app"
+        (venv / "bin").mkdir(parents=True)
+        (venv / "pyvenv.cfg").write_text("home = /usr/bin\n")
+        task = self.bare_task("t-912", self.repo)
+        q = lambda p: {"question": "install it", "command": "", "path": p, "context": ""}
+        with mock.patch.dict(os.environ, {"VIRTUAL_ENV": str(venv)}):
+            for p in (home / ".cargo" / "bin", home / ".rustup" / "toolchains" / "nightly",
+                      venv / "lib"):
+                err = io.StringIO()
+                with self.assertRaises(SystemExit), contextlib.redirect_stderr(err):
+                    cli._lane_dir(str(p))
+                self.assertIn("always keeps out", err.getvalue())
+                self.assertFalse((home / ".rustup").exists())        # nothing made
+                body = ask_mcp.notice(task, "q1", q(str(p)))
+                self.assertTrue(body.startswith("PERMISSION to use the directory "))
+                self.assertIn("No grant reaches it", body)
+                self.assertNotIn("wb allow", body)
+            # one that holds a split place is granted around it, as before
+            self.assertEqual(cli._lane_dir(str(home / ".cargo")), str(home / ".cargo"))
+            self.assertIn("wb allow t-912 --path", ask_mcp.notice(task, "q2", q(str(home / "x"))))
+
+    @home_outside_the_lane
     def test_a_cache_split_around_an_active_venv_still_takes_new_caches_and_names_grants_below(self):
         # #825 (the second 2026-11-21 audit): with a poetry venv active, ~/.cache was granted only
         # its existing entries, so uv's or Go's first cache was refused, and the report named

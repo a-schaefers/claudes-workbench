@@ -510,8 +510,8 @@ SDK_DEFAULTS = ("Android/Sdk", "Library/Android/sdk")
 VAR_CACHES = {"GOPATH": "pkg", "BUN_INSTALL": "install/cache"}
 # inside a toolchain home in the lane, what stays out of it: the programs on the user's PATH and
 # what their shell sources, and the toolchains rustup's proxies run (relative to the home, or to
-# CARGO_HOME and RUSTUP_HOME for theirs); a toolchain a rust-toolchain.toml names that isn't
-# installed yet asks first (`wb allow --path`)
+# CARGO_HOME and RUSTUP_HOME for theirs); no grant reaches them (kept_out, #912), so `cargo
+# install` or a toolchain a rust-toolchain.toml names that isn't installed yet is Claude's to do
 NOT_WRITABLE = (".cargo/bin", ".cargo/env", ".dotnet/tools", ".cabal/bin", ".ghcup/bin",
                 ".rustup/toolchains", ".nimble/bin")
 # and the same places in the homes TOOL_HOME_VARS moved: nimble and cabal install programs into
@@ -767,6 +767,19 @@ def split_points() -> set[str]:
     files, the user's active Python environments (#825: the test report named `~/.cache`, which
     a grant split around the same venv again) and NOT_WRITABLE's places, made or not."""
     return _hidden() | set(python_envs()) | not_writable(made_only=False)
+
+
+def kept_out(raw: str) -> str | None:
+    """Why the lane drops a grant of ``raw`` whole, or None: it is (in) a place writable() always
+    splits out, an active Python environment or a NOT_WRITABLE place, made or not. `wb allow
+    --path ~/.cargo/bin` was saved and the agent told to run it again, and its retry was refused
+    the same way (#912, the third 2026-11-21 audit)."""
+    real = os.path.realpath(Path(raw).expanduser())
+    for h in sorted(set(python_envs()) | not_writable(made_only=False)):
+        if real == h or _under(real, h):
+            return (f"{raw}: in {h}, which the lane always keeps out (what is there runs later "
+                    "outside the lane, as you); install the toolchain or package there yourself")
+    return None
 
 
 def gem_home_of(real: str) -> str | None:
