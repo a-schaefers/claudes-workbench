@@ -12074,7 +12074,7 @@ class LogoutStops(Base):
                         mock.patch.object(optimize, "estimate", return_value=60), \
                         mock.patch.object(models, "holders", return_value={}):
                     optimize.start()
-                with mock.patch.object(bench, "driver", return_value=None), \
+                with mock.patch.object(bench, "driver", return_value={}), \
                         mock.patch.object(bench, "cases", return_value={"c": {}}), \
                         mock.patch.object(models, "discover", return_value={}), \
                         mock.patch.object(models, "resolve", return_value=types.SimpleNamespace(id="m")):
