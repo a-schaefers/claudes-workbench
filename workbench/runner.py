@@ -1412,11 +1412,28 @@ def runner_may(path: str) -> bool:
 
 def lane_grant(path: str) -> str | None:
     """The `wb allow --path` that reaches a refused path: itself when it exists (a directory, a
-    device node, a socket) or is a device node, else the nearest directory that does; None when no grant can (`/`,
-    the home directory, a secret: context.lane_refusal)."""
-    real = os.path.realpath(path)
+    device node, a socket) or is a device node, else the nearest directory that does; the
+    toolchain home it falls in when that isn't made yet, or the one below it (`~/go`: `go/pkg`,
+    context.tool_home_of, #824: the walk reached the home directory); then, while that place holds what the lane is split around
+    (context.split_points: a grant of it would be split again), the next directory down
+    towards the path. None when no grant can (`/`, the home directory, a secret:
+    context.lane_refusal)."""
+    target = real = os.path.realpath(path)
     while not os.path.exists(real) and not real.startswith("/dev/"):  # a node: itself, or /dev
         real = os.path.dirname(real)
+    if (home := context.tool_home_of(target)) and (not os.path.exists(home)
+                                                   or context._under(home, target)):
+        real = home  # made by wb allow --path (cli._lane_dir), then in the lane (#824)
+    if context.lane_refusal(real):
+        return None
+    if real in context.secret_sockets():
+        return real  # Docker Desktop's, in .docker: connected to alone (#441)
+    out = context.split_points()
+    while real != target and context._under(target, real) and \
+            any(context._under(h, real) for h in out):
+        real = os.path.join(real, target[len(real):].strip("/").split("/")[0])
+    if real in out or any(context._under(real, h) for h in out):
+        return None  # what the lane keeps out: ~/.cargo/bin, a secret
     return None if context.lane_refusal(real) else real
 
 
@@ -1854,6 +1871,11 @@ def _prepare_now(task: store.Task) -> bool:
         f"setting up the worktree failed ({setup_timed_out(spec) if code == 'timeout' else code})"
     tail = "\n".join("    " + x for x in clip_tail(output, 8, total=1500).splitlines())
     proxy = f"\n{proxy_line(gone)}, if the setup needed it" if (gone := proxy_gap(output)) else ""
+    # what the lane refused, as a test run's report names it: a first `npm ci` failed on a
+    # ~/.npm not made yet, and the notice named no grant (#824)
+    proxy += "".join(f"\nthe lane refused {shlex.quote(n)}: wb allow {task.name} --path "
+                     f"{shlex.quote(lane_grant(n) or n)}, if the setup needs it"
+                     for n in lane_refused(task, output))
     task.set_status(phase="failed", last=what, infra="setup", failed_before="setup")  # #508
     # resume, not discard and start again: the agent never ran, and wb resume sets up again (#581)
     task.notify("failed", f"task {task.name}: {what} before any round "

@@ -3361,6 +3361,18 @@ class WorktreeSetup(Base):
         self.assertIn("NO-NETWORK", note["text"])
         self.assertIn("NO-NETWORK", (t.dir / "setup.txt").read_text())
 
+    def test_a_setup_the_lane_refused_says_the_grant_that_reaches_it(self):
+        # #824 (the second 2026-11-21 audit): a first `npm ci` refused ~/.npm, and the failed
+        # notice named no grant, only the setup's output
+        outside = Path(tempfile.mkdtemp(dir=os.path.expanduser("~"), prefix=".wb-824-"))
+        self.addCleanup(shutil.rmtree, outside, True)
+        self.start("t-setlane", "ok", "--setup",
+                   f"echo \"npm ERR! EACCES: permission denied, mkdir '{outside}/_cacache'\"; exit 243")
+        wait_phase("t-setlane", {"failed"})
+        note = [r for r in store.notices() if r["task"] == "t-setlane"][-1]
+        self.assertIn(f"the lane refused {outside}/_cacache: wb allow t-setlane --path {outside}, "
+                      "if the setup needs it", note["text"])
+
     def test_a_setup_past_its_timeout_fails_the_task_naming_the_limit_and_how_to_raise_it(self):
         # #520: a fixed 1800 s with no override failed a big first build before round 1, and
         # starting again hit the same limit
@@ -7909,6 +7921,34 @@ class Lane(Base):
         self.assertNotIn("lane", st["tests"])
         prompt = store.Task("t-773-run").round_dir(2).joinpath("prompt.md").read_text()
         self.assertIn("the bug is in this change", prompt)
+
+    @home_outside_the_lane
+    def test_a_toolchain_cache_not_made_yet_is_named_with_the_grant_that_makes_it(self):
+        # #824 (the second 2026-11-21 audit): on a machine that never ran npm or Go, the walk up
+        # from ~/.npm or ~/go reached the home directory, which no grant may name, so the report
+        # named nothing and the auto-fix rounds went to what read as the project's bug
+        abi = mock.patch.object(lane, "abi", lambda: 6)   # a lane to refuse: #773 asks for one
+        abi.start(); self.addCleanup(abi.stop)
+        home = self.fake_home()
+        task = self.bare_task("t-824", self.repo)
+        out = (f"npm ERR! Error: EACCES: permission denied, mkdir '{home}/.npm'\n"
+               f"go: could not create module cache: mkdir {home}/go: permission denied\n"
+               f"error: failed to create directory `{home}/.cargo/registry/index`: "
+               "Permission denied (os error 13)\n")
+        refused = [f"{home}/.npm", f"{home}/go", f"{home}/.cargo/registry/index"]
+        self.assertEqual(runner.lane_refused(task, out), refused)
+        grants = [f"{home}/.npm", f"{home}/go/pkg",   # GOPATH's cache, not the whole of ~/go
+                  f"{home}/.cargo/registry"]          # never ~/.cargo, where cargo's bin/ goes
+        self.assertEqual([runner.lane_grant(p) for p in refused], grants)
+        line = runner.not_the_code(task, {"ok": False, "exit": 1, "lane": refused})
+        self.assertIn(f"wb allow t-824 --path {home}/.npm; wb allow t-824 --path {home}/go/pkg", line)
+        self.assertIsNone(runner.lane_grant(f"{home}/notes/x"))     # nothing of a toolchain's
+        for g in grants:
+            self.assertEqual(cli._lane_dir(g), g)                    # made, then in the lane
+        Path(os.environ["WB_COMMANDS"]).write_text(json.dumps({"paths": grants}))
+        self.assertEqual(runner.lane_refused(task, out), [f"{home}/go"])
+        self.assertEqual(runner.lane_grant(f"{home}/go"), f"{home}/go/pkg")   # still its cache
+        self.assertLessEqual(set(grants), set(context.writable(task)))
 
     @unittest.skipUnless((lane.abi() or 0) >= 9, "needs Landlock ABI 9")
     @home_outside_the_lane

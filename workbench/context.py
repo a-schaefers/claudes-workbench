@@ -672,6 +672,51 @@ def _split(place: str, out_of: set[str]) -> list[str]:
     return [q for n in names for q in _split(os.path.join(real, n), out_of)]
 
 
+def tool_var_homes() -> list[str]:
+    """The toolchain homes TOOL_HOME_VARS name, each that is set (its first entry, its cache for
+    VAR_CACHES' whole homes)."""
+    out = []
+    for v in TOOL_HOME_VARS:
+        if os.environ.get(v):
+            first = os.environ[v].split(os.pathsep)[0]
+            if os.path.isabs(first):  # a relative CARGO_TARGET_DIR is the build's own, in the repo
+                out.append(os.path.join(first, VAR_CACHES[v]) if v in VAR_CACHES else first)
+    return out
+
+
+def tool_home_of(real: str) -> str | None:
+    """The toolchain home (TOOL_HOMES under the home, a TOOL_HOME_VARS target) that the real path
+    ``real`` lies in, or the one beneath it when it holds exactly one (`~/go` for `go/pkg`), as a
+    real path; None when it is in none. A home not made yet isn't in the lane (writable keeps
+    what exists), and the walk up from a refused `~/.npm/_cacache` reached the home directory,
+    which no grant may name, so a first `npm ci` or `go test` named no grant at all (#824)."""
+    homes = dict.fromkeys(os.path.realpath(h) for h in (
+        *(Path.home() / t for t in TOOL_HOMES), *tool_var_homes()))
+    homes.pop(os.path.realpath(Path.home()), None)
+    within = [h for h in homes if real == h or _under(real, h)]
+    if within:
+        return max(within, key=len)  # the nearest: GOMODCACHE inside ~/.cache, say
+    below = [h for h in homes if _under(h, real)]
+    return below[0] if len(below) == 1 else None
+
+
+def not_writable(made_only: bool = True) -> set[str]:
+    """NOT_WRITABLE's places, CARGO_HOME's and RUSTUP_HOME's own among them, as real paths: those
+    that exist, or with ``made_only`` false every one (lane_grant: a grant made before cargo or
+    rustup runs must not hold their bin/ either)."""
+    cargo, rustup = os.environ.get("CARGO_HOME"), os.environ.get("RUSTUP_HOME")
+    return {os.path.realpath(p) for p in (*(Path.home() / h for h in NOT_WRITABLE),
+                                          *((Path(cargo) / "bin", Path(cargo) / "env") if cargo else ()),
+                                          *((Path(rustup) / "toolchains",) if rustup else ()))
+            if not made_only or os.path.lexists(p)}
+
+
+def split_points() -> set[str]:
+    """What a grant is split around, real paths (lane_grant): the secrets and workbench's own
+    files, and NOT_WRITABLE's places, made or not."""
+    return _hidden() | not_writable(made_only=False)
+
+
 def writable(task: store.Task) -> list[str] | None:
     """The directories (and files) the agent may write to, None when the user turned the lane off
     (`"paths": ["*"]`). Only those that exist: the kernel's rules are on real files."""
@@ -684,11 +729,7 @@ def writable(task: store.Task) -> list[str] | None:
     xdg = [os.environ.get("XDG_CACHE_HOME")]
     xdg += [os.path.join(os.environ[v], "opencode") for v in ("XDG_DATA_HOME", "XDG_STATE_HOME")
             if os.environ.get(v)]  # OpenCode's own data, when the user moved those
-    for v in TOOL_HOME_VARS:
-        if os.environ.get(v):
-            first = os.environ[v].split(os.pathsep)[0]
-            if os.path.isabs(first):  # a relative CARGO_TARGET_DIR is the build's own, in the repo
-                xdg.append(os.path.join(first, VAR_CACHES[v]) if v in VAR_CACHES else first)
+    xdg += tool_var_homes()
     # OpenCode's own directories, made first: the lane writes only what exists, so a first task
     # in a fresh profile failed opening OpenCode's log before any model request (#340, the audit
     # of 1.4). One that can't be made is named in runner.log, the place a failed round points to.
@@ -728,11 +769,7 @@ def writable(task: store.Task) -> list[str] | None:
                 pass
     # the user's active Python environments too: a venv in a tool home (poetry's, pipenv's,
     # WORKON_HOME) was the agent's to install into (#490)
-    out_of = _hidden() | set(python_envs()) | \
-        {os.path.realpath(p) for p in (*(home / h for h in NOT_WRITABLE),
-                                       *((Path(cargo) / "bin", Path(cargo) / "env") if cargo else ()),
-                                       *((Path(rustup) / "toolchains",) if rustup else ()))
-         if os.path.lexists(p)}
+    out_of = _hidden() | set(python_envs()) | not_writable()
     # Of the task's directory only its worktree and ask/, where the ask server writes its
     # questions: the rest (task.json, status.json, steer.jsonl, the rounds, runner.log) steers
     # the runner and wb, outside the lane, and notify.jsonl wakes Claude for every task (the

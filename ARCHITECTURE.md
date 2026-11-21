@@ -1151,7 +1151,10 @@ and the output's tail ("the setup command failed (exit N)", "setting up the work
 (copy failed)" for a link or copy, or "setting up the worktree failed (timed out after Ns; wb
 start --setup-timeout SECS, or "setup_timeout" in the repo's commands.json "repos" entry, raises
 it)": `setup_timed_out`, which a scratch checkout's output says too), and, when it failed on a connection, the proxy the agent's
-environment left out (`runner.proxy_gap`, #380); it ends "fix it, then wb resume <task>: it sets
+environment left out (`runner.proxy_gap`, #380), and each path the lane refused with its grant,
+as a test run's report names them ("the lane refused <path>: wb allow <task> --path <grant>, if
+the setup needs it": `lane_refused`, `lane_grant`; a first `npm ci` refused a `~/.npm` not made
+yet, and the notice named none, #824); it ends "fix it, then wb resume <task>: it sets
 the worktree up again (the agent never ran)", and sets status `failed_before` `setup`. A load
 failure before the agent ran (`runner._load_failed`, `results.ran` false) sets it `load` and its
 notice adds "the agent never ran: once the model can, wb resume <task> starts it". Either way the
@@ -1482,8 +1485,15 @@ deliberately hostile process (the 2026-11-16 audit's list of what it can't stop 
   `MARKED_PATH`, spaces and all but not across ` /`, then `ABS_PATH`'s outside those: cut at a
   space, `/mnt/c/Users/John Smith/…` granted the whole Users folder, #670),
   matched in any case, that lies outside the lane and that a grant can reach (`lane_grant`: the
-  path when it exists or is under `/dev`, else its nearest existing directory; never `/`, the
-  home directory, a secret, or the task's repo), so a refused keystore, lockfile or cache is
+  path when it exists or is under `/dev`, else its nearest existing directory; the toolchain home
+  it falls in when that isn't made yet, or the one below it (`context.tool_home_of`: `TOOL_HOMES`
+  and the `TOOL_HOME_VARS` targets, `tool_var_homes`; `~/go` gives `~/go/pkg`), which
+  `wb allow --path` then makes: on a machine that never ran npm or Go the walk reached the home
+  directory and nothing was named, #824, the second 2026-11-21 audit; then, while that place
+  holds something the lane is split around (`context.split_points`: the secrets, workbench's
+  own files and `NOT_WRITABLE`'s places, made or not: `not_writable`), the next directory down
+  towards the path, so a grant is never split again and never holds `~/.cargo/bin`; never `/`,
+  the home directory, a secret, or the task's repo), so a refused keystore, lockfile or cache is
   named too, not a URL's path; and only a refusal the lane made, #773: none without Landlock
   (`lane.abi()` 0, macOS), nor a path the runner, outside the lane, may not read or write either
   (`runner_may`: the nearest existing directory for one not made yet), the user's own
