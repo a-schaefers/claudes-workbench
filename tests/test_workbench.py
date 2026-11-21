@@ -9498,6 +9498,26 @@ class Stats(Base):
         self.assertEqual((bests["largest_first_try"]["task"], bests["largest_first_try"]["lines"]), ("t-a", 20))
         self.assertEqual(bests["fastest"]["task"], "t-a")
 
+    def test_a_spec_gap_discard_counts_in_the_saved_milestone_as_in_the_saving(self):
+        # #569: the milestone left out the discard's cost, so "100K saved" showed above an
+        # all-time saving of ~11K; and a period of only spec-gap discards said "0 tasks" beside a cost
+        from workbench import savings, stats
+        now = time.time()
+        gap = {"ts": now - 40 * 86400, "outcome": "discarded", "spec_gaps": ["unclear"],
+               "claude": {"input": 115_000, "output": 0, "calls": 10}}
+        won = {"ts": now - 86400, "outcome": "accepted", "rounds": 1,
+               "claude": {"input": 4_000, "output": 0, "calls": 2}, "diff": {"files": 3, "added": 700, "removed": 0}}
+        self.assertGreater(savings.of_row(won)["saved"], 100_000)                    # alone: past 100K
+        self.assertLess(savings.of_row(won)["saved"] + savings.of_row(gap)["saved"], 100_000)
+        self.rows(gap, won)
+        f = stats.feed(now)
+        self.assertEqual([m["kind"] for m in f["milestones"]], ["landed"])          # never reached
+        self.assertEqual(f["periods"]["all"]["savings"]["saved"],
+                         savings.of_row(won)["saved"] + savings.of_row(gap)["saved"])
+        self.assertEqual((f["periods"]["all"]["tasks"], f["periods"]["all"]["spec_gaps"]), (1, 1))
+        self.assertNotIn("spec_gaps", f["periods"]["week"])
+        self.assertTrue(stats.summary(f)[1].startswith("all time: 1 task(s), 1 landed (100%), and 1 discard(s) put down to the spec"))
+
     def test_a_models_write_speed_trend_compares_its_newest_third_with_its_oldest(self):
         from workbench import stats
         self.rows(*({"ts": 1000.0 + i, "outcome": "accepted", "speed": {"write": w}}

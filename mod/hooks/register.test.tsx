@@ -2054,6 +2054,14 @@ test('the history claims no more fixed or answered than the feed confirms', () =
       'Questions: 3 asked mid-task · 1 answered'])
 })
 
+test('a period says the spec-gap discards its saving counts beside its task count', () => {
+  // #569: "cost ~115K more Claude tokens · 0 tasks · 0 landed" for a period of one such discard
+  const lines = statsLines({ tasks: 0, periods: { week: { tasks: 0, landed: 0, spec_gaps: 1,
+    savings: { saved: -115_000, tasks: 1 } } } })
+  expect(lines[0]).toEqual({ label: 'This week',
+    text: 'cost ~115K more Claude tokens (estimate) · 0 tasks · 0 landed · and 1 discard put down to the spec' })
+})
+
 test('a one-task exception shows beside its task and is under way from Claude\'s first edit', async ($, on) => {
   // #94: the next hand-back spends it once Claude has started on it
   const clock = mock.clock(on, { now: 1_800_000_000_000 })

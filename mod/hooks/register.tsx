@@ -743,7 +743,8 @@ const GUARD_WORDS: Record<string, string> = {
 // mentioned, only the best (the plan's rule: show what went right, never nag).
 export function statsLines(f: Record<string, any> | null): { label: string; text: string }[] {
   if (!f) return [{ label: '', text: 'Reading the history…' }]
-  if (!f.tasks) return [{ label: '', text: 'No finished tasks yet: delegate one with /workbench, and how it went shows here.' }]
+  // a period of spec-gap discards alone has a cost to say though no task is counted (#569)
+  if (!f.tasks && !f.periods) return [{ label: '', text: 'No finished tasks yet: delegate one with /workbench, and how it went shows here.' }]
   const out: { label: string; text: string }[] = []
   const period = (name: string, label: string) => {
     const p = f.periods?.[name]
@@ -755,6 +756,8 @@ export function statsLines(f: Record<string, any> | null): { label: string; text
       p.savings ? (saved >= 0 ? `saved ~${kilo(saved)} Claude tokens (estimate)` : `cost ~${kilo(-saved)} more Claude tokens (estimate)`) : '',
       `${p.tasks} task${p.tasks === 1 ? '' : 's'}`,
       `${p.landed} landed${p.accepted_pct !== undefined ? ` (${p.accepted_pct}%)` : ''}`,
+      // left out of the count, not the saving: Claude's tokens were spent on them (#569)
+      p.spec_gaps ? `and ${p.spec_gaps} discard${p.spec_gaps === 1 ? '' : 's'} put down to the spec` : '',
       p.savings?.wh ? `${p.savings.wh >= 1000 ? `${(p.savings.wh / 1000).toFixed(1)} kWh` : `${Math.round(p.savings.wh)} Wh`}` +
         (p.savings.cost != null ? ` (${p.savings.cost.toFixed(2)})` : '') : '',
     ]

@@ -138,7 +138,9 @@ def _bests(rows: list[dict]) -> dict:
 
 
 def _milestones(rows: list[dict]) -> list[dict]:
-    """Each milestone reached, with its day: tasks landed, and Claude tokens saved (estimate)."""
+    """Each milestone reached, with its day: tasks landed, and Claude tokens saved (estimate),
+    the saving over the same rows as savings.totals, spec-gap discards and all: over the judged
+    rows alone it reached 100K that the all-time saving never did (#569)."""
     from . import savings
     out, landed, saved = [], 0, 0
     marks_l, marks_s = list(MILESTONES_LANDED), list(MILESTONES_SAVED)
@@ -275,10 +277,13 @@ def feed(now: float | None = None, only: tuple | None = None) -> dict:
         since = now - span if span else 0
         rs = [r for r in rows if (r.get("ts") or 0) >= since]
         t = savings.totals(every, since=since)
-        if rs or t["tasks"]:
+        # in the saving (Claude's tokens were spent) but not the task count: said beside it (#569)
+        gaps = sum(1 for r in every if (r.get("ts") or 0) >= since and not tuning.judged(r))
+        if rs or t["tasks"] or gaps:
             landed = sum(map(_landed, rs))
             periods[name] = {"tasks": len(rs), "landed": landed,
                              **({"accepted_pct": round(100 * landed / len(rs))} if rs else {}),
+                             **({"spec_gaps": gaps} if gaps else {}),
                              # nothing to compare: no savings, rather than a row of zeros
                              **({"savings": t, "score": savings.score(t)} if t["tasks"] else {}),
                              **({"active_minutes": am} if (am := round(sum(r.get("active_minutes") or 0
@@ -287,7 +292,8 @@ def feed(now: float | None = None, only: tuple | None = None) -> dict:
         "periods": lambda: periods,
         "streak": lambda: _streak(rows, now),
         "bests": lambda: _bests(rows),
-        "milestones": lambda: _milestones(rows),
+        # every row: a spec-gap discard still cost Claude, as in each period's saving (#569)
+        "milestones": lambda: _milestones(every),
         "absorbed": lambda: _absorbed(rows),
         "questions": lambda: _questions(rows),
         "models": lambda: _models(rows),
@@ -317,6 +323,7 @@ def summary(f: dict) -> list[str]:
         said = (f"saved ~{saved / 1000:.0f}K" if saved >= 0 else f"cost ~{-saved / 1000:.0f}K more")
         lines.append(f"{'this week' if name == 'week' else 'all time'}: {p['tasks']} task(s), "
                      f"{p['landed']} landed" + (f" ({p['accepted_pct']}%)" if "accepted_pct" in p else "")
+                     + (f", and {p['spec_gaps']} discard(s) put down to the spec" if p.get("spec_gaps") else "")
                      + (f" · {said} Claude tokens (estimate) · score {s['score']}/100" if s else ""))
     if st := f.get("streak"):  # a run that ended isn't mentioned: only the best (the plan's rule)
         lines.append(f"streak: {st['current']} day(s) in a row with a task landed · best {st['best']}"

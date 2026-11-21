@@ -1740,12 +1740,15 @@ part of the setting. `live` and `every` are the Stats tab's live view (`wb top`)
 
 **The Stats feed** (`stats.feed`, `wb stats --json`, #405): everything workbench has learned, as
 one object for the Stats tab's history, built from what already computes it. Rows are
-`store.results()` that `tuning.judged` keeps (no trials, no spec-gap discards). A section with
+`store.results()` that `tuning.judged` keeps (no trials, no spec-gap discards), except where
+Claude's cost is counted (the periods' savings, the saved milestones): there every row but trials. A section with
 nothing in it is left out, never zeros, so a new install's feed is `{ts, until, settings, tasks:
 0}`; `until` is the next local midnight (`_midnight`): the streak, days and periods are counted
 from today, so the pane reads the feed again once it passes.
 Keys: `periods` (`week`, `month`, `all`, `savings.PERIODS`: tasks, landed, `accepted_pct`,
-`active_minutes`, and `savings` (`savings.totals`) with its `score` once a task can be compared),
+`active_minutes`, and `savings` (`savings.totals`, over every row: a spec-gap discard cost Claude
+too) with its `score` once a task can be compared, and `spec_gaps`, the spec-gap discards its
+saving counts and its task count doesn't, said beside it, #569),
 `streak` (`{current, best, days}`: local days in a row with a task landed; the current run ends
 today or yesterday, else 0, and `wb stats` then names only the best: a run that ended is never
 mentioned), `bests` (`largest_first_try`: the most lines landed with no review round the agent caused,
@@ -1753,7 +1756,8 @@ mentioned), `bests` (`largest_first_try`: the most lines landed with no review r
 (self-review, a handover, a steer: the round counter kept every default `--test` task out, #550);
 `fastest`; neither counts a task with a step Claude took over, `took_over`: Claude's lines were
 the agent's best, #566), `milestones` (`[{kind: landed|saved, n, day}]`: 1, 10, 25… tasks landed; 100K, 1M…
-Claude tokens saved by the estimate), `absorbed` (what never reached Claude: `auto_fixes` (the
+Claude tokens saved by the estimate, over every row as the periods' saving is: over the judged
+rows alone a milestone showed that the all-time saving never reached, #569), `absorbed` (what never reached Claude: `auto_fixes` (the
 rounds, whatever came of them), `auto_fixed_tasks` (their tests then passed), `handovers_landed`),
 `questions` (`{asked, answered}`: a question's notice wakes Claude, so it isn't absorbed;
 `answered` counts only what `wb answer` answered, never a NO_ANSWER: a timed-out question was
@@ -2027,7 +2031,8 @@ nothing until a surface attaches.
   `TOP_RETRY_MS` 30 s. Live view off: no child, no **Now**. The newest tick is the `top` atom
   (`top-1`). Below it is the history (#406): `wb stats --json` (*The Stats feed*) drawn as one line a
   section by `statsLines`, `Label: text` with the label bold: this week and all time (the score,
-  the saving or the cost (estimate), tasks, landed, energy and, with a price, its cost), the
+  the saving or the cost (estimate), tasks, landed, the spec-gap discards in the saving, energy
+  and, with a price, its cost), the
   streak (only the best once a run ended), what the agents absorbed without waking Claude (the
   auto-fix rounds as attempts, "then green" only for the tasks whose tests passed), the
   questions (asked, and answered only as `wb answer` did), one
