@@ -303,7 +303,7 @@ with models.GpuLease(None, optimize.HOLDER, wait=False):
         os.environ["WB_FAKE_GPU_GB"] = "48"
         tmp = Path(self.tmp.name)
         engine = tmp / "engine.py"
-        engine.write_text("import sys\nopen(sys.argv[1], 'wb').write(b'PNG')\n")
+        engine.write_text("import sys\nopen(sys.argv[1], 'wb').write(b'\\x89PNG\\r\\n\\x1a\\n')\n")
         (tmp / "images.json").write_text(json.dumps(
             {"e": {"command": f"{sys.executable} {engine} {{out}}"}}))
         os.environ["WB_IMAGES"] = str(tmp / "images.json")

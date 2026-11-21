@@ -87,6 +87,13 @@ def problem(e: dict, kinds: tuple[str, ...] = ()) -> str:
     return ""
 
 
+def starts(path: Path) -> str:
+    """What a file that isn't the media asked for starts with, for the refusal (#592, #744)."""
+    with open(path, "rb") as f:
+        head = " ".join(f.read(48).decode(errors="replace").split())
+    return f"it starts {head!r}" if head else "an empty file"
+
+
 def auth(e: dict, base: Path | None = None) -> dict:
     """The url engine's `key` (OpenCode's `{env:NAME}` and `{file:path}` work, a relative path
     from the engine file's directory, ``base``) as a Bearer header: a server started with an API

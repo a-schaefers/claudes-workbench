@@ -191,7 +191,7 @@ def generate(text: str, out_dir: Path, kind: str | None = None, n: int = 3,
                     found = inspect(fresh, kind, text if kind == "speech" else "", seconds,
                                     ear, draw=check, log=out_dir / "engine.log")
                     if found.pop("not_audio", False):  # an error page published as a clip (#592)
-                        raise RuntimeError(f"audio engine {name} wrote no audio ({_starts(fresh)})")
+                        raise RuntimeError(f"audio engine {name} wrote no audio ({media.starts(fresh)})")
                     store.write_json(fresh.with_suffix(".json"), {
                         "text": text, "kind": kind, "seed": s, "seconds": seconds, "voice": voice,
                         "lyrics": lyrics, "refs": [str(r) for r in refs], "engine": name,
@@ -217,12 +217,6 @@ def _sounds(path: Path) -> bool:
     with open(path, "rb") as f:
         head = f.read(4)
     return head.startswith(MAGIC) or (len(head) > 1 and head[0] == 0xFF and head[1] & 0xE0 == 0xE0)
-
-
-def _starts(path: Path) -> str:
-    with open(path, "rb") as f:
-        head = " ".join(f.read(48).decode(errors="replace").split())
-    return f"it starts {head!r}" if head else "an empty file"
 
 
 class _Meter:

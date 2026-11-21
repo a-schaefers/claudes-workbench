@@ -17,6 +17,7 @@ An engine is whatever runs an image model on this machine, described in
 plus optional "label", "notes" (licence, what it is good at: shown to Claude), "timeout" (s),
 "gpu" (false: not this machine's GPU; a url on another host is off it unless true).
 The first entry is the default. No model is named here: the user installs one and describes it.
+What an engine writes must start like a PNG, JPEG or WebP; a JPEG or WebP keeps its own suffix.
 
 A generation on the GPU holds the GPU lock and first unloads the coding models, as a task does;
 while a task holds the GPU it refuses at once, unless asked to wait. A command engine exits when it's done, so
@@ -80,6 +81,24 @@ def _command(e: dict, values: dict, refs: list[Path], log: Path) -> None:
     if r.returncode or not Path(values["out"]).is_file():
         tail = "\n".join(log.read_text(errors="replace").strip().splitlines()[-8:])  # one bad byte: #743
         raise RuntimeError(f"the engine exited {r.returncode} without an image:\n{tail}")
+
+
+def kind(path: Path) -> str | None:
+    """The image format a file's first bytes say ("png", "jpeg", "webp"), or None: an engine or
+    server that wrote an HTML error page, or a JPEG, was published as a .png and reported as an
+    image (#744, the image side of #592)."""
+    with open(path, "rb") as f:
+        head = f.read(12)
+    if head.startswith(b"\x89PNG\r\n\x1a\n"):
+        return "png"
+    if head.startswith(b"\xff\xd8\xff"):
+        return "jpeg"
+    if head[:4] == b"RIFF" and head[8:12] == b"WEBP":
+        return "webp"
+    return None
+
+
+SUFFIX = {"png": ".png", "jpeg": ".jpg", "webp": ".webp"}
 
 
 def _server(e: dict, values: dict) -> None:
@@ -155,10 +174,15 @@ def generate(prompt: str, out_dir: Path, n: int = 4, size: tuple[int, int] = (10
                 secs = round(time.time() - t0, 1)
                 if fresh.is_symlink() or not fresh.is_file() or not fresh.stat().st_size:
                     raise RuntimeError(f"image engine {name} wrote no image")
+                if not (fmt := kind(fresh)):
+                    raise RuntimeError(f"image engine {name} wrote no image ({media.starts(fresh)})")
+                if SUFFIX[fmt] != fresh.suffix:  # published under its real suffix (#744)
+                    fresh = fresh.rename(fresh.with_suffix(SUFFIX[fmt]))
                 store.write_json(fresh.with_suffix(".json"), {
                     "prompt": prompt, "seed": s, "width": size[0], "height": size[1],
-                    "engine": name, "refs": [str(r) for r in refs], "secs": secs, "ts": store.now()})
-                out = media.free(out_dir, f"{media.slug(prompt, 'image')}-{s}", ".png")
+                    "engine": name, "refs": [str(r) for r in refs], "secs": secs, "ts": store.now(),
+                    "format": fmt})
+                out = media.free(out_dir, f"{media.slug(prompt, 'image')}-{s}", fresh.suffix)
                 media.publish(fresh, out)
             say(f"{out}  ({secs} s)")
             made.append(out)

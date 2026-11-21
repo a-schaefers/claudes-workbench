@@ -4084,9 +4084,12 @@ custom-node packs do run their own Python).
   server with no stop command, a remote model or a kept one used to cost every generation the
   whole 90 s (#467); skipped under `WB_FAKE_MODELS`). Seeds are seed … seed+n−1 (default seed `time() % 1_000_000`). Files are
   `<slug>-<seed>.png` (the slug is the prompt's first six words), each with a `.json` sidecar
-  `{prompt, seed, width, height, engine, refs, secs, ts}`. Each is made in a fresh temporary
+  `{prompt, seed, width, height, engine, refs, secs, ts, format}`. Each is made in a fresh temporary
   directory inside the output directory (`.wb-image-*`), refused when the engine wrote nothing
-  there, then published with its sidecar under the first of `<slug>-<seed>.png`,
+  there or what it wrote doesn't start like an image (`images.kind`: PNG, JPEG or WebP magic
+  bytes; else "wrote no image (it starts '…')", `media.starts`: an HTML error page from an engine
+  or an image url was published as a .png and reported as an image, #744); a JPEG or WebP keeps
+  its own suffix (`.jpg`, `.webp`; `format` in the sidecar says which), then published with its sidecar under the first of `<slug>-<seed>.png`,
   `<slug>-<seed>-2.png`, … that has neither (`media.free`): two prompts with the same first six
   words and seed wrote one PNG, the second over the first, and an engine that exited 0 without
   writing anything passed on the old PNG with its sidecar rewritten (#267, the audit of 1.2). An
@@ -6195,7 +6198,8 @@ hidden files), `handovers` (fresh sessions). A `wb bench self` row (`bench.self_
   is written before the fetch, so a failed, timed-out or killed check waits a week too.
 - `tuning.json`: `{"<knob>": value}`, a pin for every model.
 - `notes.md`: one `- <note>` line each.
-- The image sidecar: `{prompt, seed, width, height, engine, refs, secs, ts}`.
+- The image sidecar: `{prompt, seed, width, height, engine, refs, secs, ts, format}` (`format`:
+  png, jpeg or webp, as the file's first bytes say, #744).
 - The chat files: *The web chat*.
 
 ## Installing

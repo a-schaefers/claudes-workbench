@@ -7851,6 +7851,9 @@ class Permission(Base):
                 context.commands_conf()
 
 
+IMAGE_PNG = b"\x89PNG\r\n\x1a\n"  # what a fake engine's image starts with: anything else is refused (#744)
+
+
 class Images(Base):
     def engines(self, entries):
         path = Path(self.tmp.name) / "images.json"
@@ -7862,7 +7865,7 @@ class Images(Base):
         fake = tmp / "fake_image.py"
         fake.write_text("import json, sys\n"
                         "a = sys.argv[1:]\n"
-                        "open(a[a.index('-o') + 1], 'wb').write(b'PNG')\n"
+                        "open(a[a.index('-o') + 1], 'wb').write(b'\\x89PNG\\r\\n\\x1a\\n')\n"
                         "open(sys.argv[0] + '.calls', 'a').write(json.dumps(a) + '\\n')\n")
         self.engines({"fake": {"command": f"{sys.executable} {fake} -p {{prompt}} -o {{out}} "
                                           "-W {width} -H {height} --seed {seed}",
@@ -7922,13 +7925,13 @@ class Images(Base):
         fake.write_text("import os, sys\n"
                         "a = sys.argv[1:]\n"
                         "if not os.environ.get('NOTHING'):\n"
-                        "    open(a[a.index('-o') + 1], 'wb').write(a[a.index('-p') + 1].encode())\n")
+                        "    open(a[a.index('-o') + 1], 'wb').write(b'\\x89PNG\\r\\n\\x1a\\n' + a[a.index('-p') + 1].encode())\n")
         self.engines({"fake": {"command": f"{sys.executable} {fake} -p {{prompt}} -o {{out}}"}})
         first, second = "a red fox in the snow at dawn", "a red fox in the snow at dusk"
         run_wb("image", first, "--n", "1", "--seed", "5", "--out", str(tmp / "img"))
         run_wb("image", second, "--n", "1", "--seed", "5", "--out", str(tmp / "img"))
         a, b = tmp / "img" / "a-red-fox-in-the-snow-5.png", tmp / "img" / "a-red-fox-in-the-snow-5-2.png"
-        self.assertEqual((a.read_text(), b.read_text()), (first, second))
+        self.assertEqual((a.read_bytes()[8:].decode(), b.read_bytes()[8:].decode()), (first, second))
         self.assertEqual(json.loads(a.with_suffix(".json").read_text())["prompt"], first)
         self.assertEqual(json.loads(b.with_suffix(".json").read_text())["prompt"], second)
         os.environ["NOTHING"] = "1"
@@ -7940,6 +7943,29 @@ class Images(Base):
                          ["a-red-fox-in-the-snow-5-2.json", "a-red-fox-in-the-snow-5-2.png",
                           "a-red-fox-in-the-snow-5.json", "a-red-fox-in-the-snow-5.png"])
         self.assertEqual(json.loads(a.with_suffix(".json").read_text())["prompt"], first)
+
+    def test_bytes_that_arent_an_image_are_refused_and_a_jpeg_or_webp_keeps_its_own_suffix(self):
+        # #744 (the 2026-11-21 audit, finding 95): an engine that wrote an HTML error page, or a
+        # server whose image url answered one, was published as a .png and reported as an image
+        tmp = Path(self.tmp.name)
+        fake = tmp / "fake_image.py"
+        fake.write_text("import os, sys\nopen(sys.argv[1], 'wb').write(bytes.fromhex(os.environ['BODY']))\n")
+        self.engines({"fake": {"command": f"{sys.executable} {fake} {{out}}"}})
+        for body, made in ((b"\xff\xd8\xff\xe0 a jpeg", "a-fox-1.jpg"),
+                           (b"RIFF\x10\x00\x00\x00WEBPVP8 a webp", "a-fox-1.webp")):
+            with mock.patch.dict(os.environ, {"BODY": body.hex()}):
+                out = run_wb("image", "a fox", "--n", "1", "--seed", "1", "--out", str(tmp / made))
+            self.assertIn(f"{tmp / made / made}  (", out)
+            side = json.loads((tmp / made / made).with_suffix(".json").read_text())
+            self.assertEqual(side["format"], "jpeg" if made.endswith("jpg") else "webp")
+            self.assertEqual(sorted(p.name for p in (tmp / made).glob("a-fox-1*")),
+                             sorted([made.rsplit(".", 1)[0] + ".json", made]))  # no .png beside it
+        err = io.StringIO()
+        with mock.patch.dict(os.environ, {"BODY": b"<html><body>502 Bad Gateway</body></html>".hex()}), \
+                self.assertRaises(SystemExit), redirect_stderr(err):
+            run_wb("image", "a fox", "--n", "1", "--out", str(tmp / "html"))
+        self.assertIn("image engine fake wrote no image (it starts '<html><body>502", err.getvalue())
+        self.assertEqual([p.name for p in (tmp / "html").iterdir() if p.name != "engine.log"], [])
 
     def test_wb_image_list_as_a_word_lists_the_engines_instead_of_drawing(self):
         # like `wb skill list`: it took the GPU and drew four pictures of "list" (the 2026-11-16 audit)
@@ -7971,7 +7997,7 @@ class Images(Base):
 
             def do_POST(self):
                 got.append(json.loads(self.rfile.read(int(self.headers["Content-Length"]))))
-                body = json.dumps({"data": [{"b64_json": base64.b64encode(b"IMG").decode()}]})
+                body = json.dumps({"data": [{"b64_json": base64.b64encode(IMAGE_PNG + b"IMG").decode()}]})
                 self.send_response(200); self.end_headers(); self.wfile.write(body.encode())
 
         srv = HTTPServer(("127.0.0.1", 0), H)
@@ -7981,7 +8007,7 @@ class Images(Base):
         self.engines({"srv": {"url": url, "model": "m"}})
         tmp = Path(self.tmp.name)
         run_wb("image", "a lighthouse", "--n", "1", "--seed", "9", "--out", str(tmp / "o"))
-        self.assertEqual((tmp / "o" / "a-lighthouse-9.png").read_bytes(), b"IMG")
+        self.assertEqual((tmp / "o" / "a-lighthouse-9.png").read_bytes(), IMAGE_PNG + b"IMG")
         self.assertEqual((got[0]["size"], got[0]["seed"], got[0]["model"]), ("1024x1024", 9, "m"))
         with self.assertRaises(SystemExit):  # a server engine takes no reference images
             with redirect_stderr(io.StringIO()):
@@ -8009,7 +8035,7 @@ class Images(Base):
                 seen.append((self.path, self.headers.get("Authorization")))
                 if self.headers.get("Authorization") != "Bearer sekrit":
                     return self.reply(401, b'{"error": "missing key"}')
-                self.reply(200, b"PNGFROMURL" if self.path == "/img.png" else b"ok")
+                self.reply(200, IMAGE_PNG + b"FROMURL" if self.path == "/img.png" else b"ok")
 
             def do_POST(self):
                 self.rfile.read(int(self.headers["Content-Length"]))
@@ -8036,7 +8062,7 @@ class Images(Base):
         self.assertIn(f"nokey: {root}/v1/url/x · {root} wants an API key (HTTP 401)", listed)
         self.assertIn(f"url: {root}/v1/url/x · ready", listed)   # the key read from its file
         images.generate("a fox", tmp / "o", n=1, seed=1, name="url", say=lambda m: None)
-        self.assertEqual((tmp / "o" / "a-fox-1.png").read_bytes(), b"PNGFROMURL")
+        self.assertEqual((tmp / "o" / "a-fox-1.png").read_bytes(), IMAGE_PNG + b"FROMURL")
         self.assertIn(("/v1/url/x", "Bearer sekrit"), seen)
         self.assertIn(("/img.png", "Bearer sekrit"), seen)        # the engine's own server
         for name, said in (("empty", 'sent no image: {"data": []}'),
@@ -8066,7 +8092,7 @@ class Images(Base):
         store.write_json(store.home() / "gpu.json", {str(sleeper.pid): {"model": "strata/strata",
                                                                        "task": "t-big"}})
         fake = tmp / "fake_image.py"
-        fake.write_text("import sys\nopen(sys.argv[1], 'wb').write(b'PNG')\n")
+        fake.write_text("import sys\nopen(sys.argv[1], 'wb').write(b'\\x89PNG\\r\\n\\x1a\\n')\n")
         self.engines({"cpu": {"command": f"{sys.executable} {fake} {{out}}", "gpu": False},
                       "here": {"command": f"{sys.executable} {fake} {{out}}"}})
         freed = []
@@ -8089,7 +8115,7 @@ class Images(Base):
         store.write_json(store.home() / "gpu.json", {})
         self.engines({"srv": {"url": "http://127.0.0.1:8080/v1/images/generations"}})
         with mock.patch.object(models, "free_gpu", lambda **k: freed.append(k)), \
-                mock.patch.object(images, "_server", lambda e, v: Path(v["out"]).write_bytes(b"PNG")), \
+                mock.patch.object(images, "_server", lambda e, v: Path(v["out"]).write_bytes(IMAGE_PNG)), \
                 mock.patch.object(images, "ready", lambda e: ""):
             images.generate("a fox", tmp / "o2", n=1, say=lambda m: None)
         self.assertEqual(freed[0]["keep"], ["strata/strata"])
