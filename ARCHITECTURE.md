@@ -4581,14 +4581,18 @@ it. ACE-Step's takes peaked at -0.2 dBFS, near clipping, before any `loudnorm`: 
   `tag`, `TAG_LISTS`: `-l`, `--points-at`, `--contains`, `--merged` and their `--no-` forms, which
   version scripts in Makefiles, `setup.py` and `build.rs` run: #443); `apply` only with
   `--check`, `--stat`, `--numstat` or `--summary` and no `--apply`; `hash-object` without `-w`;
-  `fsck` without `--lost-found`; `config` only with a read option or one name; `stash` only `list`
+  `fsck` without `--lost-found`; `config` only with a read option or one name (the values of
+  `CONFIG_VALUED`, `-f`, `--blob`, `--type` and the like, not counted: `git config -f .gitmodules
+  <key>` was refused, #794); `stash` only `list`
   and `show`; `worktree` only `list`; `remote` without arguments, `get-url`, `show` (with or without `-v`); `reflog`,
   `notes`, `submodule` and `symbolic-ref` in their read forms; anything else (aliases and `lfs`
   included) is a write. A read is exec'd with `GIT_OPTIONAL_LOCKS=0`, so the agent's `git status`
   never refreshes the index while Claude diffs. A write is refused, with `REFUSAL` (leave the
   change uncommitted for Claude; to undo an edit, edit it back or `git show HEAD:<path>`; ask if
   the task needs a git write), when it lands in the task's repository (`protected`: the same
-  common dir) or in any repository outside the temp directories, the worktree and the lane's tool
+  common dir; a `config` write with `--global`, `--system` or `-f` is judged by the file it
+  writes instead, `config_files`, refused only inside the task's git dir or on a `.git`: a
+  fixture's `git config --global` with HOME at its temp directory was refused, #794) or in any repository outside the temp directories, the worktree and the lane's tool
   homes; outside any repository it passes, and throwaway repositories under the temp directories,
   nested in the worktree (a common dir below it that isn't the task's), which test suites create,
   or in the lane's other writable directories (`context.writable` less `/dev` and `/proc`: the

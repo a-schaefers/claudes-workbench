@@ -6763,6 +6763,45 @@ class GitGuard(unittest.TestCase):
             _, sub, rest = gitguard.split(line.split())
             self.assertFalse(gitguard.reads(sub, rest), line)
 
+    def test_config_writes_to_a_file_of_their_own_pass_and_reads_from_a_file_are_reads(self):
+        # #794 (the second 2026-11-21 audit): `git config --global user.name t` with HOME at a
+        # fixture's temp dir, run from the worktree, was refused as a write to the task's repo,
+        # and `git config -f .gitmodules <key>` read as a write (the file name counted as a key)
+        from workbench import gitguard
+        for line in ["config -f .gitmodules submodule.x.url", "config --file .gitmodules a.b",
+                     "config --type bool core.bare", "config --blob HEAD:.gitmodules a.b"]:
+            _, sub, rest = gitguard.split(line.split())
+            self.assertTrue(gitguard.reads(sub, rest), line)
+        for line in ["config -f .gitmodules submodule.x.url u", "config --type bool a.b true"]:
+            _, sub, rest = gitguard.split(line.split())
+            self.assertFalse(gitguard.reads(sub, rest), line)
+        with tempfile.TemporaryDirectory() as d:
+            d, repo = Path(d), Path(d) / "repo"
+            subprocess.run(["git", "init", "-q", str(repo)], check=True)
+            (repo / ".gitmodules").write_text('[submodule "x"]\n\turl = ../x\n')
+            home = d / "home"
+            home.mkdir()
+            env = {k: v for k, v in os.environ.items() if not k.startswith("GIT_CONFIG")}
+            env.update(gitguard.install(d / "bin", repo, ROOT, os.environ["PATH"], repo),
+                       HOME=str(home), XDG_CONFIG_HOME=str(home / ".config"))
+            shim = lambda *a, **e: subprocess.run([str(d / "bin" / "git"), *a], cwd=repo,  # noqa
+                                                  env={**env, **e}, capture_output=True, text=True)
+            out = shim("config", "--global", "user.email", "t@example.com")
+            self.assertEqual(out.returncode, 0, out.stderr)
+            self.assertIn("t@example.com", (home / ".gitconfig").read_text())
+            out = shim("config", "-f", ".gitmodules", "submodule.x.url")
+            self.assertEqual((out.returncode, out.stdout), (0, "../x\n"), out.stderr)
+            out = shim("config", "-f", "fixture.cfg", "a.b", "c")
+            self.assertEqual(out.returncode, 0, out.stderr)
+            # the task's own config stays read-only, however it is named
+            for argv, e in [(("config", "user.name", "x"), {}),
+                            (("config", "-f", ".git/config", "user.name", "x"), {}),
+                            (("config", "--file=.git", "user.name", "x"), {}),
+                            (("config", "--global", "user.name", "x"),
+                             {"GIT_CONFIG_GLOBAL": str(repo / ".git" / "config")})]:
+                self.assertIn("read-only", shim(*argv, **e).stderr, argv)
+            self.assertNotIn("name = x", (repo / ".git" / "config").read_text())
+
     def test_protected_repositories(self):
         from workbench import gitguard
         with tempfile.TemporaryDirectory() as d:
