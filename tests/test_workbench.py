@@ -1239,6 +1239,35 @@ class Lifecycle(Base):
         self.assertLess(time.time() - began, 5)
         self.assertIn("write", out)
 
+    def test_following_the_log_into_a_file_writes_each_line_and_a_dead_runner_ends_the_follow(self):
+        # #545: `wb log t -f > out` stayed empty (print unflushed), and a task whose runner was
+        # killed stayed "running", followed for ever, until something else called wb status
+        d = store.tasks_dir() / "t-logdead"
+        d.mkdir(parents=True)
+        store.write_json(d / "task.json", {"model": "ollama/m", "created_at": time.time() - 600})
+        store.write_json(d / "status.json", {"phase": "running", "round": 1, "pid": None,
+                                             "updated_at": time.time()})
+        store.append_jsonl(d / "events.jsonl", {"ts": time.time(), "round": 1, "kind": "tool",
+                                                "tool": "read", "brief": "answer.txt", "ok": True})
+        out = Path(self.tmp.name, "log.txt")
+        with out.open("w") as f:
+            p = subprocess.Popen([str(ROOT / "bin" / "wb"), "log", "t-logdead", "-f"], stdout=f,
+                                 stderr=subprocess.STDOUT)
+        self.addCleanup(lambda: p.poll() is None and p.kill())
+        deadline = time.time() + 10
+        while "answer.txt" not in out.read_text() and time.time() < deadline:
+            time.sleep(0.05)
+        self.assertIn("answer.txt", out.read_text())                   # while it still follows
+        self.assertIsNone(p.poll())
+        p.kill()
+        p.wait()
+        backdate("t-logdead")                                          # the runner gone past the grace
+        r = subprocess.run([str(ROOT / "bin" / "wb"), "log", "t-logdead", "-f"], capture_output=True,
+                           text=True, timeout=20)
+        self.assertEqual(r.returncode, 0)
+        self.assertIn("the runner died", r.stdout)
+        self.assertEqual(store.Task("t-logdead").status["phase"], "failed")
+
     def test_stop_and_discard(self):
         self.start("t-stop", "hang")
         running("t-stop")

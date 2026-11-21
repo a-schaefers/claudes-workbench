@@ -1381,19 +1381,24 @@ def cmd_log(a):
         k = r["kind"]
         if k == "tool":
             mark = "" if r["ok"] else "  ✗ " + r.get("error", "")[:100]
-            print(shown(f"{t} r{r['round']} {r['tool']:8} {r['brief']}{mark}"))
+            # flushed: piped or redirected, a follow printed nothing for minutes (#545)
+            print(shown(f"{t} r{r['round']} {r['tool']:8} {r['brief']}{mark}"), flush=True)
         elif k in ("text", "ask", "answer", "stopped", "autofix", "round", "tests", "error", "retry"):
             body = r.get("text", "")
             if k == "text" and not a.verbose:
                 body = body.strip().splitlines()[0][:110] if body.strip() else ""
-            print(shown(f"{t} r{r['round']} {k:8} {body}"))
+            print(shown(f"{t} r{r['round']} {k:8} {body}"), flush=True)
 
     for r in rows[-a.n:] if a.n else rows:
         show(r)
     watcher = Watcher(task.dir) if a.follow else None
     while a.follow:
         # the phase before the wait, then the events after it: a finished task's follow waited 30 s
-        # before it looked (the 2026-11-18 audit, #90), and the last events still print
+        # before it looked (the 2026-11-18 audit, #90), and the last events still print. A runner
+        # that died without a word is reaped first, as wb wait does: its task was followed for
+        # ever, still "running" (#545); reap's error event then prints and the follow ends
+        if task.status.get("phase") in LIVE:
+            reap(task)
         done = task.status.get("phase") in store.NEEDS_CLAUDE | store.CLOSED
         if not done:
             watcher.wait(30)
