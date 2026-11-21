@@ -2561,6 +2561,28 @@ class Lifecycle(Base):
         run_wb("feedback", "t-l1", "--text", "1. Keep it.")
         self.assertEqual(wait_phase("t-l1", {"review", "failed"})["phase"], "review")
 
+    def test_a_progress_check_on_a_large_edit_hashes_the_diff_without_holding_it(self):
+        # #678 (Codex's audit of 1.90.6): mark() captured the whole tracked diff before hashing
+        # it, 50 MiB of Python allocations for a replaced 12 MiB file, at every progress check
+        import tracemalloc
+        g = lambda *a: subprocess.run(["git", "-C", str(self.repo), *a], check=True,  # noqa
+                                      capture_output=True)
+        big = self.repo / "big.txt"
+        big.write_bytes(b"a line of text\n" * (12 << 16))
+        g("add", "big.txt")
+        g("commit", "-qm", "big")
+        big.write_bytes(b"another line\n" * (12 << 16))
+        tracemalloc.start()
+        try:
+            first = gitops.mark(self.repo)
+            peak = tracemalloc.get_traced_memory()[1]
+        finally:
+            tracemalloc.stop()
+        self.assertLess(peak, 4 << 20)
+        self.assertEqual(gitops.mark(self.repo), first)
+        big.write_bytes(b"another line\n" * (12 << 16) + b"!")
+        self.assertNotEqual(gitops.mark(self.repo), first)    # and a change still shows
+
     def test_the_users_git_settings_do_not_change_what_workbench_reads(self):
         # the audit: diff.external replaced the review diff, color.ui=always put escape codes in
         # the changed files, status.branch a "## branch" line, quotePath escaped café.md

@@ -171,6 +171,21 @@ def git_bytes(cwd, *args) -> bytes:
     return _run(cwd, args).stdout
 
 
+def git_hash(cwd, h, *args) -> None:
+    """Feed git's output into the hash ``h`` as it comes, a chunk at a time: captured whole, the
+    tracked diff of a replaced 12 MiB file held 50 MiB in the runner at every progress check,
+    beside the resident model (#678)."""
+    with tempfile.TemporaryFile() as err:  # not a pipe: a full one would stall git mid-diff
+        p = subprocess.Popen(["git", "-C", str(cwd), *PLAIN, *_pinned(cwd), *args],
+                             stdout=subprocess.PIPE, stderr=err, stdin=subprocess.DEVNULL)
+        with p.stdout:
+            while chunk := p.stdout.read(1 << 16):
+                h.update(chunk)
+        if p.wait():
+            err.seek(0)
+            raise GitError(f"git {' '.join(args)}: {err.read().decode('utf-8', 'replace').strip()}")
+
+
 def toplevel(path) -> Path:
     """The repo's top directory; NotARepo when ``path`` is in none."""
     try:
@@ -732,7 +747,8 @@ def mark(worktree: Path) -> str:
     changes when, and only when, the agent changes a file (a new file past MARK_READ_MAX counts
     by its size and time, a symlink by its target). The index is left alone. Raw bytes: a decoded
     diff would hide an edit from one non-UTF-8 byte to another."""
-    h = hashlib.sha1(git_bytes(worktree, "diff", "--no-ext-diff", "--no-color", "HEAD"))
+    h = hashlib.sha1()
+    git_hash(worktree, h, "diff", "--no-ext-diff", "--no-color", "HEAD")
     for f in git_bytes(worktree, "ls-files", "--others", "--exclude-standard", "-z").split(b"\0"):
         if f:
             h.update(f + b"\0" + _untracked(Path(worktree) / os.fsdecode(f)))

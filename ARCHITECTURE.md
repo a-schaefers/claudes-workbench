@@ -4043,8 +4043,9 @@ it. ACE-Step's takes peaked at -0.2 dBFS, near clipping, before any `loudnorm`: 
   user's `diff.external`, colours, `status.branch` or quoted non-ASCII names once turned the review
   diff and the changed-files list into something else (the 2026-11-16 audit). Output is decoded as
   UTF-8 with bytes that aren't UTF-8 shown as U+FFFD (a Latin-1 source file crashed the runner);
-  `gitops.mark`, the runner's edit fingerprint, hashes git's raw bytes instead (`git_bytes`), so an
-  edit from one such byte to another still counts. Its untracked files are taken with `lstat`: a
+  `gitops.mark`, the runner's edit fingerprint, hashes git's raw bytes instead, streamed into the
+  hash a chunk at a time (`git_hash`: captured whole, a replaced 12 MiB file held 50 MiB in the
+  runner at every progress check, #678), so an edit from one such byte to another still counts. Its untracked files are taken with `lstat`: a
   symlink counts by its target, anything not a regular file by its type, a file past
   `MARK_READ_MAX` (1 MiB) by its size and time, so a link to `/dev/zero` or a FIFO, or a core dump,
   can't hang or swamp the runner.
