@@ -28,7 +28,7 @@ from collections import deque
 from pathlib import Path
 
 from . import (ask_mcp, context, gitguard, gitops, hardware, lane, lessons, models, progress, skills,
-               store, tuning)
+               stats, store, tuning)
 from .events import StuckDetector, normalize
 from .watch import Watcher
 
@@ -624,7 +624,7 @@ def run_round(task: store.Task, n: int, keep: bool = False) -> dict:
     heard = False
     waiting_bg = False
     out = {"exit": None, "stuck": None, "texts": [], "tools": {}, "errors": [],
-           "tok_in": 0, "tok_out": 0, "interrupted": False, "full": None}
+           "tok_in": 0, "tok_out": 0, "interrupted": False, "full": None, "guard": None}
     window = st.get("window")
     fresh_at = tuning.value(task, "fresh_at")
     opened: dict = {}  # the questions open this round (ask_mcp.relay)
@@ -706,12 +706,13 @@ def run_round(task: store.Task, n: int, keep: bool = False) -> dict:
                 if (m := gitops.mark(task.worktree)) != edit_mark:  # it edited through the shell
                     edit_mark, detector.since_edit, why = m, 0, None
             if why:
-                out["stuck"] = why
+                out["stuck"], out["guard"] = why, detector.guard
         quiet = clock.quiet(mono)
         hush = wait_hush if waiting_bg else silence
         if not out["stuck"] and clock.ran(mono) > wall:
-            out["stuck"] = f"the round ran past its {int(wall // 60)}-minute limit"
+            out["stuck"], out["guard"] = f"the round ran past its {int(wall // 60)}-minute limit", "round"
         if not out["stuck"] and not asking and quiet > hush:
+            out["guard"] = "silence"
             out["stuck"] = (f"no output for {int(hush // 60)} minutes" if heard else
                             f"no first output in {int(hush // 60)} minutes: the model may be "
                             "reading its prompt slowly (on the CPU, or partly in RAM?)")
@@ -725,6 +726,7 @@ def run_round(task: store.Task, n: int, keep: bool = False) -> dict:
                 and quiet > think):
             mins = int(quiet // 60)
             if renudge:
+                out["guard"] = "think"
                 out["stuck"] = (f"no tool call or word for {mins} minutes, even after a nudge"
                                 if not out["tools"] and not out["texts"] else
                                 f"{mins} minutes again with no tool call, even after a nudge")
@@ -792,7 +794,11 @@ def run_round(task: store.Task, n: int, keep: bool = False) -> dict:
     if power:
         power.stop()
         power.join(timeout=1)
-        task.set_status(gpu_wh=round((task.status.get("gpu_wh") or 0) + power.wh, 2))
+        st = task.status  # the round's watts too, for the Stats tab (#404): mean and peak
+        task.set_status(gpu_wh=round((st.get("gpu_wh") or 0) + power.wh, 2),
+                        gpu_w_sum=round((st.get("gpu_w_sum") or 0) + power.w_sum, 1),
+                        gpu_w_n=(st.get("gpu_w_n") or 0) + power.n,
+                        gpu_w_peak=max(st.get("gpu_w_peak") or 0, power.peak))
     out["secs"] = round(time.monotonic() - clock.t0, 1)
     # the agent's own working time, less Claude's answers and a frozen machine (#95)
     task.set_status(active_s=round(prior + clock.ran(time.monotonic()), 1))
@@ -853,17 +859,24 @@ class _Power(threading.Thread):
         super().__init__(daemon=True)
         self.done = threading.Event()
         self.wh = 0.0
+        self.w_sum, self.n, self.peak = 0.0, 0, 0.0  # the samples themselves: mean and peak
 
     def run(self):
         last = time.time()  # the first sample is taken at once; it adds nothing yet
-        watts = hardware.gpu_power_w()
+        watts = self._sample()
         while not self.done.is_set():
             self.done.wait(POWER_EVERY)
             now = time.time()
             if watts is not None:
                 self.wh += watts * (now - last) / 3600
             last = now
-            watts = hardware.gpu_power_w()
+            watts = self._sample()
+
+    def _sample(self):
+        watts = hardware.gpu_power_w()
+        if watts is not None:
+            self.w_sum, self.n, self.peak = self.w_sum + watts, self.n + 1, max(self.peak, watts)
+        return watts
 
     def stop(self):
         self.done.set()
@@ -1511,7 +1524,9 @@ def auto_fix_prompt(tests: dict, cmd: str) -> str:
 
 
 def measure_speed(task: store.Task, since: float) -> None:
-    """Record how fast the model read and wrote in this round's requests (router.budgets)."""
+    """Record how fast the model read and wrote in this round's requests (router.budgets), and,
+    for the Stats tab, the task's own samples with its time to first token (status `speeds`,
+    the newest TASK_SPEED_KEEP of each: the results row keeps their medians, #404)."""
     from . import router
     from .transcript import export
     sid = task.status.get("session")
@@ -1520,9 +1535,33 @@ def measure_speed(task: store.Task, since: float) -> None:
     try:
         msgs = [m for m in export(sid).get("messages", [])
                 if ((m.get("time") or {}).get("created") or 0) >= since * 1000]
-        router.record_speed(task.spec["model"], msgs)
+        got = router.record_speed(task.spec["model"], msgs)
+        if any(got.values()) and stats.recording():
+            had = task.status.get("speeds") or {}
+            task.set_status(speeds={k: ((had.get(k) or []) + v)[-TASK_SPEED_KEEP:]
+                                    for k, v in got.items()})
     except Exception:  # a measurement, never a reason to stop the task
         pass
+
+
+TASK_SPEED_KEEP = 200  # a task's own speed samples kept, per measure
+
+
+def _round_end(task: store.Task, n: int, rnd: dict, began: float) -> None:
+    """How the round ended, for the Stats tab (#404): the guard that stopped it is counted in
+    status `guards`, and a `round_end` event says how long it ran and how it ended. Only with
+    stats recording on; no reader of events shows the kind, so the transcript is unchanged."""
+    if not stats.recording():
+        return
+    how = ("stuck" if rnd.get("stuck") else "handover" if rnd.get("full") else
+           "interrupted" if rnd.get("interrupted") else
+           "failed" if rnd.get("exit") not in (0, None) and not rnd.get("texts") else "done")
+    if how == "stuck" and rnd.get("guard"):
+        guards = dict(task.status.get("guards") or {})
+        guards[rnd["guard"]] = guards.get(rnd["guard"], 0) + 1
+        task.set_status(guards=guards)
+    task.event({"ts": store.now(), "round": n, "kind": "round_end", "secs": round(time.time() - began, 1),
+                "how": how, **({"guard": rnd["guard"]} if how == "stuck" and rnd.get("guard") else {})})
 
 
 def _load_failed(task: store.Task, e: Exception) -> None:
@@ -1664,11 +1703,14 @@ def drive(task: store.Task) -> None:
             if rnd["full"]:  # before notes: the handover carries them (_full_round)
                 handed += 1
                 if handed <= HANDOVER_MAX:
+                    _round_end(task, n, rnd, began)
                     _full_round(task, n, rnd, handed)
                     continue
+                rnd["guard"] = "handovers"
                 rnd["stuck"] = (f"handed over to a fresh session {HANDOVER_MAX} times in this "
                                 "round without finishing: the step is too big for this model's "
                                 "window; split it (wb next) or take it over")
+            _round_end(task, n, rnd, began)
             if rnd["interrupted"] or (pending_steer(task) and not rnd["stuck"]):
                 _steer_round(task, n, rnd["interrupted"])
                 continue

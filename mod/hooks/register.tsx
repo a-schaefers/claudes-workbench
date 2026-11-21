@@ -67,7 +67,7 @@ const SCOUT_NOTE =
 import { atom, read, update } from 'claude-code'
 import type { Register } from 'claude-code'
 
-import type { WbChat, WbLine, WbLive, WbPane, WbTask } from '../types'
+import type { WbChat, WbLine, WbLive, WbPane, WbStats, WbTask, WbTop } from '../types'
 import { cells, COLUMNS, FACE, MOUTH, ROWS } from './apprentice'
 import type { Pose } from './apprentice'
 
@@ -128,7 +128,18 @@ const chat = atom({ plugin: 'workbench', key: 'chat' } as const,
 const pane = atom({ plugin: 'workbench', key: 'pane' } as const,
   { tab: 'tasks', open: '', focus: '', minimized: false } as WbPane, { shape: 'pane-1' })
 const STRIP_HINT = 'minimized · restore: click, or Ctrl+X Tab then Enter'
-const TABS: [string, string, string][] = [['tasks', 'Tasks', '1'], ['settings', 'Settings', '2']]
+// Stats between them (#406): looked at more often than Settings
+const TABS: [string, string, string][] = [['tasks', 'Tasks', '1'], ['stats', 'Stats', '2'], ['settings', 'Settings', '3']]
+// The Stats tab's history (`wb stats --json`), read while the tab is shown: when it is first
+// shown in a load, and again when results.jsonl or stats.json changes. No timer.
+const statsFeed = atom({ plugin: 'workbench', key: 'stats' } as const, { key: '', feed: null } as WbStats,
+  { shape: 'stats-1' })
+// The Stats tab's live view (#408): one `wb top --json` child, only while the tab is on screen
+// with the live view on, ended the moment it isn't; each line its newest tick
+const topNow = atom({ plugin: 'workbench', key: 'top' } as const, { snap: null, busy: {} } as WbTop,
+  { shape: 'top-1' })
+const BUSY_KEEP = 60 // busy % samples kept per GPU for the sparkline: two minutes at 2 s
+const TOP_RETRY_MS = 30_000 // a `wb top` that ended by itself (wb missing, failing) is tried again this long after
 const SETTINGS_HINT = 'Click a row to see its options, then click one; or Tab to it and press Enter. A change applies at once.'
 const CHAT_EXPIRE_MS = 6 * 3600_000 // a web message older than this isn't submitted to a new listener
 const CHAT_STALE_MS = 15_000 // as wb's LISTENING_FOR: a listener silent this long has gone
@@ -374,6 +385,29 @@ async function probeMode($: any): Promise<string> {
   }
 }
 
+// The Stats tab's rows (#406): what wb records for it and its live view, on by default (the user,
+// 2026-11-20: a measurement that costs nothing is on, and every one can be turned off), then
+// progress checks, off by default since each one wakes Claude. Each is wb's choice: `wb stats set`
+// (stats.json), `wb progress` (progress.json).
+const RECORD_STOPS: [string, string, string][] = [
+  ['on', 'On (default)', 'Each task keeps how it went for the Stats tab: speeds, watts, what stopped it. Nothing leaves this machine.'],
+  ['off', 'Off', 'Tasks keep only what workbench itself learns from.'],
+]
+const LIVE_STOPS: [string, string, string][] = [
+  ['on', 'On (default)', 'The Stats tab shows this machine now (wb top), and only while it is on screen.'],
+  ['off', 'Off', 'The Stats tab shows the history only.'],
+]
+const EVERY_STOPS: [string, string, string][] = [
+  ['1', '1 s', 'How often the live view samples the GPU, the tasks and the models.'],
+  ['2', '2 s (default)', 'How often the live view samples the GPU, the tasks and the models.'],
+  ['5', '5 s', 'How often the live view samples the GPU, the tasks and the models.'],
+]
+const PROGRESS_STOPS: [string, string, string][] = [
+  ['off', 'Off (default)', 'No progress checks: each one wakes Claude, which spends its tokens.'],
+  ['on', 'On', 'A task past its typical length gets a check and one recommendation, waking Claude.'],
+]
+const SETTING_ROWS = /^(coding|chat|probe|record|live|every|progress):/ // the rows whose ring the pane follows
+
 // One settings row: a Button naming the choice, which opens its options under it, each a Button
 // (a click, or Enter on the ring), the chosen one marked. Under them the sentence of the option
 // the ring is on, else the chosen one's; the pointer on an option lays its own over it (a hover
@@ -413,6 +447,257 @@ async function setWeb($: any, value: string) {
   mem.chatUrlAt = 0
   await readSwitch($)
   await chatLink($)
+}
+
+// stats.json's settings as wb reads them (stats.py): each its default unless the file says
+// otherwise, a mistyped value ignored
+async function statsSettings($: any): Promise<{ recording: boolean; live: boolean; every: number }> {
+  let d: any = {}
+  try { d = JSON.parse(await $.fs.read(`${mem.root}/stats.json`)) } catch { /* the defaults */ }
+  const on = (v: unknown) => (typeof v === 'boolean' ? v : true)
+  return { recording: on(d?.recording), live: on(d?.live), every: [1, 2, 5].includes(d?.every) ? d.every : 2 }
+}
+
+async function progressOn($: any): Promise<boolean> {
+  try { return JSON.parse(await $.fs.read(`${mem.root}/progress.json`)).on === true } catch { return false }
+}
+
+// The Stats tab's history: `wb stats --json`, only while the tab is shown, and only when what it
+// is made from changed since the last read (results.jsonl: a task closed; stats.json: a setting).
+// `force` after a settings pick. A stat is all a poll costs while the tab is shown; nothing at all
+// while it isn't.
+async function refreshStats($: any, force = false) {
+  if (mem.statsReading || (await read($, pane)).tab !== 'stats') return
+  const shown = ((await $.ui.panes().catch(() => [])) as Row[]).find(p => p.id === PANE)
+  if (!shown?.isShown) return
+  const stamp = async (f: string) => {
+    try { const s = await $.fs.stat(`${mem.root}/${f}`); return `${s.size}@${s.mtimeMs}` } catch { return '-' }
+  }
+  const key = `${await stamp('results.jsonl')} ${await stamp('stats.json')}`
+  const had = await read($, statsFeed)
+  if (!force && had.feed && key === had.key) return
+  mem.statsReading = true
+  try {
+    const r = await $.process.run([mem.wb, 'stats', '--json'], { timeoutMs: 30_000 })
+    if (r.exitCode !== 0) return
+    const feed = JSON.parse(r.stdout)
+    if (feed && typeof feed === 'object') await update($, statsFeed, () => ({ key, feed }))
+  } catch {
+    // wb missing or slow: the last feed stays; tried again at the next poll
+  } finally {
+    mem.statsReading = false
+  }
+}
+
+// Whether the live view should run now: the Stats tab on screen (its tab, the pane shown and not
+// minimized) with the live view on. Anything else and `wb top` isn't running.
+async function topWanted($: any): Promise<boolean> {
+  const view = await read($, pane)
+  if (view.tab !== 'stats' || view.minimized) return false
+  const shown = ((await $.ui.panes().catch(() => [])) as Row[]).find(p => p.id === PANE)
+  return !!shown?.isShown && (await statsSettings($)).live
+}
+
+// Starts or ends the live view's child to match topWanted: at each poll, on a tab's press, a
+// minimize and a Live view pick, and on each line it prints (so leaving the tab ends it within a
+// tick, whatever else happens)
+async function syncTop($: any) {
+  const want = await topWanted($)
+  if (want && !mem.top && (await $.clock.now()) >= mem.topRetryAt) void runTop($)
+  else if (!want && mem.top) stopTop()
+}
+
+function stopTop() {
+  const child = mem.top
+  mem.top = null
+  try { void child?.return?.(undefined)?.catch?.(() => {}) } catch { /* already ended */ }
+}
+
+async function runTop($: any) {
+  const child = $.process.spawn({ argv: [mem.wb, 'top', '--json'] })
+  mem.top = child
+  await update($, topNow, () => ({ snap: null, busy: {} })) // the sparkline starts as the tab opens
+  let buf = ''
+  try {
+    for await (const { stream, text } of child) {
+      if (stream !== 'stdout') continue
+      buf += text
+      let cut
+      while ((cut = buf.indexOf('\n')) >= 0) {
+        const line = buf.slice(0, cut)
+        buf = buf.slice(cut + 1)
+        let snap: Row
+        try { snap = JSON.parse(line) } catch { continue }
+        if (!snap || typeof snap !== 'object') continue
+        await update($, topNow, prev => {
+          const busy: Record<string, number[]> = {}
+          for (const g of (snap.gpus ?? []) as Row[])
+            if (typeof g.busy === 'number') busy[String(g.index ?? 0)] = [...(prev.busy[String(g.index ?? 0)] ?? []), g.busy].slice(-BUSY_KEEP)
+          return { snap, busy }
+        })
+      }
+      if (!(await topWanted($))) break // off screen now: leaving the loop ends the child
+    }
+  } catch {
+    // it could not start, or its stream closed: tried again after a while
+  }
+  if (mem.top === child) { // it ended by itself, not by stopTop: not again at once
+    mem.top = null
+    mem.topRetryAt = (await $.clock.now()) + TOP_RETRY_MS
+  }
+}
+
+const BLOCKS = '▏▎▍▌▋▊▉█'
+// ``frac`` (0..1) of ``width`` cells, in eighths, the rest light shade
+export function bar(frac: number, width: number): string {
+  const eighths = Math.round(Math.max(0, Math.min(1, frac)) * width * 8)
+  const full = Math.floor(eighths / 8), part = eighths % 8
+  const drawn = '█'.repeat(full) + (part ? BLOCKS[part - 1] : '')
+  return drawn + '░'.repeat(Math.max(0, width - drawn.length))
+}
+
+const gib = (n: number) => (n / 2 ** 30).toFixed(1)
+const secs = (s: number) => (s < 60 ? `${Math.round(s)}s` : s < 3600 ? `${Math.floor(s / 60)}m${String(Math.round(s % 60)).padStart(2, '0')}s`
+  : `${Math.floor(s / 3600)}h${String(Math.floor((s % 3600) / 60)).padStart(2, '0')}m`)
+// lspci's long name cut to the card's own (its last bracket), as `wb top` draws it
+const cardName = (name: string) => [...name.matchAll(/\[([^\]]+)\]/g)].at(-1)?.[1] ?? name
+const RACK_MARK: Record<string, string> = { resident: '●', split: '◑', idle: '○', "can't run": '✗', remote: '⇢' }
+const RACK_COLOR: Record<string, string> = { resident: 'success', split: 'warning', "can't run": 'error' }
+
+// The live view as lines of coloured parts: each GPU (memory and busy as bars, watts, busy's
+// sparkline), what runs now, the rack (every model: where it is, its speeds, its load time, the
+// task on it) and the queue. Nothing is said for what a platform can't tell.
+export function liveLines(t: WbTop): { color?: string; dim?: boolean; bold?: boolean; text: string }[][] {
+  const s = t.snap
+  if (!s) return [[{ dim: true, text: 'Reading this machine…' }]]
+  const out: { color?: string; dim?: boolean; bold?: boolean; text: string }[][] = []
+  for (const g of (s.gpus ?? []) as Row[]) {
+    const row: { color?: string; dim?: boolean; bold?: boolean; text: string }[] = [
+      { bold: true, text: g.ram ? 'RAM ' : `GPU ${g.index ?? ''} ` }, { dim: true, text: `${cardName(String(g.name ?? ''))} ` }]
+    if (typeof g.used === 'number' && g.total) {
+      const f = g.used / g.total
+      row.push({ color: f > 0.95 ? 'error' : f > 0.8 ? 'warning' : 'success', text: bar(f, 12) },
+        { text: ` ${gib(g.used)}/${gib(g.total)} GiB ` })
+    } else if (g.total) row.push({ dim: true, text: `${gib(g.total)} GiB${g.unified ? ' unified' : ''} ` })
+    if (typeof g.busy === 'number')
+      row.push({ dim: true, text: '· busy ' }, { color: g.busy > 80 ? 'warning' : 'success', text: bar(g.busy / 100, 8) },
+        { text: ` ${g.busy}% ` })
+    if (typeof g.watts === 'number') row.push({ text: `· ${Math.round(g.watts)} W ` })
+    const line = spark(t.busy[String(g.index ?? 0)] ?? [])
+    if (line.length > 1) row.push({ dim: true, text: line.slice(-24) })
+    out.push(row)
+  }
+  for (const r of (s.running ?? []) as Row[]) {
+    const parts = [r.phase, r.round ? `round ${r.round}` : '', typeof r.round_s === 'number' ? secs(r.round_s) : '',
+      typeof r.tok_s === 'number' ? `${Math.round(r.tok_s)} tok/s${r.tok_s_from === 'live' ? '' : ' (last call)'}` : '',
+      typeof r.context_pct === 'number' ? `context ${r.context_pct}%` : ''].filter(Boolean)
+    out.push([{ color: 'claude', text: '▶ ' }, { bold: true, text: `${r.task} ` }, { dim: true, text: `${r.label || r.model} · ${parts.join(' · ')}` }])
+  }
+  if (!(s.running ?? []).length) out.push([{ dim: true, text: 'Nothing running.' }])
+  for (const m of (s.rack ?? []) as Row[]) {
+    const where = typeof m.gpu_bytes === 'number'
+      ? ` ${gib(m.gpu_bytes)} GiB on the GPU${m.cpu_bytes ? ` + ${gib(m.cpu_bytes)} on the CPU` : ''}` : ''
+    const facts = [m.write_tok_s ? `writes ~${Math.round(m.write_tok_s)}` : '', m.read_tok_s ? `reads ~${Math.round(m.read_tok_s)}` : '',
+      m.load_s ? `loads ~${secs(m.load_s)}` : '', m.state === 'remote' ? 'another machine: no telemetry' : m.why ?? ''].filter(Boolean)
+    out.push([{ color: RACK_COLOR[m.state], dim: !RACK_COLOR[m.state], text: `${RACK_MARK[m.state] ?? '•'} ` },
+      { text: `${m.label || m.model} ` }, { color: RACK_COLOR[m.state], dim: !RACK_COLOR[m.state], text: `${m.state}${where}` },
+      { dim: true, text: facts.length ? ` · ${facts.join(' · ')}` : '' },
+      ...(m.tasks?.length ? [{ color: 'claude', text: ` ← ${m.tasks.join(', ')}` }] : [])])
+  }
+  for (const q of (s.queue ?? []) as Row[])
+    out.push([{ color: 'warning', text: '◌ ' }, { text: `${q.task} ` },
+      { dim: true, text: `waits for the GPU${typeof q.waited_s === 'number' ? ` (${secs(q.waited_s)})` : ''}` }])
+  return out
+}
+
+const SPARKS = '▁▂▃▄▅▆▇█'
+// Values as one character each, the highest the full block; none for all zero
+export function spark(values: number[]): string {
+  const top = Math.max(0, ...values)
+  return top > 0 ? values.map(v => SPARKS[Math.min(7, Math.round((Math.max(0, v) / top) * 7))]).join('') : ''
+}
+
+const kilo = (x: number) => (Math.abs(x) >= 1e6 ? `${(x / 1e6).toFixed(1)}M` : `${Math.round(x / 1e3)}K`)
+const GUARD_WORDS: Record<string, string> = {
+  repeat: 'the same call repeated', errors: 'tool errors in a row', no_edit: 'no file changed',
+  round: 'the round time limit', silence: 'silence', think: 'thinking with no tool call',
+  handovers: 'handovers without finishing',
+}
+
+// The Stats tab's history as lines (a label in bold, then the text): what the feed holds, each
+// section left out when it has nothing, estimates said as such. A run of days that ended isn't
+// mentioned, only the best (the plan's rule: show what went right, never nag).
+export function statsLines(f: Record<string, any> | null): { label: string; text: string }[] {
+  if (!f) return [{ label: '', text: 'Reading the history…' }]
+  if (!f.tasks) return [{ label: '', text: 'No finished tasks yet: delegate one with /workbench, and how it went shows here.' }]
+  const out: { label: string; text: string }[] = []
+  const period = (name: string, label: string) => {
+    const p = f.periods?.[name]
+    if (!p) return
+    const s = p.score
+    const saved = p.savings?.saved ?? 0
+    const parts = [
+      s ? `score ${s.score}/100` : '',
+      p.savings ? (saved >= 0 ? `saved ~${kilo(saved)} Claude tokens (estimate)` : `cost ~${kilo(-saved)} more Claude tokens (estimate)`) : '',
+      `${p.tasks} task${p.tasks === 1 ? '' : 's'}`,
+      `${p.landed} landed${p.accepted_pct !== undefined ? ` (${p.accepted_pct}%)` : ''}`,
+      p.savings?.wh ? `${p.savings.wh >= 1000 ? `${(p.savings.wh / 1000).toFixed(1)} kWh` : `${Math.round(p.savings.wh)} Wh`}` +
+        (p.savings.cost != null ? ` (${p.savings.cost.toFixed(2)})` : '') : '',
+    ]
+    out.push({ label, text: parts.filter(Boolean).join(' · ') })
+  }
+  period('week', 'This week')
+  period('all', 'All time')
+  if (f.streak) out.push({ label: 'Streak', text: f.streak.current
+    ? `${f.streak.current} day${f.streak.current === 1 ? '' : 's'} in a row with a task landed · best ${f.streak.best}`
+    : `best: ${f.streak.best} day${f.streak.best === 1 ? '' : 's'} in a row with a task landed` })
+  const ab = f.absorbed
+  if (ab) {
+    const parts = [
+      ab.auto_fixes ? `${ab.auto_fixes} test failure${ab.auto_fixes === 1 ? '' : 's'} sent back and fixed by the agent` +
+        (ab.auto_fixed_tasks ? ` (${ab.auto_fixed_tasks} task${ab.auto_fixed_tasks === 1 ? '' : 's'} then green)` : '') : '',
+      ab.questions ? `${ab.questions} question${ab.questions === 1 ? '' : 's'} answered mid-task` : '',
+      ab.handovers_landed ? `${ab.handovers_landed} landed after a handover to a fresh session` : '',
+    ].filter(Boolean)
+    if (parts.length) out.push({ label: 'Without waking Claude', text: parts.join(' · ') })
+  }
+  for (const [model, m] of Object.entries(f.models ?? {}) as [string, any][]) {
+    const trend = spark((m.write_trend ?? []).map((p: number[]) => p[1]))
+    const speed = m.speed?.write ? ` · writes ~${Math.round(m.speed.write)} tok/s` : ''
+    const change = typeof m.write_change_pct === 'number' && m.write_change_pct
+      ? ` (${m.write_change_pct > 0 ? '+' : ''}${m.write_change_pct}%)` : ''
+    out.push({ label: model, text: `${m.tasks} task${m.tasks === 1 ? '' : 's'} · ${m.accepted_pct}% landed` +
+      (m.rounds != null ? ` · ${m.rounds} rounds` : '') + (m.minutes != null ? ` · ${m.minutes} min` : '') +
+      speed + (trend ? ` ${trend}` : '') + change + (m.claude ? ` · Claude ~${kilo(m.claude)}/task` : '') })
+  }
+  const sized = Object.entries(f.sizes ?? {}) as [string, any][]
+  if (sized.length) out.push({ label: 'By size', text: sized.map(([k, v]) => `${k} ${v.tasks} (${v.accepted_pct}%)`).join(' · ') })
+  if (f.days?.length) {
+    const line = spark(f.days.map((d: any) => d.tasks))
+    if (line) out.push({ label: 'Last 30 days', text: `${line}  tasks per day` })
+  }
+  const bests = [
+    f.bests?.largest_first_try ? `largest landed first try: ${f.bests.largest_first_try.lines} lines (${f.bests.largest_first_try.task})` : '',
+    f.bests?.fastest ? `fastest landing: ${f.bests.fastest.minutes} min (${f.bests.fastest.task})` : '',
+  ].filter(Boolean)
+  if (bests.length) out.push({ label: 'Bests', text: bests.join(' · ') })
+  const last = (f.milestones ?? []).at(-1)
+  if (last) out.push({ label: 'Milestone', text: last.kind === 'landed'
+    ? `${last.n} task${last.n === 1 ? '' : 's'} landed${last.day ? ` (${last.day})` : ''}`
+    : `${kilo(last.n)} Claude tokens saved, estimated${last.day ? ` (${last.day})` : ''}` })
+  const guards = Object.entries(f.guards ?? {}) as [string, number][]
+  if (guards.length) out.push({ label: 'What stopped agents', text: guards.sort((a, b) => b[1] - a[1])
+    .map(([g, n]) => `${GUARD_WORDS[g] ?? g} ${n}`).join(' · ') })
+  for (const [model, h] of Object.entries(f.helps ?? {}) as [string, any][]) {
+    const said = Object.entries(h).filter(([, v]: any) => v[1]).map(([k, v]: any) => `a ${k === 'smaller' ? 'smaller step' : k} helped ${v[0]} of ${v[1]}`)
+    if (said.length) out.push({ label: `What helps (${model})`, text: said.join(' · ') })
+  }
+  const bench = Object.entries(f.bench ?? {}) as [string, any][]
+  if (bench.length) out.push({ label: 'Bench', text: bench.map(([m, b]) => `${m} ${b.passed}/${b.of} (${b.day})`).join(' · ') })
+  const opt = Object.entries(f.optimized ?? {}) as [string, any][]
+  if (opt.length) out.push({ label: 'Optimized', text: opt.map(([m, o]) => `${m} ${Math.round(o.window / 1024)}K` +
+    (o.spill ? ` (${o.spill}% on the CPU)` : ' all on the GPU')).join(' · ') })
+  return out
 }
 
 // The file tools' path fields: an edit in a task's worktree is writing that task's code
@@ -490,6 +775,10 @@ const mem = {
   wb: 'wb',
   liveKey: '', // the followed task and its updated_at when last read
   liveAt: 0, // when its transcript was last read
+  statsReading: false, // a `wb stats --json` under way (refreshStats)
+  top: null as any, // the `wb top --json` child while the live view runs (syncTop)
+  topRetryAt: 0, // not before then, after one ended by itself
+  price: null as number | null, // the electricity price wb says is set (`wb savings --json`)
   cwd: '', // the session's directory, resolved: which old tasks are this session's (mine)
   home: '', // the home directory, resolved: a session there claims no task by directory
   ids: new Set<string>(), // the `sessions` atom: which tasks are this session's (mine)
@@ -892,6 +1181,35 @@ export function savedLine(out: string): string {
   return `this week: ${what}${gpu}`
 }
 
+// The electricity price `wb savings --json` says is set (per kWh), or null
+export function priceOf(out: string): number | null {
+  try {
+    const p = JSON.parse(out).price
+    return typeof p === 'number' && p > 0 ? p : null
+  } catch {
+    return null
+  }
+}
+
+// The Settings tab's price row: wb checks and keeps it (`wb savings --price`), and its answer
+// is the week's saving again, now with the energy's cost
+async function setPrice($: any, text: string) {
+  const v = Number(text.trim().replace(/^\$/, ''))
+  if (!(v > 0)) {
+    $.ui.toast('workbench: the electricity price is a positive number, per kWh')
+    return
+  }
+  const { ok, out } = await runWb($, ['savings', '--price', String(v), '--json'])
+  if (!ok) {
+    $.ui.toast(`workbench: ${brief(out)}`)
+    return
+  }
+  mem.price = priceOf(out)
+  const said = savedLine(out)
+  if (said !== (await read($, savings))) await update($, savings, () => said)
+  $.ui.invalidate('ui.render')
+}
+
 async function poll($: any) {
   if (!mem.root || !mem.person) return
   if (mem.polling) { // a slow file system must not stack polls, but no change may be missed
@@ -919,6 +1237,8 @@ async function poll($: any) {
       if (!(await read($, pane)).minimized) void $.ui.open({ id: PANE, title: 'Workbench' }) // put away stays away
     }
     void refreshLive($, list, now)
+    void refreshStats($)
+    void syncTop($)
     if (!mem.busy && mem.queued.length && now >= mem.queuedRetryAt) void sendQueued($, mem.queued.shift()!)
     const isOpen = (t: WbTask) => ACTIVE.has(t.phase) || NEEDS.has(t.phase)
     // Only this session's tasks, and only in workbench mode, make a boundary: a task closing
@@ -952,6 +1272,7 @@ async function poll($: any) {
       mem.savingsAt = now
       const { ok, out } = await runWb($, ['savings', '--json'])
       const said = ok ? savedLine(out) : ''
+      mem.price = ok ? priceOf(out) : mem.price
       if (said !== (await read($, savings))) await update($, savings, () => said)
     }
   } finally {
@@ -1349,6 +1670,7 @@ async function restorePane($: any, tab: string) {
   const opening = $.ui.open({ id: PANE, title: 'Workbench' })
   mem.paneOpened = true
   await update($, pane, p => ({ ...p, tab: tab || p.tab, minimized: false }))
+  void syncTop($)
   $.ui.invalidate('ui.render')
   return opening
 }
@@ -1612,6 +1934,7 @@ export const register: Register = (on, options) => {
   on('ui.close', async ($, e, next) => {
     if (e.id === PANE && e.origin?.kind === 'person') {
       await update($, pane, p => ({ ...p, minimized: true }))
+      stopTop() // put away: the live view ends with it
       $.ui.invalidate('ui.render')
     }
     return next(e)
@@ -1642,7 +1965,7 @@ export const register: Register = (on, options) => {
 
   // Where the ring is in the pane, so an open settings row shows that option's sentence; let through
   on('ui.focus', { requestId: PANE }, async ($, e, next) => {
-    const focus = e.element && /^(coding|chat):/.test(e.element) ? e.element : ''
+    const focus = e.element && SETTING_ROWS.test(e.element) ? e.element : ''
     if (focus !== (await read($, pane)).focus) await update($, pane, p => ({ ...p, focus }))
     return next(e)
   })
@@ -1670,25 +1993,69 @@ export const register: Register = (on, options) => {
       <Box flexDirection="row" columnGap={2} marginTop={1}>
         {TABS.map(([tab, label, hotkey]) => (
           <Button key={`tab-${tab}`} label={label} hotkey={hotkey} plain dimColor={view.tab !== tab}
-            onPress={() => { void update($, pane, p => ({ ...p, tab, open: '', focus: '' })) }} />
+            onPress={() => { void update($, pane, p => ({ ...p, tab, open: '', focus: '' })).then(() => { void refreshStats($); void syncTop($) }) }} />
         ))}
       </Box>
     )
-    // the Settings tab: Claude coding (#93), the web chat and the probe experiment, one row each at rest
-    if (view.tab === 'settings') return (
-      <Box flexDirection="column">
-        <Text dimColor>{SETTINGS_HINT}</Text>
-        <Box flexDirection="column" marginTop={1}>
-          {settingRow(kit, $, 'coding', 'Claude coding', CODING_STOPS, await codingMode($), view,
-            v => runWb($, ['coding', v]))}
-          {settingRow(kit, $, 'chat', 'Web chat', CHAT_STOPS, web ? 'on' : 'off', view, v => setWeb($, v))}
-          {settingRow(kit, $, 'probe', 'Agent code navigation (experimental, may go away)', PROBE_STOPS, await probeMode($), view,
-            v => runWb($, ['experiment', 'probe', v]))}
+    // the Settings tab: Claude coding (#93), the web chat, the probe experiment, then the Stats tab's (#406), one row
+    // each at rest; the electricity price is typed (an Input: wb checks it)
+    if (view.tab === 'settings') {
+      const st = await statsSettings($)
+      const picked = (args: string[]) => runWb($, args).then(() => { void refreshStats($, true); void syncTop($) })
+      return (
+        <Box flexDirection="column">
+          <Text dimColor>{SETTINGS_HINT}</Text>
+          <Box flexDirection="column" marginTop={1}>
+            {settingRow(kit, $, 'coding', 'Claude coding', CODING_STOPS, await codingMode($), view,
+              v => runWb($, ['coding', v]))}
+            {settingRow(kit, $, 'chat', 'Web chat', CHAT_STOPS, web ? 'on' : 'off', view, v => setWeb($, v))}
+            {settingRow(kit, $, 'probe', 'Agent code navigation (experimental, may go away)', PROBE_STOPS, await probeMode($), view,
+              v => runWb($, ['experiment', 'probe', v]))}
+            {settingRow(kit, $, 'record', 'Stats recording', RECORD_STOPS, st.recording ? 'on' : 'off', view,
+              v => picked(['stats', 'set', 'recording', v]))}
+            {settingRow(kit, $, 'live', 'Live view', LIVE_STOPS, st.live ? 'on' : 'off', view,
+              v => picked(['stats', 'set', 'live', v]))}
+            {settingRow(kit, $, 'every', 'Live refresh', EVERY_STOPS, String(st.every), view,
+              v => picked(['stats', 'set', 'every', v]))}
+            {settingRow(kit, $, 'progress', 'Progress checks', PROGRESS_STOPS, (await progressOn($)) ? 'on' : 'off', view,
+              v => runWb($, ['progress', v]))}
+            <kit.Input key="price" label="▸ Electricity price per kWh: " value={mem.price ? String(mem.price) : ''}
+              placeholder="not set (energy shows in Wh)" submitLabel="set" onSubmit={(v: string) => { void setPrice($, v) }} />
+          </Box>
+          {pinned}
+          {tabs}
         </Box>
-        {pinned}
-        {tabs}
-      </Box>
-    )
+      )
+    }
+    // the Stats tab: the live view (#408, `wb top --json` while shown, with Live view on), then
+    // the history (#406, `wb stats --json`)
+    if (view.tab === 'stats') {
+      const { feed } = await read($, statsFeed)
+      const cols = Math.max(30, Number(((e.props ?? {}) as Row).bodyColumns ?? e.viewport?.columns ?? 60))
+      const now = (await statsSettings($)).live ? liveLines(await read($, topNow)) : []
+      return (
+        <Box flexDirection="column">
+          {now.length ? (
+            <Box flexDirection="column" marginBottom={1}>
+              <Text bold color="claude">Now</Text>
+              {now.map(parts => (
+                <Text wrap="truncate-end">{parts.map(p => <Text color={p.color} dimColor={p.dim} bold={p.bold}>{p.text}</Text>)}</Text>
+              ))}
+            </Box>
+          ) : null}
+          {statsLines(feed).map(({ label, text }) => (
+            <Box flexDirection="column" marginBottom={label ? 0 : 1}>
+              {label
+                ? wrapWords(`${label}: ${text}`, cols).map((l, i) => i === 0 && l.startsWith(label)
+                  ? <Text><Text bold>{label}</Text><Text dimColor>{l.slice(label.length)}</Text></Text>
+                  : <Text dimColor>{l}</Text>)
+                : <Text dimColor>{text}</Text>}
+            </Box>
+          ))}
+          {tabs}
+        </Box>
+      )
+    }
     const props = (e.props ?? {}) as Row
     const cols = Math.max(30, Number(props.bodyColumns ?? e.viewport?.columns ?? 60))
     const now = await $.clock.now()

@@ -95,8 +95,8 @@ dependencies. No packaging: it runs from the clone.
   run <cmd> (<reason>)`, 127 when not found, else 126 (outside the read lane: Permission denied);
   without Landlock (or off `lane.UNIFIED`'s architectures) it runs unrestricted and `wb doctor`
   says so. Standard library only.
-- `gitguard.py`: the read-only `git` shim first on the agent's PATH. Standard library only: it's
-  imported on every git call.
+- `gitguard.py`: the read-only `git` shim first on the agent's PATH. Standard library only: it runs
+  on every git call.
 - `gitops.py`: worktrees and branches, the review diff (intent-to-add, so new files show),
   `mark` (has the worktree changed), commits (no hooks), the repo's stack. Calls on a task's
   worktree are pinned to its recorded git dir (`rules/<task>/gitdir.json`).
@@ -116,32 +116,33 @@ dependencies. No packaging: it runs from the clone.
 - `spend.py`: what a task cost Claude, from its session's transcript; `savings.py`, against Claude
   writing it (an estimate).
 - `bench.py`: `wb bench`: accepted tasks replayed on any model, graded by their own tests.
-- `verify.py`: `wb verify`, `wb shot`: the base and the candidate run alike, in scratch checkouts.
+- `verify.py`: `wb verify`, `wb shot`: the base and the candidate run alike in scratch checkouts.
 - `progress.py`: opt-in progress checks: active work, a hint or a smaller step, what helped.
+- `stats.py`: Stats tab settings.
 - `lessons.py`: what each task taught, gathered into lessons.jsonl by feedback/next/resume/accept/discard.
 - `transcript.py`: `wb watch` (the session export merged with the task's events; `--json` feeds
-  the mod's pane). `transcript.export` is also the runner's view of the session.
+  the mod's pane). `export` is also the runner's view of the session.
 - `watch.py`: waiting without polling: inotify (ctypes) and pidfd, with a stat fallback.
 - `chat.py` + `chat_static/`: the web chat (stdlib HTTP, a token and a Host check); `webpush.py`,
   its notifications.
 - `images.py`, `audio.py`: `wb image`, `wb audio` (`images.json`, `audio.json`; sounds come checked:
   Claude can't hear); `media.py`: what they share, the GPU too.
 - `optimize.py`: `wb optimize` (when due, or asked): each Ollama model's largest window all on the GPU.
-- `agent/HANDBOOK.md`: Claude's working habits for the agent. Every agent prompt carries it, so
-  keep it short: each token costs prefill time.
+- `top.py`: `wb top`: GPUs, tasks, models, queue, live.
+- `agent/HANDBOOK.md`: Claude's working habits for the agent. Every agent prompt carries it: keep
+  it short (prefill time).
 - `skill/workbench/`: the `/workbench` procedure (`SKILL.md`, `reference/`; `wb setup` links it).
 - `mod/`: the Claude Code plugin (`hooks/register.tsx`, `hooks/apprentice.ts` the pane's
   character, `hooks/register.test.tsx`, `types/index.d.ts`; `.claude-plugin/plugin.json` has no
-  version: installs track main's commits). The root's `.claude-plugin/marketplace.json` makes it a marketplace.
+  version: installs track main's commits). Its marketplace: the root's `.claude-plugin/marketplace.json`.
 - `bin/wb`, `bin/wb-ask-mcp`: launchers that find the package from their real path.
 - `tests/`: `test_workbench.py` (end to end, one class per feature), `test_gpu.py`,
   `test_portable.py`, `test_sizing.py`, `test_docs.py` (the docs cover the code),
-  `test_workflows.py` (the merge gate),
-  `fake_opencode.py`, `capture_llm.py`, `e2e_chat.mjs`.
+  `test_workflows.py` (the merge gate), `fake_opencode.py`, `capture_llm.py`, `e2e_chat.mjs`.
 - `.github/`: CI (`workflows/check.yml`, the required check, on each push and PR,
   Python 3.11, OpenCode `OPENCODE_VERSION`; `chat.yml`, the browser test; `nightly.yml`: the
   newest Claude Code, macOS, WSL2; `opencode.yml`: the newest OpenCode), `owner-merge.yml` (approves
-  the owner's pull requests only), `rulesets/main.json`, dependabot for the actions' pins.
+  only the owner's PRs), `rulesets/main.json`, dependabot for the actions' pins.
 - `scripts/`: `ship.sh` (the road to main), `github-settings.sh check|apply`,
   `install-opencode.sh` (CI's OpenCode, from its release, hash-checked).
 - `systemd/wb-chat.service`: keeps the web chat up. `docs/`: the docs' images (a replaced one gets a
@@ -165,8 +166,7 @@ Runs on Linux, WSL2 and macOS; the launchers refuse native Windows and Python be
    without a worktree edit, silence past `--silence-timeout`, a round past `--round-timeout`, more than
    `HANDOVER_MAX` handovers in a round. Past the think budget (`--think-timeout`, from the round's
    first output, paused while OpenCode waits on a background job) it gets a nudge; the round after
-   it that stalls again is stopped. Limits stretch for a model
-   measured slow (`router.budgets`, written into task.json at start). `wb steer` queues a note;
+   it that stalls again is stopped. Limits stretch for a model measured slow (`router.budgets`, written into task.json at start). `wb steer` queues a note;
    `--now` interrupts.
 4. After a clean round the runner runs `--test`, in the agent's lane, environment and shell; failures go back to the agent up to `--auto-fix`
    times without waking Claude (`--test-timeout`, 900 s). A session that reaches the handover point (`fresh_at`, tuned per
@@ -190,7 +190,7 @@ Runs on Linux, WSL2 and macOS; the launchers refuse native Windows and Python be
 Plain files under `$WB_HOME` (`~/.local/state/workbench`); the full tree and every format are in
 ARCHITECTURE.md (*Files and formats*):
 ```
-notify{,.old}.jsonl results.jsonl lessons.jsonl notes.md coding.json progress.json tuning.json speed.json gpu*.{lock,json,admit,load}
+notify{,.old}.jsonl results.jsonl lessons.jsonl notes.md coding.json progress.json stats.json tuning.json speed.json gpu*.{lock,json,admit,load}
 scout.json update.json watch.json optimize.json gc.json archive/ imports/ images/ audio/ chat/{messages,receipts,asks,seen}.jsonl chat/{listener,prefs,push,claims,switch,open,port}.json
 bench/{cases/<case>,runs/<run>}/ bench/runs.jsonl bench/driver.json
 rules/<task>/  opencode.json HANDBOOK.md CLAUDE.md bin/git grants.json gitdir.json (no lane)

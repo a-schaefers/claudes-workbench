@@ -22,7 +22,7 @@ from pathlib import Path
 from types import SimpleNamespace
 
 from . import (__version__, ask_mcp, audio, bench, chat, context, gitops, hardware, images, lane, lessons, models,
-               optimize, progress, results, router, savings, scan, skills, spend, store, transcript,
+               optimize, progress, results, router, savings, scan, skills, spend, stats, store, transcript,
                tuning, verify)
 from .watch import Watcher, wait_exit
 from . import runner
@@ -2096,7 +2096,22 @@ def cmd_models(a):
 
 
 def cmd_stats(a):
-    print(results.table())
+    """Results by model and size; `wb stats set KEY VALUE` changes what the Stats tab records
+    and shows (stats.py)."""
+    if a.action == "set":
+        if not (a.key and a.value):
+            die("wb stats set recording|live on|off, or wb stats set every 1|2|5")
+        try:
+            stats.set_setting(a.key, a.value)
+        except ValueError as e:
+            die(str(e))
+        print(stats.line())
+        return
+    if a.json:  # the Stats tab's history (#405)
+        print(json.dumps(stats.feed()))
+        return
+    head = stats.summary(stats.feed())
+    print("\n".join(head + [""] if head else []) + results.table())
 
 
 def cmd_savings(a):
@@ -2122,7 +2137,7 @@ def cmd_savings(a):
         s = savings.score(t)
         print(f"wrote {a.card}: " + (f"{s['score']}/100. {s['sentence']}" if s else savings.NO_SCORE))
     elif a.json:
-        print(json.dumps({"period": period, **t, "score": savings.score(t)}))
+        print(json.dumps({"period": period, **t, "score": savings.score(t), "price": savings.price()}))
     else:
         print(savings.summary(t, period))
 
@@ -3011,6 +3026,14 @@ def cmd_events(a):
                     print(json.dumps({"changed": sorted(changed)}), flush=True)
                 except BrokenPipeError:
                     return
+
+
+def cmd_top(a):
+    """A live feed of the machine: GPUs, running tasks, the rack of models, the GPU's queue."""
+    from . import top
+    if a.every is not None and not a.every > 0:
+        die("--every takes a number of seconds above 0")
+    top.main(every=a.every, as_json=a.json)
 
 
 def cmd_chat(a):
@@ -4010,6 +4033,12 @@ def parser() -> argparse.ArgumentParser:
     s.set_defaults(f=cmd_scout)
     s = sub.add_parser("events", help="print a line whenever workbench's state changes (the mod's ears)")
     s.set_defaults(f=cmd_events)
+    s = sub.add_parser("top", help="a live view of the GPUs, the running tasks, the models and the "
+                       "GPU's queue (q quits)")
+    s.add_argument("--json", action="store_true", help="one JSON object per tick, until the parent exits")
+    s.add_argument("--every", type=float, metavar="S",
+                   help="seconds between ticks (default: stats.json every, else 2)")
+    s.set_defaults(f=cmd_top)
     s = sub.add_parser("chat", help="the web chat: turn it on or off (on starts a server; kept as "
                        "left), serve it, its link, reply to the user there, "
                        "the thread (log), receipts (ack, claim), what waits (pending), permission "
@@ -4090,7 +4119,12 @@ def parser() -> argparse.ArgumentParser:
     x.add_argument("--run")
     x.add_argument("--label")
     s.set_defaults(f=cmd_bench)
-    sub.add_parser("stats", help="results by model").set_defaults(f=cmd_stats)
+    s = sub.add_parser("stats", help="results by model; `set` changes the Stats tab's settings")
+    s.add_argument("action", nargs="?", choices=["set"])
+    s.add_argument("key", nargs="?", metavar="KEY", help="recording, live or every")
+    s.add_argument("value", nargs="?", metavar="VALUE", help="on|off, or 1|2|5 (seconds) for every")
+    s.add_argument("--json", action="store_true", help="everything learned, as one object (the Stats tab's feed)")
+    s.set_defaults(f=cmd_stats)
     s = sub.add_parser("backlog", help="a batch started with --backlog: each task and the batch's saving")
     s.add_argument("name", nargs="?")
     s.add_argument("--json", action="store_true")

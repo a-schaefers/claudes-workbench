@@ -37,10 +37,18 @@ export type WbLive = { task: string; lines: WbLine[] }
  * whether the user has it on (`wb chat on|off`: off, no link and no listening). */
 export type WbChat = { key: string; delegating: boolean; webAt: number; url: string; web: boolean }
 
-/** The pane's view: its tab ('tasks' or 'settings'), the settings row open ('' none, 'coding',
- * 'chat'), the option the focus ring is on ('' none), so its sentence shows, and whether the user
- * closed it (a strip above the prompt stands in for it). */
+/** The pane's view: its tab ('tasks', 'stats' or 'settings'), the settings row open ('' none,
+ * 'coding', 'chat', 'record', 'live', 'every', 'progress'), the option the focus ring is on ('' none),
+ * so its sentence shows, and whether the user closed it (a strip above the prompt stands in for it). */
 export type WbPane = { tab: string; open: string; focus: string; minimized: boolean }
+
+/** The Stats tab's history: `wb stats --json` as last read (null before the first read), and the
+ * key of the files it was read from (results.jsonl and stats.json: size and mtime). */
+export type WbStats = { key: string; feed: Record<string, any> | null }
+
+/** The Stats tab's live view (#408): `wb top --json`'s newest tick (null before the first), and
+ * each GPU's busy % since the tab was shown, for its sparkline (memory only: never on disk). */
+export type WbTop = { snap: Record<string, any> | null; busy: Record<string, number[]> }
 
 declare module 'claude-code' {
   interface PluginState {
@@ -50,6 +58,10 @@ declare module 'claude-code' {
       savings: Shaped<string>
       /** the pane's settings rows (WbPane) */
       pane: Shaped<WbPane>
+      /** the Stats tab's history (WbStats, #406) */
+      stats: Shaped<WbStats>
+      /** the Stats tab's live view (WbTop, #408) */
+      top: Shaped<WbTop>
     }
   }
 }

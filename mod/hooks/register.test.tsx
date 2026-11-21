@@ -1,5 +1,5 @@
 import { expect, mock, test } from 'claude-code/testing'
-import { awayNow, savedLine, wrapWords } from './register.js'
+import { awayNow, priceOf, savedLine, spark, statsLines, wrapWords } from './register.js'
 
 const PANE = {
   plugin: 'workbench',
@@ -1550,7 +1550,7 @@ test('the settings rows open to Buttons, pick through wb, and say the sentence o
   for (const rows of [24, 8]) {                                      // the apprentice in pixels, then its face
     const ui = await $.ui.mount({ ...PANE, surface: 'terminal', props: { ...PANE.props, scroll: { offset: 0, bodyRows: rows } } })
     expect(await ui.find({ key: 'coding' })).toBeUndefined()                                           // a tab of their own
-    expect((await ui.findAll({ type: 'Button' })).slice(-2).map(b => b.props.label)).toEqual(['Tasks', 'Settings'])  // last
+    expect((await ui.findAll({ type: 'Button' })).slice(-3).map(b => b.props.label)).toEqual(['Tasks', 'Stats', 'Settings'])  // last
     await ui.press({ key: 'tab-settings' })
     expect((await ui.find({ key: 'coding' }))?.props.label).toBe('▸ Claude coding: Let Claude decide (default)')  // no saved choice
     expect((await ui.find({ key: 'chat' }))?.props.label).toBe('▸ Web chat: Off (default)')                      // off by default
@@ -1590,6 +1590,170 @@ test('the settings rows open to Buttons, pick through wb, and say the sentence o
   const phone = await $.ui.mount({ ...PANE, surface: 'mobile' })    // the same rows there
   expect((await phone.find({ key: 'coding' }))?.props.label).toBe('▸ Claude coding: Ask me first')
   await phone.unmount()
+})
+
+const FEED = {
+  ts: 1_800_000_000, tasks: 9, settings: { recording: true, live: true, every: 2 },
+  periods: {
+    week: { tasks: 4, landed: 3, accepted_pct: 75, savings: { saved: 1_230_000, wh: 900, cost: null }, score: { score: 62 } },
+    all: { tasks: 9, landed: 8, accepted_pct: 89 },
+  },
+  streak: { current: 0, best: 3, days: 5 },
+  absorbed: { auto_fixes: 7, auto_fixed_tasks: 3, questions: 2 },
+  models: { 'ollama/m': { tasks: 9, accepted_pct: 89, rounds: 1.4, minutes: 14, speed: { write: 38 },
+    write_trend: [[1, 30], [2, 40]], write_change_pct: 12 } },
+  days: [{ day: '2026-11-19', tasks: 0 }, { day: '2026-11-20', tasks: 2 }],
+  guards: { silence: 1, repeat: 2 },
+}
+
+test('the Stats tab draws the history, read from wb stats only while it is shown and again when a task closes', async ($, on) => {
+  // #406: no timer, and nothing at all while another tab, or no pane, is shown
+  const clock = mock.clock(on, { now: 1_800_000_000_000 })
+  const files: Record<string, string> = { '/wb/results.jsonl': '{}\n' }
+  const pane = fakeTasks(on, files, [])
+  const reads: string[][] = []
+  on('process.run', (_: any, e: any) => {
+    if (e.argv[1] === 'stats' && e.argv[2] === '--json') {
+      reads.push(e.argv)
+      return { value: { exitCode: 0, stdout: JSON.stringify(FEED), stderr: '' } }
+    }
+    return { value: { exitCode: 0, stdout: '', stderr: '' } }
+  })
+  await $.session.start({ cwd: '/', surface: 'terminal', isInteractive: true })
+  pane.show(true)                                                        // the pane open, on its Tasks tab
+  await clock.advance(31_000)
+  expect(reads.length).toBe(0)                                           // the Tasks tab: never read
+  const ui = await $.ui.mount({ ...PANE, surface: 'terminal', props: { ...PANE.props, bodyColumns: 200 } })
+  await ui.press({ key: 'tab-stats' })
+  await clock.advance(10)
+  expect(reads.length).toBe(1)
+  const texts = (await ui.findAll({ type: 'Text' })).map(t => t.text)
+  expect(texts).toContain('This week: score 62/100 · saved ~1.2M Claude tokens (estimate) · 4 tasks · 3 landed (75%) · 900 Wh')
+  expect(texts).toContain('Streak: best: 3 days in a row with a task landed')          // a run that ended isn't said
+  expect(texts.some(t => t.includes('the same call repeated 2 · silence 1'))).toBe(true)
+  expect(texts.some(t => t.includes('writes ~38 tok/s ▆█ (+12%)'))).toBe(true)
+  await clock.advance(31_000)
+  expect(reads.length).toBe(1)                                           // nothing changed: not read again
+  files['/wb/results.jsonl'] = '{}\n{}\n'                                // a task closed
+  await clock.advance(31_000)
+  expect(reads.length).toBe(2)
+  pane.show(false)                                                       // put away
+  files['/wb/results.jsonl'] = '{}\n{}\n{}\n'
+  await clock.advance(31_000)
+  expect(reads.length).toBe(2)
+  await ui.press({ key: 'tab-tasks' })
+  await ui.unmount()
+})
+
+test('the Stats tab\'s settings pick through wb, progress checks stay off by default, and the price is typed', async ($, on) => {
+  const clock = mock.clock(on, { now: 1_800_000_000_000 })
+  const files: Record<string, string> = {}
+  fakeTasks(on, files, [])
+  const runs: string[][] = []
+  on('process.run', (_: any, e: any) => {
+    runs.push(e.argv)
+    if (e.argv[1] === 'stats' && e.argv[2] === 'set')
+      files['/wb/stats.json'] = JSON.stringify({ [e.argv[3]]: e.argv[3] === 'every' ? Number(e.argv[4]) : e.argv[4] === 'on' })
+    if (e.argv[1] === 'savings' && e.argv[2] === '--price')
+      return { value: { exitCode: 0, stdout: JSON.stringify({ tasks: 0, price: Number(e.argv[3]) }), stderr: '' } }
+    return { value: { exitCode: 0, stdout: '', stderr: '' } }
+  })
+  await $.session.start({ cwd: '/', surface: 'terminal', isInteractive: true })
+  await clock.advance(1000)
+  const ui = await $.ui.mount({ ...PANE, surface: 'terminal' })
+  await ui.press({ key: 'tab-settings' })
+  expect((await ui.find({ key: 'record' }))?.props.label).toBe('▸ Stats recording: On (default)')
+  expect((await ui.find({ key: 'live' }))?.props.label).toBe('▸ Live view: On (default)')
+  expect((await ui.find({ key: 'every' }))?.props.label).toBe('▸ Live refresh: 2 s (default)')
+  expect((await ui.find({ key: 'progress' }))?.props.label).toBe('▸ Progress checks: Off (default)')
+  await ui.press({ key: 'record' })
+  await ui.press({ key: 'record:off' })
+  expect(runs.some(r => r.join(' ') === 'wb stats set recording off')).toBe(true)
+  expect((await ui.find({ key: 'record' }))?.props.label).toBe('▸ Stats recording: Off')
+  await ui.press({ key: 'every' })
+  await ui.press({ key: 'every:5' })
+  expect(runs.some(r => r.join(' ') === 'wb stats set every 5')).toBe(true)
+  await ui.press({ key: 'progress' })
+  await ui.press({ key: 'progress:on' })
+  expect(runs.some(r => r.join(' ') === 'wb progress on')).toBe(true)
+  await ui.input({ key: 'price', text: 'cheap' })                        // not a number: wb isn't asked
+  expect(runs.some(r => r[2] === '--price')).toBe(false)
+  await ui.input({ key: 'price', text: '$0.30' })
+  expect(runs.some(r => r.join(' ') === 'wb savings --price 0.3 --json')).toBe(true)
+  expect((await ui.find({ key: 'price' }))?.props.value).toBe('0.3')
+  await ui.press({ key: 'tab-tasks' })
+  await ui.unmount()
+})
+
+const TICK = {
+  ts: 1_800_000_000, every: 2,
+  gpus: [{ index: 0, name: 'Advanced Micro Devices, Inc. [AMD/ATI] Navi 48 [Radeon RX 9070 XT]', used: 2 ** 33, total: 2 ** 34, busy: 40, watts: 120 }],
+  running: [{ task: 'fix-it', model: 'ollama/m', label: 'Model M', phase: 'running', round: 2, round_s: 75, tok_s: 41.2, tok_s_from: 'live', context_pct: 31 }],
+  rack: [{ model: 'ollama/m', label: 'Model M', state: 'resident', gpu_bytes: 2 ** 33, write_tok_s: 40, read_tok_s: 900, load_s: 9, tasks: ['fix-it'] },
+    { model: 'ollama/n', label: 'Model N', state: 'idle', write_tok_s: 20 }],
+  queue: [{ task: 'later', model: 'ollama/n', waited_s: 30 }],
+}
+
+test('the live view runs wb top only while the Stats tab is on screen with Live view on, and ends it when left', async ($, on) => {
+  // #408: hidden, minimized, another tab or Live view off: no child at all
+  const clock = mock.clock(on, { now: 1_800_000_000_000 })
+  const files: Record<string, string> = { '/wb/results.jsonl': '' }
+  const pane = fakeTasks(on, files, [], true, [], false)
+  let starts = 0, ends = 0
+  on('process.spawn', async function* (_: any, e: any) {
+    if (e.argv[1] !== 'top') {                                           // wb events, as fakeTasks's
+      yield { stream: 'stdout', text: '{"hello": 4242}\n' }
+      await new Promise(() => {})
+    }
+    starts += 1
+    try {
+      for (;;) {
+        yield { stream: 'stdout', text: JSON.stringify(TICK) + '\n' }
+        await new Promise(r => setTimeout(r, 5))
+      }
+    } finally {
+      ends += 1
+    }
+  })
+  on('process.run', (_: any, e: any) => ({ value: { exitCode: 0, stdout: e.argv[1] === 'stats' ? JSON.stringify({ tasks: 0 }) : '', stderr: '' } }))
+  await $.session.start({ cwd: '/', surface: 'terminal', isInteractive: true })
+  pane.show(true)
+  await clock.advance(31_000)
+  expect(starts).toBe(0)                                                 // the Tasks tab
+  const ui = await $.ui.mount({ ...PANE, surface: 'terminal', props: { ...PANE.props, bodyColumns: 200 } })
+  await ui.press({ key: 'tab-stats' })
+  await new Promise(r => setTimeout(r, 30))
+  expect(starts).toBe(1)
+  const texts = (await ui.findAll({ type: 'Text' })).map(t => t.text)
+  expect(texts.some(t => t.startsWith('GPU 0 Radeon RX 9070 XT ██████░░░░░░ 8.0/16.0 GiB · busy ███▎░░░░ 40% · 120 W'))).toBe(true)
+  expect(texts.some(t => t.includes('fix-it Model M · running · round 2 · 1m15s · 41 tok/s · context 31%'))).toBe(true)
+  expect(texts.some(t => t.includes('● Model M resident 8.0 GiB on the GPU · writes ~40 · reads ~900 · loads ~9s ← fix-it'))).toBe(true)
+  expect(texts.some(t => t.includes('◌ later waits for the GPU (30s)'))).toBe(true)
+  await clock.advance(31_000)
+  expect(starts).toBe(1)                                                 // one child, not one a poll
+  await ui.press({ key: 'tab-tasks' })
+  await new Promise(r => setTimeout(r, 30))
+  expect(ends).toBe(1)                                                   // left: ended
+  files['/wb/stats.json'] = JSON.stringify({ live: false })
+  await ui.press({ key: 'tab-stats' })
+  await clock.advance(31_000)
+  await new Promise(r => setTimeout(r, 30))
+  expect(starts).toBe(1)                                                 // Live view off: never started
+  expect((await ui.findAll({ type: 'Text' })).some(t => t.text === 'Now')).toBe(false)
+  await ui.press({ key: 'tab-tasks' })
+  await ui.unmount()
+})
+
+test('the history says nothing it has no data for, and a new install how to begin', () => {
+  expect(statsLines(null)).toEqual([{ label: '', text: 'Reading the history…' }])
+  expect(statsLines({ tasks: 0 })[0].text).toMatch(/^No finished tasks yet/)
+  const lines = statsLines({ tasks: 1, periods: { week: { tasks: 1, landed: 1, accepted_pct: 100 } } })
+  expect(lines).toEqual([{ label: 'This week', text: '1 task · 1 landed (100%)' }])   // no savings, no zeros
+  expect(spark([0, 0])).toBe('')
+  expect(spark([1, 4, 8])).toBe('▂▅█')
+  expect(priceOf('{"price": 0.3}')).toBe(0.3)
+  expect(priceOf('{"price": null}')).toBe(null)
+  expect(priceOf('not json')).toBe(null)
 })
 
 test('a one-task exception shows beside its task and is under way from Claude\'s first edit', async ($, on) => {

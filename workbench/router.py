@@ -268,25 +268,16 @@ def _speed_path():
     return store.home() / "speed.json"
 
 
-def record_speed(model_id: str, messages: list[dict]) -> None:
+def record_speed(model_id: str, messages: list[dict]) -> dict:
     """Add a session's measured speeds to speed.json: writing (output and reasoning tokens over
     the time from first token to done) and reading (new input tokens over the time to first token).
     A request cut short (a nudge, a stop) still says how fast it read: on a slow machine the
     first request is often the one interrupted, and the reading was never learned (the
     2026-11-16 audit)."""
-    write, read = [], []
-    for msg in messages:
-        t, tk = msg.get("time") or {}, msg.get("tokens") or {}
-        made, first, done = t.get("created"), t.get("firstToken"), t.get("completed")
-        if msg.get("type") != "assistant" or not (made and first):
-            continue
-        out = (tk.get("output") or 0) + (tk.get("reasoning") or 0)
-        if done and out >= 100 and done - first > 1000:
-            write.append(round(out / ((done - first) / 1000), 1))
-        if (tk.get("input") or 0) >= 1000 and first - made > 500:
-            read.append(round(tk["input"] / ((first - made) / 1000)))
+    got = speed_samples(messages)
+    write, read = got["write"], got["read"]
     if not (write or read):
-        return
+        return got
     path = _speed_path()
     with store.locked(path.with_suffix(".lock")):
         data = store.read_json(path, {}) or {}
@@ -294,6 +285,26 @@ def record_speed(model_id: str, messages: list[dict]) -> None:
         row["write"] = (row.get("write", []) + write)[-SPEED_KEEP:]
         row["read"] = (row.get("read", []) + read)[-SPEED_KEEP:]
         store.write_json(path, data)
+    return got
+
+
+def speed_samples(messages: list[dict]) -> dict:
+    """{"write", "read", "ttft"}: each request's write and read speed (tok/s; the thresholds keep
+    tiny requests from skewing them) and its time to first token (seconds), from a session
+    export's messages."""
+    write, read, ttft = [], [], []
+    for msg in messages:
+        t, tk = msg.get("time") or {}, msg.get("tokens") or {}
+        made, first, done = t.get("created"), t.get("firstToken"), t.get("completed")
+        if msg.get("type") != "assistant" or not (made and first):
+            continue
+        ttft.append(round((first - made) / 1000, 2))
+        out = (tk.get("output") or 0) + (tk.get("reasoning") or 0)
+        if done and out >= 100 and done - first > 1000:
+            write.append(round(out / ((done - first) / 1000), 1))
+        if (tk.get("input") or 0) >= 1000 and first - made > 500:
+            read.append(round(tk["input"] / ((first - made) / 1000)))
+    return {"write": write, "read": read, "ttft": ttft}
 
 
 def speed(model_id: str) -> dict:

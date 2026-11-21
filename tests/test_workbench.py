@@ -6187,8 +6187,9 @@ class ClaudeSpend(Base):
         row = store.results()[-1]
         self.assertEqual(row["claude"]["cache_read"], 20000)
         stats = run_wb("stats")
-        self.assertIn("claude", stats.splitlines()[0])
+        self.assertIn("claude", next(line for line in stats.splitlines() if line.startswith("model")))
         self.assertIn("7K", stats)
+        self.assertIn("cost ~2K more Claude tokens (estimate)", stats)  # the feed's headline, signed
 
     def test_stats_shows_the_claude_column_only_once_a_task_has_it(self):
         self.start("t-old", "ok")
@@ -6940,6 +6941,149 @@ class Shot(Base):
         (self.wt / "shoot.sh").write_text(self.CAPTURE + "\n")
         out = run_wb("shot", "t", "--capture", "sh shoot.sh", "--files", "shoot.sh")
         self.assertNotIn("no image", out)
+
+
+class Stats(Base):
+    """What the Stats tab reads (#404): the settings behind it, and what a task records for it,
+    on by default and off with one setting."""
+    def events(self, name, kind):
+        return [e for e in store.read_jsonl(store.Task(name).dir / "events.jsonl")[0]
+                if e.get("kind") == kind]
+
+    def test_the_settings_default_on_and_change_through_wb_stats_set(self):
+        from workbench import stats
+        self.assertEqual(stats.settings(), {"recording": True, "live": True, "every": 2})
+        self.assertIn("recording off", run_wb("stats", "set", "recording", "off"))
+        self.assertIn("every 5 s", run_wb("stats", "set", "every", "5"))
+        self.assertEqual(stats.settings(), {"recording": False, "live": True, "every": 5})
+        for bad in (("recording", "maybe"), ("every", "3"), ("colour", "on")):
+            with self.assertRaises(SystemExit), redirect_stderr(io.StringIO()):
+                run_wb("stats", "set", *bad)
+        for text in ('{"recording": "no", "every": 7}', '[1]', 'not json'):  # hand-edited: ignored
+            stats.path().write_text(text)
+            self.assertEqual(stats.settings(), stats.DEFAULTS)
+
+    def test_a_round_stopped_by_a_guard_says_which_and_the_row_keeps_it(self):
+        self.start("t-loop", "loop")
+        wait_phase("t-loop", {"stuck"})
+        end = self.events("t-loop", "round_end")
+        self.assertEqual((end[-1]["how"], end[-1]["guard"]), ("stuck", "repeat"))
+        self.assertGreaterEqual(end[-1]["secs"], 0)
+        self.assertEqual(store.Task("t-loop").status["guards"], {"repeat": 1})
+        run_wb("discard", "t-loop")
+        row = store.results()[-1]
+        self.assertEqual(row["guards"], {"repeat": 1})
+        self.assertEqual(row["started_at"], store.Task("t-loop").spec["created_at"])
+        self.assertIn("load_secs", row)
+
+    def test_a_clean_round_ends_done_and_an_older_reader_sees_only_new_keys(self):
+        self.start("t", "ok", "--test", TEST_CMD)
+        wait_phase("t", {"review"})
+        self.assertEqual([e["how"] for e in self.events("t", "round_end")], ["done"])
+        # the event is the Stats tab's alone: the transcript and wb log show nothing for it
+        self.assertNotIn("round_end", run_wb("log", "t"))
+        run_wb("accept", "t", "-m", "feat: answer")
+        row = store.results()[-1]
+        self.assertNotIn("guards", row)  # never measured: left out, not zero
+        self.assertEqual(row["outcome"], "accepted")
+
+    def test_with_recording_off_nothing_new_is_written(self):
+        run_wb("stats", "set", "recording", "off")
+        self.start("t-loop", "loop")
+        wait_phase("t-loop", {"stuck"})
+        self.assertEqual(self.events("t-loop", "round_end"), [])
+        run_wb("discard", "t-loop")
+        row = store.results()[-1]
+        for key in ("started_at", "load_secs", "guards", "speed", "gpu_w", "asks", "nudges"):
+            self.assertNotIn(key, row)
+        self.assertIn("rounds", row)  # what the router and the savings read is kept
+
+    def test_the_row_keeps_the_tasks_medians_watts_and_asks_by_kind(self):
+        from workbench import results
+        self.start("t", "ok")
+        wait_phase("t", {"review"})
+        task = store.Task("t")
+        task.set_status(speeds={"write": [30, 40, 50], "read": [900], "ttft": [1.0, 3.0], "x": []},
+                        gpu_w_sum=900.0, gpu_w_n=3, gpu_w_peak=410.0, nudges=1,
+                        asks={"a": "q", "b": "q", "c": "p", "d": "x"})
+        got = results.for_stats(task)
+        self.assertEqual(got["speed"], {"write": 40, "read": 900, "ttft": 2.0})
+        self.assertEqual(got["gpu_w"], {"mean": 300.0, "peak": 410.0})
+        self.assertEqual(got["asks"], {"questions": 2, "permissions": 1, "refused": 1})
+        self.assertEqual(got["nudges"], 1)
+
+    def test_a_requests_time_to_first_token_is_sampled_with_its_speeds(self):
+        from workbench import router
+        msgs = [{"type": "assistant", "time": {"created": 1000, "firstToken": 3500, "completed": 8500},
+                 "tokens": {"input": 5000, "output": 400, "reasoning": 100}},
+                {"type": "assistant", "time": {"created": 9000, "firstToken": 9100},
+                 "tokens": {"input": 10, "output": 5}},  # cut short and tiny: only its first token
+                {"type": "user", "time": {"created": 1, "firstToken": 2}}]
+        self.assertEqual(router.speed_samples(msgs),
+                         {"write": [100.0], "read": [2000], "ttft": [2.5, 0.1]})
+
+    def test_the_power_sampler_keeps_its_mean_and_peak(self):
+        from workbench import hardware, runner
+        with mock.patch.object(hardware, "gpu_power_w", side_effect=[100.0, None, 300.0]):
+            p = runner._Power()
+            for _ in range(3):
+                p._sample()
+        self.assertEqual((p.w_sum, p.n, p.peak), (400.0, 2, 300.0))
+
+    def rows(self, *rows):
+        for r in rows:
+            store.append_jsonl(store.home() / "results.jsonl", {"task": "t", "model": "m", **r})
+
+    def test_a_new_install_feeds_nothing_but_the_settings(self):
+        from workbench import stats
+        f = json.loads(run_wb("stats", "--json"))
+        self.assertEqual(set(f), {"ts", "settings", "tasks"})  # no section of zeros
+        self.assertEqual(f["tasks"], 0)
+        self.assertEqual(stats.summary(f), [])
+        self.assertIn("no finished tasks yet", run_wb("stats"))
+
+    def test_the_feed_counts_landings_streaks_bests_and_what_the_agents_absorbed(self):
+        from workbench import stats
+        day, now = 86400, time.mktime((2026, 11, 20, 12, 0, 0, 0, 0, -1))
+        self.rows(
+            {"ts": now - 5 * day, "outcome": "accepted", "rounds": 1, "reviews": 0, "minutes": 9,
+             "diff": {"files": 2, "added": 300, "removed": 12}, "size": "small", "stack": ["python"]},
+            {"ts": now - 2 * day, "outcome": "accepted", "rounds": 3, "auto_fixes": 2, "tests_ok": True,
+             "minutes": 4, "steps": [{"handovers": 1}], "asks": {"questions": 2}, "size": "small",
+             "guards": {"repeat": 1}, "speed": {"write": 30}},
+            {"ts": now - 1 * day, "outcome": "accepted", "rounds": 1, "minutes": 20, "size": "large",
+             "guards": {"repeat": 1, "silence": 1}},
+            {"ts": now, "outcome": "discarded", "rounds": 2, "size": "large"},
+            {"ts": now, "outcome": "accepted", "trial": True},  # a trial: never counted
+            {"ts": now, "outcome": "discarded", "spec_gaps": ["unclear"]})  # Claude's miss: left out
+        f = stats.feed(now)
+        self.assertEqual(f["tasks"], 4)
+        self.assertEqual((f["periods"]["week"]["tasks"], f["periods"]["week"]["landed"]), (4, 3))
+        self.assertEqual(f["periods"]["week"]["accepted_pct"], 75)
+        self.assertEqual(f["streak"], {"current": 2, "best": 2, "days": 3})
+        self.assertEqual(f["bests"]["largest_first_try"]["lines"], 312)
+        self.assertEqual(f["bests"]["fastest"]["minutes"], 4)
+        self.assertEqual(f["absorbed"], {"auto_fixes": 2, "auto_fixed_tasks": 1, "questions": 2,
+                                         "handovers_landed": 1})
+        self.assertEqual(f["guards"], {"repeat": 2, "silence": 1})
+        self.assertEqual([(m["kind"], m["n"]) for m in f["milestones"]], [("landed", 1)])
+        self.assertEqual(f["sizes"]["large"], {"tasks": 2, "accepted_pct": 50})
+        self.assertEqual(f["stacks"], {"python": {"tasks": 1, "accepted_pct": 100}})
+        self.assertEqual(f["models"]["m"]["tasks"], 4)
+        self.assertEqual(f["models"]["m"]["write_trend"], [[now - 2 * day, 30]])
+        self.assertEqual(len(f["days"]), 30)
+        self.assertEqual(f["days"][-1], {"day": "2026-11-20", "tasks": 1, "landed": 0})
+        self.assertNotIn("savings", f["periods"]["week"])  # nothing to compare
+        # two days on, the run has ended: only the best is said, never that it broke
+        later = stats.summary(stats.feed(now + 3 * day))
+        self.assertIn("best streak: 2 day(s) in a row with a task landed", later)
+        self.assertFalse(any("streak: 0" in line for line in later))
+
+    def test_a_models_write_speed_trend_compares_its_newest_third_with_its_oldest(self):
+        from workbench import stats
+        self.rows(*({"ts": 1000.0 + i, "outcome": "accepted", "speed": {"write": w}}
+                    for i, w in enumerate([20, 20, 22, 22, 25, 25])))
+        self.assertEqual(stats.feed()["models"]["m"]["write_change_pct"], 25)
 
 
 class Progress(Base):
@@ -8755,6 +8899,193 @@ class WebChat(Base):
         self.assertEqual(mine["received"]["by"], "s1")
         self.assertEqual((reply["from"], reply["text"]), ("claude", "Step 2 is in review."))
         self.assertIn("Claude: Step 2 is in review.", run_wb("chat", "log"))
+
+
+FAKE_SMI = """import os, sys, time
+with open(os.environ["FAKE_SMI_LOG"], "a") as f:
+    f.write(" ".join(sys.argv[1:]) + "\\n")
+if "--query-gpu=index,name" in sys.argv:
+    print("0, NVIDIA Fake 4090\\n1, NVIDIA Fake Old")
+    sys.exit()
+ms = int(sys.argv[sys.argv.index("-lms") + 1])
+with open(os.environ["FAKE_SMI_PID"], "w") as f:
+    f.write(str(os.getpid()))
+while True:
+    print("0, 1024, 24564, 37, 215.50")
+    print("1, [N/A], [N/A], [N/A], [N/A]", flush=True)
+    time.sleep(ms / 1000)
+"""
+
+
+class Top(Base):
+    """wb top (#407): a live feed read from files, sysfs and one nvidia-smi stream."""
+
+    def fake_sys(self) -> Path:
+        drm = Path(self.tmp.name, "drm")
+        card0 = drm / "card0" / "device"
+        files = {card0 / "uevent": "DRIVER=amdgpu\nPCI_SLOT_NAME=0000:03:00.0\nPCI_ID=1002:7550\n",
+                 card0 / "gpu_busy_percent": "97\n", card0 / "mem_info_vram_used": str(12 * 2 ** 30),
+                 card0 / "mem_info_vram_total": str(16 * 2 ** 30), card0 / "mem_info_vram_vendor": "samsung",
+                 card0 / "hwmon" / "hwmon3" / "power1_average": "212000000\n",
+                 # a connector, not a card
+                 drm / "card0-DP-1" / "device" / "uevent": "DRIVER=amdgpu\nPCI_SLOT_NAME=0000:03:00.0\n",
+                 # a card that says nothing but its driver: nothing made up for it
+                 drm / "card1" / "device" / "uevent": "DRIVER=i915\nPCI_SLOT_NAME=0000:00:02.0\n"}
+        for path, text in files.items():
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text(text)
+        return drm
+
+    def fake_smi(self) -> Path:
+        bindir = Path(self.tmp.name, "bin")
+        bindir.mkdir(exist_ok=True)
+        smi = bindir / "nvidia-smi"
+        smi.write_text(f"#!{sys.executable}\n{FAKE_SMI}")
+        smi.chmod(0o755)
+        os.environ.update(PATH=f"{bindir}{os.pathsep}{os.environ['PATH']}",
+                          FAKE_SMI_LOG=str(bindir / "log"), FAKE_SMI_PID=str(bindir / "pid"))
+        return bindir
+
+    def top(self, drm, smi=None):
+        from workbench import top
+        run = hardware._run if smi else lambda *argv: ""  # no lspci: the PCI id instead
+        with mock.patch.object(hardware, "system", lambda: "linux"), \
+                mock.patch.object(hardware, "smi_path", lambda: smi), \
+                mock.patch.object(hardware, "_run", run):
+            return top.Top(2, drm=drm)
+
+    def test_the_sysfs_readers_give_busy_vram_and_watts_and_leave_out_what_a_card_lacks(self):
+        drm = self.fake_sys()
+        cards = hardware.drm_cards(drm)
+        self.assertEqual([c["card"] for c in cards], ["card0", "card1"])
+        dev = cards[0]["dev"]
+        self.assertEqual(hardware.gpu_busy(dev), 97)
+        self.assertEqual(hardware.vram(dev), (12 * 2 ** 30, 16 * 2 ** 30))
+        self.assertEqual(hardware.card_watts(dev), 212.0)
+        self.assertEqual((hardware.gpu_busy(cards[1]["dev"]), hardware.vram(cards[1]["dev"]),
+                          hardware.card_watts(cards[1]["dev"])), (None, (None, None), None))
+        t = self.top(drm)
+        self.assertEqual(t.gpus(), [
+            {"index": 0, "name": "1002:7550", "driver": "amdgpu", "used": 12 * 2 ** 30,
+             "total": 16 * 2 ** 30, "busy": 97, "watts": 212.0},
+            {"index": 1, "name": "card1", "driver": "i915"}])  # absent, not zero
+
+    def test_with_no_gpu_it_shows_the_ram(self):
+        drm = Path(self.tmp.name, "empty")
+        drm.mkdir()
+        (g,) = self.top(drm).gpus()
+        self.assertTrue(g["ram"])
+        self.assertGreater(g["total"], 0)
+        self.assertLessEqual(g["used"], g["total"])
+
+    def test_nvidia_comes_from_one_long_lived_nvidia_smi_and_n_a_is_left_out(self):
+        bindir = self.fake_smi()
+        t = self.top(Path(self.tmp.name, "nodrm"), smi=str(bindir / "nvidia-smi"))
+        try:
+            deadline = time.time() + 10
+            while len(t.gpus()) < 2 and time.time() < deadline:
+                time.sleep(0.05)
+            for _ in range(3):
+                gpus = t.gpus()
+                time.sleep(0.1)
+            self.assertEqual(gpus, [
+                {"name": "NVIDIA Fake 4090", "driver": "nvidia", "index": 0, "used": 1024 * 2 ** 20,
+                 "total": 24564 * 2 ** 20, "busy": 37, "watts": 215.5},
+                {"name": "NVIDIA Fake Old", "driver": "nvidia", "index": 1}])
+            pid = int((bindir / "pid").read_text())
+        finally:
+            t.close()
+        self.assertTrue(wait_gone(pid))
+        calls = (bindir / "log").read_text().splitlines()
+        self.assertEqual([c for c in calls if "-lms" in c],
+                         ["--query-gpu=index,memory.used,memory.total,utilization.gpu,power.draw "
+                          "--format=csv,noheader,nounits -lms 2000"])  # one stream, not one per tick
+
+    def test_a_tick_names_the_running_tasks_the_rack_and_the_queue(self):
+        from workbench import models, top
+        now = time.time()
+        mimo = "ollama/mimo-v2.6:9b-q8_0"
+        for name, phase, extra in (("busy", "running", {
+                "round": 2, "round_started_at": now - 30, "session": "s1", "window": 32768,
+                "live_used": {"session": "s1", "used": 8192}, "last": "edit answer.txt"}),
+                ("old1", "accepted", {"load_secs": 8}), ("old2", "discarded", {"load_secs": 12})):
+            d = store.tasks_dir() / name
+            d.mkdir(parents=True)
+            store.write_json(d / "task.json", {"model": mimo, "created_at": now - 60})
+            store.write_json(d / "status.json", {"phase": phase, **extra})
+        for row in ({"ts": now - 20, "round": 2, "kind": "step", "in": 4000, "out": 100, "cache": 0},
+                    {"ts": now - 10, "round": 2, "kind": "step", "in": 300, "out": 400, "cache": 4000}):
+            store.append_jsonl(store.tasks_dir() / "busy" / "events.jsonl", row)
+        store.write_json(store.home() / "speed.json", {mimo: {"write": [40, 44], "read": [900]}})
+        waiter = subprocess.Popen(["sleep", "30"])
+        self.addCleanup(waiter.wait)
+        self.addCleanup(waiter.kill)
+        store.write_json(store.home() / "gpu.json", {
+            str(os.getpid()): {"model": mimo, "task": "busy", "since": now - 60,
+                               "start": models._started(os.getpid())},
+            str(waiter.pid): {"model": mimo, "task": "later", "since": now - 5, "waiting": True,
+                              "start": models._started(waiter.pid)}})
+        drm = Path(self.tmp.name, "empty")
+        drm.mkdir()
+        snap = self.top(drm).tick()
+        self.assertEqual(sorted(snap), ["every", "gpus", "queue", "rack", "running", "ts"])
+        (r,) = snap["running"]
+        self.assertEqual({k: r[k] for k in ("task", "model", "label", "phase", "round", "tok_s",
+                                             "tok_s_from", "read_tok_s", "context_used",
+                                             "context_window", "context_pct")},
+                         {"task": "busy", "model": mimo, "label": "MiMo", "phase": "running",
+                          "round": 2, "tok_s": 40.0, "tok_s_from": "last call", "read_tok_s": 900,
+                          "context_used": 8192, "context_window": 32768, "context_pct": 25})
+        self.assertAlmostEqual(r["round_s"], 30, delta=5)
+        rack = {x["model"]: x for x in snap["rack"]}
+        self.assertEqual(rack[mimo], {"model": mimo, "label": "MiMo", "state": "resident",
+                                      "write_tok_s": 42.0, "read_tok_s": 900, "load_s": 10.0,
+                                      "tasks": ["busy"]})
+        self.assertNotIn("write_tok_s", rack["ollama/qwen3.8-27b"])  # unmeasured: absent
+        self.assertEqual([(q["task"], q["model"]) for q in snap["queue"]], [("later", mimo)])
+        json.dumps(snap)
+        text = top.render(snap, 200, color=False)
+        for word in ("RUNNING", "busy", "40 tok/s (last call)", "RACK", "MiMo", "QUEUE", "later"):
+            self.assertIn(word, text)
+
+    def test_the_default_tick_is_stats_json_every_else_two_seconds(self):
+        from workbench import top
+        self.assertEqual(top.default_every(), 2)
+        (store.home() / "stats.json").write_text('{"every": 5, "live": true}')
+        self.assertEqual(top.default_every(), 5)
+        (store.home() / "stats.json").write_text('{"every": "often"}')
+        self.assertEqual(top.default_every(), 2)
+
+    def test_off_a_terminal_it_prints_one_pass_and_exits(self):
+        with mock.patch.object(hardware, "smi_path", lambda: None):
+            out = run_wb("top")
+        for word in ("wb top", "RUNNING", "RACK", "QUEUE"):
+            self.assertIn(word, out)
+        self.assertNotIn("\033", out)
+
+    def test_it_exits_when_its_parent_goes_and_takes_nvidia_smi_with_it(self):
+        bindir = self.fake_smi()
+        out = Path(self.tmp.name, "top.jsonl")
+        # the shell waits for the first line, so wb top has its parent's pid before the shell goes
+        sh = subprocess.run(["sh", "-c", '"$0" top --json --every 0.2 > "$1" 2>&1 & '
+                             'while [ ! -s "$1" ]; do sleep 0.05; done; echo $!',
+                             str(ROOT / "bin" / "wb"), str(out)], capture_output=True, text=True, timeout=30)
+        pid = int(sh.stdout.strip())
+        self.assertTrue(wait_gone(pid, 10), "wb top outlived its parent")
+        deadline = time.time() + 5
+        while not (bindir / "pid").exists() and time.time() < deadline:
+            time.sleep(0.05)
+        self.assertTrue(wait_gone(int((bindir / "pid").read_text()), 10), "nvidia-smi outlived wb top")
+        first = json.loads(out.read_text().splitlines()[0])
+        self.assertEqual(sorted(first), ["every", "gpus", "queue", "rack", "running", "ts"])
+
+    def test_sigterm_ends_it_quietly(self):
+        p = subprocess.Popen([str(ROOT / "bin" / "wb"), "top", "--json", "--every", "0.2"],
+                             stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+        self.assertIn('"gpus"', p.stdout.readline())
+        p.send_signal(signal.SIGTERM)
+        _, err = p.communicate(timeout=10)
+        self.assertEqual((p.returncode, err), (0, ""))
 
 
 class Hardware(unittest.TestCase):
