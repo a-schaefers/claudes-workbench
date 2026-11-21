@@ -1292,6 +1292,31 @@ class Optimize(unittest.TestCase):
         self.assertEqual(entry["options"], {"reasoningEffort": "none"})       # thinking stays off
         self.assertEqual(entry["limit"], {"context": 65536, "input": 65536 - 4096, "output": 4096})
 
+    def test_an_applied_variant_shares_its_sources_record_and_policy_and_the_advice_stops(self):
+        # #584, the audit of 1.90: the variant started with no record and ranked below the
+        # spilling source's one accepted task, it dropped the source's models.json sizes, and
+        # every wb start repeated the advice whose command then said "exists already"
+        from workbench import optimize
+        self.ollama(65536, extra={"ollama/m": {"sizes": ["trivial"], "label": "M"}})
+        store.append_jsonl(store.home() / "results.jsonl", {"task": "t1", "model": "ollama/m",
+                                                            "size": "trivial", "outcome": "accepted",
+                                                            "ran": True})
+        m = models.discover()["ollama/m"]
+        row = {"window": 65536, "fits": 49152, "spill": 12, "tried": []}
+        optimize._record(m.id, row)
+        self.assertIn("wb optimize apply ollama/m", optimize.advice(m.id, row))
+        said = optimize.apply(m)
+        self.assertIn("It shares ollama/m's record, and the router now picks it before ollama/m", said)
+        v = models.discover()["ollama/m:48k"]
+        self.assertEqual((v.extra["sizes"], v.extra["label"], v.extra["variant_of"]),
+                         (["trivial"], "M", "ollama/m"))
+        self.assertFalse(router.allowed(v, "significant"))          # the source's policy holds
+        self.assertEqual(optimize.advice(m.id, optimize.state()["models"][m.id]), "")
+        self.assertEqual([s.model.id for s in router.rank("trivial")][:2], ["ollama/m:48k", "ollama/m"])
+        sv, sm = router.score(v, "trivial"), router.score(m, "trivial")
+        self.assertEqual((sv.tries, sv.wins, sm.tries), (1, 1, 1))   # one record, both ways
+        self.assertEqual(router.lineage(m), {"ollama/m", "ollama/m:48k"})
+
     def test_a_smaller_window_cuts_the_output_cap_and_max_tokens_so_input_stays_positive(self):
         # #332 (the audit of 1.4): a 16K fit of a 128K entry wrote an input limit of -16384 and
         # kept its 32K output cap and its 64K max_tokens

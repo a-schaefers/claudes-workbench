@@ -95,9 +95,19 @@ def row_stack(r: dict) -> tuple:
     return _repo_stack(r["repo"]) if r.get("repo") else ()
 
 
+def lineage(m: models.Model) -> set[str]:
+    """The ids that share ``m``'s record: a `wb optimize apply` variant (models.json
+    `variant_of`), its source, and the source's other variants. One model at two windows is one
+    model's record (#584)."""
+    over = models._overrides()
+    root = m.extra.get("variant_of") or m.id
+    return {m.id, root} | {k for k, v in over.items() if isinstance(v, dict) and v.get("variant_of") == root}
+
+
 def score(m: models.Model, size: str, state: dict | None = None, stack=()) -> Score:
     state = state or models.status(m)
-    real = [r for r in store.results() if r.get("model") == m.id and r.get("size") == size
+    ids = lineage(m)
+    real = [r for r in store.results() if r.get("model") in ids and r.get("size") == size
             and tuning.judged(r)]
     # a model that can't run isn't weighed: its server was just found down, and asking it again
     # cost seconds per model on a sleeping LAN box (the 2026-11-16 audit)
@@ -179,7 +189,12 @@ def rank(size: str, stack=()) -> list[Score]:
         s.fits = fits(s.model, budget) if s.state["available"] else None
     usable = [s for s in scores if s.state["available"]]
     best = max((s.quality for s in usable), default=0)
-    close = _cheaper(sorted((s for s in usable if s.quality >= best - QUALITY_MARGIN), key=_guess(size)))
+    # a source whose optimize variant can run goes after it: the variant is the window measured
+    # to fit, with the same record (#584)
+    replaced = {s.model.extra.get("variant_of") for s in usable} - {None}
+    guess = _guess(size)
+    close = _cheaper(sorted((s for s in usable if s.quality >= best - QUALITY_MARGIN),
+                            key=lambda s: (s.model.id in replaced, *guess(s))))
     rest = sorted((s for s in usable if s not in close), key=lambda s: -s.quality)
     blocked = [s for s in scores if not s.state["available"]]
     return close + rest + blocked

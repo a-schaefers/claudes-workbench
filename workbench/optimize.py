@@ -255,7 +255,11 @@ def _made(key: str, source: str | None) -> None:
 
 
 def advice(model_id: str, row: dict) -> str:
-    """One line on what the fit says, or "" when there is nothing to change."""
+    """One line on what the fit says, or "" when there is nothing to change (or apply has made
+    its variant, still registered: every wb start repeated the advice, and the command it named
+    answered "exists already", #584)."""
+    if row.get("applied") and row["applied"] in models.discover():
+        return ""
     w, fits, spill = row.get("window"), row.get("fits"), row.get("spill")
     k = lambda n: f"{n // 1024}K"  # noqa
     if fits is None:
@@ -337,11 +341,19 @@ def apply(m: models.Model) -> str:
                                               "parameters": {"num_ctx": fits}}, timeout=300)
         _made(key, m.id)
     models.write_entry(provider, name, entry)
+    # the source's models.json policy (its sizes, label, weights...) and a shared record: with a
+    # record of its own the variant ranked below the source's one accepted task, so every start
+    # picked the spilling source, and a source limited to trivial work got a variant that took
+    # significant work (#584). router.lineage reads variant_of; router.rank prefers the variant.
+    for k, v in {**(models._overrides().get(m.id) or {}), "variant_of": m.id}.items():
+        models.set_override(key, k, v)
     _made(key, None)
     # measured already: it is the window that fit, so its arrival doesn't make a run due
     _record(key, {**row, "window": fits, "spill": 0, "tried": [], "ts": store.now()})
+    _record(m.id, {**row, "applied": key})  # advice() stays quiet about the source
     return (f"registered {provider}/{name}: {m.id}'s settings at a {fits // 1024}K window, all on "
-            f"the GPU here. The router weighs both by their records; wb model retire {m.id} when "
+            f"the GPU here, with its models.json settings. It shares {m.id}'s record, and the router "
+            f"now picks it before {m.id}, which stays for --model; wb model retire {m.id} when "
             "you'd rather it never runs")
 
 

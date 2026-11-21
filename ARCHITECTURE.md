@@ -2512,6 +2512,9 @@ model id; a model's entry is merged over its provider's (`{**provider, **model}`
   remote --remove` may delete it (#197).
 - `keep_loaded` (top level, a list): model ids or Ollama names wb never unloads or stops to make
   room (*Residency*), nor measures (`wb optimize`: each probe unloads its model, #254).
+- `variant_of: <id>`: `wb optimize apply` made this model from that one (with a copy of its other
+  keys here): the two share one record in the router (`router.lineage`), and the router puts the
+  variant first (#584).
 
 **Status** (`status` → {available, resident, why}). First what the config alone rules out, so the
 fake models meet it too: an entry with `tool_call: false` ("OpenCode's config says it can't call
@@ -2712,7 +2715,8 @@ exit 4 and `--queue`, and the bench's preemption, apply per server alike. `free_
 unloads or stops a remote provider's models.
 
 **Routing** (`router.rank`, `choose`). Rows: `store.results()` (no trials) that `tuning.judged`
-keeps, for this model and size. `judged` drops a discard marked `--spec-gap` and a task whose
+keeps, for this model and size (and the models sharing its record, `lineage`: a `wb optimize
+apply` variant and its source, #584). `judged` drops a discard marked `--spec-gap` and a task whose
 agent never ran (row `ran` false: its setup or its model's load failed, `failed_before`; a row
 from before `ran` was recorded: not accepted and `tok_out` 0): three discards of a lockfile
 problem scored a model 0/3, and the router passed it by for good (#581). Quality is the acceptance rate with a uniform prior, overall =
@@ -3151,7 +3155,14 @@ window, and the caps recomputed together by `budget`: `limit.output` and `option
 kept while the output cap is at most half the window, else cut to a quarter of it, `limit.input` the window less the
 output cap, and an entry no request could fit refused before anything is made: a 16K fit of a
 128K entry once wrote an input limit of -16384 and kept its 32K and 64K caps, #332, the audit of
-1.4; an alias's `id` dropped, since it would name the old model). The router weighs both by their records; retiring the
+1.4; an alias's `id` dropped, since it would name the old model). The variant gets a copy of the
+source's models.json keys (`sizes`, `label`, `weights_gb`…) and `variant_of` the source's id; the
+router scores both on one record (`router.lineage`: the source, its variants) and, when both can
+run, puts the variant before its source, which stays for `--model`. The source's optimize row gets
+`applied` (the variant's id), so `advice` stays quiet while the variant is registered. Before,
+the variant started with no record, ranked below the spilling source's one accepted task, every
+start picked the source and repeated the advice, whose command then said "exists already", and a
+source kept to trivial work got a variant that took significant work (#584). Retiring the
 old one is the user's call (`wb model retire`). The config is checked first (`models.config_target`,
 the checks `own_config` makes: one file, no comments, writable), before anything is made: the
 variant was made, then a config with comments refused its entry, and once the config was plain
@@ -5091,7 +5102,7 @@ $WB_HOME (~/.local/state/workbench)
   bench/runs.jsonl  driver.json  one row per replay; the driver's {pid, run, start}
                                  (bench.jsonl and bench/repos/ are the old suite's: nothing reads them)
   optimize.json  optimize.log    wb optimize: {pid, start, began, done, stopped, hardware (fingerprint: [name, vram] per GPU, then ["remote", root, [[name, size]…]] per remote Ollama),
-                                 secs_per_load, models: {<id>: {window, fits, spill, clamped, tried:
+                                 secs_per_load, models: {<id>: {window, fits, spill, clamped, applied?, tried:
                                  [{window, size, vram, served}], ts}}, skipped: {<id>: {outcome (busy|failed|unreachable), why,
                                  ts, retry_after}} (#583), made: {<provider>/<name>: <source id>} (a variant
                                  apply made and hasn't registered yet: #266)}; the run's output
