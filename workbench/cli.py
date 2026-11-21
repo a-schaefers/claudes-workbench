@@ -1012,7 +1012,8 @@ def cmd_start(a):
         die(why)  # #797: the checkout would have two paths in one file
     store.write_json(task.dir / STARTING, {"repo": str(repo), "worktree": str(wt),
                                            "pid": os.getpid(), "at": store.now(),
-                                           "start": models._started(os.getpid())})
+                                           "start": models._started(os.getpid()),
+                                           "machine": store.machine()})  # whose pid (#876)
     subs = gitops.fill_submodules(repo, base, wt, dry=True)
     budget = a.ask_budget
     # round 1's prompt before task.json: a write that fails leaves a dead start for gc, not a
@@ -2599,6 +2600,11 @@ def _dead_start(task: store.Task) -> dict | None:
     if task.exists or not task.dir.is_dir():
         return None
     info = store.read_json(task.dir / STARTING)
+    if isinstance(info, dict) and info.get("machine") not in (None, store.machine()):
+        # another machine's start, on a shared state directory: its pid means nothing here, and
+        # gc took a start under way there for a dead one (#876); none outlives RULES_GRACE
+        at = info.get("at")
+        return None if not isinstance(at, (int, float)) or time.time() - at < RULES_GRACE else info
     if isinstance(info, dict) and isinstance(info.get("pid"), int):
         # with its start: a recycled pid refused a retry and kept the worktree from gc (#532)
         return None if models._alive(info["pid"], info.get("start")) else info
@@ -2624,10 +2630,19 @@ def _drop_start(task: store.Task, info: dict) -> None:
     shutil.rmtree(context.rules_dir(task), ignore_errors=True)
 
 
+# Another machine's scratch directory (its name's machine tag, store.scratch) is left to that
+# machine's gc this long: gc here removed a live one, its pid not in this process table (#876)
+FAR_SCRATCH_AGE = 86400
+
+
 def _maker_alive(pid: str, tag: str) -> bool:
-    """Whether a scratch directory's maker (its name's <pid>.<start tag>, store.scratch) still
-    runs: a pid recycled since is another process, and its clone was kept for ever (#532). An
-    untagged name (made before the tag, or where no start could be read) goes by the pid alone."""
+    """Whether a scratch directory's maker (its name's <pid>.<start tag>[.<machine tag>],
+    store.scratch) still runs: a pid recycled since is another process, and its clone was kept
+    for ever (#532). An untagged name (made before the tag, or where no start could be read) goes
+    by the pid alone; another machine's, by its age (FAR_SCRATCH_AGE, #876)."""
+    tag, _, mach = tag.partition(".")
+    if mach and mach != store.machine_tag():
+        return True  # _drop_scratches judges it by its age
     if not (pid.isdigit() and models._alive(int(pid))):
         return False
     return not tag or models.same_tag(int(pid), tag)
@@ -2662,11 +2677,12 @@ def _drop_scratches() -> int:
         if maker is None or not d.is_dir() or d.is_symlink():
             continue
         pid, _, tag = maker.partition(".")
+        far = tag.partition(".")[2] not in ("", store.machine_tag())  # #876
         try:
-            old = time.time() - d.stat().st_mtime > store.SCRATCH_AGE
+            age = time.time() - d.stat().st_mtime
         except OSError:
             continue
-        if old and not _maker_alive(pid, tag):
+        if far and age > FAR_SCRATCH_AGE or age > store.SCRATCH_AGE and not _maker_alive(pid, tag):
             gitops._rmtree(d)
             n += 1
     return n

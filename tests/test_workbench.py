@@ -10922,7 +10922,7 @@ class Cleanup(Base):
         from workbench import models
         me, tag = os.getpid(), models.start_tag(os.getpid())
         self.assertTrue(tag)                                  # /proc or ps says when we started
-        self.assertTrue(store.scratch(".verify-").startswith(f".verify-{me}.{tag}-"))
+        self.assertTrue(store.scratch(".verify-").startswith(f".verify-{me}.{tag}.{store.machine_tag()}-"))
         home = store.home()
         recycled = home / f".verify-{me}.{'0' * 8 if tag != '0' * 8 else '1' * 8}-a"
         mine = home / f".verify-{me}.{tag}-b"
@@ -10940,6 +10940,54 @@ class Cleanup(Base):
         self.assertIsNone(cli._dead_start(task))              # its maker runs: under way
         store.write_json(task.dir / cli.STARTING, {**info, "start": "1"})
         self.assertEqual(cli._dead_start(task)["pid"], me)    # another process under its pid
+
+    def test_gc_leaves_another_machines_scratch_clones_starts_and_bench_run_alone(self):
+        # #876 (Claude's audit of 1.90.24): on a state directory machines share, gc here took
+        # another machine's live base check or verify clone, its start under way and its bench
+        # run's replays for dead ones, its pid not in this process table
+        from workbench import bench, models
+        home, now = store.home(), time.time()
+        far = home / ".verify-999999999.00000000.0badf00d-a"     # no such pid here: still theirs
+        stale = home / ".verify-999999999.00000000.0badf00d-b"   # that machine's, a day gone
+        mine = home / f".verify-999999999.00000000.{store.machine_tag()}-c"
+        for d, age in ((far, 7200), (stale, cli.FAR_SCRATCH_AGE + 60), (mine, 7200)):
+            d.mkdir()
+            os.utime(d, (now - age, now - age))
+        self.assertEqual(cli._drop_scratches(), 2)
+        self.assertEqual([d.exists() for d in (far, stale, mine)], [True, False, False])
+
+        task = store.Task("t-far")
+        task.dir.mkdir(parents=True)
+        info = {"repo": "/nonexistent", "pid": 999999999, "at": now, "machine": "another-machine"}
+        store.write_json(task.dir / cli.STARTING, info)
+        self.assertIsNone(cli._dead_start(task))                # under way there
+        store.write_json(task.dir / cli.STARTING, {**info, "at": now - cli.RULES_GRACE - 60})
+        self.assertEqual(cli._dead_start(task)["machine"], "another-machine")
+
+        bench.home().mkdir(parents=True, exist_ok=True)
+        store.write_json(bench.home() / "driver.json", {"pid": 999999999, "run": "r-far",
+                                                        "machine": "another-machine", "host": "lab-2"})
+        (bench.home() / "driver.lock").touch()
+        self.assertEqual(bench.driver()["run"], "r-far")        # beating there: alive
+        with self.assertRaisesRegex(RuntimeError, "runs on lab-2"):
+            bench.stop_driver()
+        replay = store.Task("t-rep")
+        store.write_json(replay.dir / "task.json", {"name": "t-rep", "created_at": store.now(),
+                                                    "bench": {"run": "r-far"}})
+        replay.set_status(phase="running", pid=999999999, machine="another-machine", host="lab-2",
+                          beat=60)
+        runner.lock_file("t-rep", "runner").parent.mkdir(parents=True, exist_ok=True)
+        runner.lock_file("t-rep", "runner").touch()
+        clone = bench.home() / "runs" / "r-far" / "t-rep" / "repo"
+        clone.mkdir(parents=True)
+        self.assertEqual(bench.sweep(), [])
+        old = now - cli.BEAT_DEAD - 60
+        os.utime(bench.home() / "driver.lock", (old, old))       # its driver stopped beating
+        self.assertEqual(bench.driver(), {})
+        self.assertEqual(bench.sweep(), [])                      # its replay's runner still beats
+        self.assertTrue(clone.is_dir())
+        self.assertEqual(replay.status["phase"], "running")
+        replay.set_status(pid=None)                              # nothing for tearDown to stop
 
     def test_wb_gc_removes_a_killed_bench_adds_clones(self):
         # #439: _drop_scratches looked at the state directory's top level only

@@ -864,10 +864,18 @@ SCRATCH_AGE = 3600
 
 
 def scratch(prefix: str) -> str:
-    """``prefix`` (one of SCRATCH_PREFIXES) with this process's pid and its start (`.<tag>`,
-    models.start_tag: a pid recycled since isn't the maker, #532), for tempfile."""
+    """``prefix`` (one of SCRATCH_PREFIXES) with this process's pid, its start (`.<tag>`,
+    models.start_tag: a pid recycled since isn't the maker, #532) and this machine
+    (`.<machine_tag>`: on a state directory several machines share, gc on one removed another's
+    live clone, its pid not in this process table, #876), for tempfile."""
     pid = os.getpid()
-    return f"{prefix}{pid}{'.' + tag if (tag := _start_tag(pid)) else ''}-"
+    return f"{prefix}{pid}.{_start_tag(pid)}.{machine_tag()}-"
+
+
+def machine_tag() -> str:
+    """This machine (store.machine) in 8 hex digits, for a name."""
+    import zlib
+    return f"{zlib.crc32(machine().encode()):08x}"
 
 
 @functools.cache  # by pid: a forked child is another process

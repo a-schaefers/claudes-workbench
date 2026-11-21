@@ -439,9 +439,19 @@ def wb_commit() -> str:
 
 
 def driver() -> dict:
-    """The driver running now ({pid, run, start}), or {}. `start` is when it started (#511): a
-    recycled pid of ours that runs the bench again isn't it."""
+    """The driver running now ({pid, run, start, machine, host}), or {}. `start` is when it
+    started (#511): a recycled pid of ours that runs the bench again isn't it. Another machine's
+    (on a state directory several share) lives while its lock file beats (runner.BEAT_SECS): on
+    this one its pid was dead, so gc here discarded its live replays and removed their clones, and
+    wb bench start started a second driver beside it (#876, Claude's audit of 1.90.24)."""
     d = store.read_json(home() / "driver.json", {}) or {}
+    if d.get("machine") not in (None, store.machine()):
+        from . import cli  # cli imports this module
+        try:
+            beat = (home() / "driver.lock").stat().st_mtime
+        except OSError:
+            return {}
+        return d if time.time() - beat < cli.BEAT_DEAD else {}
     pid = d.get("pid")
     if not isinstance(pid, int) or pid <= 0 or not models._alive(pid, d.get("start")):
         return {}
@@ -463,6 +473,8 @@ def sweep() -> list[str]:
         b = t.spec.get("bench")
         if not isinstance(b, dict) or b.get("run") == live:
             continue
+        if store.elsewhere(t.status) and cli.runner_alive(t):
+            continue  # another machine's replay, its runner still beating there (#876)
         if t.status.get("phase") not in store.CLOSED:
             with open(os.devnull, "w") as quiet, redirect_stdout(quiet):
                 try:
@@ -470,6 +482,8 @@ def sweep() -> list[str]:
                                                     spec_gap=None, keep_branch=False))
                 except SystemExit:
                     pass
+            if t.status.get("phase") not in store.CLOSED:
+                continue  # the discard refused: its clone is still in use (#876)
             out.append(t.name)
         d = home() / "runs" / str(b.get("run")) / t.name
         for left in (d / "repo", d / "tree"):  # tree/ for a sibling further up (_checkout_at)
@@ -483,6 +497,9 @@ def stop_driver() -> int | None:
     d = driver()
     if not d:
         return None
+    if d.get("machine") not in (None, store.machine()):  # its pid here is another process (#876)
+        raise RuntimeError(f"bench run {d.get('run')} runs on {d.get('host') or d['machine']}, "
+                           "which shares this state directory: stop it there")
     try:
         os.kill(d["pid"], signal.SIGTERM)  # it stops its replay's runner and closes the task
     except ProcessLookupError:
@@ -550,7 +567,8 @@ def start(model_ids: list[str], case_names: list[str], skills: list[str], label:
         proc = cli.detach([sys.executable, "-X", "utf8", "-m", "workbench.bench", run], cwd=d,
                           awake=f"wb bench run {run}", env=env, stdout=log, stderr=log)  # #516
     store.write_json(home() / "driver.json", {"pid": proc.pid, "run": run,
-                                              "start": models._started(proc.pid)})
+                                              "start": models._started(proc.pid),
+                                              "machine": store.machine(), "host": store.host()})
     return run, [f"bench run {run}: {len(pairs)} replay(s) × {repeat}"
                  + (f", label {label}" if label else "") + ", one at a time; real tasks go first",
                  f"follow: wb bench report --run {run}   stop: wb bench stop"]
@@ -970,6 +988,9 @@ def main() -> None:
     run = sys.argv[1]
     signal.signal(signal.SIGTERM, _on_term)
     store.absolute_env()
+    beat = home() / "driver.lock"  # .lock: no wb events wakes for the touch
+    beat.touch()
+    runner._beat(beat)  # another machine sharing the state directory sees it alive (#876)
     try:
         drive(run)
     finally:
