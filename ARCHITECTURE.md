@@ -708,8 +708,8 @@ A prompt (with its skills note) over `PROMPT_ARG_MAX` (100K bytes) is sent as a 
 **A fresh session's prompt** (`_start_fresh`, `handoff_prompt`). The raw prompt is kept as
 `rounds/<n>/instructions.md`, and `prompt.md` becomes: "You are picking this task up in a fresh
 session (why)…", `## The task` (the current step's prompt, `current_task_prompt`: `rounds/<step_round>/`
-`instructions.md` when the step began in a fresh session, else its `prompt.md`; the spec plus the
-protocol), `## The work so far` (the committed steps, `git log --oneline
+`instructions.md` when the step began in a fresh session, else its `prompt.md`, `store.round_prompt`,
+which `round_asks`, the lessons and `wb bench add` read too; the spec plus the protocol), `## The work so far` (the committed steps, `git log --oneline
 base..HEAD`, and the uncommitted diff, `git diff HEAD` with new files; a diff over
 `HANDOFF_DIFF_SHARE` (9%) of the window at 4 characters a token, about 12K characters on 32K, and never
 over `HANDOFF_DIFF_MAX` (60K characters), is replaced by its `--stat` and "read the changed files"), and `## Now`: "Start on the task above"
@@ -2554,7 +2554,9 @@ own commit was rejected, and its grants, deleted with its rules at the close, we
   user's repo gets no ref and the commits after the base (the answer) aren't in it: the agent can
   read only the base's history;
 - the spec (`spec.md`): the step's prompt (`rounds/<n>/prompt.md`, round 1's or the one opening
-  `Step N-1 of this task is done`), cut at the protocol's fold (`FOLD`), and its acceptance
+  `Step N-1 of this task is done`; `instructions.md` when the step began in a fresh session,
+  `store.round_prompt`: read from prompt.md alone, every step sent with `wb next --fresh` was
+  refused as gone, #503), cut at the protocol's fold (`FOLD`), and its acceptance
   command, from the protocol's `- The acceptance command is` line (`TEST_LINE`; `wb next --test`
   can change it per step);
 - the hidden checks: `--hidden` paths, by default the files the step added or changed that look
@@ -4894,6 +4896,9 @@ nested `.md` files (`docs/`, `skill/`, `mod/`, `agent/`) are unaffected. A new r
   `codingRefusal` pattern.
 - **A prompt's opening words** (the heads in *The runner, inside*) → `transcript` labels,
   `round_asks`, `lessons`, the fake OpenCode, and the tests that quote them.
+- **Where a round's own prompt is** (`instructions.md` once `_start_fresh` makes prompt.md the
+  handoff) → `store.round_prompt`, which `current_task_prompt`, `round_asks`, `lessons` and
+  `bench._step_prompt` all read it through (#503).
 - **A task.json `bench` key** → `Task.notify`, `results.record`, `cmd_status`, `_preempt_bench`
   and the mod's task listing (register.tsx) all leave a replay out of real work; the Bench tests
   and the mod's replay test.

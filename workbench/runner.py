@@ -1621,9 +1621,8 @@ def skills_note(task: store.Task, n: int) -> str:
 
 def current_task_prompt(task: store.Task) -> str:
     """The spec the agent is working to now, with the protocol: round 1's, or the latest `wb next`."""
-    d = task.round_dir(task.status.get("step_round") or 1)
-    f = d / "instructions.md"  # the step began in a fresh session: prompt.md is its handoff
-    return (f if f.is_file() else d / "prompt.md").read_text().strip()
+    # instructions.md when the step began in a fresh session: prompt.md is its handoff
+    return store.round_prompt(task, task.status.get("step_round") or 1).read_text().strip()
 
 
 def _start_fresh(task: store.Task, n: int, why: str) -> None:
@@ -2006,8 +2005,7 @@ def round_asks(task: store.Task, n: int) -> list[str]:
     first = task.status.get("step_round") or 1
     out: list[str] = []
     for r in range(n, first, -1):
-        d = task.round_dir(r)
-        f = d / "instructions.md" if (d / "instructions.md").is_file() else d / "prompt.md"
+        f = store.round_prompt(task, r)
         raw = f.read_text().strip() if f.is_file() else ""
         if not raw or raw.startswith((CARRY_ON[:60], RESUME[:60])):
             continue

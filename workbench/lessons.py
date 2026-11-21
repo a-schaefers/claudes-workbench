@@ -89,8 +89,7 @@ def gather(task: store.Task, outcome: str | None = None) -> list[dict]:
 
     for d in sorted(task.dir.glob("rounds/*"), key=lambda p: int(p.name) if p.name.isdigit() else 0):
         rnd = int(d.name) if d.name.isdigit() else 0
-        prompt = d / "instructions.md"  # a fresh session's handoff took prompt.md's place
-        prompt = prompt if prompt.is_file() else d / "prompt.md"
+        prompt = store.round_prompt(task, rnd)  # a fresh session's handoff took prompt.md's place
         if prompt.is_file() and prompt.read_text().startswith(FEEDBACK_HEAD):
             body = prompt.read_text().split("\n\n", 1)[-1]
             for item in items(body):

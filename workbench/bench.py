@@ -66,12 +66,13 @@ def cases() -> dict[str, dict]:
 # --- making a case ------------------------------------------------------------------------------
 
 def _step_prompt(task: store.Task, step: int) -> str | None:
-    """The prompt that handed the agent step `step`: round 1's, or the one `wb next` wrote."""
-    rounds = sorted((int(p.name), p) for p in (task.dir / "rounds").iterdir()
+    """The prompt that handed the agent step `step`: round 1's, or the one `wb next` wrote; a
+    round's own (`store.round_prompt`), not the handoff a fresh session got in its place (#503)."""
+    rounds = sorted(int(p.name) for p in (task.dir / "rounds").iterdir()
                     if p.name.isdigit()) if (task.dir / "rounds").is_dir() else []
-    for n, p in rounds:
+    for n in rounds:
         try:
-            text = (p / "prompt.md").read_text(encoding="utf-8")
+            text = store.round_prompt(task, n).read_text(encoding="utf-8")
         except OSError:
             continue
         head = STEP_HEAD.match(text)

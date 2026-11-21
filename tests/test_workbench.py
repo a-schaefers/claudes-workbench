@@ -6276,6 +6276,32 @@ class Bench(Base):
         self.assertEqual((bench.case_dir("t-steps-s2") / "spec.md").read_text(), "Now add the check.\n")
         self.assertEqual(case["test_cmd"], "sh tests/check.sh")
 
+    def test_a_step_that_began_in_a_fresh_session_can_be_made_a_case(self):
+        # #503 (the audit of 1.90): the handover rewrote the step's prompt.md as its handoff and
+        # kept the step's own in instructions.md, and bench add said "step 2's prompt is gone"
+        from workbench import bench
+        self.start("t-fresh", "ok", "--test", TEST_CMD)
+        wait_phase("t-fresh", {"review"})
+        step2 = Path(self.tmp.name) / "step2.md"
+        step2.write_text("Now add the check.\n")
+        run_wb("next", "t-fresh", "--spec", str(step2), "-m", "feat: the answer",
+               "--test", "sh tests/check.sh", "--fresh")
+        wait_phase("t-fresh", {"review"})
+        task = store.Task("t-fresh")
+        n = task.status["step_round"]
+        self.assertTrue(task.round_dir(n).joinpath("prompt.md").read_text().startswith(
+            "You are picking this task up in a fresh session"))
+        self.assertEqual(store.round_prompt(task, n), task.round_dir(n) / "instructions.md")
+        wt = task.worktree
+        (wt / "tests").mkdir()
+        (wt / "tests" / "check.sh").write_text("grep -qx 42 answer.txt && test -f notes.txt\n")
+        (wt / "notes.txt").write_text("step 2\n")
+        run_wb("accept", "t-fresh", "-m", "test: the check")
+        out = run_wb("bench", "add", "t-fresh", "--step", "2")
+        self.assertIn("case t-fresh-s2: step 2 of t-fresh", out)
+        self.assertEqual((bench.case_dir("t-fresh-s2") / "spec.md").read_text(), "Now add the check.\n")
+        self.assertEqual(bench.cases()["t-fresh-s2"]["test_cmd"], "sh tests/check.sh")
+
     def test_an_executable_hidden_check_stays_executable_on_the_reference_and_every_replay(self):
         # #346 (the audit of 1.4): the overlay wrote ./test_check.sh at 0644, so the right answer
         # exited 126, and the reference, graded from its commit, never saw it
