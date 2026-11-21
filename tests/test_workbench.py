@@ -8954,6 +8954,42 @@ class Bench(Base):
             run_wb("bench", "add", "t-src")                               # once
         self.assertIn("t-src", run_wb("bench", "list"))
 
+    def test_a_squash_accepted_tasks_steps_still_make_cases_after_git_gc(self):
+        # #649 (Codex's audit of 1.90.6): accepted with --merge-as squash after main moved, the
+        # task's commits were in no branch once accept deleted delegate/<task>, and only a hash
+        # in status.json named them: once the reflogs expired and gc pruned, wb bench add could
+        # no longer find the step. A ref of workbench's own keeps the tip, every step with it
+        from workbench import bench
+        g = lambda *a: gitops.git(self.repo, *a)  # noqa: E731
+        self.start("t-sq", "ok", "--test", "sh tests/check.sh")
+        wait_phase("t-sq", {"review"})
+        wt = store.Task("t-sq").worktree
+        (wt / "tests").mkdir()
+        (wt / "tests" / "check.sh").write_text("grep -qx 42 answer.txt\n")
+        run_wb("next", "t-sq", "--spec", str(self.spec), "-m", "Step one",
+               "--test", "sh tests/check2.sh")
+        wait_phase("t-sq", {"review"})
+        (wt / "two.txt").write_text("two\n")
+        (wt / "tests" / "check2.sh").write_text("grep -qx two two.txt\n")
+        (self.repo / "other.txt").write_text("main moves on\n")
+        g("add", "other.txt")
+        g("commit", "-qm", "main moves on")
+        self.assertIn("merged into main", run_wb("accept", "t-sq", "-m", "feat: two steps",
+                                                 "--merge-as", "squash"))
+        task = store.Task("t-sq")
+        tip = task.status["tip"]
+        self.assertEqual(g("branch", "--list", "delegate/t-sq"), "")
+        self.assertEqual(g("rev-parse", gitops.ACCEPTED_REF.format("t-sq")).strip(), tip)
+        g("reflog", "expire", "--expire=now", "--all")
+        g("gc", "-q", "--prune=now")
+        self.assertEqual(g("cat-file", "-t", tip).strip(), "commit")      # kept alive
+        step1 = gitops.step_commit(task, 1, 2)
+        self.assertTrue(step1)
+        self.assertIn("hidden checks: tests/check.sh", run_wb("bench", "add", "t-sq", "--step", "1"))
+        self.assertIn("hidden checks: tests/check2.sh", run_wb("bench", "add", "t-sq"))
+        self.assertEqual(bench.cases()["t-sq-s1"]["reference"], step1)
+        self.assertEqual(bench.cases()["t-sq-s2"]["base"], step1)
+
     def test_a_case_from_a_shallow_clone_is_refused_rather_than_made_unclonable(self):
         # #478 (the audit of 1.8, reproduced): the bundle of a shallow clone's history verified,
         # and cloning it failed "remote did not send all necessary objects"

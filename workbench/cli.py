@@ -2075,10 +2075,11 @@ def cmd_accept(a):
                  "merge_as": a.merge_as or "merge", "sign": _signed(spec, a)}
         task.set_status(closing=close, tip=tip)  # before anything is removed
         _spec_gaps(task, a.spec_gap)
+    tip = task.status["tip"]
+    gitops.keep_accepted(repo, a.name, tip)  # before the branch can go: wb bench add reads it (#649)
     if warn := gitops.remove_worktree(repo, task.worktree):  # committed: the rest is cleanup
         print(f"wb: {warn}", file=sys.stderr)
     context.drop_runtime_dir(task)
-    tip = task.status["tip"]
     merged, refused = close.get("merged_head"), None
     if close.get("merge") and not merged:
         into = close.get("merge_into")

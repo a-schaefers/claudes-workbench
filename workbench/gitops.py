@@ -906,11 +906,23 @@ def stack(repo) -> list[str]:
     return [lang for lang, n in langs.most_common(2) if n >= STACK_SHARE * total]
 
 
+ACCEPTED_REF = "refs/workbench/accepted/{}"  # an accepted task's tip, kept for wb bench add
+
+
+def keep_accepted(repo: Path, task: str, tip: str) -> None:
+    """A ref of workbench's own at the accepted ``tip``, so its commits, every step's, outlive the
+    delegate branch: a hash in status.json keeps no object alive, and after a squash accept (no
+    ancestor of main), its branch deleted and git's reflogs and gc done, wb bench add could no
+    longer find the step (#649, Codex's audit of 1.90.6). Never fails the accept."""
+    git(repo, "update-ref", "-m", "workbench: accepted", ACCEPTED_REF.format(task), tip, check=False)
+
+
 def step_commit(task: store.Task, step: int, steps: int) -> str | None:
     """The commit that landed step `step`: `wb next` marks its steps "(step N)", `wb accept` the last."""
     spec = task.spec
     want = f"Workbench-Task: {task.name}" + (f" (step {step})" if step < steps else "")
-    tip = task.status.get("tip") or spec["branch"]  # the branch is deleted once merged (cli.gc)
+    # the branch is deleted once merged (cli.gc); the tip is kept by ACCEPTED_REF (#649)
+    tip = task.status.get("tip") or spec["branch"]
     log = git(repo_of(spec), "log", "--format=%H%x00%B%x01", f"{spec['base']}..{tip}", check=False)
     for entry in log.split("\x01"):
         sha, _, body = entry.strip().partition("\x00")
