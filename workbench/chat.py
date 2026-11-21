@@ -120,11 +120,18 @@ def token() -> str:
     return got
 
 
-def tailscale() -> dict:
+def tailscale(windows: bool = False) -> dict:
     """This machine on the tailnet: {"ip", "names"}; {} when Tailscale isn't up; {"missing": True}
-    when there is no CLI to ask (said apart from "not running": the 2026-11-16 audit)."""
+    when there is no CLI to ask (said apart from "not running": the 2026-11-16 audit).
+    ``windows``: under WSL with no Linux CLI, Windows' tailscale.exe (Tailscale's own setup for
+    WSL2), for the name `tailscale serve` passes in through Windows' localhost forwarding: `which`
+    never tries .exe, so the chat answered it 403 "unknown host" (#920). Not for the address: in
+    WSL's NAT networking, Windows' tailnet IP isn't on WSL's interfaces."""
     cli = shutil.which("tailscale") or (TAILSCALE_APP if sys.platform == "darwin"
                                         and os.path.isfile(TAILSCALE_APP) else None)
+    if not cli and windows:
+        from . import hardware
+        cli = shutil.which("tailscale.exe") if hardware.system() == "wsl" else None
     if not cli:
         return {"missing": True}
     try:
@@ -150,7 +157,7 @@ def tailnet_name() -> str:
     name: it is the one serve's certificate has, and no other site's DNS can answer for it."""
     with _tailnet_lock:
         if time.monotonic() - _tailnet["at"] >= REPLAN_EVERY:
-            _tailnet.update(at=time.monotonic(), name=tailscale().get("dns") or "")
+            _tailnet.update(at=time.monotonic(), name=tailscale(windows=True).get("dns") or "")
         return _tailnet["name"]
 
 

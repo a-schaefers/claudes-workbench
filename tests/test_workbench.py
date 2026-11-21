@@ -17644,6 +17644,32 @@ class WebChat(Base):
                 mock.patch.object(chat, "tailscale", return_value={}):       # Tailscale down
             self.assertEqual(self.call("/api/state", token=tok, host="box.tail1234.ts.net")[0], 403)
 
+    def test_on_wsl_the_tailnet_name_comes_from_windows_tailscale_exe_but_the_bind_does_not(self):
+        # #920: with Tailscale on Windows, `which("tailscale")` never tries tailscale.exe, so the
+        # chat behind `tailscale serve` answered every request 403 "unknown host"
+        chat, tok = self.chat, self.chat.token()
+        me = {"Self": {"TailscaleIPs": ["100.64.0.9"], "DNSName": "box.tail1234.ts.net.",
+                       "HostName": "box"}}
+        ran = mock.Mock(return_value=types.SimpleNamespace(stdout=json.dumps(me) + "\r\n"))
+        exe = "/mnt/c/Program Files/Tailscale/tailscale.exe"
+        from workbench import hardware
+        with mock.patch.object(chat, "_tailnet", {"at": float("-inf"), "name": ""}), \
+                mock.patch.object(chat.shutil, "which",
+                                  side_effect=lambda n: exe if n == "tailscale.exe" else None), \
+                mock.patch.object(chat.sys, "platform", "linux"), \
+                mock.patch.object(hardware, "system", return_value="wsl"), \
+                mock.patch.object(chat.subprocess, "run", ran):
+            self.assertEqual(self.call("/api/state", token=tok, host="box.tail1234.ts.net")[0], 200)
+            self.assertEqual(ran.call_args[0][0][0], exe)
+            self.assertEqual(chat.plan(["localhost", "tailscale"])["skipped"],   # NAT: not WSL's IP
+                             ["tailscale (CLI not found: put `tailscale` on PATH)"])
+        with mock.patch.object(chat, "_tailnet", {"at": float("-inf"), "name": ""}), \
+                mock.patch.object(chat.shutil, "which",
+                                  side_effect=lambda n: exe if n == "tailscale.exe" else None), \
+                mock.patch.object(chat.sys, "platform", "linux"), \
+                mock.patch.object(hardware, "system", return_value="linux"):   # not WSL
+            self.assertEqual(chat.tailnet_name(), "")
+
     def test_a_wildcard_chat_answers_to_the_address_it_was_reached_on_where_the_host_name_says_127_0_1_1(self):
         # #533 (the 2026-11-20 audit): with bind 0.0.0.0 the names came from the host name, which
         # Debian's /etc/hosts maps to 127.0.1.1, so a phone on the LAN IP got a bare 403

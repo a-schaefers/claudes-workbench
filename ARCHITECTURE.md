@@ -5743,7 +5743,7 @@ every snapshot reads them, so a `bind` broken while the server runs must not fai
 `bind`: addresses to listen
 on, which replace localhost (`localhost`, an address, `tailscale`: the tailnet IPv4 from
 `tailscale status --json`, the CLI found on PATH or, on macOS, in the app bundle
-(`TAILSCALE_APP`); skipped as `tailscale (not running)`, or `tailscale (CLI not found: …)` when
+(`TAILSCALE_APP`), never Windows' under WSL (#920); skipped as `tailscale (not running)`, or `tailscale (CLI not found: …)` when
 neither has it; `0.0.0.0` or `::`: every interface). `hosts`: extra host names to answer to (`*`: any).
 Each is a list of strings; a string is a one-item list (iterated, `"0.0.0.0"` became the binds `0`
 and `.`), and anything else stops `serve` with `chat.ConfigError` naming chat.json, exit 78, so the
@@ -5759,7 +5759,10 @@ the host name resolves to; any other bind as itself; plus `hosts`. On any bind i
 this machine's full MagicDNS name while Tailscale is up (`chat.tailnet_name`, from `tailscale status
 --json`, asked at most every `REPLAN_EVERY` 30 s and only for a Host not already answered):
 `tailscale serve --bg 1337` passes that name through as the Host, and the default localhost chat
-answered the page itself 403 `unknown host` (#448). Only the full name (`box.tailnet.ts.net`, the one
+answered the page itself 403 `unknown host` (#448). Under WSL with no Linux CLI it asks Windows'
+`tailscale.exe` on PATH (`tailscale(windows=True)`: Tailscale's own WSL2 setup, whose serve
+reaches WSL through Windows' localhost forwarding; `which` never tries `.exe`, #920); the
+`tailscale` bind doesn't, as Windows' tailnet IP isn't on WSL's interfaces in NAT networking. Only the full name (`box.tailnet.ts.net`, the one
 serve's certificate has), which no other site's DNS can answer for. `serve` prints what it listens
 on, binds it skipped, and warnings for a wildcard bind or `hosts: *`; an address it can't listen
 on ends it with one line (`can't listen on <addr>:<port>: the port is taken: another wb chat serve
