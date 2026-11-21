@@ -1488,7 +1488,8 @@ deliberately hostile process (the 2026-11-16 audit's list of what it can't stop 
   refuses that (the Lane test runs a program outside the read lane and gets `Permission denied`).
   A Windows program inside the lane (one the agent writes, or in a repo on a Windows drive) still
   runs outside it: `wb doctor` says so while interop is on (`interop_gap`), and `[interop]
-  enabled=false` in `/etc/wsl.conf` closes it. Running a program reads it, so a program the walk leaves out can't start (in
+  enabled=false` in `/etc/wsl.conf` closes it (and stops wb reading Windows' GPUs, so the advice
+  points to `gpu_gb`, #702). Running a program reads it, so a program the walk leaves out can't start (in
   the agent's shell a plain `Permission denied`; OpenCode itself gets `workbench lane: can't run
   <cmd> (Permission denied)`, exit 126; not found, 127): add its
   directory to `commands.json` `paths`. Landlock only allows, so `readable()` walks down from `/`
@@ -1539,7 +1540,8 @@ deliberately hostile process (the 2026-11-16 audit's list of what it can't stop 
   write outside it: …`, or a `--` line without Landlock; then a `--  Landlock ABI N: …` line for
   each gap, and on WSL with interop on (`/proc/sys/fs/binfmt_misc/WSLInterop` or
   `WSLInterop-late` reading `enabled`) a `--  WSL interop is on: …` line: a Windows program in
-  the lane or the repo runs outside it; `[interop] enabled=false` in `/etc/wsl.conf` closes it.
+  the lane or the repo runs outside it; `[interop] enabled=false` in `/etc/wsl.conf` closes it,
+  and stops wb reading Windows' GPUs (set `gpu_gb` then, #702).
 - *OpenCode's side* (`external_rules`): its `external_directory` permission, checked for its file
   tools' paths and the shell's working directory and `cd` targets (not other arguments), is deny
   `*`, then allow `<dir>/*` for the lane, `READABLE` (`/usr`, `/etc`, `/opt`, `/lib*`, `/bin`,
@@ -3150,6 +3152,13 @@ five fields is skipped); WSL adds Windows' adapters (`_windows_gpus`: one `power
 names, each one's memory from its driver's registry key, `HardwareInformation.qwMemorySize` under
 the display class `{4d36e968-e325-11ce-bfc1-08002be10318}`, since `AdapterRAM` caps at 4 GB),
 kept `WINDOWS_FOR` (an hour) in `$WB_HOME/wsl-gpus.json`, as a PowerShell start takes seconds.
+`powershell.exe` from PATH, else Windows' own under WSL's automount root (`hardware.powershell`:
+`[automount] root` in `/etc/wsl.conf`, `/mnt/` by default, then `WINDOWS_POWERSHELL`), since
+`[interop] appendWindowsPath=false` takes it off PATH. A read that lists nothing (no PowerShell,
+one past `_run`'s 10 s after a boot; Windows always lists an adapter) is no reading: the last good
+one stays, its `tried` stamp waits `WINDOWS_RETRY` (60 s) before PowerShell is asked again.
+Cached as an hour's "no GPU", a Radeon only Windows sees had no budget, and a read that only
+sometimes worked flipped `wb optimize`'s fingerprint, so each flip emptied the GPU (#702).
 A model served from Windows (Ollama for Windows) runs on any vendor's GPU, and inside WSL NVIDIA,
 recent AMD (ROCm for WSL) and Intel (Level Zero) work: a 16 GB RX 7800 XT was "VRAM unknown", the
 note said only NVIDIA is usable, and with no budget tasks took turns (#522). `gpus(windows=False)`,
@@ -5696,7 +5705,7 @@ $WB_HOME (~/.local/state/workbench)
   gpu-<host>-<port>.{lock,json,admit,load}   the same for a remote server's models (models.pool)
   scout.json  watch.json         the weekly model check: when it was done and offered; the watch list
   update.json                    wb update: when origin was last asked, how far behind this copy was
-  wsl-gpus.json                  WSL only: Windows' display adapters ({ts, gpus: [{name, vram}]}), re-read hourly (hardware.WINDOWS_FOR)
+  wsl-gpus.json                  WSL only: Windows' display adapters ({ts, gpus: [{name, vram}], tried?}), re-read hourly (hardware.WINDOWS_FOR); a failed read keeps the last good one and stamps tried (retried after WINDOWS_RETRY)
   bench/cases/<case>/            case.json  spec.md  base.bundle  hidden/<path>…  reference.patch
   bench/runs/<run>/              plan.json  driver.log  <task>/{wb.log,diff.patch,grade.txt} (repo/ while it runs)
   bench/runs.jsonl  driver.json  one row per replay; the driver's {pid, run, start}

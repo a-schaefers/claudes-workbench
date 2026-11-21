@@ -107,8 +107,29 @@ WINDOWS_SCRIPT = (
     "Get-CimInstance Win32_VideoController | ForEach-Object { $n = $_.Name; "
     "$m = ($r | Where-Object { $_.DriverDesc -eq $n } | Select-Object -First 1).'HardwareInformation.qwMemorySize'; "
     "$n + [char]9 + $m }")
-WINDOWS_CACHE = "wsl-gpus.json"  # under $WB_HOME: {ts, gpus: [{name, vram}]}
+WINDOWS_CACHE = "wsl-gpus.json"  # under $WB_HOME: {ts, gpus: [{name, vram}], tried?}
 WINDOWS_FOR = 3600  # seconds a reading serves: PowerShell takes seconds to start
+WINDOWS_RETRY = 60  # seconds a failed reading waits before PowerShell is asked again
+WSL_CONF = Path("/etc/wsl.conf")
+# Windows' own PowerShell, under WSL's automount root: on PATH only while WSL appends Windows'
+# PATH, which [interop] appendWindowsPath=false (a common tweak) turns off (#702)
+WINDOWS_POWERSHELL = "c/Windows/System32/WindowsPowerShell/v1.0/powershell.exe"
+
+
+def powershell() -> str | None:
+    """Windows' powershell.exe as seen from WSL: from PATH, else under the automount root
+    (/etc/wsl.conf's [automount] root, /mnt/ by default); None when neither has it."""
+    if found := shutil.which("powershell.exe"):
+        return found
+    root, section = "/mnt/", ""
+    for line in _read(WSL_CONF).splitlines():
+        line = line.split("#", 1)[0].strip()
+        if line.startswith("[") and line.endswith("]"):
+            section = line[1:-1].strip().lower()
+        elif section == "automount" and line.partition("=")[0].strip().lower() == "root":
+            root = line.partition("=")[2].strip().strip("\"'") or root
+    path = os.path.join(root.rstrip("/") + "/", WINDOWS_POWERSHELL)
+    return path if os.path.isfile(path) else None
 
 
 def _windows_gpus() -> list[dict]:
@@ -116,22 +137,31 @@ def _windows_gpus() -> list[dict]:
     model served from Windows (Ollama for Windows) runs on any of them, and WSL shows Linux only
     NVIDIA's (and AMD's or Intel's to ROCm or Level Zero), so a 16 GB Radeon was "VRAM unknown"
     and had no budget (#522). Read at most once per WINDOWS_FOR, in WINDOWS_CACHE: the budget
-    asks it on every admission when Linux sees no GPU."""
+    asks it on every admission when Linux sees no GPU. A read that found nothing (no PowerShell,
+    one slower than _run's timeout after a boot: Windows always lists an adapter) is no reading:
+    the last good one stays and PowerShell is asked again after WINDOWS_RETRY. Cached as an hour's
+    "no GPU", a 16 GB Radeon had no budget, and a read that only sometimes worked flipped wb
+    optimize's fingerprint, so each flip emptied the GPU to measure (#702)."""
     path = store.home() / WINDOWS_CACHE
     hit = store.read_json(path, None)
-    if isinstance(hit, dict) and isinstance(hit.get("gpus"), list) \
-            and 0 <= time.time() - (hit.get("ts") or 0) < WINDOWS_FOR:
-        rows = hit["gpus"]
-    else:
-        out = _run("powershell.exe", "-NoProfile", "-NonInteractive", "-EncodedCommand",
-                   base64.b64encode(WINDOWS_SCRIPT.encode("utf-16-le")).decode())
-        rows = []
+    hit = hit if isinstance(hit, dict) and isinstance(hit.get("gpus"), list) else {"gpus": []}
+    now, rows = time.time(), hit["gpus"]
+    fresh = rows and 0 <= now - (hit.get("ts") or 0) < WINDOWS_FOR
+    if not fresh and not 0 <= now - (hit.get("tried") or 0) < WINDOWS_RETRY:
+        exe = powershell()
+        out = _run(exe, "-NoProfile", "-NonInteractive", "-EncodedCommand",
+                   base64.b64encode(WINDOWS_SCRIPT.encode("utf-16-le")).decode()) if exe else ""
+        read = []
         for line in out.splitlines():
             name, _, mem = (x.strip() for x in line.partition("\t"))
             if name:
-                rows.append({"name": name, "vram": int(mem) if mem.isdigit() and int(mem) else None})
+                read.append({"name": name, "vram": int(mem) if mem.isdigit() and int(mem) else None})
+        if read:
+            rows, hit = read, {"ts": now, "gpus": read}
+        else:
+            hit = {**hit, "tried": now}  # the last good reading kept
         try:
-            store.write_json(path, {"ts": time.time(), "gpus": rows})
+            store.write_json(path, hit)
         except OSError:
             pass  # unwritable state: asked again next time
     return [{"name": r["name"], "driver": "windows (seen from WSL)", "vram": r.get("vram"), "vram_used": None}

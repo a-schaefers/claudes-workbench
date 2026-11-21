@@ -1247,7 +1247,8 @@ def interop_gap() -> str | None:
     return ("WSL interop is on: a Windows program runs as you outside the agent's lane. The "
             "Windows drives are out of its PATH and reads, but a Windows program in its lane or "
             "repo still runs; [interop] enabled=false in /etc/wsl.conf (then wsl --shutdown) "
-            "closes it")
+            "closes it, and also stops wb reading Windows' GPUs: set their memory in models.json "
+            "gpu_gb then")  # a GPU only Windows sees had no budget at all after it (#702)
 
 
 def secret_paths() -> set[str]:

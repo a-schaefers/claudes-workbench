@@ -15840,6 +15840,7 @@ class Hardware(unittest.TestCase):
         for target, value in (("platform.system", lambda: system), ("platform.machine", lambda: machine),
                               ("workbench.hardware._run", run), ("workbench.hardware._read", read),
                               ("workbench.hardware.DRM", drm), ("pathlib.Path.glob", glob),
+                              ("workbench.hardware.powershell", lambda: "powershell.exe"),  # the runs' key
                               ("workbench.hardware.PROC", Path("/fake/proc"))):  # no ollama runs
             patcher = mock.patch(target, value)
             patcher.start()
@@ -15900,6 +15901,46 @@ class Hardware(unittest.TestCase):
         ps = [a for a in asked if a[0] == "powershell.exe"]
         self.assertEqual(len(ps), 1)                    # cached: the budget asked no PowerShell
         self.assertIn("-EncodedCommand", ps[0])          # no quoting through WSL's interop
+
+    def test_wsl_finds_windows_powershell_off_path_and_never_caches_a_failed_read_for_an_hour(self):
+        # #702: with appendWindowsPath=false powershell.exe isn't on PATH, and a PowerShell slower
+        # than the timeout after a boot read nothing too; either was cached for an hour as "no
+        # GPU", so a 16 GB Radeon under Ollama for Windows had no budget
+        wsl = {"/proc/version": "microsoft-standard-WSL2"}
+        hardware_powershell = hardware.powershell   # the real one: fake() stands one in
+        hw = self.fake("Linux", files=wsl)
+        with tempfile.TemporaryDirectory() as root:
+            exe = Path(root, hw.WINDOWS_POWERSHELL)
+            exe.parent.mkdir(parents=True)
+            exe.write_text("")
+            with mock.patch.object(hw.shutil, "which", lambda n: None), \
+                    mock.patch.object(hw, "_read", lambda path: f"[automount]\nroot = {root}/  # moved\n"
+                                      if path == hw.WSL_CONF else ""):
+                self.assertEqual(hardware_powershell(), str(exe))
+            with mock.patch.object(hw.shutil, "which", lambda n: None):
+                self.assertIsNone(hardware_powershell())     # /mnt/c has none here either
+        card = "AMD Radeon RX 7800 XT\t17163091968\r\n"
+        answers, asked = ["", card, ""], []
+        clock = [1000.0]
+
+        def run(*argv):
+            asked.append(argv[0])
+            return answers.pop(0)
+        with mock.patch.object(hw, "_run", run), mock.patch.object(hw.time, "time", lambda: clock[0]):
+            self.assertEqual(hw._windows_gpus(), [])           # PowerShell timed out: no reading
+            clock[0] += 30
+            self.assertEqual(hw._windows_gpus(), [])           # not asked again at once
+            self.assertEqual(len(asked), 1)
+            clock[0] += hw.WINDOWS_RETRY
+            self.assertEqual([g["name"] for g in hw._windows_gpus()], ["AMD Radeon RX 7800 XT"])
+            clock[0] += hw.WINDOWS_FOR + 1
+            self.assertEqual([g["vram"] for g in hw._windows_gpus()], [17163091968])  # the last good kept
+            self.assertEqual(len(asked), 3)
+        from workbench import context
+        with mock.patch.object(context, "BINFMT", "/nonexistent"), \
+                mock.patch.object(context.Path, "read_text", lambda self: "enabled\n"):
+            self.assertIn("stops wb reading Windows' GPUs: set their memory in models.json gpu_gb",
+                          context.interop_gap())
 
     def test_ollamas_quoted_service_environment_and_a_context_that_isnt_a_number(self):
         # the 2026-11-16 audit: systemd quotes a value with a space and the split lost it; "32k"
