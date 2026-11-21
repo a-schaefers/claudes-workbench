@@ -5318,7 +5318,9 @@ it posts `/api/send` with their ids, and a refused one marks the message not sen
 (edit puts its files back in the tray). In the thread a message shows its images as thumbnails
 (a tap shows one whole, `view`; a tap or Escape closes it) and other files as name and size (a
 tap saves it), each fetched once with the token as a blob (`fileURL`), or from this page's own
-bytes; one `wb gc` removed says "no longer on the computer".
+bytes; one `wb gc` removed says "no longer on the computer". Each render and each removed chip
+revokes the object URLs no chip, thread row or open viewer still names (`sweepSoon`): picked and
+removed photos held their full-size blobs until the page closed (#746).
 Away from localhost over plain HTTP the page isn't a secure context, so the browser's UUID and
 clipboard are missing (the page falls back: its own ids, and a reply's *copy* through a selected
 textarea and `execCommand('copy')`, `copyText`; it said "copy failed" on every tap, #745), and it can't install or notify: the gear says so,

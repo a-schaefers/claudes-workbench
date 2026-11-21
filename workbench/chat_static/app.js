@@ -12,6 +12,7 @@
   'use strict'
   const K = { token: 'wb-chat-token', seen: 'wb-chat-seen', outbox: 'wb-chat-outbox', draft: 'wb-chat-draft', thread: 'wb-chat-thread', about: 'wb-chat-about' }
   const BACKOFF = [500, 1000, 2000, 4000, 8000, 15000, 30000]
+  let viewing = null, sweeping = false  // the photo the viewer shows; a sweep of object URLs queued (#746)
   const DEAD_MS = 40000          // the server pings every 15 s: this long silent means the line is dead
   const CONNECT_MS = 12000       // a connection that never answers: dial again
   const HIDDEN_GRACE_MS = 60000  // a hidden page keeps its stream this long, then lets go
@@ -297,6 +298,7 @@
     }
     drawWorking(list, anchor)
     drawPresence()
+    sweepSoon()
     toEnd()
     if (list.length) firstVisit = false
   }
@@ -854,7 +856,7 @@
   }
   function unpick(id) {
     draft = draft.filter(d => d.id !== id)
-    keepDraft(); db.del(id); bytes.delete(id); drawTray(); armSend()
+    keepDraft(); db.del(id); bytes.delete(id); drawTray(); armSend(); sweepSoon()
   }
   const forgetFiles = o => { for (const f of (o && o.files) || []) { db.del(f.id); bytes.delete(f.id) } }
 
@@ -893,6 +895,24 @@
   }
   // a file's bytes as a blob URL: this page's own, else IndexedDB's, else the computer's (behind the token)
   const urls = new Map()
+  // An object URL keeps its blob alive until revoked: four photos picked and removed held four
+  // full-size blobs until the page closed (#746). Each render and removal lets go of every URL no
+  // chip, thread row or open viewer names, in a microtask: render runs before `urls` exists.
+  function sweepSoon() {
+    if (sweeping) return
+    sweeping = true
+    queueMicrotask(() => {
+      sweeping = false
+      const used = new Set(draft.map(d => d.id))
+      for (const m of items()) for (const f of m.files || []) used.add(f.id)
+      if (viewing) used.add(viewing)
+      for (const [id, p] of urls) {
+        if (used.has(id)) continue
+        urls.delete(id)
+        p.then(u => URL.revokeObjectURL(u), () => {})
+      }
+    })
+  }
   function fileURL(id) {
     if (!urls.has(id)) {
       urls.set(id, (async () => {
@@ -929,9 +949,10 @@
   function view(f) {
     const v = document.createElement('div'); v.className = 'viewer'; v.setAttribute('role', 'dialog'); v.setAttribute('aria-label', f.name)
     const img = document.createElement('img'); img.alt = f.name; v.append(img)
+    viewing = f.id
     fileURL(f.id).then(u => { img.src = u }).catch(() => v.remove())
     const esc = e => { if (e.key === 'Escape') close() }
-    const close = () => { v.remove(); removeEventListener('keydown', esc) }
+    const close = () => { v.remove(); removeEventListener('keydown', esc); if (viewing === f.id) viewing = null; sweepSoon() }
     v.onclick = close; addEventListener('keydown', esc)
     document.body.append(v)
   }

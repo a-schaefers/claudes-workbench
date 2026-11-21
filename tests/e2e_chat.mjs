@@ -593,6 +593,30 @@ async function run(engine, device) {
       await until(async () => await page.locator('#tray').isHidden())
     } finally { writeFileSync(env.WB_CHAT_CONFIG, '{}') }
   })
+  await check('photos picked and removed let go of their previews: no blob URL outlives its chip', async () => {
+    // #746 (Codex's audit of 1.90.6, finding 17): four picked and removed, four Blob URLs made,
+    // none revoked, each holding a full-size photo until the page closed
+    const p = await ctx.newPage()
+    await p.addInitScript(() => {
+      window.live = new Set()
+      const make = URL.createObjectURL, drop = URL.revokeObjectURL
+      URL.createObjectURL = b => { const u = make(b); window.live.add(u); return u }
+      URL.revokeObjectURL = u => { window.live.delete(u); drop(u) }
+    })
+    try {
+      await p.goto(base)
+      await until(async () => (await p.textContent('#presence-text')).length > 0)
+      const png = readFileSync(join(ROOT, 'workbench/chat_static/icon-192.png'))
+      const thread = await p.evaluate(() => window.live.size)  // the thread's own thumbnails
+      for (let i = 0; i < 4; i++) {
+        await p.setInputFiles('#pick', { name: `p${i}.png`, mimeType: 'image/png', buffer: Buffer.concat([png, Buffer.from([i])]) })
+        await until(() => p.$eval('#tray .face', img => img.complete && img.naturalWidth > 0))
+        await p.click('#tray .att .x')
+        await until(async () => await p.locator('#tray').isHidden())
+      }
+      await until(async () => (await p.evaluate(() => window.live.size)) <= thread)
+    } finally { await p.close() }
+  })
   await check('a disk that refuses for good shows its reason on the chip, and a server failure stops after three tries', async () => {
     // #742 (the 2026-11-21 audit): a full disk or a name it can't save answered 500 or 507 to
     // every try, and the page re-sent the whole file forever, saying only "waiting for the connection"
