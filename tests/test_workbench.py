@@ -10716,6 +10716,22 @@ class ModelRename(Base):
         lines = stats.feed()["model_lines"]["lines"]
         self.assertIn((self.NEW, 4), [(x["model"], x["tasks"]) for x in lines])
 
+    def test_a_models_speed_asks_no_server_and_links_a_digest_only_from_weights_given(self):
+        # #905 (the third audit of 2026-11-21): wb top and the Stats feed call router.speed for
+        # each running task and rack row on their tick, and its earlier() fallback asked the
+        # server its identity: 2.5 s an unreachable Ollama root, ~4 s a model elsewhere
+        from workbench import models, router
+        new = models.resolve(self.NEW)
+        self.rows(self.OLD, weights_id="ollama:0123456789abcdef")
+        router.record_read_bound(self.OLD, 40)
+        asked = []
+        with mock.patch.object(models, "identity", lambda m: asked.append(m.id) or "ollama:0123456789abcdef"):
+            self.assertEqual(router.speed(self.NEW), {})
+            self.assertEqual(asked, [])                                   # no server read
+            self.assertEqual(router.speed(self.NEW, "ollama:0123456789abcdef"), {"read": 40})
+            self.assertGreater(router.budgets(new, "ollama:0123456789abcdef")["silence"], 900)
+            self.assertEqual(asked, [])
+
 
 class Routing(Base):
     def setUp(self):

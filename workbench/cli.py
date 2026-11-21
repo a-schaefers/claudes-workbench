@@ -1083,7 +1083,9 @@ def cmd_start(a):
                                                   test_line=test_line(a.test), budget=budget)
     task.round_dir(1).mkdir(parents=True)
     task.round_dir(1).joinpath("prompt.md").write_text(prompt, encoding="utf-8")
-    limits = router.budgets(m)  # from the model's measured speed on this machine, else defaults
+    # from the model's measured speed on this machine, else defaults; its identity (cached:
+    # weights_id below) finds the speed it had under an id it was renamed from (#905)
+    limits = router.budgets(m, models.identity(m))
     store.write_json(task.dir / "task.json", {
         "name": a.name, "repo": str(repo), "cwd": os.getcwd(), "base": base, "base_ref": a.base,
         # the repository's own git dir: where its branch is once `repo` is removed (#498)

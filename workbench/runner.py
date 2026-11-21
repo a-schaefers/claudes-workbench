@@ -249,7 +249,7 @@ def stretch_limits(task: store.Task, m) -> dict:
     given = spec.get("timeouts_given")
     if given is None:  # a task from before #814: whether a flag gave them is unknown
         return {}
-    fresh = router.budgets(m)
+    fresh = router.budgets(m, spec.get("weights_id"))  # no server read for it (#905)
     raised = {k: fresh[k] for k, key in LIMITS.items()
               if k not in given and fresh[k] > float(spec.get(key) or 0)}
     task.set_status(limits=raised or None)

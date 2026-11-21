@@ -3211,7 +3211,10 @@ model id; a model's entry is merged over its provider's (`{**provider, **model}`
   aren't the defaults again) and its Stats line. Without it, an id no longer discovered whose
   newest results row ran on the Ollama digest the model has now (`weights_id` against
   `models.identity`) is linked the same way, by the router only while the server answers, by the
-  Stats line from the rows' own `weights_id`; a `bytes:` size is too weak a match to link. Keyed
+  Stats line from the rows' own `weights_id`, and by `router.speed` only from an identity its
+  caller already has (`wb start`'s, the runner's task.json `weights_id`): `wb top` and the Stats
+  feed call it on their tick, where the server read stalled them 2.5 to 4 s a model on an
+  unreachable box (#905); a `bytes:` size is too weak a match to link. Keyed
   by the id alone, each of these started the model fresh: behind the models with a record, on the
   window's guess, the default knobs and budgets (#818).
 
@@ -3618,8 +3621,12 @@ speed (input / (first token − created), ≥ 1000 tokens over > 0.5 s, also fro
 short before it completed), the last `SPEED_KEEP` 60 of
 each, in `speed.json` (`{"<id>": {"write": [...], "read": [...]}}`, under `speed.lock`; this
 machine's, in `store.machine_dir()`: on a network home a fast machine's samples outvoted a slow
-one's, whose rounds then ran on the fast one's limits, #901); `speed()` takes the medians, from
-`$WB_HOME/speed.json` (every machine's, from before) until this machine has measured the model. At `wb start`, `budgets(m)` sets think = `THINK_TOKENS` 13,500 / write + window
+one's, whose rounds then ran on the fast one's limits, #901); `speed()` takes the medians, 
+from
+`$WB_HOME/speed.json` (every machine's, from before) until this machine has measured the model,
+and of the id it had before when neither has one (`renamed_from`, #818). It asks
+no server (#905). 
+At `wb start`, `budgets(m)` sets think = `THINK_TOKENS` 13,500 / write + window
 / read (either term alone when only one speed is measured: a read bound may be all there is,
 #491), clamped to [420, `THINK_MAX` 1800] s, and scales silence (900) and round (2400) by
 think / 420. No measured speed: the defaults. They are written into task.json at start, and

@@ -136,14 +136,15 @@ def _root(over: dict, model_id: str) -> str:
 # renaming the provider (`ollama` to `local`), moving from `name:latest` to its explicit tag or
 # renaming a llama-swap alias started it fresh: behind the models with a record, on the window's
 # guess, the default knobs and the default budgets, which stall on a slow machine (#818).
-def earlier(m: models.Model, probe: bool = True) -> list[str]:
+def earlier(m: models.Model, probe: bool = True, weights: str | None = None) -> list[str]:
     """The ids ``m`` had before, nearest first: models.json `renamed_from` (wb model rename),
-    followed back; and, with ``probe`` (a server read, cached: models.identity), each id no
-    longer discovered whose newest results row ran on the Ollama digest ``m`` has now. Only a
-    digest: a `bytes:` size matches other weights too often to be called the same model."""
+    followed back; and, with ``probe`` (a server read, cached: models.identity) or ``weights``
+    (its identity, already known: task.json `weights_id`), each id no longer discovered whose
+    newest results row ran on the Ollama digest ``m`` has now. Only a digest: a `bytes:` size
+    matches other weights too often to be called the same model."""
     over = models._overrides()
     out = _up(over, m.id, "renamed_from")
-    if probe and (w := models.identity(m)) and w.startswith("ollama:"):
+    if (w := weights or (models.identity(m) if probe else None)) and w.startswith("ollama:"):
         newest = {r["model"]: r.get("weights_id") for r in store.results() if r.get("model")}
         if any(v == w for k, v in newest.items() if k != m.id):
             found = models.discover()
@@ -547,15 +548,23 @@ def speed_samples(messages: list[dict]) -> dict:
     return {"write": write, "read": read, "ttft": ttft}
 
 
-def speed(model_id: str) -> dict:
+def speed(model_id: str, weights: str | None = None) -> dict:
     """{"write", "read"}: the model's median tokens per second on this machine, where measured;
-    unmeasured under this id, under the nearest id it had before (earlier, #818)."""
+    unmeasured under this id, under the nearest id it had before (earlier, #818).
+
+    No server is asked: `wb top` and the Stats tab's feed call this for every running task and
+    rack row on their tick, and earlier()'s identity read cost 2.5 s an unreachable Ollama root,
+    ~4 s a model on another server, frozen with a few on a sleeping LAN box (#905, as #819 was
+    for expected). The digest link only from ``weights``, the identity the caller already has
+    (task.json `weights_id`: wb start, the runner's budgets)."""
     def row_in(path: Path) -> dict:
         data = store.read_json(path, {}) or {}
         row = data.get(model_id) or {}
         if not row and data:
-            m = models.discover().get(model_id)
-            row = next((data[i] for i in (earlier(m) if m else []) if data.get(i)), {})
+            ids = _up(models._overrides(), model_id, "renamed_from")
+            if weights and (m := models.discover().get(model_id)):
+                ids = earlier(m, probe=False, weights=weights)
+            row = next((data[i] for i in ids if data.get(i)), {})
         return row
     row = row_in(_speed_path())
     if not row and (shared := store.home() / "speed.json") != _speed_path():
@@ -563,9 +572,10 @@ def speed(model_id: str) -> dict:
     return {k: statistics.median(row[k]) for k in ("write", "read") if row.get(k)}
 
 
-def budgets(m: models.Model) -> dict:
-    """{"think", "silence", "round"} in seconds for a task on this model."""
-    sp = speed(m.id)
+def budgets(m: models.Model, weights: str | None = None) -> dict:
+    """{"think", "silence", "round"} in seconds for a task on this model; ``weights``: its
+    identity, when known (speed)."""
+    sp = speed(m.id, weights)
     if not sp:
         return {"think": THINK_DEFAULT_S, "silence": SILENCE_DEFAULT_S, "round": ROUND_DEFAULT_S}
     # a reading speed alone stretches them too: a model whose first request never finished had
