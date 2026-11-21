@@ -48,6 +48,43 @@ def serve(routes: dict) -> tuple[ThreadingHTTPServer, str]:
     return srv, f"http://127.0.0.1:{srv.server_address[1]}"
 
 
+def fake_lmstudio(loaded: dict, posts: list):
+    """An LM Studio with just-in-time loading on, models a and b: /v1/models lists both,
+    /api/v1/models their ``loaded`` instances (instance id -> context length); POST
+    /api/v1/models/load and /unload are recorded in ``posts`` and load or unload."""
+    class H(BaseHTTPRequestHandler):
+        def reply(self, body):
+            self.send_response(200)
+            self.end_headers()
+            self.wfile.write(json.dumps(body).encode())
+
+        def do_GET(self):
+            if self.path == "/v1/models":
+                return self.reply({"data": [{"id": "a"}, {"id": "b"}]})
+            if self.path == "/api/v1/models":
+                return self.reply({"models": [
+                    {"key": k, "loaded_instances": [{"id": i, "config": {"context_length": c}}
+                                                    for i, c in loaded.items() if i == k]}
+                    for k in ("a", "b")]})
+            self.send_response(404)
+            self.end_headers()
+
+        def do_POST(self):
+            body = json.loads(self.rfile.read(int(self.headers.get("Content-Length") or 0)) or b"{}")
+            posts.append((self.path, body))
+            if self.path == "/api/v1/models/load":
+                loaded[body["model"]] = body.get("context_length", 4096)
+            elif self.path == "/api/v1/models/unload":
+                loaded.pop(body["instance_id"], None)
+            self.reply({})
+
+        def log_message(self, *a):
+            pass
+    srv = ThreadingHTTPServer(("127.0.0.1", 0), H)
+    threading.Thread(target=srv.serve_forever, daemon=True).start()
+    return srv, f"http://127.0.0.1:{srv.server_address[1]}"
+
+
 def fake_ollama(loaded: list, tags: list, posts: list, fail: dict | None = None,
                 down: Path | None = None):
     """An Ollama on a free port: /api/tags lists ``tags``, /api/ps ``loaded`` (dicts with name,
@@ -927,6 +964,38 @@ class Real(unittest.TestCase):
         self.assertTrue(models.status(found["lms/b"])["available"])
         state.update(v1={"data": []}, lms=rows())                               # none loaded
         self.assertTrue(models.status(found["lms/b"])["available"])
+
+    def test_lm_studio_unloads_the_model_a_switch_leaves_and_reloads_one_with_a_short_window(self):
+        # #645 (the audit of main): LM Studio evicts only its just-in-time loads, never what
+        # /api/v1/models/load loaded, and free_gpu skipped the kept model's server: each switch
+        # between two of its models stacked one more in VRAM, and an instance loaded with the
+        # UI's 4K window was kept, so short_window failed the task
+        loaded, posts = {"a": 32768}, []
+        srv, url = fake_lmstudio(loaded, posts)
+        self.servers.append(srv)
+        win = {"limit": {"context": 32768}}
+        self.config({"lms": {"options": {"baseURL": url + "/v1"}, "models": {"a": win, "b": win}}},
+                    {"lms": {"engine": "server"}})
+        found = models.discover()
+        models.make_resident(found["lms/b"], say=lambda *_: None)
+        self.assertEqual(loaded, {"b": 32768})                    # a let go, b with OpenCode's window
+        self.assertEqual(posts, [("/api/v1/models/unload", {"instance_id": "a"}),
+                                 ("/api/v1/models/load", {"model": "b", "context_length": 32768})])
+        self.assertEqual(models.make_resident(found["lms/b"], say=lambda *_: None), 0.0)
+        loaded.update(a=4096)                                     # someone loads a beside it
+        models.make_resident(found["lms/b"], say=lambda *_: None)
+        self.assertEqual(loaded, {"b": 32768})
+        loaded.clear()
+        loaded["a"] = 4096                                         # a, loaded in the UI at 4K
+        posts.clear()
+        models.make_resident(found["lms/a"], say=lambda *_: None)
+        self.assertEqual(loaded, {"a": 32768})
+        self.assertEqual(posts, [("/api/v1/models/unload", {"instance_id": "a"}),
+                                 ("/api/v1/models/load", {"model": "a", "context_length": 32768})])
+        Path(os.environ["WB_MODELS"]).write_text(json.dumps({"lms": {"engine": "server"},
+                                                             "keep_loaded": ["lms/a"]}))
+        models.make_resident(found["lms/b"], say=lambda *_: None)
+        self.assertEqual(loaded, {"a": 32768, "b": 32768})        # keep_loaded is kept
 
     def test_lm_studio_says_each_models_size_window_and_tool_training(self):
         from workbench import cli

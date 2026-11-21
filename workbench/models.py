@@ -15,8 +15,10 @@ keyed by OpenCode model id or by provider id:
 
 A provider is driven as Ollama when its server answers Ollama's /api/version, whatever its port,
 and isn't an emulation of it (KoboldCpp: `emulator`); anything else is a server (`"engine": "ollama"|"server"` on the provider overrides the probe). A
-server that lists several models (LM Studio, llama-swap, vLLM) swaps them itself: its models
-are one server, stopped or started as one.
+server that lists several models (llama-swap, vLLM) swaps them itself: its models are one
+server, stopped or started as one. LM Studio (its /api/v1/models answers) is the exception: it
+unloads by itself only what it loaded just in time, so wb loads and unloads its models one by
+one (#645).
 
 The runner makes the task's model resident before it starts (make_resident): it unloads Ollama
 models and stops servers that have a stop command, then loads or starts the one it needs. A
@@ -1138,15 +1140,21 @@ def make_resident(m: Model, say=print, keep=(), warn=None) -> float:
         # first and failed after (the 2026-11-16 audit): fail before freeing anything
         raise RuntimeError(f"{m.id} can't run: {st['why']}"
                            + (f": {fix}" if (fix := remedy(m, st)) else ""))
-    if m.engine == "server" and (key := lmstudio_unloaded(m)):
+    lms = _lmstudio_of(m, _lmstudio_rows(m.root, m.api_key)) if m.engine == "server" else None
+    short = _lmstudio_short(m, lms[1]) if lms else []
+    if lms and lms[0] and (not lms[1] or short):
         # LM Studio's just-in-time loading lists every downloaded model as served, so nothing
         # was loaded, and OpenCode's first request loaded it with LM Studio's default window
         # (often 4K): the prompt was refused and round 1 failed as "opencode exited 1" (#335,
-        # the audit of 1.4). Load it here with the window OpenCode is told.
+        # the audit of 1.4). Load it here with the window OpenCode is told. One loaded with a
+        # smaller window (the UI's 4K) is loaded again: short_window failed the task (#645).
         t0 = time.time()
         if not m.remote and not _room_beside(m):
             free_gpu(keep={m.id, *keep}, say=say, warn=warn, of=m)
-        _lmstudio_load(m, key, say)
+        for instance in short:
+            say(f"unloading {instance} from LM Studio: loaded with a smaller window than OpenCode is told")
+            _lmstudio_unload(m, instance)
+        _lmstudio_load(m, lms[0], say)
         return time.time() - t0
     if st["resident"] and (m.remote or not _others_resident(m, keep) or _room_beside(m)):
         return 0.0
@@ -1191,22 +1199,70 @@ def make_resident(m: Model, say=print, keep=(), warn=None) -> float:
     return time.time() - t0
 
 
+def _lmstudio_rows(root: str, key: str = "") -> list[dict] | None:
+    """LM Studio's /api/v1/models rows, or None when the server isn't LM Studio (or is down)."""
+    lms = _ask(f"{root}/api/v1/models", key)
+    rows = lms.get("models") if isinstance(lms, dict) else None
+    return [x for x in rows if isinstance(x, dict)] if isinstance(rows, list) else None
+
+
+def _instances(x: dict) -> list[dict]:
+    return [i for i in x.get("loaded_instances") or [] if isinstance(i, dict) and i.get("id")]
+
+
+def _lmstudio_of(m: Model, rows: list[dict] | None) -> tuple[str, list[dict]] | None:
+    """m's LM Studio key and its loaded instances, when LM Studio lists it; else None. An
+    instance named m.name is m's (an alias), else every instance of the model whose key m is."""
+    for x in rows or []:
+        if hit := [i for i in _instances(x) if i["id"] == m.name]:
+            return str(x.get("key") or m.name), hit
+        if _serves(str(x.get("key") or ""), m.name):
+            return str(x.get("key") or m.name), _instances(x)
+    return None
+
+
 def lmstudio_unloaded(m: Model) -> str | None:
     """The LM Studio key of ``m`` when LM Studio lists it but has no instance of it loaded (it
     would load on the first request, with its default window: #335); else None."""
     if _fake():
         return None
-    lms = _ask(f"{m.root}/api/v1/models", m.api_key)
-    rows = lms.get("models") if isinstance(lms, dict) else None
-    for x in rows if isinstance(rows, list) else []:
-        if not isinstance(x, dict):
+    of = _lmstudio_of(m, _lmstudio_rows(m.root, m.api_key))
+    return of[0] if of and not of[1] and of[0] else None
+
+
+def _lmstudio_short(m: Model, instances: list[dict]) -> list[str]:
+    """m's instances loaded with a smaller window than limit.context (the UI's 4K, say)."""
+    said = (m.config.get("limit") or {}).get("context")
+    return [i["id"] for i in instances if isinstance(said, int)
+            and 0 < (_pos((i.get("config") or {}).get("context_length")) or said) < said]
+
+
+def _lmstudio_extra(local: list[Model], ours: list[Model], held: set[str]) -> tuple[list, set]:
+    """([(server, instance id)], LM Studio's servers): each instance LM Studio has loaded that
+    isn't one of ``ours`` (the task's model, those beside it) or kept (keep_loaded). LM Studio
+    unloads by itself only what it loaded just in time, never what /api/v1/models/load loaded:
+    each switch between two of its models stacked one more in VRAM (#645, the audit of main)."""
+    out, seen, lms = [], set(), set()
+    for o in local:
+        if o.engine != "server" or o.server in seen:
             continue
-        loaded = [i for i in x.get("loaded_instances") or [] if isinstance(i, dict)]
-        if any(i.get("id") == m.name for i in loaded):
-            return None
-        if _serves(str(x.get("key") or ""), m.name):
-            return None if loaded else str(x["key"])
-    return None
+        seen.add(o.server)
+        rows = _lmstudio_rows(o.root, o.api_key)
+        if rows is None:
+            continue
+        lms.add(o.server)
+        mine = {i["id"] for k in local if k.server == o.server and (k in ours or k.id in held)
+                for i in (_lmstudio_of(k, rows) or ("", []))[1]}
+        out += [(o, i["id"]) for x in rows for i in _instances(x)
+                if i["id"] not in mine and i["id"] not in held]
+    return out, lms
+
+
+def _lmstudio_unload(m: Model, instance: str) -> None:
+    try:
+        _post(f"{m.root}/api/v1/models/unload", {"instance_id": instance}, timeout=120)
+    except Exception:
+        pass
 
 
 def _lmstudio_load(m: Model, key: str, say) -> None:
@@ -1281,9 +1337,18 @@ def free_gpu(keep=(), say=print, warn=None, of: Model | None = None) -> None:
     held = keep_loaded()
     local = [o for o in discover().values() if not o.remote]  # another host's GPU isn't ours to free
     kept = [o for o in local if o.id in keep or o.id in held]
+    # LM Studio loads and unloads one model at a time: every instance not kept is unloaded and
+    # the server left running (#645); its server is then done
+    extra, lmstudio = _lmstudio_extra(local, kept, held)
+    for server, instance in extra:
+        deadline = time.monotonic() + INFLIGHT_WAIT
+        while not _server_idle(server) and time.monotonic() < deadline:  # never cut off a reply
+            time.sleep(5)
+        say(f"unloading {instance} from LM Studio")
+        _lmstudio_unload(server, instance)
     # a server swaps its own models; one serving another model on the kept one's port is stopped
-    done = {o.server for o in kept if o.engine == "server"
-            and (not _contended(o) or status(o)["resident"])}
+    done = lmstudio | {o.server for o in kept if o.engine == "server"
+                       and (not _contended(o) or status(o)["resident"])}
     for other in local:
         if other.engine != "server" or other.server in done or not status(other)["resident"]:
             continue
@@ -1408,6 +1473,8 @@ def _others_resident(m: Model, keep=()) -> bool:
     held, seen = keep_loaded(), {}
     local = [o for o in discover().values() if not o.remote]
     ours = [m, *(o for o in local if o.id in keep or o.id in held)]
+    if _lmstudio_extra(local, ours, held)[0]:  # another of LM Studio's models, loaded (#645)
+        return True
     if any(o.engine == "server" and o.stop and o.server not in {x.server for x in ours}
            and status(o)["resident"] for o in local):
         return True

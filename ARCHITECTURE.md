@@ -2539,7 +2539,8 @@ window that's too small or doesn't match the model's entry. Most servers start s
   `--kv-unified`), and one agent uses one slot.
 - LM Studio: the context length when the model is loaded (`lms load <model> --context-length
   32768`). Load it before registering it, so LM Studio can say what it gave it. A task loads an
-  unloaded one itself with the entry's `limit.context` (*Residency*).
+  unloaded one itself with the entry's `limit.context`, loads one loaded with less again, and
+  unloads the LM Studio models it isn't using (*Residency*).
 - vLLM: `--max-model-len`.
 
 Bigger is better while it fits on the GPU. A window too big for the card pushes part of the model
@@ -2814,7 +2815,10 @@ lists every downloaded model, so `status` says running) is loaded first, after `
 below, with `POST /api/v1/models/load` and `context_length` set to its `limit.context`; a refused
 load raises, naming `lms load <key> --context-length N`. Left to OpenCode's first request, LM
 Studio loaded it with its default window (often 4K), refused the prompt, and round 1 failed
-(#335, the audit of 1.4). With just-in-time loading off, `/v1/models` lists only loaded
+(#335, the audit of 1.4). One loaded with a smaller window than `limit.context` (`_lmstudio_short`:
+its instance's `config.context_length`, the UI's 4K, say) is unloaded (`POST
+/api/v1/models/unload {instance_id}`) and loaded again the same way: kept, `short_window` failed
+the task (#645). With just-in-time loading off, `/v1/models` lists only loaded
 models: before `status` says the server lists no model, other models, or serves another one,
 it asks `lmstudio_unloaded`, and a model LM Studio has is available, not resident ("in LM Studio,
 not loaded (wb loads it)"); with A loaded, B was told to set its id to A (#462, the audit of
@@ -2880,7 +2884,13 @@ it took go to `status.load_secs`. The runner calls it before every round, not on
 OpenCode request resets Ollama's keep-alive to `OLLAMA_KEEP_ALIVE` (5 minutes by default), so a
 model can be unloaded during a long test run. A server that lists several models swaps them itself:
 `free_gpu` treats a server as one, kept when a kept model is on it, unless the port is contended
-and it serves another model, which is then stopped first. `releasable(m)`: what `free_gpu` can
+and it serves another model, which is then stopped first. LM Studio (a server whose
+`/api/v1/models` answers) is the exception: it evicts only what it loaded just in time, never what
+`/api/v1/models/load` loaded, so each switch between two of its models stacked one more in VRAM,
+spilling into RAM or refused by its guardrail (#645, the audit of main). `free_gpu` unloads each of
+its loaded instances that isn't a kept model's (`keep`, `keep_loaded`: `_lmstudio_extra`), once
+the server is idle, and never stops it; `_others_resident` counts those instances, so a resident
+`m` beside one still frees it. `releasable(m)`: what `free_gpu` can
 let go of (a local Ollama model, a local server with `stop`); `freed(m, keep)`: what
 `free_gpu(keep)` does let go of, so neither `keep`, nor `keep_loaded`, nor a server a kept model is on.
 
