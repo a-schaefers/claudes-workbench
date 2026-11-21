@@ -47,6 +47,8 @@ model typically costs Claude about half the tokens of writing the code itself
   Claude proposes a model that fits your machine and your use's licence, and asks before
   downloading it. Small speech models run on the CPU; music wants a GPU.
 
+Tested in the Claude Code CLI only, not the Claude desktop app.
+
 ### In your terminal
 
 ```sh
