@@ -747,10 +747,34 @@ def small_window_why(ctx: int) -> str:
             "OLLAMA_CONTEXT_LENGTH or the server's context, then wb model add … --context N)")
 
 
-def status(m: Model, down=frozenset()) -> dict:
+def _catalog(m: Model, catalog: dict | None):
+    """A server's GET {base_url}/models: the body (a dict, else None) or the HTTPError's code.
+    ``catalog``: one probe's answers by (base_url, api_key), shared by every entry on that server,
+    so its aliases ask it once: wb top sent 8 requests for 8 aliases each probe, one after
+    another, 2 s each on a server that stalled (#561)."""
+    key = (m.base_url.rstrip('/'), m.api_key or "")
+    if catalog is not None and key in catalog:
+        return catalog[key]
+    auth = {"Authorization": f"Bearer {m.api_key}"} if m.api_key else {}
+    try:
+        with _open(urllib.request.Request(f"{key[0]}/models", headers=auth), timeout=2) as r:
+            got = json.loads(r.read() or b"{}")
+        got = got if isinstance(got, dict) else None  # an int would read as an HTTP code
+    except urllib.error.HTTPError as e:
+        e.close()
+        got = e.code
+    except Exception:
+        got = None
+    if catalog is not None:
+        catalog[key] = got
+    return got
+
+
+def status(m: Model, down=frozenset(), catalog: dict | None = None) -> dict:
     """``{available, resident, why}``: can the runner get this model onto the GPU, is it there.
     What the config alone rules out comes first, so the fake models meet it too. ``down``: Ollama
-    roots the caller already found not answering, not asked again."""
+    roots the caller already found not answering, not asked again. ``catalog``: a dict the caller
+    keeps for one pass, so each server other than Ollama is asked for its /models once (_catalog)."""
     if small := window_too_small(m.config):
         return _no(small_window_why(small))
     if m.config.get("tool_call") is False:  # the router used to hand it tasks (the 2026-11-16 audit)
@@ -772,26 +796,20 @@ def status(m: Model, down=frozenset()) -> dict:
             return _no(CLOUD_WHY.format(id=m.id))
         resident = _matches(m.name, _ollama_names(m, "ps"))
         return {"available": True, "resident": resident, "why": "loaded" if resident else "pulled"}
-    auth = {"Authorization": f"Bearer {m.api_key}"} if m.api_key else {}
-    try:
-        with _open(urllib.request.Request(f"{m.base_url.rstrip('/')}/models", headers=auth), timeout=2) as r:
-            body = json.loads(r.read() or b"{}")
-    except urllib.error.HTTPError as e:
-        e.close()
+    body = _catalog(m, catalog)
+    if isinstance(body, int):  # an HTTP error's code
+        code, body = body, None
         # a server behind a key answered, with the key the agent will send: refused, every
         # request of the task would be. Not "running": a wrong key passed, and the router could
         # pick that model over a working one (the 2026-11-19 audit). Not "not running" either,
         # which started a second copy and waited 20 minutes for it (the 2026-11-16 audit).
-        if e.code in (401, 403):
+        if code in (401, 403):
             # where else a key may be kept: opencode auth login's auth.json (#336, the audit of 1.4)
-            return _no(f"the server refuses its API key (HTTP {e.code}): set the provider's "
+            return _no(f"the server refuses its API key (HTTP {code}): set the provider's "
                        f"options.apiKey, or `opencode auth login` for {m.provider}, to the key it "
                        "wants" if m.api_key else
-                       f"the server answers, but it wants an API key (HTTP {e.code}): set the "
+                       f"the server answers, but it wants an API key (HTTP {code}): set the "
                        f"provider's options.apiKey, or `opencode auth login` for {m.provider}")
-        body = None
-    except Exception:
-        body = None
     if isinstance(body, dict):
         # one listed model: llama-server answers to any name; several: it routes by name
         rows = [x for x in (body.get("data") or []) if isinstance(x, dict)]

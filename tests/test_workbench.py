@@ -12791,6 +12791,57 @@ class Top(Base):
             {"ts": now, "every": 2, "gpus": [], "running": list(run.values()),
              "rack": list(rack.values()), "queue": []}, 200, color=False))
 
+    def test_a_server_with_eight_aliases_is_asked_once_a_probe_and_a_stalled_one_never_holds_the_tick(self):
+        # #561: 8 entries on one llama-swap made 8 GET /v1/models a probe, one after another, and
+        # a server that accepted and then stalled held the tick (q, the GPU rows) up to 16 s
+        from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+        from workbench import models, top
+        asked = []
+
+        class H(BaseHTTPRequestHandler):
+            def log_message(self, *a):
+                pass
+
+            def do_GET(self):
+                asked.append(self.path)
+                body = json.dumps({"data": [{"id": f"m{i}"} for i in range(8)]}).encode()
+                self.send_response(200)
+                self.end_headers()
+                self.wfile.write(body)
+
+        srv = ThreadingHTTPServer(("127.0.0.1", 0), H)
+        threading.Thread(target=srv.serve_forever, daemon=True).start()
+        self.addCleanup(srv.server_close)
+        self.addCleanup(srv.shutdown)
+        mk = lambda url, i: models.Model(id=f"swap/m{i}", provider="swap", name=f"m{i}",  # noqa: E731
+                                         base_url=url, engine="server", label=f"m{i}")
+        url = f"http://127.0.0.1:{srv.server_port}/v1"
+        found = {m.id: m for m in (mk(url, i) for i in range(8))}
+        t = self.top(Path(self.tmp.name))
+        with mock.patch.object(models, "_fake", lambda: False):
+            t.probe(found, [])
+        self.assertEqual(asked, ["/v1/models"])
+        self.assertEqual({r["state"] for r in t.rack}, {"resident"})
+
+        stall = socket.socket()  # accepts (the backlog) and never answers
+        stall.bind(("127.0.0.1", 0))
+        stall.listen(16)
+        self.addCleanup(stall.close)
+        slow = f"http://127.0.0.1:{stall.getsockname()[1]}/v1"
+        found = {m.id: m for m in (mk(slow, i) for i in range(8))}
+        t = self.top(Path(self.tmp.name))
+        t.every, t.background = 0.2, True
+        with mock.patch.object(models, "_fake", lambda: False), \
+                mock.patch.object(models, "discover", lambda: found):
+            began = time.monotonic()
+            t.tick()  # the first waits for the probe up to its interval (1 s at least)
+            self.assertLess(time.monotonic() - began, 1.8)
+            t.probed = 0.0  # due again, the stalled probe still out: the tick doesn't wait for it
+            began = time.monotonic()
+            t.tick()
+            self.assertLess(time.monotonic() - began, 0.5)
+        self.assertTrue(t.prober.is_alive())
+
     def test_the_default_tick_is_stats_json_every_else_two_seconds(self):
         from workbench import top
         self.assertEqual(top.default_every(), 2)

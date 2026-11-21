@@ -18,6 +18,7 @@ import signal
 import statistics
 import subprocess
 import sys
+import threading
 import time
 from pathlib import Path
 
@@ -168,8 +169,10 @@ class Top:
     """The state between ticks: the GPUs found at start, the stream, the cached files and the
     servers' last answers."""
 
-    def __init__(self, every: float, drm: Path = hardware.DRM):
+    def __init__(self, every: float, drm: Path = hardware.DRM, background: bool = False):
         self.every = every
+        self.background = background  # the servers asked off the tick (the live loop's)
+        self.prober: threading.Thread | None = None
         self.drm = drm
         self.files = _Files()
         self.where = hardware.system()
@@ -447,19 +450,35 @@ class Top:
         # the live object of each running task's server (Ollama has no /metrics)
         roots = {found[r["model"]].root for r in running if r["model"] in found
                  and not found[r["model"]].remote and found[r["model"]].engine != "ollama"}
-        self.live = {}
+        live = {}  # built whole, then swapped in: the tick may read it meanwhile (_probe_bg)
         for root in () if fake else roots:
             body = models._get(f"{root}/metrics", timeout=1.0)
             if isinstance(body, dict) and isinstance(body.get("live"), dict):
-                self.live[root] = body["live"]
-        self.rack = [self._state(m, tags, ps) for m in found.values()]
+                live[root] = body["live"]
+        self.live = live
+        catalog: dict = {}  # each other server's /v1/models, asked once for all its entries (#561)
+        self.rack = [self._state(m, tags, ps, catalog) for m in found.values()]
 
-    def _state(self, m: models.Model, tags: dict, ps: dict) -> dict:
+    def _probe_bg(self, found: dict, running: list[dict]) -> None:
+        """The probe on a thread of its own: a server that accepts and then stalls held the tick,
+        so `q`, the nvidia-smi stream and the pane's lines waited for its timeouts (#561). The
+        tick shows the newest answers; one probe runs at a time. The first is waited for, up to
+        one interval, so the first view has the rack."""
+        if self.prober and self.prober.is_alive():
+            return
+        self.probed = time.monotonic()
+        first = self.prober is None
+        self.prober = threading.Thread(target=self.probe, args=(found, running), daemon=True)
+        self.prober.start()
+        if first:
+            self.prober.join(max(self.every, 1.0))
+
+    def _state(self, m: models.Model, tags: dict, ps: dict, catalog: dict | None = None) -> dict:
         r = {"model": m.id, "label": m.label}
         if m.remote:
             r.update(state="remote", why="another machine: no telemetry")
         elif m.engine != "ollama" or models._fake():
-            st = models.status(m)
+            st = models.status(m, catalog=catalog)
             r["state"] = ("resident" if st["resident"] else "idle") if st["available"] else "can't run"
             if not st["available"]:
                 r["why"] = st["why"]
@@ -537,7 +556,10 @@ class Top:
         found = self.found
         running = self.running(found, now)
         if self._probe_due():
-            self.probe(found, running)
+            if self.background:
+                self._probe_bg(found, running)
+            else:
+                self.probe(found, running)
             running = self.running(found, now)  # with the servers' live objects
         pools = self.pools()
         return {"ts": round(now, 1), "every": self.every, "gpus": gpus, "running": running,
@@ -683,7 +705,8 @@ def main(every: float | None = None, as_json: bool = False, out=None, drm: Path 
     def end(_signum, _frame):
         raise SystemExit(0)
     old = {s: signal.signal(s, end) for s in (signal.SIGTERM, signal.SIGHUP)}
-    top = Top(every, drm=drm)
+    # the loop asks the servers on a thread; the one pass (not a terminal, no --json) waits for them
+    top = Top(every, drm=drm, background=as_json or tty)
     keys = None
     saved = None
     try:

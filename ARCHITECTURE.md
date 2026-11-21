@@ -2193,10 +2193,14 @@ Each tick reads, cheapest first:
 - **The lease**: gpu.json and each remote pool's `gpu-<host>.json` through `models.holders` (dead
   pids dropped); `speed.json` through `router.speed`.
 - **Every `PROBE_EVERY` (5 s), not every tick**: `models.discover()`, one `/api/tags` and one
-  `/api/ps` per local Ollama, `models.status` for the other servers (their `/v1/models`), and the
-  `/metrics` `live` object of each running task's server other than Ollama (which has none). A
-  model on another machine is not asked: no telemetry. Probes to this machine skip HTTP proxies
-  (`models._open`).
+  `/api/ps` per local Ollama, `models.status` for the other servers (their `/v1/models`, asked
+  once a probe per base URL and key, `status(catalog=)`, `models._catalog`: 8 aliases on one
+  llama-swap were 8 requests in a row, #561), and the `/metrics` `live` object of each running
+  task's server other than Ollama (which has none). A model on another machine is not asked: no
+  telemetry. Probes to this machine skip HTTP proxies (`models._open`). The loop (`--json`, the
+  terminal) probes on a thread (`Top._probe_bg`, one at a time; the first waited for up to an
+  interval), so a server that accepts and then stalls never holds the tick, `q` or the GPU rows;
+  the one pass probes inline.
 - **Typical load**: the median of the tasks' single loads per model (`models.single_loads`:
   status `loads`, else, for a task from before it, its `load_secs`), recomputed every
   `LOAD_EVERY` (300 s). Not the tasks' totals: a task that reloaded its 40 s model for each of
