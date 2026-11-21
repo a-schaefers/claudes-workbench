@@ -5771,14 +5771,16 @@ $WB_HOME (~/.local/state/workbench)
 **Store primitives** (`workbench/store.py`). `home()` is `$WB_HOME`, else
 `~/.local/state/workbench`. The path variables (`PATH_VARS`: `WB_HOME`, `WB_MODELS`, `WB_SKILLS`,
 `WB_IMAGES`, `WB_AUDIO`, `WB_COMMANDS`, `WB_CHAT_TOKEN`, `WB_CHAT_CONFIG`, `WB_OPENCODE_CONFIG`, `WB_SAVINGS`, `WB_GPU_DIR` (the GPU lease's directory, `models.lease_dir`),
-and the user's `OPENCODE_CONFIG` and `CLAUDE_CONFIG_DIR`, #328) accept `~` and
+and the user's `OPENCODE_CONFIG` and `CLAUDE_CONFIG_DIR`, #328, and `OPENCODE_CONFIG_DIR`,
+`XDG_CONFIG_HOME` and `XDG_DATA_HOME`, where OpenCode keeps its global config and its sessions,
+#650) accept `~` and
 relative paths: `absolute_env()`, first thing in `cli.main` and the runner, makes them absolute
 against wb's cwd (not resolved: a symlinked home stays as named; the mod's `absolutePath` does the
 same for `WB_HOME`, `CLAUDE_CONFIG_DIR` and `WB_SAVINGS`, #454), so every child inherits the
 same place (a relative `WB_HOME` once had wb write the task under its cwd and the runner, which
 runs from the package's directory, look for it there: the 2026-11-16 audit; a relative
 `OPENCODE_CONFIG` had `wb start` pick a model the runner then called unknown: #328, the audit of
-1.4). `write_json` writes `.<name>.<pid>.<random>.tmp` beside the file (created exclusively, so two threads never share one: the 2026-11-19 audit) and renames it
+1.4; a relative `OPENCODE_CONFIG_DIR` did the same: #650). `write_json` writes `.<name>.<pid>.<random>.tmp` beside the file (created exclusively, so two threads never share one: the 2026-11-19 audit) and renames it
 after an fsync (`store._synced`, `write_through` too: renamed unsynced, a power loss on XFS or
 ext4 without `auto_da_alloc` could leave `task.json` or `status.json` empty, #475, the audit of
 1.8), replacing a symlink with a plain file, which is right for the state directory.

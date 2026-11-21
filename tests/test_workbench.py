@@ -935,6 +935,26 @@ class Lifecycle(Base):
             os.chdir(cwd)
             os.environ.pop("OPENCODE_CONFIG", None)
 
+    def test_a_relative_opencode_config_dir_is_one_place_to_wb_and_the_runner(self):
+        # #650 (Codex's audit of 1.90.6): OPENCODE_CONFIG_DIR=providers held the only provider;
+        # wb start found the model, and the runner, which changes directory, failed "unknown model"
+        cwd = os.getcwd()
+        os.chdir(self.tmp.name)
+        try:
+            Path("providers").mkdir()
+            Path("providers/opencode.json").write_text(Path(os.environ.pop("WB_OPENCODE_CONFIG")).read_text())
+            os.environ["OPENCODE_CONFIG_DIR"] = "providers"
+            self.start("t-reldir", "ok")
+            self.assertEqual(os.environ["OPENCODE_CONFIG_DIR"], os.path.join(os.getcwd(), "providers"))
+            st = wait_phase("t-reldir", {"review", "failed"})
+            self.assertEqual(st["phase"], "review", st.get("last"))
+            run_wb("feedback", "t-reldir", "--text", "1. Add a trailing comment line.")
+            st = wait_phase("t-reldir", {"review", "failed"})
+            self.assertEqual((st["phase"], st["round"]), ("review", 2), st.get("last"))
+        finally:
+            os.chdir(cwd)
+            os.environ.pop("OPENCODE_CONFIG_DIR", None)
+
     def test_the_model_is_made_resident_again_before_each_round(self):
         # After tests longer than Ollama's 5-minute keep-alive, the auto-fix round's think
         # budget paid for reloading the model (the 2026-11-16 audit).
