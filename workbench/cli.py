@@ -1838,6 +1838,13 @@ UPDATE_STOP = "stopped for a workbench update (wb update --stop), not by Claude"
 INTERRUPTED = (RESTARTED, RUNNER_DIED, runner.SIGNAL_STOP, UPDATE_STOP)
 
 
+def _interrupted(last) -> bool:
+    """Whether status `last` says the task was interrupted from outside: one of INTERRUPTED, or
+    runner._updated's (runner.UPDATED, then the task's own `wb resume <name>`), which no exact
+    match could ever hit: after a pull under running tasks, wb resume --all resumed none (#788)."""
+    return last in INTERRUPTED or isinstance(last, str) and last.startswith(runner.UPDATED + ":")
+
+
 @one_at_a_time
 def cmd_resume(a):
     """Continue a task Claude stopped (wb stop) where the work stands: a fresh session, handed
@@ -1868,11 +1875,12 @@ def cmd_resume(a):
     for t in tasks:
         reap(t)
     tasks = [t for t in tasks if t.status.get("phase") in ("stuck", "failed")
-             and t.status.get("last") in INTERRUPTED and not runner_alive(t)
+             and _interrupted(t.status.get("last")) and not runner_alive(t)
              and (not a.backlog or t.spec.get("backlog") == a.backlog)]
     tasks, _ = _scope(tasks, *_caller(a))
     if not tasks:
-        print("nothing to resume: no task in scope was interrupted (a restart, a kill or a signal)")
+        print("nothing to resume: no task in scope was interrupted (a restart, a kill, a signal or an "
+              "update)")
         return
     for t in tasks:  # all_tasks' order: the order they were started, which the GPU queue follows
         if not _rechecks_out(t) and (why := _worktree_problem(t)):
@@ -1892,7 +1900,7 @@ def _rechecks_out(task: store.Task) -> bool:
     checkout again from nothing (runner.checkout), so it resumes at round 1 (#529, #544). One
     whose checkout failed still goes through wb discard."""
     st = task.status
-    return _first_round(st) and not runner.checked_out(task) and st.get("last") in INTERRUPTED
+    return _first_round(st) and not runner.checked_out(task) and _interrupted(st.get("last"))
 
 
 def _resume(task: store.Task) -> None:

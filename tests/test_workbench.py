@@ -13486,6 +13486,13 @@ class UpdatedUnderATask(Base):
         self.assertFalse(store.Task("t").round_dir(2).joinpath("summary.md").exists())
         notes = [r for r in store.read_jsonl(store.home() / "notify.jsonl")[0] if r.get("task") == "t"]
         self.assertIn("workbench was updated under this task", notes[-1]["text"])
+        # #788: wb resume --all matched `last` exactly against INTERRUPTED, which held neither
+        # UPDATED nor its text with the task's name: every task updated under had to be named
+        os.environ["FAKE_SCENARIO"] = "ok"
+        os.environ.pop("FAKE_SLEEP", None)
+        self.assertTrue(cli._interrupted(st["last"]))
+        self.assertIn("resumed t", run_wb("resume", "--all"))
+        self.assertFalse(cli._interrupted("workbench was updated under this tasking"))
 
     def test_an_unchanged_copy_runs_every_round(self):
         self.start("t", "fix", "--test", TEST_CMD, "--no-base-check")
