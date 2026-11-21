@@ -152,14 +152,23 @@ def _milestones(rows: list[dict]) -> list[dict]:
 
 
 def _absorbed(rows: list[dict]) -> dict:
-    """Work that never reached Claude: auto-fix rounds (and the tasks whose tests then passed),
-    the agents' questions answered, and handovers in tasks that went on to land."""
+    """Work that never reached Claude: auto-fix rounds (attempts, whatever came of them) and the
+    tasks whose tests then passed, and handovers in tasks that went on to land. A question isn't
+    here: its notice wakes Claude (#562)."""
     fixed = [r for r in rows if (r.get("auto_fixes") or 0) > 0]
     out = {"auto_fixes": sum(r["auto_fixes"] for r in fixed),
            "auto_fixed_tasks": sum(1 for r in fixed if r.get("tests_ok")),
-           "questions": sum((r.get("asks") or {}).get("questions", 0) for r in rows),
            "handovers_landed": sum(1 for r in rows if _landed(r)
                                    and any((s.get("handovers") or 0) > 0 for s in r.get("steps") or []))}
+    return {k: v for k, v in out.items() if v}
+
+
+def _questions(rows: list[dict]) -> dict:
+    """The agents' ask_reviewer questions: asked, and answered by `wb answer` (a row before
+    `answered` was recorded counts as asked only: never more answered than known, #562)."""
+    asks = [r.get("asks") or {} for r in rows]
+    out = {"asked": sum(a.get("questions", 0) for a in asks),
+           "answered": sum(a.get("answered", 0) for a in asks)}
     return {k: v for k, v in out.items() if v}
 
 
@@ -246,7 +255,7 @@ def _helps(rows: list[dict]) -> dict:
             if m and any(n for _, n in h.values())}
 
 
-SUMMARY = ("periods", "streak", "absorbed", "guards")  # what `wb stats` shows of the feed
+SUMMARY = ("periods", "streak", "absorbed", "questions", "guards")  # what `wb stats` shows of the feed
 
 
 def feed(now: float | None = None, only: tuple | None = None) -> dict:
@@ -277,6 +286,7 @@ def feed(now: float | None = None, only: tuple | None = None) -> dict:
         "bests": lambda: _bests(rows),
         "milestones": lambda: _milestones(rows),
         "absorbed": lambda: _absorbed(rows),
+        "questions": lambda: _questions(rows),
         "models": lambda: _models(rows),
         "sizes": lambda: _by(rows, lambda r: [r["size"]] if r.get("size") else []),
         "stacks": lambda: _by(rows, lambda r: r.get("stack") or []),
@@ -312,11 +322,12 @@ def summary(f: dict) -> list[str]:
         parts = []
         if ab.get("auto_fixes"):
             parts.append(f"{ab['auto_fixes']} auto-fix round(s), {ab.get('auto_fixed_tasks', 0)} task(s) then green")
-        if ab.get("questions"):
-            parts.append(f"{ab['questions']} question(s) answered mid-task")
         if ab.get("handovers_landed"):
             parts.append(f"{ab['handovers_landed']} landed after a handover")
         lines.append("without waking Claude: " + " · ".join(parts))
+    if q := f.get("questions"):
+        lines.append(f"questions: {q.get('asked', 0)} asked mid-task"
+                     + (f", {q['answered']} answered" if q.get("answered") else ""))
     if g := f.get("guards"):
         lines.append("what stopped agents: " + " · ".join(f"{k} {v}" for k, v in
                                                         sorted(g.items(), key=lambda kv: -kv[1])))

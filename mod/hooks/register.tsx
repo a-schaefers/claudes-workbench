@@ -768,13 +768,16 @@ export function statsLines(f: Record<string, any> | null): { label: string; text
   const ab = f.absorbed
   if (ab) {
     const parts = [
-      ab.auto_fixes ? `${ab.auto_fixes} test failure${ab.auto_fixes === 1 ? '' : 's'} sent back and fixed by the agent` +
+      // attempts, whatever came of them; "green" only for the tasks whose tests then passed (#562)
+      ab.auto_fixes ? `${ab.auto_fixes} test failure${ab.auto_fixes === 1 ? '' : 's'} sent back to the agent` +
         (ab.auto_fixed_tasks ? ` (${ab.auto_fixed_tasks} task${ab.auto_fixed_tasks === 1 ? '' : 's'} then green)` : '') : '',
-      ab.questions ? `${ab.questions} question${ab.questions === 1 ? '' : 's'} answered mid-task` : '',
       ab.handovers_landed ? `${ab.handovers_landed} landed after a handover to a fresh session` : '',
     ].filter(Boolean)
     if (parts.length) out.push({ label: 'Without waking Claude', text: parts.join(' · ') })
   }
+  const q = f.questions // a question wakes Claude: its own line, "answered" only for wb answer's (#562)
+  if (q?.asked) out.push({ label: 'Questions', text: `${q.asked} asked mid-task` +
+    (q.answered ? ` · ${q.answered} answered` : '') })
   for (const [model, m] of Object.entries(f.models ?? {}) as [string, any][]) {
     const trend = spark((m.write_trend ?? []).map((p: number[]) => p[1]))
     const speed = m.speed?.write ? ` · writes ~${Math.round(m.speed.write)} tok/s` : ''

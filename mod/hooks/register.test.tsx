@@ -1811,7 +1811,8 @@ const FEED = {
     all: { tasks: 9, landed: 8, accepted_pct: 89 },
   },
   streak: { current: 0, best: 3, days: 5 },
-  absorbed: { auto_fixes: 7, auto_fixed_tasks: 3, questions: 2 },
+  absorbed: { auto_fixes: 7, auto_fixed_tasks: 3 },
+  questions: { asked: 2, answered: 1 },
   models: { 'ollama/m': { tasks: 9, accepted_pct: 89, rounds: 1.4, minutes: 14, speed: { write: 38 },
     write_trend: [[1, 30], [2, 40]], write_change_pct: 12 } },
   days: [{ day: '2026-11-19', tasks: 0 }, { day: '2026-11-20', tasks: 2 }],
@@ -2039,6 +2040,18 @@ test('the history says nothing it has no data for, and a new install how to begi
   expect(priceOf('{"price": 0.3}')).toBe(0.3)
   expect(priceOf('{"price": null}')).toBe(null)
   expect(priceOf('not json')).toBe(null)
+})
+
+test('the history claims no more fixed or answered than the feed confirms', () => {
+  // #562: two failed auto-fix rounds read "fixed by the agent", a timed-out question "answered"
+  const said = (f: any) => statsLines({ tasks: 1, ...f }).map(l => `${l.label}: ${l.text}`)
+  const lines = said({ absorbed: { auto_fixes: 2 }, questions: { asked: 1 } })
+  expect(lines).toContain('Without waking Claude: 2 test failures sent back to the agent')
+  expect(lines).toContain('Questions: 1 asked mid-task')
+  expect(lines.join('\n')).not.toMatch(/fixed|answered/)
+  expect(said({ absorbed: { auto_fixes: 3, auto_fixed_tasks: 1 }, questions: { asked: 3, answered: 1 } }))
+    .toEqual(['Without waking Claude: 3 test failures sent back to the agent (1 task then green)',
+      'Questions: 3 asked mid-task · 1 answered'])
 })
 
 test('a one-task exception shows beside its task and is under way from Claude\'s first edit', async ($, on) => {

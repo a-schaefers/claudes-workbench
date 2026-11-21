@@ -90,21 +90,24 @@ def for_stats(task: store.Task) -> dict:
     speeds = {k: round(median(v), 2) for k, v in (st.get("speeds") or {}).items() if v}
     keep = {"started_at": spec.get("created_at"), "load_secs": st.get("load_secs"),
             "setup_secs": st.get("setup_secs"), "nudges": st.get("nudges"),
-            "asks": _asks(st.get("asks") or {}) or None, "guards": st.get("guards"),
+            "asks": _asks(st.get("asks") or {}, st.get("answered") or []) or None, "guards": st.get("guards"),
             "speed": speeds or None,
             "gpu_w": {"mean": round(st["gpu_w_sum"] / st["gpu_w_n"], 1),
                       "peak": round(st.get("gpu_w_peak") or 0, 1)} if st.get("gpu_w_n") else None}
     return {k: v for k, v in keep.items() if v is not None}
 
 
-def _asks(asks: dict) -> dict:
+def _asks(asks: dict, answered: list | None = None) -> dict:
     """The ask_reviewer calls by kind (status `asks`: "q" a question, "p" a command or path
-    request, "x" one refused), the kinds with none left out."""
+    request, "x" one refused), and the questions `wb answer` answered (status `answered`; one
+    timed out or outliving its round got NO_ANSWER, which isn't one, #562); none left out."""
     names = {"q": "questions", "p": "permissions", "x": "refused"}
     out = {}
     for kind in asks.values():
         if kind in names:
             out[names[kind]] = out.get(names[kind], 0) + 1
+    if n := sum(1 for q in set(answered or []) if asks.get(q) == "q"):
+        out["answered"] = n
     return out
 
 

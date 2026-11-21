@@ -9366,8 +9366,8 @@ class Stats(Base):
         self.assertEqual(f["streak"], {"current": 2, "best": 2, "days": 3})
         self.assertEqual(f["bests"]["largest_first_try"]["lines"], 312)
         self.assertEqual(f["bests"]["fastest"]["minutes"], 4)
-        self.assertEqual(f["absorbed"], {"auto_fixes": 2, "auto_fixed_tasks": 1, "questions": 2,
-                                         "handovers_landed": 1})
+        self.assertEqual(f["absorbed"], {"auto_fixes": 2, "auto_fixed_tasks": 1, "handovers_landed": 1})
+        self.assertEqual(f["questions"], {"asked": 2})  # never said answered: not recorded so
         self.assertEqual(f["guards"], {"repeat": 2, "silence": 1})
         self.assertEqual([(m["kind"], m["n"]) for m in f["milestones"]], [("landed", 1)])
         self.assertEqual(f["sizes"]["large"], {"tasks": 2, "accepted_pct": 50})
@@ -9459,6 +9459,32 @@ class Stats(Base):
                    "diff": {"files": 3, "added": 900, "removed": 0}})  # Claude sent it back: not first try
         self.assertEqual(stats.feed()["bests"]["largest_first_try"], {
             "task": "t-b", "ts": store.results()[-2]["ts"], "lines": 400})
+
+    def test_only_questions_wb_answer_answered_are_counted_answered_and_none_as_absorbed(self):
+        # #562: a timed-out question (NO_ANSWER) counted as "answered mid-task", under "Without
+        # waking Claude", though its notice wakes Claude; failed auto-fixes read as "fixed"
+        from workbench import results, stats
+        self.start("t-q", "ok", "--ask-budget", "3")
+        wait_phase("t-q", {"review"})
+        task, opened = store.Task("t-q"), {}
+        task.set_status(phase="running")
+        for qid in ("aaaaaaaa", "bbbbbbbb"):
+            store.write_json(context.ask_dir(task) / f"{qid}.json", {"id": qid, "ts": store.now(), "question": "?"})
+        ask_mcp.relay(task, opened)
+        run_wb("answer", "t-q", "--id", "aaaaaaaa", "--text", "use A")
+        opened["bbbbbbbb"] -= 1201                                   # past the ask timeout: NO_ANSWER
+        ask_mcp.relay(task, opened)
+        (context.ask_dir(task) / "cccccccc.answer").write_text("x")  # the agent's own: not Claude's
+        self.assertEqual(results.for_stats(task)["asks"], {"questions": 2, "answered": 1})
+        self.rows({"ts": time.time(), "outcome": "discarded", "auto_fixes": 2, "tests_ok": False,
+                   "asks": {"questions": 1}},                         # failed fixes, a question left
+                  {"ts": time.time(), "outcome": "accepted", "auto_fixes": 1, "tests_ok": True,
+                   "asks": {"questions": 2, "answered": 1}})
+        f = stats.feed()
+        self.assertEqual(f["absorbed"], {"auto_fixes": 3, "auto_fixed_tasks": 1})
+        self.assertEqual(f["questions"], {"asked": 3, "answered": 1})
+        self.assertIn("questions: 3 asked mid-task, 1 answered", stats.summary(f))
+        self.assertIn("without waking Claude: 3 auto-fix round(s), 1 task(s) then green", stats.summary(f))
 
     def test_a_models_write_speed_trend_compares_its_newest_third_with_its_oldest(self):
         from workbench import stats

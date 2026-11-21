@@ -1117,6 +1117,9 @@ def cmd_answer(a):
         die("the answer is empty")
     handled = store.now()  # the question; a newer notice, raised after the answer, stays news
     ask_mcp.write_answer(task, qid, text)  # whole, and never through a link in the lane
+    if (task.status.get("asks") or {}).get(qid) == "q":  # what the Stats tab may call answered:
+        # here, outside the lane (an answer file the agent could write itself), never a NO_ANSWER (#562)
+        task.set_status(answered=sorted({*(task.status.get("answered") or []), qid}))
     _ack_all(task, upto=handled)
     print(f"answered {a.name}/{qid}")
 
