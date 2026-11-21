@@ -103,7 +103,10 @@ You are the driver, not a spectator. When something tells you the agent is headi
 - `wb stop <name>`: just stop it. `wb resume <name>` continues it in a fresh session (not a
   review round), e.g. after fixing workbench under it. A task failed with "the runner died" (a
   reboot, a kill) or stuck with "stopped by a signal" resumes the same way, unless it never got
-  its worktree: then `wb discard` it and start it again under a new name.
+  its worktree: then `wb discard` it and start it again under a new name. "Interrupted by a
+  restart" comes as one notice for the batch: `wb resume --all --repo <dir>` resumes them in the
+  order they were started (`--backlog <name>` for one backlog's); one that never ran a round
+  starts round 1 again. A task a guard stopped isn't in `--all`: read its report first.
 - A check-in saying the session "reached N% of its window before it changed a file" (or "had
   read N% before its first change": a fresh session would have little room after re-reading it):
   the step needs more reading than the window holds. Let it carry on; next time name fewer files to read,

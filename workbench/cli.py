@@ -285,17 +285,28 @@ def runner_alive(task: store.Task) -> bool:
 REAP_GRACE = 15
 _DISK_SAID: list = []
 RUNNER_DIED = "the runner died (see runner.log)"
+# A runner recorded under another boot (status `boot`, store.boot_id): a restart ended it. After
+# one, every live task was failed with a wake of its own guessing why, and resumed one at a
+# time (#544): one notice now names them all, and `wb resume --all` continues them.
+RESTARTED = "interrupted by a restart (the machine started again under it)"
 
 
-def reap(task: store.Task) -> bool:
-    """Fail a live task whose runner is dead; True when this call did it."""
+def _restarted(st: dict) -> bool:
+    return bool(st.get("boot")) and store.boot_id() not in (None, st["boot"])
+
+
+def reap(task: store.Task, quiet: bool = False) -> bool:
+    """Fail a live task whose runner is dead; True when this call did it. quiet: no notice (a
+    restart's batch, which one notice names)."""
     agent = task.status.get("agent_pid")
+    restart = _restarted(task.status)
     try:
         st = task.set_status_if(  # one reaper wins: two waiters, one notice
             lambda st: st.get("phase") in LIVE and not runner_alive(task)
             and time.time() - (st.get("updated_at") or 0) >= REAP_GRACE,
-            phase="failed", last=RUNNER_DIED, pid=None, agent_pid=None, asking=None,
-            infra="runner died")  # the machine's: wb bench grades none of it (#508)
+            phase="failed", last=RESTARTED if restart else RUNNER_DIED, pid=None,
+            agent_pid=None, asking=None,  # infra: the machine's, wb bench grades none of it (#508)
+            infra="restart" if restart else "runner died")
     except OSError as e:
         if not store.disk_full(e):
             raise
@@ -319,7 +330,11 @@ def reap(task: store.Task) -> bool:
     runner.sweep(task)
     ask_mcp.close_all(task)  # and its questions, which nothing will relay (the 0.90 review)
     task.event({"ts": store.now(), "round": st.get("round"), "kind": "error",
-                "text": "the runner died without a report"})
+                "text": "the runner was " + RESTARTED if restart else "the runner died without a report"})
+    if restart:
+        if not quiet:
+            _restart_notice(task)
+        return True
     free = store.free_bytes()
     full = free is not None and free < DISK_SPARE  # a full disk is the likely why (#342)
     task.notify("failed", f"task {task.name}: the runner died without a report (killed, out of "
@@ -327,6 +342,29 @@ def reap(task: store.Task) -> bool:
                 f"see {task.dir / 'runner.log'}. wb resume {task.name} "
                 "continues it in a fresh session", round=st.get("round"), cause="died")  # #582
     return True
+
+
+def _owner(t: store.Task) -> tuple:
+    return t.spec.get("session"), t.spec.get("cwd") or t.spec.get("repo")
+
+
+def _restart_notice(task: store.Task) -> None:
+    """One notice for the tasks one restart interrupted in task's session (its others reaped
+    here, quietly), raised on the first started, the rest acknowledged with it: the mod woke
+    Claude once per task (#544)."""
+    batch = [t for t in store.all_tasks() if t.name == task.name or (
+        _owner(t) == _owner(task) and t.status.get("phase") in LIVE
+        and _restarted(t.status) and reap(t, quiet=True))]
+    ts, where = store.now(), _owner(task)[1]
+    batch[0].notify("failed", (f"task {task.name}: {RESTARTED}" if len(batch) == 1 else
+                               f"{len(batch)} tasks were {RESTARTED.replace('it)', 'them)')}: "
+                               + ", ".join(t.name for t in batch))
+                    + ". wb resume --all" + (f" --repo {shlex.quote(where)}" if where else "")
+                    + " continues them in the order they were started (one that never ran a "
+                    "round starts it again)", round=batch[0].status.get("round"), ts=ts,
+                    tasks=[t.name for t in batch], cause="died")  # not the step's size (#582)
+    for t in batch[1:]:
+        _write_ack(t, ts)  # had with the first's notice: neither wb wait nor the mod wakes for it
 
 
 def _need_worktree(task: store.Task) -> None:
@@ -1523,19 +1561,66 @@ def cmd_stop(a):
           "corrections, wb discard drops it")
 
 
+# What `wb resume --all` continues: tasks interrupted from outside, not those stopped for a
+# reason of their own (a guard, a crash, a failed load), which want Claude's look first (#544)
+INTERRUPTED = (RESTARTED, RUNNER_DIED, runner.SIGNAL_STOP)
+
+
 @one_at_a_time
 def cmd_resume(a):
     """Continue a task Claude stopped (wb stop) where the work stands: a fresh session, handed
-    the task, the work so far and what the step's rounds asked. Not a review round."""
-    task = need(a.name)
+    the task, the work so far and what the step's rounds asked. Not a review round. --all: every
+    task in scope a restart, a kill or a signal interrupted, in the order they were started."""
+    if a.name and a.all:
+        die("give a task or --all, not both")
+    if (a.repo or a.session or a.backlog) and not a.all:
+        die("--repo, --session and --backlog go with --all")
+    if not a.all:
+        if not a.name:
+            die("name a task, or --all")
+        return _resume(need(a.name))
+    tasks = [t for t in store.all_tasks() if t.status.get("phase") in LIVE + ("stuck", "failed")]
+    for t in tasks:
+        reap(t)
+    tasks = [t for t in tasks if t.status.get("phase") in ("stuck", "failed")
+             and t.status.get("last") in INTERRUPTED and not runner_alive(t)
+             and (not a.backlog or t.spec.get("backlog") == a.backlog)]
+    tasks, _ = _scope(tasks, a.repo, a.session)
+    if not tasks:
+        print("nothing to resume: no task in scope was interrupted (a restart, a kill or a signal)")
+        return
+    for t in tasks:  # all_tasks' order: the order they were started, which the GPU queue follows
+        if not t.worktree.is_dir():  # as _need_worktree says it, without ending the batch
+            print(f"{t.name}: never got its worktree (its checkout didn't finish): wb discard "
+                  f"{t.name}, then start it again under a new name" if not runner.checked_out(t)
+                  else f"{t.name}: its worktree is gone; wb discard {t.name} --keep-branch")
+            continue
+        with store.locked(runner.lock_file(t.name, "cmd")):  # as one_at_a_time, task by task
+            _resume(t)
+
+
+def _resume(task: store.Task) -> None:
     reap(task)
-    st = task.status
+    st, name = task.status, task.name
     if st.get("phase") not in ("stuck", "failed"):
-        die(f"{a.name} is {st.get('phase')}; wb resume continues a stopped task")
+        die(f"{name} is {st.get('phase')}; wb resume continues a stopped task")
     if runner_alive(task):
-        die(f"{a.name}'s runner is still running")
+        die(f"{name}'s runner is still running")
     _need_worktree(task)
     n = st.get("round", 1)
+    if n == 1 and not st.get("round_started_at") and not st.get("session"):
+        # it never ran a round (queued behind the GPU, its model or the base check): round 1
+        # again, its prompt as wb start wrote it, not "Claude stopped your last session…"
+        handled = store.now()
+        gpu = _gpu_note(task)
+        task.set_status(phase="queued", last="resumed by the reviewer")
+        task.event({"ts": store.now(), "round": 1, "kind": "resumed",
+                    "text": "Claude resumed the task: it starts its first round again"})
+        spawn_runner(task)
+        _ack_all(task, upto=handled)
+        print(f"resumed {name}: its first round, which it never ran")
+        _say(gpu)
+        return
     asks = runner.round_asks(task, n)
     notes = _stale_notes(task)  # resume means carry on: a note never delivered still applies
     task.round_dir(n + 1).mkdir(parents=True, exist_ok=True)
@@ -1549,7 +1634,7 @@ def cmd_resume(a):
                 "text": "Claude resumed the task in a fresh session"})
     spawn_runner(task)
     _ack_all(task, upto=handled)  # the stuck or failed notice is handled: wb wait must not hand it out again
-    print(f"resumed {a.name} in a fresh session (round {n + 1})")
+    print(f"resumed {name} in a fresh session (round {n + 1})")
     _say(gpu)
     _say(lessons.nudge(task))
 
@@ -4448,7 +4533,14 @@ def parser() -> argparse.ArgumentParser:
                    help="with --all: only those of Claude Code session ID (repeatable)")
     s.set_defaults(f=cmd_stop)
     s = sub.add_parser("resume", help="continue a stopped task in a fresh session (not a review round)")
-    s.add_argument("name"); s.set_defaults(f=cmd_resume)
+    s.add_argument("name", nargs="?")
+    s.add_argument("--all", action="store_true", help="every task a restart, a kill or a signal "
+                   "interrupted, in the order they were started")
+    s.add_argument("--repo", metavar="DIR", help="with --all: only those of a session started in DIR")
+    s.add_argument("--session", action="append", metavar="ID",
+                   help="with --all: only those of Claude Code session ID (repeatable)")
+    s.add_argument("--backlog", metavar="NAME", help="with --all: only that backlog's")
+    s.set_defaults(f=cmd_resume)
     s = sub.add_parser("accept", help="commit the work on its branch and close the task")
     s.add_argument("name"); s.add_argument("--message", "-m", required=True)
     s.add_argument("--merge", action="store_true"); s.add_argument("--force", action="store_true")

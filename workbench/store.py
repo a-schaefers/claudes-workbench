@@ -177,6 +177,29 @@ def loads(text):
     return scrub(json.loads(text))
 
 
+_BOOT: list = []
+
+
+def boot_id() -> str | None:
+    """This boot of the machine: Linux's (and WSL2's VM's) random boot_id, macOS's boot time; None
+    where neither is known. The runner records it (status `boot`): a runner recorded under another
+    boot was ended by a restart, which kills it without a word (#544)."""
+    if not _BOOT:
+        boot = None
+        try:
+            boot = Path("/proc/sys/kernel/random/boot_id").read_text().strip() or None
+        except OSError:
+            import subprocess
+            try:  # "{ sec = 1732000000, usec = 123456 } Wed Nov 20 …"
+                out = subprocess.run(["sysctl", "-n", "kern.boottime"], capture_output=True,
+                                     text=True, timeout=5).stdout
+                boot = (m := re.search(r"sec = (\d+)", out)) and m.group(1)
+            except (OSError, subprocess.SubprocessError):
+                pass
+        _BOOT.append(boot)
+    return _BOOT[0]
+
+
 def write_json(path: Path, data) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     # a name of its own per write, created exclusively: by pid alone, two of the chat server's

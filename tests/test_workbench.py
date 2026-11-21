@@ -331,10 +331,10 @@ class Lifecycle(Base):
             run_wb("resume", "t-late")
         runner.drive(store.Task("t-late"))
         st = store.Task("t-late").status
-        self.assertEqual((st["phase"], st["round"]), ("review", 2))
+        self.assertEqual((st["phase"], st["round"]), ("review", 1))  # never ran one: round 1 (#544)
         self.assertIs(st["base_check"]["ok"], False)
         self.assertTrue((store.Task("t-late").dir / "base-tests.txt").exists())
-        summary = (store.Task("t-late").round_dir(2) / "summary.md").read_text()
+        summary = (store.Task("t-late").round_dir(1) / "summary.md").read_text()
         self.assertIn("base check: on the base the acceptance command fails", summary)
         # once a round has reported, never again
         task = store.Task("t-late")
@@ -3834,6 +3834,36 @@ class Steering(Base):
             self.assertEqual(task.status["phase"], "stuck")
             self.assertTrue(task.worktree.exists())         # stopped, not thrown away
         self.assertIn("nothing was running", run_wb("stop", "--all"))
+
+    def test_a_restart_raises_one_notice_for_its_tasks_and_resume_all_continues_them_in_order(self):
+        # #544: after a reboot each live task failed with a wake of its own guessing why, was
+        # resumed one at a time, and one that never ran started at round 2 as if stopped
+        self.start("t-r1", "slow")
+        self.wait_session("t-r1")
+        self.start("t-r2", "ok", "--queue")                 # behind t-r1, never runs a round
+        self.assertEqual(store.Task("t-r2").status["phase"], "queued")
+        self.assertEqual(store.Task("t-r1").status["boot"], store.boot_id())
+        for name in ("t-r2", "t-r1"):                       # the machine went down under them
+            task = store.Task(name)                         # (t-r2 first: else it takes the GPU)
+            os.kill(task.status["pid"], signal.SIGKILL)
+            task.set_status(boot="an-earlier-boot")
+        before = len(store.read_jsonl(store.home() / "notify.jsonl")[0])
+        with mock.patch.object(cli, "REAP_GRACE", 0):
+            run_wb("status")                                # any reaper: one call reaps the batch
+        rows = store.read_jsonl(store.home() / "notify.jsonl")[0][before:]
+        self.assertEqual([(r["task"], r["kind"]) for r in rows], [("t-r1", "failed")])
+        self.assertIn("2 tasks were interrupted by a restart", rows[0]["text"])
+        self.assertIn(f"wb resume --all --repo {shlex.quote(os.getcwd())}", rows[0]["text"])
+        self.assertEqual(rows[0]["tasks"], ["t-r1", "t-r2"])
+        self.assertGreaterEqual(cli._acked(store.Task("t-r2")), rows[0]["ts"])  # had with t-r1's
+        for name in ("t-r1", "t-r2"):
+            self.assertEqual(store.Task(name).status["last"], cli.RESTARTED)
+        out = run_wb("resume", "--all", "--repo", os.getcwd())
+        self.assertEqual(out.splitlines()[:2], ["resumed t-r1 in a fresh session (round 2)",
+                                                "resumed t-r2: its first round, which it never ran"])
+        self.assertEqual(wait_phase("t-r1", {"review"}, timeout=40)["round"], 2)
+        self.assertEqual(wait_phase("t-r2", {"review"}, timeout=40)["round"], 1)
+        self.assertIn("nothing to resume", run_wb("resume", "--all"))
 
     def test_get_it_done_takes_over_every_open_task(self):
         self.start("t-g1", "slow")
