@@ -108,7 +108,8 @@ def disk_full(e: BaseException) -> bool:
 def free_bytes(path: Path | None = None) -> int | None:
     """Free space where the state directory lives (or ``path``), for the user; None if unknown.
     On macOS the larger of statvfs's and what the volume has for important use (_important_free),
-    which counts the purgeable space macOS frees when asked."""
+    which counts the purgeable space macOS frees when asked. On WSL2 at most the Windows drive's
+    behind the distro's virtual disk (host_drive)."""
     p = Path(path or home())
     while not p.exists() and p != p.parent:
         p = p.parent
@@ -116,7 +117,30 @@ def free_bytes(path: Path | None = None) -> int | None:
         st = os.statvfs(p)
     except OSError:
         return None
-    return max(st.f_bavail * st.f_frsize, _important_free(p) or 0)
+    free = max(st.f_bavail * st.f_frsize, _important_free(p) or 0)
+    if (drive := host_drive(p)) is not None:
+        try:
+            st = os.statvfs(drive)
+            free = min(free, st.f_bavail * st.f_frsize)
+        except OSError:
+            pass
+    return free
+
+
+def host_drive(path: Path) -> str | None:
+    """On WSL, for a ``path`` in the distro's own file system, the Windows drive's mount that
+    holds its virtual disk: the system drive's (/mnt/c, where WSL puts ext4.vhdx unless it was
+    moved), else the first drive's. statvfs there says up to 1 TB free, the virtual disk's
+    ceiling, whatever the Windows drive has: on a full C: the checkout grew the disk until
+    Windows refused, and WSL saw EIO and a read-only remount, never ENOSPC (#897). None elsewhere,
+    for a path on a Windows drive (its own statvfs is that drive's), or with no drive mounted."""
+    from . import context, hardware  # both import this module
+    if hardware.system() != "wsl":
+        return None
+    drives = context.windows_drives() or []
+    if not drives or context.on_windows(str(path), drives):
+        return None
+    return next((d for d in drives if os.path.basename(d).lower() == "c"), drives[0])
 
 
 def _important_free(path: Path) -> int | None:

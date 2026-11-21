@@ -5056,6 +5056,12 @@ def cmd_doctor(a):
                  + ("" if free >= DISK_SPARE else ": a task's writes fail on a full disk; wb "
                     "discard an open task, or free some")
                  + (f"; history: {kept}" if (kept := history_held()) else ""))
+        if hardware.system() == "wsl" and not context.on_windows(str(store.home()), context.windows_drives()):
+            drive = store.host_drive(store.home())  # the virtual disk's free space alone hid a full C: (#897)
+            print(f"--  free space is at most {drive}'s, the Windows drive WSL's virtual disk is on "
+                  "unless it was moved (a moved one's drive isn't seen)" if drive else
+                  "--  no Windows drive is mounted: the free space is the virtual disk's, and a "
+                  "full Windows drive behind it isn't seen")
         if gitops._modes_hold(str(store.home())) is False:  # exFAT, NTFS, CIFS, drvfs (#683)
             print("--  the state dir's file system keeps no file modes: a task's git ignores them, "
                   "so a script the agent makes executable lands as the repo had it")

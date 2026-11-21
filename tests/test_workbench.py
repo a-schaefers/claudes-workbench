@@ -16531,6 +16531,37 @@ class DiskRoom(Base):
         else:
             self.assertIsNone(store._important_free(store.home().parent))
 
+    def test_on_wsl2_free_space_is_at_most_the_windows_drives_behind_the_virtual_disk(self):
+        # #897: statvfs in the distro reads the virtual disk's ceiling (up to 1 TB) whatever C:
+        # has: a checkout grew ext4.vhdx until Windows refused, seen as EIO, never ENOSPC
+        drives = [str(Path(self.tmp.name) / "mnt" / d) for d in ("d", "c")]
+        for d in drives:
+            Path(d).mkdir(parents=True)
+        real = os.statvfs
+        sizes = {drives[1]: 1.5 * 10**9, drives[0]: 500 * 10**9}
+
+        def statvfs(p):
+            n = sizes.get(str(p))
+            return types.SimpleNamespace(f_bavail=n or 900 * 10**9, f_frsize=1, f_flag=0)
+        with mock.patch.object(store.os, "statvfs", statvfs), \
+                mock.patch.object(store, "_important_free", return_value=None):
+            self.assertEqual(store.free_bytes(), 900 * 10**9)                  # off WSL: as before
+            with mock.patch("workbench.hardware.system", return_value="wsl"), \
+                    mock.patch.object(context, "windows_drives", return_value=drives):
+                self.assertEqual(store.host_drive(store.home()), drives[1])     # C:, not the first
+                self.assertEqual(store.free_bytes(), 1.5 * 10**9)
+                self.assertEqual(store.free_bytes(Path(drives[0]) / "repo"), 500 * 10**9)  # on D: itself
+                err = io.StringIO()
+                with redirect_stderr(err), self.assertRaises(SystemExit):
+                    cli._disk_room(self.repo, "HEAD", {})
+                self.assertIn("1.5 GB free where the state directory is", err.getvalue())
+                out = io.StringIO()
+                with redirect_stdout(out), contextlib.suppress(SystemExit):
+                    cli.main(["doctor"])
+                self.assertIn(f"free space is at most {drives[1]}'s", out.getvalue())
+                self.assertIn("with 1.5 GB free", out.getvalue())
+        self.assertIs(os.statvfs, real)
+
     def test_the_disk_check_sizes_only_the_sparse_cone_and_fetches_nothing_in_a_blobless_clone(self):
         # #436 (the audit of v1.8): a cone of two files counted the whole tree's 6 MB, and in a
         # blobless clone each blob the count needed was fetched, one at a time
