@@ -5470,6 +5470,38 @@ no daemon, no network. The rule was `probe *` until 2026-11-21, when testing the
 that it let the agent run `probe lsp` (a daemon and language servers), `--lsp` on a read (the
 same), `probe config set|reset` (probe's config) and `probe benchmark`.
 
+**Measured (2026-11-21, the second A/B).** Four large-file cases made from workbench's own
+commits (each step changes a file of 1,500–3,000 lines, graded by the commit's own tests), one
+local model (a 27B at Q3 on a 16 GB card, 40K window), paired probe-off and probe-on replays, 3
+hours:
+
+| case | arm | passed | min | tokens read | handovers | tool calls | probe calls |
+|---|---|---|---|---|---|---|---|
+| big-this-host (models.py, ~2,700 lines) | off | 1/1 | 41 | 273K | 1 | 142 | 0 |
+| | on | 1/1 | 21 | 120K | 1 | 114 | 4 |
+| big-logout (cli.py) | off | 0/1 | 8 | 70K | 0 | 40 | 0 |
+| | on | 1/1 | 36 | 148K | 1 | 112 | 5 |
+| big-compaction (runner.py) | off | 2/2 | 4–17 | 31–40K | 0 | 28–42 | 0 |
+| | on | 2/2 | 11–20 | 117–166K | 1 each | 73–108 | 1–5 |
+
+big-gpu-power didn't fit the 3 hours. Tokens read are the prompt tokens the GPU read uncached
+(the step events' `in`); minutes ran beside other CPU work, so they are weaker. What it showed:
+- **Adoption is solved:** probe used in 4 of 4 probe-on replays (15 calls), and no long file read
+  whole (`long_reads` 0, against 2 in the off arm). The protocol line, `--allow-tests`, the 1 MB
+  note and the output cap were what changed from the first A/B, where it was never used.
+- **It pays on the very large file and costs on the others.** On big-this-host it halved the
+  time and the tokens. On big-compaction the agent explored more (2–3× the tool calls); the
+  outlines, extracts and extra greps stayed in its context until the window overflowed, OpenCode
+  compacted and the runner handed over, in both replays, where the off arm never did.
+- By the criteria set before the run (used in most replays; passes as many; reads down 20% or
+  minutes down 15%; handovers not up), it is not yet better: median tokens read 55K → 134K,
+  handovers 0 → 1, with passes 3/4 → 4/4 (one in four is noise).
+
+So it stays opt-in and off by default, with no "recommended" note in Settings (the user's call,
+2026-11-21: the A/B decides only that note). Next to measure: more pairs per case, and an arm with
+the note but not the protocol's trigger, to see whether the trigger itself drives the extra
+exploration. `wb bench report --label <arm>` prints the use line per arm (`bench.use_lines`).
+
 ## Verifying a fix against the base
 
 `wb verify <task> [--test CMD] [--files PATH…] [--expect TEXT] [--timeout N]` (`workbench/verify.py`, #96) runs

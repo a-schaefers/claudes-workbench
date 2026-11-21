@@ -21842,7 +21842,14 @@ class ProbeExperiment(Base):
                            ("timeout -k 5 60s probe symbols a.py", ["probe"]),
                            ("env A=1 nice -n 5 /usr/local/bin/probe grep x", ["probe"]),
                            ("(probe symbols a.py 2>/dev/null || cat a.py)", ["probe", "cat"]),
-                           ("grep -n probe a.py; echo probe", ["grep", "echo"])):
+                           ("grep -n probe a.py; echo probe", ["grep", "echo"]),
+                           # the probe A/B's own lines (2026-11-21): a pattern's quoted | and
+                           # 2>&1's & read as separators, so "fresh_ceiling" and "1" were programs
+                           ('probe symbols r.py 2>&1 | grep -iE "compaction_buffer|fresh_ceiling"',
+                            ["probe", "grep"]),
+                           ("cd w && python3 -m unittest t 2>&1 | tail -5", ["cd", "python3", "tail"]),
+                           ("echo hi >&2 && 2>/dev/null ls", ["echo", "ls"]),
+                           ("grep -n 'a;b' f; echo $(date)", ["grep", "echo", "date"])):
             self.assertEqual(shell_programs(line), want, line)
 
     def test_with_probe_on_the_agent_may_run_only_probes_reads(self):
