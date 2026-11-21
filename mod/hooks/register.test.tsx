@@ -3777,7 +3777,7 @@ test('the stats tab folds a model with its window variants, newest first, and su
   })
   expect(lines).toContain('ollama/q (32K, 40K, 64K): 37 tasks · 94% landed')
   expect(lines).toContain('ollama/small: 2 tasks · 50% landed')
-  expect(lines).toContain('Older models: 2 older models: 4 tasks (wb stats --all)')
+  expect(lines).toContain('Other models: 2 older models: 4 tasks (wb stats --all)')
   expect(lines.join('\n')).not.toMatch(/strata/)
   expect(lines.indexOf('ollama/q (32K, 40K, 64K): 37 tasks · 94% landed'))
     .toBeLessThan(lines.indexOf('ollama/small: 2 tasks · 50% landed'))
@@ -3819,23 +3819,41 @@ test('the stats tab stays under 25 rows with 30 models, the rest folded and coun
   expect(now).toContain("+29 more models idle, can't run or remote (wb top)")
   expect(now.some(r => r.includes('ollama/m0 resident') && r.includes('← fix-it'))).toBe(true)
   expect(now.some(r => r.startsWith('○ ollama/m1 '))).toBe(false)
-  expect(history).toContain('More models: 27 more models: 351 tasks (wb stats --all)')
+  expect(history).toContain('Other models: 27 more models: 351 tasks (wb stats --all)')
   expect(history.filter(l => /^ollama\/m\d+/.test(l))).toHaveLength(3)
   expect(history.find(l => l.startsWith('Optimized:'))).toBe('Optimized: ' +
-    ['m0', 'm1', 'm2'].map(m => `ollama/${m} 32K all on the GPU`).join(' · ') + ' · 27 more')
-  expect(history.find(l => l.startsWith('Bench:'))).toMatch(/ollama\/m2 7\/10 \(2026-11-20\) · 27 more$/)
-  expect(history.filter(l => l.startsWith('What helps'))).toEqual(['m0', 'm1', 'm2'].map((m, i) =>
-    `What helps (ollama/${m}): a hint helped 2 of 3${i === 2 ? ' · 27 more models' : ''}`))
-  // none of the shown models has an entry: the others counted, What helps left out
+    ['m0', 'm1', 'm2'].map(m => `ollama/${m} 32K all on the GPU`).join(' · ') + ' · 27 more (wb optimize report)')
+  expect(history.find(l => l.startsWith('Bench:'))).toMatch(/ollama\/m2 7\/10 \(2026-11-20\) · 27 more \(wb bench report\)$/)
+  // the rest of What helps on a row of its own, not on m2's
+  expect(history.filter(l => l.startsWith('What helps'))).toEqual([...['m0', 'm1', 'm2'].map(m =>
+    `What helps (ollama/${m}): a hint helped 2 of 3`), 'What helps: 27 more models (wb stats --json)'])
+  // none of the shown models has an entry: the others counted, with where to see them
   const others = statsLines({ ...tabFeed(ids, { models: 27, tasks: 351 }), helps: { 'ollama/m9': { hint: [1, 2] } },
     bench: { 'ollama/m9': { run: 'r1', day: '2026-11-20', passed: 1, of: 2 } }, optimized: { 'ollama/m9': { window: 32768 } } })
     .map(l => `${l.label}: ${l.text}`)
   expect(others).toContain('Bench: 1 model (wb bench report)')
   expect(others).toContain('Optimized: 1 model (wb optimize report)')
-  expect(others.some(l => l.startsWith('What helps'))).toBe(false)
+  expect(others.filter(l => l.startsWith('What helps'))).toEqual(['What helps: 1 model (wb stats --json)'])
   // the recent and the older ones on one row, a part that is 0 left out
   const both = statsLines({ tasks: 40, model_lines: { lines: [], more: { models: 2, tasks: 36 }, older: { models: 3, tasks: 4 } } })
-  expect(both).toContainEqual({ label: 'More models', text: '2 more · 3 older models: 40 tasks (wb stats --all)' })
+  expect(both).toContainEqual({ label: 'Other models', text: '2 more · 3 older models: 40 tasks (wb stats --all)' })
+})
+
+test("an older wb's feed of 30 model lines still draws 3 of them and counts the rest (2026-11-21)", () => {
+  // the mod tracks main's commits, wb runs from the user's clone: a wb from before the cap sends
+  // every line and no `more`, an older one only `models`
+  const ids = MANY(30)
+  const uncapped = { ...tabFeed(ids), model_lines: { lines: ids.map((m, i) =>
+    ({ model: m, variants: [m], windows: [32768], last: 100 - i, tasks: 13, accepted_pct: 80 })) } }
+  const { model_lines: _, ...bare } = tabFeed(ids)
+  for (const f of [uncapped, bare]) {
+    const history = statsLines(f).map(l => `${l.label}: ${l.text}`)
+    expect(history.filter(l => /^ollama\/m\d+/.test(l))).toHaveLength(3)
+    expect(history).toContain('Other models: 27 more models: 351 tasks (wb stats --all)')
+    expect(history.find(l => l.startsWith('Optimized:'))).toMatch(/ollama\/m2 32K all on the GPU · 27 more \(wb optimize report\)$/)
+    expect(history).toContain('What helps: 27 more models (wb stats --json)')
+    expect(history.length).toBeLessThanOrEqual(20)
+  }
 })
 
 test('a machine with two models draws the stats tab as before the fold (2026-11-21)', () => {

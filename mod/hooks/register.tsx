@@ -1082,8 +1082,9 @@ const GUARD_WORDS: Record<string, string> = {
   handovers: 'handovers without finishing',
 }
 
-// Each of Optimized, Bench and What helps names this many models when the feed has no model
-// lines to go by (an older wb's, or no task yet): stats.STATS_MODEL_LINES, the same (2026-11-21)
+// stats.STATS_MODEL_LINES, kept here too: the mod tracks main while wb runs from the user's clone,
+// so an older wb's feed (every model line, or only `models`) must not draw a row per model; and
+// with no line to go by (no task yet), what Optimized, Bench and What helps name (2026-11-21)
 const STATS_SHOWN = 3
 
 // The Stats tab's history as lines (a label in bold, then the text): what the feed holds, each
@@ -1135,10 +1136,12 @@ export function statsLines(f: Record<string, any> | null, why = ''): { label: st
   if (q?.asked) out.push({ label: 'Questions', text: `${q.asked} asked mid-task` +
     (q.answered ? ` · ${q.answered} answered` : '') })
   // the models OpenCode has now, a wb optimize variant folded under its source, the most recently
-  // used first, the rest on one line (`model_lines`, #638); an older wb's feed: every model
-  const shown: [string, any][] = f.model_lines
+  // used first, the rest on one line (`model_lines`, #638); an older wb's feed: its `models`.
+  // Capped here as well as in wb: a wb from before the cap sends every line (2026-11-21)
+  const all: [string, any][] = f.model_lines
     ? (f.model_lines.lines ?? []).map((m: any) => [String(m.model), m])
     : Object.entries(f.models ?? {})
+  const shown = all.slice(0, STATS_SHOWN), past = all.slice(STATS_SHOWN)
   for (const [model, m] of shown) {
     const trend = spark((m.write_trend ?? []).map((p: number[]) => p[1]))
     const speed = m.speed?.write ? ` · writes ~${Math.round(m.speed.write)} tok/s` : ''
@@ -1149,23 +1152,26 @@ export function statsLines(f: Record<string, any> | null, why = ''): { label: st
       (m.rounds != null ? ` · ${m.rounds} rounds` : '') + (m.minutes != null ? ` · ${m.minutes} min` : '') +
       speed + (trend ? ` ${trend}` : '') + change + (m.claude ? ` · Claude ~${kilo(m.claude)}/task` : '') })
   }
-  // the recent ones past stats.STATS_MODEL_LINES and the older ones, one row (2026-11-21)
-  const more = f.model_lines?.more, older = f.model_lines?.older
-  const others = (more?.models ?? 0) + (older?.models ?? 0), otherTasks = (more?.tasks ?? 0) + (older?.tasks ?? 0)
-  if (others) out.push({ label: more?.models ? 'More models' : 'Older models',
-    text: [more?.models ? `${more.models} more` : '', older?.models ? `${older.models} older` : ''].filter(Boolean).join(' · ') +
+  // the recent ones past stats.STATS_MODEL_LINES (and past this cap) and the older ones, one row;
+  // labelled "Other models" so the text after it doesn't say "more models" twice (2026-11-21)
+  const older = f.model_lines?.older
+  const moreModels = (f.model_lines?.more?.models ?? 0) + past.length
+  const moreTasks = (f.model_lines?.more?.tasks ?? 0) + past.reduce((n, [, m]) => n + (Number(m.tasks) || 0), 0)
+  const others = moreModels + (older?.models ?? 0), otherTasks = moreTasks + (older?.tasks ?? 0)
+  if (others) out.push({ label: 'Other models',
+    text: [moreModels ? `${moreModels} more` : '', older?.models ? `${older.models} older` : ''].filter(Boolean).join(' · ') +
       ` model${others === 1 ? '' : 's'}: ${otherTasks} task${otherTasks === 1 ? '' : 's'} (wb stats --all)` })
   // Optimized, Bench and What helps name only the models shown above, a line's variants with it,
-  // the rest counted (2026-11-21: 30 models' windows and runs made rows taller than the screen); an
-  // older wb's feed, or one with no task yet: the first STATS_SHOWN of each
-  const ids = f.model_lines
+  // the rest counted, with where to see them (2026-11-21: 30 models' windows and runs made rows
+  // taller than the screen); no model line yet (no task, or only older ones): the first STATS_SHOWN
+  const ids = shown.length
     ? new Set<string>(shown.flatMap(([model, m]) => [model, ...(m.variants ?? [])])) : null
   const pick = <T,>(entries: [string, T][]): [[string, T][], number] => {
     const kept = entries.filter(([m], i) => (ids ? ids.has(m) : i < STATS_SHOWN))
     return [kept, entries.length - kept.length]
   }
   const counted = (kept: string[], rest: number, report: string) => kept.length
-    ? kept.join(' · ') + (rest ? ` · ${rest} more` : '') : `${rest} model${rest === 1 ? '' : 's'} (${report})`
+    ? kept.join(' · ') + (rest ? ` · ${rest} more (${report})` : '') : `${rest} model${rest === 1 ? '' : 's'} (${report})`
   const sized = Object.entries(f.sizes ?? {}) as [string, any][]
   if (sized.length) out.push({ label: 'By size', text: sized.map(([k, v]) => `${k} ${v.tasks} (${v.accepted_pct}%)`).join(' · ') })
   if (f.days?.length) {
@@ -1188,8 +1194,10 @@ export function statsLines(f: Record<string, any> | null, why = ''): { label: st
   const helped = helps.map(([model, h]) => [model, Object.entries(h).filter(([, v]: any) => v[1])
     .map(([k, v]: any) => `a ${k === 'smaller' ? 'smaller step' : k} helped ${v[0]} of ${v[1]}`)] as [string, string[]])
     .filter(([, said]) => said.length)
-  helped.forEach(([model, said], i) => out.push({ label: `What helps (${model})`,
-    text: said.join(' · ') + (helpsRest && i === helped.length - 1 ? ` · ${helpsRest} more model${helpsRest === 1 ? '' : 's'}` : '') }))
+  helped.forEach(([model, said]) => out.push({ label: `What helps (${model})`, text: said.join(' · ') }))
+  // the rest on a row of their own, not on the last model's, where it read as that model's (2026-11-21);
+  // no text command prints them, the feed does
+  if (helpsRest) out.push({ label: 'What helps', text: `${helped.length ? `${helpsRest} more` : helpsRest} model${helpsRest === 1 ? '' : 's'} (wb stats --json)` })
   const [bench, benchRest] = pick(Object.entries(f.bench ?? {}) as [string, any][])
   // the newest finished run, and a newer one beside it, never in its place (#570)
   const sofar = (p: any) => `${p.of} of ${p.planned} ${p.running ? 'so far' : 'before it stopped'}` +

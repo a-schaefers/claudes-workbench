@@ -2741,14 +2741,18 @@ Live view off: no child, no **Now**. The newest tick is the `top` atom
   questions (asked, and answered only as `wb answer` did), one
   line per model of `model_lines`, newest first, its windows beside the name when a variant
   folded in (`ollama/q (32K, 40K, 64K)`; tasks, landed, rounds, minutes, write speed with its trend as a sparkline,
-  `spark`, and the change, Claude's cost a task), then one row for the rest, "More models: N more
-  · M older models: T tasks (wb stats --all)" (a part that is 0 left out; "Older models: M older
-  models: …" with no `more`) (a feed without `model_lines`, an older wb's: a line per `models` entry), by size, the last 30 days as a sparkline, bests,
+  `spark`, and the change, Claude's cost a task), then one row for the rest, "Other models: N more
+  · M older models: T tasks (wb stats --all)" (a part that is 0 left out). The pane caps the
+  lines at `STATS_SHOWN` 3 itself and adds the rest to N and T: the mod tracks main while `wb`
+  runs from the user's clone, so a wb from before the cap sends every line and no `more`, and an
+  older one no `model_lines` (its `models` entries stand in), by size, the last 30 days as a sparkline, bests,
   the newest milestone, what stopped agents (`GUARD_WORDS`), what helps, bench (the last finished run, and "newer run k of N so far" beside it), the optimized
   windows. What helps, Bench and Optimized name only the models of the lines shown (a line's
-  `model` and `variants`; a feed without `model_lines`, the first `STATS_SHOWN` 3), the rest
-  counted on the row as " · N more"; when none shown has one, Bench and Optimized say "N models
-  (wb bench report)" / "(wb optimize report)" and What helps is left out (2026-11-21). A section with no data is left out; a feed with no section at all (a new install's)
+  `model` and `variants`; with no line shown, the first `STATS_SHOWN` 3), the rest counted with
+  where to see them: Bench and Optimized on their row, " · N more (wb bench report)" / "(wb
+  optimize report)", or "N models (…)" when none shown has one; What helps on a row of its own,
+  "What helps: N more models (wb stats --json)" ("N models" when none shown has one), not on the
+  last model's, where it read as that model's (2026-11-21). A section with no data is left out; a feed with no section at all (a new install's)
   says to delegate one with /workbench, while one with no judged task but an optimized window,
   a bench result or a period still shows them (#549). It is read (`refreshStats`) only while the tab is shown (`pane.tab` and `$.ui.panes()`
   `isShown`): on each press of the tab, then at each poll when the size or mtime of a file the
