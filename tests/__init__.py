@@ -8,8 +8,8 @@ eating the job's budget unnamed.
 
 WB_TEST_SHARD=K/N: discovery (`python3 -m unittest`, no names) runs only the K-th of N shards,
 whole test classes dealt by their number of tests (each to the lightest shard so far), so a slow
-platform's suite splits across a matrix. Naming tests or classes on the command line runs exactly
-those."""
+platform's suite splits across a matrix, as does naming the package (`python3 -m unittest tests`).
+Naming test modules, classes or tests on the command line runs exactly those."""
 import faulthandler
 import os
 import signal
@@ -48,12 +48,23 @@ def _cases(suite):
             yield t
 
 
+_loading = False  # load_tests is under way: a nested call returns its modules unsharded
+
+
 def load_tests(loader, standard_tests, pattern):
     """Discovery of the package: every test module, or with WB_TEST_SHARD only one shard's classes."""
+    global _loading
     here = os.path.dirname(os.path.abspath(__file__))
-    found = loader.discover(here, pattern=pattern or "test*.py", top_level_dir=os.path.dirname(here))
+    nested, _loading = _loading, True
+    try:
+        # named (`python3 -m unittest tests`), discover() loads this package again and calls
+        # this once more: both sharded, a shard ran about a third of its tests, 784 of 1196
+        # never ran, unsaid (the review of #950). Only the outermost call deals the shards
+        found = loader.discover(here, pattern=pattern or "test*.py", top_level_dir=os.path.dirname(here))
+    finally:
+        _loading = nested
     shard = os.environ.get("WB_TEST_SHARD")
-    if not shard:
+    if not shard or nested:
         standard_tests.addTests(found)
         return standard_tests
     k, n = (int(x) for x in shard.split("/"))

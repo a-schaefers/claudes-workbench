@@ -7212,7 +7212,10 @@ the repo's settings refuse). Either failing turns the run red, and a release wai
 green nightly on its commit (`docs/release-checklist.md`; the 2026-11-19 audit: the macOS job
 could fail unseen and ran without OpenCode, and nothing ran WSL). The `macos` job is a matrix of
 three shards (`WB_TEST_SHARD=K/3`: `tests/__init__.py`'s `load_tests` deals whole test classes,
-largest first, to the lightest shard; only discovery is sharded, named tests run as named), each
+largest first, to the lightest shard; discovery is sharded, and so is the package named,
+`python3 -m unittest tests`, dealt once by the outermost `load_tests` (nested, it once sharded
+twice and each shard ran about a third of its tests, the review of #950); named modules,
+classes or tests run as named), each
 `python3 -X faulthandler -m unittest -v`, so each test's name is in the log as it runs: unsharded,
 it passed its 60 minutes and was cancelled on every run from d56ef5d on, and since unittest
 prints failures only at the end, about 40 failures and an 18-minute hang were never reported

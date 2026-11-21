@@ -212,13 +212,14 @@ class SuiteHooks(unittest.TestCase):
         self.assertIn("test_then_this (__main__.Hangs.test_then_this) ... ok", r.stderr)
         self.assertIn("Ran 2 tests", r.stderr)
 
-    def test_the_shards_split_the_discovered_suite_by_whole_classes_with_none_lost(self):
-        def ids(shard=None):
+    def test_the_shards_split_the_discovered_or_named_suite_by_whole_classes_with_none_lost(self):
+        def ids(shard=None, named=False):
             env = {k: v for k, v in os.environ.items() if k != "WB_TEST_SHARD"}
             if shard:
                 env["WB_TEST_SHARD"] = shard
             with mock.patch.dict(os.environ, env, clear=True):
-                suite = unittest.TestLoader().discover(str(ROOT), top_level_dir=str(ROOT))
+                suite = unittest.TestLoader().loadTestsFromName("tests") if named else \
+                    unittest.TestLoader().discover(str(ROOT), top_level_dir=str(ROOT))
             out, todo = [], [suite]
             while todo:
                 t = todo.pop()
@@ -233,3 +234,8 @@ class SuiteHooks(unittest.TestCase):
         classes = [{i.rsplit(".", 1)[0] for i in p} for p in parts]
         self.assertFalse(classes[0] & classes[1] or classes[0] & classes[2] or classes[1] & classes[2])
         self.assertLess(max(map(len, parts)) - min(map(len, parts)), len(whole) // 5)
+        # the package named, `python3 -m unittest tests`: the same shards, dealt once (the review
+        # of #950: its load_tests ran twice, nested, and each shard ran about a third of its own)
+        self.assertEqual(sorted(ids(named=True)), sorted(whole))
+        for k, part in zip((1, 2, 3), parts):
+            self.assertEqual(sorted(ids(f"{k}/3", named=True)), sorted(part))
