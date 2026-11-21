@@ -3672,10 +3672,17 @@ prefix filtering, exact for that rule: each lesson's words rarest first, its fir
 ⌈0.35 n⌉) + 1, `_prefix`; each pair once), the skills' descriptions are read into words once a
 survey, and `nudge` (the line feedback, next, resume, accept and discard end with) surveys only
 the task's new lessons (`survey(only=)`): every open lesson against all of lessons.jsonl, never
-pruned, was 5 s at 3,000 lessons and 30 s at 5,000, on each of those commands (#556). Each
+pruned, was 5 s at 3,000 lessons and 30 s at 5,000, on each of those commands (#556). A guard's
+stop (kind `stopped`) is compared on what varies, its words less the guards' fixed wording
+(`lessons.STOP_WORDS`): every stop shared it, so each was "again" of every other, those clusters
+led every survey and boilerplate read as the lesson that recurs most (#733, the 2026-11-21
+audit). Each
 lesson is attributed to the first loaded skill still in the library, else the library skill
 whose name and description share the most words (3+). `wb lessons`
-lists the open ones, recurring first, at most 12 (`--all`, `--task`); `wb lessons close <id> -m
+lists the open ones, recurring first (by the other tasks where it is still open, then all of
+them), at most 12 (`--all`, `--task`), each naming up to `AGAIN_SHOWN` (5) other tasks and
+counting the rest ("also in N other tasks (t1, …, …)": listing them all made a line kilobytes
+long, #733); `wb lessons close <id> -m
 why` closes one (a one-task detail, an environment problem, a dead end); `wb skill add|patch
 --lesson <id>` closes it as written into a skill. The weekly check counts what's waiting.
 

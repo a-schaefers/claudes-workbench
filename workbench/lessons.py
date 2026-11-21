@@ -29,6 +29,21 @@ FEEDBACK_HEAD = "Review feedback from the senior reviewer."
 ITEM = re.compile(r"^\s*\d+[.)]\s+")
 LESSON = re.compile(r"^\s*(?:[-*]\s*)?\**lesson\**\s*:\**\s*(.+)$", re.I | re.M)
 SIMILAR = 0.35  # word overlap (Jaccard) at which two corrections are the same lesson
+# The guards' fixed wording (events.StuckDetector, runner's round limits), which every stop lesson
+# shares whatever stopped the agent: any two stops passed `_similar` on it alone, so each was
+# "again" of every other, the 12 lines `wb lessons` shows were these clusters, kilobytes long,
+# and boilerplate read as the lesson that recurs most (#733, the 2026-11-21 audit). Stops are
+# compared on what varies: the call repeated, the error, the model's words.
+STOP_WORDS = skills.words(
+    "the guard stopped the agent: the same call times in a row; failing tool calls in a row "
+    "(last: ); tool calls without changing a file in the task; the round ran past its minute "
+    "limit; no output for minutes, waiting on a background job; no first output in minutes: the "
+    "model may be reading its prompt slowly (on the CPU, or partly in RAM?); --silence-timeout "
+    "gives a new task longer; no tool call or word for minutes, even after a nudge; minutes again "
+    "with no tool call, even after a nudge; handed over to a fresh session times in this round "
+    "without finishing: the step is too big for this model's window; split it (wb next) or take "
+    "it over")
+AGAIN_SHOWN = 5  # the other tasks a lesson's line names; the rest are counted (#733)
 
 
 def path() -> Path:
@@ -216,7 +231,8 @@ def survey(only: set | None = None) -> list[dict]:
     accept, feedback and discard wait seconds past a thousand tasks (5 s at 3,000 lessons, #556)."""
     lessons, closed = _all()
     have = skills.available()
-    bags = {i: skills.words(x["text"]) for i, x in lessons.items() if x["kind"] != "skill"}
+    bags = {i: skills.words(x["text"]) - (STOP_WORDS if x["kind"] == "stopped" else set())
+            for i, x in lessons.items() if x["kind"] != "skill"}  # a stop on what varies (#733)
     near = _pairs(bags, only)
     described = [(n, skills.words(f"{n} {v['description']}")) for n, v in have.items()]
     out = []
@@ -230,15 +246,20 @@ def survey(only: set | None = None) -> list[dict]:
             best = max(((len(bags[i] & bag), n) for n, bag in described), default=(0, None))
             skill = best[1] if best[0] >= 3 else None
         out.append({**x, "again": sorted(again), "skill": skill})
-    return sorted(out, key=lambda x: (-len(x["again"]), x["skill"] is None, -x.get("ts", 0)))
+    # the most other tasks where it is still open first: closed ones there say it was handled (#733)
+    return sorted(out, key=lambda x: (-len({t for t, h in x["again"] if not h}), -len(x["again"]),
+                                      x["skill"] is None, -x.get("ts", 0)))
 
 
 def line(x: dict) -> str:
     where = f"{x['task']}" + (f" round {x['round']}" if x.get("round") else "")
     again = ""
     if x["again"]:
+        # capped: every one listed made a line kilobytes long (#733)
         handled = [f"{t} ({h})" if h else t for t, h in x["again"]]
-        again = f" · also in {', '.join(handled)}"
+        tasks = len({t for t, _ in x["again"]})
+        again = (f" · also in {', '.join(handled)}" if len(handled) <= AGAIN_SHOWN else
+                 f" · also in {tasks} other tasks ({', '.join(handled[:AGAIN_SHOWN])}, …)")
     hint = f" → {x['skill']}?" if x["skill"] else ""
     return f"{x['id']} {x['kind']} ({where}){again}: {x['text'][:200]}{hint}"
 

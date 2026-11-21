@@ -15859,6 +15859,36 @@ class SkillLearning(Base):
         self.assertIn("closed:", run_wb("lessons", "close", ids[0], "-m", "a one-task detail"))
         self.assertNotIn(ids[0], [x["id"] for x in lessons.survey()])
 
+    def test_guard_stops_are_compared_on_what_varies_and_a_long_list_of_tasks_is_counted(self):
+        # #733 (the 2026-11-21 audit): every stop lesson shared the guard's wording, so each was
+        # "again" of every other, these clusters led every survey, and each line listed them all
+        from workbench import lessons
+        stops = ["the guard stopped the agent: 40 tool calls without changing a file in the task",
+                 "the guard stopped the agent: the same call 4 times in a row: read src/a.py",
+                 "the guard stopped the agent: 6 failing tool calls in a row (last: exit 1)"]
+        rows = [{"ts": n, "id": f"s{n:07x}", "task": f"t-stop{n}", "kind": "stopped", "round": 1,
+                 "text": stops[n % 3]} for n in range(60)]
+        same = "the answer file needs a trailing newline or grep misses the last line"
+        rows += [{"ts": 9e9, "id": f"f{n:07x}", "task": f"t-fb{n}", "kind": "feedback", "round": 2,
+                  "text": same} for n in range(12)]
+        rows += [{"close": "f0000001", "ts": 9e9, "how": "skill:newlines", "why": ""}]
+        lessons.path().write_text("".join(json.dumps(r) + "\n" for r in rows))
+        got = lessons.survey()
+        self.assertEqual(got[0]["kind"], "feedback")                  # the real lesson leads
+        self.assertTrue(all(x["again"] == [] for x in got if x["kind"] == "stopped"))
+        line = lessons.line(got[0])
+        self.assertIn("also in 11 other tasks (", line)
+        self.assertIn(", …)", line)
+        self.assertLess(len(line), 400)
+        self.assertEqual(line.count("t-fb"), 1 + lessons.AGAIN_SHOWN)  # its own and five others
+        # the same call looping in two tasks is still the same lesson
+        loop = "the guard stopped the agent: the same call 4 times in a row: bash pytest -k slugify tests"
+        rows += [{"ts": 9e9, "id": f"l{n:07x}", "task": f"t-loop{n}", "kind": "stopped", "round": 1,
+                  "text": loop} for n in range(2)]
+        lessons.path().write_text("".join(json.dumps(r) + "\n" for r in rows))
+        by = {x["id"]: x for x in lessons.survey()}
+        self.assertEqual(by["l0000000"]["again"], [("t-loop1", "")])
+
     def test_surveying_five_thousand_lessons_takes_seconds_not_half_a_minute_and_still_finds_a_repeat(self):
         # #556: every open lesson was compared with every lesson in lessons.jsonl, never pruned:
         # 5 s at 3,000, so each accept, feedback and discard waited seconds past 1,000 tasks
