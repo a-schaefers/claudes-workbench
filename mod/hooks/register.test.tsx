@@ -2883,13 +2883,13 @@ test('the probe row says whether it works, and turned on without probe it asks C
   await clock.advance(1000)
   const ui = await $.ui.mount({ ...PANE, surface: 'terminal' })
   await ui.press({ key: 'tab-settings' })
-  expect(await row(ui)).toBe('▸ Agent code navigation (experimental, may go away): Off (default)')
+  expect(await row(ui)).toBe('▸ Agent code navigation: Off (default)')
   expect(checks).toBe(0)                                            // off: wb isn't asked
   await ui.press({ key: 'probe' })
   await ui.press({ key: 'probe:on' })
   expect(toasts.filter(t => t.includes('code navigation'))).toEqual([
     "workbench: Agent code navigation is on but not set up: probe isn't installed. Claude will offer to set it up."])
-  expect(await row(ui)).toBe('▸ Agent code navigation (experimental, may go away): On, not set up')
+  expect(await row(ui)).toBe('▸ Agent code navigation: On, not set up')
   await clock.advance(5000)                                         // the next poll starts Claude's turn
   expect(asked).toHaveLength(1)
   expect(asked[0]).toContain('The user just turned on Agent code navigation')
@@ -2901,10 +2901,10 @@ test('the probe row says whether it works, and turned on without probe it asks C
   await clock.advance(31_000)
   await ui.press({ key: 'tab-tasks' })
   await ui.press({ key: 'tab-settings' })
-  expect(await row(ui)).toBe('▸ Agent code navigation (experimental, may go away): On, working')
+  expect(await row(ui)).toBe('▸ Agent code navigation: On, working')
   await ui.press({ key: 'probe' })
   await ui.press({ key: 'probe:off' })
-  expect(await row(ui)).toBe('▸ Agent code navigation (experimental, may go away): Off (default)')
+  expect(await row(ui)).toBe('▸ Agent code navigation: Off (default)')
   await ui.press({ key: 'probe' })
   await ui.press({ key: 'probe:on' })
   expect(toasts.filter(t => t.includes('code navigation'))).toHaveLength(2)
@@ -2967,8 +2967,11 @@ test('the settings rows open to Buttons, pick through wb, and say the sentence o
     await ui.press({ key: 'tab-settings' })
     expect((await ui.find({ key: 'coding' }))?.props.label).toBe('▸ Claude coding: Let Claude decide (default)')  // no saved choice
     expect((await ui.find({ key: 'chat' }))?.props.label).toBe('▸ Web chat: Off (default)')                      // off by default
-    expect((await ui.find({ key: 'probe' }))?.props.label).toBe('▸ Agent code navigation (experimental, may go away): Off (default)')  // opt-in
+    expect((await ui.find({ key: 'probe' }))?.props.label).toBe('▸ Agent code navigation: Off (default)')  // opt-in
     expect(await ui.find({ key: 'coding:ask' })).toBeUndefined()                                       // one row each at rest
+    const labels = (await ui.findAll({ type: 'Button' })).map(b => String(b.props.label)).filter(l => l.startsWith('▸ '))
+    expect(labels.slice(-2)).toEqual(['▸ Web chat: Off (default)', '▸ Agent code navigation: Off (default)'])  // last, apart (the user, 2026-11-21)
+    expect(await ui.find({ type: 'Text', text: /^Experimental · may change or go away$/ })).toBeDefined()   // under their own heading
     expect(await ui.find({ type: 'Text', text: /web chat / })).toBeUndefined()                         // and no link
     await ui.press({ key: 'tab-tasks' })
     await ui.unmount()
@@ -2993,7 +2996,7 @@ test('the settings rows open to Buttons, pick through wb, and say the sentence o
   await ui.press({ key: 'probe' })
   await ui.press({ key: 'probe:on' })
   expect(runs.some(r => r.join(' ') === 'wb experiment probe on')).toBe(true)   // then the row asks how it came out
-  expect((await ui.find({ key: 'probe' }))?.props.label).toBe('▸ Agent code navigation (experimental, may go away): On')
+  expect((await ui.find({ key: 'probe' }))?.props.label).toBe('▸ Agent code navigation: On')
   const texts = (await ui.findAll({ type: 'Text' })).map(t => t.text)
   expect(texts.at(-1)).toBe('http://localhost:1337/#token=abc')                                   // the link, at once
   await ui.press({ key: 'tab-tasks' })

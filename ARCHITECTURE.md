@@ -2524,7 +2524,7 @@ nothing until a surface attaches.
   `Only when I say`, `Ask me first`, `Let Claude decide (default)` (`CODING_STOPS`); a pick runs `wb coding
   <mode>`, and each draw reads `coding.json` again. **Web chat** (`CHAT_STOPS`, both saying what it
   is: `A localhost web server to interact with Claude.`): `Off (default)` and `On`; a pick runs `wb chat on|off` and reads the switch and the link back at once.
-  **Agent code navigation (experimental, may go away)** (`PROBE_STOPS`, key `probe`, options `probe:off|on`,
+  **Agent code navigation** (`PROBE_STOPS`, key `probe`, options `probe:off|on`,
   *Experiments*): `Off (default)` and `On`; a pick runs `wb experiment probe off|on` (`setProbe`), and each
   draw reads `experiments.json` again (`probeMode`; no file or no `probe` key: off). The row says
   whether it works, since it read `On` while nothing changed (the user, 2026-11-20): while it's on,
@@ -2535,7 +2535,7 @@ nothing until a surface attaches.
   also queues `PROBE_SETUP_NOTE` for Claude (once while it waits): wb's line, then offer to set
   probe up with the user's yes, from its release page, and check with `wb experiment probe`. A
   failed `wb` call is a toast of its last line.
-  Then the Stats tab's (#406), each a `wb` command, the mod writing no setting itself:
+  The Stats tab's (#406), each a `wb` command, the mod writing no setting itself:
   **Stats recording** (`RECORD_STOPS`, `On (default)` / `Off`: `wb stats set recording`,
   *Stats recording*), **Live view** (`LIVE_STOPS`: `wb stats set live`), **Live refresh**
   (`EVERY_STOPS`, `1 s`, `2 s (default)`, `5 s`: `wb stats set every`), each read back from
@@ -2551,6 +2551,10 @@ nothing until a surface attaches.
   `€0.30` were refused with no hint why and a price could never be removed), shown from `wb
   savings --json`'s `price` (`priceOf`, `mem.price`). The ring's sentence follows any of these rows
   (`SETTING_ROWS`).
+  The rows go Claude coding, the Stats tab's, the price, then apart, under the heading
+  `Experimental · may change or go away`, Web chat and Agent code navigation: the two that may
+  change or go away, kept off the settings here to stay (the user, 2026-11-21; the probe row's
+  title said `(experimental, may go away)` until then).
 - **The Stats tab** opens with **Now**, the live view (#408): `wb top --json` drawn by `liveLines`,
   a line per GPU (memory and busy % as bars, `bar`, in eighths; watts; busy's sparkline since the
   tab opened, the last `BUSY_KEEP` 60 samples, in memory only), a line per running task (phase,

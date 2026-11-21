@@ -2942,8 +2942,9 @@ export const register: Register = (on, options) => {
         ))}
       </Box>
     )
-    // the Settings tab: Claude coding (#93), the web chat, the probe experiment, then the Stats tab's (#406), one row
-    // each at rest; the electricity price is typed (an Input: wb checks it)
+    // the Settings tab: Claude coding (#93), then the Stats tab's (#406), one row each at rest; the
+    // electricity price is typed (an Input: wb checks it). Last, apart under Experimental, the web chat
+    // and the probe experiment: settings that may change or go away (the user, 2026-11-21)
     if (view.tab === 'settings') {
       const st = await statsSettings($)
       const probe = await probeStatus($)
@@ -2955,9 +2956,6 @@ export const register: Register = (on, options) => {
           <Box flexDirection="column" marginTop={1}>
             {settingRow(kit, $, 'coding', 'Claude coding', CODING_STOPS, await codingMode($), view,
               v => runWb($, ['coding', v]))}
-            {settingRow(kit, $, 'chat', 'Web chat', CHAT_STOPS, web ? 'on' : 'off', view, v => setWeb($, v))}
-            {settingRow(kit, $, 'probe', 'Agent code navigation (experimental, may go away)', probeStops(probe), probe.state === 'off' ? 'off' : 'on', view,
-              v => setProbe($, v))}
             {settingRow(kit, $, 'record', 'Stats recording', RECORD_STOPS, st.recording ? 'on' : 'off', view,
               v => picked(['stats', 'set', 'recording', v]))}
             {settingRow(kit, $, 'live', 'Live view', LIVE_STOPS, st.live ? 'on' : 'off', view,
@@ -2968,6 +2966,12 @@ export const register: Register = (on, options) => {
               v => runWb($, ['progress', v]))}
             <kit.Input key="price" label="▸ Electricity price per kWh: " value={mem.price ? String(mem.price) : ''}
               placeholder="not set (energy shows in Wh)" submitLabel="set" onSubmit={(v: string) => { void setPrice($, v) }} />
+          </Box>
+          <Box flexDirection="column" marginTop={1}>
+            <Text><Text bold>Experimental</Text><Text dimColor> · may change or go away</Text></Text>
+            {settingRow(kit, $, 'chat', 'Web chat', CHAT_STOPS, web ? 'on' : 'off', view, v => setWeb($, v))}
+            {settingRow(kit, $, 'probe', 'Agent code navigation', probeStops(probe), probe.state === 'off' ? 'off' : 'on', view,
+              v => setProbe($, v))}
           </Box>
           {pinned}
           {tabs}
