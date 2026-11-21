@@ -4410,6 +4410,49 @@ class Steering(Base):
         os.environ["HOME"] = self.env_before.get("HOME", "/")
         self.assertIn("stopped: t-old", run_wb("stop", "--all", "--repo", here, *new))
 
+    def test_adopting_a_task_is_recorded_so_the_first_session_to_claim_it_owns_it(self):
+        # #687: nothing recorded an adoption, so once the process that started a task ended, every
+        # live session near it owned it for good, and the one back from `claude --resume` too
+        from workbench import models
+        gone = subprocess.Popen(["true"]); gone.wait()             # the first Claude Code, ended
+        a = subprocess.Popen(["sleep", "60"]); self.addCleanup(a.kill)   # two live sessions' processes
+        b = subprocess.Popen(["sleep", "60"]); self.addCleanup(b.kill)
+        t = store.Task("t-orphan")
+        t.dir.mkdir(parents=True)
+        store.write_json(t.dir / "task.json", {"name": "t-orphan", "created_at": store.now(),
+                                               "repo": str(self.repo), "cwd": str(self.repo),
+                                               "session": "sess-1", "claude_pid": gone.pid})
+        t.set_status(phase="review", round=1)
+        here = str(self.repo)
+        mine = lambda *ids: [x.name for x in cli._scope([store.Task("t-orphan")], here, list(ids))[0]]
+        self.assertEqual(mine("sess-2"), ["t-orphan"])            # gone: any session near may claim
+        self.assertEqual(mine("sess-3"), ["t-orphan"])
+        self.assertIn("adopted t-orphan", run_wb("adopt", "t-orphan", "--session", "sess-2",
+                                                 "--pid", str(a.pid)))
+        spec = store.Task("t-orphan").spec
+        self.assertEqual((spec["session"], spec["claude_pid"], spec["claude_start"]),
+                         ("sess-2", a.pid, models._started(a.pid)))
+        self.assertEqual(mine("sess-2"), ["t-orphan"])
+        self.assertEqual(mine("sess-3"), [])                       # the second drops it
+        with self.assertRaises(SystemExit), redirect_stderr(io.StringIO()):
+            run_wb("adopt", "t-orphan", "--session", "sess-3", "--pid", str(b.pid))  # too late
+        self.assertEqual(store.Task("t-orphan").spec["claude_pid"], a.pid)
+        a.kill(); a.wait()                                         # sess-2's process ends, resumed
+        self.assertIn("adopted", run_wb("adopt", "t-orphan", "--session", "sess-2", "--pid", str(b.pid)))
+        spec = store.Task("t-orphan").spec
+        self.assertEqual((spec["session"], spec["claude_pid"]), ("sess-2", b.pid))  # its own id, new pid
+
+    def test_a_notice_is_taken_once_under_the_lock_whoever_asks_first(self):
+        # #687, #696: the mod and wb wait each read `acked`, then wrote it, and both delivered
+        t = store.Task("t-acked")
+        store.write_json(t.dir / "task.json", {"name": "t-acked", "created_at": store.now()})
+        t.set_status(phase="review", round=1)
+        self.assertIn("acknowledged", run_wb("ack", "t-acked", "100.5"))
+        with self.assertRaises(SystemExit) as e, redirect_stderr(io.StringIO()):
+            run_wb("ack", "t-acked", "100.5")
+        self.assertEqual(e.exception.code, 3)
+        self.assertEqual(cli._acked(t), 100.5)
+
     def test_takeover_stops_the_agent_and_hands_over_the_worktree(self):
         self.start("t-take", "slow", "--test", TEST_CMD)
         self.wait_session("t-take")

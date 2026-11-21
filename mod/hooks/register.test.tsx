@@ -368,6 +368,82 @@ test('a new Claude Code process in the project adopts the tasks of one that is g
   expect(kills.length - asked).toBeLessThanOrEqual(1)          // a live one, not at every poll
 })
 
+test('a task whose Claude Code process is gone is claimed by the first session to see it, and the others drop it (#687)', async ($, on) => {
+  // #687: nothing recorded an adoption, so once the process that started a task ended, every
+  // live session near it owned it for good, and the one back from `claude --resume` too: both
+  // woke for its review. Now the first claims it (`wb adopt`, under wb's lock) and task.json names
+  // that process; a session that loses the claim leaves the task alone.
+  const clock = mock.clock(on, { now: 1_800_000_000_000 })
+  const files: Record<string, string> = {}
+  task(files, 'won', 'review', { repo: '/home/u/a', cwd: '/home/u/a', session: 'sess-old', claude_pid: 4242 })
+  task(files, 'lost', 'review', { repo: '/home/u/a', cwd: '/home/u/a', session: 'sess-old', claude_pid: 4242 })
+  task(files, 'resumed', 'review', { repo: '/home/u/b', cwd: '/home/u/b', session: 'sess-new', claude_pid: 4141 })
+  const names = ['won', 'lost', 'resumed']
+  for (const name of names) notice(files, { ts: ts0, task: name, kind: 'review', text: `REPORT-${name}` })
+  fakeTasks(on, files, names, true, [], false)
+  on('process.spawn', async function* () {     // `wb events`: its parent is this Claude Code, pid 9000
+    yield { stream: 'stdout', text: '{"hello": 4242, "parent": 9000, "parent_start": "77"}\n' }
+    await new Promise(() => {})
+    return { code: 0, signal: null }
+  })
+  on('session.id', () => ({ value: 'sess-new' }))
+  const adopts: string[][] = []
+  on('process.run', (_: any, e: any) => {
+    const [cmd, ...args] = e.argv
+    if (cmd === 'kill') return { value: { exitCode: ['4242', '4141'].includes(args[1]) ? 1 : 0, stdout: '', stderr: '' } }
+    if (cmd === 'wb' && args[0] === 'adopt') {
+      adopts.push(args)
+      const path = `/wb/tasks/${args[1]}/task.json`
+      const spec = JSON.parse(files[path])
+      if (args[1] === 'lost') {                // another session claimed it a moment before
+        files[path] = JSON.stringify({ ...spec, session: 'sess-third', claude_pid: 5151, claude_start: '9' })
+        return { value: { exitCode: 1, stdout: '', stderr: 'wb: lost belongs to a live Claude Code session (pid 5151)' } }
+      }
+      files[path] = JSON.stringify({ ...spec, session: args.includes('sess-old') ? 'sess-old' : 'sess-new', claude_pid: 9000, claude_start: '77' })
+      return { value: { exitCode: 0, stdout: `adopted ${args[1]}`, stderr: '' } }
+    }
+    return { value: { exitCode: 0, stdout: '', stderr: '' } }
+  })
+  on('ui.toast', () => ({ value: undefined }))
+  const woken: string[] = []
+  on('prompt.submit', (_: any, e: any) => { woken.push(e.text); return { text: e.text } })
+  await $.session.start({ cwd: '/home/u/a', surface: 'terminal', isInteractive: true })
+  await clock.advance(3000)
+  expect(adopts.find(a => a[1] === 'won')).toEqual(['adopt', 'won', '--pid', '9000', '--session', 'sess-new'])
+  expect(JSON.parse(files['/wb/tasks/won/task.json']).claude_pid).toBe(9000)
+  expect(woken.filter(t => t.includes('REPORT-won'))).toHaveLength(1)
+  expect(woken.join('\n')).not.toContain('REPORT-lost')        // the other session's now
+  expect(files['/wb/tasks/lost/acked']).toBe(undefined)        // left for it
+  // this session's own task, stamped by its earlier process (a resume): stamped with this one
+  expect(adopts.find(a => a[1] === 'resumed')).toEqual(['adopt', 'resumed', '--pid', '9000', '--session', 'sess-new'])
+  expect(JSON.parse(files['/wb/tasks/resumed/task.json']).claude_pid).toBe(9000)
+  const claims = adopts.length
+  await clock.advance(31_000)
+  expect(adopts.length).toBe(claims)                            // claimed once, not at every poll
+})
+
+test('a notice another session took under wb\'s lock wakes no one here (#687)', async ($, on) => {
+  // #687: two sessions woken by one `wb events` line each read `acked`, then wrote it: both woke
+  const clock = mock.clock(on, { now: 1_800_000_000_000 })
+  const files: Record<string, string> = {}
+  task(files, 'fix-it', 'review', { repo: '/home/u/a', cwd: '/home/u/a' })
+  notice(files, { ts: ts0, task: 'fix-it', kind: 'review', text: 'REPORT-fix-it' })
+  fakeTasks(on, files)
+  on('session.id', () => ({ value: 'sess-new' }))
+  const acks: string[][] = []
+  on('process.run', (_: any, e: any) => {
+    if (e.argv[1] === 'ack') { acks.push(e.argv.slice(1)); return { value: { exitCode: 3, stdout: '', stderr: 'wb: fix-it: already acknowledged' } } }
+    return { value: { exitCode: 0, stdout: '', stderr: '' } }
+  })
+  on('ui.toast', () => ({ value: undefined }))
+  const woken: string[] = []
+  on('prompt.submit', (_: any, e: any) => { woken.push(e.text); return { text: e.text } })
+  await $.session.start({ cwd: '/home/u/a', surface: 'terminal', isInteractive: true })
+  await clock.advance(3000)
+  expect(acks).toEqual([['ack', 'fix-it', String(ts0)]])
+  expect(woken.join('\n')).not.toContain('REPORT-fix-it')
+})
+
 test('a task whose Claude Code process\'s pid now belongs to another process is adopted all the same', async ($, on) => {
   // #532: the crashed session's pid was live again under another program, and `kill -0` alone
   // said the old session still ran: the new `claude` in the project never adopted its tasks

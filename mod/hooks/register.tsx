@@ -1308,6 +1308,8 @@ const mem = {
   savingsAt: 0, // when the week's saving was last read
   eventsPid: 0, // the `wb events` child: its lines wake poll(); the chat counts it as this session
   eventsStart: '', // its start, as its hello says: with the pid, listener.json's proof of life (#532)
+  claudePid: 0, // this Claude Code process, the `wb events` child's parent, as its hello says: 0 unknown (#687)
+  claudeStart: '', // and its start
   earsOk: false, // `wb events` has said hello in this load: wb runs
   gone: new Set<string>(), // task directories closed past KEEP_CLOSED_MS: final, never read again
   recent: new Map<string, { key: string; recent: string[] }>(), // each task's last events, by events.jsonl's size@mtime (recentEvents)
@@ -1367,11 +1369,33 @@ async function noteClaude($: any, t: { session?: string; claude_pid?: number; cl
   now: number): Promise<void> {
   const pid = Number(t.claude_pid ?? 0)
   const key = pidKey(t)
-  if (!pid || !t.session || mem.ids.has(t.session) || mem.deadPids.has(key)) return
+  if (!pid || !t.session || mem.deadPids.has(key)) return
+  // this session's own, unless stamped by an older process of it (`claude --resume`): that one's
+  // death is what lets this process claim it back from the others (#687)
+  if (mem.ids.has(t.session) && (!mem.claudePid || ownPid(t))) return
   if (now - (mem.pidAt.get(key) ?? -Infinity) < PID_CHECK_MS) return
   mem.pidAt.set(key, now)
   const live = await alive($, pid, t.claude_start)
   if (live === false) mem.deadPids.add(key)
+}
+
+const ownPid = (t: { claude_pid?: number; claude_start?: string }) =>
+  Number(t.claude_pid ?? 0) === mem.claudePid && (!t.claude_start || !mem.claudeStart || t.claude_start === mem.claudeStart)
+
+// A task whose Claude Code process is gone is claimed, once, by the first session that would own
+// it (`wb adopt`, under the task's lock): task.json then names this process, so every other
+// session drops it. Unrecorded, it stayed every nearby session's for good, and the one resumed
+// with `claude --resume` too: both woke for its review and both could act on it (#687). Returns
+// task.json as it stands after the claim, whoever won.
+async function claim($: any, name: string, sp: Row): Promise<Row> {
+  if (!mem.claudePid || !sp.session || !mem.ids.size || !mem.deadPids.has(pidKey(sp)) || ownPid(sp)) return sp
+  if (!mem.ids.has(sp.session) && !near(sp)) return sp
+  const id = await $.session.id().catch(() => '')
+  const ids = [...new Set([id, ...mem.ids].filter(Boolean))]
+  const r = await runWb($, ['adopt', name, '--pid', String(mem.claudePid), ...ids.flatMap(i => ['--session', i])], 15_000)
+  const now = await readJson($, `${mem.root}/tasks/${name}/task.json`)
+  if (!r.ok && now.claude_pid === sp.claude_pid) mem.deadPids.delete(pidKey(sp)) // wb couldn't say: not ours to claim
+  return now.name ? now : sp
 }
 
 // This session's id joins the ids this process has had: at the start and at each poll, so a
@@ -1483,11 +1507,12 @@ async function scan($: any, root: string, now: number): Promise<WbTask[]> {
       if (phase === 'accepted' || phase === 'discarded') mem.gone.add(ent.name)
       continue
     }
-    const sp = await readJson($, `${base}/task.json`)
+    let sp = await readJson($, `${base}/task.json`)
     if (!sp.name || sp.bench) continue // a replay of wb bench's: no one's task, never shown or woken
     let recent: string[] = []
     if (ACTIVE.has(phase) || NEEDS.has(phase)) {
       await noteClaude($, sp, now)
+      sp = await claim($, ent.name, sp)
       recent = await recentEvents($, ent.name, `${base}/events.jsonl`)
     }
     list.push({
@@ -1668,6 +1693,8 @@ async function ears($: any) {
           if (ev.hello) {
             mem.eventsPid = Number(ev.hello)
             mem.eventsStart = typeof ev.start === 'string' ? ev.start : '' // listener.json's start (#532)
+            mem.claudePid = Number(ev.parent ?? 0) || 0 // whose tasks `wb adopt` claims (#687)
+            mem.claudeStart = typeof ev.parent_start === 'string' ? ev.parent_start : ''
             mem.earsOk = hello = true
             wait = 2000
           }
@@ -2136,8 +2163,9 @@ async function deliver($: any, now: number) {
     const ackPath = `${root}/tasks/${name}/acked`
     let acked = Number(await $.fs.read(ackPath).catch(() => '0')) || 0
     if (rows.every(r => r.ts <= acked)) continue
-    const spec = await readJson($, `${root}/tasks/${name}/task.json`)
+    let spec = await readJson($, `${root}/tasks/${name}/task.json`)
     await noteClaude($, spec, now)
+    spec = await claim($, name, spec)
     const own = mine(spec)
     // Only wake for news still true: a review notice for a task since discarded, accepted or
     // sent back is acknowledged and dropped.
@@ -2170,6 +2198,7 @@ async function deliver($: any, now: number) {
         // timeout it guesses (a 20-minute review turn, #542). It goes into the running turn, as
         // a web message does; refused, it is held like the rest, which deliver once the turn ends.
         if (row.kind === 'question') {
+          if (!(await take($, name, row.ts))) { acked = row.ts; continue } // another session's wake took it
           await $.fs.write(ackPath, String(row.ts)) // acknowledge before sending: never twice
           if (await intoTurn($, text)) {
             acked = row.ts
@@ -2182,6 +2211,7 @@ async function deliver($: any, now: number) {
         continue
       }
       const prev = acked
+      if (current && !(await take($, name, row.ts))) { acked = row.ts; continue } // taken by another
       await $.fs.write(ackPath, String(row.ts)) // acknowledge before waking: never wake twice
       acked = row.ts
       if (!current) {
@@ -2198,6 +2228,18 @@ async function deliver($: any, now: number) {
     }
   }
   if (!held) mem.lastNotify = file.key
+}
+
+// A notice taken for this session's wake, under wb's lock (`wb ack`, a compare-and-set shared with
+// `wb wait`): two sessions woken by one `wb events` line each read `acked`, then wrote it, and
+// both woke Claude for one review (#687). False only when wb says another took it first; a wb
+// that can't run leaves the plain write after it to decide, as before.
+async function take($: any, name: string, ts: number): Promise<boolean> {
+  try {
+    return (await $.process.run([mem.wb, 'ack', name, String(ts)], { timeoutMs: 15_000 })).exitCode !== 3
+  } catch {
+    return true
+  }
 }
 
 // Into the running turn, as a message typed mid-turn would be (`listen` does the same for the web

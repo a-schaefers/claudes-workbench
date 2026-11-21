@@ -1262,6 +1262,57 @@ def _ack_all(task, upto: float | None = None):
     _write_ack(task, max(acked, upto))
 
 
+def claim_ack(task, ts: float) -> bool:
+    """Move task's `acked` mark up to ts, unless it is there already: a compare-and-set under the
+    task's ack lock, shared by wb wait and the mod (`wb ack`), so one notice is taken once. Each
+    read `acked`, then wrote it, and two sessions woken by one `wb events` line both delivered it
+    (#687, #696). False: someone took it first."""
+    with store.locked(store.task_lock(task.name, "ack")):
+        if _acked(task) >= ts:
+            return False
+        _write_ack(task, ts)
+        return True
+
+
+def cmd_ack(a):
+    """The mod's acknowledgement before a wake (claim_ack): exit 3 when another session or a
+    wb wait took this notice first."""
+    task = need(a.name)
+    if not claim_ack(task, a.ts):
+        die(f"{a.name}: already acknowledged", 3)
+    print(f"acknowledged {a.name}")
+
+
+def cmd_adopt(a):
+    """The mod's claim of a task whose Claude Code process is gone (#687): under the task's command
+    lock, task.json's `session`, `claude_pid` and `claude_start` become the claimer's, so the first
+    session to claim it owns it and the others drop it. Nothing recorded it: once the process that
+    ran `wb start` ended, every live session near the task, and the one resumed with `claude
+    --resume`, owned it for good, and both woke for its review. The resumed session (its id is the
+    task's `session`) stamps its new process the same way. Refused (exit 1) while the recorded
+    process lives and isn't the claimer."""
+    task = need(a.name)
+    pid = a.pid or (int(p) if (p := os.environ.get("CLAUDE_PID", "")).isdigit() else os.getppid())
+    start = models._started(pid)
+    if pid <= 1 or not models._alive(pid, start):
+        die(f"pid {pid} is no running process to give {a.name} to")
+    with store.locked(runner.lock_file(a.name, "cmd")):
+        spec = dict(task.spec)
+        old = spec.get("claude_pid")
+        if old == pid and spec.get("claude_start") == start and spec.get("session") in a.session:
+            print(f"{a.name} is this session's already")
+            return
+        if not spec.get("session"):
+            die(f"{a.name} records no session: it goes by directory")
+        if not _gone(old, spec.get("claude_start")):
+            die(f"{a.name} belongs to a live Claude Code session (pid {old})")
+        if spec.get("session") not in a.session:
+            spec["session"] = a.session[0]
+        spec.update(claude_pid=pid, claude_start=start)
+        store.write_json(task.dir / "task.json", spec)
+    print(f"adopted {a.name}")
+
+
 def _oldest_open(task: store.Task, rows: list[dict]) -> str | None:
     """The id of the task's oldest question still open, by its notice: the one a wait delivers
     next. status.asking lags an answer until the runner's next tick (the 0.90 review)."""
@@ -3676,7 +3727,9 @@ def cmd_events(a):
     chat.chat_dir()
     parent = os.getppid()
     # its start too: the mod records both in chat/listener.json, so a recycled pid isn't a listener (#532)
-    print(json.dumps({"hello": os.getpid(), "start": models._started(os.getpid())}), flush=True)
+    # and its parent's, the Claude Code process: the mod claims tasks for it (wb adopt, #687)
+    print(json.dumps({"hello": os.getpid(), "start": models._started(os.getpid()),
+                      "parent": parent, "parent_start": models._started(parent)}), flush=True)
     # accepted and discarded are final and names aren't reused; tasks/ itself stays watched, so a
     # new task is picked up, and one that closes while this runs simply stays watched
     closed = tuple(f"tasks/{t.name}" for t in store.all_tasks() if t.status.get("phase") in store.CLOSED)
@@ -4879,6 +4932,18 @@ def parser() -> argparse.ArgumentParser:
     s.set_defaults(f=cmd_scout)
     s = sub.add_parser("events", help="print a line whenever workbench's state changes (the mod's ears)")
     s.set_defaults(f=cmd_events)
+    s = sub.add_parser("adopt", help="the mod's: make a task whose Claude Code process is gone "
+                       "this session's")
+    s.add_argument("name")
+    s.add_argument("--session", action="append", required=True, metavar="ID",
+                   help="this process's session ids, the current one first")
+    s.add_argument("--pid", type=int, help="the claiming Claude Code process (default: "
+                   "$CLAUDE_PID, else wb's parent)")
+    s.set_defaults(f=cmd_adopt)
+    s = sub.add_parser("ack", help="the mod's: take a task's notice before waking Claude "
+                       "(exit 3 when taken already)")
+    s.add_argument("name"); s.add_argument("ts", type=float)
+    s.set_defaults(f=cmd_ack)
     s = sub.add_parser("top", help="a live view of the GPUs, the running tasks, the models and the "
                        "GPU's queue (q quits)")
     s.add_argument("--json", action="store_true", help="one JSON object per tick, until the parent exits")

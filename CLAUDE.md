@@ -194,7 +194,7 @@ notify{,.old}.jsonl results.jsonl lessons.jsonl notes.md coding.json progress.js
 scout.json update.json watch.json optimize.json gc.json wsl-gpus.json archive/ imports/ images/ audio/ chat/{messages,receipts,asks,seen}.jsonl chat/{listener,prefs,push,claims,switch,open,port}.json chat/uploads/
 bench/{cases/<case>,runs/<run>}/ bench/runs.jsonl bench/driver.json
 rules/<task>/  opencode.json HANDBOOK.md CLAUDE.md imports/ bin/git grants.json gitdir.json submodules.json (no lane)
-locks/<task>.{runner,cmd,status,events,steer,grants}.lock   (store.task_lock: no lane reads them)
+locks/<task>.{runner,cmd,status,events,steer,grants,ack}.lock (store.task_lock: no lane reads them)
 tasks/<task>/  task.json status.json events.jsonl steer.jsonl acked context.md base-tests.txt setup.txt runner.log
                (the lane: worktree/, ask/)
                rounds/<n>/{prompt,instructions,summary}.md rounds/<n>/tests.txt ask/<id>.{json,answer} worktree/
