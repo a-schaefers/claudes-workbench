@@ -2107,7 +2107,11 @@ def cmd_stats(a):
             die(str(e))
         print(stats.line())
         return
-    print(results.table())
+    if a.json:  # the Stats tab's history (#405)
+        print(json.dumps(stats.feed()))
+        return
+    head = stats.summary(stats.feed())
+    print("\n".join(head + [""] if head else []) + results.table())
 
 
 def cmd_savings(a):
@@ -4105,6 +4109,7 @@ def parser() -> argparse.ArgumentParser:
     s.add_argument("action", nargs="?", choices=["set"])
     s.add_argument("key", nargs="?", metavar="KEY", help="recording, live or every")
     s.add_argument("value", nargs="?", metavar="VALUE", help="on|off, or 1|2|5 (seconds) for every")
+    s.add_argument("--json", action="store_true", help="everything learned, as one object (the Stats tab's feed)")
     s.set_defaults(f=cmd_stats)
     s = sub.add_parser("backlog", help="a batch started with --backlog: each task and the batch's saving")
     s.add_argument("name", nargs="?")

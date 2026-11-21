@@ -6166,8 +6166,9 @@ class ClaudeSpend(Base):
         row = store.results()[-1]
         self.assertEqual(row["claude"]["cache_read"], 20000)
         stats = run_wb("stats")
-        self.assertIn("claude", stats.splitlines()[0])
+        self.assertIn("claude", next(line for line in stats.splitlines() if line.startswith("model")))
         self.assertIn("7K", stats)
+        self.assertIn("cost ~2K more Claude tokens (estimate)", stats)  # the feed's headline, signed
 
     def test_stats_shows_the_claude_column_only_once_a_task_has_it(self):
         self.start("t-old", "ok")
@@ -7007,6 +7008,61 @@ class Stats(Base):
             for _ in range(3):
                 p._sample()
         self.assertEqual((p.w_sum, p.n, p.peak), (400.0, 2, 300.0))
+
+    def rows(self, *rows):
+        for r in rows:
+            store.append_jsonl(store.home() / "results.jsonl", {"task": "t", "model": "m", **r})
+
+    def test_a_new_install_feeds_nothing_but_the_settings(self):
+        from workbench import stats
+        f = json.loads(run_wb("stats", "--json"))
+        self.assertEqual(set(f), {"ts", "settings", "tasks"})  # no section of zeros
+        self.assertEqual(f["tasks"], 0)
+        self.assertEqual(stats.summary(f), [])
+        self.assertIn("no finished tasks yet", run_wb("stats"))
+
+    def test_the_feed_counts_landings_streaks_bests_and_what_the_agents_absorbed(self):
+        from workbench import stats
+        day, now = 86400, time.mktime((2026, 11, 20, 12, 0, 0, 0, 0, -1))
+        self.rows(
+            {"ts": now - 5 * day, "outcome": "accepted", "rounds": 1, "reviews": 0, "minutes": 9,
+             "diff": {"files": 2, "added": 300, "removed": 12}, "size": "small", "stack": ["python"]},
+            {"ts": now - 2 * day, "outcome": "accepted", "rounds": 3, "auto_fixes": 2, "tests_ok": True,
+             "minutes": 4, "steps": [{"handovers": 1}], "asks": {"questions": 2}, "size": "small",
+             "guards": {"repeat": 1}, "speed": {"write": 30}},
+            {"ts": now - 1 * day, "outcome": "accepted", "rounds": 1, "minutes": 20, "size": "large",
+             "guards": {"repeat": 1, "silence": 1}},
+            {"ts": now, "outcome": "discarded", "rounds": 2, "size": "large"},
+            {"ts": now, "outcome": "accepted", "trial": True},  # a trial: never counted
+            {"ts": now, "outcome": "discarded", "spec_gaps": ["unclear"]})  # Claude's miss: left out
+        f = stats.feed(now)
+        self.assertEqual(f["tasks"], 4)
+        self.assertEqual((f["periods"]["week"]["tasks"], f["periods"]["week"]["landed"]), (4, 3))
+        self.assertEqual(f["periods"]["week"]["accepted_pct"], 75)
+        self.assertEqual(f["streak"], {"current": 2, "best": 2, "days": 3})
+        self.assertEqual(f["bests"]["largest_first_try"]["lines"], 312)
+        self.assertEqual(f["bests"]["fastest"]["minutes"], 4)
+        self.assertEqual(f["absorbed"], {"auto_fixes": 2, "auto_fixed_tasks": 1, "questions": 2,
+                                         "handovers_landed": 1})
+        self.assertEqual(f["guards"], {"repeat": 2, "silence": 1})
+        self.assertEqual([(m["kind"], m["n"]) for m in f["milestones"]], [("landed", 1)])
+        self.assertEqual(f["sizes"]["large"], {"tasks": 2, "accepted_pct": 50})
+        self.assertEqual(f["stacks"], {"python": {"tasks": 1, "accepted_pct": 100}})
+        self.assertEqual(f["models"]["m"]["tasks"], 4)
+        self.assertEqual(f["models"]["m"]["write_trend"], [[now - 2 * day, 30]])
+        self.assertEqual(len(f["days"]), 30)
+        self.assertEqual(f["days"][-1], {"day": "2026-11-20", "tasks": 1, "landed": 0})
+        self.assertNotIn("savings", f["periods"]["week"])  # nothing to compare
+        # two days on, the run has ended: only the best is said, never that it broke
+        later = stats.summary(stats.feed(now + 3 * day))
+        self.assertIn("best streak: 2 day(s) in a row with a task landed", later)
+        self.assertFalse(any("streak: 0" in line for line in later))
+
+    def test_a_models_write_speed_trend_compares_its_newest_third_with_its_oldest(self):
+        from workbench import stats
+        self.rows(*({"ts": 1000.0 + i, "outcome": "accepted", "speed": {"write": w}}
+                    for i, w in enumerate([20, 20, 22, 22, 25, 25])))
+        self.assertEqual(stats.feed()["models"]["m"]["write_change_pct"], 25)
 
 
 class Progress(Base):

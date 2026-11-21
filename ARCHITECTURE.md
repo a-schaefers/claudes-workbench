@@ -1423,6 +1423,26 @@ model call, nothing that wakes Claude. With it on:
 Off, none of these are written. What the router, tuning, savings and progress read is not
 part of the setting. `live` and `every` are the Stats tab's live view (`wb top`).
 
+**The Stats feed** (`stats.feed`, `wb stats --json`, #405): everything workbench has learned, as
+one object for the Stats tab's history, built from what already computes it. Rows are
+`store.results()` that `tuning.judged` keeps (no trials, no spec-gap discards). A section with
+nothing in it is left out, never zeros, so a new install's feed is `{ts, settings, tasks: 0}`.
+Keys: `periods` (`week`, `month`, `all`, `savings.PERIODS`: tasks, landed, `accepted_pct`,
+`active_minutes`, and `savings` (`savings.totals`) with its `score` once a task can be compared),
+`streak` (`{current, best, days}`: local days in a row with a task landed; the current run ends
+today or yesterday, else 0, and `wb stats` then names only the best: a run that ended is never
+mentioned), `bests` (`largest_first_try`: the most lines landed in one round with no review;
+`fastest`), `milestones` (`[{kind: landed|saved, n, day}]`: 1, 10, 25… tasks landed; 100K, 1M…
+Claude tokens saved by the estimate), `absorbed` (what never reached Claude: `auto_fixes`,
+`auto_fixed_tasks` (their tests then passed), `questions` answered, `handovers_landed`),
+`models` (per model: the `wb stats` columns as numbers, `claude` (weighted, mean), `speed`
+(`router.speed`), `write_trend` (`[[ts, tok/s]…]`, the newest 30 rows' own `speed.write`) and,
+from `TREND_MIN` 6 rows, `write_change_pct`: the newest third's median against the oldest
+third's), `sizes`, `stacks` (`{tasks, accepted_pct}`), `days` (the last 30 local days: `{day,
+tasks, landed}`), `guards` (summed), `helps` (`progress.helped`, per model tried), `bench` (each
+model's newest run: `{run, day, passed, of}`) and `optimized` (optimize.json's `{window, fits,
+spill, ts}` per model). It reads results.jsonl once (90 ms over 70 rows here).
+
 **Taking over.** `wb takeover <task>` stops the agent and sets `review` ("Claude took over"):
 Claude finishes in the worktree, leaving it uncommitted (accept commits it with the provenance
 trailers), and accepts, or hands back with `wb feedback`. A commit Claude made there by hand is
@@ -3988,7 +4008,7 @@ delivered as taken (`_stale_notes`, *Notes*).
 | `wb bench run` | `--model ID…` (every model that can run and takes the case's size), `--case NAME…` (every case), `--skill NAME…`, `--label TEXT`, `--repeat N` (1) | Writes the run's plan and detaches its driver, then returns: one replay at a time, after any real task, preempted by one; refuses while another run runs. Skips what an earlier run with the same label already replayed. |
 | `wb backlog [NAME]` | `--json` | A batch started with `wb start --backlog NAME` (the morning summary of a night's run), archived tasks included (#270): `backlog NAME: N task(s) · 2 accepted · 1 review`, then a line per task (phase, rounds, minutes: the results row's, or since start while open; the branch when accepted; `savings.line` of its row once closed), then `savings.summary` over the batch's non-trial rows (`the batch: …`). An unknown name: exit 1. Without a name, each batch with its task count and how many are open. `--json`: `{backlog, tasks: [{task, phase, rounds, minutes, branch, saving}], totals}`. |
 | `wb savings` | `--week` (default) \| `--month` \| `--all`, `--json`, `--share` (a summary to paste: the machine, model sizes, no names; *Sharing it*), `--card FILE.svg`, `--price X` | What the delegated tasks saved Claude over the period against the estimate of writing them (`savings.totals`, `summary`; trials left out): tasks, Claude's tokens, the estimate, the saving and its percentage, the GPU energy and, with a price, its cost. `--price` (per kWh, positive, else exit 1) writes savings.json first. `--json`: `{period, tasks, of, claude, self_est, saved, wh, cost, remote, score}`. `--card FILE.svg`: the badge as an image (*The badge*). |
-| `wb stats [set KEY VALUE]` / `wb tune` / `wb trial <task…>` | `set recording\|live on\|off`, `set every 1\|2\|5` | `wb stats set` changes the Stats tab's settings (stats.json, *Stats recording*) and prints them. Results by model and size (judged rows: it says how many spec-gap discards and trials it left out), with a `claude` column (the average input-equivalent tokens a task cost Claude) once a row records one; the tuned settings; mark closed tasks as trials: their results rows, and their open lessons are dropped; an open task is refused (it has no row yet, so it was marked as nothing while its lessons went). |
+| `wb stats [set KEY VALUE]` / `wb tune` / `wb trial <task…>` | `set recording\|live on\|off`, `set every 1\|2\|5`, `--json` (the feed, *The Stats feed*) | `wb stats set` changes the Stats tab's settings (stats.json, *Stats recording*) and prints them. `wb stats` starts with the feed's headline (`stats.summary`: the week and all time, the streak, what the agents absorbed, the guards that fired), then the results by model and size (judged rows: it says how many spec-gap discards and trials it left out), with a `claude` column (the average input-equivalent tokens a task cost Claude) once a row records one; the tuned settings; mark closed tasks as trials: their results rows, and their open lessons are dropped; an open task is refused (it has no row yet, so it was marked as nothing while its lessons went). |
 | `wb gc` | `--days N` (default `ARCHIVE_DAYS` 30) | Tidies what history leaves behind (`cli.gc`, the 2026-11-19 audit, finding 18): archives tasks closed and untouched for N days (`store.archive`), moves notices older than that which are handled (acknowledged, their task closed or gone) to `notify.old.jsonl` under notify's lock (`_rotate_notices`), removes the rules of closed tasks and of vanished ones (a rules directory with no task waits `RULES_GRACE` an hour: a start in progress), stale runtime directories (`context.drop_stale_runtime_dirs`), the scratch directories in the state directory (`store.SCRATCH_PREFIXES`: `.verify-`, `.base-`, `.check-`, `.submodule-`, `wb-index-`, `wb-merge-`, each named with its maker's pid by `store.scratch`) `SCRATCH_AGE` (an hour) old whose maker is gone (`_drop_scratches`), half-made starts (`_dead_start`, `_drop_start`: a task directory with no task.json whose `starting.json` pid is gone, or with none past `RULES_GRACE`; its worktree, registration, branch and rules go too; killed commands left full clones that `_disk_room` counted, and a killed start's name was refused for good: #376, the audit of 1.6) and the delegate branches of tasks accepted with `--merge` before accept deleted them itself (`_merged_branches`: tip recorded first, `branch -d`). Prints the counts; writes `gc.json`. `wb accept` and `wb discard` run it without the branches at most once a day (`GC_EVERY`). |
 
 ### Other
