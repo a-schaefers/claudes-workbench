@@ -1286,8 +1286,10 @@ again: that cost a whole restart in one task of two (the 2026-11-17 measurement)
 6. `agent's summary:` and the agent's last text (2500 characters).
 7. `files changed:` (`git status --porcelain`), a NOTE for files outside the spec, a NOTE when the
    agent changed Claude's files (`claude_files_changed`: CLAUDE.md, CLAUDE.local.md, AGENTS.md,
-   `.claude/`), a NOTE per filled submodule whose files no longer match its commit (`NOTE: edits
-   in submodule <path> can't land: …`, `gitops.submodule_edits`, #419), and the diffstat's last
+   `.claude/`), a NOTE per filled submodule whose tracked files no longer match its commit (`NOTE:
+   edits in submodule <path> can't land: …`, `gitops.submodule_edits`, #419) and one per filled
+   submodule with new files it doesn't ignore (`NOTE: new files in submodule <path> won't be
+   committed: …`, `gitops.submodule_check`, #889), and the diffstat's last
    line against the task's base.
 
 **Speed** (`measure_speed`): after every round, the session export's messages created since the
@@ -4923,17 +4925,20 @@ it. ACE-Step's takes peaked at -0.2 dBFS, near clipping, before any `loudnorm`: 
   `NOTE: <dir>: a git repository of its own, left out of the diff and never committed: …`
   (`gitops.nested_line`), and `commit_all` refuses them by name before `add -A`, so accept and
   next stop with the task still in review.
-- **Edits in a filled submodule** (`gitops.submodule_edits`). `fill_submodules` makes the files
+- **Edits in a filled submodule** (`gitops.submodule_edits`, `submodule_check`). `fill_submodules` makes the files
   read-only, but `sed -i` replaces a file through its directory: an edit the tests passed on was
   in no diff, and gone after `wb accept --merge` (#419, the audit of 1.8). In a task's worktree
   each submodule it fills, nested ones too, is recorded in `rules/<task>/submodules.json` with a
   copy of its index made right after the fill (stat info fresh, so a check reads only what
   changed). The check runs git with the user's checkout of the submodule as git dir, a scratch
   copy of that index and the filled directory as work tree: `diff-files` (changed or deleted) and
-  `ls-files --others --exclude-standard` (new and not ignored: build output the submodule ignores
-  passes), each nested one on its own. The round report has a NOTE per submodule, and
+  `ls-files --others --exclude-standard` (new and not ignored), each nested one on its own. A
+  changed or deleted file is an edit: the round report has a NOTE per submodule, and
   `commit_all` refuses ("not committed: edits in submodule <path> can't land: …"), so accept and
-  next stop with the task in review. A submodule it can't check (its checkout gone or
+  next stop with the task in review. A new file is only noted ("new files in submodule <path>
+  won't be committed: …") and left behind, as a real submodule checkout leaves it: counted as an
+  edit, the objects a test command's `make -C vendor/lua` wrote refused every accept and came
+  back with the next test run (#889, the third 2026-11-21 audit). A submodule it can't check (its checkout gone or
   unreadable) is said the same way ("edits in submodule <path> can't be checked: … wb relocate"),
   not skipped (#682). The directories stay writable: in-tree builds of a
   submodule write there, and the agent could make them writable again anyway.

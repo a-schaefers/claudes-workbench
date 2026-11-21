@@ -660,15 +660,24 @@ def _fill(repo: Path, commit: str, checkout: Path, keep: Path | None, filled: li
 
 
 def submodule_edits(worktree: Path) -> list[str]:
-    """For each submodule fill_submodules filled in a task's worktree whose files no longer match
-    its commit (changed, deleted, new and not ignored): why it can't land. The gitlink keeps them
-    out of the diff and the commit, and read-only files stop no `sed -i`, which replaces a file
+    """For each submodule fill_submodules filled in a task's worktree whose tracked files no
+    longer match its commit (changed or deleted): why it can't land. The gitlink keeps them out
+    of the diff and the commit, and read-only files stop no `sed -i`, which replaces a file
     through its directory: an edit the tests passed on vanished at wb accept (#419, the audit of
     1.8). Checked with the user's checkout of it as git dir and a copy of the index made at fill
-    time, so the agent's files are only read; a submodule that can't be checked is said too."""
+    time, so the agent's files are only read; a submodule that can't be checked is said too.
+    New untracked files aren't edits: submodule_check."""
+    return submodule_check(worktree)[0]
+
+
+def submodule_check(worktree: Path) -> tuple[list[str], list[str]]:
+    """(submodule_edits, a note per filled submodule with new files not ignored there). New files
+    are left behind as any submodule checkout leaves them: counted as edits, the build output a
+    test command wrote in a vendored submodule (`make -C vendor/lua`) refused every wb accept and
+    came back with the next test run (#889, the third 2026-11-21 audit)."""
     rec = _record(worktree)
     subs = store.read_json(rec.with_name(SUBMODULES), []) if rec else []
-    out = []
+    out, notes = [], []
     for sub in subs if isinstance(subs, list) else []:
         dest = Path(worktree) / sub["path"]
         if not dest.is_dir() or dest.is_symlink():
@@ -695,10 +704,14 @@ def submodule_edits(worktree: Path) -> list[str]:
                            f"{sub['src']} is gone or unreadable (moved? wb relocate {rec.parent.name} "
                            "--repo <its new path>)")
                 continue
-        files = [shown(f) for f in (changed + new).split(b"\0") if f]
-        if files:
+        if files := [shown(f) for f in changed.split(b"\0") if f]:
             out.append(_edit_line(sub, files))
-    return out
+        if files := [shown(f) for f in new.split(b"\0") if f]:
+            notes.append(f"new files in submodule {sub['path']} won't be committed: "
+                         f"{', '.join(brief(files))}. The submodule doesn't track them, so the "
+                         "gitlink leaves them out: build output can stay; a new source file "
+                         "belongs in the submodule's own repository")
+    return out, notes
 
 
 def _edit_line(sub: dict, files: list[str]) -> str:

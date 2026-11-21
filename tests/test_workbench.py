@@ -15899,7 +15899,8 @@ class Projects(Base):
         st = wait_phase("t-subedit", {"review"})
         self.assertIs(st["tests"]["ok"], True)                # the tests pass on the edit
         report = run_wb("report", "t-subedit")
-        self.assertIn("NOTE: edits in submodule vendor/lib can't land: lib.c, new.c.", report)
+        self.assertIn("NOTE: edits in submodule vendor/lib can't land: lib.c.", report)
+        self.assertIn("NOTE: new files in submodule vendor/lib won't be committed: new.c.", report)
         self.assertIn("NOTE: edits in submodule vendor/lib/deps/inner can't land: in.c.", report)
         self.assertNotIn("lib.o", report.split("files changed:")[1])  # ignored there: build output
         err = io.StringIO()
@@ -15914,6 +15915,34 @@ class Projects(Base):
         (sub / "deps/inner/in.c").write_text("int y;\n")
         self.assertEqual(gitops.submodule_edits(store.Task("t-subedit").worktree), [])
         self.assertIn("merged", run_wb("accept", "t-subedit", "-m", "feat: answer", "--merge"))
+
+    def test_build_output_in_a_filled_submodule_is_noted_and_never_blocks_accept(self):
+        # #889 (the third 2026-11-21 audit): `make -C vendor/lua` in the test command wrote
+        # objects the submodule doesn't ignore, each round said "edits ... can't land", and
+        # wb accept refused them though the agent changed nothing there
+        lib = Path(self.tmp.name) / "lib"
+        subprocess.run(["git", "init", "-q", str(lib)], check=True)
+        (lib / "lib.c").write_text("int x;\n")
+        subprocess.run(["git", "-C", str(lib), "add", "."], check=True)
+        subprocess.run(["git", "-C", str(lib), "-c", "user.email=t@t", "-c", "user.name=t",
+                        "commit", "-qm", "lib"], check=True)
+        g = lambda *a: subprocess.run(["git", "-C", str(self.repo), *a], check=True,  # noqa
+                                      capture_output=True)
+        g("-c", "protocol.file.allow=always", "submodule", "add", "-q", str(lib), "vendor/lib")
+        g("commit", "-qm", "a submodule")
+        build = "echo built > vendor/lib/lib.o && "
+        self.start("t-subbuild", "ok", "--test", build + TEST_CMD, "--no-base-check")
+        st = wait_phase("t-subbuild", {"review"})
+        self.assertIs(st["tests"]["ok"], True)
+        report = run_wb("report", "t-subbuild")
+        self.assertNotIn("can't land", report)
+        self.assertIn("NOTE: new files in submodule vendor/lib won't be committed: lib.o.", report)
+        wt = store.Task("t-subbuild").worktree
+        self.assertEqual(gitops.submodule_edits(wt), [])
+        run_wb("accept", "t-subbuild", "-m", "feat: answer")
+        tree = g("ls-tree", "-r", "--name-only", "delegate/t-subbuild").stdout.decode()
+        self.assertIn("answer.txt", tree)
+        self.assertNotIn("lib.o", tree)
 
     @unittest.skipUnless(GIT_LFS, "needs git-lfs")
     def test_git_lfs_files_are_data_in_the_scratch_checkouts_and_count_at_their_size(self):

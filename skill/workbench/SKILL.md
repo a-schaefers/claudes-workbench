@@ -115,7 +115,8 @@ it that way; the agents never write either.
   `--base` and a repo with no git identity for the commits: fix those, don't work around them.
 - **Submodules** are filled read-only in the agent's worktree, at the commit the base records;
   `wb start` names any it couldn't fill (your checkout lacks it), which a build or test there
-  can't use. A step must not edit inside one: the edit can't land in the commit.
+  can't use. A step must not edit inside one: the edit can't land in the commit (new files
+  there, build output, are only noted: they are left out).
 
 ## Planning work you will hand off
 In workbench mode every plan you write is for agents weaker than you, who see only the spec you
