@@ -283,7 +283,9 @@ checkout, not the worktree), so give it its own, `--setup 'uv sync' --test 'uv r
 agent's and the tests' PATH. A note that the agent's environment leaves out a proxy (it holds a password): a setup or tests that need the
 network fail there; ask the user before naming it in commands.json `env`. Tests that use the
 GPU themselves (CUDA, PyTorch, a game engine): add `--unload-for-tests`, or they run beside the
-model and fail out of memory (it also opens the GPU's device nodes to the lane, and holds the GPU
+model and fail out of memory (before each test run it unloads or stops every model on this GPU,
+the task's own too, all but models.json `keep_loaded`: a server model starts again for the next
+round, every round; it also opens the GPU's device nodes to the lane, and holds the GPU
 from other tasks while they run, waiting for any task sharing it to step aside first, and holds
 this machine's GPU even when the model is on a wb remote box; without it they see no device). With it, the base check,
 `wb verify` and `wb shot` wait for the GPU alone too.

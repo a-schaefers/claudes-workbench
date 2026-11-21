@@ -5350,7 +5350,8 @@ def parser() -> argparse.ArgumentParser:
     s.add_argument("--test-timeout", type=int, default=900, metavar="SECS",
                    help="seconds the acceptance command may run (default 900)")
     s.add_argument("--unload-for-tests", action="store_true",
-                   help="unload the model before each test run, for tests that need the GPU")
+                   help="free this GPU of every model (keep_loaded aside) before each test run, "
+                        "for tests that need the GPU")
     s.add_argument("--no-sign", action="store_true",
                    help="commit this task's work unsigned, whatever commit.gpgsign says")
     s.add_argument("--no-base-check", action="store_true",
