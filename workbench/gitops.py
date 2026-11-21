@@ -836,6 +836,24 @@ def merge_message(repo: Path, task: str, tip: str) -> str:
     return said or f"Merge branch '{b}'"
 
 
+def squashed(repo: Path, into: str, before: str | None, tip: str) -> str | None:
+    """The squash of ``tip`` an earlier accept made on ``into``, which stood at ``before`` then:
+    a commit of the branch's first-parent line whose parent is ``before`` and whose message is
+    the tip's (commit -C). A squash never holds the tip, so a retry interrupted between it and
+    its record squashed again and recorded it refused (#432, the audit of 1.8)."""
+    if not before:
+        return None
+    want = git(repo, "log", "-1", "--format=%B", tip, check=False).strip()
+    log = git(repo, "log", "--first-parent", "--format=%H %P%x00%B%x01",
+              f"{before}..refs/heads/{into}", check=False)
+    for entry in log.split("\x01"):
+        head, _, body = entry.lstrip("\n").partition("\x00")
+        sha, *parents = head.split() or [""]
+        if sha and parents[:1] == [before] and want and body.strip() == want:
+            return git(repo, "rev-parse", "--short", sha).strip()
+    return None
+
+
 def _back_out(repo: Path, before: str) -> None:
     """Undo wb's own merge in the user's checkout, which was clean at ``before``: a conflict, a
     signature that timed out, a kill mid-merge. `reset --merge` drops MERGE_HEAD and the staged

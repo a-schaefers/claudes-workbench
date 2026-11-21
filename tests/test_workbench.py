@@ -1859,6 +1859,37 @@ class Lifecycle(Base):
         with self.assertRaisesRegex(RuntimeError, '"merge" is one of merge, ff, squash'):
             context.commands_conf()
 
+    def test_a_retry_after_an_interrupted_squash_finds_the_squash_it_made(self):
+        # #432 (the audit of 1.8, reproduced by Codex with an injected interruption): main moved
+        # on its own, accept was killed after git's squash and before merged_head was saved, and
+        # the retry looked for the tip, which a squash never holds: exit 5, merged=false, though
+        # main had the work
+        g = lambda *a: subprocess.run(["git", "-C", str(self.repo), *a], check=True,  # noqa
+                                      capture_output=True, text=True).stdout.strip()
+        self.start("t-isq", "ok")
+        wait_phase("t-isq", {"review"})
+        (self.repo / "other.txt").write_text("other\n")
+        g("add", "other.txt")
+        g("commit", "-qm", "main moves on")
+        real = gitops.merge
+
+        def then_killed(*a, **kw):
+            real(*a, **kw)
+            raise SystemExit(128 + signal.SIGTERM)
+        with mock.patch.object(gitops, "merge", then_killed), self.assertRaises(SystemExit):
+            run_wb("accept", "t-isq", "-m", "feat: answer", "--merge-as", "squash")
+        squash = g("rev-parse", "--short", "main")
+        self.assertEqual((self.repo / "answer.txt").read_text().strip(), "42")
+        out = run_wb("accept", "t-isq", "-m", "feat: answer", "--merge-as", "squash")
+        self.assertIn(f"merged into main as {squash}", out)
+        self.assertEqual(g("rev-parse", "--short", "main"), squash)    # not squashed twice
+        row = [r for r in store.results() if r.get("task") == "t-isq"][-1]
+        self.assertTrue(row["merged"])
+        self.assertNotIn("merge_refused", row)
+        self.assertEqual(g("branch", "--list", "delegate/t-isq"), "")
+        # another commit from the same parent isn't taken for it
+        self.assertIsNone(gitops.squashed(self.repo, "main", g("rev-parse", "main~1"), "main~1"))
+
     def test_the_merge_by_hand_line_follows_the_repos_merge_mode_and_signing(self):
         # #471 (the audit of 1.8): "merge with: … merge --no-ff" whatever commands.json's `merge`
         # said, and a signed merge commit after --no-sign

@@ -1769,10 +1769,18 @@ def cmd_accept(a):
         into = close.get("merge_into")
         if into and into != "HEAD" and gitops.contains(repo, f"refs/heads/{into}", tip):
             merged = gitops.git(repo, "rev-parse", "--short", f"refs/heads/{into}").strip()  # made already
+        elif into and into != "HEAD" and (merged := gitops.squashed(
+                repo, into, close.get("merge_from"), tip)):
+            pass  # a squash made already: it never holds the tip, so the retry squashed again (#432)
         else:
             try:
                 if not into:
                     raise gitops.GitError(gitops.detached(repo, spec["branch"], had=True))
+                # where the target stood before: a squash interrupted before merged_head was
+                # saved is found from it on the retry (#432, the audit of 1.8)
+                close = {**close, "merge_from": gitops.git(
+                    repo, "rev-parse", "--verify", "-q", f"refs/heads/{into}", check=False).strip()}
+                task.set_status(closing=close)
                 # every target is held to the base, a named branch too: reset or rebased since
                 # the start, the merge brought back what was withdrawn from it (#418)
                 # signed as the task's commit was, and a kill backs the checkout out: SIGTERM
