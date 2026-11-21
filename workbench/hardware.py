@@ -36,8 +36,12 @@ def _read(path: Path) -> str:
 
 
 def _run(*argv: str) -> str:
+    # Not strict UTF-8: Windows PowerShell 5.1 writes a pipe in the console's OEM code page, and a
+    # localized adapter name or error ('Adaptador de pantalla básico') raised UnicodeDecodeError
+    # past main in wb doctor, scout, top and GPU admission, again on every call (#664)
     try:
-        r = subprocess.run(argv, capture_output=True, text=True, timeout=10)
+        r = subprocess.run(argv, capture_output=True, text=True, encoding="utf-8", errors="replace",
+                           timeout=10)
         return r.stdout.strip() if r.returncode == 0 else ""
     except (OSError, subprocess.TimeoutExpired):
         return ""
@@ -128,8 +132,8 @@ def wired_limit() -> tuple[int | None, str]:
 # Windows' display adapters, each with the memory its driver's registry key states
 # (HardwareInformation.qwMemorySize, 64 bits: Win32_VideoController's AdapterRAM caps at 4 GB),
 # one name and size a line, tab between. Sent as -EncodedCommand: no quoting through WSL's interop
-WINDOWS_SCRIPT = (
-    "$r = @(Get-ItemProperty 'HKLM:\\SYSTEM\\CurrentControlSet\\Control\\Class\\"
+WINDOWS_SCRIPT = (  # UTF-8 out: names arrive intact for the registry match (#664)
+    "[Console]::OutputEncoding = [Text.Encoding]::UTF8; $r = @(Get-ItemProperty 'HKLM:\\SYSTEM\\CurrentControlSet\\Control\\Class\\"
     "{4d36e968-e325-11ce-bfc1-08002be10318}\\0*' -ErrorAction SilentlyContinue); "
     "Get-CimInstance Win32_VideoController | ForEach-Object { $n = $_.Name; "
     "$m = ($r | Where-Object { $_.DriverDesc -eq $n } | Select-Object -First 1).'HardwareInformation.qwMemorySize'; "

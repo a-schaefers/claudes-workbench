@@ -16414,6 +16414,23 @@ class Hardware(unittest.TestCase):
         self.assertIn("swap 8.6 GB (0.0 GB free)", out)
         self.assertEqual((hw.size(0), hw.size(None)), ("0.0 GB", "?"))
 
+    def test_a_byte_that_isnt_utf8_from_powershell_never_crashes_the_windows_gpu_read(self):
+        # #664: PowerShell 5.1 writes a pipe in the OEM code page; a localized adapter name
+        # ("básico" in cp850: 0xA0) raised UnicodeDecodeError past main in doctor, scout, top and
+        # GPU admission, and since nothing was cached, on every call after
+        with tempfile.TemporaryDirectory() as d:
+            ps = Path(d) / "powershell.exe"
+            ps.write_text("#!/bin/sh\nprintf 'Adaptador de pantalla b\\240sico de Microsoft\\t\\r\\n'\n")
+            ps.chmod(0o755)
+            self.assertIn("\ufffd", hardware._run(str(ps)))
+            with mock.patch.dict(os.environ, {"WB_HOME": str(Path(d) / "state"),
+                                              "PATH": f"{d}{os.pathsep}{os.environ['PATH']}"}):
+                gpus = hardware._windows_gpus()
+            self.assertEqual(len(gpus), 1)
+            self.assertTrue(gpus[0]["name"].startswith("Adaptador de pantalla b"))
+        self.assertTrue(hardware.WINDOWS_SCRIPT.startswith("[Console]::OutputEncoding = "
+                                                           "[Text.Encoding]::UTF8;"))
+
     def test_ollamas_quoted_service_environment_and_a_context_that_isnt_a_number(self):
         # the 2026-11-16 audit: systemd quotes a value with a space and the split lost it; "32k"
         # crashed wb scout, which Ollama only warns about

@@ -3301,6 +3301,7 @@ five fields is skipped); WSL adds Windows' adapters (`_windows_gpus`: one `power
 names, each one's memory from its driver's registry key, `HardwareInformation.qwMemorySize` under
 the display class `{4d36e968-e325-11ce-bfc1-08002be10318}`, since `AdapterRAM` caps at 4 GB),
 kept `WINDOWS_FOR` (an hour) in `$WB_HOME/wsl-gpus.json`, as a PowerShell start takes seconds.
+
 `powershell.exe` from PATH, else Windows' own under WSL's automount root (`hardware.powershell`:
 `[automount] root` in `/etc/wsl.conf`, `/mnt/` by default, then `WINDOWS_POWERSHELL`), since
 `[interop] appendWindowsPath=false` takes it off PATH. A read that lists nothing (no PowerShell,
@@ -3308,6 +3309,13 @@ one past `_run`'s 10 s after a boot; Windows always lists an adapter) is no read
 one stays, its `tried` stamp waits `WINDOWS_RETRY` (60 s) before PowerShell is asked again.
 Cached as an hour's "no GPU", a Radeon only Windows sees had no budget, and a read that only
 sometimes worked flipped `wb optimize`'s fingerprint, so each flip emptied the GPU (#702).
+The script first sets `[Console]::OutputEncoding` to UTF-8, and `hardware._run` decodes with
+`errors="replace"`: PowerShell 5.1 writes a pipe in the console's OEM code page, and a localized
+adapter name or error (`básico` in cp850) raised `UnicodeDecodeError` past `main` in doctor,
+scout, top and GPU admission, again on every call since nothing was cached (#664). The same
+decoding holds for the skill library's git, `models`' `ip`/`ifconfig`, stop commands and `ps`,
+and the git shim's `--git-common-dir` (as `surrogateescape`: a path, kept whole).
+
 A model served from Windows (Ollama for Windows) runs on any vendor's GPU, and inside WSL NVIDIA,
 recent AMD (ROCm for WSL) and Intel (Level Zero) work: a 16 GB RX 7800 XT was "VRAM unknown", the
 note said only NVIDIA is usable, and with no budget tasks took turns (#522). `gpus(windows=False)`,

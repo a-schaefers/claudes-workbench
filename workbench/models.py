@@ -400,7 +400,8 @@ def _own_addresses() -> frozenset:
     # Mac's own LAN address counted as remote and its model was left out: the 2026-11-19 audit)
     for argv in (["ip", "-o", "addr"], ["ifconfig", "-a"]):
         try:
-            out = subprocess.run(argv, capture_output=True, text=True, timeout=5).stdout
+            out = subprocess.run(argv, capture_output=True, text=True, encoding="utf-8",
+                                 errors="replace", timeout=5).stdout  # a localized ifconfig (#664)
         except (OSError, subprocess.TimeoutExpired):
             continue
         # 10.0.0.5/24 (ip), fe80::1%en0 (ifconfig's scope), addr:10.0.0.5 (old net-tools)
@@ -1474,7 +1475,8 @@ def free_gpu(keep=(), say=print, warn=None, of: Model | None = None) -> None:
             time.sleep(5)
         say(f"stopping {other.id}")
         try:
-            r = subprocess.run(other.stop, shell=True, capture_output=True, text=True, timeout=300)
+            r = subprocess.run(other.stop, shell=True, capture_output=True, text=True,
+                               encoding="utf-8", errors="replace", timeout=300)  # any bytes (#664)
         except subprocess.TimeoutExpired:
             warn(f"{other.id}'s stop command ran past 5 min; it may still hold GPU memory")
             continue
@@ -2208,7 +2210,8 @@ def _started(pid: int) -> str | None:
         pass
     try:
         r = subprocess.run(["ps", "-o", "lstart=", "-p", str(pid)], capture_output=True, text=True,
-                           timeout=5, env={**os.environ, "LC_ALL": "C"})
+                           encoding="utf-8", errors="replace", timeout=5,
+                           env={**os.environ, "LC_ALL": "C"})
     except (OSError, subprocess.TimeoutExpired):
         return None
     return (" ".join(r.stdout.split()) or None) if r.returncode == 0 else None
@@ -2231,7 +2234,8 @@ def runs(pid: int, *words: str) -> bool:
         # -ww: BSD ps cuts the column at 79 characters, and a framework Python's path alone is longer
         try:
             toks = subprocess.run(["ps", "-ww", "-o", "command=", "-p", str(pid)],
-                                  capture_output=True, text=True, timeout=5).stdout.split()
+                                  capture_output=True, text=True, encoding="utf-8",
+                                  errors="replace", timeout=5).stdout.split()
         except (OSError, subprocess.SubprocessError):
             return True
     n = len(words)

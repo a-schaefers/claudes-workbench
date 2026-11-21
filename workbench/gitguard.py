@@ -116,7 +116,7 @@ def _temp_roots(temps=()) -> list[str]:
 def common_dir(real: str, opts: list[str]) -> str | None:
     """The repository a git command with these global options acts on (its common git dir)."""
     r = subprocess.run([real, *opts, "rev-parse", "--git-common-dir"], capture_output=True,
-                       text=True)
+                       text=True, encoding="utf-8", errors="surrogateescape")  # a path, kept (#664)
     if r.returncode:
         return None  # not in a repository: `git init` or `git clone` somewhere new
     return os.path.realpath(os.path.join(_where(opts), r.stdout.strip()))
@@ -225,7 +225,8 @@ def install(bin_dir: Path, task_repo: Path, pkg_root: Path, path: str,
     if not real:
         return None
     common = subprocess.run([real, "-C", str(task_repo), "rev-parse", "--git-common-dir"],
-                            capture_output=True, text=True, check=True).stdout.strip()
+                            capture_output=True, text=True, encoding="utf-8",
+                            errors="surrogateescape", check=True).stdout.strip()  # #664
     repo_dir = os.path.realpath(os.path.join(task_repo, common))
     bin_dir.mkdir(parents=True, exist_ok=True)
     shim = bin_dir / "git"

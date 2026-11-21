@@ -46,7 +46,8 @@ def library() -> Path:
 
 def _run_git(*args: str) -> str:
     r = subprocess.run(["git", "-C", str(library()), "-c", "log.showSignature=false", *args],  # its
-                       capture_output=True, text=True)  # log lines are parsed (the 2026-11-16 audit)
+                       capture_output=True, text=True, encoding="utf-8",  # log lines are parsed
+                       errors="replace")  # (the 2026-11-16 audit); never a crash on a byte (#664)
     if r.returncode:
         raise RuntimeError((r.stderr or r.stdout).strip())
     return r.stdout
@@ -87,7 +88,7 @@ def _commit(message: str) -> None:
         ["-c", "user.name=workbench", "-c", "user.email=workbench@localhost"]
     r = subprocess.run(["git", "-C", str(library()), *who, "-c", "commit.gpgsign=false",
                         "-c", f"core.hooksPath={os.devnull}", "commit", "-q", "--no-verify", "-m", message],
-                       capture_output=True, text=True)
+                       capture_output=True, text=True, encoding="utf-8", errors="replace")
     if r.returncode:
         raise RuntimeError((r.stderr or r.stdout).strip())
 
@@ -308,11 +309,12 @@ def fetch(src: str, subdir: str | None = None) -> tuple[Path, dict, list[Path]]:
         shutil.rmtree(root, ignore_errors=True)
         root.parent.mkdir(parents=True, exist_ok=True)
         r = subprocess.run(["git", "clone", "-q", "--depth", "1", "--", url, str(root)],
-                           capture_output=True, text=True, timeout=300,
-                           env={**os.environ, "GIT_TERMINAL_PROMPT": "0"})
+                           capture_output=True, text=True, encoding="utf-8", errors="replace",
+                           timeout=300, env={**os.environ, "GIT_TERMINAL_PROMPT": "0"})
         if r.returncode:
             raise RuntimeError(f"git clone {url}: {(r.stderr or r.stdout).strip()}")
-    head = subprocess.run(["git", "-C", str(root), "rev-parse", "HEAD"], capture_output=True, text=True)
+    head = subprocess.run(["git", "-C", str(root), "rev-parse", "HEAD"], capture_output=True, text=True,
+                          encoding="utf-8", errors="replace")
     meta = {"source": url, "rev": head.stdout.strip() if head.returncode == 0 else ""}
     if subdir:
         found = [root / subdir] if (root / subdir / "SKILL.md").is_file() else []
