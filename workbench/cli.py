@@ -590,14 +590,18 @@ def _gpu_holders(me: str | None = None, of: models.Model | None = None) -> dict:
     but ``me``: its gpu.json's live entries, plus each task whose runner is alive but hasn't
     reached the lease yet (one just started), as an entry of its own. A runner that has (status
     `leased`, its pid) and isn't in gpu.json stepped aside for its tests or a server's wait:
-    counted, wb start refused (exit 4) a task the lease would have let in (#805)."""
+    counted, wb start refused (exit 4) a task the lease would have let in (#805). Another
+    machine's task (a network home's) isn't, with this machine's own lease: it is on that
+    machine's GPU, and its checkout or base check here refused an idle GPU (#895)."""
     pool = models.pool(of)
     held = {p: h for p, h in models.holders(pool=pool).items() if h.get("task") != me}
     named = {h.get("task") for h in held.values()}
     found = models.discover()
+    own = not models.lease_shared()
     for t in store.all_tasks():
         m = found.get(t.spec.get("model") or "")
         if t.name not in named and t.name != me and m and models.pool(m) == pool \
+                and not (own and store.elsewhere(t.status)) \
                 and t.status.get("phase") in store.ACTIVE and runner_alive(t) \
                 and t.status.get("leased") != t.status.get("pid"):
             held[f"task {t.name}"] = {"model": m.id, "task": t.name}
@@ -616,8 +620,11 @@ def _preempt_bench(m: models.Model, me: str | None = None) -> str:
     records them preempted and replays them once no real task runs). An overnight run must
     never make the morning's task queue."""
     held, waits = _gpu_wait(m, me)
+    # never another machine's: _stop_runner refuses it, and wb start, feedback, next and resume
+    # died with "runs on <host>" before their --queue check (#895)
     names = sorted({h["task"] for h in held.values() if h.get("task")
-                    and store.Task(h["task"]).spec.get("bench")}) if waits else []
+                    and store.Task(h["task"]).spec.get("bench")
+                    and not store.elsewhere(store.Task(h["task"]).status)}) if waits else []
     for name in names:
         t = store.Task(name)
         with store.locked(runner.lock_file(name, "cmd")):

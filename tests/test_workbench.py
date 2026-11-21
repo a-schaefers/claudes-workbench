@@ -4977,6 +4977,27 @@ class Steering(Base):
                 time.sleep(0.05)
         self.assertGreater(lock.stat().st_mtime, time.time() - 60)
 
+    def test_another_machines_task_not_yet_on_its_gpu_is_no_holder_of_this_machines(self):
+        # #895: on a network home another machine's task in its checkout or base check (status
+        # `leased` unset, its runner alive to runner_alive) counted as a holder of this machine's
+        # GPU: wb start refused an idle GPU, and with a bench replay _preempt_bench's
+        # _stop_runner died "runs on <host>" before the --queue check
+        from workbench import models
+        self.start("t-m1", "slow")
+        self.wait_session("t-m1")
+        task = store.Task("t-m1")
+        os.kill(task.status["pid"], signal.SIGKILL)         # not in this process table
+        store.write_json(task.dir / "task.json", {**task.spec, "bench": True})
+        task.set_status(machine="another-machine", host="lab-2", boot="another-boot", leased=None)
+        store.write_json(models.lease_dir() / "gpu.json", {})  # not on the lease yet: in its checkout
+        try:
+            m = models.resolve("mimo")
+            self.assertNotIn("t-m1", {h.get("task") for h in cli._gpu_holders(of=m).values()})
+            self.assertEqual(cli._preempt_bench(m), "")
+            self.assertEqual(store.Task("t-m1").status["phase"], "running")
+        finally:
+            task.set_status(machine=store.machine())        # this machine's again: torn down
+
     def test_on_a_network_state_dir_each_machine_takes_the_gpu_under_its_own_lease(self):
         # #849: one gpu.json for every machine sharing the state dir: each pruned the other's
         # holders as dead, and they took turns on GPUs they don't share

@@ -349,7 +349,9 @@ CLAUDE.md, the user's decisions, the review checks) marked apart.
   (the 2026-11-16 audit). The holders are gpu.json's live entries plus any task whose live runner
   hasn't reached the lease yet (`cli._gpu_holders`; status `leased`, the runner's pid, says it
   has: one that stepped aside for its tests or a server's wait was counted, and a task the lease
-  would have let in was refused with exit 4 for the length of the other's test suite, #805). A remote model is checked against the
+  would have let in was refused with exit 4 for the length of the other's test suite, #805), not
+  another machine's task (`store.elsewhere`) while the lease is this machine's own: on a network
+  home its checkout or base check refused this machine's idle GPU (#895). A remote model is checked against the
   holders of its own server's pool (`models.pool`; this machine's for one on this GPU, #750). A known limit, left by choice (the 0.90 review): the check takes no lock, and a task
   is visible to it only once its runner's pid is in its status, after task.json is written, so
   two `wb start`s at the same moment (from two sessions) can both pass it. Nothing hangs
@@ -3975,7 +3977,8 @@ A replay is kept out of real work: task.json `bench` makes `Task.notify` write n
 no notice), `results.record` write no row, `wb status` leave it out (unless `--all` or named), and
 the mod skip it; `--trial` keeps its lessons out. Its speeds do go to speed.json: they are
 measured on this machine. When `wb start`, feedback, next or resume would wait for the GPU behind a
-replay (or `wb optimize`, *Optimize*), `cli._preempt_bench` stops it (phase stuck, `PREEMPTED`), says so in one line, and the
+replay (or `wb optimize`, *Optimize*), `cli._preempt_bench` stops it (phase stuck, `PREEMPTED`; never another machine's
+replay, which `_stop_runner` refuses: wb start died before its `--queue` check, #895), says so in one line, and the
 driver records `preempted` and replays it later. `wb bench stop` (or `wb stop --all` without
 `--repo`/`--session`) ends the driver, which closes its replay. A driver killed without warning
 (SIGKILL, the OOM killer, a hard reset) closes nothing: its replay stayed open for good, its clone
