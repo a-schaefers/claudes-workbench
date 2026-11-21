@@ -1690,6 +1690,34 @@ class Lifecycle(Base):
             self.assertEqual(g("rev-parse", "--short", "HEAD").strip().decode(), head, ff)
             self.assertEqual(g("status", "--porcelain"), b"", ff)
 
+    def test_no_merge_mode_runs_the_repos_hooks_and_the_merge_commit_names_the_branch(self):
+        # #499 (Claude's audit of 1.90, reproduced): a commit-msg hook requiring "feat: " refused
+        # the merge's "Merge commit '<sha>'", which nobody could edit, and accept exited 5, while
+        # --merge-as squash ran no hooks and landed; #471: the message named a raw SHA
+        hooks = Path(self.tmp.name) / "hooks"
+        hooks.mkdir()
+        mark = Path(self.tmp.name) / "hook-ran"
+        for name in ("commit-msg", "pre-merge-commit", "post-merge", "pre-commit"):
+            (hooks / name).write_text(f"#!/bin/sh\necho {name} >> {mark}\nexit 1\n")
+            (hooks / name).chmod(0o755)
+        for how in ("merge", "squash", "ff"):
+            repo, g = self._merge_case(base={b"a.txt": b"a\n"}, main={b"c.txt": b"c\n"},
+                                       task={b"b.txt": b"b\n"}, ignore={})
+            if how == "ff":
+                g("reset", "-q", "--hard", "HEAD~1")
+            g("config", "core.hooksPath", str(hooks))
+            tip = g("rev-parse", "delegate/t").strip().decode()  # what accept merges: the SHA
+            gitops.merge(repo, "t", "main", how=how, tip=tip)
+            self.assertEqual((repo / "b.txt").read_bytes(), b"b\n", how)
+            self.assertFalse(mark.exists(), mark.exists() and mark.read_text())
+            if how == "merge":
+                self.assertEqual(g("log", "-1", "--format=%s"), b"Merge branch 'delegate/t'\n")
+                g("switch", "-q", "-c", "dev", "HEAD~1")  # git's own wording: "into dev" here
+                g("config", "merge.log", "true")          # and its shortlog, once
+                gitops.merge(repo, "t", "dev", tip=tip)
+                self.assertEqual(g("log", "-1", "--format=%B"),
+                                 b"Merge branch 'delegate/t' into dev\n\n* delegate/t:\n  task\n\n")
+
     def test_a_fast_forward_under_a_squash_merge_option_lands_or_is_backed_out_for_real(self):
         # #430 (the audit of 1.8, reproduced): with branch.main.mergeOptions=--squash, --ff-only
         # staged a squash and left HEAD; no MERGE_HEAD, so nothing was reset, and the checkout

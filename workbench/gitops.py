@@ -780,13 +780,21 @@ def merge(repo: Path, task: str, into: str | None = None, base: str | None = Non
     # fast-forward needs --no-squash too: --ff-only under mergeOptions=--squash staged a squash
     # and left HEAD (#430, the audit of 1.8). The squash says --ff: merge.ff=only refused it once
     # the branch had moved, merge.ff=false every time ("cannot be used together", #429)
+    # No mode runs the repo's hooks (NO_HOOKS, --no-verify), as no commit of workbench's does:
+    # a commit-msg hook refused the merge commit's message, which nobody could edit, while the
+    # squash ran none and landed; and once staged the merge holds the agent's files, a relative
+    # hooksPath's hooks among them (#499, Claude's audit of 1.90). The merge commit names the
+    # branch as git's own would (fmt-merge-msg, the repo's merge.log and suppressDest kept), not
+    # the tip's SHA it merges (#471, the audit of 1.8)
     try:
         if how == "squash":  # no MERGE_HEAD to abort: backed out with reset --merge
-            git(repo, "merge", "--squash", "--ff", "--no-commit", source)
+            git(repo, *NO_HOOKS, "merge", "--squash", "--ff", "--no-commit", source)
             committing([*NO_HOOKS, "commit", "--no-verify", "-q", "-C", source])
+        elif how == "ff":
+            committing([*NO_HOOKS, "merge", "--ff-only", "--no-squash", source])
         else:
-            committing(["merge", *(("--ff-only", "--no-squash") if how == "ff" else
-                                   ("--no-ff", "--commit", "--no-squash")), "--no-edit", source])
+            committing([*NO_HOOKS, "merge", "--no-ff", "--commit", "--no-squash", "--no-verify",
+                        "--no-log", "-m", merge_message(repo, task, source), source])
     except BaseException as e:  # a conflict, a timeout, a SIGTERM: the checkout as it was (#420)
         _back_out(repo, before)
         if isinstance(e, GitError):
@@ -803,6 +811,17 @@ def merge(repo: Path, task: str, into: str | None = None, base: str | None = Non
         raise GitError(f"git didn't complete the merge of {branch_name(task)} (a merge setting "
                        "of yours?); it was backed out: merge it by hand")
     return git(repo, "rev-parse", "--short", "HEAD").strip()
+
+
+def merge_message(repo: Path, task: str, tip: str) -> str:
+    """The merge commit's message git itself writes for ``delegate/<task>`` (`fmt-merge-msg`:
+    "Merge branch 'delegate/<task>'", "into <branch>" unless merge.suppressDest drops it, the
+    shortlog under merge.log, so the merge itself takes --no-log), though what is merged is
+    the reviewed ``tip`` (#471)."""
+    b, sha = branch_name(task), git(repo, "rev-parse", "--verify", f"{tip}^{{commit}}").strip()
+    r = _run(repo, ["fmt-merge-msg"], check=False, input=f"{sha}\t\tbranch '{b}' of .\n".encode())
+    said = r.stdout.decode("utf-8", "replace").strip() if r.returncode == 0 else ""
+    return said or f"Merge branch '{b}'"
 
 
 def _back_out(repo: Path, before: str) -> None:
