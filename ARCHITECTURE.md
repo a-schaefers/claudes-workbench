@@ -1216,7 +1216,14 @@ deliberately hostile process (the 2026-11-16 audit's list of what it can't stop 
   `io.systemd.Resolve`, userdb's `io.systemd.Multiplexer`, `/run/nscd/socket`, sssd's
   `pipes/nss`), so `logger` and `resolvectl` work, not the system bus; and the
   `commands.json` and grant `paths`, split around secrets and workbench's own files as the reads
-  and writes are, so `wb allow --path /run/postgresql` reaches a test database; a `--unix` rule
+  and writes are, so `wb allow --path /run/postgresql` reaches a test database; and a granted
+  `SECRET_SOCKETS` file, Docker Desktop's `~/.docker/desktop/docker.sock` (macOS's
+  `~/.docker/run/docker.sock`), which `lane_refusal` lets a grant name although `.docker` is a
+  secret: it is connected to only, `config.json` and the rest of `~/.docker` stay hidden (before
+  #441, the audit of 1.8, only turning the lane off let Testcontainers reach it). A refused
+  connection is named in the report like any refused path (`runner.lane_refused`: Docker's
+  `dial unix /var/run/docker.sock: connect: permission denied`, psql's socket under
+  `/run/postgresql`, the Nix daemon's); a `--unix` rule
   carries the socket right alone, since the 0.90 review found its read right made a granted
   `~/.config`'s gh token readable again), so the session bus (and through it `systemd-run`), the keyring and the SSH and GPG
   agents are out of reach; sockets the lane's own processes make stay theirs. From ABI 6 it also

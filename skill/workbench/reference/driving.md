@@ -30,7 +30,12 @@ check-in, when an agent asks for a command or a directory, a spec needs web rese
   run later outside the lane. A test driving a program through a pseudo-terminal (pexpect, Python's pty,
   `script`, node-pty) fails in the lane ("out of pty devices", "failed to create
   pseudo-terminal"): grant `/dev/pts` (`wb start --allow-path /dev/pts`), which also opens the
-  user's other terminals to the agent.
+  user's other terminals to the agent. Sockets outside the lane are refused too (kernels from
+  6.12): Docker's, Podman's, `/run/postgresql`, the Nix daemon's, failing with "connect:
+  permission denied"; the report names the `wb allow <name> --path <socket or its directory>`.
+  Docker's socket is root on the machine, and rootless Podman's acts as the user outside the
+  lane: grant one only when the user expects the tests to run containers. Docker Desktop's `~/.docker/desktop/docker.sock` can be granted alone;
+  the rest of `~/.docker` (its logins) stays hidden.
 
 ## The web is yours; the agent tests in a browser but does not browse
 Research (for a spec, an

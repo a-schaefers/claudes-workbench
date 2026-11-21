@@ -482,6 +482,8 @@ def lane_refusal(raw: str) -> str | None:
     real = os.path.realpath(Path(raw).expanduser())
     if real in ("/", os.path.realpath(Path.home())):
         return f"{raw}: not the whole of / or your home; name the directory the task needs"
+    if real in secret_sockets():
+        return None
     for h in secret_paths() | private_paths() | {os.path.realpath(skills.library())}:
         if real == h or _under(real, h):
             return (f"{raw}: in {h}, which holds credentials or workbench's own state and stays "
@@ -745,6 +747,19 @@ SYSTEM_SOCKETS = ("/dev/log", "/run/systemd/journal/socket", "/run/systemd/journ
                   "/var/lib/sss/pipes/nss")
 
 
+def secret_sockets() -> set[str]:
+    """SECRET_SOCKETS under the home that exist as sockets, real paths."""
+    found = set()
+    for n in SECRET_SOCKETS:
+        p = os.path.realpath(Path.home() / n)
+        try:
+            if stat.S_ISSOCK(os.stat(p).st_mode):
+                found.add(p)
+        except OSError:
+            pass
+    return found
+
+
 def unix_paths(task: store.Task) -> list[str]:
     """Where the agent may connect to a UNIX socket made outside its lane (Landlock ABI 9): the
     SYSTEM_SOCKETS there are, and what the user and Claude added (`paths`; `wb allow --path
@@ -752,9 +767,11 @@ def unix_paths(task: store.Task) -> list[str]:
     around secrets like the reads (the 0.90 review: a GPG agent socket under a granted ~/.config
     was in reach)."""
     hidden = _hidden()
+    granted = [Path(r).expanduser() for r in lane_paths(task) if r != "*"]
+    inside = secret_sockets()  # a socket in a secret: connected to, nothing else (no read, write)
     return _both([*(s for s in SYSTEM_SOCKETS if os.path.exists(s)),
-                  *(q for p in (Path(r).expanduser() for r in lane_paths(task) if r != "*")
-                    if os.path.exists(p) for q in _split(str(p), hidden))])
+                  *(str(p) for p in granted if os.path.realpath(p) in inside),
+                  *(q for p in granted if os.path.exists(p) for q in _split(str(p), hidden))])
 
 
 def ask_dir(task: store.Task) -> Path:
@@ -873,6 +890,10 @@ SECRETS = (".ssh", ".gnupg", ".password-store", ".netrc", ".git-credentials", ".
            ".kaggle", ".oci", ".gemini", ".config/containers/auth.json",
            ".local/share/fish/fish_history", ".var/app", ".config/vivaldi",
            ".config/microsoft-edge", ".config/opera", ".android/adbkey")
+# The sockets inside a secret that a grant may still reach, to connect only (unix_paths): Docker
+# Desktop's, under ~/.docker beside the registry logins in config.json, so `wb allow --path` was
+# refused and only turning the lane off let a Testcontainers suite run (#441, the audit of 1.8)
+SECRET_SOCKETS = (".docker/desktop/docker.sock", ".docker/run/docker.sock")
 # where the user moved them (a file, a directory, or a path list)
 SECRET_VARS = ("GNUPGHOME", "PASSWORD_STORE_DIR", "GH_CONFIG_DIR", "DOCKER_CONFIG", "KUBECONFIG",
                "AWS_SHARED_CREDENTIALS_FILE", "AWS_CONFIG_FILE", "CLOUDSDK_CONFIG",

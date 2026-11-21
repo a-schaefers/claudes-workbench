@@ -5353,6 +5353,49 @@ class Lane(Base):
                       f"{outside} if the tests need it", report)
         self.assertNotIn("example.org", "".join(st["tests"]["lane"]))   # a URL's path isn't one
 
+    @unittest.skipUnless((lane.abi() or 0) >= 9, "needs Landlock ABI 9")
+    @home_outside_the_lane
+    def test_a_socket_outside_the_lane_is_named_with_its_grant_and_docker_desktops_can_be_granted(self):
+        # #441, the audit of 1.8: "dial unix …docker.sock: connect: permission denied" named no
+        # grant, and Docker Desktop's socket under ~/.docker (a secret) couldn't be granted at all
+        task = self.bare_task("t-sock", self.repo)
+        task.worktree.mkdir()
+        home = Path(tempfile.mkdtemp(dir=os.path.expanduser("~"), prefix=".wb-sock-"))
+        self.addCleanup(shutil.rmtree, home, True)
+        (home / ".docker/desktop").mkdir(parents=True)
+        (home / ".docker/config.json").write_text('{"auths": {"x": {"auth": "secret"}}}')
+        (home / "pg").mkdir()
+        socks = [str(home / ".docker/desktop/docker.sock"), str(home / "pg/.s.PGSQL.5432")]
+        for p in socks:
+            srv = socket.socket(socket.AF_UNIX)
+            srv.bind(p)
+            srv.listen()
+            self.addCleanup(srv.close)
+        script = ("import socket, sys\nfor p in sys.argv[1:]:\n    s = socket.socket(socket.AF_UNIX)\n"
+                  "    try:\n        s.connect(p); print('connected', p)\n"
+                  "    except OSError as e:\n        print(f'dial unix {p}: connect: {e.strerror.lower()}')\n"
+                  "try:\n    open(sys.argv[1].rsplit('/', 2)[0] + '/config.json').read(); print('read')\n"
+                  "except OSError as e:\n    print('config:', e.strerror)\n")
+        conf = Path(os.environ["WB_COMMANDS"])
+        env = {v: "" for v in ("XDG_DATA_HOME", "XDG_STATE_HOME", "XDG_CACHE_HOME", "XDG_CONFIG_HOME",
+                               "DOCKER_CONFIG")}
+        with mock.patch.object(context.Path, "home", lambda: home), mock.patch.dict(os.environ, env):
+            def run():
+                return subprocess.run(lane.wrap(context.writable(task), [sys.executable, "-c", script,
+                                                                         *socks],
+                                                context.readable(task), context.unix_paths(task)),
+                                      capture_output=True, text=True, timeout=20).stdout
+            out = run()
+            self.assertIn(f"dial unix {socks[0]}: connect: permission denied", out)
+            self.assertEqual(runner.lane_refused(task, out), socks)
+            self.assertIsNone(context.lane_refusal(socks[0]))         # grantable, though in .docker
+            self.assertIsNotNone(context.lane_refusal(str(home / ".docker/config.json")))
+            conf.write_text(json.dumps({"paths": socks}))
+            out = run()
+        self.assertIn(f"connected {socks[0]}", out)
+        self.assertIn(f"connected {socks[1]}", out)
+        self.assertIn("config: Permission denied", out)                 # the logins stay hidden
+
     def test_a_device_node_the_lane_refused_is_named_with_its_wb_allow(self):
         # #331 (the audit of 1.4): /dev/kvm or /dev/fuse refused read as the project's bug, and the
         # agent spent its auto-fix rounds on it
