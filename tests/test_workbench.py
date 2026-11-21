@@ -4789,6 +4789,20 @@ class SkillLibrary(Base):
                 "paths", "Use when drawing.", f"Read {path} first.\n")), "-m", "warned")
             self.assertIn("outside the repo", out, path)
 
+    def test_a_skill_md_opening_with_a_utf8_bom_is_read_and_kept_without_it(self):
+        # #479 (the audit of 1.8, reproduced): a Windows editor's BOM before the `---` hid the
+        # front matter: "front matter name is ''", "no description"
+        from workbench import skills
+        d = self.draft("bom-skill")
+        md = d / "SKILL.md"
+        md.write_bytes(b"\xef\xbb\xbf" + md.read_bytes().replace(b"\n", b"\r\n"))
+        self.assertIn("added bom-skill", run_wb("skill", "add", "bom-skill", "--from", str(d),
+                                                "-m", "from Windows"))
+        self.assertEqual(skills.available()["bom-skill"]["description"],
+                         "Use when drawing bar charts as SVG.")
+        self.assertFalse((skills.library() / "bom-skill" / "SKILL.md").read_bytes()
+                         .startswith(b"\xef\xbb\xbf"))  # what OpenCode reads opens with `---`
+
     def test_the_librarys_commits_ignore_the_users_signing_and_hooks(self):
         # a signing prompt or a global hook failed `wb skill add` from Claude's Bash (the 2026-11-16 audit)
         hooks = Path(self.tmp.name) / "hooks"

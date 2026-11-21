@@ -3245,7 +3245,9 @@ quotes are stripped. Fields used: `name`, `description`, `license`.
 - Refused: no file; a name not matching `^[a-z0-9]+(-[a-z0-9]+)*$`; a front-matter name that
   differs; no description, or one over 300 characters (it's all an agent sees before loading);
   the whole file over 8000 UTF-8 bytes; a body path `references/…`, `scripts/…`, `templates/…` or
-  `assets/…` that doesn't exist beside the source file.
+  `assets/…` that doesn't exist beside the source file. A leading UTF-8 BOM (a Windows
+  editor's) is read past (`parse`, `utf-8-sig`) and left out of the library's copy: before the
+  `---` it hid the front matter, refused as "front matter name is ''" (#479, the audit of 1.8).
 - Warned: a body over 120 lines; a home path (`/home/`, `/Users/`, `/root/`, `/var/home/`) or `~/` anywhere (agents go looking for those paths); a
   description without when/for/before/after/if; for a SKILL.md in a directory, clutter
   (README.md, CHANGELOG.md, .env, .gitignore, LICENSE.txt) or more than 10 other files; a body that

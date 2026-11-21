@@ -20,6 +20,7 @@ first and never goes in by itself: Claude reads it, adapts it and adds it like i
 """
 from __future__ import annotations
 
+import codecs
 import os
 import re
 import shutil
@@ -93,8 +94,10 @@ def _commit(message: str) -> None:
 
 def parse(skill_md: Path) -> dict:
     """{name, description, license, body} from a SKILL.md: YAML-ish front matter, top-level keys,
-    a value folded from its indented lines (`description: >` as public skills often write it)."""
-    text = skill_md.read_text()
+    a value folded from its indented lines (`description: >` as public skills often write it).
+    A leading UTF-8 BOM (a Windows editor's) is dropped: before the `---` it hid the front matter,
+    and the skill was refused for its name and description (#479, the audit of 1.8)."""
+    text = skill_md.read_text(encoding="utf-8-sig")
     meta, body, key = {}, text, None
     m = re.match(r"^---\n(.*?)\n---\n?(.*)$", text, re.S)
     if m:
@@ -206,6 +209,9 @@ def add(src: Path, name: str, message: str, source: str = "") -> tuple[str, list
         dest.mkdir(parents=True, exist_ok=True)
         if (dest / "SKILL.md").resolve() != src.resolve():
             shutil.copyfile(src, dest / "SKILL.md")
+    md = dest / "SKILL.md"
+    if (raw := md.read_bytes()).startswith(codecs.BOM_UTF8):  # the library's copy without it (#479)
+        md.write_bytes(raw[len(codecs.BOM_UTF8):])
     _git("add", "-A", "--", name)
     if _git("status", "--porcelain", "--", name).strip():
         _commit(f"{name}: {message}" + (f"\n\nSource: {source}" if source else ""))
