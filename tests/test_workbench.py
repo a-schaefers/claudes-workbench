@@ -9634,6 +9634,65 @@ class Discovery(Base):
             models.resolve("gpt")
 
 
+class ModelRename(Base):
+    """A model's record follows it to a new id (#818: renaming the provider or an alias started
+    its record, slice, knobs and speed fresh)."""
+    NEW, OLD = "ollama/mimo-v2.6:9b-q8_0", "local/mimo-v2.6:9b-q8_0"
+
+    def rows(self, model, n=3, **x):
+        for _ in range(n):
+            store.append_jsonl(store.home() / "results.jsonl", {
+                "model": model, "size": "trivial", "outcome": "accepted", "ran": True, "window": 32768,
+                "active_minutes": 10, "ts": time.time(), "tuned": {"fresh_at": 0.6},
+                "steps": [{"files": 9, "lines": 900, "landed": True, "window": 32768}], **x})
+
+    def refused(self, *argv) -> str:
+        err = io.StringIO()
+        with self.assertRaises(SystemExit), redirect_stdout(io.StringIO()), redirect_stderr(err):
+            cli.main(list(argv))
+        return err.getvalue()
+
+    def test_wb_model_rename_carries_the_old_ids_record_routing_slice_knobs_speed_and_stats(self):
+        from workbench import models, router, stats, tuning
+        self.rows(self.OLD, n=4)
+        router.record_read_bound(self.OLD, 40)
+        new = models.resolve(self.NEW)
+        before = router.slice(new)
+        self.assertEqual(router.score(new, "trivial").tries, 0)       # a fresh start, as it was
+        self.assertEqual(router.speed(self.NEW), {})
+        self.assertIn("nothing is recorded under ollama/nothing",
+                      self.refused("model", "rename", "ollama/nothing", self.NEW))
+        self.assertIn("still in OpenCode's config", self.refused("model", "rename", "ollama/qwen3.8-27b", self.NEW))
+        self.assertIn("wb model rename <old id> <new id>", self.refused("model", "rename", self.OLD))
+        self.assertIn("carries on", run_wb("model", "rename", self.OLD, "mimo"))
+        self.assertEqual(json.loads(Path(os.environ["WB_MODELS"]).read_text())[self.NEW]["renamed_from"], self.OLD)
+        self.assertEqual(router.score(new, "trivial").tries, 4)
+        self.assertNotEqual((router.slice(new).files, router.slice(new).lines), (before.files, before.lines))
+        self.assertEqual(router.speed(self.NEW), {"read": 40})
+        self.assertGreater(router.budgets(new)["silence"], 900)        # no default-budget stall
+        self.assertEqual(len(tuning.record("fresh_at", self.NEW, 32768)[0.6]), 4)
+        lines = stats.feed()["model_lines"]
+        self.assertEqual([(x["model"], x["tasks"]) for x in lines["lines"]], [(self.NEW, 4)])
+        self.assertNotIn("older", lines)
+
+    def test_an_id_gone_from_the_config_on_the_same_ollama_digest_is_the_same_model(self):
+        from workbench import models, router
+        new = models.resolve(self.NEW)
+        self.rows(self.OLD, weights_id="ollama:0123456789abcdef")
+        self.rows("ollama/qwen3.8-27b", weights_id="ollama:0123456789abcdef")  # configured: apart
+        self.rows("other/size-alike", weights_id="bytes:9000")                 # a size: too weak
+        with mock.patch.object(models, "identity", lambda m: (
+                "ollama:0123456789abcdef" if m.id == self.NEW else "bytes:9000")):
+            self.assertEqual(router.earlier(new), [self.OLD])
+            self.assertEqual(router.score(new, "trivial").tries, 3)
+            self.assertEqual(router.earlier(new, probe=False), [])
+            self.assertEqual(router.earlier(models.resolve("strata")), [])  # bytes: never linked
+        from workbench import stats
+        self.rows(self.NEW, n=1, weights_id="ollama:0123456789abcdef")
+        lines = stats.feed()["model_lines"]["lines"]
+        self.assertIn((self.NEW, 4), [(x["model"], x["tasks"]) for x in lines])
+
+
 class Routing(Base):
     def setUp(self):
         super().setUp()

@@ -2116,6 +2116,8 @@ from `TREND_MIN` 6 rows, `write_change_pct`: the newest third's median against t
 third's), `model_lines` (what the tab draws, #638: `{lines: [{model, variants, windows, last,
 …the same}], older: {models, tasks}}`: the models OpenCode has now (`models.discover`), a `wb
 optimize` variant folded under its source (models.json `variant_of`, a retired variant's too),
+an id the model had before folded under the one it has now (`renamed_from`, or an id gone from
+the config on the Ollama digest a configured one's rows ran on: #818),
 the most recently used first, its speeds the newest variant's; a model no longer configured or
 with no task in `stats.OLD_DAYS` 90 days is counted in `older`; `models` keeps every one
 split), `sizes`, `stacks` (`{tasks, accepted_pct}`), `days` (the last 30 local days: `{day,
@@ -3000,6 +3002,17 @@ model id; a model's entry is merged over its provider's (`{**provider, **model}`
   variant first (#584). A variant of a variant keeps the first source here and names the variant
   it was made from in `replaces: <id>` (#723). `wb model retire` keeps both keys, so a retired
   variant's tasks stay in its source's record.
+- `renamed_from: <id>`: `wb model rename OLD NEW` wrote it on NEW: the id the model had before
+  (a provider renamed, `ollama` to `local`; `name:latest` moved to its explicit tag; a llama-swap
+  or LM Studio alias renamed), followed back through earlier renames (`router.earlier`). The
+  model's record carries over: the router's score (`router.lineage`), its slice, its tuned knobs
+  (`tuning._rows`), its speed when the new id has none measured (`router.speed`, so the budgets
+  aren't the defaults again) and its Stats line. Without it, an id no longer discovered whose
+  newest results row ran on the Ollama digest the model has now (`weights_id` against
+  `models.identity`) is linked the same way, by the router only while the server answers, by the
+  Stats line from the rows' own `weights_id`; a `bytes:` size is too weak a match to link. Keyed
+  by the id alone, each of these started the model fresh: behind the models with a record, on the
+  window's guess, the default knobs and budgets (#818).
 
 **Status** (`status` → {available, resident, why}). First what the config alone rules out, so the
 fake models meet it too: an entry with `tool_call: false` ("OpenCode's config says it can't call
@@ -6201,6 +6214,7 @@ delivered as taken (`_stale_notes`, *Notes*).
 | `wb optimize [start\|estimate\|report\|stop\|apply] [<id>…]` | `--bench`, `--if-due` | Asked for, or when due at setup and session start (*Optimize*). `start --if-due`: only when due, else nothing printed. `estimate`: how long a run would hold the GPU. `start`: detached; measures each Ollama model's largest window all on the GPU (refused while a task holds it; a task that wants it stops it); `--bench` then starts `wb bench run` on every model. `report` (the default): a line per model. `stop`. `apply <id>…`: adds the measured window as an entry of its own beside the model (an Ollama `<name>:<tag>-<N>k`, `optimize.entry_name`, with that `num_ctx`, the entry's settings copied; refused when that name exists). |
 | `wb remote <host>` | `--port N` (11434), `--context N`, `--remove` | Another machine's Ollama as this one's models: provider `ollama-<host>` marked `local: true`, each tool-capable model it has pulled registered as `wb model add` would, one line each (see *Models*); exit 1 when it doesn't answer (with `OLLAMA_HOST=0.0.0.0` to try). Refuses a provider of that id already there for another baseURL, and a host no URL can carry; an IPv6 address is bracketed either way (#707). `--remove` undoes it; not while OpenCode's default model or `small_model` is one of them (#708), nor for a provider wb didn't add or that now points elsewhere. |
 | `wb model retire <id>` | `--delete` | Unregisters it (not OpenCode's default `model` nor its `small_model`, each refusal naming the field: #708) and drops its models.json overrides but `variant_of` and `replaces` (its tasks stay in its source's record, #723); `--delete` removes Ollama's weights (or says `ollama rm <name>` when it can't). |
+| `wb model rename <old id> <new id>` | | The new id (a model OpenCode has now) carries on the old one's record (models.json `renamed_from`, *Models*, #818): refused when the old id is still configured (its tasks would count twice: retire it first) or nothing is recorded under it. |
 | `wb model sizes <id> [trivial] [significant]` | | Limits the sizes it's routed (none: every size). A flag or size for another action is refused, not ignored (#602): `--url`, `--start`, `--stop`, `--label`, `--context` and `--pull` go with `add`, `--delete` with `retire`, sizes with `sizes`. |
 | `wb scout` | `--done [--notes "…"]` (`--notes` without `--done` refused, #602), `--due`, `--watch "…"`, `--unwatch N` (1-based; 0 refused) | The weekly check's facts (with the GPU budget and the devices it counts, `cli.gpu_line`; where Ollama's settings were read, `cli.ollama_line`; the model servers here, `cli.server_lines`: the server commands on PATH (`models.SERVER_COMMANDS`) and each usual port whose `/v1/models` answers (`models.SERVER_PORTS`: Ollama's 11434, LM Studio's 1234, 8080, vLLM's 8000, KoboldCpp's 5001, SGLang's 30000, Jan's 1337 and text-generation-webui's 5000, the last two missing until #810; a 401 is a server that wants an API key, `NEEDS_KEY`, said so, unless it is wb's own web chat on 1337, and a 403 is nothing, macOS's AirPlay on 5000; on WSL2, at the Windows host too when nothing answers here, and `models.WSL_NAT` when nothing answers at all: *A server on Windows, from WSL2*, #663), flagged when OpenCode has no provider for it, compared by `models.server_key`, so `::1`, `localhost` or this host's name is one server, #588); the image and audio engines (`audio.coverage`: what the audio ones cover), and an image server answering on ComfyUI's or A1111's port that no engine uses (`cli.image_server_lines`, #753); `--done` records it; `--due` exits 0 when one is due (7 days); the watch list; each model's bench cases passed, when replayed. |
 | `wb skill list \| show <n> \| scan <n\|path>` | | The library, a skill with its history, the scan alone. |

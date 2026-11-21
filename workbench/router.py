@@ -131,18 +131,39 @@ def _root(over: dict, model_id: str) -> str:
     return (_up(over, model_id, "variant_of") or [model_id])[-1]
 
 
-def lineage(m: models.Model) -> set[str]:
+# A model's record (score, slice, knobs, speed, the Stats line) was keyed by its OpenCode id, so
+# renaming the provider (`ollama` to `local`), moving from `name:latest` to its explicit tag or
+# renaming a llama-swap alias started it fresh: behind the models with a record, on the window's
+# guess, the default knobs and the default budgets, which stall on a slow machine (#818).
+def earlier(m: models.Model, probe: bool = True) -> list[str]:
+    """The ids ``m`` had before, nearest first: models.json `renamed_from` (wb model rename),
+    followed back; and, with ``probe`` (a server read, cached: models.identity), each id no
+    longer discovered whose newest results row ran on the Ollama digest ``m`` has now. Only a
+    digest: a `bytes:` size matches other weights too often to be called the same model."""
+    over = models._overrides()
+    out = _up(over, m.id, "renamed_from")
+    if probe and (w := models.identity(m)) and w.startswith("ollama:"):
+        newest = {r["model"]: r.get("weights_id") for r in store.results() if r.get("model")}
+        if any(v == w for k, v in newest.items() if k != m.id):
+            found = models.discover()
+            out += [k for k, v in newest.items()
+                    if v == w and k != m.id and k not in found and k not in out]
+    return out
+
+
+def lineage(m: models.Model, probe: bool = True) -> set[str]:
     """The ids that share ``m``'s record: a `wb optimize apply` variant (models.json
     `variant_of`), its source, and the source's other variants, followed to the first source: a
     variant of a variant (an apply after the GPU changed) once named only the one it came from,
     and the first source's record split off (#723). One model at two windows is one model's
-    record (#584)."""
+    record (#584). And the ids it had before (earlier, #818)."""
     over = models._overrides()
     if m.extra.get("variant_of") and not (over.get(m.id) or {}).get("variant_of"):
         over = {**over, m.id: {**(over.get(m.id) or {}), "variant_of": m.extra["variant_of"]}}
     root = _root(over, m.id)
-    return {m.id, root} | {k for k, v in over.items() if isinstance(v, dict) and v.get("variant_of")
-                           and _root(over, k) == root}
+    return {m.id, root, *earlier(m, probe)} | {
+        k for k, v in over.items() if isinstance(v, dict) and v.get("variant_of")
+        and _root(over, k) == root}
 
 
 def replaced(ids) -> set[str]:
@@ -181,7 +202,7 @@ def weights_changed(m: models.Model) -> bool:
 
 def score(m: models.Model, size: str, state: dict | None = None, stack=()) -> Score:
     state = state or models.status(m)
-    ids = lineage(m)
+    ids = lineage(m, probe=state["available"])  # a server down isn't asked its weights
     real = [r for r in store.results() if r.get("model") in ids and r.get("size") == size
             and tuning.judged(r)]
     # the weights each model has now: a server just found down isn't asked again (the audit)
@@ -392,7 +413,8 @@ def slice(m: models.Model) -> Slice:
     scale = min(window / BASE_WINDOW, GUESS_MAX) if window else 1
     files, lines = max(1, round(BASE_FILES * scale)), max(50, round(BASE_LINES * scale / 10) * 10)
     basis = f"{window // 1024}K window" if window else "window unknown"
-    rows = same_weights([r for r in store.results() if r.get("model") == m.id and tuning.judged(r)],
+    ids = {m.id, *earlier(m)}  # under the ids it had before too (#818)
+    rows = same_weights([r for r in store.results() if r.get("model") in ids and tuning.judged(r)],
                         weights_now({m.id}))  # another model's steps under the same id (#726)
     steps = [s for r in rows for s in r.get("steps") or []
              if s.get("files") and (not window or s.get("window") in (None, window))]
@@ -501,8 +523,13 @@ def speed_samples(messages: list[dict]) -> dict:
 
 
 def speed(model_id: str) -> dict:
-    """{"write", "read"}: the model's median tokens per second on this machine, where measured."""
-    row = (store.read_json(_speed_path(), {}) or {}).get(model_id) or {}
+    """{"write", "read"}: the model's median tokens per second on this machine, where measured;
+    unmeasured under this id, under the nearest id it had before (earlier, #818)."""
+    data = store.read_json(_speed_path(), {}) or {}
+    row = data.get(model_id) or {}
+    if not row and data:
+        m = models.discover().get(model_id)
+        row = next((data[i] for i in (earlier(m) if m else []) if data.get(i)), {})
     return {k: statistics.median(row[k]) for k in ("write", "read") if row.get(k)}
 
 

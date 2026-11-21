@@ -192,10 +192,13 @@ def acted(name: str, row: dict, ceiling=None) -> bool:
 
 def _rows(model: str, window) -> list[dict]:
     """The rows for this model and window recorded on the weights it has now (router.same_weights:
-    knobs learned on another model under the same id don't carry over, #726)."""
-    from . import router  # router imports this module
-    return router.same_weights([r for r in store.results() if _key(r) == (model, window)],
-                               router.weights_now({model}))
+    knobs learned on another model under the same id don't carry over, #726), under the ids it
+    had before too (router.earlier: a renamed provider or alias started fresh, #818)."""
+    from . import models, router  # router imports this module
+    m = models.discover().get(model)
+    ids = {model, *(router.earlier(m) if m else [])}
+    return router.same_weights([r for r in store.results() if r.get("model") in ids
+                                and r.get("window") == window], router.weights_now({model}))
 
 
 def record(name: str, model: str, window, ceiling=None) -> dict:

@@ -3689,6 +3689,27 @@ def cmd_audio(a):
           "each spectrogram; for music or a voice's character, ask the user to listen")
 
 
+def _model_rename(old: str, rest: list) -> None:
+    """wb model rename OLD NEW: NEW carries on OLD's record (models.json `renamed_from`, #818)."""
+    if len(rest or []) != 1:
+        die("wb model rename <old id> <new id>")
+    try:
+        m = models.resolve(rest[0])
+    except KeyError as e:
+        die(e.args[0] if e.args else f"no model {rest[0]}")
+    if old == m.id:
+        die(f"{old} is already its id")
+    if old in models.discover():  # two configured ids on one record would count its tasks twice
+        die(f"{old} is still in OpenCode's config: retire it first (wb model retire {old}), or "
+            "leave the two apart")
+    if not (any(r.get("model") == old for r in store.results(trials=True))
+            or (store.read_json(router._speed_path(), {}) or {}).get(old)):
+        die(f"nothing is recorded under {old}: no task or speed to carry over")
+    models.set_override(m.id, "renamed_from", old)
+    print(f"{m.id} carries on {old}'s record: its routing, slice, tuned settings, speed and "
+          "Stats line")
+
+
 def cmd_model(a):
     """Add a model to OpenCode's config (pulling it first with --pull), or retire one."""
     # before sizes, which returned first: a flag for another action was accepted and ignored (#602)
@@ -3696,6 +3717,8 @@ def cmd_model(a):
         die("--url, --start, --stop, --label, --context and --pull go with wb model add")
     if a.action != "retire" and a.delete:
         die("--delete goes with wb model retire")
+    if a.action == "rename":
+        return _model_rename(a.id, a.sizes)
     if a.action != "sizes" and a.sizes:
         die(f"sizes ({' '.join(a.sizes)}) go with wb model sizes <id>")
     if a.action == "sizes":
@@ -5266,10 +5289,11 @@ def parser() -> argparse.ArgumentParser:
                    help="make the router's pick for significant tasks OpenCode's default model")
     s.set_defaults(f=cmd_models)
     s = sub.add_parser("model", help="add a model to OpenCode (--pull downloads it), retire one, "
-                                     "or limit the task sizes it is routed")
-    s.add_argument("action", choices=["add", "retire", "sizes"])
-    s.add_argument("id", help="provider/model")
-    s.add_argument("sizes", nargs="*", help="sizes: the only task sizes it gets (none: all)")
+                                     "limit the task sizes it is routed, or carry a renamed one's record")
+    s.add_argument("action", choices=["add", "retire", "sizes", "rename"])
+    s.add_argument("id", help="provider/model (rename: the id it had before)")
+    s.add_argument("sizes", nargs="*", help="sizes: the only task sizes it gets (none: all); "
+                   "rename: the id it has now")
     s.add_argument("--pull", action="store_true", help="add: download it into Ollama first")
     s.add_argument("--url", help="add: the baseURL of the OpenAI-compatible server it runs on "
                    "(e.g. http://127.0.0.1:8080/v1), when OpenCode has no provider for it yet")
