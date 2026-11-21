@@ -6332,6 +6332,27 @@ class Lane(Base):
                                                    home / ".ssh" / "id_ed25519"]),
                          ["read", "read", "refused", "refused"])
 
+    @unittest.skipUnless(lane.abi(), "needs Landlock")
+    @home_outside_the_lane
+    def test_jupyter_writes_its_kernel_connection_files_inside_the_lane(self):
+        # #668 (the 2026-11-21 audit): ~/.local/share/jupyter/runtime is outside the lane, so
+        # every notebook test failed with PermissionError before a kernel started
+        self.start("t-jupyter", "ok")
+        wait_phase("t-jupyter", {"review"})
+        task = store.Task("t-jupyter")
+        home = self.fake_home()
+        (home / ".local" / "share").mkdir(parents=True)
+        env = runner.agent_env(task)
+        script = ("import os; d = os.environ.get('JUPYTER_RUNTIME_DIR', os.path.expanduser("
+                  "'~/.local/share/jupyter/runtime')); "     # jupyter_core's default without it
+                  "os.makedirs(d, exist_ok=True); open(os.path.join(d, 'kernel-1.json'), 'w')")
+        out = subprocess.run(lane.wrap(context.writable(task), [sys.executable, "-c", script],
+                                       context.readable(task)), env=env, capture_output=True,
+                             text=True, timeout=20)
+        self.assertEqual(out.returncode, 0, out.stderr)
+        with mock.patch.dict(os.environ, {"JUPYTER_RUNTIME_DIR": "/srv/jupyter"}):
+            self.assertEqual(runner.agent_env(task)["JUPYTER_RUNTIME_DIR"], "/srv/jupyter")
+
     def test_a_fresh_cargo_home_gets_its_caches_made_so_the_split_grants_them(self):
         # the 0.90 review: ~/.cargo split around bin/ and env granted only what existed, so a
         # fresh rustup install couldn't make registry/ and a git dependency couldn't make git/

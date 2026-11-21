@@ -370,6 +370,10 @@ def agent_env(task: store.Task, run: str = "") -> dict:
     places = context.writable(task)
     if places is not None:  # its own: the user's holds their bus and agents
         env["XDG_RUNTIME_DIR"] = str(context.runtime_dir(task))
+        # Jupyter's kernel connection files, in the agent's runtime dir: its default,
+        # ~/.local/share/jupyter/runtime, is outside the lane, and every notebook test
+        # (nbmake, nbval, papermill) failed with PermissionError before a kernel started (#668)
+        env.setdefault("JUPYTER_RUNTIME_DIR", str(context.runtime_dir(task) / "jupyter"))
         # On WSL, not the Windows PATH, whose programs run outside the lane (context.agent_path),
         # nor the interop socket's name (the 0.90 review; /init finds it without: interop_gap)
         env.pop("WSL_INTEROP", None)
