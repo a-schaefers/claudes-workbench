@@ -20175,6 +20175,36 @@ class SkillLearning(Base):
         self.assertIn("names scripts/test.sh, which the skill doesn't have: the agent would go looking",
                       self.refused("skill", "add", "polls", "--from", str(d), "-m", "no"))
 
+    def test_a_single_file_skill_is_checked_as_the_file_alone_not_against_its_directory(self):
+        # #907 (the third audit of 2026-11-21): --from <file> copies only the file, but check()
+        # read its parent as the skill's directory: a scratch dir's references/api.md passed a
+        # skill the library's copy lacked, and its clutter and file count were warned of
+        md = self.draft("solo", body="See references/api.md, then run scripts/x.sh.\n") / "SKILL.md"
+        scratch = md.parent
+        (scratch / "references").mkdir()
+        (scratch / "references" / "api.md").write_text("Not the skill's.\n")
+        (scratch / "scripts").mkdir()
+        (scratch / "scripts" / "other.sh").write_text("true\n")
+        (scratch / ".gitignore").write_text("*.tmp\n")
+        for i in range(12):
+            (scratch / f"junk{i}.tmp").write_text("x\n")
+        err = self.refused("skill", "add", "solo", "--from", str(md), "-m", "no")
+        self.assertIn("names references/api.md, which the skill doesn't have", err)
+        self.assertNotIn("scripts/x.sh, which the skill doesn't have: the agent", err)  # a warning
+        md.write_text(md.read_text().replace("See references/api.md, then run", "Run"))
+        out = run_wb("skill", "add", "solo", "--from", str(md), "-m", "one file")
+        self.assertIn("added solo", out)
+        self.assertIn("names scripts/x.sh, which the skill doesn't have: if it is the skill's", out)
+        self.assertNotIn(".gitignore", out)
+        self.assertNotIn("supporting files", out)
+        # an update of one file keeps the library copy's other files: those count as present
+        from workbench import skills
+        lib = skills.library() / "solo"
+        (lib / "references").mkdir()
+        (lib / "references" / "api.md").write_text("The skill's own.\n")
+        md.write_text(md.read_text().replace("Run scripts/x.sh.", "See references/api.md."))
+        self.assertIn("updated solo", run_wb("skill", "add", "solo", "--from", str(md), "-m", "kept"))
+
     def test_a_patch_fixes_the_passage_that_misled_and_is_judged_on_its_own(self):
         from workbench import skills
         run_wb("skill", "add", "alpha", "--from", str(self.draft(

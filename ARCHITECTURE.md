@@ -4234,7 +4234,11 @@ quotes are stripped. Fields used: `name`, `description`, `license`.
   differs; no description, or one over 300 characters (it's all an agent sees before loading);
   the whole file over 8000 UTF-8 bytes; a body path `references/…` that doesn't exist beside the
   source file, or one under `scripts/`, `templates/` or `assets/` when the skill has that
-  directory but not the file. A leading UTF-8 BOM (a Windows
+  directory but not the file. A single file (`--from <file>`) is copied alone, so its parent
+  directory isn't the skill's: its paths are looked for only in the library's copy it updates
+  (whose other files stay), and its parent isn't walked for clutter or counted; read from its
+  parent, a scratch directory holding a `references/api.md` passed a skill that names a file the
+  library's copy lacks (#907). A leading UTF-8 BOM (a Windows
   editor's) is read past (`parse`, `utf-8-sig`) and left out of the library's copy: before the
   `---` it hid the front matter, refused as "front matter name is ''" (#479, the audit of 1.8).
 - Warned: a body over 120 lines; a home path (`/home/`, `/Users/`, `/root/`, `/var/home/`) or `~/` anywhere (agents go looking for those paths); a
