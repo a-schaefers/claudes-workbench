@@ -5528,7 +5528,9 @@ or `wb`), `mem.skill` (`$CLAUDE_CONFIG_DIR` or `~/.claude`, then `skills/workben
 `WB_HOME`, `CLAUDE_CONFIG_DIR` and `WB_SAVINGS` (`mem.savingsFile`) read as wb reads them (`absolutePath`, `store.absolute_env`'s
 rule: `~` expanded, relative to the session's directory, where the mod's `wb` calls run, `.`,
 `..` and extra slashes dropped: settings.json's `env` passes them literally, and a `~` left the
-pane empty and a trailing slash the Claude-coding guard off, #454),
+pane empty and a trailing slash the Claude-coding guard off, #454), and `WB_BIN` too when it holds a
+`/` or starts with `~` (a bare name still goes through PATH; `~/repos/workbench/bin/wb` ran a literal
+`~` and the mod couldn't run wb at all, #699),
 the chat key (`<start ms>-<6 base36>`, kept across reloads), `mem.cwd` and `mem.home` (the
 session's directory and the home directory, resolved: which tasks without a `session` are this
 session's, `mine`), `mem.ids` (the `sessions` atom plus `$.session.id()`), turns workbench mode back on when

@@ -125,6 +125,30 @@ test('the Claude Code the mod is tested on, or a newer one, hears nothing about 
   expect(toasts.join('\n')).not.toContain('older than')
 })
 
+test('WB_BIN is read as wb reads its path variables: a ~ expanded, a relative one against the session\'s directory (#699)', async ($, on) => {
+  // #699: settings.json's env passes `~/repos/workbench/bin/wb` literally, and the mod ran a `~`
+  const clock = mock.clock(on, { now: 1_800_000_000_000 })
+  const files: Record<string, string> = {}
+  fakeTasks(on, files, [])
+  const runs: string[][] = []
+  on('process.run', (_: any, e: any) => { runs.push(e.argv); return { value: { exitCode: 0, stdout: '', stderr: '' } } })
+  on('ui.toast', () => ({ value: undefined }))
+  for (const [bin, want] of [['~/repos/workbench/bin/wb', '/home/u/repos/workbench/bin/wb'],
+    ['bin/wb', '/home/u/a/bin/wb'], ['wb-dev', 'wb-dev']]) {
+    engine.env = { WB_BIN: bin }
+    try {
+      runs.length = 0
+      await $.session.start({ cwd: '/home/u/a', surface: 'terminal', isInteractive: true })
+      await clock.advance(1000)
+      await $.command.run({ command: 'workbench-quit', args: '' })
+      await clock.advance(1000)
+    } finally {
+      engine.env = undefined
+    }
+    expect(runs.find(r => r[1] === 'stop')?.[0]).toBe(want)
+  }
+})
+
 test('a copy updated from /delegate gets its /workbench link from wb setup', async ($, on) => {
   const ran: string[][] = []
   const toasts: string[] = []

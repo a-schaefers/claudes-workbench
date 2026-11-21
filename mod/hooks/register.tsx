@@ -2485,7 +2485,11 @@ export const register: Register = (on, options) => {
     mem.cwd = await real(e.cwd)
     const abs = (v: string) => absolutePath(v, home ?? '', mem.cwd) // as wb reads it (#454)
     mem.root = wbHome ? abs(wbHome) : `${home}/.local/state/workbench`
-    mem.wb = (await $.env.get('WB_BIN')) || 'wb'
+    // a path as wb reads its own (a `~` or a relative one, settings.json's env passes it as typed:
+    // `~/repos/workbench/bin/wb` ran a literal `~`, and the mod couldn't run wb at all, #699); a
+    // bare name still goes through PATH
+    const bin = await $.env.get('WB_BIN')
+    mem.wb = bin ? (bin.includes('/') || bin.startsWith('~') ? abs(bin) : bin) : 'wb'
     const config = await $.env.get('CLAUDE_CONFIG_DIR')
     mem.skill = `${config ? abs(config) : `${home}/.claude`}/skills/workbench/SKILL.md`
     const priced = await $.env.get('WB_SAVINGS')
