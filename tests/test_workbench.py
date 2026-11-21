@@ -7961,6 +7961,9 @@ class Routing(Base):
 
 
 class Cleanup(Base):
+    """What history leaves behind (the 2026-11-19 audit, finding 18): merged branches, rules,
+    runtime directories, old closed tasks and old notices, and the chat read from its end."""
+
     def test_state_files_reach_the_disk_before_they_replace_the_old_ones(self):
         # #475 (the audit of 1.8): a rename without an fsync can leave status.json or task.json
         # empty after a power loss on XFS or ext4 without auto_da_alloc
@@ -7986,9 +7989,6 @@ class Cleanup(Base):
         st = wait_phase("t-dmg", {"failed"})
         self.assertTrue(st["last"].startswith("task t-dmg's task.json is damaged"), st["last"])
         self.assertNotIn("the runner crashed", store.notices()[-1]["text"])  # a line, no traceback
-
-    """What history leaves behind (the 2026-11-19 audit, finding 18): merged branches, rules,
-    runtime directories, old closed tasks and old notices, and the chat read from its end."""
 
     def git(self, *a):
         return subprocess.run(["git", "-C", str(self.repo), *a], capture_output=True, text=True)
