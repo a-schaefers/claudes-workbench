@@ -5043,7 +5043,11 @@ it. ACE-Step's takes peaked at -0.2 dBFS, near clipping, before any `loudnorm`: 
   each submodule it fills, nested ones too, is recorded in `rules/<task>/submodules.json` with a
   copy of its index made right after the fill (stat info fresh, so a check reads only what
   changed). The check runs git with the user's checkout of the submodule as git dir, a scratch
-  copy of that index and the filled directory as work tree: `diff-files` (changed or deleted) and
+  copy of that index and the filled directory as work tree. Both copies keep the index's own time
+  (`shutil.copy2`): git trusts an entry's stat (whole seconds, inode, size) unless its file is as
+  new as the index, so a fresh copy made every entry look older, and a same-size rewrite in the
+  second of the fill, on an inode the filesystem reused, read as unchanged (CI on ext4, one run in
+  ten, batch 7 of 2026-11-21). Then `diff-files` (changed or deleted) and
   `ls-files --others --exclude-standard` (new and not ignored), each nested one on its own. A
   changed or deleted file is an edit: the round report has a NOTE per submodule, and
   `commit_all` refuses ("not committed: edits in submodule <path> can't land: …"), so accept and

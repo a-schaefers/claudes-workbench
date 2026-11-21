@@ -678,8 +678,8 @@ def _fill(repo: Path, commit: str, checkout: Path, keep: Path | None, filled: li
                 _run(src, (f"--work-tree={dest}", "update-index", "-q", "--refresh"), env=env,
                      check=False)
                 name = f"submodule-{len(filled)}.index"
-                with contextlib.suppress(OSError):
-                    shutil.copyfile(env["GIT_INDEX_FILE"], keep / name)
+                with contextlib.suppress(OSError):  # copy2: its time is git's racy-file guard
+                    shutil.copy2(env["GIT_INDEX_FILE"], keep / name)
                 filled.append({"path": at + path, "src": str(src), "sha": sha, "index": name})
         left += [f"{path}/{p}" for p in _fill(src, sha, dest, keep, filled, f"{at}{path}/")]
     return left
@@ -715,7 +715,12 @@ def submodule_check(worktree: Path) -> tuple[list[str], list[str]]:
             opts = (*NO_HOOKS, "-c", "core.fsmonitor=false", f"--work-tree={dest}")
             try:
                 try:
-                    shutil.copyfile(rec.parent / sub["index"], env["GIT_INDEX_FILE"])
+                    # with its own time: git trusts an entry's stat (whole seconds, inode, size)
+                    # unless the file is as new as the index. A fresh copy made every entry look
+                    # older, so a same-size rewrite in the second the fill wrote it, on an inode
+                    # the filesystem reused, read as unchanged, and the edit vanished at accept
+                    # (#419 again; CI on ext4, batch 7 of 2026-11-21)
+                    shutil.copy2(rec.parent / sub["index"], env["GIT_INDEX_FILE"])
                 except OSError:
                     _run(sub["src"], ("read-tree", sub["sha"]), env=env)
                 _run(sub["src"], (*opts, "update-index", "-q", "--refresh"), env=env, check=False)

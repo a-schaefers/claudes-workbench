@@ -16474,6 +16474,38 @@ class Projects(Base):
         self.assertEqual(gitops.submodule_edits(store.Task("t-subedit").worktree), [])
         self.assertIn("merged", run_wb("accept", "t-subedit", "-m", "feat: answer", "--merge"))
 
+    def test_a_same_size_rewrite_in_a_filled_submodule_that_stat_cant_see_is_still_refused(self):
+        # batch 7 of 2026-11-21, CI on ext4 one run in ten: the agent rewrote lib.c at the same
+        # size in the second the fill wrote it, on the inode the filesystem gave back, and the
+        # check's fresh copy of the saved index was newer than every entry, so git trusted the
+        # stat and the edit vanished at accept (#419). Made certain here: stat that sees only
+        # whole-second times and sizes, the file's time put back, the saved index as old as it
+        tmp = Path(self.tmp.name)
+        lib = tmp / "lib"
+        subprocess.run(["git", "init", "-q", str(lib)], check=True)
+        (lib / "lib.c").write_text("int x;\n")
+        subprocess.run(["git", "-C", str(lib), "add", "."], check=True)
+        subprocess.run(["git", "-C", str(lib), "-c", "user.email=t@t", "-c", "user.name=t",
+                        "commit", "-qm", "lib"], check=True)
+        g = lambda *a: subprocess.run(["git", "-C", str(self.repo), *a], check=True,  # noqa
+                                      capture_output=True)
+        g("-c", "protocol.file.allow=always", "submodule", "add", "-q", str(lib), "vendor/lib")
+        g("commit", "-qm", "sub")
+        for key, value in (("core.checkStat", "minimal"), ("core.trustctime", "false")):
+            subprocess.run(["git", "-C", str(self.repo / "vendor/lib"), "config", key, value], check=True)
+        self.start("t-racy", "ok")
+        wait_phase("t-racy", {"review"})
+        f = store.Task("t-racy").worktree / "vendor/lib/lib.c"
+        was = os.stat(f).st_mtime_ns
+        os.chmod(f, 0o644)
+        f.write_text("int z;\n")                             # the same size
+        os.utime(f, ns=(was, was))
+        saved = context.rules_dir(store.Task("t-racy")) / "submodule-0.index"
+        os.utime(saved, ns=(was, was))
+        time.sleep(1.1)                                       # a copy made now is a second newer
+        self.assertIn("edits in submodule vendor/lib can't land: lib.c",
+                      "; ".join(gitops.submodule_edits(store.Task("t-racy").worktree)))
+
     def test_build_output_in_a_filled_submodule_is_noted_and_never_blocks_accept(self):
         # #889 (the third 2026-11-21 audit): `make -C vendor/lua` in the test command wrote
         # objects the submodule doesn't ignore, each round said "edits ... can't land", and
