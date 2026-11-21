@@ -3904,7 +3904,7 @@ class ConfigLayer(Base):
                                                                 "theme": "dark"})
             got = json.loads(runner.rules_env({"permissions": [], "compaction": {"auto": True}})
                              ["OPENCODE_CONFIG_CONTENT"])
-            self.assertNotIn("compaction", got)     # the layer's stands: the handover's backstop
+            self.assertEqual(got["compaction"], {"auto": True})  # the layer's: the handover's backstop
             self.assertEqual(got["theme"], "dark")
             def doctor():
                 buf = io.StringIO()
@@ -3917,6 +3917,36 @@ class ConfigLayer(Base):
             self.assertIn("doesn't parse", doctor())
         finally:
             os.environ.pop("OPENCODE_CONFIG_CONTENT")
+
+    def test_what_a_project_config_could_change_is_said_again_after_it(self):
+        # #519: a repo's opencode.json loads after the layer, so its compaction, small_model,
+        # autoupdate and the model's window won; OPENCODE_CONFIG_CONTENT loads after it
+        cfg = json.loads(Path(os.environ["WB_OPENCODE_CONFIG"]).read_text())
+        cfg["provider"]["ollama"]["models"]["mimo-v2.6:9b-q8_0"].update(
+            limit={"context": 32768, "output": 2048}, options={"max_tokens": 2048, "temperature": 1})
+        Path(os.environ["WB_OPENCODE_CONFIG"]).write_text(json.dumps(cfg))
+        self.start("t-pin", "ok")
+        wait_phase("t-pin", {"review"})
+        task = store.Task("t-pin")
+        env = runner.agent_env(task)
+        layer = json.loads(Path(env["OPENCODE_CONFIG"]).read_text())
+        got = json.loads(env["OPENCODE_CONFIG_CONTENT"])
+        self.assertEqual(got["small_model"], task.spec["model"])
+        self.assertIs(got["autoupdate"], False)
+        self.assertTrue(got["compaction"]["auto"])
+        self.assertEqual(got["compaction"], layer["compaction"])
+        self.assertEqual(got["provider"]["ollama"]["models"], {"mimo-v2.6:9b-q8_0": {
+            "limit": {"context": 32768, "output": 2048}, "options": {"max_tokens": 2048}}})
+        # the layer's provider timeouts (#491) stay beside the pins, and nothing else of the entry
+        self.assertEqual(got["provider"]["ollama"]["options"],
+                         {k: layer["provider"]["ollama"]["options"][k] for k in runner.PROVIDER_TIMEOUTS})
+        # with no provider in the layer, the user's own content keeps its providers, the pins
+        # merged in
+        users = {"provider": {"strata": {"models": {}}}}
+        with mock.patch.object(runner.models, "users_config_content", return_value=users):
+            got = json.loads(runner.rules_env({"permissions": [], "small_model": task.spec["model"]})
+                             ["OPENCODE_CONFIG_CONTENT"])
+        self.assertEqual(set(got["provider"]), {"strata", "ollama"})
 
     def test_launcher_answers_initialize(self):
         out = subprocess.run(
@@ -4648,6 +4678,33 @@ class RealOpenCodeRun(Base):
         self.assertEqual(runner.context_state(task)["compactions"], 1)
         self.assertEqual(runner.fresh_reason(task), runner.COMPACTED)
         self.assertIn("OpenCode compacted", run_wb("watch", "t-run", "--once", "--no-color"))
+
+    def test_a_projects_opencode_json_keeps_neither_compaction_nor_the_window_nor_titles(self):
+        # #519 (checked on OpenCode 2.3.2): a repo's committed opencode.json loads after the layer
+        # and won: compaction off, a wider window than wb planned the handover against, titles
+        # to the project's small_model. Said again in OPENCODE_CONFIG_CONTENT, none of it holds.
+        task, st = self.answered([WRITE_42])
+        (task.worktree / "opencode.json").write_text(json.dumps({
+            "compaction": {"auto": False}, "small_model": "cap/other", "autoupdate": True,
+            "provider": {"cap": {"models": {
+                "cap": {"limit": {"context": 1_000_000, "output": 1024}},
+                "other": {"name": "other", "tool_call": True, "limit": {"context": 32768}}}}}}))
+        self.server.kill()
+        self.server.wait()
+        self.serve([], read=31_000)                                # every request fills 32K
+        env = {**runner.agent_env(task), "PWD": str(task.worktree)}
+        def turn(text, *session):
+            subprocess.run(lane.wrap(context.writable(task), [
+                "opencode", "run", "--standalone", "-m", "cap/cap", "--format", "json",
+                *session, text]), cwd=task.worktree, env=env, capture_output=True, timeout=180)
+        turn("Go on.", "--session", st["session"])
+        turn("Go on again.", "--session", st["session"])           # OpenCode compacts first
+        self.assertEqual(runner.context_state(task)["compactions"], 1)
+        before = len(self.requests.read_text().splitlines())
+        turn("A new session, so a title.")
+        sent = [json.loads(x).get("model") for x in self.requests.read_text().splitlines()[before:]]
+        self.assertTrue(sent)
+        self.assertEqual(set(sent), {"cap"})                       # not the project's small_model
 
 
 class GitGuard(unittest.TestCase):

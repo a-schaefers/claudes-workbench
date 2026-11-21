@@ -1304,7 +1304,18 @@ layer sets itself (loaded last, the user's `compaction` would undo the handover'
 `provider`, which the layer always sets now: the user's providers stay, with the layer's provider
 timeouts merged on top, so neither their content nor a project's `opencode.json` puts the 300 s
 header wait back (#491). Its `permissions` come before the layer's (the last match wins), and
-`share` is `disabled`; past the limit it goes alone, without its permissions. The layer's `edit` rule also denies
+`share` is `disabled`; past the limit it goes alone, without its permissions.
+What else the layer sets is said there again
+too, so a project config can't change it either (#519, checked on OpenCode 2.3.2: the project's
+document won each): `RESTATED` (`small_model`, `autoupdate`, `compaction`: a project's
+`compaction.auto: false` left a session past the handover point with no backstop, its
+`small_model` got the titles, its `autoupdate` moved OpenCode past `OPENCODE_TESTED`), and the
+task model's `limit` and `options.max_tokens` from wb's own reading of the entry (`model_pins`:
+a `provider` overlay, merged over the user's providers and the layer's timeouts, never a `baseURL` or key; a
+wider window there moved OpenCode's compaction off the one wb planned the handover against).
+The layer's `small_model` is the task's model, which is how `rules_env` finds it. A project
+config can still change what the layer doesn't set: another provider's entries, the task model's
+other options (`temperature`) and its provider's `baseURL`. The layer's `edit` rule also denies
 `OPENCODE_FILES` (`*opencode.json`, `*opencode.jsonc`, `.opencode/*`, `*/.opencode/*`), and the
 round report flags them with Claude's files.
 
@@ -5122,7 +5133,8 @@ nested `.md` files (`docs/`, `skill/`, `mod/`, `agent/`) are unaffected. A new r
   the lane's part of it to `worktree/` and `ask/`, and have the runner check what comes from there
   (`ask_mcp.relay`): nothing the agent writes may steer code outside its lane.
 - **The layer's `permissions`** → they go twice, in the file and as `OPENCODE_CONFIG_CONTENT`
-  (`rules_env`): keep them under `CONFIG_CONTENT_MAX`, or the fallback drops AGENTS.md.
+  (`rules_env`): keep them under `CONFIG_CONTENT_MAX`, or the fallback drops AGENTS.md. A new
+  layer key a project config mustn't change goes in `RESTATED` too.
 - **`wb watch --json`** (a style, the order, the activity wording) → the mod's `LINE_STYLE`, its
   pose regex, the `live-1` tag; `--last` and `JSON_LINE_CHARS` with the mod's `KEEP_LINES` and
   `LINE_CHARS`.
