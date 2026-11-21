@@ -1800,18 +1800,30 @@ SHARED_GPU = Path("/var/lib/workbench/gpu")
 def lease_dir() -> Path:
     """Where the GPU lease's files live (gpu.lock, gpu.json, gpu.admit, gpu.load, and a remote
     server's gpu-<host>.*): WB_GPU_DIR, else SHARED_GPU when this account may write it, else the
-    state directory, as before."""
+    state directory, as before (_own_lease)."""
     v = os.environ.get("WB_GPU_DIR")
     if v:
         return Path(os.path.abspath(os.path.expanduser(v)))
     if SHARED_GPU.is_dir() and os.access(SHARED_GPU, os.W_OK | os.X_OK):
         return SHARED_GPU
-    return store.home()
+    return _own_lease()
+
+
+def _own_lease() -> Path:
+    """The state directory, or on a network file system its `machines/<store.machine()>/`: there
+    several machines may share it, and each one's wb read the other's holders as dead and erased
+    them from gpu.json, and took turns with them on a GPU they don't share (#849)."""
+    home = store.home()
+    if not store.network_fs(os.path.realpath(home)):
+        return home
+    own = home / "machines" / store.machine()
+    own.mkdir(parents=True, exist_ok=True)
+    return own
 
 
 def lease_shared() -> bool:
-    """Whether the lease is shared with other accounts (not this account's state directory)."""
-    return os.path.realpath(lease_dir()) != os.path.realpath(store.home())
+    """Whether the lease is shared with other accounts (not this account's own)."""
+    return os.path.realpath(lease_dir()) != os.path.realpath(_own_lease())
 
 
 @contextlib.contextmanager

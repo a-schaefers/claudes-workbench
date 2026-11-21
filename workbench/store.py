@@ -38,6 +38,7 @@ import math
 import os
 import re
 import stat
+import sys
 import time
 import uuid
 from contextlib import contextmanager
@@ -338,6 +339,80 @@ def boot_id() -> str | None:
                 pass
         _BOOT.append(boot)
     return _BOOT[0]
+
+
+_MACHINE: list = []
+
+
+def machine() -> str:
+    """This machine, steadily: /etc/machine-id (Linux, WSL), the hardware UUID (macOS), else the
+    host name. A state directory on a network home is shared by several machines, and each one's
+    wb read the other's live runners as dead (its pid not in this machine's process table): failed
+    them as restarted, and signalled pids of its own (#849). The runner records it (status
+    `machine`), and a runner of another machine is never reaped or stopped here."""
+    if not _MACHINE:
+        mid = None
+        for f in ("/etc/machine-id", "/var/lib/dbus/machine-id"):
+            try:
+                mid = Path(f).read_text().strip() or None
+            except OSError:
+                continue
+            if mid:
+                break
+        if not mid and sys.platform == "darwin":
+            import subprocess
+            try:
+                out = subprocess.run(["ioreg", "-rd1", "-c", "IOPlatformExpertDevice"],
+                                     capture_output=True, text=True, timeout=5).stdout
+                mid = (m := re.search(r'"IOPlatformUUID" = "([^"]+)"', out)) and m.group(1)
+            except (OSError, subprocess.SubprocessError):
+                pass
+        _MACHINE.append(mid or host())
+    return _MACHINE[0]
+
+
+def host() -> str:
+    """This machine's name, for the user (status `host`)."""
+    import socket
+    return socket.gethostname()
+
+
+def elsewhere(st: dict) -> str | None:
+    """The machine a task's runner runs on, when it is another one (status `machine`, named by
+    `host`): its pid means nothing here (#849). None for this machine's, or one recorded before."""
+    m = st.get("machine")
+    return (st.get("host") or m) if m and m != machine() else None
+
+
+# Network file systems by their mount type (/proc/self/mounts, macOS's mount): a state directory
+# on one may be shared by several machines (#849)
+NETWORK_FS = ("nfs", "nfs4", "cifs", "smb3", "smbfs", "afs", "afpfs", "webdav", "ceph", "glusterfs",
+              "lustre", "gpfs", "beegfs", "fuse.sshfs", "fuse.glusterfs", "fuse.cephfs")
+
+
+@functools.cache
+def network_fs(path: str) -> str | None:
+    """The network file system ``path`` (a real path) is on, by its mount type; None for a local
+    one, or where the mounts can't be read."""
+    mounts: list[tuple[str, str]] = []
+    try:
+        for row in Path("/proc/self/mounts").read_text().splitlines():
+            f = row.split()
+            if len(f) > 2:
+                mounts.append((f[1].replace("\\040", " "), f[2]))
+    except OSError:
+        if sys.platform == "darwin":  # "server:/export on /Users (nfs, nodev, …)"
+            import subprocess
+            try:
+                out = subprocess.run(["mount"], capture_output=True, text=True, timeout=5).stdout
+            except (OSError, subprocess.SubprocessError):
+                out = ""
+            for row in out.splitlines():
+                if (m := re.search(r" on (/.*) \(([^,)]+)", row)):
+                    mounts.append((m.group(1), m.group(2)))
+    best = max((m for m in mounts if path == m[0] or path.startswith(m[0].rstrip("/") + "/")),
+               key=lambda m: len(m[0]), default=None)
+    return best[1] if best and best[1] in NETWORK_FS else None
 
 
 def write_json(path: Path, data, mode: int | None = None) -> None:

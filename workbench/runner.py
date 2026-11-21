@@ -2742,7 +2742,8 @@ def _rejoin(task: store.Task, lease) -> None:
 def drive(task: store.Task) -> None:
     # infra: why the machine, not the agent, failed the task's last run (wb bench grades none of it)
     task.set_status(phase="queued", last="waiting for the GPU", pid=os.getpid(), infra=None,
-                    boot=store.boot_id())  # a later boot reaps it as a restart's (cli.reap)
+                    boot=store.boot_id(),  # a later boot reaps it as a restart's (cli.reap)
+                    machine=store.machine(), host=store.host())  # whose pid it is (#849)
     say = lambda msg: task.set_status(last=msg)  # noqa: E731
     try:
         m = models.resolve(task.spec["model"])

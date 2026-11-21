@@ -138,7 +138,7 @@ def spawn_runner(task: store.Task) -> int:
         # 2026-11-16 audit); a flag, not PYTHONUTF8, so the agent and its tests keep their own
         proc = detach([sys.executable, "-X", "utf8", "-m", "workbench.runner", task.name],
                       awake=f"task {task.name}", cwd=PKG_ROOT, env=env, stdout=log, stderr=log)
-    task.set_status(pid=proc.pid)
+    task.set_status(pid=proc.pid, machine=store.machine(), host=store.host())  # whose pid (#849)
     return proc.pid
 
 
@@ -300,6 +300,8 @@ def runner_alive(task: store.Task) -> bool:
     pid = task.status.get("pid")
     if not pid:
         return False
+    if store.elsewhere(task.status):  # another machine's, on a shared state directory: its pid
+        return True                   # isn't in this process table (#849), its own wb reaps it
     try:
         os.kill(pid, 0)
     except (ProcessLookupError, PermissionError):  # gone, or a recycled pid that isn't ours
@@ -415,8 +417,9 @@ def _stop_for_update(tasks) -> str:
     stopped = []
     for t in tasks:
         with store.locked(runner.lock_file(t.name, "cmd")):
-            if t.status.get("phase") in store.CLOSED:
-                continue
+            if t.status.get("phase") in store.CLOSED or (t.status.get("pid")
+                                                         and store.elsewhere(t.status)):
+                continue  # another machine's runner (#849): that machine's wb stops it
             _stop_runner(t)
             t.event({"ts": store.now(), "round": t.status.get("round"), "kind": "stopped",
                      "by": "user", "text": UPDATE_STOP})
@@ -1674,9 +1677,10 @@ def cmd_status(a):
         if phase in store.ACTIVE and not runner_alive(t) and phase != "asking":
             phase += "?"  # the runner died seconds ago (reap waits REAP_GRACE)
         short = sp.get("model", "").split("/")[-1][:16]
+        on = f"on {where}: " if st.get("pid") and (where := store.elsewhere(st)) else ""  # #849
         print(f"{t.name:22} {phase:9} {st.get('round', 1):>3} {short:16} "
               f"{ago(sp.get('created_at')):>5} {ago(st.get('updated_at')):>5}  "
-              f"{(st.get('last') or '')[:70]}")
+              f"{(on + (st.get('last') or ''))[:70]}")
     if a.name and tasks[0].worktree.is_dir():
         print(f"worktree: {tasks[0].worktree}")
     _say(parked_line)
@@ -1753,6 +1757,8 @@ def cmd_diff(a):
 
 def _stop_runner(task):
     pid = task.status.get("pid")
+    if pid and (where := store.elsewhere(task.status)):  # #849: its pid here is another process
+        die(f"{task.name} runs on {where}, which shares this state directory: stop it there")
     if pid and runner_alive(task):
         task.set_status(stopping=True)  # wb's stop, not a shutdown's (runner.SIGNAL_STOP)
         try:
@@ -1789,8 +1795,9 @@ def stop_everything(tasks=None) -> list[str]:
         # each task under its command lock, as one_at_a_time (which --all skips): an accept or
         # discard that closed it after the listing was set back to stuck (the 0.90 review)
         with store.locked(runner.lock_file(t.name, "cmd")):
-            if t.status.get("phase") in store.CLOSED:
-                continue
+            if t.status.get("phase") in store.CLOSED or (t.status.get("pid")
+                                                         and store.elsewhere(t.status)):
+                continue  # another machine's runner (#849): that machine's wb stops it
             _stop_runner(t)
             t.event({"ts": store.now(), "round": t.status.get("round"), "kind": "stopped",
                      "by": "user", "text": "bail out: stopped by the user"})
@@ -4816,6 +4823,9 @@ def cmd_doctor(a):
     except OSError as e:
         why = f"can't make it: {e.strerror or e}"
     line(not why, f"state dir {store.home()}" + (f": {why}" if why else ""))
+    if not why and (fs := store.network_fs(os.path.realpath(store.home()))):  # #849
+        print(f"--  the state dir is on {fs}: every machine sharing it lists its tasks; each one "
+              "runs, reaps and stops only its own, and takes the GPU under its own lease")
     if not why:  # what it holds and what is left: nothing watched the disk (#342)
         held, whole = store.dir_size(store.home(), budget=3)
         free = store.free_bytes()

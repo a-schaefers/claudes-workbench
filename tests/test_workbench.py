@@ -4543,6 +4543,50 @@ class Steering(Base):
         self.assertEqual(wait_phase("t-r2", {"review"}, timeout=40)["round"], 1)
         self.assertIn("nothing to resume", run_wb("resume", "--all"))
 
+    def test_another_machines_runner_on_a_shared_state_dir_is_never_reaped_or_stopped_here(self):
+        # #849: on a network home each machine's wb read the other's live runner as dead (its pid
+        # not in this process table), failed it as restarted, and would signal its pid here
+        self.start("t-m1", "slow")
+        self.wait_session("t-m1")
+        task = store.Task("t-m1")
+        self.assertEqual(task.status["machine"], store.machine())
+        os.kill(task.status["pid"], signal.SIGKILL)         # not in this process table
+        task.set_status(machine="another-machine", host="lab-2", boot="another-boot")
+        with mock.patch.object(cli, "REAP_GRACE", 0):
+            out = run_wb("status")
+            self.assertEqual(store.Task("t-m1").status["phase"], "running")
+            self.assertIn("on lab-2: ", out)
+            self.assertNotIn("t-m1", run_wb("stop", "--all"))
+            err = io.StringIO()
+            with redirect_stderr(err), self.assertRaises(SystemExit):
+                run_wb("stop", "t-m1")
+            self.assertIn("t-m1 runs on lab-2, which shares this state directory", err.getvalue())
+            self.assertEqual(store.Task("t-m1").status["phase"], "running")
+            task.set_status(machine=store.machine())        # this machine's: dead, so reaped
+            run_wb("status")
+        self.assertEqual(store.Task("t-m1").status["phase"], "failed")
+
+    def test_on_a_network_state_dir_each_machine_takes_the_gpu_under_its_own_lease(self):
+        # #849: one gpu.json for every machine sharing the state dir: each pruned the other's
+        # holders as dead, and they took turns on GPUs they don't share
+        from workbench import models
+        os.environ.pop("WB_GPU_DIR")                        # the default: the state directory's
+        self.enterContext(mock.patch.object(models, "SHARED_GPU", Path(self.tmp.name) / "no-shared-lease"))
+        self.assertEqual(models.lease_dir(), store.home())
+        with mock.patch.object(store, "network_fs", return_value="nfs"), \
+                mock.patch.object(store, "machine", return_value="machine-a"):
+            a = models.lease_dir()
+            self.assertEqual(a, store.home() / "machines" / "machine-a")
+            self.assertTrue(a.is_dir())
+            self.assertFalse(models.lease_shared())
+            with mock.patch.object(store, "machine", return_value="machine-b"):
+                self.assertNotEqual(models.lease_dir(), a)
+        mounts = "/dev/sda1 / ext4 rw 0 0\nfiler:/home /home nfs4 rw 0 0\n//nas/x /mnt/my\\040x cifs rw 0 0\n"
+        with mock.patch.object(Path, "read_text", return_value=mounts):
+            fs = store.network_fs.__wrapped__
+            self.assertEqual([fs("/home/u/.local/state/workbench"), fs("/mnt/my x/s"), fs("/var/x"),
+                              fs("/homes")], ["nfs4", "cifs", None, None])
+
     def test_a_shutdown_that_signals_every_runner_raises_one_notice_for_its_tasks(self):
         # #544: a clean shutdown's SIGTERM left one stuck notice per task, written by each runner
         # as it stopped, and the mod woke Claude once a task
