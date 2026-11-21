@@ -35,9 +35,9 @@ own the architecture, CLAUDE.md, AGENTS.md and `.claude/`, every git write and e
 outward: commits, branches, merges, pushes, PRs, CI/CD, deploys, infrastructure. It knows this
 from its handbook and will ask (`ask_reviewer`) or say so in its summary when the task needs one
 of those; then you do it. Its hard limits: no sudo, git read-only (a `git` of workbench's own on
-its PATH; scratch repos under the temp directory, which tests make, stay writable), no `gh`, and
-no edits to CLAUDE.md, AGENTS.md or `.claude/`. The shell rules refuse the direct forms; behind
-them, where `wb doctor` reports Landlock, the kernel refuses root and writes to the repo's git,
+its PATH; scratch repos under the temp directory or nested in the worktree, which tests make,
+stay writable), no `gh`, and no edits to CLAUDE.md, AGENTS.md or `.claude/`. The shell rules
+refuse the direct forms; behind them, where `wb doctor` reports Landlock, the kernel refuses root and writes to the repo's git,
 and no credential is in the agent's reach, so `gh` or a push gets no login. Without Landlock
 (macOS, old kernels) only the rules hold: read the report's flagged files closely and check
 `git -C <repo> log` after a task. The rules stop mistakes, not a determined agent: the

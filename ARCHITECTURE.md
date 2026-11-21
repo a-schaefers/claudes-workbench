@@ -3236,7 +3236,7 @@ it. ACE-Step's takes peaked at -0.2 dBFS, near clipping, before any `loudnorm`.
   `rules/<task>/bin/git` every round (a `/bin/sh` wrapper, `exec '<python>' -I -c '<code>' "$@"`,
   quoted, since a shebang line splits at a space and a Python under `/home/John Smith/` broke
   every git call; the code inserts the package path, then `gitguard.main(<real git>, <the task
-  repo's common dir>, argv)`) and puts its directory first on the agent's `PATH`,
+  repo's common dir>, argv, <the temp roots>, [<the worktree>])`) and puts its directory first on the agent's `PATH`,
   so it's the git called from the shell, a script or `make`. `split` skips git's global options
   (and the values of `-C`, `-c`, `--git-dir`, `--work-tree`, `--namespace`, `--super-prefix`,
   `--attr-source`) to find the subcommand; `reads` decides: no subcommand or one of `READ` (41:
@@ -3252,11 +3252,14 @@ it. ACE-Step's takes peaked at -0.2 dBFS, near clipping, before any `loudnorm`.
   never refreshes the index while Claude diffs. A write is refused, with `REFUSAL` (leave the
   change uncommitted for Claude; to undo an edit, edit it back or `git show HEAD:<path>`; ask if
   the task needs a git write), when it lands in the task's repository (`protected`: the same
-  common dir) or in any repository outside the temp directories; outside any repository it passes,
-  and throwaway repositories under the temp directories, which test suites create, stay writable
+  common dir) or in any repository outside the temp directories and the worktree; outside any
+  repository it passes, and throwaway repositories under the temp directories or nested in the
+  worktree (a common dir below it that isn't the task's), which test suites create, stay writable
   (the temp roots are fixed when the shim is written, so an agent's `TMPDIR` can't make a project
-  count as scratch). For `init` and `clone` it judges by where the new repository lands
-  (`destination`, skipping options and their values). The real git
+  count as scratch; Rust's `CARGO_TARGET_TMPDIR` and fixtures in `tests/tmp` are in the worktree:
+  #444). For `init` and `clone` it judges by where the new repository lands (`new_repo`, skipping
+  options and their values): strictly below the worktree, and without `--separate-git-dir`, it
+  passes (`nested`); else by the repository its nearest existing directory is in (`destination`). The real git
   called by its full path is refused by OpenCode's rules (`context.denied_shell()`), and the task repo's refs are
   outside the lane. That also means an agent can't wipe its own unfinished work by mistake. The
   shim is standard library only: it's imported on every git call.

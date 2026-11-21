@@ -4579,6 +4579,40 @@ class GitGuard(unittest.TestCase):
                                  capture_output=True, text=True, env={**os.environ, **env})
             self.assertIn("read-only", out.stderr)
 
+    def test_a_test_suites_own_repositories_inside_the_worktree_stay_writable(self):
+        # #444, the audit of 1.8: `git init target/tmp/x` (Rust's CARGO_TARGET_TMPDIR, fixtures
+        # in tests/tmp) resolved to the task's repo, and a commit in a nested one was refused
+        from workbench import gitguard
+        d = Path(tempfile.mkdtemp(dir=os.path.expanduser("~"), prefix=".wb-nested-"))  # no temp
+        self.addCleanup(shutil.rmtree, d, True)                                         # root
+        repo, wt = d / "repo", d / "wt"
+        git = lambda *a, cwd=wt: subprocess.run(["git", *a], cwd=cwd, capture_output=True,
+                                                text=True)
+        subprocess.run(["git", "init", "-q", str(repo)], check=True)
+        git("-c", "user.name=t", "-c", "user.email=t@t", "commit", "-q", "--allow-empty", "-m",
+            "base", cwd=repo)
+        git("worktree", "add", "-q", str(wt), cwd=repo)
+        env = {**os.environ, **gitguard.install(d / "bin", repo, ROOT, os.environ["PATH"], wt),
+               "GIT_AUTHOR_NAME": "t", "GIT_AUTHOR_EMAIL": "t@t", "GIT_COMMITTER_NAME": "t",
+               "GIT_COMMITTER_EMAIL": "t@t"}
+        shim = lambda *a, cwd=wt: subprocess.run([str(d / "bin" / "git"), *a], cwd=cwd, env=env,
+                                                 capture_output=True, text=True)
+        out = shim("init", "-q", "target/tmp/x")
+        self.assertEqual(out.returncode, 0, out.stderr)
+        out = shim("commit", "-q", "--allow-empty", "-m", "fixture", cwd=wt / "target/tmp/x")
+        self.assertEqual(out.returncode, 0, out.stderr)
+        (wt / "tests/tmp").mkdir(parents=True)
+        out = shim("-C", "tests/tmp", "init", "-q")
+        self.assertEqual(out.returncode, 0, out.stderr)
+        # the task's own repository stays read-only, from the worktree or below it
+        self.assertIn("read-only", shim("commit", "--allow-empty", "-m", "x").stderr)
+        self.assertIn("read-only", shim("init", "-q").stderr)
+        (wt / "src").mkdir()
+        self.assertIn("read-only", shim("-C", "src", "commit", "--allow-empty", "-m", "x").stderr)
+        self.assertIn("read-only", shim("init", "-q", "--separate-git-dir", str(repo / ".git"),
+                                        "sub").stderr)
+        self.assertIn("read-only", shim("commit", "--allow-empty", "-m", "x", cwd=repo).stderr)
+
     def test_the_report_flags_claudes_files(self):
         status = " M src/a.c\n M CLAUDE.md\n?? docs/AGENTS.md\nR  x -> .claude/skills/s/SKILL.md\n"
         self.assertEqual(runner.claude_files_changed(status),

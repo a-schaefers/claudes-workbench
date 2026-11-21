@@ -2,10 +2,10 @@
 
 The runner puts a `git` of its own first on the agent's PATH. It lets every command that only
 reads through, and refuses the rest in the task's repository and in any repository outside the
-temp directory, so the agent can't commit, reset, stash, check out or clean away its own work, or
-touch another project. Scratch repositories under the temp directory, which test suites make,
-stay writable. The shell rules in context.py stop the agent naming the real git by its path.
-It guards against mistakes, not against a model set on getting round it.
+temp directory and the worktree, so the agent can't commit, reset, stash, check out or clean away
+its own work, or touch another project. Scratch repositories under the temp directory or nested
+in the worktree, which test suites make, stay writable. The shell rules in context.py stop the
+agent naming the real git by its path. It guards against mistakes, not against a model set on getting round it.
 
 Only the standard library here: the shim imports this module on every git call.
 """
@@ -131,9 +131,8 @@ def _where(opts: list[str]) -> str:
     return base
 
 
-def destination(sub: str, rest: list[str], opts: list[str]) -> list[str]:
-    """For `init` and `clone`, global options aimed at the nearest existing directory of the new
-    repository, which is what decides whether it lands inside a protected one."""
+def new_repo(sub: str, rest: list[str], opts: list[str]) -> str:
+    """Where `init` or `clone` puts the new repository (resolved, perhaps not there yet)."""
     plain, skip = [], False
     for a in rest:  # the arguments that aren't options or their values
         if skip:
@@ -147,19 +146,44 @@ def destination(sub: str, rest: list[str], opts: list[str]) -> list[str]:
     else:  # clone <url> [<dir>]
         dest = plain[1] if len(plain) > 1 else \
             os.path.basename(plain[0].rstrip("/")).removesuffix(".git") if plain else "."
-    path = os.path.realpath(os.path.join(_where(opts), dest))
+    return os.path.realpath(os.path.join(_where(opts), dest))
+
+
+def destination(sub: str, rest: list[str], opts: list[str]) -> list[str]:
+    """For `init` and `clone`, global options aimed at the nearest existing directory of the new
+    repository, which is what decides whether it lands inside a protected one."""
+    path = new_repo(sub, rest, opts)
     while not os.path.isdir(path):
         path = os.path.dirname(path)
     return [a for i, a in enumerate(opts) if a != "-C" and (i == 0 or opts[i - 1] != "-C")] + \
         ["-C", path]
 
 
-def protected(common: str | None, task_git: str, temps=()) -> bool:
+def _inside(path: str, roots) -> bool:
+    return any(path == r or path.startswith(r + os.sep) for r in roots)
+
+
+def nested(sub: str, rest: list[str], opts: list[str], lanes=()) -> bool:
+    """Whether `init` or `clone` makes a repository of its own below the worktree (`lanes`), as a
+    test suite does in `target/tmp` or `tests/tmp`: never the worktree itself, and never with its
+    git dir sent elsewhere."""
+    if any(a.split("=", 1)[0] == "--separate-git-dir" for a in rest):
+        return False
+    path = new_repo(sub, rest, opts)
+    return any(path.startswith(os.path.realpath(r) + os.sep) for r in lanes)
+
+
+def protected(common: str | None, task_git: str, temps=(), lanes=()) -> bool:
+    """Whether a write to the repository with this common git dir is refused: the task's own
+    always; else any outside the temp roots and the worktree (`lanes`), where a test suite's
+    repositories are scratch (#444, the audit of 1.8: `git init target/tmp/x`, Rust's
+    CARGO_TARGET_TMPDIR, and fixtures in tests/tmp were refused)."""
     if common is None:
         return False
     if common == os.path.realpath(task_git):
         return True
-    return not any(common == t or common.startswith(t + os.sep) for t in _temp_roots(temps))
+    return not (_inside(common, _temp_roots(temps))
+                or any(common.startswith(os.path.realpath(r) + os.sep) for r in lanes))
 
 
 REFUSAL = """\
@@ -171,20 +195,25 @@ with ask_reviewer or in your summary.
 """
 
 
-def main(real: str, task_git: str, args: list[str], temps=()) -> int:
+def main(real: str, task_git: str, args: list[str], temps=(), lanes=()) -> int:
+    """``lanes``: the worktree, where a repository of the test suite's own is writable."""
     opts, sub, rest = split(args)
     if reads(sub, rest):
         # no index refresh in the task's repo, which Claude may be diffing at the same moment
         os.execve(real, [real, *args], {**os.environ, "GIT_OPTIONAL_LOCKS": "0"})
-    target = destination(sub, rest, opts) if sub in ("init", "clone") else opts
-    if not protected(common_dir(real, target), task_git, temps):
+    making = sub in ("init", "clone")
+    target = destination(sub, rest, opts) if making else opts
+    if (making and nested(sub, rest, opts, lanes)) or \
+            not protected(common_dir(real, target), task_git, temps, lanes):
         os.execv(real, [real, *args])
     sys.stderr.write(REFUSAL.format(sub=sub))
     return 1
 
 
-def install(bin_dir: Path, task_repo: Path, pkg_root: Path, path: str) -> dict | None:
-    """Write the shim into bin_dir; returns the env the agent runs with, or None without git."""
+def install(bin_dir: Path, task_repo: Path, pkg_root: Path, path: str,
+            worktree: Path | None = None) -> dict | None:
+    """Write the shim into bin_dir; returns the env the agent runs with, or None without git.
+    ``worktree``: the task's, where repositories other than the task's are scratch."""
     import shutil
     real = shutil.which("git", path=path)
     if not real:
@@ -201,7 +230,8 @@ def install(bin_dir: Path, task_repo: Path, pkg_root: Path, path: str) -> dict |
             f"sys.path.insert(0, {str(pkg_root)!r})\n"
             "from workbench.gitguard import main\n"
             f"sys.exit(main({real!r}, {repo_dir!r}, sys.argv[1:], "
-            f"{sorted({tempfile.gettempdir(), '/tmp', '/var/tmp'})!r}))\n")
+            f"{sorted({tempfile.gettempdir(), '/tmp', '/var/tmp'})!r}, "
+            f"{[os.path.realpath(worktree)] if worktree else []!r}))\n")
     shim.write_text("#!/bin/sh\n"
                     "# workbench: git is read-only for the agent (see workbench/gitguard.py)\n"
                     f"exec {shlex.quote(sys.executable)} -I -c {shlex.quote(code)} \"$@\"\n")

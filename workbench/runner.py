@@ -298,7 +298,7 @@ def agent_env(task: store.Task, run: str = "") -> dict:
     # the lane, so a `git` the agent wrote into .venv/bin must not be the one it finds
     outside = os.pathsep.join(d for d in env["PATH"].split(os.pathsep) if d not in inside)
     shim = context.rules_dir(task) / "bin"
-    if gitguard.install(shim, Path(task.spec["repo"]), PKG_ROOT, outside):
+    if gitguard.install(shim, Path(task.spec["repo"]), PKG_ROOT, outside, task.worktree):
         env["PATH"] = f"{shim}{os.pathsep}{env['PATH']}"
     return env
 
