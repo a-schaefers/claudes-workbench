@@ -1635,15 +1635,17 @@ def _no_room_for(task: store.Task, wt: Path) -> str | None:
     """Why the setup's work (prepared.json `bytes`) can't be copied into the scratch checkout
     ``wt`` without filling the disk, or None. wb start counted only the checkout, measured before
     any setup ran: a 12 GB target/ copied on ext4 filled the disk twice over (cp, then copytree),
-    and every other open task's status write failed meanwhile (#860)."""
+    and every other open task's status write failed meanwhile (#860). Only freeing space helps:
+    the scratch running the setup itself (wb verify --setup) writes about as much, with no check,
+    and this line once offered that (the review of #860)."""
     need = int(prepared_record(task).get("bytes") or 0)
     free = store.free_bytes(wt)
     if not need or free is None or free >= need + CHECKOUT_SPARE or _reflinks(wt.parent):
         return None
     return (f"the setup's work in the worktree ({store.gb(need)}: its build output, installs and "
             f"copies) doesn't fit in a scratch copy: {store.gb(free)} free where the state directory "
-            "is, 2 GB kept spare. Free some (another task's build, wb gc), or have the scratch "
-            "checkout run the setup itself (wb verify --setup, wb shot --setup)")
+            f"is, 2 GB kept spare. Free {store.gb(need + CHECKOUT_SPARE - free)} (another task's "
+            "build, wb gc) and run it again")
 
 
 def prepare(task: store.Task, prepared: Path | None = None) -> tuple[int | str, str]:

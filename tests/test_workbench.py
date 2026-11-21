@@ -3521,7 +3521,9 @@ class WorktreeSetup(Base):
             code, said = runner.prepare(at, Path(self.tmp.name) / "task")
         self.assertEqual(code, "copy failed")
         self.assertIn(f"({store.gb(free + 10**9)}: its build output", said)
-        self.assertIn("wb verify --setup", said)
+        # the review of #860: a fresh setup in the scratch (--setup) writes about as much, unchecked
+        self.assertNotIn("--setup", said)
+        self.assertRegex(said, r"Free \d+\.\d GB \(another task's build, wb gc\)")  # about 3.0
         self.assertFalse((Path(self.tmp.name) / "scratch" / "target").exists())
         with mock.patch.object(runner, "_reflinks", return_value=True):  # a clone takes no space
             self.assertEqual(runner.prepare(at, Path(self.tmp.name) / "task"), (0, ""))

@@ -1239,9 +1239,11 @@ worktree (`prepare(at, prepared)`, as a reflink where the filesystem has them; `
 per path forked tens of thousands of times for an in-tree build, #867). Before copying,
 their size (prepared.json `bytes`, `store.dir_size` at setup, 10 s a path at most) must fit in
 the free space with `CHECKOUT_SPARE` (2 GB) left, unless one small file clones there
-(`runner._reflinks`: btrfs, XFS, APFS); else "copy failed", naming both sizes, what to free and
-`--setup` (`_no_room_for`): wb start counts only the checkout, measured before any setup ran,
-and a 12 GB `target/` copied on ext4 filled the disk and failed every open task's writes (#860). A file already present in the scratch checkout takes precedence. A missing prepared input or a changed parent link requires fresh setup: each input's parent must resolve to the same path under the two worktrees' resolved roots, so a link inside a worktree refuses the copy while a symlinked state directory (`WB_HOME` a link to another volume) doesn't (#345). The setup
+(`runner._reflinks`: btrfs, XFS, APFS); else "copy failed", naming both sizes, how much to free
+and where from (`_no_room_for`): wb start counts only the checkout, measured before any setup ran,
+and a 12 GB `target/` copied on ext4 filled the disk and failed every open task's writes (#860).
+It offers no `--setup`: a fresh setup in the scratch writes about as much, with no check, and the
+line once sent Claude there (the review of #860). A file already present in the scratch checkout takes precedence. A missing prepared input or a changed parent link requires fresh setup: each input's parent must resolve to the same path under the two worktrees' resolved roots, so a link inside a worktree refuses the copy while a symlinked state directory (`WB_HOME` a link to another volume) doesn't (#345). The setup
 isn't run there: each ran it from nothing, up to the setup limit, and a first build compiled three
 to five times a task (#249, the audit of 1.2). `wb verify --setup` and `wb shot --setup` run it in
 each checkout as before; so does a task prepared before the paths were recorded, and one whose
