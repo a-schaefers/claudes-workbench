@@ -11495,6 +11495,30 @@ class WebChat(Base):
         self.assertEqual([m["id"] for m in chat.pending()], [late["id"]])
         self.assertEqual(len(chat.open_work()["asks"]), 120)       # the plan cards, still open
 
+    def test_an_old_prompt_answered_past_the_tail_still_gives_its_waiter_the_answer(self):
+        # #447 (the 2026-11-20 audit, reproduced): answering an open ask whose row had left the
+        # 4 MiB tail returned allow, and right after, its waiter got "no such ask"
+        chat = self.chat
+        old = chat.ask("Bash", "rm -rf build")
+        with open(chat.chat_dir() / "asks.jsonl", "a") as f:  # history the tail can't reach back past
+            for i in range(120):
+                f.write(json.dumps({"id": f"ask-{i}", "ts": store.now(), "tool": "Bash", "text": "x" * 39_000,
+                                    "kind": "permission"}) + "\n")
+                f.write(json.dumps({"id": f"ask-{i}", "ts": store.now(), "answer": "deny", "by": "web"}) + "\n")
+        self.assertGreater((chat.chat_dir() / "asks.jsonl").stat().st_size, chat.THREAD_BYTES)
+        self.assertIsNone(chat.find_ask(old["id"])["answer"])
+        self.assertEqual(chat.answer(old["id"], "allow", "web", note="go")["answer"], "allow")
+        got = chat.find_ask(old["id"])
+        self.assertEqual((got["answer"], got["by"], got["note"], got["text"]), ("allow", "web", "go", "rm -rf build"))
+        self.assertEqual(chat.wait_answer(old["id"], 1), "allow")
+        self.assertEqual(json.loads(run_wb("chat", "wait", old["id"], "--json"))["answer"], "allow")  # another process
+        self.assertEqual(chat.answer(old["id"], "deny", "timeout")["answer"], "allow")  # the first stands
+        (chat.chat_dir() / "open.json").unlink()                     # an index built again from the files
+        self.assertEqual(chat.find_ask(old["id"])["answer"], "allow")
+        with mock.patch.object(chat.store, "now", return_value=store.now() + chat.ANSWER_KEPT + 60):
+            chat.answer(chat.ask("Bash", "ls")["id"], "allow", "web")  # a day on, it is let go
+            self.assertNotIn(old["id"], chat.open_work()["answered"])
+
     def test_wb_chat_wait_blocks_until_the_answer_or_says_open(self):
         chat = self.chat
         a = chat.ask("Write", "/etc/hosts")

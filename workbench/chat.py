@@ -386,13 +386,14 @@ def _open_rebuild() -> dict:
     msgs = {r["id"]: r for r in store.read_jsonl(chat_dir() / "messages.jsonl")[0]
             if r.get("from") == "user" and r.get("id") and r["id"] not in got}
     open_asks: dict = {}
+    answered: dict = {}
     for r in store.read_jsonl(chat_dir() / "asks.jsonl")[0]:
         if "answer" in r:
-            if r.get("answer") in ANSWERS:
-                open_asks.pop(r.get("id"), None)
+            if r.get("answer") in ANSWERS and (a := open_asks.pop(r.get("id"), None)):
+                _settle(answered, a, r)
         elif "tool" in r and r.get("id"):
             open_asks[r["id"]] = {"kind": "permission", **r}
-    return {"messages": msgs, "asks": open_asks}
+    return {"messages": msgs, "asks": open_asks, "answered": answered}
 
 
 def _received(msg_id: str) -> bool:
@@ -420,6 +421,7 @@ def _open_update(change) -> dict:
         if not (isinstance(cur, dict) and isinstance(cur.get("messages"), dict)
                 and isinstance(cur.get("asks"), dict)):
             cur = _open_rebuild()
+        cur.setdefault("answered", {})  # an older wb's index has none
         change(cur)
         store.write_json(_open_path(), cur)
         return cur
@@ -640,11 +642,31 @@ def asks(limit: int = 20) -> list[dict]:
 
 
 def find_ask(ask_id: str) -> dict | None:
-    return next((a for a in reversed(asks(10_000)) if a["id"] == ask_id), None)
+    """The ask as it stands, answered or not. One answered after its row left the asks' tail is
+    in open.json's `answered`: answering took it out of the open index, and its waiter then got
+    "no such ask" for an answer just given (#447)."""
+    return (next((a for a in reversed(asks(10_000)) if a["id"] == ask_id), None)
+            or (open_work().get("answered") or {}).get(ask_id))
 
 
-def _answered(ask_id: str) -> None:
-    _open_update(lambda w: w["asks"].pop(ask_id, None))
+ANSWER_KEPT = 86400  # seconds an answer stays in open.json for its waiter (the mod waits 30 minutes)
+
+
+def _settle(answered: dict, ask_row: dict, ans: dict) -> None:
+    """Keep the ask with its answer (the first one stands), and drop those kept past ANSWER_KEPT."""
+    answered.setdefault(ask_row["id"], {"kind": "permission", **ask_row, "answer": ans["answer"],
+                                        "answered": ans["ts"], "by": ans.get("by"),
+                                        **{k: ans[k] for k in ("note", "answers") if k in ans}})
+    cut = store.now() - ANSWER_KEPT
+    for k in [k for k, a in answered.items() if a.get("answered", 0) < cut]:
+        del answered[k]
+
+
+def _answered(ask_row: dict, ans: dict) -> None:
+    def change(w):
+        w["asks"].pop(ask_row["id"], None)
+        _settle(w["answered"], ask_row, ans)
+    _open_update(change)
 
 
 def answer(ask_id: str, verdict: str, by: str, note: str | None = None,
@@ -668,7 +690,7 @@ def answer(ask_id: str, verdict: str, by: str, note: str | None = None,
         elif cur["kind"] == "question" and verdict == "allow":
             raise ValueError("answers")  # a question is answered with its answers
         store.append_jsonl(chat_dir() / "asks.jsonl", row)
-        _answered(ask_id)
+        _answered({k: v for k, v in cur.items() if k not in ("answer", "stale")}, row)
         cur = find_ask(ask_id) or {**cur, "answer": verdict, "answered": row["ts"], "by": by}
     return cur
 

@@ -4109,10 +4109,14 @@ VPN), `"hosts": ["chat.example.org"]` a name a tunnel or proxy sends.
   seed?, voice?}]}`; the newest `LISTEN_KEPT` (20) batches are kept. `wb events` skips it.
 - `receipts.jsonl`: `{id, ts, by, how: "now"|"queued"}`, written by `wb chat ack` (the mod).
   `queued`: a mid-turn delivery didn't go through, so it was submitted as a prompt.
-- `open.json`: `{messages: {<id>: row}, asks: {<id>: row}}`, the user's messages without a
-  receipt and the asks without an answer (`chat.open_work`), under `open.lock`: `send` and `ack`,
-  `ask` and `answer` keep it, and a state directory without it gets it built once from the whole
-  files (`_open_rebuild`). The mod reads its messages to deliver them (#329).
+- `open.json`: `{messages: {<id>: row}, asks: {<id>: row}, answered: {<id>: ask}}`, the user's
+  messages without a receipt and the asks without an answer (`chat.open_work`), under `open.lock`:
+  `send` and `ack`, `ask` and `answer` keep it, and a state directory without it gets it built
+  once from the whole files (`_open_rebuild`). The mod reads its messages to deliver them (#329).
+  `answered` holds each ask with its first answer (`answer`, `answered`, `by`, `note?`,
+  `answers?`) for `ANSWER_KEPT` (a day), and `chat.find_ask` looks there when the asks' tail no
+  longer reaches the ask: answering an old open one took it out of `asks`, and its waiter (`wb chat
+  wait`) then got "no such permission prompt" for the answer just given (#447).
 - `claims.json`: `{<message id>: {by, ts}}` (a day's), under `claims.lock`: `wb chat claim` gives
   a message to the first session that asks and to it again, or to another once the claim is
   `CLAIM_STALE` (120 s) old (its session gone); exit 1 otherwise.
