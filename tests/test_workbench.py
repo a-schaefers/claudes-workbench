@@ -4955,6 +4955,37 @@ class AgentContext(Base):
                              ("skill", "publishing-arm")}, denied)
         self.assertNotIn(("skill", "add-level"), denied)
 
+    def test_the_users_personal_rules_reach_the_agent_after_their_claude_md(self):
+        # #673 (the 2026-11-21 audit): ~/.claude/rules/*.md, which Claude Code loads for every
+        # project, never reached the agent, and Claude reviewed against rules it was never told
+        home = Path(self.tmp.name) / "home"
+        os.environ["HOME"] = str(home)
+        os.environ.pop("CLAUDE_CONFIG_DIR", None)
+        rules = home / ".claude" / "rules"
+        (rules / "lang").mkdir(parents=True)
+        (home / ".claude" / "CLAUDE.md").write_text("user rules\n")
+        (rules / "testing.md").write_text("Test names read as sentences.\n@extra.md\n")
+        (rules / "extra.md").write_text("imported\n")
+        (rules / "lang" / "python.md").write_text("Type hints everywhere.\n")
+        (rules / ".draft.md").write_text("not yet\n")
+        (home / ".ssh").mkdir()
+        (home / ".ssh" / "notes.md").write_text("secret\n")
+        os.symlink(home / ".ssh" / "notes.md", rules / "leak.md")      # a link into a secret
+        self.start("t-urules", "ok")
+        wait_phase("t-urules", {"review"})
+        task = store.Task("t-urules")
+        files, _ = context.instruction_files(task)
+        mine = context.rules_dir(task) / "user-rules"
+        names = [str(p.relative_to(mine)) for p in files if p.is_relative_to(mine)]
+        self.assertEqual(names, ["extra.md", "lang/python.md", "testing.md"])
+        self.assertEqual(files[1], context.rules_dir(task) / "CLAUDE.md")  # after the user's own
+        self.assertEqual((mine / "lang" / "python.md").read_text(), "Type hints everywhere.\n")
+        _, parts = context.fixed_prompt(task)
+        self.assertIn("~/.claude/rules/lang/python.md", dict(parts))
+        (rules / "lang" / "python.md").unlink()                         # removed: its copy too
+        context.instruction_files(task)
+        self.assertFalse((mine / "lang" / "python.md").exists())
+
     def test_uncommitted_local_instructions_come_from_the_repo(self):
         from workbench import context
         (self.repo / "CLAUDE.local.md").write_text("my local rules\n")

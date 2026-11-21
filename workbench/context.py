@@ -1587,6 +1587,35 @@ def import_files(task: store.Task, roots: list[tuple[Path, Path, bool]]) -> list
     return out
 
 
+def user_rules(task: store.Task) -> list[tuple[Path, Path]]:
+    """The user's personal rules (Claude's directory's `rules/**/*.md`, which Claude Code loads
+    for every project), copied into rules/<task>/user-rules/: (the copy, the file). Only
+    ~/.claude/CLAUDE.md was handed over, and Claude's directory is hidden from the lane, so the
+    agent never saw them, and Claude reviewed against conventions it was never told (#673). Not a
+    dotted name, nor a link into a secret; copies of rules removed since go too."""
+    src, out = claude_home() / "rules", rules_dir(task) / "user-rules"
+    claude = os.path.realpath(claude_home())
+    hidden = (secret_paths() | private_paths()) - {claude}
+    made: list[tuple[Path, Path]] = []
+    for f in sorted(src.rglob("*.md")) if src.is_dir() else ():
+        rel = f.relative_to(src)
+        real = os.path.realpath(f)
+        if any(part.startswith(".") for part in rel.parts) or not os.path.isfile(real) or \
+                any(real == h or _under(real, h) for h in hidden):
+            continue
+        copy = out / rel
+        copy.parent.mkdir(parents=True, exist_ok=True)
+        tmp = copy.with_name(f".{copy.name}.{os.getpid()}.tmp")  # whole: OpenCode may be reading
+        shutil.copyfile(real, tmp)
+        os.replace(tmp, copy)
+        made.append((copy, f))
+    kept = {c for c, _ in made}
+    for old in out.rglob("*.md") if out.is_dir() else ():
+        if old not in kept:
+            old.unlink(missing_ok=True)
+    return made
+
+
 def instruction_files(task: store.Task) -> tuple[list[Path], list[str]]:
     """(files OpenCode should load, nested CLAUDE.md paths the agent reads when it works there).
     Before the runner has checked the worktree out (wb start's fixed_prompt, #529), the user's
@@ -1604,6 +1633,7 @@ def instruction_files(task: store.Task) -> tuple[list[Path], list[str]]:
         mine = rules_dir(task) / "CLAUDE.md"
         mine.write_text(user.read_text())
         roots.append((mine, user, True))
+    roots += [(copy, src, True) for copy, src in user_rules(task)]
     load: list[Path] = []
     for rel in ROOT_FILES:
         # the worktree's copy when the file is committed; the repo's when it is local or uncommitted
@@ -1661,6 +1691,9 @@ def fixed_prompt(task: store.Task) -> tuple[int, list[tuple[str, int]]]:
             n = p.stat().st_size // CHARS_PER_TOKEN
         except OSError:
             continue
+        mine = rules / "user-rules"
+        if p.is_relative_to(mine):
+            named[p] = f"~/.claude/rules/{p.relative_to(mine)}"
         label = named.get(p) or ("the spec" if p.name == "prompt.md" else
                                  str(p.relative_to(wt)) if p.is_relative_to(wt) else p.name)
         parts.append((label, n))

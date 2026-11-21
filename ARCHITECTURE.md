@@ -1129,6 +1129,13 @@ prompt, in this order:
   summary. Every agent prompt carries it, so it stays short (about 1.3K tokens);
 - the user's `~/.claude/CLAUDE.md` (`$CLAUDE_CONFIG_DIR` moves it), as a copy in `rules/<task>/`,
   because the agent can't read Claude's directory;
+- the user's personal rules, Claude's directory's `rules/**/*.md` (which Claude Code loads for
+  every project; `user_rules`), copied to `rules/<task>/user-rules/<path>` each time the
+  instructions are written, in path order, as the user's own (their imports followed as the
+  user's CLAUDE.md's are); a dotted name or a link into a secret left out, the copy of a rule
+  removed since deleted, and each counted in `fixed_prompt` as `~/.claude/rules/<path>`. Only
+  `~/.claude/CLAUDE.md` was handed over, so Claude reviewed against rules the agent was never
+  told (#673). A rule's `paths:` frontmatter isn't read: every rule loads;
 - the repo's `CLAUDE.md`, `.claude/CLAUDE.md` and `CLAUDE.local.md`: the worktree's copy when
   it exists there (committed), else the user's checkout's (local or uncommitted), so an
   uncommitted edit to a committed file isn't seen;
@@ -5501,7 +5508,8 @@ $WB_HOME (~/.local/state/workbench)
                                  audio/<batch>/ (wb chat listen's copies, <n>.<ext>, and audio.json; the newest 20)
                                  uploads/<id>/ (an attachment: <name> 0600 and .meta.json; *The web chat*)  uploads.lock
   rules/<task>/                  outside the lane: opencode.json (the config layer), HANDBOOK.md,
-                                 CLAUDE.md (a copy of the user's), imports/<n>/<name> (an import
+                                 CLAUDE.md (a copy of the user's), user-rules/<path> (their
+                                 ~/.claude/rules: context.user_rules), imports/<n>/<name> (an import
                                  from outside the repo: context.import_files), bin/git (the shim),
                                  grants.json (what Claude allowed: {"allow", "paths"}),
                                  gitdir.json (the worktree's real git dir and its .git's text: {"gitdir", "dotgit"}),
