@@ -4154,8 +4154,11 @@ their own card, while this machine's lease is held and that server's too (`GpuLe
 wait=False, on=m)`, pool `gpu-<host>`): one whose server a task holds is skipped with a line ("a
 task is using …"), since `probe` unloads the model it measures and the task may be using that very
 model (#198, the 2026-11-19 audit); one whose server has another model loaded is skipped too
-(`busy`: that card is in use, and its models aren't this machine's to unload). Either is due
-again next time. A task that wants the server meanwhile stops the run, as on this machine. The fingerprint adds each remote server that answers, with the names and
+(`busy`: that card is in use, and its models aren't this machine's to unload), and so is one
+whose box has the very model loaded for another client (not this machine's own load there,
+`box_mine`, or one of those answering a request in `INFLIGHT_WATCH`): the box's lease is this
+machine's alone, so `probe` unloaded and reloaded the model another client was running (#944).
+Either is due again next time. A task that wants the server meanwhile stops the run, as on this machine. The fingerprint adds each remote server that answers, with the names and
 sizes `/api/tags` gives (a re-pull can be another quantization); `changed` compares only the
 servers both fingerprints know, so a gaming PC asleep, or new since, makes nothing due, and
 `remembered` keeps what was known of one that didn't answer.
@@ -4593,7 +4596,9 @@ Then describe the engine in `~/.config/workbench/images.json` (`$WB_IMAGES`). Tw
   coding tasks use (a `wb remote` box, WSL2's Windows host), it takes its turn there: it queues
   with that box's tasks (refused while one runs, unless `--wait`) and that box's Ollama models are
   unloaded first (`media.turns`, `media.boxes`: it took no turn and generated beside a task's model
-  on that card, #750). WSL2's Windows host is this GPU (models.json `same_gpu`): an engine
+  on that card, #750), but one another client of the box has loaded only once it has gone quiet
+  (`box_quiet`, as a coding task's load waits; without `--wait` refused, naming it: the lease is
+  this machine's alone, and the unload cut another client's round short, #944). WSL2's Windows host is this GPU (models.json `same_gpu`): an engine
   there, or a command engine in WSL, takes this machine's turn, which the tasks on Ollama for
   Windows take too, and their models are unloaded first.
 - On a machine with several cards, pin an engine to the one it uses so it runs beside tasks on
@@ -4697,7 +4702,8 @@ custom-node packs do run their own Python).
   (`media.boxes`: a discovered remote model whose host is the url's and not on this GPU,
   `models.same_gpu`, one per lease pool) takes
   `GpuLease(None, "wb image", wait=…, on=<that model>)` on each such pool, as `wb optimize`
-  does, and unloads that box's Ollama models (not `keep_loaded`), #750; an engine off this GPU
+  does, and unloads that box's Ollama models (not `keep_loaded`), #750, another client's once it
+  has gone `BOX_QUIET` without a request (`box_quiet(act=)`; refused without `wait`, #944); an engine off this GPU
   otherwise (`media.on_gpu`) runs with no lease and frees nothing; any
   other holds the GPU for the whole batch through `media.gpu`, that is `models.GpuLease(None, "wb image",
   wait=…)` (any live holder in gpu.json: a RuntimeError naming them, unless `--wait`; then it
@@ -7441,7 +7447,8 @@ nested `.md` files (`docs/`, `skill/`, `mod/`, `agent/`) are unaffected. A new r
   takes a second lease on `gpu` in one process (it waits on itself) or leaves a model loaded.
 - **`models.BOX_QUIET` and `BOX_WAIT`** (a wb remote box's turns, #812) → OpenCode's 2-minute
   move of a shell command to the background (`BG_GRACE`), which bounds the gap between a round's
-  requests, and `router.ROUND_DEFAULT_S`, a round's default limit; `wb start`'s note names both.
+  requests, and `router.ROUND_DEFAULT_S`, a round's default limit; `wb start`'s note names both;
+  `media.turns` waits on `box_quiet` too (#944).
 - **`progress.DEFAULT_MIN` and `TYPICAL_MIN`** → the pane's Progress checks sentence
   (`PROGRESS_STOPS` in `register.tsx`), which names them (#724).
 - **`ask_mcp.NO_ANSWER`'s opening** ("No answer arrived in time.") → the mod's `NO_ANSWER`, which

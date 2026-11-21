@@ -1554,6 +1554,53 @@ class Real(unittest.TestCase):
         self.assertNotIn("x", models.box_mine(root))                   # no longer taken as ours
         self.assertEqual([p["model"] for p in posts], ["y"])
 
+    def test_a_media_job_on_a_wb_remote_box_unloads_another_clients_model_only_once_it_has_gone_quiet(self):
+        # #944 (an outside review of 1.90.24): wb image and wb audio on a wb remote box took this
+        # machine's lease for it only and unloaded every model there at once, another client's
+        # in the middle of its round, which paid a reload it was never told of
+        at = lambda s: time.strftime("%Y-%m-%dT%H:%M:%S", time.gmtime(time.time() + s)) + ".1Z"  # noqa
+        theirs = {"name": "theirs", "size": 10, "size_vram": 10, "expires_at": at(300)}
+        loaded, posts = [theirs], []
+        srv, port = fake_ollama(loaded, ["x", "theirs"], posts)
+        self.servers.append(srv)
+        self.config({"box": {"options": {"baseURL": f"http://127.0.0.1:{port}/v1"}, "models": {"x": {}}}},
+                    {"box": {"local": True}})
+        engine = {"url": "http://127.0.0.1:30000/v1/images/generations"}
+        said, requests = [], []
+
+        def request():  # the other client's next request in its round finishes
+            requests.append(time.monotonic())
+            theirs["expires_at"] = at(300 + len(requests))
+        for delay in (0.6, 1.2):
+            threading.Timer(delay, request).start()
+        with mock.patch.object(models, "_this_host", lambda h: False), \
+                mock.patch.object(models, "windows_host", lambda: None), \
+                mock.patch.object(models, "INFLIGHT_WATCH", 0.3), \
+                mock.patch.object(models, "BOX_QUIET", 1.5), mock.patch.object(models, "BOX_POLL", 0.1):
+            self.assertEqual([m.id for m in media.boxes(engine)], ["box/x"])
+            with media.turns("wb image", said.append, True, engine):
+                entered = time.monotonic()
+            self.assertEqual(len(requests), 2)
+            self.assertGreaterEqual(entered - requests[-1], 1.5)          # quiet that long first
+            self.assertEqual(posts, [{"model": "theirs", "keep_alive": 0}])
+            self.assertIn("theirs on 127.0.0.1 is another client's: unloading it for wb image once "
+                          "it has gone 1.5 s without a request", said)
+            self.assertTrue(any("is answering another client's requests" in x for x in said))
+            # without --wait: refused at once, naming it, and nothing unloaded
+            loaded[:], posts[:] = [{**theirs, "expires_at": at(300)}], []
+            with self.assertRaisesRegex(RuntimeError, "theirs on 127.0.0.1 is another client's of that "
+                                                      "wb remote box: wb image would unload it"):
+                with media.turns("wb image", said.append, False, engine):
+                    pass
+            self.assertEqual(posts, [])
+            self.assertEqual(models.holders(pool=models.pool(models.discover()["box/x"])), {})
+            # this machine's own load there, idle: unloaded as before, no wait to refuse
+            models._note_mine(models.discover()["box/x"])
+            loaded[:] = [{"name": "x", "size": 10, "size_vram": 10, "expires_at": at(300)}]
+            with media.turns("wb image", said.append, False, engine):
+                pass
+            self.assertEqual(posts, [{"model": "x", "keep_alive": 0}])
+
     def test_a_remote_task_hears_when_another_client_unloaded_its_model_between_rounds(self):
         # #812: the other client's load evicted this task's model, and nothing told this task why
         # its next round began with a reload
@@ -2311,6 +2358,27 @@ class Optimize(unittest.TestCase):
             self.assertTrue([p for p in posts if p[0] == "/api/generate"])
             self.assertIn(m.id, optimize.state()["models"])
             self.assertEqual(models.holders(pool=models.pool(m)), {})          # and let go
+
+    def test_a_remote_model_another_client_has_loaded_is_skipped_as_busy_and_never_unloaded(self):
+        # #944 (an outside review of 1.90.24): busy() left out the model being measured, and the
+        # box's lease is this machine's alone, so a run measuring the model another client of the
+        # wb remote box was running unloaded and reloaded it at odd windows, several times
+        from workbench import optimize
+        loaded = [{"name": "m", "size": 5, "size_vram": 5}]                 # another client's
+        posts = self.ollama(32768, loaded=loaded, extra={"ollama": {"local": True}})
+        with mock.patch.object(models, "_this_host", lambda h: False), \
+                mock.patch.object(models, "INFLIGHT_WATCH", 0.3), \
+                mock.patch.object(optimize.hardware, "gpus", lambda windows=True: [{"name": "Card", "vram": 1}]), \
+                mock.patch.object(sys, "argv", ["optimize", "--all"]):
+            m, = optimize.candidates()
+            self.assertEqual(optimize.busy(m), ["m"])
+            out = io.StringIO()
+            with redirect_stdout(out):
+                optimize.main()
+            self.assertIn(f"{m.id}: not measured, {m.root} has m loaded", out.getvalue())
+            self.assertEqual([p for p in posts if p[0] == "/api/generate"], [])   # nothing unloaded
+            models._note_mine(m)                       # this machine's own load, idle: measured
+            self.assertEqual(optimize.busy(m), [])
 
     def test_a_machine_with_no_gpu_measures_nothing_and_a_model_on_the_cpu_gets_no_advice(self):
         # #809: on a CPU-only box wb optimize ran by itself, loaded each model into RAM twice, and

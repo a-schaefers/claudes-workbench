@@ -1776,7 +1776,7 @@ BOX_POLL = 2.0   # seconds between two looks at the box's /api/ps meanwhile
 BOX_KEEP_ALIVE = 300
 
 
-def box_quiet(m: Model, others: list[str], say, warn, mine=()) -> list[str]:
+def box_quiet(m: Model, others: list[str], say, warn, mine=(), act: str | None = None) -> list[str]:
     """Wait, up to BOX_WAIT, until each of ``others`` (box_others: what the box has loaded for
     another client) has had no request for BOX_QUIET seconds in a row, or has gone, before ``m``
     is loaded over it (#812). Watched from now: /api/ps says when a model expires, not when it was
@@ -1786,8 +1786,10 @@ def box_quiet(m: Model, others: list[str], say, warn, mine=()) -> list[str]:
     this machine runs one task at a time on a box (its pool), so a request on it now is another
     client's, and its mark is dropped (_forget_mine). Before, a mark kept a week hid a model
     another client was mid-round on, and the load evicted it unwarned (#893). Returns the models
-    taken as another client's (``others`` less this machine's idle ones)."""
+    taken as another client's (``others`` less this machine's idle ones). ``act``: what waits,
+    said in its lines (loading ``m``, else a wb image or wb audio job's unload: #944)."""
     host, root = urlparse(m.root).hostname, m.root
+    act = act or f"loading {m.name}"
     own = [n for n in others if any(_matches(x, {n}) for x in mine)]
     used = {n for _, n in _in_use({root: own}, remote=True)} if own else set()
     if used:
@@ -1797,7 +1799,7 @@ def box_quiet(m: Model, others: list[str], say, warn, mine=()) -> list[str]:
     if not last:
         return others
     names = ", ".join(sorted({n for _, n in last}))
-    say(f"{names} on {host} is another client's: loading {m.name} once it has gone "
+    say(f"{names} on {host} is another client's: {act} once it has gone "
         f"{BOX_QUIET} s without a request")
     began = quiet = time.monotonic()
     busy = False
@@ -1818,14 +1820,14 @@ def box_quiet(m: Model, others: list[str], say, warn, mine=()) -> list[str]:
             if not busy:
                 warn(f"{', '.join(moved)} on {host} is answering another client's requests: "
                      f"waiting up to {BOX_WAIT // 60} min for it to go {BOX_QUIET} s unused before "
-                     f"loading {m.name} ({BOX_SHARED})")
+                     f"{act} ({BOX_SHARED})")
             busy = True
         last = now
         if not now or time.monotonic() - quiet >= BOX_QUIET:
             return others
         if time.monotonic() - began >= BOX_WAIT:
-            warn(f"{names} on {host} was still in use after {BOX_WAIT // 60} min: loading "
-                 f"{m.name} anyway, and the two may swap on every request ({BOX_SHARED})")
+            warn(f"{names} on {host} was still in use after {BOX_WAIT // 60} min: {act} "
+                 f"anyway, and the two may swap on every request ({BOX_SHARED})")
             return others
         time.sleep(min(BOX_POLL, max(BOX_QUIET - (time.monotonic() - quiet), 0) + 0.01,
                        max(BOX_WAIT - (time.monotonic() - began), 0) + 0.01))
