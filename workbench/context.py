@@ -338,8 +338,13 @@ def commands_conf() -> dict:
 # sets it (experiments.json), and `wb start` records its value per task (task.json `experiments`),
 # so a flip changes only the tasks started after it. Off, the agent's rules are main's exactly.
 EXPERIMENTS = {
+    # what each level does and what every level adds, since `wb experiment` said neither (the
+    # review, 2026-11-21)
     "probe": "the agent's shell may run probe, and its handbook says how: a file's outline and "
-             "one function, instead of the whole file",
+             "one function, instead of the whole file; moderate tells it to extract the function it "
+             "needs from a long file, aggressive never to read one whole, adaptable learns which "
+             "per model; every level also caps one shell call's output at a tenth of the window "
+             "and outlines the spec's long files in round 1",
 }
 # An experiment's settings besides "off", in the pane's order (one with none here is "on"). probe's
 # (the owner's design, 2026-11-21, #857): moderate, the condition measured to do no harm;

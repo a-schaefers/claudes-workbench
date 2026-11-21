@@ -499,10 +499,12 @@ const CHAT_STOPS: [string, string, string][] = [
 // The probe experiment's row (ARCHITECTURE.md, *Experiments*): wb's choice (`wb experiment probe
 // off|adaptable|moderate|aggressive`, experiments.json; `on`, the setting before the levels, reads
 // as adaptable), off by default. A task keeps what it started with. The levels in the owner's
-// order (2026-11-21, #857): off, adaptable, moderate, aggressive
+// order (2026-11-21, #857): off, adaptable, moderate, aggressive. Each sentence says "with probe",
+// where a working probe's version goes; adaptable's says it tries aggressive from the first task,
+// since "until the results show" read as moderate only (the review, 2026-11-21)
 const PROBE_STOPS: [string, string, string][] = [
   ['off', 'Off (default)', 'The agent reads whole files, as without the experiment.'],
-  ['adaptable', 'Adaptable', 'Moderate, until this machine\'s results show aggressive does better for the model.'],
+  ['adaptable', 'Adaptable', 'Moderate with probe, trying aggressive on some long-file tasks, until this machine\'s results pick the better one for the model.'],
   ['moderate', 'Moderate', 'The agent may extract one function of a long file with probe (github.com/probelabs/probe).'],
   ['aggressive', 'Aggressive', 'The agent is told never to read a long file whole, but to extract the function with probe.'],
 ]

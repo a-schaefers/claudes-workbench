@@ -3031,6 +3031,7 @@ test('the probe row says whether it works, and turned on without probe it asks C
   await ui.press({ key: 'tab-settings' })
   expect(await row(ui)).toBe('▸ Agent code navigation: Adaptable, working')
   await ui.press({ key: 'probe' })
+  expect(await ui.find({ type: 'Text', text: /Moderate with probe \(probe-code 0\.6\.0\), trying aggressive/ })).toBeDefined()  // its version (the review, 2026-11-21)
   await ui.press({ key: 'probe:off' })
   expect(await row(ui)).toBe('▸ Agent code navigation: Off (default)')
   await ui.press({ key: 'probe' })
@@ -3073,7 +3074,7 @@ test('the probe row offers off, adaptable, moderate and aggressive, and marks ad
     expect((await options()).find(l => l.startsWith('  ❯'))?.toLowerCase()).toContain(level)
   }
   expect(await ui.find({ type: 'Text', text: /never to read a long file whole/ })).toBeDefined()  // what each does
-  expect(await ui.find({ type: 'Text', text: /Moderate, until this machine's results/ })).toBeDefined()
+  expect(await ui.find({ type: 'Text', text: /trying aggressive on some long-file tasks/ })).toBeDefined()
   recommended = true                                                // Claude set PROBE_RECOMMENDED
   await clock.advance(31_000)
   await ui.press({ key: 'tab-tasks' })

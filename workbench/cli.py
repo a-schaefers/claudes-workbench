@@ -2404,7 +2404,7 @@ def experiment_lines() -> list[str]:
             out.append(f"{name}: {on[name]}, but not set up: no probe with `symbols` is on PATH, so it "
                        f"changes nothing yet (probe, a code-search tool: {context.PROBE_HOME}; "
                        f"its release binary from {context.PROBE_RELEASES}, not crates.io's "
-                       "probe-code 0.6.0)")
+                       "probe-code 0.6.0)" + best)  # the recommendation, set up or not (review, 2026-11-21)
         else:
             found = _tool_version([path])[1] if name == "probe" else ""
             out.append(f"{name}: {on[name]}" + (f" and working ({found})" if found else "")
@@ -5680,7 +5680,9 @@ def parser() -> argparse.ArgumentParser:
     s.add_argument("name", nargs="?")
     s.add_argument("state", nargs="?", choices=["on", "off", *sorted({
         v for levels in context.EXPERIMENT_LEVELS.values() for v in levels})],
-        help="off, on, or a level: probe's moderate, adaptable (what on means) or aggressive")
+        help="off, on, or a level of probe's: moderate (extract the one function needed from a long "
+             "file), aggressive (never read a long file whole), adaptable (moderate or aggressive, "
+             "learned per model; what on means)")
     s.set_defaults(f=cmd_experiment)
     s = sub.add_parser("stop", help="stop a running task (wb resume or wb feedback continues it)")
     s.add_argument("name", nargs="?")

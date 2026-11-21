@@ -22079,6 +22079,22 @@ class ProbeLevels(Base):
         with self.assertRaises(SystemExit):
             run_wb("experiment", "probe", "loud")
 
+    def test_wb_experiment_says_what_each_level_does_and_recommends_adaptable_set_up_or_not(self):
+        # the review, 2026-11-21 (#857): the levels and what every level adds went unsaid, and a
+        # probe not installed dropped the recommendation the pane reads
+        listing = run_wb("experiment")
+        for said in ("moderate tells it to extract", "aggressive never to read one whole",
+                     "adaptable learns which per model", "caps one shell call's output",
+                     "outlines the spec's long files in round 1"):
+            self.assertIn(said, listing)
+        run_wb("experiment", "probe", "adaptable")
+        with mock.patch.object(context, "PROBE_RECOMMENDED", True):
+            for found in (None, "/x/probe"):
+                with mock.patch.object(context, "probe_bin", return_value=found):
+                    self.assertTrue(cli.experiment_lines()[0].endswith("; adaptable is recommended"))
+        with mock.patch.object(context, "probe_bin", return_value=None):
+            self.assertNotIn("recommended", cli.experiment_lines()[0])
+
     def test_adaptable_records_its_setting_and_resolves_to_moderate_without_evidence(self):
         run_wb("experiment", "probe", "adaptable")
         self.long_file()
