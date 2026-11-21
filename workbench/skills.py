@@ -181,11 +181,15 @@ def resolve(names: list[str]) -> list[Path]:
     return [have[n]["path"] for n in names]
 
 
-def add(src: Path, name: str, message: str, source: str = "") -> tuple[str, list[str]]:
+def add(src: Path, name: str, message: str, source: str = "",
+        reviewed: tuple[str, ...] = ()) -> tuple[str, list[str]]:
     """Copy a skill (a SKILL.md, or a directory holding one and its files) into the library and
     commit it. Returns ("added"|"updated", warnings); raises ValueError with the problems. The
     scan refuses a critical finding; on an update only what the change brought in counts.
-    `source` (where an imported skill came from: url@commit, license) goes in the commit."""
+    `source` (where an imported skill came from: url@commit, license) goes in the commit.
+    `reviewed`: the scan's rules Claude has read the findings of and judged safe (`--reviewed`):
+    those pass as warnings, recorded in the commit; a legitimate skill (rustup's install line,
+    a Dockerfile) once had no way in (#455). Never one in scan.UNREVIEWABLE."""
     src_md = src / "SKILL.md" if src.is_dir() else src
     if src.resolve().is_relative_to(library().resolve()):  # it would be scanned against itself
         raise ValueError(f"{src} is in the library: edit a copy elsewhere and add that, or use "
@@ -195,10 +199,28 @@ def add(src: Path, name: str, message: str, source: str = "") -> tuple[str, list
     found = scan.scan(src)
     if dest.exists():
         found = scan.new_findings(found, scan.scan(dest))
-    problems += [f"scan: {x}" for x, f in zip(scan.lines(found), found) if f["severity"] == "critical"]
-    warnings += [f"scan: {x}" for x, f in zip(scan.lines(found), found) if f["severity"] != "critical"]
+    bad = set(reviewed) & scan.UNREVIEWABLE
+    if bad:
+        raise ValueError(f"--reviewed can't pass {', '.join(sorted(bad))}: what it finds can't "
+                         "be judged by reading the skill")
+    passed = lambda f: f["severity"] == "critical" and f["rule"] in reviewed  # noqa: E731
+    stopped = [(x, f) for x, f in zip(scan.lines(found), found)
+               if f["severity"] == "critical" and not passed(f)]
+    problems += [f"scan: {x}" for x, _ in stopped]
+    warnings += [f"scan: {x}" for x, f in zip(scan.lines(found), found)
+                 if f["severity"] != "critical"]
+    passes = [x for x, f in zip(scan.lines(found), found) if passed(f)]
+    warnings += [f"scan, reviewed: {x}" for x in passes]
+    warnings += [f"--reviewed {r}: no such finding" for r in sorted(set(reviewed))
+                 if not any(f["rule"] == r for f in found)]
     if problems:
+        if any(f["rule"] not in scan.UNREVIEWABLE for _, f in stopped):
+            problems.append("read each; if it is safe as written, --reviewed <rule> lets it in "
+                            "and records that in the library")
         raise ValueError("; ".join(problems))
+    if passes:
+        message += "\n\nReviewed (the scan's critical findings, judged safe):\n" + \
+            "\n".join(f"- {x}" for x in passes)
     verb = "updated" if dest.exists() else "added"
     _git("status")  # makes the repository on first use
     _put(src, dest)

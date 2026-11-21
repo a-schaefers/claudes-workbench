@@ -3335,19 +3335,23 @@ and the medium rules, and adds Unicode Cf and tag characters). 43 regex rules, 2
 high, case-insensitive and multiline:
 - exfiltration (critical: curl/wget sending a `$…KEY|TOKEN|SECRET|PASSWORD|CREDENTIAL` variable
   to a non-loopback URL, `cat` reading .env/credentials/.netrc/.pgpass/.npmrc/.pypirc (not a heredoc writing one, not
-  `.env.example`), staging in /tmp
-  then piping out; high: `~/.ssh`/`.aws`/`.gnupg`/`.kube`/`.docker`, `printenv`/`env |`, a
+  `.env.example`, not a line that warns against it: "Never `cat .env`"), staging in /tmp
+  then sending it (curl, wget, nc, `python -c`; not a script of the skill's own); high: `~/.ssh`/`.aws`/`.gnupg`/`.kube`/`.docker`, `printenv`/`env |`, a
   markdown link carrying a variable, "send/post/upload … to http", webhook.site, requestbin,
   pipedream, hookbin, pastebin);
-- prompt injection (critical: ignore previous instructions, disregard your rules, system prompt
-  override, no restrictions, without filters, DAN; high: "you are now", "pretend to be", don't
+- prompt injection, each within one line and at most four words apart where the rule allows any
+  (`S`, `W`: `\s+` and any number of words once read "## Ignore generated files", a blank
+  line, "Follow all instructions" as one, #455) (critical: ignore previous instructions,
+  disregard your rules, system prompt override, no restrictions, without filters, DAN; high: "you are now", "pretend to be", don't
   tell the user/reviewer, when no one is watching, output the system prompt, instructions in an
   HTML comment, a hidden `display:none` div);
 - destructive (critical: recursive rm of the home directory itself (`~`, `~/`, `~/*`, `$HOME`,
-  `${HOME}`, not a directory under it) or of `/`, `> /etc/`, mkfs, `dd of=/dev/`,
+  `${HOME}`, not a directory under it) or of `/`, `> /etc/` (high on a Dockerfile's `RUN` line or
+  in a Dockerfile: it writes the image), mkfs, `dd of=/dev/`,
   sudoers/visudo);
 - remote code (critical: curl|wget piped to a shell, `/bin/sh -i … >/dev/tcp`, a reverse shell
-  (`reverse_shell`: nc/ncat/netcat with `-e` or `-c`, socat to `exec:`/`system:`/`pty`),
+  (`reverse_shell`: nc/ncat/netcat with `-e` or `-c` of its own, not a later command's after
+  `;`, `&` or `|`, socat to `exec:`/`system:`/`pty`),
   `python -c "import socket`; high: a listener (`listener`: `nc -l`, socat `tcp-listen:`), ngrok,
   localtunnel, serveo);
 - obfuscation (critical: base64 decode or echo piped to an interpreter that runs
@@ -3356,7 +3360,13 @@ high, case-insensitive and multiline:
 - credentials (critical: PEM private keys, `ghp_`, `github_pat_`, `glpat-`, `sk-ant-`, `sk-`,
   `AKIA`);
 - Claude's files (critical: a shell write to AGENTS.md, CLAUDE.md or `.claude/settings*` through
-  `>`, `>>`, `sed -i` or `tee`; high: a line telling the agent to edit one).
+  `>`, `>>`, `sed -i` or `tee`, high when what comes before the `>` is itself one of them,
+  `AGENTS.md > CLAUDE.md`; high: a line telling the agent to edit one).
+
+The redirect rules (`REDIRECTS`: `> /etc/`, staging in /tmp, the write to Claude's files) match
+the text with HTML tags blanked (`TAG`), so `Read <code>CLAUDE.md</code>` is no redirect;
+`_softened` holds the other exceptions above (#455). Each finding's line names its rule
+(`[pipe_to_shell]`).
 
 File rules: what is scanned is what `skills.add` copies, which follows links. A symlink resolving
 outside the skill, or into its `.git`, and binary extensions are critical; so are a link to
@@ -3376,11 +3386,17 @@ clean. On an update only `new_findings` count: the same (file, rule, stripped li
 finding whatever its line number. `content_hash` is a sha256 over each regular file's relative
 path and bytes (display only). The rules are drawn to pass ordinary advice (`cat .env.example`, a heredoc
 writing `.env`, `rm -rf ~/build`; `nc -l 8080` is only high); a skill still refused is reworded,
-not forced.
+or, when the finding is safe as written (rustup's or bun's `curl … | sh` install line), added
+with `--reviewed <rule>`: that rule's critical findings pass as warnings ("scan, reviewed: …")
+and the commit records each under "Reviewed (the scan's critical findings, judged safe):". It
+can't pass `scan.UNREVIEWABLE` (a symlink out, a binary, invisible characters, padded code, NUL
+bytes: what reading the skill can't judge), and a rule with no finding is a warning. Before
+#455 there was no way past a false positive.
 
 **The flows.**
-- `wb skill add <name> --from <file|dir> -m "<what review taught>" [--source …] [--lesson ID…]`
-  (`skills.add`): check, then scan (critical findings become problems, the rest warnings), then
+- `wb skill add <name> --from <file|dir> -m "<what review taught>" [--source …] [--lesson ID…]
+  [--reviewed RULE…]` (`skills.add`): check, then scan (critical findings become problems, but
+  those of a `--reviewed` rule, the rest warnings), then
   copy (`skills._put`): a directory source replaces the skill's directory, copied first into a
   scratch `.adding-<name>-…` in the library (`.git` ignored) and renamed into place, a file source
   only SKILL.md, written beside it and renamed over it, so a copy that fails leaves the old
@@ -5260,7 +5276,7 @@ delivered as taken (`_stale_notes`, *Notes*).
 | `wb scout` | `--done [--notes "…"]` (`--notes` without `--done` refused, #602), `--due`, `--watch "…"`, `--unwatch N` (1-based; 0 refused) | The weekly check's facts (with the GPU budget and the devices it counts, `cli.gpu_line`; where Ollama's settings were read, `cli.ollama_line`; the model servers here, `cli.server_lines`: the server commands on PATH and each usual port whose `/v1/models` answers, flagged when OpenCode has no provider for it); the image and audio engines (`audio.coverage`: what
 the audio ones cover); `--done` records it; `--due` exits 0 when one is due (7 days); the watch list; each model's bench cases passed, when replayed. |
 | `wb skill list \| show <n> \| scan <n\|path>` | | The library, a skill with its history, the scan alone. |
-| `wb skill add <n> --from <src> -m "…"` | `--source "<origin>, <license>"`, `--lesson ID…` | Check, scan, copy, commit. |
+| `wb skill add <n> --from <src> -m "…"` | `--source "<origin>, <license>"`, `--lesson ID…`, `--reviewed RULE…` (a scan rule whose critical findings Claude read and judged safe: they pass, recorded in the commit; never one in `scan.UNREVIEWABLE`) | Check, scan, copy, commit. |
 | `wb skill patch <n> --old … --new … -m "…"` | `--old-file`, `--new-file`, `--lesson` | An exact, unique replacement, then as add. |
 | `wb skill import <url\|owner/repo\|path>` | `--path DIR`, `--as NAME` | Fetch into `imports/`, show license, hash, scan; never adds. |
 | `wb skill retire <n> -m "…"` / `restore <n>` | | Move to and from `retired/`. |

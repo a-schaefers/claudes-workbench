@@ -41,6 +41,8 @@ SHELLS = r"(?:bash|sh|zsh|ksh|dash)"
 # an interpreter that runs what it reads (`| sh`, `| python3 -`), not one running a module or
 # a file of its own on the piped data (`| python3 -m json.tool`)
 RUNS_STDIN = r"(?=\s*(?:$|[;&|)`]|-\s|-$|-s\b|-i\b))"
+S = r"[ \t]+"            # the blanks between words of one line
+W = r"(?:\w+[ \t]+){0,4}"  # and at most four words between the ones a rule names
 
 # (regex, rule, severity, what it means); compiled case-insensitive, (?-i:) where case matters
 PATTERNS = [
@@ -58,34 +60,37 @@ PATTERNS = [
      "dumps every environment variable"),
     (r"!?\[[^\[]*\]\(https?://[^\)]*\$\{?", "md_link_exfil", "high",
      "a markdown link or image whose URL carries a variable"),
-    (r">\s*/tmp/[^\s]*\s*&&\s*(curl|wget|nc|python)", "tmp_staging", "critical",
+    # a sender after it: not a script of the skill's own (`&& python3 tools/summarize.py`, #455)
+    (r">\s*/tmp/[^\s]*\s*&&\s*(curl|wget|nc|ncat|netcat|python[23]?\s+-c)\b", "tmp_staging", "critical",
      "stages data in /tmp, then sends it"),
     (r"(send|post|upload|transmit)\s+.*\s+(to|at)\s+https?://", "send_to_url", "high",
      "tells the agent to send data to a URL"),
     (r"webhook\.site|requestbin\.com|pipedream\.net|hookbin\.com|pastebin\.com", "exfil_service",
      "high", "names a data-collection service"),
-    # prompt injection
-    (r"ignore\s+(?:\w+\s+)*(previous|all|above|prior)\s+instructions", "ignore_instructions",
+    # prompt injection: within a line, words apart at most a few ({W}): `\s+` and any number
+    # of words once read "## Ignore generated files", a blank line, "Follow all instructions",
+    # and "system prompt and the project config can override", as injections (#455)
+    (rf"ignore{S}{W}(previous|all|above|prior){S}instructions", "ignore_instructions",
      "critical", "prompt injection: ignore previous instructions"),
-    (r"disregard\s+(?:\w+\s+)*(your|all|any)\s+(?:\w+\s+)*(instructions|rules|guidelines)",
+    (rf"disregard{S}{W}(your|all|any){S}{W}(instructions|rules|guidelines)",
      "disregard_rules", "critical", "tells the agent to disregard its rules"),
-    (r"system\s+(?:\w+\s+)*prompt\s+(?:\w+\s+)*override", "sys_prompt_override", "critical",
-     "tries to override the system prompt"),
-    (r"act\s+as\s+(if|though)\s+(?:\w+\s+)*you\s+(?:\w+\s+)*(have\s+no|don't\s+have)\s+"
-     r"(?:\w+\s+)*(restrictions|limits|rules)", "bypass_restrictions", "critical",
+    (rf"system{S}{W}prompt{S}(?:\w+{S}){{0,2}}override|override{S}{W}system{S}prompt",
+     "sys_prompt_override", "critical", "tries to override the system prompt"),
+    (rf"act{S}as{S}(if|though){S}{W}you{S}{W}(have{S}no|don't{S}have){S}"
+     rf"{W}(restrictions|limits|rules)", "bypass_restrictions", "critical",
      "tells the agent to act without restrictions"),
-    (r"(respond|answer|reply)\s+without\s+(?:\w+\s+)*(restrictions|limitations|filters|safety)",
+    (rf"(respond|answer|reply){S}without{S}{W}(restrictions|limitations|filters|safety)",
      "remove_filters", "critical", "tells the agent to drop its safety rules"),
-    (r"\bDAN\s+mode\b|Do\s+Anything\s+Now", "jailbreak", "critical", "a known jailbreak"),
-    (r"you\s+are\s+(?:\w+\s+)*now\s+", "role_hijack", "high", "tries to change the agent's role"),
-    (r"pretend\s+(?:\w+\s+)*(you\s+are|to\s+be)\s+", "role_pretend", "high",
+    (rf"\bDAN{S}mode\b|Do{S}Anything{S}Now", "jailbreak", "critical", "a known jailbreak"),
+    (rf"you{S}are{S}{W}now{S}", "role_hijack", "high", "tries to change the agent's role"),
+    (rf"pretend{S}{W}(you{S}are|to{S}be){S}", "role_pretend", "high",
      "tries to give the agent another identity"),
-    (r"do\s+not\s+(?:\w+\s+)*tell\s+(?:\w+\s+)*the\s+(?:user|reviewer)(?!\s+to\s+[\"'])"
+    (rf"do{S}not{S}{W}tell{S}{W}the{S}(?:user|reviewer)(?!{S}to{S}[\"'])"
      r"(?!.*\b(?:unless|except|until|confirm|verify|check)\b)", "deception_hide", "high",
      "tells the agent to hide something from the user or reviewer"),
-    (r"(when|if)\s+no\s*one\s+is\s+(watching|looking)", "conditional_deception", "high",
+    (rf"(when|if){S}no[ \t]*one{S}is{S}(watching|looking)", "conditional_deception", "high",
      "behave differently when unobserved"),
-    (r"output\s+(?:\w+\s+)*(system|initial)\s+prompt", "leak_system_prompt", "high",
+    (rf"output{S}{W}(system|initial){S}prompt", "leak_system_prompt", "high",
      "tries to extract the system prompt"),
     (r"<!--[^>]*\b(?:ignore|forget|disregard|override|secret|hidden|system\s*prompt|you\s+are\s+now)"
      r"\b[^>]*-->", "html_comment_injection", "high", "instructions hidden in an HTML comment"),
@@ -105,7 +110,8 @@ PATTERNS = [
      "critical", "downloads a script and runs it"),
     (rf"/bin/{SHELLS}\b\s+-i\s+.*>/dev/tcp/", "bash_reverse_shell", "critical",
      "an interactive reverse shell"),
-    (r"\b(?:nc|ncat|netcat)\b[^\n]*\s-[a-z]*[ec]\b|\bsocat\b[^\n]*\b(?:exec|system|pty)[\w-]*:",
+    # its own flags, not a later command's (`until nc -z db 5432; do …; done; ./run -c x`, #455)
+    (r"\b(?:nc|ncat|netcat)\b[^\n;&|]*\s-[a-z]*[ec]\b|\bsocat\b[^\n]*\b(?:exec|system|pty)[\w-]*:",
      "reverse_shell", "critical", "a reverse shell (a listener that runs a program)"),
     (r"\b(?:nc|ncat|netcat)\s+-[a-z]*l|\bsocat\b[^\n]*\b(?:tcp|udp)[\w-]*-listen:",
      "listener", "high", "a network listener"),
@@ -229,13 +235,43 @@ def _utf8(raw: bytes) -> bool:
         return False
 
 
+# What once refused legitimate skills as critical (#455): a `>` closing an HTML tag read as a
+# redirect (`Read <code>CLAUDE.md</code>`), a warning against reading a secrets file ("Never
+# `cat .env`"), a container build writing its own /etc (`RUN echo … > /etc/apt/…`), and one agent
+# file set against another (`AGENTS.md > CLAUDE.md`, a precedence or a copy: Claude reads it).
+REDIRECTS = {"system_overwrite", "agent_config_write", "tmp_staging"}  # matched with tags blanked
+TAG = re.compile(r"</?[A-Za-z][\w-]*(?:\s[^<>\n]*)?>")
+NEGATED = re.compile(r"\b(?:never|don'?t|do\s+not|must\s+not|shouldn'?t|avoid)\b[^.;:!?\n]*$",
+                     re.IGNORECASE)
+CONTAINER = re.compile(r"^\s*RUN\s")  # a Dockerfile's step: it writes the image, not this machine
+
+
+def _softened(rule: str, rel: str, text: str, m: re.Match) -> str | None:
+    """None to drop the finding, "high" to make it a warning, "" to keep it as it is."""
+    head = text[text.rfind("\n", 0, m.start()) + 1:m.start() + 1]  # its line, up to the match
+    if rule == "read_secrets_file" and NEGATED.search(head[:-1]):
+        return None
+    if rule == "system_overwrite" and (CONTAINER.match(head) or Path(rel).name.lower() in
+                                       ("dockerfile", "containerfile")
+                                       or rel.lower().endswith(".dockerfile")):
+        return "high"
+    if rule == "agent_config_write" and re.search(rf"{AGENT_FILES}$", head, re.IGNORECASE):
+        return "high"
+    return ""
+
+
 def scan_text(text: str, rel: str = "SKILL.md", prose: bool = True) -> list[dict]:
     out = []
     lines = text.splitlines()
+    tagless = TAG.sub(lambda m: " " * len(m.group()), text)  # offsets and lines kept
     for rx, rule, severity, why in COMPILED:
-        for m in rx.finditer(text):
-            n = text.count("\n", 0, m.start()) + 1
-            out.append(finding(rule, severity, rel, n, lines[n - 1] if n <= len(lines) else "", why))
+        body = tagless if rule in REDIRECTS else text
+        for m in rx.finditer(body):
+            if (soft := _softened(rule, rel, body, m)) is None:
+                continue
+            n = body.count("\n", 0, m.start()) + 1
+            out.append(finding(rule, soft or severity, rel, n,
+                               lines[n - 1] if n <= len(lines) else "", why))
     for n, line in enumerate(lines, 1):
         if n == 1:
             line = line.removeprefix("\ufeff")  # a byte-order mark opening a file is ordinary
@@ -266,7 +302,12 @@ def verdict(found: list[dict]) -> str:
 
 def lines(found: list[dict]) -> list[str]:
     return [f"{f['severity']}: {f['file']}" + (f":{f['line']}" if f["line"] else "")
-            + f" {f['why']}" + (f": {f['text']}" if f["text"] else "") for f in found]
+            + f" {f['why']} [{f['rule']}]" + (f": {f['text']}" if f["text"] else "") for f in found]
+
+
+# What `wb skill add --reviewed RULE` can't pass: what Claude can't read for itself (hidden
+# characters, code pushed off-screen, a binary) or what would copy from outside the skill
+UNREVIEWABLE = {"symlink_escape", "binary_file", "invisible_text", "padded_code", "nul_bytes"}
 
 
 def content_hash(path: Path) -> str:

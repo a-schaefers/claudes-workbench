@@ -2891,7 +2891,8 @@ def cmd_skill(a):
         if a.name in personal:
             die(f"{a.name} is the name of one of the user's own skills; pick another")
         try:
-            verb, warns = skills.add(Path(a.source), a.name, a.message, a.origin or "")
+            verb, warns = skills.add(Path(a.source), a.name, a.message, a.origin or "",
+                                     tuple(a.reviewed or ()))
         except (ValueError, OSError, RuntimeError) as e:  # a copy or git failure too (#604)
             die(f"not added: {_skill_failure(e)}")
         print(f"{verb} {a.name}" + "".join(f"\nwarning: {w}" for w in warns + _one_project(a.lesson, a.name))
@@ -4344,6 +4345,8 @@ def parser() -> argparse.ArgumentParser:
     x.add_argument("--message", "-m", required=True, help="why: what review taught")
     x.add_argument("--source", dest="origin", help="where an imported skill came from (url@commit, license)")
     x.add_argument("--lesson", action="append", metavar="ID", help="the lessons this takes in (wb lessons)")
+    x.add_argument("--reviewed", action="append", metavar="RULE", help="a scan rule whose critical "
+                   "findings you have read and judged safe: they pass, recorded in the commit (repeatable)")
     x = ss.add_parser("patch", help="fix one passage of a skill in place")
     x.add_argument("name")
     x.add_argument("--old", help="the passage to replace (it must occur exactly once)")

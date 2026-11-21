@@ -73,3 +73,6 @@ skills, then shows one's license, hash and security scan. A dangerous one is ref
 it like untrusted code. Keep only what fits the agents' work (coding in a repo, no secrets, no
 network setup) and rewrite it in this library's shape and voice. Then
 `wb skill add … --source "<url>@<commit>, <license>"`. Respect the license; skip one with none.
+When `wb skill add` refuses a finding you have read and it is safe as written (an installer's
+`curl … | sh`), `--reviewed <rule>` (the rule in brackets) lets it in and records that; reword
+anything you are less sure of.
