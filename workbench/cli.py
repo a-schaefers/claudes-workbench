@@ -1474,6 +1474,23 @@ def _scope(tasks, where, sessions=None):
     return mine, others
 
 
+def _caller(a) -> tuple:
+    """The scope (`where`, `sessions`) a command without `--repo`/`--session` takes: run from
+    Claude Code's Bash (CLAUDE_CODE_SESSION_ID set), the calling session's, as the mod passes it:
+    every id its process has had (`claude-sessions/<CLAUDE_PID>`, store.claude_sessions) and the
+    directory it runs in; `--all-sessions`, or a terminal, every session's. Plain `wb status`,
+    which the skill and the compaction note send Claude to, listed every session's open tasks
+    as one, so one session could review, accept or discard another's (#693)."""
+    if a.repo or a.session or getattr(a, "all_sessions", False):
+        return a.repo, a.session
+    sid = os.environ.get("CLAUDE_CODE_SESSION_ID", "")
+    if not sid:
+        return None, None
+    pid = os.environ.get("CLAUDE_PID", "")
+    ids = list(dict.fromkeys([*(store.claude_sessions(pid) if pid.isdigit() else []), sid]))
+    return os.getcwd(), ids
+
+
 def _folds_case(path) -> bool:
     """Whether the file system holding ``path`` ignores case: the path with every letter's case
     swapped is the same directory (APFS and HFS+ as macOS formats them; not ext4)."""
@@ -1496,7 +1513,7 @@ def cmd_status(a):
     tasks = [need(a.name)] if a.name else [t for t in store.all_tasks()  # replays: wb bench report
                                            if a.all or (t.status.get("phase") not in store.CLOSED
                                                         and not t.spec.get("bench"))]
-    tasks, others = (tasks, []) if a.name else _scope(tasks, a.repo, a.session)
+    tasks, others = (tasks, []) if a.name else _scope(tasks, *_caller(a))
     parked = [] if a.name or a.all else [t for t in tasks if store.parked(t.status)]
     tasks = [t for t in tasks if t not in parked]
     others = [t for t in others if a.all or not store.parked(t.status)]
@@ -1648,7 +1665,7 @@ def cmd_stop(a):
     if a.all:
         # everything, without --repo/--session: the bench's driver too, first, so it starts nothing
         driver = None if a.repo or a.session else bench.stop_driver()
-        mine, others = _scope(_open_tasks(), a.repo, a.session)
+        mine, others = _scope(_open_tasks(), *_caller(a))
         stopped = ([f"wb bench (pid {driver})"] if driver else []) + stop_everything(mine)
         print("stopped: " + ("; ".join(stopped) if stopped else "nothing was running"))
         _say(_others_line(others, "left running"))
@@ -1665,6 +1682,10 @@ def cmd_stop(a):
     _ack_all(task)  # else the mod's safety net wakes Claude about the stop it just made
     print(f"stopped {a.name}; wb resume continues it in a fresh session, wb feedback with "
           "corrections, wb discard drops it")
+
+
+ALL_SESSIONS = ("every Claude Code session's tasks (from Claude Code's Bash, the default is the "
+                "calling session's: _caller)")
 
 
 # What `wb resume --all` continues: tasks interrupted from outside, not those stopped for a
@@ -1704,7 +1725,7 @@ def cmd_resume(a):
     tasks = [t for t in tasks if t.status.get("phase") in ("stuck", "failed")
              and t.status.get("last") in INTERRUPTED and not runner_alive(t)
              and (not a.backlog or t.spec.get("backlog") == a.backlog)]
-    tasks, _ = _scope(tasks, a.repo, a.session)
+    tasks, _ = _scope(tasks, *_caller(a))
     if not tasks:
         print("nothing to resume: no task in scope was interrupted (a restart, a kill or a signal)")
         return
@@ -2022,7 +2043,7 @@ def cmd_takeover(a):
     """Stop the agent and hand the worktree to Claude, to finish by hand or hand back."""
     if a.all:  # "just get it done claude"
         tasks, others = _scope([t for t in store.all_tasks()
-                                if t.status.get("phase") not in store.CLOSED], a.repo, a.session)
+                                if t.status.get("phase") not in store.CLOSED], *_caller(a))
         if not tasks:
             print("no open delegated tasks to take over")
         refused = 0
@@ -4788,6 +4809,7 @@ def parser() -> argparse.ArgumentParser:
     s.add_argument("--repo", metavar="DIR", help="only the tasks of a session started in DIR")
     s.add_argument("--session", action="append", metavar="ID",
                    help="only the tasks of Claude Code session ID (repeatable; the mod passes its ids)")
+    s.add_argument("--all-sessions", action="store_true", help=ALL_SESSIONS)
     s.set_defaults(f=cmd_status)
     s = sub.add_parser("log", help="the agent's events")
     s.add_argument("name"); s.add_argument("-n", type=int, default=0)
@@ -4862,6 +4884,7 @@ def parser() -> argparse.ArgumentParser:
     s.add_argument("--repo", metavar="DIR", help="with --all: only those of a session started in DIR")
     s.add_argument("--session", action="append", metavar="ID",
                    help="with --all: only those of Claude Code session ID (repeatable)")
+    s.add_argument("--all-sessions", action="store_true", help=ALL_SESSIONS)
     s.add_argument("--user", action="store_true", help="the user's own command asked for it (the "
                    "mod's hand-back): past the Claude coding choice")
     s.set_defaults(f=cmd_takeover)
@@ -4886,6 +4909,7 @@ def parser() -> argparse.ArgumentParser:
     s.add_argument("--repo", metavar="DIR", help="with --all: only those of a session started in DIR")
     s.add_argument("--session", action="append", metavar="ID",
                    help="with --all: only those of Claude Code session ID (repeatable)")
+    s.add_argument("--all-sessions", action="store_true", help=ALL_SESSIONS)
     s.set_defaults(f=cmd_stop)
     s = sub.add_parser("resume", help="continue a stopped task in a fresh session (not a review round)")
     s.add_argument("name", nargs="?")
@@ -4896,6 +4920,7 @@ def parser() -> argparse.ArgumentParser:
     s.add_argument("--repo", metavar="DIR", help="with --all: only those of a session started in DIR")
     s.add_argument("--session", action="append", metavar="ID",
                    help="with --all: only those of Claude Code session ID (repeatable)")
+    s.add_argument("--all-sessions", action="store_true", help=ALL_SESSIONS)
     s.add_argument("--backlog", metavar="NAME", help="with --all: only that backlog's")
     s.set_defaults(f=cmd_resume)
     s = sub.add_parser("accept", help="commit the work on its branch and close the task")

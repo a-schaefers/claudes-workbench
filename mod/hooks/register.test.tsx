@@ -478,6 +478,26 @@ test('a session that adopts a task whose process is gone turns workbench mode on
   await clock.advance(3000)
 })
 
+test('in workbench mode the status line counts only this session\'s tasks as awaiting review (#693)', async ($, on) => {
+  // #693: another session's review counted in this one's "N awaiting review"
+  const clock = mock.clock(on, { now: 1_800_000_000_000 })
+  const files: Record<string, string> = {}
+  const ui: string[] = []
+  task(files, 'ours', 'review', { repo: '/home/u/a', cwd: '/home/u/a', session: 'sess-new' })
+  task(files, 'theirs', 'review', { repo: '/home/u/b', cwd: '/home/u/b', session: 'sess-b' })
+  task(files, 'asks', 'asking', { repo: '/home/u/b', cwd: '/home/u/b', session: 'sess-b' })
+  fakeTasks(on, files, ['ours', 'theirs', 'asks'], true, ui)
+  on('session.id', () => ({ value: 'sess-new' }))
+  on('process.run', () => ({ value: { exitCode: 0, stdout: '', stderr: '' } }))
+  on('ui.toast', () => ({ value: undefined }))
+  on('prompt.submit', (_: any, e: any) => ({ text: e.text }))
+  on('skill.prompt', (_: any, e: any) => ({ text: e.text }))
+  await $.session.start({ cwd: '/home/u/a', surface: 'terminal', isInteractive: true })
+  await $.skill.prompt({ skill: 'workbench', text: 'x', frontmatter: {}, source: 'userSettings' })
+  await clock.advance(3000)
+  expect(ui.filter(l => l.startsWith('status')).at(-1)).toBe('status ⚒ wb · 1 awaiting review')
+})
+
 test('a notice another session took under wb\'s lock wakes no one here (#687)', async ($, on) => {
   // #687: two sessions woken by one `wb events` line each read `acked`, then wrote it: both woke
   const clock = mock.clock(on, { now: 1_800_000_000_000 })

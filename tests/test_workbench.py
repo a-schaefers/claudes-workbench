@@ -4458,6 +4458,34 @@ class Steering(Base):
         self.assertEqual(e.exception.code, 3)
         self.assertEqual(cli._acked(t), 100.5)
 
+    def test_plain_wb_status_from_claude_code_lists_the_calling_sessions_tasks(self):
+        # #693: the skill and the compaction note send Claude to `wb status`, which listed every
+        # session's open tasks as one, so one session could accept or discard another's
+        def task(name, phase, **spec):
+            t = store.Task(name)
+            t.dir.mkdir(parents=True)
+            store.write_json(t.dir / "task.json", {"name": name, "created_at": store.now(), **spec})
+            t.set_status(phase=phase, round=1)
+        other = Path(self.tmp.name) / "b"
+        task("t-a1", "review", repo=str(self.repo), cwd=str(self.repo), session="sess-a")
+        task("t-a0", "review", repo=str(self.repo), cwd=str(self.repo), session="sess-a0")  # before a /clear
+        task("t-b1", "review", repo=str(other), cwd=str(other), session="sess-b")
+        task("t-b2", "running", repo=str(other), cwd=str(other), session="sess-b")
+        me = subprocess.Popen(["sleep", "60"]); self.addCleanup(me.kill)
+        (store.home() / "claude-sessions").mkdir()
+        (store.home() / "claude-sessions" / str(me.pid)).write_text(f"{store.now()} sess-a0\n")
+        os.environ.update(CLAUDE_CODE_SESSION_ID="sess-a", CLAUDE_PID=str(me.pid))
+        out = run_wb("status")
+        rows = [l.split()[0] for l in out.splitlines()[1:] if not l.startswith("open elsewhere")]
+        self.assertEqual(sorted(rows), ["t-a0", "t-a1"])
+        self.assertIn("open elsewhere (other sessions'): t-b1", out)
+        both = run_wb("status", "--all-sessions")
+        self.assertIn("t-b1", both.split("open elsewhere")[0])
+        self.assertIn("left running (other sessions'): t-b2", run_wb("stop", "--all"))
+        self.assertEqual(store.Task("t-b2").status["phase"], "running")
+        os.environ.pop("CLAUDE_CODE_SESSION_ID")                       # a terminal: everyone's
+        self.assertIn("t-b1", run_wb("status").split("open elsewhere")[0])
+
     def test_takeover_stops_the_agent_and_hands_over_the_worktree(self):
         self.start("t-take", "slow", "--test", TEST_CMD)
         self.wait_session("t-take")

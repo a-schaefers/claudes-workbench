@@ -2428,8 +2428,10 @@ async function restorePane($: any, tab: string) {
 function taskParts(list: WbTask[], on: boolean) {
   const shown = on ? list : list.filter(t => mine(t))
   const live = shown.filter(t => ACTIVE.has(t.phase) && t.phase !== 'asking')
-  const asking = shown.filter(t => t.phase === 'asking')
-  const waiting = shown.filter(t => waitsOnClaude(t) && t.phase !== 'asking')
+  // what waits on Claude is this session's alone, in the mode too: another session's reviews
+  // counted in this one's "N awaiting review", as if this Claude had them to do (#693)
+  const asking = shown.filter(t => t.phase === 'asking' && mine(t))
+  const waiting = shown.filter(t => waitsOnClaude(t) && t.phase !== 'asking' && mine(t))
   return { live, parts: [
     ...live.map(t => `${t.name} ${t.phase} r${t.round}`),
     ...asking.map(t => `${t.name} asks`),
