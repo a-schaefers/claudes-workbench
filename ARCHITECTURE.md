@@ -2829,7 +2829,13 @@ what they hold.
 **Residency** (`make_resident(m, keep, warn)`, called by the runner under the lease). A model
 `status` says can't run raises `RuntimeError` (its reason and remedy) before anything is freed: a
 `--force` task for an unpulled model once emptied the GPU and then failed its load. Nothing to do
-when `m` is resident and nothing else is, or all of it is in VRAM with room beside the rest.
+when `m` is resident and nothing else is, or all of it is in VRAM with room beside the rest,
+unless it is a local Ollama model partly on the CPU that would fit whole once the GPU is freed
+around it (`_respread`: a known budget, its `/api/ps` size plus the kept models' within it, no
+running server wb can't stop): then, after `free_gpu`, it is unloaded (`_unload`) and loaded
+again, since Ollama reuses a loaded runner as it was placed. Loaded while something else held
+the VRAM, it crawled at CPU speed all task beside an empty GPU (#703). Each (root, name, size)
+is reloaded so once (`_RESPREAD`): one that comes back split isn't reloaded every round.
 An LM Studio model listed but with no loaded instance (`lmstudio_unloaded`: just-in-time loading
 lists every downloaded model, so `status` says running) is loaded first, after `free_gpu` as
 below, with `POST /api/v1/models/load` and `context_length` set to its `limit.context`; a refused
@@ -2853,7 +2859,9 @@ answers someone (`_server_idle`: llama-server's `/slots` `is_processing`, else `
 `live.state` or Prometheus text with a `BUSY_GAUGES` gauge above 0, `llamacpp:requests_processing`
 or `vllm:num_requests_running`; read as JSON only, both stopped mid-reply, #465, the audit of 1.8;
 a server that says none of these is idle) (a running server with no `stop` is left, with a warning
-that it may hold GPU memory); every model loaded on each discovered Ollama server is unloaded
+that it may hold GPU memory); after a stop that succeeded, `released(STOP_SETTLE)` waits up to
+30 s until the cards' used VRAM stops falling (`media.settle` waits the same way), since a stop
+returns before the memory is freed and Ollama loading at once split the model (#703); every model loaded on each discovered Ollama server is unloaded
 (`POST /api/generate {keep_alive: 0}`) except kept ones, and except models.json's `keep_loaded`
 (`keep_loaded()`: ids or Ollama names; a server whose model is listed is never stopped), which
 `_others_resident` doesn't count either. Before those unloads, `_wait_unused` watches `/api/ps`

@@ -7988,7 +7988,7 @@ class Images(Base):
         said = []
         with mock.patch.object(models, "_fake", lambda: False), \
                 mock.patch.object(models, "resident", lambda: [kept]), \
-                mock.patch.object(media.hardware, "gpus", lambda **k: []), \
+                mock.patch.object(models.hardware, "gpus", lambda **k: []), \
                 mock.patch.object(media, "time", fake_time):
             media.settle(said.append)
             self.assertLess(clock[0], 5)
@@ -7997,7 +7997,7 @@ class Images(Base):
             self.assertTrue(models.freed(other))
         with mock.patch.object(models, "_fake", lambda: False), \
                 mock.patch.object(models, "resident", lambda: [other]), \
-                mock.patch.object(media.hardware, "gpus", lambda **k: []), \
+                mock.patch.object(models.hardware, "gpus", lambda **k: []), \
                 mock.patch.object(media, "time", fake_time):
             clock[0] = 0.0
             media.settle(said.append)       # one free_gpu unloads is still waited for

@@ -475,7 +475,8 @@ class Real(unittest.TestCase):
         next(r for r in loaded if r["name"] == "x")["size_vram"] = 5  # x partly on the CPU
         over(gpu_gb=20)
         models.make_resident(x(), say=lambda m: None)
-        self.assertEqual([p["model"] for p in posts], ["emb", "x"])  # room is made, x reloaded
+        self.assertEqual([(p["model"], p.get("keep_alive")) for p in posts],
+                         [("emb", 0), ("x", 0), ("x", "30m")])  # room is made, x placed again (#703)
         posts.clear()
         over()                                # no budget known: the GPU is freed, as before
         loaded.append({"name": "chat", "size": gb, "size_vram": gb})
@@ -483,6 +484,41 @@ class Real(unittest.TestCase):
         posts.clear()
         models.make_resident(x(), say=lambda m: None)
         self.assertEqual([p["model"] for p in posts], ["chat", "x"])
+
+    def test_a_model_loaded_partly_on_the_cpu_is_placed_again_once_it_fits_and_only_once(self):
+        # #703: loaded while something else held the VRAM, x stayed 30% on the CPU for the whole
+        # task: resident with nothing else beside it read as placed, and a generate reuses the
+        # loaded runner as it is. Now it is unloaded and loaded again, once
+        gb = 10 ** 9
+        loaded = [{"name": "x", "size": 10 * gb, "size_vram": 7 * gb}]
+        found, posts = self.own(loaded, ["x"])
+        over = lambda **kw: Path(os.environ["WB_MODELS"]).write_text(json.dumps(kw))  # noqa: E731
+        x = lambda: models.discover()["a/x"]  # noqa: E731
+        models._RESPREAD.clear()
+        self.addCleanup(models._RESPREAD.clear)
+        over(gpu_gb=8)                         # 10 GB never fits 8: left as it is, no reload
+        self.assertEqual(models.make_resident(x(), say=lambda m: None), 0.0)
+        self.assertEqual(posts, [])
+        over(gpu_gb=12)
+        models.make_resident(x(), say=lambda m: None, warn=lambda m: None)
+        self.assertEqual([(p["model"], p.get("keep_alive")) for p in posts], [("x", 0), ("x", "30m")])
+        posts.clear()
+        loaded[:] = [{"name": "x", "size": 10 * gb, "size_vram": 7 * gb}]   # split again all the same
+        self.assertEqual(models.make_resident(x(), say=lambda m: None), 0.0)  # not every round
+        self.assertEqual(posts, [])
+
+    def test_free_gpu_waits_for_a_stopped_servers_vram_before_ollama_loads(self):
+        # #703: pkill llama-server returns before its memory is freed, and Ollama loading at once
+        # put part of the model on the CPU
+        srv = self.server({"/v1/models": {"data": [{"id": "m"}]}})
+        self.config({"s": {"options": {"baseURL": srv + "/v1"}, "models": {"m": {}}}}, {"s": {"stop": "true"}})
+        used = iter([8 * 2 ** 30, 5 * 2 ** 30, 2 * 2 ** 30, 2 * 2 ** 30])
+        reads = []
+        with mock.patch.object(models.hardware, "gpus", lambda windows=True: reads.append(1) or [
+                {"name": "card", "vram": 16 * 2 ** 30, "vram_used": next(used)}]), \
+                mock.patch.object(models, "time", mock.Mock(wraps=time, sleep=lambda s: None)):
+            models.free_gpu(say=lambda m: None)
+        self.assertEqual(len(reads), 4)        # until the used VRAM stopped falling
 
     def test_a_llama_server_or_vllm_answering_a_request_is_not_idle(self):
         # #465 (the audit of 1.8): only a JSON /metrics `live.state` was read; llama-server and
@@ -694,7 +730,7 @@ class Real(unittest.TestCase):
         self.config({"one": {"options": {"baseURL": srv + "/v1"}, "models": {"z": {}}}})
         self.assertEqual([m.id for m in models.resident()], ["one/z"])
         said, t0 = [], time.time()
-        with mock.patch.object(media.hardware, "gpus", lambda windows=True: []):
+        with mock.patch.object(models.hardware, "gpus", lambda windows=True: []):
             media.settle(said.append, timeout=30)
         self.assertLess(time.time() - t0, 5)
         self.assertEqual(said, [])

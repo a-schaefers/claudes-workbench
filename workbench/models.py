@@ -1156,12 +1156,19 @@ def make_resident(m: Model, say=print, keep=(), warn=None) -> float:
             _lmstudio_unload(m, instance)
         _lmstudio_load(m, lms[0], say)
         return time.time() - t0
-    if st["resident"] and (m.remote or not _others_resident(m, keep) or _room_beside(m)):
+    respread = st["resident"] and _respread(m, keep)
+    if st["resident"] and not respread and (m.remote or not _others_resident(m, keep) or _room_beside(m)):
         return 0.0
     t0 = time.time()
     if not m.remote and not _room_beside(m):
         free_gpu(keep={m.id, *keep}, say=say, warn=warn, of=m)
     if m.engine == "ollama":
+        if respread:
+            # Ollama never re-places a loaded runner: a generate with the same options reuses
+            # it, split as it was (#703). Unloaded, it is placed again into what was freed
+            say(f"reloading {m.name}: it was partly on the CPU")
+            _unload(m)
+            _RESPREAD.add(respread)
         say(f"loading {m.name} into ollama")
         _post(f"{m.root}/api/generate", {"model": m.name, "prompt": "", "keep_alive": "30m"},
               timeout=START_TIMEOUT)
@@ -1291,6 +1298,43 @@ def _placement(m: Model, warn) -> None:
             return
 
 
+# (root, name, size) of each model make_resident reloaded to put it all on the GPU: one that
+# came back split again isn't reloaded at every round (#703)
+_RESPREAD: set = set()
+
+
+def _respread(m: Model, keep=()) -> tuple | None:
+    """When ``m`` is a local Ollama model loaded partly on the CPU that would fit all in VRAM
+    once the GPU is freed around it (its size beside the models kept, under a known budget, no
+    server wb can't stop holding memory), its (root, name, size), which make_resident reloads
+    it under; else None. Loaded while something else held the VRAM (a server whose stop returns
+    before its memory is freed, another tool's model), it crawled at CPU speed for the whole task
+    beside an empty GPU, since a resident model was taken as placed (#703)."""
+    if m.engine != "ollama" or m.remote or _fake():
+        return None
+    budget = gpu_budget(m.root)
+    if not budget:
+        return None
+    local = [o for o in discover().values() if not o.remote]
+    if any(o.engine == "server" and not o.stop and status(o)["resident"] for o in local):
+        return None  # its memory stays taken whatever is freed
+    held, seen, mine, kept = keep_loaded(), {}, None, 0
+    ours = [o for o in local if o.engine == "ollama" and (o.id in keep or o.id in held)]
+    for key, root in _roots(o for o in local if o.engine == "ollama").items():
+        if apart(m.root, root, seen):
+            continue
+        for x in (_get(f"{root}/api/ps") or {}).get("models", []):
+            name = x.get("name")
+            if key == m.server and _matches(m.name, {name}):
+                mine = x
+            elif any(o.server == key and _matches(o.name, {name}) for o in ours) or _kept_name(name or "", held):
+                kept += x.get("size") or 0
+    if not mine or not mine.get("size") or (mine.get("size_vram") or 0) >= mine["size"]:
+        return None
+    tried = (m.root, mine.get("name"), mine["size"])
+    return tried if tried not in _RESPREAD and mine["size"] + kept <= budget else None
+
+
 def _unload(m: Model) -> None:
     try:
         _post(f"{m.root}/api/generate", {"model": m.name, "keep_alive": 0}, timeout=120)
@@ -1334,6 +1378,7 @@ def free_gpu(keep=(), say=print, warn=None, of: Model | None = None) -> None:
     if _fake():
         return
     seen: dict = {}
+    stopped = False
     held = keep_loaded()
     local = [o for o in discover().values() if not o.remote]  # another host's GPU isn't ours to free
     kept = [o for o in local if o.id in keep or o.id in held]
@@ -1369,6 +1414,12 @@ def free_gpu(keep=(), say=print, warn=None, of: Model | None = None) -> None:
         if r.returncode:
             warn(f"{other.id}'s stop command failed (exit {r.returncode}): "
                  f"{(r.stderr or r.stdout).strip()[-200:]}")
+        else:
+            stopped = True
+    if stopped:
+        # a stop (pkill llama-server) returns before the server's VRAM is freed: Ollama loading
+        # at once found it taken and put part of the model on the CPU (#703)
+        released(STOP_SETTLE)
     kept_ollama = [o for o in kept if o.engine == "ollama"]
     doomed = {root: [name for name in _ollama_loaded(root)  # every model Ollama has loaded,
                      if not any(o.server == key and _matches(o.name, {name}) for o in kept_ollama)
@@ -1383,6 +1434,26 @@ def free_gpu(keep=(), say=print, warn=None, of: Model | None = None) -> None:
                 _post(f"{root}/api/generate", {"model": name, "keep_alive": 0}, timeout=120)
             except Exception:
                 pass
+
+
+STOP_SETTLE = 30  # seconds free_gpu waits at most for a stopped server's VRAM to be released
+
+
+def released(timeout: float) -> bool:
+    """Wait, up to ``timeout`` seconds, until the GPUs' used VRAM stops falling (less than 64 MiB
+    a second): memory let go returns after the call that let it go. True once it has; at once
+    where no card says its use (a Mac, a GPU named from Windows)."""
+    deadline, last = time.time() + timeout, None
+    while time.time() < deadline:
+        cards = [g["vram_used"] for g in hardware.gpus(windows=False) if g.get("vram_used") is not None]
+        if not cards:
+            return True
+        used = sum(cards)
+        if last is not None and last - used < 64 * 2 ** 20:
+            return True
+        last = used
+        time.sleep(1)
+    return False
 
 
 # A model free_gpu would unload may be answering someone this account's lease doesn't know:

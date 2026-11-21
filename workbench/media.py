@@ -20,7 +20,7 @@ import urllib.request
 from pathlib import Path
 from urllib.parse import urlparse
 
-from . import hardware, models
+from . import models
 
 
 def run_group(argv: list[str], timeout: float, **kw) -> subprocess.CompletedProcess:
@@ -175,14 +175,8 @@ def settle(say, timeout: float = 90, keep=()) -> None:
     deadline = time.time() + timeout
     while any(models.freed(m, keep) for m in models.resident()) and time.time() < deadline:
         time.sleep(1)
-    last = None
-    while time.time() < deadline:  # then until the GPU's used VRAM stops falling
-        used = sum(g["vram_used"] for g in hardware.gpus(windows=False) if g.get("vram_used") is not None)
-        if last is not None and last - used < 64 * 2 ** 20:
-            return
-        last = used
-        time.sleep(1)
-    say(f"the GPU's memory was still being released after {timeout:.0f} s; generating anyway")
+    if not models.released(max(deadline - time.time(), 0)):  # then until the used VRAM stops falling
+        say(f"the GPU's memory was still being released after {timeout:.0f} s; generating anyway")
 
 
 def on_gpu(e: dict) -> bool:
