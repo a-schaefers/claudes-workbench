@@ -1576,6 +1576,48 @@ def _copy(src: Path, dest: Path) -> None:
         shutil.copy2(src, dest, follow_symlinks=False)
 
 
+PREPARED = "prepared.json"
+
+
+def prepared_record(task) -> dict:
+    """What the setup left, for the scratch checkouts: {paths, marks, bytes} from the task's
+    prepared.json, else from status (a task prepared before the file, or a stand-in with status
+    alone). In status.json, an in-tree C build's one entry per object file was megabytes, parsed
+    and rewritten on every tool call (#867)."""
+    d = getattr(task, "dir", None)
+    try:
+        got = store.read_json(d / PREPARED) if d is not None else None
+    except OSError:
+        got = None
+    if isinstance(got, dict):
+        return got
+    st = task.status
+    return {"paths": st.get("prepared_paths"), "marks": st.get("prepared_marks"),
+            "bytes": st.get("prepared_bytes")}
+
+
+# paths given to one cp at a time: well under any ARG_MAX, with the paths' own lengths
+COPY_BATCH = 500
+
+
+def _copy_all(src: Path, dest: Path, paths: list[str]) -> None:
+    """Each of ``paths`` from under ``src`` to the same place under ``dest``, as _copy does, in
+    one GNU cp a batch (`--parents`): one cp per path forked tens of thousands of times for an
+    in-tree C build's object files before the base check ran (#867). A batch that fails (macOS's
+    or busybox's cp, a read error) is copied path by path."""
+    for i in range(0, len(paths), COPY_BATCH):
+        batch = paths[i:i + COPY_BATCH]
+        if len(batch) > 1 and sys.platform != "darwin":
+            try:
+                if subprocess.run(["cp", "-a", "--reflink=auto", "--parents", "-t", str(dest), "--", *batch],
+                                  cwd=src, capture_output=True).returncode == 0:
+                    continue
+            except OSError:
+                pass
+        for p in batch:
+            _copy(src / p, dest / p)  # what a failed batch left is replaced
+
+
 def _reflinks(at: Path) -> bool:
     """Whether a copy made in ``at`` can be a clone that takes no space (btrfs, XFS, APFS):
     one small file cloned there, or not."""
@@ -1590,11 +1632,11 @@ def _reflinks(at: Path) -> bool:
 
 
 def _no_room_for(task: store.Task, wt: Path) -> str | None:
-    """Why the setup's work (status `prepared_bytes`) can't be copied into the scratch checkout
+    """Why the setup's work (prepared.json `bytes`) can't be copied into the scratch checkout
     ``wt`` without filling the disk, or None. wb start counted only the checkout, measured before
     any setup ran: a 12 GB target/ copied on ext4 filled the disk twice over (cp, then copytree),
     and every other open task's status write failed meanwhile (#860)."""
-    need = int(task.status.get("prepared_bytes") or 0)
+    need = int(prepared_record(task).get("bytes") or 0)
     free = store.free_bytes(wt)
     if not need or free is None or free >= need + CHECKOUT_SPARE or _reflinks(wt.parent):
         return None
@@ -1611,13 +1653,14 @@ def prepare(task: store.Task, prepared: Path | None = None) -> tuple[int | str, 
     only committed files, so a check that needed node_modules, a .venv or ../lib failed on the
     base and in every round, for that and not for the step). The setup's exit code and output;
     (0, "") with nothing to do. A scratch checkout passes the task's ``prepared`` worktree: the
-    ignored paths its preparation left (status `prepared_paths`, the setup's work and the copies)
+    ignored paths its preparation left (prepared.json `paths`, the setup's work and the copies)
     are copied from there, and the setup isn't run again. The base check, wb verify (twice) and
     wb shot each ran it from nothing, up to SETUP_SECS: a first build compiled three to five
     times a task (#249, the audit of 1.2)."""
     spec, wt = task.spec, task.worktree
     repo = Path(spec["repo"])
-    made = task.status.get("prepared_paths") if prepared else None
+    record = prepared_record(task) if prepared else {}
+    made = record.get("paths") if prepared else None
     # A virtualenv names the checkout it was made in (pyvenv.cfg's home is fine, its activate
     # and its scripts' shebangs aren't): copied, the base check and wb verify ran the task's
     # worktree's interpreter and code, and failed where the task passed (#325, the audit of
@@ -1630,8 +1673,8 @@ def prepare(task: store.Task, prepared: Path | None = None) -> tuple[int | str, 
     # And one whose prepared paths the rounds rebuilt: the agent rebuilt a monorepo's
     # packages/lib/dist (or a C extension in place), the base got the candidate's build, its tests
     # imported it and passed, and verify said `base-passes` for a valid fix (#732, the 2026-11-21
-    # audit). Recorded at setup (status `prepared_marks`); a task prepared before them copies as before.
-    if made and (marks := task.status.get("prepared_marks")) and \
+    # audit). Recorded at setup (prepared.json `marks`); a task prepared before them copies as before.
+    if made and (marks := record.get("marks")) and \
             any(p in marks and prepared_mark(prepared / p) != marks[p] for p in made):
         made = None
     # a scratch checkout (the base check's, wb verify's, wb shot's), not the task's own worktree
@@ -1651,6 +1694,7 @@ def prepare(task: store.Task, prepared: Path | None = None) -> tuple[int | str, 
             roots = prepared.resolve(), wt.resolve()
             if why := _no_room_for(task, wt):
                 return "copy failed", why
+            todo = []
             for p in made:
                 src, dest = prepared / p, wt / p
                 # A later step can track an earlier build path or change its parent to a link.
@@ -1661,7 +1705,8 @@ def prepare(task: store.Task, prepared: Path | None = None) -> tuple[int | str, 
                         or dest.parent.resolve() != (roots[1] / p).parent
                         or not os.path.lexists(src)):
                     return "copy failed", f"prepared input {p} changed; use --setup for a fresh checkout"
-                _copy(src, dest)
+                todo.append(p)
+            _copy_all(prepared, wt, todo)
             return _foreign_builds(wt, made, others)
         for p in spec.get("copy") or ():
             _copy(repo / p, wt / p)
@@ -1972,8 +2017,9 @@ def _prepare_now(task: store.Task) -> bool:
         marks = {p: prepared_mark(task.worktree / p) for p in made} if made else None  # #732
         # what each scratch checkout's copy of them takes, checked against the free space (#860)
         size = sum(store.dir_size(task.worktree / p, budget=10)[0] for p in made) if made else 0
-        task.set_status(prepared=True, prepared_paths=made, prepared_marks=marks, setup_secs=secs,
-                        prepared_bytes=size)
+        # a file of its own, not status.json, which every status write rewrites whole (#867)
+        store.write_json(task.dir / PREPARED, {"paths": made, "marks": marks, "bytes": size})
+        task.set_status(prepared=True, setup_secs=secs)
         return True
     what = f"the setup command failed (exit {code})" if isinstance(code, int) else \
         f"setting up the worktree failed ({setup_timed_out(spec) if code == 'timeout' else code})"

@@ -3277,8 +3277,10 @@ class WorktreeSetup(Base):
         t = store.Task("t-once")
         self.assertEqual(st["base_check"]["exit"], 2)          # deps there: not NO-DEPS's 3
         self.assertEqual(count.read_text().count("run"), 1)     # the base check copied them
-        self.assertEqual(st["prepared_paths"], ["deps"])
-        self.assertEqual(st["prepared_bytes"], store.dir_size(t.worktree / "deps")[0])  # #860
+        made = runner.prepared_record(t)
+        self.assertEqual(made["paths"], ["deps"])
+        self.assertNotIn("prepared_paths", st)                  # not in status.json (#867)
+        self.assertEqual(made["bytes"], store.dir_size(t.worktree / "deps")[0])  # #860
         self.assertIn("setup: ", run_wb("report", "t-once"))
         (t.worktree / "test_answer.sh").write_text(self.NEEDS_DEPS + "\n")
         out = run_wb("verify", "t-once", "--test", "sh test_answer.sh", "--files", "test_answer.sh")
@@ -3300,12 +3302,13 @@ class WorktreeSetup(Base):
                    "--auto-fix", "0", "--no-self-review")
         st = wait_phase("t-dist", {"review"})
         t = store.Task("t-dist")
-        self.assertEqual(list(st["prepared_marks"]), ["dist"])
+        marks = runner.prepared_record(t)["marks"]
+        self.assertEqual(list(marks), ["dist"])
         (t.worktree / "test_lib.sh").write_text("grep -qx fixed dist/lib.txt\n")
         # what a test run leaves in a prepared path changes nothing: still copied, not set up again
         (t.worktree / "dist" / "__pycache__").mkdir()
         (t.worktree / "dist" / "__pycache__" / "lib.cpython-312.pyc").write_bytes(b"\0")
-        self.assertEqual(runner.prepared_mark(t.worktree / "dist"), st["prepared_marks"]["dist"])
+        self.assertEqual(runner.prepared_mark(t.worktree / "dist"), marks["dist"])
         run_wb("verify", "t-dist", "--test", "sh test_lib.sh", "--files", "test_lib.sh")
         self.assertEqual(count.read_text().count("run"), 1)
         (t.worktree / "src.txt").write_text("fixed\n")                     # the change, and its build
@@ -3379,6 +3382,38 @@ class WorktreeSetup(Base):
         at.status["prepared_bytes"] = 4096                       # room: copied as before
         self.assertEqual(runner.prepare(at, Path(self.tmp.name) / "task"), (0, ""))
         self.assertTrue((Path(self.tmp.name) / "scratch" / "target" / "app").exists())
+
+    def test_an_in_tree_builds_object_files_stay_out_of_status_and_copy_in_one_cp(self):
+        # #867 (the third 2026-11-21 audit): ignored *.o files beside tracked sources are listed
+        # one by one, and status.json held them all (rewritten on every tool call), and the base
+        # check forked one cp per file before any test ran
+        self.ignore("*.o")
+        (self.repo / "src").mkdir()
+        (self.repo / "src" / "main.c").write_text("int main(void) { return 0; }\n")
+        subprocess.run(["git", "-C", str(self.repo), "add", "src"], check=True)
+        subprocess.run(["git", "-C", str(self.repo), "commit", "-qm", "src"], check=True)
+        objs = "test $(ls src/*.o | wc -l) -eq 30 || { echo NO-OBJS; exit 3; }; grep -qx 42 answer.txt"
+        self.start("t-objs", "ok", "--test", objs, "--setup",
+                   "for i in $(seq 30); do echo o > src/f$i.o; done", "--auto-fix", "0", "--no-self-review")
+        st = wait_phase("t-objs", {"review"})
+        t = store.Task("t-objs")
+        self.assertEqual(st["base_check"]["exit"], 2)               # grep, the objects there: not NO-OBJS's 3
+        self.assertEqual(len(runner.prepared_record(t)["paths"]), 30)
+        self.assertNotIn("f1.o", (t.dir / "status.json").read_text())
+        scratch = Path(self.tmp.name) / "objs-scratch"
+        (scratch / "src").mkdir(parents=True)
+        real, cps = subprocess.run, []
+        def run(argv, *a, **k):
+            if argv[0] == "cp":
+                cps.append(argv)
+            return real(argv, *a, **k)
+        at = types.SimpleNamespace(spec=t.spec, worktree=scratch, name=None, dir=t.dir, status=t.status)
+        with mock.patch.object(runner.subprocess, "run", run):
+            self.assertEqual(runner.prepare(at, t.worktree), (0, ""))
+        self.assertEqual(sorted(p.name for p in (scratch / "src").iterdir()),
+                         sorted(f"f{i}.o" for i in range(1, 31)))
+        if sys.platform != "darwin":
+            self.assertEqual(len(cps), 1, cps)                      # one cp, not thirty
 
     def test_commands_json_gives_a_repo_its_setup_for_every_task(self):
         self.ignore("deps/")

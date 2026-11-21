@@ -1183,8 +1183,12 @@ check that needed them failed on the base and in every round for that, not for t
   the agent's and the tests' PATH from then on (`context.own_venv`, *Its environment*).
 
 Its output goes to `setup.txt` (as tests.txt, with the seconds it took). Done, status `prepared`
-is set and it isn't run again, with `prepared_paths` (the worktree's ignored paths it left,
-`_ignored_paths`) and `setup_secs`, which the first report shows (`setup: Ns, once`); failing, the task is `failed` before any round, with a `failed` notice holding the exit
+is set and it isn't run again, with `setup_secs`, and the task's `prepared.json` holds `paths`
+(the worktree's ignored paths it left, `_ignored_paths`), `marks` and `bytes` (below;
+`runner.prepared_record`, which reads status `prepared_paths`, `prepared_marks` and
+`prepared_bytes` for a task prepared before the file): in status.json, an in-tree C build's one
+entry per object file was megabytes, rewritten on every status write (#867). Status gets
+`setup_secs`, which the first report shows (`setup: Ns, once`); failing, the task is `failed` before any round, with a `failed` notice holding the exit
 and the output's tail ("the setup command failed (exit N)", "setting up the worktree failed
 (copy failed)" for a link or copy, or "setting up the worktree failed (timed out after Ns; wb
 start --setup-timeout SECS, or "setup_timeout" in the repo's commands.json "repos" entry, raises
@@ -1197,9 +1201,11 @@ the worktree up again (the agent never ran)", and sets status `failed_before` `s
 failure before the agent ran (`runner._load_failed`, `results.ran` false) sets it `load` and its
 notice adds "the agent never ran: once the model can, wb resume <task> starts it". Either way the
 results row says `ran: false`, which the router and the tuning leave out (#581). Each scratch checkout (the base check, `wb verify`, `wb shot`:
-`verify._run`) gets the same links beside it and a copy of the task's `prepared_paths` from its
-worktree (`prepare(at, prepared)`, as a reflink where the filesystem has them). Before copying,
-their size (status `prepared_bytes`, `store.dir_size` at setup, 10 s a path at most) must fit in
+`verify._run`) gets the same links beside it and a copy of the task's prepared paths from its
+worktree (`prepare(at, prepared)`, as a reflink where the filesystem has them; `_copy_all`, one GNU
+`cp -a --parents` per `COPY_BATCH` (500) paths, path by path where that fails or on macOS: one cp
+per path forked tens of thousands of times for an in-tree build, #867). Before copying,
+their size (prepared.json `bytes`, `store.dir_size` at setup, 10 s a path at most) must fit in
 the free space with `CHECKOUT_SPARE` (2 GB) left, unless one small file clones there
 (`runner._reflinks`: btrfs, XFS, APFS); else "copy failed", naming both sizes, what to free and
 `--setup` (`_no_room_for`): wb start counts only the checkout, measured before any setup ran,
@@ -1207,14 +1213,14 @@ and a 12 GB `target/` copied on ext4 filled the disk and failed every open task'
 isn't run there: each ran it from nothing, up to the setup limit, and a first build compiled three
 to five times a task (#249, the audit of 1.2). `wb verify --setup` and `wb shot --setup` run it in
 each checkout as before; so does a task prepared before the paths were recorded, and one whose
-`prepared_paths` hold a virtualenv (`venv_in`): its `activate` and scripts name the worktree it
+prepared paths hold a virtualenv (`venv_in`): its `activate` and scripts name the worktree it
 was made in, so the copy ran the task's interpreter and code, and the base check and `wb verify`
-failed where the task passed (#325, the audit of 1.4); and one whose `prepared_paths` hold a build
+failed where the task passed (#325, the audit of 1.4); and one whose prepared paths hold a build
 tree configured for the worktree (`build_source`: CMake's `CMakeCache.txt` `CMAKE_HOME_DIRECTORY`,
 Meson's `meson-info/meson-info.json`, in the path or one level inside): copied, its targets ran the
 candidate's code on the base, and `wb verify` said the regression already passed there (#424, the
-audit of 1.8); and one whose prepared paths the rounds rebuilt since the setup (status
-`prepared_marks`, a fingerprint per path from lstat, `prepared_mark`: the count, size and each
+audit of 1.8); and one whose prepared paths the rounds rebuilt since the setup
+(prepared.json `marks`, a fingerprint per path from lstat, `prepared_mark`: the count, size and each
 file's name, size and mtime, leaving out what a test run rewrites, `PREP_CACHES` such as
 `__pycache__`, `.pytest_cache`, `.vite`, `*.pyc`, and any directory holding `CACHEDIR.TAG`, as
 cargo's `target/`, whose own staleness check makes a copy safe): the agent rebuilt a monorepo's
@@ -6525,6 +6531,10 @@ $WB_HOME (~/.local/state/workbench)
     base-tests.txt               the base check's output: the acceptance command on the base (`--test`)
     starting.json                a start under way: repo, worktree, wb start's pid and start (one from before #529, whose start made the branch, also the branch and its commit, #416); gone once task.json is (#376)
     setup.txt                    the setup's output (`--setup`, *Setting the worktree up*)
+    prepared.json                what the setup left, for the scratch checkouts (runner.PREPARED, #867): {paths
+                                 (the worktree's ignored paths, which each copies instead of running the setup, #249,
+                                 unless one is a virtualenv, #325, or was rebuilt since), marks ({path: fingerprint},
+                                 runner.prepared_mark, #732), bytes (their size, checked against the free space, #860)}
     steps.bundle                 an accepted task's steps, base..tip, for wb bench add (gitops.bundle_steps,
                                  STEPS_BUNDLE, #799); removed by wb gc once each step has its case
     .export-<sid>.json           an earlier session's OpenCode export, before a handover: made once, for wb watch (#691)
@@ -6679,7 +6689,7 @@ check-ins off), not `wb start`'s.
 | `checked_out`, `checkout_secs` | `runner.checkout`: the worktree is made (task.json `checkout: "runner"`, #529); how long the checkout took |
 | `taken_over` | `wb takeover`: Claude has had the worktree; `runner.checkout` then fails a task not checked out rather than remove it and check it out again (#655) |
 | `branch_made` | `runner.checkout`: the commit it makes `delegate/<task>` at, recorded before `worktree add` when no such branch exists; the only branch a cleanup of the checkout cut short deletes, and only there (#416, #529) |
-| `prepared_paths`, `prepared_marks`, `prepared_bytes`, `setup_secs` | set with `prepared`: the worktree's ignored paths the preparation left, which each scratch checkout copies instead of running the setup (#249), unless one is a virtualenv (#325) or was rebuilt since (`prepared_marks`, `{path: fingerprint}`, `runner.prepared_mark`, #732); their size, checked against the free space before each copy (#860); how long it took, in the first report |
+| `setup_secs` | set with `prepared`: how long the preparation took, in the first report; what it left is the task's `prepared.json` (*Files and formats*: #867). A task prepared before that file has `prepared_paths`, `prepared_marks` (and `prepared_bytes`) here instead, which `runner.prepared_record` reads |
 | `failed_before` | `setup` or `load`: the runner failed the task on its setup or its model's load before the agent ran (`_prepare`, `_load_failed`); the results row copies it (#581) |
 | `stopping` | wb is stopping the runner (`cli._stop_runner`); cleared by `spawn_runner` and the runner's exit |
 | `tools`, `tok_in`, `tok_out` | task-wide tool calls and tokens (input without cache reads) |
