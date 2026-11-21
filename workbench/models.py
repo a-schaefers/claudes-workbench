@@ -37,7 +37,6 @@ import re
 import shlex
 import shutil
 import socket
-import stat
 import subprocess
 import sys
 import time
@@ -272,13 +271,7 @@ def config_target(change: str) -> Path:
     except ValueError:
         raise RuntimeError(f"{path} has comments, which rewriting it would lose; make this change "
                            f"by hand: {change}") from None
-    target = path.resolve()
-    target.parent.mkdir(parents=True, exist_ok=True)
-    if not os.access(target.parent, os.W_OK) or target.exists() and not os.access(target, os.W_OK):
-        raise RuntimeError(f"{path}" + (f" links to {target}, which" if target != path else "")
-                           + " isn't writable (a read-only store, such as Nix's?); make this "
-                           f"change in its source by hand: {change}")
-    return target
+    return store.writable_target(path, change)
 
 
 def write_config(cfg: dict, change: str) -> None:
@@ -288,18 +281,7 @@ def write_config(cfg: dict, change: str) -> None:
     provider's apiKey included, into Claude's context (the 2026-11-16 audit). A symlinked file
     (dotfiles, stow) is written through to its target, and its mode is kept: a 0600 file holding
     keys came back 0644, and the link was replaced by a plain file (the 2026-11-16 audit)."""
-    target = config_target(change)
-    mode = stat.S_IMODE(target.stat().st_mode) if target.exists() else 0o600  # it may hold keys
-    tmp = target.with_name(f".{target.name}.{os.getpid()}.tmp")
-    fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)  # never readable by others
-    try:
-        with os.fdopen(fd, "w") as f:
-            f.write(json.dumps(cfg, indent=2, ensure_ascii=False) + "\n")
-        os.chmod(tmp, mode)
-        os.replace(tmp, target)
-    except BaseException:
-        tmp.unlink(missing_ok=True)
-        raise
+    store.write_through(config_target(change), cfg, change)
 
 
 def overrides_path() -> Path:
@@ -1973,17 +1955,14 @@ def ollama_delete(root: str, name: str) -> None:
 
 def set_override(model_id: str, key: str, value) -> None:
     """Set (or with None, drop) one key of a model's models.json entry."""
-    path = overrides_path()
-    data = _overrides()
-    entry = data.setdefault(model_id, {})
-    if value is None:
-        entry.pop(key, None)
-    else:
-        entry[key] = value
-    if not entry:
-        data.pop(model_id)
-    path.parent.mkdir(parents=True, exist_ok=True)
-    store.write_json(path, data)
+    with store.edit_config(overrides_path(), _overrides) as data:  # through a link, locked (#495)
+        entry = data.setdefault(model_id, {})
+        if value is None:
+            entry.pop(key, None)
+        else:
+            entry[key] = value
+        if not entry:
+            data.pop(model_id)
 
 
 def write_entry(provider: str, name: str, entry: dict | None) -> None:

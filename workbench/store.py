@@ -30,9 +30,11 @@ Every file and format: ARCHITECTURE.md, *Files and formats*.
 """
 import errno
 import fcntl
+import hashlib
 import json
 import os
 import re
+import stat
 import time
 import uuid
 from contextlib import contextmanager
@@ -157,6 +159,61 @@ def write_json(path: Path, data) -> None:
     except BaseException:
         tmp.unlink(missing_ok=True)
         raise
+
+
+def writable_target(path: Path, change: str = "") -> Path:
+    """The file a write to the user's config file ``path`` lands in: a symlink's target (dotfiles:
+    stow, chezmoi, yadm, home-manager), or RuntimeError when that isn't writable (a link into a
+    read-only store, such as Nix's), saying ``change``, what to make by hand, if given."""
+    target = path.resolve()
+    target.parent.mkdir(parents=True, exist_ok=True)
+    if not os.access(target.parent, os.W_OK) or target.exists() and not os.access(target, os.W_OK):
+        raise RuntimeError(f"{path}" + (f" links to {target}, which" if target != path else "")
+                           + " isn't writable (a read-only store, such as Nix's?); "
+                           + (f"make this change in its source by hand: {change}" if change
+                              else "edit it in its source (your dotfiles) by hand"))
+    return target
+
+
+def write_through(path: Path, data, change: str = "") -> None:
+    """write_json for a file of the user's own (OpenCode's config, models.json, commands.json,
+    savings.json): written to a symlink's target, so the link stays (writable_target), and with
+    the file's mode kept, 0600 for a new one (start/stop commands and apiKeys can carry tokens),
+    the temporary file never readable by others. write_json replaced a dotfiles link with a plain
+    0644 file, so the change never reached the dotfiles and the next `chezmoi apply` undid it
+    (#495; OpenCode's config since the 2026-11-16 audit)."""
+    target = writable_target(path, change)
+    mode = stat.S_IMODE(target.stat().st_mode) if target.exists() else 0o600
+    tmp = target.with_name(f".{target.name}.{os.getpid()}.{uuid.uuid4().hex[:12]}.tmp")
+    fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as fh:
+            fh.write(json.dumps(data, indent=2, ensure_ascii=False) + "\n")
+        os.chmod(tmp, mode)
+        os.replace(tmp, target)
+    except BaseException:
+        tmp.unlink(missing_ok=True)
+        raise
+
+
+def config_lock(path: Path) -> Path:
+    """The lock over a read-modify-write of the user's config file ``path`` (edit_config), in
+    $WB_HOME/locks/, keyed by the file a write lands in: beside it, it would be a stray file in
+    the user's dotfiles."""
+    key = hashlib.sha256(str(path.resolve()).encode()).hexdigest()[:16]
+    return home() / "locks" / f"config-{key}.lock"
+
+
+@contextmanager
+def edit_config(path: Path, read, change: str = ""):
+    """A read-modify-write of the user's config file ``path``: under its lock (config_lock),
+    ``read()`` (which checks it and raises on a file it can't keep) is yielded to change in place,
+    then written through (write_through); nothing is written when the body raises. Unlocked, two
+    sessions' `wb allow --always` close together lost one of the grants (#495)."""
+    with locked(config_lock(path)):
+        data = read()
+        yield data
+        write_through(path, data, change)
 
 
 def read_json(path: Path, default=None):

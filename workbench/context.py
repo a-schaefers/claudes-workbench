@@ -154,6 +154,16 @@ def commands_path() -> Path:
     return Path(os.environ.get("WB_COMMANDS") or Path.home() / ".config" / "workbench" / "commands.json")
 
 
+def allow_always(key: str, items: list[str]) -> None:
+    """Add ``items`` to commands.json's ``key`` ("allow" or "paths"), for every task (`wb allow
+    --always`): under its lock and through a link, the file checked first (commands_conf), since
+    rewriting one that doesn't parse would lose it. Unlocked, two sessions' grants close together
+    lost one; written with write_json, a dotfiles link became a plain 0644 file (#495)."""
+    with store.edit_config(commands_path(), commands_conf) as conf:
+        have = conf.get(key) or []
+        conf[key] = have + [x for x in items if x not in have]
+
+
 def commands_conf() -> dict:
     """commands.json, checked: a file that doesn't parse, or an `allow`, `paths` or `env` that
     isn't a list of strings, is refused, not read as {} (the 2026-11-16 audit: a trailing comma

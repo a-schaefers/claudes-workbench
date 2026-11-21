@@ -464,7 +464,7 @@ average, so the constants stand until there are more runs to fit (#120).
 `claude: 56K · writing it yourself: ~59K (estimate) · saved ~3K · GPU 41 Wh` (a negative saving
 reads `cost ~3K more`); `totals(rows, since)` adds them up, with the energy's `cost` at the
 user's electricity price (`price()`, from `$WB_SAVINGS`, else `~/.config/workbench/savings.json`
-`{"kwh_price": …}`; `set_price` writes it), and `of`, every closed task of the period, compared
+`{"kwh_price": …}`; `set_price` sets it, keeping any other key, through `store.edit_config`), and `of`, every closed task of the period, compared
 or not (the coverage).
 
 **The badge** (`savings.score`, #101) is one number from 1 to 100 over those totals. B is the
@@ -1350,8 +1350,11 @@ permission request (`_permission_asked`), else the pending question; both write 
 `write_answer`.
 
 **Granting.** `wb allow <task> "<pattern>"… [--path DIR…] [--always]` adds to the task's grants
-(`rules/<task>/grants.json`, through `context.grant`; and to `commands.json` with `--always`, which
-refuses a `commands.json` that doesn't parse or has the wrong shape), answers any pending question with
+(`rules/<task>/grants.json`, through `context.grant`; and to `commands.json` with `--always`,
+`context.allow_always`, a read-modify-write under the file's lock, through a symlink, its mode kept
+(`store.edit_config`: unlocked, two sessions' grants close together lost one, and a dotfiles link
+became a plain 0644 file, #495); it refuses a `commands.json` that doesn't parse or has the wrong
+shape), answers any pending question with
 "Claude allowed … Run it again now and carry on.", and when the agent is running, also queues that
 as a `--now` note so the agent restarts on its session with the new rule (the rules are read when
 OpenCode starts).
@@ -1936,7 +1939,8 @@ no trailing commas), and when the file (or a symlink's target) isn't writable (a
 then prints only `change`, what to do by hand (the keys wb sets, or the key to delete or set),
 never the config, which can hold a provider's `apiKey` (the 2026-11-16 audit). A write reformats
 the file (atomic, indent 2), through a symlink to its target (dotfiles stay linked), keeping the
-file's mode (0600 for a new file; the temporary file is never readable by others).
+file's mode (0600 for a new file; the temporary file is never readable by others):
+`store.write_through`, which models.json, commands.json and savings.json share (#495).
 
 The agent's OpenCode loads the global files itself, but its `OPENCODE_CONFIG` is the task's layer
 (`runner.agent_env`), so a provider defined only in `$WB_OPENCODE_CONFIG` or the user's
@@ -2022,7 +2026,8 @@ refuses one, and `wb scout` lists them apart from what is installed. models.json
 on the model's own id allows one; it is then `remote`, holding no GPU lease.
 
 **models.json** (`$WB_MODELS`, default `~/.config/workbench/models.json`, strict JSON; a
-malformed file breaks every command) holds only what OpenCode can't say, keyed by provider id or
+malformed file breaks every command; `set_override` changes one key under its lock, through a
+symlink, keeping its mode: `store.edit_config`, #495) holds only what OpenCode can't say, keyed by provider id or
 model id; a model's entry is merged over its provider's (`{**provider, **model}`):
 - `start` / `stop`: shell commands for a server (start detached, then status every 5 s up to 20
   min; stop with a 300 s limit);
@@ -4210,6 +4215,9 @@ $WB_HOME (~/.local/state/workbench)
                                  lane reads; in the task's directory an agent held runner.lock, then
                                  status.lock, with flock, and every later runner exited at once, then
                                  the runner and wb stop froze at their next status write: the 0.90 review)
+  locks/config-<key>.lock        one read-modify-write at a time of a user's config file (store.config_lock:
+                                 <key> from the path a write lands in; beside the file it would be a stray
+                                 file in the user's dotfiles; #495)
   tasks/<task>/                  readable from the lane; only worktree/ and ask/ writable
     task.json  status.json
     events.jsonl  steer.jsonl  acked  context.md  runner.log
@@ -4227,7 +4235,9 @@ $WB_HOME (~/.local/state/workbench)
 ~/.local/share/workbench/skills/ ($WB_SKILLS) the skill library, its own git repo; retired/
 ~/.local/share/workbench/try/<n>/ wb try's sample projects, each a repo of its own (its task: try-<n>;
                                  beside $WB_SKILLS, whatever it is set to)
-~/.config/workbench/
+~/.config/workbench/             wb's writes to models.json, commands.json and savings.json go through
+                                 store.edit_config: locked, through a symlink to its target, the mode
+                                 kept (0600 for a new file); a read-only target is refused
   models.json ($WB_MODELS)       what OpenCode can't say about each model or provider
   images.json ($WB_IMAGES)       image engines
   audio.json ($WB_AUDIO)         audio engines (speech, sfx, music, and a listener)
@@ -4239,7 +4249,8 @@ $WB_HOME (~/.local/state/workbench)
                                  accept --merge lands there (context.MERGE_AS; --merge-as overrides, #352)
   chat.json ($WB_CHAT_CONFIG)    the web chat's {"bind": [...], "hosts": [...]}
   chat-token ($WB_CHAT_TOKEN)    the web chat's token, mode 600
-  savings.json ($WB_SAVINGS)     {"kwh_price": N}, the electricity price the energy is costed at (wb savings --price)
+  savings.json ($WB_SAVINGS)     {"kwh_price": N}, the electricity price the energy is costed at (wb savings --price;
+                                 other keys kept)
 ~/.config/opencode/opencode.json + .jsonc (layered, under $XDG_CONFIG_HOME; then $OPENCODE_CONFIG; $WB_OPENCODE_CONFIG) the models
 /tmp/wb-run-<uid>-<hash>/        the agent's XDG_RUNTIME_DIR (lane on; context.runtime_dir), 0700: kept while
                                  the task is open (stuck or in review too), removed by wb accept and wb discard
@@ -4260,7 +4271,14 @@ same place (a relative `WB_HOME` once had wb write the task under its cwd and th
 runs from the package's directory, look for it there: the 2026-11-16 audit; a relative
 `OPENCODE_CONFIG` had `wb start` pick a model the runner then called unknown: #328, the audit of
 1.4). `write_json` writes `.<name>.<pid>.<random>.tmp` beside the file (created exclusively, so two threads never share one: the 2026-11-19 audit) and renames it
-(no fsync); `read_json` returns the default for a missing or broken file. `append_jsonl` appends
+(no fsync), replacing a symlink with a plain file, which is right for the state directory. The
+user's own config files take `write_through` instead: `writable_target` follows a symlink to its
+target (refused, saying to edit it in its source, when that isn't writable: a Nix store), the
+temporary file goes beside the target, created 0600, and gets the target's mode (0600 for a new
+file) before the rename; `edit_config(path, read, change)` is the read-modify-write around it,
+under `config_lock(path)` (`locks/config-<key>.lock`), `read()` checking the file first and nothing
+written when the change raises (#495: a dotfiles link became a plain 0644 file, and two
+`wb allow --always` close together lost one grant); `read_json` returns the default for a missing or broken file. `append_jsonl` appends
 one line under `<file>.lock` (flock; a task's own events and steer files under `locks/<task>.<file>.lock`, `store.task_lock`, out of the lane), first ending a last line a write cut short (a full disk, a
 crash), so only that fragment is lost, not the row after it; `read_jsonl(path, offset)` returns
 the whole lines and the offset after the last one, skipping bad lines (bad JSON, or bytes that

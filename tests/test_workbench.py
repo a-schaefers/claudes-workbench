@@ -8013,6 +8013,71 @@ class ModelSet(Base):
         self.assertIn("runtime: retry", out)
 
 
+class ConfigWrites(Base):
+    """What wb writes into the user's own config files: OpenCode's, models.json, commands.json,
+    savings.json."""
+    def test_models_json_commands_json_and_savings_json_are_written_through_their_links_keeping_their_mode(self):
+        # #495: write_json replaced each dotfiles link with a plain 0644 file holding the new keys,
+        # while the 0600 file in the dotfiles kept the old ones
+        from workbench import models, savings
+        tmp = Path(self.tmp.name)
+        dots = tmp / "dotfiles"
+        dots.mkdir()
+        links = {"WB_MODELS": {"ollama": {"start": "serve --token s3cret"}},
+                 "WB_COMMANDS": {"allow": ["make *"], "env": ["HF_TOKEN"]},
+                 "WB_SAVINGS": {"kwh_price": 0.3, "note": "mine"}}
+        for var, data in links.items():
+            real = dots / Path(os.environ.get(var, f"{var}.json")).name
+            real.write_text(json.dumps(data))
+            real.chmod(0o600)
+            link = tmp / f"link-{real.name}"
+            link.symlink_to(real)
+            os.environ[var] = str(link)
+        models.set_override("ollama/qwen3.8-27b", "sizes", ["trivial"])
+        context.allow_always("allow", ["docker *"])
+        savings.set_price(0.25)
+        for var in links:
+            link = Path(os.environ[var])
+            self.assertTrue(link.is_symlink(), var)
+            self.assertEqual(link.resolve().stat().st_mode & 0o777, 0o600, var)
+        self.assertEqual(models._overrides(), {"ollama": {"start": "serve --token s3cret"},
+                                               "ollama/qwen3.8-27b": {"sizes": ["trivial"]}})
+        self.assertEqual(context.commands_conf(), {"allow": ["make *", "docker *"], "env": ["HF_TOKEN"]})
+        self.assertEqual(json.loads(Path(os.environ["WB_SAVINGS"]).read_text()), {"kwh_price": 0.25, "note": "mine"})
+        os.environ["WB_MODELS"] = str(tmp / "new" / "models.json")          # a new file: 0600
+        models.set_override("ollama", "skip", True)
+        self.assertEqual(Path(os.environ["WB_MODELS"]).stat().st_mode & 0o777, 0o600)
+        if os.geteuid() != 0:  # a link into a read-only store (Nix) is refused, never replaced
+            dots.chmod(0o500)
+            try:
+                with self.assertRaisesRegex(RuntimeError, "isn't writable.*dotfiles"):
+                    context.allow_always("allow", ["cargo *"])
+            finally:
+                dots.chmod(0o700)
+            self.assertTrue(Path(os.environ["WB_COMMANDS"]).is_symlink())
+
+    def test_a_read_modify_write_of_a_config_file_waits_for_the_one_under_way(self):
+        # #495: two sessions' wb allow --always close together lost one grant (no lock)
+        from workbench import models
+        path = models.overrides_path()
+        done = threading.Event()
+        with store.locked(store.config_lock(path)):
+            t = threading.Thread(target=lambda: (models.set_override("ollama", "skip", True), done.set()))
+            t.start()
+            self.assertFalse(done.wait(0.5))                                 # waits for the lock
+        t.join(10)
+        self.assertTrue(done.is_set())
+        self.assertEqual(models._overrides(), {"ollama": {"skip": True}})
+        context.allow_always("allow", ["a *"])
+        with store.locked(store.config_lock(context.commands_path())):
+            t = threading.Thread(target=context.allow_always, args=("allow", ["b *"]))
+            t.start()
+            t.join(0.5)
+            self.assertTrue(t.is_alive())
+        t.join(10)
+        self.assertEqual(context.commands_conf()["allow"], ["a *", "b *"])
+
+
 class DiskRoom(Base):
     """#342 (the audit of 1.4): nothing watched the disk, and a full one wedged every task."""
     @staticmethod
