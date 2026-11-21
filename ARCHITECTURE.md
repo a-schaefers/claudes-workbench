@@ -3067,7 +3067,8 @@ followed by `SELF_PROMPT` (the acceptance command, run before finishing).
 about the machine. A run takes a minute or two (62 s for three models on the 2026-11-18 card), so
 it runs on its own only where the user is told and expects a short wait, and only when it is due
 (`due`: never measured, the GPU changed (`fingerprint`: each GPU's name and memory), a remote
-server's models changed, a model came since, or the last run was stopped): at the end of `wb setup`, and once per Claude Code session
+server's models changed, a model came since (not one in `skipped` before its `retry_after`), or
+the last run was stopped): at the end of `wb setup`, and once per Claude Code session
 opened, after its first turn while no task is open (the mod's `measureIfDue`, which toasts
 "workbench: measuring the GPU for N local model(s) (<why>): about M min; a task you start goes
 first" and wakes no one). `wb optimize start --if-due` is that check: quiet when nothing is due or
@@ -3115,7 +3116,17 @@ case's original minutes). `wb optimize start [--bench]` detaches the run (`pytho
 workbench.optimize`, its output in `optimize.log`, its pid in `optimize.json`; it makes the state
 directory first, which a fresh profile's `wb setup` hadn't, #198) so it outlives
 Claude's session; it refuses while a task holds the GPU. The run holds the GPU alone (a
-`GpuLease` with no model, named `HOLDER` "wb optimize") after `free_gpu`. Real work stops it:
+`GpuLease` with no model, named `HOLDER` "wb optimize"), and empties this machine's GPU
+(`free_gpu`) only before its first local probe: a run due for a remote model alone unloaded the
+user's local models for nothing (#583). A model it can't measure is recorded in optimize.json
+`skipped` (`_skip`: `outcome` `busy`, its remote server leased or holding other models;
+`failed`, its load refused, a `RuntimeError`; `unreachable`, an `OSError` such as a timeout),
+with a `retry_after` `RETRY_SECS` later (6 h, 1 day, 7 days), which `due` honours: such a model
+was "new" at every Claude Code session, whose run emptied the GPU and skipped it again, and one
+model's HTTP 500 stopped the run, so the next measured every model again (#583). The run carries
+on past it; a stop (`Stopped`) still ends the run. `--all` (an asked-for run) tries every model
+again, and a measured row clears its `skipped` entry. `wb optimize report` lists each one with
+its retry time. Real work stops it:
 `cli._preempt_bench` sends it SIGTERM when a task would wait behind it and waits for it to exit
 (`OPTIMIZE_EXIT`, 30 s at most) before the GPU's holders are read: `wb try` right after `wb
 setup`'s run was refused by the entry it hadn't yet let go (#161). The fits measured so far stay
@@ -5081,7 +5092,8 @@ $WB_HOME (~/.local/state/workbench)
                                  (bench.jsonl and bench/repos/ are the old suite's: nothing reads them)
   optimize.json  optimize.log    wb optimize: {pid, start, began, done, stopped, hardware (fingerprint: [name, vram] per GPU, then ["remote", root, [[name, size]…]] per remote Ollama),
                                  secs_per_load, models: {<id>: {window, fits, spill, clamped, tried:
-                                 [{window, size, vram, served}], ts}}, made: {<provider>/<name>: <source id>} (a variant
+                                 [{window, size, vram, served}], ts}}, skipped: {<id>: {outcome (busy|failed|unreachable), why,
+                                 ts, retry_after}} (#583), made: {<provider>/<name>: <source id>} (a variant
                                  apply made and hasn't registered yet: #266)}; the run's output
   imports/<slug>/                skills fetched by wb skill import, for Claude to read
   images/<YYYYmmdd-HHMMSS>/      wb image's candidates (unless --out), their .json sidecars, engine.log

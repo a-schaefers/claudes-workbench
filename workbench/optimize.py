@@ -5,7 +5,8 @@ part that has to load a model to know.
 
 It runs on its own only where the user expects a short wait and is told: at setup (`wb setup`)
 and when a Claude Code session opens (the mod), each time only when it is due (`due`: never
-measured, the GPU changed, or a model came since), never while a task holds the GPU; each run
+measured, the GPU changed, or a model came since, not one skipped before its retry time),
+never while a task holds the GPU; each run
 takes a minute or two (the user, 2026-11-18). Anything heavier (`--bench`) waits for the user to
 ask, through Claude.
 
@@ -138,6 +139,30 @@ def busy(m: models.Model) -> list[str]:
     return [x.get("name") for x in ps.get("models") or [] if not models._matches(m.name, {x.get("name")})]
 
 
+# A model a run tried and couldn't measure (optimize.json `skipped`: its remote server busy, its
+# load refused, its server unreachable) waits this long before it makes a run due again. Without
+# a record, it was "new" at every Claude Code session, and each session's run emptied the local
+# GPU first, then skipped it again (#583, the audit of 1.90). A changed GPU or remote model list
+# still makes a run due at once.
+RETRY_SECS = {"busy": 6 * 3600, "unreachable": 24 * 3600, "failed": 7 * 86400}
+
+
+def _waiting(st: dict, now: float | None = None) -> set[str]:
+    """The ids whose last try was skipped and whose retry time hasn't come."""
+    now = store.now() if now is None else now
+    return {mid for mid, r in (st.get("skipped") or {}).items()
+            if isinstance(r, dict) and (r.get("retry_after") or 0) > now}
+
+
+def _skip(model_id: str, outcome: str, why: str) -> None:
+    """Record that ``model_id`` wasn't measured, and when to try it again (RETRY_SECS)."""
+    print(f"{model_id}: not measured, {why}", flush=True)
+    st = state()
+    row = {"outcome": outcome, "why": why, "ts": store.now(),
+           "retry_after": store.now() + RETRY_SECS[outcome]}
+    store.write_json(path(), {**st, "skipped": {**(st.get("skipped") or {}), model_id: row}})
+
+
 def due(ms: list[models.Model] | None = None) -> str:
     """Why a run is due, or "": never run, the GPU changed, a model came since, or the last run
     was stopped before it finished."""
@@ -153,7 +178,8 @@ def due(ms: list[models.Model] | None = None) -> str:
         return why
     if st.get("stopped"):
         return "the last run was stopped before it finished"
-    new = [m.id for m in ms if m.id not in (st.get("models") or {})]
+    waiting = _waiting(st)
+    new = [m.id for m in ms if m.id not in (st.get("models") or {}) and m.id not in waiting]
     return f"new model{'s' if len(new) > 1 else ''}: {', '.join(new)}" if new else ""
 
 
@@ -215,7 +241,9 @@ def fit(m: models.Model, trained: int | None, check=lambda: None) -> dict:
 
 def _record(model_id: str, row: dict) -> None:
     st = state()
-    store.write_json(path(), {**st, "models": {**(st.get("models") or {}), model_id: row}})
+    skipped = {k: v for k, v in (st.get("skipped") or {}).items() if k != model_id}
+    store.write_json(path(), {**st, "models": {**(st.get("models") or {}), model_id: row},
+                              "skipped": skipped})
 
 
 def _made(key: str, source: str | None) -> None:
@@ -380,11 +408,15 @@ def report() -> list[str]:
     elif st.get("stopped"):
         out.append(f"stopped: {st['stopped']}")
     rows = st.get("models") or {}
-    if not rows and not out:
+    if not rows and not out and not st.get("skipped"):
         return ["not run yet: wb optimize estimate, then wb optimize"]
     for mid, row in rows.items():
         out.append(advice(mid, row) or f"{mid}: its {row['window'] // 1024}K window fits all on "
                    "the GPU here, and no bigger one does")
+    for mid, row in (st.get("skipped") or {}).items():
+        when = time.strftime("%Y-%m-%d %H:%M", time.localtime(row.get("retry_after") or 0))
+        out.append(f"{mid}: not measured ({row.get('why')}); tried again after {when}, or by "
+                   "wb optimize")
     return out
 
 
@@ -400,10 +432,11 @@ def main() -> None:
         st = state()
         every = "--all" in sys.argv or st.get("stopped") or st.get("hardware") is None or \
             changed(st["hardware"])
+        waiting = set() if every else _waiting(st)
         with models.GpuLease(None, HOLDER, say=print, wait=False):
-            models.free_gpu()
+            freed = False
             for m in candidates():
-                if not every and m.id in (st.get("models") or {}):
+                if not every and (m.id in (st.get("models") or {}) or m.id in waiting):
                     continue  # due for a new model only: the others' fits still hold
                 with contextlib.ExitStack() as turn:
                     if m.remote:  # its server's own lease too: a task there may be using this very
@@ -411,18 +444,32 @@ def main() -> None:
                             turn.enter_context(models.GpuLease(None, HOLDER, say=print, wait=False,
                                                                on=m))
                         except RuntimeError:
-                            print(f"{m.id}: not measured, a task is using {m.root}", flush=True)
+                            _skip(m.id, "busy", f"a task is using {m.root}")
                             continue
                     if others := busy(m):
-                        print(f"{m.id}: not measured, {m.root} has {', '.join(others)} loaded",
-                              flush=True)
+                        _skip(m.id, "busy", f"{m.root} has {', '.join(others)} loaded")
                         continue
+                    if not m.remote and not freed:
+                        # this machine's GPU emptied only for a local probe: a run due for a
+                        # remote model alone unloaded the user's local models for nothing (#583)
+                        models.free_gpu()
+                        freed = True
                     try:
                         trained = models.ollama_show(m.root, m.name).get("context_length")
                     except Exception:
                         trained = None
                     print(f"{m.id}: measuring", flush=True)
-                    row = fit(m, trained)
+                    # one model's failure is that model's: an HTTP 500 at its load (too big for
+                    # the card) or a dropped connection stopped the run, and the next run
+                    # measured everything again (#583); a stop (Stopped) still ends the run
+                    try:
+                        row = fit(m, trained)
+                    except RuntimeError as e:
+                        _skip(m.id, "failed", f"its load failed: {e}")
+                        continue
+                    except OSError as e:
+                        _skip(m.id, "unreachable", f"its server didn't answer: {getattr(e, 'reason', e)}")
+                        continue
                     n += len(row["tried"])
                     _record(m.id, row)
     except (Stopped, RuntimeError) as e:

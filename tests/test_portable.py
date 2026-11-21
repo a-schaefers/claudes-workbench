@@ -1406,6 +1406,65 @@ class Optimize(unittest.TestCase):
             self.assertIn("a task you start goes first", out[0])
             self.assertNotIn("--all", popen.call_args[0][0])
 
+    def test_a_model_it_could_not_measure_is_remembered_and_not_due_again_each_session(self):
+        # #583, the audit of 1.90: a model skipped (its remote server busy) left no row and was
+        # "new" at every session, whose run emptied this machine's GPU first; one whose load
+        # failed (HTTP 500) stopped the run, so the next measured everything again
+        from workbench import optimize
+        gpu = lambda windows=True: [{"name": "Card", "vram": 1}]  # noqa: E731
+        loaded = [{"name": "theirs", "size": 5, "size_vram": 5}]           # the other machine's own
+        self.ollama(32768, loaded=loaded, extra={"ollama": {"local": True}})
+        with mock.patch.object(models, "_this_host", lambda h: False), \
+                mock.patch.object(optimize.hardware, "gpus", gpu), \
+                mock.patch.object(models, "free_gpu") as free, \
+                mock.patch.object(sys, "argv", ["optimize"]):
+            m, = optimize.candidates()
+            self.assertTrue(m.remote)
+            with redirect_stdout(io.StringIO()) as out:
+                optimize.main()
+            self.assertIn(f"{m.id}: not measured, {m.root} has theirs loaded", out.getvalue())
+            free.assert_not_called()                  # only a remote model was due: nothing here
+            st = optimize.state()
+            self.assertEqual(st["skipped"][m.id]["outcome"], "busy")
+            self.assertGreater(st["skipped"][m.id]["retry_after"], store.now() + 3600)
+            self.assertIsNone(st["stopped"])
+            self.assertEqual(optimize.due(), "")                     # not due at the next session
+            self.assertIn("not measured", "\n".join(optimize.report()))
+            store.write_json(optimize.path(), {**st, "skipped": {m.id: {**st["skipped"][m.id],
+                                                                        "retry_after": 1}}})
+            self.assertEqual(optimize.due(), f"new model: {m.id}")   # its time came: tried again
+            loaded.clear()
+            with redirect_stdout(io.StringIO()):
+                optimize.main()
+            self.assertIn(m.id, optimize.state()["models"])
+            free.assert_not_called()               # measured remotely: this machine's GPU untouched
+
+    def test_one_models_failed_load_is_recorded_and_the_run_carries_on(self):
+        import urllib.error
+        from workbench import optimize
+        self.ollama(32768)
+        gpu = lambda windows=True: [{"name": "Card", "vram": 1}]  # noqa: E731
+        for err, outcome in ((RuntimeError("http://x answered HTTP 500: out of memory"), "failed"),
+                             (urllib.error.URLError(TimeoutError("timed out")), "unreachable")):
+            with self.subTest(outcome), mock.patch.object(optimize.hardware, "gpus", gpu), \
+                    mock.patch.object(models, "free_gpu") as free, \
+                    mock.patch.object(optimize, "fit", side_effect=err), \
+                    mock.patch.object(sys, "argv", ["optimize"]):
+                optimize.path().unlink(missing_ok=True)
+                with redirect_stdout(io.StringIO()) as out:
+                    optimize.main()                          # no traceback: the run finishes
+                self.assertIn("ollama/m: not measured", out.getvalue())
+                free.assert_called_once()                    # a local model: freed for its probe
+                st = optimize.state()
+                self.assertEqual((st["skipped"]["ollama/m"]["outcome"], st["stopped"]), (outcome, None))
+                self.assertTrue(st["done"])
+                self.assertEqual(optimize.due(), "")
+        with mock.patch.object(optimize.hardware, "gpus", gpu), mock.patch.object(models, "free_gpu"), \
+                mock.patch.object(sys, "argv", ["optimize", "--all"]), redirect_stdout(io.StringIO()):
+            optimize.main()                                  # asked for: measured, the record cleared
+        self.assertIn("ollama/m", optimize.state()["models"])
+        self.assertEqual(optimize.state()["skipped"], {})
+
     def test_real_work_stops_it_and_what_it_measured_stays(self):
         self.ollama(32768)
         m = models.discover()["ollama/m"]
