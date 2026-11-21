@@ -162,6 +162,16 @@ def read_question(task: store.Task, qid: str) -> dict | None:
     return {**q, **{k: str(q.get(k) or "") for k in ("question", "context", "command", "path")}}
 
 
+def too_long(text: str) -> str:
+    """Why an answer can't be written, or "": past FILE_MAX the server reads none of it, so the
+    agent waited out its ask timeout for NO_ANSWER while wb said "answered" (#605)."""
+    size = len((text.strip() + "\n").encode())
+    if size <= FILE_MAX:
+        return ""
+    return (f"the answer is {size // 1024} KiB, over the {FILE_MAX // 1024} KiB the agent can be "
+            "sent: put the material in a file in the task's worktree and answer with its path")
+
+
 def write_answer(task: store.Task, qid: str, text: str) -> None:
     """ask/<qid>.answer, whole at once (the ask server watches for it: never half a file) and
     never through a link: ask/ is in the agent's lane, and a link planted there once made wb
@@ -169,6 +179,8 @@ def write_answer(task: store.Task, qid: str, text: str) -> None:
     answer's, which replaces a link instead of following it."""
     if not QID.match(qid):
         raise RuntimeError(f"no question {qid}")
+    if why := too_long(text):
+        raise RuntimeError(why)
     d = os.open(ask_dir(task), os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC)
     try:
         tmp = f".{qid}.{secrets.token_hex(6)}.tmp"

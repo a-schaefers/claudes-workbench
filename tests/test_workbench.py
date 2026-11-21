@@ -4306,6 +4306,30 @@ class AskServer(Base):
         ask_mcp.relay(task, opened)
         self.assertIn("Q: second?", run_wb("wait", "t-twoq", "--timeout", "5"))  # once more: named
 
+    def test_an_answer_too_big_for_the_server_is_refused_and_the_question_stays_open(self):
+        # #605 (the audit of v1.90): wb answer said "answered" to a 300 KiB answer the server
+        # never reads (FILE_MAX), and the agent waited out its ask timeout for NO_ANSWER
+        self.start("t-big", "ok")
+        wait_phase("t-big", {"review"})
+        task, opened = store.Task("t-big"), {}
+        task.set_status(phase="running")
+        self.agent_asks(task, "aaaaaaaa", question="the log?")
+        ask_mcp.relay(task, opened)
+        big = Path(self.tmp.name) / "big-log.txt"
+        big.write_text("x" * 300 * 1024)
+        for argv in (["answer", "t-big", "--file", str(big)],
+                     ["allow", "t-big", "make *", "--text", big.read_text()]):
+            err = io.StringIO()
+            with redirect_stderr(err), self.assertRaises(SystemExit):
+                run_wb(*argv)
+            self.assertIn("over the 256 KiB the agent can be sent: put the material in a file in "
+                          "the task's worktree", err.getvalue())
+            self.assertTrue(ask_mcp.is_open(task, "aaaaaaaa"))         # still the agent's to get
+        self.assertEqual(context.grants(task).get("allow") or [], [])   # nothing granted either
+        fits = "y" * (ask_mcp.FILE_MAX - 1)                             # the largest that fits
+        self.assertIn("answered", run_wb("answer", "t-big", "--text", fits))
+        self.assertEqual(ask_mcp._read(context.ask_dir(task) / "aaaaaaaa.answer").strip(), fits)
+
     def test_a_question_the_runner_drops_is_closed_and_wb_answer_refuses_it(self):
         # one that timed out, or whose round ended, kept looking open: Claude was woken for it
         # and `wb answer` said "answered" to nobody (the 0.90 review)

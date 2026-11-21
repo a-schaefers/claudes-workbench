@@ -1115,6 +1115,8 @@ def cmd_answer(a):
     text = a.text if a.text is not None else Path(a.file).read_text(encoding="utf-8")
     if not text.strip():  # the question stays open: an empty answer unblocked the agent (the audit)
         die("the answer is empty")
+    if why := ask_mcp.too_long(text):  # the server would never read it (#605)
+        die(f"{why} ({task.worktree})")
     handled = store.now()  # the question; a newer notice, raised after the answer, stays news
     ask_mcp.write_answer(task, qid, text)  # whole, and never through a link in the lane
     if (task.status.get("asks") or {}).get(qid) == "q":  # what the Stats tab may call answered:
@@ -1595,6 +1597,8 @@ def cmd_allow(a):
     if not pats and not dirs:
         die("nothing to allow")
     context.commands_conf()  # refused unless it parses, before any grant: rewriting it would lose it
+    if a.text and (why := ask_mcp.too_long(a.text + " " * 400)):  # with the words around it (#605)
+        die(f"--text: {why} ({task.worktree})")
     for key, new in (("allow", pats), ("paths", dirs)):
         if not new:
             continue
