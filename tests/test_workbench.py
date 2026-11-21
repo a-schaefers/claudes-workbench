@@ -21800,6 +21800,10 @@ class ProbeExperiment(Base):
         # 14 replays (2026-11-21)
         prompt = task.round_dir(1).joinpath("prompt.md").read_text()
         self.assertIn(context.EXPERIMENT_PROTOCOL["probe"], prompt)
+        # its search output capped: one query printed 42K tokens (#857); the user's own cap kept
+        self.assertEqual(runner.agent_env(task).get("PROBE_MAX_TOKENS"), str(context.PROBE_MAX_TOKENS))
+        with mock.patch.dict(os.environ, {"PROBE_MAX_TOKENS": "900"}):
+            self.assertEqual(runner.agent_env(task)["PROBE_MAX_TOKENS"], "900")
         self.assertIn("--allow-tests", context.EXPERIMENT_NOTES["probe"])
         self.assertNotIn("don't probe it", prompt)
 
@@ -21867,6 +21871,7 @@ class ProbeExperiment(Base):
         self.assertEqual(self.probe_rules(task), [])
         self.assertEqual((context.rules_dir(task) / "HANDBOOK.md").read_text(), context.HANDBOOK.read_text())
         self.assertNotIn("probe", task.round_dir(1).joinpath("prompt.md").read_text())
+        self.assertNotIn("PROBE_MAX_TOKENS", runner.agent_env(task))
 
     def probe_that(self, script: str) -> Path:
         """A `probe` first on PATH running `script`, and the file each of its runs is noted in."""

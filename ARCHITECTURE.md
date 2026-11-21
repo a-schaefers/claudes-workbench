@@ -5456,7 +5456,10 @@ failed the start after its branch and worktree were made (#518); its output is r
 refuse `--lsp` on any of them; its copy of the handbook ends with `EXPERIMENT_NOTES["probe"]`
 (`instruction_files`; `agent/HANDBOOK.md` itself is unchanged), and each round prompt's protocol
 carries `EXPERIMENT_PROTOCOL["probe"]` beside the acceptance line (`context.experiment_protocol`,
-the protocol's `{experiment_protocol}`). Both give a trigger, not a suggestion: before reading a
+the protocol's `{experiment_protocol}`). Its shell gets `PROBE_MAX_TOKENS` (the user's, else
+`context.PROBE_MAX_TOKENS` 2000, `runner.agent_env`): `probe search` has no output limit of its
+own, and one plain query on workbench printed 169 KB, about 42K tokens, more than a 40K window
+holds (#857). Both give a trigger, not a suggestion: before reading a
 file over 300 lines, `probe symbols` it. Both were added after the first measurement, in which
 the agent never ran probe in 14 replays: the note was in the handbook only, said "read a whole file
 only when you need most of it" on cases whose largest file was 312 lines, didn't name

@@ -347,8 +347,9 @@ EXPERIMENT_NOTES = {
              "Before you read any file over 300 lines, run `probe symbols <file>` (add `--allow-tests` "
              "in a test file, or its tests are left out): it lists each function and class with its "
              "line range. Then read only what you need: `probe extract <file>#<name>` prints one "
-             "function, or read just its lines. To find where a name is defined or used, `probe "
-             "search \"<words>\" <dir>`. After an edit, re-read only the function you changed. When "
+             "function, or read just its lines. To find where something is defined or used, `probe "
+             "search \"name1 OR name2\" <dir>` (its output is capped; narrow the query, or add "
+             "`ext:py`, when it is cut). After an edit, re-read only the function you changed. When "
              "probe says \"File too large\" (over 1 MB), use `grep -n` for the names and read those "
              "lines.\n",
 }
@@ -359,6 +360,10 @@ EXPERIMENT_PROTOCOL = {
              "a test file) and read only the functions you need (`probe extract <file>#<name>`).\n",
 }
 
+
+# The most a probe search prints, in tokens, unless the user's PROBE_MAX_TOKENS says otherwise
+# (runner.agent_env): it has no limit of its own, and one plain query printed 42K tokens (#857)
+PROBE_MAX_TOKENS = 2000
 
 # A read of a whole file longer than this is what probe is for: the round prompt's trigger, and
 # what the runner counts (status `long_reads`) beside the experiments' use (#857)

@@ -514,6 +514,10 @@ def agent_env(task: store.Task, run: str = "") -> dict:
         # nor the interop socket's name (the 0.90 review; /init finds it without: interop_gap)
         env.pop("WSL_INTEROP", None)
         env["PATH"] = context.agent_path(env["PATH"])
+    # probe search has no output limit of its own: one plain query on workbench printed 169 KB,
+    # about 42K tokens, more than a 40K window holds. Capped unless the user set one (#857)
+    if context.experiment(task, "probe"):
+        env["PROBE_MAX_TOKENS"] = os.environ.get("PROBE_MAX_TOKENS") or str(context.PROBE_MAX_TOKENS)
     # what the user trusts in their checkout, mise trusts in workbench's copies of it (#674):
     # the worktree and the scratch checkouts all live under the state directory
     if context.mise_trusted(task, env["PATH"]):
