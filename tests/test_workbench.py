@@ -2517,6 +2517,34 @@ class WorktreeSetup(Base):
         self.assertEqual(st["phase"], "review")
         self.assertNotIn("huge", gitops.changed(wt))                       # not a deletion
 
+    def test_a_new_directory_outside_the_sparse_cone_is_reported_verified_and_accepted(self):
+        # #493 (the audit of 1.90, reproduced): a file made outside the cone (a new package) made
+        # `git add -A -N` exit 1, the round report crashed the runner, and wb diff, verify, next
+        # and accept died on the same refusal
+        g = lambda *a: subprocess.run(["git", "-C", str(self.repo), *a], check=True,  # noqa
+                                      capture_output=True)
+        for d in ("app", "huge"):
+            (self.repo / d).mkdir()
+            (self.repo / d / "f.txt").write_text(d)
+        g("add", "app", "huge")
+        g("commit", "-qm", "two packages")
+        g("sparse-checkout", "set", "--cone", "app")
+        made = "mkdir -p tools && echo helper > tools/helper.py && "  # in the lane, as the agent would
+        self.start("t-cone", "ok", "--test", made + TEST_CMD, "--auto-fix", "0", "--no-self-review")
+        st = wait_phase("t-cone", {"review", "failed"})
+        self.assertEqual(st["phase"], "review", st.get("last"))
+        report = run_wb("report", "t-cone")
+        self.assertIn("tools/helper.py", report)
+        self.assertIn("2 files changed", report)
+        self.assertIn("+helper", run_wb("diff", "t-cone"))
+        out = run_wb("verify", "t-cone", "--test", "test -f tools/helper.py", "--files", "tools/helper.py")
+        self.assertIn("proven", out)
+        run_wb("accept", "t-cone", "-m", "feat: a helper")
+        tree = subprocess.run(["git", "-C", str(self.repo), "ls-tree", "-r", "--name-only",
+                               "delegate/t-cone"], capture_output=True, text=True).stdout.split()
+        self.assertIn("tools/helper.py", tree)
+        self.assertIn("huge/f.txt", tree)                                  # outside it: not deleted
+
     def test_copy_brings_an_ignored_path_from_the_checkout_and_refuses_secrets_and_tracked_files(self):
         self.ignore("vendor/", ".env", "local.cfg")
         (self.repo / "vendor").mkdir()

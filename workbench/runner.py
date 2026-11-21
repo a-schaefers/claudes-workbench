@@ -1548,7 +1548,10 @@ def summary_text(task: store.Task, n: int, rnd: dict, tests) -> str:
                      ".claude/ are yours to write; keep, rewrite or revert them")
     if nested := gitops.nested_repos(task.worktree):
         lines.append(gitops.nested_line(nested))
-    stat = gitops.diff(task.worktree, spec["base"], stat=True).splitlines()
+    try:  # a git that refuses the diff costs the report a line, not the task (#493)
+        stat = gitops.diff(task.worktree, spec["base"], stat=True).splitlines()
+    except gitops.GitError as e:
+        stat = [f"(no diffstat: {(str(e).splitlines() or [''])[0][:300]})"]
     if stat:
         lines.append(stat[-1].strip())
     return "\n".join(lines)

@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import contextlib
 import json
+import os
 import re
 import secrets
 import shlex
@@ -213,6 +214,13 @@ def _checkouts(task: store.Task, tree: str, files: list[str], base_rev: str):
     def candidate(work: Path) -> None:
         gitops.git(work, "checkout", "-q", "--detach", head)
         gitops.git(work, "read-tree", "-u", "--reset", tree)  # the worktree as it is, new files too
+        if gitops.sparse_of(work):  # read-tree writes nothing outside the sparse patterns: the
+            # agent's new package beside the cone was missing, and the candidate failed (#493)
+            made = [f for f in gitops.git_bytes(work, "diff", "--name-only", "--no-renames", "-z",
+                                                "--diff-filter=AMT", head, tree).split(b"\0") if f]
+            for i in range(0, len(made), 200):  # skip-worktree, as read-tree marked them
+                gitops.git(work, "checkout", "-q", "--ignore-skip-worktree-bits", tree, "--",
+                           *(":(literal)" + os.fsdecode(f) for f in made[i:i + 200]))
     return base, candidate
 
 

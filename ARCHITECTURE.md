@@ -3434,7 +3434,12 @@ it. ACE-Step's takes peaked at -0.2 dBFS, near clipping, before any `loudnorm`.
   base, or after `wb next` against the last committed step (`--all` for the whole branch). The
   scratch index starts as a copy of the worktree's (`read-tree HEAD` only when there is none), so
   sparse-checkout's skip-worktree entries aren't read as deletions: a monorepo's every file outside
-  the cone once filled the diff, the stat and the router's footprint (the audit).
+  the cone once filled the diff, the stat and the router's footprint (the audit). Its `add -A`
+  (and `commit_all`'s) is `gitops.add_all`: refused in a sparse checkout (a file the agent made
+  outside the patterns, git 2.34+), it runs again with `--sparse`; that refusal crashed the round
+  report and stopped `wb diff`, verify, next and accept (#493, the audit of 1.90). Only after the
+  refusal: a git older than `--sparse` neither has it nor refuses. A git error in the report's
+  diffstat costs that line (`(no diffstat: …)`), not the task.
 - **Nested repositories** (`gitops.nested_repos`: the untracked `dir/` entries git lists, which
   are only ever directories holding a `.git`). A scaffolder's or a test fixture's repo in the
   worktree broke the review diff (no commit) or showed as one line and was committed as a gitlink
@@ -3531,7 +3536,10 @@ it. ACE-Step's takes peaked at -0.2 dBFS, near clipping, before any `loudnorm`.
   `read-tree -mu HEAD`; newer git copies them itself, an older one checked out the whole tree. The
   scratch clones (the base check, `wb verify`, `wb shot`, `wb bench add`'s checks) are made sparse
   the same way before their checkout: the base check's clone held the whole monorepo (#263, the
-  audit of 1.2). A failed add (a required smudge filter) removes
+  audit of 1.2). There `read-tree -u` writes nothing outside the patterns, so `wb verify`'s
+  candidate checks out the files the candidate adds or changes with
+  `--ignore-skip-worktree-bits`: a new package beside the cone was missing, and the candidate
+  failed (#493). A failed add (a required smudge filter) removes
   the worktree and the branch it made, and `wb start` the task directory, so the name stays free
   (one once left all three behind for good, the 2026-11-16 audit). `remove_worktree` (always `--force`:
   after accept's commit only ignored files are left) and `prune`; when git can't remove it (a

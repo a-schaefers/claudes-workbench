@@ -465,11 +465,25 @@ def with_new_files(worktree: Path, *args, whole: bool = False, limit: int | None
         except (GitError, OSError):
             git(worktree, "read-tree", "HEAD", env=env)
         skip = [f":(exclude){p}" for p in nested_repos(worktree)]
-        git(worktree, "add", "-A", *([] if whole else ["-N"]), *(["--", ".", *skip] if skip else []),
-            env=env)
+        add_all(worktree, *([] if whole else ["-N"]), *(["--", ".", *skip] if skip else []), env=env)
         return _bounded(worktree, args, env, limit) if limit else git(worktree, *args, env=env)
     finally:
         shutil.rmtree(scratch, ignore_errors=True)
+
+
+def add_all(worktree: Path, *args, env=None, pre=()) -> None:
+    """`git add -A <args>`, with `--sparse` when a sparse checkout refused it: a file the agent
+    made outside the patterns (a new package beside the cone) made git 2.34+ exit 1, which crashed
+    the round report and stopped wb diff, verify, next and accept on the task (#493, the audit of
+    1.90). Retried only after that refusal: a git older than --sparse neither has it nor refuses."""
+    r = _run(worktree, [*pre, "add", "-A", *args], env, check=False)
+    if r.returncode and git(worktree, "config", "--bool", "core.sparseCheckout",
+                            check=False).strip() == "true":
+        if not _run(worktree, [*pre, "add", "-A", "--sparse", *args], env, check=False).returncode:
+            return
+    if r.returncode:
+        err = (r.stderr or r.stdout).decode("utf-8", "replace").strip()
+        raise GitError(f"git add -A {' '.join(args)}: {err}")
 
 
 def _bounded(cwd, args, env, limit: int) -> str | None:
@@ -593,7 +607,7 @@ def commit_all(worktree: Path, message: str, include: bool = False, sign: bool =
     if not include and (why := _bulk(worktree, snapshot(worktree))):
         raise GitError(f"not committed: {why}. Build output? Gitignore or remove it in "
                        f"{worktree}, or --include to commit it anyway")
-    git(worktree, *NO_HOOKS, "add", "-A")
+    add_all(worktree, pre=NO_HOOKS)
     if not git(worktree, "diff", "--cached", "--name-only").strip():
         raise GitError("nothing to commit: the agent's worktree has no changes")
     if not sign:  # --no-sign, at start or now: the task's commits go unsigned (#374)
