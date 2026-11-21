@@ -2442,6 +2442,40 @@ class Lifecycle(Base):
         self.assertNotEqual(gitops.mark(wt), out[0])
 
 
+class RoundEnd(Base):
+    """What the runner concludes from how OpenCode ended the round."""
+
+    def test_an_opencode_that_exits_non_zero_fails_the_round_whatever_it_printed(self):
+        # #427 (the audit of 1.8, reproduced): a child that printed "I will inspect the files"
+        # and exited 7 went to review as "tests passed: Claude reviews next", an already-green
+        # test passing; only the detailed report showed the exit
+        for name, scenario, code, wrote in (("t-before", "crash", "1", False),
+                                            ("t-text", "say", "7", False),
+                                            ("t-write", "ok", "7", True)):
+            with self.subTest(name):
+                os.environ["FAKE_EXIT"] = code
+                self.start(name, scenario, "--test", TRUE, "--no-base-check")
+                st = wait_phase(name, {"review", "stuck", "failed"})
+                self.assertEqual((st["phase"], st["last"]), ("failed", f"opencode exited {code}"))
+                self.assertNotIn("tests", st)                              # never run on it
+                rows, _ = store.read_jsonl(store.home() / "notify.jsonl")
+                notice = [r for r in rows if r["task"] == name]
+                self.assertEqual([r["kind"] for r in notice], ["failed"])
+                self.assertIn(f"opencode exited {code}", notice[0]["text"])
+                t = store.Task(name)
+                self.assertEqual((t.worktree / "answer.txt").exists(), wrote)  # its edits stay
+                if wrote:
+                    self.assertIn("answer.txt", notice[0]["text"])
+                    self.assertIn("the round didn't finish", notice[0]["text"])
+
+    def test_an_opencode_stopped_in_a_hung_shutdown_still_ends_the_round_as_its_events_say(self):
+        # #83 is no crash: its output was whole, only its exit hung, and the runner's own stop
+        # gave the non-zero exit
+        os.environ["FAKE_LINGER"] = "1"
+        self.start("t-hung", "ok", "--test", TEST_CMD, "--no-base-check", "--silence-timeout", "2")
+        st = wait_phase("t-hung", {"review", "stuck", "failed"})
+        self.assertEqual((st["phase"], st["last"]), ("review", "tests passed: Claude reviews next"))
+
 
 class WorktreeSetup(Base):
     """#201 (the 2026-11-19 audit): a task's worktree holds only committed files, under the state

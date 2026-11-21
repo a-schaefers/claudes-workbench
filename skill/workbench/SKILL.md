@@ -376,7 +376,8 @@ coding choice is the user's (`wb coding`), never changed by a check.
   blocked until you do.
 - **stuck / failed** — `wb log <name> -n 30` if the report isn't enough; then feedback that unblocks
   it, or discard. Past step 1, discard drops only this step: the steps `wb next` committed stay on
-  the branch, and the report says how to accept them instead.
+  the branch, and the report says how to accept them instead. A failed round's edits so far stay in the worktree (`wb resume` carries on).
+
 - **Lessons**: when the `lessons:` line says one was seen in more than one task, or you just
   corrected something the next agent will get wrong too, triage it now (`reference/skills.md`).
   A one-task detail needs no call.

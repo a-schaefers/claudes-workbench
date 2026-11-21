@@ -18,6 +18,7 @@
   toolhang  one tool call, then silent (a command that prints nothing for long)
   retry  no answer from the model's server: a `retry` line every FAKE_RETRY_EVERY seconds (1),
          OpenCode cutting the request at its provider timeout and sending it again (#491)
+  say    a few words and no tool call ("I will inspect the files")
 A `run` message must follow `--` when it starts with '-', or the fake prints its usage and exits
 1, as OpenCode does. FAKE_LATE: seconds before the first event (a model reading its prompt).
 FAKE_PROMPTS, if set, is a file each run appends its prompt to; FAKE_RUNS one that records
@@ -26,7 +27,8 @@ event. FAKE_LESSON ends the agent's text with a `Lesson:` line (what workbench.l
 FAKE_BG, a file: each run starts `sleep` in a session of its own, left running, and writes its pid
 there (what the agent leaves behind). FAKE_STRAY prints lines that are JSON but not events, or
 events of the wrong shape, first. FAKE_LINGER: after its last event a run closes its output and
-stays alive (a shutdown that hangs).
+stays alive (a shutdown that hangs). FAKE_EXIT: after its last event a run exits with this code
+(a crash after the model's first words, or after an edit).
 FAKE_SURROGATE: a run first reads a file whose name and text end in half an emoji (an
 unpaired surrogate escaped, which is valid JSON).
 FAKE_LATIN1: a run first prints a line that isn't UTF-8 (`caf\xe9`, Latin-1).
@@ -180,6 +182,9 @@ elif scenario == "retry":  # as OpenCode 2.3 prints it, after the step_start abo
                           "error": {"type": "provider.transport",
                                     "message": "Timed out waiting for response headers"}}), flush=True)
         time.sleep(float(os.environ.get("FAKE_RETRY_EVERY", 1)))
+elif scenario == "say":
+    emit("text", text="I will inspect the files.")
+    finish()
 elif scenario == "toolhang":
     tool("bash", {"command": "make check"})
     time.sleep(3600)
@@ -243,6 +248,8 @@ elif scenario == "fill":
     emit("step_finish", reason="tool-calls", tokens={"input": 2000, "output": 900,
                                                       "cache": {"read": 22100}})  # 25000: 76%
     time.sleep(3600)
+if os.environ.get("FAKE_EXIT") and args and args[0] == "run":
+    sys.exit(int(os.environ["FAKE_EXIT"]))
 if os.environ.get("FAKE_LINGER") and args and args[0] == "run":
     sys.stdout.flush()
     os.close(1)
