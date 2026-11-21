@@ -1,4 +1,5 @@
 """A tiny statistics module."""
+from __future__ import annotations
 
 
 def mean(xs: list[float]) -> float:
