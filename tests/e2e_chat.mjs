@@ -337,6 +337,45 @@ async function run(engine, device) {
     if (!(await page.locator('#about').isHidden())) throw new Error('still replying about them')
     await until(async () => (await page.$$eval('.about-tag', t => t.at(-1)?.textContent)) === 'About fix-nav, step 1')
   })
+  await check("wb audio's shortlist: each take plays from its blob, with its checks, and Keep sends the pick (#397)", async () => {
+    const d = join(home, 'takes'); mkdirSync(d, { recursive: true })
+    const wav = (secs, rate = 8000) => {  // a 440 Hz tone, 16-bit mono PCM
+      const n = secs * rate, b = Buffer.alloc(44 + 2 * n)
+      b.write('RIFF', 0); b.writeUInt32LE(36 + 2 * n, 4); b.write('WAVEfmt ', 8); b.writeUInt32LE(16, 16)
+      b.writeUInt16LE(1, 20); b.writeUInt16LE(1, 22); b.writeUInt32LE(rate, 24); b.writeUInt32LE(2 * rate, 28)
+      b.writeUInt16LE(2, 32); b.writeUInt16LE(16, 34); b.write('data', 36); b.writeUInt32LE(2 * n, 40)
+      for (let i = 0; i < n; i++) b.writeInt16LE(Math.round(8000 * Math.sin(2 * Math.PI * 440 * i / rate)), 44 + 2 * i)
+      return b
+    }
+    const clips = [1, 2].map(i => {
+      const p = join(d, `a-door-slam-${i}.wav`)
+      writeFileSync(p, wav(i))
+      writeFileSync(join(d, `a-door-slam-${i}.json`), JSON.stringify({ text: 'a door slam', kind: 'sfx', seed: i, engine: 'fx',
+        duration: i, peak_db: -12.3, clipped: 0, lead: 0, tail: 0, gaps: [] }))
+      return p
+    })
+    wb('chat', 'listen', ...clips, '--text', 'Two takes of the door. Take 1 has the cleaner tail.')
+    await until(async () => (await page.locator('.take audio').count()) === 2)
+    await until(async () => (await page.$$eval('.take audio', a => a.filter(x => x.src.startsWith('blob:') && x.readyState >= 1).length)) === 2)
+    const secs = await page.$$eval('.take audio', a => a.map(x => Math.round(x.duration)))
+    if (secs.join(',') !== '1,2') throw new Error('durations ' + secs.join(','))
+    const caps = await page.$$eval('.take figcaption', c => c.map(x => x.textContent))
+    if (caps.join('|') !== 'Take 1 · a-door-slam-1.wav|Take 2 · a-door-slam-2.wav') throw new Error(caps.join('|'))
+    const line = await page.locator('.take .take-line').first().textContent()
+    if (!line.includes('1.0 s · peak -12.3 dBFS')) throw new Error(line)
+    const width = await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)
+    if (!width) throw new Error('the page scrolls sideways')
+    // Claude's words revealed in full first: the bubble growing under a tap moved the button away
+    await until(async () => (await page.locator('.bubble.flowing').count()) === 0)
+    await page.fill('#input', 'a draft kept as it was')
+    await page.locator('.take .keep').nth(1).click()
+    await until(() => { const r = messages().at(-1); return r && r.from === 'user' && r.about && r.about.audio })
+    const r = messages().at(-1)
+    if (r.text !== 'Keep take 2: a-door-slam-2.wav' || r.about.n !== 2 || r.about.path !== clips[1]) throw new Error(JSON.stringify(r))
+    if ((await page.inputValue('#input')) !== 'a draft kept as it was') throw new Error('the draft was touched')
+    await page.fill('#input', '')
+    await until(async () => (await page.$$eval('.about-tag', t => t.at(-1)?.textContent)) === 'Kept take 2 · a-door-slam-2.wav')
+  })
   // the phone keyboard (2026-11-19): no browser here can raise one, so the touches are made by hand
   const touches = (moves, on = 'main') => page.evaluate(([moves, on]) => {
     const el = document.querySelector(on), r = el.getBoundingClientRect()

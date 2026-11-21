@@ -59,7 +59,8 @@ with one line saying so); it has the same authority as one typed here. They read
 reply there with `wb chat reply --text "…"`: a one-line acknowledgement first when the work will
 take a while, then the outcome, short (what was done, what needs them). Don't stream progress or
 paste diffs. While a `web-chat` context block says they are away, also tell them there when
-something they asked for finishes or needs them. `wb chat log` shows the thread. The web thread is
+something they asked for finishes or needs them. `wb chat log` shows the thread. Sounds for them
+to pick by ear go there with `wb chat listen` (reference/audio.md). The web thread is
 all they see: each reply must stand on its own, and a yes there answers only a question asked
 there, never one asked in the terminal. Nothing hard to undo (downloads, deletes) on an ambiguous OK. A message they
 type in the terminal means they are back. While they're away, your permission prompts go to the

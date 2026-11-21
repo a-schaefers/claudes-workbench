@@ -199,6 +199,15 @@ main { flex: 1; overflow-y: auto; overscroll-behavior: contain; -webkit-overflow
 .shots figcaption b { font-weight: 600; }
 .shots .missing { padding: 18px 10px; font: 13px/1.4 var(--sans); color: var(--faint); }
 .shots-of { margin-top: 6px; font: 13px/1.4 var(--sans); color: var(--faint); }
+/* Claude's shortlist of wb audio's takes (#397): one take a row, its player the row's width */
+.takes { display: grid; gap: 8px; margin-top: 8px; width: min(100%, 560px); }
+.take { margin: 0; padding: 8px 10px; background: var(--panel); border: 1px solid var(--line); border-radius: 12px; min-width: 0; }
+.take figcaption { font: 13px/1.4 var(--sans); color: var(--fg); overflow-wrap: anywhere; }
+.take figcaption b { font-weight: 600; }
+.take audio { display: block; width: 100%; margin: 6px 0; }
+.take .take-line { display: block; font: 12px/1.4 var(--mono); color: var(--faint); overflow-wrap: anywhere; }
+.take .missing { display: block; padding: 10px 0; font: 13px/1.4 var(--sans); color: var(--faint); }
+.take .keep { font: 13px/1.4 var(--sans); color: var(--fg); background: none; border: 1px solid var(--line); border-radius: 8px; padding: 8px 12px; margin-top: 6px; cursor: pointer; }
 .shots-of button, .about button { font: inherit; color: var(--fg); background: none; border: 0; padding: 8px 4px; text-decoration: underline; cursor: pointer; }
 .about-tag { font: 12.5px/1.4 var(--sans); color: var(--faint); margin-bottom: 3px; }
 .about { display: flex; align-items: center; gap: 6px; max-width: 760px; width: 100%; margin: 0 auto; padding: 0 16px; font: 13.5px/1.4 var(--sans); color: var(--fg); }

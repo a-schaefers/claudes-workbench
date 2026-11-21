@@ -1060,6 +1060,25 @@ test('a reply to a pair of screenshots reaches Claude with its task and step (#9
   expect(asked).toEqual(['[web chat] (about fix-nav, step 1, screenshots 2) the button moved'])
 })
 
+test('a take the user keeps from the shortlist reaches Claude with its number and path (#397)', async ($, on) => {
+  const clock = mock.clock(on, { now: 1_800_000_000_000 })
+  const files: Record<string, string> = {}
+  fakeTasks(on, files, [])
+  chatOn(files)
+  on('ui.toast', () => ({ value: undefined }))
+  on('session.cwd', () => ({ value: '/home/u/project' }))
+  on('skill.prompt', (_: any, e: any) => ({ text: e.text }))
+  on('process.run', () => ({ value: { exitCode: 0, stdout: 'no open tasks', stderr: '' } }))
+  const asked: string[] = []
+  on('prompt.submit', (_: any, e: any) => { asked.push(e.text); return { text: e.text } })
+  files['/wb/chat/messages.jsonl'] = JSON.stringify({ id: 'm1', ts: 1_800_000_000, from: 'user', text: 'Keep take 2: door-2.wav',
+    about: { audio: '1800000000000-abcdef', n: 2, name: 'door-2.wav', path: '/home/u/project/o/door-2.wav' } }) + '\n'
+  await $.session.start({ cwd: '/home/u/project', surface: 'terminal', isInteractive: true })
+  await $.skill.prompt({ skill: 'workbench', text: 'x', frontmatter: {}, source: 'userSettings' })
+  await clock.advance(3000)
+  expect(asked).toEqual(['[web chat] (keeps take 2 of the shortlist: /home/u/project/o/door-2.wav) Keep take 2: door-2.wav'])
+})
+
 test('the web chat reaches Claude only in /workbench mode, with a receipt, and one session listens', async ($, on) => {
   const clock = mock.clock(on, { now: 1_800_000_000_000 })
   const files: Record<string, string> = {}

@@ -420,6 +420,34 @@
     box.append(grid, of)
     return box
   }
+  // ---- Claude's shortlist of wb audio's takes (#397): Claude can't hear, so the user picks by
+  // ear. Each take is fetched with the token and played from a blob; Keep sends the pick at once.
+  function makeListen(l) {
+    const box = document.createElement('div'); box.className = 'takes'
+    for (const c of l.clips || []) {
+      const take = document.createElement('figure'); take.className = 'take'
+      const cap = document.createElement('figcaption')
+      cap.append(Object.assign(document.createElement('b'), { textContent: `Take ${c.n}` }), span('', ' · ' + c.name))
+      take.append(cap)
+      const player = document.createElement('audio'); player.controls = true; player.preload = 'metadata'
+      player.setAttribute('aria-label', `Take ${c.n}, ${c.name}`)
+      take.append(player)
+      fetch(`/api/audio?batch=${encodeURIComponent(l.batch)}&n=${c.n}`,
+            { headers: { Authorization: 'Bearer ' + token }, cache: 'no-store' })
+        .then(r => r.ok ? r.blob() : Promise.reject(r.status))
+        .then(b => { player.src = URL.createObjectURL(b) })
+        .catch(() => player.replaceWith(span('missing', 'This take is no longer kept.')))
+      if (c.line) take.append(span('take-line', c.line))
+      const keep = document.createElement('button'); keep.type = 'button'; keep.className = 'keep'; keep.textContent = 'Keep this one'
+      keep.onclick = () => pick({ audio: l.batch, n: c.n, name: c.name })
+      take.append(keep)
+      box.append(take)
+    }
+    return box
+  }
+  const aboutBody = a => a.audio ? { audio: a.audio, n: a.n } : { task: a.task, n: a.n }
+  const aboutTag = a => a.audio ? `Kept take ${a.n} · ${a.name}` : `About ${a.task}, step ${a.step}`
+
   // what the next message is about: a pair of screenshots, so the reply reaches its task and step
   let about = load(K.about, null)
   function setAbout(a) {
@@ -434,7 +462,7 @@
     if (m.ask) return makeAsk(m.ask)
     const row = document.createElement('div')
     const b = document.createElement('div'); b.className = 'bubble'
-    if (m.about) row.append(span('about-tag', `About ${m.about.task}, step ${m.about.step}`))
+    if (m.about) row.append(span('about-tag', aboutTag(m.about)))
     if (m.from === 'user') b.textContent = m.text
     else if (seen.has(m.id) || firstVisit || document.hidden || reduced.matches) {
       if (!seen.has(m.id) && !firstVisit && document.hidden) { unread++; document.title = `(${unread}) Workbench` }
@@ -445,6 +473,7 @@
     }
     row.append(b)
     if (m.shots) row.append(makeShots(m.shots))
+    if (m.audio) row.append(makeListen(m.audio))
     row.append(document.createElement('div'))
     row.lastChild.className = 'meta'
     return row
@@ -682,7 +711,7 @@
     for (const o of [...outbox, ...(held ? [held] : [])]) {
       if (o !== held && (o.error || !load(OUT + o.cid, null))) continue  // refused, or sent by another tab meanwhile
       try {
-        const r = await post('/api/send', { text: o.text, cid: o.cid, ...(o.about ? { about: { task: o.about.task, n: o.about.n } } : {}) })
+        const r = await post('/api/send', { text: o.text, cid: o.cid, ...(o.about ? { about: aboutBody(o.about) } : {}) })
         const j = await r.json().catch(() => ({}))
         // landed: the reply names it. The snapshot alone holds the newest 200, so a retry after
         // a lost reply, 205 messages later, kept its pending bubble for good (#264, the audit of 1.2)
@@ -721,9 +750,18 @@
     input.value = ''; save(K.draft, ''); grow(); sendBtn.disabled = true
     render(); toEnd(true); flush(true)
   }
+  // a take kept from the shortlist: sent as its own message, the box left as it was
+  function pick(a) {
+    if (!token || held) return
+    const o = { cid: newId(), text: `Keep take ${a.n}: ${a.name}`, ts: now(), about: a }
+    if (!save(OUT + o.cid, o)) { held = o; banner('Sending…'); flush(true); return }
+    outbox = outItems()
+    render(); toEnd(true); flush(true)
+  }
   function sentHeld() {
     if (input.value.trim() === held.text) { input.value = ''; save(K.draft, ''); grow(); sendBtn.disabled = true }
-    held = null; setAbout(null); banner('')
+    if (!(held.about && held.about.audio)) setAbout(null)  // a kept take never set the box's
+    held = null; banner('')
   }
 
   // ---- composer ----
