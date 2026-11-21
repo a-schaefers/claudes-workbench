@@ -22062,6 +22062,8 @@ class ProbeLevels(Base):
             branch=task.spec["branch"], test_line=cli.test_line(None), budget=task.spec["ask_budget"],
             experiment_protocol=""))                                      # byte for byte
         self.assertNotIn("probe_aggressive", task.status["tuned"])
+        self.assertNotIn("outline", task.status)                          # no probe symbols run
+        self.assertNotIn("tool_output", json.loads((context.rules_dir(task) / "opencode.json").read_text()))
         run_wb("discard", "t-off")
         row = [r for r in store.results(trials=True) if r["task"] == "t-off"][-1]
         self.assertFalse({k for k in row if k.startswith("probe")})
@@ -22153,6 +22155,86 @@ class ProbeLevels(Base):
         off = json.loads(runner.write_config_layer(store.Task("t-uncapped")).read_text())
         self.assertNotIn("tool_output", off)
         self.assertNotIn("tool_output", json.loads(runner.rules_env(off)["OPENCODE_CONFIG_CONTENT"]))
+
+    def symbols_probe(self, n=400, script=None) -> Path:
+        """A `probe` first on PATH whose `symbols -o json` lists ``n`` functions, the longest last
+        (or runs ``script``); the file each of its runs is noted in."""
+        bin_ = Path(self.tmp.name) / "symbols-probe"
+        bin_.mkdir()
+        ran = bin_ / "ran"
+        body = script or (f"syms = [{{'name': f'f{{i}}', 'kind': 'function', 'signature': f'def f{{i}}():', "
+                          f"'line': 2 * i + 1, 'end_line': 2 * i + 2 + i // 50}} for i in range({n})]\n"
+                          "print(json.dumps([{'file': sys.argv[-1], 'symbols': syms}]))")
+        (bin_ / "probe").write_text(
+            f"#!{sys.executable}\nimport json, sys, time\nopen({str(ran)!r}, 'a').write(' '.join(sys.argv[1:]) + '\\n')\n"
+            "if sys.argv[1:] == ['--help']:\n    print('Commands:\\n  symbols  List symbols'); sys.exit(0)\n"
+            + body + "\n")
+        (bin_ / "probe").chmod(0o755)
+        os.environ["PATH"] = f"{bin_}{os.pathsep}{os.environ['PATH']}"
+        return ran
+
+    def test_round_one_starts_with_a_capped_outline_of_the_long_files_the_spec_names_and_later_rounds_dont(self):
+        # the owner's design (2026-11-21, #857): the agent starts knowing where things are
+        ran = self.symbols_probe()
+        run_wb("experiment", "probe", "moderate")
+        self.long_file()
+        self.start("t-outline", "ok")
+        wait_phase("t-outline", {"review"})
+        task = store.Task("t-outline")
+        prompt = task.round_dir(1).joinpath("prompt.md").read_text()
+        self.assertIn("symbols --allow-tests -o json big.py", ran.read_text())
+        head = context.OUTLINE_HEAD.format(file="big.py")
+        self.assertIn(head, prompt)
+        section = prompt[prompt.index(head):]
+        self.assertLessEqual(len(section), context.PROBE_OUTLINE_TOKENS * context.CHARS_PER_TOKEN)
+        self.assertRegex(section, r"… \d+ more: `probe symbols big\.py`\n$")
+        first = section.splitlines()[1]
+        self.assertTrue(first.startswith("701-709 def f350():"), first)     # the longest first, in order
+        self.assertEqual(task.status["outline"], ["big.py"])
+        self.assertTrue(prompt.startswith(self.spec.read_text().rstrip()))  # the opening unchanged
+        run_wb("feedback", "t-outline", "--text", "1. Again.")
+        wait_phase("t-outline", {"review"})
+        self.assertNotIn("Outline of", task.round_dir(2).joinpath("prompt.md").read_text())
+        self.assertEqual(prompt, task.round_dir(1).joinpath("prompt.md").read_text())  # once
+        self.assertEqual(ran.read_text().count("symbols"), 1)
+
+    def test_a_probe_that_fails_or_hangs_adds_no_outline_and_the_round_runs(self):
+        from workbench import runner
+        self.symbols_probe(script="print('not json'); sys.exit(3)")
+        run_wb("experiment", "probe", "moderate")
+        self.long_file()
+        self.start("t-noline", "ok")
+        st = wait_phase("t-noline", {"review"})
+        task = store.Task("t-noline")
+        self.assertNotIn("Outline of", task.round_dir(1).joinpath("prompt.md").read_text())
+        self.assertEqual(st["outline"], [])
+        hang = Path(self.tmp.name) / "hang-probe"
+        hang.write_text("#!/bin/sh\nsleep 30\n")
+        hang.chmod(0o755)
+        with mock.patch.object(runner, "OUTLINE_TIMEOUT", 0.5):
+            began = time.time()
+            self.assertIsNone(runner.probe_symbols(str(hang), task.worktree, "big.py"))
+            self.assertLess(time.time() - began, 10)
+        # probe off: no outline, whatever the spec names
+        run_wb("experiment", "probe", "off")
+        self.start("t-noprobe", "ok")
+        self.assertNotIn("outline", wait_phase("t-noprobe", {"review"}))
+
+    def test_the_outline_shares_its_budget_between_the_long_files_named(self):
+        from workbench import runner
+        self.symbols_probe(n=800)
+        run_wb("experiment", "probe", "moderate")
+        for f in ("a.py", "b.py"):
+            self.long_file(f)
+        self.spec.write_text("Change `a.py` and b.py (and see README.md).\n")
+        self.start("t-two", "ok")
+        wait_phase("t-two", {"review"})
+        task = store.Task("t-two")
+        section, files = runner.outline_section(task, self.spec.read_text())
+        self.assertEqual(files, ["a.py", "b.py"])                         # README.md: short
+        self.assertLessEqual(len(section), context.PROBE_OUTLINE_TOKENS * context.CHARS_PER_TOKEN)
+        a, b = section.split("\n\n")
+        self.assertLess(abs(len(a) - len(b)), 200)                         # shared, not first come
 
     def test_aggressive_becomes_adaptables_pick_after_five_better_long_file_tasks_and_not_four(self):
         from workbench import tuning

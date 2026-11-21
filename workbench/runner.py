@@ -792,6 +792,89 @@ def steer_prompt(notes: list[dict], interrupted: bool) -> str:
             "and finish with a short summary as before.")
 
 
+OUTLINE_TIMEOUT = 20  # seconds for each `probe symbols`: a probe that hangs costs round 1 no more
+
+
+def add_outline(task: store.Task) -> None:
+    """Round 1's prompt, before its first OpenCode call, gains the outline of the long files its
+    spec names (outline_section), once: a restarted runner doesn't add it again. Only with probe
+    on; nothing it meets (no probe, a failure, a timeout) fails the round or adds anything."""
+    if context.probe_level(task) is None or "outline" in task.status or task.status.get("session"):
+        return
+    path = task.round_dir(1) / "prompt.md"
+    try:
+        section, files = outline_section(task, path.read_text())
+        if section:
+            path.write_text(path.read_text().rstrip("\n") + "\n\n" + section)
+    except Exception as e:  # noqa: BLE001: the outline is a help, never the round's end
+        print(f"workbench: no outline for round 1 ({e})", file=sys.stderr)
+        files = []
+    task.set_status(outline=files)
+
+
+def outline_section(task: store.Task, prompt: str) -> tuple[str, list[str]]:
+    """(the outline section, the files in it): for each file of more than PROBE_FILE_LINES lines
+    the spec names (context.long_files, in the worktree), `probe symbols`, its symbols longest
+    first, all of them within PROBE_OUTLINE_TOKENS, shared evenly (what a file leaves goes to the
+    next: a 5,900-line file took it all and two others named beside it got nothing, trying it on
+    workbench, 2026-11-21); a file cut short ends with OUTLINE_MORE."""
+    exe = context.probe_bin()
+    if not exe:
+        return "", []
+    from .cli import PROTOCOL  # cli imports this module
+    spec = prompt.split(PROTOCOL.split("{branch}")[0])[0]  # the spec, not the protocol's names
+    left = context.PROBE_OUTLINE_TOKENS * context.CHARS_PER_TOKEN
+    found = [(rel, syms) for rel in context.long_files(spec, task.worktree, task.spec.get("subdir"))
+             if (syms := probe_symbols(exe, task.worktree, rel))]
+    parts, files = [], []
+    for k, (rel, syms) in enumerate(found):
+        room = left // (len(found) - k)
+        head = context.OUTLINE_HEAD.format(file=rel)
+        more = lambda n: context.OUTLINE_MORE.format(n=n, file=rel)  # noqa: E731
+        if room < len(head) + len(more(len(syms))) + 2:
+            continue
+        lines, room = [head], room - len(head) - 1
+        for i, (a, b, sig, parent) in enumerate(syms):
+            line = (f"{a}-{b}" if b > a else f"{a}") + f" {sig}" + (f"  (in {parent})" if parent else "")
+            if len(line) + 1 + (len(more(len(syms))) + 1 if i < len(syms) - 1 else 0) > room:
+                lines.append(more(len(syms) - i))
+                break
+            lines.append(line)
+            room -= len(line) + 1
+        text = "\n".join(lines)
+        left -= len(text) + 2
+        parts.append(text)
+        files.append(rel)
+    return ("\n\n".join(parts) + "\n" if parts else ""), files
+
+
+def probe_symbols(exe: str, root: Path, rel: str) -> list[tuple[int, int, str, str]] | None:
+    """`probe symbols --allow-tests` of one file, as (first line, last line, signature, the class
+    it is in), longest first, or None when probe fails, times out or prints what isn't its JSON.
+    Read with errors="replace": a probe that isn't probelabs' may print anything (#518)."""
+    try:
+        r = subprocess.run([exe, "symbols", "--allow-tests", "-o", "json", rel], cwd=root,
+                           capture_output=True, text=True, errors="replace", timeout=OUTLINE_TIMEOUT,
+                           stdin=subprocess.DEVNULL)
+        found = json.loads(r.stdout) if r.returncode == 0 else None
+    except (OSError, subprocess.TimeoutExpired, ValueError):
+        return None
+    out: list[tuple[int, int, str, str]] = []
+
+    def walk(syms, parent: str) -> None:
+        for x in syms if isinstance(syms, list) else ():
+            if not isinstance(x, dict) or not isinstance(x.get("line"), int):
+                continue
+            end = x.get("end_line") if isinstance(x.get("end_line"), int) else x["line"]
+            sig = " ".join(str(x.get("signature") or x.get("name") or "").split())[:160]
+            out.append((x["line"], max(end, x["line"]), sig, parent))
+            walk(x.get("children"), str(x.get("name") or ""))
+    for f in found if isinstance(found, list) else ():
+        walk(f.get("symbols") if isinstance(f, dict) else None, "")
+    out.sort(key=lambda s: (s[0] - s[1], s[0]))
+    return out or None
+
+
 def outside_spec(task: store.Task, files: str) -> list[str]:
     """Changed files the current spec never names, when it names any: the agent's drift shows
     here first (seen 2026-11-16: a flow-field module nobody asked for). Matched by path or name;
@@ -3026,6 +3109,8 @@ def drive(task: store.Task) -> None:
                         ("probe_aggressive",) if task.spec.get("probe_explored") else ())
         except (KeyError, RuntimeError, OSError) as e:
             return _load_failed(task, e)
+        if task.status.get("round", 1) == 1:  # before round 1's first OpenCode call (probe on)
+            add_outline(task)
         handed = 0  # mid-round handovers in this runner: one review round (HANDOVER_MAX)
         first = True
         revived = None  # the round run again after its server went away under it

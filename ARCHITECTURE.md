@@ -1369,9 +1369,11 @@ by prefix; rewording one silently changes those:
 | `CARRY_ON`, `RESUME` (first 60 characters) | `_full_round`, `wb resume` | `round_asks` skips them (but their `notes.md`) |
 | `agent's summary:` | `summary_text` | `lessons` |
 | `--title "wb: <task>"` | `run_round` | `transcript.find_session` |
+| `Outline of <file> (from probe symbols):` (`context.OUTLINE_HEAD`), `… N more: `+"`probe symbols <file>`"+` (`OUTLINE_MORE`) | `runner.add_outline`, after round 1's protocol (probe on, *Experiments*) | nothing by prefix: being after the protocol, `transcript`'s fold and `bench._spec_of` leave it out of the spec (a replay makes its own) |
 
 The skills note is prepended to the prompt argument; the transcript skips past it (to its first
-blank line) before matching the label, so the prompt keeps its own.
+blank line) before matching the label, so the prompt keeps its own. The probe outline is the one
+text appended, not an opening: keep it after the protocol, where the fold cuts.
 
 ## What the agent knows
 
@@ -5534,7 +5536,21 @@ what every level adds besides: **a read cap**, OpenCode's `tool_output` in the c
 to a tenth of the window and restated so a project can't lift it (`runner.output_cap`, *What the
 agent knows*: it bounds the shell's output, not the built-in `read`, which keeps 2,000 lines or
 50 KB; so the note's last sentence, "A read of a long file returns only its first 2,000 lines (or
-50 KB): read further with `offset` and `limit`, or `probe extract` the function").
+50 KB): read further with `offset` and `limit`, or `probe extract` the function"), and **an outline
+in round 1**: before round 1's first OpenCode call (`runner.add_outline`, from `drive`, once: status
+`outline` lists the files, `[]` when none; a restarted runner adds nothing), for each file over
+`PROBE_FILE_LINES` that the spec names in the worktree (`context.long_files`, the spec cut at the
+protocol), the runner runs `probe symbols --allow-tests -o json <file>` (`runner.probe_symbols`,
+the probe `context.probe_bin` finds, in the worktree, `OUTLINE_TIMEOUT` 20 s each, read with
+`errors="replace"`; JSON rather than probe's text, whose signatures run over lines) and appends to
+the prompt, per file, `Outline of <file> (from probe symbols):` and one line per symbol,
+`<first>-<last> <signature>` (`  (in <class>)` for a method), longest first, then `… N more:
+`+"`probe symbols <file>`"+` when cut. All of it within `context.PROBE_OUTLINE_TOKENS` (1000, at
+`CHARS_PER_TOKEN`: about 4,000 characters), shared evenly between the files (one 5,900-line file
+took it all when tried on workbench). A probe that fails, times out or prints what isn't its JSON
+adds nothing and never fails the round; later rounds get no outline. The agent starts knowing
+where things are instead of exploring for it, the way Aider's repo map and Agentless's skeleton
+work.
 `context.experiment(task, "probe")` is true at any level. task.json `experiments.probe` records the
 level the task's agent got, `moderate` or `aggressive` (`context.probe_level`; `true` on a task from
 before the levels reads as moderate, whose condition it had), `probe_setting` the setting it came
@@ -7204,6 +7220,7 @@ check-ins off), not `wb start`'s.
 | `failed_before` | `setup` or `load`: the runner failed the task on its setup or its model's load before the agent ran (`_prepare`, `_load_failed`); the results row copies it (#581) |
 | `stopping` | wb is stopping the runner (`cli._stop_runner`); cleared by `spawn_runner` and the runner's exit |
 | `tools`, `tok_in`, `tok_out` | task-wide tool calls and tokens (input without cache reads) |
+| `outline` | with probe on, the files whose outline round 1's prompt got (`runner.add_outline`, *Experiments*); `[]` when none; set once, before round 1's first call |
 | `experiment_use`, `long_reads` | `{name: calls}`: the calls that used each experiment the task has on, live (`context.experiment_use`: probe when a shell line runs `probe`, by `events.shell_programs`); the whole reads (no `offset`/`limit`) of files over `context.LONG_FILE_LINES` 300 lines (`context.long_read`). `wb status <task>`, the results row and the bench row carry both, so an A/B sees within a replay whether the agent takes a tool up (#857) |
 | `live_used` | `{session, used}`: the context the round's last `step_finish` carried (input + cache + output + reasoning, #644), what the between-rounds check uses when the session export fails (#262) |
 | `gpu_wh` | the GPU energy its rounds used so far, in Wh (the runner's `_Power`, its share while tasks share the GPU: #706; absent for a remote model or no reading) |
@@ -7679,6 +7696,9 @@ nested `.md` files (`docs/`, `skill/`, `mod/`, `agent/`) are unaffected. A new r
   order and names), `experiment_protocol` (a level's line: `PROBE_AGGRESSIVE_PROTOCOL`), `probe_level`
   (results, bench, `cli._level_said`), and `probe_start` with the `probe_aggressive` knob.
   `context.PROBE_RECOMMENDED` → `experiment_lines`' `; adaptable is recommended`, which `probeSaid` reads.
+  What every level adds (`runner.output_cap` in the layer and `RESTATED`, `runner.add_outline` with
+  `OUTLINE_HEAD`/`OUTLINE_MORE` in *The runner, inside*'s prompt texts) → the off test's byte-for-byte
+  check (ProbeLevels), which each must keep passing.
 - **What a handoff costs Claude, measured** → THESIS.md (the case for users, with the same
   numbers) and the README's sentence on it, which links there.
 - **Anything a reader looks up** (a command, flag, default, guard, key, file, prompt text,

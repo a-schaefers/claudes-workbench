@@ -353,6 +353,14 @@ PROBE_RECOMMENDED = False
 # the file length from which the probe experiment's note and protocol line apply: its gain
 # showed only on a 2,700-line file, its cost on 1,500-line ones (#857)
 PROBE_FILE_LINES = 1500
+# With probe on, round 1's prompt ends with an outline of each file over PROBE_FILE_LINES the spec
+# names (runner.add_outline), at most this many tokens in all, so the agent starts knowing where
+# things are instead of exploring for it, as Aider's repo map and Agentless's skeleton do (the
+# owner's design, 2026-11-21, #857). Each file's part opens with OUTLINE_HEAD, a prompt text
+# (ARCHITECTURE.md, *The runner, inside*), and ends, when cut, with OUTLINE_MORE.
+PROBE_OUTLINE_TOKENS = 1000
+OUTLINE_HEAD = "Outline of {file} (from probe symbols):"
+OUTLINE_MORE = "… {n} more: `probe symbols {file}`"
 
 
 # what an experiment adds to the agent's copy of the handbook, after its own text. probe aborts
