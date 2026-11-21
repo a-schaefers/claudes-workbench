@@ -140,7 +140,8 @@ if you can, and start nothing until the plan is approved; then write the first s
   The runner runs it once on the base, in the agent's lane, before round 1; what it saw comes in
   the first report. A test that writes outside the lane or races under load fails there whatever
   the agent does, and the agent spends its rounds on failures it didn't cause (seen: `whoami` and
-  /tmp probes): `wb discard` and start again with a better one. A command that already passes on
+  /tmp probes): `wb discard --spec-gap "the test"` (it isn't the model's miss: without it the
+  router holds it against the model) and start again with a better one. A command that already passes on
   the base is normal when the agent writes the step's tests (the report says so; don't restart):
   then those tests are the check, so the spec names what they must cover, and at review you see
   they fail without the change. Otherwise the command should fail only for what the step changes,
@@ -165,7 +166,9 @@ whatever CLAUDE.md says is next.
 the largest model allowed significant work, the smallest allowed trivial work, unless a model's
 record of accepted tasks at that size is clearly worse, or another with as good a record has
 been measured to cost you less a task (once each has three with your spend recorded). It prints why; the runner then loads that
-model, unloading whatever is there. `wb models` shows the ranking per size. Pass
+model, unloading whatever is there. Old results weigh less, and one task in ten goes to a model
+the record left out on fewer than three tasks ("exploring: …"): review it as any other. `wb
+models` shows the ranking per size. Pass
 `--model <id or fragment>` only if the user names one, or when the record argues against the guess.
 Which sizes a model takes is set with `wb model sizes <id> trivial|significant`: set it when you
 add a model you judge fit only for small work, and otherwise change it only when the user asks.
@@ -237,9 +240,9 @@ files named, and no bigger than its slice: `wb models` (and `wb start`) give eac
 `~3 files, ~150 new lines per task`. The slice comes from the context window the model is served
 (on 32K, 2–3 files and ~150 lines, measured 2026-11-16; a task that spends it, 8 files at once,
 cost 30–60 minutes of compactions, re-reading and drift) and is corrected by every step that
-closes: the biggest that went well raise it, the smallest that went badly (compacted, stuck, or
-two review rounds the agent caused) lower it; a handover to a fresh session doesn't count against
-a step. So a strong
+closes: the size most recent good steps reached raises it, the smallest that went badly (compacted,
+stuck, or two review rounds the agent caused) lowers it; a handover to a fresh session doesn't
+count against a step, and lockfiles and generated files don't count toward a step's size. So a strong
 machine's big window earns big tasks; don't hold it to the 32K numbers. When the last few steps
 went well, try the next one a little bigger than the slice; that is how it learns to grow.
 Splitting is your job, the architect's: run the parts one after another, each with its own acceptance command.
@@ -312,7 +315,7 @@ heading the wrong way, act on it. Notes are instructions, like feedback: concret
 - `wb stop <name>`; `wb resume <name>` continues it in a fresh session (also after "the runner
   died" or "stopped by a signal"). After a restart or a shutdown one notice names every task it
   interrupted:
-  `wb resume --all --repo <dir>`, as it says.
+  `wb resume <a> <b> …`, as it says.
 - A `PERMISSION` question (a command or a directory): lean to yes for what the task needs (`wb
   allow <name> "<pattern>"`, `--path <dir>`), no to what reaches outside it.
 Before acting on one of these the first time in a session, read `reference/driving.md` beside
@@ -457,8 +460,8 @@ goes in that repo's CLAUDE.md instead. Drop a note that has stopped holding (`wb
   to rebase the task onto it or bring them back. An accept that was interrupted finishes when
   run again.
 - `wb discard <name> --reason "…"` drops it (a branch holding steps `wb next` committed is kept;
-  `--drop-steps` deletes it too). `wb status` lists open tasks (e.g. after a context
-  reset; tasks a /workbench-quit parked only by name: leave them unless the user asks); `wb stats` compares the models on finished work.
+  `--drop-steps` deletes it too). `wb status` lists this session's open tasks (e.g. after a context
+  reset; another session's are named as open elsewhere: leave them; tasks a /workbench-quit parked only by name: leave them unless the user asks); `wb stats` compares the models on finished work.
 - **Keep the good ones as bench cases.** An accepted step whose spec pinned the names its tests
   call, and whose tests fail on its base and pass in the agent's lane (one that commits or writes
   outside it never can: add refuses it), is a case: `wb bench add <name>` (`--step N` for a
@@ -470,7 +473,8 @@ goes in that repo's CLAUDE.md instead. Drop a note that has stopped holding (`wb
   a skill handed with `--skill`) on the same work. It is evidence for your `--model` and the
   weekly check, never a reason to skip review: the router doesn't read it. `wb bench self <case>
   --yes` has you write a case yourself, to set the handoff's cost against yours; it spends your
-  tokens, so run it only when the user says yes.
+  tokens, so run it only when the user says yes. `wb bench rm <case>` drops one that no longer
+  tells models apart (its results stay).
 
 ## Report to the user
 Short and honest: what was built, on which model, rounds (automatic and review), test result,

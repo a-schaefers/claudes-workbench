@@ -7,14 +7,19 @@
   hang   print one event, then go silent (the silence timeout should stop it)
   crash  exit 1 with no events; with FAKE_DOWN (a file) it takes the model server down with it
          (creates the file) the first time, and behaves like ok after
+  crashtalk  like crash, after the model's first words ("Let me look at the parser"): a server
+         killed out of memory late in a round (#657); with FAKE_CRASH_HANG it then goes silent
+         instead of exiting (OpenCode retrying a server that is gone)
   slow   a first run that takes an hour; a continued session behaves like ok
-  fill   writes "41", then a step that fills 76% of a 32K window, then works on for an hour;
-         a fresh session handed the task behaves like ok
+  fill   writes "41", then a step that fills 76% of a 32K window (6K of it reasoning), then
+         works on for an hour; a fresh session handed the task behaves like ok
   read   reads, a step that fills 76% before any change, then writes "42" like ok
   floor  reads 48% of its window before its first change, then fills to 76%, then writes "42"
   refill every session changes a file, then fills 76% and works on for an hour
   bgwait a command OpenCode moved to the background: `background_wait`, quiet for FAKE_BGWAIT
          seconds (6), then writes "42" like ok
+  devserver  writes "42", starts `npm run dev` in the background, ends its turn (reason stop),
+         then `background_wait` on that job for an hour (a server never ends: #658)
   toolhang  one tool call, then silent (a command that prints nothing for long)
   retry  no answer from the model's server: a `retry` line every FAKE_RETRY_EVERY seconds (1),
          OpenCode cutting the request at its provider timeout and sending it again (#491)
@@ -109,12 +114,18 @@ if scenario == "slow":
     scenario = "ok" if "--session" in args else "hang"
 if scenario == "fill" and "picking this task up in a fresh session" in args[-1]:
     scenario = "ok"
-if scenario == "crash" and os.path.exists(os.environ.get("FAKE_DOWN", "") + ".crashed"):
+if scenario in ("crash", "crashtalk") and os.path.exists(os.environ.get("FAKE_DOWN", "") + ".crashed"):
     scenario = "ok"  # the server came back: this run works
+if scenario == "crashtalk":
+    emit("step_start")
+    emit("text", text="Let me look at the parser.")
+    scenario = "crash"
 if scenario == "crash":
     if os.environ.get("FAKE_DOWN"):  # an out-of-memory kill or an Ollama restart, mid-round
         for f in (os.environ["FAKE_DOWN"], os.environ["FAKE_DOWN"] + ".crashed"):
             open(f, "w").close()
+    if os.environ.get("FAKE_CRASH_HANG"):
+        time.sleep(3600)
     sys.exit(1)
 if args and args[0] == "run" and not os.environ.get("FAKE_NO_MCP"):
     # as OpenCode does when a session starts: each local MCP server in the config is started and
@@ -200,6 +211,16 @@ elif scenario == "bgwait":
     tool("write", {"filePath": os.path.abspath("answer.txt"), "content": "42"})
     emit("text", text="Wrote answer.txt = 42.")
     finish()
+elif scenario == "devserver":
+    with open("answer.txt", "w") as fh:
+        fh.write("42\n")
+    tool("write", {"filePath": os.path.abspath("answer.txt"), "content": "42"})
+    tool("shell", {"command": "npm run dev", "background": True})
+    emit("text", text="Wrote answer.txt = 42; the dev server is up.")
+    finish()
+    print(json.dumps({"type": "background_wait", "timestamp": t(), "sessionID": session,
+                      "jobs": [{"id": "job1", "kind": "shell", "title": "npm run dev"}]}), flush=True)
+    time.sleep(3600)
 elif scenario == "refill":  # every session changes something early, then fills up
     with open("notes.txt", "a") as fh:
         fh.write(f"{session}\n")
@@ -245,8 +266,9 @@ elif scenario == "fill":
     emit("step_finish", reason="tool-calls", tokens={"input": 2000, "output": 100,
                                                       "cache": {"read": 900}})  # began work at 3000
     emit("text", text="Wrote 41 so far; next I fix it to the real answer.")
-    emit("step_finish", reason="tool-calls", tokens={"input": 2000, "output": 900,
-                                                      "cache": {"read": 22100}})  # 25000: 76%
+    # 25000: 76%, but 58% without its reasoning, which OpenCode's compaction counts (#644)
+    emit("step_finish", reason="tool-calls", tokens={"input": 2000, "output": 900, "reasoning": 6000,
+                                                      "cache": {"read": 16100}})
     time.sleep(3600)
 if os.environ.get("FAKE_EXIT") and args and args[0] == "run":
     sys.exit(int(os.environ["FAKE_EXIT"]))

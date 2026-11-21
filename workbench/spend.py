@@ -3,9 +3,12 @@ transcript. The pitch is that Claude's tokens are the scarce resource; this make
 
 A turn (one prompt to the next) is charged to the tasks it names: a `[workbench] Task `<name>``
 wake, or a `wb … <name>` in one of its Bash calls. Only tasks this session started (task.json
-`session`) count, and a turn naming several splits evenly. Subagents' rows count toward the
-turn they ran in. Planning before the spec, or talk that names no task, is charged to none.
+`session`) count, and a turn naming several splits evenly. A subagent's transcript is charged
+the same way, in the turn it ran in, and its calls that name no task as the session's call before
+them. Planning before the spec, or talk that names no task, is charged to none.
 """
+import bisect
+import itertools
 import re
 import shlex
 from datetime import datetime
@@ -137,39 +140,36 @@ def _usage(row: dict) -> dict:
             "output": int(u.get("output_tokens") or 0)}
 
 
-def calls(main: Path, subagents: list[Path], names: set[str]) -> list[dict]:
-    """Every API call of the session, {at, turn, names, usage, ahead}, `names` being the tasks it
-    is charged to and `ahead` those of them it hands a next step (a `wb next` call and the spec
-    charged with it). A call that runs `wb … <task>` is that task's, and so are the calls after it in
-    the turn, until another `wb` names other tasks or `wb accept|discard` closes it; the calls
-    just before a turn's first such `wb` are its tasks' too (the reading and the spec before
-    `wb start`), back to the last call that ran `wb` or edited a file other than its `--spec`;
-    a wake's turn is the wake's task's. An edit to a file outside the tasks' worktrees, and not
-    one handed to `wb` (`HANDED`), ends the charge: that is other work. A subagent's call is
-    charged as the session's call before it.
-    Charging whole turns was wrong: one long turn that also ran a task put 5.5M cached tokens
-    of other work on it (rel090-check, 2026-11-17)."""
+def _events(rows: list[dict], names: set[str]) -> list:
+    """A transcript's turns and calls in order: a set (a prompt, and the task its wake names) or
+    a call's dict (what it does, `_named`, its time and usage), one per API call."""
     events, by_id = [], {}  # an assistant message is a row per content block, each with its usage
-    for row in store.read_jsonl(main)[0]:
+    for row in rows:
         if (text := _prompt(row)) is not None:
             events.append({m.group(1)} & names if (m := WAKE.match(text)) else set())
         elif row.get("type") == "assistant":
             does = _named(row, names)
-            mid = (row.get("message") or {}).get("id") or f"row {len(events)}"
+            mid = (row.get("message") or {}).get("id") or ("row", len(events))  # not deduplicated
             if mid in by_id:
                 for k in ("hit", "shut", "edits", "specs", "nexts"):
                     by_id[mid][k] |= does[k]
                 by_id[mid]["wb"] |= does["wb"]
                 continue
-            by_id[mid] = {"at": _ts(row), "usage": _usage(row), **does}
+            by_id[mid] = {"id": mid, "at": _ts(row), "usage": _usage(row), **does}
             events.append(by_id[mid])
+    return events
+
+
+def _charge(events: list) -> list[dict]:
+    """One thread's calls (a session's, or one subagent's), each with the tasks it is charged to
+    (`calls` says how)."""
     out, turn, current, waiting = [], 0, set(), []
     for ev in events:
         if isinstance(ev, set):  # a prompt: a new turn, the wake's task, or none yet
             turn, current, waiting = turn + 1, set(ev), []
             continue
-        c = {"at": ev["at"], "turn": turn, "names": set(ev["hit"] or current), "usage": ev["usage"],
-             "ahead": set(ev["nexts"])}
+        c = {"id": ev["id"], "at": ev["at"], "turn": turn, "names": set(ev["hit"] or current),
+             "usage": ev["usage"], "ahead": set(ev["nexts"])}
         out.append(c)
         if ev["hit"]:
             # the calls just before it are the reading and the spec for it, back to the last
@@ -185,31 +185,60 @@ def calls(main: Path, subagents: list[Path], names: set[str]) -> list[dict]:
         else:  # another file edited: other work, until a `wb` names a task again
             c["names"], current = set(), set()
             waiting.append((c, ev))
-    seen = set(by_id)
-    starts = [c["at"] for c in out]
+    return out
+
+
+def calls(main: Path, subagents: list[Path], names: set[str]) -> list[dict]:
+    """Every API call of the session, {id, at, turn, names, usage, ahead}, `names` being the tasks
+    it is charged to and `ahead` those of them it hands a next step (a `wb next` call and the spec
+    charged with it). A call that runs `wb … <task>` is that task's, and so are the calls after it in
+    the turn, until another `wb` names other tasks or `wb accept|discard` closes it; the calls
+    just before a turn's first such `wb` are its tasks' too (the reading and the spec before
+    `wb start`), back to the last call that ran `wb` or edited a file other than its `--spec`;
+    a wake's turn is the wake's task's. An edit to a file outside the tasks' worktrees, and not
+    one handed to `wb` (`HANDED`), ends the charge: that is other work.
+    Charging whole turns was wrong: one long turn that also ran a task put 5.5M cached tokens
+    of other work on it (rel090-check, 2026-11-17).
+    Each subagent's transcript is a thread of its own, charged the same way (its prompt starts
+    its turn), in the turn of the session's call before it; a subagent call that names no task
+    is charged as that session call. Charged only as the session's call before it, a task a
+    subagent started, reviewed and accepted, under a turn whose one call was the Agent tool's,
+    cost Claude nothing (#718)."""
+    out = _charge(_events(store.read_jsonl(main)[0], names))
+    seen = {c["id"] for c in out}
+    # the session's call before a time: the latest in the transcript of those made at or before
+    # it (a prefix max over them sorted by time, since times are almost but not quite in order),
+    # by bisection: a scan of every session call per subagent row took 6.6 s at 8,000 calls and
+    # 30,000 subagent rows, on every accept and discard (#728)
+    order = sorted((c["at"], j) for j, c in enumerate(out) if c["at"] is not None)
+    times, latest = [t for t, _ in order], list(itertools.accumulate((j for _, j in order), max))
     for path in subagents:
-        for row in store.read_jsonl(path)[0]:
-            if row.get("type") != "assistant" or (at := _ts(row)) is None:
-                continue
-            mid = (row.get("message") or {}).get("id")
-            if mid in seen:
-                continue
-            seen.add(mid)
-            i = max((j for j, s in enumerate(starts) if s is not None and s <= at), default=None)
-            if i is not None and out[i]["names"]:
-                out.append({"at": at, "turn": out[i]["turn"], "names": set(out[i]["names"]),
-                            "usage": _usage(row), "ahead": set(out[i]["ahead"])})
+        rows = [r for r in store.read_jsonl(path)[0]
+                if r.get("type") != "assistant" or (_ts(r) is not None
+                                                    and (r.get("message") or {}).get("id") not in seen)]
+        for c in _charge(_events(rows, names)):
+            seen.add(c["id"])
+            k = bisect.bisect_right(times, c["at"])
+            parent = out[latest[k - 1]] if k else None
+            if not c["names"]:
+                if not (parent and parent["names"]):
+                    continue
+                c["names"], c["ahead"] = set(parent["names"]), set(parent["ahead"])
+            c["turn"] = parent["turn"] if parent else f"{path.name} {c['turn']}"
+            out.append(c)
     return out
 
 
 def sessions(task: store.Task) -> list[str]:
     """The Claude Code sessions the task's Claude worked in: the one `wb start` recorded, then
-    each one its process had since (a /clear starts another: store.note_claude_session, #451)."""
+    each one its process had since (a /clear starts another: store.note_claude_session, #451),
+    then each one a `wb` call naming the task ran in (another process that adopted it after a
+    restart: store.note_task_session, #719)."""
     sid = task.spec.get("session")
     if not sid:
         return []
     later = store.claude_sessions(task.spec.get("claude_pid"), task.spec.get("created_at") or 0)
-    return [sid] + [s for s in later if s != sid]
+    return list(dict.fromkeys([sid, *later, *store.task_sessions(task)]))
 
 
 def usage(task: store.Task) -> dict | None:
@@ -240,8 +269,16 @@ def usage_by_step(task: store.Task) -> tuple[dict | None, list[dict] | None]:
         return None, None
     names = {t.name for t in store.all_tasks() if t.spec.get("session") in sids} | {task.name}
     try:
-        charged = [{**c, "turn": (s, c["turn"])} for s, main, subs in found
-                   for c in calls(main, subs, names) if task.name in c["names"]]
+        charged, seen = [], set()
+        for s, main, subs in found:
+            for c in calls(main, subs, names):
+                # a resumed or forked session's transcript can copy the history it came from:
+                # a call is counted once, by its message id (#719)
+                if isinstance(c["id"], str) and c["id"] in seen:
+                    continue
+                seen.add(c["id"])
+                if task.name in c["names"]:
+                    charged.append({**c, "turn": (s, c["turn"])})
     except OSError:  # unreadable: a measurement never stops an accept
         return None, None
     bounds = _step_bounds(task)
@@ -251,6 +288,8 @@ def usage_by_step(task: store.Task) -> tuple[dict | None, list[dict] | None]:
         for c in charged:
             i = sum(b <= c["at"] for b in bounds) + (task.name in c.get("ahead", ()))
             per[min(i, len(bounds))].append(c)  # a `wb next` that failed hands nothing over
+    if not charged:  # found, but no call names it: unmeasured, not a measured 0 (#718)
+        return None, None
     return _sum(charged), None if per is None else [_sum(cs) for cs in per]
 
 

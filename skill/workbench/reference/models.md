@@ -22,7 +22,10 @@ machine without it). Its server must listen on the LAN, firewalled to this machi
 have no login); plain HTTP carries the code unencrypted (Tailscale encrypts; its address still
 needs the flag). An Ollama there: `wb remote <host> [--context N]` does all of it, with the
 user's yes (`--remove` undoes it). Another machine adds a model beside this GPU's, never speed to one model. Ollama cloud models (`:cloud`) run off this machine: never register one without
-the user's explicit yes.
+the user's explicit yes. On WSL2, a server on Windows isn't reachable on 127.0.0.1 under the
+default NAT networking: `wb setup`/`wb scout` say when one answers at the Windows host, or give
+the two ways (mirrored networking, or 0.0.0.0 plus `wb remote`); don't propose a second server
+inside WSL for it.
 
 **Updating workbench.** The mod checks weekly and tells the user; `/workbench-update` is theirs.
 Asked to update it yourself: `wb update` (it refuses while tasks run; tell the user to restart

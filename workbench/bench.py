@@ -16,7 +16,6 @@ round; these are the tasks this machine's models were actually given.
 import json
 import os
 import re
-import shlex
 import shutil
 import signal
 import subprocess
@@ -63,6 +62,42 @@ def cases() -> dict[str, dict]:
     return found
 
 
+def remove(names: list[str]) -> list[str]:
+    """`wb bench rm`: the cases gone, with their bundles; their rows in runs.jsonl stay, the
+    history. Nothing ever removed one, and a case keeps its base and hidden checks for good
+    (#740, the 2026-11-21 audit). Refused while a run goes: its plan names them."""
+    have = cases()
+    if unknown := [n for n in names if n not in have]:
+        raise RuntimeError(f"no case {', '.join(unknown)} (wb bench list)")
+    if driver():
+        raise RuntimeError("a bench run is going: wb bench stop first")
+    for n in names:
+        shutil.rmtree(case_dir(n))
+    return names
+
+
+RUNS_KEPT = 20  # the runs whose replays keep their logs, diffs and grades; older runs keep plan.json
+
+
+def prune_runs(keep: int = RUNS_KEPT) -> int:
+    """Each replay's directory (wb.log, diff.patch, grade.txt: up to 640 KB of test output) of the
+    runs older than the newest ``keep``, never the one going; plan.json and runs.jsonl's rows
+    stay, which the report and the Stats tab read. They were kept for good (#740). How many went."""
+    runs = home() / "runs"
+    going = driver().get("run")
+    old = sorted((d for d in runs.iterdir() if d.is_dir()), key=lambda d: d.stat().st_mtime,
+                 reverse=True)[keep:] if runs.is_dir() else []
+    gone = 0
+    for d in old:
+        if d.name == going:
+            continue
+        for replay in d.iterdir():
+            if replay.is_dir() and not replay.is_symlink():
+                shutil.rmtree(replay, ignore_errors=True)
+                gone += 1
+    return gone
+
+
 # --- making a case ------------------------------------------------------------------------------
 
 def _step_prompt(task: store.Task, step: int) -> str | None:
@@ -92,22 +127,22 @@ def _safe(path: str) -> bool:
 
 
 def bundle(repo: Path, commit: str, dest: Path) -> None:
-    """A bundle of `commit`'s history alone, as branch main: made in a scratch clone, so the
-    user's repo gets no ref, and the commits after it (the answer) aren't in it. Refused from a
-    shallow clone whose cut-off history `commit` reaches: its bundle can't be cloned ("remote did
-    not send all necessary objects", #478, the audit of 1.8)."""
-    shallow = Path(repo) / gitops.git(repo, "rev-parse", "--git-path", "shallow").strip()
-    try:
-        cut = shallow.read_text().split()
-    except OSError:  # not shallow
-        cut = []
-    if any(gitops.contains(repo, commit, c) for c in cut):
-        raise RuntimeError(f"{repo} is a shallow clone: a case needs the base's whole history "
-                           f"(git -C {shlex.quote(str(repo))} fetch --unshallow, then add it again)")
+    """A bundle of `commit`'s tree alone, as branch main's one commit (its message, no parent):
+    made in a scratch clone, so the user's repo gets no ref, and nothing after it (the answer) is
+    in it. The whole history it once packed was the repo's every reachable object, about 800 MB a
+    case on a big repo, for good (#740, the 2026-11-21 audit); and a shallow clone, whose cut-off
+    history couldn't be bundled (#478), has the tree."""
     with tempfile.TemporaryDirectory(prefix="wb-bench-") as tmp:
         clone = Path(tmp) / "c"
         gitops.git(tmp, "clone", "-q", "--no-checkout", "--shared", str(repo), str(clone))
-        gitops.git(clone, "update-ref", "refs/heads/main", commit)
+        when = gitops.git(clone, "log", "-1", "--format=%aI", commit).strip()
+        who = {"GIT_AUTHOR_NAME": "workbench bench", "GIT_AUTHOR_EMAIL": "bench@workbench.invalid",
+               "GIT_AUTHOR_DATE": when, "GIT_COMMITTER_DATE": when}
+        who |= {"GIT_COMMITTER_NAME": who["GIT_AUTHOR_NAME"], "GIT_COMMITTER_EMAIL": who["GIT_AUTHOR_EMAIL"]}
+        message = gitops.git(clone, "log", "-1", "--format=%B", commit).strip() or "the base"
+        root = gitops.git(clone, "commit-tree", "--no-gpg-sign", "-m", message, f"{commit}^{{tree}}",
+                          env=who).strip()
+        gitops.git(clone, "update-ref", "refs/heads/main", root)
         gitops.git(clone, "bundle", "create", str(dest.resolve()), "main")
 
 
@@ -125,6 +160,8 @@ def _clone_base(bundle_path: Path, dest: Path, repo: Path) -> None:
     files where the tests wanted the data (#509, the audit of 1.90). RuntimeError naming LFS
     when they can't be had."""
     gitops.git(dest.parent, "clone", "-q", "--no-checkout", "-b", "main", str(bundle_path), str(dest))
+    if repo.is_dir():  # its line endings, as the task's worktree had them (#736)
+        verify.checkout_settings(repo, dest)
     lfs = bool(gitops.git(dest, "grep", "-l", "-e", "filter=lfs", "main", "--",
                           ":(glob)**/.gitattributes", check=False).strip())
     if lfs and not repo.is_dir():
@@ -326,6 +363,11 @@ def add(name: str, step: int | None = None, hidden: list[str] | None = None,
                 # own commit rejected, the scratch clone without it (#250, the audit of 1.2)
                 "setup": spec.get("setup") or "", "copy": spec.get("copy") or [],
                 "siblings": spec.get("siblings") or [],
+                # its setup's limit and its tests' GPU: a replay without them stopped a 90-minute
+                # build at 1800 s, failed as an error and was retried by every run, never graded
+                # (#735, the 2026-11-21 audit)
+                "setup_timeout": spec.get("setup_timeout"),
+                "unload_for_tests": bool(spec.get("unload_for_tests")),
                 # the package the task ran in (#375), where each replay runs, sets up and is
                 # graded: from the root, an answer written there passed a package's check (#425)
                 "subdir": spec.get("subdir") or "",
@@ -357,6 +399,10 @@ def add(name: str, step: int | None = None, hidden: list[str] | None = None,
         with tempfile.TemporaryDirectory(prefix=store.scratch(".check-"), dir=home()) as scratch:
             work = _checkout_at(Path(scratch), case)
             gitops.git(scratch, "clone", "-q", "--shared", "--no-checkout", str(repo), str(work))
+            # the repo's core.autocrlf and info/attributes: a clone has none of its local config,
+            # so the reference check read LF where the task read CRLF and refused the case, and
+            # each replay was graded on other bytes than the task saw (#736, the 2026-11-21 audit)
+            verify.checkout_settings(repo, work)
             gitops.share_lfs(repo, work)  # its LFS files as data, as verify's (#382, #509)
             if sparse := gitops.sparse_of(Path(repo)):  # as the task's worktree was (#263)
                 gitops.apply_sparse(work, sparse)
@@ -468,7 +514,10 @@ def start(model_ids: list[str], case_names: list[str], skills: list[str], label:
     chosen = {n: have[n] for n in case_names} if case_names else have
     found = models.discover()
     if model_ids:
-        ms = [models.resolve(x) for x in model_ids]
+        try:
+            ms = [models.resolve(x) for x in model_ids]
+        except KeyError as e:  # a typo or a retired id: its one line, not a traceback (#737)
+            raise RuntimeError(e.args[0]) from None
     else:
         ms = [m for m in found.values() if models.status(m)["available"]]
     if not ms:
@@ -481,6 +530,7 @@ def start(model_ids: list[str], case_names: list[str], skills: list[str], label:
         return None, [f"all {len(pairs) * repeat} replay(s) already done"
                       + (f" under label {label}" if label else " (no --label)")
                       + ": --label <name> runs them again"]
+    prune_runs()  # #740
     run = stamp = time.strftime("%m%d-%H%M%S")
     for n in range(2, 100):  # two runs in one second: the second's mkdir failed (#511's test)
         if not (home() / "runs" / run).exists():
@@ -557,6 +607,15 @@ def subdir(case: dict) -> str | None:
     return (task.spec.get("subdir") or "") if case.get("task") and task.exists else None
 
 
+def _kept(case: dict, key: str):
+    """A task setting the case keeps; one made before it was kept (#735) reads it from its task,
+    while the task lasts, as ``subdir`` does."""
+    if key in case:
+        return case[key]
+    task = store.Task(case.get("task") or "")
+    return task.spec.get(key) if case.get("task") and task.exists else None
+
+
 def _start_task(case: dict, model: str, name: str, repo: Path, skills: list[str], meta: dict) -> None:
     from . import cli  # cli imports this module
     # from the package, so wb start finds it as the task's start did (cli._package, #425)
@@ -571,6 +630,10 @@ def _start_task(case: dict, model: str, name: str, repo: Path, skills: list[str]
         argv += ["--allow", pat]
     if case.get("setup"):
         argv += ["--setup", case["setup"]]
+        if isinstance(secs := _kept(case, "setup_timeout"), int) and secs > 0:  # #735
+            argv += ["--setup-timeout", str(secs)]
+    if _kept(case, "unload_for_tests"):
+        argv += ["--unload-for-tests"]
     for p in case.get("copy") or []:
         argv += ["--copy", p]
     for s in case.get("siblings") or []:

@@ -22,6 +22,11 @@ SELF_LINES_PER_CALL = 69
 SELF_OUT_PER_LINE = 36
 
 
+# What the estimate prices, said wherever it is shared (#725)
+COUNTS = ("the estimate prices the lines Claude would type: not lockfiles or generated files, and "
+          "a file deleted whole as one call")
+
+
 def per_call(u: dict) -> float | None:
     """One call's context cost, from a task's usage; None without usage or its calls."""
     if not u or not u.get("calls"):
@@ -56,8 +61,13 @@ def of_row(row: dict) -> dict | None:
     pc = per_call(row["claude"])
     if pc is None:
         return None
-    lines = row["diff"].get("added", 0) + row["diff"].get("removed", 0)
-    self_est = estimate_self(lines, pc)
+    d = row["diff"]
+    # the lines of files deleted whole aren't typed: one call removes them (#725: deleting a
+    # 2,400-line module once read 'saved ~725K'). A tool's files, lockfiles and the generated,
+    # are left out of added and removed already (gitops.footprint).
+    gone = d.get("deleted") if isinstance(d.get("deleted"), dict) else {}
+    lines = d.get("added", 0) + d.get("removed", 0) - gone.get("removed", 0)
+    self_est = estimate_self(max(0, lines), pc) + (round(pc) if gone.get("files") else 0)
     claude = spend.weighted(row["claude"])
     return {"claude": claude, "self_est": self_est, "saved": self_est - claude,
             "wh": row.get("gpu_wh"), "remote": bool(row.get("remote_gpu"))}
@@ -275,6 +285,7 @@ def share(rows: list[dict], period: str, since: float, gpus: list[dict],
     out.append(f"- tasks: {t['tasks']}; Claude used {k(t['claude'])} input-equivalent tokens, "
                f"writing them itself ~{k(t['self_est'])} (estimate)"
                + (f"; handoff/self {t['claude'] / t['self_est']:.2f}" if t["self_est"] else ""))
+    out.append(f"- {COUNTS}")
     s = score(t)  # the badge's number and its words, as the card says them (#101)
     out.append(f"- score: {s['score']}/100. {s['sentence']}" if s else f"- {NO_SCORE}")
     by: dict = {}

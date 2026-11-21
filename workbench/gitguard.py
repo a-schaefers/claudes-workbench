@@ -116,7 +116,7 @@ def _temp_roots(temps=()) -> list[str]:
 def common_dir(real: str, opts: list[str]) -> str | None:
     """The repository a git command with these global options acts on (its common git dir)."""
     r = subprocess.run([real, *opts, "rev-parse", "--git-common-dir"], capture_output=True,
-                       text=True)
+                       text=True, encoding="utf-8", errors="surrogateescape")  # a path, kept (#664)
     if r.returncode:
         return None  # not in a repository: `git init` or `git clone` somewhere new
     return os.path.realpath(os.path.join(_where(opts), r.stdout.strip()))
@@ -196,7 +196,8 @@ with ask_reviewer or in your summary.
 
 
 def main(real: str, task_git: str, args: list[str], temps=(), lanes=()) -> int:
-    """``lanes``: the worktree, where a repository of the test suite's own is writable."""
+    """``lanes``: the worktree and the lane's tool homes, where a repository other than the
+    task's is writable (a test suite's own, a package manager's)."""
     opts, sub, rest = split(args)
     if reads(sub, rest):
         # no index refresh in the task's repo, which Claude may be diffing at the same moment
@@ -211,18 +212,26 @@ def main(real: str, task_git: str, args: list[str], temps=(), lanes=()) -> int:
 
 
 def install(bin_dir: Path, task_repo: Path, pkg_root: Path, path: str,
-            worktree: Path | None = None) -> dict | None:
+            worktree: Path | None = None, scratch=()) -> dict | None:
     """Write the shim into bin_dir; returns the env the agent runs with, or None without git.
-    ``worktree``: the task's, where repositories other than the task's are scratch."""
+    ``worktree``: the task's, where repositories other than the task's are scratch; ``scratch``:
+    the rest of the lane's writable places (the tool homes), where they are scratch too: a
+    package manager's own git repositories there (pre-commit's `git remote add` in
+    ~/.cache/pre-commit, uv's `git fetch` in ~/.cache/uv, Go's direct fetches in go/pkg) were
+    refused, and `--setup 'uv sync'` failed before round 1 (#665). The agent writes those
+    places directly anyway, and the lane leaves the task's repo out of them."""
     import shutil
     real = shutil.which("git", path=path)
     if not real:
         return None
     common = subprocess.run([real, "-C", str(task_repo), "rev-parse", "--git-common-dir"],
-                            capture_output=True, text=True, check=True).stdout.strip()
+                            capture_output=True, text=True, encoding="utf-8",
+                            errors="surrogateescape", check=True).stdout.strip()  # #664
     repo_dir = os.path.realpath(os.path.join(task_repo, common))
     bin_dir.mkdir(parents=True, exist_ok=True)
     shim = bin_dir / "git"
+    lanes = list(dict.fromkeys(os.path.realpath(r) for r in ([worktree] if worktree else [])
+                               + list(scratch)))
     # a /bin/sh wrapper, not a `#!<python>` line: the kernel splits a shebang at its first space
     # and (before 5.1) cuts it at 127 bytes, so a Python under "/home/John Smith/" broke every
     # git call the agent made (the 2026-11-16 audit). -I: no user site, no PYTHONPATH.
@@ -231,7 +240,7 @@ def install(bin_dir: Path, task_repo: Path, pkg_root: Path, path: str,
             "from workbench.gitguard import main\n"
             f"sys.exit(main({real!r}, {repo_dir!r}, sys.argv[1:], "
             f"{sorted({tempfile.gettempdir(), '/tmp', '/var/tmp'})!r}, "
-            f"{[os.path.realpath(worktree)] if worktree else []!r}))\n")
+            f"{lanes!r}))\n")
     shim.write_text("#!/bin/sh\n"
                     "# workbench: git is read-only for the agent (see workbench/gitguard.py)\n"
                     f"exec {shlex.quote(sys.executable)} -I -c {shlex.quote(code)} \"$@\"\n")

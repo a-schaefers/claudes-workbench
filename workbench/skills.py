@@ -46,7 +46,8 @@ def library() -> Path:
 
 def _run_git(*args: str) -> str:
     r = subprocess.run(["git", "-C", str(library()), "-c", "log.showSignature=false", *args],  # its
-                       capture_output=True, text=True)  # log lines are parsed (the 2026-11-16 audit)
+                       capture_output=True, text=True, encoding="utf-8",  # log lines are parsed
+                       errors="replace")  # (the 2026-11-16 audit); never a crash on a byte (#664)
     if r.returncode:
         raise RuntimeError((r.stderr or r.stdout).strip())
     return r.stdout
@@ -87,7 +88,7 @@ def _commit(message: str) -> None:
         ["-c", "user.name=workbench", "-c", "user.email=workbench@localhost"]
     r = subprocess.run(["git", "-C", str(library()), *who, "-c", "commit.gpgsign=false",
                         "-c", f"core.hooksPath={os.devnull}", "commit", "-q", "--no-verify", "-m", message],
-                       capture_output=True, text=True)
+                       capture_output=True, text=True, encoding="utf-8", errors="replace")
     if r.returncode:
         raise RuntimeError((r.stderr or r.stdout).strip())
 
@@ -145,8 +146,18 @@ def check(skill_md: Path, name: str) -> tuple[list[str], list[str]]:
     # what a directory skill ships beside its SKILL.md
     root = skill_md.parent
     for ref in sorted(set(SUPPORT.findall(s["body"]))):
-        if not (root / ref).exists():
+        if (root / ref).exists():
+            continue
+        # scripts/, templates/ and assets/ are ordinary project directories too: "put the page in
+        # templates/polls/detail.html, run scripts/test.sh" was refused with no way in but
+        # rewording (#738, the 2026-11-21 audit). Refused only where it must be the skill's own:
+        # references/ (a skill's word), or a directory of that name the skill has.
+        top = ref.split("/", 1)[0]
+        if top == "references" or skill_md.name == "SKILL.md" and (root / top).is_dir():
             problems.append(f"names {ref}, which the skill doesn't have: the agent would go looking")
+        else:
+            warnings.append(f"names {ref}, which the skill doesn't have: if it is the skill's own "
+                            "file, add it; if it is a path in the project, ignore this")
     if skill_md.name == "SKILL.md" and root.is_dir():
         extra = [p for p in root.rglob("*") if p.is_file() and p != skill_md
                  and ".git" not in p.relative_to(root).parts]
@@ -298,11 +309,12 @@ def fetch(src: str, subdir: str | None = None) -> tuple[Path, dict, list[Path]]:
         shutil.rmtree(root, ignore_errors=True)
         root.parent.mkdir(parents=True, exist_ok=True)
         r = subprocess.run(["git", "clone", "-q", "--depth", "1", "--", url, str(root)],
-                           capture_output=True, text=True, timeout=300,
-                           env={**os.environ, "GIT_TERMINAL_PROMPT": "0"})
+                           capture_output=True, text=True, encoding="utf-8", errors="replace",
+                           timeout=300, env={**os.environ, "GIT_TERMINAL_PROMPT": "0"})
         if r.returncode:
             raise RuntimeError(f"git clone {url}: {(r.stderr or r.stdout).strip()}")
-    head = subprocess.run(["git", "-C", str(root), "rev-parse", "HEAD"], capture_output=True, text=True)
+    head = subprocess.run(["git", "-C", str(root), "rev-parse", "HEAD"], capture_output=True, text=True,
+                          encoding="utf-8", errors="replace")
     meta = {"source": url, "rev": head.stdout.strip() if head.returncode == 0 else ""}
     if subdir:
         found = [root / subdir] if (root / subdir / "SKILL.md").is_file() else []
@@ -372,8 +384,8 @@ def _tally() -> dict:
 
 def _count(t: dict, r: dict) -> None:
     t["n"] += 1
-    t["accepted"] += r.get("outcome") == "accepted"
-    t["first_try"] += r.get("outcome") == "accepted" and not tuning.agent_reviews(r)
+    t["accepted"] += tuning.credit(r)  # the agent's kept share: no takeover's (#647), landed steps (#722)
+    t["first_try"] += tuning.agent_landed(r) and not tuning.agent_reviews(r)
     t["reviews"] += tuning.agent_reviews(r)  # a round the spec cost isn't the skill's
 
 
@@ -392,7 +404,7 @@ def usage(current: dict[str, str] | None = None) -> dict[str, dict]:
             u["last"] = max(u["last"], r.get("ts", 0))
             if n in (r.get("skills_loaded") or []):
                 u["loaded"] += 1
-                u["accepted"] += r.get("outcome") == "accepted"
+                u["accepted"] += tuning.credit(r)
                 u["repos"].add(r.get("repo"))
                 _count(u["with"], r)
                 if current and current.get(n) and (r.get("skills_rev") or {}).get(n) == current[n]:
@@ -411,13 +423,13 @@ def record_line(u: dict | None) -> str:
     w, wo, s = u["with"], u["without"], u["since"]
     out = f"offered {u['offered']} · loaded {u['loaded']}"
     if w["n"]:
-        out += (f" · {w['accepted']} accepted, {w['first_try']} with no review round, "
+        out += (f" · {round(w['accepted'], 1):g} accepted, {w['first_try']} with no review round, "
                 f"{w['reviews'] / w['n']:.1f} review rounds a task")
     if wo["n"]:
         out += (f" · same repos without it: {wo['accepted'] / wo['n']:.0%} accepted, "
                 f"{wo['reviews'] / wo['n']:.1f} review rounds ({wo['n']} tasks)")
     if s["n"] and s["n"] < w["n"]:
-        out += f" · since its last edit: {s['accepted']} of {s['n']} accepted"
+        out += f" · since its last edit: {round(s['accepted'], 1):g} of {s['n']} accepted"
     if u["repos"]:
         out += f" · loaded in {len(u['repos'])} repo{'s' if len(u['repos']) > 1 else ''}"
     return out

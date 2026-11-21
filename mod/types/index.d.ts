@@ -16,6 +16,9 @@ export type WbTask = {
    * session's task it is */
   repo: string
   cwd: string
+  /** task.json's subdir, the monorepo package it is for ('' for none): a session in a sibling
+   * package doesn't claim it (#695) */
+  subdir: string
   /** the Claude Code session `wb start` ran in ('' by hand, or before 0.90): whose task it is */
   session: string
   /** the Claude Code process it ran in (0 when unknown): once gone, the directory rule adopts it */
@@ -24,7 +27,8 @@ export type WbTask = {
   claude_start: string
   /** task.json's backlog ('' for none): while one of this session's is open, the user stays away */
   backlog: string
-  /** stuck and status `parked`: stopped by /workbench-quit (`wb stop --all`), waiting on no one (#541) */
+  /** review, stuck or failed and status `parked`: stopped or left by /workbench-quit (`wb stop --all
+   * --park-waiting`), waiting on no one (#541, #698) */
   parked: boolean
   /** the user's unspent allowance for Claude to edit it (`wb coding allow`), as the pane says it;
    * '' for none */
@@ -37,9 +41,10 @@ export type WbLine = { s: string; t: string }
 /** The task the pane follows live, and its transcript so far (the newest lines). */
 export type WbLive = { task: string; lines: WbLine[] }
 
-/** This session and the web chat: whether it listens, when the user last wrote from there, and
- * whether the user has it on (`wb chat on|off`: off, no link and no listening). */
-export type WbChat = { key: string; delegating: boolean; webAt: number; url: string; web: boolean }
+/** This session and the web chat: whether it listens and whether the user has it on (`wb chat
+ * on|off`: off, no link and no listening). When the user last wrote from there is chat/away.json,
+ * every session's (#688). */
+export type WbChat = { key: string; delegating: boolean; url: string; web: boolean }
 
 /** The pane's view: its tab ('tasks', 'stats' or 'settings'), the settings row open ('' none,
  * 'coding', 'chat', 'record', 'live', 'every', 'progress'), the option the focus ring is on ('' none),
@@ -55,6 +60,10 @@ export type WbStats = { key: string; feed: Record<string, any> | null }
  * each GPU's busy % since the tab was shown, for its sparkline (memory only: never on disk). */
 export type WbTop = { snap: Record<string, any> | null; busy: Record<string, number[]> }
 
+/** What this conversation was told of the rules that depend on the state (#540): the user's
+ * notes, that wakes are off, the Claude-coding rule; null before its first context block. */
+export type WbSaid = { notes: string; wakeOff: boolean; coding: string }
+
 declare module 'claude-code' {
   interface PluginState {
     workbench: {
@@ -67,6 +76,8 @@ declare module 'claude-code' {
       stats: Shaped<WbStats>
       /** the Stats tab's live view (WbTop, #408) */
       top: Shaped<WbTop>
+      /** what the conversation was told of the rules (WbSaid, #540): kept across a reload (#697) */
+      said: Shaped<WbSaid | null>
     }
   }
 }

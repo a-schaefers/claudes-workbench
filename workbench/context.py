@@ -132,6 +132,12 @@ ALLOWED_COMMANDS = (
     "python3.*", "pip3.*", "pypy3", "pdm", "pipenv", "hatch", "nox", "pixi", "conda", "mamba",
     "micromamba", "pre-commit", "pyright", "flutter", "dart", "bazel", "bazelisk", "just", "task",
     "pio", "platformio", "conan", "xcodebuild", "xcrun", "rubocop", "golangci-lint", "shellcheck",
+    # whole ecosystems and plain builtins #514 missed: `dune build`, `lein test`, `pod install`,
+    # `pushd sub && make && popd` and `printenv PATH` each cost a question and a wake (#672).
+    # Not nix: its builds go through the daemon's socket, outside the lane.
+    "dune", "opam exec", "lein", "clojure", "clj", "rebar3", "nimble", "shards", "gleam", "elm",
+    "mill", "scala-cli", "pod", "ant", "crystal", "nim", "erlc", "escript",
+    "pushd", "popd", "printenv", ":", "ulimit", "local", "declare", "shift", "trap", "pgrep",
 )
 # A project's own tools and builds, by their usual relative paths (`./x` is allowed already).
 PROJECT_BINS = (".venv/bin/*", "venv/bin/*", "node_modules/.bin/*", "build/*", "target/debug/*",
@@ -152,6 +158,8 @@ ASK_FIRST = (
     "mamba install *", "micromamba install *", "flutter pub add *", "dart pub add *",
     "dart pub global activate *", "flutter pub global activate *", "pio pkg install *",
     "platformio pkg install *", "conan install *--requires*",
+    "opam install *", "nimble install *", "gleam add *", "elm install *", "clojure -Ttools *",
+    "clj -Ttools *",  # (#672)
     # fetch a package and run it
     "npx -y *", "npx --yes *", "npm exec *", "pnpm dlx *", "yarn dlx *", "bunx *", "uvx *",
     # their other spellings (the 2026-11-16 audit); a plain `npx <pkg>` runs only what the
@@ -169,8 +177,21 @@ INSTALL_LISTED = (
     "uv pip install -e .",
     "pip3.* install -r *", "pip3.* install -e .", "python3.* -m pip install -r *",
     "python3.* -m pip install -e .", "pipenv install", "pipenv install --dev", "pipenv sync",
-    "pio pkg install", "platformio pkg install",
+    "pio pkg install", "platformio pkg install", "nimble install -d", "nimble install --depsOnly",
 )
+# and with the flags projects spell those installs with, one flag each, and pip's extras of the
+# project itself: `pnpm install --frozen-lockfile` and `pip install -e ".[dev]"` were refused,
+# so an agent copying the project's own command spent a question and a Claude wake (#671).
+# `[*]` ends in `]`, which no package name does (a second requirement with extras after it
+# would match: a guardrail, not a sandbox).
+INSTALL_FLAGS = ("--frozen-lockfile", "--immutable", "--prefer-offline", "--offline",
+                 "--legacy-peer-deps", "--no-audit", "--ignore-scripts", "--prod", "--production")
+INSTALL_LISTED += tuple(f"{c} {f}" for c in ("npm install", "npm i", "pnpm install", "pnpm i",
+                                             "bun install", "bun i") for f in INSTALL_FLAGS)
+INSTALL_LISTED += tuple(f"{c} -e {e}" for c in (
+    "pip install", "pip3 install", "python -m pip install", "python3 -m pip install",
+    "uv pip install", "pip3.* install", "python3.* -m pip install")
+    for e in (".[*]", '".[*]"', "'.[*]'"))
 # The pip forms above are allowed only when they install into the worktree's own venv, or no
 # environment is active and Landlock bounds pip (python_installs); else they ask first. These,
 # which change the active venv, ask first while it is the user's (#490)
@@ -208,24 +229,27 @@ def _simple_commands(line: str) -> list[str]:
     return [p.strip().strip("()").strip() for p in parts if p.strip().strip("()").strip()]
 
 
-def test_allowances(test: str | None) -> list[str]:
-    """What `wb start --test` and `wb next --test` grant the task: the acceptance command's own
-    simple commands, as written and as `<their command> *`. The protocol tells the agent to run
-    it; refused (`flutter test`, `just test`, `scripts/test.sh`), it spent an ask and a Claude
-    wake on a command Claude chose, or finished untested (#514, the audit of 1.90). The hard
-    limits come later in the rules, so a grant here never lifts them."""
+def test_allowances(test: str | None) -> tuple[list[str], list[str]]:
+    """What `wb start --test` and `wb next --test` grant the task, as (allow, test_tools): the
+    acceptance command's own simple commands, as written and with more arguments (`npm test *`),
+    and their tools (`npm *`). The protocol tells the agent to run it; refused (`flutter test`,
+    `just test`, `scripts/test.sh`), it spent an ask and a Claude wake on a command Claude chose,
+    or finished untested (#514, the audit of 1.90). The tools go in a tier of their own, before
+    ASK_FIRST (shell_rules): granted with the commands, after it, `--test 'npm test'` allowed
+    `npm install left-pad`, `--test 'uv run pytest'` `uv add requests` (#646, the audit of main).
+    The hard limits come later in the rules, so no grant here lifts them."""
     import shlex
-    out = []
+    exact, tools = [], []
     for cmd in _simple_commands(test or ""):
-        out.append(cmd)
+        exact += [cmd, f"{cmd} *"]
         try:
             words = shlex.split(cmd)
         except ValueError:
             continue
         words = [w for w in words if not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*=.*", w)]
         if words and "*" not in words[0]:
-            out += [f"{words[0]} *", f"{ASSIGN} {words[0]} *"]
-    return list(dict.fromkeys(out))
+            tools += [f"{words[0]} *", f"{ASSIGN} {words[0]} *"]
+    return list(dict.fromkeys(exact)), list(dict.fromkeys(tools))
 
 
 def commands_path() -> Path:
@@ -387,6 +411,9 @@ def shell_rules(task: store.Task) -> list[dict]:
     rules += [{"action": "shell", "resource": f"{d}/*", "effect": "allow"}
               for d in (writable(task) or []) if os.path.isdir(d)
               and not d.startswith(("/dev", "/proc"))]
+    # the acceptance command's tools (test_allowances): before the asks, which still win (#646)
+    rules += [{"action": "shell", "resource": r, "effect": "allow"}
+              for r in grants(task).get("test_tools") or []]
     pip, theirs = python_installs(task)  # into the worktree's venv, not the user's (#490)
     rules += [{"action": "shell", "resource": r, "effect": "deny"}
               for p in (*ASK_FIRST, *(ENV_INSTALLS if theirs else ())) for r in (p, f"{ASSIGN} {p}")]
@@ -549,7 +576,7 @@ def repo_dirs(task: store.Task) -> set[str]:
 
 # What a task's directory holds beside its worktree: a sibling's link (`../<name>` from the
 # worktree) may not take one of these names. A new file in the task directory goes here too.
-TASK_FILES = ("acked", "ask", "base-tests.txt", "context.md", "events.jsonl", "rounds",
+TASK_FILES = ("acked", "ask", "base-tests.txt", "claude-sessions", "context.md", "events.jsonl", "rounds",
               "runner.log", "setup.txt", "shots", "status.json", "steer.jsonl", "task.json",
               "tree", "verify", "worktree")
 
@@ -709,6 +736,26 @@ def sdk_roots(hidden: set[str]) -> set[str]:
     directory or a place holding or inside a secret."""
     home = os.path.realpath(Path.home())
     paths = [os.environ.get(v) for v in SDK_VARS] + [str(Path(home) / d) for d in SDK_DEFAULTS]
+    real = {os.path.realpath(p) for p in paths if p and os.path.isabs(p) and os.path.isdir(p)}
+    return {r for r in real if r not in ("/", home)
+            and not any(h == r or _under(h, r) or _under(r, h) for h in hidden)}
+
+
+# The search paths the user's shell exports for a workspace outside the repo: a ROS 2 overlay
+# (~/ros2_ws/install, PYTHONPATH and AMENT_PREFIX_PATH from its setup.bash), a src tree, Spack.
+# python_path hands the agent PYTHONPATH, but the read lane kept nothing of it under a non-dot
+# home directory, so `import my_msgs` raised PermissionError and a library on LD_LIBRARY_PATH
+# "cannot open shared object file" (#667, the 2026-11-21 audit). Read-only, like sdk_roots.
+SEARCH_PATH_VARS = ("PYTHONPATH", "LD_LIBRARY_PATH", "AMENT_PREFIX_PATH", "CMAKE_PREFIX_PATH",
+                    "PKG_CONFIG_PATH")
+
+
+def search_roots(hidden: set[str]) -> set[str]:
+    """The absolute directories on SEARCH_PATH_VARS (and the user's PYTHONPATH a detached runner
+    keeps, USER_PYTHONPATH) that exist, real paths: never `/`, the home directory or a place
+    holding or inside a secret."""
+    home = os.path.realpath(Path.home())
+    paths = [d for v in (*SEARCH_PATH_VARS, USER_PYTHONPATH) for d in (os.environ.get(v) or "").split(os.pathsep)]
     real = {os.path.realpath(p) for p in paths if p and os.path.isabs(p) and os.path.isdir(p)}
     return {r for r in real if r not in ("/", home)
             and not any(h == r or _under(h, r) or _under(r, h) for h in hidden)}
@@ -1136,6 +1183,41 @@ def python_installs(task: store.Task) -> tuple[bool, bool]:
     return not kept and writable(task) is not None and lane.abi() > 0, bool(kept)
 
 
+# mise refuses a config it hasn't been told to trust outside a terminal, and trust is kept per
+# path (~/.local/state/mise/trusted-configs): the worktree, the base check's and wb verify's
+# checkouts are paths the user never trusted, so every mise shim the setup, the agent and the
+# tests ran failed ('Config files in …/mise.toml are not trusted'), and `mise trust` writes outside
+# the lane (#674, checked with mise 2026.11). The configs mise asks trust for (.tool-versions
+# isn't one):
+MISE_CONFIGS = ("mise.toml", ".mise.toml", "mise.local.toml", ".mise.local.toml",
+                ".config/mise.toml", ".config/mise/config.toml", ".mise/config.toml",
+                "mise/config.toml")
+
+
+def mise_trusted(task: store.Task, path: str | None = None) -> bool | None:
+    """Whether the user's checkout's mise config is trusted (`mise trust --show`, run outside the
+    lane); None when it has none, ``path`` has no `mise`, or mise can't say."""
+    repo = os.path.realpath(task.spec["repo"])
+    at = os.path.join(repo, task.spec["subdir"]) if task.spec.get("subdir") else repo
+    if not any(os.path.isfile(os.path.join(d, n)) for d in {repo, at} for n in MISE_CONFIGS):
+        return None
+    mise = shutil.which("mise", path=path)
+    if not mise:
+        return None
+    try:
+        out = subprocess.run([mise, "trust", "--show"], cwd=at, capture_output=True, text=True,
+                             timeout=10, stdin=subprocess.DEVNULL).stdout
+    except (OSError, subprocess.SubprocessError):
+        return None
+    said = []
+    for line in out.splitlines():  # `~/src/app: trusted`, one line per directory
+        where, _, verdict = line.rpartition(": ")
+        real = os.path.realpath(os.path.expanduser(where.strip())) if where else ""
+        if verdict.strip() in ("trusted", "untrusted") and (real == repo or _under(real, repo)):
+            said.append(verdict.strip() == "trusted")
+    return all(said) if said else None
+
+
 def venv_line(task: store.Task, setup: bool) -> str:
     """For wb start: the active environments the agent leaves out, and how to give it its own."""
     envs = checkout_envs(task)
@@ -1165,7 +1247,8 @@ def interop_gap() -> str | None:
     return ("WSL interop is on: a Windows program runs as you outside the agent's lane. The "
             "Windows drives are out of its PATH and reads, but a Windows program in its lane or "
             "repo still runs; [interop] enabled=false in /etc/wsl.conf (then wsl --shutdown) "
-            "closes it")
+            "closes it, and also stops wb reading Windows' GPUs: set their memory in models.json "
+            "gpu_gb then")  # a GPU only Windows sees had no budget at all after it (#702)
 
 
 def secret_paths() -> set[str]:
@@ -1262,7 +1345,7 @@ def readable(task: store.Task) -> list[str] | None:
     keep = {os.path.realpath(p) for p in (task.spec.get("repo"), PKG_ROOT, *lane,  # PKG_ROOT:
                                           *lane_paths(task), *siblings(task))  # the git shim,
             if p}                                                              # the ask server
-    keep |= tool_roots(hidden) | sdk_roots(hidden)
+    keep |= tool_roots(hidden) | sdk_roots(hidden) | search_roots(hidden)
     # OpenCode's global config where OPENCODE_CONFIG_DIR keeps it, outside the dotfiles: the
     # agent's OpenCode loads it itself (#370, the audit of 1.6)
     if os.environ.get("OPENCODE_CONFIG_DIR"):
@@ -1398,7 +1481,7 @@ def rules_dir(task: store.Task) -> Path:
 
 def grants(task: store.Task) -> dict:
     """What Claude allowed this task beyond the everyday rules: {"allow": [patterns], "paths":
-    [dirs]}. Kept with the rules, out of the agent's reach: an agent that edited its own grants
+    [dirs], "test_tools": [patterns, ASK_FIRST still asked]}. Kept with the rules, out of the agent's reach: an agent that edited its own grants
     would widen its next round."""
     # read without making the directory: a closed task's rules are gone (cli.gc), its grants
     # kept in its status (cli._keep_grants: wb bench add replays a case with them, #250)
@@ -1546,6 +1629,35 @@ def import_files(task: store.Task, roots: list[tuple[Path, Path, bool]]) -> list
     return out
 
 
+def user_rules(task: store.Task) -> list[tuple[Path, Path]]:
+    """The user's personal rules (Claude's directory's `rules/**/*.md`, which Claude Code loads
+    for every project), copied into rules/<task>/user-rules/: (the copy, the file). Only
+    ~/.claude/CLAUDE.md was handed over, and Claude's directory is hidden from the lane, so the
+    agent never saw them, and Claude reviewed against conventions it was never told (#673). Not a
+    dotted name, nor a link into a secret; copies of rules removed since go too."""
+    src, out = claude_home() / "rules", rules_dir(task) / "user-rules"
+    claude = os.path.realpath(claude_home())
+    hidden = (secret_paths() | private_paths()) - {claude}
+    made: list[tuple[Path, Path]] = []
+    for f in sorted(src.rglob("*.md")) if src.is_dir() else ():
+        rel = f.relative_to(src)
+        real = os.path.realpath(f)
+        if any(part.startswith(".") for part in rel.parts) or not os.path.isfile(real) or \
+                any(real == h or _under(real, h) for h in hidden):
+            continue
+        copy = out / rel
+        copy.parent.mkdir(parents=True, exist_ok=True)
+        tmp = copy.with_name(f".{copy.name}.{os.getpid()}.tmp")  # whole: OpenCode may be reading
+        shutil.copyfile(real, tmp)
+        os.replace(tmp, copy)
+        made.append((copy, f))
+    kept = {c for c, _ in made}
+    for old in out.rglob("*.md") if out.is_dir() else ():
+        if old not in kept:
+            old.unlink(missing_ok=True)
+    return made
+
+
 def instruction_files(task: store.Task) -> tuple[list[Path], list[str]]:
     """(files OpenCode should load, nested CLAUDE.md paths the agent reads when it works there).
     Before the runner has checked the worktree out (wb start's fixed_prompt, #529), the user's
@@ -1563,6 +1675,7 @@ def instruction_files(task: store.Task) -> tuple[list[Path], list[str]]:
         mine = rules_dir(task) / "CLAUDE.md"
         mine.write_text(user.read_text())
         roots.append((mine, user, True))
+    roots += [(copy, src, True) for copy, src in user_rules(task)]
     load: list[Path] = []
     for rel in ROOT_FILES:
         # the worktree's copy when the file is committed; the repo's when it is local or uncommitted
@@ -1620,6 +1733,9 @@ def fixed_prompt(task: store.Task) -> tuple[int, list[tuple[str, int]]]:
             n = p.stat().st_size // CHARS_PER_TOKEN
         except OSError:
             continue
+        mine = rules / "user-rules"
+        if p.is_relative_to(mine):
+            named[p] = f"~/.claude/rules/{p.relative_to(mine)}"
         label = named.get(p) or ("the spec" if p.name == "prompt.md" else
                                  str(p.relative_to(wt)) if p.is_relative_to(wt) else p.name)
         parts.append((label, n))

@@ -354,16 +354,55 @@ def _restart_notice(task: store.Task) -> None:
     batch = [t for t in store.all_tasks() if t.name == task.name or (
         _owner(t) == _owner(task) and t.status.get("phase") in LIVE
         and _restarted(t.status) and reap(t, quiet=True))]
-    ts, where = store.now(), _owner(task)[1]
+    ts = store.now()
+    # the batch by name: `wb resume --all --repo <cwd>` resumed nothing for a session in ~ (a
+    # broad directory claims no task) and, in a repo two sessions share, the other's tasks too (#692)
     batch[0].notify("failed", (f"task {task.name}: {RESTARTED}" if len(batch) == 1 else
                                f"{len(batch)} tasks were {RESTARTED.replace('it)', 'them)')}: "
                                + ", ".join(t.name for t in batch))
-                    + ". wb resume --all" + (f" --repo {shlex.quote(where)}" if where else "")
+                    + f". wb resume {' '.join(t.name for t in batch)}"
                     + " continues them in the order they were started (one that never ran a "
                     "round starts it again)", round=batch[0].status.get("round"), ts=ts,
                     tasks=[t.name for t in batch], cause="died")  # not the step's size (#582)
     for t in batch[1:]:
         _write_ack(t, ts)  # had with the first's notice: neither wb wait nor the mod wakes for it
+
+
+def _whose(t) -> str:
+    """Whose a task is, for a line naming it: its Claude Code session and directory."""
+    sid, where = store.owner(t)
+    return (f"session {sid}" if sid else "no session") + (f" in {where}" if where else "")
+
+
+def _stop_for_update(tasks) -> str:
+    """`wb update --stop`: every running agent stopped, each task left stuck with UPDATE_STOP and
+    a notice per owner (store.owner, as a restart's batch) naming `wb resume`, so each session,
+    this one or another, is woken to continue its own. `wb stop --all` parked them and
+    acknowledged their news: another session's Claude waited for a wake that never came (#694)."""
+    stopped = []
+    for t in tasks:
+        with store.locked(runner.lock_file(t.name, "cmd")):
+            if t.status.get("phase") in store.CLOSED:
+                continue
+            _stop_runner(t)
+            t.event({"ts": store.now(), "round": t.status.get("round"), "kind": "stopped",
+                     "by": "user", "text": UPDATE_STOP})
+            t.set_status(phase="stuck", last=UPDATE_STOP, pid=None)
+            stopped.append(t)
+    groups: dict = {}
+    for t in stopped:
+        groups.setdefault(store.owner(t), []).append(t)
+    for batch in groups.values():
+        names, ts = [t.name for t in batch], store.now()
+        batch[0].notify("stuck", (f"task {names[0]}: {UPDATE_STOP}" if len(batch) == 1 else
+                                  f"{len(batch)} tasks were {UPDATE_STOP}: " + ", ".join(names))
+                        + f". wb resume {' '.join(names)} continues "
+                        + ("it" if len(batch) == 1 else "them") + " in a fresh session",
+                        round=batch[0].status.get("round"), ts=ts, tasks=names, cause="update")
+        for t in batch[1:]:
+            _write_ack(t, ts)  # had with the first's notice, as a restart's batch (#544)
+    return "stopped for the update: " + (", ".join(f"{t.name} ({_whose(t)})" for t in stopped)
+                                          or "nothing was running")
 
 
 def _worktree_problem(task: store.Task) -> str | None:
@@ -411,7 +450,8 @@ def one_at_a_time(cmd):
     @functools.wraps(cmd)
     def run(a):
         name = getattr(a, "name", None)
-        if getattr(a, "all", False) or not name or not store.NAME_RE.match(name) \
+        if getattr(a, "all", False) or getattr(a, "more", None) or not name \
+                or not store.NAME_RE.match(name) \
                 or not store.Task(name).exists:
             return cmd(a)
         with store.locked(runner.lock_file(name, "cmd")):
@@ -426,16 +466,17 @@ def ago(ts) -> str:
     return f"{s}s" if s < 90 else f"{s // 60}m" if s < 5400 else f"{s // 3600}h"
 
 
-def pick_model(size: str, wanted: str | None, stack=()) -> tuple[models.Model, dict, str]:
+def pick_model(size: str, wanted: str | None, stack=(), name: str | None = None) -> tuple[models.Model, dict, str]:
     """The task's model: the one asked for, else the router's choice on the evidence (the
-    record on this kind of work first: router.score)."""
+    record on this kind of work first: router.score; ``name``: the task's, which decides
+    whether it explores, router.explores)."""
     if wanted:
         try:
             m = models.resolve(wanted)
         except KeyError as e:
             die(str(e).strip('"'))
         return m, models.status(m), "asked for"
-    top, why = router.choose(size, stack)
+    top, why = router.choose(size, stack, name)
     if top is None:
         die(why, 3)
     return top.model, top.state, why
@@ -715,14 +756,32 @@ def _missing_dirs(repo: Path) -> list[str]:
 # A task takes its checkout and --copy paths, then the base check's and wb verify's scratch
 # checkouts copy them again (a full copy on ext4, where reflinks don't exist), plus the build
 # (#342, the audit of 1.4)
-DISK_COPIES, DISK_SPARE = 3, 2 * 10**9
+DISK_COPIES, DISK_SPARE = 3, runner.CHECKOUT_SPARE
 
 
-def _disk_room(repo: Path, base: str, setup: dict) -> None:
-    """Refuse a task the disk has no room for: a full one mid-round failed every status write."""
+def history_held(budget: float = 2) -> str:
+    """What the state directory's history holds that wb can prune, for the disk advice: the
+    archive and wb bench's cases and runs, each with what frees it; '' when they hold little.
+    The advice named only open tasks, never the space history took for good (#740)."""
+    parts = []
+    for path, what, fix in ((store.archive_dir(), "the archive", "wb gc trims its old logs"),
+                            (bench.home() / "cases", "wb bench's cases", "wb bench rm <case>"),
+                            (bench.home() / "runs", "wb bench's runs", "a new run trims old ones")):
+        size, whole = store.dir_size(path, budget=budget)
+        if size >= 100_000_000:
+            parts.append(f"{what} {'' if whole else 'at least '}{store.gb(size)} ({fix})")
+    return "; ".join(parts)
+
+
+def _disk_room(repo: Path, base: str, setup: dict) -> int | None:
+    """Refuse a task the disk has no room for: a full one mid-round failed every status write.
+    The checkouts the open tasks' runners haven't made yet count as taken: since the runner makes
+    the checkout (#529), a batch of starts each saw the disk as the first did, and four 8 GB
+    checkouts ran at once on 40 GB (#676). Returns the size it measured (task.json
+    `checkout_bytes`), or None when the free space is unknown."""
     free = store.free_bytes()
     if free is None:
-        return
+        return None
     # Git LFS files at their own size (#382), the sparse cone only, a partial clone's local blobs
     size, unknown = gitops.checkout_size(repo, base)  # (#436)
     for p in setup.get("copy", ()):
@@ -730,16 +789,21 @@ def _disk_room(repo: Path, base: str, setup: dict) -> None:
     need = size * DISK_COPIES + DISK_SPARE
     gap = (f"; {unknown} of its files aren't fetched yet (a partial clone), so their size isn't "
            "counted" if unknown else "")
+    pending = runner.pending_checkouts()
+    if pending:
+        gap += f"; {store.gb(pending)} more is promised to the checkouts of tasks just started"
+        free = max(free - pending, 0)
     if free >= need:
         if unknown:
             print(f"note: the disk check counted {store.gb(size)} of the checkout{gap}")
-        return
+        return size
     held = sorted(((store.dir_size(t.dir, budget=2)[0], t.name) for t in store.all_tasks()
                    if t.status.get("phase") not in store.CLOSED), reverse=True)
     die(f"{store.gb(free)} free where the state directory is ({store.home()}), and a task of this "
         f"repo wants {store.gb(need)} (its checkout and --copy paths, {store.gb(size)}, three "
         f"times over, and 2 GB{gap}): free some, or wb discard an open task"
-        + ("; the open tasks: " + ", ".join(f"{n} {store.gb(b)}" for b, n in held[:8]) if held else ""))
+        + ("; the open tasks: " + ", ".join(f"{n} {store.gb(b)}" for b, n in held[:8]) if held else "")
+        + (f"; history: {kept}" if (kept := history_held()) else ""))
 
 
 def cmd_start(a):
@@ -775,10 +839,15 @@ def cmd_start(a):
     lane_dirs = [_lane_dir(p, guard) for p in a.allow_path or []]
     if not shutil.which(exe := runner.opencode_bin()[0]):  # else the runner emptied the GPU, then
         # the round died as "opencode exited 1" (the 2026-11-16 audit)
-        die(f"{exe} isn't on PATH: install OpenCode (https://opencode.ai), or put it on the PATH "
-            "Claude Code runs wb with; wb doctor checks the setup")
+        die(f"{exe} isn't on PATH: install OpenCode 2.x ({runner.OPENCODE_GET}), or put it on the "
+            "PATH Claude Code runs wb with; wb doctor checks the setup")
+    # before anything is written: 1.x has no `run --standalone --auto` nor the layer's config
+    # shape, so every round died as "opencode exited 1" after the GPU was emptied (#654)
+    if (have := runner.opencode_version()) and have < (2, 0):
+        die(f"OpenCode {have[0]}.{have[1]} can't run tasks: workbench needs OpenCode 2.x: "
+            f"{runner.OPENCODE_GET}", 3)
     stack = gitops.stack(repo)
-    m, state, why = pick_model(a.size, a.model, stack)
+    m, state, why = pick_model(a.size, a.model, stack, a.name)
     if not state["available"] and not a.force:
         fix = models.remedy(m, state)
         die(f"{m.id} can't run: {state['why']}" + (f": {fix}" if fix else "")
@@ -799,7 +868,7 @@ def cmd_start(a):
     if not a.no_sign:  # said now, not after the whole task at wb accept (#374)
         _say(gitops.sign_problem(repo, a.base))
     setup = _worktree_setup(repo, a)
-    _disk_room(repo, a.base, setup)
+    checkout_bytes = _disk_room(repo, a.base, setup)
     # Two projects, one GPU: a task that can't run beside the GPU's holders used to queue in
     # silence behind them, maybe for hours (the 2026-11-16 audit). Say so before any worktree.
     if not getattr(a, "bench", None):
@@ -841,12 +910,16 @@ def cmd_start(a):
         **({"claude_pid": int(pid), "claude_start": models._started(int(pid))}
            if (pid := os.environ.get("CLAUDE_PID", "")).isdigit() else {}),
         "base_branch": gitops.start_branch(repo, a.base),  # where wb accept --merge lands
+        # the weights behind the id: a record on other weights under it isn't this model's (#726)
+        **({"weights_id": w} if (w := models.identity(m)) else {}),
         "branch": gitops.branch_name(a.name), "model": m.id, "model_label": m.label,
         "opencode_model": m.id, "route": why, "size": a.size, "stack": stack,
         **({"trial": True} if a.trial else {}), "test_cmd": a.test, "test_timeout": a.test_timeout,
         **setup,  # setup, copy, siblings: runner.prepare, before the base check (#201)
         **({"worktree": str(wt.relative_to(task.dir))} if wt != task.dir / "worktree" else {}),
         "checkout": "runner",  # the runner makes the worktree, before its setup (#529)
+        # the next start counts it as taken until the runner has made it (#676)
+        **({"checkout_bytes": checkout_bytes} if checkout_bytes else {}),
         **({"backlog": a.backlog} if a.backlog else {}),  # a batch left to run: wb backlog
         # a replay of the bench driver's (bench.replay): no notices, no results row, not listed
         **({"bench": b} if (b := getattr(a, "bench", None)) else {}),
@@ -872,8 +945,9 @@ def cmd_start(a):
     task.set_status(phase="queued", round=1, reviews=0, auto_fixes=0, tools=0,
                     tok_in=0, tok_out=0, session=None, last="starting",
                     skills=handed, skills_ever=handed, skills_rev=skills.revs(handed))
-    context.grant(task, "allow", [p.strip() for p in a.allow or [] if p.strip()]
-                  + context.test_allowances(a.test))
+    exact, tools = context.test_allowances(a.test)
+    context.grant(task, "allow", [p.strip() for p in a.allow or [] if p.strip()] + exact)
+    context.grant(task, "test_tools", tools)
     context.grant(task, "paths", lane_dirs)
     fixed = _fixed_line(task, m)  # before the runner, which writes the same rules files
     spawn_runner(task)
@@ -906,6 +980,10 @@ def cmd_start(a):
         print(f"note: {runner.proxy_line(proxies)}")
     if venvs := context.venv_line(task, bool(setup and setup.get("setup"))):  # #490
         print(f"note: {venvs}")
+    if context.mise_trusted(task) is False:  # #674
+        print(f"note: mise doesn't trust {repo}'s config (mise trust --show), so it trusts no "
+              "copy of it either: every mise shim fails in the agent's worktree, its setup and its "
+              f"tests; `mise trust` in {repo} first, if the task needs its tools")
     if a.backlog and hardware.system() == "wsl" and not any(  # once per backlog (#516)
             t.spec.get("backlog") == a.backlog for t in store.all_tasks() if t.name != a.name):
         print(f"note: {WSL_SLEEPS}")
@@ -1095,8 +1173,9 @@ def cmd_next(a):
     _spec_gaps(task, a.spec_gap)  # after the commit: a retry after a failed one counts them once
     dropped = _stale_notes(task)
     if a.allow or a.test:
-        context.grant(task, "allow", [p.strip() for p in a.allow or [] if p.strip()]
-                      + context.test_allowances(a.test))
+        exact, tools = context.test_allowances(a.test)
+        context.grant(task, "allow", [p.strip() for p in a.allow or [] if p.strip()] + exact)
+        context.grant(task, "test_tools", tools)
     if a.test is not None:  # the one change to task.json after start
         store.write_json(task.dir / "task.json", {**spec, "test_cmd": a.test})
     test = a.test if a.test is not None else spec.get("test_cmd")
@@ -1112,7 +1191,11 @@ def cmd_next(a):
         + PROTOCOL.format(branch=spec["branch"], test_line=test_line(test), budget=budget),
         encoding="utf-8")
     handled = store.now()
-    advance = dict(round=n, steps=step + 1, step_round=n, reviews=0,
+    # the next step's comparison base, whether this step committed or not: found by its trailer
+    # alone, a step with no changes left the following one with none, and wb verify and wb shot
+    # refused it (#652, Claude's and Codex's audits)
+    approved = gitops.git(task.worktree, "rev-parse", "HEAD").strip()
+    advance = dict(round=n, steps=step + 1, step_round=n, reviews=0, step_base=approved,
                    step_sizes=(st.get("step_sizes") or []) + [measured],
                    context="fresh" if a.fresh else None,
                    auto_fixes_total=st.get("auto_fixes_total", 0) + st.get("auto_fixes", 0),
@@ -1219,6 +1302,57 @@ def _ack_all(task, upto: float | None = None):
     _write_ack(task, max(acked, upto))
 
 
+def claim_ack(task, ts: float) -> bool:
+    """Move task's `acked` mark up to ts, unless it is there already: a compare-and-set under the
+    task's ack lock, shared by wb wait and the mod (`wb ack`), so one notice is taken once. Each
+    read `acked`, then wrote it, and two sessions woken by one `wb events` line both delivered it
+    (#687, #696). False: someone took it first."""
+    with store.locked(store.task_lock(task.name, "ack")):
+        if _acked(task) >= ts:
+            return False
+        _write_ack(task, ts)
+        return True
+
+
+def cmd_ack(a):
+    """The mod's acknowledgement before a wake (claim_ack): exit 3 when another session or a
+    wb wait took this notice first."""
+    task = need(a.name)
+    if not claim_ack(task, a.ts):
+        die(f"{a.name}: already acknowledged", 3)
+    print(f"acknowledged {a.name}")
+
+
+def cmd_adopt(a):
+    """The mod's claim of a task whose Claude Code process is gone (#687): under the task's command
+    lock, task.json's `session`, `claude_pid` and `claude_start` become the claimer's, so the first
+    session to claim it owns it and the others drop it. Nothing recorded it: once the process that
+    ran `wb start` ended, every live session near the task, and the one resumed with `claude
+    --resume`, owned it for good, and both woke for its review. The resumed session (its id is the
+    task's `session`) stamps its new process the same way. Refused (exit 1) while the recorded
+    process lives and isn't the claimer."""
+    task = need(a.name)
+    pid = a.pid or (int(p) if (p := os.environ.get("CLAUDE_PID", "")).isdigit() else os.getppid())
+    start = models._started(pid)
+    if pid <= 1 or not models._alive(pid, start):
+        die(f"pid {pid} is no running process to give {a.name} to")
+    with store.locked(runner.lock_file(a.name, "cmd")):
+        spec = dict(task.spec)
+        old = spec.get("claude_pid")
+        if old == pid and spec.get("claude_start") == start and spec.get("session") in a.session:
+            print(f"{a.name} is this session's already")
+            return
+        if not spec.get("session"):
+            die(f"{a.name} records no session: it goes by directory")
+        if not _gone(old, spec.get("claude_start")):
+            die(f"{a.name} belongs to a live Claude Code session (pid {old})")
+        if spec.get("session") not in a.session:
+            spec["session"] = a.session[0]
+        spec.update(claude_pid=pid, claude_start=start)
+        store.write_json(task.dir / "task.json", spec)
+    print(f"adopted {a.name}")
+
+
 def _oldest_open(task: store.Task, rows: list[dict]) -> str | None:
     """The id of the task's oldest question still open, by its notice: the one a wait delivers
     next. status.asking lags an answer until the runner's next tick (the 0.90 review)."""
@@ -1251,20 +1385,27 @@ def cmd_wait(a):
     path.parent.mkdir(parents=True, exist_ok=True)
     path.touch()
     watcher = Watcher(store.home(), *([need(a.name).dir] if a.name else []))
+    if a.name and (a.repo or a.session or a.all_sessions):
+        die("--repo, --session and --all-sessions go with a bare wb wait")
+    where, sessions = (None, None) if a.name else _caller(a)
     while True:
         for t in [need(a.name)] if a.name else store.all_tasks():
             if t.status.get("phase") in LIVE:
                 reap(t)  # a dead runner's task becomes failed, with the notice this wait delivers
         rows = store.notices()
+        # a bare wait takes only the caller's tasks (_caller): one in another session's terminal
+        # acknowledged a notice its owner's mod then never woke for (#696)
+        theirs = set() if a.name or not (where or sessions) else {
+            t.name for t in _scope(store.all_tasks(), where, sessions)[1]}
         for row in reversed(rows):
-            if a.name and row["task"] != a.name:
+            if a.name and row["task"] != a.name or row["task"] in theirs:
                 continue
             task = store.Task(row["task"])
             if not task.exists or _stale(row, task.status, _oldest_open(task, rows)
                                          if row["kind"] == "question" else None):
                 continue  # its directory removed by hand, or no longer true
-            if row["ts"] > _acked(task):
-                _write_ack(task, row["ts"])
+            # taken under the ack lock: two waits (or a wait and the mod) both printed it (#696)
+            if row["ts"] > _acked(task) and claim_ack(task, row["ts"]):
                 print(f"[{row['kind']}] {row['task']}\n{row.get('text', '')}")
                 return
         if a.name:
@@ -1295,8 +1436,10 @@ def cmd_wait(a):
                 if phase != "asking":  # a question always has its notice, which carries its id
                     print(f"[{phase}] {a.name} (no notice: {st.get('last') or phase})")
                     return
-        elif not any(t.status.get("phase") not in store.CLOSED for t in store.all_tasks()):
-            die("no open tasks to wait for (wb status --all)", 2)
+        elif not any(t.status.get("phase") not in store.CLOSED and t.name not in theirs
+                     for t in store.all_tasks()):
+            die("no open tasks to wait for (wb status --all)"
+                + (" in this session (--all-sessions waits on every session's)" if theirs else ""), 2)
         if deadline and time.time() > deadline:
             die("timed out waiting", 2)
         # woken by the change itself; the minute bound re-checks the runner is alive
@@ -1343,8 +1486,9 @@ def _scope(tasks, where, sessions=None):
     claims it too, so a new process in the project adopts the old one's tasks (the 0.90 review:
     after a crash or an update, plain `claude` in the same repo was woken for none of them, and
     its quit left them running for nobody). One without a session (started by hand, or before
-    0.90), or with no `sessions` given (by hand), goes by directory: its `repo` is `where`,
-    inside it or holds it, or its `cwd` (where wb start ran) is `where` or inside it. A session
+    0.90), or with no `sessions` given (by hand), goes by directory: its `repo` is `where`
+    or inside it, or `where` is inside the task's spot (its package, repo/subdir; else its `cwd`
+    inside the repo; else the repo, #695), or its `cwd` (where wb start ran) is `where` or inside it. A session
     in the home directory or / claims none by directory. A task with neither key is everyone's.
     The others belong to another session, which its mod wakes and its quit commands stop (the
     2026-11-16 audit: two projects at once, one session's /workbench-quit stopped the other's
@@ -1363,10 +1507,15 @@ def _scope(tasks, where, sessions=None):
     for t in tasks:
         sid, cwd, repo = (t.spec.get(k) for k in ("session", "cwd", "repo"))
         cwd, repo = cwd and real(cwd), repo and real(repo)
+        # a session inside the task's own spot: its package (repo/subdir), else where wb start ran
+        # when that is inside the repo, else the repo. Inside the repo alone, a session in a
+        # monorepo's sibling package claimed the task and was woken for its review (#695)
+        sub = t.spec.get("subdir")
+        spot = repo and (real(repo / sub) if sub else cwd if cwd and cwd.is_relative_to(repo) else repo)
         # Path.is_relative_to compares whole components: /x/ab isn't inside /x/a
         near = here is not None and not broad and bool(
             cwd and cwd.is_relative_to(here)
-            or repo and (repo.is_relative_to(here) or here.is_relative_to(repo)))
+            or repo and (repo.is_relative_to(here) or here.is_relative_to(spot)))
         if sessions and sid:
             ok = sid in sessions or near and _gone(t.spec.get("claude_pid"), t.spec.get("claude_start"))
         elif here is None or (not cwd and not repo):
@@ -1375,6 +1524,24 @@ def _scope(tasks, where, sessions=None):
             ok = near
         (mine if ok else others).append(t)
     return mine, others
+
+
+def _caller(a) -> tuple:
+    """The scope (`where`, `sessions`) a command without `--repo`/`--session` takes: run from
+    Claude Code's Bash (CLAUDE_CODE_SESSION_ID set), the calling session's, as the mod passes it:
+    every id its process has had (`claude-sessions/<CLAUDE_PID>`, store.claude_sessions) and the
+    directory it runs in; `--all-sessions`, or a terminal, every session's. Plain `wb status`,
+    which the skill and the compaction note send Claude to, listed every session's open tasks
+    as one, so one session could review, accept or discard another's (#693)."""
+    repo, sessions = getattr(a, "repo", None), getattr(a, "session", None)
+    if repo or sessions or getattr(a, "all_sessions", False):
+        return repo, sessions
+    sid = os.environ.get("CLAUDE_CODE_SESSION_ID", "")
+    if not sid:
+        return None, None
+    pid = os.environ.get("CLAUDE_PID", "")
+    ids = list(dict.fromkeys([*(store.claude_sessions(pid) if pid.isdigit() else []), sid]))
+    return os.getcwd(), ids
 
 
 def _folds_case(path) -> bool:
@@ -1399,7 +1566,7 @@ def cmd_status(a):
     tasks = [need(a.name)] if a.name else [t for t in store.all_tasks()  # replays: wb bench report
                                            if a.all or (t.status.get("phase") not in store.CLOSED
                                                         and not t.spec.get("bench"))]
-    tasks, others = (tasks, []) if a.name else _scope(tasks, a.repo, a.session)
+    tasks, others = (tasks, []) if a.name else _scope(tasks, *_caller(a))
     parked = [] if a.name or a.all else [t for t in tasks if store.parked(t.status)]
     tasks = [t for t in tasks if t not in parked]
     others = [t for t in others if a.all or not store.parked(t.status)]
@@ -1546,18 +1713,39 @@ def stop_everything(tasks=None) -> list[str]:
     return stopped
 
 
+def _park_waiting(a) -> str:
+    """`wb stop --all --park-waiting` (the mod's /workbench-quit): the scope's tasks waiting on
+    Claude (review, stuck, failed, no runner) parked as they stand, their news acknowledged, so
+    the status line, the pick-up block and the jobs' gate leave them until the user asks. Only the
+    running ones were parked, and a review left at the quit stayed "awaiting review" and was handed
+    to every new conversation, against the quit (#698)."""
+    waiting, _ = _scope([t for t in store.all_tasks() if t.status.get("phase") in store.PARKS
+                         and not store.parked(t.status) and not runner_alive(t)], *_caller(a))
+    parked = []
+    for t in waiting:
+        with store.locked(runner.lock_file(t.name, "cmd")):
+            if t.status.get("phase") not in store.PARKS or runner_alive(t):
+                continue  # picked up meanwhile
+            t.set_status(parked=store.now())
+            _ack_all(t, upto=store.now())  # its news too, still true: the mod would wake for it
+            parked.append(t.name)
+    return f"parked as they stand (waiting on Claude): {', '.join(parked)}" if parked else ""
+
+
 @one_at_a_time
 def cmd_stop(a):
     if a.all:
         # everything, without --repo/--session: the bench's driver too, first, so it starts nothing
         driver = None if a.repo or a.session else bench.stop_driver()
-        mine, others = _scope(_open_tasks(), a.repo, a.session)
+        mine, others = _scope(_open_tasks(), *_caller(a))
         stopped = ([f"wb bench (pid {driver})"] if driver else []) + stop_everything(mine)
         print("stopped: " + ("; ".join(stopped) if stopped else "nothing was running"))
         _say(_others_line(others, "left running"))
+        if a.park_waiting:
+            _say(_park_waiting(a))
         return
-    if a.repo or a.session:
-        die("--repo and --session go with --all")
+    if a.repo or a.session or a.park_waiting:
+        die("--repo, --session and --park-waiting go with --all")
     if not a.name:
         die("name a task, or --all")
     task = need(a.name)
@@ -1570,9 +1758,15 @@ def cmd_stop(a):
           "corrections, wb discard drops it")
 
 
+ALL_SESSIONS = ("every Claude Code session's tasks (from Claude Code's Bash, the default is the "
+                "calling session's: _caller)")
+
+
+# What `wb update --stop` leaves in status `last` (#694): resumed like a restart's
+UPDATE_STOP = "stopped for a workbench update (wb update --stop), not by Claude"
 # What `wb resume --all` continues: tasks interrupted from outside, not those stopped for a
 # reason of their own (a guard, a crash, a failed load), which want Claude's look first (#544)
-INTERRUPTED = (RESTARTED, RUNNER_DIED, runner.SIGNAL_STOP)
+INTERRUPTED = (RESTARTED, RUNNER_DIED, runner.SIGNAL_STOP, UPDATE_STOP)
 
 
 @one_at_a_time
@@ -1584,6 +1778,19 @@ def cmd_resume(a):
         die("give a task or --all, not both")
     if (a.repo or a.session or a.backlog) and not a.all:
         die("--repo, --session and --backlog go with --all")
+    if a.more:  # a restart's or a signal's batch, as its notice names it (#692)
+        names = list(dict.fromkeys([a.name, *a.more]))
+        tasks = sorted((need(n) for n in names), key=lambda t: t.spec.get("created_at", 0))
+        failed = []
+        for t in tasks:  # the order they were started, which the GPU queue follows
+            with store.locked(runner.lock_file(t.name, "cmd")):  # as one_at_a_time, task by task
+                try:
+                    _resume(t)
+                except SystemExit:  # said on stderr, as a lone resume would; the rest go on
+                    failed.append(t.name)
+        if failed:
+            die(f"not resumed: {', '.join(failed)}")
+        return
     if not a.all:
         if not a.name:
             die("name a task, or --all")
@@ -1594,7 +1801,7 @@ def cmd_resume(a):
     tasks = [t for t in tasks if t.status.get("phase") in ("stuck", "failed")
              and t.status.get("last") in INTERRUPTED and not runner_alive(t)
              and (not a.backlog or t.spec.get("backlog") == a.backlog)]
-    tasks, _ = _scope(tasks, a.repo, a.session)
+    tasks, _ = _scope(tasks, *_caller(a))
     if not tasks:
         print("nothing to resume: no task in scope was interrupted (a restart, a kill or a signal)")
         return
@@ -1647,7 +1854,7 @@ def _resume(task: store.Task) -> None:
     task.round_dir(n + 1).mkdir(parents=True, exist_ok=True)
     task.round_dir(n + 1).joinpath("prompt.md").write_text(runner.RESUME.format(
         asked=runner.ASKED.format("\n\n".join(asks)).rstrip() if asks else "")
-        + (f"\n\n{runner.steer_prompt(notes, False)}" if notes else ""))
+        + (f"\n\n{runner.folded_notes(task, n + 1, notes)}" if notes else ""))
     handled = store.now()
     gpu = _gpu_note(task)  # before the task looks live (REAP_GRACE): it may probe model servers
     task.set_status(round=n + 1, context="fresh", phase="queued", last="resumed by the reviewer")
@@ -1681,6 +1888,11 @@ def _lane_dir(raw: str, guard: set[str] = frozenset()) -> str:
             "git runs there, and a hook planted in it would run outside the lane); take what the "
             "task needs there yourself")
     path = Path(real)
+    # a file not made yet (debug.keystore, a lockfile) is no directory: made as one, it broke the
+    # next round's keytool or Gradle with 'Is a directory' and stayed (#670)
+    if not path.exists() and path.suffix:
+        die(f"{raw} doesn't exist and its name looks like a file's: allow the directory it goes "
+            f"in ({path.parent}), or make {raw} first if it is a directory")
     if not path.exists():
         path.mkdir(parents=True)
     return str(path)
@@ -1784,8 +1996,10 @@ def cmd_progress(a):
         progress.set_enabled(a.state == "on", a.after)  # --after kept unless given (0 clears it, #578)
     s = progress.settings()
     print("progress checks: " + (f"on: a task past {s['after']:g} min of active work" if s.get("after")
-                                  else "on: a task past its typical length of active work")
-          + " gets a check and a recommendation" if s.get("on") else
+                                  else "on: a task past its typical length of active work (until a model "
+                                  f"and size have {progress.TYPICAL_MIN} timed tasks: "
+                                  + ", ".join(f"{m} min {k}" for k, m in progress.DEFAULT_MIN.items()) + ")")
+          + " gets a check and a recommendation, again at 2x and 4x it" if s.get("on") else
           "progress checks: off (the default): check-ins only as --checkin sets them")
 
 
@@ -1905,7 +2119,7 @@ def cmd_takeover(a):
     """Stop the agent and hand the worktree to Claude, to finish by hand or hand back."""
     if a.all:  # "just get it done claude"
         tasks, others = _scope([t for t in store.all_tasks()
-                                if t.status.get("phase") not in store.CLOSED], a.repo, a.session)
+                                if t.status.get("phase") not in store.CLOSED], *_caller(a))
         if not tasks:
             print("no open delegated tasks to take over")
         refused = 0
@@ -1926,6 +2140,9 @@ def cmd_takeover(a):
     task = need(a.name)
     if task.status.get("phase") in store.CLOSED:
         die(f"{a.name} is {task.status.get('phase')}")
+    if not runner.checked_out(task):  # the runner's checkout, running or failed: a hand-back made
+        # it again from nothing, and Claude's edits went with the old worktree (#655)
+        die(f"{a.name}: its worktree isn't ready yet: wait for it, or wb discard {a.name}")
     _coding_gate(task, getattr(a, "user", False))
     if getattr(a, "user", False) and coding_mode() != "decide":  # the user's hand-back: Claude
         _allow(task, "the whole task: the user handed it to Claude",  # finishes it (the mod's
@@ -1933,7 +2150,8 @@ def cmd_takeover(a):
     _stop_runner(task)
     task.event({"ts": store.now(), "round": task.status.get("round"), "kind": "takeover",
                 "text": "Claude took over"})
-    task.set_status(phase="review", last="Claude took over", pid=None)
+    task.set_status(phase="review", last="Claude took over", pid=None, taken_over=True,
+                    parked=None)  # Claude's now (#698)
     _ack_all(task)
     print(f"took over {a.name}: the agent is stopped. Edit in {task.worktree} and leave it "
           f"uncommitted, then wb accept {a.name} -m \"…\" (it commits), or hand it back with "
@@ -2062,10 +2280,11 @@ def cmd_accept(a):
                  "merge_as": a.merge_as or "merge", "sign": _signed(spec, a)}
         task.set_status(closing=close, tip=tip)  # before anything is removed
         _spec_gaps(task, a.spec_gap)
+    tip = task.status["tip"]
+    gitops.keep_accepted(repo, a.name, tip)  # before the branch can go: wb bench add reads it (#649)
     if warn := gitops.remove_worktree(repo, task.worktree):  # committed: the rest is cleanup
         print(f"wb: {warn}", file=sys.stderr)
     context.drop_runtime_dir(task)
-    tip = task.status["tip"]
     merged, refused = close.get("merged_head"), None
     if close.get("merge") and not merged:
         into = close.get("merge_into")
@@ -2078,16 +2297,20 @@ def cmd_accept(a):
             try:
                 if not into:
                     raise gitops.GitError(gitops.detached(repo, spec["branch"], had=True))
-                # where the target stood before: a squash interrupted before merged_head was
-                # saved is found from it on the retry (#432, the audit of 1.8)
-                close = {**close, "merge_from": gitops.git(
-                    repo, "rev-parse", "--verify", "-q", f"refs/heads/{into}", check=False).strip()}
-                task.set_status(closing=close)
-                # every target is held to the base, a named branch too: reset or rebased since
-                # the start, the merge brought back what was withdrawn from it (#418)
-                # signed as the task's commit was, and a kill backs the checkout out: SIGTERM
-                # left MERGE_HEAD and the staged merge in the user's checkout (#420)
-                with _ends_cleanly():
+                # one merge into the checkout at a time, another task's or profile's too: one
+                # backed out over another's landed merge rewound it (#639)
+                with _ends_cleanly(), gitops.merge_lock(
+                        repo, say=lambda m: print(f"wb: {m}", file=sys.stderr)):
+                    # where the target stood before: a squash interrupted before merged_head was
+                    # saved is found from it on the retry (#432, the audit of 1.8)
+                    close = {**close, "merge_from": gitops.git(
+                        repo, "rev-parse", "--verify", "-q", f"refs/heads/{into}",
+                        check=False).strip()}
+                    task.set_status(closing=close)
+                    # every target is held to the base, a named branch too: reset or rebased
+                    # since the start, the merge brought back what was withdrawn from it (#418)
+                    # signed as the task's commit was, and a kill backs the checkout out: SIGTERM
+                    # left MERGE_HEAD and the staged merge in the user's checkout (#420)
                     merged = gitops.merge(repo, a.name, into, spec["base"], tip=tip,
                                           how=close.get("merge_as", "merge"),
                                           sign=close.get("sign", True) and _signed(spec, a))
@@ -2197,8 +2420,7 @@ def _drop_start(task: store.Task, info: dict) -> None:
     repo = Path(info.get("repo") or "/nonexistent")
     if repo.is_dir():
         if info.get("worktree"):  # unlocked first when git left it "initializing" (#376, #529)
-            gitops.remove_worktree(repo, Path(info["worktree"]))
-        gitops.git(repo, "worktree", "prune", check=False)
+            gitops.remove_worktree(repo, Path(info["worktree"]))  # its registration only (#641)
         if info.get("branch") == gitops.branch_name(task.name) and info.get("branch_at"):
             gitops.delete_branch(repo, task.name, at=info["branch_at"])
     gitops._rmtree(task.dir)
@@ -2300,9 +2522,70 @@ def gc(days: float = store.ARCHIVE_DAYS, branches: bool = False) -> dict:
             _drop_start(t, half)
             out["starts"] += 1
     out["uploads"] = chat.drop_old_uploads(days)  # the web chat's attachments, once delivered (#623)
+    out["slimmed"] = store.slim_archive()  # the old archive's logs and test outputs (#740)
+    out["old_notices"] = _cap_old_notices()
+    out["leftovers"] = _drop_leftovers(days)
     out["branches"] = _merged_branches() if branches else 0
     store.write_json(store.home() / "gc.json", {"at": store.now(), **out})
     return out
+
+
+NOTIFY_OLD_MAX = 8 << 20  # notify.old.jsonl past this keeps its newest half: no code reads it
+
+
+def _cap_old_notices() -> int:
+    """notify.old.jsonl cut to its newest half once past NOTIFY_OLD_MAX: each review notice there
+    carries up to 32,000 characters of diff, and it only grew (#740, the 2026-11-21 audit). The
+    bytes dropped."""
+    path = store.home() / "notify.old.jsonl"
+    with store.locked(store.home() / "notify.jsonl.lock"):  # as _rotate_notices appends to it
+        try:
+            size = path.stat().st_size
+            if size <= NOTIFY_OLD_MAX:
+                return 0
+            with open(path, "rb") as fh:
+                fh.seek(size - NOTIFY_OLD_MAX // 2)
+                tail = fh.read()
+        except OSError:
+            return 0
+        tail = tail[tail.find(b"\n") + 1:]  # from a whole line
+        store.replace_bytes(path, tail)
+        return size - len(tail)
+
+
+def _drop_leftovers(days: float) -> int:
+    """What other commands leave in the state directory and nothing removed (#740): a skill
+    import's copy (imports/, read once by Claude before its own version is added) older than
+    ``days``, and claude-sessions/<pid> of a Claude Code process gone ``days`` ago that no open
+    task records. How many went."""
+    cutoff, gone = time.time() - days * 86400, 0
+    imports = store.home() / "imports"
+    for d in sorted(imports.iterdir()) if imports.is_dir() else ():
+        try:
+            if d.lstat().st_mtime < cutoff:
+                shutil.rmtree(d) if d.is_dir() and not d.is_symlink() else d.unlink()
+                gone += 1
+        except OSError:
+            continue
+    sessions = store.home() / "claude-sessions"
+    held = {str(t.spec.get("claude_pid")) for t in store.all_tasks()
+            if t.status.get("phase") not in store.CLOSED}
+    for f in sorted(sessions.iterdir()) if sessions.is_dir() else ():
+        try:
+            if not f.name.isdigit() or f.name in held or f.stat().st_mtime >= cutoff:
+                continue
+            try:
+                os.kill(int(f.name), 0)
+                continue  # alive, or a process by that number: kept
+            except ProcessLookupError:
+                pass
+            except OSError:  # alive and someone else's
+                continue
+            f.unlink()
+            gone += 1
+        except OSError:
+            continue
+    return gone
 
 
 def _rotate_notices(days: float) -> int:
@@ -2332,29 +2615,42 @@ def _rotate_notices(days: float) -> int:
         if old:
             with open(path.with_name("notify.old.jsonl"), "ab") as fh:
                 fh.write(b"".join(map(line, old)))
-            tmp = path.with_name(f".{path.name}.{os.getpid()}.tmp")
-            tmp.write_bytes(b"".join(map(line, kept)))
-            os.replace(tmp, path)
+                store._synced(fh)  # on the disk before they leave notify.jsonl
+            store.replace_bytes(path, b"".join(map(line, kept)))  # synced (#734)
     return len(old)
 
 
 def _merged_branches() -> int:
-    """Delete the delegate branches that wb accept --merge merged before it did so itself,
-    recording each tip first (status `tip`), which wb bench finds the task's commits from. git
-    branch -d keeps any not merged into the checkout's HEAD."""
-    n = 0
-    for name in sorted({r["task"] for r in store.results(trials=True)
-                        if r.get("outcome") == "accepted" and r.get("merged")}):
+    """Delete the delegate branches of accepted tasks that have landed: merged by wb accept
+    --merge before it deleted them itself, or by hand after a plain accept (the skill's default,
+    whose `git merge` line left delegate/<task> for good). Each tip is recorded first (status
+    `tip`), which wb bench finds the task's commits from; then `branch -d` (merged into the
+    checkout's HEAD or its upstream), else a compare-and-delete when the task's base branch holds
+    the tip. A branch gone, or deleted here, is recorded (status `branch_gone`) and never looked
+    at again: every merged task ever recorded cost a git call on every run, 2,828 of them in
+    1.8 s on tmpfs, minutes on /mnt/c (#686). Each repo's delegate refs are listed once. A branch
+    squash-merged (a PR) holds commits its target lacks, so it stays."""
+    by_repo: dict[Path, list] = {}
+    for name in sorted({r["task"] for r in store.results(trials=True) if r.get("outcome") == "accepted"}):
         t = store.Task(name)
-        repo, branch = gitops.repo_of(t.spec), t.spec.get("branch")
-        if not (t.exists and branch and repo.is_dir()):
+        if not t.exists or t.status.get("branch_gone") or not (branch := t.spec.get("branch")):
             continue
-        tip = gitops.git(repo, "rev-parse", "--verify", "-q", f"refs/heads/{branch}", check=False).strip()
-        if not tip:
-            continue
-        if not t.status.get("tip"):
-            t.set_status(tip=tip)
-        n += gitops.drop_merged_branch(repo, branch)
+        if (repo := gitops.repo_of(t.spec)).is_dir():
+            by_repo.setdefault(repo, []).append((t, branch))
+    n = 0
+    for repo, tasks in by_repo.items():
+        refs = dict(line.split(" ", 1)[::-1] for line in gitops.git(
+            repo, "for-each-ref", "--format=%(objectname) %(refname)", "refs/heads/delegate/",
+            check=False).splitlines() if " " in line)
+        for t, branch in tasks:
+            if not (tip := refs.get(f"refs/heads/{branch}")):
+                t.set_status(branch_gone=True)
+                continue
+            if not t.status.get("tip"):
+                t.set_status(tip=tip)
+            if gitops.drop_landed_branch(repo, branch, tip, t.spec.get("base_branch")):
+                n += 1
+                t.set_status(branch_gone=True)
     return n
 
 
@@ -2365,7 +2661,9 @@ def cmd_gc(a):
           f"{out['notices']} old notice(s) to notify.old.jsonl; removed {out['rules']} rules "
           f"dir(s), {out['runtime']} runtime dir(s), {out['scratch']} scratch dir(s), "
           f"{out['starts']} half-made start(s), {out['uploads']} web chat upload(s), "
-          f"{out['branches']} merged branch(es)")
+          f"{out['branches']} merged branch(es), {out['leftovers']} old import(s) and session "
+          f"record(s); freed {store.gb(out['slimmed'] + out['old_notices'])} of old logs and "
+          "test outputs")
     if left := bench.sweep():  # not in gc(): a discard runs that, and this discards (#511)
         print(f"closed {len(left)} bench replay(s) whose driver died, with their clones: "
               + ", ".join(left[:5]))
@@ -2401,7 +2699,8 @@ def _repo(task: store.Task) -> Path:
 def cmd_relocate(a):
     """Tell a task where its repository is now: moved or renamed (`mv proj proj2`), or the
     checkout it started from removed. Repairs its worktree's link (gitops.relocate) and rewrites
-    task.json `repo`, `git_common` and a `cwd` that was inside it. Without it the task could only
+    task.json `repo`, `git_common` and a `cwd` that was inside it, and the filled submodules'
+    checkouts (submodules.json `src`). Without it the task could only
     be discarded: every git call on its worktree failed, and `git worktree repair` was refused
     by the pinning (#498, the audit of 1.90)."""
     task = need(a.name)
@@ -2422,6 +2721,14 @@ def cmd_relocate(a):
     cwd = Path(spec.get("cwd") or old)
     if cwd == old or cwd.is_relative_to(old):
         spec["cwd"] = str(repo / cwd.relative_to(old))
+    # the filled submodules' checkouts, which submodule_edits checks an edit against: left at the
+    # old path, every check failed and was skipped, and an edit there vanished at accept (#682)
+    subs = context.rules_dir(task) / gitops.SUBMODULES
+    if isinstance(rows := store.read_json(subs, None), list):
+        for row in rows:
+            if isinstance(row, dict) and Path(src := row.get("src") or "").is_relative_to(old):
+                row["src"] = str(repo / Path(src).relative_to(old))
+        store.write_json(subs, rows)
     spec.update(repo=str(repo), git_common=str(gitops.common_dir(repo)))
     store.write_json(task.dir / "task.json", spec)
     print(f"relocated {a.name}: {repo} (was {old})")
@@ -2475,10 +2782,12 @@ def cmd_discard(a):
         else:
             gitops.delete_branch(repo, a.name, at=tip)
             said = f"; branch {branch} deleted (was {tip[:8]})"
+    # --drop-steps deleted the approved steps with the branch: no longer kept work (#722)
+    dropped = {"steps_dropped": True} if getattr(a, "drop_steps", False) else {}  # bench's own call lacks it
     task.set_status(phase="discarded", last=a.reason or "discarded", pid=None,
                     unrecorded={"outcome": "discarded", "step": measured,
-                                "extra": {"reason": a.reason}})
-    row = results.record(task, "discarded", measured, reason=a.reason)
+                                "extra": {"reason": a.reason, **dropped}})
+    row = results.record(task, "discarded", measured, reason=a.reason, **dropped)
     task.set_status(unrecorded=None)
     _ack_all(task)
     _closed(task)
@@ -2492,25 +2801,38 @@ def cmd_models(a):
     found = models.discover()
     if not found:
         die(f"no local models: {models.why_none()}")
+    # one pass's answers for every status and ranking below: a server asleep is asked once,
+    # not per model and again per size (31 s for a wb remote box of 4 models, #705)
+    down, catalog = set(), {}
     for m in found.values():
-        st = models.status(m)
+        st = models.status(m, down, catalog)
         print(f"{m.id:34} {('on GPU' if st['resident'] else 'ready' if st['available'] else 'no'):6}"
               f"  {m.label}" + ("" if st["available"] else f"  ({st['why']})"))
         print(f"{'':36}slice: {router.slice(m).line()}")
+        if router.weights_changed(m):  # #726
+            print(f"{'':36}weights changed since its record: starting fresh")
         if sp := router.speed_line(m.id):
             print(f"{'':36}speed: {sp} on this machine")
         if b := bench.model_line(m.id):
             print(f"{'':36}bench: {b} (wb bench report)")
+        if st["available"] and not models.weights(m):  # the router can't rank it by size (#704)
+            guess = models.guessed_weights(m)
+            print(f"{'':36}size: " + (f"~{guess / 1e9:.0f} GB guessed from its name" if guess else "unknown")
+                  + " (the server says none; models.json weights_gb sets it)")
     for size in router.SIZES:
         print(f"\n{size}:")
-        for i, sc in enumerate(router.rank(size)):
+        ranked = router.rank(size, down=down, catalog=catalog)
+        few = {sc.model.id for sc in router.unproven(ranked)}
+        for i, sc in enumerate(ranked):
             mark = "→" if i == 0 and sc.state["available"] else " "
-            print(f" {mark} {sc.model.id:34} {sc.line()}")
+            print(f" {mark} {sc.model.id:34} {sc.line()}" + (
+                f" · out of the band on {sc.tries} task(s): one task in {router.EXPLORE_ONE_IN} "
+                "explores it" if sc.model.id in few else ""))
         for m in found.values():
             if not router.allowed(m, size):
                 print(f"   {m.id:34} not for {size} tasks (wb model sizes)")
     if a.set_default:
-        top, why = router.choose("significant")
+        top, why = router.choose("significant", down=down, catalog=catalog)
         if top is None:
             die(why)
         try:
@@ -2535,8 +2857,14 @@ def cmd_stats(a):
     if a.json:  # the Stats tab's history (#405)
         print(json.dumps(stats.feed()))
         return
-    head = stats.summary(stats.feed(only=stats.SUMMARY))  # the headline: none of the rest (#565)
-    print("\n".join(head + [""] if head else []) + results.table())
+    f = stats.feed(only=(*stats.SUMMARY, "model_lines"))  # the headline: none of the rest (#565)
+    head, shown = stats.summary(f), f.get("model_lines") or {}
+    # the models OpenCode has now, as the Stats tab shows them; --all every one that ran (#638)
+    only = None if a.all or not shown else {v for x in shown.get("lines", []) for v in x["variants"]}
+    old = shown.get("older") if only is not None else None
+    print("\n".join(head + [""] if head else []) + results.table(only)
+          + (f"\n{old['models']} older model(s), retired or idle {stats.OLD_DAYS}+ days: "
+             f"{old['tasks']} task(s) (wb stats --all)" if old else ""))
 
 
 def cmd_savings(a):
@@ -2648,6 +2976,8 @@ def cmd_bench(a):
             print("\n".join(bench.add(a.task, a.step, a.hidden, a.check, a.name)))
     elif a.bench_cmd == "list":
         print("\n".join(bench.list_lines()))
+    elif a.bench_cmd == "rm":
+        print(f"removed case(s) {', '.join(bench.remove(a.case))}; their results stay in the report")
     elif a.bench_cmd == "run":
         if a.repeat < 1:
             die("--repeat is at least 1")
@@ -2846,9 +3176,18 @@ def server_lines(provs: dict) -> list[str]:
     for x in answering:
         listed = ", ".join(x["models"][:8]) + (", ..." if len(x["models"]) > 8 else "") or "no models"
         known = models.server_key(x["root"]) in keys
+        if x.get("windows"):  # WSL2's Windows host, beyond this machine (#663)
+            lines.append(f"  {x['root']} answers on Windows (usually {x['usually']}): {listed}"
+                         + ("" if known else f"; it needs local: true (wb remote {x['windows']} "
+                            f"for an Ollama; else wb model add <provider>/<model> --url "
+                            f"{x['root']}/v1 --context N, then local: true for its provider in "
+                            f"{models.overrides_path()})"))
+            continue
         lines.append(f"  {x['root']} answers (usually {x['usually']}): {listed}" + (
             "" if known else f"; OpenCode has no provider for it (wb model add <provider>/<model> "
                              f"--url {x['root']}/v1 --context N)"))
+    if not answering and models.windows_host():  # whatever is on PATH here (#663)
+        lines.append(f"  none answering here: {models.WSL_NAT}")
     return lines or ["  none found on PATH or answering on the usual ports"]
 
 
@@ -3040,7 +3379,7 @@ NOTES_MAX, NOTE_CHARS = 20, 300  # the mod puts them in every workbench-mode pro
 
 def _notes() -> list[str]:
     try:
-        text = (store.home() / "notes.md").read_text()
+        text = (store.home() / "notes.md").read_text(encoding="utf-8")
     except FileNotFoundError:
         return []
     notes = []
@@ -3078,10 +3417,7 @@ def cmd_notes(a):
             for n in gone:
                 del notes[n - 1]
         if a.action:
-            path.parent.mkdir(parents=True, exist_ok=True)
-            tmp = path.with_name(f".notes.md.{os.getpid()}.tmp")
-            tmp.write_text("".join(f"- {n}\n" for n in notes))
-            os.replace(tmp, path)
+            store.replace_bytes(path, "".join(f"- {n}\n" for n in notes).encode("utf-8"))  # #734
     if not notes:
         print("no notes yet: wb notes add \"<what the user wants, in any project>\"")
     for i, n in enumerate(notes, 1):
@@ -3116,8 +3452,9 @@ def image_lines() -> list[str]:
         out.append(f"  {name}{'' if media.on_gpu(e) else ' (off the GPU)'}: "
                    f"{str(e.get('label') or e.get('command') or e.get('url') or '')[:60]}"
                    f" · {'ready' if not why else why}"
-                   + (" · a server: it holds its GPU memory while it runs" if e.get("url")
-                      and not e.get("command") and media.on_gpu(e) else "")
+                   + (" · a server: it holds its GPU memory while it runs"
+                      + ("" if e.get("unload") else " (no unload URL)")  # #749, as audio's
+                      if e.get("url") and not e.get("command") and media.on_gpu(e) else "")
                    + (f"\n    {e['notes']}" if e.get("notes") else ""))
     return out
 
@@ -3305,6 +3642,9 @@ def cmd_model(a):
     cfg = models.read_config()
     if cfg.get("model") == a.id:
         die(f"{a.id} is OpenCode's default model; wb models --set-default picks another first")
+    if cfg.get("small_model") == a.id:  # left naming it, other OpenCode sessions broke (#708)
+        die(f"{a.id} is OpenCode's small_model; set small_model in {models.opencode_config_path()} "
+            "to another model (or remove it) first")
     if name not in prov["models"]:
         die(f"{a.id} is not registered")
     if a.delete and prov["engine"] == "ollama":
@@ -3328,7 +3668,8 @@ def cmd_model(a):
     except RuntimeError as e:
         die(str(e))
     for key in list(models._overrides().get(a.id) or {}):  # its sizes, labels, start/stop
-        models.set_override(a.id, key, None)
+        if key not in ("variant_of", "replaces"):  # its rows stay in its source's record (#723)
+            models.set_override(a.id, key, None)
     done = f"retired {a.id}: removed from OpenCode's config (its measurements stay in the history)"
     if a.delete:
         if prov["engine"] != "ollama":
@@ -3402,8 +3743,13 @@ def cmd_init(a):
         inside = ""
     except gitops.GitError as e:  # a repo git refuses (dubious ownership) is no place to git init
         die(f"{d}: {str(e).split(': ', 1)[-1]}")
+    if inside and Path(inside) != d and Path.home().resolve().is_relative_to(inside):
+        # a home kept as a git repo (dotfiles, `git init` in ~) is no project: a repo of its own
+        # nested in it is. Refused, wb try could never run there and the advice didn't apply (#684)
+        inside = ""
     if inside and Path(inside) != d:
-        die(f"{d} is inside the git repo {inside}; init the project in its own directory")
+        die(f"{d} is inside the git repo {inside}; init the project in a directory of its own, "
+            "outside that repo")
     if not _identity(d):
         die("git has no user.name/user.email: the user's identity signs the commits "
             "(git config --global user.name/user.email)")
@@ -3495,7 +3841,9 @@ def cmd_events(a):
     chat.chat_dir()
     parent = os.getppid()
     # its start too: the mod records both in chat/listener.json, so a recycled pid isn't a listener (#532)
-    print(json.dumps({"hello": os.getpid(), "start": models._started(os.getpid())}), flush=True)
+    # and its parent's, the Claude Code process: the mod claims tasks for it (wb adopt, #687)
+    print(json.dumps({"hello": os.getpid(), "start": models._started(os.getpid()),
+                      "parent": parent, "parent_start": models._started(parent)}), flush=True)
     # accepted and discarded are final and names aren't reused; tasks/ itself stays watched, so a
     # new task is picked up, and one that closes while this runs simply stays watched
     closed = tuple(f"tasks/{t.name}" for t in store.all_tasks() if t.status.get("phase") in store.CLOSED)
@@ -3546,20 +3894,26 @@ def cmd_chat(a):
         back = chat.revive()  # a chat wb chat on started, gone after a reboot or a crash (#449)
         print(chat.url(a.port if named or not back else back))  # the token is the key: keep it private
     elif a.action == "on":  # the pane's switch, kept: the link shows and a session listens
-        chat.set_on(True)
+        # the switch goes on only with a server of ours answering: turned on first and left on
+        # when this died, the pane's row read On and pinned a link that gave a 401 or nothing,
+        # its reason never shown (#690)
         who = chat.who_answers(a.port)
         if who == "workbench":
+            chat.set_on(True)
             print(f"web chat on: {chat.url(a.port)}")
         elif who == "other":  # its link would open someone else's page (#200), or 401 (#554)
-            die(f"web chat on, but another account's chat (or another program, or a server still on "
-                f"a replaced token) answers on port {a.port}: wb chat on --port <free port> (and "
+            chat.set_on(False)
+            die(f"web chat left off: another account's chat (or another program, or a server still "
+                f"on a replaced token) answers on port {a.port}: wb chat on --port <free port> (and "
                 "the same --port in chat.json's service, if any)")
         else:
             pid = chat.start(a.port)
             log = chat.chat_dir() / "serve.log"
             if not chat.wait_up(a.port, pid):
+                chat.set_on(False)
                 tail = (log.read_text(errors="replace").strip().splitlines() or ["(nothing)"])[-1]
-                die(f"web chat on, but its server didn't start: {tail} ({log})")
+                die(f"web chat left off: its server didn't start: {tail} ({log})")
+            chat.set_on(True)
             print(f"web chat on: started its server (pid {pid}, {log}): {chat.url(a.port)}")
         for why in logout_stops():  # its unit is a user service: a logout stops it (#351)
             print(f"--  {why}")
@@ -3569,7 +3923,7 @@ def cmd_chat(a):
             print("web chat off: stopped the server it started")
         elif chat.running(a.port):
             print("web chat off: no link in the pane and no session listens; a server still runs "
-                  "(systemd's wb-chat: systemctl --user disable --now wb-chat stops it)")
+                  f"({chat.service_name()}: {chat.service_hint('stop')} stops it)")  # #756
         else:
             print("web chat off")
     elif a.action == "reply":
@@ -3761,28 +4115,39 @@ def first_run() -> list[str]:
     good, said = _tool_version(runner.opencode_bin())
     major = re.search(r"(\d+)\.\d+", said) if good else None
     if not good:
-        out.append("--  OpenCode isn't installed: install OpenCode 2.x from https://opencode.ai "
-                   "(its own instructions)")
+        out.append(f"--  OpenCode isn't installed: install OpenCode 2.x: {runner.OPENCODE_GET}")
     elif major and int(major[1]) < 2:
-        out.append(f"--  opencode {said}: workbench needs OpenCode 2.x; upgrade it")
+        out.append(f"--  opencode {said}: workbench needs OpenCode 2.x: {runner.OPENCODE_GET}")
     else:
         out.append(f"ok  {said if said.lower().startswith('opencode') else 'opencode ' + said}")
     try:
         found = models.discover()
     except RuntimeError:  # an OpenCode config that doesn't parse: wb doctor says which
         found = {}
+    on_windows = []
     if models._fake():
         answering = bool(found)
     else:
         answering = any(models.ollama_answers(p["root"]) or
                         isinstance(models._get(f"{p['root']}/v1/models", timeout=1), dict)
                         for p in models.providers().values())
-        answering = answering or models.ollama_answers(models.ollama_root_here()) or \
-            bool(models.servers_here()[1])
-    out.append("ok  a model server answers" if answering else
-               "--  no model server answers here: start yours, or run /workbench and Claude lays out "
-               "the ones that fit this machine; any OpenAI-compatible server works "
-               "(wb model add <p>/<m> --url <baseURL>)")
+        answering = answering or models.ollama_answers(models.ollama_root_here())
+        if not answering:
+            here = models.servers_here()[1]
+            on_windows = [x for x in here if x.get("windows")]
+            answering = len(here) > len(on_windows)
+    if not answering and on_windows:  # WSL2: answering at the Windows host only (#663)
+        out.append(f"--  a model server answers on Windows at {on_windows[0]['root']} (usually "
+                   f"{on_windows[0]['usually']}): it needs local: true (wb remote "
+                   f"{on_windows[0]['windows']} for an Ollama; else wb model add <p>/<m> --url "
+                   f"{on_windows[0]['root']}/v1, then local: true for its provider in "
+                   f"{models.overrides_path()})")
+    else:
+        out.append("ok  a model server answers" if answering else
+                   "--  no model server answers here: start yours, or run /workbench and Claude "
+                   "lays out the ones that fit this machine; any OpenAI-compatible server works "
+                   "(wb model add <p>/<m> --url <baseURL>)"
+                   + (f"; {models.WSL_NAT}" if models.windows_host() else ""))
     out.append(f"ok  {len(found)} local model(s) registered" if found else
                "--  no local model registered yet: run /workbench in Claude Code, and Claude picks one "
                "for this machine (wb scout)")
@@ -3920,9 +4285,17 @@ def cmd_update(a):
         print(f"update available: {behind} new commit(s); /workbench-update (or wb update) installs it"
               if behind else "up to date")
         return
-    live = [t.name for t in store.all_tasks() if runner_alive(t)]
-    if live:  # a pull would change the git shim, the lane and the ask server under them
-        die(f"tasks are running ({', '.join(live)}): update when they finish, or wb stop --all first")
+    live = [t for t in store.all_tasks() if runner_alive(t)]
+    if live and not a.stop:  # a pull would change the git shim, the lane and the ask server under them
+        # whose each is: the advice was an unscoped `wb stop --all`, which parked other live
+        # sessions' agents and acknowledged their news, so no wake ever came there (#694)
+        mine = {t.name for t in _scope(live, *_caller(a))[0]} if _caller(a)[1] else set()
+        die("tasks are running (" + ", ".join(
+            t.name + (" (this session's)" if t.name in mine else f" ({_whose(t)})") for t in live)
+            + "): update when they finish, or wb update --stop (stops them; each one's session is "
+            "told to wb resume it)")
+    if live:
+        print(_stop_for_update(live))
     steps = [["claude", "plugin", "marketplace", "update", "workbench"],
              ["claude", "plugin", "update", "workbench@workbench"]]
     if kind == "clone":  # a clone is its own marketplace: pull, then let Claude Code re-read it
@@ -3979,7 +4352,8 @@ def gpu_line() -> str:
     # a GPU that publishes no memory size (Intel's i915 and xe) is left out of the budget: with
     # none, tasks never share and the user's other Ollama models are unloaded every round; the
     # fix was gpu_gb, and nothing said how to set it (#272, the audit of 1.2)
-    unknown = sorted({g["name"] for g in gs if g.get("vram") is None and not g.get("unified")})
+    unknown = sorted({g["name"] for g in gs if g.get("vram") is None and not g.get("unified")
+                      and (g.get("driver") or "").split(" ")[0] in hardware.COMPUTE})  # #710
     hand = (f'set its memory in {models.overrides_path()}: {{"gpu_gb": <the card\'s memory in '
             'decimal GB: 12.9 for a 12 GiB card>}'
             if unknown else "models.json gpu_gb sets it by hand")
@@ -4056,7 +4430,9 @@ def cmd_doctor(a):
     else:  # the config layer and `run --standalone --auto` are 2.x only (the 2026-11-16 audit)
         old = bool(major) and int(major[1]) < 2
         line(good and not old, f"opencode {said}"
-             + (": workbench needs OpenCode 2.x (checked against 2.3); upgrade it" if old else ""))
+             + (f": workbench needs OpenCode 2.x (checked against 2.3): {runner.OPENCODE_GET}"
+                if old else "")
+             + ("" if good else f": install OpenCode 2.x: {runner.OPENCODE_GET}"))
         if good and not old and (drift := runner.untested(runner.opencode_version())):
             print(f"--  {drift}")
     files = models.opencode_config_files()
@@ -4099,8 +4475,10 @@ def cmd_doctor(a):
             print(f"--  {why}")
     if gap := chat_gap():
         print(f"--  {gap}")
-    ok, said = awake_line()  # #516: a warning, not BAD: a server or a desktop that never sleeps is fine
-    if ok:
+    # #516: a warning, not BAD: a server or a desktop that never sleeps is fine. Its own name: once
+    # it reassigned `ok`, forgetting every BAD above it and failing a healthy WSL2 install (#653)
+    awake, said = awake_line()
+    if awake:
         line(True, said)
     else:
         print(f"--  {said}")
@@ -4157,6 +4535,12 @@ def cmd_doctor(a):
                 elif said and served and served > said:
                     print(f"--  {pid}/{name}: the server serves {served // 1024}K, the entry says "
                           f"{said // 1024}K; wb model add {pid}/{name} --context {served} lets its tasks grow")
+                if (sized := found.get(f"{pid}/{name}")) and states[sized.id]["available"] \
+                        and not models.weights(sized):
+                    # vLLM, SGLang, llama-swap say no size: routing went by config order (#704)
+                    print(f"--  {pid}/{name}: its size is unknown (the server says none), so routing "
+                          "ranks it by the size in its name, else the config's order: models.json "
+                          "weights_gb sets it")
                 continue
             capped = "max_tokens" in (e.get("options") or {})
             line(capped, f"{pid}/{name} caps its output on Ollama (options.max_tokens; Ollama ignores "
@@ -4196,7 +4580,11 @@ def cmd_doctor(a):
             line(free >= DISK_SPARE, f"the state dir holds {'' if whole else 'at least '}"
                  f"{store.gb(held)}, with {store.gb(free)} free"
                  + ("" if free >= DISK_SPARE else ": a task's writes fail on a full disk; wb "
-                    "discard an open task, or free some"))
+                    "discard an open task, or free some")
+                 + (f"; history: {kept}" if (kept := history_held()) else ""))
+        if gitops._modes_hold(str(store.home())) is False:  # exFAT, NTFS, CIFS, drvfs (#683)
+            print("--  the state dir's file system keeps no file modes: a task's git ignores them, "
+                  "so a script the agent makes executable lands as the repo had it")
     if idle := idle_line():
         print("--  " + idle)
     print("--  " + gpu_line())  # informs only: a CPU-only machine isn't broken
@@ -4273,6 +4661,7 @@ def main(argv=None):
     a = parser().parse_args(argv)
     try:
         store.note_claude_session()  # which sessions a /clear gave this process (spend.usage)
+        store.note_task_session(getattr(a, "name", None) or getattr(a, "task", None))  # (#719)
     except OSError:
         pass  # a measurement's record never stops a command
     try:
@@ -4281,8 +4670,9 @@ def main(argv=None):
         die(str(e))
     except OSError as e:  # a --spec, --message or --file that isn't there: a line, not a traceback
         if store.disk_full(e):  # (#342)
+            kept = history_held(budget=1)
             die(f"the disk is full ({e.filename or store.home()}: {e.strerror}): free some, or wb "
-                "discard an open task (wb status lists them)")
+                "discard an open task (wb status lists them)" + (f"; history: {kept}" if kept else ""))
         die(f"{e.filename}: {e.strerror}" if e.filename else str(e))  # (the 2026-11-16 audit)
 
 
@@ -4487,6 +4877,10 @@ def parser() -> argparse.ArgumentParser:
     s.set_defaults(f=cmd_answer)
     s = sub.add_parser("wait", help="block until a task needs Claude; prints its report")
     s.add_argument("name", nargs="?"); s.add_argument("--timeout", type=int, default=0)
+    s.add_argument("--repo", metavar="DIR", help="unnamed: only the tasks of a session started in DIR")
+    s.add_argument("--session", action="append", metavar="ID",
+                   help="unnamed: only the tasks of Claude Code session ID (repeatable)")
+    s.add_argument("--all-sessions", action="store_true", help=ALL_SESSIONS)
     s.set_defaults(f=cmd_wait)
     s = sub.add_parser("watch", help="follow a task live: the conversation between Claude and "
                        "the agent, every tool call and test")
@@ -4504,6 +4898,7 @@ def parser() -> argparse.ArgumentParser:
     s.add_argument("--repo", metavar="DIR", help="only the tasks of a session started in DIR")
     s.add_argument("--session", action="append", metavar="ID",
                    help="only the tasks of Claude Code session ID (repeatable; the mod passes its ids)")
+    s.add_argument("--all-sessions", action="store_true", help=ALL_SESSIONS)
     s.set_defaults(f=cmd_status)
     s = sub.add_parser("log", help="the agent's events")
     s.add_argument("name"); s.add_argument("-n", type=int, default=0)
@@ -4578,6 +4973,7 @@ def parser() -> argparse.ArgumentParser:
     s.add_argument("--repo", metavar="DIR", help="with --all: only those of a session started in DIR")
     s.add_argument("--session", action="append", metavar="ID",
                    help="with --all: only those of Claude Code session ID (repeatable)")
+    s.add_argument("--all-sessions", action="store_true", help=ALL_SESSIONS)
     s.add_argument("--user", action="store_true", help="the user's own command asked for it (the "
                    "mod's hand-back): past the Claude coding choice")
     s.set_defaults(f=cmd_takeover)
@@ -4602,14 +4998,20 @@ def parser() -> argparse.ArgumentParser:
     s.add_argument("--repo", metavar="DIR", help="with --all: only those of a session started in DIR")
     s.add_argument("--session", action="append", metavar="ID",
                    help="with --all: only those of Claude Code session ID (repeatable)")
+    s.add_argument("--all-sessions", action="store_true", help=ALL_SESSIONS)
+    s.add_argument("--park-waiting", action="store_true", help="with --all: also park the tasks "
+                   "waiting on Claude (review, stuck, failed) as they stand (/workbench-quit)")
     s.set_defaults(f=cmd_stop)
     s = sub.add_parser("resume", help="continue a stopped task in a fresh session (not a review round)")
     s.add_argument("name", nargs="?")
+    s.add_argument("more", nargs="*", metavar="name", help="more tasks, resumed in the order they "
+                   "were started (a restart's or a signal's batch)")
     s.add_argument("--all", action="store_true", help="every task a restart, a kill or a signal "
                    "interrupted, in the order they were started")
     s.add_argument("--repo", metavar="DIR", help="with --all: only those of a session started in DIR")
     s.add_argument("--session", action="append", metavar="ID",
                    help="with --all: only those of Claude Code session ID (repeatable)")
+    s.add_argument("--all-sessions", action="store_true", help=ALL_SESSIONS)
     s.add_argument("--backlog", metavar="NAME", help="with --all: only that backlog's")
     s.set_defaults(f=cmd_resume)
     s = sub.add_parser("accept", help="commit the work on its branch and close the task")
@@ -4670,6 +5072,18 @@ def parser() -> argparse.ArgumentParser:
     s.set_defaults(f=cmd_scout)
     s = sub.add_parser("events", help="print a line whenever workbench's state changes (the mod's ears)")
     s.set_defaults(f=cmd_events)
+    s = sub.add_parser("adopt", help="the mod's: make a task whose Claude Code process is gone "
+                       "this session's")
+    s.add_argument("name")
+    s.add_argument("--session", action="append", required=True, metavar="ID",
+                   help="this process's session ids, the current one first")
+    s.add_argument("--pid", type=int, help="the claiming Claude Code process (default: "
+                   "$CLAUDE_PID, else wb's parent)")
+    s.set_defaults(f=cmd_adopt)
+    s = sub.add_parser("ack", help="the mod's: take a task's notice before waking Claude "
+                       "(exit 3 when taken already)")
+    s.add_argument("name"); s.add_argument("ts", type=float)
+    s.set_defaults(f=cmd_ack)
     s = sub.add_parser("top", help="a live view of the GPUs, the running tasks, the models and the "
                        "GPU's queue (q quits)")
     s.add_argument("--json", action="store_true", help="one JSON object per tick, until the parent exits")
@@ -4746,6 +5160,8 @@ def parser() -> argparse.ArgumentParser:
     x.add_argument("--check", help="a command run after the acceptance command, to pass too")
     x.add_argument("--name", help="the case's name (default: the task's)")
     bs.add_parser("list", help="the cases")
+    x = bs.add_parser("rm", help="remove cases, with their bundles (their results stay)")
+    x.add_argument("case", nargs="+")
     x = bs.add_parser("run", help="replay the cases in the background, one at a time")
     x.add_argument("--model", nargs="+", help="default: every model that can run and takes the case's size")
     x.add_argument("--case", nargs="+", help="default: every case")
@@ -4767,6 +5183,8 @@ def parser() -> argparse.ArgumentParser:
     s.add_argument("key", nargs="?", metavar="KEY", help="recording, live or every")
     s.add_argument("value", nargs="?", metavar="VALUE", help="on|off, or 1|2|5 (seconds) for every")
     s.add_argument("--json", action="store_true", help="everything learned, as one object (the Stats tab's feed)")
+    s.add_argument("--all", action="store_true",
+                   help="every model that ran a task, retired and idle ones too")
     s.set_defaults(f=cmd_stats)
     s = sub.add_parser("backlog", help="a batch started with --backlog: each task and the batch's saving")
     s.add_argument("name", nargs="?")
@@ -4801,6 +5219,8 @@ def parser() -> argparse.ArgumentParser:
     s = sub.add_parser("update", help="update workbench (wb, the skill and the mod) from its origin")
     s.add_argument("--check", action="store_true", help="only say whether there is an update")
     s.add_argument("--if-due", action="store_true", help="with --check: ask origin at most weekly")
+    s.add_argument("--stop", action="store_true", help="stop the running tasks first; each one's "
+                   "session is told to wb resume it")
     s.set_defaults(f=cmd_update)
     sub.add_parser("doctor", help="check the setup").set_defaults(f=cmd_doctor)
     return ap

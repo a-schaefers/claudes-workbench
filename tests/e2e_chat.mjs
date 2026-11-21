@@ -2,7 +2,7 @@
 // real `wb chat serve`, and `wb chat` on the Claude side. Run: node tests/e2e_chat.mjs
 // Needs Playwright: PLAYWRIGHT=/path/to/node_modules/playwright (it isn't a workbench dependency).
 import { spawn, execFileSync } from 'node:child_process'
-import { mkdtempSync, mkdirSync, writeFileSync, appendFileSync, copyFileSync, readFileSync, readdirSync, existsSync, rmSync, statSync, utimesSync } from 'node:fs'
+import { mkdtempSync, mkdirSync, writeFileSync, appendFileSync, copyFileSync, readFileSync, readdirSync, existsSync, rmSync, statSync, utimesSync, chmodSync } from 'node:fs'
 import { createRequire } from 'node:module'
 import { createServer, connect as dial } from 'node:net'
 import { runInNewContext } from 'node:vm'
@@ -96,6 +96,38 @@ async function run(engine, device) {
     await until(async () => (await page.locator('.row.claude .bubble').last().textContent()).includes('make test passes'))
     await until(async () => (await page.locator('.row.claude .bubble strong').count()) === 1)
     if (await page.locator('.thread .working').count()) throw new Error('still shows working')
+  })
+  await check("Claude's reply copies over plain http at a LAN address, where navigator.clipboard is missing", async () => {
+    // #745 (the 2026-11-21 audit, finding 104): navigator.clipboard exists only in a secure
+    // context, so over http://100.x.y.z:1337 every tap said "copy failed"
+    const p = await ctx.newPage()
+    await p.addInitScript(() => {
+      Object.defineProperty(Navigator.prototype, 'clipboard', { get: () => undefined, configurable: true })
+      Object.defineProperty(window, 'isSecureContext', { get: () => false, configurable: true })
+      const real = document.execCommand.bind(document)
+      window.copied = []
+      document.execCommand = (cmd, ...rest) => {
+        const el = document.activeElement
+        if (cmd === 'copy') window.copied.push(el && el.value !== undefined ? el.value.slice(el.selectionStart, el.selectionEnd) : String(getSelection()))
+        return real(cmd, ...rest)
+      }
+      // what the button said: a state event redraws the row (and the button) at once
+      window.said = []
+      addEventListener('click', e => { const t = e.target; if (t.tagName === 'BUTTON') setTimeout(() => window.said.push(t.textContent), 50) }, true)
+    })
+    try {
+      await p.goto(base)
+      const row = p.locator('.row.claude').last()
+      await until(async () => (await row.locator('.bubble').textContent()).includes('make test passes'))
+      const button = row.locator('.meta button', { hasText: 'copy' })
+      await button.click()
+      await until(async () => (await p.evaluate(() => window.said)).length === 1)
+      const said = await p.evaluate(() => window.said)
+      if (said[0] !== 'copied') throw new Error('the button said ' + said[0])
+      const got = await p.evaluate(() => window.copied)
+      if (got.length !== 1 || !got[0].includes('`make test` passes')) throw new Error('copied ' + JSON.stringify(got))
+      if (await p.locator('textarea:not(#input)').count()) throw new Error('the copy textarea was left behind')
+    } finally { await p.close() }
   })
   await check('a message sent while the server is down lands exactly once when it is back', async () => {
     await stopServer()
@@ -551,6 +583,27 @@ async function run(engine, device) {
     await page.click('.viewer')
     await until(async () => (await page.locator('.viewer').count()) === 0)
   })
+  await check("the thread's photos are fetched as they scroll near the view, not all at each load", async () => {
+    // #754 (the 2026-11-21 audit, finding 101): every photo in the last 200 messages was fetched
+    // whole, uncached, on every load, to fill 132-pixel thumbnails
+    const now = Date.now() / 1000
+    for (let i = 0; i < 60; i++) appendFileSync(join(home, 'state/chat/messages.jsonl'), JSON.stringify({ id: `fill-${i}`,
+      ts: now + i / 100, from: 'claude', text: `filler reply ${i}\n\n` + 'a line of words to make it tall\n'.repeat(4) }) + '\n')
+    await page.reload()  // rows written behind the server's back: a load shows them (and keeps them)
+    await until(async () => (await page.locator('.row.claude .bubble').last().textContent()).includes('filler reply 59'))
+    const gets = []
+    const count = r => { if (r.url().includes('/api/file/')) gets.push(r.url()) }
+    page.on('request', count)
+    try {
+      await page.reload()
+      await until(async () => (await page.locator('.row.claude .bubble').last().textContent()).includes('filler reply 59'))
+      await sleep(1500)
+      if (gets.length) throw new Error(`fetched ${gets.length} photo(s) far above the view`)
+      await page.$eval('.row.user .files', f => f.scrollIntoView())
+      await until(() => gets.length === 1)
+      await until(() => page.$eval('.row.user .files .pic img', i => i.complete && i.naturalWidth > 0))
+    } finally { page.off('request', count) }
+  })
   await check('a file over the limit is refused on its chip, and ✕ drops it', async () => {
     writeFileSync(env.WB_CHAT_CONFIG, JSON.stringify({ upload_mb: 0.001 }))
     try {
@@ -561,6 +614,62 @@ async function run(engine, device) {
       await until(async () => await page.locator('#tray').isHidden())
     } finally { writeFileSync(env.WB_CHAT_CONFIG, '{}') }
   })
+  await check('photos picked and removed let go of their previews: no blob URL outlives its chip', async () => {
+    // #746 (Codex's audit of 1.90.6, finding 17): four picked and removed, four Blob URLs made,
+    // none revoked, each holding a full-size photo until the page closed
+    const p = await ctx.newPage()
+    await p.addInitScript(() => {
+      window.live = new Set()
+      const make = URL.createObjectURL, drop = URL.revokeObjectURL
+      URL.createObjectURL = b => { const u = make(b); if (b instanceof File) window.live.add(u); return u }  // a picked file's, not the thread's
+      URL.revokeObjectURL = u => { window.live.delete(u); drop(u) }
+    })
+    try {
+      await p.goto(base)
+      await until(async () => (await p.textContent('#presence-text')).length > 0)
+      const png = readFileSync(join(ROOT, 'workbench/chat_static/icon-192.png'))
+      for (let i = 0; i < 4; i++) {
+        await p.setInputFiles('#pick', { name: `p${i}.png`, mimeType: 'image/png', buffer: Buffer.concat([png, Buffer.from([i])]) })
+        await until(() => p.$eval('#tray .face', img => img.complete && img.naturalWidth > 0))
+        await p.click('#tray .att .x')
+        await until(async () => await p.locator('#tray').isHidden())
+      }
+      await until(async () => (await p.evaluate(() => window.live.size)) === 0)
+    } finally { await p.close() }
+  })
+  await check('a disk that refuses for good shows its reason on the chip, and a server failure stops after three tries', async () => {
+    // #742 (the 2026-11-21 audit): a full disk or a name it can't save answered 500 or 507 to
+    // every try, and the page re-sent the whole file forever, saying only "waiting for the connection"
+    const puts = []
+    const count = r => { if (r.method() === 'PUT' && r.url().includes('/api/upload/')) puts.push(r.url()) }
+    page.on('request', count)
+    const root = join(home, 'state/chat/uploads')
+    mkdirSync(root, { recursive: true })
+    chmodSync(root, 0o500)  // EACCES: a refusal another try can't fix, so `final`
+    try {
+      await page.setInputFiles('#pick', { name: 'full.txt', mimeType: 'text/plain', buffer: Buffer.from('full') })
+      await until(async () => ((await page.locator('#tray .att.refused').textContent()) || '').includes('not saved: Permission denied'))
+      await sleep(2000)
+      if (puts.length !== 1) throw new Error(`a final refusal was sent ${puts.length} times`)
+      await page.click('#tray .att .x')
+      await until(async () => await page.locator('#tray').isHidden())
+    } finally { chmodSync(root, 0o700); page.off('request', count) }
+    if (engine === 'webkit') return  // its routing doesn't see an XHR's PUT; Chromium checks the rest
+    const flaky = []
+    await page.route('**/api/upload/*', route => {
+      if (route.request().method() !== 'PUT') return route.continue()
+      flaky.push(route.request().url())
+      return route.fulfill({ status: 500, contentType: 'application/json', body: JSON.stringify({ error: 'not saved: Input/output error' }) })
+    })
+    try {
+      await page.setInputFiles('#pick', { name: 'flaky.txt', mimeType: 'text/plain', buffer: Buffer.from('flaky') })
+      await until(async () => ((await page.locator('#tray .att.refused').textContent()) || '').includes('Input/output error'), 15000)
+      await sleep(2500)
+      if (flaky.length !== 3) throw new Error(`sent ${flaky.length} times`)
+      await page.click('#tray .att .x')
+      await until(async () => await page.locator('#tray').isHidden())
+    } finally { await page.unroute('**/api/upload/*') }
+  })
   await check('no script errors', async () => { if (errors.length) throw new Error(errors.join('; ')) })
   await browser.close()
   await stopServer()
@@ -569,7 +678,7 @@ async function run(engine, device) {
 // The worker's notification text, run in node against a given state (no browser shows a push)
 async function swSays(state) {
   const ctx = { self: { addEventListener() {} }, caches: { open: async () => ({ match: async () => null }) },
-    fetch: async () => ({ ok: true, json: async () => state }), Date, Math, String }
+    fetch: async url => { if (url !== '/api/latest') throw new Error('fetched ' + url); return { ok: true, json: async () => state } }, Date, Math, String }
   runInNewContext(readFileSync(join(ROOT, 'workbench/chat_static/sw.js'), 'utf8'), ctx)
   return ctx.what()
 }

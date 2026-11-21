@@ -198,11 +198,16 @@ class Top:
         if self.where == "macos":
             self.mac = {"page": hardware._int(hardware._sysctl("hw.pagesize")) or 4096,
                         "ram": hardware._int(hardware._sysctl("hw.memsize")) or None, "at": None}
-            # an Apple GPU's ceiling is the budget's (iogpu.wired_limit_mb, else macOS's default
-            # share), not all of RAM, and its use is the RAM's (#574)
-            self.static = [{"name": g["name"], **({"total": (g.get("wired_limit") or models.unified_default(g["vram"]))
-                                                   if g.get("unified") else g["vram"]} if g.get("vram") else {}),
-                            **({"unified": True} if g.get("unified") else {})}
+            # an Apple GPU's memory is the RAM: its bar is the RAM in use against all of it, and
+            # the most the GPU may wire (iogpu.wired_limit_mb, else macOS's default share, the
+            # budget's ceiling, #574) is said beside it as `limit`. The RAM in use drawn against
+            # that limit put an idle 16 GB Mac at 104% in red with no model loaded (#701)
+            # an Intel Mac's Radeon: no total, as Ollama runs there on the CPU in RAM, so its
+            # models read `cpu`, not a warning's "split 0.0 GB GPU" (#711)
+            self.static = [{"name": g["name"], **({"total": g["vram"]} if g.get("vram") and g.get("unified") else {}),
+                            **({"unified": True, "limit": g.get("wired_limit") or models.unified_default(g["vram"])}
+                               if g.get("unified") and g.get("vram") else
+                               {"unified": True} if g.get("unified") else {})}
                            for g in hardware._mac_gpus()]
         elif self.where == "wsl" and not self.names and not self.cards:  # a failing nvidia-smi too (#547)
             self.static = [{"name": g["name"], **({"total": g["vram"]} if g.get("vram") else {})}
@@ -640,6 +645,8 @@ def _lines(snap: dict, fold: int = 0) -> list[list[tuple[str, str]]]:
                     ("", f" {_gb(g['used'])}/{_gb(g['total'])} GB  ")]
         elif g.get("total"):
             row += [("dim", f"{_gb(g['total'])} GB{' unified' if g.get('unified') else ''}, use not said  ")]
+        if g.get("limit"):  # an Apple GPU: the most of the RAM it may wire (#701)
+            row += [("dim", f"GPU may wire {_gb(g['limit'])} GB  ")]
         if g.get("stale"):
             row += [("dim", "no reading  ")]
         if g.get("busy") is not None:

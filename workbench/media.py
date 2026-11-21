@@ -7,6 +7,7 @@ whatever the kind of media adds. The first entry is the default; non-object valu
 from __future__ import annotations
 
 import contextlib
+import http.client
 import json
 import os
 import re
@@ -20,7 +21,7 @@ import urllib.request
 from pathlib import Path
 from urllib.parse import urlparse
 
-from . import hardware, models
+from . import models
 
 
 def run_group(argv: list[str], timeout: float, **kw) -> subprocess.CompletedProcess:
@@ -57,7 +58,7 @@ def load(path: Path) -> dict[str, dict]:
     return {k: v for k, v in data.items() if isinstance(v, dict)} if isinstance(data, dict) else {}
 
 
-STRINGS = ("command", "url", "ref_arg", "model", "unload", "label", "notes", "key")
+STRINGS = ("command", "url", "ref_arg", "model", "unload", "label", "notes", "key", "api")
 
 
 def problem(e: dict, kinds: tuple[str, ...] = ()) -> str:
@@ -68,6 +69,9 @@ def problem(e: dict, kinds: tuple[str, ...] = ()) -> str:
     for k in STRINGS:
         if k in e and not isinstance(e[k], str):
             return f"{k} must be a string"
+    for k in ("url", "unload"):
+        if e.get(k) and (why := _not_url(e[k])):
+            return f"{k} isn't a URL ({why})"
     if e.get("command"):
         try:
             if not shlex.split(e["command"]):
@@ -82,9 +86,32 @@ def problem(e: dict, kinds: tuple[str, ...] = ()) -> str:
         return "voices must be a list of names"
     if "gpu" in e and not isinstance(e["gpu"], bool):
         return "gpu must be true or false"
+    if "unload_body" in e and not isinstance(e["unload_body"], dict):
+        return "unload_body must be a JSON object"
     if kinds and "kind" in e and e["kind"] not in kinds:
         return f"kind must be one of {', '.join(kinds)}"
     return ""
+
+
+def _not_url(url: str) -> str:
+    """Why ``url`` can't be posted to, or ''. A placeholder left in it (`:port`), a port past
+    65535 or a missing `:` ended `wb scout`, the listings and generation in a traceback from
+    http.client or urlparse, neither OSError nor RuntimeError (#748)."""
+    try:
+        u = urlparse(url)
+        u.port  # raises on a port that isn't a number in range
+    except ValueError as err:
+        return str(err)
+    if u.scheme not in ("http", "https"):
+        return "it needs http:// or https://"
+    return "" if u.hostname else "it names no host"
+
+
+def starts(path: Path) -> str:
+    """What a file that isn't the media asked for starts with, for the refusal (#592, #744)."""
+    with open(path, "rb") as f:
+        head = " ".join(f.read(48).decode(errors="replace").split())
+    return f"it starts {head!r}" if head else "an empty file"
 
 
 def auth(e: dict, base: Path | None = None) -> dict:
@@ -118,6 +145,33 @@ def post(e: dict, url: str, data: bytes, ctype: str, timeout: float,
                               if err.code in (401, 403) and not e.get("key") else "")) from None
 
 
+def unload(used: list[dict], say, what: str, base: Path | None = None) -> None:
+    """A server engine keeps its model in GPU memory while it runs; each the batch used with an
+    `unload` URL is asked to let it go after the batch (`unload_body`, a JSON object, else {}:
+    ComfyUI's /free wants {"unload_models": true, "free_memory": true}, LocalAI's
+    /backend/shutdown {"model": …}), each URL once. Audio's listener too (#594); images had none,
+    so an image server kept 6-12 GB beside the next task's model (#749)."""
+    done = set()
+    for e in used:
+        if not e.get("unload") or e["unload"] in done:
+            continue
+        done.add(e["unload"])
+        try:
+            post(e, e["unload"], json.dumps(e.get("unload_body") or {}).encode(), "application/json",
+                 30, base)
+        except (OSError, RuntimeError, ValueError, http.client.HTTPException) as err:
+            say(f"couldn't unload the {what} server ({e['unload']}: {err}); it may still hold GPU memory")
+
+
+@contextlib.contextmanager
+def unloading(used: list[dict], say, what: str, base: Path | None = None):
+    """`unload` when the block ends, however it ends."""
+    try:
+        yield
+    finally:
+        unload(used, say, what, base)
+
+
 def ready(e: dict, kinds: tuple[str, ...] = (), base: Path | None = None) -> str:
     """'' when the engine can run, else why not."""
     if why := problem(e, kinds):
@@ -136,7 +190,7 @@ def ready(e: dict, kinds: tuple[str, ...] = (), base: Path | None = None) -> str
             if err.code in (401, 403):  # it was listed as ready, then failed every generation (#597)
                 return (f"{root} refused the key (HTTP {err.code})" if e.get("key")
                         else f"{root} wants an API key (HTTP {err.code}): `key` in its entry")
-        except OSError:
+        except (OSError, ValueError, http.client.HTTPException):  # ValueError and InvalidURL: a backstop (#748)
             return f"nothing answers at {root}"
         return ""
     return "neither command nor url"
@@ -175,14 +229,8 @@ def settle(say, timeout: float = 90, keep=()) -> None:
     deadline = time.time() + timeout
     while any(models.freed(m, keep) for m in models.resident()) and time.time() < deadline:
         time.sleep(1)
-    last = None
-    while time.time() < deadline:  # then until the GPU's used VRAM stops falling
-        used = sum(g["vram_used"] for g in hardware.gpus(windows=False) if g.get("vram_used") is not None)
-        if last is not None and last - used < 64 * 2 ** 20:
-            return
-        last = used
-        time.sleep(1)
-    say(f"the GPU's memory was still being released after {timeout:.0f} s; generating anyway")
+    if not models.released(max(deadline - time.time(), 0)):  # then until the used VRAM stops falling
+        say(f"the GPU's memory was still being released after {timeout:.0f} s; generating anyway")
 
 
 def on_gpu(e: dict) -> bool:
@@ -192,7 +240,10 @@ def on_gpu(e: dict) -> bool:
     if "gpu" in e:
         return e["gpu"] is not False
     if isinstance(e.get("url"), str) and not e.get("command"):
-        return models._this_host(urlparse(e["url"]).hostname)
+        try:
+            return models._this_host(urlparse(e["url"]).hostname)
+        except ValueError:  # a url that doesn't parse: listed as not usable, never run (#748)
+            return True
     return True
 
 
@@ -216,6 +267,51 @@ def gpu(who: str, say, wait: bool, keep=()):
     with models.GpuLease(None, who, say, wait=wait):
         models.free_gpu(keep=keep, say=say)
         settle(say, keep=keep)
+        yield
+
+
+def boxes(e: dict) -> list:
+    """The remote servers the coding tasks use on the host a url engine is on (a `wb remote`
+    box, WSL2's Windows host): one discovered model per lease pool there. An engine there took no
+    turn and posted while a task's model was loaded on that card, so one of them spilled or
+    crashed (#750). None for a command engine, one that says "gpu": false, or one on this host."""
+    if e.get("command") or e.get("gpu") is False or not isinstance(e.get("url"), str):
+        return []
+    try:
+        host = (urlparse(e["url"]).hostname or "").lower()
+    except ValueError:
+        return []
+    if not host or models._this_host(host):
+        return []
+    found: dict = {}
+    for m in models.discover().values():
+        if m.remote and (urlparse(m.root).hostname or "").lower() == host:
+            found.setdefault(models.pool(m), m)
+    return list(found.values())
+
+
+@contextlib.contextmanager
+def turns(who: str, say, wait: bool, *engines: dict):
+    """Every GPU turn a batch needs: this machine's (`gpu`) for an engine on its GPU, and one on
+    each remote box an engine shares with the coding tasks (`boxes`): queued with that box's
+    tasks (`GpuLease(None, …, on=)`, as `wb optimize` does), refused at once unless ``wait``,
+    and that box's Ollama models unloaded (keep_loaded kept)."""
+    remote = {models.pool(m): m for e in engines for m in boxes(e)}
+    here = [e for e in engines if on_gpu(e) and not boxes(e)]
+    with contextlib.ExitStack() as stack:
+        if here:
+            stack.enter_context(gpu(who, say, wait, serving(*engines)))
+        for m in remote.values():
+            stack.enter_context(models.GpuLease(None, who, say, wait=wait, on=m))
+            if m.engine == "ollama" and not models._fake():
+                held = models.keep_loaded()
+                for name in models._ollama_loaded(m.root):
+                    if not models._kept_name(name, held):
+                        say(f"unloading {name} on {m.root}")
+                        try:
+                            models._post(f"{m.root}/api/generate", {"model": name, "keep_alive": 0}, timeout=120)
+                        except Exception:  # as models._unload: its server may be gone
+                            pass
         yield
 
 

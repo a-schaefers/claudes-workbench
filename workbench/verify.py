@@ -28,10 +28,15 @@ LIMIT = 300  # seconds for each run; past it, that run is inconclusive
 # x_test.go, x.test.ts, x.spec.js; and the data a test reads beside it: Go's testdata/, fixtures/,
 # Jest's __snapshots__ (*.snap), golden/. Without the data, the base failed for lack of the golden
 # file and was called proven (#500, the audit of 1.90). One pattern for verify and bench
-# (`looks_like_test`).
-TEST_PATH = re.compile(r"(^|/)(tests?|spec|__tests__|testdata|fixtures?|__fixtures__|__snapshots__"
+# (`looks_like_test`). And the layouts that missed it: Django's tests.py, SwiftPM's Tests/ (the
+# directory part in any case), .NET's MyApp.Tests/ and *Tests.cs, JVM/PHP *Test.java/*Spec.kt,
+# Cypress's *.cy.ts, Perl's t/*.t. Unmatched, verify and bench add refused, and a Django change to
+# polls/tests.py beside a new fixture copied the fixture alone: the base ran its old tests and
+# passed, `base-passes` for a valid fix (#731, the 2026-11-21 audit).
+TEST_PATH = re.compile(r"(^|/)(?i:tests?|spec|__tests__|testdata|fixtures?|__fixtures__|__snapshots__"
                        r"|golden)/|(^|/)test_[^/]*$|_test\.[A-Za-z]+$|\.(test|spec)\.[A-Za-z]+$"
-                       r"|\.snap$")
+                       r"|\.snap$|(^|/)tests\.py$|(^|/)[^/]*(Tests?|Spec)\.(cs|fs|vb|swift|kt|java"
+                       r"|scala|groovy|php)$|\.Tests?/|\.cy\.[A-Za-z]+$|(^|/)t/[^/]+\.t$")
 # a file not found, as the common runtimes say it: what a base missing the candidate's new file
 # prints (Go's `open testdata/x.golden: no such file or directory`, Python's FileNotFoundError,
 # Node's ENOENT)
@@ -43,8 +48,13 @@ MISSING = re.compile(r"no such file or directory|FileNotFoundError|\bENOENT\b"
 # and a base that never ran an assertion was called proven (#193, the 2026-11-19 audit).
 ASSERTION = re.compile(r"AssertionError|^E\s+assert|\bassert(ion)?\b|^\s*Expected\b"
                        r"|\bexpected\b.*\b(but|got|received|to (be|equal|have))\b"
-                       r"|Error: expect\(|panic: ", re.I)
-FAILED_TEST = re.compile(r"^(FAIL[:\s]|--- FAIL|\s*✕)")
+                       r"|Error: expect\(|panic: "
+                       # PHPUnit and Pest, XCTest, swift-testing: none satisfied the `\b` after
+                       # `assert`, so these stacks were never proven without --expect (#730)
+                       r"|Failed asserting|\bXCT\w*Assert\w* failed|\bExpectation failed\b", re.I)
+# PHPUnit's `FAILURES!`, Catch2's `file.cpp:5: FAILED:`, TAP and bats' `not ok 1`, swift-testing's
+# `✘` (#730)
+FAILED_TEST = re.compile(r"^(FAIL[:\s]|--- FAIL|\s*✕|FAILURES!|\S+:\d+: FAILED:|not ok \d+|\s*✘)")
 # a run that failed before any test could: the code didn't parse, import, build or collect. A
 # failed test's header beside one of these is the setup's failure, not an assertion's (Go prints
 # `FAIL pkg [build failed]`)
@@ -52,6 +62,23 @@ SETUP = re.compile(r"\b(SyntaxError|IndentationError|TabError|ImportError|Module
                    r"|errors? (during collection|collecting)|\bfixture '[^']*' not found"
                    r"|Cannot find module|\[(build|setup) failed\]|could not compile"
                    r"|error TS\d{4}:|^\S+\.go:\d+:\d+: ", re.M)
+# an error saying the base lacks what the test calls, not that it computes it wrong: the candidate
+# adds `mod.slugify` or a `sep=` keyword and the test calls it. pytest quoted the failing source
+# line (`>       assert mod.slugify(…)`) above `E  AttributeError: …`, which matched ASSERTION, and
+# jest's `TypeError: slugify is not a function` came under a ✕ header: both were called proven,
+# while the same test written `from mod import slugify` was inconclusive (#729, the 2026-11-21
+# audit)
+MISSING_API = re.compile(r"has no attribute '|\bis not a (function|constructor)\b|\bNameError: name '"
+                         r"|\bReferenceError: \S+ is not defined|unexpected keyword argument"
+                         r"|takes (from )?\d+ (to \d+ )?positional arguments? but"
+                         r"|missing \d+ required (positional|keyword-only) argument"
+                         r"|\bundefined method\b|\buninitialized constant\b"
+                         # a script the candidate adds (bats), PHP's function (#730)
+                         r"|\bcommand not found\b|\bCall to undefined function\b")
+# pytest's own lines: `E   ` says what went wrong (the first one, what went wrong first); `>` quotes
+# the source line it went wrong on, which is no evidence of anything (#729)
+PYTEST_E = re.compile(r"^E\s{2,}(\S.*)$", re.M)
+PYTEST_PROOF = re.compile(r"^(assert\b|AssertionError\b|Failed: )")
 
 
 class _At(store.Task):
@@ -66,8 +93,19 @@ class _At(store.Task):
 
 
 def _review_base(task: store.Task) -> str | None:
+    """The commit this step is compared with: the base for step one, else the last approved
+    step's, which wb next records (status `step_base`). A step with no changes has no commit of
+    its own: from before the record, the newest earlier step that has one, else the base (#652:
+    the step after a clean one died on "cannot find the last approved step's commit")."""
     step = task.status.get("steps", 1)
-    return task.spec["base"] if step == 1 else gitops.step_commit(task, step - 1, step)
+    if step == 1:
+        return task.spec["base"]
+    if at := task.status.get("step_base"):
+        return at
+    for earlier in range(step - 1, 0, -1):
+        if found := gitops.step_commit(task, earlier, step):
+            return found
+    return task.spec["base"]
 
 
 def looks_like_test(path: str) -> bool:
@@ -92,6 +130,13 @@ def test_files(task: store.Task, tree: str, base_rev: str) -> list[str]:
             if not st.startswith("D") and looks_like_test(p)]
 
 
+def removed_tests(task: store.Task, tree: str, base_rev: str) -> list[str]:
+    """The test files (looks_like_test) the candidate deleted, a renamed test's old name among
+    them: the base run goes without them too (#643)."""
+    return [p for st, p in _changes(task, tree, base_rev)
+            if st.startswith("D") and looks_like_test(p)]
+
+
 def missing(text: str, added: list[str]) -> list[str]:
     """The files of ``added`` (the candidate's new ones, not copied to the base) that ``text``
     (the base's output) says it couldn't find: a line saying a file is missing that names one, by
@@ -102,8 +147,11 @@ def missing(text: str, added: list[str]) -> list[str]:
 
 
 def assertion(text: str) -> str:
-    """The line that says what a failed assertion found, else a failed test's header; ''."""
-    lines = [x.strip() for x in text.splitlines()]
+    """The line that says what a failed assertion found, else a failed test's header; ''. pytest's
+    first `E` line when it printed one, and never a source line it quotes (`>`, #729)."""
+    if e := PYTEST_E.search(text):
+        return e.group(0).strip()[:300]
+    lines = [x.strip() for x in text.splitlines() if not x.startswith(">")]
     for pattern in (ASSERTION, FAILED_TEST):
         for line in lines:
             if pattern.search(line):
@@ -195,23 +243,35 @@ def _run(task: store.Task, checkout, cmd, limit: int, keep=None,
         return out
 
 
-def on_base(task: store.Task, cmd: str, limit: int, say=_say) -> tuple[int | str, str]:
+def on_base(task: store.Task, cmd: str, limit: int, say=_say,
+            turn=contextlib.nullcontext) -> tuple[int | str, str]:
     """``cmd`` on the task's base commit alone, in a scratch checkout under its lane (the runner's
     base check): nothing it writes reaches the task's worktree. With the GPU alone when the
-    task's tests need it (``gpu``)."""
-    with gpu(task, say):
+    task's tests need it (``gpu``), and then ``turn()`` (the runner's prep slot) around the run
+    itself: taken first, the slot was held through the whole wait for the GPU, behind a task's
+    round of up to 40 minutes, and every queued task's setup waited too (#679)."""
+    with gpu(task, say), turn():
         return _run(task, lambda work: gitops.git(work, "checkout", "-q", "--detach", task.spec["base"]),
                     cmd, limit)
 
 
-def _checkouts(task: store.Task, tree: str, files: list[str], base_rev: str):
-    """The base, with the candidate's ``files`` copied in, and the candidate as the worktree is."""
+def _checkouts(task: store.Task, tree: str, files: list[str], base_rev: str,
+               removed: list[str] = ()):
+    """The base, with the candidate's ``files`` copied in and its ``removed`` tests gone, and the
+    candidate as the worktree is."""
     head = gitops.git(task.worktree, "rev-parse", "HEAD").strip()
 
     def base(work: Path) -> None:
         gitops.git(work, "checkout", "-q", "--detach", base_rev)
         if files:  # the candidate's, alone; literal, so a `*` in a name is no glob
             gitops.git(work, "checkout", "-q", tree, "--", *(f":(literal){f}" for f in files))
+        # the tests the candidate deleted or renamed away go from the base too: kept, broad
+        # discovery ran a failing test_old.py on the base and only the passing test_new.py on the
+        # candidate, and the old test's assertion was called proof with no code changed (#643,
+        # Codex's audit of 1.90.6)
+        for i in range(0, len(removed), 200):
+            gitops.git(work, "rm", "-q", "--ignore-unmatch", "--",
+                       *(f":(literal){f}" for f in removed[i:i + 200]))
 
     def candidate(work: Path) -> None:
         gitops.git(work, "checkout", "-q", "--detach", head)
@@ -245,6 +305,12 @@ def verdict(base: int | str, base_out: str, cand: int | str, expect: str = "",
     # (#326, the audit of 1.4)
     if SETUP.search(base_out) or missing(base_out, list(added)):  # #500
         return "inconclusive"
+    # an API the candidate adds, missing on the base; and pytest's first error not an assertion's
+    # (an AttributeError, a TypeError): the test never got to check the bug (#729)
+    if MISSING_API.search(base_out):
+        return "inconclusive"
+    if (e := PYTEST_E.search(base_out)) and not PYTEST_PROOF.match(e.group(1)):
+        return "inconclusive"
     return "proven" if assertion(base_out) else "inconclusive"
 
 
@@ -252,7 +318,9 @@ def run(task: store.Task, cmd: str, files: list[str] | None = None, limit: int =
         expect: str = "", setup: bool = False) -> dict:
     """Run ``cmd`` on the base (with the candidate's test files) and on the candidate; the
     result, also kept in tasks/<task>/verify/<n>/ with both outputs."""
-    tree, left = gitops.snapshot_left(task.worktree)  # bulky new files left out (#431)
+    # the tree accept would commit: a big text file it lands is in it (#642); what accept refuses
+    # without --include is left out, and lands with it, so then nothing here is proof (below)
+    tree, left = gitops.snapshot_left(task.worktree, landing=True)
     base_rev = _review_base(task)
     if not base_rev:
         raise RuntimeError("cannot find the last approved step's commit for the comparison")
@@ -262,7 +330,8 @@ def run(task: store.Task, cmd: str, files: list[str] | None = None, limit: int =
                            "test's files with --files (or review it as usual)")
     # the candidate's new files the base doesn't get: a test that reads one fails there for that
     uncopied = [p for st, p in _changes(task, tree, base_rev) if st.startswith("A") and p not in files]
-    base, candidate = _checkouts(task, tree, files, base_rev)
+    removed = removed_tests(task, tree, base_rev)
+    base, candidate = _checkouts(task, tree, files, base_rev, removed)
     with gpu(task):  # both runs under one hold: nothing loads in between
         b_code, b_out = _run(task, base, cmd, limit, setup=setup)
         c_code, c_out = _run(task, candidate, cmd, limit, setup=setup)
@@ -272,15 +341,23 @@ def run(task: store.Task, cmd: str, files: list[str] | None = None, limit: int =
     out.mkdir(parents=True)
     (out / "base.txt").write_text(b_out, encoding="utf-8")
     (out / "candidate.txt").write_text(c_out, encoding="utf-8")
+    said = verdict(b_code, b_out, c_code, expect, uncopied)
+    if left and said == "proven":  # a candidate missing files accept can land proves nothing (#642)
+        said = "inconclusive"
     result = {"cmd": cmd, "files": files, "tree": tree, "ts": store.now(),
               "base": {"rev": base_rev, "exit": b_code, "assertion": assertion(b_out)},
               "candidate": {"rev": tree, "exit": c_code, "assertion": assertion(c_out)},
-              "verdict": verdict(b_code, b_out, c_code, expect, uncopied), "dir": str(out),
+              "verdict": said, "dir": str(out),
               **({"expect": expect} if expect else {}),
               **({"uncopied": uncopied[:50]} if uncopied else {}),
+              **({"removed": removed[:50]} if removed else {}),
               **({"left_out": left} if left else {})}
     if b_code != 0 and (gone := missing(b_out, uncopied)):
         result["missing"] = gone
+    # --files naming code (a Rust file with its inline tests): the base got the candidate's code
+    # too, so its passing says nothing about the test (#731)
+    if code := [f for f in files if not looks_like_test(f)]:
+        result["code_copied"] = code[:50]
     store.write_json(out / "result.json", result)
     return result
 
@@ -288,9 +365,12 @@ def run(task: store.Task, cmd: str, files: list[str] | None = None, limit: int =
 SAY = {"proven": "proven: it fails on the base and passes on the candidate",
        "base-passes": "not proven: it already passes on the base, so it doesn't show the bug",
        "candidate-fails": "the candidate fails it",
-       "inconclusive": "inconclusive: the base run didn't fail on an assertion (a setup error: "
-                       "syntax, import, build or collection; a file the candidate adds missing; "
-                       "or not the --expect text), a run timed out, or the setup command failed"}
+        # not a setup error alone: a runner whose output the check doesn't read lands here too (#730)
+        "inconclusive": "inconclusive: the base run didn't fail on an assertion the check "
+                        "recognises (an error first: syntax, import, build, collection, or an API "
+                        "or file the candidate adds; output it doesn't read, which --expect TEXT "
+                        "can name; or not the --expect text), a run timed out, the setup command "
+                        "failed, or the candidate left out files accept --include would land"}
 
 
 def lines(r: dict) -> list[str]:
@@ -304,8 +384,12 @@ def lines(r: dict) -> list[str]:
     if r.get("missing"):
         out.append(f"  the base lacked what the candidate adds: {', '.join(r['missing'])} "
                    "(--files copies what the test reads onto the base)")
+    if r.get("code_copied"):
+        out.append(f"  the base got the candidate's code too, not only tests: "
+                   f"{', '.join(r['code_copied'])} (so a pass there may be the change's)")
     if r.get("left_out"):
-        out.append(f"  not in the candidate (too big to snapshot): {', '.join(r['left_out'])}")
+        out.append(f"  not in the candidate (accept refuses them without --include, and lands "
+                   f"them with it): {', '.join(r['left_out'])}")
     out.append(f"  outputs: {r['dir']}/{{base,candidate}}.txt")
     return out
 
@@ -325,13 +409,14 @@ def shot(task: store.Task, cmd: str, files: list[str] | None = None, viewport: s
     $WB_SHOT_VIEWPORT. Kept in tasks/<task>/shots/<n>/ with what each image is of."""
     if not re.fullmatch(r"\d{2,5}x\d{2,5}", viewport):
         raise RuntimeError(f"--viewport {viewport}: give it as WIDTHxHEIGHT, e.g. 390x844")
-    tree = gitops.snapshot(task.worktree)
+    tree = gitops.snapshot(task.worktree, landing=True)  # what accept would land, as verify (#642)
     # after wb next, the last approved step, as wb verify compares: the original base showed the
     # earlier steps' change as this one's (#501, the audit of 1.90)
     base_rev = _review_base(task)
     if not base_rev:
         raise RuntimeError("cannot find the last approved step's commit for the comparison")
-    base, candidate = _checkouts(task, tree, files or [], base_rev)
+    base, candidate = _checkouts(task, tree, files or [], base_rev,
+                                 removed_tests(task, tree, base_rev))
     d = task.dir / "shots"
     n = 1 + max((int(p.name) for p in d.glob("*") if p.name.isdigit()), default=0)
     out = d / str(n)
@@ -422,5 +507,5 @@ def last(task: store.Task) -> dict | None:
     # Old checks always compared against task.json's original base (#252).
     stale = task.worktree.is_dir() and (
         r["base"].get("rev", task.spec["base"]) != _review_base(task)
-        or gitops.snapshot(task.worktree) != r.get("tree"))
+        or gitops.snapshot(task.worktree, landing=True) != r.get("tree"))
     return {**r, "stale": stale}

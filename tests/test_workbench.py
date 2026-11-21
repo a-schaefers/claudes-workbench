@@ -592,6 +592,29 @@ class Lifecycle(Base):
                              capture_output=True, text=True).stdout
         self.assertTrue(row.startswith("100755"), row)                # is what lands
 
+    def test_a_state_dir_that_keeps_no_modes_never_shows_every_file_as_made_executable(self):
+        # #683 (Claude's audit of main): on exFAT, NTFS, CIFS or drvfs without metadata every file
+        # reads 0755; the task's git kept the repo's core.filemode=true, so the whole tree showed
+        # as changed to 100755 and accept committed the flip
+        self.start("t-nomodes", "ok", "--test", TEST_CMD)
+        wait_phase("t-nomodes", {"review"})
+        t = store.Task("t-nomodes")
+        for f in ("README.md", "CLAUDE.md"):
+            (t.worktree / f).chmod(0o755)                  # as such a file system reads them
+        with mock.patch.object(gitops, "_modes_hold", return_value=False):
+            self.assertIn("core.filemode=false", gitops._pinned(t.worktree))
+            self.assertEqual(gitops.changed(t.worktree).split(), ["??", "answer.txt"])
+            self.assertNotIn("old mode", runner.review_diff(t))
+            buf = io.StringIO()
+            with redirect_stdout(buf), contextlib.suppress(SystemExit):
+                cli.main(["doctor"])
+            self.assertIn("keeps no file modes", buf.getvalue())
+        with mock.patch.object(gitops, "_modes_hold", return_value=None):   # couldn't tell
+            self.assertNotIn("core.filemode=false", gitops._pinned(t.worktree))
+            self.assertNotIn("core.filemode=true", gitops._pinned(t.worktree))
+        gitops._modes_hold.cache_clear()
+        self.assertIsNone(gitops._modes_hold(str(Path(self.tmp.name) / "nowhere")))
+
     @unittest.skipIf(gitops._case_folds(tempfile.gettempdir()) is not False,
                      "the temp directory folds case: no mismatch to make")
     def test_a_case_only_rename_and_a_case_twin_land_where_the_repo_says_ignorecase(self):
@@ -621,6 +644,35 @@ class Lifecycle(Base):
         self.assertIn("OTHER.PY", tree)
         self.assertIn("other.py", tree)
         self.assertNotIn("README.md", tree)
+
+    def test_a_case_only_rename_on_a_state_dir_that_folds_case_shows_in_the_review_and_lands(self):
+        # #656 (reproduced on a case-folding tmpfs): there the task's git runs ignorecase=true and
+        # matched Helpers.py in the index to helpers.py on disk; the review showed main.py alone,
+        # and accept committed Helpers.py beside a main.py importing helpers. Played here by the
+        # same git setting on this file system, where the rename read as a deletion alone
+        g = lambda *a: subprocess.run(["git", "-C", str(self.repo), *a], check=True,  # noqa
+                                      capture_output=True)
+        (self.repo / "Helpers.py").write_text("X = 1\n")
+        (self.repo / "main.py").write_text("import Helpers\n")
+        g("add", ".")
+        g("commit", "-qm", "helpers")
+        self.start("t-fold", "ok", "--test", TEST_CMD)
+        wait_phase("t-fold", {"review"})
+        t = store.Task("t-fold")
+        with mock.patch.object(gitops, "_case_folds", return_value=True):
+            before = gitops.mark(t.worktree)
+            (t.worktree / "Helpers.py").unlink()        # as the agent did it (Linux's rename
+            (t.worktree / "helpers.py").write_text("X = 1\n")  # to a case twin does nothing)
+            self.assertEqual(gitops.case_renames(t.worktree), [(b"Helpers.py", b"helpers.py")])
+            self.assertNotEqual(gitops.mark(t.worktree), before)        # the runner sees the edit
+            (t.worktree / "main.py").write_text("import helpers\n")
+            stat = gitops.diff(t.worktree, "HEAD", stat=True)
+            self.assertIn("Helpers.py => helpers.py", stat)              # what Claude reviews
+            run_wb("accept", "t-fold", "-m", "feat: snake case")
+        tree = subprocess.run(["git", "-C", str(self.repo), "ls-tree", "--name-only", "delegate/t-fold"],
+                              capture_output=True, text=True).stdout.split()
+        self.assertIn("helpers.py", tree)                                # is what lands
+        self.assertNotIn("Helpers.py", tree)
 
     def test_a_proposed_claude_md_is_shown_as_a_diff_and_taken_only_when_claude_says(self):
         # Claude making each CLAUDE.md change itself was a call over its whole context on most
@@ -784,6 +836,16 @@ class Lifecycle(Base):
         st = wait_phase("t-bgwait", {"review", "stuck"}, timeout=40)
         self.assertEqual((st["phase"], st.get("nudges", 0), st["round"]), ("review", 0, 1))
 
+    def test_a_job_left_running_after_the_turn_ends_is_stopped_and_the_tests_run(self):
+        # #658: a dev server the agent backgrounded never ends, so `opencode run` waited on it
+        # until the long silence limit, and the finished work was reported stuck, untested
+        self.start("t-dev", "devserver", "--test", TEST_CMD, "--silence-timeout", "4")
+        st = wait_phase("t-dev", {"review", "stuck", "failed"}, timeout=60)
+        self.assertEqual(st["phase"], "review", st.get("last"))
+        self.assertTrue(st["tests"]["ok"])
+        self.assertIn("the agent left `npm run dev` running in the background when its turn "
+                      "ended; stopped", run_wb("report", "t-dev"))
+
     def test_a_round_that_stalls_again_after_a_nudge_is_stopped_whatever_it_did_first(self):
         # A tool call before the stall let the nudged round be nudged again, round after round
         # with no end (the 2026-11-16 audit).
@@ -911,6 +973,26 @@ class Lifecycle(Base):
         finally:
             os.chdir(cwd)
             os.environ.pop("OPENCODE_CONFIG", None)
+
+    def test_a_relative_opencode_config_dir_is_one_place_to_wb_and_the_runner(self):
+        # #650 (Codex's audit of 1.90.6): OPENCODE_CONFIG_DIR=providers held the only provider;
+        # wb start found the model, and the runner, which changes directory, failed "unknown model"
+        cwd = os.getcwd()
+        os.chdir(self.tmp.name)
+        try:
+            Path("providers").mkdir()
+            Path("providers/opencode.json").write_text(Path(os.environ.pop("WB_OPENCODE_CONFIG")).read_text())
+            os.environ["OPENCODE_CONFIG_DIR"] = "providers"
+            self.start("t-reldir", "ok")
+            self.assertEqual(os.environ["OPENCODE_CONFIG_DIR"], os.path.join(os.getcwd(), "providers"))
+            st = wait_phase("t-reldir", {"review", "failed"})
+            self.assertEqual(st["phase"], "review", st.get("last"))
+            run_wb("feedback", "t-reldir", "--text", "1. Add a trailing comment line.")
+            st = wait_phase("t-reldir", {"review", "failed"})
+            self.assertEqual((st["phase"], st["round"]), ("review", 2), st.get("last"))
+        finally:
+            os.chdir(cwd)
+            os.environ.pop("OPENCODE_CONFIG_DIR", None)
 
     def test_the_model_is_made_resident_again_before_each_round(self):
         # After tests longer than Ollama's 5-minute keep-alive, the auto-fix round's think
@@ -1460,7 +1542,8 @@ class Lifecycle(Base):
         said = verify.lines({"cmd": "t", "files": ["t"], "tree": tree, "verdict": "proven",
                              "dir": "d", "left_out": ["big.dat (1 MB)"],
                              **{k: {"rev": "r", "exit": 0, "assertion": ""} for k in ("base", "candidate")}})
-        self.assertIn("  not in the candidate (too big to snapshot): big.dat (1 MB)", said)
+        self.assertIn("  not in the candidate (accept refuses them without --include, and lands "
+                      "them with it): big.dat (1 MB)", said)
         # gone, nothing is left out and the snapshot is the whole working tree again
         shutil.rmtree(t.worktree / "build")
         (t.worktree / "big.dat").unlink()
@@ -1908,7 +1991,8 @@ class Lifecycle(Base):
     def test_a_case_only_rename_merges_on_a_case_insensitive_file_system(self):
         # #470 (the audit of 1.8): renaming Readme.md to README.md, lexists("README.md") is true
         # on APFS, and the merge was refused as "would overwrite README.md". The file system is
-        # made case-insensitive for the check, as core.ignorecase says it is
+        # made case-insensitive for the check: README.md is a second name for Readme.md's inode,
+        # as APFS gives it, and core.ignorecase says so (#640: the inode decides, not the setting)
         repo, g = self._merge_case(
             base={b"Readme.md": b"r\n", b"a.txt": b"a\n"}, main={b"a.txt": b"A\n"},
             task={b"Readme.md": None, b"README.md": b"r\n"}, ignore={})
@@ -1920,11 +2004,12 @@ class Lifecycle(Base):
             parent, name = os.path.split(path)
             return real(path) or os.path.isdir(parent) and any(
                 n.casefold() == name.casefold() for n in os.listdir(parent))
+        os.link(repo / "Readme.md", repo / "README.md")
         for old_git in (False, True):
-            with (mock.patch("os.path.lexists", lexists),
-                  mock.patch.object(gitops, "_merge_tree", return_value=None) if old_git
-                  else nullcontext()):
+            with mock.patch.object(gitops, "_merge_tree", return_value=None) if old_git \
+                    else nullcontext():
                 self.assertEqual(gitops._overwritten(repo, "delegate/t"), [])
+        (repo / "README.md").unlink()
         gitops.merge(repo, "t", "main")
         self.assertEqual((repo / "README.md").read_bytes(), b"r\n")
         repo, g = self._merge_case(  # a case-sensitive git: in the way, as before
@@ -1933,6 +2018,22 @@ class Lifecycle(Base):
         g("config", "core.ignorecase", "false")  # git init sets it true on macOS
         with mock.patch("os.path.lexists", lexists):
             self.assertEqual(gitops._overwritten(repo, "delegate/t"), ["README.md"])
+
+    def test_a_stale_ignorecase_on_a_case_sensitive_file_system_keeps_the_ignored_twin(self):
+        # #640 (Codex's audit of 1.90.6): a copied repo carried core.ignorecase=true onto a
+        # case-sensitive file system; the checkout tracked CONFIG and kept its own ignored config,
+        # the task committed config, and the guard took the two names for one file: the merge
+        # replaced the personal file
+        repo, g = self._merge_case(
+            base={b"CONFIG": b"tracked\n"}, main={b".gitignore": b"config\n"},
+            task={b"config": b"DEFAULT\n"}, ignore={b"config": b"PERSONAL\n"})
+        g("config", "core.ignorecase", "true")  # carried over with the copy
+        self.assertEqual((repo / "CONFIG").read_bytes(), b"tracked\n")  # two files here
+        for old_git in (False, True):
+            with mock.patch.object(gitops, "_merge_tree", return_value=None) if old_git \
+                    else nullcontext():
+                self.assertEqual(gitops._overwritten(repo, "delegate/t"), ["config"])
+        self._assert_refused_and_kept(repo, g, b"config", b"PERSONAL\n")
 
     def test_a_clean_merge_beside_ignored_files_still_merges(self):
         repo, g = self._merge_case(
@@ -2288,6 +2389,68 @@ class Lifecycle(Base):
         # another commit from the same parent isn't taken for it
         self.assertIsNone(gitops.squashed(self.repo, "main", g("rev-parse", "main~1"), "main~1"))
 
+    def test_a_merge_backed_out_never_rewinds_another_merge_that_landed_meanwhile(self):
+        # #639 (Codex's audit of 1.90.6, reproduced by pausing B just before git's merge): B read
+        # HEAD, A's merge landed, B conflicted and its rollback reset to the HEAD it had read: A's
+        # change was gone from main while A's record said merged and its branch was deleted
+        for how in ("merge", "squash", "ff"):
+            repo, g = self._merge_case(base={b"a.txt": b"base\n"}, main={b"c.txt": b"c\n"},
+                                       task={b"a.txt": b"B\n"}, ignore={b"mine.txt": b"MINE\n"})
+            g("checkout", "-q", "-b", "other", "main")
+            (repo / "a.txt").write_bytes(b"A\n")
+            g("commit", "-qam", "A's merge")
+            g("checkout", "-q", "main")
+            landed = g("rev-parse", "other").strip()
+            real = gitops.signs
+
+            def a_lands_now(r):  # after B read HEAD, before its merge
+                g("merge", "-q", "--ff-only", "other")
+                return real(r)
+            with mock.patch.object(gitops, "signs", a_lands_now), \
+                    self.assertRaisesRegex(gitops.GitError, "backed out"):
+                gitops.merge(repo, "t", "main", how=how)
+            self.assertEqual(g("rev-parse", "main").strip(), landed, how)   # A's merge stands
+            self.assertEqual((repo / "a.txt").read_bytes(), b"A\n", how)
+            self.assertEqual((repo / "mine.txt").read_bytes(), b"MINE\n", how)
+            self.assertEqual(g("status", "--porcelain", "--untracked-files=no"), b"", how)
+            self.assertNotEqual(subprocess.run(["git", "-C", str(repo), "rev-parse", "-q", "--verify",
+                                                "MERGE_HEAD"], capture_output=True).returncode, 0, how)
+        for how in ("merge", "squash"):  # an interrupted merge's own commit is still undone (#420)
+            repo, g = self._merge_case(base={b"a.txt": b"a\n"}, main={b"c.txt": b"c\n"},
+                                       task={b"b.txt": b"b\n"}, ignore={})
+            before = g("rev-parse", "main").decode().strip()
+            gitops.merge(repo, "t", "main", how=how)
+            gitops._back_out(repo, before, "delegate/t", how)
+            self.assertEqual(g("rev-parse", "main").decode().strip(), before, how)
+
+    def test_two_accept_merges_into_one_checkout_take_turns(self):
+        # #639: the command lock is per task, so two tasks' accepts merged into one checkout at
+        # once; the merge lock in its git dir (shared by every profile) makes the second wait,
+        # and one held past MERGE_WAIT refuses the merge rather than making it
+        import fcntl
+        self.start("t-l1", "ok")
+        wait_phase("t-l1", {"review"})
+        fd = os.open(self.repo / ".git" / gitops.MERGE_LOCK, os.O_RDONLY | os.O_CREAT)
+        fcntl.flock(fd, fcntl.LOCK_EX)  # another accept's merge, under way
+        done = threading.Timer(1.5, os.close, (fd,))  # it finishes
+        try:
+            with mock.patch.object(gitops, "MERGE_WAIT", 1), \
+                    self.assertRaisesRegex(gitops.GitError, "another merge into .* held it for 1s"):
+                with gitops.merge_lock(self.repo):
+                    pass
+            done.start()
+            err = io.StringIO()
+            with redirect_stderr(err):
+                out = run_wb("accept", "t-l1", "-m", "feat: answer", "--merge")
+        finally:
+            if done.ident:  # started: it closes the lock
+                done.join()
+            else:
+                os.close(fd)
+        self.assertIn("waiting for another merge into", err.getvalue())
+        self.assertIn("merged into main", out)
+        self.assertEqual((self.repo / "answer.txt").read_text().strip(), "42")
+
     def test_the_merge_by_hand_line_follows_the_repos_merge_mode_and_signing(self):
         # #471 (the audit of 1.8): "merge with: … merge --no-ff" whatever commands.json's `merge`
         # said, and a signed merge commit after --no-sign
@@ -2479,6 +2642,28 @@ class Lifecycle(Base):
             self.assertIn("�", run_wb("diff", "t-l1"))
         run_wb("feedback", "t-l1", "--text", "1. Keep it.")
         self.assertEqual(wait_phase("t-l1", {"review", "failed"})["phase"], "review")
+
+    def test_a_progress_check_on_a_large_edit_hashes_the_diff_without_holding_it(self):
+        # #678 (Codex's audit of 1.90.6): mark() captured the whole tracked diff before hashing
+        # it, 50 MiB of Python allocations for a replaced 12 MiB file, at every progress check
+        import tracemalloc
+        g = lambda *a: subprocess.run(["git", "-C", str(self.repo), *a], check=True,  # noqa
+                                      capture_output=True)
+        big = self.repo / "big.txt"
+        big.write_bytes(b"a line of text\n" * (12 << 16))
+        g("add", "big.txt")
+        g("commit", "-qm", "big")
+        big.write_bytes(b"another line\n" * (12 << 16))
+        tracemalloc.start()
+        try:
+            first = gitops.mark(self.repo)
+            peak = tracemalloc.get_traced_memory()[1]
+        finally:
+            tracemalloc.stop()
+        self.assertLess(peak, 4 << 20)
+        self.assertEqual(gitops.mark(self.repo), first)
+        big.write_bytes(b"another line\n" * (12 << 16) + b"!")
+        self.assertNotEqual(gitops.mark(self.repo), first)    # and a change still shows
 
     def test_the_users_git_settings_do_not_change_what_workbench_reads(self):
         # the audit: diff.external replaced the review diff, color.ui=always put escape codes in
@@ -2799,6 +2984,49 @@ class RepoMoved(Base):
         self.assertIn("isn't one of", self.fails("relocate", "t-r", "--repo", str(new)))
 
 
+    def test_relocate_works_when_git_writes_relative_worktree_paths(self):
+        # #682 (Claude's audit of main, reproduced with git 2.56): with worktree.useRelativePaths
+        # both links are relative, read against wb's cwd nothing matched, and every relocate
+        # was refused with "isn't one of <repo>'s worktrees"
+        if gitops.version() < (2, 48):
+            self.skipTest("worktree.useRelativePaths needs git 2.48+")
+        self.git(self.repo, "config", "worktree.useRelativePaths", "true")
+        self.start("t-rel", "ok")
+        wait_phase("t-rel", {"review"})
+        wt = store.Task("t-rel").worktree
+        self.assertFalse((wt / ".git").read_text().removeprefix("gitdir:").strip().startswith("/"))
+        old, new = self.repo, Path(self.tmp.name) / "relmoved"
+        old.rename(new)
+        self.assertIn("relocated t-rel", run_wb("relocate", "t-rel", "--repo", str(new)))
+        self.assertIn("+42", run_wb("diff", "t-rel"))
+        self.assertEqual(self.git(wt, "status", "--short").returncode, 0)
+        self.assertIn("accepted t-rel", run_wb("accept", "t-rel", "-m", "feat: answer"))
+
+    def test_after_a_relocate_an_edit_in_a_filled_submodule_is_still_refused(self):
+        # #682: relocate left submodules.json's `src` at the old path, submodule_edits failed on
+        # it and skipped the submodule, and the edit vanished at accept (the #419 failure)
+        lib = Path(self.tmp.name) / "lib"
+        self.git(self.tmp.name, "init", "-q", str(lib))
+        (lib / "lib.c").write_text("int x;\n")
+        self.git(lib, "add", ".")
+        self.git(lib, "-c", "user.email=t@t", "-c", "user.name=t", "commit", "-qm", "lib")
+        self.git(self.repo, "-c", "protocol.file.allow=always", "submodule", "add", "-q", str(lib), "vendor/lib")
+        self.git(self.repo, "-c", "user.email=t@t", "-c", "user.name=t", "commit", "-qm", "sub")
+        self.start("t-subm", "ok")
+        wait_phase("t-subm", {"review"})
+        wt = store.Task("t-subm").worktree
+        (wt / "vendor/lib/lib.c").unlink()
+        (wt / "vendor/lib/lib.c").write_text("int z;\n")
+        old, new = self.repo, Path(self.tmp.name) / "submoved"
+        old.rename(new)
+        run_wb("relocate", "t-subm", "--repo", str(new))
+        subs = json.loads((store.home() / "rules" / "t-subm" / gitops.SUBMODULES).read_text())
+        self.assertEqual(subs[0]["src"], str(new / "vendor/lib"))
+        self.assertIn("edits in submodule vendor/lib can't land: lib.c", self.fails("accept", "t-subm", "-m", "x"))
+        shutil.rmtree(new / "vendor/lib")                    # its checkout gone: said, not skipped
+        self.assertIn("edits in submodule vendor/lib can't be checked", self.fails("accept", "t-subm", "-m", "x"))
+
+
 class WorktreeSetup(Base):
     """#201 (the 2026-11-19 audit): a task's worktree holds only committed files, under the state
     directory, so a project's check that needs its installed dependencies, an ignored local file
@@ -2854,6 +3082,34 @@ class WorktreeSetup(Base):
         self.assertEqual(count.read_text().count("run"), 1)     # nor wb verify's two runs
         run_wb("verify", "t-once", "--test", "sh test_answer.sh", "--files", "test_answer.sh", "--setup")
         self.assertEqual(count.read_text().count("run"), 3)     # asked: in each checkout
+
+    def test_a_build_output_the_rounds_rebuilt_is_made_afresh_for_the_base(self):
+        # #732 (the 2026-11-21 audit): the setup built dist/, the agent rebuilt it from its change,
+        # and wb verify copied the candidate's dist/ to the base, whose tests then passed
+        self.ignore("dist/")
+        (self.repo / "src.txt").write_text("bug\n")
+        subprocess.run(["git", "-C", str(self.repo), "add", "src.txt"], check=True)
+        subprocess.run(["git", "-C", str(self.repo), "commit", "-qm", "src"], check=True)
+        count = Path(self.tmp.name) / "setup-runs"
+        self.start("t-dist", "ok", "--setup", f"mkdir -p dist && cp src.txt dist/lib.txt && echo run >> {count}",
+                   "--auto-fix", "0", "--no-self-review")
+        st = wait_phase("t-dist", {"review"})
+        t = store.Task("t-dist")
+        self.assertEqual(list(st["prepared_marks"]), ["dist"])
+        (t.worktree / "test_lib.sh").write_text("grep -qx fixed dist/lib.txt\n")
+        # what a test run leaves in a prepared path changes nothing: still copied, not set up again
+        (t.worktree / "dist" / "__pycache__").mkdir()
+        (t.worktree / "dist" / "__pycache__" / "lib.cpython-312.pyc").write_bytes(b"\0")
+        self.assertEqual(runner.prepared_mark(t.worktree / "dist"), st["prepared_marks"]["dist"])
+        run_wb("verify", "t-dist", "--test", "sh test_lib.sh", "--files", "test_lib.sh")
+        self.assertEqual(count.read_text().count("run"), 1)
+        (t.worktree / "src.txt").write_text("fixed\n")                     # the change, and its build
+        (t.worktree / "dist" / "lib.txt").write_text("fixed\n")
+        run_wb("verify", "t-dist", "--test", "sh test_lib.sh", "--files", "test_lib.sh")
+        from workbench import verify
+        r = verify.last(t)
+        self.assertEqual((r["base"]["exit"], r["candidate"]["exit"]), (1, 0))  # the base's own build
+        self.assertEqual(count.read_text().count("run"), 3)                  # made afresh in each
 
     def test_a_virtualenv_the_setup_made_is_made_again_in_each_scratch_checkout(self):
         # #325 (the audit of 1.4, reproduced): copied from the task's worktree, a .venv's scripts
@@ -3139,6 +3395,30 @@ class WorktreeSetup(Base):
         wait_phase("t-c9", {"review"})
         self.assertNotIn("local-input.dat", gitops.changed(store.Task("t-c9").worktree))
 
+    def test_takeover_refuses_a_task_whose_checkout_never_finished_so_a_hand_back_keeps_claudes_edits(self):
+        # #655: takeover after a failed checkout said "Edit in …/worktree"; wb feedback's runner saw
+        # checked_out unset, removed the worktree and made it again, and Claude's edits were gone
+        subprocess.run(["git", "-C", str(self.repo), "tag", "v0"], check=True)
+        self.ignore("local.dat")
+        (self.repo / "local.dat").write_text("LOCAL\n")
+        self.start("t-co", "ok", "--copy", "local.dat", "--base", "v0")
+        wait_phase("t-co", {"failed"})
+        task = store.Task("t-co")
+        self.assertFalse(runner.checked_out(task))
+        err = io.StringIO()
+        with self.assertRaises(SystemExit), redirect_stderr(err):
+            run_wb("takeover", "t-co")
+        self.assertIn("its worktree isn't ready yet", err.getvalue())
+        self.assertNotEqual(task.status["last"], "Claude took over")
+        # one taken over before the refusal: the runner fails it, never makes it again
+        task.set_status(phase="review", last="Claude took over", taken_over=True)
+        (task.worktree / "claude.txt").write_text("mine\n")
+        run_wb("feedback", "t-co", "--text", "carry on")
+        wait_phase("t-co", {"failed"})
+        self.assertEqual((task.worktree / "claude.txt").read_text(), "mine\n")
+        note = [r for r in store.notices() if r["task"] == "t-co"][-1]["text"]
+        self.assertIn("handed to Claude before its checkout finished", note)
+
     def test_copy_refuses_a_virtualenv_and_says_to_recreate_it_with_setup(self):
         # #260 (the audit of 1.2): a copied .venv's activate and shebangs named the checkout, so
         # the task's tests ran the developer's environment and its writes left the lane
@@ -3290,7 +3570,9 @@ class Context(Base):
                       transcript._user_message(p, False)[0])      # so read the head directly
 
     def test_a_session_filling_mid_round_hands_over_at_once(self):
-        """The runner, not OpenCode's own summary, decides what a filling session keeps."""
+        """The runner, not OpenCode's own summary, decides what a filling session keeps. The
+        fake's full step is 58% of the window without its reasoning tokens: counted as OpenCode
+        counts them, it is 76% (#644)."""
         self.start("t-c4", "fill", "--test", TEST_CMD)
         st = wait_phase("t-c4", {"review", "stuck", "failed"}, timeout=60)
         self.assertEqual(st["phase"], "review")
@@ -3320,6 +3602,61 @@ class Context(Base):
         self.assertIn("1. Size the heap for every push, not every tile.", now)
         from workbench import runner
         self.assertEqual(len(runner.round_asks(store.Task("t-c6"), 4)), 1)  # a carry-on adds nothing
+
+    def test_a_note_folded_into_a_carry_on_reaches_every_later_fresh_session(self):
+        # #677 (Claude's audit of main): round_asks skipped a carry-on whole, the note folded into
+        # it included, so the second handover's session never got the note, and steer_taken
+        # already counted it, so nothing said it went missing
+        from workbench import lessons, runner
+        t = store.Task("t-fold")
+        t.dir.mkdir(parents=True)
+        store.write_json(t.dir / "task.json", {"name": "t-fold", "created_at": store.now()})
+        t.set_status(window=32768, step_round=1, round=2)
+        for r, text in ((1, "Write the answer."), (2, lessons.FEEDBACK_HEAD + " 1. Use a heap.")):
+            t.round_dir(r).mkdir(parents=True)
+            t.round_dir(r).joinpath("prompt.md").write_text(text)
+        store.append_jsonl(t.dir / "steer.jsonl", {"ts": store.now(), "text": "Use the v2 API, not v1"})
+        rnd = {"full": 26000, "texts": ["Halfway there."]}
+        runner._full_round(t, 2, rnd)                       # the note goes with the first carry-on
+        self.assertIn("Use the v2 API", store.round_prompt(t, 3).read_text())
+        runner._full_round(t, 3, rnd)                       # and the second still carries it
+        self.assertIn("Use the v2 API", store.round_prompt(t, 4).read_text())
+        asks = runner.round_asks(t, 4)
+        self.assertEqual(sum("Use the v2 API" in a for a in asks), 1)   # once, not per handover
+        self.assertTrue(asks[0].startswith(lessons.FEEDBACK_HEAD))
+        store.append_jsonl(t.dir / "steer.jsonl", {"ts": store.now(), "text": "And log it."})
+        runner._early_notes(t, 4)                           # a note as round 4's model reloads
+        self.assertIn("And log it.", "\n".join(runner.round_asks(t, 4)))
+
+    def test_the_runners_nudge_is_never_one_of_what_a_later_fresh_session_was_asked(self):
+        # #681 (Claude's audit of main): a nudge round's prompt ("Claude, your reviewer,
+        # interrupted you… thinking for 12 minutes") went to every later fresh session in the
+        # step under "What you were asked to do", and a fresh round after it was stopped at its
+        # first long think "even after a nudge"
+        from workbench import lessons, runner
+        t = store.Task("t-nudged")
+        t.dir.mkdir(parents=True)
+        store.write_json(t.dir / "task.json", {"name": "t-nudged", "created_at": store.now()})
+        t.set_status(step_round=1, round=2)
+        for r, text in ((1, "Write the answer."), (2, lessons.FEEDBACK_HEAD + " 1. Use a heap.")):
+            t.round_dir(r).mkdir(parents=True)
+            t.round_dir(r).joinpath("prompt.md").write_text(text)
+        nudge = runner.NUDGE.format(mins=12)
+        store.append_jsonl(t.dir / "steer.jsonl", {"ts": store.now(), "text": nudge, "now": True,
+                                                   "by": "workbench"})
+        runner._steer_round(t, 2, True)
+        self.assertIn(nudge, store.round_prompt(t, 3).read_text())    # the agent still gets it
+        self.assertEqual(runner.round_asks(t, 3), [lessons.FEEDBACK_HEAD + " 1. Use a heap."])
+        store.append_jsonl(t.dir / "steer.jsonl", {"ts": store.now(), "text": nudge, "now": True,
+                                                   "by": "workbench"})
+        store.append_jsonl(t.dir / "steer.jsonl", {"ts": store.now(), "text": "Use v2.", "now": True})
+        runner._steer_round(t, 3, True)                    # Claude's note beside a nudge is kept
+        asks = "\n".join(runner.round_asks(t, 4))
+        self.assertIn("Use v2.", asks)
+        self.assertNotIn("without a tool call", asks)
+        self.assertTrue(runner.renudged({"nudged_round": 3, "session": "ses_1"}, 4))
+        self.assertFalse(runner.renudged({"nudged_round": 3, "session": None}, 4))  # a fresh one
+        self.assertFalse(runner.renudged({"nudged_round": 2, "session": "ses_1"}, 4))
 
     def test_a_fresh_session_after_a_feedback_round_still_carries_the_feedback(self):
         # Between rounds, an auto-fix round that started fresh carried only the failing tests:
@@ -3553,6 +3890,8 @@ class Context(Base):
         self.assertRegex(out, r"branch delegate/t-dd deleted \(was [0-9a-f]{8}\)")
         self.assertEqual(tip("t-dd"), "")
         self.assertEqual(store.Task("t-dd").status["tip"], step1["t-dd"])
+        rows = {r["task"]: r for r in store.results()}           # the kept step is credited (#722)
+        self.assertEqual((rows["t-dk"].get("landed_steps"), rows["t-dd"].get("landed_steps")), (1, None))
         self.start("t-d1", "ok")                         # one step, nothing committed: deleted
         wait_phase("t-d1", {"review"})
         self.assertIn("branch delegate/t-d1 deleted", run_wb("discard", "t-d1"))
@@ -3675,6 +4014,18 @@ class StartChecks(Base):
         self.assertNotIn("outside what", self.start("t-ok", "ok"))
         self.assertTrue(runner.untested((2, 2)))
         self.assertEqual(runner.untested((2, 9)), "")
+
+    def test_start_refuses_opencode_1x_before_writing_the_task_and_says_how_to_get_2x(self):
+        # #654: 1.x got only a "watch its first rounds" note; the runner then emptied the GPU and
+        # every round died as "opencode exited 1"
+        os.environ["FAKE_VERSION"] = "opencode v1.9.0"
+        with self.assertRaises(SystemExit) as e:
+            self.start("t-old", "ok")
+        self.assertEqual(e.exception.code, 3)
+        self.assertFalse(store.Task("t-old").exists)
+        self.assertIn("opencode.ai/v2/install", runner.OPENCODE_GET)
+        self.assertIn("opencode upgrade --major", runner.OPENCODE_GET)
+        self.assertIn(runner.OPENCODE_GET, "\n".join(cli.first_run()))
 
     def test_start_says_when_the_fixed_prompt_takes_much_of_the_window(self):
         # the 2026-11-19 audit (finding 27): a 25 KB CLAUDE.md on a 32K window started the agent
@@ -3837,7 +4188,7 @@ class Steering(Base):
             self.assertTrue(task.worktree.exists())         # stopped, not thrown away
         self.assertIn("nothing was running", run_wb("stop", "--all"))
 
-    def test_a_restart_raises_one_notice_for_its_tasks_and_resume_all_continues_them_in_order(self):
+    def test_a_restart_raises_one_notice_naming_its_tasks_and_resuming_them_continues_them_in_order(self):
         # #544: after a reboot each live task failed with a wake of its own guessing why, was
         # resumed one at a time, and one that never ran started at round 2 as if stopped
         self.start("t-r1", "slow")
@@ -3855,12 +4206,17 @@ class Steering(Base):
         rows = store.read_jsonl(store.home() / "notify.jsonl")[0][before:]
         self.assertEqual([(r["task"], r["kind"]) for r in rows], [("t-r1", "failed")])
         self.assertIn("2 tasks were interrupted by a restart", rows[0]["text"])
-        self.assertIn(f"wb resume --all --repo {shlex.quote(os.getcwd())}", rows[0]["text"])
+        # #692: by name, not `--all --repo <cwd>`, which resumed nothing for a session in ~ and
+        # another session's tasks in a shared repo
+        self.assertIn("wb resume t-r1 t-r2 continues them", rows[0]["text"])
         self.assertEqual(rows[0]["tasks"], ["t-r1", "t-r2"])
         self.assertGreaterEqual(cli._acked(store.Task("t-r2")), rows[0]["ts"])  # had with t-r1's
         for name in ("t-r1", "t-r2"):
             self.assertEqual(store.Task(name).status["last"], cli.RESTARTED)
-        out = run_wb("resume", "--all", "--repo", os.getcwd())
+        os.environ["HOME"] = os.getcwd()                    # a session in ~ claims none by directory
+        self.assertIn("nothing to resume", run_wb("resume", "--all", "--repo", os.getcwd()))
+        os.environ["HOME"] = self.env_before.get("HOME", "/")
+        out = run_wb("resume", "t-r2", "t-r1")              # the line's command: started order
         self.assertEqual(out.splitlines()[:2], ["resumed t-r1 in a fresh session (round 2)",
                                                 "resumed t-r2: its first round, which it never ran"])
         self.assertEqual(wait_phase("t-r1", {"review"}, timeout=40)["round"], 2)
@@ -3885,11 +4241,11 @@ class Steering(Base):
         rows = store.read_jsonl(store.home() / "notify.jsonl")[0][before:]
         self.assertEqual([(r["task"], r["kind"]) for r in rows], [("t-s1", "stuck")])
         self.assertIn("2 tasks' runners were stopped by a signal", rows[0]["text"])
-        self.assertIn(f"wb resume --all --repo {shlex.quote(os.getcwd())}", rows[0]["text"])
+        self.assertIn("wb resume t-s1 t-s2 continues them", rows[0]["text"])  # by name (#692)
         self.assertEqual(rows[0]["tasks"], ["t-s1", "t-s2"])
         self.assertGreaterEqual(cli._acked(store.Task("t-s2")), rows[0]["ts"])  # had with t-s1's
         os.environ["FAKE_SCENARIO"] = "ok"
-        out = run_wb("resume", "--all", "--repo", os.getcwd())
+        out = run_wb("resume", "t-s1", "t-s2")
         self.assertIn("resumed t-s1", out)
         self.assertIn("resumed t-s2", out)
 
@@ -3911,6 +4267,22 @@ class Steering(Base):
         self.assertIsNone(store.Task("t-park").status.get("parked"))
         wait_phase("t-park", {"review"})
         self.assertRegex(run_wb("status"), r"t-park +review ")
+
+    def test_the_quit_parks_a_task_waiting_for_review_as_it_stands(self):
+        # #698: only running tasks were parked, so a review left at /workbench-quit stayed
+        # "awaiting review" and every new conversation was told to pick it up
+        self.start("t-rev", "ok", "--test", TEST_CMD)
+        wait_phase("t-rev", {"review"})
+        out = run_wb("stop", "--all", "--park-waiting", "--repo", os.getcwd())
+        self.assertIn("parked as they stand (waiting on Claude): t-rev", out)
+        st = store.Task("t-rev").status
+        self.assertEqual(st["phase"], "review")                # its state unchanged
+        self.assertTrue(store.parked(st))
+        self.assertTrue(run_wb("status").startswith("no open tasks"))
+        self.assertGreaterEqual(cli._acked(store.Task("t-rev")),  # its review notice: handled
+                                max(r["ts"] for r in store.notices() if r["task"] == "t-rev"))
+        run_wb("takeover", "t-rev")                            # picked up: Claude's again
+        self.assertFalse(store.parked(store.Task("t-rev").status))
 
     def test_wb_doctor_names_the_tasks_left_waiting_on_claude_for_days(self):
         # #541: a task left stuck, failed or in review for weeks was named nowhere
@@ -4059,6 +4431,118 @@ class Steering(Base):
         os.environ["HOME"] = self.env_before.get("HOME", "/")
         self.assertIn("stopped: t-old", run_wb("stop", "--all", "--repo", here, *new))
 
+    def test_adopting_a_task_is_recorded_so_the_first_session_to_claim_it_owns_it(self):
+        # #687: nothing recorded an adoption, so once the process that started a task ended, every
+        # live session near it owned it for good, and the one back from `claude --resume` too
+        from workbench import models
+        gone = subprocess.Popen(["true"]); gone.wait()             # the first Claude Code, ended
+        a = subprocess.Popen(["sleep", "60"]); self.addCleanup(a.kill)   # two live sessions' processes
+        b = subprocess.Popen(["sleep", "60"]); self.addCleanup(b.kill)
+        t = store.Task("t-orphan")
+        t.dir.mkdir(parents=True)
+        store.write_json(t.dir / "task.json", {"name": "t-orphan", "created_at": store.now(),
+                                               "repo": str(self.repo), "cwd": str(self.repo),
+                                               "session": "sess-1", "claude_pid": gone.pid})
+        t.set_status(phase="review", round=1)
+        here = str(self.repo)
+        mine = lambda *ids: [x.name for x in cli._scope([store.Task("t-orphan")], here, list(ids))[0]]
+        self.assertEqual(mine("sess-2"), ["t-orphan"])            # gone: any session near may claim
+        self.assertEqual(mine("sess-3"), ["t-orphan"])
+        self.assertIn("adopted t-orphan", run_wb("adopt", "t-orphan", "--session", "sess-2",
+                                                 "--pid", str(a.pid)))
+        spec = store.Task("t-orphan").spec
+        self.assertEqual((spec["session"], spec["claude_pid"], spec["claude_start"]),
+                         ("sess-2", a.pid, models._started(a.pid)))
+        self.assertEqual(mine("sess-2"), ["t-orphan"])
+        self.assertEqual(mine("sess-3"), [])                       # the second drops it
+        with self.assertRaises(SystemExit), redirect_stderr(io.StringIO()):
+            run_wb("adopt", "t-orphan", "--session", "sess-3", "--pid", str(b.pid))  # too late
+        self.assertEqual(store.Task("t-orphan").spec["claude_pid"], a.pid)
+        a.kill(); a.wait()                                         # sess-2's process ends, resumed
+        self.assertIn("adopted", run_wb("adopt", "t-orphan", "--session", "sess-2", "--pid", str(b.pid)))
+        spec = store.Task("t-orphan").spec
+        self.assertEqual((spec["session"], spec["claude_pid"]), ("sess-2", b.pid))  # its own id, new pid
+
+    def test_a_notice_is_taken_once_under_the_lock_whoever_asks_first(self):
+        # #687, #696: the mod and wb wait each read `acked`, then wrote it, and both delivered
+        t = store.Task("t-acked")
+        store.write_json(t.dir / "task.json", {"name": "t-acked", "created_at": store.now()})
+        t.set_status(phase="review", round=1)
+        self.assertIn("acknowledged", run_wb("ack", "t-acked", "100.5"))
+        with self.assertRaises(SystemExit) as e, redirect_stderr(io.StringIO()):
+            run_wb("ack", "t-acked", "100.5")
+        self.assertEqual(e.exception.code, 3)
+        self.assertEqual(cli._acked(t), 100.5)
+
+    def test_plain_wb_status_from_claude_code_lists_the_calling_sessions_tasks(self):
+        # #693: the skill and the compaction note send Claude to `wb status`, which listed every
+        # session's open tasks as one, so one session could accept or discard another's
+        def task(name, phase, **spec):
+            t = store.Task(name)
+            t.dir.mkdir(parents=True)
+            store.write_json(t.dir / "task.json", {"name": name, "created_at": store.now(), **spec})
+            t.set_status(phase=phase, round=1)
+        other = Path(self.tmp.name) / "b"
+        task("t-a1", "review", repo=str(self.repo), cwd=str(self.repo), session="sess-a")
+        task("t-a0", "review", repo=str(self.repo), cwd=str(self.repo), session="sess-a0")  # before a /clear
+        task("t-b1", "review", repo=str(other), cwd=str(other), session="sess-b")
+        task("t-b2", "running", repo=str(other), cwd=str(other), session="sess-b")
+        me = subprocess.Popen(["sleep", "60"]); self.addCleanup(me.kill)
+        (store.home() / "claude-sessions").mkdir()
+        (store.home() / "claude-sessions" / str(me.pid)).write_text(f"{store.now()} sess-a0\n")
+        os.environ.update(CLAUDE_CODE_SESSION_ID="sess-a", CLAUDE_PID=str(me.pid))
+        out = run_wb("status")
+        rows = [l.split()[0] for l in out.splitlines()[1:] if not l.startswith("open elsewhere")]
+        self.assertEqual(sorted(rows), ["t-a0", "t-a1"])
+        self.assertIn("open elsewhere (other sessions'): t-b1", out)
+        both = run_wb("status", "--all-sessions")
+        self.assertIn("t-b1", both.split("open elsewhere")[0])
+        self.assertIn("left running (other sessions'): t-b2", run_wb("stop", "--all"))
+        self.assertEqual(store.Task("t-b2").status["phase"], "running")
+        os.environ.pop("CLAUDE_CODE_SESSION_ID")                       # a terminal: everyone's
+        self.assertIn("t-b1", run_wb("status").split("open elsewhere")[0])
+
+    def test_a_monorepo_package_task_is_not_a_sibling_packages_session(self):
+        # #695: a session in /mono/pkg-b claimed a task for /mono/pkg-a, being inside the repo
+        mono = Path(self.tmp.name) / "mono"
+        for d in ("pkg-a/src", "pkg-b"):
+            (mono / d).mkdir(parents=True)
+
+        def task(name, **spec):
+            t = store.Task(name)
+            t.dir.mkdir(parents=True)
+            store.write_json(t.dir / "task.json", {"name": name, "created_at": store.now(), **spec})
+            t.set_status(phase="review", round=1)
+            return t
+        pkg = task("t-pkg", repo=str(mono), subdir="pkg-a", cwd=str(mono))         # wb start --repo pkg-a
+        here = task("t-here", repo=str(mono), cwd=str(mono / "pkg-a"))             # started in pkg-a
+        whole = task("t-whole", repo=str(mono), cwd=str(Path(self.tmp.name)))     # from outside
+        mine = lambda d: sorted(t.name for t in cli._scope([pkg, here, whole], str(d))[0])  # noqa: E731
+        self.assertEqual(mine(mono / "pkg-b"), ["t-whole"])
+        self.assertEqual(mine(mono / "pkg-a" / "src"), ["t-here", "t-pkg", "t-whole"])
+        self.assertEqual(mine(mono), ["t-here", "t-pkg", "t-whole"])
+
+    def test_a_bare_wb_wait_takes_only_the_calling_sessions_notices(self):
+        # #696: a bare `wb wait` in one session acknowledged another session's review, so the
+        # owner's mod never woke for it
+        def task(name, **spec):
+            t = store.Task(name)
+            t.dir.mkdir(parents=True)
+            store.write_json(t.dir / "task.json", {"name": name, "created_at": store.now(), **spec})
+            t.set_status(phase="review", round=1)
+            return t
+        other = Path(self.tmp.name) / "b"
+        theirs = task("t-theirs", repo=str(other), cwd=str(other), session="sess-b")
+        ours = task("t-ours", repo=str(self.repo), cwd=str(self.repo), session="sess-a")
+        theirs.notify("review", "REPORT-theirs")
+        os.environ["CLAUDE_CODE_SESSION_ID"] = "sess-a"
+        with self.assertRaises(SystemExit), redirect_stderr(io.StringIO()):
+            run_wb("wait", "--timeout", "1")                     # theirs only: nothing to take
+        self.assertEqual(cli._acked(theirs), 0.0)                # left for its own session
+        ours.notify("review", "REPORT-ours")
+        self.assertIn("REPORT-ours", run_wb("wait", "--timeout", "1"))
+        self.assertIn("REPORT-theirs", run_wb("wait", "--all-sessions", "--timeout", "1"))
+
     def test_takeover_stops_the_agent_and_hands_over_the_worktree(self):
         self.start("t-take", "slow", "--test", TEST_CMD)
         self.wait_session("t-take")
@@ -4070,6 +4554,35 @@ class Steering(Base):
         self.assertIn("accepted t-take", run_wb("accept", "t-take", "-m", "feat: answer"))
         with self.assertRaises(SystemExit):                  # nothing left to steer
             run_wb("steer", "t-take", "--text", "x")
+
+    def test_a_task_claude_took_over_and_accepted_is_no_win_for_its_model_knobs_or_skills(self):
+        # #647 (the audit of main): results.step marked the step took_over, but the router, the
+        # tuning and the skill records read `outcome: accepted` alone, so a takeover's accept
+        # raised the model's quality and scored its knob values 1.0, above an honest accept
+        from workbench import models, progress, router, skills, tuning
+        self.start("t-took", "slow", "--test", TEST_CMD)
+        self.wait_session("t-took")
+        run_wb("takeover", "t-took")
+        task = store.Task("t-took")
+        (task.worktree / "answer.txt").write_text("42\n")
+        run_wb("accept", "t-took", "-m", "feat: answer")
+        row = [r for r in store.results() if r["task"] == "t-took"][-1]
+        self.assertEqual(row["outcome"], "accepted")
+        self.assertTrue(tuning.took_over(row) and not tuning.agent_landed(row))
+        sc = router.score(models.resolve(row["model"]), row["size"])
+        self.assertEqual((sc.tries, sc.wins), (1, 0))       # tried, and Claude finished it
+        self.assertEqual(tuning.reward(row, 10), 0.0)
+        tally = skills._tally()
+        skills._count(tally, row)
+        self.assertEqual((tally["accepted"], tally["first_try"]), (0, 0))
+        own = {**row, "steps": [{**s, "took_over": False} for s in row["steps"]]}
+        self.assertTrue(tuning.agent_landed(own))
+        self.assertGreater(tuning.reward(own, 10), 0.0)
+        # progress.helped judges rows as the Stats feed does: a spec-gap discard isn't a miss
+        store.append_jsonl(store.home() / "results.jsonl", {
+            "model": "x/y", "outcome": "discarded", "spec_gaps": [{"round": 1}], "ran": True,
+            "interventions": [{"kind": "hint"}]})
+        self.assertEqual(progress.helped("x/y")["hint"], [0, 0])
 
 
 class Watch(Base):
@@ -4091,6 +4604,20 @@ class Watch(Base):
         self.assertIn("context 1.3k of 32K (3%)", clock)  # the agent's context, not a sum
         self.assertNotIn("Σ", clock)
         self.assertLess(out.index("■ tests FAIL"), out.index("round 2"))
+
+    def test_an_earlier_session_of_a_handed_over_task_is_exported_once_for_every_watch(self):
+        # #691: the pane runs `wb watch --json` on every status write of the followed task, and
+        # each run exported every session before a handover again, a core kept busy
+        from workbench import transcript
+        t = store.Task("t-handed")
+        store.write_json(t.dir / "task.json", {"name": "t-handed", "created_at": store.now()})
+        t.set_status(phase="review", round=1, session="ses_new", sessions=["ses_old1", "ses_old2"])
+        exported = []
+        fake = lambda sid, strict=False: exported.append(sid) or {"info": {"id": sid}, "messages": []}  # noqa: E731
+        with mock.patch.object(transcript, "export", fake):
+            for _ in range(3):
+                run_wb("watch", "t-handed", "--json")
+        self.assertEqual(sorted(exported), ["ses_new"] * 3 + ["ses_old1", "ses_old2"])
 
     def test_json_lines_for_the_pane_end_with_what_is_happening(self):
         self.start("t-live", "hang")
@@ -4390,6 +4917,23 @@ class AskServer(Base):
         store.write_json(context.ask_dir(task) / f"{qid}.json",
                          {"id": qid, "ts": store.now(), "question": "?", **q})
 
+    def test_a_question_never_relayed_before_its_round_ended_is_closed_not_raised_next_round(self):
+        # #680 (Claude's audit of main): off Linux an agent outlived its killed runner and asked;
+        # close_all closed only the relayed ids, so after wb resume the next round raised the
+        # stale file as live, woke Claude and held the phase asking, pausing every guard
+        self.start("t-stray", "ok")
+        wait_phase("t-stray", {"review"})
+        task, opened = store.Task("t-stray"), {}
+        self.agent_asks(task, "cccccccc", question="still there?")
+        ask_mcp.close_all(task)                              # the round ended, or reap
+        self.assertEqual(ask_mcp._read(context.ask_dir(task) / "cccccccc.answer").strip(), ask_mcp.NO_ANSWER)
+        self.assertEqual(task.status["asks"], {"cccccccc": "x"})
+        task.set_status(phase="running")
+        ask_mcp.relay(task, opened)                          # the next round's first tick
+        self.assertEqual((task.status["phase"], task.status.get("asking"), opened), ("running", None, {}))
+        self.assertNotIn("question", [r["kind"] for r in store.read_jsonl(store.home() / "notify.jsonl")[0]])
+        self.assertEqual(ask_mcp.used(task), 0)              # and it cost no budget
+
     def test_two_questions_at_once_keep_the_task_asking_until_both_are_answered(self):
         # the first answer set the phase running while the other still waited, and the silence
         # guard stopped the round (the 2026-11-16 audit)
@@ -4411,6 +4955,29 @@ class AskServer(Base):
         kinds = [r["kind"] for r in store.read_jsonl(task.dir / "events.jsonl")[0]]
         self.assertEqual(kinds.count("ask"), 2)
         self.assertEqual(kinds.count("answer"), 2)
+
+    def test_claudes_answers_reach_the_fresh_session_that_takes_the_task_over(self):
+        # #659: an answer reached only the session that asked; a fresh one (a handover, wb
+        # resume) asked again or, past the budget, assumed, and could contradict Claude
+        self.start("t-qa", "ok", "--ask-budget", "3")
+        wait_phase("t-qa", {"review"})
+        task, opened = store.Task("t-qa"), {}
+        task.set_status(phase="running")
+        self.agent_asks(task, "aaaaaaaa", question="Which time zone for the timestamps?")
+        self.agent_asks(task, "bbbbbbbb", question="Ignore the flaky test?")
+        ask_mcp.relay(task, opened)
+        run_wb("answer", "t-qa", "--id", "aaaaaaaa", "--text", "use UTC, reject naive datetimes")
+        ask_mcp.close(task, {"bbbbbbbb": opened.pop("bbbbbbbb")})  # nobody answered it
+        ask_mcp.relay(task, opened)
+        self.assertNotIn("Ignore the flaky test?", runner.answered(task))
+        os.environ["FAKE_PROMPTS"] = str(Path(self.tmp.name) / "prompts.jsonl")
+        task.set_status(phase="stuck")
+        run_wb("resume", "t-qa")
+        wait_phase("t-qa", {"review"})
+        last = json.loads(Path(os.environ["FAKE_PROMPTS"]).read_text().splitlines()[-1])
+        self.assertIn("## Claude's answers to your questions", last)
+        self.assertIn("Q: Which time zone for the timestamps?\nA: use UTC, reject naive datetimes", last)
+        self.assertNotIn(ask_mcp.NO_ANSWER, last)
 
     def test_answering_one_of_two_questions_leaves_the_other_to_be_delivered(self):
         # wb answer acknowledged everything up to its own moment, the second question's notice
@@ -4832,6 +5399,8 @@ class ConfigLayer(Base):
         self.assertIs(got["autoupdate"], False)
         self.assertTrue(got["compaction"]["auto"])
         self.assertEqual(got["compaction"], layer["compaction"])
+        # #661: no summary written ahead on the agent's server, then thrown away at the handover
+        self.assertIs(got["compaction"]["background"], False)
         self.assertEqual(got["provider"]["ollama"]["models"], {"mimo-v2.6:9b-q8_0": {
             "limit": {"context": 32768, "output": 2048}, "options": {"max_tokens": 2048}}})
         # the layer's provider timeouts (#491) stay beside the pins, and nothing else of the entry
@@ -4954,6 +5523,37 @@ class AgentContext(Base):
         self.assertLessEqual({("question", "*"), ("execute", "*"), ("opencode_*", "*"), ("skill", "docx"), ("skill", "workbench"),
                              ("skill", "publishing-arm")}, denied)
         self.assertNotIn(("skill", "add-level"), denied)
+
+    def test_the_users_personal_rules_reach_the_agent_after_their_claude_md(self):
+        # #673 (the 2026-11-21 audit): ~/.claude/rules/*.md, which Claude Code loads for every
+        # project, never reached the agent, and Claude reviewed against rules it was never told
+        home = Path(self.tmp.name) / "home"
+        os.environ["HOME"] = str(home)
+        os.environ.pop("CLAUDE_CONFIG_DIR", None)
+        rules = home / ".claude" / "rules"
+        (rules / "lang").mkdir(parents=True)
+        (home / ".claude" / "CLAUDE.md").write_text("user rules\n")
+        (rules / "testing.md").write_text("Test names read as sentences.\n@extra.md\n")
+        (rules / "extra.md").write_text("imported\n")
+        (rules / "lang" / "python.md").write_text("Type hints everywhere.\n")
+        (rules / ".draft.md").write_text("not yet\n")
+        (home / ".ssh").mkdir()
+        (home / ".ssh" / "notes.md").write_text("secret\n")
+        os.symlink(home / ".ssh" / "notes.md", rules / "leak.md")      # a link into a secret
+        self.start("t-urules", "ok")
+        wait_phase("t-urules", {"review"})
+        task = store.Task("t-urules")
+        files, _ = context.instruction_files(task)
+        mine = context.rules_dir(task) / "user-rules"
+        names = [str(p.relative_to(mine)) for p in files if p.is_relative_to(mine)]
+        self.assertEqual(names, ["extra.md", "lang/python.md", "testing.md"])
+        self.assertEqual(files[1], context.rules_dir(task) / "CLAUDE.md")  # after the user's own
+        self.assertEqual((mine / "lang" / "python.md").read_text(), "Type hints everywhere.\n")
+        _, parts = context.fixed_prompt(task)
+        self.assertIn("~/.claude/rules/lang/python.md", dict(parts))
+        (rules / "lang" / "python.md").unlink()                         # removed: its copy too
+        context.instruction_files(task)
+        self.assertFalse((mine / "lang" / "python.md").exists())
 
     def test_uncommitted_local_instructions_come_from_the_repo(self):
         from workbench import context
@@ -5795,6 +6395,26 @@ class RealOpenCodeRun(Base):
         self.assertEqual(runner.fresh_reason(task), runner.COMPACTED)
         self.assertIn("OpenCode compacted", run_wb("watch", "t-run", "--once", "--no-color"))
 
+    def test_no_compaction_summary_is_written_ahead_of_the_handover_point(self):
+        # #661 (checked on OpenCode 2.3.2): its background compaction forked a full-context
+        # summary request at about 43% of a 32K window, below the 60% handover, on the agent's own
+        # server: a one-slot server queued the agent behind it, and the handover threw it away
+        task, st = self.answered([WRITE_42])
+        self.server.kill()
+        self.server.wait()
+        self.serve([], read=18_000)                                # 55%: past 2.3.2's precompute
+        env = {**runner.agent_env(task), "PWD": str(task.worktree)}
+        before = len(self.requests.read_text().splitlines())
+        for text in ("Go on.", "Go on again."):
+            subprocess.run(lane.wrap(context.writable(task), [
+                "opencode", "run", "--standalone", "-m", "cap/cap", "--format", "json",
+                "--session", st["session"], text]), cwd=task.worktree, env=env,
+                capture_output=True, timeout=180)
+        later = self.requests.read_text().splitlines()[before:]
+        self.assertTrue(later)
+        self.assertFalse([r for r in later if "<template>" in r and "## Objective" in r])
+        self.assertEqual(runner.context_state(task)["compactions"], 0)
+
     def test_a_projects_opencode_json_keeps_neither_compaction_nor_the_window_nor_titles(self):
         # #519 (checked on OpenCode 2.3.2): a repo's committed opencode.json loads after the layer
         # and won: compaction off, a wider window than wb planned the handover against, titles
@@ -6257,6 +6877,148 @@ class Lane(Base):
         self.assertIn(str(home / "perl5"), r)
         self.assertNotIn(str(home / "letters"), r)
 
+    @home_outside_the_lane
+    def test_package_managers_keep_their_own_git_repositories_in_the_tool_homes(self):
+        # #665 (the 2026-11-21 audit): pre-commit's `git remote add` in ~/.cache/pre-commit,
+        # uv's fetch in ~/.cache/uv and Go's in go/pkg were refused by the shim, so a git
+        # dependency failed the setup; with a dotfiles repo at ~ even their `git init` was
+        self.start("t-cachegit", "ok")
+        wait_phase("t-cachegit", {"review"})
+        task = store.Task("t-cachegit")
+        home = self.fake_home()
+        subprocess.run(["git", "init", "-q", str(home)], check=True)     # the user's dotfiles
+        (home / ".cache").mkdir()
+        (home / "go" / "pkg").mkdir(parents=True)
+        (home / "notes").mkdir()
+        env = {**runner.agent_env(task), "GIT_AUTHOR_NAME": "t", "GIT_AUTHOR_EMAIL": "t@t",
+               "GIT_COMMITTER_NAME": "t", "GIT_COMMITTER_EMAIL": "t@t"}
+        git = lambda *a: subprocess.run(["git", *a], env=env, capture_output=True, text=True,
+                                        cwd=task.worktree)
+        for d in (home / ".cache/pre-commit/repoabc", home / "go/pkg/mod/cache/vcs/0f3a"):
+            out = git("init", "-q", "--template=", str(d))
+            self.assertEqual(out.returncode, 0, out.stderr)
+            out = git("-C", str(d), "remote", "add", "origin", "https://example.invalid/x.git")
+            self.assertEqual(out.returncode, 0, out.stderr)
+        # the task's repo, and the user's own repositories outside the lane, stay read-only
+        self.assertIn("read-only", git("commit", "--allow-empty", "-m", "x").stderr)
+        self.assertIn("read-only", git("-C", str(home / "notes"), "commit", "--allow-empty",
+                                       "-m", "x").stderr)
+        self.assertIn("read-only", git("init", "-q", str(home / "notes" / "x")).stderr)
+
+    def test_the_agents_scratch_commits_and_tags_are_never_signed(self):
+        # #666 (the 2026-11-21 audit): with commit.gpgsign in ~/.gitconfig, every test that
+        # committed in a /tmp repo failed in the lane ('gpg failed to sign the data')
+        self.start("t-unsigned", "ok")
+        wait_phase("t-unsigned", {"review"})
+        task = store.Task("t-unsigned")
+        conf = Path(self.tmp.name) / "gitconfig"
+        conf.write_text("[user]\n\tname = t\n\temail = t@t\n[commit]\n\tgpgsign = true\n"
+                        "[tag]\n\tgpgsign = true\n[gpg]\n\tprogram = false\n")
+        with mock.patch.dict(os.environ, {"GIT_CONFIG_GLOBAL": str(conf), "GIT_CONFIG_COUNT": "1",
+                                          "GIT_CONFIG_KEY_0": "core.abbrev",
+                                          "GIT_CONFIG_VALUE_0": "9"}):
+            env = runner.agent_env(task)
+        fixture = Path(tempfile.mkdtemp())
+        self.addCleanup(shutil.rmtree, fixture, True)
+        git = lambda *a: subprocess.run(["git", "-C", str(fixture), *a], env=env,
+                                        capture_output=True, text=True)
+        self.assertEqual(git("init", "-q").returncode, 0)
+        out = git("commit", "-q", "--allow-empty", "-m", "fixture")
+        self.assertEqual(out.returncode, 0, out.stderr)
+        out = git("tag", "-a", "v1", "-m", "v1")
+        self.assertEqual(out.returncode, 0, out.stderr)
+        self.assertEqual(len(git("rev-parse", "--short", "HEAD").stdout.strip()), 9)  # kept
+
+    @unittest.skipUnless(lane.abi(), "needs Landlock: the kernel refuses the reads")
+    @home_outside_the_lane
+    def test_a_ros_overlay_under_the_home_on_pythonpath_and_ld_library_path_stays_readable(self):
+        # #667 (the 2026-11-21 audit): ~/ros2_ws/install was left out of the read lane, so
+        # `import my_msgs` raised PermissionError and its libraries couldn't be opened
+        home = self.fake_home()
+        site = home / "ros2_ws/install/my_msgs/lib/python3/site-packages"
+        libs = home / "ros2_ws/install/my_msgs/lib"
+        (site / "my_msgs").mkdir(parents=True)
+        (site / "my_msgs" / "__init__.py").write_text("OK = 1\n")
+        (libs / "libmy_msgs.so").write_text("elf")
+        (home / ".ssh").mkdir()
+        (home / ".ssh" / "id_ed25519").write_text("key")
+        (home / "letters.txt").write_text("private")
+        os.environ.update(WB_USER_PYTHONPATH=str(site), LD_LIBRARY_PATH=f"{libs}:{home}",
+                          AMENT_PREFIX_PATH=f"{home / 'ros2_ws/install/my_msgs'}:/",
+                          CMAKE_PREFIX_PATH=str(home / ".ssh"))   # never ~, /, or a secret
+        task = self.bare_task("t-ros", self.repo)
+        self.assertEqual(self.reads_in_lane(task, [site / "my_msgs" / "__init__.py",
+                                                   libs / "libmy_msgs.so", home / "letters.txt",
+                                                   home / ".ssh" / "id_ed25519"]),
+                         ["read", "read", "refused", "refused"])
+
+    @unittest.skipUnless(lane.abi(), "needs Landlock")
+    @home_outside_the_lane
+    def test_jupyter_writes_its_kernel_connection_files_inside_the_lane(self):
+        # #668 (the 2026-11-21 audit): ~/.local/share/jupyter/runtime is outside the lane, so
+        # every notebook test failed with PermissionError before a kernel started
+        self.start("t-jupyter", "ok")
+        wait_phase("t-jupyter", {"review"})
+        task = store.Task("t-jupyter")
+        home = self.fake_home()
+        (home / ".local" / "share").mkdir(parents=True)
+        env = runner.agent_env(task)
+        script = ("import os; d = os.environ.get('JUPYTER_RUNTIME_DIR', os.path.expanduser("
+                  "'~/.local/share/jupyter/runtime')); "     # jupyter_core's default without it
+                  "os.makedirs(d, exist_ok=True); open(os.path.join(d, 'kernel-1.json'), 'w')")
+        out = subprocess.run(lane.wrap(context.writable(task), [sys.executable, "-c", script],
+                                       context.readable(task)), env=env, capture_output=True,
+                             text=True, timeout=20)
+        self.assertEqual(out.returncode, 0, out.stderr)
+        with mock.patch.dict(os.environ, {"JUPYTER_RUNTIME_DIR": "/srv/jupyter"}):
+            self.assertEqual(runner.agent_env(task)["JUPYTER_RUNTIME_DIR"], "/srv/jupyter")
+
+    def test_the_agent_gets_build_daemons_of_its_own_not_the_users(self):
+        # #669 (the 2026-11-21 audit): Gradle, sccache and MSBuild share a per-user daemon, so
+        # the user's builds ran in the agent's, under Landlock, and the agent's in the user's
+        self.start("t-daemons", "ok")
+        wait_phase("t-daemons", {"review"})
+        task = store.Task("t-daemons")
+        with mock.patch.dict(os.environ, {"GRADLE_OPTS": "-Xmx2g", "SCCACHE_SERVER_PORT": "4226",
+                                          "MSBUILDDISABLENODEREUSE": "0"}):
+            env = runner.agent_env(task)
+            again = runner.agent_env(task)
+        runtime = context.runtime_dir(task)
+        self.assertEqual(env["GRADLE_OPTS"].split(),
+                         ["-Xmx2g", f"-Dorg.gradle.daemon.registry.base={runtime / 'gradle'}",
+                          "-Dkotlin.compiler.execution.strategy=in-process"])
+        self.assertNotEqual(env["SCCACHE_SERVER_PORT"], "4226")
+        self.assertEqual(env["SCCACHE_SERVER_PORT"], again["SCCACHE_SERVER_PORT"])  # per task
+        self.assertEqual({k: env[k] for k in runner.DAEMONS_OFF}, runner.DAEMONS_OFF)
+        Path(os.environ["WB_COMMANDS"]).write_text(json.dumps({"paths": ["*"]}))  # lane off
+        self.assertNotIn("SCCACHE_SERVER_PORT", runner.agent_env(task))
+
+    def test_a_mise_config_the_user_trusts_is_trusted_in_the_worktree_too(self):
+        # #674 (the 2026-11-21 audit): mise keeps trust per path, so in the worktree every shim
+        # failed with 'Config files in …/mise.toml are not trusted', and `mise trust` is outside
+        # the lane. A fake mise: `mise trust --show` prints what $FAKE_MISE_SHOW holds.
+        (self.repo / "mise.toml").write_text('[tools]\nnode = "22"\n')
+        subprocess.run(["git", "-C", str(self.repo), "add", "mise.toml"], check=True)
+        subprocess.run(["git", "-C", str(self.repo), "commit", "-qm", "mise"], check=True)
+        bin_ = Path(self.tmp.name) / "mise-bin"
+        bin_.mkdir()
+        (bin_ / "mise").write_text('#!/bin/sh\n[ "$1 $2" = "trust --show" ] && cat "$FAKE_MISE_SHOW"\n')
+        (bin_ / "mise").chmod(0o755)
+        show = Path(self.tmp.name) / "show.txt"
+        show.write_text(f"{self.repo}: untrusted\n")
+        os.environ.update(PATH=f"{bin_}{os.pathsep}{os.environ['PATH']}", FAKE_MISE_SHOW=str(show))
+        out = self.start("t-mise", "ok")
+        self.assertIn(f"note: mise doesn't trust {self.repo}'s config", out)
+        wait_phase("t-mise", {"review"})
+        task = store.Task("t-mise")
+        self.assertNotIn("MISE_TRUSTED_CONFIG_PATHS", runner.agent_env(task))
+        show.write_text(f"{self.repo}: trusted\n/elsewhere: untrusted\n")  # not the repo's
+        with mock.patch.dict(os.environ, {"MISE_TRUSTED_CONFIG_PATHS": "/srv/mine"}):
+            env = runner.agent_env(task)
+        self.assertEqual(env["MISE_TRUSTED_CONFIG_PATHS"],
+                         f"/srv/mine{os.pathsep}{os.path.realpath(store.home())}")
+        self.assertTrue(task.worktree.resolve().is_relative_to(os.path.realpath(store.home())))
+
     def test_a_fresh_cargo_home_gets_its_caches_made_so_the_split_grants_them(self):
         # the 0.90 review: ~/.cargo split around bin/ and env granted only what existed, so a
         # fresh rustup install couldn't make registry/ and a git dependency couldn't make git/
@@ -6639,6 +7401,29 @@ class Lane(Base):
         self.assertIn(f"the lane refused {outside}/keys/debug.keystore: wb allow t-refused --path "
                       f"{outside} if the tests need it", report)
         self.assertNotIn("example.org", "".join(st["tests"]["lane"]))   # a URL's path isn't one
+
+    def test_a_refused_file_not_made_yet_is_named_by_the_directory_a_grant_makes(self):
+        # #670 (the 2026-11-21 audit): the auto-fix line said `--path <the keystore>`, which made
+        # a directory of that name, and a path with a space was cut at it, granting its parent's
+        task = self.bare_task("t-670", self.repo)
+        outside = Path(tempfile.mkdtemp(dir=os.path.expanduser("~"), prefix=".wb-670-"))
+        self.addCleanup(shutil.rmtree, outside, True)
+        (outside / "John Smith" / "AppData").mkdir(parents=True)
+        spaced = outside / "John Smith" / "AppData" / "x.keystore"
+        keystore = outside / "keys" / "debug.keystore"
+        out = (f"java.io.FileNotFoundException: {keystore} (Permission denied)\n"
+               f"java.io.FileNotFoundException: {spaced} (Permission denied)\n"
+               f"PermissionError: [Errno 13] Permission denied: '{spaced}'\n")
+        self.assertEqual(runner.lane_refused(task, out), [str(keystore), str(spaced)])
+        line = runner.not_the_code(task, {"ok": False, "exit": 1, "lane": [str(keystore),
+                                                                           str(spaced)]})
+        self.assertIn(f"wb allow t-670 --path {outside}; wb allow t-670 --path "
+                      f"{shlex.quote(str(spaced.parent))}, then", line)
+        self.assertIn(shlex.quote(str(spaced)), line)
+        with self.assertRaises(SystemExit):
+            cli._lane_dir(str(keystore))
+        self.assertFalse(keystore.exists())
+        self.assertEqual(cli._lane_dir(str(keystore.parent)), str(keystore.parent))  # its dir
 
     @unittest.skipUnless((lane.abi() or 0) >= 9, "needs Landlock ABI 9")
     @home_outside_the_lane
@@ -7055,6 +7840,46 @@ class Permission(Base):
                 found = r["effect"]
         return found
 
+    def test_installing_what_the_project_lists_with_its_usual_flags_needs_no_question(self):
+        # #671 (the 2026-11-21 audit): `pnpm install --frozen-lockfile` and `pip install -e
+        # ".[dev]"` were refused, though the bare forms were the agent's
+        task = store.Task("t-flags")
+        task.dir.mkdir(parents=True)
+        (task.dir / "task.json").write_text(json.dumps({"name": "t-flags", "repo": str(self.repo)}))
+        rules = context.shell_rules(task)
+        for cmd in ("pnpm install --frozen-lockfile", "npm install --legacy-peer-deps",
+                    "bun install --frozen-lockfile", "npm i --no-audit", "pnpm i --offline",
+                    "npm install --production", "bun install --immutable"):
+            self.assertEqual(self.verdict(rules, cmd), "allow", cmd)
+        for cmd in ("pnpm install --frozen-lockfile lodash", "npm install --legacy-peer-deps x",
+                    "npm install left-pad", "bun install --prod zod"):
+            self.assertEqual(self.verdict(rules, cmd), "deny", cmd)       # a new package asks
+        pip = self.verdict(rules, "pip install -e .")    # allowed where pip's install is bounded
+        for cmd in ('pip install -e ".[dev]"', "pip install -e .[dev,test]",
+                    "python3 -m pip install -e '.[all]'", 'uv pip install -e ".[dev]"'):
+            self.assertEqual(self.verdict(rules, cmd), pip, cmd)
+        self.assertEqual(self.verdict(rules, "pip install -e .[dev] requests"), "deny")
+
+    def test_more_ecosystems_and_plain_builtins_run_without_asking(self):
+        # #672 (the 2026-11-21 audit): OCaml, Clojure, Erlang, Gleam, Elm, CocoaPods and Ant had
+        # no entry, nor pushd/popd or printenv, so each first use cost a question and a wake
+        task = store.Task("t-eco")
+        task.dir.mkdir(parents=True)
+        (task.dir / "task.json").write_text(json.dumps({"name": "t-eco", "repo": str(self.repo)}))
+        rules = context.shell_rules(task)
+        for cmd in ("dune build", "dune test", "opam exec -- dune build", "lein test",
+                    "clojure -M:test", "clj -X:test", "rebar3 eunit", "nimble test",
+                    "shards install", "shards build", "crystal spec", "nim c -r t.nim", "gleam test",
+                    "elm make src/Main.elm", "mill foo.test", "scala-cli test .", "pod install",
+                    "ant test", "pushd sub", "popd", "printenv PATH", ":", "ulimit -n 4096",
+                    "local x=1", "declare -a xs", "shift", "trap 'rm -f x' EXIT", "pgrep -f srv",
+                    "nimble install -d"):
+            self.assertEqual(self.verdict(rules, cmd), "allow", cmd)
+        for cmd in ("opam install lwt", "nimble install jester", "gleam add gleam_json",
+                    "elm install elm/http", "clojure -Ttools install io.github.x/y '{}' :as y",
+                    "opam switch create 5.1", "nix build"):
+            self.assertEqual(self.verdict(rules, cmd), "deny", cmd)
+
     def test_git_by_path_is_refused_but_a_directory_named_git_is_not(self):
         # `*/git` refused `go test ./internal/git` whatever Claude allowed, and `time -p sudo`
         # matched only the allow rule `time *` (the 2026-11-16 audit)
@@ -7125,6 +7950,38 @@ class Permission(Base):
         self.assertEqual(self.verdict(context.shell_rules(store.Task("t-acc-gh")), "gh run list"),
                          "deny")                                        # never the hard limits
 
+    def test_a_test_commands_tool_still_asks_before_it_adds_a_dependency(self):
+        # #646 (the audit of main): --test 'npm test' granted `npm *` after the ASK_FIRST denies,
+        # and the last matching rule wins, so `npm install left-pad` was allowed; so were `uv add`
+        # under `uv run pytest`, `cargo add` under `cargo test`, `npx -y` under `npx vitest run`
+        cases = {"npm test": ("npm install left-pad", "npm run lint"),
+                 "pnpm test": ("pnpm add lodash", "pnpm run build"),
+                 "uv run pytest": ("uv add requests", "uv run ruff check"),
+                 "cargo test": ("cargo add serde", "cargo clippy"),
+                 "go test ./...": ("go get github.com/x/y", "go vet ./..."),
+                 "python -m pytest": ("python -m pip install requests", "python -m mypy src"),
+                 "npx vitest run": ("npx -y cowsay", "npx vitest run src/a.test.ts")}
+        for n, (test, (adds, uses)) in enumerate(cases.items()):
+            task = store.Task(f"t-tool{n}")
+            task.dir.mkdir(parents=True)
+            exact, tools = context.test_allowances(test)
+            context.grant(task, "allow", exact)
+            context.grant(task, "test_tools", tools)
+            rules = context.shell_rules(task)
+            self.assertEqual(self.verdict(rules, test), "allow", test)
+            self.assertEqual(self.verdict(rules, f"CI=1 {test}"), "allow", test)
+            self.assertEqual(self.verdict(rules, uses), "allow", (test, uses))  # the tool's other work
+            self.assertEqual(self.verdict(rules, adds), "deny", (test, adds))   # still asks first
+        # a test command that is itself an ASK_FIRST shape stays the agent's to run, as written
+        task = store.Task("t-tool-x")
+        task.dir.mkdir(parents=True)
+        exact, tools = context.test_allowances("npx -y vitest run")
+        context.grant(task, "allow", exact)
+        context.grant(task, "test_tools", tools)
+        rules = context.shell_rules(task)
+        self.assertEqual(self.verdict(rules, "npx -y vitest run"), "allow")
+        self.assertEqual(self.verdict(rules, "npx -y cowsay"), "deny")
+
     def test_a_commands_json_that_is_malformed_is_refused_not_ignored(self):
         # a string `allow` was spread letter by letter, its `*` allowing every command; a file
         # that didn't parse dropped every allowance silently (the 2026-11-16 audit)
@@ -7141,6 +7998,9 @@ class Permission(Base):
                 context.commands_conf()
 
 
+IMAGE_PNG = b"\x89PNG\r\n\x1a\n"  # what a fake engine's image starts with: anything else is refused (#744)
+
+
 class Images(Base):
     def engines(self, entries):
         path = Path(self.tmp.name) / "images.json"
@@ -7152,7 +8012,7 @@ class Images(Base):
         fake = tmp / "fake_image.py"
         fake.write_text("import json, sys\n"
                         "a = sys.argv[1:]\n"
-                        "open(a[a.index('-o') + 1], 'wb').write(b'PNG')\n"
+                        "open(a[a.index('-o') + 1], 'wb').write(b'\\x89PNG\\r\\n\\x1a\\n')\n"
                         "open(sys.argv[0] + '.calls', 'a').write(json.dumps(a) + '\\n')\n")
         self.engines({"fake": {"command": f"{sys.executable} {fake} -p {{prompt}} -o {{out}} "
                                           "-W {width} -H {height} --seed {seed}",
@@ -7212,13 +8072,13 @@ class Images(Base):
         fake.write_text("import os, sys\n"
                         "a = sys.argv[1:]\n"
                         "if not os.environ.get('NOTHING'):\n"
-                        "    open(a[a.index('-o') + 1], 'wb').write(a[a.index('-p') + 1].encode())\n")
+                        "    open(a[a.index('-o') + 1], 'wb').write(b'\\x89PNG\\r\\n\\x1a\\n' + a[a.index('-p') + 1].encode())\n")
         self.engines({"fake": {"command": f"{sys.executable} {fake} -p {{prompt}} -o {{out}}"}})
         first, second = "a red fox in the snow at dawn", "a red fox in the snow at dusk"
         run_wb("image", first, "--n", "1", "--seed", "5", "--out", str(tmp / "img"))
         run_wb("image", second, "--n", "1", "--seed", "5", "--out", str(tmp / "img"))
         a, b = tmp / "img" / "a-red-fox-in-the-snow-5.png", tmp / "img" / "a-red-fox-in-the-snow-5-2.png"
-        self.assertEqual((a.read_text(), b.read_text()), (first, second))
+        self.assertEqual((a.read_bytes()[8:].decode(), b.read_bytes()[8:].decode()), (first, second))
         self.assertEqual(json.loads(a.with_suffix(".json").read_text())["prompt"], first)
         self.assertEqual(json.loads(b.with_suffix(".json").read_text())["prompt"], second)
         os.environ["NOTHING"] = "1"
@@ -7230,6 +8090,127 @@ class Images(Base):
                          ["a-red-fox-in-the-snow-5-2.json", "a-red-fox-in-the-snow-5-2.png",
                           "a-red-fox-in-the-snow-5.json", "a-red-fox-in-the-snow-5.png"])
         self.assertEqual(json.loads(a.with_suffix(".json").read_text())["prompt"], first)
+
+    def test_bytes_that_arent_an_image_are_refused_and_a_jpeg_or_webp_keeps_its_own_suffix(self):
+        # #744 (the 2026-11-21 audit, finding 95): an engine that wrote an HTML error page, or a
+        # server whose image url answered one, was published as a .png and reported as an image
+        tmp = Path(self.tmp.name)
+        fake = tmp / "fake_image.py"
+        fake.write_text("import os, sys\nopen(sys.argv[1], 'wb').write(bytes.fromhex(os.environ['BODY']))\n")
+        self.engines({"fake": {"command": f"{sys.executable} {fake} {{out}}"}})
+        for body, made in ((b"\xff\xd8\xff\xe0 a jpeg", "a-fox-1.jpg"),
+                           (b"RIFF\x10\x00\x00\x00WEBPVP8 a webp", "a-fox-1.webp")):
+            with mock.patch.dict(os.environ, {"BODY": body.hex()}):
+                out = run_wb("image", "a fox", "--n", "1", "--seed", "1", "--out", str(tmp / made))
+            self.assertIn(f"{tmp / made / made}  (", out)
+            side = json.loads((tmp / made / made).with_suffix(".json").read_text())
+            self.assertEqual(side["format"], "jpeg" if made.endswith("jpg") else "webp")
+            self.assertEqual(sorted(p.name for p in (tmp / made).glob("a-fox-1*")),
+                             sorted([made.rsplit(".", 1)[0] + ".json", made]))  # no .png beside it
+        err = io.StringIO()
+        with mock.patch.dict(os.environ, {"BODY": b"<html><body>502 Bad Gateway</body></html>".hex()}), \
+                self.assertRaises(SystemExit), redirect_stderr(err):
+            run_wb("image", "a fox", "--n", "1", "--out", str(tmp / "html"))
+        self.assertIn("image engine fake wrote no image (it starts '<html><body>502", err.getvalue())
+        self.assertEqual([p.name for p in (tmp / "html").iterdir() if p.name != "engine.log"], [])
+
+    def test_a_url_image_engines_unload_url_is_posted_with_its_body_after_the_batch_even_a_failed_one(self):
+        # #749 (the 2026-11-21 audit, finding 96): images.json's `unload` was checked but never
+        # called, so an image server kept 6-12 GB beside the next task's coding model
+        import base64, threading
+        from http.server import BaseHTTPRequestHandler, HTTPServer
+        from workbench import media
+        got, fail = [], [False]
+
+        class H(BaseHTTPRequestHandler):
+            def log_message(self, *a):
+                pass
+
+            def do_GET(self):
+                self.send_response(404); self.end_headers()
+
+            def do_POST(self):
+                got.append((self.path, json.loads(self.rfile.read(int(self.headers["Content-Length"])))))
+                if self.path == "/v1/images/generations" and fail[0]:
+                    self.send_response(500); self.end_headers(); return
+                body = json.dumps({"data": [{"b64_json": base64.b64encode(IMAGE_PNG).decode()}]})
+                self.send_response(200); self.end_headers(); self.wfile.write(body.encode())
+
+        srv = HTTPServer(("127.0.0.1", 0), H)
+        threading.Thread(target=srv.serve_forever, daemon=True).start()
+        self.addCleanup(srv.shutdown)
+        root, tmp = f"http://127.0.0.1:{srv.server_port}", Path(self.tmp.name)
+        entry = {"url": root + "/v1/images/generations", "unload": root + "/free",
+                 "unload_body": {"unload_models": True, "free_memory": True}}
+        self.engines({"comfy": entry})
+        held = []
+        with mock.patch.object(media, "gpu", lambda *a, **k: held.append(a) or nullcontext()):
+            run_wb("image", "a fox", "--n", "2", "--out", str(tmp / "o"))
+            self.assertEqual([p for p, _ in got], ["/v1/images/generations"] * 2 + ["/free"])
+            self.assertEqual(got[-1][1], {"unload_models": True, "free_memory": True})
+            got.clear(); fail[0] = True
+            with self.assertRaises(SystemExit), redirect_stderr(io.StringIO()):
+                run_wb("image", "a fox", "--n", "2", "--out", str(tmp / "o"))
+            self.assertEqual(got[-1], ("/free", {"unload_models": True, "free_memory": True}))
+        self.assertEqual(len(held), 2)                        # on this GPU: inside the lease
+        self.assertNotIn("(no unload URL)", run_wb("image", "--list"))
+        self.engines({"srv": {"url": entry["url"]}})
+        self.assertIn("a server: it holds its GPU memory while it runs (no unload URL)", run_wb("image", "--list"))
+        self.engines({"bad": {**entry, "unload_body": "free"}})
+        self.assertIn("not usable: unload_body must be a JSON object", run_wb("image", "--list"))
+
+    def test_a_relative_out_reaches_the_engine_and_the_report_as_an_absolute_path(self):
+        # #751 (the 2026-11-21 audit, finding 98): on 3.11 mkdtemp kept `--out assets` relative,
+        # so an engine that changed directory wrote its {out} elsewhere and the run failed
+        tmp = Path(self.tmp.name)
+        (tmp / "elsewhere").mkdir()
+        fake = tmp / "cd_engine.py"
+        fake.write_text("import os, sys\nopen(sys.argv[0] + '.got', 'w').write(sys.argv[1])\n"
+                        f"os.chdir({str(tmp / 'elsewhere')!r})\n"
+                        "open(sys.argv[1], 'wb').write(b'\\x89PNG\\r\\n\\x1a\\n')\n")
+        self.engines({"cd": {"command": f"{sys.executable} {fake} {{out}}", "gpu": False}})
+        here = os.getcwd()
+        os.chdir(tmp)
+        self.addCleanup(os.chdir, here)
+        out = run_wb("image", "a fox", "--n", "1", "--seed", "1", "--out", "assets")
+        self.assertTrue(Path(Path(str(fake) + ".got").read_text()).is_absolute())
+        self.assertTrue(out.startswith(f"{tmp.resolve() / 'assets' / 'a-fox-1.png'}  ("), out)
+        self.assertEqual(list((tmp / "elsewhere").iterdir()), [])
+
+    def test_an_a1111_or_forge_url_is_spoken_to_in_its_own_api(self):
+        # #753 (the 2026-11-21 audit, finding 100): a Forge url got an OpenAI body and "sent no
+        # image", though listed as ready
+        import base64, threading
+        from http.server import BaseHTTPRequestHandler, HTTPServer
+        got = []
+
+        class H(BaseHTTPRequestHandler):
+            def log_message(self, *a):
+                pass
+
+            def do_GET(self):
+                self.send_response(404); self.end_headers()
+
+            def do_POST(self):
+                got.append((self.path, json.loads(self.rfile.read(int(self.headers["Content-Length"])))))
+                body = json.dumps({"images": [base64.b64encode(IMAGE_PNG + b"forge").decode()],
+                                   "parameters": {}, "info": "{}"})
+                self.send_response(200); self.end_headers(); self.wfile.write(body.encode())
+
+        srv = HTTPServer(("127.0.0.1", 0), H)
+        threading.Thread(target=srv.serve_forever, daemon=True).start()
+        self.addCleanup(srv.shutdown)
+        root, tmp = f"http://127.0.0.1:{srv.server_port}", Path(self.tmp.name)
+        self.engines({"forge": {"url": root + "/sdapi/v1/txt2img", "steps": 20, "gpu": False}})
+        run_wb("image", "a fox", "--n", "1", "--seed", "3", "--size", "512x768", "--out", str(tmp / "o"))
+        self.assertEqual(got, [("/sdapi/v1/txt2img", {"prompt": "a fox", "width": 512, "height": 768,
+                                                      "seed": 3, "batch_size": 1, "n_iter": 1, "steps": 20})])
+        self.assertEqual((tmp / "o" / "a-fox-3.png").read_bytes(), IMAGE_PNG + b"forge")
+        self.engines({"comfy": {"url": root + "/prompt", "api": "comfyui"},
+                      "steps": {"url": root + "/sdapi/v1/txt2img", "steps": "20"}})
+        listed = run_wb("image", "--list")
+        self.assertIn("not usable: api must be one of openai, a1111", listed)
+        self.assertIn("not usable: steps must be a whole number", listed)
 
     def test_wb_image_list_as_a_word_lists_the_engines_instead_of_drawing(self):
         # like `wb skill list`: it took the GPU and drew four pictures of "list" (the 2026-11-16 audit)
@@ -7261,7 +8242,7 @@ class Images(Base):
 
             def do_POST(self):
                 got.append(json.loads(self.rfile.read(int(self.headers["Content-Length"]))))
-                body = json.dumps({"data": [{"b64_json": base64.b64encode(b"IMG").decode()}]})
+                body = json.dumps({"data": [{"b64_json": base64.b64encode(IMAGE_PNG + b"IMG").decode()}]})
                 self.send_response(200); self.end_headers(); self.wfile.write(body.encode())
 
         srv = HTTPServer(("127.0.0.1", 0), H)
@@ -7271,7 +8252,7 @@ class Images(Base):
         self.engines({"srv": {"url": url, "model": "m"}})
         tmp = Path(self.tmp.name)
         run_wb("image", "a lighthouse", "--n", "1", "--seed", "9", "--out", str(tmp / "o"))
-        self.assertEqual((tmp / "o" / "a-lighthouse-9.png").read_bytes(), b"IMG")
+        self.assertEqual((tmp / "o" / "a-lighthouse-9.png").read_bytes(), IMAGE_PNG + b"IMG")
         self.assertEqual((got[0]["size"], got[0]["seed"], got[0]["model"]), ("1024x1024", 9, "m"))
         with self.assertRaises(SystemExit):  # a server engine takes no reference images
             with redirect_stderr(io.StringIO()):
@@ -7299,7 +8280,7 @@ class Images(Base):
                 seen.append((self.path, self.headers.get("Authorization")))
                 if self.headers.get("Authorization") != "Bearer sekrit":
                     return self.reply(401, b'{"error": "missing key"}')
-                self.reply(200, b"PNGFROMURL" if self.path == "/img.png" else b"ok")
+                self.reply(200, IMAGE_PNG + b"FROMURL" if self.path == "/img.png" else b"ok")
 
             def do_POST(self):
                 self.rfile.read(int(self.headers["Content-Length"]))
@@ -7326,7 +8307,7 @@ class Images(Base):
         self.assertIn(f"nokey: {root}/v1/url/x · {root} wants an API key (HTTP 401)", listed)
         self.assertIn(f"url: {root}/v1/url/x · ready", listed)   # the key read from its file
         images.generate("a fox", tmp / "o", n=1, seed=1, name="url", say=lambda m: None)
-        self.assertEqual((tmp / "o" / "a-fox-1.png").read_bytes(), b"PNGFROMURL")
+        self.assertEqual((tmp / "o" / "a-fox-1.png").read_bytes(), IMAGE_PNG + b"FROMURL")
         self.assertIn(("/v1/url/x", "Bearer sekrit"), seen)
         self.assertIn(("/img.png", "Bearer sekrit"), seen)        # the engine's own server
         for name, said in (("empty", 'sent no image: {"data": []}'),
@@ -7356,7 +8337,7 @@ class Images(Base):
         store.write_json(store.home() / "gpu.json", {str(sleeper.pid): {"model": "strata/strata",
                                                                        "task": "t-big"}})
         fake = tmp / "fake_image.py"
-        fake.write_text("import sys\nopen(sys.argv[1], 'wb').write(b'PNG')\n")
+        fake.write_text("import sys\nopen(sys.argv[1], 'wb').write(b'\\x89PNG\\r\\n\\x1a\\n')\n")
         self.engines({"cpu": {"command": f"{sys.executable} {fake} {{out}}", "gpu": False},
                       "here": {"command": f"{sys.executable} {fake} {{out}}"}})
         freed = []
@@ -7379,7 +8360,7 @@ class Images(Base):
         store.write_json(store.home() / "gpu.json", {})
         self.engines({"srv": {"url": "http://127.0.0.1:8080/v1/images/generations"}})
         with mock.patch.object(models, "free_gpu", lambda **k: freed.append(k)), \
-                mock.patch.object(images, "_server", lambda e, v: Path(v["out"]).write_bytes(b"PNG")), \
+                mock.patch.object(images, "_server", lambda e, v: Path(v["out"]).write_bytes(IMAGE_PNG)), \
                 mock.patch.object(images, "ready", lambda e: ""):
             images.generate("a fox", tmp / "o2", n=1, say=lambda m: None)
         self.assertEqual(freed[0]["keep"], ["strata/strata"])
@@ -7400,7 +8381,7 @@ class Images(Base):
         said = []
         with mock.patch.object(models, "_fake", lambda: False), \
                 mock.patch.object(models, "resident", lambda: [kept]), \
-                mock.patch.object(media.hardware, "gpus", lambda **k: []), \
+                mock.patch.object(models.hardware, "gpus", lambda **k: []), \
                 mock.patch.object(media, "time", fake_time):
             media.settle(said.append)
             self.assertLess(clock[0], 5)
@@ -7409,7 +8390,7 @@ class Images(Base):
             self.assertTrue(models.freed(other))
         with mock.patch.object(models, "_fake", lambda: False), \
                 mock.patch.object(models, "resident", lambda: [other]), \
-                mock.patch.object(media.hardware, "gpus", lambda **k: []), \
+                mock.patch.object(models.hardware, "gpus", lambda **k: []), \
                 mock.patch.object(media, "time", fake_time):
             clock[0] = 0.0
             media.settle(said.append)       # one free_gpu unloads is still waited for
@@ -7493,6 +8474,47 @@ class Audio(Base):
             run_wb("audio", "hi", "--voice", "zoe", "--out", str(tmp / "o"))
         self.assertIn("has no voice 'zoe' (voices: anna, bo)", err.getvalue())
 
+    def test_a_listener_or_engine_that_prints_bytes_that_arent_utf8_is_reported_not_raised(self):
+        # #743 (the 2026-11-21 audit, finding 93): a listener that split a CJK character, or a
+        # Windows program's code page through WSL, ended wb audio in a UnicodeDecodeError traceback,
+        # losing the take; one bad byte in engine.log did the same to every later failure
+        tmp, tone = Path(self.tmp.name), self.tone()
+        ear = tmp / "bad_ear.py"
+        ear.write_text("import sys\nsys.stdout.buffer.write(b'\\xe3\\x81')\n"
+                       "sys.stderr.buffer.write(b'\\x93 cp1252\\n')\nsys.exit(int(sys.argv[2]))\n")
+        for code in (0, 3):
+            self.engines({"tts": {"command": f"{sys.executable} {tone} --text {{text}} --seed {{seed}} "
+                                             "--out {out}", "gpu": False},
+                          "ear": {"kind": "listen", "gpu": False,
+                                  "command": f"{sys.executable} {ear} {{in}} {code}"}})
+            out = run_wb("audio", "こんにちは", "--n", "2", "--out", str(tmp / f"o{code}"))
+            self.assertIn("2 clip(s)", out)                       # every take made
+            side = json.loads(sorted((tmp / f"o{code}").glob("*.json"))[0].read_text())
+            if code:
+                self.assertIn("listener ear exited 3: \ufffd cp1252", side["listen_error"])
+            else:
+                self.assertIn("transcript", side)
+        bad = tmp / "bad_eng.sh"
+        bad.write_text("printf '\\377\\376 broke\\n'; exit 2\n")
+        self.engines({"tts": {"command": f"sh {bad} {{out}}", "gpu": False}})
+        err = io.StringIO()
+        with self.assertRaises(SystemExit), redirect_stderr(err):
+            run_wb("audio", "a bell", "--n", "1", "--no-check", "--out", str(tmp / "o9"))
+        self.assertIn("the engine exited 2 without audio", err.getvalue())
+        self.assertIn("broke", err.getvalue())
+
+    def test_a_relative_out_gives_the_engine_and_the_listener_absolute_paths(self):
+        # #751: as wb image; without ffmpeg the listener's {in} was relative too
+        tmp, tone, ear = Path(self.tmp.name), self.tone(), self.ear('{"text": "hello"}')
+        self.engines({"tts": {"command": f"{sys.executable} {tone} --text {{text}} --out {{out}}", "gpu": False},
+                      "ear": {"kind": "listen", "gpu": False, "command": f"{sys.executable} {ear} {{in}}"}})
+        here = os.getcwd()
+        os.chdir(tmp)
+        self.addCleanup(os.chdir, here)
+        out = run_wb("audio", "hello", "--n", "1", "--seed", "1", "--out", "sounds")
+        self.assertTrue(out.startswith(f"{tmp.resolve() / 'sounds' / 'hello-1.wav'}  ("), out)
+        self.assertTrue(Path(Path(str(ear) + ".got").read_text()).is_absolute())
+
     def test_audio_cpps_key_value_transcript_is_read_for_its_text(self):
         # the first real run (#396): audio.cpp's CLI prints task=, word_timestamps=[…] and
         # text_output= lines; scored whole, a perfect take read as a WER of several hundred percent
@@ -7541,6 +8563,13 @@ class Audio(Base):
         self.assertEqual(audio.differences("open the gate and walk", "open the walk"),
                          ["gate and → (nothing)"])
         self.assertEqual(audio.wer("open the gate and walk", "open the walk"), 0.4)
+
+    def test_canonically_equal_text_scores_no_error_and_a_different_accent_still_counts(self):
+        # #747 (Codex's audit of 1.90.6, finding 20): `café` precomposed against `cafe` plus a
+        # combining acute scored a WER of 1.0, though both render the same
+        self.assertEqual(audio.wer("un caf\u00e9 noir", "un cafe\u0301 noir"), 0.0)
+        self.assertEqual(audio.wer("Ångström", "A\u030angstro\u0308m"), 0.0)
+        self.assertEqual(audio.wer("un café noir", "un cafè noir"), 0.333)  # another accent: a miss
 
     def test_peak_clipping_and_silence_are_measured_on_the_clips_own_channels_and_rate(self):
         # #586: measured on ffmpeg's 16 kHz mono copy, a 48 kHz stereo take clipped on its left
@@ -7745,6 +8774,33 @@ class Audio(Base):
         calls = [ast.literal_eval(l) for l in Path(str(tone) + ".calls").read_text().splitlines()]
         self.assertEqual(calls[-1][calls[-1].index("--seconds") + 1], "3")   # not "3.0"
         self.assertEqual(media.fill("x {s}", {"s": 2.5}), ["x", "2.5"])
+
+    def test_a_url_that_doesnt_parse_is_listed_as_not_usable_and_refused_before_the_gpu(self):
+        # #748 (the 2026-11-21 audit, finding 94): a placeholder `:port` ended wb image --list,
+        # wb scout and generation in http.client's InvalidURL; `:99999` a ValueError in generate
+        from workbench import images, media
+        tmp = Path(self.tmp.name)
+        bad = {"port": ("http://127.0.0.1:port/v1/images/generations", "url isn't a URL"),
+               "range": ("http://127.0.0.1:99999/v1/images/generations", "url isn't a URL"),
+               "colon": ("http//host/v1/images/generations", "url isn't a URL (it needs http"),
+               "nohost": ("http:///v1/images/generations", "url isn't a URL (it names no host)"),
+               "ipv6": ("http://[::1/v1/images/generations", "url isn't a URL (Invalid IPv6 URL)")}
+        (tmp / "images.json").write_text(json.dumps(
+            {**{k: {"url": u} for k, (u, _) in bad.items()},
+             "unload": {"url": "http://127.0.0.1:1/v1/images/generations", "unload": "localhost:port/free"}}))
+        self.engines({"say": {"url": "http://127.0.0.1:port/v1/audio/speech"}})
+        held = []
+        with mock.patch.dict(os.environ, {"WB_IMAGES": str(tmp / "images.json")}), \
+                mock.patch.object(media, "gpu", lambda *a, **k: held.append(a) or nullcontext()):
+            listed = run_wb("image", "--list")
+            for name, (_, why) in bad.items():
+                self.assertRegex(listed, rf"  {name}\b.*not usable: {re.escape(why)}", name)
+                with self.assertRaisesRegex(RuntimeError, f"image engine {name}: not usable"):
+                    images.generate("a fox", tmp / "img", n=1, name=name, say=lambda m: None)
+            self.assertIn("not usable: unload isn't a URL", listed)
+            self.assertIn("not usable: url isn't a URL", run_wb("audio", "--list"))
+            run_wb("scout")                                                   # no traceback
+        self.assertEqual(held, [])
 
     def test_a_second_run_keeps_the_first_clip_and_an_engine_that_writes_nothing_fails(self):
         tmp = Path(self.tmp.name)
@@ -8037,6 +9093,38 @@ class Routing(Base):
         self.assertIn("wb model sizes", why)
         self.assertIsNotNone(router.choose("trivial")[0])
 
+    def test_one_unlucky_task_does_not_leave_a_model_out_for_good(self):
+        # #648 (the audit of main): the guess sent the first significant task to the largest
+        # model, Claude discarded it for its own wrong test, and at 1/3 against an unknown 0.5
+        # it never ran again; a week misconfigured held a model down forever too
+        from workbench import router
+        run_wb("model", "sizes", "mimo", "trivial")              # two models in the running
+        self.result("strata/strata", "significant", "discarded")
+        self.result("ollama/qwen3.8-27b", "significant", "accepted", n=4)
+        names = [f"t{i}" for i in range(200)]
+        picks = [router.choose("significant", (), n)[0].model.id for n in names]
+        tried = [n for n, p in zip(names, picks) if p == "strata/strata"]
+        self.assertTrue(10 <= len(tried) <= 30, len(tried))   # about one in EXPLORE_ONE_IN
+        self.assertEqual(picks[:50], [router.choose("significant", (), n)[0].model.id
+                                      for n in names[:50]])  # the same pick for the same name
+        why = router.choose("significant", (), tried[0])[1]
+        self.assertIn("exploring: its record on significant work is 1 task(s)", why)
+        self.assertEqual(router.choose("significant")[0].model.id, "ollama/qwen3.8-27b")  # no name: no exploring
+        self.assertIn("out of the band on 1 task(s)", run_wb("models"))
+        self.result("strata/strata", "significant", "discarded", n=2)   # 3 tries: the record stands
+        self.assertEqual({router.choose("significant", (), n)[0].model.id for n in tried},
+                         {"ollama/qwen3.8-27b"})
+        # an old record fades: the same three discards two years ago weigh next to nothing
+        rows = store.read_jsonl(store.home() / "results.jsonl")[0]
+        old = time.time() - 730 * 86400
+        store.home().joinpath("results.jsonl").write_text("".join(
+            json.dumps({**r, "ts": old} if r["model"] == "strata/strata" else r) + "\n" for r in rows))
+        sc = {s.model.id: s for s in router.rank("significant")}
+        self.assertEqual(sc["strata/strata"].tries, 3)                 # still counted, and shown
+        self.assertGreater(sc["strata/strata"].quality, 0.49)
+        self.result("strata/strata", "significant", "accepted", n=3)   # fixed, and doing well now
+        self.assertEqual(router.choose("significant")[0].model.id, "strata/strata")  # back in the band
+
     def test_a_poor_record_outweighs_size(self):
         from workbench import router
         self.result("strata/strata", "significant", "discarded", n=4)
@@ -8164,6 +9252,83 @@ class Routing(Base):
         self.assertIn("t-open still open", err.getvalue())
         self.assertNotIn("aaaaaa", lessons._all()[1])
 
+    def test_an_accepted_chain_with_a_step_taken_over_credits_only_the_agents_steps(self):
+        # #647 and #722 together (merging the 2026-11-21 audit's fixes): a takeover's accept is
+        # Claude's, a landed step is the agent's; a chain of three where Claude took the last one
+        # over scores the agent's two thirds, one wholly taken over scores nothing
+        from workbench import tuning
+        row = {"outcome": "accepted", "steps": [{}, {}, {"took_over": True}]}
+        self.assertAlmostEqual(tuning.credit(row), 2 / 3)
+        self.assertFalse(tuning.agent_landed(row))
+        self.assertEqual(tuning.credit({"outcome": "accepted", "steps": [{"took_over": True}]}), 0.0)
+        self.assertEqual(tuning.reward({"outcome": "accepted", "steps": [{"took_over": True}]}), 0.0)
+        self.assertEqual(tuning.credit({"outcome": "accepted", "steps": [{}]}), 1.0)
+
+    def test_a_discarded_chain_credits_the_steps_it_landed(self):
+        # #722: four steps wb next committed and kept, the fifth stuck and discarded: the row
+        # counted as a whole rejected task for the router, the tuning and the skills
+        from workbench import models, router, skills, tuning
+        steps = [{"landed": True}] * 4 + [{"landed": False}]
+        self.result("strata/strata", "significant", "discarded", steps=steps, landed_steps=4,
+                    skills_offered=["s"], skills_loaded=["s"], repo="/r")
+        self.result("strata/strata", "significant", "discarded", steps=steps)  # --drop-steps': none
+        row = store.results()[0]
+        self.assertAlmostEqual(tuning.credit(row), 0.8)
+        self.assertAlmostEqual(tuning.reward(row), 0.8)
+        self.assertEqual(tuning.credit({**row, "outcome": "accepted"}), 1.0)
+        self.assertEqual(tuning.credit({**row, "landed_steps": 0}), 0.0)
+        top = router.score(models.discover()["strata/strata"], "significant")
+        self.assertAlmostEqual(top.wins, 0.8)
+        self.assertIn("0.8/2 real tasks accepted", top.line())
+        self.assertAlmostEqual(skills.usage()["s"]["with"]["accepted"], 0.8)
+        self.assertIn("0.8 accepted", skills.record_line(skills.usage()["s"]))
+
+    def test_a_model_whose_weights_changed_under_its_id_starts_a_fresh_record(self):
+        # #726: rows held only the id, so weights swapped behind an alias (another GGUF under
+        # llama-swap, a re-pulled tag) kept the old model's record, slice and knobs
+        from workbench import models, router, tuning
+        mid = "strata/strata"
+        steps = [{"files": 9, "lines": 900, "landed": True, "window": None}] * 3
+        self.result(mid, "significant", "accepted", n=4, weights_id="bytes:1", steps=steps,
+                    window=None, tuned={"fresh_at": 0.7})
+        self.result(mid, "significant", "discarded", n=1)                 # before weights_id: counts
+        now = {"weights": "bytes:1"}
+        with mock.patch.object(models, "identity", lambda m: now["weights"] if m and m.id == mid else None):
+            m = models.discover()[mid]
+            self.assertEqual(router.score(m, "significant").tries, 5)
+            self.assertEqual(router.slice(m).files, 9)
+            self.assertEqual(len(tuning.record("fresh_at", mid, None)[0.7]), 4)
+            self.assertNotIn("weights changed", run_wb("models"))
+            now["weights"] = "bytes:2"                                      # another model, same id
+            models._IDS.clear()
+            self.assertEqual(router.score(m, "significant").tries, 1)
+            self.assertEqual(router.slice(m).files, 3)                      # the guess again
+            self.assertEqual(tuning.record("fresh_at", mid, None)[0.7], [])
+            self.assertIn("weights changed since its record: starting fresh", run_wb("models"))
+        with mock.patch.object(models, "identity", lambda m: "ollama:abc"):
+            self.start("t-w", "ok")                                         # recorded at the start
+        self.assertEqual(store.Task("t-w").spec["weights_id"], "ollama:abc")
+        wait_phase("t-w", {"review"})
+        run_wb("accept", "t-w", "-m", "x")
+        self.assertEqual(store.results()[-1]["weights_id"], "ollama:abc")
+
+    def test_results_are_parsed_once_per_change_however_many_models_and_sizes_ask(self):
+        # #727: the router, the slice and wb tune re-read results.jsonl per model, size and knob;
+        # at 20,000 rows wb models took 2.9 s and wb tune 7.8 s
+        from workbench import models, router
+        self.result("strata/strata", "significant", "accepted", n=3)
+        real, reads = store.read_jsonl, []
+        with mock.patch.object(store, "read_jsonl",
+                               lambda p, *a: reads.append(Path(p).name) or real(p, *a)):
+            for size in router.SIZES:
+                router.rank(size)
+            for m in models.discover().values():
+                router.slice(m)
+            self.assertEqual(reads.count("results.jsonl"), 1)
+            self.result("strata/strata", "significant", "discarded")      # appended: read again
+            self.assertIn("3/4 real tasks accepted", router.choose("significant")[1])
+            self.assertEqual(reads.count("results.jsonl"), 2)
+
     def test_set_default_writes_the_pick_to_opencode(self):
         out = run_wb("models", "--set-default")
         self.assertIn("→ strata/strata", out)
@@ -8186,6 +9351,81 @@ class Cleanup(Base):
             store.write_json(Path(self.tmp.name) / "s.json", {"a": 1})
             store.write_through(Path(self.tmp.name) / "c.json", {"a": 1})
         self.assertEqual(calls, ["fsync", "replace"] * 2)
+
+    def test_the_whole_file_rewrites_reach_the_disk_before_they_replace_the_old_ones(self):
+        # #734 (the 2026-11-21 audit): wb trial's results.jsonl, the gc's notify.jsonl, a task's
+        # acked and notes.md were renamed into place unsynced, so a crash could empty them
+        self.start("t-sync", "ok")
+        wait_phase("t-sync", {"review"})
+        run_wb("discard", "t-sync")
+        task = store.Task("t-sync")
+        task.notify("review", "old news")
+        rows = store.read_jsonl(store.home() / "notify.jsonl")[0]
+        for r in rows:
+            r["ts"] -= 30 * 86400                                     # handled, and old
+        (store.home() / "notify.jsonl").write_text("".join(json.dumps(r) + "\n" for r in rows))
+        synced, replaced = set(), []
+        real_sync, real_replace = store._synced, os.replace
+
+        def sync(fh):
+            synced.add(os.path.realpath(fh.name))
+            real_sync(fh)
+
+        def replace(a, b):
+            replaced.append((os.path.basename(b), os.path.realpath(a) in synced))
+            real_replace(a, b)
+        with mock.patch.object(store, "_synced", sync), mock.patch("os.replace", replace):
+            run_wb("trial", "t-sync")
+            store.write_ack(task, 5.0)
+            run_wb("notes", "add", "keep the specs short")
+            self.assertGreater(cli._rotate_notices(7), 0)
+        got = dict(replaced)
+        for name in ("results.jsonl", "acked", "notes.md", "notify.jsonl"):
+            self.assertIs(got.get(name), True, (name, replaced))
+        self.assertEqual(store.read_jsonl(store.home() / "results.jsonl")[0][-1].get("trial"), True)
+
+    def test_gc_trims_what_history_kept_for_good(self):
+        # #740 (the 2026-11-21 audit): the archive kept every log and test output, notify.old.jsonl
+        # and imports/ and claude-sessions/ only grew, and the disk advice never named them
+        home = store.home()
+        old = home / "archive" / "t-old"
+        (old / "rounds" / "1").mkdir(parents=True)
+        long_ago = time.time() - (store.SLIM_DAYS + 1) * 86400
+        (old / "status.json").write_text(json.dumps({"phase": "accepted", "updated_at": long_ago}))
+        (old / "task.json").write_text("{}")
+        for f in ("runner.log", "base-tests.txt", "rounds/1/tests.txt"):
+            (old / f).write_text("x" * 1000)
+        (old / "rounds" / "1" / "prompt.md").write_text("the spec")  # bench add reads it
+        (old / "events.jsonl").write_text("")
+        recent = home / "archive" / "t-recent"
+        recent.mkdir()
+        (recent / "status.json").write_text(json.dumps({"phase": "accepted", "updated_at": time.time()}))
+        (recent / "runner.log").write_text("kept")
+        (home / "notify.old.jsonl").write_bytes(b'{"ts": 1}\n' * (cli.NOTIFY_OLD_MAX // 10 + 10))
+        (home / "imports" / "a-skill").mkdir(parents=True)
+        dead = subprocess.Popen(["true"])
+        dead.wait()
+        (home / "claude-sessions").mkdir()
+        (home / "claude-sessions" / str(dead.pid)).write_text("1 sid\n")
+        (home / "claude-sessions" / str(os.getpid())).write_text("1 sid\n")    # alive: kept
+        for p in (home / "imports" / "a-skill", *(home / "claude-sessions").iterdir()):
+            os.utime(p, (long_ago, long_ago))
+        out = cli.gc(30)
+        self.assertEqual(sorted(p.name for p in old.rglob("*") if p.is_file()),
+                         ["events.jsonl", "prompt.md", "status.json", "task.json"])
+        self.assertTrue((recent / "runner.log").exists())
+        self.assertEqual(out["slimmed"], 3000)
+        self.assertLessEqual((home / "notify.old.jsonl").stat().st_size, cli.NOTIFY_OLD_MAX // 2)
+        self.assertTrue((home / "notify.old.jsonl").read_bytes().startswith(b'{"ts": 1}\n'))
+        self.assertFalse((home / "imports" / "a-skill").exists())
+        self.assertEqual([p.name for p in (home / "claude-sessions").iterdir()], [str(os.getpid())])
+        self.assertEqual(out["leftovers"], 2)
+        # the disk advice names what history holds and what frees it
+        with mock.patch.object(store, "dir_size", lambda p, budget=None: (5 * 10 ** 9, True)):
+            said = cli.history_held()
+        self.assertIn("the archive 5.0 GB (wb gc trims its old logs)", said)
+        self.assertIn("wb bench's cases 5.0 GB (wb bench rm <case>)", said)
+        self.assertEqual(cli.history_held(), "")
 
     def test_a_task_json_emptied_by_a_power_loss_fails_the_task_saying_so(self):
         # #475: read as {}, task.spec["model"] raised a bare KeyError, and the runner died
@@ -8433,6 +9673,35 @@ class Cleanup(Base):
         self.assertNotIn("t-slow", g("worktree", "list"))
         self.assertFalse(task.worktree.exists())
 
+    def test_accept_and_discard_keep_another_worktree_on_a_drive_unmounted_for_now(self):
+        # #641 (Codex's audit of 1.90.6): removing a task's worktree ran a repository-wide `git
+        # worktree prune`, which dropped an unrelated worktree whose drive was unmounted; back,
+        # its `git status` exited 128 and its staged index was gone
+        g = lambda *a, cwd=self.repo: subprocess.run(["git", "-C", str(cwd), *a],  # noqa
+                                                     capture_output=True, text=True)
+        other, away = Path(self.tmp.name) / "drive" / "other", Path(self.tmp.name) / "unmounted"
+        other.parent.mkdir()
+        self.assertEqual(g("worktree", "add", "-q", "-b", "mine", str(other)).returncode, 0)
+        (other / "staged.txt").write_text("staged only\n")
+        g("add", "staged.txt", cwd=other)
+        other.parent.rename(away)                          # the drive goes
+        self.start("t-acc", "ok")
+        wait_phase("t-acc", {"review"})
+        run_wb("accept", "t-acc", "-m", "feat: answer", "--merge")
+        self.start("t-dis", "ok")
+        wait_phase("t-dis", {"review"})
+        run_wb("discard", "t-dis")
+        with mock.patch.object(gitops, "_merge_tree", return_value=None):  # the trial merge's own
+            gitops._overwritten(self.repo, "mine")                         # worktree too
+        listed = g("worktree", "list", "--porcelain").stdout
+        self.assertNotIn("t-acc", listed)                  # the tasks' own registrations go
+        self.assertNotIn("t-dis", listed)
+        self.assertNotIn("wb-merge-", listed)
+        away.rename(other.parent)                          # and comes back
+        st = g("status", "--porcelain", cwd=other)
+        self.assertEqual(st.returncode, 0, st.stderr)
+        self.assertIn("A  staged.txt", st.stdout)
+
     def test_wb_gc_deletes_branches_merged_before_and_keeps_the_rest(self):
         self.start("t-old", "ok")
         wait_phase("t-old", {"review"})
@@ -8446,6 +9715,27 @@ class Cleanup(Base):
         self.assertNotEqual(self.git("rev-parse", "--verify", "-q", "refs/heads/delegate/t-old").returncode, 0)
         self.assertEqual(task.status["tip"], tip)
         self.assertEqual(self.git("rev-parse", "--verify", "-q", "refs/heads/delegate/t-mine").returncode, 0)
+
+    def test_wb_gc_deletes_a_branch_merged_by_hand_and_never_looks_at_it_again(self):
+        # #686 (Claude's audit of main): only tasks accepted with --merge were considered, so a
+        # plain accept merged by hand (the skill's default) left delegate/<task> for good; and
+        # every merged task ever recorded cost a git call on every run, 2,828 in one state dir
+        for name in ("t-hand", "t-later"):
+            self.start(name, "ok")
+            wait_phase(name, {"review"})
+            run_wb("accept", name, "-m", "feat: answer")
+        merged = self.git("-c", "user.email=t@t", "-c", "user.name=t", "merge", "-q", "--no-ff",
+                          "--no-edit", "delegate/t-hand")
+        self.assertEqual(merged.returncode, 0, merged.stderr)
+        self.assertIn("1 merged branch(es)", run_wb("gc"))
+        self.assertNotEqual(self.git("rev-parse", "--verify", "-q", "refs/heads/delegate/t-hand").returncode, 0)
+        self.assertEqual(self.git("rev-parse", "--verify", "-q", "refs/heads/delegate/t-later").returncode, 0)
+        self.assertIs(store.Task("t-hand").status["branch_gone"], True)
+        self.assertTrue(store.Task("t-hand").status["tip"])
+        self.assertFalse(store.Task("t-later").status.get("branch_gone"))   # not merged: kept, asked again
+        with mock.patch.object(gitops, "repo_of", wraps=gitops.repo_of) as seen:
+            self.assertIn("0 merged branch(es)", run_wb("gc"))
+        self.assertEqual([c.args[0]["name"] for c in seen.call_args_list], ["t-later"])
 
     def test_old_closed_tasks_are_archived_and_still_found(self):
         # every wb wait wake, wb events minute and wb start read all 101 tasks' files
@@ -8602,15 +9892,78 @@ class Bench(Base):
         clone = Path(self.tmp.name) / "c"
         bench.checkout(case, clone)
         self.assertFalse((clone / "answer.txt").exists())
-        # the answer is not in the bundle: only the base's history, one branch
-        self.assertEqual(gitops.git(clone, "rev-list", "--all").split(), [case["base"]])
+        # the answer is not in the bundle: the base's tree alone, one commit, one branch (#740:
+        # its whole history was every reachable object of the repo, for each case)
+        (only,) = gitops.git(clone, "rev-list", "--all").split()
+        self.assertEqual(gitops.git(clone, "rev-parse", f"{only}^{{tree}}"),
+                         gitops.git(self.repo, "rev-parse", f"{case['base']}^{{tree}}"))
+        self.assertEqual(gitops.git(clone, "log", "-1", "--format=%s").strip(),
+                         gitops.git(self.repo, "log", "-1", "--format=%s", case["base"]).strip())
         with self.assertRaises(SystemExit):
             run_wb("bench", "add", "t-src")                               # once
         self.assertIn("t-src", run_wb("bench", "list"))
 
-    def test_a_case_from_a_shallow_clone_is_refused_rather_than_made_unclonable(self):
+    def test_a_squash_accepted_tasks_steps_still_make_cases_after_git_gc(self):
+        # #649 (Codex's audit of 1.90.6): accepted with --merge-as squash after main moved, the
+        # task's commits were in no branch once accept deleted delegate/<task>, and only a hash
+        # in status.json named them: once the reflogs expired and gc pruned, wb bench add could
+        # no longer find the step. A ref of workbench's own keeps the tip, every step with it
+        from workbench import bench
+        g = lambda *a: gitops.git(self.repo, *a)  # noqa: E731
+        self.start("t-sq", "ok", "--test", "sh tests/check.sh")
+        wait_phase("t-sq", {"review"})
+        wt = store.Task("t-sq").worktree
+        (wt / "tests").mkdir()
+        (wt / "tests" / "check.sh").write_text("grep -qx 42 answer.txt\n")
+        run_wb("next", "t-sq", "--spec", str(self.spec), "-m", "Step one",
+               "--test", "sh tests/check2.sh")
+        wait_phase("t-sq", {"review"})
+        (wt / "two.txt").write_text("two\n")
+        (wt / "tests" / "check2.sh").write_text("grep -qx two two.txt\n")
+        (self.repo / "other.txt").write_text("main moves on\n")
+        g("add", "other.txt")
+        g("commit", "-qm", "main moves on")
+        self.assertIn("merged into main", run_wb("accept", "t-sq", "-m", "feat: two steps",
+                                                 "--merge-as", "squash"))
+        task = store.Task("t-sq")
+        tip = task.status["tip"]
+        self.assertEqual(g("branch", "--list", "delegate/t-sq"), "")
+        self.assertEqual(g("rev-parse", gitops.ACCEPTED_REF.format("t-sq")).strip(), tip)
+        g("reflog", "expire", "--expire=now", "--all")
+        g("gc", "-q", "--prune=now")
+        self.assertEqual(g("cat-file", "-t", tip).strip(), "commit")      # kept alive
+        step1 = gitops.step_commit(task, 1, 2)
+        self.assertTrue(step1)
+        self.assertIn("hidden checks: tests/check.sh", run_wb("bench", "add", "t-sq", "--step", "1"))
+        self.assertIn("hidden checks: tests/check2.sh", run_wb("bench", "add", "t-sq"))
+        self.assertEqual(bench.cases()["t-sq-s1"]["reference"], step1)
+        self.assertEqual(bench.cases()["t-sq-s2"]["base"], step1)
+
+    def test_bench_rm_removes_a_case_and_old_runs_keep_only_their_plans(self):
+        # #740 (the 2026-11-21 audit): no command removed a case, and every replay's logs, diff
+        # and grade stayed under bench/runs/ for good
+        from workbench import bench
+        self.accepted("t-gone")
+        run_wb("bench", "add", "t-gone")
+        self.assertIn("removed case(s) t-gone", run_wb("bench", "rm", "t-gone"))
+        self.assertNotIn("t-gone", bench.cases())
+        with self.assertRaises(SystemExit):
+            run_wb("bench", "rm", "t-gone")
+        runs = bench.home() / "runs"
+        for i in range(bench.RUNS_KEPT + 2):
+            (runs / f"r{i:02d}" / "bench-x").mkdir(parents=True)
+            (runs / f"r{i:02d}" / "bench-x" / "grade.txt").write_text("out")
+            (runs / f"r{i:02d}" / "plan.json").write_text("{}")
+            os.utime(runs / f"r{i:02d}", (1e9 + i, 1e9 + i))
+        self.assertEqual(bench.prune_runs(), 2)
+        self.assertFalse((runs / "r00" / "bench-x").exists())
+        self.assertTrue((runs / "r00" / "plan.json").exists())             # the report reads it
+        self.assertTrue((runs / "r02" / "bench-x" / "grade.txt").exists())
+
+    def test_a_case_from_a_shallow_clone_bundles_its_base_and_clones(self):
         # #478 (the audit of 1.8, reproduced): the bundle of a shallow clone's history verified,
-        # and cloning it failed "remote did not send all necessary objects"
+        # and cloning it failed "remote did not send all necessary objects"; refused since, until
+        # the bundle held the base's tree alone, which a shallow clone has (#740)
         from workbench import bench
         g = lambda *a: gitops.git(self.repo, *a)  # noqa: E731
         for i in range(2):
@@ -8618,14 +9971,11 @@ class Bench(Base):
             g("add", "f.txt")
             g("commit", "-qm", f"c{i}")
         shallow = Path(self.tmp.name) / "shallow"
-        gitops.git(self.tmp.name, "clone", "-q", "--depth", "2", f"file://{self.repo}", str(shallow))
+        gitops.git(self.tmp.name, "clone", "-q", "--depth", "1", f"file://{self.repo}", str(shallow))
         dest = Path(self.tmp.name) / "base.bundle"
-        with self.assertRaisesRegex(RuntimeError, "is a shallow clone: .*fetch --unshallow"):
-            bench.bundle(shallow, "HEAD", dest)
-        self.assertFalse(dest.exists())
-        gitops.git(shallow, "fetch", "-q", "--unshallow")
-        bench.bundle(shallow, "HEAD", dest)                   # whole again: it bundles and clones
+        bench.bundle(shallow, "HEAD", dest)
         gitops.git(self.tmp.name, "clone", "-q", "-b", "main", str(dest), str(shallow) + "-c")
+        self.assertEqual((Path(str(shallow) + "-c") / "f.txt").read_text(), "1\n")
 
     def test_a_case_hides_the_golden_file_its_test_reads_beside_the_test(self):
         # #500 (the audit of 1.90): bench's own test pattern left Go's testdata/ out of the hidden
@@ -8672,6 +10022,70 @@ class Bench(Base):
             bench._start_task(case, "m", "bench-x", Path(self.tmp.name), [], {})
         self.assertEqual(argv[argv.index("--setup") + 1], "mkdir -p deps && touch deps/stamp")
         self.assertEqual(argv[argv.index("--allow") + 1], "make check*")
+
+    def test_a_replay_keeps_the_tasks_setup_limit_and_its_gpu_for_tests(self):
+        # #735 (the 2026-11-21 audit): each replay's wb start got --setup without
+        # --setup-timeout, so a long build stopped at 1800 s on every run, and lost
+        # --unload-for-tests, its GPU tests beside the resident model
+        from workbench import bench
+        self.start("t-long", "ok", "--test", "sh tests/check.sh", "--setup", "true",
+                   "--setup-timeout", "5400", "--unload-for-tests")
+        wait_phase("t-long", {"review"})
+        wt = store.Task("t-long").worktree
+        (wt / "tests").mkdir()
+        (wt / "tests" / "check.sh").write_text("grep -qx 42 answer.txt\n")
+        run_wb("accept", "t-long", "-m", "feat: the answer")
+        run_wb("bench", "add", "t-long")
+        case = bench.cases()["t-long"]
+        self.assertEqual((case["setup_timeout"], case["unload_for_tests"]), (5400, True))
+
+        def argv_of(case):
+            argv = []
+            with mock.patch.object(cli, "parser") as parser:
+                parser.return_value.parse_args.side_effect = lambda a: argv.extend(a) or mock.Mock()
+                bench._start_task(case, "m", "bench-x", Path(self.tmp.name), [], {})
+            return argv
+        argv = argv_of(case)
+        self.assertEqual(argv[argv.index("--setup-timeout") + 1], "5400")
+        self.assertIn("--unload-for-tests", argv)
+        # a case made before they were kept: read from its task, while it lasts
+        old = {k: v for k, v in case.items() if k not in ("setup_timeout", "unload_for_tests")}
+        argv = argv_of(old)
+        self.assertEqual(argv[argv.index("--setup-timeout") + 1], "5400")
+        self.assertIn("--unload-for-tests", argv)
+        self.assertNotIn("--unload-for-tests", argv_of({**case, "unload_for_tests": False}))
+
+    def test_a_cases_checkouts_read_the_bytes_the_task_read(self):
+        # #736 (the 2026-11-21 audit, reproduced by both audits): with the repo's own
+        # core.autocrlf the task read CRLF, and bench add's reference check and each replay's
+        # clone read LF: the case was refused as failing on its own commit
+        from workbench import bench
+        g = lambda *a: subprocess.run(["git", "-C", str(self.repo), *a], check=True)  # noqa
+        (self.repo / "data.txt").write_bytes(b"a\nb\n")
+        g("add", "-A")
+        g("commit", "-qm", "data")
+        g("config", "core.autocrlf", "true")
+        (self.repo / ".git" / "info" / "attributes").write_text("*.sh -text\nanswer.txt -text\n")
+        crlf = "python3 -c \"import sys; sys.exit(open('data.txt', 'rb').read() != b'a\\r\\nb\\r\\n')\""
+        test = f"{crlf} && sh tests/check.sh"
+        self.accepted("t-crlf", test)
+        out = run_wb("bench", "add", "t-crlf")
+        self.assertIn("on the base: fails", out)
+        clone = Path(self.tmp.name) / "c"
+        bench.checkout(bench.cases()["t-crlf"], clone)
+        self.assertEqual((clone / "data.txt").read_bytes(), b"a\r\nb\r\n")    # a replay's too
+
+    def test_a_bench_run_on_an_unknown_model_says_so_in_a_line(self):
+        # #737 (the 2026-11-21 audit, reproduced): models.resolve's KeyError reached main, which
+        # catches only RuntimeError and OSError, and Claude got a traceback
+        self.accepted("t-typo")
+        run_wb("bench", "add", "t-typo")
+        err = io.StringIO()
+        with self.assertRaises(SystemExit) as e, redirect_stderr(err):
+            run_wb("bench", "run", "--model", "nosuch")
+        self.assertEqual(e.exception.code, 1)
+        self.assertIn("unknown model 'nosuch'", err.getvalue())
+        self.assertNotIn("Traceback", err.getvalue())
 
     def test_a_case_with_a_sibling_two_levels_up_checks_and_replays_inside_its_own_directory(self):
         # #261 (the audit of 1.2): the case's checkouts nest as the task's worktree did, so the
@@ -9193,16 +10607,43 @@ class Tuning(Base):
     def test_a_better_record_moves_the_pick_and_one_lucky_task_does_not(self):
         from workbench import tuning
         self.result(0.6, reviews=1, n=4)                     # 0.5 each
-        self.result(0.7, n=1)                                # one clean task
-        self.assertEqual(tuning.best("fresh_at", self.M, self.W), 0.7)  # smoothed: 0.67 > 0.5...
+        self.result(0.7, n=1)                                # one clean task moves nothing (#721)
+        self.assertEqual(tuning.best("fresh_at", self.M, self.W), 0.6)
+        self.result(0.7, n=2)                                # three do (TRY_MIN)
+        self.assertEqual(tuning.best("fresh_at", self.M, self.W), 0.7)
         self.result(0.7, outcome="discarded", n=2, spec_gaps=["the spec's reading didn't fit"])
         self.assertEqual(tuning.best("fresh_at", self.M, self.W), 0.7)  # Claude's misses aren't its
-        self.result(0.7, outcome="discarded", n=2)           # ...but not once it fails twice
+        self.result(0.7, outcome="discarded", n=3)           # ...but not once it fails as often
         self.assertEqual(tuning.best("fresh_at", self.M, self.W), 0.6)
         self.result(0.7, n=6)
         self.assertEqual(tuning.best("fresh_at", self.M, self.W), 0.7)
         self.assertEqual(tuning.best("fresh_at", "ollama/other", self.W), 0.6)  # per model
         self.assertEqual(tuning.best("fresh_at", self.M, 65536), 0.6)           # and window
+
+    def test_a_task_that_never_filled_a_session_is_no_evidence_of_the_handover_point(self):
+        # #721 (reproduced): ten tasks at 0.6 scored alike; one 8-minute trivial task at 0.5,
+        # its session 15% full so fresh_at never acted, scored 1.15 against a median pooled over
+        # every size, and best() switched to 0.5; one discard switched it back
+        from workbench import tuning
+        for i in range(10):
+            self.result(0.6, outcome="discarded" if i < 2 else "accepted", reviews=int(i in (2, 3)),
+                        minutes=20.5, size="significant", peak_share=0.7)
+        self.result(0.5, minutes=8, size="trivial", peak_share=0.15)
+        self.assertEqual(tuning.record("fresh_at", self.M, self.W)[0.5], [])
+        self.assertEqual(tuning.best("fresh_at", self.M, self.W), 0.6)
+        self.result(0.5, minutes=8, size="trivial", peak_share=0.45, n=2)  # it acted: evidence,
+        self.assertEqual(len(tuning.record("fresh_at", self.M, self.W)[0.5]), 2)
+        self.assertEqual(tuning.best("fresh_at", self.M, self.W), 0.6)     # but two aren't TRY_MIN
+        # the speed term is set against the usual step of the same size, not every size's
+        self.assertAlmostEqual(tuning.record("fresh_at", self.M, self.W)[0.5][0], 1.0)
+
+    def test_a_chain_of_steps_is_scored_per_step(self):
+        # #721: a 5-step chain with one review a step scored 1/6, and its time was set against
+        # single tasks' whole minutes
+        from workbench import tuning
+        chain = {"outcome": "accepted", "reviews": 5, "active_minutes": 50, "steps": [{}] * 5}
+        self.assertEqual(tuning.reward(chain, 10), 0.5)
+        self.assertEqual(tuning.reward({**chain, "reviews": 0}, 10), 1.0)
 
     def test_compaction_and_time_cost_reward(self):
         from workbench import tuning
@@ -9229,14 +10670,36 @@ class Tuning(Base):
 
     def test_values_past_the_ceiling_are_never_tried(self):
         from workbench import runner, tuning
-        cfg = {"limit": {"context": 32768, "input": 28672, "output": 4096}, "options": {"max_tokens": 8192}}
+        cfg = {"limit": {"context": 65536, "input": 57344, "output": 8192}, "options": {"max_tokens": 16384}}
+        self.assertEqual(runner.compaction_point(cfg), 0.6875)  # where OpenCode would compact
         top = runner.fresh_ceiling(cfg)
-        self.assertEqual(top, 0.625)                         # where OpenCode would compact
+        self.assertEqual(top, 0.625)                         # a step's growth before it
         self.assertEqual(tuning.allowed("fresh_at", top), [0.4, 0.5, 0.6])
         self.assertEqual(tuning.default("fresh_at", 0.55), 0.5)
         self.result(0.6, n=3)
         picks = {tuning.choose("fresh_at", self.M, self.W, f"t{i}", top) for i in range(300)}
         self.assertEqual(picks, {(0.6, False), (0.5, True)})  # never 0.7 above the pick
+
+    def test_the_handover_point_leaves_a_steps_growth_before_opencodes_compaction(self):
+        # #644 (the audit of main): at 32K, wb model add's entry put OpenCode's compaction at
+        # 20480 tokens and the handover point at 19661: a step ending at 19000 then a 3K read,
+        # and OpenCode compacted the session before the runner saw a step past the point
+        from workbench import runner, tuning
+        for ctx in (16384, 32768, 65536, 131072):           # the entries wb model add writes
+            out = ctx // 8
+            cfg = {"limit": {"context": ctx, "input": ctx - out, "output": out},
+                   "options": {"max_tokens": 2 * out}}
+            at = runner.compaction_point(cfg) * ctx
+            for v in tuning.allowed("fresh_at", runner.fresh_ceiling(cfg)):
+                self.assertGreaterEqual(at - v * ctx, runner.STEP_GROWTH - 1e-6, (ctx, v))
+        cfg = {"limit": {"context": 32768, "input": 28672, "output": 4096}, "options": {"max_tokens": 8192}}
+        fresh_at = tuning.default("fresh_at", runner.fresh_ceiling(cfg))
+        step, read = 0.98 * fresh_at * 32768, 3000           # just under the point, then a read
+        self.assertLess(step, fresh_at * 32768)
+        self.assertLess(step + read, runner.compaction_point(cfg) * 32768)
+        # the reasoning a step spent is context OpenCode's compaction counts: so does the runner
+        self.assertEqual(events.normalize({"type": "step_finish", "part": {"tokens": {
+            "input": 100, "output": 20, "reasoning": 300, "cache": {"read": 5}}}}, 1)["reasoning"], 300)
 
     def test_a_ceiling_under_every_value_hands_over_before_the_compaction_and_says_so(self):
         # #595 (the audit of 1.90, reproduced): a 16K output cap on a 32K window put the ceiling
@@ -9244,11 +10707,16 @@ class Tuning(Base):
         from workbench import optimize, runner, tuning
         cfg = {"limit": {"context": 32768, "output": 16384}}
         top = runner.fresh_ceiling(cfg)
-        self.assertEqual(top, 0.375)
-        self.assertEqual(tuning.allowed("fresh_at", top), [0.325])
-        self.assertEqual(tuning.choose("fresh_at", self.M, self.W, "t", top), (0.325, False))
-        self.assertLess(tuning.choose("fresh_at", self.M, self.W, "t", top)[0], top)
-        self.assertIn("puts OpenCode's compaction at 38% of the window", runner.handover_warning(cfg))
+        self.assertEqual(runner.compaction_point(cfg), 0.375)
+        self.assertEqual(top, 0.25)                          # a step's growth before it (#644)
+        cfg = {"limit": {"context": 32768, "output": 12288}}
+        top = runner.fresh_ceiling(cfg)
+        self.assertEqual(tuning.allowed("fresh_at", top), [0.375])
+        self.assertEqual(tuning.choose("fresh_at", self.M, self.W, "t", top), (0.375, False))
+        self.assertLess(tuning.choose("fresh_at", self.M, self.W, "t", top)[0], runner.compaction_point(cfg))
+        self.assertIn("puts OpenCode's compaction at 50% of the window", runner.handover_warning(cfg))
+        self.assertIn("handovers come at 38%", runner.handover_warning(cfg))
+        cfg = {"limit": {"context": 32768, "output": 16384}}
         tiny = {"limit": {"context": 16384, "output": 8192}, "options": {"max_tokens": 16384}}
         self.assertLessEqual(runner.fresh_ceiling(tiny), 0)
         self.assertEqual(tuning.allowed("fresh_at", runner.fresh_ceiling(tiny)), [0.4])
@@ -9361,8 +10829,62 @@ class ClaudeSpend(Base):
         self.assertEqual(spend.usage(t2)["output"], 25)
         self.assertEqual(spend.usage(t2)["turns"], 1)
         self.assertEqual(spend.usage(t2)["calls"], 0.5)
-        self.assertEqual(spend.usage(self.task("never-named"))["output"], 0)
+        self.assertIsNone(spend.usage(self.task("never-named")))     # found, unnamed: unmeasured (#718)
         self.assertEqual(spend.usage(store.Task("theirs")), None)   # its session has no transcript
+
+    def test_a_task_a_subagent_started_reviewed_and_accepted_is_charged_its_calls(self):
+        # #718: the main turn's one call was the Agent tool's, which names no task, so the
+        # subagent's start, diff and accept were charged nothing, and the row's claude was all
+        # zeros, averaged into the router's cost as a measured 0
+        from workbench import spend
+        t = self.task("dates")
+        self.task("other")
+        main = self.transcript([
+            _turn("add date parsing, in a subagent", "2026-11-17T10:00:00Z"),
+            *_call("a1", "2026-11-17T10:00:01Z", 7),                       # the Agent tool call
+            _turn("what time is it?", "2026-11-17T10:30:00Z"),
+            *_call("a2", "2026-11-17T10:30:01Z", 1000),
+        ])
+        sub = main.parent / self.SID / "subagents" / "agent-1.jsonl"
+        sub.parent.mkdir(parents=True)
+        sub.write_text("".join(json.dumps(r) + "\n" for r in [
+            _turn("Hand the date parsing to a local agent and accept it.", "2026-11-17T10:00:02Z"),
+            *_call("s1", "2026-11-17T10:00:03Z", 10),                      # reading for the spec
+            *_call("s2", "2026-11-17T10:00:04Z", 20, "wb start dates --spec s.md"),
+            *_call("s3", "2026-11-17T10:00:05Z", 30, "wb wait dates"),
+            *_call("s4", "2026-11-17T10:10:00Z", 40, "wb diff dates"),
+            *_call("s5", "2026-11-17T10:10:01Z", 50),                      # reading the diff
+            *_call("s6", "2026-11-17T10:10:02Z", 60, "wb accept dates -m 'feat: dates'"),
+            *_call("s7", "2026-11-17T10:10:03Z", 70),                      # its report, after
+        ]))
+        u = spend.usage(t)
+        self.assertEqual((u["output"], u["turns"]), (10 + 20 + 30 + 40 + 50 + 60, 1))
+        self.assertIsNone(spend.usage(store.Task("other")))   # its transcript read, never named
+
+    def test_a_long_session_with_many_subagent_rows_is_charged_in_well_under_a_second(self):
+        # #728: each subagent row scanned every session call for the one before it: 8,000 calls
+        # and 30,000 subagent rows took 6.6 s, on every accept and discard
+        from datetime import datetime, timezone
+        from workbench import spend
+
+        def iso(ts):
+            return datetime.fromtimestamp(1_800_000_000 + ts, timezone.utc).isoformat()
+        rows = [_turn("go", iso(0))]
+        for i in range(8000):
+            rows += _call(f"m{i}", iso(1 + i * 10), 1, "wb diff t-long" if i % 100 == 0 else None)
+        rows += _call("late", iso(5), 1000)          # out of order: still not the one before 1 s
+        main = self.transcript(rows)
+        sub = main.parent / self.SID / "subagents" / "agent-1.jsonl"
+        sub.parent.mkdir(parents=True)
+        sub.write_text("".join(json.dumps(r) + "\n" for i in range(30000)
+                               for r in _call(f"s{i}", iso(0.5 + i * 2.6), 2)))
+        began = time.monotonic()
+        got = spend.calls(main, [sub], {"t-long"})
+        self.assertLess(time.monotonic() - began, 3)  # about 0.3 s here
+        subs = {c["id"]: c for c in got if c["id"].startswith("s")}
+        self.assertNotIn("s0", subs)                  # before any session call: no one's
+        self.assertEqual(subs["s1"]["names"], {"t-long"})  # after m0, which named it
+        self.assertEqual(len(subs), 29999)
 
     def test_the_turns_after_a_clear_are_charged_to_the_task_too(self):
         # #451: /clear continues the process under a new session id and transcript, and only the
@@ -9384,6 +10906,31 @@ class ClaudeSpend(Base):
         self.assertEqual(spend.sessions(t1), [self.SID, "sess-after"])
         u = spend.usage(t1)
         self.assertEqual((u["output"], u["turns"]), (10 + 20 + 30, 2))
+
+    def test_a_task_another_process_adopted_after_a_restart_is_charged_its_reviews(self):
+        # #719: Claude Code restarted mid-task; the new process (another pid, another session)
+        # adopted the task and reviewed and accepted it, and only the start process's sessions
+        # were read, so the reviews, the costliest part, went uncounted
+        from workbench import spend
+        t1 = store.Task("t1")
+        store.write_json(t1.dir / "task.json", {"name": "t1", "session": self.SID,
+                                                "claude_pid": 111, "created_at": store.now()})
+        start = _call("m1", "2026-11-17T10:00:01Z", 10, "wb start t1 --spec s.md")
+        self.transcript([_turn("add the thing", "2026-11-17T10:00:00Z"), *start])
+        self.transcript([_turn("add the thing", "2026-11-17T10:00:00Z"), *start,   # its history,
+                         _turn("[workbench] Task `t1` is ready for review.", "2026-11-17T11:00:00Z"),
+                         *_call("m2", "2026-11-17T11:00:01Z", 20, "wb diff t1"),     # copied
+                         *_call("m3", "2026-11-17T11:00:02Z", 30, "wb accept t1 -m x")], sid="sess-b")
+        with mock.patch.dict(os.environ, {"CLAUDE_PID": "222", "CLAUDE_CODE_SESSION_ID": "sess-b"}):
+            run_wb("log", "t1")                              # a call naming the task
+            run_wb("log", "t1")                              # once per id
+            run_wb("status")                                 # naming none
+        with mock.patch.dict(os.environ, {"CLAUDE_PID": "333", "CLAUDE_CODE_SESSION_ID": "sess-c"}):
+            run_wb("status")                                 # another session, not on t1
+        self.assertEqual(spend.sessions(t1), [self.SID, "sess-b"])
+        self.assertEqual((t1.dir / "claude-sessions").read_text().count("sess-b"), 1)
+        u = spend.usage(t1)
+        self.assertEqual((u["output"], u["turns"]), (10 + 20 + 30, 2))   # m1 counted once
 
     def test_a_mid_turn_image_row_or_a_compaction_summary_starts_no_new_turn(self):
         # #557: an isMeta row (the image a Read showed, a skill's body) or a compaction summary
@@ -9410,7 +10957,7 @@ class ClaudeSpend(Base):
         ])
         u = spend.usage(t2)
         self.assertEqual((u["output"], u["turns"]), (10 + 20 + 30 + 40 + 50, 1))
-        self.assertEqual(spend.usage(t3)["output"], 0)
+        self.assertIsNone(spend.usage(t3))
 
     def test_a_turn_of_other_work_ending_in_wb_start_charges_only_the_spec_before_it(self):
         from workbench import spend
@@ -9605,12 +11152,45 @@ class Savings(Base):
             "- machine: linux; GPU: Radeon RX 7900 XTX (24 GB VRAM)",
             "- local models: 2 (size unknown, 17 GB of weights)",
             "- tasks: 2; Claude used 112K input-equivalent tokens, writing them itself ~100K (estimate); handoff/self 1.12",
+            "- the estimate prices the lines Claude would type: not lockfiles or generated files, and "
+            "a file deleted whole as one call",
             "- score: 1/100. I used about 12% more Claude.",
             "- by size: significant 0.95 (1), trivial 1.36 (1)",
             "- GPU energy: 600 Wh (1 task(s) on another machine's GPU, not measured)"])
         for private in ("secret", "acme", "fix-", "other:9b"):
             self.assertNotIn(private, out)
         self.assertIn("workbench savings, the last 7 days", run_wb("savings", "--share"))
+
+    def test_a_file_deleted_whole_or_a_lockfile_is_not_priced_as_lines_claude_would_type(self):
+        # #725: deleting a 2,400-line module read 'saved ~725K', a 4,000-line lockfile 'saved
+        # ~1.28M', each priced as lines Claude would have typed
+        import subprocess
+        from workbench import gitops, results, savings
+        usage = {"turns": 2, "calls": 12, "input": 0, "cache_write_5m": 0, "cache_write_1h": 0,
+                 "cache_read": 600000, "output": 6000}
+        small = {"claude": usage, "diff": {"files": 1, "added": 30, "removed": 20}}
+        gone = {"claude": usage, "diff": {"files": 2, "added": 30, "removed": 2420,
+                                          "deleted": {"files": 1, "removed": 2400}}}
+        self.assertEqual(savings.of_row(gone)["self_est"],
+                         savings.of_row(small)["self_est"] + round(savings.per_call(usage)))  # one call
+        old = {"claude": usage, "diff": {"files": 2, "added": 30, "removed": 2420}}  # before: priced
+        self.assertGreater(savings.of_row(old)["self_est"], 10 * savings.of_row(gone)["self_est"])
+        g = lambda *a: subprocess.run(["git", "-C", str(self.repo), *a], check=True, capture_output=True)  # noqa
+        (self.repo / "old.py").write_text("x = 1\n" * 2400)
+        (self.repo / "keep.py").write_text("a\nb\n")
+        g("add", "."), g("commit", "-qm", "base")
+        g("rm", "-q", "old.py")
+        (self.repo / "keep.py").write_text("a\n")                    # a line removed, not a file
+        (self.repo / "yarn.lock").write_text("dep\n" * 4000)
+        size = gitops.footprint(self.repo, "HEAD")
+        self.assertEqual(size, {"files": 2, "lines": 0, "removed": 2401,
+                                "generated": {"files": 1, "lines": 4000, "removed": 0},
+                                "deleted": {"files": 1, "removed": 2400}})
+        steps = [{**size, "landed": True}, {"files": 1, "lines": 3, "removed": 0,
+                                            "deleted": {"files": 1, "removed": 9}}]
+        self.assertEqual(results._apart(steps, "deleted", ("files", "removed")),
+                         {"deleted": {"files": 2, "removed": 2409}})
+        self.assertEqual(results._apart(steps[1:], "generated", ("files", "lines", "removed")), {})
 
     def test_the_badge_scores_the_summed_saving_from_1_to_100_and_says_it_in_words(self):
         # #101: one number, about the percent of Claude saved; the colour never says it alone
@@ -9797,6 +11377,20 @@ class Savings(Base):
         # counted: 0-10, 10-20, the 10 s after the wake and the 10 s after the step back
         self.assertAlmostEqual(p.wh, 150 * 40 / 3600, places=9)
         self.assertIs(p.clock, time.monotonic)
+
+    def test_tasks_sharing_the_gpu_each_count_their_share_of_its_draw(self):
+        # #706: two tasks on one 300 W GPU for an hour each added 300 Wh: the week said 600 Wh
+        held = {"101": {"task": "t-a"}, "102": {"task": "t-b"}, "103": {"task": "t-c", "waiting": True},
+                "104": {"task": "t-a", "tests": True}}   # t-a's GPU tests are still t-a
+        with mock.patch.object(hardware, "gpu_power_w", return_value=300.0), \
+                mock.patch.object(runner.models, "holders", lambda *a, **k: held):
+            p = runner._Power()
+            for t in range(0, 3601, 10):   # an hour, sampled every 10 s
+                p.step(float(t))
+        self.assertAlmostEqual(p.wh, 150.0, places=6)   # half of 300 Wh
+        self.assertEqual((p.w_sum / p.n, p.peak), (300.0, 300.0))   # the GPU's own draw
+        with mock.patch.object(runner.models, "holders", lambda *a, **k: {}):
+            self.assertEqual(runner.sharers(), 1)
 
     def test_accepted_row_records_energy_and_diff_and_discarded_row_neither(self):
         from workbench import store, results
@@ -10153,6 +11747,69 @@ class Verify(Base):
         (self.wt / "calc.py").write_text("def kw(watts):\n    return watts // 1000\n")
         self.assertTrue(verify.last(store.Task("t"))["stale"])     # the candidate moved on since
 
+    def test_verify_runs_the_big_text_file_accept_lands_and_proves_nothing_without_a_binary_it_lands(self):
+        # #642 (Codex's audit of 1.90.6): the review snapshot's size limit also made verify's
+        # candidate, so a 1,100,000-byte text file was left out, verify said proven, and accept
+        # landed the file without a word: the same test failed on main
+        from workbench import verify
+        (self.wt / "big.txt").write_text("bad\n" + "x" * 1_099_996)
+        (self.wt / "tests" / "test_calc.py").write_text(
+            "import os, unittest\nfrom calc import kw\n\n\nclass T(unittest.TestCase):\n"
+            "    def test_kw(self):\n        self.assertEqual(kw(250000), 250)\n\n"
+            "    def test_big(self):\n        if os.path.exists('big.txt'):\n"
+            "            self.assertEqual(open('big.txt').readline(), 'ok\\n')\n")
+        test = "python3 -m unittest tests.test_calc"
+        r = subprocess.run(shlex.split(test), cwd=self.wt, capture_output=True,
+                           env={**os.environ, "PYTHONDONTWRITEBYTECODE": "1"})
+        self.assertEqual(r.returncode, 1)                     # the task's checkout fails it
+        out = run_wb("verify", "t", "--test", test)
+        self.assertIn("the candidate fails it", out)
+        result = verify.last(store.Task("t"))
+        self.assertIn("big.txt", gitops.git(self.wt, "ls-tree", "--name-only", result["tree"]))
+        self.assertFalse(result["stale"])
+        self.assertEqual(verify.note(store.Task("t")),
+                         f"note: the last regression check (`{test}`) is the candidate fails it")
+        # what accept refuses without --include and lands with it: never proof
+        (self.wt / "big.txt").write_text("ok\n" + "x" * 1_099_996)
+        (self.wt / "blob.bin").write_bytes(b"\0" * gitops.BINARY_MAX)
+        out = run_wb("verify", "t", "--test", test)
+        self.assertIn("inconclusive", out)
+        self.assertIn("lands them with it): blob.bin (1 MB)", out)
+        (self.wt / "blob.bin").unlink()
+        self.assertIn("proven: it fails on the base", run_wb("verify", "t", "--test", test))
+        self.assertEqual(verify.note(store.Task("t")), "")
+
+    def test_a_failing_test_swapped_for_a_passing_one_with_no_code_change_is_not_proven(self):
+        # #643 (Codex's audit of 1.90.6): the base overlay borrowed the candidate's new test but
+        # kept the one it deleted, so `unittest discover` ran the failing test_old.py on the base
+        # and only the passing test_new.py on the candidate, and verify said proven, citing the
+        # deleted test's assertion, with calc.py unchanged
+        from workbench import verify
+        run_wb("discard", "t")
+        (self.repo / "test_old.py").write_text(
+            "import unittest\nfrom calc import kw\n\n\nclass T(unittest.TestCase):\n"
+            "    def test_kw(self):\n        self.assertEqual(kw(250000), 250)\n")
+        subprocess.run(["git", "-C", str(self.repo), "add", "-A"], check=True)
+        subprocess.run(["git", "-C", str(self.repo), "commit", "-qm", "a failing test"], check=True)
+        self.start("t2", "ok")
+        wait_phase("t2", {"review"})
+        wt = store.Task("t2").worktree
+        (wt / "test_old.py").unlink()
+        (wt / "test_new.py").write_text(
+            "import unittest\nfrom calc import kw\n\n\nclass T(unittest.TestCase):\n"
+            "    def test_zero(self):\n        self.assertEqual(kw(0), 0)\n")
+        out = run_wb("verify", "t2", "--test", "python3 -m unittest discover")
+        self.assertIn("not proven: it already passes on the base", out)
+        r = verify.last(store.Task("t2"))
+        self.assertEqual((r["verdict"], r["files"], r["removed"]),
+                         ("base-passes", ["test_new.py"], ["test_old.py"]))
+        # renamed away and made to pass: the old name goes from the base too
+        (wt / "test_new.py").unlink()
+        (wt / "test_renamed.py").write_text((self.repo / "test_old.py").read_text()
+                                            .replace("kw(250000), 250", "kw(0), 0"))
+        self.assertIn("already passes on the base",
+                      run_wb("verify", "t2", "--test", "python3 -m unittest discover"))
+
     def test_a_killed_verify_leaves_no_scratch_clone_and_no_test_running(self):
         # #372 (the audit of 1.6): Claude's Bash killed wb verify at 2 minutes, and its clone and
         # the test (in a session of its own) were left behind
@@ -10170,6 +11827,32 @@ class Verify(Base):
         self.assertEqual(proc.wait(30), 128 + signal.SIGTERM)
         self.assertFalse(running())
         self.assertEqual(list(store.home().glob(".verify-*")), [])
+
+    def test_verify_and_shot_after_steps_that_changed_nothing_compare_with_the_last_commit(self):
+        # #652 (Claude's and Codex's audits): a wb next step with no changes made no commit, so
+        # the step after it found no "(step N)" trailer and wb verify and wb shot died with
+        # "cannot find the last approved step's commit"
+        from workbench import verify
+        task = store.Task("t")
+        nxt = lambda: run_wb("next", "t", "--spec", str(self.spec), "-m", "Step")  # noqa
+        self.assertIn("committed as", nxt())                       # step 1: the fix
+        wait_phase("t", {"review"})
+        step1 = gitops.git(self.wt, "rev-parse", "HEAD").strip()
+        for clean in (3, 4):                                       # one, then two clean steps
+            self.assertIn("had no changes", nxt())
+            wait_phase("t", {"review"})
+            self.assertEqual(task.status["steps"], clean)
+            self.assertEqual(task.status["step_base"], step1)
+            (self.wt / "tests/test_again.py").write_bytes((self.wt / "tests/test_calc.py").read_bytes())
+            out = run_wb("verify", "t", "--test", "python3 -m unittest tests.test_again")
+            self.assertIn("already passes", out)
+            self.assertEqual(verify.last(task)["base"]["rev"], step1)
+            self.assertFalse(verify.last(task)["stale"])
+            shot = run_wb("shot", "t", "--capture", TRUE)
+            self.assertIn(f"base {step1[:10]}", shot)
+            (self.wt / "tests/test_again.py").unlink()
+        task.set_status(step_base=None)  # a task from before the record: the walk back finds it
+        self.assertEqual(verify._review_base(task), step1)
 
     def test_verify_credits_the_step_that_fixed_the_bug(self):
         # #252 (the audit of 1.2): step two's test passed on step one's commit already.
@@ -10235,6 +11918,71 @@ class Verify(Base):
         out = run_wb("verify", "t", "--test", "python3 -m unittest tests.test_calc",
                      "--expect", "a failure it never prints")
         self.assertIn("inconclusive", out)
+
+    def test_a_test_calling_an_api_only_the_candidate_has_proves_nothing(self):
+        # #729 (the 2026-11-21 audit, reproduced): pytest quoted the failing source line, `>
+        # assert mod.slugify(…)`, which matched ASSERTION, and jest's `is not a function` came
+        # under a ✕ header: a test showing only that the API was missing was called proven
+        from workbench import verify
+        pytest = ("    def test_slug():\n>       assert mod.slugify('A B') == 'a-b'\n"
+                  "E       AttributeError: module 'mod' has no attribute 'slugify'\n\n"
+                  "tests/test_slug.py:4: AttributeError\n"
+                  "FAILED tests/test_slug.py::test_slug - AttributeError: module 'mod' has no attri…\n")
+        jest = ("FAIL src/slug.test.js\n  ✕ slugifies (2 ms)\n\n"
+                "    TypeError: (0 , _slug.slugify) is not a function\n")
+        cases = [pytest, jest,
+                 "E       TypeError: split() got an unexpected keyword argument 'sep'",
+                 "E       TypeError: parse() takes 1 positional argument but 2 were given",
+                 "E       NameError: name 'slugify' is not defined",
+                 "    expect(slugify('A B')).toBe('a-b')\n    ReferenceError: slugify is not defined",
+                 "  ✕ adds\n    NoMethodError: undefined method `slugify' for Slug:Class",
+                 # pytest's first error not an assertion's: the test never got to check the bug
+                 ">       assert parse(x) == 3\nE       KeyError: 'x'\n"]
+        for out in cases:
+            self.assertEqual(verify.verdict(1, out, 0), "inconclusive", out)
+        self.assertEqual(verify.assertion(pytest),
+                         "E       AttributeError: module 'mod' has no attribute 'slugify'")
+        # the positive controls: pytest's own assertion, and its pytest.raises
+        self.assertEqual(verify.verdict(1, ">       assert slug('A B') == 'a-b'\n"
+                                           "E       AssertionError: assert 'A B' == 'a-b'\n", 0), "proven")
+        self.assertEqual(verify.verdict(1, ">       with pytest.raises(ValueError):\n"
+                                           "E       Failed: DID NOT RAISE <class 'ValueError'>\n", 0), "proven")
+        self.assertEqual(verify.verdict(1, "FAIL src/slug.test.js\n  ✕ slugifies\n"
+                                           "    Expected: \"a-b\"\n    Received: \"A B\"\n", 0), "proven")
+
+    def test_phpunit_xctest_swift_testing_catch2_and_bats_failures_are_proven(self):
+        # #730 (the 2026-11-21 audit, reproduced): none of these runners' failures matched
+        # ASSERTION or FAILED_TEST, so their genuine regressions were inconclusive
+        from workbench import verify
+        runs = {
+            "phpunit": ("There was 1 failure:\n\n1) SlugTest::testSlug\nFailed asserting that two "
+                        "strings are identical.\n--- Expected\n+++ Actual\n\nFAILURES!\n"
+                        "Tests: 1, Assertions: 1, Failures: 1.\n"),
+            "pest": "   FAILED  Tests\\Unit\\SlugTest > slugifies\n  Failed asserting that 'A B' is identical to 'a-b'.\n",
+            "xctest": ("/src/Tests/SlugTests/SlugTests.swift:5: error: -[SlugTests.SlugTests testSlug] : "
+                       "XCTAssertEqual failed: (\"A B\") is not equal to (\"a-b\")\n"
+                       "Test Case '-[SlugTests.SlugTests testSlug]' failed (0.001 seconds).\n"),
+            "swift-testing": ("✘ Test slugifies() recorded an issue at SlugTests.swift:5:3: "
+                              "Expectation failed: (slug(\"A B\") → \"A B\") == \"a-b\"\n"
+                              "✘ Test slugifies() failed after 0.001 seconds with 1 issue.\n"),
+            "catch2": ("-------------------------------------------------------------------------------\n"
+                       "slugifies\n------------------------------------------------------------------------------\n"
+                       "/src/test.cpp:5\n...............................................................................\n\n"
+                       "/src/test.cpp:5: FAILED:\n  REQUIRE( slug(\"A B\") == \"a-b\" )\nwith expansion:\n"
+                       "  \"A B\" == \"a-b\"\n"),
+            "bats": ("1..1\nnot ok 1 slugifies\n# (in test file test/slug.bats, line 4)\n"
+                     "#   `[ \"$output\" = \"a-b\" ]' failed\n"),
+        }
+        for runner_name, out in runs.items():
+            self.assertEqual(verify.verdict(1, out, 0), "proven", runner_name)
+            self.assertTrue(verify.assertion(out), runner_name)
+        # the same runners when what failed is missing, not wrong: still no proof
+        for out in ("1..1\nnot ok 1 slugifies\n# test/slug.bats: line 3: slugify: command not found\n",
+                    "1) SlugTest::testSlug\nError: Call to undefined function slugify()\n\nERRORS!\n",
+                    "1) SlugTest::testSlug\nError: Call to undefined method Slug::slugify()\n"):
+            self.assertEqual(verify.verdict(1, out, 0), "inconclusive", out)
+        # and the wording no longer assumes the setup failed
+        self.assertIn("output it doesn't read, which --expect TEXT can name", verify.SAY["inconclusive"])
 
     def test_a_golden_file_the_candidate_adds_goes_to_the_base_and_one_left_out_proves_nothing(self):
         # #500 (the audit of 1.90): Go's testdata/ wasn't copied to the base, which failed on
@@ -10343,6 +12091,29 @@ class Verify(Base):
             run_wb("verify", "t", "--test", "python3 -m unittest tests.test_calc")
         self.assertEqual([h for _, h in seen], [{}, {}])
 
+    def test_a_base_check_waiting_for_the_gpu_holds_no_prep_turn_meanwhile(self):
+        # #679 (Claude's audit of main): an --unload-for-tests base check took the machine's one
+        # prep turn and then waited inside it for the GPU, behind another task's whole run, so
+        # every queued task's setup and base check waited too
+        from workbench import media, verify
+        with mock.patch.object(cli, "spawn_runner"):
+            self.start("t-gpuwait", "ok", "--queue", "--unload-for-tests", "--test", TEST_CMD)
+        order = []
+
+        def held(name):
+            @contextlib.contextmanager
+            def cm(*_, **__):
+                order.append(name)
+                yield
+                order.append("/" + name)
+            return cm
+        with mock.patch.object(media, "gpu", held("gpu")), \
+                mock.patch.object(runner, "prep_turn", held("turn")), \
+                mock.patch.object(verify, "_run", side_effect=lambda *a: order.append("run") or (1, "x")):
+            runner._base_check(store.Task("t-gpuwait"))
+        self.assertEqual(order, ["gpu", "turn", "run", "/turn", "/gpu"])
+        self.assertEqual(store.Task("t-gpuwait").status["base_check"]["exit"], 1)
+
     def test_the_scratch_checkouts_read_the_bytes_the_task_reads(self):
         # #426 (the audit of 1.8, reproduced): with the repo's own core.autocrlf the task read
         # CRLF, and the base check's and verify's clones read LF, failing on an untouched file
@@ -10412,6 +12183,25 @@ class Verify(Base):
     def test_a_proven_check_adds_nothing_at_accept(self):
         run_wb("verify", "t", "--test", "python3 -m unittest tests.test_calc")
         self.assertNotIn("regression check", run_wb("accept", "t", "-m", "kW from W"))
+
+    def test_django_swift_dotnet_cypress_and_perl_tests_look_like_tests(self):
+        # #731 (the 2026-11-21 audit, reproduced): none of these matched, so verify and bench add
+        # refused, and a Django tests.py edited beside a new fixture sent the fixture alone
+        from workbench import verify
+        for p in ("polls/tests.py", "tests.py", "Tests/SlugTests/SlugTests.swift",
+                  "MyApp.Tests/UserServiceTests.cs", "src/MyApp.Test/Foo.cs", "cypress/e2e/login.cy.ts",
+                  "t/basic.t", "src/test/java/com/x/SlugTest.java", "app/src/SlugSpec.kt",
+                  "tests/Unit/SlugTest.php", "Test/Spec.hs", "Fixtures/a.json"):
+            self.assertTrue(verify.looks_like_test(p), p)
+        for p in ("polls/views.py", "src/lib.rs", "Sources/Slug/Slug.swift", "MyApp/UserService.cs",
+                  "src/Manifest.java", "contest.py", "lib/t.pm"):
+            self.assertFalse(verify.looks_like_test(p), p)
+        # --files naming code, as inline tests need: the base runs the candidate's code, and says so
+        out = run_wb("verify", "t", "--test", "python3 -m unittest tests.test_calc",
+                     "--files", "tests/test_calc.py", "tests/__init__.py", "calc.py")
+        self.assertIn("not proven: it already passes on the base", out)
+        self.assertIn("the base got the candidate's code too, not only tests: calc.py", out)
+        self.assertNotIn("code too", run_wb("verify", "t", "--test", "python3 -m unittest tests.test_calc"))
 
     def test_without_a_test_file_among_the_changes_it_says_to_name_one(self):
         for p in ("tests/test_calc.py", "tests/__init__.py"):
@@ -10581,6 +12371,38 @@ class Stats(Base):
         for text in ('{"recording": "no", "every": 7}', '[1]', 'not json'):  # hand-edited: ignored
             stats.path().write_text(text)
             self.assertEqual(stats.settings(), stats.DEFAULTS)
+
+    def test_the_tab_lists_the_models_there_now_variants_folded_newest_first(self):
+        # #638 (the owner, 2026-11-21): after 49 tasks the tab listed five models, two of them
+        # wb optimize variants of a third and one long gone, in no order
+        from workbench import stats
+        cfg = json.loads(Path(os.environ["WB_OPENCODE_CONFIG"]).read_text())
+        for k in ("qwen3.8-27b-40k", "qwen3.8-27b-64k"):
+            cfg["provider"]["ollama"]["models"][k] = {"name": k}
+        Path(os.environ["WB_OPENCODE_CONFIG"]).write_text(json.dumps(cfg))
+        Path(os.environ["WB_MODELS"]).write_text(json.dumps({
+            f"ollama/qwen3.8-27b-{w}k": {"variant_of": "ollama/qwen3.8-27b"} for w in (40, 64)}))
+        now = time.time()
+        for model, window, age in (("ollama/mimo-v2.6:9b-q8_0", 32768, 5), ("ollama/qwen3.8-27b", 32768, 9),
+                                   ("ollama/qwen3.8-27b-40k", 40960, 3), ("ollama/qwen3.8-27b-64k", 65536, 1),
+                                   ("gone/model", 32768, 2), ("strata/strata", None, 200)):
+            store.append_jsonl(store.home() / "results.jsonl", {
+                "model": model, "size": "trivial", "outcome": "accepted", "ran": True,
+                "window": window, "ts": now - age * 86400})
+        f = stats.feed(now)
+        lines = f["model_lines"]["lines"]
+        self.assertEqual([x["model"] for x in lines], ["ollama/qwen3.8-27b", "ollama/mimo-v2.6:9b-q8_0"])
+        self.assertEqual((lines[0]["tasks"], lines[0]["windows"]), (3, [32768, 40960, 65536]))
+        self.assertEqual(f["model_lines"]["older"], {"models": 2, "tasks": 2})  # gone, and idle 90+ days
+        self.assertEqual(len(f["models"]), 6)                     # the feed's split stays whole
+        out = run_wb("stats")
+        self.assertIn("ollama/qwen3.8-27b-40k", out)              # wb stats keeps the variants
+        self.assertNotIn("gone/model", out)
+        self.assertIn("2 older model(s), retired or idle 90+ days: 2 task(s) (wb stats --all)", out)
+        out = run_wb("stats", "--all")
+        self.assertIn("gone/model", out)
+        self.assertIn("strata/strata", out)
+        self.assertNotIn("older model", out)
 
     def test_two_settings_changed_at_once_both_stay(self):
         # #564: each wrote back the snapshot it read, so one change was lost while both said it took.
@@ -10754,7 +12576,7 @@ class Stats(Base):
         with mock.patch.object(store, "read_jsonl", counted):
             reads.clear()
             head = stats.feed(now, only=stats.SUMMARY)
-        self.assertEqual(len(reads), 1)
+        self.assertEqual(len(reads), 0)  # unchanged since: not parsed again (#727)
         self.assertNotIn("helps", head)
         self.assertNotIn("models", head)
         self.assertEqual(stats.summary(head), stats.summary(f))
@@ -11032,6 +12854,33 @@ class Progress(Base):
         line = transcript.clock_line(task, now)
         self.assertIn("~6m00s left (typically 12m)", line)                 # 12 less 5 + 1 active
 
+    def test_with_too_few_timed_tasks_the_first_check_comes_at_the_sizes_default_then_spaced_out(self):
+        # #724: with no history the checks never came though `wb progress on` said they would,
+        # and one 1.5-minute task made the threshold 1.5 minutes: a check every 1.5 minutes
+        model = "ollama/mimo-v2.6:9b-q8_0"
+        self.assertIn("until a model and size have 3 timed tasks: 20 min trivial, 45 min significant",
+                      run_wb("progress", "on"))
+        spec = {"model": model, "size": "trivial"}
+        self.assertEqual(progress.typical(spec), (20.0, "default"))
+        self.assertEqual(progress.threshold({**spec, "size": "significant"}), 45.0)
+        row = {"model": model, "size": "trivial", "outcome": "accepted", "active_minutes": 1.5}
+        store.append_jsonl(store.home() / "results.jsonl", row)
+        self.assertEqual(progress.threshold(spec), 20.0)                    # one task isn't enough
+        for _ in range(2):
+            store.append_jsonl(store.home() / "results.jsonl", row)
+        self.assertEqual(progress.typical(spec), (10, "measured"))          # three: the floor
+        for _ in range(4):
+            store.append_jsonl(store.home() / "results.jsonl", {**row, "active_minutes": 14})
+        self.assertEqual(progress.threshold(spec), 14)
+        t = store.Task("x")
+        store.write_json(t.dir / "status.json", {})
+        hits = []
+        for active in range(0, 31 * 60, 5):          # 30 minutes of active work, a 1-minute typical
+            if progress.due(t, active, 1):
+                hits.append(active)
+                t.set_status(progress_checks=progress.passed(active, 1))
+        self.assertEqual(hits, [60, 120, 240, 480, 960])                    # 1x, 2x, 4x...: not 30
+
     def test_what_helped_more_on_the_model_decides_once_both_were_tried_enough(self):
         from workbench import progress
         self.assertEqual(progress.recommend(True, {"hint": [0, 0], "smaller": [0, 0]}), "hint")
@@ -11094,6 +12943,33 @@ class Setup(Base):
         os.environ.update(FAKE_VERSION="opencode v3.1.0")  # finding 26: past the tested range
         self.assertIn("--  OpenCode 3.1 is outside what workbench is tested with", self.setup(cmd="doctor")[1])
         self.assertIn("--  wb comes from /usr, not this copy", out)
+
+    def test_doctor_exit_code_does_not_follow_the_keep_awake_probe(self):
+        # #653: `ok, said = awake_line()` reassigned doctor's verdict: a Mac (caffeinate) exited 0
+        # beside "BAD opencode not found", and a healthy WSL2 install exited 1 with no BAD line
+        home = Path(self.tmp.name) / "home"
+        home.mkdir()
+        os.environ.update(HOME=str(home), WB_HOME=str(home / ".local/state/workbench"),
+                          FAKE_VERSION="opencode v2.3.0",
+                          PATH=os.pathsep.join([str(home / ".local/bin"), os.environ["PATH"]]))
+        os.environ.pop("CLAUDE_CONFIG_DIR", None)
+        Path(os.environ["WB_OPENCODE_CONFIG"]).write_text(json.dumps({"provider": {"strata": {
+            "options": {"baseURL": "http://127.0.0.1:8080/v1"},
+            "models": {"strata": {"limit": {"context": 32768}}}}}}))  # nothing for doctor to fault
+        self.assertEqual(self.setup()[0], 0)
+        (home / ".claude/plugins").mkdir(parents=True)
+        (home / ".claude/plugins/installed_plugins.json").write_text(
+            json.dumps({"version": 2, "plugins": {"workbench@workbench": []}}))
+        for awake in (True, False):
+            with mock.patch.object(cli, "awake_line", return_value=(awake, "keep-awake")):
+                code, out = self.setup(cmd="doctor")
+            self.assertNotIn("BAD keep-awake", out)
+            self.assertEqual(code, 1 if "\nBAD" in "\n" + out else 0, out)  # the BAD lines, and only they
+        os.environ["WB_OPENCODE_BIN"] = str(Path(self.tmp.name) / "no-opencode")
+        with mock.patch.object(cli, "awake_line", return_value=(True, "keep-awake")):
+            code, out = self.setup(cmd="doctor")
+        self.assertIn("BAD opencode", out)
+        self.assertEqual(code, 1)
 
     def test_setup_links_wb_and_the_skill_and_leaves_what_it_did_not_make(self):
         home = Path(self.tmp.name) / "home"
@@ -11305,13 +13181,44 @@ class Update(Base):
         (self.copy / "README.md").write_text("mine")
         self.assertIn("uncommitted changes", self.update())
         subprocess.run(["git", "-C", str(self.copy), "checkout", "-q", "README.md"], check=True)
-        with mock.patch.object(store, "all_tasks", lambda: [types.SimpleNamespace(name="t-up")]), \
+        with mock.patch.object(store, "all_tasks", lambda: [types.SimpleNamespace(name="t-up", spec={})]), \
                 mock.patch.object(cli, "runner_alive", lambda t: True):
-            self.assertIn("tasks are running (t-up)", self.update())
+            self.assertIn("tasks are running (t-up (no session))", self.update())
         out = self.update()
         self.assertIn("updated clone", out)
         self.assertTrue((self.copy / "new.txt").exists())
         self.assertIn("up to date", self.update("--check"))
+
+
+    def test_update_stop_tells_each_tasks_own_session_to_resume_it_instead_of_parking_it(self):
+        # #694: the refusal advised an unscoped `wb stop --all`, which parked another live
+        # session's agents and acknowledged their news: that Claude waited for a wake that never came
+        os.environ.update(CLAUDE_CODE_SESSION_ID="sess-b")
+        self.start("t-theirs", "hang")
+        running("t-theirs")
+        os.environ.update(CLAUDE_CODE_SESSION_ID="sess-a")
+        self.start("t-ours", "hang", "--queue")
+        out = self.update()
+        self.assertIn("t-ours (this session's)", out)
+        self.assertIn(f"t-theirs (session sess-b in {os.getcwd()})", out)
+        self.assertIn("wb update --stop", out)
+        self.assertFalse((self.copy / "new.txt").exists())             # nothing pulled
+        before = len(store.read_jsonl(store.home() / "notify.jsonl")[0])
+        out = self.update("--stop")
+        self.assertIn("stopped for the update: ", out)
+        self.assertNotIn("tasks are running", out)                     # and on to the update
+        rows = store.read_jsonl(store.home() / "notify.jsonl")[0][before:]
+        self.assertEqual(sorted((r["task"], r["kind"], tuple(r["tasks"])) for r in rows),
+                         [("t-ours", "stuck", ("t-ours",)), ("t-theirs", "stuck", ("t-theirs",))])
+        self.assertIn("wb resume t-theirs continues it", next(r for r in rows if r["task"] == "t-theirs")["text"])
+        for name in ("t-ours", "t-theirs"):
+            t = store.Task(name)
+            self.assertFalse(cli.runner_alive(t))
+            self.assertEqual((t.status["phase"], t.status["last"]), ("stuck", cli.UPDATE_STOP))
+            self.assertFalse(store.parked(t.status))                    # still its session's to wake
+            self.assertLess(cli._acked(t), max(r["ts"] for r in rows))  # the news isn't swallowed
+        os.environ["FAKE_SCENARIO"] = "ok"
+        self.assertIn("resumed t-theirs", run_wb("resume", "--all", "--session", "sess-b"))
 
 
 class Projects(Base):
@@ -11428,6 +13335,25 @@ class Projects(Base):
             with self.assertRaises(SystemExit):
                 run_wb("init", str(d))
         self.assertFalse((home / ".git").exists())
+
+    def test_init_makes_a_repo_of_its_own_inside_a_home_kept_as_a_git_repo(self):
+        # #684 (Claude's audit of main, reproduced): with dotfiles kept as `git init` in ~, every
+        # new project read as "inside the git repo /home/u", wb try with it, and the advice to
+        # init it "in its own directory" was what the user had done
+        self.identity()
+        home = Path(self.tmp.name) / "dothome"
+        home.mkdir()
+        self.git(home, "init", "-q")
+        os.environ["HOME"] = str(home)
+        d = home / "projects" / "new"
+        self.assertIn("git repo on", run_wb("init", str(d)))
+        self.assertEqual(Path(self.git(d, "rev-parse", "--show-toplevel")).resolve(), d.resolve())
+        self.assertEqual(self.git(d, "log", "--format=%s"), "Initial commit")
+        err = io.StringIO()                                   # inside a real project: still refused
+        with self.assertRaises(SystemExit), redirect_stderr(err):
+            run_wb("init", str(self.repo / "sub"))
+        self.assertIn(f"is inside the git repo {self.repo.resolve()}", err.getvalue())
+        self.assertIn("outside that repo", err.getvalue())
 
     def test_a_gitignored_claude_md_is_not_linked_and_does_not_stop_a_start(self):
         # the audit: init committed an AGENTS.md link to an ignored file, dangling in every clone,
@@ -11556,6 +13482,18 @@ class Projects(Base):
         row[14] = "+"                                                # a key on disk: dry-run
         gpg.write_text(f"#!/bin/sh\necho '{':'.join(row)}'\nexit 1\n")
         self.assertIsNone(gitops.presence_signer(self.repo))
+
+    def test_ssh_signing_whose_key_comes_from_a_default_key_command_starts_without_a_traceback(self):
+        # #662: no user.signingkey (gpg.ssh.defaultKeyCommand picks the key) built Path(""), and
+        # its .pub raised a ValueError past main: every wb start was a traceback
+        g = lambda *a: subprocess.run(["git", "-C", str(self.repo), *a], check=True)  # noqa
+        os.environ.pop("SSH_AUTH_SOCK", None)                       # never the user's agent
+        for k, v in (("gpg.format", "ssh"), ("gpg.ssh.defaultKeyCommand", "true"),
+                     ("commit.gpgsign", "true")):
+            g("config", k, v)
+        self.assertIsNone(gitops.presence_signer(self.repo))
+        gitops.sign_problem(self.repo, "HEAD")                     # says what it says, no raise
+        self.assertIn("started t-dkc", self.start("t-dkc", "ok", "--queue"))
 
     def test_a_monorepo_package_with_its_own_claude_md_is_where_the_agent_and_tests_run(self):
         # #375 (the audit of 1.6, reproduced): from packages/app, whose CLAUDE.md Claude Code reads,
@@ -12013,6 +13951,17 @@ class ModelSet(Base):
         with self.assertRaises(SystemExit):
             run_wb("model", "retire", "ollama/qwen3.8-27b")
 
+    def test_retire_refuses_opencodes_small_model_too_and_says_which_field(self):
+        # #708: with model and small_model on different entries, retiring the small_model one
+        # deleted it and left small_model naming it for every other OpenCode session
+        cfg = self.config(); cfg["small_model"] = "ollama/qwen3.8-27b"
+        Path(os.environ["WB_OPENCODE_CONFIG"]).write_text(json.dumps(cfg))
+        err = io.StringIO()
+        with self.assertRaises(SystemExit), redirect_stderr(err):
+            run_wb("model", "retire", "ollama/qwen3.8-27b")
+        self.assertIn("ollama/qwen3.8-27b is OpenCode's small_model; set small_model in", err.getvalue())
+        self.assertIn("qwen3.8-27b", self.config()["provider"]["ollama"]["models"])   # nothing changed
+
     def test_retire_with_delete_keeps_weights_another_alias_still_uses(self):
         # #333, the audit of 1.4: two aliases of one Ollama model, one the default; retiring the
         # other with --delete deleted the shared weights and the default read "not pulled"
@@ -12291,6 +14240,39 @@ class DiskRoom(Base):
                 redirect_stderr(err), self.assertRaises(SystemExit):
             self.start("t-partial", "ok")
         self.assertIn("7 of its files aren't fetched yet (a partial clone)", err.getvalue())
+
+    def test_start_counts_the_checkouts_of_tasks_just_started_as_taken(self):
+        # #676 (Claude's audit of main): since the runner makes the checkout (#529), each start of
+        # a batch saw 40 GB free and passed, and four 8 GB checkouts then ran at once
+        def task(name, **status):
+            t = store.Task(name)
+            t.dir.mkdir(parents=True)
+            store.write_json(t.dir / "task.json", {"name": name, "checkout": "runner",
+                                                   "checkout_bytes": 8 * 10**9, "created_at": store.now()})
+            t.set_status(phase="starting", **status)
+        task("t-a")
+        task("t-made", checked_out=True)                     # on the disk already: free counts it
+        task("t-dead")
+        store.Task("t-dead").set_status(phase="failed")      # never will be
+        self.assertEqual(runner.pending_checkouts(), 8 * 10**9)
+        size = mock.patch.object(gitops, "checkout_size", return_value=(8 * 10**9, 0))
+        with size, mock.patch.object(store, "free_bytes", return_value=40 * 10**9):
+            self.assertEqual(cli._disk_room(self.repo, "HEAD", {}), 8 * 10**9)  # 32 GB left: room
+            task("t-b")
+            err = io.StringIO()
+            with redirect_stderr(err), self.assertRaises(SystemExit):
+                cli._disk_room(self.repo, "HEAD", {})
+        self.assertIn("16.0 GB more is promised to the checkouts of tasks just started", err.getvalue())
+
+    def test_the_runner_refuses_a_checkout_the_disk_has_no_longer_room_for(self):
+        # #676: the disk filled between wb start's check and the runner's checkout
+        with mock.patch.object(gitops, "checkout_size", return_value=(10**15, 0)), \
+                mock.patch.object(store, "free_bytes", return_value=10**16):
+            self.start("t-huge", "ok")
+        self.assertEqual(store.Task("t-huge").spec["checkout_bytes"], 10**15)
+        st = wait_phase("t-huge", {"failed"})
+        self.assertIn("free where the state directory is, and its checkout needs", st["last"])
+        self.assertFalse(store.Task("t-huge").worktree.exists())
 
     def test_a_single_file_given_to_copy_counts_at_its_size(self):
         # #436 (Codex's 21): dir_size scanned a file as a directory, counted nothing and called
@@ -13148,6 +15130,19 @@ class WebChat(Base):
         self.assertEqual(page[0], 200)
         self.assertEqual(self.call("/icon-192.png")[0], 200)
 
+    def test_the_notification_badge_is_a_monochrome_image_with_an_alpha_channel(self):
+        # #757 (the 2026-11-21 audit, finding 105): Android draws the status-bar badge from the
+        # alpha channel alone, and the badge was icon-192.png, RGB with none: a white square
+        import struct
+        badge = re.search(r"badge: '/([^']+)'", (self.chat.STATIC / "sw.js").read_text()).group(1)
+        code, data = self.call("/" + badge)[:2]
+        self.assertEqual(code, 200)
+        self.assertEqual(data[:8], b"\x89PNG\r\n\x1a\n")
+        self.assertEqual(data[12:16], b"IHDR")
+        width, height, depth, colour = struct.unpack(">IIBB", data[16:26])
+        self.assertEqual((colour, depth), (6, 8))          # RGBA
+        self.assertLessEqual(width, 96)
+
     def test_a_push_that_fails_says_why_in_the_log_and_on_the_page_and_a_refusal_is_not_delivered(self):
         # #539 (the 2026-11-20 audit, reproduced with an empty SSL_CERT_FILE): send returned 0 with
         # the reason dropped, the page blamed the push service, serve.log stayed empty, the push was
@@ -13370,7 +15365,7 @@ class WebChat(Base):
         self.assertTrue(got[old["id"]]["expired"])                           # the page's mark
         self.assertNotIn("expired", got[fresh["id"]])
         self.assertEqual(chat.snapshot()["expire"], chat.MESSAGE_EXPIRE)     # the page's hours
-        self.assertEqual([m.get("expired") for m in chat.pending()], [True, None])
+        self.assertEqual([m["id"] for m in chat.pending()], [fresh["id"]])     # retired (#741)
         err = io.StringIO()
         with redirect_stderr(err), self.assertRaises(SystemExit):            # the mod is refused it
             run_wb("chat", "claim", old["id"], "--by", "s")
@@ -13677,7 +15672,57 @@ class WebChat(Base):
             run_wb("chat", "on", "--port", str(port))
         self.assertIn(f"another account's chat", err.getvalue())
         self.assertFalse((self.chat.chat_dir() / "serve.pid").exists())           # nothing started
+        # #690: the switch stayed on when it died, so the pane read On and pinned a dead link
+        self.assertIn("web chat left off", err.getvalue())
+        self.assertFalse(self.chat.is_on())
         self.assertEqual(run_wb("chat", "off", "--port", str(port)).strip(), "web chat off")  # no unit named
+
+    def test_a_push_fetches_only_the_newest_open_ask_and_claudes_last_word(self):
+        # #755 (the 2026-11-21 audit, finding 102): each push made the service worker fetch the
+        # whole /api/state (922 KB with 300 messages and 30 plans) to pick one line
+        chat = self.chat
+        for i in range(30):
+            done = chat.ask("ExitPlanMode", "", "plan", {"plan": f"plan {i}\n" + "step\n" * 4000})
+            chat.answer(done["id"], "deny", "web")
+        for i in range(100):
+            chat.send("x" * 1500, "user" if i % 2 else "claude")
+        chat.send("Tests pass, ready for review", "claude")
+        chat.send("thanks", "user")
+        old = chat.ask("Bash", "rm -rf build")
+        plan = chat.ask("ExitPlanMode", "", "plan", {"plan": "1. Read\n" + "2. Write\n" * 3000})
+        got = chat.latest()
+        self.assertEqual([a["id"] for a in got["asks"]], [plan["id"]])        # the newest open one
+        self.assertNotIn("detail", got["asks"][0])                           # not its plan's text
+        self.assertEqual([m["text"] for m in got["messages"]], ["Tests pass, ready for review"])
+        self.assertLess(len(json.dumps(got)), 2000)
+        self.assertGreater(len(json.dumps(chat.snapshot())), 400_000)
+        code, body = self.call("/api/latest", token=chat.token())
+        self.assertEqual((code, [a["id"] for a in body["asks"]]), (200, [plan["id"]]))
+        self.assertEqual(self.call("/api/latest")[0], 401)
+        chat.answer(plan["id"], "allow", "web")
+        self.assertEqual([a["id"] for a in chat.latest()["asks"]], [old["id"]])
+        self.assertIn("/api/latest", (chat.STATIC / "sw.js").read_text())
+
+    def test_on_macos_the_launchd_agent_is_checked_and_named_instead_of_systemd(self):
+        # #756 (the 2026-11-21 audit, finding 103): with the launchd agent keeping the chat up,
+        # `wb chat off` and the port-taken error gave systemctl advice, and revive ignored the agent
+        chat, ran = self.chat, []
+        fake = lambda argv, **kw: ran.append(argv) or subprocess.CompletedProcess(argv, 0, b"", b"")
+        with mock.patch.object(chat, "_macos", return_value=True), \
+                mock.patch.object(chat.shutil, "which", lambda name: "/bin/" + name), \
+                mock.patch.object(chat.subprocess, "run", fake):
+            self.assertTrue(chat._unit_keeps_it())
+        self.assertEqual(ran, [["launchctl", "print", f"gui/{os.getuid()}/workbench.chat"]])
+        with mock.patch.object(chat, "_macos", return_value=True):
+            off = run_wb("chat", "off", "--port", str(self.port))              # a server it didn't start
+            self.assertIn("launchd's workbench.chat: launchctl bootout gui/$(id -u)/workbench.chat stops it", off)
+            self.assertNotIn("systemctl", off)
+            with self.assertRaisesRegex(RuntimeError, r"another wb chat serve \(launchctl print "
+                                        r"gui/\$\(id -u\)/workbench.chat\)"):
+                chat.make_servers(self.port, ["127.0.0.1"])
+        with mock.patch.object(chat, "_macos", return_value=False):
+            self.assertIn("systemd's wb-chat: systemctl --user disable --now wb-chat stops it",
+                          run_wb("chat", "off", "--port", str(self.port)))
 
     def test_a_chat_wb_chat_on_started_comes_back_after_a_reboot_or_a_crash(self):
         # #449 (the 2026-11-20 audit): the switch stayed on and the pane showed the link, but nothing
@@ -14004,6 +16049,23 @@ class ChatUploads(Base):
         self.assertEqual(get("/api/upload/kkkkkkkk-9")[0], 404)
         self.assertEqual(get("/api/file/..%2Ftoken")[0], 404)
 
+    def test_a_file_may_be_kept_by_the_browser_and_nothing_else_is(self):
+        # #754 (the 2026-11-21 audit, finding 101): `no-store` on every response, so each load of
+        # the thread fetched every photo whole again; an upload never changes under its id
+        self.put("cccccccc-1", b"\x89PNG img", name="shot.png", ctype="image/png")
+        def headers(path, token=True):
+            c = http.client.HTTPConnection("127.0.0.1", self.port, timeout=5)
+            c.request("GET", path, headers={"Host": "localhost", **({"Authorization": f"Bearer {self.tok}"} if token else {})})
+            r = c.getresponse()
+            r.read()
+            c.close()
+            return r.status, r.getheader("Cache-Control"), r.getheader("Vary")
+        self.assertEqual(headers("/api/file/cccccccc-1"),
+                         (200, "private, max-age=31536000, immutable", "Authorization"))
+        for path in ("/api/upload/cccccccc-1", "/api/file/cccccccc-9", "/api/state", "/"):
+            self.assertEqual(headers(path)[1], "no-store", path)
+        self.assertEqual(headers("/api/file/cccccccc-1", token=False)[:2], (401, "no-store"))
+
     def test_gc_drops_old_uploads_once_their_message_is_read_and_drafts_never_sent(self):
         for uid in ("llllllll-1", "llllllll-2", "llllllll-3", "llllllll-4"):
             self.put(uid, uid.encode())
@@ -14017,6 +16079,44 @@ class ChatUploads(Base):
             (d / ".meta.json").write_text(json.dumps({**m, "ts": old}))
         self.assertIn("2 web chat upload(s)", run_wb("gc"))
         self.assertEqual(sorted(p.name for p in self.uploads().iterdir()), ["llllllll-2", "llllllll-4"])
+
+    def test_a_long_non_ascii_name_is_saved_cut_by_bytes_and_a_disk_that_refuses_says_final(self):
+        # #742 (the 2026-11-21 audit, finding 92): cut to 120 characters, 120 CJK ones were 360
+        # bytes, the rename failed ENAMETOOLONG, and the page retried that 500 for good
+        for name, ext in (("報告書" * 40 + ".pdf", ".pdf"), ("東京の写真と会議のメモ" * 9 + ".jpg", ".jpg"),
+                          ("😀" * 70 + ".png", ".png")):
+            uid = f"nnnnnnnn-{len(name)}"
+            code, got = self.put(uid, b"the bytes", name=name)
+            self.assertEqual(code, 200, got)
+            saved = Path(got["upload"]["path"]).name
+            self.assertLessEqual(len(saved.encode()), self.chat.UPLOAD_NAME)
+            self.assertTrue(saved.endswith(ext) and name.startswith(saved[:-len(ext)]), saved)
+        self.assertEqual(self.chat.upload_name("a" * 300 + ".tar.gz")[-3:], ".gz")
+        for err, code, final in ((errno.ENOSPC, 507, True), (errno.ENAMETOOLONG, 500, True),
+                                 (errno.EIO, 500, False)):
+            with mock.patch.object(self.chat, "save_upload", side_effect=OSError(err, os.strerror(err))):
+                got = self.put("ffffffff-1", b"x")
+            self.assertEqual(got, (code, {"error": f"not saved: {os.strerror(err)}",
+                                          **({"final": True} if final else {})}))
+
+    def test_an_expired_message_leaves_the_open_index_once_and_gc_then_drops_its_uploads(self):
+        # #741 (the 2026-11-21 audit, finding 91): only an ack took a message out of open.json, and
+        # an expired one is never acked, so every new session claimed it again and toasted, `wb
+        # chat pending` listed it, and gc kept its photos, for good (reproduced 40 days on)
+        self.put("eeeeeeee-1", b"\xff\xd8 the photo")
+        sent = self.send({"text": "while nobody listened", "files": ["eeeeeeee-1"]})[1]["message"]
+        later = store.now() + 40 * 86400
+        with mock.patch.object(self.chat.store, "now", return_value=later):
+            self.assertEqual(self.chat.pending(), [])                        # not listed for good
+            self.assertNotIn(sent["id"], self.chat.open_work()["messages"])  # the mod won't see it
+            self.assertTrue(self.chat.expired(sent["id"]))                   # a stale reader is still refused
+            shown = {m["id"]: m for m in self.chat.thread()}[sent["id"]]
+            self.assertEqual((shown.get("expired"), shown["received"]), (True, None))  # not "read"
+            self.assertEqual(self.chat.drop_old_uploads(30), 1)
+        rows = [r for r in store.read_jsonl(self.chat.chat_dir() / "receipts.jsonl")[0]
+                if r["id"] == sent["id"]]
+        self.assertEqual([(r["by"], r["how"]) for r in rows], [("wb", "expired")])  # once
+        self.assertFalse((self.uploads() / "eeeeeeee-1").exists())
 
 
 class Top(Base):
@@ -14225,10 +16325,11 @@ class Top(Base):
                                              "watts": 38.2})
         self.assertEqual(rows["x86_64"][1]["name"], "RAM")   # no GPU says a size: the RAM beside (#551)
 
-    def test_on_macos_the_gpu_shows_the_budgets_ceiling_and_the_memory_in_use(self):
+    def test_on_macos_the_gpu_shows_the_ram_in_use_of_all_the_ram_and_the_budgets_ceiling_beside(self):
         # #574: an Apple Silicon Mac showed "64.0 GB unified, use not said" whatever was loaded,
-        # all of RAM where the budget allows three quarters, and no row at all when
-        # system_profiler failed
+        # and no row at all when system_profiler failed. #701: the RAM in use was then drawn
+        # against the GPU's wired limit, so an idle 16 GB Mac read 104% in red: the bar is the
+        # RAM's, the limit is said beside it
         from workbench import models, top
         ram, page = 64 * 2 ** 30, 16384
         vm = ("Mach Virtual Memory Statistics: (page size of 16384 bytes)\nPages free:     100000.\n"
@@ -14242,12 +16343,12 @@ class Top(Base):
         used = ram - (100000 + 300000 + 50000) * page
         for gpus, want in (([{"name": "Apple M3 Max (40-core GPU)", "driver": "metal", "unified": True,
                               "vram": ram, "wired_limit": None}],
-                            [{"name": "Apple M3 Max (40-core GPU)", "unified": True,
-                              "total": models.unified_default(ram), "used": used}]),
+                            [{"name": "Apple M3 Max (40-core GPU)", "unified": True, "total": ram,
+                              "limit": models.unified_default(ram), "used": used}]),
                            ([{"name": "Apple M3 Max (40-core GPU)", "driver": "metal", "unified": True,
                               "vram": ram, "wired_limit": 56 * 2 ** 30}],
-                            [{"name": "Apple M3 Max (40-core GPU)", "unified": True, "total": 56 * 2 ** 30,
-                              "used": used}]),
+                            [{"name": "Apple M3 Max (40-core GPU)", "unified": True, "total": ram,
+                              "limit": 56 * 2 ** 30, "used": used}]),
                            ([], [{"name": "RAM (no GPU)", "ram": True, "total": ram, "used": used}])):
             asked.clear()
             with mock.patch.object(hardware, "system", lambda: "macos"), \
@@ -14257,6 +16358,23 @@ class Top(Base):
                 self.assertEqual(t.gpus(), want)
                 self.assertEqual(t.gpus(), want)
             self.assertEqual(asked.count(("vm_stat",)), 1)   # once per probe interval, not per tick
+
+    def test_an_idle_16_gb_mac_with_apps_open_reads_under_80_percent_not_over_100(self):
+        # #701: 11.9 GB of RAM in use by the OS and apps, no model loaded, drawn against the
+        # 11.5 GB the GPU may wire, was 104% in the bad colour
+        from workbench import top
+        ram, page = 16 * 2 ** 30, 16384
+        vm = "Pages free:     100000.\nPages inactive:  200000.\nPages speculative:  17000.\n"
+        run = lambda *argv: {("sysctl", "-n", "hw.pagesize"): str(page), ("sysctl", "-n", "hw.memsize"): str(ram),  # noqa: E731
+                             ("vm_stat",): vm}.get(argv, "")
+        gpus = [{"name": "Apple M2 (10-core GPU)", "driver": "metal", "unified": True, "vram": ram,
+                 "wired_limit": None}]
+        with mock.patch.object(hardware, "system", lambda: "macos"), \
+                mock.patch.object(hardware, "_mac_gpus", lambda: gpus), mock.patch.object(hardware, "_run", run):
+            (g,) = top.Top(2).gpus()
+        self.assertLess(g["used"] / g["total"], 0.8)
+        text = top.render({"ts": 0, "every": 2, "gpus": [g], "running": [], "rack": [], "queue": []}, 200, False)
+        self.assertIn(" 12.0/17.2 GB  GPU may wire 11.5 GB", text)
 
     def test_on_wsl_a_failing_nvidia_smi_falls_back_to_windows_adapters_not_the_ram(self):
         # #547: on WSL a stream that started and then failed hid Windows' adapters too
@@ -14646,6 +16764,7 @@ class Hardware(unittest.TestCase):
         for target, value in (("platform.system", lambda: system), ("platform.machine", lambda: machine),
                               ("workbench.hardware._run", run), ("workbench.hardware._read", read),
                               ("workbench.hardware.DRM", drm), ("pathlib.Path.glob", glob),
+                              ("workbench.hardware.powershell", lambda: "powershell.exe"),  # the runs' key
                               ("workbench.hardware.PROC", Path("/fake/proc"))):  # no ollama runs
             patcher = mock.patch(target, value)
             patcher.start()
@@ -14676,10 +16795,41 @@ class Hardware(unittest.TestCase):
         self.assertIn("RAM   34.4 GB (2.1 GB free) · swap 2.1 GB (1.6 GB free)", out)
         self.assertIn("CPU   Apple M2 Pro", out)
 
-    def test_an_intel_mac_reports_its_graphics_cards_vram(self):
-        hw = self.fake("Darwin", runs={("system_profiler",): json.dumps({"SPDisplaysDataType": [
-            {"sppci_model": "AMD Radeon Pro 5500M", "spdisplays_vram": "8 GB"}]})})
-        self.assertIn("AMD Radeon Pro 5500M · 8.6 GB VRAM · metal", "\n".join(hw.report()))
+    def test_a_wired_limit_raised_on_ventura_is_read_from_its_own_sysctl_and_named(self):
+        # #714: macOS 13 has debug.iogpu.wired_limit (bytes), not Sonoma's iogpu.wired_limit_mb:
+        # a 64 GB Mac set to 56 GB was budgeted 48 GB, and scout named a sysctl it hasn't got
+        from workbench import models
+        asked = []
+        runs = {("sysctl", "-n", "hw.memsize"): str(64 * 2 ** 30),
+                ("sysctl", "-n", "debug.iogpu.wired_limit"): str(56 * 2 ** 30),
+                ("system_profiler",): json.dumps({"SPDisplaysDataType": [
+                    {"sppci_model": "Apple M1 Max", "sppci_cores": "32"}]})}
+        hw = self.fake("Darwin", runs=runs)
+        run = hw._run
+        with mock.patch.object(hw, "_run", lambda *argv: asked.append(argv) or run(*argv)):
+            (g,) = hw.gpus()
+        self.assertEqual((g["wired_limit"], g["wired_key"]), (56 * 2 ** 30, "debug.iogpu.wired_limit"))
+        self.assertEqual(asked.count(("sysctl", "-n", "iogpu.wired_limit_mb")), 1)   # read once
+        self.assertIn("the GPU may wire 60.1 GB (debug.iogpu.wired_limit)", "\n".join(hw.report()))
+        with mock.patch.dict(os.environ, {"WB_FAKE_MODELS": "", "WB_MODELS": "/nonexistent"}):
+            budget, _, why = models.budget_devices()
+        self.assertEqual(budget, 56 * 2 ** 30)
+        self.assertIn("debug.iogpu.wired_limit", why)
+
+    def test_an_intel_mac_reports_its_graphics_cards_vram_but_budgets_none_of_it(self):
+        # #711: a MacBook Pro's 4 GB Radeon became the budget, though Ollama's Intel Mac build
+        # runs on the CPU in RAM: every model over 3.9 GB was "too big" beside 32 GB of RAM
+        from workbench import models, top
+        profile = json.dumps({"SPDisplaysDataType": [
+            {"sppci_model": "AMD Radeon Pro 5500M", "spdisplays_vram": "8 GB"}]})
+        hw = self.fake("Darwin", runs={("system_profiler",): profile})
+        self.assertIn("AMD Radeon Pro 5500M · 8.6 GB VRAM · Ollama runs models on the CPU on an Intel "
+                      "Mac (gpu_gb sets a budget by hand) · metal", "\n".join(hw.report()))
+        with mock.patch.dict(os.environ, {"WB_FAKE_MODELS": "", "WB_MODELS": "/nonexistent"}):
+            self.assertEqual(models.budget_devices(), (None, [], ""))
+        t = top.Top(2)
+        self.assertEqual([g.get("total") for g in t.gpus()][:1], [None])   # no GPU memory: models read `cpu`
+        self.assertFalse(t.gpu_memory)
 
     def test_wsl_reads_each_windows_gpus_memory_and_budgets_it_when_linux_sees_none(self):
         # #522: a 16 GB RX 7800 XT under Ollama for Windows was "VRAM unknown", scout said only
@@ -14706,6 +16856,75 @@ class Hardware(unittest.TestCase):
         ps = [a for a in asked if a[0] == "powershell.exe"]
         self.assertEqual(len(ps), 1)                    # cached: the budget asked no PowerShell
         self.assertIn("-EncodedCommand", ps[0])          # no quoting through WSL's interop
+
+    def test_wsl_finds_windows_powershell_off_path_and_never_caches_a_failed_read_for_an_hour(self):
+        # #702: with appendWindowsPath=false powershell.exe isn't on PATH, and a PowerShell slower
+        # than the timeout after a boot read nothing too; either was cached for an hour as "no
+        # GPU", so a 16 GB Radeon under Ollama for Windows had no budget
+        wsl = {"/proc/version": "microsoft-standard-WSL2"}
+        hardware_powershell = hardware.powershell   # the real one: fake() stands one in
+        hw = self.fake("Linux", files=wsl)
+        with tempfile.TemporaryDirectory() as root:
+            exe = Path(root, hw.WINDOWS_POWERSHELL)
+            exe.parent.mkdir(parents=True)
+            exe.write_text("")
+            with mock.patch.object(hw.shutil, "which", lambda n: None), \
+                    mock.patch.object(hw, "_read", lambda path: f"[automount]\nroot = {root}/  # moved\n"
+                                      if path == hw.WSL_CONF else ""):
+                self.assertEqual(hardware_powershell(), str(exe))
+            with mock.patch.object(hw.shutil, "which", lambda n: None):
+                self.assertIsNone(hardware_powershell())     # /mnt/c has none here either
+        card = "AMD Radeon RX 7800 XT\t17163091968\r\n"
+        answers, asked = ["", card, ""], []
+        clock = [1000.0]
+
+        def run(*argv):
+            asked.append(argv[0])
+            return answers.pop(0)
+        with mock.patch.object(hw, "_run", run), mock.patch.object(hw.time, "time", lambda: clock[0]):
+            self.assertEqual(hw._windows_gpus(), [])           # PowerShell timed out: no reading
+            clock[0] += 30
+            self.assertEqual(hw._windows_gpus(), [])           # not asked again at once
+            self.assertEqual(len(asked), 1)
+            clock[0] += hw.WINDOWS_RETRY
+            self.assertEqual([g["name"] for g in hw._windows_gpus()], ["AMD Radeon RX 7800 XT"])
+            clock[0] += hw.WINDOWS_FOR + 1
+            self.assertEqual([g["vram"] for g in hw._windows_gpus()], [17163091968])  # the last good kept
+            self.assertEqual(len(asked), 3)
+        from workbench import context
+        with mock.patch.object(context, "BINFMT", "/nonexistent"), \
+                mock.patch.object(context.Path, "read_text", lambda self: "enabled\n"):
+            self.assertIn("stops wb reading Windows' GPUs: set their memory in models.json gpu_gb",
+                          context.interop_gap())
+
+    def test_a_full_models_disk_and_exhausted_swap_read_zero_not_unknown(self):
+        # #717: size(0) printed "?", so a disk with 0 bytes free (ext4's reserved blocks) read as
+        # unknown in wb scout, the moment it mattered most, and so did swap all in use
+        hw = self.fake("Linux", files={"/proc/meminfo": "MemTotal:       16000000 kB\nMemAvailable:    8000000 kB\n"
+                                                        "SwapTotal:       8388608 kB\nSwapFree:              0 kB\n"})
+        with mock.patch.object(hw, "ollama_models_dir", lambda: Path("/data/ollama")), \
+                mock.patch.object(hw, "disk_free", lambda path: 0):
+            out = "\n".join(hw.report())
+        self.assertIn("disk  0.0 GB free where Ollama keeps models (/data/ollama)", out)
+        self.assertIn("swap 8.6 GB (0.0 GB free)", out)
+        self.assertEqual((hw.size(0), hw.size(None)), ("0.0 GB", "?"))
+
+    def test_a_byte_that_isnt_utf8_from_powershell_never_crashes_the_windows_gpu_read(self):
+        # #664: PowerShell 5.1 writes a pipe in the OEM code page; a localized adapter name
+        # ("básico" in cp850: 0xA0) raised UnicodeDecodeError past main in doctor, scout, top and
+        # GPU admission, and since nothing was cached, on every call after
+        with tempfile.TemporaryDirectory() as d:
+            ps = Path(d) / "powershell.exe"
+            ps.write_text("#!/bin/sh\nprintf 'Adaptador de pantalla b\\240sico de Microsoft\\t\\r\\n'\n")
+            ps.chmod(0o755)
+            self.assertIn("\ufffd", hardware._run(str(ps)))
+            with mock.patch.dict(os.environ, {"WB_HOME": str(Path(d) / "state"),
+                                              "PATH": f"{d}{os.pathsep}{os.environ['PATH']}"}):
+                gpus = hardware._windows_gpus()
+            self.assertEqual(len(gpus), 1)
+            self.assertTrue(gpus[0]["name"].startswith("Adaptador de pantalla b"))
+        self.assertTrue(hardware.WINDOWS_SCRIPT.startswith("[Console]::OutputEncoding = "
+                                                           "[Text.Encoding]::UTF8;"))
 
     def test_ollamas_quoted_service_environment_and_a_context_that_isnt_a_number(self):
         # the 2026-11-16 audit: systemd quotes a value with a space and the split lost it; "32k"
@@ -14758,6 +16977,34 @@ class Hardware(unittest.TestCase):
         self.assertEqual(hw.container_mask({"DeviceRequests": [{**gpus, "Count": 2}]})["CUDA_VISIBLE_DEVICES"], "0,1")
         self.assertEqual(hw.container_mask({"DeviceRequests": [{**gpus, "Count": -1}]}), {})  # --gpus all
         self.assertEqual(hw.container_mask(["not", "a", "host config"]), {})
+
+    def test_an_ollama_containers_own_device_mask_counts_within_the_cards_it_was_given(self):
+        # #651 (Codex's audit of 1.90.6): two cards granted, CUDA_VISIBLE_DEVICES=0 in the
+        # container's environment, and wb rebuilt the mask from the grants alone: both counted
+        gpus = {"Capabilities": [["gpu"]], "Driver": ""}
+        two = {"DeviceRequests": [{**gpus, "DeviceIDs": ["0", "1"]}]}
+        from workbench import hardware
+        mask = lambda host, **env: hardware.container_mask(host, env)  # noqa: E731
+        self.assertEqual(mask(two, CUDA_VISIBLE_DEVICES="0"),
+                         {"CUDA_VISIBLE_DEVICES": "0", "CUDA_DEVICE_ORDER": "PCI_BUS_ID"})
+        remapped = {"DeviceRequests": [{**gpus, "DeviceIDs": ["2", "3"]}]}
+        self.assertEqual(mask(remapped, CUDA_VISIBLE_DEVICES="1")["CUDA_VISIBLE_DEVICES"], "3")
+        self.assertEqual(mask(remapped, CUDA_VISIBLE_DEVICES="1,0")["CUDA_VISIBLE_DEVICES"], "3,2")
+        self.assertEqual(mask(remapped, CUDA_VISIBLE_DEVICES="0,5,1")["CUDA_VISIBLE_DEVICES"], "2")  # stops, as CUDA does
+        self.assertEqual(mask(remapped, CUDA_VISIBLE_DEVICES="GPU-abc")["CUDA_VISIBLE_DEVICES"], "GPU-abc")
+        self.assertEqual(mask(remapped, CUDA_VISIBLE_DEVICES="")["CUDA_VISIBLE_DEVICES"], "")  # none
+        self.assertEqual(mask(remapped)["CUDA_VISIBLE_DEVICES"], "2,3")              # its own: unset
+        everything = {"DeviceRequests": [{**gpus, "Count": -1}]}                     # --gpus all
+        self.assertEqual(mask(everything, CUDA_VISIBLE_DEVICES="1", CUDA_DEVICE_ORDER="PCI_BUS_ID"),
+                         {"CUDA_VISIBLE_DEVICES": "1", "CUDA_DEVICE_ORDER": "PCI_BUS_ID"})
+        self.assertEqual(mask(everything, CUDA_VISIBLE_DEVICES="1"), {"CUDA_VISIBLE_DEVICES": "1"})
+        self.assertEqual(mask(everything), {})
+        hw = self.fake("Linux", runs={
+            ("docker", "ps"): "beef ollama/ollama llm",
+            ("docker", "inspect", "--format", "{{json .Config.Env}}"): json.dumps(
+                ["OLLAMA_NUM_PARALLEL=2", "CUDA_VISIBLE_DEVICES=0"]),
+            ("docker", "inspect", "--format", "{{json .HostConfig}}"): json.dumps(remapped)})
+        self.assertEqual(hw.ollama_env()["CUDA_VISIBLE_DEVICES"], "2")
 
     def test_an_ollama_containers_readable_process_still_gets_the_cards_its_container_was_given(self):
         # the review of #463: rootless docker's processes are this user's, so /proc read first
@@ -14897,6 +17144,17 @@ class Hardware(unittest.TestCase):
                       "(0.5 GB carve-out + 103.1 GB GTT) · amdgpu", "\n".join(hw.report()))
         with mock.patch.dict(os.environ, {"WB_FAKE_MODELS": "", "WB_MODELS": "/nonexistent"}):
             self.assertEqual(models.budget_devices()[0], 512 * 2 ** 20 + 96 * 2 ** 30)
+        hw = self.fake("Linux", files={   # with the RAM read: kept for the budget's reserve (#712)
+            f"{card}/uevent": "DRIVER=amdgpu\nPCI_SLOT_NAME=0000:c5:00.0",
+            f"{card}/mem_info_vram_total": str(512 * 2 ** 20), f"{card}/mem_info_gtt_total": str(124 * 2 ** 30),
+            f"{card}/hwmon/hwmon5/in1_label": "vddnb",
+            "/proc/meminfo": "MemTotal:       131072000 kB\nMemAvailable:   120000000 kB\n"})
+        apu = hw.gpus()[0]
+        self.assertEqual((apu["carve"], apu["ram"], apu["ram_free"]),
+                         (512 * 2 ** 20, 131072000 * 1024, 120000000 * 1024))
+        with mock.patch.dict(os.environ, {"WB_FAKE_MODELS": "", "WB_MODELS": "/nonexistent"}), \
+                mock.patch.object(models, "_get", lambda *a, **k: None):
+            self.assertEqual(models.budget_devices()[0], 512 * 2 ** 20 + 120000000 * 1024)
 
         meminfo = {"/proc/meminfo": "MemTotal:       125000000 kB\nMemAvailable:    100000000 kB\n"}
         spark = ("nvidia-smi",), "GPU-77aa, NVIDIA GB10, [N/A], [N/A], 580.95"
@@ -14911,6 +17169,28 @@ class Hardware(unittest.TestCase):
         hw = self.fake("Linux", files=meminfo, runs=dict([spark]), machine="x86_64")
         self.assertIsNone(hw.gpus()[0]["vram"])  # an x86 card's [N/A] stays unknown
 
+    def test_a_jetson_without_nvidia_smi_is_its_ram_sharing_gpu_and_keeps_the_systems_reserve(self):
+        # #713: JetPack 5 has no nvidia-smi and the Tegra GPU is a platform device, so gpus()
+        # was empty: "GPU none found", no budget, and no fit check on an 8 GB Orin Nano
+        from workbench import models
+        jetson = {"/etc/nv_tegra_release": "# R35 (release), REVISION: 4.1",
+                  "/proc/device-tree/model": "NVIDIA Orin Nano Developer Kit\0",
+                  "/proc/meminfo": "MemTotal:        7800000 kB\nMemAvailable:    5000000 kB\n"}
+        hw = self.fake("Linux", files=jetson, machine="aarch64")
+        (g,) = hw.gpus()
+        self.assertEqual((g["name"], g["vram"], g["ram_free"], g["unified"]),
+                         ("NVIDIA Orin Nano Developer Kit", 7800000 * 1024, 5000000 * 1024, True))
+        with mock.patch.dict(os.environ, {"WB_FAKE_MODELS": "", "WB_MODELS": "/nonexistent"}), \
+                mock.patch.object(models, "_get", lambda *a, **k: None):
+            budget, _, why = models.budget_devices()
+        self.assertEqual(budget, 5000000 * 1024)                  # the RAM less what the system uses
+        self.assertIn("less 2.9 GB the system uses", why)
+        self.assertEqual(self.fake("Linux", files={"/proc/device-tree/compatible": "nvidia,p3767\0nvidia,tegra234\0",
+                                                   **{k: v for k, v in jetson.items() if "tegra_release" not in k}},
+                                   machine="aarch64").gpus()[0]["name"], "NVIDIA Orin Nano Developer Kit")
+        self.assertEqual(self.fake("Linux", files={k: v for k, v in jetson.items() if "meminfo" in k},
+                                   machine="aarch64").gpus(), [])   # another ARM board: none
+
     def test_an_older_amd_card_that_names_no_memory_vendor_is_not_taken_for_an_apu(self):
         # #435: GCN cards (RX 470-590, Fury, R9 390) have no mem_info_vram_vendor, so an 8 GiB
         # RX 580 with 24 GiB GTT was made a unified 34.4 GB budget. Only an APU's hwmon has vddnb
@@ -14923,6 +17203,26 @@ class Hardware(unittest.TestCase):
         bare = {k: v for k, v in gcn.items() if "/hwmon/" not in k}   # no hwmon at all: unknown
         (g,) = self.fake("Linux", files=bare, machine="x86_64").gpus()
         self.assertEqual((g["vram"], g.get("unified"), g.get("discrete")), (8 * 2 ** 30, None, None))
+
+    def test_a_bmcs_or_a_vms_display_adapter_is_no_gpu_and_gets_no_gpu_gb_hint(self):
+        # #710: a CPU-only Supermicro box's ASPEED (ast) was a GPU of unknown memory, so scout
+        # told the user to set gpu_gb for it; beside 8 NVIDIA cards the hint would have replaced
+        # the whole budget with one number
+        bmc = {"/fake/sys/class/drm/card0/device/uevent": "DRIVER=ast\nPCI_SLOT_NAME=0000:02:00.0",
+               "/proc/meminfo": "MemTotal:       64000000 kB\nMemAvailable:    60000000 kB\n"}
+        lspci = {("lspci",): "02:00.0 VGA compatible controller: ASPEED Technology, Inc. ASPEED Graphics Family"}
+        hw = self.fake("Linux", files=bmc, runs=lspci, machine="x86_64")
+        self.assertEqual(hw.gpus(), [])
+        self.assertIn("GPU   none found", "\n".join(hw.report()))
+        with mock.patch.dict(os.environ, {"WB_FAKE_MODELS": "", "WB_MODELS": "/nonexistent"}):
+            self.assertTrue(cli.gpu_line().startswith("no GPU memory found: local models run on the CPU"))
+        smi = {("nvidia-smi",): "\n".join(f"GPU-{i}, NVIDIA H100, 81559, 0, 560.94" for i in range(8)), **lspci}
+        hw = self.fake("Linux", files=bmc, runs=smi, machine="x86_64")
+        self.assertEqual({g["name"] for g in hw.gpus()}, {"NVIDIA H100"})
+        with mock.patch.dict(os.environ, {"WB_FAKE_MODELS": "", "WB_MODELS": "/nonexistent"}):
+            line = cli.gpu_line()
+        self.assertNotIn("ASPEED", line)
+        self.assertNotIn("publishes no memory size", line)
 
     def test_a_discrete_amd_card_doesnt_count_its_gtt(self):
         card = "/fake/sys/class/drm/card0/device"
@@ -14970,6 +17270,23 @@ class Hardware(unittest.TestCase):
                 self.assertEqual(hardware.gpu_power_w(Path(d)), 80.0)
                 (intel / "energy1_input").write_text("5\n")             # wrapped: nothing for it
                 self.assertEqual(hardware.gpu_power_w(Path(d)), 50.0)
+
+    def test_gpu_power_leaves_an_apus_package_power_out_beside_a_card(self):
+        # #706: a Ryzen iGPU's power1_average is the whole package's, CPU cores too, and was
+        # added to the Radeon's: the agent's builds and tests counted as GPU energy
+        from workbench import hardware
+        with tempfile.TemporaryDirectory() as d:
+            for card, mon, watts, label in (("card0", "hwmon3", "45000000", "vddnb"),
+                                            ("card1", "hwmon4", "200000000", "vddgfx")):
+                path = Path(d, card, "device", "hwmon", mon)
+                path.mkdir(parents=True)
+                (path / "power1_average").write_text(watts)
+                (path / "in1_label").write_text(label)
+            with mock.patch("platform.system", lambda: "Linux"), \
+                    mock.patch("workbench.hardware._run", lambda *argv: ""):
+                self.assertEqual(hardware.gpu_power_w(Path(d)), 200.0)
+                shutil.rmtree(Path(d, "card1"))
+                self.assertEqual(hardware.gpu_power_w(Path(d)), 45.0)   # an APU alone: all it has
 
     def test_gpu_power_nvidia_adds_every_card_and_skips_n_a(self):
         from workbench import hardware
@@ -15187,6 +17504,22 @@ class SkillLearning(Base):
             "On 2026-11-02 issue #4411 broke it, PR #4412 fixed it.\n"))), "-m", "x")
         self.assertIn("incident log", out)
 
+    def test_a_skill_naming_a_project_path_under_scripts_or_templates_is_warned_not_refused(self):
+        # #738 (the 2026-11-21 audit, reproduced): check() read both paths as the skill's own
+        # supporting files, and the add was refused with no override
+        d = self.draft("polls", body="Put the page in templates/polls/detail.html and run "
+                                     "scripts/test.sh before finishing.\n")
+        out = run_wb("skill", "add", "polls", "--from", str(d), "-m", "the polls app's habits")
+        self.assertIn("added polls", out)
+        self.assertIn("names scripts/test.sh, which the skill doesn't have: if it is the skill's "
+                      "own file, add it; if it is a path in the project, ignore this", out)
+        self.assertIn("templates/polls/detail.html", out)
+        # a skill with its own scripts/ that lacks the one it names: still refused
+        (d / "scripts").mkdir()
+        (d / "scripts" / "lint.sh").write_text("true\n")
+        self.assertIn("names scripts/test.sh, which the skill doesn't have: the agent would go looking",
+                      self.refused("skill", "add", "polls", "--from", str(d), "-m", "no"))
+
     def test_a_patch_fixes_the_passage_that_misled_and_is_judged_on_its_own(self):
         from workbench import skills
         run_wb("skill", "add", "alpha", "--from", str(self.draft(
@@ -15275,6 +17608,36 @@ class SkillLearning(Base):
         ids = [x["id"] for x in lessons.survey()]
         self.assertIn("closed:", run_wb("lessons", "close", ids[0], "-m", "a one-task detail"))
         self.assertNotIn(ids[0], [x["id"] for x in lessons.survey()])
+
+    def test_guard_stops_are_compared_on_what_varies_and_a_long_list_of_tasks_is_counted(self):
+        # #733 (the 2026-11-21 audit): every stop lesson shared the guard's wording, so each was
+        # "again" of every other, these clusters led every survey, and each line listed them all
+        from workbench import lessons
+        stops = ["the guard stopped the agent: 40 tool calls without changing a file in the task",
+                 "the guard stopped the agent: the same call 4 times in a row: read src/a.py",
+                 "the guard stopped the agent: 6 failing tool calls in a row (last: exit 1)"]
+        rows = [{"ts": n, "id": f"s{n:07x}", "task": f"t-stop{n}", "kind": "stopped", "round": 1,
+                 "text": stops[n % 3]} for n in range(60)]
+        same = "the answer file needs a trailing newline or grep misses the last line"
+        rows += [{"ts": 9e9, "id": f"f{n:07x}", "task": f"t-fb{n}", "kind": "feedback", "round": 2,
+                  "text": same} for n in range(12)]
+        rows += [{"close": "f0000001", "ts": 9e9, "how": "skill:newlines", "why": ""}]
+        lessons.path().write_text("".join(json.dumps(r) + "\n" for r in rows))
+        got = lessons.survey()
+        self.assertEqual(got[0]["kind"], "feedback")                  # the real lesson leads
+        self.assertTrue(all(x["again"] == [] for x in got if x["kind"] == "stopped"))
+        line = lessons.line(got[0])
+        self.assertIn("also in 11 other tasks (", line)
+        self.assertIn(", …)", line)
+        self.assertLess(len(line), 400)
+        self.assertEqual(line.count("t-fb"), 1 + lessons.AGAIN_SHOWN)  # its own and five others
+        # the same call looping in two tasks is still the same lesson
+        loop = "the guard stopped the agent: the same call 4 times in a row: bash pytest -k slugify tests"
+        rows += [{"ts": 9e9, "id": f"l{n:07x}", "task": f"t-loop{n}", "kind": "stopped", "round": 1,
+                  "text": loop} for n in range(2)]
+        lessons.path().write_text("".join(json.dumps(r) + "\n" for r in rows))
+        by = {x["id"]: x for x in lessons.survey()}
+        self.assertEqual(by["l0000000"]["again"], [("t-loop1", "")])
 
     def test_surveying_five_thousand_lessons_takes_seconds_not_half_a_minute_and_still_finds_a_repeat(self):
         # #556: every open lesson was compared with every lesson in lessons.jsonl, never pruned:
@@ -15413,8 +17776,21 @@ class Drift(unittest.TestCase):
                "options": {"max_tokens": 8192}}
         self.assertEqual(runner.compaction_buffer(cfg), 8192)
         self.assertEqual(runner.compaction_buffer({"limit": {"context": 65536, "output": 8192}}),
-                         4096)                     # input defaults to context - output
+                         8192 + 4096)              # no input limit: OpenCode 2.3 uses the window
         self.assertIsNone(runner.compaction_buffer({}))
+
+    def test_the_buffer_puts_opencodes_compaction_where_wb_plans_it_whatever_the_entry_says_of_input(self):
+        # #675: OpenCode 2.3 compacts at min(input, context) - buffer (input unset: context - buffer).
+        # wb took an unset input as context - output, wrote a 4K buffer for {32K, output 16K}, and
+        # OpenCode compacted at 87.5% while the handovers were planned against 37.5%
+        for lim in ({"context": 32768, "output": 16384}, {"context": 32768, "input": 16384, "output": 16384},
+                    {"context": 32768, "input": 65536, "output": 4096}, {"context": 65536, "output": 8192}):
+            cfg = {"limit": lim}
+            inp = min(lim["input"], lim["context"]) if lim.get("input") else lim["context"]
+            self.assertEqual((inp - runner.compaction_buffer(cfg)) / lim["context"],
+                             runner.compaction_point(cfg), lim)
+            self.assertLess(runner.fresh_ceiling(cfg), runner.compaction_point(cfg))  # #644's margin
+        self.assertEqual(runner.compaction_buffer({"limit": {"context": 32768, "output": 16384}}), 20480)
 
     def test_outside_spec_names_files_the_spec_never_mentions(self):
         with tempfile.TemporaryDirectory() as d:

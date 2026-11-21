@@ -20,12 +20,14 @@ import select
 import shlex
 import shutil
 import signal
+import stat
 import subprocess
 import sys
 import threading
 import time
 import traceback
 import uuid
+import zlib
 from collections import deque
 from pathlib import Path
 
@@ -78,6 +80,12 @@ def opencode_bin() -> list[str]:
 # audit). Move it when the real-OpenCode tests pass on a newer one.
 OPENCODE_TESTED = ((2, 3), (3, 0))
 
+# How to get 2.x, said wherever wb finds it missing or older (#654): opencode.ai/install, npm's
+# opencode-ai and GitHub's "Latest" release are the 1.x line, so "upgrade it" led back to 1.x.
+# Checked against OpenCode's installers, 2026-11-21: /install refuses 2.x and names these two.
+OPENCODE_GET = ("curl -fsSL https://opencode.ai/v2/install | bash (on 1.x: opencode upgrade --major; "
+                "npm's opencode-ai and GitHub's Latest release are 1.x)")
+
 
 def opencode_version() -> tuple[int, int] | None:
     """OpenCode's major and minor version, or None when it doesn't run or say."""
@@ -108,33 +116,53 @@ def untested(version: tuple[int, int] | None) -> str:
 STEP_GROWTH = 4096
 
 
+def usable_input(lim: dict) -> int:
+    """What OpenCode 2.3 compacts against: the smaller of `limit.input` and `limit.context`,
+    else whichever is set. Its compaction sits at this less `compaction.buffer`. Taking it as
+    context less output (OpenCode 1.x) wrote a 4K buffer for a hand-written {context 32K, output
+    16K}, so OpenCode compacted at 87.5% while wb planned the handover against 37.5% (#675)."""
+    inp, window = lim.get("input") or 0, lim.get("context") or 0
+    return min(inp, window) if inp and window else inp or window
+
+
 def compaction_buffer(cfg: dict) -> int | None:
     """The buffer that puts OpenCode's compaction where a request still fits the window."""
     lim, opts = cfg.get("limit") or {}, cfg.get("options") or {}
     window = lim.get("context")
     if not window:
         return None
-    usable = lim.get("input") or window - (lim.get("output") or 0)
+    usable = usable_input(lim)
     reply = opts.get("max_tokens") or lim.get("output") or 0
     return max(usable + reply - window, 0) + STEP_GROWTH
 
 
-def fresh_ceiling(cfg: dict) -> float | None:
-    """The latest a fresh session can take over: where OpenCode's compaction sits (tuning.py)."""
+def compaction_point(cfg: dict) -> float | None:
+    """Where OpenCode's compaction sits, as a share of the window."""
     lim, buf = cfg.get("limit") or {}, compaction_buffer(cfg)
     window = lim.get("context")
     if not window or buf is None:
         return None
-    usable = lim.get("input") or window - (lim.get("output") or 0)
-    return (usable - buf) / window
+    return (usable_input(lim) - buf) / window
+
+
+def fresh_ceiling(cfg: dict) -> float | None:
+    """The latest a fresh session can take over (tuning.py): one step's growth (STEP_GROWTH, or
+    tuning.CEILING_MARGIN of the window if more) before OpenCode's compaction. The runner checks
+    at each step's end and OpenCode before the next request, with that step's tool results in:
+    a ceiling at the compaction point itself left 819 tokens at 32K (0 at 16K), so one 3K file
+    read compacted the session before the runner handed it over (#644, the audit of main)."""
+    top, window = compaction_point(cfg), (cfg.get("limit") or {}).get("context")
+    if top is None:
+        return None
+    return round(top - max(STEP_GROWTH / window, tuning.CEILING_MARGIN), 6)
 
 
 def handover_warning(cfg: dict) -> str:
-    """What to say of an entry whose output cap puts OpenCode's compaction before the earliest
-    handover point (fresh_ceiling under every fresh_at value), or "". Nothing said so, and every
-    long step compacted, the small-model summary the handover exists to avoid (#595, the audit of
-    1.90). Under HANDOVER_ROOM no successor has room, so no handover fits at all."""
-    top = fresh_ceiling(cfg)
+    """What to say of an entry whose output cap puts OpenCode's compaction too close to the
+    earliest handover point (fresh_ceiling under every fresh_at value), or "". Nothing said so,
+    and every long step compacted, the small-model summary the handover exists to avoid (#595,
+    the audit of 1.90). At HANDOVER_ROOM or under, no successor has room, so no handover fits."""
+    top, at = fresh_ceiling(cfg), compaction_point(cfg)
     lo = min(tuning.KNOBS["fresh_at"].values)
     if top is None or top >= lo:
         return ""
@@ -142,9 +170,9 @@ def handover_warning(cfg: dict) -> str:
     caps = ", ".join(f"{k} {v}" for k, v in (("limit.output", lim.get("output")),
                                              ("options.max_tokens", opts.get("max_tokens"))) if v)
     return (f"its output cap ({caps} of a {lim['context'] // 1024}K window) puts OpenCode's "
-            f"compaction at {max(top, 0):.0%} of the window, before the earliest handover point "
-            f"({lo:.0%}): " + ("no handover fits, so long steps compact" if top < HANDOVER_ROOM else
-                               f"handovers come at {top - tuning.CEILING_MARGIN:.0%}, with little room")
+            f"compaction at {max(at, 0):.0%} of the window, under a step's growth past the earliest "
+            f"handover point ({lo:.0%}): " + ("no handover fits, so long steps compact" if top <= HANDOVER_ROOM else
+                               f"handovers come at {top:.0%}, with little room")
             + "; lower limit.output and options.max_tokens")
 
 
@@ -189,7 +217,11 @@ def write_config_layer(task: store.Task) -> Path:
         # OPENCODE_TESTED (#353, the audit of 1.4)
         "small_model": task.spec["model"],
         "autoupdate": False,
-        **({"compaction": {"auto": True, "buffer": buffer}} if buffer else {}),
+        # background: OpenCode 2.3.2's summary written ahead (on by default; 2.3.0 ignores the
+        # key) is a full-context request on the agent's own server, below the handover point,
+        # queued ahead of the agent's next step on a one-slot server and evicting its cache,
+        # then thrown away at the handover (#661)
+        "compaction": {"background": False, **({"auto": True, "buffer": buffer} if buffer else {})},
         "mcp": {"servers": {**users_servers_off(), "workbench": {  # 2.x shape: mcp.servers.<name>
             "type": "local",
             "command": [sys.executable, str(PKG_ROOT / "bin" / "wb-ask-mcp")],
@@ -335,6 +367,65 @@ def env_kept(name: str, value: str, through: set) -> bool:
     return name in through or name in ENV_KEEP or not (SECRET_ENV.search(name) or USERINFO.search(value))
 
 
+# Signing off for the agent's git: a user with commit.gpgsign or tag.gpgsign in ~/.gitconfig had
+# every test that commits in a scratch repo fail in the lane (the keys hidden, SSH_AUTH_SOCK and
+# the agent's sockets out of reach: 'gpg failed to sign the data'), the base check blamed on the
+# project (#666). The agent can't commit to the task's repo anyway; only scratch repos see this.
+NO_SIGNING = (("commit.gpgsign", "false"), ("tag.gpgsign", "false"))
+
+
+def git_config_env(env: dict, pairs=NO_SIGNING) -> dict:
+    """``pairs`` as git's GIT_CONFIG_COUNT/KEY_n/VALUE_n (git 2.31), after any already in ``env``."""
+    try:
+        n = max(int(env.get("GIT_CONFIG_COUNT") or 0), 0)
+    except ValueError:  # git refuses a bogus count itself; start over rather than add to it
+        n = 0
+    out = {}
+    for i, (k, v) in enumerate(pairs, n):
+        out[f"GIT_CONFIG_KEY_{i}"], out[f"GIT_CONFIG_VALUE_{i}"] = k, v
+    out["GIT_CONFIG_COUNT"] = str(n + len(pairs))
+    return out
+
+
+# Per-user build daemons crossed the lane both ways (#669, the 2026-11-21 audit): Gradle reuses
+# any idle compatible daemon in ~/.gradle/daemon, whatever its environment, so the user's own
+# `./gradlew build` ran in the agent's daemon under Landlock (and failed writing its build/, then
+# lost the daemon to sweep), and the agent's could run in the user's, outside the lane; sccache
+# shares one server on 127.0.0.1:4226, MSBuild its nodes and build server, Roslyn its compiler
+# server. With the lane on, the agent gets its own: Gradle's registry in its runtime directory
+# (`org.gradle.daemon.registry.base`), the Kotlin compiler in Gradle's process, a port of its
+# own for sccache, and no MSBuild node reuse, build server or shared compilation.
+DAEMONS_OFF = {"MSBUILDDISABLENODEREUSE": "1", "DOTNET_CLI_USE_MSBUILD_SERVER": "0",
+               "UseSharedCompilation": "false"}
+SCCACHE_PORTS = (20000, 40000)  # where a task's sccache port is looked for
+
+
+def free_port(seed: str, lo: int = SCCACHE_PORTS[0], hi: int = SCCACHE_PORTS[1]) -> int:
+    """A loopback port in [lo, hi) picked from ``seed`` (the same each time while it is free), the
+    next free one when something holds it."""
+    import socket
+    start = int(hashlib.sha256(seed.encode()).hexdigest()[:8], 16) % (hi - lo)
+    for i in range(64):
+        port = lo + (start + i) % (hi - lo)
+        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+            try:
+                s.bind(("127.0.0.1", port))
+            except OSError:
+                continue
+            return port
+    return lo + start
+
+
+def daemon_env(task: store.Task, env: dict) -> dict:
+    """The variables that give the agent build daemons of its own (DAEMONS_OFF and the rest)."""
+    runtime = context.runtime_dir(task)
+    gradle = (f"-Dorg.gradle.daemon.registry.base={runtime / 'gradle'} "
+              "-Dkotlin.compiler.execution.strategy=in-process")
+    return {**DAEMONS_OFF,
+            "GRADLE_OPTS": f"{env['GRADLE_OPTS']} {gradle}" if env.get("GRADLE_OPTS") else gradle,
+            "SCCACHE_SERVER_PORT": str(free_port(str(runtime)))}
+
+
 def agent_env(task: store.Task, run: str = "") -> dict:
     """The agent's environment: its config layer, and git read-only (gitguard.py). ``run``: the
     one run it is for (WB_RUN), which sweep can then end alone."""
@@ -345,20 +436,35 @@ def agent_env(task: store.Task, run: str = "") -> dict:
            "OPENCODE_CONFIG": str(layer), **rules_env(json.loads(layer.read_text())),
            "WB_TASK": task.name, "WB_HOME": str(store.home()), **CLEAN_ENV,
            **({"WB_RUN": run} if run else {})}
+    env.update(git_config_env(env))
     env["PATH"] = env.get("PATH") or os.defpath
-    if context.writable(task) is not None:  # its own: the user's holds their bus and agents
+    places = context.writable(task)
+    if places is not None:  # its own: the user's holds their bus and agents
         env["XDG_RUNTIME_DIR"] = str(context.runtime_dir(task))
+        # Jupyter's kernel connection files, in the agent's runtime dir: its default,
+        # ~/.local/share/jupyter/runtime, is outside the lane, and every notebook test
+        # (nbmake, nbval, papermill) failed with PermissionError before a kernel started (#668)
+        env.setdefault("JUPYTER_RUNTIME_DIR", str(context.runtime_dir(task) / "jupyter"))
+        env.update(daemon_env(task, env))  # its own build daemons, not the user's (#669)
         # On WSL, not the Windows PATH, whose programs run outside the lane (context.agent_path),
         # nor the interop socket's name (the 0.90 review; /init finds it without: interop_gap)
         env.pop("WSL_INTEROP", None)
         env["PATH"] = context.agent_path(env["PATH"])
+    # what the user trusts in their checkout, mise trusts in workbench's copies of it (#674):
+    # the worktree and the scratch checkouts all live under the state directory
+    if context.mise_trusted(task, env["PATH"]):
+        env["MISE_TRUSTED_CONFIG_PATHS"] = os.pathsep.join(
+            [*filter(None, [env.get("MISE_TRUSTED_CONFIG_PATHS")]), os.path.realpath(store.home())])
     # not the user's checkout's venv: the tests imported their checkout, not the worktree (#490)
     inside = set(context.python_env(task, env))
     # the real git found outside the worktree: the runner runs it (gitguard.install), outside
     # the lane, so a `git` the agent wrote into .venv/bin must not be the one it finds
     outside = os.pathsep.join(d for d in env["PATH"].split(os.pathsep) if d not in inside)
     shim = context.rules_dir(task) / "bin"
-    if gitguard.install(shim, Path(task.spec["repo"]), PKG_ROOT, outside, task.worktree):
+    # the lane's other directories are scratch to the shim too (#665): the kernel lets the
+    # agent write there already, and writable() leaves the task's repo out of them
+    scratch = [d for d in places or [] if os.path.isdir(d) and not d.startswith(("/dev", "/proc"))]
+    if gitguard.install(shim, Path(task.spec["repo"]), PKG_ROOT, outside, task.worktree, scratch):
         env["PATH"] = f"{shim}{os.pathsep}{env['PATH']}"
     return env
 
@@ -424,6 +530,13 @@ def _reader(stream, q):
 
 
 EXIT_GRACE = 30  # seconds OpenCode has to exit once its output closes; past that, it's stopped
+# A job left in the background after the agent's turn ended (step_finish reason `stop`): OpenCode
+# waits on it before it exits, and a dev server never ends, so the round sat out the long wait
+# below and the finished work was reported stuck, its tests never run (#658). Past this much
+# quiet (or the round's silence limit, when shorter) the round is done: the job is stopped with
+# the agent, and the tests run. A job the turn itself waits on (reason `tool-calls`) keeps the
+# long wait.
+BG_GRACE = 120
 
 
 def _stop(proc: subprocess.Popen):
@@ -703,6 +816,13 @@ class _Clock:
 NOT_THE_MODEL = frozenset({"step_start", "retry", "error", "background_wait"})
 
 
+def renudged(st: dict, n: int) -> bool:
+    """Round n stalling is stopped, not nudged: the last round ended in the runner's nudge and
+    this is the session it nudged. A fresh one never thought for long, and its first long think
+    was stopped "even after a nudge" (#681)."""
+    return st.get("nudged_round") == n - 1 and bool(st.get("session"))
+
+
 def run_round(task: store.Task, n: int, keep: bool = False) -> dict:
     """One `opencode run`. keep: Claude asked for this session to carry on (wb feedback
     --keep-context), so the round never hands over mid-way."""
@@ -759,8 +879,10 @@ def run_round(task: store.Task, n: int, keep: bool = False) -> dict:
     # was nudged and killed every 7 minutes, and rerun (the 2026-11-16 audit). While it waits
     # (`background_wait`), no nudge, and silence runs to the test timeout; the round's limit holds.
     wait_hush = max(silence, float(spec.get("test_timeout") or 900))
+    turn_over = False  # the last step finished with reason `stop`: the agent's turn ended (#658)
+    bg_jobs: list[str] = []  # what OpenCode waits on once the turn is over
     nudged = False
-    renudge = task.status.get("nudged_round") == n - 1  # the last round ended in our nudge
+    renudge = renudged(st, n)
     edit_mark = gitops.mark(task.worktree)  # shell edits (sed -i, cat >) count as edits too
     started = time.time()  # the wall clock, for check-ins: they compare with timestamps in files
     clock = _Clock(time.monotonic())
@@ -815,6 +937,12 @@ def run_round(task: store.Task, n: int, keep: bool = False) -> dict:
         for raw in got:
             if raw.get("type") == "background_wait":
                 waiting_bg = True
+                bg_jobs = [str(j.get("title") or j.get("id") or "a job")
+                           for j in raw.get("jobs") or () if isinstance(j, dict)]
+            elif raw.get("type") == "step_finish":
+                turn_over = (raw.get("part") or {}).get("reason") == "stop"
+            elif raw.get("type") not in ("retry", None):
+                turn_over = False
             if raw.get("sessionID") and not task.status.get("session"):
                 task.set_status(session=raw["sessionID"])
             row = normalize(raw, n)
@@ -835,10 +963,11 @@ def run_round(task: store.Task, n: int, keep: bool = False) -> dict:
             elif row["kind"] == "step":
                 out["tok_in"] += row["in"]
                 out["tok_out"] += row["out"]
-                used = row["in"] + row.get("cache", 0) + row["out"]
+                used = row["in"] + row.get("cache", 0) + row["out"] + row.get("reasoning", 0)  # #644
                 st = task.status
                 task.set_status(tok_in=st.get("tok_in", 0) + row["in"], tok_out=st.get("tok_out", 0) + row["out"],
-                                live_used={"session": st.get("session"), "used": used})  # #262
+                                live_used={"session": st.get("session"), "used": used},  # #262
+                                **peak(st, used))
                 # Full: a fresh session takes over (drive), never OpenCode's own summary. Only
                 # once this session has changed a file: one that filled up reading would hand
                 # the same reading to the next, which fills up too (seen 2026-11-16: twenty
@@ -878,6 +1007,15 @@ def run_round(task: store.Task, n: int, keep: bool = False) -> dict:
             if why:
                 out["stuck"], out["guard"] = why, detector.guard
         quiet = clock.quiet(mono)
+        if waiting_bg and turn_over and not out["stuck"] and not asking \
+                and quiet > min(BG_GRACE, silence):
+            # the agent finished and left a job running (a dev server): the round is done (#658)
+            out["left_bg"] = bg_jobs or ["a background job"]
+            task.event({"ts": store.now(), "round": n, "kind": "left_bg",  # not a guard's stop
+                        "text": "the agent's turn ended with " + ", ".join(out["left_bg"])
+                                + " still running in the background: stopped"})
+            _stop(proc)
+            break
         hush = wait_hush if waiting_bg else silence
         if not out["stuck"] and clock.ran(mono) > wall:
             out["stuck"], out["guard"] = f"the round ran past its {int(wall // 60)}-minute limit", "round"
@@ -932,7 +1070,7 @@ def run_round(task: store.Task, n: int, keep: bool = False) -> dict:
             mark = gitops.mark(task.worktree)
             files = gitops.changed(task.worktree)
             moved = mark != task.status.get("progress_mark", edit_mark)
-            task.set_status(progress_checks=int(active // (typical * 60)), progress_mark=mark,
+            task.set_status(progress_checks=progress.passed(active, typical), progress_mark=mark,
                             progress_open=True)
             task.notify("checkin", checkin_text(task, n, out, since, active) + "\n" + progress.text(
                 task, active, typical, moved, len(files.splitlines()) if files else 0,
@@ -1026,7 +1164,10 @@ POWER_EVERY = 10  # seconds between GPU power samples: fine enough for a round, 
 class _Power(threading.Thread):
     """Samples the GPU's power draw every POWER_EVERY seconds while OpenCode runs a round and
     integrates it into watt-hours (the tests after it aren't counted). A None reading adds nothing
-    for that interval. It is the whole GPU's draw: tasks sharing the GPU each count all of it."""
+    for that interval. Each reading is the whole GPU's draw, so the watt-hours take this task's
+    share of it: the draw over the live tasks holding the lease (`sharers`). Two tasks sharing a
+    300 W GPU for an hour each counted 300 Wh, and the week's energy and its cost doubled (#706).
+    The mean and peak stay the whole GPU's draw."""
 
     def __init__(self):
         super().__init__(daemon=True)
@@ -1058,10 +1199,21 @@ class _Power(threading.Thread):
         watts = hardware.gpu_power_w()
         if watts is not None:
             self.w_sum, self.n, self.peak = self.w_sum + watts, self.n + 1, max(self.peak, watts)
+            watts /= sharers()
         return watts
 
     def stop(self):
         self.done.set()
+
+
+def sharers() -> int:
+    """How many tasks hold this machine's GPU lease now (models.holders, those not waiting: one
+    task's GPU tests are one task), at least 1: the share of the draw each one's energy counts."""
+    try:
+        held = models.holders()
+    except OSError:
+        return 1
+    return max(1, len({h.get("task") or pid for pid, h in held.items() if not h.get("waiting")}))
 
 
 # Shells OpenCode won't run a command in (it takes $SHELL, else bash): not POSIX `-c` shells
@@ -1138,6 +1290,22 @@ def clip_tail(output: str, lines: int, width: int = 300, total: int = 4000) -> s
 # (`https://h/x`), nor one inside a word.
 REFUSAL = re.compile(r"permission denied|operation not permitted", re.I)
 ABS_PATH = re.compile(r"(?<![\w:/.~-])/[\w.+@~-]+(?:/[\w.+@~-]+)*")
+# and where a path may hold spaces (/mnt/c/Users/John Smith, ~/Library/Application Support):
+# quoted, or running up to the refusal itself. ABS_PATH stopped at the first space, and the
+# suggested grant walked up from `/mnt/c/Users/John` to the whole Users folder (#670). Not across
+# " /", where a second path begins.
+QUOTED_PATH = re.compile(r"[\"'`\u2018](/[^\"'`\u2019\n]+)[\"'`\u2019]")
+MARKED_PATH = re.compile(r"(?<![\w:/.~-])(/(?:[^\n:'\"`\s]|\s(?!/))*?)(?::\s*|\s+\()"
+                         r"(?:permission denied|operation not permitted)", re.I)
+
+
+def refused_paths(line: str) -> list[str]:
+    """The absolute paths on one line, in order: quoted ones and one that runs up to the refusal
+    whole (spaces too), then ABS_PATH's that aren't part of those."""
+    spans = [(m.start(1), m.end(1)) for r in (QUOTED_PATH, MARKED_PATH) for m in r.finditer(line)]
+    spans += [(m.start(), m.end()) for m in ABS_PATH.finditer(line)
+              if not any(a <= m.start() and m.end() <= b for a, b in spans)]
+    return [line[a:b].rstrip(". ") for a, b in sorted(set(spans))]
 
 
 def lane_refused(task: store.Task, output: str) -> list[str]:
@@ -1154,8 +1322,7 @@ def lane_refused(task: store.Task, output: str) -> list[str]:
     for line in output[-200_000:].splitlines():
         if not REFUSAL.search(line):
             continue
-        for m in ABS_PATH.finditer(line):
-            path = m.group(0).rstrip(".")
+        for path in refused_paths(line):
             grant = lane_grant(path)
             if path not in found and grant and not any(
                     path == w or path.startswith(str(w).rstrip("/") + "/") for w in lane) \
@@ -1259,6 +1426,13 @@ def prepare(task: store.Task, prepared: Path | None = None) -> tuple[int | str, 
     if made and any(venv_in(prepared / p) or _within(build_source(prepared / p), prepared)
                     for p in made):
         made = None
+    # And one whose prepared paths the rounds rebuilt: the agent rebuilt a monorepo's
+    # packages/lib/dist (or a C extension in place), the base got the candidate's build, its tests
+    # imported it and passed, and verify said `base-passes` for a valid fix (#732, the 2026-11-21
+    # audit). Recorded at setup (status `prepared_marks`); a task prepared before them copies as before.
+    if made and (marks := task.status.get("prepared_marks")) and \
+            any(p in marks and prepared_mark(prepared / p) != marks[p] for p in made):
+        made = None
     # a scratch checkout (the base check's, wb verify's, wb shot's), not the task's own worktree
     own = store.Task(task.name).worktree if getattr(task, "name", None) else prepared
     scratch = own is None or os.path.realpath(wt) != os.path.realpath(own)
@@ -1295,6 +1469,45 @@ def prepare(task: store.Task, prepared: Path | None = None) -> tuple[int | str, 
     if not (cmd := spec.get("setup")):
         return 0, ""
     return run_in_lane(task, cmd, setup_limit(spec))
+
+
+# what a test run rewrites in a prepared path without changing what the code is: Python's bytecode,
+# the runners' and linters' caches. A directory holding CACHEDIR.TAG (cargo's target/, pytest's
+# and ruff's caches) is one too: cargo rebuilds what changed itself, so its copy is safe (#732).
+PREP_CACHES = frozenset({"__pycache__", ".pytest_cache", ".mypy_cache", ".ruff_cache", ".hypothesis",
+                         ".cache", ".vite", ".turbo", ".parcel-cache", ".nyc_output", ".eslintcache"})
+
+
+def prepared_mark(path: Path) -> str:
+    """A fingerprint of ``path`` as it is now, from lstat alone: the count, total size and a sum of
+    each file's name, size and mtime (order-free, the same in every process), caches left out
+    (PREP_CACHES). '' when it is gone. What tells a prepared path rebuilt since the setup (#732)."""
+    if not os.path.lexists(path):
+        return ""
+    count = size = total = 0
+    stack = [(path, "")]
+    while stack:
+        at, rel = stack.pop()
+        try:
+            st, entries = at.lstat(), None
+            if stat.S_ISDIR(st.st_mode):
+                with os.scandir(at) as it:
+                    entries = list(it)
+        except OSError:
+            continue
+        if entries is not None:
+            if any(e.name == "CACHEDIR.TAG" for e in entries):
+                continue
+            stack.extend((Path(e.path), f"{rel}/{e.name}") for e in entries
+                         if e.name not in PREP_CACHES)
+            continue
+        if rel.endswith(".pyc"):
+            continue
+        count += 1
+        size += st.st_size
+        total = (total + zlib.crc32(f"{rel}\0{st.st_size}\0{st.st_mtime_ns}".encode(
+            "utf-8", "surrogateescape"))) % (1 << 64)
+    return f"{count}:{size}:{total:x}"
 
 
 def build_source(path: Path) -> Path | None:
@@ -1382,6 +1595,19 @@ def checked_out(task: store.Task) -> bool:
     return task.spec.get("checkout") != "runner" or bool(task.status.get("checked_out"))
 
 
+def pending_checkouts() -> int:
+    """The bytes the open tasks' checkouts will still write: task.json `checkout_bytes` of each
+    one whose runner hasn't made its worktree yet (a failed one never will). wb start counts them
+    as taken (#676)."""
+    return sum(int(t.spec.get("checkout_bytes") or 0) for t in store.all_tasks()
+               if t.status.get("phase") not in store.CLOSED | {"failed"}
+               and not checked_out(t))
+
+
+# What a checkout leaves free at the least, and wb start's spare beside a task (cli.DISK_SPARE)
+CHECKOUT_SPARE = 2 * 10**9
+
+
 def _checkout_failed(task: store.Task, what: str, fix: str) -> bool:
     task.set_status(phase="failed", last=what[:200])
     task.notify("failed", f"task {task.name}: {what}, before any round. {fix}")
@@ -1397,8 +1623,20 @@ def checkout(task: store.Task) -> bool:
     if checked_out(task):
         return True
     spec, wt = task.spec, task.worktree
+    # Claude has had this worktree (wb takeover refuses one not checked out, but not a task taken
+    # over before it did): never removed and made again under Claude's edits (#655)
+    if task.status.get("taken_over") and os.path.lexists(wt):
+        return _checkout_failed(task, "the worktree was handed to Claude before its checkout "
+                                "finished", f"wb discard {task.name} and start again")
     repo = Path(spec["repo"])
     task.set_status(last="checking out the base")
+    # the disk may have filled since wb start measured it: a checkout cut short by a full disk
+    # failed the status writes that would have said so (#342, #676)
+    free, size = store.free_bytes(), int(spec.get("checkout_bytes") or 0)
+    if free is not None and size and free < size + CHECKOUT_SPARE:
+        return _checkout_failed(
+            task, f"{store.gb(free)} free where the state directory is, and its checkout needs "
+            f"{store.gb(size)} and 2 GB spare", f"Free some, then wb discard {task.name} and start again")
     began = time.monotonic()
     branch = gitops.branch_name(task.name)
     try:
@@ -1528,7 +1766,8 @@ def _prepare_now(task: store.Task) -> bool:
             made = _ignored_paths(task.worktree)  # what the scratch checkouts copy (#249)
         except gitops.GitError:
             made = None
-        task.set_status(prepared=True, prepared_paths=made, setup_secs=secs)
+        marks = {p: prepared_mark(task.worktree / p) for p in made} if made else None  # #732
+        task.set_status(prepared=True, prepared_paths=made, prepared_marks=marks, setup_secs=secs)
         return True
     what = f"the setup command failed (exit {code})" if isinstance(code, int) else \
         f"setting up the worktree failed ({setup_timed_out(spec) if code == 'timeout' else code})"
@@ -1559,7 +1798,8 @@ def base_check(task: store.Task) -> dict | None:
         return None
     limit = min(BASE_CHECK_SECS, int(task.spec.get("test_timeout") or 900))
     from . import verify  # verify imports this module
-    code, output = verify.on_base(task, cmd, limit, say=lambda msg: task.set_status(last=msg))
+    code, output = verify.on_base(task, cmd, limit, say=lambda msg: task.set_status(last=msg),
+                                  turn=lambda: prep_turn(task))  # one at a time, as setups (#590)
     task.dir.joinpath("base-tests.txt").write_text(
         f"$ {cmd}\nexit: {code}\nshell: {test_shell()}\n\n{output}")
     return {"ok": code == 0, "exit": code, "tail": clip_tail(output, 8, total=1500), "limit": limit}
@@ -1742,6 +1982,9 @@ def summary_text(task: store.Task, n: int, rnd: dict, tests) -> str:
         lines.append("reading: " + full[-1]["text"])
     if rnd["stuck"]:
         lines.append(f"STOPPED: {rnd['stuck']}")
+    elif rnd.get("left_bg"):  # #658: what the agent left running, stopped with it
+        lines.append("the agent left " + ", ".join(f"`{j}`" for j in rnd["left_bg"])
+                     + " running in the background when its turn ended; stopped")
     elif rnd["exit"] not in (0, None):
         lines.append(f"opencode exited {rnd['exit']}"
                      + (": the round didn't finish; what it changed so far stays in the worktree"
@@ -1766,7 +2009,8 @@ def summary_text(task: store.Task, n: int, rnd: dict, tests) -> str:
             lines.append("```\n" + "\n".join(tests["tail"].splitlines()[-25:]) + "\n```")
         for node in tests.get("lane") or ():
             grant = lane_grant(node) or node
-            lines.append(f"the lane refused {node}: wb allow {task.name} --path {grant} if the "
+            lines.append(f"the lane refused {shlex.quote(node)}: wb allow {task.name} --path "
+                         f"{shlex.quote(grant)} if the "
                          "tests need it (not the agent's bug)")
         if tests.get("proxy"):  # #380
             lines.append(f"{proxy_line(tests['proxy'])}, if the tests need the network (not the "
@@ -1818,6 +2062,15 @@ HANDOFF_DIFF_SHARE = 0.09
 HANDOFF_DIFF_MAX = 60_000  # characters, whatever the window: the prompt is one argv string (see run_round)
 
 
+def peak(st: dict, used) -> dict:
+    """status `peak_share`, the fullest any of the task's sessions got (a share of the window),
+    raised to ``used`` when that is more: whether fresh_at could act on the task (#721)."""
+    window = st.get("window")
+    if not (window and isinstance(used, (int, float)) and used / window > (st.get("peak_share") or 0)):
+        return {}
+    return {"peak_share": round(used / window, 3)}
+
+
 def context_state(task: store.Task) -> dict:
     """How full the task's current session is: {"used", "window", "compactions"}."""
     sid = task.status.get("session")
@@ -1839,12 +2092,15 @@ def context_state(task: store.Task) -> dict:
         if not isinstance(tk, dict):
             return 0
         cache = tk.get("cache") if isinstance(tk.get("cache"), dict) else {}
-        return sum(n for n in (tk.get("input"), cache.get("read"), cache.get("write"), tk.get("output"))
+        return sum(n for n in (tk.get("input"), cache.get("read"), cache.get("write"), tk.get("output"),
+                               tk.get("reasoning"))  # as OpenCode's compaction counts it (#644)
                    if isinstance(n, (int, float)))
     # the last one that counted anything: an aborted step recorded with every count 0 (an
     # interrupt) read as an empty session and skipped the between-rounds check (#481)
     last = next((m for m in reversed(msgs) if m.get("type") == "assistant" and carried(m.get("tokens"))), None)
     used = carried(last["tokens"]) if last else None
+    if more := peak(task.status, used):
+        task.set_status(**more)
     return {"used": used, "window": task.status.get("window"),
             "compactions": sum(m.get("type") == "compaction" and m.get("status") == "completed"
                                for m in msgs)}
@@ -1872,6 +2128,36 @@ def fresh_reason(task: store.Task, st: dict | None = None) -> str | None:
     return None
 
 
+ANSWERS_MAX = 4000  # characters of Claude's answers a fresh session carries; the latest first kept
+
+
+def answered(task: store.Task) -> str:
+    """Claude's answers to the agent's questions in this step, as `Q: …` / `A: …` pairs, or "".
+    An answer reached only the session that asked, as a tool result: a fresh one asked again,
+    waking Claude twice, or, past the task's budget, was told to assume and could contradict it
+    (#659). From the runner's own `ask`/`answer` events (the ask files are in the agent's lane),
+    plain questions only (status `asks` "q"), never the answers nobody gave (NO_ANSWER)."""
+    first = task.status.get("step_round") or 1
+    kinds = task.status.get("asks") or {}
+    asked, pairs = {}, []
+    for e in store.read_jsonl(task.dir / "events.jsonl")[0]:
+        if (e.get("round") or 0) < first or kinds.get(e.get("id")) != "q":
+            continue
+        text = str(e.get("text") or "").strip()
+        if e.get("kind") == "ask":
+            asked[e["id"]] = text
+        elif e.get("kind") == "answer" and e["id"] in asked and text and \
+                text not in (ask_mcp.NO_ANSWER, ask_mcp.BUDGET_USED):
+            pairs.append(f"Q: {asked[e['id']][:800]}\nA: {text[:1600]}")
+    kept, size = [], 0
+    for pair in reversed(pairs):  # the latest answers matter most: kept first
+        if size + len(pair) > ANSWERS_MAX:
+            break
+        kept.insert(0, pair)
+        size += len(pair) + 2
+    return "\n\n".join(kept)
+
+
 def handoff_prompt(task: store.Task, why: str, instructions: str) -> str:
     wt, spec = task.worktree, task.spec
     steps = gitops.git(wt, "log", "--oneline", f"{spec['base']}..HEAD").strip()
@@ -1889,6 +2175,9 @@ def handoff_prompt(task: store.Task, why: str, instructions: str) -> str:
             + (f"Earlier steps, committed:\n```\n{steps}\n```\n\n" if steps else "")
             + (f"Uncommitted changes (`git diff HEAD`):\n{work}" if diff != "" else
                "No uncommitted changes yet.")
+            + (f"\n\n## Claude's answers to your questions\n\nAn earlier session asked, and "
+               f"Claude answered; follow these, and don't ask them again:\n\n{qa}"
+               if (qa := answered(task)) else "")
             + f"\n\n## Now\n\n{instructions}")
 
 
@@ -2022,8 +2311,11 @@ def not_the_code(task: store.Task, tests) -> str:
                 "the change; run it in the worktree yourself, or narrow it (wb next --test); "
                 "start a slow suite's task with a larger --test-timeout")
     if nodes := tests.get("lane"):
-        return (f"the lane refused {', '.join(nodes)}: "
-                + "; ".join(f"wb allow {task.name} --path {n}" for n in nodes)
+        # the grant that reaches each, as the report names it: the path itself, when it was a
+        # file not made yet, sent Claude's `wb allow --path` to make a directory of that name (#670)
+        grants = list(dict.fromkeys(lane_grant(n) or n for n in nodes))
+        return (f"the lane refused {', '.join(map(shlex.quote, nodes))}: "
+                + "; ".join(f"wb allow {task.name} --path {shlex.quote(g)}" for g in grants)
                 + ", then wb feedback, if the tests need it")
     return ""
 
@@ -2089,7 +2381,7 @@ def died(rnd: dict) -> bool:
     kill, a provider error), not the runner's stop of a shutdown that hung (#83). Such a round
     failed whatever it printed: one that said "I will inspect the files" and exited 7 went on to
     the tests, and to review as "tests passed" (#427, the audit of 1.8)."""
-    return rnd.get("exit") not in (0, None) and not rnd.get("lingered")
+    return rnd.get("exit") not in (0, None) and not rnd.get("lingered") and not rnd.get("left_bg")
 
 
 def _round_end(task: store.Task, n: int, rnd: dict, began: float) -> None:
@@ -2234,8 +2526,7 @@ def drive(task: store.Task) -> None:
         except RuntimeError as e:
             return _load_failed(task, e)
     if needs_base_check(task):
-        with prep_turn(task):  # one at a time on this machine, as the setups are (#590)
-            _base_check(task)  # on the untouched base, before the agent and the GPU
+        _base_check(task)  # on the untouched base, before the agent and the GPU
     # beside the running tasks' models when all fit the GPU, else alone once they finish
     with models.GpuLease(m, task.name, say) as lease:
         try:
@@ -2302,15 +2593,19 @@ def drive(task: store.Task) -> None:
             if rnd["interrupted"] or (pending_steer(task) and not rnd["stuck"]):
                 _steer_round(task, n, rnd["interrupted"])
                 continue
-            if not rnd["stuck"] and rnd["exit"] not in (0, None) and not rnd["texts"] \
-                    and revived != n and ((down := _down(m)) or _stopped(m)):
-                # OpenCode died without a word while the model's server is down (restarted, or
-                # killed out of memory): the round never reached the model. Once it is back, the
-                # loop's load reloads it and the round runs again, once (the 2026-11-19 audit).
-                # A server wb starts itself isn't waited for: the loop's load starts it (#579).
+            crashed = not rnd["stuck"] and rnd["exit"] not in (0, None)
+            hushed = rnd["guard"] == "silence"  # OpenCode retrying a server that is gone
+            if (crashed or hushed) and revived != n and ((down := _down(m)) or _stopped(m)):
+                # OpenCode died (or went quiet) while the model's server is down (restarted, or
+                # killed out of memory). Once it is back, the loop's load reloads it and the round
+                # runs again, once, continuing the session (the 2026-11-19 audit). A server wb
+                # starts itself isn't waited for: the loop's load starts it (#579). Whatever the
+                # model said first: an OOM kill comes late in a round, after its first words, and
+                # failed the task against the model (#657)
                 revived = n
                 task.event({"ts": store.now(), "round": n, "kind": "load",
-                            "text": f"opencode exited {rnd['exit']} with the model's server down: "
+                            "text": (f"opencode exited {rnd['exit']}" if crashed else "the round went silent")
+                                    + " with the model's server down: "
                                     + ("the round runs again once it is back" if down else
                                        "wb starts it again and the round runs again")})
                 lease.step_aside()  # #257: nothing of ours is on the GPU while it is down
@@ -2324,9 +2619,14 @@ def drive(task: store.Task) -> None:
                 text = summary_text(task, n, rnd, None) + _undelivered(task)
                 task.round_dir(n).joinpath("summary.md").write_text(text)
                 phase = "stuck" if rnd["stuck"] else "failed"
-                task.set_status(phase=phase, last=rnd["stuck"] or f"opencode exited {rnd['exit']}")
+                # its server gone again after the round's one revive: the machine's, not the
+                # step's, so the model's slice isn't shrunk for it (#657)
+                server = (crashed or hushed) and revived == n and (_down(m) or _stopped(m))
+                task.set_status(phase=phase, last=rnd["stuck"] or f"opencode exited {rnd['exit']}",
+                                **({"infra": "model"} if server else {}))
                 # what stopped it, for results.step: a guard or the agent's own exit (#582)
-                task.notify(phase, text, round=n, cause="guard" if rnd["stuck"] else "agent")
+                task.notify(phase, text, round=n,
+                            cause="server" if server else "guard" if rnd["stuck"] else "agent")
                 return
             # the tests need no model: the GPU is the queue's, or theirs (--unload-for-tests), #257
             lease.step_aside(unload=bool(task.spec.get("unload_for_tests")))
@@ -2379,6 +2679,27 @@ RESUME = ("Claude stopped your last session and is resuming the task in a fresh 
           "then finish them and run the tests.{asked}")
 
 
+# A round whose prompt is the runner's own think nudge (_steer_round): round_asks skips it, or a
+# later fresh session was told, under "What you were asked to do", that Claude interrupted it
+# after 12 minutes of thinking it never did (#681).
+NUDGED = "nudged"
+
+
+# Claude's notes folded into a round's prompt after its opening (a carry-on, a resume, the
+# notes that came before the round began): round_asks skips a carry-on or resume whole, so it
+# reads them from here (#677).
+FOLDED = "notes.md"
+
+
+def folded_notes(task: store.Task, n: int, notes: list[dict]) -> str:
+    """The notes as round n's prompt carries them, kept beside it for round_asks."""
+    text = steer_prompt(notes, False)
+    path = task.round_dir(n) / FOLDED
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text((path.read_text().rstrip() + "\n\n" if path.is_file() else "") + text + "\n")
+    return text
+
+
 def round_asks(task: store.Task, n: int) -> list[str]:
     """The instructions rounds n, n-1, ... gave since the step's task, back to the last review
     feedback: what a fresh session taking over mid-round must still carry out. A handover's own
@@ -2390,7 +2711,12 @@ def round_asks(task: store.Task, n: int) -> list[str]:
     for r in range(n, first, -1):
         f = store.round_prompt(task, r)
         raw = f.read_text().strip() if f.is_file() else ""
-        if not raw or raw.startswith((CARRY_ON[:60], RESUME[:60])):
+        if (not raw or raw.startswith((CARRY_ON[:60], RESUME[:60]))
+                or (task.round_dir(r) / NUDGED).exists()):
+            # but the notes folded into it (folded_notes): skipped with it, a note sent as a
+            # session filled reached that successor alone, and the next was never told (#677)
+            if (notes := task.round_dir(r) / FOLDED).is_file() and (kept := notes.read_text().strip()):
+                out.insert(0, kept)
             continue
         out.insert(0, raw)
         if raw.startswith(lessons.FEEDBACK_HEAD):
@@ -2446,7 +2772,7 @@ def _full_round(task: store.Task, n: int, rnd: dict, handed: int = 1) -> None:
     task.round_dir(n + 1).joinpath("prompt.md").write_text(CARRY_ON.format(
         asked=ASKED.format("\n\n".join(asks)) if asks else "",
         last="> " + last.replace("\n", "\n> ") if last else "(none)")
-        + (f"\n\n{steer_prompt(notes, False)}" if notes else ""))
+        + (f"\n\n{folded_notes(task, n + 1, notes)}" if notes else ""))
     task.set_status(round=n + 1, context="full", full_pct=pct,
                     handovers=task.status.get("handovers", 0) + 1,
                     steer_taken=task.status.get("steer_taken", 0) + len(notes))
@@ -2467,7 +2793,7 @@ def _early_notes(task: store.Task, n: int) -> None:
     if not (notes := pending_steer(task)):
         return
     path = task.round_dir(n).joinpath("prompt.md")
-    path.write_text(path.read_text().rstrip() + "\n\n" + steer_prompt(notes, False))
+    path.write_text(path.read_text().rstrip() + "\n\n" + folded_notes(task, n, notes))
     task.set_status(steer_taken=task.status.get("steer_taken", 0) + len(notes))
 
 
@@ -2475,6 +2801,10 @@ def _steer_round(task: store.Task, n: int, interrupted: bool) -> None:
     notes = pending_steer(task)
     task.round_dir(n + 1).mkdir(parents=True, exist_ok=True)
     task.round_dir(n + 1).joinpath("prompt.md").write_text(steer_prompt(notes, interrupted))
+    if any(r.get("by") == "workbench" for r in notes):  # the nudge isn't an ask (#681) ...
+        task.round_dir(n + 1).joinpath(NUDGED).touch()
+        if theirs := [r for r in notes if r.get("by") != "workbench"]:  # ... Claude's notes are
+            folded_notes(task, n + 1, theirs)
     task.set_status(round=n + 1, steer_taken=task.status.get("steer_taken", 0) + len(notes))
 
 
@@ -2507,7 +2837,8 @@ def _updated(task: store.Task) -> bool:
         return False
     msg = f"{UPDATED}: wb resume {task.name} continues it on the new code"
     task.set_status(phase="stuck", last=msg)
-    task.notify("stuck", f"task {task.name}: {msg}", round=task.status.get("round"))
+    # not the step's: an update mid-step shrank the model's slice (#660)
+    task.notify("stuck", f"task {task.name}: {msg}", round=task.status.get("round"), cause="updated")
     return True
 
 
@@ -2542,7 +2873,7 @@ def _signal_notice(task: store.Task, at: float) -> None:
                  and abs((t.status.get("signalled") or 0) - at) <= SIGNAL_SETTLE]
         if task.name not in (t.name for t in batch):
             batch.append(task)  # resumed meanwhile, or no owner known: its own notice still
-        names, where = [t.name for t in batch], owner[1]
+        names = [t.name for t in batch]
         ts = store.now()
         # the steps `wb next` committed, which a discard keeps (#494), for each task they are in
         kept = [line for t in batch if (line := steps_line(t))]
@@ -2550,8 +2881,9 @@ def _signal_notice(task: store.Task, at: float) -> None:
             f"task {task.name}: {SIGNAL_STOP}. wb resume {task.name} continues it in a fresh "
             f"session, wb discard {task.name} drops it" if len(batch) == 1 else
             f"{len(batch)} tasks' runners were stopped by a signal (a shutdown, a logout or a "
-            f"kill), not by Claude: {', '.join(names)}. wb resume --all"
-            + (f" --repo {shlex.quote(where)}" if where else "")
+            f"kill), not by Claude: {', '.join(names)}. wb resume {' '.join(names)}"
+            # by name: `--all --repo <cwd>` resumed nothing for a session in ~, and another
+            # session's tasks in a shared repo (#692)
             + " continues them in the order they were started")
             + "".join(f"\n{k}" for k in kept),
             round=batch[0].status.get("round"), ts=ts, tasks=names,

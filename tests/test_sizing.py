@@ -64,6 +64,48 @@ class Slice(Base):
         self.steps({"files": 9, "lines": 900, "window": 16384})  # before its window was raised
         self.assertEqual(router.slice(self.model(32768)).files, 3)
 
+    def test_one_outlier_step_that_went_well_no_longer_sets_the_slice_for_good(self):
+        # #720: the biggest good step ever won over every cap: one dependency bump (+2,400 lines)
+        # made a 128K model's slice ~2,400 lines, and six later steps of 900 lines that all
+        # compacted left it there
+        self.steps({"files": 1, "lines": 2400, "window": 131072},
+                   *({"files": 9, "lines": 900, "compacted": True, "window": 131072},) * 6)
+        s = router.slice(self.model(131072))
+        self.assertEqual((s.files, s.lines), (8, 600))       # one good step raises nothing
+        self.assertIn("1 of 7 measured steps went well, 6 badly", s.line())
+        # 40 small steps that went well, 30 a little bigger that went badly, then one rename and
+        # lockfile at 28 files: it printed ~28 files, ~3000 lines
+        (store.home() / "results.jsonl").unlink()
+        big = {"window": 131072}
+        mixed = [{"files": 3, "lines": 150, **big}, {"files": 5, "lines": 250, "compacted": True, **big}] * 30
+        self.steps(*({"files": 3, "lines": 150, **big},) * 10, *mixed, {"files": 28, "lines": 3000, **big})
+        s = router.slice(self.model(131072))
+        self.assertEqual((s.files, s.lines), (4, 187))       # below the 5 / 250 that went badly
+        self.assertIn("of the last 20 measured steps", s.line())
+        # good steps past a bad one raise it when the steps that big mostly went well
+        (store.home() / "results.jsonl").unlink()
+        self.steps({"files": 6, "lines": 400, "stuck": True}, *({"files": 8, "lines": 500},) * 4)
+        s = router.slice(self.model(32768))
+        self.assertEqual((s.files, s.lines), (8, 500))
+
+    def test_lockfiles_and_generated_files_are_counted_apart_from_a_steps_size(self):
+        # #720: footprint counted every numstat line, so a lockfile's 2,400 lines were the step's
+        import subprocess
+        from workbench import gitops
+        g = lambda *a: subprocess.run(["git", "-C", str(self.repo), *a], check=True, capture_output=True)  # noqa
+        (self.repo / "old.py").write_text("x = 1\n" * 40)
+        g("add", "."), g("commit", "-qm", "base")
+        g("mv", "old.py", "new.py")                                  # a rename: its new name
+        (self.repo / "app.py").write_text("print(1)\nprint(2)\n")
+        (self.repo / "web").mkdir()
+        (self.repo / "web" / "package-lock.json").write_text("{}\n" * 2400)
+        (self.repo / "api_client.py").write_text("pass\n" * 300)
+        (self.repo / ".gitattributes").write_text("api_client.py linguist-generated\nsnap.txt -diff\n")
+        (self.repo / "snap.txt").write_text("frame\n" * 50)
+        got = gitops.footprint(self.repo, "HEAD")
+        self.assertEqual(got, {"files": 3, "lines": 4, "removed": 0,  # app.py, new.py, .gitattributes
+                               "generated": {"files": 3, "lines": 2700, "removed": 0}})  # -diff: no lines
+
 
 class Measured(Base):
     def setUp(self):
@@ -83,6 +125,7 @@ class Measured(Base):
         wait_phase("t-m1", {"review"})
         run_wb("discard", "t-m1", "--reason", "enough")      # the fake has nothing more to write
         first, second = self.row()["steps"]
+        self.assertEqual(self.row()["landed_steps"], 1)        # kept on the branch (#722)
         self.assertEqual((first["files"], first["lines"]), (1, 1))  # answer.txt, one line
         self.assertTrue(first["landed"])
         self.assertFalse(first["compacted"] or first["stuck"] or first["took_over"])
@@ -102,6 +145,7 @@ class Measured(Base):
         run_wb("accept", "t-m2", "-m", "feat: answer")
         (step,) = self.row()["steps"]
         self.assertEqual((step["handovers"], step["reviews"], step["compacted"]), (1, 1, False))
+        self.assertGreaterEqual(self.row()["peak_share"], 0.7)  # fresh_at could act on it (#721)
         self.assertIn("1 of 1 measured steps went well",
                       router.slice(models.resolve("ollama/mimo-v2.6:9b-q8_0")).line())
 
@@ -174,6 +218,24 @@ class Measured(Base):
                            ("task t: the runner died without a report (killed…)", True),
                            ("task t: stuck: one call repeated 4 times", False)):
             self.assertIs(results._not_the_step({"kind": "stuck", "text": text}), skip)
+
+    def test_workbench_updated_under_a_step_isnt_held_against_its_size(self):
+        # #660: runner._updated's stuck notice had no cause, so an update mid-step recorded the
+        # step stuck and capped the model's slice below it, with no expiry
+        from unittest import mock
+        from workbench import results, runner
+        self.start("t-upd", "ok", "--test", TEST_CMD, "--no-self-review")
+        wait_phase("t-upd", {"review"})
+        task = store.Task("t-upd")
+        with mock.patch.dict(runner.CURRENT, code="the code before the update"):
+            self.assertTrue(runner._updated(task))
+        note = [r for r in store.notices() if r["task"] == "t-upd"][-1]
+        self.assertEqual((note["kind"], note["cause"]), ("stuck", "updated"))
+        self.assertFalse(results.step(task, True)["stuck"])
+        old = {"kind": "stuck", "round": 1, "text": f"task t: {runner.UPDATED}: wb resume t …"}
+        self.assertTrue(results._not_the_step(old))                # one written before the cause
+        for cause, skip in (("guard", False), ("agent", False), ("a stop added later", True)):
+            self.assertIs(results._not_the_step({"kind": "stuck", "cause": cause}), skip)
 
 
 if __name__ == "__main__":

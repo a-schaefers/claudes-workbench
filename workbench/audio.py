@@ -21,7 +21,6 @@ model is named here: the user installs one and describes it.
 from __future__ import annotations
 
 import array
-import contextlib
 import json
 import math
 import operator
@@ -100,7 +99,7 @@ def _command(e: dict, values: dict, refs: list[Path], log: Path) -> None:
         r = media.run_group(argv, float(e.get("timeout", 1800)), stdin=subprocess.DEVNULL, stdout=f,
                             stderr=subprocess.STDOUT)
     if r.returncode or not Path(values["out"]).is_file():
-        tail = "\n".join(log.read_text().strip().splitlines()[-8:])
+        tail = "\n".join(log.read_text(errors="replace").strip().splitlines()[-8:])  # #743
         raise RuntimeError(f"the engine exited {r.returncode} without audio:\n{tail}")
 
 
@@ -116,19 +115,8 @@ def _server(e: dict, values: dict) -> None:
 
 
 def _unload(used: list[dict], say) -> None:
-    """A server engine keeps its model in GPU memory while it runs; each the batch used with an
-    unload URL (audio.cpp's /v1/tasks/unload_all_models) is asked to let it go after the batch,
-    the listener too (only the maker was, so a GPU listener kept its VRAM after the lease was
-    let go: #594), each URL once."""
-    done = set()
-    for e in used:
-        if not e.get("unload") or e["unload"] in done:
-            continue
-        done.add(e["unload"])
-        try:
-            media.post(e, e["unload"], b"{}", "application/json", 30, config_path().parent)
-        except (OSError, RuntimeError) as err:
-            say(f"couldn't unload the audio server ({e['unload']}: {err}); it may still hold GPU memory")
+    """The engine's and the listener's `unload` URLs, after the batch (`media.unload`, #594)."""
+    media.unload(used, say, "audio", config_path().parent)
 
 
 def generate(text: str, out_dir: Path, kind: str | None = None, n: int = 3,
@@ -164,12 +152,13 @@ def generate(text: str, out_dir: Path, kind: str | None = None, n: int = 3,
     if ear and (why := ready(ear[1])):
         say(f"listener {ear[0]}: {why}; no transcripts")
         ear = None
+    # absolute on every Python: 3.11's mkdtemp kept a relative dir relative, so an engine that
+    # changed directory wrote its {out} elsewhere and the run failed (3.12+ passed) (#751)
+    out_dir = Path(out_dir).resolve()
     out_dir.mkdir(parents=True, exist_ok=True)
     seed = int(time.time()) % 1_000_000 if seed is None else seed
-    on_gpu = media.on_gpu(e) or bool(ear and media.on_gpu(ear[1]))
     made = []
-    hold = (media.gpu("wb audio", say, wait, media.serving(e, *([ear[1]] if ear else [])))
-            if on_gpu else contextlib.nullcontext())
+    hold = media.turns("wb audio", say, wait, e, *([ear[1]] if ear else []))  # as wb image (#750)
     with hold:
         try:
             for i in range(n):
@@ -191,7 +180,7 @@ def generate(text: str, out_dir: Path, kind: str | None = None, n: int = 3,
                     found = inspect(fresh, kind, text if kind == "speech" else "", seconds,
                                     ear, draw=check, log=out_dir / "engine.log")
                     if found.pop("not_audio", False):  # an error page published as a clip (#592)
-                        raise RuntimeError(f"audio engine {name} wrote no audio ({_starts(fresh)})")
+                        raise RuntimeError(f"audio engine {name} wrote no audio ({media.starts(fresh)})")
                     store.write_json(fresh.with_suffix(".json"), {
                         "text": text, "kind": kind, "seed": s, "seconds": seconds, "voice": voice,
                         "lyrics": lyrics, "refs": [str(r) for r in refs], "engine": name,
@@ -217,12 +206,6 @@ def _sounds(path: Path) -> bool:
     with open(path, "rb") as f:
         head = f.read(4)
     return head.startswith(MAGIC) or (len(head) > 1 and head[0] == 0xFF and head[1] & 0xE0 == 0xE0)
-
-
-def _starts(path: Path) -> str:
-    with open(path, "rb") as f:
-        head = " ".join(f.read(48).decode(errors="replace").split())
-    return f"it starts {head!r}" if head else "an empty file"
 
 
 class _Meter:
@@ -332,7 +315,7 @@ def _ffmpeg(*args: str, timeout: int = 300) -> subprocess.CompletedProcess | Non
         return None
     try:
         return subprocess.run([exe, "-hide_banner", "-nostdin", *args], capture_output=True,
-                              text=True, timeout=timeout)
+                              encoding="utf-8", errors="replace", timeout=timeout)  # #743
     except (OSError, subprocess.TimeoutExpired):
         return None
 
@@ -362,9 +345,10 @@ UNSPACED = re.compile("[\u0e00-\u0eff\u1000-\u109f\u1780-\u17ff\u3040-\u30ff\u31
 def words(text: str) -> list[str]:
     """The units a listener is scored on: lower-case words (letters, digits, apostrophes, and
     their combining marks: `\\w` split Hindi and Thai at each vowel sign), and each character of a
-    script written without spaces."""
+    script written without spaces. NFC first: `café` with a combining accent scored a WER of 1.0
+    against the same word precomposed (#747)."""
     out, cur, after_unit = [], "", False
-    for c in text.lower().replace("’", "'"):
+    for c in unicodedata.normalize("NFC", text.lower()).replace("’", "'"):
         if unicodedata.category(c).startswith("M"):  # a vowel sign or tone mark: its base's
             if cur:
                 cur += c
@@ -468,9 +452,12 @@ def transcribe(ear: tuple[str, dict], clip: Path, log: Path) -> str:
     name, e = ear
     if e.get("command"):
         argv = media.fill(e["command"], {"in": clip})
+        # decoded leniently: a listener that split a CJK character at a segment's end, or a
+        # Windows program's code page through WSL, raised UnicodeDecodeError and lost the take (#743)
         r = media.run_group(argv, float(e.get("timeout", 600)), stdin=subprocess.DEVNULL,
-                            stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
-        with open(log, "a") as f:
+                            stdout=subprocess.PIPE, stderr=subprocess.PIPE, encoding="utf-8",
+                            errors="replace")
+        with open(log, "a", encoding="utf-8") as f:
             f.write(r.stderr)
         if r.returncode:
             raise RuntimeError(f"listener {name} exited {r.returncode}: "
@@ -530,8 +517,8 @@ def inspect(path: Path, kind: str, script: str = "", seconds: float | None = Non
                              differences=differences(script, heard), listener=ear[0])
                 if by_characters(script):
                     found["cer"] = True  # `wer` counts characters
-            except (OSError, RuntimeError, subprocess.TimeoutExpired) as err:
-                found["listen_error"] = str(err)
+            except (OSError, RuntimeError, ValueError, subprocess.TimeoutExpired) as err:
+                found["listen_error"] = str(err)  # on the line, not raised (ValueError: #743)
     return found
 
 

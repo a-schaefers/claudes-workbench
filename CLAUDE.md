@@ -172,7 +172,7 @@ Runs on Linux, WSL2 and macOS; the launchers refuse native Windows and Python be
    times without waking Claude (`--test-timeout`, 900 s). A session that reaches the handover point (`fresh_at`, tuned per
    model) after changing a file, with room left for a successor, is stopped mid-round and a fresh
    session gets the task, the diff and its last words; between rounds, a session over the point
-   or compacted is replaced. OpenCode's own compaction is set just past it, as a backstop.
+   or compacted is replaced. OpenCode's compaction is a backstop just past it, never ahead.
 5. The runner writes the round report and a `review`/`stuck`/`failed` notice and exits; nothing
    the agent or the tests started outlives a round (`runner.sweep`). A runner that died without a
    word is failed by `cli.reap` (status, wait, events, top and the acting commands).
@@ -191,10 +191,10 @@ Plain files under `$WB_HOME` (`~/.local/state/workbench`); the tree and formats:
 (*Files and formats*):
 ```
 notify{,.old}.jsonl results.jsonl lessons.jsonl notes.md coding.json progress.json stats.json tuning.json speed.json gpu*.{lock,json,admit,load}
-scout.json update.json watch.json optimize.json gc.json wsl-gpus.json archive/ imports/ images/ audio/ chat/{messages,receipts,asks,seen}.jsonl chat/{listener,prefs,push,claims,switch,open,port}.json chat/uploads/
+scout.json update.json watch.json optimize.json gc.json wsl-gpus.json archive/ imports/ images/ audio/ chat/{messages,receipts,asks,seen}.jsonl chat/{listener,away,prefs,push,claims,switch,open,port}.json chat/uploads/
 bench/{cases/<case>,runs/<run>}/ bench/runs.jsonl bench/driver.json
 rules/<task>/  opencode.json HANDBOOK.md CLAUDE.md imports/ bin/git grants.json gitdir.json submodules.json (no lane)
-locks/<task>.{runner,cmd,status,events,steer,grants}.lock   (store.task_lock: no lane reads them)
+locks/<task>.{runner,cmd,status,events,steer,grants,ack}.lock (store.task_lock: not in a lane)
 tasks/<task>/  task.json status.json events.jsonl steer.jsonl acked context.md base-tests.txt setup.txt runner.log
                (the lane: worktree/, ask/)
                rounds/<n>/{prompt,instructions,summary}.md rounds/<n>/tests.txt ask/<id>.{json,answer} worktree/
@@ -290,8 +290,8 @@ compaction, the header wait.
   worktree, the model is still told the first one. So context carries over only within a task's
   own worktree (rounds, `wb next`), never to a new task.
 - `session export` lists compactions as messages `{type: "compaction", status, summary}`; an
-  assistant message's `tokens` (input + cache read/write + output) is the context the next request
-  carries (the between-rounds check). The live `step_finish` tokens (the same sum) drive the
+  assistant message's `tokens` (input + cache read/write + output + reasoning) is the context the
+  next request carries (the between-rounds check). Live `step_finish` tokens (the same) drive the
   mid-round check.
 - `run` reads a message that starts with `-` as a flag (usage, exit 1): the prompt goes after `--`.
 - `run --format json` prints nothing while a tool runs or the model reads its prompt; a shell

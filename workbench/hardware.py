@@ -36,8 +36,12 @@ def _read(path: Path) -> str:
 
 
 def _run(*argv: str) -> str:
+    # Not strict UTF-8: Windows PowerShell 5.1 writes a pipe in the console's OEM code page, and a
+    # localized adapter name or error ('Adaptador de pantalla básico') raised UnicodeDecodeError
+    # past main in wb doctor, scout, top and GPU admission, again on every call (#664)
     try:
-        r = subprocess.run(argv, capture_output=True, text=True, timeout=10)
+        r = subprocess.run(argv, capture_output=True, text=True, encoding="utf-8", errors="replace",
+                           timeout=10)
         return r.stdout.strip() if r.returncode == 0 else ""
     except (OSError, subprocess.TimeoutExpired):
         return ""
@@ -57,6 +61,19 @@ def shares_ram() -> bool:
     """Whether an NVIDIA GPU nvidia-smi gives no memory ([N/A]) uses the RAM: on ARM (a DGX Spark,
     a Jetson) it does; on x86 a card's [N/A] stays unknown. gpus and wb top ask it alike (#572)."""
     return platform.machine().lower() in ("aarch64", "arm64")
+
+
+TEGRA_RELEASE = Path("/etc/nv_tegra_release")
+DEVICE_TREE = Path("/proc/device-tree")
+
+
+def _tegra() -> str | None:
+    """A Jetson's name (the device tree's model, else "NVIDIA Jetson") when this is one: L4T's
+    /etc/nv_tegra_release, or "nvidia,tegra" in the device tree's compatible; else None."""
+    compatible = _read(DEVICE_TREE / "compatible")
+    if not _read(TEGRA_RELEASE) and "nvidia,tegra" not in compatible:
+        return None
+    return _read(DEVICE_TREE / "model").strip("\0").strip() or "NVIDIA Jetson"
 
 
 def system() -> str:
@@ -80,7 +97,7 @@ def _mac_gpus() -> list[dict]:
         items = json.loads(_run("system_profiler", "SPDisplaysDataType", "-json") or "{}")
     except ValueError:
         items = {}
-    found = []
+    found, wired = [], None
     for g in items.get("SPDisplaysDataType", []):
         name = g.get("sppci_model") or g.get("_name") or "unknown"
         if g.get("sppci_cores"):
@@ -89,26 +106,61 @@ def _mac_gpus() -> list[dict]:
         m = re.match(r"(\d+)\s*(MB|GB)", vram)
         unified = name.startswith("Apple")
         shared = not g.get("spdisplays_vram") and not unified  # an Intel iGPU's slice of RAM
+        if unified and wired is None:
+            wired = wired_limit()
         found.append({"name": name, "driver": "metal", "unified": unified,
                       "vram": (_int(_sysctl("hw.memsize")) if unified else None if shared else
                                int(m.group(1)) * (GIB if m.group(2) == "GB" else 2 ** 20) if m else None),
                       "vram_used": None,
-                      "wired_limit": _int(_sysctl("iogpu.wired_limit_mb")) * 2 ** 20
-                      if unified and _int(_sysctl("iogpu.wired_limit_mb")) else None})
+                      "wired_limit": wired[0] if unified and wired[0] else None,
+                      **({"wired_key": wired[1]} if unified and wired[0] else {})})
     return found
+
+
+def wired_limit() -> tuple[int | None, str]:
+    """The GPU's raised wired limit on Apple Silicon in bytes, and the sysctl that set it:
+    iogpu.wired_limit_mb (macOS 14 on, in MiB), else Ventura's debug.iogpu.wired_limit (bytes);
+    (None, "") when neither is set (0, or missing). Read from Sonoma's key alone, a limit raised on
+    macOS 13 was ignored and the budget fell back to macOS's default share (#714)."""
+    if mb := _int(_sysctl("iogpu.wired_limit_mb")):
+        return mb * 2 ** 20, "iogpu.wired_limit_mb"
+    if raw := _int(_sysctl("debug.iogpu.wired_limit")):
+        return raw, "debug.iogpu.wired_limit"
+    return None, ""
 
 
 # Windows' display adapters, each with the memory its driver's registry key states
 # (HardwareInformation.qwMemorySize, 64 bits: Win32_VideoController's AdapterRAM caps at 4 GB),
 # one name and size a line, tab between. Sent as -EncodedCommand: no quoting through WSL's interop
-WINDOWS_SCRIPT = (
-    "$r = @(Get-ItemProperty 'HKLM:\\SYSTEM\\CurrentControlSet\\Control\\Class\\"
+WINDOWS_SCRIPT = (  # UTF-8 out: names arrive intact for the registry match (#664)
+    "[Console]::OutputEncoding = [Text.Encoding]::UTF8; $r = @(Get-ItemProperty 'HKLM:\\SYSTEM\\CurrentControlSet\\Control\\Class\\"
     "{4d36e968-e325-11ce-bfc1-08002be10318}\\0*' -ErrorAction SilentlyContinue); "
     "Get-CimInstance Win32_VideoController | ForEach-Object { $n = $_.Name; "
     "$m = ($r | Where-Object { $_.DriverDesc -eq $n } | Select-Object -First 1).'HardwareInformation.qwMemorySize'; "
     "$n + [char]9 + $m }")
-WINDOWS_CACHE = "wsl-gpus.json"  # under $WB_HOME: {ts, gpus: [{name, vram}]}
+WINDOWS_CACHE = "wsl-gpus.json"  # under $WB_HOME: {ts, gpus: [{name, vram}], tried?}
 WINDOWS_FOR = 3600  # seconds a reading serves: PowerShell takes seconds to start
+WINDOWS_RETRY = 60  # seconds a failed reading waits before PowerShell is asked again
+WSL_CONF = Path("/etc/wsl.conf")
+# Windows' own PowerShell, under WSL's automount root: on PATH only while WSL appends Windows'
+# PATH, which [interop] appendWindowsPath=false (a common tweak) turns off (#702)
+WINDOWS_POWERSHELL = "c/Windows/System32/WindowsPowerShell/v1.0/powershell.exe"
+
+
+def powershell() -> str | None:
+    """Windows' powershell.exe as seen from WSL: from PATH, else under the automount root
+    (/etc/wsl.conf's [automount] root, /mnt/ by default); None when neither has it."""
+    if found := shutil.which("powershell.exe"):
+        return found
+    root, section = "/mnt/", ""
+    for line in _read(WSL_CONF).splitlines():
+        line = line.split("#", 1)[0].strip()
+        if line.startswith("[") and line.endswith("]"):
+            section = line[1:-1].strip().lower()
+        elif section == "automount" and line.partition("=")[0].strip().lower() == "root":
+            root = line.partition("=")[2].strip().strip("\"'") or root
+    path = os.path.join(root.rstrip("/") + "/", WINDOWS_POWERSHELL)
+    return path if os.path.isfile(path) else None
 
 
 def _windows_gpus() -> list[dict]:
@@ -116,22 +168,31 @@ def _windows_gpus() -> list[dict]:
     model served from Windows (Ollama for Windows) runs on any of them, and WSL shows Linux only
     NVIDIA's (and AMD's or Intel's to ROCm or Level Zero), so a 16 GB Radeon was "VRAM unknown"
     and had no budget (#522). Read at most once per WINDOWS_FOR, in WINDOWS_CACHE: the budget
-    asks it on every admission when Linux sees no GPU."""
+    asks it on every admission when Linux sees no GPU. A read that found nothing (no PowerShell,
+    one slower than _run's timeout after a boot: Windows always lists an adapter) is no reading:
+    the last good one stays and PowerShell is asked again after WINDOWS_RETRY. Cached as an hour's
+    "no GPU", a 16 GB Radeon had no budget, and a read that only sometimes worked flipped wb
+    optimize's fingerprint, so each flip emptied the GPU to measure (#702)."""
     path = store.home() / WINDOWS_CACHE
     hit = store.read_json(path, None)
-    if isinstance(hit, dict) and isinstance(hit.get("gpus"), list) \
-            and 0 <= time.time() - (hit.get("ts") or 0) < WINDOWS_FOR:
-        rows = hit["gpus"]
-    else:
-        out = _run("powershell.exe", "-NoProfile", "-NonInteractive", "-EncodedCommand",
-                   base64.b64encode(WINDOWS_SCRIPT.encode("utf-16-le")).decode())
-        rows = []
+    hit = hit if isinstance(hit, dict) and isinstance(hit.get("gpus"), list) else {"gpus": []}
+    now, rows = time.time(), hit["gpus"]
+    fresh = rows and 0 <= now - (hit.get("ts") or 0) < WINDOWS_FOR
+    if not fresh and not 0 <= now - (hit.get("tried") or 0) < WINDOWS_RETRY:
+        exe = powershell()
+        out = _run(exe, "-NoProfile", "-NonInteractive", "-EncodedCommand",
+                   base64.b64encode(WINDOWS_SCRIPT.encode("utf-16-le")).decode()) if exe else ""
+        read = []
         for line in out.splitlines():
             name, _, mem = (x.strip() for x in line.partition("\t"))
             if name:
-                rows.append({"name": name, "vram": int(mem) if mem.isdigit() and int(mem) else None})
+                read.append({"name": name, "vram": int(mem) if mem.isdigit() and int(mem) else None})
+        if read:
+            rows, hit = read, {"ts": now, "gpus": read}
+        else:
+            hit = {**hit, "tried": now}  # the last good reading kept
         try:
-            store.write_json(path, {"ts": time.time(), "gpus": rows})
+            store.write_json(path, hit)
         except OSError:
             pass  # unwritable state: asked again next time
     return [{"name": r["name"], "driver": "windows (seen from WSL)", "vram": r.get("vram"), "vram_used": None}
@@ -145,8 +206,21 @@ def _int(text: str) -> int:
         return 0
 
 
+# Display-only adapters: a server's BMC VGA (ASPEED, Matrox), a VM's emulated card, a USB or
+# firmware framebuffer. None runs models (no CUDA, ROCm, Level Zero or Vulkan device), so they are
+# no GPU: counted as one, a CPU-only rack server was told to set gpu_gb for its BMC, an 8-GPU box
+# was hinted to replace its budget with one number, and a Vulkan mask counted the BMC (#710)
+DISPLAY_ONLY = frozenset({"ast", "mgag200", "bochs", "bochs-drm", "cirrus", "cirrus-qemu", "vmwgfx",
+                          "qxl", "virtio_gpu", "virtio-gpu", "vboxvideo", "hyperv_drm", "simpledrm",
+                          "udl", "evdi", "gud"})
+# The drivers whose cards can run models, of those that may publish no memory size: only these
+# get gpu_line's hint to set gpu_gb (#710)
+COMPUTE = ("i915", "xe", "amdgpu", "nvidia", "nouveau", "windows", "metal")
+
+
 def gpus(windows: bool = True) -> list[dict]:
-    """Every display adapter: name, driver, VRAM total and in use (bytes) where the driver says,
+    """Every display adapter that can run models (not DISPLAY_ONLY's): name, driver, VRAM total
+    and in use (bytes) where the driver says,
     and `discrete` when it is known to be a card with memory of its own (not an APU's carve-out).
     On WSL, Windows' adapters too (_windows_gpus); ``windows`` False leaves them out whenever
     Linux sees a GPU of its own (a PowerShell start takes seconds: the GPU budget and wb image's
@@ -174,6 +248,15 @@ def gpus(windows: bool = True) -> list[dict]:
             g.update(vram=ram["ram"], ram_free=ram["ram_free"], unified=True, discrete=False,
                      memory="the RAM: nvidia-smi gives the GPU no memory of its own")
         found.append(g)
+    if not found and where == "linux" and shares_ram() and (tegra := _tegra()):
+        # JetPack 5 and earlier have no nvidia-smi, and the Tegra GPU is a platform device the
+        # DRM scan skips: a Jetson read as no GPU, so no budget, no reserve (#524) and no fit
+        # check on an 8 GB Orin Nano (#713). Its GPU is the RAM's, as nvidia-smi's [N/A] says
+        ram = memory()
+        if ram.get("ram"):
+            found.append({"name": tegra, "driver": "nvidia (tegra)", "vram": ram["ram"],
+                          "vram_used": None, "ram_free": ram["ram_free"], "unified": True,
+                          "discrete": False, "memory": "the RAM: a Jetson's GPU shares it"})
     if len({(g["name"], g["vram"]) for g in found}) > 1:
         # cards that differ: CUDA numbers them fastest first by default, which visible() guesses
         # from this (a query of its own: a driver that lacks the field fails the whole query)
@@ -195,8 +278,8 @@ def gpus(windows: bool = True) -> list[dict]:
             continue
         uevent = dict(x.split("=", 1) for x in _read(dev / "uevent").splitlines() if "=" in x)
         slot, driver = uevent.get("PCI_SLOT_NAME"), uevent.get("DRIVER", "")
-        if not slot or slot in seen or (driver == "nvidia" and listed):  # nvidia-smi spoke for those
-            continue
+        if not slot or slot in seen or (driver == "nvidia" and listed) or driver in DISPLAY_ONLY:
+            continue  # nvidia-smi spoke for those; a BMC's or a VM's display runs no model (#710)
         seen.add(slot)
         name = _run("lspci", "-s", slot).partition(": ")[2] or uevent.get("PCI_ID", "unknown")
         total, used = _read(dev / "mem_info_vram_total"), _read(dev / "mem_info_vram_used")
@@ -213,8 +296,13 @@ def gpus(windows: bool = True) -> list[dict]:
             # an APU's GPU also maps system RAM up to its GTT size, which is where a Strix Halo
             # with a 512 MiB carve-out keeps its models: counting the carve-out alone dropped it
             # as an iGPU, so no budget (the 2026-11-19 audit)
-            g.update(vram=(g["vram"] or 0) + gtt, unified=True,
-                     memory=f"{size(g['vram'])} carve-out + {size(gtt)} GTT")
+            # The GTT can be raised toward all of RAM (amdgpu.gttsize, ttm.pages_limit), so the
+            # RAM and what the system left are kept for the budget's reserve, as for a Jetson (#712)
+            ram = memory()
+            g.update(vram=(g["vram"] or 0) + gtt, unified=True, carve=g["vram"] or 0,
+                     memory=f"{size(g['vram'])} carve-out + {size(gtt)} GTT",
+                     **({"ram": ram["ram"], "ram_free": ram["ram_free"]}
+                        if ram.get("ram") and ram.get("ram_free") is not None else {}))
         if uid := _read(dev / "unique_id"):
             g["uuid"] = f"GPU-{uid}"  # how ROCR_VISIBLE_DEVICES names it
         found.append(g)
@@ -304,7 +392,9 @@ def _hwmon_watts(mon: Path) -> float | None:
 def gpu_power_w(drm: Path = DRM) -> float | None:
     """Power draw of the discrete cards, in watts: nvidia-smi's power.draw, else each card's
     hwmon (_hwmon_watts): read from power1_average alone, Intel's cards' energy stayed 0 and the
-    savings said it wasn't measured (#271, the audit of 1.2)."""
+    savings said it wasn't measured (#271, the audit of 1.2). An APU's hwmon (apu) is the whole
+    package's, its CPU cores too, so beside a card that isn't one it is left out: a Ryzen iGPU
+    beside a Radeon counted the agent's builds and tests as GPU energy (#706)."""
     if system() == "macos":
         return None
     total = 0.0
@@ -317,15 +407,17 @@ def gpu_power_w(drm: Path = DRM) -> float | None:
         nvidia = True  # at least one card reported a value
     if nvidia:
         return round(total, 1)
-    found = False
+    read = []  # (an APU's, watts) per card's hwmon
     for mon in sorted(drm.glob("card[0-9]*/device/hwmon/hwmon*")):
         if "-" in mon.parent.parent.parent.name:  # a connector (card0-DP-1), not a card
             continue
         w = _hwmon_watts(mon)
         if w is not None:
-            found = True
-            total += w
-    return round(total, 1) if found and total else None
+            read.append((apu(mon.parent.parent) is True, w))
+    if any(not is_apu for is_apu, _ in read):
+        read = [r for r in read if not r[0]]
+    total = sum(w for _, w in read)
+    return round(total, 1) if read and total else None
 
 
 # ---- per-card readers for wb top: plain sysfs reads, cheap enough for every tick ----
@@ -539,20 +631,42 @@ def _ollama_container() -> tuple[dict, str] | None:
                 host = json.loads(_run(tool, "inspect", "--format", "{{json .HostConfig}}", cid) or "{}")
             except ValueError:
                 host = {}
-            return ({**_environ(raw, OLLAMA_KNOBS), **container_mask(host)},
+            return ({**_environ(raw, OLLAMA_KNOBS), **container_mask(host, _environ(raw, SET_ONLY))},
                     f"the {tool} container {name or cid}")
     return None
 
 
-def container_mask(host) -> dict:
+def _within(granted: str | None, inner: str | None) -> str | None:
+    """A container's own device mask ``inner`` in this host's numbering, its ordinals indexing
+    the devices ``granted`` (the HostConfig's, None: all, numbered as here); a UUID is the same
+    everywhere. Like CUDA, the list stops at the first entry that names no device."""
+    if inner is None:
+        return granted
+    if granted is None:
+        return inner
+    cards, out = [x.strip() for x in granted.split(",") if x.strip()], []
+    for item in (x.strip() for x in inner.split(",")) if inner.strip() else ():
+        if item.isdigit() and int(item) < len(cards):
+            out.append(cards[int(item)])
+        elif item and not item.isdigit() and not item.startswith("-"):
+            out.append(item)
+        else:
+            break
+    return ",".join(out)
+
+
+def container_mask(host, inner: dict | None = None) -> dict:
     """The devices a container's HostConfig gives it, as the masks visible() reads, in this
     host's numbering: `--gpus device=0` or compose `device_ids` (DeviceRequests' DeviceIDs, or a
     Count of the first N; NVIDIA's toolkit numbers them as nvidia-smi does, PCI order), and an AMD
-    card passed as `--device /dev/dri/renderD129` (Devices). The container's own masks number
-    its own devices, so only these say which of this host's cards it has; unread, an Ollama
-    limited to one card was budgeted every card (#463, the audit of 1.8). {} when it has all."""
+    card passed as `--device /dev/dri/renderD129` (Devices). Unread, an Ollama limited to one card
+    was budgeted every card (#463, the audit of 1.8). ``inner``: the container's own environment's
+    masks, which number the devices it was given (_within): dropped, an Ollama granted two cards
+    and set to CUDA_VISIBLE_DEVICES=0 was budgeted both (#651, Codex's audit of 1.90.6). {} when
+    it has all and sets none."""
+    inner = inner or {}
     if not isinstance(host, dict):
-        return {}
+        host = {}
     out = {}
     for req in host.get("DeviceRequests") or []:
         if not isinstance(req, dict):
@@ -575,6 +689,13 @@ def container_mask(host) -> dict:
         picked = [str(amd.index(s)) for r in renders if (s := slot(DRM / r / "device")) in amd]
         if picked:
             out["ROCR_VISIBLE_DEVICES"] = ",".join(dict.fromkeys(picked))
+    for key in ("CUDA_VISIBLE_DEVICES", "ROCR_VISIBLE_DEVICES"):
+        if (got := _within(out.get(key), inner.get(key))) is not None:
+            out[key] = got
+    if "CUDA_VISIBLE_DEVICES" in inner and "CUDA_DEVICE_ORDER" not in out and inner.get("CUDA_DEVICE_ORDER"):
+        out["CUDA_DEVICE_ORDER"] = inner["CUDA_DEVICE_ORDER"]  # all its cards: its own order
+    if "HIP_VISIBLE_DEVICES" in inner:  # it numbers what ROCR leaves, inside as here
+        out["HIP_VISIBLE_DEVICES"] = inner["HIP_VISIBLE_DEVICES"]
     return out
 
 
@@ -656,8 +777,8 @@ def disk_free(path: Path | None) -> int | None:
 def size(n: int | None) -> str:
     """Bytes in decimal GB, the unit models.json's gpu_gb and vram_gb take (and Ollama prints):
     binary GiB labelled GB sat beside a decimal budget, and a hand-set gpu_gb came out 7% small
-    (#523)."""
-    return f"{n / 1e9:.1f} GB" if n else "?"
+    (#523). 0 is 0.0 GB, only None unknown: a full disk and exhausted swap read "?" (#717)."""
+    return f"{n / 1e9:.1f} GB" if n is not None else "?"
 
 
 SYSTEM_NOTE = {
@@ -678,13 +799,15 @@ def report() -> list[str]:
         if g.get("memory"):  # a unified GPU off macOS: what it may use, and where that comes from
             vram = f" · unified memory: {size(g['vram'])} usable by the GPU ({g['memory']})"
         elif g.get("unified"):
-            limit = (f", the GPU may wire {size(g['wired_limit'])} (iogpu.wired_limit_mb)"
+            limit = (f", the GPU may wire {size(g['wired_limit'])} ({g.get('wired_key') or 'iogpu.wired_limit_mb'})"
                      if g.get("wired_limit") else ", of which macOS lets the GPU use only part by default")
             vram = f" · unified memory: {size(g['vram'])} shared with the CPU{limit}"
         else:
             vram = (f" · {size(g['vram'])} VRAM" + (f" ({size(g['vram_used'])} in use)"
                                                     if g.get("vram_used") else "")) if g["vram"] \
                 else " · VRAM unknown"
+            if where == "macos":  # an Intel Mac's adapter: no budget counts it (#711)
+                vram += " · Ollama runs models on the CPU on an Intel Mac (gpu_gb sets a budget by hand)"
         gpu_lines.append(f"  GPU   {g['name']}{vram} · {g['driver']}")
     lines += gpu_lines or ["  GPU   none found (models would run on the CPU)"]
     m, c = memory(), cpu()

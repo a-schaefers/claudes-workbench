@@ -9,12 +9,19 @@ Off (the default), nothing here runs and the timing is today's.
 """
 from __future__ import annotations
 
+import math
 from pathlib import Path
 
-from . import store
+from . import store, tuning
 
 KINDS = ("hint", "smaller")
 MIN_TRIES = 2  # below this many tries of each, the evidence decides nothing
+# The typical length is the median of TYPICAL_MIN timed tasks of the model and size, at least
+# FLOOR_MIN minutes; until there are that many, DEFAULT_MIN for the size. With no history the
+# checks never came though `wb progress on` said they would, and one 1.5-minute task made the
+# threshold 1.5 minutes: a check every 1.5 minutes, each waking Claude (#724).
+TYPICAL_MIN, FLOOR_MIN = 3, 10
+DEFAULT_MIN = {"trivial": 20, "significant": 45}
 
 
 def path() -> Path:
@@ -35,33 +42,51 @@ def set_enabled(on: bool, after: float | None = None) -> None:
 
 
 def threshold(spec: dict) -> float | None:
-    """Minutes of active work before a check: the user's --after, else the typical length of a
-    task this size on this model (router.expected_minutes); None while off."""
+    """Minutes of active work before the first check (`typical`); None while off."""
+    return typical(spec)[0] if settings().get("on") else None
+
+
+def typical(spec: dict) -> tuple[float, str]:
+    """(minutes, where from): the user's --after ("user"), else the typical length of a task
+    this size on this model (router.expected: "measured" from TYPICAL_MIN timed tasks, at least
+    FLOOR_MIN), else the size's DEFAULT_MIN ("default")."""
     s = settings()
-    if not s.get("on"):
-        return None
     if s.get("after"):
-        return float(s["after"])
+        return float(s["after"]), "user"
     from . import router  # router -> models: only when on
-    return router.expected_minutes(spec["model"], spec.get("size", "significant"))
+    size = spec.get("size", "significant")
+    mins, n = router.expected(spec.get("model", ""), size)
+    if mins is not None and n >= TYPICAL_MIN:
+        return max(FLOOR_MIN, mins), "measured"
+    return float(DEFAULT_MIN.get(size, DEFAULT_MIN["significant"])), "default"
 
 
 def _mins(m: float) -> str:
     return f"{m:.0f} min" if m >= 1 else f"{m * 60:.0f} s"
 
 
+def passed(active_s: float, typical_min: float) -> int:
+    """How many check points active work has passed: 1x, 2x, 4x… the typical length (each
+    whole multiple once woke Claude every few minutes of a long task, #724)."""
+    if not typical_min or typical_min <= 0 or active_s < typical_min * 60:
+        return 0
+    return int(math.log2(active_s / (typical_min * 60))) + 1
+
+
 def due(task: store.Task, active_s: float, typical_min: float | None) -> bool:
-    """At each whole multiple of the typical length, counted in active work, once."""
+    """At 1x, 2x, 4x… the typical length, counted in active work, once each."""
     if not typical_min or typical_min <= 0:
         return False
-    k = int(active_s // (typical_min * 60))
-    return k >= 1 and k > int(task.status.get("progress_checks") or 0)
+    return passed(active_s, typical_min) > int(task.status.get("progress_checks") or 0)
 
 
 def helped(model: str) -> dict[str, list[int]]:
     """{kind: [helped, tried]} on this model: a task an intervention was tried on helped when it
     was accepted without Claude taking it over."""
-    return helped_by_model(store.results()).get(model) or {k: [0, 0] for k in KINDS}
+    # judged, as the Stats feed's rows are: a spec-gap discard or a task that never ran isn't
+    # the intervention's failure, and the two readers disagreed (#647)
+    rows = [r for r in store.results() if tuning.judged(r)]
+    return helped_by_model(rows).get(model) or {k: [0, 0] for k in KINDS}
 
 
 def helped_by_model(rows: list[dict]) -> dict[str, dict[str, list[int]]]:
@@ -72,7 +97,7 @@ def helped_by_model(rows: list[dict]) -> dict[str, dict[str, list[int]]]:
         kinds = {i.get("kind") for i in r.get("interventions") or [] if isinstance(i, dict)} & set(KINDS)
         if not kinds:
             continue
-        ok = r.get("outcome") == "accepted" and not any(s.get("took_over") for s in r.get("steps") or [])
+        ok = tuning.agent_landed(r)
         by = out.setdefault(r.get("model"), {k: [0, 0] for k in KINDS})
         for k in kinds:
             by[k][1] += 1
@@ -100,8 +125,12 @@ def text(task: store.Task, active_s: float, typical_min: float, moved: bool, fil
     rates = helped(model)
     kind = recommend(moved, rates)
     tests = st.get("tests")
-    past = (f"the {_mins(typical_min)} the user set" if settings().get("after") else
-            f"the typical {_mins(typical_min)} for a {task.spec.get('size')} task on this model")
+    source = typical(task.spec)[1]
+    past = (f"the {_mins(typical_min)} the user set" if source == "user" else
+            f"the typical {_mins(typical_min)} for a {task.spec.get('size')} task on this model"
+            if source == "measured" else
+            f"the default {_mins(typical_min)} for a {task.spec.get('size')} task (fewer than "
+            f"{TYPICAL_MIN} timed on this model)")
     lines = [f"progress check (on: wb progress): {_mins(active_s / 60)} of active work, past {past} "
              "(waits for the GPU and for answers left out)",
              f"evidence: {files} file(s) changed, " + ("some since the last check" if moved else

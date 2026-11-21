@@ -55,8 +55,14 @@ def parked(st: dict) -> bool:
     """A task `wb stop --all` (the mod's /workbench-quit) stopped and nothing has picked up since:
     the status line, the session's open-tasks block and `wb status` leave it out, `wb status
     --all` lists it. It stayed "awaiting review" and each new conversation was told to pick it up,
-    against the quit (#541). spawn_runner clears the mark; any other phase isn't parked."""
-    return st.get("phase") == "stuck" and bool(st.get("parked"))
+    against the quit (#541). A task waiting on Claude when the quit came (review, stuck, failed:
+    `--park-waiting`) is parked as it stands: only the running ones were, and a review stayed in
+    the status line and every new conversation's pick-up block (#698). spawn_runner and a takeover
+    clear the mark; any other phase isn't parked."""
+    return st.get("phase") in PARKS and bool(st.get("parked"))
+
+
+PARKS = ("review", "stuck", "failed")  # the phases a parked mark counts in (parked)
 
 
 # The environment variables that name a path. A relative one, or one with a `~` no shell expanded
@@ -70,7 +76,10 @@ def parked(st: dict) -> bool:
 # and CLAUDE_CONFIG_DIR, which the runner reads for the lane and spend.py for the transcripts.
 PATH_VARS = ("WB_HOME", "WB_MODELS", "WB_SKILLS", "WB_IMAGES", "WB_AUDIO", "WB_COMMANDS", "WB_CHAT_TOKEN",
              "WB_CHAT_CONFIG", "WB_OPENCODE_CONFIG", "WB_SAVINGS", "OPENCODE_CONFIG",
-             "CLAUDE_CONFIG_DIR", "WB_GPU_DIR")
+             "CLAUDE_CONFIG_DIR", "WB_GPU_DIR",
+             # where OpenCode's global config (and, XDG_DATA_HOME, its sessions) are: relative,
+             # wb start found the model and the runner, which runs elsewhere, didn't (#650)
+             "OPENCODE_CONFIG_DIR", "XDG_CONFIG_HOME", "XDG_DATA_HOME")
 
 
 def absolute_env() -> None:
@@ -205,6 +214,38 @@ def note_claude_session() -> None:
         f.write(f"{now()} {sid}\n")
 
 
+def note_task_session(name) -> None:
+    """Record the Claude Code session a `wb` call naming a task runs in, in the task's own
+    `claude-sessions` (`<ts> <session id>` lines, once per id): a task adopted by another
+    process after a restart (its start process gone, cli._scope) was reviewed and accepted
+    there, and spend read only the start process's sessions, so the reviews went uncounted
+    (#719)."""
+    sid = os.environ.get("CLAUDE_CODE_SESSION_ID", "")
+    if not isinstance(name, str) or not NAME_RE.match(name) or not re.fullmatch(r"[\w-]{1,128}", sid):
+        return
+    task = Task(name)
+    if not task.exists:
+        return
+    path = task.dir / "claude-sessions"
+    if sid in task_sessions(task):
+        return
+    with path.open("a") as f:
+        f.write(f"{now()} {sid}\n")
+
+
+def task_sessions(task) -> list[str]:
+    """The session ids note_task_session recorded for the task, first seen first."""
+    try:
+        words = (task.dir / "claude-sessions").read_text().split()
+    except OSError:
+        return []
+    out = []
+    for sid in words[1::2]:
+        if sid not in out:
+            out.append(sid)
+    return out
+
+
 def claude_sessions(pid, since: float = 0) -> list[str]:
     """The session ids Claude Code process `pid` ran `wb` in from `since` on, first seen first."""
     try:
@@ -257,6 +298,24 @@ def write_json(path: Path, data) -> None:
             fh.write(json.dumps(data, indent=2, ensure_ascii=False) + "\n")
             _synced(fh)
         os.replace(tmp, path)  # readers (woken by inotify on the rename) never see half a file
+    except BaseException:
+        tmp.unlink(missing_ok=True)
+        raise
+
+
+def replace_bytes(path: Path, data: bytes) -> None:
+    """``path``'s whole contents replaced by ``data`` as write_json does: a name of its own,
+    synced, then renamed into place. results.jsonl (wb trial), notify.jsonl (the daily gc), a
+    task's `acked` and notes.md were renamed unsynced under a pid-only name, so a crash soon after
+    could leave the router's whole history or every pending notice empty (#734, the 2026-11-21
+    audit)."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_name(f".{path.name}.{os.getpid()}.{uuid.uuid4().hex[:12]}.tmp")
+    try:
+        with open(tmp, "xb") as fh:
+            fh.write(data)
+            _synced(fh)
+        os.replace(tmp, path)
     except BaseException:
         tmp.unlink(missing_ok=True)
         raise
@@ -406,11 +465,29 @@ def append_jsonl(path: Path, row: dict, after: float | None = None) -> None:
             fh.write(line)
 
 
+_results_seen: dict = {}  # path -> (inode, size, mtime_ns), rows: results() parses a file once
+
+
 def results(trials: bool = False) -> list[dict]:
     """results.jsonl's rows: the evidence the router and the skill records learn from, which a
-    trial run (a check of workbench itself on a scratch repo) is not, unless asked for."""
-    rows = read_jsonl(home() / "results.jsonl")[0]
-    return rows if trials else [r for r in rows if not r.get("trial")]
+    trial run (a check of workbench itself on a scratch repo) is not, unless asked for.
+    The file is parsed again only when it changed (its inode, size or mtime): the router, the
+    slice and `wb tune` asked for it per model, size and knob, and at 20,000 rows `wb models`
+    read it 9 times (2.9 s) and `wb tune` 25 (7.8 s) (#727). Callers don't change the rows."""
+    path = home() / "results.jsonl"
+    try:
+        st = path.stat()
+        stamp = (st.st_ino, st.st_size, st.st_mtime_ns)
+    except FileNotFoundError:
+        stamp = None
+    seen = _results_seen.get(path)
+    if seen is not None and seen[0] == stamp:
+        rows = seen[1]
+    else:
+        rows = read_jsonl(path)[0] if stamp else []
+        _results_seen.clear()  # one file at a time: a test's WB_HOME, then the next one's
+        _results_seen[path] = (stamp, rows)
+    return list(rows) if trials else [r for r in rows if not r.get("trial")]
 
 
 def notices() -> list[dict]:
@@ -438,11 +515,9 @@ def mark_trials(names: set[str]) -> list[str]:
         rows = read_jsonl(path)[0]
         hit = [r["task"] for r in rows if r.get("task") in names and not r.get("trial")]
         if hit:
-            tmp = path.with_name(f".{path.name}.{os.getpid()}.tmp")
-            tmp.write_text("".join(json.dumps({**r, "trial": True} if r.get("task") in names else r,
-                                              ensure_ascii=False) + "\n" for r in rows),
-                           encoding="utf-8")
-            os.replace(tmp, path)
+            replace_bytes(path, "".join(json.dumps({**r, "trial": True} if r.get("task") in names
+                                                   else r, ensure_ascii=False) + "\n"
+                                        for r in rows).encode("utf-8"))  # #734
     return sorted(set(hit))
 
 
@@ -598,10 +673,7 @@ def write_ack(task: "Task", ts: float) -> None:
     """Task's `acked` mark, replaced whole: the mod and wb wait read it on every poll, and a read
     between a truncate and the write (or a write that failed after it) saw 0, every old notice
     news again (the 2026-11-16 audit)."""
-    f = task.dir / "acked"
-    tmp = f.with_name(f".acked.{os.getpid()}.tmp")
-    tmp.write_text(str(ts))
-    os.replace(tmp, f)
+    replace_bytes(task.dir / "acked", str(ts).encode())  # synced: read back empty, all news (#734)
 
 
 def all_tasks(archived: bool = False):
@@ -614,6 +686,34 @@ def all_tasks(archived: bool = False):
 
 
 ARCHIVE_DAYS = 30
+
+
+SLIM_DAYS = 90  # an archived task keeps its bulky outputs this long after it closed
+# what a closed task's directory holds that nothing reads once it is old: the runner's log
+# (appended every round), each round's and check's test output (up to 320 KB each). Its
+# task.json, status.json, prompts, summaries, events and asks stay: names stay taken, wb bench
+# add reads an accepted task's prompts, and the lessons and transcripts its events (#740).
+SLIM_GLOBS = ("runner.log", "base-tests.txt", "setup.txt", "rounds/*/tests.txt",
+              "verify/*/base.txt", "verify/*/candidate.txt", "shots/*/*.txt")
+
+
+def slim_archive(days: float = SLIM_DAYS) -> int:
+    """Drop SLIM_GLOBS from the archived tasks closed over ``days`` ago: archive/ kept every
+    one of them for good (#740, the 2026-11-21 audit). The bytes freed."""
+    cutoff, freed = time.time() - days * 86400, 0
+    for d in sorted(archive_dir().iterdir()) if archive_dir().is_dir() else ():
+        st = read_json(d / "status.json", {})
+        if not isinstance(st, dict) or st.get("phase") not in CLOSED or (st.get("updated_at") or 0) > cutoff:
+            continue
+        for pattern in SLIM_GLOBS:
+            for f in d.glob(pattern):
+                try:
+                    if f.is_file() and not f.is_symlink():
+                        freed += f.stat().st_size
+                        f.unlink()
+                except OSError:
+                    continue
+    return freed
 
 
 def archive(days: float = ARCHIVE_DAYS) -> list[str]:

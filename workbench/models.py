@@ -15,8 +15,10 @@ keyed by OpenCode model id or by provider id:
 
 A provider is driven as Ollama when its server answers Ollama's /api/version, whatever its port,
 and isn't an emulation of it (KoboldCpp: `emulator`); anything else is a server (`"engine": "ollama"|"server"` on the provider overrides the probe). A
-server that lists several models (LM Studio, llama-swap, vLLM) swaps them itself: its models
-are one server, stopped or started as one.
+server that lists several models (llama-swap, vLLM) swaps them itself: its models are one
+server, stopped or started as one. LM Studio (its /api/v1/models answers) is the exception: it
+unloads by itself only what it loaded just in time, so wb loads and unloads its models one by
+one (#645).
 
 The runner makes the task's model resident before it starts (make_resident): it unloads Ollama
 models and stops servers that have a stop command, then loads or starts the one it needs. A
@@ -39,6 +41,7 @@ import re
 import shlex
 import shutil
 import socket
+import struct
 import subprocess
 import sys
 import time
@@ -397,7 +400,8 @@ def _own_addresses() -> frozenset:
     # Mac's own LAN address counted as remote and its model was left out: the 2026-11-19 audit)
     for argv in (["ip", "-o", "addr"], ["ifconfig", "-a"]):
         try:
-            out = subprocess.run(argv, capture_output=True, text=True, timeout=5).stdout
+            out = subprocess.run(argv, capture_output=True, text=True, encoding="utf-8",
+                                 errors="replace", timeout=5).stdout  # a localized ifconfig (#664)
         except (OSError, subprocess.TimeoutExpired):
             continue
         # 10.0.0.5/24 (ip), fe80::1%en0 (ifconfig's scope), addr:10.0.0.5 (old net-tools)
@@ -857,8 +861,11 @@ def _catalog(m: Model, catalog: dict | None):
 def status(m: Model, down=frozenset(), catalog: dict | None = None) -> dict:
     """``{available, resident, why}``: can the runner get this model onto the GPU, is it there.
     What the config alone rules out comes first, so the fake models meet it too. ``down``: Ollama
-    roots the caller already found not answering, not asked again. ``catalog``: a dict the caller
-    keeps for one pass, so each server other than Ollama is asked for its /models once (_catalog)."""
+    roots the caller already found not answering, not asked again; a set the caller keeps for one
+    pass learns each one found so, as ``catalog`` does: a wb remote box asleep cost each status
+    call its 2.5 s timeout, per model, and wb models took 31 s (#705). ``catalog``: a dict the
+    caller keeps for one pass, so each server other than Ollama is asked for its /models once
+    (_catalog)."""
     if small := window_too_small(m.config):
         return _no(small_window_why(small))
     if m.config.get("tool_call") is False:  # the router used to hand it tasks (the 2026-11-16 audit)
@@ -871,7 +878,10 @@ def status(m: Model, down=frozenset(), catalog: dict | None = None) -> dict:
         return {"available": True, "resident": True, "why": "fake"}
     if m.engine == "ollama":
         tags = None if m.root in down else _get(f"{m.root}/api/tags")
+        _IDS[(m.root, None)] = (time.monotonic(), tags)  # identity's read too: one ask a pass
         if tags is None:
+            if isinstance(down, set):
+                down.add(m.root)
             return _no("ollama is not answering")
         row = _tag_row(m.name, tags)
         if row is None:
@@ -973,8 +983,66 @@ def weights(m: Model) -> int:
         if row and not _cloud_row(row):
             return int(row.get("size") or 0)
     if m.engine != "ollama" and not _fake():
-        return server_facts(m.root, m.name, m.api_key)["weights"] or 0
+        return server_facts(m.root, m.name, m.api_key)["weights"] or start_file(m)
     return 0
+
+
+def start_file(m: Model) -> int:
+    """Bytes of the weights file models.json's `start` command serves (`-m`/`--model <file>`,
+    as llama-server takes it), when it is a file here; else 0. vLLM's /v1/models has no size,
+    and llama-swap or a router-mode llama-server none for a model not loaded: every weight was 0,
+    so the router took the config's order and called it the largest model (#704)."""
+    try:
+        argv = shlex.split(m.start or "")
+    except ValueError:
+        return 0
+    for i, arg in enumerate(argv):
+        path = argv[i + 1] if arg in ("-m", "--model") and i + 1 < len(argv) else \
+            arg.partition("=")[2] if arg.startswith("--model=") else ""
+        if path and os.path.isfile(full := os.path.expanduser(path)):
+            return os.path.getsize(full)
+    return 0
+
+
+# A parameter count in a model's name (70b, 8x7B, 1.5B), not an active one (a3b) or part of a
+# word; a lone count as bytes at one a parameter (an 8-bit quantization's), a guess (#704)
+PARAMS = re.compile(r"(?<![A-Za-z0-9.])(?:(\d+)x)?(\d+(?:\.\d+)?)[bB](?![A-Za-z0-9])")
+
+
+def guessed_weights(m: Model) -> int:
+    """Bytes of weights guessed from the parameter count in ``m``'s name (models.PARAMS), for
+    ordering models whose server says no size; 0 when the name gives none. Never a fit: only
+    weights() is measured."""
+    counts = [float(n) * (int(e) if e else 1) for e, n in PARAMS.findall(f"{m.name} {m.label}")]
+    return int(max(counts) * 1e9) if counts else 0
+
+
+_IDS: dict = {}  # (root, name) -> (monotonic time, identity): asked once per FACTS_TTL
+
+
+def identity(m: Model | None) -> str | None:
+    """Which weights are behind the id now: Ollama's digest for the tag (`ollama:<digest>`), else
+    the bytes a server reports (`bytes:<n>`); None when nothing says. Recorded in each task and
+    its results row: an id is an alias, and weights swapped under it (another GGUF behind
+    llama-swap, a re-pulled moving tag) kept the old model's record, slice and knobs (#726)."""
+    if m is None or m.cloud or _fake():
+        return None
+    key = (m.root, m.name)
+    if (hit := _IDS.get(key)) and time.monotonic() - hit[0] < FACTS_TTL:
+        return hit[1]
+    if m.engine == "ollama":
+        # one tags read a root per TTL, kept as a (root, None) entry: a wb remote box asleep was
+        # asked again for each of its models, into a 2.5 s timeout each (#705 and #726, merged)
+        tags = _IDS.get((m.root, None))
+        if not tags or time.monotonic() - tags[0] >= FACTS_TTL:
+            _IDS[(m.root, None)] = tags = (time.monotonic(), _get(f"{m.root}/api/tags"))
+        row = _tag_row(m.name, tags[1] or {})
+        got = f"ollama:{row['digest'][:16]}" if row and isinstance(row.get("digest"), str) and row["digest"] else None
+    else:
+        n = server_facts(m.root, m.name, m.api_key)["weights"]
+        got = f"bytes:{n}" if n else None
+    _IDS[key] = (time.monotonic(), got)  # a server down is asked again only after the TTL
+    return got
 
 
 # What a server other than Ollama says about a model: only Ollama's API was read, so on any other
@@ -1076,8 +1144,10 @@ def freed(m: Model, keep=()) -> bool:
         for o in discover().values()))
 
 
-# Prometheus gauges of requests being answered: llama-server's (--metrics), vLLM's
-BUSY_GAUGES = ("llamacpp:requests_processing", "vllm:num_requests_running")
+# Prometheus gauges of requests being answered or waiting: llama-server's (--metrics), vLLM's,
+# SGLang's (--enable-metrics) and TGI's; SGLang and TGI read as idle and were stopped mid-reply (#715)
+BUSY_GAUGES = ("llamacpp:requests_processing", "vllm:num_requests_running", "sglang:num_running_reqs",
+               "sglang:num_queue_reqs", "tgi_batch_current_size", "tgi_queue_size")
 
 
 def _server_idle(m: Model) -> bool:
@@ -1138,22 +1208,35 @@ def make_resident(m: Model, say=print, keep=(), warn=None) -> float:
         # first and failed after (the 2026-11-16 audit): fail before freeing anything
         raise RuntimeError(f"{m.id} can't run: {st['why']}"
                            + (f": {fix}" if (fix := remedy(m, st)) else ""))
-    if m.engine == "server" and (key := lmstudio_unloaded(m)):
+    lms = _lmstudio_of(m, _lmstudio_rows(m.root, m.api_key)) if m.engine == "server" else None
+    short = _lmstudio_short(m, lms[1]) if lms else []
+    if lms and lms[0] and (not lms[1] or short):
         # LM Studio's just-in-time loading lists every downloaded model as served, so nothing
         # was loaded, and OpenCode's first request loaded it with LM Studio's default window
         # (often 4K): the prompt was refused and round 1 failed as "opencode exited 1" (#335,
-        # the audit of 1.4). Load it here with the window OpenCode is told.
+        # the audit of 1.4). Load it here with the window OpenCode is told. One loaded with a
+        # smaller window (the UI's 4K) is loaded again: short_window failed the task (#645).
         t0 = time.time()
         if not m.remote and not _room_beside(m):
             free_gpu(keep={m.id, *keep}, say=say, warn=warn, of=m)
-        _lmstudio_load(m, key, say)
+        for instance in short:
+            say(f"unloading {instance} from LM Studio: loaded with a smaller window than OpenCode is told")
+            _lmstudio_unload(m, instance)
+        _lmstudio_load(m, lms[0], say)
         return time.time() - t0
-    if st["resident"] and (m.remote or not _others_resident(m, keep) or _room_beside(m)):
+    respread = st["resident"] and _respread(m, keep)
+    if st["resident"] and not respread and (m.remote or not _others_resident(m, keep) or _room_beside(m)):
         return 0.0
     t0 = time.time()
     if not m.remote and not _room_beside(m):
         free_gpu(keep={m.id, *keep}, say=say, warn=warn, of=m)
     if m.engine == "ollama":
+        if respread:
+            # Ollama never re-places a loaded runner: a generate with the same options reuses
+            # it, split as it was (#703). Unloaded, it is placed again into what was freed
+            say(f"reloading {m.name}: it was partly on the CPU")
+            _unload(m)
+            _RESPREAD.add(respread)
         say(f"loading {m.name} into ollama")
         _post(f"{m.root}/api/generate", {"model": m.name, "prompt": "", "keep_alive": "30m"},
               timeout=START_TIMEOUT)
@@ -1191,22 +1274,70 @@ def make_resident(m: Model, say=print, keep=(), warn=None) -> float:
     return time.time() - t0
 
 
+def _lmstudio_rows(root: str, key: str = "") -> list[dict] | None:
+    """LM Studio's /api/v1/models rows, or None when the server isn't LM Studio (or is down)."""
+    lms = _ask(f"{root}/api/v1/models", key)
+    rows = lms.get("models") if isinstance(lms, dict) else None
+    return [x for x in rows if isinstance(x, dict)] if isinstance(rows, list) else None
+
+
+def _instances(x: dict) -> list[dict]:
+    return [i for i in x.get("loaded_instances") or [] if isinstance(i, dict) and i.get("id")]
+
+
+def _lmstudio_of(m: Model, rows: list[dict] | None) -> tuple[str, list[dict]] | None:
+    """m's LM Studio key and its loaded instances, when LM Studio lists it; else None. An
+    instance named m.name is m's (an alias), else every instance of the model whose key m is."""
+    for x in rows or []:
+        if hit := [i for i in _instances(x) if i["id"] == m.name]:
+            return str(x.get("key") or m.name), hit
+        if _serves(str(x.get("key") or ""), m.name):
+            return str(x.get("key") or m.name), _instances(x)
+    return None
+
+
 def lmstudio_unloaded(m: Model) -> str | None:
     """The LM Studio key of ``m`` when LM Studio lists it but has no instance of it loaded (it
     would load on the first request, with its default window: #335); else None."""
     if _fake():
         return None
-    lms = _ask(f"{m.root}/api/v1/models", m.api_key)
-    rows = lms.get("models") if isinstance(lms, dict) else None
-    for x in rows if isinstance(rows, list) else []:
-        if not isinstance(x, dict):
+    of = _lmstudio_of(m, _lmstudio_rows(m.root, m.api_key))
+    return of[0] if of and not of[1] and of[0] else None
+
+
+def _lmstudio_short(m: Model, instances: list[dict]) -> list[str]:
+    """m's instances loaded with a smaller window than limit.context (the UI's 4K, say)."""
+    said = (m.config.get("limit") or {}).get("context")
+    return [i["id"] for i in instances if isinstance(said, int)
+            and 0 < (_pos((i.get("config") or {}).get("context_length")) or said) < said]
+
+
+def _lmstudio_extra(local: list[Model], ours: list[Model], held: set[str]) -> tuple[list, set]:
+    """([(server, instance id)], LM Studio's servers): each instance LM Studio has loaded that
+    isn't one of ``ours`` (the task's model, those beside it) or kept (keep_loaded). LM Studio
+    unloads by itself only what it loaded just in time, never what /api/v1/models/load loaded:
+    each switch between two of its models stacked one more in VRAM (#645, the audit of main)."""
+    out, seen, lms = [], set(), set()
+    for o in local:
+        if o.engine != "server" or o.server in seen:
             continue
-        loaded = [i for i in x.get("loaded_instances") or [] if isinstance(i, dict)]
-        if any(i.get("id") == m.name for i in loaded):
-            return None
-        if _serves(str(x.get("key") or ""), m.name):
-            return None if loaded else str(x["key"])
-    return None
+        seen.add(o.server)
+        rows = _lmstudio_rows(o.root, o.api_key)
+        if rows is None:
+            continue
+        lms.add(o.server)
+        mine = {i["id"] for k in local if k.server == o.server and (k in ours or k.id in held)
+                for i in (_lmstudio_of(k, rows) or ("", []))[1]}
+        out += [(o, i["id"]) for x in rows for i in _instances(x)
+                if i["id"] not in mine and i["id"] not in held]
+    return out, lms
+
+
+def _lmstudio_unload(m: Model, instance: str) -> None:
+    try:
+        _post(f"{m.root}/api/v1/models/unload", {"instance_id": instance}, timeout=120)
+    except Exception:
+        pass
 
 
 def _lmstudio_load(m: Model, key: str, say) -> None:
@@ -1233,6 +1364,43 @@ def _placement(m: Model, warn) -> None:
                 warn(f"{m.name} is {cpu}% on the CPU: expect it to be slow (something else may "
                      "hold GPU memory, or the model and its context don't fit the GPU)")
             return
+
+
+# (root, name, size) of each model make_resident reloaded to put it all on the GPU: one that
+# came back split again isn't reloaded at every round (#703)
+_RESPREAD: set = set()
+
+
+def _respread(m: Model, keep=()) -> tuple | None:
+    """When ``m`` is a local Ollama model loaded partly on the CPU that would fit all in VRAM
+    once the GPU is freed around it (its size beside the models kept, under a known budget, no
+    server wb can't stop holding memory), its (root, name, size), which make_resident reloads
+    it under; else None. Loaded while something else held the VRAM (a server whose stop returns
+    before its memory is freed, another tool's model), it crawled at CPU speed for the whole task
+    beside an empty GPU, since a resident model was taken as placed (#703)."""
+    if m.engine != "ollama" or m.remote or _fake():
+        return None
+    budget = gpu_budget(m.root)
+    if not budget:
+        return None
+    local = [o for o in discover().values() if not o.remote]
+    if any(o.engine == "server" and not o.stop and status(o)["resident"] for o in local):
+        return None  # its memory stays taken whatever is freed
+    held, seen, mine, kept = keep_loaded(), {}, None, 0
+    ours = [o for o in local if o.engine == "ollama" and (o.id in keep or o.id in held)]
+    for key, root in _roots(o for o in local if o.engine == "ollama").items():
+        if apart(m.root, root, seen):
+            continue
+        for x in (_get(f"{root}/api/ps") or {}).get("models", []):
+            name = x.get("name")
+            if key == m.server and _matches(m.name, {name}):
+                mine = x
+            elif any(o.server == key and _matches(o.name, {name}) for o in ours) or _kept_name(name or "", held):
+                kept += x.get("size") or 0
+    if not mine or not mine.get("size") or (mine.get("size_vram") or 0) >= mine["size"]:
+        return None
+    tried = (m.root, mine.get("name"), mine["size"])
+    return tried if tried not in _RESPREAD and mine["size"] + kept <= budget else None
 
 
 def _unload(m: Model) -> None:
@@ -1278,12 +1446,22 @@ def free_gpu(keep=(), say=print, warn=None, of: Model | None = None) -> None:
     if _fake():
         return
     seen: dict = {}
+    stopped = False
     held = keep_loaded()
     local = [o for o in discover().values() if not o.remote]  # another host's GPU isn't ours to free
     kept = [o for o in local if o.id in keep or o.id in held]
+    # LM Studio loads and unloads one model at a time: every instance not kept is unloaded and
+    # the server left running (#645); its server is then done
+    extra, lmstudio = _lmstudio_extra(local, kept, held)
+    for server, instance in extra:
+        deadline = time.monotonic() + INFLIGHT_WAIT
+        while not _server_idle(server) and time.monotonic() < deadline:  # never cut off a reply
+            time.sleep(5)
+        say(f"unloading {instance} from LM Studio")
+        _lmstudio_unload(server, instance)
     # a server swaps its own models; one serving another model on the kept one's port is stopped
-    done = {o.server for o in kept if o.engine == "server"
-            and (not _contended(o) or status(o)["resident"])}
+    done = lmstudio | {o.server for o in kept if o.engine == "server"
+                       and (not _contended(o) or status(o)["resident"])}
     for other in local:
         if other.engine != "server" or other.server in done or not status(other)["resident"]:
             continue
@@ -1297,13 +1475,20 @@ def free_gpu(keep=(), say=print, warn=None, of: Model | None = None) -> None:
             time.sleep(5)
         say(f"stopping {other.id}")
         try:
-            r = subprocess.run(other.stop, shell=True, capture_output=True, text=True, timeout=300)
+            r = subprocess.run(other.stop, shell=True, capture_output=True, text=True,
+                               encoding="utf-8", errors="replace", timeout=300)  # any bytes (#664)
         except subprocess.TimeoutExpired:
             warn(f"{other.id}'s stop command ran past 5 min; it may still hold GPU memory")
             continue
         if r.returncode:
             warn(f"{other.id}'s stop command failed (exit {r.returncode}): "
                  f"{(r.stderr or r.stdout).strip()[-200:]}")
+        else:
+            stopped = True
+    if stopped:
+        # a stop (pkill llama-server) returns before the server's VRAM is freed: Ollama loading
+        # at once found it taken and put part of the model on the CPU (#703)
+        released(STOP_SETTLE)
     kept_ollama = [o for o in kept if o.engine == "ollama"]
     doomed = {root: [name for name in _ollama_loaded(root)  # every model Ollama has loaded,
                      if not any(o.server == key and _matches(o.name, {name}) for o in kept_ollama)
@@ -1318,6 +1503,26 @@ def free_gpu(keep=(), say=print, warn=None, of: Model | None = None) -> None:
                 _post(f"{root}/api/generate", {"model": name, "keep_alive": 0}, timeout=120)
             except Exception:
                 pass
+
+
+STOP_SETTLE = 30  # seconds free_gpu waits at most for a stopped server's VRAM to be released
+
+
+def released(timeout: float) -> bool:
+    """Wait, up to ``timeout`` seconds, until the GPUs' used VRAM stops falling (less than 64 MiB
+    a second): memory let go returns after the call that let it go. True once it has; at once
+    where no card says its use (a Mac, a GPU named from Windows)."""
+    deadline, last = time.time() + timeout, None
+    while time.time() < deadline:
+        cards = [g["vram_used"] for g in hardware.gpus(windows=False) if g.get("vram_used") is not None]
+        if not cards:
+            return True
+        used = sum(cards)
+        if last is not None and last - used < 64 * 2 ** 20:
+            return True
+        last = used
+        time.sleep(1)
+    return False
 
 
 # A model free_gpu would unload may be answering someone this account's lease doesn't know:
@@ -1341,13 +1546,32 @@ def _stamps(doomed: dict) -> dict:
             if x.get("name") in names and x.get("expires_at")}
 
 
+def slept() -> float:
+    """Seconds this machine has spent suspended since it booted: Linux's CLOCK_BOOTTIME less
+    CLOCK_MONOTONIC, macOS's CLOCK_MONOTONIC_RAW less CLOCK_UPTIME_RAW (which stops in sleep);
+    0 where neither pair exists."""
+    for with_sleep, without in (("CLOCK_BOOTTIME", "CLOCK_MONOTONIC"), ("CLOCK_MONOTONIC_RAW", "CLOCK_UPTIME_RAW")):
+        a, b = getattr(time, with_sleep, None), getattr(time, without, None)
+        if a is not None and b is not None and (hardware.system() == "macos") == (without == "CLOCK_UPTIME_RAW"):
+            try:
+                return max(0.0, time.clock_gettime(a) - time.clock_gettime(b))
+            except OSError:
+                return 0.0
+    return 0.0
+
+
 def _past(stamp: str) -> bool:
-    """Whether an /api/ps expires_at has gone by (a request running past the keep-alive)."""
+    """Whether an /api/ps expires_at has gone by (a request running past the keep-alive). Ollama
+    sets it from the wall clock but times the unload on Go's monotonic clock, which stops in a
+    suspend: after a lid closed and opened, an idle model's stamp is past while its timer still
+    runs, and was read as answering someone, the next task waiting behind a warning for nothing
+    (#716). So a stamp is past only by more than the machine has slept (slept: 0 on one that
+    never sleeps, a server, where #378's shared Ollamas run); a request on it still moves it."""
     try:  # Ollama writes nanoseconds; fromisoformat before 3.12 reads at most six digits
         when = datetime.fromisoformat(re.sub(r"(\.\d{6})\d+", r"\1", stamp.replace("Z", "+00:00")))
     except (ValueError, TypeError):
         return False
-    return when.tzinfo is not None and when.timestamp() < time.time() - 2
+    return when.tzinfo is not None and when.timestamp() < time.time() - 2 - slept()
 
 
 def _in_use(doomed: dict, watch: float | None = None) -> set:
@@ -1408,6 +1632,8 @@ def _others_resident(m: Model, keep=()) -> bool:
     held, seen = keep_loaded(), {}
     local = [o for o in discover().values() if not o.remote]
     ours = [m, *(o for o in local if o.id in keep or o.id in held)]
+    if _lmstudio_extra(local, ours, held)[0]:  # another of LM Studio's models, loaded (#645)
+        return True
     if any(o.engine == "server" and o.stop and o.server not in {x.server for x in ours}
            and status(o)["resident"] for o in local):
         return True
@@ -1524,7 +1750,7 @@ def unified_default(ram: int) -> int:
 
 
 def system_reserve(g: dict, root: str | None = None) -> int:
-    """Bytes of a RAM-sharing NVIDIA GPU's memory (hardware.gpus: a Jetson's, a DGX Spark's) the
+    """Bytes of a RAM-sharing GPU's memory (hardware.gpus: a Jetson's, a DGX Spark's, an APU's) the
     system keeps: what was in use when hardware read it, less the models this machine's Ollama
     (the one at ``root``, else ollama_root_here) has loaded (theirs is the GPU's), and never under
     SYSTEM_FLOOR. All of MemTotal passed a 6.5 GB model as fitting an 8 GB Orin Nano whose desktop
@@ -1534,7 +1760,8 @@ def system_reserve(g: dict, root: str | None = None) -> int:
         return SYSTEM_FLOOR
     loaded = sum(int(x.get("size") or 0) for x in
                  (_get(f"{root or ollama_root_here()}/api/ps", timeout=1.0) or {}).get("models") or [])
-    return max(SYSTEM_FLOOR, (g.get("vram") or 0) - g["ram_free"] - loaded)
+    # an APU's `ram` is MemTotal (its vram the carve-out plus the GTT); NVIDIA's vram is MemTotal
+    return max(SYSTEM_FLOOR, (g.get("ram") or g.get("vram") or 0) - g["ram_free"] - loaded)
 
 
 def budget_devices(root: str | None = None) -> tuple[int | None, list[dict], str]:
@@ -1550,7 +1777,8 @@ def budget_devices(root: str | None = None) -> tuple[int | None, list[dict], str
     an RX 7600S's 8). With none known, as before. Only the devices Ollama's environment lets it
     see count (hardware.visible): the one serving ``root`` when several run here, one per GPU
     (hardware.ollama_env_at: #460). Apple Silicon: iogpu.wired_limit_mb, else macOS's default
-    share; an APU: its carve-out and GTT, as hardware.gpus found; an NVIDIA GPU that shares the
+    share (an Intel Mac's adapters none: #711); an APU: its carve-out and GTT, as hardware.gpus found,
+    at most its carve-out and the RAM the system leaves (#712); an NVIDIA GPU that shares the
     RAM (a DGX Spark, a Jetson): the RAM less what the system uses (system_reserve, #524)."""
     hand = _overrides().get("gpu_gb")
     if hand is not None:
@@ -1563,6 +1791,11 @@ def budget_devices(root: str | None = None) -> tuple[int | None, list[dict], str
         gb = os.environ.get("WB_FAKE_GPU_GB")  # tests: a GPU of this size
         return (int(float(gb) * 1e9), [], "WB_FAKE_GPU_GB") if gb else (None, [], "")
     devs = hardware.gpus(windows=False)  # WSL's Windows names carry no VRAM: skip PowerShell
+    if hardware.system() == "macos":
+        # an Intel Mac's Radeon or Intel adapter runs no Ollama model: Ollama's Intel Mac build
+        # runs on the CPU in RAM, so a 4 GB Radeon Pro made every model over 3.9 GB "too big"
+        # beside 32 GB of RAM (#711); gpu_gb still sets one (llama.cpp's Metal on AMD)
+        devs = [g for g in devs if g.get("unified")]
     notes = []
     if any((g.get("driver") or "").split(" ")[0] in ("nvidia", "amdgpu") for g in devs):
         devs, notes = hardware.visible(devs, hardware.ollama_env_at(root))
@@ -1572,13 +1805,21 @@ def budget_devices(root: str | None = None) -> tuple[int | None, list[dict], str
     for g in devs:
         if g.get("unified") and not g.get("memory"):  # Apple Silicon
             usable = g.get("wired_limit") or unified_default(g.get("vram") or 0)
-            how = "iogpu.wired_limit_mb" if g.get("wired_limit") else "macOS's default share of the RAM"
+            how = (g.get("wired_key") or "iogpu.wired_limit_mb") if g.get("wired_limit") \
+                else "macOS's default share of the RAM"
         elif g.get("unified") and (g.get("driver") or "").startswith("nvidia"):
             keep = system_reserve(g, root)
             usable = max(0, (g.get("vram") or 0) - keep)
             how = f"{g['memory']}, less {hardware.size(keep)} the system uses"
         elif g.get("unified"):
             usable, how = g.get("vram") or 0, g["memory"]
+            if g.get("ram") and g.get("ram_free") is not None:
+                # an APU: its GTT raised toward all of RAM (a 128 GB Strix Halo at 124 GiB) left
+                # nothing for the OS, and a shared load past the RAM met the OOM killer (#712)
+                keep = system_reserve(g, root)
+                room = max(0, (g.get("carve") or 0) + g["ram"] - keep)
+                if room < usable:
+                    usable, how = room, f"{g['memory']}, less {hardware.size(keep)} the system uses"
         else:
             usable, how = g.get("vram") or 0, "VRAM"
             if usable < IGPU_UNDER:
@@ -1969,7 +2210,8 @@ def _started(pid: int) -> str | None:
         pass
     try:
         r = subprocess.run(["ps", "-o", "lstart=", "-p", str(pid)], capture_output=True, text=True,
-                           timeout=5, env={**os.environ, "LC_ALL": "C"})
+                           encoding="utf-8", errors="replace", timeout=5,
+                           env={**os.environ, "LC_ALL": "C"})
     except (OSError, subprocess.TimeoutExpired):
         return None
     return (" ".join(r.stdout.split()) or None) if r.returncode == 0 else None
@@ -1992,7 +2234,8 @@ def runs(pid: int, *words: str) -> bool:
         # -ww: BSD ps cuts the column at 79 characters, and a framework Python's path alone is longer
         try:
             toks = subprocess.run(["ps", "-ww", "-o", "command=", "-p", str(pid)],
-                                  capture_output=True, text=True, timeout=5).stdout.split()
+                                  capture_output=True, text=True, encoding="utf-8",
+                                  errors="replace", timeout=5).stdout.split()
         except (OSError, subprocess.SubprocessError):
             return True
     n = len(words)
@@ -2141,14 +2384,43 @@ def add_server_provider(pid: str, base: str) -> bool:
 
 def remote_pid(host: str) -> str:
     """The provider id wb remote gives another machine's Ollama: ollama-<host>, in id characters."""
-    return "ollama-" + (re.sub(r"[^a-z0-9]+", "-", host.lower()).strip("-") or "host")
+    return "ollama-" + (re.sub(r"[^a-z0-9]+", "-", remote_host(host)).strip("-") or "host")
+
+
+def remote_host(host: str) -> str:
+    """A wb remote host as one spelling: lower case, an IPv6 literal without its brackets."""
+    host = host.strip().lower()
+    return host[1:-1] if host.startswith("[") and host.endswith("]") else host
+
+
+def remote_root(host: str, port: int) -> str:
+    """http://<host>:<port> for a wb remote host, an IPv6 literal bracketed (its zone as %25):
+    `http://::1:11434/v1` was written as given, which the probe reached and provider discovery
+    couldn't parse, so the models were never found (#707). Raises RuntimeError for a host no URL
+    can carry."""
+    host = remote_host(host)
+    try:
+        literal = ipaddress.ip_address(host.split("%", 1)[0]).version == 6
+    except ValueError:
+        literal = False
+    root = f"http://[{host.replace('%', '%25')}]:{port}" if literal else f"http://{host}:{port}"
+    try:  # read back as discovery reads a provider's baseURL
+        ok = bool(re.fullmatch(r"[\w.:%-]+", host)) and remote_host(urlparse(f"{root}/v1").hostname or "").split("%", 1)[0] == host.split("%", 1)[0] \
+            and urlparse(root).port == port
+    except ValueError:
+        ok = False
+    if not ok:
+        raise RuntimeError(f"{host!r} with port {port} makes no URL wb can use: give a host name, "
+                           "an IPv4 address or an IPv6 one")
+    return root
 
 
 def add_remote(host: str, port: int = OLLAMA_PORT) -> tuple[str, str, list[str]]:
     """Give OpenCode a provider for the Ollama on another machine (a gaming PC on the LAN or
     tailnet), marked local in models.json: (its provider id, its root, the tool-capable models it
     has pulled, cloud models left out). Raises RuntimeError when it doesn't answer (#114)."""
-    root = f"http://{host}:{port}"
+    root = remote_root(host, port)
+    host = remote_host(host)
     if not ollama_answers(root):
         raise RuntimeError(f"no Ollama answers at {root}: on {host}, have Ollama listen on the "
                            "network (OLLAMA_HOST=0.0.0.0, then restart it), and check the port")
@@ -2183,7 +2455,7 @@ def add_remote(host: str, port: int = OLLAMA_PORT) -> tuple[str, str, list[str]]
 def remove_remote(host: str) -> tuple[str, list[str]]:
     """Undo add_remote: its models out of OpenCode's config with their models.json entries, the
     provider and its local mark gone. (provider id, the models removed)."""
-    pid = remote_pid(host)
+    host, pid = remote_host(host), remote_pid(host)
     cfg = read_config()
     key = "provider" if pid in (cfg.get("provider") or {}) else "providers"
     prov = (cfg.get(key) or {}).get(pid)
@@ -2203,6 +2475,9 @@ def remove_remote(host: str) -> tuple[str, list[str]]:
     if str(cfg.get("model") or "").startswith(pid + "/"):
         raise RuntimeError(f"{cfg['model']} is OpenCode's default model; wb models --set-default "
                            "picks another first")
+    if str(cfg.get("small_model") or "").startswith(pid + "/"):  # it was left naming it (#708)
+        raise RuntimeError(f"{cfg['small_model']} is OpenCode's small_model; set small_model in "
+                           f"{opencode_config_path()} to another model (or remove it) first")
     names = sorted(prov.get("models") or {})
     change = f'under "{key}" remove "{pid}"'
     with own_config(change) as (target, own):
@@ -2225,19 +2500,63 @@ SERVER_COMMANDS = ("ollama", "lms", "llama-server", "llama-swap", "vllm", "sglan
                    "local-ai", "mlx_lm.server", "jan")
 
 
+# WSL2's default NAT networking forwards Windows to WSL's localhost but not the reverse, so Ollama
+# for Windows or LM Studio there was never found on 127.0.0.1: first run said no server answers,
+# and Claude proposed installing a second one inside WSL (#663). Mirrored networking reaches it
+# on 127.0.0.1; else only a server listening beyond Windows' loopback, at the Windows host.
+WSL_NAT = ("on WSL2, a server running on Windows listens on Windows' own 127.0.0.1, which WSL's "
+           "default NAT networking can't reach: set networkingMode=mirrored under [wsl2] in "
+           "%UserProfile%\\.wslconfig (then wsl --shutdown), or have it listen on 0.0.0.0 "
+           "(Ollama: OLLAMA_HOST=0.0.0.0) with a firewall rule, then wb remote <Windows' address>")
+
+
+ROUTE, RESOLV = Path("/proc/net/route"), Path("/etc/resolv.conf")
+
+
+def windows_host() -> str | None:
+    """The Windows host as WSL2's NAT networking reaches it (the default gateway in
+    /proc/net/route, else the generated resolv.conf's nameserver), or None off WSL."""
+    if hardware.system() != "wsl":
+        return None
+    with contextlib.suppress(OSError, ValueError, struct.error):
+        for row in ROUTE.read_text().splitlines()[1:]:
+            f = row.split()
+            if len(f) > 2 and f[1] == "00000000" and int(f[2], 16):
+                return socket.inet_ntoa(struct.pack("<I", int(f[2], 16)))
+    with contextlib.suppress(OSError):
+        for row in RESOLV.read_text().splitlines():
+            f = row.split()
+            if len(f) > 1 and f[0] == "nameserver" and not f[1].startswith("127."):
+                return f[1]
+    return None
+
+
+def _models_at(root: str, timeout: float) -> list[str] | None:
+    body = _get(f"{root}/v1/models", timeout=timeout)
+    if isinstance(body, dict) and isinstance(body.get("data"), list):
+        return [str(x.get("id")) for x in body["data"] if isinstance(x, dict)]
+    return None
+
+
 def servers_here() -> tuple[list[str], list[dict]]:
     """The model servers' commands on PATH, and the servers answering on their default ports here:
-    {"root", "usually", "models"} (the ids an OpenAI-compatible /v1/models lists)."""
+    {"root", "usually", "models"} (the ids an OpenAI-compatible /v1/models lists), and on WSL2
+    those at the Windows host too, with "windows": its address (#663)."""
     on_path = [c for c in SERVER_COMMANDS if shutil.which(c)]
     if _fake():
         return on_path, []
     answering = []
     for port, usually in SERVER_PORTS:
         root = f"http://127.0.0.1:{port}"
-        body = _get(f"{root}/v1/models", timeout=1)
-        if isinstance(body, dict) and isinstance(body.get("data"), list):
-            answering.append({"root": root, "usually": usually,
-                              "models": [str(x.get("id")) for x in body["data"] if isinstance(x, dict)]})
+        if (names := _models_at(root, 1)) is not None:
+            answering.append({"root": root, "usually": usually, "models": names})
+    if (win := windows_host()) and not answering:  # mirrored networking found them above
+        from concurrent.futures import ThreadPoolExecutor
+        roots = [(f"http://{win}:{port}", usually) for port, usually in SERVER_PORTS]
+        with ThreadPoolExecutor(len(roots)) as pool:  # a firewall that drops: one wait, not six
+            found = list(pool.map(lambda r: _models_at(r[0], 1), roots))
+        answering += [{"root": root, "usually": usually, "models": names, "windows": win}
+                      for (root, usually), names in zip(roots, found) if names is not None]
     return on_path, answering
 
 

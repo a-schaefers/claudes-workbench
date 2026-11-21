@@ -429,11 +429,39 @@ def _open_update(change) -> dict:
 
 
 def open_work() -> dict:
-    """What still waits: {messages, asks}, each {id: row}."""
+    """What still waits: {messages, asks}, each {id: row}. A message past MESSAGE_EXPIRE leaves
+    it here (`_retire`)."""
     cur = store.read_json(_open_path(), None)
-    if isinstance(cur, dict) and isinstance(cur.get("messages"), dict) and isinstance(cur.get("asks"), dict):
-        return cur
-    return _open_update(lambda w: None)
+    if not (isinstance(cur, dict) and isinstance(cur.get("messages"), dict) and isinstance(cur.get("asks"), dict)):
+        cur = _open_update(lambda w: None)
+    now = store.now()
+    if any(isinstance(r, dict) and _expired(r, now) for r in cur["messages"].values()):
+        cur = _open_update(lambda w: _retire(w, store.now()))
+    return cur
+
+
+def _retire(work: dict, now: float) -> None:
+    """Under open.lock: take each message past MESSAGE_EXPIRE out of the index, with a receipt
+    `{id, ts, by: "wb", how: "expired"}` (thread shows it expired, not read). Only an ack popped
+    one, and an expired message is never acked: every new session claimed it again and toasted,
+    `wb chat pending` listed it, and gc kept its uploads, for good (#741)."""
+    for mid in [k for k, r in work["messages"].items() if isinstance(r, dict) and _expired(r, now)]:
+        store.append_jsonl(chat_dir() / "receipts.jsonl",
+                           {"id": mid, "ts": now, "by": "wb", "how": "expired"})
+        work["messages"].pop(mid, None)
+
+
+def _expired_receipt(msg_id: str) -> bool:
+    """Whether the message was retired as expired (`_retire`): read only when a claim names a
+    message the index no longer holds, so a mod that read the index before the retiring still
+    gets the refusal, not the message (#741)."""
+    try:
+        data = (chat_dir() / "receipts.jsonl").read_bytes()
+    except FileNotFoundError:
+        return False
+    key = msg_id.encode()
+    return any(r.get("id") == msg_id and r.get("how") == "expired" for line in data.splitlines()
+               if key in line for r in store._rows(line) if isinstance(r, dict))
 
 
 THREAD_BYTES = 4 << 20  # the last 200 messages fit with room to spare (a reply is a few KB)
@@ -447,9 +475,14 @@ def thread(limit: int = 200) -> list[dict]:
     rows = store.read_jsonl_tail(chat_dir() / "messages.jsonl", THREAD_BYTES)[-limit:]
     receipts = {r["id"]: r for r in store.read_jsonl_tail(chat_dir() / "receipts.jsonl", THREAD_BYTES)}
     now = store.now()
-    return [{**r, "received": receipts.get(r["id"]),
-             **({"expired": True} if r["id"] not in receipts and _expired(r, now) else {})}
-            if r["from"] == "user" else r for r in rows]
+    out = []
+    for r in rows:
+        if r["from"] == "user":
+            got = receipts.get(r["id"])
+            gone = got.get("how") == "expired" if got else _expired(r, now)  # retired (#741)
+            r = {**r, "received": None if gone else got, **({"expired": True} if gone else {})}
+        out.append(r)
+    return out
 
 
 # Work still waiting is kept apart from what the page shows: an open question vanished from the
@@ -468,15 +501,18 @@ def _expired(row: dict, now: float) -> bool:
 
 def expired(msg_id: str) -> bool:
     """Whether the user's unread message ``msg_id`` is too old to pass to Claude."""
-    row = open_work()["messages"].get(msg_id)
-    return bool(row) and _expired(row, store.now())
+    row = open_work()["messages"].get(msg_id)  # retires what expired (#741)
+    return _expired(row, store.now()) if row else _expired_receipt(msg_id)
 
 
 def pending() -> list[dict]:
-    """Every message of the user's without a receipt, however far back (open_work, #329)."""
-    now = store.now()
-    rows = sorted(open_work()["messages"].values(), key=lambda r: (r.get("ts", 0), r.get("id", "")))
-    return [{**r, "received": None, **({"expired": True} if _expired(r, now) else {})} for r in rows]
+    """Every message of the user's without a receipt, however far back (open_work, #329), and
+    still deliverable: an expired one is retired (#741)."""
+    # by time, ties in the order written (a stable sort over the file's order): two sends in one
+    # millisecond came back by their ids' random suffix, and CI's retry test failed by chance
+    # (seen 2026-11-21, merging the audit's fixes)
+    rows = sorted(open_work()["messages"].values(), key=lambda r: r.get("ts", 0))
+    return [{**r, "received": None} for r in rows]
 
 
 def snapshot() -> dict:
@@ -485,6 +521,24 @@ def snapshot() -> dict:
                                                  or {}).get("ts")},
             "savings": week_saved(), "uploads": upload_limits(), "build": build(), "expire": MESSAGE_EXPIRE,
             "now": store.now()}
+
+
+LATEST_BYTES = 1 << 20  # the messages' tail `latest` reads for Claude's last word
+
+
+def latest() -> dict:
+    """What a push shows, for the service worker (GET /api/latest): the newest open ask (a plan's
+    text left out: the notification says only that one is ready) and Claude's last message, in
+    the snapshot's shape. It fetched the whole /api/state, the thread and 20 asks with their
+    plans, up to a megabyte, within the time iOS gives a push handler (#755)."""
+    open_ = [a for a in asks() if a.get("answer") is None and not a.get("stale")]
+    ask = max(open_, key=lambda a: a.get("ts", 0), default=None)
+    if ask and ask.get("kind") == "plan":
+        ask = {k: v for k, v in ask.items() if k != "detail"}
+    rows = store.read_jsonl_tail(chat_dir() / "messages.jsonl", LATEST_BYTES)
+    last = next((r for r in reversed(rows) if r.get("from") == "claude"), None)
+    return {"now": store.now(), "asks": [ask] if ask else [], "messages": [last] if last else [],
+            "push": {"test": (store.read_json(chat_dir() / "push-test.json", None) or {}).get("ts")}}
 
 
 def week_saved() -> dict:
@@ -967,13 +1021,37 @@ def start(port: int) -> int:
     return proc.pid
 
 
+# What keeps the chat up: systemd's wb-chat.service on Linux, launchd's workbench.chat agent on
+# macOS (launchd/workbench.chat.plist). Only systemd was known: on a Mac `wb chat off` and the
+# port-taken error gave systemctl advice, and revive ignored the agent (#756).
+LAUNCHD_LABEL = "workbench.chat"
+
+
+def _macos() -> bool:
+    return sys.platform == "darwin"
+
+
+def service_hint(what: str) -> str:
+    """The command that does ``what`` ("stop", "status") to the chat's service on this OS."""
+    if _macos():
+        return {"stop": f"launchctl bootout gui/$(id -u)/{LAUNCHD_LABEL}",
+                "status": f"launchctl print gui/$(id -u)/{LAUNCHD_LABEL}"}[what]
+    return {"stop": "systemctl --user disable --now wb-chat", "status": "systemctl --user status wb-chat"}[what]
+
+
+def service_name() -> str:
+    return f"launchd's {LAUNCHD_LABEL}" if _macos() else "systemd's wb-chat"
+
+
 def _unit_keeps_it() -> bool:
-    """Whether wb-chat.service is enabled, so systemd brings the chat back itself."""
-    if not shutil.which("systemctl"):
+    """Whether wb-chat.service is enabled (Linux) or the workbench.chat agent is loaded (macOS),
+    so systemd or launchd brings the chat back itself."""
+    argv = (["launchctl", "print", f"gui/{os.getuid()}/{LAUNCHD_LABEL}"] if _macos()
+            else ["systemctl", "--user", "is-enabled", "--quiet", "wb-chat"])
+    if not shutil.which(argv[0]):
         return False
     try:
-        return subprocess.run(["systemctl", "--user", "is-enabled", "--quiet", "wb-chat"],
-                              capture_output=True, timeout=5).returncode == 0
+        return subprocess.run(argv, capture_output=True, timeout=5).returncode == 0
     except (OSError, subprocess.TimeoutExpired):
         return False
 
@@ -1139,7 +1217,11 @@ MB = 1 << 20
 UPLOAD_MB = 25            # chat.json `upload_mb`: one file at most this
 UPLOAD_MESSAGE_MB = 50    # chat.json `upload_message_mb`: a message's files together at most this
 UPLOAD_FILES = 10         # files one message may carry
-UPLOAD_NAME = 120         # characters of a saved file's name
+# UTF-8 bytes of a saved file's name: under eCryptfs's 143 (ext4 and APFS take 255). Cut by
+# characters, 120 CJK ones were 360 bytes, the rename failed ENAMETOOLONG, and the page retried
+# that 500 for good (#742)
+UPLOAD_NAME = 140
+FILE_CACHE = "private, max-age=31536000, immutable"  # GET /api/file/<id> (#754)
 UPLOAD_ID = re.compile(r"[A-Za-z0-9-]{8,64}")  # crypto.randomUUID(), or the page's fallback
 UPLOAD_TYPE = re.compile(r"[a-z0-9][a-z0-9.+-]*/[a-z0-9][a-z0-9.+-]*")
 SHOWN = {"image/png", "image/jpeg", "image/gif", "image/webp", "image/avif"}  # served as images
@@ -1179,15 +1261,26 @@ def upload_limits() -> dict:
 def upload_name(name: str) -> str:
     """The name a file is saved under. One that is a path (a `/` or `\\`), or `.`/`..`, is refused:
     no browser sends one. Otherwise unprintable characters become `_`, leading dots go (the
-    directory's own files start with one), and a long name keeps its extension."""
+    directory's own files start with one), and a long name keeps its extension, cut to
+    UPLOAD_NAME bytes of UTF-8, never inside a character (#742)."""
     if not name or any(c in name for c in "/\\\0") or name.strip() in (".", ".."):
         raise UploadError(400, "that file name can't be saved")
     clean = "".join(c if c.isprintable() else "_" for c in name).strip().lstrip(". ")
-    if len(clean) > UPLOAD_NAME:
+    if len(clean.encode()) > UPLOAD_NAME:
         stem, ext = os.path.splitext(clean)
-        ext = ext[:16]
-        clean = stem[:UPLOAD_NAME - len(ext)] + ext
+        ext = _cut(ext, 16)
+        clean = _cut(stem, UPLOAD_NAME - len(ext.encode())) + ext
     return clean or "file"
+
+
+def _cut(text: str, size: int) -> str:
+    """``text`` cut to at most ``size`` bytes of UTF-8, whole characters only."""
+    return text.encode()[:size].decode("utf-8", "ignore")
+
+
+# A disk that refuses for good: another try with the same bytes fails the same way, so the page
+# is told it is final (`final: true`) and shows why; it re-sent a 25 MB body forever (#742)
+FINAL_ERRNOS = {errno.ENOSPC, errno.EDQUOT, errno.EACCES, errno.EPERM, errno.EROFS, errno.ENAMETOOLONG}
 
 
 def _dir_fd(parent: int | None, name: str, make: bool) -> int:
@@ -1352,8 +1445,9 @@ def upload_file(uid: str):
 
 
 def drop_old_uploads(days: float) -> int:
-    """`wb gc`: remove the uploads older than ``days`` whose message has its receipt, or that no
-    message waiting for one names (a draft never sent). The count removed."""
+    """`wb gc`: remove the uploads older than ``days`` whose message has its receipt (an expired
+    one's too: open_work retires it, #741), or that no message waiting for one names (a draft
+    never sent). The count removed."""
     root = chat_dir() / "uploads"
     if not root.is_dir() or root.is_symlink():
         return 0
@@ -1402,9 +1496,9 @@ class Handler(BaseHTTPRequestHandler):
     def log_message(self, *args):  # the journal needn't hold every poll
         pass
 
-    def _security_headers(self) -> None:
+    def _security_headers(self, cache: str = "no-store") -> None:
         self.send_header(MARK, identity(self.secret))
-        self.send_header("Cache-Control", "no-store")
+        self.send_header("Cache-Control", cache)
         self.send_header("X-Frame-Options", "DENY")
         self.send_header("X-Content-Type-Options", "nosniff")
         self.send_header("Referrer-Policy", "no-referrer")
@@ -1494,6 +1588,10 @@ class Handler(BaseHTTPRequestHandler):
         if path == "/api/state":
             if self._authed():
                 self._json(200, snapshot())
+            return
+        if path == "/api/latest":  # the service worker's, at a push (#755)
+            if self._authed():
+                self._json(200, latest())
             return
         if path == "/api/stream":
             if self._authed():
@@ -1587,7 +1685,10 @@ class Handler(BaseHTTPRequestHandler):
             self.send_header("Content-Length", str(size))
             if not shown:
                 self.send_header("Content-Disposition", f"attachment; filename*=UTF-8''{quote(m['name'])}")
-            self._security_headers()
+            # an upload's bytes never change under its id: the browser may keep them, so the
+            # thread's photos aren't all fetched whole again on every load (#754)
+            self.send_header("Vary", "Authorization")
+            self._security_headers(FILE_CACHE)
             self.end_headers()
             shutil.copyfileobj(f, self.wfile, 1 << 16)
 
@@ -1616,12 +1717,13 @@ class Handler(BaseHTTPRequestHandler):
             self.close_connection = True
             return
         except OSError as e:  # the disk refused
-            return self._refuse(507 if e.errno == errno.ENOSPC else 500, f"not saved: {e.strerror or e}")
+            return self._refuse(507 if e.errno in (errno.ENOSPC, errno.EDQUOT) else 500,
+                                f"not saved: {e.strerror or e}", final=e.errno in FINAL_ERRNOS)
         self._json(200, {"upload": {k: meta.get(k) for k in ATTACHED}, "new": new})
 
-    def _refuse(self, code: int, why: str) -> None:
+    def _refuse(self, code: int, why: str, final: bool = False) -> None:
         try:
-            self._json(code, {"error": why})
+            self._json(code, {"error": why, **({"final": True} if final else {})})
         except OSError:  # the page went away meanwhile
             self.close_connection = True
             return
@@ -1817,7 +1919,7 @@ def make_servers(port: int, binds: list[str] | None = None,
                 s.server_close()
             why = (("the port is taken: by another address in the bind list (chat.json's bind, or "
                     "--bind) or another program" if servers else
-                    "the port is taken: another wb chat serve (systemctl --user status wb-chat) or "
+                    f"the port is taken: another wb chat serve ({service_hint('status')}) or "
                     "another program") + "; --port picks another" if e.errno == errno.EADDRINUSE else
                    "that address isn't on this machine (chat.json's bind, or --bind)"
                    if e.errno == errno.EADDRNOTAVAIL else e.strerror or str(e))

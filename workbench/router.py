@@ -5,7 +5,9 @@ Quality is the acceptance rate with a uniform prior, (accepted + 1) / (tries + 2
 task doesn't crown a model. Work of the same kind counts most: a task in a repo of the same stack
 (its main languages, gitops.stack) is judged first by that model's record on that stack, with its
 overall record as the prior worth LIKE_PRIOR tasks, so a model strong in one language and weak in
-another is routed by the one at hand once there is evidence, and by its whole record until then. Among the models within QUALITY_MARGIN of the best, the guess
+another is routed by the one at hand once there is evidence, and by its whole record until then. Each row weighs half as much every HALF_LIFE_DAYS, so a stale record
+recovers, and one task in EXPLORE_ONE_IN goes to a model the record left out on fewer than
+EXPLORE_TRIES tasks, so one unlucky task doesn't dethrone one (#648). Among the models within QUALITY_MARGIN of the best, the guess
 decides: for significant work the largest model (more parameters, better judgment), for trivial
 work the smallest (faster), and at equal size the one already on the GPU. Claude's tokens are
 what workbench saves, so once two of those models each have COST_MIN tasks of the size with what
@@ -24,8 +26,8 @@ with the context window the model is served, from what was measured on a 32K one
 step then says how a slice that size went (results.step): well when it landed with at most one
 review round the agent caused, badly when a session compacted or filled up with reading before
 any change, the agent got stuck, or it took BAD_REVIEWS rounds. Handing over to a fresh session isn't held against a step: that is how the
-runner gets through one. The biggest that went well sets a floor, the smallest that went badly a
-ceiling, so a big window on a strong machine earns big tasks.
+runner gets through one. Of the latest steps, the size most good ones reached sets a floor and
+the smallest that went badly a ceiling, so a big window on a strong machine earns big tasks.
 
 How long the agent may think, or go quiet, before the runner acts (budgets) is learned too: each
 round's session says how fast the model reads and writes on this machine (record_speed).
@@ -33,7 +35,10 @@ round's session says how fast the model reads and writes on this machine (record
 from __future__ import annotations
 
 import functools
+import hashlib
+import math
 import statistics
+import time
 import types
 from dataclasses import dataclass
 from pathlib import Path
@@ -44,6 +49,15 @@ QUALITY_MARGIN = 0.15
 COST_MIN = 3        # tasks of a size with Claude's spend recorded before it can move the pick
 COST_MARGIN = 0.15  # how much less a task must cost Claude to beat the guess
 LIKE_PRIOR = 2  # how many tasks of the same stack the overall record weighs as
+# The record forgets and explores (#648, the audit of main). One discard on a model's first task
+# (Claude's own wrong test) put it 0.17 below a model with no record, out of the band for good,
+# and a week misconfigured held a model down forever. So a row weighs half as much each
+# HALF_LIFE_DAYS, and one task in EXPLORE_ONE_IN (by its name, as tuning.EXPLORE does) goes to
+# the usable model outside the band with the fewest tasks of the size, while it has fewer than
+# EXPLORE_TRIES.
+HALF_LIFE_DAYS = 60
+EXPLORE_ONE_IN = 10
+EXPLORE_TRIES = 3
 SIZES = ("trivial", "significant")
 # Measured 2026-11-16 on a 32K window: 2-3 files and ~150 new lines landed in one session; eight
 # files took an hour of compactions and drift. A bigger window is guessed to hold proportionally
@@ -51,6 +65,8 @@ SIZES = ("trivial", "significant")
 BASE_WINDOW, BASE_FILES, BASE_LINES = 32768, 3, 150
 GUESS_MAX = 4
 BAD_REVIEWS = 2  # review rounds the agent caused at which a step held too much
+SLICE_RECENT = 20  # the measured steps the slice is learned from, the latest
+FIT_MIN, FIT_SHARE = 2, 0.75  # good steps before they raise it, and the share of them it covers
 
 
 @dataclass
@@ -59,28 +75,34 @@ class Score:
     state: dict
     weights: int = 0               # bytes of weights, 0 when unknown
     tries: int = 0
-    wins: int = 0
-    minutes: float | None = None   # mean wall time of a real task of this size
+    wins: float = 0                # accepted, and a discard's landed share (tuning.credit)
+    minutes: float | None = None   # median active minutes of a real task of this size
+    minutes_n: int = 0             # the tasks it is the median of
     fits: bool | None = None       # its need within the GPU's budget; None when unknown
     stack: tuple = ()              # the kind of work asked about, and the record on it
     like_tries: int = 0
-    like_wins: int = 0
+    like_wins: float = 0
     claude: float | None = None    # mean input-equivalent tokens a task cost Claude (spend.py)
     claude_n: int = 0              # the tasks it is the mean of
     cheaper: bool = False          # put ahead of the guess for costing Claude less (_cheaper)
+    explored: bool = False         # put first to explore it (choose's task_name)
+    # the record weighed by recency (HALF_LIFE_DAYS); None: as counted
+    w: tuple | None = None         # (tries, wins, like_tries, like_wins)
+    guessed: bool = False          # weights guessed from its name: the server says no size (#704)
 
     @property
     def quality(self) -> float:
-        overall = (self.wins + 1) / (self.tries + 2)
-        return (self.like_wins + LIKE_PRIOR * overall) / (self.like_tries + LIKE_PRIOR)
+        tries, wins, like_tries, like_wins = self.w or (self.tries, self.wins, self.like_tries, self.like_wins)
+        overall = (wins + 1) / (tries + 2)
+        return (like_wins + LIKE_PRIOR * overall) / (like_tries + LIKE_PRIOR)
 
     def line(self) -> str:
         if not self.tries:
             return "no real tasks yet"
         t = f", ~{self.minutes:.1f} min of active work" if self.minutes is not None else ""
-        like = f", {self.like_wins}/{self.like_tries} on {'/'.join(self.stack)}" if self.like_tries else ""
+        like = f", {round(self.like_wins, 1):g}/{self.like_tries} on {'/'.join(self.stack)}" if self.like_tries else ""
         c = f", ~{self.claude / 1000:.0f}K Claude tokens a task" if self.claude_n >= COST_MIN else ""
-        return f"{self.wins}/{self.tries} real tasks accepted{like}{t}{c}"
+        return f"{round(self.wins, 1):g}/{self.tries} real tasks accepted{like}{t}{c}"
 
 
 @functools.cache
@@ -95,13 +117,66 @@ def row_stack(r: dict) -> tuple:
     return _repo_stack(r["repo"]) if r.get("repo") else ()
 
 
+def _up(over: dict, model_id: str, key: str) -> list[str]:
+    """The ids models.json's ``key`` leads to from ``model_id``, nearest first (a loop stops)."""
+    out, at = [], model_id
+    while isinstance(e := over.get(at), dict) and isinstance(nxt := e.get(key), str) \
+            and nxt != model_id and nxt not in out:
+        out.append(nxt)
+        at = nxt
+    return out
+
+
+def _root(over: dict, model_id: str) -> str:
+    return (_up(over, model_id, "variant_of") or [model_id])[-1]
+
+
 def lineage(m: models.Model) -> set[str]:
     """The ids that share ``m``'s record: a `wb optimize apply` variant (models.json
-    `variant_of`), its source, and the source's other variants. One model at two windows is one
-    model's record (#584)."""
+    `variant_of`), its source, and the source's other variants, followed to the first source: a
+    variant of a variant (an apply after the GPU changed) once named only the one it came from,
+    and the first source's record split off (#723). One model at two windows is one model's
+    record (#584)."""
     over = models._overrides()
-    root = m.extra.get("variant_of") or m.id
-    return {m.id, root} | {k for k, v in over.items() if isinstance(v, dict) and v.get("variant_of") == root}
+    if m.extra.get("variant_of") and not (over.get(m.id) or {}).get("variant_of"):
+        over = {**over, m.id: {**(over.get(m.id) or {}), "variant_of": m.extra["variant_of"]}}
+    root = _root(over, m.id)
+    return {m.id, root} | {k for k, v in over.items() if isinstance(v, dict) and v.get("variant_of")
+                           and _root(over, k) == root}
+
+
+def replaced(ids) -> set[str]:
+    """The models a newer `wb optimize apply` variant among ``ids`` stands in for: the source
+    (`variant_of`) and every variant it was made from (`replaces`), however far back, so only
+    the newest leads (#723: two variants left the router picking the spilling source)."""
+    over = models._overrides()
+    out = set()
+    for i in ids:
+        for key in ("variant_of", "replaces"):
+            for up in _up(over, i, key):
+                out.add(up)
+                out |= {u for k in ("variant_of", "replaces") for u in _up(over, up, k)}
+    return out
+
+
+def weights_now(ids) -> dict:
+    """{id: models.identity} for the discovered ones of ``ids``."""
+    found = models.discover()
+    return {i: models.identity(found[i]) for i in ids if i in found}
+
+
+def same_weights(rows: list[dict], now: dict) -> list[dict]:
+    """The rows recorded on the weights each model has now (`now`: weights_now): a row from
+    before `weights_id` was recorded, or a model whose weights can't be told, counts (#726)."""
+    return [r for r in rows if not (w := r.get("weights_id")) or now.get(r.get("model")) in (None, w)]
+
+
+def weights_changed(m: models.Model) -> bool:
+    """Whether every recorded task of the model ran on other weights than it has now: its record
+    starts fresh (`wb models` says so)."""
+    now = weights_now({m.id}).get(m.id)
+    seen = {r.get("weights_id") for r in store.results() if r.get("model") == m.id} - {None}
+    return bool(now and seen and now not in seen)
 
 
 def score(m: models.Model, size: str, state: dict | None = None, stack=()) -> Score:
@@ -109,25 +184,61 @@ def score(m: models.Model, size: str, state: dict | None = None, stack=()) -> Sc
     ids = lineage(m)
     real = [r for r in store.results() if r.get("model") in ids and r.get("size") == size
             and tuning.judged(r)]
+    # the weights each model has now: a server just found down isn't asked again (the audit)
+    real = same_weights(real, weights_now(ids) if state["available"] else {})
     # a model that can't run isn't weighed: its server was just found down, and asking it again
     # cost seconds per model on a sleeping LAN box (the 2026-11-16 audit)
     s = Score(model=m, state=state, stack=tuple(stack),
               weights=models.weights(m) if state["available"] or m.extra.get("weights_gb") else 0)
+    if not s.weights and state["available"] and (guess := models.guessed_weights(m)):
+        s.weights, s.guessed = guess, True  # ordered by its name's size, not the config's (#704)
     s.tries = len(real)
-    s.wins = sum(r.get("outcome") == "accepted" for r in real)
+    s.wins = sum(tuning.credit(r) for r in real)  # the agent's kept share (#647, #722)
+    like = [r for r in real if set(row_stack(r)) & set(stack)] if stack else []
     if stack:
-        like = [r for r in real if set(row_stack(r)) & set(stack)]
         s.like_tries = len(like)
-        s.like_wins = sum(r.get("outcome") == "accepted" for r in like)
+        s.like_wins = sum(tuning.credit(r) for r in like)
+    now = time.time()
+    s.w = (sum(_weight(r, now) for r in real), sum(_weight(r, now) * tuning.credit(r) for r in real),
+           sum(_weight(r, now) for r in like), sum(_weight(r, now) * tuning.credit(r) for r in like))
     # the agent's active work, median: wall minutes held the queue, Claude's review and a night
     # before an accept (480 min for a 12-minute task), and a mean let one such row set every
     # ETA and progress check at many times the real length (#543). Rows without it are skipped.
     times = [r["active_minutes"] for r in real if isinstance(r.get("active_minutes"), (int, float))
              and not isinstance(r["active_minutes"], bool)]
-    s.minutes = statistics.median(times) if times else None
+    s.minutes, s.minutes_n = (statistics.median(times) if times else None), len(times)
     spent = [spend.weighted(r["claude"]) for r in real if isinstance(r.get("claude"), dict)]
     s.claude, s.claude_n = (statistics.fmean(spent) if spent else None), len(spent)
     return s
+
+
+def _weight(r: dict, now: float) -> float:
+    """A row's weight in the record: half for each HALF_LIFE_DAYS of age; 1 without a time."""
+    ts = r.get("ts")
+    if not isinstance(ts, (int, float)) or isinstance(ts, bool):
+        return 1.0
+    return 0.5 ** (max(now - ts, 0) / 86400 / HALF_LIFE_DAYS)
+
+
+def explores(task_name: str | None) -> bool:
+    """Whether this task is one the router sends to explore (one in EXPLORE_ONE_IN, by name)."""
+    if not task_name:
+        return False
+    return int(hashlib.sha1(f"route\0{task_name}".encode()).hexdigest(), 16) % EXPLORE_ONE_IN == 0
+
+
+def unproven(scores: list[Score]) -> list[Score]:
+    """The usable models outside the band with fewer than EXPLORE_TRIES tasks of the size, fewest
+    first: those the record left out before it could say much. One that would spill out of the
+    GPU only when the pick would too."""
+    band = [s for s in scores if s.state["available"]][:1]
+    if not band:
+        return []
+    best = max(s.quality for s in scores if s.state["available"])
+    head = band[0]
+    out = [s for s in scores if s.state["available"] and s.quality < best - QUALITY_MARGIN
+           and s.tries < EXPLORE_TRIES and (s.fits is not False or head.fits is False)]
+    return sorted(out, key=lambda s: (s.tries, -s.quality))
 
 
 def _cheaper(close: list[Score]) -> list[Score]:
@@ -149,10 +260,16 @@ def _cheaper(close: list[Score]) -> list[Score]:
 def expected_minutes(model_id: str, size: str) -> float | None:
     """How long a task of this size usually takes on this model, from real tasks: the median of
     their active minutes (the agent's own working time), so compare it with a task's active time."""
+    return expected(model_id, size)[0]
+
+
+def expected(model_id: str, size: str) -> tuple[float | None, int]:
+    """expected_minutes, and how many timed tasks it is the median of."""
     m = models.discover().get(model_id)
     if not m:
-        return None
-    return score(m, size, state={"available": True, "resident": True}).minutes
+        return None, 0
+    s = score(m, size, state={"available": True, "resident": True})
+    return s.minutes, s.minutes_n
 
 
 def allowed(m: models.Model, size: str) -> bool:
@@ -180,10 +297,15 @@ def fits(m: models.Model, budget: int | None) -> bool | None:
     return n <= models.SHARE_AT * budget if n and budget else None
 
 
-def rank(size: str, stack=()) -> list[Score]:
+def rank(size: str, stack=(), down: set | None = None, catalog: dict | None = None) -> list[Score]:
     """Every discovered model's case for a task of this size (in a repo of this stack), best
-    first (the user's policy leaves some out: allowed)."""
-    scores = [score(m, size, stack=stack) for m in models.discover().values() if allowed(m, size)]
+    first (the user's policy leaves some out: allowed). ``down`` and ``catalog``: what this pass
+    has learnt of the servers (models.status), the caller's to share across calls: each model's
+    status asked its server afresh, so a wb remote box asleep cost 2.5 s a model (#705)."""
+    down = set() if down is None else down
+    catalog = {} if catalog is None else catalog
+    scores = [score(m, size, state=models.status(m, down, catalog), stack=stack)
+              for m in models.discover().values() if allowed(m, size)]
     budget = models.gpu_budget() if scores else None
     for s in scores:
         s.fits = fits(s.model, budget) if s.state["available"] else None
@@ -191,18 +313,24 @@ def rank(size: str, stack=()) -> list[Score]:
     best = max((s.quality for s in usable), default=0)
     # a source whose optimize variant can run goes after it: the variant is the window measured
     # to fit, with the same record (#584)
-    replaced = {s.model.extra.get("variant_of") for s in usable} - {None}
+    stood_in = replaced(s.model.id for s in usable)
     guess = _guess(size)
     close = _cheaper(sorted((s for s in usable if s.quality >= best - QUALITY_MARGIN),
-                            key=lambda s: (s.model.id in replaced, *guess(s))))
+                            key=lambda s: (s.model.id in stood_in, *guess(s))))
     rest = sorted((s for s in usable if s not in close), key=lambda s: -s.quality)
     blocked = [s for s in scores if not s.state["available"]]
     return close + rest + blocked
 
 
-def choose(size: str, stack=()) -> tuple[Score | None, str]:
-    """The model for a task of this size (in a repo of this stack) and one line on why."""
-    ranked = rank(size, stack)
+def choose(size: str, stack=(), task_name: str | None = None, down: set | None = None,
+           catalog: dict | None = None) -> tuple[Score | None, str]:
+    """The model for a task of this size (in a repo of this stack) and one line on why. With
+    ``task_name``, one task in EXPLORE_ONE_IN explores a model outside the band (unproven);
+    ``down``, ``catalog``: rank's."""
+    ranked = rank(size, stack, down, catalog)
+    if explores(task_name) and (new := unproven(ranked)):
+        new[0].explored = True
+        ranked = [new[0]] + [s for s in ranked if s is not new[0]]
     top = ranked[0] if ranked and ranked[0].state["available"] else None
     if top is None:
         if ranked:
@@ -215,10 +343,17 @@ def choose(size: str, stack=()) -> tuple[Score | None, str]:
         return None, "no local models: " + models.why_none()
     usable = [s for s in ranked if s.state["available"]]
     sizes = [s.weights for s in usable if s.fits is not False or top.fits is False]
+    unknown = [s.model.id for s in usable if not s.weights]
     if len(usable) == 1:
         pick = f"the only model allowed {size} work"
+    elif top.explored:
+        pick = (f"exploring: its record on {size} work is {top.tries} task(s), too few to leave it "
+                f"out (one task in {EXPLORE_ONE_IN})")
     elif top.cheaper:
         pick = f"costs Claude least on {size} work"
+    elif size in ("significant", "trivial") and not top.weights:
+        # every weight 0 made it "the largest" and "the smallest" at once, by config order (#704)
+        pick = "sizes unknown: config order; models.json weights_gb sets a model's size"
     elif size == "significant" and top.weights == max(sizes):
         pick = "the largest model allowed significant work" + (
             " that fits the GPU" if top.fits and any(s.fits is False for s in usable) else "")
@@ -227,6 +362,10 @@ def choose(size: str, stack=()) -> tuple[Score | None, str]:
     else:
         kind = f"{size} {'/'.join(stack)}" if top.like_tries else size
         pick = f"the best record on {kind} work"
+    if top.guessed and pick.startswith(("the largest", "the smallest")):
+        pick += " (its size guessed from its name)"
+    if unknown and top.weights and size in ("significant", "trivial"):
+        pick += f" ({', '.join(unknown[:3])}: size unknown, models.json weights_gb sets it)"
     others = "; ".join(f"{s.model.id} {s.line()}" for s in usable[1:4])
     return top, f"{top.model.id}: {pick}; {top.line()}" + (f" (vs {others})" if others else "")
 
@@ -247,20 +386,37 @@ def slice(m: models.Model) -> Slice:
     scale = min(window / BASE_WINDOW, GUESS_MAX) if window else 1
     files, lines = max(1, round(BASE_FILES * scale)), max(50, round(BASE_LINES * scale / 10) * 10)
     basis = f"{window // 1024}K window" if window else "window unknown"
-    steps = [s for r in store.results() if r.get("model") == m.id and tuning.judged(r)
-             for s in r.get("steps") or [] if s.get("files") and (not window or s.get("window") in (None, window))]
+    rows = same_weights([r for r in store.results() if r.get("model") == m.id and tuning.judged(r)],
+                        weights_now({m.id}))  # another model's steps under the same id (#726)
+    steps = [s for r in rows for s in r.get("steps") or []
+             if s.get("files") and (not window or s.get("window") in (None, window))]
+    every = len(steps)
+    steps = steps[-SLICE_RECENT:]  # the latest say how it does now
     went = [_went(s) for s in steps]
     fit = [s for s, w in zip(steps, went) if w == "well"]
     over = [s for s, w in zip(steps, went) if w == "badly"]
-    if over:  # below the smallest step that went badly
-        files = min(files, max(1, min(s["files"] for s in over) - 1))
-        lines = min(lines, max(50, min(s["lines"] for s in over) * 3 // 4))
-    if fit:  # at least the biggest that went well
-        files, lines = max(files, max(s["files"] for s in fit)), max(lines, max(s["lines"] for s in fit))
+    # Below the smallest recent step that went badly; raised to the size most recent good steps
+    # reached (FIT_SHARE of them, once there are FIT_MIN), unless the steps of the bad one's size
+    # or more mostly went badly. The biggest good step ever once won over every cap: one lockfile
+    # bump, or a rename across 30 files, set the slice for good, and 30 failures at a sixth of its
+    # size couldn't lower it (#720).
+    got = {"files": files, "lines": lines}
+    for key, least, cap in (("files", 1, lambda n: n - 1), ("lines", 50, lambda n: n * 3 // 4)):
+        bad = min((s[key] for s in over), default=None)
+        if bad is not None:
+            got[key] = min(got[key], max(least, cap(bad)))
+        if len(fit) >= FIT_MIN:
+            sizes = sorted(s[key] for s in fit)
+            reach = sizes[math.ceil(FIT_SHARE * len(sizes)) - 1]
+            there = [w for s, w in zip(steps, went) if bad is not None and s[key] >= bad]
+            if bad is None or reach < bad or there.count("badly") <= there.count("well"):
+                got[key] = max(got[key], reach)
+    files, lines = got["files"], got["lines"]
     if not steps:
         return Slice(files, lines, f"a guess from its {basis}; no steps measured yet" if window
                      else "a guess, its window unknown; no steps measured yet")  # not "from its window unknown" (the 0.90 review)
-    return Slice(files, lines, f"{basis}; {len(fit)} of {len(steps)} measured steps went well, "
+    last = f"the last {len(steps)}" if every > len(steps) else f"{len(steps)}"
+    return Slice(files, lines, f"{basis}; {len(fit)} of {last} measured steps went well, "
                  f"{len(over)} badly")
 
 

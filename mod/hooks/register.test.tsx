@@ -125,6 +125,30 @@ test('the Claude Code the mod is tested on, or a newer one, hears nothing about 
   expect(toasts.join('\n')).not.toContain('older than')
 })
 
+test('WB_BIN is read as wb reads its path variables: a ~ expanded, a relative one against the session\'s directory (#699)', async ($, on) => {
+  // #699: settings.json's env passes `~/repos/workbench/bin/wb` literally, and the mod ran a `~`
+  const clock = mock.clock(on, { now: 1_800_000_000_000 })
+  const files: Record<string, string> = {}
+  fakeTasks(on, files, [])
+  const runs: string[][] = []
+  on('process.run', (_: any, e: any) => { runs.push(e.argv); return { value: { exitCode: 0, stdout: '', stderr: '' } } })
+  on('ui.toast', () => ({ value: undefined }))
+  for (const [bin, want] of [['~/repos/workbench/bin/wb', '/home/u/repos/workbench/bin/wb'],
+    ['bin/wb', '/home/u/a/bin/wb'], ['wb-dev', 'wb-dev']]) {
+    engine.env = { WB_BIN: bin }
+    try {
+      runs.length = 0
+      await $.session.start({ cwd: '/home/u/a', surface: 'terminal', isInteractive: true })
+      await clock.advance(1000)
+      await $.command.run({ command: 'workbench-quit', args: '' })
+      await clock.advance(1000)
+    } finally {
+      engine.env = undefined
+    }
+    expect(runs.find(r => r[1] === 'stop')?.[0]).toBe(want)
+  }
+})
+
 test('a copy updated from /delegate gets its /workbench link from wb setup', async ($, on) => {
   const ran: string[][] = []
   const toasts: string[] = []
@@ -165,6 +189,9 @@ const engine: { version?: { version: string; base: string }; env?: Record<string
 const TESTED = { version: '2.1.311', base: '2.1.311' }
 engine.version = TESTED
 
+// A file's mtime where a test sets one (fakeTasks' fs.stat), else 0
+const mtimes: Record<string, number> = {}
+
 function fakeTasks(on: any, files: Record<string, string>, dirs = ['fix-it'], scouted = true, ui: string[] = [], ears = true) {
   on('session.version', () => {
     if (!engine.version) throw new Error('no implementation for session.version')
@@ -186,7 +213,7 @@ function fakeTasks(on: any, files: Record<string, string>, dirs = ['fix-it'], sc
   on('fs.exists', (_: any, e: any) => ({ value: Object.keys(files).some(p => p.startsWith(e.path)) }))
   on('fs.stat', (_: any, e: any) => {
     if (!(e.path in files)) throw new Error(`ENOENT: ${e.path}`)
-    return { value: { kind: 'file', size: files[e.path].length, mtimeMs: 0, isLink: false } }
+    return { value: { kind: 'file', size: files[e.path].length, mtimeMs: mtimes[e.path] ?? 0, isLink: false } }
   })
   on('fs.list', () => ({ value: dirs.map(name => ({ name, kind: 'dir' })) }))
   on('command.register', (_: any, e: any) => ({ value: { command: e.name } }))
@@ -330,7 +357,7 @@ test('a task wb start ran in this session is its own wherever it ran, also after
   await clock.advance(31_000)                                  // the safety poll reads it
   expect(woken.filter(t => t.includes('REPORT-again'))).toHaveLength(1)
   await $.command.run({ command: 'workbench-quit', args: '' })
-  expect(runs.at(-1)).toEqual(['wb', 'stop', '--all', '--repo', '/home/u', '--session', 'sess-1', '--session', 'sess-2'])
+  expect(runs.at(-1)).toEqual(['wb', 'stop', '--all', '--park-waiting', '--repo', '/home/u', '--session', 'sess-1', '--session', 'sess-2'])
 })
 
 test('a new Claude Code process in the project adopts the tasks of one that is gone', async ($, on) => {
@@ -368,6 +395,198 @@ test('a new Claude Code process in the project adopts the tasks of one that is g
   expect(kills.length - asked).toBeLessThanOrEqual(1)          // a live one, not at every poll
 })
 
+test('a task whose Claude Code process is gone is claimed by the first session to see it, and the others drop it (#687)', async ($, on) => {
+  // #687: nothing recorded an adoption, so once the process that started a task ended, every
+  // live session near it owned it for good, and the one back from `claude --resume` too: both
+  // woke for its review. Now the first claims it (`wb adopt`, under wb's lock) and task.json names
+  // that process; a session that loses the claim leaves the task alone.
+  const clock = mock.clock(on, { now: 1_800_000_000_000 })
+  const files: Record<string, string> = {}
+  task(files, 'won', 'review', { repo: '/home/u/a', cwd: '/home/u/a', session: 'sess-old', claude_pid: 4242 })
+  task(files, 'lost', 'review', { repo: '/home/u/a', cwd: '/home/u/a', session: 'sess-old', claude_pid: 4242 })
+  task(files, 'resumed', 'review', { repo: '/home/u/b', cwd: '/home/u/b', session: 'sess-new', claude_pid: 4141 })
+  const names = ['won', 'lost', 'resumed']
+  for (const name of names) notice(files, { ts: ts0, task: name, kind: 'review', text: `REPORT-${name}` })
+  fakeTasks(on, files, names, true, [], false)
+  on('process.spawn', async function* () {     // `wb events`: its parent is this Claude Code, pid 9000
+    yield { stream: 'stdout', text: '{"hello": 4242, "parent": 9000, "parent_start": "77"}\n' }
+    await new Promise(() => {})
+    return { code: 0, signal: null }
+  })
+  on('session.id', () => ({ value: 'sess-new' }))
+  const adopts: string[][] = []
+  on('process.run', (_: any, e: any) => {
+    const [cmd, ...args] = e.argv
+    if (cmd === 'kill') return { value: { exitCode: ['4242', '4141'].includes(args[1]) ? 1 : 0, stdout: '', stderr: '' } }
+    if (cmd === 'wb' && args[0] === 'adopt') {
+      adopts.push(args)
+      const path = `/wb/tasks/${args[1]}/task.json`
+      const spec = JSON.parse(files[path])
+      if (args[1] === 'lost') {                // another session claimed it a moment before
+        files[path] = JSON.stringify({ ...spec, session: 'sess-third', claude_pid: 5151, claude_start: '9' })
+        return { value: { exitCode: 1, stdout: '', stderr: 'wb: lost belongs to a live Claude Code session (pid 5151)' } }
+      }
+      files[path] = JSON.stringify({ ...spec, session: args.includes('sess-old') ? 'sess-old' : 'sess-new', claude_pid: 9000, claude_start: '77' })
+      return { value: { exitCode: 0, stdout: `adopted ${args[1]}`, stderr: '' } }
+    }
+    return { value: { exitCode: 0, stdout: '', stderr: '' } }
+  })
+  on('ui.toast', () => ({ value: undefined }))
+  const woken: string[] = []
+  on('prompt.submit', (_: any, e: any) => { woken.push(e.text); return { text: e.text } })
+  await $.session.start({ cwd: '/home/u/a', surface: 'terminal', isInteractive: true })
+  await clock.advance(3000)
+  expect(adopts.find(a => a[1] === 'won')).toEqual(['adopt', 'won', '--pid', '9000', '--session', 'sess-new'])
+  expect(JSON.parse(files['/wb/tasks/won/task.json']).claude_pid).toBe(9000)
+  expect(woken.filter(t => t.includes('REPORT-won'))).toHaveLength(1)
+  expect(woken.join('\n')).not.toContain('REPORT-lost')        // the other session's now
+  expect(files['/wb/tasks/lost/acked']).toBe(undefined)        // left for it
+  // this session's own task, stamped by its earlier process (a resume): stamped with this one
+  expect(adopts.find(a => a[1] === 'resumed')).toEqual(['adopt', 'resumed', '--pid', '9000', '--session', 'sess-new'])
+  expect(JSON.parse(files['/wb/tasks/resumed/task.json']).claude_pid).toBe(9000)
+  const claims = adopts.length
+  await clock.advance(31_000)
+  expect(adopts.length).toBe(claims)                            // claimed once, not at every poll
+})
+
+test('a session resumed in a new process comes back in workbench mode, and a quit ends it for good (#689)', async ($, on) => {
+  // #689: the mode lived in the old process's state: `claude --continue` came back with it off,
+  // so the chat didn't listen, the status line didn't show it and a compaction dropped it
+  const clock = mock.clock(on, { now: 1_800_000_000_000 })
+  const files: Record<string, string> = {}
+  const ui: string[] = []
+  fakeTasks(on, files, [], true, ui)
+  const kept: Record<string, unknown> = { modes: { 'sess-1': 1_800_000_000_000 - 3600_000, 'sess-stale': 1_000 } }
+  on('store.get', (_: any, e: any) => ({ value: kept[e.key] }))
+  on('store.set', (_: any, e: any) => { kept[e.key] = e.value; return { value: undefined } })
+  on('session.id', () => ({ value: 'sess-1' }))
+  on('process.run', () => ({ value: { exitCode: 0, stdout: '', stderr: '' } }))
+  on('ui.toast', () => ({ value: undefined }))
+  await $.session.start({ cwd: '/home/u/a', surface: 'terminal', isInteractive: true })
+  await clock.advance(3000)
+  expect(ui).toContain('status ⚒ wb · workbench mode')
+  expect(ui).toContain('open workbench')
+  expect(kept.modes).toEqual({ 'sess-1': 1_800_000_000_000 })  // the stale one pruned
+  await $.command.run({ command: 'workbench-quit', args: '' })
+  expect(kept.modes).toEqual({})
+  await clock.advance(3000)                                     // the quit's poll ends inside the test
+})
+
+test('a session that adopts a task whose process is gone turns workbench mode on with it (#689)', async ($, on) => {
+  const clock = mock.clock(on, { now: 1_800_000_000_000 })
+  const files: Record<string, string> = {}
+  const ui: string[] = []
+  task(files, 'orphan', 'review', { repo: '/home/u/a', cwd: '/home/u/a', session: 'sess-old', claude_pid: 4242 })
+  fakeTasks(on, files, ['orphan'], true, ui, false)
+  on('process.spawn', async function* () {
+    yield { stream: 'stdout', text: '{"hello": 4343, "parent": 9000, "parent_start": "77"}\n' }
+    await new Promise(() => {})
+    return { code: 0, signal: null }
+  })
+  on('session.id', () => ({ value: 'sess-new' }))
+  on('process.run', (_: any, e: any) => {
+    const [cmd, ...args] = e.argv
+    if (cmd === 'kill') return { value: { exitCode: args[1] === '4242' ? 1 : 0, stdout: '', stderr: '' } }
+    if (args[0] === 'adopt') {
+      const path = '/wb/tasks/orphan/task.json'
+      files[path] = JSON.stringify({ ...JSON.parse(files[path]), session: 'sess-new', claude_pid: 9000, claude_start: '77' })
+    }
+    return { value: { exitCode: 0, stdout: '', stderr: '' } }
+  })
+  on('ui.toast', () => ({ value: undefined }))
+  on('prompt.submit', (_: any, e: any) => ({ text: e.text }))
+  await $.session.start({ cwd: '/home/u/a', surface: 'terminal', isInteractive: true })
+  await clock.advance(3000)
+  expect(JSON.parse(files['/wb/tasks/orphan/task.json']).session).toBe('sess-new')
+  await clock.advance(3000)
+  expect(ui.filter(l => l.startsWith('status')).at(-1)).toBe('status ⚒ wb · 1 awaiting review')
+  await $.command.run({ command: 'workbench-quit', args: '' })   // the mode was on: the quit says so
+  expect(ui).toContain('close workbench')
+  await clock.advance(3000)
+})
+
+test('in workbench mode the status line counts only this session\'s tasks as awaiting review (#693)', async ($, on) => {
+  // #693: another session's review counted in this one's "N awaiting review"
+  const clock = mock.clock(on, { now: 1_800_000_000_000 })
+  const files: Record<string, string> = {}
+  const ui: string[] = []
+  task(files, 'ours', 'review', { repo: '/home/u/a', cwd: '/home/u/a', session: 'sess-new' })
+  task(files, 'theirs', 'review', { repo: '/home/u/b', cwd: '/home/u/b', session: 'sess-b' })
+  task(files, 'asks', 'asking', { repo: '/home/u/b', cwd: '/home/u/b', session: 'sess-b' })
+  fakeTasks(on, files, ['ours', 'theirs', 'asks'], true, ui)
+  on('session.id', () => ({ value: 'sess-new' }))
+  on('process.run', () => ({ value: { exitCode: 0, stdout: '', stderr: '' } }))
+  on('ui.toast', () => ({ value: undefined }))
+  on('prompt.submit', (_: any, e: any) => ({ text: e.text }))
+  on('skill.prompt', (_: any, e: any) => ({ text: e.text }))
+  await $.session.start({ cwd: '/home/u/a', surface: 'terminal', isInteractive: true })
+  await $.skill.prompt({ skill: 'workbench', text: 'x', frontmatter: {}, source: 'userSettings' })
+  await clock.advance(3000)
+  expect(ui.filter(l => l.startsWith('status')).at(-1)).toBe('status ⚒ wb · 1 awaiting review')
+})
+
+test('in a monorepo a session in one package is not woken for another package\'s task (#695)', async ($, on) => {
+  // #695: inside the repo was enough, so a session in /mono/pkg-b claimed pkg-a's review
+  const clock = mock.clock(on, { now: 1_800_000_000_000 })
+  const files: Record<string, string> = {}
+  task(files, 'pkg', 'review', { repo: '/home/u/mono', subdir: 'pkg-a', cwd: '/home/u/mono' })
+  task(files, 'here', 'review', { repo: '/home/u/mono', cwd: '/home/u/mono/pkg-a' })
+  task(files, 'ours', 'review', { repo: '/home/u/mono', subdir: 'pkg-b', cwd: '/home/u/mono' })
+  const names = ['pkg', 'here', 'ours']
+  for (const name of names) notice(files, { ts: ts0, task: name, kind: 'review', text: `REPORT-${name}` })
+  fakeTasks(on, files, names)
+  on('session.id', () => ({ value: 'sess-new' }))
+  on('process.run', () => ({ value: { exitCode: 0, stdout: '', stderr: '' } }))
+  on('ui.toast', () => ({ value: undefined }))
+  const woken: string[] = []
+  on('prompt.submit', (_: any, e: any) => { woken.push(e.text); return { text: e.text } })
+  await $.session.start({ cwd: '/home/u/mono/pkg-b', surface: 'terminal', isInteractive: true })
+  await clock.advance(3000)
+  expect(woken.filter(t => t.includes('REPORT-ours'))).toHaveLength(1)
+  expect(woken.join('\n')).not.toContain('REPORT-pkg')
+  expect(woken.join('\n')).not.toContain('REPORT-here')
+})
+
+test('a review the quit parked is out of the status line and wakes no one (#698)', async ($, on) => {
+  // #698: the quit parked only running tasks: a review stayed "1 awaiting review" for good
+  const clock = mock.clock(on, { now: 1_800_000_000_000 })
+  const files: Record<string, string> = {}
+  const ui: string[] = []
+  task(files, 'left', 'review', { repo: '/home/u/a', cwd: '/home/u/a' }, ts0 - 3600)
+  files['/wb/tasks/left/status.json'] = JSON.stringify({ phase: 'review', round: 1, updated_at: ts0 - 3600, parked: ts0 - 60 })
+  fakeTasks(on, files, ['left'], true, ui)
+  on('process.run', () => ({ value: { exitCode: 0, stdout: '', stderr: '' } }))
+  on('ui.toast', () => ({ value: undefined }))
+  const woken: string[] = []
+  on('prompt.submit', (_: any, e: any) => { woken.push(e.text); return { text: e.text } })
+  await $.session.start({ cwd: '/home/u/a', surface: 'terminal', isInteractive: true })
+  await clock.advance(120_000)
+  expect(ui.filter(l => l.startsWith('status ⚒'))).toEqual([])
+  expect(woken).toEqual([])                                     // rewake leaves it too
+})
+
+test('a notice another session took under wb\'s lock wakes no one here (#687)', async ($, on) => {
+  // #687: two sessions woken by one `wb events` line each read `acked`, then wrote it: both woke
+  const clock = mock.clock(on, { now: 1_800_000_000_000 })
+  const files: Record<string, string> = {}
+  task(files, 'fix-it', 'review', { repo: '/home/u/a', cwd: '/home/u/a' })
+  notice(files, { ts: ts0, task: 'fix-it', kind: 'review', text: 'REPORT-fix-it' })
+  fakeTasks(on, files)
+  on('session.id', () => ({ value: 'sess-new' }))
+  const acks: string[][] = []
+  on('process.run', (_: any, e: any) => {
+    if (e.argv[1] === 'ack') { acks.push(e.argv.slice(1)); return { value: { exitCode: 3, stdout: '', stderr: 'wb: fix-it: already acknowledged' } } }
+    return { value: { exitCode: 0, stdout: '', stderr: '' } }
+  })
+  on('ui.toast', () => ({ value: undefined }))
+  const woken: string[] = []
+  on('prompt.submit', (_: any, e: any) => { woken.push(e.text); return { text: e.text } })
+  await $.session.start({ cwd: '/home/u/a', surface: 'terminal', isInteractive: true })
+  await clock.advance(3000)
+  expect(acks).toEqual([['ack', 'fix-it', String(ts0)]])
+  expect(woken.join('\n')).not.toContain('REPORT-fix-it')
+})
+
 test('a task whose Claude Code process\'s pid now belongs to another process is adopted all the same', async ($, on) => {
   // #532: the crashed session's pid was live again under another program, and `kill -0` alone
   // said the old session still ran: the new `claude` in the project never adopted its tasks
@@ -401,6 +620,56 @@ test('a task whose Claude Code process\'s pid now belongs to another process is 
   expect(woken.filter(t => t.includes('REPORT-recycled'))).toHaveLength(1)  // the pid lives, not its process
   expect(woken.filter(t => t.includes('REPORT-macos'))).toHaveLength(1)     // ps's start differs too
   expect(woken.join('\n')).not.toContain('REPORT-same')                    // the same process: still its own
+})
+
+test('without a kill executable, /proc says which Claude Code processes are gone (#700)', async ($, on) => {
+  // #700: `kill -0` threw ENOENT in a container without procps, so no gone process was ever seen
+  // and nobody was woken for a crashed session's tasks
+  const clock = mock.clock(on, { now: 1_800_000_000_000 })
+  const files: Record<string, string> = {}
+  task(files, 'orphan', 'review', { repo: '/home/u/a', cwd: '/home/u/a', session: 'sess-old', claude_pid: 4242 })
+  task(files, 'live', 'review', { repo: '/home/u/a', cwd: '/home/u/a', session: 'sess-other', claude_pid: 4343, claude_start: '2000' })
+  for (const name of ['orphan', 'live']) notice(files, { ts: ts0, task: name, kind: 'review', text: `REPORT-${name}` })
+  fakeTasks(on, files, ['orphan', 'live'])
+  files['/proc/self/stat'] = '1 (x) S 1'
+  files['/proc/4343/stat'] = `4343 (claude) S 1 ${'0 '.repeat(17)}2000 0 0`
+  on('session.id', () => ({ value: 'sess-new' }))
+  on('process.run', (_: any, e: any) => {
+    if (e.argv[0] === 'kill') throw new Error('ENOENT: kill')       // no procps
+    return { value: { exitCode: 0, stdout: '', stderr: '' } }
+  })
+  on('ui.toast', () => ({ value: undefined }))
+  const woken: string[] = []
+  on('prompt.submit', (_: any, e: any) => { woken.push(e.text); return { text: e.text } })
+  await $.session.start({ cwd: '/home/u/a', surface: 'terminal', isInteractive: true })
+  await clock.advance(3000)
+  expect(woken.filter(t => t.includes('REPORT-orphan'))).toHaveLength(1)
+  expect(woken.join('\n')).not.toContain('REPORT-live')
+})
+
+test('a listener whose life can\'t be told keeps the chat while its claim is fresh (#700)', async ($, on) => {
+  // #700: unknown liveness read as gone, so two listening sessions took listener.json from each
+  // other on every poll, each write the other's `wb events` line
+  const clock = mock.clock(on, { now: 1_800_000_000_000 })
+  const files: Record<string, string> = {}
+  fakeTasks(on, files, [])
+  chatOn(files)
+  const claim = JSON.stringify({ session: 'other-key', pid: 777, start: '1' })
+  files['/wb/chat/listener.json'] = claim
+  mtimes['/wb/chat/listener.json'] = 1_800_000_000_000
+  on('process.run', (_: any, e: any) => {
+    if (e.argv[0] === 'kill') throw new Error('ENOENT: kill')
+    return { value: { exitCode: 0, stdout: '', stderr: '' } }
+  })
+  on('ui.toast', () => ({ value: undefined }))
+  on('skill.prompt', (_: any, e: any) => ({ text: e.text }))
+  await $.session.start({ cwd: '/home/u/a', surface: 'terminal', isInteractive: true })
+  await $.skill.prompt({ skill: 'workbench', text: 'x', frontmatter: {}, source: 'userSettings' })
+  await clock.advance(3000)
+  expect(files['/wb/chat/listener.json']).toBe(claim)            // theirs stands
+  delete mtimes['/wb/chat/listener.json']                       // stale: gone, by every sign there is
+  await clock.advance(31_000)
+  expect(JSON.parse(files['/wb/chat/listener.json']).session).not.toBe('other-key')
 })
 
 test('on a file system that ignores case, a task under ~/Repos is a session in ~/repos\'s', async ($, on) => {
@@ -522,7 +791,7 @@ test('one notice for the tasks a restart interrupted wakes once, ending with the
   task(files, 'a', 'failed', {}, ts0 + 0.05)
   task(files, 'b', 'failed', {}, ts0 + 0.05)                   // its last write lands after the notice
   notice(files, { ts: ts0, task: 'a', kind: 'failed', tasks: ['a', 'b'],
-    text: '2 tasks were interrupted by a restart: a, b. wb resume --all --repo /r continues them' })
+    text: '2 tasks were interrupted by a restart: a, b. wb resume a b continues them' })
   files['/wb/tasks/b/acked'] = String(ts0)                    // acknowledged with a's notice
   fakeTasks(on, files, ['a', 'b'])
   on('process.run', () => ({ value: { exitCode: 0, stdout: '', stderr: '' } }))
@@ -534,7 +803,7 @@ test('one notice for the tasks a restart interrupted wakes once, ending with the
   await clock.advance(120_000)
   expect(woken).toHaveLength(1)
   expect(woken[0]).toContain('[workbench] Tasks `a`, `b` were interrupted.')
-  expect(woken[0]).toContain('the `wb resume --all` line above continues them all')
+  expect(woken[0]).toContain('`wb resume a b` continues them all')    // by name (#692)
   expect(woken[0]).not.toContain('wb log')
   expect(woken[0]).not.toContain('wb feedback')
   expect(toasts).toContain('workbench: a and 1 more were interrupted')
@@ -766,6 +1035,36 @@ test('a notify.jsonl past what one read takes is read from its end, and still wa
   expect(woken.filter(t => t.includes('REPORT'))).toHaveLength(1)
 })
 
+test('a task in review whose events have not changed is not read again on every poll', async ($, on) => {
+  // #739 (the 2026-11-21 audit): each poll (every 1.5 s while a task ran) spawned `tail` for every
+  // open task's events.jsonl past 64 KB, unchanged since the task went to review
+  const clock = mock.clock(on, { now: 1_800_000_000_000 })
+  const files: Record<string, string> = {}
+  task(files, 'waits', 'review')
+  task(files, 'runs', 'running')
+  const row = (brief: string) => JSON.stringify({ kind: 'tool', tool: 'read', brief, ok: true }) + '\n'
+  files['/wb/tasks/waits/events.jsonl'] = row('x'.repeat(200)).repeat(400) + row('last.py')
+  files['/wb/tasks/runs/events.jsonl'] = row('a.py')
+  fakeTasks(on, files, ['waits', 'runs'])
+  const tails: string[] = []
+  on('process.run', (_: any, e: any) => {
+    if (e.argv[0] === 'tail') {
+      tails.push(e.argv[3])
+      return { value: { exitCode: 0, stdout: files[e.argv[3]].slice(-Number(e.argv[2])), stderr: '' } }
+    }
+    return { value: { exitCode: 0, stdout: '', stderr: '' } }
+  })
+  on('ui.toast', () => ({ value: undefined }))
+  on('prompt.submit', (_: any, e: any) => ({ text: e.text }))
+  await $.session.start({ cwd: '/', surface: 'terminal', isInteractive: true })
+  await clock.advance(15_000)                                     // ten polls and more
+  const waits = () => tails.filter(p => p === '/wb/tasks/waits/events.jsonl').length
+  expect(waits()).toBe(1)
+  files['/wb/tasks/waits/events.jsonl'] += row('new.py')         // it changed: read once more
+  await clock.advance(3000)
+  expect(waits()).toBe(2)
+})
+
 test('outside workbench mode another session\'s running task opens no pane and fills no status line', async ($, on) => {
   // 2026-11-17: a session opened in another project showed the pane and the task's status line for
   // a task this session never started, and /workbench-quit couldn't clear it
@@ -851,6 +1150,34 @@ test('the pane follows the running task: its whole history, then what it is doin
   expect(watches().length).toBeGreaterThan(1)
 })
 
+test('a running task writing its status on every tool call is re-read at most every few seconds (#691)', async ($, on) => {
+  // #691: each status write made a new key, and each new key ran `wb watch --json` (a Python start
+  // and an OpenCode export) at once, back to back for the whole round
+  const clock = mock.clock(on, { now: 1_800_000_000_000 })
+  const files: Record<string, string> = {}
+  task(files, 'fix-it', 'running', { repo: '/home/u/a', cwd: '/home/u/a' })
+  fakeTasks(on, files, ['fix-it'])
+  const runs: string[][] = []
+  on('process.run', (_: any, e: any) => {
+    runs.push(e.argv)
+    return { value: { exitCode: 0, stdout: JSON.stringify({ s: 'claude', t: `line ${runs.length}` }), stderr: '' } }
+  })
+  await $.session.start({ cwd: '/home/u/a', surface: 'terminal', isInteractive: true })
+  await clock.advance(1000)
+  const watches = () => runs.filter(r => r[1] === 'watch').length
+  expect(watches()).toBe(1)
+  for (let i = 1; i <= 20; i++) {                               // a tool call every half second, for 10 s
+    files['/wb/tasks/fix-it/status.json'] = JSON.stringify({ phase: 'running', round: 1, updated_at: ts0 + i })
+    await clock.advance(500)
+  }
+  expect(watches()).toBeGreaterThanOrEqual(2)                   // it still moves
+  expect(watches()).toBeLessThanOrEqual(3)                      // but at most every LIVE_EVERY_MS
+  files['/wb/tasks/fix-it/status.json'] = JSON.stringify({ phase: 'review', round: 1, updated_at: ts0 + 30 })
+  const n = watches()
+  await clock.advance(1600)
+  expect(watches()).toBe(n + 1)                                 // done: read at once
+})
+
 test('/workbench-quit stops everything; /workbench-quit-and-hand-back-claude hands the tasks to Claude', async ($, on) => {
   const clock = mock.clock(on, { now: 1_800_000_000_000 })
   fakeTasks(on, {})
@@ -868,7 +1195,7 @@ test('/workbench-quit stops everything; /workbench-quit-and-hand-back-claude han
   await $.session.start({ cwd: '/', surface: 'terminal', isInteractive: true })
 
   const quit = await $.command.run({ command: 'workbench-quit', args: '' })
-  expect(runs.at(-1)).toEqual(['wb', 'stop', '--all', '--repo', '/'])  // this session's tasks
+  expect(runs.at(-1)).toEqual(['wb', 'stop', '--all', '--park-waiting', '--repo', '/'])  // this session's tasks
   expect(quit.text).toContain('stopped: fix-it')
   expect(JSON.stringify(quit.context)).toContain("Don't finish, restart")  // Claude is told
   expect(submitted.length).toBe(0)                                         // without a turn
@@ -1457,6 +1784,49 @@ test('a permission prompt while the user is away goes to the web chat, and their
   expect(runs.slice(n).some(a => a[2] === 'ask')).toBe(false)
 })
 
+test('a session that isn\'t listening treats the user as away too, relaying its dialogs and saying so in its wakes (#688)', async ($, on) => {
+  // #688: only the listening session set its own `webAt`, so another session's overnight backlog
+  // left its permission dialogs in the empty terminal (#110 again) and its wakes never said
+  // to answer in the chat
+  const clock = mock.clock(on, { now: 1_800_000_000_000 })
+  const files: Record<string, string> = {}
+  task(files, 'fix-it', 'review', { repo: '/home/u/project', cwd: '/home/u/project' })
+  fakeTasks(on, files)
+  chatOn(files)
+  files['/wb/chat/listener.json'] = JSON.stringify({ session: 'other-key', pid: 777, start: '1' }) // another session listens
+  files['/proc/777/stat'] = `777 (wb) S 1 ${'0 '.repeat(17)}1 0 0`
+  on('ui.toast', () => ({ value: undefined }))
+  on('skill.prompt', (_: any, e: any) => ({ text: e.text }))
+  const woken: string[] = []
+  on('prompt.submit', (_: any, e: any) => { woken.push(e.text); return { text: e.text } })
+  const runs: string[][] = []
+  on('process.run', (_: any, e: any) => {
+    runs.push(e.argv)
+    const [, cmd, act] = e.argv
+    if (cmd === 'chat' && act === 'ask') return { value: { exitCode: 0, stdout: 'ask-1-ab open\n', stderr: '' } }
+    if (cmd === 'chat' && act === 'wait') return { value: { exitCode: 0, stdout: JSON.stringify({ answer: 'allow' }), stderr: '' } }
+    return { value: { exitCode: 0, stdout: '', stderr: '' } }
+  })
+  on('classic.PermissionRequest', () => ({}))
+  const ask = (tool_name: string, tool_input: unknown) =>
+    $.classic.PermissionRequest({ tool_name, tool_input } as any) as Promise<any>
+  await $.session.start({ cwd: '/home/u/project', surface: 'terminal', isInteractive: true })
+  await $.skill.prompt({ skill: 'workbench', text: 'x', frontmatter: {}, source: 'userSettings' })
+  await clock.advance(3000)
+  expect(files['/wb/chat/listener.json']).toContain('other-key')   // still the other's
+  files['/wb/chat/away.json'] = JSON.stringify({ at: 1_800_000_000, by: 'other-key' }) // it took a web message
+  expect((await ask('Bash', { command: 'git push' })).decision).toEqual({ behavior: 'allow' })
+  expect(runs.some(a => a[2] === 'ask')).toBe(true)
+  notice(files, { ts: ts0 + 5, task: 'fix-it', kind: 'review', text: 'REPORT-fix-it' })
+  await clock.advance(31_000)                                   // the safety poll reads it
+  expect(woken.find(t => t.includes('REPORT-fix-it'))).toContain('wb chat reply')  // AWAY_NOTE
+  await $.prompt.submit({ text: 'back now' } as any)             // typed here: back, for every session
+  expect(JSON.parse(files['/wb/chat/away.json']).at).toBe(0)
+  const n = runs.length
+  expect((await ask('Bash', { command: 'git push' })).decision).toBeUndefined()
+  expect(runs.slice(n).some(a => a[2] === 'ask')).toBe(false)
+})
+
 test('a dialog wb chat ask refuses is announced on the phone, and a long plan or preview is cut to fit', async ($, on) => {
   // #535 (the 2026-11-20 audit): a long or CJK plan was refused, and the dialog sat in the
   // terminal with nothing posted and nothing said
@@ -1603,6 +1973,50 @@ test('a web message queued behind a running turn reads as read once that turn en
   await $.turn.complete(endTurn('t2'))
   await clock.advance(3000)
   expect(acks().length).toBe(2)                                    // once
+})
+
+test('a web message the turn didn\'t answer in the chat gets one follow-up, then a note on the phone (#767)', async ($, on) => {
+  // #767: Claude answered "Status" from the phone in the terminal only, release after release,
+  // and the phone heard nothing
+  const clock = mock.clock(on, { now: 1_800_000_000_000 })
+  const files: Record<string, string> = {}
+  fakeTasks(on, files, [])
+  chatOn(files)
+  on('ui.toast', () => ({ value: undefined }))
+  on('session.id', () => ({ value: 'sess-1' }))
+  const runs: string[][] = []
+  on('process.run', (_: any, e: any) => { runs.push(e.argv); return { value: { exitCode: 0, stdout: '', stderr: '' } } })
+  const asked: string[] = []
+  on('prompt.submit', (_: any, e: any) => { asked.push(e.text); return { text: e.text } })
+  on('tool.call', () => ({ result: { stdout: '' }, text: '' }))  // the engine's Bash
+  const posted = () => runs.filter(r => r[1] === 'chat' && r[2] === 'reply')
+  const followUps = () => asked.filter(a => a.includes("hasn't heard back"))
+  await $.session.start({ cwd: '/home/u/project', surface: 'terminal', isInteractive: true })
+  const say = async (id: string, text: string, ts: number) => {
+    files['/wb/chat/messages.jsonl'] = (files['/wb/chat/messages.jsonl'] ?? '') + JSON.stringify({ id, ts, from: 'user', text }) + '\n'
+    await clock.advance(31_000)
+  }
+  const turn = async (id: string, command?: string) => {
+    await $.turn.start({ text: '', turnId: id })
+    if (command) await $.tool.call({ tool: 'Bash', command })
+    await $.turn.complete(endTurn(id))
+    await clock.advance(3000)
+  }
+  await turn('t0', 'wb start t --spec s.md')                     // workbench mode: the chat listens
+  await say('m1', 'Status', 1_800_000_000)
+  expect(asked.filter(a => a.startsWith('[web chat] Status'))).toHaveLength(1)
+  await turn('t1')                                               // answered in the terminal only
+  expect(followUps()).toHaveLength(1)
+  expect(followUps()[0]).toContain('wb chat reply --text')
+  await turn('t2')                                               // the follow-up's turn: no reply either
+  expect(posted()).toEqual([['wb', 'chat', 'reply', '--text=Claude answered in the terminal; nothing was sent here.']])
+  await turn('t3')
+  expect([followUps().length, posted().length]).toEqual([1, 1])  // once per message
+
+  await say('m2', 'And now?', 1_800_000_100)
+  await turn('t4', 'wb chat reply --text "Two tasks run; done by six."')
+  await turn('t5')
+  expect([followUps().length, posted().length]).toEqual([1, 1])  // answered there: no follow-up, no note
 })
 
 test('only wb run as a command counts as delegating, read as bash reads it, not wb written in a string, a heredoc or a comment (#409, #560)', () => {
@@ -1851,6 +2265,28 @@ test('a session that enters workbench mode after its first message gets the note
   await clock.advance(31_000)
   expect(rows.length).toBe(2)                                      // once per change
   expect(asked).toEqual([])
+})
+
+test('after a reload the mod still tells the conversation of a rule change, such as wakes turned off (#697)', { options: { wake: 'off' } }, async ($, on) => {
+  // #697: what the conversation was told lived in `mem`, which a reload (here the wake option
+  // turned off) emptied, and prompt.context doesn't fire again: WAKE_OFF_NOTE was never said
+  const clock = mock.clock(on, { now: 1_800_000_000_000 })
+  const files: Record<string, string> = {}
+  task(files, 'fix-it', 'running', { repo: '/home/u/a', cwd: '/home/u/a' })
+  fakeTasks(on, files)
+  let reloaded = false
+  on('state.get', (_: any, e: any, next: any) => e.key === 'said' && e.plugin === 'workbench' && !reloaded   // the earlier load's
+    ? (reloaded = true, { value: { value: { shape: 'said-1', value: { notes: '', wakeOff: false, coding: 'decide' } }, version: 0 } }) : next(e))
+  on('ui.toast', () => ({ value: undefined }))
+  on('process.run', () => ({ value: { exitCode: 0, stdout: '', stderr: '' } }))
+  const rows: string[] = []
+  on('session.append', (_: any, e: any, next: any) => { rows.push(e.message.content[0].text); return next(e) })
+  on('prompt.submit', (_: any, e: any) => ({ text: e.text }))
+  await $.session.start({ cwd: '/home/u/a', surface: 'terminal', isInteractive: true })
+  await clock.advance(3000)
+  expect(rows.filter(r => r.includes('Wakes are off'))).toHaveLength(1)
+  await clock.advance(31_000)
+  expect(rows.filter(r => r.includes('Wakes are off'))).toHaveLength(1)   // once
 })
 
 test('a wb start that turns workbench mode on mid-session brings the notes as a row, or a turn when the row is refused (#540)', async ($, on) => {
@@ -2120,6 +2556,32 @@ test('the probe row says whether it works, and turned on without probe it asks C
   expect(toasts.at(-1)).toBe('workbench: Agent code navigation is on and working (probe-code 0.6.0): tasks started from now use it.')
   await clock.advance(5000)
   expect(asked).toHaveLength(1)                                     // working: nothing for Claude
+  await ui.unmount()
+})
+
+test('turning the web chat on from the pane says why wb couldn\'t, and pins no link (#690)', async ($, on) => {
+  // #690: setWeb ignored wb's failure; the row read On and the pane pinned a link that gave a 401
+  const clock = mock.clock(on, { now: 1_800_000_000_000 })
+  const files: Record<string, string> = {}
+  fakeTasks(on, files, [])
+  const toasts: string[] = []
+  on('ui.toast', (_: any, e: any) => { toasts.push(e.text); return { value: undefined } })
+  on('process.run', (_: any, e: any) => {
+    if (e.argv[1] === 'chat' && e.argv[2] === 'on') {             // wb leaves the switch off
+      return { value: { exitCode: 1, stdout: '', stderr: 'wb: web chat left off: another account\'s chat answers on port 1337: wb chat on --port <free port>\n' } }
+    }
+    if (e.argv[1] === 'chat' && e.argv[2] === 'url') return { value: { exitCode: 0, stdout: 'http://localhost:1337/#token=abc\n', stderr: '' } }
+    return { value: { exitCode: 0, stdout: '', stderr: '' } }
+  })
+  await $.session.start({ cwd: '/', surface: 'terminal', isInteractive: true })
+  await clock.advance(1000)
+  const ui = await $.ui.mount({ ...PANE, surface: 'terminal' })
+  await ui.press({ key: 'tab-settings' })
+  await ui.press({ key: 'chat' })
+  await ui.press({ key: 'chat:on' })
+  expect(toasts.some(t => t.includes("another account's chat answers on port 1337"))).toBe(true)
+  expect((await ui.find({ key: 'chat' }))?.props.label).toBe('▸ Web chat: Off (default)')
+  expect(await ui.find({ type: 'Text', text: /token=abc/ })).toBeUndefined()
   await ui.unmount()
 })
 
@@ -2647,6 +3109,15 @@ test('a card wb top knows but has no reading for says so, not nothing (#547)', (
   expect(text([{ index: 0, name: 'NVIDIA GeForce RTX 4090', driver: 'nvidia', stale: true }])[0]).toBe('GPU 0 NVIDIA GeForce RTX 4090 no reading ')
 })
 
+test('an idle Apple silicon Mac draws its RAM in use against all its RAM and names the GPU limit beside it (#701)', () => {
+  const lines = liveLines({ snap: { ts: 0, every: 2, running: [], rack: [], queue: [],
+    gpus: [{ name: 'Apple M2 (10-core GPU)', unified: true, total: 16 * 2 ** 30, used: 11.12 * 2 ** 30,
+      limit: 10.67 * 2 ** 30 }] }, busy: {} } as any)
+  const row = lines[0]
+  expect(row[2].color).toBe('success')  // under 80%: the GPU isn't full
+  expect(row.map(p => p.text).join('')).toContain(' 11.1/16.0 GiB · GPU may wire 10.7 GiB ')
+})
+
 test('a model all in RAM on a machine with no GPU memory is in RAM, not split (#551)', () => {
   const lines = liveLines({ snap: { ts: 0, every: 2, gpus: [], running: [], queue: [],
     rack: [{ model: 'ollama/m', label: 'M', state: 'cpu', cpu_bytes: 2 ** 33 }] }, busy: {} } as any)
@@ -2777,4 +3248,25 @@ test("a web message's attachments reach Claude as one path each, with size and t
   expect(attachedLines([{ id: 'a', name: 'p.jpg', size: 2_202_009, type: 'image/jpeg', path: '/s/chat/uploads/a/p.jpg' },
     { id: 'b', name: 'n.txt', size: 300, type: 'text/plain', path: '/s/chat/uploads/b/n.txt' }, { id: 'c' }]))
     .toBe('\n[attached: /s/chat/uploads/a/p.jpg (2.1 MB, image/jpeg)]\n[attached: /s/chat/uploads/b/n.txt (300 B, text/plain)]')
+})
+
+test('the stats tab folds a model with its window variants, newest first, and sums up the older ones', () => {
+  // #638: every model that ever ran a task, forever, each wb optimize window on its own line
+  const said = (f: any) => statsLines({ tasks: 40, ...f }).map(l => `${l.label}: ${l.text}`)
+  const lines = said({
+    models: { 'ollama/q': { tasks: 1, accepted_pct: 0 }, 'strata/strata': { tasks: 1, accepted_pct: 0 } },
+    model_lines: {
+      lines: [{ model: 'ollama/q', windows: [32768, 40960, 65536], tasks: 37, accepted_pct: 94 },
+        { model: 'ollama/small', windows: [32768], tasks: 2, accepted_pct: 50 }],
+      older: { models: 2, tasks: 4 },
+    },
+  })
+  expect(lines).toContain('ollama/q (32K, 40K, 64K): 37 tasks · 94% landed')
+  expect(lines).toContain('ollama/small: 2 tasks · 50% landed')
+  expect(lines).toContain('Older models: 2 older models: 4 tasks (wb stats --all)')
+  expect(lines.join('\n')).not.toMatch(/strata/)
+  expect(lines.indexOf('ollama/q (32K, 40K, 64K): 37 tasks · 94% landed'))
+    .toBeLessThan(lines.indexOf('ollama/small: 2 tasks · 50% landed'))
+  expect(said({ models: { 'ollama/old': { tasks: 3, accepted_pct: 67 } } }))  // an older wb's feed
+    .toContain('ollama/old: 3 tasks · 67% landed')
 })

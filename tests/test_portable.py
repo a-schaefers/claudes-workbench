@@ -22,8 +22,11 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))  # run as a scri
 
 from unittest import mock
 
-from workbench import context, images, media, models, router, store, watch
+from workbench import context, images, media, models, results, router, store, watch
 from tests.test_workbench import Base, TEST_CMD, run_wb, wait_phase
+
+
+REAL_SLEPT = models.slept  # Real stands a machine that never sleeps in for it (#716)
 
 
 def serve(routes: dict) -> tuple[ThreadingHTTPServer, str]:
@@ -40,6 +43,43 @@ def serve(routes: dict) -> tuple[ThreadingHTTPServer, str]:
             self.send_response(200 if body is not None else 404)
             self.end_headers()
             self.wfile.write(json.dumps(body if body is not None else {"error": "no"}).encode())
+
+        def log_message(self, *a):
+            pass
+    srv = ThreadingHTTPServer(("127.0.0.1", 0), H)
+    threading.Thread(target=srv.serve_forever, daemon=True).start()
+    return srv, f"http://127.0.0.1:{srv.server_address[1]}"
+
+
+def fake_lmstudio(loaded: dict, posts: list):
+    """An LM Studio with just-in-time loading on, models a and b: /v1/models lists both,
+    /api/v1/models their ``loaded`` instances (instance id -> context length); POST
+    /api/v1/models/load and /unload are recorded in ``posts`` and load or unload."""
+    class H(BaseHTTPRequestHandler):
+        def reply(self, body):
+            self.send_response(200)
+            self.end_headers()
+            self.wfile.write(json.dumps(body).encode())
+
+        def do_GET(self):
+            if self.path == "/v1/models":
+                return self.reply({"data": [{"id": "a"}, {"id": "b"}]})
+            if self.path == "/api/v1/models":
+                return self.reply({"models": [
+                    {"key": k, "loaded_instances": [{"id": i, "config": {"context_length": c}}
+                                                    for i, c in loaded.items() if i == k]}
+                    for k in ("a", "b")]})
+            self.send_response(404)
+            self.end_headers()
+
+        def do_POST(self):
+            body = json.loads(self.rfile.read(int(self.headers.get("Content-Length") or 0)) or b"{}")
+            posts.append((self.path, body))
+            if self.path == "/api/v1/models/load":
+                loaded[body["model"]] = body.get("context_length", 4096)
+            elif self.path == "/api/v1/models/unload":
+                loaded.pop(body["instance_id"], None)
+            self.reply({})
 
         def log_message(self, *a):
             pass
@@ -112,6 +152,9 @@ class Real(unittest.TestCase):
         no_gpu = mock.patch.object(models.hardware, "gpus", lambda windows=True: [])  # this machine's
         no_gpu.start()  # would decide what fits; a test that wants a budget sets models.json gpu_gb
         self.addCleanup(no_gpu.stop)
+        awake = mock.patch.object(models, "slept", lambda: 0.0)  # this machine's suspends would
+        awake.start()  # excuse the past stamps the tests set (#716); a test that wants one sets it
+        self.addCleanup(awake.stop)
 
     def tearDown(self):
         for s in self.servers:
@@ -155,6 +198,35 @@ class Real(unittest.TestCase):
                 mock.patch.object(models.time, "monotonic", lambda: later):
             models.discover()
         self.assertEqual(len(probes), 2)
+
+    def test_a_sleeping_remote_ollama_is_asked_once_per_pass_by_wb_models_and_routing(self):
+        # #705: each model's status asked the box again into a 2.5 s timeout: wb models took 31 s
+        # and each wb start 10 s for a remote of 4 models, though the task ran on a local one
+        from workbench import cli
+        dead = socket.socket()
+        dead.bind(("127.0.0.1", 0))
+        port = dead.getsockname()[1]
+        dead.close()  # nothing listens there now
+        here = self.server({"/v1/models": {"data": [{"id": "local"}]}})
+        self.config({"box": {"options": {"baseURL": f"http://127.0.0.1:{port}/v1"},
+                             "models": {n: {} for n in ("a", "b", "c", "d")}},
+                     "s": {"options": {"baseURL": here + "/v1"}, "models": {"local": {}}}},
+                    {"box": {"engine": "ollama"}, "s": {"engine": "server"}})
+        asked = []
+        real = models._open
+
+        def counting(target, timeout):
+            url = target.full_url if hasattr(target, "full_url") else target
+            if f":{port}/" in url:
+                asked.append(url)
+            return real(target, timeout)
+        with mock.patch.object(models, "_open", counting):
+            self.assertEqual(router.choose("significant")[0].model.id, "s/local")
+            self.assertEqual(len(asked), 1)
+            asked.clear()
+            with redirect_stdout(io.StringIO()):
+                cli.main(["models"])
+        self.assertEqual(len(asked), 1)
 
     def test_an_ollama_behind_a_key_is_probed_with_it_and_known_as_ollama(self):
         class H(BaseHTTPRequestHandler):
@@ -438,7 +510,8 @@ class Real(unittest.TestCase):
         next(r for r in loaded if r["name"] == "x")["size_vram"] = 5  # x partly on the CPU
         over(gpu_gb=20)
         models.make_resident(x(), say=lambda m: None)
-        self.assertEqual([p["model"] for p in posts], ["emb", "x"])  # room is made, x reloaded
+        self.assertEqual([(p["model"], p.get("keep_alive")) for p in posts],
+                         [("emb", 0), ("x", 0), ("x", "30m")])  # room is made, x placed again (#703)
         posts.clear()
         over()                                # no budget known: the GPU is freed, as before
         loaded.append({"name": "chat", "size": gb, "size_vram": gb})
@@ -446,6 +519,41 @@ class Real(unittest.TestCase):
         posts.clear()
         models.make_resident(x(), say=lambda m: None)
         self.assertEqual([p["model"] for p in posts], ["chat", "x"])
+
+    def test_a_model_loaded_partly_on_the_cpu_is_placed_again_once_it_fits_and_only_once(self):
+        # #703: loaded while something else held the VRAM, x stayed 30% on the CPU for the whole
+        # task: resident with nothing else beside it read as placed, and a generate reuses the
+        # loaded runner as it is. Now it is unloaded and loaded again, once
+        gb = 10 ** 9
+        loaded = [{"name": "x", "size": 10 * gb, "size_vram": 7 * gb}]
+        found, posts = self.own(loaded, ["x"])
+        over = lambda **kw: Path(os.environ["WB_MODELS"]).write_text(json.dumps(kw))  # noqa: E731
+        x = lambda: models.discover()["a/x"]  # noqa: E731
+        models._RESPREAD.clear()
+        self.addCleanup(models._RESPREAD.clear)
+        over(gpu_gb=8)                         # 10 GB never fits 8: left as it is, no reload
+        self.assertEqual(models.make_resident(x(), say=lambda m: None), 0.0)
+        self.assertEqual(posts, [])
+        over(gpu_gb=12)
+        models.make_resident(x(), say=lambda m: None, warn=lambda m: None)
+        self.assertEqual([(p["model"], p.get("keep_alive")) for p in posts], [("x", 0), ("x", "30m")])
+        posts.clear()
+        loaded[:] = [{"name": "x", "size": 10 * gb, "size_vram": 7 * gb}]   # split again all the same
+        self.assertEqual(models.make_resident(x(), say=lambda m: None), 0.0)  # not every round
+        self.assertEqual(posts, [])
+
+    def test_free_gpu_waits_for_a_stopped_servers_vram_before_ollama_loads(self):
+        # #703: pkill llama-server returns before its memory is freed, and Ollama loading at once
+        # put part of the model on the CPU
+        srv = self.server({"/v1/models": {"data": [{"id": "m"}]}})
+        self.config({"s": {"options": {"baseURL": srv + "/v1"}, "models": {"m": {}}}}, {"s": {"stop": "true"}})
+        used = iter([8 * 2 ** 30, 5 * 2 ** 30, 2 * 2 ** 30, 2 * 2 ** 30])
+        reads = []
+        with mock.patch.object(models.hardware, "gpus", lambda windows=True: reads.append(1) or [
+                {"name": "card", "vram": 16 * 2 ** 30, "vram_used": next(used)}]), \
+                mock.patch.object(models, "time", mock.Mock(wraps=time, sleep=lambda s: None)):
+            models.free_gpu(say=lambda m: None)
+        self.assertEqual(len(reads), 4)        # until the used VRAM stopped falling
 
     def test_a_llama_server_or_vllm_answering_a_request_is_not_idle(self):
         # #465 (the audit of 1.8): only a JSON /metrics `live.state` was read; llama-server and
@@ -473,6 +581,24 @@ class Real(unittest.TestCase):
                  ({"/metrics": prom("vllm:num_requests_running", "0.0")}, True),
                  ({"/metrics": {"live": {"state": "generating"}}}, False),
                  ({}, True)]                                   # says nothing: idle, as before
+        # #715: SGLang's and TGI's own /metrics text, as they print it, answering one request
+        sglang = ('# HELP sglang:num_running_reqs The number of running requests.\n'
+                  '# TYPE sglang:num_running_reqs gauge\n'
+                  'sglang:num_running_reqs{{model_name="Qwen/Qwen2.5-Coder-7B-Instruct"}} {run}\n'
+                  '# HELP sglang:num_queue_reqs The number of requests in the waiting queue.\n'
+                  '# TYPE sglang:num_queue_reqs gauge\n'
+                  'sglang:num_queue_reqs{{model_name="Qwen/Qwen2.5-Coder-7B-Instruct"}} {queue}\n'
+                  '# TYPE sglang:gen_throughput gauge\n'
+                  'sglang:gen_throughput{{model_name="Qwen/Qwen2.5-Coder-7B-Instruct"}} 41.2\n')
+        tgi = ('# TYPE tgi_batch_current_size gauge\ntgi_batch_current_size {batch}\n'
+               '# TYPE tgi_queue_size gauge\ntgi_queue_size {queue}\n'
+               '# TYPE tgi_request_count counter\ntgi_request_count 17\n')
+        cases += [({"/metrics": sglang.format(run="1.0", queue="0.0")}, False),
+                  ({"/metrics": sglang.format(run="0.0", queue="2.0")}, False),
+                  ({"/metrics": sglang.format(run="0.0", queue="0.0")}, True),
+                  ({"/metrics": tgi.format(batch="1", queue="0")}, False),
+                  ({"/metrics": tgi.format(batch="0", queue="3")}, False),
+                  ({"/metrics": tgi.format(batch="0", queue="0")}, True)]
         for page, idle in cases:
             pages.clear()
             pages.update(page)
@@ -533,6 +659,29 @@ class Real(unittest.TestCase):
         self.assertIn("long on ollama was still in use after", warned[-1])
         self.assertEqual([p["model"] for p in posts], ["long"])   # the GPU is the task's after all
         self.assertFalse(models._in_use({"r": []}))            # nothing to watch: no wait at all
+
+    def test_an_idle_models_stamp_left_past_by_a_suspend_is_not_taken_for_a_request(self):
+        # #716: Ollama's unload timer stops in a suspend while its wall-clock expires_at doesn't,
+        # so after the lid opened an idle model read as answering someone and the next task
+        # waited for nothing behind a warning
+        at = lambda s: time.strftime("%Y-%m-%dT%H:%M:%S", time.gmtime(time.time() + s)) + ".1Z"  # noqa
+        idle = {"name": "idle", "size": 10, "size_vram": 10, "expires_at": at(-600)}
+        found, posts = self.own([idle], [])
+        warned = []
+        with mock.patch.object(models, "slept", lambda: 3600.0), \
+                mock.patch.object(models, "INFLIGHT_WATCH", 0.3), mock.patch.object(models, "INFLIGHT_WAIT", 5):
+            t0 = time.monotonic()
+            models.free_gpu(say=lambda m: None, warn=warned.append)
+        self.assertLess(time.monotonic() - t0, 3)
+        self.assertEqual((warned, [p["model"] for p in posts]), ([], ["idle"]))
+        self.assertTrue(models._past(at(-600)))                # never asleep: a request past it
+        with mock.patch.object(models, "slept", lambda: 60.0):
+            self.assertTrue(models._past(at(-600)))            # later than any sleep explains
+        clocks = {getattr(time, "CLOCK_BOOTTIME", -1): 5000.0, time.CLOCK_MONOTONIC: 1400.0}
+        with mock.patch.object(models.hardware, "system", lambda: "linux"), \
+                mock.patch.object(models.time, "clock_gettime", lambda c: clocks.get(c, 0.0)):
+            if hasattr(time, "CLOCK_BOOTTIME"):
+                self.assertEqual(REAL_SLEPT(), 3600.0)            # BOOTTIME counts the suspends
 
     def test_waiting_for_someone_elses_request_asks_ollama_at_most_once_a_second(self):
         # #459 (the audit of 1.8, reproduced): a stamp already past is busy at once, so each
@@ -657,7 +806,7 @@ class Real(unittest.TestCase):
         self.config({"one": {"options": {"baseURL": srv + "/v1"}, "models": {"z": {}}}})
         self.assertEqual([m.id for m in models.resident()], ["one/z"])
         said, t0 = [], time.time()
-        with mock.patch.object(media.hardware, "gpus", lambda windows=True: []):
+        with mock.patch.object(models.hardware, "gpus", lambda windows=True: []):
             media.settle(said.append, timeout=30)
         self.assertLess(time.time() - t0, 5)
         self.assertEqual(said, [])
@@ -928,6 +1077,38 @@ class Real(unittest.TestCase):
         state.update(v1={"data": []}, lms=rows())                               # none loaded
         self.assertTrue(models.status(found["lms/b"])["available"])
 
+    def test_lm_studio_unloads_the_model_a_switch_leaves_and_reloads_one_with_a_short_window(self):
+        # #645 (the audit of main): LM Studio evicts only its just-in-time loads, never what
+        # /api/v1/models/load loaded, and free_gpu skipped the kept model's server: each switch
+        # between two of its models stacked one more in VRAM, and an instance loaded with the
+        # UI's 4K window was kept, so short_window failed the task
+        loaded, posts = {"a": 32768}, []
+        srv, url = fake_lmstudio(loaded, posts)
+        self.servers.append(srv)
+        win = {"limit": {"context": 32768}}
+        self.config({"lms": {"options": {"baseURL": url + "/v1"}, "models": {"a": win, "b": win}}},
+                    {"lms": {"engine": "server"}})
+        found = models.discover()
+        models.make_resident(found["lms/b"], say=lambda *_: None)
+        self.assertEqual(loaded, {"b": 32768})                    # a let go, b with OpenCode's window
+        self.assertEqual(posts, [("/api/v1/models/unload", {"instance_id": "a"}),
+                                 ("/api/v1/models/load", {"model": "b", "context_length": 32768})])
+        self.assertEqual(models.make_resident(found["lms/b"], say=lambda *_: None), 0.0)
+        loaded.update(a=4096)                                     # someone loads a beside it
+        models.make_resident(found["lms/b"], say=lambda *_: None)
+        self.assertEqual(loaded, {"b": 32768})
+        loaded.clear()
+        loaded["a"] = 4096                                         # a, loaded in the UI at 4K
+        posts.clear()
+        models.make_resident(found["lms/a"], say=lambda *_: None)
+        self.assertEqual(loaded, {"a": 32768})
+        self.assertEqual(posts, [("/api/v1/models/unload", {"instance_id": "a"}),
+                                 ("/api/v1/models/load", {"model": "a", "context_length": 32768})])
+        Path(os.environ["WB_MODELS"]).write_text(json.dumps({"lms": {"engine": "server"},
+                                                             "keep_loaded": ["lms/a"]}))
+        models.make_resident(found["lms/b"], say=lambda *_: None)
+        self.assertEqual(loaded, {"a": 32768, "b": 32768})        # keep_loaded is kept
+
     def test_lm_studio_says_each_models_size_window_and_tool_training(self):
         from workbench import cli
         lms = self.server({"/api/v1/models": {"models": [
@@ -1035,6 +1216,50 @@ class Real(unittest.TestCase):
         with self.assertRaises(SystemExit), redirect_stdout(out):
             cli.main(["doctor"])
         self.assertIn("BAD v/coder says a 128K context but the server serves 32K", out.getvalue())
+
+    def test_models_a_server_gives_no_size_are_ranked_by_their_names_or_start_file_and_say_so(self):
+        # #704: vLLM's /v1/models has no size, so every weight was 0: small-3b listed first took
+        # significant work as "the largest model", and trivial work as "the smallest"
+        from workbench import cli
+        vllm = self.server({"/v1/models": {"data": [{"id": "small-3b", "owned_by": "vllm"},
+                                                    {"id": "big-70b", "owned_by": "vllm"},
+                                                    {"id": "coder", "owned_by": "vllm"}]}})
+        entry = {"limit": {"context": 32768}}
+        self.config({"v": {"options": {"baseURL": vllm + "/v1"},
+                           "models": {"small-3b": entry, "big-70b": entry}}}, {"v": {"engine": "server"}})
+        top, why = router.choose("significant")
+        self.assertEqual(top.model.id, "v/big-70b")
+        self.assertIn("the largest model allowed significant work (its size guessed from its name)", why)
+        self.assertEqual(router.choose("trivial")[0].model.id, "v/small-3b")
+        self.assertEqual(models.guessed_weights(models.Model(
+            id="o/m", provider="o", name="mixtral-8x7b-instruct", base_url="", engine="server", label="o/m")), 56 * 10 ** 9)
+        self.assertEqual(models.guessed_weights(models.Model(
+            id="o/m", provider="o", name="qwen3-30b-a3b", base_url="", engine="server", label="o/m")), 30 * 10 ** 9)
+        # no size anywhere: said, not called the largest
+        self.config({"v": {"options": {"baseURL": vllm + "/v1"}, "models": {"coder": entry, "small-3b": entry}}},
+                    {"v": {"engine": "server"}})
+        top, why = router.choose("significant")
+        self.assertIn("v/coder: size unknown, models.json weights_gb sets it", why)
+        self.assertEqual(top.model.id, "v/small-3b")
+        self.config({"v": {"options": {"baseURL": vllm + "/v1"}, "models": {"coder": entry}},
+                     "w": {"options": {"baseURL": vllm + "/v1"}, "models": {"coder": entry}}},
+                    {"v": {"engine": "server"}, "w": {"engine": "server"}})
+        self.assertIn("sizes unknown: config order; models.json weights_gb sets a model's size",
+                      router.choose("significant")[1])
+        out = io.StringIO()
+        with redirect_stdout(out):
+            cli.main(["models"])
+        self.assertIn("size: unknown (the server says none; models.json weights_gb sets it)", out.getvalue())
+        out = io.StringIO()
+        with contextlib.suppress(SystemExit), redirect_stdout(out):
+            cli.main(["doctor"])
+        self.assertIn("--  v/coder: its size is unknown (the server says none)", out.getvalue())
+        # a llama-server start command's -m file is the size, measured
+        gguf = Path(self.tmp.name, "coder.gguf")
+        gguf.write_bytes(b"\0" * 4096)
+        self.config({"v": {"options": {"baseURL": vllm + "/v1"}, "models": {"coder": entry}}},
+                    {"v": {"engine": "server"}, "v/coder": {"start": f"llama-server -m {gguf} --port 1"}})
+        self.assertEqual(models.weights(models.discover()["v/coder"]), 4096)
 
     def test_doctor_scout_and_add_ask_ollama_by_an_aliased_entrys_id(self):
         # #588 (the audit of 1.90): `ollama/coder` with id qwen3-coder:30b; doctor asked Ollama
@@ -1246,9 +1471,9 @@ def free_port() -> int:
         return sk.getsockname()[1]
 
 
-def fake_remote_ollama(tags: list[dict], shows: dict[str, dict]):
-    """An Ollama on another machine (a free port here): /api/tags lists ``tags``, POST /api/show
-    answers ``shows[name]``."""
+def fake_remote_ollama(tags: list[dict], shows: dict[str, dict], host: str = "127.0.0.1"):
+    """An Ollama on another machine (a free port here, on ``host``: "::1" listens on IPv6):
+    /api/tags lists ``tags``, POST /api/show answers ``shows[name]``."""
     class H(BaseHTTPRequestHandler):
         def reply(self, body):
             self.send_response(200 if body is not None else 404)
@@ -1265,7 +1490,9 @@ def fake_remote_ollama(tags: list[dict], shows: dict[str, dict]):
 
         def log_message(self, *a):
             pass
-    srv = ThreadingHTTPServer(("127.0.0.1", 0), H)
+    server = type("V6", (ThreadingHTTPServer,), {"address_family": socket.AF_INET6}) if ":" in host \
+        else ThreadingHTTPServer
+    srv = server((host, 0), H)
     threading.Thread(target=srv.serve_forever, daemon=True).start()
     return srv, srv.server_address[1]
 
@@ -1342,6 +1569,29 @@ class Remote(unittest.TestCase):
         self.assertNotIn(pid, json.loads(Path(os.environ["WB_OPENCODE_CONFIG"]).read_text())["provider"])
         self.assertEqual(json.loads(Path(os.environ["WB_MODELS"]).read_text()),
                          {"keep/me": {"sizes": ["trivial"]}})            # only its own entries go
+
+    def test_wb_remote_brackets_a_bare_ipv6_address_and_either_spelling_is_one_provider(self):
+        # #707: `wb remote ::1` wrote http://::1:PORT/v1, which the probe reached and discovery
+        # couldn't parse: no models, and retrying as [::1] hit a provider conflict
+        ctx = {"llama.context_length": 131072}
+        try:
+            srv, port = fake_remote_ollama([{"name": "coder:7b"}],
+                                           {"coder:7b": {"capabilities": ["tools"], "model_info": ctx}}, host="::1")
+        except OSError:
+            self.skipTest("no IPv6 loopback here")
+        self.servers.append(srv)
+        self.config({}, {})
+        code, out = self.wb("remote", "::1", "--port", str(port), "--context", "32768")
+        self.assertEqual(code, 0, out)
+        pid = models.remote_pid("::1")
+        prov = json.loads(Path(os.environ["WB_OPENCODE_CONFIG"]).read_text())["provider"][pid]
+        self.assertEqual(prov["options"]["baseURL"], f"http://[::1]:{port}/v1")
+        self.assertIn(f"{pid}/coder:7b", models.discover())
+        code, out = self.wb("remote", "[::1]", "--port", str(port), "--context", "32768")
+        self.assertEqual(code, 0, out)                                   # the same provider, reused
+        self.assertEqual(self.wb("remote", "[::1]", "--remove")[0], 0)
+        with self.assertRaises(RuntimeError):
+            models.remote_root("bad host", 11434)
 
     def test_wb_remote_never_takes_over_or_deletes_a_provider_it_didnt_add(self):
         # #197 (the 2026-11-19 audit): the provider id comes from the host alone, so a provider of
@@ -1448,6 +1698,7 @@ class Optimize(unittest.TestCase):
         srv = ThreadingHTTPServer(("127.0.0.1", 0), H)
         threading.Thread(target=srv.serve_forever, daemon=True).start()
         self.servers.append(srv)
+        self.tags = tags  # what /api/tags lists: a test may repoint a tag (#709)
         self.config({"ollama": {"options": {"baseURL": f"http://127.0.0.1:{srv.server_address[1]}/v1"},
                                 "models": {"m": entry or {"limit": {"context": window, "output": 4096},
                                                           "options": {"reasoningEffort": "none"}}}}}, extra)
@@ -1598,6 +1849,61 @@ class Optimize(unittest.TestCase):
         self.assertEqual((sv.tries, sv.wins, sm.tries), (1, 1, 1))   # one record, both ways
         self.assertEqual(router.lineage(m), {"ollama/m", "ollama/m:48k"})
 
+    def test_a_models_weights_are_known_by_ollamas_digest_and_asked_once_a_while(self):
+        # #726: what tells a model swapped under the same id from the one its record is about
+        self.ollama(32768)
+        m = models.discover()["ollama/m"]
+        models._IDS.clear()
+        asked = []
+        tags = {"models": [{"name": "m", "digest": "0123456789abcdef0123456789"}]}
+        with mock.patch.object(models, "_get", lambda url, timeout=2.5: asked.append(url) or tags):
+            self.assertEqual(models.identity(m), "ollama:0123456789abcdef")
+            self.assertEqual(models.identity(m), "ollama:0123456789abcdef")
+            self.assertEqual(len(asked), 1)                                 # within FACTS_TTL
+            models._IDS.clear()
+            tags["models"][0]["digest"] = "fedcba9876543210fedcba"           # re-pulled
+            self.assertEqual(models.identity(m), "ollama:fedcba9876543210")
+            models._IDS.clear()
+            tags["models"] = []                                             # not pulled: unknown
+            self.assertIsNone(models.identity(m))
+        models._IDS.clear()
+
+    def test_a_variant_of_a_variant_keeps_the_first_sources_record_and_leads_alone(self):
+        # #723 (reproduced): apply on a variant wrote variant_of the variant, lineage followed one
+        # level, so the source's tasks left the record, and with both the source and the first
+        # variant `replaced` the router went back to the spilling source; retiring a variant
+        # dropped its rows from the record
+        import io
+        from contextlib import redirect_stdout
+        from workbench import cli, optimize
+        self.ollama(65536)
+        for i in range(3):
+            store.append_jsonl(store.home() / "results.jsonl", {"task": f"t{i}", "model": "ollama/m",
+                                                                "size": "trivial", "outcome": "accepted", "ran": True})
+        m = models.discover()["ollama/m"]
+        optimize._record(m.id, {"window": 65536, "fits": 49152, "spill": 12, "tried": []})
+        optimize.apply(m)
+        v1 = models.discover()["ollama/m:48k"]
+        store.append_jsonl(store.home() / "results.jsonl", {"task": "t3", "model": v1.id,
+                                                            "size": "trivial", "outcome": "accepted", "ran": True})
+        optimize._record(v1.id, {"window": 49152, "fits": 32768, "spill": 9, "tried": []})  # a new card
+        optimize.apply(v1)
+        v2 = models.discover()["ollama/m:32k"]
+        self.assertEqual((v2.extra["variant_of"], v2.extra["replaces"]), ("ollama/m", "ollama/m:48k"))
+        self.assertEqual(router.lineage(v2), {"ollama/m", "ollama/m:48k", "ollama/m:32k"})
+        self.assertEqual(router.score(v2, "trivial").tries, 4)
+        self.assertEqual([s.model.id for s in router.rank("trivial")][0], "ollama/m:32k")
+        self.assertEqual(router.replaced([v2.id]), {"ollama/m", "ollama/m:48k"})
+        # an older apply's chain (variant_of the variant itself) is followed to the source too
+        models.set_override(v2.id, "variant_of", v1.id)
+        models.set_override(v2.id, "replaces", None)
+        self.assertEqual(router.lineage(models.discover()[v2.id]), {"ollama/m", "ollama/m:48k", "ollama/m:32k"})
+        self.assertEqual(router.replaced([v2.id]), {"ollama/m", "ollama/m:48k"})
+        with redirect_stdout(io.StringIO()):
+            cli.main(["model", "retire", v1.id])
+        self.assertNotIn(v1.id, models.discover())
+        self.assertEqual(router.score(models.discover()["ollama/m"], "trivial").tries, 4)  # its row stays
+
     def test_a_source_measured_again_after_its_apply_gets_no_advice_to_apply_it_again(self):
         # the review of #584: a run that measured the source again (a changed GPU, --all, a
         # stopped run) wrote its row without `applied`, the advice came back, and the command it
@@ -1633,8 +1939,11 @@ class Optimize(unittest.TestCase):
         self.assertGreater(runner.compaction_buffer(entry), 0)
         self.assertLess(runner.compaction_buffer(entry), 16384)
         self.assertEqual(optimize.budget({"limit": {"context": 8192, "output": 1024}}, 8192)[0]["input"], 7168)
-        kept = optimize.budget({"limit": {"output": 32768}, "options": {"max_tokens": 32768}}, 65536)
-        self.assertEqual((kept[0]["output"], kept[1]["max_tokens"]), (32768, 32768))  # half: room left
+        kept = optimize.budget({"limit": {"output": 20480}, "options": {"max_tokens": 20480}}, 65536)
+        self.assertEqual((kept[0]["output"], kept[1]["max_tokens"]), (20480, 20480))  # room left
+        # half the window leaves under a step's growth past the earliest handover point (#644)
+        cut = optimize.budget({"limit": {"output": 32768}, "options": {"max_tokens": 32768}}, 65536)
+        self.assertEqual((cut[0]["output"], cut[1]["max_tokens"]), (16384, 16384))
 
     def test_two_tags_of_one_model_get_names_of_their_own_and_a_taken_name_is_refused(self):
         # the 2026-11-19 audit: family:7b and family:32b both became family-16k, the second
@@ -1730,6 +2039,35 @@ class Optimize(unittest.TestCase):
             self.assertIn("measuring the GPU for 2 local model(s) (the GPU changed)", out[0])
             self.assertIn("a task you start goes first", out[0])
             self.assertNotIn("--all", popen.call_args[0][0])
+
+    def test_a_fit_is_due_again_when_its_models_window_or_weights_change_and_only_that_one(self):
+        # #709: the fit was keyed to the GPUs alone: an entry raised from 32K to 64K, or a tag
+        # repointed at other weights, kept its old fit and no run was due
+        from workbench import optimize
+        self.ollama(32768)
+        self.tags[0]["digest"] = "sha256:aaa"
+        gpu = [{"name": "Card A", "vram": 16e9}]
+        cfg_path = Path(os.environ["WB_OPENCODE_CONFIG"])
+
+        def window(n):
+            cfg = json.loads(cfg_path.read_text())
+            cfg["provider"]["ollama"]["models"]["m"]["limit"]["context"] = n
+            cfg_path.write_text(json.dumps(cfg))
+        with mock.patch.object(optimize.hardware, "gpus", lambda windows=True: gpu):
+            m = models.discover()["ollama/m"]
+            optimize._record(m.id, {**optimize.fit(m, 262144), "digest": optimize.digest(m)})
+            store.write_json(optimize.path(), {**optimize.state(), "done": 1, "stopped": None,
+                                               "hardware": optimize.fingerprint()})
+            self.assertEqual(optimize.due(), "")
+            window(65536)
+            self.assertEqual(optimize.due(), "ollama/m's window changed")
+            window(32768)
+            self.assertEqual(optimize.due(), "")
+            self.tags[0]["digest"] = "sha256:bbb"           # ollama pull m: other weights, one name
+            self.assertEqual(optimize.due(), "ollama/m's weights changed")
+            del optimize.state()["models"][m.id]["digest"]  # a fit from before: its window alone
+            rows = optimize.state()["models"]
+            self.assertEqual(optimize.stale(m, {k: v for k, v in rows[m.id].items() if k != "digest"}), "")
 
     def test_a_model_it_could_not_measure_is_remembered_and_not_due_again_each_session(self):
         # #583, the audit of 1.90: a model skipped (its remote server busy) left no row and was
@@ -2074,6 +2412,27 @@ class ServerRestarted(Base):
         self.assertIn("opencode exited 1 with the model's server down: wb starts it again and the "
                       "round runs again", [r["text"] for r in rows if r.get("kind") == "load"])
 
+    def test_a_server_that_dies_after_the_models_first_words_is_revived_too(self):
+        # #657: the revive needed a round with no text, but an out-of-memory kill comes late in a
+        # round, after "Let me look at the parser": the task failed and counted against the model
+        os.environ["FAKE_DOWN"] = str(self.down)
+        self.start("t-talk", "crashtalk", "--test", TEST_CMD, "--model", "s/m")
+        st = wait_phase("t-talk", {"review", "stuck", "failed"}, timeout=90)
+        self.assertEqual(st["phase"], "review", st.get("last"))
+        self.assertTrue(st["tests"]["ok"])                              # the round, run again
+        self.assertEqual(self.starts.read_text().count("\n"), 1)
+
+    def test_a_round_left_silent_by_a_server_that_died_is_revived_not_reported_stuck(self):
+        # #657: OpenCode retrying a server that is gone, until the silence guard stops the round
+        os.environ.update(FAKE_DOWN=str(self.down), FAKE_CRASH_HANG="1")
+        self.start("t-hush", "crashtalk", "--test", TEST_CMD, "--model", "s/m",
+                   "--silence-timeout", "3")
+        st = wait_phase("t-hush", {"review", "stuck", "failed"}, timeout=90)
+        self.assertEqual(st["phase"], "review", st.get("last"))
+        rows, _ = store.read_jsonl(store.Task("t-hush").dir / "events.jsonl")
+        self.assertIn("the round went silent with the model's server down: wb starts it again and "
+                      "the round runs again", [r["text"] for r in rows if r.get("kind") == "load"])
+
     def test_a_second_crash_in_the_same_round_still_fails_the_task(self):
         os.environ["FAKE_DOWN"] = str(self.down)
         # the start brings the server back but the crash marker goes too: it crashes again
@@ -2083,6 +2442,65 @@ class ServerRestarted(Base):
         st = wait_phase("t-oom2", {"review", "stuck", "failed"}, timeout=90)
         self.assertEqual((st["phase"], st["last"]), ("failed", "opencode exited 1"))
         self.assertEqual(self.starts.read_text().count("\n"), 1)        # revived once a round
+        # the machine's failure, not the step's: the model's slice isn't shrunk for it (#657)
+        self.assertEqual(st.get("infra"), "model")
+        note = [r for r in store.notices() if r["task"] == "t-oom2"][-1]
+        self.assertEqual(note["cause"], "server")
+        self.assertFalse(results.step(store.Task("t-oom2"), False)["stuck"])
+
+
+class WindowsServer(Base):
+    """#663: on WSL2's default NAT networking a server on Windows never answers on 127.0.0.1, so
+    first run said no server answers here, and Claude proposed a second one inside WSL."""
+
+    def test_the_windows_host_is_read_from_the_default_route_else_the_resolver(self):
+        tmp = Path(self.tmp.name)
+        route, resolv = tmp / "route", tmp / "resolv.conf"
+        route.write_text("Iface\tDestination\tGateway \tFlags\n"
+                         "eth0\t0010A8C0\t00000000\t0001\neth0\t00000000\t0110A8C0\t0003\n")
+        resolv.write_text("# generated by WSL\nnameserver 172.20.0.1\n")
+        with mock.patch.object(models, "ROUTE", route), mock.patch.object(models, "RESOLV", resolv):
+            with mock.patch.object(models.hardware, "system", return_value="linux"):
+                self.assertIsNone(models.windows_host())
+            with mock.patch.object(models.hardware, "system", return_value="wsl"):
+                self.assertEqual(models.windows_host(), "192.168.16.1")
+                route.write_text("Iface\tDestination\tGateway\n")
+                self.assertEqual(models.windows_host(), "172.20.0.1")
+
+    def test_a_server_at_the_windows_host_is_found_and_said_to_need_local(self):
+        from workbench import cli
+        os.environ.pop("WB_FAKE_MODELS")
+        srv, url = serve({"/v1/models": {"data": [{"id": "qwen-coder"}]}})
+        self.addCleanup(srv.server_close)
+        self.addCleanup(srv.shutdown)
+        port = srv.server_address[1]
+        try:  # the Windows host, played by another loopback address (Linux has them all)
+            win = ThreadingHTTPServer(("127.0.0.2", 0), srv.RequestHandlerClass)
+        except OSError:
+            self.skipTest("no 127.0.0.2 here")
+        threading.Thread(target=win.serve_forever, daemon=True).start()
+        self.addCleanup(win.server_close)
+        self.addCleanup(win.shutdown)
+        srv.shutdown()                                  # nothing answers on 127.0.0.1
+        wport = win.server_address[1]
+        with mock.patch.object(models, "SERVER_PORTS", ((wport, "LM Studio"),)), \
+                mock.patch.object(models, "windows_host", return_value="127.0.0.2"):
+            on_path, found = models.servers_here()
+            self.assertEqual(found, [{"root": f"http://127.0.0.2:{wport}", "usually": "LM Studio",
+                                      "models": ["qwen-coder"], "windows": "127.0.0.2"}])
+            line = cli.server_lines({})[-1]
+            self.assertIn(f"127.0.0.2:{wport} answers on Windows (usually LM Studio): qwen-coder", line)
+            self.assertIn("it needs local: true (wb remote 127.0.0.2", line)
+            Path(os.environ["WB_OPENCODE_CONFIG"]).write_text("{}")
+            with mock.patch.object(models, "ollama_answers", return_value=False):
+                first = "\n".join(cli.first_run())
+            self.assertIn(f"--  a model server answers on Windows at http://127.0.0.2:{wport}", first)
+            self.assertNotIn("ok  a model server answers", first)
+        with mock.patch.object(models, "SERVER_PORTS", ((port, "LM Studio"),)), \
+                mock.patch.object(models, "windows_host", return_value="127.0.0.3"), \
+                mock.patch.object(models, "ollama_answers", return_value=False):
+            self.assertIn("networkingMode=mirrored", cli.server_lines({})[-1])  # nothing at all
+            self.assertIn("networkingMode=mirrored", "\n".join(cli.first_run()))
 
 
 class Fit(Base):

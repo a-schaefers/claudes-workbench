@@ -5,7 +5,8 @@ part that has to load a model to know.
 
 It runs on its own only where the user expects a short wait and is told: at setup (`wb setup`)
 and when a Claude Code session opens (the mod), each time only when it is due (`due`: never
-measured, the GPU changed, or a model came since, not one skipped before its retry time),
+measured, the GPU changed, a model came since or its window or weights changed, not one
+skipped before its retry time),
 never while a task holds the GPU; each run
 takes a minute or two (the user, 2026-11-18). Anything heavier (`--bench`) waits for the user to
 ask, through Claude.
@@ -163,9 +164,31 @@ def _skip(model_id: str, outcome: str, why: str) -> None:
     store.write_json(path(), {**st, "skipped": {**(st.get("skipped") or {}), model_id: row}})
 
 
+def digest(m: models.Model, tags: dict | None = None) -> str | None:
+    """The digest of the weights ``m``'s name points at (its /api/tags row), None when unsaid.
+    ``tags``: root → /api/tags, asked once per server for a pass."""
+    tags = {} if tags is None else tags
+    if m.root not in tags:
+        tags[m.root] = models._get(f"{m.root}/api/tags", timeout=2)
+    row = models._tag_row(m.name, tags[m.root] or {}) if tags[m.root] is not None else None
+    return str(row["digest"]) if row and row.get("digest") else None
+
+
+def stale(m: models.Model, row: dict, tags: dict | None = None) -> str:
+    """Why a model's fit no longer holds, or "": the window its entry serves changed since it was
+    measured, or its name points at other weights (a re-pull, a tag moved). Keyed to the GPUs
+    alone, a fit measured at 32K stood after the entry went to 64K, and one of a tag repointed at
+    another quantization (#709); a changed GPU makes every fit due (changed)."""
+    if row.get("window") is not None and row["window"] != served(m):
+        return f"{m.id}'s window changed"
+    if row.get("digest") and (now := digest(m, tags)) and now != row["digest"]:
+        return f"{m.id}'s weights changed"
+    return ""
+
+
 def due(ms: list[models.Model] | None = None) -> str:
-    """Why a run is due, or "": never run, the GPU changed, a model came since, or the last run
-    was stopped before it finished."""
+    """Why a run is due, or "": never run, the GPU changed, a model came since, a model's
+    window or weights changed (stale), or the last run was stopped before it finished."""
     if models._fake():  # the tests' fake models have no server; a detached run there outlived a
         return ""       # test and failed its tearDown (CI, 2026-11-18)
     st = state()
@@ -179,8 +202,11 @@ def due(ms: list[models.Model] | None = None) -> str:
     if st.get("stopped"):
         return "the last run was stopped before it finished"
     waiting = _waiting(st)
-    new = [m.id for m in ms if m.id not in (st.get("models") or {}) and m.id not in waiting]
-    return f"new model{'s' if len(new) > 1 else ''}: {', '.join(new)}" if new else ""
+    rows, tags = st.get("models") or {}, {}
+    new = [m.id for m in ms if m.id not in rows and m.id not in waiting]
+    if new:
+        return f"new model{'s' if len(new) > 1 else ''}: {', '.join(new)}"
+    return next((why for m in ms if m.id not in waiting and (why := stale(m, rows[m.id], tags))), "")
 
 
 def probe(m: models.Model, window: int) -> dict:
@@ -366,11 +392,18 @@ def apply(m: models.Model) -> str:
     # record of its own the variant ranked below the source's one accepted task, so every start
     # picked the spilling source, and a source limited to trivial work got a variant that took
     # significant work (#584). router.lineage reads variant_of; router.rank prefers the variant.
-    for k, v in {**(models._overrides().get(m.id) or {}), "variant_of": m.id}.items():
+    # a variant of a variant keeps the first source, and names the one it replaces: written as
+    # the one it came from, the first source's record split off and the router went back to it (#723)
+    own = models._overrides().get(m.id) or {}
+    for k, v in {**own, "variant_of": own.get("variant_of") or m.id,
+                 **({"replaces": m.id} if own.get("variant_of") else {})}.items():
         models.set_override(key, k, v)
     _made(key, None)
     # measured already: it is the window that fit, so its arrival doesn't make a run due
-    _record(key, {**row, "window": fits, "spill": 0, "tried": [], "ts": store.now()})
+    # the variant is another Ollama model (another digest) on the same weights: its own read now
+    v = models.discover().get(key)
+    _record(key, {**row, "window": fits, "spill": 0, "tried": [], "ts": store.now(),
+                  "digest": digest(v) if v else None})
     _record(m.id, {**row, "applied": key})  # advice() stays quiet about the source
     return (f"registered {provider}/{name}: {m.id}'s settings at a {fits // 1024}K window, all on "
             f"the GPU here, with its models.json settings. It shares {m.id}'s record, and the router "
@@ -470,11 +503,12 @@ def main() -> None:
         every = "--all" in sys.argv or st.get("stopped") or st.get("hardware") is None or \
             changed(st["hardware"])
         waiting = set() if every else _waiting(st)
+        rows, tags = st.get("models") or {}, {}
         with models.GpuLease(None, HOLDER, say=print, wait=False):
             freed = False
             for m in candidates():
-                if not every and (m.id in (st.get("models") or {}) or m.id in waiting):
-                    continue  # due for a new model only: the others' fits still hold
+                if not every and (m.id in rows and not stale(m, rows[m.id], tags) or m.id in waiting):
+                    continue  # due for a new or changed model only: the others' fits still hold
                 with contextlib.ExitStack() as turn:
                     if m.remote:  # its server's own lease too: a task there may be using this very
                         try:      # model, and probe unloads it (#198, the 2026-11-19 audit)
@@ -508,7 +542,7 @@ def main() -> None:
                         _skip(m.id, "unreachable", f"its server didn't answer: {getattr(e, 'reason', e)}")
                         continue
                     n += len(row["tried"])
-                    _record(m.id, row)
+                    _record(m.id, {**row, "digest": digest(m)})  # what the fit holds for (stale)
     except (Stopped, RuntimeError) as e:
         why = str(e)
     finally:

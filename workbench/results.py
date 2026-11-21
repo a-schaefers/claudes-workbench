@@ -38,17 +38,22 @@ def step(task: store.Task, landed: bool, since: str = "HEAD") -> dict:
             "stuck": stuck, "took_over": any(e.get("kind") == "takeover" for e in evs)}
 
 
-# Notices that end a round for reasons outside the step: a shutdown's, a logout's or a kill's
-# SIGTERM (runner.SIGNAL_STOP), and a runner that died (cli.reap: killed, out of memory, a reboot).
-# Counted as stuck, a laptop shut down mid-step shrank the model's slice for good (#582, the audit
-# of 1.90). Notices from before `cause` was written are known by their text.
-NOT_THE_STEP = ("signal", "died")
-_NOT_THE_STEP_TEXT = ("the runner was stopped by a signal", "the runner died without a report")
+# The causes of a stuck or failed notice that are the step's own: a guard stopped the agent, or
+# OpenCode exited non-zero. Any other ends a round for reasons outside the step: a shutdown's,
+# a logout's or a kill's SIGTERM (`signal`, runner.SIGNAL_STOP), a runner that died (`died`,
+# cli.reap: killed, out of memory, a reboot), a model server gone again after the round's one
+# revive (`server`, #657), workbench updated under the task (`updated`, runner._updated). Counted
+# as stuck, a laptop shut down mid-step shrank the model's slice for good (#582, the audit of
+# 1.90), and so did an update mid-step until it had a cause (#660): an allowlist, so the next
+# stop from outside the step can't slip in. Notices from before `cause` are known by their text.
+THE_STEP = ("guard", "agent")
+_NOT_THE_STEP_TEXT = ("the runner was stopped by a signal", "the runner died without a report",
+                      "workbench was updated under this task")  # runner.UPDATED
 
 
 def _not_the_step(notice: dict) -> bool:
     if "cause" in notice:
-        return notice["cause"] in NOT_THE_STEP
+        return notice["cause"] not in THE_STEP
     return any(t in str(notice.get("text") or "") for t in _NOT_THE_STEP_TEXT)
 
 
@@ -67,6 +72,9 @@ def record(task: store.Task, outcome: str, last_step: dict | None = None, **extr
     earlier = st.get("step_sizes") or []
     reviews = sum(s.get("reviews") or 0 for s in earlier) + st.get("reviews", 0)  # every step's
     steps = earlier + ([last_step] if last_step else [])
+    # a discard keeps the steps wb next committed, unless --drop-steps dropped them (#722)
+    landed = sum(1 for s in earlier if s.get("landed")) \
+        if outcome == "discarded" and not extra.get("steps_dropped") else 0
     u, per_step = spend.usage_by_step(task)  # what it cost Claude, and each step's share (#558)
     if per_step and len(per_step) == len(steps):
         steps = [{**s, "claude": c} for s, c in zip(steps, per_step)]
@@ -84,9 +92,12 @@ def record(task: store.Task, outcome: str, last_step: dict | None = None, **extr
            "skills_offered": st.get("skills_ever") or [], "skills_loaded": skills.loaded(task),
            "skills_rev": st.get("skills_rev") or {},  # the version handed: judges each edit
            "steps": steps,
+           **({"landed_steps": landed} if landed else {}),
            "window": st.get("window"),
+           **({"weights_id": spec["weights_id"]} if spec.get("weights_id") else {}),  # #726
            "tuned": st.get("tuned") or {}, "explored": st.get("explored") or [],  # tuning.py
            "tuned_max": st.get("tuned_max") or {},
+           **({"peak_share": st["peak_share"]} if "peak_share" in st else {}),  # tuning (#721)
            "spec_gaps": [g["text"] for g in st.get("spec_gaps") or []],
            **({"backlog": spec["backlog"]} if spec.get("backlog") else {}),  # wb backlog
            **({"claude": u} if u else {}),
@@ -96,7 +107,10 @@ def record(task: store.Task, outcome: str, last_step: dict | None = None, **extr
            **({"interventions": st["interventions"]} if st.get("interventions") else {}),  # #95
            **({"diff": {"files": sum(s.get("files", 0) for s in steps),  # what savings.py prices
                         "added": sum(s.get("lines", 0) for s in steps),
-                        "removed": sum(s.get("removed", 0) for s in steps)}}
+                        "removed": sum(s.get("removed", 0) for s in steps),
+                        # apart, so a later estimate can price them its own way (#725)
+                        **_apart(steps, "generated", ("files", "lines", "removed")),
+                        **_apart(steps, "deleted", ("files", "removed"))}}
               if outcome == "accepted" else {}),
            **({"trial": True} if spec.get("trial") else {}),
            # on only: a task with every experiment off ran as main does
@@ -104,6 +118,12 @@ def record(task: store.Task, outcome: str, last_step: dict | None = None, **extr
                                                     if v)) else {}), **for_stats(task), **extra}
     store.append_jsonl(store.home() / "results.jsonl", row)
     return row
+
+
+def _apart(steps: list[dict], key: str, fields: tuple) -> dict:
+    """{key: the steps' `key` counts summed} when any step has them, else nothing."""
+    have = [s[key] for s in steps if isinstance(s.get(key), dict)]
+    return {key: {f: sum(h.get(f, 0) for h in have) for f in fields}} if have else {}
 
 
 def for_stats(task: store.Task) -> dict:
@@ -154,10 +174,11 @@ def spec_gap_line() -> str | None:
             f"gap; last: {hit[-1]['spec_gaps'][-1][:160]} (the checklist: /workbench, Before wb start)")
 
 
-def table() -> str:
+def table(only: set | None = None) -> str:
+    """`wb stats`' table; ``only``: these models' rows alone (the ones the Stats tab shows)."""
     from .tuning import judged  # tuning reads results' rows
     every = store.results()
-    rows = [r for r in every if judged(r)]
+    rows = [r for r in every if judged(r) and (only is None or r.get("model") in only)]
     gaps = len(every) - len(rows)
     trials = len(store.results(trials=True)) - len(every)
     left_out = (f"\n({trials} trial run{'s' if trials > 1 else ''} left out)" if trials else "") + \

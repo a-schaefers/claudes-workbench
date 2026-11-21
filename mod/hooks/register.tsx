@@ -72,7 +72,7 @@ const SCOUT_NOTE =
 import { atom, read, update } from 'claude-code'
 import type { Register } from 'claude-code'
 
-import type { WbChat, WbLine, WbLive, WbPane, WbStats, WbTask, WbTop } from '../types'
+import type { WbChat, WbLine, WbLive, WbPane, WbSaid, WbStats, WbTask, WbTop } from '../types'
 import { cells, COLUMNS, FACE, MOUTH, ROWS } from './apprentice'
 import type { Pose } from './apprentice'
 
@@ -87,7 +87,7 @@ const OLDEST_WAKE_MS = 60 * 60 * 1000 // never wake for a notification older tha
 
 // Change the tag when WbTask's fields change: a reload declines what the earlier shape stored.
 const tasks = atom({ plugin: 'workbench', key: 'tasks' } as const, [] as WbTask[], {
-  shape: 'tasks-7',
+  shape: 'tasks-8',
 })
 
 // Every Claude Code session id this process has had (`$.session.id()`): /clear and a resume go on
@@ -108,7 +108,7 @@ const KEEP_LINES = 2000 // the pane scrolls back through this much history (`wb 
 // whole HISTORY_CHARS budget, hiding everything before it (the 2026-11-16 audit): each line is
 // cut to this first.
 const LINE_CHARS = 2000
-const LIVE_EVERY_MS = 5000 // a running task's transcript is re-read at most this often, unless its status moved
+const LIVE_EVERY_MS = 5000 // a running task's transcript is re-read this often, and no more often though its status moves (#691)
 // The engine draws a pane's first 100,000 characters of text and drops the rest, and the
 // apprentice comes after the history: a long task's history pushed its words (and its mouth)
 // past the cut, leaving an empty bubble (seen 2026-11-16, 119,728 characters). So the history
@@ -122,7 +122,7 @@ const HISTORY_CHARS = 60000
 // The user turns it on or off (`wb chat on|off`, or the pane's row; chat/switch.json): off by
 // default, and then no session listens, sends it prompts or shows its link (the user, 2026-11-19).
 const chat = atom({ plugin: 'workbench', key: 'chat' } as const,
-  { key: '', delegating: false, webAt: 0, url: '', web: false } as WbChat, { shape: 'chat-3' })
+  { key: '', delegating: false, url: '', web: false } as WbChat, { shape: 'chat-4' })
 // The pane's view: a Tasks tab and a Settings tab, as backseat-driver's (the user, 2026-11-19: the
 // settings belong on a page of their own). A settings row names its value, a press opens its
 // options under it as Buttons (a click or the ring's Enter picks), the option under the ring or the
@@ -170,8 +170,19 @@ export function quietForJobs(list: WbTask[], now: number, isMine: (t: WbTask) =>
   return !list.some(t => ACTIVE.has(t.phase) ||
     (waitsOnClaude(t) && isMine(t) && now - t.updatedAt <= REWAKE_MAX_MS))
 }
+// Away is the user's, not one session's (#688): the listening session records the last web
+// message in chat/away.json and a prompt typed in any session clears it, so every delegating
+// session relays its dialogs and says AWAY_NOTE. Kept in the listener's own state, only it did:
+// another session's overnight backlog left its permission dialogs in the empty terminal (#110 again).
+const awayFile = () => `${mem.root}/chat/away.json`
+async function webAt($: any): Promise<number> {
+  return Number((await readJson($, awayFile())).at ?? 0) * 1000 || 0
+}
 async function away($: any, st: WbChat): Promise<boolean> {
-  return awayNow(st.webAt, await $.clock.now(), await read($, tasks), mine)
+  return st.web && awayNow(await webAt($), await $.clock.now(), await read($, tasks), mine)
+}
+async function back($: any) {
+  if (await webAt($)) await $.fs.write(awayFile(), JSON.stringify({ at: 0 })).catch(() => {})
 }
 // Said in the context blocks while away, and in each wake while away (#540): those blocks come once
 // per conversation, so a user who went to the web chat later was never told of, and a task's
@@ -393,7 +404,7 @@ const NEXT: Record<string, (n: string, id?: string) => string> = {
 // runner._signal_notice). Nothing went wrong in them, yet the wake ended with the failure's
 // `wb log`, feedback or discard after the notice's own `wb resume --all` line (#544).
 const BATCH_NEXT = (names: string[]) => names.length > 1
-  ? 'Nothing went wrong in the tasks themselves: the `wb resume --all` line above continues ' +
+  ? `Nothing went wrong in the tasks themselves: \`wb resume ${names.join(' ')}\` continues ` +
     'them all, in the order they were started (`wb resume <name>` one, `wb discard <name>` drops one).'
   : `Nothing went wrong in the task itself: \`wb resume ${names[0]}\` continues it in a fresh ` +
     `session, \`wb discard ${names[0]}\` drops it.`
@@ -572,7 +583,8 @@ const EVERY_STOPS: [string, string, string][] = [
 const PROGRESS_OFF: [string, string, string] = ['off', 'Off (default)', 'No progress checks: each one wakes Claude, which spends its tokens.']
 const PROGRESS_STOPS: [string, string, string][] = [
   PROGRESS_OFF,
-  ['on', 'On', 'A task past its typical length gets a check and one recommendation, waking Claude.'],
+  // the defaults are progress.py's DEFAULT_MIN and TYPICAL_MIN (#724)
+  ['on', 'On', 'A task past its typical length (20 min trivial, 45 significant, until 3 of the size are timed on its model) gets a check, again at 2x and 4x, each with one recommendation, waking Claude.'],
 ]
 // With a threshold set (`wb progress on --after N`, kept through the row's bare on/off) On says
 // it: the typical length it named instead was the wrong one (#578)
@@ -619,8 +631,12 @@ function settingRow(kit: Row, $: any, name: string, title: string, stops: [strin
 
 // Turns the web chat on or off through wb, which keeps the choice (and starts a server for on),
 // then reads it back at once: the link shows (or goes) with the pick, not at the next poll
+// wb's reason is shown when it fails, as setProbe does: ignored, the row read On and the pane
+// pinned a link that gave a 401 or nothing on the phone (#690). wb leaves the switch off then,
+// so no link is pinned.
 async function setWeb($: any, value: string) {
-  await runWb($, ['chat', value], 15_000)
+  const { ok, out } = await runWb($, ['chat', value], 15_000)
+  if (!ok) $.ui.toast(`workbench: ${brief(out)}`)
   mem.chatUrlAt = 0
   await readSwitch($)
   await chatLink($)
@@ -821,6 +837,8 @@ export function liveLines(t: WbTop, why = ''): { color?: string; dim?: boolean; 
       row.push({ color: f > 0.95 ? 'error' : f > 0.8 ? 'warning' : 'success', text: bar(f, 12) },
         { text: ` ${gib(g.used)}/${gib(g.total)} GiB ` })
     } else if (g.total) row.push({ dim: true, text: `${gib(g.total)} GiB${g.unified ? ' unified' : ''} ` })
+    // an Apple GPU: its bar is the RAM, and the most of it the GPU may wire is said here (#701)
+    if (typeof g.limit === 'number' && g.limit) row.push({ dim: true, text: `· GPU may wire ${gib(g.limit)} GiB ` })
     if (g.stale) row.push({ dim: true, text: 'no reading ' })            // known, not read just now (#547)
     if (typeof g.busy === 'number')
       row.push({ dim: true, text: '· busy ' }, { color: g.busy > 80 ? 'warning' : 'success', text: bar(g.busy / 100, 8) },
@@ -1085,15 +1103,24 @@ export function statsLines(f: Record<string, any> | null, why = ''): { label: st
   const q = f.questions // a question wakes Claude: its own line, "answered" only for wb answer's (#562)
   if (q?.asked) out.push({ label: 'Questions', text: `${q.asked} asked mid-task` +
     (q.answered ? ` · ${q.answered} answered` : '') })
-  for (const [model, m] of Object.entries(f.models ?? {}) as [string, any][]) {
+  // the models OpenCode has now, a wb optimize variant folded under its source, the most recently
+  // used first, the rest on one line (`model_lines`, #638); an older wb's feed: every model
+  const shown: [string, any][] = f.model_lines
+    ? (f.model_lines.lines ?? []).map((m: any) => [String(m.model), m])
+    : Object.entries(f.models ?? {})
+  for (const [model, m] of shown) {
     const trend = spark((m.write_trend ?? []).map((p: number[]) => p[1]))
     const speed = m.speed?.write ? ` · writes ~${Math.round(m.speed.write)} tok/s` : ''
     const change = typeof m.write_change_pct === 'number' && m.write_change_pct
       ? ` (${m.write_change_pct > 0 ? '+' : ''}${m.write_change_pct}%)` : ''
-    out.push({ label: model, text: `${m.tasks} task${m.tasks === 1 ? '' : 's'} · ${m.accepted_pct}% landed` +
+    const windows = (m.windows ?? []).length > 1 ? ` (${m.windows.map((w: number) => `${Math.round(w / 1024)}K`).join(', ')})` : ''
+    out.push({ label: model + windows, text: `${m.tasks} task${m.tasks === 1 ? '' : 's'} · ${m.accepted_pct}% landed` +
       (m.rounds != null ? ` · ${m.rounds} rounds` : '') + (m.minutes != null ? ` · ${m.minutes} min` : '') +
       speed + (trend ? ` ${trend}` : '') + change + (m.claude ? ` · Claude ~${kilo(m.claude)}/task` : '') })
   }
+  const older = f.model_lines?.older
+  if (older?.models) out.push({ label: 'Older models', text: `${older.models} older model${older.models === 1 ? '' : 's'}: ` +
+    `${older.tasks} task${older.tasks === 1 ? '' : 's'} (wb stats --all)` })
   const sized = Object.entries(f.sizes ?? {}) as [string, any][]
   if (sized.length) out.push({ label: 'By size', text: sized.map(([k, v]) => `${k} ${v.tasks} (${v.accepted_pct}%)`).join(' · ') })
   if (f.days?.length) {
@@ -1199,7 +1226,17 @@ const CODING_DECIDE = 'Claude coding is now "Let Claude decide" (the user\'s cho
 // first message (again after a compaction or /clear), and a block the engine doesn't route can't
 // be added later: a session that entered workbench mode afterwards got no notes and no wake-off
 // note, and a coding change from the pane reached only the file-tool gates.
-type Said = { notes: string; wakeOff: boolean; coding: string }
+type Said = WbSaid
+// Kept across a reload within the session (#697): in `mem` alone a reload (a plugin option
+// changed, /workbench-update, /reload-plugins) emptied it, and since prompt.context doesn't fire
+// again in that conversation, sayRules waited for it for good: turning wakes off mid-session
+// never said WAKE_OFF_NOTE, and Claude ended its turn waiting for a wake that would not come.
+// A conversation's first context block (a /clear's, a compaction's) sets it again.
+const saidState = atom({ plugin: 'workbench', key: 'said' } as const, null as WbSaid | null, { shape: 'said-1' })
+async function setSaid($: any, said: Said) {
+  mem.said = said
+  await update($, saidState, () => said).catch(() => {}) // mem has it for this load either way
+}
 
 async function wanted($: any, delegating: boolean, notesToo = true): Promise<Said> {
   const notes = delegating && notesToo ? (await $.fs.read(`${mem.root}/notes.md`).catch(() => '')).trim() : ''
@@ -1218,7 +1255,7 @@ async function unsaid($: any, delegating: boolean): Promise<string[]> {
   if (want.wakeOff && !was.wakeOff) out.push(WAKE_OFF_NOTE)
   const any = delegating || mem.open.size > 0 // out of the mode with nothing open: nothing changes
   if (any && want.coding !== was.coding) out.push(want.coding === 'decide' ? CODING_DECIDE : CODING_RULES[want.coding])
-  mem.said = { notes: was.notes || want.notes, wakeOff: was.wakeOff || want.wakeOff, coding: any ? want.coding : was.coding }
+  await setSaid($, { notes: was.notes || want.notes, wakeOff: was.wakeOff || want.wakeOff, coding: any ? want.coding : was.coding })
   return out
 }
 
@@ -1292,12 +1329,16 @@ const mem = {
   chatRetry: new Map<string, number>(), // a web message whose prompt was dropped: tried again from then
   chatExpired: new Set<string>(), // web messages wb said are too old to pass on (#536): not asked again
   chatQueued: new Map<string, string>(), // web messages whose receipt says queued (id → by): read once a turn ends
+  chatOwed: new Map<string, Owed>(), // web messages passed to Claude with no reply in the chat yet (#767)
   chatUrlAt: 0, // when the web chat's link was last looked up
   savingsAt: 0, // when the week's saving was last read
   eventsPid: 0, // the `wb events` child: its lines wake poll(); the chat counts it as this session
   eventsStart: '', // its start, as its hello says: with the pid, listener.json's proof of life (#532)
+  claudePid: 0, // this Claude Code process, the `wb events` child's parent, as its hello says: 0 unknown (#687)
+  claudeStart: '', // and its start
   earsOk: false, // `wb events` has said hello in this load: wb runs
   gone: new Set<string>(), // task directories closed past KEEP_CLOSED_MS: final, never read again
+  recent: new Map<string, { key: string; recent: string[] }>(), // each task's last events, by events.jsonl's size@mtime (recentEvents)
   again: false, // something changed while a poll ran: run another after it
   hasActive: false, // a task is running: the clock redraws
   lastPoll: 0,
@@ -1322,20 +1363,25 @@ const within = (a: string, b: string) => {
 // Whether a task is this session's. One `wb start` ran in this process's sessions (task.json
 // `session`) is, wherever it ran: by directory alone, a `cd /tmp/x && wb start` task was no one's
 // (the 0.90 review). One without (started by hand, or before 0.90) goes by directory: its repo
-// is the session's directory, inside it or holds it (a session in a subdirectory, or in a folder
-// of several repos), or where `wb start` ran (`cwd`) is the session's directory or inside it. So
+// is the session's directory or inside it (a folder of several repos), or the session is inside
+// the task's spot (`spotOf`: its package, else its cwd, else the repo; #695), or where `wb start` ran (`cwd`) is the session's directory or inside it. So
 // does another session's whose Claude Code process (`claude_pid`) is gone: a new process in the
 // project adopts it (the 0.90 review: after a crash or an update, plain `claude` in the same repo
 // was woken for none of them). A session in the home directory or / claims none by directory: a
 // task started from ~ belonged to every session under it (the 0.90 review). A task with no key
 // at all is everyone's. `wb`'s _scope judges the same.
-const near = (t: { repo?: string; cwd?: string }) => {
+// A session inside the repo counts only inside the task's own spot: its package (repo/subdir),
+// else where `wb start` ran when that is inside the repo, else the repo. Inside the repo alone, a
+// session in a monorepo's sibling package was woken for another package's review (#695).
+const spotOf = (t: { repo?: string; cwd?: string; subdir?: string }) =>
+  t.subdir ? `${t.repo}/${t.subdir}` : t.cwd && within(t.repo!, t.cwd) ? t.cwd : t.repo!
+const near = (t: { repo?: string; cwd?: string; subdir?: string }) => {
   const at = parts(mem.cwd).join('/')
   if (!at || (mem.home && at === parts(mem.home).join('/'))) return false
   return (!!t.cwd && within(mem.cwd, t.cwd)) ||
-    (!!t.repo && (within(mem.cwd, t.repo) || within(t.repo, mem.cwd)))
+    (!!t.repo && (within(mem.cwd, t.repo) || within(spotOf(t), mem.cwd)))
 }
-const mine = (t: { session?: string; repo?: string; cwd?: string; claude_pid?: number; claude_start?: string }) => {
+const mine = (t: { session?: string; repo?: string; cwd?: string; subdir?: string; claude_pid?: number; claude_start?: string }) => {
   if (t.session && mem.ids.size) {
     return mem.ids.has(t.session) || (mem.deadPids.has(pidKey(t)) && near(t))
   }
@@ -1354,11 +1400,35 @@ async function noteClaude($: any, t: { session?: string; claude_pid?: number; cl
   now: number): Promise<void> {
   const pid = Number(t.claude_pid ?? 0)
   const key = pidKey(t)
-  if (!pid || !t.session || mem.ids.has(t.session) || mem.deadPids.has(key)) return
+  if (!pid || !t.session || mem.deadPids.has(key)) return
+  // this session's own, unless stamped by an older process of it (`claude --resume`): that one's
+  // death is what lets this process claim it back from the others (#687)
+  if (mem.ids.has(t.session) && (!mem.claudePid || ownPid(t))) return
   if (now - (mem.pidAt.get(key) ?? -Infinity) < PID_CHECK_MS) return
   mem.pidAt.set(key, now)
   const live = await alive($, pid, t.claude_start)
   if (live === false) mem.deadPids.add(key)
+}
+
+const ownPid = (t: { claude_pid?: number; claude_start?: string }) =>
+  Number(t.claude_pid ?? 0) === mem.claudePid && (!t.claude_start || !mem.claudeStart || t.claude_start === mem.claudeStart)
+
+// A task whose Claude Code process is gone is claimed, once, by the first session that would own
+// it (`wb adopt`, under the task's lock): task.json then names this process, so every other
+// session drops it. Unrecorded, it stayed every nearby session's for good, and the one resumed
+// with `claude --resume` too: both woke for its review and both could act on it (#687). Returns
+// task.json as it stands after the claim, whoever won.
+async function claim($: any, name: string, sp: Row): Promise<Row> {
+  if (!mem.claudePid || !sp.session || !mem.ids.size || !mem.deadPids.has(pidKey(sp)) || ownPid(sp)) return sp
+  if (!mem.ids.has(sp.session) && !near(sp)) return sp
+  const id = await $.session.id().catch(() => '')
+  const ids = [...new Set([id, ...mem.ids].filter(Boolean))]
+  const r = await runWb($, ['adopt', name, '--pid', String(mem.claudePid), ...ids.flatMap(i => ['--session', i])], 15_000)
+  const now = await readJson($, `${mem.root}/tasks/${name}/task.json`)
+  if (!r.ok && now.claude_pid === sp.claude_pid) mem.deadPids.delete(pidKey(sp)) // wb couldn't say: not ours to claim
+  // a task adopted into this session was being delegated: the mode comes back with it (#689)
+  if (r.ok) await workbenchMode($, true)
+  return now.name ? now : sp
 }
 
 // This session's id joins the ids this process has had: at the start and at each poll, so a
@@ -1368,6 +1438,7 @@ async function noteSession($: any): Promise<void> {
   if (!id || mem.ids.has(id)) return
   mem.ids.add(id)
   await update($, sessions, ids => (ids.includes(id) ? ids : [...ids, id]))
+  if (mem.delegated && (await read($, chat)).delegating) await keepMode($, true) // a /clear's id resumes in the mode too (#689)
 }
 
 // A toast shown once per load: something is wrong that the person should hear about once.
@@ -1431,6 +1502,25 @@ async function readTail($: any, path: string, max: number): Promise<{ text: stri
 const NOTIFY_TAIL = 1 << 20 // far more than OLDEST_WAKE_MS's hour of notices
 const EVENTS_TAIL = 64 << 10 // the pane shows a task's last four events
 
+// A task's last four events, read again only when events.jsonl's size or mtime changed: every
+// poll (each 1.5 s while one task runs) read each open task's file, past EVENTS_TAIL by spawning
+// `tail`, for tasks in review whose files hadn't changed in hours: 10-30 spawns a second in every
+// session with the mod (#739, the 2026-11-21 audit).
+async function recentEvents($: any, name: string, path: string): Promise<string[]> {
+  let key = ''
+  try {
+    const st = await $.fs.stat(path)
+    key = `${st.size}@${st.mtimeMs}`
+  } catch {}
+  const had = mem.recent.get(name)
+  if (key && had?.key === key) return had.recent
+  const got = await readTail($, path, EVENTS_TAIL)
+  const recent = parseLines(got?.text ?? '').map(eventLine).filter(Boolean).slice(-4) as string[]
+  if (got?.key) mem.recent.set(name, { key: got.key, recent })
+  else mem.recent.delete(name)
+  return recent
+}
+
 // Every task directory, as the pane draws it. Closed tasks drop out after half an hour, and are
 // then never read again in this load (a closed phase is final): every poll read both files of
 // every task ever created (the 2026-11-16 audit).
@@ -1451,13 +1541,13 @@ async function scan($: any, root: string, now: number): Promise<WbTask[]> {
       if (phase === 'accepted' || phase === 'discarded') mem.gone.add(ent.name)
       continue
     }
-    const sp = await readJson($, `${base}/task.json`)
+    let sp = await readJson($, `${base}/task.json`)
     if (!sp.name || sp.bench) continue // a replay of wb bench's: no one's task, never shown or woken
     let recent: string[] = []
     if (ACTIVE.has(phase) || NEEDS.has(phase)) {
       await noteClaude($, sp, now)
-      const text = (await readTail($, `${base}/events.jsonl`, EVENTS_TAIL))?.text ?? ''
-      recent = parseLines(text).map(eventLine).filter(Boolean).slice(-4) as string[]
+      sp = await claim($, ent.name, sp)
+      recent = await recentEvents($, ent.name, `${base}/events.jsonl`)
     }
     list.push({
       name: sp.name, phase, round: Number(st.round ?? 1), model: String(sp.model ?? ''),
@@ -1465,14 +1555,16 @@ async function scan($: any, root: string, now: number): Promise<WbTask[]> {
       tests: st.tests ? (st.tests.ok ? 'pass' : 'fail') : null,
       last: String(st.last ?? ''), createdAt: Number(sp.created_at ?? 0) * 1000, updatedAt,
       tokens: Number(st.tok_in ?? 0) + Number(st.tok_out ?? 0), recent,
-      repo: String(sp.repo ?? ''), cwd: String(sp.cwd ?? ''), session: String(sp.session ?? ''),
+      repo: String(sp.repo ?? ''), cwd: String(sp.cwd ?? ''), subdir: String(sp.subdir ?? ''),
+      session: String(sp.session ?? ''),
       claude_pid: Number(sp.claude_pid ?? 0), claude_start: String(sp.claude_start ?? ''),
       backlog: String(sp.backlog ?? ''),
-      parked: phase === 'stuck' && !!st.parked,
+      parked: ['review', 'stuck', 'failed'].includes(phase) && !!st.parked, // as store.parked (#698)
       allowed: allowedLine((await readJson($, `${base}/coding.json`)).allowed),
     })
   }
   for (const name of mem.gone) if (!names.has(name)) mem.gone.delete(name) // removed by hand
+  for (const name of mem.recent.keys()) if (!names.has(name) || mem.gone.has(name)) mem.recent.delete(name)
 
   return list.sort((a, b) => a.createdAt - b.createdAt)
 }
@@ -1570,6 +1662,12 @@ async function refreshLive($: any, list: WbTask[], now: number) {
   const focus = focusOf(list, followed)
   const key = focus ? `${focus.name}@${focus.updatedAt}` : ''
   if (key === mem.liveKey && !(focus && ACTIVE.has(focus.phase) && now - mem.liveAt >= LIVE_EVERY_MS)) return
+  // A running task writes its status on every tool call, and each write ran another `wb watch`
+  // (a Python start and an OpenCode export) back to back for the whole round, a core kept busy
+  // beside the model (#691): the same task, still running, is read at most every LIVE_EVERY_MS,
+  // the change kept for the clock's next poll. Another task, or one that stopped, is read at once.
+  if (focus && ACTIVE.has(focus.phase) && mem.liveKey.startsWith(`${focus.name}@`) &&
+    now - mem.liveAt < LIVE_EVERY_MS) return
   const pane = ((await $.ui.panes().catch(() => [])) as Row[]).find(p => p.id === PANE)
   if (!pane?.isShown) return // read when it shows again: the key still differs
   mem.watching = true
@@ -1636,6 +1734,8 @@ async function ears($: any) {
           if (ev.hello) {
             mem.eventsPid = Number(ev.hello)
             mem.eventsStart = typeof ev.start === 'string' ? ev.start : '' // listener.json's start (#532)
+            mem.claudePid = Number(ev.parent ?? 0) || 0 // whose tasks `wb adopt` claims (#687)
+            mem.claudeStart = typeof ev.parent_start === 'string' ? ev.parent_start : ''
             mem.earsOk = hello = true
             wait = 2000
           }
@@ -1935,15 +2035,21 @@ async function startOf($: any, pid: number): Promise<string> {
   return ''
 }
 
-// Whether a process lives (`kill -0`) and, given the start recorded beside its pid, is still the
-// one that wrote it: a recycled pid is another process (#532), as wb's models._alive judges. Only
-// two starts of one kind compare (both /proc's tick count, or both ps's date). null: unknown
-// (kill failed to run).
+// Whether a process lives and, given the start recorded beside its pid, is still the one that
+// wrote it: a recycled pid is another process (#532), as wb's models._alive judges. Only two
+// starts of one kind compare (both /proc's tick count, or both ps's date). Where there is /proc
+// (Linux), /proc/<pid> says, else `kill -0` (macOS): a container without procps has no `kill`, so
+// no gone process was ever seen, nobody adopted a crashed session's tasks, and two listening
+// sessions took the chat's listener from each other on every poll (#700). null: unknown.
 async function alive($: any, pid: number, start?: string): Promise<boolean | null> {
-  try {
-    if ((await $.process.run(['kill', '-0', String(pid)], { timeoutMs: 5000 })).exitCode !== 0) return false
-  } catch {
-    return null
+  if (await $.fs.exists('/proc/self/stat').catch(() => false)) {
+    if (!(await $.fs.exists(`/proc/${pid}/stat`).catch(() => false))) return false
+  } else {
+    try {
+      if ((await $.process.run(['kill', '-0', String(pid)], { timeoutMs: 5000 })).exitCode !== 0) return false
+    } catch {
+      return null
+    }
   }
   if (!start) return true
   const now = await startOf($, pid)
@@ -1957,7 +2063,8 @@ async function readSwitch($: any) {
   const web = !!(await readJson($, `${mem.root}/chat/switch.json`)).on
   if (web === (await read($, chat)).web) return
   if (web) mem.chatUrlAt = 0
-  await update($, chat, c => ({ ...c, web, ...(web ? {} : { url: '', webAt: 0 }) }))
+  await update($, chat, c => ({ ...c, web, ...(web ? {} : { url: '' }) }))
+  if (!web) await back($)
 }
 
 // The web chat's link while it is on, looked up again every ten minutes (it changes only with the token)
@@ -1977,7 +2084,11 @@ async function listen($: any, now: number) {
   if (!mem.eventsPid) return // the chat knows a listener by its live `wb events` process
   const claim = await readJson($, `${dir}/listener.json`)
   const theirs = claim.session && claim.session !== st.key
-  if (theirs && (claim.pid ? !!(await alive($, Number(claim.pid), claim.start ? String(claim.start) : ''))
+  // whether it lives unknown, its claim stands while the file is fresh: read as gone, two
+  // sessions took the listener from each other on every poll, each write the other's event (#700)
+  const lives = claim.pid ? await alive($, Number(claim.pid), claim.start ? String(claim.start) : '') : false
+  const fresh = async () => now - ((await $.fs.stat(`${dir}/listener.json`).catch(() => undefined))?.mtimeMs ?? 0) < CHAT_STALE_MS
+  if (theirs && (claim.pid ? lives === true || (lives === null && await fresh())
     : now - Number(claim.ts ?? 0) * 1000 < CHAT_STALE_MS)) return // another session listens
   if (!(await $.fs.exists(dir))) await runWb($, ['chat', 'log']) // wb makes the directory
   const body = JSON.stringify({ session: st.key, cwd: mem.cwd, pid: mem.eventsPid,
@@ -2018,8 +2129,12 @@ async function listen($: any, now: number) {
         .catch(() => ({ isDelivered: false }))
       if (r.isDelivered) await runWb($, ['chat', 'ack', id, '--by', st.key, '--how', 'now'])
       else void sendWeb($, id, text, 'queued', st.key)
-    } else void sendWeb($, id, text, 'now', st.key)
-    await update($, chat, c => ({ ...c, webAt: now }))
+      mem.chatOwed.set(id, { at: now, grace: r.isDelivered ? 0 : 1, nudged: false }) // queued: maybe the next turn's
+    } else {
+      void sendWeb($, id, text, 'now', st.key)
+      mem.chatOwed.set(id, { at: now, grace: 0, nudged: false })
+    }
+    await $.fs.write(awayFile(), JSON.stringify({ at: now / 1000, by: st.key })).catch(() => {})
     $.ui.toast('workbench: a message from the web chat')
   }
 }
@@ -2055,12 +2170,43 @@ async function sendWeb($: any, id: string, text: string, how: string, by: string
   const r = await $.prompt.submit({ text, asUser: true }).catch((err: unknown) => ({ drop: String(err) }))
   if (r?.drop) {
     mem.chatSent.delete(id)
+    mem.chatOwed.delete(id) // not given to Claude: nothing owed yet
     mem.chatRetry.set(id, (await $.clock.now()) + REWAKE_MS)
     return
   }
   const { ok, out } = await runWb($, ['chat', 'ack', id, '--by', by, '--how', how])
   if (!ok) warnOnce($, 'chat-ack', `wb chat ack failed: ${brief(out)}`)
   else if (how === 'queued') mem.chatQueued.set(id, by)
+}
+
+// A web message Claude was given and hasn't answered in the chat (#767): the skill and WEB_NOTE
+// say to answer with `wb chat reply`, and nothing checked. For two release cycles the owner wrote
+// "Keep me updated over here" and "Status" from the phone, Claude answered every one in the
+// terminal only, and the phone heard nothing (2026-11-21). At the end of the turn that had it
+// (`grace`: a message queued behind a running turn may only enter the next), no reply yet means
+// one follow-up turn naming `wb chat reply`; that one ending without a reply too, a plain note
+// goes to the chat, so the phone always hears something. A reply is a `wb chat reply` (or
+// `listen`, or `wb shot --chat`) in Bash, or a row of Claude's in messages.jsonl since; a prompt
+// typed in the terminal ends it (the user is back).
+type Owed = { at: number; grace: number; nudged: boolean }
+const OWED_NOTE =
+  '[workbench] The user wrote from the web chat and hasn\'t heard back: answer there with ' +
+  '`wb chat reply --text "…"` (the web thread is all they see), briefly. Nothing else to do.'
+const OWED_POSTED = 'Claude answered in the terminal; nothing was sent here.'
+const REPLIES = /\bwb\b[^\n|;&]*\bchat\s+(reply|listen)\b|\bwb\b[^\n|;&]*\bshot\b[^\n]*--chat\b/
+async function owedAtTurnEnd($: any) {
+  if (!mem.chatOwed.size) return
+  const tail = await readTail($, `${mem.root}/chat/messages.jsonl`, NOTIFY_TAIL)
+  const replied = parseLines(tail?.text ?? '').filter(m => m.from === 'claude').map(m => Number(m.ts ?? 0) * 1000)
+  let nudge = false
+  for (const [id, o] of [...mem.chatOwed]) {
+    if (replied.some(ts => ts >= o.at)) { mem.chatOwed.delete(id); continue }
+    if (o.grace > 0) { o.grace--; continue }
+    if (!o.nudged) { o.nudged = true; nudge = true; continue }
+    mem.chatOwed.delete(id)
+    await runWb($, ['chat', 'reply', `--text=${OWED_POSTED}`], 15_000)
+  }
+  if (nudge && !mem.queued.includes(OWED_NOTE)) mem.queued.push(OWED_NOTE)
 }
 
 // A queued web message enters at the running turn's next step or as the next turn, so once that
@@ -2104,8 +2250,9 @@ async function deliver($: any, now: number) {
     const ackPath = `${root}/tasks/${name}/acked`
     let acked = Number(await $.fs.read(ackPath).catch(() => '0')) || 0
     if (rows.every(r => r.ts <= acked)) continue
-    const spec = await readJson($, `${root}/tasks/${name}/task.json`)
+    let spec = await readJson($, `${root}/tasks/${name}/task.json`)
     await noteClaude($, spec, now)
+    spec = await claim($, name, spec)
     const own = mine(spec)
     // Only wake for news still true: a review notice for a task since discarded, accepted or
     // sent back is acknowledged and dropped.
@@ -2138,6 +2285,7 @@ async function deliver($: any, now: number) {
         // timeout it guesses (a 20-minute review turn, #542). It goes into the running turn, as
         // a web message does; refused, it is held like the rest, which deliver once the turn ends.
         if (row.kind === 'question') {
+          if (!(await take($, name, row.ts))) { acked = row.ts; continue } // another session's wake took it
           await $.fs.write(ackPath, String(row.ts)) // acknowledge before sending: never twice
           if (await intoTurn($, text)) {
             acked = row.ts
@@ -2150,6 +2298,7 @@ async function deliver($: any, now: number) {
         continue
       }
       const prev = acked
+      if (current && !(await take($, name, row.ts))) { acked = row.ts; continue } // taken by another
       await $.fs.write(ackPath, String(row.ts)) // acknowledge before waking: never wake twice
       acked = row.ts
       if (!current) {
@@ -2166,6 +2315,18 @@ async function deliver($: any, now: number) {
     }
   }
   if (!held) mem.lastNotify = file.key
+}
+
+// A notice taken for this session's wake, under wb's lock (`wb ack`, a compare-and-set shared with
+// `wb wait`): two sessions woken by one `wb events` line each read `acked`, then wrote it, and
+// both woke Claude for one review (#687). False only when wb says another took it first; a wb
+// that can't run leaves the plain write after it to decide, as before.
+async function take($: any, name: string, ts: number): Promise<boolean> {
+  try {
+    return (await $.process.run([mem.wb, 'ack', name, String(ts)], { timeoutMs: 15_000 })).exitCode !== 3
+  } catch {
+    return true
+  }
 }
 
 // Into the running turn, as a message typed mid-turn would be (`listen` does the same for the web
@@ -2248,6 +2409,7 @@ async function workbenchMode($: any, on: boolean) {
   if (on) mem.delegated = true
   if ((await read($, chat)).delegating === on) return
   await update($, chat, c => ({ ...c, delegating: on }))
+  await keepMode($, on)
   if (!on) {
     await update($, pane, p => ({ ...p, minimized: false })) // quit: no strip either
     await $.ui.close({ id: PANE }).catch(() => {})
@@ -2259,6 +2421,33 @@ async function workbenchMode($: any, on: boolean) {
     }
   }
   void poll($) // listen now: a message may already be waiting
+}
+
+// Workbench mode by session id, on disk (`$.store` `modes`: id → when it was turned on), so a
+// session resumed in a new process (`claude --continue`/`--resume`) comes back in it: the atom
+// died with the old process, and until Claude happened to run a delegating command the chat
+// didn't listen, the pane and status line didn't show it, and a compaction dropped it (#689).
+// Kept MODES_KEEP_MS; a quit clears every id this process has had.
+const MODES_KEEP_MS = 30 * 24 * 3600_000
+async function keepMode($: any, on: boolean) {
+  try {
+    const now = await $.clock.now()
+    const was = (await $.store.get('modes')) as Record<string, number> | undefined
+    const modes: Record<string, number> = {}
+    for (const [id, at] of Object.entries(was && typeof was === 'object' ? was : {})) {
+      if (typeof at === 'number' && now - at < MODES_KEEP_MS && !mem.ids.has(id)) modes[id] = at
+    }
+    if (on) for (const id of mem.ids) modes[id] = now
+    await $.store.set('modes', modes)
+  } catch {} // no store (an older Claude Code, a test without one): the mode lasts this process
+}
+async function modeKept($: any): Promise<boolean> {
+  try {
+    const modes = (await $.store.get('modes')) as Record<string, number> | undefined
+    return !!modes && typeof modes === 'object' && [...mem.ids].some(id => typeof modes[id] === 'number')
+  } catch {
+    return false
+  }
 }
 
 // Opens the pane, or brings it back: a pane the engine still holds but doesn't show (a tab behind
@@ -2301,8 +2490,10 @@ async function restorePane($: any, tab: string) {
 function taskParts(list: WbTask[], on: boolean) {
   const shown = on ? list : list.filter(t => mine(t))
   const live = shown.filter(t => ACTIVE.has(t.phase) && t.phase !== 'asking')
-  const asking = shown.filter(t => t.phase === 'asking')
-  const waiting = shown.filter(t => waitsOnClaude(t) && t.phase !== 'asking')
+  // what waits on Claude is this session's alone, in the mode too: another session's reviews
+  // counted in this one's "N awaiting review", as if this Claude had them to do (#693)
+  const asking = shown.filter(t => t.phase === 'asking' && mine(t))
+  const waiting = shown.filter(t => waitsOnClaude(t) && t.phase !== 'asking' && mine(t))
   return { live, parts: [
     ...live.map(t => `${t.name} ${t.phase} r${t.round}`),
     ...asking.map(t => `${t.name} asks`),
@@ -2340,7 +2531,11 @@ export const register: Register = (on, options) => {
     mem.cwd = await real(e.cwd)
     const abs = (v: string) => absolutePath(v, home ?? '', mem.cwd) // as wb reads it (#454)
     mem.root = wbHome ? abs(wbHome) : `${home}/.local/state/workbench`
-    mem.wb = (await $.env.get('WB_BIN')) || 'wb'
+    // a path as wb reads its own (a `~` or a relative one, settings.json's env passes it as typed:
+    // `~/repos/workbench/bin/wb` ran a literal `~`, and the mod couldn't run wb at all, #699); a
+    // bare name still goes through PATH
+    const bin = await $.env.get('WB_BIN')
+    mem.wb = bin ? (bin.includes('/') || bin.startsWith('~') ? abs(bin) : bin) : 'wb'
     const config = await $.env.get('CLAUDE_CONFIG_DIR')
     mem.skill = `${config ? abs(config) : `${home}/.claude`}/skills/workbench/SKILL.md`
     const priced = await $.env.get('WB_SAVINGS')
@@ -2380,7 +2575,9 @@ export const register: Register = (on, options) => {
     mem.fold = swapped !== mem.cwd && !!(await $.fs.stat(swapped).catch(() => undefined))
     mem.home = home ? await real(home) : ''
     mem.ids = new Set(await read($, sessions))
+    mem.said = mem.said ?? await read($, saidState) // a reload: what this conversation was told stands (#697)
     await noteSession($)
+    if (!(await read($, chat)).delegating && await modeKept($)) await workbenchMode($, true) // a resume (#689)
     // A `claude -p` run or an SDK session has no person at it until a surface attaches: it took
     // other sessions' wakes, the weekly check and a `wb status` before every prompt (the
     // 2026-11-16 audit). It stays quiet until then.
@@ -2437,6 +2634,7 @@ export const register: Register = (on, options) => {
     if (delegates(String(e.command ?? ''))) {
       await workbenchMode($, true)
     }
+    if (REPLIES.test(String(e.command ?? ''))) mem.chatOwed.clear() // answered in the chat (#767)
     return next(e)
   })
 
@@ -2460,8 +2658,9 @@ export const register: Register = (on, options) => {
 
   // Typed in the terminal: the user is back, so answers go here again
   on('prompt.submit', async ($, e, next) => {
-    if (!e.isMeta && !e.text.startsWith(WEB) && !e.text.startsWith('[workbench]') && (await read($, chat)).webAt) {
-      await update($, chat, c => ({ ...c, webAt: 0 }))
+    if (!e.isMeta && !e.text.startsWith(WEB) && !e.text.startsWith('[workbench]')) {
+      await back($)
+      mem.chatOwed.clear() // back at the terminal: an answer there reaches them (#767)
     }
     return next(e)
   })
@@ -2469,7 +2668,9 @@ export const register: Register = (on, options) => {
   // This session's tasks only (`--repo`): another session keeps its own running.
   on('command.run', { command: QUIT }, async $ => {
     await workbenchMode($, false)
-    const { ok, out } = await runWb($, ['stop', '--all', ...(await scope($))])
+    // waiting tasks too, as they stand: a review left at the quit stayed "awaiting review" and in
+    // every new conversation's pick-up block (#698)
+    const { ok, out } = await runWb($, ['stop', '--all', '--park-waiting', ...(await scope($))])
     $.ui.toast(ok ? 'workbench: this session\'s delegated agents are stopped'
       : `workbench: wb stop --all failed: ${brief(out)}`)
     return { text: ok ? `Delegation stopped. ${out}` : `Delegation not stopped: ${out}`, context: [QUIT_NOTE(out, ok)] }
@@ -2527,7 +2728,7 @@ export const register: Register = (on, options) => {
     // /workbench as the first message said them in its text already (#540)
     const had = mem.skillTurn ? mem.said : null
     mem.skillTurn = false
-    mem.said = want
+    await setSaid($, want)
     if (want.coding !== 'decide' && had?.coding !== want.coding) blocks.push({ name: 'claude-coding', text: CODING_RULES[want.coding] })
     if (want.notes && !had?.notes) blocks.push({ name: 'user-notes', text: NOTES_NOTE(want.notes) })
     if (isAway) blocks.push({ name: 'web-chat', text: AWAY_NOTE })
@@ -2561,6 +2762,7 @@ export const register: Register = (on, options) => {
       mem.busy = false
       mem.skillTurn = false
       if (mem.chatQueued.size) void readQueued($)
+      await owedAtTurnEnd($)
       mem.sawTurn = true
       mem.turnEndedAt = await $.clock.now()
       void poll($) // held wakes and chat messages go now, not at the next tick

@@ -12,21 +12,25 @@ An engine is whatever runs an image model on this machine, described in
                                    repeated before each --ref image
   {"url": "http://127.0.0.1:…/v1/images/generations", "model": "…"}
                                    any server with the OpenAI images API (SGLang, vLLM-Omni,
-                                   LocalAI…); the response's b64_json is saved (or
-                                   its url fetched); "key": its API key ({env:}, {file:})
+                                   LocalAI…), or with "api": "a1111" (a /sdapi/ url says so)
+                                   AUTOMATIC1111's, Forge's or SD.Next's txt2img ("steps"
+                                   optional); the response's b64_json is saved (or
+                                   its url fetched); "key": its API key ({env:}, {file:});
+                                   "unload": a URL that frees its GPU memory, "unload_body"
 plus optional "label", "notes" (licence, what it is good at: shown to Claude), "timeout" (s),
 "gpu" (false: not this machine's GPU; a url on another host is off it unless true).
 The first entry is the default. No model is named here: the user installs one and describes it.
+What an engine writes must start like a PNG, JPEG or WebP; a JPEG or WebP keeps its own suffix.
 
 A generation on the GPU holds the GPU lock and first unloads the coding models, as a task does;
 while a task holds the GPU it refuses at once, unless asked to wait. A command engine exits when it's done, so
 its memory is free again; a url engine is a server the user runs, which keeps its model in GPU
-memory for as long as it is up: workbench can't stop it.
+memory for as long as it is up, unless its "unload" URL (POSTed "unload_body", else {}, after
+each batch) makes it let go.
 """
 from __future__ import annotations
 
 import base64
-import contextlib
 import json
 import os
 import re
@@ -52,6 +56,10 @@ def engines() -> dict[str, dict]:
 
 
 def ready(e: dict) -> str:
+    if e.get("api") not in (None, *APIS):  # ComfyUI's isn't spoken yet: a command engine wraps it
+        return f"not usable: api must be one of {', '.join(APIS)}"
+    if "steps" in e and (isinstance(e["steps"], bool) or not isinstance(e["steps"], int) or e["steps"] < 1):
+        return "not usable: steps must be a whole number"
     return media.ready(e, base=config_path().parent)
 
 
@@ -78,8 +86,52 @@ def _command(e: dict, values: dict, refs: list[Path], log: Path) -> None:
         r = media.run_group(_argv(e, values, refs), float(e.get("timeout", 1800)),
                             stdin=subprocess.DEVNULL, stdout=f, stderr=subprocess.STDOUT)
     if r.returncode or not Path(values["out"]).is_file():
-        tail = "\n".join(log.read_text().strip().splitlines()[-8:])
+        tail = "\n".join(log.read_text(errors="replace").strip().splitlines()[-8:])  # one bad byte: #743
         raise RuntimeError(f"the engine exited {r.returncode} without an image:\n{tail}")
+
+
+def kind(path: Path) -> str | None:
+    """The image format a file's first bytes say ("png", "jpeg", "webp"), or None: an engine or
+    server that wrote an HTML error page, or a JPEG, was published as a .png and reported as an
+    image (#744, the image side of #592)."""
+    with open(path, "rb") as f:
+        head = f.read(12)
+    if head.startswith(b"\x89PNG\r\n\x1a\n"):
+        return "png"
+    if head.startswith(b"\xff\xd8\xff"):
+        return "jpeg"
+    if head[:4] == b"RIFF" and head[8:12] == b"WEBP":
+        return "webp"
+    return None
+
+
+SUFFIX = {"png": ".png", "jpeg": ".jpg", "webp": ".webp"}
+
+
+APIS = ("openai", "a1111")
+
+
+def api(e: dict) -> str:
+    """The API a url engine speaks: its `api`, else A1111's for a `/sdapi/` url (AUTOMATIC1111,
+    Forge, SD.Next), else OpenAI's. Only OpenAI's was spoken, so a Forge url got an OpenAI body
+    and answered "sent no image" (#753)."""
+    return e.get("api") or ("a1111" if "/sdapi/" in str(e.get("url") or "") else "openai")
+
+
+def _a1111(e: dict, values: dict) -> None:
+    """AUTOMATIC1111's API (Forge and SD.Next speak it): POST {prompt, width, height, seed,
+    steps?} to /sdapi/v1/txt2img, and images[0] is the image, base64."""
+    body = {"prompt": values["prompt"], "width": values["width"], "height": values["height"],
+            "seed": values["seed"], "batch_size": 1, "n_iter": 1}
+    if e.get("steps"):
+        body["steps"] = e["steps"]
+    raw, _ = media.post(e, e["url"], json.dumps(body).encode(), "application/json",
+                        float(e.get("timeout", 1800)), config_path().parent)
+    try:
+        b64 = json.loads(raw)["images"][0]
+        Path(values["out"]).write_bytes(base64.b64decode(b64.split(",", 1)[-1]))
+    except (ValueError, KeyError, IndexError, TypeError, AttributeError):
+        raise RuntimeError(f"{e['url']} sent no image: {media._gist(raw) or '(an empty reply)'}") from None
 
 
 def _server(e: dict, values: dict) -> None:
@@ -133,12 +185,17 @@ def generate(prompt: str, out_dir: Path, n: int = 4, size: tuple[int, int] = (10
     for r in refs:
         if not r.is_file():
             raise RuntimeError(f"no reference image {r}")
+    # absolute on every Python: 3.11's mkdtemp kept a relative dir relative, so an engine that
+    # changed directory wrote its {out} elsewhere and the run failed (3.12+ passed) (#751)
+    out_dir = Path(out_dir).resolve()
     out_dir.mkdir(parents=True, exist_ok=True)
     seed = int(time.time()) % 1_000_000 if seed is None else seed
     made = []
-    # the GPU to itself, queued with the tasks; an engine off this GPU runs beside them (#587)
-    hold = media.gpu("wb image", say, wait, media.serving(e)) if media.on_gpu(e) else contextlib.nullcontext()
-    with hold:
+    # the GPU to itself, queued with the tasks; an engine off this GPU runs beside them (#587),
+    # unless it is on a remote box the tasks use: then a turn there (#750)
+    hold = media.turns("wb image", say, wait, e)
+    # the unload inside the lease, failed or not: the next task loads beside nothing (#749)
+    with hold, media.unloading([e], say, "image", config_path().parent):
         for i in range(n):
             s = seed + i
             # into a path of its own, then published under a name nothing has: two prompts with
@@ -151,14 +208,19 @@ def generate(prompt: str, out_dir: Path, n: int = 4, size: tuple[int, int] = (10
                 if e.get("command"):
                     _command(e, values, refs, out_dir / "engine.log")
                 else:
-                    _server(e, values)
+                    (_a1111 if api(e) == "a1111" else _server)(e, values)
                 secs = round(time.time() - t0, 1)
                 if fresh.is_symlink() or not fresh.is_file() or not fresh.stat().st_size:
                     raise RuntimeError(f"image engine {name} wrote no image")
+                if not (fmt := kind(fresh)):
+                    raise RuntimeError(f"image engine {name} wrote no image ({media.starts(fresh)})")
+                if SUFFIX[fmt] != fresh.suffix:  # published under its real suffix (#744)
+                    fresh = fresh.rename(fresh.with_suffix(SUFFIX[fmt]))
                 store.write_json(fresh.with_suffix(".json"), {
                     "prompt": prompt, "seed": s, "width": size[0], "height": size[1],
-                    "engine": name, "refs": [str(r) for r in refs], "secs": secs, "ts": store.now()})
-                out = media.free(out_dir, f"{media.slug(prompt, 'image')}-{s}", ".png")
+                    "engine": name, "refs": [str(r) for r in refs], "secs": secs, "ts": store.now(),
+                    "format": fmt})
+                out = media.free(out_dir, f"{media.slug(prompt, 'image')}-{s}", fresh.suffix)
                 media.publish(fresh, out)
             say(f"{out}  ({secs} s)")
             made.append(out)
