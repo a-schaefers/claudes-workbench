@@ -7618,6 +7618,9 @@ request and answers each request that offers tools with the next scripted tool c
 read (default 1), so a test can fill the window without sending it; a request carrying OpenCode's
 compaction template (`<template>`, `## Objective`) gets the template's headings back, which
 OpenCode accepts as a summary (anything else fails the compaction: `compaction.failed`).
+It answers one request at a time and listens as soon as it starts: HTTPServer's own bind looks the
+address's name up before listening, 35 s on GitHub's macOS runners, where every connect to the
+port meanwhile timed out (#950).
 `RealOpenCode` and `RealOpenCodeSkillFiles` cover the MCP shape, skills, denials, compound shell
 commands, rule order, git by path, the edit rule, PATH and the lane; `RealOpenCodeRun` the
 events, the export, `--session`, compaction and the header wait (CLAUDE.md's *OpenCode quirks*
