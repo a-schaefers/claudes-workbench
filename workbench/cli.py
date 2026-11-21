@@ -3228,7 +3228,11 @@ def cmd_model(a):
             models.server_facts(prov["root"], name, prov["key"])
         served = models.ollama_served_context(prov["root"], name) if prov["engine"] == "ollama" \
             else other.get("context")
-        siblings = [(e.get("limit") or {}).get("context") for e in prov["models"].values()]
+        # never a sibling's window for Ollama: it serves each model its own (a `wb optimize`
+        # variant's 64K is its Modelfile's), and llama3.1:8b beside qwen3:8b-64k was registered
+        # 64K while Ollama served its default (#464, the audit of 1.8)
+        siblings = [] if prov["engine"] == "ollama" else \
+            [(e.get("limit") or {}).get("context") for e in prov["models"].values()]
         ctx = a.context or served or next((c for c in siblings if c), None)
         if prov["engine"] == "ollama":
             if not ctx:

@@ -2884,8 +2884,10 @@ output: ctx/8}}` plus `options.max_tokens` = 2 × output (`ollama_cap`: Ollama i
 `max_completion_tokens` OpenCode sends and honours `max_tokens`; uncapped, a degenerate
 generation runs until the context is full, seen as 20K-token turns with no edit). The context is
 `--context`, else what Ollama serves (`ollama_served_context`: the loaded `context_length`, the
-Modelfile's `num_ctx`, `OLLAMA_CONTEXT_LENGTH`), else the provider's other models' setting, else
-never the trained length: with none of those, Ollama serves its own default (often 4K-8K, below
+Modelfile's `num_ctx`, `OLLAMA_CONTEXT_LENGTH`), never the provider's other models' setting
+(Ollama serves each model its own: beside a `wb optimize` variant whose 64K is its Modelfile's,
+an add said 64K while Ollama served its default, #464, the audit of 1.8), and never the trained
+length: with none of those, Ollama serves its own default (often 4K-8K, below
 OpenCode's ~10K-token prompt), so add refuses and says to set `OLLAMA_CONTEXT_LENGTH` or pass
 `--context` (the 2026-11-16 audit: a stock Ollama got a 256K entry and cut prompts off silently);
 the trained length only caps the result. Another server's window is what it says

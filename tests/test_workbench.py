@@ -11828,10 +11828,11 @@ class ModelSet(Base):
         return json.loads(Path(os.environ["WB_OPENCODE_CONFIG"]).read_text())
 
     def test_add_and_retire(self):
-        out = run_wb("model", "add", "ollama/new-coder:14b", "--pull", "--label", "New Coder")
+        out = run_wb("model", "add", "ollama/new-coder:14b", "--pull", "--label", "New Coder",
+                     "--context", "32768")   # the fake Ollama says no window (#464: no sibling's)
         self.assertIn("registered ollama/new-coder:14b", out)
         entry = self.config()["provider"]["ollama"]["models"]["new-coder:14b"]
-        self.assertEqual(entry["limit"]["context"], 32768)        # what the provider serves
+        self.assertEqual(entry["limit"]["context"], 32768)
         self.assertTrue(entry["tool_call"])
         # Ollama ignores max_completion_tokens; max_tokens is the cap it honours
         self.assertEqual(entry["options"]["max_tokens"], 2 * entry["limit"]["output"])
@@ -11854,6 +11855,19 @@ class ModelSet(Base):
         self.assertEqual(self.config()["provider"]["ollama"]["models"], {})
         run_wb("model", "add", "ollama/coder:8b", "--context", "32768")
         self.assertEqual(self.config()["provider"]["ollama"]["models"]["coder:8b"]["limit"]["context"], 32768)
+
+    def test_add_on_ollama_never_takes_a_siblings_window(self):
+        # #464 (the audit of 1.8, reproduced): Ollama's window for the model unknown, the add
+        # took another entry's (an optimize variant's 64K, from its own Modelfile) and said
+        # "registered … 64K context" while Ollama served its default
+        cfg = self.config()
+        cfg["provider"]["ollama"]["models"]["qwen3:8b-64k"] = {"limit": {"context": 65536}}
+        Path(os.environ["WB_OPENCODE_CONFIG"]).write_text(json.dumps(cfg))
+        err = io.StringIO()
+        with self.assertRaises(SystemExit), redirect_stderr(err):
+            run_wb("model", "add", "ollama/llama3.1:8b")
+        self.assertIn("Ollama would serve llama3.1:8b its own default context", err.getvalue())
+        self.assertNotIn("llama3.1:8b", self.config()["provider"]["ollama"]["models"])
 
     def test_a_config_that_doesnt_parse_is_named_without_a_traceback(self):
         # the 2026-11-16 audit: one missing comma made every model command a JSONDecodeError
