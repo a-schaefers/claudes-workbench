@@ -5347,6 +5347,8 @@ or `navigator.standalone`); otherwise an Install button where the browser offere
 Safari), else the browser's menu. *Notifications*: a switch (iOS: only in the installed app,
 which is Apple's rule; blocked: where to allow them), on asks permission (only on that tap) and
 subscribes with the server's VAPID key, re-subscribing when the key changed; on shows Send a test.
+A notification's `badge` is `badge-96.png`, the white spark on transparent (RGBA): Android draws the
+status-bar badge from the alpha channel alone, and the RGB app icon showed a white square (#757).
 `sw.js` (registered with `updateViaCache: 'none'`) caches nothing and answers no fetch (another
 app's offline cache gave iOS installed apps white screens). Pushes carry no payload (RFC 8030)
 and are signed with VAPID (RFC 8292: ES256, done in plain integers in `webpush.py`, checked

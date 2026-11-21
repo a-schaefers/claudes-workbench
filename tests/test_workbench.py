@@ -14917,6 +14917,19 @@ class WebChat(Base):
         self.assertEqual(page[0], 200)
         self.assertEqual(self.call("/icon-192.png")[0], 200)
 
+    def test_the_notification_badge_is_a_monochrome_image_with_an_alpha_channel(self):
+        # #757 (the 2026-11-21 audit, finding 105): Android draws the status-bar badge from the
+        # alpha channel alone, and the badge was icon-192.png, RGB with none: a white square
+        import struct
+        badge = re.search(r"badge: '/([^']+)'", (self.chat.STATIC / "sw.js").read_text()).group(1)
+        code, data = self.call("/" + badge)[:2]
+        self.assertEqual(code, 200)
+        self.assertEqual(data[:8], b"\x89PNG\r\n\x1a\n")
+        self.assertEqual(data[12:16], b"IHDR")
+        width, height, depth, colour = struct.unpack(">IIBB", data[16:26])
+        self.assertEqual((colour, depth), (6, 8))          # RGBA
+        self.assertLessEqual(width, 96)
+
     def test_a_push_that_fails_says_why_in_the_log_and_on_the_page_and_a_refusal_is_not_delivered(self):
         # #539 (the 2026-11-20 audit, reproduced with an empty SSL_CERT_FILE): send returned 0 with
         # the reason dropped, the page blamed the push service, serve.log stayed empty, the push was

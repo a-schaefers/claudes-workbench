@@ -43,7 +43,7 @@ self.addEventListener('push', e => {
     let n
     try { n = await what() } catch { n = { title: 'Claude', body: 'Something new in the chat.' } }
     await self.registration.showNotification(n.title, {
-      body: n.body, icon: '/icon-192.png', badge: '/icon-192.png', tag: 'wb-chat', renotify: true, data: { url: '/' },
+      body: n.body, icon: '/icon-192.png', badge: '/badge-96.png', tag: 'wb-chat', renotify: true, data: { url: '/' },
     })
     // news the open page hasn't shown (a push is only for what no page saw): its line may be dead
     for (const c of await self.clients.matchAll({ type: 'window', includeUncontrolled: true })) c.postMessage({ kind: 'push' })
