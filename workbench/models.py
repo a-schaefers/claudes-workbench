@@ -1597,19 +1597,26 @@ def free_gpu(keep=(), say=print, warn=None, of: Model | None = None,
         # a stop (pkill llama-server) returns before the server's VRAM is freed: Ollama loading
         # at once found it taken and put part of the model on the CPU (#703). Waiting for the
         # VRAM to stop falling alone ended in a second while the server still held it all, two
-        # equal reads before it had begun to let go (#898): first until it stops answering, or
-        # the cards hold less than before the stops. A stop that unloads and leaves the server
-        # up (an unload endpoint, `lms unload`) never stops answering, and paid all of
-        # STOP_SETTLE on every round; one seen still answering isn't waited on again
-        # (_STOP_STAYS): stopped again with nothing loaded, the VRAM had nothing to give back
-        # (reviewing #898, 2026-11-21)
+        # equal reads before it had begun to let go (#898): first until it stops answering, or,
+        # with one server stopped, the cards hold less than before its stop. A stop that unloads
+        # and leaves the server up (an unload endpoint, `lms unload`) never stops answering, and
+        # paid all of STOP_SETTLE on every round; one still answering when STOP_SETTLE ends isn't
+        # waited on again (_STOP_STAYS): stopped again with nothing loaded, the VRAM had nothing
+        # to give back (reviewing #898, 2026-11-21). Not on the VRAM's first fall, nor with two
+        # stopped: the first one's release ended the wait while the second still held its memory,
+        # and a pkill server still answering as it let go was taken for one that stays, each
+        # #898's split again (the second review, 2026-11-21)
         deadline = time.monotonic() + STOP_SETTLE
         wait = [o for o in stopped if o.server not in _STOP_STAYS]
-        while (up := [o for o in wait if status(o)["resident"]]) and time.monotonic() < deadline:
-            if base is not None and (used := _vram_used()) is not None and used < base - FALLING:
+        one = len(stopped) == 1  # the cards' fall is its own only then
+        while up := [o for o in wait if status(o)["resident"]]:
+            if time.monotonic() >= deadline:
+                _STOP_STAYS.update(o.server for o in up)
+                break
+            if one and base is not None and (used := _vram_used()) is not None \
+                    and used < base - FALLING:
                 break  # it has begun to let go: released follows it down
             time.sleep(1)
-        _STOP_STAYS.update(o.server for o in up)
         released(max(deadline - time.monotonic(), 0))
     kept_ollama = [o for o in kept if o.engine == "ollama"]
     doomed = {root: [name for name in _ollama_loaded(root)  # every model Ollama has loaded,
@@ -1630,8 +1637,8 @@ def free_gpu(keep=(), say=print, warn=None, of: Model | None = None,
 
 STOP_SETTLE = 30  # seconds free_gpu waits at most for a stopped server's VRAM to be released
 FALLING = 64 * 2 ** 20  # less than this given back is VRAM no longer falling (released, free_gpu)
-# Servers a stop of free_gpu's left answering (it unloads, the server stays): this process waits
-# only for their VRAM after the next stop
+# Servers a stop of free_gpu's left answering all of STOP_SETTLE (it unloads, the server stays):
+# this process waits only for their VRAM after the next stop
 _STOP_STAYS: set = set()
 
 

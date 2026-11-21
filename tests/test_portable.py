@@ -721,20 +721,75 @@ class Real(unittest.TestCase):
     def test_a_stop_that_unloads_and_leaves_its_server_answering_is_not_waited_on_for_30_s(self):
         # reviewing #898 (2026-11-21): free_gpu waited, up to STOP_SETTLE, for a stopped server to
         # stop answering; a stop that unloads (an unload endpoint, `lms unload`) leaves it up and
-        # listing its model, so every free_gpu paid 30 s, and again each round it was stopped
+        # listing its model, so every free_gpu paid 30 s, and again each round it was stopped.
+        # Now its fall ends the wait, and once it has answered all of STOP_SETTLE with nothing to
+        # give back, it isn't waited on again in this process (the second review, 2026-11-21)
         flag = Path(self.tmp.name) / "unloaded"
         srv = self.server({"/v1/models": {"data": [{"id": "m"}]}})       # it answers throughout
         self.config({"s": {"options": {"baseURL": srv + "/v1"}, "models": {"m": {}}}},
                     {"s": {"stop": f"touch '{flag}'"}})
         took = []
         with mock.patch.object(models.hardware, "gpus", lambda windows=True: [
-                {"name": "card", "vram": 16 * 2 ** 30, "vram_used": (2 if flag.exists() else 8) * 2 ** 30}]):
-            for _ in range(2):  # the second: stopped again with nothing left to give back
+                {"name": "card", "vram": 16 * 2 ** 30, "vram_used": (2 if flag.exists() else 8) * 2 ** 30}]), \
+                mock.patch.object(models, "STOP_SETTLE", 3):
+            for _ in range(3):  # the second and third: stopped again with nothing left to give back
                 t0 = time.monotonic()
                 models.free_gpu(say=lambda m: None)
                 took.append(time.monotonic() - t0)
         self.assertTrue(flag.exists())
-        self.assertLess(max(took), 10, took)
+        self.assertLess(took[0], 2.5, took)            # its VRAM fell: no wait for it to go
+        self.assertGreaterEqual(took[1], 2.5, took)    # nothing fell: it could be #898's server
+        self.assertLess(took[2], 2.5, took)            # seen staying up: not waited on again
+        self.assertEqual(len(models._STOP_STAYS), 1)    # that server, keyed by its address
+
+    def test_free_gpu_waits_for_every_stopped_server_not_the_first_ones_release(self):
+        # the second review of #898 (2026-11-21): the cards read before the first stop, the first
+        # server's release ended the wait while the second still held its 10 GB, and two equal
+        # reads then read as released: Ollama loaded beside it and split its model again. A
+        # server still answering as it let go was recorded as one that stays up, and its later
+        # stops were waited on only through the VRAM
+        flags = {k: Path(self.tmp.name) / f"stopped-{k}" for k in ("s1", "s2")}
+        looks: list = []
+
+        def catalog(k, after):  # s1 goes at once; s2 answers `after` looks past its stop
+            def page(h):
+                if flags[k].exists():
+                    looks.append(k)
+                    if looks.count(k) > after:
+                        return 503
+                return {"data": [{"id": "m"}]}
+            return page
+        gone = lambda k, after: flags[k].exists() and looks.count(k) > after  # noqa: E731
+        s1, s2 = (self.server({"/v1/models": catalog(k, n)}) for k, n in (("s1", 0), ("s2", 3)))
+        self.config({"s1": {"options": {"baseURL": s1 + "/v1"}, "models": {"m": {}}},
+                     "s2": {"options": {"baseURL": s2 + "/v1"}, "models": {"m": {}}}},
+                    {k: {"stop": f"touch '{f}'"} for k, f in flags.items()})
+        seen = []
+
+        def gpus(windows=True):
+            used = (0 if gone("s1", 0) else 8) + (0 if gone("s2", 3) else 10)
+            seen.append(used)
+            return [{"name": "card", "vram": 24 * 2 ** 30, "vram_used": used * 2 ** 30}]
+        with mock.patch.object(models.hardware, "gpus", gpus), \
+                mock.patch.object(models, "time", mock.Mock(wraps=time, sleep=lambda s: None)):
+            models.free_gpu(say=lambda m: None)
+        self.assertTrue(all(f.exists() for f in flags.values()))
+        self.assertEqual(seen[-1], 0, seen)                # released only once both had let go
+        self.assertEqual(models._STOP_STAYS, set())        # both went: neither stays up
+        # one pkill server, its VRAM already falling while it answers a few looks more
+        for f in flags.values():
+            f.unlink()
+        looks.clear()
+        self.config({"s2": {"options": {"baseURL": s2 + "/v1"}, "models": {"m": {}}}},
+                    {"s2": {"stop": f"touch '{flags['s2']}'"}})
+
+        def falling(windows=True):
+            return [{"name": "card", "vram": 24 * 2 ** 30,
+                     "vram_used": (2 if flags["s2"].exists() else 10) * 2 ** 30}]
+        with mock.patch.object(models.hardware, "gpus", falling), \
+                mock.patch.object(models, "time", mock.Mock(wraps=time, sleep=lambda s: None)):
+            models.free_gpu(say=lambda m: None)
+        self.assertEqual(models._STOP_STAYS, set())        # it went in the end: its stop ends it
 
     def test_a_llama_server_or_vllm_answering_a_request_is_not_idle(self):
         # #465 (the audit of 1.8): only a JSON /metrics `live.state` was read; llama-server and
