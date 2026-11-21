@@ -1431,14 +1431,20 @@ def _overwritten(repo: Path, branch: str) -> list[str]:
     branch's added paths missed a modify/delete conflict, whose abort deleted the personal copy, a
     directory rename that moved an added file onto one, and a non-UTF-8 name read with U+FFFD
     (#241, the audit of 1.2). Raw bytes throughout. Under core.ignorecase (macOS, Windows) a
-    path matching a tracked one but for case is that tracked file: a case-only rename (Readme.md
-    to README.md) was refused as "would overwrite README.md" on APFS (#470, the audit of 1.8)."""
+    path matching a tracked one but for case is that tracked file when the file system says so
+    (the same inode): a case-only rename (Readme.md to README.md) was refused as "would
+    overwrite README.md" on APFS (#470, the audit of 1.8), and the setting alone was trusted: a
+    copied repo carried core.ignorecase=true onto a case-sensitive file system, where an ignored
+    personal `config` beside the tracked `CONFIG` was replaced by the merge (#640, Codex's audit
+    of 1.90.6)."""
     written = _merge_tree(repo, branch)
     if written is None:  # git before 2.38
         written = _trial_merge(repo, branch)
     tracked = set(_run(repo, ("ls-tree", "-r", "--name-only", "-z", "HEAD")).stdout.split(b"\0"))
     ignorecase = git(repo, "config", "--bool", "core.ignorecase", check=False).strip() == "true"
-    folded = {_folded(t) for t in tracked} if ignorecase else set()
+    folded: dict[str, list[bytes]] = {}
+    for t in tracked if ignorecase else ():
+        folded.setdefault(_folded(t), []).append(t)
     top = os.fsencode(repo)
     out = []
     for p in (p for p in written.split(b"\0") if p and p not in tracked):
@@ -1446,7 +1452,7 @@ def _overwritten(repo: Path, branch: str) -> list[str]:
         for i in range(1, len(parts) + 1):
             here = os.path.join(top, *parts[:i])
             if (b"/".join(parts[:i]) in tracked or not os.path.lexists(here)
-                    or folded and _folded(b"/".join(parts[:i])) in folded):
+                    or folded and _same_file(here, top, folded.get(_folded(b"/".join(parts[:i]))))):
                 # a tracked file where the merge puts a directory is the merge's to replace: a
                 # clean file-to-directory refactor (pkg to pkg/init.py) was refused (#343, the
                 # audit of 1.4)
@@ -1470,6 +1476,22 @@ def _overwritten(repo: Path, branch: str) -> list[str]:
             out.append(p.decode("utf-8", "replace"))
             break
     return out
+
+
+def _same_file(here: bytes, top: bytes, twins: list[bytes] | None) -> bool:
+    """Whether ``here`` is one of the tracked ``twins`` (paths equal to it but for case) on
+    disk: the same file system object, so a case-insensitive file system's name for it (#640)."""
+    try:
+        st = os.lstat(here)
+    except OSError:
+        return False
+    for t in twins or ():
+        try:
+            if os.path.samestat(st, os.lstat(os.path.join(top, t))):
+                return True
+        except OSError:
+            continue
+    return False
 
 
 def _folded(path: bytes) -> str:

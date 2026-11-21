@@ -1908,7 +1908,8 @@ class Lifecycle(Base):
     def test_a_case_only_rename_merges_on_a_case_insensitive_file_system(self):
         # #470 (the audit of 1.8): renaming Readme.md to README.md, lexists("README.md") is true
         # on APFS, and the merge was refused as "would overwrite README.md". The file system is
-        # made case-insensitive for the check, as core.ignorecase says it is
+        # made case-insensitive for the check: README.md is a second name for Readme.md's inode,
+        # as APFS gives it, and core.ignorecase says so (#640: the inode decides, not the setting)
         repo, g = self._merge_case(
             base={b"Readme.md": b"r\n", b"a.txt": b"a\n"}, main={b"a.txt": b"A\n"},
             task={b"Readme.md": None, b"README.md": b"r\n"}, ignore={})
@@ -1920,11 +1921,12 @@ class Lifecycle(Base):
             parent, name = os.path.split(path)
             return real(path) or os.path.isdir(parent) and any(
                 n.casefold() == name.casefold() for n in os.listdir(parent))
+        os.link(repo / "Readme.md", repo / "README.md")
         for old_git in (False, True):
-            with (mock.patch("os.path.lexists", lexists),
-                  mock.patch.object(gitops, "_merge_tree", return_value=None) if old_git
-                  else nullcontext()):
+            with mock.patch.object(gitops, "_merge_tree", return_value=None) if old_git \
+                    else nullcontext():
                 self.assertEqual(gitops._overwritten(repo, "delegate/t"), [])
+        (repo / "README.md").unlink()
         gitops.merge(repo, "t", "main")
         self.assertEqual((repo / "README.md").read_bytes(), b"r\n")
         repo, g = self._merge_case(  # a case-sensitive git: in the way, as before
@@ -1933,6 +1935,22 @@ class Lifecycle(Base):
         g("config", "core.ignorecase", "false")  # git init sets it true on macOS
         with mock.patch("os.path.lexists", lexists):
             self.assertEqual(gitops._overwritten(repo, "delegate/t"), ["README.md"])
+
+    def test_a_stale_ignorecase_on_a_case_sensitive_file_system_keeps_the_ignored_twin(self):
+        # #640 (Codex's audit of 1.90.6): a copied repo carried core.ignorecase=true onto a
+        # case-sensitive file system; the checkout tracked CONFIG and kept its own ignored config,
+        # the task committed config, and the guard took the two names for one file: the merge
+        # replaced the personal file
+        repo, g = self._merge_case(
+            base={b"CONFIG": b"tracked\n"}, main={b".gitignore": b"config\n"},
+            task={b"config": b"DEFAULT\n"}, ignore={b"config": b"PERSONAL\n"})
+        g("config", "core.ignorecase", "true")  # carried over with the copy
+        self.assertEqual((repo / "CONFIG").read_bytes(), b"tracked\n")  # two files here
+        for old_git in (False, True):
+            with mock.patch.object(gitops, "_merge_tree", return_value=None) if old_git \
+                    else nullcontext():
+                self.assertEqual(gitops._overwritten(repo, "delegate/t"), ["config"])
+        self._assert_refused_and_kept(repo, g, b"config", b"PERSONAL\n")
 
     def test_a_clean_merge_beside_ignored_files_still_merges(self):
         repo, g = self._merge_case(
