@@ -532,7 +532,7 @@ def outside_spec(task: store.Task, files: str) -> list[str]:
 def _event(line: str) -> list[dict]:
     """[the JSON object on this line of OpenCode's output], or [] for anything else."""
     try:
-        raw = json.loads(line) if line else None
+        raw = store.loads(line) if line else None  # scrubbed: a lone surrogate (#438)
     except json.JSONDecodeError:
         return []
     return [raw] if isinstance(raw, dict) else []

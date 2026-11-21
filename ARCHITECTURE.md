@@ -612,7 +612,10 @@ pending `--now` note (an `interrupted` event). Any stop goes through `_stop`: SI
 process group, 10 s for the leader, then SIGKILL. The agent's pid is kept in `status.agent_pid`
 while it runs, so `wb stop` can end it if the runner can't. A round that ends mid-question
 clears `asking`. A stdout line that is JSON but not an object is skipped, not a crash, and
-`events.normalize` reads an event whose parts have the wrong shape as empty ones.
+`events.normalize` reads an event whose parts have the wrong shape as empty ones. A line is
+parsed by `store.loads`, which makes a lone surrogate (half an emoji, escaped: valid JSON) U+FFFD,
+as `transcript.export` does with the session export: no UTF-8 file can hold one, and one in a
+model's tool arguments failed the next status write and the task (#438).
 
 The prompt goes after `--`: OpenCode 2.3 reads a message that starts with `-` (a spec opening with
 a bullet or front matter) as a flag, prints its usage and exits (the 2026-11-16 audit).
@@ -4595,7 +4598,8 @@ written when the change raises (#495: a dotfiles link became a plain 0644 file, 
 one line under `<file>.lock` (flock; a task's own events and steer files under `locks/<task>.<file>.lock`, `store.task_lock`, out of the lane), first ending a last line a write cut short (a full disk, a
 crash), so only that fragment is lost, not the row after it; `read_jsonl(path, offset)` returns
 the whole lines and the offset after the last one, skipping bad lines (bad JSON, or bytes that
-aren't UTF-8). All of them read and write UTF-8 whatever the locale (the 2026-11-16 audit: under a
+aren't UTF-8). `scrub(data)` makes every lone surrogate in data's strings U+FFFD and `loads(text)`
+is `json.loads` then `scrub`, for JSON from outside workbench (#438). All of them read and write UTF-8 whatever the locale (the 2026-11-16 audit: under a
 legacy one an em dash in a spec failed to write), as do `wb start|next|feedback`'s specs and
 prompts, and the runner runs under `-X utf8`. `results(trials=False)` leaves out trial rows;
 `mark_trials` rewrites results.jsonl under its lock. `Task(name)`: `spec` (task.json) and `status`
@@ -4908,7 +4912,8 @@ prompt}` to `FAKE_RUNS`; `FAKE_LATE` pauses before its first event (a model read
 `FAKE_SLEEP` after `step_start`; `FAKE_LESSON` adds a `Lesson:`
 line; `FAKE_BG` (a file) starts a `sleep` in a session of its own, left running, and writes its pid
 there (what `sweep` must end); `FAKE_STRAY` first prints lines that are JSON but not events
-(`42`, a list, `null`) and events whose parts have the wrong shape; `FAKE_LINGER` closes its
+(`42`, a list, `null`) and events whose parts have the wrong shape; `FAKE_SURROGATE` first
+a `read` and a `text` event carrying a lone surrogate escape; `FAKE_LINGER` closes its
 output after its last event and stays alive. Scenarios (`FAKE_SCENARIO`): `ok` (writes 42), `fix` (41 in a new session, 42 when
 continued: an auto-fix round passes), `loop` (the repeat guard stops it), `hang`, `crash` (exit 1,
 no events; with `FAKE_DOWN`, a file, it creates it the first time, taking the model server down

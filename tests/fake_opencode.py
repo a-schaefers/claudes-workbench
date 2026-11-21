@@ -27,6 +27,8 @@ FAKE_BG, a file: each run starts `sleep` in a session of its own, left running, 
 there (what the agent leaves behind). FAKE_STRAY prints lines that are JSON but not events, or
 events of the wrong shape, first. FAKE_LINGER: after its last event a run closes its output and
 stays alive (a shutdown that hangs).
+FAKE_SURROGATE: a run first reads a file whose name and text end in half an emoji (an
+unpaired surrogate escaped, which is valid JSON).
 `session export` prints one finished step: FAKE_FILL sets the context it read, FAKE_COMPACTED
 adds a completed compaction. `session list` lists nothing. Either fails without `--standalone`,
 as the real one does when another service holds the managed port. `--version` says
@@ -138,6 +140,12 @@ if os.environ.get("FAKE_BG") and args and args[0] == "run":
                           stderr=subprocess.DEVNULL)
     with open(os.environ["FAKE_BG"], "w") as fh:
         fh.write(str(bg.pid))
+if os.environ.get("FAKE_SURROGATE") and args and args[0] == "run":  # escaped, as JSON allows
+    print('{"type": "tool_use", "timestamp": %d, "sessionID": "%s", "part": {"tool": "read", '
+          '"state": {"status": "completed", "input": {"filePath": "caf\\ud83d.txt"}}}}'
+          % (t(), session), flush=True)
+    print('{"type": "text", "timestamp": %d, "sessionID": "%s", "part": {"text": "half \\ud83d"}}'
+          % (t(), session), flush=True)
 time.sleep(float(os.environ.get("FAKE_LATE", 0)))  # before any output: reading the prompt
 emit("step_start")
 time.sleep(float(os.environ.get("FAKE_SLEEP", 0)))  # after the first event: the session is known

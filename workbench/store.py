@@ -144,6 +144,30 @@ def now() -> float:
     return round(time.time(), 3)
 
 
+def scrub(data):
+    """``data`` with every lone surrogate in its strings (and keys) made U+FFFD. JSON may escape
+    half an emoji (``"\\ud83d"``) and json.loads keeps it, but no UTF-8 file can hold it: one in
+    a model's tool arguments made the runner's next status write raise UnicodeEncodeError and
+    failed the task (#438). Paired halves stay the character they are."""
+    if isinstance(data, str):
+        try:
+            data.encode("utf-8")  # the common case, at C speed
+            return data
+        except UnicodeEncodeError:
+            return data.encode("utf-16", "surrogatepass").decode("utf-16", "replace")
+    if isinstance(data, dict):
+        return {scrub(k): scrub(v) for k, v in data.items()}
+    if isinstance(data, list):
+        return [scrub(v) for v in data]
+    return data
+
+
+def loads(text):
+    """json.loads for text from outside workbench (OpenCode's output, the agent's files), its
+    strings scrubbed so they can be written back out."""
+    return scrub(json.loads(text))
+
+
 def write_json(path: Path, data) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     # a name of its own per write, created exclusively: by pid alone, two of the chat server's
