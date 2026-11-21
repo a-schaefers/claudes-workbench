@@ -204,6 +204,7 @@ class Top:
         self.rack: list[dict] = []
         self.live: dict[str, dict] = {}  # server root -> its /metrics live object
         self.found: dict | None = None
+        self.gpu_memory = True  # a GPU row says a memory size (gpus): else a model in RAM is `cpu`
 
     def close(self) -> None:
         if self.smi:
@@ -259,12 +260,18 @@ class Top:
                          ("watts", hardware.card_watts(dev))):
                 if v is not None:
                     g[k] = v
-            out.append(g)
+            if any(k in g for k in ("used", "total", "busy", "watts")):  # one that reports nothing
+                # (an iGPU on i915, a BMC's ast, a VM's virtio-gpu) is no row (#551)
+                out.append(g)
         out += [dict(g) for g in self.static]
-        if not out:  # no GPU: the models run in RAM, so that is what fills
+        # no GPU says a memory size: the models run in RAM, so that is what fills. Shown only while
+        # there were no rows at all, any display adapter hid it (#551); a card that is merely
+        # unread just now (stale) keeps it away (#547)
+        self.gpu_memory = any(g.get("total") for g in out)
+        if not self.gpu_memory and not any(g.get("stale") for g in out):
             m = hardware.memory() if self.where != "macos" else {}  # /proc/meminfo: one read
             if m.get("ram"):
-                out.append({"name": "RAM (no GPU)", "ram": True, "total": m["ram"],
+                out.append({"name": "RAM" if out else "RAM (no GPU)", "ram": True, "total": m["ram"],
                             **({"used": m["ram"] - m["ram_free"]} if m.get("ram_free") is not None else {})})
         return out
 
@@ -418,6 +425,11 @@ class Top:
                     r["state"] = "idle"
                 else:
                     size, on_gpu = int(hit.get("size") or 0), int(hit.get("size_vram") or 0)
+                    if size and not on_gpu and not self.gpu_memory:
+                        # all in RAM with no GPU memory here: the normal state of a CPU-only
+                        # machine, not a warning's "split 0.0 GB GPU" (#551)
+                        r.update(state="cpu", cpu_bytes=size)
+                        return r
                     r["state"] = "resident" if size and on_gpu >= size else "split" if size else "resident"
                     if on_gpu or size:
                         r["gpu_bytes"] = on_gpu
@@ -448,6 +460,7 @@ class Top:
 
     def tick(self) -> dict:
         now = time.time()
+        gpus = self.gpus()  # first: the rack's states read gpu_memory
         if self._probe_due() or self.found is None:
             self.found = models.discover()  # the config, re-read with the servers' answers
         found = self.found
@@ -456,7 +469,7 @@ class Top:
             self.probe(found, running)
             running = self.running(found, now)  # with the servers' live objects
         pools = self.pools()
-        return {"ts": round(now, 1), "every": self.every, "gpus": self.gpus(), "running": running,
+        return {"ts": round(now, 1), "every": self.every, "gpus": gpus, "running": running,
                 "rack": self.rack_now(pools), "queue": self.queue(pools, now)}
 
 
@@ -540,9 +553,11 @@ def lines(snap: dict) -> list[list[tuple[str, str]]]:
     out += [[], [("head", "RACK")]]
     for r in snap["rack"]:
         state = r["state"]
-        style = {"resident": "ok", "split": "warn", "can't run": "bad"}.get(state, "dim")
+        style = {"resident": "ok", "cpu": "ok", "split": "warn", "can't run": "bad"}.get(state, "dim")
         where = ""
-        if r.get("gpu_bytes") is not None:
+        if state == "cpu":
+            where = f" {_gb(r['cpu_bytes'])} GB in RAM"
+        elif r.get("gpu_bytes") is not None:
             where = f" {_gb(r['gpu_bytes'])} GB GPU" + (f" + {_gb(r['cpu_bytes'])} GB CPU" if r.get("cpu_bytes") else "")
         row = [("name", f"  {p(r['label'])[:30].ljust(31)}"), (style, f"{state}{where}".ljust(31))]
         facts = [f"writes ~{r['write_tok_s']:.0f}" if r.get("write_tok_s") else "",

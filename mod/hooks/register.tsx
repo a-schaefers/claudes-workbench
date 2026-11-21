@@ -630,8 +630,9 @@ export function cardName(name: string): string {
   if (n.endsWith(']')) return [...n.matchAll(/\[([^\]]+)\]/g)].at(-1)?.[1] ?? n
   return n.slice(n.lastIndexOf(']') + 1).trim() || n
 }
-const RACK_MARK: Record<string, string> = { resident: '●', split: '◑', idle: '○', "can't run": '✗', remote: '⇢' }
-const RACK_COLOR: Record<string, string> = { resident: 'success', split: 'warning', "can't run": 'error' }
+// cpu: all in RAM on a machine with no GPU memory, its normal state, not a split (#551)
+const RACK_MARK: Record<string, string> = { resident: '●', cpu: '●', split: '◑', idle: '○', "can't run": '✗', remote: '⇢' }
+const RACK_COLOR: Record<string, string> = { resident: 'success', cpu: 'success', split: 'warning', "can't run": 'error' }
 
 // The live view as lines of coloured parts: each GPU (memory and busy as bars, watts, busy's
 // sparkline), what runs now, the rack (every model: where it is, its speeds, its load time, the
@@ -665,8 +666,9 @@ export function liveLines(t: WbTop): { color?: string; dim?: boolean; bold?: boo
   }
   if (!(s.running ?? []).length) out.push([{ dim: true, text: 'Nothing running.' }])
   for (const m of (s.rack ?? []) as Row[]) {
-    const where = typeof m.gpu_bytes === 'number'
-      ? ` ${gib(m.gpu_bytes)} GiB on the GPU${m.cpu_bytes ? ` + ${gib(m.cpu_bytes)} on the CPU` : ''}` : ''
+    const where = m.state === 'cpu' && typeof m.cpu_bytes === 'number' ? ` ${gib(m.cpu_bytes)} GiB in RAM`
+      : typeof m.gpu_bytes === 'number'
+        ? ` ${gib(m.gpu_bytes)} GiB on the GPU${m.cpu_bytes ? ` + ${gib(m.cpu_bytes)} on the CPU` : ''}` : ''
     const facts = [m.write_tok_s ? `writes ~${Math.round(m.write_tok_s)}` : '', m.read_tok_s ? `reads ~${Math.round(m.read_tok_s)}` : '',
       m.load_s ? `loads ~${secs(m.load_s)}` : '', m.state === 'remote' ? 'another machine: no telemetry' : m.why ?? ''].filter(Boolean)
     out.push([{ color: RACK_COLOR[m.state], dim: !RACK_COLOR[m.state], text: `${RACK_MARK[m.state] ?? '•'} ` },

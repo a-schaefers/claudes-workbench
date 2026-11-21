@@ -9688,8 +9688,7 @@ class Top(Base):
         t = self.top(drm)
         self.assertEqual(t.gpus(), [
             {"index": 0, "name": "1002:7550", "driver": "amdgpu", "used": 12 * 2 ** 30,
-             "total": 16 * 2 ** 30, "busy": 97, "watts": 212.0},
-            {"index": 1, "name": "card1", "driver": "i915"}])  # absent, not zero
+             "total": 16 * 2 ** 30, "busy": 97, "watts": 212.0}])  # card1 says nothing: no row (#551)
 
     def test_an_older_amd_card_shows_its_vram_and_only_an_apu_adds_its_gtt(self):
         # #435's comment: wb top had its own copy of the vendor-only rule, so an 8 GiB GCN card
@@ -9718,6 +9717,36 @@ class Top(Base):
                            ("NVIDIA Corporation AD102 [GeForce RTX 4090] (rev a1)", "GeForce RTX 4090"),
                            ("NVIDIA GeForce RTX 4090", "NVIDIA GeForce RTX 4090"), ("1002:7550", "1002:7550")):
             self.assertEqual(top.short(line), want)
+
+    def test_a_display_adapter_that_reports_nothing_leaves_the_ram_view_and_models_in_ram_arent_split(self):
+        # #551: an Intel iGPU, a server's ASPEED BMC or a VM's virtio-gpu made an empty GPU row
+        # and hid the RAM view, and a model wholly on the CPU (size_vram 0) showed as "split"
+        from workbench import models, top
+        for driver in ("i915", "ast", "virtio-pci"):
+            drm = Path(self.tmp.name, driver)
+            (drm / "card0" / "device").mkdir(parents=True)
+            (drm / "card0" / "device" / "uevent").write_text(f"DRIVER={driver}\nPCI_SLOT_NAME=0000:00:02.0\n")
+            t = self.top(drm)
+            (g,) = t.gpus()
+            self.assertEqual((g["name"], g.get("ram")), ("RAM (no GPU)", True), driver)
+        m = next(x for x in models.discover().values() if x.engine == "ollama")
+        tags = {m.server: {"models": [{"name": m.name, "size": 9 * 10 ** 9}]}}
+        ps = {m.server: [{"name": m.name, "size": 9 * 10 ** 9, "size_vram": 0}]}
+        with mock.patch.object(models, "_fake", lambda: False), \
+                mock.patch.object(models, "status", lambda *a, **k: {"why": "ollama is not answering"}):
+            row = t._state(m, tags, ps)
+            self.assertEqual((row["state"], row.get("cpu_bytes"), "gpu_bytes" in row), ("cpu", 9 * 10 ** 9, False))
+            self.assertIn("9.0 GB in RAM", top.render({"ts": 0, "every": 2, "gpus": [], "running": [], "rack": [
+                {**row, "label": "M"}], "queue": []}, 200, color=False))
+            t.gpu_memory = True                  # beside a GPU with memory: part of it should be there
+            self.assertEqual(t._state(m, tags, ps)["state"], "split")
+        # a card that reports a reading but no memory size keeps its row, and the RAM shows beside it
+        drm = Path(self.tmp.name, "xe")
+        (drm / "card0" / "device").mkdir(parents=True)
+        (drm / "card0" / "device" / "uevent").write_text("DRIVER=xe\nPCI_SLOT_NAME=0000:03:00.0\n")
+        (drm / "card0" / "device" / "gpu_busy_percent").write_text("12\n")
+        gpu, ram = self.top(drm).gpus()
+        self.assertEqual((gpu["busy"], ram["name"], ram["ram"]), (12, "RAM", True))
 
     def test_with_no_gpu_it_shows_the_ram(self):
         drm = Path(self.tmp.name, "empty")
@@ -9811,8 +9840,9 @@ class Top(Base):
         self.assertEqual(rows["aarch64"], [{"name": "NVIDIA GB10", "driver": "nvidia", "index": 0, "busy": 41,
                                             "watts": 38.2, "total": 128 * 10 ** 9, "used": 28 * 10 ** 9,
                                             "unified": True}])
-        self.assertEqual(rows["x86_64"], [{"name": "NVIDIA GB10", "driver": "nvidia", "index": 0, "busy": 41,
-                                           "watts": 38.2}])
+        self.assertEqual(rows["x86_64"][0], {"name": "NVIDIA GB10", "driver": "nvidia", "index": 0, "busy": 41,
+                                             "watts": 38.2})
+        self.assertEqual(rows["x86_64"][1]["name"], "RAM")   # no GPU says a size: the RAM beside (#551)
 
     def test_on_wsl_a_failing_nvidia_smi_falls_back_to_windows_adapters_not_the_ram(self):
         # #547: on WSL a stream that started and then failed hid Windows' adapters too

@@ -1841,6 +1841,14 @@ test('a card wb top knows but has no reading for says so, not nothing (#547)', (
   expect(text([{ index: 0, name: 'NVIDIA GeForce RTX 4090', driver: 'nvidia', stale: true }])[0]).toBe('GPU 0 NVIDIA GeForce RTX 4090 no reading ')
 })
 
+test('a model all in RAM on a machine with no GPU memory is in RAM, not split (#551)', () => {
+  const lines = liveLines({ snap: { ts: 0, every: 2, gpus: [], running: [], queue: [],
+    rack: [{ model: 'ollama/m', label: 'M', state: 'cpu', cpu_bytes: 2 ** 33 }] }, busy: {} } as any)
+  const row = lines.find(r => r.some(p => p.text.startsWith('M ')))!
+  expect(row.map(p => p.text).join('')).toBe('● M cpu 8.0 GiB in RAM')
+  expect(row[0].color).toBe('success')
+})
+
 test('a card is named by its product, never the vendor tag, as wb top names it (#576)', () => {
   const amd = 'Advanced Micro Devices, Inc. [AMD/ATI]'
   expect(cardName(`${amd} Phoenix1 (rev c4)`)).toBe('Phoenix1')

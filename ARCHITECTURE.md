@@ -1783,7 +1783,7 @@ nothing until a surface attaches.
   a line per GPU (memory and busy % as bars, `bar`, in eighths; watts; busy's sparkline since the
   tab opened, the last `BUSY_KEEP` 60 samples, in memory only), a line per running task (phase,
   round, its time, tok/s, said `(last call)` when not live, context %), the rack (one line per
-  model: resident, split, idle or can't run, where its memory is, its speeds and load time, the
+  model: resident, split, cpu, idle or can't run, where its memory is, its speeds and load time, the
   tasks on it) and the queue. One child (`runTop`), started by `syncTop` only while the tab is
   shown, the pane not minimized and Live view on, checked at each poll, a tab's press, a
   minimize, a bring-back and a Stats pick; it ends (`stopTop`, `return()` on the stream) the
@@ -1911,7 +1911,11 @@ Each tick reads, cheapest first:
   Spark, GB10, a Jetson) shows the RAM it shares: `total` `MemTotal`, `used` `MemTotal` less
   `MemAvailable` (`hardware.memory`, one read a tick), `unified`; it showed load and watts but no
   memory (#572). An x86 card's `[N/A]` stays unknown. macOS: the GPUs from system_profiler once (no VRAM used, no busy %); WSL
-  where nvidia-smi named no card (none, or one that fails): Windows' adapters once (names, and memory as `total` where the registry says); no GPU at all: the RAM, from /proc/meminfo.
+  where nvidia-smi named no card (none, or one that fails): Windows' adapters once (names, and memory as `total` where the registry says).
+  A sysfs card that reports nothing (no memory, busy % or watts: an iGPU on i915, a BMC's `ast`, a
+  VM's virtio-gpu) is no row. When no row says a memory size (`total`) and none is `stale`, a RAM
+  row follows, from /proc/meminfo (`RAM (no GPU)` alone, else `RAM`): shown only when there were
+  no rows at all, any display adapter hid it on the CPU-only machines it was written for (#551).
 - **Tasks**: every task's task.json and status.json, re-read only when one changes (`_Files`, by
   mtime and size), and a running task's newest `step` events (the last 64 KiB of events.jsonl).
 - **The lease**: gpu.json and each remote pool's `gpu-<host>.json` through `models.holders` (dead
@@ -1928,8 +1932,8 @@ Each tick reads, cheapest first:
 never 0):
 - `ts`, `every`;
 - `gpus`: `[{index, name, driver, used, total, busy (%), watts, unified?, stale?}]` (`stale`: a
-  card nvidia-smi named with no fresh reading; the terminal and the pane say "no reading"), or `[{name: "RAM (no
-  GPU)", ram: true, used, total}]`;
+  card nvidia-smi named with no fresh reading; the terminal and the pane say "no reading"), then `{name: "RAM (no
+  GPU)" (or "RAM" beside GPU rows), ram: true, used, total}` when no GPU row says its memory;
 - `running` (queued, running, testing, asking): `[{task, model, label, phase, round, round_s,
   tok_s, tok_s_from, read_tok_s, read_from, context_used, context_window, context_pct, last,
   remote?, server?}]`. `tok_s_from` is `live` (the server's `live.tok_s`) or `last call`: the
@@ -1940,7 +1944,9 @@ never 0):
   one is not run.
 - `rack` (every discovered model): `[{model, label, state, why?, gpu_bytes?, cpu_bytes?,
   write_tok_s?, read_tok_s?, load_s?, tasks?}]`, `state` one of `resident` (all on the GPU),
-  `split` (Ollama's `size_vram` under its `size`: part on the CPU), `idle`, `can't run` (with
+  `split` (Ollama's `size_vram` under its `size`: part on the CPU), `cpu` (`size_vram` 0 where no
+  GPU row says a memory size: all in RAM, `cpu_bytes`, the normal state of a CPU-only machine,
+  shown as `split 0.0 GB GPU` in the warning colour before #551), `idle`, `can't run` (with
   status's `why`), `remote` (another machine: no telemetry); `tasks` the lease holders on it.
 - `queue`: the lease's waiters, oldest first: `[{task, model, since, waited_s, pool?}]` (`pool`
   for a remote server's).
