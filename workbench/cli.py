@@ -4043,6 +4043,10 @@ EVENT_SKIP = ("tasks/*/worktree", "tasks/*/tree", "tasks/*/rounds", "rules", "im
               # of 1.6); and the bench's (`wb bench add`'s .base-/.check- clones, a run's
               # replays): 1,209 of 1,211 watches were there (#439)
               "bench/.?*", "bench/runs",
+              # the web chat's uploads (one directory each, kept ARCHIVE_DAYS) and each bench case's
+              # hidden tests: nothing the mod acts on is written there, and each upload's rename
+              # woke it for nothing (#842)
+              "chat/uploads", "bench/cases",
               *(SCRATCH := (".?*", "wb-index-*", "wb-merge-*")))  # .?*: not "." (the home itself)
 QUIET = (".lock", ".tmp", "runner.log")
 

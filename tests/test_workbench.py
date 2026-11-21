@@ -5098,7 +5098,7 @@ class Watch(Base):
             watched = {str(d.relative_to(home)) for d in w.dirs.values()}
         self.assertEqual(watched, {".", "tasks"})
 
-    def test_wb_events_watches_no_bench_clone_no_link_out_and_survives_an_unreadable_directory(self):
+    def test_wb_events_watches_no_bench_clone_case_or_upload_no_link_out_and_survives_an_unreadable_directory(self):
         # #439: 1,209 of 1,211 watches were under bench/, a mode-000 directory there made wb
         # events exit 1 at every respawn, and a --sibling link took it into the sibling's tree
         from workbench import watch
@@ -5106,7 +5106,9 @@ class Watch(Base):
         for d in ("bench/.base-1-x", "bench/.check-1-y", "bench/runs/r1/case/repo"):
             for i in range(20):
                 (home / d / "node_modules" / f"p{i}").mkdir(parents=True)
-        (home / "bench/cases/c").mkdir(parents=True)
+        # #842: a bench case's hidden tests and the web chat's uploads were watched too
+        (home / "bench/cases/c/hidden/tests").mkdir(parents=True)
+        (home / "chat/uploads/u1").mkdir(parents=True)
         lib = Path(self.tmp.name) / "biglib"
         for i in range(20):
             (lib / f"src{i}").mkdir(parents=True)
@@ -5115,7 +5117,7 @@ class Watch(Base):
         locked = home / "tasks/t/locked"
         (locked / "inside").mkdir(parents=True)
         locked.chmod(0)
-        want = {".", "tasks", "tasks/t", "bench", "bench/cases", "bench/cases/c"}
+        want = {".", "tasks", "tasks/t", "bench", "chat"}
         try:
             for libc in (None, False):                      # inotify, then polling (macOS)
                 with mock.patch.object(watch, "_libc", libc), \
