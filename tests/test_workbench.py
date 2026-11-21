@@ -10723,6 +10723,48 @@ class Audio(Base):
         self.assertEqual(audio.wer("the cat sat on the mat", "the cat on the the mat"), 0.333)
         self.assertEqual(audio.wer("one two", ""), 1.0)
 
+    def test_a_long_script_is_aligned_once_in_bounded_memory_and_one_too_long_says_so(self):
+        # #947 (the v1.90.24 review, finding 29): inspect aligned a take twice (wer, then
+        # differences), each over a full matrix of Python ints: 327 MiB and 3.5 s for a
+        # 3,000-character Japanese script, several GiB past 10,000
+        import random, tracemalloc, wave as _wave
+        rnd = random.Random(947)
+        script = "".join(chr(0x4E00 + rnd.randrange(3000)) for _ in range(700))
+        heard = "中" + script[1:-1] + "国"            # a miss at each end: the whole matrix between
+        tracemalloc.start()
+        try:
+            rate, diffs = audio.score(script, heard)
+            peak = tracemalloc.get_traced_memory()[1]
+        finally:
+            tracemalloc.stop()
+        self.assertEqual((rate, diffs), (round(2 / 700, 3), [f"{script[0]} → 中", f"{script[-1]} → 国"]))
+        self.assertLess(peak, 2 * 2**20)                 # a byte a cell: 0.5 MB, not the old ~20
+        long = script * 10                               # common ends cost no matrix at all
+        self.assertEqual(audio.differences(long, long[:3500] + "中" + long[3501:]), [f"{long[3500]} → 中"])
+        for _ in range(200):                             # the fewest edits still, ends trimmed or not
+            a = [rnd.choice("abc") for _ in range(rnd.randrange(8))]
+            b = [rnd.choice("abc") for _ in range(rnd.randrange(8))]
+            d = [list(range(len(b) + 1))] + [[i] + [0] * len(b) for i in range(1, len(a) + 1)]
+            for i in range(1, len(a) + 1):
+                for j in range(1, len(b) + 1):
+                    d[i][j] = min(d[i - 1][j - 1] + (a[i - 1] != b[j - 1]), d[i - 1][j] + 1, d[i][j - 1] + 1)
+            self.assertEqual(sum(k for _, _, k in audio._align(a, b)), d[-1][-1], (a, b))
+        clip = Path(self.tmp.name) / "take.wav"
+        with _wave.open(str(clip), "wb") as w:
+            w.setnchannels(1); w.setsampwidth(2); w.setframerate(16000); w.writeframes(b"\x00\x10" * 16000)
+        calls = []
+        real = audio._align
+        with mock.patch.object(audio, "transcribe", lambda *a: heard), \
+                mock.patch.object(audio, "_align", lambda *a: (calls.append(1), real(*a))[1]):
+            found = audio.inspect(clip, "speech", script, ear=("ear", {}), draw=False)
+        self.assertEqual((found["wer"], found["differences"], len(calls)), (rate, diffs, 1))
+        with mock.patch.object(audio, "transcribe", lambda *a: heard), \
+                mock.patch.object(audio, "ALIGN_CELLS", 100_000):     # past the cap: said, not tried
+            found = audio.inspect(clip, "speech", script, ear=("ear", {}), draw=False)
+        self.assertNotIn("wer", found)
+        self.assertIn("too long to score: 700 script units against 700 heard", found["listen_error"])
+        self.assertIn("listener failed: too long to score", audio.summary(found, None))
+
     def test_speech_written_without_spaces_is_scored_by_character(self):
         # #598: '東京タワーに行きましょう。' heard with に→へ scored WER 100%, one character of a
         # 15-character Chinese line 50%, the difference shown the whole clause

@@ -4910,10 +4910,15 @@ it. ACE-Step's takes peaked at -0.2 dBFS, near clipping, before any `loudnorm`: 
   The blocks: silence is below `SILENT_DB` (-50 dBFS), a gap is
   `GAP_SECS` (1 s) or more between sounds, and a sample at 0.999 of full scale or more counts as
   clipped. `_spans` aligns the script's words with the heard ones (`_align`: the fewest word
-  edits, Levenshtein with a backtrace, lower case) and keeps each stretch of edits as a span,
+  edits, Levenshtein with a backtrace, lower case: the common start and end matched without a
+  matrix, then two rows of costs and a byte a cell for the way back; past `ALIGN_CELLS`, 16M
+  pairs between those ends, a ValueError "too long to score: …" reported as the listener's
+  failure. A full matrix of Python ints took 327 MiB and 3.5 s for a 3,000-character Japanese
+  script, several GiB past 10,000, #947) and keeps each stretch of edits as a span,
   except those that differ only in spacing or apostrophes ("boatswain's", "Boat Swain's"); `wer`
   is the substitutions, deletions and insertions over the script's words, not capped at 100%,
-  `differences` the first four spans as `script → heard`. `difflib` paired an insert with a
+  `differences` the first four spans as `script → heard`, both from one alignment (`score`,
+  which `inspect` calls once: it aligned each take twice, #947). `difflib` paired an insert with a
   delete among repeated words: one wrong word in "go go go go" scored 100%, its differences
   wrong too (#593). `words` NFC-normalizes the text first (`café` precomposed against one with a
   combining accent scored 1.0, #747), keeps letters, digits, apostrophes and their combining marks (`\w`
