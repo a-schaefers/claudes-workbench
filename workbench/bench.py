@@ -477,7 +477,7 @@ def start(model_ids: list[str], case_names: list[str], skills: list[str], label:
     d.mkdir(parents=True)
     store.write_json(d / "plan.json", {"run": run, "label": label or "", "pairs": pairs,
                                        "skills": skills, "repeat": repeat, "created_at": store.now()})
-    env = {**os.environ, "PYTHONPATH": str(PKG_ROOT), "WB_HOME": str(store.home())}
+    env = context.detached_env()  # its replays' agents get the user's PYTHONPATH (#512)
     env.pop("WB_TASK", None)
     env.pop("CLAUDE_CODE_SESSION_ID", None)  # its tasks are no session's
     env.pop("CLAUDE_PID", None)

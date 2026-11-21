@@ -1073,7 +1073,45 @@ def python_env(task: store.Task, env: dict) -> list[str]:
         env["VIRTUAL_ENV"] = str(own)
         env.pop("VIRTUAL_ENV_PROMPT", None)
     env["PATH"] = os.pathsep.join(path)
+    python_path(task, env, gone)
     return inside
+
+
+# The user's PYTHONPATH (ROS's setup.bash, a src layout exported from a shell profile, Blender,
+# Spack) never reached the agent, the setup or the tests: spawn_runner replaced it with the
+# package root, the agent's environment dropped that, and naming PYTHONPATH in commands.json `env`
+# passed workbench's own path, which lacks the project's modules and put `python3 -m workbench.cli`
+# in the agent's reach (#512, the audit of 1.90). The detached processes (the runner, the bench
+# driver, wb optimize) keep the caller's in USER_PYTHONPATH; agent_env gives it back (python_path).
+USER_PYTHONPATH = "WB_USER_PYTHONPATH"
+
+
+def detached_env() -> dict:
+    """The environment for a detached workbench process: `PYTHONPATH` the package root, and the
+    caller's own kept in USER_PYTHONPATH (already kept, when wb runs inside one: a bench replay)."""
+    env = {**os.environ, "PYTHONPATH": str(PKG_ROOT), "WB_HOME": str(store.home())}
+    env[USER_PYTHONPATH] = os.environ.get(USER_PYTHONPATH, os.environ.get("PYTHONPATH", ""))
+    return env
+
+
+def python_path(task: store.Task, env: dict, gone=lambda p: False) -> None:
+    """``env``'s PYTHONPATH, in place: the user's (USER_PYTHONPATH, never the runner's own), less
+    workbench's package and the dropped environments' directories (``gone``), with each directory
+    inside the repo as the worktree's, as on PATH; unset when nothing is left."""
+    repo = os.path.realpath(task.spec["repo"])
+    own = os.path.realpath(PKG_ROOT)
+    out = []
+    for d in env.pop(USER_PYTHONPATH, "").split(os.pathsep):
+        real = os.path.realpath(d) if os.path.isabs(d) else ""
+        if real and (real == own or _under(real, own) or gone(real)):
+            continue
+        if real and _in_repo(real, repo):
+            d = os.path.normpath(os.path.join(task.worktree, os.path.relpath(real, repo)))
+        if d:
+            out.append(d)
+    env.pop("PYTHONPATH", None)
+    if out:
+        env["PYTHONPATH"] = os.pathsep.join(out)
 
 
 def python_installs(task: store.Task) -> tuple[bool, bool]:
@@ -1383,6 +1421,121 @@ def _tracked(worktree: Path, *patterns: str) -> list[str]:
     return sorted(p for p in out.split("\0") if p)
 
 
+# A CLAUDE.md split with `@` imports (`See @README.md`, `@docs/testing.md`, a user's
+# `@~/.claude/rules/python.md`), as Claude Code's memory docs suggest, reached the agent as those
+# literal lines: OpenCode 2.3 reads each instruction file as a raw string, and an import into
+# ~/.claude was unreadable in the lane besides (#513, the audit of 1.90). So the imports are listed
+# as instruction files of their own, after the file that imports them, as Claude Code loads them:
+# relative to that file's real directory, `~` expanded, IMPORT_HOPS deep, code spans, fences and
+# HTML comments skipped, missing or non-text targets ignored. One outside the worktree and the repo
+# is copied into rules/<task>/imports/, which the lane reads. Claude Code asks before a project's
+# file imports from outside the project; wb can't, so a project's imports reach only the repo and
+# the Markdown in Claude's directory (no dot-named entry there: .credentials.json), and the user's
+# own CLAUDE.md reaches anywhere but a secret or workbench's own files.
+IMPORT = re.compile(r"(?:^|\s)@((?:[^\s\\]|\\ )+)")
+IMPORT_HOPS = 5
+FENCE = re.compile(r" {0,3}(`{3,}|~{3,})")
+
+
+def imports_in(text: str) -> list[str]:
+    """The `@` import paths in a Markdown file's ``text``, as Claude Code reads them."""
+    text = re.sub(r"<!--.*?-->", "", text, flags=re.S)
+    found, fence = [], ""
+    for line in text.splitlines():
+        if m := FENCE.match(line):
+            mark = m.group(1)
+            if not fence:
+                fence = mark
+            elif mark[0] == fence[0] and len(mark) >= len(fence) and not line.strip(" `~"):
+                fence = ""
+            continue
+        if fence:
+            continue
+        line = re.sub(r"(`+).+?\1", " ", line)
+        for m in IMPORT.finditer(line):
+            p = m.group(1).split("#", 1)[0].replace("\\ ", " ")
+            if p.startswith(("./", "~/")) or (p.startswith("/") and p != "/") or (
+                    re.match(r"[a-zA-Z0-9._-]", p) and not re.match(r"[#%^&*()]+", p)):
+                found.append(p)
+    return found
+
+
+def _text_file(path: str) -> bool:
+    try:
+        with open(path, "rb") as f:
+            head = f.read(8192)
+    except OSError:
+        return False
+    if b"\0" in head:
+        return False
+    try:
+        head.decode("utf-8")
+    except UnicodeDecodeError as e:  # a character cut at the 8 KiB mark is still text
+        return e.start >= len(head) - 3
+    return True
+
+
+def import_files(task: store.Task, roots: list[tuple[Path, Path, bool]]) -> list[Path]:
+    """Each of ``roots`` (the path OpenCode loads, the file it was read from, whether it is the
+    user's own), followed by what it imports, depth first: the paths OpenCode should load."""
+    wt, repo = task.worktree, os.path.realpath(task.spec["repo"])
+    claude = os.path.realpath(claude_home())
+    hidden = secret_paths() | private_paths()
+    within = lambda p, d: p == d or _under(p, d)  # noqa: E731
+    copies = rules_dir(task) / "imports"
+    seen: set[str] = set()
+    made: set[Path] = set()
+    out: list[Path] = []
+
+    def where(real: str, users: bool) -> Path | None:
+        """Where the agent reads the import at ``real``: the worktree's copy, the repo's, or a copy
+        in its rules; None when it may not have it."""
+        for base in (os.path.realpath(wt), repo):
+            if within(real, base):
+                rel = os.path.relpath(real, base)
+                return wt / rel if (wt / rel).is_file() else Path(real)
+        if within(real, claude):
+            mine = real.endswith(".md") and not any(
+                part.startswith(".") for part in Path(os.path.relpath(real, claude)).parts)
+            hidden_ = hidden - {claude}
+        else:
+            mine, hidden_ = users, hidden
+        if not mine or any(within(real, h) for h in hidden_):
+            return None
+        copy = copies / str(len(seen)) / Path(real).name
+        copy.parent.mkdir(parents=True, exist_ok=True)
+        # replaced whole, never emptied first: a running agent's OpenCode may be reading it (a
+        # wb allow rewrites the layer mid-round)
+        tmp = copy.with_name(f".{copy.name}.{os.getpid()}.tmp")
+        shutil.copyfile(real, tmp)
+        os.replace(tmp, copy)
+        made.add(copy)
+        return copy
+
+    def visit(load: Path, real: str, users: bool, hops: int) -> None:
+        seen.add(real)
+        out.append(load)
+        if hops >= IMPORT_HOPS:
+            return
+        try:
+            text = Path(real).read_text(encoding="utf-8", errors="replace")
+        except OSError:
+            return
+        for p in imports_in(text):
+            target = os.path.realpath(os.path.join(os.path.dirname(real), os.path.expanduser(p)))
+            if target not in seen and os.path.isfile(target) and _text_file(target) and \
+                    (at := where(target, users)):
+                visit(at, target, users, hops + 1)
+
+    for load, source, users in roots:
+        if (real := os.path.realpath(source)) not in seen:
+            visit(load, real, users, 0)
+    for old in copies.glob("*/*") if copies.is_dir() else ():  # imports dropped since
+        if old not in made:
+            old.unlink(missing_ok=True)
+    return out
+
+
 def instruction_files(task: store.Task) -> tuple[list[Path], list[str]]:
     """(files OpenCode should load, nested CLAUDE.md paths the agent reads when it works there).
     Before the runner has checked the worktree out (wb start's fixed_prompt, #529), the user's
@@ -1394,12 +1547,13 @@ def instruction_files(task: store.Task) -> tuple[list[Path], list[str]]:
     handbook = rules_dir(task) / "HANDBOOK.md"
     handbook.write_text(HANDBOOK.read_text() + "".join(
         note for name, note in EXPERIMENT_NOTES.items() if experiment(task, name)))
-    load: list[Path] = [handbook]
+    roots: list[tuple[Path, Path, bool]] = []  # (what OpenCode loads, read from, the user's own)
     user = claude_home() / "CLAUDE.md"
     if user.is_file():  # a copy too: the agent can't read Claude's directory (SECRETS)
         mine = rules_dir(task) / "CLAUDE.md"
         mine.write_text(user.read_text())
-        load.append(mine)
+        roots.append((mine, user, True))
+    load: list[Path] = []
     for rel in ROOT_FILES:
         # the worktree's copy when the file is committed; the repo's when it is local or uncommitted
         for base in (wt, repo):
@@ -1413,6 +1567,7 @@ def instruction_files(task: store.Task) -> tuple[list[Path], list[str]]:
                     load.append(base / rel)
                     break
     load += [wt / p for p in _tracked(wt, ".claude/rules/*.md")]
+    load = [handbook, *import_files(task, roots + [(p, p, False) for p in load])]  # #513
     # OpenCode already loads the worktree's AGENTS.md: skip a CLAUDE.md with the same text (one
     # only in the user's checkout isn't loaded, so it can't stand in for CLAUDE.md)
     # (and, started in a package, the package's too: checked on OpenCode 2.3, #375)

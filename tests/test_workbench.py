@@ -4231,6 +4231,69 @@ class RealOpenCode(Base):
         self.assertIn("CANARY-HANDED", text)              # a handed skill is listed to the model
         self.assertNotIn("CANARY-KEPT", text)             # and the rest of the library is not
 
+    @home_outside_the_lane
+    def test_claude_md_imports_reach_the_model_in_the_lane_and_secrets_stay_out(self):
+        # #513 (the audit of 1.90): OpenCode reads an instruction file as a raw string, so
+        # `See @docs/testing.md` reached the agent as that line, and an import into ~/.claude
+        # was unreadable in the lane
+        from workbench import runner
+        claude = Path(tempfile.mkdtemp(dir=Path.home(), prefix=".wb-imports-test-"))
+        self.addCleanup(shutil.rmtree, claude, True)
+        os.environ["CLAUDE_CONFIG_DIR"] = str(claude)              # hidden from the lane (SECRETS)
+        (claude / "rules").mkdir()
+        (claude / "CLAUDE.md").write_text("Mine: @rules/python.md\n")
+        (claude / "rules" / "python.md").write_text("CANARY-USER-IMPORT\n")
+        (claude / "notes.md").write_text("CANARY-CLAUDE-NOTES\n")
+        (claude / ".credentials.json").write_text("CANARY-CREDENTIAL\n")
+        outside = Path(self.tmp.name) / "elsewhere.md"
+        outside.write_text("CANARY-OUTSIDE\n")
+        (self.repo / "docs").mkdir()
+        for name, text in (("testing", "CANARY-IMPORTED, then @deeper.md"), ("deeper", "CANARY-DEEPER"),
+                           ("span", "CANARY-SPAN"), ("fenced", "CANARY-FENCED")):
+            (self.repo / "docs" / f"{name}.md").write_text(text + "\n")
+        (self.repo / "CLAUDE.md").write_text(
+            "See @docs/testing.md and @docs/missing.md, not `see @docs/span.md first`.\n"
+            "```\n@docs/fenced.md\n```\n<!-- @docs/span.md -->\n"
+            f"@{claude}/notes.md @{claude}/.credentials.json @{outside}\n")
+        subprocess.run(["git", "-C", str(self.repo), "add", "."], check=True)
+        subprocess.run(["git", "-C", str(self.repo), "commit", "-qm", "imports"], check=True)
+        self.start("t-imp", "ok")
+        wait_phase("t-imp", {"review"})
+        task = store.Task("t-imp")
+        files, _ = context.instruction_files(task)
+        rules = context.rules_dir(task)
+        self.assertEqual([p for p in files if p.name in ("testing.md", "deeper.md")],
+                         [task.worktree / "docs" / "testing.md", task.worktree / "docs" / "deeper.md"])
+        self.assertTrue(all(p.is_relative_to(rules) for p in files if p.name in ("python.md", "notes.md")))
+        self.assertIn("docs/testing.md", dict(context.fixed_prompt(task)[1]))  # counted at wb start
+        with socket.socket() as sock:
+            sock.bind(("127.0.0.1", 0))
+            port = sock.getsockname()[1]
+        out = Path(self.tmp.name) / "imports-requests.jsonl"
+        server = subprocess.Popen([sys.executable, str(ROOT / "tests" / "capture_llm.py"),
+                                   str(port), str(out)])
+        self.addCleanup(server.kill)
+        env = runner.agent_env(task)
+        layer_path = Path(env["OPENCODE_CONFIG"])
+        layer = json.loads(layer_path.read_text())
+        layer["provider"] = {"cap": {
+            "npm": "@ai-sdk/openai-compatible",
+            "options": {"baseURL": f"http://127.0.0.1:{port}/v1", "apiKey": "x"},
+            "models": {"cap": {"name": "capture", "tool_call": True,
+                               "limit": {"context": 32768, "output": 1024}}}}}
+        layer_path.write_text(json.dumps(layer))
+        time.sleep(0.5)
+        cmd = lane.wrap(context.writable(task), ["opencode", "run", "--standalone", "-m", "cap/cap",
+                                                 "--format", "json", "say ok"],
+                        context.readable(task), context.unix_paths(task))
+        subprocess.run(cmd, cwd=task.worktree, env=env, capture_output=True, timeout=180)
+        reqs = [json.loads(line) for line in out.read_text().splitlines()]
+        text = json.dumps(max(reqs, key=lambda r: len(r.get("tools", [])))["messages"])
+        for seen in ("CANARY-IMPORTED", "CANARY-DEEPER", "CANARY-USER-IMPORT", "CANARY-CLAUDE-NOTES"):
+            self.assertIn(seen, text)
+        for unseen in ("CANARY-SPAN", "CANARY-FENCED", "CANARY-CREDENTIAL", "CANARY-OUTSIDE"):
+            self.assertNotIn(unseen, text)
+
     def test_wb_reads_the_config_files_opencode_reads_under_opencode_config_dir(self):
         # #370 (the audit of 1.6): OpenCode 2.3 takes its global directory from
         # OPENCODE_CONFIG_DIR, and wb read ~/.config/opencode
@@ -5829,6 +5892,33 @@ class CheckoutVenv(Base):
         (site / "__editable___mypkg_0_1_finder.py").write_text(
             f"MAPPING = {{'mypkg': {str(self.repo) + '-other/src'!r}}}\n")  # another repo
         self.assertNotIn(str(finder), context.checkout_envs(task))
+
+    def test_the_users_pythonpath_reaches_the_setup_and_tests_with_the_repo_as_the_worktree(self):
+        # #512 (the audit of 1.90): ROS's setup.bash exports PYTHONPATH; the runner replaced it
+        # with workbench's own, the agent's environment dropped that, and naming PYTHONPATH in
+        # commands.json `env` passed workbench's package path instead of the user's
+        deps = Path(self.tmp.name) / "opt" / "ros"
+        deps.mkdir(parents=True)
+        (deps / "rclpy.py").write_text("OK = True\n")
+        os.environ["PYTHONPATH"] = os.pathsep.join([str(deps), str(self.repo / "src"),
+                                                    str(context.PKG_ROOT)])
+        Path(os.environ["WB_COMMANDS"]).write_text(json.dumps({"env": ["PYTHONPATH"]}))
+        check = ("python3 -c \"import importlib.util as u, rclpy, mypkg, sys; print(mypkg.__file__); "
+                 "sys.exit(mypkg.VALUE != 'base' or u.find_spec('workbench') is not None)\"")
+        self.start("t-pypath", "ok", "--setup", "python3 -c 'import rclpy'", "--test", check,
+                   "--auto-fix", "0", "--no-base-check")
+        st = wait_phase("t-pypath", {"review"})
+        task = store.Task("t-pypath")
+        said = task.round_dir(1).joinpath("tests.txt").read_text()
+        self.assertTrue(st["tests"]["ok"], said)                  # rclpy, and the worktree's mypkg
+        self.assertIn(str(task.worktree / "src" / "mypkg"), said)
+        with mock.patch.dict(os.environ, context.detached_env()):   # as spawn_runner leaves it
+            env = runner.agent_env(task)
+        self.assertEqual(env["PYTHONPATH"], os.pathsep.join([str(deps), str(task.worktree / "src")]))
+        self.assertNotIn(context.USER_PYTHONPATH, env)
+        os.environ.pop("PYTHONPATH")                              # none: none for the agent either
+        with mock.patch.dict(os.environ, context.detached_env()):
+            self.assertNotIn("PYTHONPATH", runner.agent_env(task))
 
     def test_a_venv_that_isnt_the_checkouts_stays_but_the_agent_may_not_install_into_it(self):
         envs = Path(self.tmp.name) / "envs"
