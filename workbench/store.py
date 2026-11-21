@@ -33,6 +33,7 @@ import fcntl
 import functools
 import hashlib
 import json
+import math
 import os
 import re
 import stat
@@ -287,9 +288,13 @@ def _lock_of(path: Path) -> Path:
     return path.with_name(path.name + ".lock")
 
 
-def append_jsonl(path: Path, row: dict) -> None:
-    line = json.dumps(row, ensure_ascii=False).encode() + b"\n"
+def append_jsonl(path: Path, row: dict, after: float | None = None) -> None:
+    """Append ``row``. ``after`` (a time): its `ts` is made later than it and than every row's
+    already there, under the same lock (the notices: Task.notify)."""
     with locked(_lock_of(path)):
+        if after is not None:
+            row = {**row, "ts": max(row["ts"], round(max(after, newest_ts(path)) + 0.001, 3))}
+        line = json.dumps(row, ensure_ascii=False).encode() + b"\n"
         with open(path, "ab+") as fh:
             # A write cut short (a full disk, a crash) leaves a line with no end, and the next row
             # appended to it was lost with it (the 2026-11-16 audit): end the fragment first, so
@@ -317,6 +322,14 @@ def notices() -> list[dict]:
             if isinstance(r, dict) and isinstance(r.get("task"), str) and NAME_RE.match(r["task"])
             and isinstance(r.get("kind"), str) and isinstance(r.get("ts"), (int, float))
             and isinstance(r.get("text", ""), str)]
+
+
+def newest_ts(path: Path) -> float:
+    """The latest `ts` among a JSONL file's rows (its tail first: notices carry reports), 0 for
+    none."""
+    rows = read_jsonl_tail(path, 256 * 1024) or read_jsonl(path)[0]
+    return max((r["ts"] for r in rows if isinstance(r, dict)
+                and isinstance(r.get("ts"), (int, float))), default=0.0)
 
 
 def mark_trials(names: set[str]) -> list[str]:
@@ -441,8 +454,17 @@ class Task:
     def notify(self, kind: str, text: str, **extra) -> None:
         if self.spec.get("bench"):  # a replay of wb bench's: no one is to be woken
             return
+        # stamped after every notice before it and after the task's acknowledgement, whatever
+        # the clock did since: corrected backwards (a dual boot with a local-time RTC), a notice
+        # raised after a mark came out at or before it, and wb wait, the mod's wake and its idle
+        # net all skipped it as handled (#473, the audit of 1.8)
+        try:
+            acked = float((self.dir / "acked").read_text() or 0)
+        except (OSError, ValueError):
+            acked = 0.0
         append_jsonl(home() / "notify.jsonl",
-                     {"ts": now(), "task": self.name, "kind": kind, "text": text, **extra})
+                     {"ts": now(), "task": self.name, "kind": kind, "text": text, **extra},
+                     after=acked if math.isfinite(acked) else 0.0)
 
 
 # The scratch directories workbench makes in its home, each named <prefix><maker's pid>-…: wb gc

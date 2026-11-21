@@ -4163,6 +4163,25 @@ class Watch(Base):
             th.join(40)
         self.assertFalse(th.is_alive())
 
+    def test_a_notice_raised_after_a_backward_clock_step_is_still_news(self):
+        # #473 (the audit of 1.8): an acknowledgement marked while the clock was ahead (a dual
+        # boot with a local-time RTC, corrected since) put the next notice at or before the
+        # mark, and wb wait, the mod's wake and its idle net skipped it as handled
+        self.start("t-clock", "ok")
+        wait_phase("t-clock", {"review"})
+        self.assertIn("[review] t-clock", run_wb("wait", "--timeout", "5"))
+        task = store.Task("t-clock")
+        ahead = time.time() + 3600
+        with mock.patch("time.time", return_value=ahead):
+            cli._ack_all(task)  # Claude acted, an hour ahead of the clock now
+        task.set_status(phase="stuck")
+        task.notify("stuck", "stopped: the same call 4 times")
+        row = store.notices()[-1]
+        self.assertGreater(row["ts"], ahead)
+        self.assertIn("[stuck] t-clock", run_wb("wait", "--timeout", "5"))
+        task.notify("stuck", "again")  # and after the notice before it, whatever the clock says
+        self.assertGreater(store.notices()[-1]["ts"], row["ts"])
+
     def test_a_malformed_notice_breaks_neither_wait_nor_the_commands_that_acknowledge(self):
         # one row without a task made every acknowledging command raise KeyError, and a task
         # named ../../x put wb wait's ack outside the state directory (the 2026-11-16 audit)

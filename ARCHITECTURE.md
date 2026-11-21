@@ -1912,6 +1912,11 @@ file is out of its lane (the 2026-11-16 audit: it could forge any task's wake, o
 all). Readers take its rows through `store.notices()`, which keeps only whole ones (a dict with a
 `NAME_RE` task, a kind, a numeric ts): one row without a task once made every acknowledging
 command raise. Each task's `acked` file holds the time up to which Claude has had its news.
+A notice's `ts` is the clock's, but later than every notice before it and than its task's
+`acked` mark, under the file's lock (`append_jsonl(…, after=)`, `store.newest_ts`): a clock
+corrected backwards (a dual boot with a local-time RTC) put a notice raised after a mark at or
+before it, and `wb wait`, the mod's wake and its idle net skipped it as handled (#473, the audit
+of 1.8).
 
 - **Ears.** The mod runs `wb events`, which prints a line the moment anything in the state
   directory changes (*Waiting without polling*). Each line makes the mod re-read the tasks.
