@@ -66,8 +66,19 @@ class _At(store.Task):
 
 
 def _review_base(task: store.Task) -> str | None:
+    """The commit this step is compared with: the base for step one, else the last approved
+    step's, which wb next records (status `step_base`). A step with no changes has no commit of
+    its own: from before the record, the newest earlier step that has one, else the base (#652:
+    the step after a clean one died on "cannot find the last approved step's commit")."""
     step = task.status.get("steps", 1)
-    return task.spec["base"] if step == 1 else gitops.step_commit(task, step - 1, step)
+    if step == 1:
+        return task.spec["base"]
+    if at := task.status.get("step_base"):
+        return at
+    for earlier in range(step - 1, 0, -1):
+        if found := gitops.step_commit(task, earlier, step):
+            return found
+    return task.spec["base"]
 
 
 def looks_like_test(path: str) -> bool:

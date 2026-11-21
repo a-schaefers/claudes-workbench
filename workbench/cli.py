@@ -1116,7 +1116,11 @@ def cmd_next(a):
         + PROTOCOL.format(branch=spec["branch"], test_line=test_line(test), budget=budget),
         encoding="utf-8")
     handled = store.now()
-    advance = dict(round=n, steps=step + 1, step_round=n, reviews=0,
+    # the next step's comparison base, whether this step committed or not: found by its trailer
+    # alone, a step with no changes left the following one with none, and wb verify and wb shot
+    # refused it (#652, Claude's and Codex's audits)
+    approved = gitops.git(task.worktree, "rev-parse", "HEAD").strip()
+    advance = dict(round=n, steps=step + 1, step_round=n, reviews=0, step_base=approved,
                    step_sizes=(st.get("step_sizes") or []) + [measured],
                    context="fresh" if a.fresh else None,
                    auto_fixes_total=st.get("auto_fixes_total", 0) + st.get("auto_fixes", 0),

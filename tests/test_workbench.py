@@ -10580,6 +10580,32 @@ class Verify(Base):
         self.assertFalse(running())
         self.assertEqual(list(store.home().glob(".verify-*")), [])
 
+    def test_verify_and_shot_after_steps_that_changed_nothing_compare_with_the_last_commit(self):
+        # #652 (Claude's and Codex's audits): a wb next step with no changes made no commit, so
+        # the step after it found no "(step N)" trailer and wb verify and wb shot died with
+        # "cannot find the last approved step's commit"
+        from workbench import verify
+        task = store.Task("t")
+        nxt = lambda: run_wb("next", "t", "--spec", str(self.spec), "-m", "Step")  # noqa
+        self.assertIn("committed as", nxt())                       # step 1: the fix
+        wait_phase("t", {"review"})
+        step1 = gitops.git(self.wt, "rev-parse", "HEAD").strip()
+        for clean in (3, 4):                                       # one, then two clean steps
+            self.assertIn("had no changes", nxt())
+            wait_phase("t", {"review"})
+            self.assertEqual(task.status["steps"], clean)
+            self.assertEqual(task.status["step_base"], step1)
+            (self.wt / "tests/test_again.py").write_bytes((self.wt / "tests/test_calc.py").read_bytes())
+            out = run_wb("verify", "t", "--test", "python3 -m unittest tests.test_again")
+            self.assertIn("already passes", out)
+            self.assertEqual(verify.last(task)["base"]["rev"], step1)
+            self.assertFalse(verify.last(task)["stale"])
+            shot = run_wb("shot", "t", "--capture", TRUE)
+            self.assertIn(f"base {step1[:10]}", shot)
+            (self.wt / "tests/test_again.py").unlink()
+        task.set_status(step_base=None)  # a task from before the record: the walk back finds it
+        self.assertEqual(verify._review_base(task), step1)
+
     def test_verify_credits_the_step_that_fixed_the_bug(self):
         # #252 (the audit of 1.2): step two's test passed on step one's commit already.
         from workbench import verify
