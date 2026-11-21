@@ -1424,7 +1424,10 @@ deliberately hostile process (the 2026-11-16 audit's list of what it can't stop 
   matched in any case, that lies outside the lane and that a grant can reach (`lane_grant`: the
   path when it exists or is under `/dev`, else its nearest existing directory; never `/`, the
   home directory, a secret, or the task's repo), so a refused keystore, lockfile or cache is
-  named too, not a URL's path), `/proc`, the build caches and
+  named too, not a URL's path; and only a refusal the lane made, #773: none without Landlock
+  (`lane.abi()` 0, macOS), nor a path the runner, outside the lane, may not read or write either
+  (`runner_may`: the nearest existing directory for one not made yet), the user's own
+  permissions, which go back to the agent like any failure), `/proc`, the build caches and
   toolchain homes under `$HOME` (`TOOL_HOMES`: `.cache`, `.cargo`, `.rustup`, `go/pkg`, `.npm`,
   `.bun/install/cache`, `.yarn`, `.pnpm-store`, `.local/share/pnpm/store`,
   `.gradle`, `.m2`, `.nuget`, `.dotnet`, `.gem`, `.julia`, `.cabal`, `.stack`, `.ghcup`,

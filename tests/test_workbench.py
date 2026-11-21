@@ -142,6 +142,15 @@ def home_outside_the_lane(test):
                            "which the lane writes whole (context.home_gap)")(test)
 
 
+def lane_device():
+    """A device node the lane would refuse, for a test that fakes the refusal: one this user may
+    open (#773: one it may not is the user's own permissions, not the lane's, as on CI's runners
+    with /dev/kvm in a group they're not in), and only where Landlock draws a lane."""
+    if not lane.abi():
+        return None
+    return next((n for n in ("/dev/kvm", "/dev/fuse") if os.access(n, os.R_OK | os.W_OK)), None)
+
+
 class Base(unittest.TestCase):
     def setUp(self):
         # `wb start` leaves its runner running on purpose (it outlives the command)
@@ -2860,15 +2869,17 @@ class AutoFix(Base):
             "says nothing about the change"))
         self.assertFalse(store.Task("t-slow").round_dir(2).exists())
 
+    @unittest.skipUnless(lane_device(), "needs Landlock and a device node this user may open")
     def test_tests_the_lane_refused_a_device_are_not_sent_back_as_the_agents_bug(self):
         # #496: /dev/kvm refused was named in the report (#331), yet rounds 2 and 3 ran on it
+        dev = lane_device()
         self.start("t-kvm", "ok", "--no-base-check", "--test",
-                   "echo 'qemu: could not open /dev/kvm: Permission denied'; exit 1")
+                   f"echo 'qemu: could not open {dev}: Permission denied'; exit 1")
         st = wait_phase("t-kvm", {"review", "stuck", "failed"})
         self.assertEqual((st["phase"], st["round"], st.get("auto_fixes", 0)), ("review", 1, 0))
-        self.assertEqual(st["last"], "the lane refused /dev/kvm: Claude reviews next")
+        self.assertEqual(st["last"], f"the lane refused {dev}: Claude reviews next")
         self.assertTrue(self.notice("t-kvm").startswith(
-            "auto-fix skipped: the lane refused /dev/kvm: wb allow t-kvm --path /dev/kvm, then "
+            f"auto-fix skipped: the lane refused {dev}: wb allow t-kvm --path {dev}, then "
             "wb feedback, if the tests need it"))
 
     def test_the_code_s_own_failure_still_goes_back_to_the_agent(self):
@@ -7386,6 +7397,7 @@ class Lane(Base):
                                ".android/adbkey": "Permission denied",       # a credential
                                "sdk/flutter/bin/flutter": "Permission denied"}, out.stderr)
 
+    @unittest.skipUnless(lane.abi(), "needs Landlock: without it nothing is the lane's (#773)")
     def test_any_path_the_lane_refused_is_named_with_the_grant_that_reaches_it(self):
         # #437, the audit of 1.8: only /dev paths were named, so a refused keystore or cache read
         # as the agent's bug
@@ -7414,7 +7426,8 @@ class Lane(Base):
         out = (f"java.io.FileNotFoundException: {keystore} (Permission denied)\n"
                f"java.io.FileNotFoundException: {spaced} (Permission denied)\n"
                f"PermissionError: [Errno 13] Permission denied: '{spaced}'\n")
-        self.assertEqual(runner.lane_refused(task, out), [str(keystore), str(spaced)])
+        with mock.patch.object(lane, "abi", lambda: 6):   # a lane, where there's no Landlock too
+            self.assertEqual(runner.lane_refused(task, out), [str(keystore), str(spaced)])
         line = runner.not_the_code(task, {"ok": False, "exit": 1, "lane": [str(keystore),
                                                                            str(spaced)]})
         self.assertIn(f"wb allow t-670 --path {outside}; wb allow t-670 --path "
@@ -7424,6 +7437,36 @@ class Lane(Base):
             cli._lane_dir(str(keystore))
         self.assertFalse(keystore.exists())
         self.assertEqual(cli._lane_dir(str(keystore.parent)), str(keystore.parent))  # its dir
+
+    def test_a_permission_denied_the_lane_did_not_make_goes_back_to_the_agent(self):
+        # #773 (the second 2026-11-21 audit): without Landlock, or for a path the user's own
+        # permissions refuse, a test's Permission denied was blamed on the lane: no auto-fix, and
+        # Claude was told to `wb allow --path` a grant that couldn't help
+        locked = Path(tempfile.mkdtemp(dir=os.path.expanduser("~"), prefix=".wb-773-"))
+        self.addCleanup(shutil.rmtree, locked, True)
+        os.chmod(locked, 0)
+        self.addCleanup(os.chmod, locked, 0o700)
+        out = f"PermissionError: [Errno 13] Permission denied: '{locked}/data.db'\n"
+        task = self.bare_task("t-773", self.repo)
+        if os.geteuid() != 0:                     # root may use any path
+            with mock.patch.object(lane, "abi", lambda: 6):
+                self.assertEqual(runner.lane_refused(task, out), [])
+        os.chmod(locked, 0o700)
+        with mock.patch.object(lane, "abi", lambda: 6):
+            self.assertEqual(runner.lane_refused(task, out), [f"{locked}/data.db"])
+        with mock.patch.object(lane, "abi", lambda: 0):     # macOS, or no Landlock: no lane
+            self.assertEqual(runner.lane_refused(task, out), [])
+        if os.geteuid() == 0:
+            return
+        os.chmod(locked, 0)
+        self.start("t-773-run", "fix", "--auto-fix", "1", "--no-base-check", "--test",
+                   f"echo \"PermissionError: [Errno 13] Permission denied: '{locked}/data.db'\"; "
+                   "exit 1")
+        st = wait_phase("t-773-run", {"review", "stuck", "failed"})
+        self.assertEqual((st["phase"], st["round"], st["auto_fixes"]), ("review", 2, 1))
+        self.assertNotIn("lane", st["tests"])
+        prompt = store.Task("t-773-run").round_dir(2).joinpath("prompt.md").read_text()
+        self.assertIn("the bug is in this change", prompt)
 
     @unittest.skipUnless((lane.abi() or 0) >= 9, "needs Landlock ABI 9")
     @home_outside_the_lane
@@ -7468,15 +7511,17 @@ class Lane(Base):
         self.assertIn(f"connected {socks[1]}", out)
         self.assertIn("config: Permission denied", out)                 # the logins stay hidden
 
+    @unittest.skipUnless(lane_device(), "needs Landlock and a device node this user may open")
     def test_a_device_node_the_lane_refused_is_named_with_its_wb_allow(self):
         # #331 (the audit of 1.4): /dev/kvm or /dev/fuse refused read as the project's bug, and the
         # agent spent its auto-fix rounds on it
+        dev = lane_device()
         self.start("t-dev", "ok", "--auto-fix", "0", "--no-base-check", "--test",
-                   "echo 'qemu: could not open /dev/kvm: Permission denied'; "
+                   f"echo 'qemu: could not open {dev}: Permission denied'; "
                    "echo 'tee: /dev/null: Permission denied'; exit 1")
         wait_phase("t-dev", {"review"})
         report = run_wb("report", "t-dev")
-        self.assertIn("the lane refused /dev/kvm: wb allow t-dev --path /dev/kvm", report)
+        self.assertIn(f"the lane refused {dev}: wb allow t-dev --path {dev}", report)
         self.assertNotIn("refused /dev/null", report)      # in the lane: not the lane's doing
 
     def test_a_proxy_with_a_password_stays_out_of_the_agents_environment_and_is_said_with_its_way_through(self):

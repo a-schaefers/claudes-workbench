@@ -1313,9 +1313,12 @@ def lane_refused(task: store.Task, output: str) -> list[str]:
     reach (`lane_grant`): /dev/kvm and /dev/fuse (#331, the audit of 1.4), and since #437 (the
     audit of 1.8) any path, an Android keystore, a Flutter lockfile, a NuGet cache, which read as
     the project's bug, and the agent spent its auto-fix rounds on them. The report names
-    `wb allow --path` for each."""
-    lane = context.writable(task)
-    if lane is None:
+    `wb allow --path` for each. Only a refusal the lane made: without Landlock (macOS, a kernel
+    without it) there is none, and a path the runner, outside the lane, may not use either is the
+    user's own permissions (#773, the second 2026-11-21 audit: a test's Permission denied on
+    /usr/share skipped auto-fix and woke Claude with a grant that couldn't help)."""
+    writable = context.writable(task)
+    if writable is None or not lane.abi():
         return []
     guard = context.repo_dirs(task)  # the user's checkout: no lane may write it
     found = []
@@ -1325,10 +1328,22 @@ def lane_refused(task: store.Task, output: str) -> list[str]:
         for path in refused_paths(line):
             grant = lane_grant(path)
             if path not in found and grant and not any(
-                    path == w or path.startswith(str(w).rstrip("/") + "/") for w in lane) \
-                    and not any(grant == g or context._under(grant, g) for g in guard):
+                    path == w or path.startswith(str(w).rstrip("/") + "/") for w in writable) \
+                    and not any(grant == g or context._under(grant, g) for g in guard) \
+                    and runner_may(path):
                 found.append(path)
     return found[:5]
+
+
+def runner_may(path: str) -> bool:
+    """Whether this process, outside the lane, may use `path`: read or write it when it exists,
+    else make it in the nearest directory that does (#773)."""
+    real = os.path.realpath(path)
+    if os.path.exists(real):
+        return os.access(real, os.R_OK) or os.access(real, os.W_OK)
+    while not os.path.exists(real):
+        real = os.path.dirname(real)
+    return os.access(real, os.W_OK | os.X_OK)
 
 
 def lane_grant(path: str) -> str | None:
