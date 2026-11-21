@@ -1316,6 +1316,15 @@ def restore_steps(task: store.Task) -> None:
         git(repo, "bundle", "unbundle", str(f.resolve()), check=False)
 
 
+def name_status(repo: Path, base: str, rev: str, *opts: str) -> list[tuple[str, str]]:
+    """(status letter, path) for each file ``rev`` changed since ``base``, renames as a delete and
+    an add. NUL-separated: core.quotePath=false still C-quotes a name with a tab, newline, double
+    quote or backslash ("tests/a\\tb.py"), and bench add, splitting --name-only on newlines, missed
+    such a test or asked git for the quoted name (#942, the v1.90.24 review). wb verify's too."""
+    raw = git(repo, "diff", "--name-status", "--no-renames", "-z", *opts, base, rev).split("\0")
+    return [(st, p) for st, p in zip(raw[0::2], raw[1::2]) if p]
+
+
 def step_commit(task: store.Task, step: int, steps: int) -> str | None:
     """The commit that landed step `step`: `wb next` marks its steps "(step N)", `wb accept` the last."""
     spec = task.spec

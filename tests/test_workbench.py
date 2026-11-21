@@ -12272,6 +12272,28 @@ class Bench(Base):
             bench._inputs(case, work)
             self.assertEqual((work.parent / "lib" / "VERSION").read_text(), "7\n", name)
 
+    def test_hidden_checks_whose_names_have_a_tab_or_a_quote_are_found_and_copied_exactly(self):
+        # #942 (the v1.90.24 review): bench add split `git diff --name-only` on newlines, and git
+        # C-quotes a name with a tab or a double quote even under core.quotePath=false: the
+        # top-level "tests/a\tb.py" missed verify's pattern ("changed no test files") and the
+        # nested one was asked of git quoted ("isn't a file at step 1's commit")
+        from workbench import bench
+        names = ["tests/a\tb.py", 'pkg/tests/c"d.py']
+        self.start("t-odd", "ok", "--test", "sh tests/a*b.py && sh pkg/tests/c*d.py")
+        wait_phase("t-odd", {"review"})
+        wt = store.Task("t-odd").worktree
+        for i, n in enumerate(names):
+            (wt / n).parent.mkdir(parents=True, exist_ok=True)
+            (wt / n).write_bytes(f"grep -qx 42 answer.txt # {i}\n".encode())
+        run_wb("accept", "t-odd", "-m", "feat: the answer")
+        run_wb("bench", "add", "t-odd")
+        run_wb("bench", "add", "t-odd", "--name", "t-odd-h", "--hidden", *names)
+        for case in ("t-odd", "t-odd-h"):
+            self.assertEqual(sorted(bench.cases()[case]["hidden"]), sorted(names), case)
+            for i, n in enumerate(names):
+                self.assertEqual((bench.case_dir(case) / "hidden" / n).read_bytes(),
+                                 f"grep -qx 42 answer.txt # {i}\n".encode(), case)
+
     def squashed(self, name: str) -> store.Task:
         """A two-step task accepted with --merge-as squash after main moved: no branch holds its
         steps."""

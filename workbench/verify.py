@@ -115,10 +115,8 @@ def looks_like_test(path: str) -> bool:
 
 def _changes(task: store.Task, tree: str, base_rev: str) -> list[tuple[str, str]]:
     """(status letter, path) for each file the candidate changed since ``base_rev``.
-    NUL-separated, so a name with a tab or newline survives."""
-    raw = gitops.git(task.worktree, "diff", "--name-status", "--no-renames", "-z",
-                     base_rev, tree).split("\0")
-    return [(st, p) for st, p in zip(raw[0::2], raw[1::2]) if p]
+    NUL-separated, so a name with a tab or newline survives (gitops.name_status, bench's too)."""
+    return gitops.name_status(task.worktree, base_rev, tree)
 
 
 def test_files(task: store.Task, tree: str, base_rev: str) -> list[str]:

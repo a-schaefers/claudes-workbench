@@ -4041,7 +4041,9 @@ before #649 has neither. It holds:
 - the hidden checks: `--hidden` paths, by default the files the step added or changed that look
   like tests or the data a test reads (`verify.looks_like_test`, the one pattern `wb verify` uses
   too, *Verifying a fix against the base*: `tests/`, `fixtures/`, `test_*`, `*.test.*` and the
-  like; #500, #731), copied from the reference into `hidden/` with their Git mode (a
+  like; #500, #731), listed NUL-separated as `wb verify` lists them (`gitops.name_status`: git
+  C-quotes a name with a tab or a double quote even under `core.quotePath=false`, and such a test
+  was missed or asked of git by its quoted name, #942), copied from the reference into `hidden/` with their Git mode (a
   100755 file stays executable: written at 0644, an executable `./test_check.sh` exited 126 on the
   right answer, #346), and overlaid with it on the base, the reference and every replay alike
   (`overlay`); and `--check`, a command that must pass too;

@@ -351,8 +351,8 @@ def add(name: str, step: int | None = None, hidden: list[str] | None = None,
         test_cmd = (m := TEST_LINE.search(prompt)) and m.group(1)
     if not test_cmd:
         raise RuntimeError(f"step {step} had no acceptance command: nothing to grade a replay by")
-    changed = gitops.git(repo, "diff", "--name-only", "--no-renames", "--diff-filter=AM", base, ref
-                         ).splitlines()
+    # NUL-separated, as verify's: a name with a tab or a quote came out C-quoted (#942)
+    changed = [p for _, p in gitops.name_status(repo, base, ref, "--diff-filter=AM")]
     # the tests and the data they read (Go's testdata/, fixtures/, golden files, Jest snapshots),
     # verify's one pattern: a golden file left out of hidden/ failed the base for lack of it and
     # passed a replay only when the agent wrote it (#500, the audit of 1.90)
