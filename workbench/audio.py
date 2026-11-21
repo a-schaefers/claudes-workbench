@@ -183,6 +183,8 @@ def generate(text: str, out_dir: Path, kind: str | None = None, n: int = 3,
                         raise RuntimeError(f"audio engine {name} wrote no audio")
                     found = inspect(fresh, kind, text if kind == "speech" else "", seconds,
                                     ear, draw=check, log=out_dir / "engine.log")
+                    if found.pop("not_audio", False):  # an error page published as a clip (#592)
+                        raise RuntimeError(f"audio engine {name} wrote no audio ({_starts(fresh)})")
                     store.write_json(fresh.with_suffix(".json"), {
                         "text": text, "kind": kind, "seed": s, "seconds": seconds, "voice": voice,
                         "lyrics": lyrics, "refs": [str(r) for r in refs], "engine": name,
@@ -198,6 +200,23 @@ def generate(text: str, out_dir: Path, kind: str | None = None, n: int = 3,
 
 
 # --- the checks ---------------------------------------------------------------------------------
+
+# What an audio file starts with: one the wave module can't read (a float or 24-bit WAV, an MP3)
+# may still be good when there is no ffmpeg to say; anything else isn't audio
+MAGIC = (b"RIFF", b"RF64", b"FORM", b"fLaC", b"OggS", b"ID3", b"\x1aE\xdf\xa3", b"caff")
+
+
+def _sounds(path: Path) -> bool:
+    with open(path, "rb") as f:
+        head = f.read(4)
+    return head.startswith(MAGIC) or (len(head) > 1 and head[0] == 0xFF and head[1] & 0xE0 == 0xE0)
+
+
+def _starts(path: Path) -> str:
+    with open(path, "rb") as f:
+        head = " ".join(f.read(48).decode(errors="replace").split())
+    return f"it starts {head!r}" if head else "an empty file"
+
 
 def _pcm(path: Path) -> tuple[list[float], int] | None:
     """The samples (mono, -1..1) and rate of a PCM WAV, or None when the wave module can't read
@@ -372,6 +391,10 @@ def inspect(path: Path, kind: str, script: str = "", seconds: float | None = Non
         r = _ffmpeg("-v", "error", "-i", str(path), "-c:a", "pcm_s16le", "-y", str(whole))
         pcm = _pcm(whole if r and r.returncode == 0 and whole.is_file() else path)
         if pcm is None:
+            # ffmpeg couldn't decode it, or, with no ffmpeg, it doesn't even start like audio: an
+            # engine's HTML error page was published as a clip and counted as made (#592)
+            if (r is not None and r.returncode != 0) or (r is None and not _sounds(path)):
+                found["not_audio"] = True
             found["unreadable"] = "not a PCM WAV the wave module reads" + ("" if r else "; no ffmpeg to convert it")
         else:
             found.update(levels(*pcm))

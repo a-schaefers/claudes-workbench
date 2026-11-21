@@ -7175,6 +7175,50 @@ class Audio(Base):
         self.assertIn("without audio", err.getvalue())
         self.assertEqual(len(list((tmp / "o").glob("*.wav"))), 2)
 
+    def test_an_engine_that_writes_no_audio_fails_and_n_below_one_is_refused(self):
+        # #592 (Codex's audit of 1.8 → 1.90): an engine that wrote an HTML error page and exited 0
+        # had it published as a .wav, "1 clip(s)" and exit 0; --n 0 and --n -2 exited 0 with nothing
+        from workbench import media
+        tmp = Path(self.tmp.name)
+        page, deep = tmp / "page.py", tmp / "deep.py"
+        page.write_text("import sys\nopen(sys.argv[1], 'w').write('<html><body>502 Bad Gateway</body></html>')\n")
+        deep.write_text("import sys, wave\nw = wave.open(sys.argv[1], 'wb')\nw.setnchannels(1)\n"
+                        "w.setsampwidth(3)\nw.setframerate(8000)\nw.writeframes(b'\\x00\\x00\\x20' * 8000)\n"
+                        "w.close()\n")
+        self.engines({"page": {"command": f"{sys.executable} {page} {{out}}", "gpu": False},
+                      "deep": {"command": f"{sys.executable} {deep} {{out}}", "gpu": False},
+                      "gpu": {"command": f"{sys.executable} {deep} {{out}}"}})
+        real_which = shutil.which
+        without = mock.patch.object(audio.shutil, "which",
+                                    lambda x, *a, **k: None if x == "ffmpeg" else real_which(x, *a, **k))
+        for how, ctx in (("ffmpeg", nullcontext()), ("wave alone", without)):
+            if how == "ffmpeg" and not shutil.which("ffmpeg"):
+                continue
+            with self.subTest(how), ctx:
+                out = tmp / how.replace(" ", "-")
+                err = io.StringIO()
+                with self.assertRaises(SystemExit) as code, redirect_stderr(err):
+                    run_wb("audio", "a door slam", "--engine", "page", "--n", "1", "--out", str(out))
+                self.assertNotEqual(code.exception.code, 0)
+                self.assertIn("audio engine page wrote no audio (it starts '<html><body>502 Bad",
+                              err.getvalue())
+                self.assertEqual(list(out.glob("*.wav")) + list(out.glob("*.json")), [])
+        with without:   # a 24-bit WAV is audio the wave module can't read: kept, with the note
+            said = run_wb("audio", "a door slam", "--engine", "deep", "--n", "1", "--out", str(tmp / "d"))
+        self.assertIn("1 clip(s)", said)
+        self.assertIn("unreadable: not a PCM WAV the wave module reads; no ffmpeg", said)
+        self.assertEqual(len(list((tmp / "d").glob("*.wav"))), 1)
+        held = []
+        with mock.patch.object(media, "gpu", lambda *a, **k: held.append(a) or nullcontext()):
+            for argv in (["audio", "hi", "--engine", "gpu"], ["image", "a fox"]):
+                for n in ("0", "-1"):
+                    err = io.StringIO()
+                    with self.assertRaises(SystemExit) as code, redirect_stderr(err):
+                        run_wb(*argv, "--n", n, "--out", str(tmp / "n"))
+                    self.assertEqual(code.exception.code, 2)
+                    self.assertIn("at least 1", err.getvalue())
+        self.assertEqual(held, [])
+
     def test_two_runs_at_once_never_publish_under_one_name(self):
         # #591 (Codex's audit of 1.8 → 1.90): two CPU runs (no lease) with one text's first six
         # words and one seed both chose a-b-c-d-e-f-7.wav, both reported it, and one take was lost

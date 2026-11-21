@@ -4037,6 +4037,18 @@ def main(argv=None):
         die(f"{e.filename}: {e.strerror}" if e.filename else str(e))  # (the 2026-11-16 audit)
 
 
+def _candidates(v: str) -> int:
+    """--n for wb image and wb audio: 0 or below exited 0 having made nothing, a GPU engine's
+    lease taken all the same (#592)."""
+    try:
+        n = int(v)
+    except ValueError:
+        raise argparse.ArgumentTypeError(f"{v!r} is not a whole number") from None
+    if n < 1:
+        raise argparse.ArgumentTypeError(f"{n}: at least 1")
+    return n
+
+
 def parser() -> argparse.ArgumentParser:
     """wb's commands and flags (main; the bench driver starts its replays through it)."""
     ap = argparse.ArgumentParser(prog="wb", description=__doc__,
@@ -4187,7 +4199,7 @@ def parser() -> argparse.ArgumentParser:
     s = sub.add_parser("image", help="generate images with a local image model, for Claude to "
                        "look at and choose from")
     s.add_argument("prompt", nargs="?")
-    s.add_argument("--n", type=int, default=4, help="candidates (seeds SEED, SEED+1, ...)")
+    s.add_argument("--n", type=_candidates, default=4, help="candidates (seeds SEED, SEED+1, ...)")
     s.add_argument("--size", default="1024x1024")
     s.add_argument("--seed", type=int)
     s.add_argument("--out", help="directory (default: a new one under $WB_HOME/images)")
@@ -4203,7 +4215,7 @@ def parser() -> argparse.ArgumentParser:
     s.add_argument("text", nargs="?", help="the script (speech) or the description (sfx, music)")
     s.add_argument("--kind", choices=audio.KINDS, help="the first engine of this kind (default: "
                    "the first engine)")
-    s.add_argument("--n", type=int, default=3, help="candidates (seeds SEED, SEED+1, ...)")
+    s.add_argument("--n", type=_candidates, default=3, help="candidates (seeds SEED, SEED+1, ...)")
     s.add_argument("--seconds", type=float, help="the length, for engines that take one")
     s.add_argument("--voice", help="one of the engine's voices")
     s.add_argument("--ref", action="append", help="a reference clip (repeatable): a voice the "
