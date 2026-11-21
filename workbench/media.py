@@ -30,10 +30,45 @@ def load(path: Path) -> dict[str, dict]:
     return {k: v for k, v in data.items() if isinstance(v, dict)} if isinstance(data, dict) else {}
 
 
-def ready(e: dict) -> str:
-    """'' when the engine can run, else why not."""
+STRINGS = ("command", "url", "ref_arg", "model", "unload", "label", "notes")
+
+
+def problem(e: dict, kinds: tuple[str, ...] = ()) -> str:
+    """What makes a hand-written entry unusable, or ''. Checked before anything runs: a quote left
+    open in a command, "timeout": "10m" or "voices": "af_heart" used to end `wb scout` and the
+    listings in a traceback, crash a generation after the lease was taken and the models unloaded,
+    or be misread (the voice "a", a substring test; #596)."""
+    for k in STRINGS:
+        if k in e and not isinstance(e[k], str):
+            return f"{k} must be a string"
     if e.get("command"):
-        exe = os.path.expanduser(shlex.split(e["command"])[0])
+        try:
+            if not shlex.split(e["command"]):
+                return "command is blank"
+        except ValueError as err:
+            return f"command doesn't split ({err})"
+    for k in ("timeout", "seconds"):
+        if k in e and (isinstance(e[k], bool) or not isinstance(e[k], (int, float)) or e[k] <= 0):
+            return f"{k} must be a number of seconds"
+    if "voices" in e and not (isinstance(e["voices"], list)
+                              and all(isinstance(v, str) and v for v in e["voices"])):
+        return "voices must be a list of names"
+    if "gpu" in e and not isinstance(e["gpu"], bool):
+        return "gpu must be true or false"
+    if kinds and "kind" in e and e["kind"] not in kinds:
+        return f"kind must be one of {', '.join(kinds)}"
+    return ""
+
+
+def ready(e: dict, kinds: tuple[str, ...] = ()) -> str:
+    """'' when the engine can run, else why not."""
+    if why := problem(e, kinds):
+        return f"not usable: {why}"
+    if e.get("command"):
+        try:
+            exe = os.path.expanduser(shlex.split(e["command"])[0])
+        except (ValueError, IndexError) as err:  # problem() says so first; a backstop
+            return f"not usable: command doesn't split ({err})"
         return "" if shutil.which(exe) or Path(exe).is_file() else f"{exe} not found"
     if e.get("url"):
         root = re.sub(r"/v1/.*$", "", e["url"])
@@ -47,6 +82,12 @@ def ready(e: dict) -> str:
     return "neither command nor url"
 
 
+def _text(v) -> str:
+    """A placeholder's value: a whole float without its ".0" (`--seconds 30` reached the engine
+    as "30.0" where the entry's default gave "30": #596)."""
+    return str(int(v)) if isinstance(v, float) and v.is_integer() else str(v)
+
+
 def fill(command: str, values: dict) -> list[str]:
     """The command's argv with each `{name}` of ``values`` filled in, token by token, never
     through a shell. One pass: a filled-in value is never scanned again, so a prompt that says
@@ -55,7 +96,7 @@ def fill(command: str, values: dict) -> list[str]:
     argv = []
     for tok in shlex.split(command):
         tok = os.path.expanduser(tok)  # no shell expands ~ for us; the values are filled in after
-        argv.append(pat.sub(lambda m: str(values[m.group(1)]), tok))
+        argv.append(pat.sub(lambda m: _text(values[m.group(1)]), tok))
     return argv
 
 
@@ -90,7 +131,7 @@ def on_gpu(e: dict) -> bool:
     took the exclusive lease, unloaded the coding models and refused while any task ran (#587)."""
     if "gpu" in e:
         return e["gpu"] is not False
-    if e.get("url") and not e.get("command"):
+    if isinstance(e.get("url"), str) and not e.get("command"):
         return models._this_host(urlparse(e["url"]).hostname)
     return True
 
@@ -99,7 +140,7 @@ def serving(*engines: dict) -> list[str]:
     """The discovered models on the server a url engine is (one LocalAI or vLLM serving both
     coding and images): free_gpu keeps them, or it stopped the server just before the POST (#587)."""
     roots = {models.server_key(re.sub(r"/v1/.*$", "", e["url"]))
-             for e in engines if e.get("url") and not e.get("command")}
+             for e in engines if isinstance(e.get("url"), str) and not e.get("command")}
     if not roots:
         return []
     return [m.id for m in models.discover().values() if m.server in roots]

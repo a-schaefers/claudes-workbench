@@ -3414,14 +3414,20 @@ custom-node packs do run their own Python).
   it and anything else on; #587: a remote or CPU engine took the exclusive lease, unloaded the
   coding models and refused while any task ran).
 - A command engine (`_argv`, through `media.fill`): `shlex.split(command)`, `~` expanded per token, then `{prompt}`,
-  `{out}`, `{width}`, `{height}`, `{seed}` filled in, token by token, in one pass (a prompt that
+  `{out}`, `{width}`, `{height}`, `{seed}` filled in (a whole float without its `.0`: `--seconds
+  30` reached an audio engine as "30.0", #596), token by token, in one pass (a prompt that
   says `{seed}` reaches the engine as written; it used to get the seed and the out path), never
   through a shell; `--ref` images are appended as `[ref_arg, path]` pairs (both `command` and `ref_arg` are
   required for refs). stdin is /dev/null; stdout and stderr go to `<out_dir>/engine.log`; a
   nonzero exit or no file at `{out}` fails with the log's last lines.
 - A url engine (`_server`): POST `{prompt, n: 1, size: "WxH", response_format: "b64_json", seed[,
   model]}` (no auth header), decode `data[0].b64_json`.
-- Ready (`ready`, shown by `wb image --list` and `wb scout`): a command whose first token is on
+- Ready (`ready`, shown by `wb image --list` and `wb scout`): an entry `media.problem` finds
+  nothing wrong with (the string keys strings, a command `shlex.split` accepts, `timeout` and
+  `seconds` positive numbers, `voices` a list of names, `gpu` true or false, a known `kind` for
+  audio; else "not usable: <why>", refused by `generate` before the lease: an open quote or
+  `"timeout": "10m"` ended `wb scout` in a traceback or crashed a generation after the unloads,
+  `"voices": "af_heart"` passed the voice "a", #596), then a command whose first token is on
   PATH or a file; a url whose server answers a GET (any status) within 2 s.
 - `generate`: an engine off this GPU (`media.on_gpu`) runs with no lease and frees nothing; any
   other holds the GPU for the whole batch through `media.gpu`, that is `models.GpuLease(None, "wb image",
@@ -3562,7 +3568,8 @@ it. ACE-Step's takes peaked at -0.2 dBFS, near clipping, before any `loudnorm`.
 **How it works** (`workbench/audio.py`, `cli.cmd_audio`; shared with images: `workbench/media.py`).
 - `audio.json` keys: `command` or `url`, `kind` (`speech`, `sfx`, `music`, `listen`; default
   `speech`), `gpu`, `voices`, `seconds`, `unload`, `ref_arg`, `model`, `label`, `notes`,
-  `timeout` (s, default 1800; a listener's 600). `engine(name, kind)` returns the named engine
+  `timeout` (s, default 1800; a listener's 600); `audio.ready` refuses a `kind` it doesn't know
+  (it skipped the listener and took 10 s, #596). `engine(name, kind)` returns the named engine
   (refused when it's of another kind), else the first of `--kind`, else the first that isn't a
   listener.
 - `generate` refuses, before anything runs, a voice not in `voices` and a `--voice`, `--lyrics`,
@@ -5575,7 +5582,7 @@ nested `.md` files (`docs/`, `skill/`, `mod/`, `agent/`) are unaffected. A new r
   (`skill/workbench/SKILL.md`) if Claude uses it there; README only for the quickstart. CLAUDE.md's
   *Keeping the docs true* is the procedure; `tests/test_docs.py` checks what it can (every command
   and flag here, every module and environment variable in CLAUDE.md, CLAUDE.md's size).
-- **`wb image` and `wb audio` share `media.py`** (the engine file, `fill`, `settle`, `gpu`, `on_gpu`, `serving`,
+- **`wb image` and `wb audio` share `media.py`** (the engine file, `problem`, `ready`, `fill`, `settle`, `gpu`, `on_gpu`, `serving`,
   `free`, `publish`): a change there changes both (`tests.Images`, `tests.Audio`). A new kind of
   generated media → its config path in `store.PATH_VARS` and `context.private_paths`, its output
   directory in `cli.EVENT_SKIP` (and the mod's ears), its engines in `wb scout`.

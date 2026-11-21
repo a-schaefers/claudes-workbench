@@ -70,7 +70,7 @@ def _argv(e: dict, values: dict, refs: list[Path]) -> list[str]:
 def _command(e: dict, values: dict, refs: list[Path], log: Path) -> None:
     with open(log, "a") as f:
         r = subprocess.run(_argv(e, values, refs), stdin=subprocess.DEVNULL, stdout=f,
-                           stderr=subprocess.STDOUT, timeout=int(e.get("timeout", 1800)))
+                           stderr=subprocess.STDOUT, timeout=float(e.get("timeout", 1800)))
     if r.returncode or not Path(values["out"]).is_file():
         tail = "\n".join(log.read_text().strip().splitlines()[-8:])
         raise RuntimeError(f"the engine exited {r.returncode} without an image:\n{tail}")
@@ -83,7 +83,7 @@ def _server(e: dict, values: dict) -> None:
         body["model"] = e["model"]
     req = urllib.request.Request(e["url"], json.dumps(body).encode(),
                                  {"Content-Type": "application/json"})
-    with models._open(req, timeout=int(e.get("timeout", 1800))) as r:
+    with models._open(req, timeout=float(e.get("timeout", 1800))) as r:
         data = json.loads(r.read())
     Path(values["out"]).write_bytes(base64.b64decode(data["data"][0]["b64_json"]))
 

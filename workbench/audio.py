@@ -52,6 +52,11 @@ def kind_of(e: dict) -> str:
     return e.get("kind") or "speech"
 
 
+def ready(e: dict) -> str:
+    """'' when the engine can run, else why not; a kind it doesn't know is refused (#596)."""
+    return media.ready(e, (*KINDS, "listen"))
+
+
 def engines() -> dict[str, dict]:
     return media.load(config_path())
 
@@ -91,7 +96,7 @@ def _command(e: dict, values: dict, refs: list[Path], log: Path) -> None:
         argv += [e["ref_arg"], str(r)]
     with open(log, "a") as f:
         r = subprocess.run(argv, stdin=subprocess.DEVNULL, stdout=f, stderr=subprocess.STDOUT,
-                           timeout=int(e.get("timeout", 1800)))
+                           timeout=float(e.get("timeout", 1800)))
     if r.returncode or not Path(values["out"]).is_file():
         tail = "\n".join(log.read_text().strip().splitlines()[-8:])
         raise RuntimeError(f"the engine exited {r.returncode} without audio:\n{tail}")
@@ -105,7 +110,7 @@ def _server(e: dict, values: dict) -> None:
             body[k] = v
     req = urllib.request.Request(e["url"], json.dumps(body).encode(),
                                  {"Content-Type": "application/json"})
-    with models._open(req, timeout=int(e.get("timeout", 1800))) as r:
+    with models._open(req, timeout=float(e.get("timeout", 1800))) as r:
         Path(values["out"]).write_bytes(r.read())
 
 
@@ -131,7 +136,7 @@ def generate(text: str, out_dir: Path, kind: str | None = None, n: int = 3,
     without it."""
     name, e = engine(name, kind)
     kind = kind_of(e)
-    if why := media.ready(e):
+    if why := ready(e):
         raise RuntimeError(f"audio engine {name}: {why}")
     refs = [Path(r).resolve() for r in refs]
     if refs and not (e.get("command") and e.get("ref_arg")):
@@ -151,7 +156,7 @@ def generate(text: str, out_dir: Path, kind: str | None = None, n: int = 3,
         seconds = e.get("seconds") or DEFAULT_SECONDS.get(kind, 10)
     voice = voice or (e["voices"][0] if e.get("voices") else "")
     ear = listener() if check and kind == "speech" else None
-    if ear and (why := media.ready(ear[1])):
+    if ear and (why := ready(ear[1])):
         say(f"listener {ear[0]}: {why}; no transcripts")
         ear = None
     out_dir.mkdir(parents=True, exist_ok=True)
@@ -332,7 +337,7 @@ def transcribe(ear: tuple[str, dict], clip: Path, log: Path) -> str:
     if e.get("command"):
         argv = media.fill(e["command"], {"in": clip})
         r = subprocess.run(argv, stdin=subprocess.DEVNULL, capture_output=True, text=True,
-                           timeout=int(e.get("timeout", 600)))
+                           timeout=float(e.get("timeout", 600)))
         with open(log, "a") as f:
             f.write(r.stderr)
         if r.returncode:
@@ -342,7 +347,7 @@ def transcribe(ear: tuple[str, dict], clip: Path, log: Path) -> str:
     else:
         body, ctype = _multipart({"model": e.get("model")}, clip)
         req = urllib.request.Request(e["url"], body, {"Content-Type": ctype})
-        with models._open(req, timeout=int(e.get("timeout", 600))) as resp:
+        with models._open(req, timeout=float(e.get("timeout", 600))) as resp:
             out = resp.read().decode(errors="replace").strip()
     try:
         data = json.loads(out)
@@ -418,14 +423,14 @@ def lines() -> list[str]:
     """Each engine for `wb audio --list` and `wb scout`: its kind, whether it's ready, its notes."""
     out = []
     for name, e in engines().items():
-        why = media.ready(e)
+        why = ready(e)
         out.append(f"  {name} ({kind_of(e)}{'' if media.on_gpu(e) else ', CPU'}): "
-                   f"{e.get('label') or e.get('command', e.get('url', ''))[:60]}"
+                   f"{str(e.get('label') or e.get('command') or e.get('url') or '')[:60]}"
                    f" · {'ready' if not why else why}"
                    + (" · a server: it holds its GPU memory while it runs"
                       + ("" if e.get("unload") else " (no unload URL)")
                       if e.get("url") and not e.get("command") and media.on_gpu(e) else "")
-                   + (f"\n    voices: {', '.join(e['voices'])}" if e.get("voices") else "")
+                   + (f"\n    voices: {', '.join(e['voices'])}" if e.get("voices") and not why else "")
                    + (f"\n    {e['notes']}" if e.get("notes") else
                       "\n    licence: not noted (check it, then put it in notes)"))
     return out

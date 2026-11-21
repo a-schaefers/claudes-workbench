@@ -2923,7 +2923,7 @@ def image_lines() -> list[str]:
     for name, e in images.engines().items():
         why = images.ready(e)
         out.append(f"  {name}{'' if media.on_gpu(e) else ' (off the GPU)'}: "
-                   f"{e.get('label') or e.get('command', e.get('url', ''))[:60]}"
+                   f"{str(e.get('label') or e.get('command') or e.get('url') or '')[:60]}"
                    f" · {'ready' if not why else why}"
                    + (" · a server: it holds its GPU memory while it runs" if e.get("url")
                       and not e.get("command") and media.on_gpu(e) else "")

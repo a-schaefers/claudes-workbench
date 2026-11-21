@@ -7012,6 +7012,45 @@ class Audio(Base):
         self.engines({})
         self.assertIn("no audio engine", run_wb("audio", "--list"))
 
+    def test_a_malformed_entry_is_listed_as_not_usable_and_refused_before_the_gpu(self):
+        # #596: an unbalanced quote ended wb audio --list and wb scout in a traceback, a string
+        # timeout crashed wb image after the lease and the unloads, "voices": "af_heart" passed
+        # the voice "a", an unknown kind skipped the listener; --seconds 30 reached the engine as "30.0"
+        from workbench import images, media
+        tmp, tone = Path(self.tmp.name), self.tone()
+        self.engines({"quote": {"command": "echo 'unbalanced {text} {out}"},
+                      "late": {"command": f"{sys.executable} {tone} --out {{out}}", "timeout": "10m"},
+                      "voices": {"command": f"{sys.executable} {tone} --voice {{voice}} --out {{out}}",
+                                 "voices": "af_heart"},
+                      "kind": {"kind": "listener", "command": f"{sys.executable} {tone} --out {{out}}"},
+                      "gpu": {"command": f"{sys.executable} {tone} --out {{out}}", "gpu": "no"},
+                      "fx": {"kind": "sfx", "gpu": False,
+                             "command": f"{sys.executable} {tone} --seconds {{seconds}} --out {{out}}"}})
+        listed = run_wb("audio", "--list")
+        for name, why in (("quote", "command doesn't split"), ("late", "timeout must be a number"),
+                          ("voices", "voices must be a list"), ("kind", "kind must be one of"),
+                          ("gpu", "gpu must be true or false")):
+            self.assertRegex(listed, rf"  {name} \(.*not usable: {why}", name)
+        self.assertNotIn("voices: a,", listed)
+        held = []
+        with mock.patch.object(media, "gpu", lambda *a, **k: held.append(a) or nullcontext()):
+            for name in ("quote", "late", "voices", "kind", "gpu"):
+                err = io.StringIO()
+                with self.assertRaises(SystemExit), redirect_stderr(err):
+                    run_wb("audio", "hello", "--engine", name, "--n", "1", "--out", str(tmp / "o"))
+                self.assertIn(f"audio engine {name}: not usable", err.getvalue())
+            (tmp / "images.json").write_text(json.dumps({"img": {"command": "sd {out}", "timeout": "10m"}}))
+            with mock.patch.dict(os.environ, {"WB_IMAGES": str(tmp / "images.json")}):
+                self.assertIn("not usable: timeout must be a number", run_wb("image", "--list"))
+                with self.assertRaisesRegex(RuntimeError, "image engine img: not usable"):
+                    images.generate("a fox", tmp / "img", n=1, say=lambda m: None)
+        self.assertEqual(held, [])                       # refused before any lease
+        run_wb("audio", "a door", "--engine", "fx", "--seconds", "3", "--n", "1", "--seed", "1",
+               "--no-check", "--out", str(tmp / "fx"))
+        calls = [ast.literal_eval(l) for l in Path(str(tone) + ".calls").read_text().splitlines()]
+        self.assertEqual(calls[-1][calls[-1].index("--seconds") + 1], "3")   # not "3.0"
+        self.assertEqual(media.fill("x {s}", {"s": 2.5}), ["x", "2.5"])
+
     def test_a_second_run_keeps_the_first_clip_and_an_engine_that_writes_nothing_fails(self):
         tmp = Path(self.tmp.name)
         fake = tmp / "fake.py"
