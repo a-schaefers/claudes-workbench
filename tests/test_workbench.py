@@ -11117,6 +11117,29 @@ class Verify(Base):
             run_wb("verify", "t", "--test", "python3 -m unittest tests.test_calc")
         self.assertEqual([h for _, h in seen], [{}, {}])
 
+    def test_a_base_check_waiting_for_the_gpu_holds_no_prep_turn_meanwhile(self):
+        # #679 (Claude's audit of main): an --unload-for-tests base check took the machine's one
+        # prep turn and then waited inside it for the GPU, behind another task's whole run, so
+        # every queued task's setup and base check waited too
+        from workbench import media, verify
+        with mock.patch.object(cli, "spawn_runner"):
+            self.start("t-gpuwait", "ok", "--queue", "--unload-for-tests", "--test", TEST_CMD)
+        order = []
+
+        def held(name):
+            @contextlib.contextmanager
+            def cm(*_, **__):
+                order.append(name)
+                yield
+                order.append("/" + name)
+            return cm
+        with mock.patch.object(media, "gpu", held("gpu")), \
+                mock.patch.object(runner, "prep_turn", held("turn")), \
+                mock.patch.object(verify, "_run", side_effect=lambda *a: order.append("run") or (1, "x")):
+            runner._base_check(store.Task("t-gpuwait"))
+        self.assertEqual(order, ["gpu", "turn", "run", "/turn", "/gpu"])
+        self.assertEqual(store.Task("t-gpuwait").status["base_check"]["exit"], 1)
+
     def test_the_scratch_checkouts_read_the_bytes_the_task_reads(self):
         # #426 (the audit of 1.8, reproduced): with the repo's own core.autocrlf the task read
         # CRLF, and the base check's and verify's clones read LF, failing on an untouched file

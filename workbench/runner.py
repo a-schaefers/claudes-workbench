@@ -1725,7 +1725,8 @@ def base_check(task: store.Task) -> dict | None:
         return None
     limit = min(BASE_CHECK_SECS, int(task.spec.get("test_timeout") or 900))
     from . import verify  # verify imports this module
-    code, output = verify.on_base(task, cmd, limit, say=lambda msg: task.set_status(last=msg))
+    code, output = verify.on_base(task, cmd, limit, say=lambda msg: task.set_status(last=msg),
+                                  turn=lambda: prep_turn(task))  # one at a time, as setups (#590)
     task.dir.joinpath("base-tests.txt").write_text(
         f"$ {cmd}\nexit: {code}\nshell: {test_shell()}\n\n{output}")
     return {"ok": code == 0, "exit": code, "tail": clip_tail(output, 8, total=1500), "limit": limit}
@@ -2404,8 +2405,7 @@ def drive(task: store.Task) -> None:
         except RuntimeError as e:
             return _load_failed(task, e)
     if needs_base_check(task):
-        with prep_turn(task):  # one at a time on this machine, as the setups are (#590)
-            _base_check(task)  # on the untouched base, before the agent and the GPU
+        _base_check(task)  # on the untouched base, before the agent and the GPU
     # beside the running tasks' models when all fit the GPU, else alone once they finish
     with models.GpuLease(m, task.name, say) as lease:
         try:

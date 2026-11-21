@@ -671,8 +671,11 @@ while any runner is live; a manual pull is the case this catches.
    setup or base check (one at a time on this machine)" meanwhile: run before the GPU lease, a
    batch of N queued tasks ran N installs and N test suites at once beside the running agent,
    which swapped a small machine, timed base checks out, and failed a test server on a fixed port
-   in all but one clone (#590). A round's own tests don't take a turn: the GPU lease already
-   orders the rounds.
+   in all but one clone (#590). A base check that needs the GPU (`--unload-for-tests`,
+   `verify.gpu`) takes the GPU first and its turn only around the run itself (`verify.on_base`'s
+   `turn`): taken first, the turn was held through the whole wait for the GPU, behind another
+   task's rounds, and every queued task's setup waited with it (#679). A round's own tests don't
+   take a turn: the GPU lease already orders the rounds.
 2. Hold one `GpuLease` for everything that follows, except where it steps aside
    (`lease.step_aside`: out of `gpu.json`, `gpu.lock` unlocked) because the task needs no GPU: the
    tests, and a wait for a server that is down. All of `drive` ran under it, so queued tasks waited

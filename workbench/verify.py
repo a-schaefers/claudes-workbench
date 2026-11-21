@@ -243,11 +243,14 @@ def _run(task: store.Task, checkout, cmd, limit: int, keep=None,
         return out
 
 
-def on_base(task: store.Task, cmd: str, limit: int, say=_say) -> tuple[int | str, str]:
+def on_base(task: store.Task, cmd: str, limit: int, say=_say,
+            turn=contextlib.nullcontext) -> tuple[int | str, str]:
     """``cmd`` on the task's base commit alone, in a scratch checkout under its lane (the runner's
     base check): nothing it writes reaches the task's worktree. With the GPU alone when the
-    task's tests need it (``gpu``)."""
-    with gpu(task, say):
+    task's tests need it (``gpu``), and then ``turn()`` (the runner's prep slot) around the run
+    itself: taken first, the slot was held through the whole wait for the GPU, behind a task's
+    round of up to 40 minutes, and every queued task's setup waited too (#679)."""
+    with gpu(task, say), turn():
         return _run(task, lambda work: gitops.git(work, "checkout", "-q", "--detach", task.spec["base"]),
                     cmd, limit)
 
