@@ -5159,9 +5159,18 @@ class Watch(Base):
         t = store.Task("t-kinds")
         store.write_json(t.dir / "task.json", {"name": "t-kinds", "created_at": store.now()})
         t.set_status(phase="review", round=1, session="ses_k")
-        kinds = ("reading_full", "resumed", "spec_gap", "coding", "fresh", "full", "load", "left_bg",
-                 "stopped", "error", "retry", "gpu", "next_step", "allow", "captain", "ask", "answer",
-                 "skills")
+        # from the code's own event literals, not a list: #846's hard-coded one left out
+        # compacted, limits and export, written just before it (#865)
+        written = set()
+        for f in (ROOT / "workbench").glob("*.py"):
+            written |= set(re.findall(r'\.event\(\{[^}]*?"kind": "(\w+)"', f.read_text()))
+        self.assertGreaterEqual(len(written), 25, written)        # the pattern still finds them
+        self.assertTrue({"compacted", "limits", "export"} <= written)
+        written -= {"round_end"}                                  # the Stats tab's alone
+        self.assertEqual(written - transcript.EVENT_KINDS, set())  # wb log prints each too (#861)
+        # these show a line of their own, not their text; any other kind must show its text
+        kinds = sorted(written - {"autofix", "interrupted", "round", "self_review", "steer",
+                                  "takeover", "tests"})
         for i, kind in enumerate(kinds):
             t.event({"ts": store.now() + i, "round": 1, "kind": kind, "text": f"TEXT-OF-{kind}"})
         with mock.patch.object(transcript, "export", lambda sid, strict=False: {"info": {"id": sid}, "messages": []}):

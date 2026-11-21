@@ -7215,7 +7215,10 @@ nested `.md` files (`docs/`, `skill/`, `mod/`, `agent/`) are unaffected. A new r
   event kind** → `transcript.task_entries` and `transcript.EVENT_KINDS`, which `wb log` prints
   from too (an unknown kind is never shown: `reading_full`, `resumed`, `spec_gap` and `coding`
   were missing from `wb watch` and the pane, #846, and the runner's own from `wb log`, #861) and
-  *Files and formats*; one with readable text joins `Watch`'s test of every such kind.
+  *Files and formats*. `Watch`'s test of every kind takes them from the code's own
+  `.event({… "kind": …})` literals and checks each is in `EVENT_KINDS` and shows its text (or is
+  one of the few with a fixed line): #846's hard-coded list missed `compacted`, `limits` and
+  `export`, which `wb watch` and the pane then dropped (#865).
 - **A new tuned knob** → `tuning.KNOBS`, read with `tuning.value(task, name)`, a ceiling in
   `drive` if it has one.
 - **`chat.py` or `chat_static/`** → the browser test (`chat.yml` runs it on the pull request too).
