@@ -480,6 +480,11 @@ def agent_env(task: store.Task, run: str = "") -> dict:
         # (nbmake, nbval, papermill) failed with PermissionError before a kernel started (#668)
         env.setdefault("JUPYTER_RUNTIME_DIR", str(context.runtime_dir(task) / "jupyter"))
         env.update(daemon_env(task, env))  # its own build daemons, not the user's (#669)
+        # poetry's and pipenv's venv in the worktree, as `uv sync` makes it (own_venv): their
+        # homes are split around an active venv (`poetry shell`, direnv), where no new one can
+        # be made, so a setup's `poetry install` was refused (#825); the venv ignores itself
+        env.setdefault("POETRY_VIRTUALENVS_IN_PROJECT", "true")
+        env.setdefault("PIPENV_VENV_IN_PROJECT", "1")
         # On WSL, not the Windows PATH, whose programs run outside the lane (context.agent_path),
         # nor the interop socket's name (the 0.90 review; /init finds it without: interop_gap)
         env.pop("WSL_INTEROP", None)

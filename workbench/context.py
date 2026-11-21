@@ -496,6 +496,10 @@ NOT_WRITABLE = (".cargo/bin", ".cargo/env", ".dotnet/tools", ".cabal/bin", ".ghc
 # home refuses a new entry (the 0.90 review: a fresh rustup's ~/.cargo, only bin/ and env, failed
 # every build with a dependency, and a git dependency failed wherever git/ didn't exist yet)
 CARGO_MADE = ("registry/", "git/", ".package-cache", ".package-cache-mutate", ".global-cache")
+# and what the common tools make in a cache home split around an active venv (poetry's, from
+# `poetry shell` or direnv), made first so the split grants them: Landlock can only allow, so a
+# split home refuses every new entry, and uv's, Go's and pre-commit's first run failed (#825)
+CACHE_MADE = ("uv", "pip", "go-build", "pre-commit")
 # what OpenCode and the ask server write themselves, beside the task's directory
 OPENCODE_HOMES = (".local/share/opencode", ".local/state/opencode")
 # The device nodes builds use, not /dev: the user's terminals, input devices (/dev/uinput) and
@@ -713,8 +717,9 @@ def not_writable(made_only: bool = True) -> set[str]:
 
 def split_points() -> set[str]:
     """What a grant is split around, real paths (lane_grant): the secrets and workbench's own
-    files, and NOT_WRITABLE's places, made or not."""
-    return _hidden() | not_writable(made_only=False)
+    files, the user's active Python environments (#825: the test report named `~/.cache`, which
+    a grant split around the same venv again) and NOT_WRITABLE's places, made or not."""
+    return _hidden() | set(python_envs()) | not_writable(made_only=False)
 
 
 def writable(task: store.Task) -> list[str] | None:
@@ -769,7 +774,15 @@ def writable(task: store.Task) -> list[str] | None:
                 pass
     # the user's active Python environments too: a venv in a tool home (poetry's, pipenv's,
     # WORKON_HOME) was the agent's to install into (#490)
-    out_of = _hidden() | set(python_envs()) | not_writable()
+    envs = set(python_envs())
+    out_of = _hidden() | envs | not_writable()
+    cache = os.path.realpath(os.environ.get("XDG_CACHE_HOME") or home / ".cache")
+    if any(_under(e, cache) for e in envs):  # (#825)
+        for n in CACHE_MADE:
+            try:
+                os.makedirs(os.path.join(cache, n), exist_ok=True)
+            except OSError:  # a read-only home: the task starts all the same
+                pass
     # Of the task's directory only its worktree and ask/, where the ask server writes its
     # questions: the rest (task.json, status.json, steer.jsonl, the rounds, runner.log) steers
     # the runner and wb, outside the lane, and notify.jsonl wakes Claude for every task (the

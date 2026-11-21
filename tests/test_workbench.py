@@ -7950,6 +7950,41 @@ class Lane(Base):
         self.assertEqual(runner.lane_grant(f"{home}/go"), f"{home}/go/pkg")   # still its cache
         self.assertLessEqual(set(grants), set(context.writable(task)))
 
+    @home_outside_the_lane
+    def test_a_cache_split_around_an_active_venv_still_takes_new_caches_and_names_grants_below(self):
+        # #825 (the second 2026-11-21 audit): with a poetry venv active, ~/.cache was granted only
+        # its existing entries, so uv's or Go's first cache was refused, and the report named
+        # ~/.cache, which a grant split around the same venv again
+        home = self.fake_home()
+        venv = home / ".cache" / "pypoetry" / "virtualenvs" / "app-x-py3.12"
+        (venv / "bin").mkdir(parents=True)
+        (venv / "pyvenv.cfg").write_text("home = /usr/bin\n")
+        task = self.bare_task("t-825", self.repo)
+        with mock.patch.dict(os.environ, {"VIRTUAL_ENV": str(venv)}):
+            w = context.writable(task)
+            self.assertNotIn(str(home / ".cache"), w)                 # split around it (#490)
+            self.assertFalse([p for p in w if p == str(venv) or p.startswith(f"{venv}/")])
+            for n in context.CACHE_MADE:                              # made first, so granted
+                self.assertIn(str(home / ".cache" / n), w)
+            self.assertEqual(runner.lane_grant(f"{home}/.cache/ms-playwright/chromium-1/x"),
+                             f"{home}/.cache/ms-playwright")
+            self.assertEqual(runner.lane_grant(f"{venv.parent}/other-AbCd/bin/python"),
+                             f"{venv.parent}/other-AbCd")
+            self.assertIsNone(runner.lane_grant(f"{venv}/lib/site.py"))   # the user's own: out
+        self.assertEqual(runner.lane_grant(f"{home}/.cache/ms-playwright/x"), f"{home}/.cache")
+
+    def test_the_agents_poetry_and_pipenv_make_their_venvs_in_its_worktree(self):
+        # #825: their own homes are split around an active venv, where no new venv can be made,
+        # so a setup's `poetry install` was refused; the user's own choice stays
+        self.start("t-825e", "ok")
+        wait_phase("t-825e", {"review"})
+        env = runner.agent_env(store.Task("t-825e"))
+        self.assertEqual((env["POETRY_VIRTUALENVS_IN_PROJECT"], env["PIPENV_VENV_IN_PROJECT"]),
+                         ("true", "1"))
+        with mock.patch.dict(os.environ, {"POETRY_VIRTUALENVS_IN_PROJECT": "false"}):
+            env = runner.agent_env(store.Task("t-825e"))
+        self.assertEqual(env["POETRY_VIRTUALENVS_IN_PROJECT"], "false")
+
     @unittest.skipUnless((lane.abi() or 0) >= 9, "needs Landlock ABI 9")
     @home_outside_the_lane
     def test_a_socket_outside_the_lane_is_named_with_its_grant_and_docker_desktops_can_be_granted(self):

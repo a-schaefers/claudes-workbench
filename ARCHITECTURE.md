@@ -1491,7 +1491,8 @@ deliberately hostile process (the 2026-11-16 audit's list of what it can't stop 
   `wb allow --path` then makes: on a machine that never ran npm or Go the walk reached the home
   directory and nothing was named, #824, the second 2026-11-21 audit; then, while that place
   holds something the lane is split around (`context.split_points`: the secrets, workbench's
-  own files and `NOT_WRITABLE`'s places, made or not: `not_writable`), the next directory down
+  own files, the user's active Python environments, #825, and `NOT_WRITABLE`'s places, made or
+  not: `not_writable`), the next directory down
   towards the path, so a grant is never split again and never holds `~/.cargo/bin`; never `/`,
   the home directory, a secret, or the task's repo), so a refused keystore, lockfile or cache is
   named too, not a URL's path; and only a refusal the lane made, #773: none without Landlock
@@ -1529,7 +1530,15 @@ deliberately hostile process (the 2026-11-16 audit's list of what it can't stop 
   `$CARGO_HOME`'s `bin` and `env` and `$RUSTUP_HOME`'s `toolchains`) are left out of their homes;
   so are the user's active Python environments (`context.python_envs`: `VIRTUAL_ENV`,
   `CONDA_PREFIX`, each PATH `bin` beside a `pyvenv.cfg` or `conda-meta`), which poetry's,
-  pipenv's and virtualenvwrapper's homes put inside the lane (#490);
+  pipenv's and virtualenvwrapper's homes put inside the lane (#490). Landlock only allows, so a
+  home split around one is granted its existing entries alone and refuses every new one: with a
+  poetry venv active, uv's, Go's and pre-commit's first cache in `~/.cache` and a setup's
+  `poetry install` were refused (#825, the second 2026-11-21 audit). So a cache home holding an
+  active environment gets `CACHE_MADE` (`uv`, `pip`, `go-build`, `pre-commit`) made first, the
+  agent's poetry and pipenv make their venv in the worktree (`POETRY_VIRTUALENVS_IN_PROJECT=true`,
+  `PIPENV_VENV_IN_PROJECT=1`, in its environment unless the user set them: the `.venv` that
+  `own_venv` puts first on PATH, ignored by its own `.gitignore`), and `lane_grant` names the
+  directory below a split one (above);
   `cargo install`, `rustup toolchain install` (or a `rust-toolchain.toml` naming one not
   installed yet) and the like need `wb allow --path`. A rustup home gets `toolchains/` made first,
   so the split keeps it out even before rustup made it. What stays in the lane is a documented
@@ -1719,7 +1728,9 @@ prefixes; `SSH_AUTH_SOCK`, `SSH_AGENT_PID`, `GPG_AGENT_INFO`, `DBUS_SESSION_BUS_
 own `XDG_RUNTIME_DIR` (`context.runtime_dir`, with the lane on) and in it, unless the user set
 one, `JUPYTER_RUNTIME_DIR` (`<runtime dir>/jupyter`: Jupyter's default,
 `~/.local/share/jupyter/runtime`, is outside the lane, and every notebook test, nbmake, nbval,
-papermill, failed with PermissionError writing its kernel connection file, #668), build
+papermill, failed with PermissionError writing its kernel connection file, #668),
+`POETRY_VIRTUALENVS_IN_PROJECT=true` and `PIPENV_VENV_IN_PROJECT=1` unless the user set them
+(with the lane on: their venv in the worktree, #825, *Paths, a lane*), build
 daemons of its own (`daemon_env`, with the lane on: `GRADLE_OPTS` gets
 `-Dorg.gradle.daemon.registry.base=<runtime dir>/gradle` and
 `-Dkotlin.compiler.execution.strategy=in-process` after the user's own options;
