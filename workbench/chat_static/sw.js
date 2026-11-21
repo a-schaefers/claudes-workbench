@@ -17,7 +17,8 @@ const cut = (t, n) => t.length > n ? t.slice(0, n - 1) + '…' : t
 
 async function what() {
   const token = await key()
-  const r = await fetch('/api/state', { headers: { Authorization: 'Bearer ' + token }, cache: 'no-store' })
+  // the newest open ask and Claude's last word only: the whole state was up to a megabyte (#755)
+  const r = await fetch('/api/latest', { headers: { Authorization: 'Bearer ' + token }, cache: 'no-store' })
   if (!r.ok) throw new Error('HTTP ' + r.status)
   const s = await r.json()
   const now = s.now || Date.now() / 1000

@@ -15496,6 +15496,32 @@ class WebChat(Base):
         self.assertFalse((self.chat.chat_dir() / "serve.pid").exists())           # nothing started
         self.assertEqual(run_wb("chat", "off", "--port", str(port)).strip(), "web chat off")  # no unit named
 
+    def test_a_push_fetches_only_the_newest_open_ask_and_claudes_last_word(self):
+        # #755 (the 2026-11-21 audit, finding 102): each push made the service worker fetch the
+        # whole /api/state (922 KB with 300 messages and 30 plans) to pick one line
+        chat = self.chat
+        for i in range(30):
+            done = chat.ask("ExitPlanMode", "", "plan", {"plan": f"plan {i}\n" + "step\n" * 4000})
+            chat.answer(done["id"], "deny", "web")
+        for i in range(100):
+            chat.send("x" * 1500, "user" if i % 2 else "claude")
+        chat.send("Tests pass, ready for review", "claude")
+        chat.send("thanks", "user")
+        old = chat.ask("Bash", "rm -rf build")
+        plan = chat.ask("ExitPlanMode", "", "plan", {"plan": "1. Read\n" + "2. Write\n" * 3000})
+        got = chat.latest()
+        self.assertEqual([a["id"] for a in got["asks"]], [plan["id"]])        # the newest open one
+        self.assertNotIn("detail", got["asks"][0])                           # not its plan's text
+        self.assertEqual([m["text"] for m in got["messages"]], ["Tests pass, ready for review"])
+        self.assertLess(len(json.dumps(got)), 2000)
+        self.assertGreater(len(json.dumps(chat.snapshot())), 400_000)
+        code, body = self.call("/api/latest", token=chat.token())
+        self.assertEqual((code, [a["id"] for a in body["asks"]]), (200, [plan["id"]]))
+        self.assertEqual(self.call("/api/latest")[0], 401)
+        chat.answer(plan["id"], "allow", "web")
+        self.assertEqual([a["id"] for a in chat.latest()["asks"]], [old["id"]])
+        self.assertIn("/api/latest", (chat.STATIC / "sw.js").read_text())
+
     def test_on_macos_the_launchd_agent_is_checked_and_named_instead_of_systemd(self):
         # #756 (the 2026-11-21 audit, finding 103): with the launchd agent keeping the chat up,
         # `wb chat off` and the port-taken error gave systemctl advice, and revive ignored the agent

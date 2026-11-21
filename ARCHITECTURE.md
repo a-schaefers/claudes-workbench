@@ -5194,6 +5194,9 @@ thread no longer):
 - The API wants `Authorization: Bearer <token>` (the `Bearer ` prefix required, compared in
   constant time); else 401 "bad or
   missing token: open the link from `wb chat url`".
+- `GET /api/latest`: what a push shows (`chat.latest`, #755): `{now, asks: [the newest open ask
+  that isn't stale, a plan's without its `detail`], messages: [Claude's last message, from the
+  messages' last `LATEST_BYTES` 1 MiB], push: {test}}`, the snapshot's shape for `sw.js`.
 - `GET /api/state`: `{messages (the last 200, each user row with its receipt as `received`; `thread` reads the files' last `THREAD_BYTES` 4 MiB, `store.read_jsonl_tail`, as `asks` does: the whole history was parsed on every poll, 56 ms at 20,000 rows, the 2026-11-19 audit),
   asks (the last 20, each with `answer` (null while open), `answered`, `by`), prefs, push (`{key:
   the VAPID public key, test: the last test push's ts}`), listener, savings (`chat.week_saved`:
@@ -5382,7 +5385,7 @@ app's offline cache gave iOS installed apps white screens). Pushes carry no payl
 and are signed with VAPID (RFC 8292: ES256, done in plain integers in `webpush.py`, checked
 against RFC 6979's vectors and openssl), so nothing needs encrypting and nothing the user and
 Claude write passes through Apple's, Google's or Mozilla's service: the worker fetches
-`/api/state` with the key the page left it in Cache Storage (`wb-chat` `/key`, deleted before
+`/api/latest` (the whole `/api/state`, up to a megabyte with plans in it, until #755) with the key the page left it in Cache Storage (`wb-chat` `/key`, deleted before
 each write: WebKit drops a put over an entry a reloaded page wrote) and shows the newest open
 dialog that isn't `stale`, unless Claude's latest message is newer, else that message (or
 "Notifications work" for a test; a dead session's card beat every later reply, #538), tagged `wb-chat`; a

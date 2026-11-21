@@ -678,7 +678,7 @@ async function run(engine, device) {
 // The worker's notification text, run in node against a given state (no browser shows a push)
 async function swSays(state) {
   const ctx = { self: { addEventListener() {} }, caches: { open: async () => ({ match: async () => null }) },
-    fetch: async () => ({ ok: true, json: async () => state }), Date, Math, String }
+    fetch: async url => { if (url !== '/api/latest') throw new Error('fetched ' + url); return { ok: true, json: async () => state } }, Date, Math, String }
   runInNewContext(readFileSync(join(ROOT, 'workbench/chat_static/sw.js'), 'utf8'), ctx)
   return ctx.what()
 }

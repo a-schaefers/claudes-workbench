@@ -520,6 +520,24 @@ def snapshot() -> dict:
             "now": store.now()}
 
 
+LATEST_BYTES = 1 << 20  # the messages' tail `latest` reads for Claude's last word
+
+
+def latest() -> dict:
+    """What a push shows, for the service worker (GET /api/latest): the newest open ask (a plan's
+    text left out: the notification says only that one is ready) and Claude's last message, in
+    the snapshot's shape. It fetched the whole /api/state, the thread and 20 asks with their
+    plans, up to a megabyte, within the time iOS gives a push handler (#755)."""
+    open_ = [a for a in asks() if a.get("answer") is None and not a.get("stale")]
+    ask = max(open_, key=lambda a: a.get("ts", 0), default=None)
+    if ask and ask.get("kind") == "plan":
+        ask = {k: v for k, v in ask.items() if k != "detail"}
+    rows = store.read_jsonl_tail(chat_dir() / "messages.jsonl", LATEST_BYTES)
+    last = next((r for r in reversed(rows) if r.get("from") == "claude"), None)
+    return {"now": store.now(), "asks": [ask] if ask else [], "messages": [last] if last else [],
+            "push": {"test": (store.read_json(chat_dir() / "push-test.json", None) or {}).get("ts")}}
+
+
 def week_saved() -> dict:
     """The gear sheet's Savings: `wb savings` for the last 7 days (savings.totals)."""
     t = savings.totals(store.results(), since=store.now() - savings.PERIODS["week"])
@@ -1567,6 +1585,10 @@ class Handler(BaseHTTPRequestHandler):
         if path == "/api/state":
             if self._authed():
                 self._json(200, snapshot())
+            return
+        if path == "/api/latest":  # the service worker's, at a push (#755)
+            if self._authed():
+                self._json(200, latest())
             return
         if path == "/api/stream":
             if self._authed():
