@@ -6327,7 +6327,7 @@ output after its last event and stays alive; `FAKE_EXIT` exits with that code af
 (a crash after words or an edit). Scenarios (`FAKE_SCENARIO`): `ok` (writes 42), `fix` (41 in a new session, 42 when
 continued: an auto-fix round passes), `loop` (the repeat guard stops it), `hang`, `crash` (exit 1,
 no events; with `FAKE_DOWN`, a file, it creates it the first time, taking the model server down
-with it, and runs like `ok` after), `devserver` (writes 42, a `shell` call with `background: true`, a `stop` step, then `background_wait` on `npm run dev` for an hour: #658), `slow` (hangs in a new session, ok when continued), `fill` (a 25K-token step at 76%
+with it, and runs like `ok` after), `crashtalk` (like `crash` after a `text` event; with `FAKE_CRASH_HANG` silent instead of exiting: #657), `devserver` (writes 42, a `shell` call with `background: true`, a `stop` step, then `background_wait` on `npm run dev` for an hour: #658), `slow` (hangs in a new session, ok when continued), `fill` (a 25K-token step at 76%
 of 32K, then sleeps: the runner hands over mid-round; the handover prompt turns it into `ok`),
 `read` (25K tokens before any change: it carries on), `floor` (a re-read floor too high to hand
 over: `HANDOVER_ROOM`), `refill` (every session changes a file, then fills: `HANDOVER_MAX`),
