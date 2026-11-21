@@ -7116,7 +7116,9 @@ nested `.md` files (`docs/`, `skill/`, `mod/`, `agent/`) are unaffected. A new r
   results → `results.record` and the readers' defaults for old rows.
 - **The GPU admission rule** (`models.admits`, `can_share`) → the lease, `wb start`'s refusal and
   the feedback/next/resume note (`cli._gpu_holders`, `_gpu_note`), and the Sharing tests. **A new
-  event kind** → `transcript.task_entries` (an unknown kind is never shown) and *Files and formats*.
+  event kind** → `transcript.task_entries` (an unknown kind is never shown: `reading_full`,
+  `resumed`, `spec_gap` and `coding` were missing from `wb watch` and the pane, #846) and *Files
+  and formats*; one with readable text joins `Watch`'s test of every such kind.
 - **A new tuned knob** → `tuning.KNOBS`, read with `tuning.value(task, name)`, a ceiling in
   `drive` if it has one.
 - **`chat.py` or `chat_static/`** → the browser test (`chat.yml` runs it on the pull request too).

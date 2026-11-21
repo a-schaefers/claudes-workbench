@@ -5001,6 +5001,25 @@ class Watch(Base):
                 run_wb("watch", "t-handed", "--json")
         self.assertEqual(sorted(exported), ["ses_new"] * 3 + ["ses_old1", "ses_old2"])
 
+    def test_every_event_kind_with_readable_text_shows_in_wb_watch(self):
+        # #846: reading_full, resumed, spec_gap and coding had no branch in task_entries, so a
+        # session growing into compaction, a resume or the user's allowance left no line
+        from workbench import transcript
+        t = store.Task("t-kinds")
+        store.write_json(t.dir / "task.json", {"name": "t-kinds", "created_at": store.now()})
+        t.set_status(phase="review", round=1, session="ses_k")
+        kinds = ("reading_full", "resumed", "spec_gap", "coding", "fresh", "full", "load", "left_bg",
+                 "stopped", "error", "retry", "gpu", "next_step", "allow", "captain", "ask", "answer",
+                 "skills")
+        for i, kind in enumerate(kinds):
+            t.event({"ts": store.now() + i, "round": 1, "kind": kind, "text": f"TEXT-OF-{kind}"})
+        with mock.patch.object(transcript, "export", lambda sid, strict=False: {"info": {"id": sid}, "messages": []}):
+            out = run_wb("watch", "t-kinds", "--json")
+        shown = "\n".join(json.loads(x)["t"] for x in out.splitlines())
+        for kind in kinds:
+            self.assertIn(f"TEXT-OF-{kind}", shown, kind)
+        self.assertIn("■ Claude: the spec missed: TEXT-OF-spec_gap", shown)
+
     def test_json_lines_for_the_pane_end_with_what_is_happening(self):
         self.start("t-live", "hang")
         deadline = time.time() + 10
