@@ -1296,7 +1296,11 @@ prompt, in this order:
   user's CLAUDE.md's are); a dotted name or a link into a secret left out, the copy of a rule
   removed since deleted, and each counted in `fixed_prompt` as `~/.claude/rules/<path>`. Only
   `~/.claude/CLAUDE.md` was handed over, so Claude reviewed against rules the agent was never
-  told (#673). A rule's `paths:` frontmatter isn't read: every rule loads;
+  told (#673). The walk follows directory links (`_md_under`: each real directory once, so a
+  loop ends, and no dotted name, a shared checkout's `.git`): `Path.rglob` follows none, and a
+  rules directory shared with `ln -s ~/team-rules ~/.claude/rules/team`, as Claude Code
+  documents, never reached the agent (#828, the second 2026-11-21 audit). A rule's `paths:`
+  frontmatter isn't read: every rule loads;
 - the repo's `CLAUDE.md`, `.claude/CLAUDE.md` and `CLAUDE.local.md`: the worktree's copy when
   it exists there (committed), else the user's checkout's (local or uncommitted), so an
   uncommitted edit to a committed file isn't seen;
@@ -1314,7 +1318,14 @@ prompt, in this order:
   `npm test` at the workspace root (#375, the audit of 1.6). With no CLAUDE.md found, the
   refusal says a package with its own takes `--repo <the package's directory>`. OpenCode 2.3, started there, loads
   the root's and the package's AGENTS.md (both count for the duplicate check below);
-- the tracked `.claude/rules/**/*.md` from the worktree;
+- the tracked `.claude/rules/**/*.md` from the worktree (`project_rules`), and the `.md` files
+  under a tracked link to a directory there (`_md_under`): one whose real path is outside the
+  worktree and the repo, through a file or a directory link (`.claude/rules/shared ->
+  ~/company-standards`), is copied to `rules/<task>/project-rules/<path>`, which the lane reads,
+  unless it is a secret or workbench's own, its imports reaching what a project's do, the copy
+  of one gone since deleted, and counted in `fixed_prompt` as `.claude/rules/<path>`: loaded by
+  its worktree path the lane refused it, and a directory link's files weren't listed at all
+  (#828);
 - `context.md` in the task directory: a map of nested `CLAUDE.md`/`AGENTS.md` files in
   subdirectories (tracked, not under `.claude/`), "Before you change files under one of these
   directories, read its file and follow it", instead of loading them all.
@@ -6340,7 +6351,9 @@ $WB_HOME (~/.local/state/workbench)
                                  uploads/<id>/ (an attachment: <name> 0600 and .meta.json; *The web chat*)  uploads.lock
   rules/<task>/                  outside the lane: opencode.json (the config layer), HANDBOOK.md,
                                  CLAUDE.md (a copy of the user's), user-rules/<path> (their
-                                 ~/.claude/rules: context.user_rules), imports/<n>/<name> (an import
+                                 ~/.claude/rules: context.user_rules), project-rules/<path> (a project
+                                 rule a link takes outside the repo: context.project_rules),
+                                 imports/<n>/<name> (an import
                                  from outside the repo: context.import_files), bin/git (the shim),
                                  grants.json (what Claude allowed: {"allow", "paths", "test_tools"}),
                                  gitdir.json (the worktree's real git dir and its .git's text: {"gitdir", "dotgit"}),

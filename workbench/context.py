@@ -1729,6 +1729,67 @@ def import_files(task: store.Task, roots: list[tuple[Path, Path, bool]]) -> list
     return out
 
 
+def _md_under(src: Path) -> list[Path]:
+    """The `.md` files under ``src``, through its directory links, each real directory once (a
+    link loop ends), no dotted name (a shared rules checkout's .git): Path.rglob follows no
+    directory link, so a rules directory shared by `ln -s ~/team-rules ~/.claude/rules/team`,
+    as Claude Code documents, never reached the agent (#828)."""
+    out, seen = [], set()
+    for d, dirs, files in os.walk(src, followlinks=True):
+        real = os.path.realpath(d)
+        if real in seen:
+            dirs[:] = []
+            continue
+        seen.add(real)
+        dirs[:] = [n for n in dirs if not n.startswith(".")]
+        out += [Path(d) / f for f in files if f.endswith(".md") and not f.startswith(".")]
+    return sorted(out)
+
+
+def _copy_rule(real: str, copy: Path) -> None:
+    copy.parent.mkdir(parents=True, exist_ok=True)
+    tmp = copy.with_name(f".{copy.name}.{os.getpid()}.tmp")  # whole: OpenCode may be reading
+    shutil.copyfile(real, tmp)
+    os.replace(tmp, copy)
+
+
+def project_rules(task: store.Task, wt: Path) -> list[tuple[Path, Path, bool]]:
+    """The project's tracked `.claude/rules/**/*.md`, as import_files' roots: (what OpenCode
+    loads, read from, the user's own). One a committed link takes outside the worktree and the
+    repo (`.claude/rules/shared -> ~/company-standards`) is copied into
+    rules/<task>/project-rules/, which the lane reads: loaded by its worktree path, the lane
+    refused it, and a linked directory's files weren't listed at all, so Claude reviewed against
+    rules the agent never received (#828). Not a secret or workbench's own; its imports reach
+    what a project's do; copies of rules gone since go too."""
+    base, repo = os.path.realpath(wt), os.path.realpath(task.spec["repo"])
+    within = lambda p, d: p == d or _under(p, d)  # noqa: E731
+    hidden = secret_paths() | private_paths()
+    top, out_dir = wt / ".claude" / "rules", rules_dir(task) / "project-rules"
+    files: list[Path] = []
+    for p in _tracked(wt, ".claude/rules"):  # a link is one entry, its files none
+        f = wt / p
+        if f.is_symlink() and f.is_dir():
+            files += _md_under(f)
+        elif p.endswith(".md"):
+            files.append(f)
+    out, made = [], set()
+    for f in files:
+        real = os.path.realpath(f)
+        if not os.path.isfile(real):
+            continue
+        if within(real, base) or within(real, repo):
+            out.append((f, f, False))
+        elif not any(within(real, h) for h in hidden):
+            copy = out_dir / f.relative_to(top)
+            _copy_rule(real, copy)
+            made.add(copy)
+            out.append((copy, Path(real), False))
+    for old in out_dir.rglob("*.md") if out_dir.is_dir() else ():
+        if old not in made:
+            old.unlink(missing_ok=True)
+    return out
+
+
 def user_rules(task: store.Task) -> list[tuple[Path, Path]]:
     """The user's personal rules (Claude's directory's `rules/**/*.md`, which Claude Code loads
     for every project), copied into rules/<task>/user-rules/: (the copy, the file). Only
@@ -1739,17 +1800,14 @@ def user_rules(task: store.Task) -> list[tuple[Path, Path]]:
     claude = os.path.realpath(claude_home())
     hidden = (secret_paths() | private_paths()) - {claude}
     made: list[tuple[Path, Path]] = []
-    for f in sorted(src.rglob("*.md")) if src.is_dir() else ():
+    for f in _md_under(src) if src.is_dir() else ():  # through its directory links (#828)
         rel = f.relative_to(src)
         real = os.path.realpath(f)
         if any(part.startswith(".") for part in rel.parts) or not os.path.isfile(real) or \
                 any(real == h or _under(real, h) for h in hidden):
             continue
         copy = out / rel
-        copy.parent.mkdir(parents=True, exist_ok=True)
-        tmp = copy.with_name(f".{copy.name}.{os.getpid()}.tmp")  # whole: OpenCode may be reading
-        shutil.copyfile(real, tmp)
-        os.replace(tmp, copy)
+        _copy_rule(real, copy)
         made.append((copy, f))
     kept = {c for c, _ in made}
     for old in out.rglob("*.md") if out.is_dir() else ():
@@ -1789,8 +1847,8 @@ def instruction_files(task: store.Task) -> tuple[list[Path], list[str]]:
                 if (base / rel).is_file():
                     load.append(base / rel)
                     break
-    load += [wt / p for p in _tracked(wt, ".claude/rules/*.md")]
-    load = [handbook, *import_files(task, roots + [(p, p, False) for p in load])]  # #513
+    proj = [(p, p, False) for p in load] + project_rules(task, wt)  # through their links (#828)
+    load = [handbook, *import_files(task, roots + proj)]  # #513
     # OpenCode already loads the worktree's AGENTS.md: skip a CLAUDE.md with the same text (one
     # only in the user's checkout isn't loaded, so it can't stand in for CLAUDE.md)
     # (and, started in a package, the package's too: checked on OpenCode 2.3, #375)
@@ -1836,6 +1894,8 @@ def fixed_prompt(task: store.Task) -> tuple[int, list[tuple[str, int]]]:
         mine = rules / "user-rules"
         if p.is_relative_to(mine):
             named[p] = f"~/.claude/rules/{p.relative_to(mine)}"
+        if p.is_relative_to(rules / "project-rules"):
+            named[p] = f".claude/rules/{p.relative_to(rules / 'project-rules')}"
         label = named.get(p) or ("the spec" if p.name == "prompt.md" else
                                  str(p.relative_to(wt)) if p.is_relative_to(wt) else p.name)
         parts.append((label, n))

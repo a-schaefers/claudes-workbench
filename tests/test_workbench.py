@@ -5937,6 +5937,51 @@ class AgentContext(Base):
         context.instruction_files(task)
         self.assertFalse((mine / "lang" / "python.md").exists())
 
+    def test_rules_a_link_brings_into_claudes_or_the_projects_rules_reach_the_agent(self):
+        # #828 (the second 2026-11-21 audit): Claude Code documents links in .claude/rules for
+        # sharing rules, but rglob followed no directory link, a committed directory link listed
+        # no files, and a committed file link outside the repo was loaded where the lane can't read
+        home = Path(self.tmp.name) / "home"
+        os.environ["HOME"] = str(home)
+        os.environ.pop("CLAUDE_CONFIG_DIR", None)
+        team, std = home / "team-rules", home / "company-standards"
+        for d in (home / ".claude" / "rules", team / "sub", team / ".git", std,
+                  self.repo / "docs" / "rules", self.repo / ".claude" / "rules", home / ".ssh"):
+            d.mkdir(parents=True)
+        (team / "a.md").write_text("team a\n")
+        (team / "sub" / "b.md").write_text("team b\n")
+        (team / ".git" / "x.md").write_text("not a rule\n")
+        os.symlink(team, team / "sub" / "loop")                       # a loop ends
+        os.symlink(team, home / ".claude" / "rules" / "team")
+        (std / "security.md").write_text("no secrets in logs\n")
+        (std / "logging.md").write_text("structured logs\n")
+        (self.repo / "docs" / "rules" / "style.md").write_text("in the repo\n")
+        (home / ".ssh" / "notes.md").write_text("secret\n")
+        rules = self.repo / ".claude" / "rules"
+        os.symlink(std / "security.md", rules / "security.md")       # a file link outside
+        os.symlink(std, rules / "standards")                         # a directory link outside
+        os.symlink("../../docs/rules", rules / "docs")                 # one inside the repo
+        os.symlink(home / ".ssh" / "notes.md", rules / "leak.md")      # into a secret
+        subprocess.run(["git", "-C", str(self.repo), "add", "."], check=True)
+        subprocess.run(["git", "-C", str(self.repo), "commit", "-qm", "rules"], check=True)
+        task = store.Task("t-828")
+        task.dir.mkdir(parents=True)
+        (task.dir / "task.json").write_text(json.dumps({"name": "t-828", "repo": str(self.repo)}))
+        files, _ = context.instruction_files(task)
+        mine, proj = context.rules_dir(task) / "user-rules", context.rules_dir(task) / "project-rules"
+        self.assertEqual([str(p.relative_to(mine)) for p in files if p.is_relative_to(mine)],
+                         ["team/a.md", "team/sub/b.md"])
+        self.assertEqual([str(p.relative_to(proj)) for p in files if p.is_relative_to(proj)],
+                         ["security.md", "standards/logging.md"])   # security.md once
+        self.assertEqual((proj / "standards" / "logging.md").read_text(), "structured logs\n")
+        self.assertIn(rules / "docs" / "style.md", files)             # readable where it is
+        self.assertNotIn("secret\n", [p.read_text() for p in files])
+        self.assertIn(".claude/rules/standards/logging.md", dict(context.fixed_prompt(task)[1]))
+        (rules / "standards").unlink()                                # gone: its copy too
+        subprocess.run(["git", "-C", str(self.repo), "commit", "-qam", "drop"], check=True)
+        context.instruction_files(task)
+        self.assertFalse((proj / "standards" / "logging.md").exists())
+
     def test_uncommitted_local_instructions_come_from_the_repo(self):
         from workbench import context
         (self.repo / "CLAUDE.local.md").write_text("my local rules\n")
