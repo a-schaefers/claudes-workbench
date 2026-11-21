@@ -12478,6 +12478,33 @@ class Setup(Base):
         self.assertIn("--  OpenCode 3.1 is outside what workbench is tested with", self.setup(cmd="doctor")[1])
         self.assertIn("--  wb comes from /usr, not this copy", out)
 
+    def test_doctor_exit_code_does_not_follow_the_keep_awake_probe(self):
+        # #653: `ok, said = awake_line()` reassigned doctor's verdict: a Mac (caffeinate) exited 0
+        # beside "BAD opencode not found", and a healthy WSL2 install exited 1 with no BAD line
+        home = Path(self.tmp.name) / "home"
+        home.mkdir()
+        os.environ.update(HOME=str(home), WB_HOME=str(home / ".local/state/workbench"),
+                          FAKE_VERSION="opencode v2.3.0",
+                          PATH=os.pathsep.join([str(home / ".local/bin"), os.environ["PATH"]]))
+        os.environ.pop("CLAUDE_CONFIG_DIR", None)
+        Path(os.environ["WB_OPENCODE_CONFIG"]).write_text(json.dumps({"provider": {"strata": {
+            "options": {"baseURL": "http://127.0.0.1:8080/v1"},
+            "models": {"strata": {"limit": {"context": 32768}}}}}}))  # nothing for doctor to fault
+        self.assertEqual(self.setup()[0], 0)
+        (home / ".claude/plugins").mkdir(parents=True)
+        (home / ".claude/plugins/installed_plugins.json").write_text(
+            json.dumps({"version": 2, "plugins": {"workbench@workbench": []}}))
+        for awake in (True, False):
+            with mock.patch.object(cli, "awake_line", return_value=(awake, "keep-awake")):
+                code, out = self.setup(cmd="doctor")
+            self.assertNotIn("BAD keep-awake", out)
+            self.assertEqual(code, 1 if "\nBAD" in "\n" + out else 0, out)  # the BAD lines, and only they
+        os.environ["WB_OPENCODE_BIN"] = str(Path(self.tmp.name) / "no-opencode")
+        with mock.patch.object(cli, "awake_line", return_value=(True, "keep-awake")):
+            code, out = self.setup(cmd="doctor")
+        self.assertIn("BAD opencode", out)
+        self.assertEqual(code, 1)
+
     def test_setup_links_wb_and_the_skill_and_leaves_what_it_did_not_make(self):
         home = Path(self.tmp.name) / "home"
         os.environ["HOME"] = str(home)

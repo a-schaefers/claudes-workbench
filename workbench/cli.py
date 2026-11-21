@@ -4263,8 +4263,10 @@ def cmd_doctor(a):
             print(f"--  {why}")
     if gap := chat_gap():
         print(f"--  {gap}")
-    ok, said = awake_line()  # #516: a warning, not BAD: a server or a desktop that never sleeps is fine
-    if ok:
+    # #516: a warning, not BAD: a server or a desktop that never sleeps is fine. Its own name: once
+    # it reassigned `ok`, forgetting every BAD above it and failing a healthy WSL2 install (#653)
+    awake, said = awake_line()
+    if awake:
         line(True, said)
     else:
         print(f"--  {said}")
