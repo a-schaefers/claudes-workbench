@@ -252,7 +252,9 @@ def run(task: store.Task, cmd: str, files: list[str] | None = None, limit: int =
         expect: str = "", setup: bool = False) -> dict:
     """Run ``cmd`` on the base (with the candidate's test files) and on the candidate; the
     result, also kept in tasks/<task>/verify/<n>/ with both outputs."""
-    tree, left = gitops.snapshot_left(task.worktree)  # bulky new files left out (#431)
+    # the tree accept would commit: a big text file it lands is in it (#642); what accept refuses
+    # without --include is left out, and lands with it, so then nothing here is proof (below)
+    tree, left = gitops.snapshot_left(task.worktree, landing=True)
     base_rev = _review_base(task)
     if not base_rev:
         raise RuntimeError("cannot find the last approved step's commit for the comparison")
@@ -272,10 +274,13 @@ def run(task: store.Task, cmd: str, files: list[str] | None = None, limit: int =
     out.mkdir(parents=True)
     (out / "base.txt").write_text(b_out, encoding="utf-8")
     (out / "candidate.txt").write_text(c_out, encoding="utf-8")
+    said = verdict(b_code, b_out, c_code, expect, uncopied)
+    if left and said == "proven":  # a candidate missing files accept can land proves nothing (#642)
+        said = "inconclusive"
     result = {"cmd": cmd, "files": files, "tree": tree, "ts": store.now(),
               "base": {"rev": base_rev, "exit": b_code, "assertion": assertion(b_out)},
               "candidate": {"rev": tree, "exit": c_code, "assertion": assertion(c_out)},
-              "verdict": verdict(b_code, b_out, c_code, expect, uncopied), "dir": str(out),
+              "verdict": said, "dir": str(out),
               **({"expect": expect} if expect else {}),
               **({"uncopied": uncopied[:50]} if uncopied else {}),
               **({"left_out": left} if left else {})}
@@ -290,7 +295,8 @@ SAY = {"proven": "proven: it fails on the base and passes on the candidate",
        "candidate-fails": "the candidate fails it",
        "inconclusive": "inconclusive: the base run didn't fail on an assertion (a setup error: "
                        "syntax, import, build or collection; a file the candidate adds missing; "
-                       "or not the --expect text), a run timed out, or the setup command failed"}
+                       "or not the --expect text), a run timed out, the setup command failed, "
+                       "or the candidate left out files accept --include would land"}
 
 
 def lines(r: dict) -> list[str]:
@@ -305,7 +311,8 @@ def lines(r: dict) -> list[str]:
         out.append(f"  the base lacked what the candidate adds: {', '.join(r['missing'])} "
                    "(--files copies what the test reads onto the base)")
     if r.get("left_out"):
-        out.append(f"  not in the candidate (too big to snapshot): {', '.join(r['left_out'])}")
+        out.append(f"  not in the candidate (accept refuses them without --include, and lands "
+                   f"them with it): {', '.join(r['left_out'])}")
     out.append(f"  outputs: {r['dir']}/{{base,candidate}}.txt")
     return out
 
@@ -325,7 +332,7 @@ def shot(task: store.Task, cmd: str, files: list[str] | None = None, viewport: s
     $WB_SHOT_VIEWPORT. Kept in tasks/<task>/shots/<n>/ with what each image is of."""
     if not re.fullmatch(r"\d{2,5}x\d{2,5}", viewport):
         raise RuntimeError(f"--viewport {viewport}: give it as WIDTHxHEIGHT, e.g. 390x844")
-    tree = gitops.snapshot(task.worktree)
+    tree = gitops.snapshot(task.worktree, landing=True)  # what accept would land, as verify (#642)
     # after wb next, the last approved step, as wb verify compares: the original base showed the
     # earlier steps' change as this one's (#501, the audit of 1.90)
     base_rev = _review_base(task)
@@ -422,5 +429,5 @@ def last(task: store.Task) -> dict | None:
     # Old checks always compared against task.json's original base (#252).
     stale = task.worktree.is_dir() and (
         r["base"].get("rev", task.spec["base"]) != _review_base(task)
-        or gitops.snapshot(task.worktree) != r.get("tree"))
+        or gitops.snapshot(task.worktree, landing=True) != r.get("tree"))
     return {**r, "stale": stale}

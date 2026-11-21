@@ -815,24 +815,32 @@ def _bounded(cwd, args, env, limit: int) -> str | None:
     return text if len(text) <= limit else None
 
 
-def snapshot(worktree: Path) -> str:
+def snapshot(worktree: Path, landing: bool = False) -> str:
     """The working tree as it is now, new files included, as a tree object: a base to diff
     against later. The worktree's own index is left alone. Bulky new files are left out
     (snapshot_left)."""
-    return snapshot_left(worktree)[0]
+    return snapshot_left(worktree, landing)[0]
 
 
-def snapshot_left(worktree: Path) -> tuple[str, list[str]]:
+def snapshot_left(worktree: Path, landing: bool = False) -> tuple[str, list[str]]:
     """snapshot's tree, and what it left out ("build/ (400 new files)", "data.bin (3 MB)"; []
     when nothing): a new file of BINARY_MAX or more, the top-level directories with the most new
     files while there are more than NEW_FILES_MAX, then the biggest new files while the rest
     pass SNAPSHOT_MAX bytes. Chosen by count and size alone, before anything is hashed: `add -A`
     wrote every new file into the user's object store, each round it changed, kept until git's
     prune window passed (a refused accept of 400 x 100 KB build/ files took .git/objects from
-    28K to 41M: #431, the audit of 1.8)."""
+    28K to 41M: #431, the audit of 1.8). ``landing``: the tree wb accept would commit (wb
+    verify's candidate): only what accept refuses without --include is left out, a new binary
+    of BINARY_MAX or more and the directories past NEW_FILES_MAX, and a big text file, which
+    accept commits, is kept: verify ran without a 1.1 MB text file its test read, said proven,
+    and the test failed on main once accept had landed it (#642, Codex's audit of 1.90.6)."""
     files = _new_files(worktree)
-    big = [(p, n) for p, n in files if n >= BINARY_MAX]
-    rest = [(p, n) for p, n in files if n < BINARY_MAX]
+    if landing:
+        big = [(p, n) for p, n in files if n >= BINARY_MAX and _binary(worktree, p)]
+    else:
+        big = [(p, n) for p, n in files if n >= BINARY_MAX]
+    skip = set(big)
+    rest = [r for r in files if r not in skip]
     dirs, count = [], Counter(_top(os.fsdecode(p)) for p, _ in rest)
     for d, n in count.most_common():
         if len(rest) <= NEW_FILES_MAX:
@@ -840,7 +848,7 @@ def snapshot_left(worktree: Path) -> tuple[str, list[str]]:
         dirs.append(f"{d} ({n:,} new file{'s' if n != 1 else ''})")
         rest = [(p, m) for p, m in rest if _top(os.fsdecode(p)) != d]
     rest.sort(key=lambda r: r[1])
-    while rest and sum(n for _, n in rest) > SNAPSHOT_MAX:
+    while not landing and rest and sum(n for _, n in rest) > SNAPSHOT_MAX:
         big.append(rest.pop())
     if len(rest) == len(files):
         return with_new_files(worktree, "write-tree", whole=True).strip(), []

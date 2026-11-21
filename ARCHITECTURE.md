@@ -738,7 +738,8 @@ while any runner is live; a manual pull is the case this catches.
    `SNAPSHOT_MAX` (32 MiB); the tree then gets the tracked files' changes (`add -u`) and the new
    files kept by name, where `add -A` had written every new file into the user's object store
    each round, a refused accept of 400 × 100 KB `build/` files taking `.git/objects` from 28K to
-   41M (#431);
+   41M (#431; `wb verify` takes the tree accept would land instead, `landing=True`: *Verifying a
+   fix against the base*, #642);
    then the agent's proposed instruction files as diffs, *Claude's files*), exit.
 
 Round reports and check-ins list the first 40 changed paths (`gitops.CHANGED_SHOWN`).
@@ -4388,9 +4389,15 @@ directory and in the task's own lane and environment (`runner.run_in_lane` on a 
   run, #194). That copy is what makes a test separable from the change; with no test file it
   refuses.
 - **The candidate**: the same clone at the worktree's HEAD, then `read-tree -u` of a snapshot of
-  the worktree (`gitops.snapshot`), new files included, but not the bulky ones the snapshot
-  leaves out (*The runner, inside*, #431): `result.json` `left_out` and the report's "not in the
-  candidate (too big to snapshot)" line name them.
+  the worktree, new files included: the tree `wb accept` would commit (`gitops.snapshot(landing=True)`,
+  also `wb shot`'s and the staleness check's), not the review snapshot (*The runner, inside*,
+  #431). Only what accept refuses without `--include` is left out: a new binary of `BINARY_MAX`
+  or more and the directories past `NEW_FILES_MAX`; a big text file, which accept commits, is in
+  it (the review's `SNAPSHOT_MAX` left out a 1,100,000-byte text file the test read, verify said
+  proven, and the test failed on main once accept had landed it: #642, Codex's audit of 1.90.6).
+  `result.json` `left_out` and the report's "not in the candidate (accept refuses them without
+  --include, and lands them with it)" line name what was left out, and a check that left
+  anything out is never `proven`: it would be `inconclusive`.
 
 Each is set up from the task's worktree (`runner.prepare`: its siblings, and the ignored paths
 its preparation made, copied; `--setup` runs the setup command there instead) before the test runs.
@@ -4398,7 +4405,8 @@ its preparation made, copied; `--setup` runs the setup command there instead) be
 Neither run touches the user's checkout or the worktree under review. The verdict (`verdict`):
 `proven` (the base fails on an assertion and the candidate passes), `base-passes` (the test
 doesn't show the bug), `candidate-fails`, or `inconclusive`: a run timed out, overran its
-output or couldn't be set up, or the base failed without an assertion. A missing module or a command not found says
+output or couldn't be set up, the base failed without an assertion, or the candidate left out
+files accept can land (#642). A missing module or a command not found says
 nothing about the bug, so it can never count as proof. Proof is positive evidence only: with
 `--expect TEXT`, that text in the base's output; else, unless a setup error (`SETUP`: a syntax,
 import or module error, pytest's collection errors, a fixture not found, a failed build or

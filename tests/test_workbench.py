@@ -1460,7 +1460,8 @@ class Lifecycle(Base):
         said = verify.lines({"cmd": "t", "files": ["t"], "tree": tree, "verdict": "proven",
                              "dir": "d", "left_out": ["big.dat (1 MB)"],
                              **{k: {"rev": "r", "exit": 0, "assertion": ""} for k in ("base", "candidate")}})
-        self.assertIn("  not in the candidate (too big to snapshot): big.dat (1 MB)", said)
+        self.assertIn("  not in the candidate (accept refuses them without --include, and lands "
+                      "them with it): big.dat (1 MB)", said)
         # gone, nothing is left out and the snapshot is the whole working tree again
         shutil.rmtree(t.worktree / "build")
         (t.worktree / "big.dat").unlink()
@@ -10497,6 +10498,38 @@ class Verify(Base):
         self.assertIn("AssertionError", Path(r["dir"], "base.txt").read_text())   # both outputs kept
         (self.wt / "calc.py").write_text("def kw(watts):\n    return watts // 1000\n")
         self.assertTrue(verify.last(store.Task("t"))["stale"])     # the candidate moved on since
+
+    def test_verify_runs_the_big_text_file_accept_lands_and_proves_nothing_without_a_binary_it_lands(self):
+        # #642 (Codex's audit of 1.90.6): the review snapshot's size limit also made verify's
+        # candidate, so a 1,100,000-byte text file was left out, verify said proven, and accept
+        # landed the file without a word: the same test failed on main
+        from workbench import verify
+        (self.wt / "big.txt").write_text("bad\n" + "x" * 1_099_996)
+        (self.wt / "tests" / "test_calc.py").write_text(
+            "import os, unittest\nfrom calc import kw\n\n\nclass T(unittest.TestCase):\n"
+            "    def test_kw(self):\n        self.assertEqual(kw(250000), 250)\n\n"
+            "    def test_big(self):\n        if os.path.exists('big.txt'):\n"
+            "            self.assertEqual(open('big.txt').readline(), 'ok\\n')\n")
+        test = "python3 -m unittest tests.test_calc"
+        r = subprocess.run(shlex.split(test), cwd=self.wt, capture_output=True,
+                           env={**os.environ, "PYTHONDONTWRITEBYTECODE": "1"})
+        self.assertEqual(r.returncode, 1)                     # the task's checkout fails it
+        out = run_wb("verify", "t", "--test", test)
+        self.assertIn("the candidate fails it", out)
+        result = verify.last(store.Task("t"))
+        self.assertIn("big.txt", gitops.git(self.wt, "ls-tree", "--name-only", result["tree"]))
+        self.assertFalse(result["stale"])
+        self.assertEqual(verify.note(store.Task("t")),
+                         f"note: the last regression check (`{test}`) is the candidate fails it")
+        # what accept refuses without --include and lands with it: never proof
+        (self.wt / "big.txt").write_text("ok\n" + "x" * 1_099_996)
+        (self.wt / "blob.bin").write_bytes(b"\0" * gitops.BINARY_MAX)
+        out = run_wb("verify", "t", "--test", test)
+        self.assertIn("inconclusive", out)
+        self.assertIn("lands them with it): blob.bin (1 MB)", out)
+        (self.wt / "blob.bin").unlink()
+        self.assertIn("proven: it fails on the base", run_wb("verify", "t", "--test", test))
+        self.assertEqual(verify.note(store.Task("t")), "")
 
     def test_a_killed_verify_leaves_no_scratch_clone_and_no_test_running(self):
         # #372 (the audit of 1.6): Claude's Bash killed wb verify at 2 minutes, and its clone and
