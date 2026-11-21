@@ -1559,36 +1559,62 @@ test('Claude coding: its own edit in a task\'s worktree waits for the user\'s ye
   expect((await edit('/wb/tasks/fix-it/tree/shared/lib/power.py')).deny).toBeUndefined()   // a sibling's link
 })
 
-test('turning the probe experiment on without a probe that has symbols says so in a toast', async ($, on) => {
-  // the user, 2026-11-20: the row read "On" while wb said it changed nothing yet
+test('the probe row says whether it works, and turned on without probe it asks Claude to offer the setup', async ($, on) => {
+  // the user, 2026-11-20: the row read "On" while wb said it changed nothing yet; say whether it
+  // works, and let Claude offer to set probe up
   const clock = mock.clock(on, { now: 1_800_000_000_000 })
   const files: Record<string, string> = {}
   fakeTasks(on, files, [])
   const toasts: string[] = []
   on('ui.toast', (_: any, e: any) => { toasts.push(e.text); return { value: undefined } })
+  const asked: string[] = []
+  on('prompt.submit', (_: any, e: any) => { asked.push(e.text); return { text: e.text } })
   let found = false
+  let checks = 0
+  const missing = 'probe: on, but not set up: no probe with `symbols` is on PATH, so it changes nothing yet (probe, a code-search tool: github.com/probelabs/probe; its release binary from github.com/probelabs/probe/releases, not crates.io\'s probe-code 0.6.0)'
   on('process.run', (_: any, e: any) => {
     if (e.argv[1] !== 'experiment') return { value: { exitCode: 0, stdout: '', stderr: '' } }
-    files['/wb/experiments.json'] = JSON.stringify({ probe: e.argv[3] })
-    const said = e.argv[3] === 'off' ? 'probe: off (wb experiment probe on)'
-      : found ? 'probe: on, found (probe-code 0.6.0)'
-      : 'probe: on, but no probe with `symbols` is on PATH, so it changes nothing yet (its release binary: github.com/probelabs/probe/releases)'
-    return { value: { exitCode: 0, stdout: `${said}; tasks already started keep theirs\n`, stderr: '' } }
+    if (e.argv[3]) files['/wb/experiments.json'] = JSON.stringify({ probe: e.argv[3] })
+    else checks++
+    const state = JSON.parse(files['/wb/experiments.json'] ?? '{}').probe
+    const said = state !== 'on' ? 'probe: off (wb experiment probe on)'
+      : found ? 'probe: on and working (probe-code 0.6.0)' : missing
+    return { value: { exitCode: 0, stdout: `${said}${e.argv[3] ? '; tasks already started keep theirs' : ''}\n`, stderr: '' } }
   })
+  const row = async (ui: any) => (await ui.findAll({ type: 'Button' })).map((b: any) => b.props.label)
+    .find((l: string) => l.includes('Agent code navigation'))
   await $.session.start({ cwd: '/', surface: 'terminal', isInteractive: true })
   await clock.advance(1000)
   const ui = await $.ui.mount({ ...PANE, surface: 'terminal' })
   await ui.press({ key: 'tab-settings' })
+  expect(await row(ui)).toBe('▸ Agent code navigation (experimental, may go away): Off (default)')
+  expect(checks).toBe(0)                                            // off: wb isn't asked
   await ui.press({ key: 'probe' })
   await ui.press({ key: 'probe:on' })
-  expect(toasts.filter(t => t.includes('probe'))).toEqual([
-    'workbench: probe: on, but no probe with `symbols` is on PATH, so it changes nothing yet (its release binary: github.com/probelabs/probe/releases); tasks already started keep theirs'])
+  expect(toasts.filter(t => t.includes('code navigation'))).toEqual([
+    "workbench: Agent code navigation is on but not set up: probe isn't installed. Claude will offer to set it up."])
+  expect(await row(ui)).toBe('▸ Agent code navigation (experimental, may go away): On, not set up')
+  await clock.advance(5000)                                         // the next poll starts Claude's turn
+  expect(asked).toHaveLength(1)
+  expect(asked[0]).toContain('The user just turned on Agent code navigation')
+  expect(asked[0]).toContain(missing)
+  expect(asked[0]).toContain('github.com/probelabs/probe/releases')
+  expect(asked[0]).toContain('install nothing without their yes')
+
+  found = true                                                      // Claude installed it
+  await clock.advance(31_000)
+  await ui.press({ key: 'tab-tasks' })
+  await ui.press({ key: 'tab-settings' })
+  expect(await row(ui)).toBe('▸ Agent code navigation (experimental, may go away): On, working')
   await ui.press({ key: 'probe' })
   await ui.press({ key: 'probe:off' })
-  found = true
+  expect(await row(ui)).toBe('▸ Agent code navigation (experimental, may go away): Off (default)')
   await ui.press({ key: 'probe' })
   await ui.press({ key: 'probe:on' })
-  expect(toasts.filter(t => t.includes('probe'))).toHaveLength(1)   // off, or on and found: nothing to say
+  expect(toasts.filter(t => t.includes('code navigation'))).toHaveLength(2)
+  expect(toasts.at(-1)).toBe('workbench: Agent code navigation is on and working (probe-code 0.6.0): tasks started from now use it.')
+  await clock.advance(5000)
+  expect(asked).toHaveLength(1)                                     // working: nothing for Claude
   await ui.unmount()
 })
 
@@ -1644,7 +1670,7 @@ test('the settings rows open to Buttons, pick through wb, and say the sentence o
   expect((await ui.find({ key: 'chat' }))?.props.label).toBe('▸ Web chat: On')
   await ui.press({ key: 'probe' })
   await ui.press({ key: 'probe:on' })
-  expect(runs.at(-1)).toEqual(['wb', 'experiment', 'probe', 'on'])
+  expect(runs.some(r => r.join(' ') === 'wb experiment probe on')).toBe(true)   // then the row asks how it came out
   expect((await ui.find({ key: 'probe' }))?.props.label).toBe('▸ Agent code navigation (experimental, may go away): On')
   const texts = (await ui.findAll({ type: 'Text' })).map(t => t.text)
   expect(texts.at(-1)).toBe('http://localhost:1337/#token=abc')                                   // the link, at once

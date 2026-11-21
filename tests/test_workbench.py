@@ -10014,7 +10014,7 @@ class ProbeExperiment(Base):
         handbook = (context.rules_dir(task) / "HANDBOOK.md").read_text()
         self.assertTrue(handbook.startswith(context.HANDBOOK.read_text()))
         self.assertTrue(handbook.endswith(context.EXPERIMENT_NOTES["probe"]))
-        self.assertIn("probe: on, found (probe-code 0.6.0)", cli.experiment_lines())
+        self.assertIn("probe: on and working (probe-code 0.6.0)", cli.experiment_lines())
 
     def test_it_is_off_until_turned_on_even_with_probe_installed(self):
         fake_probe(Path(self.tmp.name))
@@ -10027,11 +10027,38 @@ class ProbeExperiment(Base):
         self.assertEqual(self.probe_rules(task), [])
         self.assertEqual((context.rules_dir(task) / "HANDBOOK.md").read_text(), context.HANDBOOK.read_text())
 
+    def probe_that(self, script: str) -> Path:
+        """A `probe` first on PATH running `script`, and the file each of its runs is noted in."""
+        bin_ = Path(self.tmp.name) / "odd-probe"
+        bin_.mkdir()
+        ran = bin_ / "ran"
+        (bin_ / "probe").write_text(f'#!/bin/sh\necho "$@" >> {ran}\n{script}\n')
+        (bin_ / "probe").chmod(0o755)
+        os.environ["PATH"] = f"{bin_}{os.pathsep}{os.environ['PATH']}"
+        return ran
+
+    def test_with_it_off_wb_start_never_runs_a_probe_on_path(self):
+        # #518 (Codex's audit of 1.8 → 1.90): the check ran before the setting was read
+        ran = self.probe_that("sleep 0")
+        self.start("t-off", "ok")
+        wait_phase("t-off", {"review"})
+        self.assertEqual(store.Task("t-off").spec["experiments"], {"probe": False})
+        self.assertFalse(ran.exists())
+
+    def test_a_probe_printing_bytes_that_arent_utf8_doesnt_fail_the_start(self):
+        # #518: UnicodeDecodeError after delegate/<task> and its worktree were made
+        self.probe_that(r"printf 'Commands:\n  symbols \377\n'")
+        context.set_experiment("probe", True)
+        self.start("t-bytes", "ok")
+        wait_phase("t-bytes", {"review"})
+        self.assertEqual(store.Task("t-bytes").spec["experiments"], {"probe": True})
+
     def test_without_probe_installed_the_task_runs_as_main_does(self):
         context.set_experiment("probe", True)
         with mock.patch.object(context, "probe_bin", return_value=None):
             self.start("t-noprobe", "ok")
-            self.assertIn("no probe with `symbols`", cli.experiment_lines()[0])
+            self.assertIn("not set up: no probe with `symbols`", cli.experiment_lines()[0])
+            self.assertIn("github.com/probelabs/probe;", cli.experiment_lines()[0])
         wait_phase("t-noprobe", {"review"})
         task = store.Task("t-noprobe")
         self.assertEqual(task.spec["experiments"], {"probe": False})

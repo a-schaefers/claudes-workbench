@@ -374,15 +374,70 @@ const CHAT_STOPS: [string, string, string][] = [
 // on|off`, experiments.json), off by default. A task keeps what it started with.
 const PROBE_STOPS: [string, string, string][] = [
   ['off', 'Off (default)', 'The agent reads whole files, as without the experiment.'],
-  ['on', 'On', "The agent may read a file's outline and one function, with probe (its release binary, which you install)."],
+  ['on', 'On', "The agent reads a file's outline and one function with probe (github.com/probelabs/probe)."],
 ]
 
-// Turns the probe experiment on or off through wb. On without a probe that has `symbols`, wb says
-// it changes nothing yet and where the release binary is: the pane says so too, since the row
-// alone read "On" while nothing changed (the user, 2026-11-20)
+// What wb says of it: off, on and working (with probe's version), or on but not set up (no probe
+// with `symbols` on PATH). The row says which, since it read "On" whether or not anything changed
+// (the user, 2026-11-20). Asked of wb (`wb experiment probe`) only while the Settings tab draws
+// with it on, at most every PROBE_RECHECK_MS, and again after each pick: a probe installed
+// meanwhile shows without a restart.
+const PROBE_RECHECK_MS = 30_000
+type ProbeState = { state: 'off' | 'ready' | 'missing' | 'unknown'; version: string }
+function probeSaid(out: string): ProbeState {
+  const line = out.split('\n').find(l => l.startsWith('probe:')) ?? ''
+  if (line.startsWith('probe: off')) return { state: 'off', version: '' }
+  if (line.includes('not set up')) return { state: 'missing', version: '' }
+  if (line.startsWith('probe: on')) return { state: 'ready', version: /and working \(([^)]*)\)/.exec(line)?.[1] ?? '' }
+  return { state: 'unknown', version: '' }
+}
+
+async function probeStatus($: any): Promise<ProbeState> {
+  if ((await probeMode($)) === 'off') return { state: 'off', version: '' }
+  const now = await $.clock.now()
+  if (mem.probe && now - mem.probe.at < PROBE_RECHECK_MS) return mem.probe.said
+  const { ok, out } = await runWb($, ['experiment', 'probe'], 15_000)
+  const said = ok ? probeSaid(out) : { state: 'unknown' as const, version: '' }
+  mem.probe = { at: now, said }
+  return said
+}
+
+function probeStops(s: ProbeState): [string, string, string][] {
+  if (s.state === 'ready')
+    return [PROBE_STOPS[0], ['on', 'On, working', `The agent reads a file's outline and one function with probe${s.version ? ` (${s.version})` : ''}.`]]
+  if (s.state === 'missing')
+    return [PROBE_STOPS[0], ['on', 'On, not set up', "probe isn't installed, so nothing changes yet: Claude can set it up."]]
+  return PROBE_STOPS
+}
+
+// Claude's turn when the user turns it on and probe isn't there: offer to set it up (the user,
+// 2026-11-20: "let Claude offer to help the user get it fully set up"), with wb's own line
+const PROBE_SETUP_NOTE = (said: string) =>
+  "[workbench] The user just turned on Agent code navigation (the probe experiment) in the " +
+  `pane's Settings, but it can't work yet. wb says: ${said}\n` +
+  'Offer to set it up, and install nothing without their yes. probe (github.com/probelabs/probe) ' +
+  'is a code-search command-line tool; the agents need its release binary, whose `probe --help` ' +
+  "lists `symbols` (crates.io's probe-code 0.6.0 doesn't, though it reports the same version). " +
+  'Pick the asset for this OS and CPU from github.com/probelabs/probe/releases, put `probe` in a ' +
+  'directory on the PATH you and wb run with (such as ~/.local/bin), then run `wb experiment ' +
+  'probe` until it says "on and working". Tasks started from then use it; running ones keep ' +
+  'what they started with. If they would rather not, `wb experiment probe off`.'
+
+// Turns the probe experiment on or off through wb, then says how it came out: on and working, or
+// on but not set up, which also asks Claude to offer the setup (once while it's queued)
 async function setProbe($: any, value: string) {
   const { ok, out } = await runWb($, ['experiment', 'probe', value])
-  if (!ok || out.includes('but no probe')) $.ui.toast(`workbench: ${brief(out)}`)
+  mem.probe = null // the row asks wb again
+  if (!ok) { $.ui.toast(`workbench: ${brief(out)}`); return }
+  if (value !== 'on') return
+  const s = probeSaid(out)
+  if (s.state === 'missing') {
+    $.ui.toast("workbench: Agent code navigation is on but not set up: probe isn't installed. Claude will offer to set it up.")
+    const line = out.split('\n').find(l => l.startsWith('probe:')) ?? out
+    if (!mem.queued.some(q => q.startsWith(PROBE_SETUP_NOTE('').slice(0, 60)))) mem.queued.push(PROBE_SETUP_NOTE(line))
+  } else if (s.state === 'ready') {
+    $.ui.toast(`workbench: Agent code navigation is on and working${s.version ? ` (${s.version})` : ''}: tasks started from now use it.`)
+  }
 }
 
 async function probeMode($: any): Promise<string> {
@@ -828,6 +883,7 @@ const mem = {
   started: false, // the ears and timers run
   busy: false, // Claude's main loop is mid-turn: a wake would queue and arrive stale
   queued: [] as string[], // turns for Claude that a command asked for
+  probe: null as null | { at: number; said: ProbeState }, // wb's last word on the probe experiment (probeStatus)
   queuedRetryAt: 0, // a queued turn the engine dropped is tried again from then
   open: new Set<string>(), // this session's delegated tasks open at the last poll
   delegated: false, // workbench mode was on in this load (a hand-back's compaction still keeps the state)
@@ -2040,6 +2096,7 @@ export const register: Register = (on, options) => {
     // each at rest; the electricity price is typed (an Input: wb checks it)
     if (view.tab === 'settings') {
       const st = await statsSettings($)
+      const probe = await probeStatus($)
       const picked = (args: string[]) => runWb($, args).then(() => { void refreshStats($, true); void syncTop($) })
       return (
         <Box flexDirection="column">
@@ -2048,7 +2105,7 @@ export const register: Register = (on, options) => {
             {settingRow(kit, $, 'coding', 'Claude coding', CODING_STOPS, await codingMode($), view,
               v => runWb($, ['coding', v]))}
             {settingRow(kit, $, 'chat', 'Web chat', CHAT_STOPS, web ? 'on' : 'off', view, v => setWeb($, v))}
-            {settingRow(kit, $, 'probe', 'Agent code navigation (experimental, may go away)', PROBE_STOPS, await probeMode($), view,
+            {settingRow(kit, $, 'probe', 'Agent code navigation (experimental, may go away)', probeStops(probe), probe.state === 'off' ? 'off' : 'on', view,
               v => setProbe($, v))}
             {settingRow(kit, $, 'record', 'Stats recording', RECORD_STOPS, st.recording ? 'on' : 'off', view,
               v => picked(['stats', 'set', 'recording', v]))}

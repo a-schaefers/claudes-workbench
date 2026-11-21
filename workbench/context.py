@@ -240,18 +240,28 @@ def probe_bin() -> str | None:
     found = shutil.which("probe", path=agent_path(os.environ.get("PATH") or os.defpath))
     if not found:
         return None
-    try:
-        out = subprocess.run([found, "--help"], capture_output=True, text=True, timeout=10).stdout
+    try:  # any bytes: a `probe` that isn't probelabs' may print anything (#518)
+        out = subprocess.run([found, "--help"], capture_output=True, text=True, errors="replace",
+                             timeout=10).stdout
     except (OSError, subprocess.TimeoutExpired):
         return None
     return found if re.search(r"^\s+symbols\s", out, re.M) else None
 
 
+# What probe is and where its release binary is: wb experiment, wb doctor and the pane's note to
+# Claude name both (the user, 2026-11-20: "indicate somehow ... what the hell probe is")
+PROBE_HOME = "github.com/probelabs/probe"
+PROBE_RELEASES = "github.com/probelabs/probe/releases"
+
+
 def task_experiments() -> dict[str, bool]:
     """What `wb start` records: each experiment on only when set on and able to work (probe
-    installed), so a task's record says what its agent really had."""
-    found = {"probe": probe_bin() is not None}
-    return {name: on and found.get(name, True) for name, on in experiments().items()}
+    installed), so a task's record says what its agent really had. An experiment that is off
+    isn't checked at all: a `probe` on PATH ran on every start with it off, and one printing a
+    non-UTF-8 byte failed the start after its branch and worktree were made (#518)."""
+    able = {"probe": probe_bin}
+    return {name: on and (able[name]() is not None if name in able else True)
+            for name, on in experiments().items()}
 
 
 def experiment(task: store.Task, name: str) -> bool:

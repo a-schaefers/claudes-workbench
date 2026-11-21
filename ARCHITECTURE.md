@@ -1667,9 +1667,15 @@ nothing until a surface attaches.
   is: `A localhost web server to interact with Claude.`): `Off (default)` and `On`; a pick runs `wb chat on|off` and reads the switch and the link back at once.
   **Agent code navigation (experimental, may go away)** (`PROBE_STOPS`, key `probe`, options `probe:off|on`,
   *Experiments*): `Off (default)` and `On`; a pick runs `wb experiment probe off|on` (`setProbe`), and each
-  draw reads `experiments.json` again (`probeMode`; no file or no `probe` key: off). When wb's
-  answer says `but no probe` (on, with no probe that has `symbols`), or wb fails, its last line is
-  a toast: the row alone read `On` while nothing changed (the user, 2026-11-20).
+  draw reads `experiments.json` again (`probeMode`; no file or no `probe` key: off). The row says
+  whether it works, since it read `On` while nothing changed (the user, 2026-11-20): while it's on,
+  the Settings tab asks `wb experiment probe` (`probeStatus`, at most every `PROBE_RECHECK_MS`, 30 s,
+  and again after each pick, so a probe installed meanwhile shows) and the option reads `On, working`
+  (its sentence naming probe's version) or `On, not set up` (`probeStops`; wb's answer unreadable:
+  plain `On`). Turned on, a toast says how it came out: on and working, or on but not set up, which
+  also queues `PROBE_SETUP_NOTE` for Claude (once while it waits): wb's line, then offer to set
+  probe up with the user's yes, from its release page, and check with `wb experiment probe`. A
+  failed `wb` call is a toast of its last line.
   Then the Stats tab's (#406), each a `wb` command, the mod writing no setting itself:
   **Stats recording** (`RECORD_STOPS`, `On (default)` / `Off`: `wb stats set recording`,
   *Stats recording*), **Live view** (`LIVE_STOPS`: `wb stats set live`), **Live refresh**
@@ -3320,10 +3326,15 @@ exactly those without the experiment.
 a file's outline (`probe symbols <file>`) and one function (`probe extract <file>#<name>`)
 instead of the whole file, where its context fills (about half the measured steps compacted or
 handed over, 2026-11-20). It needs probe on the agent's PATH (`context.probe_bin`, through
-`agent_path`), installed by the user (nothing in workbench installs it, and the skill doesn't
-ask Claude to; `wb experiment`, `wb doctor` and the pane's toast say when it's missing), one whose `--help` lists `symbols`: crates.io's probe-code 0.6.0 hasn't it and
+`agent_path`), installed by the user (nothing in workbench installs it; `wb experiment`, `wb doctor` and the
+pane's row say when it's missing, naming what probe is, `context.PROBE_HOME`, and its release page,
+`context.PROBE_RELEASES`; turned on in the pane without it, Claude is asked to offer the setup:
+`PROBE_SETUP_NOTE`), one whose `--help` lists `symbols`: crates.io's probe-code 0.6.0 hasn't it and
 reports the same version as the release that has, and `probe symbols main.c` then searched for
-the word (the agent got no results and wrote a function named `symbols`, 2026-11-20). On, the task's shell rules allow `probe` (`shell_rules`, after `ALLOWED_COMMANDS`),
+the word (the agent got no results and wrote a function named `symbols`, 2026-11-20). Off, it isn't
+checked at all: `wb start` ran `probe --help` with it off, and a `probe` printing a non-UTF-8 byte
+failed the start after its branch and worktree were made (#518); its output is read with
+`errors="replace"`. On, the task's shell rules allow `probe` (`shell_rules`, after `ALLOWED_COMMANDS`),
 and its copy of the handbook ends with `EXPERIMENT_NOTES["probe"]` (`instruction_files`;
 `agent/HANDBOOK.md` itself is unchanged). It is read-only: no index, no daemon, no network.
 
@@ -4137,7 +4148,7 @@ delivered as taken (`_stale_notes`, *Notes*).
 | `wb progress [on\|off]` | `--after MIN` (with `on`; default: the task's typical length on its model) | The user's opt-in to progress checks; with no argument, what it is (*Progress checks*). |
 | `wb steer <task> --text "…" \| --message <file>` | `--now`, `--step` (a smaller step: the note opens with `STEP_NOTE`; after a progress check, recorded as a `smaller` intervention, else a `hint`) | Only while queued/running/testing/asking with a live runner. Appends to steer.jsonl: delivered when the current run ends (before the tests), or at once with `--now`. While testing: "its tests are running (up to Ns); the agent gets it when they end"; while queued: when its round starts. |
 | `wb note <task> --text "…"` | | A `captain` event: Claude's log line in the transcript. |
-| `wb experiment [<name> [on\|off]]` | | The experiments (*Experiments*): with no argument, each one's purpose and state (`cli.experiment_lines`: `probe: on, found (probe-code 0.6.0)`, `probe: on, but no probe with `+"`symbols`"+` is on PATH, so it changes nothing yet (its release binary: …)`, `probe: off (wb experiment probe on)`); with a name, its state; with `on`/`off`, sets it in `experiments.json` for the tasks started from then (`; tasks already started keep theirs`). An unknown name is refused. |
+| `wb experiment [<name> [on\|off]]` | | The experiments (*Experiments*): with no argument, each one's purpose and state (`cli.experiment_lines`: `probe: on and working (probe-code 0.6.0)`, `probe: on, but not set up: no probe with `+"`symbols`"+` is on PATH, so it changes nothing yet (probe, a code-search tool: github.com/probelabs/probe; its release binary from …)`, `probe: off (wb experiment probe on)`); with a name, its state; with `on`/`off`, sets it in `experiments.json` for the tasks started from then (`; tasks already started keep theirs`). An unknown name is refused. |
 | `wb coding [only\|ask\|decide]` | `allow <task> --edit "…" --said "…" [--when "…"]`, `used <task> --did "…"` | When Claude may write a delegated task's code (*Claude coding*): with no argument, the choice and its sentence, then each open task's unspent allowance; a mode saves it. `allow` records the user's yes for one task's edit, until the task goes back to the agent; with `--when`, a one-task exception granted ahead, spent only once Claude has started on it. `used` records what Claude changed under it and says to hand the testing back; exit 1 with none. |
 | `wb shot <task>` | `--capture CMD` (required), `--viewport WxH` (1280x800), `--files PATH…`, `--timeout N` (300), `--chat` (post the pair to the web chat), `--setup` (run the setup in each checkout) | At review, for a visual task: the project's capture command run on the base and on the candidate, each in a scratch checkout under the task's lane; where each PNG is, or why a side has none (*Screenshots of the base and the candidate*). |
 | `wb takeover [<task> \| --all]` | `--repo DIR`, `--session ID`, `--user` | Stops the runner, phase `review`, "Claude took over"; Claude edits in the worktree and accepts, or hands back with feedback. Outside "Let Claude decide" it needs the user's recorded yes for the task, else exit 3; `--user` (the mod's hand-back command) is the user's own ask, and records one (*Claude coding*). `--all`: every task that isn't closed. `--session ID` (repeatable) and `--repo DIR`, with `--all` (the mod passes every session id its process has had and its directory): only that session's tasks (`_scope`): one with a task.json `session` when it is one of the IDs, wherever it ran, or when its `claude_pid` is gone and DIR claims it as below; else (no `session`, or no `--session` given) when its `repo` is DIR, inside it or holds it, or its `cwd` is DIR or inside it, by whole components of real paths (in lower case where the file system ignores case), never when DIR is the home directory or `/`; one with no key at all: every session's. The rest are listed as `left alone (other sessions'): …`. |
@@ -4748,7 +4759,8 @@ nested `.md` files (`docs/`, `skill/`, `mod/`, `agent/`) are unaffected. A new r
 
 - **An experiment** (`context.EXPERIMENTS`) → its effects (`shell_rules`, `EXPERIMENT_NOTES`),
   `task_experiments` (when it can work), `cli.experiment_lines`, the pane's Settings row
-  (`PROBE_STOPS`, `probeMode`), and *Experiments*.
+  (`PROBE_STOPS`, `probeMode`, `probeStatus` and `probeSaid`, which read `experiment_lines`' wording,
+  `PROBE_SETUP_NOTE`), and *Experiments*.
 - **What a handoff costs Claude, measured** → THESIS.md (the case for users, with the same
   numbers) and the README's sentence on it, which links there.
 - **Anything a reader looks up** (a command, flag, default, guard, key, file, prompt text,
