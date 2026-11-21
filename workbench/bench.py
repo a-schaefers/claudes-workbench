@@ -134,7 +134,7 @@ def bundle(repo: Path, commit: str, dest: Path) -> None:
     history couldn't be bundled (#478), has the tree."""
     with tempfile.TemporaryDirectory(prefix="wb-bench-") as tmp:
         clone = Path(tmp) / "c"
-        gitops.git(tmp, "clone", "-q", "--no-checkout", "--shared", str(repo), str(clone))
+        gitops.scratch_clone(repo, clone)  # a shallow repo's too (#884)
         when = gitops.git(clone, "log", "-1", "--format=%aI", commit).strip()
         who = {"GIT_AUTHOR_NAME": "workbench bench", "GIT_AUTHOR_EMAIL": "bench@workbench.invalid",
                "GIT_AUTHOR_DATE": when, "GIT_COMMITTER_DATE": when}
@@ -399,7 +399,7 @@ def add(name: str, step: int | None = None, hidden: list[str] | None = None,
         home().mkdir(parents=True, exist_ok=True)  # not in /tmp, where the git shim allows writes
         with tempfile.TemporaryDirectory(prefix=store.scratch(".check-"), dir=home()) as scratch:
             work = _checkout_at(Path(scratch), case)
-            gitops.git(scratch, "clone", "-q", "--shared", "--no-checkout", str(repo), str(work))
+            gitops.scratch_clone(repo, work)  # a shallow repo's too (#884)
             # the repo's core.autocrlf and info/attributes: a clone has none of its local config,
             # so the reference check read LF where the task read CRLF and refused the case, and
             # each replay was graded on other bytes than the task saw (#736, the 2026-11-21 audit)

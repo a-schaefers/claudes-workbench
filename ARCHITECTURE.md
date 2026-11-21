@@ -1251,7 +1251,8 @@ checkout and passes. Failing there, the run's exit is `"setup failed"`.
 
 **The base check** (`_base_check`, `base_check`, before round 1 and the GPU): the acceptance
 command once on the untouched base, the same way but in a scratch checkout of the base
-(`verify.on_base`: a `--shared` clone under the state directory, in the task's lane), at most
+(`verify.on_base`: a `--shared` clone under the state directory, `gitops.scratch_clone`, in the
+task's lane), at most
 `min(BASE_CHECK_SECS (120 s), --test-timeout)`. It ran in the task's worktree, and what it wrote
 there (a build stamp, a fixture, an updated snapshot) stayed for the agent, could make a later
 test pass, and showed in the review diff (#192, the 2026-11-19 audit). The output goes to
@@ -5223,8 +5224,12 @@ same), `probe config set|reset` (probe's config) and `probe benchmark`.
 `wb verify <task> [--test CMD] [--files PATH…] [--expect TEXT] [--timeout N]` (`workbench/verify.py`, #96) runs
 one regression test twice, at review, each run in its own scratch checkout under the state
 directory and in the task's own lane and environment (`runner.run_in_lane` on a `verify._At`):
-- **The base**: a `--shared` clone (its Git LFS files smudged from the repo's own objects:
-  `gitops.share_lfs`, #382) at the task's original base for step one or the previous approved step commit for later steps (#252; status `step_base`, so a step with no changes keeps the commit before it, #652), with the candidate's test files
+- **The base**: a `--shared` clone (`gitops.scratch_clone`, every scratch checkout's and
+  `bundle_steps`'s: in a shallow repo, where git ignores `--shared`, made by hand, `init` with the
+  repo's objects as alternates, its `shallow` file, branches, tags and HEAD, since the clone
+  copied only what refs reach and the review snapshot's tree, or a squashed task's earlier step,
+  wasn't there: wb verify and shot died "failed to unpack tree object", bench add on step 2,
+  #884; its Git LFS files smudged from the repo's own objects: `gitops.share_lfs`, #382) at the task's original base for step one or the previous approved step commit for later steps (#252; status `step_base`, so a step with no changes keeps the commit before it, #652), with the candidate's test files
   copied in (`--files`, else the files changed since that commit whose path looks like a test or
   a test's data, `TEST_PATH` through `looks_like_test`: under `tests/`, `test/`, `spec/`,
   `__tests__/`, `testdata/`, `fixture/`, `fixtures/`, `__fixtures__/`, `__snapshots__/` or

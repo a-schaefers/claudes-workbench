@@ -1212,6 +1212,40 @@ def drop_accepted(repo: Path, task: str, tip: str) -> bool:
                     check=False).returncode
 
 
+def scratch_clone(repo: Path, dest: Path, bare: bool = False, tags: bool = True) -> None:
+    """A `--shared --no-checkout` (or ``bare``) clone of ``repo`` at ``dest``, every scratch
+    checkout's (the base check, wb verify and shot, bench's), borrowing the repo's objects
+    through alternates. A shallow repo's clone ignores --shared, writes no alternates and
+    pack-copies what its refs reach: the review snapshot's tree and a squashed task's earlier
+    steps, which no ref reaches, weren't there (wb verify and shot died "failed to unpack tree
+    object", bench add on step 2), and a big shallow checkout was copied whole for each base
+    check (#884, the third 2026-11-21 audit). So there it is made by hand: init, alternates, the
+    repo's `shallow` file, its branches (and tags) and HEAD."""
+    dest = Path(dest)
+    if git(repo, "rev-parse", "--is-shallow-repository", check=False).strip() != "true":
+        git(dest.parent, "clone", "-q", "--shared", "--bare" if bare else "--no-checkout",
+            *([] if tags else ["--no-tags"]), str(repo), str(dest))
+        return
+    common = Path(repo) / git(repo, "rev-parse", "--git-common-dir").strip()
+    git(dest.parent, "init", "-q", *(["--bare"] if bare else []), str(dest))
+    gd = dest if bare else dest / ".git"
+    info = gd / "objects" / "info"
+    info.mkdir(parents=True, exist_ok=True)
+    (info / "alternates").write_text(f"{(common / 'objects').resolve()}\n")
+    shutil.copyfile(common / "shallow", gd / "shallow")
+    at = (f"--git-dir={gd}",)  # named: safe.bareRepository=explicit (#887)
+    refs = git(repo, "for-each-ref", "--format=%(objectname) %(refname)", "refs/heads",
+               *(["refs/tags"] if tags else []))
+    if lines := [f"create {r} {sha}\n" for sha, _, r in
+                 (row.partition(" ") for row in refs.splitlines()) if r]:
+        _run(dest.parent, (*at, "update-ref", "--stdin"), input="".join(lines).encode())
+    if head := git(repo, "symbolic-ref", "-q", "HEAD", check=False).strip():
+        git(dest.parent, *at, "symbolic-ref", "HEAD", head)
+    else:
+        git(dest.parent, *at, "update-ref", "--no-deref", "HEAD",
+            git(repo, "rev-parse", "HEAD").strip())
+
+
 STEPS_BUNDLE = "steps.bundle"  # tasks/<task>/: an accepted task's steps, which wb bench add reads
 
 
@@ -1228,7 +1262,7 @@ def bundle_steps(repo: Path, base: str, tip: str, dest: Path) -> bool:
     with tempfile.TemporaryDirectory(prefix="wb-steps-") as tmp:
         clone, part = Path(tmp) / "c", dest.with_name(f".{dest.name}.{os.getpid()}.tmp")
         try:
-            git(tmp, "clone", "-q", "--bare", "--shared", "--no-tags", str(repo), str(clone))
+            scratch_clone(repo, clone, bare=True, tags=False)  # a shallow repo's too (#884)
             # named, not found from the cwd: safe.bareRepository=explicit refuses a bare repo git
             # discovers, the bundle was never made, and every accept kept the ref #799 removed
             # (#887, the third 2026-11-21 audit)

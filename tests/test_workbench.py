@@ -15782,6 +15782,36 @@ class Projects(Base):
         self.assertIn("note: submodules (vendor/lib) are empty", self.start("t-sub2", "ok"))
         wait_phase("t-sub2", {"review"})
 
+    def test_wb_verify_runs_on_a_task_in_a_shallow_clone(self):
+        # #884 (the third 2026-11-21 audit): a shallow repo's `clone --shared` wrote no
+        # alternates, so the review snapshot's tree, which no ref reaches, wasn't in the scratch
+        # clone and wb verify died "failed to unpack tree object"
+        shallow = Path(self.tmp.name) / "shallow"
+        gitops.git(self.tmp.name, "clone", "-q", "--depth", "1", self.repo.as_uri(), str(shallow))
+        self.repo = shallow
+        self.start("t-shallow", "ok", "--test", TEST_CMD, "--no-self-review")
+        st = wait_phase("t-shallow", {"review"})
+        self.assertIs(st["base_check"]["ok"], False)                     # no answer on the base
+        wt = store.Task("t-shallow").worktree
+        (wt / "test_answer.sh").write_text(TEST_CMD + "\n")
+        out = run_wb("verify", "t-shallow", "--test", "sh test_answer.sh", "--files",
+                     "test_answer.sh")
+        self.assertIn("base: exit 2\n  candidate: exit 0", out)     # both ran, the tree found
+        # an object no ref reaches is there, the shallow boundary too, and nothing was copied
+        blob = subprocess.run(["git", "-C", str(shallow), "hash-object", "-w", "--stdin"],
+                              input="unreferenced\n", capture_output=True, text=True,
+                              check=True).stdout.strip()
+        for bare in (False, True):
+            dest = Path(self.tmp.name) / f"scratch-{bare}"
+            gitops.scratch_clone(shallow, dest, bare=bare)
+            at = f"--git-dir={dest if bare else dest / '.git'}"
+            self.assertEqual(gitops.git(self.tmp.name, at, "cat-file", "-t", blob).strip(), "blob")
+            self.assertEqual(gitops.git(self.tmp.name, at, "rev-parse", "HEAD").strip(),
+                             gitops.git(shallow, "rev-parse", "HEAD").strip())
+            self.assertEqual(gitops.git(self.tmp.name, at, "rev-parse",
+                                        "--is-shallow-repository").strip(), "true")
+            self.assertEqual(gitops.git(self.tmp.name, at, "count-objects").split()[0], "0")
+
     def test_a_sparse_worktree_is_made_with_the_users_submodule_recurse_on(self):
         # #888 (the third 2026-11-21 audit, reproduced): with submodule.recurse=true, the sparse
         # worktree's `read-tree -mu HEAD` reset a submodule it had no git dir for and exited 128,
