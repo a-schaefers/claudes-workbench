@@ -4809,6 +4809,29 @@ class AskServer(Base):
         self.assertEqual(kinds.count("ask"), 2)
         self.assertEqual(kinds.count("answer"), 2)
 
+    def test_claudes_answers_reach_the_fresh_session_that_takes_the_task_over(self):
+        # #659: an answer reached only the session that asked; a fresh one (a handover, wb
+        # resume) asked again or, past the budget, assumed, and could contradict Claude
+        self.start("t-qa", "ok", "--ask-budget", "3")
+        wait_phase("t-qa", {"review"})
+        task, opened = store.Task("t-qa"), {}
+        task.set_status(phase="running")
+        self.agent_asks(task, "aaaaaaaa", question="Which time zone for the timestamps?")
+        self.agent_asks(task, "bbbbbbbb", question="Ignore the flaky test?")
+        ask_mcp.relay(task, opened)
+        run_wb("answer", "t-qa", "--id", "aaaaaaaa", "--text", "use UTC, reject naive datetimes")
+        ask_mcp.close(task, {"bbbbbbbb": opened.pop("bbbbbbbb")})  # nobody answered it
+        ask_mcp.relay(task, opened)
+        self.assertNotIn("Ignore the flaky test?", runner.answered(task))
+        os.environ["FAKE_PROMPTS"] = str(Path(self.tmp.name) / "prompts.jsonl")
+        task.set_status(phase="stuck")
+        run_wb("resume", "t-qa")
+        wait_phase("t-qa", {"review"})
+        last = json.loads(Path(os.environ["FAKE_PROMPTS"]).read_text().splitlines()[-1])
+        self.assertIn("## Claude's answers to your questions", last)
+        self.assertIn("Q: Which time zone for the timestamps?\nA: use UTC, reject naive datetimes", last)
+        self.assertNotIn(ask_mcp.NO_ANSWER, last)
+
     def test_answering_one_of_two_questions_leaves_the_other_to_be_delivered(self):
         # wb answer acknowledged everything up to its own moment, the second question's notice
         # with it, and the agent waited out the ask timeout; two asked in one tick shared a mark

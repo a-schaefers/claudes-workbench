@@ -936,7 +936,13 @@ base..HEAD`, and the uncommitted diff, `git diff HEAD` with new files; a diff ov
 over `HANDOFF_DIFF_MAX` (60K characters), is replaced by its `--stat` and "read the changed files";
 the diff is read only that far, `gitops.diff(…, limit=)`: read whole and then cut, a 300 MB
 generated file not ignored was hundreds of MB in the runner at each handover, #474, the audit of
-1.8), and `## Now`: "Start on the task above"
+1.8), then, when Claude answered any of the step's questions, `## Claude's answers to your
+questions` ("An earlier session asked, and Claude answered; follow these, and don't ask them
+again:", then `Q: …`/`A: …` pairs: `runner.answered`, from the runner's own `ask` and `answer`
+events since `step_round`, plain questions only, never `NO_ANSWER`, the latest kept first within
+`ANSWERS_MAX`, 4000 characters; an answer once reached only the session that asked, so a
+successor after a handover or `wb resume` asked again, or past the budget assumed: #659), and
+`## Now`: "Start on the task above"
 on a step's first round; a `CARRY_ON` or `RESUME` round's own text (it carries the asks); else
 the round's instructions, after what the step's earlier rounds asked since the last review
 feedback (`round_asks`, under `ASKED`'s "What you were asked to do…", then "Now:"). An auto-fix

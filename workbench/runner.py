@@ -2124,6 +2124,36 @@ def fresh_reason(task: store.Task, st: dict | None = None) -> str | None:
     return None
 
 
+ANSWERS_MAX = 4000  # characters of Claude's answers a fresh session carries; the latest first kept
+
+
+def answered(task: store.Task) -> str:
+    """Claude's answers to the agent's questions in this step, as `Q: …` / `A: …` pairs, or "".
+    An answer reached only the session that asked, as a tool result: a fresh one asked again,
+    waking Claude twice, or, past the task's budget, was told to assume and could contradict it
+    (#659). From the runner's own `ask`/`answer` events (the ask files are in the agent's lane),
+    plain questions only (status `asks` "q"), never the answers nobody gave (NO_ANSWER)."""
+    first = task.status.get("step_round") or 1
+    kinds = task.status.get("asks") or {}
+    asked, pairs = {}, []
+    for e in store.read_jsonl(task.dir / "events.jsonl")[0]:
+        if (e.get("round") or 0) < first or kinds.get(e.get("id")) != "q":
+            continue
+        text = str(e.get("text") or "").strip()
+        if e.get("kind") == "ask":
+            asked[e["id"]] = text
+        elif e.get("kind") == "answer" and e["id"] in asked and text and \
+                text not in (ask_mcp.NO_ANSWER, ask_mcp.BUDGET_USED):
+            pairs.append(f"Q: {asked[e['id']][:800]}\nA: {text[:1600]}")
+    kept, size = [], 0
+    for pair in reversed(pairs):  # the latest answers matter most: kept first
+        if size + len(pair) > ANSWERS_MAX:
+            break
+        kept.insert(0, pair)
+        size += len(pair) + 2
+    return "\n\n".join(kept)
+
+
 def handoff_prompt(task: store.Task, why: str, instructions: str) -> str:
     wt, spec = task.worktree, task.spec
     steps = gitops.git(wt, "log", "--oneline", f"{spec['base']}..HEAD").strip()
@@ -2141,6 +2171,9 @@ def handoff_prompt(task: store.Task, why: str, instructions: str) -> str:
             + (f"Earlier steps, committed:\n```\n{steps}\n```\n\n" if steps else "")
             + (f"Uncommitted changes (`git diff HEAD`):\n{work}" if diff != "" else
                "No uncommitted changes yet.")
+            + (f"\n\n## Claude's answers to your questions\n\nAn earlier session asked, and "
+               f"Claude answered; follow these, and don't ask them again:\n\n{qa}"
+               if (qa := answered(task)) else "")
             + f"\n\n## Now\n\n{instructions}")
 
 
