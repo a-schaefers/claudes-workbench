@@ -95,7 +95,7 @@ installed module:
 | Process | Started by | How it finds `workbench` |
 |---|---|---|
 | `wb` | the user, Claude, the mod | `bin/wb` puts its real path's repo root on `sys.path` (so the `~/.local/bin/wb` symlink works) |
-| the runner | `cli.spawn_runner` | `python -X utf8 -m workbench.runner <task>`, cwd and `PYTHONPATH` = the repo root, own session (and its own systemd scope where logind kills sessions at logout: `cli.runner_scope`, #351), output to `runner.log` |
+| the runner | `cli.spawn_runner` | `python -X utf8 -m workbench.runner <task>`, cwd and `PYTHONPATH` = the repo root (the caller's own kept in `WB_USER_PYTHONPATH` for the agent: `context.detached_env`, as for the bench driver and `wb optimize`), own session (and its own systemd scope where logind kills sessions at logout: `cli.runner_scope`, #351), output to `runner.log` |
 | the ask server | OpenCode, from the config layer's `mcp.servers.workbench` | `[sys.executable, <root>/bin/wb-ask-mcp]`, like `bin/wb` |
 | the git shim | the agent's shell (`<rules>/bin/git`) | a `/bin/sh` wrapper that execs `<python> -I -c` (quoted: a shebang splits at a space) with an explicit `sys.path.insert` |
 | the lane | the runner, before OpenCode | `python -I lane.py …`, a standard-library-only script |
@@ -539,7 +539,7 @@ No model name, repo, task name or price appears in it.
 ## The runner, inside
 
 `workbench/runner.py`, started as `python -X utf8 -m workbench.runner <task>` by `cli.spawn_runner` (cwd
-and `PYTHONPATH` the repo root, `WB_HOME` set, its own session, stdout and stderr appended to the
+and `PYTHONPATH` the repo root, the caller's in `WB_USER_PYTHONPATH`, `WB_HOME` set, its own session, stdout and stderr appended to the
 task's `runner.log`). `main` installs a SIGTERM handler that ignores any further SIGTERM, stops
 the process group in flight (the agent's, or the tests') and raises `Stopped` (a `BaseException`,
 so no `except Exception` on the way swallows a stop). wb's own stops mark status `stopping` first
@@ -1312,8 +1312,8 @@ deliberately hostile process (the 2026-11-16 audit's list of what it can't stop 
 
 **Its environment** (`runner.agent_env`) is that of the `wb` command that last started its runner
 (`start`, `feedback`, `next`, `resume`) less OpenCode's switches that drop the project's skills
-(`CLAUDE_CODE_OFF`, *Skills* below), credentials and the runner's `PYTHONPATH`
-(`SECRET_ENV`: names containing `TOKEN`, `SECRET`, `PASSW`, `CREDENTIAL`, `API_KEY`, `ACCESS_KEY`,
+(`CLAUDE_CODE_OFF`, *Skills* below), the runner's own `PYTHONPATH` (the user's replaces it:
+`python_path`, below) and credentials (`SECRET_ENV`: names containing `TOKEN`, `SECRET`, `PASSW`, `CREDENTIAL`, `API_KEY`, `ACCESS_KEY`,
 `PRIVATE_KEY`, `WEBHOOK`; ending `_PASS`, `_PASSPHRASE`, `_PWD`, `_DSN`, `_JWT`, `_PAT`, `_KEY`, or
 holding `PASS_`; `PASS`, `PASSPHRASE`, `KEY`, `BW_SESSION`, `OP_SESSION_*`, `KRB5CCNAME`; the
 `ANTHROPIC_`, `CLAUDE_`, `GH_`, `GITHUB_`, `GITLAB_`, `AWS_`, `AZURE_`, `GOOGLE_`, `OPENAI_`, `HF_`
@@ -1363,6 +1363,18 @@ and installed into only when asked (*Commands*, step 6). `wb start` names each o
 (`venv_line`) and, without `--setup`, how to give the worktree its own: `--setup 'uv sync' --test
 'uv run pytest'`, or the project's own install. Not covered: a user site-packages
 (`~/.local/lib`) `.pth` pointing at the checkout, from `pip install --user -e .`.
+
+*The user's `PYTHONPATH`* (`context.python_path`, from `python_env`). ROS's `setup.bash`, a src
+layout exported from a shell profile, Blender, Spack: the runner's `PYTHONPATH` is the package
+root, so the agent, the setup and the tests got none, failing on `ModuleNotFoundError` round after
+round, and naming `PYTHONPATH` in `commands.json` `env` passed workbench's own path, which put
+`python3 -m workbench.cli` in reach (#512, the audit of 1.90). `context.detached_env`, which
+`spawn_runner`, `bench.start` and `optimize.start` use, keeps the caller's value in
+`WB_USER_PYTHONPATH` (`USER_PYTHONPATH`; one already set is kept, so a bench replay's runner gets
+the user's, not the driver's). `agent_env` gives it back by default, whatever `env` names, less
+workbench's package root and the directories of a Python environment `python_env` left out, with
+each directory inside the repo as the worktree's (as on PATH: `PYTHONPATH=~/proj/src` imports the
+worktree's `src`); none left, no `PYTHONPATH`. The carrier itself never reaches the agent.
 
 **Project config can't lift the rules.** OpenCode loads a project's `opencode.json` (the
 worktree's, `.opencode/`, and one in any directory above it) after `OPENCODE_CONFIG`, and appends

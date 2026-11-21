@@ -224,10 +224,10 @@ its models.json commands; never steer a user to one server.
 Environment: `WB_HOME`, `WB_MODELS`, `WB_SKILLS`, `WB_IMAGES`, `WB_AUDIO`, `WB_CHAT_TOKEN`, `WB_CHAT_CONFIG`,
 `WB_COMMANDS`, `WB_SAVINGS` (the paths above); `WB_OPENCODE_CONFIG` (OpenCode's config); `CLAUDE_CONFIG_DIR` (where
 `spend.py` reads Claude Code's transcripts); these may be relative
-or start with `~` (`store.absolute_env` makes them absolute against wb's cwd); `WB_COMPACT_AT` (the
+or start with `~` (`store.absolute_env`); `WB_COMPACT_AT` (the
 mod's early compaction, a percentage, 0 off); `WB_BIN` (the `wb` the mod runs); `WB_TASK`, `WB_RUN` (set
-for the ask server and the agent); `WB_SHOT_OUT`, `WB_SHOT_VIEWPORT` (`wb shot`); `CLAUDE_CODE_SESSION_ID` (Claude Code's: `wb start` records it,
-which session's task it is) and `CLAUDE_PID` (its process: once gone, the directory rule adopts the task). Tests only: `WB_OPENCODE_BIN` (a command line, split with
+for the ask server and the agent); `WB_USER_PYTHONPATH` (the user's, for the agent); `WB_SHOT_OUT`, `WB_SHOT_VIEWPORT` (`wb shot`); `CLAUDE_CODE_SESSION_ID` (Claude Code's: `wb start` records it,
+which session's task it is) and `CLAUDE_PID` (its process: once gone, the directory rule adopts the task). Tests only: `WB_OPENCODE_BIN` (split with
 `shlex`: the fake), `WB_FAKE_MODELS` (no model servers), `WB_FAKE_GPU_GB` (the fake GPU's size;
 unset: unknown, so no sharing).
 

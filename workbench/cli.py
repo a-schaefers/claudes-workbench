@@ -120,7 +120,7 @@ def _coding_used(task: store.Task) -> None:
 
 def spawn_runner(task: store.Task) -> int:
     _coding_used(task)  # work handed (back) to the agent: Claude's allowance, if any, is spent
-    env = {**os.environ, "PYTHONPATH": str(PKG_ROOT), "WB_HOME": str(store.home())}
+    env = context.detached_env()  # the user's PYTHONPATH kept for the agent (#512)
     env.pop("WB_TASK", None)  # the agent's mark (runner.sweep kills what carries it), not the runner's
     task.set_status(stopping=None)  # a stop wb made earlier says nothing about this runner
     with open(task.dir / "runner.log", "a") as log:
