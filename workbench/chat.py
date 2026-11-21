@@ -596,7 +596,8 @@ def build() -> str:
 ANSWERS = ("allow", "deny", "expired")
 KINDS = ("permission", "plan", "question")
 ASK_TEXT = 2000
-DETAIL_MAX = 40_000   # a plan or four questions with previews
+DETAIL_MAX = 40_000   # bytes of JSON as stored (UTF-8): a plan or four questions with previews
+CUT_NOTE = " (cut: the rest is in the terminal)"
 NOTE_MAX = 2000
 AWAY = ("ask", "allow")  # prefs.json `away`: ask the user here, or let Claude go ahead
 
@@ -609,14 +610,45 @@ def ask(tool: str, text: str, kind: str = "permission", detail: dict | None = No
     row = {"id": f"ask-{int(time.time() * 1000)}-{secrets.token_hex(4)}", "ts": store.now(),
            "tool": tool[:200], "text": text[:ASK_TEXT], "kind": kind}
     if detail is not None:
-        if len(json.dumps(detail)) > DETAIL_MAX:
-            raise ValueError("detail too long")
-        row["detail"] = detail
+        row["detail"] = fit_detail(detail)
     store.append_jsonl(chat_dir() / "asks.jsonl", row)
     _open_update(lambda w: w["asks"].__setitem__(row["id"], row))
     if kind == "permission" and prefs()["away"] == "allow":
         return answer(row["id"], "allow", "setting")
     return {**row, "answer": None}
+
+
+def _stored(d) -> int:
+    return len(json.dumps(d, ensure_ascii=False).encode())
+
+
+def fit_detail(detail: dict) -> dict:
+    """``detail`` within DETAIL_MAX as stored: a plan, else the questions' previews, else their
+    options' descriptions, cut (each to one length, the longest first) and marked CUT_NOTE.
+    Measured as json.dumps' ASCII escapes, a 7,700-character Japanese plan was six bytes a
+    character and refused, and the dialog sat in the terminal with the phone told nothing (#535).
+    ValueError when even the questions themselves don't fit."""
+    if _stored(detail) <= DETAIL_MAX:
+        return detail
+    d = json.loads(json.dumps(detail))
+    opts = [o for q in d.get("questions") or [] if isinstance(q, dict)
+            for o in q.get("options") or [] if isinstance(o, dict)]
+    for spots in ([(d, "plan")], [(o, "preview") for o in opts], [(o, "description") for o in opts]):
+        spots = [(h, k, h[k]) for h, k in spots if isinstance(h.get(k), str) and h[k]]
+        if not spots:
+            continue
+        def cap(n):
+            for h, k, text in spots:
+                h[k] = text if len(text) <= n else text[:n].rstrip() + CUT_NOTE
+        lo, hi = 0, max(len(t) for _, _, t in spots)
+        while lo < hi:  # the longest length every text may keep
+            mid = (lo + hi + 1) // 2
+            cap(mid)
+            lo, hi = (mid, hi) if _stored(d) <= DETAIL_MAX else (lo, mid - 1)
+        cap(lo)
+        if _stored(d) <= DETAIL_MAX:
+            return d
+    raise ValueError("detail too long")
 
 
 def asks(limit: int = 20) -> list[dict]:
@@ -715,7 +747,7 @@ def session_plan(session: str | None, plan_file: str | None = None) -> str:
     try:
         if f is None or f.resolve().parent != d or f.suffix != ".md" or not f.resolve().is_file():
             return ""
-        return f.read_text(errors="replace")[:DETAIL_MAX - 100]
+        return f.read_text(errors="replace")[:DETAIL_MAX + 1]  # ask cuts it, marked (#535)
     except OSError:
         return ""
 

@@ -1424,27 +1424,48 @@ function askText(input: unknown): string {
   return text.length > 1500 ? text.slice(0, 1500) + '…' : text
 }
 
+// What a dialog sends wb, within an argument's size: a plan's first DETAIL_CHARS (one past wb's
+// budget, so wb cuts it and says so) and each option's preview to PREVIEW_CHARS. wb measures the
+// rest and cuts it to its own budget; a long plan was refused whole, and the dialog sat in the
+// terminal with the phone told nothing (#535)
+const DETAIL_CHARS = 40_001
+const PREVIEW_CHARS = 2000
+const CUT_NOTE = ' (cut: the rest is in the terminal)'
+export function askQuestions(questions: unknown): unknown {
+  if (!Array.isArray(questions)) return questions
+  return questions.map(q => !q || typeof q !== 'object' || !Array.isArray((q as any).options) ? q : {
+    ...q, options: (q as any).options.map((o: any) => o && typeof o.preview === 'string' && o.preview.length > PREVIEW_CHARS
+      ? { ...o, preview: o.preview.slice(0, PREVIEW_CHARS) + CUT_NOTE } : o),
+  })
+}
+
 // The PermissionRequest answer from the user's answer in the chat, else undefined (the dialog)
 async function askOnChat($: any, tool: string, input: unknown, signal?: AbortSignal) {
   const kind = KIND[tool] ?? 'permission'
   const i = (input && typeof input === 'object' ? input : {}) as Record<string, unknown>
-  const args = ['chat', 'ask', '--tool', tool, '--kind', kind, '--text', kind === 'permission' ? askText(input) : '']
-  if (kind === 'question') args.push('--detail', JSON.stringify({ questions: i.questions }))
+  // `--opt=value`: a value starting with `-` was read as a flag (#535)
+  const args = ['chat', 'ask', `--tool=${tool}`, `--kind=${kind}`, `--text=${kind === 'permission' ? askText(input) : ''}`]
+  if (kind === 'question') args.push(`--detail=${JSON.stringify({ questions: askQuestions(i.questions) })}`)
   // what the call is for, as Claude described it (Bash's description): the card leads with it
   if (kind === 'permission' && typeof i.description === 'string' && i.description.trim())
-    args.push('--detail', JSON.stringify({ purpose: i.description.trim().slice(0, 300) }))
+    args.push(`--detail=${JSON.stringify({ purpose: i.description.trim().slice(0, 300) })}`)
   // a plan: its text, else its file, and whose it is; wb read the newest in the plans directory,
   // any project's, so a card could show another session's plan (#253, the audit of 1.2)
   if (kind === 'plan') {
-    if (typeof i.plan === 'string' && i.plan) args.push('--detail', JSON.stringify({ plan: i.plan }))
-    else if (typeof i.planFilePath === 'string') args.push('--detail', JSON.stringify({ plan_file: i.planFilePath }))
+    if (typeof i.plan === 'string' && i.plan) args.push(`--detail=${JSON.stringify({ plan: i.plan.slice(0, DETAIL_CHARS) })}`)
+    else if (typeof i.planFilePath === 'string') args.push(`--detail=${JSON.stringify({ plan_file: i.planFilePath })}`)
     const session = await $.session.id().catch(() => '')
     if (session) args.push('--session', session)
     if (mem.cwd) args.push('--repo', mem.cwd)
   }
   const posted = await runWb($, args, 15_000)
   const [id, state] = (posted.out.split('\n').pop() || '').split(' ')
-  if (!posted.ok || !id?.startsWith('ask-')) return undefined
+  if (!posted.ok || !id?.startsWith('ask-')) { // the away user is told where it waits, not left guessing (#535)
+    const what = kind === 'plan' ? 'a plan' : kind === 'question' ? 'a question' : 'a permission'
+    await runWb($, ['chat', 'reply', `--text=Claude is waiting on ${what} in the terminal: it couldn't be shown here.`], 15_000)
+    $.ui.toast(`workbench: ${what} couldn't go to the web chat (${brief(posted.out)}): answer it here`)
+    return undefined
+  }
   if (state === 'allow') return { behavior: 'allow' as const }  // their setting: go ahead while away
   if (state === 'expired') return undefined  // a plan wb can't show: the dialog, in the terminal
   mem.asksOpen.add(id)

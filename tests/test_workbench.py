@@ -11446,6 +11446,40 @@ class WebChat(Base):
             self.assertEqual((detail, state), ({"plan": "", "project": "alpha"}, "expired"), args)
         self.assertEqual(self.chat.asks()[-1]["by"], "terminal")              # answered there
 
+    def test_a_long_or_cjk_plan_reaches_the_page_cut_to_fit_instead_of_refused(self):
+        # #535 (the 2026-11-20 audit, reproduced): the size was json.dumps' ASCII escapes, six bytes
+        # a CJK character, so a 7,700-character Japanese plan was refused, as was an ASCII plan
+        # file of 39,900 characters once its newlines were escaped
+        chat = self.chat
+        stored = lambda a: len(json.dumps(chat.find_ask(a)["detail"], ensure_ascii=False).encode())
+        ja = "計画の手順。\n" * 1100                                          # 7,700 characters
+        a, state = run_wb("chat", "ask", "--tool", "ExitPlanMode", "--kind", "plan",
+                          "--detail", json.dumps({"plan": ja})).split()
+        self.assertEqual((chat.find_ask(a)["detail"]["plan"], state), (ja, "open"))  # whole
+        huge = "大きな計画。\n" * 10_000
+        a = run_wb("chat", "ask", "--tool", "ExitPlanMode", "--kind", "plan",
+                   "--detail", json.dumps({"plan": huge})).split()[0]
+        plan = chat.find_ask(a)["detail"]["plan"]
+        self.assertTrue(plan.endswith(chat.CUT_NOTE) and huge.startswith(plan[:-len(chat.CUT_NOTE)]))
+        self.assertLessEqual(stored(a), chat.DETAIL_MAX)
+        self.assertGreater(stored(a), chat.DETAIL_MAX - 100)                  # cut no more than it must
+        home = Path(self.tmp.name) / "claude"                                  # a plan file, newlines and all
+        (home / "plans").mkdir(parents=True)
+        (home / "plans" / "p.md").write_text(("step\n" * 8000)[:39_900])
+        with mock.patch.dict(os.environ, {"CLAUDE_CONFIG_DIR": str(home)}):
+            a = run_wb("chat", "ask", "--tool", "ExitPlanMode", "--kind", "plan", "--detail",
+                       json.dumps({"plan_file": str(home / "plans" / "p.md")})).split()[0]
+        self.assertTrue(chat.find_ask(a)["detail"]["plan"].endswith(chat.CUT_NOTE))
+        self.assertLessEqual(stored(a), chat.DETAIL_MAX)
+        opts = [{"label": f"opt {i}", "description": "d", "preview": "プレビュー" * 3000} for i in range(4)]
+        q = chat.ask("AskUserQuestion", "", "question", {"questions": [{"question": "Which?", "options": opts}]})
+        got = q["detail"]["questions"][0]["options"]
+        self.assertEqual([o["label"] for o in got], [o["label"] for o in opts])  # the choices whole
+        self.assertTrue(all(o["preview"].endswith(chat.CUT_NOTE) for o in got))
+        self.assertLessEqual(stored(q["id"]), chat.DETAIL_MAX)
+        with self.assertRaises(ValueError):                                    # only the questions can't be cut
+            chat.ask("AskUserQuestion", "", "question", {"questions": [{"question": "?" * 50_000}]})
+
     def test_open_questions_and_unread_messages_outlast_the_display_windows(self):
         # #265 (the audit of 1.2): an open question vanished from the page behind 20 newer answered
         # ones, and `wb chat pending` lost an unread message behind 200 newer replies

@@ -1259,8 +1259,8 @@ test('a permission prompt while the user is away goes to the web chat, and their
   files['/wb/chat/messages.jsonl'] = JSON.stringify({ id: 'm1', ts: 1_800_000_003, from: 'user', text: 'hi' }) + '\n'
   await clock.advance(3000)                                     // a web message: the user is away
   expect((await ask('Bash', { command: 'git push origin main', description: 'Push the fix' })).decision).toEqual({ behavior: 'allow' })
-  expect(runs.find(a => a[2] === 'ask')).toEqual(['wb', 'chat', 'ask', '--tool', 'Bash', '--kind', 'permission', '--text',
-    'git push origin main', '--detail', '{"purpose":"Push the fix"}'])  // the card leads with it (#103)
+  expect(runs.find(a => a[2] === 'ask')).toEqual(['wb', 'chat', 'ask', '--tool=Bash', '--kind=permission',
+    '--text=git push origin main', '--detail={"purpose":"Push the fix"}'])  // the card leads with it (#103)
   expect(runs.find(a => a[2] === 'wait')?.slice(0, 4)).toEqual(['wb', 'chat', 'wait', 'ask-1-ab'])
   expect(toasts.some(t => t.includes('waiting for you in the web chat'))).toBe(true)
 
@@ -1269,12 +1269,12 @@ test('a permission prompt while the user is away goes to the web chat, and their
   expect(no.behavior).toBe('deny')
   expect(no.message).toContain('wb chat reply')                  // Claude asks the user what instead
   expect(no.message).toContain('not on main')                    // with their words
-  expect(runs.filter(a => a[2] === 'ask').at(-1)?.at(-1)).toBe('/etc/hosts')
+  expect(runs.filter(a => a[2] === 'ask').at(-1)?.at(-1)).toBe('--text=/etc/hosts')
 
   // a finished plan: approved, or sent back with a note
   said = { answer: 'allow' }
   expect((await ask('ExitPlanMode', {})).decision).toEqual({ behavior: 'allow' })
-  expect(runs.filter(a => a[2] === 'ask').at(-1)?.slice(3, 7)).toEqual(['--tool', 'ExitPlanMode', '--kind', 'plan'])
+  expect(runs.filter(a => a[2] === 'ask').at(-1)?.slice(3, 5)).toEqual(['--tool=ExitPlanMode', '--kind=plan'])
   said = { answer: 'deny', note: 'split step 2' }
   const back = (await ask('ExitPlanMode', {})).decision
   expect([back.behavior, back.message.includes('split step 2'), back.message.includes('Revise the plan')]).toEqual(['deny', true, true])
@@ -1283,7 +1283,7 @@ test('a permission prompt while the user is away goes to the web chat, and their
   said = { answer: 'allow' }
   await ask('ExitPlanMode', { planFilePath: '/home/u/.claude/plans/a-b-c.md' })
   const plan = runs.filter(a => a[2] === 'ask').at(-1)!
-  expect(plan[plan.indexOf('--detail') + 1]).toBe('{"plan_file":"/home/u/.claude/plans/a-b-c.md"}')
+  expect(plan.find(a => a.startsWith('--detail='))).toBe('--detail={"plan_file":"/home/u/.claude/plans/a-b-c.md"}')
   expect(plan.slice(-2)).toEqual(['--repo', '/home/u/project'])     // whose plan it is
   posted = 'ask-3-ef expired'
   const waited = runs.filter(a => a[2] === 'wait').length
@@ -1296,7 +1296,7 @@ test('a permission prompt while the user is away goes to the web chat, and their
   said = { answer: 'allow', answers: { 'Which DB?': 'SQLite' } }
   const picked = (await ask('AskUserQuestion', { questions })).decision
   expect(picked).toEqual({ behavior: 'allow', updatedInput: { questions, answers: { 'Which DB?': 'SQLite' } } })
-  expect(JSON.parse(runs.filter(a => a[2] === 'ask').at(-1)!.at(-1)!)).toEqual({ questions })
+  expect(JSON.parse(runs.filter(a => a[2] === 'ask').at(-1)!.at(-1)!.slice('--detail='.length))).toEqual({ questions })
 
   // their setting says go ahead while away: allowed at once, no wait, no toast
   posted = 'ask-2-cd allow'
@@ -1314,6 +1314,53 @@ test('a permission prompt while the user is away goes to the web chat, and their
   said = { answer: 'allow' }
   expect((await ask('Bash', { command: 'git push' })).decision).toBeUndefined()
   expect(runs.slice(n).some(a => a[2] === 'ask')).toBe(false)
+})
+
+test('a dialog wb chat ask refuses is announced on the phone, and a long plan or preview is cut to fit', async ($, on) => {
+  // #535 (the 2026-11-20 audit): a long or CJK plan was refused, and the dialog sat in the
+  // terminal with nothing posted and nothing said
+  const clock = mock.clock(on, { now: 1_800_000_000_000 })
+  const files: Record<string, string> = {}
+  fakeTasks(on, files, [])
+  chatOn(files)
+  const toasts: string[] = []
+  on('ui.toast', (_: any, e: any) => { toasts.push(e.text); return { value: undefined } })
+  on('session.cwd', () => ({ value: '/home/u/project' }))
+  on('skill.prompt', (_: any, e: any) => ({ text: e.text }))
+  on('prompt.submit', (_: any, e: any) => ({ text: e.text }))
+  let refuse = true
+  const runs: string[][] = []
+  on('process.run', (_: any, e: any) => {
+    runs.push(e.argv)
+    const [, cmd, act] = e.argv
+    if (cmd === 'chat' && act === 'ask') return { value: refuse
+      ? { exitCode: 1, stdout: '', stderr: 'wb: wb chat ask: detail too long\n' }
+      : { exitCode: 0, stdout: 'ask-1-ab open\n', stderr: '' } }
+    if (cmd === 'chat' && act === 'wait') return { value: { exitCode: 0, stdout: JSON.stringify({ answer: 'deny' }), stderr: '' } }
+    return { value: { exitCode: 0, stdout: 'no open tasks', stderr: '' } }
+  })
+  on('classic.PermissionRequest', () => ({}))
+  const ask = (tool_name: string, tool_input: unknown) =>
+    $.classic.PermissionRequest({ tool_name, tool_input } as any) as Promise<any>
+  await $.session.start({ cwd: '/home/u/project', surface: 'terminal', isInteractive: true })
+  await $.skill.prompt({ skill: 'workbench', text: 'x', frontmatter: {}, source: 'userSettings' })
+  files['/wb/chat/messages.jsonl'] = JSON.stringify({ id: 'm1', ts: 1_800_000_003, from: 'user', text: 'hi' }) + '\n'
+  await clock.advance(3000)                                     // a web message: the user is away
+  const plan = '計画'.repeat(30_000)
+  expect((await ask('ExitPlanMode', { plan })).decision).toBeUndefined()  // refused: the dialog, here
+  const sent = runs.filter(a => a[2] === 'ask').at(-1)!
+  expect(JSON.parse(sent.find(a => a.startsWith('--detail='))!.slice(9)).plan).toBe(plan.slice(0, 40_001))
+  expect(runs.find(a => a[2] === 'reply')).toEqual(['wb', 'chat', 'reply',
+    "--text=Claude is waiting on a plan in the terminal: it couldn't be shown here."])
+  expect(toasts.some(t => t.includes("a plan couldn't go to the web chat (wb: wb chat ask: detail too long)"))).toBe(true)
+  refuse = false
+  const long = { label: 'A', description: '', preview: 'p'.repeat(5000) }
+  await ask('AskUserQuestion', { questions: [{ question: 'Which?', options: [long, { label: 'B' }] }] })
+  const q = JSON.parse(runs.filter(a => a[2] === 'ask').at(-1)!.at(-1)!.slice(9))
+  expect(q.questions[0].options[0].preview).toBe('p'.repeat(2000) + ' (cut: the rest is in the terminal)')
+  expect(q.questions[0].options[1]).toEqual({ label: 'B' })
+  await ask('Bash', { command: '--version' })                   // a value that starts with `-`
+  expect(runs.filter(a => a[2] === 'ask').at(-1)).toContain('--text=--version')
 })
 
 test('running wb counts as workbench mode, and a web message reaches a running turn', async ($, on) => {

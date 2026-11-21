@@ -4126,7 +4126,11 @@ VPN), `"hosts": ["chat.example.org"]` a name a tunnel or proxy sends.
   answered EPERM and read as listening, #532), or, with no pid, while its `ts` is under 15 s old.
 - `asks.jsonl`: the dialogs. An ask row `{id: "ask-<ms>-<8 hex>", ts, tool (200 characters),
   text (2000), kind: "permission"|"plan"|"question", detail?}` from `wb chat ask` (`detail`, at
-  most 40,000 characters of JSON: a question's `{questions}`, the tool's own; a plan's `{plan}`,
+  most `DETAIL_MAX` 40,000 bytes of JSON as stored, UTF-8 and unescaped; over that,
+  `chat.fit_detail` cuts the plan, else the options' previews, else their descriptions, each to one
+  length, the longest first, ending `CUT_NOTE` " (cut: the rest is in the terminal)", and refuses
+  only questions that can't fit themselves. Measured as json.dumps' ASCII escapes, six bytes a CJK
+  character, a 7,700-character Japanese plan was refused, #535. A question's `{questions}`, the tool's own; a plan's `{plan}`,
   from the tool's input, else `chat.session_plan`: the file `{plan_file}` names, else the last
   plan file the `--session`'s transcript names, read only when it is a `*.md` directly in
   `$CLAUDE_CONFIG_DIR/plans`; one it can't find is `{plan: "", project: <--repo's name>}`,
@@ -4614,11 +4618,15 @@ gets no receipt and is tried again a minute later), `webAt = now`, a toast. Dial
 settles it): unless a settings hook already decided, or the session isn't delegating with
 `webAt` within AWAY_MS (6 h; a prompt typed in the terminal sets it to 0) or this session with a
 backlog task open (`awayNow`), `askOnChat` runs `wb
-chat ask --tool <t> --kind <KIND[tool], else permission> --text <a permission's: the input's
-command, file_path, url, path or pattern, else its JSON, cut at 1500>` (`--detail` with a
-question's `{questions}`; a plan's `{plan}` when the input has its text, else `{plan_file}` from
+chat ask --tool=<t> --kind=<KIND[tool], else permission> --text=<a permission's: the input's
+command, file_path, url, path or pattern, else its JSON, cut at 1500>` (each `--opt=value`, so a
+value starting with `-` isn't read as a flag; `--detail=` with a question's `{questions}`, each
+option's `preview` cut to PREVIEW_CHARS 2000 with CUT_NOTE (`askQuestions`); a plan's `{plan}`, its
+first DETAIL_CHARS 40,001, when the input has its text, else `{plan_file}` from
 its `planFilePath`, and for a plan `--session <id> --repo <the session's directory>`, so wb reads
-this session's own plan, #253). It prints `<id> <state>`:
+this session's own plan, #253). When `wb chat ask` fails, the mod posts `Claude is waiting on a
+plan|question|permission in the terminal` (`wb chat reply`), toasts why, and leaves the dialog: a
+refused plan sat in the terminal with the phone told nothing (#535). It prints `<id> <state>`:
 `allow` (the user's setting) answers `{behavior: 'allow'}` at once; `expired` (a plan wb couldn't
 read) leaves the dialog to the terminal at once; else the id goes in
 `mem.asksOpen`, a toast says what waits in the web chat, and `waitOnChat` runs `wb chat wait <id>
@@ -4659,7 +4667,7 @@ and pinned link, both quit commands (typed words stop nothing), KEEP_ON_COMPACT 
 compaction, the live header label, the weekly check, the chat listener (exact text, receipt,
 standing by, stopping after a quit), dialogs on the chat (only while away, allow and deny with
 a note, a plan sent back, a question's answers, the go-ahead setting, an expiry, back in the
-terminal), Bash `wb start` turning the mode on and mid-turn delivery,
+terminal, one wb refuses posted to the phone, a long plan or preview cut), Bash `wb start` turning the mode on and mid-turn delivery,
 rewake, Raster vs face, `/workbench` alone, the update check and `/workbench-update`, `wrapWords`;
 and the 2026-11-16 audit's: another project's task neither woken nor acked, a headless session
 quiet until a surface attaches, a dropped wake retried, no false rewake for a notice delivered
