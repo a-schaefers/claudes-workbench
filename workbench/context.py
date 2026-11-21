@@ -358,6 +358,10 @@ def probe_bin() -> str | None:
 # What probe is and where its release binary is: wb experiment, wb doctor and the pane's note to
 # Claude name both (the user, 2026-11-20: "indicate somehow ... what the hell probe is")
 PROBE_HOME = "github.com/probelabs/probe"
+# The subcommands the agent may run: they read files and print. `probe *` let it run the rest too
+# (2026-11-21, testing the experiment): `lsp` starts a daemon and language servers, `--lsp` on a
+# read starts them too, `config set|reset` writes probe's config, `benchmark` takes the CPU.
+PROBE_READS = ("symbols", "extract", "search", "grep", "query")
 PROBE_RELEASES = "github.com/probelabs/probe/releases"
 
 
@@ -403,7 +407,9 @@ def shell_rules(task: store.Task) -> list[dict]:
               for c in ALLOWED_COMMANDS for r in (f"{c} *", f"{ASSIGN} {c} *")]  # `c *` is `c` too
     if experiment(task, "probe"):  # read-only: an outline, one function, a search
         rules += [{"action": "shell", "resource": r, "effect": "allow"}
-                  for r in ("probe", "probe *", f"{ASSIGN} probe *")]
+                  for c in PROBE_READS for r in (f"probe {c} *", f"{ASSIGN} probe {c} *")]
+        rules += [{"action": "shell", "resource": r, "effect": "deny"}
+                  for r in ("probe *--lsp*", f"{ASSIGN} probe *--lsp*")]
     rules += [{"action": "shell", "resource": r, "effect": "allow"}
               for b in ("./*", "../*", *PROJECT_BINS) for r in (b, f"{ASSIGN} {b}")]
     # and what it built anywhere in its lane, by path: a debug binary in the temp directory was

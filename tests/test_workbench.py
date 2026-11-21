@@ -18029,11 +18029,26 @@ class ProbeExperiment(Base):
         wait_phase("t-probe", {"review"})
         task = store.Task("t-probe")
         self.assertEqual(task.spec["experiments"], {"probe": True})
-        self.assertEqual(self.probe_rules(task), ["probe", "probe *", f"{context.ASSIGN} probe *"])
+        self.assertTrue(self.probe_rules(task))
         handbook = (context.rules_dir(task) / "HANDBOOK.md").read_text()
         self.assertTrue(handbook.startswith(context.HANDBOOK.read_text()))
         self.assertTrue(handbook.endswith(context.EXPERIMENT_NOTES["probe"]))
         self.assertIn("probe: on and working (probe-code 0.6.0)", cli.experiment_lines())
+
+    def test_with_probe_on_the_agent_may_run_only_probes_reads(self):
+        # 2026-11-21, testing the experiment: `probe *` let the agent start probe's LSP daemon
+        # and language servers, and write probe's config, though the docs called it read-only
+        self.fake_probe()
+        self.start("t-reads", "ok")
+        wait_phase("t-reads", {"review"})
+        rules = context.shell_rules(store.Task("t-reads"))
+        for ok in ("probe symbols main.c", "probe extract a.py#run", "probe extract a.py:10-50",
+                   "probe search 'lease' workbench/", "probe grep TODO .", "probe query 'fn $N' src",
+                   "LANG=C probe symbols main.c"):
+            self.assertEqual(Permission.verdict(rules, ok), "allow", ok)
+        for no in ("probe lsp start", "probe config set x 1", "probe benchmark",
+                   "probe extract a.py#run --lsp", "probe search x --lsp .", "LANG=C probe lsp start"):
+            self.assertEqual(Permission.verdict(rules, no), "deny", no)
 
     def test_it_is_off_until_turned_on_even_with_probe_installed(self):
         fake_probe(Path(self.tmp.name))
