@@ -622,8 +622,14 @@ export function bar(frac: number, width: number): string {
 const gib = (n: number) => (n / 2 ** 30).toFixed(1)
 const secs = (s: number) => (s < 60 ? `${Math.round(s)}s` : s < 3600 ? `${Math.floor(s / 60)}m${String(Math.round(s % 60)).padStart(2, '0')}s`
   : `${Math.floor(s / 3600)}h${String(Math.floor((s % 3600) / 60)).padStart(2, '0')}m`)
-// lspci's long name cut to the card's own (its last bracket), as `wb top` draws it
-const cardName = (name: string) => [...name.matchAll(/\[([^\]]+)\]/g)].at(-1)?.[1] ?? name
+// lspci's long name cut to the card's own, as `wb top` draws it (top.short): its last bracket
+// when the name ends with one, else what follows the last bracket, the vendor's ("[AMD/ATI]
+// Phoenix1" was shown as AMD/ATI, #576); "(rev c4)" dropped
+export function cardName(name: string): string {
+  const n = name.replace(/\s*\(rev [0-9a-f]+\)\s*$/i, '').trim()
+  if (n.endsWith(']')) return [...n.matchAll(/\[([^\]]+)\]/g)].at(-1)?.[1] ?? n
+  return n.slice(n.lastIndexOf(']') + 1).trim() || n
+}
 const RACK_MARK: Record<string, string> = { resident: '●', split: '◑', idle: '○', "can't run": '✗', remote: '⇢' }
 const RACK_COLOR: Record<string, string> = { resident: 'success', split: 'warning', "can't run": 'error' }
 

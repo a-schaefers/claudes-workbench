@@ -1937,7 +1937,9 @@ never 0):
 
 On a terminal (without `--json`) the same view fills the alternate screen and is redrawn in place
 each tick: bars in eighths (`▏▎▍▌▋▊▉█`) for VRAM and busy, models by their `label`, the card's
-short name (lspci's last bracket), sizes in decimal GB, colour only there; stdin in cbreak mode for `q`, restored on
+short name (`top.short`, the pane's `cardName` alike: lspci's last bracket when the name ends with
+one, else what follows the last bracket, the vendor tag's, so a Phoenix1 or a "Device 1586" newer
+than hwdata isn't shown as "AMD/ATI", #576; `(rev …)` dropped), sizes in decimal GB, colour only there; stdin in cbreak mode for `q`, restored on
 exit. Not on a terminal: one plain pass, then exit (as `wb watch --once`).
 
 ## Models: found, loaded, chosen

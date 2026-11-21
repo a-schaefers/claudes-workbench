@@ -9695,6 +9695,17 @@ class Top(Base):
         self.assertEqual((apu["used"], apu["total"], apu.get("unified")),
                          (2 ** 30 + 300 * 2 ** 20, 32 * 2 ** 30, True))
 
+    def test_a_cards_short_name_is_its_product_never_the_vendor_tag(self):
+        # #576: a Ryzen 7840HS's Phoenix1 (no product bracket in pci.ids) and a card newer than
+        # hwdata ("Device 1586") were both shown as "AMD/ATI"
+        from workbench import top
+        amd = "Advanced Micro Devices, Inc. [AMD/ATI]"
+        for line, want in ((f"{amd} Phoenix1 (rev c4)", "Phoenix1"), (f"{amd} Device 1586 (rev c1)", "Device 1586"),
+                           (f"{amd} Navi 48 [Radeon RX 9070 XT] (rev c0)", "Radeon RX 9070 XT"),
+                           ("NVIDIA Corporation AD102 [GeForce RTX 4090] (rev a1)", "GeForce RTX 4090"),
+                           ("NVIDIA GeForce RTX 4090", "NVIDIA GeForce RTX 4090"), ("1002:7550", "1002:7550")):
+            self.assertEqual(top.short(line), want)
+
     def test_with_no_gpu_it_shows_the_ram(self):
         drm = Path(self.tmp.name, "empty")
         drm.mkdir()

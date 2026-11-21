@@ -1,5 +1,5 @@
 import { expect, mock, test } from 'claude-code/testing'
-import { awayNow, delegates,priceOf, savedLine, spark, statsLines, wrapWords } from './register.js'
+import { awayNow, cardName, delegates,priceOf, savedLine, spark, statsLines, wrapWords } from './register.js'
 
 const PANE = {
   plugin: 'workbench',
@@ -1833,6 +1833,14 @@ test('the live view runs wb top only while the Stats tab is on screen with Live 
   expect((await ui.findAll({ type: 'Text' })).some(t => t.text === 'Now')).toBe(false)
   await ui.press({ key: 'tab-tasks' })
   await ui.unmount()
+})
+
+test('a card is named by its product, never the vendor tag, as wb top names it (#576)', () => {
+  const amd = 'Advanced Micro Devices, Inc. [AMD/ATI]'
+  expect(cardName(`${amd} Phoenix1 (rev c4)`)).toBe('Phoenix1')
+  expect(cardName(`${amd} Device 1586 (rev c1)`)).toBe('Device 1586')
+  expect(cardName(`${amd} Navi 48 [Radeon RX 9070 XT] (rev c0)`)).toBe('Radeon RX 9070 XT')
+  expect(cardName('NVIDIA GeForce RTX 4090')).toBe('NVIDIA GeForce RTX 4090')
 })
 
 test('the history says nothing it has no data for, and a new install how to begin', () => {

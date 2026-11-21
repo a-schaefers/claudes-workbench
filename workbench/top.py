@@ -443,9 +443,15 @@ def _secs(s: float) -> str:
 
 
 def short(name: str) -> str:
-    """lspci's long name cut to the card's own (its last bracket: Radeon RX 9070 XT), for the view."""
-    groups = re.findall(r"\[([^\]]+)\]", name)
-    return groups[-1] if groups else name
+    """lspci's long name cut to the card's own, for the view: its last bracket when the name ends
+    with one (Navi 48 [Radeon RX 9070 XT]), else what follows the last bracket, which is the
+    vendor's (Phoenix1, Device 1586 after [AMD/ATI], which a product with no bracket in pci.ids
+    and a card newer than hwdata were shown as, #576); "(rev c4)" dropped. The pane's cardName
+    is the same rule."""
+    name = re.sub(r"\s*\(rev [0-9a-fA-F]+\)\s*$", "", name).strip()
+    if name.endswith("]") and (groups := re.findall(r"\[([^\]]+)\]", name)):
+        return groups[-1]
+    return name.rpartition("]")[2].strip() or name
 
 
 def lines(snap: dict) -> list[list[tuple[str, str]]]:
