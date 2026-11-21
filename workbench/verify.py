@@ -80,11 +80,12 @@ def assertion(text: str) -> str:
     return ""
 
 
-def _run(task: store.Task, checkout, cmd: str, limit: int, keep=None,
+def _run(task: store.Task, checkout, cmd, limit: int, keep=None,
          setup: bool = False) -> tuple[int | str, str]:
     """``cmd`` in a scratch clone that ``checkout`` sets up, under the task's lane; ``keep(work)``
-    takes what the run left before the clone goes. Prepared from the task's worktree, unless
-    ``setup`` (--setup) asks for the setup to run there again."""
+    takes what the run left before the clone goes. ``cmd`` may be a function of the clone's path,
+    for a command that names it. Prepared from the task's worktree, unless ``setup`` (--setup)
+    asks for the setup to run there again."""
     store.home().mkdir(parents=True, exist_ok=True)  # not in /tmp, where the git shim allows writes
     with tempfile.TemporaryDirectory(prefix=store.scratch(".verify-"), dir=store.home()) as scratch:
         # nested as the worktree is, so that a sibling two levels up stays in the scratch (#261)
@@ -102,7 +103,7 @@ def _run(task: store.Task, checkout, cmd: str, limit: int, keep=None,
         code, said = runner.prepare(at, None if setup else task.worktree)
         if code != 0:
             return "setup failed", f"[setting up the scratch checkout failed: {code}]\n{said}"
-        out = runner.run_in_lane(at, cmd, limit)
+        out = runner.run_in_lane(at, cmd(work) if callable(cmd) else cmd, limit)
         if keep:
             keep(work)
         return out
@@ -233,8 +234,12 @@ def shot(task: store.Task, cmd: str, files: list[str] | None = None, viewport: s
             p = work / name
             if p.is_file() and not p.is_symlink() and p.read_bytes()[:8] == b"\x89PNG\r\n\x1a\n":
                 shutil.copyfile(p, dest)
-        env = f"WB_SHOT_OUT=./{name} WB_SHOT_VIEWPORT={viewport} "
-        code, text = _run(task, checkout, env + f"sh -c {shlex.quote(cmd)}", limit, keep, setup)
+        # absolute: the command runs in the task's package (task.json `subdir`), where a relative
+        # path landed while the image was looked for at the checkout's top (#433, the audit of 1.8)
+        def line(work: Path, name=name) -> str:
+            return (f"WB_SHOT_OUT={shlex.quote(str(work / name))} WB_SHOT_VIEWPORT={viewport} "
+                    f"sh -c {shlex.quote(cmd)}")
+        code, text = _run(task, checkout, line, limit, keep, setup)
         (out / f"{side}.txt").write_text(text, encoding="utf-8")
         # a capture that exits nonzero failed, PNG or not: one that wrote its image and exited 7
         # on both sides printed two normal-looking paths (#268, the audit of 1.2)

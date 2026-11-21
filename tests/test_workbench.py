@@ -6942,6 +6942,32 @@ class Shot(Base):
         out = run_wb("shot", "t", "--capture", "sh shoot.sh", "--files", "shoot.sh")
         self.assertNotIn("no image", out)
 
+    def test_a_package_scoped_task_keeps_both_screenshots(self):
+        # #433 (the audit of 1.8, reproduced): run from packages/web, both captures wrote their
+        # PNG to the relative $WB_SHOT_OUT, inside the package, and wb shot looked at the top
+        g = lambda *a: subprocess.run(["git", "-C", str(self.repo), *a], check=True)  # noqa
+        web = self.repo / "packages" / "web"
+        web.mkdir(parents=True)
+        (web / "CLAUDE.md").write_text("# web\nThe web package.\n")
+        (web / "page.txt").write_text("old page\n")
+        g("add", "-A")
+        g("commit", "-qm", "a web package")
+        os.environ["FAKE_SCENARIO"] = "ok"
+        run_wb("start", "t-web", "--spec", str(self.spec), "--repo", str(web), "--model", "mimo",
+               "--queue")
+        wait_phase("t-web", {"review"})
+        task = store.Task("t-web")
+        self.assertEqual(task.spec["subdir"], "packages/web")
+        (task.workdir / "page.txt").write_text("new page\n")
+        capture = ("python3 -c \"import os; open(os.environ['WB_SHOT_OUT'], 'wb').write("
+                   "b'\\x89PNG\\r\\n\\x1a\\n' + open('page.txt', 'rb').read())\"")
+        out = run_wb("shot", "t-web", "--capture", capture)
+        self.assertNotIn("a capture failed", out)
+        m = json.loads((task.dir / "shots" / "1" / "shots.json").read_text())
+        self.assertEqual((m["base"]["ok"], m["candidate"]["ok"]), (True, True))
+        self.assertIn(b"old page", Path(m["base"]["image"]).read_bytes())
+        self.assertIn(b"new page", Path(m["candidate"]["image"]).read_bytes())
+
 
 class Stats(Base):
     """What the Stats tab reads (#404): the settings behind it, and what a task records for it,
