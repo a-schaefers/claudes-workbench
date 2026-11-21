@@ -354,9 +354,13 @@ def claude_files_changed(files: str) -> list[str]:
 
 
 def _reader(stream, q):
-    for line in stream:
-        q.put(line)
-    q.put(None)
+    # the end marker whatever happens: a reader that died without it left the round waiting on a
+    # finished agent until the silence timeout stopped it (#440)
+    try:
+        for line in stream:
+            q.put(line)
+    finally:
+        q.put(None)
 
 
 EXIT_GRACE = 30  # seconds OpenCode has to exit once its output closes; past that, it's stopped
@@ -659,7 +663,10 @@ def run_round(task: store.Task, n: int, keep: bool = False) -> dict:
                     context.unix_paths(task))
     log = open(task.dir / "runner.log", "a")
     proc = subprocess.Popen(cmd, cwd=task.workdir, env=env, stdin=subprocess.DEVNULL,
-                            stdout=subprocess.PIPE, stderr=log, text=True,
+                            stdout=subprocess.PIPE, stderr=log, encoding="utf-8",
+                            # a byte that isn't UTF-8 (a plugin's Latin-1 print) is U+FFFD, not
+                            # the reader's death and a round lost as "no first output" (#440)
+                            errors="replace",
                             start_new_session=True)  # its own group, so a stop takes MCP too
     CURRENT["proc"] = proc
     task.set_status(agent_pid=proc.pid)  # its own session: wb stop ends it if the runner can't

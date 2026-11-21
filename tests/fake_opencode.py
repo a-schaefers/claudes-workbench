@@ -29,6 +29,7 @@ events of the wrong shape, first. FAKE_LINGER: after its last event a run closes
 stays alive (a shutdown that hangs).
 FAKE_SURROGATE: a run first reads a file whose name and text end in half an emoji (an
 unpaired surrogate escaped, which is valid JSON).
+FAKE_LATIN1: a run first prints a line that isn't UTF-8 (`caf\xe9`, Latin-1).
 `session export` prints one finished step: FAKE_FILL sets the context it read, FAKE_COMPACTED
 adds a completed compaction. `session list` lists nothing. Either fails without `--standalone`,
 as the real one does when another service holds the managed port. `--version` says
@@ -140,6 +141,10 @@ if os.environ.get("FAKE_BG") and args and args[0] == "run":
                           stderr=subprocess.DEVNULL)
     with open(os.environ["FAKE_BG"], "w") as fh:
         fh.write(str(bg.pid))
+if os.environ.get("FAKE_LATIN1") and args and args[0] == "run":  # a plugin printing Latin-1
+    sys.stdout.flush()
+    sys.stdout.buffer.write(b"caf\xe9\n")
+    sys.stdout.buffer.flush()
 if os.environ.get("FAKE_SURROGATE") and args and args[0] == "run":  # escaped, as JSON allows
     print('{"type": "tool_use", "timestamp": %d, "sessionID": "%s", "part": {"tool": "read", '
           '"state": {"status": "completed", "input": {"filePath": "caf\\ud83d.txt"}}}}'

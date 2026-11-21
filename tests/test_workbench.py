@@ -7,6 +7,7 @@ import glob
 import fnmatch
 import io
 import json
+import queue
 import shlex
 import os
 import shutil
@@ -459,6 +460,26 @@ class Lifecycle(Base):
         events = (store.Task("t-sur").dir / "events.jsonl").read_text(encoding="utf-8")
         self.assertIn("caf�.txt", events)
         self.assertIn("half �", events)
+
+    def test_a_line_that_isnt_utf8_on_opencodes_output_loses_nothing(self):
+        # #440: one Latin-1 byte killed the reader thread; the finished agent went unseen until
+        # the silence timeout stopped the round as "no first output"
+        os.environ["FAKE_LATIN1"] = "1"
+        self.start("t-latin", "ok", "--silence-timeout", "8")
+        st = wait_phase("t-latin", {"review", "stuck", "failed"})
+        self.assertEqual(st["phase"], "review", st)
+        self.assertEqual(st["tools"], 1)  # the events after that line were read too
+        self.assertEqual((store.Task("t-latin").worktree / "answer.txt").read_text(), "42\n")
+
+    def test_the_round_reader_queues_its_end_even_when_its_stream_fails(self):
+        # #440: without its end marker the round waited on a finished agent
+        def stream():
+            yield "one\n"
+            raise UnicodeDecodeError("utf-8", b"\xe9", 0, 1, "invalid continuation byte")
+        q = queue.Queue()
+        with self.assertRaises(UnicodeDecodeError):
+            runner._reader(stream(), q)
+        self.assertEqual([q.get_nowait(), q.get_nowait()], ["one\n", None])
 
     def test_an_agent_that_closes_its_output_and_lingers_is_stopped(self):
         # #83 (the 2026-11-18 audit): EOF left the watchdog loop for an unbounded wait, so an
