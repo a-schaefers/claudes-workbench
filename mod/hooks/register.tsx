@@ -1295,6 +1295,7 @@ const mem = {
   startedAt: 0,
   lastDrawn: '',
   lastNotify: '-', // notify.jsonl's size and mtime when last read
+  notifyRows: { key: '', rows: [] as Row[] }, // its rows as last parsed, under that key (#921)
   paneOpened: false,
   polling: false,
   watching: false,
@@ -2294,18 +2295,33 @@ async function readQueued($: any) {
 // not acknowledged here.
 async function deliver($: any, now: number) {
   const root = mem.root
-  const file = await readTail($, `${root}/notify.jsonl`, NOTIFY_TAIL)
-  if (!file) {
-    warnOnce($, 'notify', `can't read ${root}/notify.jsonl, so no wake can come: wb doctor`)
-    return
-  }
+  const path = `${root}/notify.jsonl`
+  // The stat first, as recentEvents does (#739): every poll read the whole file (up to
+  // NOTIFY_TAIL, past it a `tail` spawned) before the size@mtime check, which then skipped only
+  // the parse; a few weeks of notices are hundreds of KB, read at each status write (#921).
+  let key = ''
+  try {
+    const st = await $.fs.stat(path)
+    key = `${path}:${st.size}@${st.mtimeMs}`
+  } catch {}
   // While Claude is mid-turn, look every poll (the turn may act on the task) but hold the wake:
   // a prompt submitted now would queue and arrive after the task has moved on.
+  if (key && key === mem.lastNotify && !mem.busy) return
+  let file = key && key === mem.notifyRows.key ? mem.notifyRows : null // mid-turn: parsed already
+  if (!file) {
+    const got = await readTail($, path, NOTIFY_TAIL)
+    if (!got) {
+      warnOnce($, 'notify', `can't read ${path}, so no wake can come: wb doctor`)
+      return
+    }
+    file = { key: got.key && `${path}:${got.key}`, rows: parseLines(got.text) }
+    if (file.key) mem.notifyRows = file
+  }
   if (file.key === mem.lastNotify && !mem.busy) return
   // Per task, its newest notice and every question: two asked at once (parallel tool calls) are
   // both open, and the newest alone hid the first, its agent blocked (the 2026-11-16 audit).
   const due = new Map<string, Row[]>()
-  for (const row of parseLines(file.text)) {
+  for (const row of file.rows) {
     // Every notice counts for rewake, however old: a notice delivered before a reload (or by
     // another session) is news Claude had, not a lost one (the 2026-11-16 audit).
     // a batch's notice is news for each task it names (acked with it), or rewake woke for the rest

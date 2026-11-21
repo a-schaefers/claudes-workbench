@@ -1275,6 +1275,34 @@ test('a task in review whose events have not changed is not read again on every 
   expect(waits()).toBe(2)
 })
 
+test('#921: notify.jsonl unchanged is not read again on every poll, mid-turn or not', async ($, on) => {
+  // deliver read the whole file (past 1 MiB, a `tail` spawned) before its size@mtime check
+  const clock = mock.clock(on, { now: 1_800_000_000_000 })
+  const files: Record<string, string> = {}
+  task(files, 'fix-it', 'review')
+  task(files, 'runs', 'running')                                  // a task active: a poll each 1.5 s
+  notice(files, { ts: ts0 - 7200, task: 'fix-it', kind: 'review', text: 'OLD ' + 'x'.repeat(5000) })
+  const { reads } = fakeTasks(on, files, ['fix-it', 'runs'])
+  on('process.run', wbAck(files))
+  on('ui.toast', () => ({ value: undefined }))
+  const woken: string[] = []
+  on('prompt.submit', (_: any, e: any) => { woken.push(e.text); return { text: e.text } })
+  await $.session.start({ cwd: '/', surface: 'terminal', isInteractive: true })
+  const notify = () => reads.filter(p => p === '/wb/notify.jsonl').length
+  await clock.advance(15_000)                                     // ten polls and more
+  expect(notify()).toBe(1)
+  await $.turn.start({ text: 'busy', turnId: 't1' })
+  await clock.advance(15_000)                                     // mid-turn: the rows kept
+  expect(notify()).toBe(1)
+  notice(files, { ts: ts0, task: 'fix-it', kind: 'review', text: 'NEW' })  // it changed: read once
+  await clock.advance(6000)
+  expect(notify()).toBe(2)
+  await $.turn.complete(endTurn('t1'))
+  await clock.advance(6000)
+  expect(woken.filter(t => t.includes('NEW'))).toHaveLength(1)     // the held wake still comes
+  expect(notify()).toBe(2)
+})
+
 test('outside workbench mode another session\'s running task opens no pane and fills no status line', async ($, on) => {
   // 2026-11-17: a session opened in another project showed the pane and the task's status line for
   // a task this session never started, and /workbench-quit couldn't clear it

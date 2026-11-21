@@ -6192,7 +6192,9 @@ which no `turn.complete` would clear), and cleared only by the main loop's `turn
 wakes are rechecked on every poll.
 
 **Waking** (`deliver`). Only when notify.jsonl's size or mtime changed, Claude is busy, or a wake
-was held for the turn. Per task, the newest notify row under an hour old and every question
+was held for the turn; the file is stat'ed first and read only on a change, its rows kept in
+`mem.notifyRows` by size@mtime for the polls of a busy turn (every poll read it whole, or spawned
+`tail` past 1 MiB, before the check: #921). Per task, the newest notify row under an hour old and every question
 row, past the task's `acked`; a row is still true when it's a check-in and the task is
 queued/running/testing, a question while the phase is `asking` and (with an id) its
 `ask/<id>.json` has no `<id>.answer`, or the phase equals the kind. A stale one is acked and dropped. A true one is
