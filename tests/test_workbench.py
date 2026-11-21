@@ -9486,6 +9486,18 @@ class Stats(Base):
         self.assertIn("questions: 3 asked mid-task, 1 answered", stats.summary(f))
         self.assertIn("without waking Claude: 3 auto-fix round(s), 1 task(s) then green", stats.summary(f))
 
+    def test_a_task_claude_finished_after_a_takeover_is_no_best_of_the_agents(self):
+        # #566: Claude wrote 251 lines after wb takeover, and the pane called it the largest
+        # landed first try and the fastest landing
+        from workbench import stats
+        self.rows({"task": "t-b", "ts": time.time(), "outcome": "accepted", "rounds": 1, "reviews": 0,
+                   "minutes": 3, "steps": [{"took_over": True}], "diff": {"files": 4, "added": 251, "removed": 0}},
+                  {"task": "t-a", "ts": time.time(), "outcome": "accepted", "rounds": 1, "reviews": 0,
+                   "minutes": 9, "steps": [{"took_over": False}], "diff": {"files": 1, "added": 20, "removed": 0}})
+        bests = stats.feed()["bests"]
+        self.assertEqual((bests["largest_first_try"]["task"], bests["largest_first_try"]["lines"]), ("t-a", 20))
+        self.assertEqual(bests["fastest"]["task"], "t-a")
+
     def test_a_models_write_speed_trend_compares_its_newest_third_with_its_oldest(self):
         from workbench import stats
         self.rows(*({"ts": 1000.0 + i, "outcome": "accepted", "speed": {"write": w}}

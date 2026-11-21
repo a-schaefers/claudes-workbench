@@ -122,6 +122,9 @@ def _bests(rows: list[dict]) -> dict:
     (#550)."""
     from . import tuning
     out = {}
+    # the agent's own landings: a task Claude finished after wb takeover is Claude's work (#566),
+    # as progress.helped leaves it out
+    rows = [r for r in rows if not any(s.get("took_over") for s in r.get("steps") or [])]
     first_try = [r for r in rows if _landed(r) and not tuning.agent_reviews(r) and r.get("diff")]
     if first_try:
         big = max(first_try, key=lambda r: r["diff"].get("added", 0) + r["diff"].get("removed", 0))

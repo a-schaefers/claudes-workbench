@@ -1751,7 +1751,8 @@ today or yesterday, else 0, and `wb stats` then names only the best: a run that 
 mentioned), `bests` (`largest_first_try`: the most lines landed with no review round the agent caused,
 `tuning.agent_reviews`, as skills.py counts first try, whatever rounds the runner added
 (self-review, a handover, a steer: the round counter kept every default `--test` task out, #550);
-`fastest`), `milestones` (`[{kind: landed|saved, n, day}]`: 1, 10, 25… tasks landed; 100K, 1M…
+`fastest`; neither counts a task with a step Claude took over, `took_over`: Claude's lines were
+the agent's best, #566), `milestones` (`[{kind: landed|saved, n, day}]`: 1, 10, 25… tasks landed; 100K, 1M…
 Claude tokens saved by the estimate), `absorbed` (what never reached Claude: `auto_fixes` (the
 rounds, whatever came of them), `auto_fixed_tasks` (their tests then passed), `handovers_landed`),
 `questions` (`{asked, answered}`: a question's notice wakes Claude, so it isn't absorbed;
