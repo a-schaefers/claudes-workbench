@@ -371,7 +371,7 @@ coding choice is the user's (`wb coding`), never changed by a check.
 - **question** — answer it briefly and decisively: `wb answer <name> --text "…"`. The agent is
   blocked until you do.
 - **stuck / failed** — `wb log <name> -n 30` if the report isn't enough; then feedback that unblocks
-  it, or discard.
+  it, or discard. A failed round's edits so far stay in the worktree (`wb resume` carries on).
 - **Lessons**: when the `lessons:` line says one was seen in more than one task, or you just
   corrected something the next agent will get wrong too, triage it now (`reference/skills.md`).
   A one-task detail needs no call.

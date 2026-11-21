@@ -878,6 +878,7 @@ def run_round(task: store.Task, n: int, keep: bool = False) -> dict:
         log.flush()
         _stop(proc)
         out["exit"] = proc.wait()
+        out["lingered"] = True  # our stop's exit, not a crash: the round is what its events say
     log.close()
     ask_mcp.close(task, opened)  # its server is gone: closed, so nothing takes them for open
     if task.status.get("asking") or task.status.get("phase") == "asking":  # it ended
@@ -1461,7 +1462,10 @@ def summary_text(task: store.Task, n: int, rnd: dict, tests) -> str:
     if rnd["stuck"]:
         lines.append(f"STOPPED: {rnd['stuck']}")
     elif rnd["exit"] not in (0, None):
-        lines.append(f"opencode exited {rnd['exit']} (see {task.dir / 'runner.log'})")
+        lines.append(f"opencode exited {rnd['exit']}"
+                     + (": the round didn't finish; what it changed so far stays in the worktree"
+                        if died(rnd) and gitops.changed(task.worktree) else "")
+                     + f" (see {task.dir / 'runner.log'})")
     if rnd.get("retries"):  # #491: a request cut at the provider's timeout, or refused, and resent
         why = rnd["retries"][-1]
         lines.append(f"OpenCode resent {len(rnd['retries'])} request(s) to the model's server: {why}"
@@ -1758,6 +1762,14 @@ def read_bound(task: store.Task, n: int, rnd: dict) -> int | None:
     return tok_s
 
 
+def died(rnd: dict) -> bool:
+    """Whether OpenCode itself ended the round with a non-zero exit (a crash, an out-of-memory
+    kill, a provider error), not the runner's stop of a shutdown that hung (#83). Such a round
+    failed whatever it printed: one that said "I will inspect the files" and exited 7 went on to
+    the tests, and to review as "tests passed" (#427, the audit of 1.8)."""
+    return rnd.get("exit") not in (0, None) and not rnd.get("lingered")
+
+
 def _round_end(task: store.Task, n: int, rnd: dict, began: float) -> None:
     """How the round ended, for the Stats tab (#404): the guard that stopped it is counted in
     status `guards`, and a `round_end` event says how long it ran and how it ended. Only with
@@ -1766,7 +1778,7 @@ def _round_end(task: store.Task, n: int, rnd: dict, began: float) -> None:
         return
     how = ("stuck" if rnd.get("stuck") else "handover" if rnd.get("full") else
            "interrupted" if rnd.get("interrupted") else
-           "failed" if rnd.get("exit") not in (0, None) and not rnd.get("texts") else "done")
+           "failed" if died(rnd) else "done")
     if how == "stuck" and rnd.get("guard"):
         guards = dict(task.status.get("guards") or {})
         guards[rnd["guard"]] = guards.get(rnd["guard"], 0) + 1
@@ -1942,7 +1954,7 @@ def drive(task: store.Task) -> None:
                 except RuntimeError as e:
                     return _load_failed(task, e)
                 continue
-            if rnd["stuck"] or (rnd["exit"] not in (0, None) and not rnd["texts"]):
+            if rnd["stuck"] or died(rnd):
                 text = summary_text(task, n, rnd, None) + _undelivered(task)
                 task.round_dir(n).joinpath("summary.md").write_text(text)
                 phase = "stuck" if rnd["stuck"] else "failed"

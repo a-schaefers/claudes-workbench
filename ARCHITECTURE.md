@@ -188,7 +188,7 @@ stuck, failed, asking (`asking` is in both); `CLOSED` = accepted, discarded. Who
 | `asking` | the runner while a question of the round is open (`ask_mcp.relay`) |
 | `review` | the runner (tests pass; tests fail with auto-fix spent; no `--test`); `wb takeover` |
 | `stuck` | the runner (a guard stop; a SIGTERM that wasn't wb's: `runner.SIGNAL_STOP`); `wb stop`; `wb accept` when a live task's commit fails ("accept failed: …", the work kept in the worktree) |
-| `failed` | the runner (opencode exited non-zero with no text; the model couldn't load; a crash); `cli.reap` (the runner died without a report) |
+| `failed` | the runner (opencode exited non-zero, whatever it printed: `runner.died`; the model couldn't load; a crash); `cli.reap` (the runner died without a report) |
 | `accepted` / `discarded` | `wb accept` / `wb discard` |
 
 Inside one runner, rounds follow each other with no `queued` in between: a steer, a handover, an
@@ -572,9 +572,12 @@ once more and `pid` and `stopping` are cleared.
    `_steer_round` (the next round carries the notes). Opencode exited non-zero with no text
    while the model's server is down (it went away under the round) → a `load` event, the wait
    for the server (*Waiting for a server that is down*), and the round runs again, once a round.
-   Stuck, or opencode exited non-zero with no text → the report without tests (plus "NOTE: not delivered,
-   the round stopped first: …" for Claude's notes still pending, `_undelivered`), phase
-   `stuck`/`failed`, a notice, exit. Otherwise `run_tests`; a note that arrived meanwhile, or while
+   Stuck, or opencode exited non-zero (`died`: whatever it printed, since a child that said "I
+   will inspect the files" and exited 7 went on to an already-green test and to review as "tests
+   passed", #427; not the runner's own stop of a shutdown that hung, `lingered`) → the report
+   without tests (plus "NOTE: not delivered, the round stopped first: …" for Claude's notes still
+   pending, `_undelivered`), phase `stuck`/`failed`, a notice, exit; the edits so far stay in the
+   worktree. Otherwise `run_tests`; a note that arrived meanwhile, or while
    the report was being written → `_steer_round`. The report
    goes to `rounds/<n>/summary.md`. Failing tests with auto-fix left → an auto-fix round (round
    n+1's prompt is the failure). Otherwise phase `review`, a `review` notice (the report, then
@@ -864,8 +867,11 @@ again: that cost a whole restart in one task of two (the 2026-11-17 measurement)
 1. `task X · label · round n · M.m min · local tokens IN in / OUT out` (this round; input
    excludes cache reads).
 2. `agent context: U.UK of WK (P%)[, compacted Nx][; the next round starts a fresh session]`.
-3. `STOPPED: why` or `opencode exited N (see …/runner.log)`, when either; `OpenCode resent N
+3. `STOPPED: why` or `opencode exited N (see …/runner.log)`, when either; after a crash with the
+   worktree changed, `opencode exited N: the round didn't finish; what it changed so far stays in
+   the worktree (see …)`. `OpenCode resent N
    request(s) to the model's server: …` when it retried any (#491).
+
 4. `tests: PASS|FAIL (`cmd`, exit N)`, the last 25 lines on a failure; `base check: …`
    (`base_check_line`) while the task is on its first step with no review round yet;
    `auto-fix rounds used: a/b`.
@@ -4749,7 +4755,8 @@ prompt}` to `FAKE_RUNS`; `FAKE_LATE` pauses before its first event (a model read
 line; `FAKE_BG` (a file) starts a `sleep` in a session of its own, left running, and writes its pid
 there (what `sweep` must end); `FAKE_STRAY` first prints lines that are JSON but not events
 (`42`, a list, `null`) and events whose parts have the wrong shape; `FAKE_LINGER` closes its
-output after its last event and stays alive. Scenarios (`FAKE_SCENARIO`): `ok` (writes 42), `fix` (41 in a new session, 42 when
+output after its last event and stays alive; `FAKE_EXIT` exits with that code after its last event
+(a crash after words or an edit). Scenarios (`FAKE_SCENARIO`): `ok` (writes 42), `fix` (41 in a new session, 42 when
 continued: an auto-fix round passes), `loop` (the repeat guard stops it), `hang`, `crash` (exit 1,
 no events; with `FAKE_DOWN`, a file, it creates it the first time, taking the model server down
 with it, and runs like `ok` after), `slow` (hangs in a new session, ok when continued), `fill` (a 25K-token step at 76%
@@ -4758,7 +4765,9 @@ of 32K, then sleeps: the runner hands over mid-round; the handover prompt turns 
 over: `HANDOVER_ROOM`), `refill` (every session changes a file, then fills: `HANDOVER_MAX`),
 `bgwait` (a `background_wait` line, then `FAKE_BGWAIT` seconds, 6, of quiet, then `ok`),
 `toolhang` (one tool call, then silent), `retry` (a `retry` line every `FAKE_RETRY_EVERY`
-seconds, 1, as OpenCode prints it cutting each request at the provider timeout). `session list` lists nothing. Both session commands fail
+seconds, 1, as OpenCode prints it cutting each request at the provider timeout). 
+`say` (a few words, no tool call). 
+`session list` lists nothing. Both session commands fail
 without `--standalone`, as the real ones do when another service holds the managed port. Its
 live tool names are 1.x-style (`bash`, `filePath`); real OpenCode 2.x says `shell`, `path`
 (`events._brief` reads both).
