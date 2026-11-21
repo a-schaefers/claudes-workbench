@@ -775,6 +775,28 @@ class Real(unittest.TestCase):
 
     # only Ollama's API was read: on any other server the router ranked models without their
     # sizes, checked no fit, and every window had to be typed in (2026-11-17)
+    def test_lm_studio_without_just_in_time_loading_has_a_model_it_hasnt_loaded(self):
+        # #462 (the audit of 1.8, reproduced): JIT off lists only loaded models on /v1/models, so
+        # with a loaded, b read "the server serves a, not b: set the entry's id to a"
+        rows = lambda *loaded: {"models": [  # noqa: E731
+            {"key": k, "loaded_instances": [{"id": k}] if k in loaded else []} for k in ("a", "b", "c")]}
+        state = {"v1": {"data": [{"id": "a"}]}, "lms": rows("a")}
+        lms = self.server({"/v1/models": lambda h: state["v1"], "/api/v1/models": lambda h: state["lms"]})
+        plain = self.server({"/v1/models": {"data": [{"id": "a"}]}})     # not LM Studio
+        self.config({"lms": {"options": {"baseURL": lms + "/v1"}, "models": {"a": {}, "b": {}, "z": {}}},
+                     "srv": {"options": {"baseURL": plain + "/v1"}, "models": {"b": {}}}},
+                    {"lms": {"engine": "server"}, "srv": {"engine": "server"}})
+        found = models.discover()
+        self.assertEqual(models.status(found["lms/b"]),
+                         {"available": True, "resident": False, "why": "in LM Studio, not loaded (wb loads it)"})
+        self.assertTrue(models.status(found["lms/a"])["resident"])
+        self.assertIn("set the entry's id to a", models.status(found["lms/z"])["why"])  # LM Studio lacks z
+        self.assertIn("set the entry's id to a", models.status(found["srv/b"])["why"])
+        state.update(v1={"data": [{"id": "a"}, {"id": "c"}]}, lms=rows("a", "c"))  # two loaded
+        self.assertTrue(models.status(found["lms/b"])["available"])
+        state.update(v1={"data": []}, lms=rows())                               # none loaded
+        self.assertTrue(models.status(found["lms/b"])["available"])
+
     def test_lm_studio_says_each_models_size_window_and_tool_training(self):
         from workbench import cli
         lms = self.server({"/api/v1/models": {"models": [

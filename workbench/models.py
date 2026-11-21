@@ -872,10 +872,16 @@ def status(m: Model, down=frozenset(), catalog: dict | None = None) -> dict:
         # one listed model: llama-server answers to any name; several: it routes by name
         rows = [x for x in (body.get("data") or []) if isinstance(x, dict)]
         served = {x.get("id") for x in rows}
+        # LM Studio with just-in-time loading off lists only what is loaded: with A loaded, B
+        # read "the server serves A: set the entry's id to A", which pointed B at A, though LM
+        # Studio has B and wb loads it (#462, the audit of 1.8). Asked before a verdict only.
+        unloaded = {"available": True, "resident": False, "why": "in LM Studio, not loaded (wb loads it)"}
         if isinstance(body.get("data"), list) and not served:  # it read as running (#256)
-            return _no("the server answers but lists no model: load it there")
+            return unloaded if lmstudio_unloaded(m) else \
+                _no("the server answers but lists no model: load it there")
         if len(served) > 1 and m.name not in served:
-            return _no(f"the server lists {len(served)} models, not {m.name}")
+            return unloaded if lmstudio_unloaded(m) else \
+                _no(f"the server lists {len(served)} models, not {m.name}")
         sid = str(next(iter(served))) if len(served) == 1 else ""
         # vLLM, SGLang and TGI refuse any other name with a 404: the round died at its first
         # request as "opencode exited 1", and a vLLM name is a long HF path, easy to miss (#256,
@@ -885,7 +891,8 @@ def status(m: Model, down=frozenset(), catalog: dict | None = None) -> dict:
         # id, so studio/coder read as serving personal/coder (#339, the audit of 1.4)
         same = sid == m.name or (llamacpp and _serves(sid, m.name))
         if sid and not same and not llamacpp and not (m.start and _contended(m)):
-            return _no(f"the server serves {sid}, not {m.name}: set the entry's id to {sid}")
+            return unloaded if lmstudio_unloaded(m) else \
+                _no(f"the server serves {sid}, not {m.name}: set the entry's id to {sid}")
         if sid and m.start and _contended(m) and not same:
             # the task would run on the other model, recorded under this one (the 2026-11-16 audit)
             owners = _owners(m, sid)

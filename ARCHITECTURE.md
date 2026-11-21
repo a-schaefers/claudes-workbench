@@ -2686,7 +2686,11 @@ lists every downloaded model, so `status` says running) is loaded first, after `
 below, with `POST /api/v1/models/load` and `context_length` set to its `limit.context`; a refused
 load raises, naming `lms load <key> --context-length N`. Left to OpenCode's first request, LM
 Studio loaded it with its default window (often 4K), refused the prompt, and round 1 failed
-(#335, the audit of 1.4). Nothing is freed when `m` fits beside every model resident now (`_room_beside`: Ollama only, a
+(#335, the audit of 1.4). With just-in-time loading off, `/v1/models` lists only loaded
+models: before `status` says the server lists no model, other models, or serves another one,
+it asks `lmstudio_unloaded`, and a model LM Studio has is available, not resident ("in LM Studio,
+not loaded (wb loads it)"); with A loaded, B was told to set its id to A (#462, the audit of
+1.8). Nothing is freed when `m` fits beside every model resident now (`_room_beside`: Ollama only, a
 known budget, no other server resident, `m` all in VRAM if loaded, Ollama's loaded-model limit not
 reached, and the loaded sizes from `/api/ps` plus `need(m)` within `SHARE_AT` of the budget):
 every round once unloaded the user's Open WebUI, autocomplete or embedding model, fits or not
