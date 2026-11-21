@@ -498,6 +498,28 @@ test('in workbench mode the status line counts only this session\'s tasks as awa
   expect(ui.filter(l => l.startsWith('status')).at(-1)).toBe('status ⚒ wb · 1 awaiting review')
 })
 
+test('in a monorepo a session in one package is not woken for another package\'s task (#695)', async ($, on) => {
+  // #695: inside the repo was enough, so a session in /mono/pkg-b claimed pkg-a's review
+  const clock = mock.clock(on, { now: 1_800_000_000_000 })
+  const files: Record<string, string> = {}
+  task(files, 'pkg', 'review', { repo: '/home/u/mono', subdir: 'pkg-a', cwd: '/home/u/mono' })
+  task(files, 'here', 'review', { repo: '/home/u/mono', cwd: '/home/u/mono/pkg-a' })
+  task(files, 'ours', 'review', { repo: '/home/u/mono', subdir: 'pkg-b', cwd: '/home/u/mono' })
+  const names = ['pkg', 'here', 'ours']
+  for (const name of names) notice(files, { ts: ts0, task: name, kind: 'review', text: `REPORT-${name}` })
+  fakeTasks(on, files, names)
+  on('session.id', () => ({ value: 'sess-new' }))
+  on('process.run', () => ({ value: { exitCode: 0, stdout: '', stderr: '' } }))
+  on('ui.toast', () => ({ value: undefined }))
+  const woken: string[] = []
+  on('prompt.submit', (_: any, e: any) => { woken.push(e.text); return { text: e.text } })
+  await $.session.start({ cwd: '/home/u/mono/pkg-b', surface: 'terminal', isInteractive: true })
+  await clock.advance(3000)
+  expect(woken.filter(t => t.includes('REPORT-ours'))).toHaveLength(1)
+  expect(woken.join('\n')).not.toContain('REPORT-pkg')
+  expect(woken.join('\n')).not.toContain('REPORT-here')
+})
+
 test('a notice another session took under wb\'s lock wakes no one here (#687)', async ($, on) => {
   // #687: two sessions woken by one `wb events` line each read `acked`, then wrote it: both woke
   const clock = mock.clock(on, { now: 1_800_000_000_000 })

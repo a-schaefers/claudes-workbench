@@ -1477,8 +1477,9 @@ def _scope(tasks, where, sessions=None):
     claims it too, so a new process in the project adopts the old one's tasks (the 0.90 review:
     after a crash or an update, plain `claude` in the same repo was woken for none of them, and
     its quit left them running for nobody). One without a session (started by hand, or before
-    0.90), or with no `sessions` given (by hand), goes by directory: its `repo` is `where`,
-    inside it or holds it, or its `cwd` (where wb start ran) is `where` or inside it. A session
+    0.90), or with no `sessions` given (by hand), goes by directory: its `repo` is `where`
+    or inside it, or `where` is inside the task's spot (its package, repo/subdir; else its `cwd`
+    inside the repo; else the repo, #695), or its `cwd` (where wb start ran) is `where` or inside it. A session
     in the home directory or / claims none by directory. A task with neither key is everyone's.
     The others belong to another session, which its mod wakes and its quit commands stop (the
     2026-11-16 audit: two projects at once, one session's /workbench-quit stopped the other's
@@ -1497,10 +1498,15 @@ def _scope(tasks, where, sessions=None):
     for t in tasks:
         sid, cwd, repo = (t.spec.get(k) for k in ("session", "cwd", "repo"))
         cwd, repo = cwd and real(cwd), repo and real(repo)
+        # a session inside the task's own spot: its package (repo/subdir), else where wb start ran
+        # when that is inside the repo, else the repo. Inside the repo alone, a session in a
+        # monorepo's sibling package claimed the task and was woken for its review (#695)
+        sub = t.spec.get("subdir")
+        spot = repo and (real(repo / sub) if sub else cwd if cwd and cwd.is_relative_to(repo) else repo)
         # Path.is_relative_to compares whole components: /x/ab isn't inside /x/a
         near = here is not None and not broad and bool(
             cwd and cwd.is_relative_to(here)
-            or repo and (repo.is_relative_to(here) or here.is_relative_to(repo)))
+            or repo and (repo.is_relative_to(here) or here.is_relative_to(spot)))
         if sessions and sid:
             ok = sid in sessions or near and _gone(t.spec.get("claude_pid"), t.spec.get("claude_start"))
         elif here is None or (not cwd and not repo):

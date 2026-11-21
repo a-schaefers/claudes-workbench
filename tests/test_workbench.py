@@ -4486,6 +4486,26 @@ class Steering(Base):
         os.environ.pop("CLAUDE_CODE_SESSION_ID")                       # a terminal: everyone's
         self.assertIn("t-b1", run_wb("status").split("open elsewhere")[0])
 
+    def test_a_monorepo_package_task_is_not_a_sibling_packages_session(self):
+        # #695: a session in /mono/pkg-b claimed a task for /mono/pkg-a, being inside the repo
+        mono = Path(self.tmp.name) / "mono"
+        for d in ("pkg-a/src", "pkg-b"):
+            (mono / d).mkdir(parents=True)
+
+        def task(name, **spec):
+            t = store.Task(name)
+            t.dir.mkdir(parents=True)
+            store.write_json(t.dir / "task.json", {"name": name, "created_at": store.now(), **spec})
+            t.set_status(phase="review", round=1)
+            return t
+        pkg = task("t-pkg", repo=str(mono), subdir="pkg-a", cwd=str(mono))         # wb start --repo pkg-a
+        here = task("t-here", repo=str(mono), cwd=str(mono / "pkg-a"))             # started in pkg-a
+        whole = task("t-whole", repo=str(mono), cwd=str(Path(self.tmp.name)))     # from outside
+        mine = lambda d: sorted(t.name for t in cli._scope([pkg, here, whole], str(d))[0])  # noqa: E731
+        self.assertEqual(mine(mono / "pkg-b"), ["t-whole"])
+        self.assertEqual(mine(mono / "pkg-a" / "src"), ["t-here", "t-pkg", "t-whole"])
+        self.assertEqual(mine(mono), ["t-here", "t-pkg", "t-whole"])
+
     def test_takeover_stops_the_agent_and_hands_over_the_worktree(self):
         self.start("t-take", "slow", "--test", TEST_CMD)
         self.wait_session("t-take")

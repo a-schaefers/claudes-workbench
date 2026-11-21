@@ -16,6 +16,9 @@ export type WbTask = {
    * session's task it is */
   repo: string
   cwd: string
+  /** task.json's subdir, the monorepo package it is for ('' for none): a session in a sibling
+   * package doesn't claim it (#695) */
+  subdir: string
   /** the Claude Code session `wb start` ran in ('' by hand, or before 0.90): whose task it is */
   session: string
   /** the Claude Code process it ran in (0 when unknown): once gone, the directory rule adopts it */

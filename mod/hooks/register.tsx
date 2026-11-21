@@ -87,7 +87,7 @@ const OLDEST_WAKE_MS = 60 * 60 * 1000 // never wake for a notification older tha
 
 // Change the tag when WbTask's fields change: a reload declines what the earlier shape stored.
 const tasks = atom({ plugin: 'workbench', key: 'tasks' } as const, [] as WbTask[], {
-  shape: 'tasks-7',
+  shape: 'tasks-8',
 })
 
 // Every Claude Code session id this process has had (`$.session.id()`): /clear and a resume go on
@@ -1352,20 +1352,25 @@ const within = (a: string, b: string) => {
 // Whether a task is this session's. One `wb start` ran in this process's sessions (task.json
 // `session`) is, wherever it ran: by directory alone, a `cd /tmp/x && wb start` task was no one's
 // (the 0.90 review). One without (started by hand, or before 0.90) goes by directory: its repo
-// is the session's directory, inside it or holds it (a session in a subdirectory, or in a folder
-// of several repos), or where `wb start` ran (`cwd`) is the session's directory or inside it. So
+// is the session's directory or inside it (a folder of several repos), or the session is inside
+// the task's spot (`spotOf`: its package, else its cwd, else the repo; #695), or where `wb start` ran (`cwd`) is the session's directory or inside it. So
 // does another session's whose Claude Code process (`claude_pid`) is gone: a new process in the
 // project adopts it (the 0.90 review: after a crash or an update, plain `claude` in the same repo
 // was woken for none of them). A session in the home directory or / claims none by directory: a
 // task started from ~ belonged to every session under it (the 0.90 review). A task with no key
 // at all is everyone's. `wb`'s _scope judges the same.
-const near = (t: { repo?: string; cwd?: string }) => {
+// A session inside the repo counts only inside the task's own spot: its package (repo/subdir),
+// else where `wb start` ran when that is inside the repo, else the repo. Inside the repo alone, a
+// session in a monorepo's sibling package was woken for another package's review (#695).
+const spotOf = (t: { repo?: string; cwd?: string; subdir?: string }) =>
+  t.subdir ? `${t.repo}/${t.subdir}` : t.cwd && within(t.repo!, t.cwd) ? t.cwd : t.repo!
+const near = (t: { repo?: string; cwd?: string; subdir?: string }) => {
   const at = parts(mem.cwd).join('/')
   if (!at || (mem.home && at === parts(mem.home).join('/'))) return false
   return (!!t.cwd && within(mem.cwd, t.cwd)) ||
-    (!!t.repo && (within(mem.cwd, t.repo) || within(t.repo, mem.cwd)))
+    (!!t.repo && (within(mem.cwd, t.repo) || within(spotOf(t), mem.cwd)))
 }
-const mine = (t: { session?: string; repo?: string; cwd?: string; claude_pid?: number; claude_start?: string }) => {
+const mine = (t: { session?: string; repo?: string; cwd?: string; subdir?: string; claude_pid?: number; claude_start?: string }) => {
   if (t.session && mem.ids.size) {
     return mem.ids.has(t.session) || (mem.deadPids.has(pidKey(t)) && near(t))
   }
@@ -1539,7 +1544,8 @@ async function scan($: any, root: string, now: number): Promise<WbTask[]> {
       tests: st.tests ? (st.tests.ok ? 'pass' : 'fail') : null,
       last: String(st.last ?? ''), createdAt: Number(sp.created_at ?? 0) * 1000, updatedAt,
       tokens: Number(st.tok_in ?? 0) + Number(st.tok_out ?? 0), recent,
-      repo: String(sp.repo ?? ''), cwd: String(sp.cwd ?? ''), session: String(sp.session ?? ''),
+      repo: String(sp.repo ?? ''), cwd: String(sp.cwd ?? ''), subdir: String(sp.subdir ?? ''),
+      session: String(sp.session ?? ''),
       claude_pid: Number(sp.claude_pid ?? 0), claude_start: String(sp.claude_start ?? ''),
       backlog: String(sp.backlog ?? ''),
       parked: phase === 'stuck' && !!st.parked,
