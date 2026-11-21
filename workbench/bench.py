@@ -765,7 +765,10 @@ def replay(case: dict, model: str, rep: int, run: str, label: str, skills: list[
                    minutes=round((time.time() - began) / 60, 1), asks_refused=asks_refused,
                    visible_ok=(st.get("tests") or {}).get("ok"),
                    handovers=sum(e.get("kind") == "fresh" for e in
-                                 store.read_jsonl(task.dir / "events.jsonl")[0]))
+                                 store.read_jsonl(task.dir / "events.jsonl")[0]),
+                   # the arm it ran in and what its agent used of it (#857): an A/B reads both
+                   experiments=sorted(k for k, v in (task.spec.get("experiments") or {}).items() if v),
+                   experiment_use=st.get("experiment_use") or {}, long_reads=st.get("long_reads", 0))
         if st.get("last") == PREEMPTED:
             return {**row, "outcome": "preempted"}
         if phase == "failed" and st.get("infra"):  # the setup, the server, the runner, the disk
@@ -1000,6 +1003,7 @@ def report(run: str | None = None, label: str | None = None) -> str:
         out.append(f"{lab[:12]:12} {model[:34]:34} {n:>5} {sum(r['outcome'] == 'passed' for r in g) / n:>6.0%} "
                    f"{avg('rounds'):>6.1f} {avg('auto_fixes'):>7.1f} {avg('minutes'):>6.1f} "
                    f"{int(avg('tok_in') + avg('tok_out')):>10}")
+    out += use_lines(by)
     have = cases()
     out.append("")
     for c in sorted({r["case"] for r in rs}):
@@ -1013,6 +1017,21 @@ def report(run: str | None = None, label: str | None = None) -> str:
         out.append(f"({len(other) - len(errors)} replay(s) preempted, left out)")
     out += unstarted + self_lines(mine)
     return "\n".join(out)
+
+
+def use_lines(by: dict) -> list[str]:
+    """Per label and model whose replays had an experiment on: how many of them used it, how
+    often, and their whole reads of long files. An A/B whose agent never ran the tool measures
+    nothing, and the first probe run learnt it only by searching the events afterwards (#857)."""
+    out = []
+    for (lab, model), g in sorted(by.items()):
+        for name in sorted({x for r in g for x in r.get("experiments") or ()}):
+            on = [r for r in g if name in (r.get("experiments") or ())]
+            calls = [(r.get("experiment_use") or {}).get(name, 0) for r in on]
+            out.append(f"{lab[:12]} {model.split('/')[-1]}: {name} used in {sum(c > 0 for c in calls)} of "
+                       f"{len(on)} replay(s), {sum(calls)} call(s); whole reads of long files: "
+                       f"{sum(r.get('long_reads') or 0 for r in on)}")
+    return out
 
 
 def model_line(model_id: str) -> str | None:

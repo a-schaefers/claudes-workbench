@@ -341,12 +341,78 @@ EXPERIMENTS = {
     "probe": "the agent's shell may run probe, and its handbook says how: a file's outline and "
              "one function, instead of the whole file",
 }
-# what an experiment adds to the agent's copy of the handbook, after its own text
+# the file length from which the probe experiment's note and protocol line apply: its gain
+# showed only on a 2,700-line file, its cost on 1,500-line ones (#857)
+PROBE_FILE_LINES = 1500
+
+
+# what an experiment adds to the agent's copy of the handbook, after its own text. probe aborts
+# (SIGABRT, a core dump, a desktop crash dialog) when a pipe closes early: Rust's println! panics
+# on EPIPE. Agents piped it into `head` (the A/B of 2026-11-21), so the note steers them to its
+# own limits and to `grep`, which reads to the end (#857)
 EXPERIMENT_NOTES = {
-    "probe": "\n## Reading code\nRead a whole file only when you need most of it. `probe symbols "
-             "<file>` lists its functions with line numbers; `probe extract <file>#<name>` prints "
-             "one; after an edit, re-read only the function you changed.\n",
+    "probe": "\n## Reading code: probe\nWhen you need one function from a file over "
+             "{probe_lines} lines, read just that function, not the whole file. You know its name: "
+             "`probe extract <file>#<name>`. You don't: `probe symbols <file>` lists each function "
+             "and class with its lines (add `--allow-tests` in a test file). To find where a name is "
+             "defined or used, `probe search \"name1 OR name2\" <dir> --dry-run -o plain` prints "
+             "only files and line ranges; then extract or read those lines. One search already "
+             "matches other spellings (case, snake_case, camelCase), so never repeat one or re-spell "
+             "it. \"No results\" doesn't mean the name is absent: check with `grep -n`. After two "
+             "searches that miss, use `grep -n`. Stop exploring once you know the function you will "
+             "change and what calls it. Never pipe probe into `head` (it crashes when its output is "
+             "cut off): filter with `grep`. When probe says \"File too large\" (over 1 MB), use "
+             "`grep -n` for the names and read those lines.\n",
 }
+# what an experiment adds to every round prompt's protocol, beside the acceptance line: the
+# handbook alone went unread (probe: 0 calls in 14 replays, 2026-11-21). A condition, not an
+# order: "before you read a file over 300 lines, run probe symbols" made the agent outline and
+# search mid-sized files it didn't need to, filling a 40K window (the second A/B, 2026-11-21:
+# 2-3x the calls, a handover in every probe-on replay of big-compaction, #857)
+EXPERIMENT_PROTOCOL = {
+    "probe": "- When you need one function from a file over {probe_lines} lines, `probe extract "
+             "<file>#<name>` it instead of reading the whole file.\n",
+}
+EXPERIMENT_NOTES = {k: v.replace("{probe_lines}", str(PROBE_FILE_LINES)) for k, v in EXPERIMENT_NOTES.items()}
+EXPERIMENT_PROTOCOL = {k: v.replace("{probe_lines}", str(PROBE_FILE_LINES))
+                       for k, v in EXPERIMENT_PROTOCOL.items()}
+# The most a probe search prints, in tokens, unless the user's PROBE_MAX_TOKENS says otherwise
+# (runner.agent_env): it has no limit of its own, and one plain query printed 42K tokens (#857)
+PROBE_MAX_TOKENS = 2000
+
+# A read of a whole file longer than this is what probe is for: the round prompt's trigger, and
+# what the runner counts (status `long_reads`) beside the experiments' use (#857)
+LONG_FILE_LINES = 300
+
+
+def experiment_use(task: store.Task, row: dict) -> list[str]:
+    """The experiments this tool call used: probe when a shell line runs `probe` and the task has
+    probe on. Counted live (status `experiment_use`), so an A/B knows within a replay whether the
+    agent takes the tool up: the first measurement learnt only at its end that probe had never
+    run, in 14 replays (#857)."""
+    return ["probe"] if experiment(task, "probe") and "probe" in (row.get("programs") or ()) else []
+
+
+def long_read(task: store.Task, row: dict) -> int:
+    """The length in lines of the file this call read whole, when over LONG_FILE_LINES; else 0."""
+    if row.get("tool") != "read" or not row.get("whole") or not row.get("path"):
+        return 0
+    path = Path(row["path"])
+    path = path if path.is_absolute() else task.worktree / path
+    try:
+        with open(path, "rb") as f:
+            n = sum(1 for _ in f)
+    except OSError:
+        return 0
+    return n if n > LONG_FILE_LINES else 0
+
+
+def experiment_protocol(task: store.Task | None = None, experiments: dict | None = None) -> str:
+    """The protocol lines of the experiments this task's agent has (EXPERIMENT_PROTOCOL): the
+    task's, or ``experiments`` as task.json will record them (wb start writes round 1's prompt
+    before task.json, #873)."""
+    have = experiments if experiments is not None else (task.spec.get("experiments") or {}) if task else {}
+    return "".join(line for name, line in EXPERIMENT_PROTOCOL.items() if have.get(name))
 
 
 def experiments_path() -> Path:
