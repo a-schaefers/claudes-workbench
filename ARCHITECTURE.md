@@ -286,7 +286,9 @@ CLAUDE.md, the user's decisions, the review checks) marked apart.
   (`context.instruction_files`), and it's never to be committed. All of this comes before the task
   directory is made, so a refusal leaves nothing behind.
 - It picks the model: the router's choice for the task's size (`--size trivial|significant`,
-  default significant) and the repo's stack (its main languages, from its tracked files), or
+  default significant) and the repo's stack (its main languages, from its tracked files; a
+  monorepo package's own, from the package's files: a Go service in a TypeScript monorepo was
+  routed and recorded as TypeScript work, #820), or
   `--model` (an id, or a fragment that names one model). First it refuses when the first word of
   `runner.opencode_bin()` isn't on PATH (the runner would empty the GPU, then the round die as
   "opencode exited 1"). No model can run: exit 3, each model's reason with its next step
@@ -3336,7 +3338,8 @@ often taken over looked best, #647); a discard whose earlier steps `wb next` com
 branch kept counts their share (the row's `landed_steps` over its steps; `--drop-steps` writes
 none): a chain of four approved steps whose fifth stuck counted as a whole failed try, for the
 router, the tuning (`reward` is that share too) and the skills' records alike (#722); on the repo's stack (`gitops.stack`: up to two languages, each at
-least 20% of the tracked source files; a row's stack is the one recorded, else read from its repo)
+least 20% of the tracked source files, the package's alone when the task has one, #820; a
+row's stack is the one recorded, else read from its repo, its `subdir` when the row has one)
 quality = (like_accepted + `LIKE_PRIOR`·overall) / (like_tried + `LIKE_PRIOR`), `LIKE_PRIOR` = 2.
 Each count in quality is weighed by recency (`_weight`: half for each `HALF_LIFE_DAYS` 60 of a
 row's age, 1 without a `ts`; `Score.w`), so a record from a week a model was misconfigured
@@ -6531,7 +6534,8 @@ questions `ask {id}`, `answer {id}`. From `wb`:
 `takeover`, `coding` (the user allowed Claude an edit), `error` (`reap`: the runner died without a report).
 
 **results.jsonl** (`results.record`, on accept and discard): `ts`, `task`, `outcome`
-(`accepted`/`discarded`), `model`, `size`, `repo`, `stack`, `rounds`, `auto_fixes`, `reviews`
+(`accepted`/`discarded`), `model`, `size`, `repo`, `stack`, `subdir` (task.json's, a monorepo
+package, when set: #820), `rounds`, `auto_fixes`, `reviews`
 (every step's), `spec_rounds`, `tests_ok`, `minutes` (wall clock since `wb start`, queueing and
 review included), `tok_in`, `tok_out`, `ran` (whether the agent ever got a request to its model, `results.ran`: a
 session began or a token was written), `failed_before` (`setup` or `load`, when it never ran:

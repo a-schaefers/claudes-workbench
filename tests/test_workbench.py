@@ -14495,6 +14495,34 @@ class Projects(Base):
         self.assertIn(web / "CLAUDE.md", context.instruction_files(task)[0])
         self.assertEqual(cli.claude_md_status(self.repo, "HEAD", "packages/web"), cli.LOCAL_CLAUDE_MD)
 
+    def test_a_monorepo_packages_stack_is_its_own_not_the_whole_repos(self):
+        # #820: a Go service in a mostly-TypeScript monorepo was routed by, and recorded as,
+        # TypeScript work: the stack came from every tracked file, before the package was found
+        g = lambda *a: subprocess.run(["git", "-C", str(self.repo), *a], check=True)  # noqa
+        api, web = self.repo / "services" / "api", self.repo / "web"
+        for d in (api, web):
+            d.mkdir(parents=True)
+        (api / "CLAUDE.md").write_text("# api\nThe Go service.\n")
+        for i in range(2):
+            (api / f"h{i}.go").write_text("package api\n")
+        for i in range(20):
+            (web / f"c{i}.ts").write_text("export {}\n")
+        g("add", "-A")
+        g("commit", "-qm", "a Go service in a TypeScript monorepo")
+        self.assertEqual(gitops.stack(self.repo), ["typescript"])
+        self.assertEqual(gitops.stack(self.repo, "services/api"), ["go"])
+        os.environ["FAKE_SCENARIO"] = "ok"
+        run_wb("start", "t-go", "--spec", str(self.spec), "--repo", str(api), "--model", "mimo")
+        self.assertEqual(store.Task("t-go").spec["stack"], ["go"])
+        wait_phase("t-go", {"review"})
+        run_wb("accept", "t-go", "-m", "x")
+        row = store.results()[-1]
+        self.assertEqual((row["stack"], row["subdir"]), (["go"], "services/api"))
+        from workbench import router
+        router._repo_stack.cache_clear()
+        old = {k: v for k, v in row.items() if k != "stack"}       # a row from before the stack
+        self.assertEqual(router.row_stack(old), ("go",))
+
     def test_from_a_folder_inside_a_package_the_nearest_package_claude_md_above_is_used(self):
         # #606 (the audit of v1.90): only --repo itself was looked at, so from packages/app/src
         # wb start refused the repo, or with a root CLAUDE.md ran the task at the root

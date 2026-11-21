@@ -106,15 +106,16 @@ class Score:
 
 
 @functools.cache
-def _repo_stack(repo: str) -> tuple:
-    return tuple(gitops.stack(repo)) if Path(repo).is_dir() else ()
+def _repo_stack(repo: str, subdir: str | None = None) -> tuple:
+    return tuple(gitops.stack(repo, subdir)) if Path(repo).is_dir() else ()
 
 
 def row_stack(r: dict) -> tuple:
-    """A result's stack: recorded since it was, else read from its repo while that exists."""
+    """A result's stack: recorded since it was, else read from its repo (its package's, #820)
+    while that exists."""
     if r.get("stack") is not None:
         return tuple(r["stack"])
-    return _repo_stack(r["repo"]) if r.get("repo") else ()
+    return _repo_stack(r["repo"], r.get("subdir")) if r.get("repo") else ()
 
 
 def _up(over: dict, model_id: str, key: str) -> list[str]:

@@ -1133,11 +1133,12 @@ LANGUAGES = {
 STACK_SHARE = 0.2  # a language holding at least this share of the source files is part of it
 
 
-def stack(repo) -> list[str]:
+def stack(repo, subdir: str | None = None) -> list[str]:
     """The repo's main languages, most files first (at most two), from its tracked files; empty
-    when it has no source or isn't a repository."""
+    when it has no source or isn't a repository. ``subdir``: a monorepo package's alone (a Go
+    service in a TypeScript monorepo was routed and recorded as TypeScript work, #820)."""
     try:
-        names = git(repo, "ls-files", "-z").split("\0")
+        names = git(repo, "ls-files", "-z", *(["--", subdir] if subdir else [])).split("\0")
     except (GitError, OSError):
         return []
     langs = Counter(LANGUAGES[x] for n in names if (x := Path(n).suffix[1:].lower()) in LANGUAGES)

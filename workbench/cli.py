@@ -897,7 +897,9 @@ def cmd_start(a):
     if (have := runner.opencode_version()) and have < (2, 0):
         die(f"OpenCode {have[0]}.{have[1]} can't run tasks: workbench needs OpenCode 2.x: "
             f"{runner.OPENCODE_GET}", 3)
-    stack = gitops.stack(repo)
+    # the package first: its stack is the task's, not the whole monorepo's (#820). Read again
+    # below, after the base is checked; a base that names no commit finds none here
+    stack = gitops.stack(repo, _package(repo, Path(a.repo).resolve(), a.base))
     m, state, why = pick_model(a.size, a.model, stack, a.name)
     if not state["available"] and not a.force:
         fix = models.remedy(m, state)
