@@ -2872,6 +2872,26 @@ class Budgets(Base):
         self.assertEqual((spec["think_timeout"], spec["silence_timeout"]), (b["think"], b["silence"]))
         wait_phase("t-slow", {"review"})
 
+    def test_a_task_measured_slow_after_it_started_gets_the_longer_limits_in_its_next_round(self):
+        # #814: the limits were fixed at wb start, so a first task whose round measured the model
+        # slow kept 900 s of silence in every later round; a limit a flag gave stays the user's
+        self.start("t-later", "ok", "--round-timeout", "3000")
+        spec = store.Task("t-later").spec
+        self.assertEqual(spec["timeouts_given"], ["round"])
+        self.assertEqual(spec["silence_timeout"], 900)
+        wait_phase("t-later", {"review"})
+        self.assertIsNone(store.Task("t-later").status.get("limits"))   # not measured: as started
+        m = models.resolve("mimo")
+        router.record_speed(m.id, self.session(15, 150, n=40))
+        b = router.budgets(m)
+        run_wb("feedback", "t-later", "--text", "1. Again.")
+        st = wait_phase("t-later", {"review"})
+        self.assertEqual(st["limits"], {"think": b["think"], "silence": b["silence"]})
+        layer = json.loads((context.rules_dir(store.Task("t-later")) / "opencode.json").read_text())
+        self.assertEqual(layer["provider"]["ollama"]["options"]["chunkTimeout"], (b["silence"] + 60) * 1000)
+        evs, _ = store.read_jsonl(store.Task("t-later").dir / "events.jsonl")
+        self.assertTrue(any(e["kind"] == "limits" and e["round"] == 2 for e in evs))
+
     def test_a_thinking_model_that_would_outlast_its_budget_on_this_machine_is_flagged(self):
         # a 64K entry left thinking with a 16K cap, spilled to 21 tok/s, sat silent 14 minutes
         # at a time (2026-11-18); the same settings on a fast card are fine

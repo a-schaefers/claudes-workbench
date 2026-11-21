@@ -315,7 +315,9 @@ CLAUDE.md, the user's decisions, the review checks) marked apart.
   naming the holders it will wait for (`cli._gpu_note`).
 - It works out the limits: `--round-timeout` and `--silence-timeout` unset (or 0) take the
   model's measured budgets (`router.budgets`), as does `--think-timeout` unset (0 turns the
-  think nudge off); `--checkin` defaults to 0 (off).
+  think nudge off); `--checkin` defaults to 0 (off). The ones no flag gave (task.json
+  `timeouts_given` lists those a flag did) stretch before each round when the model has since
+  been measured slower (`runner.stretch_limits`, *Budgets and speed*, #814).
 - It doesn't make the worktree: the runner does, first of all (`runner.checkout`, task.json
   `checkout: "runner"`, status `checked_out` and `checkout_secs`), branch `delegate/<task>` in a
   fresh worktree under the task directory from `--base` (default `HEAD`). Made here, a big repo,
@@ -883,7 +885,7 @@ on the wall clock, which the files' timestamps use. Silence and the think budget
   round nudged for that was then stopped "even after a nudge". Silence before the first line
   says so: "no first output in N minutes: the model may be reading its prompt slowly…;
   --silence-timeout gives a new task longer", and the round's read speed bound (*Speed*,
-  below) adds what a new task on the model now waits.
+  below) adds what this task's next round and a new task on the model now wait.
 - A `retry` line is not output (#491, the audit of 1.90). OpenCode 2.3 waits `headerTimeout` (300
   s unless the provider sets it) for a response's headers and `chunkTimeout` (900 s) between
   streamed chunks, then aborts the request and prints `retry {attempt, nextRetryAt, error:
@@ -3372,7 +3374,13 @@ each, in `speed.json` (`{"<id>": {"write": [...], "read": [...]}}`, under `speed
 takes the medians. At `wb start`, `budgets(m)` sets think = `THINK_TOKENS` 13,500 / write + window
 / read (either term alone when only one speed is measured: a read bound may be all there is,
 #491), clamped to [420, `THINK_MAX` 1800] s, and scales silence (900) and round (2400) by
-think / 420. No measured speed: the defaults. They are written into task.json once.
+think / 420. No measured speed: the defaults. They are written into task.json at start, and
+before each round `runner.stretch_limits` raises each one no flag gave (task.json
+`timeouts_given`) to `budgets(m)` again where that is longer, into status `limits`, which the
+round's guards and the layer's `chunkTimeout` read (`runner.limit`), with a `limits` event: a
+first task whose round 1 measured the model slow kept 900 s of silence in every later round,
+and a fresh session read its prompt again into the same wall (#814). A flag's value never
+changes; a task from before the key keeps task.json's.
 
 **Managing the set.** `wb model add <provider/model> [--pull] [--context N]` (Ollama): pulls
 (`/api/pull`, progress every 5%), asks `/api/show` for capabilities and context, and writes the
@@ -6415,7 +6423,9 @@ monorepo package, *Instructions*) (each when set), `setup`, `setup_timeout` (wit
 set: its limit in seconds, `--setup-timeout` or the repo's commands.json one), `copy`, `siblings` (when set: the
 flags with commands.json `repos`, *Setting the worktree up*; `lib` one level up, `../../a/b` further),
 `worktree` (when nested: the worktree's path in the task's directory, `tree/…/worktree`, #261), `checkout` (`"runner"`: the runner makes the worktree, `runner.checkout`; missing on a task from before #529, whose worktree `wb start` made), `checkout_bytes` (the checkout and `--copy` size `wb start`'s disk check measured: counted as taken until the runner has made it, and checked again before it does, #676; missing when the free space was unknown), `auto_fix`, `self_review` (true/false from the flags; null: learned), `ask_budget`,
-`ask_timeout`, `checkin`, `round_timeout`, `silence_timeout`, `think_timeout`, `test_timeout`,
+`ask_timeout`, `checkin`, `round_timeout`, `silence_timeout`, `think_timeout`, `timeouts_given`
+(which of `round`, `silence`, `think` a flag gave: the rest stretch, `runner.stretch_limits`,
+#814), `test_timeout`,
 `created_at`, `wb_version`, `experiments` (`{probe: true|false}`: what this task's agent has,
 `context.task_experiments`; missing on a task from before them: all off). Read but written by no command: `stuck` (the guards' thresholds),
 `deny_skills`. A missing key takes the runner's own default (auto-fix 0, think and
@@ -6430,6 +6440,7 @@ check-ins off), not `wb start`'s.
 | `signalled` | when a SIGTERM that wasn't wb's stopped the runner (`SIGNAL_STOP`): a shutdown's tasks are batched by it (`runner._signal_notice`, #544) |
 | `boot` | the boot the runner started in (`store.boot_id`: Linux's and WSL2's `/proc/sys/kernel/random/boot_id`, macOS's `kern.boottime`); `reap` reads another as a restart (#544) |
 | `round`, `round_started_at` | the runner round (every kind counts); when it started |
+| `limits` | `{think?, silence?, round?}` seconds: the limits no flag gave, raised before the round for a model measured slower since wb start (`runner.stretch_limits`, #814); null when none was |
 | `steps`, `step_round`, `step_sizes` | `wb next`: the step number, the round it began, the closed steps' `results.step` |
 | `step_base` | `wb next`: the worktree's HEAD as the step advanced, its commit or, for a step with no changes, the last one before it: what `wb verify` and `wb shot` compare the next step with (`verify._review_base`; without it, the newest earlier step's commit by its trailer, else the base: the step after a clean one refused both, #652) |
 | `reviews` | review rounds in this step (`wb feedback` +1, `wb next` resets) |
@@ -6482,7 +6493,7 @@ description, 90 characters; a skill's id), `text {text}` (2000 characters), `ste
 cache, reasoning?}` (reasoning tokens apart from `out`, when any, #644), `error {text}`, `retry {text, attempt}` (OpenCode resending a request, #491). From the runner: `round`, `stopped {text}`, `steer {now, by:
 "workbench"}` (a nudge), `interrupted`, `tests {ok, text}`, `skills`, `fresh {overflow,
 compacted}`,
-`autofix`, `self_review`, `reading_full`, `full`, `compacted {text}` (OpenCode compacted the session mid-round and it carried on, #774), `load` (the model reloaded before a round), `left_bg {text}` (the round ended with a job still in the background, #658),
+`autofix`, `self_review`, `reading_full`, `full`, `compacted {text}` (OpenCode compacted the session mid-round and it carried on, #774), `load` (the model reloaded before a round), `limits {text}` (the limits stretched for a model measured slow, #814), `left_bg {text}` (the round ended with a job still in the background, #658),
 `round_end {secs, how, guard?}` (with stats recording on: *Stats recording*), `export` (the session export failed: judged by `live_used`), `stopped {by:
 "signal"}` (a SIGTERM not from wb), `gpu {text}` (a warning from loading the model: a server wb
 can't stop, a model partly on the CPU, a share Ollama couldn't keep), and relaying the agent's

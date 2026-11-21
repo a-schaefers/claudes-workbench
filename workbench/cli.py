@@ -990,6 +990,9 @@ def cmd_start(a):
         "round_timeout": a.round_timeout or limits["round"],
         "silence_timeout": a.silence_timeout or limits["silence"],
         "think_timeout": a.think_timeout if a.think_timeout is not None else limits["think"],
+        # the rest stretch when a round measures the model slow (runner.stretch_limits, #814)
+        "timeouts_given": [k for k, v in (("round", a.round_timeout), ("silence", a.silence_timeout))
+                           if v] + (["think"] if a.think_timeout is not None else []),
         "created_at": store.now(), "wb_version": __version__})
     (task.dir / STARTING).unlink(missing_ok=True)  # a task now: wb discard drops it from here on
     prompt = spec_text.rstrip() + PROTOCOL.format(branch=gitops.branch_name(a.name),

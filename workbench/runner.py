@@ -193,8 +193,42 @@ def provider_timeouts(task: store.Task) -> dict:
     pid = str(task.spec.get("model") or "").split("/", 1)[0]
     if not pid:
         return {}
-    chunk = max(900, int(float(task.spec.get("silence_timeout") or 900)) + 60) * 1000
+    chunk = max(900, int(float(limit(task, "silence")) + 60)) * 1000
     return {"provider": {pid: {"options": {"headerTimeout": False, "chunkTimeout": chunk}}}}
+
+
+# A task's limits were fixed in task.json at wb start, so a task on a model not yet measured kept
+# the defaults in every later round, after its first round had measured the model slow and said a
+# new task would wait longer: a fresh session read its prompt again at the same speed and hit the
+# same 900 s wall, and only a new task got the time (#814). Before each round the runner takes,
+# for each limit no flag gave (task.json `timeouts_given`), the larger of task.json's value and the
+# model's budget now, into status `limits`; a flag's value is the user's word, and a task from
+# before the key keeps its own.
+LIMITS = {"think": "think_timeout", "silence": "silence_timeout", "round": "round_timeout"}
+LIMIT_DEFAULTS = {"think": 0, "silence": 900, "round": 2400}  # a task.json missing the key
+
+
+def limit(task: store.Task, which: str) -> float:
+    """The round's limit ``which`` (think, silence, round) in seconds: status `limits`, stretched
+    for a model measured slow since wb start (stretch_limits), else task.json's."""
+    if (now := (task.status.get("limits") or {}).get(which)) is not None:
+        return float(now)
+    return float(task.spec.get(LIMITS[which]) or LIMIT_DEFAULTS[which])
+
+
+def stretch_limits(task: store.Task, m) -> dict:
+    """Status `limits`: each limit no flag gave, raised to the model's budget now
+    (router.budgets) where that is longer than task.json's; returns what was raised."""
+    from . import router
+    spec = task.spec
+    given = spec.get("timeouts_given")
+    if given is None:  # a task from before #814: whether a flag gave them is unknown
+        return {}
+    fresh = router.budgets(m)
+    raised = {k: fresh[k] for k, key in LIMITS.items()
+              if k not in given and fresh[k] > float(spec.get(key) or 0)}
+    task.set_status(limits=raised or None)
+    return raised
 
 
 def write_config_layer(task: store.Task) -> Path:
@@ -877,8 +911,7 @@ def run_round(task: store.Task, n: int, keep: bool = False) -> dict:
         power.start()
 
     detector = StuckDetector(**spec.get("stuck", {}), worktree=task.worktree)
-    wall, silence = float(spec.get("round_timeout", 2400)), float(spec.get("silence_timeout", 900))
-    think = float(spec.get("think_timeout") or 0)
+    wall, silence, think = limit(task, "round"), limit(task, "silence"), limit(task, "think")
     # A shell command OpenCode moved to the background (past 2 minutes it does, and the turn
     # ends waiting on it) prints nothing until it is done: a long test suite counted as thinking,
     # was nudged and killed every 7 minutes, and rerun (the 2026-11-16 audit). While it waits
@@ -2712,6 +2745,10 @@ def drive(task: store.Task) -> None:
                 _start_fresh(task, n, why)
             elif keep:
                 task.set_status(context=None)  # a one-round instruction, held by run_round
+            if raised := stretch_limits(task, m):  # measured slow since wb start (#814)
+                task.event({"ts": store.now(), "round": n, "kind": "limits",
+                            "text": "the model was measured slow here: " + ", ".join(
+                                f"{k} {v // 60} min" for k, v in raised.items())})
             task.set_status(phase="running", round=n, round_started_at=store.now(),
                             last="agent started")  # not "starting…": the pane shows its progress
             task.event({"ts": store.now(), "round": n, "kind": "round", "text": "started"})
@@ -2723,8 +2760,9 @@ def drive(task: store.Task) -> None:
             measure_speed(task, began)
             if (bound := read_bound(task, n, rnd)) and rnd["guard"] == "silence":
                 from . import router
-                rnd["stuck"] += (f" (it read at most ~{bound} tokens/s here: a new task on this "
-                                 f"model now waits {router.budgets(m)['silence'] // 60} minutes)")
+                rnd["stuck"] += (f" (it read at most ~{bound} tokens/s here: this task's next "
+                                 f"round and a new task on this model now wait "
+                                 f"{router.budgets(m)['silence'] // 60} minutes)")
             if rnd["full"]:  # before notes: the handover carries them (_full_round)
                 handed += 1
                 if handed <= HANDOVER_MAX:
