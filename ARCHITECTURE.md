@@ -6253,7 +6253,9 @@ twice (name, size, modified time) is one chip. Send takes the text and the chips
 the outbox item (`files`: `[{id, name, size, type}]`); `flush` makes sure each is uploaded before
 it posts `/api/send` with their ids, and a refused one marks the message not sent, naming the file
 (edit puts its files back in the tray, and what it was about back above the box: `setAbout`, a
-kept take shown by its `aboutTag`; the edited message went out as a general one, #843). In the thread a message shows its images as thumbnails
+kept take shown by its `aboutTag`; the edited message went out as a general one, #843; and its words
+back in the box, before what the box already holds: put over it, words typed after the refusal were
+lost, #958). In the thread a message shows its images as thumbnails
 (a tap shows one whole, `view`; a tap or Escape closes it) and other files as name and size (a
 tap saves it), each fetched once with the token as a blob (`fileURL`), or from this page's own
 bytes; one `wb gc` removed says "no longer on the computer". A thumbnail is fetched only once it
