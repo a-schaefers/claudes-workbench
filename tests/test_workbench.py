@@ -9167,6 +9167,18 @@ class Bench(Base):
         bench.checkout(bench.cases()["t-crlf"], clone)
         self.assertEqual((clone / "data.txt").read_bytes(), b"a\r\nb\r\n")    # a replay's too
 
+    def test_a_bench_run_on_an_unknown_model_says_so_in_a_line(self):
+        # #737 (the 2026-11-21 audit, reproduced): models.resolve's KeyError reached main, which
+        # catches only RuntimeError and OSError, and Claude got a traceback
+        self.accepted("t-typo")
+        run_wb("bench", "add", "t-typo")
+        err = io.StringIO()
+        with self.assertRaises(SystemExit) as e, redirect_stderr(err):
+            run_wb("bench", "run", "--model", "nosuch")
+        self.assertEqual(e.exception.code, 1)
+        self.assertIn("unknown model 'nosuch'", err.getvalue())
+        self.assertNotIn("Traceback", err.getvalue())
+
     def test_a_case_with_a_sibling_two_levels_up_checks_and_replays_inside_its_own_directory(self):
         # #261 (the audit of 1.2): the case's checkouts nest as the task's worktree did, so the
         # link to ../../shared/lib is made in the scratch, not in the bench's own directory

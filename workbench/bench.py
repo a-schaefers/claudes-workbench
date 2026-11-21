@@ -479,7 +479,10 @@ def start(model_ids: list[str], case_names: list[str], skills: list[str], label:
     chosen = {n: have[n] for n in case_names} if case_names else have
     found = models.discover()
     if model_ids:
-        ms = [models.resolve(x) for x in model_ids]
+        try:
+            ms = [models.resolve(x) for x in model_ids]
+        except KeyError as e:  # a typo or a retired id: its one line, not a traceback (#737)
+            raise RuntimeError(e.args[0]) from None
     else:
         ms = [m for m in found.values() if models.status(m)["available"]]
     if not ms:
