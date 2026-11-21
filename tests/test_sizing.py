@@ -125,6 +125,7 @@ class Measured(Base):
         wait_phase("t-m1", {"review"})
         run_wb("discard", "t-m1", "--reason", "enough")      # the fake has nothing more to write
         first, second = self.row()["steps"]
+        self.assertEqual(self.row()["landed_steps"], 1)        # kept on the branch (#722)
         self.assertEqual((first["files"], first["lines"]), (1, 1))  # answer.txt, one line
         self.assertTrue(first["landed"])
         self.assertFalse(first["compacted"] or first["stuck"] or first["took_over"])

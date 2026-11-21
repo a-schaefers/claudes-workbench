@@ -3827,6 +3827,8 @@ class Context(Base):
         self.assertRegex(out, r"branch delegate/t-dd deleted \(was [0-9a-f]{8}\)")
         self.assertEqual(tip("t-dd"), "")
         self.assertEqual(store.Task("t-dd").status["tip"], step1["t-dd"])
+        rows = {r["task"]: r for r in store.results()}           # the kept step is credited (#722)
+        self.assertEqual((rows["t-dk"].get("landed_steps"), rows["t-dd"].get("landed_steps")), (1, None))
         self.start("t-d1", "ok")                         # one step, nothing committed: deleted
         wait_phase("t-d1", {"review"})
         self.assertIn("branch delegate/t-d1 deleted", run_wb("discard", "t-d1"))
@@ -8783,6 +8785,25 @@ class Routing(Base):
             run_wb("trial", "t-open", "nope")
         self.assertIn("t-open still open", err.getvalue())
         self.assertNotIn("aaaaaa", lessons._all()[1])
+
+    def test_a_discarded_chain_credits_the_steps_it_landed(self):
+        # #722: four steps wb next committed and kept, the fifth stuck and discarded: the row
+        # counted as a whole rejected task for the router, the tuning and the skills
+        from workbench import models, router, skills, tuning
+        steps = [{"landed": True}] * 4 + [{"landed": False}]
+        self.result("strata/strata", "significant", "discarded", steps=steps, landed_steps=4,
+                    skills_offered=["s"], skills_loaded=["s"], repo="/r")
+        self.result("strata/strata", "significant", "discarded", steps=steps)  # --drop-steps': none
+        row = store.results()[0]
+        self.assertAlmostEqual(tuning.credit(row), 0.8)
+        self.assertAlmostEqual(tuning.reward(row), 0.8)
+        self.assertEqual(tuning.credit({**row, "outcome": "accepted"}), 1.0)
+        self.assertEqual(tuning.credit({**row, "landed_steps": 0}), 0.0)
+        top = router.score(models.discover()["strata/strata"], "significant")
+        self.assertAlmostEqual(top.wins, 0.8)
+        self.assertIn("0.8/2 real tasks accepted", top.line())
+        self.assertAlmostEqual(skills.usage()["s"]["with"]["accepted"], 0.8)
+        self.assertIn("0.8 accepted", skills.record_line(skills.usage()["s"]))
 
     def test_results_are_parsed_once_per_change_however_many_models_and_sizes_ask(self):
         # #727: the router, the slice and wb tune re-read results.jsonl per model, size and knob;

@@ -67,6 +67,9 @@ def record(task: store.Task, outcome: str, last_step: dict | None = None, **extr
     earlier = st.get("step_sizes") or []
     reviews = sum(s.get("reviews") or 0 for s in earlier) + st.get("reviews", 0)  # every step's
     steps = earlier + ([last_step] if last_step else [])
+    # a discard keeps the steps wb next committed, unless --drop-steps dropped them (#722)
+    landed = sum(1 for s in earlier if s.get("landed")) \
+        if outcome == "discarded" and not extra.get("steps_dropped") else 0
     u, per_step = spend.usage_by_step(task)  # what it cost Claude, and each step's share (#558)
     if per_step and len(per_step) == len(steps):
         steps = [{**s, "claude": c} for s, c in zip(steps, per_step)]
@@ -84,6 +87,7 @@ def record(task: store.Task, outcome: str, last_step: dict | None = None, **extr
            "skills_offered": st.get("skills_ever") or [], "skills_loaded": skills.loaded(task),
            "skills_rev": st.get("skills_rev") or {},  # the version handed: judges each edit
            "steps": steps,
+           **({"landed_steps": landed} if landed else {}),
            "window": st.get("window"),
            "tuned": st.get("tuned") or {}, "explored": st.get("explored") or [],  # tuning.py
            "tuned_max": st.get("tuned_max") or {},

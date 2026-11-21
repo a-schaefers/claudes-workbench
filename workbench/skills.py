@@ -382,7 +382,7 @@ def _tally() -> dict:
 
 def _count(t: dict, r: dict) -> None:
     t["n"] += 1
-    t["accepted"] += tuning.agent_landed(r)  # Claude's work after a takeover isn't the skill's (#647)
+    t["accepted"] += tuning.credit(r)  # the agent's kept share: no takeover's (#647), landed steps (#722)
     t["first_try"] += tuning.agent_landed(r) and not tuning.agent_reviews(r)
     t["reviews"] += tuning.agent_reviews(r)  # a round the spec cost isn't the skill's
 
@@ -402,7 +402,7 @@ def usage(current: dict[str, str] | None = None) -> dict[str, dict]:
             u["last"] = max(u["last"], r.get("ts", 0))
             if n in (r.get("skills_loaded") or []):
                 u["loaded"] += 1
-                u["accepted"] += tuning.agent_landed(r)
+                u["accepted"] += tuning.credit(r)
                 u["repos"].add(r.get("repo"))
                 _count(u["with"], r)
                 if current and current.get(n) and (r.get("skills_rev") or {}).get(n) == current[n]:
@@ -421,13 +421,13 @@ def record_line(u: dict | None) -> str:
     w, wo, s = u["with"], u["without"], u["since"]
     out = f"offered {u['offered']} · loaded {u['loaded']}"
     if w["n"]:
-        out += (f" · {w['accepted']} accepted, {w['first_try']} with no review round, "
+        out += (f" · {round(w['accepted'], 1):g} accepted, {w['first_try']} with no review round, "
                 f"{w['reviews'] / w['n']:.1f} review rounds a task")
     if wo["n"]:
         out += (f" · same repos without it: {wo['accepted'] / wo['n']:.0%} accepted, "
                 f"{wo['reviews'] / wo['n']:.1f} review rounds ({wo['n']} tasks)")
     if s["n"] and s["n"] < w["n"]:
-        out += f" · since its last edit: {s['accepted']} of {s['n']} accepted"
+        out += f" · since its last edit: {round(s['accepted'], 1):g} of {s['n']} accepted"
     if u["repos"]:
         out += f" · loaded in {len(u['repos'])} repo{'s' if len(u['repos']) > 1 else ''}"
     return out

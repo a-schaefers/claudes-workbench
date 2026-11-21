@@ -3080,9 +3080,14 @@ apply` variant and its source, #584). `judged` drops a discard marked `--spec-ga
 agent never ran (row `ran` false: its setup or its model's load failed, `failed_before`; a row
 from before `ran` was recorded: not accepted and `tok_out` 0): three discards of a lockfile
 problem scored a model 0/3, and the router passed it by for good (#581). Quality is the acceptance rate with a uniform prior, overall =
-(accepted + 1) / (tried + 2), where accepted is the agent's own (`tuning.agent_landed`: accepted
-and no step `took_over`; a task Claude finished after `wb takeover` is a try, not a win: it
-counted as the agent's, so the model most often taken over looked best, #647); on the repo's stack (`gitops.stack`: up to two languages, each at
+(accepted + 1) / (tried + 2), where 
+accepted is the agent's kept share (`tuning.credit`): 1 when `tuning.agent_landed` (accepted
+and no step `took_over`); a task Claude finished after `wb takeover` counts only the steps the agent
+did, so a single taken-over step is a try, not a win (it counted as the agent's, so the model most
+often taken over looked best, #647); a discard whose earlier steps `wb next` committed and the
+branch kept counts their share (the row's `landed_steps` over its steps; `--drop-steps` writes
+none): a chain of four approved steps whose fifth stuck counted as a whole failed try, for the
+router, the tuning (`reward` is that share too) and the skills' records alike (#722); on the repo's stack (`gitops.stack`: up to two languages, each at
 least 20% of the tracked source files; a row's stack is the one recorded, else read from its repo)
 quality = (like_accepted + `LIKE_PRIOR`·overall) / (like_tried + `LIKE_PRIOR`), `LIKE_PRIOR` = 2.
 Each count in quality is weighed by recency (`_weight`: half for each `HALF_LIFE_DAYS` 60 of a
@@ -3818,7 +3823,9 @@ skill drops out silently. `skills.loaded(task)` reads the `skill` tool calls fro
 
 **Judged on outcomes** (`skills.usage`, `record_line`, `advice`). Rows: `store.results()` (trials
 left out) that `tuning.judged` keeps (a discard marked `--spec-gap` is dropped). Per skill:
-offered (in `skills_offered`), loaded (in `skills_loaded`), and for loads: accepted
+offered (in `skills_offered`), loaded (in `skills_loaded`), and for loads: 
+accepted (the agent's kept share, `tuning.credit`: none after a takeover, #647; a discard's
+landed share, #722), first-try
 (`tuning.agent_landed`: not after a takeover, #647), first-try (that, with no agent-caused review
 round), review rounds a task; the same repos' tasks that
 didn't load it; "since its last edit" (rows whose `skills_rev[name]` is the current rev); repos
@@ -6038,7 +6045,9 @@ names on for the task, when any), `steps` (one `results.step` per step), `window
 output}`, *What a task cost Claude*), `gpu_wh` (status's, when measured), `remote_gpu` (true
 when its model ran on another machine, whose energy nothing here measures), `active_minutes`
 (status `active_s`), `interventions` (status's, when a progress check was answered), `diff` (accepted only:
-`{files, added, removed}` summed over the steps; *What a task saved*), `backlog` (task.json's), `trial` (when set);
+`{files, added, removed}` summed over the steps; *What a task saved*), `landed_steps` (discarded only:
+the steps `wb next` committed and the discard kept, when any; `steps_dropped` true after `--drop-steps`,
+#722), `backlog` (task.json's), `trial` (when set);
 with stats recording on (`results.for_stats`, each only when measured), `started_at`, `load_secs`, `setup_secs`,
 `nudges`, `asks` (`{questions, permissions, refused, answered}`), `guards`, `speed` (`{write, read, ttft}`, the
 medians of status `speeds`) and `gpu_w` (`{mean, peak}`); `commit` and `merged` on accept (and `merge_refused`, git's reason, when `--merge` was refused), `reason` on

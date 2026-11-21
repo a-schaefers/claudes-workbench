@@ -105,6 +105,23 @@ def agent_landed(row: dict) -> bool:
     return row.get("outcome") == "accepted" and not took_over(row)
 
 
+def credit(row: dict) -> float:
+    """How much of the task was the agent's approved work that was kept: 1 when agent_landed; an
+    accepted chain with steps taken over, the share of its steps the agent did (#647); a discard
+    whose earlier steps `wb next` committed and the branch kept (results' `landed_steps`), their
+    share of its steps; else 0. Counted as a whole rejected task, a chain of four approved steps
+    whose fifth stuck scored the model a failed try and every knob and skill it ran 0 (#722)."""
+    steps = [s for s in row.get("steps") or [] if isinstance(s, dict)]
+    if row.get("outcome") == "accepted":
+        if not took_over(row):
+            return 1.0
+        return sum(not s.get("took_over") for s in steps) / max(1, len(steps))
+    landed = row.get("landed_steps")
+    if row.get("outcome") == "discarded" and isinstance(landed, int) and landed > 0:
+        return min(1.0, landed / max(1, len(row.get("steps") or [])))
+    return 0.0
+
+
 def agent_reviews(row: dict) -> int:
     """The review rounds a task (or a step) needed that weren't the spec's fault (--spec-gap)."""
     return max(0, (row.get("reviews") or 0) - (row.get("spec_rounds") or 0))
@@ -125,9 +142,10 @@ def _step_minutes(row: dict) -> float | None:
 def reward(row: dict, usual_minutes: float | None = None) -> float:
     """Per step, so a chain is set against single tasks fairly: a 5-step chain with one review a
     step scored 1/6 (#721). ``usual_minutes``: the model's usual minutes a step for the size."""
-    if not agent_landed(row):  # a discard, or Claude's work after a takeover (#647)
+    share = credit(row)  # the agent's kept share: no takeover's (#647), a discard's landed steps (#722)
+    if not share:
         return 0.0
-    r = 1 / (1 + agent_reviews(row) / _steps(row))
+    r = share / (1 + agent_reviews(row) / _steps(row))
     if any(s.get("compacted") for s in row.get("steps") or []):
         r -= COMPACT_PENALTY
     mins = _step_minutes(row)

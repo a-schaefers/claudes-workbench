@@ -75,12 +75,12 @@ class Score:
     state: dict
     weights: int = 0               # bytes of weights, 0 when unknown
     tries: int = 0
-    wins: int = 0
+    wins: float = 0                # accepted, and a discard's landed share (tuning.credit)
     minutes: float | None = None   # mean wall time of a real task of this size
     fits: bool | None = None       # its need within the GPU's budget; None when unknown
     stack: tuple = ()              # the kind of work asked about, and the record on it
     like_tries: int = 0
-    like_wins: int = 0
+    like_wins: float = 0
     claude: float | None = None    # mean input-equivalent tokens a task cost Claude (spend.py)
     claude_n: int = 0              # the tasks it is the mean of
     cheaper: bool = False          # put ahead of the guess for costing Claude less (_cheaper)
@@ -99,9 +99,9 @@ class Score:
         if not self.tries:
             return "no real tasks yet"
         t = f", ~{self.minutes:.1f} min of active work" if self.minutes is not None else ""
-        like = f", {self.like_wins}/{self.like_tries} on {'/'.join(self.stack)}" if self.like_tries else ""
+        like = f", {round(self.like_wins, 1):g}/{self.like_tries} on {'/'.join(self.stack)}" if self.like_tries else ""
         c = f", ~{self.claude / 1000:.0f}K Claude tokens a task" if self.claude_n >= COST_MIN else ""
-        return f"{self.wins}/{self.tries} real tasks accepted{like}{t}{c}"
+        return f"{round(self.wins, 1):g}/{self.tries} real tasks accepted{like}{t}{c}"
 
 
 @functools.cache
@@ -137,14 +137,14 @@ def score(m: models.Model, size: str, state: dict | None = None, stack=()) -> Sc
     if not s.weights and state["available"] and (guess := models.guessed_weights(m)):
         s.weights, s.guessed = guess, True  # ordered by its name's size, not the config's (#704)
     s.tries = len(real)
-    s.wins = sum(tuning.agent_landed(r) for r in real)  # a takeover's accept is Claude's (#647)
+    s.wins = sum(tuning.credit(r) for r in real)  # the agent's kept share (#647, #722)
     like = [r for r in real if set(row_stack(r)) & set(stack)] if stack else []
     if stack:
         s.like_tries = len(like)
-        s.like_wins = sum(tuning.agent_landed(r) for r in like)
+        s.like_wins = sum(tuning.credit(r) for r in like)
     now = time.time()
-    s.w = (sum(_weight(r, now) for r in real), sum(_weight(r, now) for r in real if tuning.agent_landed(r)),
-           sum(_weight(r, now) for r in like), sum(_weight(r, now) for r in like if tuning.agent_landed(r)))
+    s.w = (sum(_weight(r, now) for r in real), sum(_weight(r, now) * tuning.credit(r) for r in real),
+           sum(_weight(r, now) for r in like), sum(_weight(r, now) * tuning.credit(r) for r in like))
     # the agent's active work, median: wall minutes held the queue, Claude's review and a night
     # before an accept (480 min for a 12-minute task), and a mean let one such row set every
     # ETA and progress check at many times the real length (#543). Rows without it are skipped.
