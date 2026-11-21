@@ -3901,7 +3901,10 @@ it. ACE-Step's takes peaked at -0.2 dBFS, near clipping, before any `loudnorm`: 
   merge (#189). The paths come from the merge itself, done first in memory (`git merge-tree
   --write-tree`, git 2.38+; an older git does the same merge with `--no-commit` in a scratch
   worktree of HEAD under the state directory, then removes it: `gitops._trial_merge`, whose
-  failure refuses the merge. The paths the branch adds, the old fallback, missed a modify/delete
+  failure refuses the merge. The worktree is made with `--no-checkout` and its index read from
+  HEAD, so the merge writes only the files it changes, with LFS's smudge skipped (`NO_SMUDGE`),
+  and the paths come from the index: a full checkout took gigabytes and minutes on a big repo
+  and failed when LFS objects weren't local, #469, the audit of 1.8. The paths the branch adds, the old fallback, missed a modify/delete
   conflict on Git 2.34.1, Ubuntu 22.04's, and its abort deleted the ignored copy: #320, the audit
   of 1.4) and compared with HEAD as raw bytes, conflict or not: the branch's added paths, decoded, missed a modify/delete conflict
   (main stopped tracking `settings.ini`, the task edited it, and the merge's abort deleted the

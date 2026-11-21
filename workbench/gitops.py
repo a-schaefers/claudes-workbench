@@ -44,6 +44,7 @@ PLAIN = ("-c", "color.ui=never", "-c", "color.diff=never", "-c", "color.status=n
 # wb accept ran them as the user outside the lane (the 2026-11-16 audit). The checks belong in
 # --test, which runs in the lane. Signing is kept: only the hooks go.
 NO_HOOKS = ("-c", "core.hooksPath=/dev/null")
+NO_SMUDGE = {"GIT_LFS_SKIP_SMUDGE": "1"}  # LFS files stay pointers: a trial reads paths only (#469)
 
 
 def _record(worktree) -> Path | None:
@@ -1427,15 +1428,21 @@ def _trial_merge(repo: Path, branch: str) -> bytes:
     """The paths the merge would write, from the same merge done in a scratch worktree of HEAD:
     git before 2.38 has no merge-tree --write-tree, and the paths the branch adds, its fallback,
     missed a modify/delete conflict whose abort deleted the developer's ignored copy on Git
-    2.34.1, Ubuntu 22.04's (#320, the audit of 1.4). A trial that can't run refuses the merge."""
+    2.34.1, Ubuntu 22.04's (#320, the audit of 1.4). A trial that can't run refuses the merge.
+    The worktree is made without a checkout and its index read from HEAD, so the merge writes
+    only the files it changes, and LFS's smudge is skipped: a full checkout of HEAD took
+    gigabytes and minutes on a big repo, ignoring its sparse patterns, and failed when LFS
+    objects weren't local (#469, the audit of 1.8). A file missing from the worktree is no local
+    change to git's merge, and the paths are read from the index (diff --cached)."""
     store.home().mkdir(parents=True, exist_ok=True)
     scratch = tempfile.mkdtemp(prefix=store.scratch("wb-merge-"), dir=store.home())
     wt = os.path.join(scratch, "w")
     try:
-        _run(repo, (*NO_HOOKS, "worktree", "add", "-q", "--detach", wt, "HEAD"))
+        _run(repo, (*NO_HOOKS, "worktree", "add", "-q", "--no-checkout", "--detach", wt, "HEAD"))
+        _run(wt, ("read-tree", "HEAD"))
         _run(wt, (*NO_HOOKS, "-c", "rerere.enabled=false", "merge", "--no-commit", "--no-ff",
-                  "--no-edit", branch), check=False)  # a conflict still says what it touched
-        changed = _run(wt, ("diff", "--name-only", "--no-renames", "-z", "HEAD")).stdout
+                  "--no-edit", branch), NO_SMUDGE, check=False)  # a conflict says what it touched
+        changed = _run(wt, ("diff", "--cached", "--name-only", "--no-renames", "-z", "HEAD")).stdout
         unmerged = [row.split(b"\t", 1)[1] for row in
                     _run(wt, ("ls-files", "-u", "-z")).stdout.split(b"\0") if b"\t" in row]
         return b"\0".join([*changed.split(b"\0"), *unmerged])

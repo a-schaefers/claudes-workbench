@@ -1877,6 +1877,27 @@ class Lifecycle(Base):
             self.assertEqual((repo / "b.txt").read_bytes(), b"b\n")
             self.assertEqual((repo / "local.ini").read_bytes(), b"PERSONAL\n")
 
+    def test_on_a_git_before_2_38_the_trial_merge_writes_only_the_files_it_changes(self):
+        # #469 (the audit of 1.8): the trial worktree was a full checkout of HEAD, gigabytes and
+        # minutes on a big repo, running LFS's smudge on every file. A smudge filter logs what
+        # was checked out: the file nobody touched never is, and the trial skips LFS's smudge
+        log = Path(self.tmp.name) / "smudged.log"
+        smudge = f"sh -c 'echo \"%f ${{GIT_LFS_SKIP_SMUDGE:-}}\" >> {shlex.quote(str(log))}; cat'"
+        repo, g = self._merge_case(
+            base={b".gitattributes": b"*.big filter=wbt\n", b"untouched.big": b"U\n",
+                  b"a.txt": b"1\n2\n3\n4\n"},
+            main={b"a.txt": b"1\n2\n3\nfour\n"}, task={b"a.txt": b"one\n2\n3\n4\n",
+                                                     b"changed.big": b"C\n"},
+            ignore={}, config=[("filter.wbt.smudge", smudge)])
+        log.unlink(missing_ok=True)
+        with mock.patch.object(gitops, "_merge_tree", return_value=None):
+            gitops.merge(repo, "t", "main")
+        self.assertEqual((repo / "a.txt").read_bytes(), b"one\n2\n3\nfour\n")
+        smudged = log.read_text().splitlines()
+        self.assertNotIn("untouched.big", " ".join(smudged))
+        self.assertIn("changed.big 1", smudged)  # the trial's, LFS skipped
+        self.assertEqual(g("worktree", "list", "--porcelain").count(b"worktree "), 1)
+
     def test_a_clean_merge_beside_ignored_files_still_merges(self):
         repo, g = self._merge_case(
             base={b"a.txt": b"a\n"}, main={b".gitignore": b"local.ini\n"},
