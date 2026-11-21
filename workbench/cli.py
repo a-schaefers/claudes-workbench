@@ -3531,20 +3531,27 @@ def cmd_try(a):
     while store.Task(f"try-{n}").exists:  # task names are never reused
         n += 1
     d = base / str(n)
-    shutil.copytree(TRY / "project", d)
-    with redirect_stdout(io.StringIO()):
-        cmd_init(argparse.Namespace(dir=str(d)))
     name = f"try-{n}"
+    # the Python wb runs on, not PATH's python3: on RHEL 8 that is 3.6, and the untouched base
+    # failed its tests (#530)
+    py = shlex.quote(sys.executable)
     argv = ["start", name, "--spec", str(TRY / "spec.md"), "--repo", str(d), "--size", "trivial",
-            "--trial", "--test", "python3 -m unittest", *(["--model", a.model] if a.model else [])]
-    s = parser().parse_args(argv)
+            "--trial", "--test", f"{py} -m unittest", *(["--model", a.model] if a.model else [])]
     try:
+        # the copy and its init inside: wb init refusing (no git identity, a home that is a
+        # git repo) left try/<n> behind, one more at each retry (#530)
+        shutil.copytree(TRY / "project", d)
+        with redirect_stdout(io.StringIO()):
+            cmd_init(argparse.Namespace(dir=str(d)))
+        s = parser().parse_args(argv)
         s.f(s)
-    except SystemExit:  # refused (the GPU busy, no model): no sample left behind without a task
-        shutil.rmtree(d, ignore_errors=True)
+    except BaseException:  # refused (the GPU busy, no model): no sample left behind without a task
+        if not store.Task(name).exists:
+            shutil.rmtree(d, ignore_errors=True)
         raise
     print(f"the sample project: {d}")
-    print(f"hidden check, at review: python3 {TRY / 'check.py'} {store.Task(name).worktree}")
+    print(f"hidden check, at review: {py} {shlex.quote(str(TRY / 'check.py'))} "
+          f"{shlex.quote(str(store.Task(name).worktree))}")
 
 
 def cmd_remote(a):

@@ -8326,8 +8326,10 @@ class Try(Base):
         task = store.Task("try-1")
         self.assertTrue(task.spec["trial"])                               # never the evidence
         self.assertEqual(task.spec["size"], "trivial")
-        self.assertIn("hidden check, at review: python3 ", out)
-        check = out.split("hidden check, at review: ")[1].split()
+        # wb's own Python, not PATH's python3, which on RHEL 8 is 3.6 (#530)
+        self.assertIn(f"hidden check, at review: {shlex.quote(sys.executable)} ", out)
+        self.assertEqual(task.spec["test_cmd"], f"{shlex.quote(sys.executable)} -m unittest")
+        check = shlex.split(out.split("hidden check, at review: ")[1].splitlines()[0])
         self.assertEqual(check[-1], str(task.worktree))
         wait_phase("try-1", {"review"})
         repo = cli.try_dir() / "1"
@@ -8360,6 +8362,29 @@ class Try(Base):
         with self.assertRaises(SystemExit), redirect_stderr(io.StringIO()):
             run_wb("try", "--model", "no-such-model")                     # refused: nothing left
         self.assertFalse((cli.try_dir() / "3").exists())          # (#161)
+
+    def test_wb_try_refused_by_wb_init_leaves_no_sample_behind(self):
+        # #530: with no git identity wb init refused, and try/1, try/2… were left at each retry
+        os.environ.update(GIT_CONFIG_GLOBAL=os.devnull, GIT_CONFIG_NOSYSTEM="1")
+        for k in ("GIT_AUTHOR_NAME", "GIT_AUTHOR_EMAIL", "GIT_COMMITTER_NAME", "GIT_COMMITTER_EMAIL",
+                  "EMAIL"):
+            os.environ.pop(k, None)
+        for _ in range(2):
+            with self.assertRaises(SystemExit), redirect_stderr(io.StringIO()) as err:
+                run_wb("try", "--model", "mimo")
+            self.assertIn("no user.name/user.email", err.getvalue())
+        self.assertEqual(list(cli.try_dir().glob("*")) if cli.try_dir().exists() else [], [])
+
+    def test_the_hidden_check_reports_a_sample_its_python_cannot_read(self):
+        # #530: it caught only ImportError, so a SyntaxError crashed it with a traceback
+        work = Path(self.tmp.name) / "unreadable"
+        work.mkdir()
+        (work / "stats.py").write_text("def median(xs:\n")
+        r = subprocess.run([sys.executable, str(cli.TRY / "check.py"), str(work)],
+                           capture_output=True, text=True)
+        self.assertEqual(r.returncode, 1)
+        self.assertIn("hidden check: FAIL (no stats.median", r.stderr)
+        self.assertNotIn("Traceback", r.stderr)
 
 
 class Coding(Base):
