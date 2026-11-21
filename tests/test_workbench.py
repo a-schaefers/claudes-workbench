@@ -10949,6 +10949,25 @@ class Verify(Base):
         run_wb("verify", "t", "--test", "python3 -m unittest tests.test_calc")
         self.assertNotIn("regression check", run_wb("accept", "t", "-m", "kW from W"))
 
+    def test_django_swift_dotnet_cypress_and_perl_tests_look_like_tests(self):
+        # #731 (the 2026-11-21 audit, reproduced): none of these matched, so verify and bench add
+        # refused, and a Django tests.py edited beside a new fixture sent the fixture alone
+        from workbench import verify
+        for p in ("polls/tests.py", "tests.py", "Tests/SlugTests/SlugTests.swift",
+                  "MyApp.Tests/UserServiceTests.cs", "src/MyApp.Test/Foo.cs", "cypress/e2e/login.cy.ts",
+                  "t/basic.t", "src/test/java/com/x/SlugTest.java", "app/src/SlugSpec.kt",
+                  "tests/Unit/SlugTest.php", "Test/Spec.hs", "Fixtures/a.json"):
+            self.assertTrue(verify.looks_like_test(p), p)
+        for p in ("polls/views.py", "src/lib.rs", "Sources/Slug/Slug.swift", "MyApp/UserService.cs",
+                  "src/Manifest.java", "contest.py", "lib/t.pm"):
+            self.assertFalse(verify.looks_like_test(p), p)
+        # --files naming code, as inline tests need: the base runs the candidate's code, and says so
+        out = run_wb("verify", "t", "--test", "python3 -m unittest tests.test_calc",
+                     "--files", "tests/test_calc.py", "tests/__init__.py", "calc.py")
+        self.assertIn("not proven: it already passes on the base", out)
+        self.assertIn("the base got the candidate's code too, not only tests: calc.py", out)
+        self.assertNotIn("code too", run_wb("verify", "t", "--test", "python3 -m unittest tests.test_calc"))
+
     def test_without_a_test_file_among_the_changes_it_says_to_name_one(self):
         for p in ("tests/test_calc.py", "tests/__init__.py"):
             (self.wt / p).unlink()

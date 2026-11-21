@@ -28,10 +28,15 @@ LIMIT = 300  # seconds for each run; past it, that run is inconclusive
 # x_test.go, x.test.ts, x.spec.js; and the data a test reads beside it: Go's testdata/, fixtures/,
 # Jest's __snapshots__ (*.snap), golden/. Without the data, the base failed for lack of the golden
 # file and was called proven (#500, the audit of 1.90). One pattern for verify and bench
-# (`looks_like_test`).
-TEST_PATH = re.compile(r"(^|/)(tests?|spec|__tests__|testdata|fixtures?|__fixtures__|__snapshots__"
+# (`looks_like_test`). And the layouts that missed it: Django's tests.py, SwiftPM's Tests/ (the
+# directory part in any case), .NET's MyApp.Tests/ and *Tests.cs, JVM/PHP *Test.java/*Spec.kt,
+# Cypress's *.cy.ts, Perl's t/*.t. Unmatched, verify and bench add refused, and a Django change to
+# polls/tests.py beside a new fixture copied the fixture alone: the base ran its old tests and
+# passed, `base-passes` for a valid fix (#731, the 2026-11-21 audit).
+TEST_PATH = re.compile(r"(^|/)(?i:tests?|spec|__tests__|testdata|fixtures?|__fixtures__|__snapshots__"
                        r"|golden)/|(^|/)test_[^/]*$|_test\.[A-Za-z]+$|\.(test|spec)\.[A-Za-z]+$"
-                       r"|\.snap$")
+                       r"|\.snap$|(^|/)tests\.py$|(^|/)[^/]*(Tests?|Spec)\.(cs|fs|vb|swift|kt|java"
+                       r"|scala|groovy|php)$|\.Tests?/|\.cy\.[A-Za-z]+$|(^|/)t/[^/]+\.t$")
 # a file not found, as the common runtimes say it: what a base missing the candidate's new file
 # prints (Go's `open testdata/x.golden: no such file or directory`, Python's FileNotFoundError,
 # Node's ENOENT)
@@ -346,6 +351,10 @@ def run(task: store.Task, cmd: str, files: list[str] | None = None, limit: int =
               **({"left_out": left} if left else {})}
     if b_code != 0 and (gone := missing(b_out, uncopied)):
         result["missing"] = gone
+    # --files naming code (a Rust file with its inline tests): the base got the candidate's code
+    # too, so its passing says nothing about the test (#731)
+    if code := [f for f in files if not looks_like_test(f)]:
+        result["code_copied"] = code[:50]
     store.write_json(out / "result.json", result)
     return result
 
@@ -372,6 +381,9 @@ def lines(r: dict) -> list[str]:
     if r.get("missing"):
         out.append(f"  the base lacked what the candidate adds: {', '.join(r['missing'])} "
                    "(--files copies what the test reads onto the base)")
+    if r.get("code_copied"):
+        out.append(f"  the base got the candidate's code too, not only tests: "
+                   f"{', '.join(r['code_copied'])} (so a pass there may be the change's)")
     if r.get("left_out"):
         out.append(f"  not in the candidate (accept refuses them without --include, and lands "
                    f"them with it): {', '.join(r['left_out'])}")

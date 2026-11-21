@@ -3229,8 +3229,8 @@ once the reflogs expired and `git gc` pruned, no case could be made (#649, Codex
   can change it per step);
 - the hidden checks: `--hidden` paths, by default the files the step added or changed that look
   like tests or the data a test reads (`verify.looks_like_test`, the one pattern `wb verify` uses
-  too: under `tests/`, `test/`, `spec/`, `__tests__/`, `testdata/`, `fixtures/`, `__snapshots__/`,
-  `golden/`, or `test_*`, `*_test.*`, `*.test.*`, `*.spec.*`, `*.snap`; #500), copied from the reference into `hidden/` with their Git mode (a
+  too, *Verifying a fix against the base*: `tests/`, `fixtures/`, `test_*`, `*.test.*` and the
+  like; #500, #731), copied from the reference into `hidden/` with their Git mode (a
   100755 file stays executable: written at 0644, an executable `./test_check.sh` exited 126 on the
   right answer, #346), and overlaid with it on the base, the reference and every replay alike
   (`overlay`); and `--check`, a command that must pass too;
@@ -4388,8 +4388,12 @@ directory and in the task's own lane and environment (`runner.run_in_lane` on a 
   copied in (`--files`, else the files changed since that commit whose path looks like a test or
   a test's data, `TEST_PATH` through `looks_like_test`: under `tests/`, `test/`, `spec/`,
   `__tests__/`, `testdata/`, `fixture/`, `fixtures/`, `__fixtures__/`, `__snapshots__/` or
-  `golden/`, or named `test_*`, `*_test.*`, `*.test.*`, `*.spec.*`, `*.snap`; Go's `testdata/`
-  golden file left behind made the base fail for lack of it, which was called proven, #500; as
+  `golden/` (each in any case, as SwiftPM's `Tests/`), or a .NET `*.Tests/` project, or named
+  `test_*`, `*_test.*`, `*.test.*`, `*.spec.*`, `*.snap`, Django's `tests.py`, `*Test.java`,
+  `*Tests.cs`, `*Spec.kt` and the like (`(Tests?|Spec).` with a .NET, Swift, JVM or PHP
+  extension), Cypress's `*.cy.*`, Perl's `t/*.t`; Go's `testdata/` golden file left behind made
+  the base fail for lack of it, which was called proven, #500; a Django `tests.py` edited beside a
+  new fixture sent the fixture alone, and the base passed its old tests, #731; as
   they are in the candidate: a deleted one, such as a renamed test's old name, is left out, and
   each path goes to git `:(literal)`; the old name once stopped git on its pathspec before either
   run, #194). The test files the candidate deleted, a renamed test's old name among them, are
@@ -4397,7 +4401,10 @@ directory and in the task's own lane and environment (`runner.run_in_lane` on a 
   likewise): kept, `unittest discover` ran a failing `test_old.py` on the base and only its
   passing replacement on the candidate, and verify said proven with no code changed (#643,
   Codex's audit of 1.90.6). That copy is what makes a test separable from the change; with no
-  test file it refuses.
+  test file it refuses. A `--files` path that doesn't look like a test (a Rust file with inline
+  tests) carries the candidate's code to the base too: `result.json` `code_copied` and the report's
+  "the base got the candidate's code too" line say so, since a pass there may be the change's (#731).
+
 - **The candidate**: the same clone at the worktree's HEAD, then `read-tree -u` of a snapshot of
   the worktree, new files included: the tree `wb accept` would commit (`gitops.snapshot(landing=True)`,
   also `wb shot`'s and the staleness check's), not the review snapshot (*The runner, inside*,
@@ -4447,7 +4454,8 @@ picks the line the report shows: pytest's first `E` line, else the first asserti
 `>` line), else a failed test's header. Each run is kept in `tasks/<task>/verify/<n>/`: `base.txt`,
 `candidate.txt` and `result.json` `{cmd, files, tree, ts, base: {rev, exit, assertion}, candidate:
 {rev, exit, assertion}, verdict, dir, expect (when given), uncopied (the candidate's added files
-not copied to the base, when any), removed (the candidate's deleted tests, gone from the base too), missing (those the base's output said it couldn't find), left_out (when any)}`. `verify.last` reads the newest, with `stale` once the worktree
+not copied to the base, when any), removed (the candidate's deleted tests, gone from the base too), missing (those the base's output said it couldn't find), code_copied (`--files` paths that
+aren't tests), left_out (when any)}`. `verify.last` reads the newest, with `stale` once the worktree
 or the comparison base has changed since. The verdict names the base commit and candidate tree.
 
 The comparison reaches the review (#97): `wb report <task>` (the latest round's) ends with the
