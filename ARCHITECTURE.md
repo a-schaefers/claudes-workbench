@@ -6756,9 +6756,11 @@ $WB_HOME (~/.local/state/workbench)
   locks/prepare-check.json, prepare-check-<n>.lock  the base checks' own, the same (#868)
   locks/signal-stop.lock         one runner at a time writing a shutdown's one notice (runner._signal_notice, #544)
   locks/skills.lock              one change to the skill library at a time, add to commit (skills._library_lock, #822)
-  locks/config-<key>.lock        one read-modify-write at a time of a user's config file (store.config_lock:
-                                 <key> from the path a write lands in; beside the file it would be a stray
-                                 file in the user's dotfiles; #495)
+  locks/config-<key>.lock        not here: in store.config_lock_dir, $XDG_RUNTIME_DIR/workbench (else a 0700
+                                 workbench-<uid> in the temp directory, else here), one for every WB_HOME of
+                                 the account, since the files are shared (#939): one read-modify-write at a
+                                 time of a user's config file (store.config_lock: <key> from the path a write
+                                 lands in; beside the file it would be a stray file in the user's dotfiles; #495)
   tasks/<task>/                  readable from the lane; only worktree/ and ask/ writable
     task.json  status.json
     events.jsonl  steer.jsonl  acked  noticed (its newest notice's ts, #844)  context.md  runner.log
@@ -6848,9 +6850,13 @@ user's own config files take `write_through` instead: `writable_target` follows 
 target (refused, saying to edit it in its source, when that isn't writable: a Nix store), the
 temporary file goes beside the target, created 0600, and gets the target's mode (0600 for a new
 file) before the rename; `edit_config(path, read, change)` is the read-modify-write around it,
-under `config_lock(path)` (`locks/config-<key>.lock`), `read()` checking the file first and nothing
+under `config_lock(path)` (`config-<key>.lock` in `config_lock_dir()`, shared by every state
+directory of the account: under each WB_HOME's `locks/`, two profiles editing one commands.json
+took different locks and one grant was lost, #939), `read()` checking the file first and nothing
 written when the change raises (#495: a dotfiles link became a plain 0644 file, and two
-`wb allow --always` close together lost one grant); `read_json` returns the default for a missing or broken file. `append_jsonl` appends
+`wb allow --always` close together lost one grant); a file whose inode, mtime or size changed
+between the read and the write (OpenCode, an editor) is left as it is, a RuntimeError saying "changed
+while wb was editing it; nothing was written: run the command again" (#939); `read_json` returns the default for a missing or broken file. `append_jsonl` appends
 one line under `<file>.lock` (flock; a task's own events and steer files under `locks/<task>.<file>.lock`, `store.task_lock`, out of the lane), first ending a last line a write cut short (a full disk, a
 crash), so only that fragment is lost, not the row after it; `read_jsonl(path, offset)` returns
 the whole lines and the offset after the last one, skipping bad lines (bad JSON, or bytes that
@@ -7200,7 +7206,8 @@ main (*Shipping to main*).
 (a command line, split with `shlex`), `WB_FAKE_MODELS=1`, `WB_OPENCODE_CONFIG` (a fixture with
 providers `ollama` on 127.0.0.1:11434 holding `mimo-v2.6:9b-q8_0`, which has a 32K
 `limit.context`, and `qwen3.8-27b` with none; `strata` on :8080; `cloud` on a remote host that
-discovery drops), `WB_MODELS`, `WB_SKILLS`, `WB_COMMANDS`; a git repo `<tmp>/repo` on `main`
+discovery drops), `WB_MODELS`, `WB_SKILLS`, `WB_COMMANDS`, `store.config_lock_dir` patched to
+`<tmp>/state/locks` (else the suite left its config locks in the user's `$XDG_RUNTIME_DIR`); a git repo `<tmp>/repo` on `main`
 with README.md and a committed CLAUDE.md and a repo-local identity; a spec "Write the answer to
 answer.txt."; the acceptance command `grep -qx 42 answer.txt`. `self.start(name, scenario,
 *extra)` sets `FAKE_SCENARIO` and runs `wb start … --model mimo`. tearDown restores the env and

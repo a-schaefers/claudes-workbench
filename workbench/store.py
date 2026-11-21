@@ -39,6 +39,7 @@ import os
 import re
 import stat
 import sys
+import tempfile
 import time
 import uuid
 from contextlib import contextmanager
@@ -626,12 +627,46 @@ def write_through(path: Path, data, change: str = "") -> None:
         raise
 
 
+def config_lock_dir() -> Path:
+    """Where the config files' locks live: one place for every state directory of this account,
+    since the files are shared. Under $WB_HOME/locks two profiles (a second WB_HOME, a test one
+    beside the real one) editing one commands.json took different locks, and the later write
+    dropped the other's grant (#939, the outside review of 1.90.24; #495 again). $XDG_RUNTIME_DIR
+    first (no lane reads /run/user, context.ONLY_KEPT: an agent can't flock one there), else a
+    0700 directory of this uid's in the temp directory (in the lane: an agent could hold a lock
+    there until its round's sweep, the price of a machine without a runtime directory); one that
+    isn't this account's own leaves $WB_HOME/locks. Not beside the file: there it would be a
+    stray file in the user's dotfiles."""
+    uid = os.getuid()
+    for base, name in ((os.environ.get("XDG_RUNTIME_DIR"), "workbench"),
+                       (tempfile.gettempdir(), f"workbench-{uid}")):
+        if not base or not os.path.isabs(base):
+            continue
+        d = Path(base) / name
+        try:
+            d.mkdir(mode=0o700, exist_ok=True)
+            st = os.lstat(d)
+        except OSError:
+            continue
+        if stat.S_ISDIR(st.st_mode) and st.st_uid == uid and not st.st_mode & 0o077:
+            return d
+    return home() / "locks"
+
+
 def config_lock(path: Path) -> Path:
-    """The lock over a read-modify-write of the user's config file ``path`` (edit_config), in
-    $WB_HOME/locks/, keyed by the file a write lands in: beside it, it would be a stray file in
-    the user's dotfiles."""
+    """The lock over a read-modify-write of the user's config file ``path`` (edit_config), keyed
+    by the file a write lands in, in config_lock_dir."""
     key = hashlib.sha256(str(path.resolve()).encode()).hexdigest()[:16]
-    return home() / "locks" / f"config-{key}.lock"
+    return config_lock_dir() / f"config-{key}.lock"
+
+
+def _seen(path: Path):
+    """The file a write to ``path`` lands in, as (inode, mtime, size), or None when absent."""
+    try:
+        st = path.resolve().stat()
+    except OSError:
+        return None
+    return st.st_ino, st.st_mtime_ns, st.st_size
 
 
 @contextmanager
@@ -639,10 +674,16 @@ def edit_config(path: Path, read, change: str = ""):
     """A read-modify-write of the user's config file ``path``: under its lock (config_lock),
     ``read()`` (which checks it and raises on a file it can't keep) is yielded to change in place,
     then written through (write_through); nothing is written when the body raises. Unlocked, two
-    sessions' `wb allow --always` close together lost one of the grants (#495)."""
+    sessions' `wb allow --always` close together lost one of the grants (#495). A file changed
+    under it all the same (by OpenCode, by hand, or a wb before config_lock_dir) is left as it
+    is, with a RuntimeError to run the command again: written, it would lose that change (#939)."""
     with locked(config_lock(path)):
+        seen = _seen(path)
         data = read()
         yield data
+        if _seen(path) != seen:
+            raise RuntimeError(f"{path} changed while wb was editing it; nothing was written: "
+                               "run the command again")
         write_through(path, data, change)
 
 

@@ -176,6 +176,11 @@ class Base(unittest.TestCase):
                           # the GPU lease in the test's own state, never a machine's shared one (#393)
                           WB_GPU_DIR=str(tmp / "state"))
         (tmp / "opencode.json").write_text(json.dumps(OPENCODE_CONFIG))
+        # the config files' locks are outside WB_HOME, shared by every profile (#939): in the
+        # test's own state, or the suite left thousands in the user's $XDG_RUNTIME_DIR
+        lock_dir = mock.patch.object(store, "config_lock_dir", lambda: tmp / "state" / "locks")
+        lock_dir.start()
+        self.addCleanup(lock_dir.stop)
         self.repo = tmp / "repo"
         self.repo.mkdir()
         g = lambda *a: subprocess.run(["git", "-C", str(self.repo), *a], check=True,  # noqa
@@ -17158,6 +17163,39 @@ class ConfigWrites(Base):
             self.assertTrue(t.is_alive())
         t.join(10)
         self.assertEqual(context.commands_conf()["allow"], ["a *", "b *"])
+
+    def test_two_state_directories_editing_one_commands_json_keep_both_grants(self):
+        # #939 (the outside review of 1.90.24): the lock was under each WB_HOME, so two profiles
+        # sharing ~/.config/workbench/commands.json took different locks, both read, and the
+        # later write dropped the other's grant, both exiting 0
+        script = ("import os, sys, time; sys.path.insert(0, sys.argv[1])\n"
+                  "from workbench import context\n"
+                  "real = context.commands_conf\n"
+                  "def slow():\n"
+                  "    conf = real(); time.sleep(0.5); return conf  # the other reads meanwhile\n"
+                  "context.commands_conf = slow\n"
+                  "context.allow_always('allow', [sys.argv[2]])\n")
+        run = Path(self.tmp.name) / "run"   # one account's runtime directory, as /run/user/<uid>
+        run.mkdir(mode=0o700)
+        procs = []
+        for n, pattern in enumerate(("a *", "b *")):
+            env = {**os.environ, "WB_HOME": str(Path(self.tmp.name) / f"profile-{n}"),
+                   "XDG_RUNTIME_DIR": str(run)}
+            procs.append(subprocess.Popen([sys.executable, "-c", script, str(ROOT), pattern], env=env))
+        self.assertEqual([p.wait(30) for p in procs], [0, 0])
+        self.assertEqual(sorted(context.commands_conf()["allow"]), ["a *", "b *"])
+        self.assertTrue(list((run / "workbench").glob("config-*.lock")))
+
+    def test_a_config_file_changed_during_an_edit_is_left_as_it_is_and_the_edit_refused(self):
+        # #939: a writer outside the lock (OpenCode, the user's editor) lost its change
+        cmds = Path(os.environ["WB_COMMANDS"])
+        cmds.write_text('{"allow": ["a *"]}')
+        with self.assertRaisesRegex(RuntimeError, "changed while wb was editing it"):
+            with store.edit_config(cmds, context.commands_conf) as conf:
+                conf["allow"].append("b *")
+                cmds.write_text('{"allow": ["a *", "by hand *"]}')
+        self.assertEqual(context.commands_conf()["allow"], ["a *", "by hand *"])
+
 
 class DiskRoom(Base):
     """#342 (the audit of 1.4): nothing watched the disk, and a full one wedged every task."""
