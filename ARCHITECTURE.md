@@ -1018,7 +1018,14 @@ failed where the task passed (#325, the audit of 1.4); and one whose `prepared_p
 tree configured for the worktree (`build_source`: CMake's `CMakeCache.txt` `CMAKE_HOME_DIRECTORY`,
 Meson's `meson-info/meson-info.json`, in the path or one level inside): copied, its targets ran the
 candidate's code on the base, and `wb verify` said the regression already passed there (#424, the
-audit of 1.8). A scratch checkout whose copied build tree (from the worktree or `--copy`) was
+audit of 1.8); and one whose prepared paths the rounds rebuilt since the setup (status
+`prepared_marks`, a fingerprint per path from lstat, `prepared_mark`: the count, size and each
+file's name, size and mtime, leaving out what a test run rewrites, `PREP_CACHES` such as
+`__pycache__`, `.pytest_cache`, `.vite`, `*.pyc`, and any directory holding `CACHEDIR.TAG`, as
+cargo's `target/`, whose own staleness check makes a copy safe): the agent rebuilt a monorepo's
+`packages/lib/dist` (or a C extension in place), the base got the candidate's build, its tests
+imported it and passed, and `wb verify` said `base-passes` for a valid fix (#732, the 2026-11-21
+audit); a task prepared before the marks were recorded copies as before. A scratch checkout whose copied build tree (from the worktree or `--copy`) was
 configured for another checkout's tracked sources, the user's or the worktree's, with nothing to
 make it afresh, is refused (`_foreign_builds`: "copy failed", "<path> is a build tree configured
 for <dir>…", naming `--setup`); a dependency's build whose source is ignored is the same in every
@@ -5730,7 +5737,7 @@ check-ins off), not `wb start`'s.
 | `prepared` | true once the worktree is set up (`runner._prepare`: `setup`, `copy`, `siblings`), so a later run of the runner doesn't again |
 | `checked_out`, `checkout_secs` | `runner.checkout`: the worktree is made (task.json `checkout: "runner"`, #529); how long the checkout took |
 | `branch_made` | `runner.checkout`: the commit it makes `delegate/<task>` at, recorded before `worktree add` when no such branch exists; the only branch a cleanup of the checkout cut short deletes, and only there (#416, #529) |
-| `prepared_paths`, `setup_secs` | set with `prepared`: the worktree's ignored paths the preparation left, which each scratch checkout copies instead of running the setup (#249), unless one is a virtualenv (#325); how long it took, in the first report |
+| `prepared_paths`, `prepared_marks`, `setup_secs` | set with `prepared`: the worktree's ignored paths the preparation left, which each scratch checkout copies instead of running the setup (#249), unless one is a virtualenv (#325) or was rebuilt since (`prepared_marks`, `{path: fingerprint}`, `runner.prepared_mark`, #732); how long it took, in the first report |
 | `failed_before` | `setup` or `load`: the runner failed the task on its setup or its model's load before the agent ran (`_prepare`, `_load_failed`); the results row copies it (#581) |
 | `stopping` | wb is stopping the runner (`cli._stop_runner`); cleared by `spawn_runner` and the runner's exit |
 | `tools`, `tok_in`, `tok_out` | task-wide tool calls and tokens (input without cache reads) |

@@ -20,12 +20,14 @@ import select
 import shlex
 import shutil
 import signal
+import stat
 import subprocess
 import sys
 import threading
 import time
 import traceback
 import uuid
+import zlib
 from collections import deque
 from pathlib import Path
 
@@ -1348,6 +1350,13 @@ def prepare(task: store.Task, prepared: Path | None = None) -> tuple[int | str, 
     if made and any(venv_in(prepared / p) or _within(build_source(prepared / p), prepared)
                     for p in made):
         made = None
+    # And one whose prepared paths the rounds rebuilt: the agent rebuilt a monorepo's
+    # packages/lib/dist (or a C extension in place), the base got the candidate's build, its tests
+    # imported it and passed, and verify said `base-passes` for a valid fix (#732, the 2026-11-21
+    # audit). Recorded at setup (status `prepared_marks`); a task prepared before them copies as before.
+    if made and (marks := task.status.get("prepared_marks")) and \
+            any(p in marks and prepared_mark(prepared / p) != marks[p] for p in made):
+        made = None
     # a scratch checkout (the base check's, wb verify's, wb shot's), not the task's own worktree
     own = store.Task(task.name).worktree if getattr(task, "name", None) else prepared
     scratch = own is None or os.path.realpath(wt) != os.path.realpath(own)
@@ -1384,6 +1393,45 @@ def prepare(task: store.Task, prepared: Path | None = None) -> tuple[int | str, 
     if not (cmd := spec.get("setup")):
         return 0, ""
     return run_in_lane(task, cmd, setup_limit(spec))
+
+
+# what a test run rewrites in a prepared path without changing what the code is: Python's bytecode,
+# the runners' and linters' caches. A directory holding CACHEDIR.TAG (cargo's target/, pytest's
+# and ruff's caches) is one too: cargo rebuilds what changed itself, so its copy is safe (#732).
+PREP_CACHES = frozenset({"__pycache__", ".pytest_cache", ".mypy_cache", ".ruff_cache", ".hypothesis",
+                         ".cache", ".vite", ".turbo", ".parcel-cache", ".nyc_output", ".eslintcache"})
+
+
+def prepared_mark(path: Path) -> str:
+    """A fingerprint of ``path`` as it is now, from lstat alone: the count, total size and a sum of
+    each file's name, size and mtime (order-free, the same in every process), caches left out
+    (PREP_CACHES). '' when it is gone. What tells a prepared path rebuilt since the setup (#732)."""
+    if not os.path.lexists(path):
+        return ""
+    count = size = total = 0
+    stack = [(path, "")]
+    while stack:
+        at, rel = stack.pop()
+        try:
+            st, entries = at.lstat(), None
+            if stat.S_ISDIR(st.st_mode):
+                with os.scandir(at) as it:
+                    entries = list(it)
+        except OSError:
+            continue
+        if entries is not None:
+            if any(e.name == "CACHEDIR.TAG" for e in entries):
+                continue
+            stack.extend((Path(e.path), f"{rel}/{e.name}") for e in entries
+                         if e.name not in PREP_CACHES)
+            continue
+        if rel.endswith(".pyc"):
+            continue
+        count += 1
+        size += st.st_size
+        total = (total + zlib.crc32(f"{rel}\0{st.st_size}\0{st.st_mtime_ns}".encode(
+            "utf-8", "surrogateescape"))) % (1 << 64)
+    return f"{count}:{size}:{total:x}"
 
 
 def build_source(path: Path) -> Path | None:
@@ -1617,7 +1665,8 @@ def _prepare_now(task: store.Task) -> bool:
             made = _ignored_paths(task.worktree)  # what the scratch checkouts copy (#249)
         except gitops.GitError:
             made = None
-        task.set_status(prepared=True, prepared_paths=made, setup_secs=secs)
+        marks = {p: prepared_mark(task.worktree / p) for p in made} if made else None  # #732
+        task.set_status(prepared=True, prepared_paths=made, prepared_marks=marks, setup_secs=secs)
         return True
     what = f"the setup command failed (exit {code})" if isinstance(code, int) else \
         f"setting up the worktree failed ({setup_timed_out(spec) if code == 'timeout' else code})"

@@ -2936,6 +2936,34 @@ class WorktreeSetup(Base):
         run_wb("verify", "t-once", "--test", "sh test_answer.sh", "--files", "test_answer.sh", "--setup")
         self.assertEqual(count.read_text().count("run"), 3)     # asked: in each checkout
 
+    def test_a_build_output_the_rounds_rebuilt_is_made_afresh_for_the_base(self):
+        # #732 (the 2026-11-21 audit): the setup built dist/, the agent rebuilt it from its change,
+        # and wb verify copied the candidate's dist/ to the base, whose tests then passed
+        self.ignore("dist/")
+        (self.repo / "src.txt").write_text("bug\n")
+        subprocess.run(["git", "-C", str(self.repo), "add", "src.txt"], check=True)
+        subprocess.run(["git", "-C", str(self.repo), "commit", "-qm", "src"], check=True)
+        count = Path(self.tmp.name) / "setup-runs"
+        self.start("t-dist", "ok", "--setup", f"mkdir -p dist && cp src.txt dist/lib.txt && echo run >> {count}",
+                   "--auto-fix", "0", "--no-self-review")
+        st = wait_phase("t-dist", {"review"})
+        t = store.Task("t-dist")
+        self.assertEqual(list(st["prepared_marks"]), ["dist"])
+        (t.worktree / "test_lib.sh").write_text("grep -qx fixed dist/lib.txt\n")
+        # what a test run leaves in a prepared path changes nothing: still copied, not set up again
+        (t.worktree / "dist" / "__pycache__").mkdir()
+        (t.worktree / "dist" / "__pycache__" / "lib.cpython-312.pyc").write_bytes(b"\0")
+        self.assertEqual(runner.prepared_mark(t.worktree / "dist"), st["prepared_marks"]["dist"])
+        run_wb("verify", "t-dist", "--test", "sh test_lib.sh", "--files", "test_lib.sh")
+        self.assertEqual(count.read_text().count("run"), 1)
+        (t.worktree / "src.txt").write_text("fixed\n")                     # the change, and its build
+        (t.worktree / "dist" / "lib.txt").write_text("fixed\n")
+        run_wb("verify", "t-dist", "--test", "sh test_lib.sh", "--files", "test_lib.sh")
+        from workbench import verify
+        r = verify.last(t)
+        self.assertEqual((r["base"]["exit"], r["candidate"]["exit"]), (1, 0))  # the base's own build
+        self.assertEqual(count.read_text().count("run"), 3)                  # made afresh in each
+
     def test_a_virtualenv_the_setup_made_is_made_again_in_each_scratch_checkout(self):
         # #325 (the audit of 1.4, reproduced): copied from the task's worktree, a .venv's scripts
         # ran the worktree's interpreter and code, so the base check and wb verify failed there
