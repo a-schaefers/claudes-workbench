@@ -3787,6 +3787,69 @@ class AskServer(Base):
         self.assertEqual((context.ask_dir(task) / "aaaaaaaa.answer").read_text(), "the answer\n")
         self.assertFalse((context.ask_dir(task) / "aaaaaaaa.answer").is_symlink())
 
+    def serve(self, task, *lines):
+        """The ask server as OpenCode runs it: these requests on its stdin, held open (a call is
+        served on a thread of its own) until each has its reply; the replies by id."""
+        proc = subprocess.Popen([sys.executable, str(ROOT / "bin" / "wb-ask-mcp")],
+                                stdin=subprocess.PIPE, stdout=subprocess.PIPE, text=True,
+                                env={**os.environ, "WB_TASK": task.name, "PYTHONPATH": ""})
+        timer = threading.Timer(30, proc.kill)
+        timer.start()
+        try:
+            proc.stdin.write("".join(line + "\n" for line in lines))
+            proc.stdin.flush()
+            replies = {}
+            while len(replies) < len(lines) and (line := proc.stdout.readline()):
+                reply = json.loads(line)
+                replies[reply.get("id")] = reply
+            return replies
+        finally:
+            timer.cancel()
+            proc.stdin.close()
+            proc.wait(10)
+
+    def test_a_question_that_cant_be_written_tells_the_agent_to_carry_on(self):
+        # #525: a full disk or an unwritable ask/ raised out of handle, and the call never ended
+        self.start("t-full", "ok")
+        wait_phase("t-full", {"review"})
+        task = store.Task("t-full")
+        call = {"jsonrpc": "2.0", "id": 7, "method": "tools/call",
+                "params": {"name": "ask_reviewer", "arguments": {"question": "41 or 42?"}}}
+        with mock.patch.object(ask_mcp, "ask", side_effect=OSError(28, "No space left on device")):
+            reply = ask_mcp.handle(call, task)
+        self.assertEqual(reply["id"], 7)
+        self.assertTrue(reply["result"]["isError"])
+        self.assertEqual(reply["result"]["content"][0]["text"],
+                         "ask_reviewer failed: [Errno 28] No space left on device; carry on "
+                         "without an answer and say so in your summary.")
+
+    def test_the_servers_reply_to_a_request_that_fails_carries_its_id(self):
+        # #525: the reply said id null, which OpenCode's MCP client dropped, so the call waited
+        # until the silence guard stopped the round
+        self.start("t-id", "ok")
+        wait_phase("t-id", {"review"})
+        replies = self.serve(store.Task("t-id"), json.dumps(
+            {"jsonrpc": "2.0", "id": 7, "method": "tools/call", "params": "not an object"}))
+        self.assertEqual(replies[7]["error"]["code"], -32603)
+
+    def test_half_an_emoji_in_a_question_reaches_claude_as_a_replacement_character(self):
+        # #525: a lone surrogate failed the ask file's write; and one the agent wrote into an
+        # ask file itself would fail the runner's event
+        self.start("t-emoji", "ok")
+        wait_phase("t-emoji", {"review"})
+        task = store.Task("t-emoji")
+        threading.Thread(target=self.answer_soon, args=(task, "Use 42.")).start()
+        replies = self.serve(task, '{"jsonrpc": "2.0", "id": 7, "method": "tools/call", "params": '
+                                   '{"name": "ask_reviewer", "arguments": '
+                                   '{"question": "emoji \\ud83d broken"}}}')
+        self.assertEqual(replies[7]["result"]["content"][0]["text"], "Use 42.")
+        (context.ask_dir(task) / "bbbbbbbb.json").write_text(
+            '{"id": "bbbbbbbb", "ts": 1, "question": "mine \\udc00"}', encoding="utf-8")
+        ask_mcp.relay(task, {})
+        events = (task.dir / "events.jsonl").read_text(encoding="utf-8")
+        self.assertIn("emoji � broken", events)
+        self.assertIn("mine �", events)
+
 
 class ConfigLayer(Base):
     def test_mcp_layer_uses_opencode_2_shape_and_a_launcher(self):

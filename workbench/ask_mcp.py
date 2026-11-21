@@ -154,7 +154,7 @@ def _read(path, limit: int = FILE_MAX) -> str | None:
 def read_question(task: store.Task, qid: str) -> dict | None:
     """ask/<qid>.json as the agent wrote it, its fields as strings, or None."""
     try:
-        q = json.loads(_read(ask_dir(task) / f"{qid}.json") or "")
+        q = store.loads(_read(ask_dir(task) / f"{qid}.json") or "")  # the runner writes it on (#525)
     except ValueError:
         return None
     if not isinstance(q, dict):
@@ -333,8 +333,16 @@ def handle(msg: dict, task: store.Task):
             return {"jsonrpc": "2.0", "id": mid,
                     "error": {"code": -32602, "message": f"unknown tool {params.get('name')}"}}
         args = params.get("arguments") or {}
-        text = ask(task, str(args.get("question", "")).strip(), str(args.get("context", "")),
-                   str(args.get("command", "")).strip(), str(args.get("path", "")).strip())
+        if not isinstance(args, dict):
+            args = {}
+        try:
+            text = ask(task, str(args.get("question", "")).strip(), str(args.get("context", "")),
+                       str(args.get("command", "")).strip(), str(args.get("path", "")).strip())
+        except Exception as exc:  # a full disk, an unwritable ask/: the agent hears it and goes on
+            why = " ".join(str(exc).split())[:200] or type(exc).__name__
+            return {"jsonrpc": "2.0", "id": mid, "result": {"isError": True, "content": [
+                {"type": "text", "text": f"ask_reviewer failed: {why}; carry on without an "
+                                         "answer and say so in your summary."}]}}
         result = {"content": [{"type": "text", "text": text}], "isError": False}
     else:
         return {"jsonrpc": "2.0", "id": mid,
@@ -347,10 +355,16 @@ def main():
     out = threading.Lock()
 
     def serve(line: str) -> None:
+        mid = None  # null only for a line that isn't a request at all, as JSON-RPC says
         try:
-            reply = handle(json.loads(line), task)
+            # scrubbed: half an emoji (a lone surrogate) in the question failed its write (#525)
+            msg = store.loads(line)
+            mid = msg.get("id") if isinstance(msg, dict) else None
+            reply = handle(msg, task)
         except Exception as exc:  # never let one bad message take the agent's tool away
-            reply = {"jsonrpc": "2.0", "id": None, "error": {"code": -32603, "message": str(exc)}}
+            # with the request's own id: OpenCode's MCP client dropped a reply with id null, and
+            # the call waited until the silence guard stopped the round (#525)
+            reply = {"jsonrpc": "2.0", "id": mid, "error": {"code": -32603, "message": str(exc)}}
         if reply is not None:
             with out:
                 sys.stdout.write(json.dumps(reply) + "\n")

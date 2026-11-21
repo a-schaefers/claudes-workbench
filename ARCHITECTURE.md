@@ -1541,7 +1541,14 @@ courtesy: the runner's count is the one that holds) it returns the refusal. Othe
 `ask/<id>.json` (`{id, ts, round, question, context, command?, path?}`) and blocks (a `Watcher`
 on `ask/`) until `ask/<id>.answer` appears or the ask timeout passes (`--ask-timeout`, 20
 minutes), returning the answer or "No answer arrived in time. Make the most reasonable
-assumption…".
+assumption…". A call that raises (a full disk, an unwritable `ask/`) returns `isError: true` and
+`ask_reviewer failed: <why>; carry on without an answer and say so in your summary.`; any other
+request that raises gets a `-32603` error with the request's own id (`null` only for a line that
+isn't a request). OpenCode's MCP client dropped a reply with id `null`, so the call waited out
+its execution timeout and the silence guard stopped the round (#525). Requests are parsed with
+`store.loads`, and the runner reads ask files with it too, so half an emoji (a lone surrogate)
+in a question is U+FFFD rather than a write that fails: in the server, or in the runner's event
+for an ask file the agent wrote itself.
 
 The runner relays it (`ask_mcp.relay`, each tick of the round's loop, woken by the steer bell
 when `ask/` changes). Outside the lane, it reads each new ask file (no links, at most
