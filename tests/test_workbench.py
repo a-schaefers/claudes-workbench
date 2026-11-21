@@ -1677,6 +1677,85 @@ class Lifecycle(Base):
         self.assertTrue(tip.startswith(gitops.merge(repo, "t", "main", how="ff")))
         self.assertEqual(git(repo, "rev-list", "--min-parents=2", "--count", "HEAD"), "0")
 
+    def _signer(self, hang_on_merge: bool = False) -> Path:
+        """A gpg.program that signs unattended with a made-up signature (git checks only the
+        status line), or, `hang_on_merge`, waits on nobody for a commit with two parents: a
+        pinentry no one answers."""
+        prog = Path(self.tmp.name) / f"signer{len(os.listdir(self.tmp.name))}"
+        prog.write_text("#!/bin/sh\npayload=$(cat)\n" + (
+            "if [ \"$(printf '%s\\n' \"$payload\" | grep -c '^parent ')\" -ge 2 ]; then exec sleep 30; fi\n"
+            if hang_on_merge else "") +
+            "printf '\\n[GNUPG:] SIG_CREATED D 22 8 00 0 FAKE\\n' >&2\n"
+            "printf -- '-----BEGIN PGP SIGNATURE-----\\n\\nmade up\\n-----END PGP SIGNATURE-----\\n'\n")
+        prog.chmod(0o755)
+        return prog
+
+    def test_a_signed_merge_no_one_answers_is_backed_out_in_time_and_no_sign_merges_unsigned(self):
+        # #420 (the audit of 1.8, reproduced): the merge and the squash's commit in the user's
+        # checkout ran with a terminal and no time limit, and signed after --no-sign
+        slow = Path(self.tmp.name) / "slowgpg"
+        slow.write_text("#!/bin/sh\nexec sleep 30\n")  # git is killed; this one lapses
+        slow.chmod(0o755)
+        for how in ("merge", "squash"):
+            repo, g = self._merge_case(base={b"a.txt": b"a\n"}, main={b"c.txt": b"c\n"},
+                                       task={b"b.txt": b"b\n"}, ignore={})
+            g("config", "commit.gpgsign", "true")
+            g("config", "gpg.program", str(slow))
+            before = g("rev-parse", "main")
+            t0 = time.monotonic()
+            with mock.patch.object(gitops, "COMMIT_SECS", 2), \
+                    self.assertRaisesRegex(gitops.GitError, "backed out") as e:
+                gitops.merge(repo, "t", "main", how=how)
+            self.assertLess(time.monotonic() - t0, 20, how)
+            self.assertIn("needs unlocking", str(e.exception), how)
+            self.assertEqual(g("rev-parse", "main"), before, how)
+            self.assertEqual(g("status", "--porcelain"), b"", how)  # nothing staged, no b.txt
+            self.assertNotEqual(subprocess.run(["git", "-C", str(repo), "rev-parse", "-q", "--verify",
+                                                "MERGE_HEAD"]).returncode, 0, how)
+            head = gitops.merge(repo, "t", "main", how=how, sign=False)
+            self.assertNotIn(b"gpgsig", g("cat-file", "commit", head), how)
+
+    @unittest.skipUnless(shutil.which("timeout"), "needs timeout")
+    def test_an_accept_merge_killed_mid_merge_leaves_the_checkout_as_it_was(self):
+        # #420: under `timeout 4 wb accept --merge`, a signing key waiting on a pinentry left
+        # MERGE_HEAD and the staged merge in the user's checkout, and the retry refused it
+        g = lambda *a: subprocess.run(["git", "-C", str(self.repo), *a], check=True,  # noqa
+                                      capture_output=True, text=True).stdout
+        g("config", "commit.gpgsign", "true")
+        g("config", "gpg.program", str(self._signer(hang_on_merge=True)))
+        out = self.start("t-kill", "ok")
+        self.assertNotIn("needs unlocking", out)                       # the signer works
+        wait_phase("t-kill", {"review"})
+        before = g("rev-parse", "main")
+        r = subprocess.run(["timeout", "5", sys.executable, str(ROOT / "bin" / "wb"), "accept",
+                            "t-kill", "-m", "feat: answer", "--merge"], capture_output=True, text=True)
+        self.assertEqual(r.returncode, 124, r.stderr)                  # killed in the merge
+        self.assertEqual(g("rev-parse", "main"), before)
+        self.assertEqual(g("status", "--porcelain", "--untracked-files=no"), "")
+        self.assertFalse((self.repo / "answer.txt").exists())
+        self.assertNotEqual(subprocess.run(["git", "-C", str(self.repo), "rev-parse", "-q",
+                                            "--verify", "MERGE_HEAD"]).returncode, 0)
+        self.assertIn("gpgsig", g("cat-file", "commit", store.Task("t-kill").status["tip"]))
+        self.assertIn("merged into main", run_wb("accept", "t-kill", "-m", "feat: answer",
+                                                 "--merge", "--no-sign"))  # the retry lands it
+        self.assertNotIn("gpgsig", g("cat-file", "commit", "main"))
+        self.assertEqual((self.repo / "answer.txt").read_text().strip(), "42")
+
+    def test_accept_merge_no_sign_merges_unsigned_when_the_key_cannot_sign(self):
+        # #420 (Codex's 20 too): --no-sign let the task's commit through, then the merge signed,
+        # failed ("gpg failed to sign the data") and exited 5: the task couldn't land
+        g = lambda *a: subprocess.run(["git", "-C", str(self.repo), *a], check=True,  # noqa
+                                      capture_output=True, text=True).stdout
+        g("config", "commit.gpgsign", "true")
+        g("config", "gpg.program", "false")
+        for name, how in (("t-ns", ()), ("t-nsq", ("--merge-as", "squash"))):
+            self.start(name, "ok", "--no-sign")
+            wait_phase(name, {"review"})
+            self.assertIn("merged into main", run_wb("accept", name, "-m", f"feat: {name}",
+                                                     "--merge", *how))
+            self.assertNotIn("gpgsig", g("cat-file", "commit", "main"), name)
+            g("reset", "-q", "--hard", "HEAD~1")  # the next one from the same base
+
     def test_accept_merge_as_squash_lands_one_commit_and_drops_the_branch(self):
         # #352: branch -d keeps a squashed branch (never an ancestor of the squash), and merged
         # delegate branches once piled up, 8 in one repo (the 2026-11-19 audit)
