@@ -1601,6 +1601,29 @@ class Real(unittest.TestCase):
                 pass
             self.assertEqual(posts, [{"model": "x", "keep_alive": 0}])
 
+    def test_a_media_batch_takes_the_remote_boxes_turns_in_one_order_whatever_its_engines_order(self):
+        # #945 (an outside review of 1.90.24): the boxes' leases were taken in engine order, so
+        # two wb audio jobs with generator and listener on two boxes the other way round (two
+        # audio.json files, one shared lease directory) each held one box waiting for the other
+        box = lambda h: models.Model(id=f"{h}/x", provider=h, name="x", engine="server",  # noqa: E731
+                                     base_url=f"http://{h}.invalid:8000/v1", label=h, remote=True)
+        a, b = box("box-a"), box("box-b")
+        taken = []
+
+        @contextlib.contextmanager
+        def lease(m, who, say, wait=True, on=None, cards=None):
+            taken.append(models.pool(on))
+            yield
+        gen, ear = {"url": "http://box-b.invalid:9000/v1/audio", "on": b}, \
+            {"url": "http://box-a.invalid:9000/v1/audio", "on": a}
+        with mock.patch.object(media, "boxes", lambda e: [e["on"]]), \
+                mock.patch.object(models, "same_gpu", lambda m: False), \
+                mock.patch.object(models, "GpuLease", lease):
+            for engines in ((gen, ear), (ear, gen)):
+                with media.turns("wb audio", lambda *_: None, True, *engines):
+                    pass
+        self.assertEqual(taken, ["gpu-box-a-invalid-8000", "gpu-box-b-invalid-8000"] * 2)
+
     def test_a_remote_task_hears_when_another_client_unloaded_its_model_between_rounds(self):
         # #812: the other client's load evicted this task's model, and nothing told this task why
         # its next round began with a reload

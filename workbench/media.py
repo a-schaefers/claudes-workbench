@@ -350,7 +350,11 @@ def turns(who: str, say, wait: bool, *engines: dict):
             pins = [cards(e) for e in here]  # one engine that can't say: every card, as before
             pinned = frozenset().union(*pins) if all(pins) else None
             stack.enter_context(gpu(who, say, wait, serving(*engines), pinned))
-        for m in remote.values():
+        # one order for every batch, whatever its engines': this machine's pool, then the boxes'
+        # by pool name. In engine order, a wb audio whose generator was on box B and listener on
+        # A held B waiting for A while another's (its own audio.json, one shared lease directory)
+        # held A waiting for B, and with --wait neither ever ran (#945)
+        for _, m in sorted(remote.items()):
             stack.enter_context(models.GpuLease(None, who, say, wait=wait, on=m))
             if m.engine == "ollama" and not models._fake():
                 held = models.keep_loaded()

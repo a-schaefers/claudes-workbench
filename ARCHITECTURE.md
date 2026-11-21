@@ -4703,7 +4703,10 @@ custom-node packs do run their own Python).
   `models.same_gpu`, one per lease pool) takes
   `GpuLease(None, "wb image", wait=…, on=<that model>)` on each such pool, as `wb optimize`
   does, and unloads that box's Ollama models (not `keep_loaded`), #750, another client's once it
-  has gone `BOX_QUIET` without a request (`box_quiet(act=)`; refused without `wait`, #944); an engine off this GPU
+  has gone `BOX_QUIET` without a request (`box_quiet(act=)`; refused without `wait`, #944), the
+  pools always in one order, this machine's first, then the boxes' sorted by pool name (in engine
+  order, two wb audio jobs with generator and listener on two boxes the other way round, two
+  audio.json files on one shared lease directory, each held one box waiting for the other: #945); an engine off this GPU
   otherwise (`media.on_gpu`) runs with no lease and frees nothing; any
   other holds the GPU for the whole batch through `media.gpu`, that is `models.GpuLease(None, "wb image",
   wait=…)` (any live holder in gpu.json: a RuntimeError naming them, unless `--wait`; then it
