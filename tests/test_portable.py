@@ -2521,13 +2521,16 @@ class Optimize(unittest.TestCase):
     def test_the_first_run_on_a_fresh_profile_starts(self):
         # #198 (the 2026-11-19 audit): optimize.log was opened before the state directory existed,
         # and wb setup swallowed the error, so the first measurement never ran
-        from workbench import optimize
+        from workbench import cli, optimize
         self.ollama(32768)
         os.environ["WB_HOME"] = str(Path(os.environ["WB_HOME"]) / "fresh")
-        with mock.patch.object(optimize.subprocess, "Popen") as popen, \
+        # the detached run faked, not every process: with subprocess.Popen patched, the `mount`
+        # store.network_fs runs on macOS (no /proc/self/mounts) got a mock and raised (#950)
+        with mock.patch.object(cli, "detach") as detach, \
                 mock.patch.object(models, "_started", return_value="1"):  # not ps on the fake
-            popen.return_value.pid = os.getpid()
+            detach.return_value.pid = os.getpid()
             self.assertIn("wb optimize: measuring 1 model(s)", optimize.start()[0])
+        self.assertIn("workbench.optimize", detach.call_args[0][0])
         self.assertTrue((store.home() / "optimize.log").exists())
 
     def test_a_window_that_spills_is_measured_down_to_the_largest_that_fits_whole(self):
@@ -2746,7 +2749,7 @@ class Optimize(unittest.TestCase):
         # a run takes a minute or two, so it runs at setup and session start when due (the user,
         # 2026-11-18), quietly otherwise
         self.ollama(32768)
-        from workbench import optimize
+        from workbench import cli, optimize
         gpu = [{"name": "Card A", "vram": 16e9}]
         with mock.patch.object(optimize.hardware, "gpus", lambda windows=True: gpu):
             self.assertEqual(optimize.due(), "never measured")
@@ -2755,24 +2758,24 @@ class Optimize(unittest.TestCase):
             store.write_json(optimize.path(), {**optimize.state(), "done": 1, "stopped": None,
                                                "hardware": optimize.fingerprint()})
             self.assertEqual(optimize.due(), "")
-            with mock.patch.object(optimize.subprocess, "Popen") as popen, \
+            with mock.patch.object(cli, "detach") as detach, \
                 mock.patch.object(models, "_started", return_value="1"):  # not ps on the fake
                 self.assertEqual(optimize.start(if_due=True), [])            # nothing to do: quiet
-                popen.assert_not_called()
+                detach.assert_not_called()
             optimize.apply(m)                                    # its own entry: measured already
             self.assertEqual(optimize.due(), "")
             gpu[0] = {"name": "Card B", "vram": 24e9}
             self.assertEqual(optimize.due(), "the GPU changed")
             with mock.patch.object(models, "holders", lambda *a: {"1": {"task": "t"}}):
                 self.assertEqual(optimize.start(if_due=True), [])            # busy: next session
-            with mock.patch.object(optimize.subprocess, "Popen") as popen, \
+            with mock.patch.object(cli, "detach") as detach, \
                 mock.patch.object(models, "_started", return_value="1"):  # not ps on the fake
-                popen.return_value.pid = os.getpid()
+                detach.return_value.pid = os.getpid()
                 out = optimize.start(if_due=True)
             # the model and the variant apply made (the fake lists what /api/create made: #266)
             self.assertIn("measuring the GPU for 2 local model(s) (the GPU changed)", out[0])
             self.assertIn("a task you start goes first", out[0])
-            self.assertNotIn("--all", popen.call_args[0][0])
+            self.assertNotIn("--all", detach.call_args[0][0])
 
     def test_a_fit_is_due_again_when_its_models_window_or_weights_change_and_only_that_one(self):
         # #709: the fit was keyed to the GPUs alone: an entry raised from 32K to 64K, or a tag
