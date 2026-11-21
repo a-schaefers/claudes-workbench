@@ -487,6 +487,32 @@ test('a session resumed in a new process comes back in workbench mode, and a qui
   await clock.advance(3000)                                     // the quit's poll ends inside the test
 })
 
+test('after a reload in workbench mode, a /clear\'s new session id is kept in the mode too (#840)', async ($, on) => {
+  // #840: a reload started mem.delegated false while the chat atom kept the mode, so a /clear's
+  // id was never saved, and `claude --continue` into it came back with the mode off
+  const clock = mock.clock(on, { now: 1_800_000_000_000 })
+  const files: Record<string, string> = {}
+  fakeTasks(on, files, [])
+  const kept: Record<string, unknown> = { modes: { 'sess-1': 1_800_000_000_000 - 3600_000 } }
+  on('store.get', (_: any, e: any) => ({ value: kept[e.key] }))
+  on('store.set', (_: any, e: any) => { kept[e.key] = e.value; return { value: undefined } })
+  // the chat atom as the earlier load left it, in the mode: it outlives the reload, mem doesn't
+  let held: any = { shape: 'chat-4', value: { key: 'k1', delegating: true, url: '', web: false } }
+  let version = 1
+  const isChat = (e: any) => e.key === 'chat' && e.plugin === 'workbench'
+  on('state.get', (_: any, e: any, next: any) => isChat(e) ? { value: { value: held, version } } : next(e))
+  on('state.set', (_: any, e: any, next: any) => isChat(e) ? (held = e.value, { value: { isSet: true, version: ++version } }) : next(e))
+  let id = 'sess-1'
+  on('session.id', () => ({ value: id }))
+  on('process.run', () => ({ value: { exitCode: 0, stdout: '', stderr: '' } }))
+  on('ui.toast', () => ({ value: undefined }))
+  await $.session.start({ cwd: '/home/u/a', surface: 'terminal', isInteractive: true })
+  await clock.advance(3000)
+  id = 'sess-2'                                                   // /clear, before any delegating command
+  await clock.advance(31_000)
+  expect(Object.keys(kept.modes as object).sort()).toEqual(['sess-1', 'sess-2'])
+})
+
 test('a session that adopts a task whose process is gone turns workbench mode on with it (#689)', async ($, on) => {
   const clock = mock.clock(on, { now: 1_800_000_000_000 })
   const files: Record<string, string> = {}

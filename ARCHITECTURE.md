@@ -5880,7 +5880,9 @@ the chat key (`<start ms>-<6 base36>`, kept across reloads), `mem.cwd` and `mem.
 session's directory and the home directory, resolved: which tasks without a `session` are this
 session's, `mine`), `mem.ids` (the `sessions` atom plus `$.session.id()`), turns workbench mode back on when
 `$.store`'s `modes` holds one of those ids (`modeKept`; `keepMode` writes `{<id>: <ms>}` for every id when the
-mode turns on, and for a /clear's new id while it is on, drops this process's ids when it turns off, and
+mode turns on, and for a /clear's new id while it is on (a load that starts in the mode, after a
+reload, keeps its ids and counts as delegating: a /clear's id after /workbench-update or
+/reload-plugins was never kept, #840), drops this process's ids when it turns off, and
 entries past MODES_KEEP_MS, 30 days: #689, `claude --continue` came back with the mode off, so the chat
 didn't listen and a compaction dropped it, until Claude happened to run a delegating command; a
 `wb adopt` that succeeds turns it on too, for a task still delegated (`delegatedWork`: running, or

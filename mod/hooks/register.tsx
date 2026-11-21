@@ -2652,7 +2652,13 @@ export const register: Register = (on, options) => {
     mem.ids = new Set(await read($, sessions))
     mem.said = mem.said ?? await read($, saidState) // a reload: what this conversation was told stands (#697)
     await noteSession($)
-    if (!(await read($, chat)).delegating && await modeKept($)) await workbenchMode($, true) // a resume (#689)
+    if ((await read($, chat)).delegating) {
+      // a reload in the mode (/workbench-update, an option change, /reload-plugins): mem.delegated
+      // starts false, so a /clear's new id was never kept and `claude --continue` into it came
+      // back with the mode off, #689 again (#840)
+      mem.delegated = true
+      await keepMode($, true)
+    } else if (await modeKept($)) await workbenchMode($, true) // a resume (#689)
     // A `claude -p` run or an SDK session has no person at it until a surface attaches: it took
     // other sessions' wakes, the weekly check and a `wb status` before every prompt (the
     // 2026-11-16 audit). It stays quiet until then.
