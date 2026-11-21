@@ -28,6 +28,10 @@ Claude Code plugin that connects the two inside your normal Claude Code session.
   every image; it can't hear, so each sound comes with a transcript and measurements it can read,
   and for music you have the last word ([images](ARCHITECTURE.md#images),
   [audio](ARCHITECTURE.md#audio)).
+- **Experimental: lighter code reading.** Turn on *Agent code navigation* in the pane's Settings
+  and agents read a file's outline and just the function they need, with probe (its release
+  binary, installed by you), instead of the whole file, which saves their context on big files.
+  It's off by default and may go away ([experiments](ARCHITECTURE.md#experiments)).
 
 On bigger coding tasks, once the session is already open, handing the coding off to the local
 model typically costs Claude about half the tokens of writing the code itself
