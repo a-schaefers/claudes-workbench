@@ -564,8 +564,10 @@ async function run(engine, device) {
   await check('a message over 6 h unread says it was not passed to Claude, never Delivered, and sends again', async () => {
     // #536 (the 2026-11-20 audit): the mod skipped it, and the page said "Delivered" for good
     listen(false)
+    // #843: about a pair of screenshots, sent again without it: Claude got the words, no task
+    const about = { task: 'fix-nav', n: 1, step: 1, round: 2 }
     appendFileSync(join(home, 'state/chat/messages.jsonl'), JSON.stringify({ id: 'old-1', ts: Date.now() / 1000 - 7 * 3600,
-      from: 'user', text: 'run the backlog overnight' }) + '\n')
+      from: 'user', text: 'run the backlog overnight', about }) + '\n')
     const row = page.locator('.row.user', { hasText: 'run the backlog overnight' })
     await until(async () => (await row.locator('.meta').textContent()).includes('Not passed to Claude (over 6 h old)'))
     if ((await row.locator('.meta').textContent()).includes('Delivered')) throw new Error('says Delivered')
@@ -573,7 +575,31 @@ async function run(engine, device) {
     await until(() => messages().filter(m => m.text === 'run the backlog overnight').length === 2)
     const again = messages().filter(m => m.text === 'run the backlog overnight').at(-1)
     if (Date.now() / 1000 - again.ts > 60) throw new Error('not sent as a new message')
+    if (JSON.stringify(again.about) !== JSON.stringify(about)) throw new Error('about lost: ' + JSON.stringify(again.about))
     await until(async () => (await page.locator('.row.user', { hasText: 'run the backlog overnight' }).last().locator('.meta').textContent()).includes('Delivered'))
+  })
+  await check('a refused message about a pair of screenshots, edited, is still about them (#843)', async () => {
+    // #843: edit put the words and files back in the box but not what they were about. The pair
+    // again, newest: the first one may have left the thread's newest 200 by now
+    const shots = { task: 'fix-nav', n: 1, step: 1, round: 2, viewport: '390x844',
+      base: { rev: '1a2b3c4d5e6f', image: true }, candidate: { rev: '9f8e7d6c5b4a', image: true } }
+    appendFileSync(join(home, 'state/chat/messages.jsonl'), JSON.stringify({ id: 'shots-again', ts: Date.now() / 1000, from: 'claude',
+      text: 'screenshots of fix-nav again.', shots }) + '\n')
+    await until(async () => (await page.locator('text=Reply about these').count()) > 0)
+    await page.locator('text=Reply about these').last().click()
+    await until(async () => (await page.textContent('#about-text')) === 'Replying about fix-nav, step 1')
+    await page.fill('#input', 'x'.repeat(8001))                    // past MAX_TEXT: refused
+    await page.click('#send')
+    const row = page.locator('.row.user.pending', { hasText: 'Not sent' })
+    await until(async () => (await row.count()) === 1)
+    if (!(await page.locator('#about').isHidden())) throw new Error('the box still said it before the edit')
+    await row.locator('.meta button', { hasText: 'edit' }).click()
+    await until(async () => (await page.textContent('#about-text')) === 'Replying about fix-nav, step 1')
+    await page.fill('#input', 'the logo is cut off')
+    await page.click('#send')
+    await until(() => { const r = messages().at(-1); return r && r.text === 'the logo is cut off' })
+    const r = messages().at(-1)
+    if (JSON.stringify(r.about) !== JSON.stringify({ task: 'fix-nav', n: 1, step: 1, round: 2 })) throw new Error(JSON.stringify(r.about))
   })
   await check('a photo attached, the page reloaded before sending: the chip is back, nothing uploaded twice; one message with one path reaches Claude', async () => {
     // #623, the owner (2026-11-20): never a file uploaded twice by a refresh

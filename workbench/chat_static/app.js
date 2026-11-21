@@ -242,6 +242,7 @@
         const ed = document.createElement('button'); ed.textContent = 'edit'
         ed.onclick = () => {
           drop(m.cid)
+          if (m.about) setAbout(m.about)  // what it was about comes back with it (#843)
           for (const f of m.files || []) if (!draft.some(d => d.id === f.id)) draft.push({ ...f, mod: 0, state: 'up' })
           keepDraft(); drawTray(); pump()
           input.value = m.text; save(K.draft, m.text); grow(); armSend()
@@ -494,7 +495,7 @@
   function setAbout(a) {
     about = a; save(K.about, a)
     $('about').hidden = !a
-    $('about-text').textContent = a ? `Replying about ${a.task}, step ${a.step}` : ''
+    $('about-text').textContent = !a ? '' : a.audio ? aboutTag(a) : `Replying about ${a.task}, step ${a.step}`
   }
   $('about-x').onclick = () => setAbout(null)
   setAbout(about)
@@ -1090,11 +1091,12 @@
     render(); toEnd(true); flush(true)
   }
   // an expired message, sent again as a new one through the outbox (its own cid), with its files:
-  // already on the computer, so not a byte again (#623)
+  // already on the computer, so not a byte again (#623); and what it was about, a pair of
+  // screenshots or a kept take: without it Claude got the words with no task or take (#843)
   function resend(m) {
     if (!token) return
     const files = (m.files || []).map(({ id, name, size, type }) => ({ id, name, size, type }))
-    const o = { cid: newId(), text: m.text, ts: now(), ...(files.length ? { files } : {}) }
+    const o = { cid: newId(), text: m.text, ts: now(), ...(m.about ? { about: m.about } : {}), ...(files.length ? { files } : {}) }
     if (!save(OUT + o.cid, o)) { banner('Not sent: this browser keeps no outbox here. Copy it into the box.', true); return }
     outbox = outItems()
     render(); toEnd(true); flush(true)

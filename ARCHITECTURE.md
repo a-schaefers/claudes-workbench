@@ -5470,7 +5470,9 @@ VPN), `"hosts": ["chat.example.org"]` a name a tunnel or proxy sends.
   A message of the user's unread past `MESSAGE_EXPIRE` (6 h, the one threshold: the snapshot's
   `expire`) carries `expired: true` in `chat.thread`; `wb chat claim` refuses
   it, so no session springs it on Claude, and the page says "Not passed to Claude (over 6 h old)"
-  with *send again* (a new message, its own cid, naming the same uploads: not a byte sent again). The mod skipped it on a clock of its own and
+  with *send again* (a new message, its own cid, naming the same uploads: not a byte sent again,
+  and what it was about, a pair of screenshots or a kept take: without it Claude got the words with
+  no task, step or take, #843). The mod skipped it on a clock of its own and
   the page said "Delivered" for good (#536). The first `chat.open_work` to find it expired retires
   it (`_retire`, under `open.lock`): out of `open.json`'s `messages`, with an `expired` receipt, so
   `wb chat pending` no longer lists it, the mod no longer sees it, and `wb gc` drops its uploads;
@@ -5733,7 +5735,8 @@ the same id), a network failure backing off, a refusal shown on its chip. The sa
 twice (name, size, modified time) is one chip. Send takes the text and the chips not refused into
 the outbox item (`files`: `[{id, name, size, type}]`); `flush` makes sure each is uploaded before
 it posts `/api/send` with their ids, and a refused one marks the message not sent, naming the file
-(edit puts its files back in the tray). In the thread a message shows its images as thumbnails
+(edit puts its files back in the tray, and what it was about back above the box: `setAbout`, a
+kept take shown by its `aboutTag`; the edited message went out as a general one, #843). In the thread a message shows its images as thumbnails
 (a tap shows one whole, `view`; a tap or Escape closes it) and other files as name and size (a
 tap saves it), each fetched once with the token as a blob (`fileURL`), or from this page's own
 bytes; one `wb gc` removed says "no longer on the computer". A thumbnail is fetched only once it
