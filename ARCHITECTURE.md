@@ -2160,7 +2160,9 @@ nothing until a surface attaches.
   tab opened, the last `BUSY_KEEP` 60 samples, in memory only), a line per running task (phase,
   round, its time, tok/s, said `(last call)` when not live, context %), the rack (one line per
   model: resident, split, cpu, idle or can't run, where its memory is, its speeds and load time, the
-  tasks on it) and the queue. One child (`runTop`, read by `pumpTop`), started by `syncTop` only
+  tasks on it) and the queue. A line longer than the pane wraps at spaces, the rest indented
+  (`wrapParts`, colours kept): cut at the edge, a long GPU name took its busy bar, watts and
+  sparkline. One child (`runTop`, read by `pumpTop`), started by `syncTop` only
   while the tab is shown, the pane not minimized and Live view on, checked at each poll, a tab's
   press, a minimize, a bring-back and a Stats pick; it ends (`stopTop`, `return()` on the stream) the
   moment any of those stops holding, and its own loop checks again at each line, so a pane put

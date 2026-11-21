@@ -311,6 +311,45 @@ export const wrapWords = (text: string, n: number): string[] => {
   return lines.length ? lines : ['']
 }
 
+// A line of coloured parts broken into lines of at most n characters at spaces, each further
+// line indented: the Stats tab's live rows were cut at the pane's edge (truncate-end), so a GPU
+// with a long name lost its busy bar, watts and sparkline, and a model its load time, to "…"
+// (2026-11-21). A word longer than a line stays whole; the Text still cuts it at the edge.
+type Part = { color?: string; dim?: boolean; bold?: boolean; text: string }
+export const wrapParts = (parts: Part[], n: number, indent = 2): Part[][] => {
+  const lines: Part[][] = []
+  let line: Part[] = []
+  let width = 0
+  const add = (p: Part, text: string) => {
+    const last = line[line.length - 1]
+    if (last && last.color === p.color && last.dim === p.dim && last.bold === p.bold) last.text += text
+    else line.push({ ...p, text })
+    width += text.length
+  }
+  for (const p of parts) {
+    for (const tok of p.text.split(/(\s+)/).filter(Boolean)) {
+      if (/^\s/.test(tok)) {
+        if (width > (lines.length ? indent : 0)) add(p, tok)
+        continue
+      }
+      if (width > (lines.length ? indent : 0) && width + tok.length > n) {
+        const end = line[line.length - 1]
+        if (end) end.text = end.text.trimEnd()
+        lines.push(line)
+        line = [{ text: ' '.repeat(indent) }]
+        width = indent
+      }
+      add(p, tok)
+    }
+  }
+  if (line.length) {
+    const end = line[line.length - 1]
+    end.text = end.text.trimEnd()
+    lines.push(line)
+  }
+  return lines.length ? lines : [[{ text: '' }]]
+}
+
 const eventLine = (r: Row): string | null => {
   switch (r.kind) {
     case 'tool': return `${r.tool} ${r.brief ?? ''}${r.ok ? '' : '  ✗'}`.trim()
@@ -2649,7 +2688,7 @@ export const register: Register = (on, options) => {
           {now.length ? (
             <Box flexDirection="column" marginBottom={1}>
               <Text bold color="claude">Now</Text>
-              {now.map(parts => (
+              {now.flatMap(parts => wrapParts(parts, cols)).map(parts => (
                 <Text wrap="truncate-end">{parts.map(p => <Text color={p.color} dimColor={p.dim} bold={p.bold}>{p.text}</Text>)}</Text>
               ))}
             </Box>
