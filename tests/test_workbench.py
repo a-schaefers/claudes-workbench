@@ -10108,6 +10108,24 @@ class Detector(unittest.TestCase):
         self.assertEqual(events.normalize({"type": "step_finish", "part": {"tokens": 5}}, 1)["in"], 0)
         self.assertEqual(events.normalize({"type": "error", "error": "boom"}, 1)["text"], "boom")
 
+    def test_four_different_files_with_one_long_header_are_not_the_same_call(self):
+        # #497 (the audit of 1.90, reproduced): the signature was the input's JSON cut to 400
+        # characters, `content` sorting before `filePath`, so four new files opening with one
+        # Apache header stopped the round as "the same call 4 times in a row: write …/eval.c"
+        header = "/*\n * Licensed under the Apache License, Version 2.0 (the \"License\");\n" * 7
+        self.assertGreater(len(header), 400)
+        d = events.StuckDetector()
+        tool = lambda inp: events.normalize({"type": "tool_use", "part": {"tool": "write", "state": {  # noqa
+            "status": "completed", "input": inp}}}, 1)
+        for name in ("parser", "lexer", "ast", "eval"):
+            row = tool({"filePath": f"/w/src/{name}.c", "content": f"{header}int {name}(void);\n"})
+            self.assertIsNone(d.feed(row), name)
+        same = {"filePath": "/w/src/eval.c", "content": header}
+        self.assertIsNone(d.feed(tool(same)))
+        self.assertIsNone(d.feed(tool(same)))
+        self.assertIsNone(d.feed(tool(same)))
+        self.assertEqual(d.feed(tool(same)), "the same call 4 times in a row: write /w/src/eval.c")
+
     def test_a_suspend_is_neither_silence_nor_the_rounds_time(self):
         # On the wall clock a laptop shut for 20 minutes woke to a round stopped for silence
         # (the 2026-11-16 audit). The monotonic clock skips a suspend; a frozen pass is cut out.

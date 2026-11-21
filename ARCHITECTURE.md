@@ -344,7 +344,7 @@ themselves, so the runner stops the agent:
 
 | Guard | Default | Set by |
 |---|---|---|
-| the same tool call (same input) in a row | 4 | `events.StuckDetector` |
+| the same tool call (its whole input: a hash of the JSON; cut to 400 characters, four new files opening with one licence header were one call, #497) in a row | 4 | `events.StuckDetector` |
 | failing tool calls in a row | 6 | |
 | tool calls since the last successful edit to the task's files (an edit through the shell counts; a file written outside the worktree doesn't: an agent sure the compiler was broken wrote 20 minutes of test programs in /tmp, each resetting the count, 2026-11-18) | 40 | |
 | no output at all (not counted while it waits on Claude; while a background job runs, the test timeout if longer) | 15 min | `--silence-timeout` |
