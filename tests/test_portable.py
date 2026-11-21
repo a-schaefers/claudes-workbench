@@ -183,6 +183,26 @@ class Real(unittest.TestCase):
         self.assertEqual(found["s/coder"].engine, "server")
         self.assertEqual(models.status(found["o/m"])["why"], "m is not pulled")
 
+    def test_a_native_ollama_sdk_provider_with_an_api_base_is_ollama(self):
+        # #585 (the audit of 1.90): only /v1 was stripped, so a baseURL ending in /api probed
+        # /api/api/version, read as a server "not running, and no start command"
+        posts = []
+        srv, port = fake_ollama([], ["coder"], posts)
+        self.servers.append(srv)
+        self.config({"nat": {"npm": "ollama-ai-provider-v2",
+                             "options": {"baseURL": f"http://127.0.0.1:{port}/api"}, "models": {"coder": {}}},
+                     "oai": {"options": {"baseURL": f"http://localhost:{port}/v1"}, "models": {"coder": {}}}})
+        found = models.discover()
+        nat = found["nat/coder"]
+        self.assertEqual((nat.engine, nat.root), ("ollama", f"http://127.0.0.1:{port}"))
+        self.assertEqual(models.status(nat), {"available": True, "resident": False, "why": "pulled"})
+        self.assertEqual(nat.server, found["oai/coder"].server)       # one Ollama, not two
+        self.assertEqual(nat.openai_base, f"http://127.0.0.1:{port}/v1")
+        self.assertEqual(models.providers()["nat"]["root"], f"http://127.0.0.1:{port}")
+        self.config({"nat": {"npm": "ollama-ai-provider-v2", "options": {
+            "baseURL": f"http://127.0.0.1:{port}/api"}, "models": {"coder": {}}}}, {"nat": {"engine": "ollama"}})
+        self.assertTrue(models.status(models.discover()["nat/coder"])["available"])
+
     def test_a_down_server_on_ollamas_port_is_taken_for_ollama_and_the_override_wins(self):
         self.config({"o": {"options": {"baseURL": "http://127.0.0.1:11434/v1"}, "models": {"m": {}}},
                      "x": {"options": {"baseURL": "http://127.0.0.1:1/v1"}, "models": {"m": {}}}},

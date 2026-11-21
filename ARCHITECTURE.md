@@ -2629,7 +2629,12 @@ tools": the router never picks it, `wb start --model` refuses it; a missing key 
 default and counts as capable), a provider problem (`url_problem`: an Ollama provider, plain
 OpenAI-compatible, whose baseURL doesn't end in `/v1`, where Ollama's OpenAI API lives; OpenCode
 would get 404 on every request after the model loaded; or an `apiKey` the agent won't get, above),
-an Ollama cloud model not allowed. Then Ollama: not answering / `<name>` is not pulled / a cloud
+an Ollama cloud model not allowed. A server's root is its baseURL without a trailing `/v1` or `/api`
+(`server_root`, behind `Model.root`, `server_key`, the engine probe and `providers()`): a native
+Ollama SDK provider (`ollama-ai-provider`, `-v2`) has a `…/api` baseURL, and with only `/v1`
+stripped it probed `/api/api/version` and read "not running", and one Ollama through both was two
+servers (#585, the audit of 1.90); a server's own probe of such a base asks `<root>/v1/models`
+(`openai_base`). Then Ollama: not answering / `<name>` is not pulled / a cloud
 model by its tags row / pulled / loaded (`/api/tags`, `/api/ps`). A server (`GET <base>/models`):
 running (a server listing several models must list this one: "the server lists N models, not …";
 one listing none (`data: []`) is unavailable, "the server answers but lists no model" (it read as

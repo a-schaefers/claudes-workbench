@@ -2766,7 +2766,7 @@ def cmd_scout(a):
             print(f"  {pid}: Ollama isn't answering at {prov['root']}, so what it has and serves is unknown")
         installed = {x["name"]: x for x in models.ollama_installed(prov["root"])} if up else {}
         other = prov["engine"] != "ollama" and not models._fake() and \
-            models._ask(f"{prov['url'].rstrip('/')}/models", prov["key"], timeout=1) is not None
+            models._ask(f"{models.openai_base(prov['url'])}/models", prov["key"], timeout=1) is not None
         for name in prov["models"]:
             m = registered.get(f"{pid}/{name}")
             disk = installed.get(name) or installed.get(f"{name}:latest") or {}

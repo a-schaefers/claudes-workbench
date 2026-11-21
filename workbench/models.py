@@ -84,12 +84,35 @@ class Model:
 
     @property
     def root(self) -> str:
-        return self.base_url.rstrip("/").removesuffix("/v1")
+        return server_root(self.base_url)
+
+    @property
+    def openai_base(self) -> str:
+        return openai_base(self.base_url)
 
     @property
     def server(self) -> tuple:
         """The server behind the baseURL, one key however its host is spelled (server_key)."""
         return server_key(self.base_url, self.remote)
+
+
+def openai_base(url: str) -> str:
+    """Where the server behind a baseURL has its OpenAI API: the baseURL, or <root>/v1 for a
+    native Ollama SDK's `…/api` one (#585)."""
+    base = url.rstrip("/")
+    return f"{server_root(url)}/v1" if base.endswith("/api") else base
+
+
+def server_root(url: str) -> str:
+    """The server behind a provider's baseURL: without its trailing `/v1` (the OpenAI API), or
+    `/api`, a native Ollama SDK's base (ollama-ai-provider). Only `/v1` was stripped, so such a
+    provider probed `/api/api/version`, read as a server not running, and one Ollama through both
+    counted as two servers (#585, the audit of 1.90)."""
+    base = url.rstrip("/")
+    for tail in ("/v1", "/api"):
+        if base.endswith(tail):
+            return base[:-len(tail)]
+    return base
 
 
 def server_key(url: str, remote: bool = False) -> tuple:
@@ -102,7 +125,7 @@ def server_key(url: str, remote: bool = False) -> tuple:
     here = not remote and _this_host(u.hostname)
     return ("this host" if here else (u.hostname or "").lower(),
             u.port or (443 if u.scheme == "https" else 80),
-            u.path.rstrip("/").removesuffix("/v1"))
+            urlparse(server_root(url)).path)
 
 
 def _config_dir() -> Path:
@@ -435,7 +458,7 @@ def _engine(url: str, over: dict, pid: str = "") -> str:
     the server has given one."""
     if over.get("engine") in ("ollama", "server"):
         return over["engine"]
-    root = url.rstrip("/").removesuffix("/v1")
+    root = server_root(url)
     if root in _ENGINES:
         return _ENGINES[root]
     guess = "ollama" if urlparse(url).port == OLLAMA_PORT or "ollama" in pid.lower() else "server"
@@ -505,7 +528,7 @@ def engine_note(pid: str, url: str, over: dict) -> str:
 def engine_known(url: str, over: dict) -> bool:
     """Whether the engine was said (models.json) or probed, not guessed while the server is down."""
     return _fake() or over.get("engine") in ("ollama", "server") or \
-        url.rstrip("/").removesuffix("/v1") in _ENGINES
+        server_root(url) in _ENGINES
 
 
 _TEMPLATE = re.compile(r"\{(env|file):([^}]*)\}")
@@ -579,7 +602,7 @@ def _local_providers(cfg: dict, extra: dict, dirs: dict | None = None):
             raw = str((prov.get("options") or prov.get("settings") or {}).get("apiKey") or "")
             key = _expand(raw, base=(dirs or {}).get(pid)) if raw else auth_key(pid)  # #336
             if key:
-                _KEYS[url.rstrip("/").removesuffix("/v1")] = key
+                _KEYS[server_root(url)] = key
             yield pid, prov, url, _engine(url, extra.get(pid) or {}, pid), remote
 
 
@@ -806,11 +829,12 @@ def small_window_why(ctx: int) -> str:
 
 
 def _catalog(m: Model, catalog: dict | None):
-    """A server's GET {base_url}/models: the body (a dict, else None) or the HTTPError's code.
+    """A server's GET {openai_base}/models (a native Ollama SDK's `…/api` base asks <root>/v1,
+    #585): the body (a dict, else None) or the HTTPError's code.
     ``catalog``: one probe's answers by (base_url, api_key), shared by every entry on that server,
     so its aliases ask it once: wb top sent 8 requests for 8 aliases each probe, one after
     another, 2 s each on a server that stalled (#561)."""
-    key = (m.base_url.rstrip('/'), m.api_key or "")
+    key = (m.openai_base, m.api_key or "")
     if catalog is not None and key in catalog:
         return catalog[key]
     auth = {"Authorization": f"Bearer {m.api_key}"} if m.api_key else {}
@@ -1929,7 +1953,7 @@ def providers() -> dict[str, dict]:
     def key(pid, prov):
         raw = str((prov.get("options") or prov.get("settings") or {}).get("apiKey") or "")
         return _expand(raw, base=dirs.get(pid)) if raw else auth_key(pid)   # #336, the audit of 1.4
-    return {pid: {"root": url.rstrip("/").removesuffix("/v1"), "url": url,
+    return {pid: {"root": server_root(url), "url": url,
                   "models": prov.get("models") or {}, "engine": engine,
                   "key": key(pid, prov),
                   "engine_known": engine_known(url, extra.get(pid) or {}),
