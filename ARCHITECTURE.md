@@ -4019,7 +4019,11 @@ Then describe the engine in `~/.config/workbench/images.json` (`$WB_IMAGES`). Tw
   shell.
   `ref_arg` (e.g. `"-r"`) adds `--ref` images, for models that edit or keep a character
   consistent.
-- A **url** is any server with the OpenAI images API (SGLang, vLLM-Omni, LocalAI and others).
+- A **url** is any server with the OpenAI images API (SGLang, vLLM-Omni, LocalAI and others),
+  or, with `"api": "a1111"` (a url with `/sdapi/` says so itself), AUTOMATIC1111's, Forge's or
+  SD.Next's: `{"url": "http://127.0.0.1:7860/sdapi/v1/txt2img", "steps": 20, "unload":
+  "http://127.0.0.1:7860/sdapi/v1/unload-checkpoint"}`. ComfyUI's isn't spoken yet: wrap it in a
+  command engine.
   One started with an API key takes `"key"` (`{env:NAME}` and `{file:path}` work, as in
   OpenCode's config, a relative path from the engine file's directory), sent as a Bearer token.
 - `notes` is shown to Claude. Put the model's licence there: some licences limit where and how
@@ -4045,7 +4049,7 @@ custom-node packs do run their own Python).
 
 **How it works** (`workbench/images.py`, `cli.cmd_image`; what audio shares is in `workbench/media.py`).
 - `images.json` (`$WB_IMAGES`, default `~/.config/workbench/images.json`) maps an engine name to an
-  entry; the first entry is the default, non-object values are ignored. Keys: `command` or `url`,
+  entry; the first entry is the default, non-object values are ignored. Keys: `command` or `url` (with `api`, `steps`),
   `ref_arg`, `model`, `label`, `notes` (shown to Claude: put the licence there), `timeout` (s,
   default 1800), `unload` and `unload_body` (a JSON object, else `{}`: `media.unload` POSTs it to
   `unload` when the batch ends, inside the lease, failed or not, `media.unloading`; it was checked
@@ -4066,7 +4070,11 @@ custom-node packs do run their own Python).
   goes only to the engine's own server). An error status is a RuntimeError with the status and the
   first 300 characters of the body, and a 401 or 403 without a key says it wants one; a reply of
   another shape quotes it ("sent no image: …"). A 200 with a url gave "wb: b64_json", `{"data":
-  []}` or a page that isn't JSON a traceback, a 400 only "Bad Request" (#597).
+  []}` or a page that isn't JSON a traceback, a 400 only "Bad Request" (#597). An `a1111` engine
+  (`images.api`, `_a1111`) POSTs `{prompt, width, height, seed, batch_size: 1, n_iter: 1, steps?}`
+  and decodes `images[0]` (a `data:` prefix dropped); a Forge url got an OpenAI body and "sent no
+  image" while listed ready (#753). `ready` refuses an `api` outside `images.APIS` and a `steps`
+  that isn't a whole number.
 - Ready (`ready`, shown by `wb image --list` and `wb scout`): an entry `media.problem` finds
   nothing wrong with (the string keys strings, a command `shlex.split` accepts, `timeout` and
   `seconds` positive numbers, `voices` a list of names, `gpu` true or false, a known `kind` for

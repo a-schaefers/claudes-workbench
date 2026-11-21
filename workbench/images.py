@@ -12,7 +12,9 @@ An engine is whatever runs an image model on this machine, described in
                                    repeated before each --ref image
   {"url": "http://127.0.0.1:…/v1/images/generations", "model": "…"}
                                    any server with the OpenAI images API (SGLang, vLLM-Omni,
-                                   LocalAI…); the response's b64_json is saved (or
+                                   LocalAI…), or with "api": "a1111" (a /sdapi/ url says so)
+                                   AUTOMATIC1111's, Forge's or SD.Next's txt2img ("steps"
+                                   optional); the response's b64_json is saved (or
                                    its url fetched); "key": its API key ({env:}, {file:});
                                    "unload": a URL that frees its GPU memory, "unload_body"
 plus optional "label", "notes" (licence, what it is good at: shown to Claude), "timeout" (s),
@@ -55,6 +57,10 @@ def engines() -> dict[str, dict]:
 
 
 def ready(e: dict) -> str:
+    if e.get("api") not in (None, *APIS):  # ComfyUI's isn't spoken yet: a command engine wraps it
+        return f"not usable: api must be one of {', '.join(APIS)}"
+    if "steps" in e and (isinstance(e["steps"], bool) or not isinstance(e["steps"], int) or e["steps"] < 1):
+        return "not usable: steps must be a whole number"
     return media.ready(e, base=config_path().parent)
 
 
@@ -101,6 +107,32 @@ def kind(path: Path) -> str | None:
 
 
 SUFFIX = {"png": ".png", "jpeg": ".jpg", "webp": ".webp"}
+
+
+APIS = ("openai", "a1111")
+
+
+def api(e: dict) -> str:
+    """The API a url engine speaks: its `api`, else A1111's for a `/sdapi/` url (AUTOMATIC1111,
+    Forge, SD.Next), else OpenAI's. Only OpenAI's was spoken, so a Forge url got an OpenAI body
+    and answered "sent no image" (#753)."""
+    return e.get("api") or ("a1111" if "/sdapi/" in str(e.get("url") or "") else "openai")
+
+
+def _a1111(e: dict, values: dict) -> None:
+    """AUTOMATIC1111's API (Forge and SD.Next speak it): POST {prompt, width, height, seed,
+    steps?} to /sdapi/v1/txt2img, and images[0] is the image, base64."""
+    body = {"prompt": values["prompt"], "width": values["width"], "height": values["height"],
+            "seed": values["seed"], "batch_size": 1, "n_iter": 1}
+    if e.get("steps"):
+        body["steps"] = e["steps"]
+    raw, _ = media.post(e, e["url"], json.dumps(body).encode(), "application/json",
+                        float(e.get("timeout", 1800)), config_path().parent)
+    try:
+        b64 = json.loads(raw)["images"][0]
+        Path(values["out"]).write_bytes(base64.b64decode(b64.split(",", 1)[-1]))
+    except (ValueError, KeyError, IndexError, TypeError, AttributeError):
+        raise RuntimeError(f"{e['url']} sent no image: {media._gist(raw) or '(an empty reply)'}") from None
 
 
 def _server(e: dict, values: dict) -> None:
@@ -176,7 +208,7 @@ def generate(prompt: str, out_dir: Path, n: int = 4, size: tuple[int, int] = (10
                 if e.get("command"):
                     _command(e, values, refs, out_dir / "engine.log")
                 else:
-                    _server(e, values)
+                    (_a1111 if api(e) == "a1111" else _server)(e, values)
                 secs = round(time.time() - t0, 1)
                 if fresh.is_symlink() or not fresh.is_file() or not fresh.stat().st_size:
                     raise RuntimeError(f"image engine {name} wrote no image")

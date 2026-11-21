@@ -58,7 +58,7 @@ def load(path: Path) -> dict[str, dict]:
     return {k: v for k, v in data.items() if isinstance(v, dict)} if isinstance(data, dict) else {}
 
 
-STRINGS = ("command", "url", "ref_arg", "model", "unload", "label", "notes", "key")
+STRINGS = ("command", "url", "ref_arg", "model", "unload", "label", "notes", "key", "api")
 
 
 def problem(e: dict, kinds: tuple[str, ...] = ()) -> str:

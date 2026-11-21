@@ -8030,6 +8030,41 @@ class Images(Base):
         self.assertTrue(out.startswith(f"{tmp.resolve() / 'assets' / 'a-fox-1.png'}  ("), out)
         self.assertEqual(list((tmp / "elsewhere").iterdir()), [])
 
+    def test_an_a1111_or_forge_url_is_spoken_to_in_its_own_api(self):
+        # #753 (the 2026-11-21 audit, finding 100): a Forge url got an OpenAI body and "sent no
+        # image", though listed as ready
+        import base64, threading
+        from http.server import BaseHTTPRequestHandler, HTTPServer
+        got = []
+
+        class H(BaseHTTPRequestHandler):
+            def log_message(self, *a):
+                pass
+
+            def do_GET(self):
+                self.send_response(404); self.end_headers()
+
+            def do_POST(self):
+                got.append((self.path, json.loads(self.rfile.read(int(self.headers["Content-Length"])))))
+                body = json.dumps({"images": [base64.b64encode(IMAGE_PNG + b"forge").decode()],
+                                   "parameters": {}, "info": "{}"})
+                self.send_response(200); self.end_headers(); self.wfile.write(body.encode())
+
+        srv = HTTPServer(("127.0.0.1", 0), H)
+        threading.Thread(target=srv.serve_forever, daemon=True).start()
+        self.addCleanup(srv.shutdown)
+        root, tmp = f"http://127.0.0.1:{srv.server_port}", Path(self.tmp.name)
+        self.engines({"forge": {"url": root + "/sdapi/v1/txt2img", "steps": 20, "gpu": False}})
+        run_wb("image", "a fox", "--n", "1", "--seed", "3", "--size", "512x768", "--out", str(tmp / "o"))
+        self.assertEqual(got, [("/sdapi/v1/txt2img", {"prompt": "a fox", "width": 512, "height": 768,
+                                                      "seed": 3, "batch_size": 1, "n_iter": 1, "steps": 20})])
+        self.assertEqual((tmp / "o" / "a-fox-3.png").read_bytes(), IMAGE_PNG + b"forge")
+        self.engines({"comfy": {"url": root + "/prompt", "api": "comfyui"},
+                      "steps": {"url": root + "/sdapi/v1/txt2img", "steps": "20"}})
+        listed = run_wb("image", "--list")
+        self.assertIn("not usable: api must be one of openai, a1111", listed)
+        self.assertIn("not usable: steps must be a whole number", listed)
+
     def test_wb_image_list_as_a_word_lists_the_engines_instead_of_drawing(self):
         # like `wb skill list`: it took the GPU and drew four pictures of "list" (the 2026-11-16 audit)
         tmp = Path(self.tmp.name)

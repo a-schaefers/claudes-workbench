@@ -29,7 +29,10 @@ memory while it runs, unless its entry has an `unload` URL (`(no unload URL)` in
 it hasn't): then ask the user to stop it before big coding tasks.
 
 **No ready engine? Offer to set one up; never set it up unasked.** This is an optional step, as
-ARCHITECTURE.md's Images section (in the workbench code, two directories above `readlink -f "$(command -v wb)"`) says. Read `wb scout` for the OS and GPU, then propose in one
+ARCHITECTURE.md's Images section (in the workbench code, two directories above `readlink -f "$(command -v wb)"`) says. First ask whether the user already runs an image server: AUTOMATIC1111, Forge or
+SD.Next (port 7860; an entry `{"url": "http://127.0.0.1:7860/sdapi/v1/txt2img"}` speaks its API,
+`"unload": ".../sdapi/v1/unload-checkpoint"`), or one with the OpenAI images API; ComfyUI needs a
+command engine that wraps it. Otherwise read `wb scout` for the OS and GPU, then propose in one
 message: a runtime that fits (stable-diffusion.cpp on Vulkan for AMD or Intel, CUDA for NVIDIA,
 Metal on macOS; built from its upstream source, with packages from the OS's own repositories),
 and an image model you've just checked. It must fit the VRAM without spilling, and its licence
