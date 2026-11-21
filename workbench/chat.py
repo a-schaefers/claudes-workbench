@@ -797,6 +797,37 @@ def start(port: int) -> int:
     return proc.pid
 
 
+def _unit_keeps_it() -> bool:
+    """Whether wb-chat.service is enabled, so systemd brings the chat back itself."""
+    if not shutil.which("systemctl"):
+        return False
+    try:
+        return subprocess.run(["systemctl", "--user", "is-enabled", "--quiet", "wb-chat"],
+                              capture_output=True, timeout=5).returncode == 0
+    except (OSError, subprocess.TimeoutExpired):
+        return False
+
+
+def revive() -> int | None:
+    """Start again the server `wb chat on` started (chat/serve.pid), when the switch is still on and
+    it is gone and nothing answers on its port; the port it started on, else None. Nothing brought
+    it back after a reboot or a crash, while the switch said on and the pane showed the link, so
+    the phone said "Can't reach the computer" for good (#449). `wb chat url` calls it, which the
+    mod runs at a session's start and every ten minutes while the chat is on. Never for a chat wb
+    didn't start, nor where wb-chat.service is enabled (systemd's to restart)."""
+    from . import models  # as in stop_started
+    rec = store.read_json(chat_dir() / "serve.pid", None) or {}
+    pid, port = rec.get("pid"), rec.get("port")
+    if not is_on() or not isinstance(port, int) or not pid:
+        return None
+    if _alive(pid) and models.runs(int(pid), "chat", "serve"):  # up, or still starting
+        return None
+    if who_answers(port) is not None or _unit_keeps_it():
+        return None
+    start(port)
+    return port
+
+
 def stop_started() -> bool:
     """Stop the server `start` made, if it still runs; never one wb didn't start (systemd's)."""
     from . import models  # only here: chat is imported by the server, which needs none of it
@@ -1330,12 +1361,15 @@ def watch_code(restart, every: float = RELOAD_EVERY) -> None:
 
 
 def port() -> int:
-    """The port the running server recorded (chat/port.json), else PORT: so a command or the
-    pane that names no port finds a server started on another (#349, the audit of 1.4)."""
+    """The port the running server recorded (chat/port.json), else the one `wb chat on` last
+    started a server on (chat/serve.pid: gone after a reboot or a crash, it comes back there,
+    #449), else PORT: so a command or the pane that names no port finds a server started on
+    another (#349, the audit of 1.4)."""
     st = store.read_json(chat_dir() / "port.json", None) or {}
     if isinstance(st.get("port"), int) and st.get("pid") and _alive(st["pid"]):
         return st["port"]
-    return PORT
+    started = (store.read_json(chat_dir() / "serve.pid", None) or {}).get("port")
+    return started if isinstance(started, int) else PORT
 
 
 def url(port: int) -> str:

@@ -3116,6 +3116,7 @@ def cmd_chat(a):
     """The web chat: the user's side door to Claude while away from the terminal."""
     if a.more and a.action != "listen":
         die(f"wb chat {a.action}: too many arguments")
+    named = a.port is not None
     if a.port is None:  # named: that port; else the running server's, else the default (#349)
         a.port = chat.PORT if a.action == "serve" else chat.port()
     if a.action == "serve":
@@ -3123,8 +3124,9 @@ def cmd_chat(a):
             chat.serve(a.port, a.bind or None, a.host or None, say=lambda m: print(m, flush=True))
         except chat.ConfigError as e:  # 78 (EX_CONFIG): wb-chat.service stops, no retry fixes it
             die(str(e), 78)
-    elif a.action == "url":
-        print(chat.url(a.port))  # the token is the key: keep the link private
+    elif a.action == "url":  # silent but for the link: the mod reads it whole
+        back = chat.revive()  # a chat wb chat on started, gone after a reboot or a crash (#449)
+        print(chat.url(a.port if named or not back else back))  # the token is the key: keep it private
     elif a.action == "on":  # the pane's switch, kept: the link shows and a session listens
         chat.set_on(True)
         who = chat.who_answers(a.port)
@@ -3220,6 +3222,24 @@ def cmd_chat(a):
             print(f"{time.strftime('%H:%M', time.localtime(r['ts']))} {who}: {r['text']}")
         lst = chat.listener()
         print(f"listening: {lst['cwd']}" if lst else "no session is listening")
+
+
+def chat_gap() -> str | None:
+    """With the switch on, what keeps the chat from answering: the pane shows its link whatever
+    runs, and a chat gone after a reboot or a crash went unnoticed (#449)."""
+    if not chat.is_on():
+        return None
+    port = chat.port()
+    try:
+        who = chat.who_answers(port)
+    except RuntimeError as e:  # chat.json it can't follow
+        return f"the web chat is on, but {e}"
+    if who == "workbench":
+        return None
+    if who == "other":
+        return (f"the web chat is on, but something else answers on port {port} (another account's "
+                "chat, or another program): wb chat on --port <free port>")
+    return f"the web chat is on, but no server answers on port {port}: wb chat on starts one"
 
 
 def logout_stops() -> list[str]:
@@ -3623,6 +3643,8 @@ def cmd_doctor(a):
     for why in logout_stops():
         if chat.is_on() or "wb-chat" not in why or "runners" in why:
             print(f"--  {why}")
+    if gap := chat_gap():
+        print(f"--  {gap}")
     found = models.discover()
     line(bool(found), f"{len(found)} local model(s)")
     for pid, why in models.skipped_providers():  # once dropped without a word (the 2026-11-16 audit)

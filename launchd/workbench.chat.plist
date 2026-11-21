@@ -1,0 +1,38 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  The web chat on macOS (wb chat serve), kept up the way systemd/wb-chat.service keeps it on Linux:
+  started at login, started again whenever it exits (#449). Install it as a copy (launchd reads
+  LaunchAgents at login):
+    cp launchd/workbench.chat.plist ~/Library/LaunchAgents/
+    launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/workbench.chat.plist
+  and remove it with `launchctl bootout gui/$(id -u)/workbench.chat`. A shell runs ~/.local/bin/wb
+  (wb setup's link), since launchd expands neither ~ nor $HOME. PATH puts Homebrew's python3 first:
+  /usr/bin/python3 is Apple's 3.9, which bin/wb refuses (exit 78). launchd can't exempt that exit
+  from KeepAlive, so a broken install retries every ThrottleInterval seconds: fix it, then
+  `launchctl kickstart -k gui/$(id -u)/workbench.chat`. Set WB_HOME or WB_CHAT_* here too if you
+  export them.
+-->
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>workbench.chat</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>/bin/sh</string>
+    <string>-c</string>
+    <string>exec "$HOME/.local/bin/wb" chat serve</string>
+  </array>
+  <key>EnvironmentVariables</key>
+  <dict>
+    <key>PATH</key>
+    <string>/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin</string>
+  </dict>
+  <key>RunAtLoad</key>
+  <true/>
+  <key>KeepAlive</key>
+  <true/>
+  <key>ThrottleInterval</key>
+  <integer>10</integer>
+</dict>
+</plist>

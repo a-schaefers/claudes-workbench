@@ -10474,6 +10474,55 @@ class WebChat(Base):
         self.assertFalse((self.chat.chat_dir() / "serve.pid").exists())           # nothing started
         self.assertEqual(run_wb("chat", "off", "--port", str(port)).strip(), "web chat off")  # no unit named
 
+    def test_a_chat_wb_chat_on_started_comes_back_after_a_reboot_or_a_crash(self):
+        # #449 (the 2026-11-20 audit): the switch stayed on and the pane showed the link, but nothing
+        # started the server again, so the phone said "Can't reach the computer" for good
+        from workbench import cli
+        chat = self.chat
+        with socket.socket() as sk:
+            sk.bind(("127.0.0.1", 0))
+            free = sk.getsockname()[1]
+        dead = subprocess.Popen([sys.executable, "-c", "pass"])
+        dead.wait()
+        chat.set_on(True)
+        store.write_json(chat.chat_dir() / "serve.pid", {"pid": dead.pid, "port": free})  # it died
+        self.assertIn(f"no server answers on port {free}: wb chat on starts one", cli.chat_gap())
+        with mock.patch.object(chat, "_unit_keeps_it", return_value=True):   # systemd's to restart
+            self.assertIsNone(chat.revive())
+        chat.set_on(False)
+        self.assertIsNone(chat.revive())                                       # off: left off
+        self.assertIsNone(cli.chat_gap())
+        chat.set_on(True)
+        with mock.patch.object(chat, "_unit_keeps_it", return_value=False):
+            out = run_wb("chat", "url")
+        self.assertEqual(out.strip(), f"http://localhost:{free}/#token={chat.token()}")  # the link alone
+        pid = store.read_json(chat.chat_dir() / "serve.pid")["pid"]
+        self.assertNotEqual(pid, dead.pid)
+        try:
+            deadline = time.time() + 10
+            while not chat.running(free) and time.time() < deadline:
+                time.sleep(0.1)
+            self.assertTrue(chat.running(free))
+            self.assertIsNone(cli.chat_gap())
+            self.assertIsNone(chat.revive())                                   # up: not a second
+            run_wb("chat", "off", "--port", str(free))
+            deadline = time.time() + 10
+            while os.waitpid(pid, os.WNOHANG) == (0, 0) and time.time() < deadline:
+                time.sleep(0.1)
+        finally:
+            with contextlib.suppress(ProcessLookupError):
+                os.kill(pid, signal.SIGKILL)
+
+    def test_the_launchd_agent_runs_wb_chat_serve_and_keeps_it_up(self):
+        # #449: the docs named a launchd agent for macOS and none shipped
+        import plistlib
+        with open(ROOT / "launchd" / "workbench.chat.plist", "rb") as f:
+            agent = plistlib.load(f)
+        self.assertEqual(agent["Label"], "workbench.chat")
+        self.assertIn('"$HOME/.local/bin/wb" chat serve', agent["ProgramArguments"][-1])
+        self.assertTrue(agent["RunAtLoad"] and agent["KeepAlive"])
+        self.assertIn("/opt/homebrew/bin", agent["EnvironmentVariables"]["PATH"])  # not the stub python3
+
     def test_a_chat_on_an_address_that_comes_and_goes_rebinds_in_place_when_it_changes(self):
         # #200 (the 2026-11-19 audit): with bind ["tailscale"] the plan was loopback while the
         # tailnet was down and its address once up, but only a longer list restarted, and the
