@@ -493,10 +493,13 @@ def submodules(repo: Path, commit: str) -> list[str]:
     """The submodule paths ``commit`` lists. In a task's worktree each is filled read-only by
     fill_submodules, never checked out: a `.git` there would be a file the agent could point at a
     git dir of its own, whose config git then obeys outside the lane (see _pinned; the 2026-11-16
-    audit). wb start names only the ones it couldn't fill."""
-    out = git(repo, "config", "--blob", f"{commit}:.gitmodules", "--get-regexp",
+    audit). wb start names only the ones it couldn't fill. Read NUL-terminated, each record
+    `key\nvalue`: split at the first space, a submodule named `my lib` (git's default for that
+    path) read as `lib.path my lib`, never filled, and wb start named a path that isn't there
+    (#791, the second 2026-11-21 audit)."""
+    out = git(repo, "config", "-z", "--blob", f"{commit}:.gitmodules", "--get-regexp",
               r"^submodule\..*\.path$", check=False)
-    return [line.split(" ", 1)[1] for line in out.splitlines() if " " in line]
+    return [rec.split("\n", 1)[1] for rec in out.split("\0") if "\n" in rec]
 
 
 SUBMODULES = "submodules.json"  # rules/<task>/: the submodules filled in its worktree (#419)

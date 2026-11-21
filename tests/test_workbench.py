@@ -14244,6 +14244,28 @@ class Projects(Base):
         self.assertIn("note: submodules (vendor/lib) are empty", self.start("t-sub2", "ok"))
         wait_phase("t-sub2", {"review"})
 
+    def test_a_submodule_at_a_path_with_a_space_is_filled_by_its_real_path(self):
+        # #791 (the second 2026-11-21 audit): `submodule.my lib.path my lib` split at its first
+        # space read as `lib.path my lib`: never filled, and wb start named a path not there
+        lib, wt = Path(self.tmp.name) / "lib", Path(self.tmp.name) / "wt"
+        subprocess.run(["git", "init", "-q", str(lib)], check=True)
+        (lib / "lib.c").write_text("int x;\n")
+        subprocess.run(["git", "-C", str(lib), "add", "."], check=True)
+        subprocess.run(["git", "-C", str(lib), "-c", "user.email=t@t", "-c", "user.name=t",
+                        "commit", "-qm", "lib"], check=True)
+        g = lambda *a: subprocess.run(["git", "-C", str(self.repo), *a], check=True,  # noqa
+                                      capture_output=True)
+        g("-c", "protocol.file.allow=always", "submodule", "add", "-q", str(lib), "my lib")
+        g("-c", "protocol.file.allow=always", "submodule", "add", "-q", "--name", "the b",
+          str(lib), "vendor/b")
+        g("commit", "-qm", "submodules")
+        base = g("rev-parse", "HEAD").stdout.decode().strip()
+        self.assertEqual(sorted(gitops.submodules(self.repo, base)), ["my lib", "vendor/b"])
+        wt.mkdir()
+        self.assertEqual(gitops.fill_submodules(self.repo, base, wt), [])
+        self.assertEqual((wt / "my lib" / "lib.c").read_text(), "int x;\n")
+        self.assertEqual((wt / "vendor" / "b" / "lib.c").read_text(), "int x;\n")
+
     def test_a_submodules_own_submodules_are_filled_too_and_named_when_they_cant_be(self):
         # #383 (the audit of 1.6): only the top .gitmodules was read, so a submodule's own
         # submodule stayed an empty directory in the worktree and the base check's checkout
