@@ -104,8 +104,8 @@ You are the driver, not a spectator. When something tells you the agent is headi
   review round), e.g. after fixing workbench under it. A task failed with "the runner died" (a
   reboot, a kill) or stuck with "stopped by a signal" resumes the same way, unless its checkout
   failed and it never got its worktree: then `wb discard` it and start it again under a new name. "Interrupted by a
-  restart", or a shutdown's signal to several runners, comes as one notice for the batch: `wb resume --all --repo <dir>` resumes them in the
-  order they were started (`--backlog <name>` for one backlog's); one that never ran a round
+  restart", or a shutdown's signal to several runners, comes as one notice for the batch: `wb resume <a> <b> …`, as it names them, resumes them in the
+  order they were started (`wb resume --all` takes every interrupted task in scope, `--backlog <name>` one backlog's); one that never ran a round
   starts round 1 again. A task a guard stopped isn't in `--all`: read its report first.
 - A check-in saying the session "reached N% of its window before it changed a file" (or "had
   read N% before its first change": a fresh session would have little room after re-reading it):

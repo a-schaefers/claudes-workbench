@@ -2873,7 +2873,7 @@ def _signal_notice(task: store.Task, at: float) -> None:
                  and abs((t.status.get("signalled") or 0) - at) <= SIGNAL_SETTLE]
         if task.name not in (t.name for t in batch):
             batch.append(task)  # resumed meanwhile, or no owner known: its own notice still
-        names, where = [t.name for t in batch], owner[1]
+        names = [t.name for t in batch]
         ts = store.now()
         # the steps `wb next` committed, which a discard keeps (#494), for each task they are in
         kept = [line for t in batch if (line := steps_line(t))]
@@ -2881,8 +2881,9 @@ def _signal_notice(task: store.Task, at: float) -> None:
             f"task {task.name}: {SIGNAL_STOP}. wb resume {task.name} continues it in a fresh "
             f"session, wb discard {task.name} drops it" if len(batch) == 1 else
             f"{len(batch)} tasks' runners were stopped by a signal (a shutdown, a logout or a "
-            f"kill), not by Claude: {', '.join(names)}. wb resume --all"
-            + (f" --repo {shlex.quote(where)}" if where else "")
+            f"kill), not by Claude: {', '.join(names)}. wb resume {' '.join(names)}"
+            # by name: `--all --repo <cwd>` resumed nothing for a session in ~, and another
+            # session's tasks in a shared repo (#692)
             + " continues them in the order they were started")
             + "".join(f"\n{k}" for k in kept),
             round=batch[0].status.get("round"), ts=ts, tasks=names,

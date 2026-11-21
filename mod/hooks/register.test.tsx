@@ -654,7 +654,7 @@ test('one notice for the tasks a restart interrupted wakes once, ending with the
   task(files, 'a', 'failed', {}, ts0 + 0.05)
   task(files, 'b', 'failed', {}, ts0 + 0.05)                   // its last write lands after the notice
   notice(files, { ts: ts0, task: 'a', kind: 'failed', tasks: ['a', 'b'],
-    text: '2 tasks were interrupted by a restart: a, b. wb resume --all --repo /r continues them' })
+    text: '2 tasks were interrupted by a restart: a, b. wb resume a b continues them' })
   files['/wb/tasks/b/acked'] = String(ts0)                    // acknowledged with a's notice
   fakeTasks(on, files, ['a', 'b'])
   on('process.run', () => ({ value: { exitCode: 0, stdout: '', stderr: '' } }))
@@ -666,7 +666,7 @@ test('one notice for the tasks a restart interrupted wakes once, ending with the
   await clock.advance(120_000)
   expect(woken).toHaveLength(1)
   expect(woken[0]).toContain('[workbench] Tasks `a`, `b` were interrupted.')
-  expect(woken[0]).toContain('the `wb resume --all` line above continues them all')
+  expect(woken[0]).toContain('`wb resume a b` continues them all')    // by name (#692)
   expect(woken[0]).not.toContain('wb log')
   expect(woken[0]).not.toContain('wb feedback')
   expect(toasts).toContain('workbench: a and 1 more were interrupted')

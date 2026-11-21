@@ -354,11 +354,13 @@ def _restart_notice(task: store.Task) -> None:
     batch = [t for t in store.all_tasks() if t.name == task.name or (
         _owner(t) == _owner(task) and t.status.get("phase") in LIVE
         and _restarted(t.status) and reap(t, quiet=True))]
-    ts, where = store.now(), _owner(task)[1]
+    ts = store.now()
+    # the batch by name: `wb resume --all --repo <cwd>` resumed nothing for a session in ~ (a
+    # broad directory claims no task) and, in a repo two sessions share, the other's tasks too (#692)
     batch[0].notify("failed", (f"task {task.name}: {RESTARTED}" if len(batch) == 1 else
                                f"{len(batch)} tasks were {RESTARTED.replace('it)', 'them)')}: "
                                + ", ".join(t.name for t in batch))
-                    + ". wb resume --all" + (f" --repo {shlex.quote(where)}" if where else "")
+                    + f". wb resume {' '.join(t.name for t in batch)}"
                     + " continues them in the order they were started (one that never ran a "
                     "round starts it again)", round=batch[0].status.get("round"), ts=ts,
                     tasks=[t.name for t in batch], cause="died")  # not the step's size (#582)
@@ -411,7 +413,8 @@ def one_at_a_time(cmd):
     @functools.wraps(cmd)
     def run(a):
         name = getattr(a, "name", None)
-        if getattr(a, "all", False) or not name or not store.NAME_RE.match(name) \
+        if getattr(a, "all", False) or getattr(a, "more", None) or not name \
+                or not store.NAME_RE.match(name) \
                 or not store.Task(name).exists:
             return cmd(a)
         with store.locked(runner.lock_file(name, "cmd")):
@@ -1678,6 +1681,19 @@ def cmd_resume(a):
         die("give a task or --all, not both")
     if (a.repo or a.session or a.backlog) and not a.all:
         die("--repo, --session and --backlog go with --all")
+    if a.more:  # a restart's or a signal's batch, as its notice names it (#692)
+        names = list(dict.fromkeys([a.name, *a.more]))
+        tasks = sorted((need(n) for n in names), key=lambda t: t.spec.get("created_at", 0))
+        failed = []
+        for t in tasks:  # the order they were started, which the GPU queue follows
+            with store.locked(runner.lock_file(t.name, "cmd")):  # as one_at_a_time, task by task
+                try:
+                    _resume(t)
+                except SystemExit:  # said on stderr, as a lone resume would; the rest go on
+                    failed.append(t.name)
+        if failed:
+            die(f"not resumed: {', '.join(failed)}")
+        return
     if not a.all:
         if not a.name:
             die("name a task, or --all")
@@ -4873,6 +4889,8 @@ def parser() -> argparse.ArgumentParser:
     s.set_defaults(f=cmd_stop)
     s = sub.add_parser("resume", help="continue a stopped task in a fresh session (not a review round)")
     s.add_argument("name", nargs="?")
+    s.add_argument("more", nargs="*", metavar="name", help="more tasks, resumed in the order they "
+                   "were started (a restart's or a signal's batch)")
     s.add_argument("--all", action="store_true", help="every task a restart, a kill or a signal "
                    "interrupted, in the order they were started")
     s.add_argument("--repo", metavar="DIR", help="with --all: only those of a session started in DIR")

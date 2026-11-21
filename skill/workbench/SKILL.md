@@ -315,7 +315,7 @@ heading the wrong way, act on it. Notes are instructions, like feedback: concret
 - `wb stop <name>`; `wb resume <name>` continues it in a fresh session (also after "the runner
   died" or "stopped by a signal"). After a restart or a shutdown one notice names every task it
   interrupted:
-  `wb resume --all --repo <dir>`, as it says.
+  `wb resume <a> <b> …`, as it says.
 - A `PERMISSION` question (a command or a directory): lean to yes for what the task needs (`wb
   allow <name> "<pattern>"`, `--path <dir>`), no to what reaches outside it.
 Before acting on one of these the first time in a session, read `reference/driving.md` beside

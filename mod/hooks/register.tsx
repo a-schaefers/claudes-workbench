@@ -404,7 +404,7 @@ const NEXT: Record<string, (n: string, id?: string) => string> = {
 // runner._signal_notice). Nothing went wrong in them, yet the wake ended with the failure's
 // `wb log`, feedback or discard after the notice's own `wb resume --all` line (#544).
 const BATCH_NEXT = (names: string[]) => names.length > 1
-  ? 'Nothing went wrong in the tasks themselves: the `wb resume --all` line above continues ' +
+  ? `Nothing went wrong in the tasks themselves: \`wb resume ${names.join(' ')}\` continues ` +
     'them all, in the order they were started (`wb resume <name>` one, `wb discard <name>` drops one).'
   : `Nothing went wrong in the task itself: \`wb resume ${names[0]}\` continues it in a fresh ` +
     `session, \`wb discard ${names[0]}\` drops it.`

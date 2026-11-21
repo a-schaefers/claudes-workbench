@@ -4188,7 +4188,7 @@ class Steering(Base):
             self.assertTrue(task.worktree.exists())         # stopped, not thrown away
         self.assertIn("nothing was running", run_wb("stop", "--all"))
 
-    def test_a_restart_raises_one_notice_for_its_tasks_and_resume_all_continues_them_in_order(self):
+    def test_a_restart_raises_one_notice_naming_its_tasks_and_resuming_them_continues_them_in_order(self):
         # #544: after a reboot each live task failed with a wake of its own guessing why, was
         # resumed one at a time, and one that never ran started at round 2 as if stopped
         self.start("t-r1", "slow")
@@ -4206,12 +4206,17 @@ class Steering(Base):
         rows = store.read_jsonl(store.home() / "notify.jsonl")[0][before:]
         self.assertEqual([(r["task"], r["kind"]) for r in rows], [("t-r1", "failed")])
         self.assertIn("2 tasks were interrupted by a restart", rows[0]["text"])
-        self.assertIn(f"wb resume --all --repo {shlex.quote(os.getcwd())}", rows[0]["text"])
+        # #692: by name, not `--all --repo <cwd>`, which resumed nothing for a session in ~ and
+        # another session's tasks in a shared repo
+        self.assertIn("wb resume t-r1 t-r2 continues them", rows[0]["text"])
         self.assertEqual(rows[0]["tasks"], ["t-r1", "t-r2"])
         self.assertGreaterEqual(cli._acked(store.Task("t-r2")), rows[0]["ts"])  # had with t-r1's
         for name in ("t-r1", "t-r2"):
             self.assertEqual(store.Task(name).status["last"], cli.RESTARTED)
-        out = run_wb("resume", "--all", "--repo", os.getcwd())
+        os.environ["HOME"] = os.getcwd()                    # a session in ~ claims none by directory
+        self.assertIn("nothing to resume", run_wb("resume", "--all", "--repo", os.getcwd()))
+        os.environ["HOME"] = self.env_before.get("HOME", "/")
+        out = run_wb("resume", "t-r2", "t-r1")              # the line's command: started order
         self.assertEqual(out.splitlines()[:2], ["resumed t-r1 in a fresh session (round 2)",
                                                 "resumed t-r2: its first round, which it never ran"])
         self.assertEqual(wait_phase("t-r1", {"review"}, timeout=40)["round"], 2)
@@ -4236,11 +4241,11 @@ class Steering(Base):
         rows = store.read_jsonl(store.home() / "notify.jsonl")[0][before:]
         self.assertEqual([(r["task"], r["kind"]) for r in rows], [("t-s1", "stuck")])
         self.assertIn("2 tasks' runners were stopped by a signal", rows[0]["text"])
-        self.assertIn(f"wb resume --all --repo {shlex.quote(os.getcwd())}", rows[0]["text"])
+        self.assertIn("wb resume t-s1 t-s2 continues them", rows[0]["text"])  # by name (#692)
         self.assertEqual(rows[0]["tasks"], ["t-s1", "t-s2"])
         self.assertGreaterEqual(cli._acked(store.Task("t-s2")), rows[0]["ts"])  # had with t-s1's
         os.environ["FAKE_SCENARIO"] = "ok"
-        out = run_wb("resume", "--all", "--repo", os.getcwd())
+        out = run_wb("resume", "t-s1", "t-s2")
         self.assertIn("resumed t-s1", out)
         self.assertIn("resumed t-s2", out)
 
