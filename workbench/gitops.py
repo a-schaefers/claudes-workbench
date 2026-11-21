@@ -1156,6 +1156,16 @@ def keep_accepted(repo: Path, task: str, tip: str) -> None:
     git(repo, "update-ref", "-m", "workbench: accepted", ACCEPTED_REF.format(task), tip, check=False)
 
 
+def drop_accepted(repo: Path, task: str, tip: str) -> bool:
+    """Delete ``task``'s ACCEPTED_REF while it still points at ``tip`` (a compare-and-delete), once
+    nothing needs it: a branch that holds the tip keeps every step alive, or each step has its
+    bench case. Kept on every accept for good, each task's steps showed as a side line in `git log
+    --all`, `clone --mirror` copied them, and gc could never prune them (#799, the second
+    2026-11-21 audit). Whether it went."""
+    return not _run(repo, ("update-ref", "-d", ACCEPTED_REF.format(task), tip),
+                    check=False).returncode
+
+
 def step_commit(task: store.Task, step: int, steps: int) -> str | None:
     """The commit that landed step `step`: `wb next` marks its steps "(step N)", `wb accept` the last."""
     spec = task.spec

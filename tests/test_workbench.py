@@ -10325,7 +10325,8 @@ class Cleanup(Base):
         self.assertFalse(store.Task("t-later").status.get("branch_gone"))   # not merged: kept, asked again
         with mock.patch.object(gitops, "repo_of", wraps=gitops.repo_of) as seen:
             self.assertIn("0 merged branch(es)", run_wb("gc"))
-        self.assertEqual([c.args[0]["name"] for c in seen.call_args_list], ["t-later"])
+        # (and once more by the accepted refs' sweep, #799: its ref is still there)
+        self.assertEqual({c.args[0]["name"] for c in seen.call_args_list}, {"t-later"})
 
     def test_old_closed_tasks_are_archived_and_still_found(self):
         # every wb wait wake, wb events minute and wb start read all 101 tasks' files
@@ -10528,6 +10529,48 @@ class Bench(Base):
         self.assertIn("hidden checks: tests/check2.sh", run_wb("bench", "add", "t-sq"))
         self.assertEqual(bench.cases()["t-sq-s1"]["reference"], step1)
         self.assertEqual(bench.cases()["t-sq-s2"]["base"], step1)
+
+    def test_the_accepted_ref_goes_once_a_branch_holds_the_tip_or_every_step_has_its_case(self):
+        # #799 (the second 2026-11-21 audit): refs/workbench/accepted/<task> was kept on every
+        # accept for good, so each task's steps showed in `git log --all`, mirrors copied them,
+        # and gc could never prune them, though a merge already kept them alive
+        g = lambda *a: gitops.git(self.repo, *a, check=False)  # noqa: E731
+        ref = gitops.ACCEPTED_REF.format
+        self.start("t-mrg", "ok")
+        wait_phase("t-mrg", {"review"})
+        run_wb("accept", "t-mrg", "-m", "feat: merged", "--merge")
+        self.assertEqual(g("rev-parse", "--verify", "-q", ref("t-mrg")), "")   # main holds it
+        self.assertTrue(gitops.step_commit(store.Task("t-mrg"), 1, 1))
+        # a plain accept keeps it, until the branch is merged by hand and wb gc runs
+        task = self.accepted("t-hand")
+        hand = task.status["tip"]
+        self.assertEqual(g("rev-parse", ref("t-hand")).strip(), hand)
+        # squashed, no branch holds the steps: kept until each step has its case
+        self.start("t-squ", "ok", "--test", "sh tests/squ.sh")
+        wait_phase("t-squ", {"review"})
+        wt = store.Task("t-squ").worktree
+        (wt / "tests").mkdir()
+        (wt / "tests" / "squ.sh").write_text("grep -qx squ squ.txt\n")
+        (wt / "squ.txt").write_text("squ\n")
+        (self.repo / "other.txt").write_text("main moves on\n")   # else the squash is a ff
+        g("add", "other.txt")
+        g("commit", "-qm", "main moves on")
+        run_wb("accept", "t-squ", "-m", "feat: squashed", "--merge-as", "squash")
+        tip = store.Task("t-squ").status["tip"]
+        self.assertIn("0 accepted ref(s) no longer needed", run_wb("gc"))
+        self.assertEqual(g("rev-parse", ref("t-squ")).strip(), tip)
+        self.assertEqual(g("rev-parse", ref("t-hand")).strip(), hand)
+        run_wb("bench", "add", "t-squ")
+        self.assertIn("1 accepted ref(s) no longer needed", run_wb("gc"))
+        self.assertEqual(g("rev-parse", "--verify", "-q", ref("t-squ")), "")
+        self.assertEqual(g("rev-parse", ref("t-hand")).strip(), hand)
+        merged = subprocess.run(["git", "-C", str(self.repo), "merge", "-q", "--no-edit",
+                                 "delegate/t-hand"], capture_output=True, text=True)
+        self.assertEqual(merged.returncode, 0, merged.stderr)
+        self.assertIn("1 accepted ref(s) no longer needed", run_wb("gc"))
+        self.assertEqual(g("rev-parse", "--verify", "-q", ref("t-hand")), "")
+        for name in ("t-mrg", "t-squ", "t-hand"):        # never looked at again (#686)
+            self.assertIs(store.Task(name).status.get("accepted_ref_gone"), True, name)
 
     def test_bench_rm_removes_a_case_and_old_runs_keep_only_their_plans(self):
         # #740 (the 2026-11-21 audit): no command removed a case, and every replay's logs, diff

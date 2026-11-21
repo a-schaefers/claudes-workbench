@@ -2402,6 +2402,11 @@ def cmd_accept(a):
                 print(f"wb: not merged: {e}", file=sys.stderr)
         if merged:
             task.set_status(closing={**close, "merged_head": merged})
+    # landed by a merge or a fast-forward, the target keeps the steps alive; a squash doesn't
+    into = close.get("merge_into")
+    if merged and into and into != "HEAD" and gitops.contains(repo, f"refs/heads/{into}", tip):
+        if gitops.drop_accepted(repo, a.name, tip):  # (#799)
+            task.set_status(accepted_ref_gone=True)
     if merged and gitops.git(repo, "rev-parse", "--verify", "-q", f"refs/heads/{spec['branch']}",
                              check=False).strip() == tip:
         if close.get("merge_as") == "squash":  # never an ancestor of the squash: -d would keep it
@@ -2610,6 +2615,7 @@ def gc(days: float = store.ARCHIVE_DAYS, branches: bool = False) -> dict:
     out["old_notices"] = _cap_old_notices()
     out["leftovers"] = _drop_leftovers(days)
     out["branches"] = _merged_branches() if branches else 0
+    out["refs"] = _released_refs() if branches else 0
     store.write_json(store.home() / "gc.json", {"at": store.now(), **out})
     return out
 
@@ -2738,6 +2744,48 @@ def _merged_branches() -> int:
     return n
 
 
+def _released_refs() -> int:
+    """Delete each accepted task's refs/workbench/accepted/<task> that nothing needs any more: its
+    tip landed in the task's base branch (merged by hand after a plain accept), which then keeps
+    every step alive, or each of its steps has a bench case, the only thing it was kept for
+    (#649). One accepted after a squash, whose steps no branch holds, stays until then (#799, the
+    second 2026-11-21 audit). A ref gone, or deleted here, is recorded (status
+    `accepted_ref_gone`) and never looked at again, and each repo's refs are listed once, with one
+    `for-each-ref --merged` per base branch: not a call per task on every run (#686)."""
+    cased: dict[str, set] = {}
+    for c in bench.cases().values():
+        cased.setdefault(c.get("task"), set()).add(c.get("step"))
+    by_repo: dict[Path, list] = {}
+    for name in sorted({r["task"] for r in store.results(trials=True) if r.get("outcome") == "accepted"}):
+        t = store.Task(name)
+        if t.exists and not t.status.get("accepted_ref_gone") and \
+                (repo := gitops.repo_of(t.spec)).is_dir():
+            by_repo.setdefault(repo, []).append(t)
+    n = 0
+    for repo, tasks in by_repo.items():
+        refs = dict(line.split(" ", 1)[::-1] for line in gitops.git(
+            repo, "for-each-ref", "--format=%(objectname) %(refname)", "refs/workbench/accepted/",
+            check=False).splitlines() if " " in line)
+        landed: dict[str, set] = {}
+        for t in tasks:
+            base = t.spec.get("base_branch")
+            if refs and base and base not in landed:
+                landed[base] = set(gitops.git(
+                    repo, "for-each-ref", f"--merged=refs/heads/{base}", "--format=%(refname)",
+                    "refs/workbench/accepted/", check=False).split())
+        for t in tasks:
+            ref = gitops.ACCEPTED_REF.format(t.name)
+            if not (tip := refs.get(ref)):  # one from before #649, or deleted by hand
+                t.set_status(accepted_ref_gone=True)
+                continue
+            done = set(range(1, int(t.status.get("steps") or 1) + 1)) <= cased.get(t.name, set())
+            if (done or ref in landed.get(t.spec.get("base_branch"), ())) and \
+                    gitops.drop_accepted(repo, t.name, tip):
+                t.set_status(accepted_ref_gone=True)
+                n += 1
+    return n
+
+
 def cmd_gc(a):
     """Tidy what history leaves behind (gc); wb accept and discard run it once a day too."""
     out = gc(a.days, branches=True)
@@ -2745,7 +2793,8 @@ def cmd_gc(a):
           f"{out['notices']} old notice(s) to notify.old.jsonl; removed {out['rules']} rules "
           f"dir(s), {out['runtime']} runtime dir(s), {out['scratch']} scratch dir(s), "
           f"{out['starts']} half-made start(s), {out['uploads']} web chat upload(s), "
-          f"{out['branches']} merged branch(es), {out['leftovers']} old import(s) and session "
+          f"{out['branches']} merged branch(es), {out['refs']} accepted ref(s) no longer needed, "
+          f"{out['leftovers']} old import(s) and session "
           f"record(s); freed {store.gb(out['slimmed'] + out['old_notices'])} of old logs and "
           "test outputs")
     if left := bench.sweep():  # not in gc(): a discard runs that, and this discards (#511)
