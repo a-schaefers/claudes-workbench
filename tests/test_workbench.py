@@ -3850,6 +3850,31 @@ class WorktreeSetup(Base):
         out = self.start("t-lack2", "ok", "--setup", "true")  # set up: no note
         self.assertNotIn("node_modules/", out)
 
+    def test_start_names_a_monorepo_packages_ignored_installs_from_the_package(self):
+        # #877 (Claude's audit of 1.90.24): only the top level was looked at, so a package's
+        # .venv and another's node_modules got no note, and the rounds ran against a base that
+        # could never pass
+        self.ignore(".venv/", "node_modules/", "dist/", ".pytest_cache/")
+        api, web = self.repo / "services" / "api", self.repo / "web"
+        for d in (api / ".venv" / "lib", web / "node_modules" / "x", api / "dist",
+                  api / ".pytest_cache", self.repo / "deep" / "er" / "dist"):
+            d.mkdir(parents=True)
+        (api / "CLAUDE.md").write_text("# api\n")
+        for d in (web, self.repo / "deep" / "er"):           # packages with files of their own
+            (d / "index.js").write_text("")
+        subprocess.run(["git", "-C", str(self.repo), "add", "-A"], check=True)
+        subprocess.run(["git", "-C", str(self.repo), "commit", "-qm", "packages"], check=True)
+        self.assertEqual(sorted(cli._missing_dirs(self.repo, "services/api")),
+                         ["../../web/node_modules/", ".venv/", "dist/"])
+        self.assertEqual(sorted(cli._missing_dirs(self.repo)),
+                         ["services/api/.venv/", "web/node_modules/"])
+        os.environ["FAKE_SCENARIO"] = "ok"
+        out = run_wb("start", "t-pkg", "--spec", str(self.spec), "--repo", str(api),
+                     "--model", "mimo")
+        line = next(x for x in out.splitlines() if "only committed files" in x)
+        self.assertIn("ignored .venv/, dist/, ../../web/node_modules/:", line)  # from the package
+        wait_phase("t-pkg", {"review"})
+
     def test_a_repo_on_a_windows_drive_gets_a_note(self):
         # #201's finding 30: git is much slower on WSL's /mnt/c, and wb checks the worktree every step
         with mock.patch.object(context, "on_windows", return_value=True):

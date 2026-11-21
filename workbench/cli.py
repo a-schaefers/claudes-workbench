@@ -842,16 +842,34 @@ def _worktree_setup(repo: Path, a, sub: str | None = None) -> dict:
                               ("setup_timeout", limit if setup else None)) if v}
 
 
-def _missing_dirs(repo: Path) -> list[str]:
-    """The checkout's ignored top-level directories (but caches), which a task's worktree won't
-    have: what a --setup would install (node_modules/, .venv/, target/)."""
+# What an install makes, at any depth: a monorepo's per-package node_modules or .venv
+INSTALL_DIRS = ("node_modules", ".venv", "venv", "target", "vendor")
+
+
+def _missing_dirs(repo: Path, sub: str | None = None) -> list[str]:
+    """The checkout's ignored directories (but caches), which a task's worktree won't have:
+    what a --setup would install (node_modules/, .venv/, target/). Those at the top, directly
+    in the package (`sub`) and any install directory (INSTALL_DIRS) deeper, named from the
+    package: only the top level was looked at, so a monorepo's services/api/.venv and
+    web/node_modules got no note, and every round ran against a base that could never pass
+    (#877, Claude's audit of 1.90.24)."""
     try:
         out = gitops.git(repo, "ls-files", "--others", "--ignored", "--exclude-standard",
                          "--directory", "-z")
     except gitops.GitError:
         return []
-    return [p for p in out.split("\0") if p.endswith("/") and p.count("/") == 1
-            and p[:-1] not in CACHE_DIRS and not p[:-1].endswith("cache")]
+    pre = f"{sub.strip('/')}/" if sub else ""
+    keep = []
+    for p in out.split("\0"):
+        if not p.endswith("/"):
+            continue
+        name = p[:-1].rsplit("/", 1)[-1]
+        if name in CACHE_DIRS or name.endswith("cache"):
+            continue
+        if p.count("/") == 1 or (pre and p.startswith(pre) and p[len(pre):].count("/") == 1) \
+                or name in INSTALL_DIRS:
+            keep.append(os.path.relpath(p, pre or ".") + "/" if pre else p)
+    return keep
 
 
 # A task takes its checkout and --copy paths, then the base check's and wb verify's scratch
@@ -1093,7 +1111,7 @@ def cmd_start(a):
         print(f"setup: the runner sets the worktree up first ({'; '.join(does)}); a failure stops "
               "the task before any round")
     elif "repos" not in context.commands_conf() or not context.repo_conf(repo, sub):
-        if lack := _missing_dirs(repo):
+        if lack := _missing_dirs(repo, sub):
             print(f"note: the worktree has only committed files, not the checkout's ignored "
                   f"{', '.join(lack[:4])}: --setup '<install command>' sets a task up (--copy "
                   "<path> copies one in); commands.json \"repos\" for every task")
