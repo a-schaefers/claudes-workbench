@@ -821,6 +821,8 @@ export function liveLines(t: WbTop, why = ''): { color?: string; dim?: boolean; 
       row.push({ color: f > 0.95 ? 'error' : f > 0.8 ? 'warning' : 'success', text: bar(f, 12) },
         { text: ` ${gib(g.used)}/${gib(g.total)} GiB ` })
     } else if (g.total) row.push({ dim: true, text: `${gib(g.total)} GiB${g.unified ? ' unified' : ''} ` })
+    // an Apple GPU: its bar is the RAM, and the most of it the GPU may wire is said here (#701)
+    if (typeof g.limit === 'number' && g.limit) row.push({ dim: true, text: `· GPU may wire ${gib(g.limit)} GiB ` })
     if (g.stale) row.push({ dim: true, text: 'no reading ' })            // known, not read just now (#547)
     if (typeof g.busy === 'number')
       row.push({ dim: true, text: '· busy ' }, { color: g.busy > 80 ? 'warning' : 'success', text: bar(g.busy / 100, 8) },

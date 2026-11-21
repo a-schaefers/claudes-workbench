@@ -2447,11 +2447,13 @@ Each tick reads, cheapest first:
   A card nvidia-smi gives no memory (`[N/A]`) on ARM (`hardware.shares_ram`, `gpus`' rule: a DGX
   Spark, GB10, a Jetson) shows the RAM it shares: `total` `MemTotal`, `used` `MemTotal` less
   `MemAvailable` (`hardware.memory`, one read a tick), `unified`; it showed load and watts but no
-  memory (#572). An x86 card's `[N/A]` stays unknown. macOS: the GPUs from system_profiler once (no busy %); an Apple GPU's `total` is the
-  budget's ceiling (`wired_limit`, else `models.unified_default`) and its `used` the RAM in use
-  (`hw.memsize` less vm_stat's free, inactive and speculative pages, `hardware.mac_free`; the
-  sysctls read once, vm_stat every `PROBE_EVERY`), and with no GPU listed the RAM row shows there
-  too: it showed all of RAM, "use not said", and nothing when system_profiler failed (#574); WSL
+  memory (#572). An x86 card's `[N/A]` stays unknown. macOS: the GPUs from system_profiler once (no busy %); an Apple GPU's `total` is
+  all of the RAM and its `used` the RAM in use (`hw.memsize` less vm_stat's free, inactive and
+  speculative pages, `hardware.mac_free`; the sysctls read once, vm_stat every `PROBE_EVERY`),
+  and its `limit` the budget's ceiling (`wired_limit`, else `models.unified_default`), said beside
+  the bar as "GPU may wire N GB"; with no GPU listed the RAM row shows there too: it showed "use
+  not said", and nothing when system_profiler failed (#574), then the RAM in use against the
+  limit, so an idle 16 GB Mac read 104% in red with no model loaded (#701); WSL
   where nvidia-smi named no card (none, or one that fails): Windows' adapters once (names, and memory as `total` where the registry says).
   A sysfs card that reports nothing (no memory, busy % or watts: an iGPU on i915, a BMC's `ast`, a
   VM's virtio-gpu) is no row. When no row says a memory size (`total`) and none is `stale`, a RAM
@@ -2482,7 +2484,8 @@ Each tick reads, cheapest first:
 `--json` prints one object per tick (sizes in bytes; a field the platform can't give is left out,
 never 0):
 - `ts`, `every`;
-- `gpus`: `[{index, name, driver, used, total, busy (%), watts, unified?, stale?}]` (`stale`: a
+- `gpus`: `[{index, name, driver, used, total, busy (%), watts, unified?, limit?, stale?}]` (`limit`: an
+  Apple GPU's wired limit, its `total` and `used` the RAM's; `stale`: a
   card nvidia-smi named with no fresh reading; the terminal and the pane say "no reading"), then `{name: "RAM (no
   GPU)" (or "RAM" beside GPU rows), ram: true, used, total}` when no GPU row says its memory;
 - `running` (queued, running, testing, asking): `[{task, model, label, phase, round, round_s,

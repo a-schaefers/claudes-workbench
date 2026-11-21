@@ -2677,6 +2677,15 @@ test('a card wb top knows but has no reading for says so, not nothing (#547)', (
   expect(text([{ index: 0, name: 'NVIDIA GeForce RTX 4090', driver: 'nvidia', stale: true }])[0]).toBe('GPU 0 NVIDIA GeForce RTX 4090 no reading ')
 })
 
+test('an idle Apple silicon Mac draws its RAM in use against all its RAM and names the GPU limit beside it (#701)', () => {
+  const lines = liveLines({ snap: { ts: 0, every: 2, running: [], rack: [], queue: [],
+    gpus: [{ name: 'Apple M2 (10-core GPU)', unified: true, total: 16 * 2 ** 30, used: 11.12 * 2 ** 30,
+      limit: 10.67 * 2 ** 30 }] }, busy: {} } as any)
+  const row = lines[0]
+  expect(row[2].color).toBe('success')  // under 80%: the GPU isn't full
+  expect(row.map(p => p.text).join('')).toContain(' 11.1/16.0 GiB · GPU may wire 10.7 GiB ')
+})
+
 test('a model all in RAM on a machine with no GPU memory is in RAM, not split (#551)', () => {
   const lines = liveLines({ snap: { ts: 0, every: 2, gpus: [], running: [], queue: [],
     rack: [{ model: 'ollama/m', label: 'M', state: 'cpu', cpu_bytes: 2 ** 33 }] }, busy: {} } as any)

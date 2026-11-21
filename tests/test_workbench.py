@@ -15401,10 +15401,11 @@ class Top(Base):
                                              "watts": 38.2})
         self.assertEqual(rows["x86_64"][1]["name"], "RAM")   # no GPU says a size: the RAM beside (#551)
 
-    def test_on_macos_the_gpu_shows_the_budgets_ceiling_and_the_memory_in_use(self):
+    def test_on_macos_the_gpu_shows_the_ram_in_use_of_all_the_ram_and_the_budgets_ceiling_beside(self):
         # #574: an Apple Silicon Mac showed "64.0 GB unified, use not said" whatever was loaded,
-        # all of RAM where the budget allows three quarters, and no row at all when
-        # system_profiler failed
+        # and no row at all when system_profiler failed. #701: the RAM in use was then drawn
+        # against the GPU's wired limit, so an idle 16 GB Mac read 104% in red: the bar is the
+        # RAM's, the limit is said beside it
         from workbench import models, top
         ram, page = 64 * 2 ** 30, 16384
         vm = ("Mach Virtual Memory Statistics: (page size of 16384 bytes)\nPages free:     100000.\n"
@@ -15418,12 +15419,12 @@ class Top(Base):
         used = ram - (100000 + 300000 + 50000) * page
         for gpus, want in (([{"name": "Apple M3 Max (40-core GPU)", "driver": "metal", "unified": True,
                               "vram": ram, "wired_limit": None}],
-                            [{"name": "Apple M3 Max (40-core GPU)", "unified": True,
-                              "total": models.unified_default(ram), "used": used}]),
+                            [{"name": "Apple M3 Max (40-core GPU)", "unified": True, "total": ram,
+                              "limit": models.unified_default(ram), "used": used}]),
                            ([{"name": "Apple M3 Max (40-core GPU)", "driver": "metal", "unified": True,
                               "vram": ram, "wired_limit": 56 * 2 ** 30}],
-                            [{"name": "Apple M3 Max (40-core GPU)", "unified": True, "total": 56 * 2 ** 30,
-                              "used": used}]),
+                            [{"name": "Apple M3 Max (40-core GPU)", "unified": True, "total": ram,
+                              "limit": 56 * 2 ** 30, "used": used}]),
                            ([], [{"name": "RAM (no GPU)", "ram": True, "total": ram, "used": used}])):
             asked.clear()
             with mock.patch.object(hardware, "system", lambda: "macos"), \
@@ -15433,6 +15434,23 @@ class Top(Base):
                 self.assertEqual(t.gpus(), want)
                 self.assertEqual(t.gpus(), want)
             self.assertEqual(asked.count(("vm_stat",)), 1)   # once per probe interval, not per tick
+
+    def test_an_idle_16_gb_mac_with_apps_open_reads_under_80_percent_not_over_100(self):
+        # #701: 11.9 GB of RAM in use by the OS and apps, no model loaded, drawn against the
+        # 11.5 GB the GPU may wire, was 104% in the bad colour
+        from workbench import top
+        ram, page = 16 * 2 ** 30, 16384
+        vm = "Pages free:     100000.\nPages inactive:  200000.\nPages speculative:  17000.\n"
+        run = lambda *argv: {("sysctl", "-n", "hw.pagesize"): str(page), ("sysctl", "-n", "hw.memsize"): str(ram),  # noqa: E731
+                             ("vm_stat",): vm}.get(argv, "")
+        gpus = [{"name": "Apple M2 (10-core GPU)", "driver": "metal", "unified": True, "vram": ram,
+                 "wired_limit": None}]
+        with mock.patch.object(hardware, "system", lambda: "macos"), \
+                mock.patch.object(hardware, "_mac_gpus", lambda: gpus), mock.patch.object(hardware, "_run", run):
+            (g,) = top.Top(2).gpus()
+        self.assertLess(g["used"] / g["total"], 0.8)
+        text = top.render({"ts": 0, "every": 2, "gpus": [g], "running": [], "rack": [], "queue": []}, 200, False)
+        self.assertIn(" 12.0/17.2 GB  GPU may wire 11.5 GB", text)
 
     def test_on_wsl_a_failing_nvidia_smi_falls_back_to_windows_adapters_not_the_ram(self):
         # #547: on WSL a stream that started and then failed hid Windows' adapters too
