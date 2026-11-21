@@ -3865,10 +3865,14 @@ sessions a task belongs to, the first to deliver a notice wins (the `acked` writ
 (`skill.prompt`, which also records its path and opens the pane through `showPane`; run again
 while the mode is on and with no task, which `firstTask` reads from the expanded skill's
 "**First task:** \`…\`" line, it returns AGAIN_NOTE in place of the skill: the pane is back,
-reply in one line), or a Bash tool call matching
-`/(^|[\s;&|(])wb (start|next|feedback|steer|answer)\b/` (checked before it runs; a resumed
-session or a /workbench the mod missed; a `wb` named by absolute path isn't seen; not `accept` or
-`takeover`, which a done note after a quit asks for). Off:
+reply in one line), or a Bash tool call that runs `wb start|next|feedback|steer|answer`
+(`delegates`, checked before it runs; a resumed session or a /workbench the mod missed; not
+`accept` or `takeover`, which a done note after a quit asks for). Only a command counts, not
+text (#409, 2026-11-20: a Python patch's string holding "(wb next)" turned a session's mode on):
+heredoc bodies, quoted strings and comments are dropped, the rest split into simple commands
+(`;`, `&&`, `||`, `|`, `&`, newlines, `(`, `$(`, `{`, backticks), and the command word, past
+`VAR=x`, `env`, `time`, `nohup`, `exec` and `command`, must be `wb` or a path ending in `/wb`.
+Off:
 either quit command, which also closes the pane. While on: the `workbench-mode` and `user-notes`
 context blocks (and `claude-coding` outside "Let Claude decide", with a task open too), the idle status line, pane auto-open, web chat listening, the apprentice's
 "Workbench mode is on.", the boundary compaction. `mem.delegated` remembers the mode was on in

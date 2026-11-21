@@ -610,6 +610,38 @@ export function liveLines(t: WbTop): { color?: string; dim?: boolean; bold?: boo
   return out
 }
 
+// The commands that hand work out: run as a command, not merely written down. #409 (2026-11-20):
+// a Python patch whose string held "split it (wb next)" turned a session's workbench mode on, so a
+// heredoc's body, a quoted string and a comment are dropped first, and only a simple command's
+// own word counts (after `;`, `&&`, `||`, `|`, `&`, a newline, `(`, `$(`, `{`, a backtick; past
+// `VAR=x`, `env`, `time`, `nohup`, `exec`, `command`): `wb` or a path ending in `/wb`.
+const HANDS_OUT = new Set(['start', 'next', 'feedback', 'steer', 'answer'])
+const PREFIXES = new Set(['env', 'time', 'nohup', 'exec', 'command'])
+export function delegates(command: string): boolean {
+  let text = command
+  // heredoc bodies: from the line after `<<TAG` (`<<-`, quoted or not) to the line that is TAG
+  for (;;) {
+    const m = /<<-?\s*(['"]?)([A-Za-z_][\w]*)\1/.exec(text)
+    if (!m) break
+    const lineEnd = text.indexOf('\n', m.index)
+    const head = text.slice(0, m.index)
+    if (lineEnd < 0) { text = head; break }
+    const rest = text.slice(lineEnd + 1)
+    const end = new RegExp(`^\\t*${m[2]}[ \\t]*$`, 'm').exec(rest)
+    text = head + ' Q' + text.slice(m.index + m[0].length, lineEnd + 1) + (end ? rest.slice(end.index + end[0].length) : '')
+  }
+  // quoted strings and comments, each left as one word so the words around them stay apart
+  text = text.replace(/'[^']*'|"(?:[^"\\]|\\.)*"|(^|[\s;&|(])#[^\n]*/g, (q, pre) => (pre !== undefined ? `${pre} ` : ' Q '))
+  for (const part of text.split(/\$\(|&&|\|\||[;&|\n(){}`]/)) {
+    const words = part.trim().split(/\s+/).filter(Boolean)
+    let i = 0
+    while (i < words.length && (/^[A-Za-z_]\w*=/.test(words[i] ?? '') || PREFIXES.has(words[i] ?? ''))) i++
+    const cmd = words[i] ?? ''
+    if ((cmd === 'wb' || cmd.endsWith('/wb')) && HANDS_OUT.has(words[i + 1] ?? '')) return true
+  }
+  return false
+}
+
 const SPARKS = '▁▂▃▄▅▆▇█'
 // Values as one character each, the highest the full block; none for all zero
 export function spark(values: number[]): string {
@@ -1795,8 +1827,7 @@ export const register: Register = (on, options) => {
   // Delegating with wb counts as workbench mode too (a session resumed mid-delegation, or one
   // where /workbench ran before this mod could see it)
   on('tool.call', { tool: 'Bash' }, async ($, e, next) => {
-    // the commands that hand work out (accept and takeover also close what a hand-back gave Claude)
-    if (/(^|[\s;&|(])wb (start|next|feedback|steer|answer)\b/.test(e.command)) {
+    if (delegates(String(e.command ?? ''))) {
       await workbenchMode($, true)
     }
     return next(e)

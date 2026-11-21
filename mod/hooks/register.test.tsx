@@ -1,5 +1,5 @@
 import { expect, mock, test } from 'claude-code/testing'
-import { awayNow, priceOf, savedLine, spark, statsLines, wrapWords } from './register.js'
+import { awayNow, delegates,priceOf, savedLine, spark, statsLines, wrapWords } from './register.js'
 
 const PANE = {
   plugin: 'workbench',
@@ -1279,6 +1279,38 @@ test('running wb counts as workbench mode, and a web message reaches a running t
   expect(sent[0].text).toContain('[web chat] still there?')
   expect(sent[0].text).toContain('wb chat reply')               // framed as a peer's: one line says whose
   expect(runs.some(a => a.join(' ') === 'wb chat ack m1 --by ' + a[5] + ' --how now')).toBe(true)
+})
+
+test('only wb run as a command counts as delegating, not wb written in a string, a heredoc or a comment (#409)', () => {
+  // 2026-11-20: a Python patch whose string held "split it (wb next)" turned workbench mode on
+  for (const run of ['wb start t --spec s.md', 'cd ~ && wb start step-2 --spec s.md --repo .', 'wb next t',
+    'git add -A; wb feedback t --text x', 'true || wb steer t "go"', 'WB_HOME=/x wb answer t q1 yes',
+    'env WB_HOME=/x wb next t', '~/repos/workbench/bin/wb start t', 'out=$(wb start t --spec s.md)',
+    'cat <<EOF > s.md\nwrite it\nEOF\nwb start t --spec s.md', '(cd repo; wb next t)'])
+    expect([run, delegates(run)]).toEqual([run, true])
+  for (const data of ['python3 - <<\'EOF\'\ns = "split it (wb next) or take it over"\nEOF',
+    'python3 -c "print(\'(wb next)\')"', 'git commit -m "wb start now records the session"',
+    'grep -n "wb (start|next)" ARCHITECTURE.md', 'echo done # then wb next t', "echo 'wb answer t q1'",
+    'wb status', 'wb accept t', 'cat <<-X\n\twb start t\n\tX', 'awb next t', 'wb nextstep'])
+    expect([data, delegates(data)]).toEqual([data, false])
+})
+
+test('a heredoc that mentions wb leaves workbench mode off; running it turns it on (#409)', async ($, on) => {
+  const clock = mock.clock(on, { now: 1_800_000_000_000 })
+  const files: Record<string, string> = {}
+  const ui: string[] = []
+  fakeTasks(on, files, [], true, ui)
+  on('process.run', () => ({ value: { exitCode: 0, stdout: '', stderr: '' } }))
+  on('tool.call', () => ({ result: { stdout: '' }, text: '' }))  // the engine's Bash
+  await $.session.start({ cwd: '/home/u/project', surface: 'terminal', isInteractive: true })
+  const mode = async () => ui.includes('status ⚒ wb · workbench mode')   // the mode's sign on the status line
+  await $.tool.call({ tool: 'Bash', command: 'python3 - <<\'EOF\'\nmsg = "split it (wb next) or take it over"\nEOF' })
+  await clock.advance(1000)
+  expect(await mode()).toBe(false)
+  expect(ui).not.toContain('open workbench')
+  await $.tool.call({ tool: 'Bash', command: 'cd ~ && wb next t' })
+  await clock.advance(1000)
+  expect(await mode()).toBe(true)
 })
 
 test('a task left waiting with no notice reaching Claude wakes it anyway, once', async ($, on) => {
