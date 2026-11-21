@@ -354,10 +354,14 @@ def _capture(task: store.Task, cmd: str, viewport: str, limit: int, setup: bool,
             if p.is_file() and not p.is_symlink() and p.read_bytes()[:8] == b"\x89PNG\r\n\x1a\n":
                 shutil.copyfile(p, dest)
         # absolute: the command runs in the task's package (task.json `subdir`), where a relative
-        # path landed while the image was looked for at the checkout's top (#433, the audit of 1.8)
+        # path landed while the image was looked for at the checkout's top (#433, the audit of 1.8).
+        # Exported, then the command itself, in the agent's shell as --test and wb verify run it
+        # (runner.test_shell): a nested `sh -c` was dash on Debian and Ubuntu, and `source
+        # .venv/bin/activate && …` failed on both sides (#517). Every part of a compound command
+        # sees the variables.
         def line(work: Path, name=name) -> str:
-            return (f"WB_SHOT_OUT={shlex.quote(str(work / name))} WB_SHOT_VIEWPORT={viewport} "
-                    f"sh -c {shlex.quote(cmd)}")
+            return (f"export WB_SHOT_OUT={shlex.quote(str(work / name))} "
+                    f"WB_SHOT_VIEWPORT={shlex.quote(viewport)}\n{cmd}")
         code, text = _run(task, checkout, line, limit, keep, setup)
         (out / f"{side}.txt").write_text(text, encoding="utf-8")
         # a capture that exits nonzero failed, PNG or not: one that wrote its image and exited 7
