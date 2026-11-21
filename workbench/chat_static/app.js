@@ -1177,7 +1177,7 @@
     const saved = t.saved >= 0
       ? `Saved about ${tokens(t.saved)}${t.self_est > 0 ? ` (${Math.round(100 * t.saved / t.self_est)}%)` : ''}.`
       : `It cost about ${tokens(-t.saved)} more.`
-    const gpu = t.wh ? ` The GPU used ${t.wh >= 1000 ? `${(t.wh / 1000).toFixed(1)} kWh` : `${Math.round(t.wh)} Wh`}${t.cost != null ? ` ($${t.cost.toFixed(2)})` : ''}.` : ''
+    const gpu = t.wh ? ` The GPU used ${t.wh >= 1000 ? `${(t.wh / 1000).toFixed(1)} kWh` : `${Math.round(t.wh)} Wh`}${t.cost != null ? `, cost ${t.cost.toFixed(2)}` : ''}.` : ''  // no currency sign: the price is the user's, in theirs (#845, as #609)
     $('saved').textContent = `In the last 7 days, ${t.tasks} task${t.tasks === 1 ? '' : 's'}: Claude used ${tokens(t.claude)} tokens where writing them itself would have taken about ${tokens(t.self_est)} (an estimate). ${saved}${gpu}`
   }
   function drawSettings() {

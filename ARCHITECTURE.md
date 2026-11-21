@@ -5721,7 +5721,9 @@ there) or "no answer in time: it waits in the terminal". The gear in the header 
 sheet (`#settings`; closed by the gear, Escape or a tap outside), what people come back for first
 (#103): *Tool permissions while you're away* (Ask me here / Let Claude go ahead, posting
 `/api/prefs`, with what each means), *Notifications* and *What it saved* (`drawSaved`: the week's
-`savings`, in a sentence, called an estimate; "Nothing to compare yet" before a task can be), then
+`savings`, in a sentence, called an estimate, the GPU's energy with `, cost 0.27` once a price is
+set, no currency sign, as `wb savings` and the pane: a `$` made a euro or pound price dollars,
+#845; "Nothing to compare yet" before a task can be), then
 *The app*, *This chat* (what this lane is: a second lane to the session, not a copy of the
 terminal; Claude sends here what matters, and keeps the user posted here when asked) and *This
 device* (forget the key: the key screen, with no restoring of the old one). Claude's messages flow in at a reading pace (`flows`) once
@@ -7114,7 +7116,9 @@ nested `.md` files (`docs/`, `skill/`, `mod/`, `agent/`) are unaffected. A new r
 - **The Claude coding choices** (`cli.CODING`: modes, labels, sentences) → the mod's
   `CODING_STOPS` (the Settings row) and `CODING_RULES` (the context block), and the skill's *Claude
   coding* bullet.
-- **`savings.totals`' keys** → the mod's `savedLine` and the chat page's `drawSaved`, which read them.
+- **`savings.totals`' keys** → the mod's `savedLine` and the chat page's `drawSaved`, which read them;
+  how the cost is labelled (no currency sign, #609, #845) → `wb savings`, the pane's Stats tab and
+  `savedLine`, and `drawSaved`, alike.
 - **Which session a task is** (task.json `session`, else `cwd`/`repo`) → the mod's `mine` and
   `cli._scope` (`--session`, `--repo`): the same rule, the home-or-`/` exception included, and
   the mod's `scope()` passing every id it has.

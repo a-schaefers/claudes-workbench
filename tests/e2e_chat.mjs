@@ -14,7 +14,7 @@ const ROOT = join(dirname(fileURLToPath(import.meta.url)), '..')
 const pw = createRequire(import.meta.url)(process.env.PLAYWRIGHT || 'playwright')
 const home = mkdtempSync(join(tmpdir(), 'wbchat-'))
 const env = { ...process.env, WB_HOME: join(home, 'state'), WB_CHAT_TOKEN: join(home, 'token'),
-  WB_CHAT_CONFIG: join(home, 'chat.json') }  // not the user's
+  WB_CHAT_CONFIG: join(home, 'chat.json'), WB_SAVINGS: join(home, 'savings.json') }  // not the user's
 // a system Chromium when there is one (CHROMIUM names another), else Playwright's own
 const CHROMIUM = process.env.CHROMIUM || (existsSync('/usr/bin/chromium') ? '/usr/bin/chromium' : '')
 const PORT = Number(process.env.WB_E2E_PORT || 13371)
@@ -268,6 +268,15 @@ async function run(engine, device) {
     await until(async () => (await page.textContent('#saved')).includes('In the last 7 days, 1 task: Claude used 56K tokens'))
     const said = await page.textContent('#saved')
     if (!said.includes('about 59K (an estimate). Saved about 3K (5%). The GPU used 600 Wh.')) throw new Error(said)
+    // #845: a price in the user's own currency showed as dollars on the phone
+    writeFileSync(env.WB_SAVINGS, JSON.stringify({ kwh_price: 0.3 }))
+    await page.click('#gear')
+    await until(async () => await page.locator('#settings').isHidden())
+    await page.reload()
+    await page.click('#gear')
+    await until(async () => (await page.textContent('#saved')).includes('The GPU used 600 Wh, cost 0.18.'))
+    if ((await page.textContent('#saved')).includes('$')) throw new Error('a currency sign: ' + await page.textContent('#saved'))
+    writeFileSync(env.WB_SAVINGS, '{}')  // no price again, for the next engine
     // #101: the badge, its number and its words, legible at phone width
     if (await page.locator('#badge').isHidden()) throw new Error('no badge')
     const n = await page.textContent('#badge-n'), cls = await page.getAttribute('#badge-n', 'class')
