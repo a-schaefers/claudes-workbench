@@ -13065,6 +13065,27 @@ class Stats(Base):
         self.assertIn("strata/strata", out)
         self.assertNotIn("older model", out)
 
+    def test_wb_stats_counts_only_real_spec_gap_discards_and_names_tasks_that_never_ran(self):
+        # #817: every row the table left out (another model's, one that never ran) was called a
+        # discard put down to the spec: 40 on a retired model read "(41 discards ... left out)"
+        from workbench import results
+        mimo = "ollama/mimo-v2.6:9b-q8_0"
+        add = lambda model, **x: store.append_jsonl(store.home() / "results.jsonl", {  # noqa
+            "model": model, "size": "trivial", "outcome": "accepted", "ran": True, **x})
+        for _ in range(40):
+            add("gone/model")
+        for _ in range(5):
+            add(mimo)
+        add(mimo, outcome="discarded", ran=False)
+        out = results.table({mimo})
+        self.assertNotIn("put down to the spec", out)
+        self.assertIn("(1 task whose agent never ran left out)", out)
+        add(mimo, outcome="discarded", spec_gaps=["the spec said 41"])
+        add("gone/model", outcome="discarded", spec_gaps=["not shown"])
+        out = results.table({mimo})
+        self.assertIn("(1 discard put down to the spec left out)", out)
+        self.assertIn("(2 discards put down to the spec left out)", results.table())
+
     def test_two_settings_changed_at_once_both_stay(self):
         # #564: each wrote back the snapshot it read, so one change was lost while both said it took.
         # Each process waits after its read until the other has read too (or a second passes: under
