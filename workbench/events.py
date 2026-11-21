@@ -4,6 +4,7 @@ and the detector that decides a run is going nowhere.
 import hashlib
 import json
 import os
+import re
 import time
 from collections import deque
 
@@ -20,6 +21,31 @@ def _brief(tool: str, inp: dict) -> str:
             text = str(inp[key]).replace("\n", " ")
             return text if len(text) <= 90 else text[:87] + "..."
     return ""
+
+
+# the words that only wrap the program a simple command runs: `env X=1 probe …`, `time probe …`
+WRAPPERS = {"env", "command", "exec", "time", "nice", "nohup", "timeout", "stdbuf"}
+
+
+def shell_programs(command: str) -> list[str]:
+    """The program each simple command in a shell line runs, in order, its path and the
+    variable assignments before it dropped: `cd x && FOO=1 probe symbols a.py | head` is
+    ["cd", "probe", "head"]. Which tools an agent really used (the experiments' use, #857):
+    its 90-character brief cut the line short and a tool was found only by searching events."""
+    out = []
+    for part in re.split(r"&&|\|\||[;|&\n]|\$\(|`|\(|\)", command or ""):
+        words = part.split()
+        while words and (re.match(r"^[A-Za-z_][A-Za-z0-9_]*=", words[0]) or words[0] in WRAPPERS):
+            wrapper = words.pop(0)
+            while wrapper in ("timeout", "nice", "stdbuf") and words and words[0].startswith("-"):
+                flag = words.pop(0)
+                if flag in ("-k", "-s", "-n") and words:
+                    words.pop(0)  # its value
+            if wrapper == "timeout" and words and re.match(r"^[0-9.]+[smhd]?$", words[0]):
+                words.pop(0)  # the duration
+        if words and not words[0].startswith(("-", "<", ">", "2>", "#")):
+            out.append(os.path.basename(words[0].strip("{}\"'")))
+    return out
 
 
 def _obj(v) -> dict:
@@ -48,6 +74,12 @@ def normalize(raw: dict, round_no: int):
         inp = state.get("input") if isinstance(state.get("input"), dict) else {}
         if tool in EDIT_TOOLS and (inp.get("filePath") or inp.get("path")):
             row["path"] = str(inp.get("filePath") or inp.get("path"))  # whole: brief is cut at 90
+        elif tool == "read" and (inp.get("filePath") or inp.get("path")):
+            row["path"] = str(inp.get("filePath") or inp.get("path"))
+            if not inp.get("offset") and not inp.get("limit"):
+                row["whole"] = True  # the whole file: the runner counts a long one (#857)
+        elif tool in ("shell", "bash") and isinstance(inp.get("command"), str):
+            row["programs"] = list(dict.fromkeys(shell_programs(inp["command"])))[:8]
         # The signature is what "the same call again" means to the stuck detector: the whole
         # input. Cut to its first 400 characters, `content` sorting before `filePath`, four new
         # files opening with one licence header were "the same call 4 times" (#497).

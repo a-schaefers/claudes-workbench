@@ -1857,6 +1857,8 @@ def cmd_status(a):
               f"{(on + (st.get('last') or ''))[:70]}")
     if a.name and tasks[0].worktree.is_dir():
         print(f"worktree: {tasks[0].worktree}")
+    if a.name and (line := use_line(tasks[0])):
+        print(line)
     _say(parked_line)
     _say(_others_line(others, "open elsewhere"))
 
@@ -2340,6 +2342,33 @@ def _coding_gate(task: store.Task, user: bool) -> None:
         f"(then wb coding allow {task.name} --edit \"…\" --said \"<their words>\")", 3)
 
 
+def use_line(task: store.Task) -> str | None:
+    """What a task's agent has used of its experiments so far, live (#857), or None when none is on."""
+    on = [k for k, v in (task.spec.get("experiments") or {}).items() if v]
+    if not on:
+        return None
+    st = task.status
+    used = st.get("experiment_use") or {}
+    return ("; ".join(f"{k}: {used.get(k, 0)} call(s)" for k in on)
+            + f"; whole reads of files over {context.LONG_FILE_LINES} lines: {st.get('long_reads', 0)}")
+
+
+USE_RECENT = 5  # the tasks with an experiment on that wb experiment reports its use over
+
+
+def use_recent(name: str) -> str:
+    """Whether the agents used experiment ``name`` in the latest tasks that had it on (bench
+    replays and trials too), "" before any did: on and installed said nothing of whether the agent
+    ran it, and it never had in 14 replays (#857)."""
+    rows = [r for r in store.results(trials=True) if name in (r.get("experiments") or ())
+            and "experiment_use" in r][-USE_RECENT:]
+    if not rows:
+        return ""
+    calls = [(r.get("experiment_use") or {}).get(name, 0) for r in rows]
+    return (f"; the agent used it in {sum(c > 0 for c in calls)} of the last {len(rows)} task(s) "
+            f"with it on ({sum(calls)} call(s))")
+
+
 def experiment_lines() -> list[str]:
     """One line per experiment: its setting and whether it can work here (probe installed)."""
     on = context.experiments()
@@ -2354,7 +2383,7 @@ def experiment_lines() -> list[str]:
                        "probe-code 0.6.0)")
         else:
             found = _tool_version([path])[1] if name == "probe" else ""
-            out.append(f"{name}: on" + (f" and working ({found})" if found else ""))
+            out.append(f"{name}: on" + (f" and working ({found})" if found else "") + use_recent(name))
     return out
 
 

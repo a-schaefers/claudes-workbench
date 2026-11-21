@@ -1046,8 +1046,16 @@ def run_round(task: store.Task, n: int, keep: bool = False) -> dict:
                 out["tools"][row["tool"]] = out["tools"].get(row["tool"], 0) + 1
                 if not row["ok"]:
                     out["errors"].append(f"{row['tool']}: {row.get('error', '')}")
+                st = task.status
+                used = context.experiment_use(task, row)
                 task.set_status(last=f"{row['tool']} {row['brief']}".strip(),
-                                tools=task.status.get("tools", 0) + 1)
+                                tools=st.get("tools", 0) + 1,
+                                # what the agent really used, live (#857): wb status, the row
+                                **({"experiment_use": {**(st.get("experiment_use") or {}),
+                                                       **{u: (st.get("experiment_use") or {}).get(u, 0) + 1
+                                                          for u in used}}} if used else {}),
+                                **({"long_reads": st.get("long_reads", 0) + 1}
+                                   if context.long_read(task, row) else {}))
             elif row["kind"] == "text":
                 out["texts"].append(row["text"])
                 row["text"] = row["text"][:2000]

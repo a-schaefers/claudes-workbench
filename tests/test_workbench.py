@@ -21803,6 +21803,44 @@ class ProbeExperiment(Base):
         self.assertIn("--allow-tests", context.EXPERIMENT_NOTES["probe"])
         self.assertNotIn("don't probe it", prompt)
 
+    def test_what_the_agent_used_of_probe_is_counted_live_and_reported(self):
+        # #857: the first A/B learnt only after 28 replays, by searching their events, that the
+        # agent had never once run probe
+        self.fake_probe()
+        self.start("t-used", "probing")
+        wait_phase("t-used", {"review"})
+        task = store.Task("t-used")
+        st = task.status
+        self.assertEqual(st.get("experiment_use"), {"probe": 1})   # the compound line, not grep's
+        self.assertEqual(st.get("long_reads"), 1)                   # the whole read, not the part
+        self.assertIn("probe: 1 call(s); whole reads of files over 300 lines: 1", run_wb("status", "t-used"))
+        run_wb("discard", "t-used")
+        row = [r for r in store.results(trials=True) if r["task"] == "t-used"][-1]
+        self.assertEqual((row["experiment_use"], row["long_reads"]), ({"probe": 1}, 1))
+        self.assertIn("and working (probe-code 0.6.0); the agent used it in 1 of the last 1 task(s) "
+                      "with it on (1 call(s))", cli.experiment_lines()[0])
+        context.set_experiment("probe", False)                    # off: nothing is counted as its use
+        self.start("t-unused", "probing")
+        wait_phase("t-unused", {"review"})
+        self.assertNotIn("experiment_use", store.Task("t-unused").status)
+        self.assertNotIn("probe:", run_wb("status", "t-unused"))
+
+    def test_bench_report_says_how_many_replays_used_the_experiment(self):
+        from workbench import bench
+        on = [{"experiments": ["probe"], "experiment_use": {"probe": 3}, "long_reads": 2},
+              {"experiments": ["probe"], "experiment_use": {}, "long_reads": 1}]
+        self.assertEqual(bench.use_lines({("probe-on", "o/m"): on, ("probe-off", "o/m"): [{"experiments": []}]}),
+                         ["probe-on m: probe used in 1 of 2 replay(s), 3 call(s); whole reads of long files: 3"])
+
+    def test_the_programs_a_shell_line_runs_are_read_past_wrappers_and_assignments(self):
+        from workbench.events import shell_programs
+        for line, want in (("cd x && FOO=1 probe extract a.py#f | head -5", ["cd", "probe", "head"]),
+                           ("timeout -k 5 60s probe symbols a.py", ["probe"]),
+                           ("env A=1 nice -n 5 /usr/local/bin/probe grep x", ["probe"]),
+                           ("(probe symbols a.py 2>/dev/null || cat a.py)", ["probe", "cat"]),
+                           ("grep -n probe a.py; echo probe", ["grep", "echo"])):
+            self.assertEqual(shell_programs(line), want, line)
+
     def test_with_probe_on_the_agent_may_run_only_probes_reads(self):
         # 2026-11-21, testing the experiment: `probe *` let the agent start probe's LSP daemon
         # and language servers, and write probe's config, though the docs called it read-only

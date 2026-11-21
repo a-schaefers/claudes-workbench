@@ -244,6 +244,18 @@ elif scenario == "read":
     tool("write", {"filePath": os.path.abspath("answer.txt"), "content": "42"})
     emit("text", text="Wrote answer.txt = 42.")
     finish()
+elif scenario == "probing":  # #857: probe in a compound line, a long file read whole and in part
+    with open("long.py", "w") as fh:
+        fh.write("x = 1\n" * 400)
+    tool("shell", {"command": "cd . && timeout 30 probe symbols long.py | head -40"})
+    tool("read", {"filePath": os.path.abspath("long.py")})                      # whole: counted
+    tool("read", {"filePath": os.path.abspath("long.py"), "offset": 10, "limit": 20})  # a part
+    tool("shell", {"command": "grep -n probe long.py"})                         # not a probe call
+    with open("answer.txt", "w") as fh:
+        fh.write("42\n")
+    tool("write", {"filePath": os.path.abspath("answer.txt"), "content": "42"})
+    emit("text", text="Wrote answer.txt = 42.")
+    finish()
 elif scenario == "floor":  # read half its window before its first change, then filled up
     tool("read", {"filePath": os.path.abspath("answer.txt")})
     emit("step_finish", reason="tool-calls", tokens={"input": 2000, "output": 100,

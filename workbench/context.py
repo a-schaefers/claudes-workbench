@@ -360,6 +360,33 @@ EXPERIMENT_PROTOCOL = {
 }
 
 
+# A read of a whole file longer than this is what probe is for: the round prompt's trigger, and
+# what the runner counts (status `long_reads`) beside the experiments' use (#857)
+LONG_FILE_LINES = 300
+
+
+def experiment_use(task: store.Task, row: dict) -> list[str]:
+    """The experiments this tool call used: probe when a shell line runs `probe` and the task has
+    probe on. Counted live (status `experiment_use`), so an A/B knows within a replay whether the
+    agent takes the tool up: the first measurement learnt only at its end that probe had never
+    run, in 14 replays (#857)."""
+    return ["probe"] if experiment(task, "probe") and "probe" in (row.get("programs") or ()) else []
+
+
+def long_read(task: store.Task, row: dict) -> int:
+    """The length in lines of the file this call read whole, when over LONG_FILE_LINES; else 0."""
+    if row.get("tool") != "read" or not row.get("whole") or not row.get("path"):
+        return 0
+    path = Path(row["path"])
+    path = path if path.is_absolute() else task.worktree / path
+    try:
+        with open(path, "rb") as f:
+            n = sum(1 for _ in f)
+    except OSError:
+        return 0
+    return n if n > LONG_FILE_LINES else 0
+
+
 def experiment_protocol(task: store.Task | None = None, experiments: dict | None = None) -> str:
     """The protocol lines of the experiments this task's agent has (EXPERIMENT_PROTOCOL): the
     task's, or ``experiments`` as task.json will record them (wb start writes round 1's prompt
