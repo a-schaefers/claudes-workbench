@@ -2369,7 +2369,7 @@ def cmd_stats(a):
     if a.json:  # the Stats tab's history (#405)
         print(json.dumps(stats.feed()))
         return
-    head = stats.summary(stats.feed())
+    head = stats.summary(stats.feed(only=stats.SUMMARY))  # the headline: none of the rest (#565)
     print("\n".join(head + [""] if head else []) + results.table())
 
 

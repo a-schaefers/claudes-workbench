@@ -226,27 +226,31 @@ def _optimized() -> dict:
             for m, v in (models or {}).items() if isinstance(v, dict) and v.get("window")}
 
 
-def _helps(rows: list[dict], progress) -> dict:
-    """progress.helped for each model a progress check's answer was tried on."""
-    out = {}
-    for m in {r.get("model") for r in rows if r.get("interventions")}:
-        h = progress.helped(m) if m else {}
-        if any(n for _, n in h.values()):
-            out[m] = h
-    return out
+def _helps(rows: list[dict]) -> dict:
+    """progress.helped for each model a progress check's answer was tried on, over the feed's
+    rows (one pass: a read per model was most of the feed's time on a long history, #565)."""
+    from . import progress
+    return {m: h for m, h in progress.helped_by_model(rows).items()
+            if m and any(n for _, n in h.values())}
 
 
-def feed(now: float | None = None) -> dict:
-    """`wb stats --json`: the Stats tab's history (#405)."""
-    from . import progress, savings, tuning
+SUMMARY = ("periods", "streak", "absorbed", "guards")  # what `wb stats` shows of the feed
+
+
+def feed(now: float | None = None, only: tuple | None = None) -> dict:
+    """`wb stats --json`: the Stats tab's history (#405). results.jsonl is read once and that
+    snapshot passed down: each period's savings and each model's helps read it again, 16 reads
+    of a 4,800-row history per feed (#565). ``only``: these sections alone (`wb stats`)."""
+    from . import savings, tuning
     now = store.now() if now is None else now
-    rows = [r for r in store.results() if tuning.judged(r)]  # trials and spec-gap discards out
+    every = store.results()
+    rows = [r for r in every if tuning.judged(r)]  # trials and spec-gap discards out
     out: dict = {"ts": now, "settings": settings(), "tasks": len(rows)}
     periods = {}
     for name, span in savings.PERIODS.items():
         since = now - span if span else 0
         rs = [r for r in rows if (r.get("ts") or 0) >= since]
-        t = savings.totals(store.results(), since=since)
+        t = savings.totals(every, since=since)
         if rs or t["tasks"]:
             landed = sum(map(_landed, rs))
             periods[name] = {"tasks": len(rs), "landed": landed,
@@ -256,21 +260,24 @@ def feed(now: float | None = None) -> dict:
                              **({"active_minutes": am} if (am := round(sum(r.get("active_minutes") or 0
                                                                            for r in rs), 1)) else {})}
     sections = {
-        "periods": periods,
-        "streak": _streak(rows, now),
-        "bests": _bests(rows),
-        "milestones": _milestones(rows),
-        "absorbed": _absorbed(rows),
-        "models": _models(rows),
-        "sizes": _by(rows, lambda r: [r["size"]] if r.get("size") else []),
-        "stacks": _by(rows, lambda r: r.get("stack") or []),
-        "days": _days(rows, now) if rows else None,
-        "guards": dict(sum((Counter(r.get("guards") or {}) for r in rows), Counter())),
-        "helps": _helps(rows, progress),
-        "bench": _bench(),
-        "optimized": _optimized(),
+        "periods": lambda: periods,
+        "streak": lambda: _streak(rows, now),
+        "bests": lambda: _bests(rows),
+        "milestones": lambda: _milestones(rows),
+        "absorbed": lambda: _absorbed(rows),
+        "models": lambda: _models(rows),
+        "sizes": lambda: _by(rows, lambda r: [r["size"]] if r.get("size") else []),
+        "stacks": lambda: _by(rows, lambda r: r.get("stack") or []),
+        "days": lambda: _days(rows, now) if rows else None,
+        "guards": lambda: dict(sum((Counter(r.get("guards") or {}) for r in rows), Counter())),
+        "helps": lambda: _helps(rows),
+        "bench": _bench,
+        "optimized": _optimized,
     }
-    out.update({k: v for k, v in sections.items() if v})
+    for k, make in sections.items():
+        if only is None or k in only:
+            if v := make():
+                out[k] = v
     return out
 
 

@@ -9381,6 +9381,38 @@ class Stats(Base):
         self.assertIn("best streak: 2 day(s) in a row with a task landed", later)
         self.assertFalse(any("streak: 0" in line for line in later))
 
+    def test_the_feed_reads_results_jsonl_once_however_many_models_and_periods(self):
+        # #565: each period's savings and each model's helps read the whole file again: 16 reads
+        # and parses of a 4,800-row history per feed, 3 s at 20,000 rows
+        from workbench import stats
+        now = time.time()
+        rows = [{"ts": now - i * 60, "task": f"t{i}", "model": f"m{i % 12}", "outcome": "accepted",
+                 "rounds": 1, "minutes": 5, "diff": {"files": 1, "added": 10, "removed": 1},
+                 "claude": {"input": 1000, "output": 100, "calls": 3, "cache_read": 0, "cache_write": 0},
+                 "interventions": [{"kind": "hint"}]} for i in range(10_000)]
+        with open(store.home() / "results.jsonl", "w") as fh:
+            fh.writelines(json.dumps(r) + "\n" for r in rows)
+        real, reads = store.read_jsonl, []
+        def counted(path, *a, **kw):
+            if Path(path).name == "results.jsonl":
+                reads.append(path)
+            return real(path, *a, **kw)
+        with mock.patch.object(store, "read_jsonl", counted):
+            began = time.monotonic()
+            f = stats.feed(now)
+            took = time.monotonic() - began
+        self.assertEqual(len(reads), 1)
+        self.assertEqual(len(f["helps"]), 12)
+        self.assertEqual(f["helps"]["m0"]["hint"][1], 834)
+        self.assertLess(took, 10)  # about 0.5 s here; a read per section was several times that
+        with mock.patch.object(store, "read_jsonl", counted):
+            reads.clear()
+            head = stats.feed(now, only=stats.SUMMARY)
+        self.assertEqual(len(reads), 1)
+        self.assertNotIn("helps", head)
+        self.assertNotIn("models", head)
+        self.assertEqual(stats.summary(head), stats.summary(f))
+
     def test_a_models_write_speed_trend_compares_its_newest_third_with_its_oldest(self):
         from workbench import stats
         self.rows(*({"ts": 1000.0 + i, "outcome": "accepted", "speed": {"write": w}}

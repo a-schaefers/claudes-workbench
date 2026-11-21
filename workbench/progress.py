@@ -57,15 +57,22 @@ def due(task: store.Task, active_s: float, typical_min: float | None) -> bool:
 def helped(model: str) -> dict[str, list[int]]:
     """{kind: [helped, tried]} on this model: a task an intervention was tried on helped when it
     was accepted without Claude taking it over."""
-    out = {k: [0, 0] for k in KINDS}
-    for r in store.results():
-        if r.get("model") != model:
+    return helped_by_model(store.results()).get(model) or {k: [0, 0] for k in KINDS}
+
+
+def helped_by_model(rows: list[dict]) -> dict[str, dict[str, list[int]]]:
+    """helped for every model with an intervention, in one pass over ``rows`` (the Stats feed's:
+    a read of results.jsonl per model was most of its time on a long history, #565)."""
+    out: dict[str, dict[str, list[int]]] = {}
+    for r in rows:
+        kinds = {i.get("kind") for i in r.get("interventions") or [] if isinstance(i, dict)} & set(KINDS)
+        if not kinds:
             continue
-        kinds = {i.get("kind") for i in r.get("interventions") or []} & set(KINDS)
         ok = r.get("outcome") == "accepted" and not any(s.get("took_over") for s in r.get("steps") or [])
+        by = out.setdefault(r.get("model"), {k: [0, 0] for k in KINDS})
         for k in kinds:
-            out[k][1] += 1
-            out[k][0] += ok
+            by[k][1] += 1
+            by[k][0] += ok
     return out
 
 
