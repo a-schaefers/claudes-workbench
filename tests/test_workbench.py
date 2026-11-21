@@ -6257,6 +6257,34 @@ class Lane(Base):
         self.assertIn(str(home / "perl5"), r)
         self.assertNotIn(str(home / "letters"), r)
 
+    @home_outside_the_lane
+    def test_package_managers_keep_their_own_git_repositories_in_the_tool_homes(self):
+        # #665 (the 2026-11-21 audit): pre-commit's `git remote add` in ~/.cache/pre-commit,
+        # uv's fetch in ~/.cache/uv and Go's in go/pkg were refused by the shim, so a git
+        # dependency failed the setup; with a dotfiles repo at ~ even their `git init` was
+        self.start("t-cachegit", "ok")
+        wait_phase("t-cachegit", {"review"})
+        task = store.Task("t-cachegit")
+        home = self.fake_home()
+        subprocess.run(["git", "init", "-q", str(home)], check=True)     # the user's dotfiles
+        (home / ".cache").mkdir()
+        (home / "go" / "pkg").mkdir(parents=True)
+        (home / "notes").mkdir()
+        env = {**runner.agent_env(task), "GIT_AUTHOR_NAME": "t", "GIT_AUTHOR_EMAIL": "t@t",
+               "GIT_COMMITTER_NAME": "t", "GIT_COMMITTER_EMAIL": "t@t"}
+        git = lambda *a: subprocess.run(["git", *a], env=env, capture_output=True, text=True,
+                                        cwd=task.worktree)
+        for d in (home / ".cache/pre-commit/repoabc", home / "go/pkg/mod/cache/vcs/0f3a"):
+            out = git("init", "-q", "--template=", str(d))
+            self.assertEqual(out.returncode, 0, out.stderr)
+            out = git("-C", str(d), "remote", "add", "origin", "https://example.invalid/x.git")
+            self.assertEqual(out.returncode, 0, out.stderr)
+        # the task's repo, and the user's own repositories outside the lane, stay read-only
+        self.assertIn("read-only", git("commit", "--allow-empty", "-m", "x").stderr)
+        self.assertIn("read-only", git("-C", str(home / "notes"), "commit", "--allow-empty",
+                                       "-m", "x").stderr)
+        self.assertIn("read-only", git("init", "-q", str(home / "notes" / "x")).stderr)
+
     def test_a_fresh_cargo_home_gets_its_caches_made_so_the_split_grants_them(self):
         # the 0.90 review: ~/.cargo split around bin/ and env granted only what existed, so a
         # fresh rustup install couldn't make registry/ and a git dependency couldn't make git/

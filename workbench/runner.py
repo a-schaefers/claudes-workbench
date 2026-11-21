@@ -346,7 +346,8 @@ def agent_env(task: store.Task, run: str = "") -> dict:
            "WB_TASK": task.name, "WB_HOME": str(store.home()), **CLEAN_ENV,
            **({"WB_RUN": run} if run else {})}
     env["PATH"] = env.get("PATH") or os.defpath
-    if context.writable(task) is not None:  # its own: the user's holds their bus and agents
+    places = context.writable(task)
+    if places is not None:  # its own: the user's holds their bus and agents
         env["XDG_RUNTIME_DIR"] = str(context.runtime_dir(task))
         # On WSL, not the Windows PATH, whose programs run outside the lane (context.agent_path),
         # nor the interop socket's name (the 0.90 review; /init finds it without: interop_gap)
@@ -358,7 +359,10 @@ def agent_env(task: store.Task, run: str = "") -> dict:
     # the lane, so a `git` the agent wrote into .venv/bin must not be the one it finds
     outside = os.pathsep.join(d for d in env["PATH"].split(os.pathsep) if d not in inside)
     shim = context.rules_dir(task) / "bin"
-    if gitguard.install(shim, Path(task.spec["repo"]), PKG_ROOT, outside, task.worktree):
+    # the lane's other directories are scratch to the shim too (#665): the kernel lets the
+    # agent write there already, and writable() leaves the task's repo out of them
+    scratch = [d for d in places or [] if os.path.isdir(d) and not d.startswith(("/dev", "/proc"))]
+    if gitguard.install(shim, Path(task.spec["repo"]), PKG_ROOT, outside, task.worktree, scratch):
         env["PATH"] = f"{shim}{os.pathsep}{env['PATH']}"
     return env
 
