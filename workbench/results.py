@@ -101,7 +101,10 @@ def record(task: store.Task, outcome: str, last_step: dict | None = None, **extr
            **({"interventions": st["interventions"]} if st.get("interventions") else {}),  # #95
            **({"diff": {"files": sum(s.get("files", 0) for s in steps),  # what savings.py prices
                         "added": sum(s.get("lines", 0) for s in steps),
-                        "removed": sum(s.get("removed", 0) for s in steps)}}
+                        "removed": sum(s.get("removed", 0) for s in steps),
+                        # apart, so a later estimate can price them its own way (#725)
+                        **_apart(steps, "generated", ("files", "lines", "removed")),
+                        **_apart(steps, "deleted", ("files", "removed"))}}
               if outcome == "accepted" else {}),
            **({"trial": True} if spec.get("trial") else {}),
            # on only: a task with every experiment off ran as main does
@@ -109,6 +112,12 @@ def record(task: store.Task, outcome: str, last_step: dict | None = None, **extr
                                                     if v)) else {}), **for_stats(task), **extra}
     store.append_jsonl(store.home() / "results.jsonl", row)
     return row
+
+
+def _apart(steps: list[dict], key: str, fields: tuple) -> dict:
+    """{key: the steps' `key` counts summed} when any step has them, else nothing."""
+    have = [s[key] for s in steps if isinstance(s.get(key), dict)]
+    return {key: {f: sum(h.get(f, 0) for h in have) for f in fields}} if have else {}
 
 
 def for_stats(task: store.Task) -> dict:

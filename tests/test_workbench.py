@@ -10645,12 +10645,45 @@ class Savings(Base):
             "- machine: linux; GPU: Radeon RX 7900 XTX (24 GB VRAM)",
             "- local models: 2 (size unknown, 17 GB of weights)",
             "- tasks: 2; Claude used 112K input-equivalent tokens, writing them itself ~100K (estimate); handoff/self 1.12",
+            "- the estimate prices the lines Claude would type: not lockfiles or generated files, and "
+            "a file deleted whole as one call",
             "- score: 1/100. I used about 12% more Claude.",
             "- by size: significant 0.95 (1), trivial 1.36 (1)",
             "- GPU energy: 600 Wh (1 task(s) on another machine's GPU, not measured)"])
         for private in ("secret", "acme", "fix-", "other:9b"):
             self.assertNotIn(private, out)
         self.assertIn("workbench savings, the last 7 days", run_wb("savings", "--share"))
+
+    def test_a_file_deleted_whole_or_a_lockfile_is_not_priced_as_lines_claude_would_type(self):
+        # #725: deleting a 2,400-line module read 'saved ~725K', a 4,000-line lockfile 'saved
+        # ~1.28M', each priced as lines Claude would have typed
+        import subprocess
+        from workbench import gitops, results, savings
+        usage = {"turns": 2, "calls": 12, "input": 0, "cache_write_5m": 0, "cache_write_1h": 0,
+                 "cache_read": 600000, "output": 6000}
+        small = {"claude": usage, "diff": {"files": 1, "added": 30, "removed": 20}}
+        gone = {"claude": usage, "diff": {"files": 2, "added": 30, "removed": 2420,
+                                          "deleted": {"files": 1, "removed": 2400}}}
+        self.assertEqual(savings.of_row(gone)["self_est"],
+                         savings.of_row(small)["self_est"] + round(savings.per_call(usage)))  # one call
+        old = {"claude": usage, "diff": {"files": 2, "added": 30, "removed": 2420}}  # before: priced
+        self.assertGreater(savings.of_row(old)["self_est"], 10 * savings.of_row(gone)["self_est"])
+        g = lambda *a: subprocess.run(["git", "-C", str(self.repo), *a], check=True, capture_output=True)  # noqa
+        (self.repo / "old.py").write_text("x = 1\n" * 2400)
+        (self.repo / "keep.py").write_text("a\nb\n")
+        g("add", "."), g("commit", "-qm", "base")
+        g("rm", "-q", "old.py")
+        (self.repo / "keep.py").write_text("a\n")                    # a line removed, not a file
+        (self.repo / "yarn.lock").write_text("dep\n" * 4000)
+        size = gitops.footprint(self.repo, "HEAD")
+        self.assertEqual(size, {"files": 2, "lines": 0, "removed": 2401,
+                                "generated": {"files": 1, "lines": 4000, "removed": 0},
+                                "deleted": {"files": 1, "removed": 2400}})
+        steps = [{**size, "landed": True}, {"files": 1, "lines": 3, "removed": 0,
+                                            "deleted": {"files": 1, "removed": 9}}]
+        self.assertEqual(results._apart(steps, "deleted", ("files", "removed")),
+                         {"deleted": {"files": 2, "removed": 2409}})
+        self.assertEqual(results._apart(steps[1:], "generated", ("files", "lines", "removed")), {})
 
     def test_the_badge_scores_the_summed_saving_from_1_to_100_and_says_it_in_words(self):
         # #101: one number, about the percent of Claude saved; the colour never says it alone

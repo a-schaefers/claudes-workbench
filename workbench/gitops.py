@@ -941,7 +941,9 @@ def generated(worktree: Path, paths: list[str]) -> set[str]:
 def footprint(worktree: Path, base: str) -> dict:
     """What a change spans since ``base``: files touched and lines added or removed, new files
     included, a renamed file under its new name. Generated files (`generated`) are left out of
-    those and counted in `generated` ({files, lines, removed}, only when there are any)."""
+    those and counted in `generated` ({files, lines, removed}, only when there are any); the
+    files deleted whole are counted again in `deleted` ({files, removed}, when any): one call
+    deletes them, which savings.py prices apart (#725)."""
     out = with_new_files(worktree, "diff", "--no-ext-diff", "--no-color", "--numstat", "-z", base)
     words, rows = (out or "").split("\0"), []
     i = 0
@@ -961,7 +963,11 @@ def footprint(worktree: Path, base: str) -> dict:
                 "removed": sum(int(r) for _, r, _ in rs if r.isdigit())}
     size = total([r for r in rows if r[2] not in made])
     gen = [r for r in rows if r[2] in made]
-    return {**size, **({"generated": total(gen)} if gen else {})}
+    gone = set(with_new_files(worktree, "diff", "--no-renames", "--name-only", "--diff-filter=D", "-z",
+                              base).split("\0")) - {""} - made
+    dead = total([r for r in rows if r[2] in gone])
+    return {**size, **({"generated": total(gen)} if gen else {}),
+            **({"deleted": {"files": dead["files"], "removed": dead["removed"]}} if dead["files"] else {})}
 
 
 # Source files by extension, for the kind of work a repo holds (stack). Markup, data and docs

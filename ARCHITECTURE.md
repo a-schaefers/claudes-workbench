@@ -558,7 +558,13 @@ error 19% again, −32% to +21%, low on four of the five, so it understates the 
 the three constants on those five fit them better (15%) but missed each one left out by 32% on
 average, so the constants stand until there are more runs to fit (#120).
 `estimate_self(lines, per_call)` is that sum, weighted; `of_row(row)` needs the results row's
-`claude` (with `calls`) and `diff`, and gives `{claude, self_est, saved, wh}`; `line(row)` reads
+`claude` (with `calls`) and `diff`, and gives `{claude, self_est, saved, wh}`. It prices the lines
+Claude would type: a tool's files (lockfiles, files marked `linguist-generated` or `-diff`) are
+left out of `diff`'s `added` and `removed` (`gitops.footprint`, kept apart in `diff.generated`),
+and the lines of files deleted whole (`diff.deleted`) are priced as one more call, not as lines:
+deleting a 2,400-line module read "saved ~725K", a 4,000-line lockfile "saved ~1.28M", far
+outside the fit, which came from ordinary edits (#725; rows from before keep their old price).
+`--share` says so (`savings.COUNTS`); `line(row)` reads
 `claude: 56K · writing it yourself: ~59K (estimate) · saved ~3K · GPU 41 Wh` (a negative saving
 reads `cost ~3K more`); `totals(rows, since)` adds them up, with the energy's `cost` at the
 user's electricity price (`price()`, from `$WB_SAVINGS`, else `~/.config/workbench/savings.json`
@@ -604,7 +610,8 @@ doubled (#706). The mean and peak (`gpu_w_*`) stay the GPU's own draw. The size:
 `removed` (a renamed file under its new name), leaving out the files a tool writes
 (`gitops.generated`: a package manager's lockfile by name, `gitops.LOCKFILES`, or one the repo's
 .gitattributes marks `linguist-generated` or `-diff`), which it counts apart as `generated`
-(`{files, lines, removed}`, only when there are any, #720); each step records them
+(`{files, lines, removed}`, only when there are any, #720), and the files deleted whole again in
+`deleted` (`{files, removed}`, when any, #725); each step records them
 (`results.step`), and an accepted task's row sums them as `diff`.
 
 **Sharing it** (`wb savings --share`, `savings.share`, #119) prints a plain summary for the user
@@ -612,7 +619,8 @@ to paste into a discussion, where users pool their evidence. Nothing is sent any
 the period's rows with both sides to compare:
 - the machine: `hardware.system()`, each GPU's name and VRAM (`hardware.gpus(windows=False)`);
 - the local models used: their count and weights (`models.weights`), never a name;
-- the tasks: Claude's tokens, the estimate, handoff/self overall and by task size;
+- the tasks: Claude's tokens, the estimate, handoff/self overall and by task size, and what the
+  estimate counts (`COUNTS`, #725);
 - the badge's score and sentence (*The badge*), or `NO_SCORE`;
 - the GPU energy, saying when some ran on another machine's GPU.
 
@@ -6060,7 +6068,9 @@ names on for the task, when any), `steps` (one `results.step` per step), `window
 output}`, *What a task cost Claude*), `gpu_wh` (status's, when measured), `remote_gpu` (true
 when its model ran on another machine, whose energy nothing here measures), `active_minutes`
 (status `active_s`), `interventions` (status's, when a progress check was answered), `diff` (accepted only:
-`{files, added, removed}` summed over the steps; *What a task saved*), `landed_steps` (discarded only:
+`{files, added, removed, generated?, deleted?}` summed over the steps, `generated` `{files, lines,
+removed}` and `deleted` `{files, removed}` when a step had any (`gitops.footprint`, #725); *What a
+task saved*), `landed_steps` (discarded only:
 the steps `wb next` committed and the discard kept, when any; `steps_dropped` true after `--drop-steps`,
 #722), `backlog` (task.json's), `trial` (when set);
 with stats recording on (`results.for_stats`, each only when measured), `started_at`, `load_secs`, `setup_secs`,
