@@ -1881,7 +1881,7 @@ deliberately hostile process (the 2026-11-16 audit's list of what it can't stop 
   the install writable, though the user's own shell runs it outside the lane later. This is all
   that applies without Landlock.
 - *Asking for more.* A refused write is "Permission denied" (the protocol says so, and not to
-  probe it); the agent calls `ask_reviewer` with `path`, which raises a PERMISSION question naming
+  keep trying it); the agent calls `ask_reviewer` with `path`, which raises a PERMISSION question naming
   `wb allow <task> --path <dir>`. That grants read and write (`--always` keeps it in
   `commands.json`; `wb start --allow-path` grants it up front). `_lane_dir` refuses a path through
   a link, naming its target (the agent can plant `/tmp/out` -> another project and ask for
@@ -5454,7 +5454,15 @@ failed the start after its branch and worktree were made (#518); its output is r
 `errors="replace"`. On, the task's shell rules allow probe's read-only subcommands, `context.PROBE_READS`
 (`symbols`, `extract`, `search`, `grep`, `query`; `shell_rules`, after `ALLOWED_COMMANDS`), and
 refuse `--lsp` on any of them; its copy of the handbook ends with `EXPERIMENT_NOTES["probe"]`
-(`instruction_files`; `agent/HANDBOOK.md` itself is unchanged). So it stays read-only: no index,
+(`instruction_files`; `agent/HANDBOOK.md` itself is unchanged), and each round prompt's protocol
+carries `EXPERIMENT_PROTOCOL["probe"]` beside the acceptance line (`context.experiment_protocol`,
+the protocol's `{experiment_protocol}`). Both give a trigger, not a suggestion: before reading a
+file over 300 lines, `probe symbols` it. Both were added after the first measurement, in which
+the agent never ran probe in 14 replays: the note was in the handbook only, said "read a whole file
+only when you need most of it" on cases whose largest file was 312 lines, didn't name
+`--allow-tests` (without it `probe symbols` leaves out a test file's tests), and didn't say what to
+do when probe refuses a file over 1 MB ("File too large"; it has no setting to raise that). The
+protocol's line on refused writes said "don't probe it" until then. So it stays read-only: no index,
 no daemon, no network. The rule was `probe *` until 2026-11-21, when testing the experiment found
 that it let the agent run `probe lsp` (a daemon and language servers), `--lsp` on a read (the
 same), `probe config set|reset` (probe's config) and `probe benchmark`.
@@ -7505,7 +7513,7 @@ nested `.md` files (`docs/`, `skill/`, `mod/`, `agent/`) are unaffected. A new r
 
 - **A file a round's children load** (the lane, the git shim, the ask server, and what they
   import) → `runner.CHILD_CODE`, so an update under a running task is caught (*The runner, inside*).
-- **An experiment** (`context.EXPERIMENTS`) → its effects (`shell_rules`, `EXPERIMENT_NOTES`),
+- **An experiment** (`context.EXPERIMENTS`) → its effects (`shell_rules`, `EXPERIMENT_NOTES`, `EXPERIMENT_PROTOCOL`),
   `task_experiments` (when it can work), `cli.experiment_lines`, the pane's Settings row
   (`PROBE_STOPS`, `probeMode`, `probeStatus` and `probeSaid`, which read `experiment_lines`' wording,
   `PROBE_SETUP_NOTE`), and *Experiments*.

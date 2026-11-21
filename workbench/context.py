@@ -343,10 +343,29 @@ EXPERIMENTS = {
 }
 # what an experiment adds to the agent's copy of the handbook, after its own text
 EXPERIMENT_NOTES = {
-    "probe": "\n## Reading code\nRead a whole file only when you need most of it. `probe symbols "
-             "<file>` lists its functions with line numbers; `probe extract <file>#<name>` prints "
-             "one; after an edit, re-read only the function you changed.\n",
+    "probe": "\n## Reading code: probe\nFiles here can be long, and every line you read costs time. "
+             "Before you read any file over 300 lines, run `probe symbols <file>` (add `--allow-tests` "
+             "in a test file, or its tests are left out): it lists each function and class with its "
+             "line range. Then read only what you need: `probe extract <file>#<name>` prints one "
+             "function, or read just its lines. To find where a name is defined or used, `probe "
+             "search \"<words>\" <dir>`. After an edit, re-read only the function you changed. When "
+             "probe says \"File too large\" (over 1 MB), use `grep -n` for the names and read those "
+             "lines.\n",
 }
+# what an experiment adds to every round prompt's protocol, beside the acceptance line: the
+# handbook alone went unread (probe: 0 calls in 14 replays, 2026-11-21)
+EXPERIMENT_PROTOCOL = {
+    "probe": "- Before you read a file over 300 lines, run `probe symbols <file>` (`--allow-tests` in "
+             "a test file) and read only the functions you need (`probe extract <file>#<name>`).\n",
+}
+
+
+def experiment_protocol(task: store.Task | None = None, experiments: dict | None = None) -> str:
+    """The protocol lines of the experiments this task's agent has (EXPERIMENT_PROTOCOL): the
+    task's, or ``experiments`` as task.json will record them (wb start writes round 1's prompt
+    before task.json, #873)."""
+    have = experiments if experiments is not None else (task.spec.get("experiments") or {}) if task else {}
+    return "".join(line for name, line in EXPERIMENT_PROTOCOL.items() if have.get(name))
 
 
 def experiments_path() -> Path:

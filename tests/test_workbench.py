@@ -21796,6 +21796,12 @@ class ProbeExperiment(Base):
         self.assertTrue(handbook.startswith(context.HANDBOOK.read_text()))
         self.assertTrue(handbook.endswith(context.EXPERIMENT_NOTES["probe"]))
         self.assertIn("probe: on and working (probe-code 0.6.0)", cli.experiment_lines())
+        # and the round's protocol says it too: the handbook alone went unread, 0 probe calls in
+        # 14 replays (2026-11-21)
+        prompt = task.round_dir(1).joinpath("prompt.md").read_text()
+        self.assertIn(context.EXPERIMENT_PROTOCOL["probe"], prompt)
+        self.assertIn("--allow-tests", context.EXPERIMENT_NOTES["probe"])
+        self.assertNotIn("don't probe it", prompt)
 
     def test_with_probe_on_the_agent_may_run_only_probes_reads(self):
         # 2026-11-21, testing the experiment: `probe *` let the agent start probe's LSP daemon
@@ -21822,6 +21828,7 @@ class ProbeExperiment(Base):
         self.assertEqual(task.spec["experiments"], {"probe": False})
         self.assertEqual(self.probe_rules(task), [])
         self.assertEqual((context.rules_dir(task) / "HANDBOOK.md").read_text(), context.HANDBOOK.read_text())
+        self.assertNotIn("probe", task.round_dir(1).joinpath("prompt.md").read_text())
 
     def probe_that(self, script: str) -> Path:
         """A `probe` first on PATH running `script`, and the file each of its runs is noted in."""
