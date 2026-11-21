@@ -72,7 +72,7 @@ directories, pidfd on processes, `workbench/watch.py`) until one of them changes
 calls are `wb` subcommands (`wb events`, `wb watch --json`, `wb status`, `wb chat ack|claim|url|log|ask|wait|answer|on|off`,
 `wb stop|takeover --all --repo … --session …`, `wb update` and its weekly `wb update --check --if-due`,
 `wb optimize start --if-due` once per session (*Optimize*)), plus
-`kill -0` to see whether the chat listener's pid lives and `tail -c` to read a long file's end. A
+`kill -0` where there is no `/proc` (macOS) to see whether a pid lives and `tail -c` to read a long file's end. A
 crashed piece loses nothing, and every piece can be inspected with `cat`.
 
 workbench is Python's standard library only (3.11+), plus the TypeScript mod. There is no
@@ -2261,7 +2261,8 @@ mod keeps every id its process has had (`$.session.id()` at the start and at eac
 /clear and a resume go on under another; the `sessions` atom): a task with a `session` is the
 session's whose ids hold it, wherever it ran. `wb start` also records that session's Claude Code
 process (`CLAUDE_PID`, task.json `claude_pid`) and its start (`claude_start`, `models._started`);
-once it is gone (`kill -0` fails, or the pid now runs a process that started at another time:
+once it is gone (no `/proc/<pid>` where there is `/proc`, else `kill -0` fails: a container without
+procps has no `kill`, and no gone process was ever seen, #700; or the pid now runs a process that started at another time:
 a recycled pid, #532; the mod's `noteClaude`, a live one asked at most every 30 s, a gone one
 final; `cli._gone`, `models._alive`), the task is
 also claimed by directory, so a new process in the project adopts the earlier one's tasks (the
@@ -5725,9 +5726,10 @@ frame in six, other poses blink one in eleven, except `sleep` and `slump`; FACE 
 …). The bubble says what the agent is doing (`speechOf`) in the phase's colour.
 
 **The web chat listener** (`listen`, workbench mode with the chat on, needs the events child): another
-session's live claim (its pid answers `kill -0` and, with a `start`, still started then: `alive`,
-which reads `/proc/<pid>/stat` or `ps -o lstart=` as wb does and compares only two of a kind; else
-its `ts` within 15 s) makes this one stand by; otherwise it writes `chat/listener.json`
+session's live claim (its pid lives, `/proc/<pid>` on Linux, else `kill -0`, and, with a `start`, still started then: `alive`,
+which reads `/proc/<pid>/stat` or `ps -o lstart=` as wb does and compares only two of a kind; when
+neither can say, while listener.json was written within 15 s, #700: read as gone, two sessions took
+it from each other on every poll; without a pid, its `ts` within 15 s) makes this one stand by; otherwise it writes `chat/listener.json`
 `{session, cwd, pid, start, busy}` when that changes, and
 delivers each user message without a receipt, once `wb chat claim <id> --by <key>` gives it the
 message (refused: another session's, looked at again a minute later; two sessions starting

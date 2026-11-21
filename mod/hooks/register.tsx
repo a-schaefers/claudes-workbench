@@ -2034,15 +2034,21 @@ async function startOf($: any, pid: number): Promise<string> {
   return ''
 }
 
-// Whether a process lives (`kill -0`) and, given the start recorded beside its pid, is still the
-// one that wrote it: a recycled pid is another process (#532), as wb's models._alive judges. Only
-// two starts of one kind compare (both /proc's tick count, or both ps's date). null: unknown
-// (kill failed to run).
+// Whether a process lives and, given the start recorded beside its pid, is still the one that
+// wrote it: a recycled pid is another process (#532), as wb's models._alive judges. Only two
+// starts of one kind compare (both /proc's tick count, or both ps's date). Where there is /proc
+// (Linux), /proc/<pid> says, else `kill -0` (macOS): a container without procps has no `kill`, so
+// no gone process was ever seen, nobody adopted a crashed session's tasks, and two listening
+// sessions took the chat's listener from each other on every poll (#700). null: unknown.
 async function alive($: any, pid: number, start?: string): Promise<boolean | null> {
-  try {
-    if ((await $.process.run(['kill', '-0', String(pid)], { timeoutMs: 5000 })).exitCode !== 0) return false
-  } catch {
-    return null
+  if (await $.fs.exists('/proc/self/stat').catch(() => false)) {
+    if (!(await $.fs.exists(`/proc/${pid}/stat`).catch(() => false))) return false
+  } else {
+    try {
+      if ((await $.process.run(['kill', '-0', String(pid)], { timeoutMs: 5000 })).exitCode !== 0) return false
+    } catch {
+      return null
+    }
   }
   if (!start) return true
   const now = await startOf($, pid)
@@ -2077,7 +2083,11 @@ async function listen($: any, now: number) {
   if (!mem.eventsPid) return // the chat knows a listener by its live `wb events` process
   const claim = await readJson($, `${dir}/listener.json`)
   const theirs = claim.session && claim.session !== st.key
-  if (theirs && (claim.pid ? !!(await alive($, Number(claim.pid), claim.start ? String(claim.start) : ''))
+  // whether it lives unknown, its claim stands while the file is fresh: read as gone, two
+  // sessions took the listener from each other on every poll, each write the other's event (#700)
+  const lives = claim.pid ? await alive($, Number(claim.pid), claim.start ? String(claim.start) : '') : false
+  const fresh = async () => now - ((await $.fs.stat(`${dir}/listener.json`).catch(() => undefined))?.mtimeMs ?? 0) < CHAT_STALE_MS
+  if (theirs && (claim.pid ? lives === true || (lives === null && await fresh())
     : now - Number(claim.ts ?? 0) * 1000 < CHAT_STALE_MS)) return // another session listens
   if (!(await $.fs.exists(dir))) await runWb($, ['chat', 'log']) // wb makes the directory
   const body = JSON.stringify({ session: st.key, cwd: mem.cwd, pid: mem.eventsPid,

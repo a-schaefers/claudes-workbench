@@ -189,6 +189,9 @@ const engine: { version?: { version: string; base: string }; env?: Record<string
 const TESTED = { version: '2.1.311', base: '2.1.311' }
 engine.version = TESTED
 
+// A file's mtime where a test sets one (fakeTasks' fs.stat), else 0
+const mtimes: Record<string, number> = {}
+
 function fakeTasks(on: any, files: Record<string, string>, dirs = ['fix-it'], scouted = true, ui: string[] = [], ears = true) {
   on('session.version', () => {
     if (!engine.version) throw new Error('no implementation for session.version')
@@ -210,7 +213,7 @@ function fakeTasks(on: any, files: Record<string, string>, dirs = ['fix-it'], sc
   on('fs.exists', (_: any, e: any) => ({ value: Object.keys(files).some(p => p.startsWith(e.path)) }))
   on('fs.stat', (_: any, e: any) => {
     if (!(e.path in files)) throw new Error(`ENOENT: ${e.path}`)
-    return { value: { kind: 'file', size: files[e.path].length, mtimeMs: 0, isLink: false } }
+    return { value: { kind: 'file', size: files[e.path].length, mtimeMs: mtimes[e.path] ?? 0, isLink: false } }
   })
   on('fs.list', () => ({ value: dirs.map(name => ({ name, kind: 'dir' })) }))
   on('command.register', (_: any, e: any) => ({ value: { command: e.name } }))
@@ -617,6 +620,56 @@ test('a task whose Claude Code process\'s pid now belongs to another process is 
   expect(woken.filter(t => t.includes('REPORT-recycled'))).toHaveLength(1)  // the pid lives, not its process
   expect(woken.filter(t => t.includes('REPORT-macos'))).toHaveLength(1)     // ps's start differs too
   expect(woken.join('\n')).not.toContain('REPORT-same')                    // the same process: still its own
+})
+
+test('without a kill executable, /proc says which Claude Code processes are gone (#700)', async ($, on) => {
+  // #700: `kill -0` threw ENOENT in a container without procps, so no gone process was ever seen
+  // and nobody was woken for a crashed session's tasks
+  const clock = mock.clock(on, { now: 1_800_000_000_000 })
+  const files: Record<string, string> = {}
+  task(files, 'orphan', 'review', { repo: '/home/u/a', cwd: '/home/u/a', session: 'sess-old', claude_pid: 4242 })
+  task(files, 'live', 'review', { repo: '/home/u/a', cwd: '/home/u/a', session: 'sess-other', claude_pid: 4343, claude_start: '2000' })
+  for (const name of ['orphan', 'live']) notice(files, { ts: ts0, task: name, kind: 'review', text: `REPORT-${name}` })
+  fakeTasks(on, files, ['orphan', 'live'])
+  files['/proc/self/stat'] = '1 (x) S 1'
+  files['/proc/4343/stat'] = `4343 (claude) S 1 ${'0 '.repeat(17)}2000 0 0`
+  on('session.id', () => ({ value: 'sess-new' }))
+  on('process.run', (_: any, e: any) => {
+    if (e.argv[0] === 'kill') throw new Error('ENOENT: kill')       // no procps
+    return { value: { exitCode: 0, stdout: '', stderr: '' } }
+  })
+  on('ui.toast', () => ({ value: undefined }))
+  const woken: string[] = []
+  on('prompt.submit', (_: any, e: any) => { woken.push(e.text); return { text: e.text } })
+  await $.session.start({ cwd: '/home/u/a', surface: 'terminal', isInteractive: true })
+  await clock.advance(3000)
+  expect(woken.filter(t => t.includes('REPORT-orphan'))).toHaveLength(1)
+  expect(woken.join('\n')).not.toContain('REPORT-live')
+})
+
+test('a listener whose life can\'t be told keeps the chat while its claim is fresh (#700)', async ($, on) => {
+  // #700: unknown liveness read as gone, so two listening sessions took listener.json from each
+  // other on every poll, each write the other's `wb events` line
+  const clock = mock.clock(on, { now: 1_800_000_000_000 })
+  const files: Record<string, string> = {}
+  fakeTasks(on, files, [])
+  chatOn(files)
+  const claim = JSON.stringify({ session: 'other-key', pid: 777, start: '1' })
+  files['/wb/chat/listener.json'] = claim
+  mtimes['/wb/chat/listener.json'] = 1_800_000_000_000
+  on('process.run', (_: any, e: any) => {
+    if (e.argv[0] === 'kill') throw new Error('ENOENT: kill')
+    return { value: { exitCode: 0, stdout: '', stderr: '' } }
+  })
+  on('ui.toast', () => ({ value: undefined }))
+  on('skill.prompt', (_: any, e: any) => ({ text: e.text }))
+  await $.session.start({ cwd: '/home/u/a', surface: 'terminal', isInteractive: true })
+  await $.skill.prompt({ skill: 'workbench', text: 'x', frontmatter: {}, source: 'userSettings' })
+  await clock.advance(3000)
+  expect(files['/wb/chat/listener.json']).toBe(claim)            // theirs stands
+  delete mtimes['/wb/chat/listener.json']                       // stale: gone, by every sign there is
+  await clock.advance(31_000)
+  expect(JSON.parse(files['/wb/chat/listener.json']).session).not.toBe('other-key')
 })
 
 test('on a file system that ignores case, a task under ~/Repos is a session in ~/repos\'s', async ($, on) => {
