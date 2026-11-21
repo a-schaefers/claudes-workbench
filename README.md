@@ -27,15 +27,6 @@ Claude Code plugin that connects the two inside your normal Claude Code session.
   for a project's icons, illustrations, voice lines, sound effects and music, and checks each one;
   a voice or music you pick by ear, on your phone too ([images](ARCHITECTURE.md#images),
   [audio](ARCHITECTURE.md#audio)).
-- **See how it's going.** The pane's Stats tab shows this machine live (the GPU, the running
-  task, every model) and your history: tasks landed, Claude tokens saved, energy, streaks.
-- **Experimental: lighter code reading.** With [probe](https://github.com/probelabs/probe)
-  installed, agents read a file's outline and one function instead of the whole file. Turn on
-  *Agent code navigation* in the pane's Settings, and Claude can set probe up for you
-  ([experiments](ARCHITECTURE.md#experiments)).
-- **Optional: Claude on your phone.** Turn on *Web chat* in Settings to message Claude and answer
-  its prompts from your phone, over your own network such as Tailscale
-  ([the web chat](ARCHITECTURE.md#the-web-chat)).
 
 On bigger coding tasks, once the session is already open, handing the coding off to the local
 model typically costs Claude about half the tokens of writing the code itself
