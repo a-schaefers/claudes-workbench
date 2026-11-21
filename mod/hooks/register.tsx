@@ -1252,6 +1252,7 @@ const mem = {
   chatSent: new Set<string>(), // web messages submitted by this load, awaiting their receipt
   chatRetry: new Map<string, number>(), // a web message whose prompt was dropped: tried again from then
   chatExpired: new Set<string>(), // web messages wb said are too old to pass on (#536): not asked again
+  chatQueued: new Map<string, string>(), // web messages whose receipt says queued (id → by): read once a turn ends
   chatUrlAt: 0, // when the web chat's link was last looked up
   savingsAt: 0, // when the week's saving was last read
   eventsPid: 0, // the `wb events` child: its lines wake poll(); the chat counts it as this session
@@ -2020,6 +2021,17 @@ async function sendWeb($: any, id: string, text: string, how: string, by: string
   }
   const { ok, out } = await runWb($, ['chat', 'ack', id, '--by', by, '--how', how])
   if (!ok) warnOnce($, 'chat-ack', `wb chat ack failed: ${brief(out)}`)
+  else if (how === 'queued') mem.chatQueued.set(id, by)
+}
+
+// A queued web message enters at the running turn's next step or as the next turn, so once that
+// turn ends Claude has it: its receipt becomes read. The phone said "Queued for Claude" for good
+// on messages Claude had read and acted on (2026-11-21).
+async function readQueued($: any) {
+  for (const [id, by] of [...mem.chatQueued]) {
+    mem.chatQueued.delete(id)
+    await runWb($, ['chat', 'ack', id, '--by', by, '--how', 'now'])
+  }
 }
 
 // Notifications nobody has acknowledged yet: one toast each, and, for this session's tasks, a
@@ -2509,6 +2521,7 @@ export const register: Register = (on, options) => {
       mem.asksOpen.clear()
       mem.busy = false
       mem.skillTurn = false
+      if (mem.chatQueued.size) void readQueued($)
       mem.sawTurn = true
       mem.turnEndedAt = await $.clock.now()
       void poll($) // held wakes and chat messages go now, not at the next tick

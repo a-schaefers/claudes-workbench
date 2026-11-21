@@ -1570,6 +1570,41 @@ test('running wb counts as workbench mode, and a web message reaches a running t
   expect(runs.some(a => a.join(' ') === 'wb chat ack m1 --by ' + a[5] + ' --how now')).toBe(true)
 })
 
+test('a web message queued behind a running turn reads as read once that turn ends', async ($, on) => {
+  // 2026-11-21: three messages Claude had read and acted on said "Queued for Claude" on the phone for good
+  const clock = mock.clock(on, { now: 1_800_000_000_000 })
+  const files: Record<string, string> = {}
+  fakeTasks(on, files, [])
+  chatOn(files)
+  on('ui.toast', () => ({ value: undefined }))
+  on('session.cwd', () => ({ value: '/home/u/project' }))
+  on('session.id', () => ({ value: 'sess-1' }))
+  on('session.send', () => ({ isDelivered: false, reason: 'busy' }))  // refused: a queued prompt instead
+  const runs: string[] = []
+  on('process.run', (_: any, e: any) => { runs.push(e.argv.join(' ')); return { value: { exitCode: 0, stdout: 'no open tasks', stderr: '' } } })
+  const asked: string[] = []
+  on('prompt.submit', (_: any, e: any) => { asked.push(e.text); return { text: e.text } })
+  on('tool.call', () => ({ result: { stdout: '' }, text: '' }))  // the engine's Bash
+  await $.session.start({ cwd: '/home/u/project', surface: 'terminal', isInteractive: true })
+  await $.turn.start({ text: 'a long review', turnId: 't1' })
+  await $.tool.call({ tool: 'Bash', command: 'wb start t --spec s.md' })  // workbench mode: the chat listens
+  files['/wb/chat/messages.jsonl'] = JSON.stringify({ id: 'm1', ts: 1_800_000_000, from: 'user', text: 'status?' }) + '\n'
+  await clock.advance(3000)
+  expect(asked.some(a => a.startsWith('[web chat] status?'))).toBe(true)
+  const acks = () => runs.filter(r => r.includes('chat ack m1'))
+  expect(acks().length).toBe(1)
+  expect(acks()[0]).toMatch(/--how queued$/)
+  await $.turn.complete(endTurn('t1'))
+  await clock.advance(3000)
+  expect(acks().length).toBe(2)
+  expect(acks()[1]).toMatch(/--how now$/)                          // the page's "Read by Claude"
+  expect(acks()[1].split(' --by ')[1]).toBe(acks()[0].split(' --by ')[1].replace(/ --how queued$/, ' --how now'))
+  await $.turn.start({ text: 'next', turnId: 't2' })
+  await $.turn.complete(endTurn('t2'))
+  await clock.advance(3000)
+  expect(acks().length).toBe(2)                                    // once
+})
+
 test('only wb run as a command counts as delegating, read as bash reads it, not wb written in a string, a heredoc or a comment (#409, #560)', () => {
   // 2026-11-20: a Python patch whose string held "split it (wb next)" turned workbench mode on
   for (const run of ['wb start t --spec s.md', 'cd ~ && wb start step-2 --spec s.md --repo .', 'wb next t',
