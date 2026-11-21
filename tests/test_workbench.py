@@ -9982,6 +9982,59 @@ class Images(Base):
         self.assertNotIn("answers at http://127.0.0.1:7860", out)
         self.assertIn("something answers at http://127.0.0.1:8188 (ComfyUI's port), but not its API", out)
 
+    def test_wb_scout_finds_comfyui_desktop_on_its_port_and_an_image_server_on_wsls_windows_host(self):
+        # #923: only 8188 and 7860 on 127.0.0.1 were probed: ComfyUI Desktop (8000) and a server
+        # on Windows under WSL2's NAT went unseen, and the skill proposed the 11 GB install again
+        import socket
+        import threading
+        from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+        from workbench import images, models
+
+        def serving(host, code, body):
+            class H(BaseHTTPRequestHandler):
+                def log_message(self, *a):
+                    pass
+
+                def do_GET(self):
+                    self.send_response(code); self.end_headers()
+                    self.wfile.write(json.dumps(body).encode())
+            srv = ThreadingHTTPServer((host, 0), H)
+            threading.Thread(target=srv.serve_forever, daemon=True).start()
+            self.addCleanup(srv.server_close)
+            self.addCleanup(srv.shutdown)
+            return srv.server_address[1]
+        stats = {"system": {"comfyui_version": "0"}, "devices": []}
+        desktop = serving("127.0.0.1", 200, stats)
+        vllm = serving("127.0.0.1", 404, {"detail": "Not Found"})        # vLLM on 8000: no image server
+        other = serving("127.0.0.1", 200, {"object": "list"})            # nor a JSON without the keys
+        self.assertEqual(images.PORTS[1], (8000, "comfyui", "/system_stats"))
+        ports = tuple((p, "comfyui", "/system_stats") for p in (desktop, vllm, other))
+        shared = {p: ("system", "devices") for p in (desktop, vllm, other)}
+        with mock.patch.object(images, "PORTS", ports), mock.patch.object(images, "SHARED_PORTS", shared), \
+                mock.patch.object(models, "_fake", return_value=False), \
+                mock.patch.object(models, "windows_host", return_value="127.0.0.2"):
+            self.assertEqual(images.servers_here(), [{"root": f"http://127.0.0.1:{desktop}", "api": "comfyui"}])
+        try:  # the Windows host, played by another loopback address (Linux has them all)
+            win = serving("127.0.0.2", 200, stats)
+        except OSError:
+            self.skipTest("no 127.0.0.2 here")
+        with socket.socket() as sock:
+            sock.bind(("127.0.0.1", 0))
+            closed = sock.getsockname()[1]
+        ports = ((closed, "comfyui", "/system_stats"), (win, "comfyui", "/system_stats"))
+        with mock.patch.object(images, "PORTS", ports), mock.patch.object(models, "_fake", return_value=False), \
+                mock.patch.object(models, "windows_host", return_value="127.0.0.2"):
+            found = images.servers_here()
+        self.assertEqual(found, [{"root": f"http://127.0.0.2:{win}", "api": "comfyui", "windows": "127.0.0.2"}])
+        self.engines({})
+        with mock.patch.object(images, "servers_here", return_value=found):
+            out = run_wb("scout")
+        self.assertIn(f"ComfyUI answers at http://127.0.0.2:{win} on Windows (keep it started with "
+                      "--listen), and no engine uses it", out)
+        self.engines({"comfy": {"url": f"http://127.0.0.2:{win}", "workflow": "w.json"}})  # named
+        with mock.patch.object(images, "servers_here", return_value=found):
+            self.assertNotIn("ComfyUI answers", run_wb("scout"))
+
     def test_wb_image_list_as_a_word_lists_the_engines_instead_of_drawing(self):
         # like `wb skill list`: it took the GPU and drew four pictures of "list" (the 2026-11-16 audit)
         tmp = Path(self.tmp.name)

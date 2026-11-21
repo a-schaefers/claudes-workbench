@@ -3853,26 +3853,31 @@ def image_server_lines() -> list[str]:
     """An image server answering on its default port here that no engine names, with the entry
     that would use it: the skill proposed an 11 GB install to a user already running ComfyUI or
     Forge (#753)."""
-    named = set()
+    named = set()  # (host, port): the host as the url has it, and "" for this machine's
     for e in images.engines().values():
         try:
             u = urlparse(str(e.get("url") or ""))
-            if u.port and models._this_host(u.hostname):
-                named.add(u.port)
+            if u.port:
+                named.add(((u.hostname or "").lower(), u.port))
+                if models._this_host(u.hostname):
+                    named.add(("", u.port))
         except ValueError:  # a url that doesn't parse: listed as not usable (#748)
             pass
     out = []
     for s in images.servers_here():
         port = urlparse(s["root"]).port
-        if port in named:
+        if ((s.get("windows") or "").lower(), port) in named:
             continue
+        # one on Windows (WSL2's NAT, #923) answers at the host's address: it listens beyond
+        # Windows' own localhost (ComfyUI's --listen), which it has to keep for this to reach it
+        where = " on Windows (keep it started with --listen)" if s.get("windows") else ""
         if s["api"] in IMAGE_SERVERS:
             what, entry = IMAGE_SERVERS[s["api"]]
-            out.append(f"  {what} answers at {s['root']}, and no engine uses it: "
+            out.append(f"  {what} answers at {s['root']}{where}, and no engine uses it: "
                        + entry.format(root=s["root"]))
         else:
             usual = next(IMAGE_SERVERS[k][0] for p, k, _ in images.PORTS if p == port)
-            out.append(f"  something answers at {s['root']} ({usual}'s port), but not its API"
+            out.append(f"  something answers at {s['root']}{where} ({usual}'s port), but not its API"
                        + (" (AUTOMATIC1111 needs --api)" if port == 7860 else ""))
     return out
 
