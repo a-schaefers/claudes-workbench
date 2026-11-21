@@ -2144,6 +2144,69 @@ test('a poll and tab presses at once start one wb top, and leaving ends every on
   await ui.unmount()
 })
 
+test('a live view the engine put away starts again as soon as the pane is back, without its old tick (#552)', { timeoutMs: 20_000 }, async ($, on) => {
+  // its own loop's break was booked as a crash: no wb top for 30 s, and the last tick drawn as Now
+  const clock = mock.clock(on, { now: 1_800_000_000_000 })
+  const files: Record<string, string> = { '/wb/results.jsonl': '' }
+  const pane = fakeTasks(on, files, [], true, [], false)
+  let starts = 0, ends = 0
+  on('process.spawn', async function* (_: any, e: any) {
+    if (e.argv[1] !== 'top') {
+      yield { stream: 'stdout', text: '{"hello": 4242}\n' }
+      await new Promise(() => {})
+    }
+    starts += 1
+    const first = starts === 1
+    try {
+      if (!first) await new Promise(r => setTimeout(r, 100))           // later ones are slow to their first line
+      for (;;) {
+        yield { stream: 'stdout', text: JSON.stringify(first ? TICK : { ...TICK, running: [] }) + '\n' }
+        await new Promise(r => setTimeout(r, 5))
+      }
+    } finally {
+      ends += 1
+    }
+  })
+  on('skill.prompt', (_: any, e: any) => ({ text: e.text }))
+  on('process.run', (_: any, e: any) => ({ value: { exitCode: 0, stdout: e.argv[1] === 'stats' ? JSON.stringify({ tasks: 0 }) : '', stderr: '' } }))
+  await $.session.start({ cwd: '/', surface: 'terminal', isInteractive: true })
+  await $.skill.prompt({ skill: 'workbench', text: 'x', frontmatter: {}, source: 'userSettings' })  // workbench mode on
+  await clock.advance(31_000)
+  let ui = await $.ui.mount({ ...PANE, surface: 'terminal', props: { ...PANE.props, bodyColumns: 200 } })
+  await ui.press({ key: 'tab-stats' })
+  await new Promise(r => setTimeout(r, 30))
+  expect(starts).toBe(1)
+  const said = async () => (await ui.findAll({ type: 'Text' })).map(t => t.text)
+  expect((await said()).some(t => t.includes('fix-it Model M · running'))).toBe(true)
+  pane.show(false)                                                       // the engine puts it away
+  await new Promise(r => setTimeout(r, 30))
+  expect(ends).toBe(1)                                                   // ended within a tick
+  expect((await said()).some(t => t.includes('fix-it'))).toBe(false)      // and its tick forgotten
+  await ui.unmount()
+  await clock.advance(5_000)
+  pane.show(true)                                                        // and draws it again 5 s on
+  ui = await $.ui.mount({ ...PANE, surface: 'terminal', props: { ...PANE.props, bodyColumns: 200 } })
+  await clock.settle()
+  expect(starts).toBe(2)                                                 // at once, not 30 s later
+  expect((await said()).some(t => t.includes('fix-it'))).toBe(false)      // the old tick isn't Now
+  expect((await said())).toContain('Reading this machine…')
+  pane.show(false)
+  await new Promise(r => setTimeout(r, 150))
+  expect(ends).toBe(2)
+  await ui.unmount()
+  // /workbench again while in workbench mode (no poll of its own) brings the pane back, and the
+  // live view with it
+  await $.skill.prompt({ skill: 'workbench', text: 'x', frontmatter: {}, source: 'userSettings' })
+  await clock.settle()
+  expect(starts).toBe(3)
+  await new Promise(r => setTimeout(r, 30))
+  ui = await $.ui.mount({ ...PANE, surface: 'terminal', props: { ...PANE.props, bodyColumns: 200 } })
+  await ui.press({ key: 'tab-tasks' })
+  await new Promise(r => setTimeout(r, 150))
+  expect(ends).toBe(3)
+  await ui.unmount()
+})
+
 test('a card wb top knows but has no reading for says so, not nothing (#547)', () => {
   const text = (gpus: any[]) => liveLines({ snap: { ts: 0, every: 2, gpus, running: [], rack: [], queue: [] }, busy: {} } as any)
     .map(r => r.map(p => p.text).join(''))

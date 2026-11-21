@@ -2042,10 +2042,18 @@ nothing until a surface attaches.
   spawns with none between (`runTop` claims `mem.top` synchronously), and gives up when
   `mem.topGen` (bumped by each start and stop) moved meanwhile; `stopTop` ends every child in
   `mem.topKids`, not only the newest: a poll and a tab press at once started two, and a close
-  ended only the second (#546). One that ended by itself is tried again after
-  `TOP_RETRY_MS` 30 s, doubling to `RETRY_MAX_MS` 10 min until a tick comes; from its second run in
-  a row with no tick, **Now** says why (the last line of its stderr: "This machine can't be read:
-  …"), where "Reading this machine…" was all it ever said (#553). Live view off: no child, no **Now**. The newest tick is the `top` atom
+  ended only the second (#546). One that ended by itself (an exit, a stream error, nothing
+  printed) is tried again after `TOP_RETRY_MS` 30 s, doubling to `RETRY_MAX_MS` 10 min until a
+  tick comes; from its second run in a row with no tick, **Now** says why (the last line of its
+  stderr: "This machine can't be read: …"), where "Reading this machine…" was all it ever said
+  (#553). One its own loop ended because the tab was no longer wanted is not backed off (#552: a
+  pane the engine hid and showed again 5 s later got no child for 30 s). `stopTop` and that break
+  also clear the `top` atom, so a return says "Reading this machine…", never the old tick under
+  **Now**. The Stats tab drawn with no child calls `syncTop` (the engine showing the pane again
+  says so no other way), and `showPane` (`/workbench` again) and `restorePane` call
+  `refreshStats` and `syncTop` once their open resolves (`paneBack`), not before, when the pane
+  could still read as hidden. 
+Live view off: no child, no **Now**. The newest tick is the `top` atom
   (`top-1`). Below it is the history (#406): `wb stats --json` (*The Stats feed*) drawn as one line a
   section by `statsLines`, `Label: text` with the label bold: this week and all time (the score,
   the saving or the cost (estimate), tasks, landed, the spec-gap discards in the saving, the

@@ -600,15 +600,18 @@ async function syncTop($: any) {
   const want = await topWanted($)
   if (gen !== mem.topGen) return // started or stopped meanwhile: that call's view is newer
   if (want && !mem.top && now >= mem.topRetryAt) runTop($)
-  else if (!want && (mem.top || mem.topKids.size)) stopTop()
+  else if (!want && (mem.top || mem.topKids.size)) stopTop($)
 }
 
-function stopTop() {
+// Ends every child started, and forgets the last tick: shown again, the tab said a finished task
+// was still "running · round 2" under Now until the next child's first line (#552)
+function stopTop($: any) {
   mem.top = null
   mem.topGen += 1
   for (const child of mem.topKids)
     try { void child?.return?.(undefined)?.catch?.(() => {}) } catch { /* already ended */ }
   mem.topKids.clear()
+  void update($, topNow, () => ({ snap: null, busy: {} })).catch(() => {})
 }
 
 // Starts the child and claims it at once (mem.top, mem.topKids), before any await; pumpTop reads it
@@ -622,9 +625,10 @@ function runTop($: any) {
 
 async function pumpTop($: any, child: any) {
   await update($, topNow, () => ({ snap: null, busy: {} })) // the sparkline starts as the tab opens
-  let buf = '', err = '', ticked = false
+  let buf = '', err = '', ticked = false, putAway = false
   try {
     for await (const { stream, text } of child) {
+      if (!mem.topKids.has(child)) break // stopped meanwhile: its lines aren't the view's
       if (stream === 'stderr') err = (err + text).slice(-2000) // why it ended, should it (#553)
       if (stream !== 'stdout') continue
       buf += text
@@ -645,20 +649,26 @@ async function pumpTop($: any, child: any) {
           return { snap, busy }
         })
       }
-      if (!mem.topKids.has(child)) break // stopped meanwhile: its lines aren't the view's
-      if (!(await topWanted($))) break // off screen now: leaving the loop ends the child
+      if (!mem.topKids.has(child)) break
+      if (!(await topWanted($))) { putAway = true; break } // off screen now: leaving the loop ends the child
     }
   } catch (e) {
     err ||= String(e) // it could not start, or its stream closed: tried again after a while
   }
   const mine = mem.topKids.delete(child)
-  if (mine && mem.top === child) { // it ended by itself, not by stopTop: not again at once, and why
+  if (mine && mem.top === child) { // it ended by itself, not by stopTop
     mem.top = null
-    if (!ticked) mem.topFails += 1
-    mem.topWhy = brief(err) || 'it ended'
-    mem.topBackoff = Math.min(mem.topBackoff ? mem.topBackoff * 2 : TOP_RETRY_MS, RETRY_MAX_MS)
-    mem.topRetryAt = (await $.clock.now()) + mem.topBackoff
-    $.ui.invalidate('ui.render')
+    // put away by the engine is no failure: booked as one, a pane shown again 5 s later got no
+    // child for 30 s, its last tick drawn as Now meanwhile (#552). Only an exit, a stream error or
+    // a child that printed nothing waits, doubling, and says why (#553)
+    if (putAway) await update($, topNow, () => ({ snap: null, busy: {} }))
+    else {
+      if (!ticked) mem.topFails += 1
+      mem.topWhy = brief(err) || 'it ended'
+      mem.topBackoff = Math.min(mem.topBackoff ? mem.topBackoff * 2 : TOP_RETRY_MS, RETRY_MAX_MS)
+      mem.topRetryAt = (await $.clock.now()) + mem.topBackoff
+      $.ui.invalidate('ui.render')
+    }
   }
 }
 
@@ -1901,7 +1911,17 @@ async function showPane($: any) {
   mem.paneOpened = true
   const opening = $.ui.open({ id: PANE, title: 'Workbench' })
   if ((await read($, pane)).minimized) await update($, pane, p => ({ ...p, minimized: false }))
+  void paneBack($, opening)
   return opening
+}
+
+// Once an open lands, the Stats tab's history and live view catch up: /workbench again and a
+// bring-back from the strip waited for the next poll, up to 30 s with no task (#552), and a
+// syncTop before the open resolved could still see the pane hidden
+async function paneBack($: any, opening: Promise<unknown>) {
+  await Promise.resolve(opening).catch(() => {})
+  void refreshStats($)
+  void syncTop($)
 }
 
 // Brings the pane back from the strip, on the tab asked for. Opened first, while the press is still
@@ -1911,7 +1931,7 @@ async function restorePane($: any, tab: string) {
   const opening = $.ui.open({ id: PANE, title: 'Workbench' })
   mem.paneOpened = true
   await update($, pane, p => ({ ...p, tab: tab || p.tab, minimized: false }))
-  void syncTop($)
+  void paneBack($, opening)
   $.ui.invalidate('ui.render')
   return opening
 }
@@ -2176,7 +2196,7 @@ export const register: Register = (on, options) => {
   on('ui.close', async ($, e, next) => {
     if (e.id === PANE && e.origin?.kind === 'person') {
       await update($, pane, p => ({ ...p, minimized: true }))
-      stopTop() // put away: the live view ends with it
+      stopTop($) // put away: the live view ends with it
       $.ui.invalidate('ui.render')
     }
     return next(e)
@@ -2273,6 +2293,9 @@ export const register: Register = (on, options) => {
     // the Stats tab: the live view (#408, `wb top --json` while shown, with Live view on), then
     // the history (#406, `wb stats --json`)
     if (view.tab === 'stats') {
+      // drawn with no child: the engine shows the pane again (nothing else says so), so the live
+      // view starts now, not at the next poll, 30 s off with no task (#552)
+      if (!mem.top && !mem.topKids.size) void syncTop($)
       const { feed } = await read($, statsFeed)
       const cols = Math.max(30, Number(((e.props ?? {}) as Row).bodyColumns ?? e.viewport?.columns ?? 60))
       const now = (await statsSettings($)).live ? liveLines(await read($, topNow), mem.topFails >= 2 ? mem.topWhy : '') : []
