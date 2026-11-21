@@ -229,6 +229,20 @@ def write_answer(task: store.Task, qid: str, text: str) -> None:
         os.close(d)
 
 
+def answer_once(task: store.Task, qid: str, text: str) -> bool:
+    """Answer a question still open, as one step: False (nothing written) when another answer or
+    the runner's NO_ANSWER got there first. is_open and write_answer apart let two `wb answer`s
+    (or `wb answer` and `wb allow`) both say "answered", the second replacing the first after the
+    server had returned it, and an answer racing close() overwrite NO_ANSWER and be counted
+    answered though the agent got none (#938, the outside review of 1.90.24). The lock is in
+    $WB_HOME/locks (store.task_lock), which no lane reads: an agent can't hold it."""
+    with store.locked(store.task_lock(task.name, "ask")):
+        if not is_open(task, qid):
+            return False
+        write_answer(task, qid, text)
+        return True
+
+
 def is_open(task: store.Task, qid: str) -> bool:
     """Asked and not answered, as the mod's asking() judges it: ask/<qid>.json and no answer
     (read as the server reads it, so a link planted at the answer's name isn't one)."""
@@ -243,11 +257,10 @@ def close(task: store.Task, opened: dict) -> None:
     review). The server's own words, should one still be waiting a moment; lessons skip it."""
     for qid in list(opened):
         _WAITS.pop((str(task.dir), qid), None)
-        if is_open(task, qid):
-            try:
-                write_answer(task, qid, NO_ANSWER)
-            except OSError:
-                pass
+        try:
+            answer_once(task, qid, NO_ANSWER)
+        except OSError:
+            pass
         del opened[qid]
 
 
@@ -341,7 +354,7 @@ def relay(task: store.Task, opened: dict) -> None:
         asks[qid] = kind
         if why:
             try:
-                write_answer(task, qid, why)
+                answer_once(task, qid, why)  # unless a `wb answer` got there first
             except OSError:
                 pass
             continue

@@ -8,9 +8,14 @@ owner-merge.yml approving only the owner's pull requests without ever running
 their code.
 """
 import json
+import os
 import re
+import subprocess
+import sys
+import time
 import unittest
 from pathlib import Path
+from unittest import mock
 
 ROOT = Path(__file__).resolve().parent.parent
 WORKFLOWS = ROOT / ".github" / "workflows"
@@ -83,6 +88,21 @@ class ReleaseGates(unittest.TestCase):
         script = (ROOT / "scripts" / "ci-wsl.sh").read_text()
         for want in ("sudo -u ci", "install-opencode.sh", "python3 -m unittest"):
             self.assertIn(want, script)
+
+    def test_the_macos_nightly_is_sharded_names_each_test_and_every_suite_job_fails_a_hang(self):
+        # #950 (the outside review of 1.90.24): the macOS job ran past its 60 minutes and was
+        # cancelled on every run, and unittest reports failures only at the end, so ~40 failures
+        # and an 18-minute hang went unseen
+        mac = job("nightly.yml", "macos")
+        for want in ("shard: [1, 2, 3]", "fail-fast: false", "WB_TEST_SHARD: ${{ matrix.shard }}/3",
+                     "WB_TEST_HANG_SECS:", "python3 -X faulthandler -m unittest -v"):
+            self.assertIn(want, mac)
+        for workflow, name in (("nightly.yml", "check"), ("nightly.yml", "wsl"), ("check.yml", "check"),
+                               ("opencode.yml", "check")):
+            with self.subTest(workflow=workflow, job=name):
+                self.assertIn("WB_TEST_HANG_SECS:", job(workflow, name))
+        self.assertIn("WB_TEST_HANG_SECS", job("nightly.yml", "wsl").split("WSLENV:")[1].split("\n")[0])
+        self.assertIn("WB_TEST_HANG_SECS", (ROOT / "scripts" / "ci-wsl.sh").read_text())
 
     def test_the_release_checklist_names_each_platform_and_the_nightly(self):
         checklist = (ROOT / "docs" / "release-checklist.md").read_text()
@@ -167,3 +187,55 @@ class OwnerMerge(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class SuiteHooks(unittest.TestCase):
+    """tests/__init__.py's CI hooks (#950): a hang named and failed, and the suite in shards."""
+
+    def test_a_test_hung_past_wb_test_hang_secs_fails_named_with_its_stack_and_the_suite_goes_on(self):
+        script = ("import sys, time, unittest\n"
+                  "sys.path.insert(0, sys.argv[1])\n"
+                  "import tests  # the hooks\n"
+                  "class Hangs(unittest.TestCase):\n"
+                  "    def test_hangs(self):\n"
+                  "        time.sleep(60)\n"
+                  "    def test_then_this(self):\n"
+                  "        pass\n"
+                  "unittest.main(argv=['x', '-v'])\n")
+        began = time.monotonic()
+        r = subprocess.run([sys.executable, "-c", script, str(ROOT)], capture_output=True, text=True,
+                           env={**os.environ, "WB_TEST_HANG_SECS": "1"}, timeout=50)
+        self.assertLess(time.monotonic() - began, 30)
+        self.assertNotEqual(r.returncode, 0)
+        self.assertIn("TimeoutError: __main__.Hangs.test_hangs hung past WB_TEST_HANG_SECS (1 s)", r.stderr)
+        self.assertIn("in test_hangs", r.stderr)                       # its stack, dumped
+        self.assertIn("test_then_this (__main__.Hangs.test_then_this) ... ok", r.stderr)
+        self.assertIn("Ran 2 tests", r.stderr)
+
+    def test_the_shards_split_the_discovered_or_named_suite_by_whole_classes_with_none_lost(self):
+        def ids(shard=None, named=False):
+            env = {k: v for k, v in os.environ.items() if k != "WB_TEST_SHARD"}
+            if shard:
+                env["WB_TEST_SHARD"] = shard
+            with mock.patch.dict(os.environ, env, clear=True):
+                suite = unittest.TestLoader().loadTestsFromName("tests") if named else \
+                    unittest.TestLoader().discover(str(ROOT), top_level_dir=str(ROOT))
+            out, todo = [], [suite]
+            while todo:
+                t = todo.pop()
+                if isinstance(t, unittest.TestSuite):
+                    todo.extend(t)
+                else:
+                    out.append(t.id())
+            return out
+        whole = ids()
+        parts = [ids(f"{k}/3") for k in (1, 2, 3)]
+        self.assertEqual(sorted(sum(parts, [])), sorted(whole))
+        classes = [{i.rsplit(".", 1)[0] for i in p} for p in parts]
+        self.assertFalse(classes[0] & classes[1] or classes[0] & classes[2] or classes[1] & classes[2])
+        self.assertLess(max(map(len, parts)) - min(map(len, parts)), len(whole) // 5)
+        # the package named, `python3 -m unittest tests`: the same shards, dealt once (the review
+        # of #950: its load_tests ran twice, nested, and each shard ran about a third of its own)
+        self.assertEqual(sorted(ids(named=True)), sorted(whole))
+        for k, part in zip((1, 2, 3), parts):
+            self.assertEqual(sorted(ids(f"{k}/3", named=True)), sorted(part))

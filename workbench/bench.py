@@ -36,7 +36,10 @@ REFUSED = ("No reviewer is available in this run, so nothing outside the everyda
 # The protocol's fold (cli.PROTOCOL, `transcript`'s marker) and its acceptance line; a step's
 # opening (cli.cmd_next). Prompt openings are an API: these read the prompts wb wrote.
 FOLD = "\n---\nHow to work"
-TEST_LINE = re.compile(r"^- The acceptance command is `(.+)`\. Run it", re.M)
+# across lines and to the sentence's end: `.+` stopped at a newline, and a command of several
+# lines (`set -e` and a script) read as none (#941, the v1.90.24 review). Only for a task from
+# before status `step_tests`, which records each step's command as data
+TEST_LINE = re.compile(r"^- The acceptance command is `(.+?)`\. Run it before you finish", re.M | re.S)
 STEP_HEAD = re.compile(r"\AStep (\d+) of this task is done and committed \([^)]*\)\. The next step:\n\n")
 BASE_CHECK_SECS = 120  # the hidden checks on the base, at add time; past this, not checked
 
@@ -149,7 +152,7 @@ def bundle(repo: Path, commit: str, dest: Path) -> None:
 def _checkout_at(d: Path, case: dict) -> Path:
     """Where a case's checkout goes in `d`: nested as a task's worktree is when a sibling is two
     or more levels up, so that its link lands in `d` (#261, the audit of 1.2)."""
-    work = context.tree(d, case["repo"], case.get("siblings"), "repo")
+    work = context.tree(d, _checkout(case), case.get("siblings"), "repo")
     work.parent.mkdir(parents=True, exist_ok=True)
     return work
 
@@ -172,10 +175,31 @@ def _clone_base(bundle_path: Path, dest: Path, repo: Path) -> None:
     try:
         gitops.git(dest, "reset", "-q", "--hard")
     except gitops.GitError as e:
+        _filtered(repo, dest, e)
         if not lfs:
             raise
         raise RuntimeError(f"the case's Git LFS files can't be checked out from {repo}'s LFS "
                            f"objects (git lfs fetch there?): {str(e)[-300:]}") from None
+    _filtered(repo, dest)
+
+
+def _filtered(repo: Path, work: Path, e: gitops.GitError | None = None) -> None:
+    """RuntimeError naming the repo's own filter when `work`'s checkout isn't the bytes the task
+    had: the checkout's failure in a `required` one (verify._filter_failed), else a filtered file
+    whose bytes aren't what the repo itself makes of them (verify.smudge_gap). Bench's clones took
+    the repo's filters (#932) but not verify's handling of them: git-crypt's keys are in the git
+    dir, so bench add died on a raw "smudge filter git-crypt failed" naming no setting, each
+    replay of such a case was an error row saying the same, and a filter that only falls back
+    to the stored bytes graded replays on other bytes without a word (#932's review). Nothing
+    when the repo is gone: its filters weren't copied then."""
+    if not repo.is_dir():
+        return
+    if e is not None:
+        if why := verify._filter_failed(repo, e):
+            raise RuntimeError(why) from None
+        return
+    if why := verify.smudge_gap(repo, work):
+        raise RuntimeError(why)
 
 
 def _filled(repo: Path, commit: str, work: Path, where: str) -> None:
@@ -220,6 +244,16 @@ def _repo(case: dict) -> Path:
     replay lost its line endings, and one with Git LFS files or submodules failed as "gone"
     (#909, the third audit of 2026-11-21)."""
     return gitops.repo_of({"repo": case.get("repo"), "git_common": case.get("git_common")})
+
+
+def _checkout(case: dict) -> str:
+    """The checkout the task ran in, which its siblings are relative to (`../lib`), even once
+    that linked worktree is removed: Path.parents is lexical, so they resolve from the path
+    alone. Not _repo's main worktree, which sits elsewhere (Claude Code's
+    `.claude/worktrees/<name>`, `../proj-wt/feat`): resolved from there, a replay's links named
+    the wrong place, its build failed and the failure counted against the model (#909's
+    review). case.json `checkout`, or `repo` in a case from before it."""
+    return case.get("checkout") or case["repo"]
 
 
 def checkout(case: dict, dest: Path) -> None:
@@ -284,7 +318,8 @@ def _prepared(at: store.Task, where: str) -> None:
 
 def _inputs(case: dict, repo: Path) -> None:
     """The original checkout's copied paths and siblings, beside a replay's checkout, where its
-    wb start --copy and --sibling find them (#250)."""
+    wb start --copy and --sibling find them (#250): the copies from the repo as it is now
+    (_repo), the siblings from where the task ran (_checkout)."""
     src = _repo(case)
     for p in case.get("copy") or ():
         if os.path.lexists(src / p):
@@ -292,7 +327,7 @@ def _inputs(case: dict, repo: Path) -> None:
     for name in case.get("siblings") or ():  # at any level the case reaches (#261)
         if not os.path.lexists(at := context.sibling_link(repo, name)):
             at.parent.mkdir(parents=True, exist_ok=True)
-            at.symlink_to(context.sibling_real(src, name))
+            at.symlink_to(context.sibling_real(_checkout(case), name))
 
 
 def add(name: str, step: int | None = None, hidden: list[str] | None = None,
@@ -331,11 +366,14 @@ def add(name: str, step: int | None = None, hidden: list[str] | None = None,
     prompt = _step_prompt(task, step)
     if prompt is None:
         raise RuntimeError(f"step {step}'s prompt is gone from {task.dir / 'rounds'}")
-    test = TEST_LINE.search(prompt)
-    if not test:
+    if str(step) in (recorded := st.get("step_tests") or {}):  # as data since #941
+        test_cmd = recorded[str(step)]
+    else:
+        test_cmd = (m := TEST_LINE.search(prompt)) and m.group(1)
+    if not test_cmd:
         raise RuntimeError(f"step {step} had no acceptance command: nothing to grade a replay by")
-    changed = gitops.git(repo, "diff", "--name-only", "--no-renames", "--diff-filter=AM", base, ref
-                         ).splitlines()
+    # NUL-separated, as verify's: a name with a tab or a quote came out C-quoted (#942)
+    changed = [p for _, p in gitops.name_status(repo, base, ref, "--diff-filter=AM")]
     # the tests and the data they read (Go's testdata/, fixtures/, golden files, Jest snapshots),
     # verify's one pattern: a golden file left out of hidden/ failed the base for lack of it and
     # passed a replay only when the agent wrote it (#500, the audit of 1.90)
@@ -367,10 +405,11 @@ def add(name: str, step: int | None = None, hidden: list[str] | None = None,
         step_row = measured[step - 1] if len(measured) >= step else {}
         grants = context.grants(task)
         case = {"name": case_name, "task": name, "step": step, "repo": str(repo),
+                "checkout": str(spec.get("repo") or repo),  # its siblings' (_checkout)
                 **({"git_common": str(c)} if (c := gitops.common_dir(repo)) else {}),  # _repo
                 "base": base,
                 "reference": ref, "size": spec.get("size"), "stack": spec.get("stack"),
-                "test_cmd": test.group(1), "test_timeout": spec.get("test_timeout") or 900,
+                "test_cmd": test_cmd, "test_timeout": spec.get("test_timeout") or 900,
                 "check_cmd": check, "hidden": picked, "allow": grants.get("allow") or [],
                 "paths": grants.get("paths") or [], "skills": st.get("skills_ever") or [],
                 # the worktree's setup (#201), so the reference, the base and each replay are the
@@ -421,7 +460,12 @@ def add(name: str, step: int | None = None, hidden: list[str] | None = None,
             gitops.share_lfs(repo, work)  # its LFS files as data, as verify's (#382, #509)
             if sparse := gitops.sparse_of(Path(repo)):  # as the task's worktree was (#263)
                 gitops.apply_sparse(work, sparse)
-            gitops.git(work, "checkout", "-q", "--detach", ref)
+            try:
+                gitops.git(work, "checkout", "-q", "--detach", ref)
+            except gitops.GitError as e:
+                _filtered(repo, work, e)  # a required filter that can't work here, named (#932)
+                raise
+            _filtered(repo, work)  # or one that fell back to the stored bytes
             _filled(repo, ref, work, f"step {step}'s own commit")
             # the hidden checks overlaid as on a replay: graded straight from the commit, a check
             # the overlay broke (its execute bit lost) still let the case in (#346, the audit of 1.4)
@@ -697,7 +741,7 @@ def replay(case: dict, model: str, rep: int, run: str, label: str, skills: list[
     try:
         try:
             checkout(case, work)
-        except RuntimeError as e:  # its LFS files or submodules (#509): the next run tries again
+        except RuntimeError as e:  # its LFS, submodules (#509), filters (#932): the next run retries
             return {**row, "outcome": "error", "why": str(e)[:300]}
         _inputs(case, work)
         with redirect_stdout(log):
@@ -764,8 +808,7 @@ def _wait(task: store.Task) -> tuple[dict, int]:
             if phase in cli.LIVE:
                 cli.reap(task)
             if phase == "asking" and (qid := st.get("asking")) and ask_mcp.is_open(task, qid):
-                ask_mcp.write_answer(task, qid, REFUSED)
-                refused += 1
+                refused += ask_mcp.answer_once(task, qid, REFUSED)  # not if closed meanwhile (#938)
             elif phase in ("review", "stuck", "failed") and not cli.runner_alive(task):
                 return st, refused
             watcher.wait(30.0)

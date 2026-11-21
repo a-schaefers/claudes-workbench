@@ -52,7 +52,8 @@ question(s) for this task). Otherwise make reasonable choices and say what you a
 
 
 def test_line(test: str | None) -> str:
-    """The protocol's acceptance line (bench.TEST_LINE reads it back). It names the command and
+    """The protocol's acceptance line (bench.TEST_LINE reads it back for a task from before status
+    `step_tests`, #941). It names the command and
     keeps the agent to it: two agents in a row ran the whole suite for half an hour after theirs
     passed (2026-11-18, #127), and the runner runs the command after each round anyway."""
     return (f"- The acceptance command is `{test}`. Run it before you finish and make it pass. "
@@ -1138,7 +1139,11 @@ def cmd_start(a):
     task.set_status(phase="queued", round=1, reviews=0, auto_fixes=0, tools=0,
                     tok_in=0, tok_out=0, session=None, last="starting",
                     opencode=f"{have[0]}.{have[1]}" if have else None,  # runner.opencode_moved
-                    skills=handed, skills_ever=handed, skills_rev=skills.revs(handed))
+                    skills=handed, skills_ever=handed, skills_rev=skills.revs(handed),
+                    # each step's acceptance command, as data: bench add read it back from the
+                    # prompt alone, whose one-line pattern missed a command of several lines
+                    # (#941, the v1.90.24 review); task.json's test_cmd is only the latest
+                    step_tests={"1": a.test})
     exact, tools = context.test_allowances(a.test)
     context.grant(task, "allow", [p.strip() for p in a.allow or [] if p.strip()] + exact)
     context.grant(task, "test_tools", tools)
@@ -1407,6 +1412,7 @@ def cmd_next(a):
     advance = dict(round=n, steps=step + 1, step_round=n, reviews=0, step_base=approved,
                    step_active_s=st.get("active_s") or 0, progress_checks=0,
                    step_sizes=(st.get("step_sizes") or []) + [measured],
+                   step_tests={**(st.get("step_tests") or {}), str(step + 1): test},  # #941
                    context="fresh" if a.fresh else None,
                    auto_fixes_total=st.get("auto_fixes_total", 0) + st.get("auto_fixes", 0),
                    auto_fixes=0, phase="queued", last=f"step {step} " + (
@@ -1476,7 +1482,10 @@ def cmd_answer(a):
     if why := ask_mcp.too_long(text):  # the server would never read it (#605)
         die(f"{why} ({task.worktree})")
     handled = store.now()  # the question; a newer notice, raised after the answer, stays news
-    ask_mcp.write_answer(task, qid, text)  # whole, and never through a link in the lane
+    # whole, never through a link in the lane, and only while still open: another answer or the
+    # runner's NO_ANSWER may have landed since the check above (#938)
+    if not ask_mcp.answer_once(task, qid, text):
+        die(f"{qid} was already answered (or closed with NO_ANSWER)")
     if (task.status.get("asks") or {}).get(qid) == "q":  # what the Stats tab may call answered:
         # here, outside the lane (an answer file the agent could write itself), never a NO_ANSWER (#562)
         task.set_status(answered=sorted({*(task.status.get("answered") or []), qid}))
@@ -2002,11 +2011,17 @@ def _park_waiting(a) -> str:
 def cmd_stop(a):
     if a.all:
         # everything, without --repo/--session: the bench's driver too, first, so it starts nothing
-        driver = None if a.repo or a.session else bench.stop_driver()
+        driver, far = None, ""
+        if not (a.repo or a.session):
+            try:
+                driver = bench.stop_driver()
+            except RuntimeError as e:  # another machine's run: that one's to stop there, and the
+                far = str(e)           # bail-out died before stopping any task here (#876 review)
         mine, others = _scope(_open_tasks(), *_caller(a))
         stopped = ([f"wb bench (pid {driver})"] if driver else []) + stop_everything(mine)
         print("stopped: " + ("; ".join(stopped) if stopped else "nothing was running"))
         _say(_others_line(others, "left running"))
+        _say(far and f"left running: {far}")
         if a.park_waiting:
             _say(_park_waiting(a))
         return
@@ -2221,7 +2236,8 @@ def cmd_allow(a):
     handled = None
     if qid and ask_mcp.is_open(task, qid):
         handled = store.now()  # the request is answered: handled, as wb answer does
-        ask_mcp.write_answer(task, qid, text)  # whole, and never through a link in the lane
+        if not ask_mcp.answer_once(task, qid, text):  # answered or closed meanwhile (#938)
+            handled = None
     if (phase := task.status.get("phase")) in LIVE and runner_alive(task):
         store.append_jsonl(task.dir / "steer.jsonl", {"ts": store.now(), "text": text, "now": True})
         print(f"allowed {said} on {a.name}" + (" (always)" if a.always else "") + ": "
@@ -2284,13 +2300,14 @@ def cmd_progress(a):
 
 def _when_delivered(task: store.Task, phase: str, running: str) -> str:
     """When a note reaches the agent: --now promised "within a few seconds" while the tests ran
-    (up to the test timeout) or the task waited for the GPU (the 2026-11-16 audit)."""
+    (up to the test timeout) or the task waited for the GPU (the 2026-11-16 audit), and the
+    GPU's wait before a round's tests (--unload-for-tests) read as `running` (#943's review)."""
     if phase == "testing":
         return (f"its tests are running (up to {int(task.spec.get('test_timeout') or 900)}s); "
                 "the agent gets it when they end")
     if phase == "queued":
-        return ("its round hasn't started (waiting for the GPU or its model); the agent gets it "
-                "when the round starts")
+        return ("it is waiting for the GPU or its model, before a round or a round's tests; the "
+                "agent gets it when the round starts, or once the tests end")
     return running
 
 
@@ -2540,9 +2557,7 @@ def cmd_accept(a):
            f"\n\nWorkbench-Task: {a.name}\nOpenCode-Session: {st.get('session')}")
     if close:
         commit, measured = close["commit"], close.get("step")
-        if task.worktree.is_dir() and (gitops.changed(task.worktree) or gitops.git(
-                task.worktree, "rev-parse", "HEAD", check=False).strip() != gitops.git(
-                    repo, "rev-parse", "--verify", "-q", f"{commit}^{{commit}}", check=False).strip()):
+        if _gained_work(task, repo, commit):
             # the forced worktree removal below would delete what changed, and the merge leave
             # it out (#878)
             die(f"{a.name}'s worktree changed after an earlier wb accept committed {commit}: "
@@ -2675,6 +2690,23 @@ def cmd_accept(a):
     _say(lessons.nudge(task, "accepted"))
     if refused:  # accepted, not merged: a script or Claude reading 0 went on as if main had it
         sys.exit(NOT_MERGED)  # (#247, the audit of 1.2)
+
+
+def _gained_work(task: store.Task, repo: Path, commit: str) -> bool:
+    """Whether a retried accept's worktree holds work its commit doesn't: an intact worktree with
+    a change other than a deleted file, or moved off the commit. One the earlier try's removal
+    left half-deleted is not: its files gone read as deletions, its `.git` gone as a GitError,
+    and every retry refused it while discard, feedback and the rest pointed back at wb accept
+    (the review of #878). Nothing a deletion drops is lost: the commit has it."""
+    if not task.worktree.is_dir():
+        return False
+    try:
+        left = [ln for ln in gitops.changed(task.worktree).splitlines() if ln[:2].strip() != "D"]
+        head = gitops.git(task.worktree, "rev-parse", "HEAD", check=False).strip()
+    except gitops.GitError:  # its .git removed (or not what it said): being removed
+        return False
+    return bool(left) or head != gitops.git(
+        repo, "rev-parse", "--verify", "-q", f"{commit}^{{commit}}", check=False).strip()
 
 
 NOT_MERGED = 5  # wb accept --merge's exit status when the accept stands and the merge was refused
@@ -2956,9 +2988,10 @@ def _merged_branches() -> int:
     """Delete the delegate branches of accepted tasks that have landed: merged by wb accept
     --merge before it deleted them itself, or by hand after a plain accept (the skill's default,
     whose `git merge` line left delegate/<task> for good). Each tip is recorded first (status
-    `tip`), which wb bench finds the task's commits from; then `branch -d` (merged into the
-    checkout's HEAD or its upstream), else a compare-and-delete when the task's base branch holds
-    the tip. A branch gone, or deleted here, is recorded (status `branch_gone`) and never looked
+    `tip`), which wb bench finds the task's commits from; a branch moved past that tip since is
+    the user's and stays (#930); then `branch -d` (merged into the checkout's HEAD or its
+    upstream), else a compare-and-delete when the task's base branch holds the tip, never while a
+    worktree has the branch out (#930: its HEAD was left naming no ref). A branch gone, or deleted here, is recorded (status `branch_gone`) and never looked
     at again: every merged task ever recorded cost a git call on every run, 2,828 of them in
     1.8 s on tmpfs, minutes on /mnt/c (#686). Each repo's delegate refs are listed once. A branch
     squash-merged (a PR) holds commits its target lacks, so it stays."""
@@ -2978,8 +3011,11 @@ def _merged_branches() -> int:
             if not (tip := refs.get(f"refs/heads/{branch}")):
                 t.set_status(branch_gone=True)
                 continue
-            if not t.status.get("tip"):
+            if not (accepted := t.status.get("tip")):  # accepted before accept recorded it
+                accepted = tip
                 t.set_status(tip=tip)
+            if tip != accepted:  # moved since accept (more work on it): the user's now, it stays
+                continue  # (#930: the tip compared was the one read here, so it went if merged)
             if gitops.drop_landed_branch(repo, branch, tip, t.spec.get("base_branch")):
                 n += 1
                 t.set_status(branch_gone=True)
@@ -2990,13 +3026,15 @@ def _released_refs() -> int:
     """Delete each accepted task's refs/workbench/accepted/<task>, the ref wb accept kept in the
     user's repo before #799 (or when it couldn't write the task's steps bundle): kept for good, each
     task's steps showed in `git log --all`, mirrors copied them and git's gc never pruned them (the
-    second 2026-11-21 audit). wb bench add reads the steps from gitops.STEPS_BUNDLE now, so one
-    that still has a step to make a case of is moved into that bundle first; one whose tip landed
-    in the task's base branch (which keeps every step alive), or each of whose steps has its case
-    (the only thing it was kept for, #649), just goes. And a bundle whose every step has its case
-    goes too. A ref gone, or deleted here, is recorded (status `accepted_ref_gone`) and never
-    looked at again, and each repo's refs are listed once, with one `for-each-ref --merged` per
-    base branch: not a call per task on every run (#686)."""
+    second 2026-11-21 audit). wb bench add reads the steps from gitops.STEPS_BUNDLE now, so the ref
+    is moved into that bundle first; one whose tip landed in the task's base branch (which keeps
+    every step alive) just goes, and so does one whose bundle can't be made once each step has its
+    case (#649). The bundle stays as long as the task: removed once every step had its case, a
+    case removed with wb bench rm (#740) could never be made again after a squash accept, once
+    git's gc pruned the steps (#940, the v1.90.24 review); it holds base..tip alone. A ref gone,
+    or deleted here, is recorded (status `accepted_ref_gone`) and never looked at again, and each
+    repo's refs are listed once, with one `for-each-ref --merged` per base branch: not a call per
+    task on every run (#686)."""
     cased: dict[str, set] = {}
     for c in bench.cases().values():
         cased.setdefault(c.get("task"), set()).add(c.get("step"))
@@ -3007,8 +3045,6 @@ def _released_refs() -> int:
         if not t.exists:
             continue
         done[name] = set(range(1, int(t.status.get("steps") or 1) + 1)) <= cased.get(name, set())
-        if done[name]:
-            (t.dir / gitops.STEPS_BUNDLE).unlink(missing_ok=True)
         if not t.status.get("accepted_ref_gone") and (repo := gitops.repo_of(t.spec)).is_dir():
             by_repo.setdefault(repo, []).append(t)
     n = 0
@@ -3028,9 +3064,11 @@ def _released_refs() -> int:
             if not (tip := refs.get(ref)):  # one from before #649, or deleted by hand
                 t.set_status(accepted_ref_gone=True)
                 continue
-            if (done[t.name] or ref in landed.get(t.spec.get("base_branch"), ()) or
-                    gitops.bundle_steps(repo, t.spec["base"], tip, t.dir / gitops.STEPS_BUNDLE)) \
-                    and gitops.drop_accepted(repo, t.name, tip):
+            # into the bundle even when each step has its case: a case removed could be made
+            # again only from it (#940); dropped outright then only when it can't be made
+            if (ref in landed.get(t.spec.get("base_branch"), ()) or
+                    gitops.bundle_steps(repo, t.spec["base"], tip, t.dir / gitops.STEPS_BUNDLE)
+                    or done[t.name]) and gitops.drop_accepted(repo, t.name, tip):
                 t.set_status(accepted_ref_gone=True)
                 n += 1
     return n
@@ -3117,6 +3155,14 @@ def cmd_relocate(a):
     print(f"relocated {a.name}: {repo} (was {old})")
 
 
+def _held(repo: Path, branch: str) -> str:
+    """Why discard kept ``branch``: a worktree has it out, which update-ref would have left
+    naming no ref (#930); else it moved under the compare-and-delete."""
+    if at := gitops.checked_out_in(repo, branch):
+        return f"; branch {branch} kept: it is checked out in {at}"
+    return f"; branch {branch} kept: it moved while being deleted"
+
+
 @one_at_a_time
 def cmd_discard(a):
     task = need(a.name)
@@ -3148,8 +3194,8 @@ def cmd_discard(a):
         tip = gitops.git(repo, "rev-parse", "--verify", "-q", f"refs/heads/{branch}",
                          check=False).strip()
         if tip and made and tip == made:
-            gitops.delete_branch(repo, a.name, at=made)
-            said = f"; branch {branch} deleted"
+            said = f"; branch {branch} deleted" if gitops.delete_branch(repo, a.name, at=made) \
+                else _held(repo, branch)
         elif tip:
             said = (f"; branch {branch} kept: this task's checkout "
                     + ("made it, but it has moved since" if made else "didn't make it"))
@@ -3164,9 +3210,10 @@ def cmd_discard(a):
             said = (f"; branch {branch} kept: its {past} commit(s) past the base are approved "
                     f"steps. {git_c} merge {branch} lands them; {git_c} branch -D {branch} "
                     "drops them (wb discard --drop-steps deletes it at once)")
-        else:
-            gitops.delete_branch(repo, a.name, at=tip)
+        elif gitops.delete_branch(repo, a.name, at=tip):
             said = f"; branch {branch} deleted (was {tip[:8]})"
+        else:
+            said = _held(repo, branch)
     # --drop-steps deleted the approved steps with the branch: no longer kept work (#722)
     dropped = {"steps_dropped": True} if getattr(a, "drop_steps", False) else {}  # bench's own call lacks it
     task.set_status(phase="discarded", last=a.reason or "discarded", pid=None,
@@ -4221,6 +4268,11 @@ def cmd_init(a):
         did.append("git repo on " + (gitops.git(d, "symbolic-ref", "--short", "HEAD",
                                                 check=False).strip() or "its default branch"))
     has_commits = bool(gitops.git(d, "rev-parse", "--verify", "-q", "HEAD", check=False).strip())
+    # HEAD's and the index's CLAUDE.md and AGENTS.md before anything changes: the commit below
+    # holds only what wb init made, built from these (#931)
+    head, index = (_md_entries(d, "ls-tree", "HEAD"), _md_entries(d, "ls-files", "-s")) \
+        if has_commits else ({}, {})
+    moved = False  # AGENTS.md's file became CLAUDE.md
     if not has_commits:  # before anything is changed: a run after the fix starts clean
         secrets, vendored = _unfit_for_commit(d)
         if secrets or vendored:
@@ -4238,9 +4290,11 @@ def cmd_init(a):
         agents.rename(claude)
         agents.symlink_to("CLAUDE.md")
         did.append("AGENTS.md moved to CLAUDE.md, which it now links to")
+        moved = True
     if agents.is_file() and not agents.is_symlink() and not claude.exists():
         agents.rename(claude)  # the project's instructions live in CLAUDE.md, AGENTS.md points at it
         did.append("AGENTS.md moved to CLAUDE.md")
+        moved = True
     if claude.is_file() and agents.is_file() and not agents.is_symlink():
         if not os.path.samefile(claude, agents) and agents.read_bytes() == claude.read_bytes():
             agents.unlink()
@@ -4257,13 +4311,8 @@ def cmd_init(a):
         gitops.git(d, "commit", "-q", "--allow-empty", "-m", "Initial commit")
         did.append(f"initial commit of the {n} file(s) here (git show --stat to check)" if n
                    else "initial commit")
-    else:
-        touched = [p for p in ("CLAUDE.md", "AGENTS.md")
-                   if gitops.git(d, "status", "--porcelain", "--", p).strip()]
-        if touched and any("AGENTS.md" in x or "moved" in x for x in did):
-            gitops.git(d, "add", "-A", "--", *touched)
-            gitops.git(d, "commit", "-q", "-m", "chore: AGENTS.md links to CLAUDE.md", "--", *touched)
-            did.append("committed")
+    elif any("AGENTS.md" in x for x in did):
+        did.append(_commit_link(d, head, index, moved))
     status = claude_md_status(d)
     print(f"{d}: " + (", ".join(did) if did else "already set up") + f"; {status}"
           + (" (AGENTS.md not linked)" if local else "")
@@ -4271,6 +4320,63 @@ def cmd_init(a):
           + ("\nnext: write CLAUDE.md (what the project is, how to build and test it, its "
              "conventions), commit it, then wb init again to link AGENTS.md"
              if status == "no CLAUDE.md" else ""))
+
+
+def _md_entries(d: Path, *ls) -> dict:
+    """{path: (mode, blob)} for CLAUDE.md and AGENTS.md from ``git ls-tree HEAD`` or ``git
+    ls-files -s`` (the index): the two lines differ only in what sits between mode and hash."""
+    out = {}
+    for line in gitops.git(d, *ls, "-z", "--", "CLAUDE.md", "AGENTS.md").split("\0"):
+        if "\t" in line:
+            meta, path = line.split("\t", 1)
+            f = meta.split()
+            out[path] = (f[0], f[1] if ls[0] == "ls-files" else f[2])
+    return out
+
+
+def _commit_link(d: Path, head: dict, index: dict, moved: bool) -> str:
+    """Commit what wb init made in a repo with commits, and nothing of the user's: the AGENTS.md
+    link and, when AGENTS.md's file moved to CLAUDE.md, the committed text under its new name.
+    `git add -A -- CLAUDE.md AGENTS.md` and a path-limited commit took CLAUDE.md's working copy
+    into "chore: AGENTS.md links to CLAUDE.md" and dropped whatever of it was staged (#931, the
+    outside review of 1.90.24), so the commit is built in a scratch index from HEAD and the
+    user's index and working tree keep their bytes. A path whose index already differed from
+    HEAD (a staged change of theirs), or a link whose CLAUDE.md isn't committed, is left to them."""
+    import tempfile
+    if moved and _local_claude_md(d):
+        # a committed AGENTS.md moved to a gitignored CLAUDE.md, which gets no link: the commit
+        # held a link the worktree lacked and force-tracked the CLAUDE.md that is never to be
+        # committed (the review of #931). Git sees AGENTS.md deleted: the user's call
+        return ("not committed: CLAUDE.md is gitignored, so AGENTS.md's move to it is yours to "
+                "commit" if "AGENTS.md" in head else "nothing to commit: CLAUDE.md is gitignored")
+    with tempfile.TemporaryDirectory(prefix="wb-init-") as tmp:
+        (link := Path(tmp, "link")).write_text("CLAUDE.md")
+        agents = d / "AGENTS.md"
+        new = {"AGENTS.md": ("120000", gitops.git(d, "hash-object", "-w", "--no-filters",
+                                                  str(link)).strip())} \
+            if agents.is_symlink() and os.readlink(agents) == "CLAUDE.md" else {}  # only what is there
+        if moved and head.get("AGENTS.md", ("",))[0].startswith("100"):
+            new["CLAUDE.md"] = head["AGENTS.md"]  # its committed text: unstaged edits stay unstaged
+        changed = {p: e for p, e in new.items() if head.get(p) != e}
+        if not changed:
+            return "already committed"
+        if what := gitops.under_way(d):  # its commit is the user's (the review of #931)
+            return (f"not committed: {what} is under way here, so commit "
+                    + " and ".join(sorted(changed)) + " yourself once it is done")
+        if (moved and "CLAUDE.md" not in new) or any(index.get(p) != head.get(p) for p in changed) \
+                or not {**head, **changed}.get("CLAUDE.md", ("",))[0].startswith("100"):
+            return ("not committed: CLAUDE.md or AGENTS.md has changes of yours (staged, or not "
+                    "committed yet), so commit them yourself")
+        env = {"GIT_INDEX_FILE": str(Path(tmp, "index"))}
+        gitops.git(d, "read-tree", "HEAD", env=env)
+        for p, (mode, blob) in changed.items():
+            gitops.git(d, "update-index", "--add", "--cacheinfo", f"{mode},{blob},{p}", env=env)
+        # no hooks: one with a scratch GIT_INDEX_FILE (lint-staged's stash) could rewrite the tree
+        gitops.git(d, *gitops.NO_HOOKS, "commit", "-q", "-m", "chore: AGENTS.md links to CLAUDE.md",
+                   env=env)
+    for p, (mode, blob) in changed.items():  # their index matched HEAD here: now the new HEAD
+        gitops.git(d, "update-index", "--add", "--cacheinfo", f"{mode},{blob},{p}")
+    return "committed"
 
 
 # What `wb events` reports: the state, not the work (worktrees) or the noise. rules/ (the agents'
@@ -5244,7 +5350,8 @@ def parser() -> argparse.ArgumentParser:
     s.add_argument("--test-timeout", type=int, default=900, metavar="SECS",
                    help="seconds the acceptance command may run (default 900)")
     s.add_argument("--unload-for-tests", action="store_true",
-                   help="unload the model before each test run, for tests that need the GPU")
+                   help="free this GPU of every model (keep_loaded aside) before each test run, "
+                        "for tests that need the GPU")
     s.add_argument("--no-sign", action="store_true",
                    help="commit this task's work unsigned, whatever commit.gpgsign says")
     s.add_argument("--no-base-check", action="store_true",

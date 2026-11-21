@@ -27,7 +27,9 @@ concurrency:
 jobs:
   check:
     runs-on: ubuntu-latest
-    timeout-minutes: 40
+    timeout-minutes: 60  # check.yml's suite, 24 to 28 minutes at 24dfb6d (#950)
+    env:
+      WB_TEST_HANG_SECS: '600'  # a hung test fails, named (tests/__init__.py, #950)
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:

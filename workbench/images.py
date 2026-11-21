@@ -23,7 +23,7 @@ An engine is whatever runs an image model on this machine, described in
 plus optional "label", "notes" (licence, what it is good at: shown to Claude), "timeout" (s),
 "gpu" (false: not this machine's GPU; a url on another host is off it unless true).
 The first entry is the default. No model is named here: the user installs one and describes it.
-What an engine writes must start like a PNG, JPEG or WebP; a JPEG or WebP keeps its own suffix.
+What an engine writes must be a whole PNG, JPEG or WebP; a JPEG or WebP keeps its own suffix.
 
 A generation on the GPU holds the GPU lock and first unloads the coding models, as a task does;
 while a task holds the GPU it refuses at once, unless asked to wait. A command engine exits when it's done, so
@@ -109,19 +109,96 @@ def _command(e: dict, values: dict, refs: list[Path], log: Path) -> None:
         raise RuntimeError(f"the engine exited {r.returncode} without an image:\n{tail}")
 
 
-def kind(path: Path) -> str | None:
-    """The image format a file's first bytes say ("png", "jpeg", "webp"), or None: an engine or
-    server that wrote an HTML error page, or a JPEG, was published as a .png and reported as an
-    image (#744, the image side of #592)."""
-    with open(path, "rb") as f:
-        head = f.read(12)
-    if head.startswith(b"\x89PNG\r\n\x1a\n"):
-        return "png"
-    if head.startswith(b"\xff\xd8\xff"):
-        return "jpeg"
-    if head[:4] == b"RIFF" and head[8:12] == b"WEBP":
-        return "webp"
+def kind(path: Path) -> tuple[str, int, int] | None:
+    """The image a file holds, as (format, width, height) with format "png", "jpeg" or "webp",
+    or None when its first bytes say it isn't one: an engine or server that wrote an HTML error
+    page, or a JPEG, was published as a .png and reported as an image (#744, the image side of
+    #592). A file that starts like an image but isn't whole raises ValueError saying what is
+    missing: a bare PNG signature, a JPEG cut before its end marker or a WebP shorter than its
+    RIFF size passed the magic bytes, was published, and its sidecar gave the size asked for,
+    not one measured (#946). Trailing bytes after a whole image pass, as decoders take them."""
+    data = Path(path).read_bytes()
+    if data.startswith(b"\x89PNG\r\n\x1a\n"):
+        return ("png", *_png(data))
+    if data.startswith(b"\xff\xd8\xff"):
+        return ("jpeg", *_jpeg(data))
+    if data[:4] == b"RIFF" and data[8:12] == b"WEBP":
+        return ("webp", *_webp(data))
     return None
+
+
+def _png(data: bytes) -> tuple[int, int]:
+    """Its IHDR size, after walking its chunks to IEND, each length within the file."""
+    if data[12:16] != b"IHDR" or len(data) < 33:
+        raise ValueError("no IHDR chunk after the PNG signature")
+    w, h = int.from_bytes(data[16:20], "big"), int.from_bytes(data[20:24], "big")
+    if not (w and h):
+        raise ValueError(f"a {w}x{h} PNG")
+    at = 8
+    while at + 12 <= len(data):
+        n, typ = int.from_bytes(data[at:at + 4], "big"), data[at + 4:at + 8]
+        if at + 12 + n > len(data):
+            break                                       # cut off inside this chunk
+        if typ == b"IEND":
+            return w, h
+        at += 12 + n
+    raise ValueError("a PNG cut off before its IEND chunk")
+
+
+def _jpeg(data: bytes) -> tuple[int, int]:
+    """Its frame (SOFn) size, found by walking the segments to the scan, and an end marker after
+    the scan: entropy-coded data stuffs every 0xFF, so FFD9 after the first SOS is the EOI (an
+    EXIF thumbnail's own EOI comes before it)."""
+    at, size = 2, None
+    while at + 4 <= len(data):
+        if data[at] != 0xFF:
+            raise ValueError("a JPEG whose segments don't line up")
+        marker = data[at + 1]
+        if marker == 0xFF:                              # fill bytes before a marker
+            at += 1
+            continue
+        if marker in (0x01, *range(0xD0, 0xD8)):        # markers without a length
+            at += 2
+            continue
+        n = int.from_bytes(data[at + 2:at + 4], "big")
+        if n < 2 or at + 2 + n > len(data):
+            break
+        # SOF0-15 less DHT (C4), JPG (C8) and DAC (CC)
+        if 0xC0 <= marker <= 0xCF and marker not in (0xC4, 0xC8, 0xCC) and n >= 7:
+            size = (int.from_bytes(data[at + 7:at + 9], "big"), int.from_bytes(data[at + 5:at + 7], "big"))
+        if marker == 0xDA:                              # SOS: the image data follows
+            if not size:
+                raise ValueError("a JPEG with no frame (SOF) before its scan")
+            if not (size[0] and size[1]):
+                raise ValueError(f"a {size[0]}x{size[1]} JPEG")
+            if data.find(b"\xff\xd9", at + 2 + n) < 0:
+                raise ValueError("a JPEG cut off before its end marker (FFD9)")
+            return size
+        at += 2 + n
+    raise ValueError("a JPEG cut off before its image data")
+
+
+def _webp(data: bytes) -> tuple[int, int]:
+    """Its size from the first chunk (VP8X canvas, VP8 lossy frame, VP8L lossless header), with
+    the file at least as long as its RIFF size says and that chunk within it."""
+    riff = int.from_bytes(data[4:8], "little")
+    if len(data) < riff + 8:
+        raise ValueError(f"a WebP of {len(data)} bytes whose RIFF size says {riff + 8}")
+    typ, n, body = data[12:16], int.from_bytes(data[16:20], "little"), data[20:]
+    if len(data) < 20 or 20 + n > riff + 8 or len(body) < n:
+        raise ValueError("a WebP whose first chunk doesn't fit it")
+    if typ == b"VP8X" and n >= 10:
+        w, h = 1 + int.from_bytes(body[4:7], "little"), 1 + int.from_bytes(body[7:10], "little")
+    elif typ == b"VP8 " and n >= 10 and body[3:6] == b"\x9d\x01\x2a":
+        w, h = int.from_bytes(body[6:8], "little") & 0x3FFF, int.from_bytes(body[8:10], "little") & 0x3FFF
+    elif typ == b"VP8L" and n >= 5 and body[0] == 0x2F:
+        bits = int.from_bytes(body[1:5], "little")
+        w, h = 1 + (bits & 0x3FFF), 1 + ((bits >> 14) & 0x3FFF)
+    else:
+        raise ValueError(f"a WebP with no VP8/VP8L/VP8X image chunk (first: {typ!r})")
+    if not (w and h):
+        raise ValueError(f"a {w}x{h} WebP")
+    return w, h
 
 
 SUFFIX = {"png": ".png", "jpeg": ".jpg", "webp": ".webp"}
@@ -392,12 +469,17 @@ def generate(prompt: str, out_dir: Path, n: int = 4, size: tuple[int, int] = (10
                 secs = round(time.time() - t0, 1)
                 if fresh.is_symlink() or not fresh.is_file() or not fresh.stat().st_size:
                     raise RuntimeError(f"image engine {name} wrote no image")
-                if not (fmt := kind(fresh)):
+                try:
+                    got = kind(fresh)
+                except ValueError as why:  # nothing published, no sidecar (#946)
+                    raise RuntimeError(f"image engine {name} wrote an incomplete image ({why})") from None
+                if not got:
                     raise RuntimeError(f"image engine {name} wrote no image ({media.starts(fresh)})")
+                fmt, width, height = got
                 if SUFFIX[fmt] != fresh.suffix:  # published under its real suffix (#744)
                     fresh = fresh.rename(fresh.with_suffix(SUFFIX[fmt]))
                 store.write_json(fresh.with_suffix(".json"), {
-                    "prompt": prompt, "seed": s, "width": size[0], "height": size[1],
+                    "prompt": prompt, "seed": s, "width": width, "height": height,  # measured (#946)
                     "engine": name, "refs": [str(r) for r in refs], "secs": secs, "ts": store.now(),
                     "format": fmt})
                 out = media.free(out_dir, f"{media.slug(prompt, 'image')}-{s}", fresh.suffix)

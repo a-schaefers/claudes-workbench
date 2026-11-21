@@ -195,10 +195,15 @@ def _case_folds(d: str) -> bool | None:
             pass
 
 
-def _run(cwd, args, env=None, check=True, timeout=None, input=None) -> subprocess.CompletedProcess:
+def _run(cwd, args, env=None, check=True, timeout=None, input=None,
+         detach=False) -> subprocess.CompletedProcess:
+    """``detach``: git in a session of its own, with no controlling terminal, for the calls that
+    may sign (with NO_TERMINAL): ssh-keygen opens /dev/tty when it can, and on WSL2, where wb has
+    one, it prompted there for a passphrase nobody would type, so wb accept waited COMMIT_SECS
+    and wb start SIGN_SECS before refusing (#933). Detached, it fails at once."""
     try:
         r = subprocess.run(["git", "-C", str(cwd), *PLAIN, *_pinned(cwd), *args], capture_output=True,
-                           env=_env(env), timeout=timeout, input=input,
+                           env=_env(env), timeout=timeout, input=input, start_new_session=detach,
                            stdin=subprocess.DEVNULL if timeout and input is None else None)
     except subprocess.TimeoutExpired:
         raise GitError(f"git {' '.join(args)}: no answer in {timeout}s") from None
@@ -1238,14 +1243,19 @@ def scratch_clone(repo: Path, dest: Path, bare: bool = False, tags: bool = True)
     steps, which no ref reaches, weren't there (wb verify and shot died "failed to unpack tree
     object", bench add on step 2), and a big shallow checkout was copied whole for each base
     check (#884, the third 2026-11-21 audit). So there it is made by hand: init, alternates, the
-    repo's `shallow` file, its branches (and tags) and HEAD."""
+    repo's `shallow` file, its branches (and tags) and HEAD. In the repo's own object format:
+    a plain init takes git's default (or init.defaultObjectFormat), and a SHA-256 shallow repo's,
+    or a SHA-1 one's under a SHA-256 default, refused every ref ("invalid <new-oid>", #884's
+    review)."""
     dest = Path(dest)
     if git(repo, "rev-parse", "--is-shallow-repository", check=False).strip() != "true":
         git(dest.parent, "clone", "-q", "--shared", "--bare" if bare else "--no-checkout",
             *([] if tags else ["--no-tags"]), str(repo), str(dest))
         return
     common = Path(repo) / git(repo, "rev-parse", "--git-common-dir").strip()
-    git(dest.parent, "init", "-q", *(["--bare"] if bare else []), str(dest))
+    fmt = git(repo, "rev-parse", "--show-object-format").strip()
+    git(dest.parent, "init", "-q", f"--object-format={fmt}", *(["--bare"] if bare else []),
+        str(dest))
     gd = dest if bare else dest / ".git"
     info = gd / "objects" / "info"
     info.mkdir(parents=True, exist_ok=True)
@@ -1304,6 +1314,15 @@ def restore_steps(task: store.Task) -> None:
     if tip and f.is_file() and _run(repo, ("cat-file", "-e", f"{tip}^{{commit}}"),
                                     check=False).returncode:
         git(repo, "bundle", "unbundle", str(f.resolve()), check=False)
+
+
+def name_status(repo: Path, base: str, rev: str, *opts: str) -> list[tuple[str, str]]:
+    """(status letter, path) for each file ``rev`` changed since ``base``, renames as a delete and
+    an add. NUL-separated: core.quotePath=false still C-quotes a name with a tab, newline, double
+    quote or backslash ("tests/a\\tb.py"), and bench add, splitting --name-only on newlines, missed
+    such a test or asked git for the quoted name (#942, the v1.90.24 review). wb verify's too."""
+    raw = git(repo, "diff", "--name-status", "--no-renames", "-z", *opts, base, rev).split("\0")
+    return [(st, p) for st, p in zip(raw[0::2], raw[1::2]) if p]
 
 
 def step_commit(task: store.Task, step: int, steps: int) -> str | None:
@@ -1411,7 +1430,7 @@ def sign_problem(repo: Path, rev: str) -> str | None:
     r = None
     with contextlib.suppress(GitError):
         r = _run(repo, ["commit-tree", "-S", "-m", "workbench: can it sign?", f"{rev}^{{tree}}"],
-                 NO_TERMINAL, check=False, timeout=SIGN_SECS)
+                 NO_TERMINAL, check=False, timeout=SIGN_SECS, detach=True)
     return None if r is not None and r.returncode == 0 else UNLOCK
 
 
@@ -1437,7 +1456,7 @@ def commit_all(worktree: Path, message: str, include: bool = False, sign: bool =
     elif signs(worktree):  # no terminal, a time limit, and git's error said plainly (#374)
         try:
             r = _run(worktree, [*NO_HOOKS, "commit", "-q", "-m", message], NO_TERMINAL,
-                     check=False, timeout=COMMIT_SECS)
+                     check=False, timeout=COMMIT_SECS, detach=True)
         except GitError as e:  # no answer: a pinentry waiting on an unattended desktop
             raise GitError(f"not committed: {_unlock(worktree)} ({e})") from None
         if r.returncode:
@@ -1553,13 +1572,34 @@ def _unlock_cut_short(repo: Path, worktree: Path) -> None:
             return
 
 
-def delete_branch(repo: Path, task: str, at: str | None = None) -> None:
+def checked_out_in(repo: Path, branch: str) -> str | None:
+    """The worktree that has ``branch`` checked out (the main one or a linked one), or None.
+    `git branch -d/-D` refuse such a branch, but `update-ref -d` skips that check: wb gc deleted a
+    landed delegate branch the user had out in a second worktree, whose HEAD then named no ref,
+    `git status` showed every file staged and the next commit there had no parent (#930). A
+    registration whose directory is gone (`prunable`) holds nothing: no checkout breaks."""
+    held = entry = None
+    for line in git(repo, "worktree", "list", "--porcelain", check=False).splitlines() + [""]:
+        if line.startswith("worktree "):
+            entry, held = line[9:], None
+        elif line == f"branch refs/heads/{branch}":
+            held = entry
+        elif line.startswith("prunable"):
+            held = entry = None
+        elif not line and held:
+            return held
+    return None
+
+
+def delete_branch(repo: Path, task: str, at: str | None = None) -> bool:
     """Delete the task's branch; with ``at``, only while it still points at that commit (one
-    update-ref, compare and delete), so a branch someone else made or moved stays (#416)."""
+    update-ref, compare and delete), so a branch someone else made or moved stays (#416), and
+    never while a worktree has it checked out (#930). True when it went."""
     if at:
-        git(repo, "update-ref", "-d", f"refs/heads/{branch_name(task)}", at, check=False)
-    else:
-        git(repo, "branch", "-D", branch_name(task), check=False)
+        branch = branch_name(task)
+        return checked_out_in(repo, branch) is None and _run(
+            repo, ("update-ref", "-d", f"refs/heads/{branch}", at), check=False).returncode == 0
+    return _run(repo, ("branch", "-D", branch_name(task)), check=False).returncode == 0
 
 
 def drop_merged_branch(repo: Path, branch: str) -> bool:
@@ -1571,11 +1611,14 @@ def drop_merged_branch(repo: Path, branch: str) -> bool:
 def drop_landed_branch(repo: Path, branch: str, tip: str, into: str | None) -> bool:
     """Delete ``branch`` once it has landed: merged into the checkout's HEAD (drop_merged_branch),
     else held by ``into`` (the task's base branch, not checked out), deleted only while it still
-    points at ``tip`` (update-ref's compare-and-delete). wb gc (#686)."""
-    if drop_merged_branch(repo, branch):
+    points at ``tip`` (update-ref's compare-and-delete), and never while a worktree has it checked
+    out: update-ref doesn't look, and that checkout's HEAD was left naming no ref (#930). wb gc
+    (#686)."""
+    if drop_merged_branch(repo, branch):  # git's own check refuses a checked-out branch
         return True
-    return bool(into) and contains(repo, f"refs/heads/{into}", tip) and _run(
-        repo, ("update-ref", "-d", f"refs/heads/{branch}", tip), check=False).returncode == 0
+    return bool(into) and contains(repo, f"refs/heads/{into}", tip) and \
+        checked_out_in(repo, branch) is None and _run(
+            repo, ("update-ref", "-d", f"refs/heads/{branch}", tip), check=False).returncode == 0
 
 
 def current_branch(repo: Path) -> str:
@@ -1722,7 +1765,7 @@ def merge(repo: Path, task: str, into: str | None = None, base: str | None = Non
     secs = COMMIT_SECS if signed and how != "ff" else None
 
     def committing(args):  # the step that makes a commit, so may sign
-        r = _run(repo, [*unsigned, *args], NO_TERMINAL, check=False, timeout=secs)
+        r = _run(repo, [*unsigned, *args], NO_TERMINAL, check=False, timeout=secs, detach=signed)
         if r.returncode:
             said = (r.stderr or r.stdout).decode("utf-8", "replace").strip()
             raise GitError(f"git {' '.join(args)}: {said}")
@@ -2017,6 +2060,21 @@ def contains(repo: Path, ref: str, commit: str) -> bool:
 def _merging(repo: Path) -> bool:
     """Whether a merge is under way in ``repo`` (MERGE_HEAD is there)."""
     return _run(repo, ("rev-parse", "-q", "--verify", "MERGE_HEAD"), check=False).returncode == 0
+
+
+# What git leaves in the git dir while an operation waits for the user's commit, and its name
+UNDER_WAY = (("MERGE_HEAD", "a merge"), ("CHERRY_PICK_HEAD", "a cherry-pick"),
+             ("REVERT_HEAD", "a revert"), ("rebase-merge", "a rebase"), ("rebase-apply", "a rebase"),
+             ("sequencer", "a cherry-pick or revert"))
+
+
+def under_way(repo: Path) -> str | None:
+    """The git operation waiting in ``repo`` for the user to finish it (UNDER_WAY), or None. A
+    commit made then is theirs to shape: during a merge, wb init's link commit took MERGE_HEAD as
+    its second parent with only HEAD's tree, so the merge's changes were lost and MERGE_HEAD
+    consumed (the review of #931)."""
+    paths = git(repo, "rev-parse", *(a for p, _ in UNDER_WAY for a in ("--git-path", p))).splitlines()
+    return next((what for (_, what), p in zip(UNDER_WAY, paths) if (Path(repo) / p).exists()), None)
 
 
 def ignored(repo: Path, path: str) -> bool:

@@ -338,7 +338,11 @@ def turns(who: str, say, wait: bool, *engines: dict):
     """Every GPU turn a batch needs: this machine's (`gpu`) for an engine on its GPU, and one on
     each remote box an engine shares with the coding tasks (`boxes`): queued with that box's
     tasks (`GpuLease(None, …, on=)`, as `wb optimize` does), refused at once unless ``wait``,
-    and that box's Ollama models unloaded (keep_loaded kept)."""
+    and that box's Ollama models unloaded (keep_loaded kept). That lease is this machine's
+    alone: another client's model there was unloaded in the middle of its round, its next
+    request paying a reload it was never told of (#944). So, as a coding task's load waits
+    (box_quiet, #812), the unload waits until such a model has gone quiet; without ``wait`` it is
+    refused, naming it."""
     remote = {models.pool(m): m for e in engines for m in boxes(e)}
     here = [e for e in engines if on_gpu(e) and not boxes(e)]
     with contextlib.ExitStack() as stack:
@@ -346,17 +350,31 @@ def turns(who: str, say, wait: bool, *engines: dict):
             pins = [cards(e) for e in here]  # one engine that can't say: every card, as before
             pinned = frozenset().union(*pins) if all(pins) else None
             stack.enter_context(gpu(who, say, wait, serving(*engines), pinned))
-        for m in remote.values():
+        # one order for every batch, whatever its engines': this machine's pool, then the boxes'
+        # by pool name. In engine order, a wb audio whose generator was on box B and listener on
+        # A held B waiting for A while another's (its own audio.json, one shared lease directory)
+        # held A waiting for B, and with --wait neither ever ran (#945)
+        for _, m in sorted(remote.items()):
             stack.enter_context(models.GpuLease(None, who, say, wait=wait, on=m))
             if m.engine == "ollama" and not models._fake():
                 held = models.keep_loaded()
-                for name in models._ollama_loaded(m.root):
-                    if not models._kept_name(name, held):
-                        say(f"unloading {name} on {m.root}")
-                        try:
-                            models._post(f"{m.root}/api/generate", {"model": name, "keep_alive": 0}, timeout=120)
-                        except Exception:  # as models._unload: its server may be gone
-                            pass
+                names = [n for n in models._ollama_loaded(m.root) if n and not models._kept_name(n, held)]
+                mine = models.box_mine(m.root)  # this machine's own loads there (#893 watches them)
+                theirs = [n for n in names if not any(models._matches(x, {n}) for x in mine)]
+                if names and wait:
+                    models.box_quiet(m, names, say, say, mine=mine, act=f"unloading it for {who}")
+                elif theirs and models._stamps({m.root: theirs}):
+                    raise RuntimeError(
+                        f"{', '.join(theirs)} on {urlparse(m.root).hostname} is another client's of "
+                        f"that wb remote box: {who} would unload it in the middle of its round. Run "
+                        f"it with --wait, in the background, to take the box once it has gone "
+                        f"{models.BOX_QUIET} s without a request")
+                for name in names:
+                    say(f"unloading {name} on {m.root}")
+                    try:
+                        models._post(f"{m.root}/api/generate", {"model": name, "keep_alive": 0}, timeout=120)
+                    except Exception:  # as models._unload: its server may be gone
+                        pass
         yield
 
 

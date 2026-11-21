@@ -152,11 +152,21 @@ def remembered(old) -> list:
 
 def busy(m: models.Model) -> list[str]:
     """Other models its remote server has loaded: what else is using that card. A fit measured
-    beside them would come out small, and they aren't this machine's to unload."""
+    beside them would come out small, and they aren't this machine's to unload. ``m`` itself too,
+    loaded there for another client (not this machine's own load, box_mine, or one of those
+    answering requests now): the box's lease is this machine's alone, so probe unloaded and
+    reloaded the very model another client was running, several times (#944)."""
     if not m.remote or models.same_gpu(m):
         return []  # free_gpu has emptied this machine's (WSL2's Windows host's too: #750)
     ps = models._get(f"{m.root}/api/ps", timeout=2) or {}
-    return [x.get("name") for x in ps.get("models") or [] if not models._matches(m.name, {x.get("name")})]
+    names = [x.get("name") for x in ps.get("models") or []]
+    others = [n for n in names if not models._matches(m.name, {n})]
+    itself = [n for n in names if n and models._matches(m.name, {n})]
+    if itself and m.engine == "ollama":
+        if not any(models._matches(x, set(itself)) for x in models.box_mine(m.root)) \
+                or models._in_use({m.root: itself}, remote=True):
+            others += itself
+    return others
 
 
 # A model a run tried and couldn't measure (optimize.json `skipped`: its remote server busy, its

@@ -65,6 +65,8 @@ PUSH_WINDOW = 900       # only news this recent is pushed, never a backlog
 PUSH_RETRY = 30         # seconds before a device whose push failed for now is tried again
 # macOS's App Store and standalone Tailscale apps keep the CLI in the bundle, off PATH
 TAILSCALE_APP = "/Applications/Tailscale.app/Contents/MacOS/Tailscale"
+# Tailscale for Windows' CLI under WSL's automount root, for a chat whose PATH lacks Windows' (#920)
+TAILSCALE_WINDOWS = "c/Program Files/Tailscale/tailscale.exe"
 STATIC = Path(__file__).parent / "chat_static"
 TYPES = {".html": "text/html; charset=utf-8", ".js": "text/javascript; charset=utf-8",
          ".css": "text/css; charset=utf-8", ".svg": "image/svg+xml",
@@ -121,25 +123,33 @@ def token() -> str:
 
 
 def tailscale(windows: bool = False) -> dict:
-    """This machine on the tailnet: {"ip", "names"}; {} when Tailscale isn't up; {"missing": True}
-    when there is no CLI to ask (said apart from "not running": the 2026-11-16 audit).
+    """This machine on the tailnet: {"ip", "names"}; {} when Tailscale isn't up (no Self, or a
+    BackendState other than Running); {"missing": True} when there is no CLI to ask (said apart
+    from "not running": the 2026-11-16 audit). The ip is the IPv4 one, else the first IPv6: a node
+    with IPv4 turned off was reported "not running" and the chat bound localhost alone (#937).
     ``windows``: under WSL with no Linux CLI, Windows' tailscale.exe (Tailscale's own setup for
     WSL2), for the name `tailscale serve` passes in through Windows' localhost forwarding: `which`
-    never tries .exe, so the chat answered it 403 "unknown host" (#920). Not for the address: in
-    WSL's NAT networking, Windows' tailnet IP isn't on WSL's interfaces."""
+    never tries .exe, so the chat answered it 403 "unknown host" (#920). From PATH, else its
+    install under the automount root: wb-chat.service runs with the user manager's PATH, which
+    has none of Windows', as has appendWindowsPath=false (the review of #920). Not for the
+    address: in WSL's NAT networking, Windows' tailnet IP isn't on WSL's interfaces."""
     cli = shutil.which("tailscale") or (TAILSCALE_APP if sys.platform == "darwin"
                                         and os.path.isfile(TAILSCALE_APP) else None)
     if not cli and windows:
         from . import hardware
-        cli = shutil.which("tailscale.exe") if hardware.system() == "wsl" else None
+        cli = (hardware.windows_program("tailscale.exe", TAILSCALE_WINDOWS)
+               if hardware.system() == "wsl" else None)
     if not cli:
         return {"missing": True}
     try:
         r = subprocess.run([cli, "status", "--json"], capture_output=True, text=True, timeout=5)
-        me = json.loads(r.stdout)["Self"]
-    except (OSError, ValueError, KeyError, subprocess.TimeoutExpired):
+        status = json.loads(r.stdout)
+        me = status["Self"]
+    except (OSError, ValueError, KeyError, TypeError, subprocess.TimeoutExpired):
         return {}
-    ips = [ip for ip in me.get("TailscaleIPs") or [] if "." in ip]
+    if status.get("BackendState", "Running") != "Running":  # stopped or logged out: not up
+        return {}
+    ips = sorted(me.get("TailscaleIPs") or [], key=lambda ip: ":" in ip)  # IPv4 first
     dns = (me.get("DNSName") or "").rstrip(".")
     names = {n for n in (dns, dns.split(".")[0], me.get("HostName", "")) if n}
     return {"ip": ips[0] if ips else None, "names": names, "dns": dns.lower()}
@@ -1201,10 +1211,16 @@ def _alive(pid, start=None) -> bool:
 
 def listener() -> dict | None:
     """The session listening now. Its `wb events` process (pid) lives exactly as long as the
-    session; a listener.json without a pid falls back to its age."""
+    session; a listener.json without a pid falls back to its age. A claim another machine wrote
+    (`machine`, on a shared state directory) listens, as the mod has it: its pid means nothing in
+    this process table, and the page said "Waiting for a Claude session" while that machine's
+    session got every message (the review of #922). The mod writes the file only on a change, so
+    its age can't say either."""
     st = store.read_json(chat_dir() / "listener.json", None)
     if not st:
         return None
+    if isinstance(st.get("machine"), str) and st["machine"] and st["machine"] != store.machine():
+        return st
     if st.get("pid"):
         return st if _alive(st["pid"], st.get("start")) else None
     return st if store.now() - st.get("ts", 0) <= LISTENING_FOR else None
@@ -1976,7 +1992,7 @@ def plan(binds: list[str] | None = None, hosts: list[str] | None = None) -> dict
             ts = tailscale()
             if not ts.get("ip"):
                 skipped.append("tailscale (CLI not found: put `tailscale` on PATH)" if ts.get("missing")
-                               else "tailscale (not running)")
+                               else "tailscale (no Tailscale address)" if ts else "tailscale (not running)")
                 continue
             b = ts["ip"]
             allowed |= {n.lower() for n in ts["names"]}

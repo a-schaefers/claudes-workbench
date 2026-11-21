@@ -1635,15 +1635,17 @@ def _no_room_for(task: store.Task, wt: Path) -> str | None:
     """Why the setup's work (prepared.json `bytes`) can't be copied into the scratch checkout
     ``wt`` without filling the disk, or None. wb start counted only the checkout, measured before
     any setup ran: a 12 GB target/ copied on ext4 filled the disk twice over (cp, then copytree),
-    and every other open task's status write failed meanwhile (#860)."""
+    and every other open task's status write failed meanwhile (#860). Only freeing space helps:
+    the scratch running the setup itself (wb verify --setup) writes about as much, with no check,
+    and this line once offered that (the review of #860)."""
     need = int(prepared_record(task).get("bytes") or 0)
     free = store.free_bytes(wt)
     if not need or free is None or free >= need + CHECKOUT_SPARE or _reflinks(wt.parent):
         return None
     return (f"the setup's work in the worktree ({store.gb(need)}: its build output, installs and "
             f"copies) doesn't fit in a scratch copy: {store.gb(free)} free where the state directory "
-            "is, 2 GB kept spare. Free some (another task's build, wb gc), or have the scratch "
-            "checkout run the setup itself (wb verify --setup, wb shot --setup)")
+            f"is, 2 GB kept spare. Free {store.gb(need + CHECKOUT_SPARE - free)} (another task's "
+            "build, wb gc) and run it again")
 
 
 def prepare(task: store.Task, prepared: Path | None = None) -> tuple[int | str, str]:
@@ -2106,6 +2108,8 @@ def base_check_line(r: dict, task: store.Task) -> str:
         tail = "\n".join("    " + line for line in r["tail"].splitlines())
         return (f"note: setting up the base's scratch checkout failed, so the base wasn't checked "
                 f"({task.dir / 'base-tests.txt'}):\n{tail}")
+    if r["exit"] == "filtered":  # its checkout isn't the task's bytes: a failure there says nothing (#932)
+        return f"note: the base wasn't checked: {r['tail'].strip().strip('[]')}"
     if r["exit"] == "timeout":
         limit = r.get("limit", BASE_CHECK_SECS)
         if limit < BASE_CHECK_SECS:  # --test-timeout set it: every round's tests stop there too
@@ -2907,6 +2911,29 @@ def _loaded(task: store.Task, secs: float) -> None:
                     **({"loads": [*(st.get("loads") or []), secs]} if secs > 0 else {}))
 
 
+@contextlib.contextmanager
+def _tests_gpu(task: store.Task, lease):
+    """This machine's GPU to a round's tests alone, with --unload-for-tests, once `step_aside`
+    has let the model go: on this GPU the lease's own pool, held for them and waited empty, and
+    what the other tasks left loaded freed (free_gpu, keep_loaded kept) and let go of; for a model
+    on another machine's GPU (a wb remote box), whose pool the tests left, this machine's pool,
+    taken alone as the base check's is (verify.gpu). The tests run here whatever the model's
+    pool: before, a peer's model, a local task's or a wb image job's shared this GPU with them
+    (#943)."""
+    if not task.spec.get("unload_for_tests") or not task.spec.get("test_cmd"):
+        yield
+        return
+    from . import media, verify  # verify imports this module; media only for these tests
+    say = lambda msg: task.set_status(last=msg)  # noqa: E731
+    if lease.pool == "gpu":
+        models.free_gpu(say=say)
+        media.settle(say)
+        yield
+        return
+    with verify.gpu(task, say):
+        yield
+
+
 def _rejoin(task: store.Task, lease) -> None:
     """Back on the GPU before a round, after the tests or a server's wait let it go (#257):
     queued, in its first-come place, when the GPU is someone else's meanwhile."""
@@ -3055,9 +3082,16 @@ def drive(task: store.Task) -> None:
                 task.notify(phase, text, round=n,
                             cause="server" if server else "guard" if rnd["stuck"] else "agent")
                 return
-            # the tests need no model: the GPU is the queue's, or theirs (--unload-for-tests), #257
-            lease.step_aside(unload=bool(task.spec.get("unload_for_tests")))
-            tests = run_tests(task, n)
+            # the tests need no model: the GPU is the queue's, or theirs (--unload-for-tests), #257.
+            # Theirs is waited for (a peer's round, up to its timeout; this machine's pool for a
+            # remote model): queued meanwhile, as _rejoin is, since left `running`, wb steer --now
+            # promised an interrupt within seconds and the wait counted as active work (#943's
+            # review, 2026-11-21)
+            if unload := bool(task.spec.get("unload_for_tests")):
+                task.set_status(phase="queued", last="waiting for the GPU: the tests use it alone")
+            lease.step_aside(unload=unload)
+            with _tests_gpu(task, lease):
+                tests = run_tests(task, n)
             if pending_steer(task):  # a note that came in while the tests ran
                 _steer_round(task, n, False)
                 continue

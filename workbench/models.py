@@ -1328,7 +1328,12 @@ def make_resident(m: Model, say=print, keep=(), warn=None) -> float:
             _unload(m)
             _RESPREAD.add(respread)
         say(f"loading {m.name} into ollama")
-        _post(f"{m.root}/api/generate", {"model": m.name, "prompt": "", "keep_alive": "30m"},
+        # on a wb remote box, for BOX_KEEP_ALIVE only: another client's box_quiet reads a stamp
+        # less BOX_KEEP_ALIVE as the model's last finished request, and a 30 min load's stamp put
+        # that 25 min ahead while the round's first request (the full prefill) ran, read as quiet
+        # and loaded over (reviewing #899, 2026-11-21). This runs before every round anyway
+        _post(f"{m.root}/api/generate", {"model": m.name, "prompt": "",
+                                         "keep_alive": f"{BOX_KEEP_ALIVE}s" if away else "30m"},
               timeout=START_TIMEOUT)
         if away:
             _note_mine(m)  # this machine's own, for its next task's box_others
@@ -1562,6 +1567,7 @@ def free_gpu(keep=(), say=print, warn=None, of: Model | None = None,
     # a server swaps its own models; one serving another model on the kept one's port is stopped
     done = lmstudio | {o.server for o in kept if o.engine == "server"
                        and (not _contended(o) or status(o)["resident"])}
+    base, took = None, False  # the cards' used VRAM before the first stop (the wait after it)
     for other in local:
         if other.engine != "server" or other.server in done or not status(other)["resident"]:
             continue
@@ -1574,6 +1580,8 @@ def free_gpu(keep=(), say=print, warn=None, of: Model | None = None,
         while not _server_idle(other) and time.monotonic() < deadline:  # never cut off a reply
             time.sleep(5)
         say(f"stopping {other.id}")
+        if not took:
+            base, took = _vram_used(), True
         try:
             r = subprocess.run(other.stop, shell=True, capture_output=True, text=True,
                                encoding="utf-8", errors="replace", timeout=300)  # any bytes (#664)
@@ -1589,9 +1597,25 @@ def free_gpu(keep=(), say=print, warn=None, of: Model | None = None,
         # a stop (pkill llama-server) returns before the server's VRAM is freed: Ollama loading
         # at once found it taken and put part of the model on the CPU (#703). Waiting for the
         # VRAM to stop falling alone ended in a second while the server still held it all, two
-        # equal reads before it had begun to let go (#898): first until it stops answering
+        # equal reads before it had begun to let go (#898): first until it stops answering, or,
+        # with one server stopped, the cards hold less than before its stop. A stop that unloads
+        # and leaves the server up (an unload endpoint, `lms unload`) never stops answering, and
+        # paid all of STOP_SETTLE on every round; one still answering when STOP_SETTLE ends isn't
+        # waited on again (_STOP_STAYS): stopped again with nothing loaded, the VRAM had nothing
+        # to give back (reviewing #898, 2026-11-21). Not on the VRAM's first fall, nor with two
+        # stopped: the first one's release ended the wait while the second still held its memory,
+        # and a pkill server still answering as it let go was taken for one that stays, each
+        # #898's split again (the second review, 2026-11-21)
         deadline = time.monotonic() + STOP_SETTLE
-        while any(status(o)["resident"] for o in stopped) and time.monotonic() < deadline:
+        wait = [o for o in stopped if o.server not in _STOP_STAYS]
+        one = len(stopped) == 1  # the cards' fall is its own only then
+        while up := [o for o in wait if status(o)["resident"]]:
+            if time.monotonic() >= deadline:
+                _STOP_STAYS.update(o.server for o in up)
+                break
+            if one and base is not None and (used := _vram_used()) is not None \
+                    and used < base - FALLING:
+                break  # it has begun to let go: released follows it down
             time.sleep(1)
         released(max(deadline - time.monotonic(), 0))
     kept_ollama = [o for o in kept if o.engine == "ollama"]
@@ -1612,19 +1636,29 @@ def free_gpu(keep=(), say=print, warn=None, of: Model | None = None,
 
 
 STOP_SETTLE = 30  # seconds free_gpu waits at most for a stopped server's VRAM to be released
+FALLING = 64 * 2 ** 20  # less than this given back is VRAM no longer falling (released, free_gpu)
+# Servers a stop of free_gpu's left answering all of STOP_SETTLE (it unloads, the server stays):
+# this process waits only for their VRAM after the next stop
+_STOP_STAYS: set = set()
+
+
+def _vram_used() -> int | None:
+    """The bytes of VRAM the cards use, together; None where no card says (a Mac, a GPU named
+    from Windows)."""
+    cards = [g["vram_used"] for g in hardware.gpus(windows=False) if g.get("vram_used") is not None]
+    return sum(cards) if cards else None
 
 
 def released(timeout: float) -> bool:
-    """Wait, up to ``timeout`` seconds, until the GPUs' used VRAM stops falling (less than 64 MiB
-    a second): memory let go returns after the call that let it go. True once it has; at once
-    where no card says its use (a Mac, a GPU named from Windows)."""
+    """Wait, up to ``timeout`` seconds, until the GPUs' used VRAM stops falling (less than
+    FALLING a second): memory let go returns after the call that let it go. True once it has; at
+    once where no card says its use (a Mac, a GPU named from Windows)."""
     deadline, last = time.time() + timeout, None
     while time.time() < deadline:
-        cards = [g["vram_used"] for g in hardware.gpus(windows=False) if g.get("vram_used") is not None]
-        if not cards:
+        used = _vram_used()
+        if used is None:
             return True
-        used = sum(cards)
-        if last is not None and last - used < 64 * 2 ** 20:
+        if last is not None and last - used < FALLING:
             return True
         last = used
         time.sleep(1)
@@ -1749,7 +1783,7 @@ BOX_POLL = 2.0   # seconds between two looks at the box's /api/ps meanwhile
 BOX_KEEP_ALIVE = 300
 
 
-def box_quiet(m: Model, others: list[str], say, warn, mine=()) -> list[str]:
+def box_quiet(m: Model, others: list[str], say, warn, mine=(), act: str | None = None) -> list[str]:
     """Wait, up to BOX_WAIT, until each of ``others`` (box_others: what the box has loaded for
     another client) has had no request for BOX_QUIET seconds in a row, or has gone, before ``m``
     is loaded over it (#812). Watched from now: /api/ps says when a model expires, not when it was
@@ -1759,8 +1793,10 @@ def box_quiet(m: Model, others: list[str], say, warn, mine=()) -> list[str]:
     this machine runs one task at a time on a box (its pool), so a request on it now is another
     client's, and its mark is dropped (_forget_mine). Before, a mark kept a week hid a model
     another client was mid-round on, and the load evicted it unwarned (#893). Returns the models
-    taken as another client's (``others`` less this machine's idle ones)."""
+    taken as another client's (``others`` less this machine's idle ones). ``act``: what waits,
+    said in its lines (loading ``m``, else a wb image or wb audio job's unload: #944)."""
     host, root = urlparse(m.root).hostname, m.root
+    act = act or f"loading {m.name}"
     own = [n for n in others if any(_matches(x, {n}) for x in mine)]
     used = {n for _, n in _in_use({root: own}, remote=True)} if own else set()
     if used:
@@ -1770,7 +1806,7 @@ def box_quiet(m: Model, others: list[str], say, warn, mine=()) -> list[str]:
     if not last:
         return others
     names = ", ".join(sorted({n for _, n in last}))
-    say(f"{names} on {host} is another client's: loading {m.name} once it has gone "
+    say(f"{names} on {host} is another client's: {act} once it has gone "
         f"{BOX_QUIET} s without a request")
     began = quiet = time.monotonic()
     busy = False
@@ -1791,14 +1827,14 @@ def box_quiet(m: Model, others: list[str], say, warn, mine=()) -> list[str]:
             if not busy:
                 warn(f"{', '.join(moved)} on {host} is answering another client's requests: "
                      f"waiting up to {BOX_WAIT // 60} min for it to go {BOX_QUIET} s unused before "
-                     f"loading {m.name} ({BOX_SHARED})")
+                     f"{act} ({BOX_SHARED})")
             busy = True
         last = now
         if not now or time.monotonic() - quiet >= BOX_QUIET:
             return others
         if time.monotonic() - began >= BOX_WAIT:
-            warn(f"{names} on {host} was still in use after {BOX_WAIT // 60} min: loading "
-                 f"{m.name} anyway, and the two may swap on every request ({BOX_SHARED})")
+            warn(f"{names} on {host} was still in use after {BOX_WAIT // 60} min: {act} "
+                 f"anyway, and the two may swap on every request ({BOX_SHARED})")
             return others
         time.sleep(min(BOX_POLL, max(BOX_QUIET - (time.monotonic() - quiet), 0) + 0.01,
                        max(BOX_WAIT - (time.monotonic() - began), 0) + 0.01))
@@ -2450,7 +2486,11 @@ class GpuLease:
         holder runs it, and the lease stays held for the tests, an entry with no model (`tests`)
         that nobody joins, so wb start refuses and a queued task waits: let go, a queued task was
         admitted and ran a model round beside them, both allocating VRAM at once (#428, the audit
-        of 1.8). On a remote model's server the tests use none of its GPU: let go there.
+        of 1.8). Kept, the tests still waited for nobody: a task already sharing the GPU kept its
+        model there and its rounds running beside them (#943), so the tests wait, holding their
+        entry, until every other holder has stepped aside or ended (_alone_for_tests); the runner
+        then frees what they left loaded. On a remote model's server the tests use none of its
+        GPU: let go there (the runner takes this machine's GPU for them: verify.gpu).
         `rejoin` before the next round."""
         if self.aside or not self.fh:
             return
@@ -2463,12 +2503,35 @@ class GpuLease:
             held.pop(self.me, None)
             if unload:
                 self._unload_unshared(held)
-            if unload and not (self.m and self.m.remote and not same_gpu(self.m)):
+            alone = unload and not (self.m and self.m.remote and not same_gpu(self.m))
+            if alone:
                 self._set({**held, self.me: {**self._entry(), "model": None, "tests": True}})
             else:
                 self._set(held)
                 fcntl.flock(self.fh, fcntl.LOCK_UN)
             self.aside = True
+        if alone:
+            self._alone_for_tests()
+
+    def _alone_for_tests(self) -> None:
+        """Wait, holding the tests' entry (nobody joins it), until no other holder is left in the
+        pool but tests of tasks started after this one (first come, by ``since``): admitted
+        beside this task before its tests, a peer's model kept serving its rounds while the
+        project's GPU tests allocated VRAM, and an out-of-memory failure went back to the agent
+        as its bug (#943). Two tasks' GPU tests never run together, and never wait on each
+        other: the later one waits. Waiting entries hold nothing."""
+        mine = (self.since or 0, self.task)
+
+        def ahead() -> list[str]:
+            return sorted({h.get("task") or "?" for p, h in self._holders().items()
+                           if p != self.me and not h.get("waiting")
+                           and not (h.get("tests") and (h.get("since") or 0, h.get("task") or "") > mine)})
+        if not (others := ahead()):
+            return
+        self.say(f"waiting for the GPU (held by {', '.join(others)}): the tests use it alone")
+        with Watcher(self.home) as w:
+            while ahead():
+                w.wait(QUEUE_POLL)
 
     def _unload_unshared(self, held: dict) -> None:
         held_ids = keep_loaded()  # the user's own (#215), and only Ollama unloads on request

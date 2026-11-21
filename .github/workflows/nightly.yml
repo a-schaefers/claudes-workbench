@@ -31,8 +31,10 @@ concurrency:
 jobs:
   check:
     runs-on: ubuntu-latest
-    timeout-minutes: 40
+    # check.yml's suite: 7.5 minutes at 594c0bc, 27 at 24dfb6d (#950)
+    timeout-minutes: 60
     env:
+      WB_TEST_HANG_SECS: '600'  # a hung test fails, named (tests/__init__.py, #950)
       # Always the newest release.
       CLAUDE_CODE_VERSION: latest
       CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC: '1'
@@ -64,12 +66,22 @@ jobs:
 
   macos:
     runs-on: macos-latest
-    # 21 minutes without OpenCode (no inotify there: waits poll), past 30 with it (2026-11-20)
+    # 21 minutes without OpenCode (no inotify there: waits poll), past 30 with it (2026-11-20),
+    # then past 60 once the suite doubled, cancelled every run with nothing reported: unittest
+    # prints failures only at the end (#950). So three shards (tests/__init__.py, WB_TEST_SHARD:
+    # whole classes, dealt by size), each test's name as it runs (-v), and a test hung past
+    # WB_TEST_HANG_SECS fails with every thread's stack instead of eating the budget.
     timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [1, 2, 3]
     env:
       # check.yml's OpenCode, its Apple silicon asset's hash
       OPENCODE_VERSION: '2.3.0'
       OPENCODE_SHA256: '7907df2b12720a840fbb49c5b978b9b82925b6bf75479a5fd216afa8932b6702'
+      WB_TEST_SHARD: ${{ matrix.shard }}/3
+      WB_TEST_HANG_SECS: '600'
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -82,16 +94,18 @@ jobs:
           git config --global user.name "workbench CI"
           git config --global user.email "ci@invalid"
       - run: scripts/install-opencode.sh "$OPENCODE_VERSION" "$OPENCODE_SHA256" >> "$GITHUB_PATH"
-      - run: python3 -m unittest
+      - run: python3 -X faulthandler -m unittest -v
 
   wsl:
     runs-on: windows-2025
-    timeout-minutes: 45
+    # 29 minutes at 24dfb6d (#950)
+    timeout-minutes: 60
     env:
       # check.yml's OpenCode, its Linux x64 asset's hash
       OPENCODE_VERSION: '2.3.0'
       OPENCODE_SHA256: 'fc0f81522aceeabac47693d88389efa2bc517ce74c2c38fd6967819fcc6e4d3b'
-      WSLENV: OPENCODE_VERSION:OPENCODE_SHA256
+      WB_TEST_HANG_SECS: '600'  # a hung test fails, named (tests/__init__.py, #950)
+      WSLENV: OPENCODE_VERSION:OPENCODE_SHA256:WB_TEST_HANG_SECS
     steps:
       # LF endings and the repo's own text: the clone inside WSL is made from this checkout
       - run: git config --global core.autocrlf false

@@ -570,6 +570,176 @@ async function run(engine, device) {
     const n = messages().filter(m => m.text === 'retried after a lost reply').length
     if (n !== 1) throw new Error(`landed ${n} times`)
   })
+  await check("storage full: a 200 that doesn't name the message (a portal's page, an empty body) leaves it in the box and it is sent again", async () => {
+    // #934 (the review of 1.90.24): any 200 cleared a held message's box, its only copy, though
+    // nothing had reached the server
+    // its own context with no service worker: WebKit's routing doesn't see a page's fetches
+    // while one is registered
+    const qc = await browser.newContext({ ...(device ? pw.devices[device] : {}), serviceWorkers: 'block' })
+    const q = await qc.newPage()
+    q.on('pageerror', e => errors.push(String(e)))
+    await q.goto(base + '#token=' + token)
+    await until(async () => await q.locator('#input').isEditable())
+    await q.evaluate(() => { Storage.prototype.setItem = () => { throw new DOMException('full', 'QuotaExceededError') } })
+    const foreign = [{ body: '' }, { contentType: 'text/html', body: '<html>Welcome to the Wi-Fi</html>' },
+      { contentType: 'application/json', body: JSON.stringify({ message: { cid: 'someone-else', text: 'not yours' } }) }]
+    let n = 0
+    await q.route('**/api/send', route => n < foreign.length ? route.fulfill({ status: 200, ...foreign[n++] }) : route.continue())
+    try {
+      const text = 'held through a captive portal'
+      await q.fill('#input', text)
+      await q.click('#send')
+      for (let i = 1; i <= foreign.length; i++) {
+        await until(() => n >= i, 15000)
+        await sleep(200)
+        if ((await q.inputValue('#input')) !== text) throw new Error(`the box was cleared by foreign 200 number ${i}`)
+        if (messages().some(m => m.text === text)) throw new Error('reached the server through a foreign 200')
+      }
+      await until(() => messages().filter(m => m.text === text).length === 1, 20000)
+      await until(async () => (await q.inputValue('#input')) === '', 10000)
+      await sleep(1500)
+      const rows = messages().filter(m => m.text === text)
+      if (rows.length !== 1 || new Set(rows.map(m => m.cid)).size !== 1) throw new Error(`landed ${rows.length} times`)
+    } finally { await qc.close() }
+  })
+  await check('a send whose reply body stalls after the headers is given up and sent again, and a later message still goes', async () => {
+    // #935 (the review of 1.90.24): post() cleared its timer at the headers, so a body that never
+    // came held flush, and every later send, until the page was reloaded. A proxy that answers
+    // the first send's headers and one byte, then holds the line
+    let stalled = 0
+    const socks = new Set()
+    const proxy = createServer(c => {
+      const up = dial(PORT, '127.0.0.1'), s = { c, up, held: false }
+      socks.add(s)
+      c.on('data', d => {
+        if (!s.held && !stalled && d.toString('latin1').startsWith('POST /api/send')) {
+          stalled++; s.held = true
+          c.write('HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: 400\r\n\r\n{')
+        }
+        if (!s.held) up.write(d)
+      })
+      up.on('data', d => { if (!s.held) c.write(d) })
+      for (const x of [c, up]) x.on('error', () => {}).on('close', () => { c.destroy(); up.destroy(); socks.delete(s) })
+    })
+    await new Promise(r => proxy.listen(PORT + 8, '127.0.0.1', r))
+    const p = await ctx.newPage()
+    p.on('pageerror', e => errors.push(String(e)))
+    try {
+      await p.goto(`http://localhost:${PORT + 8}/#token=${token}`)
+      await until(async () => await p.locator('#input').isEditable())
+      for (const text of ['its reply stalled', 'sent after the stall']) {
+        await p.fill('#input', text)
+        await p.click('#send')
+        await until(() => stalled === 1)
+      }
+      // POST_MS (15 s), then the first backoff
+      await until(() => ['its reply stalled', 'sent after the stall'].every(t => messages().some(m => m.text === t)), 25000)
+      await until(async () => (await p.locator('.row.user.pending').count()) === 0, 10000)
+      await sleep(1500)
+      for (const text of ['its reply stalled', 'sent after the stall']) {
+        const n = messages().filter(m => m.text === text).length
+        if (n !== 1) throw new Error(`${text}: landed ${n} times`)
+      }
+    } finally {
+      await p.close()
+      for (const s of socks) { s.c.destroy(); s.up.destroy() }
+      proxy.close()
+    }
+  })
+  await check("a 429 from something in front of the chat is sent again by itself, and a 400 still shows as not sent", async () => {
+    // #936 (the review of 1.90.24): every 4xx but 401 was a refusal, so a throttled send waited
+    // for a tap on retry; uploads already took 408 and 429 as "try again later". No service
+    // worker: WebKit's routing doesn't see a page's fetches while one is registered
+    const tc = await browser.newContext({ ...(device ? pw.devices[device] : {}), serviceWorkers: 'block' })
+    const t = await tc.newPage()
+    t.on('pageerror', e => errors.push(String(e)))
+    try {
+      await t.goto(base + '#token=' + token)
+      await until(async () => await t.locator('#input').isEditable())
+      let throttled = 0
+      await t.route('**/api/send', route => throttled++ ? route.continue()
+        : route.fulfill({ status: 429, headers: { 'Retry-After': '1' }, contentType: 'text/plain', body: 'slow down' }))
+      await t.fill('#input', 'throttled once')
+      await t.click('#send')
+      await until(() => messages().filter(m => m.text === 'throttled once').length === 1, 15000)
+      if (throttled !== 2) throw new Error(`sent ${throttled} times`)
+      await until(async () => (await t.locator('.row.user.pending').count()) === 0)
+      if (await t.locator('.row.user.failed').count()) throw new Error('marked not sent')
+      await t.unroute('**/api/send')
+      await t.route('**/api/send', route => route.fulfill({ status: 400, contentType: 'application/json', body: JSON.stringify({ error: 'bad request' }) }))
+      await t.fill('#input', 'refused for good')
+      await t.click('#send')
+      const row = t.locator('.row.user.failed', { hasText: 'refused for good' })
+      await until(async () => (await row.count()) === 1)
+      if (!(await row.locator('.meta').textContent()).includes('Not sent: bad request')) throw new Error(await row.locator('.meta').textContent())
+      await row.locator('.meta button', { hasText: 'delete' }).click()
+      await until(async () => (await t.locator('.row.user.failed').count()) === 0)
+      await sleep(1000)
+      if (messages().filter(m => m.text === 'throttled once').length !== 1) throw new Error('throttled once landed twice')
+    } finally { await tc.close() }
+  })
+  await check('storage full: a send whose reply trickles in over more than 15 s still clears the box, sent once', async () => {
+    // the review of #935: post() gave the whole reply body 15 s, so a link too slow to carry its
+    // snapshot in that time aborted every reply, and a held message, cleared only by its reply,
+    // stayed in the box for good. A proxy that relays each send's reply a twelfth every 1.5 s
+    let sends = 0
+    const socks = new Set()
+    const proxy = createServer(c => {
+      const up = dial(PORT, '127.0.0.1'), s = { c, up, slow: false, buf: Buffer.alloc(0), pacer: 0 }
+      socks.add(s)
+      c.on('data', d => {
+        if (d.toString('latin1').startsWith('POST /api/send')) { sends++; s.slow = true }
+        up.write(d)
+      })
+      up.on('data', d => {
+        if (!s.slow) return c.write(d)
+        s.buf = Buffer.concat([s.buf, d])
+        if (s.pacer) return
+        const cut = s.buf.indexOf('\r\n\r\n')
+        if (cut < 0) return
+        const length = Number(/content-length:\s*(\d+)/i.exec(s.buf.subarray(0, cut).toString('latin1'))[1])
+        c.write(s.buf.subarray(0, cut + 4)); s.buf = s.buf.subarray(cut + 4)
+        const piece = Math.ceil(length / 12)
+        let left = length
+        s.pacer = setInterval(() => {
+          const n = Math.min(piece, left, s.buf.length)
+          c.write(s.buf.subarray(0, n)); s.buf = s.buf.subarray(n); left -= n
+          if (left <= 0) {
+            clearInterval(s.pacer); s.pacer = 0; s.slow = false
+            if (s.buf.length) c.write(s.buf)
+            s.buf = Buffer.alloc(0)
+            if (s.upClosed) c.end()
+          }
+        }, 1500)
+      })
+      // the server closes after each reply (HTTP/1.0): the client's side stays open until the
+      // trickle has carried it all
+      up.on('error', () => {}).on('close', () => { s.upClosed = true; if (!s.pacer) c.destroy() })
+      c.on('error', () => {}).on('close', () => { clearInterval(s.pacer); up.destroy(); socks.delete(s) })
+    })
+    await new Promise(r => proxy.listen(PORT + 9, '127.0.0.1', r))
+    const p = await ctx.newPage()
+    p.on('pageerror', e => errors.push(String(e)))
+    try {
+      await p.goto(`http://localhost:${PORT + 9}/#token=${token}`)
+      await until(async () => await p.locator('#input').isEditable())
+      await p.evaluate(() => { Storage.prototype.setItem = () => { throw new DOMException('full', 'QuotaExceededError') } })
+      const text = 'held over a slow link'
+      await p.fill('#input', text)
+      await p.click('#send')
+      await until(() => messages().filter(m => m.text === text).length === 1, 10000)
+      await sleep(2000)
+      if ((await p.inputValue('#input')) !== text) throw new Error('the box was cleared before the reply came')
+      await until(async () => (await p.inputValue('#input')) === '', 30000)   // 18 s of reply
+      if (sends !== 1) throw new Error(`sent ${sends} times: the trickling reply was given up`)
+      const n = messages().filter(m => m.text === text).length
+      if (n !== 1) throw new Error(`landed ${n} times`)
+    } finally {
+      await p.close()
+      for (const s of socks) { clearInterval(s.pacer); s.c.destroy(); s.up.destroy() }
+      proxy.close()
+    }
+  })
   await check('a message over 6 h unread says it was not passed to Claude, never Delivered, and sends again', async () => {
     // #536 (the 2026-11-20 audit): the mod skipped it, and the page said "Delivered" for good
     listen(false)

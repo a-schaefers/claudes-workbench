@@ -20,7 +20,7 @@
   const HIDDEN_GRACE_MS = 60000  // a hidden page keeps its stream this long, then lets go
   const STALE_MS = 20000         // back on screen with nothing heard this long: the line is likely dead
   const AWAY_MS = 3000           // off screen this long: a phone may have let the line die, so dial again
-  const POST_MS = 15000          // a send that hasn't answered by now is tried again
+  const POST_MS = 15000          // a send silent this long (no headers yet, or no more of its reply) is tried again
   const FLOW_MS = 40
 
   const $ = id => document.getElementById(id)
@@ -597,12 +597,44 @@
     location.reload()
     return true
   }
-  async function post(path, body) {  // a POST that gives up after POST_MS, so a dead line can't hold it
-    const ctrl = new AbortController(), timer = setTimeout(() => ctrl.abort(), POST_MS)
+  async function post(path, body) {  // a POST that gives up after POST_MS silent, so a dead line can't hold it
+    const ctrl = new AbortController()
+    let timer = 0
+    const pet = () => { clearTimeout(timer); timer = setTimeout(() => ctrl.abort(), POST_MS) }
+    pet()
     try {
-      return await fetch(path, { method: 'POST', cache: 'no-store', signal: ctrl.signal,
+      const r = await fetch(path, { method: 'POST', cache: 'no-store', signal: ctrl.signal,
         headers: { Authorization: 'Bearer ' + token, 'Content-Type': 'application/json' }, body: JSON.stringify(body) })
+      // the body is read under the timer too: cleared at the headers, a reply whose body stalled
+      // (a phone changing networks between the two) held flush, and every later send, for as long
+      // as TCP took to give up (#935). But re-armed at each chunk, as an upload's STALL_MS is: one
+      // deadline for the whole body cut off a reply's snapshot on a slow link every time, so a
+      // held message, which only its reply clears, stayed in the box for good (the review of #935)
+      let text = ''
+      if (r.body) {
+        const reader = r.body.getReader(), dec = new TextDecoder()
+        ctrl.signal.addEventListener('abort', () => { reader.cancel().catch(() => {}) }, { once: true })
+        for (;;) {
+          pet()
+          const { value, done } = await reader.read()
+          if (done) break
+          text += dec.decode(value, { stream: true })
+        }
+        // a cancelled read can end as done rather than throw: half a reply is no reply
+        if (ctrl.signal.aborted) throw new DOMException('the reply stalled', 'AbortError')
+        text += dec.decode()
+      } else text = await r.text()
+      return { ok: r.ok, status: r.status, headers: r.headers, json: async () => JSON.parse(text) }
     } finally { clearTimeout(timer) }
+  }
+  // "try again later", from whatever is in front of the chat (a proxy, a tunnel): never a refusal,
+  // for an upload or a send (#936)
+  const transient = status => status === 408 || status === 425 || status === 429
+  // a Retry-After (seconds or a date) in ms, held under BACKOFF's last step; 0 when it says nothing
+  function retryAfter(r) {
+    const v = (r.headers && r.headers.get('Retry-After')) || ''
+    const ms = /^\d+$/.test(v.trim()) ? Number(v) * 1000 : Date.parse(v) - Date.now()
+    return ms > 0 ? Math.min(ms, BACKOFF[BACKOFF.length - 1]) : 0
   }
   async function connect() {
     if (conn || !token || document.hidden) return
@@ -831,7 +863,7 @@
         try { j = JSON.parse(x.responseText) } catch {}
         if (x.status === 200) { serverFails.delete(f.id); resolve(j.upload) }
         else if (x.status === 401) { keyless('That key was not accepted.'); reject(new Error('key')) }
-        else if (j.final || (x.status >= 400 && x.status < 500 && x.status !== 408 && x.status !== 429)) reject(new Refused(j.error || 'refused'))
+        else if (j.final || (x.status >= 400 && x.status < 500 && !transient(x.status))) reject(new Refused(j.error || 'refused'))
         else if (x.status >= 500) {
           const n = (serverFails.get(f.id) || 0) + 1
           serverFails.set(f.id, n)
@@ -1025,8 +1057,10 @@
     outbox = outItems()  // another tab's too: whichever tab is online sends them all
     if (flushing || !token || !(outbox.length || held)) return
     flushing = true
-    let again = false
-    for (const o of [...outbox, ...(held ? [held] : [])]) {
+    let again = false, wait = 0
+    // in a finally: a throw from keep, render or apply left `flushing` set, and the page sent
+    // nothing more until a reload (#935)
+    try { for (const o of [...outbox, ...(held ? [held] : [])]) {
       if (o !== held && (o.error || !load(OUT + o.cid, null))) continue  // refused, or sent by another tab meanwhile
       let file = null
       try {  // its files first, each once (#623): a refusal says which file and why
@@ -1046,22 +1080,29 @@
         // landed: the reply names it. The snapshot alone holds the newest 200, so a retry after
         // a lost reply, 205 messages later, kept its pending bubble for good (#264, the audit of 1.2)
         if (r.ok) {
-          if (o === held) sentHeld()
-          else if (j.message && j.message.cid === o.cid) { forgetFiles(o); drop(o.cid) }
+          // a 200 that doesn't name it isn't the chat server's (a captive portal, a proxy's
+          // page, an empty body): for a held message it cleared the box, its only copy, though
+          // nothing had reached the server (#934). Tried again; the server ignores a cid it has
+          if (!(j.message && j.message.cid === o.cid)) again = true
+          else if (o === held) sentHeld()
+          else { forgetFiles(o); drop(o.cid) }
           if (j.state) apply(j.state, { reply: true }); else render()
           continue
         }
         if (r.status === 401) { keyless('That key was not accepted.'); break }
+        if (transient(r.status)) { again = true; wait = Math.max(wait, retryAfter(r)); continue }
         if (r.status >= 400 && r.status < 500) {
           if (o === held) { held = null; banner('Not sent: ' + (j.error || 'refused') + '. Your message is still in the box.', true); continue }
           o.error = j.error || 'refused'; keep(o); render(); continue
         }
         again = true
       } catch { again = true }
-    }
-    flushing = false
-    if (again && (held || outbox.some(o => !o.error))) {
-      flushTimer = setTimeout(flush, BACKOFF[Math.min(flushTries++, BACKOFF.length - 1)])
+    } } finally {
+      flushing = false
+      if (again && (held || outbox.some(o => !o.error))) {
+        clearTimeout(flushTimer)
+        flushTimer = setTimeout(flush, Math.max(wait, BACKOFF[Math.min(flushTries++, BACKOFF.length - 1)]))
+      }
     }
   }
   const newId = () => (crypto.randomUUID ? crypto.randomUUID() : Date.now().toString(36) + Math.random().toString(36).slice(2))

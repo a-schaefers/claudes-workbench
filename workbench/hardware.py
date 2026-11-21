@@ -147,10 +147,13 @@ WSL_CONF = Path("/etc/wsl.conf")
 WINDOWS_POWERSHELL = "c/Windows/System32/WindowsPowerShell/v1.0/powershell.exe"
 
 
-def powershell() -> str | None:
-    """Windows' powershell.exe as seen from WSL: from PATH, else under the automount root
-    (/etc/wsl.conf's [automount] root, /mnt/ by default); None when neither has it."""
-    if found := shutil.which("powershell.exe"):
+def windows_program(name: str, rel: str) -> str | None:
+    """A Windows program as seen from WSL: `name` from PATH, else `rel` (from the drive letter,
+    c/...) under the automount root (/etc/wsl.conf's [automount] root, /mnt/ by default); None
+    when neither has it. PATH has Windows' only while WSL appends it, which neither
+    [interop] appendWindowsPath=false nor a systemd unit (the user manager's PATH) gets (#702,
+    #920)."""
+    if found := shutil.which(name):
         return found
     root, section = "/mnt/", ""
     for line in _read(WSL_CONF).splitlines():
@@ -159,8 +162,13 @@ def powershell() -> str | None:
             section = line[1:-1].strip().lower()
         elif section == "automount" and line.partition("=")[0].strip().lower() == "root":
             root = line.partition("=")[2].strip().strip("\"'") or root
-    path = os.path.join(root.rstrip("/") + "/", WINDOWS_POWERSHELL)
+    path = os.path.join(root.rstrip("/") + "/", rel)
     return path if os.path.isfile(path) else None
+
+
+def powershell() -> str | None:
+    """Windows' powershell.exe as seen from WSL (windows_program)."""
+    return windows_program("powershell.exe", WINDOWS_POWERSHELL)
 
 
 def _windows_gpus() -> list[dict]:

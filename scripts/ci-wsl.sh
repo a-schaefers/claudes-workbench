@@ -10,7 +10,7 @@ apt-get update -qq
 apt-get install -y -qq git python3 curl ca-certificates sudo >/dev/null
 id ci >/dev/null 2>&1 || useradd -m ci
 src=$PWD
-sudo -u ci -H --preserve-env=OPENCODE_VERSION,OPENCODE_SHA256 bash -euo pipefail -s "$src" <<'EOF'
+sudo -u ci -H --preserve-env=OPENCODE_VERSION,OPENCODE_SHA256,WB_TEST_HANG_SECS bash -euo pipefail -s "$src" <<'EOF'
 git config --global --add safe.directory '*'   # the checkout belongs to Windows' user
 git config --global user.name "workbench CI"
 git config --global user.email "ci@invalid"

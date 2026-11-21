@@ -380,34 +380,91 @@ def by_characters(script: str) -> bool:
     return sum(bool(UNSPACED.match(u)) for u in units) * 2 > len(units) if units else False
 
 
-def _align(ref: list[str], hyp: list[str]) -> list[tuple[list[str], list[str], int]]:
+# The most cells one alignment fills: a byte each for the way back, so 64 MB. Cells are the
+# script's units times the band of diagonals tried (below), the whole of the heard ones at most.
+# The full matrix of Python ints, built twice, took 327 MiB and 3.5 s for a 3,000-character
+# Japanese script, several GiB past 10,000 (#947); its first cap, 16M pairs between the common
+# ends, refused 4,100 characters with a miss at each end, which had scored before (the review of
+# #947): a listener's first or last word often differs, so trimming the ends saved nothing.
+ALIGN_CELLS = 64_000_000
+# The first band tried: this many edits either side of the diagonal, doubled until it holds the
+# alignment. A take that follows its script costs a sliver of the matrix, however long.
+ALIGN_BAND = 32
+
+
+def _align(ref: list[str], hyp: list[str], band: int = ALIGN_BAND) -> list[tuple[list[str], list[str], int]]:
     """The fewest edits (substitutions, deletions, insertions) from ``ref`` to ``hyp``, as runs
     of (script words, heard words, edits): 0 edits for a matched word, else a whole stretch of
     edits. difflib's longest-block matching paired an insert with a delete among repeated
-    words: one wrong word in "go go go go" scored 100% (#593)."""
+    words: one wrong word in "go go go go" scored 100% (#593). The common start and end match
+    without a matrix; between them, two rows of costs and a byte per cell for the way back
+    (#947), over the diagonals within ``k`` of the main one. An alignment of at most ``k`` edits
+    never leaves them, so one that costs at most ``k`` there is the fewest, and the cells on
+    every cheapest path hold their full-matrix costs: the way back takes the same turns, ties
+    included. Otherwise ``k`` doubles, up to the whole matrix. Past ``ALIGN_CELLS`` it raises
+    ValueError rather than take the machine's memory."""
     n, m = len(ref), len(hyp)
-    d = [list(range(m + 1))] + [[i] + [0] * m for i in range(1, n + 1)]
-    for i in range(1, n + 1):
-        for j in range(1, m + 1):
-            d[i][j] = min(d[i - 1][j - 1] + (ref[i - 1] != hyp[j - 1]), d[i - 1][j] + 1, d[i][j - 1] + 1)
+    end = 0  # the end first: the way back matched a common end word for word anyway
+    while end < min(n, m) and ref[n - 1 - end] == hyp[m - 1 - end]:
+        end += 1
+    start = 0
+    while start < min(n, m) - end and ref[start] == hyp[start]:
+        start += 1
+    same = lambda ws: [([w], [w], 0) for w in ws]  # noqa: E731
+    r, h = ref[start:n - end], hyp[start:m - end]
+    n, m = len(r), len(h)
+    k = max(band, abs(n - m), 1)
+    while True:
+        if 2 * (2 * k + 1) >= n + m + 1:  # over half of them: the whole matrix at once
+            k = max(n, m)
+        lo, hi = max(-k, -n), min(k, m)  # the diagonals j - i kept
+        width = hi - lo + 1
+        if n * width > ALIGN_CELLS:
+            raise ValueError(f"too long to score: {n} script units against {m} heard between their "
+                             f"common start and end, too far apart to align in {ALIGN_CELLS:,} cells")
+        far = n + m + 1  # a cell outside the band: dearer than any alignment
+        back = bytearray(n * width)  # 0 a match or substitution, 1 a deletion, 2 an insertion
+        prev = [j if 0 <= j <= m else far for j in range(lo, hi + 1)]  # row 0, by diagonal
+        for i in range(1, n + 1):
+            word, cur, row = r[i - 1], [far] * width, (i - 1) * width
+            first, last = max(0, -i - lo), min(width - 1, m - i - lo)  # 0 <= j <= m
+            for t in range(first, last + 1):
+                j = i + lo + t
+                if j == 0:
+                    cur[t] = i
+                    continue
+                diag = prev[t] + (word != h[j - 1])
+                up = prev[t + 1] + 1 if t + 1 < width else far
+                left = cur[t - 1] + 1 if t else far
+                if diag <= up and diag <= left:  # the way back's order: a match or substitution first
+                    cur[t] = diag
+                elif up <= left:
+                    cur[t], back[row + t] = up, 1
+                else:
+                    cur[t], back[row + t] = left, 2
+            prev = cur
+        if prev[m - n - lo] <= k or (lo, hi) == (-n, m):
+            break
+        k *= 2
     steps, i, j = [], n, m
     while i or j:  # back from the end: a match or substitution first, then a deletion
-        if i and j and d[i][j] == d[i - 1][j - 1] + (ref[i - 1] != hyp[j - 1]):
-            steps.append((ref[i - 1] == hyp[j - 1], [ref[i - 1]], [hyp[j - 1]]))
+        way = back[(i - 1) * width + j - i - lo] if i and j else (1 if i else 2)
+        if way == 0:
+            steps.append((r[i - 1] == h[j - 1], [r[i - 1]], [h[j - 1]]))
             i, j = i - 1, j - 1
-        elif i and d[i][j] == d[i - 1][j] + 1:
-            steps.append((False, [ref[i - 1]], []))
+        elif way == 1:
+            steps.append((False, [r[i - 1]], []))
             i -= 1
         else:
-            steps.append((False, [], [hyp[j - 1]]))
+            steps.append((False, [], [h[j - 1]]))
             j -= 1
     runs: list[list] = []
-    for same, a, b in reversed(steps):
-        if same or not runs or not runs[-1][2]:
-            runs.append([a, b, 0 if same else 1])
+    for matched, a, b in reversed(steps):
+        if matched or not runs or not runs[-1][2]:
+            runs.append([a, b, 0 if matched else 1])
         else:  # this edit extends the stretch before it
             runs[-1] = [runs[-1][0] + a, runs[-1][1] + b, runs[-1][2] + 1]
-    return [tuple(r) for r in runs]
+    return same(ref[:start]) + [tuple(x) for x in runs] + same(ref[len(ref) - end:])
 
 
 def _spans(script: str, heard: str) -> tuple[int, list[tuple[str, str, int]]]:
@@ -420,20 +477,25 @@ def _spans(script: str, heard: str) -> tuple[int, list[tuple[str, str, int]]]:
     return len(ref), spans
 
 
+def score(script: str, heard: str, most: int = 4) -> tuple[float, list[str]]:
+    """`wer` and `differences` from one alignment: `inspect` aligned the take twice (#947).
+    ValueError when the two are too long to align (``ALIGN_CELLS``)."""
+    n, spans = _spans(script, heard)
+    rate = (0.0 if not words(heard) else 1.0) if not n else round(sum(k for _, _, k in spans) / n, 3)
+    return rate, [f"{a or '(nothing)'} → {b or '(nothing)'}" for a, b, _ in spans[:most]]
+
+
 def wer(script: str, heard: str) -> float:
     """Word error rate: substitutions, deletions and insertions over the script's length, not
     capped (a reading twice as long as the script ranks below a lighter one). Read it with
     `differences`: a listener writes "2026" for "twenty twenty-six", and Claude can tell that
     from a fumble only by seeing the words."""
-    n, spans = _spans(script, heard)
-    if not n:
-        return 0.0 if not words(heard) else 1.0
-    return round(sum(k for _, _, k in spans) / n, 3)
+    return score(script, heard)[0]
 
 
 def differences(script: str, heard: str, most: int = 4) -> list[str]:
     """Up to ``most`` spans as 'script → heard' ('…→ (nothing)' for a skipped stretch)."""
-    return [f"{a or '(nothing)'} → {b or '(nothing)'}" for a, b, _ in _spans(script, heard)[1][:most]]
+    return score(script, heard, most)[1]
 
 
 def _multipart(fields: dict, file: Path) -> tuple[bytes, str]:
@@ -513,8 +575,8 @@ def inspect(path: Path, kind: str, script: str = "", seconds: float | None = Non
             clip = plain if r16 and r16.returncode == 0 and plain.is_file() else path
             try:
                 heard = transcribe(ear, clip, log or Path(tmp) / "listen.log")
-                found.update(transcript=heard, wer=wer(script, heard),
-                             differences=differences(script, heard), listener=ear[0])
+                rate, diffs = score(script, heard)  # once: a long script's alignment is costly (#947)
+                found.update(transcript=heard, wer=rate, differences=diffs, listener=ear[0])
                 if by_characters(script):
                     found["cer"] = True  # `wer` counts characters
             except (OSError, RuntimeError, ValueError, subprocess.TimeoutExpired) as err:
